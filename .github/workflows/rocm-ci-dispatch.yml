@@ -9,11 +9,10 @@ on:
     branches:
       - 'dev'
       - 'release_v2.*_rocm'
-    types: [ labeled, synchronize, reopened ]
+    types: [ opened, labeled, synchronize, reopened ]
 
 permissions:
   contents: read
-  actions: write
 
 jobs:
   determine_level:
@@ -27,107 +26,39 @@ jobs:
         with:
           script: |
             const parseLevelLabel = (labelName) => {
-              const label = (labelName || '').toLowerCase();
-              if (label === 'ci-level 3') return 3;
-              if (label === 'ci-level 2') return 2;
-              if (label === 'ci-level 1') return 1;
-              return 0;
+              const m = (labelName || '').match(/^ci-level\s+(\d+)$/i);
+              return m ? Number(m[1]) : 0;
             };
 
             const labels = (context.payload.pull_request.labels || [])
-              .map(label => parseLevelLabel(label.name));
+              .map(l => parseLevelLabel(l.name));
             const action = context.payload.action;
             const currentLevel = labels.length ? Math.max(...labels) : 0;
 
-            // Determine if a CI level label was added, and what level it was.
-            const addedLevel = action === 'labeled' ? parseLevelLabel(context.payload.label?.name) : 0;
-            if(addedLevel > 0){
-              core.info(`Dispatch debug: action=${action}, addedLabel=${context.payload.label.name}, addedLevel=${addedLevel}, currentLevel=${currentLevel}, labels=[${labels.join(',')}]`);
-            }
-
-            let requiresDispatch = false;
+            let dispatch = false;
             if (action === 'labeled') {
-              // Only dispatch when the added CI-level label is now the highest level.
-              // Adding a lower-level label should not trigger a new run.
-              requiresDispatch = addedLevel > 0 && addedLevel === currentLevel;
-              core.info(`Dispatch debug: initial labeled decision requiresDispatch=${requiresDispatch}`);
-
-              // If an existing run for this PR/commit already satisfies the newly
-              // added level (same or higher), reuse it and do not dispatch again.
-              if (requiresDispatch) {
-                const prNumber = context.payload.pull_request.number;
-                const headSha = context.payload.pull_request.head.sha;
-                const owner = context.repo.owner;
-                const repo = context.repo.repo;
-
-                core.info(`Dispatch debug: checking existing runs for PR #${prNumber}, headSha=${headSha}`);
-
-                const runs = await github.paginate(github.rest.actions.listWorkflowRuns, {
-                  owner,
-                  repo,
-                  workflow_id: 'rocm-ci-dispatch.yml',
-                  per_page: 100,
-                  head_sha: headSha,
-                });
-
-                core.info(`Dispatch debug: total workflow runs fetched=${runs.length}`);
-
-                const candidateRuns = runs.filter(run => {
-                  const prMatch = (run.pull_requests || []).some(pr => pr.number === prNumber);
-                  const completedNotSuccess = run.status === 'completed' && run.conclusion !== 'success';
-                  return prMatch && !completedNotSuccess;
-                });
-
-                core.info(`Dispatch debug: candidate runs matching PR+sha=${candidateRuns.length}`);
-
-                let satisfiesAddedLevel = false;
-                for (const run of candidateRuns) {
-                  let detectedLevel = 0;
-
-                  // Inspect called-workflow job names, which include level.
-                  const jobsResp = await github.rest.actions.listJobsForWorkflowRun({
-                    owner,
-                    repo,
-                    run_id: run.id,
-                    per_page: 100,
-                  });
-
-                  for (const job of jobsResp.data.jobs || []) {
-                    const m = (job.name || '').match(/(?:CI\s+)?Level\s*(\d+)/i);
-                    if (m) {
-                      detectedLevel = Number(m[1]);
-                      core.info(`Dispatch debug: run_id=${run.id}, job_id=${job.id}, job_name=${job.name}, detectedLevel=${detectedLevel}, threshold=${addedLevel}`);
-                      break;
-                    }
-                  }
-
-                  if (detectedLevel >= addedLevel) {
-                    satisfiesAddedLevel = true;
-                    core.info(`Dispatch debug: run_id=${run.id} satisfies added level; skipping new dispatch`);
-                    break;
-                  }
-                }
-
-                if (satisfiesAddedLevel) {
-                  requiresDispatch = false;
-                }
-                core.info(`Dispatch debug: post-existing-run check requiresDispatch=${requiresDispatch}`);
-              }
-            } else if (action === 'synchronize' || action === 'reopened') {
-              requiresDispatch = currentLevel > 0;
+              const addedLevel = parseLevelLabel(context.payload.label?.name);
+              // Only dispatch when the newly added label is (or ties) the highest level.
+              dispatch = addedLevel > 0 && addedLevel === currentLevel;
+            } else {
+              // synchronize, reopened, opened — dispatch at whatever level is set.
+              dispatch = currentLevel > 0;
             }
-            core.info(`Dispatch debug: final requiresDispatch=${requiresDispatch}, output test_level=${requiresDispatch ? String(currentLevel) : ''}`);
-            core.setOutput('test_level', requiresDispatch ? String(currentLevel) : '');
+
+            const level = dispatch ? String(currentLevel) : '';
+            core.info(`action=${action}, currentLevel=${currentLevel}, dispatch=${dispatch}`);
+            core.setOutput('test_level', level);
 
   dispatch:
     # Run this job if there is a valid level to test, which requires
     # that any of the following are true:
     # - A ci-level label higher than any existing ci-level label(s) was added
     # - A commit was pushed with existing ci-level label(s)
-    # - The PR was reopened with existing ci-level label(s)
+    # - The PR was reopened or opened with existing ci-level label(s)
     if: ${{ needs.determine_level.outputs.test_level != '' }}
     needs: determine_level
     name: CI Level ${{ needs.determine_level.outputs.test_level }}
     uses: ./.github/workflows/rocm-ci.yml
+    secrets: inherit
     with:
       test_level: ${{ needs.determine_level.outputs.test_level }}
