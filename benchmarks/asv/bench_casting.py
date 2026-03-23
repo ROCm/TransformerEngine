@@ -51,13 +51,17 @@ class BenchCasting:
         else:
             self.x = torch.randn(M, hidden, dtype=torch.bfloat16, device="cuda")
             self.quantizer = quantizer
+        self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 
     def time_cast(self, M, model, cast):
+        self._evt[0].record()
         if self.direction == "quantize":
             self.quantizer.quantize(self.x)
         else:
             self.x.dequantize(dtype=torch.bfloat16)
+        self._evt[1].record()
         torch.cuda.synchronize()
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000
 
 if __name__ == "__main__":
     from driver import run_as_main

@@ -50,19 +50,26 @@ class BenchGroupedGemm:
         ]
         outs = self.module(self.xs)
         self.grad_outs = [torch.randn_like(o) for o in outs]
+        self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 
     def time_forward(self, M, config):
+        self._evt[0].record()
         self.module(self.xs)
+        self._evt[1].record()
         torch.cuda.synchronize()
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000
 
     def time_forward_backward(self, M, config):
+        self._evt[0].record()
         outs = self.module(self.xs)
         torch.autograd.backward(outs, self.grad_outs)
+        self._evt[1].record()
+        torch.cuda.synchronize()
         for x in self.xs:
             x.grad = None
         for p in self.module.parameters():
             p.grad = None
-        torch.cuda.synchronize()
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000
 
 if __name__ == "__main__":
     from driver import run_as_main

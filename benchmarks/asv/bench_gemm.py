@@ -43,17 +43,24 @@ class BenchGemm:
         self.linear = te.Linear(K, N, bias=False).to(device="cuda", dtype=dtype)
         self.x = torch.randn(M, K, dtype=dtype, device="cuda", requires_grad=True)
         self.grad_out = torch.randn_like(self.linear(self.x))
+        self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 
     def time_forward(self, M, shape):
+        self._evt[0].record()
         self.linear(self.x)
+        self._evt[1].record()
         torch.cuda.synchronize()
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000
 
     def time_forward_backward(self, M, shape):
+        self._evt[0].record()
         out = self.linear(self.x)
         out.backward(self.grad_out)
+        self._evt[1].record()
+        torch.cuda.synchronize()
         self.x.grad = None
         self.linear.weight.grad = None
-        torch.cuda.synchronize()
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000
 
 if __name__ == "__main__":
     from driver import run_as_main

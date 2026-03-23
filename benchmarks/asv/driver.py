@@ -237,8 +237,9 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
             samples = []
             for _ in range(iters):
                 t0 = time.perf_counter()
-                method(*combo)
-                samples.append(time.perf_counter() - t0)
+                result = method(*combo)
+                wall = time.perf_counter() - t0
+                samples.append(wall if result is None else result)
 
             median, ci_lo, ci_hi, q25, q75 = _compute_stats(samples)
             mean = sum(samples) / len(samples)
