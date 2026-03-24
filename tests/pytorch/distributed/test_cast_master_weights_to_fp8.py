@@ -1,4 +1,6 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# This file was modified for portability to AMDGPU.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -31,7 +33,7 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.tensor import cast_master_weights_to_fp8
 from transformer_engine.pytorch.tensor.utils import post_all_gather_processing, replace_raw_data
-
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 def _get_quantization_recipe(quantization) -> Recipe:
     """Quantization recipe setup"""
@@ -494,7 +496,9 @@ def _test_mini_optimizer(dp_group):
             torch.testing.assert_close(w1, w3, atol=0, rtol=0)
 
 
-def _test_cast_master_weights_to_fp8(quantization, dp_group, manual_post_all_gather_processing):
+def _test_cast_master_weights_to_fp8(
+    quantization, dp_group, manual_post_all_gather_processing, keep_fp8_weight_transpose_cache
+):
     rank = dist.get_rank(dp_group)
     world_size = dist.get_world_size(dp_group)
 
@@ -504,7 +508,12 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group, manual_post_all_gat
     mock_groups = [dist.new_group(ranks=[i]) for i in range(world_size)]
     mock_group = mock_groups[rank]
 
-    linear_kwargs = {"params_dtype": torch.bfloat16, "bias": False, "fuse_wgrad_accumulation": True}
+    linear_kwargs = {
+        "params_dtype": torch.bfloat16,
+        "bias": False,
+        "fuse_wgrad_accumulation": True,
+        "keep_fp8_weight_transpose_cache": keep_fp8_weight_transpose_cache,
+    }
 
     # Create model with FP8 weights
     with te.quantized_model_init(
@@ -581,7 +590,7 @@ def _test_cast_master_weights_to_fp8(quantization, dp_group, manual_post_all_gat
 
 
 def _test_fsdp_cast_master_weights_to_fp8(
-    quantization, dp_group, manual_post_all_gather_processing
+    quantization, dp_group, manual_post_all_gather_processing, keep_fp8_weight_transpose_cache
 ):
     rank = dist.get_rank(dp_group)
     world_size = dist.get_world_size(dp_group)
@@ -600,6 +609,7 @@ def _test_fsdp_cast_master_weights_to_fp8(
         "params_dtype": torch.bfloat16,
         "bias": False,
         "fuse_wgrad_accumulation": True,
+        "keep_fp8_weight_transpose_cache": keep_fp8_weight_transpose_cache,
     }
 
     # Create model with FP8 weights
@@ -700,13 +710,21 @@ def run_parallel_tests() -> None:
         quantizations.append("fp8_block")
 
     manual_post_all_gather_processings = [False, True]
+    keep_fp8_weight_transpose_caches = [True]
+    if IS_HIP_EXTENSION:
+        keep_fp8_weight_transpose_caches.append(False)
 
     _test_mini_optimizer(dp_group)
 
     for quantization in quantizations:
         for post_ag_processing in manual_post_all_gather_processings:
-            _test_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
-            _test_fsdp_cast_master_weights_to_fp8(quantization, dp_group, post_ag_processing)
+            for keep_fp8_weight_transpose_cache in keep_fp8_weight_transpose_caches:
+                _test_cast_master_weights_to_fp8(
+                    quantization, dp_group, post_ag_processing, keep_fp8_weight_transpose_cache
+                )
+                _test_fsdp_cast_master_weights_to_fp8(
+                    quantization, dp_group, post_ag_processing, keep_fp8_weight_transpose_cache
+                )
 
     dist.destroy_process_group()
 
@@ -717,7 +735,9 @@ def run_parallel_tests() -> None:
 @pytest.mark.parametrize("world_size", [2])
 def test_cast_master_weights_to_fp8(world_size: int) -> None:
     """Launch parallel job that runs parallel tests"""
-    python_exe = pathlib.Path(sys.executable).resolve()
+    # ROCm: Use executable as-is; do not resolve() or a venv symlink may point to system
+    # Python which does not have torch/site-packages.
+    python_exe = pathlib.Path(sys.executable)
     current_file = pathlib.Path(__file__).resolve()
     command = [
         python_exe,
