@@ -11,6 +11,30 @@ set(AITER_MHA_INSTALL_PREFIX "transformer_engine" CACHE STRING "aiter mha shared
 set(__AITER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter")
 set(__CK_SOURCE_DIR "${__AITER_SOURCE_DIR}/3rdparty/composable_kernel")
 
+if(NOT Python_EXECUTABLE)
+  find_package(Python COMPONENTS Interpreter QUIET)
+endif()
+
+if(Python_EXECUTABLE)
+  execute_process(
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/check_aiter_mha_args.py --mode both --te-dir "${CMAKE_CURRENT_LIST_DIR}/../../.."
+    RESULT_VARIABLE AITER_ARG_CHECK_RESULT
+    OUTPUT_VARIABLE AITER_ARG_CHECK_OUTPUT
+    ERROR_VARIABLE AITER_ARG_CHECK_ERROR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_STRIP_TRAILING_WHITESPACE
+  )
+
+  if(NOT AITER_ARG_CHECK_RESULT EQUAL 0)
+    message(FATAL_ERROR
+            "AITER API validation failed in check_aiter_mha_args.py.\n"
+            "${AITER_ARG_CHECK_OUTPUT}\n${AITER_ARG_CHECK_ERROR}")
+  endif()
+  message(STATUS "AITER API validation passed via check_aiter_mha_args.py")
+else()
+  message(WARNING "Python interpreter not found; skipping AITER API validation.")
+endif()
+
 # so far, there are only gfx942 and gfx950 v3 kernels
 SET(V3_ASM_ARCHS_SUPPORTED "gfx942;gfx950")
 
@@ -107,3 +131,13 @@ set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
 
 install(FILES ${__AITER_MHA_PATH}/libmha_fwd.so ${__AITER_MHA_PATH}/libmha_bwd.so DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
 install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
+# copy v3 kernels to destination
+foreach(ARCH IN LISTS V3_ASM_ARCHS)
+  foreach(KERNEL_TYPE IN ITEMS fmha_v3_fwd fmha_v3_bwd)
+    file(REMOVE_RECURSE ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib/aiter/${ARCH}/${KERNEL_TYPE})
+    install(DIRECTORY
+          ${__AITER_SOURCE_DIR}/hsa/${ARCH}/${KERNEL_TYPE}
+          DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib/aiter/${ARCH}/
+          PATTERN "codegen.py" EXCLUDE)
+  endforeach()
+endforeach()
