@@ -53,6 +53,16 @@ class BenchCasting:
             self.quantizer = quantizer
         self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 
+    def work_cast(self, M, model, cast):
+        hidden = HIDDEN_SIZES[model]
+        direction = CAST_CONFIGS[cast][0]
+        if direction == "quantize":
+            # Read BF16 (2B) + write FP8 (1B) + write scale
+            return {"bytes": M * hidden * 3}
+        else:
+            # Read FP8 (1B) + read scale + write BF16 (2B)
+            return {"bytes": M * hidden * 3}
+
     def time_cast(self, M, model, cast):
         self._evt[0].record()
         if self.direction == "quantize":

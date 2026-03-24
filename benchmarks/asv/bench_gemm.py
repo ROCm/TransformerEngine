@@ -45,6 +45,14 @@ class BenchGemm:
         self.grad_out = torch.randn_like(self.linear(self.x))
         self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 
+    def work_forward(self, M, shape):
+        N, K = SHAPES[shape]
+        return {"flops": 2 * M * N * K}
+
+    def work_forward_backward(self, M, shape):
+        N, K = SHAPES[shape]
+        return {"flops": 3 * 2 * M * N * K}
+
     def time_forward(self, M, shape):
         self._evt[0].record()
         self.linear(self.x)

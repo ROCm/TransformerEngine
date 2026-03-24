@@ -52,6 +52,14 @@ class BenchGroupedGemm:
         self.grad_outs = [torch.randn_like(o) for o in outs]
         self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 
+    def work_forward(self, M, config):
+        B, N, K = CONFIGS[config]
+        return {"flops": B * 2 * M * N * K}
+
+    def work_forward_backward(self, M, config):
+        B, N, K = CONFIGS[config]
+        return {"flops": B * 3 * 2 * M * N * K}
+
     def time_forward(self, M, config):
         self._evt[0].record()
         self.module(self.xs)

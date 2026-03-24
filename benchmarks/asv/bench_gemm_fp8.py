@@ -48,6 +48,14 @@ class BenchGemmFP8:
         self.grad_out = torch.randn(M, N, dtype=dtype, device="cuda")
         self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 
+    def work_forward(self, M, shape):
+        N, K = SHAPES[shape]
+        return {"flops": 2 * M * N * K}
+
+    def work_forward_backward(self, M, shape):
+        N, K = SHAPES[shape]
+        return {"flops": 3 * 2 * M * N * K}
+
     def time_forward(self, M, shape):
         self._evt[0].record()
         with te.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):

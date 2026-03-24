@@ -25,6 +25,14 @@ class BenchNormalization:
         self.grad_out = torch.randn_like(self.norm(self.x))
         self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 
+    def work_forward(self, M, hidden, norm_type):
+        # Read input (2B) + write output (2B) = 4 bytes per element
+        return {"bytes": M * hidden * 4}
+
+    def work_forward_backward(self, M, hidden, norm_type):
+        # Fwd: read+write (4B), Bwd: read input+grad_out+write grad_in (6B) = 10B
+        return {"bytes": M * hidden * 10}
+
     def time_forward(self, M, hidden, norm_type):
         self._evt[0].record()
         self.norm(self.x)

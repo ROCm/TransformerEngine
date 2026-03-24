@@ -8,10 +8,12 @@
 
 Usage:
     python driver.py <suite> [method_filter] [-w W] [-n N] [--no-save]
+    python driver.py --all [-w W] [-n N] [--no-save]
     python bench_gemm.py [method_filter] [-w W] [-n N] [--no-save]
 """
 
 import argparse
+import glob
 import hashlib
 import importlib
 import inspect
@@ -30,12 +32,14 @@ import time
 # ASV result generation
 # ---------------------------------------------------------------------------
 
-def _get_benchmark_version(cls, method_name):
-    """Compute the version hash the same way ASV does.
+def _get_benchmark_code_and_version(cls, method_name):
+    """Build the code string and version hash the same way ASV does.
 
     ASV hashes a code string built from the time_* and setup methods.
     The string is class header + indented time method + indented setup,
     with no trailing newline.
+
+    Returns (code, version_hash).
     """
     time_src = textwrap.dedent(inspect.getsource(getattr(cls, method_name)))
     setup_src = textwrap.dedent(inspect.getsource(cls.setup))
@@ -44,7 +48,7 @@ def _get_benchmark_version(cls, method_name):
         + textwrap.indent(time_src, "    ") + "\n"
         + textwrap.indent(setup_src, "    ")
     ).rstrip("\n")
-    return hashlib.sha256(code.encode()).hexdigest()
+    return code, hashlib.sha256(code.encode()).hexdigest()
 
 
 def _format_param_value(v):
@@ -116,8 +120,8 @@ def _get_results_dir():
     return os.path.normpath(os.path.join(conf_dir, conf["results_dir"]))
 
 
-def save_asv_results(all_results):
-    """Write results to ASV's results directory."""
+def save_asv_results(all_results, bench_meta):
+    """Write results and benchmark index to ASV's results directory."""
     commit_hash = _get_commit_hash()
     machine_name, machine_info = _get_machine_info()
     env_name = "existing-" + sys.executable.replace("/", "_").strip("_")
@@ -168,28 +172,65 @@ def save_asv_results(all_results):
 
     print(f"\nResults saved to {result_path}")
 
+    # Update benchmarks.json index so ASV dashboard stays in sync
+    benchmarks_path = os.path.join(results_dir, "benchmarks.json")
+    if os.path.exists(benchmarks_path):
+        with open(benchmarks_path) as f:
+            benchmarks_data = json.load(f)
+    else:
+        benchmarks_data = {"version": 2}
+
+    benchmarks_data.update(bench_meta)
+
+    with open(benchmarks_path, "w") as f:
+        json.dump(benchmarks_data, f, indent=4)
+
+    print(f"Updated {benchmarks_path}")
+
 
 # ---------------------------------------------------------------------------
 # Benchmark runner
 # ---------------------------------------------------------------------------
 
 def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7):
-    """Run all benchmarks in a class, returning ASV-formatted results."""
+    """Run all benchmarks in a class, returning (results, metadata) dicts."""
     methods = sorted(m for m in dir(cls) if m.startswith("time_"))
     if method_filter:
         methods = [m for m in methods if method_filter in m]
     if not methods:
-        return {}
+        return {}, {}
 
     params = getattr(cls, "params", [[]])
     param_names = getattr(cls, "param_names", [])
     combos = list(itertools.product(*params))
 
+    # Probe the first method to determine if work_* companions exist
+    # and what metric columns to show for this class.
+    has_flops = False
+    has_bytes = False
+    for method_name in methods:
+        work_name = "work_" + method_name[len("time_"):]
+        work_fn = getattr(cls, work_name, None)
+        if work_fn is not None:
+            # Probe with the first combo to discover keys
+            try:
+                probe = work_fn(cls(), *combos[0])
+                has_flops = has_flops or "flops" in probe
+                has_bytes = has_bytes or "bytes" in probe
+            except Exception:
+                pass
+
     print(f"\n{class_name}  ({len(combos)} combos x {len(methods)} methods, "
           f"{warmup} warmup, {iters} timed)")
+    extra_hdr = ""
+    if has_flops:
+        extra_hdr += f"  {'TFLOPS':>10}"
+    if has_bytes:
+        extra_hdr += f"  {'GB/s':>10}"
     HDR = (f"  {'median':>10}  {'mean':>10}  {'stdev':>10}"
            f"  {'q25':>10}  {'q75':>10}  {'min':>10}  {'max':>10}"
-           f"  {'method':<30}  params")
+           + extra_hdr
+           + f"  {'method':<30}  params")
     print("-" * len(HDR))
     print(HDR)
     print("-" * len(HDR))
@@ -198,10 +239,28 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
     asv_params = [[_format_param_value(v) for v in dim] for dim in params]
 
     all_results = {}
+    all_meta = {}
 
     for method_name in methods:
         bench_key = f"{suite_name}.{class_name}.{method_name}"
-        version = _get_benchmark_version(cls, method_name)
+        code, version = _get_benchmark_code_and_version(cls, method_name)
+
+        all_meta[bench_key] = {
+            "code": code,
+            "min_run_count": 2,
+            "name": bench_key,
+            "number": 0,
+            "param_names": list(param_names),
+            "params": asv_params,
+            "repeat": 0,
+            "rounds": 2,
+            "sample_time": 0.01,
+            "timeout": getattr(cls, "timeout", 300),
+            "type": "time",
+            "unit": "seconds",
+            "version": version,
+            "warmup_time": -1,
+        }
 
         medians = []
         ci_los = []
@@ -254,9 +313,35 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
             numbers.append(1)
             repeats.append(iters)
 
+            # Compute throughput from work_* companion if available
+            extra_cols = ""
+            work_name = "work_" + method_name[len("time_"):]
+            work_fn = getattr(instance, work_name, None)
+            if work_fn is not None and median and median > 0:
+                try:
+                    work = work_fn(*combo)
+                except Exception:
+                    work = {}
+                if has_flops and "flops" in work:
+                    tflops = work["flops"] / median / 1e12
+                    extra_cols += f"  {tflops:>10.1f}"
+                elif has_flops:
+                    extra_cols += f"  {'':>10}"
+                if has_bytes and "bytes" in work:
+                    gbps = work["bytes"] / median / 1e9
+                    extra_cols += f"  {gbps:>10.1f}"
+                elif has_bytes:
+                    extra_cols += f"  {'':>10}"
+            else:
+                if has_flops:
+                    extra_cols += f"  {'':>10}"
+                if has_bytes:
+                    extra_cols += f"  {'':>10}"
+
             print(f"  {median*1000:>8.3f}ms  {mean*1000:>8.3f}ms  "
                   f"{stdev*1000:>8.3f}ms  {q25*1000:>8.3f}ms  {q75*1000:>8.3f}ms  "
-                  f"{s_min*1000:>8.3f}ms  {s_max*1000:>8.3f}ms  "
+                  f"{s_min*1000:>8.3f}ms  {s_max*1000:>8.3f}ms"
+                  f"{extra_cols}  "
                   f"{method_name:<30}  {label}")
 
         duration = time.perf_counter() - t_start
@@ -277,7 +362,7 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
             repeats,
         ]
 
-    return all_results
+    return all_results, all_meta
 
 
 def run_as_main(caller_file=None):
@@ -296,7 +381,10 @@ def run_as_main(caller_file=None):
     parser = argparse.ArgumentParser(
         description="Run ASV benchmarks directly in-process (no subprocess overhead).")
     if caller_file is None:
-        parser.add_argument("suite", help="Benchmark module name (e.g. bench_casting)")
+        parser.add_argument("suite", nargs="?", default=None,
+                            help="Benchmark module name (e.g. bench_casting)")
+        parser.add_argument("--all", action="store_true",
+                            help="Run all bench_*.py suites in the directory")
     parser.add_argument("method_filter", nargs="?", default=None,
                         help="Only run time_* methods containing this string")
     parser.add_argument("-w", "--warmup", type=int, default=3,
@@ -309,27 +397,38 @@ def run_as_main(caller_file=None):
 
     if caller_file is not None:
         script_dir = os.path.dirname(os.path.abspath(caller_file))
-        suite_name = os.path.splitext(os.path.basename(caller_file))[0]
+        suite_names = [os.path.splitext(os.path.basename(caller_file))[0]]
     else:
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        suite_name = args.suite
+        run_all = getattr(args, "all", False)
+        if run_all:
+            suite_names = sorted(
+                os.path.splitext(os.path.basename(f))[0]
+                for f in glob.glob(os.path.join(script_dir, "bench_*.py"))
+            )
+        elif args.suite:
+            suite_names = [args.suite]
+        else:
+            parser.error("provide a suite name or use --all")
 
     os.chdir(script_dir)
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
 
-    mod = importlib.import_module(suite_name)
-
     all_results = {}
-    for name in sorted(dir(mod)):
-        obj = getattr(mod, name)
-        if isinstance(obj, type) and name.startswith("Bench"):
-            results = run_class(
-                suite_name, obj, name, args.method_filter, args.warmup, args.iters)
-            all_results.update(results)
+    all_meta = {}
+    for suite_name in suite_names:
+        mod = importlib.import_module(suite_name)
+        for name in sorted(dir(mod)):
+            obj = getattr(mod, name)
+            if isinstance(obj, type) and name.startswith("Bench"):
+                results, meta = run_class(
+                    suite_name, obj, name, args.method_filter, args.warmup, args.iters)
+                all_results.update(results)
+                all_meta.update(meta)
 
     if all_results and not args.no_save:
-        save_asv_results(all_results)
+        save_asv_results(all_results, all_meta)
 
 
 if __name__ == "__main__":

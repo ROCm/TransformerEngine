@@ -47,6 +47,16 @@ class BenchAttention:
         self.grad_out = torch.randn_like(self.attn(self.q, self.k, self.v))
         self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 
+    def work_forward(self, seq_len, model):
+        n_q, n_kv, hd, tp = MODELS[model]
+        qh = n_q // tp
+        return {"flops": 4 * BATCH * qh * seq_len * seq_len * hd}
+
+    def work_forward_backward(self, seq_len, model):
+        n_q, n_kv, hd, tp = MODELS[model]
+        qh = n_q // tp
+        return {"flops": 3 * 4 * BATCH * qh * seq_len * seq_len * hd}
+
     def time_forward(self, seq_len, model):
         self._evt[0].record()
         self.attn(self.q, self.k, self.v)
