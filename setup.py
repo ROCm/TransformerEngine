@@ -22,6 +22,7 @@ from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
     rocm_build,
+    rocm_version,
     all_files_in_dir,
     cuda_archs,
     cuda_version,
@@ -250,9 +251,10 @@ if __name__ == "__main__":
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
         } if not rocm_build() else {
-            "core": [f"transformer_engine_rocm=={__version__}"],
-            "pytorch": [f"transformer_engine_torch=={__version__}"],
-            "jax": [f"transformer_engine_jax=={__version__}"],
+            "rocm": [f"transformer_engine_rocm7=={__version__}"],
+            "rocm7": [f"transformer_engine_rocm7=={__version__}"],
+            "rocm_pytorch": [f"transformer_engine_rocm7[pytorch]=={__version__}"],
+            "rocm_jax": [f"transformer_engine_rocm7[jax]=={__version__}"],
         }
     else:
         install_requires, test_requires = setup_requirements()
@@ -288,9 +290,14 @@ if __name__ == "__main__":
                 )
 
     PACKAGE_NAME="transformer_engine"
-    if rocm_build() and bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-        if not bool(int(os.getenv("NVTE_BUILD_METAPACKAGE", "0"))):
-            PACKAGE_NAME="transformer_engine_rocm"
+    if (rocm_build() and bool(int(os.getenv("NVTE_RELEASE_BUILD", "0")))
+        and not bool(int(os.getenv("NVTE_BUILD_METAPACKAGE", "0"))) ):
+        PACKAGE_NAME=f"transformer_engine_rocm{rocm_version()[0]}"
+        #On ROCm add extras to core package so it can be installed w/o metapackage
+        extras_require.update({
+            "pytorch": [f"transformer_engine_rocm_torch=={__version__}"],
+            "jax": [f"transformer_engine_rocm_jax=={__version__}"],
+        })
 
     # Configure package
     setuptools.setup(
