@@ -6,7 +6,6 @@ cd "$(git rev-parse --show-toplevel)"
 
 BENCH_DIR="benchmarks/asv"
 ASV_CONF="$(pwd)/$BENCH_DIR/asv.conf.json"
-mapfile -t SUITES < <(find "$BENCH_DIR" -maxdepth 1 -name 'bench_*.py' -printf '%f\n' | sed 's/\.py$//' | sort)
 
 usage() {
     cat <<EOF
@@ -40,19 +39,11 @@ case "${1:-}" in
             echo "Running (asv): ${CMD[*]}"
             "${CMD[@]}"
         else
-            # Default: fast in-process run
-            ARGS=()
-            while [[ $# -gt 0 ]]; do
-                ARGS+=("$1")
-                shift
-            done
-            if [[ ${#ARGS[@]} -eq 0 ]]; then
-                # Run all suites
-                for s in "${SUITES[@]}"; do
-                    python "$BENCH_DIR/driver.py" "$s"
-                done
+            # Default: fast in-process run (--all when no suite given)
+            if [[ $# -eq 0 ]]; then
+                python "$BENCH_DIR/driver.py" --all
             else
-                python "$BENCH_DIR/driver.py" "${ARGS[@]}"
+                python "$BENCH_DIR/driver.py" "$@"
             fi
         fi
         ;;
@@ -69,7 +60,7 @@ case "${1:-}" in
         ;;
     list)
         echo "Available benchmark suites:"
-        for s in "${SUITES[@]}"; do echo "  $s"; done
+        ls "$BENCH_DIR"/bench_*.py 2>/dev/null | sed 's|.*/bench_|  bench_|;s|\.py$||'
         ;;
     *)
         usage

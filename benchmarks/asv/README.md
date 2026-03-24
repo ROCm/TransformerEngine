@@ -24,7 +24,9 @@ format by default.
 
 ```bash
 cd benchmarks/asv
-python bench_gemm.py                        # run all methods in the suite
+python driver.py --all                      # run every suite
+python driver.py bench_gemm                 # run one suite via driver
+python bench_gemm.py                        # run one suite directly
 python bench_gemm.py time_forward           # filter to a specific method
 python bench_gemm.py -w 5 -n 20             # custom warmup/iteration counts
 python bench_casting.py --no-save           # skip saving results
@@ -104,13 +106,22 @@ class BenchSomething:
     def setup(self, M, config):
         # Allocate tensors, create modules.
         # This runs before each time_* method but is NOT timed.
+        self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
         ...
 
     def time_forward(self, M, config):
-        # ASV times this method (adaptive iterations + statistics).
-        # MUST call torch.cuda.synchronize() to ensure GPU work completes.
+        # Use CUDA events for accurate GPU timing.
+        # Return elapsed seconds — the driver uses this instead of wall time.
+        self._evt[0].record()
         self.module(self.x)
+        self._evt[1].record()
         torch.cuda.synchronize()
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000
+
+    # Optional: define work_<name> to get throughput columns (TFLOPS / GB/s).
+    def work_forward(self, M, config):
+        return {"flops": 2 * M * self.N * self.K}   # compute-bound
+        # return {"bytes": M * self.hidden * 4}      # memory-bound
 
 if __name__ == "__main__":
     from driver import run_as_main
@@ -119,6 +130,7 @@ if __name__ == "__main__":
 
 Key rules:
 - Method names starting with `time_` are automatically timed.
-- Always call `torch.cuda.synchronize()` at the end of `time_*` methods.
+- Use CUDA events and return elapsed seconds for accurate GPU timing.
+- Optionally define `work_<name>` companions to get TFLOPS or GB/s columns.
 - Clear `.grad` attributes in backward benchmarks to prevent memory accumulation.
 - The `params` list defines a cross-product; keep the matrix size reasonable.
