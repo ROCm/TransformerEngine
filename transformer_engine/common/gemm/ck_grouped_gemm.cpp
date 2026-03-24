@@ -127,7 +127,7 @@ struct Runner{
           Partitioner::MPerBlock, Partitioner::NPerBlock,
           TileCfg::M_Warp, TileCfg::N_Warp,
           TileCfg::M_Warp_Tile, TileCfg::N_Warp_Tile, TileCfg::K_Warp_Tile,
-          Problem::TransposeC, ck_tile::memory_operation_enum::set>>;
+          Problem::TransposeC>>;
 
   using Kernel = ck_tile::GroupedGemmKernel<Partitioner, Pipeline, Epilogue>;
 };
@@ -265,12 +265,6 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
 {
   if (group_num <= 0)
     return true;
-
-  // The current CK grouped GEMM path uses CShuffleEpilogueProblem without an explicit
-  // memory-operation template argument, so D accumulation semantics are not guaranteed.
-  // Fall back for accumulate=true to preserve numerics.
-  if (accumulate)
-    return false;
 
   using namespace transformer_engine;
   using namespace transformer_engine::grouped_gemm;
