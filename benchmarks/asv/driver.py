@@ -96,19 +96,15 @@ def _get_commit_hash():
 
 
 def _compute_stats(samples):
-    """Compute statistics from a list of timing samples."""
-    if not samples:
-        return None, None, None, None, None
+    """Return (median, mean, stdev, ci_lo, ci_hi, q25, q75) for *samples*."""
     s = sorted(samples)
     n = len(s)
-    median = s[n // 2]
     mean = sum(s) / n
-    q25 = s[max(0, n // 4)]
-    q75 = s[min(n - 1, 3 * n // 4)]
     stdev = math.sqrt(sum((t - mean) ** 2 for t in s) / n)
-    ci_lo = max(0, mean - 2.576 * stdev / math.sqrt(n))  # 99% CI
-    ci_hi = mean + 2.576 * stdev / math.sqrt(n)
-    return median, ci_lo, ci_hi, q25, q75
+    ci = 2.576 * stdev / math.sqrt(n)  # 99 % CI half-width
+    return (s[n // 2], mean, stdev,
+            max(0, mean - ci), mean + ci,
+            s[max(0, n // 4)], s[min(n - 1, 3 * n // 4)])
 
 
 def _get_results_dir():
@@ -192,6 +188,12 @@ def save_asv_results(all_results, bench_meta):
 # Benchmark runner
 # ---------------------------------------------------------------------------
 
+_ASV_META_DEFAULTS = {
+    "min_run_count": 2, "number": 0, "repeat": 0, "rounds": 2,
+    "sample_time": 0.01, "type": "time", "unit": "seconds", "warmup_time": -1,
+}
+
+
 def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7):
     """Run all benchmarks in a class, returning (results, metadata) dicts."""
     methods = sorted(m for m in dir(cls) if m.startswith("time_"))
@@ -203,40 +205,34 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
     params = getattr(cls, "params", [[]])
     param_names = getattr(cls, "param_names", [])
     combos = list(itertools.product(*params))
+    asv_params = [[_format_param_value(v) for v in dim] for dim in params]
 
-    # Probe the first method to determine if work_* companions exist
-    # and what metric columns to show for this class.
-    has_flops = False
-    has_bytes = False
-    for method_name in methods:
-        work_name = "work_" + method_name[len("time_"):]
-        work_fn = getattr(cls, work_name, None)
-        if work_fn is not None:
-            # Probe with the first combo to discover keys
+    # Discover throughput columns from work_* companions
+    # Each entry: (dict_key, column_header, unit_divisor)
+    probe_keys = set()
+    for m in methods:
+        wfn = getattr(cls, "work_" + m[5:], None)
+        if wfn:
             try:
-                probe = work_fn(cls(), *combos[0])
-                has_flops = has_flops or "flops" in probe
-                has_bytes = has_bytes or "bytes" in probe
+                probe_keys.update(wfn(cls(), *combos[0]))
             except Exception:
                 pass
+    throughput_cols = []
+    if "flops" in probe_keys:
+        throughput_cols.append(("flops", "TFLOPS", 1e12))
+    if "bytes" in probe_keys:
+        throughput_cols.append(("bytes", "GB/s", 1e9))
 
+    # Print table header
     print(f"\n{class_name}  ({len(combos)} combos x {len(methods)} methods, "
           f"{warmup} warmup, {iters} timed)")
-    extra_hdr = ""
-    if has_flops:
-        extra_hdr += f"  {'TFLOPS':>10}"
-    if has_bytes:
-        extra_hdr += f"  {'GB/s':>10}"
+    extra_hdr = "".join(f"  {label:>10}" for _, label, _ in throughput_cols)
     HDR = (f"  {'median':>10}  {'mean':>10}  {'stdev':>10}"
            f"  {'q25':>10}  {'q75':>10}  {'min':>10}  {'max':>10}"
-           + extra_hdr
-           + f"  {'method':<30}  params")
+           + extra_hdr + f"  {'method':<30}  params")
     print("-" * len(HDR))
     print(HDR)
     print("-" * len(HDR))
-
-    # ASV stores params as lists of string representations
-    asv_params = [[_format_param_value(v) for v in dim] for dim in params]
 
     all_results = {}
     all_meta = {}
@@ -246,29 +242,14 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
         code, version = _get_benchmark_code_and_version(cls, method_name)
 
         all_meta[bench_key] = {
-            "code": code,
-            "min_run_count": 2,
-            "name": bench_key,
-            "number": 0,
-            "param_names": list(param_names),
-            "params": asv_params,
-            "repeat": 0,
-            "rounds": 2,
-            "sample_time": 0.01,
+            **_ASV_META_DEFAULTS,
+            "code": code, "name": bench_key, "version": version,
+            "param_names": list(param_names), "params": asv_params,
             "timeout": getattr(cls, "timeout", 300),
-            "type": "time",
-            "unit": "seconds",
-            "version": version,
-            "warmup_time": -1,
         }
 
-        medians = []
-        ci_los = []
-        ci_his = []
-        q25s = []
-        q75s = []
-        numbers = []
-        repeats = []
+        medians, ci_los, ci_his, q25s, q75s = [], [], [], [], []
+        numbers, repeats = [], []
         started_at = int(time.time() * 1000)
         t_start = time.perf_counter()
 
@@ -279,17 +260,11 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
                 instance.setup(*combo)
             except Exception as e:
                 print(f"  SKIP  {label}  setup failed: {e}")
-                medians.append(None)
-                ci_los.append(None)
-                ci_his.append(None)
-                q25s.append(None)
-                q75s.append(None)
-                numbers.append(None)
-                repeats.append(None)
+                for lst in (medians, ci_los, ci_his, q25s, q75s, numbers, repeats):
+                    lst.append(None)
                 continue
 
             method = getattr(instance, method_name)
-
             for _ in range(warmup):
                 method(*combo)
 
@@ -300,9 +275,7 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
                 wall = time.perf_counter() - t0
                 samples.append(wall if result is None else result)
 
-            median, ci_lo, ci_hi, q25, q75 = _compute_stats(samples)
-            mean = sum(samples) / len(samples)
-            stdev = math.sqrt(sum((t - mean) ** 2 for t in samples) / len(samples))
+            median, mean, stdev, ci_lo, ci_hi, q25, q75 = _compute_stats(samples)
             s_min, s_max = min(samples), max(samples)
 
             medians.append(median)
@@ -313,29 +286,19 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
             numbers.append(1)
             repeats.append(iters)
 
-            # Compute throughput from work_* companion if available
-            extra_cols = ""
-            work_name = "work_" + method_name[len("time_"):]
-            work_fn = getattr(instance, work_name, None)
-            if work_fn is not None and median and median > 0:
+            # Derive throughput from work_* companion
+            work = {}
+            wfn = getattr(instance, "work_" + method_name[5:], None)
+            if wfn and median > 0:
                 try:
-                    work = work_fn(*combo)
+                    work = wfn(*combo)
                 except Exception:
-                    work = {}
-                if has_flops and "flops" in work:
-                    tflops = work["flops"] / median / 1e12
-                    extra_cols += f"  {tflops:>10.1f}"
-                elif has_flops:
-                    extra_cols += f"  {'':>10}"
-                if has_bytes and "bytes" in work:
-                    gbps = work["bytes"] / median / 1e9
-                    extra_cols += f"  {gbps:>10.1f}"
-                elif has_bytes:
-                    extra_cols += f"  {'':>10}"
-            else:
-                if has_flops:
-                    extra_cols += f"  {'':>10}"
-                if has_bytes:
+                    pass
+            extra_cols = ""
+            for key, _, divisor in throughput_cols:
+                if key in work and median > 0:
+                    extra_cols += f"  {work[key] / median / divisor:>10.1f}"
+                else:
                     extra_cols += f"  {'':>10}"
 
             print(f"  {median*1000:>8.3f}ms  {mean*1000:>8.3f}ms  "
@@ -344,22 +307,9 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
                   f"{extra_cols}  "
                   f"{method_name:<30}  {label}")
 
-        duration = time.perf_counter() - t_start
-
-        # ASV result row: [result, params, version, started_at, duration,
-        #   ci_99_a, ci_99_b, q_25, q_75, number, repeat, samples]
         all_results[bench_key] = [
-            medians,
-            asv_params,
-            version,
-            started_at,
-            round(duration, 2),
-            ci_los,
-            ci_his,
-            q25s,
-            q75s,
-            numbers,
-            repeats,
+            medians, asv_params, version, started_at, round(duration, 2),
+            ci_los, ci_his, q25s, q75s, numbers, repeats,
         ]
 
     return all_results, all_meta
