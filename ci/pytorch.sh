@@ -94,10 +94,7 @@ run_test_config_mgpu(){
     #run in parallel on CI and it affects timing
     run_default_fa 1 test_gemm_sm_count.py
     run_default_fa 3 test_sanity_import.py
-<<<<<<< HEAD
     run_default_fa 3 distributed/test_cast_master_weights_to_fp8.py
-=======
->>>>>>> 16b62493 (Cleanup and RS flag race condition fix)
     run_default_fa 3 distributed/test_comm_gemm_overlap.py
     run_default_fa 2 distributed/test_fusible_ops.py
     run_default_fa 2 distributed/test_numerics.py
