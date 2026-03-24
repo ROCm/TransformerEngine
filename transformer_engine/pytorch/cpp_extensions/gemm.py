@@ -13,7 +13,9 @@ import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 from ..constants import TE_DType
-from ..utils import get_sm_count, _empty_tensor, get_device_compute_capability
+from ..utils import get_sm_count, _empty_tensor
+if IS_HIP_EXTENSION:
+    from ..utils import get_device_compute_capability
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
@@ -39,7 +41,7 @@ def get_cublas_workspace_size_bytes() -> None:
             return 67_108_864
         return 33_554_432
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
-    if get_device_compute_capability() >= (9, 0):
+    if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
         # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
         return 32 * 1024 * 1024 + 1024
     return 4_194_304
