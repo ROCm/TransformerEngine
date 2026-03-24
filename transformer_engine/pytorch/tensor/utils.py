@@ -1,18 +1,23 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 """Helper functions for using fp8 tensors as weights"""
 
+from typing import Optional, Union, List
 import torch
+
 import transformer_engine_torch as tex
 from transformer_engine_torch import multi_tensor_scale, multi_tensor_compute_scale_and_scale_inv
 
-from .quantized_tensor import QuantizedTensor
+from ..quantized_tensor import QuantizedTensor, Quantizer, QuantizedTensorStorage
 from .float8_tensor import Float8Tensor, Float8Quantizer, Float8CurrentScalingQuantizer
 from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
+from ..utils import is_non_tn_fp8_gemm_supported, is_fp8_fnuz
 
 
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
@@ -45,7 +50,12 @@ def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
 
 
 def cast_master_weights_to_fp8(
-    model_weights, master_weights, start_offsets, group, fsdp_shard_model_weights=None
+    model_weights,
+    master_weights,
+    start_offsets,
+    group,
+    fsdp_shard_model_weights=None,
+    manual_post_all_gather_processing=False,
 ):
     r"""Helper function to cast master weights to FP8 primary weights.
 
@@ -66,6 +76,11 @@ def cast_master_weights_to_fp8(
     fsdp_shard_model_weights : list of FSDP shard model weights. If None, it means that the model weights are
                              not sharded. Otherwise, it means that the model weights are sharded and we get
                              target model weights data storage using the FSDP shard model weights.
+    manual_post_all_gather_processing: bool, default = `False`.
+                     If False, post processing will be automatically triggered during next forward.
+                     If True, the timing of calling post_all_gather_processing is left to the user.
+                     Note that users must call `post_all_gather_processing` if it's set to True,
+                     otherwise the weights won't be updated correctly.
 
     """
 
@@ -126,21 +141,18 @@ def cast_master_weights_to_fp8(
                 f"cast_master_weights_to_fp8 for {type(quantizer)} is not supported yet"
             )
 
+    extra_args = [group, use_fsdp_shard_model_weights, manual_post_all_gather_processing]
     if len(delayed_scaling_params) > 0:
-        _cast_master_weights_to_fp8_delayed_scaling(
-            delayed_scaling_params, group, use_fsdp_shard_model_weights
-        )
+        _cast_master_weights_to_fp8_delayed_scaling(delayed_scaling_params, *extra_args)
     if len(current_scaling_params) > 0:
-        _cast_master_weights_to_fp8_current_scaling(
-            current_scaling_params, group, use_fsdp_shard_model_weights
-        )
+        _cast_master_weights_to_fp8_current_scaling(current_scaling_params, *extra_args)
     if len(blockwise_scaling_params) > 0:
-        _cast_master_weights_to_fp8_blockwise_scaling(
-            blockwise_scaling_params, group, use_fsdp_shard_model_weights
-        )
+        _cast_master_weights_to_fp8_blockwise_scaling(blockwise_scaling_params, *extra_args)
 
 
-def _cast_master_weights_to_fp8_delayed_scaling(params, group, use_fsdp_shard_model_weights=False):
+def _cast_master_weights_to_fp8_delayed_scaling(
+    params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
+):
     r"""Helper function to cast master weights to FP8 primary weights for delayed scaling.
 
     Parameters
@@ -157,11 +169,12 @@ def _cast_master_weights_to_fp8_delayed_scaling(params, group, use_fsdp_shard_mo
     amaxes, scales, scale_invs = [], [], []
 
     for model_weight, master_weight, start_offset, shard_model_weight_raw in params:
-        # Reset transpose cache for all model weights.
-        # We cannot create transpose cache here because users (like megatron) may want to overlap
-        # the all-gather of model weights and forward process, so the model weight is not updated
-        # currently.
-        model_weight._reset_caches()
+        if not manual_post_all_gather_processing:
+            # Reset transpose cache for all model weights.
+            # We cannot create transpose cache here because users (like megatron) may want to
+            # overlap the all-gather of model weights and forward process, so the model weight is
+            # not updated currently.
+            model_weight._reset_caches()
 
         quantizer = model_weight._get_quantizer()
 
@@ -222,7 +235,9 @@ def _cast_master_weights_to_fp8_delayed_scaling(params, group, use_fsdp_shard_mo
         )
 
 
-def _cast_master_weights_to_fp8_current_scaling(params, group, use_fsdp_shard_model_weights=False):
+def _cast_master_weights_to_fp8_current_scaling(
+    params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
+):
     r"""Helper function to cast master weights to FP8 primary weights for current scaling.
 
     Parameters
@@ -280,7 +295,7 @@ def _cast_master_weights_to_fp8_current_scaling(params, group, use_fsdp_shard_mo
     # Step 3: Update scales and scale_invs.
     # ---------------------------------------------------------------------------------------------
     if fp8_dtype == tex.DType.kFloat8E4M3:
-        max_fp8 = 448.0
+        max_fp8 = 240.0 if is_fp8_fnuz() else 448.0
     elif fp8_dtype == tex.DType.kFloat8E5M2:
         max_fp8 = 57344.0
     else:
@@ -300,11 +315,12 @@ def _cast_master_weights_to_fp8_current_scaling(params, group, use_fsdp_shard_mo
     for (model_weight, master_weight, start_offset, model_weight_fragment), scale in zip(
         params, scales
     ):
-        # Reset transpose cache for all model weights.
-        # We cannot create transpose cache here because users (like megatron) may want to overlap
-        # the all-gather of model weights and forward process, so the model weight is not updated
-        # currently.
-        model_weight._reset_caches()
+        if not manual_post_all_gather_processing:
+            # Reset transpose cache for all model weights.
+            # We cannot create transpose cache here because users (like megatron) may want to
+            # overlap the all-gather of model weights and forward process, so the model weight is
+            # not updated currently.
+            model_weight._reset_caches()
 
         # If master weight is None, it means that the master weight of the current model weight
         # is in other DP ranks.
@@ -331,7 +347,7 @@ def _cast_master_weights_to_fp8_current_scaling(params, group, use_fsdp_shard_mo
 
 
 def _cast_master_weights_to_fp8_blockwise_scaling(
-    params, group, use_fsdp_shard_model_weights=False
+    params, group, use_fsdp_shard_model_weights=False, manual_post_all_gather_processing=False
 ):
     r"""Helper function to cast master weights to FP8 primary weights for blockwise scaling.
 
@@ -410,7 +426,7 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
     # Step 3: Update scales and scale_invs.
     # ---------------------------------------------------------------------------------------------
     if fp8_dtype == tex.DType.kFloat8E4M3:
-        max_fp8 = 448.0
+        max_fp8 = 240.0 if is_fp8_fnuz() else 448.0
     elif fp8_dtype == tex.DType.kFloat8E5M2:
         max_fp8 = 57344.0
     else:
@@ -430,11 +446,12 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
     for (model_weight, master_weight, start_offset, model_weight_fragment), scale in zip(
         params, scales
     ):
-        # Clear columnwise data for all model weights.
-        # We cannot create columnwise data here because users (like megatron) may want to overlap
-        # the all-gather of model weights and forward process, so the model weight is not updated
-        # at this moment.
-        model_weight.update_usage(rowwise_usage=True, columnwise_usage=False)
+        if not manual_post_all_gather_processing:
+            # Clear columnwise data for all model weights.
+            # We cannot create columnwise data here because users (like megatron) may want to
+            # overlap the all-gather of model weights and forward process, so the model weight is
+            # not updated at this moment.
+            model_weight.update_usage(rowwise_usage=True, columnwise_usage=False)
 
         # If master weight is None, it means that the master weight of the current model weight
         # is in other DP ranks.
@@ -450,3 +467,38 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
         tex.fp8_block_scaling_partial_cast(
             master_weight, model_weight_fragment, scale, h, w, start_offset, block_len, fp8_dtype
         )
+
+
+def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Tensor]]):
+    """
+    Post-processing after all-gather for weights in distributed optimizer.
+    - Float8Tensor: may need to create a transposed view to match backend GEMM.
+    - Float8BlockwiseQTensor: create column-wise storage.
+    - Plain pytorch tensor: noop.
+    """
+    if not isinstance(model_weights, list):
+        model_weights = [model_weights]
+    for model_weight in model_weights:
+        if isinstance(model_weight, Float8Tensor):
+            # Delayed scaling and per-tensor current scaling: if backend does not support
+            # non-transposed FP8 GEMM, pre-create the transpose.
+            # ROCm: add check for columnwise_usage from the quantizer since keep_fp8_weight_transpose_cache can be false.
+            if model_weight._quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported():
+                model_weight._create_transpose()
+        elif isinstance(model_weight, Float8BlockwiseQTensor):
+            # Blockwise scaling: create column-wise storage.
+            model_weight._create_columnwise()
+        elif isinstance(model_weight, QuantizedTensor):
+            raise ValueError(f"post_processing for {type(model_weight)} is not supported")
+
+
+def is_custom(x: Optional[Union[Quantizer, QuantizedTensorStorage]] = None) -> bool:
+    """Check if an object is custom.
+
+    Returns False if x is a torch.Tensor.
+    """
+    if x is None or isinstance(x, torch.Tensor):
+        return False
+    if not isinstance(x, (Quantizer, QuantizedTensorStorage)):
+        raise AssertionError("Object must be a Quantizer or QuantizedTensorStorage instance")
+    return hasattr(x, "custom") and x.custom

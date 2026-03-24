@@ -1,11 +1,11 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 import pytest
 import torch
 
-import transformer_engine.pytorch as te
+import transformer_engine.pytorch
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.optimizers import MultiTensorApply
 from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type

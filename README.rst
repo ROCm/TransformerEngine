@@ -1,9 +1,7 @@
 ..
     This file was modified to include portability information to AMDGPU.
-
-    Copyright (c) 2023-2025, Advanced Micro Devices, Inc. All rights reserved.
-
-    Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+    Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
+    Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
     See LICENSE for license information.
 
@@ -28,69 +26,20 @@ Feature Support Status
 Installation
 ============
 
-Install from manylinux wheels
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+See docs/installation.rst for detailed installation instructions on ROCm and AMDGPU.
+For addtional build configuration parameters see `Fused Attention Backends on ROCm` section below.
 
-Starting from ROCm 7.0, we provide manylinux wheels for Transformer Engine releases on `https://repo.radeon.com/rocm/manylinux`. For example, the wheels for ROCm 7.1.1 are at `https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/`. From the page, you can find four files related to Transformer Engine:
+AITER rebuilding
+^^^^^^^^^^^^^^^^
 
-* transformer_engine_rocm-*-py3-none-manylinux_2_28_x86_64.whl - This is the wheel file for installing the common library. It should not be installed by itself.
-* transformer_engine-*-py3-none-any.whl - This is the wheel file for installing the common TE Python package.
-* transformer_engine_jax-*.tar.gz - This is the source tar ball for the JAX extension.
-* transformer_engine_torch-*.tar.gz - This is the source tar ball for the Pytorch extension.
-
-Below are the example commands to download and install the wheels. They install both Pytorch and JAX extensions on the system where both frameworks are installed.
-
-.. code-block:: bash
-
-  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine_rocm-2.2.0-py3-none-manylinux_2_28_x86_64.whl
-  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine-2.2.0-py3-none-any.whl
-  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine_jax-2.2.0.tar.gz
-  wget https://repo.radeon.com/rocm/manylinux/rocm-rel-7.1.1/transformer_engine_torch-2.2.0.tar.gz
-
-  pip install ./transformer_engine* --no-build-isolation
-
-Install TE from source
-^^^^^^^^^^^^^^^^^^
-
-Execute the following commands to install ROCm Transformer Engine from source on AMDGPUs:
-
-.. code-block:: bash
-
-  # Clone TE repo and submodules
-  git clone --recursive https://github.com/ROCm/TransformerEngine.git
-
-  cd TransformerEngine
-  export NVTE_FRAMEWORK=pytorch,jax #optionally set framework, currently only support pytorch and jax; if not set will try to detect installed frameworks
-  export NVTE_ROCM_ARCH=gfx942,gfx950 # gfx942 for support of MI300/MI325, and gfx950 for support of MI350
-
-  # Build Platform Selection (optional)
-  # Note: Useful when both ROCm and CUDA platforms are present in the Docker
-  export NVTE_USE_ROCM=1  #Use 1 for ROCm, or set to 0 to use CUDA; If not set will try to detect installed platform, prioritizing ROCm
-
-  pip install . --no-build-isolation
-
-It is also possible to build wheels for later installation with "pip wheel ." although those wheels will not be portable to systems with
-different libraries installed. If the build still fails with the "--no-build-isolation" flag try installing setuptools<80.0.0
-
-Note on Switching between Installation from Source and Installation from Wheels
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-Sometimes, issues might occur when installing from source on a system where a previous installation with wheels, or vice versa. It is safe to uninstall TE first before 
-switching between installing from source and installing from wheels. Here is the example command:
-
-.. code-block:: bash
-
-  # The package name pattern might be transformer_engine or transformer-engine depending on setuptools version
-  pip list | grep transformer.engine | xargs pip uninstall -y
+TE uses AITER submodule as fused attention backend on ROCm. Rebuilding of this library takes a long time so build scripts cache the built library in `build/aiter-prebuilts`. If you want rebuild AITER, delete the cache and rebuild TE.
 
 Known Issue with ROCm 6.4 PyTorch Release
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 Using the docker image ``rocm/pytorch:rocm6.4_ubuntu22.04_py3.10_pytorch_release_2.5.1`` triggers a failure in the unit-test ``tests/pytorch/test_permutation.py`` (tracked in Jira ticket SWDEV-534311).
 
 Rebuilding PyTorch at commit ``f929e0d602a71aa393ca2e6097674b210bdf321c`` resolves the issue.
-
-Re-install PyTorch
-^^^^^^^^^^^^^^^^^^
 
 .. code-block:: bash
 
@@ -299,7 +248,7 @@ Certain settings can be enabled to potentially optimize workloads depending on t
 * NVTE_CK_ZERO_OUT_PAD - by default 1, if set to 0 then the output of the FA forward pass will not be initialized to zero, meaning invalid regions (representing padding) may take nonzero values. Only used if input has padding.
 
 AITER FA v3 Kernels
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~
 ROCm TE supports flash-attention v3 fwd/bwd kernels on gfx942 and gfx950 using AITER backend.
 This functionality can be controlled by the following environment variables:
 
@@ -309,7 +258,7 @@ This functionality can be controlled by the following environment variables:
 * NVTE_CK_HOW_V3_BF16_CVT - by default 1, float to bf16 convert type when v3 is enabled, 0:RTNE; 1:RTNA; 2:RTZ, only applicable to the gfx942 architecture.
 
 Float to BFloat16 Conversion in CK Backend (gfx942 only)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 How fp32 converts to bf16 affects both the performance and accuracy in ck fused attn.
 ROCm TE provides the compile-time env NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT with the following values available to choose from:
 
@@ -354,6 +303,19 @@ legacy single-stage atomic kernel by setting:
 
     NVTE_USE_ATOMIC_AMAX=1
 
+Grouped GEMM using CK_Tile
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Transformer Engine provides a CK_Tile–based implementation of grouped GEMM
+as an alternative to the hipBlasLt-based default grouped GEMM implementation.
+This will provide performance improvements in most supported cases.
+
+You can enable the CK_Tile-based backend using the same environment variables as in the
+upstream CUTLASS implementation:
+
+    NVTE_USE_CUTLASS_GROUPED_GEMM=1             # Enable CK_Tile-based grouped GEMM
+    NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK=1   # Print a warning if falling back to hipBlasLt backend (e.g., due to an unsupported config)
+
 
 Transformer Engine
 ******************
@@ -362,6 +324,14 @@ Transformer Engine
 
 Latest News
 ===========
+
+* [09/2025] `Pretraining Large Language Models with NVFP4 <https://www.arxiv.org/pdf/2509.25149>`_
+* [09/2025] `Native FP8 Mixed Precision Training for Ling 2.0, Open Sourced! <https://huggingface.co/blog/im0qianqian/ling-mini-2-fp8-mixed-precision-training-solution>`_
+* [09/2025] `Faster Training Throughput in FP8 Precision with NVIDIA NeMo <https://developer.nvidia.com/blog/faster-training-throughput-in-fp8-precision-with-nvidia-nemo/>`_
+* [08/2025] `How we built DeepL's next-generation LLMs with FP8 for training and inference <https://www.deepl.com/en/blog/tech/next-generation-llm-fp8-training>`_
+* [08/2025] `NVFP4 Trains with Precision of 16-bit and Speed and Efficiency of 4-bit <https://developer.nvidia.com/blog/nvfp4-trains-with-precision-of-16-bit-and-speed-and-efficiency-of-4-bit/>`_
+* [06/2025] `Floating Point 8: An Introduction to Efficient, Lower-Precision AI Training <https://developer.nvidia.com/blog/floating-point-8-an-introduction-to-efficient-lower-precision-ai-training/>`_
+* [05/2025] `Advanced Optimization Strategies for LLM Training on NVIDIA Grace Hopper <https://developer.nvidia.com/blog/advanced-optimization-strategies-for-llm-training-on-nvidia-grace-hopper/>`_
 * [03/2025] `Stable and Scalable FP8 Deep Learning Training on Blackwell | GTC 2025 <https://www.nvidia.com/en-us/on-demand/session/gtc25-s72778/>`_
 * [03/2025] `Measure and Improve AI Workload Performance with NVIDIA DGX Cloud Benchmarking <https://developer.nvidia.com/blog/measure-and-improve-ai-workload-performance-with-nvidia-dgx-cloud-benchmarking/>`_
 
@@ -436,7 +406,7 @@ PyTorch
   fp8_recipe = recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.E4M3)
 
   # Enable autocasting for the forward pass
-  with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+  with te.autocast(enabled=True, recipe=fp8_recipe):
       out = model(inp)
 
   loss = out.sum()
@@ -471,7 +441,7 @@ Flax
   fp8_recipe = recipe.DelayedScaling(margin=0, fp8_format=recipe.Format.HYBRID)
 
   # Enable autocasting for the forward pass
-  with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+  with te.autocast(enabled=True, recipe=fp8_recipe):
       model = te_flax.DenseGeneral(features=HIDDEN)
 
       def loss_fn(params, other_vars, inp):
@@ -547,7 +517,7 @@ pip Installation
 **Prerequisites for pip installation:**
 
 * A compatible C++ compiler
-* CUDA Toolkit with cuDNN and NVCC (NVIDIA CUDA Compiler) installed
+* CUDA Toolkit with cuDNN and NVCC (NVIDIA CUDA Compiler) if installing from source.
 
 To install the latest stable version with pip:
 

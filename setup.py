@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -8,10 +8,11 @@
 
 from importlib import metadata
 import os
+import shutil
+import subprocess
 import time
 from pathlib import Path
 from typing import List, Tuple
-import subprocess
 
 import setuptools
 from setuptools.command.egg_info import egg_info
@@ -21,12 +22,13 @@ from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
 from build_tools.utils import (
     rocm_build,
+    rocm_version,
     all_files_in_dir,
-    hipify,
     cuda_archs,
     cuda_version,
     get_frameworks,
     remove_dups,
+    min_python_version_str,
 )
 
 frameworks = get_frameworks()
@@ -47,9 +49,9 @@ class HipifyMeta(egg_info):
 
     def run(self):
         if rocm_build():
+            from build_tools.hipify.hipify import do_hipify
             print("Running hipification of installable headers for ROCm build...")
-            common_headers_dir = current_file_path / "transformer_engine/common/include"
-            hipify(current_file_path, common_headers_dir, all_files_in_dir(common_headers_dir), [])
+            do_hipify(current_file_path, current_file_path / "transformer_engine/common/include")
         super().run()
 
 CMakeBuildExtension = get_build_ext(BuildExtension)
@@ -171,8 +173,63 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
     return [remove_dups(reqs) for reqs in [install_reqs, test_reqs]]
 
 
+def git_check_submodules() -> None:
+    """
+    Attempt to checkout git submodules automatically during setup.
+
+    This runs successfully only if the submodules are
+    either in the correct or uninitialized state.
+
+    Note to devs: With this, any updates to the submodules itself, e.g. moving to a newer
+    commit, must be commited before build. This also ensures that stale submodules aren't
+    being silently used by developers.
+    """
+
+    # Provide an option to skip these checks for development.
+    if bool(int(os.getenv("NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD", "0"))):
+        return
+
+    # Require git executable.
+    if shutil.which("git") is None:
+        return
+
+    # Require a .gitmodules file.
+    if not (current_file_path / ".gitmodules").exists():
+        return
+
+    try:
+        submodules = subprocess.check_output(
+            ["git", "submodule", "status", "--recursive"],
+            cwd=str(current_file_path),
+            text=True,
+        ).splitlines()
+
+        for submodule in submodules:
+            # '-' start is for an uninitialized submodule.
+            # ' ' start is for a submodule on the correct commit.
+            assert submodule[0] in (
+                " ",
+                "-",
+            ), (
+                "Submodules are initialized incorrectly. If this is intended, set the "
+                "environment variable `NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD` to a "
+                "non-zero value to skip these checks during development. Otherwise, "
+                "run `git submodule update --init --recursive` to checkout the correct"
+                " submodule commits."
+            )
+
+        subprocess.check_call(
+            ["git", "submodule", "update", "--init", "--recursive"],
+            cwd=str(current_file_path),
+        )
+    except subprocess.CalledProcessError:
+        return
+
+
 if __name__ == "__main__":
     __version__ = te_version()
+
+    git_check_submodules()
 
     with open("README.rst", encoding="utf-8") as f:
         long_description = f.read()
@@ -182,15 +239,22 @@ if __name__ == "__main__":
         assert bool(
             int(os.getenv("NVTE_RELEASE_BUILD", "0"))
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
-        te_cuda_vers = "rocm" if rocm_build() else "cu12"
         ext_modules = []
         cmdclass = {}
         package_data = {}
         include_package_data = False
-        install_requires = ([f"transformer_engine_{te_cuda_vers}=={__version__}"],)
+        install_requires = []
         extras_require = {
+            "core": [f"transformer_engine_cu12=={__version__}"],
+            "core_cu12": [f"transformer_engine_cu12=={__version__}"],
+            "core_cu13": [f"transformer_engine_cu13=={__version__}"],
             "pytorch": [f"transformer_engine_torch=={__version__}"],
             "jax": [f"transformer_engine_jax=={__version__}"],
+        } if not rocm_build() else {
+            "rocm": [f"transformer_engine_rocm7=={__version__}"],
+            "rocm7": [f"transformer_engine_rocm7=={__version__}"],
+            "rocm_pytorch": [f"transformer_engine_rocm7[pytorch]=={__version__}"],
+            "rocm_jax": [f"transformer_engine_rocm7[jax]=={__version__}"],
         }
     else:
         install_requires, test_requires = setup_requirements()
@@ -225,9 +289,19 @@ if __name__ == "__main__":
                     )
                 )
 
+    PACKAGE_NAME="transformer_engine"
+    if (rocm_build() and bool(int(os.getenv("NVTE_RELEASE_BUILD", "0")))
+        and not bool(int(os.getenv("NVTE_BUILD_METAPACKAGE", "0"))) ):
+        PACKAGE_NAME=f"transformer_engine_rocm{rocm_version()[0]}"
+        #On ROCm add extras to core package so it can be installed w/o metapackage
+        extras_require.update({
+            "pytorch": [f"transformer_engine_rocm_torch=={__version__}"],
+            "jax": [f"transformer_engine_rocm_jax=={__version__}"],
+        })
+
     # Configure package
     setuptools.setup(
-        name="transformer_engine",
+        name=PACKAGE_NAME,
         version=__version__,
         packages=setuptools.find_packages(
             include=[
@@ -242,7 +316,7 @@ if __name__ == "__main__":
         long_description_content_type="text/x-rst",
         ext_modules=ext_modules,
         cmdclass={"egg_info": HipifyMeta, "build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
-        python_requires=">=3.8",
+        python_requires=f">={min_python_version_str()}",
         classifiers=["Programming Language :: Python :: 3"],
         install_requires=install_requires,
         license_files=("LICENSE",),

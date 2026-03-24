@@ -1,10 +1,10 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 import random
 import torch
-from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
+from transformer_engine.pytorch import parallel_cross_entropy
 
 from utils import dtype_tols
 

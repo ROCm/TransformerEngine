@@ -1,0 +1,14 @@
+{
+ "custom_map" : {
+        "<cuda_bf16.h>" : "<hip/hip_bfloat16.h>",
+        "<cuda_fp8.h>" : "\"common/amd_detail/hip_float8.h\"",
+        "cuda_runtime.h\"" : "hip_runtime.h\"",
+        "ATen/cudnn/Handle.h" : "ATen/miopen/Handle.h",
+        "CUfunc_cache" : "hipFuncCache_t", 
+        "<nvtx3/nvToolsExt.h>" : "<roctracer/roctx.h>",
+        "cudaFuncSetAttribute(" : "hipFuncSetAttribute((const void*)",
+        "__nv_bfloat162":"__hip_bfloat162",
+        "cuda::getCurrentCUDAStream" : "hip::getCurrentHIPStreamMasqueradingAsCUDA"
+ }
+}
+

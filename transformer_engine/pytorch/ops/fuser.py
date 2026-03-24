@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -13,7 +13,7 @@ import itertools
 
 import torch
 
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager, Recipe, DelayedScaling
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager, Recipe, DelayedScaling
 from transformer_engine.pytorch.ops.op import (
     BasicOperation,
     FusibleOperation,
@@ -34,7 +34,7 @@ if not IS_HIP_EXTENSION:
         fuse_userbuffers_backward_linear,
         fuse_userbuffers_forward_linear,
     )
-from transformer_engine.pytorch.tensor.quantized_tensor import (
+from transformer_engine.pytorch.quantized_tensor import (
     prepare_for_saving,
     restore_from_saved,
 )
@@ -479,6 +479,10 @@ class OperationFuser:
 
         # Attempt to fuse operations if neccesary
         self.maybe_fuse_ops(is_grad_enabled, recipe, input, basic_op_extra_inputs)
+
+        # Initialization before forward
+        for idx, op in enumerate(self._basic_ops):
+            op.pre_fuser_forward(requires_grad=idx >= self.first_op_requiring_backward)
 
         # Fuser forward pass
         if is_grad_enabled:

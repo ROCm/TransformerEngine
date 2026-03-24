@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -22,6 +22,7 @@ bool is_ck_backend_supported(
   NVTE_QKV_Layout qkv_layout,
   NVTE_Bias_Type bias_type,
   NVTE_Mask_Type attn_mask_type,
+  NVTE_Softmax_Type softmax_type,
   float dropout,
   size_t num_attn_heads, size_t num_gqa_groups,
   size_t max_seqlen_q, size_t max_seqlen_kv,

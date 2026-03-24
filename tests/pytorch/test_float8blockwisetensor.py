@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -14,12 +14,11 @@ import torch
 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine.common.recipe
-import transformer_engine.pytorch as te
-from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+from transformer_engine.pytorch import (
     Float8BlockQuantizer,
     Float8BlockwiseQTensor,
+    get_device_compute_capability,
 )
-from transformer_engine.pytorch.utils import get_device_compute_capability
 import transformer_engine_torch as tex
 
 # PyTorch tensor dtypes

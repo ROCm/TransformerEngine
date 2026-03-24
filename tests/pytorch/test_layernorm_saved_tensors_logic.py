@@ -1,11 +1,11 @@
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
 import pytest
 import torch
 import torch.nn as nn
 from unittest.mock import patch
-from transformer_engine.pytorch import LayerNormLinear, LayerNormMLP, fp8_autocast
+from transformer_engine.pytorch import LayerNormLinear, LayerNormMLP, autocast
 from transformer_engine.pytorch.tensor import QuantizedTensor
 from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 
@@ -84,7 +84,7 @@ def test_saved_tensors_logic(layernorm_type):
     weight_tensor.requires_grad_(True)
 
     with patch(config["backward_target"], side_effect=spy_on_ctx) as mock_backward:
-        with fp8_autocast(enabled=True):
+        with autocast(enabled=True):
             out, ln_out_returned = model(inp)
             out.backward(grad_output, retain_graph=True)
 
@@ -99,7 +99,7 @@ def test_saved_tensors_logic(layernorm_type):
     saved_ln_out_container.clear()
 
     with patch(config["backward_target"], side_effect=spy_on_ctx) as mock_backward:
-        with fp8_autocast(enabled=True):
+        with autocast(enabled=True):
             out, ln_out_returned = model(inp)
             out.backward(grad_output)
 

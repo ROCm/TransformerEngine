@@ -3,4 +3,3 @@ recursive-include common_headers *.*
 recursive-include csrc *.*
 recursive-include 3rdparty *.*
 recursive-include triton_kernels/gmm/configs *.json
-include hipify_custom_map.json

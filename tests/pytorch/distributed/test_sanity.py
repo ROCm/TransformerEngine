@@ -1,4 +1,4 @@
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -7,8 +7,7 @@ import sys
 import pytest
 import torch
 import transformer_engine
-from transformer_engine.pytorch.attention.dot_product_attention import DotProductAttention
-from transformer_engine.pytorch import TransformerLayer, Linear
+from transformer_engine.pytorch import DotProductAttention, TransformerLayer, Linear
 
 _current_file = pathlib.Path(__file__).resolve()
 sys.path.append(str(_current_file.parent.parent))
