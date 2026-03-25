@@ -213,8 +213,11 @@ def make_mask(
         inv_mask = combine_masks(inv_causal_mask, inv_mask)
 
     # sliding window mask
-    inv_swa_mask = (
-        make_swa_mask(
+    # Use bottom-right diagonal alignment for non-causal mask types (NO_MASK,
+    # PADDING_MASK) and explicit bottom-right types. Top-left causal masks
+    # (CAUSAL_MASK, PADDING_CAUSAL_MASK) keep top-left SWA alignment.
+    if attn_mask_type.is_bottom_right() or not attn_mask_type.is_causal():
+        inv_swa_mask = make_swa_mask(
             segment_pos_q,
             segment_pos_kv,
             window_size,
@@ -222,9 +225,10 @@ def make_mask(
             segment_ids_q=segment_ids_q,
             segment_ids_kv=segment_ids_kv,
         )
-        if attn_mask_type.is_bottom_right()
-        else make_swa_mask(segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool_)
-    )
+    else:
+        inv_swa_mask = make_swa_mask(
+            segment_pos_q, segment_pos_kv, window_size, dtype=jnp.bool
+        )
     inv_mask = combine_masks(inv_mask, inv_swa_mask)
     mask = jnp.logical_not(inv_mask)
     return mask
@@ -467,18 +471,6 @@ class FusedAttnRunner:
         if is_hip_extension():
             if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
                 pytest.skip("Unsupported inputs combination or device compute capability.")
-            # CK set_ck_mask maps NO_MASK/PADDING + SWA to mask_bottom_right, which uses
-            # bottom-right diagonal alignment. For cross-attention (s_q != s_kv) this
-            # produces different attention patterns than the top-left aligned reference.
-            if (
-                self.window_size is not None
-                and self.max_seqlen_q != self.max_seqlen_kv
-                and not self.attn_mask_type.is_causal()
-            ):
-                pytest.skip(
-                    "CK backend uses bottom-right mask alignment for non-causal SWA,"
-                    " which diverges from the top-left reference for cross-attention"
-                )
         else:
             if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
                 pytest.skip("Unsupported inputs combination or device compute capability.")
