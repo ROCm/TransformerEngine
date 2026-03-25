@@ -34,6 +34,9 @@ PyTypeObject *MXFP8QuantizerClass = nullptr;
 PyTypeObject *Float8BlockwiseQTensorPythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQTensorStoragePythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
+PyTypeObject *MXFP4TensorPythonClass = nullptr;
+PyTypeObject *MXFP4TensorStoragePythonClass = nullptr;
+PyTypeObject *MXFP4QuantizerClass = nullptr;
 PyTypeObject *NVFP4TensorPythonClass = nullptr;
 PyTypeObject *NVFP4TensorStoragePythonClass = nullptr;
 PyTypeObject *NVFP4QuantizerClass = nullptr;
@@ -91,6 +94,21 @@ void init_float8blockwise_extension() {
              "Internal error: could not initialize pyTorch float8blockwise extension.");
 }
 
+void init_mxfp4_extension() {
+  if (MXFP4TensorPythonClass) return;
+  auto fp4_module = py::module_::import("transformer_engine.pytorch.tensor.mxfp4_tensor");
+  MXFP4QuantizerClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp4_module.ptr(), "MXFP4Quantizer"));
+  MXFP4TensorPythonClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp4_module.ptr(), "MXFP4Tensor"));
+  auto fp4_base_module =
+      py::module_::import("transformer_engine.pytorch.tensor.storage.mxfp4_tensor_storage");
+  MXFP4TensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp4_base_module.ptr(), "MXFP4TensorStorage"));
+  NVTE_CHECK(MXFP4TensorPythonClass != nullptr,
+             "Internal error: could not initialize pyTorch MXFP4 extension.");
+}
+
 void init_nvfp4_extensions() {
   if (NVFP4TensorPythonClass) return;
   auto nvfp4_module = py::module_::import("transformer_engine.pytorch.tensor.nvfp4_tensor");
@@ -109,6 +127,7 @@ void init_nvfp4_extensions() {
 void init_extension() {
   init_float8_extension();
   init_mxfp8_extension();
+  init_mxfp4_extension();
   init_float8blockwise_extension();
   init_nvfp4_extensions();
 }
@@ -126,6 +145,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("bgrad_quantize", transformer_engine::pytorch::bgrad_quantize,
         "Compute bias gradient and quantize", py::arg("input"), py::arg("quantizer"));
+  m.def("cast_transpose_mxfp4_fused_shuffle",
+        &transformer_engine::pytorch::cast_transpose_mxfp4_fused_shuffle,
+        "MXFP4 cast and transpose with fused weight shuffle for GEMM",
+        py::call_guard<py::gil_scoped_release>());
   m.def("generic_gemm", transformer_engine::pytorch::gemm, "Compute GEMM (matrix-matrix multiply)",
         py::arg("A"), py::arg("transA"), py::arg("B"), py::arg("transB"), py::arg("D"),
         py::arg("quantizer"), py::arg("output_dtype"), py::arg("bias"), py::arg("bias_type"),

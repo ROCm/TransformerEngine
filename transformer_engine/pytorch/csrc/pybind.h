@@ -42,6 +42,9 @@ extern PyTypeObject *MXFP8QuantizerClass;
 extern PyTypeObject *Float8BlockwiseQTensorPythonClass;
 extern PyTypeObject *Float8BlockwiseQTensorStoragePythonClass;
 extern PyTypeObject *Float8BlockwiseQuantizerClass;
+extern PyTypeObject *MXFP4TensorPythonClass;
+extern PyTypeObject *MXFP4TensorStoragePythonClass;
+extern PyTypeObject *MXFP4QuantizerClass;
 extern PyTypeObject *NVFP4TensorPythonClass;
 extern PyTypeObject *NVFP4TensorStoragePythonClass;
 extern PyTypeObject *NVFP4QuantizerClass;
@@ -68,6 +71,12 @@ inline bool IsMXFP8Tensor(PyObject *obj) {
 
 inline bool IsFloat8BlockwiseQuantizers(PyObject *obj) {
   return Py_TYPE(obj) == Float8BlockwiseQuantizerClass;
+}
+
+inline bool IsMXFP4Quantizers(PyObject *obj) { return Py_TYPE(obj) == MXFP4QuantizerClass; }
+
+inline bool IsMXFP4Tensor(PyObject *obj) {
+  return Py_TYPE(obj) == MXFP4TensorPythonClass || Py_TYPE(obj) == MXFP4TensorStoragePythonClass;
 }
 
 inline bool IsNVFP4Quantizers(PyObject *obj) { return Py_TYPE(obj) == NVFP4QuantizerClass; }
