@@ -32,13 +32,26 @@ function(get_aiter_cache_key ROCM_VER_PARAM KEY_VAR CACHE_DIR_VAR)
   set(${CACHE_DIR_VAR} "${AITER_CACHE_ROOT}/${_KEY}" PARENT_SCOPE)
 endfunction()
 
+# Required files that must be present in a valid AITER prebuilt cache
+set(AITER_PREBUILT_REQUIRED_FILES
+  "libmha_fwd.a"
+  "libmha_bwd.a"
+)
+
 # Validate existing cache path
 function(is_aiter_cache_valid ROCM_VER_PARAM CACHE_VALID)
   get_aiter_cache_key("${ROCM_VER_PARAM}" KEY EXTRACT_DIR)
-  if(EXISTS "${EXTRACT_DIR}/libmha_fwd.a" AND EXISTS "${EXTRACT_DIR}/libmha_bwd.a")
-    set(${CACHE_VALID} TRUE PARENT_SCOPE)
-    message(STATUS "[AITER-PREBUILT] Found Cached build files at ${EXTRACT_DIR}")
+  if(NOT EXISTS "${EXTRACT_DIR}")
+    return()
   endif()
+  foreach(REQUIRED_FILE IN LISTS AITER_PREBUILT_REQUIRED_FILES)
+    if(NOT EXISTS "${EXTRACT_DIR}/${REQUIRED_FILE}")
+      message(WARNING "[AITER-PREBUILT] Cache at ${EXTRACT_DIR} is missing ${REQUIRED_FILE}")
+      return()
+    endif()
+  endforeach()
+  set(${CACHE_VALID} TRUE PARENT_SCOPE)
+  message(STATUS "[AITER-PREBUILT] Found valid cached build files at ${EXTRACT_DIR}")
 endfunction()
 
 # Main function to get prebuilt aiter libs. 
@@ -107,5 +120,15 @@ function(download_aiter_prebuilt ROCM_VER_PARAM DOWNLOAD_SUCCESS)
   # Download & extract prebuilt files
   FetchContent_MakeAvailable(aiter_prebuilt)
   message(STATUS "[AITER-PREBUILT] Successfully downloaded to ${EXTRACT_DIR}")
+
+  # Validate downloaded contents before declaring success
+  foreach(REQUIRED_FILE IN LISTS AITER_PREBUILT_REQUIRED_FILES)
+    if(NOT EXISTS "${EXTRACT_DIR}/${REQUIRED_FILE}")
+      message(WARNING "[AITER-PREBUILT] Downloaded cache is missing ${REQUIRED_FILE} — discarding and falling back to source build.")
+      file(REMOVE_RECURSE "${EXTRACT_DIR}")
+      return()
+    endif()
+  endforeach()
+  message(STATUS "[AITER-PREBUILT] Downloaded cache validated successfully.")
   set(${DOWNLOAD_SUCCESS} TRUE PARENT_SCOPE)
 endfunction()
