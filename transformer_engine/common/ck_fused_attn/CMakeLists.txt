@@ -73,12 +73,18 @@ else()
               --install-dir ${__AITER_MHA_PATH}
               --gpu-archs "${V3_ASM_ARCHS_STR}"
               --ck-tile-bf16 ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
+      RESULT_VARIABLE AITER_BUILD_RESULT
     )
-      # libmha_fwd.a and libmha_bwd.a will be under 3rdparty/aiter/op_tests/cpp/mha 
-      cache_local_aiter_build(${__AITER_TEST_DIR})
+    if(NOT AITER_BUILD_RESULT EQUAL 0)
+      message(FATAL_ERROR "[AITER-BUILD] aiter_build.sh failed with exit code ${AITER_BUILD_RESULT}")
     endif()
+    # Validate the source build produced the expected files
+    foreach(REQUIRED_FILE IN LISTS AITER_PREBUILT_REQUIRED_FILES)
+      if(NOT EXISTS "${__AITER_MHA_PATH}/${REQUIRED_FILE}")
+        message(FATAL_ERROR "[AITER-BUILD] Source build completed but ${REQUIRED_FILE} is missing from ${__AITER_MHA_PATH}")
+      endif()
+    endforeach()
   endif()
-  set(__AITER_MHA_PATH "${EXTRACT_DIR}")
   message(STATUS "[AITER-BUILD] Using __AITER_MHA_PATH=${__AITER_MHA_PATH}")
 endif()
 
