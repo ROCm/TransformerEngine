@@ -19,6 +19,7 @@ from transformer_engine.pytorch.custom_recipes.quantization import MMParams
 from transformer_engine.pytorch.custom_recipes.quantization_current_scaling import (
     CurrentScalingQuantizerRef,
 )
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 
 # read env variable NVTE_TEST_FLOAT8_CURRENT_SCALING_EXACT_TENSOR_DUMP_DIR to override the default tensor dump directory
@@ -31,7 +32,6 @@ if tensor_dump_dir_env is not None:
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
 
-
 class GetRecipes:
 
     @staticmethod
@@ -43,6 +43,9 @@ class GetRecipes:
         # return default configs
         return Float8CurrentScaling()
 
+fp8_e4m3_type = torch.float8_e4m3fn
+if IS_HIP_EXTENSION:
+    fp8_e4m3_type = get_fp8_torch_dtype(GetRecipes.fp8_per_tensor_current_scaling_default())
 
 # base class for validating current_scaling x linear layer
 class TestFP8RecipeLinearBase:
@@ -770,7 +773,7 @@ class TestFP8CurrentScalingNativeVsRef:
         )
         # Reference quantizer
         ref_quant = CurrentScalingQuantizerRef(
-            dtype=torch.float8_e4m3fn,
+            dtype=fp8_e4m3_type,
             rowwise=rowwise,
             columnwise=columnwise,
             pow_2_scales=False,
@@ -798,7 +801,7 @@ class TestFP8CurrentScalingNativeVsRef:
         # Native TE quantization
         x_te = te_quant(x)
         assert x_te._data is not None
-        qx_native = x_te._data.view(dtype=torch.float8_e4m3fn)
+        qx_native = x_te._data.view(dtype=fp8_e4m3_type)
         sx_native = x_te._scale_inv
 
         # Reference quantization
@@ -837,8 +840,8 @@ class TestFP8CurrentScalingNativeVsRef:
 
         # Prepare inputs for reference qgemm
         assert qx_native._data is not None and qw_native._data is not None
-        qx_data = qx_native._data.view(dtype=torch.float8_e4m3fn)
-        qw_data = qw_native._data.view(dtype=torch.float8_e4m3fn)
+        qx_data = qx_native._data.view(dtype=fp8_e4m3_type)
+        qw_data = qw_native._data.view(dtype=fp8_e4m3_type)
         sx = qx_native._scale_inv
         sw = qw_native._scale_inv
 
