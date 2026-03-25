@@ -288,6 +288,7 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
 #else
 #if ARCH_HAS_STOCHASTIC_ROUNDING
   // opsel=1 always writes to byte 1, result read from fp4x2[1]
+  // Matches HIP's own usage, see e.g. https://github.com/ROCm/clr/blob/3dbb5f1c5e0734d21dd2424a38255e61ee0a73e0/hipamd/include/hip/amd_detail/amd_hip_ocp_fp.hpp#L1858-L1890
   union { uint32_t ui32; __hip_fp4x2_storage_t fp4x2[4]; } u{0};
   __amd_floatx2_storage_t packed01{in01.x, in01.y};
   __amd_floatx2_storage_t packed23{in23.x, in23.y};

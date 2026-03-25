@@ -591,7 +591,7 @@ void performTest(float (*OP)(const float),
     // as well as stochastic rounding.
     hipDeviceProp_t prop;
     hipGetDeviceProperties(&prop, 0);
-    const bool is_gfx950 = std::string(prop.gcnArchName).find("gfx950") != std::string::npos;
+    const bool is_gfx950 = prop.major == 9 && prop.minor == 5;
     for (bool use_stochastic_rounding : (is_gfx950 ? std::vector<bool>{false, true}
                                                    : std::vector<bool>{false})) {
     for (bool use_2d_quantization : {false, true}) {
