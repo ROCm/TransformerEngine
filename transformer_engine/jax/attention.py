@@ -276,15 +276,14 @@ def make_swa_mask(
     right_window = jnp.inf if right_window < 0 else right_window
     pos_q = jnp.expand_dims(segment_pos_q, axis=-1)
     pos_kv = jnp.expand_dims(segment_pos_kv, axis=-2)
-    # Bottom-right diagonal alignment (used for BRCM and non-causal mask types)
+    # For Bottom Right Causal Mask (BRCM)
     if segment_ids_q is not None and segment_ids_kv is not None:
         run_length_q = run_length_fill(segment_ids_q)
         run_length_kv = run_length_fill(segment_ids_kv)
         run_length_q_exp = jnp.expand_dims(run_length_q, axis=-1)
         run_length_kv_exp = jnp.expand_dims(run_length_kv, axis=-2)
-        offset = run_length_kv_exp - run_length_q_exp
-        bottom_right_inv_swa_mask = (pos_kv >= pos_q - left_window + offset) & (
-            pos_kv <= pos_q + right_window + offset
+        bottom_right_inv_swa_mask = (
+            run_length_q_exp - pos_q + left_window >= run_length_kv_exp - pos_kv
         )
         bottom_right_inv_swa_mask = jnp.expand_dims(bottom_right_inv_swa_mask, axis=-3)
         return bottom_right_inv_swa_mask.astype(dtype)
