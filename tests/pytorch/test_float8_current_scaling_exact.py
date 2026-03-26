@@ -19,7 +19,7 @@ from transformer_engine.pytorch.custom_recipes.quantization import MMParams
 from transformer_engine.pytorch.custom_recipes.quantization_current_scaling import (
     CurrentScalingQuantizerRef,
 )
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
+from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type
 
 
 # read env variable NVTE_TEST_FLOAT8_CURRENT_SCALING_EXACT_TENSOR_DUMP_DIR to override the default tensor dump directory
@@ -31,6 +31,7 @@ if tensor_dump_dir_env is not None:
 
 # Check if FP8 is supported
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+fp8_e4m3_type = get_torch_float8_e4m3_type()
 
 class GetRecipes:
 
@@ -43,9 +44,6 @@ class GetRecipes:
         # return default configs
         return Float8CurrentScaling()
 
-fp8_e4m3_type = torch.float8_e4m3fn
-if IS_HIP_EXTENSION:
-    fp8_e4m3_type = get_fp8_torch_dtype(GetRecipes.fp8_per_tensor_current_scaling_default())
 
 # base class for validating current_scaling x linear layer
 class TestFP8RecipeLinearBase:

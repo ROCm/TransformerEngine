@@ -59,7 +59,7 @@ run_test_config(){
     run_default_fa 1 test_gemm_autotune.py
     run 1 test_gqa.py
     run 1 test_jit.py
-    run_default_fa 1 test_multi_tensor.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py

@@ -285,7 +285,7 @@ def test_multi_tensor_compute_scale_inv_e8m0(input_size_pair, applier, repeat):
         [amax_list, scale_inv_list],
     )
 
-    max_fp8 = torch.finfo(torch.float8_e4m3fn).max
+    max_fp8 = torch.finfo(get_torch_float8_e4m3_type()).max
     for amax, scale_inv in zip(amax_list, scale_inv_list):
         scale_inv_u32 = (amax.float() / max_fp8).view(torch.int)
         exponent = scale_inv_u32 // 2**23
