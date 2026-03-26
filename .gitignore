@@ -32,6 +32,7 @@ cmake_install.cmake
 *.hip
 *_hip.h
 *_hip.cpp
+!transformer_engine/pytorch/csrc/extensions/mxfp4_hip.cpp
 *_hip.cuh
 hip_driver*
 hip_runtime*
