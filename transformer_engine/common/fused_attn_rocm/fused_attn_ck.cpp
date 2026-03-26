@@ -26,8 +26,9 @@ __global__ void build_padded_q_to_batch_kernel(const int* cu_seqlens_q_padded,
   if (b >= bs) return;
   int start = cu_seqlens_q_padded[b];
   int end   = cu_seqlens_q_padded[b + 1];
-  if (end > start)
-    padded_q_to_batch[start] = b;
+  for (int i = start; i < end; ++i) {
+    padded_q_to_batch[i] = b;
+  }
 }
 
 // check the fused attn config to see whether it's ck backend supported
@@ -628,12 +629,14 @@ void fused_attn_ck_fwd_impl(
 
   const char* nvte_smallseq = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
   if (is_ragged && s_q!=s_kv && nvte_smallseq && std::string(nvte_smallseq) == "1") {
-    void* max_seqlen_workspace = workspace_next;
+    void* max_seqlen_workspace_q = workspace_next;
+    void* max_seqlen_workspace_kv =
+        static_cast<void*>(static_cast<int8_t*>(workspace_next) + sizeof(uint64_t));
     size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
-        static_cast<uint64_t>(b), devPtrCuSeqlensQ, nullptr, max_seqlen_workspace, stream));
+        static_cast<uint64_t>(b), devPtrCuSeqlensQ, nullptr, max_seqlen_workspace_q, stream));
     size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
-        static_cast<uint64_t>(b), devPtrCuSeqlensKV, nullptr, max_seqlen_workspace, stream));
-    workspace_next = static_cast<void*>(static_cast<int8_t*>(workspace_next) + sizeof(uint64_t));
+        static_cast<uint64_t>(b), devPtrCuSeqlensKV, nullptr, max_seqlen_workspace_kv, stream));
+    workspace_next = static_cast<void*>(static_cast<int8_t*>(workspace_next) + 2 * sizeof(uint64_t));
 
     if (nvte_log_ck_config) {
       std::cout << std::endl << "attn_fwd(ck small-seq): ";
@@ -976,12 +979,14 @@ void fused_attn_ck_bwd_impl(
 
   const char* nvte_smallseq = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
   if (is_ragged && s_q!=s_kv && nvte_smallseq && std::string(nvte_smallseq) == "1") {
-    void* max_seqlen_workspace = workspace_next;
+    void* max_seqlen_workspace_q = workspace_next;
+    void* max_seqlen_workspace_kv =
+        static_cast<void*>(static_cast<int8_t*>(workspace_next) + sizeof(uint64_t));
     size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
-      b, devPtrCuSeqlensQ, nullptr, max_seqlen_workspace, stream));
+      b, devPtrCuSeqlensQ, nullptr, max_seqlen_workspace_q, stream));
     size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
-      b, devPtrCuSeqlensKV, nullptr, max_seqlen_workspace, stream));
-    workspace_next = static_cast<void*>(static_cast<int8_t*>(workspace_next) + sizeof(uint64_t));
+      b, devPtrCuSeqlensKV, nullptr, max_seqlen_workspace_kv, stream));
+    workspace_next = static_cast<void*>(static_cast<int8_t*>(workspace_next) + 2 * sizeof(uint64_t));
 
     if (nvte_log_ck_config) {
       std::cout << std::endl << "attn_bwd(ck small-seq): ";

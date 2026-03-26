@@ -216,6 +216,46 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   nvte_tensor_pack_destroy(&aux_output_tensors);
 
   auto workspace_shape = MakeShapeVector(query_workspace_tensor.shape());
+
+  const char* nvte_smallseq = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
+  if (is_ragged && q_max_seqlen != kv_max_seqlen && nvte_smallseq &&
+      std::string(nvte_smallseq) == "1") {
+    size_t workspace_elems = product(workspace_shape);
+    size_t elt_size = transformer_engine::typeToSize(query_workspace_tensor.dtype());
+    size_t workspace_bytes = workspace_elems * elt_size;
+
+    // (1) Unfused small-seq kernel workspace (scores / softmax / bf16-fp16 footprint).
+    const size_t unfused_small_seq_softmax_lse_bytes = input_batch * attn_heads * kv_max_seqlen * 2u;
+    // (2) padded_q_to_batch[total_padded_q] int32 map (total_padded_q ~ input_batch * q_max_seqlen).
+    const size_t padded_q_to_batch_bytes = input_batch * q_max_seqlen * sizeof(int32_t);
+    // (3) For get_runtime_max_seqlen: one call per cu_seqlens tensor (Q and KV).
+    const size_t get_runtime_max_seqlen_bytes = 2 * sizeof(uint64_t);
+
+    const size_t min_smallseq_bytes = unfused_small_seq_softmax_lse_bytes +
+                                      padded_q_to_batch_bytes +
+                                      get_runtime_max_seqlen_bytes;
+
+    if (workspace_bytes < min_smallseq_bytes) {
+      size_t min_elems = (min_smallseq_bytes + elt_size - 1) / elt_size;
+      workspace_shape = std::vector<size_t>{min_elems};
+      workspace_elems = min_elems;
+      workspace_bytes = workspace_elems * elt_size;
+    }
+
+    const char* nvte_log_ck_config = std::getenv("NVTE_LOG_CK_CONFIG");
+    if (nvte_log_ck_config && std::string(nvte_log_ck_config) == "1") {
+      std::cout << std::endl << "attn_fwd(ck unfused small-seq workspace size): ";
+      std::cout << "q_max_seqlen: " << q_max_seqlen << ", ";
+      std::cout << "kv_max_seqlen: " << kv_max_seqlen << ", ";
+      std::cout << "input_batch: " << input_batch << ", ";
+      std::cout << "unfused_small_seq_softmax_lse_bytes: " << unfused_small_seq_softmax_lse_bytes
+                << ", ";
+      std::cout << "padded_q_to_batch_bytes: " << padded_q_to_batch_bytes << ", ";
+      std::cout << "get_runtime_max_seqlen_bytes: " << get_runtime_max_seqlen_bytes << ", ";
+      std::cout << "min_smallseq_bytes (sum): " << min_smallseq_bytes;
+      std::cout << std::endl;
+    }
+  }
   return pybind11::make_tuple(workspace_shape, query_workspace_tensor.dtype());
 }
 
@@ -515,10 +555,18 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     size_t workspace_elems = product(work_shape);
     size_t elt_size = transformer_engine::typeToSize(query_workspace_tensor.dtype());
     size_t workspace_bytes = workspace_elems * elt_size;
-    size_t unfused_small_seq_workspace = input_batch * attn_heads * 16 * 2;  // min for unfused small-seq (bf16/fp16)
 
-    if (workspace_bytes < unfused_small_seq_workspace) {
-      size_t min_elems = (unfused_small_seq_workspace + elt_size - 1) / elt_size;
+    // ROCm CK small-seq path (fused_attn_ck): three components, then sum (same as forward).
+    const size_t unfused_small_seq_softmax_lse_bytes = input_batch * attn_heads * kv_max_seqlen * 2u;
+    const size_t padded_q_to_batch_bytes = input_batch * q_max_seqlen * sizeof(int32_t);
+    const size_t get_runtime_max_seqlen_bytes = 2 * sizeof(uint64_t);
+
+    const size_t min_smallseq_bytes = unfused_small_seq_softmax_lse_bytes +
+                                      padded_q_to_batch_bytes +
+                                      get_runtime_max_seqlen_bytes;
+
+    if (workspace_bytes < min_smallseq_bytes) {
+      size_t min_elems = (min_smallseq_bytes + elt_size - 1) / elt_size;
       work_shape = std::vector<size_t>{min_elems};
       workspace_elems = min_elems;
       workspace_bytes = workspace_elems * elt_size;
@@ -527,13 +575,15 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     const char* nvte_log_ck_config = std::getenv("NVTE_LOG_CK_CONFIG");
     if (nvte_log_ck_config && std::string(nvte_log_ck_config) == "1") {
       std::cout << std::endl << "attn_bwd(ck unfused small-seq workspace size): ";
+      std::cout << "q_max_seqlen: " << q_max_seqlen << ", ";
+      std::cout << "kv_max_seqlen: " << kv_max_seqlen << ", ";
       std::cout << "input_batch: " << input_batch << ", ";
-      std::cout << "is_ragged: " << is_ragged << ", ";
-      std::cout << "workspace_elems: " << workspace_elems << ", ";
-      std::cout << "workspace_bytes: " << workspace_bytes << ", ";
-      std::cout << "unfused_small_seq_min_bytes: " << unfused_small_seq_workspace << ", ";
-      std::cout << "workspace_bytes >= unfused_small_seq_workspace: "
-                << (workspace_bytes >= unfused_small_seq_workspace ? "true" : "false") << std::endl;
+      std::cout << "unfused_small_seq_softmax_lse_bytes: " << unfused_small_seq_softmax_lse_bytes
+                << ", ";
+      std::cout << "padded_q_to_batch_bytes: " << padded_q_to_batch_bytes << ", ";
+      std::cout << "get_runtime_max_seqlen_bytes: " << get_runtime_max_seqlen_bytes << ", ";
+      std::cout << "min_smallseq_bytes (sum): " << min_smallseq_bytes;
+      std::cout << std::endl;
     }
   }
   return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
