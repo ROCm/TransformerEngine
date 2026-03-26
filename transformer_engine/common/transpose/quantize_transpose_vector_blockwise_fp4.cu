@@ -165,6 +165,7 @@ template <int group_size, int shfl_down_stride>
 __device__ __forceinline__ float groupMax(float val, unsigned int groupMask) {
   for (int offset = group_size / 2; offset > 0; offset /= 2) {
 #ifdef __HIP_PLATFORM_AMD__
+    (void)groupMask;  // unused on AMD, __shfl_down does not take a mask
     val = max(val, __shfl_down(val, offset * shfl_down_stride, kThreadsPerWarp));
 #else
     val = max(val, __shfl_down_sync(groupMask, val, offset * shfl_down_stride));
