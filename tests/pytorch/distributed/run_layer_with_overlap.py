@@ -567,8 +567,8 @@ def _train(opts):
         # Now validate accuracy
         if not bool(numerics_failed.item()):
             for i, (test_g, ref_g) in enumerate(zip(test_grads, ref_grads)):
-                rtol = 0.125 if opts.fp8 else 0.025 if not IS_HIP_EXTENSION else 3e-2
-                atol = 0.0625 if opts.fp8 else 0.00125 if not IS_HIP_EXTENSION else 1e-2
+                rtol = 0.125 if opts.fp8 else 0.025 if not IS_HIP_EXTENSION else .03
+                atol = 0.0625 if opts.fp8 else 0.00125 if not IS_HIP_EXTENSION else .01
                 grad_failed, grad_info = _compare_tensors(names[i], test_g, ref_g, rtol, atol)
                 dist_print(grad_info, src=WORLD_RANK, error=grad_failed)
                 numerics_failed[0] = int(grad_failed)

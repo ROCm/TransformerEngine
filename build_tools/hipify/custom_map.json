@@ -8,7 +8,6 @@
         "CUfunc_cache" : "hipFuncCache_t", 
         "<nvtx3/nvToolsExt.h>" : "<roctracer/roctx.h>",
         "cudaFuncSetAttribute(" : "hipFuncSetAttribute((const void*)",
-        "__nv_bfloat162" : "__hip_bfloat162",
         "__nv_fp8_e5m2" : "te_hip_fp8_e5m2",
         "__nv_fp8_e4m3" : "te_hip_fp8_e4m3",
         "cuda::getCurrentCUDAStream" : "hip::getCurrentHIPStreamMasqueradingAsCUDA",

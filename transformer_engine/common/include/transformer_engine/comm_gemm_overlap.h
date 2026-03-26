@@ -17,7 +17,11 @@
 
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 
+#ifdef __HIP_PLATFORM_AMD__
+#define NVTE_COMM_OVERLAP_MAX_STREAMS NVTE_ROCM_MAX_RINGS
+#else
 #define NVTE_COMM_OVERLAP_MAX_STREAMS 3
+#endif
 
 
 namespace transformer_engine {
@@ -196,7 +200,7 @@ class CommOverlapBase : public CommOverlapCore {
   CommOverlapBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
                   int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
                   ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle, int num_splits = 3,
-                  int num_max_streams = NVTE_ROCM_MAX_RINGS, int comm_cga_size = 2,
+                  int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
                   int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
                   bool set_sm_margin = true, bool atomic_gemm = false,
                   bool rs_overlap_first_gemm = false);
@@ -280,7 +284,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
   std::vector<TensorWrapper> _ubufs;
   std::vector<cudaStream_t> _stream_send, l_stream_send, l_stream_recv;
   cudaStream_t _stream_recv;
-  cudaEvent_t _stop_send, _stop_recv, l_stop_recv[7];
+  cudaEvent_t _stop_send, _stop_recv, l_stop_recv[NVTE_ROCM_MAX_RINGS];
 
   uint64_t _ag_signal_base = 0;
   uint64_t _rs_signal_base = 0;
@@ -295,7 +299,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
   CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, DType buffer_dtype, int myrank,
                      int numranks, int mylocal, int numlocal, int mynode, int numnodes, int tp_size,
                      ExtAllgatherOp allgather_handle, ExtBarrierOp barrier_handle,
-                     CommOverlapType comm_type, int num_max_streams = NVTE_ROCM_MAX_RINGS,
+                     CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
                      int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
                      int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
                      bool atomic_gemm = false, bool aggregate = false);

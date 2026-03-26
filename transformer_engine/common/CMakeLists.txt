@@ -173,7 +173,7 @@ set(transformer_engine_cuda_arch_specific_sources)
 
 # Source files in both cuda and rocm
 list(APPEND transformer_engine_cpp_sources
-     transformer_engine.cpp 
+     transformer_engine.cpp
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
      comm_gemm_overlap/comm_gemm_overlap.cpp

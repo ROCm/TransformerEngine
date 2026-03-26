@@ -357,7 +357,7 @@ void CommOverlapBase::bulk_overlap(const TensorWrapper &A, bool transa, const Te
       char *rs_output_ptr = reinterpret_cast<char *>(rs_output.dptr());
       reducescatter2_userbuff_fp8<__nv_fp8_e5m2>(rs_output_ptr, _ubuf.scale_inv(), _ub_reg, 0,
                                                  comm_elements, _ub_comm, _stream_comm,
-                                                 (cudaEvent_t)_comm_launch_event);                                         
+                                                 (cudaEvent_t)_comm_launch_event);
     } else {
       reducescatter2_userbuff_inplace(_ub_reg, 0, comm_elements, _ub_comm, _stream_comm,
                                       (cudaEvent_t)_comm_launch_event);
