@@ -9,7 +9,6 @@ import math
 from typing import Optional, Tuple, Union
 
 import torch
-from ..triton_kernels.cast import te_quantize_triton
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
@@ -25,6 +24,7 @@ from ._quantization_helpers import _IdentityFunc
 MXFP4_BLOCK_SCALING_SIZE = MXFP8_BLOCK_SCALING_SIZE
 
 aten = torch.ops.aten
+
 
 
 def _logical_to_rowwise_data_shape(shape: Tuple[int, ...]) -> Tuple[int, ...]:
@@ -59,10 +59,12 @@ class MXFP4Quantizer(Quantizer):
         rowwise: bool = True,
         columnwise: bool = True,
         shuffle_B_matrix_for_aiter: bool = False,
+        use_hadamard: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp4_dtype
         self.shuffle_B_matrix_for_aiter = shuffle_B_matrix_for_aiter
+        self.use_hadamard = use_hadamard
         assert self.dtype == tex.DType.kFloat4E2M1, "Only E2M1 format supported for MXFP4"
 
     def update_quantized(
@@ -81,12 +83,57 @@ class MXFP4Quantizer(Quantizer):
         if not src.is_contiguous():
             src = src.contiguous()
 
-        te_quantize_triton(src, self, dst, noop_flag)
+        # Flatten to 2D for HIP kernel
+        if src.dim() > 2:
+            src = src.view(-1, src.shape[-1])
+
+        with torch._C._DisableTorchDispatch():
+            rowwise_fp4_uint8 = (
+                dst._rowwise_data.view(torch.uint8) if dst._rowwise_data is not None else None
+            )
+            rowwise_scale_uint8 = (
+                dst._rowwise_scale_inv.view(torch.uint8)
+                if dst._rowwise_scale_inv is not None
+                else None
+            )
+            colwise_fp4_uint8 = (
+                dst._columnwise_data.view(torch.uint8)
+                if dst._columnwise_data is not None
+                else None
+            )
+            colwise_scale_uint8 = (
+                dst._columnwise_scale_inv.view(torch.uint8)
+                if dst._columnwise_scale_inv is not None
+                else None
+            )
+
+            tex.cast_transpose_mxfp4_fused_shuffle(
+                src,
+                rowwise_fp4_uint8,
+                rowwise_scale_uint8,
+                colwise_fp4_uint8,
+                colwise_scale_uint8,
+                True,
+                True,
+                self.shuffle_B_matrix_for_aiter,
+                self.shuffle_B_matrix_for_aiter,
+                self.use_hadamard,
+            )
 
         # Update FP4 dtype
         dst._fp4_dtype = self.dtype
 
         return dst
+
+    def quantize_impl(self, tensor: torch.Tensor) -> "MXFP4Tensor":
+        """Quantize a high-precision tensor to MXFP4 (out-of-place)"""
+        out = self.make_empty(
+            tensor.shape,
+            dtype=tensor.dtype,
+            device=tensor.device,
+            requires_grad=tensor.requires_grad,
+        )
+        return self.update_quantized(tensor, out)
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""

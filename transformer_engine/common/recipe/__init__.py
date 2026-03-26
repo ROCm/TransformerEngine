@@ -570,6 +570,7 @@ class MXFP4BlockScaling(Recipe):
     fp4_format: Format = Format.E2M1
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    use_hadamard: bool = os.getenv("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
 
     @property
     def fp8_format(self) -> Format:
