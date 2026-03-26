@@ -86,7 +86,11 @@ for lib in fwd bwd; do
   total_objs=${#obj_files[@]}
 
   rm -f "${out_archive}"
-  "${AR_BIN}" q "${out_archive}" "${obj_files[@]}"
+  # Batch ar calls to avoid ARG_MAX limits with thousands of object files
+  BATCH_SIZE=5000
+  for (( i=0; i<total_objs; i+=BATCH_SIZE )); do
+    "${AR_BIN}" q "${out_archive}" "${obj_files[@]:i:BATCH_SIZE}"
+  done
 
   if [[ -n "${RANLIB_BIN}" ]]; then
     "${RANLIB_BIN}" "${out_archive}"
