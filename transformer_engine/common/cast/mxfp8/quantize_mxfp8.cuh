@@ -610,8 +610,12 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
   const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
 
-  TRANSFORMER_ENGINE_CHUNK_DIM_SWITCH(
-    use_large_chunks, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK,
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+    use_large_chunks, USE_LARGE_CHUNKS,
+
+    constexpr size_t CHUNK_DIM_Y = USE_LARGE_CHUNKS ? 128 : 64;
+    constexpr size_t CHUNK_DIM_X = USE_LARGE_CHUNKS ? 128 : 64;
+    constexpr size_t THREADS_PER_CHUNK = USE_LARGE_CHUNKS ? 256 : 128;
 
     const size_t blocks_Y = DIVUP(rows, CHUNK_DIM_Y);
     const size_t blocks_X = DIVUP(cols, CHUNK_DIM_X);

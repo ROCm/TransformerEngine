@@ -12,8 +12,6 @@
 
 #include "benchmark_utils.h"
 
-#include "amd_detail/hip_float8.h"
-
 #include <transformer_engine/cast_hip.h>
 #include <transformer_engine/activation_hip.h>
 #include <transformer_engine/transformer_engine_hip.h>
