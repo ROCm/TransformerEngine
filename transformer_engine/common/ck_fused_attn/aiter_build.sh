@@ -50,11 +50,6 @@ CK_TILE_FLOAT_TO_BFLOAT16_DEFAULT="${CK_TILE_BF16_DEFAULT}" \
 GPU_ARCHS="${GPU_ARCHS_VAL}" \
 python3 "${AITER_TEST_DIR}/compile.py"
 
-# Generate static archives from the built object files only if NVTE_AITER_STATIC_LINK=1
-if [[ "${NVTE_AITER_STATIC_LINK:-1}" -ne 1 ]]; then
-  exit 0
-fi
-
 # Check for ar and ranlib
 AR_BIN="${AR:-$(command -v ar || true)}"
 RANLIB_BIN="${RANLIB:-$(command -v ranlib || true)}"

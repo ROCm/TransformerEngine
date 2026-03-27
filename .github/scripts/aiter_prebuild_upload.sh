@@ -54,12 +54,8 @@ if [[ "${1:-}" == "--build" ]]; then
 fi
 
 # Ensure built libs exist
-if [[ ! -f "${EXTRACT_DIR}/libmha_fwd.so" ]]; then
-  echo "[AITER-PREBUILT] Missing libmha_fwd.so in ${EXTRACT_DIR}" >&2
-  exit 1
-fi
-if [[ ! -f "${EXTRACT_DIR}/libmha_bwd.so" ]]; then
-  echo "[AITER-PREBUILT] Missing libmha_bwd.so in ${EXTRACT_DIR}" >&2
+if [[ ! -f "${EXTRACT_DIR}/libmha.a" ]]; then
+  echo "[AITER-PREBUILT] Missing libmha.a in ${EXTRACT_DIR}" >&2
   exit 1
 fi
 
