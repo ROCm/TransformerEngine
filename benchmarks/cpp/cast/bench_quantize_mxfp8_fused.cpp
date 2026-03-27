@@ -132,6 +132,7 @@ static void BM_QuantizeMXFP8_Fused(benchmark::State &state) {
 
   size_t bytes_write_data   = rows * cols * sizeof(OType) *
                              ((USE_ROWWISE ?: 0) + (USE_COLWISE ?: 0));
+  // Scales are single byte, E8M0 type
   size_t bytes_write_scales = (USE_ROWWISE ? rows * scale_cols_row : 0) +
                                (USE_COLWISE ? scale_rows_col * scale_cols_col : 0);
 

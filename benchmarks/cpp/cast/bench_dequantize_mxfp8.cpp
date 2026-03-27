@@ -100,6 +100,7 @@ static void BM_DequantizeMXFP8(benchmark::State &state) {
 
   const size_t bytes_read_data = rows * cols * sizeof(IType) *
                                   ((USE_ROWWISE ?: 0) + (USE_COLWISE ?: 0));
+  // Scales are single byte, E8M0 type
   const size_t bytes_read_scales = (USE_ROWWISE ? rows * scale_cols_row : 0) +
                                     (USE_COLWISE ? scale_rows_col * scale_cols_col : 0);
   const size_t bytes_write = rows * cols * sizeof(OType);

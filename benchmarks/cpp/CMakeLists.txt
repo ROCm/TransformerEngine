@@ -41,7 +41,6 @@ set(COMMON_COMPILE_OPTIONS
   -DNDEBUG
   -DUSE_ROCM
   --offload-arch=${GPU_TARGETS}
-  -w
 )
 
 find_library(TRANSFORMER_ENGINE_LIB

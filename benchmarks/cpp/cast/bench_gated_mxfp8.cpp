@@ -94,6 +94,7 @@ static void BM_GatedMXFP8_Forward(benchmark::State &state) {
 
   const size_t bytes_write_data   = rows * output_cols * sizeof(OType) *
                                    ((USE_ROWWISE ?: 0) + (USE_COLWISE ?: 0));
+  // Scales are single byte, E8M0 type
   const size_t bytes_write_scales = (USE_ROWWISE ? rows * scale_cols_row : 0) +
                                      (USE_COLWISE ? scale_rows_col * scale_cols_col : 0);
 
@@ -162,6 +163,7 @@ static void BM_GatedMXFP8_Backward(benchmark::State &state) {
 
   const size_t bytes_write_data   = rows * output_cols * sizeof(OType) *
                                    ((USE_ROWWISE ?: 0) + (USE_COLWISE ?: 0));
+  // Scales are single byte, E8M0 type
   const size_t bytes_write_scales = (USE_ROWWISE ? rows * scale_cols_row : 0) +
                                      (USE_COLWISE ? scale_rows_col * scale_cols_col : 0);
 
