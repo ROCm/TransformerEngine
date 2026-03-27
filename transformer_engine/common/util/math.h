@@ -14,6 +14,8 @@ namespace transformer_engine {
 // AMD Fast tanh using hardware exp instruction
 __device__ inline float fast_tanhf(float x) {
 #ifdef __HIP_PLATFORM_AMD__
+  // tanh(x) saturates at ±1 for |x| > 20
+  x = fmaxf(fminf(x, 20.f), -20.f);
   float e2x = __expf(2.0f * x);
   return (e2x - 1.0f) * __frcp_rn(e2x + 1.0f);
 #else
