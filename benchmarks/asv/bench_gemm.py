@@ -8,7 +8,23 @@
 
 GEMM shapes derived from transformer layer projections:
   QKV, AttnOut, GateUp (SwiGLU), Down.
-"""
+
+Model configuration sources:
+- Llama 3 8B (hidden=4096, intermediate=14336, heads=32, kv_heads=8, head_dim=128)
+  https://huggingface.co/meta-llama/Llama-3.1-8B/blob/main/config.json
+
+- Llama 3 70B (hidden=8192, intermediate=28672, heads=64, kv_heads=8, head_dim=128)
+  https://huggingface.co/meta-llama/Llama-3.1-70B/blob/main/config.json
+
+- Llama 3 405B (hidden=16384, intermediate=53248, heads=128, kv_heads=8, head_dim=128)
+  https://huggingface.co/meta-llama/Llama-3.1-405B/blob/main/config.json
+
+- Qwen 2.5 7B (hidden=3584, intermediate=18944, heads=28, kv_heads=4, head_dim=128)
+  https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/config.json
+
+- Qwen 2.5 72B (hidden=8192, intermediate=29568, heads=64, kv_heads=8, head_dim=128)
+  https://huggingface.co/Qwen/Qwen2.5-72B-Instruct/blob/main/config.json
+  """
 
 import torch
 import transformer_engine.pytorch as te

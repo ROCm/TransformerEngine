@@ -4,10 +4,22 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""FP8 casting micro-benchmarks.
+"""
+Benchmarks quantization (BF16 -> FP8) and dequantization (FP8 -> BF16) for
+both E4M3 (activations/weights) and E5M2 (gradients) formats.
 
-Memory-bound quantization/dequantization between BF16 and FP8 formats
-using Transformer Engine's quantized tensor infrastructure.
+Shapes are (M, hidden_size) matching the activation tensors from models:
+  - Llama 3.1 8B, 70B, 405B
+  - Qwen 2.5  7B, 72B
+
+These casts are memory-bound; we report GB/s (input + output bytes).
+
+Sources for model configs:
+  https://huggingface.co/meta-llama/Llama-3.1-8B/blob/main/config.json
+  https://huggingface.co/meta-llama/Llama-3.1-70B/blob/main/config.json
+  https://huggingface.co/meta-llama/Llama-3.1-405B/blob/main/config.json
+  https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/config.json
+  https://huggingface.co/Qwen/Qwen2.5-72B-Instruct/blob/main/config.json
 """
 
 import torch

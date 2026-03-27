@@ -4,9 +4,25 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""FP8 GEMM benchmarks via te.Linear under fp8_autocast.
+"""
+FP8 GEMM benchmarks via te.Linear under fp8_autocast.
 
-Same shapes as bench_gemm.py but with FP8 quantized compute.
+Same shapes as bench_gemm.py but with FP8 quantized compute:
+  - Llama 3   8B (TP=1, TP=8), 70B (TP=8), 405B (TP=8)
+  - Qwen 2.5  7B (TP=1), 72B (TP=8)
+
+Each model contributes four GEMM shapes:
+  QKV projection     (column-parallel)  N = (Qheads + 2*KVheads)*head_dim / TP, K = hidden
+  Attention output   (row-parallel)     N = hidden, K = Qheads*head_dim / TP
+  MLP Gate+Up        (column-parallel)  N = 2*intermediate / TP, K = hidden  (SwiGLU)
+  MLP Down           (row-parallel)     N = hidden, K = intermediate / TP
+
+Sources for model configs:
+  https://huggingface.co/meta-llama/Llama-3.1-8B/blob/main/config.json
+  https://huggingface.co/meta-llama/Llama-3.1-70B/blob/main/config.json
+  https://huggingface.co/meta-llama/Llama-3.1-405B/blob/main/config.json
+  https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/config.json
+  https://huggingface.co/Qwen/Qwen2.5-72B-Instruct/blob/main/config.json
 """
 
 import torch

@@ -4,7 +4,26 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""RMSNorm and LayerNorm benchmarks on activation-sized tensors."""
+"""
+RMSNorm and LayerNorm benchmarks on activation-sized tensors.
+
+Shapes are derived from training workloads:
+  - Llama 3   8B, 70B, 405B (all use RMSNorm)
+  - Qwen 2.5  7B, 72B       (all use RMSNorm)
+
+Modern models predominantly use RMSNorm, but we benchmark both
+LayerNorm and RMSNorm since TE supports both and they share the
+same kernel infrastructure.
+
+The M dimension (batch * seq_len) is swept across typical training sizes.
+
+Sources for model configs:
+  https://huggingface.co/meta-llama/Llama-3.1-8B/blob/main/config.json
+  https://huggingface.co/meta-llama/Llama-3.1-70B/blob/main/config.json
+  https://huggingface.co/meta-llama/Llama-3.1-405B/blob/main/config.json
+  https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/config.json
+  https://huggingface.co/Qwen/Qwen2.5-72B-Instruct/blob/main/config.json
+"""
 
 import torch
 import transformer_engine.pytorch as te

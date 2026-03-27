@@ -7,6 +7,8 @@
 """Grouped GEMM benchmarks via te.GroupedLinear.
 
 MoE model configurations with GateUp and Down projections.
+Configurations are based on:
+https://github.com/AMD-AGI/Primus-Turbo/blob/main/benchmark/ops/config.py
 """
 
 import torch
