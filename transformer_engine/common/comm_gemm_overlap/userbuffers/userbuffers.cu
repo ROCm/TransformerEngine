@@ -153,11 +153,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 
   __syncthreads();
-#ifdef __HIP_PLATFORM_AMD__
   if (threadIdx.x == 0) __threadfence_system();
-#else
-  if (threadIdx.x == 0) __threadfence();
-#endif
   __syncthreads();
 
   if (threadIdx.x < RANKS) {
@@ -506,11 +502,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 
   __syncthreads();
-#ifdef __HIP_PLATFORM_AMD__
   if (threadIdx.x == 0) __threadfence_system();
-#else
-  if (threadIdx.x == 0) __threadfence();
-#endif
   __syncthreads();
 
   if (threadIdx.x < RANKS) {
@@ -741,11 +733,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 
   __syncthreads();
-#ifdef __HIP_PLATFORM_AMD__
   if (threadIdx.x == 0) __threadfence_system();
-#else
-  if (threadIdx.x == 0) __threadfence();
-#endif
   __syncthreads();
 
   __shared__ int lastSM;
@@ -1374,11 +1362,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 
   __syncthreads();
-#ifdef __HIP_PLATFORM_AMD__
   if (threadIdx.x == 0) __threadfence_system();
-#else
-  if (threadIdx.x == 0) __threadfence();
-#endif
   __syncthreads();
 
   __shared__ int lastSM;

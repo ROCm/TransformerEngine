@@ -282,9 +282,12 @@ class CommOverlapP2PBase : public CommOverlapCore {
   int _num_ubuf_chunks;
   int _self_chunk_id;
   std::vector<TensorWrapper> _ubufs;
-  std::vector<cudaStream_t> _stream_send, l_stream_send, l_stream_recv;
+  std::vector<cudaStream_t> _stream_send;
+#ifdef __HIP_PLATFORM_AMD__  
+  std::vector<cudaStream_t> l_stream_send, l_stream_recv;
+#endif
   cudaStream_t _stream_recv;
-  cudaEvent_t _stop_send, _stop_recv, l_stop_recv[NVTE_ROCM_MAX_RINGS];
+  cudaEvent_t _stop_send, _stop_recv;
 
   uint64_t _ag_signal_base = 0;
   uint64_t _rs_signal_base = 0;

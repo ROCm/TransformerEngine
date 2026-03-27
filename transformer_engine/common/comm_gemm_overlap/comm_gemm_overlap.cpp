@@ -722,23 +722,26 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
     _stream_send.push_back(std::move(stream));
   }
+
+#ifdef __HIP_PLATFORM_AMD__
   for (int i = 0; i < NVTE_ROCM_MAX_RINGS; i++) {
-    cudaStream_t stream;
-    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
-    l_stream_send.push_back(std::move(stream));
+    {  
+      cudaStream_t stream;
+      NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
+      l_stream_send.push_back(std::move(stream));
+    }
+    {
+      cudaStream_t stream;
+      NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
+      l_stream_recv.push_back(std::move(stream));
+    }
   }
-  for (int i = 0; i < NVTE_ROCM_MAX_RINGS; i++) {
-    cudaStream_t stream;
-    NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
-    l_stream_recv.push_back(std::move(stream));
-  }
+#endif 
+
   NVTE_CHECK_CUDA(
       cudaStreamCreateWithPriority(&_stream_recv, cudaStreamNonBlocking, _comm_priority));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_send, 0));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_recv, 0));
-  for (int i = 0; i < NVTE_ROCM_MAX_RINGS; i++) {
-    NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&l_stop_recv[i], 0));
-  }
 }
 
 CommOverlapP2PBase::~CommOverlapP2PBase() {
@@ -748,11 +751,12 @@ CommOverlapP2PBase::~CommOverlapP2PBase() {
   for (size_t i = 0; i < _stream_send.size(); i++) {
     cudaStreamDestroy(_stream_send[i]);
   }
+#ifdef __HIP_PLATFORM_AMD__
   for (int i = 0; i < NVTE_ROCM_MAX_RINGS; i++) {
     cudaStreamDestroy(l_stream_recv[i]);
     cudaStreamDestroy(l_stream_send[i]);
-    cudaEventDestroy(l_stop_recv[i]);
   }
+#endif
 }
 
 void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapper &source,
