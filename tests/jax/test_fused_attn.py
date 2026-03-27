@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from functools import partial
 from math import sqrt
 from typing import Tuple, Optional, Dict
+import os
 import random
 
 import jax
@@ -26,7 +27,7 @@ from jax.typing import ArrayLike, DTypeLike
 
 from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
 from transformer_engine.jax import autocast
-from transformer_engine.jax.sharding import MeshResource
+from transformer_engine.jax.sharding import MeshResource, global_shard_guard
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -1252,3 +1253,141 @@ def test_jax_new_rng():
     )
     runner = FusedAttnRunner(**kwargs)
     runner.test_forward()
+
+
+
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="CK deterministic backward only applies to AMD hardware"
+)
+@pytest.mark.parametrize(
+    "qkv_layout",
+    [
+        pytest.param(QKVLayout.BS3HD, id="QKV_PACKED"),
+        pytest.param(QKVLayout.BSHD_BS2HD, id="KV_PACKED"),
+        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id="SEPARATE"),
+    ],
+)
+@pytest.mark.parametrize(
+    "attn_mask_type",
+    [
+        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
+        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
+    ],
+)
+@pytest.mark.parametrize(
+    "b, seq_len, h_q, h_kv, d",
+    [
+        pytest.param(2, 256, 8, 8, 128, id="b2_s256_MHA"),
+        pytest.param(2, 2048, 8, 8, 128, id="b2_s2048_MHA"),
+    ],
+)
+def test_deterministic_bwd(qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d):
+    """
+    Test that the CK fused attention backward pass in deterministic mode
+    produces bitwise-reproducible and numerically correct gradients.
+
+    All seq_len values are >= 256 so that nsplits = ceil(s/kN0) > 1
+    (kN0=128 for d<=128), ensuring the kernel actually exercises the
+    deterministic split-accumulator path rather than the trivial single-split.
+    """
+    s = seq_len
+    dtype = jnp.bfloat16
+    scaling_factor = 1.0 / sqrt(d)
+
+    # Set deterministic mode before any TE calls so the flag is visible
+    # throughout backend selection and kernel dispatch.
+    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+
+    # Verify the CK backend is selected, otherwise test is meaningless
+    backend = FusedAttnHelper(
+        True, dtype, dtype, qkv_layout, AttnBiasType.NO_BIAS, attn_mask_type,
+        0.0, h_q, h_kv, s, s, d, d, (-1, -1),
+    ).get_fused_attn_backend()
+    if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
+        pytest.skip("No fused attention backend available for this config")
+    assert backend == NVTE_Fused_Attn_Backend.NVTE_CK, (
+        f"Expected CK backend but got {backend}."
+    )
+    try:
+        key = jax.random.PRNGKey(42)
+        q_key, k_key, v_key = jax.random.split(key, 3)
+        q = jax.random.normal(q_key, (b, s, h_q, d), dtype=dtype)
+        k = jax.random.normal(k_key, (b, s, h_kv, d), dtype=dtype)
+        v = jax.random.normal(v_key, (b, s, h_kv, d), dtype=dtype)
+
+        if attn_mask_type == AttnMaskType.NO_MASK:
+            seq_desc = None
+            mask = None
+        else:
+            idx = jnp.arange(s)
+            causal_mask = idx[None, :] > idx[:, None]
+            seq_desc = jnp.broadcast_to(causal_mask[None, None], (b, 1, s, s))
+            mask = seq_desc
+
+        kwargs = dict(
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=attn_mask_type,
+            scaling_factor=scaling_factor,
+            dropout_probability=0.0,
+            is_training=True,
+            qkv_layout=qkv_layout,
+        )
+
+        # Fused CK backward — run twice to check bitwise reproducibility
+        def fused_fn(q, k, v):
+            return customcall_fused_dpa(
+                q, k, v, None, seq_desc, None, **kwargs
+            ).astype(jnp.float32).sum()
+
+        with global_shard_guard(MeshResource()):
+            _, grads1 = jax.value_and_grad(fused_fn, argnums=(0, 1, 2))(q, k, v)
+            fused_dq1 = np.array(grads1[0].block_until_ready())
+            fused_dk1 = np.array(grads1[1].block_until_ready())
+            fused_dv1 = np.array(grads1[2].block_until_ready())
+
+            _, grads2 = jax.value_and_grad(fused_fn, argnums=(0, 1, 2))(q, k, v)
+            fused_dq2 = np.array(grads2[0].block_until_ready())
+            fused_dk2 = np.array(grads2[1].block_until_ready())
+            fused_dv2 = np.array(grads2[2].block_until_ready())
+
+        # Bitwise reproducibility across consecutive runs
+        np.testing.assert_array_equal(fused_dq1, fused_dq2, err_msg="dQ not bitwise reproducible")
+        np.testing.assert_array_equal(fused_dk1, fused_dk2, err_msg="dK not bitwise reproducible")
+        np.testing.assert_array_equal(fused_dv1, fused_dv2, err_msg="dV not bitwise reproducible")
+
+        # Numerical correctness vs unfused JAX reference
+        def ref_fn(q, k, v):
+            return jax_dpa(q, k, v, None, mask, None, **kwargs).astype(jnp.float32).sum()
+
+        _, ref_grads = jax.value_and_grad(ref_fn, argnums=(0, 1, 2))(q, k, v)
+        ref_dq = ref_grads[0].block_until_ready()
+        ref_dk = ref_grads[1].block_until_ready()
+        ref_dv = ref_grads[2].block_until_ready()
+
+        assert_allclose(jnp.array(fused_dq1), ref_dq, dtype=dtype)
+        assert_allclose(jnp.array(fused_dk1), ref_dk, dtype=dtype)
+        assert_allclose(jnp.array(fused_dv1), ref_dv, dtype=dtype)
+    finally:
+        os.environ.pop("NVTE_ALLOW_NONDETERMINISTIC_ALGO", None)
+
+
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="CK deterministic backward only applies to AMD hardware"
+)
+@pytest.mark.parametrize(
+    "attn_mask_type",
+    [
+        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
+        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
+    ],
+)
+def test_deterministic_bwd_gqa(attn_mask_type):
+    """
+    GQA variant of test_deterministic_bwd.
+    Only BSHD_BSHD_BSHD layout supports h_q != h_kv.
+    """
+    test_deterministic_bwd(
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        attn_mask_type=attn_mask_type,
+        b=2, seq_len=2048, h_q=12, h_kv=4, d=128,
+    )
