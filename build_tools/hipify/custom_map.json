@@ -2,6 +2,7 @@
  "custom_map" : {
         "<cuda_bf16.h>" : "<hip/hip_bfloat16.h>",
         "<cuda_fp8.h>" : "\"common/amd_detail/hip_float8.h\"",
+        "<cuda_fp4.h>" : "<hip/hip_fp4.h>",
         "cuda_runtime.h\"" : "hip_runtime.h\"",
         "ATen/cudnn/Handle.h" : "ATen/miopen/Handle.h",
         "CUfunc_cache" : "hipFuncCache_t", 
@@ -9,7 +10,13 @@
         "cudaFuncSetAttribute(" : "hipFuncSetAttribute((const void*)",
         "__nv_bfloat162":"__hip_bfloat162",
         "cuda::getCurrentCUDAStream" : "hip::getCurrentHIPStreamMasqueradingAsCUDA",
-        "at::cuda::CUDAGuard" : "at::hip::HIPGuardMasqueradingAsCUDA"
+        "at::cuda::CUDAGuard" : "at::hip::HIPGuardMasqueradingAsCUDA",
+        "__nv_fp4_e2m1" : "__hip_fp4_e2m1",
+        "__nv_fp4x2_e2m1" : "__hip_fp4x2_e2m1",
+        "__nv_fp4x4_e2m1" : "__hip_fp4x4_e2m1",
+        "__nv_fp4x2_storage_t" : "__hip_fp4x2_storage_t",
+        "#include <cudaTypedefs.h>" : "",
+        "#include <cuda/barrier>" : ""
  }
 }
 

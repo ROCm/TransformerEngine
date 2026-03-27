@@ -225,7 +225,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      cast/cast.cu
      multi_tensor/compute_scale.cu
      recipe/mxfp8_scaling.cu
-     )
+     transpose/quantize_transpose_vector_blockwise_fp4.cu)
 
 if(USE_CUDA)
 #NV specific source codes
@@ -248,6 +248,7 @@ if(USE_CUDA)
     list(APPEND transformer_engine_cuda_arch_specific_sources
         gemm/cutlass_grouped_gemm.cu
         hadamard_transform/group_hadamard_transform.cu
+        transpose/quantize_transpose_square_blockwise.cu
         hadamard_transform/hadamard_transform.cu
         hadamard_transform/hadamard_transform_cast_fusion.cu
         hadamard_transform/group_hadamard_transform_cast_fusion.cu
