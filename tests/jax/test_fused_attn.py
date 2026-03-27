@@ -1255,7 +1255,6 @@ def test_jax_new_rng():
     runner.test_forward()
 
 
-
 @pytest.mark.skipif(
     not is_hip_extension(), reason="CK deterministic backward only applies to AMD hardware"
 )
@@ -1296,6 +1295,7 @@ def test_deterministic_bwd(qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d)
 
     # Set deterministic mode before any TE calls so the flag is visible
     # throughout backend selection and kernel dispatch.
+    _orig_nondeterministic = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO")
     os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
 
     # Verify the CK backend is selected, otherwise test is meaningless
@@ -1368,7 +1368,10 @@ def test_deterministic_bwd(qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d)
         assert_allclose(jnp.array(fused_dk1), ref_dk, dtype=dtype)
         assert_allclose(jnp.array(fused_dv1), ref_dv, dtype=dtype)
     finally:
-        os.environ.pop("NVTE_ALLOW_NONDETERMINISTIC_ALGO", None)
+        if _orig_nondeterministic is None:
+            os.environ.pop("NVTE_ALLOW_NONDETERMINISTIC_ALGO", None)
+        else:
+            os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = _orig_nondeterministic
 
 
 @pytest.mark.skipif(
