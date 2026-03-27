@@ -133,10 +133,9 @@ target_include_directories(ck_fused_attn PRIVATE ${CK_INCLUDE_DIR} ${__CK_SOURCE
 target_include_directories(ck_fused_attn PRIVATE ${AITER_INCLUDE_DIR})
 target_link_options(ck_fused_attn PRIVATE -Wl,--exclude-libs,ALL)
 
-set(__AITER_MHA_FWD_LIB "${__AITER_MHA_PATH}/libmha_fwd.a")
-set(__AITER_MHA_BWD_LIB "${__AITER_MHA_PATH}/libmha_bwd.a")
+set(__AITER_MHA_LIB "${__AITER_MHA_PATH}/libmha.a")
 find_package(hip)
-list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64 ${__AITER_MHA_FWD_LIB} ${__AITER_MHA_BWD_LIB})
+list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64 ${__AITER_MHA_LIB})
 
 target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})

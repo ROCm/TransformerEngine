@@ -67,39 +67,40 @@ if [[ -z "${RANLIB_BIN}" ]]; then
   exit 1
 fi
 
-# Create static archives for both forward and backward passes
+# Create a single unified static archive from both forward and backward object files
+out_archive="${AITER_TEST_DIR}/libmha.a"
+obj_list=$(mktemp)
+rm -f "${obj_list}"
+
 for lib in fwd bwd; do
   src_obj_dir="${AITER_DIR}/aiter/jit/build/libmha_${lib}/build"
-  out_archive="${AITER_TEST_DIR}/libmha_${lib}.a"
-
   if [[ ! -d "${src_obj_dir}" ]]; then
     echo "[AITER-BUILD] Missing object directory: ${src_obj_dir}" >&2
+    rm -f "${obj_list}"
     exit 1
   fi
-
-  mapfile -d '' obj_files < <(find "${src_obj_dir}" -type f -name '*.o' -print0)
-  if [[ ${#obj_files[@]} -eq 0 ]]; then
-    echo "[AITER-BUILD] No object files found under ${src_obj_dir}" >&2
-    exit 1
-  fi
-
-  total_objs=${#obj_files[@]}
-
-  rm -f "${out_archive}"
-  # Batch ar calls to avoid ARG_MAX limits with thousands of object files
-  BATCH_SIZE=5000
-  for (( i=0; i<total_objs; i+=BATCH_SIZE )); do
-    "${AR_BIN}" q "${out_archive}" "${obj_files[@]:i:BATCH_SIZE}"
-  done
-
-  if [[ -n "${RANLIB_BIN}" ]]; then
-    "${RANLIB_BIN}" "${out_archive}"
-  fi
-
-  echo "[AITER-BUILD] Created static archive: ${out_archive} (${#obj_files[@]} objects)"
+  find "${src_obj_dir}" -type f -name '*.o' >> "${obj_list}"
 done
+
+total_objs=$(wc -l < "${obj_list}")
+if [[ "${total_objs}" -eq 0 ]]; then
+  echo "[AITER-BUILD] No object files found for fwd/bwd" >&2
+  rm -f "${obj_list}"
+  exit 1
+fi
+
+rm -f "${out_archive}"
+# Use a file list to avoid ARG_MAX limits with thousands of object files
+"${AR_BIN}" qc "${out_archive}" @"${obj_list}"
+
+if [[ -n "${RANLIB_BIN}" ]]; then
+  "${RANLIB_BIN}" "${out_archive}"
+fi
+
+echo "[AITER-BUILD] Created static archive: ${out_archive} (${total_objs} objects)"
+rm -f "${obj_list}"
 
 if [ -n "${INSTALL_DIR}" ]; then
   mkdir -p "${INSTALL_DIR}"
-  cp "${AITER_TEST_DIR}/libmha_fwd.a" "${AITER_TEST_DIR}/libmha_bwd.a" "${INSTALL_DIR}/"
+  cp "${out_archive}" "${INSTALL_DIR}/"
 fi

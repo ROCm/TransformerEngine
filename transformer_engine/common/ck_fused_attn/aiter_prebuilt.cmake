@@ -34,8 +34,7 @@ endfunction()
 
 # Required files that must be present in a valid AITER prebuilt cache
 set(AITER_PREBUILT_REQUIRED_FILES
-  "libmha_fwd.a"
-  "libmha_bwd.a"
+  "libmha.a"
 )
 
 # Validate existing cache path
