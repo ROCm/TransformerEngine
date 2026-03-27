@@ -223,6 +223,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/gelu.cu
      activation/relu.cu
      activation/swiglu.cu
+     hadamard_transform/hadamard_transform.cu
      transpose/quantize_transpose_vector_blockwise_fp4.cu)
 
 if(USE_CUDA)
@@ -247,7 +248,6 @@ if(USE_CUDA)
     list(APPEND transformer_engine_cuda_arch_specific_sources
         gemm/cutlass_grouped_gemm.cu
         transpose/quantize_transpose_square_blockwise.cu
-        hadamard_transform/hadamard_transform.cu
         hadamard_transform/hadamard_transform_cast_fusion.cu)
 else()
 #ROCm specific source codes

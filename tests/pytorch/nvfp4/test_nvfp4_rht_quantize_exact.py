@@ -246,3 +246,69 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         use_cpp_allocator=use_cpp_allocator,
         with_random_sign_mask=with_random_sign_mask,
     )
+
+
+def _ref_wht16_tiled(x: torch.Tensor, sign_mask: int) -> torch.Tensor:
+    """Pure-Python reference WHT: tiled 16-point butterfly, normalised by 0.25."""
+    import numpy as np
+    x_np = x.float().cpu().numpy().copy()
+    rows, cols = x_np.shape
+    d = np.array([((-1) ** ((sign_mask >> i) & 1)) for i in range(16)], dtype=np.float32)
+    for c in range(0, cols, 16):
+        tile = x_np[:, c:c+16] * d
+        h = 1
+        while h < 16:
+            for i in range(0, 16, h * 2):
+                for j in range(i, i + h):
+                    a, b = tile[:, j].copy(), tile[:, j + h].copy()
+                    tile[:, j], tile[:, j + h] = a + b, a - b
+            h *= 2
+        x_np[:, c:c+16] = tile * 0.25
+    return torch.from_numpy(x_np)
+
+
+@pytest.mark.parametrize("rows,cols", [(64, 64), (128, 128)])
+def test_hadamard_transform_amax(rows, cols):
+    """
+    Tests nvte_hadamard_transform_amax via NVFP4Quantizer (with_rht=True).
+    Exercises the WHT kernel without requiring a full NVFP4 recipe.
+    Checks:
+      - amax_rowwise == max|x|           (pre-RHT amax of raw input)
+      - amax_colwise == max|WHT(x.T)|    (post-RHT amax of transposed input)
+    """
+    torch.manual_seed(42)
+    x = torch.randn((rows, cols), dtype=torch.bfloat16, device="cuda").contiguous()
+
+    quantizer = NVFP4Quantizer(
+        fp4_dtype=tex.DType.kFloat4E2M1,
+        rowwise=True,
+        columnwise=True,
+        with_amax_reduction=False,
+        amax_reduction_group=None,
+        with_rht=True,
+        with_post_rht_amax=True,
+        with_random_sign_mask=True,
+    )
+    out = quantizer(x)
+
+    # amax_rowwise: pre-RHT, should equal max|x|
+    expected_rowwise_amax = x.float().abs().max()
+    torch.testing.assert_close(
+        out._amax_rowwise.float().squeeze(),
+        expected_rowwise_amax,
+        rtol=1e-3, atol=1e-3,
+        msg=f"pre-RHT amax mismatch rows={rows} cols={cols}",
+    )
+
+    # amax_colwise: post-RHT of x.T, should equal max|WHT(x.T)|
+    sign_mask_t = quantizer.rht_matrix_random_sign_mask_t
+    x_t = x.t().contiguous()  # (cols, rows)
+    wht_x_t = _ref_wht16_tiled(x_t, sign_mask=sign_mask_t)
+    expected_colwise_amax = wht_x_t.float().abs().max()
+
+    torch.testing.assert_close(
+        out._amax_columnwise.float().squeeze().item(),
+        float(expected_colwise_amax),
+        rtol=2e-2, atol=2e-2,
+        msg=f"post-RHT amax mismatch rows={rows} cols={cols}",
+    )

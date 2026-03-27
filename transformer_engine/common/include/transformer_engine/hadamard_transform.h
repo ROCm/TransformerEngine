@@ -13,8 +13,6 @@
 #ifndef TRANSFORMER_ENGINE_HADAMARD_TRANSFORM_H_
 #define TRANSFORMER_ENGINE_HADAMARD_TRANSFORM_H_
 
-#ifndef __HIP_PLATFORM_AMD__
-
 #include "transformer_engine.h"
 
 #ifdef __cplusplus
@@ -67,8 +65,6 @@ void nvte_hadamard_transform_cast_fusion_columnwise(const NVTETensor input, NVTE
 
 #ifdef __cplusplus
 }  // extern "C"
-#endif
-
 #endif
 
 #endif  // TRANSFORMER_ENGINE_HADAMARD_TRANSFORM_H_
