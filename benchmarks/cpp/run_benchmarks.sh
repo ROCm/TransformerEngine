@@ -10,8 +10,33 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+setup_test_common_symlinks() {
+    local utils_dir="${SCRIPT_DIR}/utils"
+    local test_common_hip="../../tests/cpp/test_common.hip"
+    local test_common_h="../../tests/cpp/test_common_hip.h"
+
+    if [ ! -f "${SCRIPT_DIR}/${test_common_hip}" ] || [ ! -f "${SCRIPT_DIR}/${test_common_h}" ]; then
+        echo -e "${RED}Error: hipified test_common files not found. Build tests before running benchmarks."
+        return 1
+    fi
+
+    if [ ! -L "${utils_dir}/test_common.hip" ] || [ ! -e "${utils_dir}/test_common.hip" ]; then
+        ln -sf "../${test_common_hip}" "${utils_dir}/test_common.hip"
+    fi
+
+    if [ ! -L "${utils_dir}/test_common_hip.h" ] || [ ! -e "${utils_dir}/test_common_hip.h" ]; then
+        ln -sf "../${test_common_h}" "${utils_dir}/test_common_hip.h"
+    fi
+
+    return 0
+}
+
 main() {
     echo -e "${GREEN}=== MXFP8 Benchmark Suite ===${NC}"
+
+    if ! setup_test_common_symlinks; then
+        return
+    fi
 
     echo -e "\n${YELLOW}[1/3] Building benchmarks...${NC}"
     cd "${SCRIPT_DIR}"

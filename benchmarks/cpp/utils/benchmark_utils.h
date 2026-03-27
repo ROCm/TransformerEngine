@@ -16,7 +16,7 @@
 #include <benchmark/benchmark.h>
 
 #include <transformer_engine/transformer_engine_hip.h>
-#include "test_common.h"
+#include "test_common_hip.h"
 
 namespace te_bench {
 

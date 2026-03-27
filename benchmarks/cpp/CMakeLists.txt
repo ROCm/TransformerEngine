@@ -24,6 +24,7 @@ FetchContent_MakeAvailable(benchmark)
 include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/../../transformer_engine/common/include
   ${CMAKE_CURRENT_SOURCE_DIR}/../../transformer_engine/common
+  ${CMAKE_CURRENT_SOURCE_DIR}/../../transformer_engine
   ${CMAKE_CURRENT_SOURCE_DIR}/utils
 )
 
@@ -71,8 +72,11 @@ else()
 endif()
 
 function(add_te_benchmark TARGET_NAME SOURCE_FILE)
-  add_executable(${TARGET_NAME} ${SOURCE_FILE} utils/test_common.cpp)
+  set(TEST_COMMON_HIP ${CMAKE_CURRENT_SOURCE_DIR}/utils/test_common.hip)
+  set_source_files_properties(${TEST_COMMON_HIP} PROPERTIES LANGUAGE CXX)
+  add_executable(${TARGET_NAME} ${SOURCE_FILE} ${TEST_COMMON_HIP})
   target_compile_options(${TARGET_NAME} PRIVATE ${COMMON_COMPILE_OPTIONS})
+  target_compile_definitions(${TARGET_NAME} PRIVATE NVTE_ROCM_BENCHMARK)
   target_link_libraries(${TARGET_NAME} PRIVATE
     benchmark::benchmark
     ${TRANSFORMER_ENGINE_LIB}
