@@ -12,7 +12,14 @@ set -euo pipefail
 
 # Derive ROCm version and aiter commit -> cache key
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-ROCM_PATH="${ROCM_PATH:-/opt/rocm}"
+if [ -n "$ROCM_PATH" ]; then
+    true # Use provided ROCM_PATH
+elif [ -d "/opt/rocm/core" ]; then
+    ROCM_PATH="/opt/rocm/core"
+else
+    ROCM_PATH="/opt/rocm"
+fi
+export ROCM_PATH
 ROCM_VER=`head -n1 "${ROCM_PATH}/.info/version" | cut -d. -f1`
 
 AITER_DIR="${ROOT_DIR}/3rdparty/aiter"

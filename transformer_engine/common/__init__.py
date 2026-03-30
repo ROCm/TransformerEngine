@@ -421,7 +421,10 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
     if te_rocm_build:
         try:
             # Get installed ROCm version
-            with open(os.getenv("ROCM_PATH", "/opt/rocm") + "/.info/version", "r") as f:
+            for rocm_path in (os.getenv("ROCM_PATH"), "/opt/rocm/core", "/opt/rocm"):
+                if rocm_path and os.path.exists(os.path.join(rocm_path, ".info/version")):
+                    break
+            with open(os.path.join(rocm_path, ".info/version"), "r") as f:
                 rocm_version= f.read().strip().split('.')[:2]
 
             # Get ROCm version from the build info file

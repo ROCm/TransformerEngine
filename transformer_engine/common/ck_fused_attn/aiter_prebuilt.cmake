@@ -11,8 +11,12 @@ if(POLICY CMP0135)
 endif()
 
 # Extract ROCm version
-set(ROCM_PATH "$ENV{ROCM_PATH}")
-if("${ROCM_PATH}" STREQUAL "")
+
+if(NOT "$ENV{ROCM_PATH}" STREQUAL "")
+  set(ROCM_PATH "$ENV{ROCM_PATH}")
+elseif(EXISTS "/opt/rocm/core")
+  set(ROCM_PATH "/opt/rocm/core")
+else()
   set(ROCM_PATH "/opt/rocm")
 endif()
 file(READ "${ROCM_PATH}/.info/version" ROCM_VER_CONTENT)
