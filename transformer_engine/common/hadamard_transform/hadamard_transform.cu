@@ -1056,77 +1056,12 @@ void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_s
 #endif  // __HIP_PLATFORM_AMD__
 }
 
-// Kernel that applies the 16x16 hadamard transform the input and input.T, and then
-// gets the absolute max value of the result.
+// Kernel that will apply the 16x16 hadamard transform the input and input.T, and then
+// get the absolute max value of the result.
 void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t random_sign_mask,
                              uint16_t random_sign_mask_t, cudaStream_t stream) {
   NVTE_API_CALL(hadamard_transform_amax);
-#ifdef __HIP_PLATFORM_AMD__
-  NVTE_CHECK(input_.dtype() == DType::kBFloat16, "Input must be BF16.");
-  NVTE_CHECK(input_.dim() >= 2, "Input must be >=2D.");
-
-  const SimpleTensor& input = input_.data;
-  SimpleTensor& pre_rht_tensor = output_.amax;
-  SimpleTensor identity_tensor;  // Unused
-  SimpleTensor& transpose_tensor = output_.columnwise_amax;
-
-  const bool want_pre_rht  = (pre_rht_tensor.dptr   != nullptr);
-  const bool want_identity = (identity_tensor.dptr  != nullptr);
-  const bool want_trans    = (transpose_tensor.dptr != nullptr);
-
-  if (!want_pre_rht && !want_identity && !want_trans)
-    return;
-
-  const size_t ndim = input.shape.size();
-  const size_t row_length = input.shape[ndim - 1];
-  size_t num_rows = 1;
-
-  for (size_t i = 0; i < ndim - 1; ++i)
-    num_rows *= input.shape[i];
-
-  NVTE_CHECK(row_length % kHadamardDim == 0, "row_length must be divisible by 16.");
-  NVTE_CHECK(num_rows   % kHadamardDim == 0, "num_rows must be divisible by 16.");
-
-  auto* in_ptr       = reinterpret_cast<const __hip_bfloat16*>(input.dptr);
-  auto* pre_amax_ptr = reinterpret_cast<float*>(pre_rht_tensor.dptr);
-  auto* id_amax_ptr  = reinterpret_cast<float*>(identity_tensor.dptr);
-  auto* tr_amax_ptr  = reinterpret_cast<float*>(transpose_tensor.dptr);
-
-  if (pre_amax_ptr)
-    NVTE_CHECK_CUDA(cudaMemsetAsync(pre_amax_ptr, 0, sizeof(float), stream));
-  if (id_amax_ptr)
-    NVTE_CHECK_CUDA(cudaMemsetAsync(id_amax_ptr,  0, sizeof(float), stream));
-  if (tr_amax_ptr)
-    NVTE_CHECK_CUDA(cudaMemsetAsync(tr_amax_ptr,  0, sizeof(float), stream));
-
-  if (want_pre_rht) {
-      const uint64_t num_elems = (uint64_t)num_rows * row_length;
-      dim3 g(DIVUP(num_elems, (uint64_t)kThreadsPerBlock));
-      PreRhtAmaxKernel<<<g,kThreadsPerBlock,0,stream>>>(in_ptr,pre_amax_ptr,num_elems);
-      NVTE_CHECK_CUDA(cudaGetLastError());
-  }
-
-  if (want_identity || want_trans) {
-      dim3 grid = transform_grid(num_rows, row_length), block(kThreadsPerBlock);
-#define LAUNCH_A(IDENT,TRANS,UA,UAT) \
-      HadamardTransformKernel<IDENT,TRANS,UA,UAT> \
-          <<<grid,block,0,stream>>>(in_ptr,nullptr,nullptr, \
-              random_sign_mask,random_sign_mask_t, \
-              (uint64_t)num_rows,(uint64_t)row_length, \
-              id_amax_ptr,tr_amax_ptr,false)
-
-      if (want_identity && want_trans)
-        LAUNCH_A(true, true,  true,  true);
-      else if (want_identity)
-        LAUNCH_A(true, false, true,  false);
-      else
-        LAUNCH_A(false,true,  false, true);
-
-      NVTE_CHECK_CUDA(cudaGetLastError());
-#undef LAUNCH_A
-  }
-#else  // __HIP_PLATFORM_AMD__
-#if CUDA_VERSION >= 12080
+#if CUDA_VERSION >= 12080 || defined(__HIP_PLATFORM_AMD__)
 
   // Check input tensor
   NVTE_CHECK(input_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
@@ -1151,22 +1086,47 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
     return;
   }
 
-  // Zero out amaxes if needed
-  ZeroAmaxKernel<<<1, 1, 0, stream>>>(reinterpret_cast<float*>(output_pre_rht_amax.dptr),
-                                      reinterpret_cast<float*>(output_identity_amax.dptr),
-                                      reinterpret_cast<float*>(output_transpose_amax.dptr));
-  NVTE_CHECK_CUDA(cudaGetLastError());
-
-  checkCuDriverContext(stream);
-
-  using IType = bf16;
-
   const size_t ndim = input.shape.size();
   const size_t row_length = input.shape[ndim - 1];
   size_t num_rows = 1;
   for (size_t i = 0; i < ndim - 1; ++i) {
     num_rows *= input.shape[i];
   }
+
+#ifdef __HIP_PLATFORM_AMD__
+  auto* pre_amax_ptr = reinterpret_cast<float*>(output_pre_rht_amax.dptr);
+  auto* id_amax_ptr = reinterpret_cast<float*>(output_identity_amax.dptr);
+  auto* tr_amax_ptr = reinterpret_cast<float*>(output_transpose_amax.dptr);
+
+  NVTE_CHECK(row_length % kHadamardDim == 0, "row_length must be divisible by 16.");
+  NVTE_CHECK(num_rows % kHadamardDim == 0, "num_rows must be divisible by 16.");
+
+  auto* in_ptr = reinterpret_cast<const __hip_bfloat16*>(input.dptr);
+
+  if (pre_amax_ptr) {
+    NVTE_CHECK_CUDA(cudaMemsetAsync(pre_amax_ptr, 0, sizeof(float), stream));
+  }
+  if (id_amax_ptr) {
+    NVTE_CHECK_CUDA(cudaMemsetAsync(id_amax_ptr, 0, sizeof(float), stream));
+  }
+  if (tr_amax_ptr) {
+    NVTE_CHECK_CUDA(cudaMemsetAsync(tr_amax_ptr, 0, sizeof(float), stream));
+  }
+
+  if (return_pre_rht_amax) {
+    const uint64_t num_elems = static_cast<uint64_t>(num_rows) * row_length;
+    dim3 grid(DIVUP(num_elems, static_cast<uint64_t>(kThreadsPerBlock)));
+    PreRhtAmaxKernel<<<grid, kThreadsPerBlock, 0, stream>>>(in_ptr, pre_amax_ptr, num_elems);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  }
+#else
+  // Zero out amaxes if needed
+  ZeroAmaxKernel<<<1, 1, 0, stream>>>(pre_amax_ptr, id_amax_ptr, tr_amax_ptr);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+
+  checkCuDriverContext(stream);
+
+  using IType = bf16;
 
   constexpr int kHadamardDimension = 16;
   NVTE_CHECK(row_length % kHadamardDimension == 0,
@@ -1200,6 +1160,7 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
   dim3 block(kThreadBlockX * kThreadsPerWarp, kThreadBlockY);
 
   dim3 grid(DIVUP(row_length, kChunkBlockXSmall), DIVUP(num_rows, kChunkBlockYSmall));
+#endif
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       return_transposed_amax, kReturnTransposedAmax,
@@ -1207,6 +1168,17 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
           return_identity_amax, kReturnIdentityAmax,
 
+#ifdef __HIP_PLATFORM_AMD__
+          if (kReturnIdentityAmax || kReturnTransposedAmax) {
+            dim3 grid = transform_grid(num_rows, row_length), block(kThreadsPerBlock);
+            HadamardTransformKernel<kReturnIdentityAmax, kReturnTransposedAmax,
+                                    kReturnIdentityAmax, kReturnTransposedAmax>
+                <<<grid, block, 0, stream>>>(in_ptr, nullptr, nullptr, random_sign_mask,
+                                             random_sign_mask_t, static_cast<uint64_t>(num_rows),
+                                             static_cast<uint64_t>(row_length), id_amax_ptr,
+                                             tr_amax_ptr, false);
+          }
+#else
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               return_pre_rht_amax, kReturnPreRhtAmax,
 
@@ -1230,13 +1202,14 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
                   reinterpret_cast<float*>(output_identity_amax.dptr),
                   reinterpret_cast<float*>(output_transpose_amax.dptr), random_sign_mask,
                   random_sign_mask_t, num_rows, row_length);)));
+#endif
+          ));
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("Hadamard transform requires CUDA 12.8+, but compile-time CUDA version is ",
              CUDA_VERSION);
-#endif  // CUDA_VERSION >= 12080
-#endif  // __HIP_PLATFORM_AMD__
+#endif  // CUDA_VERSION >= 12080 || __HIP_PLATFORM_AMD__
 }
 
 }  // namespace transformer_engine
