@@ -732,6 +732,7 @@ __device__ __forceinline__ void wht16(
     auto sgn = [&](int k) -> float {
         return ((sign_mask >> (thread_in_group * kElemsPerThread + k)) & 1u) ? -1.f : 1.f;
     };
+
     if (apply_pre) {
       v0*=sgn(0); v1*=sgn(1); v2*=sgn(2); v3*=sgn(3);
     }
@@ -755,7 +756,10 @@ __device__ __forceinline__ void wht16(
       v2=up?(p2-v2):(p2+v2); v3=up?(p3-v3):(p3+v3); }
 
     v0*=kHadamardScale; v1*=kHadamardScale; v2*=kHadamardScale; v3*=kHadamardScale;
-    if (!apply_pre) { v0*=sgn(0); v1*=sgn(1); v2*=sgn(2); v3*=sgn(3); }
+
+    if (!apply_pre) {
+      v0*=sgn(0); v1*=sgn(1); v2*=sgn(2); v3*=sgn(3);
+    }
 }
 
 // Grid:  blockIdx.x = col tile [0, row_length/16)
@@ -786,8 +790,12 @@ void HadamardTransformKernel(
     const bool apply_pre = !inverse_hadamard;
     const bool in_bounds = (global_row < num_rows) && (col_base + kElemsPerThread - 1 < row_length);
 
-    // Smem for transposed path: 64×(16+1) BF16; +1 avoids LDS bank conflict.
+    // Smem for transposed path: 64*(16+1) BF16; +1 avoids LDS bank conflict.
     __shared__ __hip_bfloat16 smem[kRowsPerBlock][kHadamardDim + 1];
+
+    __shared__ float block_amax[kWarpsPerBlock];
+    __shared__ float block_amax_t[kWarpsPerBlock];
+
     float v0=0.f, v1=0.f, v2=0.f, v3=0.f;
     if (in_bounds) {
         unpack_bf16x4(*reinterpret_cast<const uint64_t*>(
@@ -797,17 +805,22 @@ void HadamardTransformKernel(
     // Identity path: WHT along row dimension
     if constexpr (kComputeIdentity || kUpdateAmax) {
         float r0=v0, r1=v1, r2=v2, r3=v3;
+        float lam = 0.f;
         if (global_row < num_rows) {
             wht16(r0, r1, r2, r3, thread_in_grp, random_sign_mask, apply_pre);
             if constexpr (kUpdateAmax) {
-                float lam = fmaxf(fmaxf(fabsf(r0),fabsf(r1)),fmaxf(fabsf(r2),fabsf(r3)));
-                for (int off=kWarpSize/2; off>=1; off>>=1) lam=fmaxf(lam,__shfl_xor(lam,off));
-                if (lane_id == 0) atomicMaxFloat(amax, lam);
+                lam = fmaxf(fmaxf(fabsf(r0),fabsf(r1)),fmaxf(fabsf(r2),fabsf(r3)));
+                for (int off=kWarpSize/2; off>=1; off>>=1)
+                  lam=fmaxf(lam,__shfl_xor(lam,off));
             }
             if constexpr (kComputeIdentity)
                 if (output && in_bounds)
                     *reinterpret_cast<uint64_t*>(&output[global_row*row_length+col_base]) =
                         pack_bf16x4(r0,r1,r2,r3);
+        }
+        if constexpr (kUpdateAmax) {
+            if (lane_id == 0)
+              block_amax[warp_id] = lam;
         }
     }
 
@@ -815,6 +828,7 @@ void HadamardTransformKernel(
     if constexpr (kComputeTransposed || kUpdateAmaxT) {
         const int local_row  = warp_id * kRowsPerWarp + row_in_warp;
         const int col_offset = thread_in_grp * kElemsPerThread;
+        float lam = 0.f;
         smem[local_row][col_offset+0] = to_bf16(global_row < num_rows ? v0 : 0.f);
         smem[local_row][col_offset+1] = to_bf16(global_row < num_rows ? v1 : 0.f);
         smem[local_row][col_offset+2] = to_bf16(global_row < num_rows ? v2 : 0.f);
@@ -831,9 +845,10 @@ void HadamardTransformKernel(
         wht16(c0, c1, c2, c3, thread_in_grp, random_sign_mask_t, apply_pre);
 
         if constexpr (kUpdateAmaxT) {
-            float lam = fmaxf(fmaxf(fabsf(c0),fabsf(c1)),fmaxf(fabsf(c2),fabsf(c3)));
-            for (int off=kWarpSize/2; off>=1; off>>=1) lam=fmaxf(lam,__shfl_xor(lam,off));
-            if (lane_id == 0) atomicMaxFloat(amax_t, lam);
+            lam = fmaxf(fmaxf(fabsf(c0),fabsf(c1)),fmaxf(fabsf(c2),fabsf(c3)));
+
+            for (int off=kWarpSize/2; off>=1; off>>=1)
+              lam=fmaxf(lam,__shfl_xor(lam,off));
         }
 
         if constexpr (kComputeTransposed) {
@@ -847,18 +862,67 @@ void HadamardTransformKernel(
                             pack_bf16x4(c0,c1,c2,c3);
             }
         }
+
+        if constexpr (kUpdateAmaxT) {
+            if (lane_id == 0)
+              block_amax_t[warp_id] = lam;
+        }
+    }
+
+    if constexpr (kUpdateAmax || kUpdateAmaxT) {
+        __syncthreads();
+
+        if (warp_id == 0) {
+            if constexpr (kUpdateAmax) {
+                float block_lam = (lane_id < kWarpsPerBlock) ? block_amax[lane_id] : 0.f;
+
+                for (int off=kWarpSize/2; off>=1; off>>=1)
+                  block_lam = fmaxf(block_lam, __shfl_xor(block_lam, off));
+
+                if (lane_id == 0)
+                  atomicMaxFloat(amax, block_lam);
+            }
+
+            if constexpr (kUpdateAmaxT) {
+                float block_lam_t = (lane_id < kWarpsPerBlock) ? block_amax_t[lane_id] : 0.f;
+
+                for (int off=kWarpSize/2; off>=1; off>>=1)
+                  block_lam_t = fmaxf(block_lam_t, __shfl_xor(block_lam_t, off));
+
+                if (lane_id == 0)
+                  atomicMaxFloat(amax_t, block_lam_t);
+            }
+        }
     }
 }
 
 // Pre-RHT amax: max|input| before any transform.
 __global__ void PreRhtAmaxKernel(const __hip_bfloat16* __restrict__ input,
                                  float* __restrict__ amax_out, uint64_t num_elems) {
+    __shared__ float block_amax[kWarpsPerBlock];
     float lam = 0.f;
     for (uint64_t i = (uint64_t)blockIdx.x*blockDim.x+threadIdx.x;
          i < num_elems; i += (uint64_t)gridDim.x*blockDim.x)
-        lam = fmaxf(lam, fabsf(to_f32(input[i])));
-    for (int off=kWarpSize/2; off>=1; off>>=1) lam=fmaxf(lam,__shfl_xor(lam,off));
-    if (threadIdx.x % kWarpSize == 0) atomicMaxFloat(amax_out, lam);
+      lam = fmaxf(lam, fabsf(to_f32(input[i])));
+
+    for (int off=kWarpSize/2; off>=1; off>>=1)
+      lam=fmaxf(lam,__shfl_xor(lam,off));
+
+    const int warp_id = threadIdx.x / kWarpSize;
+    const int lane_id = threadIdx.x % kWarpSize;
+    if (lane_id == 0)
+      block_amax[warp_id] = lam;
+
+    __syncthreads();
+
+    if (warp_id == 0) {
+      float block_lam = (lane_id < kWarpsPerBlock) ? block_amax[lane_id] : 0.f;
+      for (int off=kWarpSize/2; off>=1; off>>=1)
+        block_lam=fmaxf(block_lam,__shfl_xor(block_lam,off));
+
+      if (lane_id == 0)
+        atomicMaxFloat(amax_out, block_lam);
+    }
 }
 
 static inline dim3 transform_grid(uint64_t num_rows, uint64_t row_length) {
@@ -878,7 +942,7 @@ void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_s
   NVTE_CHECK(input_.dim() >= 2, "Input must be >=2D.");
 
   const SimpleTensor& input = input_.data;
-  SimpleTensor identity_out;
+  SimpleTensor identity_out; // Unused
   SimpleTensor& transposed_out = output_.data;
 
   const bool want_identity   = (identity_out.dptr   != nullptr);
@@ -904,9 +968,9 @@ void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_s
 
 #define LAUNCH_T(IDENT, TRANS) \
   HadamardTransformKernel<IDENT,TRANS,false,false> \
-      <<<grid,block,0,stream>>>(in_ptr,id_ptr,tr_ptr, \
-          random_sign_mask,random_sign_mask_t, \
-          (uint64_t)num_rows,(uint64_t)row_length,nullptr,nullptr,false)
+      <<<grid, block, 0, stream>>>(in_ptr, id_ptr, tr_ptr, \
+          random_sign_mask, random_sign_mask_t, \
+          (uint64_t)num_rows, (uint64_t)row_length, nullptr, nullptr, false)
 
   if (want_identity && want_transposed)
     LAUNCH_T(true,  true);
@@ -992,8 +1056,8 @@ void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_s
 #endif  // __HIP_PLATFORM_AMD__
 }
 
-// Kernel that will apply the 16x16 hadamard transform the input and input.T, and then
-// get the absolute max value of the result.
+// Kernel that applies the 16x16 hadamard transform the input and input.T, and then
+// gets the absolute max value of the result.
 void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t random_sign_mask,
                              uint16_t random_sign_mask_t, cudaStream_t stream) {
   NVTE_API_CALL(hadamard_transform_amax);
@@ -1003,7 +1067,7 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
 
   const SimpleTensor& input = input_.data;
   SimpleTensor& pre_rht_tensor = output_.amax;
-  SimpleTensor identity_tensor;
+  SimpleTensor identity_tensor;  // Unused
   SimpleTensor& transpose_tensor = output_.columnwise_amax;
 
   const bool want_pre_rht  = (pre_rht_tensor.dptr   != nullptr);
