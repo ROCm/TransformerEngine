@@ -94,6 +94,8 @@ if $BUILD_PYTORCH -a $ROCM_BUILD ; then
         cd /TransformerEngine/transformer_engine/pytorch
         #Only need torch for creating sdist, install CPU version to avoid installing CUDA/ROCm dependencies
         ${PYBINDIR}pip install torch --index-url https://download.pytorch.org/whl/cpu
+        # torch constrains setuptools<82 which can remove wheel — reinstall it
+        ${PYBINDIR}pip install wheel
         ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/torch.txt
         mv dist/* /wheelhouse/
 elif $BUILD_PYTORCH ; then

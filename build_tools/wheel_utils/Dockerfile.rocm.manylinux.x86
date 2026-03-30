@@ -31,6 +31,7 @@ RUN dnf group install -y "Development Tools" && dnf install -y git cmake llvm-to
 RUN dnf clean all
 RUN rm -rf /var/cache/dnf/*
 
+ENV ROCM_PATH=/opt/rocm
 ENV CMAKE_PREFIX_PATH=/opt/rocm/lib/cmake
 ENV NVTE_RELEASE_BUILD=1
 
