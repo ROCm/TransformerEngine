@@ -9,20 +9,7 @@ from aiter.ops.shuffle import shuffle_weight
 from ..utils import cast_if_needed
 
 
-def _select_kernel(layout: str, grad: bool) -> str:
-    """Select kernel based on GEMM layout.
-    
-    Args:
-        layout: GEMM layout (TN=fprop, NN=dgrad, NT=wgrad)
-        grad: Whether this is a gradient computation
-    """
-    if layout == "NT" and grad:
-        return "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E"
-    else:
-        return "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_128x512E"
-
-
-def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16, out_buffer=None, kernel_name="", b_pre_shuffled=True):
+def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16, out_buffer=None, b_pre_shuffled=True):
     """Core FP4 GEMM computation using AITER ASM a4w4 kernel.
     
     Args:
@@ -32,7 +19,6 @@ def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16, o
         B_scales: Scale tensor for B matrix (uint8, E8M0 format)
         out_dtype: Output dtype (default: bfloat16)
         out_buffer: Optional output buffer (for accumulation)
-        kernel_name: AITER kernel name
         b_pre_shuffled: Whether B matrix is already shuffled
     """
     A_scales_uint8 = A_scales.view(torch.uint8)
@@ -46,6 +32,15 @@ def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16, o
 
     M = A_fp4.shape[0]
     N = B_fp4.shape[0]
+    K = A_fp4.shape[1] * 2
+
+    kernel_name = ""
+    log2_k_split = 0
+    from aiter.ops.gemm_op_a4w4 import get_GEMM_config
+    config = get_GEMM_config(M, N, K)
+    if config is not None:
+        kernel_name = config["kernelName"]
+        log2_k_split = config.get("splitK", 0)
 
     if out_buffer is not None:
         out_hp = out_buffer
@@ -63,7 +58,7 @@ def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16, o
         kernel_name,
         None,
         bpreshuffle=True,
-        log2_k_split=0
+        log2_k_split=log2_k_split
     )
 
     if result.shape[0] > M:
@@ -106,8 +101,6 @@ def fp4_gemm_layout(
         Result tensor in out_dtype
     """
     with torch._C._DisableTorchDispatch():
-        kernel_name = _select_kernel(layout, grad)
-        
         if layout == "TN":
             # Forward: input @ weight^T
             # A is weight, B is input
@@ -144,7 +137,6 @@ def fp4_gemm_layout(
                 A_fp4, A_scales, B_fp4, B_scales,
                 out_dtype=out.dtype if out is not None else out_dtype,
                 out_buffer=None,
-                kernel_name=kernel_name,
                 b_pre_shuffled=b_pre_shuffled
             )
             out.add_(result)
@@ -154,7 +146,6 @@ def fp4_gemm_layout(
                 A_fp4, A_scales, B_fp4, B_scales,
                 out_dtype=out_dtype,
                 out_buffer=out,
-                kernel_name=kernel_name,
                 b_pre_shuffled=b_pre_shuffled
             )
         
@@ -165,4 +156,3 @@ def fp4_gemm_layout(
                 result = result + bias_casted
         
         return result
-

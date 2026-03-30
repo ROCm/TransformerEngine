@@ -1622,38 +1622,32 @@ class Linear(TransformerEngineBaseModule):
             return [None] * 7
         
         if is_mxfp4_enabled:
-            # MXFP4 quantizers
             from ..tensor.mxfp4_tensor import MXFP4Quantizer
-            
-            # Input: used as A in fprop, B in wgrad - can't pre-shuffle
+
+            # Backward (wgrad) needs columnwise FP4 data for input and grad_output.
+            # _get_quantizers is called per-forward, so this reflects the current context.
+            needs_wgrad = torch.is_grad_enabled()
+
             input_quantizer = MXFP4Quantizer(
                 rowwise=True,
-                columnwise=False,
-                shuffle_B_matrix_for_aiter=False
+                columnwise=needs_wgrad,
+                shuffle_B_matrix_for_aiter=False,
             )
-            
-            # Weight: always used as B (fprop and dgrad) - can pre-shuffle
             weight_quantizer = MXFP4Quantizer(
                 rowwise=True,
-                columnwise=True,
-                shuffle_B_matrix_for_aiter=True
+                columnwise=needs_wgrad,
+                shuffle_B_matrix_for_aiter=True,
             )
-            
-            output_quantizer = None  # MXFP4 doesn't use output quantizer
-            
-            grad_input_quantizer = None  # MXFP4 doesn't use grad_input quantizer
-            grad_weight_quantizer = None  # MXFP4 doesn't use separate grad_weight quantizer
-            
-            # Grad output quantizer for standard path
+            output_quantizer = None
+            grad_input_quantizer = None
+            grad_weight_quantizer = None
             grad_output_quantizer = MXFP4Quantizer(
                 rowwise=True,
-                columnwise=False
-            )  # No shuffle for grad
-            
-            # Separate MXFP4 quantizer for grad_output (for mixed precision scenarios)
+                columnwise=needs_wgrad,
+            )
             grad_output_quantizer_mxfp4 = MXFP4Quantizer(
                 rowwise=True,
-                columnwise=False
+                columnwise=needs_wgrad,
             )
             
             return (

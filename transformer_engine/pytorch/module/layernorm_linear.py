@@ -1730,7 +1730,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_input_quantizer,
                 grad_weight_quantizer,
                 grad_output_quantizer,
-                grad_output_quantizer_mxfp4,  # ADDED for MXFP4
+                grad_output_quantizer_mxfp4,
             ) = quantizers
 
             if torch.is_grad_enabled():
@@ -1757,7 +1757,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_input_quantizer,
                 grad_weight_quantizer,
                 grad_output_quantizer,
-                grad_output_quantizer_mxfp4,  # ADDED for MXFP4
+                grad_output_quantizer_mxfp4,
                 is_cpu_offload_enabled(),
                 self.tp_group,
                 self.tp_size,
@@ -1814,23 +1814,26 @@ class LayerNormLinear(TransformerEngineBaseModule):
         grad_weight_quantizer = None
         grad_output_quantizer = None
         output_quantizer = None
-        grad_output_quantizer_mxfp4 = None  # ADDED for MXFP4
+        grad_output_quantizer_mxfp4 = None
 
         if is_mxfp4_enabled:
             from ..tensor.mxfp4_tensor import MXFP4Quantizer
+
+            # Backward (wgrad) needs columnwise FP4 data for input and grad_output.
+            needs_wgrad = torch.is_grad_enabled()
+
             input_quantizer = MXFP4Quantizer(
-                rowwise=True, columnwise=False, shuffle_B_matrix_for_aiter=False
+                rowwise=True, columnwise=needs_wgrad, shuffle_B_matrix_for_aiter=False,
             )
             weight_quantizer = MXFP4Quantizer(
-                rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=True
+                rowwise=True, columnwise=needs_wgrad, shuffle_B_matrix_for_aiter=True,
             )
             grad_output_quantizer = MXFP4Quantizer(
-                rowwise=True, columnwise=False
+                rowwise=True, columnwise=needs_wgrad,
             )
             grad_output_quantizer_mxfp4 = MXFP4Quantizer(
-                rowwise=True, columnwise=False
+                rowwise=True, columnwise=needs_wgrad,
             )
-            # For MXFP4, grad_weight_quantizer is not used
             grad_weight_quantizer = None
         else:
             input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
@@ -1852,7 +1855,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             grad_input_quantizer,
             grad_weight_quantizer,
             grad_output_quantizer,
-            grad_output_quantizer_mxfp4,  # ADDED for MXFP4
+            grad_output_quantizer_mxfp4,
         )
 
     def _get_debug_quantizers(self, fp8_output, fp8_grad):
