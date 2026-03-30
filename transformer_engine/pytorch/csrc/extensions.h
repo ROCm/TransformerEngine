@@ -374,7 +374,6 @@ size_t get_cublasLt_version();
 size_t get_cudnn_version();
 #endif
 
-//TODO: support user buffer for ROCm
 void placeholder();
 
 /***************************************************************************************************
