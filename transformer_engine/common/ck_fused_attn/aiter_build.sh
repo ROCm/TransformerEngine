@@ -52,13 +52,8 @@ python3 "${AITER_TEST_DIR}/compile.py"
 
 # Check for ar and ranlib
 AR_BIN="${AR:-$(command -v ar || true)}"
-RANLIB_BIN="${RANLIB:-$(command -v ranlib || true)}"
 if [[ -z "${AR_BIN}" ]]; then
   echo "[AITER-BUILD] Could not find ar for static archive generation." >&2
-  exit 1
-fi
-if [[ -z "${RANLIB_BIN}" ]]; then
-  echo "[AITER-BUILD] Could not find ranlib for static archive generation." >&2
   exit 1
 fi
 
@@ -86,11 +81,7 @@ fi
 
 rm -f "${out_archive}"
 # Use a file list to avoid ARG_MAX limits with thousands of object files
-"${AR_BIN}" qc "${out_archive}" @"${obj_list}"
-
-if [[ -n "${RANLIB_BIN}" ]]; then
-  "${RANLIB_BIN}" "${out_archive}"
-fi
+"${AR_BIN}" qcs "${out_archive}" @"${obj_list}"
 
 echo "[AITER-BUILD] Created static archive: ${out_archive} (${total_objs} objects)"
 rm -f "${obj_list}"

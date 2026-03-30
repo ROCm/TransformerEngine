@@ -131,7 +131,6 @@ endif()
 target_include_directories(ck_fused_attn PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 target_include_directories(ck_fused_attn PRIVATE ${CK_INCLUDE_DIR} ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha)
 target_include_directories(ck_fused_attn PRIVATE ${AITER_INCLUDE_DIR})
-target_link_options(ck_fused_attn PRIVATE -Wl,--exclude-libs,ALL)
 
 set(__AITER_MHA_LIB "${__AITER_MHA_PATH}/libmha.a")
 find_package(hip)
