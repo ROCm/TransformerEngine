@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -249,22 +251,26 @@ def test_nvfp4_quantization_noncontiguous_inputs(
 
 
 def _ref_wht16_tiled(x: torch.Tensor, sign_mask: int) -> torch.Tensor:
-    """Pure-Python reference WHT: tiled 16-point butterfly, normalised by 0.25."""
-    import numpy as np
-    x_np = x.float().cpu().numpy().copy()
-    rows, cols = x_np.shape
-    d = np.array([((-1) ** ((sign_mask >> i) & 1)) for i in range(16)], dtype=np.float32)
+    """Reference 16-point WHT tiled along last dim, normalised by 0.25."""
+    x = x.float()
+    _rows, cols = x.shape
+    d = torch.tensor(
+        [((-1) ** ((sign_mask >> i) & 1)) for i in range(16)],
+        dtype=torch.float32, device=x.device,
+    )
+    out = x.clone()
     for c in range(0, cols, 16):
-        tile = x_np[:, c:c+16] * d
+        tile = out[:, c:c+16] * d        # apply sign
         h = 1
         while h < 16:
             for i in range(0, 16, h * 2):
-                for j in range(i, i + h):
-                    a, b = tile[:, j].copy(), tile[:, j + h].copy()
-                    tile[:, j], tile[:, j + h] = a + b, a - b
+                a = tile[:, i:i+h].clone()
+                b = tile[:, i+h:i+2*h].clone()
+                tile[:, i:i+h]     = a + b
+                tile[:, i+h:i+2*h] = a - b
             h *= 2
-        x_np[:, c:c+16] = tile * 0.25
-    return torch.from_numpy(x_np)
+        out[:, c:c+16] = tile * 0.25
+    return out
 
 
 @pytest.mark.parametrize("rows,cols", [(64, 64), (128, 128)])
