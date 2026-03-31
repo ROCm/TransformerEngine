@@ -12,7 +12,7 @@ set -euo pipefail
 
 # Derive ROCm version and aiter commit -> cache key
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
-if [ -n "$ROCM_PATH" ]; then
+if [ -n "${ROCM_PATH:-}" ]; then
     true # Use provided ROCM_PATH
 elif [ -d "/opt/rocm/core" ]; then
     ROCM_PATH="/opt/rocm/core"

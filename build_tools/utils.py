@@ -184,16 +184,16 @@ def rocm_build() -> bool:
     Determines which build platform to use:
 
     - If `NVTE_USE_ROCM` is set:
-        - Non-zero value: Use ROCm, if hipcc is detected.
+        - Any value excet "0": Use ROCm, if hipcc is detected.
         - Zero value: Use CUDA, if nvcc is detected.
     - If `NVTE_USE_ROCM` is not set:
+        - If `HIP_PLATFORM=amd`, require ROCm and use it if hipcc is detected.
         - Attempt to auto-detect: Check for ROCm first, then CUDA.
 
     Returns:
         bool: `True` for ROCm, `False` for CUDA.
 
     Raises:
-        ValueError: If NVTE_USE_ROCM is set to invalid value.
         FileNotFoundError: If required tools (hipcc or nvcc) are not found.
     """
     nvte_use_rocm = os.getenv("NVTE_USE_ROCM",

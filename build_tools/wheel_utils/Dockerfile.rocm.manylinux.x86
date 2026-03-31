@@ -22,10 +22,12 @@ ARG ROCM_REPO_URL=https://repo.amd.com/rocm/packages/rhel8/x86_64/
 RUN echo -e "[rocm]\nname=ROCm\nbaseurl=${ROCM_REPO_URL}\nenabled=1\ngpgcheck=0" > /etc/yum.repos.d/rocm.repo
 
 # Setup packages
+# ROCm TheRock packages are built for single GPU family. However, nothing from HW libraries is statically linked to TE,
+# so they can be used to build for multiple GPU targets. Using gfx950 here.
 RUN dnf install -y --disablerepo=epel amdrocm-core-devel-gfx950
 
 # xz-devel installs lzma needed by AOTriton
-RUN dnf install -y gcc-toolset-12 xz-devel
+RUN dnf install -y gcc-toolset-13 xz-devel
 
 RUN dnf clean all
 RUN rm -rf /var/cache/dnf/*
