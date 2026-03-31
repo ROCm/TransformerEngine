@@ -273,14 +273,54 @@ def _ref_wht16_tiled(x: torch.Tensor, sign_mask: int) -> torch.Tensor:
     return out
 
 
+def _ref_quantize_wht16_tiled(
+    x: torch.Tensor, sign_mask: int, global_amax: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor]:
+    # Mirror the non-fused TE RHT path by quantizing the BF16-rounded WHT(x.T)
+    # with the same global amax used by the TE columnwise output.
+
+    x_t_rht = _ref_wht16_tiled(x.t().contiguous(), sign_mask=sign_mask).to(dtype=x.dtype)
+    ref_quantizer = NVFP4QuantizerRef(
+        dtype=utils.Fp4Formats.E2M1,
+        rowwise=True,
+        columnwise=False,
+        pow_2_scales=False,
+        eps=0.0,
+        quant_tile_shape=(1, 16),
+        with_rht=False,
+        with_random_sign_mask=False,
+    )
+
+    x_t_rht_padded = ref_quantizer._pad_tensor(
+        x_t_rht,
+        row_divisor=ref_quantizer.quant_tile_shape[0],
+        col_divisor=ref_quantizer.quant_tile_shape[1],
+    )
+
+    qx_t_ref, sx_t_ref = ref_quantizer._quantize_blockwise_reference(
+        x_t_rht_padded,
+        global_amax,
+        ref_quantizer.quant_tile_shape[1],
+        ref_quantizer.quant_tile_shape[0],
+        pow_2_scales=ref_quantizer.pow_2_scales,
+        eps=ref_quantizer.eps,
+    )
+
+    qx_t_ref = ref_quantizer._rm_pad_tensor(qx_t_ref, (x_t_rht.shape[0], x_t_rht.shape[1] // 2))
+
+    return qx_t_ref, sx_t_ref
+
+
 @pytest.mark.parametrize("rows,cols", [(64, 64), (128, 128)])
 def test_hadamard_transform_amax(rows, cols):
     """
-    Tests nvte_hadamard_transform_amax via NVFP4Quantizer (with_rht=True).
-    Exercises the WHT kernel without requiring a full NVFP4 recipe.
+    Tests hadamard_transform_amax() and hadamard_transform() via NVFP4Quantizer
+    (with_rht=True), without requiring a full NVFP4 recipe.
     Checks:
       - amax_rowwise == max|x|           (pre-RHT amax of raw input)
       - amax_colwise == max|WHT(x.T)|    (post-RHT amax of transposed input)
+      - packed columnwise output == quantized WHT(x.T) derived from hadamard_transform()
+        in the non-fused TE path
     """
     torch.manual_seed(42)
     x = torch.randn((rows, cols), dtype=torch.bfloat16, device="cuda").contiguous()
@@ -302,8 +342,7 @@ def test_hadamard_transform_amax(rows, cols):
     torch.testing.assert_close(
         out._amax_rowwise.float().squeeze(),
         expected_rowwise_amax,
-        rtol=1e-3, atol=1e-3,
-        msg=f"pre-RHT amax mismatch rows={rows} cols={cols}",
+        rtol=0, atol=0,
     )
 
     # amax_colwise: post-RHT of x.T, should equal max|WHT(x.T)|
@@ -315,6 +354,29 @@ def test_hadamard_transform_amax(rows, cols):
     torch.testing.assert_close(
         out._amax_columnwise.float().squeeze().item(),
         float(expected_colwise_amax),
-        rtol=2e-2, atol=2e-2,
-        msg=f"post-RHT amax mismatch rows={rows} cols={cols}",
+        rtol=0, atol=0,
+    )
+
+    assert out._columnwise_data is not None
+    assert out._columnwise_scale_inv is not None
+
+    qx_t_ref, sx_t_ref = _ref_quantize_wht16_tiled(x, sign_mask_t, out._amax_columnwise)
+
+    qx_t = unpack_fp4(out._columnwise_data.view(torch.uint8))
+    qx_t_ref = unpack_fp4(qx_t_ref.view(torch.uint8))
+    torch.testing.assert_close(
+        qx_t,
+        qx_t_ref,
+        atol=0.0,
+        rtol=0.0,
+    )
+
+    sx_t = out._columnwise_scale_inv
+    sx_t_ref = sx_t_ref.view(dtype=torch.uint8)
+    sx_t_valid = sx_t[: sx_t_ref.shape[0], : sx_t_ref.shape[1]]
+    torch.testing.assert_close(
+        sx_t_valid,
+        sx_t_ref,
+        atol=0.0,
+        rtol=0.0,
     )
