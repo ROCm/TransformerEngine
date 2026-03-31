@@ -1,10 +1,7 @@
 #!/usr/bin/python3
 
-# This file was modified for portability to AMDGPU
 # Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# See LICENSE for license information.
+# License for AMD contributions = MIT. See LICENSE for more information
 
 import os
 import sys
@@ -18,13 +15,11 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 
+import torch.profiler
+
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
 from transformer_engine.common.recipe import Format, DelayedScaling
-
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
-
-assert (not IS_HIP_EXTENSION), "Please use rocm_te_layer_overlap_profile.py with HIP."
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)
@@ -56,10 +51,10 @@ def _parse_args(argv=None, namespace=None):
         description="Train a Transformer Engine module with GEMM+comm overlap via Userbuffers."
     )
     parser.add_argument(
-        "-i", "--num-iters", type=int, default=5, help="Number of dummy 'training' iterations."
+        "-i", "--num-iters", type=int, default=10, help="Number of dummy 'training' iterations."
     )
-    parser.add_argument("-b", "--batch-size", type=int, default=2, help="Input batch size.")
-    parser.add_argument("-s", "--seq-length", type=int, default=2048, help="Input sequence length.")
+    parser.add_argument("-b", "--batch-size", type=int, default=8, help="Input batch size.")
+    parser.add_argument("-s", "--seq-length", type=int, default=16384, help="Input sequence length.")
     parser.add_argument(
         "-n", "--num-heads", type=int, default=64, help="Number of attention heads."
     )
@@ -83,16 +78,7 @@ def _parse_args(argv=None, namespace=None):
         help="Disable the comm+GEMM overlap.",
     )
     parser.add_argument(
-        "--num-replicas",
-        type=int,
-        default=1,
-        help="Number of data-parallel model replicas per node.",
-    )
-    parser.add_argument(
-        "--use-global-replica-count",
-        action="store_true",
-        default=False,
-        help="Treat '--num-replicas' as the total number of replicas.",
+        "--num-replicas", type=int, default=1, help="Number of data-parallel model replicas."
     )
     parser.add_argument(
         "--tcp-init",
@@ -126,6 +112,18 @@ def _parse_args(argv=None, namespace=None):
         default=False,
         help="Print out additional debug information.",
     )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        default=False,
+        help="Enable PyTorch profiler.",
+    )
+    parser.add_argument(
+        "--profile-dir",
+        type=str,
+        default="./logs/profiler_traces",
+        help="Directory to save PyTorch profiler traces.",
+    )
     args = parser.parse_args(argv, namespace)
     if args.bootstrap_backend == "nccl":
         args.bind_to_device = True
@@ -153,8 +151,6 @@ def _get_layer_args(config, tp_group, tp_size, reference=False):
         kwargs["ub_name"] = "proj"
     else:
         input_shape[0] = config.seq_length // tp_size
-        kwargs["ub_bulk_wgrad"] = not config.no_comm_overlap
-        kwargs["ub_bulk_dgrad"] = not config.no_comm_overlap
         if config.layer_type is te.LayerNormLinear:
             args.append(3 * hidden_size)
             kwargs["parallel_mode"] = "column"
@@ -163,7 +159,9 @@ def _get_layer_args(config, tp_group, tp_size, reference=False):
             kwargs["set_parallel_mode"] = True
             kwargs["ub_overlap_rs"] = not config.no_comm_overlap
             if config.layer_type in [te.LayerNormMLP, te.TransformerLayer]:
-                args.append(4 * hidden_size)
+                # args.append(4 * hidden_size)
+                args.append(int(3.5 * hidden_size))
+
                 kwargs["seq_length"] = config.seq_length
             if config.layer_type in [te.MultiheadAttention, te.TransformerLayer]:
                 args.append(config.num_heads)
@@ -188,12 +186,13 @@ def _train(opts):
         opts.tcp_init = True
         opts.bind_to_device = True
         opts.bootstrap_backend = "mpi"
-    else:  # TORCHELASTIC, SLURM, etc...
+    elif "TORCHELASTIC_RUN_ID" in os.environ:
         WORLD_RANK = int(os.getenv("RANK", "0"))
         WORLD_SIZE = int(os.getenv("WORLD_SIZE", "1"))
         LOCAL_RANK = int(os.getenv("LOCAL_RANK", "0"))
-        LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", str(torch.cuda.device_count())))
-
+        LOCAL_SIZE = int(os.getenv("LOCAL_WORLD_SIZE", "1"))
+    else:
+        raise RuntimeError(f"{__file__} must be launched with either `mpirun` or `torchrun`!")
     NUM_NODES = WORLD_SIZE // LOCAL_SIZE
 
     # Initialize torch.distributed global process group and get DP/TP groups
@@ -228,24 +227,90 @@ def _train(opts):
 
     dist_print(f"Initialized default NCCL process group with {WORLD_SIZE} GPUs")
 
-    total_replicas = (
-        opts.num_replicas if opts.use_global_replica_count else opts.num_replicas * NUM_NODES
-    )
-    tp_size = WORLD_SIZE // total_replicas
+    # Figure out process groups for tensor- and data-parallelism (if any)
+    if NUM_NODES > 1:
+        # Create a list of world ranks on this node
+        hostname = socket.gethostname()
+        ifname = os.getenv(
+            "NVTE_UB_SOCKET_IFNAME",
+            os.getenv("NCCL_SOCKET_IFNAME", os.getenv("GLOO_SOCKET_IFNAME")),
+        )
 
-    if total_replicas > 1:
-        ranks_per_replica_list = [
-            [i * tp_size + t for t in range(tp_size)] for i in range(total_replicas)
-        ]
+        if ifname is not None:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                hostname = socket.inet_ntoa(
+                    fcntl.ioctl(
+                        s.fileno(), 0x8915, struct.pack("256s", ifname[:15].encode("UTF-8"))
+                    )[20:24]
+                )
+            except OSError as err:
+                raise OSError(f"Invalid network interface: {ifname}") from err
+
+        hostnames = [None for _ in range(WORLD_SIZE)]
+        dist.all_gather_object(hostnames, hostname)
+        unique_hosts = []
+        for host in hostnames:
+            if host not in unique_hosts:
+                unique_hosts.append(host)
+        assert len(unique_hosts) == NUM_NODES
+
+        ranks_per_node_list = [[] for _ in range(NUM_NODES)]
+        self_node_idx = -1
+        for i, host in enumerate(hostnames):
+            node_idx = unique_hosts.index(host)
+            ranks_per_node_list[node_idx].append(i)
+            if host == hostname:
+                self_node_idx = node_idx
+        assert self_node_idx >= 0
+        self_node_ranks = ranks_per_node_list[self_node_idx]
+
+        if opts.num_replicas > 1:
+            # Split node ranks into multiple replicas
+            assert len(self_node_ranks) % opts.num_replicas == 0
+            tp_size = len(self_node_ranks) // opts.num_replicas
+            ranks_per_replica_list = []
+            for node_ranks in ranks_per_node_list:
+                for i in range(opts.num_replicas):
+                    start = i * tp_size
+                    end = start + tp_size
+                    ranks_per_replica_list.append(node_ranks[start:end])
+
+            self_replica_idx = -1
+            for i, replica_ranks in enumerate(ranks_per_replica_list):
+                if WORLD_RANK in replica_ranks:
+                    self_replica_idx = i
+                    break
+            assert self_replica_idx >= 0
+
+        else:
+            # The entire node is the tensor-parallel group
+            ranks_per_replica_list = ranks_per_node_list
+            self_replica_idx = self_node_idx
 
         tp_group, _ = dist.new_subgroups_by_enumeration(ranks_per_replica_list, backend="nccl")
         ranks_per_replica_tensor = torch.tensor(ranks_per_replica_list, dtype=torch.int32)
         dp_group, _ = dist.new_subgroups_by_enumeration(
             ranks_per_replica_tensor.transpose(0, 1).tolist(), backend="nccl"
         )
+
     else:
-        dp_group = None
-        tp_group = nccl_world
+        if opts.num_replicas > 1:
+            # Mixed data- and tensor-parallelism on a single node
+            # NOTE: Avoid dist.init_device_mesh() to support older PyTorch versions
+            all_ranks = torch.tensor(list(range(LOCAL_SIZE)), dtype=torch.uint8, device="cpu")
+            ranks_per_replica_tensor = all_ranks.reshape(
+                (opts.num_replicas, LOCAL_SIZE // opts.num_replicas)
+            )
+            tp_group, _ = dist.new_subgroups_by_enumeration(
+                ranks_per_replica_tensor.tolist(), backend="nccl"
+            )
+            dp_group, _ = dist.new_subgroups_by_enumeration(
+                ranks_per_replica_tensor.transpose(0, 1).tolist(), backend="nccl"
+            )
+        else:
+            dp_group = None
+            tp_group = nccl_world
 
     tp_rank = dist.get_rank(tp_group)
     tp_size = dist.get_world_size(tp_group)
@@ -269,17 +334,10 @@ def _train(opts):
         te.module.base.initialize_ub(
             [batched_size, hidden_size],
             tp_size,
-            quantization_modes=[
-                (
-                    te.module.base.UserBufferQuantizationMode.FP8
-                    if opts.fp8
-                    else te.module.base.UserBufferQuantizationMode.NONE
-                )
-            ],
+            use_fp8=opts.fp8,
             dtype=torch.bfloat16,
             bootstrap_backend=opts.bootstrap_backend,
         )
-
     # Initialize the fused LayerNorm + Multi-layer Perceptron module
     torch.manual_seed(opts.seed + dp_rank)
     torch.cuda.manual_seed(opts.seed + tp_rank)
@@ -295,32 +353,91 @@ def _train(opts):
     fp8_format = Format.HYBRID
     fp8_recipe = DelayedScaling(fp8_format=fp8_format, amax_history_len=32, amax_compute_algo="max")
 
-    # Start dummy "training" iterations
-    dist_print("Starting training iterations...")
-    for i in range(opts.num_iters):
-        dist_print(f"    Iter {i+1}", group=tp_group, debug=True)
+    if opts.profile:
+        log_dir = os.path.join(opts.profile_dir, f"rank_{WORLD_RANK}")
+        os.makedirs(log_dir, exist_ok=True)
+        dist_print(f"Profiler traces will be saved to: {log_dir}", group=nccl_world)
 
-        dist_print("    |-- Generate random input batch", group=tp_group, debug=True)
-        x = torch.randn(input_size, dtype=torch.float32, device="cuda", requires_grad=True)
+        schedule = torch.profiler.schedule(wait=1, warmup=2, active=5, repeat=1)
 
-        dist_print("    |-- Forward pass", group=tp_group, debug=True)
-        with torch.amp.autocast("cuda", dtype=torch.bfloat16):
-            with te.autocast(enabled=opts.fp8, recipe=fp8_recipe, amax_reduction_group=nccl_world):
-                y = model(x)
-                if isinstance(y, tuple):
-                    out, *_ = y
-                else:
-                    out = y
-                dist_print("    |-- Compute loss", group=tp_group, debug=True)
-                loss = out.sum()
+        on_trace_ready = torch.profiler.tensorboard_trace_handler(
+            log_dir, worker_name=f"rank_{WORLD_RANK}"
+        )
 
-        dist_print("    |-- Backward pass", group=tp_group, debug=True)
-        loss.backward()
+        profiler_activities = [
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
+        import time
 
-        dist_print("    |-- Optimizer step", group=tp_group, debug=True)
-        optim.step()
+        start_time = time.time()
+        with torch.profiler.profile(
+            schedule=schedule,
+            # record_shapes=True,
+            # with_stack=True,
+            # with_flops=True,
+            # with_modules=True,
+            on_trace_ready=on_trace_ready,
+            profile_memory=True,   
+            activities=profiler_activities,
+        ) as prof:
+            dist_print("Starting training iterations...")
+            for i in range(opts.num_iters):
+                dist_print(f"    Iter {i+1}", group=tp_group, debug=True)
 
-    torch.cuda.synchronize()
+                dist_print("    |-- Generate random input batch", group=tp_group, debug=True)
+                x = torch.randn(input_size, dtype=torch.float32, device="cuda", requires_grad=True)
+
+                dist_print("    |-- Forward pass", group=tp_group, debug=True)
+                with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                    with te.autocast(enabled=opts.fp8, recipe=fp8_recipe, amax_reduction_group=nccl_world):
+                        y = model(x)
+                        if isinstance(y, tuple):
+                            out, *_ = y
+                        else:
+                            out = y
+                        dist_print("    |-- Compute loss", group=tp_group, debug=True)
+                        loss = out.sum()
+
+                dist_print("    |-- Backward pass", group=tp_group, debug=True)
+                loss.backward()
+
+                dist_print("    |-- Optimizer step", group=tp_group, debug=True)
+                optim.step()
+
+                prof.step()
+            torch.cuda.synchronize()
+            end_time = time.time()
+            total_wall_clock_time = end_time - start_time
+            print(f"Total Wall Clock Time: {total_wall_clock_time:.4f} seconds")
+            # total_flops = sum([item.flops for item in prof.key_averages()])
+            # print(f"Total FLOPs: {total_flops}")
+    else:
+        dist_print("Starting training iterations...")
+        for i in range(opts.num_iters):
+            dist_print(f"    Iter {i+1}", group=tp_group, debug=True)
+
+            dist_print("    |-- Generate random input batch", group=tp_group, debug=True)
+            x = torch.randn(input_size, dtype=torch.float32, device="cuda", requires_grad=True)
+
+            dist_print("    |-- Forward pass", group=tp_group, debug=True)
+            with torch.amp.autocast("cuda", dtype=torch.bfloat16):
+                with te.autocast(enabled=opts.fp8, recipe=fp8_recipe, amax_reduction_group=nccl_world):
+                    y = model(x)
+                    if isinstance(y, tuple):
+                        out, *_ = y
+                    else:
+                        out = y
+                    dist_print("    |-- Compute loss", group=tp_group, debug=True)
+                    loss = out.sum()
+
+            dist_print("    |-- Backward pass", group=tp_group, debug=True)
+            loss.backward()
+
+            dist_print("    |-- Optimizer step", group=tp_group, debug=True)
+            optim.step()
+
+
     dist_print("Finished training!")
     te.module.base.destroy_ub()
 
@@ -330,7 +447,6 @@ def _train(opts):
         print("Exiting...\n", end="", flush=True)
 
     return 0
-
 
 if __name__ == "__main__":
     sys.exit(_train(_parse_args()))
