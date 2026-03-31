@@ -184,11 +184,10 @@ def rocm_build() -> bool:
     Determines which build platform to use:
 
     - If `NVTE_USE_ROCM` is set:
-        - Any value excet "0": Use ROCm, if hipcc is detected.
+        - Any value except "0": Use ROCm, if hipcc is detected.
         - Zero value: Use CUDA, if nvcc is detected.
-    - If `NVTE_USE_ROCM` is not set:
-        - If `HIP_PLATFORM=amd`, require ROCm and use it if hipcc is detected.
-        - Attempt to auto-detect: Check for ROCm first, then CUDA.
+    - If `NVTE_USE_ROCM` is not set, guess if from `HIP_PLATFORM` if it is set.
+    - Otherwise auto-detect trying ROCm first.
 
     Returns:
         bool: `True` for ROCm, `False` for CUDA.
@@ -196,8 +195,11 @@ def rocm_build() -> bool:
     Raises:
         FileNotFoundError: If required tools (hipcc or nvcc) are not found.
     """
-    nvte_use_rocm = os.getenv("NVTE_USE_ROCM",
-                              "1" if os.getenv("HIP_PLATFORM", "") == "amd" else "")
+    nvte_use_rocm = os.getenv("NVTE_USE_ROCM", "")
+    if not nvte_use_rocm:
+        match os.getenv("HIP_PLATFORM", ""):
+            case "amd": nvte_use_rocm = "1"
+            case "nvidia": nvte_use_rocm = "0"
     if nvte_use_rocm != "0":
         try:
             rocm_path()
@@ -216,8 +218,10 @@ def rocm_build() -> bool:
 
 @functools.lru_cache(maxsize=None)
 def rocm_path() -> Tuple[str, str]:
-    """ROCm root path and HIPCC binary path as a tuple"""
-    """If ROCm installation is not specified, use default ROCm path"""
+    """
+    ROCm root path and HIPCC binary path as a tuple
+    If ROCm installation is not specified, use default ROCm path
+    """
     hipcc_bin = None
     if os.getenv("ROCM_PATH"):
         rocm_home = Path(os.getenv("ROCM_PATH"))

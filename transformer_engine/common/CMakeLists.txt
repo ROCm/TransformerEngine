@@ -133,30 +133,16 @@ else()
     message(FATAL_ERROR "This project requires the Ninja build system. Install it using 'pip install ninja'.")
   endif()
 
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
+
   # Disable Asserts In Code (Can't use asserts on HIP stack.)
   add_definitions(-DNDEBUG)
   add_definitions(-DUSE_ROCM)
-
-  if(NOT DEFINED ENV{NVTE_ROCM_ARCH})
-    SET(CMAKE_HIP_ARCHITECTURES gfx942 gfx950)
-  else()
-    # Accept comma separated list for NVTE_ROCM_ARCH
-    string(REPLACE "," ";" HIP_ARCH_LIST "$ENV{NVTE_ROCM_ARCH}")
-    SET(CMAKE_HIP_ARCHITECTURES ${HIP_ARCH_LIST})
-  endif()
 
   # build error will be dup-ed parallel-jobs times
   # set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -parallel-jobs=4")
   if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -g")
-  endif()
-
-  if(NOT "$ENV{ROCM_PATH}" STREQUAL "")
-    set(ROCM_PATH "$ENV{ROCM_PATH}")
-  elseif(EXISTS "/opt/rocm/core")
-    set(ROCM_PATH "/opt/rocm/core")
-  else()
-    set(ROCM_PATH "/opt/rocm")
   endif()
 endif()
 

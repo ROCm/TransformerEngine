@@ -19,16 +19,11 @@ set_target_properties(rocshmemapi PROPERTIES
     POSITION_INDEPENDENT_CODE ON
 )
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../../build_tools/rocm_utils.cmake")
+
 if(DEFINED ENV{ROCSHMEM_HOME})
   set(ROCSHMEM_HOME "$ENV{ROCSHMEM_HOME}" CACHE STRING "Location of ROCSHMEM installation")
 else()
-  if(NOT "$ENV{ROCM_PATH}" STREQUAL "")
-    set(ROCM_PATH "$ENV{ROCM_PATH}")
-  elseif(EXISTS "/opt/rocm/core")
-    set(ROCM_PATH "/opt/rocm/core")
-  else()
-    set(ROCM_PATH "/opt/rocm")
-  endif()
   set(ROCSHMEM_HOME "${ROCM_PATH}" CACHE STRING "Location of ROCSHMEM installation (default)")
 endif()
 set(ROCSHMEM_LIBRARY_PATH "${ROCSHMEM_HOME}/lib/librocshmem.a")
