@@ -317,6 +317,10 @@ else()
   message(STATUS "nvte hipified sources: ${te_hip_sources}")
 
   add_library(transformer_engine SHARED ${te_hip_sources})
+
+  # Workaround for TheRock installation that moved some headers from system-wide location
+  # to rocm_sysdeps but missing it in the default include path.
+  target_include_directories(transformer_engine SYSTEM PRIVATE "${ROCM_PATH}/lib/rocm_sysdeps/include")
 endif()
 
 target_include_directories(transformer_engine PUBLIC
