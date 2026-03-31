@@ -8,14 +8,21 @@
         "CUfunc_cache" : "hipFuncCache_t", 
         "<nvtx3/nvToolsExt.h>" : "<roctracer/roctx.h>",
         "cudaFuncSetAttribute(" : "hipFuncSetAttribute((const void*)",
-        "__nv_bfloat162":"__hip_bfloat162",
+        "__nv_fp8_e5m2" : "te_hip_fp8_e5m2",
+        "__nv_fp8_e4m3" : "te_hip_fp8_e4m3",
         "cuda::getCurrentCUDAStream" : "hip::getCurrentHIPStreamMasqueradingAsCUDA",
         "__nv_fp4_e2m1" : "__hip_fp4_e2m1",
         "__nv_fp4x2_e2m1" : "__hip_fp4x2_e2m1",
         "__nv_fp4x4_e2m1" : "__hip_fp4x4_e2m1",
         "__nv_fp4x2_storage_t" : "__hip_fp4x2_storage_t",
         "#include <cudaTypedefs.h>" : "",
-        "#include <cuda/barrier>" : ""
+        "#include <cuda/barrier>" : "",
+        "cudaLaunchKernelExC": "hipLaunchKernelExC",
+        "CUmemGenericAllocationHandle": "hipMemGenericAllocationHandle_t",
+        "cudaLaunchConfig_t": "hipLaunchConfig_t",
+        "cudaLaunchAttribute": "hipLaunchAttribute",
+        "cudaLaunchAttributeCooperative": "hipLaunchAttributeCooperative",
+        "CUdeviceptr": "hipDeviceptr_t"
  }
 }
 

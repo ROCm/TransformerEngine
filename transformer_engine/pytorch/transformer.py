@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -35,6 +37,8 @@ from transformer_engine.pytorch.constants import (
 from transformer_engine.pytorch.distributed import get_distributed_world_size
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
+
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
@@ -311,8 +315,8 @@ class TransformerLayer(torch.nn.Module):
         ub_overlap_ag: bool = True,
         ub_overlap_rs: bool = True,
         ub_overlap_rs_dgrad: bool = False,
-        ub_bulk_dgrad: bool = True,
-        ub_bulk_wgrad: bool = True,
+        ub_bulk_dgrad: bool = not IS_HIP_EXTENSION,
+        ub_bulk_wgrad: bool = not IS_HIP_EXTENSION,
         bias: bool = True,
         activation: str = "gelu",
         activation_params: Optional[dict] = None,

@@ -490,7 +490,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("GRAD_OUTPUT3", transformer_engine::pytorch::FP8BwdTensors::GRAD_OUTPUT3)
       .value("GRAD_INPUT3", transformer_engine::pytorch::FP8BwdTensors::GRAD_INPUT3);
 
-#ifndef USE_ROCM
   py::class_<CommOverlapHelper>(m, "CommOverlapHelper")
       .def(py::init<>(), py::call_guard<py::gil_scoped_release>())
       .def(py::init<c10d::ProcessGroup *, std::optional<c10d::ProcessGroup *>>(),
@@ -530,9 +529,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
       .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
-#else
-  m.def("CommOverlapHelper", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
-  m.def("CommOverlap", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
-  m.def("CommOverlapP2P", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
-#endif //USE_ROCM
 }
