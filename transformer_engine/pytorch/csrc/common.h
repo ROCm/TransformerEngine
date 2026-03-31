@@ -30,9 +30,7 @@
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/cast_transpose_noop.h>
-#ifndef USE_ROCM
 #include <transformer_engine/comm_gemm_overlap.h>
-#endif
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/fused_router.h>
