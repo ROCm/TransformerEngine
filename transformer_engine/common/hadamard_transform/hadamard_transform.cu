@@ -809,7 +809,13 @@ void HadamardTransformKernel(
         if (global_row < num_rows) {
             wht16(r0, r1, r2, r3, thread_in_grp, random_sign_mask, apply_pre);
             if constexpr (kUpdateAmax) {
-                lam = fmaxf(fmaxf(fabsf(r0),fabsf(r1)),fmaxf(fabsf(r2),fabsf(r3)));
+                // Match the stored/output precision when reporting amax.
+                const float r0_bf16 = to_f32(to_bf16(r0));
+                const float r1_bf16 = to_f32(to_bf16(r1));
+                const float r2_bf16 = to_f32(to_bf16(r2));
+                const float r3_bf16 = to_f32(to_bf16(r3));
+                lam = fmaxf(fmaxf(fabsf(r0_bf16), fabsf(r1_bf16)),
+                            fmaxf(fabsf(r2_bf16), fabsf(r3_bf16)));
                 for (int off=kWarpSize/2; off>=1; off>>=1)
                   lam=fmaxf(lam,__shfl_xor(lam,off));
             }
@@ -845,7 +851,13 @@ void HadamardTransformKernel(
         wht16(c0, c1, c2, c3, thread_in_grp, random_sign_mask_t, apply_pre);
 
         if constexpr (kUpdateAmaxT) {
-            lam = fmaxf(fmaxf(fabsf(c0),fabsf(c1)),fmaxf(fabsf(c2),fabsf(c3)));
+            // Match the stored/output precision when reporting amax.
+            const float c0_bf16 = to_f32(to_bf16(c0));
+            const float c1_bf16 = to_f32(to_bf16(c1));
+            const float c2_bf16 = to_f32(to_bf16(c2));
+            const float c3_bf16 = to_f32(to_bf16(c3));
+            lam = fmaxf(fmaxf(fabsf(c0_bf16), fabsf(c1_bf16)),
+                        fmaxf(fabsf(c2_bf16), fabsf(c3_bf16)));
 
             for (int off=kWarpSize/2; off>=1; off>>=1)
               lam=fmaxf(lam,__shfl_xor(lam,off));
