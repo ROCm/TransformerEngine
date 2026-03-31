@@ -70,6 +70,32 @@ CI backend configs (`ci/_utils.sh::configure_fused_attn_env`): `auto`, `ck`, `ao
 - Edit `transformer_engine/*`, `build_tools/*`, `tests/*`, `ci/*`; avoid `3rdparty/*` unless explicitly required.
 - Keep env-var behavior stable; tests toggle flags intentionally.
 - Python: Black, line length 100. C/C++: cpplint + `.clang-format`.
+- **Preserve the existing style of each file you edit.** Much of the codebase originates from upstream, and style can vary file-to-file (naming conventions, comment style, control flow patterns, etc.). Before writing new code in a file, read enough of it to understand how similar logic is already written, and follow that style. Consistency within a file matters more than imposing a uniform style across the project.
+
+## Copyright headers
+When you modify a file, update its copyright header so the end-year reflects the current year.
+
+This repo carries **two** copyright lines — AMD and NVIDIA. Follow these rules:
+
+1. **Files with an existing AMD copyright line** — update the AMD end-year to the current year (e.g. `2025` → `2026`). Leave the NVIDIA line untouched.
+2. **Files with only an NVIDIA copyright line** — add an AMD line **above** the NVIDIA line:
+   - Python: `# Copyright (c) <YEAR>, Advanced Micro Devices, Inc. All rights reserved.`
+   - C/C++/HIP: `/* Copyright (c) <YEAR>, Advanced Micro Devices, Inc. All rights reserved. */` (or use the `*`-block style matching the file).
+   - `<YEAR>` is the current year (single year) for newly-added lines, e.g. `2026`.
+3. **New files you create** — include both AMD and NVIDIA headers with the current year, followed by a blank comment line and `See LICENSE for license information.`
+4. **Never change the NVIDIA copyright year range** — those dates are updated during IFU (integrate from upstream) merges.
+
+The copyright checker (`qa/L0_license/copyright_checker.py` + `qa/L0_license/config.json`) validates NVIDIA headers automatically. AMD headers are our addition and should stay consistent with the patterns already in the codebase.
+
+## Memory management
+When writing or updating memories in the project memory directory, follow these guidelines:
+
+- **Scope**: only save information that will be useful in future conversations. Do not save ephemeral task details, debugging breadcrumbs, or things derivable from the code/git history.
+- **Check before writing**: read `MEMORY.md` and check for an existing memory on the same topic before creating a new file. Update the existing memory instead of duplicating.
+- **File naming**: use short, descriptive, snake_case names (e.g. `aiter_build.md`, `container_setup.md`). Group by topic, not by date.
+- **Frontmatter**: every memory file must have the standard `name`, `description`, and `type` frontmatter fields.
+- **Index maintenance**: after creating or removing a memory file, update `MEMORY.md` to keep the index in sync. Each entry should be a single line under 150 characters.
+- **Staleness**: memories are point-in-time observations. When recalling a memory, verify it against current code/state before acting on it. Update or delete memories that are no longer accurate.
 
 ## Troubleshooting pointers
 - **Missing `.so` on import**: check path resolution in `transformer_engine/common/__init__.py`.
