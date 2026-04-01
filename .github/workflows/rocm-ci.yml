@@ -3,7 +3,7 @@
 # See LICENSE for license information.
 
 name: Build and Test Branch
-run-name: CI Level ${{ inputs.test_level || '1' }}
+run-name: CI Level ${{ (github.event_name == 'push' && '3') || inputs.test_level || '1' }}
 
 on:
   push:
@@ -47,7 +47,7 @@ concurrency:
 
 jobs:
   build_and_test:
-    name: Build and Test on GPU (${{ matrix.runner }}) - Level ${{ inputs.test_level || '1' }}
+    name: Build and Test on GPU (${{ matrix.runner }}) - Level ${{ (github.event_name == 'push' && '3') || inputs.test_level || '1' }}
     timeout-minutes: 720
     runs-on: ${{ matrix.runner }}
     strategy:
