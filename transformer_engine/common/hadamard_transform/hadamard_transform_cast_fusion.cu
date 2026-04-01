@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -9,19 +11,24 @@
 #include <cuda_bf16.h>
 #include <cuda_pipeline.h>
 #include <cuda_runtime.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cutlass/arch/barrier.h>
+#endif
 #include <transformer_engine/hadamard_transform.h>
 
 #include <cuda/barrier>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cute/algorithm/gemm.hpp>
 #include <cute/arch/cluster_sm90.hpp>
 #include <cute/tensor.hpp>
+#endif
 
 #include "common/common.h"
 #include "common/util/cuda_runtime.h"
 #include "common/util/curanddx.hpp"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
+#ifndef __HIP_PLATFORM_AMD__
 #include "cutlass/arch/barrier.h"
 #include "cutlass/cutlass.h"
 #include "cutlass/gemm/collective/builders/sm100_common.inl"
@@ -31,9 +38,11 @@
 #include "cutlass/util/command_line.h"
 #include "cutlass/util/helper_cuda.hpp"
 #include "cutlass/util/print_error.hpp"
+#endif
 
 // clang-format off
 
+#ifndef __HIP_PLATFORM_AMD__
 namespace transformer_engine {
 namespace detail {
 namespace {
@@ -817,6 +826,278 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
 }
 
 }  // namespace transformer_engine
+#else
+
+#include "wht16.cuh"
+
+namespace transformer_engine {
+
+namespace {
+
+__device__ __forceinline__ float to_f32(__hip_bfloat16 v) { return static_cast<float>(v); }
+
+__device__ __forceinline__ float group_max_4(float v) {
+  v = fmaxf(v, ds_swizzle_xor1(v));
+  v = fmaxf(v, ds_swizzle_xor2(v));
+  return v;
+}
+
+__device__ __forceinline__ float compute_global_encode_scale_fp4(const float global_amax) {
+#if !defined(__HIP_DEVICE_COMPILE__)
+  const float fp8_max = detail::TypeExtrema<fp8e4m3>::max;
+#else
+  constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;
+#endif
+  constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;
+  float global_encode_scale = fp8_max * fp4_max / global_amax;
+  global_encode_scale = fminf(global_encode_scale, detail::TypeExtrema<float>::max);
+  return (global_amax == 0.f || global_encode_scale == 0.f) ? 1.f : global_encode_scale;
+}
+
+template <typename ScaleType>
+__device__ __forceinline__ ScaleType compute_decode_scale_fp4(const float amax,
+                                                              const float global_encode_scale) {
+  float decode_scale = amax / detail::TypeExtrema<fp4e2m1>::max;
+  decode_scale *= global_encode_scale;
+  decode_scale = fminf(decode_scale, detail::TypeExtrema<float>::max);
+  return static_cast<ScaleType>(decode_scale);
+}
+
+template <typename ScaleType>
+__device__ __forceinline__ float compute_encode_scale_fp4(ScaleType decode_scale,
+                                                          const float global_decode_scale) {
+  return fminf(1.0f / (static_cast<float>(decode_scale) * global_decode_scale),
+               detail::TypeExtrema<float>::max);
+}
+
+__device__ __forceinline__ uint32_t get_rbits(
+    transformer_engine::curanddx::detail::philox4x32_native_state<10>& rng, uint4& random_uint4,
+    int& rnd_idx) {
+  if (rnd_idx == 4) {
+    rnd_idx = 0;
+    random_uint4 = rng.generate4();
+  }
+  const uint32_t* const rbits_arr = reinterpret_cast<uint32_t*>(&random_uint4);
+  return rbits_arr[rnd_idx++];
+}
+
+template <bool kUseStochasticRounding>
+__device__ __forceinline__ fp4e2m1x4 cvt_fp32_to_fp4_4x(const float2 in01, const float2 in23,
+                                                        const uint32_t rbits) {
+  if constexpr (kUseStochasticRounding) {
+#if ARCH_HAS_STOCHASTIC_ROUNDING
+    union {
+      uint32_t ui32;
+      __hip_fp4x2_storage_t fp4x2[4];
+    } packed{0};
+    __amd_floatx2_storage_t packed01{in01.x, in01.y};
+    __amd_floatx2_storage_t packed23{in23.x, in23.y};
+    packed.ui32 =
+        __builtin_amdgcn_cvt_scalef32_sr_pk_fp4_f32(packed.ui32, packed01, rbits, 1.0f, 1);
+    const __hip_fp4x2_storage_t lo = packed.fp4x2[1];
+    packed.ui32 =
+        __builtin_amdgcn_cvt_scalef32_sr_pk_fp4_f32(packed.ui32, packed23, rbits, 1.0f, 1);
+    const __hip_fp4x2_storage_t hi = packed.fp4x2[1];
+
+    fp4e2m1x4 result;
+    result.__x = static_cast<__hip_fp4x4_storage_t>(
+        lo | (static_cast<__hip_fp4x4_storage_t>(hi) << 8));
+    return result;
+#else
+    NVTE_DEVICE_ERROR("FP4 stochastic rounding on AMDGPU requires gfx950 or later.");
+    return fp4e2m1x4{};
+#endif
+  } else {
+    const __hip_fp4_storage_t q0 =
+        __hip_cvt_float_to_fp4(in01.x, __HIP_E2M1, hipRoundNearest);
+    const __hip_fp4_storage_t q1 =
+        __hip_cvt_float_to_fp4(in01.y, __HIP_E2M1, hipRoundNearest);
+    const __hip_fp4_storage_t q2 =
+        __hip_cvt_float_to_fp4(in23.x, __HIP_E2M1, hipRoundNearest);
+    const __hip_fp4_storage_t q3 =
+        __hip_cvt_float_to_fp4(in23.y, __HIP_E2M1, hipRoundNearest);
+
+    fp4e2m1x4 result;
+    result.__x = static_cast<__hip_fp4x4_storage_t>((q0 & 0xFu) | ((q1 & 0xFu) << 4) |
+                                                    ((q2 & 0xFu) << 8) | ((q3 & 0xFu) << 12));
+    return result;
+  }
+}
+
+__device__ __forceinline__ uint16_t fp4x4_to_bits(fp4e2m1x4 v) {
+  uint16_t bits;
+  __builtin_memcpy(&bits, &v, sizeof(bits));
+  return bits;
+}
+
+template <bool kUseStochasticRounding>
+__global__ __launch_bounds__(kThreadsPerBlock, 4) void HadamardTransformCastFusionKernel(
+    const __hip_bfloat16* __restrict__ input, uint8_t* __restrict__ output_t,
+    fp8e4m3* __restrict__ scale_inv_t, const float global_amax,
+    const uint16_t random_sign_mask_t, const uint64_t num_rows, const uint64_t row_length,
+    const size_t scale_stride, const size_t* rng_state) {
+  const int tid = threadIdx.x;
+  const int warp_id = tid / kWarpSize;
+  const int lane_id = tid % kWarpSize;
+  const int row_in_warp = lane_id / kThreadsPerWHT;
+  const int thread_in_grp = lane_id % kThreadsPerWHT;
+
+  const uint64_t output_row = static_cast<uint64_t>(blockIdx.x) * kHadamardDim + row_in_warp;
+  const uint64_t block_row_base =
+      static_cast<uint64_t>(blockIdx.y) * kRowsPerBlock + warp_id * kHadamardDim;
+
+  if (block_row_base + kHadamardDim > num_rows) {
+    return;
+  }
+
+  const uint64_t input_row_base = block_row_base + thread_in_grp * kElemsPerThread;
+  const uint64_t input_col = output_row;
+
+  float c0 = to_f32(input[(input_row_base + 0) * row_length + input_col]);
+  float c1 = to_f32(input[(input_row_base + 1) * row_length + input_col]);
+  float c2 = to_f32(input[(input_row_base + 2) * row_length + input_col]);
+  float c3 = to_f32(input[(input_row_base + 3) * row_length + input_col]);
+
+  wht16(c0, c1, c2, c3, thread_in_grp, random_sign_mask_t, /*apply_pre=*/true);
+
+  // Truncate to BF16 precision to match the reference BF16 matmul path.
+  // Without this, FP32 WHT results at FP4 quantization boundaries round
+  // differently than the BF16-precision reference, causing off-by-one errors.
+  c0 = to_f32(static_cast<__hip_bfloat16>(c0));
+  c1 = to_f32(static_cast<__hip_bfloat16>(c1));
+  c2 = to_f32(static_cast<__hip_bfloat16>(c2));
+  c3 = to_f32(static_cast<__hip_bfloat16>(c3));
+
+  const float local_block_amax =
+      fmaxf(fmaxf(fabsf(c0), fabsf(c1)), fmaxf(fabsf(c2), fabsf(c3)));
+  const float block_amax = group_max_4(local_block_amax);
+
+  const float global_encode_scale = compute_global_encode_scale_fp4(global_amax);
+  const float global_decode_scale = 1.0f / global_encode_scale;
+  const fp8e4m3 scale_inv = compute_decode_scale_fp4<fp8e4m3>(block_amax, global_encode_scale);
+  const float encode_scale = compute_encode_scale_fp4(scale_inv, global_decode_scale);
+
+  if (thread_in_grp == 0) {
+    const uint64_t scale_col = block_row_base / kHadamardDim;
+    scale_inv_t[output_row * scale_stride + scale_col] = scale_inv;
+  }
+
+  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  uint4 random_uint4{0, 0, 0, 0};
+  int rnd_idx = 0;
+  if constexpr (kUseStochasticRounding) {
+    const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
+    const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
+    const size_t rng_sequence = static_cast<size_t>(threadIdx.x) +
+                                static_cast<size_t>(blockIdx.x) * blockDim.x +
+                                static_cast<size_t>(blockIdx.y) * gridDim.x * blockDim.x;
+    rng.init(rng_seed, rng_sequence, rng_offset);
+    random_uint4 = rng.generate4();
+  }
+
+  const float2 scaled01{c0 * encode_scale, c1 * encode_scale};
+  const float2 scaled23{c2 * encode_scale, c3 * encode_scale};
+  const uint32_t rbits = kUseStochasticRounding ? get_rbits(rng, random_uint4, rnd_idx) : 0;
+  const uint16_t packed = fp4x4_to_bits(cvt_fp32_to_fp4_4x<kUseStochasticRounding>(
+      scaled01, scaled23, rbits));
+
+  const uint64_t output_col_base = input_row_base;
+  const uint64_t output_byte_offset = output_row * (num_rows / 2) + output_col_base / 2;
+  *reinterpret_cast<uint16_t*>(&output_t[output_byte_offset]) = packed;
+}
+
+uint16_t random_sign_mask_from_rht_matrix(const SimpleTensor& hadamard_matrix, cudaStream_t stream) {
+  std::array<uint16_t, kHadamardDim * kHadamardDim> host_matrix{};
+
+  NVTE_CHECK_CUDA(cudaMemcpyAsync(host_matrix.data(), hadamard_matrix.dptr,
+                                  host_matrix.size() * sizeof(uint16_t),
+                                  cudaMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+
+  uint16_t random_sign_mask = 0;
+  for (size_t row = 0; row < kHadamardDim; ++row) {
+    // The first column of diag(sign) @ H16 is sign[row] * 0.25.
+    random_sign_mask |= static_cast<uint16_t>(((host_matrix[row * kHadamardDim] >> 15) & 1) << row);
+  }
+  return random_sign_mask;
+}
+
+}  // namespace
+
+void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &output_,
+                                               const Tensor &hadamard_matrix_,
+                                               QuantizationConfig quant_config,
+                                               cudaStream_t stream) {
+  NVTE_API_CALL(hadamard_transform_cast_fusion_columnwise);
+
+  NVTE_CHECK(input_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
+             "Input tensor must be BF16 tensor, but scaling mode is ",
+             to_string(input_.scaling_mode), ".");
+  NVTE_CHECK(input_.dtype() == transformer_engine::DType::kBFloat16,
+             "Input tensor must be BF16 tensor, but dtype is ", to_string(input_.dtype()), ".");
+  NVTE_CHECK(input_.dim() >= 2, "Input must be a 2D tensor.");
+  NVTE_CHECK(output_.scaling_mode == NVTE_NVFP4_1D_SCALING,
+             "Output tensor must use NVFP4 scaling, but scaling mode is ",
+             to_string(output_.scaling_mode), ".");
+  NVTE_CHECK(output_.data.dptr != nullptr, "Output rowwise data must be allocated.");
+  NVTE_CHECK(output_.scale_inv.dptr != nullptr, "Output rowwise scale_inv must be allocated.");
+  NVTE_CHECK(output_.amax.dptr != nullptr, "Output rowwise amax must be allocated.");
+
+  NVTE_CHECK(hadamard_matrix_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
+             "Hadamard matrix must be BF16 tensor, but scaling mode is ",
+             to_string(hadamard_matrix_.scaling_mode), ".");
+  NVTE_CHECK(hadamard_matrix_.dtype() == transformer_engine::DType::kBFloat16,
+             "Hadamard matrix must be BF16 tensor, but dtype is ",
+             to_string(hadamard_matrix_.dtype()), ".");
+  const auto expected_hadamard_shape = std::vector<size_t>{kHadamardDim, kHadamardDim};
+  NVTE_CHECK(hadamard_matrix_.shape() == expected_hadamard_shape,
+             "Hadamard matrix must have shape=",
+             expected_hadamard_shape,
+             ", but got shape=", hadamard_matrix_.shape(), ".");
+
+  const SimpleTensor& input = input_.data;
+  const size_t ndim = input.shape.size();
+  const size_t n = input.shape[ndim - 1];
+  size_t m = 1;
+  for (size_t i = 0; i < ndim - 1; ++i) {
+    m *= input.shape[i];
+  }
+
+  NVTE_CHECK(n % kHadamardDim == 0, "row_length must be divisible by hadamard_dimension.");
+  NVTE_CHECK(m % kHadamardDim == 0, "num_rows must be divisible by hadamard_dimension.");
+
+  const size_t* rng_state = nullptr;
+  if (quant_config.rng_state != nullptr) {
+    Tensor& rng_state_tensor = *convertNVTETensor(quant_config.rng_state);
+    NVTE_CHECK(rng_state_tensor.dtype() == DType::kInt64,
+               "RNG state should contain 2 64-bit values.");
+    NVTE_CHECK(rng_state_tensor.data.shape == std::vector<size_t>{2},
+               "Shape of the RNG state should be [2], but got ", rng_state_tensor.data.shape);
+    rng_state = reinterpret_cast<const size_t*>(rng_state_tensor.data.dptr);
+  }
+
+  const uint16_t random_sign_mask_t =
+      random_sign_mask_from_rht_matrix(hadamard_matrix_.data, stream);
+
+  const dim3 block(kThreadsPerBlock);
+  const dim3 grid(DIVUP(n, static_cast<size_t>(kHadamardDim)),
+                  DIVUP(m, static_cast<size_t>(kRowsPerBlock)));
+
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      quant_config.stochastic_rounding, kUseStochasticRounding,
+      HadamardTransformCastFusionKernel<kUseStochasticRounding><<<grid, block, 0, stream>>>(
+          reinterpret_cast<const __hip_bfloat16*>(input.dptr),
+          reinterpret_cast<uint8_t*>(output_.data.dptr),
+          reinterpret_cast<fp8e4m3*>(output_.scale_inv.dptr),
+          *reinterpret_cast<const float*>(output_.amax.dptr), random_sign_mask_t,
+          static_cast<uint64_t>(m), static_cast<uint64_t>(n), output_.scale_inv.shape[1],
+          rng_state););
+
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+}  // namespace transformer_engine
+#endif
 
 void nvte_hadamard_transform_cast_fusion_columnwise(const NVTETensor input, NVTETensor output,
                                                     const NVTETensor hadamard_matrix,
