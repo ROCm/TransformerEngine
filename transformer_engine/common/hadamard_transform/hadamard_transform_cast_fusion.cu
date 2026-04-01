@@ -713,118 +713,6 @@ rht_gemm_ttt_wrapper(int m, int n,
 
 // clang-format on
 
-void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &output_,
-                                               const Tensor &hadamard_matrix_,
-                                               QuantizationConfig quant_config,
-                                               cudaStream_t stream) {
-  NVTE_API_CALL(hadamard_transform_cast_fusion_columnwise);
-
-  // Check input and output tensors
-  NVTE_CHECK(input_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "Input tensor must be BF16 tensor, but scaling mode is ",
-             to_string(input_.scaling_mode), ".");
-  NVTE_CHECK(input_.dtype() == transformer_engine::DType::kBFloat16,
-             "Input tensor must be BF16 tensor, but dtype is ", to_string(input_.dtype()), ".");
-  NVTE_CHECK(input_.dim() >= 2, "Input must be a 2D tensor.");
-  const SimpleTensor &input = input_.data;
-  SimpleTensor &global_amax = output_.amax;
-  SimpleTensor &output_t = output_.data;
-  SimpleTensor &scale_inv_t = output_.scale_inv;
-
-  // Stochastic rounding config
-  const bool use_stochastic_rounding = quant_config.stochastic_rounding;
-  const size_t *rng_state = nullptr;
-  if (quant_config.rng_state != nullptr) {
-    Tensor &rng_state_tensor = *convertNVTETensor(quant_config.rng_state);
-    NVTE_CHECK(rng_state_tensor.dtype() == DType::kInt64,
-               "RNG state should contain 2 64-bit values.");
-    NVTE_CHECK(rng_state_tensor.data.shape == std::vector<size_t>{2},
-               "Shape of the RNG state should be [2], but got ", rng_state_tensor.data.shape);
-    rng_state = reinterpret_cast<const size_t *>(rng_state_tensor.data.dptr);
-  }
-
-  // Template arguments
-  using TA = cute::bfloat16_t;
-  using TB = cute::bfloat16_t;
-  using TC = cutlass::float_e2m1_t;
-  using TSFC = cutlass::float_ue4m3_t;
-
-  checkCuDriverContext(stream);
-
-  // Check Hadamard matrix
-  constexpr int kHadamardDimension = 16;
-  NVTE_CHECK(hadamard_matrix_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
-             "Hadamard matrix must be BF16 tensor, but scaling mode is ",
-             to_string(hadamard_matrix_.scaling_mode), ".");
-  NVTE_CHECK(hadamard_matrix_.dtype() == transformer_engine::DType::kBFloat16,
-             "Hadamard matrix must be BF16 tensor, but dtype is ",
-             to_string(hadamard_matrix_.dtype()), ".");
-  const SimpleTensor &hadamard_matrix = hadamard_matrix_.data;
-  NVTE_CHECK(
-      (hadamard_matrix_.shape() == std::vector<size_t>{kHadamardDimension, kHadamardDimension}),
-      "Hadamard matrix must have shape=",
-      std::vector<size_t>{kHadamardDimension, kHadamardDimension},
-      ", but got shape=", hadamard_matrix_.shape(), ".");
-  const size_t hadamard_dimension = hadamard_matrix.shape[0];
-
-  const size_t ndim = input.shape.size();
-  const size_t n = input.shape[ndim - 1];
-  size_t m = 1;
-  for (size_t i = 0; i < ndim - 1; ++i) {
-    m *= input.shape[i];
-  }
-
-  auto sm_count = transformer_engine::cuda::sm_count();
-
-  NVTE_CHECK(n % hadamard_dimension == 0, "row_length must be divisible by hadamard_dimension.");
-
-  NVTE_CHECK(m % hadamard_dimension == 0, "num_rows must be divisible by hadamard_dimension");
-
-  int k_tile_size = 1024;
-
-  if (m == 8192 && n == 5120) {
-    k_tile_size = 512;
-  } else if (m == 8192 && n == 10240) {
-    k_tile_size = 1024;
-  } else if (m == 8192 && n == 2560) {
-    k_tile_size = 1280;
-  } else if (m == 8192 && n == 11328) {
-    k_tile_size = 1024;
-  } else if (m == 8192 && n == 512) {
-    k_tile_size = 256;
-  } else if (m == 8192 && n == 3584) {
-    k_tile_size = 512;
-  } else if (m == 11328 && n == 8192) {
-    k_tile_size = 1024;
-  } else if (m == 5120 && n == 8192) {
-    k_tile_size = 512;
-  } else if (m == 10240 && n == 8192) {
-    k_tile_size = 1024;
-  } else if (m == 2560 && n == 8192) {
-    k_tile_size = 1280;
-  } else if (m == 512 && n == 8192) {
-    k_tile_size = 256;
-  } else if (m == 3584 && n == 8192) {
-    k_tile_size = 512;
-  } else if (m < 1024 || n < 1024) {
-    k_tile_size = 512;
-  }
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      use_stochastic_rounding, kUseStochasticRounding,
-      detail::rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding>(
-          /*m=*/m,
-          /*n=*/n,
-          /*A=*/reinterpret_cast<TA const *>(input.dptr),
-          /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
-          /*C=*/reinterpret_cast<TC *>(output_t.dptr),
-          /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t.dptr),
-          /*global_amax=*/reinterpret_cast<float const *>(global_amax.dptr),
-          /*rng_state=*/rng_state,
-          /*sm_count=*/sm_count,
-          /*stream=*/stream,
-          /*k_tile_size=*/k_tile_size););
-}
-
 }  // namespace transformer_engine
 #else
 
@@ -1024,38 +912,67 @@ uint16_t random_sign_mask_from_rht_matrix(const SimpleTensor& hadamard_matrix, c
 
 }  // namespace
 
+}  // namespace transformer_engine
+#endif
+
+namespace transformer_engine {
+
 void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &output_,
                                                const Tensor &hadamard_matrix_,
                                                QuantizationConfig quant_config,
                                                cudaStream_t stream) {
   NVTE_API_CALL(hadamard_transform_cast_fusion_columnwise);
 
+  // Check input and output tensors
   NVTE_CHECK(input_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
              "Input tensor must be BF16 tensor, but scaling mode is ",
              to_string(input_.scaling_mode), ".");
   NVTE_CHECK(input_.dtype() == transformer_engine::DType::kBFloat16,
              "Input tensor must be BF16 tensor, but dtype is ", to_string(input_.dtype()), ".");
   NVTE_CHECK(input_.dim() >= 2, "Input must be a 2D tensor.");
-  NVTE_CHECK(output_.scaling_mode == NVTE_NVFP4_1D_SCALING,
-             "Output tensor must use NVFP4 scaling, but scaling mode is ",
-             to_string(output_.scaling_mode), ".");
-  NVTE_CHECK(output_.data.dptr != nullptr, "Output rowwise data must be allocated.");
-  NVTE_CHECK(output_.scale_inv.dptr != nullptr, "Output rowwise scale_inv must be allocated.");
-  NVTE_CHECK(output_.amax.dptr != nullptr, "Output rowwise amax must be allocated.");
+  const SimpleTensor &input = input_.data;
+  SimpleTensor &global_amax = output_.amax;
+  SimpleTensor &output_t = output_.data;
+  SimpleTensor &scale_inv_t = output_.scale_inv;
 
+  // Stochastic rounding config
+  const bool use_stochastic_rounding = quant_config.stochastic_rounding;
+  const size_t *rng_state = nullptr;
+  if (quant_config.rng_state != nullptr) {
+    Tensor &rng_state_tensor = *convertNVTETensor(quant_config.rng_state);
+    NVTE_CHECK(rng_state_tensor.dtype() == DType::kInt64,
+               "RNG state should contain 2 64-bit values.");
+    NVTE_CHECK(rng_state_tensor.data.shape == std::vector<size_t>{2},
+               "Shape of the RNG state should be [2], but got ", rng_state_tensor.data.shape);
+    rng_state = reinterpret_cast<const size_t *>(rng_state_tensor.data.dptr);
+  }
+
+#ifndef __HIP_PLATFORM_AMD__
+  // Template arguments
+  using TA = cute::bfloat16_t;
+  using TB = cute::bfloat16_t;
+  using TC = cutlass::float_e2m1_t;
+  using TSFC = cutlass::float_ue4m3_t;
+
+  checkCuDriverContext(stream);
+#endif
+
+  // Check Hadamard matrix
+  constexpr int kHadamardDimension = 16;
   NVTE_CHECK(hadamard_matrix_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
              "Hadamard matrix must be BF16 tensor, but scaling mode is ",
              to_string(hadamard_matrix_.scaling_mode), ".");
   NVTE_CHECK(hadamard_matrix_.dtype() == transformer_engine::DType::kBFloat16,
              "Hadamard matrix must be BF16 tensor, but dtype is ",
              to_string(hadamard_matrix_.dtype()), ".");
-  const auto expected_hadamard_shape = std::vector<size_t>{kHadamardDim, kHadamardDim};
-  NVTE_CHECK(hadamard_matrix_.shape() == expected_hadamard_shape,
-             "Hadamard matrix must have shape=",
-             expected_hadamard_shape,
-             ", but got shape=", hadamard_matrix_.shape(), ".");
+  const SimpleTensor &hadamard_matrix = hadamard_matrix_.data;
+  NVTE_CHECK(
+      (hadamard_matrix_.shape() == std::vector<size_t>{kHadamardDimension, kHadamardDimension}),
+      "Hadamard matrix must have shape=",
+      std::vector<size_t>{kHadamardDimension, kHadamardDimension},
+      ", but got shape=", hadamard_matrix_.shape(), ".");
+  const size_t hadamard_dimension = hadamard_matrix.shape[0];
 
-  const SimpleTensor& input = input_.data;
   const size_t ndim = input.shape.size();
   const size_t n = input.shape[ndim - 1];
   size_t m = 1;
@@ -1063,41 +980,81 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
     m *= input.shape[i];
   }
 
-  NVTE_CHECK(n % kHadamardDim == 0, "row_length must be divisible by hadamard_dimension.");
-  NVTE_CHECK(m % kHadamardDim == 0, "num_rows must be divisible by hadamard_dimension.");
+#ifndef __HIP_PLATFORM_AMD__
+  auto sm_count = transformer_engine::cuda::sm_count();
+#endif
 
-  const size_t* rng_state = nullptr;
-  if (quant_config.rng_state != nullptr) {
-    Tensor& rng_state_tensor = *convertNVTETensor(quant_config.rng_state);
-    NVTE_CHECK(rng_state_tensor.dtype() == DType::kInt64,
-               "RNG state should contain 2 64-bit values.");
-    NVTE_CHECK(rng_state_tensor.data.shape == std::vector<size_t>{2},
-               "Shape of the RNG state should be [2], but got ", rng_state_tensor.data.shape);
-    rng_state = reinterpret_cast<const size_t*>(rng_state_tensor.data.dptr);
+  NVTE_CHECK(n % hadamard_dimension == 0, "row_length must be divisible by hadamard_dimension.");
+
+  NVTE_CHECK(m % hadamard_dimension == 0, "num_rows must be divisible by hadamard_dimension");
+
+#ifndef __HIP_PLATFORM_AMD__
+  int k_tile_size = 1024;
+
+  if (m == 8192 && n == 5120) {
+    k_tile_size = 512;
+  } else if (m == 8192 && n == 10240) {
+    k_tile_size = 1024;
+  } else if (m == 8192 && n == 2560) {
+    k_tile_size = 1280;
+  } else if (m == 8192 && n == 11328) {
+    k_tile_size = 1024;
+  } else if (m == 8192 && n == 512) {
+    k_tile_size = 256;
+  } else if (m == 8192 && n == 3584) {
+    k_tile_size = 512;
+  } else if (m == 11328 && n == 8192) {
+    k_tile_size = 1024;
+  } else if (m == 5120 && n == 8192) {
+    k_tile_size = 512;
+  } else if (m == 10240 && n == 8192) {
+    k_tile_size = 1024;
+  } else if (m == 2560 && n == 8192) {
+    k_tile_size = 1280;
+  } else if (m == 512 && n == 8192) {
+    k_tile_size = 256;
+  } else if (m == 3584 && n == 8192) {
+    k_tile_size = 512;
+  } else if (m < 1024 || n < 1024) {
+    k_tile_size = 512;
   }
-
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      use_stochastic_rounding, kUseStochasticRounding,
+      detail::rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding>(
+          /*m=*/m,
+          /*n=*/n,
+          /*A=*/reinterpret_cast<TA const *>(input.dptr),
+          /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
+          /*C=*/reinterpret_cast<TC *>(output_t.dptr),
+          /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t.dptr),
+          /*global_amax=*/reinterpret_cast<float const *>(global_amax.dptr),
+          /*rng_state=*/rng_state,
+          /*sm_count=*/sm_count,
+          /*stream=*/stream,
+          /*k_tile_size=*/k_tile_size););
+#else
   const uint16_t random_sign_mask_t =
-      random_sign_mask_from_rht_matrix(hadamard_matrix_.data, stream);
+      random_sign_mask_from_rht_matrix(hadamard_matrix, stream);
 
   const dim3 block(kThreadsPerBlock);
   const dim3 grid(DIVUP(n, static_cast<size_t>(kHadamardDim)),
                   DIVUP(m, static_cast<size_t>(kRowsPerBlock)));
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      quant_config.stochastic_rounding, kUseStochasticRounding,
+      use_stochastic_rounding, kUseStochasticRounding,
       HadamardTransformCastFusionKernel<kUseStochasticRounding><<<grid, block, 0, stream>>>(
           reinterpret_cast<const __hip_bfloat16*>(input.dptr),
-          reinterpret_cast<uint8_t*>(output_.data.dptr),
-          reinterpret_cast<fp8e4m3*>(output_.scale_inv.dptr),
-          *reinterpret_cast<const float*>(output_.amax.dptr), random_sign_mask_t,
-          static_cast<uint64_t>(m), static_cast<uint64_t>(n), output_.scale_inv.shape[1],
+          reinterpret_cast<uint8_t*>(output_t.dptr),
+          reinterpret_cast<fp8e4m3*>(scale_inv_t.dptr),
+          *reinterpret_cast<const float*>(global_amax.dptr), random_sign_mask_t,
+          static_cast<uint64_t>(m), static_cast<uint64_t>(n), scale_inv_t.shape[1],
           rng_state););
 
   NVTE_CHECK_CUDA(cudaGetLastError());
+#endif
 }
 
 }  // namespace transformer_engine
-#endif
 
 void nvte_hadamard_transform_cast_fusion_columnwise(const NVTETensor input, NVTETensor output,
                                                     const NVTETensor hadamard_matrix,
