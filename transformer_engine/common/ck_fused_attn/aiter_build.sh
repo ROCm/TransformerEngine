@@ -60,7 +60,6 @@ fi
 # Create a single unified static archive from both forward and backward object files
 out_archive="${AITER_TEST_DIR}/libmha.a"
 obj_list=$(mktemp)
-rm -f "${obj_list}"
 
 for lib in fwd bwd; do
   src_obj_dir="${AITER_DIR}/aiter/jit/build/libmha_${lib}/build"

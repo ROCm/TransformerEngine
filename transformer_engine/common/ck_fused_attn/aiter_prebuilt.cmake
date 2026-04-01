@@ -41,6 +41,7 @@ set(AITER_PREBUILT_REQUIRED_FILES
 function(is_aiter_cache_valid ROCM_VER_PARAM CACHE_VALID)
   get_aiter_cache_key("${ROCM_VER_PARAM}" KEY EXTRACT_DIR)
   if(NOT EXISTS "${EXTRACT_DIR}")
+      message(WARNING "[AITER-PREBUILT] The directory ${EXTRACT_DIR} is missing")
     return()
   endif()
   foreach(REQUIRED_FILE IN LISTS AITER_PREBUILT_REQUIRED_FILES)
