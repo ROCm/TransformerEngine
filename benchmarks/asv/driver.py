@@ -307,6 +307,7 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
                   f"{extra_cols}  "
                   f"{method_name:<30}  {label}")
 
+        duration = time.perf_counter() - t_start
         all_results[bench_key] = [
             medians, asv_params, version, started_at, round(duration, 2),
             ci_los, ci_his, q25s, q75s, numbers, repeats,
