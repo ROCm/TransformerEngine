@@ -10,11 +10,9 @@ if(POLICY CMP0135)
   cmake_policy(SET CMP0135 NEW)
 endif()
 
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../../build_tools/rocm_utils.cmake")
+
 # Extract ROCm version
-set(ROCM_PATH "$ENV{ROCM_PATH}")
-if("${ROCM_PATH}" STREQUAL "")
-  set(ROCM_PATH "/opt/rocm")
-endif()
 file(READ "${ROCM_PATH}/.info/version" ROCM_VER_CONTENT)
 string(STRIP "${ROCM_VER_CONTENT}" ROCM_VER_CONTENT)
 string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER_CONTENT}")
