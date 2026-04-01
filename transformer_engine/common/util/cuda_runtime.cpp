@@ -178,6 +178,7 @@ const std::string &include_directory(bool required) {
 #ifdef __HIP_PLATFORM_AMD__
     std::vector<std::pair<std::string, Path>> search_paths = {{"ROCM_PATH", ""},
                                                               {"HIP_PATH", ""},
+                                                              {"", "/opt/rocm/core"},
                                                               {"", "/opt/rocm"}};
 #else
     std::vector<std::pair<std::string, Path>> search_paths = {{"NVTE_CUDA_INCLUDE_DIR", ""},

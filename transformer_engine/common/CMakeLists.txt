@@ -133,23 +133,17 @@ else()
     message(FATAL_ERROR "This project requires the Ninja build system. Install it using 'pip install ninja'.")
   endif()
 
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
+
   # Disable Asserts In Code (Can't use asserts on HIP stack.)
   add_definitions(-DNDEBUG)
   add_definitions(-DUSE_ROCM)
-
-  if(NOT DEFINED ENV{NVTE_ROCM_ARCH})
-    SET(CMAKE_HIP_ARCHITECTURES gfx942 gfx950)
-  else()
-    SET(CMAKE_HIP_ARCHITECTURES $ENV{NVTE_ROCM_ARCH})
-  endif()
 
   # build error will be dup-ed parallel-jobs times
   # set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -parallel-jobs=4")
   if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -g")
   endif()
-
-  list(APPEND CMAKE_MODULE_PATH "/opt/rocm")
 endif()
 
 set(message_line "-------------------------------------------------------------")
@@ -323,6 +317,10 @@ else()
   message(STATUS "nvte hipified sources: ${te_hip_sources}")
 
   add_library(transformer_engine SHARED ${te_hip_sources})
+
+  # Workaround for TheRock installation that moved some headers from system-wide location
+  # to rocm_sysdeps but missing it in the default include path.
+  target_include_directories(transformer_engine SYSTEM PRIVATE "${ROCM_PATH}/lib/rocm_sysdeps/include")
 endif()
 
 target_include_directories(transformer_engine PUBLIC
@@ -355,6 +353,7 @@ target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_
 target_include_directories(transformer_engine PRIVATE
                           ${CUTLASS_INCLUDE_DIR}
                           ${CUTLASS_TOOLS_INCLUDE_DIR})
+endif()
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
 # Changed
@@ -369,6 +368,7 @@ if (NVTE_UB_WITH_MPI)
     target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
 endif()
 
+if(USE_CUDA)
 option(NVTE_ENABLE_NVSHMEM "Compile with NVSHMEM library" OFF)
 if (NVTE_ENABLE_NVSHMEM)
     add_subdirectory(nvshmem_api)
@@ -562,11 +562,6 @@ endif()
 install(TARGETS transformer_engine DESTINATION .)
 if (USE_ROCM)
   set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
-  if("$ENV{ROCM_PATH}" STREQUAL "")
-    set(ROCM_PATH "/opt/rocm")
-  else()
-    set(ROCM_PATH "$ENV{ROCM_PATH}")
-  endif()
   file(READ "${ROCM_PATH}/.info/version" ROCM_VER)
   string(STRIP "${ROCM_VER}" ROCM_VER)
   string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER}")

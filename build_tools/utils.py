@@ -184,42 +184,30 @@ def rocm_build() -> bool:
     Determines which build platform to use:
 
     - If `NVTE_USE_ROCM` is set:
-        - Non-zero value: Use ROCm, if hipcc is detected.
+        - Any value except "0": Use ROCm, if hipcc is detected.
         - Zero value: Use CUDA, if nvcc is detected.
-    - If `NVTE_USE_ROCM` is not set:
-        - Attempt to auto-detect: Check for ROCm first, then CUDA.
+    - If `NVTE_USE_ROCM` is not set, guess if from `HIP_PLATFORM` if it is set.
+    - Otherwise auto-detect trying ROCm first.
 
     Returns:
         bool: `True` for ROCm, `False` for CUDA.
 
     Raises:
-        ValueError: If NVTE_USE_ROCM is set to invalid value.
         FileNotFoundError: If required tools (hipcc or nvcc) are not found.
     """
-    nvte_use_rocm = os.getenv("NVTE_USE_ROCM")
-    if nvte_use_rocm:
+    nvte_use_rocm = os.getenv("NVTE_USE_ROCM", "")
+    if not nvte_use_rocm:
+        match os.getenv("HIP_PLATFORM", ""):
+            case "amd": nvte_use_rocm = "1"
+            case "nvidia": nvte_use_rocm = "0"
+    if nvte_use_rocm != "0":
         try:
-            nvte_use_rocm = bool(int(nvte_use_rocm))
-        except ValueError:
-            raise ValueError(
-                f"Invalid value for NVTE_USE_ROCM: '{nvte_use_rocm}'.")
-
-        if nvte_use_rocm:
-            _, hipcc_bin = rocm_path()
-            if hipcc_bin.is_file():
-                return True
-            else:
-                raise FileNotFoundError(f"Could not find hipcc at {hipcc_bin}")
-        else:
-            nvcc_path()
-            return False
-
-    # Try to detect ROCm
-    _, hipcc_bin = rocm_path()
-    if hipcc_bin.is_file():
-        return True
-
-    # Try to detect CUDA
+            rocm_path()
+            return True
+        except FileNotFoundError:
+            if nvte_use_rocm:
+                raise FileNotFoundError("Could not find ROCm installation.")
+    # Try to detect CUDA if NVTE_USE_ROCM is set to "0" or ROCm is not found
     try:
         nvcc_path()
         return False
@@ -230,8 +218,10 @@ def rocm_build() -> bool:
 
 @functools.lru_cache(maxsize=None)
 def rocm_path() -> Tuple[str, str]:
-    """ROCm root path and HIPCC binary path as a tuple"""
-    """If ROCm installation is not specified, use default /opt/rocm path"""
+    """
+    ROCm root path and HIPCC binary path as a tuple
+    If ROCm installation is not specified, use default ROCm path
+    """
     hipcc_bin = None
     if os.getenv("ROCM_PATH"):
         rocm_home = Path(os.getenv("ROCM_PATH"))
@@ -239,11 +229,15 @@ def rocm_path() -> Tuple[str, str]:
     if hipcc_bin is None:
         hipcc_bin = shutil.which("hipcc")
         if hipcc_bin is not None:
-            hipcc_bin = Path(hipcc_bin)
+            hipcc_bin = Path(hipcc_bin).resolve()
             rocm_home = hipcc_bin.parent.parent
     if hipcc_bin is None:
-        rocm_home = Path("/opt/rocm/")
+        rocm_home = Path("/opt/rocm/core")
+        if not rocm_home.is_dir():
+            rocm_home = Path("/opt/rocm/")
         hipcc_bin = rocm_home / "bin" / "hipcc"
+    if not hipcc_bin.is_file():
+        raise FileNotFoundError(f"Could not find hipcc at {hipcc_bin}")
     return rocm_home, hipcc_bin
 
 
