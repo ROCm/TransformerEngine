@@ -59,7 +59,7 @@ jobs:
           docker ps -a
 
           echo ">>> ROCm Installation:"
-          ls -d /opt/rocm* || echo "No /opt/rocm found"
+          (ls -d /opt/rocm/core-* || ls -d /opt/rocm-* || echo "No default ROCm path found") 2>/dev/null || true
           echo ">>> GPU info:"
           ls -l /dev/dri
           ls -l /dev/kfd
@@ -235,11 +235,6 @@ jobs:
           #!/usr/bin/bash
           set -x -o pipefail
           ulimit -c 0 # Disable core dumps
-
-          # debug output
-          ls -d /opt/rocm*
-          python --version
-          pip list | egrep "transformer_e|torch|jax|numpy|ml_dtypes|typing_ext"
 
           HIP_VISIBLE_DEVICES=1 ci/pytorch.sh > /workspace/torch_sgpu.log 2>&1 &
           torch_pid=$!; echo Pytorch test pid $!
