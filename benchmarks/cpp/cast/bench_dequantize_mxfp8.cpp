@@ -12,8 +12,8 @@
 
 #include "benchmark_utils.h"
 
-#include <transformer_engine/cast_hip.h>
-#include <transformer_engine/transformer_engine_hip.h>
+#include "transformer_engine/cast_hip.h"
+#include "transformer_engine/transformer_engine_hip.h"
 
 using namespace te_bench;
 using namespace transformer_engine;

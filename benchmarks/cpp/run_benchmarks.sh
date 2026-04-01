@@ -5,41 +5,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BUILD_DIR="${SCRIPT_DIR}/build"
 RESULTS_DIR="${SCRIPT_DIR}/results"
 
-setup_test_common_symlinks() {
-    local utils_dir="${SCRIPT_DIR}/utils"
-    local test_common_hip="../../tests/cpp/test_common.hip"
-    local test_common_h="../../tests/cpp/test_common_hip.h"
-
-    if [ ! -f "${SCRIPT_DIR}/${test_common_hip}" ] || [ ! -f "${SCRIPT_DIR}/${test_common_h}" ]; then
-        echo -e "Error: hipified test_common files not found. Build tests before running benchmarks."
-        return 1
-    fi
-
-    if [ ! -L "${utils_dir}/test_common.hip" ] || [ ! -e "${utils_dir}/test_common.hip" ]; then
-        ln -sf "../${test_common_hip}" "${utils_dir}/test_common.hip"
-    fi
-
-    if [ ! -L "${utils_dir}/test_common_hip.h" ] || [ ! -e "${utils_dir}/test_common_hip.h" ]; then
-        ln -sf "../${test_common_h}" "${utils_dir}/test_common_hip.h"
-    fi
-
-    return 0
-}
-
 main() {
-    echo -e "=== MXFP8 Benchmark Suite ==="
-
-    if ! setup_test_common_symlinks; then
-        return
-    fi
+    echo "=== MXFP8 Benchmark Suite ==="
 
     echo -e "\n[1/3] Building benchmarks..."
     cd "${SCRIPT_DIR}"
     if ! cmake -GNinja -B"${BUILD_DIR}" . || ! cmake --build "${BUILD_DIR}"; then
-        echo -e "Build failed. Fix the build errors and try again."
+        echo "Build failed. Fix the build errors and try again."
         return
     fi
-    echo -e "✓ Build complete"
+    echo "Build complete"
 
     mkdir -p "${RESULTS_DIR}"
     TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -56,18 +31,18 @@ main() {
     FAILED_BENCHMARKS=()
     for bench in "${BENCHMARKS[@]}"; do
         if [ -f "${BUILD_DIR}/${bench}" ]; then
-            echo -e "  Running ${bench}..."
+            echo "  Running ${bench}..."
             if "${BUILD_DIR}/${bench}" \
                 --benchmark_out="${RESULT_PREFIX}_${bench}.csv" \
                 --benchmark_out_format=csv \
                 --benchmark_min_time=0.2s; then
-                echo -e "  ✓ Saved to ${RESULT_PREFIX}_${bench}.csv"
+                echo "  Saved to ${RESULT_PREFIX}_${bench}.csv"
             else
-                echo -e "  ✗ ${bench} failed (exit code $?), continuing..."
+                echo "  FAILED: ${bench} (exit code $?), continuing..."
                 FAILED_BENCHMARKS+=("${bench}")
             fi
         else
-            echo -e "  ✗ ${bench} not found, skipping"
+            echo "  ${bench} not found, skipping"
         fi
     done
 
@@ -77,7 +52,7 @@ main() {
     FIRST_CSV=$(ls "${RESULT_PREFIX}"_*.csv 2>/dev/null | grep -v "_all.csv" | head -1)
 
     if [ -z "$FIRST_CSV" ]; then
-        echo -e "No CSV files found to consolidate"
+        echo "No CSV files found to consolidate"
         return
     fi
 
@@ -89,7 +64,7 @@ main() {
         fi
     done
 
-    echo -e "✓ Consolidated CSV: ${CONSOLIDATED_CSV}"
+    echo "Consolidated CSV: ${CONSOLIDATED_CSV}"
 
     echo -e "\n=== Summary ==="
     TOTAL_ROWS=$(tail -n +2 "$CONSOLIDATED_CSV" | wc -l)
@@ -106,9 +81,9 @@ main() {
     echo ""
 
     if [ ${#FAILED_BENCHMARKS[@]} -gt 0 ]; then
-        echo -e "Failed benchmarks:"
+        echo "Failed benchmarks:"
         for bench in "${FAILED_BENCHMARKS[@]}"; do
-            echo -e "  ✗ ${bench}"
+            echo "  ${bench}"
         done
         echo ""
     fi

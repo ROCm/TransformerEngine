@@ -21,11 +21,17 @@ set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "Disable benchmark tests" FORCE)
 set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "Disable gtest in benchmark" FORCE)
 FetchContent_MakeAvailable(benchmark)
 
+set(TESTS_CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../tests/cpp)
+
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/hipify/hipify.cmake")
+TE_Hipify(${TESTS_CPP_DIR})
+
 include_directories(
   ${CMAKE_CURRENT_SOURCE_DIR}/../../transformer_engine/common/include
   ${CMAKE_CURRENT_SOURCE_DIR}/../../transformer_engine/common
   ${CMAKE_CURRENT_SOURCE_DIR}/../../transformer_engine
   ${CMAKE_CURRENT_SOURCE_DIR}/utils
+  ${TESTS_CPP_DIR}
 )
 
 if(DEFINED ENV{NVTE_ROCM_ARCH})
@@ -71,7 +77,7 @@ else()
 endif()
 
 function(add_te_benchmark TARGET_NAME SOURCE_FILE)
-  set(TEST_COMMON_HIP ${CMAKE_CURRENT_SOURCE_DIR}/utils/test_common.hip)
+  set(TEST_COMMON_HIP ${TESTS_CPP_DIR}/test_common.hip)
   set_source_files_properties(${TEST_COMMON_HIP} PROPERTIES LANGUAGE CXX)
   add_executable(${TARGET_NAME} ${SOURCE_FILE} ${TEST_COMMON_HIP})
   target_compile_options(${TARGET_NAME} PRIVATE ${COMMON_COMPILE_OPTIONS})
