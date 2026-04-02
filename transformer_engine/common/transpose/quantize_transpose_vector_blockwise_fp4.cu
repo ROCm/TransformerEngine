@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -23,7 +25,7 @@
 
 namespace transformer_engine {
 
-#if CUDA_VERSION >= 12080
+#if defined(__HIP_PLATFORM_AMD__) || CUDA_VERSION >= 12080
 namespace quantize_transpose_nvfp4 {
 namespace {
 
@@ -162,7 +164,12 @@ static __device__ constexpr unsigned int WARP_REDUCE_AMAX_GROUP_MASKS[8] = {
 template <int group_size, int shfl_down_stride>
 __device__ __forceinline__ float groupMax(float val, unsigned int groupMask) {
   for (int offset = group_size / 2; offset > 0; offset /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+    (void)groupMask;  // unused on AMD, __shfl_down does not take a mask
+    val = max(val, __shfl_down(val, offset * shfl_down_stride, kThreadsPerWarp));
+#else
     val = max(val, __shfl_down_sync(groupMask, val, offset * shfl_down_stride));
+#endif
   }
   return val;
 }
@@ -189,7 +196,12 @@ __device__ __forceinline__ float ComputeOutputFP4(IType input, float encode_scal
 }
 
 __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__HIP_DEVICE_COMPILE__)
+  // On AMD host, TypeExtrema<fp8e4m3>::max is non-constexpr (runtime FNUZ detection)
+  const float fp8_max = TypeExtrema<fp8e4m3>::max;
+#else
   constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;
+#endif
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
   // If scale is infinity, return max value of float32
@@ -259,6 +271,7 @@ __device__ __forceinline__ size_t scale_factor_swizzled_offset(size_t row_idx, s
 
 __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_rounding(
     const float2 in01, const float2 in23, const uint32_t rbits) {
+#ifndef __HIP_PLATFORM_AMD__
   constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
   if constexpr (has_rs) {
     uint16_t out_4x;
@@ -273,14 +286,46 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
     NVTE_DEVICE_ERROR(
         "FP4 cvt.rs PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
+#else
+#if ARCH_HAS_STOCHASTIC_ROUNDING
+  // opsel=1 always writes to byte 1, result read from fp4x2[1]
+  // Matches HIP's own usage, see e.g. https://github.com/ROCm/clr/blob/3dbb5f1c5e0734d21dd2424a38255e61ee0a73e0/hipamd/include/hip/amd_detail/amd_hip_ocp_fp.hpp#L1858-L1890
+  union { uint32_t ui32; __hip_fp4x2_storage_t fp4x2[4]; } u{0};
+  __amd_floatx2_storage_t packed01{in01.x, in01.y};
+  __amd_floatx2_storage_t packed23{in23.x, in23.y};
+  u.ui32 = __builtin_amdgcn_cvt_scalef32_sr_pk_fp4_f32(u.ui32, packed01, rbits, 1.0f, 1);
+  const __hip_fp4x2_storage_t lo = u.fp4x2[1];
+  u.ui32 = __builtin_amdgcn_cvt_scalef32_sr_pk_fp4_f32(u.ui32, packed23, rbits, 1.0f, 1);
+  const __hip_fp4x2_storage_t hi = u.fp4x2[1];
+  __hip_fp4x4_e2m1 result;
+  result.__x = static_cast<__hip_fp4x4_storage_t>(lo | (static_cast<__hip_fp4x4_storage_t>(hi) << 8));
+  return result;
+#else
+  NVTE_DEVICE_ERROR("FP4 stochastic rounding on AMDGPU requires gfx950 or later.");
+#endif // ARCH_HAS_STOCHASTIC_ROUNDING
+#endif // !__HIP_PLATFORM_AMD__
     uint16_t dummy = 0;
     return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
+#ifndef __HIP_PLATFORM_AMD__
   }
+#endif
 }
+
 
 __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
                                                                       const float2 in23,
                                                                       const uint32_t rbits) {
+#ifdef __HIP_PLATFORM_AMD__
+  const __hip_fp4_storage_t q0 = __hip_cvt_float_to_fp4(in01.x, __HIP_E2M1, hipRoundNearest);
+  const __hip_fp4_storage_t q1 = __hip_cvt_float_to_fp4(in01.y, __HIP_E2M1, hipRoundNearest);
+  const __hip_fp4_storage_t q2 = __hip_cvt_float_to_fp4(in23.x, __HIP_E2M1, hipRoundNearest);
+  const __hip_fp4_storage_t q3 = __hip_cvt_float_to_fp4(in23.y, __HIP_E2M1, hipRoundNearest);
+
+  __hip_fp4x4_e2m1 result;
+  result.__x = static_cast<__hip_fp4x4_storage_t>(
+        (q0 & 0xFu) | ((q1 & 0xFu) << 4) | ((q2 & 0xFu) << 8) | ((q3 & 0xFu) << 12));
+  return result;
+#else
   constexpr bool has_fp4 = ARCH_BLACKWELL_FAMILY;
   if constexpr (has_fp4) {
     // NOTE: rbits unused for rn.
@@ -303,6 +348,7 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_rn(const floa
     uint16_t dummy = 0;
     return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
   }
+  #endif
 }
 
 template <bool kApplyStochasticRounding>
@@ -418,8 +464,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   __syncthreads();
 
   const int kNumThreadsReduce = kScaleBlockDim / kNVecOut;
+#ifdef __HIP_PLATFORM_AMD__
+  const float global_encode_scale =
+      (kIsE8Scaling || global_amax == nullptr) ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0]);
+#else
   const float global_encode_scale =
       kIsE8Scaling ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0]);
+#endif
   const float global_decode_scale = 1.0 / global_encode_scale;
 
   // Step 2: Cast and store to output_c
@@ -709,7 +760,7 @@ void quantize_transpose_vector_blockwise_fp4(
     const NVTETensor rng_state_tensor, const bool use_2d_quantization,
     const SimpleTensor& noop_tensor, cudaStream_t stream) {
   NVTE_API_CALL(quantize_transpose_vector_blockwise_fp4);
-#if CUDA_VERSION >= 12080
+#if defined(__HIP_PLATFORM_AMD__) || CUDA_VERSION >= 12080
 
   // pow 2 scale is for MXFP4 since it's using E8M0 scaling
   // raise error if pow2_scale is true

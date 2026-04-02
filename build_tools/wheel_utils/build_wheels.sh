@@ -25,17 +25,21 @@ mkdir -p /wheelhouse/logs
 git config --global --add safe.directory /TransformerEngine
 cd /TransformerEngine
 
-#If there is default Python installation, use it
-PYTHON=`which python || true`
-if [ -z "$PYTHON" ]; then
-        PYBINDIR=/opt/python/cp310-cp310/bin/
-        #hipify expects python in PATH, also ninja may be installed to python bindir
-        PATH="$PYBINDIR:$PATH"
-else
-        PYBINDIR="" #python bindir is already in PATHs
-fi
+#hipify and aiter expect python in PATH, also ninja may be installed to python bindir
+#set it first because system python may be too old
+PATH="/opt/python/cp310-cp310/bin/:$PATH"
 
-ROCM_BUILD=$(${PYBINDIR}python -c "import build_tools.utils as u; print('true' if u.rocm_build() else 'false')")
+case "$HIP_PLATFORM" in
+  amd)
+    ROCM_BUILD=true
+    ;;
+  nvidia)
+    ROCM_BUILD=false
+    ;;
+  *)
+    ROCM_BUILD=$(python -c "import build_tools.utils as u; print('true' if u.rocm_build() else 'false')")
+    ;;
+esac
 
 if [ "$LOCAL_TREE_BUILD" != "1" ]; then
         if $ROCM_BUILD ; then
@@ -48,22 +52,23 @@ else
 fi
 
 if $ROCM_BUILD ; then
-  #dataclasses, psutil are needed for AITER
-  ${PYBINDIR}pip install pybind11[global] ninja setuptools dataclasses psutil
+  pip install pybind11[global] ninja setuptools wheel
+  #modules needed to build AITER
+  pip install dataclasses psutil numpy pandas
+  export PATH=$PATH:$ROCM_PATH/bin
 else
-  PYBINDIR=/opt/python/cp310-cp310/bin/
   /opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel
 fi
 
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine
-        NVTE_BUILD_METAPACKAGE=1 ${PYBINDIR}python setup.py bdist_wheel 2>&1 | tee /wheelhouse/logs/metapackage.txt
+        NVTE_BUILD_METAPACKAGE=1 python setup.py bdist_wheel 2>&1 | tee /wheelhouse/logs/metapackage.txt
         mv dist/* /wheelhouse/
 fi
 
 if $BUILD_COMMON -a $ROCM_BUILD ; then
         # Create the wheel.
-        ${PYBINDIR}python setup.py bdist_wheel --verbose --plat-name=$PLATFORM 2>&1 | tee /wheelhouse/logs/common.txt
+        python setup.py bdist_wheel --verbose --plat-name=$PLATFORM 2>&1 | tee /wheelhouse/logs/common.txt
 
         # Rename the wheel to make it python version agnostic.
         whl_name=$(basename dist/*)
@@ -96,8 +101,8 @@ fi
 if $BUILD_PYTORCH -a $ROCM_BUILD ; then
         cd /TransformerEngine/transformer_engine/pytorch
         #Only need torch for creating sdist, install CPU version to avoid installing CUDA/ROCm dependencies
-        ${PYBINDIR}pip install torch --index-url https://download.pytorch.org/whl/cpu
-        ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/torch.txt
+        pip install torch --index-url https://download.pytorch.org/whl/cpu
+        python setup.py sdist 2>&1 | tee /wheelhouse/logs/torch.txt
         mv dist/* /wheelhouse/
 elif $BUILD_PYTORCH ; then
 	cd /TransformerEngine/transformer_engine/pytorch
@@ -108,8 +113,8 @@ fi
 
 if $BUILD_JAX -a $ROCM_BUILD ; then
         cd /TransformerEngine/transformer_engine/jax
-        ${PYBINDIR}pip install jax
-        ${PYBINDIR}python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
+        pip install jax
+        python setup.py sdist 2>&1 | tee /wheelhouse/logs/jax.txt
         mv dist/* /wheelhouse/
 elif $BUILD_JAX ; then
 	cd /TransformerEngine/transformer_engine/jax

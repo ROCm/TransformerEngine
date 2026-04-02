@@ -38,14 +38,8 @@ enum NVTEDType {
   kNVTEFloat8E4M3 = 7,  /*!< 8-bit float (E4M3) */
   kNVTEFloat8E5M2 = 8,  /*!< 8-bit float (E5M2) */
   kNVTEFloat8E8M0 = 9,  /*!< 8-bit float (E8M0) */
-#ifndef __HIP_PLATFORM_AMD__
   kNVTEFloat4E2M1 = 10, /*!< 4-bit float (E2M1) */
   kNVTENumTypes         /*!< Number of supported types */
-#else
-  //switch the order since rocm platform does not support e2m1
-  kNVTENumTypes = 10,   /*!< Number of supported types */
-  kNVTEFloat4E2M1 = 11  /*!< 4-bit float (E2M1) */
-#endif // #ifndef __HIP_PLATFORM_AMD__
 };
 
 /*! \struct NVTEShape
@@ -570,13 +564,8 @@ enum class DType {
   kFloat8E4M3 = 7,
   kFloat8E5M2 = 8,
   kFloat8E8M0 = 9,
-#ifndef __HIP_PLATFORM_AMD__
   kFloat4E2M1 = 10,
   kNumTypes
-#else
-  kNumTypes = 10,
-  kFloat4E2M1
-#endif // #ifndef __HIP_PLATFORM_AMD__
 };
 
 /*! \brief Check if TE datatype is FP8
@@ -588,17 +577,12 @@ inline bool is_fp8_dtype(const DType t) {
   return t == DType::kFloat8E4M3 || t == DType::kFloat8E5M2;
 }
 
-#ifndef __HIP_PLATFORM_AMD__
 /*! \brief Check if TE datatype is FP4
  *
  * Return true if TE datatype is FP4
  *  \param[in] t      TE Datatype of interest
  */
 inline bool is_fp4_dtype(const DType t) { return t == DType::kFloat4E2M1; }
-#else
-//TODO: fp4 types not supported on AMD GPUs
-inline bool is_fp4_dtype(const DType t) { return false; }
-#endif // #ifndef __HIP_PLATFORM_AMD__
 
 /*! \brief Check if TE datatype is high precision (FP32, FP16, BF16)
  *

@@ -144,7 +144,7 @@ def get_te_core_package_info() -> Tuple[bool, str, str]:
     
     te_core_packages = ("transformer-engine-cu12", "transformer-engine-cu13")
     if te_rocm_build:
-        te_core_packages = ("transformer-engine-rocm",)
+        te_core_packages = ("transformer-engine-rocm7",)
     for package in te_core_packages:
         if _is_package_installed(package):
             return True, package, version(package)
@@ -176,6 +176,11 @@ def load_framework_extension(framework: str) -> None:
     te_installed = _is_package_installed("transformer_engine")
     te_installed_via_pypi = _is_package_installed_from_wheel("transformer_engine")
 
+    # Meta package is optional for ROCm build.
+    if te_rocm_build and te_core_installed and not te_installed:
+        te_installed = True
+        te_installed_via_pypi = True
+
     assert te_installed, "Could not find `transformer_engine`."
 
     # If the framework extension pip package is installed, it means that TE is installed via
@@ -183,7 +188,8 @@ def load_framework_extension(framework: str) -> None:
     # extension are all installed via PyPI and have matching versions.
     if te_framework_installed:
         assert te_installed_via_pypi, "Could not find `transformer-engine` PyPI package."
-        assert te_core_installed, "Could not find TE core package `transformer-engine-cu*`."
+        assert te_core_installed, ( "Could not find TE core package "
+                                   f"`transformer-engine-{'rocm' if te_rocm_build else 'cu'}*`." )
 
         assert version(module_name) == version("transformer-engine") == te_core_version, (
             "Transformer Engine package version mismatch. Found"
@@ -395,7 +401,10 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
     if te_rocm_build:
         try:
             # Get installed ROCm version
-            with open(os.getenv("ROCM_PATH", "/opt/rocm") + "/.info/version", "r") as f:
+            for rocm_path in (os.getenv("ROCM_PATH"), "/opt/rocm/core", "/opt/rocm"):
+                if rocm_path and os.path.exists(os.path.join(rocm_path, ".info/version")):
+                    break
+            with open(os.path.join(rocm_path, ".info/version"), "r") as f:
                 rocm_version= f.read().strip().split('.')[:2]
 
             # Get ROCm version from the build info file

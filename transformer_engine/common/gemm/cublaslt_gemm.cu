@@ -1122,8 +1122,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   };
 
 #ifdef __HIP_PLATFORM_AMD__
-  // FIXME: The accumulate path is currently disabled due to instability on MI325.
-  if (!use_cutlass || num_gemms == 1 || accumulate == true) {
+  if (!use_cutlass || num_gemms == 1) {
 #else
   // Currently only support cutlass group gemm on Hopper Arch
   if (!(is_hopper && use_cutlass)) {

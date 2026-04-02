@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -83,7 +85,7 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     _gemm_priority = gemm_priority;
     _comm_priority = comm_priority;
   }
-  for (int i = 0; i < std::min(num_max_streams, num_splits); i++) {
+  for (int i = 0; i < std::max(num_max_streams, num_splits); i++) {
     cudaStream_t stream;
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _gemm_priority));
     _stream_compute.push_back(std::move(stream));
@@ -208,6 +210,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
   NVTE_DIM_CHECK(chunk_height > 0 && chunk_width > 0, "Attempted to get empty tensor chunk");
   NVTE_DIM_CHECK(chunk_height <= height && chunk_width <= width,
                  "Attempted to get out-of-bounds tensor chunk");
+#ifndef __HIP_PLATFORM_AMD__
   if (scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING) {
     // MXFP8 scale-inverses are padded to a 2D matrix with dims that
     // are divisible by 128. UB doesn't handle this padding yet.
@@ -216,6 +219,7 @@ TensorWrapper CommOverlapCore::get_tensor_chunk(const TensorWrapper &source, siz
     NVTE_DIM_CHECK(chunk_height % 128 == 0 && chunk_width % 128 == 0,
                    "Userbuffers requires MXFP8 tensor chunk dims that are divisible by 128");
   }
+#endif
 #undef NVTE_DIM_CHECK
 
   // Construct tensor chunk
@@ -481,7 +485,7 @@ void CommOverlapBase::atomic_gemm_overlap_rs(const TensorWrapper &A, bool transa
   NVTE_CHECK_CUDA(cudaEventRecord(_stop_comm, _stream_comm));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_compute, 0));
   NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream_main, _stop_comm, 0));
-}  // split_overlap_rs
+}  // atomic_gemm_overlap_rs
 
 /*
 ** Split FPROP GEMM + ReduceScatter
@@ -629,6 +633,7 @@ void CommOverlapBase::split_overlap_rs(const TensorWrapper &A, bool transa, cons
 
 void CommOverlapBase::bulk_overlap_external_ag(cudaStream_t send_stream, cudaStream_t recv_stream,
                                                cudaStream_t stream_main) {
+  
   int comm_bytes = _ubuf.bytes();
   int comm_bytes_per_rank = comm_bytes / _tp_size;
 
@@ -727,6 +732,22 @@ void CommOverlapP2PBase::initialize(const std::vector<size_t> &buffer_shape, DTy
     NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
     _stream_send.push_back(std::move(stream));
   }
+
+#ifdef __HIP_PLATFORM_AMD__
+  for (int i = 0; i < NVTE_ROCM_MAX_RINGS; i++) {
+    {  
+      cudaStream_t stream;
+      NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
+      l_stream_send.push_back(std::move(stream));
+    }
+    {
+      cudaStream_t stream;
+      NVTE_CHECK_CUDA(cudaStreamCreateWithPriority(&stream, cudaStreamNonBlocking, _comm_priority));
+      l_stream_recv.push_back(std::move(stream));
+    }
+  }
+#endif 
+
   NVTE_CHECK_CUDA(
       cudaStreamCreateWithPriority(&_stream_recv, cudaStreamNonBlocking, _comm_priority));
   NVTE_CHECK_CUDA(cudaEventCreateWithFlags(&_stop_send, 0));
@@ -740,6 +761,12 @@ CommOverlapP2PBase::~CommOverlapP2PBase() {
   for (size_t i = 0; i < _stream_send.size(); i++) {
     cudaStreamDestroy(_stream_send[i]);
   }
+#ifdef __HIP_PLATFORM_AMD__
+  for (int i = 0; i < NVTE_ROCM_MAX_RINGS; i++) {
+    cudaStreamDestroy(l_stream_recv[i]);
+    cudaStreamDestroy(l_stream_send[i]);
+  }
+#endif
 }
 
 void CommOverlapP2PBase::copy_into_buffer(cudaStream_t stream, const TensorWrapper &source,

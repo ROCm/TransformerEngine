@@ -50,7 +50,7 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
 
 from build_tools.build_ext import get_build_ext, SdistWithLocalVersion
 from build_tools.utils import copy_common_headers, min_python_version_str
-from build_tools.utils import rocm_build
+from build_tools.utils import rocm_build, rocm_version
 from build_tools.te_version import te_version
 from build_tools.jax import setup_jax_extension, install_requirements, test_requirements
 
@@ -132,12 +132,12 @@ if __name__ == "__main__":
     if not rocm_build():
         te_core = f"transformer_engine_cu{get_cuda_major_version()}=={__version__}"
     else:
-        te_core = f"transformer_engine_rocm=={__version__}"
+        te_core = f"transformer_engine_rocm{rocm_version()[0]}=={__version__}"
     install_requires = install_requirements() + [te_core]
 
     # Configure package
     setuptools.setup(
-        name="transformer_engine_jax",
+        name="transformer_engine_rocm_jax" if rocm_build() else "transformer_engine_jax",
         version=__version__,
         description="Transformer acceleration library - Jax Lib",
         ext_modules=ext_modules,

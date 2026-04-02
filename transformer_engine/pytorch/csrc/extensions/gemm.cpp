@@ -270,7 +270,6 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 #endif
 
     if (comm_overlap) {
-#ifndef USE_ROCM
       // Prepare extra output tensor
       TensorWrapper extra_output_tensor;
       if (extra_output.has_value()) {
@@ -279,7 +278,6 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
         extra_output_tensor =
             makeTransformerEngineTensor(nullptr, std::vector<size_t>{0}, DType::kByte);
       }
-
       // Direct GEMM call to the correct overlap
       if (bulk_overlap) {
         NVTE_SCOPED_GIL_RELEASE({
@@ -296,6 +294,15 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                                                  accumulate, use_split_accumulator,
                                                  extra_output_tensor, main_stream);
           });
+#ifdef __HIP_PLATFORM_AMD__
+        } else if (!comm_overlap->is_aggregate()) {
+          NVTE_SCOPED_GIL_RELEASE({
+            comm_overlap->rocm_split_overlap_ag(A_tensor, transa, B_tensor, transb, D_tensor,
+                                                bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                                accumulate, use_split_accumulator,
+                                                extra_output_tensor, main_stream);
+          });
+#endif // #ifdef __HIP_PLATFORM_AMD
         } else {
           NVTE_SCOPED_GIL_RELEASE({
             comm_overlap->split_overlap_ag(A_tensor, transa, B_tensor, transb, out_tensor,
@@ -313,17 +320,26 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                                                  extra_output_tensor, main_stream);
           });
         } else {
+#ifdef __HIP_PLATFORM_AMD__
+          if (comm_overlap->is_p2p_overlap()) {
+            NVTE_SCOPED_GIL_RELEASE({
+              comm_overlap->rocm_split_overlap_rs(A_tensor, transa, B_tensor, transb, out_tensor,
+                                                  bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                                  accumulate, use_split_accumulator, extra_output_tensor,
+                                                  main_stream);
+            });
+          } else 
+#endif
+          {
           NVTE_SCOPED_GIL_RELEASE({
             comm_overlap->split_overlap_rs(A_tensor, transa, B_tensor, transb, out_tensor,
-                                           bias_tensor, te_pre_gelu_out, te_workspace, grad,
-                                           accumulate, use_split_accumulator, extra_output_tensor,
-                                           main_stream);
+                                          bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                          accumulate, use_split_accumulator, extra_output_tensor,
+                                          main_stream);
           });
+          }
         }
       }
-#else
-    NVTE_ERROR("ROCm TE does not support comm_overlap\n");
-#endif //!USE_ROCM
     } else {
       // Launch GEMM
       NVTE_SCOPED_GIL_RELEASE({

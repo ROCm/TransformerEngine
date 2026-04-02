@@ -35,6 +35,22 @@ static inline bool get_flat_2d_dims(const transformer_engine::Tensor& t,
   return true;
 }
 
+// Selects epilogue traits based on whether we are accumulating (D += A*B) or not (D = A*B).
+// For accumulate=true, the existing D buffer is passed as a MultiD input tensor and combined
+// via element_wise::Add. For accumulate=false, no extra input is needed and PassThrough is used.
+template <typename CType, typename CLayout, bool Accumulate>
+struct EpilogueTraits {
+  using DsDataType = ck_tile::tuple<>;
+  using DsLayout   = ck_tile::tuple<>;
+  using ElemOp     = ck_tile::element_wise::PassThrough;
+};
+template <typename CType, typename CLayout>
+struct EpilogueTraits<CType, CLayout, true> {
+  using DsDataType = ck_tile::tuple<CType>;
+  using DsLayout   = ck_tile::tuple<CLayout>;
+  using ElemOp     = ck_tile::element_wise::Add;
+};
+
 static inline const transformer_engine::SimpleTensor& data_view(const transformer_engine::Tensor& t) {
   return t.data; // rowwise data view
 }
@@ -79,8 +95,7 @@ struct TileCfg_256x128x64_padding : TileCfg_256x128x64 {
 // See e.g. https://github.com/ROCm/composable_kernel/blob/develop/example/ck_tile/03_gemm/universal_gemm_invoker.hpp for reference.
 template <typename AType, typename BType, typename CType,
           typename ALayout, typename BLayout, typename CLayout,
-          typename TileCfg, ck_tile::memory_operation_enum MemOp,
-          typename AccType = float>
+          typename TileCfg, bool Accumulate, typename AccType = float>
 struct Runner{
   using GemmShape = ck_tile::TileGemmShape<
       ck_tile::sequence<TileCfg::M_Tile, TileCfg::N_Tile, TileCfg::K_Tile>,
@@ -102,21 +117,23 @@ struct Runner{
 
   using Pipeline = ck_tile::GemmPipelineAgBgCrCompV3<Problem>;
 
+  using ET = EpilogueTraits<CType, CLayout, Accumulate>;
+
   using Epilogue = ck_tile::CShuffleEpilogue<
       ck_tile::CShuffleEpilogueProblem<
-          AType, BType, ck_tile::tuple<>, AccType,
-          CType, ck_tile::tuple<>, CLayout,
-          ck_tile::element_wise::PassThrough,
+          AType, BType, typename ET::DsDataType, AccType,
+          CType, typename ET::DsLayout, CLayout,
+          typename ET::ElemOp,
           Partitioner::MPerBlock, Partitioner::NPerBlock,
           TileCfg::M_Warp, TileCfg::N_Warp,
           TileCfg::M_Warp_Tile, TileCfg::N_Warp_Tile, TileCfg::K_Warp_Tile,
-          Problem::TransposeC, MemOp>>;
+          Problem::TransposeC>>;
 
   using Kernel = ck_tile::GroupedGemmKernel<Partitioner, Pipeline, Epilogue>;
 };
 
 template <typename T, typename ALayout, typename BLayout, typename CLayout,
-          ck_tile::memory_operation_enum MemOp, typename TileCfg>
+          bool Accumulate, typename TileCfg>
 static bool run_grouped_impl(const NVTETensor* A_use,
                              const NVTETensor* B_use,
                              NVTETensor* D,
@@ -127,15 +144,21 @@ static bool run_grouped_impl(const NVTETensor* A_use,
                              size_t workspace_bytes,
                              hipStream_t stream)
 {
-  using Kernel = typename Runner<T, T, T, ALayout, BLayout, CLayout, TileCfg, MemOp>::Kernel;
+  using Kernel = typename Runner<T, T, T, ALayout, BLayout, CLayout, TileCfg, Accumulate>::Kernel;
 
   const size_t needed = Kernel::GetWorkSpaceSize(group_num);
   if (!workspace || workspace_bytes < needed) {
-    NVTE_ERROR("ck_tile_grouped_gemm: insufficient workspace. Needed bytes=", needed);
+    NVTE_WARN("ck_tile_grouped_gemm: insufficient workspace for CK path. Needed bytes=", needed,
+              ", available bytes=", workspace_bytes, ". Falling back.");
     return false;
   }
 
-  thread_local std::vector<ck_tile::GroupedGemmHostArgs<0>> descs;
+  // GroupedGemmHostArgs<1> for the MultiD accumulate path, <0> for the overwrite path.
+  using HostArgs = std::conditional_t<Accumulate,
+      ck_tile::GroupedGemmHostArgs<1>,
+      ck_tile::GroupedGemmHostArgs<0>>;
+
+  thread_local std::vector<HostArgs> descs;
   descs.clear();
   descs.reserve(group_num);
 
@@ -179,25 +202,33 @@ static bool run_grouped_impl(const NVTETensor* A_use,
     const ck_tile::index_t stride_B = Bd1;
     const ck_tile::index_t stride_E = Dd1;
 
-    descs.emplace_back(
-        a.dptr,
-        b.dptr,
-        std::array<const void*, 0>{},
-        d.dptr,
-        1,
-        M,
-        N,
-        K,
-        stride_A,
-        stride_B,
-        std::array<ck_tile::index_t, 0>{},
-        stride_E);
+    if constexpr (Accumulate) {
+      // MultiD: E = Add(A@B, D1).  D1 and E point to the same buffer for in-place accumulation.
+      descs.emplace_back(
+          a.dptr, b.dptr,
+          std::array<const void*, 1>{d.dptr},  // D1 = existing D contents (read)
+          d.dptr,                               // E  = same buffer (write)
+          1, M, N, K,
+          stride_A, stride_B,
+          std::array<ck_tile::index_t, 1>{stride_E},
+          stride_E);
+    } else {
+      descs.emplace_back(
+          a.dptr, b.dptr,
+          std::array<const void*, 0>{},
+          d.dptr,
+          1, M, N, K,
+          stride_A, stride_B,
+          std::array<ck_tile::index_t, 0>{},
+          stride_E);
+    }
   }
 
   const dim3 grids = Kernel::GridSize(descs);
   auto kargs = Kernel::MakeKargs(descs);
   if (!Kernel::IsSupportedArgument(kargs)) {
-    NVTE_ERROR("ck_tile_grouped_gemm: CK_Tile kernel arguments not supported for this config.");
+    NVTE_WARN("ck_tile_grouped_gemm: CK_Tile kernel arguments not supported for this config. "
+              "Falling back.");
     return false;
   }
 
@@ -280,11 +311,11 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
 
           if (accumulate) {
             return run_grouped_impl<T, ALayout, BLayout, RowMajor,
-                                  ck_tile::memory_operation_enum::atomic_add, TileCfgSel>(
+                                    true, TileCfgSel>(
                 A_use, B_use, D, group_num, kTransA, kTransB, ws_ptr, ws_bytes, stream);
           } else {
             return run_grouped_impl<T, ALayout, BLayout, RowMajor,
-                                  ck_tile::memory_operation_enum::set, TileCfgSel>(
+                                    false, TileCfgSel>(
                 A_use, B_use, D, group_num, kTransA, kTransB, ws_ptr, ws_bytes, stream);
           }
         });

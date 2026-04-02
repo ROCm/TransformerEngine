@@ -3064,6 +3064,10 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
         if not use_cutlass:
             # cublas implementation should be bit-wise match
             torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+        elif IS_HIP_EXTENSION and accumulate and dtype == torch.bfloat16 and get_device_compute_capability() == (9, 4):
+            # ck_tile's MultiD Add epilogue fuses accumulation into the tile store, producing
+            # a different FP rounding order than sequential GEMMs.
+            torch.testing.assert_close(o, o_ref, rtol=4e-2, atol=4e-2)
         else:
             torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
 
