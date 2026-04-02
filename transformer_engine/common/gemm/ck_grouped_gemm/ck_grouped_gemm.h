@@ -12,4 +12,4 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
                           bool transB,
                           NVTETensor* workspace,
                           bool accumulate,
-                          hipStream_t stream);
+                          cudaStream_t stream);
