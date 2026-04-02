@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -10,6 +12,8 @@ from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils
+
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
@@ -143,7 +147,12 @@ def check_nvfp4_gemm_versus_reference(
 
     # Native TE GEMM using tex.generic_gemm (cuBLAS GEMM)
     # Allocate cuBLAS workspace
-    workspace = torch.empty(4, dtype=torch.uint8, device=device)
+    if IS_HIP_EXTENSION:
+        # On ROCm, FP4 is dequantized to BF16 in workspace before GEMM, so allocate enough space.
+        ws_bytes = M * K * 2 + K * N * 2 + 32 * 1024 * 1024
+        workspace = torch.empty(ws_bytes, dtype=torch.uint8, device=device)
+    else:
+        workspace = torch.empty(4, dtype=torch.uint8, device=device)
 
     transa = True if not w_columnwise else False
     transb = False if not x_columnwise else True
