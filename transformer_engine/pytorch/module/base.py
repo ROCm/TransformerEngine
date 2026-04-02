@@ -16,6 +16,7 @@ from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
 import logging
 from types import MethodType
+from itertools import chain
 
 import torch
 import torch.nn.functional as F
@@ -288,15 +289,21 @@ def initialize_ub(
                 flush=True,
             )
 
-    # Allocate cuBLAS workspace with expanded size for chunking in overlapping GEMM calls
+    # Allocate cuBLAS workspace with expanded size for chunking in overlapping GEMM calls.
+    # The workspace must have enough copies for max(num_max_streams, tp_size) compute streams,
+    # since CommOverlapCore creates that many streams and divides the workspace among them.
+    if IS_HIP_EXTENSION:
+        num_workspace_copies = max(_NUM_MAX_UB_STREAMS, tp_size)
+    else:
+        num_workspace_copies = _NUM_MAX_UB_STREAMS
     global _cublas_workspace
     if _cublas_workspace is None:
-        _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
-    elif _cublas_workspace.numel() != get_cublas_workspace_size_bytes() * _NUM_MAX_UB_STREAMS:
+        _cublas_workspace = get_workspace().repeat(num_workspace_copies)
+    elif _cublas_workspace.numel() != get_cublas_workspace_size_bytes() * (num_workspace_copies):
         # This ensures we don't do `.repeat()` on an already expanded workspace
         _cublas_workspace = torch.empty(
             get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
-        ).repeat(_NUM_MAX_UB_STREAMS)
+        ).repeat(num_workspace_copies)
 
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
     layers_all_gather_overlap = [
@@ -312,22 +319,43 @@ def initialize_ub(
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
     # Default overlap methods for layers
-    methods = {
-        "ring_exchange": [
-            "qkv_fprop",
-            "fc1_fprop",
-            "proj_dgrad",
-            "fc2_dgrad",
-        ],
-        "pipeline": ["proj_fprop", "fc2_fprop"],
-        "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
-        "external": ["proj_wgrad", "fc2_wgrad"],
-    }
+    if IS_HIP_EXTENSION:
+        methods = {
+            "ring_exchange": [
+                "qkv_fprop",
+                "fc1_fprop",
+                "proj_dgrad",
+                "fc2_dgrad",
+                "proj_wgrad",
+                "fc2_wgrad",
+                "proj_fprop",
+                "fc2_fprop",
+                "qkv_dgrad",
+                "fc1_dgrad",
+                "qkv_wgrad",
+                "fc1_wgrad"
+            ],
+            "pipeline": [],
+            # TODO: Investigate issues with qkv_dgrad and fc1_dgrad overlap on ROCm
+            "bulk": [],
+        }
+    else:
+        methods = {
+            "ring_exchange": [
+                "qkv_fprop",
+                "fc1_fprop",
+                "proj_dgrad",
+                "fc2_dgrad",
+            ],
+            "pipeline": ["proj_fprop", "fc2_fprop"],
+            "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
+            "external": ["proj_wgrad", "fc2_wgrad"],
+        }
 
     # AG-RS overlap pairs of layers forming a tensor-parallel block
     ag_rs_pairs = {"qkv_fprop": "proj_fprop", "fc1_fprop": "fc2_fprop"}
     rs_ag_pairs = {v: k for k, v in ag_rs_pairs.items()}
-    external_gemm_to_overlap = {"proj_wgrad": "proj_dgrad", "fc2_wgrad": "fc2_dgrad"}
+    external_gemm_to_overlap = {} if IS_HIP_EXTENSION else {"proj_wgrad": "proj_dgrad", "fc2_wgrad": "fc2_dgrad"}
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
 
@@ -348,7 +376,7 @@ def initialize_ub(
             "is_reduce_scatter": is_reduce_scatter,
             "num_sm": 1 if method == "ring_exchange" else 16,
             "cga_size": 1 if method == "ring_exchange" else 2,
-            "set_sm_margin": not method == "ring_exchange",
+            "set_sm_margin": not method == "ring_exchange" and not IS_HIP_EXTENSION, # Default set to False for HIP for performance
             "num_splits": tp_size if method == "ring_exchange" else 4,
             "aggregate": False,
             "atomic_gemm": False,
@@ -428,6 +456,7 @@ def initialize_ub(
             if (quantization_mode == UserBufferQuantizationMode.FP8 and fp8_buf)
             else dtype
         )
+
         if method == "ring_exchange":
             ub_obj = tex.CommOverlapP2P(
                 shape,  # Communication buffer shape
@@ -473,16 +502,26 @@ def initialize_ub(
                 ):
                     wgrad_name = name.replace("dgrad", "wgrad")
                     assert wgrad_name not in user_ub_cfg
-                    layers_reduce_scatter_overlap.remove(wgrad_name)
-                    layers_all_gather_overlap.remove(name)
-                    layers_reduce_scatter_overlap.append(name)
-                    methods["bulk"].remove(name)
+                    if wgrad_name in layers_reduce_scatter_overlap:
+                        layers_reduce_scatter_overlap.remove(wgrad_name)
+                    if name in layers_all_gather_overlap:
+                        layers_all_gather_overlap.remove(name)
+                    if name not in layers_reduce_scatter_overlap:
+                        layers_reduce_scatter_overlap.append(name)
+                    if name in methods["bulk"]:
+                        methods["bulk"].remove(name)
                     new_method = user_ub_cfg[name]["method"]
-                    methods[new_method].append(name)
+                    if name not in methods[new_method]:
+                        methods[new_method].append(name)
 
-        for name in (
-            methods["ring_exchange"] + methods["pipeline"] + methods["bulk"] + methods["external"]
-        ):
+        if IS_HIP_EXTENSION and user_ub_cfg is not None:
+            for name, cfg in user_ub_cfg.items():
+                assert cfg.get("method") != "bulk", (
+                    f"Bulk overlap method for '{name}' is not supported on HIP/ROCm. "
+                    "Please use 'ring_exchange' method instead."
+                )
+
+        for name in chain.from_iterable(methods.values()):
             ub_cfg = get_default_config(name)
             if user_ub_cfg is not None and name in user_ub_cfg:
                 fp8_buf = (name in layers_all_gather_overlap) or (
