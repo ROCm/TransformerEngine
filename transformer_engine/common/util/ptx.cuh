@@ -1,9 +1,6 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
-=======
->>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -872,6 +869,7 @@ __device__ __forceinline__ void abs_max_2x(fp16x2 &dst, const fp16x2 &p1, const 
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 __device__ __forceinline__ int32_t elect_one_sync(uint32_t mask = 0xFFFFFFFFu) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   int32_t pred = 0;
@@ -1553,6 +1551,7 @@ __device__ __forceinline__ floatx4 up_cast(const bf16x4 &in) {
       : "r"(in2[0]), "r"(in2[1]));
   return out;
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 }  // namespace ptx
 

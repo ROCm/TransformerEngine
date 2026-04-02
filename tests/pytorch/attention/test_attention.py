@@ -1,8 +1,5 @@
-<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
-=======
->>>>>>> 99df88
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -999,6 +996,8 @@ def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad
 
     for num_q_per_gqa_group in num_querys_per_gqa_group:
         config.num_gqa_groups = config.num_heads // num_q_per_gqa_group
+        if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
+            continue
         test_dot_product_attention(
             dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
         )

@@ -1,9 +1,6 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
-=======
->>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -24,11 +21,9 @@
 #include "../core/common.cuh"
 #include "../fp8/quantize_fp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
-<<<<<<< HEAD
+//TODO: ROCm TE does not support nvfp4 yet
 #ifndef __HIP_PLATFORM_AMD__
-=======
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
->>>>>>> 99df88
 #include "../nvfp4/quantize_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
 #endif //#ifndef __HIP_PLATFORM_AMD__
@@ -365,6 +360,7 @@ void group_quantize_fwd_helper(const NVTETensor input, NVTETensor *outputs,
 
   // Dispatch to quantization kernel depending on data format
   switch (scaling_mode) {
+#ifndef __HIP_PLATFORM_AMD__
     case NVTE_NVFP4_1D_SCALING: {
       NVTE_CHECK(!IS_ACT, "IS_ACT is not supported by FWD NVTE_NVFP4_1D_SCALING");
 
@@ -388,6 +384,7 @@ void group_quantize_fwd_helper(const NVTETensor input, NVTETensor *outputs,
           &quant_config_cpp, stream);
       break;
     }
+#endif //#ifndef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(scaling_mode) + ".");
   }

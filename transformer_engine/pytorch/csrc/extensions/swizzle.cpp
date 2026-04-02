@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -262,6 +264,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
   return std::move(output_scales_pyt);
 }
 
+#ifndef USE_ROCM
 at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper &input,
                                                  bool rowwise) {
   // Check input tensor
@@ -330,6 +333,7 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapp
   input = std::move(output_cu);
   return swizzled_scale_inv;
 }
+#endif  // !USE_ROCM
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
   // Convert Python tensor to C++ tensor

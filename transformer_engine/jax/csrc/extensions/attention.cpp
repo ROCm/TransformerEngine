@@ -1,9 +1,6 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
-=======
->>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -60,6 +57,8 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
   // arbitrary sequence length backend needs the RNG state and a different shape/dtype softmax
 #ifndef USE_ROCM
   if (backend == NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen) {
+#else
+  {
 #endif
     // ROCm fused attn has two backends: aotriton and ck
     // They both have the same shape and stride for softmax and rng aux tensors
@@ -92,10 +91,7 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
       bias_aux_data.dtype = static_cast<NVTEDType>(dtype);
       nvte_set_tensor_param(&bias_aux, kNVTERowwiseData, &bias_aux_data);
     }
-<<<<<<< HEAD
 #ifndef USE_ROCM
-=======
-
     // include softmax_offset if provided
     if (softmax_offset_buf != nullptr) {
       NVTETensor &softmax_offset_aux = tensor_pack->tensors[size];
@@ -110,12 +106,11 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
       softmax_offset_aux_data.dtype = static_cast<NVTEDType>(DType::kFloat32);
       nvte_set_tensor_param(&softmax_offset_aux, kNVTERowwiseData, &softmax_offset_aux_data);
     }
+#endif
 
     // Set final size
     tensor_pack->size = size;
->>>>>>> 99df88
   }
-#endif
   nvte_set_tensor_param(&softmax_aux, kNVTERowwiseData, &softmax_aux_data);
 }
 /*

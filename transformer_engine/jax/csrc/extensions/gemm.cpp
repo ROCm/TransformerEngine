@@ -1,9 +1,6 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
-=======
->>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -89,16 +86,11 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
       } else {
         input.set_columnwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       }
-<<<<<<< HEAD
-    } else {  // Swizzle for NVFP4
-#ifdef USE_ROCM
-      NVTE_ERROR("ROCm TE does not support NVFP4 yet.");
-    }
-#else
-=======
       input.set_with_gemm_swizzled_scales(true);
     } else if (is_nvfp4) {  // Swizzle for NVFP4
->>>>>>> 99df88
+#ifdef USE_ROCM
+      NVTE_ERROR("ROCm TE does not support NVFP4 yet.");
+#else
       NVTE_CHECK(rowwise, "NVFP4 GEMM expects rowwise for both LHS and RHS");
       input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       // Create tensor to hold swizzled scale factor
@@ -111,6 +103,7 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
       // Set swizzled scales into the input tensor
       input.set_rowwise_scale_inv(swizzle_scale_ptr, scale_dtype, scale_shape);
       input.set_with_gemm_swizzled_scales(true);
+#endif
     } else {  // Tensor scaling
       if (rowwise) {
         input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
@@ -118,7 +111,6 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
         input.set_columnwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       }
     }
-#endif // #ifdef USE_ROCM
   }
 
   return std::make_tuple(std::move(input), input_shape);

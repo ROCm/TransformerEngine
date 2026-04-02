@@ -1,9 +1,6 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
-=======
->>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -28,9 +25,9 @@ namespace {
 #endif
 
 constexpr int MXFP8_BLOCK_SIZE = 32;
-#ifndef __HIP_PLATFORM_AMD__
 constexpr int NVFP4_BLOCK_SIZE = 16;
 
+#ifndef __HIP_PLATFORM_AMD__
 constexpr __device__ __host__ int TB_DIM = 32;
 constexpr __device__ __host__ int NEW_SF_TILE_DIM_K = 16;
 constexpr __device__ __host__ int N_SF_PER_TD_PER_TILE = 4;
@@ -387,30 +384,6 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
     return;
   }
 
-<<<<<<< HEAD
-  CheckInputTensor(*input, "scaling_factor_input");
-  CheckInputTensor(*output, "scaling_factor_output");
-
-  auto& scaling_mode = input->scaling_mode;
-  NVTE_CHECK(scaling_mode == NVTE_MXFP8_1D_SCALING || scaling_mode == NVTE_NVFP4_1D_SCALING,
-             "Unsupported scaling mode for swizzling.");
-
-  bool nvfp4 = scaling_mode == NVTE_NVFP4_1D_SCALING;
-
-  // 1D block scaling, row-wise or colum-wise
-
-  int m, k;
-  if (input->has_data()) {
-    m = input->scale_inv.shape[0];
-    k = input->scale_inv.shape[1];
-  } else {
-    if (nvfp4) {
-      m = input->columnwise_scale_inv.shape[0];
-      k = input->columnwise_scale_inv.shape[1];
-    } else {
-      m = input->columnwise_scale_inv.shape[1];
-      k = input->columnwise_scale_inv.shape[0];
-=======
   // Deduce tensor dims
   int m{0}, k{0};
   switch (scaling_mode) {
@@ -428,7 +401,6 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
         k = input->columnwise_scale_inv.shape[0];
       }
       break;
->>>>>>> 99df88
     }
     case NVTE_NVFP4_1D_SCALING: {
       if (has_rowwise_scale_inv) {

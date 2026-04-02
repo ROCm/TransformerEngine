@@ -1,9 +1,6 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
-=======
->>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -404,14 +401,11 @@ inline at::ScalarType GetATenDType(transformer_engine::DType t) {
     case transformer_engine::DType::kFloat8E5M2:
 #ifndef USE_ROCM
       return at::kFloat8_e5m2;
-<<<<<<< HEAD
 #else
       return te_fp8_fnuz()? at::kFloat8_e5m2fnuz : at::kFloat8_e5m2;
 #endif // USE_ROCM
-=======
     case transformer_engine::DType::kFloat8E8M0:
       return at::kByte;  // e8m0 dtype requires PyTorch 2.7.0+
->>>>>>> 99df88
     default:
       NVTE_ERROR("Invalid type (", static_cast<int>(t), ").");
   }

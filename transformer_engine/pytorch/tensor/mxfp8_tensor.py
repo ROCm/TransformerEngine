@@ -1,8 +1,5 @@
-<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
-=======
->>>>>>> 99df88
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -169,16 +166,6 @@ class MXFP8Quantizer(Quantizer):
         if self.columnwise_usage:
             columnwise_data = torch.empty(
                 shape, dtype=torch.uint8, device=device, pin_memory=pin_memory
-<<<<<<< HEAD
-=======
-            )
-            columnwise_scale_inv = torch.empty(
-                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
-                round_up_to_nearest_multiple(shape[-1], 128),
-                dtype=torch.uint8,
-                device=device,
-                pin_memory=pin_memory,
->>>>>>> 99df88
             )
             # ROCm TE does not implement fuse padding zeros so use zero tensor here
             if IS_HIP_EXTENSION:

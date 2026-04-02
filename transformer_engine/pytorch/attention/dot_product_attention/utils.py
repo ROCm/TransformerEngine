@@ -1,8 +1,5 @@
-<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
-=======
->>>>>>> 99df88
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -306,13 +303,9 @@ def get_attention_backend(
     ----------
     use_flash_attention : bool
         Whether the `FlashAttention` backend has been selected.
-<<<<<<< HEAD
     flash_attention_backend: PkgVersion
         If `use_flash_attention = True`, the version of the selected `FlashAttention` backend.
-    use_fused_attention: bool
-=======
     use_fused_attention : bool
->>>>>>> 99df88
         Whether the `FusedAttention` backend has been selected.
     fused_attention_backend : tex.NVTE_Fused_Attn_Backend
         If `use_fused_attention = True`, one of `FusedAttention` three sub-backends, else `None`.

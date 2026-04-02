@@ -1,8 +1,5 @@
-<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
-=======
->>>>>>> 99df88
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -13,12 +10,8 @@ from functools import wraps
 from typing import Callable, Optional, Tuple
 import torch
 
-<<<<<<< HEAD
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-from . import torch_version
-=======
 from .torch_version import torch_version
->>>>>>> 99df88
 from .export import is_in_onnx_export_mode
 from .utils import gpu_autocast_ctx
 

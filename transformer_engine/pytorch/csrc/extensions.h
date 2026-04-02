@@ -1,9 +1,6 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
-=======
->>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -483,9 +480,6 @@ void fused_multi_row_padding(at::Tensor input, at::Tensor output,
 void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
                                std::vector<size_t> input_row_list,
                                std::vector<size_t> unpadded_input_row_list);
-<<<<<<< HEAD
-#ifndef USE_ROCM
-=======
 
 /***************************************************************************************************
  * Scale swizzling for GEMM
@@ -493,7 +487,7 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor);
 
->>>>>>> 99df88
+#ifndef USE_ROCM
 /***************************************************************************************************
  * NVSHMEM APIs
  **************************************************************************************************/

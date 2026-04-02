@@ -1,9 +1,6 @@
 /*************************************************************************
-<<<<<<< HEAD
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
-=======
->>>>>>> 99df88
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -52,15 +49,11 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(std::vector<Tenso
  *  The returned swizzled scaling factor tensor should be kept alive
  *  during the GEMM.
  */
-<<<<<<< HEAD
-at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper &input,
-                                                 bool rowwise);
-#endif  //!USE_ROCM
-=======
 at::Tensor convert_block_scaling_to_mxfp8_tensor(TensorWrapper& input, bool rowwise);
 
 }  // namespace pytorch
 }  // namespace transformer_engine
->>>>>>> 99df88
+
+#endif  //!USE_ROCM
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_

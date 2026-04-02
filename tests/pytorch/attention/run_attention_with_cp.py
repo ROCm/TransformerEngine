@@ -1,8 +1,5 @@
-<<<<<<< HEAD
 # This file was modified for portability to AMDGPU
 # Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
-=======
->>>>>>> 99df88
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -106,24 +103,20 @@ def generate_input_shapes(
                 seqlens_q_padded.cumsum(0, dtype=torch.int32),
             ]
         ).cuda()
-<<<<<<< HEAD
-        if kernel_backend == "FlashAttention":
-            cu_seqlens_q = cu_seqlens_q_padded[:-1]
-        else:
+        if IS_HIP_EXTENSION and kernel_backend != "FlashAttention":
             cu_seqlens_q = torch.cat(
                 [torch.zeros([1], dtype=torch.int32), seqlens_q.cumsum(0, dtype=torch.int32)]
             ).cuda()
-=======
-        cu_seqlens_q = torch.clone(cu_seqlens_q_padded)
+        else:
+            cu_seqlens_q = torch.clone(cu_seqlens_q_padded)
 
-        # Since FlashAttention doesn't support pad b/w sequences, and FusedAttention does,
-        # cu_seqlens_q is updated to reflect non-padded lengths for FusedAttention only.
-        if kernel_backend == "FusedAttention":
-            cu_seqlens_q[1:] = seqlens_q.cumsum(0, dtype=torch.int32).cuda()
+            # Since FlashAttention doesn't support pad b/w sequences, and FusedAttention does,
+            # cu_seqlens_q is updated to reflect non-padded lengths for FusedAttention only.
+            if kernel_backend == "FusedAttention":
+                cu_seqlens_q[1:] = seqlens_q.cumsum(0, dtype=torch.int32).cuda()
 
         # NOTE: In case of Cross-Attention, `cu_seqlens_kv` and `cu_seqlens_kv_padded`
         # will not be the same as `cu_seqlens_q` and `cu_seqlens_q_padded` respectively.
->>>>>>> 99df88
         cu_seqlens_kv = cu_seqlens_q
         cu_seqlens_kv_padded = cu_seqlens_q_padded
 
@@ -345,10 +338,8 @@ def run_dpa_with_cp(
             core_attention_bias=bias,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
-            cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
-            cu_seqlens_kv_padded=(
-                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
-            ),
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:
@@ -442,10 +433,8 @@ def run_dpa_with_cp(
             core_attention_bias=bias_,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
-            cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
-            cu_seqlens_kv_padded=(
-                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
-            ),
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:
@@ -493,7 +482,7 @@ def run_dpa_with_cp(
         dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
         dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
         dq_, dk_, dv_, out_ = [dq_, dk_, dv_, out_]
-        cu_seqlens_q_padded = cu_seqlens_q_padded[:-1] // world_size
+        cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
         cu_seqlens_q = get_cu_seqlens_on_cp_rank(
             cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
         )
@@ -512,7 +501,7 @@ def run_dpa_with_cp(
                     ).item()
                     == 0
                 )
-        cu_seqlens_kv_padded = cu_seqlens_kv_padded[:-1] // world_size
+        cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
         cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
             cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
         )

@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -52,7 +54,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
 
 #pragma unroll
     for (int delta = 16; delta > 0; delta /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+      float other_row_amax = __shfl_down(row_amax, delta, THREADS_PER_WARP);
+#else
       float other_row_amax = __shfl_down_sync(0xFFFFFFFF, row_amax, delta);
+#endif
       row_amax = fmaxf(row_amax, other_row_amax);
     }
 

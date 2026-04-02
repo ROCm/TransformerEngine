@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,9 +10,12 @@ from typing import Iterable, Optional, Tuple, Union, List
 import os
 import functools
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
+if IS_HIP_EXTENSION:
+    from ..utils import get_device_compute_capability
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
@@ -29,6 +34,12 @@ _NUM_MAX_UB_STREAMS = 3
 
 
 def get_cublas_workspace_size_bytes() -> None:
+    """Return workspace size needed for current architecture."""
+    if IS_HIP_EXTENSION:
+        """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
+        if get_device_compute_capability() == (9, 5):
+            return 67_108_864
+        return 33_554_432
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
         # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
