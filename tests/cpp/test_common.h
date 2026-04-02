@@ -301,6 +301,21 @@ class Tensor {
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
   }
 
+  void set_tensor_amax(float amax) {
+    if (!amax_cpu_data_) {
+      amax_cpu_data_ = std::make_shared<float>(amax);
+    } else {
+      *amax_cpu_data_ = amax;
+    }
+
+    float *amax_gpu = nullptr;
+    NVTE_CHECK_CUDA(cudaMalloc(&amax_gpu, sizeof(float)));
+    NVTE_CHECK_CUDA(cudaMemcpy(amax_gpu, amax_cpu_data_.get(),
+                              sizeof(float), cudaMemcpyHostToDevice));
+
+    tensor_.set_amax(amax_gpu, DType::kFloat32, tensor_.defaultShape);
+  }
+
   void to_cpu() const;
   void from_cpu() const;
   void set_scale(float scale);
@@ -355,6 +370,11 @@ constexpr size_t scale_tensor_alignment_X_rowwise = 4;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 constexpr size_t scale_tensor_alignment_X_colwise = 128;
 #endif
+
+static constexpr float E2M1_LUT[16] = {
+     0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
+    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
+};
 
 inline size_t divide_round_up(const size_t N, const size_t M) {
     return (N - 1 + M) / M;
@@ -519,7 +539,7 @@ template <typename T>
 void compare_scaling_factors(const std::string &name, const T *test, const T *ref,
                              const size_t row_blocks, const size_t col_blocks, const size_t stride,
 #ifdef USE_ROCM
-                             std::vector<size_t>& mismatch_indices, 
+                             std::vector<size_t>& mismatch_indices,
 #endif  //#ifdef USE_ROCM
                              size_t& mismatches_num,
                              const size_t scale_diff_abs_tolerance = 0,
