@@ -166,8 +166,7 @@ class QuantGroupedGemmRunner : public RunnerInterface {
       const transformer_engine::SimpleTensor* b_src = nullptr;
       if (ctx.use_b_columnwise_data) {
         if (!B_te->has_columnwise_data()) {
-          NVTE_ERROR("ck_tile_grouped_gemm: ctx.use_b_columnwise_data=true but "
-                     "columnwise_data is absent.");
+          NVTE_ERROR("ck_tile_grouped_gemm: ctx.use_b_columnwise_data=true but columnwise_data is absent.");
         }
         b_src = &B_te->columnwise_data;
       } else {
@@ -176,18 +175,24 @@ class QuantGroupedGemmRunner : public RunnerInterface {
 
       const auto& b = *b_src;
 
-      int64_t Ad0 = 0, Ad1 = 0, Dd0 = 0, Dd1 = 0;
-      if (!get_flat_2d_dims(*A_te, Ad0, Ad1) ||
-          !get_flat_2d_dims(*D_te, Dd0, Dd1)) {
-        NVTE_ERROR("ck_tile_grouped_gemm: expected A and D to be rank>=2.");
+      int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0, Dd0 = 0, Dd1 = 0;
+      if (!get_flat_2d_dims(*A_te, Ad0, Ad1)) {
+        NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for normalized A in group ", i);
       }
 
-      if (b.shape.size() < 2) {
-        NVTE_ERROR("ck_tile_grouped_gemm: expected chosen B source to be rank>=2.");
+      if (ctx.use_b_columnwise_data) {
+        if (!get_columnwise_storage_2d_dims(B_te->columnwise_data, Bd0, Bd1)) {
+          NVTE_ERROR("ck_tile_grouped_gemm: expected 2D columnwise_data for B in group ", i);
+        }
+      } else {
+        if (!get_flat_2d_dims(*B_te, Bd0, Bd1)) {
+          NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for normalized B in group ", i);
+        }
       }
 
-      int64_t Bd0 = static_cast<int64_t>(b.shape[b.shape.size() - 2]);
-      int64_t Bd1 = static_cast<int64_t>(b.shape[b.shape.size() - 1]);
+      if (!get_flat_2d_dims(*D_te, Dd0, Dd1)) {
+        NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for normalized D in group ", i);
+      }
 
       const int64_t M = ctx.transA ? Ad1 : Ad0;
       const int64_t K = ctx.transA ? Ad0 : Ad1;
@@ -195,43 +200,13 @@ class QuantGroupedGemmRunner : public RunnerInterface {
       const int64_t Kb = ctx.transB ? Bd1 : Bd0;
 
       if (Kb != K) {
-        NVTE_ERROR("ck_tile_grouped_gemm: K mismatch between A and B in group ",
-                   i,
-                   ". op(A)=",
-                   M,
-                   "x",
-                   K,
-                   " op(B)=",
-                   Kb,
-                   "x",
-                   N,
-                   " raw A=",
-                   Ad0,
-                   "x",
-                   Ad1,
-                   " raw B=",
-                   Bd0,
-                   "x",
-                   Bd1,
-                   " use_b_columnwise_data=",
-                   static_cast<int>(ctx.use_b_columnwise_data),
-                   " transA=",
-                   static_cast<int>(ctx.transA),
-                   " transB=",
-                   static_cast<int>(ctx.transB));
+        NVTE_ERROR("ck_tile_grouped_gemm: K mismatch between A and B in group ", i,
+                   ". op(A)=", M, "x", K, ", op(B)=", Kb, "x", N);
       }
 
       if (Dd0 != M || Dd1 != N) {
-        NVTE_ERROR("ck_tile_grouped_gemm: D shape mismatch in group ",
-                   i,
-                   ". D=",
-                   Dd0,
-                   "x",
-                   Dd1,
-                   ", expected=",
-                   M,
-                   "x",
-                   N);
+        NVTE_ERROR("ck_tile_grouped_gemm: D shape mismatch in group ", i,
+                   ". D=", Dd0, "x", Dd1, ", expected=", M, "x", N);
       }
 
       const ck_tile::index_t stride_A = static_cast<ck_tile::index_t>(Ad1);
@@ -302,101 +277,66 @@ struct FP8TileCfg<GPUArch::GFX950> {
   using type = TileCfg_128x128x128_16x16x128_2x2x1;
 };
 
-template <GPUArch Arch, typename teA, typename teB, typename ALayout, typename BLayout>
-static std::unique_ptr<RunnerInterface> make_fp8_runner_typed(
-    DType d_dtype,
-    const GroupedGemmRunContext& ctx) {
+template <GPUArch Arch>
+static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
+                                                   DType b_dtype,
+                                                   DType d_dtype,
+                                                   const GroupedGemmRunContext& ctx) {
+  const ck_tile::stream_config s{ctx.stream};
   std::unique_ptr<RunnerInterface> runner = nullptr;
 
-  using AType = typename TETypeToCKType<teA>::type;
-  using BType = typename TETypeToCKType<teB>::type;
   using CTypeLayout = RowMajor;
   using TileCfg = typename FP8TileCfg<Arch>::type;
 
-  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(d_dtype, d_te_type, {
-    using CType = typename TETypeToCKType<d_te_type>::type;
-    using Runner = QuantGroupedGemmRunner<AType,
-                                          BType,
-                                          CType,
-                                          ALayout,
-                                          BLayout,
-                                          CTypeLayout,
-                                          TileCfg,
-                                          ck_tile::memory_operation_enum::set>;
-    runner = std::make_unique<Runner>();
-  });
-
-  return runner;
-}
-
-template <GPUArch Arch>
-static std::unique_ptr<RunnerInterface> make_fp8_runner_impl(
-    DType a_dtype,
-    DType b_dtype,
-    DType d_dtype,
-    const GroupedGemmRunContext& ctx) {
   TRANSFORMER_ENGINE_SWITCH_CONDITION(ctx.transA, kTransA, {
     using ALayout = std::conditional_t<kTransA, ColMajor, RowMajor>;
 
     TRANSFORMER_ENGINE_SWITCH_CONDITION(ctx.transB, kTransB, {
       using BLayout = std::conditional_t<kTransB, ColMajor, RowMajor>;
 
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(a_dtype, a_type, {
-        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(b_dtype, b_type, {
-          return make_fp8_runner_typed<Arch, a_type, b_type, ALayout, BLayout>(
-              d_dtype, ctx);
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(a_dtype, a_te_type, {
+        using AType = typename TETypeToCKType<a_te_type>::type;
+
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(b_dtype, b_te_type, {
+          using BType = typename TETypeToCKType<b_te_type>::type;
+
+          TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(d_dtype, d_te_type, {
+            using CType = typename TETypeToCKType<d_te_type>::type;
+            using Runner = QuantGroupedGemmRunner<AType,
+                                                  BType,
+                                                  CType,
+                                                  ALayout,
+                                                  BLayout,
+                                                  CTypeLayout,
+                                                  TileCfg,
+                                                  ck_tile::memory_operation_enum::set>;
+            runner = std::make_unique<Runner>();
+          });
         });
       });
     });
   });
 
-  return nullptr;
-}
-
-static inline std::unique_ptr<RunnerInterface> make_fp8_runner_gfx942(
-    DType a_dtype,
-    DType b_dtype,
-    DType d_dtype,
-    const GroupedGemmRunContext& ctx) {
-  return make_fp8_runner_impl<GPUArch::GFX942>(a_dtype, b_dtype, d_dtype, ctx);
-}
-
-static inline std::unique_ptr<RunnerInterface> make_fp8_runner_gfx950(
-    DType a_dtype,
-    DType b_dtype,
-    DType d_dtype,
-    const GroupedGemmRunContext& ctx) {
-  return make_fp8_runner_impl<GPUArch::GFX950>(a_dtype, b_dtype, d_dtype, ctx);
-}
-
-static std::unique_ptr<RunnerInterface> make_fp8_runner(
-    DType a_dtype,
-    DType b_dtype,
-    DType d_dtype,
-    const GroupedGemmRunContext& ctx) {
-  switch (detect_gpu_arch()) {
-    case GPUArch::GFX942:
-      return make_fp8_runner_gfx942(a_dtype, b_dtype, d_dtype, ctx);
-    case GPUArch::GFX950:
-      return make_fp8_runner_gfx950(a_dtype, b_dtype, d_dtype, ctx);
-    default:
-      NVTE_ERROR("ck_tile_grouped_gemm: available architectures = {gfx942, gfx950}");
-      return nullptr;
+  if (!runner) {
+    return false;
   }
+
+  return runner->run(s, ctx);
 }
 
 bool ck_tile_grouped_gemm_fp8_dispatch(DType a_dtype,
                                        DType b_dtype,
                                        DType d_dtype,
                                        const GroupedGemmRunContext& ctx) {
-  const ck_tile::stream_config s{ctx.stream};
-
-  auto runner = make_fp8_runner(a_dtype, b_dtype, d_dtype, ctx);
-  if (!runner) {
-    return false;
+  switch (detect_gpu_arch()) {
+    case GPUArch::GFX942:
+      return ck_tile_grouped_gemm_fp8_dispatch_arch<GPUArch::GFX942>(a_dtype, b_dtype, d_dtype, ctx);
+    case GPUArch::GFX950:
+      return ck_tile_grouped_gemm_fp8_dispatch_arch<GPUArch::GFX950>(a_dtype, b_dtype, d_dtype, ctx);
+    default:
+      NVTE_ERROR("ck_tile_grouped_gemm: available architectures = {gfx942, gfx950}");
+      return false;
   }
-
-  return runner->run(s, ctx);
 }
 
 }  // namespace grouped_gemm
