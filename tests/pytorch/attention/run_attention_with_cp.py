@@ -95,42 +95,52 @@ def generate_input_shapes(
         cu_seqlens_q_padded = None
         cu_seqlens_kv_padded = None
     elif qkv_format == "thd":
-        q_input_shape = (
-            config.batch_size * config.max_seqlen_q,
-            config.num_heads,
-            config.head_dim_qk,
-        )
-        k_input_shape = (
-            config.batch_size * config.max_seqlen_q,
-            config.num_gqa_groups,
-            config.head_dim_qk,
-        )
-        v_input_shape = (
-            config.batch_size * config.max_seqlen_q,
-            config.num_gqa_groups,
-            config.head_dim_v,
-        )
-        attn_output_shape = (
-            config.batch_size * config.max_seqlen_q,
-            config.num_heads * config.head_dim_v,
-        )
         seqlens_q = torch.randint(0, config.max_seqlen_q + 1, [config.batch_size]).to(torch.int32)
         seqlens_q_padded = (seqlens_q + 2 * world_size - 1) // (world_size * 2) * (world_size * 2)
         cu_seqlens_q_padded = torch.cat(
             [
                 torch.zeros([1], dtype=torch.int32),
                 seqlens_q_padded.cumsum(0, dtype=torch.int32),
-                torch.tensor([q_input_shape[0]], dtype=torch.int32),
             ]
         ).cuda()
-        if kernel_backend == "FlashAttention":
-            cu_seqlens_q = cu_seqlens_q_padded[:-1]
-        else:
+        if IS_HIP_EXTENSION and kernel_backend != "FlashAttention":
             cu_seqlens_q = torch.cat(
                 [torch.zeros([1], dtype=torch.int32), seqlens_q.cumsum(0, dtype=torch.int32)]
             ).cuda()
+        else:
+            cu_seqlens_q = torch.clone(cu_seqlens_q_padded)
+
+            # Since FlashAttention doesn't support pad b/w sequences, and FusedAttention does,
+            # cu_seqlens_q is updated to reflect non-padded lengths for FusedAttention only.
+            if kernel_backend == "FusedAttention":
+                cu_seqlens_q[1:] = seqlens_q.cumsum(0, dtype=torch.int32).cuda()
+
+        # NOTE: In case of Cross-Attention, `cu_seqlens_kv` and `cu_seqlens_kv_padded`
+        # will not be the same as `cu_seqlens_q` and `cu_seqlens_q_padded` respectively.
         cu_seqlens_kv = cu_seqlens_q
         cu_seqlens_kv_padded = cu_seqlens_q_padded
+
+        total_tokens = cu_seqlens_q_padded[-1]
+
+        q_input_shape = (
+            total_tokens,
+            config.num_heads,
+            config.head_dim_qk,
+        )
+        k_input_shape = (
+            total_tokens,
+            config.num_gqa_groups,
+            config.head_dim_qk,
+        )
+        v_input_shape = (
+            total_tokens,
+            config.num_gqa_groups,
+            config.head_dim_v,
+        )
+        attn_output_shape = (
+            total_tokens,
+            config.num_heads * config.head_dim_v,
+        )
     else:
         assert False, f"{qkv_format=} is not supported!"
 
@@ -328,10 +338,8 @@ def run_dpa_with_cp(
             core_attention_bias=bias,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
-            cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
-            cu_seqlens_kv_padded=(
-                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
-            ),
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:
@@ -425,10 +433,8 @@ def run_dpa_with_cp(
             core_attention_bias=bias_,
             cu_seqlens_q=cu_seqlens_q,
             cu_seqlens_kv=cu_seqlens_kv,
-            cu_seqlens_q_padded=None if cu_seqlens_q_padded is None else cu_seqlens_q_padded[:-1],
-            cu_seqlens_kv_padded=(
-                None if cu_seqlens_kv_padded is None else cu_seqlens_kv_padded[:-1]
-            ),
+            cu_seqlens_q_padded=cu_seqlens_q_padded,
+            cu_seqlens_kv_padded=cu_seqlens_kv_padded,
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:
@@ -476,7 +482,7 @@ def run_dpa_with_cp(
         dq, out = [x.index_select(0, seq_idx_q).contiguous() for x in [dq, out]]
         dk, dv = [x.index_select(0, seq_idx_kv).contiguous() for x in [dk, dv]]
         dq_, dk_, dv_, out_ = [dq_, dk_, dv_, out_]
-        cu_seqlens_q_padded = cu_seqlens_q_padded[:-1] // world_size
+        cu_seqlens_q_padded = cu_seqlens_q_padded // world_size
         cu_seqlens_q = get_cu_seqlens_on_cp_rank(
             cu_seqlens_q, cu_seqlens_q_padded, world_size, rank, True, True
         )
@@ -495,7 +501,7 @@ def run_dpa_with_cp(
                     ).item()
                     == 0
                 )
-        cu_seqlens_kv_padded = cu_seqlens_kv_padded[:-1] // world_size
+        cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
         cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
             cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True
         )
