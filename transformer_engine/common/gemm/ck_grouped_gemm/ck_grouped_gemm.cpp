@@ -5,6 +5,8 @@
  ************************************************************************/
 
 #include "ck_grouped_gemm_common.h"
+#include "ck_grouped_gemm_fp16.h"
+#include "ck_grouped_gemm_fp8.h"
 
 bool ck_tile_grouped_gemm(const NVTETensor* A,
                           const NVTETensor* B,
@@ -14,7 +16,7 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
                           bool transB,
                           NVTETensor* workspace,
                           bool accumulate,
-                          cudaStream_t stream) {
+                          hipStream_t stream) {
   if (group_num <= 0) {
     return true;
   }
@@ -40,15 +42,15 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   bool use_b_columnwise_data = false;
 
   const auto caller_a_dtype = convertNVTETensorCheck(A[0])->dtype(); 
-  const bool is_fp8 = is_fp8_dtype(caller_a_dtype);
-  const bool is_fp16 = is_fp16_dtype(caller_a_dtype);
+  const bool is_8bit_float = is_fp8_dtype(caller_a_dtype);
+  const bool  is_16bit_float = is_fp16_dtype(caller_a_dtype);
   
   // Currently the accumulate path is only supported on fp16
-  if (accumulate && is_fp8)
+  if (accumulate && is_8bit_float)
   	return false;
 
   // Handle pathological NN case during fp8 dX GEMM by reading W columnwise and re-formulating as NT
-  if (!transA_use && !transB_use && is_fp8) {
+  if (!transA_use && !transB_use && is_8bit_float) {
     auto* B0_te = convertNVTETensorCheck(B_use[0]);
     if (B0_te->has_columnwise_data()) {
       use_b_columnwise_data = true;
@@ -75,12 +77,10 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   }
 
   if (use_b_columnwise_data) {
-    if (B0_te->columnwise_data.shape.size() < 2) {
-      NVTE_ERROR("ck_tile_grouped_gemm: expected columnwise_data rank>=2 for B_use[0]");
+    if (!get_columnwise_storage_2d_dims(B0_te->columnwise_data, b0, b1)) {
+      NVTE_ERROR("ck_tile_grouped_gemm: expected 2D columnwise_data for B_use[0]");
       return false;
     }
-    b0 = static_cast<int64_t>(B0_te->columnwise_data.shape[B0_te->columnwise_data.shape.size() - 2]);
-    b1 = static_cast<int64_t>(B0_te->columnwise_data.shape[B0_te->columnwise_data.shape.size() - 1]);
   } else {
     if (!get_flat_2d_dims(*B0_te, b0, b1)) {
       NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for normalized B_use[0]");
@@ -125,14 +125,12 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
       use_b_columnwise_data,
       accumulate};
 
-
-  if (is_fp16) {
+  if (is_16bit_float) {
     return ck_tile_grouped_gemm_fp16_dispatch(a_dtype, b_dtype, d_dtype, ctx);
-  }
-
-  else if (is_fp8) {
+  } else if (is_8bit_float) {
     return ck_tile_grouped_gemm_fp8_dispatch(a_dtype, b_dtype, d_dtype, ctx);
   }
 
+  NVTE_WARN("ck_tile_grouped_gemm: input dtype is neither fp16 nor fp8.");
   return false;
 }
