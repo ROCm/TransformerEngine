@@ -821,9 +821,24 @@ __device__ __forceinline__ uint16_t fp4x4_to_bits(fp4e2m1x4 v) {
 template <bool kUseStochasticRounding>
 __global__ __launch_bounds__(kThreadsPerBlock, 4) void HadamardTransformCastFusionKernel(
     const __hip_bfloat16* __restrict__ input, uint8_t* __restrict__ output_t,
-    fp8e4m3* __restrict__ scale_inv_t, const float global_amax,
-    const uint16_t random_sign_mask_t, const uint64_t num_rows, const uint64_t row_length,
-    const size_t scale_stride, const size_t* rng_state) {
+    fp8e4m3* __restrict__ scale_inv_t, const float* __restrict__ global_amax_ptr,
+    const __hip_bfloat16* __restrict__ hadamard_matrix, const uint64_t num_rows,
+    const uint64_t row_length, const size_t scale_stride, const size_t* rng_state) {
+
+  // Thread 0 loads global_amax and computes random sign mask
+  __shared__ uint16_t s_random_sign_mask;
+  __shared__ float s_global_amax;
+  if (threadIdx.x == 0) {
+    s_global_amax = *global_amax_ptr;
+    uint16_t mask = 0;
+    for (int row = 0; row < kHadamardDim; ++row) {
+      mask |= static_cast<uint16_t>((to_f32(hadamard_matrix[row * kHadamardDim]) < 0.0f ? 1u : 0u) << row);
+    }
+    s_random_sign_mask = mask;
+  }
+  __syncthreads();
+  const float global_amax = s_global_amax;
+
   const int tid = threadIdx.x;
   const int warp_id = tid / kWarpSize;
   const int lane_id = tid % kWarpSize;
@@ -846,7 +861,7 @@ __global__ __launch_bounds__(kThreadsPerBlock, 4) void HadamardTransformCastFusi
   float c2 = to_f32(input[(input_row_base + 2) * row_length + input_col]);
   float c3 = to_f32(input[(input_row_base + 3) * row_length + input_col]);
 
-  wht16(c0, c1, c2, c3, thread_in_grp, random_sign_mask_t, /*apply_pre=*/true);
+  wht16(c0, c1, c2, c3, thread_in_grp, s_random_sign_mask, /*apply_pre=*/true);
 
   // Truncate to BF16 precision to match the reference BF16 matmul path.
   // Without this, FP32 WHT results at FP4 quantization boundaries round
@@ -892,22 +907,6 @@ __global__ __launch_bounds__(kThreadsPerBlock, 4) void HadamardTransformCastFusi
   const uint64_t output_col_base = input_row_base;
   const uint64_t output_byte_offset = output_row * (num_rows / 2) + output_col_base / 2;
   *reinterpret_cast<uint16_t*>(&output_t[output_byte_offset]) = packed;
-}
-
-uint16_t random_sign_mask_from_rht_matrix(const SimpleTensor& hadamard_matrix, cudaStream_t stream) {
-  std::array<uint16_t, kHadamardDim * kHadamardDim> host_matrix{};
-
-  NVTE_CHECK_CUDA(cudaMemcpyAsync(host_matrix.data(), hadamard_matrix.dptr,
-                                  host_matrix.size() * sizeof(uint16_t),
-                                  cudaMemcpyDeviceToHost, stream));
-  NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
-
-  uint16_t random_sign_mask = 0;
-  for (size_t row = 0; row < kHadamardDim; ++row) {
-    // The first column of diag(sign) @ H16 is sign[row] * 0.25.
-    random_sign_mask |= static_cast<uint16_t>(((host_matrix[row * kHadamardDim] >> 15) & 1) << row);
-  }
-  return random_sign_mask;
 }
 
 }  // namespace
@@ -1033,9 +1032,6 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
           /*stream=*/stream,
           /*k_tile_size=*/k_tile_size););
 #else
-  const uint16_t random_sign_mask_t =
-      random_sign_mask_from_rht_matrix(hadamard_matrix, stream);
-
   const dim3 block(kThreadsPerBlock);
   const dim3 grid(DIVUP(n, static_cast<size_t>(kHadamardDim)),
                   DIVUP(m, static_cast<size_t>(kRowsPerBlock)));
@@ -1046,7 +1042,8 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
           reinterpret_cast<const __hip_bfloat16*>(input.dptr),
           reinterpret_cast<uint8_t*>(output_t.dptr),
           reinterpret_cast<fp8e4m3*>(scale_inv_t.dptr),
-          *reinterpret_cast<const float*>(global_amax.dptr), random_sign_mask_t,
+          reinterpret_cast<const float*>(global_amax.dptr),
+          reinterpret_cast<const __hip_bfloat16*>(hadamard_matrix.dptr),
           static_cast<uint64_t>(m), static_cast<uint64_t>(n), scale_inv_t.shape[1],
           rng_state););
 
