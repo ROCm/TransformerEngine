@@ -239,7 +239,8 @@ if(USE_CUDA)
         fused_attn/fused_attn_fp8.cu
         fused_attn/utils.cu
         swizzle/swizzle.cu
-        swizzle/swizzle_block_scaling.cu)
+        swizzle/swizzle_block_scaling.cu
+        recipe/nvfp4.cu)
     list(APPEND transformer_engine_cuda_arch_specific_sources
         gemm/cutlass_grouped_gemm.cu
         transpose/quantize_transpose_square_blockwise.cu)
