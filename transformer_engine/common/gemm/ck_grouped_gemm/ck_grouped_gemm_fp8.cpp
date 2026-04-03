@@ -6,8 +6,7 @@
 
 #include "ck_grouped_gemm_common.h"
 #include "ck_grouped_gemm_fp8.h"
-
-#include <hip/hip_runtime.h>
+#include "common/util/cuda_runtime.h"
 
 #include "ck_tile/ops/gemm_quant/kernel/grouped_gemm_quant_kernel.hpp"
 #include "ck_tile/ops/gemm_quant/pipeline/gemm_group_quant_utils.hpp"
@@ -279,16 +278,12 @@ class QuantGroupedGemmRunner : public RunnerInterface {
 };
 
 static inline GPUArch detect_gpu_arch() {
-  int device = 0;
-  HIP_CHECK_ERROR(hipGetDevice(&device));
+  int arch = cuda::sm_arch(0);
 
-  hipDeviceProp_t props{};
-  HIP_CHECK_ERROR(hipGetDeviceProperties(&props, device));
-
-  if (props.major == 9 && props.minor == 4) {
+  if (arch == 94) {
     return GPUArch::GFX942;
   }
-  if (props.major == 9 && props.minor == 5) {
+  if (arch == 95) {
     return GPUArch::GFX950;
   }
   return GPUArch::UNKNOWN;
