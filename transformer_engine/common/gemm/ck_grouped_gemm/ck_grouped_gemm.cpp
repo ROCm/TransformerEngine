@@ -43,7 +43,7 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
 
   const auto caller_a_dtype = convertNVTETensorCheck(A[0])->dtype(); 
   const bool is_8bit_float = is_fp8_dtype(caller_a_dtype);
-  const bool  is_16bit_float = is_fp16_dtype(caller_a_dtype);
+  const bool is_16bit_float = is_fp16_dtype(caller_a_dtype);
   
   // Currently the accumulate path is only supported on fp16
   if (accumulate && is_8bit_float)
