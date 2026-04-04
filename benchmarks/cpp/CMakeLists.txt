@@ -4,7 +4,9 @@ if(NOT DEFINED CMAKE_CXX_COMPILER)
   set(CMAKE_CXX_COMPILER hipcc)
 endif()
 
-project(transformer_engine_benchmarks LANGUAGES CXX)
+include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
+
+project(transformer_engine_benchmarks LANGUAGES CXX HIP)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -34,19 +36,12 @@ include_directories(
   ${TESTS_CPP_DIR}
 )
 
-if(DEFINED ENV{NVTE_ROCM_ARCH})
-  set(GPU_TARGETS $ENV{NVTE_ROCM_ARCH})
-else()
-  set(GPU_TARGETS "gfx942;gfx950")
-endif()
-
 set(COMMON_COMPILE_OPTIONS
   -Wall
   -Wextra
   -O3
   -DNDEBUG
   -DUSE_ROCM
-  --offload-arch=${GPU_TARGETS}
 )
 
 find_library(TRANSFORMER_ENGINE_LIB
@@ -77,9 +72,7 @@ else()
 endif()
 
 function(add_te_benchmark TARGET_NAME SOURCE_FILE)
-  set(TEST_COMMON_HIP ${TESTS_CPP_DIR}/test_common.hip)
-  set_source_files_properties(${TEST_COMMON_HIP} PROPERTIES LANGUAGE CXX)
-  add_executable(${TARGET_NAME} ${SOURCE_FILE} ${TEST_COMMON_HIP})
+  add_executable(${TARGET_NAME} ${SOURCE_FILE} ${TESTS_CPP_DIR}/test_common.hip)
   target_compile_options(${TARGET_NAME} PRIVATE ${COMMON_COMPILE_OPTIONS})
   target_compile_definitions(${TARGET_NAME} PRIVATE NVTE_ROCM_BENCHMARK)
   target_link_libraries(${TARGET_NAME} PRIVATE
@@ -87,7 +80,6 @@ function(add_te_benchmark TARGET_NAME SOURCE_FILE)
     ${TRANSFORMER_ENGINE_LIB}
     hiprand
   )
-  set_target_properties(${TARGET_NAME} PROPERTIES HIP_ARCHITECTURES "${GPU_TARGETS}")
 endfunction()
 
 add_te_benchmark(bench_quantize_mxfp8_fused cast/bench_quantize_mxfp8_fused.cpp)
