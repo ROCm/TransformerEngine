@@ -2,19 +2,30 @@
 #
 # See LICENSE for license information.
 
-name: TransformerEngine CI
+name: Build and Test Branch
+run-name: CI Level ${{ inputs.test_level || '1' }}
 
 on:
   push:
     branches:
       - 'dev'
-      - 'release_v1.*_rocm'
       - 'release_v2.*_rocm'
-  pull_request:
-    branches:
-      - 'dev'
-      - 'release_v1.**_rocm'
-      - 'release_v2.**_rocm'
+  workflow_call:
+    inputs:
+      test_level:
+        description: 'Test Level (1-3)'
+        required: false
+        default: '1'
+        type: string
+      docker_image_override:
+        description: 'Manual Docker Image (Leave empty to use config file value)'
+        required: false
+        type: string
+      test_config_from_source:
+        description: 'DEBUG: Use config.json from current source branch instead of dev'
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
     inputs:
       test_level:
@@ -36,13 +47,13 @@ concurrency:
 
 jobs:
   build_and_test:
-    name: Build and Test on GPU (${{ matrix.runner }})
+    name: Build and Test on GPU (${{ matrix.runner }}) - Level ${{ inputs.test_level || '1' }}
     timeout-minutes: 720
     runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
-        runner: [linux-te-mi325-8, linux-te-mi355-8]
+        runner: [linux-te-mi325-8, linux-te-mi35x-8]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -59,7 +70,7 @@ jobs:
           docker ps -a
 
           echo ">>> ROCm Installation:"
-          ls -d /opt/rocm* || echo "No /opt/rocm found"
+          (ls -d /opt/rocm/core-* || ls -d /opt/rocm-* || echo "No default ROCm path found") 2>/dev/null || true
           echo ">>> GPU info:"
           ls -l /dev/dri
           ls -l /dev/kfd
@@ -235,11 +246,6 @@ jobs:
           #!/usr/bin/bash
           set -x -o pipefail
           ulimit -c 0 # Disable core dumps
-
-          # debug output
-          ls -d /opt/rocm*
-          python --version
-          pip list | egrep "transformer_e|torch|jax|numpy|ml_dtypes|typing_ext"
 
           HIP_VISIBLE_DEVICES=1 ci/pytorch.sh > /workspace/torch_sgpu.log 2>&1 &
           torch_pid=$!; echo Pytorch test pid $!

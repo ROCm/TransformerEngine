@@ -15,15 +15,14 @@
 
 #ifndef USE_ROCM
 #define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
+#else
+#define FP4_TYPE_SUPPORTED (true)
+#endif
+
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #if FP4_TYPE_SUPPORTED
 #include <cuda_fp4.h>
-#endif
-#else
-#define FP4_TYPE_SUPPORTED (false)
-#include <hip/hip_bfloat16.h>
-#include "amd_detail/hip_float8.h"
 #endif
 #include <cuda_runtime_api.h>
 
@@ -302,6 +301,10 @@ class Tensor {
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
   }
 
+  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
+    tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+  }
+
   void to_cpu() const;
   void from_cpu() const;
   void set_scale(float scale);
@@ -339,10 +342,17 @@ constexpr uint32_t FP32_MANTISSA_BITS = 23;
 
 // [128,4] rowwise and [4,128] colwise alignment requirement
 #ifdef __HIP_PLATFORM_AMD__
+// For mxfp8:
 constexpr size_t scale_tensor_alignment_X_rowwise = 1;
 constexpr size_t scale_tensor_alignment_Y_rowwise = 1;
 constexpr size_t scale_tensor_alignment_X_colwise = 1;
 constexpr size_t scale_tensor_alignment_Y_colwise = 1;
+
+// For nvfp4:
+constexpr size_t nvfp4_scale_tensor_alignment_Y_rowwise = 128;
+constexpr size_t nvfp4_scale_tensor_alignment_X_rowwise = 4;
+constexpr size_t nvfp4_scale_tensor_alignment_Y_colwise = 4;
+constexpr size_t nvfp4_scale_tensor_alignment_X_colwise = 128;
 #else
 constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t scale_tensor_alignment_X_rowwise = 4;
