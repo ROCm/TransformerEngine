@@ -204,8 +204,8 @@ __device__ constexpr float kFP4E2M1Table[16] = {
 };
 
 // Dequantize FP4 (e2m1) packed data with FP8 e4m3 block scales to BF16.
-// NOTE: The per-tensor amax factor is NOT applied here — it is folded into the GEMM alpha instead,
-// matching how cuBLASLt handles NVFP4 on CUDA. This avoids BF16 precision loss from the extra scaling.
+// Only applies block scales: output = fp4_value * block_scale.
+// The per-tensor amax correction is applied separately via the GEMM alpha scalar.
 __global__ void dequant_fp4_to_bf16_kernel(
     const uint8_t* __restrict__ data,
     const fp8e4m3* __restrict__ scale_inv,
@@ -243,6 +243,19 @@ static void launch_dequant_fp4_to_bf16(
       reinterpret_cast<const fp8e4m3*>(scale_inv),
       reinterpret_cast<hip_bfloat16*>(output),
       total_elements);
+}
+
+// Compute per-row alpha vector on device for NVFP4 GEMM:
+//   alpha_out[i] = alpha_in * amax_A * amax_B / (fp4_max^2 * fp8_max^2)  for i in [0, m)
+// Used with HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST, which
+// expects a device vector of length m for alpha, while beta stays on the host.
+__global__ void compute_fp4_alpha_vector_kernel(float alpha_in, const float* __restrict__ amax_A,
+                                                const float* __restrict__ amax_B, float factor_inv,
+                                                float* __restrict__ alpha_out, int m) {
+  const float alpha_val = alpha_in * (*amax_A) * (*amax_B) * factor_inv;
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < m; i += blockDim.x * gridDim.x) {
+    alpha_out[i] = alpha_val;
+  }
 }
 
 GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cublasOperation_t transA,
@@ -1017,9 +1030,19 @@ void hipblaslt_gemm(const Tensor *inputA,
 
   // FP4 dequant path: hipBLASLt does not support FP4 natively,
   // so we dequantize FP4 -> BF16 (block scales only) and run a standard BF16 GEMM.
-  // The per-tensor amax factor is folded into the GEMM alpha, matching the cuBLASLt approach.
+  //
+  // The per-tensor amax correction is computed on-device as a per-row alpha vector:
+  //   alpha'[i] = alpha * amax_A * amax_B / (fp4_max^2 * fp8_max^2)
+  // Alpha is passed as a device vector of length m via
+  // HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST. Beta stays on host.
   const bool use_fp4 = is_fp4_dtype(param.Atype) || is_fp4_dtype(param.Btype);
+  const void* alpha_ptr = static_cast<const void*>(&alpha);
+  const void* beta_ptr  = static_cast<const void*>(&beta);
   if (use_fp4) {
+    const float fp4_max = 6.0f;
+    const float fp8_max = te_fp8_fnuz() ? 240.0f : 448.0f;
+    const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max * fp8_max);
+
     const float* amax_A = (transa == CUBLAS_OP_T)
         ? reinterpret_cast<const float*>(inputA->amax.dptr)
         : reinterpret_cast<const float*>(inputA->columnwise_amax.dptr);
@@ -1027,22 +1050,24 @@ void hipblaslt_gemm(const Tensor *inputA,
         ? reinterpret_cast<const float*>(inputB->amax.dptr)
         : reinterpret_cast<const float*>(inputB->columnwise_amax.dptr);
 
-    // Fold per-tensor amax into alpha: alpha *= amax_A * amax_B / (fp4_max * fp8_max)^2
-    // This matches the CUDA path (nvfp4.cu: compute_nvfp4_per_tensor_scale_kernel).
-    const float fp4_max = 6.0f;
-    const float fp8_max = te_fp8_fnuz() ? 240.0f : 448.0f;
-    const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max * fp8_max);
-    float h_amax_A = 1.0f, h_amax_B = 1.0f;
-    if (amax_A != nullptr) {
-      NVTE_CHECK_CUDA(hipMemcpyAsync(&h_amax_A, amax_A, sizeof(float), hipMemcpyDeviceToHost, stream));
-    }
-    if (amax_B != nullptr) {
-      NVTE_CHECK_CUDA(hipMemcpyAsync(&h_amax_B, amax_B, sizeof(float), hipMemcpyDeviceToHost, stream));
-    }
-    NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
-    alpha *= h_amax_A * h_amax_B * factor_inv;
+    // Reserve m floats from end of workspace for the device alpha vector.
+    const size_t alpha_vec_bytes = static_cast<size_t>(m) * sizeof(float);
+    NVTE_CHECK(workspaceSize >= alpha_vec_bytes,
+               "NVFP4 GEMM requires at least ", alpha_vec_bytes, " bytes workspace for alpha vector.");
+    workspaceSize = (workspaceSize / sizeof(float)) * sizeof(float) - alpha_vec_bytes;
+    float* device_alpha_vec = reinterpret_cast<float*>(
+        reinterpret_cast<uint8_t*>(workspace) + workspaceSize);
 
-    // Compute workspace needed for dequantized BF16 buffers
+    NVTE_CHECK(amax_A != nullptr, "FP4 GEMM requires amax_A");
+    NVTE_CHECK(amax_B != nullptr, "FP4 GEMM requires amax_B");
+    constexpr int kBlockSize = 256;
+    const int num_blocks = (m + kBlockSize - 1) / kBlockSize;
+    compute_fp4_alpha_vector_kernel<<<num_blocks, kBlockSize, 0, stream>>>(
+        alpha, amax_A, amax_B, factor_inv, device_alpha_vec, m);
+    alpha_ptr = static_cast<const void*>(device_alpha_vec);
+    // beta_ptr stays as host &beta
+
+    // Dequantize FP4 -> BF16 (block scales only, no amax folded in)
     const size_t a_bf16_bytes = is_fp4_dtype(param.Atype) ? static_cast<size_t>(m) * k * sizeof(hip_bfloat16) : 0;
     const size_t b_bf16_bytes = is_fp4_dtype(param.Btype) ? static_cast<size_t>(k) * n * sizeof(hip_bfloat16) : 0;
     const size_t dequant_ws = (a_bf16_bytes + b_bf16_bytes + 255) & ~size_t(255);
@@ -1073,7 +1098,7 @@ void hipblaslt_gemm(const Tensor *inputA,
       ws_offset += b_bf16_bytes;
     }
 
-    // Advance workspace past dequant buffers
+    // Advance workspace past dequant buffers (device alpha vector is safe at the end)
     workspace = ws_ptr + ((ws_offset + 255) & ~size_t(255));
     workspaceSize -= dequant_ws;
   }
@@ -1297,6 +1322,13 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                    HIPBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
 
+    if (use_fp4) {
+    int32_t pointer_mode = HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST;
+    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+        operationDesc, HIPBLASLT_MATMUL_DESC_POINTER_MODE,
+        &pointer_mode, sizeof(pointer_mode)));
+  }
+
   GemmAlgoCache::Key gemm_cfg(algoCache.device_cap(device_id), A_type, B_type, D_type, 
     use_fp8 ? bias_type : (hipDataType)-1,
     (use_fp8 && gelu) ? aux_type : (hipDataType)-1,
@@ -1318,10 +1350,10 @@ void hipblaslt_gemm(const Tensor *inputA,
         if (HIPBLAS_STATUS_SUCCESS == hipblaslt_ext::matmulIsAlgoSupported(
           handle,
           operationDesc, 
-          static_cast<const void*>(&alpha),
+          alpha_ptr,
           Adesc, 
           Bdesc, 
-          static_cast<const void*>(&beta),
+          beta_ptr,
           Ddesc,
           Ddesc,
           algo_arr[0].algo,
@@ -1398,12 +1430,12 @@ void hipblaslt_gemm(const Tensor *inputA,
             // Warm-up call
             NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                             operationDesc,
-                                            static_cast<const void*>(&alpha),         /* alpha */
+                                            alpha_ptr,                                /* alpha */
                                             param.A,                                      /* A */
                                             Adesc,
                                             param.B,                                      /* B */
                                             Bdesc,
-                                            static_cast<const void*>(&beta),        /* beta */
+                                            beta_ptr,                                 /* beta */
                                             C,                                      /* C */
                                             Cdesc,
                                             D,                                      /* D */
@@ -1420,12 +1452,12 @@ void hipblaslt_gemm(const Tensor *inputA,
           {
             NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                             operationDesc,
-                                            static_cast<const void*>(&alpha),         /* alpha */
+                                            alpha_ptr,                                /* alpha */
                                             param.A,                                      /* A */
                                             Adesc,
                                             param.B,                                      /* B */
                                             Bdesc,
-                                            static_cast<const void*>(&beta),        /* beta */
+                                            beta_ptr,                                 /* beta */
                                             C,                                      /* C */
                                             Cdesc,
                                             D,                                      /* D */
@@ -1481,12 +1513,12 @@ void hipblaslt_gemm(const Tensor *inputA,
   // D = alpha * (A * B) + beta * C
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                    operationDesc,
-                                   static_cast<const void*>(&alpha),         /* alpha */
+                                   alpha_ptr,                              /* alpha */
                                    param.A,                                      /* A */
                                    Adesc,
                                    param.B,                                      /* B */
                                    Bdesc,
-                                   static_cast<const void*>(&beta),        /* beta */
+                                   beta_ptr,                               /* beta */
                                    C,                                      /* C */
                                    Cdesc,
                                    D,                                      /* D */
