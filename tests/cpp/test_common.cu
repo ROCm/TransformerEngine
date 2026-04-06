@@ -17,7 +17,9 @@
 #include <cmath>
 #include <string>
 
+#ifndef NVTE_ROCM_BENCHMARK
 #include <gtest/gtest.h>
+#endif
 #include <omp.h>
 
 #include <transformer_engine/transformer_engine.h>
@@ -28,9 +30,13 @@
 namespace test {
 
 size_t create_seed_from_tensor_name(const std::string& tensor_name) {
+#ifndef NVTE_ROCM_BENCHMARK
   auto full_name = std::string(testing::UnitTest::GetInstance()->current_test_info()->name()) +
                    "/" + tensor_name;
   return std::hash<std::string>{}(full_name);
+#else
+  return std::hash<std::string>{}(tensor_name);
+#endif
 }
 
 std::vector<DType> all_fp_types = {DType::kFloat32,
@@ -640,6 +646,8 @@ std::vector<size_t> unravel(const size_t i, const NVTEShape &shape) {
   return ret;
 }
 
+#ifndef NVTE_ROCM_BENCHMARK
+
 void compareResults_sequential(const std::string &name, const Tensor &test,
                                const void *ref, const bool rowwise,
                                double atol, double rtol, bool if_on_gpus,
@@ -944,6 +952,7 @@ void compare_scaling_factors<fp8e4m3>(const std::string &name, const fp8e4m3 *te
                                       const double abs_tolerable_mismatches_limit,
                                       const double rel_tolerable_mismatches_limit);
 
+#endif  // NVTE_ROCM_BENCHMARK
 
 std::pair<double, double> getTolerances(const DType type) {
   switch(type) {

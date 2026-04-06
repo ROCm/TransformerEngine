@@ -844,20 +844,33 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
               const size_t buff_size_aligned_out =
                   DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
 
+#ifdef __HIP_PLATFORM_AMD__
+              // rowwise-only uses direct global reads/writes, no shmem needed
+              size_t in_mem = 0;
+              size_t out_mem = 0;
+              if (USE_COLWISE_SCALING) {
+                const size_t grad_mem = (IS_BWD ? buff_size_aligned_in : 0);
+                const size_t in_act_mem = buff_size_aligned_in;
+                const size_t in_gate_mem = buff_size_aligned_in;
+                in_mem = grad_mem + in_act_mem + in_gate_mem;
+
+                out_mem = buff_size_aligned_out;
+                if constexpr (IS_BWD) {
+                  out_mem += buff_size_aligned_out;
+                }
+              }
+#else
               const size_t grad_mem = (IS_BWD ? buff_size_aligned_in : 0);
               const size_t in_act_mem = buff_size_aligned_in;
               const size_t in_gate_mem = buff_size_aligned_in;
               const size_t in_mem = grad_mem + in_act_mem + in_gate_mem;
 
               const size_t out_act_mem = buff_size_aligned_out;
-#ifdef __HIP_PLATFORM_AMD__
-              const size_t out_gate_mem = buff_size_aligned_out;
-#else
               const size_t out_gate_mem = (IS_BWD ? buff_size_aligned_out : 0);
-#endif
               size_t out_mem = out_act_mem + out_gate_mem;
 
               if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) { out_mem *= 2; }
+#endif
 
               const size_t shmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
