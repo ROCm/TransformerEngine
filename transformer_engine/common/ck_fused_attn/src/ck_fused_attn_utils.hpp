@@ -1,5 +1,5 @@
 /*************************************************************************
- * Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
@@ -7,9 +7,9 @@
 #ifndef CK_FUSED_ATTN_UTILS_H
 #define CK_FUSED_ATTN_UTILS_H
 
-#include<iostream>
-#include<cstdint>
+#include<fstream>
 #include<hip/hip_runtime.h>
+#include "ck_tile/host.hpp"
 
 //forward declaration for ck_tile enum
 enum class mask_enum;
@@ -55,6 +55,29 @@ BiasShape get_bias_shape(uint64_t b, uint64_t h, uint64_t bias_b, uint64_t bias_
 std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, uint64_t b, uint64_t h, uint64_t bias_b, uint64_t bias_h);
 
 uint64_t get_runtime_max_seqlen(uint64_t b, const void* cu_seqlen_ptr, const void* cu_seqlen_padded_ptr, void* workspace, hipStream_t stream);
+
+// This helper merely standardizes the logging to make it a bit easier to parse
+// through it at a glance while guaranteeing uniformity.
+template<typename T>
+void log_value(std::ostream* log_file, const char* label, const T& value) {
+    (*log_file) << label << ": " << value << "\n";
+}
+
+ck_tile::index_t get_batch_stride_bias(
+  ck_tile::index_t bias_h,
+  BiasShape bias_shape,
+  ck_tile::index_t max_seqlen_q,
+  ck_tile::index_t max_seqlen_k,
+  bool is_group_mode,
+  bool is_fwd
+);
+ck_tile::index_t get_nhead_stride_bias(
+  BiasShape bias_shape,
+  ck_tile::index_t max_seqlen_q,
+  ck_tile::index_t max_seqlen_k,
+  bool is_group_mode
+);
+std::ostream* get_ck_log_stream();
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_UTILS_H

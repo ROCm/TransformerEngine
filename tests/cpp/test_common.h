@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -15,15 +15,14 @@
 
 #ifndef USE_ROCM
 #define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
+#else
+#define FP4_TYPE_SUPPORTED (true)
+#endif
+
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #if FP4_TYPE_SUPPORTED
 #include <cuda_fp4.h>
-#endif
-#else
-#define FP4_TYPE_SUPPORTED (false)
-#include <hip/hip_bfloat16.h>
-#include "amd_detail/hip_float8.h"
 #endif
 #include <cuda_runtime_api.h>
 
@@ -74,6 +73,8 @@ using fp8e5m2 = te_hip_fp8_e5m2;
 using fp8e8m0 = uint8_t;
 #if FP4_TYPE_SUPPORTED
 using fp4e2m1 = __nv_fp4_e2m1;
+using fp4e2m1x2 = __nv_fp4x2_e2m1;
+using fp4e2m1x4 = __nv_fp4x4_e2m1;
 #endif
 
 template <typename T>
@@ -239,7 +240,9 @@ class Tensor {
 
   float scale() const {
     if(scale_cpu_data_) {
-      NVTE_CHECK(tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING, "Invalid scaling_mode!");
+      NVTE_CHECK((tensor_.scaling_mode() == NVTE_DELAYED_TENSOR_SCALING)
+                 || (tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING),
+                 "Invalid scaling_mode!");
       to_cpu();
       return *scale_cpu_data_;
     } else {
@@ -253,6 +256,8 @@ class Tensor {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
+    } else if (tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING) {
+      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat8E4M3, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
     }
@@ -266,6 +271,8 @@ class Tensor {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
     } else if (tensor_.scaling_mode() == NVTE_BLOCK_SCALING_1D || tensor_.scaling_mode() == NVTE_BLOCK_SCALING_2D) {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat32, "Invalid type!");
+    } else if (tensor_.scaling_mode() == NVTE_NVFP4_1D_SCALING) {
+      NVTE_CHECK(TypeInfo<T>::dtype == DType::kFloat8E4M3, "Invalid type!");
     } else {
       NVTE_CHECK(TypeInfo<T>::dtype == DType::kByte, "Invalid type!");
     }
@@ -292,6 +299,10 @@ class Tensor {
 
   void set_tensor_amax_nullptr(){
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
+  }
+
+  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
+    tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   }
 
   void to_cpu() const;
@@ -330,10 +341,24 @@ constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 
 // [128,4] rowwise and [4,128] colwise alignment requirement
-constexpr size_t scale_tensor_alignment_X_rowwise = 4;
+#ifdef __HIP_PLATFORM_AMD__
+// For mxfp8:
+constexpr size_t scale_tensor_alignment_X_rowwise = 1;
+constexpr size_t scale_tensor_alignment_Y_rowwise = 1;
+constexpr size_t scale_tensor_alignment_X_colwise = 1;
+constexpr size_t scale_tensor_alignment_Y_colwise = 1;
+
+// For nvfp4:
+constexpr size_t nvfp4_scale_tensor_alignment_Y_rowwise = 128;
+constexpr size_t nvfp4_scale_tensor_alignment_X_rowwise = 4;
+constexpr size_t nvfp4_scale_tensor_alignment_Y_colwise = 4;
+constexpr size_t nvfp4_scale_tensor_alignment_X_colwise = 128;
+#else
 constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
-constexpr size_t scale_tensor_alignment_X_colwise = 128;
+constexpr size_t scale_tensor_alignment_X_rowwise = 4;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
+constexpr size_t scale_tensor_alignment_X_colwise = 128;
+#endif
 
 inline size_t divide_round_up(const size_t N, const size_t M) {
     return (N - 1 + M) / M;
@@ -494,12 +519,16 @@ void compareResults(const std::string &name, const float test, const float ref,
                     double atol = 1e-5, double rtol = 1e-8);
 void compareResults(const std::string &name, const uint8_t *test, const uint8_t *ref,
                     size_t N, float mismatch_rate_tol = 0.);
-void compare_e8m0_scaling_factors(const std::string &name, const uint8_t *test, const uint8_t *ref,
-                                  const size_t row_blocks, const size_t col_blocks, const size_t stride,
-                                  std::vector<size_t> &mismatch_indices, size_t& mismatches_num,
-                                  const size_t scale_diff_abs_tolerance = 0,
-                                  const double abs_tolerable_mismatches_limit = 0,
-                                  const double rel_tolerable_mismatches_limit = 0);
+template <typename T>
+void compare_scaling_factors(const std::string &name, const T *test, const T *ref,
+                             const size_t row_blocks, const size_t col_blocks, const size_t stride,
+#ifdef USE_ROCM
+                             std::vector<size_t>& mismatch_indices, 
+#endif  //#ifdef USE_ROCM
+                             size_t& mismatches_num,
+                             const size_t scale_diff_abs_tolerance = 0,
+                             const double abs_tolerable_mismatches_limit = 0,
+                             const double rel_tolerable_mismatches_limit = 0);
 
 #ifdef USE_ROCM
 void adjust_ref_for_e8m0_scale_error(const std::string &name,
@@ -530,6 +559,7 @@ const std::string& caseName(InputsFillCase type);
 extern std::vector<DType> all_fp_types;
 
 bool isFp8Type(DType type);
+bool isFp4Type(DType type);
 
 int32_t getDeviceComputeCapability();
 constexpr int32_t hopperComputeCapability = 90;
@@ -607,7 +637,7 @@ constexpr int32_t blackwellComputeCapability = 100;
         SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__) \
         default: \
             printf("dtype: %d\n", static_cast<int>(dtype)); \
-            NVTE_ERROR("Invalid type MARKED TEST."); \
+            NVTE_ERROR("Invalid type."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP8_ONLY(dtype, type, ...) \
@@ -626,7 +656,7 @@ constexpr int32_t blackwellComputeCapability = 100;
             } \
         break; \
         default: \
-            NVTE_ERROR("Invalid type MARKED TEST 2."); \
+            NVTE_ERROR("Invalid type."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP4_ONLY(dtype, type, ...) \
@@ -634,7 +664,7 @@ constexpr int32_t blackwellComputeCapability = 100;
         using namespace transformer_engine; \
         SWITCH_FP4_HANDLE(type, __VA_ARGS__) \
         default: \
-            NVTE_ERROR("Invalid type MARKED TEST 3."); \
+            NVTE_ERROR("Invalid type."); \
     }
 
 #define TRANSFORMER_ENGINE_TYPE_SWITCH_FP16_FP32_ONLY(dtype, type, ...) \
@@ -659,5 +689,5 @@ constexpr int32_t blackwellComputeCapability = 100;
             } \
         break; \
         default: \
-            NVTE_ERROR("Invalid type MARKED TEST 4."); \
+            NVTE_ERROR("Invalid type."); \
     }

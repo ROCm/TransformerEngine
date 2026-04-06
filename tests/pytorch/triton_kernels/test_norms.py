@@ -218,7 +218,7 @@ class TestNorms:
         gamma_tensor = fill_uniform(N, in_dtype)
         bias_tensor = fill_uniform(N, in_dtype)
 
-        self._check_skips(quantization=quantization, shape=(M, N))
+        self._check_skips(quantization=quantization, shape=(M, N), colwise=columnwise)
 
         epsilon = 1e-5
 
@@ -349,7 +349,7 @@ class TestNorms:
         fp8_dtype = tex.DType.kFloat8E4M3
         gamma_tensor = torch.tensor([2**20] + [0]*127, dtype=in_dtype, device="cuda")
 
-        self._check_skips(quantization=quantization, shape=(M, N))
+        self._check_skips(quantization=quantization, shape=(M, N), colwise=columnwise)
 
         quantizer_triton, quantizer_hip = self._make_quantizer(
             quantization=quantization,
@@ -458,10 +458,6 @@ class TestNorms:
             # pass the earlier comparisons.
             compare_func = partial(te_compare_results, atol=1, rtol=0, use_torch_semantics=True)
 
-            # The MXFP8 tensors carry their scale_inv values in a padded
-            # format, hence we must omit the padded values.
-            input_shape = out_triton.shape
-            unpad_rscale_inv_shape = (math.prod(input_shape[:-1]), input_shape[-1] // MXFP8_BLOCK_SCALING_SIZE)
             if has_rscale_triton != has_rscale_hip:
                 msg = "Expected rowwise scale to "
                 if has_rscale_hip:
@@ -470,8 +466,8 @@ class TestNorms:
                 raise ValueError(msg)
             if has_rscale_triton:
                 compare_func(
-                    actual=out_triton._rowwise_scale_inv[:unpad_rscale_inv_shape[0], :unpad_rscale_inv_shape[1]],
-                    expected=out_hip._rowwise_scale_inv[:unpad_rscale_inv_shape[0], :unpad_rscale_inv_shape[1]],
+                    actual=out_triton._rowwise_scale_inv,
+                    expected=out_hip._rowwise_scale_inv,
                     msg=lambda msg: f"Output rowwise scale inverse does not match triton <-> hip\n\n{msg}\n",
                 )
 
@@ -485,8 +481,8 @@ class TestNorms:
                 raise ValueError(msg)
             if has_cscale_triton:
                 compare_func(
-                    actual=out_triton._columnwise_scale_inv[:unpad_rscale_inv_shape[1], :unpad_rscale_inv_shape[0]],
-                    expected=out_hip._columnwise_scale_inv[:unpad_rscale_inv_shape[1], :unpad_rscale_inv_shape[0]],
+                    actual=out_triton._columnwise_scale_inv,
+                    expected=out_hip._columnwise_scale_inv,
                     msg=lambda msg: f"Output columnwise scale inverse does not match triton <-> hip\n\n{msg}\n",
                 )
 
@@ -542,15 +538,17 @@ class TestNorms:
                 msg=lambda msg: f"mu does not match triton <-> hip\n\n{msg}\n",
             )
 
-    def _check_skips(self, quantization, shape):
+    def _check_skips(self, quantization, shape, colwise):
         # Check if quantization scheme is supported
         if quantization == "fp8" and not fp8_available:
             pytest.skip(reason_for_no_fp8)
         if quantization == "mxfp8":
             if not mxfp8_available:
                 pytest.skip(reason_for_no_mxfp8)
-            if shape[0] % 32 !=0 or shape[1] % 32 !=0:
-                pytest.skip("MXFP8 quantization requires dimensions divisible by 32.")
+            if shape[0] % 32:
+                pytest.skip("MXFP8 quantization requires row dimensions divisible by 32.")
+            if colwise and shape[1] % 32:
+                pytest.skip("Colwise MXFP8 quantization requires col dimensions divisible by 32.") 
 
 
     def _make_quantizer(self, quantization, fp8_dtype, columnwise):

@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -18,14 +18,15 @@ from subprocess import CalledProcessError
 from typing import List, Optional, Type
 
 import setuptools
+from setuptools.command.sdist import sdist as _sdist
 
+from .te_version import te_version, is_local_version_used, version_file
 from .utils import (
     rocm_build,
     rocm_path,
     cmake_bin,
     debug_build_enabled,
     found_ninja,
-    get_frameworks,
     nvcc_path,
     get_max_jobs_for_parallel_build,
 )
@@ -61,9 +62,16 @@ class CMakeExtension(setuptools.Extension):
             build_dir,
             f"-DPython_EXECUTABLE={sys.executable}",
             f"-DPython_INCLUDE_DIR={sysconfig.get_path('include')}",
+            f"-DPython_SITEARCH={sysconfig.get_path('platlib')}",
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]
+        if bool(int(os.getenv("NVTE_USE_CCACHE", "0"))):
+            ccache_bin = os.getenv("NVTE_CCACHE_BIN", "ccache")
+            configure_command += [
+                f"-DCMAKE_CXX_COMPILER_LAUNCHER={ccache_bin}",
+                f"-DCMAKE_CUDA_COMPILER_LAUNCHER={ccache_bin}",
+            ]
         configure_command += self.cmake_flags
 
         import pybind11
@@ -158,8 +166,11 @@ def get_build_ext(
         def build_extensions(self):
             # For core lib + JAX install, fix build_ext from pybind11.setup_helpers
             # to handle CUDA files correctly.
+            # Upstream uses get_frameworks() here which is incorrectly works when install from
+            # release (sdist) wheel on a system with both frameworks installed.
             ext_names = [ext.name for ext in self.extensions]
-            if "transformer_engine_pytorch" not in ext_names:
+            if ("transformer_engine_torch" not in ext_names and
+                "transformer_engine_rocm_torch" not in ext_names):
                 # Ensure at least an empty list of flags for 'cxx' and 'nvcc' when
                 # extra_compile_args is a dict.
                 for ext in self.extensions:
@@ -224,3 +235,15 @@ def get_build_ext(
             super().build_extensions()
 
     return _CMakeBuildExtension
+
+
+class SdistWithLocalVersion(_sdist):
+    """
+    Override sdist to modify the *staged* copy of VERSION.txt.
+    """
+    def make_release_tree(self, base_dir, files):
+        # First let setuptools stage the files into base_dir
+        super().make_release_tree(base_dir, files)
+
+        if is_local_version_used():
+            version_file(base_dir).write_text(te_version() + "\n", encoding="utf-8")

@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -31,6 +31,7 @@ typedef uint16_t hip_bfloat16x2 __attribute__((ext_vector_type(2)));
 #endif
 
 #if !defined(__CUDACC_RTC__)
+#include <cassert>
 #include <cstdint>
 #else
 // Importing C++ standard headers is a pain with NVRTC
@@ -49,6 +50,39 @@ static_assert(sizeof(uint64_t) == 8);
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
 constexpr uint32_t THREADS_PER_WARP = 32;
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Device-side error
+#define NVTE_DEVICE_ERROR(message)                                                                 \
+  do {                                                                                             \
+    printf("%s:%d in function %s (thread (%d,%d,%d), block (%d,%d,%d)): %s\n", __FILE__, __LINE__, \
+           __func__, threadIdx.x, threadIdx.y, threadIdx.z, blockIdx.x, blockIdx.y, blockIdx.z,    \
+           (message));                                                                             \
+    assert(0);                                                                                     \
+  } while (false)
+
+// Device-side error on thread 0
+#define NVTE_DEVICE_THREAD0_ERROR(message)                                           \
+  do {                                                                               \
+    if (blockIdx.x == 0 && blockIdx.y == 0 && blockIdx.z == 0 && threadIdx.x == 0 && \
+        threadIdx.y == 0 && threadIdx.z == 0) {                                      \
+      NVTE_DEVICE_ERROR(message);                                                    \
+    }                                                                                \
+  } while (false)
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+inline __device__ float2 operator+(const float2 &a, const float2 &b) {  // NOLINT(*)
+  return {a.x + b.x, a.y + b.y};
+}
+
+////////////////////////////////////////////////////////////////////////////////////////////////////
+
+inline __device__ void operator+=(float2 &a, const float2 &b) {  // NOLINT(*)
+  a.x += b.x;
+  a.y += b.y;
+}
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 
@@ -1003,7 +1037,7 @@ struct Numeric_Traits<fp8e4m3> {
 #endif
 };
 
-#if !defined(__HIP_DEVICE_COMPILE__)
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__HIP_DEVICE_COMPILE__)
 template <bool FNUZ>
 struct Numeric_Traits_fp8e4m3: public Numeric_Traits<fp8e4m3> {
   static constexpr double maxNorm = FNUZ ? 240 : 448;
@@ -1021,7 +1055,7 @@ struct Quantized_Limits {
   static constexpr int max_unbiased_exponent = Numeric_Traits<T>::maxUnbiasedExponent;
   static constexpr float emax = 1 << max_unbiased_exponent;
   static constexpr float emax_rcp = 1.0 / emax;
-#if !defined(__HIP_DEVICE_COMPILE__)
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__HIP_DEVICE_COMPILE__)
   static constexpr struct {
     operator float() const {
       if (std::is_same<T, fp8e4m3>::value) {
@@ -1034,10 +1068,10 @@ struct Quantized_Limits {
   } max_norm = {};
   // dummy value for kernels host path compilation
   static constexpr float max_norm_rcp = std::numeric_limits<float>::signaling_NaN();
-#else // !defined(__HIP_DEVICE_COMPILE__)
+#else // defined(__HIP_PLATFORM_AMD__) && !defined(__HIP_DEVICE_COMPILE__)
   static constexpr float max_norm = Numeric_Traits<T>::maxNorm;
   static constexpr float max_norm_rcp = 1.0 / max_norm;
-#endif // !defined(__HIP_DEVICE_COMPILE__)
+#endif // defined(__HIP_PLATFORM_AMD__) && !defined(__HIP_DEVICE_COMPILE__)
 };
 
 }  // namespace transformer_engine

@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -16,20 +16,23 @@ from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
 import logging
 from types import MethodType
+from itertools import chain
 
 import torch
 import torch.nn.functional as F
+from torch.distributed.tensor import DTensor
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import Recipe
 
 from ._common import _ParameterInitMeta, noop_cat
-from ..fp8 import (
+from ..quantization import (
     MXFP8BlockScalingRecipeState,
     DelayedScalingRecipeState,
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
+    NVFP4BlockScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
 )
@@ -40,18 +43,17 @@ from ..distributed import (
     _fsdp_gather_tensors,
 )
 from ..constants import dist_group_type
-from ..tensor.quantized_tensor import QuantizedTensor, QuantizedTensorBase, Quantizer
+from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ..tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 if IS_HIP_EXTENSION:
     from ..tensor.fsdp2_allgather_tensor import FSDPAGTensor
-from ..tensor._internal.float8_tensor_base import Float8TensorBase
-from ..tensor._internal.mxfp8_tensor_base import MXFP8TensorBase
-if IS_HIP_EXTENSION:
     from ..triton_kernels.cast import te_quantize_triton
+from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
+from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..utils import get_device_compute_capability, is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
-from ..tensor._internal.float8_blockwise_tensor_base import Float8BlockwiseQTensorBase
+from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
@@ -89,7 +91,8 @@ def get_cublas_workspace_size_bytes() -> None:
         return 33_554_432        
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
-        return 33_554_432
+        # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
+        return 32 * 1024 * 1024 + 1024
     return 4_194_304
 
 
@@ -286,16 +289,6 @@ def initialize_ub(
                 flush=True,
             )
 
-    # Allocate cuBLAS workspace with expanded size for chunking in overlapping GEMM calls
-    global _cublas_workspace
-    if _cublas_workspace is None:
-        _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
-    elif _cublas_workspace.numel() != get_cublas_workspace_size_bytes() * _NUM_MAX_UB_STREAMS:
-        # This ensures we don't do `.repeat()` on an already expanded workspace
-        _cublas_workspace = torch.empty(
-            get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
-        ).repeat(_NUM_MAX_UB_STREAMS)
-
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
     layers_all_gather_overlap = [
         "qkv_fprop",
@@ -310,22 +303,43 @@ def initialize_ub(
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
     # Default overlap methods for layers
-    methods = {
-        "ring_exchange": [
-            "qkv_fprop",
-            "fc1_fprop",
-            "proj_dgrad",
-            "fc2_dgrad",
-        ],
-        "pipeline": ["proj_fprop", "fc2_fprop"],
-        "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
-        "external": ["proj_wgrad", "fc2_wgrad"],
-    }
+    if IS_HIP_EXTENSION:
+        methods = {
+            "ring_exchange": [
+                "qkv_fprop",
+                "fc1_fprop",
+                "proj_dgrad",
+                "fc2_dgrad",
+                "proj_wgrad",
+                "fc2_wgrad",
+                "proj_fprop",
+                "fc2_fprop",
+                "qkv_dgrad",
+                "fc1_dgrad",
+                "qkv_wgrad",
+                "fc1_wgrad"
+            ],
+            "pipeline": [],
+            # TODO: Investigate issues with qkv_dgrad and fc1_dgrad overlap on ROCm
+            "bulk": [],
+        }
+    else:
+        methods = {
+            "ring_exchange": [
+                "qkv_fprop",
+                "fc1_fprop",
+                "proj_dgrad",
+                "fc2_dgrad",
+            ],
+            "pipeline": ["proj_fprop", "fc2_fprop"],
+            "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
+            "external": ["proj_wgrad", "fc2_wgrad"],
+        }
 
     # AG-RS overlap pairs of layers forming a tensor-parallel block
     ag_rs_pairs = {"qkv_fprop": "proj_fprop", "fc1_fprop": "fc2_fprop"}
     rs_ag_pairs = {v: k for k, v in ag_rs_pairs.items()}
-    external_gemm_to_overlap = {"proj_wgrad": "proj_dgrad", "fc2_wgrad": "fc2_dgrad"}
+    external_gemm_to_overlap = {} if IS_HIP_EXTENSION else {"proj_wgrad": "proj_dgrad", "fc2_wgrad": "fc2_dgrad"}
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
 
@@ -346,7 +360,7 @@ def initialize_ub(
             "is_reduce_scatter": is_reduce_scatter,
             "num_sm": 1 if method == "ring_exchange" else 16,
             "cga_size": 1 if method == "ring_exchange" else 2,
-            "set_sm_margin": not method == "ring_exchange",
+            "set_sm_margin": not method == "ring_exchange" and not IS_HIP_EXTENSION, # Default set to False for HIP for performance
             "num_splits": tp_size if method == "ring_exchange" else 4,
             "aggregate": False,
             "atomic_gemm": False,
@@ -426,6 +440,7 @@ def initialize_ub(
             if (quantization_mode == UserBufferQuantizationMode.FP8 and fp8_buf)
             else dtype
         )
+
         if method == "ring_exchange":
             ub_obj = tex.CommOverlapP2P(
                 shape,  # Communication buffer shape
@@ -471,16 +486,26 @@ def initialize_ub(
                 ):
                     wgrad_name = name.replace("dgrad", "wgrad")
                     assert wgrad_name not in user_ub_cfg
-                    layers_reduce_scatter_overlap.remove(wgrad_name)
-                    layers_all_gather_overlap.remove(name)
-                    layers_reduce_scatter_overlap.append(name)
-                    methods["bulk"].remove(name)
+                    if wgrad_name in layers_reduce_scatter_overlap:
+                        layers_reduce_scatter_overlap.remove(wgrad_name)
+                    if name in layers_all_gather_overlap:
+                        layers_all_gather_overlap.remove(name)
+                    if name not in layers_reduce_scatter_overlap:
+                        layers_reduce_scatter_overlap.append(name)
+                    if name in methods["bulk"]:
+                        methods["bulk"].remove(name)
                     new_method = user_ub_cfg[name]["method"]
-                    methods[new_method].append(name)
+                    if name not in methods[new_method]:
+                        methods[new_method].append(name)
 
-        for name in (
-            methods["ring_exchange"] + methods["pipeline"] + methods["bulk"] + methods["external"]
-        ):
+        if IS_HIP_EXTENSION and user_ub_cfg is not None:
+            for name, cfg in user_ub_cfg.items():
+                assert cfg.get("method") != "bulk", (
+                    f"Bulk overlap method for '{name}' is not supported on HIP/ROCm. "
+                    "Please use 'ring_exchange' method instead."
+                )
+
+        for name in chain.from_iterable(methods.values()):
             ub_cfg = get_default_config(name)
             if user_ub_cfg is not None and name in user_ub_cfg:
                 fp8_buf = (name in layers_all_gather_overlap) or (
@@ -515,7 +540,7 @@ def fill_userbuffers_buffer_for_all_gather(
     local_tensor: torch.Tensor,
     quantizer: Optional[Quantizer],
     process_group,
-) -> tuple[torch.Tensor | QuantizedTensorBase, torch.Tensor | QuantizedTensorBase]:
+) -> tuple[torch.Tensor | QuantizedTensorStorage, torch.Tensor | QuantizedTensorStorage]:
     """Fill local shard of Userbuffers buffer with data for all-gather
 
     Returns the full tensor and the local shard, both using the
@@ -539,7 +564,7 @@ def fill_userbuffers_buffer_for_all_gather(
 
     # Unquantized data
     if quantizer is None:
-        if isinstance(local_tensor, QuantizedTensorBase):
+        if isinstance(local_tensor, QuantizedTensorStorage):
             local_tensor = local_tensor.dequantize()
         if comm.is_fp8_ubuf():
             raise RuntimeError(
@@ -552,8 +577,8 @@ def fill_userbuffers_buffer_for_all_gather(
 
     # FP8 data
     if isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
-        if not isinstance(local_tensor, Float8TensorBase):
-            if isinstance(local_tensor, QuantizedTensorBase):
+        if not isinstance(local_tensor, Float8TensorStorage):
+            if isinstance(local_tensor, QuantizedTensorStorage):
                 local_tensor.dequantize()
             quantizer.set_usage(rowwise=True, columnwise=False)
             local_tensor = quantizer(local_tensor)
@@ -564,7 +589,7 @@ def fill_userbuffers_buffer_for_all_gather(
             )
         comm.copy_into_buffer(local_tensor._data, local_chunk=True)
         global_tensor_data = comm.get_buffer(shape=global_shape)
-        global_tensor = Float8TensorBase(
+        global_tensor = Float8TensorStorage(
             data=global_tensor_data,
             fp8_scale_inv=local_tensor._scale_inv,
             fp8_dtype=local_tensor._fp8_dtype,
@@ -576,8 +601,8 @@ def fill_userbuffers_buffer_for_all_gather(
     if isinstance(quantizer, MXFP8Quantizer):
 
         # Cast to MXFP8 if needed
-        if not isinstance(local_tensor, MXFP8TensorBase):
-            if isinstance(local_tensor, QuantizedTensorBase):
+        if not isinstance(local_tensor, MXFP8TensorStorage):
+            if isinstance(local_tensor, QuantizedTensorStorage):
                 local_tensor.dequantize()
             local_tensor = quantizer(local_tensor)
         if not comm.is_fp8_ubuf():
@@ -602,7 +627,7 @@ def fill_userbuffers_buffer_for_all_gather(
         comm.copy_into_buffer(local_data, local_chunk=True)
 
         # Gather scaling-inverses
-        if math.prod(local_shape[:-1]) % 128 != 0:
+        if math.prod(local_shape[:-1]) % 128 != 0 and not IS_HIP_EXTENSION:
             raise ValueError(
                 "Userbuffers requires MXFP8 tensor dims that are divisible by 128, "
                 f"but got MXFP8 tensor with shape={tuple(local_shape)}"
@@ -632,7 +657,7 @@ def fill_userbuffers_buffer_for_all_gather(
             rowwise_data, rowwise_scale_inv = global_data, global_scale_inv
         else:
             columnwise_data, columnwise_scale_inv = global_data, global_scale_inv
-        global_tensor = MXFP8TensorBase(
+        global_tensor = MXFP8TensorStorage(
             rowwise_data=rowwise_data,
             rowwise_scale_inv=rowwise_scale_inv,
             columnwise_data=columnwise_data,
@@ -675,6 +700,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         self.keep_fp8_weight_transpose_cache: bool = True
         self.use_fsdp2 = False
         self.wgrad_accumulation_and_reduce_hooks = []
+        self.wgrad_store = None
 
         if not TEDebugState.debug_enabled:
             TEDebugState.initialize()
@@ -772,6 +798,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 recipe_state, Float8BlockScalingRecipeState
             ):
                 return
+            if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
+                return
 
         # Max. number of fp8 tensors per GEMM = 3 (input, weight, output) for fwd and
         # 2 (grad_output and grad_input) for bwd
@@ -796,10 +824,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             f"({len(weight_quantizers)}) must match"
         )
         for weight, quantizer in zip(weight_tensors, weight_quantizers):
-            if quantizer is not None and isinstance(weight, QuantizedTensorBase):
+            if quantizer is not None and isinstance(weight, QuantizedTensorStorage):
                 weight.update_quantizer(quantizer)
 
-    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorBase]]:
+    def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorStorage]]:
         """Get the weight tensors of the module."""
         raise NotImplementedError(
             f"{self.__class__.__name__} class does not implement _get_weight_tensors function"
@@ -981,12 +1009,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         dtype = inp.dtype
-        for name, param in self.named_parameters():
-            if param is not None:
-                assert dtype == param.dtype, (
-                    "Data types for parameters must match when outside of autocasted region. "
-                    f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
-                )
+        if not self.allow_different_data_and_param_types:
+            for name, param in self.named_parameters():
+                if param is not None:
+                    assert dtype == param.dtype, (
+                        "Data types for parameters must match when outside of autocasted region. "
+                        f" Found input dtype: {dtype} and {name!r} dtype: {param.dtype}"
+                    )
         self.activation_dtype = dtype
 
     def set_tensor_parallel_group(self, tp_group: Union[dist_group_type, None]) -> None:
@@ -1050,8 +1079,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_meta["fp8_group"] = FP8GlobalStateManager.get_fp8_group()
 
             # Set FP8_MAX per tensor according to recipe
-            self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
-            self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
+            if hasattr(self.fp8_meta["recipe"], "fp8_format"):
+                self.fp8_meta["fp8_max_fwd"] = self.fp8_meta["recipe"].fp8_format.value.max_fwd
+                self.fp8_meta["fp8_max_bwd"] = self.fp8_meta["recipe"].fp8_format.value.max_bwd
 
             # Allocate scales and amaxes
             self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
@@ -1080,6 +1110,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         inp: torch.Tensor,
         num_gemms: int = 1,
         allow_non_contiguous: bool = False,
+        allow_different_data_and_param_types: bool = False,
     ) -> Generator[torch.Tensor, None, None]:
         """Checks and prep for FWD.
         The context manager is needed because there isn't a way for a module to know
@@ -1087,6 +1118,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         to setup the forward aggregated amax reduction for every module
         just in case. The autocast exit will pick up the most recent one.
         """
+        self.allow_different_data_and_param_types = allow_different_data_and_param_types
         self.forwarded_at_least_once = True
         # Activation recomputation is used and this is the second forward phase.
         if self.fp8 and in_fp8_activation_recompute_phase():
@@ -1182,9 +1214,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_output,
                     (
                         QuantizedTensor,
-                        Float8TensorBase,
-                        MXFP8TensorBase,
-                        Float8BlockwiseQTensorBase,
+                        Float8TensorStorage,
+                        MXFP8TensorStorage,
+                        Float8BlockwiseQTensorStorage,
                     ),
                 ):
                     grad_output = quantizer(grad_output)
@@ -1213,9 +1245,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_output_.get_tensor(True),
                     (
                         QuantizedTensor,
-                        Float8TensorBase,
-                        MXFP8TensorBase,
-                        Float8BlockwiseQTensorBase,
+                        Float8TensorStorage,
+                        MXFP8TensorStorage,
+                        Float8BlockwiseQTensorStorage,
                     ),
                 )
                 and ctx.use_bias
@@ -1231,7 +1263,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         if ctx.use_bias:
             if isinstance(
                 grad_output,
-                (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase),
+                (
+                    QuantizedTensor,
+                    Float8TensorStorage,
+                    MXFP8TensorStorage,
+                    Float8BlockwiseQTensorStorage,
+                ),
             ):
                 grad_bias = grad_output.dequantize().view(-1, grad_output.shape[-1]).sum(dim=0)
             else:
@@ -1240,10 +1277,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     grad_bias = grad_output.view(-1, grad_output.shape[-1]).sum(dim=0)
                 else:
                     grad_bias, grad_output = tex.bgrad_quantize(grad_output, quantizer)
-        if not isinstance(
-            grad_output,
-            (QuantizedTensor, Float8TensorBase, MXFP8TensorBase, Float8BlockwiseQTensorBase),
-        ):
+        if not isinstance(grad_output, QuantizedTensorStorage):
             grad_output = quantizer(grad_output)
         return grad_output, grad_bias
 
@@ -1253,7 +1287,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         metedata used in deferred initialization.
         """
         super().register_parameter(name, param)
-        self.param_init_meta[name] = _ParameterInitMeta(**kwargs)
+        # Initialize param_init_meta exactly once during the init. FSDP2 can call
+        # register parameter again to change parameters to DTensors. And it calls
+        # it without custom fp8 specific kwargs that we need. And so we dont want
+        # to reset/loose our fp8 init attributes.
+        if hasattr(self, "param_init_meta") and name not in self.param_init_meta:
+            self.param_init_meta[name] = _ParameterInitMeta(**kwargs)
 
     def reset_parameters(self, defer_init: Optional[bool] = False) -> None:
         """
@@ -1265,10 +1304,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             return
 
         for name, param in self.named_parameters(recurse=False):
+            # Check if parameter is a DTensor (FSDP2) or regular tensor
+            is_dtensor = isinstance(param, DTensor)
+            dtensor_param = param if is_dtensor else None
+            # Need to update/quantize local tensor in case of DTensor
+            param = param._local_tensor if is_dtensor else param
             # Ensure parameter is on a real device
             if param.device == torch.device("meta"):
                 param = torch.empty_like(param, device="cuda")
-
             # Initialize the parameter values on device
             init_fn = self.param_init_meta[name].init_fn
             get_rng_state_tracker = self.param_init_meta[name].get_rng_state_tracker
@@ -1300,6 +1343,15 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 if IS_HIP_EXTENSION and not self.keep_fp8_weight_transpose_cache:
                     quantizer.columnwise_usage=False
 
+                if is_dtensor and isinstance(quantizer, Float8CurrentScalingQuantizer):
+                    device_mesh = dtensor_param.device_mesh
+                    amax_reduction_group = (
+                        device_mesh.get_group(mesh_dim="shard")
+                        if device_mesh.ndim > 1
+                        else device_mesh.get_group()
+                    )
+                    quantizer.amax_reduction_group = amax_reduction_group
+                    quantizer.with_amax_reduction = True
                 # Quantize parameter
                 param = quantizer(param)
             if IS_HIP_EXTENSION and self.use_fsdp2 and not self.primary_weights_in_fp8 and fp8_meta_index is not None:
@@ -1315,7 +1367,18 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             # NOTE: Currently this can only be broken when primary weights are in Fp8 but
             #       re-applying the nn.Parameter() wrap is a no-op when the input is already
             #       a parameter so we always re-apply it just for extra safety.
-            param = torch.nn.Parameter(param)
+            if is_dtensor:
+                # recreate the DTensor from the parameter.
+                dtensor_param = DTensor.from_local(
+                    param,
+                    device_mesh=dtensor_param.device_mesh,
+                    placements=dtensor_param.placements,
+                    shape=dtensor_param.size(),
+                    stride=dtensor_param.stride(),
+                )
+                dtensor_param = torch.nn.Parameter(dtensor_param)
+            else:
+                param = torch.nn.Parameter(param)
 
             # Keep high-precision values on CPU if needed
             if high_precision_init_val is not None:
@@ -1343,8 +1406,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 param._high_precision_init_val = high_precision_init_val
                 param.get_high_precision_init_val = MethodType(get, param)
                 param.clear_high_precision_init_val = MethodType(clear, param)
+                # Update the parameter based on its type
 
-            setattr(self, name, param)
+            if not is_dtensor:
+                setattr(self, name, param)
+            else:
+                setattr(self, name, dtensor_param)
 
     @abstractmethod
     def forward(self):
@@ -1407,14 +1474,14 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         # Reset cache if workspace is invalid
         if out is not None and quantizer is not None:
             reset_cache = False
-            if isinstance(out, Float8TensorBase):
+            if isinstance(out, Float8TensorStorage):
                 if (
                     not is_non_tn_fp8_gemm_supported()
                     and quantizer.columnwise_usage
                     and out._transpose is None
                 ):
                     reset_cache = True
-            elif isinstance(out, MXFP8TensorBase):
+            elif isinstance(out, MXFP8TensorStorage):
                 if quantizer.rowwise_usage and out._rowwise_data is None:
                     reset_cache = True
                 elif quantizer.columnwise_usage and out._columnwise_data is None:
@@ -1507,12 +1574,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         self.wgrad_accumulation_and_reduce_hooks.append(wgrad_accumulation_and_reduce_hook)
 
+    def need_backward_dw(self):
+        """
+        Check if this module needs to execute the delayed weight gradient computation.
+        This method should be used at the beginning of self.backward_dw() to determine if it
+        should actually be executed or just return without doing anything.
+        User can also manually call this method to check that before calling into backward_dw().
+        """
+        return self.wgrad_store is not None and self.wgrad_store.delay_wgrad_compute()
+
     def backward_dw(self):
         """
         Execute the delayed weight gradient computation.
         This method is called after the main backward pass to compute weight gradients.
         """
-        if self.wgrad_store is None or not self.wgrad_store.delay_wgrad_compute():
+        if not self.need_backward_dw():
             return
         with torch.cuda.nvtx.range(f"_{self.__class__.__name__}_wgrad"):
             (wgrad, bgrad), _ = self.wgrad_store.pop()
@@ -1549,7 +1625,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 debug = False
             else:
                 debug = TEDebugState.get_iteration() >= self.next_iter_when_debug_should_be_run
-        self.debug_last_iteration = TEDebugState.get_iteration()
+            self.debug_last_iteration = TEDebugState.get_iteration()
+            self.debug_enabled_in_this_iteration = debug
+        else:
+            # If this is the same iteration as previous invocation of the module,
+            # we use the debug value from the first invocation in the iteration.
+            debug = self.debug_enabled_in_this_iteration
+
         return debug
 
     def no_debug_features_active(self, quantizers):
@@ -1600,8 +1682,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         - MXFP8BlockScaling → MXFP8Tensor
         - Float8BlockScaling → Float8BlockTensor
 
-        Example case to check: recipe is DelayedScaling (DelayedScaling is set in fp8_autocast()),
-        but the weight tensor is MXFP8Tensor (MXFP8BlockScaling is set in fp8_model_init()).
+        Example case to check: recipe is DelayedScaling (DelayedScaling is set in autocast()),
+        but the weight tensor is MXFP8Tensor (MXFP8BlockScaling is set in quantized_model_init()).
         """
         if not self.fp8 and not self.fp8_calibration:
             return
@@ -1611,7 +1693,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         recipe = self.fp8_meta["recipe"]
         weight_tensors = [getattr(self, name) for name in self.weight_names]
         for i, tensor in enumerate(weight_tensors):
-            if isinstance(tensor, QuantizedTensorBase):
+            if isinstance(tensor, QuantizedTensorStorage):
                 quantizer = tensor._get_quantizer()
                 if quantizer is None:
                     continue
@@ -1622,6 +1704,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     raise RuntimeError(
                         f"Recipe mismatch for '{self.weight_names[i]}': tensor supports recipe"
                         f" {compatible_recipe_class.__name__}, but got {recipe.__class__.__name__}."
-                        " Please check the recipes assigned during fp8_model_init() and"
-                        " fp8_autocast() calls."
+                        " Please check the recipes assigned during quantized_model_init() and"
+                        " autocast() calls."
                     )

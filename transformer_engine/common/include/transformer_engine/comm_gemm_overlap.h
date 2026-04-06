@@ -1,5 +1,7 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -15,7 +17,12 @@
 
 #include "common/comm_gemm_overlap/userbuffers/userbuffers.h"
 
+#ifdef __HIP_PLATFORM_AMD__
+#define NVTE_COMM_OVERLAP_MAX_STREAMS NVTE_ROCM_MAX_RINGS
+#else
 #define NVTE_COMM_OVERLAP_MAX_STREAMS 3
+#endif
+
 
 namespace transformer_engine {
 
@@ -67,6 +74,11 @@ class CommOverlapCore {
   std::vector<cudaStream_t> _stream_compute;
   cudaEvent_t _start_compute, _stop_compute, _start_comm, _stop_comm, _comm_launch_event;
 
+ private:
+  void initialize(int tp_size, int num_splits, int num_max_streams, int comm_cga_size,
+                  int gemm_priority, int comm_priority, int num_comm_sm, bool set_sm_margin,
+                  bool use_ce, bool atomic_gemm);
+
  public:
   CommOverlapCore() {}  // dummy constructor for exposing type to Python
 
@@ -78,9 +90,16 @@ class CommOverlapCore {
 
   virtual ~CommOverlapCore();
 
+  void *get_ubuf_dptr() { return _ubuf.dptr(); }
+
   void set_ubuf_scale_inv(float *scale_inv) {
     _ubuf_scale_inv = scale_inv;
     _ubuf_scale_inv_initialized = true;
+  }
+
+  virtual void copy_into_buffer(cudaStream_t stream, const TensorWrapper &source, bool local_chunk,
+                                bool rowwise = true) {
+    NVTE_ERROR("Operation is not implemented.");
   }
 
   TensorWrapper get_tensor_chunk(const TensorWrapper &source, size_t offset,
@@ -89,11 +108,18 @@ class CommOverlapCore {
   TensorWrapper get_buffer_chunk_like(const TensorWrapper &source, size_t offset,
                                       const std::vector<size_t> &shape);
 
+  int get_tp_size() { return _tp_size; }
+
   bool is_atomic_gemm() { return _atomic_gemm; }
 
   bool is_p2p_overlap() { return _is_p2p; }
 
+
   bool is_fp8_ubuf() { return _ubuf.element_size() == 1; }
+
+  virtual bool is_aggregate() {
+    NVTE_ERROR("Operation is not implemented.");
+  }
 
   virtual void bulk_overlap(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                             bool transb, TensorWrapper &D, TensorWrapper &bias,
@@ -112,6 +138,14 @@ class CommOverlapCore {
   }
 
   virtual void split_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                                bool accumulate, bool use_split_accumulator,
+                                TensorWrapper &rs_output, cudaStream_t stream_main) {
+    NVTE_ERROR("Operation is not implemented.");
+  }
+
+  virtual void rocm_split_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                                 bool transb, TensorWrapper &D, TensorWrapper &bias,
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator,
@@ -139,6 +173,14 @@ class CommOverlapCore {
                                         cudaStream_t stream_main) {
     NVTE_ERROR("Operation is not implemented.");
   }
+
+  virtual void rocm_split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                                bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
+                                cudaStream_t stream_main) {
+    NVTE_ERROR("Operation is not implemented.");
+  }
 };  // CommOverlapCore
 
 class CommOverlapBase : public CommOverlapCore {
@@ -147,6 +189,10 @@ class CommOverlapBase : public CommOverlapCore {
   bool _rs_overlap_first_gemm;
   cudaStream_t _stream_comm;
   cudaEvent_t _start_d2dcopy;
+
+ private:
+  void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
+                  bool rs_overlap_first_gemm);
 
  public:
   CommOverlapBase() {}  // dummy constructor for exposing type to Python
@@ -207,6 +253,22 @@ class CommOverlapBase : public CommOverlapCore {
 
   void bulk_overlap_external_ag(cudaStream_t send_stream, cudaStream_t recv_stream,
                                 cudaStream_t stream_main) override;
+
+  void rocm_split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                           bool transb, TensorWrapper &D, TensorWrapper &bias,
+                           TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                           bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
+                           cudaStream_t stream_main) override {
+    NVTE_ERROR("Operation not supported.");
+  }
+
+  void rocm_split_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+                        TensorWrapper &workspace, bool grad, bool accumulate,
+                        bool use_split_accumulator, TensorWrapper &rs_output,
+                        cudaStream_t stream_main) override {
+    NVTE_ERROR("Operation not supported.");
+                        }
 };  // CommOverlapBase
 
 class CommOverlapP2PBase : public CommOverlapCore {
@@ -221,8 +283,18 @@ class CommOverlapP2PBase : public CommOverlapCore {
   int _self_chunk_id;
   std::vector<TensorWrapper> _ubufs;
   std::vector<cudaStream_t> _stream_send;
+#ifdef __HIP_PLATFORM_AMD__  
+  std::vector<cudaStream_t> l_stream_send, l_stream_recv;
+#endif
   cudaStream_t _stream_recv;
   cudaEvent_t _stop_send, _stop_recv;
+
+  uint64_t _ag_signal_base = 0;
+  uint64_t _rs_signal_base = 0;
+
+ private:
+  void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
+                  CommOverlapType comm_type, bool aggregate);
 
  public:
   CommOverlapP2PBase() {}  // dummy constructor for exposing type to Python
@@ -236,6 +308,9 @@ class CommOverlapP2PBase : public CommOverlapCore {
                      bool atomic_gemm = false, bool aggregate = false);
 
   virtual ~CommOverlapP2PBase();
+
+  void copy_into_buffer(cudaStream_t stream, const TensorWrapper &source, bool local_chunk,
+                        bool rowwise = true) override;
 
   TensorWrapper get_buffer_chunk_by_id(const TensorWrapper &source, size_t buffer_id);
 
@@ -286,6 +361,25 @@ class CommOverlapP2PBase : public CommOverlapCore {
                         TensorWrapper &workspace, bool grad, bool accumulate,
                         bool use_split_accumulator, TensorWrapper &rs_output,
                         cudaStream_t stream_main) override;
+  /*
+  ** ROCm Multiring ReduceScatter + GEMM
+  */
+  void rocm_split_overlap_rs(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+                        TensorWrapper &workspace, bool grad, bool accumulate,
+                        bool use_split_accumulator, TensorWrapper &rs_output,
+                        cudaStream_t stream_main) override;
+
+  /*
+  ** ROCm Multiring AllGather + GEMM
+  */
+  void rocm_split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+                        TensorWrapper &workspace, bool grad, bool accumulate,
+                        bool use_split_accumulator, TensorWrapper &B_copy,
+                        cudaStream_t stream_main) override;
+
+  bool is_aggregate() { return _aggregate; } // needed for rocm pathing
 
   /*
   ** This function overlaps the AG for the current communicator object with the GEMM for the overlap_gemm object.

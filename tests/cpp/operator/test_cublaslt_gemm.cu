@@ -29,6 +29,7 @@ std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes = {
 }; 
 
 std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes_mxfp8 = {
+  {32, 128, 16},
   {768, 3072, 4096},
 };
 
@@ -345,8 +346,11 @@ void performTest(const TestParams& params) {
     if (!has_fp8) {
       GTEST_SKIP() << "MXFP8 scaling mode requires Float8 types";
     }
-    if (params.m % 32 != 0 || params.n % 32 != 0 || params.k % 32 != 0) {
-      GTEST_SKIP() << "MXFP8 requires M, N, K to be multiples of 32";
+    if (params.m % 16 || params.n % 16) {
+      GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
+    }
+    if (params.k % 128) {
+      GTEST_SKIP() << "MXFP8 requires K to be a multiple of 128";
     }
   }
 
@@ -560,8 +564,11 @@ void performDqTest(const TestParams &params) {
   GTEST_ASSERT_TRUE(isFp8Type(atype) && isFp8Type(btype)) << "FP8/BF8 input datatype is expected";
   GTEST_ASSERT_FALSE(isFp8Type(dtype)) << "Non FP8/BF8 output datatype is expected";
 
-  if (params.m % 32 != 0 || params.n % 32 != 0 || params.k % 32 != 0) {
-    GTEST_SKIP() << "MXFP8 requires M, N, K to be multiples of 32";
+  if (params.m % 16 || params.n % 16) {
+    GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
+  }
+  if (params.k % 128) {
+    GTEST_SKIP() << "MXFP8 requires K to be a multiple of 128";
   }
 
   cudaDeviceProp prop;

@@ -142,7 +142,7 @@ def benchmark_dot_product_attention(model, attention, column_name, dirname):
     config = model_configs[model]
 
     for i in range(warmup_iters):
-        attn_fwd, attn_bwd = _run_dot_product_attention(
+        attn_fwd, _, attn_bwd = _run_dot_product_attention(
                 dtype,
                 config,
                 attention,
@@ -185,7 +185,7 @@ def benchmark_dot_product_attention_profiler(model, attention, column_name):
     attn_start = time.time()
     
     for i in range(num_iters):
-        attn_fwd, attn_bwd = _run_dot_product_attention(
+        attn_fwd, _, attn_bwd = _run_dot_product_attention(
                 dtype,
                 config,
                 attention,
@@ -307,7 +307,6 @@ def sanity_checks(
             cfg,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
-            window_size=cfg.window_size,
             pad_between_seqs=pad_between_seqs,
         )
         flash_ok, fused_ok, _ = avail
@@ -368,7 +367,6 @@ def main(args):
             config,
             qkv_dtype=dtype,
             qkv_layout=qkv_layout,
-            window_size=config.window_size,
             pad_between_seqs=pad_between_seqs,
         )
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends

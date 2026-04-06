@@ -225,7 +225,15 @@ check_test_filter() {
 
 start_message() {
     echo "Started with TEST_LEVEL=$TEST_LEVEL sGPU='$TEST_SGPU' mGPU='$TEST_MGPU' at `date`"
-    echo "ROCm: `ls -d /opt/rocm-*`"
+    if [ -n "$ROCM_PATH" ]; then
+        _rocm_path="$ROCM_PATH"
+    elif [ -d "/opt/rocm/core" ]; then
+        _rocm_path="/opt/rocm/core"
+    else
+        _rocm_path="/opt/rocm"
+    fi
+    _rocm_path=`$REALPATH "$_rocm_path"`
+    test -d "$_rocm_path" && echo "ROCm: $_rocm_path" || echo "ROCm path not found"
     python --version
 }
 

@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -15,10 +15,29 @@ import re
 import shutil
 import subprocess
 import sys
+import platform
 from pathlib import Path
 from importlib.metadata import version as get_version
 from subprocess import CalledProcessError
 from typing import List, Optional, Tuple, Union
+
+
+# Needs to stay consistent with .pre-commit-config.yaml config.
+def min_python_version() -> Tuple[int]:
+    """Minimum supported Python version."""
+    return (3, 10, 0)
+
+
+def min_python_version_str() -> str:
+    """String representing minimum supported Python version."""
+    return ".".join(map(str, min_python_version()))
+
+
+if sys.version_info < min_python_version():
+    raise RuntimeError(
+        f"Transformer Engine requires Python {min_python_version_str()} or newer, "
+        f"but found Python {platform.python_version()}."
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -165,42 +184,30 @@ def rocm_build() -> bool:
     Determines which build platform to use:
 
     - If `NVTE_USE_ROCM` is set:
-        - Non-zero value: Use ROCm, if hipcc is detected.
+        - Any value except "0": Use ROCm, if hipcc is detected.
         - Zero value: Use CUDA, if nvcc is detected.
-    - If `NVTE_USE_ROCM` is not set:
-        - Attempt to auto-detect: Check for ROCm first, then CUDA.
+    - If `NVTE_USE_ROCM` is not set, guess if from `HIP_PLATFORM` if it is set.
+    - Otherwise auto-detect trying ROCm first.
 
     Returns:
         bool: `True` for ROCm, `False` for CUDA.
 
     Raises:
-        ValueError: If NVTE_USE_ROCM is set to invalid value.
         FileNotFoundError: If required tools (hipcc or nvcc) are not found.
     """
-    nvte_use_rocm = os.getenv("NVTE_USE_ROCM")
-    if nvte_use_rocm:
+    nvte_use_rocm = os.getenv("NVTE_USE_ROCM", "")
+    if not nvte_use_rocm:
+        match os.getenv("HIP_PLATFORM", ""):
+            case "amd": nvte_use_rocm = "1"
+            case "nvidia": nvte_use_rocm = "0"
+    if nvte_use_rocm != "0":
         try:
-            nvte_use_rocm = bool(int(nvte_use_rocm))
-        except ValueError:
-            raise ValueError(
-                f"Invalid value for NVTE_USE_ROCM: '{nvte_use_rocm}'.")
-
-        if nvte_use_rocm:
-            _, hipcc_bin = rocm_path()
-            if hipcc_bin.is_file():
-                return True
-            else:
-                raise FileNotFoundError(f"Could not find hipcc at {hipcc_bin}")
-        else:
-            nvcc_path()
-            return False
-
-    # Try to detect ROCm
-    _, hipcc_bin = rocm_path()
-    if hipcc_bin.is_file():
-        return True
-
-    # Try to detect CUDA
+            rocm_path()
+            return True
+        except FileNotFoundError:
+            if nvte_use_rocm:
+                raise FileNotFoundError("Could not find ROCm installation.")
+    # Try to detect CUDA if NVTE_USE_ROCM is set to "0" or ROCm is not found
     try:
         nvcc_path()
         return False
@@ -208,10 +215,13 @@ def rocm_build() -> bool:
         # If neither ROCm nor CUDA is detected, raise an error
         raise FileNotFoundError("Could not detect ROCm or CUDA platform")
 
+
 @functools.lru_cache(maxsize=None)
 def rocm_path() -> Tuple[str, str]:
-    """ROCm root path and HIPCC binary path as a tuple"""
-    """If ROCm installation is not specified, use default /opt/rocm path"""
+    """
+    ROCm root path and HIPCC binary path as a tuple
+    If ROCm installation is not specified, use default ROCm path
+    """
     hipcc_bin = None
     if os.getenv("ROCM_PATH"):
         rocm_home = Path(os.getenv("ROCM_PATH"))
@@ -219,13 +229,29 @@ def rocm_path() -> Tuple[str, str]:
     if hipcc_bin is None:
         hipcc_bin = shutil.which("hipcc")
         if hipcc_bin is not None:
-            hipcc_bin = Path(hipcc_bin)
+            hipcc_bin = Path(hipcc_bin).resolve()
             rocm_home = hipcc_bin.parent.parent
     if hipcc_bin is None:
-        rocm_home = Path("/opt/rocm/")
+        rocm_home = Path("/opt/rocm/core")
+        if not rocm_home.is_dir():
+            rocm_home = Path("/opt/rocm/")
         hipcc_bin = rocm_home / "bin" / "hipcc"
+    if not hipcc_bin.is_file():
+        raise FileNotFoundError(f"Could not find hipcc at {hipcc_bin}")
     return rocm_home, hipcc_bin
 
+
+def rocm_version() -> Tuple[int, ...]:
+    """ROCm version as a (major, minor) tuple.
+    Try to get ROCm version by parsing .info/version.
+    """
+    rocm_home, _ = rocm_path()
+    try:
+        with open(rocm_home / ".info" / "version", "r") as f:
+            rocm_version= f.read().strip().split('.')[:2]
+        return tuple(int(v) for v in rocm_version)
+    except FileNotFoundError:
+        raise RuntimeError("Could not determine ROCm version.")
 
 
 def cuda_toolkit_include_path() -> Tuple[str, str]:
@@ -293,27 +319,24 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
 
     cuda_root = Path(nvidia.__file__).parent
     return [
-        cuda_root / "cuda_nvcc" / "include",
-        cuda_root / "cublas" / "include",
-        cuda_root / "cuda_runtime" / "include",
-        cuda_root / "cudnn" / "include",
-        cuda_root / "cuda_cccl" / "include",
-        cuda_root / "nvtx" / "include",
-        cuda_root / "cuda_nvrtc" / "include",
+        subdir / "include"
+        for subdir in cuda_root.iterdir()
+        if subdir.is_dir() and (subdir / "include").is_dir()
     ]
 
 
 @functools.lru_cache(maxsize=None)
 def cuda_archs() -> str:
-    version = cuda_version()
-    if os.getenv("NVTE_CUDA_ARCHS") is None:
+    archs = os.getenv("NVTE_CUDA_ARCHS")
+    if archs is None:
+        version = cuda_version()
         if version >= (13, 0):
-            os.environ["NVTE_CUDA_ARCHS"] = "75;80;89;90;100;120"
+            archs = "75;80;89;90;100;120"
         elif version >= (12, 8):
-            os.environ["NVTE_CUDA_ARCHS"] = "70;80;89;90;100;120"
+            archs = "70;80;89;90;100;120"
         else:
-            os.environ["NVTE_CUDA_ARCHS"] = "70;80;89;90"
-    return os.getenv("NVTE_CUDA_ARCHS")
+            archs = "70;80;89;90"
+    return archs
 
 
 def cuda_version() -> Tuple[int, ...]:
@@ -451,34 +474,6 @@ def copy_common_headers(
         new_path.parent.mkdir(exist_ok=True, parents=True)
         shutil.copy(path, new_path)
 
-def copy_hipify_tools(
-    src_dir: Union[Path, str],
-    dst_dir: Union[Path, str],
-) -> None:
-    """Copy necessary hipify tools from library root
-    src_dir should be the root or Transformer Engine repository.
-    """
-    if rocm_build() and bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-        hipify_dir = src_dir / "3rdparty" / "hipify_torch"
-        hipify_copy = dst_dir / "3rdparty" / "hipify_torch"
-        if hipify_copy.exists():
-            shutil.rmtree(hipify_copy)
-        shutil.copytree(hipify_dir, hipify_copy)
-        shutil.copy(src_dir / "hipify_custom_map.json", dst_dir / "hipify_custom_map.json")
-
-
-def clear_hipify_tools_copy(
-    dst_dir: Union[Path, str],
-) -> None:
-    """Clear temporary copies of hipify tools
-    """
-    hipify_copy = dst_dir / "3rdparty"
-    if hipify_copy.exists():
-        shutil.rmtree(hipify_copy)
-    map_copy = dst_dir / "hipify_custom_map.json"
-    if map_copy.exists():
-        map_copy.unlink()
-
 
 def install_and_import(package):
     """Install a package via pip (if not already installed) and import into globals."""
@@ -495,56 +490,12 @@ def uninstall_te_wheel_packages():
             "pip",
             "uninstall",
             "-y",
-            "transformer_engine_rocm", # te_cuda_vers for ROCm build
+            "transformer_engine",
             "transformer_engine_cu12",
             "transformer_engine_torch",
             "transformer_engine_jax",
+            "transformer_engine_rocm7",
+            "transformer_engine_rocm_jax",
+            "transformer_engine_rocm_torch",
         ]
     )
-
-def detect_hipify_v2():
-    try:
-        from torch.utils.hipify import __version__
-        from packaging.version import Version
-        if Version(__version__) >= Version("2.0.0"):
-            return True
-    except Exception as e:
-        print("failed to detect pytorch hipify version, defaulting to version 1.0.0 behavior")
-        print(e)
-    return False
-
-def hipify(base_dir, src_dir, sources, include_dirs):
-    cwd = os.getcwd()
-    if detect_hipify_v2():
-        hipify_module = importlib.import_module("3rdparty.hipify_torch.hipify_torch.v2.hipify_python")
-    else:
-        hipify_module = importlib.import_module("3rdparty.hipify_torch.hipify_torch.hipify_python")
-    do_hipify = hipify_module.hipify
-
-    hipify_result = do_hipify(
-        project_directory=src_dir,
-        output_directory=src_dir,
-        includes=["*"],
-        ignores=["*/amd_detail/*", "*/aotriton/*", "*/ck_fused_attn/*"],
-        header_include_dirs=include_dirs,
-        custom_map_list=base_dir / "hipify_custom_map.json",
-        extra_files=[],
-        is_pytorch_extension=True,
-        hipify_extra_files_only=False,
-        show_detailed=False,
-        no_math_replace=True)
-
-    # Because hipify output_directory == project_directory
-    # Original sources list may contain previous hipifying results that ends up with duplicated entries
-    # Keep unique entries only
-    hipified_sources = set()
-    for fname in sources:
-        fname = os.path.abspath(str(fname))
-        if fname in hipify_result:
-            file_result = hipify_result[fname]
-            if file_result.hipified_path is not None:
-                fname = hipify_result[fname].hipified_path
-        # setup() arguments must *always* be /-separated paths relative to the setup.py directory,
-        # *never* absolute paths
-        hipified_sources.add(os.path.relpath(fname, cwd))
-    return list(hipified_sources)

@@ -1,4 +1,4 @@
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -7,7 +7,7 @@
 
 # Build args:
 # BASE_IMAGE - Base manylinux image to use. Default: quay.io/pypa/manylinux_2_28_x86_64
-# ROCM_REPO_URL - ROCm repository URL. Default: https://repo.radeon.com/rocm/rhel8/latest/main/
+# ROCM_REPO_URL - ROCm TheRock repository URL. Default: https://repo.amd.com/rocm/packages/rhel8/x86_64/
 # GPU_TARGETS - Semicolon separated list of target GPU architectures. Default: "gfx942;gfx950"
 # TARGET_BRANCH - Target branch for TransformerEngine. Default: none (use git default)
 # GPU_TARGETS and TARGET_BRANCH can be overriden when start a container with NVTE_ROCM_ARCH and TARGET_BRANCH environment variables.
@@ -16,22 +16,25 @@
 ARG BASE_IMAGE=quay.io/pypa/manylinux_2_28_x86_64
 FROM $BASE_IMAGE
 
-ARG ROCM_REPO_URL=https://repo.radeon.com/rocm/rhel8/latest/main/
+ARG ROCM_REPO_URL=https://repo.amd.com/rocm/packages/rhel8/x86_64/
 
 # Set up ROCm repo
 RUN echo -e "[rocm]\nname=ROCm\nbaseurl=${ROCM_REPO_URL}\nenabled=1\ngpgcheck=0" > /etc/yum.repos.d/rocm.repo
 
 # Setup packages
-RUN dnf install -y --disablerepo=epel rocm-dev hipblaslt hipblaslt-devel hipcub hipcub-devel hiprand-devel rocrand-devel
-RUN dnf group install -y "Development Tools" && dnf install -y git cmake llvm-toolset gcc-toolset-12
+# ROCm TheRock packages are built for single GPU family. However, nothing from HW libraries is statically linked to TE,
+# so they can be used to build for multiple GPU targets. Using gfx950 here.
+RUN dnf install -y --disablerepo=epel amdrocm-core-devel-gfx950
 
-#Uncomment the next line for ROCm 6.4 cmake workaround: remove newer incomnpatible cmake preinstalled on base image
-#RUN rm /usr/local/bin/cmake || true
+# xz-devel installs lzma needed by AOTriton
+RUN dnf install -y gcc-toolset-13 xz-devel
 
 RUN dnf clean all
 RUN rm -rf /var/cache/dnf/*
 
-ENV CMAKE_PREFIX_PATH=/opt/rocm/lib/cmake
+ENV HIP_PLATFORM=amd
+ENV ROCM_PATH=/opt/rocm/core
+
 ENV NVTE_RELEASE_BUILD=1
 
 ARG GPU_TARGETS="gfx942;gfx950"

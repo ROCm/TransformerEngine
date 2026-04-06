@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -9,8 +9,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 import io
 import math
-import pathlib
-import sys
 from typing import Optional
 
 import pytest
@@ -19,7 +17,6 @@ import torch
 import transformer_engine
 import transformer_engine.common.recipe
 import transformer_engine.pytorch as te
-from transformer_engine.pytorch.fp8 import FP8GlobalStateManager
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.ops.fused import (
     BackwardActivationBias,
@@ -30,28 +27,29 @@ from transformer_engine.pytorch.ops.fused import (
     ForwardLinearBiasAdd,
     ForwardLinearScaleAdd,
 )
-from transformer_engine.pytorch.tensor import QuantizedTensor
-from transformer_engine.pytorch.tensor.float8_tensor import (
-    Float8Tensor,
+from transformer_engine.pytorch import (
+    QuantizedTensor,
     Float8CurrentScalingQuantizer,
     Float8Quantizer,
+    MXFP8Quantizer,
+    NVFP4Quantizer,
+    is_bf16_available,
 )
-from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
-from transformer_engine.pytorch.utils import is_bf16_compatible
 from transformer_engine.pytorch.utils import get_device_compute_capability
 import transformer_engine_torch as tex
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 # Import utility functions
-from utils import dtype_tols, make_recipe, reset_rng_states
+from utils import dtype_tols, make_recipe, quantization_tols, reset_rng_states
 
-# Check if FP8 is supported
-fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
-mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
+# Check for supported quantization schemes
+fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
+mxfp8_available, reason_for_no_mxfp8 = te.is_mxfp8_available(return_reason=True)
+nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 
 # Supported data types
 _dtypes: list[torch.dtype] = [torch.float32, torch.float16]
-if is_bf16_compatible():  # bf16 requires sm_80 or higher
+if is_bf16_available():  # bf16 requires sm_80 or higher
     _dtypes.append(torch.bfloat16)
 
 # Supported devices
@@ -63,6 +61,8 @@ if fp8_available:
     _quantization_list.extend(("fp8_delayed_scaling", "fp8_current_scaling"))
 if mxfp8_available:
     _quantization_list.append("mxfp8")
+if nvfp4_available:
+    _quantization_list.append("nvfp4")
 
 
 def maybe_skip_quantization(
@@ -70,6 +70,7 @@ def maybe_skip_quantization(
     *,
     dims: Optional[Iterable[int] | int] = None,
     device: Optional[torch.device | str] = None,
+    dtype: Optional[torch.dtype] = None,
 ) -> None:
     """Skip test case if a quantization scheme is not supported"""
 
@@ -77,12 +78,17 @@ def maybe_skip_quantization(
     if quantization is None:
         return
 
-    # Check if quantization scheme is supported
+    # Check if quantization scheme is supported on device
+    if device is not None and torch.device(device).type != "cuda":
+        pytest.skip("Quantization is only supported on CUDA devices")
     if quantization in ("fp8", "fp8_delayed_scaling", "fp8_current_scaling") and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
+    if quantization == "nvfp4" and not nvfp4_available:
+        pytest.skip(reason_for_no_nvfp4)
 
+    # Check dims
     if dims is not None:
         if not isinstance(dims, Iterable):
             dims = (dims,)
@@ -92,10 +98,14 @@ def maybe_skip_quantization(
         elif quantization == "mxfp8":
             if math.prod(dims[:-1]) % 32 != 0 or dims[-1] % 32 != 0:
                 pytest.skip("MXFP8 GEMMs require dims that are divisible by 32")
+        elif quantization == "nvfp4":
+            if math.prod(dims[:-1]) % 16 != 0 or dims[-1] % 16 != 0:
+                pytest.skip("NVFP4 GEMMs require dims that are divisible by 16")
 
-    # Check if device is supported
-    if device is not None and torch.device(device).type != "cuda":
-        pytest.skip("Quantization is only supported on CUDA devices")
+    # Check dtype
+    if dtype is not None:
+        if quantization == "nvfp4" and dtype != torch.bfloat16:
+            pytest.skip("NVFP4 quantization is only supported with BF16 data")
 
 
 @torch.no_grad()
@@ -145,6 +155,14 @@ def make_reference_and_test_tensors(
         test = quantizer(test)
     elif quantization == "mxfp8":
         test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
+    elif quantization == "nvfp4":
+        test = NVFP4Quantizer(
+            with_rht=False,
+            with_post_rht_amax=False,
+            with_2d_quantization=False,
+            stochastic_rounding=False,
+            with_random_sign_mask=False,
+        )(test)
     else:
         raise ValueError(f"Unsupported quantization scheme ({quantization})")
     if isinstance(test, QuantizedTensor) and not test_is_quantized:
@@ -354,7 +372,7 @@ class TestFuser:
         )
 
         # Construct model
-        with te.fp8_model_init(recipe=recipe):
+        with te.quantized_model_init(recipe=recipe):
             model = te_ops.basic.BasicLinear(
                 size,
                 size,
@@ -386,7 +404,7 @@ class TestFuser:
             )
 
             # Training step
-            with te.fp8_autocast(fp8_recipe=recipe):
+            with te.autocast(recipe=recipe):
                 y = model(x)
             y.backward(dy)
             with torch.no_grad():
@@ -399,12 +417,12 @@ class TestFuser:
             torch.testing.assert_close(
                 y,
                 torch.full_like(y, y_val_ref),
-                **dtype_tols(tex.DType.kFloat8E4M3),
+                **quantization_tols("fp8_delayed_scaling"),
             )
             torch.testing.assert_close(
                 x.grad,
                 torch.full_like(x.grad, dx_val_ref),
-                **dtype_tols(tex.DType.kFloat8E5M2),
+                **quantization_tols("fp8_delayed_scaling"),
             )
 
             # Check that scaling factors match expected
@@ -438,7 +456,8 @@ class TestFuser:
         # Skip invalid configurations
         in_shape = (size, size)
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=init_dtype)
+        maybe_skip_quantization(quantization, dtype=final_dtype)
 
         # Random data
         dtype = torch.float32
@@ -454,7 +473,7 @@ class TestFuser:
         )
 
         # Construct operation
-        with te.fp8_model_init(enabled=with_quantization, recipe=make_recipe(quantization)):
+        with te.quantized_model_init(enabled=with_quantization, recipe=make_recipe(quantization)):
             op = te_ops.Linear(size, size, bias=False, device=device, dtype=init_dtype)
         with torch.no_grad():
             op.weight.copy_(w_test)
@@ -506,11 +525,12 @@ class TestFuser:
         # Skip invalid configurations
         in_shape = (size, size)
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=model_dtype)
+        maybe_skip_quantization(quantization, dtype=autocast_dtype)
 
         # Construct operation
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weights, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weights, recipe=recipe):
             op = te_ops.Linear(size, size, bias=False, device=device, dtype=model_dtype)
 
         # Check forward and backward pass
@@ -520,7 +540,7 @@ class TestFuser:
             device=device,
             requires_grad=True,
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             with torch.autocast(device_type=device.type, dtype=autocast_dtype):
                 y = op(x)
         y.backward(torch.zeros_like(y))
@@ -533,7 +553,7 @@ class TestFuser:
             x.grad = None
             op.weight.grad = None
             with torch.autocast(device_type=device.type, dtype=autocast_dtype):
-                with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+                with te.autocast(enabled=quantized_compute, recipe=recipe):
                     y = op(x)
             y.backward(torch.zeros_like(y))
             assert y.dtype == autocast_dtype
@@ -562,7 +582,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -628,7 +648,7 @@ class TestBasicOps:
         # Skip invalid configurations
         if memory_format == torch.channels_last and len(in_shape) != 4:
             pytest.skip("torch.channels_last only supports 4D tensors")
-        maybe_skip_quantization(quantization, device=device)
+        maybe_skip_quantization(quantization, device=device, dtype=dtype)
         with_quantization = quantization is not None
 
         # Random data
@@ -694,7 +714,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -756,7 +776,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, device=device)
+        maybe_skip_quantization(quantization, device=device, dtype=dtype)
         if quantization == "mxfp8":
             maybe_skip_quantization(quantization, dims=in_shape)
 
@@ -783,7 +803,7 @@ class TestBasicOps:
         # Implementation with fusible operation
         op = te_ops.Quantize(forward=cast_forward, backward=cast_backward)
         recipe = make_recipe(quantization)
-        with te.fp8_autocast(enabled=with_quantization, fp8_recipe=recipe):
+        with te.autocast(enabled=with_quantization, recipe=recipe):
             y_test = op(x_test)
         y_test.backward(dy_test)
 
@@ -823,7 +843,7 @@ class TestBasicOps:
         out_shape = in_shape[:-1] + [out_features]
 
         # Skip invalid configurations
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         quantization_needed = any(
             (
@@ -877,7 +897,7 @@ class TestBasicOps:
 
         # Implementation with fusible operation
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             op = te_ops.BasicLinear(
                 in_features,
                 out_features,
@@ -885,16 +905,16 @@ class TestBasicOps:
                 dtype=dtype,
                 accumulate_into_main_grad=accumulate_into_main_grad,
             )
+            forward = te_ops.Sequential(
+                te_ops.Quantize(forward=quantized_input, backward=quantized_grad_input),
+                op,
+                te_ops.Quantize(forward=quantized_output, backward=quantized_grad_output),
+            )
         with torch.no_grad():
             op.weight.copy_(w_test)
             del w_test
             op.weight.main_grad = torch.full_like(op.weight, 0.5, dtype=torch.float32)
-        forward = te_ops.Sequential(
-            te_ops.Quantize(forward=quantized_input, backward=quantized_grad_input),
-            op,
-            te_ops.Quantize(forward=quantized_output, backward=quantized_grad_output),
-        )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
@@ -903,7 +923,7 @@ class TestBasicOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute or quantized_output or quantized_grad_input:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1024,7 +1044,7 @@ class TestBasicOps:
         out_shape = in_shape[:-1] + [out_features]
 
         # Skip invalid configurations
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         if quantization is None and (quantized_compute or quantized_weight):
             pytest.skip("Quantization scheme is not specified")
@@ -1065,7 +1085,7 @@ class TestBasicOps:
 
         # Implementation with fusible operation
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             op = te_ops.Linear(
                 in_features,
                 out_features,
@@ -1081,7 +1101,7 @@ class TestBasicOps:
             del b_test
             for param in op.parameters():
                 param.requires_grad_(requires_grad=weight_requires_grad)
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = op(x_test)
         if input_requires_grad or weight_requires_grad:
             y_test.backward(dy_test)
@@ -1091,7 +1111,7 @@ class TestBasicOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1128,7 +1148,7 @@ class TestBasicOps:
         in_shape = list(in_shape)[:-1] + list(weight_shape)
 
         # Skip invalid configurations
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -1182,14 +1202,14 @@ class TestBasicOps:
             op,
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
         # Expected numerical error
         tols = dtype_tols(dtype)
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1298,7 +1318,7 @@ class TestBasicOps:
         in_shape = list(in_shape)[:-1] + list(weight_shape)
 
         # Skip invalid configurations
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -1344,7 +1364,7 @@ class TestBasicOps:
             op,
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
@@ -1352,16 +1372,8 @@ class TestBasicOps:
         # Expected numerical error
         tols = dtype_tols(dtype)
 
-        # Explicit checks for quantization
         if quantized_compute:
-            tols = dtype_tols(y_test._quantizer.dtype)
-            expected_tensor_cls = {
-                Float8Quantizer:Float8Tensor,
-                Float8CurrentScalingQuantizer:Float8Tensor,
-                MXFP8Quantizer:MXFP8Tensor
-            }[type(y_test._quantizer)]
-            assert isinstance(y_test, expected_tensor_cls)
-            y_test = y_test.dequantize(dtype=torch.float32)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1441,7 +1453,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x1_ref, x1_test = make_reference_and_test_tensors(
@@ -1480,8 +1492,11 @@ class TestBasicOps:
 
         # Check results
         tols = dtype_tols(dtype)
-        if with_quantization:
-            tols = dtype_tols(x1_test._fp8_dtype)
+        if in_place:
+            if quantization in ("fp8_delayed_scaling", "fp8_current_scaling", "mxfp8"):
+                tols = dtype_tols(x1_test._fp8_dtype)
+            elif quantization == "nvfp4":
+                tols = dtype_tols(x1_test._fp4_dtype)
         y_test = y_test.to(dtype=torch.float64, device="cpu")
         dx1_test = x1_test.grad.to(dtype=torch.float64, device="cpu")
         dx2_test = x2_test.grad.to(dtype=torch.float64, device="cpu")
@@ -1510,7 +1525,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -1583,7 +1598,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         if cache_quantized_input:
             maybe_skip_quantization("fp8_current_scaling", device=device)
 
@@ -1651,14 +1666,16 @@ class TestBasicOps:
             make_op(cache_quantized_input=cache_quantized_input),
             te_ops.Quantize(forward=quantized_compute, backward=False),
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
         # Expected numerical error
         tols = dtype_tols(dtype)
-        if quantized_compute or cache_quantized_input:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+        if quantized_compute:
+            tols = quantization_tols(quantization)
+        elif cache_quantized_input:
+            tols = quantization_tols("fp8_current_scaling")
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1689,7 +1706,7 @@ class TestBasicOps:
         quantized_compute = quantization is not None
         if not quantized_compute and (quantize_forward or quantize_backward):
             pytest.skip("Quantization scheme has not been provided")
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -1716,13 +1733,87 @@ class TestBasicOps:
             te_ops.SwiGLU(),
             te_ops.Quantize(forward=quantize_forward, backward=False),
         )
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
 
         # Expected numerical error
         tols = dtype_tols(dtype)
         if quantized_compute:
+            tols = quantization_tols(quantization)
+
+        # Check results
+        y_test = y_test.to(dtype=torch.float64, device="cpu")
+        dx_test = x_test.grad.to(dtype=torch.float64, device="cpu")
+        torch.testing.assert_close(y_test, y_ref, **tols)
+        torch.testing.assert_close(dx_test, x_ref.grad, **tols)
+
+    @pytest.mark.parametrize("dtype", _dtypes)
+    @pytest.mark.parametrize("quantization", _quantization_list)
+    @pytest.mark.parametrize("quantize_forward", (False, True))
+    @pytest.mark.parametrize("quantize_backward", (False, True))
+    def test_clamped_swiglu(
+        self,
+        *,
+        out_shape: Iterable[int] = (32, 32),
+        dtype: torch.dtype,
+        device: torch.device = "cuda",
+        quantization: Optional[str],
+        quantize_forward: bool,
+        quantize_backward: bool,
+        limit: float = 0.75,
+        alpha: float = 1.702,
+    ):
+        # Test SwiGLU variant used in GPT OSS.
+        # Tensor dimensions
+        in_shape = list(out_shape)
+        in_shape[-1] *= 2
+
+        # Skip invalid configurations
+        quantized_compute = quantization is not None
+        if not quantized_compute and (quantize_forward or quantize_backward):
+            pytest.skip("Quantization scheme has not been provided")
+        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+
+        # Random data
+        x_ref, x_test = make_reference_and_test_tensors(
+            in_shape,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        dy_ref, dy_test = make_reference_and_test_tensors(
+            out_shape,
+            test_dtype=dtype,
+            test_device=device,
+            requires_grad=False,
+        )
+
+        # Plain PyTorch implementation
+        x_glu, x_linear = x_ref.chunk(2, dim=-1)
+        x_glu = x_glu.clamp(min=None, max=limit)
+        x_linear = x_linear.clamp(min=-limit, max=limit)
+        out_glu = x_glu * torch.sigmoid(alpha * x_glu)
+        y_ref = out_glu * (x_linear + 1)
+        y_ref.backward(dy_ref)
+
+        # Implementation with fusible operation
+        recipe = make_recipe(quantization)
+
+        forward = te_ops.Sequential(
+            te_ops.Quantize(forward=False, backward=quantize_backward),
+            te_ops.ClampedSwiGLU(limit=limit, alpha=alpha),
+            te_ops.Quantize(forward=quantize_forward, backward=False),
+        )
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
+            y_test = forward(x_test)
+
+        y_test.backward(dy_test)
+
+        # Expected numerical error
+        tols = dtype_tols(dtype)
+        if quantized_compute and quantization == "nvfp4":
+            tols = dtype_tols(tex.DType.kFloat4E2M1)
+        elif quantized_compute:
             tols = dtype_tols(tex.DType.kFloat8E4M3)
 
         # Check results
@@ -1791,7 +1882,7 @@ class TestBasicOps:
 
         # Skip invalid configurations
         quantized_input = quantization is not None
-        maybe_skip_quantization(quantization, dims=shape, device=device)
+        maybe_skip_quantization(quantization, dims=shape, device=device, dtype=dtype)
 
         # Random data
         # Note: Shift values to make sure inputs are non-zero
@@ -1882,7 +1973,7 @@ class TestFusedOps:
 
         # Skip invalid configurations
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         if dtype not in (torch.float16, torch.bfloat16):
             pytest.skip(
@@ -1923,7 +2014,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_compute, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_compute, recipe=recipe):
             model = te_ops.Sequential(
                 te_ops.Linear(
                     in_features,
@@ -1939,7 +2030,7 @@ class TestFusedOps:
                 model[0].bias.copy_(b_test)
             del w_test
             del b_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = model(x_test)
         y_test.backward(dy_test)
 
@@ -1953,7 +2044,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -1989,7 +2080,7 @@ class TestFusedOps:
 
         # Skip invalid configurations
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         if quantized_compute and dtype not in (torch.float16, torch.bfloat16):
             pytest.skip("FP8 GEMM is only supported with FP8, FP16, or BF16 output")
@@ -2033,7 +2124,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             model = te_ops.Sequential(
                 te_ops.Linear(
                     in_features,
@@ -2050,7 +2141,7 @@ class TestFusedOps:
                 model[0].bias.copy_(b_test)
             del w_test
             del b_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = model(x1_test, x2_test)
         y_test.backward(dy_test)
 
@@ -2064,7 +2155,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -2102,7 +2193,7 @@ class TestFusedOps:
 
         # Skip invalid configurations
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         if quantized_compute and dtype not in (torch.float16, torch.bfloat16):
             pytest.skip("FP8 GEMM is only supported with FP8, FP16, or BF16 output")
@@ -2139,7 +2230,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             model = te_ops.Sequential(
                 te_ops.Linear(
                     in_features,
@@ -2155,7 +2246,7 @@ class TestFusedOps:
         with torch.no_grad():
             model[0].weight.copy_(w_test)
             del w_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = model(x1_test, x2_test)
         y_test.backward(dy_test)
 
@@ -2170,7 +2261,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -2203,7 +2294,7 @@ class TestFusedOps:
 
         # Skip invalid configurations
         with_quantization = quantization is not None
-        maybe_skip_quantization(quantization, device=device)
+        maybe_skip_quantization(quantization, device=device, dtype=dtype)
         if quantization == "mxfp8" and (len(in_shape) < 2 or in_shape[-1] % 32 != 0):
             pytest.skip("Unsupported tensor size for MXFP8")
 
@@ -2246,7 +2337,7 @@ class TestFusedOps:
         with torch.no_grad():
             model[1].bias.copy_(b_test)
             del b_test
-        with te.fp8_autocast(enabled=with_quantization, fp8_recipe=recipe):
+        with te.autocast(enabled=with_quantization, recipe=recipe):
             y_test = model(x_test)
         y_test.backward(dy_test)
 
@@ -2265,7 +2356,7 @@ class TestFusedOps:
         # Expected numerical error
         tols = dtype_tols(dtype)
         if with_quantization:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -2384,7 +2475,7 @@ class TestFusedOps:
 
         # Skip invalid configurations
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         if quantized_compute and dtype not in (torch.float16, torch.bfloat16):
             pytest.skip("FP8 GEMM is only supported with FP8, FP16, or BF16 output")
@@ -2424,7 +2515,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight):
+        with te.quantized_model_init(enabled=quantized_weight):
             model = te_ops.Sequential(
                 te_ops.MakeExtraOutput(in_place=True),
                 te_ops.Linear(
@@ -2438,7 +2529,7 @@ class TestFusedOps:
         with torch.no_grad():
             model[1].weight.copy_(w_test)
             del w_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y1_test, y2_test = model(x_test)
         (y1_test * dy1_test + y2_test * dy2_test).sum().backward()
 
@@ -2452,7 +2543,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y1_test = y1_test.to(dtype=torch.float64, device="cpu")
@@ -2487,7 +2578,7 @@ class TestFusedOps:
 
         # Skip invalid configurations
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         if quantized_compute and dtype not in (torch.float16, torch.bfloat16):
             pytest.skip("FP8 GEMM is only supported with FP8, FP16, or BF16 output")
@@ -2519,7 +2610,7 @@ class TestFusedOps:
 
         # Implementation with fusible operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight):
+        with te.quantized_model_init(enabled=quantized_weight):
             model = te_ops.Sequential(
                 te_ops.Linear(
                     in_features,
@@ -2533,7 +2624,7 @@ class TestFusedOps:
         with torch.no_grad():
             model[0].weight.copy_(w_test)
             del w_test
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = model(x_test)
         (y_test * dy_test).sum().backward()
 
@@ -2547,7 +2638,7 @@ class TestFusedOps:
         if dtype == torch.float32:
             tols = dtype_tols(torch.float16)  # TF32 GEMM
         if quantized_compute:
-            tols = dtype_tols(tex.DType.kFloat8E4M3)
+            tols = quantization_tols(quantization)
 
         # Check results
         y_test = y_test.to(dtype=torch.float64, device="cpu")
@@ -2588,12 +2679,12 @@ class TestCheckpointing:
 
         # Skip invalid configurations
         quantized_compute = quantization is not None
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
 
         # Construct model
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             model_save = te_ops.Sequential(
                 te_ops.Linear(in_features, out_features, device=device, dtype=dtype)
             )
@@ -2604,7 +2695,7 @@ class TestCheckpointing:
             x = torch.randn(in_shape, dtype=dtype, device=device, requires_grad=True)
             dy = torch.randn(out_shape, dtype=dtype, device=device)
             optim_save.zero_grad()
-            with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            with te.autocast(enabled=quantized_compute, recipe=recipe):
                 y = model_save(x)
             y.backward(dy)
             optim_save.step()
@@ -2633,14 +2724,14 @@ class TestCheckpointing:
         ys_save = []
         for i in range(post_checkpoint_steps):
             optim_save.zero_grad()
-            with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            with te.autocast(enabled=quantized_compute, recipe=recipe):
                 y = model_save(xs_save[i])
             y.backward(dys[i])
             optim_save.step()
             ys_save.append(y)
 
         # Load checkpoint
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
             model_load = te_ops.Sequential(
                 te_ops.Linear(in_features, out_features, device=device, dtype=dtype)
             )
@@ -2653,7 +2744,7 @@ class TestCheckpointing:
         ys_load = []
         for i in range(post_checkpoint_steps):
             optim_load.zero_grad()
-            with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+            with te.autocast(enabled=quantized_compute, recipe=recipe):
                 y = model_load(xs_load[i])
             y.backward(dys[i])
             optim_load.step()
@@ -2662,7 +2753,11 @@ class TestCheckpointing:
         # Check that original and loaded model match exactly
         tols = {"rtol": 0, "atol": 0}
         for param_load, param_save in zip(model_load.parameters(), model_save.parameters()):
-            torch.testing.assert_close(param_load, param_save, **tols)
+            torch.testing.assert_close(  # Force dequantization by casting to FP64
+                param_load.to(dtype=torch.float64, device="cpu"),
+                param_save.to(dtype=torch.float64, device="cpu"),
+                **tols,
+            )
             torch.testing.assert_close(param_load.grad, param_save.grad, **tols)
         for y_load, y_save in zip(ys_load, ys_save):
             torch.testing.assert_close(y_load, y_save, **tols)
@@ -2679,7 +2774,6 @@ class TestSequentialModules:
 
     @pytest.mark.parametrize("requires_grad", (False, True))
     @pytest.mark.parametrize("bias", (False, True))
-    @pytest.mark.parametrize("normalization", ("LayerNorm", "RMSNorm"))
     @pytest.mark.parametrize("quantized_compute", (False, True))
     @pytest.mark.parametrize("quantized_weight", (False, True))
     @pytest.mark.parametrize("dtype", _dtypes)
@@ -2689,32 +2783,25 @@ class TestSequentialModules:
         *,
         requires_grad: bool,
         bias: bool,
-        normalization: str,
         quantized_compute: bool,
         quantized_weight: bool,
         dtype: torch.dtype,
         quantization: Optional[str],
         device: torch.device = "cuda",
-        hidden_size: int = 32,
-        sequence_length: int = 512,
+        hidden_size: int = 256,
+        sequence_length: int = 48,
         batch_size: int = 4,
-        ffn_hidden_size: int = 64,
+        ffn_hidden_size: int = 384,
         layernorm_epsilon: float = 1e-5,
     ) -> None:
-        """
-        LayerNorm/RMSNorm + Linear + GELU + Linear
-
-        Note that this test checks only if the module runs
-        as when chaining multiple modules it is hard to validate
-        numerical accuracy.
-        """
+        """LayerNorm/RMSNorm + Linear + SwiGLU + Linear"""
 
         # Make input shape
         in_shape = (sequence_length, batch_size, hidden_size)
         ffn_shape = in_shape[:-1] + (ffn_hidden_size,)
 
         # Skip invalid configurations
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=ffn_shape, device=device)
         quantization_needed = quantized_compute or quantized_weight
         if quantization is None and quantization_needed:
@@ -2723,38 +2810,90 @@ class TestSequentialModules:
             pytest.skip("Quantization scheme is not used")
 
         # Random data
-        _, x_test = make_reference_and_test_tensors(
+        x_ref, x_test = make_reference_and_test_tensors(
             in_shape,
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
             requires_grad=requires_grad,
         )
-        _, dy_test = make_reference_and_test_tensors(
+        norm_w_ref, norm_w_test = make_reference_and_test_tensors(
+            hidden_size,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        norm_b_ref, norm_b_test = make_reference_and_test_tensors(
+            hidden_size,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w1_ref, w1_test = make_reference_and_test_tensors(
+            (ffn_hidden_size, hidden_size),
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        w2_ref, w2_test = make_reference_and_test_tensors(
+            (hidden_size, ffn_hidden_size // 2),
+            quantization=quantization,
+            test_dtype=dtype,
+            test_device=device,
+        )
+        b1_ref, b1_test, b2_ref, b2_test = None, None, None, None
+        if bias:
+            b1_ref, b1_test = make_reference_and_test_tensors(
+                ffn_hidden_size,
+                test_dtype=dtype,
+                test_device=device,
+            )
+            b2_ref, b2_test = make_reference_and_test_tensors(
+                hidden_size,
+                test_dtype=dtype,
+                test_device=device,
+            )
+        dy_ref, dy_test = make_reference_and_test_tensors(
             in_shape,
             quantization=quantization,
             test_dtype=dtype,
             test_device=device,
             requires_grad=False,
         )
+        with torch.no_grad():
+            for t in (norm_w_ref, norm_w_test, norm_b_ref, norm_b_test):
+                t -= 0.5
+            for t in (w1_ref, w1_test, w2_ref, w2_test):
+                t *= 1 / 64
+            if bias:
+                for t in (b1_ref, b1_test, b2_ref, b2_test):
+                    t -= 0.5
+            for t in (dy_ref, dy_test):
+                t -= 0.5
 
-        # Implementation with fusible operations
+        # Reference implementation
+        x = x_ref
+        x = torch.nn.functional.layer_norm(
+            x,
+            (hidden_size,),
+            weight=norm_w_ref,
+            bias=norm_b_ref,
+            eps=layernorm_epsilon,
+        )
+        x = torch.nn.functional.linear(x, w1_ref, bias=b1_ref)
+        x1, x2 = x.chunk(2, dim=-1)
+        x = torch.nn.functional.silu(x1) * x2
+        x = torch.nn.functional.linear(x, w2_ref, bias=b2_ref)
+        y_ref = x
+        y_ref.backward(dy_ref)
+
+        # Construct operations
         recipe = make_recipe(quantization)
-        with te.fp8_model_init(enabled=quantized_weight, recipe=recipe):
-            if normalization == "LayerNorm":
-                norm = te_ops.LayerNorm(
-                    hidden_size,
-                    eps=layernorm_epsilon,
-                    device=device,
-                    dtype=dtype,
-                )
-            else:
-                norm = te_ops.RMSNorm(
-                    hidden_size,
-                    eps=layernorm_epsilon,
-                    device=device,
-                    dtype=dtype,
-                )
+        with te.quantized_model_init(enabled=quantized_weight, recipe=recipe):
+            norm = te_ops.LayerNorm(
+                hidden_size,
+                eps=layernorm_epsilon,
+                device=device,
+                dtype=dtype,
+            )
             ffn1 = te_ops.Linear(
                 hidden_size,
                 ffn_hidden_size,
@@ -2762,15 +2901,48 @@ class TestSequentialModules:
                 device=device,
                 dtype=dtype,
             )
-            act = te_ops.GELU()
+            act = te_ops.SwiGLU()
             ffn2 = te_ops.Linear(
-                ffn_hidden_size,
+                ffn_hidden_size // 2,
                 hidden_size,
                 bias=bias,
                 device=device,
                 dtype=dtype,
             )
+
+        # Copy weights
+        with torch.no_grad():
+            norm.weight.copy_(norm_w_test)
+            norm.bias.copy_(norm_b_test)
+            ffn1.weight.copy_(w1_test)
+            ffn2.weight.copy_(w2_test)
+            if bias:
+                ffn1.bias.copy_(b1_test)
+                ffn2.bias.copy_(b2_test)
+        del norm_w_test, norm_b_test, w1_test, b1_test, w2_test, b2_test
+
+        # Fuse ops and perform forward and backward pass
         forward = te_ops.Sequential(norm, ffn1, act, ffn2)
-        with te.fp8_autocast(enabled=quantized_compute, fp8_recipe=recipe):
+        with te.autocast(enabled=quantized_compute, recipe=recipe):
             y_test = forward(x_test)
         y_test.backward(dy_test)
+
+        def to_cpu(tensor: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
+            """Convert to FP64 CPU tensor"""
+            if tensor is None:
+                return None
+            out = tensor.detach().to(dtype=torch.float64, device="cpu")
+            out = out.requires_grad_(requires_grad=tensor.requires_grad)
+            return out
+
+        # Check values
+        tols = {"rtol": 0.25, "atol": 0.5}  # Loose tols for sanity checking
+        torch.testing.assert_close(to_cpu(y_test), y_ref, **tols)
+        torch.testing.assert_close(to_cpu(x_test.grad), x_ref.grad, **tols)
+        torch.testing.assert_close(to_cpu(norm.weight.grad), norm_w_ref.grad, **tols)
+        torch.testing.assert_close(to_cpu(norm.bias.grad), norm_b_ref.grad, **tols)
+        torch.testing.assert_close(to_cpu(ffn2.weight.grad), w2_ref.grad, **tols)
+        torch.testing.assert_close(to_cpu(ffn1.weight.grad), w1_ref.grad, **tols)
+        if bias:
+            torch.testing.assert_close(to_cpu(ffn1.bias.grad), b1_ref.grad, **tols)
+            torch.testing.assert_close(to_cpu(ffn2.bias.grad), b2_ref.grad, **tols)
