@@ -6,7 +6,7 @@ name: PR Automatic CI
 
 on:
   pull_request:
-    types: [ opened, labeled, synchronize, reopened ]
+    types: [ labeled, synchronize, reopened ]
 
 permissions:
   contents: read
