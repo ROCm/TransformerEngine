@@ -289,22 +289,6 @@ def initialize_ub(
                 flush=True,
             )
 
-    # Allocate cuBLAS workspace with expanded size for chunking in overlapping GEMM calls.
-    # The workspace must have enough copies for max(num_max_streams, tp_size) compute streams,
-    # since CommOverlapCore creates that many streams and divides the workspace among them.
-    if IS_HIP_EXTENSION:
-        num_workspace_copies = max(_NUM_MAX_UB_STREAMS, tp_size)
-    else:
-        num_workspace_copies = _NUM_MAX_UB_STREAMS
-    global _cublas_workspace
-    if _cublas_workspace is None:
-        _cublas_workspace = get_workspace().repeat(num_workspace_copies)
-    elif _cublas_workspace.numel() != get_cublas_workspace_size_bytes() * (num_workspace_copies):
-        # This ensures we don't do `.repeat()` on an already expanded workspace
-        _cublas_workspace = torch.empty(
-            get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
-        ).repeat(num_workspace_copies)
-
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
     layers_all_gather_overlap = [
         "qkv_fprop",
