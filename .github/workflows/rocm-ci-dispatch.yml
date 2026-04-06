@@ -6,9 +6,6 @@ name: PR Automatic CI
 
 on:
   pull_request:
-    branches:
-      - 'dev'
-      - 'release_v2.*_rocm'
     types: [ opened, labeled, synchronize, reopened ]
 
 permissions:
