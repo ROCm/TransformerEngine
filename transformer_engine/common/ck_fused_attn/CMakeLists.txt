@@ -35,25 +35,6 @@ else()
   message(WARNING "Python interpreter not found; skipping AITER API validation.")
 endif()
 
-# so far, there are only gfx942 and gfx950 v3 kernels
-SET(V3_ASM_ARCHS_SUPPORTED "gfx942;gfx950")
-
-# filter unsupported gfx archs for v3 kernels in aiter
-SET(V3_ASM_ARCHS "")
-# generate fwd/bwd v3 kernels for each requested rocm arch
-foreach(CK_TARGET_ARCH IN LISTS CMAKE_HIP_ARCHITECTURES)
-  string(TOLOWER "${CK_TARGET_ARCH}" CK_TARGET_ARCH_LOWER)
-  if(${CK_TARGET_ARCH_LOWER} IN_LIST V3_ASM_ARCHS_SUPPORTED)
-    list(APPEND V3_ASM_ARCHS "${CK_TARGET_ARCH_LOWER}")
-  else()
-    message(WARNING "${CK_TARGET_ARCH} not supported with aiter v3 asm kernels")
-  endif()
-endforeach()
-message(STATUS "AITER V3_ASM_ARCHS: ${V3_ASM_ARCHS}")
-
-# pass GPU_TARGET as env into aiter codegen
-list(JOIN V3_ASM_ARCHS ";" V3_ASM_ARCHS_STR)
-
 if(DEFINED AITER_MHA_PATH)
   message(STATUS "[AITER-BUILD] Using AITER_MHA_PATH=${AITER_MHA_PATH}")
   # use pre-built libmha_fwd.so libmha_bwd.so
@@ -65,13 +46,14 @@ else()
 
   if(__AITER_MHA_PATH STREQUAL "")
     # If not available, fallback: Build from source
-    message(STATUS "[AITER-BUILD] Building aiter from source.")
+    list(JOIN CMAKE_HIP_ARCHITECTURES ";" GPU_ARCHS_STR)
+    message(STATUS "[AITER-BUILD] Building aiter from source for ${GPU_ARCHS_STR}")
     get_default_aiter_cache_dir(__AITER_MHA_PATH)
     execute_process(
       COMMAND bash ${CMAKE_CURRENT_LIST_DIR}/aiter_build.sh
               --aiter-dir ${__AITER_SOURCE_DIR}
               --install-dir ${__AITER_MHA_PATH}
-              --gpu-archs "${V3_ASM_ARCHS_STR}"
+              --gpu-archs "${GPU_ARCHS_STR}"
               --ck-tile-bf16 ${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
     )
   else()
@@ -95,7 +77,7 @@ set(CK_FUSED_ATTN_COMPILE_OPTIONS)
 list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
     -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT})
 
-foreach(ARCH IN LISTS V3_ASM_ARCHS)
+foreach(ARCH IN LISTS CMAKE_HIP_ARCHITECTURES)
   list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS --offload-arch=${ARCH})
 endforeach()
 
@@ -132,7 +114,12 @@ set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
 install(FILES ${__AITER_MHA_PATH}/libmha_fwd.so ${__AITER_MHA_PATH}/libmha_bwd.so DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
 install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
 # copy v3 kernels to destination
-foreach(ARCH IN LISTS V3_ASM_ARCHS)
+# so far, there are only gfx942 and gfx950 v3 kernels
+foreach(ARCH IN LISTS CMAKE_HIP_ARCHITECTURES)
+  string(TOLOWER "${ARCH}" ARCH)
+  if(${ARCH} NOT IN_LIST V3_ASM_ARCHS_SUPPORTED)
+    continue()
+  endif()
   foreach(KERNEL_TYPE IN ITEMS fmha_v3_fwd fmha_v3_bwd)
     file(REMOVE_RECURSE ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib/aiter/${ARCH}/${KERNEL_TYPE})
     install(DIRECTORY

@@ -126,14 +126,14 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 
 else()
   set(CMAKE_CXX_STANDARD 17)
+  #define GPU ARCH before enabling HIP to avoid potential failures with arch detection
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
   project(transformer_engine LANGUAGES HIP CXX)
 
   # If using ROCm, ninja must be installed to build TE.
   if (NOT CMAKE_GENERATOR STREQUAL "Ninja")
     message(FATAL_ERROR "This project requires the Ninja build system. Install it using 'pip install ninja'.")
   endif()
-
-  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
 
   # Disable Asserts In Code (Can't use asserts on HIP stack.)
   add_definitions(-DNDEBUG)

@@ -91,7 +91,31 @@ _flash_attn_fwd = None
 _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
+
+if IS_HIP_EXTENSION and os.getenv("NVTE_FLASH_ATTN_AITER", "1") == "1":
+    try:
+        import aiter
+        import triton
+        from aiter.ops.triton.mha import flash_attn_func, flash_attn_varlen_func
+        from aiter.ops.triton.mha import _flash_attn_forward as _flash_attn_fwd
+        from aiter.ops.triton.mha import flash_attn_onekernel_backward as _flash_attn_bwd
+        from aiter.ops.triton.mha import (
+            _flash_attn_forward as _flash_attn_varlen_fwd,
+        )
+        from aiter.ops.triton.mha import (
+            flash_attn_onekernel_backward as _flash_attn_varlen_bwd,
+        )
+    except ImportError as e:
+        pass
+    else:
+        fa_utils.use_aiter_triton = True
+        # Setup Flash attention utils
+        fa_utils.version = PkgVersion("2.7.1")  #masqurade as FA 2.7.1
+        fa_utils.set_flash_attention_version()
+        attn_log.fa_logger.info("Using AITER Triton for FlashAttn.")
 try:
+    if fa_utils.use_aiter_triton:
+        raise PackageNotFoundError  # skip version check for aiter triton
     fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
