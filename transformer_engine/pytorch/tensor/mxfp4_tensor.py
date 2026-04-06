@@ -185,6 +185,58 @@ class MXFP4Quantizer(Quantizer):
             quantizer=self,
         )
 
+    def qgemm(
+        self,
+        qx: torch.Tensor,
+        qw: torch.Tensor,
+        m_params,
+        out_dtype: torch.dtype,
+        sx: torch.Tensor,
+        sw: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        out: Optional[torch.Tensor] = None,
+        accumulate: bool = False,
+        gemm_type=None,
+        qresult_x=None,
+        qresult_w=None,
+    ) -> torch.Tensor:
+        """MXFP4 GEMM via AITER f4gemm kernels (gfx950 only, forward pass only).
+
+        Routes to ASM or CK blockscale kernel based on tuned config CSV.
+        """
+        # Lazy import to avoid circular deps and allow non-gfx950 builds
+        from ..triton_kernels.common import is_cdna4
+        from ..custom_recipes.quantization import GEMMType
+
+        if gemm_type is None:
+            gemm_type = GEMMType.FPROP
+
+        if gemm_type != GEMMType.FPROP:
+            raise NotImplementedError(
+                f"MXFP4 qgemm only supports FPROP, got {gemm_type}. "
+                "Backward passes (DGRAD/WGRAD) are not supported with FP4 GEMM."
+            )
+
+        if not is_cdna4():
+            raise RuntimeError(
+                "MXFP4 qgemm via AITER f4gemm requires gfx950 (CDNA4)."
+            )
+
+        from .f4gemm_dispatch import f4gemm
+
+        m = qx.shape[0]
+        n = qw.shape[0]
+
+        # Allocate output padded to multiples of 32 (required by ASM kernels)
+        m_padded = ((m + 31) // 32) * 32
+        result = torch.empty(m_padded, n, dtype=out_dtype, device=qx.device)
+
+        return f4gemm(
+            qx, qw, sx, sw, result,
+            bias=bias,
+            bpreshuffle=self.shuffle_B_matrix_for_aiter,
+        )
+
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return MXFP4BlockScaling
 

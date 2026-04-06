@@ -97,6 +97,11 @@ def setup_common_extension() -> CMakeExtension:
         elif os.getenv("NVTE_FUSED_ATTN_CK") or os.getenv("NVTE_FUSED_ATTN"):
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=ON")
 
+        if os.getenv("NVTE_AITER_F4GEMM_PATH"):
+            cmake_flags.append(f"-DAITER_F4GEMM_PATH={os.getenv('NVTE_AITER_F4GEMM_PATH')}")
+        if int(os.getenv("NVTE_AITER_F4GEMM", "1")) == 0:
+            cmake_flags.append("-DUSE_AITER_F4GEMM=OFF")
+
         if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))) and os.getenv("NVTE_ENABLE_ROCSHMEM") is None:
             os.environ["NVTE_ENABLE_ROCSHMEM"] = '1'
             os.environ["NVTE_ENABLE_NVSHMEM"] = '0'
@@ -264,6 +269,12 @@ if __name__ == "__main__":
         package_data = {
             "": ["VERSION.txt"],
             "transformer_engine.pytorch.triton_kernels.gmm": ["configs/*.json"],
+            "transformer_engine": [
+                "lib/f4gemm/*.so",
+                "lib/f4gemm/*.csv",
+                "lib/aiter/gfx950/f4gemm/*.co",
+                "lib/aiter/gfx950/f4gemm/*.csv",
+            ],
         }
         include_package_data = True
         extras_require = {"test": test_requires}

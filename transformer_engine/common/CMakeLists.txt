@@ -450,6 +450,11 @@ else()
     add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
   endif()
 
+  option(USE_AITER_F4GEMM "Build AITER f4gemm kernels" ON)
+  if(USE_AITER_F4GEMM)
+    add_subdirectory(ck_f4gemm ${CMAKE_CURRENT_BINARY_DIR}/ck_f4gemm)
+  endif()
+
   find_package(hip)
   list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64)
   find_package(hiprtc)

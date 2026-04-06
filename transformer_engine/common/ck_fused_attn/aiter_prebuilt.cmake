@@ -75,6 +75,15 @@ function(get_default_aiter_cache_dir CACHE_DIR_VAR)
   set(${CACHE_DIR_VAR} "${EXTRACT_DIR}" PARENT_SCOPE)
 endfunction()
 
+# Validate f4gemm content in existing cache
+function(is_f4gemm_cache_valid ROCM_VER_PARAM CACHE_VALID)
+  get_aiter_cache_key("${ROCM_VER_PARAM}" KEY EXTRACT_DIR)
+  if(EXISTS "${EXTRACT_DIR}/f4gemm/module_gemm_a4w4_asm.so")
+    set(${CACHE_VALID} TRUE PARENT_SCOPE)
+    message(STATUS "[AITER-PREBUILT] Found cached f4gemm at ${EXTRACT_DIR}")
+  endif()
+endfunction()
+
 # Download prebuilt tgz file
 function(download_aiter_prebuilt ROCM_VER_PARAM DOWNLOAD_SUCCESS)
   if(NOT DEFINED ENV{NVTE_AITER_PREBUILT_BASE_URL} OR "$ENV{NVTE_AITER_PREBUILT_BASE_URL}" STREQUAL "")

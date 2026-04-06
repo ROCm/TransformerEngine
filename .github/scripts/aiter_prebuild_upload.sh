@@ -53,11 +53,21 @@ fi
 if [[ "${1:-}" == "--build" ]]; then
   shift
   GPU_ARCHS="gfx942;gfx950"
-  echo "[AITER-PREBUILT] Building aiter libs for ${GPU_ARCHS} ..."
+  echo "[AITER-PREBUILT] Building aiter MHA libs for ${GPU_ARCHS} ..."
   bash "${ROOT_DIR}/transformer_engine/common/ck_fused_attn/aiter_build.sh" \
     --aiter-dir "${ROOT_DIR}/3rdparty/aiter" \
     --install-dir "${EXTRACT_DIR}" \
     --gpu-archs "${GPU_ARCHS}"
+
+  # Build f4gemm for gfx950
+  if [[ "${GPU_ARCHS}" == *"gfx950"* ]]; then
+    echo "[AITER-PREBUILT] Building aiter f4gemm libs for gfx950 ..."
+    bash "${ROOT_DIR}/transformer_engine/common/ck_fused_attn/aiter_build.sh" \
+      --aiter-dir "${ROOT_DIR}/3rdparty/aiter" \
+      --install-dir "${EXTRACT_DIR}" \
+      --gpu-archs "gfx950" \
+      --mode f4gemm
+  fi
 fi
 
 # Ensure built libs exist
