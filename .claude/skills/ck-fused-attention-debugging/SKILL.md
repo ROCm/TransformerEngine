@@ -1,5 +1,5 @@
 ---
-name: ck-debugging
+name: ck-fused-attention-debugging
 description: Triage, investigate, debug, and isolate CK/AITER Fused Attention failures in TransformerEngine as integration vs kernel issues.
 ---
 
