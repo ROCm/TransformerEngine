@@ -86,8 +86,17 @@ except FileNotFoundError as e:
 try:
     __version__ = str(metadata.version("transformer_engine"))
 except metadata.PackageNotFoundError:
-    if not transformer_engine.common.te_rocm_build:
+    if transformer_engine.common._nvte_lite_mode:
+        # In lite mode, version metadata may not be available from pip.
+        # Try to read version from build_tools or fall back to "0.0.0-lite".
+        try:
+            from transformer_engine.build_tools.te_version import te_version
+            __version__ = te_version() + "+lite"
+        except Exception:
+            __version__ = "0.0.0+lite"
+    elif not transformer_engine.common.te_rocm_build:
         raise
-    _te_core_installed, _, __version__ = transformer_engine.common.get_te_core_package_info()
-    if not _te_core_installed:
-        raise
+    else:
+        _te_core_installed, _, __version__ = transformer_engine.common.get_te_core_package_info()
+        if not _te_core_installed:
+            raise
