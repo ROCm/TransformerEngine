@@ -34,13 +34,10 @@ except ImportError:
 def get_fused_attn_backend(*args, **kwargs):
     """Get the fused attention backend to use.
 
-    In lite mode, we prefer: AITER > flash-attn > SDPA.
+    In lite mode, fused attention is not yet implemented (Phase 3).
+    Return No_Backend so the caller falls back to unfused (SDPA) attention.
     """
-    if _aiter_available:
-        return NVTE_Fused_Attn_Backend.NVTE_CK
-    if _flash_attn_available:
-        return NVTE_Fused_Attn_Backend.NVTE_Flash
-    return NVTE_Fused_Attn_Backend.NVTE_SDPA
+    return NVTE_Fused_Attn_Backend.NVTE_No_Backend
 
 
 def fused_attn_fwd(*args, **kwargs):

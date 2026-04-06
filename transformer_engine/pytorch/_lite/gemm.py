@@ -46,7 +46,13 @@ def generic_gemm(A, transA, B, transB, D, quantizer, output_dtype,
     a = _dequantize_if_needed(A)
     b = _dequantize_if_needed(B)
 
-    # Apply transposes
+    # cuBLAS column-major: C = op(A) @ op(B)
+    # In row-major (PyTorch): C_row = B_row @ A_row  (reversed operand order)
+    # The trans flags apply directly to the row-major tensors.
+    # Typical "TN" layout: transA=True, transB=False
+    #   A=[out,in] weight → a.t()=[in,out], B=[batch,in] → b as-is
+    #   result = b @ a.t() = [batch,in] @ [in,out] = [batch,out]
+
     if transA:
         a = a.t()
     if transB:
@@ -62,19 +68,30 @@ def generic_gemm(A, transA, B, transB, D, quantizer, output_dtype,
     a = a.to(compute_dtype)
     b = b.to(compute_dtype)
 
-    # Compute GEMM
-    result = torch.matmul(a, b)
+    # Compute GEMM: row-major equivalent is B @ A
+    result = torch.matmul(b, a)
 
     if alpha != 1.0:
         result = result * alpha
 
-    # Apply bias
+    # Handle bias: in forward (grad=False) add bias to result,
+    # in backward (grad=True) compute bias_grad from grad_output (B).
+    bias_grad = torch.Tensor()
     if bias is not None and bias.numel() > 0:
-        result = result + bias
+        if grad:
+            # Backward: bias_grad = grad_output.sum(batch_dims)
+            # In wgrad GEMM (layout="NT"), B is grad_output.
+            grad_out = _dequantize_if_needed(B)
+            bias_grad = grad_out.reshape(-1, grad_out.shape[-1]).sum(dim=0)
+        else:
+            # Forward: add bias to result
+            result = result + bias
 
     # Apply GELU if requested
+    gelu_input = torch.Tensor()
     if gelu and gelu_in is not None:
         gelu_in.copy_(result)
+        gelu_input = gelu_in
         result = torch.nn.functional.gelu(result, approximate='tanh')
 
     # Accumulate into D if requested
@@ -89,7 +106,9 @@ def generic_gemm(A, transA, B, transB, D, quantizer, output_dtype,
     if quantizer is not None and hasattr(quantizer, 'quantize'):
         D = quantizer.quantize(D)
 
-    return D
+    # Return 4-tuple matching C++ tex.generic_gemm signature:
+    # (output, bias_grad, gelu_input, extra_output)
+    return D, bias_grad, gelu_input, extra_output
 
 
 def te_general_grouped_gemm(*args, **kwargs):

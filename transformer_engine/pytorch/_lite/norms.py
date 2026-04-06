@@ -40,7 +40,7 @@ def layernorm_fwd(input, weight, bias, eps, ln_out, quantizer, otype, sm_margin,
     return ln_out, mean.squeeze(-1), rstdev.squeeze(-1)
 
 
-def layernorm_bwd(grad_output, input, mean, rstdev, weight, zero_centered_gamma):
+def layernorm_bwd(grad_output, input, mean, rstdev, weight, sm_margin, zero_centered_gamma):
     """LayerNorm backward."""
     if zero_centered_gamma:
         weight = weight + 1.0
@@ -86,10 +86,11 @@ def rmsnorm_fwd(input, weight, eps, ln_out, quantizer, otype, sm_margin, zero_ce
     else:
         ln_out = output
 
-    return ln_out, rms.squeeze(-1)
+    # Return 3 values to match C++ signature: (output, dummy_mean, rstdev)
+    return ln_out, torch.Tensor(), rms.squeeze(-1)
 
 
-def rmsnorm_bwd(grad_output, input, rstdev, weight, zero_centered_gamma):
+def rmsnorm_bwd(grad_output, input, rstdev, weight, sm_margin, zero_centered_gamma):
     """RMSNorm backward."""
     if zero_centered_gamma:
         weight = weight + 1.0
