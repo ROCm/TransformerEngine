@@ -253,13 +253,15 @@ __global__ void rocm_cast_transpose_remainder_kernel(
     }
 }
 
+namespace transformer_engine::detail {
+
 template <int LOAD_SZ, int STORE_SZ, int WPT, typename IType, typename OType>
 void rocm_ct_launch(const IType *in, const float *noop,
                     OType *out_c, OType *out_t,
                     const float *scale, float *amax, float *scale_inv,
                     size_t col_off, size_t row_off,
                     size_t sub_cols, size_t sub_rows,
-                    size_t stride_row, size_t stride_col, cudaStream_t stream) {
+                    size_t stride_row, size_t stride_col, hipStream_t stream) {
     constexpr int TN  = ROCM_CT_WARP_SIZE * (LOAD_SZ / (int)sizeof(IType));
     constexpr int TM  = ROCM_CT_WARP_SIZE * (STORE_SZ / (int)sizeof(OType));
     constexpr int BLK = ROCM_CT_WARP_SIZE * WPT;
@@ -280,7 +282,7 @@ void rocm_ct_launch_cols(const IType *in, const float *noop,
                          OType *out_c, OType *out_t,
                          const float *scale, float *amax, float *scale_inv,
                          size_t row_off, size_t sub_rows,
-                         size_t row_length, size_t num_rows, cudaStream_t stream) {
+                         size_t row_length, size_t num_rows, hipStream_t stream) {
     constexpr int ISZ     = sizeof(IType);
     constexpr int MAX_LD  = (ISZ <= 2) ? 8 : 16;
     constexpr int TN_MAX  = ROCM_CT_WARP_SIZE * (MAX_LD / ISZ);
@@ -350,7 +352,7 @@ template <typename IType, typename OType>
 size_t rocm_cast_transpose_dispatch(const IType *in, const float *noop,
                                     OType *out_c, OType *out_t,
                                     const float *scale, float *amax, float *scale_inv,
-                                    size_t row_length, size_t num_rows, cudaStream_t stream) {
+                                    size_t row_length, size_t num_rows, hipStream_t stream) {
     constexpr int WPT = 16;
     constexpr int OSZ = sizeof(OType);
 
@@ -388,3 +390,4 @@ size_t rocm_cast_transpose_dispatch(const IType *in, const float *noop,
 
     return rows_done;
 }
+}  // namespace transformer_engine::detail

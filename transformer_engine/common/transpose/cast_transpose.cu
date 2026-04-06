@@ -19,12 +19,14 @@
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_cast_transpose.cuh"
+using CType = float;
 #endif
 
 namespace transformer_engine::detail {
 
 namespace {
 
+#ifndef __HIP_PLATFORM_AMD__
 // String with RTC kernel implementation
 #include "string_code_transpose_rtc_cast_transpose_cu.h"
 
@@ -220,6 +222,7 @@ __global__ void __launch_bounds__(block_size) cast_transpose_general_kernel(
     reciprocal<CType>(scale_inv_ptr, scale);
   }
 }
+#endif  // #ifndef __HIP_PLATFORM_AMD__
 
 }  // namespace
 
@@ -278,8 +281,9 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                 size_t rem = num_rows - rows_done;
                 const auto *in  = static_cast<const InputType *>(input.data.dptr);
                 const auto *no  = reinterpret_cast<const CType *>(noop.data.dptr);
-                auto *oc        = static_cast<OutputType *>(output.data.dptr);
-                auto *ot        = static_cast<OutputType *>(output.columnwise_data.dptr);
+
+                auto *oc  = static_cast<OutputType *>(output.data.dptr);
+                auto *ot  = static_cast<OutputType *>(output.columnwise_data.dptr);
                 rocm_cast_transpose_remainder_kernel<InputType, OutputType>
                     <<<DIVUP(rem * row_length, (size_t)256), 256, 0, stream>>>(
                         in + rows_done * row_length, no,

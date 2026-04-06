@@ -6,7 +6,6 @@
 #pragma once
 
 #include "../common.h"
-#include "../util/cuda_runtime.h"
 #include "../utils.cuh"
 #include "rocm_cast_transpose.cuh"
 
@@ -123,7 +122,7 @@ namespace transformer_engine::detail {
 using CType = float;
 
 inline void rocm_cast_only(const Tensor &input, const Tensor &noop,
-                           Tensor *output_, cudaStream_t stream) {
+                           Tensor *output_, hipStream_t stream) {
     Tensor &output = *output_;
 
     CheckInputTensor(input, "rocm_cast_only_input");
@@ -136,13 +135,20 @@ inline void rocm_cast_only(const Tensor &input, const Tensor &noop,
     const size_t num_rows   = input.flat_first_dim();
     const size_t total      = num_rows * row_length;
 
+    static const size_t cu_count = []() {
+        int dev;
+        hipGetDevice(&dev);
+        hipDeviceProp_t prop;
+        hipGetDeviceProperties(&prop, dev);
+        return static_cast<size_t>(prop.multiProcessorCount);
+    }();
+
     TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
         input.dtype(), InputType,
         TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
             output.dtype(), OutputType,
             if (is_tensor_scaling(output.scaling_mode)) {
               constexpr size_t ELEMS_PER_BLK = ROCM_CAST_BLOCK * ROCM_CAST_ELEMS;
-              const size_t cu_count = static_cast<size_t>(cuda::sm_count());
               const bool oversubscribe = sizeof(InputType) <= 2 && total >= (1u << 27);
               const size_t max_blks = oversubscribe ? cu_count * 2 : cu_count;
               const int nblk = (int)(std::min((total + ELEMS_PER_BLK - 1) / ELEMS_PER_BLK, max_blks));
@@ -156,11 +162,10 @@ inline void rocm_cast_only(const Tensor &input, const Tensor &noop,
                       static_cast<CType *>(output.amax.dptr),
                       static_cast<CType *>(output.scale_inv.dptr),
                       total);
-              NVTE_CHECK_CUDA(cudaGetLastError());
+              NVTE_CHECK_CUDA(hipGetLastError());
             } else {
               NVTE_ERROR("Not implemented scaling mode: ", to_string(output.scaling_mode));
             }
     ););           // NOLINT(*)
 }
-
 }  // namespace transformer_engine::detail
