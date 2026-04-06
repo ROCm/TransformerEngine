@@ -19,7 +19,7 @@ jobs:
     steps:
       - name: Determine CI dispatch from labels
         id: set_level
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const parseLevelLabel = (labelName) => {
