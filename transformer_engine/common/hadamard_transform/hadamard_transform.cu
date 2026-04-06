@@ -18,7 +18,9 @@
 #include "common/common.h"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
+#ifndef __HIP_PLATFORM_AMD__
 #include "hadamard_transform_utils.cuh"
+#endif
 
 namespace transformer_engine {
 namespace {
