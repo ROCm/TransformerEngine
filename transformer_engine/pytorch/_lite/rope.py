@@ -11,13 +11,7 @@ Otherwise, falls back to PyTorch-native implementation.
 
 import torch
 
-# Try to import AITER RoPE
-_aiter_rope_available = False
-try:
-    from aiter import rope as aiter_rope
-    _aiter_rope_available = True
-except ImportError:
-    pass
+from .aiter_utils import get_aiter_rope
 
 
 def _apply_rope_pytorch(t, freqs, transpose_output=False):
@@ -42,8 +36,9 @@ def _apply_rope_pytorch(t, freqs, transpose_output=False):
 
 def fused_rope_forward(t, freqs, transpose_output=False):
     """Fused RoPE forward."""
-    if _aiter_rope_available:
-        return aiter_rope.fused_rope_forward(t, freqs, transpose_output)
+    _aiter_rope = get_aiter_rope()
+    if _aiter_rope is not None:
+        return _aiter_rope.fused_rope_forward(t, freqs, transpose_output)
     return _apply_rope_pytorch(t, freqs, transpose_output)
 
 
@@ -52,8 +47,9 @@ def fused_rope_backward(grad_output, freqs, transpose_output=False):
 
     RoPE backward is the same as forward but with negated sin component.
     """
-    if _aiter_rope_available:
-        return aiter_rope.fused_rope_backward(grad_output, freqs, transpose_output)
+    _aiter_rope = get_aiter_rope()
+    if _aiter_rope is not None:
+        return _aiter_rope.fused_rope_backward(grad_output, freqs, transpose_output)
 
     d = grad_output.shape[-1]
     g1, g2 = grad_output[..., :d // 2], grad_output[..., d // 2:]
@@ -69,8 +65,9 @@ def fused_rope_backward(grad_output, freqs, transpose_output=False):
 
 def fused_qkv_rope_forward(qkv, freqs_q, freqs_k=None, transpose_output=False):
     """Fused QKV RoPE forward -- apply RoPE to Q and K within a packed QKV tensor."""
-    if _aiter_rope_available:
-        return aiter_rope.fused_qkv_rope_forward(qkv, freqs_q, freqs_k, transpose_output)
+    _aiter_rope = get_aiter_rope()
+    if _aiter_rope is not None:
+        return _aiter_rope.fused_qkv_rope_forward(qkv, freqs_q, freqs_k, transpose_output)
 
     # QKV is packed: split into Q, K, V
     # Assume last dim is 3 * head_dim or there are 3 heads
@@ -83,8 +80,9 @@ def fused_qkv_rope_forward(qkv, freqs_q, freqs_k=None, transpose_output=False):
 
 def fused_qkv_rope_backward(grad_output, freqs_q, freqs_k=None, transpose_output=False):
     """Fused QKV RoPE backward."""
-    if _aiter_rope_available:
-        return aiter_rope.fused_qkv_rope_backward(grad_output, freqs_q, freqs_k, transpose_output)
+    _aiter_rope = get_aiter_rope()
+    if _aiter_rope is not None:
+        return _aiter_rope.fused_qkv_rope_backward(grad_output, freqs_q, freqs_k, transpose_output)
 
     gq, gk, gv = grad_output.chunk(3, dim=-1)
     gq_rot = fused_rope_backward(gq, freqs_q)

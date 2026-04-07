@@ -3,14 +3,19 @@
 #
 # See LICENSE for license information.
 
-"""Activation functions -- PyTorch-native implementations.
+"""Activation functions -- AITER fused gated activations with PyTorch fallback.
 
-TODO Phase 2: Replace with AITER fused_fp8_quant or standalone Triton fused act+quantize.
+When AITER is available, gated activations (swiglu, geglu) use AITER's
+fused kernels (silu_and_mul, gelu_tanh_and_mul) which combine
+chunk + activation + gate multiply in a single kernel. Non-gated
+activations use PyTorch ops. Quantization is always a separate step.
 """
 
 import torch
 import torch.nn.functional as F
 import math
+
+from .aiter_utils import is_aiter_available, get_aiter
 
 
 def _apply_quantizer(output, quantizer):
@@ -18,6 +23,28 @@ def _apply_quantizer(output, quantizer):
     if quantizer is not None and hasattr(quantizer, 'quantize'):
         return quantizer.quantize(output)
     return output
+
+
+def _aiter_gated_act(input, aiter_fn_name):
+    """Try AITER fused gated activation. Returns None if unsupported.
+
+    AITER gated activation API: fn(out, input) -> None
+    Input is (*, 2*H), output is (*, H). Fuses chunk + act + gate multiply.
+    """
+    aiter = get_aiter()
+    if aiter is None:
+        return None
+    fn = getattr(aiter, aiter_fn_name, None)
+    if fn is None:
+        return None
+    try:
+        half_size = input.shape[-1] // 2
+        out_shape = input.shape[:-1] + (half_size,)
+        out = torch.empty(out_shape, dtype=input.dtype, device=input.device)
+        fn(out, input)
+        return out
+    except (RuntimeError, TypeError):
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -32,6 +59,10 @@ def gelu(input, quantizer):
 
 def geglu(input, quantizer):
     """GeGLU: split input in half, apply GELU to first, multiply by second."""
+    if is_aiter_available():
+        result = _aiter_gated_act(input, 'gelu_tanh_and_mul')
+        if result is not None:
+            return _apply_quantizer(result, quantizer)
     chunks = input.chunk(2, dim=-1)
     out = F.gelu(chunks[0], approximate='tanh') * chunks[1]
     return _apply_quantizer(out, quantizer)
@@ -84,6 +115,10 @@ def silu(input, quantizer):
 
 def swiglu(input, quantizer):
     """SwiGLU: gated variant of SiLU."""
+    if is_aiter_available():
+        result = _aiter_gated_act(input, 'silu_and_mul')
+        if result is not None:
+            return _apply_quantizer(result, quantizer)
     chunks = input.chunk(2, dim=-1)
     out = F.silu(chunks[0]) * chunks[1]
     return _apply_quantizer(out, quantizer)
