@@ -157,25 +157,12 @@ static_assert(kNumThreadsLoad <= kThreadsPerWarp, "kNumThreadsLoad must be <= kT
 static_assert(kNumThreadsStore <= kThreadsPerWarp, "kNumThreadsStore must be <= kThreadsPerWarp");
 
 // for 2D block scaling, we need to reduce amax in warp
-#ifdef __HIP_PLATFORM_AMD__
-static __device__ constexpr uint64_t WARP_REDUCE_AMAX_GROUP_MASKS[8] = {
-    0x0101010101010101ULL, 0x0202020202020202ULL,
-    0x0404040404040404ULL, 0x0808080808080808ULL,
-    0x1010101010101010ULL, 0x2020202020202020ULL,
-    0x4040404040404040ULL, 0x8080808080808080ULL};
-#else
 static __device__ constexpr unsigned int WARP_REDUCE_AMAX_GROUP_MASKS[8] = {
     0x01010101, 0x02020202, 0x04040404, 0x08080808, 0x10101010, 0x20202020, 0x40404040, 0x80808080};
-#endif
 
 // max for every group_size elements in warp
 template <int group_size, int shfl_down_stride>
-__device__ __forceinline__ float groupMax(float val,
-#ifdef __HIP_PLATFORM_AMD__
-                                          uint64_t groupMask) {
-#else
-                                          unsigned int groupMask) {
-#endif
+__device__ __forceinline__ float groupMax(float val, unsigned int groupMask) {
   for (int offset = group_size / 2; offset > 0; offset /= 2) {
 #ifdef __HIP_PLATFORM_AMD__
     (void)groupMask;  // unused on AMD, __shfl_down does not take a mask
