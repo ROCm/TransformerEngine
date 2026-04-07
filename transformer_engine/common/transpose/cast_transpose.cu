@@ -29,12 +29,14 @@ namespace {
 #ifndef __HIP_PLATFORM_AMD__
 // String with RTC kernel implementation
 #include "string_code_transpose_rtc_cast_transpose_cu.h"
+#endif
 
 // Hard-coded kernel parameters
 using CType = float;
 constexpr size_t warps_per_tile = 4;
 constexpr size_t block_size = THREADS_PER_WARP * warps_per_tile;
 
+#ifndef __HIP_PLATFORM_AMD__
 /* Performance heuristics for optimized kernel parameters */
 struct KernelConfig {
   /** Vector load size */
@@ -107,6 +109,7 @@ struct KernelConfig {
     }
   }
 };
+#endif  // #ifndef __HIP_PLATFORM_AMD__
 
 template <size_t load_size, size_t store_size, typename IType, typename OType>
 __global__ void __launch_bounds__(block_size) cast_transpose_general_kernel(
@@ -222,7 +225,6 @@ __global__ void __launch_bounds__(block_size) cast_transpose_general_kernel(
     reciprocal<CType>(scale_inv_ptr, scale);
   }
 }
-#endif  // #ifndef __HIP_PLATFORM_AMD__
 
 }  // namespace
 
@@ -277,7 +279,21 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                   static_cast<CType *>(output.amax.dptr),
                   static_cast<CType *>(output.scale_inv.dptr),
                   row_length, num_rows, stream);
-              if (rows_done < num_rows) {
+              if (rows_done == 0 && rows_done < num_rows) {
+                constexpr size_t ld = 4, st = 4;
+                const int nblk = DIVUP(row_length, ld / itype_size * THREADS_PER_WARP)
+                               * DIVUP(num_rows, st / otype_size * THREADS_PER_WARP);
+                cast_transpose_general_kernel<ld, st, InputType, OutputType>
+                    <<<nblk, block_size, 0, stream>>>(
+                        static_cast<const InputType *>(input.data.dptr),
+                        reinterpret_cast<const CType *>(noop.data.dptr),
+                        static_cast<OutputType *>(output.data.dptr),
+                        static_cast<OutputType *>(output.columnwise_data.dptr),
+                        static_cast<const CType *>(output.scale.dptr),
+                        static_cast<CType *>(output.amax.dptr),
+                        static_cast<CType *>(output.scale_inv.dptr),
+                        row_length, num_rows);
+              } else if (rows_done < num_rows) {
                 size_t rem = num_rows - rows_done;
                 const auto *in  = static_cast<const InputType *>(input.data.dptr);
                 const auto *no  = reinterpret_cast<const CType *>(noop.data.dptr);

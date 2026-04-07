@@ -18,7 +18,7 @@
 #include "../../common.h"
 #include "../../transpose/cast_transpose.h"
 #ifdef __HIP_PLATFORM_AMD__
-#include "../../transpose/rocm_cast.cuh"
+#include "../fp8/rocm_cast.cuh"
 #endif
 #include "../../util/vectorized_pointwise.h"
 #include "../core/common.cuh"
@@ -83,7 +83,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       } else if (output_tensor->has_data()) {
 #ifdef __HIP_PLATFORM_AMD__
         if constexpr (!IS_ACT) {
-          detail::rocm_cast_only(*input_tensor, *noop_tensor, output_tensor, stream);
+          fp8::rocm_cast_only(*input_tensor, *noop_tensor, output_tensor, stream);
         } else
 #endif
         {
