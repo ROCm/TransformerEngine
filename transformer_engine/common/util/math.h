@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -8,6 +10,18 @@
 #define TRANSFORMER_ENGINE_COMMON_UTIL_MATH_H_
 
 namespace transformer_engine {
+
+// AMD Fast tanh using hardware exp instruction
+__device__ inline float fast_tanhf(float x) {
+#ifdef __HIP_PLATFORM_AMD__
+  // tanh(x) saturates at ±1 for |x| > 20
+  x = fmaxf(fminf(x, 20.f), -20.f);
+  float e2x = __expf(2.0f * x);
+  return (e2x - 1.0f) * __frcp_rn(e2x + 1.0f);
+#else
+  return tanhf(x);
+#endif
+}
 
 struct Empty {};
 
@@ -19,13 +33,13 @@ struct ClampedSwiGLUParam {
 template <typename OType, typename IType>
 __device__ inline OType gelu(const IType val, const Empty&) {
   const float cval = val;
-  return cval * (0.5F + 0.5F * tanhf(cval * (0.79788456F + 0.03567741F * cval * cval)));
+  return cval * (0.5F + 0.5F * fast_tanhf(cval * (0.79788456F + 0.03567741F * cval * cval)));
 }
 
 template <typename OType, typename IType>
 __device__ inline OType dgelu(const IType val, const Empty&) {
   const float cval = val;
-  const float tanh_out = tanhf(0.79788456f * cval * (1.f + 0.044715f * cval * cval));
+  const float tanh_out = fast_tanhf(0.79788456f * cval * (1.f + 0.044715f * cval * cval));
   return 0.5f * cval * ((1.f - tanh_out * tanh_out) * (0.79788456f + 0.1070322243f * cval * cval)) +
          0.5f * (1.f + tanh_out);
 }
@@ -33,7 +47,11 @@ __device__ inline OType dgelu(const IType val, const Empty&) {
 template <typename OType, typename IType>
 __device__ inline OType sigmoid(const IType val, const Empty&) {
   const float cval = val;
+#ifdef __HIP_PLATFORM_AMD__
+  return __frcp_rn(1.0f + __expf(-cval));
+#else
   return 1.f / (1.f + expf(-cval));
+#endif
 }
 
 __device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf(-x)); }
@@ -61,8 +79,8 @@ template <typename OType, typename IType>
 __device__ inline OType dqgelu_with_alpha(const IType val, const float alpha) {
   const float cval = val;
   Empty e = {};
-  return alpha * cval * dsigmoid<float, float>(alpha * cval, e) +
-         sigmoid<float, float>(alpha * cval, e);
+  const float s = sigmoid<float, float>(alpha * cval, e);
+  return s * (1.f + alpha * cval * (1.f - s));
 }
 
 template <typename OType, typename IType>
@@ -85,7 +103,8 @@ __device__ inline OType clamped_silu(const IType val, const ClampedSwiGLUParam& 
 template <typename OType, typename IType>
 __device__ inline OType dsilu(const IType val, const Empty& e) {
   const float cval = val;
-  return cval * dsigmoid<float, float>(cval, e) + sigmoid<float, float>(cval, e);
+  const float s = sigmoid<float, float>(cval, e);
+  return s * (1.f + cval * (1.f - s));
 }
 
 template <typename OType, typename IType>
