@@ -234,3 +234,151 @@ class TestNumerical:
         assert torch.allclose(y_te, y_pt, atol=5e-3, rtol=1e-2), (
             f"LayerNorm max diff: {(y_te - y_pt).abs().max().item():.2e}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Triton kernel wiring (Phase 2)
+# ---------------------------------------------------------------------------
+
+class TestTritonNorms:
+    """Verify that Triton norm kernels are wired correctly via _lite."""
+
+    def test_triton_norms_loadable(self):
+        """Triton norm kernels should be importable when Triton is installed."""
+        try:
+            import triton  # noqa: F401
+            has_triton = True
+        except ImportError:
+            has_triton = False
+
+        from transformer_engine.pytorch._lite.norms import (
+            _try_load_triton_norms,
+            _triton_ln_fwd,
+        )
+        _try_load_triton_norms()
+        if has_triton:
+            from transformer_engine.pytorch._lite import norms as _n
+            assert _n._triton_ln_fwd is not None, "Triton norms should load when Triton is available"
+        # If triton is not installed, the fallback path is tested by other tests.
+
+    @pytest.mark.parametrize("hidden_size", [256, 512, 1024])
+    def test_layernorm_fwd_triton_vs_pytorch(self, device, hidden_size):
+        """Triton layernorm_fwd should match PyTorch reference."""
+        from transformer_engine.pytorch._lite.norms import (
+            _layernorm_fwd_pytorch,
+        )
+        weight = torch.randn(hidden_size, device=device, dtype=torch.bfloat16)
+        bias = torch.randn(hidden_size, device=device, dtype=torch.bfloat16)
+        x = torch.randn(8, hidden_size, device=device, dtype=torch.bfloat16)
+
+        y_pt, mean_pt, rstd_pt = _layernorm_fwd_pytorch(
+            x, weight, bias, 1e-5, None, None, None, 0, False,
+        )
+        y_te, mean_te, rstd_te = tex.layernorm_fwd(
+            x, weight, bias, 1e-5, None, None, None, 0, False,
+        )
+        # Dequantize if needed
+        if hasattr(y_te, 'dequantize'):
+            y_te = y_te.dequantize()
+        # BF16 layernorm: Triton fused kernel vs PyTorch individual ops have
+        # different rounding, so tolerance must accommodate BF16 ULP differences
+        assert torch.allclose(y_te.to(torch.bfloat16), y_pt, atol=8e-2, rtol=2e-2), (
+            f"LayerNorm fwd max diff: {(y_te.to(torch.bfloat16) - y_pt).abs().max().item():.2e}"
+        )
+
+    @pytest.mark.parametrize("hidden_size", [256, 512, 1024])
+    def test_rmsnorm_fwd_triton_vs_pytorch(self, device, hidden_size):
+        """Triton rmsnorm_fwd should match PyTorch reference."""
+        from transformer_engine.pytorch._lite.norms import (
+            _rmsnorm_fwd_pytorch,
+        )
+        weight = torch.randn(hidden_size, device=device, dtype=torch.bfloat16)
+        x = torch.randn(8, hidden_size, device=device, dtype=torch.bfloat16)
+
+        y_pt, _, rstd_pt = _rmsnorm_fwd_pytorch(
+            x, weight, 1e-5, None, None, None, 0, False,
+        )
+        y_te, _, rstd_te = tex.rmsnorm_fwd(
+            x, weight, 1e-5, None, None, None, 0, False,
+        )
+        if hasattr(y_te, 'dequantize'):
+            y_te = y_te.dequantize()
+        assert torch.allclose(y_te.to(torch.bfloat16), y_pt, atol=5e-3, rtol=1e-2), (
+            f"RMSNorm fwd max diff: {(y_te.to(torch.bfloat16) - y_pt).abs().max().item():.2e}"
+        )
+
+    def test_layernorm_bwd_triton_vs_pytorch(self, device):
+        """Triton layernorm_bwd should match PyTorch reference."""
+        from transformer_engine.pytorch._lite.norms import (
+            _layernorm_fwd_pytorch,
+            _layernorm_bwd_pytorch,
+        )
+        hidden = 512
+        weight = torch.randn(hidden, device=device, dtype=torch.bfloat16)
+        bias = torch.randn(hidden, device=device, dtype=torch.bfloat16)
+        x = torch.randn(8, hidden, device=device, dtype=torch.bfloat16)
+        grad_out = torch.randn(8, hidden, device=device, dtype=torch.bfloat16)
+
+        _, mean, rstd = _layernorm_fwd_pytorch(
+            x, weight, bias, 1e-5, None, None, None, 0, False,
+        )
+        dx_pt, dw_pt, db_pt = _layernorm_bwd_pytorch(
+            grad_out, x, mean, rstd, weight, 0, False,
+        )
+        dx_te, dw_te, db_te = tex.layernorm_bwd(
+            grad_out, x, mean, rstd, weight, 0, False,
+        )
+        assert torch.allclose(dx_te, dx_pt, atol=8e-2, rtol=2e-2), (
+            f"LayerNorm bwd dx max diff: {(dx_te - dx_pt).abs().max().item():.2e}"
+        )
+        # Weight grad is reduced over batch -- wider BF16 tolerance
+        assert torch.allclose(dw_te, dw_pt, atol=5e-2, rtol=5e-2), (
+            f"LayerNorm bwd dw max diff: {(dw_te - dw_pt).abs().max().item():.2e}"
+        )
+
+    def test_rmsnorm_bwd_triton_vs_pytorch(self, device):
+        """Triton rmsnorm_bwd should match PyTorch reference."""
+        from transformer_engine.pytorch._lite.norms import (
+            _rmsnorm_fwd_pytorch,
+            _rmsnorm_bwd_pytorch,
+        )
+        hidden = 512
+        weight = torch.randn(hidden, device=device, dtype=torch.bfloat16)
+        x = torch.randn(8, hidden, device=device, dtype=torch.bfloat16)
+        grad_out = torch.randn(8, hidden, device=device, dtype=torch.bfloat16)
+
+        _, _, rstd = _rmsnorm_fwd_pytorch(
+            x, weight, 1e-5, None, None, None, 0, False,
+        )
+        dx_pt, dw_pt = _rmsnorm_bwd_pytorch(
+            grad_out, x, rstd, weight, 0, False,
+        )
+        dx_te, dw_te = tex.rmsnorm_bwd(
+            grad_out, x, rstd, weight, 0, False,
+        )
+        # Cast to common dtype -- PyTorch fallback may promote to fp32
+        # while Triton kernel returns in input dtype
+        dx_te_bf16 = dx_te.to(torch.bfloat16)
+        dx_pt_bf16 = dx_pt.to(torch.bfloat16)
+        dw_te_bf16 = dw_te.to(torch.bfloat16)
+        dw_pt_bf16 = dw_pt.to(torch.bfloat16)
+        assert torch.allclose(dx_te_bf16, dx_pt_bf16, atol=5e-2, rtol=2e-2), (
+            f"RMSNorm bwd dx max diff: {(dx_te_bf16 - dx_pt_bf16).abs().max().item():.2e}"
+        )
+        assert torch.allclose(dw_te_bf16, dw_pt_bf16, atol=5e-2, rtol=5e-2), (
+            f"RMSNorm bwd dw max diff: {(dw_te_bf16 - dw_pt_bf16).abs().max().item():.2e}"
+        )
+
+    def test_layernorm_3d_input(self, device):
+        """Norm functions should handle 3D input (batch, seq, hidden)."""
+        mod = te.LayerNorm(256).to(dtype=torch.bfloat16, device=device)
+        x = torch.randn(2, 4, 256, device=device, dtype=torch.bfloat16)
+        y = mod(x)
+        assert y.shape == (2, 4, 256)
+
+    def test_rmsnorm_3d_input(self, device):
+        """RMSNorm should handle 3D input (batch, seq, hidden)."""
+        mod = te.RMSNorm(256).to(dtype=torch.bfloat16, device=device)
+        x = torch.randn(2, 4, 256, device=device, dtype=torch.bfloat16)
+        y = mod(x)
+        assert y.shape == (2, 4, 256)

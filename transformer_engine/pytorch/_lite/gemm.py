@@ -7,7 +7,7 @@
 
 Backend priority:
 1. AITER GEMM (CK + Triton) when available
-2. Standalone Triton FP8 GEMM (TODO Phase 2)
+2. Standalone Triton FP8 GEMM (TODO)
 3. torch._scaled_mm for FP8 (fallback)
 4. torch.matmul for BF16/FP16 (last resort)
 """
@@ -42,7 +42,13 @@ def generic_gemm(A, transA, B, transB, D, quantizer, output_dtype,
 
     This is the primary GEMM entry point, replacing tex.generic_gemm.
     """
-    # Dequantize inputs if needed
+    # --- AITER dispatch (Phase 3: AITER integration) ---
+    # When AITER is available, dispatch FP8 GEMMs to AITER's CK/Triton kernels:
+    #   if _aiter_available and _is_fp8_gemm(A, B):
+    #       return _aiter_gemm(A, transA, B, transB, D, quantizer, ...)
+    # AITER provides: aiter.gemm_a8w8_blockscale, aiter.gemm_a16w8, etc.
+
+    # --- PyTorch fallback ---
     a = _dequantize_if_needed(A)
     b = _dequantize_if_needed(B)
 
@@ -50,7 +56,7 @@ def generic_gemm(A, transA, B, transB, D, quantizer, output_dtype,
     # In row-major (PyTorch): C_row = B_row @ A_row  (reversed operand order)
     # The trans flags apply directly to the row-major tensors.
     # Typical "TN" layout: transA=True, transB=False
-    #   A=[out,in] weight → a.t()=[in,out], B=[batch,in] → b as-is
+    #   A=[out,in] weight -> a.t()=[in,out], B=[batch,in] -> b as-is
     #   result = b @ a.t() = [batch,in] @ [in,out] = [batch,out]
 
     if transA:
@@ -112,10 +118,23 @@ def generic_gemm(A, transA, B, transB, D, quantizer, output_dtype,
 
 
 def te_general_grouped_gemm(*args, **kwargs):
-    """Grouped GEMM.
+    """Grouped GEMM for MoE-style expert parallelism.
 
-    TODO Phase 2: Wire up to existing Triton GMM or AITER grouped GEMM.
+    Backend priority:
+    1. AITER grouped GEMM (CK + Triton) -- via aiter.gemm / gmm kernels
+    2. Triton grouped GEMM -- via triton_kernels/grouped_gemm.py
+       (general_grouped_gemm_triton wraps aiter's gmm/ptgmm/nptgmm)
+    3. Not yet implemented as a fallback
+
+    Wire-up deferred to AITER integration phase.
     """
+    # --- AITER / Triton grouped GEMM dispatch ---
+    # When AITER is available:
+    #   from transformer_engine.pytorch.triton_kernels.grouped_gemm import (
+    #       general_grouped_gemm_triton,
+    #   )
+    #   return general_grouped_gemm_triton(*args, **kwargs)
+
     raise NotImplementedError(
         "Grouped GEMM in lite mode requires AITER or Triton GMM. "
         "Set up AITER or use the standard GEMM path."
