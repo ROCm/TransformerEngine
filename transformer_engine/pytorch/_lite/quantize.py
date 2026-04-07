@@ -300,7 +300,12 @@ def dequantize(input, otype):
 
 
 def bgrad_quantize(input, quantizer):
-    """Compute bias gradient and quantize."""
+    """Compute bias gradient and quantize.
+
+    Uses separate sum + quantize. Both ops dispatch to optimized CUDA/Triton
+    kernels individually. A true single-pass fusion would require merging
+    bgrad accumulation into the cast kernel (te_cast_transpose_noop_triton).
+    """
     bgrad = input.sum(dim=tuple(range(input.ndim - 1)))
     quantized = quantize(input, quantizer)
     return quantized, bgrad
