@@ -14,7 +14,6 @@ name: ROCm Wheels Build
 
 on:
   workflow_dispatch:
-  pull_request:
     inputs:
       use_local_version:
         description: 'Use local version suffix for generated wheels.'
@@ -46,6 +45,7 @@ on:
         required: false
         default: ''
         type: string
+  pull_request:
 
 env:
   DOCKER_IMAGE_NAME: te-rocm-manylinux-x86
@@ -72,16 +72,16 @@ jobs:
           HARBOR_PROJECT="framework/te-ci"
           
           # Build the image tag
-          if [ -n "${{ inputs.docker_image_tag_override }}" ]; then
+          if [ -n "${{ inputs.docker_image_tag_override || '' }}" ]; then
             # Use override if provided
-            IMAGE_TAG="${{ inputs.docker_image_tag_override }}"
+            IMAGE_TAG="${{ inputs.docker_image_tag_override || '' }}"
             echo "Using override tag: ${IMAGE_TAG}"
           else
             # Get current year-month
             YEAR_MONTH=$(date +"%Y%m")
             
             # Try to detect ROCm revision from repomd.xml
-            ROCM_URL="${{ inputs.rocm_repo_url }}"
+            ROCM_URL="${{ inputs.rocm_repo_url || 'https://repo.amd.com/rocm/packages/rhel8/x86_64/' }}"
             ROCM_REVISION=$(curl -s "${ROCM_URL}/repodata/repomd.xml" 2>/dev/null | grep -oP '(?<=<revision>)[^<]+' | head -n1 || echo "")
             
             if [ -n "$ROCM_REVISION" ]; then
@@ -107,7 +107,7 @@ jobs:
 
       - name: Check for existing image in Harbor
         id: check-harbor
-        if: ${{ !inputs.force_build_image }}
+        if: ${{ !(inputs.force_build_image || true) }}
         run: |
           echo "Checking if image exists in Harbor: ${{ steps.set-tag.outputs.harbor_image_tag }}"
           
@@ -125,18 +125,18 @@ jobs:
       # The build context is build_tools/wheel_utils/ because the Dockerfile
       # COPYs build_wheels.sh from that directory.
       - name: Build Docker image
-        if: ${{ inputs.force_build_image || steps.check-harbor.outputs.image_exists != 'true' }}
+        if: ${{ (inputs.force_build_image || true) || steps.check-harbor.outputs.image_exists != 'true' }}
         run: |
           echo "Building Docker image: ${{ steps.set-tag.outputs.image_tag }}"
           docker build \
             --no-cache \
-            --build-arg ROCM_REPO_URL="${{ inputs.rocm_repo_url }}" \
+            --build-arg ROCM_REPO_URL="${{ inputs.rocm_repo_url || 'https://repo.amd.com/rocm/packages/rhel8/x86_64/' }}" \
             --tag "${{ steps.set-tag.outputs.image_tag }}" \
             --file build_tools/wheel_utils/Dockerfile.rocm.manylinux.x86 \
             build_tools/wheel_utils/
 
       - name: Upload Docker image to Harbor
-        if: ${{ inputs.upload_image && (inputs.force_build_image || steps.check-harbor.outputs.image_exists != 'true') }}
+        if: ${{ (inputs.upload_image || false) && ((inputs.force_build_image || true) || steps.check-harbor.outputs.image_exists != 'true') }}
         env:
           HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
           HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
@@ -167,8 +167,8 @@ jobs:
             --env LOCAL_TREE_BUILD=1 \
             --env NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1 \
             --env TARGET_BRANCH="${{ github.ref_name }}" \
-            ${{ inputs.use_local_version && '--env NVTE_USE_LOCAL_VERSION=1' || '' }} \
-            ${{ inputs.use_prebuilt_aiter && '--env NVTE_AITER_PREBUILT_BASE_URL="${NVTE_AITER_PREBUILT_BASE_URL}"' || '' }} \
+            ${{ (inputs.use_local_version || true) && '--env NVTE_USE_LOCAL_VERSION=1' || '' }} \
+            ${{ (inputs.use_prebuilt_aiter || true) && '--env NVTE_AITER_PREBUILT_BASE_URL="${NVTE_AITER_PREBUILT_BASE_URL}"' || '' }} \
             --volume "${{ github.workspace }}:/TransformerEngine" \
             --volume "${{ runner.temp }}/wheelhouse:/wheelhouse" \
             "${{ steps.set-tag.outputs.image_tag }}"
