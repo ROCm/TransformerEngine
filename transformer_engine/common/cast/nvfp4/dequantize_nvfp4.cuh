@@ -57,7 +57,7 @@ __global__ void __launch_bounds__(512)
   fp4vec value;
   value.vec = input_vectorized[my_index];
   fp8e4m3 scale = scales[my_scale_index];
-  float amax = *tensor_amax;
+  float amax = (tensor_amax == nullptr) ? 1.0f : *tensor_amax;
   constexpr float factor_inv = 1.0 / (6.0 * 448.0);
   float final_scale = static_cast<float>(scale) * amax * factor_inv;
 #pragma unroll

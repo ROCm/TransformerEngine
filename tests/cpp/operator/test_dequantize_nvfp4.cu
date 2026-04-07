@@ -31,39 +31,24 @@ constexpr size_t kFP4BlockSize1D = 16;
 constexpr size_t kFP4BlockSize2DY = 16;
 constexpr size_t kFP4BlockSize2DX = 16;
 
-size_t divide_round_up(size_t x, size_t y) {
-    return (x + y - 1) / y;
-}
-
-// Generates random FP8 (E4M3) scale values by sampling raw 8-bit patterns
-// and rejects non-finite values (i.e., NaN) before storing.
+// Generates random FP8 (E4M3) scale values by sampling raw 8-bit patterns.
+// Only finite, non-negative scales are allowed.
 // Values are written using memcpy to preserve exact
 // bit patterns rather than relying on numeric conversion.
 void generate_1d_scales(fp8e4m3* scale_buffer,
-                     const size_t mathematical_rows,
-                     const size_t mathematical_blocks_per_row,
-                     const size_t physical_row_stride,
-                     std::mt19937& gen,
-                     std::uniform_int_distribution<int>& dis) {
-    const size_t total_elems = mathematical_rows * physical_row_stride;
+                        const size_t unpadded_blocks_Y,
+                        const size_t unpadded_blocks_X,
+                        const size_t scales_stride,
+                        std::mt19937& gen,
+                        std::uniform_int_distribution<int>& finite_nonneg_e4m3_dis) {
+    const size_t total_elems = unpadded_blocks_Y * scales_stride;
     std::memset(scale_buffer, 0, total_elems * sizeof(fp8e4m3));
 
-    for (size_t row = 0; row < mathematical_rows; ++row) {
-        for (size_t block = 0; block < mathematical_blocks_per_row; ++block) {
-            const size_t idx = row * physical_row_stride + block;
-
-            while (true) {
-                const uint8_t bits = static_cast<uint8_t>(dis(gen));
-
-                fp8e4m3 candidate;
-                std::memcpy(&candidate, &bits, sizeof(bits));
-
-                const float decoded = static_cast<float>(candidate);
-                if (std::isfinite(decoded)) {
-                    scale_buffer[idx] = candidate;
-                    break;
-                }
-            }
+    for (size_t row = 0; row < unpadded_blocks_Y; ++row) {
+        for (size_t block = 0; block < unpadded_blocks_X; ++block) {
+            const size_t scale_idx = row * scales_stride + block;
+            const uint8_t scale = static_cast<uint8_t>(finite_nonneg_e4m3_dis(gen));
+            std::memcpy(&scale_buffer[scale_idx], &scale, sizeof(scale));
         }
     }
 }
@@ -75,12 +60,12 @@ void generate_1d_scales(fp8e4m3* scale_buffer,
 void generate_2d_scales_with_replication(fp8e4m3* scale_buffer,
                                          const size_t rows,
                                          const size_t cols,
-                                         const size_t mathematical_scale_rows,
-                                         const size_t mathematical_scale_blocks_per_row,
-                                         const size_t physical_row_stride,
+                                         const size_t unpadded_blocks_Y,
+                                         const size_t unpadded_blocks_X,
+                                         const size_t scales_stride,
                                          std::mt19937& gen,
-                                         std::uniform_int_distribution<int>& dis) {
-    const size_t total_elems = mathematical_scale_rows * physical_row_stride;
+                                         std::uniform_int_distribution<int>& finite_nonneg_e4m3_dis) {
+    const size_t total_elems = unpadded_blocks_Y * scales_stride;
     std::memset(scale_buffer, 0, total_elems * sizeof(fp8e4m3));
 
     const size_t blocks_y = divide_round_up(rows, kFP4BlockSize2DY);
@@ -90,26 +75,17 @@ void generate_2d_scales_with_replication(fp8e4m3* scale_buffer,
 
     for (size_t by = 0; by < blocks_y; ++by) {
         for (size_t bx = 0; bx < blocks_x; ++bx) {
-            while (true) {
-                const uint8_t bits = static_cast<uint8_t>(dis(gen));
-
-                fp8e4m3 candidate;
-                std::memcpy(&candidate, &bits, sizeof(bits));
-
-                const float decoded = static_cast<float>(candidate);
-                if (std::isfinite(decoded)) {
-                    compact_2d[by * blocks_x + bx] = candidate;
-                    break;
-                }
-            }
+            const size_t compact_idx = by * blocks_x + bx;
+            const uint8_t scale = static_cast<uint8_t>(finite_nonneg_e4m3_dis(gen));
+            std::memcpy(&compact_2d[compact_idx], &scale, sizeof(scale));
         }
     }
 
-    for (size_t row = 0; row < mathematical_scale_rows; ++row) {
+    for (size_t row = 0; row < unpadded_blocks_Y; ++row) {
         const size_t by = row / kFP4BlockSize2DY;
-        for (size_t bx = 0; bx < mathematical_scale_blocks_per_row; ++bx) {
-            const size_t dst_idx = row * physical_row_stride + bx;
-            scale_buffer[dst_idx] = compact_2d[by * blocks_x + bx];
+        for (size_t bx = 0; bx < unpadded_blocks_X; ++bx) {
+            const size_t scale_idx = row * scales_stride + bx;
+            scale_buffer[scale_idx] = compact_2d[by * blocks_x + bx];
         }
     }
 }
@@ -142,7 +118,7 @@ void generate_data_and_transpose(fp4e2m1* data,
                                  const size_t rows,
                                  const size_t cols,
                                  std::mt19937& gen,
-                                 std::uniform_int_distribution<int>& dis) {
+                                 std::uniform_int_distribution<int>& e2m1_dis) {
     const size_t packed_bytes = (rows * cols * BitsNumber<fp4e2m1>::num_bits) / 8;
 
     std::memset(data, 0, packed_bytes);
@@ -150,7 +126,7 @@ void generate_data_and_transpose(fp4e2m1* data,
 
     for (size_t i = 0; i < rows; ++i) {
         for (size_t j = 0; j < cols; ++j) {
-            const uint8_t nibble = static_cast<uint8_t>(dis(gen)) & 0xF;
+            const uint8_t nibble = static_cast<uint8_t>(e2m1_dis(gen)) & 0xF;
 
             const size_t idx = i * cols + j;
             set_fp4_nibble(data, idx, nibble);
@@ -162,11 +138,11 @@ void generate_data_and_transpose(fp4e2m1* data,
 }
 
 // Decode a single FP4 (E2M1) value from packed storage.
-float get_fp4_value(const fp4e2m1* data, const size_t mathematical_idx) {
+float get_fp4_value(const fp4e2m1* data, const size_t idx) {
     const auto* raw = reinterpret_cast<const uint8_t*>(data);
-    const size_t byte_idx = mathematical_idx / 2;
+    const size_t byte_idx = idx / 2;
     const uint8_t packed = raw[byte_idx];
-    const uint8_t nibble = (mathematical_idx % 2 == 0) ? (packed & 0xF) : ((packed >> 4) & 0xF);
+    const uint8_t nibble = (idx % 2 == 0) ? (packed & 0xF) : ((packed >> 4) & 0xF);
     return E2M1_LUT[nibble];
 }
 
@@ -234,7 +210,7 @@ void run_single_case(const std::string& case_name,
                      cudaMemcpyHostToDevice);
     ASSERT_EQ(err, cudaSuccess) << case_name << ": " << cudaGetErrorString(err);
 
-    input.set_tensor_amax(amax);
+    input.set_scale(amax);
 
     nvte_dequantize(input.data(), output.data(), 0);
 
@@ -293,31 +269,31 @@ void performTest(const size_t rows, const size_t cols, DType otype) {
         std::make_unique<fp8e4m3[]>(blocks_Y * blocks_X);
 
     static std::mt19937 gen(42);
-    std::uniform_int_distribution<int> fp4_dis(0, 15);
-    std::uniform_int_distribution<int> fp8_dis(0, 255);
+    std::uniform_int_distribution<int> e2m1_dis(0, 15);
+    std::uniform_int_distribution<int> finite_nonneg_e4m3_dis(0, 126);
 
     generate_data_and_transpose(host_input.get(),
                                 host_input_t.get(),
                                 rows,
                                 cols,
                                 gen,
-                                fp4_dis);
+                                e2m1_dis);
 
     // Row-wise 1D scales on [rows, cols]
     generate_1d_scales(host_scales_rowwise_1d.get(),
-                    unpadded_blocks_Y,
-                    unpadded_blocks_X,
-                    scales_stride,
-                    gen,
-                    fp8_dis);
+                       unpadded_blocks_Y,
+                       unpadded_blocks_X,
+                       scales_stride,
+                       gen,
+                       finite_nonneg_e4m3_dis);
 
     // Col-wise 1D scales on [cols, rows]
     generate_1d_scales(host_scales_colwise_1d.get(),
-                    unpadded_blocks_Y_t,
-                    unpadded_blocks_X_t,
-                    scales_stride_t,
-                    gen,
-                    fp8_dis);
+                       unpadded_blocks_Y_t,
+                       unpadded_blocks_X_t,
+                       scales_stride_t,
+                       gen,
+                       finite_nonneg_e4m3_dis);
 
     // 2D scales replicated row-wise
     generate_2d_scales_with_replication(host_scales_2d_replicated.get(),
@@ -327,7 +303,7 @@ void performTest(const size_t rows, const size_t cols, DType otype) {
                                         unpadded_blocks_X,
                                         scales_stride,
                                         gen,
-                                        fp8_dis);
+                                        finite_nonneg_e4m3_dis);
 
     const float amax = 1.0f;
 
