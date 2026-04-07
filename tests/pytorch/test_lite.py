@@ -382,3 +382,89 @@ class TestTritonNorms:
         x = torch.randn(2, 4, 256, device=device, dtype=torch.bfloat16)
         y = mod(x)
         assert y.shape == (2, 4, 256)
+
+
+# ---------------------------------------------------------------------------
+# FP8 quantize / dequantize (Phase 2)
+# ---------------------------------------------------------------------------
+
+class TestQuantize:
+    """Verify FP8 quantize/dequantize works in lite mode without recursion."""
+
+    def test_fp8_quantize_no_recursion(self, device):
+        """tex.quantize with Float8Quantizer should not recurse."""
+        from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+
+        x = torch.randn(8, 16, device=device, dtype=torch.bfloat16)
+        amax_val = x.abs().max().item()
+        fp8_max = 240.0
+        scale = torch.tensor([fp8_max / amax_val], device=device, dtype=torch.float32)
+        amax = torch.tensor([0.0], device=device, dtype=torch.float32)
+        q = Float8Quantizer(scale=scale, amax=amax, fp8_dtype=tex.DType.kFloat8E4M3)
+
+        result = tex.quantize(x, q)
+        assert hasattr(result, '_data'), "Quantize should return a Float8Tensor"
+        assert result._data.shape == (8, 16)
+        assert result._data.dtype == torch.uint8
+
+    def test_fp8_dequantize(self, device):
+        """tex.dequantize should reconstruct values from FP8."""
+        from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+
+        x = torch.randn(8, 16, device=device, dtype=torch.bfloat16)
+        amax_val = x.abs().max().item()
+        fp8_max = 240.0
+        scale = torch.tensor([fp8_max / amax_val], device=device, dtype=torch.float32)
+        amax = torch.tensor([0.0], device=device, dtype=torch.float32)
+        q = Float8Quantizer(scale=scale, amax=amax, fp8_dtype=tex.DType.kFloat8E4M3)
+
+        quantized = tex.quantize(x, q)
+        y = tex.dequantize(quantized, tex.DType.kBFloat16)
+
+        # FP8 quantization error should be small with proper scaling
+        max_abs_err = (y.to(torch.bfloat16) - x).abs().max().item()
+        assert max_abs_err < 0.5, f"FP8 roundtrip max error too large: {max_abs_err:.4f}"
+
+    def test_fp8_roundtrip_relative_error(self, device):
+        """FP8 quantize-dequantize roundtrip should have low relative error."""
+        from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+
+        x = torch.randn(32, 64, device=device, dtype=torch.bfloat16)
+        amax_val = x.abs().max().item()
+        fp8_max = 240.0
+        scale = torch.tensor([fp8_max / amax_val], device=device, dtype=torch.float32)
+        amax = torch.tensor([0.0], device=device, dtype=torch.float32)
+        q = Float8Quantizer(scale=scale, amax=amax, fp8_dtype=tex.DType.kFloat8E4M3)
+
+        quantized = tex.quantize(x, q)
+        y = tex.dequantize(quantized, tex.DType.kBFloat16)
+
+        mean_rel_err = ((y.to(torch.bfloat16) - x).abs() / (x.abs() + 1e-8)).mean().item()
+        assert mean_rel_err < 0.1, f"FP8 mean relative error too large: {mean_rel_err:.4f}"
+
+    def test_quantize_no_quantizer(self, device):
+        """quantize with no quantizer should return tensor as-is."""
+        x = torch.randn(4, 8, device=device, dtype=torch.bfloat16)
+        result = tex.quantize(x, None)
+        assert torch.equal(result, x)
+
+    def test_quantize_with_output(self, device):
+        """quantize with output tensor should copy into it."""
+        x = torch.randn(4, 8, device=device, dtype=torch.bfloat16)
+        out = torch.empty_like(x)
+        result = tex.quantize(x, None, output=out)
+        assert torch.equal(result, x)
+
+    def test_bgrad_quantize(self, device):
+        """bgrad_quantize should return (quantized, bias_grad)."""
+        x = torch.randn(4, 8, device=device, dtype=torch.bfloat16)
+        quantized, bgrad = tex.bgrad_quantize(x, None)
+        expected_bgrad = x.sum(dim=0)
+        assert torch.allclose(bgrad, expected_bgrad)
+
+    def test_dequantize_plain_tensor(self, device):
+        """dequantize on a plain tensor should just cast dtype."""
+        x = torch.randn(4, 8, device=device, dtype=torch.float32)
+        y = tex.dequantize(x, tex.DType.kBFloat16)
+        assert y.dtype == torch.bfloat16
+        assert torch.allclose(y, x.to(torch.bfloat16))
