@@ -529,7 +529,7 @@ __device__ __forceinline__ __hip_bfloat16 to_bf16(float v)          { return sta
 
 // Bit-cast __hip_bfloat16->uint16_t without address-of-temporary.
 __device__ __forceinline__ uint16_t bf16_to_bits(__hip_bfloat16 v) {
-    uint16_t bits; __builtin_memcpy(&bits, &v, sizeof(uint16_t)); return bits;
+    return __builtin_bit_cast(uint16_t, v);
 }
 
 // Unpack/pack 4 BF16 values as uint64_t (vectorised global load/store).
