@@ -1048,6 +1048,8 @@ void hipblaslt_gemm(const Tensor *inputA,
   // Alpha is passed as a device vector of length m via
   // HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST. Beta stays on host.
   const bool use_fp4 = is_fp4_dtype(param.Atype) || is_fp4_dtype(param.Btype);
+  void* fp4_dequant_a_buf = nullptr;
+  void* fp4_dequant_b_buf = nullptr;
   const void* alpha_ptr = static_cast<const void*>(&alpha);
   const void* beta_ptr  = static_cast<const void*>(&beta);
   if (use_fp4) {
@@ -1080,18 +1082,10 @@ void hipblaslt_gemm(const Tensor *inputA,
     // beta_ptr stays as host &beta
 
     // Dequantize FP4 -> BF16 (block scales only, no amax folded in)
-    const size_t a_bf16_bytes = is_fp4_dtype(param.Atype) ? static_cast<size_t>(m) * k * sizeof(hip_bfloat16) : 0;
-    const size_t b_bf16_bytes = is_fp4_dtype(param.Btype) ? static_cast<size_t>(k) * n * sizeof(hip_bfloat16) : 0;
-    const size_t dequant_ws = (a_bf16_bytes + b_bf16_bytes + 255) & ~size_t(255);
-    NVTE_CHECK(workspaceSize >= dequant_ws,
-               "NVFP4 GEMM requires at least ", dequant_ws, " bytes workspace for FP4->BF16 dequant, "
-               "but only ", workspaceSize, " bytes available.");
-
-    uint8_t* ws_ptr = reinterpret_cast<uint8_t*>(workspace);
-    size_t ws_offset = 0;
-
     if (is_fp4_dtype(param.Atype)) {
-      hip_bfloat16* a_bf16 = reinterpret_cast<hip_bfloat16*>(ws_ptr + ws_offset);
+      const size_t a_bf16_bytes = static_cast<size_t>(m) * k * sizeof(hip_bfloat16);
+      NVTE_CHECK_CUDA(hipMallocAsync(&fp4_dequant_a_buf, a_bf16_bytes, stream));
+      hip_bfloat16* a_bf16 = reinterpret_cast<hip_bfloat16*>(fp4_dequant_a_buf);
       const int64_t total_a = static_cast<int64_t>(m) * k;
       // Determine scale stride from scale tensor shape
       const auto& a_sinv = (transa == CUBLAS_OP_T) ? inputA->scale_inv
@@ -1105,11 +1099,12 @@ void hipblaslt_gemm(const Tensor *inputA,
       param.A = a_bf16;
       param.Atype = DType::kBFloat16;
       param.A_scale_inv = nullptr;
-      ws_offset += a_bf16_bytes;
     }
 
     if (is_fp4_dtype(param.Btype)) {
-      hip_bfloat16* b_bf16 = reinterpret_cast<hip_bfloat16*>(ws_ptr + ws_offset);
+      const size_t b_bf16_bytes = static_cast<size_t>(k) * n * sizeof(hip_bfloat16);
+      NVTE_CHECK_CUDA(hipMallocAsync(&fp4_dequant_b_buf, b_bf16_bytes, stream));
+      hip_bfloat16* b_bf16 = reinterpret_cast<hip_bfloat16*>(fp4_dequant_b_buf);
       const int64_t total_b = static_cast<int64_t>(k) * n;
       // Determine scale stride from scale tensor shape
       const auto& b_sinv = (transb == CUBLAS_OP_N) ? inputB->scale_inv
@@ -1123,12 +1118,7 @@ void hipblaslt_gemm(const Tensor *inputA,
       param.B = b_bf16;
       param.Btype = DType::kBFloat16;
       param.B_scale_inv = nullptr;
-      ws_offset += b_bf16_bytes;
     }
-
-    // Advance workspace past dequant buffers (device alpha vector is safe at the end)
-    workspace = ws_ptr + ((ws_offset + 255) & ~size_t(255));
-    workspaceSize -= dequant_ws;
   }
 
   bool nvte_log_gemm_config = false;
@@ -1563,6 +1553,11 @@ void hipblaslt_gemm(const Tensor *inputA,
   if (is_fp8_dtype(outputD->data.dtype) && outputD->scale_inv.dptr) {
     update_tensor_scale_inv(outputD, stream);
   }
+
+  if (fp4_dequant_a_buf)
+    NVTE_CHECK_CUDA(hipFreeAsync(fp4_dequant_a_buf, stream));
+  if (fp4_dequant_b_buf)
+    NVTE_CHECK_CUDA(hipFreeAsync(fp4_dequant_b_buf, stream));
 
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Ddesc));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Bdesc));
