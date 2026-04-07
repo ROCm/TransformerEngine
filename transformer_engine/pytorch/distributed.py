@@ -32,7 +32,7 @@ except ImportError:
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.triton.pad import pad_columnwise_scale_inv
-from . import torch_version
+from .torch_version import torch_version
 from .utils import (
     is_non_tn_fp8_gemm_supported,
     safely_set_viewless_tensor_data,
@@ -50,7 +50,7 @@ from .tensor.storage.float8_tensor_storage import Float8TensorStorage
 from .tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from .tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from .tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
-from ..debug.pytorch.debug_quantization import DebugQuantizedTensor, DebugQuantizer
+from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
 __all__ = ["checkpoint", "CudaRNGStatesTracker"]
@@ -90,6 +90,11 @@ def graph_safe_rng_available() -> bool:
         and hasattr(torch.Generator, "graphsafe_get_state")
         and hasattr(torch.Generator, "clone_state")
     )
+
+
+def is_graph_safe_rng_state(state: Union[torch.Tensor, torch.Generator]) -> bool:
+    """Returns whether the rng state is a graph safe version."""
+    return graph_safe_rng_available() and isinstance(state, torch.Generator)
 
 
 def _get_cuda_rng_state(
@@ -342,9 +347,16 @@ class _CheckpointFunction(torch.autograd.Function):
 
         # Copy the rng states.
         ctx.fwd_cpu_rng_state = torch.get_rng_state()
-        ctx.fwd_cuda_rng_state = _get_cuda_rng_state(graph_safe=False)
         if get_rng_state_tracker is not None:
             ctx.fwd_cuda_rng_state_tracker = get_rng_state_tracker().get_states()
+            ctx.graph_safe_rng_state = (
+                is_graph_safe_rng_state(next(iter(ctx.fwd_cuda_rng_state_tracker.values())))
+                if ctx.fwd_cuda_rng_state_tracker
+                else False
+            )
+        else:
+            ctx.graph_safe_rng_state = False
+        ctx.fwd_cuda_rng_state = _get_cuda_rng_state(graph_safe=ctx.graph_safe_rng_state)
 
         if context_fn is not None:
             forward_ctx, recompute_ctx = context_fn()
@@ -408,13 +420,13 @@ class _CheckpointFunction(torch.autograd.Function):
 
         # Store the current states.
         bwd_cpu_rng_state = torch.get_rng_state()
-        bwd_cuda_rng_state = _get_cuda_rng_state(graph_safe=False)
+        bwd_cuda_rng_state = _get_cuda_rng_state(graph_safe=ctx.graph_safe_rng_state)
         if get_rng_state_tracker is not None:
             bwd_cuda_rng_state_tracker = get_rng_state_tracker().get_states()
 
         # Set the states to what it used to be before the forward pass.
         torch.set_rng_state(ctx.fwd_cpu_rng_state)
-        _set_cuda_rng_state(ctx.fwd_cuda_rng_state, graph_safe=False)
+        _set_cuda_rng_state(ctx.fwd_cuda_rng_state, graph_safe=ctx.graph_safe_rng_state)
         if get_rng_state_tracker is not None:
             get_rng_state_tracker().set_states(ctx.fwd_cuda_rng_state_tracker)
 
@@ -429,7 +441,7 @@ class _CheckpointFunction(torch.autograd.Function):
 
         # Set the states back to what it was at the start of this function.
         torch.set_rng_state(bwd_cpu_rng_state)
-        _set_cuda_rng_state(bwd_cuda_rng_state, graph_safe=False)
+        _set_cuda_rng_state(bwd_cuda_rng_state, graph_safe=ctx.graph_safe_rng_state)
         if get_rng_state_tracker is not None:
             get_rng_state_tracker().set_states(bwd_cuda_rng_state_tracker)
 
@@ -472,12 +484,21 @@ class _CheckpointFrame:
 
     def cache_rng_states(self, forward=True):
         """Cache fwd/bwd RNG states in the frame to restore later."""
-        rng_states = (
-            torch.get_rng_state(),
-            _get_cuda_rng_state(graph_safe=False),
-        )
+        rng_states = (torch.get_rng_state(),)
         if self.get_rng_state_tracker is not None:
-            rng_states += (self.get_rng_state_tracker().get_states(),)
+            tracker_states = self.get_rng_state_tracker().get_states()
+            self.graph_safe_rng_state = (
+                is_graph_safe_rng_state(next(iter(tracker_states.values())))
+                if tracker_states
+                else False
+            )
+            rng_states += (
+                _get_cuda_rng_state(graph_safe=self.graph_safe_rng_state),
+                tracker_states,
+            )
+        else:
+            self.graph_safe_rng_state = False
+            rng_states += (_get_cuda_rng_state(graph_safe=self.graph_safe_rng_state),)
 
         if forward:
             self.fwd_rng_states = rng_states
@@ -492,7 +513,7 @@ class _CheckpointFrame:
             rng_states = self.bwd_rng_states
 
         torch.set_rng_state(rng_states[0])
-        _set_cuda_rng_state(rng_states[1], graph_safe=False)
+        _set_cuda_rng_state(rng_states[1], graph_safe=self.graph_safe_rng_state)
         if self.get_rng_state_tracker is not None:
             self.get_rng_state_tracker().set_states(rng_states[2])
 
@@ -644,18 +665,18 @@ def checkpoint(
 
     Parameters
     ----------
-    function: Callable
+    function : Callable
             pytorch module used to run the forward and backward passes using
             the specified :attr:`args` and :attr:`kwargs`.
-    distribute_saved_activations: bool, default = False
-            if set to `True` and `use_reentrant=True`, first tensor argument is distributed
-            across the specified tensor parallel group (`tp_group`) before saving it for the
-            backward pass. This has no effect when `use_reentrant=False`.
-    get_rng_state_tracker: `Callable`, default = None
-            python callable which returns an instance of :func:`CudaRNGStatesTracker`.
+    distribute_saved_activations : bool, default = False
+            if set to ``True`` and ``use_reentrant=True``, first tensor argument is distributed
+            across the specified tensor parallel group (``tp_group``) before saving it for the
+            backward pass. This has no effect when ``use_reentrant=False``.
+    get_rng_state_tracker : Callable, default = None
+            python callable which returns an instance of :class:`CudaRNGStatesTracker`.
     tp_group : ProcessGroup, default = None
-            tensor parallel process group. Used only when `distribute_saved_activations=True`
-            and `use_reentrant=True`. If `None`, it falls back to the default group.
+            tensor parallel process group. Used only when ``distribute_saved_activations=True``
+            and ``use_reentrant=True``. If ``None``, it falls back to the default group.
     use_reentrant : bool, default = True
             perform checkpointing in reentrant mode.
     args : tuple
@@ -782,8 +803,8 @@ class CudaRNGStatesTracker:
     For model parallelism, multiple RNG states need to simultaneously exist in order
     to execute operations in or out of the model parallel region. This class keeps
     track of the various RNG states and provides utility methods to maintain them and
-    execute parts of the model under a given RNG setting. Using the `add` method, a
-    cuda rng state is initialized based on the input `seed` and is assigned to `name`.
+    execute parts of the model under a given RNG setting. Using the :meth:`add` method, a
+    cuda rng state is initialized based on the input ``seed`` and is assigned to ``name``.
     Later, by forking the rng state, we can perform operations and return to our starting
     cuda state.
     """
@@ -816,18 +837,24 @@ class CudaRNGStatesTracker:
         Set the rng states. For efficiency purposes, we do not
         check the size of seed for compatibility.
 
-        states: Dict[str, torch.Tensor]
+        Parameters
+        ----------
+        states : Dict[str, torch.Tensor]
                A mapping from string names to RNG states.
         """
         self.states_ = states
+        # Update global states.
+        set_all_rng_states(self.states_)
 
     def add(self, name: str, seed: int) -> None:
         """
         Adds a new RNG state.
 
-        name: str
+        Parameters
+        ----------
+        name : str
              string identifier for the RNG state.
-        seed: int
+        seed : int
              PyTorch seed for the RNG state.
         """
         # Check seed is not already used.
@@ -861,7 +888,9 @@ class CudaRNGStatesTracker:
         Fork the cuda rng state, perform operations, and exit with
         the original state.
 
-        name: str
+        Parameters
+        ----------
+        name : str
              string identifier for the RNG state.
         """
         # Check if we have added the state
@@ -903,6 +932,34 @@ def reduce_scatter_along_first_dim(
         output, inp.contiguous(), group=tp_group, async_op=async_op
     )
     return output, handle
+
+
+@dataclass
+class _AsyncHandle:
+    """Handle for asynchronous collectives."""
+
+    async_handle: torch.distributed.Work
+    post_process_function: Optional[Callable] = None
+    post_process_function_args: Optional[Tuple[Any, ...]] = None
+    post_process_function_kwargs: Optional[Dict[str, Any]] = None
+    _synchronized: bool = False
+
+    def wait(self) -> None:
+        """Synchronize the asynchronous communicaton.
+
+        Perform post-processing if needed.
+
+        """
+        if self._synchronized:
+            return
+        self.async_handle.wait()
+        if self.post_process_function is not None:
+            args = self.post_process_function_args
+            args = () if args is None else args
+            kwargs = self.post_process_function_kwargs
+            kwargs = {} if kwargs is None else kwargs
+            self.post_process_function(*args, **kwargs)
+        self._synchronized = True
 
 
 def _all_gather_fp8(
@@ -958,7 +1015,7 @@ def _all_gather_fp8(
         init_columnwise_usage = quantizer.columnwise_usage
         quantizer.set_usage(rowwise=True, columnwise=init_columnwise_usage)
         out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
-        quantizer.set_usage(rowwise=init_rowwise_usage, columnwise=init_columnwise_usage) 
+        quantizer.set_usage(rowwise=init_rowwise_usage, columnwise=init_columnwise_usage)
     elif isinstance(inp, Float8Tensor):
         out = inp.make_like(inp, shape=out_shape)
         out._data = torch.empty(
@@ -995,73 +1052,7 @@ def _all_gather_fp8(
     return out, handle
 
 
-def _get_quantizer_format(quantizer: Quantizer) -> Optional[bool]:
-    """Get quantizer format."""
-    if isinstance(quantizer, DebugQuantizer):
-        quantizer = quantizer.parent_quantizer
-    if isinstance(quantizer, Float8BlockQuantizer):
-        return quantizer.all_gather_usage
-    return None
-
-
-def _set_quantizer_format(quantizer: Quantizer, compact: bool = False) -> None:
-    """Make quantizer compact"""
-    _quantizer = quantizer
-    if isinstance(quantizer, DebugQuantizer):
-        _quantizer = quantizer.parent_quantizer
-    if isinstance(_quantizer, Float8BlockQuantizer):
-        _quantizer.all_gather_usage = compact
-
-
-def _post_process_fp8_blockwise_gather(
-    out: Float8BlockwiseQTensorStorage,
-    quantizer: Float8BlockQuantizer,
-    handle: Optional[torch.distributed.Work] = None,
-) -> Float8BlockwiseQTensorStorage:
-    """Post-process FP8 blockwise gather."""
-    if handle is not None:
-        handle.wait()
-        handle = None
-
-    if out._is_gemm_ready_format():
-        return out
-
-    needs_columnwise_data_transpose = quantizer is not None and quantizer.columnwise_usage
-    need_rowwise_scale_transpose = quantizer is not None and quantizer.rowwise_usage
-
-    # CuBLAS requires transpose of the scale inv tensor, suppose orig input is 256x1024
-    # columnwise compact format means doing 128x1 quantization of it
-    # so quantized tensor is 256x1024, scale inv is 2x1024
-    # If we were doing GEMM_READY format, then it's equivalent to do 1x128 quantization
-    # on a transposed 1024x256 tensor, so scale inv is 1024x2, cublas requries 2x1024
-    # Thereforce, it turns out we don't need to transpose the scale inv, only columnwise data
-    if needs_columnwise_data_transpose:
-        out._transpose_columnwise_data()
-    if need_rowwise_scale_transpose:
-        out._rowwise_scale_inv = out._rowwise_scale_inv.transpose(-2, -1).contiguous()
-    out._data_format = tex.Float8BlockScaleTensorFormat.GEMM_READY
-    return out
-
-
-@dataclass
-class _FP8BlockwiseAllGatherAsyncHandle:
-    """Handle for asynchronous FP8 blockwise all-gather."""
-
-    tensor: Float8BlockwiseQTensorStorage
-    quantizer: Float8BlockQuantizer
-    async_handle: torch.distributed.Work
-    _synchronized: bool = False
-
-    def wait(self) -> None:
-        """Wait for the async operation to complete and post-process the tensor."""
-        if self._synchronized:
-            return
-        self.async_handle.wait()
-        _post_process_fp8_blockwise_gather(self.tensor, self.quantizer)
-        self._synchronized = True
-
-
-def _all_gather_fp8_blockwise(
+def _start_all_gather_fp8_blockwise(
     inp: torch.Tensor,
     process_group: dist_group_type,
     *,
@@ -1100,44 +1091,25 @@ def _all_gather_fp8_blockwise(
         )
     world_size = get_distributed_world_size(process_group)
 
-    # Check that quantizer is valid
-    if quantizer is not None and not isinstance(quantizer, Float8BlockQuantizer):
-        raise ValueError(f"Got non-FP8 blockwise quantizer ({quantizer.__class__.__name__})")
-    if not (quantizer.block_scaling_dim == 1 and quantizer.block_len == 128):
-        raise NotImplementedError("Only 1D blockwise quantization is supported for allgather")
-
     # Output tensor dims
     if out_shape is None:
         out_shape = list(inp.size())
         out_shape[0] *= world_size
 
-    # Doing BF16 gather for now as baseline because it's simpler
-    if (
-        not isinstance(inp, Float8BlockwiseQTensorStorage)
-        and quantizer is not None
-        and not quantizer.is_quantizable(inp)
-    ):
-        out = torch.empty(
-            out_shape,
-            dtype=dtype,
-            device=device,
-            memory_format=torch.contiguous_format,
-        )
+    # Check that quantizer is valid
+    if quantizer is None:
+        raise ValueError("Quantizer is missing")
+    if not isinstance(quantizer, Float8BlockQuantizer):
+        raise ValueError(f"Got non-FP8 blockwise quantizer ({quantizer.__class__.__name__})")
+
+    # Fall back to high-precision all-gather if FP8 is not supported
+    if not quantizer.is_quantizable(inp) or quantizer.block_scaling_dim != 1:
+        out = torch.empty(out_shape, dtype=dtype, device=device)
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group, async_op=False)
-        orig_all_gather_usage = quantizer.all_gather_usage
-        quantizer.all_gather_usage = False
         out = quantizer(out)
-        quantizer.all_gather_usage = orig_all_gather_usage
         return out, None
 
-    # Implementation of fp8 gather needs to account for:
-    # * Getting columnwise data as a transpose of how it is stored for GEMMS.
-    # * Gathering non GEMM swizzled scales.
-
-    # Cast input tensor to Float8BlockwiseQTensor with required data
-    # Set to compact usage in case the quantizer is not correctly configured
-    orig_all_gather_usage = quantizer.all_gather_usage
-    quantizer.all_gather_usage = True
+    # Quantize input tensor if needed
     if not isinstance(inp, Float8BlockwiseQTensorStorage):
         inp = quantizer(inp)
     elif (quantizer.rowwise_usage and inp._rowwise_data is None) or (
@@ -1152,14 +1124,9 @@ def _all_gather_fp8_blockwise(
     # Construct Float8BlockwiseQTensor output tensor
     out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
 
-    quantizer.all_gather_usage = orig_all_gather_usage
-
-    # Begin to do network communication, need to make sure compact format
-    if inp._data_format != tex.Float8BlockScaleTensorFormat.COMPACT:
-        raise RuntimeError(
-            "All-gather with FP8 block-wise quantized tensor requires compact data format, "
-            f"but found data_format={inp._data_format}"
-        )
+    # Temporary buffers for all-gathering transposed buffers
+    interleaved_rowwise_scale_inv = None
+    interleaved_columnwise_data = None
 
     # Coalesce NCCL collectives
     with torch.distributed._coalescing_manager(
@@ -1168,11 +1135,17 @@ def _all_gather_fp8_blockwise(
         async_ops=async_op,
     ) as coalescing_manager:
 
-        # Gather Float8BlockwiseQTensor data for row-wise usage
+        # Gather row-wise data
         if quantizer.rowwise_usage:
-            # Launch all-gathers
+            scale_inv_shape = list(inp._rowwise_scale_inv.size())
+            scale_inv_shape[0] *= world_size
+            interleaved_rowwise_scale_inv = torch.empty(
+                scale_inv_shape,
+                dtype=inp._rowwise_scale_inv.dtype,
+                device=device,
+            )
             torch.distributed.all_gather_into_tensor(
-                out._rowwise_scale_inv,
+                interleaved_rowwise_scale_inv,
                 inp._rowwise_scale_inv,
                 group=process_group,
             )
@@ -1182,36 +1155,73 @@ def _all_gather_fp8_blockwise(
                 group=process_group,
             )
 
-        # Gather Float8BlockwiseQTensor data for column-wise usage
+        # Column-wise data
         if quantizer.columnwise_usage:
-            # Launch all-gathers
+            data_shape = list(inp._columnwise_data.size())
+            data_shape[0] *= world_size
+            interleaved_columnwise_data = torch.empty(
+                data_shape,
+                dtype=inp._columnwise_data.dtype,
+                device=device,
+            )
             torch.distributed.all_gather_into_tensor(
                 out._columnwise_scale_inv,
                 inp._columnwise_scale_inv,
                 group=process_group,
             )
             torch.distributed.all_gather_into_tensor(
-                out._columnwise_data,
+                interleaved_columnwise_data,
                 inp._columnwise_data,
                 group=process_group,
             )
 
-    handle = coalescing_manager if async_op else None
-
-    # Unlike MXFP8, this fp8 blockwise tensor primarily works with Hopper
-    # This means that we need to transpose the gathered columnwise data
-    # Example usage is grad_output tensor, ie. dY in linear backward
-    # We want to gather two FP8 tensors (rowwise and columnwise) along dim0
-    # and then transpose the columnwise data to match the rowwise data
-    # Make sure FP8 transpose is populated if needed
-
+    # Finalize communication if needed
+    async_handle = None
     if async_op:
-        handle = _FP8BlockwiseAllGatherAsyncHandle(out, quantizer, handle)
+        async_handle = _AsyncHandle(
+            coalescing_manager,
+            post_process_function=_finish_all_gather_fp8_blockwise,
+            post_process_function_args=(
+                out,
+                world_size,
+                interleaved_rowwise_scale_inv,
+                interleaved_columnwise_data,
+            ),
+        )
     else:
-        # if it's a sync op, we need to do the transpose here as post processing step
-        _post_process_fp8_blockwise_gather(out, quantizer, handle)
+        _finish_all_gather_fp8_blockwise(
+            out,
+            world_size,
+            interleaved_rowwise_scale_inv,
+            interleaved_columnwise_data,
+        )
 
-    return out, handle
+    return out, async_handle
+
+
+def _finish_all_gather_fp8_blockwise(
+    out: Float8BlockwiseQTensorStorage,
+    world_size: int,
+    interleaved_rowwise_scale_inv: Optional[torch.Tensor],
+    interleaved_columnwise_data: Optional[torch.Tensor],
+) -> Float8BlockwiseQTensorStorage:
+    """Post-process FP8 blockwise gather."""
+
+    # Fix interleaving in row-wise scales
+    if interleaved_rowwise_scale_inv is not None:
+        dim0 = out._rowwise_scale_inv.size(0)
+        view_in = interleaved_rowwise_scale_inv.view(world_size, dim0, -1)
+        view_out = out._rowwise_scale_inv.view(dim0, world_size, -1)
+        tex.swap_first_dims(view_in, out=view_out)
+
+    # Fix interleaving in column-wise data
+    if interleaved_columnwise_data is not None:
+        dim0 = out._columnwise_data.size(0)
+        view_in = interleaved_columnwise_data.view(world_size, dim0, -1)
+        view_out = out._columnwise_data.view(dim0, world_size, -1)
+        tex.swap_first_dims(view_in, out=view_out)
+
+    return out
 
 
 def _swap_first_dims(tensor: torch.Tensor, world_size: int):
@@ -1225,7 +1235,7 @@ def _swap_first_dims(tensor: torch.Tensor, world_size: int):
     """
 
     shape = tensor.shape
-    assert tensor.ndim >= 2, "Wrong number of dimensions for fixing interleave."
+    assert len(shape) >= 2, "Wrong number of dimensions for fixing interleave."
     first_dim = shape[0]
     flattened_trailing = math.prod(shape[1:])
     assert first_dim % world_size == 0, "Wrong dimensions for fixing interleave."
@@ -1656,7 +1666,7 @@ def gather_along_first_dim(
     if isinstance(inp, Float8BlockwiseQTensorStorage) or isinstance(
         quantizer, Float8BlockQuantizer
     ):
-        return _all_gather_fp8_blockwise(
+        return _start_all_gather_fp8_blockwise(
             inp,
             process_group,
             async_op=async_op,
@@ -1694,10 +1704,6 @@ def gather_along_first_dim(
         )
         if isinstance(inp, QuantizedTensorStorage):
             inp = inp.dequantize()
-        # Falling back to high-precision all-gather for Float8BlockQuantizer
-        # means that it should directly output GEMM_READY format
-        compact = _get_quantizer_format(quantizer)
-        _set_quantizer_format(quantizer, compact=False)
         out = torch.empty(
             out_shape,
             dtype=inp.dtype,
@@ -1706,7 +1712,6 @@ def gather_along_first_dim(
         )
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group)
         out = quantizer(out)
-        _set_quantizer_format(quantizer, compact=compact)
         return out, None
 
     # Dequantize quantized tensor if not supported
@@ -2007,7 +2012,7 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
 
     Parameters
     ----------
-    fsdp_root: torch.nn.Module
+    fsdp_root : torch.nn.Module
                FSDP-wrapped root module that may contain FSDP-wrapped TE modules.
     """
     assert isinstance(fsdp_root, FSDP), "Root module must be FSDP-wrapped."

@@ -149,6 +149,6 @@
   pybind11::enum_<transformer_engine::Float8BlockScaleTensorFormat>(                               \
       m, "Float8BlockScaleTensorFormat", pybind11::module_local())                                 \
       .value("GEMM_READY", transformer_engine::Float8BlockScaleTensorFormat::GEMM_READY)           \
-      .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT);                \
-
+      .value("COMPACT", transformer_engine::Float8BlockScaleTensorFormat::COMPACT)                 \
+      .value("INVALID", transformer_engine::Float8BlockScaleTensorFormat::INVALID);
 #endif
