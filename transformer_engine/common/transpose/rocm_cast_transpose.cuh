@@ -190,13 +190,14 @@ void rocm_ct_launch(const IType *in, const float *noop,
     constexpr int BLK = ROCM_CT_WARP_SIZE * WPT;
     int nblk = (sub_cols / TN) * (sub_rows / TM);
     if (nblk > 0) {
-        rocm_cast_transpose_kernel<LOAD_SZ, STORE_SZ, WPT, IType, OType>
-            <<<nblk, BLK, 0, stream>>>(
-                in + row_off * stride_row + col_off, noop,
-                out_c + row_off * stride_row + col_off,
-                out_t + col_off * stride_col + row_off,
-                scale, amax, scale_inv,
-                sub_cols, sub_rows, stride_row, stride_col);
+        hipLaunchKernelGGL(
+            (rocm_cast_transpose_kernel<LOAD_SZ, STORE_SZ, WPT, IType, OType>),
+            dim3(nblk), dim3(BLK), 0, stream,
+            in + row_off * stride_row + col_off, noop,
+            out_c + row_off * stride_row + col_off,
+            out_t + col_off * stride_col + row_off,
+            scale, amax, scale_inv,
+            sub_cols, sub_rows, stride_row, stride_col);
     }
 }
 
@@ -261,13 +262,14 @@ void rocm_ct_launch_cols(const IType *in, const float *noop,
 
     if (done < row_length) {
         size_t rem = row_length - done;
-        rocm_cast_transpose_remainder_kernel<IType, OType>
-            <<<((sub_rows * rem + 255) / 256), 256, 0, stream>>>(
-                in + row_off * row_length + done, noop,
-                out_c + row_off * row_length + done,
-                out_t + done * num_rows + row_off,
-                scale, amax, scale_inv,
-                sub_rows, rem, row_length, num_rows);
+        hipLaunchKernelGGL(
+            (rocm_cast_transpose_remainder_kernel<IType, OType>),
+            dim3((sub_rows * rem + 255) / 256), dim3(256), 0, stream,
+            in + row_off * row_length + done, noop,
+            out_c + row_off * row_length + done,
+            out_t + done * num_rows + row_off,
+            scale, amax, scale_inv,
+            sub_rows, rem, row_length, num_rows);
     }
 }
 

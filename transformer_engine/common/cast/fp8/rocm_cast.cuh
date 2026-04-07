@@ -6,8 +6,6 @@
 #pragma once
 //#include "hip/hip_runtime.h" // prevent hipification of this rocm_ file
 
-#include "../../common.h"
-#include "../../utils.cuh"
 #include "../../util/rocm_device_utils.cuh"
 
 #define ROCM_CAST_BLOCK 256
@@ -147,15 +145,16 @@ inline void rocm_cast_only(const Tensor &input, const Tensor &noop,
               const size_t max_blks = oversubscribe ? cu_count * 2 : cu_count;
               const int nblk = (int)(std::min((total + ELEMS_PER_BLK - 1) / ELEMS_PER_BLK, max_blks));
 
-              rocm_cast_only_kernel<InputType, OutputType>
-                  <<<nblk, ROCM_CAST_BLOCK, 0, stream>>>(
-                      static_cast<const InputType *>(input.data.dptr),
-                      reinterpret_cast<const CType *>(noop.data.dptr),
-                      static_cast<OutputType *>(output.data.dptr),
-                      static_cast<const CType *>(output.scale.dptr),
-                      static_cast<CType *>(output.amax.dptr),
-                      static_cast<CType *>(output.scale_inv.dptr),
-                      total);
+              hipLaunchKernelGGL(
+                  (rocm_cast_only_kernel<InputType, OutputType>),
+                  dim3(nblk), dim3(ROCM_CAST_BLOCK), 0, stream,
+                  static_cast<const InputType *>(input.data.dptr),
+                  reinterpret_cast<const CType *>(noop.data.dptr),
+                  static_cast<OutputType *>(output.data.dptr),
+                  static_cast<const CType *>(output.scale.dptr),
+                  static_cast<CType *>(output.amax.dptr),
+                  static_cast<CType *>(output.scale_inv.dptr),
+                  total);
               NVTE_CHECK_CUDA(hipGetLastError());
             } else {
               NVTE_ERROR("Not implemented scaling mode: ", to_string(output.scaling_mode));
