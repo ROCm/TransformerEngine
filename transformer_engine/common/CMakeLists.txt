@@ -184,7 +184,6 @@ list(APPEND transformer_engine_cuda_sources
      common.cu
      comm_gemm_overlap/userbuffers/userbuffers.cu
      multi_tensor/adam.cu
-     multi_tensor/compute_scale.cu
      multi_tensor/l2norm.cu
      multi_tensor/scale.cu
      multi_tensor/sgd.cu
@@ -214,13 +213,16 @@ list(APPEND transformer_engine_cuda_sources
      fused_router/fused_topk_with_score_function.cu
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
-     recipe/fp8_block_scaling.cu)
+     recipe/fp8_block_scaling.cu
+     swizzle/swizzle.cu)
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
-     cast/cast.cu
      activation/gelu.cu
      activation/relu.cu
      activation/swiglu.cu
+     cast/cast.cu
+     multi_tensor/compute_scale.cu
+     recipe/mxfp8_scaling.cu
      transpose/quantize_transpose_vector_blockwise_fp4.cu)
 
 if(USE_CUDA)
@@ -235,28 +237,33 @@ if(USE_CUDA)
         fused_attn/fused_attn_f16_arbitrary_seqlen.cu
         fused_attn/fused_attn_fp8.cu
         fused_attn/utils.cu
-        swizzle/swizzle.cu
         swizzle/swizzle_block_scaling.cu
         recipe/nvfp4.cu)
     list(APPEND transformer_engine_cuda_arch_specific_sources
         gemm/cutlass_grouped_gemm.cu
+        hadamard_transform/group_hadamard_transform.cu
         transpose/quantize_transpose_square_blockwise.cu
         hadamard_transform/hadamard_transform.cu
-        hadamard_transform/hadamard_transform_cast_fusion.cu)
+        hadamard_transform/hadamard_transform_cast_fusion.cu
+        hadamard_transform/group_hadamard_transform_cast_fusion.cu
+        hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
+        transpose/quantize_transpose_square_blockwise.cu
+        transpose/quantize_transpose_vector_blockwise_fp4.cu)
 else()
 #ROCm specific source codes
     list(APPEND transformer_engine_cpp_sources
         comm_gemm_overlap/rocm_comm_gemm_overlap.cpp
         fused_attn_rocm/fused_attn.cpp
         gemm/rocm_gemm.cu
-        gemm/ck_grouped_gemm.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp
         amd_detail/system.cpp)
     list(APPEND transformer_engine_cuda_sources
         fused_attn_rocm/fused_attn_aotriton.cpp
         fused_attn_rocm/fused_attn_ck.cpp
         fused_attn_rocm/utils.cpp)
 endif()
-
 
 # Compiling the files with the worst compilation time first to hopefully overlap
 # better with the faster-compiling cpp files
@@ -327,12 +334,24 @@ target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 if (USE_CUDA)
-# CUTLASS kernels require SM90a and cause hang in debug build
+# Grouped GEMM kernels require SM90a
 set_property(
   SOURCE gemm/cutlass_grouped_gemm.cu
   APPEND
   PROPERTY
-  COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a;-g0")
+  COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a")
+
+# CUTLASS kernels could cause hang in debug build
+set(CUTLASS_KERNEL_SOURCES
+    gemm/cutlass_grouped_gemm.cu
+    hadamard_transform/group_hadamard_transform_cast_fusion.cu
+    hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
+    hadamard_transform/hadamard_transform_cast_fusion.cu)
+set_property(
+  SOURCE ${CUTLASS_KERNEL_SOURCES}
+  APPEND
+  PROPERTY
+  COMPILE_OPTIONS "-g0;-dopt=on")
 else()
   set(CK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/aiter/3rdparty/composable_kernel)
   target_include_directories(transformer_engine PRIVATE ${CK_ROOT}/include)

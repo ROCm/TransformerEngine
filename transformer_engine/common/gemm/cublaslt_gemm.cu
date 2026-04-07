@@ -32,7 +32,7 @@
 #ifndef __HIP_PLATFORM_AMD__
 #include "./cutlass_grouped_gemm.cuh"
 #else
-#include "ck_grouped_gemm.h"
+#include "ck_grouped_gemm/ck_grouped_gemm.h"
 #endif
 
 #ifndef __HIP_PLATFORM_AMD__
@@ -386,7 +386,9 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   // TODO: Check whether scales are on CPU/GPU or add API to control.
   // Currently scales are assumed to be on CPU when amax is provided
   // and on GPU when not provided, but this is brittle.
-  if (use_fp4 && (inputA->amax.dptr != nullptr || inputB->amax.dptr != nullptr)) {
+  if (use_fp4 &&
+      ((transa == CUBLAS_OP_T ? inputA->amax.dptr : inputA->columnwise_amax.dptr) != nullptr ||
+       (transb == CUBLAS_OP_T ? inputB->columnwise_amax.dptr : inputB->amax.dptr) != nullptr)) {
     // Reserve some workspace for alpha scale
     NVTE_CHECK(workspaceSize >= 4,
                "NVFP4 GEMM requires at least 4 byte workspace for alpha scale, but only has ",
@@ -401,8 +403,10 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     // tensor scales in matmul output, instead of in matmul inputs.
     float old_alpha = *reinterpret_cast<const float *>(alpha);  // Assumed to be on CPU
     TensorWrapper new_alpha_tensor(new_alpha_ptr, std::vector<size_t>{1}, DType::kFloat32);
-    nvte_nvfp4_compute_per_tensor_scale(inputA->nvte_tensor, transa, inputB->nvte_tensor, !transb,
-                                        old_alpha, new_alpha_tensor.data(), stream);
+    bool a_rowwise_amax = transa == CUBLAS_OP_T;
+    bool b_rowwise_amax = transb != CUBLAS_OP_T;
+    nvte_nvfp4_compute_per_tensor_scale(inputA->nvte_tensor, a_rowwise_amax, inputB->nvte_tensor,
+                                        b_rowwise_amax, old_alpha, new_alpha_tensor.data(), stream);
     alpha = new_alpha_ptr;
 
     // Make sure beta scale is on device
@@ -522,6 +526,14 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 #if CUBLAS_VERSION >= 120800
       NVTE_CHECK(cublas_version() >= 120800,
                  "MXFP8 requires cuBLAS 12.8+, but run-time cuBLAS version is ", cublas_version());
+
+      // Check that scales are in expected format
+      NVTE_CHECK(inputA->with_gemm_swizzled_scales,
+                 "MXFP8 scales are not in format expected by GEMM");
+      NVTE_CHECK(inputB->with_gemm_swizzled_scales,
+                 "MXFP8 scales are not in format expected by GEMM");
+
+      // Configure cuBLAS scales
       fp8e8m0 *A_scale_inverse = reinterpret_cast<fp8e8m0 *>(param.A_scale_inv);
       fp8e8m0 *B_scale_inverse = reinterpret_cast<fp8e8m0 *>(param.B_scale_inv);
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
@@ -532,6 +544,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                                        &B_scale_inverse, sizeof(B_scale_inverse)));
       scaling_mode_a = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
       scaling_mode_b = CUBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+
       // Workaround for heuristic cache bug in cublasLt. This separates the MXFP8 cache key from non-block scaling.
       // CUBLASLT_MATMUL_DESC_ALPHA_VECTOR_BATCH_STRIDE is unused for block scaling so it's safe to set.
       if (cublas_version() <= 120803) {
@@ -548,17 +561,22 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 #if CUBLAS_VERSION >= 120800
       NVTE_CHECK(cublas_version() >= 120800,
                  "FP4 requires cuBLAS 12.8+, but run-time cuBLAS version is ", cublas_version());
-      // make sure alpha beta computation dtype remains fp32 by CUBLASLT_MATMUL_DESC_SCALE_TYPE
-      cublasDataType_t scale_type = CUDA_R_32F;
+
+      // Check that scales are in expected format
+      NVTE_CHECK(inputA->with_gemm_swizzled_scales,
+                 "NVFP4 block scales are not in format expected by GEMM");
+      NVTE_CHECK(inputB->with_gemm_swizzled_scales,
+                 "NVFP4 block scales are not in format expected by GEMM");
+
+      // alpha and beta are device pointers to FP32
+      const cublasDataType_t scale_type = CUDA_R_32F;
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
           operationDesc, CUBLASLT_MATMUL_DESC_SCALE_TYPE, &scale_type, sizeof(scale_type)));
-
-      // Set pointer mode: alpha and beta are both device pointers
-      // https://docs.nvidia.com/cuda/cublas/#cublasltpointermode-t
-      cublasLtPointerMode_t pointer_mode = CUBLASLT_POINTER_MODE_DEVICE;
+      const cublasLtPointerMode_t pointer_mode = CUBLASLT_POINTER_MODE_DEVICE;
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(
           operationDesc, CUBLASLT_MATMUL_DESC_POINTER_MODE, &pointer_mode, sizeof(pointer_mode)));
 
+      // Configure cuBLAS scales
       fp8e4m3 *A_scale_inverse = reinterpret_cast<fp8e4m3 *>(param.A_scale_inv);
       fp8e4m3 *B_scale_inverse = reinterpret_cast<fp8e4m3 *>(param.B_scale_inv);
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
@@ -580,6 +598,14 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       NVTE_CHECK(cublas_version() >= 120900,
                  "FP8 block scaling requires cuBLAS 12.9+, but run-time cuBLAS version is ",
                  cublas_version());
+
+      // Check that matrix formats are valid
+      NVTE_CHECK((!(inputA->scaling_mode == NVTE_BLOCK_SCALING_2D &&
+                    inputB->scaling_mode == NVTE_BLOCK_SCALING_2D)),
+                 "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling GEMM is supported, "
+                 "but got 2D by 2D");
+
+      // Configure cuBLAS scales
       float *A_scale_inverse = reinterpret_cast<float *>(param.A_scale_inv);
       float *B_scale_inverse = reinterpret_cast<float *>(param.B_scale_inv);
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
@@ -588,9 +614,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       NVTE_CHECK_CUBLAS(cublasLtMatmulDescSetAttribute(operationDesc,
                                                        CUBLASLT_MATMUL_DESC_B_SCALE_POINTER,
                                                        &B_scale_inverse, sizeof(B_scale_inverse)));
-      NVTE_CHECK((!(inputA->scaling_mode == NVTE_BLOCK_SCALING_2D &&
-                    inputB->scaling_mode == NVTE_BLOCK_SCALING_2D)),
-                 "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling supported, but got 2D by 2D");
       scaling_mode_a = inputA->scaling_mode == NVTE_BLOCK_SCALING_1D
                            ? CUBLASLT_MATMUL_MATRIX_SCALE_VEC128_32F
                            : CUBLASLT_MATMUL_MATRIX_SCALE_BLK128x128_32F;
@@ -1140,9 +1163,13 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     auto A_dt = inputA->data.dtype;
     auto B_dt = inputB->data.dtype;
     auto D_dt = OutputD->data.dtype;
-    return (A_dt == B_dt) && (A_dt == D_dt) &&
-           (A_dt == transformer_engine::DType::kFloat16 ||
-            A_dt == transformer_engine::DType::kBFloat16);
+    return (
+            (is_fp8_dtype(A_dt) && is_fp8_dtype(B_dt))
+          ) ||
+          (
+            (A_dt == B_dt) && (A_dt == D_dt) &&
+            (is_fp16_dtype(A_dt))
+          );
 #else
     auto A_type = get_cuda_dtype(inputA->data.dtype);
     auto B_type = get_cuda_dtype(inputB->data.dtype);
