@@ -48,7 +48,7 @@ class HipifyMeta(egg_info):
     """Custom egg_info command to hipify source files before packaging."""
 
     def run(self):
-        if rocm_build():
+        if rocm_build() and not bool(int(os.getenv("NVTE_LITE_ONLY", "0"))):
             from build_tools.hipify.hipify import do_hipify
             print("Running hipification of installable headers for ROCm build...")
             do_hipify(current_file_path, current_file_path / "transformer_engine/common/include")
@@ -229,7 +229,8 @@ def git_check_submodules() -> None:
 if __name__ == "__main__":
     __version__ = te_version()
 
-    git_check_submodules()
+    if not bool(int(os.getenv("NVTE_LITE_ONLY", "0"))):
+        git_check_submodules()
 
     with open("README.rst", encoding="utf-8") as f:
         long_description = f.read()
@@ -256,6 +257,23 @@ if __name__ == "__main__":
             "rocm_pytorch": [f"transformer_engine_rocm7[pytorch]=={__version__}"],
             "rocm_jax": [f"transformer_engine_rocm7[jax]=={__version__}"],
         }
+    elif bool(int(os.getenv("NVTE_LITE_ONLY", "0"))):
+        # Lite-only build: no C++ compilation, pure Python + Triton kernels.
+        # Builds in seconds. NVTE_LITE=1 is forced at import time via marker file.
+        install_requires, test_requires = setup_requirements()
+        ext_modules = []
+        cmdclass = {"bdist_wheel": TimedBdist}
+        package_data = {
+            "": ["VERSION.txt", "LITE_BUILD"],
+            "transformer_engine.pytorch.triton_kernels.gmm": ["configs/*.json"],
+        }
+        include_package_data = True
+        extras_require = {"test": test_requires}
+
+        # Write marker file so import-time code knows this is a lite-only wheel
+        marker_path = current_file_path / "transformer_engine" / "LITE_BUILD"
+        marker_path.write_text("This is a lite-only build. NVTE_LITE=1 is forced.\n")
+        PACKAGE_NAME = "tealite"
     else:
         install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
@@ -289,7 +307,8 @@ if __name__ == "__main__":
                     )
                 )
 
-    PACKAGE_NAME="transformer_engine"
+    if not bool(int(os.getenv("NVTE_LITE_ONLY", "0"))):
+        PACKAGE_NAME="transformer_engine"
     if (rocm_build() and bool(int(os.getenv("NVTE_RELEASE_BUILD", "0")))
         and not bool(int(os.getenv("NVTE_BUILD_METAPACKAGE", "0"))) ):
         PACKAGE_NAME=f"transformer_engine_rocm{rocm_version()[0]}"

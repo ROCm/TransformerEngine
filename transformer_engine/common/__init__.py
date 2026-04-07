@@ -413,7 +413,11 @@ def _load_core_library():
     return ctypes.CDLL(_get_shared_object_file("core"), mode=ctypes.RTLD_GLOBAL)
 
 
-_nvte_lite_mode = os.environ.get("NVTE_LITE", "0") == "1"
+# Detect lite mode: explicit env var or LITE_BUILD marker file (lite-only wheel)
+_lite_marker = Path(__file__).parent.parent / "LITE_BUILD"
+_nvte_lite_mode = os.environ.get("NVTE_LITE", "0") == "1" or _lite_marker.exists()
+if _nvte_lite_mode:
+    os.environ["NVTE_LITE"] = "1"
 
 if _nvte_lite_mode:
     # In lite mode, skip loading compiled C++ libraries entirely.
