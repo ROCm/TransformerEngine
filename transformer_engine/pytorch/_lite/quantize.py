@@ -340,48 +340,213 @@ def fused_amax_and_scale_update_after_reduction(
     scale_inv.copy_(1.0 / new_scale)
 
 
-def fp8_block_scaling_compute_partial_amax(tensor, amax, h, w, start_offset, block_len):
-    """Compute per-block amax from master weights for fp8 block scaling.
+# ---------------------------------------------------------------------------
+# Triton kernels for FP8 block scaling
+# ---------------------------------------------------------------------------
 
-    Vectorized -- no Python loops over blocks.
-    """
-    partial = tensor.view(-1)[start_offset:start_offset + h * w].view(h, w)
+_triton_block_scaling_loaded = False
+_triton_block_amax_kernel = None
+_triton_block_cast_kernel = None
+
+
+def _try_load_triton_block_scaling():
+    """Define Triton kernels for block scaling on first call."""
+    global _triton_block_scaling_loaded, _triton_block_amax_kernel, _triton_block_cast_kernel
+
+    if _triton_block_scaling_loaded:
+        return
+    _triton_block_scaling_loaded = True
+
+    try:
+        import triton
+        import triton.language as tl
+
+        @triton.autotune(
+            configs=[
+                triton.Config({"TILE_ROWS": 4}, num_warps=4),
+                triton.Config({"TILE_ROWS": 8}, num_warps=4),
+                triton.Config({"TILE_ROWS": 16}, num_warps=8),
+                triton.Config({"TILE_ROWS": 32}, num_warps=8),
+            ],
+            key=["BLOCK_LEN"],
+        )
+        @triton.jit
+        def _block_amax_kernel(
+            input_ptr, amax_ptr,
+            h, w,
+            input_row_stride,
+            num_blocks_w,
+            BLOCK_LEN: tl.constexpr,
+            TILE_ROWS: tl.constexpr,
+        ):
+            """2D-tiled per-block amax reduction.
+
+            Each program handles one (BLOCK_LEN x BLOCK_LEN) block.
+            Loads TILE_ROWS rows x BLOCK_LEN cols per iteration,
+            processing all rows in ceil(BLOCK_LEN / TILE_ROWS) steps.
+            """
+            block_idx = tl.program_id(0)
+            block_i = block_idx // num_blocks_w
+            block_j = block_idx % num_blocks_w
+
+            row_start = block_i * BLOCK_LEN
+            col_start = block_j * BLOCK_LEN
+
+            # 2D offsets for one tile: (TILE_ROWS, BLOCK_LEN)
+            row_offsets = tl.arange(0, TILE_ROWS)    # [TILE_ROWS]
+            col_offsets = tl.arange(0, BLOCK_LEN)    # [BLOCK_LEN]
+
+            max_val = 0.0
+            for tile_start in tl.static_range(0, BLOCK_LEN, TILE_ROWS):
+                rows = row_start + tile_start + row_offsets  # [TILE_ROWS]
+                cols = col_start + col_offsets                # [BLOCK_LEN]
+
+                # 2D mask: valid rows AND valid cols
+                row_mask = rows < h                           # [TILE_ROWS]
+                col_mask = cols < w                           # [BLOCK_LEN]
+                mask = row_mask[:, None] & col_mask[None, :]  # [TILE_ROWS, BLOCK_LEN]
+
+                # 2D load
+                ptrs = input_ptr + rows[:, None] * input_row_stride + cols[None, :]
+                vals = tl.load(ptrs, mask=mask, other=0.0)    # [TILE_ROWS, BLOCK_LEN]
+
+                max_val = tl.maximum(max_val, tl.max(tl.abs(vals)))
+
+            tl.store(amax_ptr + block_idx, max_val)
+
+        @triton.autotune(
+            configs=[
+                triton.Config({"TILE_ROWS": 4}, num_warps=4),
+                triton.Config({"TILE_ROWS": 8}, num_warps=4),
+                triton.Config({"TILE_ROWS": 16}, num_warps=8),
+                triton.Config({"TILE_ROWS": 32}, num_warps=8),
+            ],
+            key=["BLOCK_LEN"],
+        )
+        @triton.jit
+        def _block_cast_kernel(
+            input_ptr, output_ptr, scale_ptr,
+            h, w,
+            input_row_stride, output_row_stride,
+            num_blocks_w,
+            BLOCK_LEN: tl.constexpr,
+            TILE_ROWS: tl.constexpr,
+        ):
+            """2D-tiled per-block scale and copy.
+
+            Each program handles one (BLOCK_LEN x BLOCK_LEN) block.
+            Loads TILE_ROWS rows x BLOCK_LEN cols per iteration.
+            """
+            block_idx = tl.program_id(0)
+            block_i = block_idx // num_blocks_w
+            block_j = block_idx % num_blocks_w
+
+            row_start = block_i * BLOCK_LEN
+            col_start = block_j * BLOCK_LEN
+
+            s = tl.load(scale_ptr + block_idx)
+
+            row_offsets = tl.arange(0, TILE_ROWS)
+            col_offsets = tl.arange(0, BLOCK_LEN)
+
+            for tile_start in tl.static_range(0, BLOCK_LEN, TILE_ROWS):
+                rows = row_start + tile_start + row_offsets
+                cols = col_start + col_offsets
+
+                row_mask = rows < h
+                col_mask = cols < w
+                mask = row_mask[:, None] & col_mask[None, :]
+
+                in_ptrs = input_ptr + rows[:, None] * input_row_stride + cols[None, :]
+                vals = tl.load(in_ptrs, mask=mask, other=0.0)
+
+                out_ptrs = output_ptr + rows[:, None] * output_row_stride + cols[None, :]
+                tl.store(out_ptrs, vals * s, mask=mask)
+
+        _triton_block_amax_kernel = _block_amax_kernel
+        _triton_block_cast_kernel = _block_cast_kernel
+
+    except (ImportError, ModuleNotFoundError):
+        pass
+
+
+# ---------------------------------------------------------------------------
+# PyTorch fallbacks for block scaling (used when Triton unavailable)
+# ---------------------------------------------------------------------------
+
+def _fp8_block_scaling_compute_partial_amax_pytorch(partial, amax, h, w, block_len):
+    """Vectorized PyTorch fallback for block amax."""
     num_blocks_h = (h + block_len - 1) // block_len
     num_blocks_w = (w + block_len - 1) // block_len
 
-    # Pad to exact multiple of block_len so we can reshape into blocks
     pad_h = num_blocks_h * block_len - h
     pad_w = num_blocks_w * block_len - w
     if pad_h > 0 or pad_w > 0:
         partial = torch.nn.functional.pad(partial, (0, pad_w, 0, pad_h), value=0.0)
 
-    # Reshape into (num_blocks_h, block_len, num_blocks_w, block_len)
-    # then take abs().max() over the block dimensions
     blocked = partial.reshape(num_blocks_h, block_len, num_blocks_w, block_len)
-    block_amaxes = blocked.abs().amax(dim=(1, 3))  # (num_blocks_h, num_blocks_w)
+    block_amaxes = blocked.abs().amax(dim=(1, 3))
     amax.copy_(block_amaxes.reshape(-1))
 
 
-def fp8_block_scaling_partial_cast(inp, out, scale, h, w, start_offset, block_len, out_dtype):
-    """Partial cast from master weights with per-block scaling.
-
-    Vectorized -- no Python loops over blocks.
-    """
-    partial = inp.view(-1)[start_offset:start_offset + h * w].view(h, w)
+def _fp8_block_scaling_partial_cast_pytorch(partial, out, scale, h, w, block_len):
+    """Vectorized PyTorch fallback for block cast."""
     num_blocks_h = (h + block_len - 1) // block_len
     num_blocks_w = (w + block_len - 1) // block_len
 
-    # Pad to exact multiple of block_len
     pad_h = num_blocks_h * block_len - h
     pad_w = num_blocks_w * block_len - w
     if pad_h > 0 or pad_w > 0:
         partial = torch.nn.functional.pad(partial, (0, pad_w, 0, pad_h), value=0.0)
 
-    # Reshape into blocks, apply per-block scale, then reshape back
     blocked = partial.reshape(num_blocks_h, block_len, num_blocks_w, block_len)
     scale_2d = scale.reshape(num_blocks_h, num_blocks_w)[:, None, :, None]
     scaled = blocked * scale_2d
     result = scaled.reshape(num_blocks_h * block_len, num_blocks_w * block_len)
-
-    # Trim padding and copy to output
     out.copy_(result[:h, :w])
+
+
+# ---------------------------------------------------------------------------
+# Public API for block scaling
+# ---------------------------------------------------------------------------
+
+def fp8_block_scaling_compute_partial_amax(tensor, amax, h, w, start_offset, block_len):
+    """Compute per-block amax. Uses Triton kernel when available."""
+    partial = tensor.view(-1)[start_offset:start_offset + h * w].view(h, w)
+    num_blocks_h = (h + block_len - 1) // block_len
+    num_blocks_w = (w + block_len - 1) // block_len
+
+    _try_load_triton_block_scaling()
+    if _triton_block_amax_kernel is not None:
+        grid = (num_blocks_h * num_blocks_w,)
+        _triton_block_amax_kernel[grid](
+            partial, amax,
+            h, w,
+            partial.stride(0),
+            num_blocks_w,
+            BLOCK_LEN=block_len,
+        )
+        return
+
+    _fp8_block_scaling_compute_partial_amax_pytorch(partial, amax, h, w, block_len)
+
+
+def fp8_block_scaling_partial_cast(inp, out, scale, h, w, start_offset, block_len, out_dtype):
+    """Partial cast with per-block scaling. Uses Triton kernel when available."""
+    partial = inp.view(-1)[start_offset:start_offset + h * w].view(h, w)
+    num_blocks_h = (h + block_len - 1) // block_len
+    num_blocks_w = (w + block_len - 1) // block_len
+
+    _try_load_triton_block_scaling()
+    if _triton_block_cast_kernel is not None:
+        grid = (num_blocks_h * num_blocks_w,)
+        _triton_block_cast_kernel[grid](
+            partial, out, scale,
+            h, w,
+            partial.stride(0), out.stride(0),
+            num_blocks_w,
+            BLOCK_LEN=block_len,
+        )
+        return
+
+    _fp8_block_scaling_partial_cast_pytorch(partial, out, scale, h, w, block_len)
