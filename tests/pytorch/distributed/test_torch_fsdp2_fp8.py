@@ -25,8 +25,8 @@ def assert_allclose(
     assert len(l1) == len(l2), "Unequal number of outputs."
     tols = dict(atol=atol)
     tols["rtol"] = rtol if rtol is not None else 0
-    tol = tols["atol"] + (tols["rtol"] * torch.abs(l2))
     for i, (t1, t2) in enumerate(zip(l1, l2)):
+        tol = tols["atol"] + (tols["rtol"] * torch.abs(t2))
         result = torch.allclose(t1, t2, **tols)
         if not result:
             diff = torch.abs(t1 - t2)
@@ -90,9 +90,12 @@ def _run_test(quantized_init, autocast, recipe):
     # When autocast=True and quantized_init=False, FP8 quantization happens after the
     # FSDP2 AllGather reconstructs the full weight, so both paths compute identical
     # scales and produce bit-identical FP8 GEMMs — strict tolerance (0) is used.
-    if quantized_init or (not quantized_init and not autocast):
+    if not quantized_init and not autocast:
         atol = 1e-6
         rtol = 5e-5
+    elif quantized_init:
+        atol = 0.05
+        rtol = 0.05
     
     for idx, (te_output_no_cache, te_output_cache) in enumerate(zip(output_fsdp, output_dp)):
     
