@@ -57,7 +57,16 @@ __global__ void __launch_bounds__(512)
   fp4vec value;
   value.vec = input_vectorized[my_index];
   fp8e4m3 scale = scales[my_scale_index];
-  float amax = (tensor_amax == nullptr) ? 1.0f : *tensor_amax;
+  // NVFP4 may reach this path with scale present but no separate amax buffer.
+  // Use 1.0f as the neutral fallback when tensor_amax is not provided on HIP.
+  float amax = 1.0f;
+#ifndef __HIP_PLATFORM_AMD__
+  amax = *tensor_amax;
+#else
+  if (tensor_amax != nullptr) {
+    amax = *tensor_amax;
+  }
+#endif
   constexpr float factor_inv = 1.0 / (6.0 * 448.0);
   float final_scale = static_cast<float>(scale) * amax * factor_inv;
 #pragma unroll
