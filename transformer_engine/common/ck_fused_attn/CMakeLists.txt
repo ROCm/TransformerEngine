@@ -117,7 +117,7 @@ install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_IN
 # so far, there are only gfx942 and gfx950 v3 kernels
 foreach(ARCH IN LISTS CMAKE_HIP_ARCHITECTURES)
   string(TOLOWER "${ARCH}" ARCH)
-  if(${ARCH} NOT IN_LIST V3_ASM_ARCHS_SUPPORTED)
+  if(NOT "${ARCH}" IN_LIST V3_ASM_ARCHS_SUPPORTED)
     continue()
   endif()
   foreach(KERNEL_TYPE IN ITEMS fmha_v3_fwd fmha_v3_bwd)
