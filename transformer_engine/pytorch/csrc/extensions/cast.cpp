@@ -801,6 +801,7 @@ static StochasticRngStateResources setup_stochastic_rounding_rng_states_helper(
   return res;
 }
 
+#ifndef USE_ROCM
 // Implements split-quantize NVFP4 with Row/Column-wise Hadamard Transform (RHT)
 void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
                                                const std::vector<TensorWrapper> &input_list,
@@ -963,6 +964,7 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
     }
   }
 }
+#endif  // #ifndef USE_ROCM
 
 void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
                                       const std::vector<TensorWrapper> &input_list,
@@ -1019,8 +1021,16 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
     NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
     output_list[i].set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
   }
+#ifndef USE_ROCM
   nvte_group_amax(input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
                   split_sections.data(), num_tensors, stream);
+#else
+  // nvte_group_amax is not available on ROCm; compute amax individually
+  for (size_t i = 0; i < num_tensors; i++) {
+    if (input_list[i].numel() == 0) continue;
+    nvte_compute_amax(input_list[i].data(), output_list[i].data(), stream);
+  }
+#endif
   for (size_t i = 0; i < num_tensors; i++) {
     output_list[i].set_amax(orig_amax_ptr_list[i], DType::kFloat32, std::vector<size_t>{1});
   }
@@ -1085,20 +1095,28 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 
   // Perform multi-tensor quantization
   NVTE_SCOPED_GIL_RELEASE({
+#ifndef USE_ROCM
     if (quantizer.with_rht) {  // Quantize row-wise data, RHT+quantize column-wise data
       // Check that config is supported
       NVTE_CHECK(input.dtype() == DType::kBFloat16, "RHT is only supported for bfloat16 input");
       // Fuse the rowwise and colwise into one when the kernel is ready
       split_quantize_nvfp4_impl_with_rht_helper(input, input_list, output_list, split_sections,
                                                 quantizers, stream);
-    } else {  // NVFP4 quantize
-      // Fuse the rowwise and colwise into one when the kernel is ready
+    } else {
+      // NVFP4 quantize without RHT
       split_quantize_nvfp4_impl_helper(input, input_list, output_list, split_sections, quantizers,
                                        stream);
     }
+#else
+    // ROCm: group hadamard kernels are not available, fall back to per-tensor quantize
+    // which handles both RHT and non-RHT paths via NVFP4Quantizer::quantize_impl.
+    for (size_t i = 0; i < num_tensors; i++) {
+      if (input_list[i].numel() == 0) continue;
+      quantizers[i]->quantize(input_list[i], output_list[i]);
+    }
+#endif
   });
 }
-// #endif  // #ifndef USE_ROCM
 
 }  // namespace
 
@@ -1168,14 +1186,12 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                              return detail::IsMXFP8Quantizers(quantizer.ptr());
                            })) {
       allocation_method = AllocationMethod::BULK_MXFP8;
-#ifndef USE_ROCM
     } else if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
                            [](const py::handle &quantizer) -> bool {
                              return detail::IsNVFP4Quantizers(quantizer.ptr());
                            })) {
       allocation_method = AllocationMethod::BULK_NVFP4;
       quantization_method = QuantizationMethod::FUSED_NVFP4;
-#endif
     }
   }
 

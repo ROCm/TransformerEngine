@@ -206,11 +206,17 @@ __device__ constexpr float kFP4E2M1Table[16] = {
 // Dequantize FP4 (e2m1) packed data with FP8 e4m3 block scales to BF16.
 // Only applies block scales: output = fp4_value * block_scale.
 // The per-tensor amax correction is applied separately via the GEMM alpha scalar.
+//
+// Scale layout: 2D tensor of shape {num_rows_padded, scale_stride} where
+// scale_stride = roundup(num_cols / 16, 4).  Each scale covers a block of 16
+// consecutive elements along the fast (column) dimension.
 __global__ void dequant_fp4_to_bf16_kernel(
     const uint8_t* __restrict__ data,
     const fp8e4m3* __restrict__ scale_inv,
     hip_bfloat16* __restrict__ output,
-    int64_t total_elements)
+    int64_t total_elements,
+    int64_t num_cols,
+    int64_t scale_stride)
 {
   // Process 2 elements (1 byte) per iteration for coalesced access
   const int64_t pair_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
@@ -222,8 +228,12 @@ __global__ void dequant_fp4_to_bf16_kernel(
   const uint8_t hi_nibble = byte >> 4;
 
   const int64_t elem_base = pair_idx * 2;
-  const float s0 = static_cast<float>(scale_inv[elem_base / 16]);
-  const float s1 = static_cast<float>(scale_inv[(elem_base + 1) / 16]);
+  const int64_t row0 = elem_base / num_cols;
+  const int64_t col0 = elem_base % num_cols;
+  const int64_t row1 = (elem_base + 1) / num_cols;
+  const int64_t col1 = (elem_base + 1) % num_cols;
+  const float s0 = static_cast<float>(scale_inv[row0 * scale_stride + col0 / 16]);
+  const float s1 = static_cast<float>(scale_inv[row1 * scale_stride + col1 / 16]);
 
   output[elem_base]     = static_cast<hip_bfloat16>(kFP4E2M1Table[lo_nibble] * s0);
   output[elem_base + 1] = static_cast<hip_bfloat16>(kFP4E2M1Table[hi_nibble] * s1);
@@ -232,7 +242,9 @@ __global__ void dequant_fp4_to_bf16_kernel(
 // Launch helper for dequant kernel
 static void launch_dequant_fp4_to_bf16(
     const void* data, const void* scale_inv,
-    void* output, int64_t total_elements, hipStream_t stream)
+    void* output, int64_t total_elements,
+    int64_t num_cols, int64_t scale_stride,
+    hipStream_t stream)
 {
   constexpr int kBlockSize = 256;
   const int64_t total_pairs = total_elements / 2;
@@ -242,7 +254,7 @@ static void launch_dequant_fp4_to_bf16(
       reinterpret_cast<const uint8_t*>(data),
       reinterpret_cast<const fp8e4m3*>(scale_inv),
       reinterpret_cast<hip_bfloat16*>(output),
-      total_elements);
+      total_elements, num_cols, scale_stride);
 }
 
 // Compute per-row alpha vector on device for NVFP4 GEMM:
@@ -1081,7 +1093,15 @@ void hipblaslt_gemm(const Tensor *inputA,
     if (is_fp4_dtype(param.Atype)) {
       hip_bfloat16* a_bf16 = reinterpret_cast<hip_bfloat16*>(ws_ptr + ws_offset);
       const int64_t total_a = static_cast<int64_t>(m) * k;
-      launch_dequant_fp4_to_bf16(param.A, param.A_scale_inv, a_bf16, total_a, stream);
+      // Determine scale stride from scale tensor shape
+      const auto& a_sinv = (transa == CUBLAS_OP_T) ? inputA->scale_inv
+                                                   : inputA->columnwise_scale_inv;
+      const int64_t a_num_cols = (transa == CUBLAS_OP_T)
+          ? inputA->data.shape.back()
+          : inputA->columnwise_data.shape.back();
+      const int64_t a_scale_stride = (a_sinv.shape.size() >= 2) ? a_sinv.shape[1] : (a_num_cols / 16);
+      launch_dequant_fp4_to_bf16(param.A, param.A_scale_inv, a_bf16, total_a,
+                                 a_num_cols, a_scale_stride, stream);
       param.A = a_bf16;
       param.Atype = DType::kBFloat16;
       param.A_scale_inv = nullptr;
@@ -1091,7 +1111,15 @@ void hipblaslt_gemm(const Tensor *inputA,
     if (is_fp4_dtype(param.Btype)) {
       hip_bfloat16* b_bf16 = reinterpret_cast<hip_bfloat16*>(ws_ptr + ws_offset);
       const int64_t total_b = static_cast<int64_t>(k) * n;
-      launch_dequant_fp4_to_bf16(param.B, param.B_scale_inv, b_bf16, total_b, stream);
+      // Determine scale stride from scale tensor shape
+      const auto& b_sinv = (transb == CUBLAS_OP_N) ? inputB->scale_inv
+                                                   : inputB->columnwise_scale_inv;
+      const int64_t b_num_cols = (transb == CUBLAS_OP_N)
+          ? inputB->data.shape.back()
+          : inputB->columnwise_data.shape.back();
+      const int64_t b_scale_stride = (b_sinv.shape.size() >= 2) ? b_sinv.shape[1] : (b_num_cols / 16);
+      launch_dequant_fp4_to_bf16(param.B, param.B_scale_inv, b_bf16, total_b,
+                                 b_num_cols, b_scale_stride, stream);
       param.B = b_bf16;
       param.Btype = DType::kBFloat16;
       param.B_scale_inv = nullptr;

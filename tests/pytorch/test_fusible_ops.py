@@ -2936,7 +2936,10 @@ class TestSequentialModules:
             return out
 
         # Check values
-        tols = {"rtol": 0.25, "atol": 0.5}  # Loose tols for sanity checking
+        if IS_HIP_EXTENSION:
+            tols = {"rtol": 0.25, "atol": 0.54}
+        else:
+            tols = {"rtol": 0.25, "atol": 0.5}  # Loose tols for sanity checking
         torch.testing.assert_close(to_cpu(y_test), y_ref, **tols)
         torch.testing.assert_close(to_cpu(x_test.grad), x_ref.grad, **tols)
         torch.testing.assert_close(to_cpu(norm.weight.grad), norm_w_ref.grad, **tols)

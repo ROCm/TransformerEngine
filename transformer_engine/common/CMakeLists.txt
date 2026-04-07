@@ -247,12 +247,9 @@ if(USE_CUDA)
         transpose/quantize_transpose_square_blockwise.cu
         hadamard_transform/group_hadamard_transform.cu
         transpose/quantize_transpose_square_blockwise.cu
-        hadamard_transform/hadamard_transform.cu
-        hadamard_transform/hadamard_transform_cast_fusion.cu
         hadamard_transform/group_hadamard_transform_cast_fusion.cu
         hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
-        transpose/quantize_transpose_square_blockwise.cu
-        transpose/quantize_transpose_vector_blockwise_fp4.cu)
+        transpose/quantize_transpose_square_blockwise.cu)
 else()
 #ROCm specific source codes
     list(APPEND transformer_engine_cpp_sources
