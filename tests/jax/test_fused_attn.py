@@ -27,7 +27,7 @@ from jax.typing import ArrayLike, DTypeLike
 
 from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
 from transformer_engine.jax import autocast
-from transformer_engine.jax.sharding import MeshResource, global_shard_guard
+from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
@@ -1511,15 +1511,19 @@ def test_jax_new_rng():
 
 
 def _run_deterministic_bwd_case(
-    qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d, check_numerical=None
+    monkeypatch, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d,
+    dtype=jnp.bfloat16, check_numerical=None,
 ):
     """
     Shared helper for deterministic backward tests.
 
-    Verifies that the CK fused attention backward pass in deterministic mode
+    Verifies that the fused attention backward pass in deterministic mode
     produces bitwise-reproducible gradients.  Optionally checks numerical
     correctness against an unfused JAX reference (O(s^2)); this is skipped for
     large seq_len to keep CI fast.
+
+    Both CK and AOTriton backends are exercised (AOTriton is deterministic by
+    nature).  The test is skipped when neither backend is selected.
 
     All seq_len values should be >= 256 so that nsplits = ceil(s/kN0) > 1
     (kN0=128 for d<=128), ensuring the kernel actually exercises the
@@ -1528,102 +1532,140 @@ def _run_deterministic_bwd_case(
     if check_numerical is None:
         check_numerical = seq_len <= 256
     s = seq_len
-    dtype = jnp.bfloat16
     scaling_factor = 1.0 / sqrt(d)
 
     # Set deterministic mode before any TE calls so the flag is visible
     # throughout backend selection and kernel dispatch.
-    _orig_nondeterministic = os.environ.get("NVTE_ALLOW_NONDETERMINISTIC_ALGO")
-    os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = "0"
+    # monkeypatch automatically restores the original value when the test ends.
+    monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
 
-    # Verify the CK backend is selected, otherwise test is meaningless
+    # Verify a deterministic fused backend is selected.
     backend = FusedAttnHelper(
         True, dtype, dtype, qkv_layout, AttnBiasType.NO_BIAS, attn_mask_type,
-        0.0, h_q, h_kv, s, s, d, d, (-1, -1),
+        AttnSoftmaxType.VANILLA_SOFTMAX, 0.0, h_q, h_kv, s, s, d, d, (-1, -1),
     ).get_fused_attn_backend()
     if backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
         pytest.skip("No fused attention backend available for this config")
-    assert backend == NVTE_Fused_Attn_Backend.NVTE_CK, (
-        f"Expected CK backend but got {backend}."
-    )
-    try:
-        key = jax.random.PRNGKey(42)
-        q_key, k_key, v_key = jax.random.split(key, 3)
-        q = jax.random.normal(q_key, (b, s, h_q, d), dtype=dtype)
-        k = jax.random.normal(k_key, (b, s, h_kv, d), dtype=dtype)
-        v = jax.random.normal(v_key, (b, s, h_kv, d), dtype=dtype)
+    if backend not in (
+        NVTE_Fused_Attn_Backend.NVTE_CK,
+        NVTE_Fused_Attn_Backend.NVTE_AOTriton,
+    ):
+        pytest.skip(
+            f"Deterministic test requires CK or AOTriton backend, got {backend}."
+        )
 
-        # Build sequence descriptor via the non-deprecated SequenceDescriptor API.
-        # For NO_MASK every sequence is full-length; for CAUSAL the mask type
-        # alone drives masking inside fused_attn.
+    key = jax.random.PRNGKey(42)
+    q_key, k_key, v_key = jax.random.split(key, 3)
+    q = jax.random.normal(q_key, (b, s, h_q, d), dtype=dtype)
+    k = jax.random.normal(k_key, (b, s, h_kv, d), dtype=dtype)
+    v = jax.random.normal(v_key, (b, s, h_kv, d), dtype=dtype)
+
+    # Build sequence descriptor and reference mask based on mask type.
+    if qkv_layout.is_thd():
+        # THD (sequence packing): create multiple segments per batch element.
+        num_segs = 3
+        seg_len = s // (num_segs + 1)  # Leave room for padding
+        segment_ids = np.zeros((b, s), dtype=np.int32)
+        segment_pos = np.zeros((b, s), dtype=np.int32)
+        for seg_id in range(1, num_segs + 1):
+            start = (seg_id - 1) * seg_len
+            end = seg_id * seg_len
+            segment_ids[:, start:end] = seg_id
+            segment_pos[:, start:end] = np.arange(seg_len)
+        segment_ids = jnp.array(segment_ids)
+        segment_pos = jnp.array(segment_pos)
+
+        seqlens, offsets = get_seqlens_and_offsets(segment_ids)
+        seq_desc = SequenceDescriptor.from_seqlens_and_offsets(
+            (seqlens, seqlens), (offsets, offsets)
+        )
+        mask = make_mask(segment_ids, segment_ids, segment_pos, segment_pos, attn_mask_type)
+    elif attn_mask_type.is_padding():
+        # Variable-length sequences: use 70% of max seqlen as actual length.
+        pad_ratio = 0.3
+        valid_len = int(s * (1 - pad_ratio))
+        actual_seqlens = jnp.full((b,), valid_len, dtype=jnp.int32)
+        seq_desc = SequenceDescriptor.from_seqlens((actual_seqlens, actual_seqlens))
+
+        # Build reference mask via segment ids.
+        segment_ids = jnp.concatenate(
+            [jnp.ones((b, valid_len), dtype=jnp.int32),
+             jnp.zeros((b, s - valid_len), dtype=jnp.int32)],
+            axis=-1,
+        )
+        mask = make_mask(segment_ids, segment_ids, None, None, attn_mask_type)
+    else:
         seqlens = jnp.full((b,), s, dtype=jnp.int32)
         seq_desc = SequenceDescriptor.from_seqlens((seqlens, seqlens))
 
-        # The unfused JAX reference (jax_dpa) still takes a raw mask ndarray.
         if attn_mask_type == AttnMaskType.NO_MASK:
             mask = None
         else:
-            idx = jnp.arange(s)
-            mask = jnp.broadcast_to(
-                (idx[None, :] > idx[:, None])[None, None], (b, 1, s, s)
-            )
+            segment_ids = jnp.ones((b, s), dtype=jnp.int32)
+            mask = make_mask(segment_ids, segment_ids, None, None, attn_mask_type)
 
-        kwargs = dict(
-            attn_bias_type=AttnBiasType.NO_BIAS,
-            attn_mask_type=attn_mask_type,
-            scaling_factor=scaling_factor,
-            dropout_probability=0.0,
-            is_training=True,
-            qkv_layout=qkv_layout,
+    kwargs = dict(
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=attn_mask_type,
+        scaling_factor=scaling_factor,
+        dropout_probability=0.0,
+        is_training=True,
+        qkv_layout=qkv_layout,
+    )
+
+    # Fused backward — JIT-compiled, run twice for bitwise reproducibility
+    def fused_fn(q, k, v):
+        return customcall_fused_dpa(
+            q, k, v, None, None, seq_desc, None, **kwargs
+        ).astype(jnp.float32).sum()
+
+    fused_val_grad = jit(jax.value_and_grad(fused_fn, argnums=(0, 1, 2)))
+
+    _, grads1 = fused_val_grad(q, k, v)
+    fused_dq1 = np.array(grads1[0].block_until_ready())
+    fused_dk1 = np.array(grads1[1].block_until_ready())
+    fused_dv1 = np.array(grads1[2].block_until_ready())
+
+    _, grads2 = fused_val_grad(q, k, v)
+    fused_dq2 = np.array(grads2[0].block_until_ready())
+    fused_dk2 = np.array(grads2[1].block_until_ready())
+    fused_dv2 = np.array(grads2[2].block_until_ready())
+
+    # Bitwise reproducibility across consecutive runs
+    np.testing.assert_array_equal(fused_dq1, fused_dq2, err_msg="dQ not bitwise reproducible")
+    np.testing.assert_array_equal(fused_dk1, fused_dk2, err_msg="dK not bitwise reproducible")
+    np.testing.assert_array_equal(fused_dv1, fused_dv2, err_msg="dV not bitwise reproducible")
+
+    # Numerical correctness vs unfused JAX reference (O(s^2), skip for large s)
+    if check_numerical:
+        ref_kwargs = dict(
+            **kwargs,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
         )
 
-        # Fused CK backward — JIT-compiled, run twice for bitwise reproducibility
-        def fused_fn(q, k, v):
-            return customcall_fused_dpa(
-                q, k, v, None, seq_desc, None, **kwargs
-            ).astype(jnp.float32).sum()
+        def ref_fn(q, k, v):
+            return jax_dpa(q, k, v, None, None, mask, None, **ref_kwargs).astype(jnp.float32).sum()
 
-        fused_val_grad = jit(jax.value_and_grad(fused_fn, argnums=(0, 1, 2)))
+        ref_val_grad = jit(jax.value_and_grad(ref_fn, argnums=(0, 1, 2)))
+        _, ref_grads = ref_val_grad(q, k, v)
+        ref_dq = ref_grads[0].block_until_ready()
+        ref_dk = ref_grads[1].block_until_ready()
+        ref_dv = ref_grads[2].block_until_ready()
 
-        with global_shard_guard(MeshResource()):
-            _, grads1 = fused_val_grad(q, k, v)
-            fused_dq1 = np.array(grads1[0].block_until_ready())
-            fused_dk1 = np.array(grads1[1].block_until_ready())
-            fused_dv1 = np.array(grads1[2].block_until_ready())
-
-            _, grads2 = fused_val_grad(q, k, v)
-            fused_dq2 = np.array(grads2[0].block_until_ready())
-            fused_dk2 = np.array(grads2[1].block_until_ready())
-            fused_dv2 = np.array(grads2[2].block_until_ready())
-
-        # Bitwise reproducibility across consecutive runs
-        np.testing.assert_array_equal(fused_dq1, fused_dq2, err_msg="dQ not bitwise reproducible")
-        np.testing.assert_array_equal(fused_dk1, fused_dk2, err_msg="dK not bitwise reproducible")
-        np.testing.assert_array_equal(fused_dv1, fused_dv2, err_msg="dV not bitwise reproducible")
-
-        # Numerical correctness vs unfused JAX reference (O(s^2), skip for large s)
-        if check_numerical:
-            def ref_fn(q, k, v):
-                return jax_dpa(q, k, v, None, mask, None, **kwargs).astype(jnp.float32).sum()
-
-            ref_val_grad = jit(jax.value_and_grad(ref_fn, argnums=(0, 1, 2)))
-            _, ref_grads = ref_val_grad(q, k, v)
-            ref_dq = ref_grads[0].block_until_ready()
-            ref_dk = ref_grads[1].block_until_ready()
-            ref_dv = ref_grads[2].block_until_ready()
-
-            assert_allclose(jnp.array(fused_dq1), ref_dq, dtype=dtype)
-            assert_allclose(jnp.array(fused_dk1), ref_dk, dtype=dtype)
-            assert_allclose(jnp.array(fused_dv1), ref_dv, dtype=dtype)
-    finally:
-        if _orig_nondeterministic is None:
-            os.environ.pop("NVTE_ALLOW_NONDETERMINISTIC_ALGO", None)
-        else:
-            os.environ["NVTE_ALLOW_NONDETERMINISTIC_ALGO"] = _orig_nondeterministic
+        assert_allclose(jnp.array(fused_dq1), ref_dq, dtype=dtype)
+        assert_allclose(jnp.array(fused_dk1), ref_dk, dtype=dtype)
+        assert_allclose(jnp.array(fused_dv1), ref_dv, dtype=dtype)
 
 
 @pytest.mark.skipif(
-    not is_hip_extension(), reason="CK deterministic backward only applies to AMD hardware"
+    not is_hip_extension(), reason="Deterministic backward only applies to AMD hardware"
+)
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pytest.param(jnp.bfloat16, id="BF16"),
+        pytest.param(jnp.float16, id="FP16"),
+    ],
 )
 @pytest.mark.parametrize(
     "qkv_layout",
@@ -1638,6 +1680,11 @@ def _run_deterministic_bwd_case(
     [
         pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
         pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
+        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
+        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+        pytest.param(
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK, id="PADDING_CAUSAL_BOTTOM_RIGHT"
+        ),
     ],
 )
 @pytest.mark.parametrize(
@@ -1647,26 +1694,89 @@ def _run_deterministic_bwd_case(
         pytest.param(2, 2048, 8, 8, 128, id="b2_s2048_MHA"),
     ],
 )
-def test_deterministic_bwd(qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d):
-    """Test CK deterministic backward: bitwise reproducibility + correctness."""
-    _run_deterministic_bwd_case(qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d)
+def test_deterministic_bwd(monkeypatch, dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d):
+    """Test deterministic backward: bitwise reproducibility + correctness."""
+    _run_deterministic_bwd_case(
+        monkeypatch, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d, dtype=dtype,
+    )
 
 
 @pytest.mark.skipif(
-    not is_hip_extension(), reason="CK deterministic backward only applies to AMD hardware"
+    not is_hip_extension(), reason="Deterministic backward only applies to AMD hardware"
+)
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pytest.param(jnp.bfloat16, id="BF16"),
+        pytest.param(jnp.float16, id="FP16"),
+    ],
 )
 @pytest.mark.parametrize(
     "attn_mask_type",
     [
         pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
         pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
+        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
+        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+        pytest.param(
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK, id="PADDING_CAUSAL_BOTTOM_RIGHT"
+        ),
     ],
 )
-def test_deterministic_bwd_gqa(attn_mask_type):
-    """GQA variant: BSHD_BSHD_BSHD with h_q != h_kv."""
+@pytest.mark.parametrize(
+    "h_q, h_kv",
+    [
+        pytest.param(8, 8, id="MHA"),
+        pytest.param(12, 4, id="GQA"),
+    ],
+)
+def test_deterministic_bwd_gqa(monkeypatch, dtype, attn_mask_type, h_q, h_kv):
+    """MHA and GQA variants: BSHD_BSHD_BSHD with various head configurations."""
     _run_deterministic_bwd_case(
+        monkeypatch,
         qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
         attn_mask_type=attn_mask_type,
-        b=2, seq_len=2048, h_q=12, h_kv=4, d=128,
+        b=2, seq_len=2048, h_q=h_q, h_kv=h_kv, d=128,
+        dtype=dtype,
+        check_numerical=False,
+    )
+
+
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="Deterministic backward only applies to AMD hardware"
+)
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pytest.param(jnp.bfloat16, id="BF16"),
+        pytest.param(jnp.float16, id="FP16"),
+    ],
+)
+@pytest.mark.parametrize(
+    "attn_mask_type",
+    [
+        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
+        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+        pytest.param(
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK, id="PADDING_CAUSAL_BOTTOM_RIGHT"
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "qkv_layout",
+    [
+        pytest.param(QKVLayout.T3HD, id="T3HD"),
+        pytest.param(QKVLayout.THD_T2HD, id="THD_T2HD"),
+        pytest.param(QKVLayout.THD_THD_THD, id="THD_THD_THD"),
+    ],
+)
+def test_deterministic_bwd_seqpack(monkeypatch, dtype, attn_mask_type, qkv_layout):
+    """Sequence packing (THD) variants for deterministic backward."""
+    _run_deterministic_bwd_case(
+        monkeypatch,
+        qkv_layout=qkv_layout,
+        attn_mask_type=attn_mask_type,
+        b=2, seq_len=2048, h_q=8, h_kv=8, d=128,
+        dtype=dtype,
         check_numerical=False,
     )
