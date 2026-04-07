@@ -341,37 +341,47 @@ def fused_amax_and_scale_update_after_reduction(
 
 
 def fp8_block_scaling_compute_partial_amax(tensor, amax, h, w, start_offset, block_len):
-    """Compute partial amax from master weights for fp8 block scaling."""
+    """Compute per-block amax from master weights for fp8 block scaling.
+
+    Vectorized -- no Python loops over blocks.
+    """
     partial = tensor.view(-1)[start_offset:start_offset + h * w].view(h, w)
     num_blocks_h = (h + block_len - 1) // block_len
     num_blocks_w = (w + block_len - 1) // block_len
 
-    for i in range(num_blocks_h):
-        for j in range(num_blocks_w):
-            h_start = i * block_len
-            h_end = min(h_start + block_len, h)
-            w_start = j * block_len
-            w_end = min(w_start + block_len, w)
-            block = partial[h_start:h_end, w_start:w_end]
-            block_amax = block.abs().max()
-            amax[i * num_blocks_w + j] = block_amax
+    # Pad to exact multiple of block_len so we can reshape into blocks
+    pad_h = num_blocks_h * block_len - h
+    pad_w = num_blocks_w * block_len - w
+    if pad_h > 0 or pad_w > 0:
+        partial = torch.nn.functional.pad(partial, (0, pad_w, 0, pad_h), value=0.0)
+
+    # Reshape into (num_blocks_h, block_len, num_blocks_w, block_len)
+    # then take abs().max() over the block dimensions
+    blocked = partial.reshape(num_blocks_h, block_len, num_blocks_w, block_len)
+    block_amaxes = blocked.abs().amax(dim=(1, 3))  # (num_blocks_h, num_blocks_w)
+    amax.copy_(block_amaxes.reshape(-1))
 
 
 def fp8_block_scaling_partial_cast(inp, out, scale, h, w, start_offset, block_len, out_dtype):
-    """Partial cast from master weights for fp8 block scaling."""
+    """Partial cast from master weights with per-block scaling.
+
+    Vectorized -- no Python loops over blocks.
+    """
     partial = inp.view(-1)[start_offset:start_offset + h * w].view(h, w)
     num_blocks_h = (h + block_len - 1) // block_len
     num_blocks_w = (w + block_len - 1) // block_len
 
-    result = torch.empty_like(partial)
-    for i in range(num_blocks_h):
-        for j in range(num_blocks_w):
-            h_start = i * block_len
-            h_end = min(h_start + block_len, h)
-            w_start = j * block_len
-            w_end = min(w_start + block_len, w)
-            block = partial[h_start:h_end, w_start:w_end]
-            s = scale[i * num_blocks_w + j]
-            result[h_start:h_end, w_start:w_end] = block * s
+    # Pad to exact multiple of block_len
+    pad_h = num_blocks_h * block_len - h
+    pad_w = num_blocks_w * block_len - w
+    if pad_h > 0 or pad_w > 0:
+        partial = torch.nn.functional.pad(partial, (0, pad_w, 0, pad_h), value=0.0)
 
-    out.copy_(result)
+    # Reshape into blocks, apply per-block scale, then reshape back
+    blocked = partial.reshape(num_blocks_h, block_len, num_blocks_w, block_len)
+    scale_2d = scale.reshape(num_blocks_h, num_blocks_w)[:, None, :, None]
+    scaled = blocked * scale_2d
+    result = scaled.reshape(num_blocks_h * block_len, num_blocks_w * block_len)
+
+    # Trim padding and copy to output
+    out.copy_(result[:h, :w])
