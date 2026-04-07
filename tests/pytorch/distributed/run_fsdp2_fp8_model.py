@@ -198,7 +198,8 @@ def _train(args):
         model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)
     # Move the model to the correct device
     if not args.memory_profile and not args.profile:
-        model.load_state_dict(torch.load('fsdp_model.pth'))
+        # weights_only = False when we have fp8 param in state dict
+        model.load_state_dict(torch.load('fsdp_model.pth', weights_only=not args.quantized_init))
     model.to(device)
 
     # Creating a DeviceMesh for fully_shard
@@ -237,7 +238,7 @@ def _train(args):
         model = DDP(model, device_ids=[LOCAL_RANK])
 
     if args.quantized_init:
-        optimizer =  te.optimizers.FusedAdam(model.parameters(), lr=1e-3, master_weights=True, use_decoupled_grad=True)
+        optimizer =  te.optimizers.FusedAdam(model.parameters(), lr=1e-3, master_weights=True)
     else:
         optimizer =  te.optimizers.FusedAdam(model.parameters(), lr=1e-3)
 

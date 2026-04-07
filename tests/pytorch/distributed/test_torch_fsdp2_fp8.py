@@ -11,7 +11,8 @@ from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 import torch
 from run_fsdp2_fp8_model import SimpleNet
-
+from transformer_engine.pytorch.quantization import quantized_model_init
+from transformer_engine.common.recipe import Float8CurrentScaling, DelayedScaling, MXFP8BlockScaling
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
@@ -75,8 +76,12 @@ def _run_test(quantized_init, autocast, recipe):
     rtol = 0
     # Use relaxed tolerance when FSDP2 and DDP are not guaranteed to be bit-identical:
     #
-    # - quantized_init=True: After each optimizer step, FP8 weights are re-quantized
-    #   from FP32 master weights. Hence we use a relaxed tolerance.
+    # - quantized_init=True: With FSDP2, the FP8 Adam optimizer
+    #   re-quantizes FP32 master weights back to FP8 using a scale derived from
+    #   the previous iteration's shard-local max_abs (each rank only sees its
+    #   weight shard). In DDP, the same scale is derived from the full tensor's
+    #   max_abs. This scale difference causes different FP8 rounding, which
+    #   compounds over iterations. Hence we use a relaxed tolerance.
     #
     # - No FP8 (quantized_init=False, autocast=False): gradient reduction order differs
     #   (all-reduce vs reduce-scatter), so float non-associativity produces last-bit
@@ -134,7 +139,12 @@ def test_distributed(quantized_init, autocast, recipe):
         torch.save(input_data.cpu(), input_path)
         print("Generated and saved shared input tensor.")
 
-    model = SimpleNet(input_size, 2048, 2048)
+    if quantized_init:
+        fp8_recipe = {"delayed": DelayedScaling(), "current": Float8CurrentScaling(), "mxfp8": MXFP8BlockScaling()}[recipe]
+        with quantized_model_init(enabled=True, recipe=fp8_recipe):
+            model = SimpleNet(input_size, 2048, 2048)
+    else:
+        model = SimpleNet(input_size, 2048, 2048)
     torch.save(model.state_dict(), 'fsdp_model.pth')
 
     if torch.cuda.device_count() < 4:

@@ -1054,7 +1054,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fp8_enabled = self.fp8 or self.fp8_calibration
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
 
-        if IS_HIP_EXTENSION and not FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 and hasattr(self, 'use_fsdp2') and self.use_fsdp2:  
+        if IS_HIP_EXTENSION and not self.primary_weights_in_fp8 and not FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 and hasattr(self, 'use_fsdp2') and self.use_fsdp2:  
             FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 = True 
 
         if self.fp8_parameters or fp8_enabled:
