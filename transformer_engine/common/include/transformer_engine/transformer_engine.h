@@ -565,6 +565,17 @@ enum class DType {
   kNumTypes
 };
 
+#ifdef USE_ROCM
+/*! \brief Check if TE datatype is FP16
+ *
+ * Return true if TE datatype is FP16
+ *  \param[in] DType      TE Datatype of interest
+ */
+inline bool is_fp16_dtype(const DType t) {
+  return t == DType::kFloat16 || t == DType::kBFloat16;
+}
+#endif
+
 /*! \brief Check if TE datatype is FP8
  *
  * Return true if TE datatype is FP8
