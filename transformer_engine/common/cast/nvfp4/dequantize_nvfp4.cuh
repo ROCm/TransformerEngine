@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -59,10 +61,10 @@ __global__ void __launch_bounds__(512)
   fp8e4m3 scale = scales[my_scale_index];
   // NVFP4 may reach this path with scale present but no separate amax buffer.
   // Use 1.0f as the neutral fallback when tensor_amax is not provided on HIP.
-  float amax = 1.0f;
 #ifndef __HIP_PLATFORM_AMD__
-  amax = *tensor_amax;
+  float amax = *tensor_amax;
 #else
+  float amax = 1.0f;
   if (tensor_amax != nullptr) {
     amax = *tensor_amax;
   }
