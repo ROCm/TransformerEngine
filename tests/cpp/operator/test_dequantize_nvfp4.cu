@@ -210,8 +210,6 @@ void run_single_case(const std::string& case_name,
                      cudaMemcpyHostToDevice);
     ASSERT_EQ(err, cudaSuccess) << case_name << ": " << cudaGetErrorString(err);
 
-    input.set_scale(amax);
-
     nvte_dequantize(input.data(), output.data(), 0);
 
     cudaDeviceSynchronize();
@@ -305,6 +303,9 @@ void performTest(const size_t rows, const size_t cols, DType otype) {
                                         gen,
                                         finite_nonneg_e4m3_dis);
 
+    // With the current test_common NVFP4 helper path on ROCm, there is no direct
+    // way to populate a separate global amax buffer for dequant, so this test
+    // explicitly covers the HIP nullptr -> 1.0f fallback path for now.
     const float amax = 1.0f;
 
     run_single_case<OutputType>("rowwise_1d_dequant",
