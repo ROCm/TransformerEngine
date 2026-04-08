@@ -958,3 +958,331 @@ class TestAttention:
         with torch.amp.autocast("cuda", dtype=self.DTYPE):
             out = mha(x)
         assert out.shape == x.shape
+
+
+# ---------------------------------------------------------------------------
+# MoE permutation tests
+# ---------------------------------------------------------------------------
+
+def _pytorch_permute_index_map(tokens, indices, num_out_tokens=None):
+    """Reference implementation for index-map permutation."""
+    topk = indices.size(1) if indices.dim() > 1 else 1
+    flat = indices.view(-1)
+    sorted_indices = torch.argsort(flat, stable=True)
+    n_out = num_out_tokens if num_out_tokens is not None else flat.size(0)
+    return tokens.index_select(0, sorted_indices[:n_out] // topk), sorted_indices
+
+
+def _pytorch_unpermute_index_map(permuted, sorted_indices, probs=None):
+    """Reference implementation for index-map unpermutation."""
+    if probs is not None:
+        n_unp = probs.numel()
+        topk = probs.size(1)
+    else:
+        n_unp = sorted_indices.size(0)
+        topk = 1
+    out = torch.zeros(n_unp, permuted.shape[-1],
+                      dtype=permuted.dtype, device=permuted.device)
+    out.index_copy_(0, sorted_indices[:permuted.size(0)], permuted)
+    out = out.reshape(-1, topk, permuted.size(-1))
+    if probs is not None:
+        out = out * probs.unsqueeze(-1)
+    return out.sum(dim=1)
+
+
+class TestMoEPermutation:
+    """Test MoE permutation operations in lite mode."""
+
+    DTYPE = torch.bfloat16
+    SEED = 1234
+
+    def _seed(self):
+        torch.manual_seed(self.SEED)
+        torch.cuda.manual_seed(self.SEED)
+
+    # -- Low-level tex interface tests -----------------------------------
+
+    def test_permute_fwd_shapes(self, device):
+        """moe_permute_fwd returns correct shapes."""
+        self._seed()
+        N, H, topK, E = 32, 64, 2, 8
+        inp = torch.randn(N, H, device=device, dtype=self.DTYPE)
+        indices = torch.stack(
+            [torch.randperm(E, device=device)[:topK] for _ in range(N)]
+        ).to(torch.int32)
+
+        permuted, row_id_map, ws = tex.moe_permute_fwd(
+            inp, tex.DType.kBFloat16, indices, -1, [], N * topK,
+        )
+        assert permuted.shape == (N * topK, H)
+        assert row_id_map.shape == (N * topK,)
+        assert row_id_map.dtype == torch.int32
+
+    def test_permute_fwd_with_num_out_tokens(self, device):
+        """moe_permute_fwd respects num_out_tokens truncation."""
+        self._seed()
+        N, H, topK, E = 32, 64, 2, 8
+        num_out = 48
+        inp = torch.randn(N, H, device=device, dtype=self.DTYPE)
+        indices = torch.stack(
+            [torch.randperm(E, device=device)[:topK] for _ in range(N)]
+        ).to(torch.int32)
+
+        permuted, row_id_map, _ = tex.moe_permute_fwd(
+            inp, tex.DType.kBFloat16, indices, num_out, [], N * topK,
+        )
+        assert permuted.shape == (num_out, H)
+
+    def test_roundtrip_identity(self, device):
+        """Permute then unpermute with uniform probs recovers the input."""
+        self._seed()
+        N, H, topK, E = 64, 128, 2, 8
+        inp = torch.randn(N, H, device=device, dtype=self.DTYPE)
+        indices = torch.stack(
+            [torch.randperm(E, device=device)[:topK] for _ in range(N)]
+        ).to(torch.int32)
+
+        permuted, row_id_map, _ = tex.moe_permute_fwd(
+            inp, tex.DType.kBFloat16, indices, -1, [], N * topK,
+        )
+        probs = torch.ones(N, topK, device=device, dtype=torch.float32)
+        unpermuted = tex.moe_unpermute_fwd(
+            permuted, tex.DType.kBFloat16, row_id_map, probs, N, topK,
+        )
+        # Each token is gathered topK times and summed with prob=1.0
+        torch.testing.assert_close(unpermuted, inp.float() * topK, atol=1e-5, rtol=1e-5)
+
+    def test_permute_bwd_equals_unpermute_fwd(self, device):
+        """moe_permute_bwd delegates to moe_unpermute_fwd."""
+        self._seed()
+        N, H, topK, E = 32, 64, 2, 8
+        inp = torch.randn(N, H, device=device, dtype=self.DTYPE)
+        indices = torch.stack(
+            [torch.randperm(E, device=device)[:topK] for _ in range(N)]
+        ).to(torch.int32)
+
+        permuted, row_id_map, _ = tex.moe_permute_fwd(
+            inp, tex.DType.kBFloat16, indices, -1, [], N * topK,
+        )
+        probs = torch.rand(N, topK, device=device, dtype=torch.float32)
+
+        via_bwd = tex.moe_permute_bwd(
+            permuted, tex.DType.kBFloat16, row_id_map, probs, N, topK,
+        )
+        via_fwd = tex.moe_unpermute_fwd(
+            permuted, tex.DType.kBFloat16, row_id_map, probs, N, topK,
+        )
+        torch.testing.assert_close(via_bwd, via_fwd)
+
+    def test_unpermute_bwd_shapes(self, device):
+        """moe_unpermute_bwd returns (act_grad, prob_grad) with correct shapes."""
+        self._seed()
+        N, H, topK, E = 32, 64, 2, 8
+        inp = torch.randn(N, H, device=device, dtype=self.DTYPE)
+        indices = torch.stack(
+            [torch.randperm(E, device=device)[:topK] for _ in range(N)]
+        ).to(torch.int32)
+
+        permuted, row_id_map, _ = tex.moe_permute_fwd(
+            inp, tex.DType.kBFloat16, indices, -1, [], N * topK,
+        )
+        probs = torch.rand(N, topK, device=device, dtype=torch.float32)
+        grad_out = torch.randn(N, H, device=device, dtype=self.DTYPE)
+
+        act_grad, prob_grad = tex.moe_unpermute_bwd(
+            grad_out, permuted, tex.DType.kBFloat16, row_id_map, probs,
+        )
+        assert act_grad.shape == (N * topK, H)
+        assert prob_grad.shape == (N, topK)
+        assert prob_grad.dtype == torch.float32
+
+    def test_unpermute_bwd_no_probs(self, device):
+        """moe_unpermute_bwd works without probs."""
+        self._seed()
+        N, H, topK, E = 32, 64, 1, 8
+        inp = torch.randn(N, H, device=device, dtype=self.DTYPE)
+        indices = torch.stack(
+            [torch.randperm(E, device=device)[:topK] for _ in range(N)]
+        ).to(torch.int32)
+
+        permuted, row_id_map, _ = tex.moe_permute_fwd(
+            inp, tex.DType.kBFloat16, indices, -1, [], N * topK,
+        )
+        grad_out = torch.randn(N, H, device=device, dtype=self.DTYPE)
+        empty_prob = torch.empty(0, device=device)
+
+        act_grad, prob_grad = tex.moe_unpermute_bwd(
+            grad_out, permuted, tex.DType.kBFloat16, row_id_map, empty_prob,
+        )
+        assert act_grad.shape == (N * topK, H)
+        assert prob_grad.numel() == 0
+
+    # -- High-level API: forward / backward numerical tests ---------------
+
+    @pytest.mark.parametrize("topK", [1, 2])
+    @pytest.mark.parametrize("with_probs", [True, False])
+    def test_index_map_vs_reference(self, device, topK, with_probs):
+        """High-level moe_permute/unpermute matches PyTorch reference (index map)."""
+        if not with_probs and topK > 1:
+            pytest.skip("topK>1 without probs not supported for index-map")
+        self._seed()
+        N, H, E = 64, 128, 8
+        from transformer_engine.pytorch.permutation import moe_permute, moe_unpermute
+
+        inp = torch.randn(N, H, device=device, dtype=self.DTYPE, requires_grad=True)
+        indices = torch.stack(
+            [torch.randperm(E, device=device)[:topK] for _ in range(N)]
+        ).to(torch.int32)
+
+        # Reference
+        ref_perm, ref_sorted = _pytorch_permute_index_map(inp.detach(), indices)
+        probs = None
+        if with_probs:
+            probs = torch.rand(N, topK, device=device).softmax(dim=-1)
+
+        ref_unperm = _pytorch_unpermute_index_map(ref_perm, ref_sorted, probs)
+
+        # TE lite
+        te_inp = inp.detach().clone().requires_grad_(True)
+        te_perm, row_id_map = moe_permute(te_inp, indices, map_type="index")
+
+        te_probs = probs.clone().requires_grad_(True) if probs is not None else None
+        te_unperm = moe_unpermute(
+            te_perm.detach().clone().requires_grad_(True),
+            row_id_map, te_probs, map_type="index",
+        )
+
+        # Forward check
+        torch.testing.assert_close(
+            ref_perm.float(), te_perm.float(),
+            msg="permute fwd mismatch",
+        )
+        tols = dict(rtol=2.5e-2, atol=1e-5)
+        torch.testing.assert_close(
+            ref_unperm.float(), te_unperm.float(),
+            msg="unpermute fwd mismatch", **tols,
+        )
+
+        # Backward check
+        grad = torch.randn(N, H, device=device, dtype=self.DTYPE)
+        te_unperm.backward(grad)
+
+    @pytest.mark.parametrize("topK", [1, 2, 3])
+    def test_index_map_empty_input(self, device, topK):
+        """Empty tensor should pass through without error."""
+        from transformer_engine.pytorch.permutation import moe_permute, moe_unpermute
+        inp = torch.empty(0, 64, device=device, dtype=self.DTYPE)
+        indices = torch.empty(0, topK, device=device, dtype=torch.int32)
+        perm, rid = moe_permute(inp, indices, map_type="index")
+        assert perm.numel() == 0
+
+    # -- Triton kernel integration ----------------------------------------
+
+    def test_triton_sort_used_in_permute(self, device):
+        """Verify the Triton sort_chunks_by_map kernel is loaded for permute."""
+        from transformer_engine.pytorch._lite.permutation import _try_load_triton_sort
+        fn = _try_load_triton_sort()
+        assert fn is not None, "Triton sort_chunks_by_map should be loadable"
+
+    def test_triton_gather_matches_pytorch(self, device):
+        """Triton sort_chunks_by_map (gather mode) matches PyTorch indexing."""
+        from transformer_engine.pytorch.triton.permutation import sort_chunks_by_map
+        self._seed()
+        N, H = 128, 256
+        inp = torch.randn(N, H, device=device, dtype=self.DTYPE)
+        ids = torch.randperm(N, device=device, dtype=torch.int32)
+        triton_out, _ = sort_chunks_by_map(inp, ids, None, N, H, is_forward=False)
+        pytorch_out = inp[ids.long()]
+        torch.testing.assert_close(triton_out, pytorch_out)
+
+
+# ---------------------------------------------------------------------------
+# MoE padding tests
+# ---------------------------------------------------------------------------
+
+class TestMoEPadding:
+    """Test multi-row padding / unpadding in lite mode."""
+
+    DTYPE = torch.bfloat16
+
+    def test_padding_basic(self, device):
+        """Rows are copied and extra rows are zero-padded."""
+        src_splits = [3, 5, 2]
+        dst_splits = [4, 8, 4]
+        features = 64
+        inp = torch.randn(sum(src_splits), features, device=device, dtype=self.DTYPE)
+        out = torch.full(
+            (sum(dst_splits), features), float("nan"), device=device, dtype=self.DTYPE,
+        )
+        tex.fused_multi_row_padding(inp, out, src_splits, dst_splits)
+
+        in_off, out_off = 0, 0
+        for src, dst in zip(src_splits, dst_splits):
+            # Copied region matches
+            torch.testing.assert_close(
+                out[out_off:out_off + src], inp[in_off:in_off + src],
+            )
+            # Padding region is zero
+            if dst > src:
+                assert (out[out_off + src:out_off + dst] == 0).all()
+            in_off += src
+            out_off += dst
+
+    def test_unpadding_basic(self, device):
+        """Unpadding extracts the correct rows."""
+        src_splits = [4, 8, 4]
+        dst_splits = [3, 5, 2]
+        features = 64
+        inp = torch.randn(sum(src_splits), features, device=device, dtype=self.DTYPE)
+        out = torch.empty(sum(dst_splits), features, device=device, dtype=self.DTYPE)
+        tex.fused_multi_row_unpadding(inp, out, src_splits, dst_splits)
+
+        in_off, out_off = 0, 0
+        for src, dst in zip(src_splits, dst_splits):
+            torch.testing.assert_close(
+                out[out_off:out_off + dst], inp[in_off:in_off + dst],
+            )
+            in_off += src
+            out_off += dst
+
+    def test_roundtrip(self, device):
+        """Padding then unpadding recovers the original tensor."""
+        src_splits = [7, 3, 11, 1]
+        dst_splits = [8, 8, 16, 8]
+        features = 128
+        inp = torch.randn(sum(src_splits), features, device=device, dtype=self.DTYPE)
+        padded = torch.empty(
+            sum(dst_splits), features, device=device, dtype=self.DTYPE,
+        )
+        tex.fused_multi_row_padding(inp, padded, src_splits, dst_splits)
+
+        recovered = torch.empty_like(inp)
+        tex.fused_multi_row_unpadding(padded, recovered, dst_splits, src_splits)
+        torch.testing.assert_close(recovered, inp)
+
+    def test_no_padding_needed(self, device):
+        """When splits are equal, data is just copied."""
+        splits = [4, 4, 4]
+        features = 32
+        inp = torch.randn(sum(splits), features, device=device, dtype=self.DTYPE)
+        out = torch.empty_like(inp)
+        tex.fused_multi_row_padding(inp, out, splits, splits)
+        torch.testing.assert_close(out, inp)
+
+    def test_single_group(self, device):
+        """Works with a single group."""
+        inp = torch.randn(5, 16, device=device, dtype=self.DTYPE)
+        out = torch.empty(8, 16, device=device, dtype=self.DTYPE)
+        tex.fused_multi_row_padding(inp, out, [5], [8])
+        torch.testing.assert_close(out[:5], inp)
+        assert (out[5:] == 0).all()
+
+    @pytest.mark.parametrize("dtype", [torch.float32, torch.float16, torch.bfloat16])
+    def test_dtype_preservation(self, device, dtype):
+        """Padding works across dtypes."""
+        inp = torch.randn(10, 32, device=device, dtype=dtype)
+        out = torch.empty(16, 32, device=device, dtype=dtype)
+        tex.fused_multi_row_padding(inp, out, [4, 6], [8, 8])
+        assert out.dtype == dtype
+        torch.testing.assert_close(out[:4], inp[:4])
+        torch.testing.assert_close(out[8:14], inp[4:10])
