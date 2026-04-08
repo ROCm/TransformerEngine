@@ -890,11 +890,11 @@ def te_dequantize_mxfp8_triton(input, dtype):
     fp8_dtype = input_metadata["fp8_dtype"]
     scale_M, scale_N = scale_inv_ptr.shape
     dtype = te_dtype_to_torch_dtype(dtype)
-    out = torch.zeros(input.shape, dtype=dtype, device=x_ptr.device)
+    out = torch.empty(input.shape, dtype=dtype, device=x_ptr.device)
 
     BLOCK_X = 64
     BLOCK_Y = 64
-    GROUP_Y = 4
+    GROUP_Y = MXFP8_BLOCK_SCALING_SIZE
     tl_dtype = te_dtype_to_triton_dtype(fp8_dtype)
 
     grid = lambda META: (triton.cdiv(num_rows, META['BLOCK_Y']) * triton.cdiv(row_length, META['BLOCK_X']),)

@@ -133,23 +133,17 @@ else()
     message(FATAL_ERROR "This project requires the Ninja build system. Install it using 'pip install ninja'.")
   endif()
 
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
+
   # Disable Asserts In Code (Can't use asserts on HIP stack.)
   add_definitions(-DNDEBUG)
   add_definitions(-DUSE_ROCM)
-
-  if(NOT DEFINED ENV{NVTE_ROCM_ARCH})
-    SET(CMAKE_HIP_ARCHITECTURES gfx942 gfx950)
-  else()
-    SET(CMAKE_HIP_ARCHITECTURES $ENV{NVTE_ROCM_ARCH})
-  endif()
 
   # build error will be dup-ed parallel-jobs times
   # set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -parallel-jobs=4")
   if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -g")
   endif()
-
-  list(APPEND CMAKE_MODULE_PATH "/opt/rocm")
 endif()
 
 set(message_line "-------------------------------------------------------------")
@@ -174,6 +168,9 @@ set(transformer_engine_cuda_arch_specific_sources)
 # Source files in both cuda and rocm
 list(APPEND transformer_engine_cpp_sources
      transformer_engine.cpp
+     comm_gemm_overlap/userbuffers/ipcsocket.cc
+     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+     comm_gemm_overlap/comm_gemm_overlap.cpp
      gemm/config.cpp
      normalization/common.cpp
      normalization/layernorm/ln_api.cpp
@@ -185,8 +182,8 @@ list(APPEND transformer_engine_cpp_sources
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
+     comm_gemm_overlap/userbuffers/userbuffers.cu
      multi_tensor/adam.cu
-     multi_tensor/compute_scale.cu
      multi_tensor/l2norm.cu
      multi_tensor/scale.cu
      multi_tensor/sgd.cu
@@ -216,52 +213,57 @@ list(APPEND transformer_engine_cuda_sources
      fused_router/fused_topk_with_score_function.cu
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
-     recipe/fp8_block_scaling.cu)
+     recipe/fp8_block_scaling.cu
+     swizzle/swizzle.cu)
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
-     cast/cast.cu
      activation/gelu.cu
      activation/relu.cu
-     activation/swiglu.cu)
+     activation/swiglu.cu
+     cast/cast.cu
+     multi_tensor/compute_scale.cu
+     recipe/mxfp8_scaling.cu
+     transpose/quantize_transpose_vector_blockwise_fp4.cu)
 
 if(USE_CUDA)
 #NV specific source codes
     list(APPEND transformer_engine_cpp_sources
         cudnn_utils.cpp
         fused_attn/fused_attn.cpp
-        util/cuda_nvml.cpp
-        comm_gemm_overlap/userbuffers/ipcsocket.cc
-        comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-        comm_gemm_overlap/comm_gemm_overlap.cpp)
+        util/cuda_nvml.cpp)
     list(APPEND transformer_engine_cuda_sources
         transpose/quantize_transpose_vector_blockwise.cu
         fused_attn/fused_attn_f16_max512_seqlen.cu
         fused_attn/fused_attn_f16_arbitrary_seqlen.cu
         fused_attn/fused_attn_fp8.cu
         fused_attn/utils.cu
-        swizzle/swizzle.cu
         swizzle/swizzle_block_scaling.cu
-        recipe/nvfp4.cu
-        comm_gemm_overlap/userbuffers/userbuffers.cu)
+        recipe/nvfp4.cu)
     list(APPEND transformer_engine_cuda_arch_specific_sources
         gemm/cutlass_grouped_gemm.cu
+        hadamard_transform/group_hadamard_transform.cu
         transpose/quantize_transpose_square_blockwise.cu
-        transpose/quantize_transpose_vector_blockwise_fp4.cu
         hadamard_transform/hadamard_transform.cu
-        hadamard_transform/hadamard_transform_cast_fusion.cu)
+        hadamard_transform/hadamard_transform_cast_fusion.cu
+        hadamard_transform/group_hadamard_transform_cast_fusion.cu
+        hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
+        transpose/quantize_transpose_square_blockwise.cu
+        transpose/quantize_transpose_vector_blockwise_fp4.cu)
 else()
 #ROCm specific source codes
     list(APPEND transformer_engine_cpp_sources
+        comm_gemm_overlap/rocm_comm_gemm_overlap.cpp
         fused_attn_rocm/fused_attn.cpp
         gemm/rocm_gemm.cu
-        gemm/ck_grouped_gemm.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp
         amd_detail/system.cpp)
     list(APPEND transformer_engine_cuda_sources
         fused_attn_rocm/fused_attn_aotriton.cpp
         fused_attn_rocm/fused_attn_ck.cpp
         fused_attn_rocm/utils.cpp)
 endif()
-
 
 # Compiling the files with the worst compilation time first to hopefully overlap
 # better with the faster-compiling cpp files
@@ -322,18 +324,34 @@ else()
   message(STATUS "nvte hipified sources: ${te_hip_sources}")
 
   add_library(transformer_engine SHARED ${te_hip_sources})
+
+  # Workaround for TheRock installation that moved some headers from system-wide location
+  # to rocm_sysdeps but missing it in the default include path.
+  target_include_directories(transformer_engine SYSTEM PRIVATE "${ROCM_PATH}/lib/rocm_sysdeps/include")
 endif()
 
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 if (USE_CUDA)
-# CUTLASS kernels require SM90a and cause hang in debug build
+# Grouped GEMM kernels require SM90a
 set_property(
   SOURCE gemm/cutlass_grouped_gemm.cu
   APPEND
   PROPERTY
-  COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a;-g0")
+  COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a")
+
+# CUTLASS kernels could cause hang in debug build
+set(CUTLASS_KERNEL_SOURCES
+    gemm/cutlass_grouped_gemm.cu
+    hadamard_transform/group_hadamard_transform_cast_fusion.cu
+    hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
+    hadamard_transform/hadamard_transform_cast_fusion.cu)
+set_property(
+  SOURCE ${CUTLASS_KERNEL_SOURCES}
+  APPEND
+  PROPERTY
+  COMPILE_OPTIONS "-g0;-dopt=on")
 else()
   set(CK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/aiter/3rdparty/composable_kernel)
   target_include_directories(transformer_engine PRIVATE ${CK_ROOT}/include)
@@ -354,16 +372,22 @@ target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_
 target_include_directories(transformer_engine PRIVATE
                           ${CUTLASS_INCLUDE_DIR}
                           ${CUTLASS_TOOLS_INCLUDE_DIR})
+endif()
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
+# Changed
 option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
 if (NVTE_UB_WITH_MPI)
-    find_package(MPI REQUIRED)
-    target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
-    target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
+    # OpenMPI C++ headers are deprecated -- flag unused w/ MPICH
+    add_definitions(-DOMPI_SKIP_MPICXX)
+    
+    target_include_directories(transformer_engine PRIVATE "$ENV{MPI_HOME}/include")
+    target_link_directories(transformer_engine PRIVATE "$ENV{MPI_HOME}/lib")
+    target_link_libraries(transformer_engine PUBLIC mpi)
     target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
 endif()
 
+if(USE_CUDA)
 option(NVTE_ENABLE_NVSHMEM "Compile with NVSHMEM library" OFF)
 if (NVTE_ENABLE_NVSHMEM)
     add_subdirectory(nvshmem_api)
@@ -543,7 +567,7 @@ endif()
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads ${BUILD_THREADS_PER_JOB}")
 message(STATUS "Threads per parallel build job: ${BUILD_THREADS_PER_JOB}")
 else()
-  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3")
+  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3 -fopenmp")
   set(HIP_HCC_FLAGS "${CMAKE_HIP_FLAGS} -mavx2 -mf16c -mfma -std=c++17")
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
@@ -557,11 +581,6 @@ endif()
 install(TARGETS transformer_engine DESTINATION .)
 if (USE_ROCM)
   set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
-  if("$ENV{ROCM_PATH}" STREQUAL "")
-    set(ROCM_PATH "/opt/rocm")
-  else()
-    set(ROCM_PATH "$ENV{ROCM_PATH}")
-  endif()
   file(READ "${ROCM_PATH}/.info/version" ROCM_VER)
   string(STRIP "${ROCM_VER}" ROCM_VER)
   string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER}")

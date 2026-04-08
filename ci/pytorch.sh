@@ -49,7 +49,7 @@ run_test_config(){
     fi
     run 1 test_cuda_graphs.py
     run_default_fa 1 test_deferred_init.py
-    run_default_fa 1 test_float8tensor.py
+    run_default_fa 1 test_quantized_tensor.py
     run_default_fa 1 test_float8_current_scaling_exact.py
     test $_fus_attn = auto -o $_fus_attn = ck && run 1 test_cpu_offloading.py
     test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 NVTE_CPU_OFFLOAD_V1=1 run 3 test_cpu_offloading_v1.py
@@ -59,7 +59,7 @@ run_test_config(){
     run_default_fa 1 test_gemm_autotune.py
     run 1 test_gqa.py
     run 1 test_jit.py
-    run_default_fa 1 test_multi_tensor.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py
@@ -95,6 +95,7 @@ run_test_config_mgpu(){
     run_default_fa 1 test_gemm_sm_count.py
     run_default_fa 3 test_sanity_import.py
     run_default_fa 3 distributed/test_cast_master_weights_to_fp8.py
+    run_default_fa 3 distributed/test_comm_gemm_overlap.py
     run_default_fa 2 distributed/test_fusible_ops.py
     run_default_fa 2 distributed/test_numerics.py
     run_default_fa 1 distributed/test_torch_fsdp2.py
