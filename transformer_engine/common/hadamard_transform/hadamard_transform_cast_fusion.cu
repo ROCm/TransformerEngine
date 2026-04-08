@@ -814,8 +814,45 @@ __device__ __forceinline__ fp4e2m1x4 cvt_fp32_to_fp4_4x(const float2 in01, const
         lo | (static_cast<__hip_fp4x4_storage_t>(hi) << 8));
     return result;
 #else
-    NVTE_DEVICE_ERROR("FP4 stochastic rounding on AMDGPU requires gfx950 or later.");
-    return fp4e2m1x4{};
+    // Software stochastic rounding fallback for AMD GPUs without native
+    // FP4 SR instructions (e.g. gfx942).
+    //
+    // FP4 E2M1 has 8 non-negative magnitudes whose 3-bit codes happen to
+    // be sorted: {0->0.0, 1->0.5, 2->1.0, 3->1.5, 4->2.0, 5->3.0,
+    //             6->4.0, 7->6.0}.
+    //
+    // For each value we:
+    //  1. Clamp |x| into [0, 6] (the FP4 representable range).
+    //  2. Find the floor index fi in the FP4 grid via branchless
+    //     comparisons (sum of (|x| >= threshold) for each level).
+    //  3. Compute the fractional position within [kV[fi], kV[ci]]
+    //     where ci = min(fi+1, 7) is the ceiling index.
+    //  4. Draw a uniform random value r in [0,1) from 8 bits of rbits.
+    //  5. Round up to ci if r < frac, otherwise keep fi.
+    //     This gives E[round(x)] = x (unbiased).
+    //  6. Set the sign bit (bit 3) if the original value was negative.
+    {
+      constexpr float kV[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+      const float vals[4] = {in01.x, in01.y, in23.x, in23.y};
+      __hip_fp4_storage_t q[4];
+#pragma unroll
+      for (int i = 0; i < 4; ++i) {
+        const float av = fminf(fabsf(vals[i]), 6.0f);
+        const int fi = int(av >= 0.5f) + int(av >= 1.0f) + int(av >= 1.5f) +
+                       int(av >= 2.0f) + int(av >= 3.0f) + int(av >= 4.0f) + int(av >= 6.0f);
+        const int ci = min(fi + 1, 7);
+        const float gap = kV[ci] - kV[fi];
+        const float frac = (gap > 0.0f) ? (av - kV[fi]) / gap : 0.0f;
+        const float r = static_cast<float>((rbits >> (8 * i)) & 0xFFu) * (1.0f / 256.0f);
+        const int ri = (r < frac) ? ci : fi;
+        q[i] = static_cast<__hip_fp4_storage_t>((vals[i] < 0.0f) ? (ri | 0x8) : ri);
+      }
+      fp4e2m1x4 result;
+      result.__x = static_cast<__hip_fp4x4_storage_t>(
+          (q[0] & 0xFu) | ((q[1] & 0xFu) << 4) |
+          ((q[2] & 0xFu) << 8) | ((q[3] & 0xFu) << 12));
+      return result;
+    }
 #endif
   } else {
     const __hip_fp4_storage_t q0 =
