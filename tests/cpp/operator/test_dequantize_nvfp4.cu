@@ -101,10 +101,10 @@ void set_fp4_nibble(fp4e2m1* data, const size_t mathematical_idx, const uint8_t 
 
     if ((mathematical_idx % 2) == 0) {
         // set low nibble
-        raw[byte_idx] = static_cast<uint8_t>((raw[byte_idx] & 0xF0) | val);
+        raw[byte_idx] = (raw[byte_idx] & 0xF0) | val;
     } else {
         // set high nibble
-        raw[byte_idx] = static_cast<uint8_t>((raw[byte_idx] & 0x0F) | (val << 4));
+        raw[byte_idx] = (raw[byte_idx] & 0x0F) | (val << 4);
     }
 }
 
