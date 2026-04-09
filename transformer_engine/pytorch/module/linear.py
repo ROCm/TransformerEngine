@@ -68,6 +68,7 @@ from ..quantized_tensor import (
 )
 from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.utils import is_custom
 from ..export import is_in_onnx_export_mode, assert_warmed_up
 from ..cpu_offload import (
@@ -265,6 +266,10 @@ class _Linear(torch.autograd.Function):
                         is_fp8_activation_recompute_enabled()
                         and not in_fp8_activation_recompute_phase()
                     )
+                # NVFP4 must produce columnwise data at quantization time
+                # (no lazy transpose like Float8Tensor)
+                if not columnwise_usage and isinstance(weight_quantizer, NVFP4Quantizer):
+                    columnwise_usage = is_grad_enabled and inp.requires_grad
                 weight_quantizer.set_usage(rowwise=True, columnwise=columnwise_usage)
             elif isinstance(weight, QuantizedTensor):
                 # If weight is already quantized, no need to set quantizer states
@@ -325,7 +330,7 @@ class _Linear(torch.autograd.Function):
         # Forward GEMM
         # Note: y = x * w^T
         # ------------------------------------------------------
-        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
+        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache and hasattr(weightmat, '_transpose'):
                 assert weightmat._transpose is None or weightmat._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
 
         nvtx_range_push(f"{nvtx_label}.gemm")
@@ -1712,5 +1717,8 @@ class Linear(TransformerEngineBaseModule):
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
         if IS_HIP_EXTENSION:
-            weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
+            # NVFP4 must always produce columnwise data at quantization time
+            # (no lazy transpose like Float8Tensor), so force columnwise=True.
+            is_nvfp4 = isinstance(weight_quantizer, NVFP4Quantizer)
+            weight_quantizer.set_usage(columnwise=True if is_nvfp4 else self.keep_fp8_weight_transpose_cache)
         return [weight_quantizer]

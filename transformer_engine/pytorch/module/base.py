@@ -52,6 +52,7 @@ if IS_HIP_EXTENSION:
     from ..triton_kernels.cast import te_quantize_triton
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..utils import get_device_compute_capability, is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ...common.recipe import DelayedScaling, Recipe
@@ -1482,6 +1483,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 ):
                     reset_cache = True
             elif isinstance(out, MXFP8TensorStorage):
+                if quantizer.rowwise_usage and out._rowwise_data is None:
+                    reset_cache = True
+                elif quantizer.columnwise_usage and out._columnwise_data is None:
+                    reset_cache = True
+            elif isinstance(out, NVFP4TensorStorage):
                 if quantizer.rowwise_usage and out._rowwise_data is None:
                     reset_cache = True
                 elif quantizer.columnwise_usage and out._columnwise_data is None:
