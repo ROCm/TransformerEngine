@@ -1,0 +1,928 @@
+============================================================
+Small-Sequence Attention Benchmarks
+============================================================
+Kernels:      jax te
+Layouts:      bshd
+Seq lengths:  1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17
+Batch sizes:  2048 4096
+Heads:        32
+Head dims:    64 128 256
+GQA ratios:   1
+Modes:        fwd bwd
+Repeats:      25
+Warmups:      5
+Output:       results/small_seq_sweep_<LAYOUT>_bs_<BATCH>_hd_<DIM>_scenario_1_3_4.csv
+============================================================
+
+============================================================
+layout=bshd  batch_size=2048  head_dim=64
+  -> /myworkspace/sciforium/extended_small_seq_benchmarking/TransformerEngine/benchmark_extended_small_seq/results/small_seq_sweep_bshd_bs_2048_hd_64_scenario_1_3_4.csv
+============================================================
+  sq=skv=1
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:01<00:01,  1.84s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:02<00:00,  1.32s/it]100%|██████████| 2/2 [00:02<00:00,  1.40s/it]
+  sq=skv=2
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.57s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:04<00:00,  2.22s/it]100%|██████████| 2/2 [00:04<00:00,  2.42s/it]
+  sq=skv=3
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.63s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:05<00:00,  2.35s/it]100%|██████████| 2/2 [00:05<00:00,  2.54s/it]
+  sq=skv=4
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.65s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:05<00:00,  2.52s/it]100%|██████████| 2/2 [00:05<00:00,  2.69s/it]
+  sq=skv=5
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.62s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:05<00:00,  2.61s/it]100%|██████████| 2/2 [00:05<00:00,  2.77s/it]
+  sq=skv=6
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.68s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:12<00:00,  6.65s/it]100%|██████████| 2/2 [00:12<00:00,  6.20s/it]
+  sq=skv=7
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.49s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:13<00:00,  7.26s/it]100%|██████████| 2/2 [00:13<00:00,  6.70s/it]
+  sq=skv=8
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.59s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:06<00:00,  2.95s/it]100%|██████████| 2/2 [00:06<00:00,  3.05s/it]
+  sq=skv=9
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.63s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:06<00:00,  3.09s/it]100%|██████████| 2/2 [00:06<00:00,  3.17s/it]
+  sq=skv=10
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.63s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:06<00:00,  3.22s/it]100%|██████████| 2/2 [00:06<00:00,  3.28s/it]
+  sq=skv=11
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.58s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:07<00:00,  4.04s/it]100%|██████████| 2/2 [00:07<00:00,  3.97s/it]
+  sq=skv=12
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.49s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:06<00:00,  3.43s/it]100%|██████████| 2/2 [00:06<00:00,  3.44s/it]
+  sq=skv=13
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.64s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:07<00:00,  3.63s/it]100%|██████████| 2/2 [00:07<00:00,  3.63s/it]
+  sq=skv=14
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.66s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:07<00:00,  3.75s/it]100%|██████████| 2/2 [00:07<00:00,  3.74s/it]
+  sq=skv=15
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.64s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:07<00:00,  3.90s/it]100%|██████████| 2/2 [00:07<00:00,  3.86s/it]
+  sq=skv=16
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.47s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:25<00:00, 14.26s/it]100%|██████████| 2/2 [00:25<00:00, 12.64s/it]
+  sq=skv=17
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.10s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:07<00:00,  4.00s/it]100%|██████████| 2/2 [00:07<00:00,  3.86s/it]
+============================================================
+layout=bshd  batch_size=4096  head_dim=64
+  -> /myworkspace/sciforium/extended_small_seq_benchmarking/TransformerEngine/benchmark_extended_small_seq/results/small_seq_sweep_bshd_bs_4096_hd_64_scenario_1_3_4.csv
+============================================================
+  sq=skv=1
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.48s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:04<00:00,  2.11s/it]100%|██████████| 2/2 [00:04<00:00,  2.31s/it]
+  sq=skv=2
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.66s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:05<00:00,  2.55s/it]100%|██████████| 2/2 [00:05<00:00,  2.72s/it]
+  sq=skv=3
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.62s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:05<00:00,  2.75s/it]100%|██████████| 2/2 [00:05<00:00,  2.88s/it]
+  sq=skv=4
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.66s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:06<00:00,  3.00s/it]100%|██████████| 2/2 [00:06<00:00,  3.10s/it]
+  sq=skv=5
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.57s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:06<00:00,  3.19s/it]100%|██████████| 2/2 [00:06<00:00,  3.24s/it]
+  sq=skv=6
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.61s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:06<00:00,  3.47s/it]100%|██████████| 2/2 [00:06<00:00,  3.49s/it]
+  sq=skv=7
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.66s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:07<00:00,  3.74s/it]100%|██████████| 2/2 [00:07<00:00,  3.73s/it]
+  sq=skv=8
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.62s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:07<00:00,  3.94s/it]100%|██████████| 2/2 [00:07<00:00,  3.90s/it]
+  sq=skv=9
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.68s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:08<00:00,  4.22s/it]100%|██████████| 2/2 [00:08<00:00,  4.14s/it]
+  sq=skv=10
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.63s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:08<00:00,  4.44s/it]100%|██████████| 2/2 [00:08<00:00,  4.31s/it]
+  sq=skv=11
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.64s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:09<00:00,  4.70s/it]100%|██████████| 2/2 [00:09<00:00,  4.54s/it]
+  sq=skv=12
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.69s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:09<00:00,  5.02s/it]100%|██████████| 2/2 [00:09<00:00,  4.83s/it]
+  sq=skv=13
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.61s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:10<00:00,  5.25s/it]100%|██████████| 2/2 [00:10<00:00,  5.00s/it]
+  sq=skv=14
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.71s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:10<00:00,  5.54s/it]100%|██████████| 2/2 [00:10<00:00,  5.26s/it]
+  sq=skv=15
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.66s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:44<00:00, 25.46s/it]100%|██████████| 2/2 [00:44<00:00, 22.19s/it]
+  sq=skv=16
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.75s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [01:35<00:00, 54.76s/it]100%|██████████| 2/2 [01:35<00:00, 47.56s/it]
+  sq=skv=17
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:07<00:07,  7.00s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_odo_bf16_group.co GetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter28fmha_bwd_hd64_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_bf16_causal_a32_rtna_pssk_group.co GetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE
+[aiter] hipModuleGetFunction: _ZN5aiter55fmha_bwd_hd64_bf16_causal_a32_rtna_pssk_group_recompileE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd64_dq_convert_bf16_group.co GetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter35fmha_bwd_hd64_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [01:40<00:00, 58.06s/it]100%|██████████| 2/2 [01:40<00:00, 50.40s/it]
+============================================================
+layout=bshd  batch_size=2048  head_dim=128
+  -> /myworkspace/sciforium/extended_small_seq_benchmarking/TransformerEngine/benchmark_extended_small_seq/results/small_seq_sweep_bshd_bs_2048_hd_128_scenario_1_3_4.csv
+============================================================
+  sq=skv=1
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.46s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:04<00:00,  2.06s/it]100%|██████████| 2/2 [00:04<00:00,  2.27s/it]
+  sq=skv=2
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.68s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:06<00:00,  3.03s/it]100%|██████████| 2/2 [00:06<00:00,  3.12s/it]
+  sq=skv=3
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.66s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:05<00:00,  2.74s/it]100%|██████████| 2/2 [00:05<00:00,  2.88s/it]
+  sq=skv=4
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.62s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:06<00:00,  2.92s/it]100%|██████████| 2/2 [00:06<00:00,  3.03s/it]
+  sq=skv=5
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.77s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:06<00:00,  3.39s/it]100%|██████████| 2/2 [00:06<00:00,  3.45s/it]
+  sq=skv=6
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.12s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:06<00:00,  3.15s/it]100%|██████████| 2/2 [00:06<00:00,  3.15s/it]
+  sq=skv=7
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.63s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:07<00:00,  3.59s/it]100%|██████████| 2/2 [00:07<00:00,  3.60s/it]
+  sq=skv=8
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.64s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:07<00:00,  3.83s/it]100%|██████████| 2/2 [00:07<00:00,  3.80s/it]
+  sq=skv=9
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.71s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:08<00:00,  4.07s/it]100%|██████████| 2/2 [00:08<00:00,  4.02s/it]
+  sq=skv=10
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.18s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:07<00:00,  4.12s/it]100%|██████████| 2/2 [00:07<00:00,  3.98s/it]
+  sq=skv=11
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.45s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:08<00:00,  4.45s/it]100%|██████████| 2/2 [00:08<00:00,  4.30s/it]
+  sq=skv=12
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.61s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:09<00:00,  4.76s/it]100%|██████████| 2/2 [00:09<00:00,  4.59s/it]
+  sq=skv=13
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.66s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:09<00:00,  5.06s/it]100%|██████████| 2/2 [00:09<00:00,  4.85s/it]
+  sq=skv=14
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.60s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:09<00:00,  5.21s/it]100%|██████████| 2/2 [00:09<00:00,  4.97s/it]
+  sq=skv=15
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.54s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:10<00:00,  5.48s/it]100%|██████████| 2/2 [00:10<00:00,  5.19s/it]
+  sq=skv=16
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.49s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:10<00:00,  5.65s/it]100%|██████████| 2/2 [00:10<00:00,  5.32s/it]
+  sq=skv=17
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.70s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:11<00:00,  6.03s/it]100%|██████████| 2/2 [00:11<00:00,  5.68s/it]
+============================================================
+layout=bshd  batch_size=4096  head_dim=128
+  -> /myworkspace/sciforium/extended_small_seq_benchmarking/TransformerEngine/benchmark_extended_small_seq/results/small_seq_sweep_bshd_bs_4096_hd_128_scenario_1_3_4.csv
+============================================================
+  sq=skv=1
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.55s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:05<00:00,  2.33s/it]100%|██████████| 2/2 [00:05<00:00,  2.51s/it]
+  sq=skv=2
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.57s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:07<00:00,  3.51s/it]100%|██████████| 2/2 [00:07<00:00,  3.52s/it]
+  sq=skv=3
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.55s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:06<00:00,  3.37s/it]100%|██████████| 2/2 [00:06<00:00,  3.40s/it]
+  sq=skv=4
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.71s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:07<00:00,  3.91s/it]100%|██████████| 2/2 [00:07<00:00,  3.88s/it]
+  sq=skv=5
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.67s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:08<00:00,  4.29s/it]100%|██████████| 2/2 [00:08<00:00,  4.20s/it]
+  sq=skv=6
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.76s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:09<00:00,  4.77s/it]100%|██████████| 2/2 [00:09<00:00,  4.62s/it]
+  sq=skv=7
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.73s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:10<00:00,  5.23s/it]100%|██████████| 2/2 [00:10<00:00,  5.01s/it]
+  sq=skv=8
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.82s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:10<00:00,  5.74s/it]100%|██████████| 2/2 [00:10<00:00,  5.46s/it]
+  sq=skv=9
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.69s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:11<00:00,  6.12s/it]100%|██████████| 2/2 [00:11<00:00,  5.76s/it]
+  sq=skv=10
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.71s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:12<00:00,  6.74s/it]100%|██████████| 2/2 [00:12<00:00,  6.29s/it]
+  sq=skv=11
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.24s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:12<00:00,  6.89s/it]100%|██████████| 2/2 [00:12<00:00,  6.34s/it]
+  sq=skv=12
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.59s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:13<00:00,  7.60s/it]100%|██████████| 2/2 [00:13<00:00,  7.00s/it]
+  sq=skv=13
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.19s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:14<00:00,  7.87s/it]100%|██████████| 2/2 [00:14<00:00,  7.17s/it]
+  sq=skv=14
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.74s/it][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:15<00:00,  8.73s/it]100%|██████████| 2/2 [00:15<00:00,  7.98s/it]
+  sq=skv=15
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.15s/it]/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (2.02GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:15<00:00,  8.75s/it]100%|██████████| 2/2 [00:15<00:00,  7.91s/it]
+  sq=skv=16
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.56s/it]/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (2.16GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:17<00:00,  9.39s/it]100%|██████████| 2/2 [00:17<00:00,  8.52s/it]
+  sq=skv=17
+  0%|          | 0/2 [00:00<?, ?it/s][aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_fwd/fwd_hd128_bf16_causal_group.co GetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter32fmha_fwd_hd128_bf16_causal_groupE Success
+ 50%|█████     | 1/2 [00:03<00:03,  3.81s/it]/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (2.29GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_odo_bf16_group.co GetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter29fmha_bwd_hd128_odo_bf16_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_bf16_causal_a32_psskddv_group.co GetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter44fmha_bwd_hd128_bf16_causal_a32_psskddv_groupE Success
+[aiter] hipModuleLoad: /opt/venv/lib/python3.11/site-packages/transformer_engine/lib/aiter/gfx950/fmha_v3_bwd/bwd_hd128_dq_convert_bf16_group.co GetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE
+[aiter] hipModuleGetFunction: _ZN5aiter36fmha_bwd_hd128_dq_convert_bf16_groupE Success
+100%|██████████| 2/2 [00:18<00:00, 10.03s/it]100%|██████████| 2/2 [00:18<00:00,  9.10s/it]
+============================================================
+layout=bshd  batch_size=2048  head_dim=256
+  -> /myworkspace/sciforium/extended_small_seq_benchmarking/TransformerEngine/benchmark_extended_small_seq/results/small_seq_sweep_bshd_bs_2048_hd_256_scenario_1_3_4.csv
+============================================================
+  sq=skv=1
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.85s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [00:12<00:00,  6.70s/it]100%|██████████| 2/2 [00:12<00:00,  6.27s/it]
+  sq=skv=2
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.22s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [00:29<00:00, 16.07s/it]100%|██████████| 2/2 [00:29<00:00, 14.59s/it]
+  sq=skv=3
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.35s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [00:38<00:00, 21.35s/it]100%|██████████| 2/2 [00:38<00:00, 19.10s/it]
+  sq=skv=4
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.36s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [00:48<00:00, 27.28s/it]100%|██████████| 2/2 [00:48<00:00, 24.14s/it]
+  sq=skv=5
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.65s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [00:58<00:00, 33.23s/it]100%|██████████| 2/2 [00:58<00:00, 29.25s/it]
+  sq=skv=6
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.44s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [01:08<00:00, 38.97s/it]100%|██████████| 2/2 [01:08<00:00, 34.09s/it]
+  sq=skv=7
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.45s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [01:18<00:00, 45.13s/it]100%|██████████| 2/2 [01:18<00:00, 39.32s/it]
+  sq=skv=8
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.44s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [01:28<00:00, 51.09s/it]100%|██████████| 2/2 [01:28<00:00, 44.39s/it]
+  sq=skv=9
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.76s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [01:38<00:00, 56.79s/it]100%|██████████| 2/2 [01:38<00:00, 49.29s/it]
+  sq=skv=10
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.59s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [01:49<00:00, 63.13s/it]100%|██████████| 2/2 [01:49<00:00, 54.65s/it]
+  sq=skv=11
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.76s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [01:59<00:00, 68.95s/it]100%|██████████| 2/2 [01:59<00:00, 59.62s/it]
+  sq=skv=12
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.69s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [02:10<00:00, 75.30s/it]100%|██████████| 2/2 [02:10<00:00, 65.01s/it]
+  sq=skv=13
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:07<00:07,  7.35s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [02:22<00:00, 82.38s/it]100%|██████████| 2/2 [02:22<00:00, 71.12s/it]
+  sq=skv=14
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.44s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [02:30<00:00, 87.10s/it]100%|██████████| 2/2 [02:30<00:00, 75.01s/it]
+  sq=skv=15
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:07<00:07,  7.26s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (2.02GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+100%|██████████| 2/2 [02:40<00:00, 93.35s/it]100%|██████████| 2/2 [02:40<00:00, 80.44s/it]
+  sq=skv=16
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.56s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (2.15GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+100%|██████████| 2/2 [02:52<00:00, 100.54s/it]100%|██████████| 2/2 [02:52<00:00, 86.44s/it] 
+  sq=skv=17
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.90s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (2.29GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+100%|██████████| 2/2 [03:00<00:00, 104.82s/it]100%|██████████| 2/2 [03:00<00:00, 90.13s/it] 
+============================================================
+layout=bshd  batch_size=4096  head_dim=256
+  -> /myworkspace/sciforium/extended_small_seq_benchmarking/TransformerEngine/benchmark_extended_small_seq/results/small_seq_sweep_bshd_bs_4096_hd_256_scenario_1_3_4.csv
+============================================================
+  sq=skv=1
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:03<00:03,  3.91s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [00:20<00:00, 11.24s/it]100%|██████████| 2/2 [00:20<00:00, 10.14s/it]
+  sq=skv=2
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.25s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [00:49<00:00, 28.18s/it]100%|██████████| 2/2 [00:49<00:00, 24.89s/it]
+  sq=skv=3
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.30s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [01:08<00:00, 38.93s/it]100%|██████████| 2/2 [01:08<00:00, 34.04s/it]
+  sq=skv=4
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.69s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [01:29<00:00, 51.45s/it]100%|██████████| 2/2 [01:29<00:00, 44.74s/it]
+  sq=skv=5
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.38s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [01:48<00:00, 62.78s/it]100%|██████████| 2/2 [01:48<00:00, 54.32s/it]
+  sq=skv=6
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.75s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [02:08<00:00, 74.20s/it]100%|██████████| 2/2 [02:08<00:00, 64.08s/it]
+  sq=skv=7
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.75s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+100%|██████████| 2/2 [02:29<00:00, 86.82s/it]100%|██████████| 2/2 [02:29<00:00, 74.81s/it]
+  sq=skv=8
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.58s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (2.15GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+100%|██████████| 2/2 [02:50<00:00, 99.14s/it]100%|██████████| 2/2 [02:50<00:00, 85.26s/it]
+  sq=skv=9
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.98s/it][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (2.42GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+100%|██████████| 2/2 [03:10<00:00, 110.60s/it]100%|██████████| 2/2 [03:10<00:00, 95.06s/it] 
+  sq=skv=10
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.79s/it]/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (2.12GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+[aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (2.69GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+100%|██████████| 2/2 [03:29<00:00, 122.16s/it]100%|██████████| 2/2 [03:29<00:00, 104.85s/it]
+  sq=skv=11
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.85s/it]/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (2.34GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+[aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (2.96GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+100%|██████████| 2/2 [03:49<00:00, 134.08s/it]100%|██████████| 2/2 [03:49<00:00, 115.00s/it]
+  sq=skv=12
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.80s/it]/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (2.56GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+[aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (3.23GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+100%|██████████| 2/2 [04:12<00:00, 147.46s/it]100%|██████████| 2/2 [04:12<00:00, 126.36s/it]
+  sq=skv=13
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:07<00:07,  7.05s/it]/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (2.79GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+[aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (3.50GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+100%|██████████| 2/2 [04:31<00:00, 158.27s/it]100%|██████████| 2/2 [04:31<00:00, 135.59s/it]
+  sq=skv=14
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.90s/it]/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (3.01GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+[aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (3.77GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+100%|██████████| 2/2 [04:51<00:00, 170.27s/it]100%|██████████| 2/2 [04:51<00:00, 145.77s/it]
+  sq=skv=15
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:07<00:07,  7.13s/it]/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (3.24GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+E0409 23:38:10.225022  991594 message_lite.cc:592] xla.gpu.CompilationResultProto exceeded maximum protobuf size of 2GB: 2235482819
+/opt/venv/lib/python3.11/site-packages/jax/_src/compiler.py:847: UserWarning: Error writing persistent compilation cache entry for 'jit__unnamed_function': JaxRuntimeError: INTERNAL: PjRtStreamExecutorClient::SerializeExecutable proto serialization failed
+  warnings.warn(
+[aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (4.04GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+100%|██████████| 2/2 [02:57<00:00, 103.39s/it]100%|██████████| 2/2 [02:57<00:00, 88.95s/it] 
+  sq=skv=16
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:06<00:06,  6.92s/it]/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (3.47GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+E0409 23:41:15.346570  994339 message_lite.cc:592] xla.gpu.CompilationResultProto exceeded maximum protobuf size of 2GB: 2399190988
+/opt/venv/lib/python3.11/site-packages/jax/_src/compiler.py:847: UserWarning: Error writing persistent compilation cache entry for 'jit__unnamed_function': JaxRuntimeError: INTERNAL: PjRtStreamExecutorClient::SerializeExecutable proto serialization failed
+  warnings.warn(
+[aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (4.30GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+E0409 23:41:39.522014  994339 message_lite.cc:592] xla.gpu.CompilationResultProto exceeded maximum protobuf size of 2GB: 2155953298
+100%|██████████| 2/2 [01:04<00:00, 36.79s/it]100%|██████████| 2/2 [01:04<00:00, 32.31s/it]
+  sq=skv=17
+  0%|          | 0/2 [00:00<?, ?it/s][aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+ 50%|█████     | 1/2 [00:07<00:07,  7.34s/it]/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (3.71GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+E0409 23:42:27.839346  996721 message_lite.cc:592] xla.gpu.CompilationResultProto exceeded maximum protobuf size of 2GB: 2564739009
+/opt/venv/lib/python3.11/site-packages/jax/_src/compiler.py:847: UserWarning: Error writing persistent compilation cache entry for 'jit__unnamed_function': JaxRuntimeError: INTERNAL: PjRtStreamExecutorClient::SerializeExecutable proto serialization failed
+  warnings.warn(
+[aiter WARNING] unsupported condition in fwd_v3!!! data type: bf16
+/opt/venv/lib/python3.11/site-packages/jax/_src/interpreters/mlir.py:1172: UserWarning: A large amount of constants were captured during lowering (4.57GB total). If this is intentional, disable this warning by setting JAX_CAPTURED_CONSTANTS_WARN_BYTES=-1. To obtain a report of where these constants were encountered, set JAX_CAPTURED_CONSTANTS_REPORT_FRAMES=-1.
+  warnings.warn(message)
+E0409 23:42:53.366041  996721 message_lite.cc:592] xla.gpu.CompilationResultProto exceeded maximum protobuf size of 2GB: 2290699407
+100%|██████████| 2/2 [01:08<00:00, 39.09s/it]100%|██████████| 2/2 [01:08<00:00, 34.33s/it]
+
+============================================================
+Complete. CSV files (one per layout x batch x head_dim):
+  /myworkspace/sciforium/extended_small_seq_benchmarking/TransformerEngine/benchmark_extended_small_seq/results/small_seq_sweep_bshd_bs_2048_hd_64_scenario_1_3_4.csv
+  /myworkspace/sciforium/extended_small_seq_benchmarking/TransformerEngine/benchmark_extended_small_seq/results/small_seq_sweep_bshd_bs_4096_hd_64_scenario_1_3_4.csv
+  /myworkspace/sciforium/extended_small_seq_benchmarking/TransformerEngine/benchmark_extended_small_seq/results/small_seq_sweep_bshd_bs_2048_hd_128_scenario_1_3_4.csv
+  /myworkspace/sciforium/extended_small_seq_benchmarking/TransformerEngine/benchmark_extended_small_seq/results/small_seq_sweep_bshd_bs_4096_hd_128_scenario_1_3_4.csv
+  /myworkspace/sciforium/extended_small_seq_benchmarking/TransformerEngine/benchmark_extended_small_seq/results/small_seq_sweep_bshd_bs_2048_hd_256_scenario_1_3_4.csv
+  /myworkspace/sciforium/extended_small_seq_benchmarking/TransformerEngine/benchmark_extended_small_seq/results/small_seq_sweep_bshd_bs_4096_hd_256_scenario_1_3_4.csv
+
+View results (example):
+  column -s, -t /myworkspace/sciforium/extended_small_seq_benchmarking/TransformerEngine/benchmark_extended_small_seq/results/small_seq_sweep_bshd_bs_2048_hd_128_scenario_1_3_4.csv
+============================================================
