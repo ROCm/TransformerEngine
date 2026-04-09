@@ -94,8 +94,8 @@ rocm_cast_transpose_kernel(const IType *__restrict__ input,
             {
 #pragma unroll
                 for (int j2 = 0; j2 < NVEC_IN; j2++) {
-                    const OType o          = static_cast<OType>(static_cast<float>(in.val[j2]) * scale);
-                    out_c.val[j2]          = o;
+                    const OType o = static_cast<OType>(static_cast<float>(in.val[j2]) * scale);
+                    out_c.val[j2] = o;
                     local_t[j2][iter].val[i2] = o;
                 }
             }
@@ -175,8 +175,6 @@ __global__ void rocm_cast_transpose_remainder_kernel(
         *scale_inv_ptr = __frcp_rn(scale);
     }
 }
-
-namespace transformer_engine::detail {
 
 template <int LOAD_SZ, int STORE_SZ, int WPT, typename IType, typename OType>
 void rocm_ct_launch(const IType *in, const float *noop,
@@ -347,4 +345,3 @@ size_t rocm_cast_transpose_dispatch(const IType *in, const float *noop,
 
     return rows_done;
 }
-}  // namespace transformer_engine::detail

@@ -17,11 +17,11 @@
 #include "../utils.cuh"
 #include "cast_transpose.h"
 
+namespace transformer_engine::detail {
+
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_cast_transpose.cuh"
 #endif  // #ifdef __HIP_PLATFORM_AMD__
-
-namespace transformer_engine::detail {
 
 namespace {
 
