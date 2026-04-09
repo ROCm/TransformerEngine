@@ -56,7 +56,7 @@ jobs:
 
   build-rocm-wheels:
     name: Build ROCm Docker image and TransformerEngine wheels
-    runs-on: linux-te-mi325-8
+    runs-on: build-only-te
 
     steps:
       - name: Checkout repository
