@@ -3043,7 +3043,16 @@ def _run_deterministic_bwd_pytorch(
         q.requires_grad_(True)
         k.requires_grad_(True)
         v.requires_grad_(True)
-        d_out = 0.001 * torch.randn(b, s, h, d, dtype=dtype, device="cuda")
+        d_out = 0.001 * torch.randn(b, s, h * d, dtype=dtype, device="cuda")
+
+        # Build attention mask for padding mask types
+        attention_mask = None
+        if "padding" in config.attn_mask_type:
+            seqlens = torch.randint(1, s, (b,), dtype=torch.int32)
+            attention_mask = torch.zeros(b, 1, 1, s, dtype=torch.bool)
+            for i in range(b):
+                attention_mask[i, 0, 0, seqlens[i]:] = True
+            attention_mask = attention_mask.to(device="cuda")
 
         block = DotProductAttention(
             config.num_heads,
@@ -3064,6 +3073,7 @@ def _run_deterministic_bwd_pytorch(
             q, k, v,
             qkv_format="bshd",
             attn_mask_type=config.attn_mask_type,
+            attention_mask=attention_mask,
         )
         out.backward(d_out)
         return (
@@ -3099,6 +3109,7 @@ def _run_deterministic_bwd_pytorch(
     "b, seq_len, h_q, h_kv, d",
     [
         pytest.param(2, 256, 8, 8, 128, id="b2_s256_MHA"),
+        pytest.param(2, 512, 8, 8, 128, id="b2_s512_MHA"),
         pytest.param(2, 2048, 8, 8, 128, id="b2_s2048_MHA"),
         pytest.param(2, 2048, 12, 4, 128, id="b2_s2048_GQA"),
     ],
@@ -3174,7 +3185,7 @@ def _run_deterministic_bwd_thd_pytorch(
         q.requires_grad_(True)
         k.requires_grad_(True)
         v.requires_grad_(True)
-        d_out = 0.001 * torch.randn(total_tokens, h, d, dtype=dtype, device="cuda")
+        d_out = 0.001 * torch.randn(total_tokens, h * d, dtype=dtype, device="cuda")
 
         block = DotProductAttention(
             config.num_heads,
