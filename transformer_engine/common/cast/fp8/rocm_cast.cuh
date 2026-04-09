@@ -70,7 +70,7 @@ rocm_cast_only_kernel(const IType *__restrict__ input,
                 memcpy(&out[0].val[e], &packed, 4);
             }
         } else
-#endif
+#endif  // #if defined(__gfx950__)
         {
 #pragma unroll
             for (int e = 0; e < ROCM_CAST_ELEMS; e++) {

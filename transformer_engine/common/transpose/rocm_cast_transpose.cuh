@@ -90,7 +90,7 @@ rocm_cast_transpose_kernel(const IType *__restrict__ input,
                     }
                 }
             } else
-#endif
+#endif  // #if defined(__gfx950__)
             {
 #pragma unroll
                 for (int j2 = 0; j2 < NVEC_IN; j2++) {

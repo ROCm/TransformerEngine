@@ -20,7 +20,7 @@
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_cast_transpose.cuh"
 using CType = float;
-#endif
+#endif  // #ifdef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine::detail {
 
@@ -29,7 +29,7 @@ namespace {
 #ifndef __HIP_PLATFORM_AMD__
 // String with RTC kernel implementation
 #include "string_code_transpose_rtc_cast_transpose_cu.h"
-#endif
+#endif  // #ifndef __HIP_PLATFORM_AMD__
 
 // Hard-coded kernel parameters
 using CType = float;
@@ -393,7 +393,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                       static_cast<CType *>(output.scale_inv.dptr), row_length, num_rows);
               NVTE_CHECK_CUDA(cudaGetLastError());
             }
-#endif
+#endif  // #ifdef __HIP_PLATFORM_AMD__
           } else {
             NVTE_ERROR("Not implemented scaling mode: ", to_string(output.scaling_mode));
           });  // NOLINT(*)

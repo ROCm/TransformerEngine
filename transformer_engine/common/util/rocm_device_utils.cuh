@@ -30,11 +30,9 @@ uint32_t rocm_cvt_4xfp8(float s0, float s1, float s2, float s3, float scale) {
         r = __builtin_amdgcn_cvt_scalef32_pk_bf8_f32(r, s0, s1, scale, false);
         r = __builtin_amdgcn_cvt_scalef32_pk_bf8_f32(r, s2, s3, scale, true);
     }
-    uint32_t result;
-    memcpy(&result, &r, 4);
-    return result;
+    return __builtin_bit_cast(uint32_t, r);
 }
-#endif
+#endif  // #if defined(__gfx950__)
 
 template <typename T, int N>
 struct alignas(sizeof(T) * N) CVec {
