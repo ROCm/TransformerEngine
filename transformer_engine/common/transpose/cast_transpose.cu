@@ -19,7 +19,6 @@
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_cast_transpose.cuh"
-using CType = float;
 #endif  // #ifdef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine::detail {
@@ -279,7 +278,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                   static_cast<CType *>(output.amax.dptr),
                   static_cast<CType *>(output.scale_inv.dptr),
                   row_length, num_rows, stream);
-              if (rows_done == 0 && rows_done < num_rows) {
+              if (rows_done == 0) {
                 constexpr size_t ld = 4, st = 4;
                 const int nblk = DIVUP(row_length, ld / itype_size * THREADS_PER_WARP)
                                * DIVUP(num_rows, st / otype_size * THREADS_PER_WARP);
