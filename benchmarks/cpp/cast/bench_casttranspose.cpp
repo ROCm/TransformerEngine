@@ -16,6 +16,8 @@
 #include "transformer_engine/transpose_hip.h"
 #include "transformer_engine/transformer_engine_hip.h"
 
+// #define NVTE_ROCM_EXTENDED_BENCHMARKS 1
+
 using namespace te_bench;
 using namespace transformer_engine;
 using fp8_e4m3 = test::fp8e4m3;
@@ -69,6 +71,47 @@ using fp8_e4m3 = test::fp8e4m3;
   ->Args({16384, 28672})           \
   ->Args({32768, 8192})            \
   ->Args({32768, 16384})
+
+// Only used for specific benchmarks (older models, special cases, etc)
+#define EXTENDED_SHAPES            \
+  ->Args({2048, 12288})            \
+  ->Args({256, 65536})             \
+  ->Args({65536, 128})             \
+  ->Args({1600, 1600})             \
+  ->Args({1600, 6400})             \
+  ->Args({4800, 1600})             \
+  ->Args({56320 , 1600})           \
+  ->Args({6400, 1600})             \
+  ->Args({128256, 4096})           \
+  ->Args({24576, 128256})          \
+  ->Args({24576, 4096})            \
+  ->Args({24576, 4096})            \
+  ->Args({24576, 5120})            \
+  ->Args({28672, 4096})            \
+  ->Args({4096, 12288})            \
+  ->Args({4096, 4096})             \
+  ->Args({5120, 4096})             \
+  ->Args({10240, 8192})            \
+  ->Args({128256, 8192})           \
+  ->Args({57344, 10240})           \
+  ->Args({57344, 128256})          \
+  ->Args({57344, 8192})            \
+  ->Args({57344, 8192})            \
+  ->Args({8192, 28672})            \
+  ->Args({8192, 8192})             \
+  ->Args({28672, 4096})            \
+  ->Args({32000, 4096})            \
+  ->Args({32768, 32000})           \
+  ->Args({32768, 4096})            \
+  ->Args({32768, 4096})            \
+  ->Args({32768, 5120})            \
+  ->Args({4096, 14336})            \
+  ->Args({4096, 4096})             \
+  ->Args({5120, 4096})
+
+  
+
+
 
 template <typename IType>
 static void BM_CastOnly(benchmark::State &state) {
@@ -197,6 +240,25 @@ static void BM_CastTranspose(benchmark::State &state) {
     COMMON_SHAPES                                                             \
     ->Unit(benchmark::kMicrosecond)                                           \
     ->UseManualTime();
+
+#ifdef NVTE_ROCM_EXTENDED_BENCHMARKS
+#define REGISTER_EXTENDED_CAST_ONLY(ITYPE, INAME)                             \
+  BENCHMARK_TEMPLATE(BM_CastOnly, ITYPE)                                      \
+    ->Name("BM_CastOnlyExtended/" INAME "_E4M3/llm")                          \
+    EXTENDED_SHAPES                                                           \
+    ->Unit(benchmark::kMicrosecond)                                           \
+    ->UseManualTime();
+
+#define REGISTER_EXTENDED_CAST_TRANSPOSE(ITYPE, INAME)                        \
+  BENCHMARK_TEMPLATE(BM_CastTranspose, ITYPE)                                 \
+    ->Name("BM_CastTransposeExtended/" INAME "_E4M3/llm")                     \
+    EXTENDED_SHAPES                                                           \
+    ->Unit(benchmark::kMicrosecond)                                           \
+    ->UseManualTime();
+
+REGISTER_EXTENDED_CAST_TRANSPOSE(float,        "FP32")
+REGISTER_EXTENDED_CAST_TRANSPOSE(hip_bfloat16, "BF16")
+#endif // #ifdef NVTE_ROCM_EXTENDED_BENCHMARKS
 
 REGISTER_CAST_ONLY(float,        "FP32")
 REGISTER_CAST_ONLY(hip_bfloat16, "BF16")
