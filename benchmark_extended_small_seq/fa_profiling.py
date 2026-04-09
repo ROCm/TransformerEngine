@@ -281,33 +281,74 @@ def main():
     parser.add_argument("--tensorboard-logdir", type=str, default=None)
     args = parser.parse_args()
 
-    cases = []
-    case_product = product(args.kernel_names, args.dtypes, args.batch_sizes, args.seqlens_q, args.seqlens_kv, args.nheads,
-                           args.dims, args.gqa_ratios, args.modes, args.layouts, args.nr_segments, args.window_sizes)
-    for name, dtype, bsz, sq, skv, nh, dm, gqa, mode, layout, nr_segment, window_size in case_product:
+    configs = []
+    config_product = product(args.dtypes, args.batch_sizes, args.seqlens_q, args.seqlens_kv, args.nheads,
+                             args.dims, args.gqa_ratios, args.modes, args.layouts, args.nr_segments, args.window_sizes)
+    for dtype, bsz, sq, skv, nh, dm, gqa, mode, layout, nr_segment, window_size in config_product:
         if not ((nr_segment > 1 and layout == "bshd") or (window_size > sq)):
-            cases.append(Case(kernel_name=name, name_suffix=args.name_suffix, mode=mode, layout=layout, dtype=dtype, batch_size=bsz,
-                            seqlen_q=sq, seqlen_kv=skv, nheads=nh, dim=dm, gqa_ratio=gqa, causal=not args.non_causal, nr_segments=nr_segment,
-                            sliding_window_size=window_size))
+            configs.append(dict(name_suffix=args.name_suffix, mode=mode, layout=layout, dtype=dtype, batch_size=bsz,
+                                seqlen_q=sq, seqlen_kv=skv, nheads=nh, dim=dm, gqa_ratio=gqa, causal=not args.non_causal,
+                                nr_segments=nr_segment, sliding_window_size=window_size))
     # fmt: on
 
-    for case in tqdm(cases):
-        try:
-            prof_res = case.profile_case(args.repeats, args.warmups, args.tensorboard_logdir)
-
-            if args.csv is not None:
-                file_exists = os.path.exists(args.csv)
-                with open(args.csv, "a", newline="") as f:
-                    writer = csv.DictWriter(f, fieldnames=list(prof_res.keys()))
-                    if not file_exists:
-                        writer.writeheader()
-                    writer.writerow(prof_res)
-
+    for cfg in tqdm(configs):
+        kernel_results = {}
+        for kernel_name in args.kernel_names:
+            case = Case(kernel_name=kernel_name, **cfg)
+            try:
+                kernel_results[kernel_name] = case.profile_case(
+                    args.repeats, args.warmups, args.tensorboard_logdir
+                )
+            except Exception as e:
+                print(f"Failed case: {case}")
+                print(e)
             jax.clear_caches()
             gc.collect()
-        except Exception as e:
-            print(f"Failed case: {case}")
-            print(e)
+
+        if not kernel_results or args.csv is None:
+            continue
+
+        first = next(iter(kernel_results.values()))
+        row = {
+            "mode": first["mode"],
+            "layout": first["layout"],
+            "dtype": first["dtype"],
+            "batch_size": first["batch_size"],
+            "seqlen_q": first["seqlen_q"],
+            "seqlen_kv": first["seqlen_kv"],
+            "nheads": first["nheads"],
+            "dim": first["dim"],
+            "gqa_ratio": first["gqa_ratio"],
+            "causal": first["causal"],
+            "num_segments": first["num_segments"],
+            "sliding_window_size": first["sliding_window_size"],
+        }
+
+        timing_fields = [
+            "min_steptime_ms", "median_steptime_ms", "mean_steptime_ms",
+            "q1_steptime_ms", "q3_steptime_ms", "memory_total_mib",
+        ]
+        for kname in args.kernel_names:
+            res = kernel_results.get(kname)
+            for field in timing_fields:
+                col = f"{kname}_{field}"
+                row[col] = res[field] if res else ""
+
+        means = []
+        for kname in args.kernel_names:
+            res = kernel_results.get(kname)
+            means.append(float(res["mean_steptime_ms"]) if res else None)
+        if len(means) == 2 and all(m is not None and m > 0 for m in means):
+            row["speedup_mean"] = f"{means[1] / means[0]:.2f}x"
+        else:
+            row["speedup_mean"] = ""
+
+        file_exists = os.path.exists(args.csv)
+        with open(args.csv, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=list(row.keys()))
+            if not file_exists:
+                writer.writeheader()
+            writer.writerow(row)
 
 
 if __name__ == "__main__":
