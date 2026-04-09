@@ -32,9 +32,9 @@ rocm_cast_transpose_kernel(const IType *__restrict__ input,
     constexpr int TILE_ROWS = ROCM_CT_WARP_SIZE * NVEC_OUT;
     constexpr int NUM_ITERS = ROCM_CT_WARP_SIZE / WARPS_PER_TILE;
 
-    using IVec  = CVec<IType, NVEC_IN>;
-    using OVecC = CVec<OType, NVEC_IN>;
-    using OVecT = CVec<OType, NVEC_OUT>;
+    using IVec  = NTVec<IType, NVEC_IN>;
+    using OVecC = NTVec<OType, NVEC_IN>;
+    using OVecT = NTVec<OType, NVEC_OUT>;
 
     const int tid      = threadIdx.x;
     const int tidx     = tid % ROCM_CT_WARP_SIZE;

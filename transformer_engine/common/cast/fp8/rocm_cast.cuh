@@ -29,8 +29,8 @@ rocm_cast_only_kernel(const IType *__restrict__ input,
     constexpr int LOADS    = ROCM_CAST_ELEMS / NVEC_IN;
     constexpr int STORES   = ROCM_CAST_ELEMS / NVEC_OUT;
 
-    using IVec = CVec<IType, NVEC_IN>;
-    using OVec = CVec<OType, NVEC_OUT>;
+    using IVec = NTVec<IType, NVEC_IN>;
+    using OVec = NTVec<OType, NVEC_OUT>;
 
     const float scale = (scale_ptr != nullptr) ? *scale_ptr : 1.0f;
     float amax = 0.0f;

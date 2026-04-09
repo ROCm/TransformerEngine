@@ -38,28 +38,46 @@ uint32_t rocm_cvt_4xfloat8(float s0, float s1, float s2, float s3, float scale =
 #endif  // #if defined(__gfx950__)
 
 template <typename T, int N>
-struct alignas(sizeof(T) * N) CVec {
+struct alignas(sizeof(T) * N) NTVec {
     T val[N];
 
     __device__ __forceinline__ void load(const T *ptr) {
-        *this = *reinterpret_cast<const CVec*>(ptr);
+        *this = *reinterpret_cast<const NTVec*>(ptr);
+    }
+
+    __device__ __forceinline__ void nt_load(const T *ptr) {
+        if constexpr (sizeof(NTVec) == 16) {
+            *reinterpret_cast<__attribute__((__vector_size__(16))) int *>(this) =
+                __builtin_nontemporal_load(reinterpret_cast<const __attribute__((__vector_size__(16))) int *>(ptr));
+        } else if constexpr (sizeof(NTVec) == 8) {
+            *reinterpret_cast<unsigned long long *>(this) =
+                __builtin_nontemporal_load(reinterpret_cast<const unsigned long long *>(ptr));
+        } else if constexpr (sizeof(NTVec) == 4) {
+            *reinterpret_cast<unsigned int *>(this) =
+                __builtin_nontemporal_load(reinterpret_cast<const unsigned int *>(ptr));
+        } else if constexpr (sizeof(NTVec) == 2) {
+            *reinterpret_cast<unsigned short *>(this) =
+                __builtin_nontemporal_load(reinterpret_cast<const unsigned short *>(ptr));
+        } else {
+            load(ptr);
+        }
     }
 
     __device__ __forceinline__ void store(T *ptr) const {
-        *reinterpret_cast<CVec*>(ptr) = *this;
+        *reinterpret_cast<NTVec*>(ptr) = *this;
     }
 
     __device__ __forceinline__ void nt_store(T *ptr) const {
-        if constexpr (sizeof(CVec) == 16) {
+        if constexpr (sizeof(NTVec) == 16) {
             __builtin_nontemporal_store(*reinterpret_cast<const __attribute__((__vector_size__(16))) int *>(this),
                                         reinterpret_cast<__attribute__((__vector_size__(16))) int *>(ptr));
-        } else if constexpr (sizeof(CVec) == 8) {
+        } else if constexpr (sizeof(NTVec) == 8) {
             __builtin_nontemporal_store(*reinterpret_cast<const unsigned long long *>(this),
                                         reinterpret_cast<unsigned long long *>(ptr));
-        } else if constexpr (sizeof(CVec) == 4) {
+        } else if constexpr (sizeof(NTVec) == 4) {
             __builtin_nontemporal_store(*reinterpret_cast<const unsigned int *>(this),
                                         reinterpret_cast<unsigned int *>(ptr));
-        } else if constexpr (sizeof(CVec) == 2) {
+        } else if constexpr (sizeof(NTVec) == 2) {
             __builtin_nontemporal_store(*reinterpret_cast<const unsigned short *>(this),
                                         reinterpret_cast<unsigned short *>(ptr));
         } else {
