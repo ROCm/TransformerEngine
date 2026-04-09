@@ -138,8 +138,10 @@ constexpr int kNFP4PerContainer = 2;
 
 // Hyperparameters for performance tuning
 // gfx942 has 64 KB LDS per workgroup. With kTileDim=128 and float32 input,
-// shared memory exceeds 64 KB. Use kTileDim=64 and kThreadsPerBlock=128 on gfx942.
-#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx950__)
+// shared memory exceeds 64 KB. Use kTileDim=64 and kThreadsPerBlock=128 on AMD.
+// TODO: For optimal gfx950 performance (128 KB LDS), implement runtime dispatch
+// with two kernel instantiations (kTileDim=64 and kTileDim=128).
+#if defined(__HIP_PLATFORM_AMD__)
 constexpr int kTileDim = 64;
 constexpr int kThreadsPerBlock = 128;  // Thread block size, 4 warps in total
 #else
