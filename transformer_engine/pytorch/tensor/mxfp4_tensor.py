@@ -67,6 +67,19 @@ class MXFP4Quantizer(Quantizer):
         self.use_hadamard = use_hadamard
         assert self.dtype == tex.DType.kFloat4E2M1, "Only E2M1 format supported for MXFP4"
 
+    def copy(self) -> "MXFP4Quantizer":
+        """Create shallow copy"""
+        quantizer = MXFP4Quantizer(
+            fp4_dtype=self.dtype,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+            shuffle_B_matrix_for_aiter=self.shuffle_B_matrix_for_aiter,
+            use_hadamard=self.use_hadamard,
+        )
+        quantizer.internal = self.internal
+        quantizer.optimize_for_gemm = self.optimize_for_gemm
+        return quantizer
+
     def update_quantized(
         self,
         src: torch.Tensor,
