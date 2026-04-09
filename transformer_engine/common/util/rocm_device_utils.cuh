@@ -14,13 +14,13 @@
 template <typename OType>
 __device__ __forceinline__
 uint32_t rocm_cvt_4xfp8(float s0, float s1, float s2, float s3, float scale) {
-    // gfx950 is OCP: e4m3 max = 448, e5m2 max = 57344
+    // Clamp to FP8 max to prevent NaNs from polluting
     constexpr float FP8_MAX = std::is_same_v<OType, transformer_engine::fp8e4m3>
                               ? 448.0f : 57344.0f;
-    s0 = __builtin_amdgcn_fmed3f(s0, -FP8_MAX, FP8_MAX);
-    s1 = __builtin_amdgcn_fmed3f(s1, -FP8_MAX, FP8_MAX);
-    s2 = __builtin_amdgcn_fmed3f(s2, -FP8_MAX, FP8_MAX);
-    s3 = __builtin_amdgcn_fmed3f(s3, -FP8_MAX, FP8_MAX);
+    s0 = (s0 >  FP8_MAX) ?  FP8_MAX : (s0 < -FP8_MAX) ? -FP8_MAX : s0;
+    s1 = (s1 >  FP8_MAX) ?  FP8_MAX : (s1 < -FP8_MAX) ? -FP8_MAX : s1;
+    s2 = (s2 >  FP8_MAX) ?  FP8_MAX : (s2 < -FP8_MAX) ? -FP8_MAX : s2;
+    s3 = (s3 >  FP8_MAX) ?  FP8_MAX : (s3 < -FP8_MAX) ? -FP8_MAX : s3;
     typedef short v2i16_t __attribute__((ext_vector_type(2)));
     v2i16_t r = {0, 0};
     if constexpr (std::is_same_v<OType, transformer_engine::fp8e4m3>) {
