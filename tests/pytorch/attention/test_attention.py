@@ -3009,9 +3009,10 @@ def _run_deterministic_bwd_pytorch(
     Run fused attention backward twice with NVTE_ALLOW_NONDETERMINISTIC_ALGO=0
     and verify bitwise-reproducible gradients.
 
-    The test exercises whichever fused sub-backend (CK or AOTriton) is selected
-    by the runtime for the given configuration.  It is skipped when no
-    deterministic fused backend is available.
+    Supports both BSHD and THD (sequence-packed) layouts.  The test exercises
+    whichever fused sub-backend (CK or AOTriton) is selected by the runtime
+    for the given configuration.  It is skipped when no deterministic fused
+    backend is available.
 
     Parameters
     ----------
@@ -3022,8 +3023,22 @@ def _run_deterministic_bwd_pytorch(
     config : ModelConfig
         Model configuration.
     qkv_layout : str
-        QKV memory layout string.
+        QKV memory layout string (e.g. "bshd_bshd_bshd" or "thd_thd_thd").
     """
+    import copy
+    config = copy.copy(config)
+
+    is_thd = "thd" in qkv_layout
+    qkv_format = "thd" if is_thd else "bshd"
+
+    # THD requires a padding mask type.
+    if is_thd and "padding" not in config.attn_mask_type:
+        config.attn_mask_type = (
+            "padding_" + config.attn_mask_type
+            if config.attn_mask_type != "no_mask"
+            else "padding"
+        )
+
     _setup_deterministic_env(monkeypatch, config, dtype, qkv_layout)
 
     def _run_once(seed_val):
@@ -3037,21 +3052,34 @@ def _run_deterministic_bwd_pytorch(
         h_kv = config.num_gqa_groups
         d = config.head_dim_qk
 
-        q = 0.1 * torch.randn(b, s, h, d, dtype=dtype, device="cuda")
-        k = 0.1 * torch.randn(b, s, h_kv, d, dtype=dtype, device="cuda")
-        v = 0.1 * torch.randn(b, s, h_kv, d, dtype=dtype, device="cuda")
+        # Build Q, K, V and d_out with layout-appropriate shapes.
+        if is_thd:
+            seqlens = torch.randint(1, s, (b,), dtype=torch.int32, device="cuda")
+            cu_seqlens = torch.zeros(b + 1, dtype=torch.int32, device="cuda")
+            cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
+            total_tokens = int(cu_seqlens[-1].item())
+
+            q = 0.1 * torch.randn(total_tokens, h, d, dtype=dtype, device="cuda")
+            k = 0.1 * torch.randn(total_tokens, h_kv, d, dtype=dtype, device="cuda")
+            v = 0.1 * torch.randn(total_tokens, h_kv, d, dtype=dtype, device="cuda")
+            d_out = 0.001 * torch.randn(total_tokens, h * d, dtype=dtype, device="cuda")
+        else:
+            q = 0.1 * torch.randn(b, s, h, d, dtype=dtype, device="cuda")
+            k = 0.1 * torch.randn(b, s, h_kv, d, dtype=dtype, device="cuda")
+            v = 0.1 * torch.randn(b, s, h_kv, d, dtype=dtype, device="cuda")
+            d_out = 0.001 * torch.randn(b, s, h * d, dtype=dtype, device="cuda")
+
         q.requires_grad_(True)
         k.requires_grad_(True)
         v.requires_grad_(True)
-        d_out = 0.001 * torch.randn(b, s, h * d, dtype=dtype, device="cuda")
 
-        # Build attention mask for padding mask types
+        # Build attention mask for BSHD padding mask types.
         attention_mask = None
-        if "padding" in config.attn_mask_type:
-            seqlens = torch.randint(1, s, (b,), dtype=torch.int32)
+        if not is_thd and "padding" in config.attn_mask_type:
+            pad_seqlens = torch.randint(1, s, (b,), dtype=torch.int32)
             attention_mask = torch.zeros(b, 1, 1, s, dtype=torch.bool)
             for i in range(b):
-                attention_mask[i, 0, 0, seqlens[i]:] = True
+                attention_mask[i, 0, 0, pad_seqlens[i]:] = True
             attention_mask = attention_mask.to(device="cuda")
 
         block = DotProductAttention(
@@ -3059,7 +3087,7 @@ def _run_deterministic_bwd_pytorch(
             config.head_dim_qk,
             num_gqa_groups=config.num_gqa_groups,
             attention_dropout=0.0,
-            qkv_format="bshd",
+            qkv_format=qkv_format,
             attn_mask_type=config.attn_mask_type,
             sequence_parallel=False,
             tp_size=1,
@@ -3069,12 +3097,21 @@ def _run_deterministic_bwd_pytorch(
 
         _attention_backends["backend_selection_requires_update"] = True
 
-        out = block(
-            q, k, v,
-            qkv_format="bshd",
+        fwd_kwargs = dict(
+            qkv_format=qkv_format,
             attn_mask_type=config.attn_mask_type,
-            attention_mask=attention_mask,
         )
+        if is_thd:
+            fwd_kwargs.update(
+                max_seqlen_q=s,
+                max_seqlen_kv=s,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_kv=cu_seqlens,
+            )
+        else:
+            fwd_kwargs["attention_mask"] = attention_mask
+
+        out = block(q, k, v, **fwd_kwargs)
         out.backward(d_out)
         return (
             q.grad.clone().detach(),
@@ -3127,100 +3164,6 @@ def test_deterministic_bwd(monkeypatch, dtype, attn_mask_type, b, seq_len, h_q, 
     _run_deterministic_bwd_pytorch(monkeypatch, dtype, config, "bshd_bshd_bshd")
 
 
-def _run_deterministic_bwd_thd_pytorch(
-    monkeypatch,
-    dtype,
-    config,
-    qkv_layout,
-):
-    """
-    Run fused attention backward twice with NVTE_ALLOW_NONDETERMINISTIC_ALGO=0
-    using THD (sequence-packed) layouts and verify bitwise-reproducible gradients.
-
-    Parameters
-    ----------
-    monkeypatch : pytest.MonkeyPatch
-        Pytest fixture for safe env var management.
-    dtype : torch.dtype
-        Data type (torch.bfloat16 or torch.float16).
-    config : ModelConfig
-        Model configuration (attn_mask_type must include "padding").
-    qkv_layout : str
-        THD QKV memory layout string (e.g. "thd_thd_thd").
-    """
-    # Avoid mutating the caller's config object.
-    import copy
-    config = copy.copy(config)
-
-    # THD requires padding mask type
-    if "padding" not in config.attn_mask_type:
-        config.attn_mask_type = (
-            "padding_" + config.attn_mask_type
-            if config.attn_mask_type != "no_mask"
-            else "padding"
-        )
-
-    _setup_deterministic_env(monkeypatch, config, dtype, qkv_layout)
-
-    def _run_once(seed_val):
-        reset_rng_states()
-        torch.manual_seed(seed_val)
-        torch.cuda.manual_seed(seed_val)
-
-        b = config.batch_size
-        s = config.max_seqlen_q
-        h = config.num_heads
-        h_kv = config.num_gqa_groups
-        d = config.head_dim_qk
-
-        # Create variable-length sequences for sequence packing
-        seqlens = torch.randint(1, s, (b,), dtype=torch.int32, device="cuda")
-        cu_seqlens = torch.zeros(b + 1, dtype=torch.int32, device="cuda")
-        cu_seqlens[1:] = torch.cumsum(seqlens, dim=0)
-        total_tokens = int(cu_seqlens[-1].item())
-
-        q = 0.1 * torch.randn(total_tokens, h, d, dtype=dtype, device="cuda")
-        k = 0.1 * torch.randn(total_tokens, h_kv, d, dtype=dtype, device="cuda")
-        v = 0.1 * torch.randn(total_tokens, h_kv, d, dtype=dtype, device="cuda")
-        q.requires_grad_(True)
-        k.requires_grad_(True)
-        v.requires_grad_(True)
-        d_out = 0.001 * torch.randn(total_tokens, h * d, dtype=dtype, device="cuda")
-
-        block = DotProductAttention(
-            config.num_heads,
-            config.head_dim_qk,
-            num_gqa_groups=config.num_gqa_groups,
-            attention_dropout=0.0,
-            qkv_format="thd",
-            attn_mask_type=config.attn_mask_type,
-            sequence_parallel=False,
-            tp_size=1,
-            tp_group=None,
-            layer_number=1,
-        ).to(dtype=dtype, device="cuda")
-
-        _attention_backends["backend_selection_requires_update"] = True
-
-        out = block(
-            q, k, v,
-            qkv_format="thd",
-            attn_mask_type=config.attn_mask_type,
-            max_seqlen_q=s,
-            max_seqlen_kv=s,
-            cu_seqlens_q=cu_seqlens,
-            cu_seqlens_kv=cu_seqlens,
-        )
-        out.backward(d_out)
-        return (
-            q.grad.clone().detach(),
-            k.grad.clone().detach(),
-            v.grad.clone().detach(),
-        )
-
-    _assert_deterministic_bwd(_run_once)
-
-
 @pytest.mark.skipif(
     not IS_HIP_EXTENSION, reason="Deterministic backward only applies to AMD hardware"
 )
@@ -3258,4 +3201,4 @@ def test_deterministic_bwd_thd(
         num_gqa_groups=h_kv,
         attn_mask_type=attn_mask_type,
     )
-    _run_deterministic_bwd_thd_pytorch(monkeypatch, dtype, config, "thd_thd_thd")
+    _run_deterministic_bwd_pytorch(monkeypatch, dtype, config, "thd_thd_thd")
