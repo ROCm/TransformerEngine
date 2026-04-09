@@ -163,6 +163,7 @@ def load_framework_extension(framework: str) -> None:
     module_name = f"transformer_engine_{framework}"
 
     # Name of the pip extra dependency for framework extensions from PyPI.
+    # ROCm: here is a bug in upstream code - using module name whereas it shoukd be framwork name.
     extra_dep_name = framework
     if framework == "torch":
         extra_dep_name = "pytorch"
@@ -191,7 +192,7 @@ def load_framework_extension(framework: str) -> None:
     # If the framework extension pip package is installed, it means that TE is installed via
     # PyPI. For this case we need to make sure that the metapackage, the core lib, and framework
     # extension are all installed via PyPI and have matching versions.
-    # Metapackage and core lib matchiong is checked in `sanity_checks_for_pypi_installation()`,
+    # Metapackage and core lib matching is checked in `sanity_checks_for_pypi_installation()`,
     # so here we only need to check the framework extension.
     if te_framework_installed:
         assert te_installed_via_pypi, "Could not find `transformer-engine` PyPI package."
@@ -257,7 +258,7 @@ def sanity_checks_for_pypi_installation() -> None:
     elif te_installed_via_pypi:
         raise RuntimeError(
             "Found empty `transformer-engine` meta package installed. "
-            "Install `transformer-engine` with framework extensions via"
+            "Install `transformer-engine` with framework extensions via "
             "'pip3 install --no-build-isolation transformer-engine[rocm_pytorch,rocm_jax]'"
             " or 'pip3 install transformer-engine[rocm]' for the ROCm TE core lib only."
             " Or if you are using CUDA, install with "
