@@ -6,10 +6,7 @@ name: PR Automatic CI
 
 on:
   pull_request:
-    branches:
-      - 'dev'
-      - 'release_v2.*_rocm'
-    types: [ opened, labeled, synchronize, reopened ]
+    types: [ labeled, synchronize, reopened ]
 
 permissions:
   contents: read
@@ -22,7 +19,7 @@ jobs:
     steps:
       - name: Determine CI dispatch from labels
         id: set_level
-        uses: actions/github-script@v7
+        uses: actions/github-script@v8
         with:
           script: |
             const parseLevelLabel = (labelName) => {
