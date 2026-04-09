@@ -567,7 +567,7 @@ endif()
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads ${BUILD_THREADS_PER_JOB}")
 message(STATUS "Threads per parallel build job: ${BUILD_THREADS_PER_JOB}")
 else()
-  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3 -fopenmp")
+  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3")
   set(HIP_HCC_FLAGS "${CMAKE_HIP_FLAGS} -mavx2 -mf16c -mfma -std=c++17")
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
