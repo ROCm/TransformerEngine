@@ -1056,6 +1056,11 @@ def get_attention_backend(
                 "please install flash-attn >= 2.4.1."
             )
             use_flash_attention_2 = False
+    if use_fused_attention and deterministic and IS_HIP_EXTENSION:
+        logger.debug(
+            "Deterministic mode engaged on HIP with FusedAttention (CK/AOTriton). "
+            "The CK backend will use a split-accumulator workspace for deterministic dQ."
+        )
     if use_fused_attention and deterministic and (not IS_HIP_EXTENSION):
         if fused_attention_backend == FusedAttnBackend["FP8"] and is_training:
             logger.debug("Disabling FusedAttention for determinism reasons with FP8")

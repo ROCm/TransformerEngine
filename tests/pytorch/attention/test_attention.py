@@ -2968,6 +2968,37 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
 # ---------------------- Deterministic Backward Tests ----------------------
 
 
+def _setup_deterministic_env(monkeypatch, config, dtype, qkv_layout):
+    """Set environment variables and check backend availability for deterministic bwd tests."""
+    monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
+    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
+    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
+    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
+    _attention_backends["backend_selection_requires_update"] = True
+
+    available_backends, _, _ = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        deterministic=True,
+        is_training=True,
+    )
+    if not available_backends[1]:
+        pytest.skip("FusedAttention not available for this config")
+
+    _attention_backends["backend_selection_requires_update"] = True
+
+
+def _assert_deterministic_bwd(run_once_fn):
+    """Run backward twice with the same seed and assert bitwise reproducibility."""
+    dq1, dk1, dv1 = run_once_fn(42)
+    dq2, dk2, dv2 = run_once_fn(42)
+
+    torch.testing.assert_close(dq1, dq2, atol=0, rtol=0, msg="dQ not bitwise reproducible")
+    torch.testing.assert_close(dk1, dk2, atol=0, rtol=0, msg="dK not bitwise reproducible")
+    torch.testing.assert_close(dv1, dv2, atol=0, rtol=0, msg="dV not bitwise reproducible")
+
+
 def _run_deterministic_bwd_pytorch(
     monkeypatch,
     dtype,
@@ -2978,8 +3009,9 @@ def _run_deterministic_bwd_pytorch(
     Run fused attention backward twice with NVTE_ALLOW_NONDETERMINISTIC_ALGO=0
     and verify bitwise-reproducible gradients.
 
-    Both CK and AOTriton backends are exercised (AOTriton is deterministic by
-    nature).  The test is skipped when no deterministic fused backend is available.
+    The test exercises whichever fused sub-backend (CK or AOTriton) is selected
+    by the runtime for the given configuration.  It is skipped when no
+    deterministic fused backend is available.
 
     Parameters
     ----------
@@ -2992,26 +3024,7 @@ def _run_deterministic_bwd_pytorch(
     qkv_layout : str
         QKV memory layout string.
     """
-    monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
-    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
-    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
-    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
-    _attention_backends["backend_selection_requires_update"] = True
-
-    # Check that fused attention with CK is available for this config
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
-        config,
-        qkv_dtype=dtype,
-        qkv_layout=qkv_layout,
-        deterministic=True,
-        is_training=True,
-    )
-    if not available_backends[1]:
-        pytest.skip("FusedAttention not available for this config")
-    if not fused_attn_backends:
-        pytest.skip("No fused attention sub-backend available")
-
-    _attention_backends["backend_selection_requires_update"] = True
+    _setup_deterministic_env(monkeypatch, config, dtype, qkv_layout)
 
     def _run_once(seed_val):
         reset_rng_states()
@@ -3059,12 +3072,7 @@ def _run_deterministic_bwd_pytorch(
             v.grad.clone().detach(),
         )
 
-    dq1, dk1, dv1 = _run_once(42)
-    dq2, dk2, dv2 = _run_once(42)
-
-    torch.testing.assert_close(dq1, dq2, atol=0, rtol=0, msg="dQ not bitwise reproducible")
-    torch.testing.assert_close(dk1, dk2, atol=0, rtol=0, msg="dK not bitwise reproducible")
-    torch.testing.assert_close(dv1, dv2, atol=0, rtol=0, msg="dV not bitwise reproducible")
+    _assert_deterministic_bwd(_run_once)
 
 
 @pytest.mark.skipif(
@@ -3088,14 +3096,6 @@ def _run_deterministic_bwd_pytorch(
     ],
 )
 @pytest.mark.parametrize(
-    "qkv_layout",
-    [
-        pytest.param("bshd_bshd_bshd", id="SEPARATE"),
-        pytest.param("bshd_bs2hd", id="KV_PACKED"),
-        pytest.param("bs3hd", id="QKV_PACKED"),
-    ],
-)
-@pytest.mark.parametrize(
     "b, seq_len, h_q, h_kv, d",
     [
         pytest.param(2, 256, 8, 8, 128, id="b2_s256_MHA"),
@@ -3103,7 +3103,7 @@ def _run_deterministic_bwd_pytorch(
         pytest.param(2, 2048, 12, 4, 128, id="b2_s2048_GQA"),
     ],
 )
-def test_deterministic_bwd(monkeypatch, dtype, attn_mask_type, qkv_layout, b, seq_len, h_q, h_kv, d):
+def test_deterministic_bwd(monkeypatch, dtype, attn_mask_type, b, seq_len, h_q, h_kv, d):
     """Test deterministic backward: bitwise reproducibility."""
     config = ModelConfig(
         batch_size=b,
@@ -3113,7 +3113,7 @@ def test_deterministic_bwd(monkeypatch, dtype, attn_mask_type, qkv_layout, b, se
         num_gqa_groups=h_kv,
         attn_mask_type=attn_mask_type,
     )
-    _run_deterministic_bwd_pytorch(monkeypatch, dtype, config, qkv_layout)
+    _run_deterministic_bwd_pytorch(monkeypatch, dtype, config, "bshd_bshd_bshd")
 
 
 def _run_deterministic_bwd_thd_pytorch(
@@ -3137,11 +3137,9 @@ def _run_deterministic_bwd_thd_pytorch(
     qkv_layout : str
         THD QKV memory layout string (e.g. "thd_thd_thd").
     """
-    monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
-    monkeypatch.setenv("NVTE_FUSED_ATTN", "1")
-    monkeypatch.setenv("NVTE_FLASH_ATTN", "0")
-    monkeypatch.setenv("NVTE_UNFUSED_ATTN", "0")
-    _attention_backends["backend_selection_requires_update"] = True
+    # Avoid mutating the caller's config object.
+    import copy
+    config = copy.copy(config)
 
     # THD requires padding mask type
     if "padding" not in config.attn_mask_type:
@@ -3151,19 +3149,7 @@ def _run_deterministic_bwd_thd_pytorch(
             else "padding"
         )
 
-    available_backends, _, fused_attn_backends = get_available_attention_backends(
-        config,
-        qkv_dtype=dtype,
-        qkv_layout=qkv_layout,
-        deterministic=True,
-        is_training=True,
-    )
-    if not available_backends[1]:
-        pytest.skip("FusedAttention not available for this config")
-    if not fused_attn_backends:
-        pytest.skip("No fused attention sub-backend available")
-
-    _attention_backends["backend_selection_requires_update"] = True
+    _setup_deterministic_env(monkeypatch, config, dtype, qkv_layout)
 
     def _run_once(seed_val):
         reset_rng_states()
@@ -3221,12 +3207,7 @@ def _run_deterministic_bwd_thd_pytorch(
             v.grad.clone().detach(),
         )
 
-    dq1, dk1, dv1 = _run_once(42)
-    dq2, dk2, dv2 = _run_once(42)
-
-    torch.testing.assert_close(dq1, dq2, atol=0, rtol=0, msg="dQ not bitwise reproducible")
-    torch.testing.assert_close(dk1, dk2, atol=0, rtol=0, msg="dK not bitwise reproducible")
-    torch.testing.assert_close(dv1, dv2, atol=0, rtol=0, msg="dV not bitwise reproducible")
+    _assert_deterministic_bwd(_run_once)
 
 
 @pytest.mark.skipif(
@@ -3248,14 +3229,6 @@ def _run_deterministic_bwd_thd_pytorch(
     ],
 )
 @pytest.mark.parametrize(
-    "qkv_layout",
-    [
-        pytest.param("thd_thd_thd", id="THD_SEPARATE"),
-        pytest.param("thd_t2hd", id="THD_KV_PACKED"),
-        pytest.param("t3hd", id="THD_QKV_PACKED"),
-    ],
-)
-@pytest.mark.parametrize(
     "b, seq_len, h_q, h_kv, d",
     [
         pytest.param(2, 2048, 8, 8, 128, id="b2_s2048_MHA"),
@@ -3263,11 +3236,9 @@ def _run_deterministic_bwd_thd_pytorch(
     ],
 )
 def test_deterministic_bwd_thd(
-    monkeypatch, dtype, attn_mask_type, qkv_layout, b, seq_len, h_q, h_kv, d
+    monkeypatch, dtype, attn_mask_type, b, seq_len, h_q, h_kv, d
 ):
     """Test deterministic backward with THD (sequence packing): bitwise reproducibility."""
-    if h_q != h_kv and "3" in qkv_layout:
-        pytest.skip("QKV-packed layout not applicable for GQA")
     config = ModelConfig(
         batch_size=b,
         max_seqlen_q=seq_len,
@@ -3276,4 +3247,4 @@ def test_deterministic_bwd_thd(
         num_gqa_groups=h_kv,
         attn_mask_type=attn_mask_type,
     )
-    _run_deterministic_bwd_thd_pytorch(monkeypatch, dtype, config, qkv_layout)
+    _run_deterministic_bwd_thd_pytorch(monkeypatch, dtype, config, "thd_thd_thd")

@@ -9,7 +9,6 @@ from dataclasses import dataclass, field
 from functools import partial
 from math import sqrt
 from typing import Tuple, Optional, Dict
-import os
 import random
 
 import jax
@@ -1525,12 +1524,12 @@ def _run_deterministic_bwd_case(
     Both CK and AOTriton backends are exercised (AOTriton is deterministic by
     nature).  The test is skipped when neither backend is selected.
 
-    All seq_len values should be >= 256 so that nsplits = ceil(s/kN0) > 1
-    (kN0=128 for d<=128), ensuring the kernel actually exercises the
-    deterministic split-accumulator path rather than the trivial single-split.
+    Numerical correctness is checked against an unfused JAX reference for
+    seq_len <= 512 (O(s^2) cost).  For larger seq_len only bitwise
+    reproducibility is verified.
     """
     if check_numerical is None:
-        check_numerical = seq_len <= 256
+        check_numerical = seq_len <= 512
     s = seq_len
     scaling_factor = 1.0 / sqrt(d)
 
@@ -1691,6 +1690,7 @@ def _run_deterministic_bwd_case(
     "b, seq_len, h_q, h_kv, d",
     [
         pytest.param(2, 256, 8, 8, 128, id="b2_s256_MHA"),
+        pytest.param(2, 512, 8, 8, 128, id="b2_s512_MHA"),
         pytest.param(2, 2048, 8, 8, 128, id="b2_s2048_MHA"),
     ],
 )
@@ -1730,11 +1730,18 @@ def test_deterministic_bwd(monkeypatch, dtype, qkv_layout, attn_mask_type, b, se
         pytest.param(12, 4, id="GQA"),
     ],
 )
-def test_deterministic_bwd_gqa(monkeypatch, dtype, attn_mask_type, h_q, h_kv):
-    """MHA and GQA variants: BSHD_BSHD_BSHD with various head configurations."""
+@pytest.mark.parametrize(
+    "qkv_layout",
+    [
+        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id="SEPARATE"),
+        pytest.param(QKVLayout.BSHD_BS2HD, id="KV_PACKED"),
+    ],
+)
+def test_deterministic_bwd_gqa(monkeypatch, dtype, attn_mask_type, h_q, h_kv, qkv_layout):
+    """MHA and GQA variants with separate and KV-packed layouts."""
     _run_deterministic_bwd_case(
         monkeypatch,
-        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        qkv_layout=qkv_layout,
         attn_mask_type=attn_mask_type,
         b=2, seq_len=2048, h_q=h_q, h_kv=h_kv, d=128,
         dtype=dtype,
