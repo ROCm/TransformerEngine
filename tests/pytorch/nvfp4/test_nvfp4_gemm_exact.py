@@ -12,6 +12,7 @@ from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils
+from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type
 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
@@ -110,10 +111,11 @@ def check_nvfp4_gemm_versus_reference(
     sx_trimmed = sx_native[:M, :expected_sx_cols]
     sw_trimmed = sw_native[:N, :expected_sw_cols]
 
-    # Native scales are stored as uint8 but need to be interpreted as float8_e4m3fn
+    # Native scales are stored as uint8 but need to be interpreted as float8_e4m3
     # for the reference GEMM to work correctly
-    sx_trimmed = sx_trimmed.view(torch.float8_e4m3fn)
-    sw_trimmed = sw_trimmed.view(torch.float8_e4m3fn)
+    fp8_dtype = get_torch_float8_e4m3_type()
+    sx_trimmed = sx_trimmed.view(fp8_dtype)
+    sw_trimmed = sw_trimmed.view(fp8_dtype)
 
     # Create reference quantizer for reference GEMM
     ref_quantizer = NVFP4QuantizerRef(

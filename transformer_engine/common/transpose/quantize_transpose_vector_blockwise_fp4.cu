@@ -137,12 +137,19 @@ constexpr int kThreadsPerWarp = 32;
 constexpr int kNFP4PerContainer = 2;
 
 // Hyperparameters for performance tuning
+// gfx942 has 64 KB LDS per workgroup. With kTileDim=128 and float32 input,
+// shared memory exceeds 64 KB. Use kTileDim=64 and kThreadsPerBlock=128 on gfx942.
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx950__)
+constexpr int kTileDim = 64;
+constexpr int kThreadsPerBlock = 128;  // Thread block size, 4 warps in total
+#else
 constexpr int kTileDim = 128;
+constexpr int kThreadsPerBlock = 256;  // Thread block size, 8 warps in total
+#endif
 // constexpr int kScaleDim = 32;
 constexpr int kNVecIn = 8;             // The number of elements each LDG touches
 constexpr int kNVecOut = 16;           // The number of elements each STG touches
 constexpr int kNVecSMem = 2;           // The number of elements each LDS/STS touches
-constexpr int kThreadsPerBlock = 256;  // Thread block size, 8 warps in total
 
 // Auto-calculated constants, do not modify directly)
 static_assert(kNVecIn % kNVecSMem == 0, "kNVecIn must be divisible by kNVecSMem");

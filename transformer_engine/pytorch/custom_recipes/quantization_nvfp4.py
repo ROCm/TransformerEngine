@@ -12,6 +12,15 @@ import torch
 from transformer_engine.pytorch.custom_recipes import quantization
 from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
+from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, is_fp8_fnuz
+
+
+def _fp8_e4m3_max():
+    return 240.0 if is_fp8_fnuz() else 448.0
+
+
+def _fp8_e4m3_dtype():
+    return get_torch_float8_e4m3_type()
 
 
 def nvfp4_ref_rht_2d_quantizer_factory(role):
@@ -137,9 +146,9 @@ def cast_to_e4m3(decode_scale, global_amax):
     TODO(etsykunov): Make less unintuitive.
     """
     decode_scale = decode_scale * global_amax
-    FLOAT8_E4M3_MAX = torch.tensor(448.0, device=decode_scale.device, dtype=torch.float32)
+    FLOAT8_E4M3_MAX = torch.tensor(_fp8_e4m3_max(), device=decode_scale.device, dtype=torch.float32)
     decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
-    return decode_scale.to(torch.float8_e4m3fn)
+    return decode_scale.to(_fp8_e4m3_dtype())
 
 
 def high_precision_gemm_ref(
@@ -470,7 +479,7 @@ class NVFP4QuantizerRef(Quantizer):
             )  # (128, 8, 1)
         x = x.view(m, n // tile_len_x, tile_len_x)
         FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)
-        FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
+        FLOAT8_E4M3_MAX = torch.tensor(_fp8_e4m3_max(), device=x.device, dtype=torch.float32)
         decode_scale = torch.div(vec_max, FLOAT4_E2M1_MAX)
 
         if pow_2_scales:
@@ -503,7 +512,7 @@ class NVFP4QuantizerRef(Quantizer):
                 ),
             )
             decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
-            decode_scale = decode_scale.to(torch.float8_e4m3fn)
+            decode_scale = decode_scale.to(_fp8_e4m3_dtype())
 
             encode_scale = torch.min(
                 torch.div(1.0, decode_scale.to(torch.float32) * global_decode_scale),
@@ -823,7 +832,8 @@ class NVFP4QuantizerRef(Quantizer):
             sx = sx.to(torch.float32)
             sw = sw.to(torch.float32)
 
-            factor = 6.0 * 6.0 * 448.0 * 448.0
+            _e4m3_max = _fp8_e4m3_max()
+            factor = 6.0 * 6.0 * _e4m3_max * _e4m3_max
 
             if gemm_type == quantization.GEMMType.WGRAD:
                 partial_alpha = qresult_x.global_amax_col * qresult_w.global_amax_col

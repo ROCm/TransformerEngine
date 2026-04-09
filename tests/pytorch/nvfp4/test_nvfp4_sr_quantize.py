@@ -11,6 +11,7 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch import NVFP4Quantizer
+from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, is_fp8_fnuz
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
@@ -58,10 +59,12 @@ def fp4_to_fp32(fp4: torch.Tensor) -> torch.Tensor:
 
 
 def dequantize_fp4(qx: torch.Tensor, sx: torch.Tensor, amax: torch.Tensor) -> torch.Tensor:
-    sf = sx.repeat_interleave(16, dim=1).view(torch.float8_e4m3fn).to(torch.float32)
+    fp8_dtype = get_torch_float8_e4m3_type()
+    fp8_max = 240.0 if is_fp8_fnuz() else 448.0
+    sf = sx.repeat_interleave(16, dim=1).view(fp8_dtype).to(torch.float32)
     dqx = fp4_to_fp32(unpack_fp4(qx))
     sf = sf[: dqx.shape[0], : dqx.shape[1]]
-    dequant = dqx * sf * (amax / (6.0 * 448))
+    dequant = dqx * sf * (amax / (6.0 * fp8_max))
     return dequant
 
 
