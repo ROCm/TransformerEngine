@@ -101,4 +101,17 @@ from .context_parallel import (
     thd_read_second_half_lse, thd_out_correction,
     thd_grad_correction, thd_get_partitioned_indices,
 )
+from .mori_ep import (
+    mori_ep_available,
+    init_mori_ep,
+    finalize_mori_ep,
+    is_mori_ep_initialized,
+    mask_to_index,
+    index_to_mask,
+    MoriExpertParallel,
+    MoriEPDispatch,
+    MoriEPCombine,
+    MoriEPDispatchStdMoE,
+    MoriEPCombineStdMoE,
+)
 from .padding import fused_multi_row_padding, fused_multi_row_unpadding
