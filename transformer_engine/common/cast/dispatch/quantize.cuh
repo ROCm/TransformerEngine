@@ -17,12 +17,12 @@
 
 #include "../../common.h"
 #include "../../transpose/cast_transpose.h"
-#ifdef __HIP_PLATFORM_AMD__
-#include "../fp8/rocm_cast.cuh"
-#endif
 #include "../../util/vectorized_pointwise.h"
 #include "../core/common.cuh"
 #include "../fp8/quantize_fp8.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../fp8/rocm_cast.cuh"
+#endif
 #include "../mxfp8/quantize_mxfp8.cuh"
 //TODO: ROCm TE does not support nvfp4 yet
 #ifndef __HIP_PLATFORM_AMD__

@@ -9,14 +9,17 @@
 #include <type_traits>
 
 #define ROCM_CT_WARP_SIZE 32
+constexpr int ROCM_VEC_BYTES = 16;  // 128-bit max vectorized load/store width
 
 #if defined(__gfx950__) && __HIP_DEVICE_COMPILE__
 template <typename OType>
 __device__ __forceinline__
-uint32_t rocm_cvt_4xfp8(float s0, float s1, float s2, float s3, float scale) {
+uint32_t rocm_cvt_4xfloat8(float s0, float s1, float s2, float s3, float scale = 1.0f) {
+    static_assert(std::is_same_v<OType, transformer_engine::fp8e4m3> ||
+                  std::is_same_v<OType, transformer_engine::fp8e5m2>,
+                  "OType must be fp8e4m3 or fp8e5m2");
     // Clamp to FP8 max to prevent NaNs from polluting
-    constexpr float FP8_MAX = std::is_same_v<OType, transformer_engine::fp8e4m3>
-                              ? 448.0f : 57344.0f;
+    constexpr float FP8_MAX = transformer_engine::detail::TypeExtrema<OType>::max;
     s0 = (s0 >  FP8_MAX) ?  FP8_MAX : (s0 < -FP8_MAX) ? -FP8_MAX : s0;
     s1 = (s1 >  FP8_MAX) ?  FP8_MAX : (s1 < -FP8_MAX) ? -FP8_MAX : s1;
     s2 = (s2 >  FP8_MAX) ?  FP8_MAX : (s2 < -FP8_MAX) ? -FP8_MAX : s2;

@@ -24,8 +24,8 @@ rocm_cast_only_kernel(const IType *__restrict__ input,
         return;
     }
 
-    constexpr int NVEC_IN  = 16 / sizeof(IType);
-    constexpr int NVEC_OUT = 16 / sizeof(OType);
+    constexpr int NVEC_IN  = ROCM_VEC_BYTES / sizeof(IType);
+    constexpr int NVEC_OUT = ROCM_VEC_BYTES / sizeof(OType);
     constexpr int LOADS    = ROCM_CAST_ELEMS / NVEC_IN;
     constexpr int STORES   = ROCM_CAST_ELEMS / NVEC_OUT;
 
@@ -61,13 +61,12 @@ rocm_cast_only_kernel(const IType *__restrict__ input,
                 const int l2 = (e+2) / NVEC_IN, j2 = (e+2) % NVEC_IN;
                 const int l3 = (e+3) / NVEC_IN, j3 = (e+3) % NVEC_IN;
 
-                uint32_t packed = rocm_cvt_4xfp8<OType>(
+                uint32_t packed = rocm_cvt_4xfloat8<OType>(
                     static_cast<float>(in[l0].val[j0]) * scale,
                     static_cast<float>(in[l1].val[j1]) * scale,
                     static_cast<float>(in[l2].val[j2]) * scale,
-                    static_cast<float>(in[l3].val[j3]) * scale,
-                    1.0f);
-                memcpy(&out[0].val[e], &packed, 4);
+                    static_cast<float>(in[l3].val[j3]) * scale);
+                memcpy(&out[e / NVEC_OUT].val[e % NVEC_OUT], &packed, 4);
             }
         } else
 #endif  // #if defined(__gfx950__)

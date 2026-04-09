@@ -76,12 +76,11 @@ rocm_cast_transpose_kernel(const IType *__restrict__ input,
             if constexpr (sizeof(OType) == 1) {
 #pragma unroll
                 for (int j2 = 0; j2 < NVEC_IN; j2 += 4) {
-                    uint32_t packed = rocm_cvt_4xfp8<OType>(
+                    uint32_t packed = rocm_cvt_4xfloat8<OType>(
                         static_cast<float>(in.val[j2]) * scale,
                         (j2+1 < NVEC_IN) ? static_cast<float>(in.val[j2+1]) * scale : 0.0f,
                         (j2+2 < NVEC_IN) ? static_cast<float>(in.val[j2+2]) * scale : 0.0f,
-                        (j2+3 < NVEC_IN) ? static_cast<float>(in.val[j2+3]) * scale : 0.0f,
-                        1.0f);
+                        (j2+3 < NVEC_IN) ? static_cast<float>(in.val[j2+3]) * scale : 0.0f);
                     uint8_t *bytes = reinterpret_cast<uint8_t *>(&packed);
 #pragma unroll
                     for (int k = 0; k < 4 && j2 + k < NVEC_IN; k++) {

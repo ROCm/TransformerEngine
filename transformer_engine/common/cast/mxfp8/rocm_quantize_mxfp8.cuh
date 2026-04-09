@@ -63,9 +63,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr size_t THREADS_PER_SCALE_X_ROWWISE =
       DIVUP(SCALE_DIM_X, ELEMS_PER_THREAD);                      //   2 = 32 / 16
   constexpr size_t SUBWARP_WIDTH = THREADS_PER_SCALE_X_ROWWISE;  //   2
-  // Cap vector width so each load/store is at most 16 bytes (AMD max: global_load_dwordx4)
-  constexpr size_t VECTOR_WIDTH_IN  = 16 / sizeof(IType);   // BF16/FP16: 8, FP32: 4
-  constexpr size_t VECTOR_WIDTH_OUT = 16 / sizeof(OType);   // FP8: 16
+  constexpr size_t VECTOR_WIDTH_IN  = ROCM_VEC_BYTES / sizeof(IType);   // BF16/FP16: 8, FP32: 4
+  constexpr size_t VECTOR_WIDTH_OUT = ROCM_VEC_BYTES / sizeof(OType);   // FP8: 16
 
   const int block_offset_Y = blockIdx.y * CHUNK_DIM_Y;
   const int block_offset_X = blockIdx.x * CHUNK_DIM_X;
@@ -206,7 +205,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         } cvt_out{};
 #pragma unroll
         for (int p = 0; p < ELEMS_PER_THREAD / 4; p++) {
-          cvt_out.packed[p] = rocm_cvt_4xfp8<OType>(
+          cvt_out.packed[p] = rocm_cvt_4xfloat8<OType>(
               in_compute[p*4+0], in_compute[p*4+1],
               in_compute[p*4+2], in_compute[p*4+3], cvt_scale);
         }
@@ -351,7 +350,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             } cvt_out{};
 #pragma unroll
             for (int p = 0; p < ELEMS_PER_THREAD / 4; p++) {
-              cvt_out.packed[p] = rocm_cvt_4xfp8<OType>(
+              cvt_out.packed[p] = rocm_cvt_4xfloat8<OType>(
                   in_compute[p*4+0], in_compute[p*4+1],
                   in_compute[p*4+2], in_compute[p*4+3], cvt_scale);
             }
@@ -430,7 +429,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           const float cvt_scale = (biased_exponent == 0) ? 1.0f : ptx::exp2f(biased_exponent);
 #pragma unroll
           for (int i = 0; i < SCALE_DIM_Y; i += 2) {
-            uint32_t packed = rocm_cvt_4xfp8<OType>(
+            uint32_t packed = rocm_cvt_4xfloat8<OType>(
                 in_compute[i], in_compute[i+1], 0.0f, 0.0f, cvt_scale);
             OType val0, val1;
             memcpy(&val0, &packed, sizeof(OType));
