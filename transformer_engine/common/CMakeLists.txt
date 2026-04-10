@@ -251,6 +251,8 @@ if(USE_CUDA)
         transpose/quantize_transpose_vector_blockwise_fp4.cu)
 else()
 #ROCm specific source codes
+    list(APPEND transformer_engine_cuda_sources
+        transpose/cast_transpose_mxfp4_shuffled.cu)
     list(APPEND transformer_engine_cpp_sources
         comm_gemm_overlap/rocm_comm_gemm_overlap.cpp
         fused_attn_rocm/fused_attn.cpp

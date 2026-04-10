@@ -1,33 +1,7 @@
 #include <torch/extension.h>
 #include <c10/hip/HIPStream.h>
 #include <hip/hip_runtime.h>
-
-namespace te_mxfp4 {
-extern "C" void launch_cast_transpose_mxfp4_shuffled(
-    const void* input,
-    void* rowwise_fp4,
-    void* rowwise_scale,
-    void* colwise_fp4,
-    void* colwise_scale,
-    int M, int N,
-    bool use_rowwise,
-    bool use_colwise,
-    bool shuffle_scales,
-    bool use_hadamard,
-    bool shuffle_rowwise_fp4,
-    bool shuffle_colwise_fp4,
-    int rowwise_scale_stride,
-    int colwise_scale_stride,
-    int rowwise_scale_N,
-    int rowwise_scale_M_pad,
-    int rowwise_scale_N_pad,
-    int colwise_scale_M,
-    int colwise_scale_N,
-    int colwise_scale_M_pad,
-    int colwise_scale_N_pad,
-    hipStream_t stream
-);
-}
+#include "transformer_engine/transpose.h"
 
 namespace transformer_engine::pytorch {
 
@@ -147,7 +121,7 @@ cast_transpose_mxfp4_fused_shuffle(
         colwise_scale = at::empty({0}, at::TensorOptions().dtype(at::kByte).device(device));
     }
 
-    te_mxfp4::launch_cast_transpose_mxfp4_shuffled(
+    nvte_cast_transpose_mxfp4_fused_shuffle(
         input.data_ptr(),
         use_rowwise ? rowwise_fp4.data_ptr() : nullptr,
         use_rowwise ? rowwise_scale.data_ptr() : nullptr,
