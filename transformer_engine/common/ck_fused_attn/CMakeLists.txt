@@ -114,13 +114,17 @@ set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
 install(FILES ${__AITER_MHA_PATH}/libmha_fwd.so ${__AITER_MHA_PATH}/libmha_bwd.so DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
 install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
 # copy v3 kernels to destination
-# so far, there are only gfx942 and gfx950 v3 kernels
+if(NOT EXISTS "${__AITER_SOURCE_DIR}/hsa")
+  message(FATAL_ERROR "Cannot find AITER v3 kernels location at ${__AITER_SOURCE_DIR}/hsa.")
+  continue()
+endif()
 foreach(ARCH IN LISTS CMAKE_HIP_ARCHITECTURES)
   string(TOLOWER "${ARCH}" ARCH)
-  if(NOT "${ARCH}" IN_LIST V3_ASM_ARCHS_SUPPORTED)
-    continue()
-  endif()
   foreach(KERNEL_TYPE IN ITEMS fmha_v3_fwd fmha_v3_bwd)
+    if(NOT EXISTS "${__AITER_SOURCE_DIR}/hsa/${ARCH}/${KERNEL_TYPE}")
+      message(WARNING "No AITER ${KERNEL_TYPE} kernels found for architecture ${ARCH}.")
+      continue()
+    endif()
     file(REMOVE_RECURSE ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib/aiter/${ARCH}/${KERNEL_TYPE})
     install(DIRECTORY
           ${__AITER_SOURCE_DIR}/hsa/${ARCH}/${KERNEL_TYPE}
