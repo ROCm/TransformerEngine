@@ -28,6 +28,8 @@ from transformer_engine.pytorch.utils import (
 if IS_HIP_EXTENSION:
     from transformer_engine.pytorch.utils import is_mi200, is_mi308
 
+from unittest import mock
+
 from transformer_engine.pytorch import (
     autocast,
     quantized_model_init,
@@ -66,6 +68,13 @@ fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
 fp8_block_scaling_available = is_fp8_block_scaling_available()
 nvfp4_available = is_nvfp4_available()
+
+mxfp4_available = IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5)
+try:
+    import aiter  # noqa: F401
+    aiter_available = True
+except ImportError:
+    aiter_available = False
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
 
@@ -3270,3 +3279,149 @@ def test_noncontiguous():
     out = _run_module(g2, b)
 
     assert_allclose(out, outT, 1e-7)
+
+
+# ============================================================================
+# MXFP4 tests (gfx950 / MI355X only)
+# ============================================================================
+
+_mxfp4_skip = not (mxfp4_available and aiter_available)
+_mxfp4_reason = "MXFP4 A4W4 requires gfx950 + aiter"
+
+
+@pytest.mark.skipif(_mxfp4_skip, reason=_mxfp4_reason)
+@pytest.mark.parametrize("N", [128, 256, 512])
+@pytest.mark.parametrize("datatype", [torch.bfloat16])
+def test_mxfp4_gemm(N, datatype):
+    """AITER A4W4 GEMM: quantize → general_gemm → compare vs dequantized FP64 reference."""
+    from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer
+
+    inp = torch.randn(N, N, device="cuda", dtype=datatype)
+    weight = torch.randn(N, N, device="cuda", dtype=datatype)
+
+    input_quantizer = MXFP4Quantizer(rowwise=True, columnwise=False)
+    weight_quantizer = MXFP4Quantizer(
+        rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=True,
+    )
+
+    inp_fp4 = input_quantizer(inp)
+    weight_fp4 = weight_quantizer(weight)
+
+    out, *_ = general_gemm(
+        weight_fp4, inp_fp4, torch.bfloat16,
+        quantization_params=None, bias=None, use_split_accumulator=False,
+    )
+
+    ref = torch.matmul(
+        inp_fp4.dequantize().to(torch.float64),
+        weight_fp4.dequantize().to(torch.float64).T,
+    )
+
+    torch.testing.assert_close(
+        out.to(torch.float64), ref, rtol=0.125, atol=0.0675,
+    )
+
+
+@pytest.mark.skipif(_mxfp4_skip, reason=_mxfp4_reason)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("bias", [True, False])
+def test_linear_mxfp4(dtype, model, bias):
+    """TE Linear forward + backward with MXFP4BlockScaling recipe."""
+    mxfp4_recipe = recipe.MXFP4BlockScaling()
+    config = model_configs[model]
+
+    with mock.patch(
+        "transformer_engine.pytorch.module.linear._is_mxfp4_enabled", return_value=True,
+    ), quantized_model_init(enabled=True, recipe=mxfp4_recipe):
+        te_linear = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=bias,
+            params_dtype=dtype,
+            device="cuda",
+        ).eval()
+
+    inp = torch.randn(
+        config.max_seqlen_q, 1, config.hidden_size,
+        dtype=dtype, device="cuda", requires_grad=True,
+    )
+
+    with mock.patch(
+        "transformer_engine.pytorch.module.linear._is_mxfp4_enabled", return_value=True,
+    ), autocast(enabled=True, recipe=mxfp4_recipe):
+        out = te_linear(inp)
+
+    assert out.shape == (config.max_seqlen_q, 1, 4 * config.hidden_size)
+    assert not torch.isnan(out).any(), "NaN in forward output"
+    assert not torch.isinf(out).any(), "Inf in forward output"
+
+    loss = out.sum()
+    loss.backward()
+
+    assert inp.grad is not None, "No gradient for input"
+    assert not torch.isnan(inp.grad).any(), "NaN in input gradient"
+    for name, p in te_linear.named_parameters():
+        if p.requires_grad:
+            assert p.grad is not None, f"No gradient for {name}"
+            assert not torch.isnan(p.grad).any(), f"NaN in gradient for {name}"
+
+    ref = torch.nn.functional.linear(
+        inp.detach().to(torch.float64),
+        te_linear.weight.detach().to(torch.float64),
+        te_linear.bias.detach().to(torch.float64) if bias else None,
+    )
+    torch.testing.assert_close(out.detach().to(torch.float64), ref, rtol=0.5, atol=2.0)
+
+
+@pytest.mark.skipif(_mxfp4_skip, reason=_mxfp4_reason)
+@pytest.mark.parametrize("dtype", [torch.bfloat16])
+@pytest.mark.parametrize("model", ["small"])
+@pytest.mark.parametrize("normalization", all_normalizations)
+@pytest.mark.parametrize("bias", [True, False])
+def test_layernorm_linear_mxfp4(dtype, model, normalization, bias):
+    """TE LayerNormLinear forward + backward with MXFP4BlockScaling recipe."""
+    mxfp4_recipe = recipe.MXFP4BlockScaling()
+    config = model_configs[model]
+
+    with mock.patch(
+        "transformer_engine.pytorch.module.linear._is_mxfp4_enabled", return_value=True,
+    ), mock.patch(
+        "transformer_engine.pytorch.module.layernorm_linear._is_mxfp4_enabled",
+        return_value=True,
+    ), quantized_model_init(enabled=True, recipe=mxfp4_recipe):
+        te_ln_linear = LayerNormLinear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=bias,
+            normalization=normalization,
+            params_dtype=dtype,
+            device="cuda",
+        ).eval()
+
+    inp = torch.randn(
+        config.max_seqlen_q, 1, config.hidden_size,
+        dtype=dtype, device="cuda", requires_grad=True,
+    )
+
+    with mock.patch(
+        "transformer_engine.pytorch.module.linear._is_mxfp4_enabled", return_value=True,
+    ), mock.patch(
+        "transformer_engine.pytorch.module.layernorm_linear._is_mxfp4_enabled",
+        return_value=True,
+    ), autocast(enabled=True, recipe=mxfp4_recipe):
+        out = te_ln_linear(inp)
+
+    assert out.shape == (config.max_seqlen_q, 1, 4 * config.hidden_size)
+    assert not torch.isnan(out).any(), "NaN in forward output"
+    assert not torch.isinf(out).any(), "Inf in forward output"
+
+    loss = out.sum()
+    loss.backward()
+
+    assert inp.grad is not None, "No gradient for input"
+    assert not torch.isnan(inp.grad).any(), "NaN in input gradient"
+    for name, p in te_ln_linear.named_parameters():
+        if p.requires_grad:
+            assert p.grad is not None, f"No gradient for {name}"
+            assert not torch.isnan(p.grad).any(), f"NaN in gradient for {name}"
