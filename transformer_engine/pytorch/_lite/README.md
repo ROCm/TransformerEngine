@@ -77,6 +77,7 @@ _lite/
   # Distributed
   comm.py              # Comm-overlap stubs (not available; use torch.distributed)
   context_parallel.py  # THD <-> BSHD conversion helpers
+  mori_ep.py           # Expert parallelism via MORI (dispatch/combine, autograd)
 
   # Optimizer
   multi_tensor.py      # Multi-tensor Adam, SGD, scale, L2 norm (PyTorch)
@@ -251,16 +252,65 @@ permutation ops. Performance difference is most visible at high expert counts.
 |---------|------|------------|
 | Comm-overlap (AG/RS + GEMM) | **Not available** (stubs raise error) | Full support |
 | NVSHMEM integration | **Not available** | Full support |
+| Expert parallelism (EP) | MORI dispatch/combine | NCCL / NVSHMEM |
 | `torch.distributed` | Works normally | Works normally |
 | Tensor parallelism | No built-in support | Integrated in modules |
 | Sequence parallelism | No built-in support | Integrated in modules |
 | Context parallelism helpers | THD <-> BSHD conversion only | Full support |
 
-**Gaps:** The most significant gap overall. All comm-overlap APIs are stubs.
-Multi-GPU training works via standard `torch.distributed` (DDP, FSDP), but the
-fused communication + compute overlap that TE provides for large-scale training
-is not available. This primarily affects performance at scale rather than
-correctness.
+**Gaps:** Comm-overlap APIs remain stubs. Multi-GPU training works via standard
+`torch.distributed` (DDP, FSDP), but fused communication + compute overlap is
+not available. Tensor and sequence parallelism have no built-in support.
+
+Expert parallelism is now supported via the MORI integration (see below), which
+bridges the most significant distributed gap for MoE workloads.
+
+---
+
+### Expert Parallelism (MORI)
+
+The `mori_ep` module integrates AMD's [MORI](https://github.com/ROCm/mori)
+(Modular RDMA Interface) library to provide high-performance distributed expert
+parallelism for MoE pipelines. MORI handles token dispatch/combine across GPUs
+using XGMI (intra-node) and RDMA (inter-node) without requiring C++ extensions.
+
+**Requirements:** `pip install mori` (or build from source with ROCm 6.4+).
+MORI shmem must be initialized after `torch.distributed.init_process_group()`.
+
+| Feature | Lite (MORI) | Full Build |
+|---------|-------------|------------|
+| Token dispatch (flat layout) | `MoriExpertParallel.dispatch` | NCCL all-to-all |
+| Token combine (flat layout) | `MoriExpertParallel.combine` | NCCL all-to-all |
+| Per-expert layout (grouped GEMM) | `dispatch_standard_moe` / `combine_standard_moe` | Custom kernels |
+| Layout conversion (flat <-> per-expert) | `convert_dispatch_to_standard` / `convert_standard_to_combine_input` | N/A |
+| Autograd (flat layout training) | `MoriEPDispatch` / `MoriEPCombine` | Integrated in MoE module |
+| Autograd (per-expert layout training) | `MoriEPDispatchStdMoE` / `MoriEPCombineStdMoE` | Integrated in MoE module |
+| Routing map conversion (mask <-> index) | `mask_to_index` / `index_to_mask` | N/A (native format) |
+| Intra-node transport (XGMI) | Yes | N/A (NCCL) |
+| Inter-node transport (RDMA) | Yes (multiple kernel types) | N/A (NCCL) |
+| FP8 quantized dispatch | `fp8_direct_cast` mode | Yes |
+| Convenience dispatch+combine cycle | `dispatch_and_combine` | N/A |
+
+**Kernel types:** `intra_node` (default), `inter_node`, `inter_node_v1`,
+`inter_node_v1_ll`, `async_ll`. Standard MoE layout requires `intra_node` or
+`inter_node_v1_ll`.
+
+**EP gaps vs full build:**
+
+- **No integration with TE's `MoE` module layer** -- MORI EP is a standalone
+  primitive. The full build's `MoE` module handles EP dispatch/combine
+  transparently within its forward pass; with lite, you must call the MORI APIs
+  explicitly in your training loop.
+- **No comm-overlap with expert GEMM** -- dispatch and GEMM run sequentially.
+  The full build can overlap EP communication with expert computation.
+- **No pipeline-parallel EP** -- only data-parallel expert parallelism is
+  supported. No integration with pipeline stages or interleaved scheduling.
+- **No heterogeneous expert placement** -- assumes uniform
+  `num_experts_per_rank` across all ranks. The full build supports uneven expert
+  distribution.
+- **Standard MoE layout limited to two kernel types** -- `dispatch_standard_moe`
+  / `combine_standard_moe` require MORI built with `ENABLE_STANDARD_MOE_ADAPT=ON`
+  and only work with `intra_node` or `inter_node_v1_ll` kernels.
 
 ---
 
@@ -292,11 +342,14 @@ not the training bottleneck.
 | Quantization | Full | Good (Triton) | Triton cast kernels |
 | RoPE | Basic only | Moderate | AITER / PyTorch |
 | MOE | Full | Moderate | Triton sort / PyTorch |
+| Expert parallelism | Full (standalone) | Good (MORI) | MORI XGMI/RDMA |
 | Comm-overlap | **None** | N/A | Stubs |
 | Multi-tensor ops | Full | Lower | PyTorch loops |
 
 The lite module provides **functional correctness** across all major compute
 paths. Performance is competitive for GEMM, attention, norms, and quantization
-where AITER or Triton kernels are available. The primary gaps are **comm-overlap**
-(not available), **RoPE** (missing advanced features), and **fused compound
-modules** (LayerNormLinear, LayerNormMLP) which are full-build-only.
+where AITER or Triton kernels are available. Expert parallelism is now available
+via MORI for distributed MoE workloads. The remaining primary gaps are
+**comm-overlap** (not available), **RoPE** (missing advanced features), and
+**fused compound modules** (LayerNormLinear, LayerNormMLP) which are
+full-build-only.
