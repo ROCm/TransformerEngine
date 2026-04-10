@@ -196,10 +196,6 @@ def _train(args):
     # Build the model with the specified context
     with quantized_model_init(enabled=args.quantized_init, recipe=fp8_recipe):
         model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)
-    # Move the model to the correct device
-    if not args.memory_profile and not args.profile:
-        # weights_only = False when we have fp8 param in state dict
-        model.load_state_dict(torch.load('fsdp_model.pth', weights_only=not args.quantized_init))
     model.to(device)
 
     # Creating a DeviceMesh for fully_shard
