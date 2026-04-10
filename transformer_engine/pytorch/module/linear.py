@@ -5,6 +5,7 @@
 # See LICENSE for license information.
 
 """Linear API"""
+import os
 from typing import Callable, Dict, Optional, Tuple, Union, List
 from functools import reduce
 from operator import mul as multiply_op
@@ -76,8 +77,13 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 
 def _is_mxfp4_enabled():
-    from megatron.core.fp4_utils import is_mxfp4_phase
-    return is_mxfp4_phase()
+    if os.environ.get("FP4", "false").lower() not in ("true", "1", "yes"):
+        return False
+    try:
+        from megatron.core.fp4_utils import is_mxfp4_phase
+        return bool(is_mxfp4_phase())
+    except Exception:
+        return os.environ.get("FP4_RECIPE", "").lower() == "mxfp4"
 
 
 __all__ = ["Linear"]
