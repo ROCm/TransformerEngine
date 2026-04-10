@@ -15,6 +15,7 @@ Run with:
 import os
 import pytest
 import torch
+import torch.nn.functional as F
 
 # Ensure lite mode is active before importing TE
 os.environ["NVTE_LITE"] = "1"
@@ -961,6 +962,495 @@ class TestAttention:
 
 
 # ---------------------------------------------------------------------------
+# MoE router tests
+# ---------------------------------------------------------------------------
+
+class TestMoERouter:
+    """Test MoE router operations in lite mode."""
+
+    SEED = 42
+
+    def _seed(self):
+        torch.manual_seed(self.SEED)
+        torch.cuda.manual_seed(self.SEED)
+
+    # -- fused_topk_with_score_function forward ----------------------------
+
+    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
+    @pytest.mark.parametrize("topk", [1, 2])
+    def test_topk_fwd_shapes(self, device, score_function, topk):
+        """Forward returns (probs, routing_map, intermediate_output) with correct shapes."""
+        self._seed()
+        N, E = 32, 8
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        expert_bias = torch.randn(E, device=device) if score_function == "sigmoid" else None
+
+        probs, routing_map, intermediate = tex.fused_topk_with_score_function_fwd(
+            logits, topk, False, None, None, 1.0, score_function, expert_bias,
+        )
+        assert probs.shape == (N, E)
+        assert routing_map.shape == (N, E)
+        assert intermediate.shape == (N, E)
+        assert routing_map.dtype == torch.bool
+        # Exactly topk experts selected per token
+        assert (routing_map.sum(dim=-1) == topk).all()
+
+    def test_softmax_pre_softmax(self, device):
+        """Pre-softmax mode: softmax applied before topk."""
+        self._seed()
+        N, E, topk = 16, 8, 2
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        probs, routing_map, intermediate = tex.fused_topk_with_score_function_fwd(
+            logits, topk, True, None, None, 1.0, "softmax", None,
+        )
+        # intermediate should be softmax output (sums to 1 per row)
+        torch.testing.assert_close(
+            intermediate.sum(dim=-1),
+            torch.ones(N, device=device),
+            atol=1e-5, rtol=1e-5,
+        )
+
+    def test_softmax_post_softmax(self, device):
+        """Post-softmax mode: softmax applied after topk over selected experts."""
+        self._seed()
+        N, E, topk = 16, 8, 2
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        probs, routing_map, _ = tex.fused_topk_with_score_function_fwd(
+            logits, topk, False, None, None, 1.0, "softmax", None,
+        )
+        # Selected probs should sum to 1 per token (post-softmax over topk)
+        selected_probs = probs[routing_map].reshape(N, topk)
+        torch.testing.assert_close(
+            selected_probs.sum(dim=-1),
+            torch.ones(N, device=device),
+            atol=1e-5, rtol=1e-5,
+        )
+
+    def test_sigmoid_values(self, device):
+        """Sigmoid scores are in (0, 1) range."""
+        self._seed()
+        N, E, topk = 16, 8, 1
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        _, _, intermediate = tex.fused_topk_with_score_function_fwd(
+            logits, topk, False, None, None, 1.0, "sigmoid", None,
+        )
+        # intermediate holds sigmoid output
+        ref_sigmoid = torch.sigmoid(logits)
+        torch.testing.assert_close(intermediate, ref_sigmoid, atol=1e-6, rtol=1e-6)
+
+    def test_sigmoid_expert_bias(self, device):
+        """Expert bias affects expert selection but is removed from final scores."""
+        self._seed()
+        N, E, topk = 32, 8, 2
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        bias = torch.zeros(E, device=device)
+        bias[0] = 100.0  # strongly bias towards expert 0
+
+        probs, routing_map, _ = tex.fused_topk_with_score_function_fwd(
+            logits, topk, False, None, None, 1.0, "sigmoid", bias,
+        )
+        # Expert 0 should be selected for (almost) every token
+        assert routing_map[:, 0].sum() >= N * 0.9
+
+    def test_sigmoid_normalization_topk_gt1(self, device):
+        """With topk > 1, sigmoid scores are normalized to sum to ~1."""
+        self._seed()
+        N, E, topk = 16, 8, 3
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        probs, routing_map, _ = tex.fused_topk_with_score_function_fwd(
+            logits, topk, False, None, None, 1.0, "sigmoid", None,
+        )
+        selected = probs[routing_map].reshape(N, topk)
+        # Should be approximately normalized (sum ≈ 1)
+        torch.testing.assert_close(
+            selected.sum(dim=-1),
+            torch.ones(N, device=device),
+            atol=1e-5, rtol=1e-5,
+        )
+
+    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
+    def test_group_topk(self, device, score_function):
+        """Group top-k selects experts only from winning groups."""
+        self._seed()
+        N, E, topk = 32, 16, 4
+        num_groups, group_topk = 4, 2  # 4 groups of 4 experts, pick 2 groups
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        expert_bias = torch.randn(E, device=device) if score_function == "sigmoid" else None
+
+        probs, routing_map, intermediate = tex.fused_topk_with_score_function_fwd(
+            logits, topk, False, num_groups, group_topk, 1.0,
+            score_function, expert_bias,
+        )
+        assert probs.shape == (N, E)
+        assert routing_map.dtype == torch.bool
+        # Exactly topk experts selected per token
+        assert (routing_map.sum(dim=-1) == topk).all()
+
+        # Selected experts should come from at most group_topk groups
+        group_size = E // num_groups
+        for i in range(N):
+            selected_experts = routing_map[i].nonzero(as_tuple=True)[0]
+            groups_used = set((idx.item() // group_size) for idx in selected_experts)
+            assert len(groups_used) <= group_topk, (
+                f"Token {i}: experts from {len(groups_used)} groups, expected <= {group_topk}"
+            )
+
+    def test_scaling_factor(self, device):
+        """Scaling factor multiplies the output probs."""
+        self._seed()
+        N, E, topk = 16, 8, 2
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        scale = 2.5
+        probs_s1, _, _ = tex.fused_topk_with_score_function_fwd(
+            logits, topk, True, None, None, 1.0, "softmax", None,
+        )
+        probs_s2, _, _ = tex.fused_topk_with_score_function_fwd(
+            logits, topk, True, None, None, scale, "softmax", None,
+        )
+        torch.testing.assert_close(probs_s2, probs_s1 * scale, atol=1e-5, rtol=1e-5)
+
+    # -- fused_topk_with_score_function backward ---------------------------
+
+    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
+    @pytest.mark.parametrize("topk", [1, 2])
+    def test_topk_bwd_shapes(self, device, score_function, topk):
+        """Backward returns grad_logits with correct shape."""
+        self._seed()
+        N, E = 32, 8
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        expert_bias = torch.randn(E, device=device) if score_function == "sigmoid" else None
+
+        probs, routing_map, intermediate = tex.fused_topk_with_score_function_fwd(
+            logits, topk, False, None, None, 1.0, score_function, expert_bias,
+        )
+        grad_probs = torch.randn_like(probs)
+        grad_logits = tex.fused_topk_with_score_function_bwd(
+            N, E, routing_map, intermediate, grad_probs, topk,
+            False, 1.0, score_function,
+        )
+        assert grad_logits.shape == (N, E)
+
+    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
+    def test_topk_bwd_unselected_zero(self, device, score_function):
+        """Gradients at unselected expert positions should be zero (softmax post) or
+        propagated through score function (softmax pre / sigmoid)."""
+        self._seed()
+        N, E, topk = 16, 8, 2
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+
+        probs, routing_map, intermediate = tex.fused_topk_with_score_function_fwd(
+            logits, topk, False, None, None, 1.0, score_function, None,
+        )
+        grad_probs = torch.randn_like(probs)
+        grad_logits = tex.fused_topk_with_score_function_bwd(
+            N, E, routing_map, intermediate, grad_probs, topk,
+            False, 1.0, score_function,
+        )
+        # grad_logits should not be all zeros
+        assert not torch.all(grad_logits == 0)
+
+    # -- fused_score_for_moe_aux_loss --------------------------------------
+
+    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
+    def test_aux_loss_score_fwd(self, device, score_function):
+        """fused_score_for_moe_aux_loss_fwd returns 3 tensors."""
+        self._seed()
+        N, E, topk = 32, 8, 2
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+
+        scores, routing_map, intermediate = tex.fused_score_for_moe_aux_loss_fwd(
+            logits, topk, score_function,
+        )
+        assert scores.shape == (N, E)
+        assert routing_map.shape == (N, E)
+        assert intermediate.shape == (N, E)
+
+        if score_function == "sigmoid":
+            ref = torch.sigmoid(logits)
+        else:
+            ref = F.softmax(logits, dim=-1)
+        torch.testing.assert_close(scores, ref, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
+    def test_aux_loss_score_bwd(self, device, score_function):
+        """fused_score_for_moe_aux_loss_bwd returns correct gradient shape."""
+        self._seed()
+        N, E, topk = 32, 8, 2
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        scores, _, intermediate = tex.fused_score_for_moe_aux_loss_fwd(
+            logits, topk, score_function,
+        )
+        grad_scores = torch.randn_like(scores)
+        grad_logits = tex.fused_score_for_moe_aux_loss_bwd(
+            N, E, intermediate, grad_scores, topk, score_function,
+        )
+        assert grad_logits.shape == (N, E)
+
+    # -- Aux loss fwd/bwd return + autograd ---------------------------------
+
+    def test_aux_loss_fwd_returns_tuple(self, device):
+        """fused_moe_aux_loss_fwd returns (loss, Const_buf) matching C++ interface."""
+        self._seed()
+        N, E, topk, coeff = 32, 8, 2, 0.01
+        probs = torch.rand(N, E, device=device, dtype=torch.float32)
+        tpe = torch.randint(1, N, (E,), device=device, dtype=torch.int32)
+        total = int(tpe.sum().item())
+
+        result = tex.fused_moe_aux_loss_fwd(
+            probs, tpe, total, E, N, E, topk, coeff,
+        )
+        assert isinstance(result, tuple), f"Expected tuple, got {type(result)}"
+        loss, const_buf = result
+        assert loss.shape == (), f"loss should be scalar, got {loss.shape}"
+        assert const_buf.shape == (), f"Const_buf should be scalar, got {const_buf.shape}"
+        assert const_buf.dtype == torch.float32
+
+        # Verify Const_buf value
+        expected_c = (E * coeff) / topk / (total * total)
+        torch.testing.assert_close(
+            const_buf, torch.tensor(expected_c, dtype=torch.float32, device=device),
+            atol=1e-6, rtol=1e-6,
+        )
+
+    def test_aux_loss_bwd_uses_const_buf(self, device):
+        """fused_moe_aux_loss_bwd produces correct gradient using Const_buf."""
+        self._seed()
+        N, E, topk, coeff = 16, 8, 2, 0.05
+        probs = torch.rand(N, E, device=device, dtype=torch.float32)
+        tpe = torch.randint(1, N, (E,), device=device, dtype=torch.int32)
+        total = int(tpe.sum().item())
+
+        loss, const_buf = tex.fused_moe_aux_loss_fwd(
+            probs, tpe, total, E, N, E, topk, coeff,
+        )
+        grad_aux = torch.tensor(1.0, device=device, dtype=torch.float32)
+        grad_probs = tex.fused_moe_aux_loss_bwd(const_buf, tpe, N, E, grad_aux)
+
+        assert grad_probs.shape == (N, E)
+        # grad_probs[j, i] = C_coeff * tokens_per_expert[i] * grad_aux_loss
+        for i in range(E):
+            expected = const_buf.item() * tpe[i].item() * grad_aux.item()
+            torch.testing.assert_close(
+                grad_probs[:, i],
+                torch.full((N,), expected, device=device),
+                atol=1e-5, rtol=1e-5,
+            )
+
+    def test_autograd_aux_loss(self, device):
+        """High-level fused_moe_aux_loss propagates gradients end-to-end."""
+        from transformer_engine.pytorch.router import fused_moe_aux_loss
+        self._seed()
+        N, E, topk, coeff = 16, 8, 2, 0.01
+        probs = torch.rand(N, E, device=device, dtype=torch.float32, requires_grad=True)
+        tpe = torch.randint(1, N, (E,), device=device, dtype=torch.int32)
+        total = int(tpe.sum().item())
+
+        loss = fused_moe_aux_loss(probs, tpe, total, E, topk, coeff)
+        loss.backward()
+        assert probs.grad is not None
+        assert probs.grad.shape == (N, E)
+        assert not torch.all(probs.grad == 0)
+
+    # -- High-level autograd integration -----------------------------------
+
+    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
+    def test_autograd_topk(self, device, score_function):
+        """High-level fused_topk_with_score_function propagates gradients."""
+        from transformer_engine.pytorch.router import fused_topk_with_score_function
+        self._seed()
+        N, E, topk = 16, 8, 2
+        logits = torch.randn(N, E, device=device, dtype=torch.float32, requires_grad=True)
+        expert_bias = torch.randn(E, device=device) if score_function == "sigmoid" else None
+
+        probs, routing_map = fused_topk_with_score_function(
+            logits, topk, False, None, None, 1.0, score_function, expert_bias,
+        )
+        probs.sum().backward()
+        assert logits.grad is not None
+        assert logits.grad.shape == (N, E)
+        assert not torch.all(logits.grad == 0)
+
+    # -- Numerical gradient verification ------------------------------------
+
+    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
+    @pytest.mark.parametrize("topk", [1, 2, 3])
+    def test_gradient_vs_finite_diff(self, device, score_function, topk):
+        """Verify backward matches finite-difference approximation.
+
+        Uses random grad_out (uniform grad is degenerate for normalization)
+        and tolerances appropriate for float32 finite differences.
+        """
+        self._seed()
+        N, E = 4, 8
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        eps = 1e-4  # larger eps for float32 stability
+
+        # Forward + backward
+        probs, rmap, inter = tex.fused_topk_with_score_function_fwd(
+            logits, topk, False, None, None, 1.0, score_function, None,
+        )
+        grad_out = torch.randn_like(probs)
+        grad_ana = tex.fused_topk_with_score_function_bwd(
+            N, E, rmap, inter, grad_out, topk, False, 1.0, score_function,
+        )
+
+        # Finite-difference per element, only where routing is stable
+        max_err = 0.0
+        n_checked = 0
+        for i in range(N):
+            for j in range(E):
+                logits_p = logits.clone()
+                logits_p[i, j] += eps
+                probs_p, rmap_p, _ = tex.fused_topk_with_score_function_fwd(
+                    logits_p, topk, False, None, None, 1.0, score_function, None,
+                )
+                logits_m = logits.clone()
+                logits_m[i, j] -= eps
+                probs_m, rmap_m, _ = tex.fused_topk_with_score_function_fwd(
+                    logits_m, topk, False, None, None, 1.0, score_function, None,
+                )
+                if not (torch.equal(rmap_p, rmap) and torch.equal(rmap_m, rmap)):
+                    continue  # skip topk discontinuity
+                fd = ((probs_p - probs_m) * grad_out).sum() / (2 * eps)
+                err = abs(grad_ana[i, j].item() - fd.item())
+                max_err = max(max_err, err)
+                n_checked += 1
+
+        assert n_checked > 0, "No stable routing points found for finite-diff check"
+        assert max_err < 0.01, (
+            f"Max gradient error {max_err:.4e} for {score_function} topk={topk} "
+            f"({n_checked} points checked)"
+        )
+
+    def test_sigmoid_topk1_no_normalization(self, device):
+        """Sigmoid with topk=1 skips normalization — score is raw sigmoid * scale."""
+        self._seed()
+        N, E = 16, 8
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        probs, rmap, inter = tex.fused_topk_with_score_function_fwd(
+            logits, 1, False, None, None, 1.0, "sigmoid", None,
+        )
+        # For each token, the selected prob should equal sigmoid(logit)
+        selected_probs = probs[rmap]
+        selected_sigmoid = inter[rmap]
+        torch.testing.assert_close(selected_probs, selected_sigmoid, atol=1e-6, rtol=1e-6)
+
+    def test_pre_softmax_backward(self, device):
+        """Pre-softmax backward: gradient flows through all experts via softmax Jacobian."""
+        from transformer_engine.pytorch.router import fused_topk_with_score_function
+        self._seed()
+        N, E, topk = 8, 8, 2
+        logits = torch.randn(N, E, device=device, dtype=torch.float32, requires_grad=True)
+
+        probs, _ = fused_topk_with_score_function(
+            logits, topk, True, None, None, 1.0, "softmax", None,
+        )
+        probs.sum().backward()
+        # Pre-softmax: gradient should be non-zero at ALL expert positions
+        # (softmax couples all inputs), not just selected ones
+        assert logits.grad is not None
+        non_zero_per_token = (logits.grad.abs() > 1e-7).sum(dim=-1)
+        assert (non_zero_per_token > topk).all(), (
+            "Pre-softmax backward should produce non-zero gradients beyond selected experts"
+        )
+
+    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
+    def test_triton_vs_pytorch_fallback(self, device, score_function):
+        """Triton-fused path matches the PyTorch-native fallback."""
+        from transformer_engine.pytorch._lite.router import (
+            _fused_topk_fwd_pytorch, _fused_topk_bwd_pytorch,
+        )
+        from transformer_engine.pytorch.triton.fused_router import (
+            fused_topk_with_score_function_fwd as triton_fwd,
+            fused_topk_with_score_function_bwd as triton_bwd,
+        )
+        self._seed()
+        N, E, topk = 32, 8, 2
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        expert_bias = torch.randn(E, device=device) if score_function == "sigmoid" else None
+
+        # Forward
+        p_tri, r_tri, i_tri = triton_fwd(
+            logits, topk, False, 1.0, score_function, expert_bias,
+        )
+        p_pt, r_pt, i_pt = _fused_topk_fwd_pytorch(
+            logits, topk, False, None, None, 1.0, score_function, expert_bias,
+        )
+        torch.testing.assert_close(r_tri, r_pt, msg="routing_map mismatch")
+        torch.testing.assert_close(p_tri, p_pt, atol=1e-5, rtol=1e-5, msg="probs fwd mismatch")
+        torch.testing.assert_close(i_tri, i_pt, atol=1e-5, rtol=1e-5, msg="intermediate mismatch")
+
+        # Backward
+        grad_out = torch.randn_like(p_tri)
+        g_tri = triton_bwd(N, E, r_tri, i_tri, grad_out, topk, False, 1.0, score_function)
+        g_pt = _fused_topk_bwd_pytorch(
+            N, E, r_pt, i_pt, grad_out, topk, False, 1.0, score_function,
+        )
+        torch.testing.assert_close(g_tri, g_pt, atol=1e-5, rtol=1e-5, msg="grad_logits mismatch")
+
+    def test_sigmoid_scaling_factor(self, device):
+        """Scaling factor works correctly with sigmoid scoring."""
+        self._seed()
+        N, E, topk = 16, 8, 2
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        scale = 3.0
+        p1, r1, _ = tex.fused_topk_with_score_function_fwd(
+            logits, topk, False, None, None, 1.0, "sigmoid", None,
+        )
+        p2, r2, _ = tex.fused_topk_with_score_function_fwd(
+            logits, topk, False, None, None, scale, "sigmoid", None,
+        )
+        # Same routing
+        torch.testing.assert_close(r1, r2)
+        # Probs scaled
+        torch.testing.assert_close(p2, p1 * scale, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
+    def test_autograd_group_topk(self, device, score_function):
+        """Autograd works end-to-end with group top-k."""
+        from transformer_engine.pytorch.router import fused_topk_with_score_function
+        self._seed()
+        N, E, topk = 16, 16, 4
+        num_groups, group_topk = 4, 2
+        logits = torch.randn(N, E, device=device, dtype=torch.float32, requires_grad=True)
+        expert_bias = torch.randn(E, device=device) if score_function == "sigmoid" else None
+
+        probs, routing_map = fused_topk_with_score_function(
+            logits, topk, False, num_groups, group_topk, 1.0,
+            score_function, expert_bias,
+        )
+        probs.sum().backward()
+        assert logits.grad is not None
+        assert not torch.all(logits.grad == 0)
+
+    @pytest.mark.parametrize("score_function", ["softmax", "sigmoid"])
+    def test_triton_vs_pytorch_group_topk(self, device, score_function):
+        """Triton group top-k matches PyTorch fallback."""
+        from transformer_engine.pytorch._lite.router import _fused_topk_fwd_pytorch
+        from transformer_engine.pytorch.triton.fused_router import (
+            fused_topk_with_score_function_fwd as triton_fwd,
+        )
+        self._seed()
+        N, E, topk = 32, 16, 4
+        num_groups, group_topk = 4, 2
+        logits = torch.randn(N, E, device=device, dtype=torch.float32)
+        expert_bias = torch.randn(E, device=device) if score_function == "sigmoid" else None
+
+        p_tri, r_tri, i_tri = triton_fwd(
+            logits, topk, False, 1.0, score_function, expert_bias,
+            num_groups, group_topk,
+        )
+        p_pt, r_pt, i_pt = _fused_topk_fwd_pytorch(
+            logits, topk, False, num_groups, group_topk, 1.0,
+            score_function, expert_bias,
+        )
+        torch.testing.assert_close(r_tri, r_pt, msg="group topk routing_map mismatch")
+        torch.testing.assert_close(
+            p_tri, p_pt, atol=1e-5, rtol=1e-5, msg="group topk probs mismatch",
+        )
+
+
+# ---------------------------------------------------------------------------
 # MoE permutation tests
 # ---------------------------------------------------------------------------
 
@@ -1194,6 +1684,230 @@ class TestMoEPermutation:
         triton_out, _ = sort_chunks_by_map(inp, ids, None, N, H, is_forward=False)
         pytorch_out = inp[ids.long()]
         torch.testing.assert_close(triton_out, pytorch_out)
+
+    # -- Mask-map path tests ------------------------------------------------
+
+    @staticmethod
+    def _make_routing_map(N, E, topK, device):
+        """Create a mask-format routing map: [N, E] int32 with topK ones per row."""
+        routing_map = torch.zeros(N, E, dtype=torch.int32, device=device)
+        for i in range(N):
+            experts = torch.randperm(E, device=device)[:topK]
+            routing_map[i, experts] = 1
+        return routing_map
+
+    @pytest.mark.parametrize("topK", [1, 2, 3])
+    def test_mask_map_permute_shapes(self, device, topK):
+        """moe_permute with mask map returns correct shapes."""
+        from transformer_engine.pytorch.permutation import moe_permute
+        self._seed()
+        N, H, E = 64, 128, 8
+        inp = torch.randn(N, H, device=device, dtype=self.DTYPE)
+        routing_map = self._make_routing_map(N, E, topK, device)
+        num_out = int(routing_map.sum().item())
+
+        perm, row_id_map = moe_permute(inp, routing_map, num_out_tokens=num_out, map_type="mask")
+        assert perm.shape == (num_out, H)
+        assert row_id_map.shape[0] == N
+
+    @pytest.mark.parametrize("topK", [1, 2])
+    def test_mask_map_roundtrip(self, device, topK):
+        """Mask-map permute then unpermute with merging_probs recovers weighted sum."""
+        from transformer_engine.pytorch.permutation import moe_permute, moe_unpermute
+        self._seed()
+        N, H, E = 32, 64, 8
+        inp = torch.randn(N, H, device=device, dtype=self.DTYPE)
+        routing_map = self._make_routing_map(N, E, topK, device)
+        num_out = int(routing_map.sum().item())
+
+        perm, row_id_map = moe_permute(inp, routing_map, num_out_tokens=num_out, map_type="mask")
+
+        # Create merging probs matching the routing map
+        probs_full = torch.rand(N, E, device=device, dtype=torch.float32) * routing_map.float()
+        # Normalize per token
+        probs_full = probs_full / probs_full.sum(dim=-1, keepdim=True).clamp(min=1e-6)
+
+        unperm = moe_unpermute(
+            perm, row_id_map, merging_probs=probs_full,
+            restore_shape=torch.Size([N, H]), map_type="mask",
+        )
+        assert unperm.shape == (N, H)
+
+    @pytest.mark.parametrize("topK", [1, 2])
+    def test_mask_map_backward(self, device, topK):
+        """Mask-map path propagates gradients through permute and unpermute."""
+        from transformer_engine.pytorch.permutation import moe_permute, moe_unpermute
+        self._seed()
+        N, H, E = 32, 64, 8
+        inp = torch.randn(N, H, device=device, dtype=torch.float32, requires_grad=True)
+        routing_map = self._make_routing_map(N, E, topK, device)
+        num_out = int(routing_map.sum().item())
+
+        perm, row_id_map = moe_permute(inp, routing_map, num_out_tokens=num_out, map_type="mask")
+        assert perm.requires_grad
+
+        # Backward through permute
+        perm.sum().backward()
+        assert inp.grad is not None
+        assert inp.grad.shape == inp.shape
+
+    @pytest.mark.parametrize("topK", [1, 2])
+    def test_mask_map_unpermute_backward_with_probs(self, device, topK):
+        """Unpermute backward propagates gradients to both act and probs."""
+        from transformer_engine.pytorch.permutation import moe_permute, moe_unpermute
+        self._seed()
+        N, H, E = 32, 64, 8
+        inp = torch.randn(N, H, device=device, dtype=torch.float32)
+        routing_map = self._make_routing_map(N, E, topK, device)
+        num_out = int(routing_map.sum().item())
+
+        perm, row_id_map = moe_permute(inp, routing_map, num_out_tokens=num_out, map_type="mask")
+        perm_detached = perm.detach().clone().requires_grad_(True)
+
+        probs_full = (torch.rand(N, E, device=device, dtype=torch.float32)
+                      * routing_map.float()).requires_grad_(True)
+
+        unperm = moe_unpermute(
+            perm_detached, row_id_map, merging_probs=probs_full,
+            restore_shape=torch.Size([N, H]), map_type="mask",
+        )
+        grad_out = torch.randn_like(unperm)
+        unperm.backward(grad_out)
+
+        assert perm_detached.grad is not None, "act_grad not propagated"
+        assert perm_detached.grad.shape == perm_detached.shape
+        assert probs_full.grad is not None, "probs_grad not propagated"
+        assert probs_full.grad.shape == probs_full.shape
+
+    # -- moe_permute_with_probs tests ---------------------------------------
+
+    @pytest.mark.parametrize("topK", [1, 2])
+    def test_permute_with_probs_forward(self, device, topK):
+        """moe_permute_with_probs permutes both tokens and probs."""
+        from transformer_engine.pytorch.permutation import moe_permute_with_probs
+        self._seed()
+        N, H, E = 32, 64, 8
+        inp = torch.randn(N, H, device=device, dtype=self.DTYPE)
+        routing_map = self._make_routing_map(N, E, topK, device)
+        probs = torch.rand(N, E, device=device, dtype=torch.float32) * routing_map.float()
+        num_out = int(routing_map.sum().item())
+
+        perm_out, perm_probs, row_id_map = moe_permute_with_probs(
+            inp, probs, routing_map, num_out_tokens=num_out,
+        )
+        assert perm_out.shape == (num_out, H)
+        assert perm_probs.shape == (num_out,)
+
+    @pytest.mark.parametrize("topK", [1, 2])
+    def test_permute_with_probs_backward(self, device, topK):
+        """moe_permute_with_probs backward propagates gradients to probs."""
+        from transformer_engine.pytorch.permutation import moe_permute_with_probs
+        self._seed()
+        N, H, E = 32, 64, 8
+        inp = torch.randn(N, H, device=device, dtype=torch.float32, requires_grad=True)
+        routing_map = self._make_routing_map(N, E, topK, device)
+        probs = (torch.rand(N, E, device=device, dtype=torch.float32)
+                 * routing_map.float()).requires_grad_(True)
+        num_out = int(routing_map.sum().item())
+
+        perm_out, perm_probs, row_id_map = moe_permute_with_probs(
+            inp, probs, routing_map, num_out_tokens=num_out,
+        )
+        # Backward through probs
+        perm_probs.sum().backward()
+        assert probs.grad is not None
+        assert probs.grad.shape == probs.shape
+
+    # -- Chunk-sort tests ---------------------------------------------------
+
+    def test_sort_chunks_by_index(self, device):
+        """moe_sort_chunks_by_index reorders chunks correctly."""
+        from transformer_engine.pytorch.permutation import moe_sort_chunks_by_index
+        self._seed()
+        H = 64
+        split_sizes = torch.tensor([10, 20, 15, 5], device=device, dtype=torch.int32)
+        N = int(split_sizes.sum().item())
+        inp = torch.randn(N, H, device=device, dtype=self.DTYPE, requires_grad=True)
+        sorted_indices = torch.tensor([2, 0, 3, 1], device=device, dtype=torch.int32)
+
+        output = moe_sort_chunks_by_index(inp, split_sizes, sorted_indices)
+        assert output.shape == (N, H)
+
+        # Verify chunks are reordered: chunk at sorted_indices[i] moves to position i
+        ref_chunks = torch.split(inp.detach(), split_sizes.tolist(), dim=0)
+        ref_output = torch.cat([ref_chunks[idx] for idx in sorted_indices.tolist()], dim=0)
+        torch.testing.assert_close(output.detach(), ref_output)
+
+    def test_sort_chunks_by_index_backward(self, device):
+        """moe_sort_chunks_by_index backward propagates gradients."""
+        from transformer_engine.pytorch.permutation import moe_sort_chunks_by_index
+        self._seed()
+        H = 64
+        split_sizes = torch.tensor([8, 12, 6], device=device, dtype=torch.int32)
+        N = int(split_sizes.sum().item())
+        inp = torch.randn(N, H, device=device, dtype=torch.float32, requires_grad=True)
+        sorted_indices = torch.tensor([1, 2, 0], device=device, dtype=torch.int32)
+
+        output = moe_sort_chunks_by_index(inp, split_sizes, sorted_indices)
+        output.sum().backward()
+        assert inp.grad is not None
+        assert inp.grad.shape == inp.shape
+
+    def test_sort_chunks_by_index_with_probs(self, device):
+        """moe_sort_chunks_by_index_with_probs reorders both tokens and probs."""
+        from transformer_engine.pytorch.permutation import moe_sort_chunks_by_index_with_probs
+        self._seed()
+        H = 64
+        split_sizes = torch.tensor([10, 20, 15], device=device, dtype=torch.int32)
+        N = int(split_sizes.sum().item())
+        inp = torch.randn(N, H, device=device, dtype=self.DTYPE)
+        probs = torch.rand(N, device=device, dtype=torch.float32)
+        sorted_indices = torch.tensor([2, 0, 1], device=device, dtype=torch.int32)
+
+        output, perm_probs = moe_sort_chunks_by_index_with_probs(
+            inp, probs, split_sizes, sorted_indices,
+        )
+        assert output.shape == (N, H)
+        assert perm_probs.shape == (N,)
+
+        # Verify probs are reordered consistently with tokens
+        ref_prob_chunks = torch.split(probs, split_sizes.tolist(), dim=0)
+        ref_probs = torch.cat([ref_prob_chunks[idx] for idx in sorted_indices.tolist()], dim=0)
+        torch.testing.assert_close(perm_probs, ref_probs)
+
+    # -- Numerical gradient verification for index-map ----------------------
+
+    @pytest.mark.parametrize("topK", [1, 2])
+    def test_index_map_gradient_numerical(self, device, topK):
+        """Verify index-map permute/unpermute gradients numerically."""
+        from transformer_engine.pytorch.permutation import moe_permute, moe_unpermute
+        self._seed()
+        N, H, E = 16, 32, 8
+        inp = torch.randn(N, H, device=device, dtype=torch.float32, requires_grad=True)
+        indices = torch.stack(
+            [torch.randperm(E, device=device)[:topK] for _ in range(N)]
+        ).to(torch.int32)
+        probs = torch.rand(N, topK, device=device, dtype=torch.float32).requires_grad_(True)
+
+        # Forward
+        perm, row_id_map = moe_permute(inp, indices, map_type="index")
+        perm_detached = perm.detach().clone().requires_grad_(True)
+        unperm = moe_unpermute(perm_detached, row_id_map, probs, map_type="index")
+
+        # Backward
+        grad_out = torch.randn(N, H, device=device, dtype=torch.float32)
+        unperm.backward(grad_out)
+
+        # Verify act_grad: manual computation
+        # unpermute gathers from permuted[row_id_map], applies probs, sums over topK
+        # So d(unperm)/d(perm[j]) = probs_flat[inv_map[j]] * (grad_out broadcast)
+        assert perm_detached.grad is not None
+        assert not torch.all(perm_detached.grad == 0), "act_grad is all zeros"
+
+        # Verify prob_grad: d(loss)/d(prob[i,k]) = sum_h(perm[row_id_map[i*topK+k], h] * grad_out[i, h])
+        assert probs.grad is not None
+        assert probs.grad.shape == (N, topK)
+        assert not torch.all(probs.grad == 0), "prob_grad is all zeros"
 
 
 # ---------------------------------------------------------------------------
