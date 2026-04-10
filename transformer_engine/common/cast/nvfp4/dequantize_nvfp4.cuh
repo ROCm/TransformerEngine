@@ -64,10 +64,7 @@ __global__ void __launch_bounds__(512)
 #ifndef __HIP_PLATFORM_AMD__
   float amax = *tensor_amax;
 #else
-  float amax = 1.0f;
-  if (tensor_amax != nullptr) {
-    amax = *tensor_amax;
-  }
+  float amax = (tensor_amax != nullptr) ? *tensor_amax : 1.0f;
 #endif
   constexpr float factor_inv = 1.0 / (6.0 * 448.0);
   float final_scale = static_cast<float>(scale) * amax * factor_inv;
