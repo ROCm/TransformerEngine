@@ -28,8 +28,6 @@ using namespace test;
 namespace {
 
 constexpr size_t kFP4BlockSize1D = 16;
-constexpr size_t kFP4BlockSize2DY = 16;
-constexpr size_t kFP4BlockSize2DX = 16;
 
 // Generates random FP8 (E4M3) scale values by sampling raw 8-bit patterns.
 // Only finite, non-negative scales are allowed.
@@ -53,43 +51,6 @@ void generate_1d_scales(fp8e4m3* scale_buffer,
     }
 }
 
-// Generate compact 2D scales over 16x16 tiles, then replicate them row-wise
-// into the physical scale layout expected by the existing 1D dequant kernel.
-//
-// replicated[row][block_x] = compact_2d[row / 16][block_x]
-void generate_2d_scales_with_replication(fp8e4m3* scale_buffer,
-                                         const size_t rows,
-                                         const size_t cols,
-                                         const size_t unpadded_blocks_Y,
-                                         const size_t unpadded_blocks_X,
-                                         const size_t scales_stride,
-                                         std::mt19937& gen,
-                                         std::uniform_int_distribution<int>& finite_nonneg_e4m3_dis) {
-    const size_t total_elems = unpadded_blocks_Y * scales_stride;
-    std::memset(scale_buffer, 0, total_elems * sizeof(fp8e4m3));
-
-    const size_t blocks_y = divide_round_up(rows, kFP4BlockSize2DY);
-    const size_t blocks_x = divide_round_up(cols, kFP4BlockSize2DX);
-
-    std::vector<fp8e4m3> compact_2d(blocks_y * blocks_x);
-
-    for (size_t by = 0; by < blocks_y; ++by) {
-        for (size_t bx = 0; bx < blocks_x; ++bx) {
-            const size_t compact_idx = by * blocks_x + bx;
-            const uint8_t scale = static_cast<uint8_t>(finite_nonneg_e4m3_dis(gen));
-            std::memcpy(&compact_2d[compact_idx], &scale, sizeof(scale));
-        }
-    }
-
-    for (size_t row = 0; row < unpadded_blocks_Y; ++row) {
-        const size_t by = row / kFP4BlockSize2DY;
-        for (size_t bx = 0; bx < unpadded_blocks_X; ++bx) {
-            const size_t scale_idx = row * scales_stride + bx;
-            scale_buffer[scale_idx] = compact_2d[by * blocks_x + bx];
-        }
-    }
-}
-
 // Write one mathematical FP4 E2M1 value, represented as a raw nibble [0, 15],
 // into packed storage. Two mathematical FP4 values are packed per byte:
 // even mathematical index -> low nibble, odd mathematical index -> high nibble.
@@ -108,21 +69,15 @@ void set_fp4_nibble(fp4e2m1* data, const size_t mathematical_idx, const uint8_t 
     }
 }
 
-// Populate FP4 (E2M1) tensor using packed 4-bit encoding, and simultaneously
-// populate its mathematical transpose in packed storage.
-//
-// data   has mathematical shape [rows, cols]
-// data_t has mathematical shape [cols, rows]
-void generate_data_and_transpose(fp4e2m1* data,
-                                 fp4e2m1* data_t,
-                                 const size_t rows,
-                                 const size_t cols,
-                                 std::mt19937& gen,
-                                 std::uniform_int_distribution<int>& e2m1_dis) {
+// Populate FP4 (E2M1) tensor using packed 4-bit encoding.
+void generate_data(fp4e2m1* data,
+                   const size_t rows,
+                   const size_t cols,
+                   std::mt19937& gen,
+                   std::uniform_int_distribution<int>& e2m1_dis) {
     const size_t packed_bytes = (rows * cols * BitsNumber<fp4e2m1>::num_bits) / 8;
 
     std::memset(data, 0, packed_bytes);
-    std::memset(data_t, 0, packed_bytes);
 
     for (size_t i = 0; i < rows; ++i) {
         for (size_t j = 0; j < cols; ++j) {
@@ -130,9 +85,6 @@ void generate_data_and_transpose(fp4e2m1* data,
 
             const size_t idx = i * cols + j;
             set_fp4_nibble(data, idx, nibble);
-
-            const size_t idx_t = j * rows + i;
-            set_fp4_nibble(data_t, idx_t, nibble);
         }
     }
 }
@@ -177,50 +129,28 @@ void compute_ref(const fp4e2m1* input,
 
 template <typename OutputType>
 void run_single_case(const std::string& case_name,
-                     const fp4e2m1* host_input,
-                     const fp8e4m3* host_scales,
+                     Tensor& input,
                      const size_t rows,
                      const size_t cols,
-                     const size_t blocks_y,
-                     const size_t blocks_x,
                      const size_t scale_stride,
                      const float amax,
                      DType otype) {
-    const DType itype = DType::kFloat4E2M1;
-
-    Tensor input(case_name + "_input", std::vector<size_t>{rows, cols}, itype,
-                 true, false, NVTE_NVFP4_1D_SCALING);
     Tensor output(case_name + "_output", std::vector<size_t>{rows, cols}, otype, true, false);
 
     std::unique_ptr<OutputType[]> ref_output =
         std::make_unique<OutputType[]>(rows * cols);
 
-    const size_t data_bytes = (rows * cols * BitsNumber<fp4e2m1>::num_bits) / 8;
-    const size_t scale_bytes = blocks_y * blocks_x * sizeof(fp8e4m3);
-
-    auto err = cudaMemcpy(input.rowwise_dptr(),
-                          host_input,
-                          data_bytes,
-                          cudaMemcpyHostToDevice);
-    ASSERT_EQ(err, cudaSuccess) << case_name << ": " << cudaGetErrorString(err);
-
-    err = cudaMemcpy(input.rowwise_scale_inv_dptr(),
-                     host_scales,
-                     scale_bytes,
-                     cudaMemcpyHostToDevice);
-    ASSERT_EQ(err, cudaSuccess) << case_name << ": " << cudaGetErrorString(err);
-
+    input.from_cpu();
     nvte_dequantize(input.data(), output.data(), 0);
 
-    cudaDeviceSynchronize();
-    err = cudaGetLastError();
+    cudaError_t err = cudaDeviceSynchronize();
     ASSERT_EQ(err, cudaSuccess) << case_name << ": " << cudaGetErrorString(err);
 
     output.to_cpu();
 
-    compute_ref(host_input,
+    compute_ref(input.rowwise_cpu_dptr<fp4e2m1>(),
                 ref_output.get(),
-                host_scales,
+                input.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
                 amax,
                 rows,
                 cols,
@@ -230,78 +160,42 @@ void run_single_case(const std::string& case_name,
     compareResults(case_name, output, ref_output.get(), true, atol, rtol);
 }
 
-// End-to-end test: generate random FP4 input and FP8 scales, then exercise
-// 1) row-wise 1D dequant
-// 2) col-wise 1D dequant (by running the same dequant kernel on transposed data)
-// 3) 2D dequant semantics using row-wise replicated scales
+// End-to-end test: generate random FP4 input and FP8 scales.
+// Only tests row-wise 1D dequant since the kernel is hardwired for that.
 template <typename OutputType>
 void performTest(const size_t rows, const size_t cols, DType otype) {
     const std::array<size_t, 4> scale_dims = get_scale_tensor_dims(rows, cols, 1, 16);
-    const std::array<size_t, 4> scale_dims_t = get_scale_tensor_dims(cols, rows, 1, 16);
 
     const size_t unpadded_blocks_Y = scale_dims[0];
     const size_t unpadded_blocks_X = scale_dims[1];
-    const size_t blocks_Y = scale_dims[2];
     const size_t blocks_X = scale_dims[3];
     const size_t scales_stride = blocks_X;
 
-    const size_t unpadded_blocks_Y_t = scale_dims_t[0];
-    const size_t unpadded_blocks_X_t = scale_dims_t[1];
-    const size_t blocks_Y_t = scale_dims_t[2];
-    const size_t blocks_X_t = scale_dims_t[3];
-    const size_t scales_stride_t = blocks_X_t;
+    const DType itype = DType::kFloat4E2M1;
 
-    std::unique_ptr<fp4e2m1[]> host_input =
-        std::make_unique<fp4e2m1[]>(rows * cols);
-
-    std::unique_ptr<fp4e2m1[]> host_input_t =
-        std::make_unique<fp4e2m1[]>(rows * cols);
-
-    std::unique_ptr<fp8e4m3[]> host_scales_rowwise_1d =
-        std::make_unique<fp8e4m3[]>(blocks_Y * blocks_X);
-
-    std::unique_ptr<fp8e4m3[]> host_scales_colwise_1d =
-        std::make_unique<fp8e4m3[]>(blocks_Y_t * blocks_X_t);
-
-    std::unique_ptr<fp8e4m3[]> host_scales_2d_replicated =
-        std::make_unique<fp8e4m3[]>(blocks_Y * blocks_X);
+    Tensor input("rowwise_1d_dequant_input",
+                 std::vector<size_t>{rows, cols},
+                 itype,
+                 true, false,
+                 NVTE_NVFP4_1D_SCALING);
 
     static std::mt19937 gen(42);
     std::uniform_int_distribution<int> e2m1_dis(0, 15);
     std::uniform_int_distribution<int> finite_nonneg_e4m3_dis(0, 126);
 
-    generate_data_and_transpose(host_input.get(),
-                                host_input_t.get(),
-                                rows,
-                                cols,
-                                gen,
-                                e2m1_dis);
+    generate_data(input.rowwise_cpu_dptr<fp4e2m1>(),
+                  rows,
+                  cols,
+                  gen,
+                  e2m1_dis);
 
     // Row-wise 1D scales on [rows, cols]
-    generate_1d_scales(host_scales_rowwise_1d.get(),
+    generate_1d_scales(input.rowwise_cpu_scale_inv_ptr<fp8e4m3>(),
                        unpadded_blocks_Y,
                        unpadded_blocks_X,
                        scales_stride,
                        gen,
                        finite_nonneg_e4m3_dis);
-
-    // Col-wise 1D scales on [cols, rows]
-    generate_1d_scales(host_scales_colwise_1d.get(),
-                       unpadded_blocks_Y_t,
-                       unpadded_blocks_X_t,
-                       scales_stride_t,
-                       gen,
-                       finite_nonneg_e4m3_dis);
-
-    // 2D scales replicated row-wise
-    generate_2d_scales_with_replication(host_scales_2d_replicated.get(),
-                                        rows,
-                                        cols,
-                                        unpadded_blocks_Y,
-                                        unpadded_blocks_X,
-                                        scales_stride,
-                                        gen,
-                                        finite_nonneg_e4m3_dis);
 
     // With the current test_common NVFP4 helper path on ROCm, there is no direct
     // way to populate a separate global amax buffer for dequant, so this test
@@ -309,34 +203,9 @@ void performTest(const size_t rows, const size_t cols, DType otype) {
     const float amax = 1.0f;
 
     run_single_case<OutputType>("rowwise_1d_dequant",
-                                host_input.get(),
-                                host_scales_rowwise_1d.get(),
+                                input,
                                 rows,
                                 cols,
-                                blocks_Y,
-                                blocks_X,
-                                scales_stride,
-                                amax,
-                                otype);
-
-    run_single_case<OutputType>("colwise_1d_dequant",
-                                host_input_t.get(),
-                                host_scales_colwise_1d.get(),
-                                cols,
-                                rows,
-                                blocks_Y_t,
-                                blocks_X_t,
-                                scales_stride_t,
-                                amax,
-                                otype);
-
-    run_single_case<OutputType>("replicated_2d_dequant",
-                                host_input.get(),
-                                host_scales_2d_replicated.get(),
-                                rows,
-                                cols,
-                                blocks_Y,
-                                blocks_X,
                                 scales_stride,
                                 amax,
                                 otype);
