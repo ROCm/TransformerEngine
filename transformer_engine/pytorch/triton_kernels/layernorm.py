@@ -175,7 +175,7 @@ def _layernorm_fwd_triton_impl(
         else:
             tl.store(amax_ptr + pid, amax)
 
-autotune_dec = triton.autotune(configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=True)
+autotune_dec = triton.autotune(configs=get_autotune_config(), key=["n_rows", "n_cols"], use_cuda_graph=False) #PIV use_cuda_graph
 _layernorm_fwd_triton = autotune_dec(_layernorm_fwd_triton_impl)
 
 @triton.jit
