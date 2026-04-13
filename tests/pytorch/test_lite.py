@@ -262,6 +262,77 @@ class TestTritonNorms:
             assert _n._triton_ln_fwd is not None, "Triton norms should load when Triton is available"
         # If triton is not installed, the fallback path is tested by other tests.
 
+    def test_aiter_norms_active(self, device):
+        """AITER Triton norm kernels should be the active backend when AITER is available."""
+        from transformer_engine.pytorch._lite.aiter_utils import is_aiter_available
+        from transformer_engine.pytorch._lite import norms as _n
+
+        # Trigger lazy loading by calling a norm function
+        x = torch.randn(4, 128, device=device, dtype=torch.bfloat16)
+        w = torch.randn(128, device=device, dtype=torch.bfloat16)
+        b = torch.randn(128, device=device, dtype=torch.bfloat16)
+        tex.rmsnorm_fwd(x, w, 1e-5, None, None, None, 0, False)
+        tex.layernorm_fwd(x, w, b, 1e-5, None, None, None, 0, False)
+
+        if is_aiter_available():
+            assert _n._aiter_rms_fwd is not None, "AITER RMSNorm fwd should be loaded"
+            assert _n._aiter_rms_bwd is not None, "AITER RMSNorm bwd should be loaded"
+            assert _n._aiter_ln_fwd is not None, "AITER LayerNorm fwd should be loaded"
+            assert _n._aiter_ln_bwd is not None, "AITER LayerNorm bwd should be loaded"
+
+    def test_aiter_rmsnorm_fwd_bwd(self, device):
+        """AITER RMSNorm forward and backward produce correct results."""
+        from transformer_engine.pytorch._lite.norms import _rmsnorm_fwd_pytorch, _rmsnorm_bwd_pytorch
+
+        hidden = 512
+        x = torch.randn(8, hidden, device=device, dtype=torch.bfloat16)
+        w = torch.randn(hidden, device=device, dtype=torch.bfloat16)
+        g = torch.randn(8, hidden, device=device, dtype=torch.bfloat16)
+
+        # PyTorch reference
+        y_pt, rstd_pt = _rmsnorm_fwd_pytorch(x, w, 1e-5, False)
+        dx_pt, dw_pt = _rmsnorm_bwd_pytorch(g, x, rstd_pt, w, False)
+
+        # AITER-backed tex path
+        y_te, _, rstd_te = tex.rmsnorm_fwd(x, w, 1e-5, None, None, None, 0, False)
+        dx_te, dw_te = tex.rmsnorm_bwd(g, x, rstd_te, w, 0, False)
+
+        assert torch.allclose(y_te, y_pt, atol=5e-1, rtol=5e-2), (
+            f"RMSNorm fwd max diff: {(y_te - y_pt).abs().max().item():.2e}"
+        )
+        assert torch.allclose(dx_te.to(torch.bfloat16), dx_pt.to(torch.bfloat16),
+                              atol=5e-1, rtol=5e-2), (
+            f"RMSNorm bwd dx max diff: {(dx_te - dx_pt).abs().max().item():.2e}"
+        )
+
+    def test_aiter_layernorm_fwd_bwd(self, device):
+        """AITER LayerNorm forward and backward produce correct results."""
+        from transformer_engine.pytorch._lite.norms import (
+            _layernorm_fwd_pytorch, _layernorm_bwd_pytorch,
+        )
+
+        hidden = 512
+        x = torch.randn(8, hidden, device=device, dtype=torch.bfloat16)
+        w = torch.randn(hidden, device=device, dtype=torch.bfloat16)
+        b = torch.randn(hidden, device=device, dtype=torch.bfloat16)
+        g = torch.randn(8, hidden, device=device, dtype=torch.bfloat16)
+
+        # PyTorch reference
+        y_pt, mean_pt, rstd_pt = _layernorm_fwd_pytorch(x, w, b, 1e-5, False)
+        dx_pt, dw_pt, db_pt = _layernorm_bwd_pytorch(g, x, mean_pt, rstd_pt, w, False)
+
+        # AITER-backed tex path
+        y_te, mean_te, rstd_te = tex.layernorm_fwd(x, w, b, 1e-5, None, None, None, 0, False)
+        dx_te, dw_te, db_te = tex.layernorm_bwd(g, x, mean_te, rstd_te, w, 0, False)
+
+        assert torch.allclose(y_te, y_pt, atol=8e-2, rtol=2e-2), (
+            f"LayerNorm fwd max diff: {(y_te - y_pt).abs().max().item():.2e}"
+        )
+        assert torch.allclose(dx_te.to(torch.bfloat16), dx_pt.to(torch.bfloat16),
+                              atol=8e-2, rtol=2e-2), (
+            f"LayerNorm bwd dx max diff: {(dx_te - dx_pt).abs().max().item():.2e}"
+        )
+
     @pytest.mark.parametrize("hidden_size", [256, 512, 1024])
     def test_layernorm_fwd_triton_vs_pytorch(self, device, hidden_size):
         """Triton layernorm_fwd should match PyTorch reference."""
