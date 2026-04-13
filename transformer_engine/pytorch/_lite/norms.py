@@ -6,13 +6,15 @@
 """Normalization -- AITER Triton, TE Triton, or PyTorch-native fallback.
 
 Backend priority:
-  1. AITER Triton kernels (aiter.ops.triton.rmsnorm / norm) -- tuned for MI300X
-  2. TE Triton kernels (triton_kernels/norms_common.py)
-  3. Pure PyTorch fallback
+  1. AITER fused norm+quantize (single kernel: RMSNorm/LayerNorm -> FP8 cast)
+     - Per-tensor static: fused_rms_fp8_per_tensor_static_quant (Float8Quantizer)
+     - Block scaling:     fused_rms_fp8_group_quant (MXFP8Quantizer)
+  2. AITER Triton norm kernels (no quantize fusion)
+  3. TE Triton kernels (triton_kernels/norms_common.py)
+  4. Pure PyTorch fallback
 
-The fused norm+quantize path (AITER's dynamicquant/smoothquant) uses per-row
-scaling which is incompatible with TE's per-tensor FP8 scaling. Quantization
-is therefore applied as a separate step via the quantizer interface.
+Fused norm+quantize is used when a compatible quantizer is provided in the
+forward pass. Otherwise falls back to norm -> quantizer.quantize() separately.
 """
 
 import torch
@@ -28,6 +30,10 @@ _aiter_rms_fwd = None
 _aiter_rms_bwd = None
 _aiter_ln_fwd = None
 _aiter_ln_bwd = None
+# AITER fused norm+quantize kernels
+_aiter_fused_rms_fp8_static = None
+_aiter_fused_rms_fp8_group = None
+_aiter_fused_ln_fp8_static = None  # LayerNorm variant (if available)
 _aiter_import_attempted = False
 
 # TE Triton norm functions (fallback)
@@ -41,6 +47,8 @@ _triton_import_attempted = False
 def _try_load_aiter_norms():
     """Lazy-import AITER Triton norm kernels. Called once, result cached."""
     global _aiter_rms_fwd, _aiter_rms_bwd, _aiter_ln_fwd, _aiter_ln_bwd
+    global _aiter_fused_rms_fp8_static, _aiter_fused_rms_fp8_group
+    global _aiter_fused_ln_fp8_static
     global _aiter_import_attempted
 
     if _aiter_import_attempted:
@@ -62,6 +70,17 @@ def _try_load_aiter_norms():
         _aiter_rms_bwd = _rmsnorm_backward
         _aiter_ln_fwd = _layernorm_forward
         _aiter_ln_bwd = _layernorm_backward
+    except (ImportError, AttributeError):
+        pass
+
+    # Fused norm+quantize kernels (separate try — these may not exist in older AITER)
+    try:
+        from aiter.ops.triton.fused_fp8_quant import (
+            fused_rms_fp8_per_tensor_static_quant,
+            fused_rms_fp8_group_quant,
+        )
+        _aiter_fused_rms_fp8_static = fused_rms_fp8_per_tensor_static_quant
+        _aiter_fused_rms_fp8_group = fused_rms_fp8_group_quant
     except (ImportError, AttributeError):
         pass
 
@@ -206,6 +225,93 @@ def _aiter_rmsnorm_bwd(grad_output_2d, input_2d, rstdev, weight,
 
 
 # ---------------------------------------------------------------------------
+# Fused norm+quantize adapters
+# ---------------------------------------------------------------------------
+
+def _is_delayed_scaling_quantizer(quantizer):
+    """Check if quantizer is Float8Quantizer (delayed per-tensor scaling)."""
+    # Avoid importing Float8Quantizer at module level (circular import risk).
+    # Use duck typing: has scale (pre-computed) and amax (to be updated).
+    return (
+        quantizer is not None
+        and type(quantizer).__name__ == "Float8Quantizer"
+        and hasattr(quantizer, "scale")
+        and hasattr(quantizer, "amax")
+    )
+
+
+def _is_mxfp8_quantizer(quantizer):
+    """Check if quantizer is MXFP8Quantizer (block scaling)."""
+    return (
+        quantizer is not None
+        and type(quantizer).__name__ == "MXFP8Quantizer"
+    )
+
+
+def _try_fused_rmsnorm_quant(input_2d, weight, eps, quantizer, zero_centered_gamma,
+                             orig_shape=None):
+    """Attempt fused RMSNorm+FP8 quantize via AITER.
+
+    Returns (output, rsigma) on success, or None if fusion not possible.
+    The output is a QuantizedTensor (Float8Tensor or MXFP8Tensor).
+    """
+    if orig_shape is None:
+        orig_shape = input_2d.shape
+
+    if zero_centered_gamma:
+        weight = weight + 1.0
+
+    # Float8Quantizer: fused_rms_fp8_per_tensor_static_quant
+    if _is_delayed_scaling_quantizer(quantizer) and _aiter_fused_rms_fp8_static is not None:
+        # AITER kernel expects dequant scale = 1/quant_scale
+        dequant_scale = (1.0 / quantizer.scale).to(torch.float32)
+
+        out_fp8, _, _, _ = _aiter_fused_rms_fp8_static(
+            input_2d, weight, eps, dequant_scale,
+        )
+
+        # Update amax for next iteration's delayed scaling
+        quantizer.amax.fill_(input_2d.abs().max().item())
+
+        # Wrap raw FP8 data in Float8Tensor via the quantizer.
+        # Create empty container with the ORIGINAL (possibly N-D) shape,
+        # then copy in the 2D FP8 data from the fused kernel.
+        out = quantizer.make_empty(
+            orig_shape, dtype=input_2d.dtype, device=input_2d.device,
+        )
+        fp8_bytes = out_fp8.view(torch.uint8)
+        if hasattr(out, '_data'):
+            out._data.copy_(fp8_bytes.reshape(out._data.shape))
+        if hasattr(out, '_scale_inv'):
+            out._scale_inv.copy_(dequant_scale)
+        # Also fill columnwise transpose if the quantizer requested it
+        if hasattr(out, '_data_transpose') and out._data_transpose is not None:
+            out._data_transpose.copy_(
+                fp8_bytes.reshape(orig_shape).transpose(-1, -2).contiguous().view(torch.uint8)
+            )
+
+        # Compute rsigma for backward pass (we need it, but the fused kernel
+        # doesn't return it). Cheaply recompute from input.
+        rsigma = input_2d.float().square().mean(dim=-1).add_(eps).rsqrt()
+        return out, rsigma
+
+    # MXFP8Quantizer: fused_rms_fp8_group_quant
+    if _is_mxfp8_quantizer(quantizer) and _aiter_fused_rms_fp8_group is not None:
+        (out_fp8, out_scales), _, _, _ = _aiter_fused_rms_fp8_group(
+            input_2d, weight, eps, group_size=32,
+        )
+
+        # Wrap in MXFP8Tensor via quantizer
+        # The group kernel already computed block scales, but wrapping
+        # requires going through the quantizer interface for proper metadata.
+        # For now, fall back to separate quantize for MXFP8 since the
+        # tensor wrapping is complex. TODO: direct MXFP8Tensor construction.
+        return None
+
+    return None
+
+
+# ---------------------------------------------------------------------------
 # Reshape helpers for N-D input
 # ---------------------------------------------------------------------------
 
@@ -334,18 +440,32 @@ def rmsnorm_fwd(input, weight, eps, ln_out, quantizer, otype, sm_margin,
                 zero_centered_gamma):
     """RMSNorm forward.
 
-    Backend priority: AITER Triton > TE Triton > PyTorch.
+    Backend priority:
+      1. AITER fused norm+quantize (single kernel, Float8Quantizer only)
+      2. AITER Triton norm + separate quantize
+      3. TE Triton norm (handles quantizer internally)
+      4. PyTorch fallback norm + separate quantize
     """
     _try_load_aiter_norms()
     _try_load_triton_norms()
 
     input_2d, orig_shape = _ensure_2d(input)
 
-    # Try AITER Triton
+    # Try AITER fused norm+quantize (single kernel launch)
+    fused_result = _try_fused_rmsnorm_quant(
+        input_2d, weight, eps, quantizer, zero_centered_gamma,
+        orig_shape=orig_shape,
+    )
+    if fused_result is not None:
+        out, rsigma = fused_result
+        rsigma = _restore_stats(rsigma, orig_shape)
+        return out, torch.Tensor(), rsigma
+
+    # Try AITER Triton (norm only, quantize separate)
     if _aiter_rms_fwd is not None:
         out, rsigma = _aiter_rmsnorm_fwd(input_2d, weight, eps, zero_centered_gamma)
-        mu = torch.Tensor()  # empty, matches C++ signature
-    # Try TE Triton
+        mu = torch.Tensor()
+    # Try TE Triton (handles quantizer internally)
     elif _triton_rms_fwd is not None:
         if otype is None:
             otype = input.dtype
@@ -361,7 +481,7 @@ def rmsnorm_fwd(input, weight, eps, ln_out, quantizer, otype, sm_margin,
         out, rsigma = _rmsnorm_fwd_pytorch(input_2d, weight, eps, zero_centered_gamma)
         mu = torch.Tensor()
 
-    # Apply quantizer (separate step -- AITER and PyTorch paths)
+    # Apply quantizer (separate step -- AITER norm and PyTorch paths)
     if quantizer is not None and hasattr(quantizer, 'quantize'):
         out = quantizer.quantize(out)
 
