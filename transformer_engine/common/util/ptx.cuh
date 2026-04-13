@@ -272,7 +272,6 @@ __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
 
 __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
 #ifndef __HIP_PLATFORM_AMD__
-  constexpr bool is_blackwell = false;
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   if constexpr (is_blackwell) {
     uint16_t out;

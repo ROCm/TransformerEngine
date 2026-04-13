@@ -447,10 +447,8 @@ void rocm_norm_mxfp8_quantize(LaunchParams<ForwardKernelParams> &launch_params) 
   const size_t scale_dim_X_rowwise = 32;
   const size_t scale_dim_Y_colwise = launch_params.training ? 32 : 1;
 
-  const size_t chunks_Y = DIVUP(rows, dispatch::mxfp8::quantize_kernel::MXFP8_CHUNK_DIM_Y);
-  const size_t chunks_X = DIVUP(cols, dispatch::mxfp8::quantize_kernel::MXFP8_CHUNK_DIM_X);
-  const size_t blocks_Y = DIVUP(chunks_Y, dispatch::mxfp8::quantize_kernel::MXFP8_CHUNKS_PER_BLOCK_Y);
-  const size_t blocks_X = DIVUP(chunks_X, dispatch::mxfp8::quantize_kernel::MXFP8_CHUNKS_PER_BLOCK_X);
+  const size_t blocks_Y = DIVUP(rows, dispatch::mxfp8::quantize_kernel::MXFP8_CHUNK_DIM_Y);
+  const size_t blocks_X = DIVUP(cols, dispatch::mxfp8::quantize_kernel::MXFP8_CHUNK_DIM_X);
 
   const size_t scale_stride_rowwise = launch_params.z_tensor->scale_inv.shape[1];
   const size_t scale_stride_colwise = launch_params.training ? launch_params.z_tensor->columnwise_scale_inv.shape[1] : 1;

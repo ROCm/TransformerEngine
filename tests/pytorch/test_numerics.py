@@ -2238,6 +2238,14 @@ def test_grouped_linear_accuracy(
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize(
+    "fp8_model_params",
+    all_boolean if IS_HIP_EXTENSION else [False],
+)
+@pytest.mark.parametrize(
+    "recipe",
+    (fp8_recipes + [None]) if IS_HIP_EXTENSION else [None],
+)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
 def test_grouped_linear_accuracy_cutlass(
@@ -2245,6 +2253,8 @@ def test_grouped_linear_accuracy_cutlass(
     num_gemms,
     bs,
     model,
+    recipe,
+    fp8_model_params,
     fuse_wgrad_accumulation,
     delay_wgrad_compute,
 ):
@@ -2254,8 +2264,8 @@ def test_grouped_linear_accuracy_cutlass(
         num_gemms,
         bs,
         model,
-        None,
-        False,
+        recipe,
+        fp8_model_params,
         fuse_wgrad_accumulation,
         False,
         delay_wgrad_compute,

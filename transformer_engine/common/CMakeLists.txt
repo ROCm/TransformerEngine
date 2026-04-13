@@ -255,7 +255,9 @@ else()
         comm_gemm_overlap/rocm_comm_gemm_overlap.cpp
         fused_attn_rocm/fused_attn.cpp
         gemm/rocm_gemm.cu
-        gemm/ck_grouped_gemm.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp
         amd_detail/system.cpp)
     list(APPEND transformer_engine_cuda_sources
         fused_attn_rocm/fused_attn_aotriton.cpp
@@ -565,7 +567,7 @@ endif()
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --threads ${BUILD_THREADS_PER_JOB}")
 message(STATUS "Threads per parallel build job: ${BUILD_THREADS_PER_JOB}")
 else()
-  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3 -fopenmp")
+  set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -O3")
   set(HIP_HCC_FLAGS "${CMAKE_HIP_FLAGS} -mavx2 -mf16c -mfma -std=c++17")
   # Ask hcc to generate device code during compilation so we can use
   # host linker to link.
