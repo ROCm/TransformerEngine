@@ -127,7 +127,8 @@ rocgdb --args python -m pytest <test> -x -s
 
 ## 4) CK eligibility checks (`is_ck_backend_supported`)
 
-The function in `fused_attn_ck.cpp:23-152` applies these filters in order. When CK is rejected, `NVTE_LOG_CK_CONFIG=1` prints the reason. The filters are:
+The function in `fused_attn_ck.cpp:23-152` applies these filters in order. When CK is rejected, `NVTE_LOG_CK_CONFIG=1` prints the reason. As of TE commit 09811572 (subject to change in later
+commits), filters are:
 
 1. **GQA groups**: `num_gqa_groups > 0` and `num_attn_heads % num_gqa_groups == 0`
 2. **Data type**: `q_dtype == kv_dtype` and both are fp16 or bf16 (no fp8)
@@ -210,8 +211,8 @@ pytest tests/pytorch/attention/test_attention.py::test_dot_product_attention -x 
      -iperm=1 -operm=1 -mask=1 -mode=0 -kname=1 -v=1
    ```
 5. Key argument mappings:
-   - `-iperm=1 -operm=1` → BSHD layout (TE default)
-   - `-iperm=0 -operm=0` → SBHD layout
+   - `-iperm=1 -operm=1` → BHSD layout (TE default)
+   - `-iperm=0 -operm=0` → BSHD layout
    - `-mask=0` → no mask, `-mask=1` → causal top-left, `-mask=2` → causal bottom-right
    - `-mask=t:L,R` → SWA top-left, `-mask=b:L,R` → SWA bottom-right
    - `-lse=1` → store LSE (TE always does this)

@@ -1,7 +1,7 @@
 ---
 name: ifu-merge
 description: >
-  Guide for performing IFU (Internal Feature Update) merges on the TransformerEngine ROCm fork.
+  Guide for performing IFU (Integrate From Upstream) merges on the TransformerEngine ROCm fork.
   This skill walks through resolving merge conflicts between upstream NVIDIA TransformerEngine
   and the AMD ROCm fork, then fixing build and runtime errors systematically. Use this skill
   whenever the user mentions IFU, merge upstream, merge NVIDIA, upstream merge,
@@ -11,7 +11,7 @@ description: >
 
 # TransformerEngine ROCm — IFU Merge Guide
 
-An IFU (Internal Feature Update) merges upstream NVIDIA TransformerEngine commits into the AMD ROCm fork. The merge is often committed with conflict markers still in place, then conflicts are resolved in follow-up commits.
+An IFU (Integrate From Upstream) merges upstream NVIDIA TransformerEngine commits into the AMD ROCm fork. The merge is often committed with conflict markers still in place, then conflicts are resolved in follow-up commits.
 
 This guide captures generalized strategies for resolving these merges.
 
