@@ -6,7 +6,6 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
-import os
 from typing import Optional, Tuple, Union
 
 import torch
@@ -25,8 +24,6 @@ from ._quantization_helpers import _IdentityFunc
 MXFP4_BLOCK_SCALING_SIZE = MXFP8_BLOCK_SCALING_SIZE
 
 aten = torch.ops.aten
-
-_use_hadamard = os.environ.get("USE_HADAMARD", "0").lower() in ("1", "true", "yes")
 
 
 def _logical_to_rowwise_data_shape(shape: Tuple[int, ...]) -> Tuple[int, ...]:
@@ -61,20 +58,26 @@ class MXFP4Quantizer(Quantizer):
         rowwise: bool = True,
         columnwise: bool = True,
         shuffle_B_matrix_for_aiter: bool = False,
+        use_hadamard: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp4_dtype
         self.shuffle_B_matrix_for_aiter = shuffle_B_matrix_for_aiter
+        self.use_hadamard = use_hadamard
         assert self.dtype == tex.DType.kFloat4E2M1, "Only E2M1 format supported for MXFP4"
 
     def copy(self) -> "MXFP4Quantizer":
         """Create shallow copy"""
-        return MXFP4Quantizer(
+        quantizer = MXFP4Quantizer(
             fp4_dtype=self.dtype,
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
             shuffle_B_matrix_for_aiter=self.shuffle_B_matrix_for_aiter,
+            use_hadamard=self.use_hadamard,
         )
+        quantizer.internal = self.internal
+        quantizer.optimize_for_gemm = self.optimize_for_gemm
+        return quantizer
 
     def update_quantized(
         self,
@@ -126,7 +129,7 @@ class MXFP4Quantizer(Quantizer):
                 True,
                 self.shuffle_B_matrix_for_aiter,
                 self.shuffle_B_matrix_for_aiter,
-                _use_hadamard,
+                self.use_hadamard,
             )
 
         # Update FP4 dtype

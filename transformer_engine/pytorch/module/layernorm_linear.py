@@ -227,11 +227,13 @@ class _LayerNormLinear(torch.autograd.Function):
         input_quantizer_mxfp4 = None
         if is_mxfp4_enabled:
             from ..tensor.mxfp4_tensor import MXFP4Quantizer
-            # Input: used as A in fprop, B in wgrad - can't pre-shuffle
+            _recipe = FP8GlobalStateManager.get_fp8_recipe()
+            _use_hadamard = getattr(_recipe, "use_hadamard", False)
             input_quantizer_mxfp4 = MXFP4Quantizer(
                 rowwise=True,
                 columnwise=backward_needs_input,
-                shuffle_B_matrix_for_aiter=False
+                shuffle_B_matrix_for_aiter=False,
+                use_hadamard=_use_hadamard,
             )
 
         # Configure quantizer for norm output
@@ -878,10 +880,12 @@ class _LayerNormLinear(torch.autograd.Function):
                 with torch.no_grad():
                     _bf16 = ctx.weight.dequantize()
                     from ..tensor.mxfp4_tensor import MXFP4Quantizer
+                    _use_hadamard = getattr(ctx.fp8_recipe, "use_hadamard", False)
                     _q = MXFP4Quantizer(
                         rowwise=False,
                         columnwise=True,
                         shuffle_B_matrix_for_aiter=True,
+                        use_hadamard=_use_hadamard,
                     )
                     _q.internal = True
                     _col = _q.quantize(_bf16)
@@ -1824,17 +1828,23 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         if is_mxfp4_enabled:
             from ..tensor.mxfp4_tensor import MXFP4Quantizer
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            use_hadamard = getattr(recipe, "use_hadamard", False)
             input_quantizer = MXFP4Quantizer(
-                rowwise=True, columnwise=False, shuffle_B_matrix_for_aiter=False
+                rowwise=True, columnwise=False,
+                shuffle_B_matrix_for_aiter=False, use_hadamard=use_hadamard,
             )
             weight_quantizer = MXFP4Quantizer(
-                rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=True
+                rowwise=True, columnwise=True,
+                shuffle_B_matrix_for_aiter=True, use_hadamard=use_hadamard,
             )
             grad_output_quantizer = MXFP4Quantizer(
-                rowwise=True, columnwise=False
+                rowwise=True, columnwise=False,
+                use_hadamard=use_hadamard,
             )
             grad_output_quantizer_mxfp4 = MXFP4Quantizer(
-                rowwise=True, columnwise=False
+                rowwise=True, columnwise=False,
+                use_hadamard=use_hadamard,
             )
             grad_weight_quantizer = None
         else:

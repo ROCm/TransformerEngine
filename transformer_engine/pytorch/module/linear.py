@@ -819,10 +819,12 @@ class _Linear(torch.autograd.Function):
                     with torch.no_grad():
                         _bf16 = ctx.fp8_weight_for_dgrad.dequantize()
                         from ..tensor.mxfp4_tensor import MXFP4Quantizer
+                        _use_hadamard = getattr(ctx.fp8_recipe, "use_hadamard", False)
                         _q = MXFP4Quantizer(
                             rowwise=False,
                             columnwise=True,
                             shuffle_B_matrix_for_aiter=True,
+                            use_hadamard=_use_hadamard,
                         )
                         _q.internal = True
                         _col = _q.quantize(_bf16)
@@ -1639,26 +1641,26 @@ class Linear(TransformerEngineBaseModule):
 
         if is_mxfp4_enabled:
             from ..tensor.mxfp4_tensor import MXFP4Quantizer
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            use_hadamard = getattr(recipe, "use_hadamard", False)
             input_quantizer = MXFP4Quantizer(
-                rowwise=True,
-                columnwise=False,
-                shuffle_B_matrix_for_aiter=False
+                rowwise=True, columnwise=False,
+                shuffle_B_matrix_for_aiter=False, use_hadamard=use_hadamard,
             )
             weight_quantizer = MXFP4Quantizer(
-                rowwise=True,
-                columnwise=True,
-                shuffle_B_matrix_for_aiter=True
+                rowwise=True, columnwise=True,
+                shuffle_B_matrix_for_aiter=True, use_hadamard=use_hadamard,
             )
             output_quantizer = None
             grad_input_quantizer = None
             grad_weight_quantizer = None
             grad_output_quantizer = MXFP4Quantizer(
-                rowwise=True,
-                columnwise=False
+                rowwise=True, columnwise=False,
+                use_hadamard=use_hadamard,
             )
             grad_output_quantizer_mxfp4 = MXFP4Quantizer(
-                rowwise=True,
-                columnwise=False
+                rowwise=True, columnwise=False,
+                use_hadamard=use_hadamard,
             )
             return (
                 input_quantizer,
