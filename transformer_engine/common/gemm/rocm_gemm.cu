@@ -1048,8 +1048,6 @@ void hipblaslt_gemm(const Tensor *inputA,
   // Alpha is passed as a device vector of length m via
   // HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST. Beta stays on host.
   const bool use_fp4 = is_fp4_dtype(param.Atype) || is_fp4_dtype(param.Btype);
-  void* fp4_dequant_a_buf = nullptr;
-  void* fp4_dequant_b_buf = nullptr;
   const void* alpha_ptr = static_cast<const void*>(&alpha);
   const void* beta_ptr  = static_cast<const void*>(&beta);
   if (use_fp4) {
@@ -1064,13 +1062,29 @@ void hipblaslt_gemm(const Tensor *inputA,
         ? reinterpret_cast<const float*>(inputB->amax.dptr)
         : reinterpret_cast<const float*>(inputB->columnwise_amax.dptr);
 
-    // Reserve m floats from end of workspace for the device alpha vector.
+    // Compute total extra bytes needed from the workspace:
+    //   alpha vector:  m * sizeof(float)
+    //   dequant A:     m * k * sizeof(bf16)   (if A is FP4)
+    //   dequant B:     k * n * sizeof(bf16)   (if B is FP4)
     const size_t alpha_vec_bytes = static_cast<size_t>(m) * sizeof(float);
-    NVTE_CHECK(workspaceSize >= alpha_vec_bytes,
-               "NVFP4 GEMM requires at least ", alpha_vec_bytes, " bytes workspace for alpha vector.");
-    workspaceSize = (workspaceSize / sizeof(float)) * sizeof(float) - alpha_vec_bytes;
-    float* device_alpha_vec = reinterpret_cast<float*>(
-        reinterpret_cast<uint8_t*>(workspace) + workspaceSize);
+    const size_t a_bf16_bytes = is_fp4_dtype(param.Atype)
+        ? static_cast<size_t>(m) * k * sizeof(hip_bfloat16) : 0;
+    const size_t b_bf16_bytes = is_fp4_dtype(param.Btype)
+        ? static_cast<size_t>(k) * n * sizeof(hip_bfloat16) : 0;
+    const size_t fp4_total_bytes = alpha_vec_bytes + a_bf16_bytes + b_bf16_bytes;
+    NVTE_CHECK(workspaceSize >= fp4_total_bytes,
+               "NVFP4 GEMM requires at least ", fp4_total_bytes, " bytes workspace (",
+               fp4_total_bytes / (1024 * 1024), " MiB) for alpha vector + BF16 dequant buffers, "
+               "but only ", workspaceSize, " bytes (", workspaceSize / (1024 * 1024),
+               " MiB) available. Increase the cuBLAS workspace size.");
+
+    // Carve regions from the end of the workspace.
+    // Layout: [cublas workspace ... | alpha_vec | dequant_a | dequant_b]
+    workspaceSize = (workspaceSize / sizeof(float)) * sizeof(float) - fp4_total_bytes;
+    uint8_t* ws_ptr = reinterpret_cast<uint8_t*>(workspace) + workspaceSize;
+
+    float* device_alpha_vec = reinterpret_cast<float*>(ws_ptr);
+    ws_ptr += alpha_vec_bytes;
 
     NVTE_CHECK(amax_A != nullptr, "FP4 GEMM requires amax_A");
     NVTE_CHECK(amax_B != nullptr, "FP4 GEMM requires amax_B");
@@ -1083,9 +1097,8 @@ void hipblaslt_gemm(const Tensor *inputA,
 
     // Dequantize FP4 -> BF16 (block scales only, no amax folded in)
     if (is_fp4_dtype(param.Atype)) {
-      const size_t a_bf16_bytes = static_cast<size_t>(m) * k * sizeof(hip_bfloat16);
-      NVTE_CHECK_CUDA(hipMallocAsync(&fp4_dequant_a_buf, a_bf16_bytes, stream));
-      hip_bfloat16* a_bf16 = reinterpret_cast<hip_bfloat16*>(fp4_dequant_a_buf);
+      hip_bfloat16* a_bf16 = reinterpret_cast<hip_bfloat16*>(ws_ptr);
+      ws_ptr += a_bf16_bytes;
       const int64_t total_a = static_cast<int64_t>(m) * k;
       // Determine scale stride from scale tensor shape
       const auto& a_sinv = (transa == CUBLAS_OP_T) ? inputA->scale_inv
@@ -1102,9 +1115,8 @@ void hipblaslt_gemm(const Tensor *inputA,
     }
 
     if (is_fp4_dtype(param.Btype)) {
-      const size_t b_bf16_bytes = static_cast<size_t>(k) * n * sizeof(hip_bfloat16);
-      NVTE_CHECK_CUDA(hipMallocAsync(&fp4_dequant_b_buf, b_bf16_bytes, stream));
-      hip_bfloat16* b_bf16 = reinterpret_cast<hip_bfloat16*>(fp4_dequant_b_buf);
+      hip_bfloat16* b_bf16 = reinterpret_cast<hip_bfloat16*>(ws_ptr);
+      ws_ptr += b_bf16_bytes;
       const int64_t total_b = static_cast<int64_t>(k) * n;
       // Determine scale stride from scale tensor shape
       const auto& b_sinv = (transb == CUBLAS_OP_N) ? inputB->scale_inv
@@ -1553,11 +1565,6 @@ void hipblaslt_gemm(const Tensor *inputA,
   if (is_fp8_dtype(outputD->data.dtype) && outputD->scale_inv.dptr) {
     update_tensor_scale_inv(outputD, stream);
   }
-
-  if (fp4_dequant_a_buf)
-    NVTE_CHECK_CUDA(hipFreeAsync(fp4_dequant_a_buf, stream));
-  if (fp4_dequant_b_buf)
-    NVTE_CHECK_CUDA(hipFreeAsync(fp4_dequant_b_buf, stream));
 
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Ddesc));
   NVTE_CHECK_HIPBLASLT(hipblasLtMatrixLayoutDestroy(Bdesc));
