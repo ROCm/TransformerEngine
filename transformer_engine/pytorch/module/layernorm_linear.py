@@ -126,6 +126,7 @@ class _LayerNormLinear(torch.autograd.Function):
             grad_input_quantizer,
             grad_weight_quantizer,
             grad_output_quantizer,
+            grad_output_quantizer_mxfp4,
             cpu_offloading,
             tp_group,
             tp_size,

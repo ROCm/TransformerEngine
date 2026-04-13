@@ -113,6 +113,7 @@ class _Linear(torch.autograd.Function):
             grad_input_quantizer,
             grad_weight_quantizer,
             grad_output_quantizer,
+            grad_output_quantizer_mxfp4,
             fuse_wgrad_accumulation,
             cpu_offloading,
             tp_group,
