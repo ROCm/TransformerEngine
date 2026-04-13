@@ -27,6 +27,8 @@
 #include <hip/hip_bf16.h>
 #include <cstdint>
 
+#include "transformer_engine/transpose.h"
+
 namespace te_mxfp4 {
 
 // ============================================================================
@@ -667,47 +669,23 @@ void cast_transpose_mxfp4_shuffled(
 
 }  // namespace te_mxfp4
 
-// ============================================================================
-// KERNEL LAUNCHER - Template Instantiation and Configuration Dispatch
-// ============================================================================
-
-/*
- * Launch Function with Configuration Selection
- * ---------------------------------------------
- * Dispatches to the appropriate kernel template instantiation based on
- * runtime configuration flags. This allows a single entry point to support
- * all possible combinations of features.
- */
-extern "C" void launch_cast_transpose_mxfp4_shuffled(
+void nvte_cast_transpose_mxfp4_fused_shuffle(
     const void* input,
-    void* rowwise_fp4,
-    void* rowwise_scale,
-    void* colwise_fp4,
-    void* colwise_scale,
-    int M,
-    int N,
-    bool use_rowwise,
-    bool use_colwise,
-    bool shuffle_scales,
-    bool use_hadamard,
-    bool shuffle_rowwise_fp4,
-    bool shuffle_colwise_fp4,
-    int rowwise_scale_stride,
-    int colwise_scale_stride,
-    int rowwise_scale_N,
-    int rowwise_scale_M_pad,
-    int rowwise_scale_N_pad,
-    int colwise_scale_M,
-    int colwise_scale_N,
-    int colwise_scale_M_pad,
-    int colwise_scale_N_pad,
+    void* rowwise_fp4, void* rowwise_scale,
+    void* colwise_fp4, void* colwise_scale,
+    int M, int N,
+    bool use_rowwise, bool use_colwise,
+    bool shuffle_scales, bool use_hadamard,
+    bool shuffle_rowwise_fp4, bool shuffle_colwise_fp4,
+    int rowwise_scale_stride, int colwise_scale_stride,
+    int rowwise_scale_N, int rowwise_scale_M_pad, int rowwise_scale_N_pad,
+    int colwise_scale_M, int colwise_scale_N,
+    int colwise_scale_M_pad, int colwise_scale_N_pad,
     hipStream_t stream
 ) {
-    // Grid configuration: tiles of 128x64
-    dim3 grid((M + 128 - 1) / 128, (N + 64 - 1) / 64);
+    dim3 grid((M + 127) / 128, (N + 63) / 64);
     dim3 block(256);
 
-    // Macro for cleaner kernel launch syntax
     #define LAUNCH_KERNEL(ROW, COL, HAD, SHUF_ROW, SHUF_COL) \
         te_mxfp4::cast_transpose_mxfp4_shuffled<ROW, COL, true, HAD, SHUF_ROW, SHUF_COL> \
             <<<grid, block, 0, stream>>>( \
@@ -719,7 +697,6 @@ extern "C" void launch_cast_transpose_mxfp4_shuffled(
                 rowwise_scale_N, rowwise_scale_M_pad, rowwise_scale_N_pad, \
                 colwise_scale_M, colwise_scale_N, colwise_scale_M_pad, colwise_scale_N_pad)
 
-    // Dispatch to appropriate template instantiation
     if (use_hadamard) {
         if (shuffle_rowwise_fp4 && shuffle_colwise_fp4) {
             if (use_rowwise && use_colwise)      LAUNCH_KERNEL(true, true, true, true, true);
@@ -759,4 +736,4 @@ extern "C" void launch_cast_transpose_mxfp4_shuffled(
     }
 
     #undef LAUNCH_KERNEL
-}
+}  // nvte_cast_transpose_mxfp4_fused_shuffle
