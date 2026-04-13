@@ -26,6 +26,7 @@ namespace {
 // Strings with headers for RTC kernels
 #include "string_code_util_math_h.h"
 #include "string_code_utils_cuh.h"
+#include "string_code_transpose_cast_transpose_tile_kernel_cuh.h"
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "string_code_amd_detail_hip_float8_h.h"
@@ -185,13 +186,13 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   // Compile source
   nvrtcProgram program;
 #ifdef __HIP_PLATFORM_AMD__
-  constexpr int num_headers = 3;
-  const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h, string_code_amd_detail_hip_float8_h};
-  const char* include_names[num_headers] = {"utils_hip.cuh", "util/math.h", "common/amd_detail/hip_float8.h"};
+  constexpr int num_headers = 4;
+  const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h, string_code_amd_detail_hip_float8_h, string_code_transpose_cast_transpose_tile_kernel_cuh};
+  const char* include_names[num_headers] = {"utils_hip.cuh", "util/math.h", "common/amd_detail/hip_float8.h", "transpose/cast_transpose_tile_kernel.cuh"};
 #else
-  constexpr int num_headers = 2;
-  constexpr const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h};
-  constexpr const char* include_names[num_headers] = {"utils.cuh", "util/math.h"};
+  constexpr int num_headers = 3;
+  constexpr const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h, string_code_transpose_cast_transpose_tile_kernel_cuh};
+  constexpr const char* include_names[num_headers] = {"utils.cuh", "util/math.h", "transpose/cast_transpose_tile_kernel.cuh"};
 #endif // __HIP_PLATFORM_AMD__
   NVTE_CHECK_NVRTC(nvrtcCreateProgram(&program, code.c_str(), filename.c_str(), num_headers,
                                       headers, include_names));

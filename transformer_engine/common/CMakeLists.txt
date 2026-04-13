@@ -497,9 +497,13 @@ make_string_header_from_file(transpose/rtc/swap_first_dims.cu
                              string_code_transpose_rtc_swap_first_dims_cu)
 make_string_header_from_file(utils.cuh
                              string_code_utils_cuh)
+make_string_header_from_file(transpose/cast_transpose_tile_kernel.cuh
+                             string_code_transpose_cast_transpose_tile_kernel_cuh)
 else()
   make_string_header_from_file(utils_hip.cuh
                                string_code_utils_cuh)
+  make_string_header_from_file(transpose/cast_transpose_tile_kernel.cuh
+                               string_code_transpose_cast_transpose_tile_kernel_cuh)
   make_string_header_from_file(transpose/rtc/cast_transpose_fusion.hip
                               string_code_transpose_rtc_cast_transpose_fusion_cu)
   make_string_header_from_file(transpose/rtc/transpose.hip
