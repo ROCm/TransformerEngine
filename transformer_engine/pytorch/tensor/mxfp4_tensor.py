@@ -67,6 +67,15 @@ class MXFP4Quantizer(Quantizer):
         self.shuffle_B_matrix_for_aiter = shuffle_B_matrix_for_aiter
         assert self.dtype == tex.DType.kFloat4E2M1, "Only E2M1 format supported for MXFP4"
 
+    def copy(self) -> "MXFP4Quantizer":
+        """Create shallow copy"""
+        return MXFP4Quantizer(
+            fp4_dtype=self.dtype,
+            rowwise=self.rowwise_usage,
+            columnwise=self.columnwise_usage,
+            shuffle_B_matrix_for_aiter=self.shuffle_B_matrix_for_aiter,
+        )
+
     def update_quantized(
         self,
         src: torch.Tensor,
