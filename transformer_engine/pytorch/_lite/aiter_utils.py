@@ -31,11 +31,11 @@ def get_aiter():
 
 
 def get_aiter_rope():
-    """Return aiter.rope module, or None if not available."""
+    """Return aiter.ops.rope module, or None if not available."""
     if not is_aiter_available():
         return None
     try:
-        from aiter import rope
+        from aiter.ops import rope
         return rope
     except (ImportError, AttributeError):
         return None

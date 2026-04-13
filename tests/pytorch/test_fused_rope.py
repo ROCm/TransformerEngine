@@ -3,6 +3,7 @@
 # See LICENSE for license information.
 from typing import Callable, Tuple, Union, List
 import math
+import os
 import torch
 import pytest
 from transformer_engine.pytorch.attention.rope import (
@@ -10,6 +11,8 @@ from transformer_engine.pytorch.attention.rope import (
     apply_rotary_pos_emb,
     apply_fused_qkv_rotary_pos_emb,
 )
+
+_IS_LITE = os.environ.get("NVTE_LITE", "0") == "1"
 
 
 # Gradient is a broadcasted scalar
@@ -57,6 +60,10 @@ def test_fused_rope(
         # This makes sure that the `start_positions` offsets being applied
         # are with the maximum length of the rope embeddings.
         pytest.skip("Skipping test with margin=0 and start_positions=True")
+
+    if _IS_LITE:
+        if transpose is not None:
+            pytest.skip("Lite mode: non-contiguous tensors not supported in fused RoPE kernel")
 
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
@@ -143,6 +150,11 @@ def test_fused_rope_thd(
     start_positions: bool,
     margin: int,
 ) -> None:
+    if _IS_LITE:
+        if transpose is not None:
+            pytest.skip("Lite mode: non-contiguous tensors not supported in fused RoPE kernel")
+        if cp_size > 1:
+            pytest.skip("Lite mode: THD format with CP not yet supported (thd_* stubs)")
 
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
