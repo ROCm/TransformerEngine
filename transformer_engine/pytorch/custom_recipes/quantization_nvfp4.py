@@ -12,6 +12,10 @@ import torch
 from transformer_engine.pytorch.custom_recipes import quantization
 from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+if IS_HIP_EXTENSION:
+    from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, is_fp8_fnuz
 
 
 def nvfp4_ref_rht_2d_quantizer_factory(role):
@@ -137,9 +141,15 @@ def cast_to_e4m3(decode_scale, global_amax):
     TODO(etsykunov): Make less unintuitive.
     """
     decode_scale = decode_scale * global_amax
-    FLOAT8_E4M3_MAX = torch.tensor(448.0, device=decode_scale.device, dtype=torch.float32)
+    if IS_HIP_EXTENSION:
+        FLOAT8_E4M3_MAX = torch.tensor(240.0 if is_fp8_fnuz() else 448.0, device=decode_scale.device, dtype=torch.float32)
+    else:
+        FLOAT8_E4M3_MAX = torch.tensor(448.0, device=decode_scale.device, dtype=torch.float32)
     decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
-    return decode_scale.to(torch.float8_e4m3fn)
+    if IS_HIP_EXTENSION:
+        return decode_scale.to(get_torch_float8_e4m3_type())
+    else:
+        return decode_scale.to(torch.float8_e4m3fn)
 
 
 def high_precision_gemm_ref(
@@ -470,7 +480,7 @@ class NVFP4QuantizerRef(Quantizer):
             )  # (128, 8, 1)
         x = x.view(m, n // tile_len_x, tile_len_x)
         FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)
-        FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
+        FLOAT8_E4M3_MAX = torch.tensor(240.0 if is_fp8_fnuz() else 448.0, device=x.device, dtype=torch.float32)
         decode_scale = torch.div(vec_max, FLOAT4_E2M1_MAX)
 
         if pow_2_scales:
@@ -503,7 +513,10 @@ class NVFP4QuantizerRef(Quantizer):
                 ),
             )
             decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
-            decode_scale = decode_scale.to(torch.float8_e4m3fn)
+            if IS_HIP_EXTENSION:
+                decode_scale = decode_scale.to(get_torch_float8_e4m3_type())
+            else:
+                decode_scale = decode_scale.to(torch.float8_e4m3fn)
 
             encode_scale = torch.min(
                 torch.div(1.0, decode_scale.to(torch.float32) * global_decode_scale),
@@ -823,7 +836,10 @@ class NVFP4QuantizerRef(Quantizer):
             sx = sx.to(torch.float32)
             sw = sw.to(torch.float32)
 
-            factor = 6.0 * 6.0 * 448.0 * 448.0
+            if IS_HIP_EXTENSION:
+                factor = 6.0 * 6.0 * 240.0 * 240.0 if is_fp8_fnuz() else 6.0 * 6.0 * 448.0 * 448.0
+            else:
+                factor = 6.0 * 6.0 * 448.0 * 448.0
 
             if gemm_type == quantization.GEMMType.WGRAD:
                 partial_alpha = qresult_x.global_amax_col * qresult_w.global_amax_col
