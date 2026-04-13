@@ -273,7 +273,7 @@ class TestTritonNorms:
         x = torch.randn(8, hidden_size, device=device, dtype=torch.bfloat16)
 
         y_pt, mean_pt, rstd_pt = _layernorm_fwd_pytorch(
-            x, weight, bias, 1e-5, None, None, None, 0, False,
+            x, weight, bias, 1e-5, False,
         )
         y_te, mean_te, rstd_te = tex.layernorm_fwd(
             x, weight, bias, 1e-5, None, None, None, 0, False,
@@ -296,8 +296,8 @@ class TestTritonNorms:
         weight = torch.randn(hidden_size, device=device, dtype=torch.bfloat16)
         x = torch.randn(8, hidden_size, device=device, dtype=torch.bfloat16)
 
-        y_pt, _, rstd_pt = _rmsnorm_fwd_pytorch(
-            x, weight, 1e-5, None, None, None, 0, False,
+        y_pt, rstd_pt = _rmsnorm_fwd_pytorch(
+            x, weight, 1e-5, False,
         )
         y_te, _, rstd_te = tex.rmsnorm_fwd(
             x, weight, 1e-5, None, None, None, 0, False,
@@ -323,10 +323,10 @@ class TestTritonNorms:
         grad_out = torch.randn(8, hidden, device=device, dtype=torch.bfloat16)
 
         _, mean, rstd = _layernorm_fwd_pytorch(
-            x, weight, bias, 1e-5, None, None, None, 0, False,
+            x, weight, bias, 1e-5, False,
         )
         dx_pt, dw_pt, db_pt = _layernorm_bwd_pytorch(
-            grad_out, x, mean, rstd, weight, 0, False,
+            grad_out, x, mean, rstd, weight, False,
         )
         dx_te, dw_te, db_te = tex.layernorm_bwd(
             grad_out, x, mean, rstd, weight, 0, False,
@@ -350,11 +350,11 @@ class TestTritonNorms:
         x = torch.randn(8, hidden, device=device, dtype=torch.bfloat16)
         grad_out = torch.randn(8, hidden, device=device, dtype=torch.bfloat16)
 
-        _, _, rstd = _rmsnorm_fwd_pytorch(
-            x, weight, 1e-5, None, None, None, 0, False,
+        _, rstd = _rmsnorm_fwd_pytorch(
+            x, weight, 1e-5, False,
         )
         dx_pt, dw_pt = _rmsnorm_bwd_pytorch(
-            grad_out, x, rstd, weight, 0, False,
+            grad_out, x, rstd, weight, False,
         )
         dx_te, dw_te = tex.rmsnorm_bwd(
             grad_out, x, rstd, weight, 0, False,
