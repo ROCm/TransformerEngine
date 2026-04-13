@@ -305,6 +305,103 @@ class TestTritonNorms:
             f"RMSNorm bwd dx max diff: {(dx_te - dx_pt).abs().max().item():.2e}"
         )
 
+    def test_fused_rmsnorm_fp8_quant_active(self, device):
+        """Fused RMSNorm+FP8 quantize kernel is used for Float8Quantizer."""
+        from transformer_engine.pytorch._lite import norms as _n
+        from transformer_engine.pytorch import Float8Quantizer
+
+        _n._try_load_aiter_norms()
+        if _n._aiter_fused_rms_fp8_static is None:
+            pytest.skip("AITER fused RMSNorm+FP8 kernel not available")
+
+        hidden = 256
+        x = torch.randn(8, hidden, device=device, dtype=torch.bfloat16)
+        w = torch.randn(hidden, device=device, dtype=torch.bfloat16)
+
+        q = Float8Quantizer(
+            scale=torch.tensor([4.0], dtype=torch.float32, device=device),
+            amax=torch.tensor([0.0], dtype=torch.float32, device=device),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+        )
+
+        out, _, rsigma = tex.rmsnorm_fwd(x, w, 1e-5, None, q, None, 0, False)
+
+        # Verify output is a Float8Tensor
+        assert type(out).__name__ == "Float8Tensor", (
+            f"Expected Float8Tensor, got {type(out).__name__}"
+        )
+        # Verify shape is preserved
+        assert out.shape == x.shape, f"Shape mismatch: {out.shape} vs {x.shape}"
+        # Verify amax was updated (non-zero means kernel ran)
+        assert q.amax.item() > 0, "amax should be updated by fused kernel"
+        # Verify scale_inv was set
+        assert hasattr(out, '_scale_inv')
+        expected_scale_inv = 1.0 / 4.0
+        assert abs(out._scale_inv.item() - expected_scale_inv) < 1e-6
+
+    def test_fused_rmsnorm_fp8_quant_vs_separate(self, device):
+        """Fused RMSNorm+FP8 path matches separate norm->quantize path."""
+        from transformer_engine.pytorch._lite.norms import (
+            _aiter_fused_rms_fp8_static, _try_load_aiter_norms,
+            _rmsnorm_fwd_pytorch,
+        )
+        from transformer_engine.pytorch import Float8Quantizer
+
+        _try_load_aiter_norms()
+        if _aiter_fused_rms_fp8_static is None:
+            pytest.skip("AITER fused RMSNorm+FP8 kernel not available")
+
+        hidden = 512
+        x = torch.randn(16, hidden, device=device, dtype=torch.bfloat16)
+        w = torch.randn(hidden, device=device, dtype=torch.bfloat16)
+        scale_val = 6.0
+
+        # Separate path: norm then quantize manually
+        normed, _ = _rmsnorm_fwd_pytorch(x, w, 1e-5, False)
+        dequant_scale = 1.0 / scale_val
+        fp8_separate = (normed.float() * scale_val).to(torch.float8_e4m3fnuz)
+        deq_separate = fp8_separate.float() * dequant_scale
+
+        # Fused path via tex
+        q = Float8Quantizer(
+            scale=torch.tensor([scale_val], dtype=torch.float32, device=device),
+            amax=torch.tensor([0.0], dtype=torch.float32, device=device),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+        )
+        out_fused, _, _ = tex.rmsnorm_fwd(x, w, 1e-5, None, q, None, 0, False)
+        deq_fused = out_fused._data.view(torch.float8_e4m3fnuz).float() * dequant_scale
+
+        # Allow FP8 rounding tolerance — different intermediate precision
+        # (fused kernel does norm in float32 vs PyTorch fallback in bf16)
+        diff = (deq_separate - deq_fused).abs().max().item()
+        assert diff < 0.5, (
+            f"Fused vs separate max dequantized diff: {diff:.4f} (expected < 0.5)"
+        )
+
+    def test_fused_rmsnorm_fp8_quant_3d_input(self, device):
+        """Fused path handles 3D input shape correctly."""
+        from transformer_engine.pytorch._lite.norms import (
+            _aiter_fused_rms_fp8_static, _try_load_aiter_norms,
+        )
+        from transformer_engine.pytorch import Float8Quantizer
+
+        _try_load_aiter_norms()
+        if _aiter_fused_rms_fp8_static is None:
+            pytest.skip("AITER fused RMSNorm+FP8 kernel not available")
+
+        x = torch.randn(4, 8, 256, device=device, dtype=torch.bfloat16)
+        w = torch.randn(256, device=device, dtype=torch.bfloat16)
+
+        q = Float8Quantizer(
+            scale=torch.tensor([2.0], dtype=torch.float32, device=device),
+            amax=torch.tensor([0.0], dtype=torch.float32, device=device),
+            fp8_dtype=tex.DType.kFloat8E4M3,
+        )
+        out, _, rsigma = tex.rmsnorm_fwd(x, w, 1e-5, None, q, None, 0, False)
+
+        assert out.shape == (4, 8, 256), f"Expected (4,8,256), got {out.shape}"
+        assert rsigma.shape == (4, 8), f"Expected (4,8), got {rsigma.shape}"
+
     def test_aiter_layernorm_fwd_bwd(self, device):
         """AITER LayerNorm forward and backward produce correct results."""
         from transformer_engine.pytorch._lite.norms import (
