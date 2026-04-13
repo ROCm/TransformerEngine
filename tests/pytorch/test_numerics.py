@@ -3270,3 +3270,111 @@ def test_noncontiguous():
     out = _run_module(g2, b)
 
     assert_allclose(out, outT, 1e-7)
+
+
+# ============================================================================
+# MXFP4 Tests (ROCm gfx950 only)
+# ============================================================================
+
+_mxfp4_available = (
+    IS_HIP_EXTENSION
+    and get_device_compute_capability() == (9, 5)
+)
+_mxfp4_skip_reason = "MXFP4 requires ROCm gfx950"
+
+try:
+    import aiter as _aiter_mod  # noqa: F401
+    _aiter_available = True
+except ImportError:
+    _aiter_available = False
+
+
+@pytest.mark.skipif(not _mxfp4_available, reason=_mxfp4_skip_reason)
+@pytest.mark.parametrize("M,N,K", [(256, 256, 256), (512, 1024, 512)])
+def test_mxfp4_a4w4_gemm(M, N, K):
+    """Smoke test: MXFP4-quantize A and W, run general_gemm, check finite output."""
+    from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer
+
+    reset_rng_states()
+    FP8GlobalStateManager.reset()
+
+    A = torch.randn(M, K, device="cuda", dtype=torch.bfloat16)
+    W = torch.randn(N, K, device="cuda", dtype=torch.bfloat16)
+
+    q_input = MXFP4Quantizer(rowwise=True, columnwise=False)
+    q_weight = MXFP4Quantizer(rowwise=True, columnwise=True,
+                               shuffle_B_matrix_for_aiter=_aiter_available)
+
+    A_fp4 = q_input(A)
+    W_fp4 = q_weight(W)
+
+    out, *_ = general_gemm(W_fp4, A_fp4, torch.bfloat16,
+                            quantization_params=None, bias=None,
+                            use_split_accumulator=False)
+
+    assert out.shape == (M, N), f"Expected ({M}, {N}), got {out.shape}"
+    assert torch.isfinite(out).all(), "MXFP4 GEMM output contains non-finite values"
+
+
+@pytest.mark.skipif(not _mxfp4_available, reason=_mxfp4_skip_reason)
+@pytest.mark.parametrize("hidden_size", [256, 512])
+def test_mxfp4_linear_forward_backward(hidden_size):
+    """Test TE Linear fwd+bwd under MXFP4BlockScaling recipe."""
+    from unittest import mock
+
+    reset_rng_states()
+    FP8GlobalStateManager.reset()
+
+    seq_len, bs = 128, 2
+    mxfp4_recipe = recipe.MXFP4BlockScaling()
+
+    block = Linear(hidden_size, hidden_size, bias=False).cuda()
+    inp = torch.randn(seq_len, bs, hidden_size, device="cuda",
+                      dtype=torch.bfloat16, requires_grad=True)
+
+    with mock.patch(
+        "transformer_engine.pytorch.module.linear._is_mxfp4_enabled",
+        return_value=True,
+    ):
+        with autocast(enabled=True, recipe=mxfp4_recipe):
+            out = block(inp)
+
+    assert out.shape == inp.shape
+    assert torch.isfinite(out).all(), "Linear MXFP4 fwd output has non-finite values"
+
+    loss = out.sum()
+    loss.backward()
+    assert inp.grad is not None, "No gradient for input"
+    assert torch.isfinite(inp.grad).all(), "Linear MXFP4 bwd grad has non-finite values"
+
+
+@pytest.mark.skipif(not _mxfp4_available, reason=_mxfp4_skip_reason)
+@pytest.mark.parametrize("hidden_size", [256, 512])
+def test_mxfp4_layernorm_linear_forward_backward(hidden_size):
+    """Test TE LayerNormLinear fwd+bwd under MXFP4BlockScaling recipe."""
+    from unittest import mock
+
+    reset_rng_states()
+    FP8GlobalStateManager.reset()
+
+    seq_len, bs = 128, 2
+    mxfp4_recipe = recipe.MXFP4BlockScaling()
+
+    block = LayerNormLinear(hidden_size, hidden_size, bias=False).cuda()
+    inp = torch.randn(seq_len, bs, hidden_size, device="cuda",
+                      dtype=torch.bfloat16, requires_grad=True)
+
+    with mock.patch(
+        "transformer_engine.pytorch.module.layernorm_linear._is_mxfp4_enabled",
+        return_value=True,
+    ):
+        with autocast(enabled=True, recipe=mxfp4_recipe):
+            out = block(inp)
+
+    assert out.shape == inp.shape
+    assert torch.isfinite(out).all(), "LayerNormLinear MXFP4 fwd has non-finite values"
+
+    loss = out.sum()
+    loss.backward()
+    assert inp.grad is not None, "No gradient for input"
+    assert torch.isfinite(inp.grad).all(), "LayerNormLinear MXFP4 bwd grad has non-finite values"
