@@ -4,8 +4,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
+#include <hip/hip_runtime.h>
+#include <hip/hip_bfloat16.h>
 #include <gtest/gtest.h>
 
 #include <cstdint>
@@ -60,13 +60,13 @@ TEST_P(CastTransposeMXFP4Test, SmokeAndNonZero) {
 
     std::mt19937 rng(42);
     std::normal_distribution<float> dist(0.0f, 1.0f);
-    std::vector<__hip_bfloat16> h_input(M * N);
-    for (auto& v : h_input) v = __float2bfloat16(dist(rng));
+    std::vector<hip_bfloat16> h_input(M * N);
+    for (auto& v : h_input) v = hip_bfloat16(dist(rng));
 
     void *d_input = nullptr, *d_row_fp4 = nullptr, *d_row_scale = nullptr;
     void *d_col_fp4 = nullptr, *d_col_scale = nullptr;
 
-    ASSERT_EQ(hipMalloc(&d_input, M * N * sizeof(__hip_bfloat16)), hipSuccess);
+    ASSERT_EQ(hipMalloc(&d_input, M * N * sizeof(hip_bfloat16)), hipSuccess);
     ASSERT_EQ(hipMalloc(&d_row_fp4, M * N / 2), hipSuccess);
     ASSERT_EQ(hipMalloc(&d_row_scale, rowwise_scale_M_pad * rowwise_scale_N_pad), hipSuccess);
     ASSERT_EQ(hipMalloc(&d_col_fp4, N * M / 2), hipSuccess);
@@ -75,7 +75,7 @@ TEST_P(CastTransposeMXFP4Test, SmokeAndNonZero) {
     ASSERT_EQ(hipMemset(d_row_fp4, 0, M * N / 2), hipSuccess);
     ASSERT_EQ(hipMemset(d_col_fp4, 0, N * M / 2), hipSuccess);
 
-    ASSERT_EQ(hipMemcpy(d_input, h_input.data(), M * N * sizeof(__hip_bfloat16),
+    ASSERT_EQ(hipMemcpy(d_input, h_input.data(), M * N * sizeof(hip_bfloat16),
                          hipMemcpyHostToDevice), hipSuccess);
 
     hipStream_t stream;

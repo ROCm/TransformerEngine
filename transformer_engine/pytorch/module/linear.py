@@ -71,7 +71,7 @@ from ..tensor.mxfp8_tensor import MXFP8Quantizer
 from ..tensor.utils import is_custom
 from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
 from ..export import is_in_onnx_export_mode, assert_warmed_up
-from ..cpu_offload import is_cpu_offload_enabled, mark_activation_offload
+from ..cpu_offload import is_cpu_offload_enabled, mark_not_offload, mark_activation_offload
 from ...debug.pytorch.debug_state import TEDebugState
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
