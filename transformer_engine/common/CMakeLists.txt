@@ -452,7 +452,9 @@ else()
     else()
       # Real .git directory — run git rev-parse directly
       execute_process(
-        COMMAND git -C ${REPO_DIR} rev-parse HEAD
+        COMMAND sh -c "export GIT_CONFIG_GLOBAL=$(mktemp /tmp/gitconfig.XXXXXX);
+        git config --global --add safe.directory ${REPO_DIR} && git -C ${REPO_DIR} rev-parse HEAD;
+        rm $GIT_CONFIG_GLOBAL"
         OUTPUT_VARIABLE _COMMIT
         OUTPUT_STRIP_TRAILING_WHITESPACE
       )
