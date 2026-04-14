@@ -904,6 +904,170 @@ class TestQuantize:
 
 
 # ---------------------------------------------------------------------------
+# MXFP8 BlockScaling tests
+# ---------------------------------------------------------------------------
+
+class TestMXFP8:
+    """Verify MXFP8 BlockScaling detection, quantize, GEMM, and norms in lite mode."""
+
+    def test_mxfp8_detection_not_fp4(self, device):
+        """MXFP8 tensor should be detected as MXFP8, not FP4."""
+        from transformer_engine.pytorch._lite.gemm import _is_mxfp8, _is_fp4
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        # Both dims must be divisible by 32 for MXFP8
+        q = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+        t = q.make_empty((32, 64), dtype=torch.bfloat16, device=device)
+        assert _is_mxfp8(t), "MXFP8 tensor not detected by _is_mxfp8()"
+        assert not _is_fp4(t), "MXFP8 tensor should NOT match _is_fp4()"
+
+    def test_fp4_detection_not_mxfp8(self, device):
+        """MXFP4 tensor should be detected as FP4, not MXFP8."""
+        from transformer_engine.pytorch._lite.gemm import _is_mxfp8, _is_fp4
+        try:
+            from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer
+        except ImportError:
+            pytest.skip("MXFP4Quantizer not available")
+
+        q = MXFP4Quantizer(tex.DType.kFloat4E2M1)
+        t = q.make_empty((32, 64), dtype=torch.bfloat16, device=device)
+        assert _is_fp4(t), "MXFP4 tensor not detected by _is_fp4()"
+        assert not _is_mxfp8(t), "MXFP4 tensor should NOT match _is_mxfp8()"
+
+    def test_mxfp8_is_quantized(self, device):
+        """_is_quantized should return True for MXFP8 tensors."""
+        from transformer_engine.pytorch._lite.gemm import _is_quantized
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        q = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+        t = q.make_empty((32, 64), dtype=torch.bfloat16, device=device)
+        assert _is_quantized(t), "MXFP8 tensor should be detected as quantized"
+
+    def test_linear_scale_to_e8m0(self, device):
+        """E8M0 conversion should produce correct biased exponents."""
+        import sys
+        _qmod = sys.modules["transformer_engine.pytorch._lite.quantize"]
+        e8m0_fn = _qmod._linear_scale_to_e8m0
+
+        scales = torch.tensor([1.0, 2.0, 0.5, 4.0, 0.25], device=device)
+        e8m0 = e8m0_fn(scales)
+        # 1.0 = 2^0 → 0 + 127 = 127
+        # 2.0 = 2^1 → 1 + 127 = 128
+        # 0.5 = 2^-1 → -1 + 127 = 126
+        # 4.0 = 2^2 → 2 + 127 = 129
+        # 0.25 = 2^-2 → -2 + 127 = 125
+        expected = torch.tensor([127, 128, 126, 129, 125], dtype=torch.uint8, device=device)
+        assert torch.equal(e8m0, expected), (
+            f"E8M0 mismatch: {e8m0.tolist()} vs {expected.tolist()}"
+        )
+
+    def test_mxfp8_quantize_roundtrip(self, device):
+        """MXFP8 quantize→dequantize roundtrip should have low error."""
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        x = torch.randn(32, 128, device=device, dtype=torch.bfloat16)
+        q = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+
+        quantized = tex.quantize(x, q)
+        # Verify it's an MXFP8 tensor
+        assert hasattr(quantized, '_rowwise_data'), "Expected MXFP8Tensor"
+        assert hasattr(quantized, '_rowwise_scale_inv'), "Expected MXFP8 scales"
+
+        # Dequantize and check error
+        deq = tex.dequantize(quantized, tex.DType.kBFloat16)
+        rel_err = (
+            (x.float() - deq.float()).abs() / (x.float().abs() + 1e-8)
+        ).mean().item()
+        assert rel_err < 0.1, (
+            f"MXFP8 roundtrip mean relative error {rel_err:.4f} > 10%"
+        )
+
+    def test_mxfp8_quantize_pytorch_fallback(self, device):
+        """MXFP8 PyTorch fallback should produce correct results without Triton."""
+        import sys
+        _qmod = sys.modules["transformer_engine.pytorch._lite.quantize"]
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        x = torch.randn(32, 128, device=device, dtype=torch.bfloat16)
+        q = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+        out = q.make_empty(x.shape, dtype=x.dtype, device=device)
+
+        result = _qmod._quantize_mxfp8_pytorch(x, q, out)
+
+        # Verify data was written
+        assert result._rowwise_data is not None
+        assert result._rowwise_data.any(), "FP8 data should be non-zero"
+        # Verify E8M0 scales were written
+        assert result._rowwise_scale_inv is not None
+        assert result._rowwise_scale_inv.any(), "E8M0 scales should be non-zero"
+
+        # Dequantize via Triton/tensor method and check error
+        deq = result.dequantize(dtype=torch.bfloat16)
+        rel_err = (
+            (x.float() - deq.float()).abs() / (x.float().abs() + 1e-8)
+        ).mean().item()
+        assert rel_err < 0.1, (
+            f"MXFP8 PyTorch fallback roundtrip mean rel error {rel_err:.4f} > 10%"
+        )
+
+    def test_mxfp8_gemm_dequant_path(self, device):
+        """MXFP8 tensors through generic_gemm should produce correct BF16 via dequant."""
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        M, N, K = 32, 64, 128
+        A_bf16 = torch.randn(N, K, device=device, dtype=torch.bfloat16)
+        B_bf16 = torch.randn(M, K, device=device, dtype=torch.bfloat16)
+
+        # Quantize both to MXFP8
+        q = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+        A_mxfp8 = tex.quantize(A_bf16, q)
+        B_mxfp8 = tex.quantize(B_bf16, q)
+
+        # Reference: dequantize then matmul
+        A_deq = A_mxfp8.dequantize(dtype=torch.bfloat16)
+        B_deq = B_mxfp8.dequantize(dtype=torch.bfloat16)
+        ref = B_deq @ A_deq.t()  # TN layout: result = B @ A^T
+
+        ws = torch.empty(1024, device=device, dtype=torch.uint8)
+        out, _, _, _ = tex.generic_gemm(
+            A_mxfp8, True, B_mxfp8, False, None, None, None,
+            None, None, False, None, False, ws, ws.shape[0],
+            False, False,
+        )
+
+        assert out.shape == (M, N), f"Expected ({M},{N}), got {out.shape}"
+        # Should match dequant reference closely (same precision path)
+        max_diff = (out.float() - ref.float()).abs().max().item()
+        assert max_diff < 0.5, (
+            f"MXFP8 GEMM max diff {max_diff:.4f} vs dequant reference"
+        )
+
+    def test_mxfp8_fused_rmsnorm(self, device):
+        """Fused RMSNorm+MXFP8 quant should produce valid MXFP8Tensor."""
+        from transformer_engine.pytorch._lite import norms as _n
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
+
+        _n._try_load_aiter_norms()
+        if _n._aiter_fused_rms_fp8_group is None:
+            pytest.skip("AITER fused_rms_fp8_group_quant not available")
+
+        hidden = 256
+        x = torch.randn(32, hidden, device=device, dtype=torch.bfloat16)
+        w = torch.randn(hidden, device=device, dtype=torch.bfloat16)
+
+        q = MXFP8Quantizer(tex.DType.kFloat8E4M3)
+        out, _, rsigma = tex.rmsnorm_fwd(x, w, 1e-5, None, q, None, 0, False)
+
+        # Verify output is MXFP8
+        assert hasattr(out, '_rowwise_data'), (
+            f"Expected MXFP8Tensor, got {type(out).__name__}"
+        )
+        assert out._rowwise_data is not None, "MXFP8 rowwise data should be populated"
+        assert out._rowwise_scale_inv is not None, "MXFP8 scales should be populated"
+        assert out._rowwise_scale_inv.any(), "E8M0 scales should be non-zero"
+
+
+# ---------------------------------------------------------------------------
 # GEMM tests
 # ---------------------------------------------------------------------------
 

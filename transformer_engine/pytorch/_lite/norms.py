@@ -365,17 +365,38 @@ def _try_fused_rmsnorm_quant(input_2d, weight, eps, quantizer, zero_centered_gam
         return out, rsigma
 
     # MXFP8Quantizer: fused_rms_fp8_group_quant
+    # Single kernel: RMSNorm → per-block FP8 quantize (group_size=32).
     if _is_mxfp8_quantizer(quantizer) and _aiter_fused_rms_fp8_group is not None:
-        (out_fp8, out_scales), _, _, _ = _aiter_fused_rms_fp8_group(
-            input_2d, weight, eps, group_size=32,
-        )
+        try:
+            from transformer_engine.pytorch._lite.quantize import _linear_scale_to_e8m0
 
-        # Wrap in MXFP8Tensor via quantizer
-        # The group kernel already computed block scales, but wrapping
-        # requires going through the quantizer interface for proper metadata.
-        # For now, fall back to separate quantize for MXFP8 since the
-        # tensor wrapping is complex. TODO: direct MXFP8Tensor construction.
-        return None
+            (out_fp8, out_scales), _, _, _ = _aiter_fused_rms_fp8_group(
+                input_2d, weight, eps, group_size=32,
+            )
+
+            # Create empty MXFP8 container via quantizer
+            out = quantizer.make_empty(
+                orig_shape, dtype=input_2d.dtype, device=input_2d.device,
+            )
+
+            # Copy FP8 data (uint8 bit pattern)
+            fp8_bytes = out_fp8.view(torch.uint8)
+            if hasattr(out, '_rowwise_data') and out._rowwise_data is not None:
+                out._rowwise_data.copy_(fp8_bytes.reshape(out._rowwise_data.shape))
+
+            # Convert AITER linear float32 scales → E8M0 uint8 and store
+            e8m0_scales = _linear_scale_to_e8m0(out_scales)
+            if hasattr(out, '_rowwise_scale_inv') and out._rowwise_scale_inv is not None:
+                out._rowwise_scale_inv.copy_(
+                    e8m0_scales.reshape(out._rowwise_scale_inv.shape)
+                )
+
+            # Compute rsigma for backward pass
+            rsigma = input_2d.float().square().mean(dim=-1).add_(eps).rsqrt()
+            return out, rsigma
+        except (RuntimeError, ValueError):
+            # Scale shape mismatch or other issue — fall back to separate path
+            pass
 
     return None
 

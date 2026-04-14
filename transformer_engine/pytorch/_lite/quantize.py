@@ -129,6 +129,22 @@ def _te_dtype_to_torch_fp8(te_dtype):
         return torch.float8_e4m3fnuz
 
 
+def _linear_scale_to_e8m0(scale_float32):
+    """Convert linear float32 scales to E8M0 biased exponent (uint8).
+
+    E8M0 format: value = 2^(exponent - 127), stored as uint8.
+    Conversion: e8m0 = floor(log2(scale)) + 127, clamped to [0, 254].
+
+    Args:
+        scale_float32: float32 tensor of per-group linear dequant scales
+    Returns:
+        uint8 tensor of E8M0 biased exponents
+    """
+    scale_clamped = scale_float32.float().clamp(min=2**-127)
+    exponent = torch.floor(torch.log2(scale_clamped)) + 127
+    return exponent.clamp(0, 254).to(torch.uint8)
+
+
 def _quantize_float8_pytorch(input_tensor, quantizer, out):
     """Quantize to Float8 using PyTorch ops. No C++ or tex.quantize dependency."""
     if input_tensor.nelement() == 0:
@@ -182,6 +198,66 @@ def _quantize_per_row_dynamic(input_tensor, quantizer, out):
     return out
 
 
+def _quantize_mxfp8_pytorch(input_tensor, quantizer, out):
+    """Quantize to MXFP8 using pure PyTorch ops — no Triton dependency.
+
+    Implements group_size=32 block scaling with E8M0 scale format:
+    1. Reshape input into groups of 32
+    2. Compute per-group amax → E8M0 biased exponent
+    3. Scale groups, cast to FP8, store as uint8
+    """
+    if input_tensor.nelement() == 0:
+        return out
+
+    try:
+        from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
+        group_size = MXFP8_BLOCK_SCALING_SIZE  # 32
+    except ImportError:
+        group_size = 32
+
+    input_2d = input_tensor.reshape(-1, input_tensor.shape[-1])
+    M, K = input_2d.shape
+    torch_fp8_dtype = _te_dtype_to_torch_fp8(quantizer.dtype)
+
+    # Pad K to multiple of group_size if needed
+    K_padded = ((K + group_size - 1) // group_size) * group_size
+    if K_padded != K:
+        input_padded = torch.nn.functional.pad(input_2d, (0, K_padded - K))
+    else:
+        input_padded = input_2d
+
+    # Reshape into groups: (M, K/32, 32)
+    num_groups = K_padded // group_size
+    grouped = input_padded.float().reshape(M, num_groups, group_size)
+
+    # Per-group amax
+    group_amax = grouped.abs().amax(dim=-1)  # (M, num_groups)
+    group_amax = group_amax.clamp(min=2**-127)
+
+    # E8M0 biased exponent: floor(log2(amax)) + 127
+    biased_exp = torch.floor(torch.log2(group_amax)) + 127
+    biased_exp = biased_exp.clamp(0, 254)
+
+    # Dequant: output = fp8_data * 2^(biased_exp - 127)
+    # Quantize: fp8_data = input / 2^(biased_exp - 127)
+    dequant_scale = torch.exp2(biased_exp - 127)  # (M, num_groups)
+    inv_scale = 1.0 / dequant_scale  # (M, num_groups)
+
+    # Scale each group and cast to FP8
+    scaled = grouped * inv_scale.unsqueeze(-1)  # (M, num_groups, 32)
+    fp8_data = scaled.reshape(M, K_padded)[:, :K].contiguous().to(torch_fp8_dtype)
+    fp8_bytes = fp8_data.view(torch.uint8)
+
+    # Write into output container
+    if hasattr(out, '_rowwise_data') and out._rowwise_data is not None:
+        out._rowwise_data.copy_(fp8_bytes.reshape(out._rowwise_data.shape))
+    if hasattr(out, '_rowwise_scale_inv') and out._rowwise_scale_inv is not None:
+        e8m0 = biased_exp[:, :((K + group_size - 1) // group_size)].to(torch.uint8)
+        out._rowwise_scale_inv.copy_(e8m0.reshape(out._rowwise_scale_inv.shape))
+
+    return out
+
+
 def _quantize_pytorch_fallback(tensor, quantizer, output=None, noop=None):
     """Pure PyTorch quantize -- never calls tex.quantize (avoids recursion)."""
     _try_load_triton_cast()
@@ -206,6 +282,8 @@ def _quantize_pytorch_fallback(tensor, quantizer, output=None, noop=None):
         return tensor
 
     # Dispatch to appropriate PyTorch fallback based on output type
+    if _MXFP8TensorStorage is not None and isinstance(out, _MXFP8TensorStorage):
+        return _quantize_mxfp8_pytorch(tensor.contiguous(), quantizer, out)
     if _Float8TensorStorage is not None and isinstance(out, _Float8TensorStorage):
         return _quantize_float8_pytorch(tensor.contiguous(), quantizer, out)
 
@@ -314,6 +392,8 @@ def quantize(tensor, quantizer, output=None, noop=None):
         if _triton_cast_transpose_mxfp8 is not None:
             _triton_cast_transpose_mxfp8(input_tensor, out)
             return out
+        else:
+            return _quantize_mxfp8_pytorch(input_tensor, quantizer, out)
 
     elif _MXFP4TensorStorage and isinstance(out, _MXFP4TensorStorage):
         if _triton_cast_transpose_mxfp4 is not None:

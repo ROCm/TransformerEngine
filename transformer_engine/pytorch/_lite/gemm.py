@@ -32,6 +32,8 @@ _GEMM_BACKEND = os.environ.get("NVTE_LITE_GEMM_BACKEND", "ck").lower()
 
 def _dequantize_if_needed(tensor):
     """Dequantize FP8/quantized tensor to BF16 for matmul."""
+    if _is_mxfp8(tensor):
+        return tensor.dequantize(dtype=torch.bfloat16)
     if _is_blockwise_fp8(tensor):
         return tensor.dequantize(dtype=torch.bfloat16)
     if hasattr(tensor, 'dequantize'):
@@ -42,8 +44,12 @@ def _dequantize_if_needed(tensor):
 
 
 def _is_quantized(tensor):
-    """Check if tensor is a quantized type with _data attribute."""
-    return hasattr(tensor, '_data') and hasattr(tensor, '_scale_inv')
+    """Check if tensor is a quantized type with FP8 data."""
+    if hasattr(tensor, '_data') and hasattr(tensor, '_scale_inv'):
+        return True
+    if _is_mxfp8(tensor):
+        return True
+    return False
 
 
 def _get_raw_data(tensor):
@@ -51,7 +57,11 @@ def _get_raw_data(tensor):
     if _is_blockwise_fp8(tensor):
         data, scale = _get_blockwise_data(tensor, need_rowwise=True)
         return data, scale
-    if _is_quantized(tensor):
+    if _is_mxfp8(tensor):
+        # MXFP8 scales are E8M0 uint8 — not directly usable as float scales
+        # for AITER GEMM dispatch. Return data only; GEMM will dequantize.
+        return tensor._rowwise_data, None
+    if hasattr(tensor, '_data') and hasattr(tensor, '_scale_inv'):
         return tensor._data, tensor._scale_inv
     return tensor, None
 
@@ -82,10 +92,27 @@ def _is_block_scaled(scale):
 
 
 def _is_fp4(tensor):
-    """Check if tensor is MXFP4 quantized."""
+    """Check if tensor is MXFP4 quantized.
+
+    Discriminates from MXFP8 via _fp4_dtype (MXFP4) vs _fp8_dtype (MXFP8).
+    """
     return (hasattr(tensor, '_rowwise_data') and
-            hasattr(tensor, '_rowwise_scale_inv') and
+            hasattr(tensor, '_fp4_dtype') and
             not hasattr(tensor, '_is_2D_scaled') and  # exclude Float8Blockwise
+            tensor._rowwise_data is not None)
+
+
+def _is_mxfp8(tensor):
+    """Check if tensor is MXFP8 quantized (block-scaled FP8, group_size=32).
+
+    MXFP8 uses _rowwise_data/_rowwise_scale_inv (shared attribute names with
+    MXFP4), distinguished by _fp8_dtype. No AITER GEMM kernel exists on MI300X;
+    future MI350 kernel hook is in _aiter_ck_gemm/_aiter_triton_gemm.
+    """
+    return (hasattr(tensor, '_rowwise_data') and
+            hasattr(tensor, '_fp8_dtype') and
+            not hasattr(tensor, '_is_2D_scaled') and  # exclude Float8Blockwise
+            not hasattr(tensor, '_data') and           # exclude Float8Tensor
             tensor._rowwise_data is not None)
 
 
@@ -120,6 +147,11 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
                    A, B):
     """Dispatch to AITER CK/ASM kernels. Returns result tensor or None."""
     try:
+        # MXFP8: No hardware GEMM on MI300X. Fall through to dequant path.
+        # TODO(MI350): Add aiter.gemm_mxfp8() dispatch when available.
+        if _is_mxfp8(A) or _is_mxfp8(B):
+            return None
+
         # FP4 × FP4
         if _is_fp4(A) and _is_fp4(B):
             if hasattr(aiter, 'gemm_a4w4'):
@@ -199,6 +231,11 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
     Returns result tensor or None.
     """
     try:
+        # MXFP8: No Triton MXFP8 GEMM on MI300X. Fall through to dequant path.
+        # TODO(MI350): Add Triton MXFP8 GEMM kernel dispatch when available.
+        if _is_mxfp8(A) or _is_mxfp8(B):
+            return None
+
         # FP4 × FP4
         if _is_fp4(A) and _is_fp4(B):
             from aiter.ops.triton.gemm_afp4wfp4 import (
