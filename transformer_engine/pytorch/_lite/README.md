@@ -226,7 +226,7 @@ supported for multi-GPU training with `cp_size` / `cp_rank` parameters.
 | Amax compute / update | Yes | Yes |
 | Block-scaling partial amax / cast | Yes | Yes |
 | Fused cast + transpose | Triton (noop variant) | CUDA kernel |
-| FP8 recipe management | Via PyTorch quantizers | Full DelayedScaling + recipes |
+| FP8 recipe management (`fp8_autocast`, recipes) | Yes (pure Python, shared) | Yes |
 
 **Gaps:** Minimal. The Triton cast kernels cover all major quantization formats.
 When a `Float8CurrentScalingQuantizer` is used and AITER is available, all
