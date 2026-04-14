@@ -291,6 +291,7 @@ __device__ __forceinline__ void mbarrier_wait_parity_acquire_cta_shared_cta(uint
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 __device__ __forceinline__ void try_cancel_cta(uint64_t *mbar, __uint128_t *response_data_ptr) {
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
   if constexpr (is_blackwell) {
@@ -337,6 +338,7 @@ __device__ __forceinline__ void get_cancelled_cta_id_2D(__uint128_t *response_da
         "Try recompiling with sm_XXXa instead of sm_XXX.");
   }
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
@@ -781,6 +783,7 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x(const float2 in01, c
   }
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 template <typename SCALING_COEFFICIENT_TYPE>
 __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_round_to_nearest(
     const uint64_t in03, const uint64_t in47, const SCALING_COEFFICIENT_TYPE scaling_coefficient) {
@@ -952,6 +955,7 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
   }
   return out_8x;
 }
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
 #endif  // FP4_TYPE_SUPPORTED
 
@@ -1806,6 +1810,7 @@ __device__ __forceinline__ floatx4 up_cast(const bf16x4 &in) {
 }
 #endif //#ifndef __HIP_PLATFORM_AMD__
 
+#ifndef __HIP_PLATFORM_AMD__
 // Loads single BF16/FP16 element from shared memory state space
 __device__ __forceinline__ bf16 ld_shared_b16(const bf16 *__restrict__ src_smem) {
   const uint32_t src_smem_ptr = __cvta_generic_to_shared(src_smem);
@@ -1858,6 +1863,7 @@ __device__ __forceinline__ void st_shared_b64(fp4e2m1x2 *__restrict__ dst_smem,
   asm volatile("st.shared.b64 [%0], %1;" : : "r"(dst_smem_ptr), "l"(fp4_pack_x16));
 }
 #endif
+#endif //#ifndef __HIP_PLATFORM_AMD__
 }  // namespace ptx
 
 namespace {
