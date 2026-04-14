@@ -234,7 +234,8 @@ struct Tensor {
       case NVTE_DELAYED_TENSOR_SCALING:
       case NVTE_BLOCK_SCALING_1D:
       case NVTE_BLOCK_SCALING_2D:
-      case NVTE_NVFP4_1D_SCALING: {
+      case NVTE_NVFP4_1D_SCALING:
+      case NVTE_MXFP4_1D_SCALING: {
         // Row-wise data shape matches tensor logical shape,
         // column-wise data shape is transpose of logical shape
         if (!has_data() && has_columnwise_data()) {
@@ -425,6 +426,8 @@ struct QuantizationConfig {
   bool nvfp4_2d_quantization = false;
   bool stochastic_rounding = false;
   bool use_fast_math = false;
+  bool mxfp4_use_hadamard = false;
+  bool mxfp4_shuffle = false;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -434,7 +437,9 @@ struct QuantizationConfig {
       sizeof(NVTETensor),                    // rng_seed and offset
       sizeof(uint8_t),                       // nvfp4_2d_quantization
       sizeof(uint8_t),                       // stochastic_rounding
-      sizeof(uint8_t)                        // use_fast_math
+      sizeof(uint8_t),                       // use_fast_math
+      sizeof(uint8_t),                       // mxfp4_use_hadamard
+      sizeof(uint8_t)                        // mxfp4_shuffle
   };
 };
 

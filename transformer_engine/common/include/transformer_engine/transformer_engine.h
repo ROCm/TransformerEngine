@@ -375,6 +375,10 @@ enum NVTEQuantizationConfigAttribute {
    *  inconsistently between kernels.
    */
   kNVTEQuantizationConfigUseFastMath = 7,
+  /*! Whether to apply Hadamard transform before MXFP4 quantization */
+  kNVTEQuantizationConfigMXFP4UseHadamard = 8,
+  /*! Whether to shuffle data/scales for AITER GEMM (MXFP4) */
+  kNVTEQuantizationConfigMXFP4Shuffle = 9,
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -1059,6 +1063,20 @@ class QuantizationConfigWrapper {
   void set_use_fast_math(bool use_fast_math) {
     const auto val = static_cast<uint8_t>(use_fast_math);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath, &val,
+                                           sizeof(val));
+  }
+
+  /*! \brief Set whether to apply Hadamard transform before MXFP4 quantization */
+  void set_mxfp4_use_hadamard(bool use_hadamard) {
+    const auto val = static_cast<uint8_t>(use_hadamard);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigMXFP4UseHadamard, &val,
+                                           sizeof(val));
+  }
+
+  /*! \brief Set whether to shuffle data/scales for AITER GEMM (MXFP4) */
+  void set_mxfp4_shuffle(bool shuffle) {
+    const auto val = static_cast<uint8_t>(shuffle);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigMXFP4Shuffle, &val,
                                            sizeof(val));
   }
 

@@ -1739,6 +1739,8 @@ std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
 
 MXFP4Quantizer::MXFP4Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
   this->dtype = quantizer.attr("dtype").cast<DType>();
+  this->use_hadamard = quantizer.attr("use_hadamard").cast<bool>();
+  this->shuffle_B_matrix_for_aiter = quantizer.attr("shuffle_B_matrix_for_aiter").cast<bool>();
 }
 
 void MXFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
@@ -1748,6 +1750,7 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(const std::ve
   using namespace pybind11::literals;
 
   // Scaling factor format
+  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
   const bool shuffle_B_matrix_for_aiter = this->shuffle_B_matrix_for_aiter;
   const bool use_hadamard = this->use_hadamard;
 
@@ -1801,7 +1804,8 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(const std::ve
   if (internal) {
     py::handle MXFP4TensorClass(reinterpret_cast<PyObject*>(MXFP4TensorStoragePythonClass));
     out_py = MXFP4TensorClass(rowwise_data_py, rowwise_scale_inv_py, columnwise_data_py,
-                              columnwise_scale_inv_py, this->dtype, this->quantizer);
+                              columnwise_scale_inv_py, this->dtype, this->quantizer,
+                              with_gemm_swizzled_scales);
   } else {
     py::handle MXFP4TensorClass(reinterpret_cast<PyObject*>(MXFP4TensorPythonClass));
     out_py = MXFP4TensorClass(
@@ -1809,7 +1813,7 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(const std::ve
         "rowwise_data"_a = rowwise_data_py, "columnwise_data"_a = columnwise_data_py,
         "rowwise_scale_inv"_a = rowwise_scale_inv_py,
         "columnwise_scale_inv"_a = columnwise_scale_inv_py, "fp4_dtype"_a = this->dtype,
-        "quantizer"_a = this->quantizer);
+        "quantizer"_a = this->quantizer, "with_gemm_swizzled_scales"_a = with_gemm_swizzled_scales);
   }
 
   // Construct C++ MXFP4 tensor
@@ -1851,25 +1855,33 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
   auto columnwise_scale_inv = get_tensor("_columnwise_scale_inv");
   NVTE_CHECK(rowwise_data || columnwise_data, "MXFP4Tensor has no data.");
 
-  // Tensor dimensions
+  // Tensor dimensions (logical shape, recovering from packed FP4 //2)
   std::vector<size_t> shape;
   if (columnwise_data) {
-    shape = getTensorShape(*columnwise_data);
+    shape = convert_shape_back_from_fp4(getTensorShape(*columnwise_data), true);
     if (rowwise_data) {
-      auto expected_shape = getTensorShape(*rowwise_data);
+      auto expected_shape = convert_shape_back_from_fp4(getTensorShape(*rowwise_data), false);
       NVTE_CHECK(shape == expected_shape, "MXFP4 row-wise data (shape=", expected_shape,
                  ") and column-wise data (shape=", shape, ") do not match");
     }
-  } else {  // Already checked columnwise_data_tensor == true
-    shape = getTensorShape(*rowwise_data);
+  } else {
+    shape = convert_shape_back_from_fp4(getTensorShape(*rowwise_data), false);
   }
+
+  size_t flat_first_dim = 1;
+  if (shape.size() > 0) {
+    for (size_t i = 0; i < shape.size() - 1; ++i) {
+      flat_first_dim *= shape[i];
+    }
+  }
+  const size_t flat_last_dim = shape.size() > 0 ? shape.back() : 1;
 
   // Coerce row-wise data
   if (rowwise_usage) {
     if (!rowwise_data) {
       const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
       const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
-      rowwise_data = at::empty(shape_int64, opts);
+      rowwise_data = at::empty(convert_shape_for_fp4(shape_int64), opts);
       tensor.attr("_rowwise_data") = *rowwise_data;
     }
     if (!rowwise_scale_inv) {
@@ -1894,9 +1906,11 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
   // Coerce column-wise data
   if (columnwise_usage) {
     if (!columnwise_data) {
-      const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
+      std::vector<int64_t> shape_int64_2d = {static_cast<int64_t>(flat_first_dim),
+                                             static_cast<int64_t>(flat_last_dim)};
       const auto opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
-      columnwise_data = at::empty(shape_int64, opts);
+      const auto transpose_shape_int64 = make_transpose_shape<int64_t>(shape_int64_2d);
+      columnwise_data = at::empty(convert_shape_for_fp4(transpose_shape_int64), opts);
       tensor.attr("_columnwise_data") = *columnwise_data;
     }
     if (!columnwise_scale_inv) {
@@ -1919,7 +1933,7 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
   }
 
   // Coerce other attrs
-  tensor.attr("_fp8_dtype") = dtype;
+  tensor.attr("_fp4_dtype") = dtype;
   tensor.attr("_with_gemm_swizzled_scales") = with_gemm_swizzled_scales;
 
   // Construct C++ MXFP4 tensor
@@ -1930,7 +1944,9 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
                                   getTensorShape(*rowwise_scale_inv));
   }
   if (columnwise_usage) {
-    out_cpp.set_columnwise_data(columnwise_data->data_ptr(), dtype, shape);
+    std::vector<size_t> shape_2d = {flat_first_dim, flat_last_dim};
+    auto col_data_shape = make_transpose_shape<size_t>(shape_2d);
+    out_cpp.set_columnwise_data(columnwise_data->data_ptr(), dtype, col_data_shape);
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
                                      getTensorShape(*columnwise_scale_inv));
   }
@@ -1949,6 +1965,8 @@ void MXFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
   if (noop_flag) {
     quant_config.set_noop_tensor(noop_flag->data());
   }
+  quant_config.set_mxfp4_use_hadamard(this->use_hadamard);
+  quant_config.set_mxfp4_shuffle(this->shuffle_B_matrix_for_aiter);
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });

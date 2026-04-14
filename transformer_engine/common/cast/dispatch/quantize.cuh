@@ -21,6 +21,7 @@
 #include "../core/common.cuh"
 #include "../fp8/quantize_fp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
+#include "../mxfp4/quantize_mxfp4.cuh"
 //TODO: ROCm TE does not support nvfp4 yet
 #ifndef __HIP_PLATFORM_AMD__
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
@@ -91,6 +92,15 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       mxfp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
           *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
           dummy_workspace_tensor, stream);
+      break;
+    }
+    case NVTE_MXFP4_1D_SCALING: {
+      const Tensor *dummy_input_tensor = nullptr;
+      Tensor *dummy_dbias_tensor = nullptr;
+      Tensor *dummy_workspace_tensor = nullptr;
+      mxfp4::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
+          *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
+          dummy_workspace_tensor, quant_config_cpp, stream);
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
@@ -235,6 +245,12 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       mxfp8::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
           *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
           stream);
+      break;
+    }
+    case NVTE_MXFP4_1D_SCALING: {
+      mxfp4::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
+          *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
+          quant_config_cpp, stream);
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {

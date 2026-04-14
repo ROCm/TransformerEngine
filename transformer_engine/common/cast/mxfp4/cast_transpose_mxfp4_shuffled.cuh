@@ -1,3 +1,9 @@
+/*************************************************************************
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+ 
 /*
  * MXFP4 Cast + Transpose Kernel (CUDA/HIP)
  * =========================================
@@ -23,11 +29,12 @@
  *   - Colwise output: FP4 packed (N x M/2) + E8M0 scales (N x M/32)
  */
 
+#ifndef TRANSFORMER_ENGINE_CAST_TRANSPOSE_MXFP4_SHUFFLED_CUH_
+#define TRANSFORMER_ENGINE_CAST_TRANSPOSE_MXFP4_SHUFFLED_CUH_
+
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <cstdint>
-
-#include "transformer_engine/transpose.h"
 
 namespace te_mxfp4 {
 
@@ -669,7 +676,7 @@ void cast_transpose_mxfp4_shuffled(
 
 }  // namespace te_mxfp4
 
-void nvte_cast_transpose_mxfp4_fused_shuffle(
+inline void nvte_cast_transpose_mxfp4_fused_shuffle(
     const void* input,
     void* rowwise_fp4, void* rowwise_scale,
     void* colwise_fp4, void* colwise_scale,
@@ -737,3 +744,5 @@ void nvte_cast_transpose_mxfp4_fused_shuffle(
 
     #undef LAUNCH_KERNEL
 }  // nvte_cast_transpose_mxfp4_fused_shuffle
+
+#endif  // TRANSFORMER_ENGINE_CAST_TRANSPOSE_MXFP4_SHUFFLED_CUH_

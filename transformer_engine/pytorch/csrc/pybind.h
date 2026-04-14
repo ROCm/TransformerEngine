@@ -104,6 +104,8 @@ std::unique_ptr<Quantizer> CreateMXFP8Params(const py::handle params);
 TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor,
                                                    Quantizer *quantization_params);
 
+TensorWrapper NVTETensorFromMXFP4Tensor(py::handle tensor, Quantizer *quantizer);
+
 TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer);
 
 inline bool IsFloatingPointType(at::ScalarType type) {
@@ -119,6 +121,8 @@ constexpr std::array custom_types_converters = {
                     CreateQuantizer<MXFP8Quantizer>),
     std::make_tuple(IsFloat8BlockwiseQTensor, IsFloat8BlockwiseQuantizers,
                     NVTETensorFromFloat8BlockwiseQTensor, CreateQuantizer<Float8BlockQuantizer>),
+    std::make_tuple(IsMXFP4Tensor, IsMXFP4Quantizers, NVTETensorFromMXFP4Tensor,
+                    CreateQuantizer<MXFP4Quantizer>),
 #ifdef USE_ROCM
 };
 #else

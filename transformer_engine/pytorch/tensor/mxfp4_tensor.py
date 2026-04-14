@@ -9,7 +9,6 @@ import math
 from typing import Optional, Tuple, Union
 
 import torch
-from ..triton_kernels.cast import te_quantize_triton
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
@@ -21,6 +20,9 @@ from ..utils import devices_match, round_up_to_nearest_multiple
 from .storage.mxfp4_tensor_storage import MXFP4TensorStorage, _FromMXFP4Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
+
+import os
+from ..triton_kernels.cast import te_quantize_triton
 
 MXFP4_BLOCK_SCALING_SIZE = MXFP8_BLOCK_SCALING_SIZE
 
@@ -77,6 +79,7 @@ class MXFP4Quantizer(Quantizer):
             use_hadamard=self.use_hadamard,
         )
         quantizer.internal = self.internal
+        quantizer.optimize_for_gemm = self.optimize_for_gemm
         return quantizer
 
     def update_quantized(
@@ -95,46 +98,12 @@ class MXFP4Quantizer(Quantizer):
         if not src.is_contiguous():
             src = src.contiguous()
 
-        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+        # Launch cast kernel
+        use_cast_transpose_triton = bool(
+            int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0"))
+        )
         quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
         quantize_func(src, self, dst, noop_flag)
-
-        # Flatten to 2D for HIP kernel
-        if src.dim() > 2:
-            src = src.view(-1, src.shape[-1])
-
-        with torch._C._DisableTorchDispatch():
-            rowwise_fp4_uint8 = (
-                dst._rowwise_data.view(torch.uint8) if dst._rowwise_data is not None else None
-            )
-            rowwise_scale_uint8 = (
-                dst._rowwise_scale_inv.view(torch.uint8)
-                if dst._rowwise_scale_inv is not None
-                else None
-            )
-            colwise_fp4_uint8 = (
-                dst._columnwise_data.view(torch.uint8)
-                if dst._columnwise_data is not None
-                else None
-            )
-            colwise_scale_uint8 = (
-                dst._columnwise_scale_inv.view(torch.uint8)
-                if dst._columnwise_scale_inv is not None
-                else None
-            )
-
-            tex.cast_transpose_mxfp4_fused_shuffle(
-                src,
-                rowwise_fp4_uint8,
-                rowwise_scale_uint8,
-                colwise_fp4_uint8,
-                colwise_scale_uint8,
-                True,
-                True,
-                self.shuffle_B_matrix_for_aiter,
-                self.shuffle_B_matrix_for_aiter,
-                self.use_hadamard,
-            )
 
         # Update FP4 dtype
         dst._fp4_dtype = self.dtype
@@ -143,8 +112,9 @@ class MXFP4Quantizer(Quantizer):
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
-        from ..triton_kernels.cast import te_quantize_triton
-        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+        use_cast_transpose_triton = bool(
+            int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0"))
+        )
         quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
         return quantize_func(tensor, self)
 
@@ -218,6 +188,7 @@ class MXFP4Quantizer(Quantizer):
             columnwise_scale_inv=columnwise_scale_inv,
             quantizer=self,
             requires_grad=requires_grad,
+            with_gemm_swizzled_scales=self.optimize_for_gemm,
         )
 
     def calibrate(self, tensor: torch.Tensor) -> None:
@@ -243,6 +214,7 @@ class MXFP4Quantizer(Quantizer):
             columnwise_scale_inv=None,
             fp4_dtype=fp4_dtype,
             quantizer=self,
+            with_gemm_swizzled_scales=False,
         )
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
@@ -284,6 +256,7 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
         columnwise_scale_inv: Optional[torch.Tensor],
         fp4_dtype: TE_DType,
         quantizer: Optional[Quantizer],
+        with_gemm_swizzled_scales: bool = False,
         **kwargs,
     ):
         instance = super().__new__(
@@ -294,6 +267,7 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
             columnwise_scale_inv,
             fp4_dtype,
             quantizer,
+            with_gemm_swizzled_scales,
             *args,
             **kwargs,
         )
@@ -434,6 +408,7 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
                 quantizer=tensor._quantizer,
                 requires_grad=False,
                 fp4_dtype=tensor._fp4_dtype,
+                with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
             )
 
         # Default case
@@ -450,6 +425,7 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
         dtype: torch.dtype,
         shape: torch.shape,
         quantizer: Optional[Quantizer] = None,
+        with_gemm_swizzled_scales: bool = False,
     ) -> MXFP4Tensor:
         """Build MXFP4Tensor, for use in __reduce__
 
@@ -466,6 +442,7 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
             dtype=dtype,
             shape=shape,
             quantizer=quantizer,
+            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         )
 
     def __reduce_ex__(self, protocol: int) -> tuple:
@@ -481,6 +458,7 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
                 self.dtype,
                 self.shape,
                 self._quantizer,
+                self._with_gemm_swizzled_scales,
             ),
         )
 
@@ -530,6 +508,7 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
             self._fp4_dtype = tensor._fp4_dtype
             self._rowwise_scale_inv = tensor._rowwise_scale_inv
             self._columnwise_scale_inv = tensor._columnwise_scale_inv
+            self._with_gemm_swizzled_scales = tensor._with_gemm_swizzled_scales
             return
 
         # Quantize to FP4
@@ -600,6 +579,7 @@ class _ViewFunc(torch.autograd.Function):
             columnwise_scale_inv=tensor._columnwise_scale_inv,
             fp4_dtype=tensor._fp4_dtype,
             quantizer=tensor._quantizer,
+            with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
         )
 
     @staticmethod
@@ -629,6 +609,7 @@ class _ViewFunc(torch.autograd.Function):
                 columnwise_scale_inv=grad._columnwise_scale_inv,
                 fp4_dtype=grad._fp4_dtype,
                 quantizer=grad._quantizer,
+                with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
             )
             return dgrad, None
         return grad.view(ctx.shape), None
@@ -692,6 +673,7 @@ class _ReshapeFunc(torch.autograd.Function):
             columnwise_scale_inv=tensor._columnwise_scale_inv,
             fp4_dtype=tensor._fp4_dtype,
             quantizer=tensor._quantizer,
+            with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
         )
 
     @staticmethod
@@ -720,6 +702,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 columnwise_scale_inv=grad._columnwise_scale_inv,
                 fp4_dtype=grad._fp4_dtype,
                 quantizer=grad._quantizer,
+                with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
             )
             return dgrad, None
         return grad.view(ctx.shape), None
