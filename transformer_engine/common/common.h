@@ -62,7 +62,11 @@ inline bool is_nvfp4_scaling(const NVTEScalingMode &mode) { return mode == NVTE_
 
 inline bool is_mxfp8_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
 
-inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
+inline bool is_mxfp4_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP4_1D_SCALING; }
+
+inline bool is_mxfp_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_MXFP8_1D_SCALING || mode == NVTE_MXFP4_1D_SCALING;
+}
 
 inline bool is_nvfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_NVFP4_1D_SCALING; }
 

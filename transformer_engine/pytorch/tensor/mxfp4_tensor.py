@@ -9,6 +9,7 @@ import math
 from typing import Optional, Tuple, Union
 
 import torch
+from ..triton_kernels.cast import te_quantize_triton
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
@@ -76,7 +77,6 @@ class MXFP4Quantizer(Quantizer):
             use_hadamard=self.use_hadamard,
         )
         quantizer.internal = self.internal
-        quantizer.optimize_for_gemm = self.optimize_for_gemm
         return quantizer
 
     def update_quantized(
@@ -94,6 +94,10 @@ class MXFP4Quantizer(Quantizer):
             src = src.to(device=dst.device)
         if not src.is_contiguous():
             src = src.contiguous()
+
+        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+        quantize_func(src, self, dst, noop_flag)
 
         # Flatten to 2D for HIP kernel
         if src.dim() > 2:
@@ -137,15 +141,12 @@ class MXFP4Quantizer(Quantizer):
 
         return dst
 
-    def quantize_impl(self, tensor: torch.Tensor) -> "MXFP4Tensor":
-        """Quantize a high-precision tensor to MXFP4 (out-of-place)"""
-        out = self.make_empty(
-            tensor.shape,
-            dtype=tensor.dtype,
-            device=tensor.device,
-            requires_grad=tensor.requires_grad,
-        )
-        return self.update_quantized(tensor, out)
+    def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
+        """Quantize tensor implementation"""
+        from ..triton_kernels.cast import te_quantize_triton
+        use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+        return quantize_func(tensor, self)
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
