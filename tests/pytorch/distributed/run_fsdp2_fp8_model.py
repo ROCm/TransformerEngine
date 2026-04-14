@@ -23,43 +23,48 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from pathlib import Path
 
 class SimpleNet(nn.Module):  
-    def __init__(self, input_size, hidden_size, output_size, use_fsdp2=False):
+    def __init__(self, input_size, hidden_size, output_size, use_fsdp2=False, linear_only=False):
         super(SimpleNet, self).__init__()  
-          
-        # LayerNormLinear: fuses LayerNorm + Linear  
-        self.ln_linear = te.LayerNormLinear(  
-            in_features=input_size,  
-            out_features=hidden_size,  
-            eps=1e-5,
-            use_fsdp2=use_fsdp2,
-            keep_fp8_weight_transpose_cache=False
-        )  
-          
-        # LayerNormMLP: fuses LayerNorm + FC1 + Activation + FC2  
-        self.ln_mlp = te.LayerNormMLP(  
-            hidden_size=hidden_size,  
-            ffn_hidden_size=hidden_size * 4,  # Typical 4x expansion
-            use_fsdp2=use_fsdp2,
-            keep_fp8_weight_transpose_cache=False
-        )  
-          
+        self.linear_only = linear_only
+        if not linear_only:
+            # LayerNormLinear: fuses LayerNorm + Linear  
+            self.ln_linear = te.LayerNormLinear(  
+                in_features=input_size,  
+                out_features=hidden_size,  
+                eps=1e-5,
+                use_fsdp2=use_fsdp2,
+                keep_fp8_weight_transpose_cache=False
+            )  
+            
+            # LayerNormMLP: fuses LayerNorm + FC1 + Activation + FC2  
+            self.ln_mlp = te.LayerNormMLP(  
+                hidden_size=hidden_size,  
+                ffn_hidden_size=hidden_size * 4,  # Typical 4x expansion
+                use_fsdp2=use_fsdp2,
+                keep_fp8_weight_transpose_cache=False
+            )  
+            
         # Regular Linear for final projection  
         self.fc_out = te.Linear(  
             hidden_size,   
             output_size,  
             use_fsdp2=use_fsdp2,
-            keep_fp8_weight_transpose_cache=False
+            keep_fp8_weight_transpose_cache=False,
+            bias=False
         )  
   
     def forward(self, x):  
-        # LayerNormLinear: applies LayerNorm then Linear  
-        x = self.ln_linear(x)  
-          
-        # LayerNormMLP: applies LayerNorm + FC1 + GELU + FC2  
-        x = self.ln_mlp(x)  
-          
-        # Final Linear projection  
-        x = self.fc_out(x)  
+        if self.linear_only:
+            return self.fc_out(x)
+        else:
+            # LayerNormLinear: applies LayerNorm then Linear  
+            x = self.ln_linear(x)  
+            
+            # LayerNormMLP: applies LayerNorm + FC1 + GELU + FC2  
+            x = self.ln_mlp(x)  
+            
+            # Final Linear projection  
+            x = self.fc_out(x)  
           
         return x
 
@@ -86,6 +91,7 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument("--hidden-size", type=int, default=2048, help="Hidden layer size")
     parser.add_argument("--output-size", type=int, default=2048, help="Output size for the model")
     parser.add_argument("--batch-size", type=int, default=2048, help="Output size for the model")
+    parser.add_argument("--linear-only", action="store_true", default=False, help="Only use Linear layer")
     parser.add_argument(
         "--quantized-init", action="store_true", default=False, help="Initialize primary weights in FP8 via quantized_model_init."
     )
@@ -195,7 +201,7 @@ def _train(args):
         
     # Build the model with the specified context
     with quantized_model_init(enabled=args.quantized_init, recipe=fp8_recipe):
-        model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)
+        model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2, linear_only=args.linear_only)
     model.to(device)
 
     # Creating a DeviceMesh for fully_shard

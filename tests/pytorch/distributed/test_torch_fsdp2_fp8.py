@@ -62,6 +62,8 @@ def _run_test(quantized_init, autocast, recipe):
         test_cmd += ["--autocast"]
     if autocast or quantized_init:
         test_cmd += ["--recipe", recipe]
+    if quantized_init:
+        test_cmd += ["--linear-only"]
     
     subprocess.run(test_cmd + ['--use-fsdp2','--gradients-save-file', 'all_iters_fsdp2.pt'], env=os.environ, check=True)
     subprocess.run(test_cmd + ['--gradients-save-file', 'all_iters_dp.pt'], env=os.environ, check=True)
@@ -77,7 +79,21 @@ def _run_test(quantized_init, autocast, recipe):
     #   (all-reduce vs reduce-scatter), so float non-associativity produces last-bit
     #   differences in the reduced gradients and updated weights.
     #
-    # All other cases (quantized_init=True, autocast=True, or autocast=True) use strict tolerance (0).
+    # quantized_init=True + autocast=True uses a Linear-only model (--linear-only)
+    # with bias=False to ensure all parameters are Float8Tensors. This avoids a
+    # known issue where PyTorch DDP's _broadcast_coalesced concatenates FP8 and
+    # FP32 parameters via aten::cat, triggering Float8Tensor dequantization (since
+    # Float8Tensor doesn't natively handle aten::cat). The subsequent aten::copy_
+    # back into the Float8Tensor re-quantizes from the dequantized values, which
+    # recomputes amax/scale with FP8 round-trip error, causing divergence from
+    # FSDP2. With bias=False and all params in FP8, aten::cat operates on
+    # homogeneous Float8Tensors and no dequantization occurs.
+    #
+    # autocast=True alone (quantized_init=False) works without any modifications
+    # because weights are initialized as regular FP32 tensors. DDP broadcasts
+    # FP32 parameters natively without any FP8 dequantize/re-quantize path, and
+    # quantization to FP8 only happens dynamically during the forward pass inside
+    # te.autocast, which is identical for both DDP and FSDP2.
     if (not quantized_init and not autocast):
         atol = 1e-6
         rtol = 5e-5

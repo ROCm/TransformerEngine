@@ -822,31 +822,6 @@ class Float8Tensor(Float8TensorStorage, QuantizedTensor):
                         dst._transpose.copy_(src._transpose, *args[2:], **kwargs)
                     else:
                         dst._create_transpose()
-                # Sync quantizer scale/amax so that the quantizer metadata
-                # stays consistent with the copied data and scale_inv.
-                src_q = getattr(src, "_quantizer", None)
-                dst_q = getattr(dst, "_quantizer", None)
-                if src_q is not None and dst_q is not None:
-                    if hasattr(src_q, "amax") and hasattr(dst_q, "amax"):
-                        dst_q.amax.copy_(src_q.amax)
-                    if hasattr(src_q, "scale") and hasattr(dst_q, "scale"):
-                        dst_q.scale.copy_(src_q.scale)
-                return dst
-            # DDP broadcast path: _broadcast_coalesced dequantizes Float8Tensors
-            # (via aten::cat fallback) then copies the plain tensor back.
-            # Re-quantize while preserving the original quantizer state.
-            if isinstance(dst, Float8Tensor) and not isinstance(src, Float8Tensor):
-                quantizer = getattr(dst, "_quantizer", None)
-                if quantizer is not None:
-                    saved_amax = quantizer.amax.clone() if hasattr(quantizer, "amax") else None
-                    saved_scale = quantizer.scale.clone() if hasattr(quantizer, "scale") else None
-                    dst.quantize_(src)
-                    if saved_amax is not None:
-                        quantizer.amax.copy_(saved_amax)
-                    if saved_scale is not None:
-                        quantizer.scale.copy_(saved_scale)
-                else:
-                    dst.quantize_(src)
                 return dst
         elif func in _ops_to_preserve_subclass_in_fsdp2:
             # Ops in the _ops_to_preserve_subclass_in_fsdp2 are recommened to return the same class instance to work fine with the torch fsdp2
