@@ -434,14 +434,30 @@ else()
 
   function(get_git_commit REPO_DIR COMMIT_ID_VAR)
     file(REAL_PATH "${REPO_DIR}" REPO_DIR)
-    execute_process(
-      COMMAND sh -c "export GIT_CONFIG_GLOBAL=$(mktemp /tmp/gitconfig.XXXXXX);
-      git config --global --add safe.directory ${REPO_DIR} && git -C ${REPO_DIR} rev-parse HEAD;
-      rm $GIT_CONFIG_GLOBAL"
-      OUTPUT_VARIABLE ${COMMIT_ID_VAR}
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-    )
-    SET(${COMMIT_ID_VAR} ${${COMMIT_ID_VAR}} PARENT_SCOPE)
+    if(EXISTS "${REPO_DIR}/.git" AND NOT IS_DIRECTORY "${REPO_DIR}/.git")
+      # .git is a file (submodule or worktree) — read HEAD from the gitdir
+      # directly. Running git fails inside containers where worktree metadata
+      # contains host-absolute paths that don't exist in the mount namespace.
+      file(READ "${REPO_DIR}/.git" _GITFILE)
+      string(STRIP "${_GITFILE}" _GITFILE)
+      string(REGEX REPLACE "^gitdir: " "" _GITDIR_REL "${_GITFILE}")
+      file(REAL_PATH "${_GITDIR_REL}" _GITDIR BASE_DIRECTORY "${REPO_DIR}")
+      file(READ "${_GITDIR}/HEAD" _COMMIT)
+      string(STRIP "${_COMMIT}" _COMMIT)
+      if(_COMMIT MATCHES "^ref: ")
+        string(REGEX REPLACE "^ref: " "" _REF "${_COMMIT}")
+        file(READ "${_GITDIR}/${_REF}" _COMMIT)
+        string(STRIP "${_COMMIT}" _COMMIT)
+      endif()
+    else()
+      # Real .git directory — run git rev-parse directly
+      execute_process(
+        COMMAND git -C ${REPO_DIR} rev-parse HEAD
+        OUTPUT_VARIABLE _COMMIT
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+      )
+    endif()
+    set(${COMMIT_ID_VAR} "${_COMMIT}" PARENT_SCOPE)
   endfunction()
 
   if(USE_FUSED_ATTN_AOTRITON)
