@@ -402,6 +402,137 @@ class TestTritonNorms:
         assert out.shape == (4, 8, 256), f"Expected (4,8,256), got {out.shape}"
         assert rsigma.shape == (4, 8), f"Expected (4,8), got {rsigma.shape}"
 
+    # --- Current Scaling: fused RMSNorm + per-row dynamic FP8 quantize ---
+
+    def test_fused_rmsnorm_current_scaling_active(self, device):
+        """Fused RMSNorm+FP8 per-row dynamic quant kernel is used for CurrentScaling."""
+        from transformer_engine.pytorch._lite import norms as _n
+        from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
+
+        _n._try_load_aiter_norms()
+        if _n._aiter_fused_rms_dynamic_quant is None:
+            pytest.skip("AITER rmsnorm2d_fwd_with_dynamicquant not available")
+
+        hidden = 256
+        x = torch.randn(8, hidden, device=device, dtype=torch.bfloat16)
+        w = torch.randn(hidden, device=device, dtype=torch.bfloat16)
+
+        q = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device=device,
+        )
+
+        out, _, rsigma = tex.rmsnorm_fwd(x, w, 1e-5, None, q, None, 0, False)
+
+        # Verify output is Float8Tensor
+        assert type(out).__name__ == "Float8Tensor", (
+            f"Expected Float8Tensor, got {type(out).__name__}"
+        )
+        # Verify shape is preserved
+        assert out.shape == x.shape, f"Shape mismatch: {out.shape} vs {x.shape}"
+        # Verify _scale_inv is per-row (M,) not scalar
+        assert hasattr(out, '_scale_inv')
+        assert out._scale_inv.shape == (8,), (
+            f"Expected per-row scale_inv shape (8,), got {out._scale_inv.shape}"
+        )
+        # Verify all per-row scales are positive (valid dequant scales)
+        assert (out._scale_inv > 0).all(), "All per-row scales should be positive"
+
+    def test_fused_rmsnorm_current_scaling_vs_separate(self, device):
+        """Fused per-row path matches separate norm->quantize within FP8 tolerance."""
+        from transformer_engine.pytorch._lite.norms import (
+            _aiter_fused_rms_dynamic_quant, _try_load_aiter_norms,
+            _rmsnorm_fwd_pytorch,
+        )
+
+        _try_load_aiter_norms()
+        if _aiter_fused_rms_dynamic_quant is None:
+            pytest.skip("AITER rmsnorm2d_fwd_with_dynamicquant not available")
+
+        hidden = 512
+        x = torch.randn(16, hidden, device=device, dtype=torch.bfloat16)
+        w = torch.randn(hidden, device=device, dtype=torch.bfloat16)
+
+        # Reference: separate RMSNorm (PyTorch)
+        normed_ref, _ = _rmsnorm_fwd_pytorch(x, w, 1e-5, False)
+
+        # Fused: RMSNorm + per-row dynamic FP8 quant
+        fp8_dtype = torch.float8_e4m3fnuz
+        out_fp8 = torch.empty_like(x, dtype=fp8_dtype)
+        yscale = torch.empty(x.shape[0], dtype=torch.float32, device=device)
+        _aiter_fused_rms_dynamic_quant(out_fp8, x, yscale, w, 1e-5)
+
+        # Dequantize: FP8 data * per-row scale
+        deq_fused = out_fp8.to(torch.float32) * yscale.unsqueeze(1)
+
+        # FP8 E4M3 has ~3.5% relative error budget — use generous tolerance
+        max_err = (normed_ref.float() - deq_fused).abs().max().item()
+        rel_err = (
+            (normed_ref.float() - deq_fused).abs()
+            / (normed_ref.float().abs() + 1e-8)
+        ).mean().item()
+        assert rel_err < 0.05, (
+            f"Mean relative error {rel_err:.4f} exceeds 5% tolerance"
+        )
+        assert max_err < 1.0, (
+            f"Max abs error {max_err:.4f} exceeds tolerance"
+        )
+
+    def test_fused_rmsnorm_current_scaling_per_row_scales_vary(self, device):
+        """Per-row scales should differ across rows (not degenerate scalar)."""
+        from transformer_engine.pytorch._lite.norms import (
+            _aiter_fused_rms_dynamic_quant, _try_load_aiter_norms,
+        )
+
+        _try_load_aiter_norms()
+        if _aiter_fused_rms_dynamic_quant is None:
+            pytest.skip("AITER rmsnorm2d_fwd_with_dynamicquant not available")
+
+        # Use input with varying row magnitudes to ensure different scales
+        hidden = 256
+        x = torch.randn(32, hidden, device=device, dtype=torch.bfloat16)
+        # Scale rows differently so per-row scales must differ
+        row_scales = torch.linspace(0.1, 10.0, 32, device=device).unsqueeze(1)
+        x = x * row_scales.to(x.dtype)
+        w = torch.ones(hidden, device=device, dtype=torch.bfloat16)
+
+        fp8_dtype = torch.float8_e4m3fnuz
+        out_fp8 = torch.empty_like(x, dtype=fp8_dtype)
+        yscale = torch.empty(32, dtype=torch.float32, device=device)
+        _aiter_fused_rms_dynamic_quant(out_fp8, x, yscale, w, 1e-5)
+
+        # With 32 rows at very different magnitudes, all scales should be unique
+        unique_scales = yscale.unique().numel()
+        assert unique_scales == 32, (
+            f"Expected 32 unique per-row scales, got {unique_scales}"
+        )
+
+    def test_fused_rmsnorm_current_scaling_3d_input(self, device):
+        """Fused per-row path handles 3D input shape correctly."""
+        from transformer_engine.pytorch._lite import norms as _n
+        from transformer_engine.pytorch.tensor.float8_tensor import Float8CurrentScalingQuantizer
+
+        _n._try_load_aiter_norms()
+        if _n._aiter_fused_rms_dynamic_quant is None:
+            pytest.skip("AITER rmsnorm2d_fwd_with_dynamicquant not available")
+
+        x = torch.randn(4, 8, 256, device=device, dtype=torch.bfloat16)
+        w = torch.randn(256, device=device, dtype=torch.bfloat16)
+
+        q = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device=device,
+        )
+        out, _, rsigma = tex.rmsnorm_fwd(x, w, 1e-5, None, q, None, 0, False)
+
+        assert out.shape == (4, 8, 256), f"Expected (4,8,256), got {out.shape}"
+        # rsigma should be flattened to batch dims
+        assert rsigma.shape == (4, 8), f"Expected (4,8), got {rsigma.shape}"
+        # scale_inv should be per-row over the flattened batch: 4*8 = 32 rows
+        assert out._scale_inv.shape == (32,), (
+            f"Expected per-row scale_inv shape (32,), got {out._scale_inv.shape}"
+        )
+
     def test_aiter_layernorm_fwd_bwd(self, device):
         """AITER LayerNorm forward and backward produce correct results."""
         from transformer_engine.pytorch._lite.norms import (
@@ -640,6 +771,137 @@ class TestQuantize:
         assert y.dtype == torch.bfloat16
         assert torch.allclose(y, x.to(torch.bfloat16))
 
+    # --- CurrentScaling per-row quantize (backward path) ---
+
+    def test_current_scaling_quantize_per_row(self, device):
+        """CurrentScaling quantizer should produce per-row scales via AITER."""
+        import sys
+        _qmod = sys.modules["transformer_engine.pytorch._lite.quantize"]
+        from transformer_engine.pytorch.tensor.float8_tensor import (
+            Float8CurrentScalingQuantizer,
+        )
+
+        _qmod._try_load_aiter_quant()
+        if _qmod._aiter_dynamic_per_token_quant is None:
+            pytest.skip("AITER dynamic_per_token_quant_fp8_i8 not available")
+
+        x = torch.randn(16, 64, device=device, dtype=torch.bfloat16)
+        q = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device=device,
+        )
+
+        result = tex.quantize(x, q)
+
+        # Should be Float8Tensor
+        assert hasattr(result, '_data'), "Expected Float8Tensor output"
+        assert result._data.shape == (16, 64)
+        # Per-row: _scale_inv should be (M,) not scalar
+        assert result._scale_inv.shape == (16,), (
+            f"Expected per-row scale_inv (16,), got {result._scale_inv.shape}"
+        )
+        assert (result._scale_inv > 0).all(), "All per-row scales should be positive"
+
+    def test_current_scaling_quantize_roundtrip(self, device):
+        """CurrentScaling per-row quantize->dequantize roundtrip has low error."""
+        import sys
+        _qmod = sys.modules["transformer_engine.pytorch._lite.quantize"]
+        from transformer_engine.pytorch.tensor.float8_tensor import (
+            Float8CurrentScalingQuantizer,
+        )
+
+        _qmod._try_load_aiter_quant()
+        if _qmod._aiter_dynamic_per_token_quant is None:
+            pytest.skip("AITER dynamic_per_token_quant_fp8_i8 not available")
+
+        x = torch.randn(32, 128, device=device, dtype=torch.bfloat16)
+        q = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device=device,
+        )
+
+        result = tex.quantize(x, q)
+
+        # Manual dequantize: FP8 data * per-row scale
+        from transformer_engine.pytorch._lite.quantize import _te_dtype_to_torch_fp8
+        fp8_dtype = _te_dtype_to_torch_fp8(q.dtype)
+        fp8_data = result._data.view(fp8_dtype)
+        deq = fp8_data.to(torch.float32) * result._scale_inv.unsqueeze(1)
+
+        rel_err = (
+            (x.float() - deq).abs() / (x.float().abs() + 1e-8)
+        ).mean().item()
+        assert rel_err < 0.05, (
+            f"Per-row quantize roundtrip mean rel error {rel_err:.4f} > 5%"
+        )
+
+    def test_current_scaling_quantize_backward_dgrad_flow(self, device):
+        """Simulate backward: quantize dY per-row, then per-token GEMM for dgrad."""
+        import sys
+        _qmod = sys.modules["transformer_engine.pytorch._lite.quantize"]
+        from transformer_engine.pytorch.tensor.float8_tensor import (
+            Float8CurrentScalingQuantizer,
+        )
+
+        _qmod._try_load_aiter_quant()
+        if _qmod._aiter_dynamic_per_token_quant is None:
+            pytest.skip("AITER dynamic_per_token_quant_fp8_i8 not available")
+
+        try:
+            from aiter.ops.triton.gemm_a8w8_per_token_scale import (
+                gemm_a8w8_per_token_scale,
+            )
+        except ImportError:
+            pytest.skip("AITER gemm_a8w8_per_token_scale not available")
+
+        M, N, K = 32, 64, 128  # dY is [M, N], W is [N, K], dX = dY @ W
+        fp8_dtype = torch.float8_e4m3fnuz
+
+        # dY: quantize per-row via CurrentScaling
+        dY = torch.randn(M, N, device=device, dtype=torch.bfloat16)
+        q = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device=device,
+        )
+        dY_quant = tex.quantize(dY, q)
+        dY_fp8 = dY_quant._data.view(fp8_dtype)
+        dY_scale = dY_quant._scale_inv  # (M,)
+
+        # W: per-tensor quantize
+        W = torch.randn(N, K, device=device, dtype=torch.bfloat16)
+        w_amax = W.abs().max()
+        w_qs = 240.0 / w_amax
+        W_fp8 = (W.float() * w_qs).to(fp8_dtype)
+        w_ds = torch.full((K, 1), (1.0 / w_qs).item(),
+                          dtype=torch.float32, device=device)
+
+        # dgrad GEMM: dX = dY @ W  (dY is [M,N], W is [N,K])
+        # per_token_scale: Y = X @ W^T, so X=dY [M,N], W_t=W^T [K,N]
+        # We need W transposed: W is [N,K], so W^T is [K,N]
+        # gemm_a8w8_per_token_scale(x, w, x_scale, w_scale) computes x @ w^T
+        # So: x=dY_fp8 [M,N], w=W_fp8^T [K,N] → result [M,K]
+        # But kernel takes w in [N_out, K_in] and transposes internally
+        # Actually: kernel computes Y = X @ W^T where W is [K, N]
+        # So we pass w=W^T = [K, N], then kernel does dY @ (W^T)^T = dY @ W
+        W_T_fp8 = W_fp8.t().contiguous()  # [K, N]
+        result = gemm_a8w8_per_token_scale(
+            dY_fp8, W_T_fp8,
+            dY_scale.unsqueeze(1), w_ds,
+        )
+
+        # Reference: dequant both, matmul
+        dY_deq = dY_fp8.to(torch.float32) * dY_scale.unsqueeze(1)
+        W_deq = W_fp8.to(torch.float32) * (1.0 / w_qs.item())
+        ref = dY_deq @ W_deq  # [M,N] @ [N,K] = [M,K]
+
+        assert result.shape == (M, K), f"Expected ({M},{K}), got {result.shape}"
+        rel_err = (
+            (result.float() - ref).abs() / (ref.abs() + 1e-8)
+        ).mean().item()
+        assert rel_err < 0.05, (
+            f"Backward dgrad per-row mean rel error {rel_err:.4f} > 5%"
+        )
+
 
 # ---------------------------------------------------------------------------
 # GEMM tests
@@ -852,6 +1114,125 @@ class TestGemm:
         )
         ref = B @ A.t()
         assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)
+
+    # -- Per-row scaled FP8 GEMM (CurrentScaling) ----------------------------
+
+    def test_gemm_per_row_scaled_fp8(self, device):
+        """FP8 GEMM with per-row activation scales dispatches correctly."""
+        from transformer_engine.pytorch._lite.gemm import (
+            _is_per_row_scaled, _is_block_scaled, is_aiter_available,
+        )
+        if not is_aiter_available():
+            pytest.skip("AITER not available")
+        try:
+            from aiter.ops.triton.gemm_a8w8_per_token_scale import (
+                gemm_a8w8_per_token_scale,
+            )
+        except ImportError:
+            pytest.skip("AITER gemm_a8w8_per_token_scale not available")
+
+        M, N, K = 32, 64, 128
+        fp8_dtype = torch.float8_e4m3fnuz
+
+        # Create per-row-scaled activation (simulates fused norm+quant output)
+        x_bf16 = torch.randn(M, K, device=device, dtype=torch.bfloat16)
+        from aiter.ops.triton.quant import dynamic_per_token_quant_fp8_i8
+        x_fp8 = torch.empty(M, K, dtype=fp8_dtype, device=device)
+        x_scale = torch.empty(M, dtype=torch.float32, device=device)
+        dynamic_per_token_quant_fp8_i8(x_fp8, x_bf16, x_scale)
+
+        # Create per-tensor-scaled weight
+        w_bf16 = torch.randn(N, K, device=device, dtype=torch.bfloat16)
+        w_amax = w_bf16.abs().max()
+        w_quant_scale = 240.0 / w_amax
+        w_fp8 = (w_bf16.float() * w_quant_scale).to(fp8_dtype)
+        w_dequant = torch.tensor([1.0 / w_quant_scale.item()],
+                                 dtype=torch.float32, device=device)
+
+        # Verify scale detection
+        assert _is_per_row_scaled(x_scale), "x_scale should be per-row"
+        assert not _is_per_row_scaled(w_dequant), "w_dequant should not be per-row"
+        assert not _is_block_scaled(x_scale), "per-row scale should not be block-scaled"
+
+        # Build mock Float8Tensor-like objects for generic_gemm
+        class _FP8Wrap:
+            def __init__(self, data, scale_inv):
+                self._data = data
+                self._scale_inv = scale_inv
+            @property
+            def dtype(self):
+                return self._data.dtype
+
+        A = _FP8Wrap(w_fp8, w_dequant)  # weight [N, K], transA=True
+        B = _FP8Wrap(x_fp8, x_scale)    # activation [M, K], transB=False
+
+        ws = self._workspace(device)
+        out, _, _, _ = tex.generic_gemm(
+            A, True, B, False, None, None, None,
+            None, None, False, None, False, ws, ws.shape[0],
+            False, False,
+        )
+
+        # Reference: dequantize both and matmul in float32
+        x_deq = x_fp8.to(torch.float32) * x_scale.unsqueeze(1)
+        w_deq = w_fp8.to(torch.float32) * (1.0 / w_quant_scale.item())
+        ref = x_deq @ w_deq.t()
+
+        assert out.shape == (M, N), f"Expected ({M},{N}), got {out.shape}"
+        rel_err = (
+            (out.float() - ref).abs() / (ref.abs() + 1e-8)
+        ).mean().item()
+        assert rel_err < 0.05, (
+            f"Per-row GEMM mean relative error {rel_err:.4f} exceeds 5% tolerance"
+        )
+
+    def test_gemm_per_row_scaled_numerical_accuracy(self, device):
+        """Per-row scaled FP8 GEMM matches dequantized matmul reference."""
+        from transformer_engine.pytorch._lite.gemm import is_aiter_available
+        if not is_aiter_available():
+            pytest.skip("AITER not available")
+        try:
+            from aiter.ops.triton.gemm_a8w8_per_token_scale import (
+                gemm_a8w8_per_token_scale,
+            )
+        except ImportError:
+            pytest.skip("AITER gemm_a8w8_per_token_scale not available")
+
+        from aiter.ops.triton.rmsnorm import rmsnorm2d_fwd_with_dynamicquant
+
+        M, K, N = 64, 256, 128
+        fp8_dtype = torch.float8_e4m3fnuz
+
+        # Full forward path: input → fused RMSNorm+quant → per-token GEMM
+        inp = torch.randn(M, K, device=device, dtype=torch.bfloat16)
+        norm_w = torch.randn(K, device=device, dtype=torch.bfloat16)
+        x_fp8 = torch.empty(M, K, dtype=fp8_dtype, device=device)
+        x_scale = torch.empty(M, dtype=torch.float32, device=device)
+        rmsnorm2d_fwd_with_dynamicquant(x_fp8, inp, x_scale, norm_w, 1e-5)
+
+        # Weight (per-tensor quantized)
+        w_bf16 = torch.randn(N, K, device=device, dtype=torch.bfloat16)
+        w_amax = w_bf16.abs().max()
+        w_qs = 240.0 / w_amax
+        w_fp8 = (w_bf16.float() * w_qs).to(fp8_dtype)
+        w_ds = torch.full((N, 1), (1.0 / w_qs).item(),
+                          dtype=torch.float32, device=device)
+
+        result = gemm_a8w8_per_token_scale(
+            x_fp8, w_fp8, x_scale.unsqueeze(1), w_ds,
+        )
+
+        # Reference
+        x_deq = x_fp8.to(torch.float32) * x_scale.unsqueeze(1)
+        w_deq = w_fp8.to(torch.float32) * w_ds
+        ref = x_deq @ w_deq.t()
+
+        rel_err = (
+            (result.float() - ref).abs() / (ref.abs() + 1e-8)
+        ).mean().item()
+        assert rel_err < 0.02, (
+            f"End-to-end fused norm→per-row GEMM mean rel error {rel_err:.4f} > 2%"
+        )
 
 
 # ---------------------------------------------------------------------------

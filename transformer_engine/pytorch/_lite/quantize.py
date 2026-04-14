@@ -26,6 +26,10 @@ _MXFP8TensorStorage = None
 _MXFP4TensorStorage = None
 _Float8CurrentScalingQuantizer = None
 
+# AITER per-row dynamic quantize (lazy-loaded)
+_aiter_dynamic_per_token_quant = None
+_aiter_quant_import_attempted = False
+
 
 def _try_load_triton_cast():
     """Lazy-import Triton cast kernels and tensor storage types."""
@@ -89,6 +93,24 @@ def _try_load_triton_cast():
         pass
 
 
+def _try_load_aiter_quant():
+    """Lazy-import AITER per-row dynamic quantize kernel."""
+    global _aiter_dynamic_per_token_quant, _aiter_quant_import_attempted
+
+    if _aiter_quant_import_attempted:
+        return
+    _aiter_quant_import_attempted = True
+
+    try:
+        from .aiter_utils import is_aiter_available
+        if not is_aiter_available():
+            return
+        from aiter.ops.triton.quant import dynamic_per_token_quant_fp8_i8
+        _aiter_dynamic_per_token_quant = dynamic_per_token_quant_fp8_i8
+    except (ImportError, AttributeError):
+        pass
+
+
 def _empty_tensor():
     """Get tensor with no entries and no data."""
     return torch.Tensor().cuda()
@@ -126,6 +148,36 @@ def _quantize_float8_pytorch(input_tensor, quantizer, out):
     fp8_data = scaled.to(torch_fp8_dtype)
     out._data.copy_(fp8_data.view(torch.uint8))
     scale_inv.fill_(1.0 / scale.float().item())
+
+    return out
+
+
+def _quantize_per_row_dynamic(input_tensor, quantizer, out):
+    """Per-row dynamic FP8 quantize via AITER dynamic_per_token_quant_fp8_i8.
+
+    Each row gets its own scale computed in-kernel (no global amax pass).
+    Output Float8Tensor has _scale_inv shape (M,) instead of scalar.
+    Used for CurrentScaling in backward (dY quantization) and standalone
+    quantize calls.
+    """
+    if input_tensor.nelement() == 0:
+        return out
+
+    input_2d = input_tensor.reshape(-1, input_tensor.shape[-1])
+    M, N = input_2d.shape
+    torch_fp8_dtype = _te_dtype_to_torch_fp8(quantizer.dtype)
+
+    # Pre-allocate output tensors for the AITER kernel
+    qx = torch.empty(M, N, dtype=torch_fp8_dtype, device=input_2d.device)
+    scale_out = torch.empty(M, dtype=torch.float32, device=input_2d.device)
+
+    _aiter_dynamic_per_token_quant(qx, input_2d, scale_out)
+
+    # Write FP8 data into the output container
+    fp8_bytes = qx.view(torch.uint8)
+    out._data.copy_(fp8_bytes.reshape(out._data.shape))
+    # Store per-row dequant scales — downstream GEMM detects numel() > 1
+    out._scale_inv = scale_out
 
     return out
 
@@ -216,6 +268,17 @@ def quantize(tensor, quantizer, output=None, noop=None):
     if not (_MXFP8TensorStorage and isinstance(out, _MXFP8TensorStorage)):
         if hasattr(out, 'size') and callable(out.size) and out.size().numel() == 0:
             return out
+
+    # --- Per-row dynamic quantize (CurrentScaling + AITER) ---
+    # Must come before per-tensor paths: per-row is strictly better for
+    # CurrentScaling (fused single kernel, no global amax pass).
+    _try_load_aiter_quant()
+    if (_Float8TensorStorage and isinstance(out, _Float8TensorStorage)
+            and _Float8CurrentScalingQuantizer is not None
+            and isinstance(quantizer, _Float8CurrentScalingQuantizer)
+            and _aiter_dynamic_per_token_quant is not None
+            and input_tensor.nelement() > 0):
+        return _quantize_per_row_dynamic(input_tensor, quantizer, out)
 
     # --- Triton dispatch ---
     if _Float8TensorStorage and isinstance(out, _Float8TensorStorage):

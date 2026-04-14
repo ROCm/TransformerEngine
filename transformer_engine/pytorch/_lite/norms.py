@@ -7,6 +7,9 @@
 
 Backend priority:
   1. AITER fused norm+quantize (single kernel: RMSNorm/LayerNorm -> FP8 cast)
+     - Current scaling:   rmsnorm2d_fwd_with_dynamicquant (Float8CurrentScalingQuantizer)
+       Per-row dynamic: computes per-row scale in-kernel, no global amax pass.
+       Output: FP8 data + yscale(M,) per-row dequant scales.
      - Per-tensor static: fused_rms_fp8_per_tensor_static_quant (Float8Quantizer)
      - Block scaling:     fused_rms_fp8_group_quant (MXFP8Quantizer)
   2. AITER Triton norm kernels (no quantize fusion)
@@ -33,6 +36,7 @@ _aiter_ln_bwd = None
 # AITER fused norm+quantize kernels
 _aiter_fused_rms_fp8_static = None
 _aiter_fused_rms_fp8_group = None
+_aiter_fused_rms_dynamic_quant = None  # Per-row dynamic: rmsnorm2d_fwd_with_dynamicquant
 _aiter_fused_ln_fp8_static = None  # LayerNorm variant (if available)
 _aiter_import_attempted = False
 
@@ -48,6 +52,7 @@ def _try_load_aiter_norms():
     """Lazy-import AITER Triton norm kernels. Called once, result cached."""
     global _aiter_rms_fwd, _aiter_rms_bwd, _aiter_ln_fwd, _aiter_ln_bwd
     global _aiter_fused_rms_fp8_static, _aiter_fused_rms_fp8_group
+    global _aiter_fused_rms_dynamic_quant
     global _aiter_fused_ln_fp8_static
     global _aiter_import_attempted
 
@@ -81,6 +86,15 @@ def _try_load_aiter_norms():
         )
         _aiter_fused_rms_fp8_static = fused_rms_fp8_per_tensor_static_quant
         _aiter_fused_rms_fp8_group = fused_rms_fp8_group_quant
+    except (ImportError, AttributeError):
+        pass
+
+    # Fused RMSNorm + per-row dynamic FP8 quantize (current scaling)
+    try:
+        from aiter.ops.triton.rmsnorm import (
+            rmsnorm2d_fwd_with_dynamicquant,
+        )
+        _aiter_fused_rms_dynamic_quant = rmsnorm2d_fwd_with_dynamicquant
     except (ImportError, AttributeError):
         pass
 
@@ -240,12 +254,34 @@ def _is_delayed_scaling_quantizer(quantizer):
     )
 
 
+def _is_current_scaling_quantizer(quantizer):
+    """Check if quantizer is Float8CurrentScalingQuantizer (per-tensor current scaling).
+
+    This quantizer computes amax from the current tensor (no history window).
+    With per-row fusion, we bypass the per-tensor amax entirely — each row
+    gets its own dynamic scale computed inside the fused kernel.
+    """
+    return (
+        quantizer is not None
+        and type(quantizer).__name__ == "Float8CurrentScalingQuantizer"
+    )
+
+
 def _is_mxfp8_quantizer(quantizer):
     """Check if quantizer is MXFP8Quantizer (block scaling)."""
     return (
         quantizer is not None
         and type(quantizer).__name__ == "MXFP8Quantizer"
     )
+
+
+def _get_fp8_torch_dtype(quantizer):
+    """Get the torch FP8 dtype from a quantizer's TE dtype."""
+    try:
+        from transformer_engine.pytorch._lite.quantize import _te_dtype_to_torch_fp8
+        return _te_dtype_to_torch_fp8(quantizer.dtype)
+    except (ImportError, AttributeError):
+        return torch.float8_e4m3fnuz
 
 
 def _try_fused_rmsnorm_quant(input_2d, weight, eps, quantizer, zero_centered_gamma,
@@ -260,6 +296,39 @@ def _try_fused_rmsnorm_quant(input_2d, weight, eps, quantizer, zero_centered_gam
 
     if zero_centered_gamma:
         weight = weight + 1.0
+
+    # Float8CurrentScalingQuantizer: rmsnorm2d_fwd_with_dynamicquant
+    # Fused RMSNorm + per-row dynamic FP8 quantize in a single kernel.
+    # Each row computes its own scale in registers — no global amax pass,
+    # no BF16 intermediate written to HBM.
+    if _is_current_scaling_quantizer(quantizer) and _aiter_fused_rms_dynamic_quant is not None:
+        M, N = input_2d.shape
+        fp8_dtype = _get_fp8_torch_dtype(quantizer)
+
+        # Pre-allocate output tensors for the AITER kernel
+        out_fp8 = torch.empty(M, N, dtype=fp8_dtype, device=input_2d.device)
+        yscale = torch.empty(M, dtype=torch.float32, device=input_2d.device)
+
+        _aiter_fused_rms_dynamic_quant(out_fp8, input_2d, yscale, weight, eps)
+
+        # yscale is the per-row dequant scale (multiply FP8 data by yscale to
+        # recover high-precision values). Wrap in Float8Tensor with vector
+        # _scale_inv of shape (M,) instead of the usual scalar.
+        out = quantizer.make_empty(
+            orig_shape, dtype=input_2d.dtype, device=input_2d.device,
+        )
+        fp8_bytes = out_fp8.view(torch.uint8)
+        if hasattr(out, '_data'):
+            out._data.copy_(fp8_bytes.reshape(out._data.shape))
+        # Store per-row dequant scales — downstream GEMM dispatch will detect
+        # scale_inv.numel() > 1 and route to gemm_a8w8_per_token_scale.
+        if hasattr(out, '_scale_inv'):
+            out._scale_inv = yscale
+
+        # Compute rsigma for backward pass. The fused kernel doesn't return it,
+        # so cheaply recompute from input (one reduction, no FP8 cast).
+        rsigma = input_2d.float().square().mean(dim=-1).add_(eps).rsqrt()
+        return out, rsigma
 
     # Float8Quantizer: fused_rms_fp8_per_tensor_static_quant
     if _is_delayed_scaling_quantizer(quantizer) and _aiter_fused_rms_fp8_static is not None:

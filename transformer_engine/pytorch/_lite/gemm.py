@@ -60,9 +60,25 @@ def _get_raw_data(tensor):
 # AITER CK GEMM dispatch
 # ---------------------------------------------------------------------------
 
+def _is_per_row_scaled(scale):
+    """Check if scale tensor is per-row (one scale per token/row).
+
+    Per-row scales have shape (M,) or (M, 1) — 1D with numel > 1.
+    Block scales are 2D with shape (ceil(M/block), ceil(N/block)).
+    """
+    return (scale is not None
+            and scale.numel() > 1
+            and scale.ndim == 1)
+
+
 def _is_block_scaled(scale):
-    """Check if scale tensor indicates block scaling (more than 1 element)."""
-    return scale is not None and scale.numel() > 1
+    """Check if scale tensor indicates block scaling (2D multi-element scale).
+
+    Excludes per-row scales (1D) — those use gemm_a8w8_per_token_scale.
+    """
+    return (scale is not None
+            and scale.numel() > 1
+            and not _is_per_row_scaled(scale))
 
 
 def _is_fp4(tensor):
@@ -134,7 +150,12 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
                 w = a_data if transA else a_data.t().contiguous()
                 w_scale = a_scale
 
-            if (_is_block_scaled(x_scale) or _is_block_scaled(w_scale)
+            if _is_per_row_scaled(x_scale) or _is_per_row_scaled(w_scale):
+                # Per-row (per-token) FP8 — from CurrentScaling fused norm+quant.
+                # Triton-only kernel; no CK variant exists. Fall through to None
+                # so the caller tries the Triton backend next.
+                pass
+            elif (_is_block_scaled(x_scale) or _is_block_scaled(w_scale)
                     or a_is_blockwise or b_is_blockwise):
                 # Block-scale FP8 (includes Float8Blockwise)
                 if hasattr(aiter, 'gemm_a8w8_blockscale'):
@@ -170,8 +191,9 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
 
     Per precision:
       FP4×FP4: aiter.ops.triton.gemm_afp4wfp4
+      FP8×FP8 per-row:     aiter.ops.triton.gemm_a8w8_per_token_scale
       FP8×FP8 block-scale: aiter.ops.triton.gemm_a8w8_blockscale
-      FP8×FP8 per-tensor: aiter.ops.triton.gemm_a8w8
+      FP8×FP8 per-tensor:  aiter.ops.triton.gemm_a8w8
       BF16/FP16: aiter.ops.triton.gemm_a16w16
     All kernels compute Y = X @ W^T (weight is internally transposed).
     Returns result tensor or None.
@@ -203,7 +225,22 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
             w_scale = a_scale
 
         if a_is_fp8 and b_is_fp8:
-            if (_is_block_scaled(x_scale) or _is_block_scaled(w_scale)
+            if _is_per_row_scaled(x_scale) or _is_per_row_scaled(w_scale):
+                # Per-row (per-token) FP8 — from CurrentScaling fused norm+quant.
+                # x_scale (M,) = per-token activation scale
+                # w_scale may be scalar (per-tensor weight) or (N,) per-channel.
+                from aiter.ops.triton.gemm_a8w8_per_token_scale import (
+                    gemm_a8w8_per_token_scale as triton_a8w8_pt,
+                )
+                # Kernel expects (M, 1) and (N, 1) shaped scales
+                if x_scale is not None and x_scale.ndim == 1:
+                    x_scale = x_scale.unsqueeze(1)
+                if w_scale is not None and w_scale.numel() == 1:
+                    w_scale = w_scale.expand(w.shape[0]).unsqueeze(1)
+                elif w_scale is not None and w_scale.ndim == 1:
+                    w_scale = w_scale.unsqueeze(1)
+                return triton_a8w8_pt(x, w, x_scale, w_scale)
+            elif (_is_block_scaled(x_scale) or _is_block_scaled(w_scale)
                     or a_is_blockwise or b_is_blockwise):
                 from aiter.ops.triton.gemm_a8w8_blockscale import (
                     gemm_a8w8_blockscale as triton_a8w8_bs,
