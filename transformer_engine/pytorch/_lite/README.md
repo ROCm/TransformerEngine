@@ -98,6 +98,7 @@ Each section below compares the lite module against the full C++ build.
 |---------|------|------------|
 | BF16 / FP16 / FP32 GEMM | AITER Triton or `torch.matmul` | cuBLAS / hipBLAS |
 | Per-tensor FP8 x FP8 | AITER CK (`gemm_a8w8`) | cuBLAS |
+| Per-row FP8 x FP8 | AITER Triton (`gemm_a8w8_per_token_scale`) | N/A |
 | Block-scaled FP8 x FP8 | AITER CK/Triton (`gemm_a8w8_blockscale`) | cuBLAS |
 | Mixed precision (FP16 x FP8) | AITER CK (`gemm_a16w8`) | cuBLAS |
 | MXFP4 x MXFP4 | AITER CK/Triton (`gemm_a4w4`) | cuBLAS |
@@ -160,11 +161,14 @@ unfused PyTorch ops.
 
 | Feature | Lite | Full Build |
 |---------|------|------------|
-| LayerNorm forward / backward | Triton or PyTorch | CUDA tuned kernels |
-| RMSNorm forward / backward | Triton or PyTorch | CUDA tuned kernels |
+| LayerNorm forward / backward | AITER Triton > TE Triton > PyTorch | CUDA tuned kernels |
+| RMSNorm forward / backward | AITER Triton > TE Triton > PyTorch | CUDA tuned kernels |
 | RMSNorm backward + add | Yes | Yes |
 | Zero-centered gamma | Yes | Yes |
-| Output quantization | Yes (generic quantizer) | Yes (per-tensor, block, MXFP8) |
+| Fused RMSNorm + FP8 quant (delayed) | AITER (`fused_rms_fp8_per_tensor_static_quant`) | CUDA kernel |
+| Fused RMSNorm + FP8 quant (current, per-row) | AITER (`rmsnorm2d_fwd_with_dynamicquant`) | N/A |
+| Fused RMSNorm + MXFP8 quant (block) | AITER (`fused_rms_fp8_group_quant`) — partial | CUDA kernel |
+| Output quantization (generic) | Yes | Yes |
 | cuDNN backend | No | Yes (optional) |
 | Pre-tuned hidden sizes (28 sizes) | No (auto-tune) | Yes |
 | Fused LayerNormLinear | No | Yes |
@@ -178,9 +182,11 @@ unfused PyTorch ops.
 projection into single kernels with FP8 and parallelism support. SM margin
 control is ignored in the backward pass. No distributed parallelism integration.
 
-The core norm operations themselves are the strongest lite subsystem -- Triton
-kernels with `zero_centered_gamma` and quantizer support cover most single-GPU
-use cases.
+The core norm operations are the strongest lite subsystem. AITER Triton kernels
+are the primary backend with TE Triton and PyTorch fallbacks. The fused
+RMSNorm+FP8 quantize path for CurrentScaling is a lite-only feature -- it fuses
+norm and per-row quantize into a single kernel, which is not available in the
+full C++ build (see [FP8 Training](#fp8-training) below).
 
 ---
 
@@ -195,16 +201,14 @@ use cases.
 | Partial RoPE (`rotary_percent`) | No | Yes |
 | `start_positions` (KV-cache inference) | No | Yes |
 | `cu_seqlens` (THD ragged packing) | No | Yes |
-| Context parallelism (`cp_size` / `cp_rank`) | No | Yes |
+| Context parallelism (`cp_size` / `cp_rank`) | Yes | Yes |
 | Position interpolation (NTK-like) | No | Yes |
 | `RotaryPositionEmbedding` module | No | Yes |
 
-**Gaps:** The most feature-limited lite subsystem. Only the simplest case works --
-apply rotation to a dense tensor with a single assumed layout. Missing
-`start_positions` blocks KV-cache inference, missing `cu_seqlens` blocks
-variable-length batching, missing context parallelism blocks distributed
-training. Suitable only for basic single-GPU training with uniform sequence
-lengths.
+**Gaps:** Only the simplest layout works -- apply rotation to a dense tensor with
+a single assumed layout. Missing `start_positions` blocks KV-cache inference,
+missing `cu_seqlens` blocks variable-length batching. Context parallelism is
+supported for multi-GPU training with `cp_size` / `cp_rank` parameters.
 
 ---
 
@@ -213,6 +217,7 @@ lengths.
 | Feature | Lite | Full Build |
 |---------|------|------------|
 | Per-tensor Float8 (e4m3 / e5m2) | Triton cast kernel | CUDA kernel |
+| Per-row dynamic Float8 (CurrentScaling) | AITER (`dynamic_per_token_quant_fp8_i8`) | N/A |
 | MXFP8 (block-scaled) | Triton cast kernel | CUDA kernel |
 | MXFP4 | Triton cast kernel | CUDA kernel |
 | Dequantize | Yes | Yes |
@@ -224,9 +229,82 @@ lengths.
 | FP8 recipe management | Via PyTorch quantizers | Full DelayedScaling + recipes |
 
 **Gaps:** Minimal. The Triton cast kernels cover all major quantization formats.
-Performance difference vs CUDA kernels varies by shape and dtype. The
-higher-level FP8 recipe and delayed-scaling infrastructure lives above `_lite` in
-the PyTorch module layer and works with both backends.
+When a `Float8CurrentScalingQuantizer` is used and AITER is available, all
+quantize calls automatically use per-row dynamic scaling instead of per-tensor --
+this is strictly better (higher precision, single kernel) and happens
+transparently. Performance difference vs CUDA kernels varies by shape and dtype.
+
+---
+
+### FP8 Training
+
+The lite module supports three FP8 scaling recipes, each with different
+trade-offs. The CurrentScaling per-row path is a **lite-only optimization** that
+is not available in the full C++ build.
+
+| Recipe | Scaling granularity | Lite backend | Full Build |
+|--------|-------------------|--------------|------------|
+| `DelayedScaling` | Per-tensor (history window) | AITER fused norm+quant / Triton cast | CUDA kernels |
+| `Float8CurrentScaling` | **Per-row dynamic** | AITER fused norm+quant / per-token GEMM | Per-tensor CUDA kernels |
+| `MXFP8BlockScaling` | Per-block (128×128 or 1×128) | Triton cast / AITER block GEMM | CUDA kernels |
+| `Float8BlockScaling` | Per-block (128×128) | Triton cast / AITER block GEMM | CUDA kernels |
+
+#### CurrentScaling per-row fusion (lite-only)
+
+The full C++ build implements `Float8CurrentScaling` as **per-tensor** current
+scaling: scan the entire tensor for `amax`, compute one scale, then quantize.
+This requires three kernel launches and three full memory passes:
+
+```
+Kernel 1: RMSNorm(input) → BF16 output    [read input, write BF16 to HBM]
+Kernel 2: amax = max(abs(BF16 output))     [read BF16 from HBM, write scalar]
+Kernel 3: FP8 = BF16 output × scale        [read BF16 from HBM, write FP8]
+```
+
+The lite module replaces this with AITER's `rmsnorm2d_fwd_with_dynamicquant`
+which fuses norm + quantize into a **single kernel** with **per-row** scaling.
+Each row computes its own `max(abs(...))` in registers and quantizes before the
+data leaves SRAM. The BF16 intermediate never touches HBM:
+
+```
+Kernel 1: RMSNorm+Quant(input) → FP8 output + yscale(M,)   [1 read, 1 write]
+```
+
+This works because per-row scaling removes the global data dependency: row 0's
+scale doesn't depend on row 1's data, so the fused kernel can process each row
+independently.
+
+**Forward path:**
+
+| Step | Kernel | Input → Output |
+|------|--------|---------------|
+| Fused norm+quant | `rmsnorm2d_fwd_with_dynamicquant` | BF16 → FP8 + scale(M,) |
+| GEMM | `gemm_a8w8_per_token_scale` | FP8 × FP8 → BF16 |
+
+**Backward path (dgrad):**
+
+| Step | Kernel | Input → Output |
+|------|--------|---------------|
+| Per-row quant dY | `dynamic_per_token_quant_fp8_i8` | BF16 → FP8 + scale(M,) |
+| dgrad GEMM | `gemm_a8w8_per_token_scale` | FP8 × FP8 → BF16 |
+
+**Backward path (wgrad):**
+
+Per-row scales are along the reduction axis (M) — incompatible with per-token
+GEMM. Falls back to per-tensor `gemm_a8w8_CK`, which is acceptable since the
+reduction across tokens averages out outliers.
+
+**Precision advantage:** Per-row scaling gives each token its own optimal scale
+factor. A batch with high-magnitude outlier tokens no longer forces every token
+to share a single scale driven by the outlier's magnitude. This is especially
+beneficial for long-context training where activation magnitudes vary widely
+across sequence positions.
+
+**Detection is automatic:** When `Float8CurrentScaling` recipe is used in lite
+mode and AITER is available, the per-row path activates transparently — no
+configuration needed. The `Float8Tensor._scale_inv` field carries shape `(M,)`
+instead of `(1,)`, and the GEMM dispatch detects this and routes to
+`gemm_a8w8_per_token_scale`.
 
 ---
 
@@ -236,13 +314,13 @@ the PyTorch module layer and works with both backends.
 |---------|------|------------|
 | Token permutation (forward / backward) | Triton sort + PyTorch gather | CUDA kernel |
 | Token unpermutation | PyTorch gather + scatter | CUDA kernel |
-| Top-k routing | PyTorch (`torch.topk`) | CUDA fused kernel |
-| Auxiliary load-balancing loss | PyTorch | CUDA fused kernel |
-| Score functions | PyTorch (`F.softmax`) | CUDA fused kernel |
+| Top-k routing | Fused Triton kernel | CUDA fused kernel |
+| Auxiliary load-balancing loss | Fused Triton kernel | CUDA fused kernel |
+| Score functions (softmax, sigmoid) | Fused Triton kernel | CUDA fused kernel |
 
-**Gaps:** Functionally complete but entirely PyTorch-native (except Triton sort
-for permutation). The full build uses fused CUDA kernels for all router and
-permutation ops. Performance difference is most visible at high expert counts.
+**Gaps:** Functionally complete. Router ops use a fused Triton kernel that
+combines topk, scoring, and aux loss in a single pass. The full build uses fused
+CUDA kernels. Performance difference is most visible at high expert counts.
 
 ---
 
@@ -335,21 +413,23 @@ not the training bottleneck.
 
 | Subsystem | Functional Coverage | Performance | Key Backend |
 |-----------|-------------------|-------------|-------------|
-| GEMM | Full | Good (AITER) | AITER CK/Triton |
+| GEMM | Full (incl. per-row FP8) | Good (AITER) | AITER CK/Triton |
 | Attention | Full | Good (AITER) | AITER CK / SDPA |
-| Norms | Full | Good (Triton) | Triton kernels |
+| Norms | Full + fused norm+quant | Good (AITER) | AITER Triton / TE Triton |
+| FP8 Training | Full (3 recipes) | **Best** (fused per-row) | AITER fused kernels |
 | Activations | Full | Moderate | AITER (2 ops) / PyTorch |
-| Quantization | Full | Good (Triton) | Triton cast kernels |
-| RoPE | Basic only | Moderate | AITER / PyTorch |
-| MOE | Full | Moderate | Triton sort / PyTorch |
+| Quantization | Full + per-row dynamic | Good (AITER/Triton) | AITER / Triton cast |
+| RoPE | Basic + CP | Moderate | AITER / PyTorch |
+| MOE | Full | Good (Triton) | Triton fused router |
 | Expert parallelism | Full (standalone) | Good (MORI) | MORI XGMI/RDMA |
 | Comm-overlap | **None** | N/A | Stubs |
 | Multi-tensor ops | Full | Lower | PyTorch loops |
 
 The lite module provides **functional correctness** across all major compute
 paths. Performance is competitive for GEMM, attention, norms, and quantization
-where AITER or Triton kernels are available. Expert parallelism is now available
-via MORI for distributed MoE workloads. The remaining primary gaps are
-**comm-overlap** (not available), **RoPE** (missing advanced features), and
-**fused compound modules** (LayerNormLinear, LayerNormMLP) which are
-full-build-only.
+where AITER or Triton kernels are available. The **FP8 CurrentScaling per-row
+fusion** is a lite-only optimization that outperforms the full build's per-tensor
+path by eliminating two HBM round-trips per norm+quantize operation. Expert
+parallelism is available via MORI for distributed MoE workloads. The remaining
+primary gaps are **comm-overlap** (not available) and **fused compound modules**
+(LayerNormLinear, LayerNormMLP) which are full-build-only.
