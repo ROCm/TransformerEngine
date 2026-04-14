@@ -1,0 +1,15 @@
+[qola]
+aiter_commit = "33f2e6af5f39379c739720080ed0033d533f5cb2"    # pinned AITER submodule commit
+namespace = "te"
+rocm_versions = ["7.2"]
+
+[build]
+architectures = ["gfx950"]
+
+# FP4 GEMM pybind modules from optCompilerConfig.json
+
+[[modules]]
+name = "module_gemm_a4w4_asm"
+
+[[modules]]
+name = "module_gemm_a4w4_blockscale"

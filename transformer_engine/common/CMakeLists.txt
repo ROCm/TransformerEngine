@@ -9,6 +9,7 @@ cmake_minimum_required(VERSION 3.21)
 option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
+option(USE_F4GEMM "Build f4gemm QoLA pybind modules" ON)
 set(USE_CUDA OFF)
 
 if (USE_ROCM)
@@ -434,6 +435,9 @@ else()
 
   function(get_git_commit REPO_DIR COMMIT_ID_VAR)
     file(REAL_PATH "${REPO_DIR}" REPO_DIR)
+    # For worktree submodules the .git file contains a relative gitdir path
+    # that may not resolve inside containers. Read the target commit directly
+    # from the HEAD file when the standard git command fails.
     execute_process(
       COMMAND sh -c "export GIT_CONFIG_GLOBAL=$(mktemp /tmp/gitconfig.XXXXXX);
       git config --global --add safe.directory ${REPO_DIR} && git -C ${REPO_DIR} rev-parse HEAD;
@@ -441,6 +445,32 @@ else()
       OUTPUT_VARIABLE ${COMMIT_ID_VAR}
       OUTPUT_STRIP_TRAILING_WHITESPACE
     )
+    if(NOT ${COMMIT_ID_VAR})
+      # Fallback: resolve the gitdir from the .git file and read HEAD directly
+      set(__git_path "${REPO_DIR}/.git")
+      if(EXISTS "${__git_path}" AND NOT IS_DIRECTORY "${__git_path}")
+        file(READ "${__git_path}" __git_content)
+        string(STRIP "${__git_content}" __git_content)
+        string(REGEX REPLACE "^gitdir: *" "" __gitdir "${__git_content}")
+        if(NOT IS_ABSOLUTE "${__gitdir}")
+          file(REAL_PATH "${__gitdir}" __gitdir BASE_DIRECTORY "${REPO_DIR}")
+        endif()
+        set(__head_file "${__gitdir}/HEAD")
+        if(EXISTS "${__head_file}")
+          file(READ "${__head_file}" __head_content)
+          string(STRIP "${__head_content}" __head_content)
+          if(__head_content MATCHES "^ref: (.+)$")
+            set(__ref_file "${__gitdir}/${CMAKE_MATCH_1}")
+            if(EXISTS "${__ref_file}")
+              file(READ "${__ref_file}" ${COMMIT_ID_VAR})
+              string(STRIP "${${COMMIT_ID_VAR}}" ${COMMIT_ID_VAR})
+            endif()
+          else()
+            set(${COMMIT_ID_VAR} "${__head_content}")
+          endif()
+        endif()
+      endif()
+    endif()
     SET(${COMMIT_ID_VAR} ${${COMMIT_ID_VAR}} PARENT_SCOPE)
   endfunction()
 
@@ -450,6 +480,10 @@ else()
 
   if(USE_FUSED_ATTN_CK)
     add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
+  endif()
+
+  if(USE_F4GEMM)
+    add_subdirectory(f4gemm ${CMAKE_CURRENT_BINARY_DIR}/f4gemm)
   endif()
 
   find_package(hip)

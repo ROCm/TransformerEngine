@@ -16,10 +16,11 @@ from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import MXFP4BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE  # MXFP4 uses same block size
+from ..custom_recipes.quantization import GEMMType
 from ..utils import devices_match, round_up_to_nearest_multiple
 
 from .storage.mxfp4_tensor_storage import MXFP4TensorStorage, _FromMXFP4Func
-from ..quantized_tensor import QuantizedTensor, Quantizer
+from ..quantized_tensor import QuantizedTensor, QuantizedTensorStorage, Quantizer
 from ._quantization_helpers import _IdentityFunc
 
 MXFP4_BLOCK_SCALING_SIZE = MXFP8_BLOCK_SCALING_SIZE
@@ -64,6 +65,11 @@ class MXFP4Quantizer(Quantizer):
         self.dtype = fp4_dtype
         self.shuffle_B_matrix_for_aiter = shuffle_B_matrix_for_aiter
         assert self.dtype == tex.DType.kFloat4E2M1, "Only E2M1 format supported for MXFP4"
+
+    @property
+    def custom(self) -> bool:
+        """Flag to route through custom_gemm() dispatch."""
+        return True
 
     def update_quantized(
         self,
@@ -184,6 +190,53 @@ class MXFP4Quantizer(Quantizer):
             fp4_dtype=fp4_dtype,
             quantizer=self,
         )
+
+    def qgemm(
+        self,
+        qx: torch.Tensor,
+        qw: torch.Tensor,
+        m_params,
+        out_dtype: torch.dtype,
+        sx: torch.Tensor,
+        sw: torch.Tensor,
+        bias: Optional[torch.Tensor] = None,
+        out: Optional[torch.Tensor] = None,
+        accumulate: bool = False,
+        gemm_type: GEMMType = GEMMType.FPROP,
+        qresult_x: Optional[QuantizedTensorStorage] = None,
+        qresult_w: Optional[QuantizedTensorStorage] = None,
+    ) -> torch.Tensor:
+        """FP4 GEMM via QoLA's AITER kernels (FPROP only).
+
+        After custom_gemm()'s A,B swap: qx = weight data, qw = activation data,
+        sx = weight scale, sw = activation scale.  The kernel expects
+        A = activation [M, K/2], B = weight [N, K/2], so we swap back.
+        """
+        if gemm_type != GEMMType.FPROP:
+            raise NotImplementedError(
+                "MXFP4 GEMM only supports FPROP. DGRAD and WGRAD are not available "
+                "because AITER does not have FP4 backward GEMM kernels."
+            )
+
+        from .f4gemm_dispatch import gemm_a4w4_asm, gemm_a4w4_blockscale
+
+        # qx = weight [N, K/2], qw = activation [M, K/2] (after custom_gemm swap)
+        # kernel expects: A = activation [M, K/2], B = weight [N, K/2]
+        act, act_scale = qw, sw
+        wt, wt_scale = qx, sx
+
+        M = act.shape[0]
+        N = wt.shape[0]
+
+        if out is None:
+            out = torch.empty(M, N, dtype=out_dtype, device=act.device)
+
+        if self.shuffle_B_matrix_for_aiter:
+            gemm_a4w4_asm(act, wt, act_scale, wt_scale, out, bias=bias)
+        else:
+            gemm_a4w4_blockscale(act, wt, act_scale, wt_scale, out)
+
+        return out
 
     def _get_compatible_recipe(self) -> Union[type[Recipe], None]:
         return MXFP4BlockScaling
@@ -424,9 +477,13 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
             ),
         )
 
-    def _get_data(self) -> MXFP4Tensor:
-        """Get tensor data property"""
-        return super().data
+    def _get_data(self):
+        """Get tensor data property
+
+        Returns the rowwise packed FP4 data, which is the quantized
+        representation used by the custom GEMM dispatch path.
+        """
+        return self._rowwise_data
 
     @torch.no_grad()
     def _set_data(self, tensor: torch.Tensor) -> None:

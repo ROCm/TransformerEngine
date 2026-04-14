@@ -68,7 +68,7 @@ else()
     message(STATUS "[AITER-BUILD] Building AITER kernels via QoLA.")
     get_default_aiter_cache_dir(__QOLA_OUTPUT_DIR)
     set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
-    set(__QOLA_MANIFEST "${__QOLA_DIR}/example/te-manifest.toml")
+    set(__QOLA_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/../manifests/mha.toml")
     execute_process(
       COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${__QOLA_DIR}:$ENV{PYTHONPATH}"
               ${Python_EXECUTABLE} -m qola.cli build

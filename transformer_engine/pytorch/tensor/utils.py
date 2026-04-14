@@ -630,10 +630,12 @@ def post_all_gather_processing(model_weights: Union[torch.Tensor, List[torch.Ten
 def is_custom(x: Optional[Union[Quantizer, QuantizedTensorStorage]] = None) -> bool:
     """Check if an object is custom.
 
-    Returns False if x is a torch.Tensor.
+    Returns False if x is a plain torch.Tensor (not a QuantizedTensorStorage).
     """
-    if x is None or isinstance(x, torch.Tensor):
+    if x is None:
         return False
-    if not isinstance(x, (Quantizer, QuantizedTensorStorage)):
-        raise AssertionError("Object must be a Quantizer or QuantizedTensorStorage instance")
-    return hasattr(x, "custom") and x.custom
+    if isinstance(x, (Quantizer, QuantizedTensorStorage)):
+        return hasattr(x, "custom") and x.custom
+    if isinstance(x, torch.Tensor):
+        return False
+    raise AssertionError("Object must be a Quantizer or QuantizedTensorStorage instance")

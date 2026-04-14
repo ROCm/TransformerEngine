@@ -1,0 +1,59 @@
+[qola]
+aiter_commit = "33f2e6af5f39379c739720080ed0033d533f5cb2"    # pinned AITER submodule commit
+namespace = "te"
+rocm_versions = ["7.2"]
+
+[build]
+architectures = ["gfx950"]
+
+# Static modules from optCompilerConfig.json
+
+[[modules]]
+name = "libmha_fwd"
+mode = "cpp_itfs"
+drop_srcs = ["mha_fwd_split.cu", "mha_fwd_batch_prefill.cu"]
+drop_directions = ["fwd_splitkv", "batch_prefill"]
+
+[[modules]]
+name = "libmha_bwd"
+mode = "cpp_itfs"
+
+# MHA variant declarations.  Fwd and bwd have separate sections because
+# CK codegen uses different instance naming schemes per direction.
+#
+# When libmha_fwd/libmha_bwd are listed in [[modules]], variants filter
+# CK codegen into a single .so per direction.  Without libmha_fwd in
+# [[modules]], fwd variants expand as separate pybind .so files instead.
+#
+# Options can be scalars, lists, or omitted:
+#   scalar       → single value
+#   list         → all listed values (cartesian product with other options)
+#   omitted      → all available values for that option
+#
+# Duplicates from the cartesian product (e.g. has_bias/has_alibi
+# interaction) are automatically deduplicated.
+
+# --- Forward variants ---
+# Option space: dtype, has_bias, has_alibi, has_mask, has_lse,
+#               has_dropout, has_skip, has_sink
+[[mha_fwd_variants]]
+dtype = ["bf16", "fp16"]
+# has_bias    — omitted: TE uses both (elementwise bias in batch mode)
+# has_alibi   — omitted: TE uses both (ALiBi in batch mode; deduped with has_bias)
+# has_mask    — omitted: TE uses no_mask, top_left, and bottom_right
+has_lse = true                     # TE always passes an LSE buffer
+# has_dropout — omitted: TE uses both (inference vs training)
+has_skip = false                   # TE never uses skip tokens
+has_sink = false                   # TE never uses sink tokens
+
+# --- Backward variants ---
+# Option space: dtype, has_bias, has_alibi, has_dbias, has_mask,
+#               has_dropout, deterministic
+[[mha_bwd_variants]]
+dtype = ["bf16", "fp16"]
+# has_bias    — omitted: TE uses both
+# has_alibi   — omitted: TE uses both (deduped with has_bias)
+# has_dbias   — omitted: TE uses both (bias gradient when post_scale_bias)
+# has_mask    — omitted: TE uses both
+# has_dropout — omitted: TE uses both (inference vs training)
+# deterministic — omitted: TE uses both

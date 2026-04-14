@@ -91,6 +91,21 @@ class MXFP4TensorStorage(QuantizedTensorStorage):
 
         return instance
 
+    @property
+    def custom(self) -> bool:
+        """Flag to route through custom_gemm() dispatch."""
+        return True
+
+    @property
+    def scale(self) -> Optional[torch.Tensor]:
+        """Rowwise E8M0 block scales [M_padded, K/32_padded]."""
+        return self._rowwise_scale_inv
+
+    @property
+    def original_shape(self) -> Tuple[int, ...]:
+        """Logical shape of the tensor (from the wrapper subclass or rowwise data)."""
+        return tuple(self.size())
+
     def clear(self):
         """Deallocate this tensor's memory. Typically not needed and must be used carefully."""
         for t in (

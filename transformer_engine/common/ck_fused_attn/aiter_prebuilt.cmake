@@ -107,3 +107,43 @@ function(download_aiter_prebuilt ROCM_VER_PARAM DOWNLOAD_SUCCESS)
   message(STATUS "[AITER-PREBUILT] Successfully downloaded to ${EXTRACT_DIR}")
   set(${DOWNLOAD_SUCCESS} TRUE PARENT_SCOPE)
 endfunction()
+
+# Validate f4gemm files in existing cache path
+function(is_f4gemm_cache_valid ROCM_VER_PARAM CACHE_VALID)
+  get_aiter_cache_key("${ROCM_VER_PARAM}" KEY EXTRACT_DIR)
+  if(EXISTS "${EXTRACT_DIR}/lib/te_module_gemm_a4w4_asm.so"
+     AND EXISTS "${EXTRACT_DIR}/lib/te_module_gemm_a4w4_blockscale.so")
+    set(${CACHE_VALID} TRUE PARENT_SCOPE)
+    message(STATUS "[F4GEMM-PREBUILT] Found cached f4gemm files at ${EXTRACT_DIR}")
+  endif()
+endfunction()
+
+# Get prebuilt f4gemm libs.
+# Checks cache validity first, if invalid, tries to download.
+function(get_prebuilt_f4gemm PREBUILT_DIR_VAR)
+  set(RESULT FALSE)
+  foreach(ROCM_VER_PARAM IN LISTS ROCM_VER_MAJOR ROCM_VER)
+    is_f4gemm_cache_valid("${ROCM_VER_PARAM}" RESULT)
+    if(RESULT)
+      get_aiter_cache_key("${ROCM_VER_PARAM}" _UNUSED CACHE_DIR)
+      set(${PREBUILT_DIR_VAR} "${CACHE_DIR}/lib" PARENT_SCOPE)
+      return()
+    endif()
+  endforeach()
+
+  # Cache is invalid/outdated - clean it and try download
+  file(REMOVE_RECURSE "${AITER_CACHE_ROOT}")
+  file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/_deps")
+
+  foreach(ROCM_VER_PARAM IN LISTS ROCM_VER_MAJOR ROCM_VER)
+    download_aiter_prebuilt("${ROCM_VER_PARAM}" RESULT)
+    if(RESULT)
+      is_f4gemm_cache_valid("${ROCM_VER_PARAM}" F4VALID)
+      if(F4VALID)
+        get_aiter_cache_key("${ROCM_VER_PARAM}" _UNUSED CACHE_DIR)
+        set(${PREBUILT_DIR_VAR} "${CACHE_DIR}/lib" PARENT_SCOPE)
+        return()
+      endif()
+    endif()
+  endforeach()
+endfunction()
