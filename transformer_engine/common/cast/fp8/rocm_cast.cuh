@@ -136,7 +136,7 @@ inline void rocm_cast_only(const Tensor &input, const Tensor &noop,
 
     TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
         input.dtype(), InputType,
-        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
             output.dtype(), OutputType,
             if (is_tensor_scaling(output.scaling_mode)) {
               constexpr size_t ELEMS_PER_BLK = ROCM_CAST_BLOCK * ROCM_CAST_ELEMS;
