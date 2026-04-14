@@ -66,22 +66,29 @@ else()
   if(__AITER_MHA_PATH STREQUAL "")
     # If not available, fallback: Build from source via QoLA
     message(STATUS "[AITER-BUILD] Building AITER kernels via QoLA.")
-    get_default_aiter_cache_dir(__QOLA_OUTPUT_DIR)
     set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
+    set(__QOLA_BUILD_DIR "${__QOLA_DIR}/build")
     set(__QOLA_MANIFEST "${__QOLA_DIR}/example/te-manifest.toml")
     execute_process(
       COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${__QOLA_DIR}:$ENV{PYTHONPATH}"
               ${Python_EXECUTABLE} -m qola.cli build
               --manifest ${__QOLA_MANIFEST}
               --aiter-root ${__AITER_SOURCE_DIR}
-              --output-dir ${__QOLA_OUTPUT_DIR}
+              --output-dir ${__QOLA_BUILD_DIR}
               --arch "${V3_ASM_ARCHS_STR}"
       RESULT_VARIABLE QOLA_BUILD_RESULT
     )
     if(NOT QOLA_BUILD_RESULT EQUAL 0)
       message(FATAL_ERROR "[AITER-BUILD] QoLA build failed.")
     endif()
-    set(__AITER_MHA_PATH "${__QOLA_OUTPUT_DIR}/lib")
+
+    # Copy only the final .so libs into the aiter prebuilt cache.
+    get_default_aiter_cache_dir(__QOLA_CACHE_DIR)
+    set(__QOLA_CACHE_LIB "${__QOLA_CACHE_DIR}/lib")
+    file(MAKE_DIRECTORY ${__QOLA_CACHE_LIB})
+    file(GLOB __QOLA_BUILT_LIBS "${__QOLA_BUILD_DIR}/lib/*.so")
+    file(COPY ${__QOLA_BUILT_LIBS} DESTINATION ${__QOLA_CACHE_LIB})
+    set(__AITER_MHA_PATH "${__QOLA_CACHE_LIB}")
   else()
     message(STATUS "[AITER-BUILD] Using pre-built AITER from ${__AITER_MHA_PATH}")
   endif()
