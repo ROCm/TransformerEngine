@@ -11,6 +11,7 @@
 #include "cgemm_helper.h"
 #endif //#ifndef USE_ROCM
 #include "common/util/cuda_runtime.h"
+#include "transformer_engine/gemm.h"
 
 namespace transformer_engine {
 namespace jax {
@@ -73,6 +74,10 @@ pybind11::dict Registrations() {
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CollectiveGemmInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GemmHandler));
 
+  dict["te_gemm_v2_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(GemmInitV2Handler),
+                     pybind11::arg("execute") = EncapsulateFFI(GemmV2Handler));
+
   // Grouped GEMM
   dict["te_grouped_gemm_d2h_group_sizes_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
@@ -80,6 +85,10 @@ pybind11::dict Registrations() {
   dict["te_grouped_gemm_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(GroupedGemmHandler));
+  dict["te_grouped_gemm_v2_ffi"] =
+      pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CublasHandleInitHandler),
+                     pybind11::arg("execute") = EncapsulateFFI(GroupedGemmV2Handler));
+
   // Amax
   dict["te_rht_amax_ffi"] = pybind11::dict(
       pybind11::arg("initialize") = EncapsulateFFI(RHTAmaxCalculationInitializeHandler),
@@ -96,6 +105,17 @@ pybind11::dict Registrations() {
   dict["te_gemm_ffi"] = EncapsulateFFI(GemmHandler);
   dict["te_grouped_gemm_ffi"] = EncapsulateFFI(GroupedGemmHandler);
 #endif
+  dict["te_inspect_ffi"] =
+      pybind11::dict(pybind11::arg("execute") = EncapsulateFFI(InspectHandler));
+
+  // Router
+  dict["te_fused_topk_with_score_function_forward_ffi"] =
+      EncapsulateFFI(FusedTopkWithScoreFunctionForwardHandler);
+  dict["te_fused_topk_with_score_function_backward_ffi"] =
+      EncapsulateFFI(FusedTopkWithScoreFunctionBackwardHandler);
+  dict["te_fused_moe_aux_loss_forward_ffi"] = EncapsulateFFI(FusedMoEAuxLossForwardHandler);
+  dict["te_fused_moe_aux_loss_backward_ffi"] = EncapsulateFFI(FusedMoEAuxLossBackwardHandler);
+
   return dict;
 }
 
@@ -122,6 +142,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
 #ifndef USE_ROCM
   m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
   m.def("get_cgemm_num_max_streams", &GetCgemmNumMaxStreams);
+  m.def("get_grouped_gemm_setup_workspace_size", &nvte_get_grouped_gemm_setup_workspace_size);
 #endif
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
@@ -171,6 +192,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   pybind11::enum_<NVTE_Activation_Type>(m, "NVTE_Activation_Type", pybind11::module_local())
       .value("GELU", NVTE_Activation_Type::GELU)
       .value("GEGLU", NVTE_Activation_Type::GEGLU)
+      .value("GLU", NVTE_Activation_Type::GLU)
       .value("SILU", NVTE_Activation_Type::SILU)
       .value("SWIGLU", NVTE_Activation_Type::SWIGLU)
       .value("RELU", NVTE_Activation_Type::RELU)
@@ -213,6 +235,11 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
       .value("ROWWISE", JAXX_Quantize_Layout::ROWWISE)
       .value("COLWISE", JAXX_Quantize_Layout::COLWISE)
       .value("ROWWISE_COLWISE", JAXX_Quantize_Layout::ROWWISE_COLWISE)
+      .export_values();
+
+  pybind11::enum_<JAXX_Score_Function>(m, "JAXX_Score_Function", pybind11::module_local())
+      .value("SIGMOID", JAXX_Score_Function::SIGMOID)
+      .value("SOFTMAX", JAXX_Score_Function::SOFTMAX)
       .export_values();
 
   pybind11::enum_<JAXX_Collective_Op>(m, "JAXX_Collective_Op", pybind11::module_local())

@@ -43,7 +43,6 @@ from ..utils import (
     init_method_constant,
     cast_if_needed,
     assert_dim_for_fp8_exec,
-    assert_dim_for_all_gather,
     clear_tensor_data,
     requires_grad,
     needs_quantized_gemm,
@@ -62,7 +61,7 @@ from ..distributed import (
     _get_cuda_rng_state,
     _set_cuda_rng_state,
 )
-from ..constants import dist_group_type
+from ..constants import FP8BwdTensorIdx, FP8FwdTensorIdx, dist_group_type
 from ..jit import no_torch_dynamo
 from ..graph import is_graph_capturing
 from ..tensor.float8_tensor import (
@@ -104,6 +103,7 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
         return {
             "gelu": (tex.gelu, tex.dgelu, None),
             "geglu": (tex.geglu, tex.dgeglu, None),
+            "glu": (tex.glu, tex.dglu, None),
             "qgelu": (tex.qgelu, tex.dqgelu, None),
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
             "relu": (tex.relu, tex.drelu, None),
@@ -120,6 +120,7 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
         return {
             "gelu": (tex.gelu, tex.dgelu, tex.dbias_dgelu),
             "geglu": (tex.geglu, tex.dgeglu, None),
+            "glu": (tex.glu, tex.dglu, None),
             "qgelu": (tex.qgelu, tex.dqgelu, tex.dbias_dqgelu),
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
             "relu": (tex.relu, tex.drelu, tex.dbias_drelu),
@@ -142,6 +143,7 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
         return {
             "gelu": (tex.gelu, tex.dgelu, None),
             "geglu": (tex.geglu, tex.dgeglu, None),
+            "glu": (tex.glu, tex.dglu, None),
             "qgelu": (tex.qgelu, tex.dqgelu, None),
             "qgeglu": (tex.qgeglu, tex.dqgeglu, None),
             "relu": (tex.relu, tex.drelu, None),
@@ -341,7 +343,6 @@ class _LayerNormMLP(torch.autograd.Function):
         inputmat = inp.view((-1, in_features))
         if fp8:
             assert_dim_for_fp8_exec(inputmat, fc1_weight, fc2_weight)
-            assert_dim_for_all_gather(inputmat, sequence_parallel, fc1_input_quantizer)
 
         activation_func = _act_func(
             activation, FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
@@ -484,12 +485,13 @@ class _LayerNormMLP(torch.autograd.Function):
             # FP8 cast to workspace buffer
             update_workspace = is_first_microbatch is None or is_first_microbatch
             # No need to set the quantizer states if weights are already quantized
-            if isinstance(fc1_weight, QuantizedTensorStorage):
+            # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
+            if isinstance(fc1_weight, QuantizedTensorStorage) and not debug:
                 fc1_weight_quantizer = fc1_weight._quantizer
             elif fc1_weight_quantizer is not None:
                 fc1_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and keep_fp8_weight_transpose_cache)
 
-            if isinstance(fc2_weight, QuantizedTensorStorage):
+            if isinstance(fc2_weight, QuantizedTensorStorage) and not debug:
                 fc2_weight_quantizer = fc2_weight._quantizer
             elif fc2_weight_quantizer is not None:
                 fc2_weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and keep_fp8_weight_transpose_cache)
@@ -1717,7 +1719,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                    type of normalization applied.
     activation : str, default = 'gelu'
           activation function used.
-          Options: ``'gelu'``, ``'geglu'``, ``'qgelu'``, ``'qgeglu'``, ``'relu'``, ``'reglu'``, ``'srelu'``, ``'sreglu'``,
+          Options: ``'gelu'``, ``'geglu'``, ``'glu'``, ``'qgelu'``, ``'qgeglu'``, ``'relu'``, ``'reglu'``, ``'srelu'``, ``'sreglu'``,
           ``'silu'``, ``'swiglu'``, and ``'clamped_swiglu'``.
     activation_params : dict, default = None
                         Additional parameters for the activation function.
@@ -1853,7 +1855,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         zero_centered_gamma: bool = False,
         device: Union[torch.device, str] = "cuda",
         ub_overlap_ag: bool = False,
-        name: str = None,
+        name: Optional[str] = None,
         ub_overlap_rs: bool = False,
         ub_overlap_rs_dgrad: bool = False,
         ub_bulk_dgrad: bool = False,
@@ -1864,7 +1866,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         keep_fp8_weight_transpose_cache: bool = True,
         use_fsdp2: bool = False,
     ) -> None:
-        super().__init__()
+        super().__init__(name)
 
         params_dtype = torch.get_default_dtype() if params_dtype is None else params_dtype
         self.fuse_wgrad_accumulation = fuse_wgrad_accumulation
@@ -1897,7 +1899,6 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 for use_fp8 in [False, True]
             )
         )
-        self.name = name
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
 
@@ -1955,7 +1956,15 @@ class LayerNormMLP(TransformerEngineBaseModule):
             self.layer_norm_bias = None
 
         # FC1 init
-        if self.activation in ["geglu", "qgeglu", "reglu", "sreglu", "swiglu", "clamped_swiglu"]:
+        if self.activation in [
+            "geglu",
+            "glu",
+            "qgeglu",
+            "reglu",
+            "sreglu",
+            "swiglu",
+            "clamped_swiglu",
+        ]:
             fc1_output_features = 2 * self.size_per_partition
         else:
             fc1_output_features = self.size_per_partition
@@ -1968,7 +1977,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc1_weight,
             init_fn=init_method,
             get_rng_state_tracker=get_rng_state_tracker,
-            fp8_meta_index=tex.FP8FwdTensors.GEMM1_WEIGHT,
+            fp8_meta_index=FP8FwdTensorIdx.GEMM1_WEIGHT,
         )
 
         if self.use_bias:
@@ -1988,7 +1997,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_weight,
             init_fn=output_layer_init_method,
             get_rng_state_tracker=get_rng_state_tracker,
-            fp8_meta_index=tex.FP8FwdTensors.GEMM2_WEIGHT,
+            fp8_meta_index=FP8FwdTensorIdx.GEMM2_WEIGHT,
         )
 
         if self.use_bias:
@@ -2117,8 +2126,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if get_ub("fc2_fprop", FP8GlobalStateManager.is_fp8_enabled()).is_fp8_ubuf():
                 fp8_output = True
 
-        with self.prepare_forward(inp, num_gemms=2) as inp:
+        inp = self.prepare_forward(inp, num_gemms=2)
 
+        try:
             quantizers = (
                 self._get_quantizers(fp8_output, is_grad_enabled)
                 if not debug
@@ -2158,7 +2168,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
             # Disable bias_gelu_nvfusion for determinism checkpointing in non-reentrant mode
             if ( not IS_HIP_EXTENSION
                 and self.bias_gelu_nvfusion and not use_reentrant_activation_recompute() ):
-                self.bias_gelu_nvfusion = False
+                self.fast_setattr("bias_gelu_nvfusion", False)
 
             if is_grad_enabled:
                 fwd_fn = _LayerNormMLP.apply
@@ -2230,6 +2240,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 non_tensor_args,
             )
 
+        finally:
+            self.end_forward()
+
         if self.return_layernorm_output:
             out, ln_out = out
 
@@ -2259,11 +2272,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
         ) = [None] * 10
         fc1_weight_quantizer, fc2_weight_quantizer = self._get_weight_quantizers()
         if self.fp8 or self.fp8_calibration:
-            fc1_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
+            fc1_input_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_INPUT]
             fc1_input_quantizer.internal = True
             if not self.sequence_parallel:
                 fc1_input_quantizer.optimize_for_gemm = True
-            fc2_input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
+            fc2_input_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM2_INPUT]
             fc2_input_quantizer.set_usage(
                 rowwise=True,
                 columnwise=isinstance(
@@ -2274,18 +2287,16 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc2_input_quantizer.internal = True
             fc2_input_quantizer.optimize_for_gemm = True
             if fp8_output:
-                fc2_output_quantizer = self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM2_OUTPUT
-                ]
+                fc2_output_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM2_OUTPUT]
             if is_grad_enabled:
                 fc2_grad_output_quantizer = self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT2
+                    FP8BwdTensorIdx.GRAD_OUTPUT2
                 ]
                 fc2_grad_output_quantizer.internal = True
                 if not self.sequence_parallel:
                     fc2_grad_output_quantizer.optimize_for_gemm = True
                 fc1_grad_output_quantizer = self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT1
+                    FP8BwdTensorIdx.GRAD_OUTPUT1
                 ]
                 fc1_grad_output_quantizer.internal = True
                 fc1_grad_output_quantizer.optimize_for_gemm = True
@@ -2378,6 +2389,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         activation_map = {
             "gelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
             "geglu": lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
+            "glu": lambda x: torch.sigmoid(x.chunk(2, -1)[0]) * x.chunk(2, -1)[1],
             "qgelu": lambda x: torch.nn.functional.gelu(x, approximate="tanh"),
             "qgeglu": lambda x: torch.nn.functional.gelu(x.chunk(2, -1)[0], approximate="tanh")
             * x.chunk(2, -1)[1],
@@ -2432,6 +2444,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     label,
                     None if label in ("dgrad", "wgrad") else base_quantizers[i + offset],
                     self.tp_group,
+                    self.tp_size,
                 )
                 for i, label in enumerate(labels)
             ]
@@ -2446,63 +2459,63 @@ class LayerNormMLP(TransformerEngineBaseModule):
         if fwd:
             # fc1_input_quantizer: set configs about amax epsilon and power_2_scale
             self.quantizers["scaling_fwd"][
-                tex.FP8FwdTensors.GEMM1_INPUT
+                FP8FwdTensorIdx.GEMM1_INPUT
             ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
             self.quantizers["scaling_fwd"][
-                tex.FP8FwdTensors.GEMM1_INPUT
+                FP8FwdTensorIdx.GEMM1_INPUT
             ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
             # fc2_input_quantizer
             self.quantizers["scaling_fwd"][
-                tex.FP8FwdTensors.GEMM2_INPUT
+                FP8FwdTensorIdx.GEMM2_INPUT
             ].force_pow_2_scales = recipe.fp8_quant_fwd_inp.power_2_scale
             self.quantizers["scaling_fwd"][
-                tex.FP8FwdTensors.GEMM2_INPUT
+                FP8FwdTensorIdx.GEMM2_INPUT
             ].amax_epsilon = recipe.fp8_quant_fwd_inp.amax_epsilon
             # fc1_weight_quantizer: also set numerical configs about weight
             self.quantizers["scaling_fwd"][
-                tex.FP8FwdTensors.GEMM1_WEIGHT
+                FP8FwdTensorIdx.GEMM1_WEIGHT
             ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
             self.quantizers["scaling_fwd"][
-                tex.FP8FwdTensors.GEMM1_WEIGHT
+                FP8FwdTensorIdx.GEMM1_WEIGHT
             ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
             # fc2_weight_quantizer
             self.quantizers["scaling_fwd"][
-                tex.FP8FwdTensors.GEMM2_WEIGHT
+                FP8FwdTensorIdx.GEMM2_WEIGHT
             ].force_pow_2_scales = recipe.fp8_quant_fwd_weight.power_2_scale
             self.quantizers["scaling_fwd"][
-                tex.FP8FwdTensors.GEMM2_WEIGHT
+                FP8FwdTensorIdx.GEMM2_WEIGHT
             ].amax_epsilon = recipe.fp8_quant_fwd_weight.amax_epsilon
             # parallel related
             if self.sequence_parallel and self.set_parallel_mode:
                 # fc1_input_quantizer: customize input_quantizer with amax reduction TP group, column parallel + sequence parallel here
                 self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
+                    FP8FwdTensorIdx.GEMM1_INPUT
                 ].with_amax_reduction = True
                 self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
+                    FP8FwdTensorIdx.GEMM1_INPUT
                 ].amax_reduction_group = self.tp_group
         else:
             # fc2_grad_output_quantizer: set configs about amax epsilon and power_2_scale for fc2_grad_output_quantizer
             self.quantizers["scaling_bwd"][
-                tex.FP8BwdTensors.GRAD_OUTPUT2
+                FP8BwdTensorIdx.GRAD_OUTPUT2
             ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
             self.quantizers["scaling_bwd"][
-                tex.FP8BwdTensors.GRAD_OUTPUT2
+                FP8BwdTensorIdx.GRAD_OUTPUT2
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
             # fc1_grad_output_quantizer: also set numerical configs for fc1_grad_output_quantizer
             self.quantizers["scaling_bwd"][
-                tex.FP8BwdTensors.GRAD_OUTPUT1
+                FP8BwdTensorIdx.GRAD_OUTPUT1
             ].force_pow_2_scales = recipe.fp8_quant_bwd_grad.power_2_scale
             self.quantizers["scaling_bwd"][
-                tex.FP8BwdTensors.GRAD_OUTPUT1
+                FP8BwdTensorIdx.GRAD_OUTPUT1
             ].amax_epsilon = recipe.fp8_quant_bwd_grad.amax_epsilon
             if self.sequence_parallel and self.set_parallel_mode:
                 # fc2_grad_output_quantizer: customize grad_output_quantizer with amax reduction TP group, row parallel + sequence parallel here
                 self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT2
+                    FP8BwdTensorIdx.GRAD_OUTPUT2
                 ].with_amax_reduction = True
                 self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT2
+                    FP8BwdTensorIdx.GRAD_OUTPUT2
                 ].amax_reduction_group = self.tp_group
 
     def _customize_quantizers_nvfp4(self, fwd: bool, recipe: Recipe) -> None:
@@ -2512,19 +2525,19 @@ class LayerNormMLP(TransformerEngineBaseModule):
             if self.sequence_parallel and self.set_parallel_mode:
                 # fc1_input_quantizer: customize input_quantizer with amax reduction TP group, column parallel + sequence parallel here
                 self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
+                    FP8FwdTensorIdx.GEMM1_INPUT
                 ].with_amax_reduction = True
                 self.quantizers["scaling_fwd"][
-                    tex.FP8FwdTensors.GEMM1_INPUT
+                    FP8FwdTensorIdx.GEMM1_INPUT
                 ].amax_reduction_group = self.tp_group
         else:
             if self.sequence_parallel and self.set_parallel_mode:
                 # fc2_grad_output_quantizer: customize grad_output_quantizer with amax reduction TP group, row parallel + sequence parallel here
                 self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT2
+                    FP8BwdTensorIdx.GRAD_OUTPUT2
                 ].with_amax_reduction = True
                 self.quantizers["scaling_bwd"][
-                    tex.FP8BwdTensors.GRAD_OUTPUT2
+                    FP8BwdTensorIdx.GRAD_OUTPUT2
                 ].amax_reduction_group = self.tp_group
 
     def _get_weight_tensors(self) -> List[Union[torch.Tensor, QuantizedTensorStorage]]:
@@ -2535,11 +2548,11 @@ class LayerNormMLP(TransformerEngineBaseModule):
         """Get the weight quantizers of the module."""
         if not self.fp8 and not self.fp8_calibration:
             return [None, None]
-        fc1_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
+        fc1_weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
         fc1_weight_quantizer.internal = True
         if IS_HIP_EXTENSION:
             fc1_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
-        fc2_weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_WEIGHT]
+        fc2_weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM2_WEIGHT]
         fc2_weight_quantizer.internal = True
         if IS_HIP_EXTENSION:
             fc2_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
@@ -2580,5 +2593,4 @@ class LayerNormMLP(TransformerEngineBaseModule):
             del fc2_wgrad
             del fc1_wgrad
             del fc1_bias_grad
-            for wgrad_accumulation_and_reduce_hook in self.wgrad_accumulation_and_reduce_hooks:
-                wgrad_accumulation_and_reduce_hook()
+            self._trigger_wgrad_accumulation_and_reduce_hooks()
