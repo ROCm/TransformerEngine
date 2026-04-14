@@ -1832,20 +1832,21 @@ class LayerNormLinear(TransformerEngineBaseModule):
             from ..tensor.mxfp4_tensor import MXFP4Quantizer
             recipe = FP8GlobalStateManager.get_fp8_recipe()
             use_hadamard = getattr(recipe, "use_hadamard", False)
+            needs_wgrad = is_grad_enabled
             input_quantizer = MXFP4Quantizer(
-                rowwise=True, columnwise=False,
+                rowwise=True, columnwise=needs_wgrad,
                 shuffle_B_matrix_for_aiter=False, use_hadamard=use_hadamard,
             )
             weight_quantizer = MXFP4Quantizer(
-                rowwise=True, columnwise=True,
+                rowwise=True, columnwise=needs_wgrad,
                 shuffle_B_matrix_for_aiter=True, use_hadamard=use_hadamard,
             )
             grad_output_quantizer = MXFP4Quantizer(
-                rowwise=True, columnwise=False,
+                rowwise=True, columnwise=needs_wgrad,
                 use_hadamard=use_hadamard,
             )
             grad_output_quantizer_mxfp4 = MXFP4Quantizer(
-                rowwise=True, columnwise=False,
+                rowwise=True, columnwise=needs_wgrad,
                 use_hadamard=use_hadamard,
             )
             grad_weight_quantizer = None
