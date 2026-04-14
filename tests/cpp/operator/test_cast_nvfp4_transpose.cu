@@ -32,13 +32,6 @@ enum ActivationType {
     SReLU
 };
 
-#ifdef __HIP_PLATFORM_AMD__
-static constexpr float E2M1_LUT[16] = {
-     0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
-    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
-};
-#endif
-
 double2 cvt_fp4x2_to_double2(fp4e2m1x2 fp4_pair) {
 #ifdef __HIP_PLATFORM_AMD__
     uint8_t raw = *reinterpret_cast<uint8_t*>(&fp4_pair);
