@@ -84,11 +84,13 @@ if IS_HIP_EXTENSION:
 
 
 def _is_mxfp4_enabled():
+    if os.environ.get("FP4", "false").lower() not in ("true", "1", "yes"):
+        return False
     try:
         from megatron.core.fp4_utils import is_mxfp4_phase
-        return is_mxfp4_phase()
-    except (ImportError, ModuleNotFoundError):
-        return False
+        return bool(is_mxfp4_phase())
+    except Exception:
+        return os.environ.get("FP4_RECIPE", "").lower() == "mxfp4"
 
 
 __all__ = ["LayerNormLinear"]
