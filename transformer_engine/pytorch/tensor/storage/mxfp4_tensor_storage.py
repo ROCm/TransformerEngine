@@ -80,7 +80,7 @@ class MXFP4TensorStorage(QuantizedTensorStorage):
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: torch.Tensor,
         fp4_dtype: TE_DType,
-        quantizer: Optional[Quantizer] = None,
+        quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,
         **kwargs,

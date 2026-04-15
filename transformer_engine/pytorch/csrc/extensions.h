@@ -1,10 +1,10 @@
 /*************************************************************************
- * This file was modified for portability to AMDGPU
- * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
- *
- * See LICENSE for license information.
- ************************************************************************/
+* This file was modified for portability to AMDGPU
+* Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
+* Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+*
+* See LICENSE for license information.
+************************************************************************/
 
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_EXTENSIONS_H_
@@ -25,8 +25,8 @@ class CommOverlapP2P;
 namespace transformer_engine::pytorch {
 
 /***************************************************************************************************
- * Router fusion
- **************************************************************************************************/
+* Router fusion
+**************************************************************************************************/
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fwd(
     at::Tensor logits, int topk, bool use_pre_softmax, c10::optional<int> num_groups,
@@ -34,11 +34,11 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_topk_with_score_function_fw
     c10::optional<at::Tensor> expert_bias);
 
 at::Tensor fused_topk_with_score_function_bwd(int num_tokens, int num_experts,
-                                              at::Tensor routing_map,
-                                              at::Tensor intermediate_output, at::Tensor grad_probs,
-                                              int topk, bool use_pre_softmax,
-                                              c10::optional<float> scaling_factor,
-                                              std::string score_function);
+                                            at::Tensor routing_map,
+                                            at::Tensor intermediate_output, at::Tensor grad_probs,
+                                            int topk, bool use_pre_softmax,
+                                            c10::optional<float> scaling_factor,
+                                            std::string score_function);
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_score_for_moe_aux_loss_fwd(
     at::Tensor logits, int topk, std::string score_function);
@@ -48,35 +48,35 @@ at::Tensor fused_score_for_moe_aux_loss_bwd(int num_tokens, int num_experts,
                                             int topk, std::string score_function);
 
 std::tuple<at::Tensor, at::Tensor> fused_moe_aux_loss_fwd(at::Tensor probs,
-                                                          at::Tensor tokens_per_expert,
-                                                          int total_num_tokens, int num_experts,
-                                                          int num_rows, int num_cols, int topk,
-                                                          float coeff);
+                                                        at::Tensor tokens_per_expert,
+                                                        int total_num_tokens, int num_experts,
+                                                        int num_rows, int num_cols, int topk,
+                                                        float coeff);
 
 at::Tensor fused_moe_aux_loss_bwd(at::Tensor Const_buf, at::Tensor tokens_per_expert, int num_rows,
-                                  int num_cols, at::Tensor grad_aux_loss);
+                                int num_cols, at::Tensor grad_aux_loss);
 
 /***************************************************************************************************
- * Permutation
- **************************************************************************************************/
+* Permutation
+**************************************************************************************************/
 
 std::tuple<at::Tensor, at::Tensor, std::vector<at::Tensor>> moe_permute_fwd(
     at::Tensor input, const DType dtype, at::Tensor indices, int64_t num_out_tokens,
     std::vector<at::Tensor> workspace, int64_t max_expanded_token_num);
 
 at::Tensor moe_permute_bwd(at::Tensor input, const DType dtype, at::Tensor row_id_map,
-                           at::Tensor prob, int64_t num_tokens, int64_t topK);
+                        at::Tensor prob, int64_t num_tokens, int64_t topK);
 
 at::Tensor moe_unpermute_fwd(at::Tensor input, const DType dtype, at::Tensor row_id_map,
-                             at::Tensor prob, int64_t num_tokens, int64_t topK);
+                            at::Tensor prob, int64_t num_tokens, int64_t topK);
 
 std::tuple<at::Tensor, at::Tensor> moe_unpermute_bwd(at::Tensor input_bwd, at::Tensor input_fwd,
-                                                     const DType dtype, at::Tensor row_id_map,
-                                                     at::Tensor prob);
+                                                    const DType dtype, at::Tensor row_id_map,
+                                                    at::Tensor prob);
 
 /***************************************************************************************************
- * Attention
- **************************************************************************************************/
+* Attention
+**************************************************************************************************/
 
 NVTE_Fused_Attn_Backend get_fused_attn_backend(
     bool is_training, const DType q_dtype, const DType kv_dtype, NVTE_QKV_Layout qkv_layout,
@@ -116,24 +116,24 @@ at::Tensor fa_prepare_bwd(at::Tensor q, at::Tensor k, at::Tensor v);
 at::Tensor convert_thd_to_bshd(at::Tensor tensor, at::Tensor cu_seqlens, int b, int max_seq_len);
 at::Tensor convert_bshd_to_thd(at::Tensor tensor, at::Tensor cu_seqlens, int t);
 void copy_to_kv_cache(at::Tensor new_k, at::Tensor new_v, at::Tensor k_cache, at::Tensor v_cache,
-                      at::Tensor page_table, at::Tensor cu_new_lens, at::Tensor cu_cached_lens,
-                      NVTE_QKV_Format kv_format, int b, int max_ctx_len, int max_seq_len,
-                      int max_pages_per_seq, bool is_non_paged);
+                    at::Tensor page_table, at::Tensor cu_new_lens, at::Tensor cu_cached_lens,
+                    NVTE_QKV_Format kv_format, int b, int max_ctx_len, int max_seq_len,
+                    int max_pages_per_seq, bool is_non_paged);
 
 /***************************************************************************************************
- * GEMM
- **************************************************************************************************/
+* GEMM
+**************************************************************************************************/
 
 using MaybeTensor = std::optional<at::Tensor>;
 
 std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool transb, py::object D,
-                             py::handle quantizer, std::optional<DType> out_dtype, MaybeTensor bias,
-                             DType bias_type, bool gelu, MaybeTensor gelu_in, bool grad,
-                             at::Tensor workspace, size_t workspaceSize, bool accumulate,
-                             bool use_split_accumulator, CommOverlapCore *comm_overlap = nullptr,
-                             std::optional<CommOverlapType> comm_type = std::nullopt,
-                             MaybeTensor extra_output = std::nullopt, bool bulk_overlap = false,
-                             float alpha = 1.0f, std::optional<float> beta = std::nullopt);
+                            py::handle quantizer, std::optional<DType> out_dtype, MaybeTensor bias,
+                            DType bias_type, bool gelu, MaybeTensor gelu_in, bool grad,
+                            at::Tensor workspace, size_t workspaceSize, bool accumulate,
+                            bool use_split_accumulator, CommOverlapCore *comm_overlap = nullptr,
+                            std::optional<CommOverlapType> comm_type = std::nullopt,
+                            MaybeTensor extra_output = std::nullopt, bool bulk_overlap = false,
+                            float alpha = 1.0f, std::optional<float> beta = std::nullopt);
 
 void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
                     std::vector<int64_t> A_scaling_mode, bool transa, at::Tensor B,
@@ -152,17 +152,17 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     size_t workspaceSize, bool accumulate, bool use_split_accumulator, int math_sm_count);
 
 /***************************************************************************************************
- * Transpose
- **************************************************************************************************/
+* Transpose
+**************************************************************************************************/
 
 at::Tensor fp8_transpose(at::Tensor input, DType otype,
-                         std::optional<at::Tensor> output = std::nullopt);
+                        std::optional<at::Tensor> output = std::nullopt);
 
 at::Tensor swap_first_dims(at::Tensor tensor, std::optional<at::Tensor> out = std::nullopt);
 
 /***************************************************************************************************
- * Activations
- **************************************************************************************************/
+* Activations
+**************************************************************************************************/
 
 /* GELU and variants*/
 py::object gelu(const at::Tensor &input, py::handle quantizer);
@@ -210,24 +210,24 @@ py::object dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle q
 py::object clamped_swiglu(const at::Tensor &input, py::handle quantizer, float limit, float alpha);
 
 py::object clamped_dswiglu(const at::Tensor &grad, const at::Tensor &input, py::handle quantizer,
-                           float limit, float alpha);
+                        float limit, float alpha);
 /***************************************************************************************************
- * LayerNorm
- **************************************************************************************************/
+* LayerNorm
+**************************************************************************************************/
 
 std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
-                                      const at::Tensor &mu, const at::Tensor &rsigma,
-                                      const at::Tensor &gamma, const int sm_margin,
-                                      const bool zero_centered_gamma);
+                                    const at::Tensor &mu, const at::Tensor &rsigma,
+                                    const at::Tensor &gamma, const int sm_margin,
+                                    const bool zero_centered_gamma);
 
 std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, MaybeTensor bias,
-                                      float eps, py::object ln_out, py::handle quantizer,
-                                      DType out_dtype, const int sm_margin,
-                                      const bool zero_centered_gamma);
+                                    float eps, py::object ln_out, py::handle quantizer,
+                                    DType out_dtype, const int sm_margin,
+                                    const bool zero_centered_gamma);
 
 /***************************************************************************************************
- * RMSNorm
- **************************************************************************************************/
+* RMSNorm
+**************************************************************************************************/
 
 std::vector<py::object> rmsnorm_bwd(const at::Tensor &dz, const at::Tensor &x,
                                     const at::Tensor &rsigma, const at::Tensor &gamma,
@@ -243,8 +243,8 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
                                     const int sm_margin, const bool zero_centered_gamma);
 
 /***************************************************************************************************
- * Cast
- **************************************************************************************************/
+* Cast
+**************************************************************************************************/
 
 py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::object &output,
                     std::optional<at::Tensor> noop_flag);
@@ -252,32 +252,16 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
 py::object dequantize(const py::handle &input, DType otype);
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
-                                              std::vector<py::handle> quantizer_list);
+                                            std::vector<py::handle> quantizer_list);
 
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
-                                       const std::vector<size_t> &split_sections,
-                                       std::vector<py::handle> quantizer_list,
-                                       bool disable_bulk_allocation = false);
+                                    const std::vector<size_t> &split_sections,
+                                    std::vector<py::handle> quantizer_list,
+                                    bool disable_bulk_allocation = false);
 
 /***************************************************************************************************
- * MXFP4 Quantization
- **************************************************************************************************/
-
-std::tuple<at::Tensor, at::Tensor, at::Tensor, at::Tensor> cast_transpose_mxfp4_fused_shuffle(
-    at::Tensor input,
-    std::optional<at::Tensor> rowwise_fp4_out,
-    std::optional<at::Tensor> rowwise_scale_out,
-    std::optional<at::Tensor> colwise_fp4_out,
-    std::optional<at::Tensor> colwise_scale_out,
-    bool shuffle_rowwise_scale,
-    bool shuffle_colwise_scale,
-    bool shuffle_rowwise_fp4,
-    bool shuffle_colwise_fp4,
-    bool use_hadamard);
-
-/***************************************************************************************************
- * Bias gradient fusions
- **************************************************************************************************/
+* Bias gradient fusions
+**************************************************************************************************/
 
 std::vector<py::object> bgrad_quantize(const at::Tensor &input, py::handle py_quantizer);
 
@@ -291,59 +275,59 @@ std::vector<py::object> dbias_drelu(const at::Tensor &grad_output, const at::Ten
                                     py::handle quantizer);
 
 std::vector<py::object> dbias_dqgelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                     py::handle quantizer);
+                                    py::handle quantizer);
 
 std::vector<py::object> dbias_dsrelu(const at::Tensor &grad_output, const at::Tensor &act_input,
-                                     py::handle quantizer);
+                                    py::handle quantizer);
 
 /***************************************************************************************************
- * Dropout
- **************************************************************************************************/
+* Dropout
+**************************************************************************************************/
 
 std::vector<py::object> dropout_fwd(const py::handle &input, const float dropout_probability,
                                     std::optional<at::Tensor> out = std::nullopt);
 
 py::object dropout_bwd(const at::Tensor &grad_output, const at::Tensor &mask,
-                       const float dropout_probability,
-                       std::optional<at::Tensor> grad_input = std::nullopt);
+                    const float dropout_probability,
+                    std::optional<at::Tensor> grad_input = std::nullopt);
 
 /***************************************************************************************************
- * Softmax
- **************************************************************************************************/
+* Softmax
+**************************************************************************************************/
 
 at::Tensor scaled_softmax_forward(at::Tensor input, float scale_factor);
 
 at::Tensor scaled_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_results_,
-                                   float scale_factor);
+                                float scale_factor);
 
 at::Tensor scaled_masked_softmax_forward(at::Tensor input, at::Tensor mask, float scale_factor);
 
 at::Tensor scaled_masked_softmax_backward(at::Tensor output_grad_, at::Tensor softmax_results_,
-                                          float scale_factor);
+                                        float scale_factor);
 
 at::Tensor scaled_upper_triang_masked_softmax_forward(at::Tensor input, float scale_factor);
 
 at::Tensor scaled_upper_triang_masked_softmax_backward(at::Tensor output_grads_,
-                                                       at::Tensor softmax_results_,
-                                                       float scale_factor);
+                                                    at::Tensor softmax_results_,
+                                                    float scale_factor);
 
 at::Tensor scaled_aligned_causal_masked_softmax_forward(at::Tensor input, float scale_factor);
 
 at::Tensor scaled_aligned_causal_masked_softmax_backward(at::Tensor output_grads_,
-                                                         at::Tensor softmax_results_,
-                                                         float scale_factor);
+                                                        at::Tensor softmax_results_,
+                                                        float scale_factor);
 
 /***************************************************************************************************
- * FP8 recipe
- **************************************************************************************************/
+* FP8 recipe
+**************************************************************************************************/
 
 void compute_amax(const at::Tensor &tensor, at::Tensor &amax);
 
 void fused_amax_and_scale_update_after_reduction(const at::Tensor &amax_reduction_buffer,
-                                                 std::vector<at::Tensor> amax_histories,
-                                                 std::vector<at::Tensor> scales,
-                                                 const std::string &amax_compute_algo,
-                                                 DType fp8_dtype, float margin);
+                                                std::vector<at::Tensor> amax_histories,
+                                                std::vector<at::Tensor> scales,
+                                                const std::string &amax_compute_algo,
+                                                DType fp8_dtype, float margin);
 
 // Note that the start_offset is the logical offset along the tensor dimension.
 // The offset in bytes is start_offset * sizeof(tensor.dtype)
@@ -364,20 +348,20 @@ void mxfp8_scaling_partial_cast(const at::Tensor &input, at::Tensor output_rowwi
                                 size_t start_offset);
 
 /***************************************************************************************************
- * Rotary positional embedding
- **************************************************************************************************/
+* Rotary positional embedding
+**************************************************************************************************/
 
 at::Tensor fused_rope_forward(const at::Tensor &input, const at::Tensor &freqs,
-                              const std::optional<at::Tensor> start_positions,
-                              const NVTE_QKV_Format qkv_format, const bool interleaved,
-                              const std::optional<at::Tensor> cu_seqlens, const int cp_size,
-                              const int cp_rank);
+                            const std::optional<at::Tensor> start_positions,
+                            const NVTE_QKV_Format qkv_format, const bool interleaved,
+                            const std::optional<at::Tensor> cu_seqlens, const int cp_size,
+                            const int cp_rank);
 
 at::Tensor fused_rope_backward(const at::Tensor &output_grads, const at::Tensor &freqs,
-                               const std::optional<at::Tensor> start_positions,
-                               const NVTE_QKV_Format qkv_format, const bool interleaved,
-                               const std::optional<at::Tensor> cu_seqlens, const int cp_size,
-                               const int cp_rank);
+                            const std::optional<at::Tensor> start_positions,
+                            const NVTE_QKV_Format qkv_format, const bool interleaved,
+                            const std::optional<at::Tensor> cu_seqlens, const int cp_size,
+                            const int cp_rank);
 
 std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_qkv_rope_forward(
     const at::Tensor &qkv_input, const at::Tensor &q_freqs, const at::Tensor &k_freqs,
@@ -385,15 +369,15 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> fused_qkv_rope_forward(
     const NVTE_QKV_Format qkv_format, const bool interleaved, const int cp_size, const int cp_rank);
 
 at::Tensor fused_qkv_rope_backward(const at::Tensor &q_grad_out, const at::Tensor &k_grad_out,
-                                   const at::Tensor &v_grad_out, const at::Tensor &q_freqs,
-                                   const at::Tensor &k_freqs,
-                                   const std::vector<int> &qkv_split_arg_list,
-                                   const NVTE_QKV_Format qkv_format, const bool interleaved,
-                                   const int cp_size, const int cp_rank);
+                                const at::Tensor &v_grad_out, const at::Tensor &q_freqs,
+                                const at::Tensor &k_freqs,
+                                const std::vector<int> &qkv_split_arg_list,
+                                const NVTE_QKV_Format qkv_format, const bool interleaved,
+                                const int cp_size, const int cp_rank);
 
 /***************************************************************************************************
- * Miscellaneous
- **************************************************************************************************/
+* Miscellaneous
+**************************************************************************************************/
 
 #ifndef USE_ROCM
 size_t get_cublasLt_version();
@@ -403,8 +387,8 @@ size_t get_cudnn_version();
 void placeholder();
 
 /***************************************************************************************************
- * Support THD format for Context Parallel
- **************************************************************************************************/
+* Support THD format for Context Parallel
+**************************************************************************************************/
 
 at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_seqlens,
                                 int half_idx);
@@ -420,18 +404,18 @@ void thd_out_correction(at::Tensor out, const at::Tensor &out_per_step, const at
                         bool only_second_half, bool lse_packed);
 
 void thd_grad_correction(at::Tensor grad, const at::Tensor &grad_per_step,
-                         const at::Tensor &cu_seqlens, const std::string &first_half,
-                         const std::string &second_half);
+                        const at::Tensor &cu_seqlens, const std::string &first_half,
+                        const std::string &second_half);
 
 at::Tensor thd_get_partitioned_indices(const at::Tensor &cu_seqlens, int total_tokens,
-                                       int world_size, int rank);
+                                    int world_size, int rank);
 
 /***************************************************************************************************
- * multi_tensor_* kernels
- **************************************************************************************************/
+* multi_tensor_* kernels
+**************************************************************************************************/
 
 void multi_tensor_scale_cuda(int chunk_size, at::Tensor noop_flag,
-                             std::vector<std::vector<at::Tensor>> tensor_lists, float scale);
+                            std::vector<std::vector<at::Tensor>> tensor_lists, float scale);
 
 std::tuple<at::Tensor, at::Tensor> multi_tensor_l2norm_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
@@ -460,53 +444,53 @@ void multi_tensor_adam_fp8_cuda(int chunk_size, at::Tensor noop_flag,
                                 const float weight_decay, DType fp8_dtype);
 
 void multi_tensor_adam_capturable_cuda(int chunk_size, at::Tensor noop_flag,
-                                       std::vector<std::vector<at::Tensor>> tensor_lists,
-                                       at::Tensor lr, const float beta1, const float beta2,
-                                       const float epsilon, at::Tensor step, const int mode,
-                                       const int bias_correction, const float weight_decay,
-                                       at::Tensor inv_scale);
+                                    std::vector<std::vector<at::Tensor>> tensor_lists,
+                                    at::Tensor lr, const float beta1, const float beta2,
+                                    const float epsilon, at::Tensor step, const int mode,
+                                    const int bias_correction, const float weight_decay,
+                                    at::Tensor inv_scale);
 
 void multi_tensor_adam_capturable_master_cuda(int chunk_size, at::Tensor noop_flag,
-                                              std::vector<std::vector<at::Tensor>> tensor_lists,
-                                              at::Tensor lr, const float beta1, const float beta2,
-                                              const float epsilon, at::Tensor step, const int mode,
-                                              const int bias_correction, const float weight_decay,
-                                              at::Tensor inv_scale);
+                                            std::vector<std::vector<at::Tensor>> tensor_lists,
+                                            at::Tensor lr, const float beta1, const float beta2,
+                                            const float epsilon, at::Tensor step, const int mode,
+                                            const int bias_correction, const float weight_decay,
+                                            at::Tensor inv_scale);
 
 void multi_tensor_sgd_cuda(int chunk_size, at::Tensor noop_flag,
-                           std::vector<std::vector<at::Tensor>> tensor_lists, float wd,
-                           float momentum, float dampening, float lr, bool nesterov, bool first_run,
-                           bool wd_after_momentum, float scale);
+                        std::vector<std::vector<at::Tensor>> tensor_lists, float wd,
+                        float momentum, float dampening, float lr, bool nesterov, bool first_run,
+                        bool wd_after_momentum, float scale);
 
 void multi_tensor_compute_scale_and_scale_inv_cuda(
     int chunk_size, at::Tensor noop_flag, std::vector<std::vector<at::Tensor>> tensor_lists,
     float max_fp8, bool force_pow_2_scales, float epsilon);
 
 void multi_tensor_compute_scale_inv_e8m0_cuda(int chunk_size, const py::object &dummy,
-                                              std::vector<std::vector<at::Tensor>> tensor_lists);
+                                            std::vector<std::vector<at::Tensor>> tensor_lists);
 
 /***************************************************************************************************
- * padding
- **************************************************************************************************/
+* padding
+**************************************************************************************************/
 
 void fused_multi_row_padding(at::Tensor input, at::Tensor output,
-                             std::vector<size_t> input_row_list,
-                             std::vector<size_t> padded_input_row_list);
+                            std::vector<size_t> input_row_list,
+                            std::vector<size_t> padded_input_row_list);
 
 void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
-                               std::vector<size_t> input_row_list,
-                               std::vector<size_t> unpadded_input_row_list);
+                            std::vector<size_t> input_row_list,
+                            std::vector<size_t> unpadded_input_row_list);
 
 /***************************************************************************************************
- * Scale swizzling for GEMM
- **************************************************************************************************/
+* Scale swizzling for GEMM
+**************************************************************************************************/
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor);
 
 #ifndef USE_ROCM
 /***************************************************************************************************
- * NVSHMEM APIs
- **************************************************************************************************/
+* NVSHMEM APIs
+**************************************************************************************************/
 
 void init_nvshmem_backend(c10d::ProcessGroup *process_group);
 
@@ -519,8 +503,8 @@ void nvshmem_wait_on_current_stream(at::Tensor signal, const std::string &wait_k
 void nvshmem_finalize();
 #else
 /***************************************************************************************************
- * ROCSHMEM APIs
- **************************************************************************************************/
+* ROCSHMEM APIs
+**************************************************************************************************/
 
 void init_rocshmem_backend(c10d::ProcessGroup *process_group);
 
@@ -535,8 +519,8 @@ void rocshmem_finalize();
 
 #ifndef USE_ROCM
 /***************************************************************************************************
- * Comm+GEMM Overlap Wrappers
- **************************************************************************************************/
+* Comm+GEMM Overlap Wrappers
+**************************************************************************************************/
 
 void bulk_overlap_ag_with_external_gemm(CommOverlap &allgather_communicator, at::Stream send_stream,
                                         at::Stream recv_stream);
@@ -545,74 +529,74 @@ void bulk_overlap_ag_with_external_gemm(CommOverlap &allgather_communicator, at:
 }  // namespace transformer_engine::pytorch
 
 /***************************************************************************************************
- * Comm+GEMM Overlap Wrappers
- **************************************************************************************************/
+* Comm+GEMM Overlap Wrappers
+**************************************************************************************************/
 
 class CommOverlapHelper : torch::CustomClassHolder {
- private:
-  bool initialized{false};
-  bool backend_is_nccl{false};
-  std::map<std::string, c10d::ProcessGroup *> pgs;
+private:
+bool initialized{false};
+bool backend_is_nccl{false};
+std::map<std::string, c10d::ProcessGroup *> pgs;
 
- public:
-  int myrank = -1;
-  int numranks = -1;
-  int mylocal = -1;
-  int numlocal = -1;
-  int mynode = -1;
-  int numnodes = -1;
+public:
+int myrank = -1;
+int numranks = -1;
+int mylocal = -1;
+int numlocal = -1;
+int mynode = -1;
+int numnodes = -1;
 
-  CommOverlapHelper();
+CommOverlapHelper();
 
-  CommOverlapHelper(c10d::ProcessGroup *world_group,
+CommOverlapHelper(c10d::ProcessGroup *world_group,
                     std::optional<c10d::ProcessGroup *> intra_node_group);
 
-  ~CommOverlapHelper();
+~CommOverlapHelper();
 
-  void ub_allgather(void *globaldata, size_t globalbytes, void *localdata, size_t localbytes,
+void ub_allgather(void *globaldata, size_t globalbytes, void *localdata, size_t localbytes,
                     ExtComm comm);
 
-  void ub_barrier(ExtComm comm);
+void ub_barrier(ExtComm comm);
 };
 
 class CommOverlap : torch::CustomClassHolder, public transformer_engine::CommOverlapBase {
- public:
-  CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
-              CommOverlapHelper *helper, int tp_size, int num_splits = 3,
-              int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
-              int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
-              bool set_sm_margin = true, bool atomic_gemm = false,
-              bool rs_overlap_first_gemm = false);
+public:
+CommOverlap(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+            CommOverlapHelper *helper, int tp_size, int num_splits = 3,
+            int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
+            int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 16,
+            bool set_sm_margin = true, bool atomic_gemm = false,
+            bool rs_overlap_first_gemm = false);
 
-  ~CommOverlap() {}
+~CommOverlap() {}
 
-  void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
+void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
 
-  at::Tensor get_buffer(bool local_chunk = false,
+at::Tensor get_buffer(bool local_chunk = false,
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
 
-  std::pair<at::Stream, at::Stream> get_communication_stream();
+std::pair<at::Stream, at::Stream> get_communication_stream();
 
 };  // CommOverlap
 
 class CommOverlapP2P : torch::CustomClassHolder, public transformer_engine::CommOverlapP2PBase {
- public:
-  CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
-                 CommOverlapHelper *helper, int tp_size,
-                 transformer_engine::CommOverlapType comm_type,
-                 int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
-                 int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 3,
-                 bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = true,
-                 bool aggregate = false);
+public:
+CommOverlapP2P(const std::vector<size_t> &buffer_shape, at::ScalarType buffer_dtype,
+                CommOverlapHelper *helper, int tp_size,
+                transformer_engine::CommOverlapType comm_type,
+                int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS, int comm_cga_size = 2,
+                int gemm_priority = 0, int comm_priority = 0, int num_comm_sm = 3,
+                bool set_sm_margin = true, bool atomic_gemm = false, bool use_ce = true,
+                bool aggregate = false);
 
-  ~CommOverlapP2P() {}
+~CommOverlapP2P() {}
 
-  void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
+void copy_into_buffer(const at::Tensor &input, bool local_chunk = false);
 
-  at::Tensor get_buffer(bool local_chunk = false,
+at::Tensor get_buffer(bool local_chunk = false,
                         std::optional<std::vector<int64_t>> shape = std::nullopt);
 
-  std::pair<at::Stream, at::Stream> get_communication_stream();
+std::pair<at::Stream, at::Stream> get_communication_stream();
 
 };  // CommOverlapP2P
 
