@@ -70,6 +70,22 @@ def _shuffle_scales(scales: torch.Tensor) -> torch.Tensor:
     return scales.view(sm // 32, sn * 32)
 
 
+def _shuffle_fp4_data(x: torch.Tensor, layout=(16, 16)) -> torch.Tensor:
+    """Shuffle packed FP4 data into the layout expected by AITER GEMM kernels.
+
+    Mirrors ``aiter.ops.shuffle.shuffle_weight`` for uint8 packed FP4 tensors.
+    """
+    IN, IK = layout
+    BN = IN
+    BK = IK * 2
+    K = 16 // x.element_size()
+    assert x.shape[-2] % BN == 0, f"{x.shape[-2]} % {BN} != 0"
+    assert x.shape[-1] % BK == 0, f"{x.shape[-1]} % {BK} != 0"
+    x_ = x.view(-1, x.shape[-2] // BN, BN, x.shape[-1] // BK, BK // K, K)
+    x_ = x_.permute(0, 1, 3, 4, 2, 5).contiguous()
+    return x_.view(*x.shape)
+
+
 # ---------------------------------------------------------------------------
 # Data container
 # ---------------------------------------------------------------------------
@@ -279,6 +295,10 @@ class MXFP4QuantizerRef(Quantizer):
         fp4_packed = ((fp4_flat[:, 1::2] << 4) | fp4_flat[:, 0::2]).astype(np.uint8)
 
         fp4_packed_torch = torch.from_numpy(fp4_packed).to(tensor.device)
+
+        if self.shuffle_B_matrix_for_aiter:
+            fp4_packed_torch = _shuffle_fp4_data(fp4_packed_torch)
+
         scales_valid = torch.from_numpy(scales).to(tensor.device)
 
         # Pad scales to match native allocator layout (multiples of 256 x 8)

@@ -26,6 +26,18 @@ BLOCK_SIZE = 32
 _USE_TRITON = bool(int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0")))
 
 
+def un_shuffle_scales(scales_shuffled: torch.Tensor) -> torch.Tensor:
+    """Invert the AITER scale shuffle permutation."""
+    scales = scales_shuffled.clone()
+    sm, sn = scales.shape
+    scales = scales.view(sm * 32, sn // 32)
+    sm, sn = scales.shape
+    scales = scales.view(sm // 32, sn // 8, 4, 16, 2, 2, 1)
+    scales = scales.permute(0, 5, 3, 1, 4, 2, 6).contiguous()
+    scales = scales.view(sm, sn)
+    return scales
+
+
 def unpack_fp4(x: torch.Tensor) -> torch.Tensor:
     """Unpack packed FP4 uint8 tensor into individual nibbles."""
     repeated = x.repeat_interleave(2, dim=1)
@@ -87,6 +99,9 @@ def check_quantization_mxfp4_versus_reference(
     N: int,
     return_transpose: bool,
     use_cpp_allocator: bool,
+    use_hadamard: bool = False,
+    shuffle_B_matrix_for_aiter: bool = False,
+    shuffle_scales: bool = False,
 ) -> None:
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -102,8 +117,9 @@ def check_quantization_mxfp4_versus_reference(
         fp4_dtype=te_dtype,
         rowwise=True,
         columnwise=return_transpose,
-        shuffle_B_matrix_for_aiter=False,
-        use_hadamard=False,
+        shuffle_B_matrix_for_aiter=shuffle_B_matrix_for_aiter,
+        shuffle_scales=shuffle_scales,
+        use_hadamard=use_hadamard,
     )
     if use_cpp_allocator:
         x_mxfp4_sut = mxfp4_quantizer(x)
@@ -130,9 +146,21 @@ def check_quantization_mxfp4_versus_reference(
     ref_quantizer = MXFP4QuantizerRef(
         rowwise=True,
         columnwise=return_transpose,
+        shuffle_B_matrix_for_aiter=shuffle_B_matrix_for_aiter,
+        shuffle_scales=shuffle_scales,
+        use_hadamard=use_hadamard,
     )
     x_ref = ref_quantizer.quantize(x)
 
+
+    # When shuffle is enabled, unshuffle scales before comparison so we can
+    # compare in plain layout (following test_cast_mxfp4.py's approach).
+    num_scale_cols = N // BLOCK_SIZE
+    sx_cmp = sx.view(torch.uint8)
+    ref_scale_cmp = x_ref.scale
+    if shuffle_scales:
+        sx_cmp = un_shuffle_scales(sx_cmp.view(sx_cmp.shape[0] // 32, -1))
+        ref_scale_cmp = un_shuffle_scales(ref_scale_cmp.view(ref_scale_cmp.shape[0] // 32, -1))
 
     # Both native and reference produce uint8 E8M0 scales and packed FP4 data.
     # The Triton backend uses software thresholds matching the reference exactly,
@@ -140,12 +168,11 @@ def check_quantization_mxfp4_versus_reference(
     # differently at threshold boundaries (±1 nibble / ±1 exponent).
     qx_unpacked = unpack_fp4(qx)
     qx_ref_unpacked = unpack_fp4(x_ref.data.view(dtype=torch.uint8))
-    num_scale_cols = N // BLOCK_SIZE
 
     if _USE_TRITON:
         torch.testing.assert_close(qx_unpacked, qx_ref_unpacked, atol=0, rtol=0)
         torch.testing.assert_close(
-            sx[:M, :num_scale_cols], x_ref.scale[:M, :num_scale_cols], atol=0, rtol=0,
+            sx_cmp[:M, :num_scale_cols], ref_scale_cmp[:M, :num_scale_cols], atol=0, rtol=0,
         )
     else:
         compare_fp4_data(
@@ -153,7 +180,7 @@ def check_quantization_mxfp4_versus_reference(
             msg=f"Rowwise FP4 ({M}x{N}, {x_dtype})",
         )
         compare_e8m0_scales(
-            sx[:M, :num_scale_cols], x_ref.scale[:M, :num_scale_cols],
+            sx_cmp[:M, :num_scale_cols], ref_scale_cmp[:M, :num_scale_cols],
             msg=f"Rowwise E8M0 ({M}x{N}, {x_dtype})", max_diff=1, max_mismatch_rate=1e-4, max_outliers=1
         )
 
@@ -163,10 +190,16 @@ def check_quantization_mxfp4_versus_reference(
         qx_t_ref_unpacked = unpack_fp4(x_ref.data_t.view(dtype=torch.uint8))
         num_scale_cols_t = M // BLOCK_SIZE
 
+        sx_t_cmp = sx_t.view(torch.uint8)
+        ref_scale_t_cmp = x_ref.scale_t
+        if shuffle_scales:
+            sx_t_cmp = un_shuffle_scales(sx_t_cmp.view(sx_t_cmp.shape[0] // 32, -1))
+            ref_scale_t_cmp = un_shuffle_scales(ref_scale_t_cmp.view(ref_scale_t_cmp.shape[0] // 32, -1))
+
         if _USE_TRITON:
             torch.testing.assert_close(qx_t_unpacked, qx_t_ref_unpacked, atol=0, rtol=0)
             torch.testing.assert_close(
-                sx_t[:N, :num_scale_cols_t], x_ref.scale_t[:N, :num_scale_cols_t],
+                sx_t_cmp[:N, :num_scale_cols_t], ref_scale_t_cmp[:N, :num_scale_cols_t],
                 atol=0, rtol=0,
             )
         else:
@@ -175,7 +208,7 @@ def check_quantization_mxfp4_versus_reference(
                 msg=f"Colwise FP4 ({M}x{N}, {x_dtype})",
             )
             compare_e8m0_scales(
-                sx_t[:N, :num_scale_cols_t], x_ref.scale_t[:N, :num_scale_cols_t],
+                sx_t_cmp[:N, :num_scale_cols_t], ref_scale_t_cmp[:N, :num_scale_cols_t],
                 msg=f"Colwise E8M0 ({M}x{N}, {x_dtype})", max_diff=1, max_mismatch_rate=1e-4, max_outliers=1
             )
 
@@ -200,8 +233,16 @@ def check_quantization_mxfp4_versus_reference(
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_alloc", "python_alloc"]
 )
+@pytest.mark.parametrize("use_hadamard", [False, True], ids=["no_hadamard", "hadamard"])
+@pytest.mark.parametrize(
+    "shuffle_B_matrix_for_aiter", [False, True], ids=["no_data_shuffle", "data_shuffle"]
+)
+@pytest.mark.parametrize(
+    "shuffle_scales", [False, True], ids=["no_scale_shuffle", "scale_shuffle"]
+)
 def test_quantization_versus_reference(
-    M, N, x_dtype, return_transpose, use_cpp_allocator
+    M, N, x_dtype, return_transpose, use_cpp_allocator, use_hadamard,
+    shuffle_B_matrix_for_aiter, shuffle_scales,
 ):
     check_quantization_mxfp4_versus_reference(
         x_dtype=x_dtype,
@@ -209,6 +250,9 @@ def test_quantization_versus_reference(
         N=N,
         return_transpose=return_transpose,
         use_cpp_allocator=use_cpp_allocator,
+        use_hadamard=use_hadamard,
+        shuffle_B_matrix_for_aiter=shuffle_B_matrix_for_aiter,
+        shuffle_scales=shuffle_scales,
     )
 
 
@@ -220,8 +264,16 @@ def test_quantization_versus_reference(
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_alloc", "python_alloc"]
 )
+@pytest.mark.parametrize("use_hadamard", [False, True], ids=["no_hadamard", "hadamard"])
+@pytest.mark.parametrize(
+    "shuffle_B_matrix_for_aiter", [False, True], ids=["no_data_shuffle", "data_shuffle"]
+)
+@pytest.mark.parametrize(
+    "shuffle_scales", [False, True], ids=["no_scale_shuffle", "scale_shuffle"]
+)
 def test_quantization_extrema(
-    M, N, x_dtype, extrema_high, return_transpose, use_cpp_allocator
+    M, N, x_dtype, extrema_high, return_transpose, use_cpp_allocator,
+    use_hadamard, shuffle_B_matrix_for_aiter, shuffle_scales,
 ):
     """Test quantization with extreme values: all zeros or all max."""
     te_dtype = tex.DType.kFloat4E2M1
@@ -236,8 +288,9 @@ def test_quantization_extrema(
         fp4_dtype=te_dtype,
         rowwise=True,
         columnwise=return_transpose,
-        shuffle_B_matrix_for_aiter=False,
-        use_hadamard=False,
+        shuffle_B_matrix_for_aiter=shuffle_B_matrix_for_aiter,
+        shuffle_scales=shuffle_scales,
+        use_hadamard=use_hadamard,
     )
 
     if use_cpp_allocator:
@@ -254,7 +307,6 @@ def test_quantization_extrema(
     assert qx.shape == (M, N // 2)
 
     if not extrema_high:
-        # All zeros input should produce all-zero packed FP4 data
         assert (qx == 0).all(), "All-zero input should produce all-zero FP4 data"
 
 
@@ -265,8 +317,16 @@ def test_quantization_extrema(
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_alloc", "python_alloc"]
 )
+@pytest.mark.parametrize("use_hadamard", [False, True], ids=["no_hadamard", "hadamard"])
+@pytest.mark.parametrize(
+    "shuffle_B_matrix_for_aiter", [False, True], ids=["no_data_shuffle", "data_shuffle"]
+)
+@pytest.mark.parametrize(
+    "shuffle_scales", [False, True], ids=["no_scale_shuffle", "scale_shuffle"]
+)
 def test_quantization_noncontiguous_inputs(
-    M, N, x_dtype, return_transpose, use_cpp_allocator
+    M, N, x_dtype, return_transpose, use_cpp_allocator, use_hadamard,
+    shuffle_B_matrix_for_aiter, shuffle_scales,
 ):
     """Test that non-contiguous inputs are handled correctly."""
     te_dtype = tex.DType.kFloat4E2M1
@@ -283,8 +343,9 @@ def test_quantization_noncontiguous_inputs(
         fp4_dtype=te_dtype,
         rowwise=True,
         columnwise=return_transpose,
-        shuffle_B_matrix_for_aiter=False,
-        use_hadamard=False,
+        shuffle_B_matrix_for_aiter=shuffle_B_matrix_for_aiter,
+        shuffle_scales=shuffle_scales,
+        use_hadamard=use_hadamard,
     )
 
     if use_cpp_allocator:
@@ -295,7 +356,6 @@ def test_quantization_noncontiguous_inputs(
         )
         result = mxfp4_quantizer.update_quantized(x, result)
 
-    # Also quantize the contiguous version
     x_contig = x.contiguous()
     if use_cpp_allocator:
         result_contig = mxfp4_quantizer(x_contig)
