@@ -2901,3 +2901,124 @@ class TestLiteLayerNormMLP:
         y = mod(x)
         diff = (y - expected).abs().max().item()
         assert diff < 0.5, f"Max diff {diff:.4f} too large"
+
+
+# ---------------------------------------------------------------------------
+# Fused gated activation + FP8 quantize (AITER kernel)
+# ---------------------------------------------------------------------------
+
+class TestFusedGatedActQuant:
+    """Tests for AITER fused gated activation + block FP8 quantize."""
+
+    DTYPE = torch.bfloat16
+
+    @staticmethod
+    def _has_fused_kernel():
+        """Check if the AITER fused act+quant kernel is available."""
+        try:
+            from aiter.ops.triton.activation import act_mul_and_fp8_group_quant  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    @staticmethod
+    def _has_float8_block():
+        """Check if Float8BlockQuantizer is available."""
+        try:
+            from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+                Float8BlockQuantizer,
+            )
+            return True
+        except ImportError:
+            return False
+
+    @pytest.mark.parametrize("activation,aiter_act", [
+        ("swiglu", "silu"),
+        ("geglu", "gelu_tanh"),
+        ("reglu", "relu"),
+    ])
+    def test_fused_path_matches_separate(self, device, activation, aiter_act):
+        """Fused act+quant output should dequantize close to separate act then quant."""
+        if not self._has_fused_kernel() or not self._has_float8_block():
+            pytest.skip("AITER fused act+quant or Float8BlockQuantizer not available")
+
+        from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
+        from transformer_engine.pytorch._lite.activations import (
+            _aiter_fused_gated_act_quant,
+        )
+        from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+            Float8BlockQuantizer,
+        )
+
+        hidden = 256
+        x = torch.randn(8, 2 * hidden, device=device, dtype=self.DTYPE)
+
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+        )
+
+        # Fused path
+        fused_out = _aiter_fused_gated_act_quant(x, activation, quantizer)
+        assert fused_out is not None, "Fused path should fire for Float8BlockQuantizer"
+
+        # Separate path: manual act then quantize
+        act_fn = {"swiglu": F.silu, "geglu": lambda t: F.gelu(t, approximate="tanh"), "reglu": F.relu}
+        chunks = x.chunk(2, dim=-1)
+        ref_bf16 = act_fn[activation](chunks[0]) * chunks[1]
+
+        # Dequantize fused output
+        fp8_data = fused_out._rowwise_data.view(torch.float8_e4m3fnuz).float()
+        scale_inv = fused_out._rowwise_scale_inv
+        # Expand scales to match data: each scale covers block_len elements
+        block_len = quantizer.block_len
+        num_blocks = fp8_data.shape[-1] // block_len
+        scale_expanded = scale_inv.repeat_interleave(block_len, dim=-1)
+        if scale_expanded.shape[-1] > fp8_data.shape[-1]:
+            scale_expanded = scale_expanded[..., :fp8_data.shape[-1]]
+        dequant = fp8_data * scale_expanded
+
+        diff = (dequant - ref_bf16.float()).abs().max().item()
+        # FP8 quantization error should be small relative to the values
+        ref_max = ref_bf16.float().abs().max().item()
+        rel_err = diff / max(ref_max, 1e-6)
+        assert rel_err < 0.15, f"Fused act+quant relative error {rel_err:.4f} too large"
+
+    @pytest.mark.parametrize("activation", ["swiglu", "geglu", "reglu"])
+    def test_fused_path_not_taken_without_block_quantizer(self, device, activation):
+        """Fused path should return None when quantizer is not Float8BlockQuantizer."""
+        from transformer_engine.pytorch._lite.activations import (
+            _aiter_fused_gated_act_quant,
+        )
+
+        x = torch.randn(4, 256, device=device, dtype=self.DTYPE)
+        # None quantizer → no fused path
+        result = _aiter_fused_gated_act_quant(x, activation, None)
+        assert result is None
+
+    def test_fused_path_output_shape(self, device):
+        """Fused output should have half the last dim (gated activation)."""
+        if not self._has_fused_kernel() or not self._has_float8_block():
+            pytest.skip("AITER fused act+quant or Float8BlockQuantizer not available")
+
+        from transformer_engine.pytorch._lite.activations import (
+            _aiter_fused_gated_act_quant,
+        )
+        from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+            Float8BlockQuantizer,
+        )
+
+        quantizer = Float8BlockQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            rowwise=True,
+            columnwise=False,
+        )
+
+        x = torch.randn(4, 8, 512, device=device, dtype=self.DTYPE)
+        result = _aiter_fused_gated_act_quant(x, "swiglu", quantizer)
+        assert result is not None
+        # Gated activation halves last dim: 512 → 256
+        assert result._rowwise_data.shape[-1] == 256
+        # Total elements should match batch * 256
+        assert result._rowwise_data.numel() == 4 * 8 * 256
