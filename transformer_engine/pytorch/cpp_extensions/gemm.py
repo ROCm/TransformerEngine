@@ -23,9 +23,6 @@ from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
-import aiter
-from aiter.ops.shuffle import shuffle_weight
-from aiter.ops.gemm_op_a4w4 import get_GEMM_config
 from ..utils import cast_if_needed
 
 _FP4_GEMM_TUNING = int(os.environ.get("NVTE_FP4_GEMM_TUNING", "1"))
@@ -111,6 +108,8 @@ def get_tensor_device(tensor: torch.Tensor) -> int:
 
 def _select_kernel_fp4(layout: str, grad: bool, M: int, N: int, K: int):
     """Select kernel via tuned CSV lookup, falling back to layout-based default."""
+    from aiter.ops.gemm_op_a4w4 import get_GEMM_config
+
     kernel_name = _DEFAULT_WGRAD if (layout == "NT" and grad) else _DEFAULT_FPROP_DGRAD
     split_k = 0
 
@@ -131,6 +130,9 @@ def _select_kernel_fp4(layout: str, grad: bool, M: int, N: int, K: int):
 def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16,
                     out_buffer=None, kernel_name="", b_pre_shuffled=True, log2_k_split=0):
     """Core FP4 GEMM via AITER ASM a4w4 kernel."""
+    import aiter
+    from aiter.ops.shuffle import shuffle_weight
+
     _fp4_dtype = torch.float4_e2m1fn_x2
     A_fp4 = A_fp4.view(_fp4_dtype) if A_fp4.dtype != _fp4_dtype else A_fp4
     B_fp4 = B_fp4.view(_fp4_dtype) if B_fp4.dtype != _fp4_dtype else B_fp4
@@ -313,8 +315,6 @@ def general_gemm(
     from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
 
     if isinstance(A, MXFP4TensorStorage) or isinstance(B, MXFP4TensorStorage):
-        from ..module.fp4_handler_gemm import fp4_gemm_layout
-
         result = fp4_gemm_layout(
             A,
             B,
