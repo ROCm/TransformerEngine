@@ -395,7 +395,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
       h, h, max_seqlen, max_seqlen, d, d, window_size_left, window_size_right, return_max_logit,
-      cuda_graph);
+      cuda_graph, false);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd_qkvpacked(
@@ -478,7 +478,8 @@ void nvte_fused_attn_bwd_qkvpacked(
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       true, QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout, h, h,
-      max_seqlen, max_seqlen, d, d, window_size_left, window_size_right, false, cuda_graph);
+      max_seqlen, max_seqlen, d, d, window_size_left, window_size_right, false, cuda_graph,
+      deterministic);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)){
@@ -572,7 +573,7 @@ void nvte_fused_attn_fwd_kvpacked(
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
       h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, window_size_left, window_size_right,
-      return_max_logit, cuda_graph);
+      return_max_logit, cuda_graph, false);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd_kvpacked(
@@ -668,7 +669,8 @@ void nvte_fused_attn_bwd_kvpacked(
   NVTE_Fused_Attn_Backend fused_attention_backend =
       nvte_get_fused_attn_backend(true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type,
                                   softmax_type, dropout, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
-                                  d, window_size_left, window_size_right, false, cuda_graph);
+                                  d, window_size_left, window_size_right, false, cuda_graph,
+                                  deterministic);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
@@ -763,7 +765,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
       h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right,
-      return_max_logit, cuda_graph);
+      return_max_logit, cuda_graph, false);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd(
@@ -856,7 +858,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout, h_q,
       h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right, false,
-      cuda_graph);
+      cuda_graph, deterministic);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
