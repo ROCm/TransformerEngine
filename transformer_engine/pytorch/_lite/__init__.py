@@ -115,3 +115,8 @@ from .mori_ep import (
     MoriEPCombineStdMoE,
 )
 from .padding import fused_multi_row_padding, fused_multi_row_unpadding
+
+# Note: fused_layernorm_linear and fused_layernorm_mlp are NOT imported here
+# because they import `transformer_engine_torch as tex` which resolves to this
+# module, creating a circular import. They are accessed via
+# transformer_engine.pytorch.module.__init__ when NVTE_LITE=1.

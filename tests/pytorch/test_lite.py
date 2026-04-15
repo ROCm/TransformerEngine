@@ -2713,3 +2713,192 @@ class TestMoEPadding:
         assert out.dtype == dtype
         torch.testing.assert_close(out[:4], inp[:4])
         torch.testing.assert_close(out[8:14], inp[4:10])
+
+
+# ---------------------------------------------------------------------------
+# Fused LayerNormLinear / LayerNormMLP (lite-native modules)
+# ---------------------------------------------------------------------------
+
+class TestLiteLayerNormLinear:
+    """Tests for the lite-native LayerNormLinear module."""
+
+    DTYPE = torch.bfloat16
+
+    @pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+    def test_forward_shape(self, device, normalization):
+        mod = te.LayerNormLinear(
+            256, 128, bias=True, normalization=normalization,
+        ).to(dtype=self.DTYPE, device=device)
+        x = torch.randn(4, 256, device=device, dtype=self.DTYPE)
+        y = mod(x)
+        assert y.shape == (4, 128)
+
+    def test_forward_3d_input(self, device):
+        mod = te.LayerNormLinear(256, 128, bias=True).to(
+            dtype=self.DTYPE, device=device
+        )
+        x = torch.randn(2, 8, 256, device=device, dtype=self.DTYPE)
+        y = mod(x)
+        assert y.shape == (2, 8, 128)
+
+    def test_forward_no_bias(self, device):
+        mod = te.LayerNormLinear(256, 128, bias=False).to(
+            dtype=self.DTYPE, device=device
+        )
+        x = torch.randn(4, 256, device=device, dtype=self.DTYPE)
+        y = mod(x)
+        assert y.shape == (4, 128)
+
+    def test_return_layernorm_output(self, device):
+        mod = te.LayerNormLinear(
+            256, 128, bias=True, return_layernorm_output=True,
+        ).to(dtype=self.DTYPE, device=device)
+        x = torch.randn(4, 256, device=device, dtype=self.DTYPE)
+        out = mod(x)
+        assert isinstance(out, tuple) and len(out) == 2
+        y, ln_out = out
+        assert y.shape == (4, 128)
+        assert ln_out.shape == (4, 256)
+
+    @pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+    def test_backward_all_grads(self, device, normalization):
+        mod = te.LayerNormLinear(
+            256, 128, bias=True, normalization=normalization,
+        ).to(dtype=self.DTYPE, device=device)
+        x = torch.randn(4, 256, device=device, dtype=self.DTYPE, requires_grad=True)
+        y = mod(x)
+        y.sum().backward()
+        assert x.grad is not None and x.grad.shape == x.shape
+        assert mod.weight.grad is not None
+        assert mod.layer_norm_weight.grad is not None
+        if normalization == "LayerNorm":
+            assert mod.layer_norm_bias.grad is not None
+
+    def test_backward_no_bias(self, device):
+        mod = te.LayerNormLinear(256, 128, bias=False).to(
+            dtype=self.DTYPE, device=device
+        )
+        x = torch.randn(4, 256, device=device, dtype=self.DTYPE, requires_grad=True)
+        y = mod(x)
+        y.sum().backward()
+        assert x.grad is not None
+
+    def test_numerical_vs_manual(self, device):
+        """Verify output matches manual norm→linear composition."""
+        mod = te.LayerNormLinear(128, 64, bias=True, normalization="RMSNorm").to(
+            dtype=self.DTYPE, device=device
+        )
+        x = torch.randn(4, 128, device=device, dtype=self.DTYPE)
+
+        # Manual reference
+        w = mod.layer_norm_weight.data
+        rms = x.float().pow(2).mean(dim=-1, keepdim=True).add(1e-5).rsqrt()
+        normed = (x.float() * rms * w.float()).to(self.DTYPE)
+        expected = torch.nn.functional.linear(normed, mod.weight.data, mod.bias.data)
+
+        y = mod(x)
+        diff = (y - expected).abs().max().item()
+        assert diff < 0.1, f"Max diff {diff:.4f} too large"
+
+
+class TestLiteLayerNormMLP:
+    """Tests for the lite-native LayerNormMLP module."""
+
+    DTYPE = torch.bfloat16
+
+    @pytest.mark.parametrize("activation", ["gelu", "silu", "relu"])
+    def test_forward_non_gated(self, device, activation):
+        mod = te.LayerNormMLP(
+            256, 512, bias=True, activation=activation,
+        ).to(dtype=self.DTYPE, device=device)
+        x = torch.randn(4, 256, device=device, dtype=self.DTYPE)
+        y = mod(x)
+        assert y.shape == (4, 256)
+
+    @pytest.mark.parametrize("activation", ["swiglu", "geglu", "reglu"])
+    def test_forward_gated(self, device, activation):
+        mod = te.LayerNormMLP(
+            256, 512, bias=True, activation=activation,
+        ).to(dtype=self.DTYPE, device=device)
+        x = torch.randn(4, 256, device=device, dtype=self.DTYPE)
+        y = mod(x)
+        assert y.shape == (4, 256)
+        # Gated activations should have 2x fc1_weight first dim
+        assert mod.fc1_weight.shape[0] == 1024
+
+    def test_forward_3d_input(self, device):
+        mod = te.LayerNormMLP(256, 512).to(dtype=self.DTYPE, device=device)
+        x = torch.randn(2, 8, 256, device=device, dtype=self.DTYPE)
+        y = mod(x)
+        assert y.shape == (2, 8, 256)
+
+    def test_forward_no_bias(self, device):
+        mod = te.LayerNormMLP(256, 512, bias=False).to(
+            dtype=self.DTYPE, device=device
+        )
+        x = torch.randn(4, 256, device=device, dtype=self.DTYPE)
+        y = mod(x)
+        assert y.shape == (4, 256)
+
+    @pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+    def test_forward_norm_variants(self, device, normalization):
+        mod = te.LayerNormMLP(
+            256, 512, normalization=normalization,
+        ).to(dtype=self.DTYPE, device=device)
+        x = torch.randn(4, 256, device=device, dtype=self.DTYPE)
+        y = mod(x)
+        assert y.shape == (4, 256)
+
+    def test_return_layernorm_output(self, device):
+        mod = te.LayerNormMLP(
+            256, 512, return_layernorm_output=True,
+        ).to(dtype=self.DTYPE, device=device)
+        x = torch.randn(4, 256, device=device, dtype=self.DTYPE)
+        out = mod(x)
+        assert isinstance(out, tuple) and len(out) == 2
+        y, ln_out = out
+        assert y.shape == (4, 256)
+        assert ln_out.shape == (4, 256)
+
+    @pytest.mark.parametrize("activation", ["gelu", "silu", "relu", "swiglu"])
+    def test_backward_all_grads(self, device, activation):
+        mod = te.LayerNormMLP(
+            256, 512, bias=True, activation=activation,
+        ).to(dtype=self.DTYPE, device=device)
+        x = torch.randn(4, 256, device=device, dtype=self.DTYPE, requires_grad=True)
+        y = mod(x)
+        y.sum().backward()
+        assert x.grad is not None and x.grad.shape == x.shape
+        assert mod.fc1_weight.grad is not None
+        assert mod.fc2_weight.grad is not None
+        assert mod.layer_norm_weight.grad is not None
+
+    def test_backward_no_bias(self, device):
+        mod = te.LayerNormMLP(256, 512, bias=False, activation="gelu").to(
+            dtype=self.DTYPE, device=device
+        )
+        x = torch.randn(4, 256, device=device, dtype=self.DTYPE, requires_grad=True)
+        y = mod(x)
+        y.sum().backward()
+        assert x.grad is not None
+        assert mod.fc1_weight.grad is not None
+        assert mod.fc2_weight.grad is not None
+
+    def test_numerical_vs_manual(self, device):
+        """Verify output matches manual norm→fc1→gelu→fc2 composition."""
+        mod = te.LayerNormMLP(
+            128, 256, bias=True, normalization="RMSNorm", activation="gelu",
+        ).to(dtype=self.DTYPE, device=device)
+        x = torch.randn(4, 128, device=device, dtype=self.DTYPE)
+
+        # Manual reference
+        w = mod.layer_norm_weight.data
+        rms = x.float().pow(2).mean(dim=-1, keepdim=True).add(1e-5).rsqrt()
+        normed = (x.float() * rms * w.float()).to(self.DTYPE)
+        fc1_out = torch.nn.functional.linear(normed, mod.fc1_weight.data, mod.fc1_bias.data)
+        act_out = torch.nn.functional.gelu(fc1_out, approximate="tanh")
+        expected = torch.nn.functional.linear(act_out, mod.fc2_weight.data, mod.fc2_bias.data)
+
+        y = mod(x)
+        diff = (y - expected).abs().max().item()
+        assert diff < 0.5, f"Max diff {diff:.4f} too large"

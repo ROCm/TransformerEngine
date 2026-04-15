@@ -480,10 +480,27 @@ def fused_amax_and_scale_update_after_reduction(
     amax_history, scale, scale_inv, scale_inv_mask, fp8_max, recipe_type,
     amax_compute_algo, is_mxfp8
 ):
-    """Update amax history and FP8 scale/scale_inv after reduction."""
-    current_amax = amax_history[0].clone()
-    current_amax = torch.clamp(current_amax, min=1e-12)
-    new_scale = fp8_max / current_amax
+    """Update amax history and FP8 scale/scale_inv after reduction.
+
+    Mirrors the C++ kernel in common/recipe/delayed_scaling.cu:
+    1. Roll history window: shift rows down, current amax stays at [0].
+    2. Compute scale from history using amax_compute_algo.
+    """
+    # Roll history: move row i to row i+1, freeing row 0 for the next step's amax.
+    # amax_history[0] already holds the current step's amax (written by quantize kernel).
+    if amax_history.shape[0] > 1:
+        amax_history[1:] = amax_history[:-1].clone()
+
+    # Compute effective amax from history window
+    if callable(amax_compute_algo):
+        amax = amax_compute_algo(amax_history)
+    elif amax_compute_algo == "most_recent":
+        amax = amax_history[0].clone()
+    else:  # "max" (default)
+        amax = amax_history.max(dim=0).values
+
+    amax = torch.clamp(amax, min=1e-12)
+    new_scale = fp8_max / amax
     scale.copy_(new_scale)
     scale_inv.copy_(1.0 / new_scale)
 
