@@ -10,6 +10,7 @@
 #include "transformer_engine/fused_attn.h"
 #include "fused_attn_aotriton.h"
 #include "fused_attn_ck.h"
+#include "fused_attn_small_seq.h"
 #include "../common.h"
 #include "utils.h"
 
@@ -873,6 +874,182 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   }else{
     NVTE_ERROR("Invalid combination of data type and sequence length for rocm fused attention. \n");
   }
+}
+
+bool nvte_is_small_seq_attn_supported(
+    NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float dropout,
+    size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv,
+    size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
+    int64_t window_size_right) {
+  return transformer_engine::fused_attn_rocm::is_small_seq_attn_supported(
+      q_dtype, kv_dtype, qkv_layout, bias_type, attn_mask_type, dropout, num_attn_heads,
+      num_gqa_groups, max_seqlen_q, max_seqlen_kv, head_dim_qk, head_dim_v, window_size_left,
+      window_size_right);
+}
+
+size_t nvte_fused_attn_small_seq_bwd_workspace_size(size_t batch, size_t attn_heads,
+                                                    size_t max_seqlen_kv, NVTEDType dtype) {
+  return transformer_engine::fused_attn_rocm::fused_attn_small_seq_bwd_workspace_size(
+      batch, attn_heads, max_seqlen_kv, static_cast<transformer_engine::DType>(dtype));
+}
+
+void nvte_fused_attn_small_seq_fwd(
+    const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor Bias,
+    NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
+    const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
+    const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
+    const NVTETensor page_table_v, const NVTETensor rng_state, size_t max_seqlen_q,
+    size_t max_seqlen_kv, bool is_training, float attn_scale, float dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    int64_t window_size_left, int64_t window_size_right, NVTETensor workspace,
+    cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_attn_small_seq_fwd);
+  using namespace transformer_engine;
+  const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
+  const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
+  const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
+  const Tensor *input_cu_seqlens_kv_padded = convertNVTETensorCheck(cu_seqlens_kv_padded);
+  const Tensor *input_rng_state = convertNVTETensorCheck(rng_state);
+  const Tensor *input_Q = convertNVTETensorCheck(Q);
+  const Tensor *input_K = convertNVTETensorCheck(K);
+  const Tensor *input_V = convertNVTETensorCheck(V);
+  convertNVTETensorCheck(Bias);
+  convertNVTETensorCheck(S);
+  Tensor *output_O = convertNVTETensorCheck(O);
+  Tensor *wkspace = convertNVTETensorCheck(workspace);
+
+  auto ndim = input_Q->data.shape.size();
+  size_t b = input_cu_seqlens_q->data.shape[0] - 1;
+  size_t h_q = input_Q->data.shape[ndim - 2];
+  size_t h_kv = input_K->data.shape[ndim - 2];
+  size_t d_qk = input_Q->data.shape[ndim - 1];
+  size_t d_v = input_V->data.shape[ndim - 1];
+
+  const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
+  const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
+
+  log_fused_attn_config(__FUNCTION__, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type,
+                        dropout, b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
+                        window_size_left, window_size_right);
+
+  std::tie(window_size_left, window_size_right) =
+      check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+
+  NVTE_CHECK(
+      fused_attn_rocm::is_small_seq_attn_supported(
+          Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv,
+          max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right),
+      "nvte_fused_attn_small_seq_fwd: configuration not supported for small-seq path.");
+
+  Tensor *softmax_aux_tensor = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+  void *attn_weights_buf = softmax_aux_tensor->data.dptr;
+
+  if (wkspace->data.dptr == nullptr) {
+    wkspace->data.shape = {1};
+    wkspace->data.dtype = DType::kByte;
+    return;
+  }
+
+  void *dev_ptr_seed = input_rng_state->data.dptr;
+  void *dev_ptr_offset =
+      reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(input_rng_state->data.dptr) + 1);
+
+  size_t workspace_bytes = 1;
+  for (size_t i = 0; i < wkspace->data.shape.size(); ++i) {
+    workspace_bytes *= wkspace->data.shape[i];
+  }
+  workspace_bytes *= nvte_dtype_size(wkspace->data.dtype);
+
+  fused_attn_rocm::fused_attn_small_seq_fwd(
+      b, h_q, h_kv, max_seqlen_kv, d_qk, d_v, is_training, attn_scale, dropout,
+      input_Q->data.dptr, input_K->data.dptr, input_V->data.dptr, output_O->data.dptr,
+      attn_weights_buf, input_cu_seqlens_kv->data.dptr, input_cu_seqlens_kv_padded->data.dptr,
+      dev_ptr_seed, dev_ptr_offset, input_Q->data.dtype, wkspace->data.dptr, &workspace_bytes,
+      stream);
+  (void)page_table_k;
+  (void)page_table_v;
+}
+
+void nvte_fused_attn_small_seq_bwd(
+    const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor O,
+    const NVTETensor dO, const NVTETensor S, NVTETensor dP,
+    const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQ, NVTETensor dK, NVTETensor dV,
+    NVTETensor dBias, const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
+    size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    int64_t window_size_left, int64_t window_size_right, bool deterministic, NVTETensor workspace,
+    cudaStream_t stream) {
+  NVTE_API_CALL(nvte_fused_attn_small_seq_bwd);
+  (void)deterministic;
+  using namespace transformer_engine;
+  const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
+  const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
+  const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
+  const Tensor *input_cu_seqlens_kv_padded = convertNVTETensorCheck(cu_seqlens_kv_padded);
+  const Tensor *input_Q = convertNVTETensorCheck(Q);
+  const Tensor *input_K = convertNVTETensorCheck(K);
+  const Tensor *input_V = convertNVTETensorCheck(V);
+  const Tensor *input_O = convertNVTETensorCheck(O);
+  const Tensor *input_dO = convertNVTETensorCheck(dO);
+  convertNVTETensorCheck(S);
+  convertNVTETensorCheck(dP);
+  Tensor *output_dQ = convertNVTETensorCheck(dQ);
+  Tensor *output_dK = convertNVTETensorCheck(dK);
+  Tensor *output_dV = convertNVTETensorCheck(dV);
+  convertNVTETensorCheck(dBias);
+  Tensor *wkspace = convertNVTETensorCheck(workspace);
+
+  const Tensor *attn_weights_tensor = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+  convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+
+  auto ndim = input_Q->data.shape.size();
+  size_t b = input_cu_seqlens_q->data.shape[0] - 1;
+  size_t h_q = input_Q->data.shape[ndim - 2];
+  size_t h_kv = input_K->data.shape[ndim - 2];
+  size_t d_qk = input_Q->data.shape[ndim - 1];
+  size_t d_v = input_V->data.shape[ndim - 1];
+
+  const NVTEDType Q_type = static_cast<NVTEDType>(input_Q->data.dtype);
+  const NVTEDType KV_type = static_cast<NVTEDType>(input_K->data.dtype);
+
+  log_fused_attn_config(__FUNCTION__, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type,
+                        dropout, b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
+                        window_size_left, window_size_right);
+
+  std::tie(window_size_left, window_size_right) =
+      check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+
+  NVTE_CHECK(
+      fused_attn_rocm::is_small_seq_attn_supported(
+          Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, dropout, h_q, h_kv,
+          max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right),
+      "nvte_fused_attn_small_seq_bwd: configuration not supported for small-seq path.");
+
+  size_t req_bytes = fused_attn_rocm::fused_attn_small_seq_bwd_workspace_size(
+      b, h_q, max_seqlen_kv, input_Q->data.dtype);
+
+  if (wkspace->data.dptr == nullptr) {
+    wkspace->data.shape = {req_bytes};
+    wkspace->data.dtype = DType::kByte;
+    return;
+  }
+
+  size_t workspace_bytes = 1;
+  for (size_t i = 0; i < wkspace->data.shape.size(); ++i) {
+    workspace_bytes *= wkspace->data.shape[i];
+  }
+  workspace_bytes *= nvte_dtype_size(wkspace->data.dtype);
+  NVTE_CHECK(workspace_bytes >= req_bytes, "nvte_fused_attn_small_seq_bwd: workspace too small.");
+
+  fused_attn_rocm::fused_attn_small_seq_bwd(
+      b, h_q, h_kv, max_seqlen_kv, d_qk, d_v, attn_scale, dropout, input_Q->data.dptr,
+      input_K->data.dptr, input_V->data.dptr, input_O->data.dptr, input_dO->data.dptr,
+      attn_weights_tensor->data.dptr, output_dQ->data.dptr, output_dK->data.dptr,
+      output_dV->data.dptr, input_cu_seqlens_kv->data.dptr,
+      input_cu_seqlens_kv_padded->data.dptr, input_Q->data.dtype, wkspace->data.dptr,
+      &workspace_bytes, stream);
 }
 
 uint32_t nvte_get_runtime_num_segments(NVTETensor cu_seqlen, NVTETensor workspace, size_t max_batch_size,

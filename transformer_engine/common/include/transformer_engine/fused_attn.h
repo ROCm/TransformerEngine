@@ -633,6 +633,43 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          int64_t window_size_right, bool deterministic, NVTETensor workspace,
                          cudaStream_t stream);
 
+#ifdef __HIP_PLATFORM_AMD__
+bool nvte_is_small_seq_attn_supported(
+    NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float dropout,
+    size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, size_t max_seqlen_kv,
+    size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left,
+    int64_t window_size_right);
+
+/*! \brief Device workspace bytes required for small-seq backward. */
+size_t nvte_fused_attn_small_seq_bwd_workspace_size(size_t batch, size_t attn_heads,
+                                                    size_t max_seqlen_kv, NVTEDType dtype);
+
+/*! \brief ROCm small-seq forward: separate Q, K, V; same tensor roles as nvte_fused_attn_fwd. */
+void nvte_fused_attn_small_seq_fwd(
+    const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor Bias,
+    NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
+    const NVTETensor cu_seqlens_kv, const NVTETensor cu_seqlens_q_padded,
+    const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
+    const NVTETensor page_table_v, const NVTETensor rng_state, size_t max_seqlen_q,
+    size_t max_seqlen_kv, bool is_training, float attn_scale, float dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    int64_t window_size_left, int64_t window_size_right, NVTETensor workspace,
+    cudaStream_t stream);
+
+/*! \brief ROCm small-seq backward. */
+void nvte_fused_attn_small_seq_bwd(
+    const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor O,
+    const NVTETensor dO, const NVTETensor S, NVTETensor dP,
+    const NVTETensorPack *Aux_CTX_Tensors, NVTETensor dQ, NVTETensor dK, NVTETensor dV,
+    NVTETensor dBias, const NVTETensor cu_seqlens_q, const NVTETensor cu_seqlens_kv,
+    const NVTETensor cu_seqlens_q_padded, const NVTETensor cu_seqlens_kv_padded,
+    size_t max_seqlen_q, size_t max_seqlen_kv, float attn_scale, float dropout,
+    NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+    int64_t window_size_left, int64_t window_size_right, bool deterministic, NVTETensor workspace,
+    cudaStream_t stream);
+#endif  // __HIP_PLATFORM_AMD__
+
 /*!  \brief Update the RNG state with the seed and calculated offset.
  *
  * \warning   This API is **experimental** and subject to change.

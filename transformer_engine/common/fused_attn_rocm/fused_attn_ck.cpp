@@ -9,7 +9,6 @@
 #include <numeric> // Required for std::accumulate
 #ifdef USE_FUSED_ATTN_CK
 #include <ck_fused_attn/ck_fused_attn.hpp>
-#include "fused_attn_smallseq.h"
 #endif // USE_FUSED_ATTN_CK
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
@@ -615,40 +614,6 @@ void fused_attn_ck_fwd_impl(
   // denote the next available section of workspace from upstream
   void* workspace_next = workspace;
 
-  const char* nvte_smallseq = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
-  if (is_ragged && s_q!=s_kv && nvte_smallseq && std::string(nvte_smallseq) == "1") {
-    void* max_seqlen_workspace = workspace_next;
-    size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
-        static_cast<uint64_t>(b), devPtrCuSeqlensQ, nullptr, max_seqlen_workspace, stream));
-    size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
-        static_cast<uint64_t>(b), devPtrCuSeqlensKV, nullptr, max_seqlen_workspace, stream));
-    workspace_next = static_cast<void*>(static_cast<int8_t*>(workspace_next) + sizeof(uint64_t));
-
-    if (nvte_log_ck_config) {
-      std::cout << std::endl << "attn_fwd(ck small-seq): ";
-      std::cout << "b: " << b << ", ";
-      std::cout << "runtime_max_seqlen_q: " << runtime_max_seqlen_q << ", ";
-      std::cout << "runtime_max_seqlen_kv: " << runtime_max_seqlen_kv << ", ";
-      std::cout << "flow: "
-                << (runtime_max_seqlen_q == 1 && runtime_max_seqlen_kv >= 2 &&
-                            runtime_max_seqlen_kv <= 16
-                        ? "ck-smallseq"
-                        : "regular ck/aiter")
-                << std::endl;
-    }
-
-    if (runtime_max_seqlen_q == 1 && runtime_max_seqlen_kv >= 2 && runtime_max_seqlen_kv <= 16) {
-      fused_attn_rocm::fused_attn_smallseq_fwd(
-          b, h, hg, runtime_max_seqlen_kv, d_qk, d_v,
-          is_training, scaling_factor, dropout_probability,
-          devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxAux,
-          devPtrCuSeqlensKV, devPtrSeqOffsetsKV,
-          devPtrDropoutSeed, devPtrDropoutOffset,
-          dtype, workspace, workspace_size, stream);
-      return;
-    }
-  }
-
   std::array<uint64_t, 4> q_stride;
   std::array<uint64_t, 4> k_stride;
   std::array<uint64_t, 4> v_stride;
@@ -950,40 +915,6 @@ void fused_attn_ck_bwd_impl(
   }
   // denote the next available section of workspace from upstream
   void* workspace_next = workspace;
-
-  const char* nvte_smallseq = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
-  if (is_ragged && s_q!=s_kv && nvte_smallseq && std::string(nvte_smallseq) == "1") {
-    void* max_seqlen_workspace = workspace_next;
-    size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
-      b, devPtrCuSeqlensQ, nullptr, max_seqlen_workspace, stream));
-    size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
-      b, devPtrCuSeqlensKV, nullptr, max_seqlen_workspace, stream));
-    workspace_next = static_cast<void*>(static_cast<int8_t*>(workspace_next) + sizeof(uint64_t));
-
-    if (nvte_log_ck_config) {
-      std::cout << std::endl << "attn_bwd(ck small-seq): ";
-      std::cout << "b: " << b << ", ";
-      std::cout << "runtime_max_seqlen_q: " << runtime_max_seqlen_q << ", ";
-      std::cout << "runtime_max_seqlen_kv: " << runtime_max_seqlen_kv << ", ";
-      std::cout << "flow: "
-                << (runtime_max_seqlen_q == 1 && runtime_max_seqlen_kv >= 2 &&
-                            runtime_max_seqlen_kv <= 16
-                        ? "ck-smallseq"
-                        : "regular ck/aiter")
-                << std::endl;
-    }
-
-    if (runtime_max_seqlen_q == 1 && runtime_max_seqlen_kv >= 2 && runtime_max_seqlen_kv <= 16) {
-      fused_attn_rocm::fused_attn_smallseq_bwd(
-          b, h, hg, runtime_max_seqlen_kv, d_qk, d_v,
-          scaling_factor, dropout_probability,
-          devPtrQ, devPtrK, devPtrV, devPtrO, devPtrdO, devPtrSoftmaxAux,
-          devPtrdQ, devPtrdK, devPtrdV,
-          devPtrCuSeqlensKV, devPtrSeqOffsetsKV,
-          dtype, workspace, workspace_size, stream);
-      return;
-    }
-  }
 
   std::array<uint64_t, 4> q_stride;
   std::array<uint64_t, 4> k_stride;

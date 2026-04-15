@@ -4,8 +4,8 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
-/*! \file fused_attn_smallseq.cpp
- *  \brief Unfused small-seq (varlen) attention: seq_q=1, max_seqlen_kv<=16, THD only.
+/*! \file fused_attn_small_seq.cpp
+ *  \brief small-seq (varlen) attention: seq_q=1, max_seqlen_kv<=16, THD only.
  */
 
 #include <hip/hip_runtime.h>
@@ -15,25 +15,26 @@
 #include <cstdint>
 #include <cstdlib>
 #include <iostream>
+#include <string>
 
 #include "../common.h"
 #include "../util/cuda_runtime.h"
-#include "fused_attn_smallseq.h"
+#include "fused_attn_small_seq.h"
 #include "utils.h"
 
 // Macros to avoid repeating dispatch switch cases for max_seqlen_kv in [2, 16].
-// T, bi, hi and the pointer/scale args must be in scope where these are used.
+// T, bi, hi, d_qk and the pointer/scale args must be in scope where these are used.
 #define SMALLSEQ_DISPATCH_FWD_CASE(N)                                      \
   case N:                                                                  \
     dispatch_fwd<N, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout, \
                        sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, \
-                       stream);                                            \
+                       d_qk, stream);                                      \
     break;
 #define SMALLSEQ_DISPATCH_BWD_CASE(N)                                        \
   case N:                                                                    \
     dispatch_bwd<N, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr,        \
                        dropout_mask, dropout, sqr_dk_scale, dQ_ptr, dK_ptr, \
-                       dV_ptr, workspace_ptr, cu_kv, cu_kv_p, stream);       \
+                       dV_ptr, workspace_ptr, cu_kv, cu_kv_p, d_qk, stream); \
     break;
 
 namespace transformer_engine {
@@ -57,9 +58,8 @@ struct SmallSeqConfig {
 
 /* MAX_SEQ_KV and HEAD_DIM are compile-time so kernels can use fixed stack arrays
  * (e.g. float results[max_seq_kv], T attn[max_seq_kv]) and constexpr grid/block
- * sizes. This matches varlen_attn/attn_fwd.cpp (FmhaKernelConfig<..., MAX_SEQ_KV, HEAD_DIM>)
- * and INTEGRATION_TASK.md: seq_q==1, max_seq_kv<=16; head_dim=128 is the only
- * value tested in varlen_attn (main() uses TestRunner<2,16>::run<..., 128, ...>). */
+ * sizes. This matches varlen_attn/attn_fwd.cpp (FmhaKernelConfig<..., MAX_SEQ_KV, HEAD_DIM>).
+ * Dispatch supports head_dim 128, 256, 512 (d_qk == d_v). */
 
 // ----- Forward kernels (with runtime batch_size, head_num) -----
 
@@ -784,7 +784,7 @@ void run_attn_bwd_impl(int b,
       workspace, Q, K, grad_Q, grad_K, scale, cu_seqlens_kv, cu_seqlens_kv_padded, b, head_num);
 }
 
-size_t fused_attn_smallseq_bwd_workspace_size(size_t b,
+size_t fused_attn_small_seq_bwd_workspace_size(size_t b,
                                               size_t h_q,
                                               size_t max_seqlen_kv,
                                               DType dtype) {
@@ -795,22 +795,56 @@ size_t fused_attn_smallseq_bwd_workspace_size(size_t b,
 template <int MAX_KV, typename T>
 static void dispatch_fwd(int b, int h_q, const T* Q, const T* K, const T* V, const T* dropout_mask,
                         float dropout, float scale, T* O, T* workspace, const int* cu_kv,
-                        const int* cu_kv_p, hipStream_t stream) {
-  run_attn_fwd_impl<T, SmallSeqConfig<MAX_KV, 128>>(
-      b, h_q, Q, K, V, dropout_mask, dropout, scale, O, workspace, cu_kv, cu_kv_p, stream);
+                        const int* cu_kv_p, size_t d_qk, hipStream_t stream) {
+  switch (d_qk) {
+    case 128:
+      run_attn_fwd_impl<T, SmallSeqConfig<MAX_KV, 128>>(
+          b, h_q, Q, K, V, dropout_mask, dropout, scale, O, workspace, cu_kv, cu_kv_p, stream);
+      break;
+    case 256:
+      run_attn_fwd_impl<T, SmallSeqConfig<MAX_KV, 256>>(
+          b, h_q, Q, K, V, dropout_mask, dropout, scale, O, workspace, cu_kv, cu_kv_p, stream);
+      break;
+    case 512:
+      run_attn_fwd_impl<T, SmallSeqConfig<MAX_KV, 512>>(
+          b, h_q, Q, K, V, dropout_mask, dropout, scale, O, workspace, cu_kv, cu_kv_p, stream);
+      break;
+    default:
+      NVTE_ERROR(
+          "Unsupported head dimension (d_qk) for small-seq attention: must be 128, 256, or "
+          "512.");
+  }
 }
 
 template <int MAX_KV, typename T>
 static void dispatch_bwd(int b, int h_q, const T* Q, const T* K, const T* V, const T* grad_O,
                         const T* attn_weights, const T* dropout_mask, float dropout, float scale,
                         T* grad_Q, T* grad_K, T* grad_V, T* workspace, const int* cu_kv,
-                        const int* cu_kv_p, hipStream_t stream) {
-  run_attn_bwd_impl<T, SmallSeqConfig<MAX_KV, 128>>(
-      b, h_q, Q, K, V, grad_O, attn_weights, dropout_mask, dropout, scale,
-      grad_Q, grad_K, grad_V, workspace, cu_kv, cu_kv_p, stream);
+                        const int* cu_kv_p, size_t d_qk, hipStream_t stream) {
+  switch (d_qk) {
+    case 128:
+      run_attn_bwd_impl<T, SmallSeqConfig<MAX_KV, 128>>(
+          b, h_q, Q, K, V, grad_O, attn_weights, dropout_mask, dropout, scale,
+          grad_Q, grad_K, grad_V, workspace, cu_kv, cu_kv_p, stream);
+      break;
+    case 256:
+      run_attn_bwd_impl<T, SmallSeqConfig<MAX_KV, 256>>(
+          b, h_q, Q, K, V, grad_O, attn_weights, dropout_mask, dropout, scale,
+          grad_Q, grad_K, grad_V, workspace, cu_kv, cu_kv_p, stream);
+      break;
+    case 512:
+      run_attn_bwd_impl<T, SmallSeqConfig<MAX_KV, 512>>(
+          b, h_q, Q, K, V, grad_O, attn_weights, dropout_mask, dropout, scale,
+          grad_Q, grad_K, grad_V, workspace, cu_kv, cu_kv_p, stream);
+      break;
+    default:
+      NVTE_ERROR(
+          "Unsupported head dimension (d_qk) for small-seq attention: must be 128, 256, or "
+          "512.");
+  }
 }
 
-void fused_attn_smallseq_fwd(size_t b,
+void fused_attn_small_seq_fwd(size_t b,
                             size_t h_q,
                             size_t h_kv,
                             size_t max_seqlen_kv,
@@ -887,7 +921,7 @@ void fused_attn_smallseq_fwd(size_t b,
 
 }
 
-void fused_attn_smallseq_bwd(size_t b,
+void fused_attn_small_seq_bwd(size_t b,
                              size_t h_q,
                              size_t h_kv,
                              size_t max_seqlen_kv,
@@ -966,6 +1000,125 @@ void fused_attn_smallseq_bwd(size_t b,
         NVTE_ERROR("Unsupported max_seqlen_kv for small-seq: max_seqlen_kv <= 16.");
     }
   );
+}
+
+bool is_small_seq_attn_supported(
+    NVTEDType q_dtype,
+    NVTEDType kv_dtype,
+    NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type attn_mask_type,
+    float dropout,
+    size_t num_attn_heads,
+    size_t num_gqa_groups,
+    size_t max_seqlen_q,
+    size_t max_seqlen_kv,
+    size_t head_dim_qk,
+    size_t head_dim_v,
+    int64_t window_size_left,
+    int64_t window_size_right) {
+  bool log = false;
+  if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG")) {
+    log = (env_p != nullptr && std::string(env_p) == "1");
+  }
+
+  if (num_gqa_groups == 0 || num_attn_heads % num_gqa_groups != 0) {
+    if (log) {
+      std::cout << "small-seq: heads must be divisible by GQA groups" << std::endl;
+    }
+    return false;
+  }
+
+  if (q_dtype != kv_dtype ||
+      !(q_dtype == NVTEDType::kNVTEFloat16 || q_dtype == NVTEDType::kNVTEBFloat16)) {
+    if (log) {
+      std::cout << "small-seq: Q/K/V must be FP16 or BF16 and match" << std::endl;
+    }
+    return false;
+  }
+
+  if (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) {
+    if (log) {
+      std::cout << "small-seq: bias not supported" << std::endl;
+    }
+    return false;
+  }
+
+  if (dropout != 0.f) {
+    if (log) {
+      std::cout << "small-seq: dropout not supported in kernel path" << std::endl;
+    }
+    return false;
+  }
+
+  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
+  if (layout_group != NVTE_QKV_Layout_Group::NVTE_HD_HD_HD ||
+      nvte_get_qkv_format(qkv_layout) != NVTE_QKV_Format::NVTE_THD) {
+    if (log) {
+      std::cout << "small-seq: requires THD separate Q, K, V (THD_THD_THD)" << std::endl;
+    }
+    return false;
+  }
+
+  if (qkv_layout != NVTE_QKV_Layout::NVTE_THD_THD_THD) {
+    if (log) {
+      std::cout << "small-seq: layout must be NVTE_THD_THD_THD" << std::endl;
+    }
+    return false;
+  }
+
+  // max_seqlen_q / max_seqlen_kv are compile-time or padded upper bounds; actual varlen
+  // lengths are in cu_seqlens / offsets. Do not reject here based on those maxima — callers
+  // must ensure runtime lengths and the launch-time max_seqlen_kv passed to fwd/bwd match
+  // the small-seq kernel contract (e.g. dispatch cases 2..16, effective q len 1).
+  (void)max_seqlen_q;
+  (void)max_seqlen_kv;
+
+  if (head_dim_qk != head_dim_v) {
+    if (log) {
+      std::cout << "small-seq: head_dim_qk and head_dim_v must match" << std::endl;
+    }
+    return false;
+  }
+  if (head_dim_qk != 128 && head_dim_qk != 256 && head_dim_qk != 512) {
+    if (log) {
+      std::cout << "small-seq: head_dim_qk must be 128, 256, or 512" << std::endl;
+    }
+    return false;
+  }
+
+  bool is_causal =
+      (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+       attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+       attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
+       attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  if (is_causal) {
+    if (log) {
+      std::cout << "small-seq: causal mask types not supported" << std::endl;
+    }
+    return false;
+  }
+
+  if (attn_mask_type != NVTE_Mask_Type::NVTE_NO_MASK &&
+      attn_mask_type != NVTE_Mask_Type::NVTE_PADDING_MASK) {
+    if (log) {
+      std::cout << "small-seq: only NO_MASK or PADDING_MASK supported" << std::endl;
+    }
+    return false;
+  }
+
+  if (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
+      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) {
+    if (!((window_size_left == -1 && window_size_right == -1) ||
+          (window_size_left >= 0 && window_size_right >= 0))) {
+      if (log) {
+        std::cout << "small-seq: invalid window size for mask type" << std::endl;
+      }
+      return false;
+    }
+  }
+
+  return true;
 }
 
 }  // namespace fused_attn_rocm

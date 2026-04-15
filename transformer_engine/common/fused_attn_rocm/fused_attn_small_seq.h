@@ -4,20 +4,37 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
-/*! \file fused_attn_smallseq.h
+/*! \file fused_attn_small_seq.h
  *  \brief Small-seq (varlen) attention for ROCm: seq_q=1, max_seqlen_kv<=16, THD only.
  */
 
-#ifndef TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_FUSED_ATTN_SMALLSEQ_H_
-#define TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_FUSED_ATTN_SMALLSEQ_H_
+#ifndef TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_FUSED_ATTN_SMALL_SEQ_H_
+#define TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_FUSED_ATTN_SMALL_SEQ_H_
 
 #include <transformer_engine/transformer_engine.h>
+#include "transformer_engine/fused_attn.h"
 
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
+bool is_small_seq_attn_supported(
+    NVTEDType q_dtype,
+    NVTEDType kv_dtype,
+    NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type attn_mask_type,
+    float dropout,
+    size_t num_attn_heads,
+    size_t num_gqa_groups,
+    size_t max_seqlen_q,
+    size_t max_seqlen_kv,
+    size_t head_dim_qk,
+    size_t head_dim_v,
+    int64_t window_size_left,
+    int64_t window_size_right);
+
 /** Workspace size in bytes for small-seq backward path */
-size_t fused_attn_smallseq_bwd_workspace_size(size_t b,
+size_t fused_attn_small_seq_bwd_workspace_size(size_t b,
                                               size_t h_q,
                                               size_t max_seqlen_kv,
                                               DType dtype);
@@ -26,7 +43,7 @@ size_t fused_attn_smallseq_bwd_workspace_size(size_t b,
  *  attn_weights_buffer is also used as internal workspace (scores then overwritten by attn
  *  weights). No separate workspace required for the launcher; caller may use workspace for
  *  get_runtime_max_seqlen (8 bytes). */
-void fused_attn_smallseq_fwd(size_t b,
+void fused_attn_small_seq_fwd(size_t b,
                              size_t h_q,
                              size_t h_kv,
                              size_t max_seqlen_kv,
@@ -50,8 +67,8 @@ void fused_attn_smallseq_fwd(size_t b,
                              cudaStream_t stream);
 
 /** Backward: dO, O, attn_weights -> dQ, dK, dV. attn_weights is the buffer from forward
- *  (output_S). workspace must be at least fused_attn_smallseq_bwd_workspace_size. */
-void fused_attn_smallseq_bwd(size_t b,
+ *  (output_S). workspace must be at least fused_attn_small_seq_bwd_workspace_size. */
+void fused_attn_small_seq_bwd(size_t b,
                              size_t h_q,
                              size_t h_kv,
                              size_t max_seqlen_kv,
@@ -78,4 +95,4 @@ void fused_attn_smallseq_bwd(size_t b,
 }  // namespace fused_attn_rocm
 }  // namespace transformer_engine
 
-#endif  // TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_FUSED_ATTN_SMALLSEQ_H_
+#endif  // TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_FUSED_ATTN_SMALL_SEQ_H_
