@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -19,6 +21,10 @@ from torch.nn.parallel import DistributedDataParallel
 import transformer_engine.pytorch as te
 import transformer_engine.pytorch.cpp_extensions as tex
 from transformer_engine.common.recipe import Format, DelayedScaling
+
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+assert (not IS_HIP_EXTENSION), "Please use rocm_te_layer_overlap_profile.py with HIP."
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=FutureWarning)

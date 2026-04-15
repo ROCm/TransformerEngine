@@ -1,3 +1,4 @@
+.venv
 *.o
 *.swp
 *.ii
@@ -56,3 +57,4 @@ artifacts/
 transformer_engine/build_info.txt
 transformer_engine/common/util/hip_nvml.*
 .asv/
+*.DS_Store

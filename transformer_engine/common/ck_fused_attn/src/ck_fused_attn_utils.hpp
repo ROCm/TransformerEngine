@@ -9,6 +9,7 @@
 
 #include<fstream>
 #include<hip/hip_runtime.h>
+#include "ck_tile/host.hpp"
 
 //forward declaration for ck_tile enum
 enum class mask_enum;
@@ -55,6 +56,27 @@ std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, 
 
 uint64_t get_runtime_max_seqlen(uint64_t b, const void* cu_seqlen_ptr, const void* cu_seqlen_padded_ptr, void* workspace, hipStream_t stream);
 
+// This helper merely standardizes the logging to make it a bit easier to parse
+// through it at a glance while guaranteeing uniformity.
+template<typename T>
+void log_value(std::ostream* log_file, const char* label, const T& value) {
+    (*log_file) << label << ": " << value << "\n";
+}
+
+ck_tile::index_t get_batch_stride_bias(
+  ck_tile::index_t bias_h,
+  BiasShape bias_shape,
+  ck_tile::index_t max_seqlen_q,
+  ck_tile::index_t max_seqlen_k,
+  bool is_group_mode,
+  bool is_fwd
+);
+ck_tile::index_t get_nhead_stride_bias(
+  BiasShape bias_shape,
+  ck_tile::index_t max_seqlen_q,
+  ck_tile::index_t max_seqlen_k,
+  bool is_group_mode
+);
 std::ostream* get_ck_log_stream();
 
 }//namespace ck_fused_attn

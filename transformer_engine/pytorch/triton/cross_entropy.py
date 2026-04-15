@@ -51,6 +51,8 @@ def cross_entropy_forward(
     # tensor to hold this rank's m/d/X_y values
     m_d_X_y = torch.zeros(n_rows * 3, dtype=torch.float32, device=_input.device)
 
+    n_non_ignore = torch.zeros(1, dtype=torch.int64, device=_input.device)
+
     # ensure _input and target are contiguous in the last dimension
     if _input.stride(-1) != 1:
         _input = _input.contiguous()
@@ -68,9 +70,13 @@ def cross_entropy_forward(
         m_d_X_y_stride=m_d_X_y.stride(-1),
         rank=rank,
         n_cols=V,
+        ignore_idx=ignore_idx,
+        n_non_ignore=n_non_ignore,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=NUM_WARPS,
     )
+
+    n_non_ignore = torch.clamp(n_non_ignore, min=1)
 
     world_size = 1 if dist_process_group is None else dist.get_world_size(dist_process_group)
 
@@ -95,14 +101,17 @@ def cross_entropy_forward(
         world_size=world_size,
         ignore_idx=ignore_idx,
         n_cols=V,
-        n_non_ignore=n_rows,
+        n_rows=n_rows,
+        n_non_ignore=n_non_ignore,
         reduce_loss=reduce_loss,
         label_smoothing=label_smoothing,
         BLOCK_SIZE=BLOCK_SIZE,
         num_warps=NUM_WARPS,
     )
 
-    loss = torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / n_rows)
+    loss = (
+        torch.reshape(loss_1d, (B, SQ)) if not reduce_loss else (torch.sum(loss_1d) / n_non_ignore)
+    )
 
     return loss, _input
 
@@ -126,7 +135,7 @@ def cross_entropy_backward(
         element_mul_kernel[(n_rows,)](
             _input,
             _input.stride(-2),
-            grad_output,
+            grad_output.contiguous(),
             1 if grad_output.numel() > 1 else 0,
             V,
             BLOCK_SIZE=BLOCK_SIZE,
