@@ -1136,6 +1136,12 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigUseFastMath:
       bool_to_uint8(config_.use_fast_math, buf);
       break;
+    case kNVTEQuantizationConfigMXFP4UseHadamard:
+      bool_to_uint8(config_.mxfp4_use_hadamard, buf);
+      break;
+    case kNVTEQuantizationConfigMXFP4Shuffle:
+      bool_to_uint8(config_.mxfp4_shuffle, buf);
+      break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -1190,6 +1196,12 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigUseFastMath:
       uint8_to_bool(buf, config_.use_fast_math);
+      break;
+    case kNVTEQuantizationConfigMXFP4UseHadamard:
+      uint8_to_bool(buf, config_.mxfp4_use_hadamard);
+      break;
+    case kNVTEQuantizationConfigMXFP4Shuffle:
+      uint8_to_bool(buf, config_.mxfp4_shuffle);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
