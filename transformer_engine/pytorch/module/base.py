@@ -32,6 +32,7 @@ from ..quantization import (
     DelayedScalingRecipeState,
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
+    MXFP4BlockScalingRecipeState,
     NVFP4BlockScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
@@ -797,6 +798,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if recipe.float8_block_scaling() and isinstance(
                 recipe_state, Float8BlockScalingRecipeState
             ):
+                return
+            if recipe.mxfp4() and isinstance(recipe_state, MXFP4BlockScalingRecipeState):
                 return
             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return

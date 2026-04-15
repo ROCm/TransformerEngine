@@ -136,6 +136,7 @@ def _get_act_func_supported_list(recipe: Optional[Recipe] = None):
     if (
         recipe.float8_current_scaling()
         or recipe.float8_block_scaling()
+        or recipe.mxfp4()
         or recipe.nvfp4()
         or recipe.custom()
     ):

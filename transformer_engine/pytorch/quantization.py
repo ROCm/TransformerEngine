@@ -25,6 +25,7 @@ from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     Float8CurrentScaling,
     Float8BlockScaling,
+    MXFP4BlockScaling,
     NVFP4BlockScaling,
     CustomRecipe,
 )
@@ -94,18 +95,15 @@ def check_nvfp4_support() -> Tuple[bool, str]:
         return True, ""
     return False, "Device compute capability 10.0 or higher required for NVFP4 execution."
 
-
 @functools.lru_cache(maxsize=None)
-def check_fp8_block_scaling_support() -> Tuple[bool, str]:
-    """Return if fp8 block scaling support is available"""
+def check_mxfp4_support() -> Tuple[bool, str]:
+    """Return if mxfp4 support is available"""
     if IS_HIP_EXTENSION:
-        return False, "FP8 block scaled gemm not yet supported for ROCm"
-    if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
-        return True, ""
-    return (
-        False,
-        "FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9.",
-    )
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch == (9, 5):
+            return True, ""
+        return False, "Gfx95x is required for MXFP4 execution."
+    return False, "Only ROCm gfx950 supports MXFP4"
 
 
 def check_recipe_support(recipe: Recipe) -> None:
@@ -118,6 +116,8 @@ def check_recipe_support(recipe: Recipe) -> None:
         recipe_supported, unsupported_reason = check_fp8_block_scaling_support()
     elif isinstance(recipe, MXFP8BlockScaling):
         recipe_supported, unsupported_reason = check_mxfp8_support()
+    elif isinstance(recipe, MXFP4BlockScaling):
+        recipe_supported, unsupported_reason = check_mxfp4_support()
     assert recipe_supported, unsupported_reason
 
 
@@ -149,6 +149,8 @@ def get_align_size_for_quantization(recipe: Recipe) -> int:
         return 32
     if recipe.nvfp4():
         return 128
+    if recipe.mxfp4():
+        return 256
     return 16
 
 
@@ -258,6 +260,21 @@ def is_nvfp4_available(return_reason: bool = False) -> Union[bool, Tuple[bool, s
         return check_nvfp4_support()
     return check_nvfp4_support()[0]
 
+def is_mxfp4_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
+    """
+    Determine if support is available for the MXFP4 recipe.
+
+    Parameters
+    ----------
+    return_reason : bool, optional
+        If ``False`` (default), return only a boolean indicating availability.
+        If ``True``, return a tuple ``(is_available, reason)`` where ``reason`` provides
+        a human-readable explanation when required support is not available. The reason
+        will be an empty string if support for MXFP4 is available.
+    """
+    if return_reason:
+        return check_mxfp4_support()
+    return check_mxfp4_support()[0]
 
 class FP8GlobalStateManager:
     """Class to keep track of and manipulate the global
@@ -345,6 +362,11 @@ class FP8GlobalStateManager:
     def is_nvfp4_available(cls) -> Tuple[bool, str]:
         """Return if NVFP4 support is available."""
         return check_nvfp4_support()
+
+    @classmethod
+    def is_mxfp4_available(cls) -> Tuple[bool, str]:
+        """Return if MXFP4 support is available."""
+        return check_mxfp4_support()
 
     @staticmethod
     def get_meta_tensor_key(forward: bool = True) -> str:
@@ -1051,6 +1073,8 @@ class RecipeState(abc.ABC):
             cls = Float8CurrentScalingRecipeState
         elif recipe.float8_block_scaling():
             cls = Float8BlockScalingRecipeState
+        elif recipe.mxfp4():
+            cls = MXFP4BlockScalingRecipeState
         elif recipe.nvfp4():
             cls = NVFP4BlockScalingRecipeState
         elif recipe.custom():
@@ -1304,6 +1328,68 @@ class Float8BlockScalingRecipeState(RecipeState):
                 ]
             )
         )
+
+
+class MXFP4BlockScalingRecipeState(RecipeState):
+    """Configuration for MXFP4 quantization.
+
+    MXFP4 quantization does not require persistent scaling state beyond
+    the quantizer configuration (per-block scales are computed at cast time).
+
+    """
+
+    recipe: MXFP4BlockScaling
+    mode: str
+    dtype: tex.DType
+
+    def __init__(
+        self,
+        recipe: MXFP4BlockScaling,
+        *,
+        mode: str,
+        num_quantizers: int = 1,
+        device: Optional[torch.device] = None,
+    ) -> None:
+        self.recipe = recipe
+        self.mode = mode
+        self.num_quantizers = num_quantizers
+        self.dtype = get_fp4_te_dtype(recipe)
+
+        if device is None:
+            device = torch.device("cuda")
+
+    def make_quantizers(self) -> list:
+        from .tensor.mxfp4_tensor import MXFP4Quantizer
+
+        use_hadamard = self.recipe.use_hadamard
+
+        if self.mode == "forward":
+
+            def _make_quantizer(idx: int):
+                is_weight = idx % 3 == 1
+                return MXFP4Quantizer(
+                    fp4_dtype=self.dtype,
+                    rowwise=True,
+                    columnwise=is_weight,
+                    shuffle_B_matrix_for_aiter=is_weight,
+                    use_hadamard=use_hadamard,
+                )
+
+            return [_make_quantizer(idx) for idx in range(self.num_quantizers)]
+
+        if self.mode == "backward":
+            return [
+                MXFP4Quantizer(
+                    fp4_dtype=self.dtype,
+                    rowwise=True,
+                    columnwise=False,
+                    shuffle_B_matrix_for_aiter=False,
+                    use_hadamard=use_hadamard,
+                )
+                for _ in range(self.num_quantizers)
+            ]
+
+        raise RuntimeError(f"Unexpected recipe mode ({self.mode})")
 
 
 class NVFP4BlockScalingRecipeState(RecipeState):

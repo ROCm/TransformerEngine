@@ -66,6 +66,7 @@ fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
 mxfp8_available, reason_for_no_mxfp8 = is_mxfp8_available(return_reason=True)
 fp8_block_scaling_available = is_fp8_block_scaling_available()
 nvfp4_available = is_nvfp4_available()
+mxfp4_available, reason_for_no_mxfp4 = is_mxfp4_available(return_reason=True)
 
 sm_80plus = get_device_compute_capability() >= (8, 0)
 
@@ -185,6 +186,8 @@ if fp8_available:
     fp8_recipes.append(recipe.DelayedScaling())
 if nvfp4_available:
     fp8_recipes.append(nvfp4_rht_and_2d_quantization())
+if mxfp4_available:
+    fp8_recipes.append(recipe.MXFP4BlockScaling())
 
 use_cutlass_grouped_gemm = [False]
 # Only enable cutlass grouped gemm on Hopper
