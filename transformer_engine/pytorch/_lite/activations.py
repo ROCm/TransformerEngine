@@ -7,8 +7,10 @@
 
 When AITER is available, gated activations (swiglu, geglu) use AITER's
 fused kernels (silu_and_mul, gelu_tanh_and_mul) which combine
-chunk + activation + gate multiply in a single kernel. Non-gated
-activations use PyTorch ops. Quantization is always a separate step.
+chunk + activation + gate multiply in a single kernel. For block-scaled
+FP8 quantization, AITER's act_mul_and_fp8_group_quant fuses activation +
+gate multiply + FP8 cast in a single kernel, eliminating the intermediate
+bf16 round-trip.
 """
 
 import torch
@@ -16,6 +18,101 @@ import torch.nn.functional as F
 import math
 
 from .aiter_utils import is_aiter_available, get_aiter
+
+
+# Lazy-loaded references to avoid circular imports
+_Float8BlockQuantizer = None
+_Float8BlockwiseQTensorStorage = None
+_Float8BlockScaleTensorFormat = None
+_aiter_act_mul_fp8_group_quant = None
+_fused_act_quant_loaded = False
+
+
+def _try_load_fused_act_quant():
+    """Lazy-load Float8Block types and AITER fused act+quant kernel."""
+    global _Float8BlockQuantizer, _Float8BlockwiseQTensorStorage
+    global _Float8BlockScaleTensorFormat, _aiter_act_mul_fp8_group_quant
+    global _fused_act_quant_loaded
+
+    if _fused_act_quant_loaded:
+        return
+    _fused_act_quant_loaded = True
+
+    try:
+        from transformer_engine.pytorch.tensor.float8_blockwise_tensor import (
+            Float8BlockQuantizer,
+        )
+        from transformer_engine.pytorch.tensor.storage.float8_blockwise_tensor_storage import (
+            Float8BlockwiseQTensorStorage,
+        )
+        from .enums import Float8BlockScaleTensorFormat
+        _Float8BlockQuantizer = Float8BlockQuantizer
+        _Float8BlockwiseQTensorStorage = Float8BlockwiseQTensorStorage
+        _Float8BlockScaleTensorFormat = Float8BlockScaleTensorFormat
+    except ImportError:
+        pass
+
+    if is_aiter_available():
+        try:
+            from aiter.ops.triton.activation import act_mul_and_fp8_group_quant
+            _aiter_act_mul_fp8_group_quant = act_mul_and_fp8_group_quant
+        except ImportError:
+            pass
+
+
+# Map TE activation names → AITER activation strings for fused act+quant
+_AITER_ACT_QUANT_MAP = {
+    "swiglu": "silu",
+    "geglu": "gelu_tanh",
+    "reglu": "relu",
+}
+
+
+def _aiter_fused_gated_act_quant(input, activation, quantizer):
+    """Try AITER fused gated activation + block FP8 quantize.
+
+    Returns the quantized tensor, or None if the fused path isn't available
+    (wrong quantizer type, AITER not installed, etc.).
+    """
+    _try_load_fused_act_quant()
+
+    if _aiter_act_mul_fp8_group_quant is None or _Float8BlockQuantizer is None:
+        return None
+    if not isinstance(quantizer, _Float8BlockQuantizer):
+        return None
+
+    aiter_act = _AITER_ACT_QUANT_MAP.get(activation)
+    if aiter_act is None:
+        return None
+
+    # Flatten to 2D for AITER kernel
+    orig_shape = input.shape
+    input_2d = input.reshape(-1, input.shape[-1])
+
+    try:
+        fp8_data, scale_inv = _aiter_act_mul_fp8_group_quant(
+            input_2d, aiter_act, group_size=quantizer.block_len,
+        )
+    except (RuntimeError, TypeError):
+        return None
+
+    # Reshape fp8_data back to original leading dims
+    half_size = input.shape[-1] // 2
+    out_shape = orig_shape[:-1] + (half_size,)
+    fp8_data = fp8_data.reshape(out_shape) if fp8_data.shape != out_shape else fp8_data
+
+    # Wrap in Float8BlockwiseQTensorStorage
+    result = _Float8BlockwiseQTensorStorage(
+        rowwise_data=fp8_data.view(torch.uint8),
+        rowwise_scale_inv=scale_inv,
+        columnwise_data=None,
+        columnwise_scale_inv=None,
+        fp8_dtype=quantizer.dtype,
+        quantizer=quantizer,
+        is_2D_scaled=False,
+        data_format=_Float8BlockScaleTensorFormat.COMPACT,
+    )
+    return result
 
 
 def _apply_quantizer(output, quantizer):
@@ -59,6 +156,10 @@ def gelu(input, quantizer):
 
 def geglu(input, quantizer):
     """GeGLU: split input in half, apply GELU to first, multiply by second."""
+    # Try fused gated act + block FP8 quantize (single kernel)
+    fused = _aiter_fused_gated_act_quant(input, "geglu", quantizer)
+    if fused is not None:
+        return fused
     if is_aiter_available():
         result = _aiter_gated_act(input, 'gelu_tanh_and_mul')
         if result is not None:
@@ -89,6 +190,9 @@ def relu(input, quantizer):
 
 def reglu(input, quantizer):
     """ReGLU: gated variant of ReLU."""
+    fused = _aiter_fused_gated_act_quant(input, "reglu", quantizer)
+    if fused is not None:
+        return fused
     chunks = input.chunk(2, dim=-1)
     out = F.relu(chunks[0]) * chunks[1]
     return _apply_quantizer(out, quantizer)
@@ -115,6 +219,9 @@ def silu(input, quantizer):
 
 def swiglu(input, quantizer):
     """SwiGLU: gated variant of SiLU."""
+    fused = _aiter_fused_gated_act_quant(input, "swiglu", quantizer)
+    if fused is not None:
+        return fused
     if is_aiter_available():
         result = _aiter_gated_act(input, 'silu_and_mul')
         if result is not None:
