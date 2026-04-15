@@ -57,6 +57,11 @@ def e8m0_to_float(scales_u8: torch.Tensor) -> torch.Tensor:
     return torch.pow(2.0, scales_u8.to(torch.float32) - 127.0)
 
 
+def _round_up(x: int, multiple: int) -> int:
+    """Round *x* up to the nearest multiple of *multiple*."""
+    return ((x + multiple - 1) // multiple) * multiple
+
+
 def _shuffle_scales(scales: torch.Tensor) -> torch.Tensor:
     """Shuffle E8M0 scales into the layout expected by AITER GEMM kernels."""
     sm, sn = scales.shape
@@ -272,19 +277,21 @@ class MXFP4QuantizerRef(Quantizer):
         fp4_packed = ((fp4_flat[:, 1::2] << 4) | fp4_flat[:, 0::2]).astype(np.uint8)
 
         fp4_packed_torch = torch.from_numpy(fp4_packed).to(tensor.device)
-        scales_torch = torch.from_numpy(scales).to(tensor.device)
+        scales_valid = torch.from_numpy(scales).to(tensor.device)
+
+        # Pad scales to match native allocator layout (multiples of 256 x 8)
+        num_scale_rows = M
+        num_scale_cols = N // MXFP4_BLOCK_SIZE
+        padded_rows = _round_up(num_scale_rows, 256)
+        padded_cols = _round_up(num_scale_cols, 8)
+        scales_torch = torch.zeros(
+            padded_rows, padded_cols, dtype=torch.uint8, device=tensor.device,
+        )
+        scales_torch[:num_scale_rows, :num_scale_cols] = scales_valid
 
         if self.shuffle_B_matrix_for_aiter:
-            scaleM = (M + 255) // 256 * 256
-            scaleN_valid = (N + 31) // 32
-            scaleN = (scaleN_valid + 7) // 8 * 8
-            scales_pad = torch.empty(
-                (scaleM, scaleN), dtype=scales_torch.dtype, device=scales_torch.device,
-            )
-            scales_pad[:M, :scaleN_valid] = scales_torch[:M, :scaleN_valid]
-            scales_pad = _shuffle_scales(scales_pad)
-            scales_pad = scales_pad.view(scales_pad.shape[0] * 32, -1)
-            scales_torch = scales_pad
+            scales_torch = _shuffle_scales(scales_torch)
+            scales_torch = scales_torch.view(scales_torch.shape[0] * 32, -1)
 
         return fp4_packed_torch, scales_torch
 
@@ -299,14 +306,15 @@ class MXFP4QuantizerRef(Quantizer):
         Parameters
         ----------
         fp4_packed : torch.Tensor  uint8 (M, N/2)
-        scales     : torch.Tensor  uint8 (M, N/32)
+        scales     : torch.Tensor  uint8 — may be padded; only ``[:M, :N//32]`` is used.
         """
         packed = fp4_packed.cpu().numpy().astype(np.uint8)
-        scales_np = scales.cpu().numpy().astype(np.uint8)
 
         M, halfN = packed.shape
         N = halfN * 2
         num_blocks = N // MXFP4_BLOCK_SIZE
+
+        scales_np = scales[:M, :num_blocks].cpu().numpy().astype(np.uint8)
 
         fp4_even = packed & 0x0F
         fp4_odd = (packed >> 4) & 0x0F
@@ -401,15 +409,17 @@ class MXFP4QuantizerRef(Quantizer):
         hp_x = unpack_fp4x2(qx, torch.float32)
         hp_w = unpack_fp4x2(qw, torch.float32)
 
-        sx_f = e8m0_to_float(sx)
-        sw_f = e8m0_to_float(sw)
-
         M, K = hp_x.shape
         N, K_w = hp_w.shape
         assert K == K_w
         assert K % MXFP4_BLOCK_SIZE == 0
 
         grid_k = K // MXFP4_BLOCK_SIZE
+
+        # Scales may be padded; slice to valid region
+        sx_f = e8m0_to_float(sx[:M, :grid_k])
+        sw_f = e8m0_to_float(sw[:N, :grid_k])
+
         y = torch.zeros(M, N, dtype=torch.float32, device=qx.device)
 
         for k in range(grid_k):
