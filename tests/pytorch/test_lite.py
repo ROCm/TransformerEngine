@@ -160,7 +160,6 @@ class TestBackward:
         y.sum().backward()
         assert x.grad is not None
 
-    @pytest.mark.xfail(reason="TransformerLayer backward has autograd Variable issue with fc2_bias (Phase 1)")
     def test_transformer_layer(self, device):
         mod = te.TransformerLayer(1024, 4096, 16).to(
             dtype=torch.bfloat16, device=device

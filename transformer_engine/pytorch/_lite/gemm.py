@@ -433,6 +433,15 @@ def generic_gemm(A, transA, B, transB, D, quantizer, output_dtype,
     #   A=[out,in] weight -> a.t()=[in,out], B=[batch,in] -> b as-is
     #   result = b @ a.t() = [batch,in] @ [in,out] = [batch,out]
 
+    # cuBLAS GEMM treats N-D tensors as batched 2D: leading dims of B are
+    # preserved in the output.  torch.matmul with 2D operands doesn't do
+    # this, so we flatten to 2D, matmul, then restore B's leading dims.
+    b_leading = b.shape[:-1]  # leading dims of B (before transpose)
+    if a.dim() > 2:
+        a = a.reshape(-1, a.shape[-1])
+    if b.dim() > 2:
+        b = b.reshape(-1, b.shape[-1])
+
     if transA:
         a = a.t()
     if transB:
@@ -448,6 +457,10 @@ def generic_gemm(A, transA, B, transB, D, quantizer, output_dtype,
     b = b.to(compute_dtype)
 
     result = torch.matmul(b, a)
+
+    # Restore B's leading dimensions in the output (cuBLAS convention)
+    if len(b_leading) > 1:
+        result = result.view(*b_leading, result.shape[-1])
 
     if alpha != 1.0:
         result = result * alpha
