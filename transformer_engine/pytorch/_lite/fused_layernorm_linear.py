@@ -57,6 +57,8 @@ class _LayerNormLinearLite(torch.autograd.Function):
         input_quantizer: Optional[Quantizer],
         weight_quantizer: Optional[Quantizer],
         grad_output_quantizer: Optional[Quantizer],
+        grad_input_quantizer: Optional[Quantizer],
+        grad_weight_quantizer: Optional[Quantizer],
         activation_dtype: torch.dtype,
         return_layernorm_output: bool,
         normalization: str,
@@ -177,6 +179,8 @@ class _LayerNormLinearLite(torch.autograd.Function):
             ctx.input_quantizer = input_quantizer
             ctx.weight_quantizer = weight_quantizer
             ctx.grad_output_quantizer = grad_output_quantizer
+            ctx.grad_input_quantizer = grad_input_quantizer
+            ctx.grad_weight_quantizer = grad_weight_quantizer
             ctx.return_layernorm_output = return_layernorm_output
 
         if return_layernorm_output:
@@ -209,17 +213,23 @@ class _LayerNormLinearLite(torch.autograd.Function):
             ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
             grad_output = ctx.grad_output_quantizer(grad_output)
 
-        # ---- DGRAD: d_ln_out = grad_output @ weight ----
+        # ---- DGRAD: d_ln_out = grad_output @ weight (NN layout) ----
         d_ln_out = None
         if ctx.requires_dgrad:
+            # Configure grad_input quantizer for dgrad output
+            dgrad_quantizer = None
+            if ctx.fp8 and ctx.grad_input_quantizer is not None:
+                ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
+                dgrad_quantizer = ctx.grad_input_quantizer
+
             bias_dtype = TE_DType[torch.bfloat16]
             d_ln_out, _, _, _ = tex.generic_gemm(
                 weightmat,       # A (weight)
-                False,           # transA=False → weight^T effect via NN layout
+                False,           # transA=False (NN layout)
                 grad_output,     # B
                 False,           # transB
                 None,            # D
-                None,            # quantizer
+                dgrad_quantizer, # quantizer — FP8 dgrad output
                 TE_DType[ctx.activation_dtype] if ctx.activation_dtype in TE_DType else None,
                 None,            # bias
                 bias_dtype,      # bias_type
@@ -236,6 +246,22 @@ class _LayerNormLinearLite(torch.autograd.Function):
         dweight = None
         dbias = None
         if ctx.requires_wgrad:
+            # Re-quantize ln_out with columnwise usage for NT wgrad GEMM
+            if ctx.fp8 and ctx.input_quantizer is not None:
+                if isinstance(ln_out, QuantizedTensorStorage):
+                    ln_out.update_usage(columnwise_usage=True)
+                else:
+                    ctx.input_quantizer.set_usage(rowwise=False, columnwise=True)
+                    ln_out = ctx.input_quantizer(ln_out)
+
+            # Configure grad_output with columnwise usage for wgrad
+            if ctx.fp8 and ctx.grad_output_quantizer is not None:
+                if isinstance(grad_output, QuantizedTensorStorage):
+                    grad_output.update_usage(columnwise_usage=True)
+                else:
+                    ctx.grad_output_quantizer.set_usage(rowwise=False, columnwise=True)
+                    grad_output = ctx.grad_output_quantizer(grad_output)
+
             bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
             dweight, dbias_gemm, _, _ = tex.generic_gemm(
                 ln_out,          # A (input for wgrad)
@@ -243,7 +269,7 @@ class _LayerNormLinearLite(torch.autograd.Function):
                 grad_output,     # B (grad output)
                 True,            # transB (T) → NT layout
                 None,            # D
-                None,            # quantizer
+                ctx.grad_weight_quantizer,  # quantizer — FP8 wgrad output
                 TE_DType[ctx.activation_dtype] if ctx.activation_dtype in TE_DType else None,
                 bias if ctx.use_bias else None,  # bias (for grad computation)
                 bias_dtype,      # bias_type
@@ -291,6 +317,8 @@ class _LayerNormLinearLite(torch.autograd.Function):
             None,            # input_quantizer
             None,            # weight_quantizer
             None,            # grad_output_quantizer
+            None,            # grad_input_quantizer
+            None,            # grad_weight_quantizer
             None,            # activation_dtype
             None,            # return_layernorm_output
             None,            # normalization
@@ -441,15 +469,21 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
     def _get_quantizers(self, fp8_output: bool = False):
         if not self.fp8:
-            return (None, None, None)
+            return (None, None, None, None, None)
         input_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         input_quantizer.internal = True
         (weight_quantizer,) = self._get_weight_quantizers()
         grad_output_quantizer = None
+        grad_input_quantizer = None
+        grad_weight_quantizer = None
         if torch.is_grad_enabled():
             grad_output_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
             grad_output_quantizer.internal = True
-        return (input_quantizer, weight_quantizer, grad_output_quantizer)
+            grad_input_quantizer = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
+        return (
+            input_quantizer, weight_quantizer,
+            grad_output_quantizer, grad_input_quantizer, grad_weight_quantizer,
+        )
 
     def set_meta_tensor(self, fwd: bool, recipe) -> None:
         super().set_meta_tensor(fwd, recipe)
@@ -483,6 +517,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 input_quantizer,
                 weight_quantizer,
                 grad_output_quantizer,
+                grad_input_quantizer,
+                grad_weight_quantizer,
             ) = self._get_quantizers()
 
             out = _LayerNormLinearLite.apply(
@@ -496,6 +532,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 input_quantizer,
                 weight_quantizer,
                 grad_output_quantizer,
+                grad_input_quantizer,
+                grad_weight_quantizer,
                 self.activation_dtype,
                 self.return_layernorm_output,
                 self.normalization,

@@ -54,7 +54,7 @@ _ACT_FUNC_MAP = {
 }
 
 
-def _gemm(A, transA, B, transB, bias, grad, quantizer=None, output_dtype=None,
+def _gemm(A, transA, B, transB, bias, grad, quantizer=None, output_dtype=None,  # noqa: E501
           gelu=False, gelu_in=None, accumulate=False):
     """Thin wrapper around _lite generic_gemm with sane defaults."""
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
@@ -94,7 +94,10 @@ class _LayerNormMLPLite(torch.autograd.Function):
         fc1_weight_quantizer: Optional[Quantizer],
         fc2_input_quantizer: Optional[Quantizer],
         fc2_weight_quantizer: Optional[Quantizer],
-        grad_output_quantizer: Optional[Quantizer],
+        fc2_grad_output_quantizer: Optional[Quantizer],
+        fc1_grad_output_quantizer: Optional[Quantizer],
+        fc1_grad_input_quantizer: Optional[Quantizer],
+        fc1_grad_weight_quantizer: Optional[Quantizer],
         activation_dtype: torch.dtype,
         return_layernorm_output: bool,
         normalization: str,
@@ -229,7 +232,10 @@ class _LayerNormMLPLite(torch.autograd.Function):
             ctx.requires_wgrad = fc1_weight.requires_grad
             ctx.fc1_input_quantizer = fc1_input_quantizer
             ctx.fc2_input_quantizer = fc2_input_quantizer
-            ctx.grad_output_quantizer = grad_output_quantizer
+            ctx.fc2_grad_output_quantizer = fc2_grad_output_quantizer
+            ctx.fc1_grad_output_quantizer = fc1_grad_output_quantizer
+            ctx.fc1_grad_input_quantizer = fc1_grad_input_quantizer
+            ctx.fc1_grad_weight_quantizer = fc1_grad_weight_quantizer
             ctx.return_layernorm_output = return_layernorm_output
 
         if return_layernorm_output:
@@ -260,10 +266,10 @@ class _LayerNormMLPLite(torch.autograd.Function):
         grad_output = grad_output.reshape(-1, hidden_size)
         grad_output = cast_if_needed(grad_output, ctx.activation_dtype)
 
-        # Quantize grad_output for FP8
-        if ctx.fp8 and ctx.grad_output_quantizer is not None:
-            ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
-            grad_output = ctx.grad_output_quantizer(grad_output)
+        # Quantize grad_output for FP8 (rowwise for FC2 dgrad, columnwise for FC2 wgrad)
+        if ctx.fp8 and ctx.fc2_grad_output_quantizer is not None:
+            ctx.fc2_grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+            grad_output = ctx.fc2_grad_output_quantizer(grad_output)
 
         # ---- FC2 DGRAD: d_act = grad_output @ fc2_weight ----
         d_act, _, _, _ = _gemm(
@@ -275,6 +281,19 @@ class _LayerNormMLPLite(torch.autograd.Function):
         dfc2_weight = None
         dfc2_bias = None
         if ctx.requires_wgrad:
+            # Re-quantize act_out with columnwise usage for NT wgrad GEMM
+            if ctx.fp8 and ctx.fc2_input_quantizer is not None:
+                if isinstance(act_out, QuantizedTensorStorage):
+                    act_out.update_usage(columnwise_usage=True)
+                else:
+                    ctx.fc2_input_quantizer.set_usage(rowwise=False, columnwise=True)
+                    act_out = ctx.fc2_input_quantizer(act_out)
+
+            # Ensure grad_output has columnwise usage for wgrad
+            if ctx.fp8 and ctx.fc2_grad_output_quantizer is not None:
+                if isinstance(grad_output, QuantizedTensorStorage):
+                    grad_output.update_usage(columnwise_usage=True)
+
             dfc2_weight, dfc2_bias_grad, _, _ = _gemm(
                 act_out, False, grad_output, True,
                 bias=fc2_bias if ctx.use_fc2_bias else None,
@@ -294,20 +313,45 @@ class _LayerNormMLPLite(torch.autograd.Function):
             if ctx.use_fc1_bias:
                 dfc1_bias = dfc1_out.reshape(-1, dfc1_out.shape[-1]).sum(dim=0)
 
+        # Quantize dfc1_out (fc1_grad_output) for FC1 GEMMs
+        if ctx.fp8 and ctx.fc1_grad_output_quantizer is not None:
+            ctx.fc1_grad_output_quantizer.set_usage(rowwise=True, columnwise=True)
+            dfc1_out = ctx.fc1_grad_output_quantizer(dfc1_out)
+
         # ---- FC1 DGRAD: d_ln_out = dfc1_out @ fc1_weight ----
         d_ln_out = None
         if ctx.requires_dgrad:
+            # Quantize FC1 dgrad output
+            dgrad_quantizer = None
+            if ctx.fp8 and ctx.fc1_grad_input_quantizer is not None:
+                ctx.fc1_grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
+                dgrad_quantizer = ctx.fc1_grad_input_quantizer
+
             d_ln_out, _, _, _ = _gemm(
                 fc1_weightmat, False, dfc1_out, False,
-                bias=None, grad=False, output_dtype=out_dtype,
+                bias=None, grad=False, quantizer=dgrad_quantizer, output_dtype=out_dtype,
             )
 
         # ---- FC1 WGRAD: dW1 = dfc1_out^T @ ln_out (NT layout) ----
         dfc1_weight = None
         if ctx.requires_wgrad:
+            # Re-quantize ln_out with columnwise usage for NT wgrad GEMM
+            if ctx.fp8 and ctx.fc1_input_quantizer is not None:
+                if isinstance(ln_out, QuantizedTensorStorage):
+                    ln_out.update_usage(columnwise_usage=True)
+                else:
+                    ctx.fc1_input_quantizer.set_usage(rowwise=False, columnwise=True)
+                    ln_out = ctx.fc1_input_quantizer(ln_out)
+
+            # Ensure dfc1_out has columnwise usage for wgrad
+            if ctx.fp8 and ctx.fc1_grad_output_quantizer is not None:
+                if isinstance(dfc1_out, QuantizedTensorStorage):
+                    dfc1_out.update_usage(columnwise_usage=True)
+
             dfc1_weight, _, _, _ = _gemm(
                 ln_out, False, dfc1_out, True,
-                bias=None, grad=False, output_dtype=out_dtype,
+                bias=None, grad=False, quantizer=ctx.fc1_grad_weight_quantizer,
+                output_dtype=out_dtype,
             )
 
         # ---- Norm backward ----
@@ -343,7 +387,10 @@ class _LayerNormMLPLite(torch.autograd.Function):
             None,             # fc1_weight_quantizer
             None,             # fc2_input_quantizer
             None,             # fc2_weight_quantizer
-            None,             # grad_output_quantizer
+            None,             # fc2_grad_output_quantizer
+            None,             # fc1_grad_output_quantizer
+            None,             # fc1_grad_input_quantizer
+            None,             # fc1_grad_weight_quantizer
             None,             # activation_dtype
             None,             # return_layernorm_output
             None,             # normalization
@@ -534,17 +581,27 @@ class LayerNormMLP(TransformerEngineBaseModule):
 
     def _get_quantizers(self):
         if not self.fp8:
-            return [None] * 5
+            return (None,) * 8
         fc1_input_q = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_INPUT]
         fc1_input_q.internal = True
         fc1_weight_q, fc2_weight_q = self._get_weight_quantizers()
         fc2_input_q = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM2_INPUT]
         fc2_input_q.internal = True
-        grad_output_q = None
+        # Backward quantizers
+        fc2_grad_output_q = None
+        fc1_grad_output_q = None
+        fc1_grad_input_q = None
         if torch.is_grad_enabled():
-            grad_output_q = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
-            grad_output_q.internal = True
-        return (fc1_input_q, fc1_weight_q, fc2_input_q, fc2_weight_q, grad_output_q)
+            fc2_grad_output_q = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT2]
+            fc2_grad_output_q.internal = True
+            fc1_grad_output_q = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_OUTPUT1]
+            fc1_grad_output_q.internal = True
+            fc1_grad_input_q = self.quantizers["scaling_bwd"][tex.FP8BwdTensors.GRAD_INPUT1]
+        return (
+            fc1_input_q, fc1_weight_q, fc2_input_q, fc2_weight_q,
+            fc2_grad_output_q, fc1_grad_output_q, fc1_grad_input_q,
+            None,  # fc1_grad_weight_q (not used in full build either)
+        )
 
     def set_meta_tensor(self, fwd: bool, recipe) -> None:
         super().set_meta_tensor(fwd, recipe)
@@ -578,7 +635,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
             (
                 fc1_input_q, fc1_weight_q,
                 fc2_input_q, fc2_weight_q,
-                grad_output_q,
+                fc2_grad_output_q, fc1_grad_output_q,
+                fc1_grad_input_q, fc1_grad_weight_q,
             ) = self._get_quantizers()
 
             out = _LayerNormMLPLite.apply(
@@ -595,7 +653,10 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 fc1_weight_q,
                 fc2_input_q,
                 fc2_weight_q,
-                grad_output_q,
+                fc2_grad_output_q,
+                fc1_grad_output_q,
+                fc1_grad_input_q,
+                fc1_grad_weight_q,
                 self.activation_dtype,
                 self.return_layernorm_output,
                 self.normalization,
