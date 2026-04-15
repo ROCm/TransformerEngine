@@ -369,8 +369,11 @@ def test_quantization_noncontiguous_inputs(
     qx_contig = result_contig._rowwise_data.view(dtype=torch.uint8)
     torch.testing.assert_close(qx, qx_contig, atol=0, rtol=0)
 
-    sx = result._rowwise_scale_inv
-    sx_contig = result_contig._rowwise_scale_inv
+    sx = result._rowwise_scale_inv.view(torch.uint8)
+    sx_contig = result_contig._rowwise_scale_inv.view(torch.uint8)
+    if shuffle_scales:
+        sx = un_shuffle_scales(sx.view(sx.shape[0] // 32, -1))
+        sx_contig = un_shuffle_scales(sx_contig.view(sx_contig.shape[0] // 32, -1))
     num_scale_cols = N // BLOCK_SIZE
     torch.testing.assert_close(
         sx[:M, :num_scale_cols], sx_contig[:M, :num_scale_cols], atol=0, rtol=0
