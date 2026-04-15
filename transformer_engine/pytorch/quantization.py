@@ -1384,8 +1384,9 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                 return MXFP4Quantizer(
                     fp4_dtype=self.dtype,
                     rowwise=True,
-                    columnwise=is_weight,
+                    columnwise=True,
                     shuffle_B_matrix_for_aiter=is_weight,
+                    shuffle_scales=True,
                     use_hadamard=use_hadamard,
                 )
 
@@ -1396,8 +1397,9 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                 MXFP4Quantizer(
                     fp4_dtype=self.dtype,
                     rowwise=True,
-                    columnwise=False,
+                    columnwise=True,
                     shuffle_B_matrix_for_aiter=False,
+                    shuffle_scales=True,
                     use_hadamard=use_hadamard,
                 )
                 for _ in range(self.num_quantizers)

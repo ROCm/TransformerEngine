@@ -36,7 +36,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
   bool use_colwise = output->has_columnwise_data();
 
   bool use_hadamard = quant_config.mxfp4_use_hadamard;
-  bool do_shuffle = quant_config.mxfp4_shuffle;
+  bool scale_shuffle = quant_config.mxfp4_scale_shuffle;
+  bool data_shuffle = quant_config.mxfp4_data_shuffle;
 
   auto cdiv = [](int a, int b) { return (a + b - 1) / b; };
   auto rup = [](int a, int b) { return ((a + b - 1) / b) * b; };
@@ -72,10 +73,10 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
       use_colwise ? output->columnwise_scale_inv.dptr : nullptr,
       M, N,
       use_rowwise, use_colwise,
-      do_shuffle,
+      scale_shuffle,
       use_hadamard,
-      do_shuffle,
-      do_shuffle,
+      data_shuffle,
+      data_shuffle,
       rowwise_scale_stride, colwise_scale_stride,
       rowwise_scale_N, rowwise_scale_M_pad, rowwise_scale_N_pad,
       colwise_scale_M, colwise_scale_N,

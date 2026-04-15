@@ -1139,8 +1139,11 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigMXFP4UseHadamard:
       bool_to_uint8(config_.mxfp4_use_hadamard, buf);
       break;
-    case kNVTEQuantizationConfigMXFP4Shuffle:
-      bool_to_uint8(config_.mxfp4_shuffle, buf);
+    case kNVTEQuantizationConfigMXFP4ScaleShuffle:
+      bool_to_uint8(config_.mxfp4_scale_shuffle, buf);
+      break;
+    case kNVTEQuantizationConfigMXFP4DataShuffle:
+      bool_to_uint8(config_.mxfp4_data_shuffle, buf);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
@@ -1200,8 +1203,11 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigMXFP4UseHadamard:
       uint8_to_bool(buf, config_.mxfp4_use_hadamard);
       break;
-    case kNVTEQuantizationConfigMXFP4Shuffle:
-      uint8_to_bool(buf, config_.mxfp4_shuffle);
+    case kNVTEQuantizationConfigMXFP4ScaleShuffle:
+      uint8_to_bool(buf, config_.mxfp4_scale_shuffle);
+      break;
+    case kNVTEQuantizationConfigMXFP4DataShuffle:
+      uint8_to_bool(buf, config_.mxfp4_data_shuffle);
       break;
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");

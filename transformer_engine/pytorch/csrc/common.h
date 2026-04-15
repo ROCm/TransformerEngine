@@ -295,6 +295,7 @@ class MXFP4Quantizer : public Quantizer {
   DType dtype;
   bool use_hadamard;
   bool shuffle_B_matrix_for_aiter;
+  bool shuffle_scales;
 
   explicit MXFP4Quantizer(const py::handle& quantizer);
 

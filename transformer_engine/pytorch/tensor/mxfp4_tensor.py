@@ -61,11 +61,13 @@ class MXFP4Quantizer(Quantizer):
         rowwise: bool = True,
         columnwise: bool = True,
         shuffle_B_matrix_for_aiter: bool = False,
+        shuffle_scales: bool = False,
         use_hadamard: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp4_dtype
         self.shuffle_B_matrix_for_aiter = shuffle_B_matrix_for_aiter
+        self.shuffle_scales = shuffle_scales
         self.use_hadamard = use_hadamard
         assert self.dtype == tex.DType.kFloat4E2M1, "Only E2M1 format supported for MXFP4"
 
@@ -76,6 +78,7 @@ class MXFP4Quantizer(Quantizer):
             rowwise=self.rowwise_usage,
             columnwise=self.columnwise_usage,
             shuffle_B_matrix_for_aiter=self.shuffle_B_matrix_for_aiter,
+            shuffle_scales=self.shuffle_scales,
             use_hadamard=self.use_hadamard,
         )
         quantizer.internal = self.internal

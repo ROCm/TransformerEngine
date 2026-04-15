@@ -166,11 +166,13 @@ class MXFP4QuantizerRef(Quantizer):
         rowwise: bool = True,
         columnwise: bool = True,
         shuffle_B_matrix_for_aiter: bool = False,
+        shuffle_scales: bool = False,
         use_hadamard: bool = False,
     ):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.internal = True
         self.shuffle_B_matrix_for_aiter = shuffle_B_matrix_for_aiter
+        self.shuffle_scales = shuffle_scales
         self.use_hadamard = use_hadamard
 
     @property
@@ -289,7 +291,7 @@ class MXFP4QuantizerRef(Quantizer):
         )
         scales_torch[:num_scale_rows, :num_scale_cols] = scales_valid
 
-        if self.shuffle_B_matrix_for_aiter:
+        if self.shuffle_scales:
             scales_torch = _shuffle_scales(scales_torch)
             scales_torch = scales_torch.view(scales_torch.shape[0] * 32, -1)
 

@@ -1741,6 +1741,7 @@ MXFP4Quantizer::MXFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->dtype = quantizer.attr("dtype").cast<DType>();
   this->use_hadamard = quantizer.attr("use_hadamard").cast<bool>();
   this->shuffle_B_matrix_for_aiter = quantizer.attr("shuffle_B_matrix_for_aiter").cast<bool>();
+  this->shuffle_scales = quantizer.attr("shuffle_scales").cast<bool>();
 }
 
 void MXFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
@@ -1966,7 +1967,8 @@ void MXFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
     quant_config.set_noop_tensor(noop_flag->data());
   }
   quant_config.set_mxfp4_use_hadamard(this->use_hadamard);
-  quant_config.set_mxfp4_shuffle(this->shuffle_B_matrix_for_aiter);
+  quant_config.set_mxfp4_scale_shuffle(this->shuffle_scales);
+  quant_config.set_mxfp4_data_shuffle(this->shuffle_B_matrix_for_aiter);
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });

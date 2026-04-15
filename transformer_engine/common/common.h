@@ -427,7 +427,8 @@ struct QuantizationConfig {
   bool stochastic_rounding = false;
   bool use_fast_math = false;
   bool mxfp4_use_hadamard = false;
-  bool mxfp4_shuffle = false;
+  bool mxfp4_scale_shuffle = false;
+  bool mxfp4_data_shuffle = false;
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -439,7 +440,8 @@ struct QuantizationConfig {
       sizeof(uint8_t),                       // stochastic_rounding
       sizeof(uint8_t),                       // use_fast_math
       sizeof(uint8_t),                       // mxfp4_use_hadamard
-      sizeof(uint8_t)                        // mxfp4_shuffle
+      sizeof(uint8_t),                       // mxfp4_scale_shuffle
+      sizeof(uint8_t)                        // mxfp4_data_shuffle
   };
 };
 
