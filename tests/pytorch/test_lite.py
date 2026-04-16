@@ -3812,3 +3812,119 @@ class TestFP8AttentionFlags:
             "NVTE_FP8 must exist in the enum for framework compat, even if "
             "lite doesn't implement the corresponding backend."
         )
+
+
+# ---------------------------------------------------------------------------
+# GroupedLinear tests — MoE-style expert parallelism via a single module
+# that dispatches num_gemms weights against an input split by m_splits.
+# ---------------------------------------------------------------------------
+
+class TestGroupedLinear:
+    """Verify GroupedLinear works end-to-end in lite mode."""
+
+    DTYPE = torch.bfloat16
+    NUM_GEMMS = 4
+    IN_FEATURES = 256
+    OUT_FEATURES = 256
+    M_SPLITS = [8, 8, 8, 8]  # total 32 tokens
+
+    @pytest.fixture(autouse=True)
+    def _reset_fp8_state(self):
+        yield
+        FP8GlobalStateManager.reset()
+
+    def _make_module(self, device, bias=True):
+        return te.GroupedLinear(
+            num_gemms=self.NUM_GEMMS,
+            in_features=self.IN_FEATURES,
+            out_features=self.OUT_FEATURES,
+            bias=bias,
+            params_dtype=self.DTYPE,
+            parallel_mode=None,
+        ).to(device)
+
+    @pytest.mark.parametrize("bias", [True, False])
+    def test_forward_shape(self, device, bias):
+        """Output shape is (total_tokens, out_features)."""
+        mod = self._make_module(device, bias=bias)
+        total = sum(self.M_SPLITS)
+        x = torch.randn(total, self.IN_FEATURES, device=device, dtype=self.DTYPE)
+        y = mod(x, self.M_SPLITS)
+        assert y.shape == (total, self.OUT_FEATURES)
+        assert torch.isfinite(y).all()
+
+    @pytest.mark.parametrize("bias", [True, False])
+    def test_forward_matches_manual(self, device, bias):
+        """Output matches F.linear per chunk (reference implementation)."""
+        torch.manual_seed(42)
+        mod = self._make_module(device, bias=bias)
+        total = sum(self.M_SPLITS)
+        x = torch.randn(total, self.IN_FEATURES, device=device, dtype=self.DTYPE)
+        y = mod(x, self.M_SPLITS)
+
+        # Manual reference: split input, run each chunk through its expert
+        chunks = torch.split(x, self.M_SPLITS, dim=0)
+        y_ref_parts = []
+        for i, chunk in enumerate(chunks):
+            w = getattr(mod, f"weight{i}")
+            b = getattr(mod, f"bias{i}") if bias else None
+            y_ref_parts.append(F.linear(chunk, w, b))
+        y_ref = torch.cat(y_ref_parts, dim=0)
+        assert torch.allclose(y, y_ref, atol=1e-3, rtol=1e-3), (
+            f"GroupedLinear output differs from manual: max_diff="
+            f"{(y - y_ref).abs().max().item()}"
+        )
+
+    @pytest.mark.parametrize("bias", [True, False])
+    def test_backward_grads_finite(self, device, bias):
+        """Input gradient and all per-expert weight gradients must be finite."""
+        mod = self._make_module(device, bias=bias)
+        total = sum(self.M_SPLITS)
+        x = torch.randn(total, self.IN_FEATURES, device=device,
+                         dtype=self.DTYPE, requires_grad=True)
+        y = mod(x, self.M_SPLITS)
+        y.sum().backward()
+        torch.cuda.synchronize()
+        assert x.grad is not None
+        assert torch.isfinite(x.grad).all()
+        for i in range(self.NUM_GEMMS):
+            w_grad = getattr(mod, f"weight{i}").grad
+            assert w_grad is not None, f"weight{i}.grad is None"
+            assert torch.isfinite(w_grad).all(), f"weight{i}.grad has NaN/Inf"
+            if bias:
+                b_grad = getattr(mod, f"bias{i}").grad
+                assert b_grad is not None, f"bias{i}.grad is None"
+                assert torch.isfinite(b_grad).all(), f"bias{i}.grad has NaN/Inf"
+
+    def test_uneven_splits(self, device):
+        """Non-uniform m_splits should also work (MoE often has imbalanced routing)."""
+        mod = self._make_module(device, bias=True)
+        m_splits = [4, 12, 8, 8]  # total 32
+        total = sum(m_splits)
+        x = torch.randn(total, self.IN_FEATURES, device=device,
+                         dtype=self.DTYPE, requires_grad=True)
+        y = mod(x, m_splits)
+        assert y.shape == (total, self.OUT_FEATURES)
+        y.sum().backward()
+        torch.cuda.synchronize()
+        assert torch.isfinite(x.grad).all()
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD_BWD)
+    @pytest.mark.xfail(
+        strict=True,
+        reason="FP8 GroupedLinear hits dtype mismatch in Triton wrapper "
+               "(lhs=fp32 vs bias=bf16) — pre-existing issue in "
+               "triton_kernels/gmm/gmm_common.py, out of scope for lite adapter.",
+    )
+    def test_fp8_forward(self, device, fp8_recipe):
+        """FP8 GroupedLinear — currently blocked on a Triton GMM bug."""
+        mod = self._make_module(device, bias=True)
+        total = sum(self.M_SPLITS)
+        x = torch.randn(total, self.IN_FEATURES, device=device,
+                         dtype=self.DTYPE, requires_grad=True)
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            y = mod(x, self.M_SPLITS)
+        y.sum().backward()
+        torch.cuda.synchronize()
+        assert torch.isfinite(y).all()
+        assert torch.isfinite(x.grad).all()
