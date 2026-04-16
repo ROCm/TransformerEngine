@@ -1507,18 +1507,54 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
 #endif
 
   // Compute amax.
+#ifdef USE_ROCM
+  // Allocate rht_output_t early so that the amax kernel can also write the
+  // transposed RHT output in the same kernel launch (fused amax + transform).
+  at::Tensor rht_output_t;
+#endif
   if (this->with_rht) {
     if (input.dtype() != DType::kBFloat16) {
       NVTE_CHECK(false, "RHT is only supported for bfloat16 input");
     }
+
+#ifdef USE_ROCM
+    // Pre-allocate if we'll need the transposed RHT output later
+    if (this->columnwise_usage && !eligible_for_rht_cast_fusion) {
+      rht_output_t =
+          allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
+    }
+#endif
+
     if (this->with_post_rht_amax) {
       // We need:
       // 1. Rowwise amax = amax for input
       // 2. Columnwise amax = amax for RHT(input.t)
-      NVTE_SCOPED_GIL_RELEASE({
-        nvte_hadamard_transform_amax(input.data(), out.data(), 0,
-                                     this->rht_matrix_random_sign_mask_t, stream);
-      });
+#ifdef USE_ROCM
+      if (rht_output_t.defined()) {
+        // Fused path: compute amax AND write transposed RHT output in one kernel.
+        // Create a wrapper with amax fields from out + data pointing to rht_output_t.
+        TensorWrapper amax_and_transform(out.scaling_mode());
+        auto out_amax = out.get_amax();
+        auto out_col_amax = out.get_columnwise_amax();
+        amax_and_transform.set_amax(out_amax.data_ptr, static_cast<DType>(out_amax.dtype),
+                                    out_amax.shape);
+        amax_and_transform.set_columnwise_amax(out_col_amax.data_ptr,
+                                               static_cast<DType>(out_col_amax.dtype),
+                                               out_col_amax.shape);
+        amax_and_transform.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),
+                                            std::vector<size_t>{cols, rows});
+        NVTE_SCOPED_GIL_RELEASE({
+          nvte_hadamard_transform_amax(input.data(), amax_and_transform.data(), 0,
+                                       this->rht_matrix_random_sign_mask_t, stream);
+        });
+      } else
+#endif
+      {
+        NVTE_SCOPED_GIL_RELEASE({
+          nvte_hadamard_transform_amax(input.data(), out.data(), 0,
+                                       this->rht_matrix_random_sign_mask_t, stream);
+        });
+      }
     } else {
       // raise error since it's not supported yet
       NVTE_CHECK(false, "Pre-RHT amax is not supported yet");
@@ -1631,25 +1667,38 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
           need_separate_columnwise_rng ? quant_config_columnwise : quant_config;
 
       if (!eligible_for_rht_cast_fusion) {
-        // Invoking fallback RHT kernel.
-
-        // If using RHT, then amax will be computed in the RHT step
-        // If not using RHT, then amax will be computed based on input x
-        at::Tensor rht_output_t;  // The RHT(x_t) output, in columnwise layout
-        // This wrapper is going to be passed as input to the quantization kernel.
-        TensorWrapper rht_output_t_cpp;  // Wrapper to contain the RHT(x) and RHT(x_t) outputs
+#ifdef USE_ROCM
+        // If rht_output_t was already produced by the fused amax+transform kernel above,
+        // skip the separate hadamard_transform call.
+        if (!rht_output_t.defined()) {
+          rht_output_t =
+              allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
+          TensorWrapper rht_output_t_cpp;
+          rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),
+                                            std::vector<size_t>{cols, rows});
+          NVTE_SCOPED_GIL_RELEASE({
+            nvte_hadamard_transform(input.data(), rht_output_t_cpp.data(), 0,
+                                    this->rht_matrix_random_sign_mask_t, stream);
+          });
+        }
+#else
+        at::Tensor rht_output_t;
         rht_output_t =
             allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
-        // NOTE (frsun): This is non-intuitive, we are writing the
-        // result of transposed RHT to the output of rowwise.
+        {
+          TensorWrapper rht_output_t_cpp;
+          rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),
+                                            std::vector<size_t>{cols, rows});
+          NVTE_SCOPED_GIL_RELEASE({
+            nvte_hadamard_transform(input.data(), rht_output_t_cpp.data(), 0,
+                                    this->rht_matrix_random_sign_mask_t, stream);
+          });
+        }
+#endif
+
+        TensorWrapper rht_output_t_cpp;
         rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),
                                           std::vector<size_t>{cols, rows});
-
-        NVTE_SCOPED_GIL_RELEASE({
-          // Perform the RHT(input.t), and write to rht_output_cpp.columnwise.
-          nvte_hadamard_transform(input.data(), rht_output_t_cpp.data(), 0,
-                                  this->rht_matrix_random_sign_mask_t, stream);
-        });
 
         // Quantize kernel will treat everything as rowwise input/output, which is
         // intended.

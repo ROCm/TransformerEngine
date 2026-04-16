@@ -653,7 +653,8 @@ __device__ __forceinline__ void wht16(
 // Block: 256 threads = 4 wavefronts of 64 lanes.
 //   lane/4 = row_in_warp (0..15), lane%4 = thread_in_grp (0..3)
 template <bool kComputeIdentity, bool kComputeTransposed,
-          bool kUpdateAmax,      bool kUpdateAmaxT>
+          bool kUpdateAmax,      bool kUpdateAmaxT,
+          bool kUpdatePreRhtAmax = false>
 __global__ __launch_bounds__(kThreadsPerBlock, 4)
 void HadamardTransformKernel(
         const __hip_bfloat16* __restrict__ input,
@@ -662,6 +663,7 @@ void HadamardTransformKernel(
         uint16_t random_sign_mask, uint16_t random_sign_mask_t,
         uint64_t num_rows, uint64_t row_length,
         float* __restrict__ amax, float* __restrict__ amax_t,
+        float* __restrict__ pre_rht_amax,
         bool inverse_hadamard) {
     const int tid           = threadIdx.x;
     const int warp_id       = tid / kWarpSize;
@@ -681,11 +683,25 @@ void HadamardTransformKernel(
 
     __shared__ float block_amax[kWarpsPerBlock];
     __shared__ float block_amax_t[kWarpsPerBlock];
+    __shared__ float block_pre_rht_amax[kWarpsPerBlock];
 
     float v0=0.f, v1=0.f, v2=0.f, v3=0.f;
     if (in_bounds) {
         unpack_bf16x4(*reinterpret_cast<const uint64_t*>(
             &input[global_row * row_length + col_base]), v0, v1, v2, v3);
+    }
+
+    // Pre-RHT amax: max|input| before any transform
+    if constexpr (kUpdatePreRhtAmax) {
+        float local_pre = 0.f;
+        if (in_bounds) {
+            local_pre = fmaxf(fmaxf(fabsf(v0), fabsf(v1)),
+                              fmaxf(fabsf(v2), fabsf(v3)));
+        }
+        for (int off = kWarpSize / 2; off >= 1; off >>= 1)
+            local_pre = fmaxf(local_pre, __shfl_xor(local_pre, off));
+        if (lane_id == 0)
+            block_pre_rht_amax[warp_id] = local_pre;
     }
 
     // Identity path: WHT along row dimension
@@ -769,7 +785,7 @@ void HadamardTransformKernel(
         }
     }
 
-    if constexpr (kUpdateAmax || kUpdateAmaxT) {
+    if constexpr (kUpdateAmax || kUpdateAmaxT || kUpdatePreRhtAmax) {
         __syncthreads();
 
         if (warp_id == 0) {
@@ -777,31 +793,10 @@ void HadamardTransformKernel(
                 reduce_block_amax(block_amax, lane_id, amax);
             if constexpr (kUpdateAmaxT)
                 reduce_block_amax(block_amax_t, lane_id, amax_t);
+            if constexpr (kUpdatePreRhtAmax)
+                reduce_block_amax(block_pre_rht_amax, lane_id, pre_rht_amax);
         }
     }
-}
-
-// Pre-RHT amax: max|input| before any transform.
-__global__ void PreRhtAmaxKernel(const __hip_bfloat16* __restrict__ input,
-                                 float* __restrict__ amax_out, uint64_t num_elems) {
-    __shared__ float block_amax[kWarpsPerBlock];
-    float local_amax = 0.f;
-    for (uint64_t i = (uint64_t)blockIdx.x*blockDim.x+threadIdx.x;
-         i < num_elems; i += (uint64_t)gridDim.x*blockDim.x)
-      local_amax = fmaxf(local_amax, fabsf(to_f32(input[i])));
-
-    for (int off=kWarpSize/2; off>=1; off>>=1)
-      local_amax=fmaxf(local_amax,__shfl_xor(local_amax,off));
-
-    const int warp_id = threadIdx.x / kWarpSize;
-    const int lane_id = threadIdx.x % kWarpSize;
-    if (lane_id == 0)
-      block_amax[warp_id] = local_amax;
-
-    __syncthreads();
-
-    if (warp_id == 0)
-      reduce_block_amax(block_amax, lane_id, amax_out);
 }
 
 static inline dim3 transform_grid(uint64_t num_rows, uint64_t row_length) {
@@ -896,7 +891,7 @@ void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_s
                   reinterpret_cast<IType*>(output.dptr),
                   reinterpret_cast<IType*>(output_t.dptr), random_sign_mask,
                   random_sign_mask_t, static_cast<uint64_t>(num_rows),
-                  static_cast<uint64_t>(row_length), nullptr, nullptr, false);););
+                  static_cast<uint64_t>(row_length), nullptr, nullptr, nullptr, false);););
 #else
           auto kernel =
               HadamardTransformKernel<IType, kHadamardDimension, kReturnIdentity, kReturnTransposed,
@@ -934,6 +929,11 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
   SimpleTensor output_identity_amax;
   SimpleTensor& output_transpose_amax = output_.columnwise_amax;
 
+#ifdef __HIP_PLATFORM_AMD__
+  // Check for optional transposed output buffer (written alongside amax)
+  SimpleTensor& output_t = output_.data;
+#endif
+
   // Check requested outputs
   const bool return_pre_rht_amax = output_pre_rht_amax.dptr != nullptr;
   const bool return_identity_amax = output_identity_amax.dptr != nullptr;
@@ -966,6 +966,12 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
   auto* pre_amax_ptr = reinterpret_cast<float*>(output_pre_rht_amax.dptr);
   auto* id_amax_ptr = reinterpret_cast<float*>(output_identity_amax.dptr);
   auto* tr_amax_ptr = reinterpret_cast<float*>(output_transpose_amax.dptr);
+  // Only use output_.data as transposed output buffer if it's actually BF16.
+  // When called from the fused path, output_.data is a BF16 buffer for RHT output.
+  // When called from the non-fused path, output_.data is an FP4 buffer (wrong type/size).
+  auto* out_t_ptr = (output_t.dtype == transformer_engine::DType::kBFloat16)
+      ? reinterpret_cast<__hip_bfloat16*>(output_t.dptr)
+      : static_cast<__hip_bfloat16*>(nullptr);
 
   NVTE_CHECK(row_length % kHadamardDim == 0, "row_length must be divisible by 16.");
   NVTE_CHECK(num_rows % kHadamardDim == 0, "num_rows must be divisible by 16.");
@@ -980,13 +986,6 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
   }
   if (tr_amax_ptr) {
     NVTE_CHECK_CUDA(cudaMemsetAsync(tr_amax_ptr, 0, sizeof(float), stream));
-  }
-
-  if (return_pre_rht_amax) {
-    const uint64_t num_elems = static_cast<uint64_t>(num_rows) * row_length;
-    dim3 grid(DIVUP(num_elems, static_cast<uint64_t>(kThreadsPerBlock)));
-    PreRhtAmaxKernel<<<grid, kThreadsPerBlock, 0, stream>>>(in_ptr, pre_amax_ptr, num_elems);
-    NVTE_CHECK_CUDA(cudaGetLastError());
   }
 #else
   constexpr int kHadamardDimension = 16;
@@ -1030,14 +1029,25 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
           return_identity_amax, kReturnIdentityAmax,
 
 #ifdef __HIP_PLATFORM_AMD__
-          if (kReturnIdentityAmax || kReturnTransposedAmax) {
+          {
+            // Compute transposed path if we need transposed amax or have an output buffer.
+            const bool compute_transposed = kReturnTransposedAmax || (out_t_ptr != nullptr);
             dim3 grid = transform_grid(num_rows, row_length), block(kThreadsPerBlock);
-            HadamardTransformKernel<kReturnIdentityAmax, kReturnTransposedAmax,
-                                    kReturnIdentityAmax, kReturnTransposedAmax>
-                <<<grid, block, 0, stream>>>(in_ptr, nullptr, nullptr, random_sign_mask,
-                                             random_sign_mask_t, static_cast<uint64_t>(num_rows),
-                                             static_cast<uint64_t>(row_length), id_amax_ptr,
-                                             tr_amax_ptr, false);
+            TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                return_pre_rht_amax, kReturnPreRhtAmax,
+                TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                    compute_transposed, kComputeTransposed,
+                    if (kReturnIdentityAmax || kComputeTransposed || kReturnPreRhtAmax) {
+                      HadamardTransformKernel<kReturnIdentityAmax, kComputeTransposed,
+                                              kReturnIdentityAmax, kReturnTransposedAmax,
+                                              kReturnPreRhtAmax>
+                          <<<grid, block, 0, stream>>>(
+                              in_ptr, nullptr, out_t_ptr, random_sign_mask,
+                              random_sign_mask_t, static_cast<uint64_t>(num_rows),
+                              static_cast<uint64_t>(row_length), id_amax_ptr,
+                              tr_amax_ptr, pre_amax_ptr, false);
+                    }
+                ));
           }
         ));
 #else
