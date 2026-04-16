@@ -3022,3 +3022,156 @@ class TestFusedGatedActQuant:
         assert result._rowwise_data.shape[-1] == 256
         # Total elements should match batch * 256
         assert result._rowwise_data.numel() == 4 * 8 * 256
+
+
+class TestFusedGatedActCurrentScaling:
+    """Tests for AITER fused gated activation + per-row FP8 quantize (CurrentScaling)."""
+
+    DTYPE = torch.bfloat16
+
+    @staticmethod
+    def _has_fused_kernel():
+        try:
+            from aiter.ops.triton.activation import act_mul_and_fp8_group_quant  # noqa: F401
+            return True
+        except ImportError:
+            return False
+
+    @staticmethod
+    def _has_current_scaling():
+        try:
+            from transformer_engine.pytorch.tensor.float8_tensor import (
+                Float8CurrentScalingQuantizer,  # noqa: F401
+            )
+            return True
+        except ImportError:
+            return False
+
+    @pytest.mark.parametrize("activation,aiter_act", [
+        ("swiglu", "silu"),
+        ("geglu", "gelu_tanh"),
+        ("reglu", "relu"),
+    ])
+    def test_current_scaling_fused_matches_separate(self, device, activation, aiter_act):
+        """Fused act+quant with CurrentScaling should dequantize close to separate act then quant."""
+        if not self._has_fused_kernel() or not self._has_current_scaling():
+            pytest.skip("AITER fused kernel or Float8CurrentScalingQuantizer not available")
+
+        from transformer_engine.pytorch._lite.activations import (
+            _aiter_fused_gated_act_current_scaling,
+        )
+        from transformer_engine.pytorch.tensor.float8_tensor import (
+            Float8CurrentScalingQuantizer,
+            Float8Tensor,
+        )
+
+        hidden = 256
+        x = torch.randn(8, 2 * hidden, device=device, dtype=self.DTYPE)
+
+        quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device=x.device,
+            rowwise=True,
+            columnwise=False,
+        )
+
+        # Fused path
+        fused_out = _aiter_fused_gated_act_current_scaling(x, activation, quantizer)
+        assert fused_out is not None, "Fused path should fire for Float8CurrentScalingQuantizer"
+        assert isinstance(fused_out, Float8Tensor)
+
+        # Per-row scale_inv: shape (M,)
+        assert fused_out._scale_inv.shape == (8,), (
+            f"Expected per-row scale_inv shape (8,), got {fused_out._scale_inv.shape}"
+        )
+
+        # Separate path: manual act then per-row quant reference
+        act_fn = {"swiglu": F.silu, "geglu": lambda t: F.gelu(t, approximate="tanh"), "reglu": F.relu}
+        chunks = x.chunk(2, dim=-1)
+        ref_bf16 = act_fn[activation](chunks[0]) * chunks[1]
+
+        # Dequantize fused output
+        fp8_data = fused_out._data.view(torch.float8_e4m3fnuz).float()
+        scale_inv = fused_out._scale_inv  # shape (M,)
+        # Expand per-row scales: (M,) → (M, 1) for broadcast
+        dequant = fp8_data * scale_inv.unsqueeze(-1)
+
+        diff = (dequant - ref_bf16.float()).abs().max().item()
+        ref_max = ref_bf16.float().abs().max().item()
+        rel_err = diff / max(ref_max, 1e-6)
+        assert rel_err < 0.15, f"Fused act+quant (CurrentScaling) relative error {rel_err:.4f} too large"
+
+    @pytest.mark.parametrize("activation", ["swiglu", "geglu", "reglu"])
+    def test_current_scaling_not_taken_for_block_quantizer(self, device, activation):
+        """CurrentScaling fused path should return None for Float8BlockQuantizer."""
+        from transformer_engine.pytorch._lite.activations import (
+            _aiter_fused_gated_act_current_scaling,
+        )
+
+        x = torch.randn(4, 256, device=device, dtype=self.DTYPE)
+        # None quantizer → no fused path
+        result = _aiter_fused_gated_act_current_scaling(x, activation, None)
+        assert result is None
+
+    def test_current_scaling_output_shape_3d(self, device):
+        """Fused output should handle 3D input and have half the last dim."""
+        if not self._has_fused_kernel() or not self._has_current_scaling():
+            pytest.skip("AITER fused kernel or Float8CurrentScalingQuantizer not available")
+
+        from transformer_engine.pytorch._lite.activations import (
+            _aiter_fused_gated_act_current_scaling,
+        )
+        from transformer_engine.pytorch.tensor.float8_tensor import (
+            Float8CurrentScalingQuantizer,
+            Float8Tensor,
+        )
+
+        quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device=device,
+            rowwise=True,
+            columnwise=False,
+        )
+
+        x = torch.randn(4, 8, 512, device=device, dtype=self.DTYPE)
+        result = _aiter_fused_gated_act_current_scaling(x, "swiglu", quantizer)
+        assert result is not None
+        assert isinstance(result, Float8Tensor)
+        # Gated activation halves last dim: 512 → 256
+        assert result._data.shape == (4, 8, 256)
+        # Per-row scales: M = 4*8 = 32 rows
+        assert result._scale_inv.shape == (32,)
+
+    def test_current_scaling_per_row_scales_vary(self, device):
+        """Per-row scales should differ across rows (not degenerate per-tensor)."""
+        if not self._has_fused_kernel() or not self._has_current_scaling():
+            pytest.skip("AITER fused kernel or Float8CurrentScalingQuantizer not available")
+
+        from transformer_engine.pytorch._lite.activations import (
+            _aiter_fused_gated_act_current_scaling,
+        )
+        from transformer_engine.pytorch.tensor.float8_tensor import (
+            Float8CurrentScalingQuantizer,
+        )
+
+        # Use input with deliberately different magnitudes per row
+        hidden = 128
+        x = torch.randn(16, 2 * hidden, device=device, dtype=self.DTYPE)
+        # Scale each row differently so per-row scales must differ
+        row_scales = torch.logspace(-2, 2, 16, device=device, dtype=self.DTYPE).unsqueeze(-1)
+        x = x * row_scales
+
+        quantizer = Float8CurrentScalingQuantizer(
+            fp8_dtype=tex.DType.kFloat8E4M3,
+            device=device,
+            rowwise=True,
+            columnwise=False,
+        )
+
+        result = _aiter_fused_gated_act_current_scaling(x, "swiglu", quantizer)
+        assert result is not None
+        scales = result._scale_inv
+        # With 4 orders of magnitude in row scales, per-row scales should vary
+        assert scales.max() / scales.min() > 2.0, (
+            f"Per-row scales should vary, got max/min ratio {scales.max() / scales.min():.2f}"
+        )

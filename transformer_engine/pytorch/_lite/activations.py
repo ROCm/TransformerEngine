@@ -24,14 +24,18 @@ from .aiter_utils import is_aiter_available, get_aiter
 _Float8BlockQuantizer = None
 _Float8BlockwiseQTensorStorage = None
 _Float8BlockScaleTensorFormat = None
+_Float8CurrentScalingQuantizer = None
+_Float8Tensor = None
 _aiter_act_mul_fp8_group_quant = None
 _fused_act_quant_loaded = False
 
 
 def _try_load_fused_act_quant():
-    """Lazy-load Float8Block types and AITER fused act+quant kernel."""
+    """Lazy-load Float8Block/CurrentScaling types and AITER fused act+quant kernel."""
     global _Float8BlockQuantizer, _Float8BlockwiseQTensorStorage
-    global _Float8BlockScaleTensorFormat, _aiter_act_mul_fp8_group_quant
+    global _Float8BlockScaleTensorFormat
+    global _Float8CurrentScalingQuantizer, _Float8Tensor
+    global _aiter_act_mul_fp8_group_quant
     global _fused_act_quant_loaded
 
     if _fused_act_quant_loaded:
@@ -49,6 +53,16 @@ def _try_load_fused_act_quant():
         _Float8BlockQuantizer = Float8BlockQuantizer
         _Float8BlockwiseQTensorStorage = Float8BlockwiseQTensorStorage
         _Float8BlockScaleTensorFormat = Float8BlockScaleTensorFormat
+    except ImportError:
+        pass
+
+    try:
+        from transformer_engine.pytorch.tensor.float8_tensor import (
+            Float8CurrentScalingQuantizer,
+            Float8Tensor,
+        )
+        _Float8CurrentScalingQuantizer = Float8CurrentScalingQuantizer
+        _Float8Tensor = Float8Tensor
     except ImportError:
         pass
 
@@ -115,6 +129,58 @@ def _aiter_fused_gated_act_quant(input, activation, quantizer):
     return result
 
 
+def _aiter_fused_gated_act_current_scaling(input, activation, quantizer):
+    """Try AITER fused gated activation + per-row FP8 quantize for CurrentScaling.
+
+    Uses act_mul_and_fp8_group_quant with group_size = output_hidden_dim (N/2),
+    so each row gets exactly one scale — equivalent to per-row dynamic scaling.
+    Returns a Float8Tensor with _scale_inv shape (M,), or None if unavailable.
+    """
+    _try_load_fused_act_quant()
+
+    if _aiter_act_mul_fp8_group_quant is None or _Float8CurrentScalingQuantizer is None:
+        return None
+    if not isinstance(quantizer, _Float8CurrentScalingQuantizer):
+        return None
+
+    aiter_act = _AITER_ACT_QUANT_MAP.get(activation)
+    if aiter_act is None:
+        return None
+
+    # Flatten to 2D for AITER kernel
+    orig_shape = input.shape
+    input_2d = input.reshape(-1, input.shape[-1])
+    half_size = input.shape[-1] // 2
+
+    try:
+        # group_size = half_size means one group per row → per-row scaling
+        fp8_data, scale_inv = _aiter_act_mul_fp8_group_quant(
+            input_2d, aiter_act, group_size=half_size,
+        )
+    except (RuntimeError, TypeError):
+        return None
+
+    # scale_inv shape: (M, 1) — squeeze to (M,) for per-row convention
+    M = input_2d.shape[0]
+    scale_inv = scale_inv.reshape(M)
+
+    # Reshape fp8_data back to original leading dims
+    out_shape = orig_shape[:-1] + (half_size,)
+    fp8_data = fp8_data.reshape(out_shape) if fp8_data.shape != out_shape else fp8_data
+
+    # Wrap in Float8Tensor with per-row scale_inv
+    result = _Float8Tensor(
+        shape=out_shape,
+        dtype=input.dtype,
+        data=fp8_data.view(torch.uint8),
+        fp8_scale_inv=scale_inv,
+        fp8_dtype=quantizer.dtype,
+        data_transpose=None,
+        quantizer=quantizer,
+    )
+    return result
+
+
 def _apply_quantizer(output, quantizer):
     """Apply quantizer if provided, otherwise return as-is."""
     if quantizer is not None and hasattr(quantizer, 'quantize'):
@@ -156,6 +222,10 @@ def gelu(input, quantizer):
 
 def geglu(input, quantizer):
     """GeGLU: split input in half, apply GELU to first, multiply by second."""
+    # Try fused gated act + per-row FP8 quantize (CurrentScaling)
+    fused = _aiter_fused_gated_act_current_scaling(input, "geglu", quantizer)
+    if fused is not None:
+        return fused
     # Try fused gated act + block FP8 quantize (single kernel)
     fused = _aiter_fused_gated_act_quant(input, "geglu", quantizer)
     if fused is not None:
@@ -190,6 +260,9 @@ def relu(input, quantizer):
 
 def reglu(input, quantizer):
     """ReGLU: gated variant of ReLU."""
+    fused = _aiter_fused_gated_act_current_scaling(input, "reglu", quantizer)
+    if fused is not None:
+        return fused
     fused = _aiter_fused_gated_act_quant(input, "reglu", quantizer)
     if fused is not None:
         return fused
@@ -219,6 +292,9 @@ def silu(input, quantizer):
 
 def swiglu(input, quantizer):
     """SwiGLU: gated variant of SiLU."""
+    fused = _aiter_fused_gated_act_current_scaling(input, "swiglu", quantizer)
+    if fused is not None:
+        return fused
     fused = _aiter_fused_gated_act_quant(input, "swiglu", quantizer)
     if fused is not None:
         return fused
