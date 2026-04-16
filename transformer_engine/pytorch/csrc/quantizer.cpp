@@ -1736,7 +1736,7 @@ std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
 }
 #endif 
 
-
+#ifdef USE_ROCM
 MXFP4Quantizer::MXFP4Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
   this->dtype = quantizer.attr("dtype").cast<DType>();
   this->use_hadamard = quantizer.attr("use_hadamard").cast<bool>();
@@ -2003,5 +2003,6 @@ std::vector<size_t> MXFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
   }
   return scale_shape;
 }
+#endif //#ifdef USE_ROCM
 
 }  // namespace transformer_engine::pytorch

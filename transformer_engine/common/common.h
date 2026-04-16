@@ -62,12 +62,19 @@ inline bool is_nvfp4_scaling(const NVTEScalingMode &mode) { return mode == NVTE_
 
 inline bool is_mxfp8_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
 
+#ifdef __HIP_PLATFORM_AMD__
 inline bool is_mxfp4_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP4_1D_SCALING; }
+#endif //#ifdef __HIP_PLATFORM_AMD__
 
+#ifdef __HIP_PLATFORM_AMD__
 inline bool is_mxfp_scaling(const NVTEScalingMode &mode) {
   return mode == NVTE_MXFP8_1D_SCALING || mode == NVTE_MXFP4_1D_SCALING;
 }
-
+#else
+inline bool is_mxfp_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_MXFP8_1D_SCALING;
+}
+#endif //#ifdef __HIP_PLATFORM_AMD__
 inline bool is_nvfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_NVFP4_1D_SCALING; }
 
 inline size_t product(const std::vector<size_t> &shape, const size_t begin, const size_t end) {
@@ -235,7 +242,10 @@ struct Tensor {
       case NVTE_BLOCK_SCALING_1D:
       case NVTE_BLOCK_SCALING_2D:
       case NVTE_NVFP4_1D_SCALING:
-      case NVTE_MXFP4_1D_SCALING: {
+      #ifdef __HIP_PLATFORM_AMD__
+      case NVTE_MXFP4_1D_SCALING:
+      #endif //#ifdef __HIP_PLATFORM_AMD__
+      {
         // Row-wise data shape matches tensor logical shape,
         // column-wise data shape is transpose of logical shape
         if (!has_data() && has_columnwise_data()) {
@@ -426,9 +436,11 @@ struct QuantizationConfig {
   bool nvfp4_2d_quantization = false;
   bool stochastic_rounding = false;
   bool use_fast_math = false;
+  #ifdef __HIP_PLATFORM_AMD__
   bool mxfp4_use_hadamard = false;
   bool mxfp4_scale_shuffle = false;
   bool mxfp4_data_shuffle = false;
+  #endif //#ifdef __HIP_PLATFORM_AMD__
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -439,9 +451,11 @@ struct QuantizationConfig {
       sizeof(uint8_t),                       // nvfp4_2d_quantization
       sizeof(uint8_t),                       // stochastic_rounding
       sizeof(uint8_t),                       // use_fast_math
+      #ifdef __HIP_PLATFORM_AMD__
       sizeof(uint8_t),                       // mxfp4_use_hadamard
       sizeof(uint8_t),                       // mxfp4_scale_shuffle
       sizeof(uint8_t)                        // mxfp4_data_shuffle
+      #endif //#ifdef __HIP_PLATFORM_AMD__
   };
 };
 

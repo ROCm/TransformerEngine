@@ -128,6 +128,7 @@ TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor, Quantizer 
   return ret;
 }
 
+#ifdef USE_ROCM
 TensorWrapper NVTETensorFromMXFP4Tensor(py::handle tensor, Quantizer *quantizer) {
   const DType dtype = tensor.attr("_fp4_dtype").cast<DType>();
 
@@ -166,7 +167,7 @@ TensorWrapper NVTETensorFromMXFP4Tensor(py::handle tensor, Quantizer *quantizer)
 
   return ret;
 }
-
+#endif //#ifdef USE_ROCM
 TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer) {
   const DType dtype = tensor.attr("_fp4_dtype").cast<DType>();
 

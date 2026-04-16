@@ -290,6 +290,7 @@ class MXFP8Quantizer : public Quantizer {
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
 
+#ifdef USE_ROCM
 class MXFP4Quantizer : public Quantizer {
  public:
   DType dtype;
@@ -313,6 +314,7 @@ class MXFP4Quantizer : public Quantizer {
 
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
+#endif //#ifdef USE_ROCM
 
 #ifndef USE_ROCM
 class NVFP4Quantizer : public Quantizer {

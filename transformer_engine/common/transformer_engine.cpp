@@ -76,8 +76,10 @@ std::string to_string(const NVTEScalingMode &mode) {
       return "NVTE_BLOCK_SCALING_2D";
     case NVTE_NVFP4_1D_SCALING:
       return "NVTE_NVFP4_1D_SCALING";
+    #ifdef __HIP_PLATFORM_AMD__
     case NVTE_MXFP4_1D_SCALING:
       return "NVTE_MXFP4_1D_SCALING";
+    #endif //#ifdef __HIP_PLATFORM_AMD__
     case NVTE_INVALID_SCALING:
       return "NVTE_INVALID_SCALING";
   }
@@ -178,7 +180,9 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
                    "\"  has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
                    t.columnwise_scale_inv.shape, ")");
       }
-    } else if (t.scaling_mode == NVTE_MXFP4_1D_SCALING) {
+    } 
+    #ifdef __HIP_PLATFORM_AMD__
+    else if (t.scaling_mode == NVTE_MXFP4_1D_SCALING) {
       const size_t row_alignment = 256;
       const size_t col_alignment = 8;
 
@@ -203,6 +207,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
                    t.columnwise_scale_inv.shape, ")");
       }
     }
+    #endif //#ifdef __HIP_PLATFORM_AMD__
   }
 }
 
@@ -337,7 +342,7 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
     if (t.has_data()) {
       NVTE_CHECK(t.scale_inv.has_data(), "FP4 scaling factor output ", name,
                  "_scale_inverse must be allocated");
-      NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E4M3 || t.scale_inv.dtype == DType::kFloat8E8M0, "FP4 scaling factor output ", name,
+                 NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor output ", name,
                  "_scale_inverse has invalid dtype "
                  "(expected Float8E4M3, got ",
                  to_string(t.scale_inv.dtype), ")");
@@ -345,8 +350,8 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
     if (t.has_columnwise_data()) {
       NVTE_CHECK(t.columnwise_scale_inv.has_data(), "FP4 scaling factor output ", name,
                  "_columnwise_scale_inverse must be allocated");
-      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3,
-                 "FP4 scaling factor output ", name,
+      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor output ",
+                 name,
                  "_columnwise_scale_inverse has invalid dtype "
                  "(expected Float8E4M3, got ",
                  to_string(t.columnwise_scale_inv.dtype), ")");
@@ -449,7 +454,11 @@ static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string &name
   // Determine expected dtype based on data type and scaling mode
   if (is_fp8_dtype(t.dtype()) && is_tensor_scaling(t.scaling_mode)) {
     check_scales(DType::kFloat32);
-  } else if (is_mxfp8_scaling(t.scaling_mode) || is_mxfp4_scaling(t.scaling_mode)) {
+  } else if (is_mxfp8_scaling(t.scaling_mode)
+    #ifdef __HIP_PLATFORM_AMD__
+            || is_mxfp4_scaling(t.scaling_mode)
+    #endif
+            ) {
     check_scales(DType::kFloat8E8M0);
   } else if (is_nvfp4_scaling(t.scaling_mode)) {
     check_scales(DType::kFloat8E4M3);
@@ -1136,6 +1145,7 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigUseFastMath:
       bool_to_uint8(config_.use_fast_math, buf);
       break;
+    #ifdef __HIP_PLATFORM_AMD__
     case kNVTEQuantizationConfigMXFP4UseHadamard:
       bool_to_uint8(config_.mxfp4_use_hadamard, buf);
       break;
@@ -1145,6 +1155,7 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigMXFP4DataShuffle:
       bool_to_uint8(config_.mxfp4_data_shuffle, buf);
       break;
+    #endif //#ifdef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -1200,6 +1211,7 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigUseFastMath:
       uint8_to_bool(buf, config_.use_fast_math);
       break;
+    #ifdef __HIP_PLATFORM_AMD__
     case kNVTEQuantizationConfigMXFP4UseHadamard:
       uint8_to_bool(buf, config_.mxfp4_use_hadamard);
       break;
@@ -1209,6 +1221,7 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigMXFP4DataShuffle:
       uint8_to_bool(buf, config_.mxfp4_data_shuffle);
       break;
+    #endif //#ifdef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
