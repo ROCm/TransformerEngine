@@ -136,6 +136,14 @@ SDPA fallback does not return real softmax statistics (LSE), which can affect
 numerics in some training configurations. Sliding window and bias types require
 AITER -- no PyTorch fallback for those features.
 
+**FP8 attention flags (`fp8_dpa`, `fp8_mha`):** Not supported. AITER, PyTorch
+SDPA, and the stubbed flash-attn path all operate on bf16/fp16 — there is no
+FP8 attention kernel in lite. Setting either flag to `True` on the recipe
+raises a clear `NotImplementedError` from `get_fused_attn_backend` pointing
+back at `fp8_dpa=False / fp8_mha=False`. The default recipe (both flags
+`False`, which is the default) continues to work — attention runs bf16 while
+GEMMs use FP8. See `TestFP8AttentionFlags` for the contract.
+
 ---
 
 ### Activations
@@ -148,12 +156,18 @@ AITER -- no PyTorch fallback for those features.
 | All backward variants | Yes | Yes |
 | Fused dbias + dact (non-gated) | Yes | Yes |
 | Fused dbias + dact (gated) | No | Yes |
-| Fused activation + FP8 quantization | No (quantize post-compute) | Yes (FULLY_FUSED, FUSED_AMAX_FP8, NVFP4) |
+| Fused activation + FP8 quantization (gated) | AITER (`act_mul_and_fp8_group_quant`) | Yes (FULLY_FUSED, FUSED_AMAX_FP8, NVFP4) |
+| Fused activation + FP8 quantization (non-gated) | No (quantize post-compute) | Yes |
 
-**Gaps:** No fused activation + quantization -- always a separate post-compute
-step, meaning extra memory traffic. Gated dbias fusions are missing. Only SwiGLU
-and GeGLU get AITER-fused forward kernels; the other 9 activations run as
-unfused PyTorch ops.
+**Gaps:** Gated activations (SwiGLU, GeGLU, ReGLU) use AITER's
+`act_mul_and_fp8_group_quant` to fuse activation + gate multiply + FP8 quantize
+into a single kernel, eliminating the BF16 intermediate round-trip. This covers
+both `Float8BlockQuantizer` (per-block scales, `group_size=block_len`) and
+`Float8CurrentScalingQuantizer` (per-row scales, `group_size = output_hidden_dim`
+so each row gets one scale). Non-gated activations (GeLU, ReLU, SiLU, etc.)
+still run as separate ops with post-compute quantize. Gated dbias fusions are
+missing. Activations outside the 6 with explicit paths (swiglu/geglu/reglu for
+fused + gelu/silu/relu for basic) fall back to unfused PyTorch ops.
 
 ---
 
@@ -171,16 +185,23 @@ unfused PyTorch ops.
 | Output quantization (generic) | Yes | Yes |
 | cuDNN backend | No | Yes (optional) |
 | Pre-tuned hidden sizes (28 sizes) | No (auto-tune) | Yes |
-| Fused LayerNormLinear | No | Yes |
-| Fused LayerNormMLP | No | Yes |
+| Fused LayerNormLinear | Yes (pure-Python autograd Function) | Yes (CUDA) |
+| Fused LayerNormMLP | Yes (pure-Python autograd Function) | Yes (CUDA) |
 | SM margin (backward) | Ignored | Full per-stage control |
 | Tensor / sequence parallelism | No | Yes |
 | FSDP2 integration | No | Yes |
 
-**Gaps:** No cuDNN backend or pre-tuned CUDA kernels. The compound fused modules
-(`LayerNormLinear`, `LayerNormMLP`) are full-build-only -- these fuse norm +
-projection into single kernels with FP8 and parallelism support. SM margin
-control is ignored in the backward pass. No distributed parallelism integration.
+**Gaps:** No cuDNN backend or pre-tuned CUDA kernels. SM margin control is
+ignored in the backward pass. No distributed parallelism integration (TP/SP).
+
+`LayerNormLinear` and `LayerNormMLP` are implemented as pure-Python
+`torch.autograd.Function` subclasses in `_lite/fused_layernorm_linear.py` and
+`_lite/fused_layernorm_mlp.py`. They reuse the AITER fused norm+quant path
+when FP8 is active, then chain to the Linear/MLP GEMMs. This is not the same
+thing as the full build's single CUDA kernel, but functionally covers the same
+API surface — including `return_bias`, `return_layernorm_output`, and all
+supported activations. Tensor parallelism and FSDP2 integration are the
+features missing from lite's compound modules.
 
 The core norm operations are the strongest lite subsystem. AITER Triton kernels
 are the primary backend with TE Triton and PyTorch fallbacks. The fused
@@ -409,6 +430,76 @@ not the training bottleneck.
 
 ---
 
+## Running Tests
+
+The lite module has a dedicated test suite at `tests/pytorch/test_lite.py`.
+All tests run entirely in lite mode (the file sets `NVTE_LITE=1` before
+importing TE, so the C++ extension is never loaded).
+
+```bash
+# Full lite test suite
+pytest tests/pytorch/test_lite.py -v
+
+# One test class
+pytest tests/pytorch/test_lite.py::TestRecipeIntegration -v
+
+# Tests filtered by name
+pytest tests/pytorch/test_lite.py -k "current_scaling" -v
+```
+
+### Test Coverage
+
+| Class | What it covers |
+|-------|----------------|
+| `TestImport` | Module loads, key symbols exist |
+| `TestForward` | bf16 forward for Linear / LayerNormLinear / LayerNormMLP / LayerNorm / RMSNorm / TransformerLayer |
+| `TestBackward` | Same modules with `loss.backward()` |
+| `TestNumerical` | Lite output vs `torch.nn` reference (FP32 exact / BF16 close) |
+| `TestTritonNorms` | Triton + AITER norm kernels, fused norm+quant for Float8Quantizer / Float8CurrentScalingQuantizer / MXFP8Quantizer |
+| `TestQuantize` | FP8 quantize/dequantize (no-recursion), `bgrad_quantize`, CurrentScaling per-row |
+| `TestMXFP8` | MXFP8 tensor detection, E8M0 scale conversion, roundtrip error |
+| `TestGemm` | `generic_gemm` with all transpose combinations, bias epilogue, bias-gradient epilogue |
+| `TestAttention` | Fused attention: BSHD / SBHD / THD layouts, causal / padding masks, GQA, bias |
+| `TestMoERouter` | MoE router top-k, softmax / sigmoid score functions, aux-loss |
+| `TestMoEPermutation` | Token permute / unpermute / roundtrip, gradient shapes |
+| `TestMoEPadding` | Multi-row pad / unpad / roundtrip across dtypes |
+| `TestLiteLayerNormLinear` | LayerNormLinear bf16 forward+backward, LayerNorm/RMSNorm variants, `return_layernorm_output` |
+| `TestLiteLayerNormMLP` | LayerNormMLP bf16 forward+backward, non-gated + gated activations |
+| `TestFusedGatedActQuant` | AITER fused gated act + block FP8 quantize (swiglu/geglu/reglu × Float8BlockQuantizer) |
+| `TestFusedGatedActCurrentScaling` | AITER fused gated act + per-row FP8 quantize (swiglu/geglu/reglu × Float8CurrentScalingQuantizer, `group_size = N/2`) |
+| `TestRecipeIntegration` | Full `te.autocast(recipe=...)` path for Linear / LayerNormLinear / LayerNormMLP / TransformerLayer × DelayedScaling / Float8CurrentScaling; multi-step loops; FP8 vs bf16 correlation |
+| `TestLiteAPI` | Public symbol presence, tex function signatures, DType enum, module constructor kwargs, regression tests |
+| `TestFP8Training` | `optimizer.step()`-driven training — overfit-a-batch (loss must drop), FP8 vs bf16 weight tracking, cache-invalidation |
+| `TestFP8AttentionFlags` | `fp8_dpa=True` / `fp8_mha=True` raise clean `NotImplementedError`; default flags work |
+| `TestGroupedLinear` | GroupedLinear forward+backward, output matches manual F.linear per chunk, uneven m_splits |
+
+Total: **~285 tests** covering forward, backward, FP8 recipes (DelayedScaling /
+Float8CurrentScaling end-to-end), API contracts, training loops, and MoE ops.
+The suite is the primary gate against regressions in the lite build.
+
+### Known xfails
+
+- `TestGroupedLinear::test_fp8_forward` — FP8 GroupedLinear hits a dtype
+  mismatch in the Triton GMM wrapper (`lhs=fp32` vs `bias=bf16`). This is a
+  pre-existing issue in `triton_kernels/gmm/gmm_common.py`; out of scope for
+  the lite adapter. The marker is `strict=True`, so if the Triton fix lands
+  upstream the test will fail-loud (XPASS → FAIL) to force a deliberate flip.
+
+### Adding new tests
+
+- Any new kernel or dispatch path added to `_lite/` should get a regression
+  test in `test_lite.py`. Prefer the test class closest to the feature
+  (e.g. a new GEMM kernel → `TestGemm`, a new recipe-level feature →
+  `TestRecipeIntegration`).
+- Tests that exercise FP8 recipes should use the `_RECIPES_FWD_BWD` or
+  `_RECIPES_FWD` helpers to parametrize across whatever recipes the hardware
+  supports, so tests skip cleanly on unsupported hardware.
+- FP8-vs-bf16 correlation (cosine similarity ≥ 0.9 for single modules,
+  ≥ 0.75 for TransformerLayer) is the standard numerical check — catches
+  silent wrong-dispatch and scale-broadcast bugs.
+
+---
+
 ## Summary
 
 | Subsystem | Functional Coverage | Performance | Key Backend |
@@ -431,5 +522,6 @@ where AITER or Triton kernels are available. The **FP8 CurrentScaling per-row
 fusion** is a lite-only optimization that outperforms the full build's per-tensor
 path by eliminating two HBM round-trips per norm+quantize operation. Expert
 parallelism is available via MORI for distributed MoE workloads. The remaining
-primary gaps are **comm-overlap** (not available) and **fused compound modules**
-(LayerNormLinear, LayerNormMLP) which are full-build-only.
+primary gaps are **comm-overlap** (not available), **tensor/sequence
+parallelism** (no built-in support in lite's compound modules), and a handful of
+FP8 attention paths (`fp8_dpa` / `fp8_mha` — see the Attention section).
