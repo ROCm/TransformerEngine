@@ -371,8 +371,12 @@ class LayerNormLinear(TransformerEngineBaseModule):
         zero_centered_gamma: bool = False,
         return_layernorm_output: bool = False,
         device: Union[torch.device, str] = "cuda",
+        # FSDP2 per-parameter sharding: wrap weights in FSDPAGTensor so the
+        # quantizer runs at all-gather time instead of at init (ROCm only).
+        use_fsdp2: bool = False,
+        keep_fp8_weight_transpose_cache: bool = True,
         # Accepted for API compatibility with full-build LayerNormLinear but
-        # ignored in lite mode (no TP/SP/FSDP/userbuffers support):
+        # ignored in lite mode (no TP/SP/userbuffers support):
         return_bias: bool = False,
         parallel_mode: Optional[str] = None,
         sequence_parallel: bool = False,
@@ -392,6 +396,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
         assert normalization in ("LayerNorm", "RMSNorm"), "Unsupported normalization type!"
         self.zero_centered_gamma = zero_centered_gamma
         self.return_layernorm_output = return_layernorm_output
+
+        # FSDP2 flags must be set before register_parameter/reset_parameters
+        # so the inherited base-class wrap logic (module/base.py) sees them.
+        # The wrap also requires IS_HIP_EXTENSION; mirror the full build's
+        # gate so non-ROCm runs silently ignore the flag.
+        from torch.utils.cpp_extension import IS_HIP_EXTENSION as _IS_HIP
+        self.use_fsdp2 = use_fsdp2 if _IS_HIP else False
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
         # No TP/SP in lite
         self.tp_size = 1

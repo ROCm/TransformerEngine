@@ -456,8 +456,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
         return_layernorm_output: bool = False,
         device: Union[torch.device, str] = "cuda",
         return_bias: bool = False,
+        # FSDP2 per-parameter sharding: wrap FC1/FC2 weights in FSDPAGTensor
+        # so the quantizer runs at all-gather time (ROCm only).
+        use_fsdp2: bool = False,
+        keep_fp8_weight_transpose_cache: bool = True,
         # Accepted for API compatibility with full-build LayerNormMLP but
-        # ignored in lite mode (no TP/SP/FSDP/userbuffers support):
+        # ignored in lite mode (no TP/SP/userbuffers support):
         sequence_parallel: bool = False,
         tp_group=None,
         tp_size: int = 1,
@@ -480,6 +484,12 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.zero_centered_gamma = zero_centered_gamma
         self.return_layernorm_output = return_layernorm_output
         self.return_bias = return_bias
+
+        # FSDP2 flags must be set before register_parameter/reset_parameters
+        # so the inherited base-class wrap logic (module/base.py) sees them.
+        from torch.utils.cpp_extension import IS_HIP_EXTENSION as _IS_HIP
+        self.use_fsdp2 = use_fsdp2 if _IS_HIP else False
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
 
         # No TP/SP in lite
         self.tp_size = 1

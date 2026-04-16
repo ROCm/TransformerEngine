@@ -3928,3 +3928,142 @@ class TestGroupedLinear:
         torch.cuda.synchronize()
         assert torch.isfinite(y).all()
         assert torch.isfinite(x.grad).all()
+
+
+# ---------------------------------------------------------------------------
+# FSDP2 weight-wrap tests — lite's compound modules must wrap FP8 weights in
+# FSDPAGTensor when use_fsdp2=True so FSDP2's all-gather calls
+# fsdp_pre_all_gather to quantize at gather time, not at parameter init.
+# ---------------------------------------------------------------------------
+
+class TestFSDP2WeightWrap:
+    """Verify lite compound modules emit FSDPAGTensor under use_fsdp2=True."""
+
+    DTYPE = torch.bfloat16
+    HIDDEN = 256
+    FFN_HIDDEN = 1024
+
+    @staticmethod
+    def _has_fsdpag():
+        try:
+            from transformer_engine.pytorch.tensor.fsdp2_allgather_tensor import FSDPAGTensor  # noqa
+            return True
+        except ImportError:
+            return False
+
+    def _fsdpag_cls(self):
+        from transformer_engine.pytorch.tensor.fsdp2_allgather_tensor import FSDPAGTensor
+        return FSDPAGTensor
+
+    def test_layernorm_linear_no_wrap_by_default(self, device):
+        """Default (use_fsdp2=False): weight is a plain Parameter, not FSDPAGTensor."""
+        if not self._has_fsdpag():
+            pytest.skip("FSDPAGTensor unavailable")
+        mod = te.LayerNormLinear(
+            self.HIDDEN, self.HIDDEN, params_dtype=self.DTYPE, device=device,
+        )
+        assert not isinstance(mod.weight, self._fsdpag_cls())
+        assert isinstance(mod.weight, torch.nn.Parameter)
+
+    def test_layernorm_linear_wraps_with_use_fsdp2(self, device):
+        """use_fsdp2=True: weight is wrapped in FSDPAGTensor for FSDP2 all-gather."""
+        if not self._has_fsdpag():
+            pytest.skip("FSDPAGTensor unavailable")
+        mod = te.LayerNormLinear(
+            self.HIDDEN, self.HIDDEN, use_fsdp2=True,
+            params_dtype=self.DTYPE, device=device,
+        )
+        assert isinstance(mod.weight, self._fsdpag_cls())
+        # Must still be a Parameter so autograd works
+        assert isinstance(mod.weight, torch.nn.Parameter)
+
+    def test_layernorm_mlp_wraps_both_weights(self, device):
+        """use_fsdp2=True: both fc1_weight and fc2_weight are wrapped."""
+        if not self._has_fsdpag():
+            pytest.skip("FSDPAGTensor unavailable")
+        mod = te.LayerNormMLP(
+            self.HIDDEN, self.FFN_HIDDEN, use_fsdp2=True,
+            params_dtype=self.DTYPE, device=device,
+        )
+        assert isinstance(mod.fc1_weight, self._fsdpag_cls())
+        assert isinstance(mod.fc2_weight, self._fsdpag_cls())
+
+    def test_layernorm_mlp_no_wrap_by_default(self, device):
+        """Default (use_fsdp2=False): no FSDPAGTensor wrapping."""
+        if not self._has_fsdpag():
+            pytest.skip("FSDPAGTensor unavailable")
+        mod = te.LayerNormMLP(
+            self.HIDDEN, self.FFN_HIDDEN, params_dtype=self.DTYPE, device=device,
+        )
+        assert not isinstance(mod.fc1_weight, self._fsdpag_cls())
+        assert not isinstance(mod.fc2_weight, self._fsdpag_cls())
+
+    def test_forward_bf16_with_wrapped_weights(self, device):
+        """bf16 forward+backward works with FSDPAGTensor-wrapped weights (the
+        wrapper's __torch_dispatch__ unwraps for ordinary ops).
+        FP8 + use_fsdp2 requires an actual FSDP2 wrap to gather properly —
+        that path is not tested here because it needs ≥2 GPUs + fully_shard.
+        """
+        if not self._has_fsdpag():
+            pytest.skip("FSDPAGTensor unavailable")
+        mod = te.LayerNormLinear(
+            self.HIDDEN, self.HIDDEN, use_fsdp2=True,
+            params_dtype=self.DTYPE, device=device,
+        )
+        x = torch.randn(8, self.HIDDEN, device=device,
+                         dtype=self.DTYPE, requires_grad=True)
+        y = mod(x)
+        y.sum().backward()
+        torch.cuda.synchronize()
+        assert y.shape == x.shape
+        assert torch.isfinite(y).all()
+        assert x.grad is not None
+        assert torch.isfinite(x.grad).all()
+
+    def test_forward_bf16_layernorm_mlp_with_wrap(self, device):
+        """Same bf16 smoke test for LayerNormMLP with use_fsdp2=True."""
+        if not self._has_fsdpag():
+            pytest.skip("FSDPAGTensor unavailable")
+        mod = te.LayerNormMLP(
+            self.HIDDEN, self.FFN_HIDDEN, activation="swiglu",
+            use_fsdp2=True, params_dtype=self.DTYPE, device=device,
+        )
+        x = torch.randn(8, self.HIDDEN, device=device,
+                         dtype=self.DTYPE, requires_grad=True)
+        y = mod(x)
+        y.sum().backward()
+        torch.cuda.synchronize()
+        assert y.shape == x.shape
+        assert torch.isfinite(y).all()
+        assert torch.isfinite(x.grad).all()
+
+    def test_non_hip_silently_ignores_flag(self, device):
+        """On non-ROCm builds the flag is forced to False (matches full build).
+        On ROCm this is always True; we just verify the attribute is accessible."""
+        mod = te.LayerNormLinear(
+            self.HIDDEN, self.HIDDEN, use_fsdp2=True,
+            params_dtype=self.DTYPE, device=device,
+        )
+        assert hasattr(mod, "use_fsdp2")
+        # On ROCm (lite's target platform), use_fsdp2 should pass through.
+        from torch.utils.cpp_extension import IS_HIP_EXTENSION
+        if IS_HIP_EXTENSION:
+            assert mod.use_fsdp2 is True
+        else:
+            assert mod.use_fsdp2 is False
+
+    def test_fsdpag_wraps_parameter_preserve_grad(self, device):
+        """After wrap, gradients still flow to the underlying _data tensor."""
+        if not self._has_fsdpag():
+            pytest.skip("FSDPAGTensor unavailable")
+        mod = te.LayerNormLinear(
+            self.HIDDEN, self.HIDDEN, use_fsdp2=True,
+            params_dtype=self.DTYPE, device=device,
+        )
+        assert mod.weight.requires_grad
+        x = torch.randn(8, self.HIDDEN, device=device,
+                         dtype=self.DTYPE)
+        mod(x).sum().backward()
+        torch.cuda.synchronize()
+        assert mod.weight.grad is not None
+        assert torch.isfinite(mod.weight.grad).all()
