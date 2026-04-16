@@ -62,7 +62,20 @@ def _get_raw_data(tensor):
         # for AITER GEMM dispatch. Return data only; GEMM will dequantize.
         return tensor._rowwise_data, None
     if hasattr(tensor, '_data') and hasattr(tensor, '_scale_inv'):
-        return tensor._data, tensor._scale_inv
+        data = tensor._data
+        if data is None:
+            # Columnwise-only tensor: _data was deleted by update_usage.
+            # Use transpose if available, otherwise dequantize.
+            if hasattr(tensor, '_transpose') and tensor._transpose is not None:
+                data = tensor._transpose
+            else:
+                return tensor, None
+        # Float8Tensor stores FP8 bit patterns as uint8 — reinterpret as the
+        # actual FP8 dtype so downstream Triton kernels see the correct type.
+        if data.dtype == torch.uint8 and hasattr(tensor, '_fp8_dtype'):
+            from transformer_engine.pytorch._lite.quantize import _te_dtype_to_torch_fp8
+            data = data.view(_te_dtype_to_torch_fp8(tensor._fp8_dtype))
+        return data, tensor._scale_inv
     return tensor, None
 
 

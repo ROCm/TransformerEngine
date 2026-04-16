@@ -451,7 +451,7 @@ def bgrad_quantize(input, quantizer):
     """
     bgrad = input.sum(dim=tuple(range(input.ndim - 1)))
     quantized = quantize(input, quantizer)
-    return quantized, bgrad
+    return bgrad, quantized
 
 
 def multi_tensor_quantize(tensor_list, quantizer_list):

@@ -22,6 +22,8 @@ os.environ["NVTE_LITE"] = "1"
 
 import transformer_engine.pytorch as te  # noqa: E402
 import transformer_engine_torch as tex  # noqa: E402
+from transformer_engine.common import recipe  # noqa: E402
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager  # noqa: E402
 
 
 @pytest.fixture(autouse=True)
@@ -757,9 +759,9 @@ class TestQuantize:
         assert torch.equal(result, x)
 
     def test_bgrad_quantize(self, device):
-        """bgrad_quantize should return (quantized, bias_grad)."""
+        """bgrad_quantize should return (bias_grad, quantized)."""
         x = torch.randn(4, 8, device=device, dtype=torch.bfloat16)
-        quantized, bgrad = tex.bgrad_quantize(x, None)
+        bgrad, quantized = tex.bgrad_quantize(x, None)
         expected_bgrad = x.sum(dim=0)
         assert torch.allclose(bgrad, expected_bgrad)
 
@@ -3174,4 +3176,233 @@ class TestFusedGatedActCurrentScaling:
         # With 4 orders of magnitude in row scales, per-row scales should vary
         assert scales.max() / scales.min() > 2.0, (
             f"Per-row scales should vary, got max/min ratio {scales.max() / scales.min():.2f}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Recipe-level FP8 integration tests
+# ---------------------------------------------------------------------------
+
+def _available_recipes():
+    """Build list of recipe instances for what this hardware supports."""
+    recipes = []
+    avail, _ = te.is_fp8_available(return_reason=True)
+    if avail:
+        recipes.append(recipe.DelayedScaling())
+        recipes.append(recipe.Float8CurrentScaling())
+    block_avail, _ = te.is_fp8_block_scaling_available(return_reason=True)
+    if block_avail:
+        recipes.append(recipe.Float8BlockScaling())
+    mx_avail, _ = te.is_mxfp8_available(return_reason=True)
+    if mx_avail:
+        recipes.append(recipe.MXFP8BlockScaling())
+    return recipes
+
+
+def _recipe_id(val):
+    """Short string ID for parametrize labels."""
+    if isinstance(val, pytest.param):
+        return None  # let pytest use the id from pytest.param
+    return type(val).__name__
+
+
+def _mark_recipes(recipes, needs_backward=False):
+    """Wrap recipes with xfail markers for known lite-mode bugs.
+
+    needs_backward: if True, also marks CurrentScaling as xfail (backward
+    dgrad shape bug). Forward-only CurrentScaling tests pass.
+    """
+    marked = []
+    for r in recipes:
+        name = type(r).__name__
+        if name == "DelayedScaling":
+            marked.append(pytest.param(
+                r, id=name,
+                marks=pytest.mark.xfail(
+                    reason="_lite fused_amax_and_scale_update_after_reduction signature mismatch",
+                    strict=True,
+                ),
+            ))
+        elif name == "Float8CurrentScaling" and needs_backward:
+            marked.append(pytest.param(
+                r, id=name,
+                marks=pytest.mark.xfail(
+                    reason="Wgrad GEMM routes per-row scaled dY to gemm_a8w8_per_token_scale "
+                           "but per-row scales are along reduction axis K for dW=dY^T@X — "
+                           "needs layout-aware dispatch to fall back to per-tensor GEMM for wgrad",
+                    strict=True,
+                ),
+            ))
+        else:
+            marked.append(pytest.param(r, id=name))
+    return marked
+
+
+_RECIPES = _available_recipes()
+_RECIPES_FWD = _mark_recipes(_RECIPES, needs_backward=False)
+_RECIPES_FWD_BWD = _mark_recipes(_RECIPES, needs_backward=True)
+
+
+class TestRecipeIntegration:
+    """Recipe-level FP8 integration through te.autocast for core TE modules.
+
+    Tests the full path: recipe object -> autocast context -> RecipeState ->
+    quantizer construction -> module forward/backward.
+    """
+
+    DTYPE = torch.bfloat16
+    HIDDEN = 256
+    FFN_HIDDEN = 1024
+    BATCH = 8       # Must be divisible by 8 for FP8 alignment
+    SEQ = 8
+
+    @pytest.fixture(autouse=True)
+    def _reset_fp8_state(self):
+        """Reset global FP8 state between tests."""
+        yield
+        FP8GlobalStateManager.reset()
+
+    def _skip_if_no_recipes(self):
+        if not _RECIPES:
+            pytest.skip("No FP8 recipes available on this hardware")
+
+    # ---------------------------------------------------------------
+    # Linear — simplest module, isolates GEMM + quantize path
+    # ---------------------------------------------------------------
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD_BWD)
+    def test_linear_fwd_bwd(self, device, fp8_recipe):
+        """Linear forward+backward completes without error under each recipe."""
+        mod = te.Linear(self.HIDDEN, self.HIDDEN, bias=True,
+                        params_dtype=self.DTYPE).to(device)
+        x = torch.randn(self.BATCH, self.HIDDEN, device=device,
+                         dtype=self.DTYPE, requires_grad=True)
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            y = mod(x)
+        y.sum().backward()
+        torch.cuda.synchronize()
+        assert y.shape == (self.BATCH, self.HIDDEN)
+        assert x.grad is not None
+        assert x.grad.shape == x.shape
+        for p in mod.parameters():
+            if p.requires_grad:
+                assert p.grad is not None, f"Missing grad for param shape {p.shape}"
+
+    # ---------------------------------------------------------------
+    # LayerNormLinear — tests fused norm+quant -> GEMM path
+    # ---------------------------------------------------------------
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD_BWD)
+    @pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+    def test_layernorm_linear_fwd_bwd(self, device, fp8_recipe, normalization):
+        """LayerNormLinear forward+backward under each recipe and norm variant."""
+        mod = te.LayerNormLinear(
+            self.HIDDEN, self.HIDDEN, bias=True,
+            normalization=normalization,
+            params_dtype=self.DTYPE,
+        ).to(device)
+        x = torch.randn(self.BATCH, self.HIDDEN, device=device,
+                         dtype=self.DTYPE, requires_grad=True)
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            y = mod(x)
+        y.sum().backward()
+        torch.cuda.synchronize()
+        assert y.shape == (self.BATCH, self.HIDDEN)
+        assert x.grad is not None
+
+    # ---------------------------------------------------------------
+    # LayerNormMLP — norm+quant -> GEMM -> act+quant -> GEMM
+    # ---------------------------------------------------------------
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD_BWD)
+    @pytest.mark.parametrize("activation", ["gelu", "swiglu", "geglu"])
+    def test_layernorm_mlp_fwd_bwd(self, device, fp8_recipe, activation):
+        """LayerNormMLP forward+backward — exercises fused act+quant dispatch."""
+        mod = te.LayerNormMLP(
+            self.HIDDEN, self.FFN_HIDDEN,
+            activation=activation,
+            params_dtype=self.DTYPE,
+        ).to(device)
+        x = torch.randn(self.BATCH, self.HIDDEN, device=device,
+                         dtype=self.DTYPE, requires_grad=True)
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            y = mod(x)
+        y.sum().backward()
+        torch.cuda.synchronize()
+        assert y.shape == (self.BATCH, self.HIDDEN)
+        assert x.grad is not None
+
+    # ---------------------------------------------------------------
+    # Multi-step — catches stale scale / amax history bugs
+    # ---------------------------------------------------------------
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD_BWD)
+    def test_linear_multi_step(self, device, fp8_recipe):
+        """3-step forward+backward — verifies amax history and scale updates."""
+        mod = te.Linear(self.HIDDEN, self.HIDDEN, bias=True,
+                        params_dtype=self.DTYPE).to(device)
+        for step in range(3):
+            x = torch.randn(self.BATCH, self.HIDDEN, device=device,
+                             dtype=self.DTYPE, requires_grad=True)
+            with te.autocast(enabled=True, recipe=fp8_recipe):
+                y = mod(x)
+            y.sum().backward()
+            torch.cuda.synchronize()
+            assert y.shape == (self.BATCH, self.HIDDEN), f"Failed at step {step}"
+            assert x.grad is not None, f"No input grad at step {step}"
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD_BWD)
+    def test_layernorm_mlp_multi_step(self, device, fp8_recipe):
+        """3-step LayerNormMLP — full pipeline with scale state evolution."""
+        mod = te.LayerNormMLP(
+            self.HIDDEN, self.FFN_HIDDEN,
+            activation="swiglu",
+            params_dtype=self.DTYPE,
+        ).to(device)
+        for step in range(3):
+            x = torch.randn(self.BATCH, self.HIDDEN, device=device,
+                             dtype=self.DTYPE, requires_grad=True)
+            with te.autocast(enabled=True, recipe=fp8_recipe):
+                y = mod(x)
+            y.sum().backward()
+            torch.cuda.synchronize()
+            assert y.shape == (self.BATCH, self.HIDDEN), f"Failed at step {step}"
+
+    # ---------------------------------------------------------------
+    # Output sanity — FP8 shouldn't produce garbage
+    # ---------------------------------------------------------------
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD)
+    def test_linear_output_finite(self, device, fp8_recipe):
+        """FP8 output should be finite and not all-zeros."""
+        mod = te.Linear(self.HIDDEN, self.HIDDEN, bias=True,
+                        params_dtype=self.DTYPE).to(device)
+        x = torch.randn(self.BATCH, self.HIDDEN, device=device,
+                         dtype=self.DTYPE)
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            y = mod(x)
+        assert torch.isfinite(y).all(), "Output contains NaN/Inf"
+        assert y.abs().max() > 0, "Output is all zeros"
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD)
+    def test_fp8_vs_bf16_correlation(self, device, fp8_recipe):
+        """FP8 output should correlate with bf16 output (same weights, same input)."""
+        mod = te.Linear(self.HIDDEN, self.HIDDEN, bias=True,
+                        params_dtype=self.DTYPE).to(device)
+        x = torch.randn(self.BATCH, self.HIDDEN, device=device,
+                         dtype=self.DTYPE)
+
+        # bf16 reference (no FP8)
+        with torch.no_grad():
+            ref = mod(x)
+
+        # FP8 path
+        with torch.no_grad():
+            with te.autocast(enabled=True, recipe=fp8_recipe):
+                fp8_out = mod(x)
+
+        cos_sim = F.cosine_similarity(ref.flatten().float(),
+                                       fp8_out.flatten().float(), dim=0)
+        assert cos_sim > 0.9, (
+            f"FP8 output too far from bf16: cosine_similarity={cos_sim:.4f}"
         )
