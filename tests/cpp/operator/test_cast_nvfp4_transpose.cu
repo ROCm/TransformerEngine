@@ -626,6 +626,7 @@ void performTest(float (*OP)(const float),
     rng_state.rowwise_cpu_dptr<int64_t>()[1] = 321;  // rng_sequence
     rng_state.from_cpu();
 
+    QuantizationConfigWrapper quant_config;
     quant_config.set_use_fast_math(use_fast_math);
 #ifdef __HIP_PLATFORM_AMD__
     quant_config.set_stochastic_rounding(use_stochastic_rounding);
