@@ -27,6 +27,7 @@ namespace {
 
 #ifndef __HIP_PLATFORM_AMD__
 constexpr int kThreadsPerWarp = 32;
+
 template <typename IType, int kHadamardDimension, int BUFF_DIM_Y, int BUFF_DIM_X,
           bool kReturnPreRhtAmax, bool kReturnIdentityAmax, bool kReturnTransposedAmax>
 __device__ __forceinline__ void ComputeKernel(uint32_t b_frag_i[4], uint32_t b_frag_t[4],
