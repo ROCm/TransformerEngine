@@ -355,14 +355,16 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
                 )
                 return triton_a8w8_bs(x, w, x_scale, w_scale)
             else:
-                # Per-tensor FP8. aiter.gemm_a8w8 is INT8-only, so reuse the
-                # per-token kernel with scalar scales broadcast to (M,1)/(N,1).
-                from aiter.ops.triton.gemm_a8w8_per_token_scale import (
-                    gemm_a8w8_per_token_scale as triton_a8w8_pt,
+                # Per-tensor FP8. gemm_a8w8 indexes the scale pointer by row
+                # (A) / col (B), so a scalar (1,) scale reads out of bounds
+                # and produces garbage. Expand to (M,) and (N,) so every
+                # row/col sees the same per-tensor scale.
+                from aiter.ops.triton.gemm_a8w8 import (
+                    gemm_a8w8 as triton_a8w8,
                 )
-                x_scale_exp = x_scale.expand(x.shape[0]).unsqueeze(1).contiguous()
-                w_scale_exp = w_scale.expand(w.shape[0]).unsqueeze(1).contiguous()
-                return triton_a8w8_pt(x, w, x_scale_exp, w_scale_exp)
+                x_scale_exp = x_scale.expand(x.shape[0]).contiguous()
+                w_scale_exp = w_scale.expand(w.shape[0]).contiguous()
+                return triton_a8w8(x, w, x_scale_exp, w_scale_exp)
 
         elif not a_is_fp8 and b_is_fp8:
             try:
