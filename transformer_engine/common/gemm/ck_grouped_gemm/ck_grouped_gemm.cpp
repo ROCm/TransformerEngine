@@ -39,23 +39,53 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   const NVTETensor* B_use = A;
   bool transA_use = transB;
   bool transB_use = transA;
+  bool use_a_columnwise_data = false;
   bool use_b_columnwise_data = false;
 
   const auto caller_a_dtype = convertNVTETensorCheck(A[0])->dtype(); 
   const bool is_8bit_float = is_fp8_dtype(caller_a_dtype);
   const bool is_16bit_float = is_fp16_dtype(caller_a_dtype);
   
+  Tensor* A0_te = convertNVTETensorCheck(A_use[0]);
+  Tensor* B0_te = convertNVTETensorCheck(B_use[0]);
+
   // Currently the accumulate path is only supported on fp16
   if (accumulate && is_8bit_float)
   	return false;
 
-  // Handle pathological NN case during fp8 dX GEMM by reading W columnwise and re-formulating as NT
-  if (!transA_use && !transB_use && is_8bit_float) {
-    auto* B0_te = convertNVTETensorCheck(B_use[0]);
-    if (B0_te->has_columnwise_data()) {
-      use_b_columnwise_data = true;
-      transB_use = true;
-    } 
+  // FP8 special handling:
+  //
+  // Prefer reformulating problematic normalized layouts into NT using the
+  // alternate physical storage view when available.
+  //
+  // Cases handled:
+  //   1) normalized NN -> NT by reading B from columnwise storage
+  //   2) normalized TN -> NT by reading both A and B from columnwise storage
+  if (is_8bit_float) {
+    // normalized NN: op(A_use)=A, op(B_use)=B
+    if (!transA_use && !transB_use) {
+      if (B0_te->has_columnwise_data()) {
+        use_b_columnwise_data = true;
+        transB_use = true;
+      }
+    }
+
+    // normalized TN: op(A_use)=A^T, op(B_use)=B
+    else if (transA_use && !transB_use) {
+      const bool has_a_col = A0_te->has_columnwise_data();
+      const bool has_b_col = B0_te->has_columnwise_data();
+
+      if (has_a_col && has_b_col) {
+        use_a_columnwise_data = true;
+        use_b_columnwise_data = true;
+        transA_use = false;
+        transB_use = true;
+      } else if (has_a_col) {
+        // Fallback: preserves math, but does not become NT.
+        use_a_columnwise_data = true;
+        transA_use = false;
+      }
+    }
   }
 
   const auto a_dtype = convertNVTETensorCheck(A_use[0])->dtype();
@@ -64,16 +94,20 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   Tensor* D0_te = convertNVTETensorCheck(D[0]);
   const auto d_dtype = D0_te->dtype();
 
-  Tensor* A0_te = convertNVTETensorCheck(A_use[0]);
-  Tensor* B0_te = convertNVTETensorCheck(B_use[0]);
-
   int64_t a0 = 0, a1 = 0;
   int64_t b0 = 0, b1 = 0;
   int64_t d0 = 0, d1 = 0;
 
-  if (!get_flat_2d_dims(*A0_te, a0, a1)) {
-    NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for normalized A_use[0]");
-    return false;
+  if (use_a_columnwise_data) {
+    if (!get_columnwise_storage_2d_dims(A0_te->columnwise_data, a0, a1)) {
+      NVTE_ERROR("ck_tile_grouped_gemm: expected 2D columnwise_data for A_use[0]");
+      return false;
+    }
+  } else {
+    if (!get_flat_2d_dims(*A0_te, a0, a1)) {
+      NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for normalized A_use[0]");
+      return false;
+    }
   }
 
   if (use_b_columnwise_data) {
@@ -122,6 +156,7 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
       ws_ptr,
       ws_bytes,
       stream,
+      use_a_columnwise_data,
       use_b_columnwise_data,
       accumulate};
 

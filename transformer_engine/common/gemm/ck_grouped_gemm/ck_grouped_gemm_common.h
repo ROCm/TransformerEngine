@@ -84,6 +84,7 @@ struct GroupedGemmRunContext {
     size_t workspace_bytes = 0;
     hipStream_t stream = nullptr;
 
+    bool use_a_columnwise_data = false;
     bool use_b_columnwise_data = false;
     bool accumulate = false;
 };
