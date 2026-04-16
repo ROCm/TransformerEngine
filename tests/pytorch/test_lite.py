@@ -3207,21 +3207,8 @@ def _recipe_id(val):
 
 
 def _mark_recipes(recipes):
-    """Wrap recipes with xfail markers for known lite-mode bugs."""
-    marked = []
-    for r in recipes:
-        name = type(r).__name__
-        if name == "DelayedScaling":
-            marked.append(pytest.param(
-                r, id=name,
-                marks=pytest.mark.xfail(
-                    reason="_lite fused_amax_and_scale_update_after_reduction signature mismatch",
-                    strict=True,
-                ),
-            ))
-        else:
-            marked.append(pytest.param(r, id=name))
-    return marked
+    """Wrap recipes with xfail markers for any known lite-mode bugs."""
+    return [pytest.param(r, id=type(r).__name__) for r in recipes]
 
 
 _RECIPES = _available_recipes()

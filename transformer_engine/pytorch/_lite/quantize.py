@@ -194,6 +194,11 @@ def _quantize_per_row_dynamic(input_tensor, quantizer, out):
     out._data.copy_(fp8_bytes.reshape(out._data.shape))
     # Store per-row dequant scales — downstream GEMM detects numel() > 1
     out._scale_inv = scale_out
+    # Mark transpose cache stale so update_usage(columnwise=True) will
+    # regenerate it from the freshly-written _data instead of using the
+    # uninitialized buffer allocated by make_empty().
+    if hasattr(out, '_transpose_invalid'):
+        out._transpose_invalid = True
 
     return out
 
@@ -482,32 +487,64 @@ def compute_amax(input, amax):
 
 
 def fused_amax_and_scale_update_after_reduction(
-    amax_history, scale, scale_inv, scale_inv_mask, fp8_max, recipe_type,
-    amax_compute_algo, is_mxfp8
+    contiguous_amax, amax_histories, scales,
+    amax_compute_algo, fp8_dtype, margin,
 ):
-    """Update amax history and FP8 scale/scale_inv after reduction.
+    """Update amax history and FP8 scale after amax reduction (delayed scaling).
 
-    Mirrors the C++ kernel in common/recipe/delayed_scaling.cu:
-    1. Roll history window: shift rows down, current amax stays at [0].
-    2. Compute scale from history using amax_compute_algo.
+    Called by FP8GlobalStateManager.reduce_and_update_fp8_tensors during
+    every training step. Mirrors the fused C++ kernel: writes the current
+    step's reduced amax into the history buffer, rolls the window, and
+    recomputes the scale from the max (or most_recent) of the history.
+
+    Args:
+        contiguous_amax: flat tensor of reduced amax values for all tensors
+        amax_histories: list of [history_len, N_i] tensors (per-module group)
+        scales: list of [N_i] scale buffers (per-module group)
+        amax_compute_algo: "max" or "most_recent" (callable handled upstream)
+        fp8_dtype: TE_DType (kFloat8E4M3 or kFloat8E5M2)
+        margin: int, scale = fp8_max / amax / 2**margin
     """
-    # Roll history: move row i to row i+1, freeing row 0 for the next step's amax.
-    # amax_history[0] already holds the current step's amax (written by quantize kernel).
-    if amax_history.shape[0] > 1:
-        amax_history[1:] = amax_history[:-1].clone()
+    from transformer_engine.common.recipe import _FormatMaxVals
 
-    # Compute effective amax from history window
-    if callable(amax_compute_algo):
-        amax = amax_compute_algo(amax_history)
-    elif amax_compute_algo == "most_recent":
-        amax = amax_history[0].clone()
-    else:  # "max" (default)
-        amax = amax_history.max(dim=0).values
+    # Map FP8 dtype → max representable value (matches get_fp8_max). On ROCm
+    # (fnuz dtypes) E4M3 is clamped to 240 instead of 448.
+    try:
+        is_fnuz = torch.float8_e4m3fnuz is not None and torch.cuda.is_available()
+    except AttributeError:
+        is_fnuz = False
+    dtype_name = str(fp8_dtype).rsplit('.', 1)[-1]  # "kFloat8E4M3" or "kFloat8E5M2"
+    if "E4M3" in dtype_name:
+        fp8_max = _FormatMaxVals.E4M3.value[1 if is_fnuz else 0]
+    else:
+        fp8_max = _FormatMaxVals.E5M2.value[1 if is_fnuz else 0]
 
-    amax = torch.clamp(amax, min=1e-12)
-    new_scale = fp8_max / amax
-    scale.copy_(new_scale)
-    scale_inv.copy_(1.0 / new_scale)
+    # Split the flat contiguous_amax by each group's per-tensor count (last dim
+    # of history). E.g. history [1024, 3] → chunk of size 3 in contiguous_amax.
+    chunk_sizes = [h.shape[-1] for h in amax_histories]
+    splits = contiguous_amax.split(chunk_sizes)
+    for amax_history, scale, amax_chunk in zip(amax_histories, scales, splits):
+        # Write current step's reduced amax into slot 0 of history
+        amax_history[0].copy_(amax_chunk)
+
+        # Compute effective amax from history
+        if amax_compute_algo == "most_recent":
+            amax = amax_history[0].clone()
+        else:  # "max"
+            amax = amax_history.max(dim=0).values
+
+        # Roll history window: slot 0 gets zeroed for next step's write
+        if amax_history.shape[0] > 1:
+            amax_history.copy_(torch.roll(amax_history, -1, 0))
+        amax_history[0].fill_(0.0)
+
+        # Compute scale: fp8_max / amax / 2**margin, with safe fallbacks
+        sf = (fp8_max / amax) / (2 ** margin)
+        fp32_max = torch.finfo(torch.float32).max
+        sf = torch.where(amax > 0.0, sf, scale)
+        sf = torch.where(torch.isfinite(amax), sf, scale)
+        sf = torch.where(torch.isinf(sf), torch.full_like(sf, fp32_max), sf)
+        scale.copy_(sf)
 
 
 # ---------------------------------------------------------------------------
