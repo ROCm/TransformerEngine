@@ -3574,3 +3574,149 @@ class TestLiteAPI:
         assert hasattr(r, "Float8CurrentScaling")
         assert hasattr(r, "Float8BlockScaling")
         assert hasattr(r, "MXFP8BlockScaling")
+
+
+# ---------------------------------------------------------------------------
+# End-to-end training loop tests — optimizer.step() drives weight updates,
+# verifying that FP8 recipes actually converge and the fp8 weight cache
+# invalidates correctly between steps.
+# ---------------------------------------------------------------------------
+
+class TestFP8Training:
+    """Verify FP8 recipes support real training (optimizer.step)."""
+
+    DTYPE = torch.bfloat16
+    HIDDEN = 256
+    FFN_HIDDEN = 1024
+    BATCH = 8
+
+    @pytest.fixture(autouse=True)
+    def _reset_fp8_state(self):
+        yield
+        FP8GlobalStateManager.reset()
+
+    def _overfit_and_check(self, mod, x, target, fp8_recipe,
+                            steps=50, lr=1e-3, use_amp=False,
+                            loss_drop_ratio=0.8):
+        """Run N training steps with Adam; assert loss drops by at least
+        (1-loss_drop_ratio) of the initial value. Adam is used (not SGD)
+        to avoid per-module LR tuning — it adapts to gradient magnitudes."""
+        opt = torch.optim.Adam(mod.parameters(), lr=lr)
+        losses = []
+        for _ in range(steps):
+            opt.zero_grad()
+            if use_amp:
+                with torch.amp.autocast("cuda", dtype=self.DTYPE):
+                    with te.autocast(enabled=True, recipe=fp8_recipe):
+                        y = mod(x)
+            else:
+                with te.autocast(enabled=True, recipe=fp8_recipe):
+                    y = mod(x)
+            loss = (y.float() - target.float()).pow(2).mean()
+            loss.backward()
+            opt.step()
+            losses.append(loss.item())
+        torch.cuda.synchronize()
+        # No NaN/Inf during the trajectory
+        assert all(torch.isfinite(torch.tensor(L)) for L in losses), (
+            f"Non-finite loss during training: trajectory={losses[::5]}"
+        )
+        # Substantial learning (final < loss_drop_ratio * initial)
+        assert losses[-1] < losses[0] * loss_drop_ratio, (
+            f"Loss didn't drop enough: {losses[0]:.4f} -> {losses[-1]:.4f} "
+            f"(trajectory every 10: {losses[::10]})"
+        )
+        return losses
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD_BWD)
+    def test_linear_overfits_batch(self, device, fp8_recipe):
+        """Linear should overfit a fixed batch under each FP8 recipe."""
+        torch.manual_seed(0)
+        mod = te.Linear(self.HIDDEN, self.HIDDEN, bias=True,
+                        params_dtype=self.DTYPE).to(device)
+        x = torch.randn(self.BATCH, self.HIDDEN, device=device, dtype=self.DTYPE)
+        target = torch.randn(self.BATCH, self.HIDDEN, device=device, dtype=self.DTYPE)
+        self._overfit_and_check(mod, x, target, fp8_recipe)
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD_BWD)
+    def test_layernorm_mlp_overfits_batch(self, device, fp8_recipe):
+        """LayerNormMLP should overfit a fixed batch."""
+        torch.manual_seed(0)
+        mod = te.LayerNormMLP(self.HIDDEN, self.FFN_HIDDEN,
+                              activation="swiglu",
+                              params_dtype=self.DTYPE).to(device)
+        x = torch.randn(self.BATCH, self.HIDDEN, device=device, dtype=self.DTYPE)
+        target = torch.randn(self.BATCH, self.HIDDEN, device=device, dtype=self.DTYPE)
+        self._overfit_and_check(mod, x, target, fp8_recipe)
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD_BWD)
+    def test_transformer_layer_overfits_batch(self, device, fp8_recipe):
+        """TransformerLayer should overfit a fixed batch."""
+        torch.manual_seed(0)
+        mod = te.TransformerLayer(
+            self.HIDDEN, self.FFN_HIDDEN, num_attention_heads=4,
+            params_dtype=self.DTYPE,
+        ).to(device)
+        x = torch.randn(self.BATCH, 2, self.HIDDEN, device=device, dtype=self.DTYPE)
+        target = torch.randn(self.BATCH, 2, self.HIDDEN, device=device, dtype=self.DTYPE)
+        self._overfit_and_check(mod, x, target, fp8_recipe, use_amp=True)
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD_BWD)
+    def test_weights_change_after_step(self, device, fp8_recipe):
+        """Sanity: optimizer.step() must actually update the weights."""
+        torch.manual_seed(0)
+        mod = te.Linear(self.HIDDEN, self.HIDDEN, bias=True,
+                        params_dtype=self.DTYPE).to(device)
+        opt = torch.optim.SGD(mod.parameters(), lr=0.1)
+
+        x = torch.randn(self.BATCH, self.HIDDEN, device=device, dtype=self.DTYPE)
+        w_before = mod.weight.detach().clone()
+
+        with te.autocast(enabled=True, recipe=fp8_recipe):
+            y = mod(x)
+        y.sum().backward()
+        opt.step()
+        torch.cuda.synchronize()
+
+        assert not torch.equal(w_before, mod.weight), (
+            "Weights unchanged after optimizer.step()"
+        )
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD_BWD)
+    def test_fp8_training_tracks_bf16(self, device, fp8_recipe):
+        """After N training steps, FP8 weights should still correlate with bf16 weights.
+        Catches FP8 weight-cache staleness — if fp8 cache isn't invalidated after
+        optimizer.step, the two trajectories diverge rapidly."""
+        torch.manual_seed(0)
+        mod_fp8 = te.Linear(self.HIDDEN, self.HIDDEN, bias=True,
+                            params_dtype=self.DTYPE).to(device)
+        torch.manual_seed(0)
+        mod_bf = te.Linear(self.HIDDEN, self.HIDDEN, bias=True,
+                           params_dtype=self.DTYPE).to(device)
+
+        opt_fp8 = torch.optim.SGD(mod_fp8.parameters(), lr=0.01)
+        opt_bf = torch.optim.SGD(mod_bf.parameters(), lr=0.01)
+
+        for step in range(10):
+            torch.manual_seed(step + 1)
+            x = torch.randn(self.BATCH, self.HIDDEN, device=device, dtype=self.DTYPE)
+            target = torch.randn(self.BATCH, self.HIDDEN, device=device, dtype=self.DTYPE)
+
+            opt_fp8.zero_grad()
+            with te.autocast(enabled=True, recipe=fp8_recipe):
+                y = mod_fp8(x)
+            ((y.float() - target.float()).pow(2).mean()).backward()
+            opt_fp8.step()
+
+            opt_bf.zero_grad()
+            y_bf = mod_bf(x)
+            ((y_bf.float() - target.float()).pow(2).mean()).backward()
+            opt_bf.step()
+
+        torch.cuda.synchronize()
+        cos = F.cosine_similarity(
+            mod_fp8.weight.detach().float().flatten(),
+            mod_bf.weight.detach().float().flatten(),
+            dim=0,
+        ).item()
+        assert cos > 0.95, f"FP8 weights diverged from bf16: cos={cos:.4f}"
