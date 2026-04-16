@@ -25,9 +25,8 @@
 namespace transformer_engine {
 namespace {
 
-constexpr int kThreadsPerWarp = 32;
-
 #ifndef __HIP_PLATFORM_AMD__
+constexpr int kThreadsPerWarp = 32;
 template <typename IType, int kHadamardDimension, int BUFF_DIM_Y, int BUFF_DIM_X,
           bool kReturnPreRhtAmax, bool kReturnIdentityAmax, bool kReturnTransposedAmax>
 __device__ __forceinline__ void ComputeKernel(uint32_t b_frag_i[4], uint32_t b_frag_t[4],
@@ -491,21 +490,37 @@ __global__ void HadamardTransformKernel(const T* __restrict__ input, T* __restri
 }
 
 #endif  // __HIP_PLATFORM_AMD__
-}  // namespace
 
 #ifdef __HIP_PLATFORM_AMD__
 
-namespace {
-
-static constexpr int kHadamardDim     = 16;
-static constexpr int kWarpSize        = 64;
-static constexpr int kThreadsPerWHT   = 4;
-static constexpr int kElemsPerThread  = 4;
+// Tiling / layout constants
+//
+// A 16-point WHT operates on tiles of kHadamardDim (16) elements.
+// Each tile is processed by kThreadsPerWHT (4) threads, each holding
+// kElemsPerThread (4) values, so one wavefront of kWarpSize (64) lanes
+// handles kRowsPerWarp (16) independent tiles (= rows) simultaneously.
+// kWarpsPerBlock wavefronts are combined into a thread-block that covers
+// kRowsPerBlock (64) consecutive rows.
+static constexpr int kHadamardDim     = 16;   // WHT dimension (H16)
+static constexpr int kWarpSize        = 64;   // Wavefront width
+static constexpr int kThreadsPerWHT   = 4;    // threads per 16-pt WHT
+static constexpr int kElemsPerThread  = 4;    // elements each thread owns
 static constexpr int kRowsPerWarp     = kWarpSize / kThreadsPerWHT;   // 16
 static constexpr int kWarpsPerBlock   = 4;
 static constexpr int kRowsPerBlock    = kRowsPerWarp * kWarpsPerBlock; // 64
 static constexpr int kThreadsPerBlock = kWarpSize   * kWarpsPerBlock;  // 256
-static constexpr float kHadamardScale = 0.25f;
+static constexpr float kHadamardScale = 0.25f; // 1/sqrt(16)
+
+// Reduce per-warp amax values in warp 0 and atomically update a global amax.
+__device__ __forceinline__ void reduce_block_amax(
+        const float* __restrict__ warp_amax, int lane_id,
+        float* __restrict__ global_amax) {
+    float val = (lane_id < kWarpsPerBlock) ? warp_amax[lane_id] : 0.f;
+    for (int off = kWarpSize / 2; off >= 1; off >>= 1)
+        val = fmaxf(val, __shfl_xor(val, off));
+    if (lane_id == 0)
+        atomicMaxFloat(global_amax, val);
+}
 
 // ds_swizzle: sub-wavefront exchange without LDS.
 // Same instructions as cast_transpose_mxfp4_kernel_shuffled.cu.
@@ -675,19 +690,20 @@ void HadamardTransformKernel(
     // Identity path: WHT along row dimension
     if constexpr (kComputeIdentity || kUpdateAmax) {
         float r0=v0, r1=v1, r2=v2, r3=v3;
-        float lam = 0.f;
+        float local_amax = 0.f;
         if (global_row < num_rows) {
             wht16(r0, r1, r2, r3, thread_in_grp, random_sign_mask, apply_pre);
             if constexpr (kUpdateAmax) {
-                // Match the stored/output precision when reporting amax.
+                // Down-cast to BF16 and back so the amax matches the
+                // stored/output precision (matches upstream NV behaviour).
                 const float r0_bf16 = to_f32(to_bf16(r0));
                 const float r1_bf16 = to_f32(to_bf16(r1));
                 const float r2_bf16 = to_f32(to_bf16(r2));
                 const float r3_bf16 = to_f32(to_bf16(r3));
-                lam = fmaxf(fmaxf(fabsf(r0_bf16), fabsf(r1_bf16)),
-                            fmaxf(fabsf(r2_bf16), fabsf(r3_bf16)));
+                local_amax = fmaxf(fmaxf(fabsf(r0_bf16), fabsf(r1_bf16)),
+                                   fmaxf(fabsf(r2_bf16), fabsf(r3_bf16)));
                 for (int off=kWarpSize/2; off>=1; off>>=1)
-                  lam=fmaxf(lam,__shfl_xor(lam,off));
+                  local_amax=fmaxf(local_amax,__shfl_xor(local_amax,off));
             }
             if constexpr (kComputeIdentity)
                 if (output && in_bounds)
@@ -696,7 +712,7 @@ void HadamardTransformKernel(
         }
         if constexpr (kUpdateAmax) {
             if (lane_id == 0)
-              block_amax[warp_id] = lam;
+              block_amax[warp_id] = local_amax;
         }
     }
 
@@ -704,7 +720,7 @@ void HadamardTransformKernel(
     if constexpr (kComputeTransposed || kUpdateAmaxT) {
         const int local_row  = warp_id * kRowsPerWarp + row_in_warp;
         const int col_offset = thread_in_grp * kElemsPerThread;
-        float lam = 0.f;
+        float local_amax = 0.f;
         smem[local_row][col_offset+0] = to_bf16(global_row < num_rows ? v0 : 0.f);
         smem[local_row][col_offset+1] = to_bf16(global_row < num_rows ? v1 : 0.f);
         smem[local_row][col_offset+2] = to_bf16(global_row < num_rows ? v2 : 0.f);
@@ -721,16 +737,17 @@ void HadamardTransformKernel(
         wht16(c0, c1, c2, c3, thread_in_grp, random_sign_mask_t, apply_pre);
 
         if constexpr (kUpdateAmaxT) {
-            // Match the stored/output precision when reporting amax.
+            // Down-cast to BF16 and back so the amax matches the
+            // stored/output precision (matches upstream NV behaviour).
             const float c0_bf16 = to_f32(to_bf16(c0));
             const float c1_bf16 = to_f32(to_bf16(c1));
             const float c2_bf16 = to_f32(to_bf16(c2));
             const float c3_bf16 = to_f32(to_bf16(c3));
-            lam = fmaxf(fmaxf(fabsf(c0_bf16), fabsf(c1_bf16)),
-                        fmaxf(fabsf(c2_bf16), fabsf(c3_bf16)));
+            local_amax = fmaxf(fmaxf(fabsf(c0_bf16), fabsf(c1_bf16)),
+                               fmaxf(fabsf(c2_bf16), fabsf(c3_bf16)));
 
             for (int off=kWarpSize/2; off>=1; off>>=1)
-              lam=fmaxf(lam,__shfl_xor(lam,off));
+              local_amax=fmaxf(local_amax,__shfl_xor(local_amax,off));
         }
 
         if constexpr (kComputeTransposed) {
@@ -747,7 +764,7 @@ void HadamardTransformKernel(
 
         if constexpr (kUpdateAmaxT) {
             if (lane_id == 0)
-              block_amax_t[warp_id] = lam;
+              block_amax_t[warp_id] = local_amax;
         }
     }
 
@@ -755,25 +772,10 @@ void HadamardTransformKernel(
         __syncthreads();
 
         if (warp_id == 0) {
-            if constexpr (kUpdateAmax) {
-                float block_lam = (lane_id < kWarpsPerBlock) ? block_amax[lane_id] : 0.f;
-
-                for (int off=kWarpSize/2; off>=1; off>>=1)
-                  block_lam = fmaxf(block_lam, __shfl_xor(block_lam, off));
-
-                if (lane_id == 0)
-                  atomicMaxFloat(amax, block_lam);
-            }
-
-            if constexpr (kUpdateAmaxT) {
-                float block_lam_t = (lane_id < kWarpsPerBlock) ? block_amax_t[lane_id] : 0.f;
-
-                for (int off=kWarpSize/2; off>=1; off>>=1)
-                  block_lam_t = fmaxf(block_lam_t, __shfl_xor(block_lam_t, off));
-
-                if (lane_id == 0)
-                  atomicMaxFloat(amax_t, block_lam_t);
-            }
+            if constexpr (kUpdateAmax)
+                reduce_block_amax(block_amax, lane_id, amax);
+            if constexpr (kUpdateAmaxT)
+                reduce_block_amax(block_amax_t, lane_id, amax_t);
         }
     }
 }
@@ -782,29 +784,23 @@ void HadamardTransformKernel(
 __global__ void PreRhtAmaxKernel(const __hip_bfloat16* __restrict__ input,
                                  float* __restrict__ amax_out, uint64_t num_elems) {
     __shared__ float block_amax[kWarpsPerBlock];
-    float lam = 0.f;
+    float local_amax = 0.f;
     for (uint64_t i = (uint64_t)blockIdx.x*blockDim.x+threadIdx.x;
          i < num_elems; i += (uint64_t)gridDim.x*blockDim.x)
-      lam = fmaxf(lam, fabsf(to_f32(input[i])));
+      local_amax = fmaxf(local_amax, fabsf(to_f32(input[i])));
 
     for (int off=kWarpSize/2; off>=1; off>>=1)
-      lam=fmaxf(lam,__shfl_xor(lam,off));
+      local_amax=fmaxf(local_amax,__shfl_xor(local_amax,off));
 
     const int warp_id = threadIdx.x / kWarpSize;
     const int lane_id = threadIdx.x % kWarpSize;
     if (lane_id == 0)
-      block_amax[warp_id] = lam;
+      block_amax[warp_id] = local_amax;
 
     __syncthreads();
 
-    if (warp_id == 0) {
-      float block_lam = (lane_id < kWarpsPerBlock) ? block_amax[lane_id] : 0.f;
-      for (int off=kWarpSize/2; off>=1; off>>=1)
-        block_lam=fmaxf(block_lam,__shfl_xor(block_lam,off));
-
-      if (lane_id == 0)
-        atomicMaxFloat(amax_out, block_lam);
-    }
+    if (warp_id == 0)
+      reduce_block_amax(block_amax, lane_id, amax_out);
 }
 
 static inline dim3 transform_grid(uint64_t num_rows, uint64_t row_length) {
@@ -812,9 +808,9 @@ static inline dim3 transform_grid(uint64_t num_rows, uint64_t row_length) {
                 (uint32_t)DIVUP(num_rows, (uint64_t)kRowsPerBlock));
 }
 
-}  // namespace
-
 #endif  // __HIP_PLATFORM_AMD__
+
+}  // namespace
 
 void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_sign_mask,
                         uint16_t random_sign_mask_t, cudaStream_t stream) {
