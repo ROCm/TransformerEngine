@@ -42,12 +42,22 @@ def _dequantize_from_transpose(tensor):
     if t.dtype == torch.uint8 and hasattr(tensor, '_fp8_dtype'):
         from transformer_engine.pytorch._lite.quantize import _te_dtype_to_torch_fp8
         t = t.view(_te_dtype_to_torch_fp8(tensor._fp8_dtype))
-    # _transpose is shape [K, M]; logical shape is [M, K]
-    logical = t.t().contiguous().to(torch.bfloat16)
+    # _transpose is [K, d0, d1, ...] (last dim moved to front); invert to
+    # the logical [d0, d1, ..., K].
+    if t.ndim == 2:
+        logical = t.t().contiguous().to(torch.bfloat16)
+    else:
+        inv_perm = list(range(1, t.ndim)) + [0]
+        logical = t.permute(*inv_perm).contiguous().to(torch.bfloat16)
     scale_inv = tensor._scale_inv
     if scale_inv.numel() == 1:
         return logical * scale_inv
-    # Per-row scale shape (M,) broadcasts against [M, K]
+    # Per-row scale shape (M_flat,); reshape to match logical's leading dims
+    leading_numel = 1
+    for d in logical.shape[:-1]:
+        leading_numel *= d
+    if scale_inv.numel() == leading_numel:
+        return logical * scale_inv.reshape(*logical.shape[:-1], 1)
     return logical * scale_inv.reshape(-1, 1)
 
 
@@ -216,8 +226,25 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
             # TE: result = B @ A. transA=True means A is (N,K) weight layout.
             # When _get_raw_data returned the transpose (columnwise-only
             # tensor, e.g. wgrad inputmat), orientation is already flipped.
-            effective_transA = transA ^ _is_transpose_only(A)
-            effective_transB = transB ^ _is_transpose_only(B)
+            a_transpose_only = _is_transpose_only(A)
+            b_transpose_only = _is_transpose_only(B)
+            effective_transA = transA ^ a_transpose_only
+            effective_transB = transB ^ b_transpose_only
+
+            # CK FP8 kernels require 2D; flatten N-D leading dims first so
+            # subsequent .t() works and scales (which are per flattened row)
+            # stay aligned. _data is [d0, ..., K]; _transpose is [K, d0, ...].
+            x_leading_shape = b_data.shape[:-1] if not b_transpose_only else b_data.shape[1:]
+            if b_data.ndim > 2:
+                if b_transpose_only:
+                    b_data = b_data.reshape(b_data.shape[0], -1)
+                else:
+                    b_data = b_data.reshape(-1, b_data.shape[-1])
+            if a_data.ndim > 2:
+                if a_transpose_only:
+                    a_data = a_data.reshape(a_data.shape[0], -1)
+                else:
+                    a_data = a_data.reshape(-1, a_data.shape[-1])
 
             if b_is_blockwise:
                 x, x_scale = _get_blockwise_data(B, need_rowwise=not transB)
@@ -240,7 +267,10 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
                     or a_is_blockwise or b_is_blockwise):
                 # Block-scale FP8 (includes Float8Blockwise)
                 if hasattr(aiter, 'gemm_a8w8_blockscale'):
-                    return aiter.gemm_a8w8_blockscale(x, w, x_scale, w_scale)
+                    result = aiter.gemm_a8w8_blockscale(x, w, x_scale, w_scale)
+                    if len(x_leading_shape) > 1:
+                        result = result.reshape(*x_leading_shape, result.shape[-1])
+                    return result
             else:
                 # Per-tensor FP8. gemm_a8w8_CK requires (M,1) x_scale and
                 # (1,N) w_scale — passing scalar (1,) produces garbage.
@@ -249,7 +279,10 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
                     N = w.shape[0]
                     x_scale_ck = x_scale.expand(M).unsqueeze(1).contiguous()
                     w_scale_ck = w_scale.expand(N).unsqueeze(0).contiguous()
-                    return aiter.gemm_a8w8_CK(x, w, x_scale_ck, w_scale_ck)
+                    result = aiter.gemm_a8w8_CK(x, w, x_scale_ck, w_scale_ck)
+                    if len(x_leading_shape) > 1:
+                        result = result.reshape(*x_leading_shape, result.shape[-1])
+                    return result
 
         elif not a_is_fp8 and b_is_fp8:
             if hasattr(aiter, 'gemm_a16w8'):
@@ -307,8 +340,26 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
         # orientation is already flipped — invert the transpose flag so the
         # dispatch logic below picks the right direction. This happens for
         # columnwise-only tensors in the wgrad path.
-        effective_transA = transA ^ _is_transpose_only(A)
-        effective_transB = transB ^ _is_transpose_only(B)
+        a_transpose_only = _is_transpose_only(A)
+        b_transpose_only = _is_transpose_only(B)
+        effective_transA = transA ^ a_transpose_only
+        effective_transB = transB ^ b_transpose_only
+
+        # Triton FP8 kernels require 2D; flatten N-D leading dims of raw data
+        # before the transpose dispatch (.t() only works on 2D).
+        # _data has shape [d0, ..., K] → flatten to [prod(d), K].
+        # _transpose has shape [K, d0, ...] → flatten to [K, prod(d)].
+        x_leading = b_data.shape[:-1] if not b_transpose_only else b_data.shape[1:]
+        if b_data.ndim > 2:
+            if b_transpose_only:
+                b_data = b_data.reshape(b_data.shape[0], -1)
+            else:
+                b_data = b_data.reshape(-1, b_data.shape[-1])
+        if a_data.ndim > 2:
+            if a_transpose_only:
+                a_data = a_data.reshape(a_data.shape[0], -1)
+            else:
+                a_data = a_data.reshape(-1, a_data.shape[-1])
 
         if b_is_blockwise:
             x, x_scale = _get_blockwise_data(B, need_rowwise=not transB)
@@ -323,6 +374,7 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
             w_scale = a_scale
 
         if a_is_fp8 and b_is_fp8:
+
             if _is_per_row_scaled(x_scale) or _is_per_row_scaled(w_scale):
                 # Per-row (per-token) FP8 — from CurrentScaling fused norm+quant.
                 # Per-row scales are valid only when they index the kernel's
@@ -347,13 +399,13 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
                     w_scale = w_scale.expand(w.shape[0]).unsqueeze(1)
                 elif w_scale is not None and w_scale.ndim == 1:
                     w_scale = w_scale.unsqueeze(1)
-                return triton_a8w8_pt(x, w, x_scale, w_scale)
+                result = triton_a8w8_pt(x, w, x_scale, w_scale)
             elif (_is_block_scaled(x_scale) or _is_block_scaled(w_scale)
                     or a_is_blockwise or b_is_blockwise):
                 from aiter.ops.triton.gemm_a8w8_blockscale import (
                     gemm_a8w8_blockscale as triton_a8w8_bs,
                 )
-                return triton_a8w8_bs(x, w, x_scale, w_scale)
+                result = triton_a8w8_bs(x, w, x_scale, w_scale)
             else:
                 # Per-tensor FP8. gemm_a8w8 indexes the scale pointer by row
                 # (A) / col (B), so a scalar (1,) scale reads out of bounds
@@ -364,7 +416,12 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
                 )
                 x_scale_exp = x_scale.expand(x.shape[0]).contiguous()
                 w_scale_exp = w_scale.expand(w.shape[0]).contiguous()
-                return triton_a8w8(x, w, x_scale_exp, w_scale_exp)
+                result = triton_a8w8(x, w, x_scale_exp, w_scale_exp)
+
+            # Restore the leading N-D shape from x (B operand) on the result
+            if len(x_leading) > 1:
+                result = result.reshape(*x_leading, result.shape[-1])
+            return result
 
         elif not a_is_fp8 and b_is_fp8:
             try:

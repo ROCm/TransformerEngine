@@ -455,9 +455,9 @@ class LayerNormMLP(TransformerEngineBaseModule):
         zero_centered_gamma: bool = False,
         return_layernorm_output: bool = False,
         device: Union[torch.device, str] = "cuda",
+        return_bias: bool = False,
         # Accepted for API compatibility with full-build LayerNormMLP but
         # ignored in lite mode (no TP/SP/FSDP/userbuffers support):
-        return_bias: bool = False,
         sequence_parallel: bool = False,
         tp_group=None,
         tp_size: int = 1,
@@ -479,6 +479,7 @@ class LayerNormMLP(TransformerEngineBaseModule):
         assert activation in _ACT_FUNC_MAP, f"Unsupported activation: {activation}"
         self.zero_centered_gamma = zero_centered_gamma
         self.return_layernorm_output = return_layernorm_output
+        self.return_bias = return_bias
 
         # No TP/SP in lite
         self.tp_size = 1
@@ -668,4 +669,16 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 is_first_microbatch,
             )
 
+        # Match full-build LayerNormMLP's return contract. Bias is already
+        # folded into `out` by the fused kernel, so return a zero placeholder
+        # for the bias tuple slot — TransformerLayer's bias_dropout_add will
+        # add zero, preserving correctness.
+        if self.return_bias:
+            primary = out[0] if self.return_layernorm_output else out
+            bias_placeholder = torch.zeros(
+                primary.shape[-1], dtype=primary.dtype, device=primary.device
+            )
+            if self.return_layernorm_output:
+                return primary, bias_placeholder, out[1]
+            return primary, bias_placeholder
         return out

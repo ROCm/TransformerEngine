@@ -3379,3 +3379,29 @@ class TestRecipeIntegration:
         assert cos_sim > 0.9, (
             f"FP8 output too far from bf16: cosine_similarity={cos_sim:.4f}"
         )
+
+    # ---------------------------------------------------------------
+    # TransformerLayer — full attention + MLP stack with FP8
+    # ---------------------------------------------------------------
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD_BWD)
+    def test_transformer_layer_fwd_bwd(self, device, fp8_recipe):
+        """Full TransformerLayer forward+backward under FP8 recipe."""
+        mod = te.TransformerLayer(
+            self.HIDDEN, self.FFN_HIDDEN, num_attention_heads=4,
+            params_dtype=self.DTYPE,
+        ).to(device)
+        # TransformerLayer expects (seq, batch, hidden)
+        x = torch.randn(
+            self.SEQ, 2, self.HIDDEN, device=device,
+            dtype=self.DTYPE, requires_grad=True,
+        )
+        with torch.amp.autocast("cuda", dtype=self.DTYPE):
+            with te.autocast(enabled=True, recipe=fp8_recipe):
+                y = mod(x)
+        y.sum().backward()
+        torch.cuda.synchronize()
+        assert y.shape == x.shape
+        assert torch.isfinite(y).all()
+        assert x.grad is not None
+        assert torch.isfinite(x.grad).all()

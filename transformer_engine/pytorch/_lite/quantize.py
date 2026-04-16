@@ -437,8 +437,19 @@ def dequantize(input, otype):
             scale_inv = input._scale_inv
             if scale_inv.numel() == 1:
                 return hp * scale_inv
-            # Per-row scale shape (M,) — broadcast against leading dims
-            return hp * scale_inv.reshape(*scale_inv.shape, *([1] * (hp.ndim - scale_inv.ndim)))
+            # Per-row scale: quantize produced (M_flat,) scale from a 2D view,
+            # but _data may be stored in N-D shape. Reshape scale to match
+            # hp's leading dims so broadcast against the last dim works.
+            leading_numel = 1
+            for d in hp.shape[:-1]:
+                leading_numel *= d
+            if scale_inv.numel() == leading_numel:
+                scale_inv = scale_inv.reshape(*hp.shape[:-1], 1)
+            else:
+                scale_inv = scale_inv.reshape(
+                    *scale_inv.shape, *([1] * (hp.ndim - scale_inv.ndim))
+                )
+            return hp * scale_inv
         raise NotImplementedError("Dequantize from transpose not implemented in lite mode")
 
     # Plain tensor — just cast dtype
