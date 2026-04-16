@@ -16,6 +16,7 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 
+from transformer_engine.pytorch.custom_recipes import quantization
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 
 
@@ -394,7 +395,11 @@ class MXFP4QuantizerRef(Quantizer):
     # Public API
     # ------------------------------------------------------------------
 
-    def quantize(self, tensor: torch.Tensor) -> MXFP4TensorRef:
+    def quantize(
+        self, 
+        tensor: torch.Tensor,
+        **kwargs,  # pylint: disable=unused-argument
+    ) -> MXFP4TensorRef:
         """Quantize a high-precision tensor, returning an MXFP4TensorRef."""
         original_shape = tensor.shape
         if tensor.ndim > 2:
@@ -441,28 +446,50 @@ class MXFP4QuantizerRef(Quantizer):
         self,
         qx: torch.Tensor,
         qw: torch.Tensor,
+        m_params: quantization.MMParams,  # pylint: disable=unused-argument
         out_dtype: torch.dtype,
         sx: torch.Tensor,
         sw: torch.Tensor,
-        bias: Optional[torch.Tensor] = None,
-        out: Optional[torch.Tensor] = None,
+        bias: torch.Tensor | None = None,
+        out: torch.Tensor | None = None,
         accumulate: bool = False,
+        gemm_type: quantization.GEMMType = quantization.GEMMType.FPROP,  # pylint: disable=unused-argument
+        qresult_x: QuantizedTensorStorage | None = None,  # pylint: disable=unused-argument
+        qresult_w: QuantizedTensorStorage | None = None,  # pylint: disable=unused-argument
     ) -> torch.Tensor:
-        """Reference MXFP4 GEMM: Y = (dequant(qx, sx)) @ (dequant(qw, sw))^T.
+        """Reference MXFP4 GEMM: ``Y = dequant(qx, sx) @ dequant(qw, sw)^T``.
 
-        All arithmetic is in float32 with block-scaled inner products to
-        match the hardware tensor-core accumulation model.
+        Block-scaled inner products are accumulated in float32 to match the
+        hardware tensor-core accumulation model, then cast to ``out_dtype``.
 
         Parameters
         ----------
-        qx : torch.Tensor  uint8 (M, K/2) — packed FP4 activations
-        qw : torch.Tensor  uint8 (N, K/2) — packed FP4 weights
+        qx : torch.Tensor
+            uint8 ``(M, K/2)`` packed FP4 activations.
+        qw : torch.Tensor
+            uint8 ``(N, K/2)`` packed FP4 weights.
+        m_params : quantization.MMParams
+            Matmul parameters (unused by the reference; kept for API parity
+            with the NVFP4 reference and ``custom_gemm`` dispatcher).
         out_dtype : torch.dtype
-        sx : torch.Tensor  uint8 (M, K/32)
-        sw : torch.Tensor  uint8 (N, K/32)
-        bias : optional (N,)
-        out : optional (M, N)  pre-existing output for accumulation
+            Desired output dtype.
+        sx : torch.Tensor
+            uint8 ``(M, K/32)`` E8M0 activation scales (may be padded).
+        sw : torch.Tensor
+            uint8 ``(N, K/32)`` E8M0 weight scales (may be padded).
+        bias : torch.Tensor, optional
+            Not yet supported.
+        out : torch.Tensor, optional
+            Pre-existing output tensor; required when ``accumulate=True``.
         accumulate : bool
+            If True, add the GEMM result to ``out`` (in float32) before
+            casting to ``out_dtype``.
+        gemm_type : quantization.GEMMType
+            Which GEMM this call represents (FPROP/DGRAD/WGRAD). Unused by
+            the reference but accepted for API parity.
+        qresult_x, qresult_w : QuantizedTensorStorage, optional
+            Full quantized tensor storages. Unused by the reference but
+            accepted for API parity with NVFP4.
         """
         assert bias is None, "Bias not yet supported in MXFP4 reference GEMM."
 
@@ -471,8 +498,8 @@ class MXFP4QuantizerRef(Quantizer):
 
         M, K = hp_x.shape
         N, K_w = hp_w.shape
-        assert K == K_w
-        assert K % MXFP4_BLOCK_SIZE == 0
+        assert K == K_w, "K dimension mismatch between qx and qw"
+        assert K % MXFP4_BLOCK_SIZE == 0, "K must be divisible by MXFP4 block size (32)"
 
         grid_k = K // MXFP4_BLOCK_SIZE
 

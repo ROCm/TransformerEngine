@@ -112,6 +112,7 @@ def check_mxfp4_gemm_versus_reference(
     y_ref = ref_quantizer.qgemm(
         qx=qx_data,
         qw=qw_data,
+        m_params=None,  # MMParams not used in reference
         out_dtype=out_dtype,
         sx=sx_trimmed,
         sw=sw_trimmed,
