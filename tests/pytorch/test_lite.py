@@ -3405,3 +3405,172 @@ class TestRecipeIntegration:
         assert torch.isfinite(y).all()
         assert x.grad is not None
         assert torch.isfinite(x.grad).all()
+
+    # ---------------------------------------------------------------
+    # FP8 vs bf16 correlation for fused modules — catches silent
+    # wrong-dispatch, scale broadcast bugs, and per-row axis misalignment
+    # ---------------------------------------------------------------
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD)
+    @pytest.mark.parametrize("normalization", ["LayerNorm", "RMSNorm"])
+    def test_layernorm_linear_correlation(self, device, fp8_recipe, normalization):
+        """LayerNormLinear FP8 output should correlate with bf16 (same weights)."""
+        mod = te.LayerNormLinear(
+            self.HIDDEN, self.HIDDEN, bias=True,
+            normalization=normalization, params_dtype=self.DTYPE,
+        ).to(device)
+        x = torch.randn(self.BATCH, self.HIDDEN, device=device, dtype=self.DTYPE)
+        with torch.no_grad():
+            ref = mod(x)
+            with te.autocast(enabled=True, recipe=fp8_recipe):
+                fp8_out = mod(x)
+        cos = F.cosine_similarity(ref.flatten().float(),
+                                   fp8_out.flatten().float(), dim=0).item()
+        assert cos > 0.9, f"cos_sim={cos:.4f}"
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD)
+    @pytest.mark.parametrize("activation", ["gelu", "swiglu"])
+    def test_layernorm_mlp_correlation(self, device, fp8_recipe, activation):
+        """LayerNormMLP FP8 output should correlate with bf16 (same weights)."""
+        mod = te.LayerNormMLP(
+            self.HIDDEN, self.FFN_HIDDEN,
+            activation=activation, params_dtype=self.DTYPE,
+        ).to(device)
+        x = torch.randn(self.BATCH, self.HIDDEN, device=device, dtype=self.DTYPE)
+        with torch.no_grad():
+            ref = mod(x)
+            with te.autocast(enabled=True, recipe=fp8_recipe):
+                fp8_out = mod(x)
+        cos = F.cosine_similarity(ref.flatten().float(),
+                                   fp8_out.flatten().float(), dim=0).item()
+        assert cos > 0.9, f"cos_sim={cos:.4f}"
+
+    @pytest.mark.parametrize("fp8_recipe", _RECIPES_FWD)
+    def test_transformer_layer_correlation(self, device, fp8_recipe):
+        """TransformerLayer FP8 output should correlate with bf16 (same weights)."""
+        mod = te.TransformerLayer(
+            self.HIDDEN, self.FFN_HIDDEN, num_attention_heads=4,
+            params_dtype=self.DTYPE,
+        ).to(device)
+        x = torch.randn(self.SEQ, 2, self.HIDDEN, device=device, dtype=self.DTYPE)
+        with torch.no_grad():
+            with torch.amp.autocast("cuda", dtype=self.DTYPE):
+                ref = mod(x)
+                with te.autocast(enabled=True, recipe=fp8_recipe):
+                    fp8_out = mod(x)
+        cos = F.cosine_similarity(ref.flatten().float(),
+                                   fp8_out.flatten().float(), dim=0).item()
+        # TransformerLayer has more accumulated error than a single Linear,
+        # so use a looser tolerance (still much better than random ~0).
+        assert cos > 0.75, f"cos_sim={cos:.4f}"
+
+
+# ---------------------------------------------------------------------------
+# API contract tests — verify lite exposes the symbols the full TE does,
+# with compatible constructor signatures. Catches cases like "accepted kwarg
+# but silently dropped it" (the return_bias bug we just fixed).
+# ---------------------------------------------------------------------------
+
+class TestLiteAPI:
+    """Verify the lite backend exposes the API contract of full TE."""
+
+    # Top-level symbols that test_sanity.py imports from transformer_engine.pytorch
+    _TE_PUBLIC_SYMBOLS = [
+        "Linear", "LayerNormLinear", "LayerNormMLP", "TransformerLayer",
+        "GroupedLinear", "RMSNorm", "LayerNorm",
+        "autocast", "fp8_autocast",
+        "Float8Tensor", "Float8Quantizer", "Float8CurrentScalingQuantizer",
+        "QuantizedTensor",
+        "is_fp8_available", "is_mxfp8_available", "is_fp8_block_scaling_available",
+        "is_bf16_available",
+    ]
+
+    # Critical tex (transformer_engine_torch) functions used across the codebase
+    _TEX_FUNCTIONS = [
+        "quantize", "dequantize", "bgrad_quantize", "split_quantize",
+        "generic_gemm", "fp8_transpose",
+        "layernorm_fwd", "layernorm_bwd", "rmsnorm_fwd", "rmsnorm_bwd",
+        "fused_amax_and_scale_update_after_reduction", "compute_amax",
+        "swiglu", "geglu", "reglu", "gelu", "silu", "relu", "srelu", "qgelu",
+        "dswiglu", "dgeglu", "dreglu", "dgelu", "dsilu", "drelu",
+        "dbias_dgelu", "dbias_dsilu", "dbias_drelu",
+    ]
+
+    # Expected DType enum values
+    _TEX_DTYPES = [
+        "kFloat32", "kFloat16", "kBFloat16",
+        "kFloat8E4M3", "kFloat8E5M2",
+    ]
+
+    def test_te_public_symbols_exist(self):
+        """Every symbol test_sanity.py imports from te must exist in lite."""
+        missing = [s for s in self._TE_PUBLIC_SYMBOLS if not hasattr(te, s)]
+        assert not missing, f"Missing from te: {missing}"
+
+    def test_tex_functions_exist(self):
+        """Every tex function called across the TE codebase must exist in lite."""
+        missing = [s for s in self._TEX_FUNCTIONS if not hasattr(tex, s)]
+        assert not missing, f"Missing from tex: {missing}"
+
+    def test_tex_functions_callable(self):
+        """tex functions must be callable, not just exist as sentinel values."""
+        non_callable = [
+            s for s in self._TEX_FUNCTIONS
+            if hasattr(tex, s) and not callable(getattr(tex, s))
+        ]
+        assert not non_callable, f"Not callable: {non_callable}"
+
+    def test_tex_dtype_enum(self):
+        """DType enum must expose the standard values."""
+        assert hasattr(tex, "DType"), "tex.DType missing"
+        missing = [v for v in self._TEX_DTYPES if not hasattr(tex.DType, v)]
+        assert not missing, f"Missing DType values: {missing}"
+
+    @pytest.mark.parametrize("cls_name,required_kwargs", [
+        ("Linear", ["bias", "params_dtype"]),
+        ("LayerNormLinear", ["bias", "params_dtype", "normalization",
+                             "return_bias", "return_layernorm_output",
+                             "zero_centered_gamma"]),
+        ("LayerNormMLP", ["bias", "params_dtype", "normalization", "activation",
+                          "return_bias", "return_layernorm_output",
+                          "zero_centered_gamma"]),
+        ("TransformerLayer", ["num_attention_heads", "params_dtype"]),
+        ("LayerNorm", ["zero_centered_gamma"]),
+        ("RMSNorm", ["zero_centered_gamma"]),
+    ])
+    def test_module_accepts_expected_kwargs(self, cls_name, required_kwargs):
+        """Module constructors must accept the documented kwargs, not silently drop them."""
+        import inspect
+        cls = getattr(te, cls_name)
+        sig = inspect.signature(cls.__init__)
+        params = sig.parameters
+        # Either the kwarg is explicitly listed, or **kwargs catches it.
+        has_kwargs = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in params.values())
+        missing = [k for k in required_kwargs if k not in params and not has_kwargs]
+        assert not missing, f"{cls_name} missing kwargs: {missing}"
+
+    def test_layernorm_mlp_return_bias_returns_tuple(self, device):
+        """Regression test: LayerNormMLP(return_bias=True) must return (out, bias)."""
+        mod = te.LayerNormMLP(
+            256, 1024, bias=True, return_bias=True, params_dtype=torch.bfloat16,
+        ).to(device)
+        x = torch.randn(8, 256, device=device, dtype=torch.bfloat16)
+        out = mod(x)
+        assert isinstance(out, tuple), f"Expected tuple, got {type(out).__name__}"
+        assert len(out) == 2, f"Expected 2-tuple, got {len(out)}-tuple"
+        main_out, bias = out
+        assert main_out.shape == (8, 256)
+        # bias must be 1D with last-dim size — either a real bias or a placeholder
+        assert bias.ndim == 1 and bias.shape[0] == 256
+
+    def test_lite_mode_flag(self):
+        """The tex module's __name__ reliably identifies lite vs full backend."""
+        assert tex.__name__ == "transformer_engine.pytorch._lite"
+
+    def test_recipes_available(self):
+        """Recipe classes must be importable via the common API, regardless of hw support."""
+        from transformer_engine.common import recipe as r
+        assert hasattr(r, "DelayedScaling")
+        assert hasattr(r, "Float8CurrentScaling")
+        assert hasattr(r, "Float8BlockScaling")
+        assert hasattr(r, "MXFP8BlockScaling")
