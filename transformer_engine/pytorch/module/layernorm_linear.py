@@ -230,7 +230,7 @@ class _LayerNormLinear(torch.autograd.Function):
         if is_mxfp4_enabled:
             from ..tensor.mxfp4_tensor import MXFP4Quantizer
             _recipe = FP8GlobalStateManager.get_fp8_recipe()
-            _use_hadamard = getattr(_recipe, "use_hadamard", False)
+            _use_hadamard = getattr(_recipe, "use_hadamard", os.getenv("NVTE_MXFP4_USE_HADAMARD", "0") == "1")
             input_quantizer_mxfp4 = MXFP4Quantizer(
                 rowwise=True,
                 columnwise=backward_needs_input,
@@ -882,7 +882,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 with torch.no_grad():
                     _bf16 = ctx.weight.dequantize()
                     from ..tensor.mxfp4_tensor import MXFP4Quantizer
-                    _use_hadamard = getattr(ctx.fp8_recipe, "use_hadamard", False)
+                    _use_hadamard = getattr(ctx.fp8_recipe, "use_hadamard", os.getenv("NVTE_MXFP4_USE_HADAMARD", "0") == "1")
                     _q = MXFP4Quantizer(
                         rowwise=False,
                         columnwise=True,
@@ -1831,7 +1831,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
         if is_mxfp4_enabled:
             from ..tensor.mxfp4_tensor import MXFP4Quantizer
             recipe = FP8GlobalStateManager.get_fp8_recipe()
-            use_hadamard = getattr(recipe, "use_hadamard", False)
+            use_hadamard = getattr(recipe, "use_hadamard", os.getenv("NVTE_MXFP4_USE_HADAMARD", "0") == "1")
             needs_wgrad = is_grad_enabled
             input_quantizer = MXFP4Quantizer(
                 rowwise=True, columnwise=needs_wgrad,
