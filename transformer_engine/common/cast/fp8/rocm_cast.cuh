@@ -3,6 +3,7 @@
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
+
 #pragma once
 //#include "hip/hip_runtime.h" // prevent hipification of this rocm_ file
 
@@ -11,6 +12,13 @@
 #define ROCM_CAST_BLOCK 256
 #define ROCM_CAST_ELEMS 16
 
+/*
+ * ROCm FP8 cast-only kernel, replacing the upstream VectorizedUnaryKernel.
+ * - 1D grid-stride loop over M*N elements, 256 threads/block, 16 elems/thread.
+ * - FP8 via rocm_pack_4xfloat8: 2 v_cvt_pk_fp8_f32 per 4 values.
+ * - NT stores for write-once output, bypassing L2.
+ * - Grid = cu_count blocks (2x for large BF16 tensors >128M elems).
+ */
 template <typename IType, typename OType>
 __global__ void __launch_bounds__(ROCM_CAST_BLOCK)
 rocm_cast_only_kernel(const IType *__restrict__ input,
@@ -52,7 +60,7 @@ rocm_cast_only_kernel(const IType *__restrict__ input,
 
         OVec out[STORES];
 
-#if defined(__gfx950__) && __HIP_DEVICE_COMPILE__
+#if __HIP_DEVICE_COMPILE__ && __has_builtin(__builtin_amdgcn_cvt_pk_fp8_f32)
         if constexpr (sizeof(OType) == 1) {
 #pragma unroll
             for (int e = 0; e < ROCM_CAST_ELEMS; e += 4) {
@@ -61,7 +69,7 @@ rocm_cast_only_kernel(const IType *__restrict__ input,
                 const int l2 = (e+2) / NVEC_IN, j2 = (e+2) % NVEC_IN;
                 const int l3 = (e+3) / NVEC_IN, j3 = (e+3) % NVEC_IN;
 
-                uint32_t packed = rocm_cvt_4xfloat8<OType>(
+                uint32_t packed = rocm_pack_4xfloat8<OType>(
                     static_cast<float>(in[l0].val[j0]) * scale,
                     static_cast<float>(in[l1].val[j1]) * scale,
                     static_cast<float>(in[l2].val[j2]) * scale,
@@ -69,7 +77,7 @@ rocm_cast_only_kernel(const IType *__restrict__ input,
                 memcpy(&out[e / NVEC_OUT].val[e % NVEC_OUT], &packed, 4);
             }
         } else
-#endif  // #if defined(__gfx950__)
+#endif  // __has_builtin(__builtin_amdgcn_cvt_pk_fp8_f32)
         {
 #pragma unroll
             for (int e = 0; e < ROCM_CAST_ELEMS; e++) {
