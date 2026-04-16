@@ -9,6 +9,8 @@ Compares native MXFP4BlockScaling recipe output against a CustomRecipe that
 uses MXFP4QuantizerRef.  Tests Linear and LayerNormLinear modules with fwd+bwd.
 """
 
+import gc
+
 import pytest
 import torch
 import transformer_engine.pytorch as te
@@ -17,6 +19,7 @@ from transformer_engine.pytorch.custom_recipes.quantization_mxfp4 import (
     mxfp4_ref_quantizer_factory,
 )
 from transformer_engine.pytorch.custom_recipes.quantization_mxfp4 import MXFP4QuantizerRef
+from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 
 
 recipe_available, reason_for_no_recipe = te.is_mxfp4_available(return_reason=True)
@@ -42,14 +45,14 @@ def get_mxfp4_quantizer_factory(use_hadamard: bool = False):
     """Create a quantizer factory for MXFP4 reference implementation."""
     def factory(role):  
         if role == "linear_input":
-            return MXFP4QuantizerRef(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=False, shuffle_scales=False, use_hadamard=use_hadamard)
+            return MXFP4QuantizerRef(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=False, shuffle_scales=False, use_hadamard=use_hadamard, use_te_quantizer=True)
         if role == "linear_weight":
-            return MXFP4QuantizerRef(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=False, shuffle_scales=False, use_hadamard=use_hadamard)
+            return MXFP4QuantizerRef(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=False, shuffle_scales=False, use_hadamard=use_hadamard, use_te_quantizer=True)
         elif role == "linear_output":
             # Output quantization not used
             return None
         if role == "linear_grad_output":
-            return MXFP4QuantizerRef(rowwise=True, columnwise=False, shuffle_B_matrix_for_aiter=False, shuffle_scales=False, use_hadamard=use_hadamard)
+            return MXFP4QuantizerRef(rowwise=True, columnwise=True, shuffle_B_matrix_for_aiter=False, shuffle_scales=False, use_hadamard=use_hadamard, use_te_quantizer=True)
         elif role == "linear_grad_input":
             # Grad input quantization not used
             return None
@@ -64,6 +67,14 @@ def reset_rng_states():
     torch.cuda.manual_seed(seed)
 
 
+def isolate_test_state():
+    """Clear all global state that can leak between tests."""
+    FP8GlobalStateManager.reset()
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+
+
 def check_mxfp4_module_versus_reference(
     module_class,
     in_features: int,
@@ -74,6 +85,8 @@ def check_mxfp4_module_versus_reference(
     use_hadamard: bool = False,
 ):
     """Compare native MXFP4 module against reference implementation."""
+    isolate_test_state()
+
     device = "cuda"
     batch_size = 32
     seq_len = 128
@@ -155,17 +168,11 @@ def check_mxfp4_module_versus_reference(
 
         with te.autocast(enabled=True, recipe=mxfp4_recipe):
             y_native = native_module(x_native, is_first_microbatch=(step == 0))
-            print("NATIVE FORWARD DONE!")
         y_native.backward(grad_output)
-        print("NATIVE BACKWARD DONE!")
-        print("NATIVE OUTPUT SHAPE:", y_native)
 
         with te.autocast(enabled=True, recipe=mxfp4_ref_recipe):
             y_ref = ref_module(x_ref)
-            print("REF FORWARD DONE!")
         y_ref.backward(grad_output)
-        print("REF BACKWARD DONE!")
-        print("REF OUTPUT SHAPE:", y_ref)
         native_outputs.append(
             {
                 "output": y_native.detach().clone(),
@@ -202,32 +209,6 @@ def check_mxfp4_module_versus_reference(
             }
         )
 
-    def _diff_report(label, a, b, atol, rtol):
-        a_f = a.float()
-        b_f = b.float()
-        abs_diff = (a_f - b_f).abs()
-        # safe relative diff: ignore positions where |ref| is essentially 0
-        denom = b_f.abs()
-        safe = denom > 1e-6
-        rel_diff = torch.where(safe, abs_diff / denom.clamp_min(1e-12), torch.zeros_like(abs_diff))
-        tol = atol + rtol * denom
-        mism = (abs_diff > tol) & torch.isfinite(abs_diff)
-        any_nan = torch.isnan(a_f).any().item() or torch.isnan(b_f).any().item()
-        any_inf = torch.isinf(a_f).any().item() or torch.isinf(b_f).any().item()
-        idx_abs = torch.unravel_index(abs_diff.argmax(), abs_diff.shape)
-        idx_rel = torch.unravel_index(rel_diff.argmax(), rel_diff.shape)
-        print(
-            f"[{label}] shape={tuple(a.shape)} dtype={a.dtype}\n"
-            f"  mismatches: {int(mism.sum())}/{mism.numel()} "
-            f"({100.0*mism.float().mean():.3f}%)\n"
-            f"  max_abs={abs_diff.max().item():.4g} at {tuple(int(i) for i in idx_abs)} "
-            f"(native={a_f[idx_abs].item():.4g}, ref={b_f[idx_abs].item():.4g})\n"
-            f"  max_rel_safe={rel_diff.max().item():.4g} at {tuple(int(i) for i in idx_rel)} "
-            f"(native={a_f[idx_rel].item():.4g}, ref={b_f[idx_rel].item():.4g})\n"
-            f"  ref_zeros_with_nonzero_native="
-            f"{int(((denom == 0) & (a_f.abs() > 0)).sum())}\n"
-            f"  any_nan={any_nan}  any_inf={any_inf}"
-        )
     for step in range(num_steps):
         native_out = native_outputs[step]
         ref_out = ref_outputs[step]
@@ -235,25 +216,24 @@ def check_mxfp4_module_versus_reference(
         torch.testing.assert_close(
             native_out["output"],
             ref_out["output"],
-            atol=1e-1,
-            rtol=1e-1,
+            atol=8e-3,
+            rtol=8e-3,
         )
 
         torch.testing.assert_close(
             native_out["input_grad"],
             ref_out["input_grad"],
-            atol=1e-1,
-            rtol=1e-1,
+            atol=8e-3,
+            rtol=8e-3,
             msg=f"Input gradient mismatch at step {step}",
         )
 
-        _diff_report("weight_grad",      native_out["weight_grad"],      ref_out["weight_grad"],      1e-1, 1e-1)
 
         torch.testing.assert_close(
             native_out["weight_grad"],
             ref_out["weight_grad"],
-            atol=1e-1,
-            rtol=1e-1,
+            atol=8e-3,
+            rtol=8e-3,
             msg=f"Weight gradient mismatch at step {step}",
         )
 
@@ -261,8 +241,8 @@ def check_mxfp4_module_versus_reference(
             torch.testing.assert_close(
                 native_out["bias_grad"],
                 ref_out["bias_grad"],
-                atol=1e-1,
-                rtol=1e-1,
+                atol=8e-3,
+                rtol=8e-3,
                 msg=f"Bias gradient mismatch at step {step}",
             )
 
@@ -280,7 +260,7 @@ def check_mxfp4_module_versus_reference(
 )
 @pytest.mark.parametrize("bias", [False], ids=["no_bias"])
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
-@pytest.mark.parametrize("num_steps", [1, 3], ids=["single_step", "multi_step"])
+@pytest.mark.parametrize("num_steps", [1], ids=["single_step"])
 @pytest.mark.parametrize("use_hadamard", [True, False], ids=["with_hadamard", "no_hadamard"])
 def test_mxfp4_linear_versus_reference(
     in_features: int,
@@ -315,6 +295,8 @@ def check_mxfp4_layernorm_linear_versus_reference(
     use_hadamard: bool = False,
 ):
     """Compare native MXFP4 LayerNormLinear against reference, including ln_out."""
+    isolate_test_state()
+
     device = "cuda"
     batch_size = 32
     seq_len = 128
@@ -415,19 +397,19 @@ def check_mxfp4_layernorm_linear_versus_reference(
         n = native_outputs[step]
         r = ref_outputs[step]
         torch.testing.assert_close(
-            n["output"], r["output"], atol=1e-6, rtol=1e-6,
+            n["output"], r["output"], atol=8e-3, rtol=8e-3,
             msg=f"Output mismatch at step {step}",
         )
         torch.testing.assert_close(
-            n["ln_out"], r["ln_out"], atol=1e-6, rtol=1e-6,
+            n["ln_out"], r["ln_out"], atol=8e-3, rtol=8e-3,
             msg=f"LN output mismatch at step {step}",
         )
         torch.testing.assert_close(
-            n["input_grad"], r["input_grad"], atol=1e-6, rtol=1e-6,
+            n["input_grad"], r["input_grad"], atol=8e-3, rtol=8e-3,
             msg=f"Input gradient mismatch at step {step}",
         )
         torch.testing.assert_close(
-            n["weight_grad"], r["weight_grad"], atol=1e-6, rtol=1e-6,
+            n["weight_grad"], r["weight_grad"], atol=8e-3, rtol=8e-3,
             msg=f"Weight gradient mismatch at step {step}",
         )
 

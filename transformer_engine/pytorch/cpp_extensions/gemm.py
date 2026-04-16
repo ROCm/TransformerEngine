@@ -217,7 +217,6 @@ def fp4_gemm_layout(
         a_batch_shape = A_fp4.shape[:-1]
         if A_fp4.ndim > 2:
             A_fp4 = A_fp4.reshape(-1, A_fp4.shape[-1])
-            A_scales = A_scales.reshape(-1, A_scales.shape[-1])
 
         out_flat = out
         if out is not None and out.ndim > 2:

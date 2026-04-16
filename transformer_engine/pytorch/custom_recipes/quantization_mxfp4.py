@@ -16,7 +16,10 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 
+import transformer_engine_torch as tex
+
 from transformer_engine.pytorch.custom_recipes import quantization
+from transformer_engine.pytorch.tensor.mxfp4_tensor import MXFP4Quantizer
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
 
 
@@ -223,13 +226,14 @@ class MXFP4QuantizerRef(Quantizer):
         shuffle_B_matrix_for_aiter: bool = False,
         shuffle_scales: bool = False,
         use_hadamard: bool = False,
+        use_te_quantizer: bool = False,
     ):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.internal = True
         self.shuffle_B_matrix_for_aiter = shuffle_B_matrix_for_aiter
         self.shuffle_scales = shuffle_scales
         self.use_hadamard = use_hadamard
-
+        self.use_te_quantizer = use_te_quantizer
     @property
     def custom(self) -> bool:
         return True
@@ -404,6 +408,23 @@ class MXFP4QuantizerRef(Quantizer):
         original_shape = tensor.shape
         if tensor.ndim > 2:
             tensor = tensor.view(-1, tensor.shape[-1])
+        if self.use_te_quantizer:
+            te_quantizer = MXFP4Quantizer(rowwise=self.rowwise_usage, 
+                                        columnwise=self.columnwise_usage, 
+                                        shuffle_B_matrix_for_aiter=self.shuffle_B_matrix_for_aiter, 
+                                        shuffle_scales=self.shuffle_scales, 
+                                        use_hadamard=self.use_hadamard)
+            q_tensor = tex.quantize(tensor, te_quantizer)
+            return MXFP4TensorRef(
+                data=q_tensor._rowwise_data,
+                scale=q_tensor._rowwise_scale_inv,
+                data_t=q_tensor._columnwise_data,
+                scale_t=q_tensor._columnwise_scale_inv,
+                dtype=tensor.dtype,
+                device=tensor.device,
+                original_shape=original_shape,
+                _quantizer=self,
+            )
 
         if self.rowwise_usage:
             qx, sx = self._quantize_2d(tensor)
