@@ -342,7 +342,7 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
     if (t.has_data()) {
       NVTE_CHECK(t.scale_inv.has_data(), "FP4 scaling factor output ", name,
                  "_scale_inverse must be allocated");
-                 NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor output ", name,
+      NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor output ", name,
                  "_scale_inverse has invalid dtype "
                  "(expected Float8E4M3, got ",
                  to_string(t.scale_inv.dtype), ")");
