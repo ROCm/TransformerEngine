@@ -164,6 +164,18 @@ def _has_bias_tensor(bias_type) -> bool:
 # Backend selection
 # ---------------------------------------------------------------------------
 
+_FP8_TE_DTYPES = None
+
+
+def _is_fp8_dtype(te_dtype):
+    """Detect FP8 TE DType values (kFloat8E4M3, kFloat8E5M2)."""
+    global _FP8_TE_DTYPES
+    if _FP8_TE_DTYPES is None:
+        from .enums import DType as TE_DType
+        _FP8_TE_DTYPES = {TE_DType.kFloat8E4M3, TE_DType.kFloat8E5M2}
+    return te_dtype in _FP8_TE_DTYPES
+
+
 def get_fused_attn_backend(
     is_training,
     q_type,
@@ -187,7 +199,20 @@ def get_fused_attn_backend(
     """Select the best available attention backend for lite mode.
 
     Priority: AITER CK > (flash-attn, stubbed) > PyTorch SDPA.
+
+    FP8 attention (fp8_dpa=True / fp8_mha=True in the recipe) is not
+    implemented in lite — there is no FP8 attention kernel available
+    through AITER or PyTorch SDPA on ROCm. Raises NotImplementedError
+    with a clear message if FP8 input dtypes reach this call.
     """
+    if _is_fp8_dtype(q_type) or _is_fp8_dtype(kv_type):
+        raise NotImplementedError(
+            "FP8 attention (fp8_dpa=True or fp8_mha=True) is not supported in "
+            "NVTE_LITE mode — no FP8 attention kernel is available through "
+            "AITER or PyTorch SDPA on ROCm. Set fp8_dpa=False and fp8_mha=False "
+            "on the recipe; attention will run in bf16 while GEMMs use FP8."
+        )
+
     _try_load_aiter_attn()
 
     # AITER available -- covers causal, padding, sliding window, GQA, bias

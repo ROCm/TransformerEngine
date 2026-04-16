@@ -93,6 +93,10 @@ class NVTE_Fused_Attn_Backend(enum.IntEnum):
     # Lite-mode additions
     NVTE_SDPA = 100
     NVTE_Flash = 101
+    # Included for API parity with the full build. Lite does not actually
+    # implement an FP8 attention kernel — get_fused_attn_backend raises
+    # NotImplementedError when FP8 inputs are requested (fp8_dpa=True).
+    NVTE_FP8 = 200
 
 
 class Float8BlockScaleTensorFormat(enum.IntEnum):

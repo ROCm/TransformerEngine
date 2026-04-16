@@ -3720,3 +3720,95 @@ class TestFP8Training:
             dim=0,
         ).item()
         assert cos > 0.95, f"FP8 weights diverged from bf16: cos={cos:.4f}"
+
+
+# ---------------------------------------------------------------------------
+# FP8 attention flags — lite does not implement FP8 attention kernels.
+# These tests document the behavior: fp8_dpa=False/fp8_mha=False works,
+# setting either to True raises a clear NotImplementedError (not a cryptic
+# AttributeError from a missing enum value).
+# ---------------------------------------------------------------------------
+
+class TestFP8AttentionFlags:
+    """Lite accepts fp8_dpa/fp8_mha recipe flags but rejects them cleanly."""
+
+    DTYPE = torch.bfloat16
+    HIDDEN = 256
+    FFN_HIDDEN = 1024
+
+    @pytest.fixture(autouse=True)
+    def _reset_fp8_state(self):
+        yield
+        FP8GlobalStateManager.reset()
+
+    def _make_model_and_input(self, device):
+        mod = te.TransformerLayer(
+            self.HIDDEN, self.FFN_HIDDEN, num_attention_heads=4,
+            params_dtype=self.DTYPE,
+        ).to(device)
+        x = torch.randn(8, 2, self.HIDDEN, device=device, dtype=self.DTYPE)
+        return mod, x
+
+    def test_fp8_dpa_raises_not_implemented(self, device):
+        """fp8_dpa=True must raise a clear NotImplementedError, not AttributeError."""
+        if not _RECIPES:
+            pytest.skip("No FP8 recipes available on this hardware")
+        mod, x = self._make_model_and_input(device)
+        r = recipe.DelayedScaling(fp8_dpa=True)
+        with pytest.raises(NotImplementedError, match="FP8 attention"):
+            with torch.amp.autocast("cuda", dtype=self.DTYPE):
+                with te.autocast(enabled=True, recipe=r):
+                    mod(x)
+
+    def test_fp8_mha_raises_not_implemented(self, device):
+        """fp8_mha=True must raise NotImplementedError (q_type becomes FP8 upstream)."""
+        if not _RECIPES:
+            pytest.skip("No FP8 recipes available on this hardware")
+        mod, x = self._make_model_and_input(device)
+        r = recipe.DelayedScaling(fp8_mha=True)
+        with pytest.raises(NotImplementedError, match="FP8 attention"):
+            with torch.amp.autocast("cuda", dtype=self.DTYPE):
+                with te.autocast(enabled=True, recipe=r):
+                    mod(x)
+
+    def test_fp8_dpa_and_mha_raises(self, device):
+        """Both flags set together still raises cleanly."""
+        if not _RECIPES:
+            pytest.skip("No FP8 recipes available on this hardware")
+        mod, x = self._make_model_and_input(device)
+        r = recipe.DelayedScaling(fp8_dpa=True, fp8_mha=True)
+        with pytest.raises(NotImplementedError, match="FP8 attention"):
+            with torch.amp.autocast("cuda", dtype=self.DTYPE):
+                with te.autocast(enabled=True, recipe=r):
+                    mod(x)
+
+    def test_default_flags_work(self, device):
+        """Recipe without the FP8 attention flags (default) must work end-to-end."""
+        if not _RECIPES:
+            pytest.skip("No FP8 recipes available on this hardware")
+        mod, x = self._make_model_and_input(device)
+        # Explicitly False to pin the contract
+        r = recipe.DelayedScaling(fp8_dpa=False, fp8_mha=False)
+        with torch.amp.autocast("cuda", dtype=self.DTYPE):
+            with te.autocast(enabled=True, recipe=r):
+                y = mod(x)
+        assert y.shape == x.shape
+        assert torch.isfinite(y).all()
+
+    def test_current_scaling_fp8_dpa_raises(self, device):
+        """CurrentScaling recipe with fp8_dpa=True also rejected cleanly."""
+        if not _RECIPES:
+            pytest.skip("No FP8 recipes available on this hardware")
+        mod, x = self._make_model_and_input(device)
+        r = recipe.Float8CurrentScaling(fp8_dpa=True)
+        with pytest.raises(NotImplementedError, match="FP8 attention"):
+            with torch.amp.autocast("cuda", dtype=self.DTYPE):
+                with te.autocast(enabled=True, recipe=r):
+                    mod(x)
+
+    def test_enum_has_nvte_fp8(self):
+        """NVTE_FP8 enum value must exist for API compatibility."""
+        assert hasattr(tex.NVTE_Fused_Attn_Backend, "NVTE_FP8"), (
+            "NVTE_FP8 must exist in the enum for framework compat, even if "
+            "lite doesn't implement the corresponding backend."
+        )
