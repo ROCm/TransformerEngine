@@ -428,7 +428,12 @@ def dequantize(input, otype):
             # Reinterpret uint8 bits as FP8 dtype, then cast to target
             torch_fp8_dtype = _te_dtype_to_torch_fp8(input._fp8_dtype)
             fp8_view = input._data.view(torch_fp8_dtype)
-            return fp8_view.to(target_dtype) * input._scale_inv
+            hp = fp8_view.to(target_dtype)
+            scale_inv = input._scale_inv
+            if scale_inv.numel() == 1:
+                return hp * scale_inv
+            # Per-row scale shape (M,) — broadcast against leading dims
+            return hp * scale_inv.reshape(*scale_inv.shape, *([1] * (hp.ndim - scale_inv.ndim)))
         raise NotImplementedError("Dequantize from transpose not implemented in lite mode")
 
     # Plain tensor — just cast dtype

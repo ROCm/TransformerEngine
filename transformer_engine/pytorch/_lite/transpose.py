@@ -8,9 +8,11 @@
 import torch
 
 
-def fp8_transpose(input, dtype, *, out):
+def fp8_transpose(input, dtype, *, out=None):
     """Transpose a 2D tensor. dtype is ignored since we work with PyTorch tensors directly."""
     result = input.t().contiguous()
+    if out is None:
+        return result
     out.copy_(result)
     return out
 

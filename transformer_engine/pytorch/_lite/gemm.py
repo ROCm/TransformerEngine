@@ -30,12 +30,37 @@ _FP8_DTYPES = (
 _GEMM_BACKEND = os.environ.get("NVTE_LITE_GEMM_BACKEND", "ck").lower()
 
 
+def _dequantize_from_transpose(tensor):
+    """Dequantize a Float8Tensor when only its _transpose is available.
+
+    Columnwise-only tensors (wgrad path) have _data=None; the standard
+    dequantize() raises NotImplementedError. We dequantize from _transpose
+    manually: reinterpret uint8 as FP8 dtype, transpose back to logical
+    shape, and multiply by the per-row or per-tensor scale.
+    """
+    t = tensor._transpose
+    if t.dtype == torch.uint8 and hasattr(tensor, '_fp8_dtype'):
+        from transformer_engine.pytorch._lite.quantize import _te_dtype_to_torch_fp8
+        t = t.view(_te_dtype_to_torch_fp8(tensor._fp8_dtype))
+    # _transpose is shape [K, M]; logical shape is [M, K]
+    logical = t.t().contiguous().to(torch.bfloat16)
+    scale_inv = tensor._scale_inv
+    if scale_inv.numel() == 1:
+        return logical * scale_inv
+    # Per-row scale shape (M,) broadcasts against [M, K]
+    return logical * scale_inv.reshape(-1, 1)
+
+
 def _dequantize_if_needed(tensor):
     """Dequantize FP8/quantized tensor to BF16 for matmul."""
     if _is_mxfp8(tensor):
         return tensor.dequantize(dtype=torch.bfloat16)
     if _is_blockwise_fp8(tensor):
         return tensor.dequantize(dtype=torch.bfloat16)
+    # Columnwise-only Float8Tensor: _data deleted, must dequantize from _transpose
+    if (hasattr(tensor, '_data') and tensor._data is None
+            and hasattr(tensor, '_transpose') and tensor._transpose is not None):
+        return _dequantize_from_transpose(tensor)
     if hasattr(tensor, 'dequantize'):
         return tensor.dequantize()
     if isinstance(tensor, torch.Tensor) and tensor.dtype in _FP8_DTYPES:
@@ -277,8 +302,18 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
         if a_is_fp8 and b_is_fp8:
             if _is_per_row_scaled(x_scale) or _is_per_row_scaled(w_scale):
                 # Per-row (per-token) FP8 — from CurrentScaling fused norm+quant.
-                # x_scale (M,) = per-token activation scale
-                # w_scale may be scalar (per-tensor weight) or (N,) per-channel.
+                # Per-row scales are valid only when they index the kernel's
+                # non-reduction axis (first dim of x and w). This holds for
+                # forward (X @ W^T) and dgrad (dY @ W), but NOT wgrad
+                # (dY^T @ X) where the transposes put per-row scales along
+                # the reduction axis. Verify scale-axis alignment before
+                # dispatching to the per-token kernel.
+                x_scale_valid = (x_scale is None or x_scale.numel() == 1
+                                 or x_scale.numel() == x.shape[0])
+                w_scale_valid = (w_scale is None or w_scale.numel() == 1
+                                 or w_scale.numel() == w.shape[0])
+                if not (x_scale_valid and w_scale_valid):
+                    return None  # Let caller fall back to dequantize + bf16 GEMM
                 from aiter.ops.triton.gemm_a8w8_per_token_scale import (
                     gemm_a8w8_per_token_scale as triton_a8w8_pt,
                 )

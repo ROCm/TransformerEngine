@@ -502,6 +502,11 @@ def layernorm_bwd(grad_output, input, mean, rstdev, weight, sm_margin,
     _try_load_aiter_norms()
     _try_load_triton_norms()
 
+    # Dequantize grad_output if it arrived as a QuantizedTensor (e.g., from
+    # the dgrad GEMM of a LayerNormLinear under FP8 CurrentScaling).
+    if hasattr(grad_output, 'dequantize') and hasattr(grad_output, '_fp8_dtype'):
+        grad_output = grad_output.dequantize(dtype=input.dtype)
+
     orig_shape = input.shape
     input_2d, _ = _ensure_2d(input)
     grad_2d, _ = _ensure_2d(grad_output)
@@ -592,6 +597,11 @@ def rmsnorm_bwd(grad_output, input, rstdev, weight, sm_margin, zero_centered_gam
     """
     _try_load_aiter_norms()
     _try_load_triton_norms()
+
+    # Dequantize grad_output if it arrived as a QuantizedTensor (e.g., from
+    # the dgrad GEMM of a LayerNormLinear under FP8 CurrentScaling).
+    if hasattr(grad_output, 'dequantize') and hasattr(grad_output, '_fp8_dtype'):
+        grad_output = grad_output.dequantize(dtype=input.dtype)
 
     orig_shape = input.shape
     input_2d, _ = _ensure_2d(input)

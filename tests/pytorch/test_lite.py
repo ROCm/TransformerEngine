@@ -3206,12 +3206,8 @@ def _recipe_id(val):
     return type(val).__name__
 
 
-def _mark_recipes(recipes, needs_backward=False):
-    """Wrap recipes with xfail markers for known lite-mode bugs.
-
-    needs_backward: if True, also marks CurrentScaling as xfail (backward
-    dgrad shape bug). Forward-only CurrentScaling tests pass.
-    """
+def _mark_recipes(recipes):
+    """Wrap recipes with xfail markers for known lite-mode bugs."""
     marked = []
     for r in recipes:
         name = type(r).__name__
@@ -3223,24 +3219,14 @@ def _mark_recipes(recipes, needs_backward=False):
                     strict=True,
                 ),
             ))
-        elif name == "Float8CurrentScaling" and needs_backward:
-            marked.append(pytest.param(
-                r, id=name,
-                marks=pytest.mark.xfail(
-                    reason="Wgrad GEMM routes per-row scaled dY to gemm_a8w8_per_token_scale "
-                           "but per-row scales are along reduction axis K for dW=dY^T@X — "
-                           "needs layout-aware dispatch to fall back to per-tensor GEMM for wgrad",
-                    strict=True,
-                ),
-            ))
         else:
             marked.append(pytest.param(r, id=name))
     return marked
 
 
 _RECIPES = _available_recipes()
-_RECIPES_FWD = _mark_recipes(_RECIPES, needs_backward=False)
-_RECIPES_FWD_BWD = _mark_recipes(_RECIPES, needs_backward=True)
+_RECIPES_FWD = _mark_recipes(_RECIPES)
+_RECIPES_FWD_BWD = _mark_recipes(_RECIPES)
 
 
 class TestRecipeIntegration:
