@@ -85,6 +85,44 @@ def _shuffle_fp4_data(x: torch.Tensor, layout=(16, 16)) -> torch.Tensor:
     x_ = x_.permute(0, 1, 3, 4, 2, 5).contiguous()
     return x_.view(*x.shape)
 
+def mxfp4_to_f32(x):
+    if x.dtype == torch.float4_e2m1fn_x2:
+        x = x.view(torch.uint8)
+
+    # 2 because we pack fp4 in uint8.
+    x = x.repeat_interleave(2, dim=-1)
+    x[..., ::2] = x[..., ::2] & 0xF
+    x[..., 1::2] = x[..., 1::2] >> 4
+    mxfp4_list = [
+        0.0,
+        0.5,
+        1.0,
+        1.5,
+        2.0,
+        3.0,
+        4.0,
+        6.0,
+        -0.0,
+        -0.5,
+        -1.0,
+        -1.5,
+        -2.0,
+        -3.0,
+        -4.0,
+        -6.0,
+    ]
+    mxfp4_in_f32 = torch.tensor(mxfp4_list, dtype=torch.float32, device=x.device)
+    return mxfp4_in_f32[x.long()]
+
+def e8m0_to_f32(scale_e8m0_biased):
+    scale_e8m0_biased = scale_e8m0_biased.view(torch.uint8)
+    zero_case = scale_e8m0_biased == 0
+    nan_case = scale_e8m0_biased == 0xFF
+    scale_f32 = scale_e8m0_biased.to(torch.int32) << 23
+    scale_f32[zero_case] = 0x00400000
+    scale_f32[nan_case] = 0x7F800001
+    scale_f32 = scale_f32.view(torch.float32)
+    return scale_f32
 
 # ---------------------------------------------------------------------------
 # Data container
@@ -428,8 +466,8 @@ class MXFP4QuantizerRef(Quantizer):
         """
         assert bias is None, "Bias not yet supported in MXFP4 reference GEMM."
 
-        hp_x = unpack_fp4x2(qx, torch.float32)
-        hp_w = unpack_fp4x2(qw, torch.float32)
+        hp_x = mxfp4_to_f32(qx)
+        hp_w = mxfp4_to_f32(qw)
 
         M, K = hp_x.shape
         N, K_w = hp_w.shape
@@ -438,24 +476,20 @@ class MXFP4QuantizerRef(Quantizer):
 
         grid_k = K // MXFP4_BLOCK_SIZE
 
-        # Scales may be padded; slice to valid region
-        sx_f = e8m0_to_float(sx[:M, :grid_k])
-        sw_f = e8m0_to_float(sw[:N, :grid_k])
+        # Scales may be padded; slice to valid region, then broadcast to K
+        sx_f = e8m0_to_f32(sx[:M, :grid_k]).repeat_interleave(MXFP4_BLOCK_SIZE, dim=1)
+        sw_f = e8m0_to_f32(sw[:N, :grid_k]).repeat_interleave(MXFP4_BLOCK_SIZE, dim=1)
 
-        y = torch.zeros(M, N, dtype=torch.float32, device=qx.device)
+        hp_x = hp_x * sx_f
+        hp_w = hp_w * sw_f
 
-        for k in range(grid_k):
-            k0 = k * MXFP4_BLOCK_SIZE
-            k1 = k0 + MXFP4_BLOCK_SIZE
-            xb = hp_x[:, k0:k1]
-            wb = hp_w[:, k0:k1]
-            y += torch.outer(sx_f[:, k], sw_f[:, k]) * (xb @ wb.t())
+        y = torch.mm(hp_x, hp_w.T).to(out_dtype)
 
         if accumulate:
             assert out is not None
-            y += out.to(torch.float32)
+            y = y + out.to(out_dtype)
 
-        return y.to(out_dtype)
+        return y
 
     # ------------------------------------------------------------------
     # Stubs required by Quantizer base class

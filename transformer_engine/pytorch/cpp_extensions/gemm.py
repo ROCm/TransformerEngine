@@ -28,8 +28,7 @@ from ..utils import cast_if_needed
 _FP4_GEMM_TUNING = int(os.environ.get("NVTE_FP4_GEMM_TUNING", "1"))
 _FP4_LOG_SHAPES = int(os.environ.get("NVTE_FP4_LOG_GEMM_SHAPES", "0"))
 
-_DEFAULT_FPROP_DGRAD = "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_128x512E"
-_DEFAULT_WGRAD = "_ZN5aiter42f4gemm_bf16_per1x32Fp4_BpreShuffle_256x256E"
+_DEFAULT_FP4_KERNEL = ""  # empty → let AITER heuristic select the best tile
 
 __all__ = [
     "general_gemm",
@@ -107,10 +106,10 @@ def get_tensor_device(tensor: torch.Tensor) -> int:
     return torch.cuda.current_device()
 
 def _select_kernel_fp4(layout: str, grad: bool, M: int, N: int, K: int):
-    """Select kernel via tuned CSV lookup, falling back to layout-based default."""
+    """Select kernel via tuned CSV lookup, falling back to AITER heuristic."""
     from aiter.ops.gemm_op_a4w4 import get_GEMM_config
 
-    kernel_name = _DEFAULT_WGRAD if (layout == "NT" and grad) else _DEFAULT_FPROP_DGRAD
+    kernel_name = _DEFAULT_FP4_KERNEL
     split_k = 0
 
     if _FP4_GEMM_TUNING:
@@ -120,9 +119,9 @@ def _select_kernel_fp4(layout: str, grad: bool, M: int, N: int, K: int):
             split_k = int(cfg.get("splitK", 0))
 
     if _FP4_LOG_SHAPES:
-        tag = "256x256" if "256x256" in kernel_name else "128x512"
         print(f"[FP4-GEMM] {layout} grad={grad} M={M} N={N} K={K} "
-              f"kernel={tag} splitK={split_k}", flush=True)
+              f"kernel={'heuristic' if not kernel_name else kernel_name} "
+              f"splitK={split_k}", flush=True)
 
     return kernel_name, split_k
 
