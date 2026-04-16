@@ -219,7 +219,7 @@ def fp4_gemm_layout(
                 log2_k_split=split_k,
             )
             out.add_(result)
-            result = None
+            result = out
         else:
             result = _fp4_gemm_core(
                 A_fp4, A_scales, B_fp4, B_scales,
