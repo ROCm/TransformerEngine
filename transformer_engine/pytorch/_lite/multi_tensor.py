@@ -14,11 +14,21 @@ import math
 
 
 def multi_tensor_scale(chunk_size, noop_flag, tensor_lists, scale):
-    """Scale a list of tensors by a scalar."""
-    overflow_buf = noop_flag
-    for tensor_group in tensor_lists:
-        for t in tensor_group:
-            t.mul_(scale)
+    """Scale tensors by a scalar, matching common/multi_tensor/scale.cu.
+
+    tensor_lists is [in_list, out_list]. For each pair, writes
+    out = cast(in * scale, out.dtype). If any element of `in` is non-finite,
+    sets noop_flag[0] to 1 (the overflow flag).
+    """
+    in_list, out_list = tensor_lists[0], tensor_lists[1]
+    any_non_finite = False
+    for src, dst in zip(in_list, out_list):
+        scaled = src.float() * scale
+        if not any_non_finite and not torch.isfinite(src).all().item():
+            any_non_finite = True
+        dst.copy_(scaled.to(dst.dtype))
+    if any_non_finite and noop_flag is not None and noop_flag.numel() > 0:
+        noop_flag[0] = 1
 
 
 def multi_tensor_l2norm(chunk_size, noop_flag, tensor_lists, per_tensor=False):
@@ -147,34 +157,46 @@ def multi_tensor_adam_capturable_master(*args, **kwargs):
 
 
 def multi_tensor_sgd(chunk_size, noop_flag, tensor_lists, lr, momentum, dampening,
-                     weight_decay, nesterov, first_run, wd_after_momentum, scale=-1.0):
-    """Fused SGD optimizer step for multiple tensors."""
-    params, grads = tensor_lists[0], tensor_lists[1]
-    # momentum_bufs is tensor_lists[2] if momentum != 0
-    momentum_bufs = tensor_lists[2] if len(tensor_lists) > 2 else [None] * len(params)
+                     weight_decay, nesterov, first_run, wd_after_momentum, scale=1.0):
+    """Fused SGD step mirroring common/multi_tensor/sgd.cu.
 
-    for p, g, buf in zip(params, grads, momentum_bufs):
-        if scale > 0:
-            g = g * scale
+    tensor_lists layout:
+      3 lists: [grads, weights, momentum_bufs]
+      4 lists: [grads, weights, momentum_bufs, weights_fp16_copy]
+    Math runs in fp32 on upcast copies; updates are written back in the source dtype.
+    """
+    if noop_flag is not None and noop_flag.numel() > 0 and noop_flag.item() != 0:
+        return
+    assert len(tensor_lists) in (3, 4), (
+        f"multi_tensor_sgd expects 3 or 4 tensor lists, got {len(tensor_lists)}"
+    )
+    grads = tensor_lists[0]
+    weights = tensor_lists[1]
+    mom_bufs = tensor_lists[2]
+    fp16_copies = tensor_lists[3] if len(tensor_lists) == 4 else [None] * len(weights)
 
-        if weight_decay != 0 and not wd_after_momentum:
-            g = g.add(p.data, alpha=weight_decay)
+    for g, w, mom, w_fp16 in zip(grads, weights, mom_bufs, fp16_copies):
+        g_f = g.float() * scale
+        w_f = w.float()
 
-        if momentum != 0:
-            if buf is None or first_run:
-                buf = g.clone()
+        if weight_decay != 0.0 and not wd_after_momentum:
+            g_f = g_f + weight_decay * w_f
+
+        if momentum != 0.0:
+            if first_run:
+                mom.copy_(g_f.to(mom.dtype))
             else:
-                buf.mul_(momentum).add_(g, alpha=1 - dampening)
+                mom.mul_(momentum).add_(g_f.to(mom.dtype), alpha=1 - dampening)
+            mom_f = mom.float()
+            g_f = g_f + momentum * mom_f if nesterov else mom_f
 
-            if nesterov:
-                g = g.add(buf, alpha=momentum)
-            else:
-                g = buf
+        if weight_decay != 0.0 and wd_after_momentum:
+            g_f = g_f + weight_decay * w_f
 
-        if weight_decay != 0 and wd_after_momentum:
-            g = g.add(p.data, alpha=weight_decay)
-
-        p.data.add_(g, alpha=-lr)
+        w_f = w_f - lr * g_f
+        w.copy_(w_f.to(w.dtype))
+        if w_fp16 is not None:
+            w_fp16.copy_(w_f.to(w_fp16.dtype))
 
 
 def multi_tensor_compute_scale_and_scale_inv(amax_list, scale_list, scale_inv_list,
