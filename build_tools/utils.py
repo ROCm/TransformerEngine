@@ -425,7 +425,7 @@ def get_frameworks() -> List[str]:
         if framework not in supported_frameworks:
             raise ValueError(f"Transformer Engine does not support framework={framework}")
 
-    if rocm_build():
+    if rocm_build() and not bool(int(os.getenv("NVTE_LITE_ONLY", "0"))):
         _unsupported_frameworks = []
         if "pytorch" in _frameworks:
             try:
