@@ -29,6 +29,16 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
   NVTE_CHECK(!IS_DBIAS, "IS_DBIAS is not supported by NVTE_MXFP4_1D_SCALING");
   NVTE_CHECK(!IS_DACT, "IS_DACT is not supported by NVTE_MXFP4_1D_SCALING");
 
+  {
+    hipDeviceProp_t prop;
+    int device;
+    NVTE_CHECK_CUDA(hipGetDevice(&device));
+    NVTE_CHECK_CUDA(hipGetDeviceProperties(&prop, device));
+    NVTE_CHECK(prop.major == 9 && prop.minor == 5,
+               "MXFP4 quantization requires gfx950 (detected gfx",
+               prop.major, prop.minor * 10, ")");
+  }
+
   int M = static_cast<int>(input.flat_first_dim());
   int N = static_cast<int>(input.flat_last_dim());
 

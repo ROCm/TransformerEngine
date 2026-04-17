@@ -240,6 +240,9 @@ void CheckInputTensor(const Tensor &t, const std::string &name) {
 #ifdef __HIP_PLATFORM_AMD__
     const DType expected_scale_dtype =
         is_mxfp4_scaling(t.scaling_mode) ? DType::kFloat8E8M0 : DType::kFloat8E4M3;
+#else
+    const DType expected_scale_dtype = DType::kFloat8E4M3;
+#endif
     if (t.has_data()) {
       NVTE_CHECK(t.scale_inv.has_data(), "FP4 scaling factor input ", name,
                  "_scale_inverse must be allocated");
@@ -257,25 +260,6 @@ void CheckInputTensor(const Tensor &t, const std::string &name) {
                  "(expected ", to_string(expected_scale_dtype), ", got ",
                  to_string(t.columnwise_scale_inv.dtype), ")");
     }
-#else
-    if (t.has_data()) {
-      NVTE_CHECK(t.scale_inv.has_data(), "FP4 scaling factor input ", name,
-                 "_scale_inverse must be allocated");
-      NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor input ", name,
-                 "_scale_inverse has invalid dtype "
-                 "(expected DType::kFloat8E4M3, got ",
-                 to_string(t.scale_inv.dtype), ")");
-    }
-    if (t.has_columnwise_data()) {
-      NVTE_CHECK(t.columnwise_scale_inv.has_data(), "FP4 scaling factor input ", name,
-                 "_columnwise_scale_inverse must be allocated");
-      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor input ",
-                 name,
-                 "_columnwise_scale_inverse has invalid dtype "
-                 "(expected DType::kFloat8E4M3, got ",
-                 to_string(t.columnwise_scale_inv.dtype), ")");
-    }
-#endif
   } else {
     NVTE_CHECK(!t.scale.has_data(), "Scale is not supported for non-FP8 input ", name);
     NVTE_CHECK(!t.scale_inv.has_data(), "Scale_inv is not supported for non-FP8 input ", name);
@@ -321,6 +305,9 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
 #ifdef __HIP_PLATFORM_AMD__
     const DType expected_scale_dtype =
         is_mxfp4_scaling(t.scaling_mode) ? DType::kFloat8E8M0 : DType::kFloat8E4M3;
+#else
+    const DType expected_scale_dtype = DType::kFloat8E4M3;
+#endif
     if (t.has_data()) {
       NVTE_CHECK(t.scale_inv.has_data(), "FP4 scaling factor output ", name,
                  "_scale_inverse must be allocated");
@@ -338,25 +325,6 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
                  "(expected ", to_string(expected_scale_dtype), ", got ",
                  to_string(t.columnwise_scale_inv.dtype), ")");
     }
-#else
-    if (t.has_data()) {
-      NVTE_CHECK(t.scale_inv.has_data(), "FP4 scaling factor output ", name,
-                 "_scale_inverse must be allocated");
-      NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor output ", name,
-                 "_scale_inverse has invalid dtype "
-                 "(expected Float8E4M3, got ",
-                 to_string(t.scale_inv.dtype), ")");
-    }
-    if (t.has_columnwise_data()) {
-      NVTE_CHECK(t.columnwise_scale_inv.has_data(), "FP4 scaling factor output ", name,
-                 "_columnwise_scale_inverse must be allocated");
-      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor output ",
-                 name,
-                 "_columnwise_scale_inverse has invalid dtype "
-                 "(expected Float8E4M3, got ",
-                 to_string(t.columnwise_scale_inv.dtype), ")");
-    }
-#endif
   } else {
     NVTE_CHECK(!t.scale.has_data(), "Scale is not supported for non-FP8 output ", name);
     NVTE_CHECK(!t.scale_inv.has_data(), "Scale_inv is not supported for non-FP8 output ", name);

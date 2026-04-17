@@ -16,14 +16,13 @@ from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
 if IS_HIP_EXTENSION:
     from ..utils import get_device_compute_capability
+    from ..utils import cast_if_needed
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
-
-from ..utils import cast_if_needed
 
 _FP4_GEMM_TUNING = int(os.environ.get("NVTE_FP4_GEMM_TUNING", "1"))
 _FP4_LOG_SHAPES = int(os.environ.get("NVTE_FP4_LOG_GEMM_SHAPES", "0"))
@@ -169,7 +168,7 @@ def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16,
     return result[:M, :] if result.shape[0] > M else result
 
 
-def fp4_gemm_layout(
+def mxfp4_gemm(
     A,
     B,
     layout: str = "TN",
@@ -186,74 +185,73 @@ def fp4_gemm_layout(
         NN: A=weight, B=grad_output -> dgrad: grad_output @ weight
         NT: A=input, B=grad_output  -> wgrad: grad_output^T @ input
     """
-    with torch._C._DisableTorchDispatch():
-        if layout == "TN":
-            A_fp4 = B._rowwise_data
-            A_scales = B._rowwise_scale_inv
-            B_fp4 = A._rowwise_data
-            B_scales = A._rowwise_scale_inv
-            b_pre_shuffled = True
+    if layout == "TN":
+        A_fp4 = B._rowwise_data
+        A_scales = B._rowwise_scale_inv
+        B_fp4 = A._rowwise_data
+        B_scales = A._rowwise_scale_inv
+        b_pre_shuffled = True
 
-        elif layout == "NN":
-            A_fp4 = B._rowwise_data
-            A_scales = B._rowwise_scale_inv
-            B_fp4 = A._columnwise_data
-            B_scales = A._columnwise_scale_inv
-            b_pre_shuffled = True
+    elif layout == "NN":
+        A_fp4 = B._rowwise_data
+        A_scales = B._rowwise_scale_inv
+        B_fp4 = A._columnwise_data
+        B_scales = A._columnwise_scale_inv
+        b_pre_shuffled = True
 
-        elif layout == "NT":
-            A_fp4 = B._columnwise_data
-            A_scales = B._columnwise_scale_inv
-            B_fp4 = A._columnwise_data
-            B_scales = A._columnwise_scale_inv
-            b_pre_shuffled = False
+    elif layout == "NT":
+        A_fp4 = B._columnwise_data
+        A_scales = B._columnwise_scale_inv
+        B_fp4 = A._columnwise_data
+        B_scales = A._columnwise_scale_inv
+        b_pre_shuffled = False
 
-        else:
-            raise ValueError(f"Unsupported layout for FP4 GEMM: {layout}")
+    else:
+        raise ValueError(f"Unsupported layout for FP4 GEMM: {layout}")
 
-        # AITER a4w4 kernels require 2D inputs (M, K/2). Activations quantized
-        # from a >=3D tensor keep their leading dims, e.g. (batch, seq, K/2),
-        # so flatten to (M_total, K/2) and restore the batch shape afterward.
-        a_batch_shape = A_fp4.shape[:-1]
-        if A_fp4.ndim > 2:
-            A_fp4 = A_fp4.reshape(-1, A_fp4.shape[-1])
+    # AITER a4w4 kernels require 2D inputs (M, K/2). Activations quantized
+    # from a >=3D tensor keep their leading dims, e.g. (batch, seq, K/2),
+    # so flatten to (M_total, K/2) and restore the batch shape afterward.
+    a_batch_shape = A_fp4.shape[:-1]
+    if A_fp4.ndim > 2:
+        A_fp4 = A_fp4.reshape(-1, A_fp4.shape[-1])
 
-        out_flat = out
-        if out is not None and out.ndim > 2:
-            out_flat = out.reshape(-1, out.shape[-1])
+    out_flat = out
+    if out is not None and out.ndim > 2:
+        out_flat = out.reshape(-1, out.shape[-1])
 
-        gemm_M = A_fp4.shape[0]
-        gemm_N = B_fp4.shape[0]
-        gemm_K = B_fp4.shape[-1] * 2
+    gemm_M = A_fp4.shape[0]
+    gemm_N = B_fp4.shape[0]
+    gemm_K = B_fp4.shape[-1] * 2
 
-        kernel_name, split_k = _select_kernel_fp4(layout, grad, gemm_M, gemm_N, gemm_K)
+    kernel_name, split_k = _select_kernel_fp4(layout, grad, gemm_M, gemm_N, gemm_K)
 
-        if accumulate and out_flat is not None:
-            result = _fp4_gemm_core(
-                A_fp4, A_scales, B_fp4, B_scales,
-                out_dtype=out_flat.dtype, out_buffer=None,
-                kernel_name=kernel_name, b_pre_shuffled=b_pre_shuffled,
-                log2_k_split=split_k,
-            )
-            out_flat.add_(result)
-            result = out_flat
-        else:
-            result = _fp4_gemm_core(
-                A_fp4, A_scales, B_fp4, B_scales,
-                out_dtype=out_dtype, out_buffer=out_flat,
-                kernel_name=kernel_name, b_pre_shuffled=b_pre_shuffled,
-                log2_k_split=split_k,
-            )
+    if accumulate and out_flat is not None:
+        result = _fp4_gemm_core(
+            A_fp4, A_scales, B_fp4, B_scales,
+            out_dtype=out_flat.dtype, out_buffer=None,
+            kernel_name=kernel_name, b_pre_shuffled=b_pre_shuffled,
+            log2_k_split=split_k,
+        )
+        out_flat.add_(result)
+        result = out_flat
+    else:
+        result = _fp4_gemm_core(
+            A_fp4, A_scales, B_fp4, B_scales,
+            out_dtype=out_dtype, out_buffer=out_flat,
+            kernel_name=kernel_name, b_pre_shuffled=b_pre_shuffled,
+            log2_k_split=split_k,
+        )
 
-        if bias is not None and layout == "TN" and not grad:
-            bias_casted = cast_if_needed(bias, out_dtype)
-            if result is not None:
-                result = result + bias_casted
+    if bias is not None and layout == "TN" and not grad:
+        bias_casted = cast_if_needed(bias, out_dtype)
+        if result is not None:
+            result = result + bias_casted
 
-        if len(a_batch_shape) > 1 and result is not None:
-            result = result.reshape(*a_batch_shape, result.shape[-1])
+    if len(a_batch_shape) > 1 and result is not None:
+        result = result.reshape(*a_batch_shape, result.shape[-1])
 
-        return result
+    return result
 
 
 def general_gemm(
@@ -334,7 +332,7 @@ def general_gemm(
     from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
 
     if isinstance(A, MXFP4TensorStorage) or isinstance(B, MXFP4TensorStorage):
-        result = fp4_gemm_layout(
+        result = mxfp4_gemm(
             A,
             B,
             layout=layout,

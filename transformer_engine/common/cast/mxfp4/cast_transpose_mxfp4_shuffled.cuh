@@ -342,7 +342,7 @@ __device__ __forceinline__ uint16_t cvt_f32x4_to_fp4x4(
  *   i5 = col % 4
  *   index = i0*(scale_n_pad//8)*256 + i3*256 + i5*64 + i2*4 + i4*2 + i1
  */
-__device__ __forceinline__ int compute_shuffle_index(
+__device__ __forceinline__ int compute_scale_shuffle_index(
     int row, int col,
     int scale_n_pad
 ) {
@@ -582,7 +582,7 @@ void cast_transpose_mxfp4_shuffled(
                             if constexpr (SHUFFLE_SCALES) {
                                 if (global_row < rowwise_scale_M_pad &&
                                     scale_col < rowwise_scale_N_pad) {
-                                    int idx = compute_shuffle_index(
+                                    int idx = compute_scale_shuffle_index(
                                         global_row, scale_col, rowwise_scale_N_pad
                                     );
                                     rowwise_scale[idx] = e8m0_scale;
@@ -655,7 +655,7 @@ void cast_transpose_mxfp4_shuffled(
                             if constexpr (SHUFFLE_SCALES) {
                                 if (global_col < colwise_scale_M_pad &&
                                     scale_col < colwise_scale_N_pad) {
-                                    int idx = compute_shuffle_index(
+                                    int idx = compute_scale_shuffle_index(
                                         global_col, scale_col, colwise_scale_N_pad
                                     );
                                     colwise_scale[idx] = e8m0_scale;

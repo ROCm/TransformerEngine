@@ -280,7 +280,7 @@ class MXFP4QuantizerRef(Quantizer):
     # Core quantization (operates on a 2-D float tensor)
     # ------------------------------------------------------------------
 
-    def _quantize_2d(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _quantize(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Quantize a 2-D tensor to packed FP4 + E8M0 scales.
 
         Parameters
@@ -361,7 +361,7 @@ class MXFP4QuantizerRef(Quantizer):
         return fp4_packed_torch, scales_torch
 
     @staticmethod
-    def _dequantize_2d(
+    def _dequantize(
         fp4_packed: torch.Tensor,
         scales: torch.Tensor,
         dtype: torch.dtype = torch.float32,
@@ -427,13 +427,13 @@ class MXFP4QuantizerRef(Quantizer):
             )
 
         if self.rowwise_usage:
-            qx, sx = self._quantize_2d(tensor)
+            qx, sx = self._quantize(tensor)
         else:
             qx = sx = None
 
         if self.columnwise_usage:
             t_input = tensor.t().contiguous()
-            qx_t, sx_t = self._quantize_2d(t_input)
+            qx_t, sx_t = self._quantize(t_input)
         else:
             qx_t = sx_t = None
 
@@ -451,12 +451,12 @@ class MXFP4QuantizerRef(Quantizer):
     def dequantize_rowwise(self, ref: MXFP4TensorRef, dtype=torch.float32) -> torch.Tensor:
         """Dequantize rowwise data back to high-precision tensor."""
         assert ref.data is not None and ref.scale is not None
-        return self._dequantize_2d(ref.data, ref.scale, dtype=dtype)
+        return self._dequantize(ref.data, ref.scale, dtype=dtype)
 
     def dequantize_columnwise(self, ref: MXFP4TensorRef, dtype=torch.float32) -> torch.Tensor:
         """Dequantize columnwise data and transpose back."""
         assert ref.data_t is not None and ref.scale_t is not None
-        deq = self._dequantize_2d(ref.data_t, ref.scale_t, dtype=dtype)
+        deq = self._dequantize(ref.data_t, ref.scale_t, dtype=dtype)
         return deq.t().contiguous()
 
     # ------------------------------------------------------------------
