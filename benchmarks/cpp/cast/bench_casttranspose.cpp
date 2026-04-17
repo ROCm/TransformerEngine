@@ -85,34 +85,22 @@ using fp8_e4m3 = test::fp8e4m3;
   ->Args({128256, 4096})           \
   ->Args({24576, 128256})          \
   ->Args({24576, 4096})            \
-  ->Args({24576, 4096})            \
   ->Args({24576, 5120})            \
   ->Args({28672, 4096})            \
   ->Args({4096, 12288})            \
-  ->Args({4096, 4096})             \
   ->Args({5120, 4096})             \
   ->Args({10240, 8192})            \
   ->Args({128256, 8192})           \
   ->Args({57344, 10240})           \
   ->Args({57344, 128256})          \
   ->Args({57344, 8192})            \
-  ->Args({57344, 8192})            \
-  ->Args({8192, 28672})            \
-  ->Args({8192, 8192})             \
-  ->Args({28672, 4096})            \
   ->Args({32000, 4096})            \
   ->Args({32768, 32000})           \
   ->Args({32768, 4096})            \
-  ->Args({32768, 4096})            \
   ->Args({32768, 5120})            \
-  ->Args({4096, 14336})            \
-  ->Args({4096, 4096})             \
-  ->Args({5120, 4096})             \
   ->Args({3072, 1024})             \
   ->Args({24576, 1024})            \
-  ->Args({4096, 1024})             \
-  ->Args({1024, 4096})             \
-  ->Args({24576, 4096})
+  ->Args({4096, 1024})
 
   
 
@@ -266,6 +254,9 @@ static void BM_CastTranspose(benchmark::State &state) {
     EXTENDED_SHAPES                                                           \
     ->Unit(benchmark::kMicrosecond)                                           \
     ->UseManualTime();
+
+REGISTER_EXTENDED_CAST_ONLY(float,        "FP32")
+REGISTER_EXTENDED_CAST_ONLY(hip_bfloat16, "BF16")
 
 REGISTER_EXTENDED_CAST_TRANSPOSE(float,        "FP32")
 REGISTER_EXTENDED_CAST_TRANSPOSE(hip_bfloat16, "BF16")
