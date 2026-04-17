@@ -1,5 +1,4 @@
-# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -107,7 +106,7 @@ def check_mxfp4_gemm_versus_reference(
     sx_trimmed = sx_native[:M, :expected_scale_cols]
     sw_trimmed = sw_native[:N, :expected_scale_cols]
 
-    # Reference GEMM: dequantize to FP32, torch.mm, cast to out_dtype
+    # Reference GEMM
     ref_quantizer = MXFP4QuantizerRef(rowwise=True, columnwise=True)
     y_ref = ref_quantizer.qgemm(
         qx=qx_data,
