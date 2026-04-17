@@ -68,7 +68,7 @@
     const hipblasStatus_t status_NVTE_CHECK_CUBLAS = (expr);            \
     if (status_NVTE_CHECK_CUBLAS != CUBLAS_STATUS_SUCCESS) {            \
       NVTE_ERROR("HIPBLASLT Error: ",                                   \
-                 std::to_string((int)status_NVTE_CHECK_CUBLAS));        \
+                 std::to_string(static_cast<int>(status_NVTE_CHECK_CUBLAS))); \
     }                                                                   \
   } while (false)
 #else //cublas

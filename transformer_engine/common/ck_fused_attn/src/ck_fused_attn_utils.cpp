@@ -76,7 +76,13 @@ void set_aiter_asm_dir() {
   static std::once_flag aiter_asm_dir_once;
   std::call_once(aiter_asm_dir_once, []() {
     Dl_info info;
-    dladdr((void*)set_aiter_asm_dir, &info);
+    // dladdr expects void*; avoid reinterpret_cast<void*>(fn) (not ISO C++).
+    union {
+      void (*fn)();
+      void *addr;
+    } sym{};
+    sym.fn = set_aiter_asm_dir;
+    dladdr(sym.addr, &info);
     const char* log_ck_config_env = std::getenv("NVTE_LOG_CK_CONFIG");
     bool log_ck_config = log_ck_config_env && std::string(log_ck_config_env) == "1";
     // Check if user has set AITER_ASM_DIR, if yes, skip auto setting and log
@@ -130,9 +136,10 @@ std::ostream* get_ck_log_stream() {
       if (!log_dir_str.empty() && log_dir_str != "0") {
         if (log_dir_str == "1") {
           log_stream = &std::cout;
-        }
-        else if (open_ck_fused_attn_log_file(log_file, "ck_fused_attn", log_dir_str)) {
-          log_stream = &log_file;
+        } else {
+          if (open_ck_fused_attn_log_file(log_file, "ck_fused_attn", log_dir_str)) {
+            log_stream = &log_file;
+          }
         }
       }
     }

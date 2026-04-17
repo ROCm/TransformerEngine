@@ -146,26 +146,26 @@ std::pair<int64_t, int64_t> check_set_window_size(NVTE_Mask_Type attn_mask_type,
       nvte_log_fused_attn_config = true;
   }
   if(attn_mask_type==NVTE_CAUSAL_MASK || attn_mask_type==NVTE_PADDING_CAUSAL_MASK || attn_mask_type==NVTE_CAUSAL_BOTTOM_RIGHT_MASK || attn_mask_type==NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK){
-    if(window_size==std::make_pair<int64_t, int64_t>(-1, -1) || (window_size.first >=0 && window_size.second!=0)){
+    if(window_size==std::pair<int64_t, int64_t>(-1, -1) || (window_size.first >=0 && window_size.second!=0)){
       //TODO: better INFO logging
       if(nvte_log_fused_attn_config){
         std::cout<<"window_size should be (-1, 0) or (>=0, 0) for attn_mask_type="<<attn_mask_type<<std::endl;
       }
       window_size.second = 0;
       return window_size;
-    }else if( window_size!=std::make_pair<int64_t, int64_t>(-1, 0) && (window_size.first < 0 || window_size.second != 0)){
+    }else if( window_size!=std::pair<int64_t, int64_t>(-1, 0) && (window_size.first < 0 || window_size.second != 0)){
       NVTE_ERROR("window_size should be (-1, 0) or (>=0, 0) for attn_mask_type=" + std::to_string(attn_mask_type));
     }
   }else if(attn_mask_type==NVTE_NO_MASK || attn_mask_type==NVTE_PADDING_MASK){
     //no_mask and padding mask
-    if(window_size==std::make_pair<int64_t, int64_t>(-1, 0)){
+    if(window_size==std::pair<int64_t, int64_t>(-1, 0)){
       //TODO: better INFO logging
       if(nvte_log_fused_attn_config){
         std::cout<<"window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type="<<attn_mask_type<<std::endl;
       }
       window_size.second=-1;
       return window_size;
-    }else if(window_size!=std::make_pair<int64_t, int64_t>(-1, -1) && (window_size.first < 0 or window_size.second < 0)){
+    }else if(window_size!=std::pair<int64_t, int64_t>(-1, -1) && (window_size.first < 0 || window_size.second < 0)){
       NVTE_ERROR("window_size should be (-1, -1) or (>=0, >=0) for attn_mask_type=" + std::to_string(attn_mask_type)); 
     }
   }else{
@@ -267,7 +267,7 @@ void log_fused_attn_config(
   std::cout<<"d_qk: "<<head_dim_qk<<", ";
   std::cout<<"d_v: "<<head_dim_v<<", ";
   std::cout<<"(window_size_left, window_size_right): ("<<window_size_left<<", "<<window_size_right<<") ";
-  if(window_size_left >0 or window_size_right >0){
+  if(window_size_left >0 || window_size_right >0){
     std::cout<<", (sliding window)";
   }
   std::cout<<std::endl;

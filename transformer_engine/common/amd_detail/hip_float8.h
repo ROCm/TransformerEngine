@@ -61,7 +61,11 @@ union _te_hip_fp8 {
   __device__ operator float() const;
 
   __host__ _te_hip_fp8<FNUZ, OCP>(const float& v) {
-    if (te_fp8_fnuz()) fnuz=v; else ocp=v;
+    if (te_fp8_fnuz()) {
+      fnuz = v;
+    } else {
+      ocp = v;
+    }
   }
   __device__ _te_hip_fp8<FNUZ, OCP>(const float& v);
 };

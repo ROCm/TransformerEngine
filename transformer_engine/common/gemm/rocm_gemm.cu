@@ -117,7 +117,7 @@ public:
     data[key][stream] = item; 
   }
 
-  ObjCache(void (*a_offload)(const Data&)): offload(a_offload) {}
+  explicit ObjCache(void (*a_offload)(const Data&)): offload(a_offload) {}
 
   ~ObjCache()
   {
@@ -461,7 +461,7 @@ template<typename T>
 class NameMapper
 {
 public:
-  NameMapper(const std::unordered_map<T, std::string_view>& name_map): map(name_map) {}
+  explicit NameMapper(const std::unordered_map<T, std::string_view>& name_map): map(name_map) {}
   const std::string_view &getName(const T &val) {
     return map.at(val);
   }
@@ -769,14 +769,17 @@ protected:
       }
 
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
-      if (cfg.scaling_mode < 0 || cfg.scaling_mode >= (int)HIPBLASLT_MATMUL_MATRIX_SCALE_END)
-#else
-      if (cfg.scaling_mode != 0)
-#endif
-      {
+      if (cfg.scaling_mode < 0 ||
+          cfg.scaling_mode >= static_cast<int>(HIPBLASLT_MATMUL_MATRIX_SCALE_END)) {
         std::cout << "[WARNING] Unsupported scaling mode at " << line << "\n";
         continue;
       }
+#else
+      if (cfg.scaling_mode != 0) {
+        std::cout << "[WARNING] Unsupported scaling mode at " << line << "\n";
+        continue;
+      }
+#endif
 
       auto fp8_filter = te_fp8_fnuz()
                             ? [](const hipDataType& val) 
@@ -966,10 +969,10 @@ void hipblaslt_gemm(const Tensor *inputA,
     std::cout << "m=" << m << " k=" << k << " n=" << n 
         << " transa=" << (param.transA == HIPBLAS_OP_T ? "T" : "N")
         << " transb=" << (param.transB == HIPBLAS_OP_T ? "T" : "N")
-        << " A_type=" << (int)(param.Atype)
-        << " B_type=" << (int)(param.Btype)
-        << " D_type=" << (int)outputD->data.dtype
-        << " bias_type=" << (int)inputBias->data.dtype
+        << " A_type=" << static_cast<int>(param.Atype)
+        << " B_type=" << static_cast<int>(param.Btype)
+        << " D_type=" << static_cast<int>(outputD->data.dtype)
+        << " bias_type=" << static_cast<int>(inputBias->data.dtype)
         << " grad=" << grad
         << " bias=" << (inputBias->data.dptr != nullptr)
         << " gelu=" << (outputPreGelu->data.dptr != nullptr)
@@ -1386,7 +1389,7 @@ void hipblaslt_gemm(const Tensor *inputA,
 }
 
 
-typedef unsigned long long ServiceStreamKey;
+using ServiceStreamKey = std::uint64_t;
 
 ServiceStreamKey make_service_stream_key(const int device_id, const int cu_count) {
   return (static_cast<ServiceStreamKey>(device_id) << 32) | static_cast<ServiceStreamKey>(cu_count);

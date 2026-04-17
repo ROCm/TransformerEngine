@@ -81,12 +81,12 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
 #endif
 
       for (int e = 0; e < kElementsPerAccess; e++) {
-        frag_sum[e] = float(TCompute(frag_load_store_ptr[e]));
+        frag_sum[e] = static_cast<float>(TCompute(frag_load_store_ptr[e]));
       }
 
       if (hasProb) {
         for (int e = 0; e < kElementsPerAccess; e++) {
-          frag_sum[e] = frag_sum[e] * float(s_prob[0]);
+          frag_sum[e] = frag_sum[e] * static_cast<float>(s_prob[0]);
         }
       }
     } else {
@@ -120,7 +120,7 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
       }
 
       for (int e = 0; e < kElementsPerAccess; e++) {
-        frag_sum[e] += float(frag_elem[e]);
+        frag_sum[e] += static_cast<float>(frag_elem[e]);
       }
     }
 
@@ -129,7 +129,7 @@ __global__ void moe_unpermute_kernel(const T *input, T *unpermuted_output, const
     for (int e = 0; e < kElementsPerAccess; e++) {
       if constexpr ((std::is_same_v<T, transformer_engine::fp8e4m3> || std::is_same_v<T, transformer_engine::fp8e5m2>) &&
                     (!hasProb)) {
-        frag_sum[e] = frag_sum[e] / float(TCompute(topK));
+        frag_sum[e] = frag_sum[e] / static_cast<float>(TCompute(topK));
       }
       frag_load_store_ptr[e] = T(TCompute(frag_sum[e]));
     }
