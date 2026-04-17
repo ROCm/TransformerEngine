@@ -460,12 +460,17 @@ void compute_ref(float (*OP)(const float),
                  transformer_engine::DType>> {};
  
  TEST_P(FusedCastTransposeMXFP4TestSuite, TestFusedCastTransposeMXFP4) {
- #ifndef __HIP_PLATFORM_AMD__
-     // Skip tests for pre-Blackwell architectures
-     if (getDeviceComputeCapability() < blackwellComputeCapability) {
-         GTEST_SKIP();
-     }
- #endif
+#ifdef __HIP_PLATFORM_AMD__
+    hipDeviceProp_t prop;
+    hipGetDeviceProperties(&prop, 0);
+    if (!(prop.major > 9 || (prop.major == 9 && prop.minor == 5))) {
+        GTEST_SKIP() << "MXFP4 requires gfx950";
+    }
+#else
+    if (getDeviceComputeCapability() < blackwellComputeCapability) {
+        GTEST_SKIP();
+    }
+#endif
  
      using namespace transformer_engine;
      using namespace test;

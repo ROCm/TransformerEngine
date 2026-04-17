@@ -23,6 +23,13 @@ from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 
 recipe_available, reason_for_no_recipe = te.is_mxfp4_available(return_reason=True)
 
+try:
+    import aiter  # noqa: F401
+
+    _aiter_available = True
+except ImportError:
+    _aiter_available = False
+
 
 class GetRecipes:
     @staticmethod
@@ -247,6 +254,7 @@ def check_mxfp4_module_versus_reference(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(not _aiter_available, reason="aiter package not available")
 @pytest.mark.parametrize(
     "in_features, out_features",
     [
@@ -414,6 +422,7 @@ def check_mxfp4_layernorm_linear_versus_reference(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(not _aiter_available, reason="aiter package not available")
 @pytest.mark.parametrize(
     "in_features, out_features",
     [
