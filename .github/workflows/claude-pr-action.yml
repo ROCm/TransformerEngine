@@ -35,11 +35,8 @@ concurrency:
 jobs:
   claude:
     # Self-hosted runner — required so the job has network access to the AMD
-    # internal LLM gateway (ANTHROPIC_BASE_URL). Code review does not need a
-    # GPU; using `linux-te-mi325-8` here only because it is the smallest label
-    # already provisioned for this repo (see rocm-ci.yml). Swap for a lighter
-    # CPU-only label if/when one becomes available.
-    runs-on: linux-te-mi325-8
+    # internal LLM gateway (ANTHROPIC_BASE_URL).
+    runs-on: te_builder
     permissions:
       contents: read
       pull-requests: write
