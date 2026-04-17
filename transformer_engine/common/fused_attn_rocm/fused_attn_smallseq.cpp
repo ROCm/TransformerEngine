@@ -22,18 +22,18 @@
 #include "utils.h"
 
 // Macros to avoid repeating dispatch switch cases for max_seqlen_kv in [2, 16].
-// T, bi, hi, d_qk and the pointer/scale args must be in scope where these are used.
-#define SMALLSEQ_DISPATCH_FWD_CASE(N)                                      \
-  case N:                                                                  \
-    dispatch_fwd<N, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout, \
-                       sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p, \
-                       d_qk, stream);                                      \
+// T, bi, hi, hi_kv, d_qk and the pointer/scale args must be in scope where these are used.
+#define SMALLSEQ_DISPATCH_FWD_CASE(N)                                              \
+  case N:                                                                          \
+    dispatch_fwd<N, T>(bi, hi, hi_kv, Q_ptr, K_ptr, V_ptr, dropout_mask, dropout,  \
+                       sqr_dk_scale, O_ptr, attn_workspace, cu_kv, cu_kv_p,        \
+                       d_qk, stream);                                              \
     break;
-#define SMALLSEQ_DISPATCH_BWD_CASE(N)                                        \
-  case N:                                                                    \
-    dispatch_bwd<N, T>(bi, hi, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr,        \
-                       dropout_mask, dropout, sqr_dk_scale, dQ_ptr, dK_ptr, \
-                       dV_ptr, workspace_ptr, cu_kv, cu_kv_p, d_qk, stream); \
+#define SMALLSEQ_DISPATCH_BWD_CASE(N)                                                  \
+  case N:                                                                              \
+    dispatch_bwd<N, T>(bi, hi, hi_kv, Q_ptr, K_ptr, V_ptr, dO_ptr, attn_ptr,           \
+                       dropout_mask, dropout, sqr_dk_scale, dQ_ptr, dK_ptr,            \
+                       dV_ptr, workspace_ptr, cu_kv, cu_kv_p, d_qk, stream);           \
     break;
 
 namespace transformer_engine {
@@ -70,7 +70,8 @@ __global__ void compute_scores_kernel(const T* Q,
                                       const int* cu_seqlens_kv,
                                       const int* cu_seqlens_kv_padded,
                                       int batch_size,
-                                      int head_num)
+                                      int head_num,
+                                      int head_num_kv)
 {
   constexpr int seq_q        = Config::seq_q;
   constexpr int max_seq_kv   = Config::max_seq_kv;
@@ -81,6 +82,7 @@ __global__ void compute_scores_kernel(const T* Q,
 
   int base_block_offset = blockIdx.x * thread_block_size * tasks_per_block;
   int thread_id         = threadIdx.x;
+  int num_groups        = head_num / head_num_kv;
 
   for (int task = 0; task < tasks_per_block; task++) {
     int cur_batch_idx = base_block_offset + task * thread_block_size + thread_id;
@@ -88,6 +90,7 @@ __global__ void compute_scores_kernel(const T* Q,
     int seq_head_idx  = cur_batch_idx % (seq_q * head_num);
     int seq_idx       = seq_head_idx / head_num;
     int head_idx      = seq_head_idx % head_num;
+    int head_idx_kv   = head_idx / num_groups;
 
     if (batch_idx >= batch_size)
       continue;
@@ -99,7 +102,7 @@ __global__ void compute_scores_kernel(const T* Q,
     T fetch_Q[block_k];
     T fetch_K[block_k];
     T* Q_ptr = (T*)&Q[(batch_idx * seq_q * head_num + seq_idx * head_num + head_idx) * head_dim];
-    T* K_ptr = (T*)&K[(kv_offset * head_num + head_idx) * head_dim];
+    T* K_ptr = (T*)&K[(kv_offset * head_num_kv + head_idx_kv) * head_dim];
     T* score_ptr = (T*)&scores[cur_batch_idx * max_seq_kv];
     uint4 ls_dwordx4_tmp_var;
     for (int i = 0; i < seq_kv; i++)
@@ -120,7 +123,7 @@ __global__ void compute_scores_kernel(const T* Q,
         for (int kv_idx = 0; kv_idx < seq_kv; kv_idx++) {
           for (int k = 0; k < block_k / 8; k++) {
             ls_dwordx4_tmp_var =
-                *((uint4*)&K_ptr[kv_idx * head_num * head_dim + dim_offset + k * 8]);
+                *((uint4*)&K_ptr[kv_idx * head_num_kv * head_dim + dim_offset + k * 8]);
             fetch_K[k * 8 + 0] = ((T*)&ls_dwordx4_tmp_var.x)[0];
             fetch_K[k * 8 + 1] = ((T*)&ls_dwordx4_tmp_var.x)[1];
             fetch_K[k * 8 + 2] = ((T*)&ls_dwordx4_tmp_var.y)[0];
@@ -145,7 +148,7 @@ __global__ void compute_scores_kernel(const T* Q,
         for (int kv_idx = 0; kv_idx < seq_kv; kv_idx++) {
           for (int k = 0; k < block_k / 4; k++) {
             ls_dwordx4_tmp_var =
-                *((uint4*)&K_ptr[kv_idx * head_num * head_dim + dim_offset + k * 4]);
+                *((uint4*)&K_ptr[kv_idx * head_num_kv * head_dim + dim_offset + k * 4]);
             fetch_K[k * 4 + 0] = *((T*)&ls_dwordx4_tmp_var.x);
             fetch_K[k * 4 + 1] = *((T*)&ls_dwordx4_tmp_var.y);
             fetch_K[k * 4 + 2] = *((T*)&ls_dwordx4_tmp_var.z);
@@ -256,7 +259,8 @@ __global__ void compute_output_kernel(const T* attn_weights,
                                      const int* cu_seqlens_kv,
                                      const int* cu_seqlens_kv_padded,
                                      int batch_size,
-                                     int head_num)
+                                     int head_num,
+                                     int head_num_kv)
 {
   constexpr int seq_q                 = Config::seq_q;
   constexpr int max_seq_kv            = Config::max_seq_kv;
@@ -271,6 +275,7 @@ __global__ void compute_output_kernel(const T* attn_weights,
   int thread_id         = threadIdx.x;
   int thread_batch_offset = thread_id / (head_dim / block_k);
   int thread_head_offset  = thread_id % (head_dim / block_k) * block_k;
+  int num_groups          = head_num / head_num_kv;
 
   uint4 load_dwordx4_tmp_var[block_k / dwordx4_load_elt],
       store_dwordx4_tmp_var[block_k / dwordx4_load_elt];
@@ -284,6 +289,7 @@ __global__ void compute_output_kernel(const T* attn_weights,
     int seq_head_idx = cur_idx % (seq_q * head_num);
     int seq_q_idx    = seq_head_idx / head_num;
     int head_idx     = seq_head_idx % head_num;
+    int head_idx_kv  = head_idx / num_groups;
 
     if (batch_idx >= batch_size)
       continue;
@@ -305,8 +311,8 @@ __global__ void compute_output_kernel(const T* attn_weights,
 #pragma unroll
       for (int i = 0; i < block_k / dwordx4_load_elt; i++) {
         load_dwordx4_tmp_var[i] =
-            *((uint4*)&V[((kv_offset + j) * head_num + head_idx) * head_dim + thread_head_offset +
-                         i * dwordx4_load_elt]);
+            *((uint4*)&V[((kv_offset + j) * head_num_kv + head_idx_kv) * head_dim +
+                         thread_head_offset + i * dwordx4_load_elt]);
       }
 #pragma unroll
       for (int b = 0; b < block_k; b++)
@@ -326,6 +332,7 @@ __global__ void compute_output_kernel(const T* attn_weights,
 template <typename T, typename Config>
 void run_attn_fwd_impl(int b,
                        int head_num,
+                       int head_num_kv,
                        const T* Q,
                        const T* K,
                        const T* V,
@@ -351,7 +358,7 @@ void run_attn_fwd_impl(int b,
   dim3 block(kernel1_threads);
   dim3 grid((merge_bs + kernel1_threads - 1) / kernel1_threads);
   compute_scores_kernel<T, Config, 1><<<grid, block, 0, stream>>>(
-      Q, K, workspace, scale, cu_seqlens_kv, cu_seqlens_kv_padded, b, head_num);
+      Q, K, workspace, scale, cu_seqlens_kv, cu_seqlens_kv_padded, b, head_num, head_num_kv);
 
   constexpr int work_thread_num =
       Config::step2_block_size / (seq_q * max_seq_kv) * (seq_q * max_seq_kv);
@@ -367,11 +374,16 @@ void run_attn_fwd_impl(int b,
   dim3 block3(kernel3_threads);
   dim3 grid3((merge_bs / process_head_per_warp + 2 - 1) / 2);
   compute_output_kernel<T, Config, 2, kernel3_block_k><<<grid3, block3, 0, stream>>>(
-      workspace, V, O, cu_seqlens_kv, cu_seqlens_kv_padded, b, head_num);
+      workspace, V, O, cu_seqlens_kv, cu_seqlens_kv_padded, b, head_num, head_num_kv);
 }
 
 // ----- Backward kernels (with runtime batch_size, head_num) -----
 
+// GQA-aware grad_V: iterate per (batch, h_kv); accumulate over the num_groups
+// Q-heads that share each KV head before writing the result. This avoids races
+// that would otherwise occur if multiple (batch, h_q) threads wrote to the same
+// grad_V[batch, j, h_kv, :] slot. For MHA (head_num == head_num_kv) this
+// degenerates to the original one-Q-head-per-thread behaviour.
 template <typename T, typename Config, int TASKS_PER_BLOCK = 1, int BLOCK_K = 16>
 __global__ void compute_grad_v_kernel(const T* attn_weights,
                                       const T* grad_O,
@@ -379,7 +391,8 @@ __global__ void compute_grad_v_kernel(const T* attn_weights,
                                       const int* cu_seqlens_kv,
                                       const int* cu_seqlens_kv_padded,
                                       int batch_size,
-                                      int head_num)
+                                      int head_num,
+                                      int head_num_kv)
 {
   constexpr int seq_q                 = Config::seq_q;
   constexpr int max_seq_kv            = Config::max_seq_kv;
@@ -394,27 +407,23 @@ __global__ void compute_grad_v_kernel(const T* attn_weights,
   int thread_id           = threadIdx.x;
   int thread_batch_offset = thread_id / (head_dim / block_k);
   int thread_head_offset  = thread_id % (head_dim / block_k) * block_k;
+  int num_groups          = head_num / head_num_kv;
 
   uint4 load_dwordx4_tmp_var[block_k / dwordx4_load_elt];
-  T attn[max_seq_kv];
 
   for (int task = 0; task < tasks_per_block; task++) {
     int block_batch_head_idx = base_block_offset + task * process_head_per_warp;
     int cur_idx              = block_batch_head_idx + thread_batch_offset;
 
-    int batch_idx    = cur_idx / (seq_q * head_num);
-    int seq_head_idx = cur_idx % (seq_q * head_num);
-    int seq_q_idx    = seq_head_idx / head_num;
-    int head_idx     = seq_head_idx % head_num;
+    int batch_idx    = cur_idx / (seq_q * head_num_kv);
+    int seq_head_idx = cur_idx % (seq_q * head_num_kv);
+    int seq_q_idx    = seq_head_idx / head_num_kv;
+    int head_idx_kv  = seq_head_idx % head_num_kv;
 
     if (batch_idx >= batch_size)
       continue;
 
     int seq_kv = cu_seqlens_kv[batch_idx + 1] - cu_seqlens_kv[batch_idx];
-
-#pragma unroll
-    for (int i = 0; i < max_seq_kv; i++)
-      attn[i] = attn_weights[cur_idx * max_seq_kv + i];
 
     for (int j = 0; j < seq_kv; j++) {
       uint4 store_dwordx4_tmp_var[block_k / dwordx4_load_elt];
@@ -426,25 +435,30 @@ __global__ void compute_grad_v_kernel(const T* attn_weights,
         store_dwordx4_tmp_var[i].w = 0;
       }
 
+      // Accumulate contributions from all Q-heads in this group.
+      for (int g = 0; g < num_groups; g++) {
+        int head_idx = head_idx_kv * num_groups + g;
+        int q_idx    = batch_idx * seq_q * head_num + seq_q_idx * head_num + head_idx;
+        T attn_j     = attn_weights[q_idx * max_seq_kv + j];
+
 #pragma unroll
-      for (int i = 0; i < block_k / dwordx4_load_elt; i++) {
-        load_dwordx4_tmp_var[i] =
-            *((uint4*)&grad_O[(batch_idx * seq_q * head_num + seq_q_idx * head_num + head_idx) *
-                                  head_dim +
-                              thread_head_offset + i * dwordx4_load_elt]);
+        for (int i = 0; i < block_k / dwordx4_load_elt; i++) {
+          load_dwordx4_tmp_var[i] =
+              *((uint4*)&grad_O[q_idx * head_dim + thread_head_offset + i * dwordx4_load_elt]);
+        }
+
+#pragma unroll
+        for (int b = 0; b < block_k; b++) {
+          ((T*)&store_dwordx4_tmp_var[b / dwordx4_load_elt])[b % dwordx4_load_elt] +=
+              attn_j *
+              ((T*)&load_dwordx4_tmp_var[b / dwordx4_load_elt])[b % dwordx4_load_elt];
+        }
       }
 
 #pragma unroll
-      for (int b = 0; b < block_k; b++) {
-        ((T*)&store_dwordx4_tmp_var[b / dwordx4_load_elt])[b % dwordx4_load_elt] +=
-            attn[j] *
-            ((T*)&load_dwordx4_tmp_var[b / dwordx4_load_elt])[b % dwordx4_load_elt];
-      }
-
-#pragma unroll
       for (int i = 0; i < block_k / dwordx4_load_elt; i++) {
-        int grad_v_idx = (cu_seqlens_kv_padded[batch_idx] + j) * head_num * head_dim +
-                         head_idx * head_dim + thread_head_offset + i * dwordx4_load_elt;
+        int grad_v_idx = (cu_seqlens_kv_padded[batch_idx] + j) * head_num_kv * head_dim +
+                         head_idx_kv * head_dim + thread_head_offset + i * dwordx4_load_elt;
         *((uint4*)&grad_V[grad_v_idx]) = store_dwordx4_tmp_var[i];
       }
     }
@@ -458,7 +472,8 @@ __global__ void compute_grad_attn_kernel(const T* grad_O,
                                          const int* cu_seqlens_kv,
                                          const int* cu_seqlens_kv_padded,
                                          int batch_size,
-                                         int head_num)
+                                         int head_num,
+                                         int head_num_kv)
 {
   constexpr int seq_q        = Config::seq_q;
   constexpr int max_seq_kv   = Config::max_seq_kv;
@@ -469,6 +484,7 @@ __global__ void compute_grad_attn_kernel(const T* grad_O,
 
   int base_block_offset = blockIdx.x * thread_block_size * tasks_per_block;
   int thread_id         = threadIdx.x;
+  int num_groups        = head_num / head_num_kv;
 
   for (int task = 0; task < tasks_per_block; task++) {
     int cur_batch_idx = base_block_offset + task * thread_block_size + thread_id;
@@ -476,6 +492,7 @@ __global__ void compute_grad_attn_kernel(const T* grad_O,
     int seq_head_idx  = cur_batch_idx % (seq_q * head_num);
     int seq_idx       = seq_head_idx / head_num;
     int head_idx      = seq_head_idx % head_num;
+    int head_idx_kv   = head_idx / num_groups;
 
     if (batch_idx >= batch_size)
       continue;
@@ -490,8 +507,8 @@ __global__ void compute_grad_attn_kernel(const T* grad_O,
                                 head_dim];
 
     const T* V_base =
-        &V[cu_seqlens_kv_padded[batch_idx] * head_num * head_dim + head_idx * head_dim];
-    int V_stride = head_num * head_dim;
+        &V[cu_seqlens_kv_padded[batch_idx] * head_num_kv * head_dim + head_idx_kv * head_dim];
+    int V_stride = head_num_kv * head_dim;
 
     T* grad_attn_ptr = (T*)&grad_attn[cur_batch_idx * max_seq_kv];
 
@@ -632,17 +649,18 @@ __global__ void softmax_backward_kernel(const T* attn_weights,
   }
 }
 
+// grad_Q is per Q-head: each (batch, h_q) thread reads its grad_scores row,
+// reads K with the GQA-mapped KV head (h_q / num_groups), and writes grad_Q.
 template <typename T, typename Config, int TASKS_PER_BLOCK = 1, int BLOCK_K = 16>
-__global__ void compute_grad_qk_kernel(const T* grad_scores,
-                                      const T* Q,
+__global__ void compute_grad_q_kernel(const T* grad_scores,
                                       const T* K,
                                       T* grad_Q,
-                                      T* grad_K,
                                       float scale,
                                       const int* cu_seqlens_kv,
                                       const int* cu_seqlens_kv_padded,
                                       int batch_size,
-                                      int head_num)
+                                      int head_num,
+                                      int head_num_kv)
 {
   constexpr int seq_q                 = Config::seq_q;
   constexpr int max_seq_kv            = Config::max_seq_kv;
@@ -657,6 +675,7 @@ __global__ void compute_grad_qk_kernel(const T* grad_scores,
   int thread_id           = threadIdx.x;
   int thread_batch_offset = thread_id / (head_dim / block_k);
   int thread_head_offset  = thread_id % (head_dim / block_k) * block_k;
+  int num_groups          = head_num / head_num_kv;
 
   uint4 load_dwordx4_tmp_var[block_k / dwordx4_load_elt];
   T grad_score_vals[max_seq_kv];
@@ -669,6 +688,7 @@ __global__ void compute_grad_qk_kernel(const T* grad_scores,
     int seq_head_idx = cur_idx % (seq_q * head_num);
     int seq_q_idx    = seq_head_idx / head_num;
     int head_idx     = seq_head_idx % head_num;
+    int head_idx_kv  = head_idx / num_groups;
 
     if (batch_idx >= batch_size)
       continue;
@@ -690,8 +710,8 @@ __global__ void compute_grad_qk_kernel(const T* grad_scores,
     for (int j = 0; j < seq_kv; j++) {
 #pragma unroll
       for (int i = 0; i < block_k / dwordx4_load_elt; i++) {
-        int k_idx = (cu_seqlens_kv_padded[batch_idx] + j) * head_num * head_dim +
-                    head_idx * head_dim + thread_head_offset + i * dwordx4_load_elt;
+        int k_idx = (cu_seqlens_kv_padded[batch_idx] + j) * head_num_kv * head_dim +
+                    head_idx_kv * head_dim + thread_head_offset + i * dwordx4_load_elt;
         load_dwordx4_tmp_var[i] = *((uint4*)&K[k_idx]);
       }
 #pragma unroll
@@ -709,21 +729,84 @@ __global__ void compute_grad_qk_kernel(const T* grad_scores,
       for (int b = 0; b < dwordx4_load_elt; b++)
         grad_Q_ptr[b] = ((T*)&store_dwordx4_tmp_var[i])[b] * T(scale);
     }
-#pragma unroll
-    for (int i = 0; i < block_k / dwordx4_load_elt; i++) {
-      load_dwordx4_tmp_var[i] =
-          *((uint4*)&Q[(batch_idx * seq_q * head_num + seq_q_idx * head_num + head_idx) * head_dim +
-                       thread_head_offset + i * dwordx4_load_elt]);
-    }
+  }
+}
+
+// GQA-aware grad_K: iterate per (batch, h_kv); accumulate over the num_groups
+// Q-heads that share each KV head before writing the result. Avoids races on
+// grad_K[batch, j, h_kv, :] under MQA/GQA.
+template <typename T, typename Config, int TASKS_PER_BLOCK = 1, int BLOCK_K = 16>
+__global__ void compute_grad_k_kernel(const T* grad_scores,
+                                      const T* Q,
+                                      T* grad_K,
+                                      float scale,
+                                      const int* cu_seqlens_kv,
+                                      const int* cu_seqlens_kv_padded,
+                                      int batch_size,
+                                      int head_num,
+                                      int head_num_kv)
+{
+  constexpr int seq_q                 = Config::seq_q;
+  constexpr int max_seq_kv            = Config::max_seq_kv;
+  constexpr int head_dim              = Config::head_dim;
+  constexpr int block_k               = BLOCK_K;
+  constexpr int dwordx4_load_elt      = 16 / sizeof(T);
+  constexpr int warp_size             = 64;
+  constexpr int process_head_per_warp = warp_size / (head_dim / block_k);
+  constexpr int tasks_per_block       = TASKS_PER_BLOCK;
+
+  int base_block_offset   = blockIdx.x * process_head_per_warp * tasks_per_block;
+  int thread_id           = threadIdx.x;
+  int thread_batch_offset = thread_id / (head_dim / block_k);
+  int thread_head_offset  = thread_id % (head_dim / block_k) * block_k;
+  int num_groups          = head_num / head_num_kv;
+
+  uint4 load_dwordx4_tmp_var[block_k / dwordx4_load_elt];
+
+  for (int task = 0; task < tasks_per_block; task++) {
+    int block_batch_head_idx = base_block_offset + task * process_head_per_warp;
+    int cur_idx              = block_batch_head_idx + thread_batch_offset;
+
+    int batch_idx    = cur_idx / (seq_q * head_num_kv);
+    int seq_head_idx = cur_idx % (seq_q * head_num_kv);
+    int seq_q_idx    = seq_head_idx / head_num_kv;
+    int head_idx_kv  = seq_head_idx % head_num_kv;
+
+    if (batch_idx >= batch_size)
+      continue;
+
+    int seq_kv = cu_seqlens_kv[batch_idx + 1] - cu_seqlens_kv[batch_idx];
+
     for (int j = 0; j < seq_kv; j++) {
+      // Per-column accumulator; sum across all Q-heads in this group.
+      T acc_block[block_k];
+#pragma unroll
+      for (int b = 0; b < block_k; b++) acc_block[b] = T(0.0f);
+
+      for (int g = 0; g < num_groups; g++) {
+        int head_idx = head_idx_kv * num_groups + g;
+        int q_idx    = batch_idx * seq_q * head_num + seq_q_idx * head_num + head_idx;
+
+        T grad_score_j = grad_scores[q_idx * max_seq_kv + j];
+
+#pragma unroll
+        for (int i = 0; i < block_k / dwordx4_load_elt; i++) {
+          load_dwordx4_tmp_var[i] =
+              *((uint4*)&Q[q_idx * head_dim + thread_head_offset + i * dwordx4_load_elt]);
+        }
+#pragma unroll
+        for (int b = 0; b < block_k; b++) {
+          acc_block[b] +=
+              grad_score_j *
+              ((T*)&load_dwordx4_tmp_var[b / dwordx4_load_elt])[b % dwordx4_load_elt];
+        }
+      }
+
 #pragma unroll
       for (int b = 0; b < block_k; b++) {
-        T val = grad_score_vals[j] *
-                ((T*)&load_dwordx4_tmp_var[b / dwordx4_load_elt])[b % dwordx4_load_elt] *
-                T(scale);
-        int grad_k_idx = (cu_seqlens_kv_padded[batch_idx] + j) * head_num * head_dim +
-                         head_idx * head_dim + thread_head_offset + b;
-        grad_K[grad_k_idx] = val;
+        int grad_k_idx = (cu_seqlens_kv_padded[batch_idx] + j) * head_num_kv * head_dim +
+                         head_idx_kv * head_dim + thread_head_offset + b;
+        grad_K[grad_k_idx] = acc_block[b] * T(scale);
       }
     }
   }
@@ -732,6 +815,7 @@ __global__ void compute_grad_qk_kernel(const T* grad_scores,
 template <typename T, typename Config>
 void run_attn_bwd_impl(int b,
                        int head_num,
+                       int head_num_kv,
                        const T* Q,
                        const T* K,
                        const T* V,
@@ -758,17 +842,18 @@ void run_attn_bwd_impl(int b,
   float dropout_scale = (dropout_p > 0.0f) ? (1.0f / (1.0f - dropout_p)) : 1.0f;
 
   dim3 block(warp_size);
+  // grad_V iterates per (batch, h_kv) so the grid scales with head_num_kv.
   constexpr int tasks_per_block_v = 16;
-  dim3 grid_v((b * seq_q * head_num + tasks_per_block_v - 1) / tasks_per_block_v);
+  dim3 grid_v((b * seq_q * head_num_kv + tasks_per_block_v - 1) / tasks_per_block_v);
   compute_grad_v_kernel<T, Config, tasks_per_block_v><<<grid_v, block, 0, stream>>>(
-      attn_weights, grad_O, grad_V, cu_seqlens_kv, cu_seqlens_kv_padded, b, head_num);
+      attn_weights, grad_O, grad_V, cu_seqlens_kv, cu_seqlens_kv_padded, b, head_num, head_num_kv);
 
   constexpr int tasks_per_block_attn  = 16;
   constexpr int process_head_per_warp = warp_size / (head_dim / 64);
   dim3 grid_grad_attn((b * seq_q * head_num + tasks_per_block_attn * process_head_per_warp - 1) /
                       (tasks_per_block_attn * process_head_per_warp));
   compute_grad_attn_kernel<T, Config, tasks_per_block_attn><<<grid_grad_attn, block, 0, stream>>>(
-      grad_O, V, workspace, cu_seqlens_kv, cu_seqlens_kv_padded, b, head_num);
+      grad_O, V, workspace, cu_seqlens_kv, cu_seqlens_kv_padded, b, head_num, head_num_kv);
 
   constexpr int work_thread_num =
       Config::step2_block_size / (seq_q * max_seq_kv) * (seq_q * max_seq_kv);
@@ -777,10 +862,15 @@ void run_attn_bwd_impl(int b,
   softmax_backward_kernel<T, Config><<<grid_softmax, block_softmax, 0, stream>>>(
       attn_weights, dropout_mask, workspace, dropout_scale, cu_seqlens_kv, b, head_num);
 
+  // grad_Q is per Q-head; grad_K iterates per (batch, h_kv) like grad_V.
   constexpr int tasks_per_block_qk = 4;
-  dim3 grid_qk((b * seq_q * head_num + tasks_per_block_qk - 1) / tasks_per_block_qk);
-  compute_grad_qk_kernel<T, Config, tasks_per_block_qk><<<grid_qk, block, 0, stream>>>(
-      workspace, Q, K, grad_Q, grad_K, scale, cu_seqlens_kv, cu_seqlens_kv_padded, b, head_num);
+  dim3 grid_q((b * seq_q * head_num + tasks_per_block_qk - 1) / tasks_per_block_qk);
+  compute_grad_q_kernel<T, Config, tasks_per_block_qk><<<grid_q, block, 0, stream>>>(
+      workspace, K, grad_Q, scale, cu_seqlens_kv, cu_seqlens_kv_padded, b, head_num, head_num_kv);
+
+  dim3 grid_k((b * seq_q * head_num_kv + tasks_per_block_qk - 1) / tasks_per_block_qk);
+  compute_grad_k_kernel<T, Config, tasks_per_block_qk><<<grid_k, block, 0, stream>>>(
+      workspace, Q, grad_K, scale, cu_seqlens_kv, cu_seqlens_kv_padded, b, head_num, head_num_kv);
 }
 
 size_t fused_attn_smallseq_bwd_workspace_size(size_t b,
@@ -792,21 +882,24 @@ size_t fused_attn_smallseq_bwd_workspace_size(size_t b,
 }
 
 template <int MAX_KV, typename T>
-static void dispatch_fwd(int b, int h_q, const T* Q, const T* K, const T* V, const T* dropout_mask,
-                        float dropout, float scale, T* O, T* workspace, const int* cu_kv,
-                        const int* cu_kv_p, size_t d_qk, hipStream_t stream) {
+static void dispatch_fwd(int b, int h_q, int h_kv, const T* Q, const T* K, const T* V,
+                        const T* dropout_mask, float dropout, float scale, T* O, T* workspace,
+                        const int* cu_kv, const int* cu_kv_p, size_t d_qk, hipStream_t stream) {
   switch (d_qk) {
     case 128:
       run_attn_fwd_impl<T, SmallSeqConfig<MAX_KV, 128>>(
-          b, h_q, Q, K, V, dropout_mask, dropout, scale, O, workspace, cu_kv, cu_kv_p, stream);
+          b, h_q, h_kv, Q, K, V, dropout_mask, dropout, scale, O, workspace,
+          cu_kv, cu_kv_p, stream);
       break;
     case 256:
       run_attn_fwd_impl<T, SmallSeqConfig<MAX_KV, 256>>(
-          b, h_q, Q, K, V, dropout_mask, dropout, scale, O, workspace, cu_kv, cu_kv_p, stream);
+          b, h_q, h_kv, Q, K, V, dropout_mask, dropout, scale, O, workspace,
+          cu_kv, cu_kv_p, stream);
       break;
     case 512:
       run_attn_fwd_impl<T, SmallSeqConfig<MAX_KV, 512>>(
-          b, h_q, Q, K, V, dropout_mask, dropout, scale, O, workspace, cu_kv, cu_kv_p, stream);
+          b, h_q, h_kv, Q, K, V, dropout_mask, dropout, scale, O, workspace,
+          cu_kv, cu_kv_p, stream);
       break;
     default:
       NVTE_ERROR("Unsupported head dimension (d_qk) for small-seq attention: must be 128, 256, or "
@@ -815,24 +908,24 @@ static void dispatch_fwd(int b, int h_q, const T* Q, const T* K, const T* V, con
 }
 
 template <int MAX_KV, typename T>
-static void dispatch_bwd(int b, int h_q, const T* Q, const T* K, const T* V, const T* grad_O,
-                        const T* attn_weights, const T* dropout_mask, float dropout, float scale,
-                        T* grad_Q, T* grad_K, T* grad_V, T* workspace, const int* cu_kv,
-                        const int* cu_kv_p, size_t d_qk, hipStream_t stream) {
+static void dispatch_bwd(int b, int h_q, int h_kv, const T* Q, const T* K, const T* V,
+                        const T* grad_O, const T* attn_weights, const T* dropout_mask,
+                        float dropout, float scale, T* grad_Q, T* grad_K, T* grad_V, T* workspace,
+                        const int* cu_kv, const int* cu_kv_p, size_t d_qk, hipStream_t stream) {
   switch (d_qk) {
     case 128:
       run_attn_bwd_impl<T, SmallSeqConfig<MAX_KV, 128>>(
-          b, h_q, Q, K, V, grad_O, attn_weights, dropout_mask, dropout, scale,
+          b, h_q, h_kv, Q, K, V, grad_O, attn_weights, dropout_mask, dropout, scale,
           grad_Q, grad_K, grad_V, workspace, cu_kv, cu_kv_p, stream);
       break;
     case 256:
       run_attn_bwd_impl<T, SmallSeqConfig<MAX_KV, 256>>(
-          b, h_q, Q, K, V, grad_O, attn_weights, dropout_mask, dropout, scale,
+          b, h_q, h_kv, Q, K, V, grad_O, attn_weights, dropout_mask, dropout, scale,
           grad_Q, grad_K, grad_V, workspace, cu_kv, cu_kv_p, stream);
       break;
     case 512:
       run_attn_bwd_impl<T, SmallSeqConfig<MAX_KV, 512>>(
-          b, h_q, Q, K, V, grad_O, attn_weights, dropout_mask, dropout, scale,
+          b, h_q, h_kv, Q, K, V, grad_O, attn_weights, dropout_mask, dropout, scale,
           grad_Q, grad_K, grad_V, workspace, cu_kv, cu_kv_p, stream);
       break;
     default:
@@ -888,6 +981,9 @@ void fused_attn_smallseq_fwd(size_t b,
 
   float sqr_dk_scale = attn_scale;
 
+  NVTE_CHECK(h_kv > 0 && h_q % h_kv == 0,
+             "Small-seq attention requires h_q to be a positive multiple of h_kv (GQA).");
+
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(qkv_dtype, T,
     const T* Q_ptr         = static_cast<const T*>(devPtrQ);
     const T* K_ptr         = static_cast<const T*>(devPtrK);
@@ -897,8 +993,9 @@ void fused_attn_smallseq_fwd(size_t b,
     const int* cu_kv       = static_cast<const int*>(devPtrCuSeqlensKV);
     const int* cu_kv_p     = static_cast<const int*>(devPtrSeqOffsetsKV);
     const T* dropout_mask  = nullptr;
-    int bi = static_cast<int>(b);
-    int hi = static_cast<int>(h_q);
+    int bi    = static_cast<int>(b);
+    int hi    = static_cast<int>(h_q);
+    int hi_kv = static_cast<int>(h_kv);
 
     switch (max_seqlen_kv) {
       SMALLSEQ_DISPATCH_FWD_CASE(2)
@@ -970,6 +1067,9 @@ void fused_attn_smallseq_bwd(size_t b,
 
   float sqr_dk_scale = attn_scale;
 
+  NVTE_CHECK(h_kv > 0 && h_q % h_kv == 0,
+             "Small-seq attention requires h_q to be a positive multiple of h_kv (GQA).");
+
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(qkv_dtype, T,
     const T* Q_ptr      = static_cast<const T*>(devPtrQ);
     const T* K_ptr      = static_cast<const T*>(devPtrK);
@@ -984,8 +1084,9 @@ void fused_attn_smallseq_bwd(size_t b,
     const int* cu_kv    = static_cast<const int*>(devPtrCuSeqlensKV);
     const int* cu_kv_p  = static_cast<const int*>(devPtrSeqOffsetsKV);
     const T* dropout_mask = nullptr;
-    int bi = static_cast<int>(b);
-    int hi = static_cast<int>(h_q);
+    int bi    = static_cast<int>(b);
+    int hi    = static_cast<int>(h_q);
+    int hi_kv = static_cast<int>(h_kv);
 
     switch (max_seqlen_kv) {
       SMALLSEQ_DISPATCH_BWD_CASE(2)
