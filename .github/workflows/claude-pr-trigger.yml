@@ -4,7 +4,7 @@ name: Claude PR Trigger
 #
 # Two trigger surfaces:
 #   1. Labels:  `claude-review`, `claude-summary`
-#   2. Comments on a PR: `/claude review`, `/claude summary` (or `walkthrough`)
+#   2. Comments on a PR: `/claude review`, `/claude summary`
 #
 # Why the indirection (repository_dispatch -> worker)?
 # claude-code-action exchanges the GitHub OIDC token for a GitHub App
@@ -70,8 +70,8 @@ jobs:
             # Match `/claude <cmd>` as the first non-whitespace token.
             cmd=$(printf '%s' "$COMMENT_BODY" | awk 'NR==1 && $1=="/claude" {print $2}')
             case "$cmd" in
-              review)                 action="review"  ;;
-              summary|walkthrough)    action="summary" ;;
+              review)    action="review"  ;;
+              summary)   action="summary" ;;
             esac
             pr="$PR_FROM_COMMENT"
           fi
