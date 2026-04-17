@@ -17,10 +17,15 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/JAX extensions."""
-    if rocm_build():
-        return jax_install_requires(["flax>=0.7.1"])
-    else:
-        return ["jax", "flax>=0.7.1"]
+    # If NVTE_RELEASE_BUILD is set, we assume not building but sources packaging
+    if rocm_build() and not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
+        """Update requirements with current JAX version to avoid undesired update."""
+        try:
+            import jax
+            return [f"jax=={jax.__version__}", "flax>=0.7.1"]
+        except ImportError:
+            pass
+    return ["jax", "flax>=0.7.1"]
 
 
 def test_requirements() -> List[str]:
@@ -128,12 +133,3 @@ def setup_jax_extension(
         extra_compile_args=cxx_flags,
         libraries=["nccl"] if not rocm_build() else [],
     )
-
-
-def jax_install_requires(reqs: List[str]) -> List[str]:
-    """Update requirements with current JAX version to avoid undesired update."""
-    try:
-        import jax
-    except ImportError:
-        return []
-    return reqs + [f"jax=={jax.__version__}"]
