@@ -87,13 +87,17 @@ try:
     __version__ = str(metadata.version("transformer_engine"))
 except metadata.PackageNotFoundError:
     if transformer_engine.common._nvte_lite_mode:
-        # In lite mode, version metadata may not be available from pip.
-        # Try to read version from build_tools or fall back to "0.0.0-lite".
+        # Lite-only wheels are installed under the `tealite` distribution name,
+        # so `metadata.version("transformer_engine")` raises. Prefer that, then
+        # fall back to reading VERSION.txt via build_tools, then a sentinel.
         try:
-            from transformer_engine.build_tools.te_version import te_version
-            __version__ = te_version() + "+lite"
-        except Exception:
-            __version__ = "0.0.0+lite"
+            __version__ = str(metadata.version("tealite"))
+        except metadata.PackageNotFoundError:
+            try:
+                from transformer_engine.build_tools.te_version import te_version
+                __version__ = te_version() + "+lite"
+            except Exception:
+                __version__ = "0.0.0+lite"
     elif not transformer_engine.common.te_rocm_build:
         raise
     else:
