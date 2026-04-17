@@ -97,28 +97,40 @@ def multi_tensor_adam(chunk_size, noop_flag, tensor_lists, lr, beta1, beta2, eps
     bc2 = (1.0 - beta2 ** step) if bias_correction else 1.0
 
     for g, p, m, v, pm in zip(grads, params, exp_avgs, exp_avg_sqs, master_params):
-        p_src = pm if pm is not None else p
-        g_f = g.float()
-        p_f = p_src.float()
+        # Match C++ multi_tensor_apply semantics: the number of elements to
+        # process is taken from tensor_lists[0] (grads), and the other tensors
+        # are accessed by raw pointer. So m/v/p/pm may be larger than g — e.g.
+        # Megatron's distributed optimizer stores m/v for the full vocab while
+        # passing only this rank's TP shard as the gradient. Operate on flat
+        # views truncated to g.numel().
+        n = g.numel()
+        g_f = g.reshape(-1).float()
+        m_view = m.view(-1)[:n]
+        v_view = v.view(-1)[:n]
+        p_src_view = (pm if pm is not None else p).view(-1)[:n]
+        p_f = p_src_view.float()
 
         if not adam_w_mode and weight_decay != 0.0:
             # ADAM_MODE_0 (L2): fold weight decay into the gradient
             g_f = g_f + weight_decay * p_f
 
-        m.mul_(beta1).add_(g_f, alpha=1 - beta1)
-        v.mul_(beta2).addcmul_(g_f, g_f, value=1 - beta2)
+        m_view.mul_(beta1).add_(g_f.to(m_view.dtype), alpha=1 - beta1)
+        v_view.mul_(beta2).addcmul_(g_f.to(v_view.dtype),
+                                     g_f.to(v_view.dtype), value=1 - beta2)
 
-        denom = (v / bc2).sqrt_().add_(eps)
-        update = (m / bc1) / denom
+        denom = (v_view.float() / bc2).sqrt_().add_(eps)
+        update = (m_view.float() / bc1) / denom
         if adam_w_mode and weight_decay != 0.0:
             # ADAM_MODE_1 (decoupled weight decay / AdamW)
             update = update + weight_decay * p_f
 
-        p_f = p_f - lr * update
+        p_new = p_f - lr * update
 
         if pm is not None:
-            pm.copy_(p_f)
-        p.copy_(p_f.to(p.dtype))
+            pm.view(-1)[:n].copy_(p_new)
+            p.view(-1)[:n].copy_(p_new.to(p.dtype))
+        else:
+            p_src_view.copy_(p_new.to(p.dtype))
 
 
 def multi_tensor_adam_param_remainder(*args, **kwargs):

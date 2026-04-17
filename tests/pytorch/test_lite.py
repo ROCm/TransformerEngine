@@ -4279,6 +4279,44 @@ class TestMultiTensor:
         p_ref = p0 - 1e-3 * (m_ref / denom)
         torch.testing.assert_close(p, p_ref, atol=1e-6, rtol=1e-5)
 
+    def test_adam_oversized_state_tensors(self, device):
+        """Megatron's distributed optimizer passes m/v sized for the full
+        vocab while the gradient is only this rank's TP shard. The C++ kernel
+        uses `g.numel()` as the work size, and lite must match that. Only the
+        first g.numel() elements of m/v/p should be modified.
+        """
+        overflow = self._overflow_buf(device)
+        torch.manual_seed(0)
+        # g/p are the TP shard; m/v are the full parameter (8x larger).
+        shard_rows, full_rows, cols = 64, 512, 32
+        g = torch.randn(shard_rows, cols, device=device, dtype=torch.bfloat16) * 0.01
+        p = torch.randn(shard_rows, cols, device=device, dtype=torch.bfloat16)
+        m = torch.randn(full_rows, cols, device=device, dtype=torch.float32) * 0.001
+        v = torch.randn(full_rows, cols, device=device, dtype=torch.float32).abs() * 0.001
+
+        # Snapshot the out-of-shard region to confirm it's untouched.
+        m_tail = m[shard_rows:].clone()
+        v_tail = v[shard_rows:].clone()
+        p0 = p.clone()
+        m_head0 = m[:shard_rows].clone()
+        v_head0 = v[:shard_rows].clone()
+
+        tex.multi_tensor_adam(
+            self.CHUNK, overflow, [[g], [p], [m], [v]],
+            1e-3, 0.9, 0.999, 1e-8, 1, True, True, 0.0,
+        )
+
+        # Out-of-shard region untouched.
+        torch.testing.assert_close(m[shard_rows:], m_tail)
+        torch.testing.assert_close(v[shard_rows:], v_tail)
+
+        # In-shard region updated per Adam math on fp32-upcast grads.
+        g_f = g.float()
+        m_ref = 0.9 * m_head0 + 0.1 * g_f
+        v_ref = 0.999 * v_head0 + 0.001 * g_f * g_f
+        torch.testing.assert_close(m[:shard_rows], m_ref, atol=1e-5, rtol=1e-4)
+        torch.testing.assert_close(v[:shard_rows], v_ref, atol=1e-5, rtol=1e-4)
+
     def test_adam_param_remainder_not_implemented(self, device):
         with pytest.raises(NotImplementedError):
             tex.multi_tensor_adam_param_remainder()
