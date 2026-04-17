@@ -63,6 +63,8 @@ __all__ = [
     "FusedAttnHelper",
     "fused_attn_fwd",
     "fused_attn_bwd",
+    "fused_attn_small_seq_fwd",
+    "fused_attn_small_seq_bwd",
 ]
 
 
@@ -366,39 +368,14 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                 softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             elif backend == NVTE_Fused_Attn_Backend.NVTE_CK:
                 if config.qkv_layout.is_thd():
-                    # THD only: check env; run small-seq logic only when enabled
-                    if os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") != "1" or q_max_seqlen == kv_max_seqlen:
-                        softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
-                        softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
-                    else:
-                        batch_size = reduce(operator.mul, batch_shape)
-                        ck_standard_softmax_aux_size = (
-                            batch_size * attn_heads * q_max_seqlen * 1 * 4 
-                        ) # 4 bytes for the float32
-                        ck_smallseq_softmax_aux_size = (
-                            batch_size * attn_heads * q_max_seqlen
-                            * min(kv_max_seqlen, 16) * 2
-                        )  # 2 bytes for bf16/fp16
-                        if ck_standard_softmax_aux_size >= ck_smallseq_softmax_aux_size:
-                            softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
-                            softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
-                        else:
-                            softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, min(kv_max_seqlen, 16))
-                            softmax_dtype = dtypes.canonicalize_dtype(q_dtype)
+                    softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
+                    softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
                 else:
                     softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
                     softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
                 raise ValueError(f"Unsupported {backend=}")
 
-        if os.environ.get("NVTE_LOG_CK_CONFIG", "0") == "1":
-            jax.debug.print(
-                "attn_fwd(ck small-seq JAX abstract): batch_shape: {}, softmax_shape: {}, softmax_dtype: {}",
-                batch_shape,
-                softmax_shape,
-                softmax_dtype,
-            )
-        
         softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=softmax_dtype)
 
         # JAX does not enable 64-bit int by default so we get XLA to allocate x8 memory with
@@ -1172,6 +1149,702 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 
 
 register_primitive(FusedAttnBwdPrimitive)
+
+
+class SmallSeqAttnFwdPrimitive(BasePrimitive):
+    """ROCm small-sequence cross-attention forward"""
+
+    name = "te_small_seq_attn_forward_ffi"
+    multiple_results = True
+    impl_static_args = (13,)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        q_aval,
+        k_aval,
+        v_aval,
+        bias_aval,
+        seed_aval,
+        q_seqlen_or_cu_seqlen_aval,
+        kv_seqlen_or_cu_seqlen_aval,
+        _q_seq_offsets,
+        _k_seq_offsets,
+        _q_segment_ids,
+        _kv_segment_ids,
+        _q_segment_pos,
+        _kv_segment_pos,
+        *,
+        config: _FusedAttnConfig,
+    ):
+        if not is_hip_extension():
+            raise ValueError(
+                "Small-seq attention requires Transformer Engine built for ROCm (HIP extension)."
+            )
+        if not hasattr(transformer_engine_jax, "get_small_seq_attn_fwd_workspace_sizes"):
+            raise ValueError(
+                "Small-seq workspace helpers are unavailable; use a ROCm build of transformer_engine_jax."
+            )
+        if config.qkv_layout != QKVLayout.THD_THD_THD:
+            raise ValueError(f"Small-seq requires QKVLayout.THD_THD_THD, got {config.qkv_layout}")
+        if config.attn_bias_type != AttnBiasType.NO_BIAS:
+            raise ValueError("Small-seq does not support attention bias.")
+        if config.dropout_probability != 0:
+            raise ValueError("Small-seq kernel path does not support dropout.")
+
+        q_dtype = dtypes.canonicalize_dtype(q_aval.dtype)
+        k_dtype = dtypes.canonicalize_dtype(k_aval.dtype)
+        v_dtype = dtypes.canonicalize_dtype(v_aval.dtype)
+        bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
+        assert q_dtype == k_dtype == v_dtype == bias_dtype
+        assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
+
+        (
+            batch_shape,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            q_head_dim,
+            v_head_dim,
+        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
+
+        if q_head_dim != v_head_dim or q_head_dim not in (128, 256, 512):
+            raise ValueError(
+                "Small-seq requires matching q/v head dims in {128, 256, 512}, "
+                f"got qk={q_head_dim} v={v_head_dim}"
+            )
+
+        output_shape = (*batch_shape, q_max_seqlen, attn_heads, v_head_dim)
+        out_aval = q_aval.update(shape=output_shape, dtype=q_dtype)
+
+        kv_eff = min(kv_max_seqlen, 16)
+        softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, kv_eff)
+        softmax_aux_aval = q_aval.update(shape=softmax_shape, dtype=q_dtype)
+
+        checker = _FusedAttnRNGStateChecker()
+        seed_dtype = dtypes.canonicalize_dtype(seed_aval.dtype)
+        assert seed_dtype == checker.rng_state_dtype
+        rng_state_shape = (seed_aval.shape[0], checker.rng_state_size)
+        rng_state_aval = seed_aval.update(shape=rng_state_shape, dtype=checker.rng_state_dtype)
+
+        bias_batch = bias_heads = 0
+        input_batch = reduce(operator.mul, batch_shape)
+        wkspace_info = transformer_engine_jax.get_small_seq_attn_fwd_workspace_sizes(
+            input_batch,
+            bias_batch,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            bias_heads,
+            q_head_dim,
+            v_head_dim,
+            config.scaling_factor,
+            config.dropout_probability,
+            config.attn_bias_type.value,
+            config.attn_mask_type.value,
+            config.qkv_layout.value,
+            jax_dtype_to_te_dtype(q_aval.dtype),
+            config.is_training,
+            config.max_segments_per_seq,
+            config.window_size[0],
+            config.window_size[1],
+        )
+        wkspace_aval = q_aval.update(
+            shape=wkspace_info[0], dtype=te_dtype_to_jax_dtype(wkspace_info[1])
+        )
+
+        return out_aval, softmax_aux_aval, rng_state_aval, wkspace_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        out_aval, softmax_aux_aval, rng_state_aval, _ = SmallSeqAttnFwdPrimitive.abstract(
+            *args, **kwargs
+        )
+        return out_aval, softmax_aux_aval, rng_state_aval
+
+    @staticmethod
+    def lowering(
+        ctx,
+        q,
+        k,
+        v,
+        bias,
+        seed,
+        q_cu_seqlen,
+        kv_cu_seqlen,
+        q_seq_offsets,
+        k_seq_offsets,
+        _q_segment_ids,
+        _kv_segment_ids,
+        _q_segment_pos,
+        _kv_segment_pos,
+        *,
+        config: _FusedAttnConfig,
+    ):
+        q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
+        (
+            batch_shape,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            q_head_dim,
+            v_head_dim,
+        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
+        input_batch = reduce(operator.mul, batch_shape)
+        bias_batch = bias_heads = 0
+        window_size_left = config.window_size[0]
+        window_size_right = config.window_size[1]
+
+        return ffi.ffi_lowering(SmallSeqAttnFwdPrimitive.name)(
+            ctx,
+            q,
+            k,
+            v,
+            bias,
+            seed,
+            q_cu_seqlen,
+            kv_cu_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,
+            input_batch=input_batch,
+            bias_batch=bias_batch,
+            q_max_seqlen=q_max_seqlen,
+            kv_max_seqlen=kv_max_seqlen,
+            attn_heads=attn_heads,
+            num_gqa_groups=num_gqa_groups,
+            bias_heads=bias_heads,
+            qk_head_dim=q_head_dim,
+            v_head_dim=v_head_dim,
+            max_segments_per_seq=config.max_segments_per_seq,
+            scaling_factor=float(config.scaling_factor),
+            dropout_probability=float(config.dropout_probability),
+            bias_type=int(config.attn_bias_type.value),
+            mask_type=int(config.attn_mask_type.value),
+            qkv_layout=int(config.qkv_layout.value),
+            is_training=config.is_training,
+            deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
+        )
+
+    @staticmethod
+    def impl(
+        q,
+        k,
+        v,
+        bias,
+        seed,
+        q_seqlen,
+        kv_seqlen,
+        q_seq_offsets,
+        k_seq_offsets,
+        _q_segment_ids,
+        _kv_segment_ids,
+        _q_segment_pos,
+        _kv_segment_pos,
+        config: _FusedAttnConfig,
+    ):
+        assert SmallSeqAttnFwdPrimitive.inner_primitive is not None
+        sequence_descriptor = SequenceDescriptor(
+            seqlens=(q_seqlen, kv_seqlen),
+            seq_offsets=(q_seq_offsets, k_seq_offsets),
+            segment_ids=(_q_segment_ids, _kv_segment_ids),
+            segment_pos=(_q_segment_pos, _kv_segment_pos),
+        )
+        (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
+            sequence_descriptor.get_seqlens_and_offsets(
+                config.attn_mask_type,
+                config.qkv_layout,
+                config.window_size,
+                config.max_segments_per_seq,
+            )
+        )
+        if config.qkv_layout.is_thd():
+
+            def _fix_len_take(x, condition, fill_value=-1):
+                x_shape = x.shape
+                x = x.flatten()
+                size = x.size
+                indices = jnp.nonzero(condition.flatten(), size=size, fill_value=size)[0]
+                y = jnp.take(x, indices, fill_value=fill_value)
+                return jnp.reshape(y, x_shape)
+
+            def convert_to_2d(offsets, batch, max_seqlen):
+                offsets_2d = jnp.where(
+                    offsets >= 0,
+                    offsets + (jnp.arange(batch) * max_seqlen)[..., jnp.newaxis],
+                    offsets,
+                )
+                return offsets_2d
+
+            batch, q_max_seqlen, kv_max_seqlen, *_ = FusedAttnHelper.parse_qkv_aval(
+                q, k, v, config.qkv_layout
+            )
+            assert len(batch) == 1
+            kv_batch = q_batch = batch[0]
+            if get_cudnn_version() >= (9, 3, 0):
+                fill_value = 0
+            else:
+                fill_value = -1
+            q_seqlen = _fix_len_take(q_seqlen, q_seqlen > 0, fill_value=fill_value)
+            kv_seqlen = _fix_len_take(kv_seqlen, kv_seqlen > 0, fill_value=fill_value)
+            q_seq_offsets = convert_to_2d(q_seq_offsets, q_batch, q_max_seqlen)
+            k_seq_offsets = convert_to_2d(k_seq_offsets, kv_batch, kv_max_seqlen)
+            q_seq_offsets = _fix_len_take(
+                q_seq_offsets, q_seq_offsets >= 0, fill_value=q_batch * q_max_seqlen
+            )
+            k_seq_offsets = _fix_len_take(
+                k_seq_offsets, k_seq_offsets >= 0, fill_value=kv_batch * kv_max_seqlen
+            )
+
+        q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
+        kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
+
+        output, softmax_aux, rng_state, _ = SmallSeqAttnFwdPrimitive.inner_primitive.bind(
+            q,
+            k,
+            v,
+            bias,
+            seed,
+            q_cu_seqlen,
+            kv_cu_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,
+            config=config,
+        )
+        return output, softmax_aux, rng_state
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, config):
+        check_valid_batch_dims(batch_dims)
+        assert SmallSeqAttnFwdPrimitive.outer_primitive is not None
+        q_bdim, _, _, _, seed_bdim, *_ = batch_dims
+        out_bdims = q_bdim, q_bdim, seed_bdim
+        return (
+            SmallSeqAttnFwdPrimitive.outer_primitive.bind(*batched_args, config=config),
+            out_bdims,
+        )
+
+    @staticmethod
+    def infer_sharding_from_operands(config, mesh, arg_infos, result_infos):
+        del config, result_infos
+        q_spec = get_padded_spec(arg_infos[0])
+        out_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
+        softmax_aux_sharding = NamedSharding(
+            mesh, PartitionSpec(*q_spec[:-3], q_spec[-2], q_spec[-3], None)
+        )
+        rng_state_sharding = NamedSharding(mesh, PartitionSpec(get_all_mesh_axes(), None))
+        return (out_sharding, softmax_aux_sharding, rng_state_sharding)
+
+    @staticmethod
+    def partition(config, mesh, arg_infos, result_infos):
+        out_sharding = result_infos[0].sharding
+        softmax_aux_sharding = result_infos[1].sharding
+        rng_state_sharding = seed_sharding = NamedSharding(
+            mesh, PartitionSpec(get_all_mesh_axes(), None)
+        )
+        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+        arg_shardings[4] = seed_sharding
+        arg_shardings[-1] = arg_shardings[-3]
+        arg_shardings[-2] = arg_shardings[-4]
+        arg_shardings = tuple(arg_shardings)
+        out_shardings = (out_sharding, softmax_aux_sharding, rng_state_sharding)
+        impl = partial(SmallSeqAttnFwdPrimitive.impl, config=config)
+        return mesh, impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(config, mesh, value_types, result_types):
+        if version.parse(jax.__version__) < version.parse("0.5.0"):
+            raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
+        del mesh, result_types
+        input_spec = [(f"…{x}",) for x in range(len(value_types))]
+        rng_sharding = (f"…{len(value_types)}",)
+        input_spec[0] = ("…0", "seqlen", "head", "hidden")
+        out_sharding = ("…0", "seqlen", "head", "hidden")
+        softmax_aux_sharding = ("…0", "head", "seqlen", "i")
+        return SdyShardingRule(
+            tuple(input_spec), (out_sharding, softmax_aux_sharding, rng_sharding)
+        )
+
+
+class SmallSeqAttnBwdPrimitive(BasePrimitive):
+    """ROCm small-sequence cross-attention backward."""
+
+    name = "te_small_seq_attn_backward_ffi"
+    multiple_results = True
+    impl_static_args = (16,)
+    inner_primitive = None
+    outer_primitive = None
+
+    @staticmethod
+    def abstract(
+        q_aval,
+        k_aval,
+        v_aval,
+        bias_aval,
+        softmax_aux_aval,
+        rng_state_aval,
+        output_aval,
+        doutput_aval,
+        q_seqlen_or_cu_seqlen_aval,
+        kv_seqlen_or_cu_seqlen_aval,
+        _q_seq_offsets,
+        _k_seq_offsets,
+        _q_segment_ids,
+        _kv_segment_ids,
+        _q_segment_pos,
+        _kv_segment_pos,
+        *,
+        config,
+    ):
+        if not is_hip_extension():
+            raise ValueError(
+                "Small-seq attention requires Transformer Engine built for ROCm (HIP extension)."
+            )
+        if not hasattr(transformer_engine_jax, "get_small_seq_attn_bwd_workspace_sizes"):
+            raise ValueError(
+                "Small-seq workspace helpers are unavailable; use a ROCm build of transformer_engine_jax."
+            )
+        del softmax_aux_aval, rng_state_aval, output_aval
+
+        q_dtype = dtypes.canonicalize_dtype(q_aval.dtype)
+        k_dtype = dtypes.canonicalize_dtype(k_aval.dtype)
+        v_dtype = dtypes.canonicalize_dtype(v_aval.dtype)
+        bias_dtype = dtypes.canonicalize_dtype(bias_aval.dtype)
+        doutput_dtype = dtypes.canonicalize_dtype(doutput_aval.dtype)
+        assert q_dtype == k_dtype == v_dtype == bias_dtype == doutput_dtype
+        assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
+
+        (
+            batch_shape,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            qk_head_dim,
+            v_head_dim,
+        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
+
+        bias_batch = bias_heads = 0
+        deterministic = not FusedAttnHelper.is_non_deterministic_allowed()
+        input_batch = reduce(operator.mul, batch_shape)
+        wkspace_shape, wkspace_dtype = transformer_engine_jax.get_small_seq_attn_bwd_workspace_sizes(
+            input_batch,
+            bias_batch,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            bias_heads,
+            qk_head_dim,
+            v_head_dim,
+            config.scaling_factor,
+            config.dropout_probability,
+            config.attn_bias_type.value,
+            config.attn_mask_type.value,
+            config.qkv_layout.value,
+            jax_dtype_to_te_dtype(q_aval.dtype),
+            config.is_training,
+            deterministic,
+            config.max_segments_per_seq,
+            config.window_size[0],
+            config.window_size[1],
+        )
+
+        dq_aval = q_aval.update(shape=q_aval.shape, dtype=q_dtype)
+        dk_aval = k_aval.update(shape=k_aval.shape, dtype=k_dtype)
+        dv_aval = v_aval.update(shape=v_aval.shape, dtype=v_dtype)
+        dbias_aval = bias_aval.update(shape=bias_aval.shape, dtype=bias_dtype)
+        wkspace_aval = q_aval.update(
+            shape=wkspace_shape, dtype=te_dtype_to_jax_dtype(wkspace_dtype)
+        )
+        return dq_aval, dk_aval, dv_aval, dbias_aval, wkspace_aval
+
+    @staticmethod
+    def outer_abstract(*args, **kwargs):
+        dq_aval, dk_aval, dv_aval, dbias_aval, _ = SmallSeqAttnBwdPrimitive.abstract(
+            *args, **kwargs
+        )
+        return dq_aval, dk_aval, dv_aval, dbias_aval
+
+    @staticmethod
+    def lowering(
+        ctx,
+        q,
+        k,
+        v,
+        bias,
+        softmax_aux,
+        rng_state,
+        output,
+        doutput,
+        q_cu_seqlen,
+        kv_cu_seqlen,
+        q_seq_offsets,
+        k_seq_offsets,
+        q_segment_ids,
+        kv_segment_ids,
+        q_segment_pos,
+        kv_segment_pos,
+        *,
+        config,
+    ):
+        q_aval, k_aval, v_aval, bias_aval, *_ = ctx.avals_in
+        (
+            batch_shape,
+            q_max_seqlen,
+            kv_max_seqlen,
+            attn_heads,
+            num_gqa_groups,
+            qk_head_dim,
+            v_head_dim,
+        ) = FusedAttnHelper.parse_qkv_aval(q_aval, k_aval, v_aval, config.qkv_layout)
+        input_batch = reduce(operator.mul, batch_shape)
+        bias_batch = bias_heads = 0
+        window_size_left = config.window_size[0]
+        window_size_right = config.window_size[1]
+
+        return ffi.ffi_lowering(SmallSeqAttnBwdPrimitive.name)(
+            ctx,
+            q,
+            k,
+            v,
+            bias,
+            softmax_aux,
+            rng_state,
+            output,
+            doutput,
+            q_cu_seqlen,
+            kv_cu_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            q_segment_ids,
+            kv_segment_ids,
+            q_segment_pos,
+            kv_segment_pos,
+            input_batch=input_batch,
+            bias_batch=bias_batch,
+            q_max_seqlen=q_max_seqlen,
+            kv_max_seqlen=kv_max_seqlen,
+            attn_heads=attn_heads,
+            num_gqa_groups=num_gqa_groups,
+            bias_heads=bias_heads,
+            qk_head_dim=qk_head_dim,
+            v_head_dim=v_head_dim,
+            max_segments_per_seq=config.max_segments_per_seq,
+            scaling_factor=float(config.scaling_factor),
+            dropout_probability=float(config.dropout_probability),
+            bias_type=int(config.attn_bias_type.value),
+            mask_type=int(config.attn_mask_type.value),
+            qkv_layout=int(config.qkv_layout.value),
+            is_training=config.is_training,
+            deterministic=not FusedAttnHelper.is_non_deterministic_allowed(),
+            window_size_left=window_size_left,
+            window_size_right=window_size_right,
+        )
+
+    @staticmethod
+    def impl(
+        q,
+        k,
+        v,
+        bias,
+        softmax_aux,
+        rng_state,
+        output,
+        doutput,
+        q_seqlen,
+        kv_seqlen,
+        q_seq_offsets,
+        k_seq_offsets,
+        _q_segment_ids,
+        _kv_segment_ids,
+        _q_segment_pos,
+        _kv_segment_pos,
+        config,
+    ):
+        assert SmallSeqAttnBwdPrimitive.inner_primitive is not None
+        sequence_descriptor = SequenceDescriptor(
+            seqlens=(q_seqlen, kv_seqlen),
+            seq_offsets=(q_seq_offsets, k_seq_offsets),
+            segment_ids=(_q_segment_ids, _kv_segment_ids),
+            segment_pos=(_q_segment_pos, _kv_segment_pos),
+        )
+        (q_seqlen, kv_seqlen), (q_seq_offsets, k_seq_offsets) = (
+            sequence_descriptor.get_seqlens_and_offsets(
+                config.attn_mask_type,
+                config.qkv_layout,
+                config.window_size,
+                config.max_segments_per_seq,
+            )
+        )
+        if config.qkv_layout.is_thd():
+
+            def _fix_len_take(x, condition, fill_value=-1):
+                x_shape = x.shape
+                x = x.flatten()
+                size = x.size
+                indices = jnp.nonzero(condition.flatten(), size=size, fill_value=size)[0]
+                y = jnp.take(x, indices, fill_value=fill_value)
+                return jnp.reshape(y, x_shape)
+
+            def convert_to_2d(offsets, batch, max_seqlen):
+                offsets_2d = jnp.where(
+                    offsets >= 0,
+                    offsets + (jnp.arange(batch) * max_seqlen)[..., jnp.newaxis],
+                    offsets,
+                )
+                return offsets_2d
+
+            batch, q_max_seqlen, kv_max_seqlen, *_ = FusedAttnHelper.parse_qkv_aval(
+                q, k, v, config.qkv_layout
+            )
+            assert len(batch) == 1
+            kv_batch = q_batch = batch[0]
+            if get_cudnn_version() >= (9, 3, 0):
+                fill_value = 0
+            else:
+                fill_value = -1
+            q_seqlen = _fix_len_take(q_seqlen, q_seqlen > 0, fill_value=fill_value)
+            kv_seqlen = _fix_len_take(kv_seqlen, kv_seqlen > 0, fill_value=fill_value)
+            q_seq_offsets = convert_to_2d(q_seq_offsets, q_batch, q_max_seqlen)
+            k_seq_offsets = convert_to_2d(k_seq_offsets, kv_batch, kv_max_seqlen)
+            q_seq_offsets = _fix_len_take(
+                q_seq_offsets, q_seq_offsets >= 0, fill_value=q_batch * q_max_seqlen
+            )
+            k_seq_offsets = _fix_len_take(
+                k_seq_offsets, k_seq_offsets >= 0, fill_value=kv_batch * kv_max_seqlen
+            )
+
+        q_cu_seqlen = generate_cu_seqlen(q_seqlen.flatten())
+        kv_cu_seqlen = generate_cu_seqlen(kv_seqlen.flatten())
+
+        dq, dk, dv, dbias, _ = SmallSeqAttnBwdPrimitive.inner_primitive.bind(
+            q,
+            k,
+            v,
+            bias,
+            softmax_aux,
+            rng_state,
+            output,
+            doutput,
+            q_cu_seqlen,
+            kv_cu_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,
+            config=config,
+        )
+        return dq, dk, dv, dbias
+
+    @staticmethod
+    def batcher(batched_args, batch_dims, *, config):
+        check_valid_batch_dims(batch_dims)
+        assert SmallSeqAttnBwdPrimitive.outer_primitive is not None
+        q_bdim, k_bdim, v_bdim, *_ = batch_dims
+        out_bdims = q_bdim, k_bdim, v_bdim, q_bdim
+        return (
+            SmallSeqAttnBwdPrimitive.outer_primitive.bind(*batched_args, config=config),
+            out_bdims,
+        )
+
+    @staticmethod
+    def infer_sharding_from_operands(config, mesh, arg_infos, result_infos):
+        del config, result_infos
+        q_spec = get_padded_spec(arg_infos[0])
+        k_spec = get_padded_spec(arg_infos[1])
+        v_spec = get_padded_spec(arg_infos[2])
+        bias_spec = get_padded_spec(arg_infos[3])
+        dq_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
+        dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
+        dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
+        dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
+        return (dq_sharding, dk_sharding, dv_sharding, dbias_sharding)
+
+    @staticmethod
+    def partition(config, mesh, arg_infos, result_infos):
+        del result_infos
+        q_spec = get_padded_spec(arg_infos[0])
+        k_spec = get_padded_spec(arg_infos[1])
+        v_spec = get_padded_spec(arg_infos[2])
+        bias_spec = get_padded_spec(arg_infos[3])
+        dq_sharding = NamedSharding(mesh, PartitionSpec(*q_spec))
+        dk_sharding = NamedSharding(mesh, PartitionSpec(*k_spec))
+        dv_sharding = NamedSharding(mesh, PartitionSpec(*v_spec))
+        dbias_sharding = NamedSharding(mesh, PartitionSpec(*bias_spec))
+        arg_shardings = [arg_i.sharding for arg_i in arg_infos]
+        arg_shardings[-1] = arg_shardings[-3]
+        arg_shardings[-2] = arg_shardings[-4]
+        arg_shardings = tuple(arg_shardings)
+        out_shardings = (dq_sharding, dk_sharding, dv_sharding, dbias_sharding)
+
+        def sharded_impl(
+            q,
+            k,
+            v,
+            bias,
+            softmax_aux,
+            rng_state,
+            output,
+            doutput,
+            q_cu_seqlen,
+            kv_cu_seqlen,
+            q_seq_offsets,
+            k_seq_offsets,
+            _q_segment_ids,
+            _kv_segment_ids,
+            _q_segment_pos,
+            _kv_segment_pos,
+        ):
+            return SmallSeqAttnBwdPrimitive.impl(
+                q,
+                k,
+                v,
+                bias,
+                softmax_aux,
+                rng_state,
+                output,
+                doutput,
+                q_cu_seqlen,
+                kv_cu_seqlen,
+                q_seq_offsets,
+                k_seq_offsets,
+                _q_segment_ids,
+                _kv_segment_ids,
+                _q_segment_pos,
+                _kv_segment_pos,
+                config=config,
+            )
+
+        return mesh, sharded_impl, out_shardings, arg_shardings
+
+    @staticmethod
+    def shardy_sharding_rule(config, mesh, value_types, result_types):
+        if version.parse(jax.__version__) < version.parse("0.5.0"):
+            raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
+        del config, mesh
+        input_spec = tuple((f"…{x}",) for x in range(len(value_types)))
+        output_spec = tuple((f"…{x}",) for x in range(len(result_types)))
+        return SdyShardingRule(input_spec, output_spec)
+
+
+register_primitive(SmallSeqAttnFwdPrimitive)
+register_primitive(SmallSeqAttnBwdPrimitive)
 
 
 def reorder_causal_dual_chunk_swap(tensor, cp_size: int, seq_dim: int, to_contiguous: bool):
@@ -2841,3 +3514,119 @@ def fused_attn_bwd(
         config=fused_config,
     )
     return tuple(qkv_grads[: len(qkv)]), bias_grad
+
+
+def fused_attn_small_seq_fwd(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    sequence_descriptor: SequenceDescriptor,
+    seed: Optional[jnp.ndarray],
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int,
+    window_size: Optional[Tuple[int, int]] = None,
+) -> Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray]:
+    """
+    Forward pass for ROCm small-sequence cross-attention (explicit TE API).
+    """
+    if not is_hip_extension():
+        raise RuntimeError(
+            "fused_attn_small_seq_fwd requires Transformer Engine built for ROCm (HIP)."
+        )
+    if qkv_layout != QKVLayout.THD_THD_THD:
+        raise ValueError(
+            f"fused_attn_small_seq_fwd requires QKVLayout.THD_THD_THD, got {qkv_layout}"
+        )
+    if len(qkv) != 3:
+        raise ValueError(f"fused_attn_small_seq_fwd expects qkv=(q, k, v), got len={len(qkv)}")
+
+    seed = _FusedAttnRNGStateChecker().check_seed(seed, dropout_probability, is_training)
+    if attn_bias_type == AttnBiasType.NO_BIAS:
+        assert bias is None
+        bias = jnp.zeros(0, dtype=qkv[0].dtype)
+    else:
+        raise ValueError("fused_attn_small_seq_fwd only supports AttnBiasType.NO_BIAS")
+
+    fused_config = _FusedAttnConfig(
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        qkv_layout=qkv_layout,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+        window_size=(-1, -1) if window_size is None else window_size,
+        context_parallel_load_balanced=False,
+        cp_axis="",
+        cp_striped_window_size=None,
+    )
+
+    seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
+    output, softmax_aux, rng_state = SmallSeqAttnFwdPrimitive.outer_primitive.bind(
+        *qkv,
+        bias,
+        seed,
+        *seq_desc_flatten,
+        config=fused_config,
+    )
+    rng_state = with_sharding_constraint(rng_state, PartitionSpec(get_all_mesh_axes(), None))
+    return (output, softmax_aux, rng_state)
+
+
+def fused_attn_small_seq_bwd(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    softmax_aux: jnp.ndarray,
+    rng_state: jnp.ndarray,
+    output: jnp.ndarray,
+    doutput: jnp.ndarray,
+    sequence_descriptor: SequenceDescriptor,
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int,
+    window_size: Optional[Tuple[int, int]] = None,
+):
+    if not is_hip_extension():
+        raise RuntimeError(
+            "fused_attn_small_seq_bwd requires Transformer Engine built for ROCm (HIP)."
+        )
+    if len(qkv) != 3:
+        raise ValueError(f"fused_attn_small_seq_bwd expects qkv=(q, k, v), got len={len(qkv)}")
+    if attn_bias_type == AttnBiasType.NO_BIAS:
+        assert bias is None
+        bias = jnp.zeros(0, dtype=qkv[0].dtype)
+
+    fused_config = _FusedAttnConfig(
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        qkv_layout=qkv_layout,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+        window_size=(-1, -1) if window_size is None else window_size,
+        context_parallel_load_balanced=False,
+        cp_axis="",
+        cp_striped_window_size=None,
+    )
+
+    seq_desc_flatten, _ = jax.tree.flatten(sequence_descriptor)
+    dq, dk, dv, _dbias = SmallSeqAttnBwdPrimitive.outer_primitive.bind(
+        *qkv,
+        bias,
+        softmax_aux,
+        rng_state,
+        output,
+        doutput,
+        *seq_desc_flatten,
+        config=fused_config,
+    )
+    return (dq, dk, dv), None
