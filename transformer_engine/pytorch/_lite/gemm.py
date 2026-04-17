@@ -30,6 +30,26 @@ _FP8_DTYPES = (
 _GEMM_BACKEND = os.environ.get("NVTE_LITE_GEMM_BACKEND", "ck").lower()
 
 
+def _resolve_output_dtype(output_dtype):
+    """Normalize output_dtype (TE_DType | torch.dtype | None) to torch.dtype.
+
+    `cpp_extensions/gemm.py` forwards the user-provided `out_dtype` as a
+    `TE_DType` enum. The pure-Python path needs a `torch.dtype` to cast the
+    result; the full build resolves this inside cuBLAS. Returns None when the
+    caller did not specify an output dtype (the full build uses the D operand
+    dtype in that case).
+    """
+    if output_dtype is None or isinstance(output_dtype, torch.dtype):
+        return output_dtype
+    try:
+        from transformer_engine.pytorch.triton_kernels.common import (
+            te_dtype_to_torch_dtype,
+        )
+        return te_dtype_to_torch_dtype(output_dtype)
+    except (ImportError, KeyError):
+        return None
+
+
 def _dequantize_from_transpose(tensor):
     """Dequantize a Float8Tensor when only its _transpose is available.
 
@@ -612,6 +632,13 @@ def generic_gemm(A, transA, B, transB, D, quantizer, output_dtype,
         gelu_in.copy_(result)
         gelu_input = gelu_in
         result = torch.nn.functional.gelu(result, approximate='tanh')
+
+    # Honor the caller-requested output dtype. cuBLAS casts to out_dtype in the
+    # full build; without this cast, an fp32 operand promotes the whole result
+    # to fp32 and the next module fails set_activation_dtype.
+    out_torch_dtype = _resolve_output_dtype(output_dtype)
+    if out_torch_dtype is not None and result.dtype != out_torch_dtype:
+        result = result.to(out_torch_dtype)
 
     if accumulate and D is not None:
         D.add_(result)

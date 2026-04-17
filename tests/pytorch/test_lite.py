@@ -1280,6 +1280,52 @@ class TestGemm:
         ref = B @ A.t()
         assert torch.allclose(out, ref, atol=1e-5, rtol=1e-5)
 
+    # -- output_dtype honored across mixed-precision operands --------------
+
+    def test_gemm_output_dtype_honored_mixed_operands(self, device):
+        """output_dtype must be honored even when an operand is fp32.
+
+        Regression: the PyTorch fallback promoted compute to fp32 whenever
+        either operand was fp32 and ignored `output_dtype`, returning fp32.
+        The next module then failed `set_activation_dtype` with input=fp32
+        against bf16 weights. cuBLAS in the full build always casts to the
+        caller-requested dtype.
+        """
+        M, N, K = 16, 32, 64
+        ws = self._workspace(device)
+
+        # bf16 weight × fp32 activation: naive promotion would yield fp32.
+        # Caller requests bf16 output.
+        A = torch.randn(N, K, device=device, dtype=torch.bfloat16)
+        B_fp32 = torch.randn(M, K, device=device, dtype=torch.float32)
+
+        out, _, _, _ = tex.generic_gemm(
+            A, True, B_fp32, False, None, None, tex.DType.kBFloat16,
+            None, None, False, None, False, ws, ws.shape[0],
+            False, False,
+        )
+        assert out.dtype == torch.bfloat16, (
+            f"Expected bf16 output, got {out.dtype} — output_dtype not honored"
+        )
+
+        # Symmetric case: fp32 weight × bf16 activation.
+        A_fp32 = torch.randn(N, K, device=device, dtype=torch.float32)
+        B = torch.randn(M, K, device=device, dtype=torch.bfloat16)
+        out, _, _, _ = tex.generic_gemm(
+            A_fp32, True, B, False, None, None, tex.DType.kBFloat16,
+            None, None, False, None, False, ws, ws.shape[0],
+            False, False,
+        )
+        assert out.dtype == torch.bfloat16
+
+        # torch.dtype is also accepted (pass-through in _resolve_output_dtype).
+        out, _, _, _ = tex.generic_gemm(
+            A, True, B_fp32, False, None, None, torch.bfloat16,
+            None, None, False, None, False, ws, ws.shape[0],
+            False, False,
+        )
+        assert out.dtype == torch.bfloat16
+
     # -- Per-row scaled FP8 GEMM (CurrentScaling) ----------------------------
 
     def test_gemm_per_row_scaled_fp8(self, device):
