@@ -61,9 +61,9 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   // Cases handled:
   //   1) normalized NN -> NT by reading B from columnwise storage
   //   2) normalized TN -> NT by reading both A and B from columnwise storage
-  const bool has_a_col = A0_te->has_columnwise_data();
-  const bool has_b_col = B0_te->has_columnwise_data();
   if (is_8bit_float) {
+    const bool has_a_col = A0_te->has_columnwise_data();
+    const bool has_b_col = B0_te->has_columnwise_data();
     // normalized NN: op(A_use)=A, op(B_use)=B
     if (!transA_use && !transB_use) {
       if (has_b_col) {
