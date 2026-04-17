@@ -262,13 +262,10 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
             // Choose between runtime-compiled or statically-compiled kernel
             const bool aligned =
                 (row_length % THREADS_PER_WARP == 0 && num_rows % THREADS_PER_WARP == 0);
-#ifdef __HIP_PLATFORM_AMD__
-            // Whether to fall back to the cost-model-based RTC kernel selection
-            bool fallback_to_cost_model_rtc = false;
-#endif
             if (aligned && rtc::is_enabled()) {  // Runtime-compiled tuned kernel
 #ifdef __HIP_PLATFORM_AMD__
-              fallback_to_cost_model_rtc = true;
+              // Whether to fall back to the cost-model-based RTC kernel selection
+              bool fallback_to_cost_model_rtc = true;
               // even if we enforce to use OPTIMIZED_HIPIFIED_CAST_TRANSPOSE, may fall back to general kernel configs from NVTE cost model
               bool nvte_use_optimized_hipified_cast_transpose = false;
               if (const char* env_p = std::getenv("NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE") ) {
@@ -352,8 +349,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                                     num_rows);
                 }
               }
-            }
-            if(fallback_to_cost_model_rtc){
+              if(fallback_to_cost_model_rtc){
 #endif
               // Pick kernel config
               std::vector<KernelConfig> kernel_configs;
@@ -413,11 +409,9 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                                  static_cast<CType *>(output.amax.dptr),
                                  static_cast<CType *>(output.scale_inv.dptr), row_length, num_rows);
 #ifdef __HIP_PLATFORM_AMD__
-            }
-            if (!aligned || !rtc::is_enabled()) {  // Statically-compiled general kernel
-#else
-            } else {  // Statically-compiled general kernel
+              }
 #endif
+            } else {  // Statically-compiled general kernel
               constexpr size_t load_size = 4;
               constexpr size_t store_size = 4;
               constexpr size_t row_tile_size = load_size / itype_size * THREADS_PER_WARP;
