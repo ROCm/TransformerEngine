@@ -353,6 +353,11 @@ constexpr size_t nvfp4_scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t nvfp4_scale_tensor_alignment_X_rowwise = 4;
 constexpr size_t nvfp4_scale_tensor_alignment_Y_colwise = 4;
 constexpr size_t nvfp4_scale_tensor_alignment_X_colwise = 128;
+
+constexpr size_t mxfp4_scale_tensor_alignment_Y_rowwise = 256;
+constexpr size_t mxfp4_scale_tensor_alignment_X_rowwise = 8;
+constexpr size_t mxfp4_scale_tensor_alignment_Y_colwise = 8;
+constexpr size_t mxfp4_scale_tensor_alignment_X_colwise = 256;
 #else
 constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t scale_tensor_alignment_X_rowwise = 4;
@@ -546,7 +551,11 @@ void adjust_ref_for_e8m0_scale_error(const std::string &name,
 #endif
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
-                                            const size_t block_size_rows, const size_t block_size_cols);
+                                            const size_t block_size_rows, const size_t block_size_cols
+                                            #ifdef USE_ROCM
+                                            , const NVTEScalingMode scaling_mode = NVTE_MXFP8_1D_SCALING
+                                            #endif
+                                          );
 
 std::pair<double, double> getTolerances(const DType type);
 

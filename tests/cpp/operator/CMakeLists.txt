@@ -39,7 +39,7 @@ if(USE_CUDA)
 else()
   list(APPEND test_cuda_sources
               test_cublaslt_gemm.cu
-              test_cast_transpose_mxfp4_shuffled.cu)
+              test_cast_mxfp4_transpose.cu)
 endif()
 
 if(USE_CUDA)
