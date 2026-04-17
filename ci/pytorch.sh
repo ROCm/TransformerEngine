@@ -49,7 +49,7 @@ run_test_config(){
     fi
     run 1 test_cuda_graphs.py
     run_default_fa 1 test_deferred_init.py
-    run_default_fa 1 test_float8tensor.py
+    run_default_fa 1 test_quantized_tensor.py
     run_default_fa 1 test_float8_current_scaling_exact.py
     test $_fus_attn = auto -o $_fus_attn = ck && run 1 test_cpu_offloading.py
     test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 NVTE_CPU_OFFLOAD_V1=1 run 3 test_cpu_offloading_v1.py
@@ -59,7 +59,7 @@ run_test_config(){
     run_default_fa 1 test_gemm_autotune.py
     run 1 test_gqa.py
     run 1 test_jit.py
-    run_default_fa 1 test_multi_tensor.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py
@@ -84,6 +84,8 @@ run_test_config(){
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_numerics.py
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_fusible_ops.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 triton_kernels/test_cast.py
+
+    run_default_fa 1 nvfp4/
 }
 
 run_test_config_mgpu(){

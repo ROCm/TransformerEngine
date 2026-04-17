@@ -18,9 +18,7 @@
 #include "../../common.h"
 #include "../fp8/dequantize_fp8.cuh"
 #include "../mxfp8/dequantize_mxfp8.cuh"
-#ifndef __HIP_PLATFORM_AMD__
 #include "../nvfp4/dequantize_nvfp4.cuh"
-#endif //#ifndef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine {
 namespace dispatch {
@@ -31,9 +29,9 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
 
   switch (input.scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
-      NVTE_CHECK(is_fp8_dtype(input.data.dtype), "Input must have FP8 type.");
-      NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
-      NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
+      NVTE_CHECK(is_fp8_dtype(input.dtype()), "Input must have FP8 type.");
+      NVTE_CHECK(!is_fp8_dtype(output->dtype()), "Output must be in higher precision.");
+      NVTE_CHECK(output->shape() == input.shape(), "Input and output shapes need to match.");
       fp8::dequantize(input, output, stream);
       break;
     }
@@ -49,12 +47,10 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
 #endif //#ifndef __HIP_PLATFORM_AMD__
       break;
     }
-#ifndef __HIP_PLATFORM_AMD__
     case NVTE_NVFP4_1D_SCALING: {
       nvfp4::dequantize(input, output, stream);
       break;
     }
-#endif //#ifndef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(input.scaling_mode) + ".");
   }

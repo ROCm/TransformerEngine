@@ -18,6 +18,7 @@ from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4Qu
 from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.common.recipe import NVFP4BlockScaling
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import pytest
 import torch
@@ -249,123 +250,103 @@ def test_nvfp4_quantization_noncontiguous_inputs(
         with_random_sign_mask=with_random_sign_mask,
     )
 
-
-def _ref_wht16_tiled(x: torch.Tensor, sign_mask: int) -> torch.Tensor:
-    """Reference 16-point WHT tiled along last dim, normalised by 0.25."""
-    x = x.float()
-    _rows, cols = x.shape
-    d = torch.tensor(
-        [((-1) ** ((sign_mask >> i) & 1)) for i in range(16)],
-        dtype=torch.float32, device=x.device,
-    )
-    out = x.clone()
-    for c in range(0, cols, 16):
-        tile = out[:, c:c+16] * d        # apply sign
-        h = 1
-        while h < 16:
-            for i in range(0, 16, h * 2):
-                a = tile[:, i:i+h].clone()
-                b = tile[:, i+h:i+2*h].clone()
-                tile[:, i:i+h]     = a + b
-                tile[:, i+h:i+2*h] = a - b
-            h *= 2
-        out[:, c:c+16] = tile * 0.25
-    return out
+if IS_HIP_EXTENSION:
+    def _ref_rht(x: torch.Tensor) -> torch.Tensor:
+        """Apply reference RHT using NVFP4QuantizerRef._apply_rht."""
+        ref = NVFP4QuantizerRef(
+            dtype=utils.Fp4Formats.E2M1,
+            rowwise=True,
+            columnwise=False,
+            quant_tile_shape=(1, 16),
+            with_rht=True,
+            with_random_sign_mask=True,
+        )
+        return ref._apply_rht(x)
 
 
-def _ref_quantize_wht16_tiled(
-    x: torch.Tensor, sign_mask: int, global_amax: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor]:
-    # Mirror the TE columnwise RHT path by BF16-rounding WHT(x.T)
-    # before applying NVFP4 reference quantization with the TE global amax.
+    def _ref_quantize_rht(
+        x: torch.Tensor, global_amax: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Quantize BF16-rounded RHT(x.T) with the given global amax."""
+        x_t_rht = _ref_rht(x.t().contiguous()).to(dtype=x.dtype)
+        ref_quantizer = NVFP4QuantizerRef(
+            dtype=utils.Fp4Formats.E2M1,
+            rowwise=True,
+            columnwise=False,
+            pow_2_scales=False,
+            eps=0.0,
+            quant_tile_shape=(1, 16),
+            with_rht=False,
+            with_random_sign_mask=False,
+        )
 
-    x_t_rht = _ref_wht16_tiled(x.t().contiguous(), sign_mask=sign_mask).to(dtype=x.dtype)
-    ref_quantizer = NVFP4QuantizerRef(
-        dtype=utils.Fp4Formats.E2M1,
-        rowwise=True,
-        columnwise=False,
-        pow_2_scales=False,
-        eps=0.0,
-        quant_tile_shape=(1, 16),
-        with_rht=False,
-        with_random_sign_mask=False,
-    )
+        qx_t_ref, sx_t_ref = ref_quantizer._quantize_blockwise_reference(
+            x_t_rht,
+            global_amax,
+            ref_quantizer.quant_tile_shape[1],
+            ref_quantizer.quant_tile_shape[0],
+            pow_2_scales=ref_quantizer.pow_2_scales,
+            eps=ref_quantizer.eps,
+        )
 
-    x_t_rht_padded = ref_quantizer._pad_tensor(
-        x_t_rht,
-        row_divisor=ref_quantizer.quant_tile_shape[0],
-        col_divisor=ref_quantizer.quant_tile_shape[1],
-    )
-
-    qx_t_ref, sx_t_ref = ref_quantizer._quantize_blockwise_reference(
-        x_t_rht_padded,
-        global_amax,
-        ref_quantizer.quant_tile_shape[1],
-        ref_quantizer.quant_tile_shape[0],
-        pow_2_scales=ref_quantizer.pow_2_scales,
-        eps=ref_quantizer.eps,
-    )
-
-    qx_t_ref = ref_quantizer._rm_pad_tensor(qx_t_ref, (x_t_rht.shape[0], x_t_rht.shape[1] // 2))
-
-    return qx_t_ref, sx_t_ref
+        return qx_t_ref, sx_t_ref
 
 
-@pytest.mark.parametrize("rows,cols", [(64, 64), (128, 128)])
-def test_hadamard_transform_amax(rows, cols):
-    """
-    Tests hadamard_transform_amax() via NVFP4Quantizer (with_rht=True),
-    without requiring a full NVFP4 recipe.
-    Checks:
-      - amax_rowwise == max|x|           (pre-RHT amax of raw input)
-      - amax_colwise == max|WHT(x.T)|    (post-RHT amax of transposed input)
-      - packed columnwise output == quantized BF16-rounded WHT(x.T)
-    """
-    torch.manual_seed(42)
-    x = torch.randn((rows, cols), dtype=torch.bfloat16, device="cuda").contiguous()
+    @pytest.mark.parametrize("rows,cols", [(64, 64), (128, 128)])
+    def test_hadamard_transform_amax(rows, cols):
+        """
+        Tests hadamard_transform_amax() via NVFP4Quantizer (with_rht=True),
+        without requiring a full NVFP4 recipe.
 
-    quantizer = NVFP4Quantizer(
-        fp4_dtype=tex.DType.kFloat4E2M1,
-        rowwise=True,
-        columnwise=True,
-        with_amax_reduction=False,
-        amax_reduction_group=None,
-        with_rht=True,
-        with_post_rht_amax=True,
-        with_random_sign_mask=True,
-    )
-    out = quantizer(x)
+        Checks:
+        - amax_rowwise == max|x|           (pre-RHT amax of raw input)
+        - amax_colwise == max|WHT(x.T)|    (post-RHT amax of transposed input)
+        - packed columnwise output == quantized BF16-rounded WHT(x.T)
+        """
+        torch.manual_seed(42)
+        x = torch.randn((rows, cols), dtype=torch.bfloat16, device="cuda").contiguous()
 
-    # amax_rowwise: pre-RHT, should equal max|x|
-    expected_rowwise_amax = x.float().abs().max()
-    torch.testing.assert_close(
-        out._amax_rowwise.float().squeeze(),
-        expected_rowwise_amax,
-        rtol=0, atol=0,
-    )
+        quantizer = NVFP4Quantizer(
+            fp4_dtype=tex.DType.kFloat4E2M1,
+            rowwise=True,
+            columnwise=True,
+            with_amax_reduction=False,
+            amax_reduction_group=None,
+            with_rht=True,
+            with_post_rht_amax=True,
+            with_random_sign_mask=True,
+        )
+        out = quantizer(x)
 
-    # amax_colwise: post-RHT of x.T, should equal max|WHT(x.T)|
-    sign_mask_t = quantizer.rht_matrix_random_sign_mask_t
-    x_t = x.t().contiguous()  # (cols, rows)
-    wht_x_t = _ref_wht16_tiled(x_t, sign_mask=sign_mask_t).to(torch.bfloat16).float()
-    expected_colwise_amax = wht_x_t.float().abs().max()
+        # amax_rowwise: pre-RHT, should equal max|x|
+        expected_rowwise_amax = x.float().abs().max()
+        torch.testing.assert_close(
+            out._amax_rowwise.float().squeeze(),
+            expected_rowwise_amax,
+            rtol=0, atol=0,
+        )
 
-    torch.testing.assert_close(
-        out._amax_columnwise.float().squeeze().item(),
-        float(expected_colwise_amax),
-        rtol=0, atol=0,
-    )
+        # amax_colwise: post-RHT of x.T, should equal max|WHT(x.T)|
+        x_t = x.t().contiguous()  # (cols, rows)
+        wht_x_t = _ref_rht(x_t).to(torch.bfloat16).float()
+        expected_colwise_amax = wht_x_t.float().abs().max()
 
-    assert out._columnwise_data is not None
-    assert out._columnwise_scale_inv is not None
+        torch.testing.assert_close(
+            out._amax_columnwise.float().squeeze().item(),
+            float(expected_colwise_amax),
+            rtol=0, atol=0,
+        )
 
-    qx_t_ref, sx_t_ref = _ref_quantize_wht16_tiled(x, sign_mask_t, out._amax_columnwise)
+        assert out._columnwise_data is not None
+        assert out._columnwise_scale_inv is not None
 
-    qx_t = unpack_fp4(out._columnwise_data.view(torch.uint8))
-    qx_t_ref = unpack_fp4(qx_t_ref.view(torch.uint8))
-    torch.testing.assert_close(qx_t, qx_t_ref, atol=0.0, rtol=0.0)
+        qx_t_ref, sx_t_ref = _ref_quantize_rht(x, out._amax_columnwise)
 
-    sx_t = out._columnwise_scale_inv
-    sx_t_ref = sx_t_ref.view(dtype=torch.uint8)
-    sx_t_valid = sx_t[: sx_t_ref.shape[0], : sx_t_ref.shape[1]]
-    torch.testing.assert_close(sx_t_valid, sx_t_ref, atol=0.0, rtol=0.0)
+        qx_t = unpack_fp4(out._columnwise_data.view(torch.uint8))
+        qx_t_ref = unpack_fp4(qx_t_ref.view(torch.uint8))
+        torch.testing.assert_close(qx_t, qx_t_ref, atol=0.0, rtol=0.0)
+
+        sx_t = out._columnwise_scale_inv
+        sx_t_ref = sx_t_ref.view(dtype=torch.uint8)
+        sx_t_valid = sx_t[: sx_t_ref.shape[0], : sx_t_ref.shape[1]]
+        torch.testing.assert_close(sx_t_valid, sx_t_ref, atol=0.0, rtol=0.0)
