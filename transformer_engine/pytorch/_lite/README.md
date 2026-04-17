@@ -50,6 +50,14 @@ Most subsystems follow a tiered fallback:
 
 GEMM backend can be forced via `NVTE_LITE_GEMM_BACKEND={ck,triton,pytorch}`.
 
+## Environment Variables
+
+| Variable | Scope | Values | Default | Purpose |
+|----------|-------|--------|---------|---------|
+| `NVTE_LITE_ONLY` | build-time | `0` / `1` | `0` | When `1`, `setup.py` produces the `tealite` wheel (Python + Triton only, no C++ extensions) and embeds a `LITE_BUILD` marker so lite mode activates automatically at import. |
+| `NVTE_LITE` | runtime | `0` / `1` | `0` | When `1`, forces lite dispatch at import time on a full build — `transformer_engine.pytorch` registers `_lite` as `transformer_engine_torch` in `sys.modules` instead of loading the C++ extension. Set automatically by `tealite` wheels via the `LITE_BUILD` marker. |
+| `NVTE_LITE_GEMM_BACKEND` | runtime | `ck`, `triton`, `pytorch` | `ck` | Forces the GEMM backend in `_lite/gemm.py`. `ck` and `triton` route to AITER (falling back to `torch.matmul` if AITER is missing); `pytorch` skips AITER entirely and uses `torch.matmul`. Read once at module import. |
+
 ## Module Structure
 
 ```
