@@ -63,31 +63,52 @@ def multi_tensor_unscale_l2norm(chunk_size, noop_flag, tensor_lists, inv_scale, 
 
 def multi_tensor_adam(chunk_size, noop_flag, tensor_lists, lr, beta1, beta2, eps,
                       step, adam_w_mode, bias_correction, weight_decay):
-    """Fused Adam optimizer step for multiple tensors."""
-    # tensor_lists: [params, grads, exp_avg, exp_avg_sq]
-    params, grads, exp_avgs, exp_avg_sqs = tensor_lists[0], tensor_lists[1], \
-                                            tensor_lists[2], tensor_lists[3]
+    """Fused Adam step mirroring common/multi_tensor/adam.cu.
 
-    for p, g, m, v in zip(params, grads, exp_avgs, exp_avg_sqs):
-        if adam_w_mode and weight_decay != 0:
-            p.data.mul_(1 - lr * weight_decay)
+    tensor_lists layout:
+      4 lists: [grads, params, exp_avg, exp_avg_sq]
+      5 lists: [grads, params, exp_avg, exp_avg_sq, master_params]
 
-        m.mul_(beta1).add_(g, alpha=1 - beta1)
-        v.mul_(beta2).addcmul_(g, g, value=1 - beta2)
+    With master_params, Adam math runs in fp32 on master_params and the result
+    is downcast into params. Without them, math runs on params directly.
+    adam_w_mode=True is ADAM_MODE_1 (decoupled weight decay), False is
+    ADAM_MODE_0 (L2 regularization folded into the gradient).
+    """
+    assert len(tensor_lists) in (4, 5), (
+        f"multi_tensor_adam expects 4 or 5 tensor lists, got {len(tensor_lists)}"
+    )
+    grads = tensor_lists[0]
+    params = tensor_lists[1]
+    exp_avgs = tensor_lists[2]
+    exp_avg_sqs = tensor_lists[3]
+    master_params = tensor_lists[4] if len(tensor_lists) == 5 else [None] * len(params)
 
-        if bias_correction:
-            bc1 = 1 - beta1 ** step
-            bc2 = 1 - beta2 ** step
-            step_size = lr / bc1
-            denom = (v.sqrt() / math.sqrt(bc2)).add_(eps)
-        else:
-            step_size = lr
-            denom = v.sqrt().add_(eps)
+    bc1 = (1.0 - beta1 ** step) if bias_correction else 1.0
+    bc2 = (1.0 - beta2 ** step) if bias_correction else 1.0
 
-        p.data.addcdiv_(m, denom, value=-step_size)
+    for g, p, m, v, pm in zip(grads, params, exp_avgs, exp_avg_sqs, master_params):
+        p_src = pm if pm is not None else p
+        g_f = g.float()
+        p_f = p_src.float()
 
-        if not adam_w_mode and weight_decay != 0:
-            p.data.add_(p.data, alpha=-lr * weight_decay)
+        if not adam_w_mode and weight_decay != 0.0:
+            # ADAM_MODE_0 (L2): fold weight decay into the gradient
+            g_f = g_f + weight_decay * p_f
+
+        m.mul_(beta1).add_(g_f, alpha=1 - beta1)
+        v.mul_(beta2).addcmul_(g_f, g_f, value=1 - beta2)
+
+        denom = (v / bc2).sqrt_().add_(eps)
+        update = (m / bc1) / denom
+        if adam_w_mode and weight_decay != 0.0:
+            # ADAM_MODE_1 (decoupled weight decay / AdamW)
+            update = update + weight_decay * p_f
+
+        p_f = p_f - lr * update
+
+        if pm is not None:
+            pm.copy_(p_f)
+        p.copy_(p_f.to(p.dtype))
 
 
 def multi_tensor_adam_param_remainder(*args, **kwargs):
