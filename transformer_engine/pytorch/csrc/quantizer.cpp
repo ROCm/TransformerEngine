@@ -1502,6 +1502,10 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   bool eligible_for_rht_cast_fusion =
       input.dtype() == DType::kBFloat16 && rows % 64 == 0 && cols % 128 == 0;
 
+#ifdef USE_ROCM
+  eligible_for_rht_cast_fusion = false;
+#endif
+
   // Compute amax.
 #ifdef USE_ROCM
   // Allocate rht_output_t early so that the amax kernel can also write the
@@ -1703,6 +1707,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
                            stream);
         });
       } else {
+#ifndef USE_ROCM
         // RHT cast fusion kernel.
         NVTE_CHECK(this->rht_matrix.defined() && this->rht_matrix.numel() > 0,
                    "RHT matrix is not set");
@@ -1712,6 +1717,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
                                                          rht_matrix_nvte.data(),
                                                          columnwise_quant_config, stream);
         });
+#endif
       }
     }
   } else {
