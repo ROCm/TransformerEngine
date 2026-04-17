@@ -130,10 +130,9 @@ static void BM_CastOnly(benchmark::State &state) {
   HIP_CHECK(hipEventCreate(&start));
   HIP_CHECK(hipEventCreate(&stop));
 
-  warmup_gpu();
   // Untimed call to trigger any RTC compilation before measurement
   nvte_quantize(input.data(), output.data(), stream);
-  HIP_CHECK(hipDeviceSynchronize());
+  warmup_gpu();
 
   for (auto _ : state) {
     HIP_CHECK(hipEventRecord(start, stream));
@@ -180,10 +179,9 @@ static void BM_CastTranspose(benchmark::State &state) {
   HIP_CHECK(hipEventCreate(&start));
   HIP_CHECK(hipEventCreate(&stop));
 
-  warmup_gpu();
   // Untimed call to trigger any RTC compilation before measurement
   nvte_quantize(input.data(), output.data(), stream);
-  HIP_CHECK(hipDeviceSynchronize());
+  warmup_gpu();
 
   for (auto _ : state) {
     HIP_CHECK(hipEventRecord(start, stream));

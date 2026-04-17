@@ -38,7 +38,7 @@ uint32_t rocm_pack_4xfloat8(float s0, float s1, float s2, float s3) {
 #endif  // __has_builtin(__builtin_amdgcn_cvt_pk_fp8_f32)
 
 // Scaled FP8 packed conversion for MXFP8 (E8M0 block scale)
-#if defined(__gfx950__) && __HIP_DEVICE_COMPILE__
+#if __HIP_DEVICE_COMPILE__ && __has_builtin(__builtin_amdgcn_cvt_scalef32_pk_fp8_f32)
 template <typename OType>
 __device__ __forceinline__
 uint32_t rocm_cvt_4xfloat8(float s0, float s1, float s2, float s3, float scale) {
@@ -56,7 +56,7 @@ uint32_t rocm_cvt_4xfloat8(float s0, float s1, float s2, float s3, float scale) 
     }
     return __builtin_bit_cast(uint32_t, r);
 }
-#endif  // #if defined(__gfx950__)
+#endif  // __has_builtin(__builtin_amdgcn_cvt_scalef32_pk_fp8_f32)
 
 template <typename T, int N>
 struct alignas(sizeof(T) * N) NTVec {
