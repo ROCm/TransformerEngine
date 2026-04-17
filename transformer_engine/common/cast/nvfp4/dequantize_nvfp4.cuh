@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -57,6 +59,9 @@ __global__ void __launch_bounds__(512)
   fp4vec value;
   value.vec = input_vectorized[my_index];
   fp8e4m3 scale = scales[my_scale_index];
+  // NVFP4 may reach this path with scale present but no separate amax buffer.
+  // Use 1.0f as the neutral fallback when tensor_amax is not provided on HIP.
+// #ifndef __HIP_PLATFORM_AMD__
   float amax = *tensor_amax;
 #if defined(__HIP_PLATFORM_AMD__) && !defined(__HIP_DEVICE_COMPILE__)
   // On AMD host, TypeExtrema<fp8e4m3>::max is non-constexpr (runtime FNUZ detection)

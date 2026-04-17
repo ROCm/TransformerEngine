@@ -1079,19 +1079,19 @@ void hadamard_transform_cast_fusion_columnwise(const Tensor &input_, Tensor &out
   }
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
-      use_stochastic_rounding, kUseStochasticRounding,
-      detail::rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding>(
-          /*m=*/m,
-          /*n=*/n,
-          /*A=*/reinterpret_cast<TA const *>(input.dptr),
-          /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
-          /*C=*/reinterpret_cast<TC *>(output_t.dptr),
-          /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t.dptr),
-          /*global_amax=*/reinterpret_cast<float const *>(global_amax.dptr),
-          /*rng_state=*/rng_state,
-          /*sm_count=*/sm_count,
-          /*stream=*/stream,
-          /*k_tile_size=*/k_tile_size););
+          quant_config.use_fast_math, kUseFastMath,
+          detail::rht_gemm_ttt_wrapper<TA, TB, TC, TSFC, kUseStochasticRounding, kUseFastMath>(
+              /*m=*/m,
+              /*n=*/n,
+              /*A=*/reinterpret_cast<TA const *>(input.dptr),
+              /*B=*/reinterpret_cast<TB const *>(hadamard_matrix.dptr),
+              /*C=*/reinterpret_cast<TC *>(output_t.dptr),
+              /*SFC=*/reinterpret_cast<TSFC *>(scale_inv_t.dptr),
+              /*global_amax=*/reinterpret_cast<float const *>(global_amax.dptr),
+              /*rng_state=*/rng_state,
+              /*sm_count=*/sm_count,
+              /*stream=*/stream,
+              /*k_tile_size=*/k_tile_size);););
 #else
   const dim3 block(kThreadsPerBlock);
   const dim3 grid(DIVUP(n, static_cast<size_t>(kHadamardDim)),
