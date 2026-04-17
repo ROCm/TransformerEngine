@@ -914,13 +914,13 @@ def te_cast_transpose_mxfp4_triton(input, out, noop_flag=None):
     M = input.numel() // N
     input_2d_view = input.reshape(M, N).contiguous()
     out_metadata = out.get_metadata()
-    shuffle_B_matrix_for_aiter = out_metadata["quantizer"].shuffle_B_matrix_for_aiter
+    shuffle_scales = out_metadata["quantizer"].shuffle_scales
 
     USE_ROWWISE_SCALING = out_metadata["rowwise_data"] is not None
     USE_COLWISE_SCALING = out_metadata["columnwise_data"] is not None
 
-    SHUFFLE_ROWWISE_SCALING = shuffle_B_matrix_for_aiter and USE_ROWWISE_SCALING
-    SHUFFLE_COLWISE_SCALING = shuffle_B_matrix_for_aiter and USE_COLWISE_SCALING
+    SHUFFLE_ROWWISE_SCALING = shuffle_scales and USE_ROWWISE_SCALING
+    SHUFFLE_COLWISE_SCALING = shuffle_scales and USE_COLWISE_SCALING
 
     MXFP4_BLOCK_SIZE = 32
     BLOCK_M = 128
@@ -997,7 +997,7 @@ def te_cast_transpose_mxfp4_triton(input, out, noop_flag=None):
         USE_ROWWISE=USE_ROWWISE_SCALING,
         USE_COLWISE=USE_COLWISE_SCALING,
         SHUFFLE_ROWWISE=SHUFFLE_ROWWISE_SCALING,
-        SHUFFLE_COLWISE=SHUFFLE_ROWWISE_SCALING,
+        SHUFFLE_COLWISE=SHUFFLE_COLWISE_SCALING,
     )
 
 ##########################################

@@ -1,3 +1,9 @@
+/*************************************************************************
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * See LICENSE for license information.
+ ************************************************************************/
+ 
 /*
  * MXFP4 Cast + Transpose Kernel (CUDA/HIP)
  * =========================================
@@ -23,11 +29,12 @@
  *   - Colwise output: FP4 packed (N x M/2) + E8M0 scales (N x M/32)
  */
 
+#ifndef TRANSFORMER_ENGINE_CAST_TRANSPOSE_MXFP4_SHUFFLED_CUH_
+#define TRANSFORMER_ENGINE_CAST_TRANSPOSE_MXFP4_SHUFFLED_CUH_
+
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <cstdint>
-
-#include "transformer_engine/transpose.h"
 
 namespace te_mxfp4 {
 
@@ -669,7 +676,7 @@ void cast_transpose_mxfp4_shuffled(
 
 }  // namespace te_mxfp4
 
-void nvte_cast_transpose_mxfp4_fused_shuffle(
+inline void nvte_cast_transpose_mxfp4_fused_shuffle(
     const void* input,
     void* rowwise_fp4, void* rowwise_scale,
     void* colwise_fp4, void* colwise_scale,
@@ -686,8 +693,8 @@ void nvte_cast_transpose_mxfp4_fused_shuffle(
     dim3 grid((M + 127) / 128, (N + 63) / 64);
     dim3 block(256);
 
-    #define LAUNCH_KERNEL(ROW, COL, HAD, SHUF_ROW, SHUF_COL) \
-        te_mxfp4::cast_transpose_mxfp4_shuffled<ROW, COL, true, HAD, SHUF_ROW, SHUF_COL> \
+    #define LAUNCH_KERNEL(ROW, COL, HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES) \
+        te_mxfp4::cast_transpose_mxfp4_shuffled<ROW, COL, SHUF_SCALES, HAD, SHUF_ROW, SHUF_COL> \
             <<<grid, block, 0, stream>>>( \
                 (const uint16_t*)input, \
                 (uint8_t*)rowwise_fp4, (uint8_t*)rowwise_scale, \
@@ -697,43 +704,40 @@ void nvte_cast_transpose_mxfp4_fused_shuffle(
                 rowwise_scale_N, rowwise_scale_M_pad, rowwise_scale_N_pad, \
                 colwise_scale_M, colwise_scale_N, colwise_scale_M_pad, colwise_scale_N_pad)
 
-    if (use_hadamard) {
-        if (shuffle_rowwise_fp4 && shuffle_colwise_fp4) {
-            if (use_rowwise && use_colwise)      LAUNCH_KERNEL(true, true, true, true, true);
-            else if (use_rowwise)                LAUNCH_KERNEL(true, false, true, true, false);
-            else if (use_colwise)                LAUNCH_KERNEL(false, true, true, false, true);
-        } else if (shuffle_rowwise_fp4) {
-            if (use_rowwise && use_colwise)      LAUNCH_KERNEL(true, true, true, true, false);
-            else if (use_rowwise)                LAUNCH_KERNEL(true, false, true, true, false);
-            else if (use_colwise)                LAUNCH_KERNEL(false, true, true, false, false);
-        } else if (shuffle_colwise_fp4) {
-            if (use_rowwise && use_colwise)      LAUNCH_KERNEL(true, true, true, false, true);
-            else if (use_rowwise)                LAUNCH_KERNEL(true, false, true, false, false);
-            else if (use_colwise)                LAUNCH_KERNEL(false, true, true, false, true);
-        } else {
-            if (use_rowwise && use_colwise)      LAUNCH_KERNEL(true, true, true, false, false);
-            else if (use_rowwise)                LAUNCH_KERNEL(true, false, true, false, false);
-            else if (use_colwise)                LAUNCH_KERNEL(false, true, true, false, false);
-        }
+    #define DISPATCH_ROWCOL(HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES)                     \
+        do {                                                                           \
+            if (use_rowwise && use_colwise)                                            \
+                LAUNCH_KERNEL(true, true, HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES);     \
+            else if (use_rowwise)                                                      \
+                LAUNCH_KERNEL(true, false, HAD, SHUF_ROW, false, SHUF_SCALES);        \
+            else if (use_colwise)                                                      \
+                LAUNCH_KERNEL(false, true, HAD, false, SHUF_COL, SHUF_SCALES);        \
+        } while(0)
+
+    #define DISPATCH_SHUFFLE(HAD, SHUF_SCALES)                                         \
+        do {                                                                           \
+            if (shuffle_rowwise_fp4 && shuffle_colwise_fp4)                            \
+                DISPATCH_ROWCOL(HAD, true, true, SHUF_SCALES);                        \
+            else if (shuffle_rowwise_fp4)                                              \
+                DISPATCH_ROWCOL(HAD, true, false, SHUF_SCALES);                       \
+            else if (shuffle_colwise_fp4)                                              \
+                DISPATCH_ROWCOL(HAD, false, true, SHUF_SCALES);                       \
+            else                                                                       \
+                DISPATCH_ROWCOL(HAD, false, false, SHUF_SCALES);                      \
+        } while(0)
+
+    if (shuffle_scales) {
+        if (use_hadamard) { DISPATCH_SHUFFLE(true, true); }
+        else              { DISPATCH_SHUFFLE(false, true); }
     } else {
-        if (shuffle_rowwise_fp4 && shuffle_colwise_fp4) {
-            if (use_rowwise && use_colwise)      LAUNCH_KERNEL(true, true, false, true, true);
-            else if (use_rowwise)                LAUNCH_KERNEL(true, false, false, true, false);
-            else if (use_colwise)                LAUNCH_KERNEL(false, true, false, false, true);
-        } else if (shuffle_rowwise_fp4) {
-            if (use_rowwise && use_colwise)      LAUNCH_KERNEL(true, true, false, true, false);
-            else if (use_rowwise)                LAUNCH_KERNEL(true, false, false, true, false);
-            else if (use_colwise)                LAUNCH_KERNEL(false, true, false, false, false);
-        } else if (shuffle_colwise_fp4) {
-            if (use_rowwise && use_colwise)      LAUNCH_KERNEL(true, true, false, false, true);
-            else if (use_rowwise)                LAUNCH_KERNEL(true, false, false, false, false);
-            else if (use_colwise)                LAUNCH_KERNEL(false, true, false, false, true);
-        } else {
-            if (use_rowwise && use_colwise)      LAUNCH_KERNEL(true, true, false, false, false);
-            else if (use_rowwise)                LAUNCH_KERNEL(true, false, false, false, false);
-            else if (use_colwise)                LAUNCH_KERNEL(false, true, false, false, false);
-        }
+        if (use_hadamard) { DISPATCH_SHUFFLE(true, false); }
+        else              { DISPATCH_SHUFFLE(false, false); }
     }
+
+    #undef DISPATCH_SHUFFLE
+    #undef DISPATCH_ROWCOL
 
     #undef LAUNCH_KERNEL
 }  // nvte_cast_transpose_mxfp4_fused_shuffle
+
+#endif  // TRANSFORMER_ENGINE_CAST_TRANSPOSE_MXFP4_SHUFFLED_CUH_

@@ -336,6 +336,7 @@ def test_quantize_mxfp4_standard(
         rowwise=rowwise,
         columnwise=columnwise,
         shuffle_B_matrix_for_aiter=shuffle_B_matrix_for_aiter,
+        shuffle_scales=shuffle_B_matrix_for_aiter,
     )
 
     quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer)

@@ -326,25 +326,6 @@ void nvte_dsreglu_cast_transpose(const NVTETensor input, const NVTETensor act_in
  */
 void nvte_swap_first_dims(const NVTETensor input, NVTETensor output, cudaStream_t stream);
 
-/*! \brief Fused MXFP4 cast + transpose with optional scale/data shuffling.
- *
- *  ROCm-only kernel for gfx950. Converts BF16 input to MXFP4 format with
- *  optional Hadamard transform and memory-layout shuffling for GEMM.
- */
-void nvte_cast_transpose_mxfp4_fused_shuffle(
-    const void* input,
-    void* rowwise_fp4, void* rowwise_scale,
-    void* colwise_fp4, void* colwise_scale,
-    int M, int N,
-    bool use_rowwise, bool use_colwise,
-    bool shuffle_scales, bool use_hadamard,
-    bool shuffle_rowwise_fp4, bool shuffle_colwise_fp4,
-    int rowwise_scale_stride, int colwise_scale_stride,
-    int rowwise_scale_N, int rowwise_scale_M_pad, int rowwise_scale_N_pad,
-    int colwise_scale_M, int colwise_scale_N,
-    int colwise_scale_M_pad, int colwise_scale_N_pad,
-    cudaStream_t stream);
-
 #ifdef __cplusplus
 }  // extern "C"
 #endif

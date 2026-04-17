@@ -42,9 +42,11 @@ extern PyTypeObject *MXFP8QuantizerClass;
 extern PyTypeObject *Float8BlockwiseQTensorPythonClass;
 extern PyTypeObject *Float8BlockwiseQTensorStoragePythonClass;
 extern PyTypeObject *Float8BlockwiseQuantizerClass;
+#ifdef USE_ROCM
 extern PyTypeObject *MXFP4TensorPythonClass;
 extern PyTypeObject *MXFP4TensorStoragePythonClass;
 extern PyTypeObject *MXFP4QuantizerClass;
+#endif //#ifdef USE_ROCM
 extern PyTypeObject *NVFP4TensorPythonClass;
 extern PyTypeObject *NVFP4TensorStoragePythonClass;
 extern PyTypeObject *NVFP4QuantizerClass;
@@ -73,11 +75,13 @@ inline bool IsFloat8BlockwiseQuantizers(PyObject *obj) {
   return Py_TYPE(obj) == Float8BlockwiseQuantizerClass;
 }
 
+#ifdef USE_ROCM
 inline bool IsMXFP4Quantizers(PyObject *obj) { return Py_TYPE(obj) == MXFP4QuantizerClass; }
 
 inline bool IsMXFP4Tensor(PyObject *obj) {
   return Py_TYPE(obj) == MXFP4TensorPythonClass || Py_TYPE(obj) == MXFP4TensorStoragePythonClass;
 }
+#endif //#ifdef USE_ROCM
 
 inline bool IsNVFP4Quantizers(PyObject *obj) { return Py_TYPE(obj) == NVFP4QuantizerClass; }
 
@@ -104,6 +108,10 @@ std::unique_ptr<Quantizer> CreateMXFP8Params(const py::handle params);
 TensorWrapper NVTETensorFromFloat8BlockwiseQTensor(py::handle tensor,
                                                    Quantizer *quantization_params);
 
+#ifdef USE_ROCM
+TensorWrapper NVTETensorFromMXFP4Tensor(py::handle tensor, Quantizer *quantizer);
+#endif //#ifdef USE_ROCM
+
 TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer);
 
 inline bool IsFloatingPointType(at::ScalarType type) {
@@ -120,6 +128,8 @@ constexpr std::array custom_types_converters = {
     std::make_tuple(IsFloat8BlockwiseQTensor, IsFloat8BlockwiseQuantizers,
                     NVTETensorFromFloat8BlockwiseQTensor, CreateQuantizer<Float8BlockQuantizer>),
 #ifdef USE_ROCM
+    std::make_tuple(IsMXFP4Tensor, IsMXFP4Quantizers, NVTETensorFromMXFP4Tensor,
+      CreateQuantizer<MXFP4Quantizer>),
 };
 #else
     std::make_tuple(IsNVFP4Tensor, IsNVFP4Quantizers, NVTETensorFromNVFP4Tensor,

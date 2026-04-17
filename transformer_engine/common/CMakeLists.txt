@@ -262,8 +262,7 @@ else()
     list(APPEND transformer_engine_cuda_sources
         fused_attn_rocm/fused_attn_aotriton.cpp
         fused_attn_rocm/fused_attn_ck.cpp
-        fused_attn_rocm/utils.cpp
-        transpose/cast_transpose_mxfp4_shuffled.cu)
+        fused_attn_rocm/utils.cpp)
 endif()
 
 # Compiling the files with the worst compilation time first to hopefully overlap

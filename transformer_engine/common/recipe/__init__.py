@@ -119,6 +119,10 @@ class Recipe:
         """Whether the given recipe is MXFP8 block scaling."""
         return isinstance(self, MXFP8BlockScaling)
 
+    def mxfp4(self):
+        """Whether the given recipe is MXFP4 block scaling."""
+        return isinstance(self, MXFP4BlockScaling)
+
     def delayed(self):
         """Whether the given recipe is delayed scaling."""
         return isinstance(self, DelayedScaling)
@@ -570,6 +574,7 @@ class MXFP4BlockScaling(Recipe):
 
     margin: int = 0
     fp4_format: Format = Format.E2M1
+    fp8_format: Format = Format.E4M3
     fp8_dpa: bool = False
     fp8_mha: bool = False
     use_hadamard: bool = os.getenv("NVTE_MXFP4_USE_HADAMARD", "0") == "1"

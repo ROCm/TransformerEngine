@@ -99,6 +99,11 @@ enum NVTEScalingMode {
   /*! Single scale per block of 16 elements consecutive in either
    * rowwise or columnwise direction */
   NVTE_NVFP4_1D_SCALING = 4,
+  #ifdef USE_ROCM
+  /*! Single scale per block of 32 elements consecutive in either
+      rowwise or columnwise direction */
+  NVTE_MXFP4_1D_SCALING = 5,
+  #endif //#ifdef USE_ROCM
   NVTE_INVALID_SCALING = 100
 };
 
@@ -372,6 +377,14 @@ enum NVTEQuantizationConfigAttribute {
    *  inconsistently between kernels.
    */
   kNVTEQuantizationConfigUseFastMath = 7,
+  #ifdef USE_ROCM
+  /*! Whether to apply Hadamard transform before MXFP4 quantization */
+  kNVTEQuantizationConfigMXFP4UseHadamard = 8,
+  /*! Whether to shuffle E8M0 scales for AITER GEMM (MXFP4) */
+  kNVTEQuantizationConfigMXFP4ScaleShuffle = 9,
+  /*! Whether to shuffle FP4 data for AITER GEMM (MXFP4) */
+  kNVTEQuantizationConfigMXFP4DataShuffle = 10,
+  #endif //#ifdef USE_ROCM
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -1058,6 +1071,29 @@ class QuantizationConfigWrapper {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath, &val,
                                            sizeof(val));
   }
+
+  #ifdef USE_ROCM
+  /*! \brief Set whether to apply Hadamard transform before MXFP4 quantization */
+  void set_mxfp4_use_hadamard(bool use_hadamard) {
+    const auto val = static_cast<uint8_t>(use_hadamard);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigMXFP4UseHadamard, &val,
+                                           sizeof(val));
+  }
+
+  /*! \brief Set whether to shuffle E8M0 scales for AITER GEMM (MXFP4) */
+  void set_mxfp4_scale_shuffle(bool shuffle) {
+    const auto val = static_cast<uint8_t>(shuffle);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigMXFP4ScaleShuffle, &val,
+                                           sizeof(val));
+  }
+
+  /*! \brief Set whether to shuffle FP4 data for AITER GEMM (MXFP4) */
+  void set_mxfp4_data_shuffle(bool shuffle) {
+    const auto val = static_cast<uint8_t>(shuffle);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigMXFP4DataShuffle, &val,
+                                           sizeof(val));
+  }
+  #endif //#ifdef USE_ROCM
 
  private:
   /*! \brief Wrapped NVTEQuantizationConfig. */
