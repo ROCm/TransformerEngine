@@ -75,6 +75,8 @@ pybind11::dict Registrations() {
   // Attention
   dict["te_fused_attn_forward_ffi"] = EncapsulateFFI(FusedAttnForwardHandler);
   dict["te_fused_attn_backward_ffi"] = EncapsulateFFI(FusedAttnBackwardHandler);
+  dict["te_small_seq_attn_forward_ffi"] = EncapsulateFFI(SmallSeqAttnForwardHandler);
+  dict["te_small_seq_attn_backward_ffi"] = EncapsulateFFI(SmallSeqAttnBackwardHandler);
 
   dict["te_gemm_ffi"] = EncapsulateFFI(GemmHandler);
   dict["te_grouped_gemm_ffi"] = EncapsulateFFI(GroupedGemmHandler);
@@ -100,6 +102,10 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_norm_bwd_workspace_sizes", &GetNormBackwardWorkspaceSizes);
   m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
+#ifdef USE_ROCM
+  m.def("get_small_seq_attn_fwd_workspace_sizes", &GetSmallSeqAttnForwardWorkspaceSizes);
+  m.def("get_small_seq_attn_bwd_workspace_sizes", &GetSmallSeqAttnBackwardWorkspaceSizes);
+#endif
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
 
