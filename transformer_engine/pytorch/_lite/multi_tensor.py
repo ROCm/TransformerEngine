@@ -22,36 +22,43 @@ def multi_tensor_scale(chunk_size, noop_flag, tensor_lists, scale):
 
 
 def multi_tensor_l2norm(chunk_size, noop_flag, tensor_lists, per_tensor=False):
-    """Compute L2 norm for a list of tensors."""
+    """Compute L2 norm for a list of tensors.
+
+    Always returns a 2-tuple (total_norm, per_tensor_norms) to match the C++
+    contract in csrc/extensions/multi_tensor/l2norm.cpp. When per_tensor is
+    False, the second tensor is empty.
+    """
+    device = tensor_lists[0][0].device
     if per_tensor:
-        norms = []
-        for t in tensor_lists[0]:
-            norms.append(t.float().norm().item())
+        norms = [t.float().norm().item() for t in tensor_lists[0]]
         total = math.sqrt(sum(n * n for n in norms))
-        return torch.tensor([total], device=tensor_lists[0][0].device), \
-               torch.tensor(norms, device=tensor_lists[0][0].device)
-    else:
-        total_sq = 0.0
-        for t in tensor_lists[0]:
-            total_sq += t.float().norm().item() ** 2
-        return torch.tensor([math.sqrt(total_sq)], device=tensor_lists[0][0].device)
+        return (torch.tensor([total], device=device, dtype=torch.float32),
+                torch.tensor(norms, device=device, dtype=torch.float32))
+    total_sq = 0.0
+    for t in tensor_lists[0]:
+        total_sq += t.float().norm().item() ** 2
+    return (torch.tensor([math.sqrt(total_sq)], device=device, dtype=torch.float32),
+            torch.empty(0, device=device, dtype=torch.float32))
 
 
 def multi_tensor_unscale_l2norm(chunk_size, noop_flag, tensor_lists, inv_scale, per_tensor=False):
-    """Compute L2 norm after unscaling (tensors are NOT modified)."""
+    """Compute L2 norm after unscaling (tensors are NOT modified).
+
+    Always returns a 2-tuple (total_norm, per_tensor_norms) to match the C++
+    contract. When per_tensor is False, the second tensor is empty.
+    """
     scale = 1.0 / inv_scale.item() if inv_scale.numel() == 1 else 1.0 / inv_scale
+    device = tensor_lists[0][0].device
     if per_tensor:
-        norms = []
-        for t in tensor_lists[0]:
-            norms.append((t.float() * scale).norm().item())
+        norms = [(t.float() * scale).norm().item() for t in tensor_lists[0]]
         total = math.sqrt(sum(n * n for n in norms))
-        return torch.tensor([total], device=tensor_lists[0][0].device), \
-               torch.tensor(norms, device=tensor_lists[0][0].device)
-    else:
-        total_sq = 0.0
-        for t in tensor_lists[0]:
-            total_sq += (t.float() * scale).norm().item() ** 2
-        return torch.tensor([math.sqrt(total_sq)], device=tensor_lists[0][0].device)
+        return (torch.tensor([total], device=device, dtype=torch.float32),
+                torch.tensor(norms, device=device, dtype=torch.float32))
+    total_sq = 0.0
+    for t in tensor_lists[0]:
+        total_sq += (t.float() * scale).norm().item() ** 2
+    return (torch.tensor([math.sqrt(total_sq)], device=device, dtype=torch.float32),
+            torch.empty(0, device=device, dtype=torch.float32))
 
 
 def multi_tensor_adam(chunk_size, noop_flag, tensor_lists, lr, beta1, beta2, eps,
