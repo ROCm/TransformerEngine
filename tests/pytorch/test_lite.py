@@ -4067,3 +4067,299 @@ class TestFSDP2WeightWrap:
         torch.cuda.synchronize()
         assert mod.weight.grad is not None
         assert torch.isfinite(mod.weight.grad).all()
+
+
+# ---------------------------------------------------------------------------
+# Multi-tensor kernels
+# ---------------------------------------------------------------------------
+
+class TestMultiTensor:
+    """Cover the lite replacements for transformer_engine_torch multi-tensor ops.
+
+    The reference semantics come from common/multi_tensor/{scale,l2norm,adam,sgd}.cu
+    and csrc/extensions/multi_tensor/*.cpp.
+    """
+
+    CHUNK = 2048 * 32
+
+    @staticmethod
+    def _overflow_buf(device):
+        return torch.zeros(1, dtype=torch.int32, device=device)
+
+    # --- multi_tensor_scale -------------------------------------------------
+
+    @pytest.mark.parametrize("in_dtype,out_dtype", [
+        (torch.float32, torch.float32),
+        (torch.float32, torch.bfloat16),
+        (torch.float16, torch.float32),
+        (torch.bfloat16, torch.bfloat16),
+    ])
+    def test_scale_writes_out_list(self, device, in_dtype, out_dtype):
+        overflow = self._overflow_buf(device)
+        a = torch.full([777], 4.0, dtype=in_dtype, device=device)
+        b = torch.full([555], 4.0, dtype=in_dtype, device=device)
+        in_list = [a.clone(), b.clone()]
+        out_list = [torch.empty_like(t, dtype=out_dtype) for t in in_list]
+
+        tex.multi_tensor_scale(self.CHUNK, overflow, [in_list, out_list], 0.25)
+
+        expected = torch.full_like(out_list[0], 1.0)
+        torch.testing.assert_close(out_list[0], expected)
+        torch.testing.assert_close(out_list[1], torch.full_like(out_list[1], 1.0))
+        # in_list should not be modified
+        torch.testing.assert_close(in_list[0], torch.full_like(in_list[0], 4.0))
+        assert overflow.item() == 0
+
+    def test_scale_sets_overflow_on_nan(self, device):
+        overflow = self._overflow_buf(device)
+        a = torch.full([64], 4.0, dtype=torch.float32, device=device)
+        a[3] = float("nan")
+        out = torch.empty_like(a)
+        tex.multi_tensor_scale(self.CHUNK, overflow, [[a], [out]], 0.5)
+        assert overflow.item() == 1
+
+    def test_scale_sets_overflow_on_inf(self, device):
+        overflow = self._overflow_buf(device)
+        a = torch.full([64], 4.0, dtype=torch.float32, device=device)
+        a[7] = float("inf")
+        out = torch.empty_like(a)
+        tex.multi_tensor_scale(self.CHUNK, overflow, [[a], [out]], 0.5)
+        assert overflow.item() == 1
+
+    # --- multi_tensor_l2norm ------------------------------------------------
+
+    def test_l2norm_returns_2_tuple_when_per_tensor_false(self, device):
+        """Megatron's clip_grad_norm unpacks (norm, _) unconditionally."""
+        overflow = self._overflow_buf(device)
+        a = torch.full([100], 3.0, dtype=torch.float32, device=device)
+        b = torch.full([100], 4.0, dtype=torch.float32, device=device)
+        result = tex.multi_tensor_l2norm(self.CHUNK, overflow, [[a, b]], False)
+        assert isinstance(result, tuple) and len(result) == 2
+        norm, per_tensor = result
+        # sqrt(100*9 + 100*16) = sqrt(2500) = 50
+        torch.testing.assert_close(norm, torch.tensor([50.0], device=device))
+        assert per_tensor.numel() == 0
+
+    def test_l2norm_per_tensor_values(self, device):
+        overflow = self._overflow_buf(device)
+        a = torch.full([100], 3.0, dtype=torch.float32, device=device)
+        b = torch.full([100], 4.0, dtype=torch.float32, device=device)
+        norm, per_tensor = tex.multi_tensor_l2norm(
+            self.CHUNK, overflow, [[a, b]], True
+        )
+        # norms: sqrt(100*9)=30, sqrt(100*16)=40; total=50
+        torch.testing.assert_close(norm, torch.tensor([50.0], device=device))
+        torch.testing.assert_close(per_tensor, torch.tensor([30.0, 40.0], device=device))
+
+    def test_l2norm_mixed_dtypes(self, device):
+        """l2norm must tolerate fp16/bf16 inputs (upcasts to fp32 internally)."""
+        overflow = self._overflow_buf(device)
+        a = torch.full([64], 3.0, dtype=torch.bfloat16, device=device)
+        b = torch.full([64], 4.0, dtype=torch.float16, device=device)
+        norm, _ = tex.multi_tensor_l2norm(self.CHUNK, overflow, [[a, b]], False)
+        expected = (64 * 9 + 64 * 16) ** 0.5  # sqrt(1600) = 40
+        torch.testing.assert_close(norm, torch.tensor([expected], device=device),
+                                   atol=1e-4, rtol=1e-4)
+
+    # --- multi_tensor_unscale_l2norm ---------------------------------------
+
+    def test_unscale_l2norm_returns_2_tuple(self, device):
+        overflow = self._overflow_buf(device)
+        a = torch.full([100], 6.0, dtype=torch.float32, device=device)
+        b = torch.full([100], 8.0, dtype=torch.float32, device=device)
+        inv_scale = torch.tensor([2.0], device=device)  # scale = 0.5
+        result = tex.multi_tensor_unscale_l2norm(
+            self.CHUNK, overflow, [[a, b]], inv_scale, False
+        )
+        assert isinstance(result, tuple) and len(result) == 2
+        norm, per_tensor = result
+        # After unscaling (multiply by 0.5): norms 3 and 4; total 50 over 100 each
+        # sqrt(100*9 + 100*16) = 50
+        torch.testing.assert_close(norm, torch.tensor([50.0], device=device))
+        assert per_tensor.numel() == 0
+
+    def test_unscale_l2norm_per_tensor(self, device):
+        overflow = self._overflow_buf(device)
+        a = torch.full([100], 6.0, dtype=torch.float32, device=device)
+        b = torch.full([100], 8.0, dtype=torch.float32, device=device)
+        inv_scale = torch.tensor([2.0], device=device)
+        norm, per_tensor = tex.multi_tensor_unscale_l2norm(
+            self.CHUNK, overflow, [[a, b]], inv_scale, True
+        )
+        torch.testing.assert_close(norm, torch.tensor([50.0], device=device))
+        torch.testing.assert_close(per_tensor, torch.tensor([30.0, 40.0], device=device))
+
+    # --- multi_tensor_adam --------------------------------------------------
+
+    @staticmethod
+    def _adam_reference(p, g, m, v, lr, b1, b2, eps, step, wd, adam_w):
+        """Reference implementation mirroring common/multi_tensor/adam.cu."""
+        p_f = p.float()
+        g_f = g.float()
+        if not adam_w and wd != 0.0:
+            g_f = g_f + wd * p_f
+        m_new = b1 * m + (1 - b1) * g_f
+        v_new = b2 * v + (1 - b2) * g_f * g_f
+        bc1 = 1 - b1 ** step
+        bc2 = 1 - b2 ** step
+        denom = (v_new / bc2).sqrt() + eps
+        update = (m_new / bc1) / denom
+        if adam_w and wd != 0.0:
+            update = update + wd * p_f
+        p_new = p_f - lr * update
+        return p_new, m_new, v_new
+
+    @pytest.mark.parametrize("adam_w_mode", [True, False])
+    @pytest.mark.parametrize("weight_decay", [0.0, 0.01])
+    def test_adam_4list_no_master(self, device, adam_w_mode, weight_decay):
+        overflow = self._overflow_buf(device)
+        torch.manual_seed(0)
+        p = torch.randn(256, device=device, dtype=torch.float32)
+        g = torch.randn(256, device=device, dtype=torch.float32) * 0.01
+        m = torch.zeros_like(p)
+        v = torch.zeros_like(p)
+        p0, g0 = p.clone(), g.clone()
+
+        tex.multi_tensor_adam(
+            self.CHUNK, overflow, [[g], [p], [m], [v]],
+            1e-3, 0.9, 0.999, 1e-8, 1, adam_w_mode, True, weight_decay,
+        )
+
+        p_ref, m_ref, v_ref = self._adam_reference(
+            p0, g0, torch.zeros_like(p0), torch.zeros_like(p0),
+            1e-3, 0.9, 0.999, 1e-8, 1, weight_decay, adam_w_mode,
+        )
+        torch.testing.assert_close(p, p_ref, atol=1e-6, rtol=1e-5)
+        torch.testing.assert_close(m, m_ref, atol=1e-6, rtol=1e-5)
+        torch.testing.assert_close(v, v_ref, atol=1e-6, rtol=1e-5)
+
+    def test_adam_5list_master_bf16(self, device):
+        """Megatron's master-weights path: bf16 params, fp32 master + m + v."""
+        overflow = self._overflow_buf(device)
+        torch.manual_seed(0)
+        pm = torch.randn(256, device=device, dtype=torch.float32)
+        p = pm.to(torch.bfloat16)
+        g = (torch.randn(256, device=device) * 0.01).to(torch.bfloat16)
+        m = torch.zeros(256, device=device, dtype=torch.float32)
+        v = torch.zeros(256, device=device, dtype=torch.float32)
+        pm0 = pm.clone()
+
+        tex.multi_tensor_adam(
+            self.CHUNK, overflow, [[g], [p], [m], [v], [pm]],
+            1e-3, 0.9, 0.999, 1e-8, 1, True, True, 0.0,
+        )
+
+        p_ref, _, _ = self._adam_reference(
+            pm0, g.float(), torch.zeros_like(pm0), torch.zeros_like(pm0),
+            1e-3, 0.9, 0.999, 1e-8, 1, 0.0, True,
+        )
+        # Master is kept in fp32
+        torch.testing.assert_close(pm, p_ref, atol=1e-6, rtol=1e-5)
+        # bf16 shadow is a downcast of master
+        torch.testing.assert_close(p, p_ref.to(torch.bfloat16), atol=1e-3, rtol=1e-2)
+
+    def test_adam_no_bias_correction(self, device):
+        overflow = self._overflow_buf(device)
+        torch.manual_seed(0)
+        p = torch.randn(64, device=device)
+        g = torch.randn(64, device=device) * 0.01
+        m = torch.zeros_like(p)
+        v = torch.zeros_like(p)
+        p0, g0 = p.clone(), g.clone()
+
+        tex.multi_tensor_adam(
+            self.CHUNK, overflow, [[g], [p], [m], [v]],
+            1e-3, 0.9, 0.999, 1e-8, 5, True, False, 0.0,
+        )
+
+        # bias_correction=False → bc1=bc2=1
+        m_ref = 0.9 * torch.zeros_like(p0) + 0.1 * g0
+        v_ref = 0.999 * torch.zeros_like(p0) + 0.001 * g0 * g0
+        denom = v_ref.sqrt() + 1e-8
+        p_ref = p0 - 1e-3 * (m_ref / denom)
+        torch.testing.assert_close(p, p_ref, atol=1e-6, rtol=1e-5)
+
+    def test_adam_param_remainder_not_implemented(self, device):
+        with pytest.raises(NotImplementedError):
+            tex.multi_tensor_adam_param_remainder()
+
+    def test_adam_fp8_not_implemented(self, device):
+        with pytest.raises(NotImplementedError):
+            tex.multi_tensor_adam_fp8()
+
+    def test_adam_capturable_not_implemented(self, device):
+        with pytest.raises(NotImplementedError):
+            tex.multi_tensor_adam_capturable()
+
+    # --- multi_tensor_sgd ---------------------------------------------------
+
+    def test_sgd_no_momentum(self, device):
+        overflow = self._overflow_buf(device)
+        torch.manual_seed(0)
+        w = torch.randn(64, device=device, dtype=torch.float32)
+        g = torch.randn(64, device=device, dtype=torch.float32) * 0.01
+        mom = torch.zeros_like(w)
+        w0, g0 = w.clone(), g.clone()
+
+        tex.multi_tensor_sgd(
+            self.CHUNK, overflow, [[g], [w], [mom]],
+            1e-2,  # lr
+            0.0,   # momentum
+            0.0,   # dampening
+            0.0,   # weight_decay
+            False, # nesterov
+            True,  # first_run
+            False, # wd_after_momentum
+            1.0,   # scale
+        )
+        torch.testing.assert_close(w, w0 - 1e-2 * g0, atol=1e-6, rtol=1e-5)
+
+    def test_sgd_with_momentum_first_run(self, device):
+        overflow = self._overflow_buf(device)
+        torch.manual_seed(0)
+        w = torch.randn(64, device=device, dtype=torch.float32)
+        g = torch.randn(64, device=device, dtype=torch.float32) * 0.01
+        mom = torch.zeros_like(w)
+        w0, g0 = w.clone(), g.clone()
+
+        tex.multi_tensor_sgd(
+            self.CHUNK, overflow, [[g], [w], [mom]],
+            1e-2, 0.9, 0.0, 0.0, False, True, False, 1.0,
+        )
+        # first_run: mom = g; g_eff = mom = g; w -= lr*g
+        torch.testing.assert_close(mom, g0, atol=1e-6, rtol=1e-5)
+        torch.testing.assert_close(w, w0 - 1e-2 * g0, atol=1e-6, rtol=1e-5)
+
+    def test_sgd_weight_decay_before_momentum(self, device):
+        overflow = self._overflow_buf(device)
+        torch.manual_seed(0)
+        w = torch.randn(32, device=device, dtype=torch.float32)
+        g = torch.randn(32, device=device, dtype=torch.float32) * 0.01
+        mom = torch.zeros_like(w)
+        w0, g0 = w.clone(), g.clone()
+
+        tex.multi_tensor_sgd(
+            self.CHUNK, overflow, [[g], [w], [mom]],
+            1e-2, 0.0, 0.0, 0.1, False, True, False, 1.0,
+        )
+        # wd before momentum: g_eff = g + 0.1*w; w -= lr*g_eff
+        g_eff = g0 + 0.1 * w0
+        torch.testing.assert_close(w, w0 - 1e-2 * g_eff, atol=1e-6, rtol=1e-5)
+
+    def test_sgd_4list_writes_fp16_copy(self, device):
+        overflow = self._overflow_buf(device)
+        torch.manual_seed(0)
+        w = torch.randn(32, device=device, dtype=torch.float32)
+        g = torch.randn(32, device=device, dtype=torch.float32) * 0.01
+        mom = torch.zeros_like(w)
+        w_fp16 = torch.zeros(32, device=device, dtype=torch.float16)
+        w0, g0 = w.clone(), g.clone()
+
+        tex.multi_tensor_sgd(
+            self.CHUNK, overflow, [[g], [w], [mom], [w_fp16]],
+            1e-2, 0.0, 0.0, 0.0, False, True, False, 1.0,
+        )
+        expected = w0 - 1e-2 * g0
+        torch.testing.assert_close(w, expected, atol=1e-6, rtol=1e-5)
+        torch.testing.assert_close(w_fp16, expected.to(torch.float16),
+                                   atol=1e-3, rtol=1e-2)
