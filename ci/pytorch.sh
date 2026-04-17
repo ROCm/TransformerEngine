@@ -65,6 +65,7 @@ run_test_config(){
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
     run_default_fa 1 test_sanity_import.py
+    run_default_fa 3 test_sanity_hipified_cast_transpose.py
     run_default_fa 1 attention/test_attention.py # Backend selection is controlled by the test
     run_default_fa 1 attention/test_cp_utils.py
     run_default_fa 1 attention/test_kv_cache.py
