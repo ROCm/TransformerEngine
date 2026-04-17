@@ -76,10 +76,10 @@ std::string to_string(const NVTEScalingMode &mode) {
       return "NVTE_BLOCK_SCALING_2D";
     case NVTE_NVFP4_1D_SCALING:
       return "NVTE_NVFP4_1D_SCALING";
-    #ifdef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
     case NVTE_MXFP4_1D_SCALING:
       return "NVTE_MXFP4_1D_SCALING";
-    #endif //#ifdef __HIP_PLATFORM_AMD__
+#endif
     case NVTE_INVALID_SCALING:
       return "NVTE_INVALID_SCALING";
   }
@@ -180,8 +180,8 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
                    "\"  has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
                    t.columnwise_scale_inv.shape, ")");
       }
-    } 
-    #ifdef __HIP_PLATFORM_AMD__
+    }
+#ifdef __HIP_PLATFORM_AMD__
     else if (t.scaling_mode == NVTE_MXFP4_1D_SCALING) {
       const size_t row_alignment = 256;
       const size_t col_alignment = 8;
@@ -207,7 +207,7 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
                    t.columnwise_scale_inv.shape, ")");
       }
     }
-    #endif //#ifdef __HIP_PLATFORM_AMD__
+#endif
   }
 }
 
@@ -455,9 +455,9 @@ static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string &name
   if (is_fp8_dtype(t.dtype()) && is_tensor_scaling(t.scaling_mode)) {
     check_scales(DType::kFloat32);
   } else if (is_mxfp8_scaling(t.scaling_mode)
-    #ifdef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
             || is_mxfp4_scaling(t.scaling_mode)
-    #endif
+#endif
             ) {
     check_scales(DType::kFloat8E8M0);
   } else if (is_nvfp4_scaling(t.scaling_mode)) {
@@ -1145,7 +1145,7 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigUseFastMath:
       bool_to_uint8(config_.use_fast_math, buf);
       break;
-    #ifdef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
     case kNVTEQuantizationConfigMXFP4UseHadamard:
       bool_to_uint8(config_.mxfp4_use_hadamard, buf);
       break;
@@ -1155,7 +1155,7 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigMXFP4DataShuffle:
       bool_to_uint8(config_.mxfp4_data_shuffle, buf);
       break;
-    #endif //#ifdef __HIP_PLATFORM_AMD__
+#endif
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -1211,7 +1211,7 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigUseFastMath:
       uint8_to_bool(buf, config_.use_fast_math);
       break;
-    #ifdef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
     case kNVTEQuantizationConfigMXFP4UseHadamard:
       uint8_to_bool(buf, config_.mxfp4_use_hadamard);
       break;
@@ -1221,7 +1221,7 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigMXFP4DataShuffle:
       uint8_to_bool(buf, config_.mxfp4_data_shuffle);
       break;
-    #endif //#ifdef __HIP_PLATFORM_AMD__
+#endif
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }

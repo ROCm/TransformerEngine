@@ -552,9 +552,9 @@ void adjust_ref_for_e8m0_scale_error(const std::string &name,
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
                                             const size_t block_size_rows, const size_t block_size_cols
-                                            #ifdef USE_ROCM
+#ifdef USE_ROCM
                                             , const NVTEScalingMode scaling_mode = NVTE_MXFP8_1D_SCALING
-                                            #endif
+#endif
                                           );
 
 std::pair<double, double> getTolerances(const DType type);

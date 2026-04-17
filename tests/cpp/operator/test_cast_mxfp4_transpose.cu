@@ -33,13 +33,13 @@
  };
  
  double2 cvt_fp4x2_to_double2(fp4e2m1x2 fp4_pair) {
- #ifdef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
      uint8_t raw = *reinterpret_cast<uint8_t*>(&fp4_pair);
      // Decode manually
      float lo = E2M1_LUT[raw & 0xF];
      float hi = E2M1_LUT[(raw >> 4) & 0xF];
      return {static_cast<double>(lo), static_cast<double>(hi)};
- #else
+#else
      const __half2_raw raw_truncated_to_fp4e2m1_pair =
          __nv_cvt_fp4x2_to_halfraw2(*reinterpret_cast<__nv_fp4x2_storage_t*>(&fp4_pair), __NV_E2M1);
  
@@ -47,7 +47,7 @@
      const double truncated_to_fp4e2m1_x = static_cast<double>(truncated_to_fp4e2m1_pair.x);
      const double truncated_to_fp4e2m1_y = static_cast<double>(truncated_to_fp4e2m1_pair.y);
      return {truncated_to_fp4e2m1_x, truncated_to_fp4e2m1_y};
- #endif
+#endif //#ifndef __HIP_PLATFORM_AMD__
  }
  
  template <typename InputType>

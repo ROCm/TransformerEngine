@@ -242,9 +242,9 @@ struct Tensor {
       case NVTE_BLOCK_SCALING_1D:
       case NVTE_BLOCK_SCALING_2D:
       case NVTE_NVFP4_1D_SCALING:
-      #ifdef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
       case NVTE_MXFP4_1D_SCALING:
-      #endif //#ifdef __HIP_PLATFORM_AMD__
+#endif
       {
         // Row-wise data shape matches tensor logical shape,
         // column-wise data shape is transpose of logical shape
@@ -436,11 +436,11 @@ struct QuantizationConfig {
   bool nvfp4_2d_quantization = false;
   bool stochastic_rounding = false;
   bool use_fast_math = false;
-  #ifdef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
   bool mxfp4_use_hadamard = false;
   bool mxfp4_scale_shuffle = false;
   bool mxfp4_data_shuffle = false;
-  #endif //#ifdef __HIP_PLATFORM_AMD__
+#endif
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -451,11 +451,11 @@ struct QuantizationConfig {
       sizeof(uint8_t),                       // nvfp4_2d_quantization
       sizeof(uint8_t),                       // stochastic_rounding
       sizeof(uint8_t),                       // use_fast_math
-      #ifdef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
       sizeof(uint8_t),                       // mxfp4_use_hadamard
       sizeof(uint8_t),                       // mxfp4_scale_shuffle
       sizeof(uint8_t)                        // mxfp4_data_shuffle
-      #endif //#ifdef __HIP_PLATFORM_AMD__
+#endif
   };
 };
 

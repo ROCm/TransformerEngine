@@ -1274,9 +1274,9 @@ std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
                                             const size_t cols,
                                             const size_t block_size_rows,
                                             const size_t block_size_cols
-                                            #ifdef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
                                             ,const NVTEScalingMode scaling_mode
-                                            #endif //#ifdef __HIP_PLATFORM_AMD__
+#endif
                                           ) {
     const bool is_rowwise = (block_size_rows == 1)
                             && ((block_size_cols == 32) || (block_size_cols == 16));
