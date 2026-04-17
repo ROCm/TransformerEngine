@@ -337,6 +337,186 @@ static void FusedAttnForwardImpl(
   nvte_tensor_pack_destroy(&aux_output_tensors);
 }
 
+#ifdef USE_ROCM
+void PrepareSmallSeqAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t input_batch,
+                                          const size_t attn_heads, const size_t q_max_seqlen,
+                                          const size_t kv_max_seqlen, DType dtype,
+                                          void *softmax_buf, void *rng_state_buf) {
+  tensor_pack->size = 2;
+  NVTETensor &softmax_aux = tensor_pack->tensors[0];
+  NVTEBasicTensor softmax_aux_data;
+  softmax_aux_data.data_ptr = softmax_buf;
+  softmax_aux_data.shape.ndim = 4;
+  softmax_aux_data.shape.data[0] = input_batch;
+  softmax_aux_data.shape.data[1] = attn_heads;
+  softmax_aux_data.shape.data[2] = q_max_seqlen;
+  softmax_aux_data.shape.data[3] = std::min(kv_max_seqlen, size_t{16});
+  softmax_aux_data.dtype = static_cast<NVTEDType>(dtype);
+  nvte_set_tensor_param(&softmax_aux, kNVTERowwiseData, &softmax_aux_data);
+
+  NVTETensor &rng_state_aux = tensor_pack->tensors[1];
+  NVTEBasicTensor rng_state_aux_data;
+  rng_state_aux_data.data_ptr = rng_state_buf;
+  rng_state_aux_data.shape = {};
+  rng_state_aux_data.shape.ndim = 2;
+  rng_state_aux_data.dtype = static_cast<NVTEDType>(DType::kInt64);
+  nvte_set_tensor_param(&rng_state_aux, kNVTERowwiseData, &rng_state_aux_data);
+}
+
+void PrepareSmallSeqAttnBackwardAuxTensors(NVTETensorPack *tensor_pack, const size_t input_batch,
+                                         const size_t attn_heads, const size_t q_max_seqlen,
+                                         const size_t kv_max_seqlen, DType dtype, void *softmax_buf,
+                                         void *rng_state_buf) {
+  PrepareSmallSeqAttnForwardAuxTensors(tensor_pack, input_batch, attn_heads, q_max_seqlen,
+                                       kv_max_seqlen, dtype, softmax_buf, rng_state_buf);
+}
+
+pybind11::tuple GetSmallSeqAttnForwardWorkspaceSizes(
+    size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
+    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim,
+    size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
+    size_t max_segments_per_seq, int64_t window_size_left, int64_t window_size_right) {
+  (void)scaling_factor;
+  (void)is_training;
+  (void)max_segments_per_seq;
+  NVTE_CHECK(
+      nvte_is_small_seq_attn_supported(
+          static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
+          mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
+          qk_head_dim, v_head_dim, window_size_left, window_size_right),
+      "GetSmallSeqAttnForwardWorkspaceSizes: configuration not supported.");
+  NVTE_CHECK(bias_batch == 0 && bias_heads == 0,
+             "GetSmallSeqAttnForwardWorkspaceSizes: bias not supported for small-seq.");
+  TensorWrapper query_workspace_tensor(nullptr, std::vector<size_t>{1}, DType::kByte);
+  return pybind11::make_tuple(MakeShapeVector(query_workspace_tensor.shape()),
+                              query_workspace_tensor.dtype());
+}
+
+static void SmallSeqAttnForwardImpl(
+    cudaStream_t stream, void *q, void *k, void *v, void *bias, void *seed, void *q_cu_seqlens,
+    void *kv_cu_seqlens, void *q_seq_offsets, void *k_seq_offsets, void *output, void *softmax_aux,
+    void *rng_state, void *workspace, size_t input_batch, size_t bias_batch, size_t q_max_seqlen,
+    size_t kv_max_seqlen, size_t attn_heads, size_t num_gqa_groups, size_t bias_heads,
+    size_t qk_head_dim, size_t v_head_dim, size_t max_segments_per_seq, size_t wkspace_size,
+    float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype,
+    bool is_training, bool deterministic, int64_t window_size_left, int64_t window_size_right) {
+  (void)deterministic;
+  FUSED_ATTN_IMPL_COMMON_BLOCK;
+  NVTE_CHECK(layout_group == NVTE_QKV_Layout_Group::NVTE_HD_HD_HD && is_ragged,
+             "SmallSeqAttnForwardImpl: requires THD separate Q, K, V.");
+  NVTE_CHECK(bias_batch == 0 && bias_heads == 0,
+             "SmallSeqAttnForwardImpl: bias not supported for small-seq.");
+
+  auto bias_tensor = TensorWrapper(bias, bias_shape, dtype);
+
+  if (is_ragged) {
+    auto output_size = input_batch * q_max_seqlen * attn_heads * v_head_dim;
+    (void)cudaMemsetAsync(output, 0, output_size * typeToSize(dtype), stream);
+    size_t kv_eff = std::min(kv_max_seqlen, size_t{16});
+    auto softmax_aux_elems = input_batch * q_max_seqlen * attn_heads * kv_eff;
+    (void)cudaMemsetAsync(softmax_aux, 0, softmax_aux_elems * typeToSize(dtype), stream);
+  }
+
+  auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
+  auto o_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim};
+  auto o_tensor = TensorWrapper(output, o_shape, dtype);
+  auto rng_state_tensor = TensorWrapper(rng_state, std::vector<size_t>{2}, DType::kInt64);
+
+  nvte_populate_rng_state_async(rng_state, seed, q_max_seqlen, kv_max_seqlen,
+                                NVTE_Fused_Attn_Backend::NVTE_CK, stream);
+
+  NVTETensorPack aux_output_tensors;
+  nvte_tensor_pack_create(&aux_output_tensors);
+  PrepareSmallSeqAttnForwardAuxTensors(&aux_output_tensors, input_batch, attn_heads, q_max_seqlen,
+                                       kv_max_seqlen, dtype, softmax_aux, rng_state);
+
+  auto workspace_tensor =
+      TensorWrapper(workspace, std::vector<size_t>{wkspace_size}, wkspace_dtype);
+  auto dummy_page_table_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt32);
+
+  auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
+  auto k_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim};
+  auto v_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, v_head_dim};
+  auto q_tensor = TensorWrapper(q, q_shape, dtype);
+  auto k_tensor = TensorWrapper(k, k_shape, dtype);
+  auto v_tensor = TensorWrapper(v, v_shape, dtype);
+
+  nvte_fused_attn_small_seq_fwd(
+      q_tensor.data(), k_tensor.data(), v_tensor.data(), bias_tensor.data(), s_tensor.data(),
+      o_tensor.data(), &aux_output_tensors, q_cu_seqlens_tensor.data(),
+      kv_cu_seqlens_tensor.data(), q_seq_offsets_tensor.data(), k_seq_offsets_tensor.data(),
+      dummy_page_table_tensor.data(), dummy_page_table_tensor.data(), rng_state_tensor.data(),
+      q_max_seqlen, kv_max_seqlen, is_training, scaling_factor, dropout_probability, qkv_layout,
+      bias_type, mask_type, window_size_left, window_size_right, workspace_tensor.data(), stream);
+
+  nvte_tensor_pack_destroy(&aux_output_tensors);
+}
+
+static void SmallSeqAttnBackwardImpl(
+    cudaStream_t stream, void *q, void *k, void *v, void *bias, void *softmax_aux, void *rng_state,
+    void *output, void *doutput, void *q_cu_seqlens, void *kv_cu_seqlens, void *q_seq_offsets,
+    void *k_seq_offsets, void *dq, void *dk, void *dv, void *dbias, void *workspace,
+    size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
+    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim,
+    size_t v_head_dim, size_t max_segments_per_seq, size_t wkspace_size, float scaling_factor,
+    float dropout_probability, NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+    NVTE_QKV_Layout qkv_layout, DType dtype, DType wkspace_dtype, bool is_training,
+    bool deterministic, int64_t window_size_left, int64_t window_size_right) {
+  FUSED_ATTN_IMPL_COMMON_BLOCK;
+  NVTE_CHECK(layout_group == NVTE_QKV_Layout_Group::NVTE_HD_HD_HD && is_ragged,
+             "SmallSeqAttnBackwardImpl: requires THD separate Q, K, V.");
+  NVTE_CHECK(bias_batch == 0 && bias_heads == 0,
+             "SmallSeqAttnBackwardImpl: bias not supported for small-seq.");
+
+  auto output_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, v_head_dim};
+  auto output_tensor = TensorWrapper(output, output_shape, dtype);
+  auto doutput_tensor = TensorWrapper(doutput, output_shape, dtype);
+  auto s_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, dtype);
+  auto dbias_tensor = TensorWrapper(dbias, bias_shape, dtype);
+
+  NVTETensorPack aux_input_tensors;
+  nvte_tensor_pack_create(&aux_input_tensors);
+  PrepareSmallSeqAttnBackwardAuxTensors(&aux_input_tensors, input_batch, attn_heads, q_max_seqlen,
+                                        kv_max_seqlen, dtype, softmax_aux, rng_state);
+
+  auto workspace_tensor =
+      TensorWrapper(workspace, std::vector<size_t>{wkspace_size}, wkspace_dtype);
+
+  auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
+  auto k_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim};
+  auto v_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, v_head_dim};
+  auto q_tensor = TensorWrapper(q, q_shape, dtype);
+  auto k_tensor = TensorWrapper(k, k_shape, dtype);
+  auto v_tensor = TensorWrapper(v, v_shape, dtype);
+  auto dq_tensor = TensorWrapper(dq, q_shape, dtype);
+  auto dk_tensor = TensorWrapper(dk, k_shape, dtype);
+  auto dv_tensor = TensorWrapper(dv, v_shape, dtype);
+
+  if (is_ragged) {
+    (void)cudaMemsetAsync(dq, 0, transformer_engine::jax::product(q_shape) * typeToSize(dtype),
+                          stream);
+    (void)cudaMemsetAsync(dk, 0, transformer_engine::jax::product(k_shape) * typeToSize(dtype),
+                          stream);
+    (void)cudaMemsetAsync(dv, 0, transformer_engine::jax::product(v_shape) * typeToSize(dtype),
+                          stream);
+  }
+
+  nvte_fused_attn_small_seq_bwd(
+      q_tensor.data(), k_tensor.data(), v_tensor.data(), output_tensor.data(),
+      doutput_tensor.data(), s_tensor.data(), s_tensor.data(), &aux_input_tensors,
+      dq_tensor.data(), dk_tensor.data(), dv_tensor.data(), dbias_tensor.data(),
+      q_cu_seqlens_tensor.data(), kv_cu_seqlens_tensor.data(), q_seq_offsets_tensor.data(),
+      k_seq_offsets_tensor.data(), q_max_seqlen, kv_max_seqlen, scaling_factor,
+      dropout_probability, qkv_layout, bias_type, mask_type, window_size_left, window_size_right,
+      deterministic, workspace_tensor.data(), stream);
+
+  nvte_tensor_pack_destroy(&aux_input_tensors);
+  (void)is_training;
+}
+#endif  // USE_ROCM
+
 #define FUSED_ATTN_FFI_GET_ATTRS                                                        \
   size_t input_batch = get_attr_value<int64_t>(attrs, "input_batch");                   \
   size_t bias_batch = get_attr_value<int64_t>(attrs, "bias_batch");                     \
@@ -510,34 +690,36 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 
   auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
 
-  const char* nvte_smallseq = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
-  if (is_ragged && q_max_seqlen!=kv_max_seqlen && nvte_smallseq && std::string(nvte_smallseq) == "1") {
-    size_t workspace_elems = product(work_shape);
-    size_t elt_size = transformer_engine::typeToSize(query_workspace_tensor.dtype());
-    size_t workspace_bytes = workspace_elems * elt_size;
-    size_t unfused_small_seq_workspace = input_batch * attn_heads * 16 * 2;  // min for unfused small-seq (bf16/fp16)
-
-    if (workspace_bytes < unfused_small_seq_workspace) {
-      size_t min_elems = (unfused_small_seq_workspace + elt_size - 1) / elt_size;
-      work_shape = std::vector<size_t>{min_elems};
-      workspace_elems = min_elems;
-      workspace_bytes = workspace_elems * elt_size;
-    }
-
-    const char* nvte_log_ck_config = std::getenv("NVTE_LOG_CK_CONFIG");
-    if (nvte_log_ck_config && std::string(nvte_log_ck_config) == "1") {
-      std::cout << std::endl << "attn_bwd(ck unfused small-seq workspace size): ";
-      std::cout << "input_batch: " << input_batch << ", ";
-      std::cout << "is_ragged: " << is_ragged << ", ";
-      std::cout << "workspace_elems: " << workspace_elems << ", ";
-      std::cout << "workspace_bytes: " << workspace_bytes << ", ";
-      std::cout << "unfused_small_seq_min_bytes: " << unfused_small_seq_workspace << ", ";
-      std::cout << "workspace_bytes >= unfused_small_seq_workspace: "
-                << (workspace_bytes >= unfused_small_seq_workspace ? "true" : "false") << std::endl;
-    }
-  }
   return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
+
+#ifdef USE_ROCM
+pybind11::tuple GetSmallSeqAttnBackwardWorkspaceSizes(
+    size_t input_batch, size_t bias_batch, size_t q_max_seqlen, size_t kv_max_seqlen,
+    size_t attn_heads, size_t num_gqa_groups, size_t bias_heads, size_t qk_head_dim,
+    size_t v_head_dim, float scaling_factor, float dropout_probability, NVTE_Bias_Type bias_type,
+    NVTE_Mask_Type mask_type, NVTE_QKV_Layout qkv_layout, DType dtype, bool is_training,
+    bool deterministic, size_t max_segments_per_seq, int64_t window_size_left,
+    int64_t window_size_right) {
+  (void)scaling_factor;
+  (void)is_training;
+  (void)deterministic;
+  (void)max_segments_per_seq;
+  NVTE_CHECK(
+      nvte_is_small_seq_attn_supported(
+          static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), qkv_layout, bias_type,
+          mask_type, dropout_probability, attn_heads, num_gqa_groups, q_max_seqlen, kv_max_seqlen,
+          qk_head_dim, v_head_dim, window_size_left, window_size_right),
+      "GetSmallSeqAttnBackwardWorkspaceSizes: configuration not supported.");
+  NVTE_CHECK(bias_batch == 0 && bias_heads == 0,
+             "GetSmallSeqAttnBackwardWorkspaceSizes: bias not supported for small-seq.");
+  size_t bwd_bytes = nvte_fused_attn_small_seq_bwd_workspace_size(
+      input_batch, attn_heads, kv_max_seqlen, static_cast<NVTEDType>(dtype));
+  TensorWrapper query_workspace_tensor(nullptr, std::vector<size_t>{bwd_bytes}, DType::kByte);
+  return pybind11::make_tuple(MakeShapeVector(query_workspace_tensor.shape()),
+                              query_workspace_tensor.dtype());
+}
+#endif  // USE_ROCM
 
 static void FusedAttnBackwardImpl(
     cudaStream_t stream, void *q, void *k, void *v, void *bias, void *softmax_aux, void *rng_state,
@@ -691,6 +873,102 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnBackwardHandler, FusedAttnBackwardFFI,
                                   .Ret<Buffer_Type>()      // workspace
                                   .Attrs(),
                               FFI_CudaGraph_Traits);
+
+#ifdef USE_ROCM
+Error_Type SmallSeqAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf,
+                                  Buffer_Type v_buf, Buffer_Type bias_buf, Buffer_Type seed_buf,
+                                  Buffer_Type q_cu_seqlens_buf, Buffer_Type kv_cu_seqlens_buf,
+                                  Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf,
+                                  Variadic_Buffer_Type _unused_args, Result_Type output_buf,
+                                  Result_Type softmax_aux_buf, Result_Type rng_state_buf,
+                                  Result_Type workspace_buf, Dictionary attrs) {
+  FUSED_ATTN_FFI_GET_ATTRS;
+
+  SmallSeqAttnForwardImpl(
+      stream, q_buf.untyped_data(), k_buf.untyped_data(), v_buf.untyped_data(),
+      bias_buf.untyped_data(), seed_buf.untyped_data(), q_cu_seqlens_buf.untyped_data(),
+      kv_cu_seqlens_buf.untyped_data(), is_ragged ? q_seq_offsets_buf.untyped_data() : nullptr,
+      is_ragged ? k_seq_offsets_buf.untyped_data() : nullptr, output_buf->untyped_data(),
+      softmax_aux_buf->untyped_data(), rng_state_buf->untyped_data(), workspace_buf->untyped_data(),
+      input_batch, bias_batch, q_max_seqlen, kv_max_seqlen, attn_heads, num_gqa_groups, bias_heads,
+      qk_head_dim, v_head_dim, max_segments_per_seq, wkspace_size, scaling_factor,
+      dropout_probability, bias_type, mask_type, qkv_layout, dtype, wkspace_dtype, is_training,
+      deterministic, window_size_left, window_size_right);
+
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(SmallSeqAttnForwardHandler, SmallSeqAttnForwardFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .RemainingArgs()
+                                  .Ret<Buffer_Type>()
+                                  .Ret<Buffer_Type>()
+                                  .Ret<Buffer_Type>()
+                                  .Ret<Buffer_Type>()
+                                  .Attrs(),
+                              FFI_CudaGraph_Traits);
+
+Error_Type SmallSeqAttnBackwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer_Type k_buf,
+                                   Buffer_Type v_buf, Buffer_Type bias_buf,
+                                   Buffer_Type softmax_aux_buf, Buffer_Type rng_state_buf,
+                                   Buffer_Type output_buf, Buffer_Type doutput_buf,
+                                   Buffer_Type q_cu_seqlens_buf, Buffer_Type kv_cu_seqlens_buf,
+                                   Buffer_Type q_seq_offsets_buf, Buffer_Type k_seq_offsets_buf,
+                                   Variadic_Buffer_Type _unused_args, Result_Type dq_buf,
+                                   Result_Type dk_buf, Result_Type dv_buf, Result_Type dbias_buf,
+                                   Result_Type workspace_buf, Dictionary attrs) {
+  FUSED_ATTN_FFI_GET_ATTRS;
+
+  SmallSeqAttnBackwardImpl(
+      stream, q_buf.untyped_data(), k_buf.untyped_data(), v_buf.untyped_data(),
+      bias_buf.untyped_data(), softmax_aux_buf.untyped_data(), rng_state_buf.untyped_data(),
+      output_buf.untyped_data(), doutput_buf.untyped_data(), q_cu_seqlens_buf.untyped_data(),
+      kv_cu_seqlens_buf.untyped_data(), is_ragged ? q_seq_offsets_buf.untyped_data() : nullptr,
+      is_ragged ? k_seq_offsets_buf.untyped_data() : nullptr, dq_buf->untyped_data(),
+      dk_buf->untyped_data(), dv_buf->untyped_data(), dbias_buf->untyped_data(),
+      workspace_buf->untyped_data(), input_batch, bias_batch, q_max_seqlen, kv_max_seqlen,
+      attn_heads, num_gqa_groups, bias_heads, qk_head_dim, v_head_dim, max_segments_per_seq,
+      wkspace_size, scaling_factor, dropout_probability, bias_type, mask_type, qkv_layout, dtype,
+      wkspace_dtype, is_training, deterministic, window_size_left, window_size_right);
+
+  return ffi_with_cuda_error_check();
+}
+
+XLA_FFI_DEFINE_HANDLER_SYMBOL(SmallSeqAttnBackwardHandler, SmallSeqAttnBackwardFFI,
+                              FFI::Bind()
+                                  .Ctx<FFI_Stream_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .Arg<Buffer_Type>()
+                                  .RemainingArgs()
+                                  .Ret<Buffer_Type>()
+                                  .Ret<Buffer_Type>()
+                                  .Ret<Buffer_Type>()
+                                  .Ret<Buffer_Type>()
+                                  .Ret<Buffer_Type>()
+                                  .Attrs(),
+                              FFI_CudaGraph_Traits);
+#endif  // USE_ROCM
 
 }  // namespace jax
 }  // namespace transformer_engine
