@@ -58,7 +58,7 @@ jobs:
           ref: refs/pull/${{ env.PR_NUMBER }}/head
           fetch-depth: 0
 
-      # Skills live in .github/claude-skills/.
+      # Skills live in .github/agent-skills/.
       # Stage them into .claude/skills/ at runtime so Claude Code discovers
       # them via its default `.claude/skills/<name>/SKILL.md` lookup. Source
       # from the repo default branch so a release-branch PR (which may not
@@ -78,11 +78,11 @@ jobs:
           mkdir -p .claude/skills
           # `git archive | tar -x` materializes the skills from the default
           # branch even if the PR branch deleted or doesn't carry them.
-          if git cat-file -e "origin/$DEFAULT_BRANCH:.github/claude-skills" 2>/dev/null; then
-            git archive "origin/$DEFAULT_BRANCH" .github/claude-skills \
+          if git cat-file -e "origin/$DEFAULT_BRANCH:.github/agent-skills" 2>/dev/null; then
+            git archive "origin/$DEFAULT_BRANCH" .github/agent-skills \
               | tar -x --strip-components=2 -C .claude/skills
           else
-            echo "::warning::No .github/claude-skills/ on origin/$DEFAULT_BRANCH; review will run skill-less."
+            echo "::warning::No .github/agent-skills/ on origin/$DEFAULT_BRANCH; review will run skill-less."
           fi
           ls -la .claude/skills/ || true
 
