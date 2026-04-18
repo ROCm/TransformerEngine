@@ -55,7 +55,6 @@ on:
         default: true
       rocm_repo_url:
         type: string
-        required: true
         default: 'https://repo.amd.com/rocm/packages/rhel8/x86_64/'
       force_build_image:
         type: boolean
