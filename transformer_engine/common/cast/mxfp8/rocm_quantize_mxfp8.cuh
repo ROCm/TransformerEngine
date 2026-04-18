@@ -16,9 +16,9 @@ constexpr size_t MXFP8_THREADS_PER_CHUNK = 64;
 constexpr size_t ELEMS_PER_THREAD = 16;
 constexpr size_t MXFP8_BUFFER_DIM_Y = 32;  // only 32 is supported
 
-#if defined(__gfx950__) && __HIP_DEVICE_COMPILE__
+#ifdef HAS_CVT_4xFLOAT8
 typedef short mxfp8_v2i16_t __attribute__((ext_vector_type(2)));
-#endif
+#endif  // #ifdef HAS_CVT_4xFLOAT8
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
@@ -196,7 +196,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
 
       Vec<OType, ELEMS_PER_THREAD> out_c;
-#if defined(__gfx950__) && __HIP_DEVICE_COMPILE__
+#ifdef HAS_CVT_4xFLOAT8
       {
         const float cvt_scale = (biased_exponent == 0) ? 1.0f : ptx::exp2f(biased_exponent);
         union {
@@ -219,7 +219,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           out_c.data.elt[j] = static_cast<OType>(in_compute[j] * block_scale_inverse);
         }
       }
-#endif
+#endif  // #ifdef HAS_CVT_4xFLOAT8
 
       if (row_valid && col_valid) {
         if (IS_ALIGNED || col_start + ELEMS_PER_THREAD <= cols) {
@@ -341,7 +341,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
 
           Vec<OType, ELEMS_PER_THREAD> out_c;
-#if defined(__gfx950__) && __HIP_DEVICE_COMPILE__
+#ifdef HAS_CVT_4xFLOAT8
           {
             const float cvt_scale = (biased_exponent == 0) ? 1.0f : ptx::exp2f(biased_exponent);
             union {
@@ -364,7 +364,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               out_c.data.elt[j] = static_cast<OType>(in_compute[j] * block_scale_inverse);
             }
           }
-#endif
+#endif  // #ifdef HAS_CVT_4xFLOAT8
 
           if (row_valid && col_valid) {
             if (IS_ALIGNED || col_start + ELEMS_PER_THREAD <= cols) {
@@ -424,7 +424,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           scales_colwise[scale_idx] = biased_exponent;
         }
 
-#if defined(__gfx950__) && __HIP_DEVICE_COMPILE__
+#ifdef HAS_CVT_4xFLOAT8
         {
           const float cvt_scale = (biased_exponent == 0) ? 1.0f : ptx::exp2f(biased_exponent);
 #pragma unroll
@@ -449,7 +449,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                 static_cast<OType>(in_compute[i] * block_scale_inverse);
           }
         }
-#endif
+#endif  // #ifdef HAS_CVT_4xFLOAT8
       }
 
       __syncthreads();

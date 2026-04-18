@@ -83,7 +83,7 @@ rocm_cast_transpose_kernel(const IType *__restrict__ input,
                 amax = fmaxf(fabsf(v), amax);
             }
 
-#if __HIP_DEVICE_COMPILE__ && __has_builtin(__builtin_amdgcn_cvt_pk_fp8_f32)
+#ifdef HAS_PACK_4xFLOAT8
             if constexpr (sizeof(OType) == 1) {
 #pragma unroll
                 for (int j2 = 0; j2 < NVEC_IN; j2 += 4) {
@@ -100,7 +100,7 @@ rocm_cast_transpose_kernel(const IType *__restrict__ input,
                     }
                 }
             } else
-#endif  // __has_builtin(__builtin_amdgcn_cvt_pk_fp8_f32)
+#endif  // #ifdef HAS_PACK_4xFLOAT8
             {
 #pragma unroll
                 for (int j2 = 0; j2 < NVEC_IN; j2++) {

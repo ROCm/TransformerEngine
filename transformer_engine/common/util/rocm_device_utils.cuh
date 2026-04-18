@@ -11,8 +11,15 @@
 #define ROCM_CT_WARP_SIZE 32
 constexpr int ROCM_VEC_BYTES = 16;  // 128-bit max vectorized load/store width
 
-// Non-scaled FP8 packed conversion for cast/cast_transpose (pre-scaled values)
 #if __HIP_DEVICE_COMPILE__ && __has_builtin(__builtin_amdgcn_cvt_pk_fp8_f32)
+#define HAS_PACK_4xFLOAT8 1
+#endif
+#if __HIP_DEVICE_COMPILE__ && __has_builtin(__builtin_amdgcn_cvt_scalef32_pk_fp8_f32)
+#define HAS_CVT_4xFLOAT8 1
+#endif
+
+// Non-scaled FP8 packed conversion for cast/cast_transpose (pre-scaled values)
+#ifdef HAS_PACK_4xFLOAT8
 template <typename OType>
 __device__ __forceinline__
 uint32_t rocm_pack_4xfloat8(float s0, float s1, float s2, float s3) {
@@ -35,10 +42,10 @@ uint32_t rocm_pack_4xfloat8(float s0, float s1, float s2, float s3) {
     }
     return static_cast<uint32_t>(r);
 }
-#endif  // __has_builtin(__builtin_amdgcn_cvt_pk_fp8_f32)
+#endif  // #ifdef HAS_PACK_4xFLOAT8
 
 // Scaled FP8 packed conversion for MXFP8 (E8M0 block scale)
-#if __HIP_DEVICE_COMPILE__ && __has_builtin(__builtin_amdgcn_cvt_scalef32_pk_fp8_f32)
+#ifdef HAS_CVT_4xFLOAT8
 template <typename OType>
 __device__ __forceinline__
 uint32_t rocm_cvt_4xfloat8(float s0, float s1, float s2, float s3, float scale) {
@@ -56,7 +63,7 @@ uint32_t rocm_cvt_4xfloat8(float s0, float s1, float s2, float s3, float scale) 
     }
     return __builtin_bit_cast(uint32_t, r);
 }
-#endif  // __has_builtin(__builtin_amdgcn_cvt_scalef32_pk_fp8_f32)
+#endif  // #ifdef HAS_CVT_4xFLOAT8
 
 template <typename T, int N>
 struct alignas(sizeof(T) * N) NTVec {

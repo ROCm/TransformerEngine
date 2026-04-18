@@ -60,7 +60,7 @@ rocm_cast_only_kernel(const IType *__restrict__ input,
 
         OVec out[STORES];
 
-#if __HIP_DEVICE_COMPILE__ && __has_builtin(__builtin_amdgcn_cvt_pk_fp8_f32)
+#ifdef HAS_PACK_4xFLOAT8
         if constexpr (sizeof(OType) == 1) {
 #pragma unroll
             for (int e = 0; e < ROCM_CAST_ELEMS; e += 4) {
@@ -77,7 +77,7 @@ rocm_cast_only_kernel(const IType *__restrict__ input,
                 memcpy(&out[e / NVEC_OUT].val[e % NVEC_OUT], &packed, 4);
             }
         } else
-#endif  // __has_builtin(__builtin_amdgcn_cvt_pk_fp8_f32)
+#endif  // #ifdef HAS_PACK_4xFLOAT8
         {
 #pragma unroll
             for (int e = 0; e < ROCM_CAST_ELEMS; e++) {
