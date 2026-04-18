@@ -1,0 +1,16 @@
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
+# Trigger a ROCm wheels build on every pull request.
+# Delegates to the reusable rocm-wheels-build workflow using its defaults.
+
+name: ROCm Wheels PR Build
+
+on:
+  pull_request:
+
+jobs:
+  build-rocm-wheels:
+    uses: ./.github/workflows/rocm-wheels-build.yml
+    secrets: inherit
