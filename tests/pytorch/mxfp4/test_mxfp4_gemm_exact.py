@@ -55,7 +55,8 @@ def check_mxfp4_gemm_versus_reference(
         fp4_dtype=te_dtype,
         rowwise=True,
         columnwise=True,
-        shuffle_B_matrix_for_aiter=False,
+        shuffle_rowwise_data=False,
+        shuffle_columnwise_data=False,
         shuffle_scales=True,
         use_hadamard=False,
     )
@@ -63,7 +64,8 @@ def check_mxfp4_gemm_versus_reference(
         fp4_dtype=te_dtype,
         rowwise=True,
         columnwise=True,
-        shuffle_B_matrix_for_aiter=True,
+        shuffle_rowwise_data=True,
+        shuffle_columnwise_data=True,
         shuffle_scales=True,
         use_hadamard=False,
     )
@@ -73,7 +75,8 @@ def check_mxfp4_gemm_versus_reference(
         fp4_dtype=te_dtype,
         rowwise=True,
         columnwise=True,
-        shuffle_B_matrix_for_aiter=False,
+        shuffle_rowwise_data=False,
+        shuffle_columnwise_data=False,
         shuffle_scales=False,
         use_hadamard=False,
     )
@@ -81,7 +84,8 @@ def check_mxfp4_gemm_versus_reference(
         fp4_dtype=te_dtype,
         rowwise=True,
         columnwise=True,
-        shuffle_B_matrix_for_aiter=False,
+        shuffle_rowwise_data=False,
+        shuffle_columnwise_data=False,
         shuffle_scales=False,
         use_hadamard=False,
     )

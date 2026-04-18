@@ -99,7 +99,8 @@ def check_quantization_mxfp4_versus_reference(
     return_transpose: bool,
     use_cpp_allocator: bool,
     use_hadamard: bool = False,
-    shuffle_B_matrix_for_aiter: bool = False,
+    shuffle_rowwise_data: bool = False,
+    shuffle_columnwise_data: bool = False,
     shuffle_scales: bool = False,
 ) -> None:
     te_dtype = tex.DType.kFloat4E2M1
@@ -116,7 +117,8 @@ def check_quantization_mxfp4_versus_reference(
         fp4_dtype=te_dtype,
         rowwise=True,
         columnwise=return_transpose,
-        shuffle_B_matrix_for_aiter=shuffle_B_matrix_for_aiter,
+        shuffle_rowwise_data=shuffle_rowwise_data,
+        shuffle_columnwise_data=shuffle_columnwise_data,
         shuffle_scales=shuffle_scales,
         use_hadamard=use_hadamard,
     )
@@ -145,7 +147,8 @@ def check_quantization_mxfp4_versus_reference(
     ref_quantizer = MXFP4QuantizerRef(
         rowwise=True,
         columnwise=return_transpose,
-        shuffle_B_matrix_for_aiter=shuffle_B_matrix_for_aiter,
+        shuffle_rowwise_data=shuffle_rowwise_data,
+        shuffle_columnwise_data=shuffle_columnwise_data,
         shuffle_scales=shuffle_scales,
         use_hadamard=use_hadamard,
     )
@@ -234,14 +237,17 @@ def check_quantization_mxfp4_versus_reference(
 )
 @pytest.mark.parametrize("use_hadamard", [False, True], ids=["no_hadamard", "hadamard"])
 @pytest.mark.parametrize(
-    "shuffle_B_matrix_for_aiter", [False, True], ids=["no_data_shuffle", "data_shuffle"]
+    "shuffle_rowwise_data", [False, True], ids=["no_rowwise_data_shuffle", "rowwise_data_shuffle"]
+)
+@pytest.mark.parametrize(
+    "shuffle_columnwise_data", [False, True], ids=["no_columnwise_data_shuffle", "columnwise_data_shuffle"]
 )
 @pytest.mark.parametrize(
     "shuffle_scales", [False, True], ids=["no_scale_shuffle", "scale_shuffle"]
 )
 def test_quantization_versus_reference(
     M, N, x_dtype, return_transpose, use_cpp_allocator, use_hadamard,
-    shuffle_B_matrix_for_aiter, shuffle_scales,
+    shuffle_rowwise_data, shuffle_columnwise_data, shuffle_scales,
 ):
     check_quantization_mxfp4_versus_reference(
         x_dtype=x_dtype,
@@ -250,7 +256,8 @@ def test_quantization_versus_reference(
         return_transpose=return_transpose,
         use_cpp_allocator=use_cpp_allocator,
         use_hadamard=use_hadamard,
-        shuffle_B_matrix_for_aiter=shuffle_B_matrix_for_aiter,
+        shuffle_rowwise_data=shuffle_rowwise_data,
+        shuffle_columnwise_data=shuffle_columnwise_data,
         shuffle_scales=shuffle_scales,
     )
 
@@ -265,14 +272,17 @@ def test_quantization_versus_reference(
 )
 @pytest.mark.parametrize("use_hadamard", [False, True], ids=["no_hadamard", "hadamard"])
 @pytest.mark.parametrize(
-    "shuffle_B_matrix_for_aiter", [False, True], ids=["no_data_shuffle", "data_shuffle"]
+    "shuffle_rowwise_data", [False, True], ids=["no_rowwise_data_shuffle", "rowwise_data_shuffle"]
+)
+@pytest.mark.parametrize(
+    "shuffle_columnwise_data", [False, True], ids=["no_columnwise_data_shuffle", "columnwise_data_shuffle"]
 )
 @pytest.mark.parametrize(
     "shuffle_scales", [False, True], ids=["no_scale_shuffle", "scale_shuffle"]
 )
 def test_quantization_extrema(
     M, N, x_dtype, extrema_high, return_transpose, use_cpp_allocator,
-    use_hadamard, shuffle_B_matrix_for_aiter, shuffle_scales,
+    use_hadamard, shuffle_rowwise_data, shuffle_columnwise_data, shuffle_scales,
 ):
     """Test quantization with extreme values: all zeros or all max."""
     te_dtype = tex.DType.kFloat4E2M1
@@ -287,7 +297,8 @@ def test_quantization_extrema(
         fp4_dtype=te_dtype,
         rowwise=True,
         columnwise=return_transpose,
-        shuffle_B_matrix_for_aiter=shuffle_B_matrix_for_aiter,
+        shuffle_rowwise_data=shuffle_rowwise_data,
+        shuffle_columnwise_data=shuffle_columnwise_data,
         shuffle_scales=shuffle_scales,
         use_hadamard=use_hadamard,
     )
@@ -318,14 +329,17 @@ def test_quantization_extrema(
 )
 @pytest.mark.parametrize("use_hadamard", [False, True], ids=["no_hadamard", "hadamard"])
 @pytest.mark.parametrize(
-    "shuffle_B_matrix_for_aiter", [False, True], ids=["no_data_shuffle", "data_shuffle"]
+    "shuffle_rowwise_data", [False, True], ids=["no_rowwise_data_shuffle", "rowwise_data_shuffle"]
+)
+@pytest.mark.parametrize(
+    "shuffle_columnwise_data", [False, True], ids=["no_columnwise_data_shuffle", "columnwise_data_shuffle"]
 )
 @pytest.mark.parametrize(
     "shuffle_scales", [False, True], ids=["no_scale_shuffle", "scale_shuffle"]
 )
 def test_quantization_noncontiguous_inputs(
     M, N, x_dtype, return_transpose, use_cpp_allocator, use_hadamard,
-    shuffle_B_matrix_for_aiter, shuffle_scales,
+    shuffle_rowwise_data, shuffle_columnwise_data, shuffle_scales,
 ):
     """Test that non-contiguous inputs are handled correctly."""
     te_dtype = tex.DType.kFloat4E2M1
@@ -342,7 +356,8 @@ def test_quantization_noncontiguous_inputs(
         fp4_dtype=te_dtype,
         rowwise=True,
         columnwise=return_transpose,
-        shuffle_B_matrix_for_aiter=shuffle_B_matrix_for_aiter,
+        shuffle_rowwise_data=shuffle_rowwise_data,
+        shuffle_columnwise_data=shuffle_columnwise_data,
         shuffle_scales=shuffle_scales,
         use_hadamard=use_hadamard,
     )

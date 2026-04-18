@@ -922,6 +922,17 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
     case kNVTEWithGEMMSwizzledScales:
       t.with_gemm_swizzled_scales = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
       break;
+#ifdef __HIP_PLATFORM_AMD__
+    case kNVTEMXFP4ShuffleScales:
+      t.mxfp4_shuffle_scales = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
+    case kNVTEMXFP4ShuffleRowwiseData:
+      t.mxfp4_shuffle_rowwise_data = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
+    case kNVTEMXFP4ShuffleColumnwiseData:
+      t.mxfp4_shuffle_columnwise_data = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
+#endif
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
   }
@@ -1002,6 +1013,17 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
     case kNVTEWithGEMMSwizzledScales:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->with_gemm_swizzled_scales);
       break;
+#ifdef __HIP_PLATFORM_AMD__
+    case kNVTEMXFP4ShuffleScales:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->mxfp4_shuffle_scales);
+      break;
+    case kNVTEMXFP4ShuffleRowwiseData:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->mxfp4_shuffle_rowwise_data);
+      break;
+    case kNVTEMXFP4ShuffleColumnwiseData:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->mxfp4_shuffle_columnwise_data);
+      break;
+#endif
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
   }
@@ -1117,12 +1139,6 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigMXFP4UseHadamard:
       bool_to_uint8(config_.mxfp4_use_hadamard, buf);
       break;
-    case kNVTEQuantizationConfigMXFP4ScaleShuffle:
-      bool_to_uint8(config_.mxfp4_scale_shuffle, buf);
-      break;
-    case kNVTEQuantizationConfigMXFP4DataShuffle:
-      bool_to_uint8(config_.mxfp4_data_shuffle, buf);
-      break;
 #endif
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
@@ -1182,12 +1198,6 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
 #ifdef __HIP_PLATFORM_AMD__
     case kNVTEQuantizationConfigMXFP4UseHadamard:
       uint8_to_bool(buf, config_.mxfp4_use_hadamard);
-      break;
-    case kNVTEQuantizationConfigMXFP4ScaleShuffle:
-      uint8_to_bool(buf, config_.mxfp4_scale_shuffle);
-      break;
-    case kNVTEQuantizationConfigMXFP4DataShuffle:
-      uint8_to_bool(buf, config_.mxfp4_data_shuffle);
       break;
 #endif
     default:

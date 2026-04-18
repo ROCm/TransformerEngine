@@ -1380,12 +1380,23 @@ class MXFP4BlockScalingRecipeState(RecipeState):
         if self.mode == "forward":
 
             def _make_quantizer(idx: int):
+                is_activation = idx % 3 == 0
                 is_weight = idx % 3 == 1
+                if is_activation:
+                    shuffle_rowwise_data = False
+                    shuffle_columnwise_data = True
+                elif is_weight:
+                    shuffle_rowwise_data = True
+                    shuffle_columnwise_data = True
+                else:
+                    shuffle_rowwise_data = False
+                    shuffle_columnwise_data = False
                 return MXFP4Quantizer(
                     fp4_dtype=self.dtype,
                     rowwise=True,
                     columnwise=True,
-                    shuffle_B_matrix_for_aiter=is_weight,
+                    shuffle_rowwise_data=shuffle_rowwise_data,
+                    shuffle_columnwise_data=shuffle_columnwise_data,
                     shuffle_scales=True,
                     use_hadamard=use_hadamard,
                 )
@@ -1398,7 +1409,8 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                     fp4_dtype=self.dtype,
                     rowwise=True,
                     columnwise=True,
-                    shuffle_B_matrix_for_aiter=False,
+                    shuffle_rowwise_data=False,
+                    shuffle_columnwise_data=False,
                     shuffle_scales=True,
                     use_hadamard=use_hadamard,
                 )

@@ -190,21 +190,21 @@ def mxfp4_gemm(
         A_scales = B._rowwise_scale_inv
         B_fp4 = A._rowwise_data
         B_scales = A._rowwise_scale_inv
-        b_pre_shuffled = True
+        b_pre_shuffled = A._shuffle_rowwise_data
 
     elif layout == "NN":
         A_fp4 = B._rowwise_data
         A_scales = B._rowwise_scale_inv
         B_fp4 = A._columnwise_data
         B_scales = A._columnwise_scale_inv
-        b_pre_shuffled = True
+        b_pre_shuffled = A._shuffle_columnwise_data
 
     elif layout == "NT":
         A_fp4 = B._columnwise_data
         A_scales = B._columnwise_scale_inv
         B_fp4 = A._columnwise_data
         B_scales = A._columnwise_scale_inv
-        b_pre_shuffled = False
+        b_pre_shuffled = A._shuffle_columnwise_data
 
     else:
         raise ValueError(f"Unsupported layout for FP4 GEMM: {layout}")

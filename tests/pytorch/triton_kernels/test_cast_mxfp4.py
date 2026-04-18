@@ -316,7 +316,7 @@ def compare_e8m0_scales(
     ],
 )
 @pytest.mark.parametrize(
-    ("rowwise", "columnwise", "shuffle_B_matrix_for_aiter"),
+    ("rowwise", "columnwise", "shuffle_data"),
     [
         (True, False, False),
         (False, True, False),
@@ -327,7 +327,7 @@ def compare_e8m0_scales(
     ],
 )
 def test_quantize_mxfp4_standard(
-    shape, in_dtype, rowwise, columnwise, shuffle_B_matrix_for_aiter
+    shape, in_dtype, rowwise, columnwise, shuffle_data
 ):
     """Standard MXFP4 quantization with statistical validation."""
     input_tensor = fill_uniform(shape, dtype=in_dtype)
@@ -335,8 +335,9 @@ def test_quantize_mxfp4_standard(
     quantizer = MXFP4Quantizer(
         rowwise=rowwise,
         columnwise=columnwise,
-        shuffle_B_matrix_for_aiter=shuffle_B_matrix_for_aiter,
-        shuffle_scales=shuffle_B_matrix_for_aiter,
+        shuffle_rowwise_data=shuffle_data,
+        shuffle_columnwise_data=shuffle_data,
+        shuffle_scales=shuffle_data,
     )
 
     quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer)
@@ -346,13 +347,13 @@ def test_quantize_mxfp4_standard(
 
     if rowwise:
         ref_data, ref_scale = mxfp4_quantize_cpu(
-            input_tensor, axis="row", SHUFFLE=shuffle_B_matrix_for_aiter
+            input_tensor, axis="row", SHUFFLE=shuffle_data
         )
         num_blocks = math.ceil(K / MXFP4_BLOCK_SCALING_SIZE)
 
         y1_scales_triton = quantized_out._rowwise_scale_inv.view(torch.uint8)
         y1_scales_torch = ref_scale
-        if shuffle_B_matrix_for_aiter:
+        if shuffle_data:
             y1_scales_triton = un_shuffle_scales(
                 y1_scales_triton.view(y1_scales_triton.shape[0] // 32, -1)
             )
@@ -391,13 +392,13 @@ def test_quantize_mxfp4_standard(
 
     if columnwise:
         ref_data, ref_scale = mxfp4_quantize_cpu(
-            input_tensor, axis="col", SHUFFLE=shuffle_B_matrix_for_aiter
+            input_tensor, axis="col", SHUFFLE=shuffle_data
         )
         num_blocks = math.ceil(M / MXFP4_BLOCK_SCALING_SIZE)
 
         y1_scales_triton = quantized_out._columnwise_scale_inv.view(torch.uint8)
         y1_scales_torch = ref_scale
-        if shuffle_B_matrix_for_aiter:
+        if shuffle_data:
             y1_scales_triton = un_shuffle_scales(
                 y1_scales_triton.view(y1_scales_triton.shape[0] // 32, -1)
             )

@@ -223,14 +223,16 @@ class MXFP4QuantizerRef(Quantizer):
         self,
         rowwise: bool = True,
         columnwise: bool = True,
-        shuffle_B_matrix_for_aiter: bool = False,
+        shuffle_rowwise_data: bool = False,
+        shuffle_columnwise_data: bool = False,
         shuffle_scales: bool = False,
         use_hadamard: bool = False,
         use_te_quantizer: bool = False,
     ):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.internal = True
-        self.shuffle_B_matrix_for_aiter = shuffle_B_matrix_for_aiter
+        self.shuffle_rowwise_data = shuffle_rowwise_data
+        self.shuffle_columnwise_data = shuffle_columnwise_data
         self.shuffle_scales = shuffle_scales
         self.use_hadamard = use_hadamard
         self.use_te_quantizer = use_te_quantizer
@@ -280,13 +282,17 @@ class MXFP4QuantizerRef(Quantizer):
     # Core quantization (operates on a 2-D float tensor)
     # ------------------------------------------------------------------
 
-    def _quantize(self, tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def _quantize(
+        self, tensor: torch.Tensor, shuffle_data: bool = False,
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Quantize a 2-D tensor to packed FP4 + E8M0 scales.
 
         Parameters
         ----------
         tensor : torch.Tensor
             Shape ``(M, N)`` with ``N`` divisible by 32.
+        shuffle_data : bool
+            Whether to shuffle the packed FP4 data for AITER GEMM.
 
         Returns
         -------
@@ -339,7 +345,7 @@ class MXFP4QuantizerRef(Quantizer):
 
         fp4_packed_torch = torch.from_numpy(fp4_packed).to(tensor.device)
 
-        if self.shuffle_B_matrix_for_aiter:
+        if shuffle_data:
             fp4_packed_torch = _shuffle_fp4_data(fp4_packed_torch)
 
         scales_valid = torch.from_numpy(scales).to(tensor.device)
@@ -411,7 +417,8 @@ class MXFP4QuantizerRef(Quantizer):
         if self.use_te_quantizer:
             te_quantizer = MXFP4Quantizer(rowwise=self.rowwise_usage, 
                                         columnwise=self.columnwise_usage, 
-                                        shuffle_B_matrix_for_aiter=self.shuffle_B_matrix_for_aiter, 
+                                        shuffle_rowwise_data=self.shuffle_rowwise_data, 
+                                        shuffle_columnwise_data=self.shuffle_columnwise_data, 
                                         shuffle_scales=self.shuffle_scales, 
                                         use_hadamard=self.use_hadamard)
             q_tensor = tex.quantize(tensor, te_quantizer)
@@ -427,13 +434,13 @@ class MXFP4QuantizerRef(Quantizer):
             )
 
         if self.rowwise_usage:
-            qx, sx = self._quantize(tensor)
+            qx, sx = self._quantize(tensor, shuffle_data=self.shuffle_rowwise_data)
         else:
             qx = sx = None
 
         if self.columnwise_usage:
             t_input = tensor.t().contiguous()
-            qx_t, sx_t = self._quantize(t_input)
+            qx_t, sx_t = self._quantize(t_input, shuffle_data=self.shuffle_columnwise_data)
         else:
             qx_t = sx_t = None
 
