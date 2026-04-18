@@ -17,34 +17,55 @@ on:
     inputs:
       use_local_version:
         description: 'Use local version suffix for generated wheels.'
+        type: boolean
         required: false
         default: true
-        type: boolean
       use_prebuilt_aiter:
         description: 'Use precompiled aiter instead of building from source.'
+        type: boolean
         required: false
         default: true
-        type: boolean
       rocm_repo_url:
         description: 'ROCm TheRock repository URL used inside the Docker image.'
+        type: string
         required: true
         default: 'https://repo.amd.com/rocm/packages/rhel8/x86_64/'
-        type: string
       force_build_image:
-        description: 'Force rebuild of ROCm Docker image, skip checking intermediate storage.'
+        description: 'Force building of ROCm Docker image, skip checking intermediate storage.'
+        type: boolean
         required: false
         default: true
-        type: boolean
       upload_image:
-        description: 'Upload newly built ROCm Docker image to intermediate storage.'
+        description: 'Upload built ROCm Docker image to intermediate storage.'
+        type: boolean
         required: false
         default: false
-        type: boolean
       docker_image_tag_override:
-        description: 'Override the auto-generated ROCm Docker image tag (e.g., 202604-custom).'
+        description: 'Override the auto-generated ROCm Docker image tag.'
+        type: string
         required: false
         default: ''
+  workflow_call:
+    inputs:
+      use_local_version:
+        type: boolean
+        default: true
+      use_prebuilt_aiter:
+        type: boolean
+        default: true
+      rocm_repo_url:
         type: string
+        required: true
+        default: 'https://repo.amd.com/rocm/packages/rhel8/x86_64/'
+      force_build_image:
+        type: boolean
+        default: true
+      upload_image:
+        type: boolean
+        default: false
+      docker_image_tag_override:
+        type: string
+        default: ''
 
 env:
   DOCKER_IMAGE_NAME: te-rocm-manylinux-x86
@@ -60,8 +81,13 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
-        with:
-          submodules: recursive
+
+      - name: Initialize required submodules
+        run: |
+          git submodule update --init --recursive --depth 1 \
+            3rdparty/aotriton \
+            3rdparty/aiter \
+            3rdparty/hipify_torch
 
       - name: Derive Docker image tag
         id: set-tag
