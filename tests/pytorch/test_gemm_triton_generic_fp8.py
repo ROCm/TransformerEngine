@@ -76,14 +76,10 @@ def test_generic_gemm_triton_fp8(M, K, N, fp8_format, layout):
     A_fp8 = create_fp8_tensor(A_f32, fp8_dtype_a, scale=1.0)
     B_fp8 = create_fp8_tensor(B_f32, fp8_dtype_b, scale=1.0)
 
-    # Create workspace tensor (required but unused)
-    workspace = torch.empty(1024 * 1024, dtype=torch.int8, device='cuda')
-
     # Call general_gemm with FP8 inputs (will use te_generic_gemm_triton via NVTE_USE_GEMM_TRITON=1)
     output, bias_grad, gelu_in, extra = general_gemm(
         A=A_fp8,
         B=B_fp8,
-        workspace=workspace,
         out_dtype=torch.float32,
         quantization_params=None,
         gelu=False,
@@ -143,13 +139,10 @@ def test_generic_gemm_triton_fp8_multidim(batch_size, M, K, N):
     A_fp8 = create_fp8_tensor(A_f32, tex.DType.kFloat8E4M3, scale=1.0)
     B_fp8 = create_fp8_tensor(B_f32, tex.DType.kFloat8E4M3, scale=1.0)
 
-    workspace = torch.empty(1024 * 1024, dtype=torch.int8, device='cuda')
-
     # Call general_gemm with TN layout
     output, _, _, _ = general_gemm(
         A=A_fp8,
         B=B_fp8,
-        workspace=workspace,
         out_dtype=torch.float32,
         layout="TN",
     )
@@ -188,13 +181,10 @@ def test_generic_gemm_triton_fp8_backward_compatibility():
     A_f16 = torch.randn(M, K, dtype=torch.float16, device='cuda')
     B_f16 = torch.randn(N, K, dtype=torch.float16, device='cuda')
 
-    workspace = torch.empty(1024 * 1024, dtype=torch.int8, device='cuda')
-
     # Call general_gemm with regular tensors (TN layout)
     output, _, _, _ = general_gemm(
         A=A_f16,
         B=B_f16,
-        workspace=workspace,
         layout="TN",
     )
 
