@@ -10,6 +10,14 @@ print("Testing MXFP8 kernel directly...")
 if not torch.cuda.is_available():
     pytest.skip("CUDA not available", allow_module_level=True)
 
+from transformer_engine.pytorch import torch_version
+if torch_version() < (2, 10):
+    pytest.skip(
+        f"MXFP8 Triton kernel requires PyTorch >= 2.10 (found {torch_version()}); "
+        "earlier versions hit a tl.dot_scaled() RHS-scale compiler bug producing NaNs.",
+        allow_module_level=True,
+    )
+
 
 def test_mxfp8_kernel_with_simulated_data():
     """Test MXFP8 kernel with simulated FP8 data and E8M0 scales"""
