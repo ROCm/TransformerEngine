@@ -687,12 +687,18 @@ def te_generic_gemm_triton(A,
         a_scale_triton = b_scale_inv
         b_scale_triton = a_scale_inv
 
-    epilogue = 'DEFAULT'
-    #if bias.data_ptr() != 0:
-        #if grad:
-            #epilogue = 'BGRADB'
-        #else:
-            #epilogue = 'BIAS'
+    # Bias / bias-gradient wiring for the regular/FP8 matmul kernel.
+    # MXFP8 takes a separate path below and does not yet support bias.
+    has_bias = bias is not None and bias.numel() > 0
+    if has_bias and grad:
+        epilogue = 'BGRADB'
+        bias_grad = torch.empty_like(bias)
+    elif has_bias:
+        epilogue = 'BIAS'
+        bias_grad = None
+    else:
+        epilogue = 'DEFAULT'
+        bias_grad = None
 
     # Compute output shape
     if input_mxfp8:
@@ -736,8 +742,17 @@ def te_generic_gemm_triton(A,
 
     # Empty tensors for unused parameters (matching C++ empty tensor pattern)
     D_scale = torch.Tensor()
-    bias_tensor = torch.Tensor()
     D_amax = torch.Tensor()
+    # Bias tensor passed to the kernel:
+    #   - BIAS:   the actual bias, read and added to output
+    #   - BGRADB: output buffer that receives the bias gradient
+    #   - DEFAULT: empty (kernel ignores it)
+    if epilogue == 'BIAS':
+        bias_tensor = bias
+    elif epilogue == 'BGRADB':
+        bias_tensor = bias_grad
+    else:
+        bias_tensor = torch.Tensor()
 
     # Dispatch to appropriate kernel based on input type
     if input_mxfp8:
@@ -847,7 +862,7 @@ def te_generic_gemm_triton(A,
         matmul(a_row_major, b_row_major, d_row_major, a_scale_triton, b_scale_triton,
                D_scale, bias_tensor, D_amax, epilogue, input_fp8, output_fp8)
 
-    return D, bias, None, None
+    return D, bias_grad, None, None
         
     
                             

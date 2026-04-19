@@ -159,6 +159,25 @@ def call_gemm(A, B, layout, out_dtype, use_triton=True):
     return output
 
 
+def call_gemm_with_bias(A, B, layout, out_dtype, bias, grad, use_triton=True):
+    """Call general_gemm() with a bias argument.
+
+    Returns (output, bias_grad). When grad=True the GEMM uses the BGRADB
+    epilogue and bias_grad contains the reduced bias gradient; otherwise
+    it uses the BIAS epilogue and bias is fused into the output.
+    """
+    os.environ['NVTE_USE_GEMM_TRITON'] = '1' if use_triton else '0'
+    output, bias_grad, _, _ = general_gemm(
+        A=A,
+        B=B,
+        out_dtype=out_dtype,
+        layout=layout,
+        bias=bias,
+        grad=grad,
+    )
+    return output, bias_grad
+
+
 # ==============================================================================
 # Approach 1: Triton vs PyTorch torch.matmul reference
 # ==============================================================================
@@ -332,6 +351,94 @@ def test_triton_vs_cpp_mxfp8(M, K, N, layout):
 
     torch.testing.assert_close(
         triton_out.float(), cpp_out.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+# ==============================================================================
+# Bias epilogue coverage (regression guard for gemm_triton.py bias wiring)
+#
+# The Triton wrapper must honor the `bias` + `grad` arguments to general_gemm:
+#   - grad=False + bias present → BIAS epilogue, bias added to output
+#   - grad=True  + bias present → BGRADB epilogue, bias gradient returned as
+#                                  the second element of general_gemm's tuple
+# Layout TN matches TE Linear's forward convention: A=weight[M,K],
+# B=input[N,K], output[N,M]; BIAS reads bias[M], BGRADB reduces to shape [N].
+# ==============================================================================
+
+BIAS_SHAPES = [(128, 256, 512), (229, 541, 541), (71, 71, 3571)]
+
+
+@pytest.mark.parametrize("M, K, N", BIAS_SHAPES)
+@pytest.mark.parametrize("dtype", REGULAR_DTYPES, ids=["fp32", "fp16", "bf16"])
+def test_triton_vs_cpp_bias_forward(M, K, N, dtype):
+    """Forward with BIAS epilogue: Triton must match C++ when bias is fused."""
+    torch.manual_seed(42)
+    A_shape, B_shape = get_shapes("TN", M, K, N)
+    A = torch.randn(A_shape, dtype=dtype, device='cuda') * 0.5
+    B = torch.randn(B_shape, dtype=dtype, device='cuda') * 0.5
+    bias = torch.randn((M,), dtype=dtype, device='cuda')
+
+    triton_out, _ = call_gemm_with_bias(A, B, "TN", dtype, bias, grad=False, use_triton=True)
+    cpp_out, _ = call_gemm_with_bias(A, B, "TN", dtype, bias, grad=False, use_triton=False)
+
+    # Bias must actually change the result vs. no-bias path; otherwise BIAS
+    # silently reverted to DEFAULT would pass a simple Triton-vs-C++ check.
+    no_bias_out = call_gemm(A, B, "TN", out_dtype=dtype, use_triton=True)
+    assert not torch.allclose(triton_out.float(), no_bias_out.float(), atol=1e-4), (
+        "Triton output matches no-bias output; BIAS epilogue appears inactive."
+    )
+
+    torch.testing.assert_close(
+        triton_out.float(), cpp_out.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+WGRAD_SHAPES = [
+    # (batch*seq, in_features, out_features) — TE Linear wgrad pattern
+    (256, 128, 512),
+    (512, 541, 229),
+    (128, 3571, 71),
+]
+
+
+@pytest.mark.parametrize("batch, in_features, out_features", WGRAD_SHAPES)
+@pytest.mark.parametrize("dtype", REGULAR_DTYPES, ids=["fp32", "fp16", "bf16"])
+def test_triton_vs_cpp_bias_grad(batch, in_features, out_features, dtype):
+    """Backward with BGRADB epilogue: Triton must produce the correct bias gradient.
+
+    Exercises the same call shape TE Linear uses for weight-grad:
+      general_gemm(x, dy, layout="NT", bias=<weight.bias>, grad=True)
+    A=x[batch, in_features], B=dy[batch, out_features].
+    The reduced bias gradient is expected to equal dy.sum(dim=0).
+
+    Regression guard for the wrapper bug where the epilogue was hardcoded to
+    DEFAULT, which silently zeroed the returned bias gradient.
+    """
+    torch.manual_seed(42)
+    A = torch.randn((batch, in_features), dtype=dtype, device='cuda') * 0.5
+    B = torch.randn((batch, out_features), dtype=dtype, device='cuda') * 0.5
+    bias = torch.zeros((out_features,), dtype=dtype, device='cuda')
+
+    _, triton_bias_grad = call_gemm_with_bias(A, B, "NT", dtype, bias, grad=True, use_triton=True)
+    _, cpp_bias_grad = call_gemm_with_bias(A, B, "NT", dtype, bias, grad=True, use_triton=False)
+
+    assert triton_bias_grad is not None, "Triton did not return a bias gradient tensor."
+    assert cpp_bias_grad is not None, "C++ did not return a bias gradient tensor."
+    # A correct BGRADB must not produce an all-zero gradient for non-trivial B.
+    assert triton_bias_grad.abs().sum().item() > 0, (
+        "Triton bias gradient is all zeros — BGRADB epilogue appears inactive."
+    )
+
+    # Cross-check against the analytical reduction.
+    expected = B.float().sum(dim=0)
+    torch.testing.assert_close(
+        triton_bias_grad.float(), expected,
+        atol=5e-2, rtol=1e-2,
+    )
+    torch.testing.assert_close(
+        triton_bias_grad.float(), cpp_bias_grad.float(),
         atol=5e-3, rtol=1e-2,
     )
 
