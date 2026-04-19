@@ -1,6 +1,4 @@
 /*************************************************************************
- * This file was modified for portability to AMDGPU
- * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -129,12 +127,10 @@ constexpr std::array custom_types_converters = {
                     NVTETensorFromFloat8BlockwiseQTensor, CreateQuantizer<Float8BlockQuantizer>),
 #ifdef USE_ROCM
     std::make_tuple(IsMXFP4Tensor, IsMXFP4Quantizers, NVTETensorFromMXFP4Tensor,
-      CreateQuantizer<MXFP4Quantizer>),
-};
-#else
+                    CreateQuantizer<MXFP4Quantizer>),
+#endif //#ifdef USE_ROCM
     std::make_tuple(IsNVFP4Tensor, IsNVFP4Quantizers, NVTETensorFromNVFP4Tensor,
                     CreateQuantizer<NVFP4Quantizer>)};
-#endif
 }  // namespace detail
 
 }  // namespace transformer_engine::pytorch

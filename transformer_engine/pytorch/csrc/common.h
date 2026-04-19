@@ -317,7 +317,6 @@ class MXFP4Quantizer : public Quantizer {
 };
 #endif //#ifdef USE_ROCM
 
-#ifndef USE_ROCM
 class NVFP4Quantizer : public Quantizer {
  public:
   // fp4 dtype
@@ -371,7 +370,6 @@ class NVFP4Quantizer : public Quantizer {
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                      const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 };
-#endif // #ifndef USE_ROCM
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 
