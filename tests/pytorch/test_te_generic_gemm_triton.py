@@ -150,11 +150,9 @@ def create_mxfp8_tensors(M, K, N, layout):
 def call_gemm(A, B, layout, out_dtype, use_triton=True):
     """Call general_gemm() with appropriate env var setting."""
     os.environ['NVTE_USE_GEMM_TRITON'] = '1' if use_triton else '0'
-    workspace = torch.empty(1024 * 1024, dtype=torch.int8, device='cuda')
     output, _, _, _ = general_gemm(
         A=A,
         B=B,
-        workspace=workspace,
         out_dtype=out_dtype,
         layout=layout,
     )
