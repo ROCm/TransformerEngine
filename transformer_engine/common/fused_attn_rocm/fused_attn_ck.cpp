@@ -1300,12 +1300,143 @@ void fused_attn_ck_bwd_impl(
 }  // namespace fused_attn_rocm
 
 using namespace transformer_engine::fused_attn_rocm;
+
+namespace {
+// File-local helpers shared by the public NVTE wrappers below.
+
+// max_tokens = product(shape) / (h * d * divisor); divisor accounts for QKV (3) or KV (2) packing.
+size_t compute_max_tokens(const Tensor* tensor, size_t h, size_t d, size_t divisor) {
+  return std::accumulate(tensor->data.shape.begin(), tensor->data.shape.end(),
+                         static_cast<size_t>(1), std::multiplies<size_t>()) / h / d / divisor;
+}
+
+// Carve Q/K/V (or dQ/dK/dV) sub-pointers from a packed QKV tensor.
+void extract_qkv_packed(const Tensor* qkv, NVTE_QKV_Layout_Group layout_group,
+                        size_t h, size_t d,
+                        void** ptrQ, void** ptrK, void** ptrV) {
+  size_t stride_to_k = 0;
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
+    stride_to_k = nvte_dtype_size(qkv->data.dtype) * h * d;
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
+    stride_to_k = nvte_dtype_size(qkv->data.dtype) * d;
+  }
+  int8_t* base = static_cast<int8_t*>(qkv->data.dptr);
+  *ptrQ = base;
+  *ptrK = base + stride_to_k;
+  *ptrV = base + 2 * stride_to_k;
+}
+
+// Carve K/V (or dK/dV) sub-pointers from a packed KV tensor.
+void extract_kv_packed(const Tensor* kv, NVTE_QKV_Layout_Group layout_group,
+                       size_t h_kv, size_t d,
+                       void** ptrK, void** ptrV) {
+  size_t stride = 0;
+  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
+    stride = nvte_dtype_size(kv->data.dtype) * h_kv * d;
+  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
+    stride = nvte_dtype_size(kv->data.dtype) * d;
+  }
+  int8_t* base = static_cast<int8_t*>(kv->data.dptr);
+  *ptrK = base;
+  *ptrV = base + stride;
+}
+
+bool has_explicit_bias(NVTE_Bias_Type bt) {
+  return bt != NVTE_Bias_Type::NVTE_NO_BIAS && bt != NVTE_Bias_Type::NVTE_ALIBI;
+}
+
+void extract_bias_fwd(NVTE_Bias_Type bt, const Tensor* input_Bias,
+                      void** devPtrBias, size_t* bias_b, size_t* bias_h) {
+  *devPtrBias = nullptr; *bias_b = 0; *bias_h = 0;
+  if (has_explicit_bias(bt)) {
+    *devPtrBias = input_Bias->data.dptr;
+    *bias_b = input_Bias->data.shape[0];
+    *bias_h = input_Bias->data.shape[1];
+  }
+}
+
+void extract_bias_bwd(NVTE_Bias_Type bt,
+                      const Tensor* input_Bias, Tensor* output_dBias,
+                      void** devPtrBias, void** devPtrdBias,
+                      size_t* bias_b, size_t* bias_h) {
+  *devPtrBias = nullptr; *devPtrdBias = nullptr; *bias_b = 0; *bias_h = 0;
+  if (has_explicit_bias(bt)) {
+    *devPtrBias = input_Bias->data.dptr;
+    *devPtrdBias = output_dBias->data.dptr;
+    *bias_b = output_dBias->data.shape[0];
+    *bias_h = output_dBias->data.shape[1];
+  }
+}
+
+// Set up the Aux_CTX_Tensors slots on the first call (size==0), or read devPtrS back
+// from them on subsequent calls. Mirrors the original behavior across all fwd wrappers.
+void setup_fwd_aux_ctx(NVTETensorPack* aux, NVTE_Bias_Type bt,
+                       size_t b, size_t h, size_t max_seqlen_q, size_t max_seqlen_kv,
+                       size_t max_tokens_q, bool is_ragged, DType qkv_dtype,
+                       size_t bias_b, size_t bias_h,
+                       void* devPtrBias, const Tensor* rng_state,
+                       void** out_devPtrS) {
+  *out_devPtrS = nullptr;
+  bool with_bias = has_explicit_bias(bt);
+  if (aux->size == 0) {
+    aux->size = with_bias ? 3 : 2;
+    Tensor* output_S = convertNVTETensorCheck(aux->tensors[0]);
+    output_S->data.dptr = nullptr;
+    output_S->data.shape = is_ragged ? std::vector<size_t>{max_tokens_q, h, 1}
+                                     : std::vector<size_t>{b, h, max_seqlen_q, 1};
+    output_S->data.dtype = DType::kFloat32;
+    Tensor* output_rng_state = convertNVTETensorCheck(aux->tensors[1]);
+    output_rng_state->data.dptr = nullptr;
+    output_rng_state->data.shape = {2};
+    output_rng_state->data.dtype = DType::kInt64;
+    if (with_bias) {
+      Tensor* output_bias = convertNVTETensorCheck(aux->tensors[2]);
+      output_bias->data.dptr = nullptr;
+      output_bias->data.shape = {bias_b, bias_h, max_seqlen_q, max_seqlen_kv};
+      output_bias->data.dtype = qkv_dtype;
+    }
+  } else if (aux->size == 2 || aux->size == 3) {
+    Tensor* output_S = convertNVTETensorCheck(aux->tensors[0]);
+    *out_devPtrS = output_S->data.dptr;
+    Tensor* output_rng_state = convertNVTETensorCheck(aux->tensors[1]);
+    output_rng_state->data.dptr = rng_state->data.dptr;
+    if (aux->size == 3) {
+      Tensor* output_bias = convertNVTETensorCheck(aux->tensors[2]);
+      output_bias->data.dptr = devPtrBias;
+    }
+  } else {
+    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
+  }
+}
+
+// Update workspace shape per the impl's reported size. Original control flow:
+// if size>0 && dptr==null: set shape={size}; if size==0: set shape={1}; else fall through.
+void finalize_workspace(Tensor* workspace, size_t workspace_size) {
+  if (workspace_size > 0) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {workspace_size};
+      workspace->data.dtype = DType::kByte;
+    }
+  } else {  // size_t can't be negative; size==0 is the only remaining case
+    workspace->data.shape = {1};
+    workspace->data.dtype = DType::kByte;
+  }
+}
+
+// Pull out (philox_seed, philox_offset) ptrs that live consecutively in rng_state.
+void rng_state_to_seed_offset(const Tensor* rng_state, void** seed, void** offset) {
+  *seed = rng_state->data.dptr;
+  *offset = reinterpret_cast<void*>(reinterpret_cast<uint64_t*>(rng_state->data.dptr) + 1);
+}
+
+}  // anonymous namespace
+
 void fused_attn_ck_fwd_qkvpacked(
   size_t b, size_t h, size_t max_seqlen, size_t d,
-  bool is_training, float attn_scale, float dropout, 
+  bool is_training, float attn_scale, float dropout,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
-  const Tensor* input_QKV, const Tensor* input_Bias, 
+  const Tensor* input_QKV, const Tensor* input_Bias,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
   const Tensor* input_cu_seqlens,
   const Tensor* input_cu_seqlens_padded,
@@ -1315,125 +1446,41 @@ void fused_attn_ck_fwd_qkvpacked(
 
 #ifdef USE_FUSED_ATTN_CK
   const DType QKV_type = input_QKV->data.dtype;
-  void *devPtrQKV = input_QKV->data.dptr;
-  // determine the stride based on qkv layout
-  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  size_t stride_to_k = 0;
-  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride_to_k = nvte_dtype_size(QKV_type) * h * d;
-  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride_to_k = nvte_dtype_size(QKV_type) * d;
-  }
-  void *devPtrQ = static_cast<void *>(devPtrQKV);
-  void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride_to_k);
-  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2*stride_to_k);
+  void *devPtrQ, *devPtrK, *devPtrV;
+  extract_qkv_packed(input_QKV, nvte_get_qkv_layout_group(qkv_layout), h, d,
+                     &devPtrQ, &devPtrK, &devPtrV);
 
   void *devPtrBias = nullptr;
-  size_t bias_b = 0;
-  size_t bias_h = 0;
-  if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
-    devPtrBias = input_Bias->data.dptr;
-    bias_b = input_Bias->data.shape[0];
-    bias_h = input_Bias->data.shape[1];
-  }
-  void *devPtrO = output_O->data.dptr;
+  size_t bias_b = 0, bias_h = 0;
+  extract_bias_fwd(bias_type, input_Bias, &devPtrBias, &bias_b, &bias_h);
+
+  size_t max_tokens = compute_max_tokens(input_QKV, h, d, 3);
+  bool is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
+
   void *devPtrS = nullptr;
+  setup_fwd_aux_ctx(Aux_CTX_Tensors, bias_type, b, h, max_seqlen, max_seqlen,
+                    max_tokens, is_ragged, QKV_type, bias_b, bias_h,
+                    devPtrBias, rng_state, &devPtrS);
+
   void *devPtrCuSeqlens = input_cu_seqlens->data.dptr;
   void *devPtrSeqOffsets = input_cu_seqlens_padded->data.dptr;
-
-  size_t max_tokens = std::accumulate((input_QKV->data).shape.begin(), (input_QKV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h/d/3;
-  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
-
-  if (Aux_CTX_Tensors->size == 0) {
-    if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
-      Aux_CTX_Tensors->size = 3;
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-      output_S->data.dptr = nullptr;
-      if(is_ragged){
-        output_S->data.shape = {max_tokens, h, 1};
-      }else{
-        output_S->data.shape = {b, h, max_seqlen, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
-      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-      output_bias->data.dptr = nullptr;
-      output_bias->data.shape = {bias_b, bias_h, max_seqlen, max_seqlen};
-      output_bias->data.dtype = QKV_type;
-    } else {
-      Aux_CTX_Tensors->size = 2;
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-      output_S->data.dptr = nullptr;
-      if(is_ragged){
-        output_S->data.shape = {max_tokens, h, 1};
-      }else{
-        output_S->data.shape = {b, h, max_seqlen, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
-    }
-  } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    output_rng_state->data.dptr = rng_state->data.dptr;
-  } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    output_rng_state->data.dptr = rng_state->data.dptr;
-    Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-    output_bias->data.dptr = devPtrBias;
-  } else {
-    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
-  }
+  void *philox_seed, *philox_offset;
+  rng_state_to_seed_offset(rng_state, &philox_seed, &philox_offset);
 
   size_t workspace_size = 0;
-
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
   fused_attn_ck_fwd_impl(
     b, h, h, max_seqlen, max_seqlen, d, d, bias_b, bias_h,
     max_tokens, max_tokens,
-    is_training, attn_scale, dropout, 
-    qkv_layout,
-    bias_type, attn_mask_type,
+    is_training, attn_scale, dropout,
+    qkv_layout, bias_type, attn_mask_type,
     window_size_left, window_size_right,
-    devPtrQ, 
-    devPtrK, 
-    devPtrV, 
-    devPtrBias,
-    devPtrS, 
-    devPtrO,
-    rng_state->data.dptr, 
-    reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1),
+    devPtrQ, devPtrK, devPtrV, devPtrBias,
+    devPtrS, output_O->data.dptr,
+    philox_seed, philox_offset,
     devPtrCuSeqlens, devPtrCuSeqlens,
     devPtrSeqOffsets, devPtrSeqOffsets,
-    QKV_type,
-    workspace->data.dptr,
-    &workspace_size,
-    stream);
-
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
+    QKV_type, workspace->data.dptr, &workspace_size, stream);
+  finalize_workspace(workspace, workspace_size);
 #else
   NVTE_ERROR("CK fused attn backend not compiled.");
 #endif // USE_FUSED_ATTN_CK
@@ -1441,11 +1488,11 @@ void fused_attn_ck_fwd_qkvpacked(
 
 void fused_attn_ck_bwd_qkvpacked(
   size_t b, size_t h, size_t max_seqlen, size_t d,
-  float attn_scale, float dropout, 
+  float attn_scale, float dropout,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
   bool deterministic,
-  const Tensor* input_QKV, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias, 
+  const Tensor* input_QKV, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias,
   const Tensor* output_S,
   Tensor* output_dQKV,
   Tensor* output_dBias,
@@ -1457,91 +1504,39 @@ void fused_attn_ck_bwd_qkvpacked(
 
 #ifdef USE_FUSED_ATTN_CK
   const DType QKV_type = input_QKV->data.dtype;
-  //input tensor
-  void *devPtrQKV = input_QKV->data.dptr;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  size_t stride_to_k = 0;
-  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride_to_k = nvte_dtype_size(QKV_type) * h * d;
-  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride_to_k = nvte_dtype_size(QKV_type) * d;
-  }
-  void *devPtrQ = static_cast<void *>(devPtrQKV);
-  void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride_to_k);
-  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2*stride_to_k);
-  void *devPtrSoftmaxStats = output_S->data.dptr;
+  void *devPtrQ, *devPtrK, *devPtrV;
+  extract_qkv_packed(input_QKV, layout_group, h, d, &devPtrQ, &devPtrK, &devPtrV);
+  void *devPtrdQ, *devPtrdK, *devPtrdV;
+  extract_qkv_packed(output_dQKV, layout_group, h, d, &devPtrdQ, &devPtrdK, &devPtrdV);
 
-  void *devPtrO = input_O->data.dptr;
-  void *devPtrdO = input_dO->data.dptr;
-  void *devPtrBias = nullptr;
-  void *devPtrdBias = nullptr;
-  size_t bias_b = 0;
-  size_t bias_h = 0;
-  if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
-    devPtrBias = input_Bias->data.dptr;
-    devPtrdBias = output_dBias->data.dptr;
-    bias_b = output_dBias->data.shape[0];
-    bias_h = output_dBias->data.shape[1];
-  }
+  void *devPtrBias = nullptr, *devPtrdBias = nullptr;
+  size_t bias_b = 0, bias_h = 0;
+  extract_bias_bwd(bias_type, input_Bias, output_dBias,
+                   &devPtrBias, &devPtrdBias, &bias_b, &bias_h);
 
-  // output tensor
-  void *devPtrdQKV = output_dQKV->data.dptr;
-  void *devPtrdQ = static_cast<void *>(devPtrdQKV);
-  void *devPtrdK = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + stride_to_k);
-  void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + 2*stride_to_k);
-  
-  void *devPtrCuSeqlens = input_cu_seqlens->data.dptr; 
+  void *devPtrCuSeqlens = input_cu_seqlens->data.dptr;
   void *devPtrSeqOffsets = input_cu_seqlens_padded->data.dptr;
-  
+  void *philox_seed, *philox_offset;
+  rng_state_to_seed_offset(rng_state, &philox_seed, &philox_offset);
+  size_t max_tokens = compute_max_tokens(input_QKV, h, d, 3);
+
   size_t workspace_size = 0;
-
-  // extract the qkv and o storage bytes to clear dq buffer
-  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  // extract the max_tokens for padding/unpadding and softmax_lse buffer
-  // b from cu_seqlen and max_seqlen are not the actual storage batch and seqlen for pad_between_seqs case
-  size_t max_tokens = std::accumulate((input_QKV->data).shape.begin(), (input_QKV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h/d/3;
-
-  // in qkvpacked layouts, o is of the same max_tokens as q
-  // dqkv has the same shape as qkv
-  // do has the same shape as o
-
   fused_attn_ck_bwd_impl(
     b, h, h, max_seqlen, max_seqlen, d, d, bias_b, bias_h,
     max_tokens, max_tokens,
-    attn_scale, dropout, 
-    qkv_layout,
-    bias_type, attn_mask_type,
-    window_size_left, window_size_right,
-    deterministic,
-    devPtrQ, devPtrK, devPtrV, 
-    devPtrO, devPtrSoftmaxStats, devPtrBias,
-    devPtrdQ, devPtrdK, devPtrdV, 
-    devPtrdO, devPtrdBias,
-    rng_state->data.dptr, 
-    reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1),
+    attn_scale, dropout,
+    qkv_layout, bias_type, attn_mask_type,
+    window_size_left, window_size_right, deterministic,
+    devPtrQ, devPtrK, devPtrV,
+    input_O->data.dptr, output_S->data.dptr, devPtrBias,
+    devPtrdQ, devPtrdK, devPtrdV,
+    input_dO->data.dptr, devPtrdBias,
+    philox_seed, philox_offset,
     devPtrCuSeqlens, devPtrCuSeqlens,
     devPtrSeqOffsets, devPtrSeqOffsets,
-    QKV_type,
-    workspace->data.dptr,
-    &workspace_size,
-    stream);
-
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
+    QKV_type, workspace->data.dptr, &workspace_size, stream);
+  finalize_workspace(workspace, workspace_size);
 #else
   NVTE_ERROR("CK fused attn backend not compiled.");
 #endif // USE_FUSED_ATTN_CK
@@ -1549,10 +1544,10 @@ void fused_attn_ck_bwd_qkvpacked(
 
 void fused_attn_ck_fwd_kvpacked(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
-  bool is_training, float attn_scale, float dropout, 
+  bool is_training, float attn_scale, float dropout,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
-  const Tensor* input_Q, const Tensor* input_KV, const Tensor* input_Bias, 
+  const Tensor* input_Q, const Tensor* input_KV, const Tensor* input_Bias,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
@@ -1564,126 +1559,44 @@ void fused_attn_ck_fwd_kvpacked(
 
 #ifdef USE_FUSED_ATTN_CK
   const DType QKV_type = input_Q->data.dtype;
-  //input tensor
   void *devPtrQ = input_Q->data.dptr;
-  void *devPtrKV = input_KV->data.dptr;
-  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  size_t stride = 0;
-  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = nvte_dtype_size(QKV_type)*h_kv*d;
-  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = nvte_dtype_size(QKV_type) * d;
-  }
-  void *devPtrK = devPtrKV;
-  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
+  void *devPtrK, *devPtrV;
+  extract_kv_packed(input_KV, nvte_get_qkv_layout_group(qkv_layout), h_kv, d, &devPtrK, &devPtrV);
 
   void *devPtrBias = nullptr;
-  size_t bias_b = 0;
-  size_t bias_h = 0;
-  if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
-    devPtrBias = input_Bias->data.dptr;
-    bias_b = input_Bias->data.shape[0];
-    bias_h = input_Bias->data.shape[1];
-  }
-  void *devPtrO = output_O->data.dptr;
+  size_t bias_b = 0, bias_h = 0;
+  extract_bias_fwd(bias_type, input_Bias, &devPtrBias, &bias_b, &bias_h);
+
+  size_t max_tokens_q = compute_max_tokens(input_Q, h_q, d, 1);
+  size_t max_tokens_kv = compute_max_tokens(input_KV, h_kv, d, 2);
+  bool is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
+
   void *devPtrS = nullptr;
+  setup_fwd_aux_ctx(Aux_CTX_Tensors, bias_type, b, h_q, max_seqlen_q, max_seqlen_kv,
+                    max_tokens_q, is_ragged, QKV_type, bias_b, bias_h,
+                    devPtrBias, rng_state, &devPtrS);
+
   void *devPtrCuSeqlensQ = input_cu_seqlens_q->data.dptr;
   void *devPtrCuSeqlensKV = input_cu_seqlens_kv->data.dptr;
   void *devPtrSeqOffsetsQ = input_cu_seqlens_q_padded->data.dptr;
   void *devPtrSeqOffsetsKV = input_cu_seqlens_kv_padded->data.dptr;
+  void *philox_seed, *philox_offset;
+  rng_state_to_seed_offset(rng_state, &philox_seed, &philox_offset);
 
-  size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d;
-  size_t max_tokens_kv = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d/2;
-
-  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
-
-  if (Aux_CTX_Tensors->size == 0) {
-    if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
-      Aux_CTX_Tensors->size = 3;
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-      output_S->data.dptr = nullptr;
-      if(is_ragged){
-        output_S->data.shape = {max_tokens_q, h_q, 1};
-      }else{
-        output_S->data.shape = {b, h_q, max_seqlen_q, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
-      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-      output_bias->data.dptr = nullptr;
-      output_bias->data.shape = {bias_b, bias_h, max_seqlen_q, max_seqlen_kv};
-      output_bias->data.dtype = QKV_type;
-    } else {
-      Aux_CTX_Tensors->size = 2;
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-      output_S->data.dptr = nullptr;
-      if(is_ragged){
-        output_S->data.shape = {max_tokens_q, h_q, 1};
-      }else{
-        output_S->data.shape = {b, h_q, max_seqlen_q, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
-    }
-  } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    output_rng_state->data.dptr = rng_state->data.dptr;
-  } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    output_rng_state->data.dptr = rng_state->data.dptr;
-    Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-    output_bias->data.dptr = devPtrBias;
-  } else {
-    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
-  }
-  
   size_t workspace_size = 0;
-
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, bias_b, bias_h,
-    max_tokens_q, max_tokens_kv, 
-    is_training, attn_scale, dropout, 
-    qkv_layout,
-    bias_type, attn_mask_type,
+    max_tokens_q, max_tokens_kv,
+    is_training, attn_scale, dropout,
+    qkv_layout, bias_type, attn_mask_type,
     window_size_left, window_size_right,
     devPtrQ, devPtrK, devPtrV, devPtrBias,
-    devPtrS, devPtrO,
-    rng_state->data.dptr, 
-    reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1),
+    devPtrS, output_O->data.dptr,
+    philox_seed, philox_offset,
     devPtrCuSeqlensQ, devPtrCuSeqlensKV,
     devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
-    QKV_type,
-    workspace->data.dptr,
-    &workspace_size,
-    stream);
-
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
+    QKV_type, workspace->data.dptr, &workspace_size, stream);
+  finalize_workspace(workspace, workspace_size);
 #else
   NVTE_ERROR("CK fused attn backend not compiled.");
 #endif // USE_FUSED_ATTN_CK
@@ -1691,11 +1604,11 @@ void fused_attn_ck_fwd_kvpacked(
 
 void fused_attn_ck_bwd_kvpacked(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
-  float attn_scale, float dropout, 
+  float attn_scale, float dropout,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
   bool deterministic,
-  const Tensor* input_Q, const Tensor* input_KV, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias, 
+  const Tensor* input_Q, const Tensor* input_KV, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias,
   const Tensor* output_S,
   Tensor* output_dQ, Tensor* output_dKV,
   Tensor* output_dBias,
@@ -1706,92 +1619,47 @@ void fused_attn_ck_bwd_kvpacked(
   const Tensor* rng_state,
   Tensor* workspace,
   cudaStream_t stream){
+
 #ifdef USE_FUSED_ATTN_CK
   const DType QKV_type = input_Q->data.dtype;
-  //input tensor
-  void *devPtrQ = input_Q->data.dptr;
-  void *devPtrKV = input_KV->data.dptr;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  size_t stride = 0;
-  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = nvte_dtype_size(QKV_type) * h_kv * d;
-  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = nvte_dtype_size(QKV_type) * d;
-  }
-  void *devPtrK = devPtrKV;
-  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
-
-  void *devPtrO = input_O->data.dptr;
-  void *devPtrdO = input_dO->data.dptr;
-  void *devPtrBias = nullptr;
-  void *devPtrdBias = nullptr;
-  size_t bias_b = 0;
-  size_t bias_h = 0;
-  if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
-    devPtrBias = input_Bias->data.dptr;
-    devPtrdBias = output_dBias->data.dptr;
-    bias_b = output_dBias->data.shape[0];
-    bias_h = output_dBias->data.shape[1];
-  }
-  // output tensor
+  void *devPtrQ = input_Q->data.dptr;
+  void *devPtrK, *devPtrV;
+  extract_kv_packed(input_KV, layout_group, h_kv, d, &devPtrK, &devPtrV);
   void *devPtrdQ = output_dQ->data.dptr;
-  void *devPtrdKV = output_dKV->data.dptr;
-  void *devPtrdK = devPtrdKV;
-  void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdKV) + stride);
+  void *devPtrdK, *devPtrdV;
+  extract_kv_packed(output_dKV, layout_group, h_kv, d, &devPtrdK, &devPtrdV);
 
-  void *devPtrSoftmaxStats = output_S->data.dptr;
+  void *devPtrBias = nullptr, *devPtrdBias = nullptr;
+  size_t bias_b = 0, bias_h = 0;
+  extract_bias_bwd(bias_type, input_Bias, output_dBias,
+                   &devPtrBias, &devPtrdBias, &bias_b, &bias_h);
 
   void *devPtrCuSeqlensQ = input_cu_seqlens_q->data.dptr;
   void *devPtrCuSeqlensKV = input_cu_seqlens_kv->data.dptr;
   void *devPtrSeqOffsetsQ = input_cu_seqlens_q_padded->data.dptr;
   void *devPtrSeqOffsetsKV = input_cu_seqlens_kv_padded->data.dptr;
+  void *philox_seed, *philox_offset;
+  rng_state_to_seed_offset(rng_state, &philox_seed, &philox_offset);
+  size_t max_tokens_q = compute_max_tokens(input_Q, h_q, d, 1);
+  size_t max_tokens_kv = compute_max_tokens(input_KV, h_kv, d, 2);
 
   size_t workspace_size = 0;
-
-  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  
-  // extract the max_tokens for padding/unpadding and softmax_lse buffer
-  // b from cu_seqlen and max_seqlen are not the actual storage batch and seqlen for pad_between_seqs case
-  size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d;
-  size_t max_tokens_kv = std::accumulate((input_KV->data).shape.begin(), (input_KV->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d/2;
-  
   fused_attn_ck_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, bias_b, bias_h,
-    max_tokens_q, max_tokens_kv, 
-    attn_scale, dropout, 
-    qkv_layout,
-    bias_type, attn_mask_type,
-    window_size_left, window_size_right,
-    deterministic,
-    devPtrQ, devPtrK, devPtrV, 
-    devPtrO, devPtrSoftmaxStats, devPtrBias,
-    devPtrdQ, devPtrdK, devPtrdV, 
-    devPtrdO, devPtrdBias,
-    rng_state->data.dptr, 
-    reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1),
-    devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
+    max_tokens_q, max_tokens_kv,
+    attn_scale, dropout,
+    qkv_layout, bias_type, attn_mask_type,
+    window_size_left, window_size_right, deterministic,
+    devPtrQ, devPtrK, devPtrV,
+    input_O->data.dptr, output_S->data.dptr, devPtrBias,
+    devPtrdQ, devPtrdK, devPtrdV,
+    input_dO->data.dptr, devPtrdBias,
+    philox_seed, philox_offset,
+    devPtrCuSeqlensQ, devPtrCuSeqlensKV,
     devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
-    QKV_type,
-    workspace->data.dptr,
-    &workspace_size,
-    stream);
-
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
+    QKV_type, workspace->data.dptr, &workspace_size, stream);
+  finalize_workspace(workspace, workspace_size);
 #else
   NVTE_ERROR("CK fused attn backend not compiled.");
 #endif // USE_FUSED_ATTN_CK
@@ -1799,10 +1667,10 @@ void fused_attn_ck_bwd_kvpacked(
 
 void fused_attn_ck_fwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d_qk, size_t d_v,
-  bool is_training, float attn_scale, float dropout, 
+  bool is_training, float attn_scale, float dropout,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
-  const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_Bias, 
+  const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_Bias,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
@@ -1814,116 +1682,45 @@ void fused_attn_ck_fwd(
 
 #ifdef USE_FUSED_ATTN_CK
   const DType QKV_type = input_Q->data.dtype;
-
   void *devPtrQ = input_Q->data.dptr;
   void *devPtrK = input_K->data.dptr;
   void *devPtrV = input_V->data.dptr;
-  void *devPtrO = output_O->data.dptr;
-  void *devPtrS = nullptr;
+
   void *devPtrBias = nullptr;
-  size_t bias_b = 0;
-  size_t bias_h = 0;
-  if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
-    devPtrBias = input_Bias->data.dptr;
-    bias_b = input_Bias->data.shape[0];
-    bias_h = input_Bias->data.shape[1];
-  }
+  size_t bias_b = 0, bias_h = 0;
+  extract_bias_fwd(bias_type, input_Bias, &devPtrBias, &bias_b, &bias_h);
+
+  // Note: K's head dim is d_qk, not d_v
+  size_t max_tokens_q = compute_max_tokens(input_Q, h_q, d_qk, 1);
+  size_t max_tokens_kv = compute_max_tokens(input_K, h_kv, d_qk, 1);
+  bool is_ragged = nvte_get_qkv_format(qkv_layout) == NVTE_QKV_Format::NVTE_THD;
+
+  void *devPtrS = nullptr;
+  setup_fwd_aux_ctx(Aux_CTX_Tensors, bias_type, b, h_q, max_seqlen_q, max_seqlen_kv,
+                    max_tokens_q, is_ragged, QKV_type, bias_b, bias_h,
+                    devPtrBias, rng_state, &devPtrS);
 
   void *devPtrCuSeqlensQ = input_cu_seqlens_q->data.dptr;
   void *devPtrCuSeqlensKV = input_cu_seqlens_kv->data.dptr;
   void *devPtrSeqOffsetsQ = input_cu_seqlens_q_padded->data.dptr;
   void *devPtrSeqOffsetsKV = input_cu_seqlens_kv_padded->data.dptr;
+  void *philox_seed, *philox_offset;
+  rng_state_to_seed_offset(rng_state, &philox_seed, &philox_offset);
 
-  size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d_qk;
-  size_t max_tokens_kv = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d_qk;
-
-  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
-  if (Aux_CTX_Tensors->size == 0) {
-    if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
-      Aux_CTX_Tensors->size = 3;
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-      output_S->data.dptr = nullptr;
-      if(is_ragged){
-        output_S->data.shape = {max_tokens_q, h_q, 1};
-      }else{
-        output_S->data.shape = {b, h_q, max_seqlen_q, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
-      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-      output_bias->data.dptr = nullptr;
-      output_bias->data.shape = {bias_b, bias_h, max_seqlen_q, max_seqlen_kv};
-      output_bias->data.dtype = QKV_type;
-    } else {
-      Aux_CTX_Tensors->size = 2;
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-      output_S->data.dptr = nullptr;
-      if(is_ragged){
-        output_S->data.shape = {max_tokens_q, h_q, 1};
-      }else{
-        output_S->data.shape = {b, h_q, max_seqlen_q, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
-    }
-  } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    output_rng_state->data.dptr = rng_state->data.dptr;
-  } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    output_rng_state->data.dptr = rng_state->data.dptr;
-    Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-    output_bias->data.dptr = devPtrBias;
-  } else {
-    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
-  }
   size_t workspace_size = 0;
-
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, bias_b, bias_h,
     max_tokens_q, max_tokens_kv,
-    is_training, attn_scale, dropout, 
-    qkv_layout,
-    bias_type, attn_mask_type,
+    is_training, attn_scale, dropout,
+    qkv_layout, bias_type, attn_mask_type,
     window_size_left, window_size_right,
-    devPtrQ, devPtrK, devPtrV, devPtrBias, 
-    devPtrS, devPtrO,
-    rng_state->data.dptr, 
-    reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1),
+    devPtrQ, devPtrK, devPtrV, devPtrBias,
+    devPtrS, output_O->data.dptr,
+    philox_seed, philox_offset,
     devPtrCuSeqlensQ, devPtrCuSeqlensKV,
     devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
-    QKV_type,
-    workspace->data.dptr,
-    &workspace_size,
-    stream);
-
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
+    QKV_type, workspace->data.dptr, &workspace_size, stream);
+  finalize_workspace(workspace, workspace_size);
 #else
   NVTE_ERROR("CK fused attn backend not compiled.");
 #endif // USE_FUSED_ATTN_CK
@@ -1931,11 +1728,11 @@ void fused_attn_ck_fwd(
 
 void fused_attn_ck_bwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d_qk, size_t d_v,
-  float attn_scale, float dropout, 
+  float attn_scale, float dropout,
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
   int64_t window_size_left, int64_t window_size_right,
   bool deterministic,
-  const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias, 
+  const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias,
   const Tensor* output_S,
   Tensor* output_dQ, Tensor* output_dK, Tensor* output_dV,
   Tensor* output_dBias,
@@ -1946,81 +1743,47 @@ void fused_attn_ck_bwd(
   const Tensor* rng_state,
   Tensor* workspace,
   cudaStream_t stream){
+
 #ifdef USE_FUSED_ATTN_CK
   const DType QKV_type = input_Q->data.dtype;
-
   void *devPtrQ = input_Q->data.dptr;
   void *devPtrK = input_K->data.dptr;
   void *devPtrV = input_V->data.dptr;
-  void *devPtrO = input_O->data.dptr;
-  void *devPtrdO = input_dO->data.dptr;
-  void *devPtrBias = nullptr;
-  void *devPtrdBias = nullptr;
-  size_t bias_b = 0;
-  size_t bias_h = 0;
-  if ((bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) && (bias_type != NVTE_Bias_Type::NVTE_ALIBI)) {
-    devPtrBias = input_Bias->data.dptr;
-    devPtrdBias = output_dBias->data.dptr;
-    bias_b = output_dBias->data.shape[0];
-    bias_h = output_dBias->data.shape[1];
-  }
-
   void *devPtrdQ = output_dQ->data.dptr;
   void *devPtrdK = output_dK->data.dptr;
   void *devPtrdV = output_dV->data.dptr;
-  void *devPtrSoftmaxStats = output_S->data.dptr;
+
+  void *devPtrBias = nullptr, *devPtrdBias = nullptr;
+  size_t bias_b = 0, bias_h = 0;
+  extract_bias_bwd(bias_type, input_Bias, output_dBias,
+                   &devPtrBias, &devPtrdBias, &bias_b, &bias_h);
 
   void *devPtrCuSeqlensQ = input_cu_seqlens_q->data.dptr;
   void *devPtrCuSeqlensKV = input_cu_seqlens_kv->data.dptr;
   void *devPtrSeqOffsetsQ = input_cu_seqlens_q_padded->data.dptr;
   void *devPtrSeqOffsetsKV = input_cu_seqlens_kv_padded->data.dptr;
+  void *philox_seed, *philox_offset;
+  rng_state_to_seed_offset(rng_state, &philox_seed, &philox_offset);
+  // Note: K's head dim is d_qk, not d_v
+  size_t max_tokens_q = compute_max_tokens(input_Q, h_q, d_qk, 1);
+  size_t max_tokens_kv = compute_max_tokens(input_K, h_kv, d_qk, 1);
 
   size_t workspace_size = 0;
-
-  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  
-  // extract the max_tokens for padding/unpadding and softmax_lse buffer
-  // b from cu_seqlen and max_seqlen are not the actual storage batch and seqlen for pad_between_seqs case
-  size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d_qk;
-  size_t max_tokens_kv = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d_qk;
-
   fused_attn_ck_bwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, bias_b, bias_h,
     max_tokens_q, max_tokens_kv,
-    attn_scale, dropout, 
-    qkv_layout,
-    bias_type, attn_mask_type,
-    window_size_left, window_size_right,
-    deterministic,
-    devPtrQ, devPtrK, devPtrV, 
-    devPtrO, devPtrSoftmaxStats, devPtrBias,
-    devPtrdQ, devPtrdK, devPtrdV, 
-    devPtrdO, devPtrdBias,
-    rng_state->data.dptr, 
-    reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1),
-    devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
+    attn_scale, dropout,
+    qkv_layout, bias_type, attn_mask_type,
+    window_size_left, window_size_right, deterministic,
+    devPtrQ, devPtrK, devPtrV,
+    input_O->data.dptr, output_S->data.dptr, devPtrBias,
+    devPtrdQ, devPtrdK, devPtrdV,
+    input_dO->data.dptr, devPtrdBias,
+    philox_seed, philox_offset,
+    devPtrCuSeqlensQ, devPtrCuSeqlensKV,
     devPtrSeqOffsetsQ, devPtrSeqOffsetsKV,
-    QKV_type,
-    workspace->data.dptr,
-    &workspace_size,
-    stream);
-
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
+    QKV_type, workspace->data.dptr, &workspace_size, stream);
+  finalize_workspace(workspace, workspace_size);
 #else
   NVTE_ERROR("CK fused attn backend not compiled.");
 #endif // USE_FUSED_ATTN_CK
