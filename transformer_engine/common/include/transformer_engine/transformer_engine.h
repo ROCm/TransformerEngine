@@ -107,7 +107,7 @@ enum NVTEScalingMode {
 #ifdef USE_ROCM
   /*! Single scale per block of 32 elements consecutive in either
       rowwise or columnwise direction */
-  NVTE_MXFP4_1D_SCALING = 5,
+  NVTE_MXFP4_1D_SCALING = 50,
 #endif
   NVTE_INVALID_SCALING = 100
 };
