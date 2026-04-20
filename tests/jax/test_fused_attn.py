@@ -97,6 +97,12 @@ def general_dot_product_attention(
         logits = logits.reshape((b, h_kv * num_groups, s_q, s_kv))
         # apply post-scale bias
         logits = logits + bias
+        # [ROCm] Detect query rows where ALL bias values are -inf (fully masked out).
+        # These rows would produce NaN in softmax; zero them so softmax yields 0 instead.
+        # Use equality check against -inf so real-valued bias (e.g. 1HSS) is unaffected.
+        if is_hip_extension():
+            bias_all_neg_mask = jnp.all(bias == -jnp.inf, axis=-1, keepdims=True)
+            logits = jnp.where(bias_all_neg_mask, 0, logits)
         # reshape logits back to original
         logits = logits.reshape((b, h_kv, num_groups, s_q, s_kv))
 
@@ -124,6 +130,14 @@ def general_dot_product_attention(
             softmax_out = softmax_with_extra[..., :-1].astype(dtype)
         case _:
             raise NotImplementedError(f"Unknown {softmax_type=}")
+
+    # [ROCm] Zero out softmax for fully-masked rows to prevent NaN propagation in backward
+    # Only triggers for -inf mask bias, not real-valued bias (e.g. 1HSS)
+    if bias is not None and is_hip_extension():
+        bias_all_neg_mask = jnp.all(bias == -jnp.inf, axis=-1, keepdims=True)
+        # Expand to match softmax_out 5D shape (b, h_kv, num_groups, s_q, s_kv)
+        bias_all_neg_mask = jnp.expand_dims(bias_all_neg_mask, axis=2)
+        softmax_out = jnp.where(bias_all_neg_mask, 0, softmax_out)
 
     if not deterministic and dropout_rate > 0.0:
         keep_prob = 1.0 - dropout_rate
@@ -1026,6 +1040,13 @@ class FusedAttnRunner:
         if self.dropout_prob > 0.0:
             return
 
+        # [ROCm] Verify no NaN or Inf in forward outputs
+        if is_hip_extension():
+            assert not jnp.any(jnp.isnan(primitive_out)), "Fused attention output contains NaN"
+            assert not jnp.any(jnp.isinf(primitive_out)), "Fused attention output contains Inf"
+            assert not jnp.any(jnp.isnan(reference_out)), "Reference attention output contains NaN"
+            assert not jnp.any(jnp.isinf(reference_out)), "Reference attention output contains Inf"
+
         print_debug_tensor_stats(f"primitive_out", primitive_out)
         print_debug_tensor_stats(f"reference_grad_valid", reference_out)
         print_debug_tensor_stats(f"diff_grad", jnp.abs(primitive_out - reference_out))
@@ -1052,6 +1073,18 @@ class FusedAttnRunner:
         primitive_dq = self.cp_inverse_reorder_fn(primitive_dq)
         primitive_dk = self.cp_inverse_reorder_fn(primitive_dk)
         primitive_dv = self.cp_inverse_reorder_fn(primitive_dv)
+
+        # [ROCm] Verify no NaN or Inf in gradients
+        if is_hip_extension():
+            for name, p_grad, r_grad in [
+                ("dq", primitive_dq, reference_dq),
+                ("dk", primitive_dk, reference_dk),
+                ("dv", primitive_dv, reference_dv),
+            ]:
+                assert not jnp.any(jnp.isnan(p_grad)), f"Fused attention {name} contains NaN"
+                assert not jnp.any(jnp.isinf(p_grad)), f"Fused attention {name} contains Inf"
+                assert not jnp.any(jnp.isnan(r_grad)), f"Reference attention {name} contains NaN"
+                assert not jnp.any(jnp.isinf(r_grad)), f"Reference attention {name} contains Inf"
 
         check_dqkv(primitive_dq, reference_dq, self.pad_q, 0)
         check_dqkv(primitive_dk, reference_dk, self.pad_kv, 1)
@@ -1473,6 +1506,74 @@ class TestFusedAttn:
             seq_desc_format,
         )
         runner.test_backward()
+
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="Bias all-neg-inf NaN fix is ROCm-specific (SWDEV-561757)"
+)
+@pytest.mark.parametrize(
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout",
+    [
+        pytest.param(
+            2, 1024, 1024, 12, 12, 64, 64, jnp.bfloat16, QKVLayout.BSHD_BSHD_BSHD,
+            id="2-1024-1024-12-12-64-64-BF16-SELF-SEPARATE",
+        ),
+        pytest.param(
+            2, 1024, 512, 12, 12, 64, 64, jnp.bfloat16, QKVLayout.BSHD_BSHD_BSHD,
+            id="2-1024-512-12-12-64-64-BF16-CROSS-SEPARATE",
+        ),
+    ],
+)
+def test_backward_bias_all_neg_inf(b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout):
+    """
+    Test backward with B1SS bias containing true -inf values.
+    Regression test for SWDEV-561757: when bias rows are ALL -inf (fully masked-out query
+    positions), softmax produces NaN which propagates into dq/dk/dv. The CK kernel fix and
+    the reference fix in general_dot_product_attention handle this by zeroing out fully-masked
+    rows before and after softmax.
+
+    The bias is a binary mask with only two values: 0 and -inf. Some rows are entirely -inf
+    (fully masked-out), while other rows have a mix of 0 and -inf (partially masked).
+    """
+    runner = FusedAttnRunner(
+        batch_size=b,
+        max_seqlen_q=s_q,
+        max_seqlen_kv=s_kv,
+        num_heads_q=h_q,
+        num_heads_kv=h_kv,
+        head_dim_qk=d_qk,
+        head_dim_v=d_v,
+        attn_bias_type=AttnBiasType.POST_SCALE_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_prob=0.0,
+        use_old_rng=True,
+        dtype=dtype,
+        is_training=True,
+        qkv_layout=qkv_layout,
+        bias_shape=BiasShape._B1SS,
+        window_size=None,
+        seq_desc_format=SeqDescFormat.Mask,
+    )
+    runner._setup_inputs()
+
+    # Build a B1SS binary bias with only two values: 0 and -inf.
+    # Use an explicit block-diagonal pattern with guaranteed gaps so that:
+    #   - Rows inside a block have a mix of 0 (within-block columns) and -inf (outside)
+    #   - Rows in the gaps between blocks are entirely -inf (fully masked-out)
+    bias_shape = (b, 1, s_q, s_kv)
+    bias = jnp.full(bias_shape, -jnp.inf, dtype=dtype)
+    block_size = min(s_q, s_kv) // 8
+    gap_size = block_size // 2
+    pos = 0
+    while pos + block_size <= min(s_q, s_kv):
+        bias = bias.at[:, :, pos : pos + block_size, pos : pos + block_size].set(0.0)
+        pos += block_size + gap_size  # leave a gap of all-neg-inf rows
+    runner.bias = bias
+
+    # Prevent test_backward from re-running _setup_inputs which would regenerate bias
+    runner._setup_inputs = lambda: None
+    runner.test_backward()
+
 
 # Single test with new-style RNG
 @pytest.mark.skipif(
