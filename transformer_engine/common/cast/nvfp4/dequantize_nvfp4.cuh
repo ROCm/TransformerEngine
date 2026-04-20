@@ -61,7 +61,6 @@ __global__ void __launch_bounds__(512)
   fp8e4m3 scale = scales[my_scale_index];
   // NVFP4 may reach this path with scale present but no separate amax buffer.
   // Use 1.0f as the neutral fallback when tensor_amax is not provided on HIP.
-// #ifndef __HIP_PLATFORM_AMD__
   float amax = *tensor_amax;
 #if defined(__HIP_PLATFORM_AMD__) && !defined(__HIP_DEVICE_COMPILE__)
   // On AMD host, TypeExtrema<fp8e4m3>::max is non-constexpr (runtime FNUZ detection)
