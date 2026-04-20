@@ -208,10 +208,10 @@ class Utils:
             from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace_size_bytes
             # workspaces are larger for AMDGPU
             addl_space = get_cublas_workspace_size_bytes() / (1024**2) * 4
-        else:
-            addl_space = 0
 
-        if Utils.get_cuda_memory_mb() > 1000 + addl_space:
+        if Utils.get_cuda_memory_mb() > 1000:
+            if IS_HIP_EXTENSION and Utils.get_cuda_memory_mb() <= 1000 + addl_space:
+                return
             memory_num = Utils.get_cuda_memory_mb()
             import gc
 

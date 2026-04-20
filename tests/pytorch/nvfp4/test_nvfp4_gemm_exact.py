@@ -111,11 +111,15 @@ def check_nvfp4_gemm_versus_reference(
     sx_trimmed = sx_native[:M, :expected_sx_cols]
     sw_trimmed = sw_native[:N, :expected_sw_cols]
 
-    # Native scales are stored as uint8 but need to be interpreted as float8_e4m3
+    # Native scales are stored as uint8 but need to be interpreted as float8_e4m3fn
     # for the reference GEMM to work correctly
-    fp8_dtype = get_torch_float8_e4m3_type()
-    sx_trimmed = sx_trimmed.view(fp8_dtype)
-    sw_trimmed = sw_trimmed.view(fp8_dtype)
+    if IS_HIP_EXTENSION:
+        fp8_dtype = get_torch_float8_e4m3_type()
+        sx_trimmed = sx_trimmed.view(fp8_dtype)
+        sw_trimmed = sw_trimmed.view(fp8_dtype)
+    else:
+        sx_trimmed = sx_trimmed.view(torch.float8_e4m3fn)
+        sw_trimmed = sw_trimmed.view(torch.float8_e4m3fn)
 
     # Create reference quantizer for reference GEMM
     ref_quantizer = NVFP4QuantizerRef(

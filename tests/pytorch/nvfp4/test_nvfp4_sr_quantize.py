@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -11,7 +13,9 @@ import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch import NVFP4Quantizer
-from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, is_fp8_fnuz
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+if IS_HIP_EXTENSION:
+        from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, is_fp8_fnuz
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
@@ -59,12 +63,18 @@ def fp4_to_fp32(fp4: torch.Tensor) -> torch.Tensor:
 
 
 def dequantize_fp4(qx: torch.Tensor, sx: torch.Tensor, amax: torch.Tensor) -> torch.Tensor:
-    fp8_dtype = get_torch_float8_e4m3_type()
-    fp8_max = 240.0 if is_fp8_fnuz() else 448.0
-    sf = sx.repeat_interleave(16, dim=1).view(fp8_dtype).to(torch.float32)
+    if IS_HIP_EXTENSION:
+        fp8_dtype = get_torch_float8_e4m3_type()
+        fp8_max = 240.0 if is_fp8_fnuz() else 448.0
+        sf = sx.repeat_interleave(16, dim=1).view(fp8_dtype).to(torch.float32)
+    else:
+        sf = sx.repeat_interleave(16, dim=1).view(torch.float8_e4m3fn).to(torch.float32)
     dqx = fp4_to_fp32(unpack_fp4(qx))
     sf = sf[: dqx.shape[0], : dqx.shape[1]]
-    dequant = dqx * sf * (amax / (6.0 * fp8_max))
+    if IS_HIP_EXTENSION:
+        dequant = dqx * sf * (amax / (6.0 * fp8_max))
+    else:
+        dequant = dqx * sf * (amax / (6.0 * 448))
     return dequant
 
 

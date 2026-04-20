@@ -980,15 +980,8 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
 
   auto* in_ptr = reinterpret_cast<const __hip_bfloat16*>(input.dptr);
 
-  if (pre_amax_ptr) {
-    NVTE_CHECK_CUDA(cudaMemsetAsync(pre_amax_ptr, 0, sizeof(float), stream));
-  }
-  if (id_amax_ptr) {
-    NVTE_CHECK_CUDA(cudaMemsetAsync(id_amax_ptr, 0, sizeof(float), stream));
-  }
-  if (tr_amax_ptr) {
-    NVTE_CHECK_CUDA(cudaMemsetAsync(tr_amax_ptr, 0, sizeof(float), stream));
-  }
+  ZeroAmaxKernel<<<1, 1, 0, stream>>>(pre_amax_ptr, id_amax_ptr, tr_amax_ptr);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   constexpr int kHadamardDimension = 16;
   NVTE_CHECK(row_length % kHadamardDimension == 0,

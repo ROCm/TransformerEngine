@@ -68,9 +68,9 @@ float compute_global_encode_scaling_factor_FP4(const float global_amax) {
 #ifdef __HIP_PLATFORM_AMD__
   const float fp8_max = te_fp8_fnuz() ? 240.0f : 448.0f;
 #else
-  constexpr float fp8_max = 448.0f;
+  constexpr float fp8_max = 448.0f;     // 448.0f;
 #endif
-  constexpr float fp4_max = 6.0f;
+  constexpr float fp4_max = 6.0f;       // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
   // If scale is infinity, return max value of float32
   global_encode_scale = fminf(global_encode_scale, Numeric_Traits<float>::maxNorm);
