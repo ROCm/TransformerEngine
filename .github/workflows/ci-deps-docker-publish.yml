@@ -1,0 +1,72 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+#
+# Build .github/scripts/Dockerfile.ci.deps and push to Artifactory.
+#
+# Required repository secrets:
+#   ARTIFACTORY_DOCKER_USERNAME / ARTIFACTORY_DOCKER_PASSWORD — registry basic auth
+#
+# Required repository variables:
+#   ARTIFACTORY_DOCKER_REGISTRY
+#   ARTIFACTORY_CI_DEPS_REPOSITORY — path under that registry
+
+name: Publish CI deps Docker image
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Image tag pushed to Artifactory (required)"
+        required: true
+        type: string
+
+jobs:
+  build-and-push:
+    runs-on: linux-te-mi325-8
+    timeout-minutes: 720
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Validate configuration
+        env:
+          REGISTRY: ${{ vars.ARTIFACTORY_DOCKER_REGISTRY }}
+          REPOSITORY: ${{ vars.ARTIFACTORY_CI_DEPS_REPOSITORY }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          if [ -z "${REGISTRY}" ] || [ -z "${REPOSITORY}" ]; then
+            echo "Set repository variables ARTIFACTORY_DOCKER_REGISTRY and ARTIFACTORY_CI_DEPS_REPOSITORY." >&2
+            exit 1
+          fi
+          if [ -z "${IMAGE_TAG}" ]; then
+            echo "image_tag must be non-empty." >&2
+            exit 1
+          fi
+
+      - name: Log in to Artifactory Docker registry
+        env:
+          REGISTRY: ${{ vars.ARTIFACTORY_DOCKER_REGISTRY }}
+          ARTIFACTORY_DOCKER_USERNAME: ${{ secrets.ARTIFACTORY_DOCKER_USERNAME }}
+          ARTIFACTORY_DOCKER_PASSWORD: ${{ secrets.ARTIFACTORY_DOCKER_PASSWORD }}
+        run: |
+          set -euo pipefail
+          echo "${ARTIFACTORY_DOCKER_PASSWORD}" | docker login "${REGISTRY}" \
+            -u "${ARTIFACTORY_DOCKER_USERNAME}" \
+            --password-stdin
+
+      - name: Build and push image
+        env:
+          REGISTRY: ${{ vars.ARTIFACTORY_DOCKER_REGISTRY }}
+          REPOSITORY: ${{ vars.ARTIFACTORY_CI_DEPS_REPOSITORY }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euxo pipefail
+          FULL_IMAGE="${REGISTRY}/${REPOSITORY}"
+          docker build \
+            -f .github/scripts/Dockerfile.ci.deps \
+            -t "${FULL_IMAGE}:${IMAGE_TAG}" \
+            .
+          docker push "${FULL_IMAGE}:${IMAGE_TAG}"
+          echo "Pushed ${FULL_IMAGE}:${IMAGE_TAG}"
