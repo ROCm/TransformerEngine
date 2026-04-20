@@ -1,4 +1,5 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -15,38 +16,47 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
 
 logger = logging.getLogger(__name__)
 
+try:
+    from torch.utils.cpp_extension import IS_HIP_EXTENSION
+except ImportError:
+    IS_HIP_EXTENSION = False
+
 _aiter_rope_fwd = None
 _aiter_rope_bwd = None
 _HAVE_AITER_ROPE = False
-_USE_AITER_ROPE = os.environ.get("NVTE_USE_AITER_ROPE", "1") == "1"
+_USE_AITER_ROPE = os.environ.get("NVTE_USE_AITER_ROPE", "0") == "1"
 
-if _USE_AITER_ROPE:
+if IS_HIP_EXTENSION and _USE_AITER_ROPE:
     try:
-        from torch.utils.cpp_extension import IS_HIP_EXTENSION
-    except ImportError:
-        IS_HIP_EXTENSION = False
-
-    if IS_HIP_EXTENSION:
-        try:
-            from aiter.ops.rope import (  # pylint: disable=import-error
-                rope_fwd as _aiter_rope_fwd,
-                rope_bwd as _aiter_rope_bwd,
-            )
-            _HAVE_AITER_ROPE = True
-        except Exception as _aiter_import_err:  # pylint: disable=broad-except
-            _HAVE_AITER_ROPE = False
-            logger.info(
-                "AITER fused RoPE import failed (%s: %s). "
-                "Falling back to TE native kernels. "
-                "Set NVTE_USE_AITER_ROPE=0 to silence this message.",
-                type(_aiter_import_err).__name__,
-                _aiter_import_err,
-            )
+        from aiter.ops.rope import (  # pylint: disable=import-error
+            rope_fwd as _aiter_rope_fwd,
+            rope_bwd as _aiter_rope_bwd,
+        )
+        _HAVE_AITER_ROPE = True
+    except Exception as _aiter_import_err:  # pylint: disable=broad-except
+        _HAVE_AITER_ROPE = False
+        logger.warning(
+            "AITER fused RoPE import failed (%s: %s). "
+            "Falling back to TE native kernels. "
+            "Set NVTE_USE_AITER_ROPE=0 to silence this message.",
+            type(_aiter_import_err).__name__,
+            _aiter_import_err,
+        )
 
 if _HAVE_AITER_ROPE:
-    logger.info("Using AITER fused RoPE kernels (aiter.ops.rope)")
+    _aiter_version = "unknown"
+    try:
+        from aiter._version import version as _aiter_version  # pylint: disable=import-error
+    except Exception:  # pylint: disable=broad-except
+        pass
+    logger.info("Using AITER fused RoPE kernels (aiter.ops.rope, version=%s)", _aiter_version)
 else:
-    _reason = "disabled via NVTE_USE_AITER_ROPE=0" if not _USE_AITER_ROPE else "not available"
+    if not IS_HIP_EXTENSION:
+        _reason = "not on ROCm"
+    elif not _USE_AITER_ROPE:
+        _reason = "disabled via NVTE_USE_AITER_ROPE=0"
+    else:
+        _reason = "not available"
     logger.debug("AITER RoPE not active (%s), using TE native kernels", _reason)
 
 
@@ -155,6 +165,11 @@ class FusedRoPEFunc(torch.autograd.Function):
     the RoPE tensor to be of shape (s, 1, 1, d). It accepts arbitrary memory layouts to avoid
     the expensive `.contiguous()` calls, thus it may not achieve the best memory access pattern.
     """
+
+    @staticmethod
+    def has_aiter_rope():
+        """Return whether AITER RoPE kernels are available."""
+        return _HAVE_AITER_ROPE
 
     @staticmethod
     def _can_use_aiter(tensor_format, interleaved, cu_seqlens, cp_size, start_positions):

@@ -11,7 +11,6 @@ from transformer_engine.pytorch.attention.rope import (
     RotaryPositionEmbedding,
     apply_rotary_pos_emb,
     apply_fused_qkv_rotary_pos_emb,
-    _HAVE_AITER_ROPE,
 )
 
 
@@ -500,6 +499,9 @@ def test_rotary_position_embedding_forward_with_autocast_gives_same_result_as_wi
     )
 
 
+@pytest.mark.skipif(
+    not FusedRoPEFunc.has_aiter_rope(), reason="AITER RoPE not available"
+)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("seq_length", [2048, 4096, 8192])
 @pytest.mark.parametrize("hidden_size", [64, 128, 256])
@@ -516,8 +518,6 @@ def test_aiter_rope_matches_te_fused(
     When AITER dispatch is active (sbhd, non-interleaved, cp_size=1, no cu_seqlens,
     no start_positions), verify output and gradients match the TE fused kernel.
     """
-    if not _HAVE_AITER_ROPE:
-        pytest.skip("AITER RoPE not available")
 
     device = torch.device("cuda:0")
     batch_size, head_num = 2, 64
@@ -589,7 +589,7 @@ def test_aiter_rope_can_use_guard(
     expected: bool,
 ) -> None:
     """Unit test the _can_use_aiter guard logic exhaustively."""
-    if not _HAVE_AITER_ROPE and expected:
+    if not FusedRoPEFunc.has_aiter_rope() and expected:
         pytest.skip("AITER not available — guard always returns False for True cases")
     result = FusedRoPEFunc._can_use_aiter(
         tensor_format, interleaved, cu_seqlens, cp_size, start_positions
