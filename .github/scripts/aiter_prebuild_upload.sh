@@ -22,7 +22,9 @@ fi
 export ROCM_PATH
 ROCM_VER=`head -n1 "${ROCM_PATH}/.info/version" | cut -d. -f1`
 
-AITER_DIR="${ROOT_DIR}/3rdparty/aiter"
+QOLA_DIR="${ROOT_DIR}/3rdparty/QoLA"
+AITER_DIR="${QOLA_DIR}/3rdparty/aiter"
+QOLA_MANIFEST="${ROOT_DIR}/transformer_engine/common/ck_fused_attn/qola_manifest.toml"
 GIT_CONFIG_GLOBAL="$(mktemp /tmp/gitconfig.XXXXXX)"
 trap 'rm -f "${GIT_CONFIG_GLOBAL}"' EXIT
 git config --file "${GIT_CONFIG_GLOBAL}" --add safe.directory "${AITER_DIR}"
@@ -53,20 +55,32 @@ fi
 if [[ "${1:-}" == "--build" ]]; then
   shift
   GPU_ARCHS="gfx942;gfx950"
-  echo "[AITER-PREBUILT] Building aiter libs for ${GPU_ARCHS} ..."
-  bash "${ROOT_DIR}/transformer_engine/common/ck_fused_attn/aiter_build.sh" \
-    --aiter-dir "${ROOT_DIR}/3rdparty/aiter" \
-    --install-dir "${EXTRACT_DIR}" \
-    --gpu-archs "${GPU_ARCHS}"
+  echo "[AITER-PREBUILT] Building aiter libs via QoLA for ${GPU_ARCHS} ..."
+  QOLA_BUILD_DIR="${QOLA_DIR}/build"
+  PYTHONPATH="${QOLA_DIR}:${PYTHONPATH:-}" \
+    python3 -m qola.cli build \
+      --manifest "${QOLA_MANIFEST}" \
+      --aiter-root "${AITER_DIR}" \
+      --output-dir "${QOLA_BUILD_DIR}" \
+      --arch "${GPU_ARCHS}"
+
+  # Stage QoLA outputs into the cache layout expected by aiter_prebuilt.cmake.
+  mkdir -p "${EXTRACT_DIR}/lib" "${EXTRACT_DIR}/include"
+  cp "${QOLA_BUILD_DIR}/lib/"*.so "${EXTRACT_DIR}/lib/"
+  cp "${QOLA_BUILD_DIR}/include/"*.h "${EXTRACT_DIR}/include/"
 fi
 
-# Ensure built libs exist
-if [[ ! -f "${EXTRACT_DIR}/libmha_fwd.so" ]]; then
-  echo "[AITER-PREBUILT] Missing libmha_fwd.so in ${EXTRACT_DIR}" >&2
-  exit 1
-fi
-if [[ ! -f "${EXTRACT_DIR}/libmha_bwd.so" ]]; then
-  echo "[AITER-PREBUILT] Missing libmha_bwd.so in ${EXTRACT_DIR}" >&2
+# Ensure built libs exist (matches aiter_prebuilt.cmake::is_aiter_cache_valid).
+for lib in te_libmha_fwd.so te_libmha_bwd.so; do
+  if [[ ! -f "${EXTRACT_DIR}/lib/${lib}" ]]; then
+    echo "[AITER-PREBUILT] Missing ${lib} in ${EXTRACT_DIR}/lib" >&2
+    exit 1
+  fi
+done
+
+# qola_config.h is the namespace-baked header; without it consumer compiles fail.
+if [[ ! -f "${EXTRACT_DIR}/include/qola_config.h" ]]; then
+  echo "[AITER-PREBUILT] Missing qola_config.h in ${EXTRACT_DIR}/include" >&2
   exit 1
 fi
 
