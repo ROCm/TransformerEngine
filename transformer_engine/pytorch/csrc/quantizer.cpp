@@ -1667,10 +1667,15 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
           need_separate_columnwise_rng ? quant_config_columnwise : quant_config;
 
       if (!eligible_for_rht_cast_fusion) {
-#ifdef USE_ROCM
+#ifndef USE_ROCM
+        at::Tensor rht_output_t;
+#endif
         // If rht_output_t was already produced by the fused amax+transform kernel above,
         // skip the separate hadamard_transform call.
-        if (!rht_output_t.defined()) {
+#ifdef USE_ROCM
+        if (!rht_output_t.defined())
+#endif
+        {
           rht_output_t =
               allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
           TensorWrapper rht_output_t_cpp;
@@ -1681,20 +1686,6 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
                                     this->rht_matrix_random_sign_mask_t, stream);
           });
         }
-#else
-        at::Tensor rht_output_t;
-        rht_output_t =
-            allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
-        {
-          TensorWrapper rht_output_t_cpp;
-          rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),
-                                            std::vector<size_t>{cols, rows});
-          NVTE_SCOPED_GIL_RELEASE({
-            nvte_hadamard_transform(input.data(), rht_output_t_cpp.data(), 0,
-                                    this->rht_matrix_random_sign_mask_t, stream);
-          });
-        }
-#endif
 
         TensorWrapper rht_output_t_cpp;
         rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),

@@ -301,21 +301,6 @@ class Tensor {
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
   }
 
-  void set_tensor_amax(float amax) {
-    if (!amax_cpu_data_) {
-      amax_cpu_data_ = std::make_shared<float>(amax);
-    } else {
-      *amax_cpu_data_ = amax;
-    }
-
-    float *amax_gpu = nullptr;
-    NVTE_CHECK_CUDA(cudaMalloc(&amax_gpu, sizeof(float)));
-    NVTE_CHECK_CUDA(cudaMemcpy(amax_gpu, amax_cpu_data_.get(),
-                              sizeof(float), cudaMemcpyHostToDevice));
-
-    tensor_.set_amax(amax_gpu, DType::kFloat32, tensor_.defaultShape);
-  }
-
   void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
     tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
   }
