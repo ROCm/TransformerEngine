@@ -83,7 +83,6 @@ def generate_grok_v2_test_cases():
 
 
 def make_fwd_bwd_funcs_te(x, w, group_lens, activation_dtype):
-    from transformer_engine.pytorch.module.base import get_multi_stream_cublas_workspace
     from transformer_engine.pytorch.cpp_extensions import general_grouped_gemm
 
     B = int(group_lens.numel())
@@ -99,8 +98,6 @@ def make_fwd_bwd_funcs_te(x, w, group_lens, activation_dtype):
     xs = list(torch.split(x_view, m_splits))
     weights = [w[i] for i in range(B)]
 
-    workspaces = get_multi_stream_cublas_workspace()
-
     # Forward output buffer
     out = torch.empty((sum_M, N), device=x.device, dtype=activation_dtype)
 
@@ -109,8 +106,8 @@ def make_fwd_bwd_funcs_te(x, w, group_lens, activation_dtype):
             A=weights,
             B=xs,
             out=[out],
+            quantization_params=[None] * B,
             out_dtype=activation_dtype,
-            workspaces=workspaces,
             single_output=True,
             m_splits=m_splits,
             use_bias=False,
@@ -135,8 +132,8 @@ def make_fwd_bwd_funcs_te(x, w, group_lens, activation_dtype):
             A=weights,
             B=splits,
             out=dxs,
+            quantization_params=[None] * B,
             out_dtype=activation_dtype,
-            workspaces=workspaces,
             single_output=False,
             layout="NN",
             m_splits=m_splits,
@@ -149,8 +146,8 @@ def make_fwd_bwd_funcs_te(x, w, group_lens, activation_dtype):
             A=xs,
             B=splits,
             out=dws,
+            quantization_params=[None] * B,
             out_dtype=activation_dtype,
-            workspaces=workspaces,
             single_output=False,
             layout="NT",
             m_splits=m_splits,
