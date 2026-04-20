@@ -10,6 +10,7 @@ from importlib import metadata
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import List, Tuple
@@ -226,10 +227,25 @@ def git_check_submodules() -> None:
         return
 
 
+def install_aiter_from_submodule() -> None:
+    """Install aiter from the vendored submodule if not already installed."""
+    if not rocm_build():
+        return
+    try:
+        import aiter  # noqa: F401
+    except ImportError:
+        aiter_path = current_file_path / "3rdparty" / "aiter"
+        if aiter_path.exists():
+            subprocess.check_call(
+                [sys.executable, "-m", "pip", "install", "--no-deps", str(aiter_path)],
+            )
+
+
 if __name__ == "__main__":
     __version__ = te_version()
 
     git_check_submodules()
+    install_aiter_from_submodule()
 
     with open("README.rst", encoding="utf-8") as f:
         long_description = f.read()
