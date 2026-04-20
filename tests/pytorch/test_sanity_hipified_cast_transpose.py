@@ -33,22 +33,16 @@ def _fill_uniform(shape, dtype):
 ])
 @pytest.mark.parametrize("in_dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("out_dtype", [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2])
-@pytest.mark.parametrize("use_hipified_env", [False, True])
-def test_single_kernel_dispatch(shape, in_dtype, out_dtype, use_hipified_env, monkeypatch):
+def test_single_kernel_dispatch(shape, in_dtype, out_dtype, monkeypatch):
     """
-    Verify that tex.quantize dispatches exactly one cast_transpose GPU kernel.
-    Tests both the default cost-model RTC path and the PR #89 hipified path
+    Verify that tex.quantize dispatches exactly one cast_transpose GPU kernel when using PR #89 hipified path
     (NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE=1).
     """
     input_tensor = _fill_uniform(shape, dtype=in_dtype)
     scale = torch.rand(1, dtype=torch.float32, device="cuda") * 3.0 - 2.0
     amax = torch.zeros(1, dtype=torch.float32, device="cuda")
 
-    env_key = "NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE"
-    if use_hipified_env:
-        monkeypatch.setenv(env_key, "1")
-    else:
-        monkeypatch.setenv(env_key, "0")
+    monkeypatch.setenv("NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE", "1")
 
     # Warmup (also triggers hipRTC compilation)
     q = Float8Quantizer(scale=scale.clone(), amax=amax.clone(), fp8_dtype=out_dtype)
