@@ -739,6 +739,22 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<", ";
     std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<std::endl;
   }
+  // Common fields filled here; mode-specific fields are overwritten below.
+  ck_fused_attn::CkAttnFwdArgs ck_args;
+  ck_args.dtype = nvte_to_ck_dtype(dtype);
+  ck_args.b = b; ck_args.h = h; ck_args.hg = hg;
+  ck_args.s_q = s_q; ck_args.s_kv = s_kv; ck_args.d_qk = d_qk; ck_args.d_v = d_v;
+  ck_args.is_training = is_training;
+  ck_args.scaling_factor = scaling_factor;
+  ck_args.dropout_probability = dropout_probability;
+  ck_args.philox_seed_ptr = devPtrDropoutSeed;
+  ck_args.philox_offset_ptr = devPtrDropoutOffset;
+  ck_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
+  ck_args.window_size_left = window_size_left;
+  ck_args.window_size_right = window_size_right;
+  ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3;
+  ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
+
   if(is_SBHD && is_padding){
     // remove padding for q, k, v
     remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, false, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrQWithoutPadding, stream);
@@ -746,85 +762,57 @@ void fused_attn_ck_fwd_impl(
     remove_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, false, v_stride[0], v_stride[1], v_stride[2], devPtrV, devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV, devPtrVWithoutPadding, stream);
     // call varlen api using without_padding ptrs
     // for BSHD/SBHD, after padding removal, THD require stride_s update
-    using ck_fused_attn::ck_attn_varlen_fwd;
-    NVTE_CHECK_CUDA(
-      ck_attn_varlen_fwd(
-        nvte_to_ck_dtype(dtype),
-        b, h, hg, s_q, s_kv, d_qk, d_v,
-        max_tokens_q,
-        devPtrQWithoutPadding,
-        q_stride[1], q_stride[0],
-        devPtrKWithoutPadding,
-        k_stride[1], std::min(k_stride[0], k_stride[2]),
-        devPtrVWithoutPadding,
-        v_stride[1], std::min(v_stride[0], v_stride[2]),
-        devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
-        nullptr, nullptr, //cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr
-        is_training, scaling_factor, dropout_probability,
-        devPtrDropoutSeed, devPtrDropoutOffset,
-        set_ck_mask(mask_type, window_size_left, window_size_right),
-        window_size_left, window_size_right,
-        devPtrOWithoutPadding,
-        o_stride[1], o_stride[0],
-        devPtrSoftmaxLSEWithoutPadding,
-        nvte_ck_uses_fwd_v3,
-        nvte_ck_how_v3_bf16_cvt,
-        stream));
+    ck_args.is_group_mode = true;
+    ck_args.max_tokens_q = max_tokens_q;
+    ck_args.q_ptr = devPtrQWithoutPadding;
+    ck_args.stride_h_q = q_stride[1]; ck_args.stride_s_q = q_stride[0];
+    ck_args.k_ptr = devPtrKWithoutPadding;
+    ck_args.stride_h_k = k_stride[1]; ck_args.stride_s_k = std::min(k_stride[0], k_stride[2]);
+    ck_args.v_ptr = devPtrVWithoutPadding;
+    ck_args.stride_h_v = v_stride[1]; ck_args.stride_s_v = std::min(v_stride[0], v_stride[2]);
+    ck_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
+    ck_args.cu_seqlen_kv_ptr = devPtrCuSeqlensKV;
+    ck_args.o_ptr = devPtrOWithoutPadding;
+    ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[0];
+    ck_args.lse_ptr = devPtrSoftmaxLSEWithoutPadding;
+    NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_fwd(ck_args, stream));
     // add padding for o and softmax_lse
     add_padding(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrOWithoutPadding, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrO, stream);
     add_padding_softmax_lse(b, h, s_q, max_tokens_q, false, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxAux, stream);
   }else if(bshd_to_thd || is_ragged){
-    using ck_fused_attn::ck_attn_varlen_fwd;
-    NVTE_CHECK_CUDA(
-      ck_attn_varlen_fwd(
-        nvte_to_ck_dtype(dtype),
-        b, h, hg, s_q, s_kv, d_qk, d_v,
-        max_tokens_q,
-        devPtrQ, 
-        q_stride[1], q_stride[2],
-        devPtrK, 
-        k_stride[1], k_stride[2],
-        devPtrV, 
-        v_stride[1], v_stride[2],
-        devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
-        devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedKV,
-        is_training, scaling_factor, dropout_probability,
-        devPtrDropoutSeed, devPtrDropoutOffset,
-        set_ck_mask(mask_type, window_size_left, window_size_right),
-        window_size_left, window_size_right,
-        devPtrO,
-        o_stride[1], o_stride[2],
-        devPtrSoftmaxLSEWithoutPadding,
-        nvte_ck_uses_fwd_v3,
-        nvte_ck_how_v3_bf16_cvt,
-        stream));
+    ck_args.is_group_mode = true;
+    ck_args.max_tokens_q = max_tokens_q;
+    ck_args.q_ptr = devPtrQ;
+    ck_args.stride_h_q = q_stride[1]; ck_args.stride_s_q = q_stride[2];
+    ck_args.k_ptr = devPtrK;
+    ck_args.stride_h_k = k_stride[1]; ck_args.stride_s_k = k_stride[2];
+    ck_args.v_ptr = devPtrV;
+    ck_args.stride_h_v = v_stride[1]; ck_args.stride_s_v = v_stride[2];
+    ck_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
+    ck_args.cu_seqlen_kv_ptr = devPtrCuSeqlensKV;
+    ck_args.cu_seqlen_q_padded_ptr = devPtrCuSeqlenPaddedQ;
+    ck_args.cu_seqlen_kv_padded_ptr = devPtrCuSeqlenPaddedKV;
+    ck_args.o_ptr = devPtrO;
+    ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[2];
+    ck_args.lse_ptr = devPtrSoftmaxLSEWithoutPadding;
+    NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_fwd(ck_args, stream));
     // aiter asm output softmax_lse with padding
     add_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxAux, stream);
   }else{
-    using ck_fused_attn::ck_attn_fwd;
-    NVTE_CHECK_CUDA(
-      ck_attn_fwd(
-        nvte_to_ck_dtype(dtype),
-        b, h, hg, s_q, s_kv, d_qk, d_v, bias_b, bias_h,
-        devPtrQ, 
-        q_stride[0], q_stride[1], q_stride[2],
-        devPtrK, 
-        k_stride[0], k_stride[1], k_stride[2],
-        devPtrV, 
-        v_stride[0], v_stride[1], v_stride[2],
-        devPtrBias,
-        devPtrAlibiSlope,
-        is_training, scaling_factor, dropout_probability,
-        devPtrDropoutSeed, devPtrDropoutOffset,
-        nvte_to_ck_bias_type(bias_type),
-        set_ck_mask(mask_type, window_size_left, window_size_right),
-        window_size_left, window_size_right,
-        devPtrO,
-        o_stride[0], o_stride[1], o_stride[2],
-        devPtrSoftmaxAux,
-        nvte_ck_uses_fwd_v3,
-        nvte_ck_how_v3_bf16_cvt,
-        stream));
+    ck_args.bias_b = bias_b; ck_args.bias_h = bias_h;
+    ck_args.q_ptr = devPtrQ;
+    ck_args.stride_b_q = q_stride[0]; ck_args.stride_h_q = q_stride[1]; ck_args.stride_s_q = q_stride[2];
+    ck_args.k_ptr = devPtrK;
+    ck_args.stride_b_k = k_stride[0]; ck_args.stride_h_k = k_stride[1]; ck_args.stride_s_k = k_stride[2];
+    ck_args.v_ptr = devPtrV;
+    ck_args.stride_b_v = v_stride[0]; ck_args.stride_h_v = v_stride[1]; ck_args.stride_s_v = v_stride[2];
+    ck_args.bias_ptr = devPtrBias;
+    ck_args.alibi_slope_ptr = devPtrAlibiSlope;
+    ck_args.attn_bias_type = nvte_to_ck_bias_type(bias_type);
+    ck_args.o_ptr = devPtrO;
+    ck_args.stride_b_o = o_stride[0]; ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[2];
+    ck_args.lse_ptr = devPtrSoftmaxAux;
+    NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_fwd(ck_args, stream));
   }
 }
 
@@ -1154,6 +1142,27 @@ void fused_attn_ck_bwd_impl(
     std::cout<<"nvte_ck_is_v3_atomic_fp32: "<<nvte_ck_is_v3_atomic_fp32<<", ";
     std::cout<<"nvte_ck_how_v3_bf16_cvt: "<<nvte_ck_how_v3_bf16_cvt<<std::endl;
   }
+  // Common fields filled here; mode-specific fields are overwritten below.
+  ck_fused_attn::CkAttnBwdArgs ck_args;
+  ck_args.dtype = nvte_to_ck_dtype(dtype);
+  ck_args.b = b; ck_args.h = h; ck_args.hg = hg;
+  ck_args.s_q = s_q; ck_args.s_kv = s_kv; ck_args.d_qk = d_qk; ck_args.d_v = d_v;
+  ck_args.scaling_factor = scaling_factor;
+  ck_args.dropout_probability = dropout_probability;
+  ck_args.philox_seed_ptr = devPtrDropoutSeed;
+  ck_args.philox_offset_ptr = devPtrDropoutOffset;
+  ck_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
+  ck_args.window_size_left = window_size_left;
+  ck_args.window_size_right = window_size_right;
+  ck_args.dq_acc_ptr = dq_acc_ptr;
+  ck_args.dk_expanded_ptr = dk_expanded_ptr;
+  ck_args.dv_expanded_ptr = dv_expanded_ptr;
+  ck_args.lse_workspace_ptr = lse_workspace;
+  ck_args.deterministic = deterministic;
+  ck_args.uses_bwd_v3 = nvte_ck_uses_bwd_v3;
+  ck_args.is_v3_atomic_fp32 = nvte_ck_is_v3_atomic_fp32;
+  ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
+
   if(is_SBHD && is_padding){
     // remove padding for q, k, v, o, do
     remove_padding(dtype, b, h, s_q, d_qk, max_tokens_q, false, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrQWithoutPadding, stream);
@@ -1164,46 +1173,34 @@ void fused_attn_ck_bwd_impl(
     remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrdO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdOWithoutPadding, stream);
     // also remove the padding for softmax lse
     remove_padding_softmax_lse(b, h, s_q, max_tokens_q, false, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
-    using ck_fused_attn::ck_attn_varlen_bwd;
-    NVTE_CHECK_CUDA(
-      ck_attn_varlen_bwd(
-        nvte_to_ck_dtype(dtype),
-        b, h, hg, s_q, s_kv, d_qk, d_v,
-        max_tokens_q, max_tokens_kv,
-        devPtrQWithoutPadding,
-        q_stride[1], q_stride[0],
-        devPtrKWithoutPadding,
-        k_stride[1], std::min(k_stride[0], k_stride[2]),
-        devPtrVWithoutPadding,
-        v_stride[1], std::min(v_stride[0], v_stride[2]),
-        devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
-        nullptr, nullptr, //cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr
-        devPtrOWithoutPadding,
-        o_stride[1], o_stride[0],
-        devPtrSoftmaxLSEWithoutPadding,
-        devPtrdOWithoutPadding,
-        o_stride[1], o_stride[0], //dO and O share the same stride in TE
-        scaling_factor, dropout_probability,
-        devPtrDropoutSeed, devPtrDropoutOffset,
-        set_ck_mask(mask_type, window_size_left, window_size_right),
-        window_size_left, window_size_right,
-        devPtrdQWithoutPadding,
-        q_stride[1], q_stride[0], //dq and q share the same stride in TE
-        dq_acc_ptr,
-        dk_expanded_ptr,
-        dv_expanded_ptr,
-        dk_expanded_stride[1], std::min(dk_expanded_stride[0], dk_expanded_stride[2]), //dK and K share the same stride
-        dv_expanded_stride[1], std::min(dv_expanded_stride[0], dv_expanded_stride[2]), //dV and V share the same stride
-        devPtrdKWithoutPadding,
-        k_stride[1], std::min(k_stride[0], k_stride[2]), //dK and K share the same stride
-        devPtrdVWithoutPadding,
-        v_stride[1], std::min(v_stride[0], v_stride[2]), //dV and V share the same stride
-        lse_workspace, // softmax_lsed
-        deterministic,
-        nvte_ck_uses_bwd_v3,
-        nvte_ck_is_v3_atomic_fp32,
-        nvte_ck_how_v3_bf16_cvt,
-        stream));
+    ck_args.is_group_mode = true;
+    ck_args.max_tokens_q = max_tokens_q; ck_args.max_tokens_kv = max_tokens_kv;
+    ck_args.q_ptr = devPtrQWithoutPadding;
+    ck_args.stride_h_q = q_stride[1]; ck_args.stride_s_q = q_stride[0];
+    ck_args.k_ptr = devPtrKWithoutPadding;
+    ck_args.stride_h_k = k_stride[1]; ck_args.stride_s_k = std::min(k_stride[0], k_stride[2]);
+    ck_args.v_ptr = devPtrVWithoutPadding;
+    ck_args.stride_h_v = v_stride[1]; ck_args.stride_s_v = std::min(v_stride[0], v_stride[2]);
+    ck_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
+    ck_args.cu_seqlen_kv_ptr = devPtrCuSeqlensKV;
+    ck_args.o_ptr = devPtrOWithoutPadding;
+    ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[0];
+    ck_args.lse_ptr = devPtrSoftmaxLSEWithoutPadding;
+    // dO and O share the same stride in TE
+    ck_args.do_ptr = devPtrdOWithoutPadding;
+    ck_args.stride_h_do = o_stride[1]; ck_args.stride_s_do = o_stride[0];
+    // dQ/dK/dV share strides with Q/K/V
+    ck_args.dq_ptr = devPtrdQWithoutPadding;
+    ck_args.stride_h_dq = q_stride[1]; ck_args.stride_s_dq = q_stride[0];
+    ck_args.stride_h_dk_expanded = dk_expanded_stride[1];
+    ck_args.stride_s_dk_expanded = std::min(dk_expanded_stride[0], dk_expanded_stride[2]);
+    ck_args.stride_h_dv_expanded = dv_expanded_stride[1];
+    ck_args.stride_s_dv_expanded = std::min(dv_expanded_stride[0], dv_expanded_stride[2]);
+    ck_args.dk_ptr = devPtrdKWithoutPadding;
+    ck_args.stride_h_dk = k_stride[1]; ck_args.stride_s_dk = std::min(k_stride[0], k_stride[2]);
+    ck_args.dv_ptr = devPtrdVWithoutPadding;
+    ck_args.stride_h_dv = v_stride[1]; ck_args.stride_s_dv = std::min(v_stride[0], v_stride[2]);
+    NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_bwd(ck_args, stream));
     // add padding for dq, dk, dv
     // dq, dk, dv of same shape as q, k, v
     add_padding(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrdQWithoutPadding, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdQ, stream);
@@ -1211,89 +1208,65 @@ void fused_attn_ck_bwd_impl(
     add_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrdVWithoutPadding, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdV, stream);
   }else if(bshd_to_thd || is_ragged){
     remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxLSEWithoutPadding, stream);
-    using ck_fused_attn::ck_attn_varlen_bwd;
-    NVTE_CHECK_CUDA(
-      ck_attn_varlen_bwd(
-        nvte_to_ck_dtype(dtype),
-        b, h, hg, s_q, s_kv, d_qk, d_v,
-        max_tokens_q, max_tokens_kv,
-        devPtrQ,
-        q_stride[1], q_stride[2],
-        devPtrK,
-        k_stride[1], k_stride[2],
-        devPtrV,
-        v_stride[1], v_stride[2],
-        devPtrCuSeqlensQ, devPtrCuSeqlensKV, 
-        devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedKV,
-        devPtrO,
-        o_stride[1], o_stride[2],
-        devPtrSoftmaxLSEWithoutPadding,
-        devPtrdO,
-        o_stride[1], o_stride[2], //dO and O share the same stride
-        scaling_factor, dropout_probability,
-        devPtrDropoutSeed, devPtrDropoutOffset,
-        set_ck_mask(mask_type, window_size_left, window_size_right),
-        window_size_left, window_size_right,
-        devPtrdQ,
-        q_stride[1], q_stride[2], //dQ and Q share the same stride
-        dq_acc_ptr, 
-        dk_expanded_ptr,
-        dv_expanded_ptr,
-        dk_expanded_stride[1], dk_expanded_stride[2], //dK and K share the same stride
-        dv_expanded_stride[1], dv_expanded_stride[2], //dV and V share the same stride
-        devPtrdK,
-        k_stride[1], k_stride[2], //dK and K share the same stride
-        devPtrdV,
-        v_stride[1], v_stride[2], //dV and V share the same stride
-        lse_workspace, // softmax_lsed
-        deterministic,
-        nvte_ck_uses_bwd_v3,
-        nvte_ck_is_v3_atomic_fp32,
-        nvte_ck_how_v3_bf16_cvt,
-        stream));
+    ck_args.is_group_mode = true;
+    ck_args.max_tokens_q = max_tokens_q; ck_args.max_tokens_kv = max_tokens_kv;
+    ck_args.q_ptr = devPtrQ;
+    ck_args.stride_h_q = q_stride[1]; ck_args.stride_s_q = q_stride[2];
+    ck_args.k_ptr = devPtrK;
+    ck_args.stride_h_k = k_stride[1]; ck_args.stride_s_k = k_stride[2];
+    ck_args.v_ptr = devPtrV;
+    ck_args.stride_h_v = v_stride[1]; ck_args.stride_s_v = v_stride[2];
+    ck_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
+    ck_args.cu_seqlen_kv_ptr = devPtrCuSeqlensKV;
+    ck_args.cu_seqlen_q_padded_ptr = devPtrCuSeqlenPaddedQ;
+    ck_args.cu_seqlen_kv_padded_ptr = devPtrCuSeqlenPaddedKV;
+    ck_args.o_ptr = devPtrO;
+    ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[2];
+    ck_args.lse_ptr = devPtrSoftmaxLSEWithoutPadding;
+    // dO and O share the same stride
+    ck_args.do_ptr = devPtrdO;
+    ck_args.stride_h_do = o_stride[1]; ck_args.stride_s_do = o_stride[2];
+    ck_args.dq_ptr = devPtrdQ;
+    ck_args.stride_h_dq = q_stride[1]; ck_args.stride_s_dq = q_stride[2];
+    ck_args.stride_h_dk_expanded = dk_expanded_stride[1]; ck_args.stride_s_dk_expanded = dk_expanded_stride[2];
+    ck_args.stride_h_dv_expanded = dv_expanded_stride[1]; ck_args.stride_s_dv_expanded = dv_expanded_stride[2];
+    ck_args.dk_ptr = devPtrdK;
+    ck_args.stride_h_dk = k_stride[1]; ck_args.stride_s_dk = k_stride[2];
+    ck_args.dv_ptr = devPtrdV;
+    ck_args.stride_h_dv = v_stride[1]; ck_args.stride_s_dv = v_stride[2];
+    NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_bwd(ck_args, stream));
   }else{
-    using ck_fused_attn::ck_attn_bwd;
-    NVTE_CHECK_CUDA(
-      ck_attn_bwd(
-        nvte_to_ck_dtype(dtype),
-        b, h, hg, s_q, s_kv, d_qk, d_v, bias_b, bias_h,
-        devPtrQ,
-        q_stride[0], q_stride[1], q_stride[2],
-        devPtrK,
-        k_stride[0], k_stride[1], k_stride[2],
-        devPtrV,
-        v_stride[0], v_stride[1], v_stride[2],
-        devPtrBias,
-        devPtrAlibiSlope,
-        devPtrO,
-        o_stride[0], o_stride[1], o_stride[2],
-        devPtrSoftmaxAux,
-        devPtrdO,
-        o_stride[0], o_stride[1], o_stride[2], //dO and O share the same stride
-        scaling_factor, dropout_probability,
-        devPtrDropoutSeed, devPtrDropoutOffset,
-        nvte_to_ck_bias_type(bias_type),
-        set_ck_mask(mask_type, window_size_left, window_size_right),
-        window_size_left, window_size_right,
-        devPtrdQ,
-        q_stride[0], q_stride[1], q_stride[2], //dQ and Q share the same stride
-        dq_acc_ptr, 
-        dk_expanded_ptr,
-        dv_expanded_ptr,
-        dk_expanded_stride[0], dk_expanded_stride[1], dk_expanded_stride[2], //dK and K share the same stride
-        dv_expanded_stride[0], dv_expanded_stride[1], dv_expanded_stride[2], //dV and V share the same stride
-        devPtrdK,
-        k_stride[0], k_stride[1], k_stride[2], //dK and K share the same stride
-        devPtrdV,
-        v_stride[0], v_stride[1], v_stride[2], //dV and V share the same stride
-        dbias_expanded_ptr,
-        devPtrdBias,
-        lse_workspace,
-        deterministic,
-        nvte_ck_uses_bwd_v3,
-        nvte_ck_is_v3_atomic_fp32,
-        nvte_ck_how_v3_bf16_cvt,
-        stream));
+    ck_args.bias_b = bias_b; ck_args.bias_h = bias_h;
+    ck_args.q_ptr = devPtrQ;
+    ck_args.stride_b_q = q_stride[0]; ck_args.stride_h_q = q_stride[1]; ck_args.stride_s_q = q_stride[2];
+    ck_args.k_ptr = devPtrK;
+    ck_args.stride_b_k = k_stride[0]; ck_args.stride_h_k = k_stride[1]; ck_args.stride_s_k = k_stride[2];
+    ck_args.v_ptr = devPtrV;
+    ck_args.stride_b_v = v_stride[0]; ck_args.stride_h_v = v_stride[1]; ck_args.stride_s_v = v_stride[2];
+    ck_args.bias_ptr = devPtrBias;
+    ck_args.alibi_slope_ptr = devPtrAlibiSlope;
+    ck_args.attn_bias_type = nvte_to_ck_bias_type(bias_type);
+    ck_args.o_ptr = devPtrO;
+    ck_args.stride_b_o = o_stride[0]; ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[2];
+    ck_args.lse_ptr = devPtrSoftmaxAux;
+    // dO and O share the same stride
+    ck_args.do_ptr = devPtrdO;
+    ck_args.stride_b_do = o_stride[0]; ck_args.stride_h_do = o_stride[1]; ck_args.stride_s_do = o_stride[2];
+    ck_args.dq_ptr = devPtrdQ;
+    ck_args.stride_b_dq = q_stride[0]; ck_args.stride_h_dq = q_stride[1]; ck_args.stride_s_dq = q_stride[2];
+    ck_args.stride_b_dk_expanded = dk_expanded_stride[0];
+    ck_args.stride_h_dk_expanded = dk_expanded_stride[1];
+    ck_args.stride_s_dk_expanded = dk_expanded_stride[2];
+    ck_args.stride_b_dv_expanded = dv_expanded_stride[0];
+    ck_args.stride_h_dv_expanded = dv_expanded_stride[1];
+    ck_args.stride_s_dv_expanded = dv_expanded_stride[2];
+    ck_args.dk_ptr = devPtrdK;
+    ck_args.stride_b_dk = k_stride[0]; ck_args.stride_h_dk = k_stride[1]; ck_args.stride_s_dk = k_stride[2];
+    ck_args.dv_ptr = devPtrdV;
+    ck_args.stride_b_dv = v_stride[0]; ck_args.stride_h_dv = v_stride[1]; ck_args.stride_s_dv = v_stride[2];
+    ck_args.dbias_expanded_ptr = dbias_expanded_ptr;
+    ck_args.dbias_ptr = devPtrdBias;
+    NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_bwd(ck_args, stream));
   }
 }
 #endif // USE_FUSED_ATTN_CK
