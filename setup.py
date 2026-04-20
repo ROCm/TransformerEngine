@@ -237,7 +237,10 @@ def install_aiter_from_submodule() -> None:
         aiter_path = current_file_path / "3rdparty" / "aiter"
         if aiter_path.exists():
             subprocess.check_call(
-                [sys.executable, "-m", "pip", "install", "--no-deps", str(aiter_path)],
+                [sys.executable, "-m", "pip", "install", "--no-deps",
+                 "--extra-index-url",
+                 "https://rocm.frameworks-nightlies.amd.com/whl/gfx942-gfx950/",
+                 str(aiter_path)],
             )
 
 

@@ -297,11 +297,11 @@ __device__ __forceinline__ uint8_t compute_e8m0_scale(
  * 
  * Reference: AMD CDNA4 ISA, v_cvt_scalef32_pk_fp4_f32 (page 390)
  */
+#if defined(__gfx950__)
 __device__ __forceinline__ uint16_t cvt_f32x4_to_fp4x4(
     float v0, float v1, float v2, float v3,
     float scale
 ) {
-#if defined(__gfx950__)
     uint32_t result = 0;
     
     // Convert first pair (v0, v1) to 8-bit packed FP4
@@ -318,10 +318,8 @@ __device__ __forceinline__ uint16_t cvt_f32x4_to_fp4x4(
     // Combine into 16-bit result (4 FP4 values)
     result |= (tmp << 8);
     return (uint16_t)(result & 0xFFFF);
-#else
-    return 0;  // Fallback for non-gfx950 architectures
-#endif
 }
+#endif
 
 // ============================================================================
 // MEMORY LAYOUT - Index Computation for Shuffled Layouts

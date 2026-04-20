@@ -24,7 +24,7 @@ from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
-_FP4_GEMM_TUNING = int(os.environ.get("NVTE_FP4_GEMM_TUNING", "1"))
+_FP4_USE_TUNED_GEMM = int(os.environ.get("NVTE_FP4_USE_TUNED_GEMM", "1"))
 _FP4_LOG_SHAPES = int(os.environ.get("NVTE_FP4_LOG_GEMM_SHAPES", "0"))
 
 __all__ = [
@@ -109,7 +109,7 @@ def _select_kernel_fp4(layout: str, grad: bool, M: int, N: int, K: int):
     kernel_name = ""
     split_k = 0
 
-    if _FP4_GEMM_TUNING:
+    if _FP4_USE_TUNED_GEMM:
         cfg = get_GEMM_config(M, N, K)
         if cfg is not None:
             kernel_name = cfg["kernelName"]

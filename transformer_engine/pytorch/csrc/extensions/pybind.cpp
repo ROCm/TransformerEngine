@@ -112,6 +112,7 @@ void init_mxfp4_extension() {
               "Internal error: could not initialize pyTorch MXFP4 extension.");
 }
 #endif //#ifdef USE_ROCM
+
 void init_nvfp4_extensions() {
   if (NVFP4TensorPythonClass) return;
   auto nvfp4_module = py::module_::import("transformer_engine.pytorch.tensor.nvfp4_tensor");
