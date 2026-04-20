@@ -150,10 +150,11 @@ def _quantize_float8_pytorch(input_tensor, quantizer, out):
     if input_tensor.nelement() == 0:
         return out
 
-    # Compute amax and scale
-    amax_val = input_tensor.abs().max()
+    # Compute amax and scale. Keep both on-device: .item() would force a
+    # CPU<->GPU sync on every quantize call.
+    amax_val = input_tensor.abs().amax()
     if hasattr(quantizer, 'amax') and quantizer.amax is not None:
-        quantizer.amax.fill_(amax_val.item())
+        quantizer.amax.copy_(amax_val)
 
     scale = quantizer.scale
     scale_inv = out._scale_inv
@@ -163,7 +164,7 @@ def _quantize_float8_pytorch(input_tensor, quantizer, out):
     scaled = input_tensor.float() * scale.float()
     fp8_data = scaled.to(torch_fp8_dtype)
     out._data.copy_(fp8_data.view(torch.uint8))
-    scale_inv.fill_(1.0 / scale.float().item())
+    scale_inv.copy_(scale.float().reciprocal())
 
     return out
 
@@ -494,7 +495,7 @@ def split_quantize(tensor, split_sections, quantizer_list):
 
 def compute_amax(input, amax):
     """Compute absolute max value in tensor."""
-    amax.fill_(input.abs().max().item())
+    amax.copy_(input.abs().amax())
 
 
 def fused_amax_and_scale_update_after_reduction(

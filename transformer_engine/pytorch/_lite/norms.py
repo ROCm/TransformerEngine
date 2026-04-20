@@ -339,8 +339,10 @@ def _try_fused_rmsnorm_quant(input_2d, weight, eps, quantizer, zero_centered_gam
             input_2d, weight, eps, dequant_scale,
         )
 
-        # Update amax for next iteration's delayed scaling
-        quantizer.amax.fill_(input_2d.abs().max().item())
+        # Update amax for next iteration's delayed scaling.
+        # copy_() keeps the reduction on-device; .item() would force a
+        # CPU<->GPU sync on every RMSNorm forward.
+        quantizer.amax.copy_(input_2d.abs().amax())
 
         # Wrap raw FP8 data in Float8Tensor via the quantizer.
         # Create empty container with the ORIGINAL (possibly N-D) shape,
