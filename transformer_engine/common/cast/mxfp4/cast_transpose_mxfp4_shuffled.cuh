@@ -35,6 +35,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <cstdint>
+#include "../../util/curanddx.hpp"
 
 namespace te_mxfp4 {
 
@@ -323,6 +324,54 @@ __device__ __forceinline__ uint16_t cvt_f32x4_to_fp4x4(
 #endif
 }
 
+/*
+ * FP32 to FP4 Conversion with Stochastic Rounding
+ * -------------------------------------------------
+ * Uses __builtin_amdgcn_cvt_scalef32_sr_pk_fp4_f32 to convert with random
+ * rounding bits. The instruction takes a packed float2 source (64-bit VGPR pair).
+ *
+ * Reference: AMD CDNA4 ISA, v_cvt_scalef32_sr_pk_fp4_f32
+ */
+__device__ __forceinline__ uint16_t cvt_f32x4_to_fp4x4_sr(
+    float v0, float v1, float v2, float v3,
+    float scale, uint32_t rbits
+) {
+#if defined(__gfx950__)
+    uint32_t lo32 = 0;
+    __amd_floatx2_storage_t packed01{v0, v1};
+    lo32 = __builtin_amdgcn_cvt_scalef32_sr_pk_fp4_f32(lo32, packed01, rbits, scale, 0);
+
+    uint32_t hi32 = 0;
+    __amd_floatx2_storage_t packed23{v2, v3};
+    hi32 = __builtin_amdgcn_cvt_scalef32_sr_pk_fp4_f32(hi32, packed23, rbits >> 16, scale, 0);
+
+    return (uint16_t)(lo32 & 0xFF) | (uint16_t)((hi32 & 0xFF) << 8);
+#else
+    return 0;
+#endif
+}
+
+/*
+ * Get next 32-bit random word from Philox state.
+ * Consumes one 32-bit word from the current uint4 batch, regenerating when exhausted.
+ */
+template <typename PhiloxState>
+__device__ __forceinline__ uint32_t next_rbits(PhiloxState& rng, uint4& rng_result, int& rng_count) {
+    if (rng_count >= 4) {
+        rng_result = rng.generate4();
+        rng_count = 0;
+    }
+    uint32_t val;
+    switch (rng_count) {
+        case 0: val = rng_result.x; break;
+        case 1: val = rng_result.y; break;
+        case 2: val = rng_result.z; break;
+        default: val = rng_result.w; break;
+    }
+    rng_count++;
+    return val;
+}
+
 // ============================================================================
 // MEMORY LAYOUT - Index Computation for Shuffled Layouts
 // ============================================================================
@@ -423,7 +472,8 @@ template<
     bool SHUFFLE_SCALES,
     bool USE_HADAMARD,
     bool SHUFFLE_ROWWISE_FP4,
-    bool SHUFFLE_COLWISE_FP4
+    bool SHUFFLE_COLWISE_FP4,
+    bool USE_STOCHASTIC_ROUNDING = false
 >
 __global__ __launch_bounds__(256, 8)
 void cast_transpose_mxfp4_shuffled(
@@ -442,7 +492,8 @@ void cast_transpose_mxfp4_shuffled(
     const int colwise_scale_M,
     const int colwise_scale_N,
     const int colwise_scale_M_pad,
-    const int colwise_scale_N_pad
+    const int colwise_scale_N_pad,
+    const int64_t* __restrict__ rng_state = nullptr
 ) {
     // ========================================================================
     // Thread and Block Identification
@@ -467,6 +518,28 @@ void cast_transpose_mxfp4_shuffled(
     // Packed dimensions (2 FP4 values per byte)
     const int K_packed = N / 2;
     const int M_packed = M / 2;
+
+    // ========================================================================
+    // Stochastic Rounding - Philox RNG Initialization
+    // ========================================================================
+
+    using PhiloxState = transformer_engine::curanddx::detail::philox4x32_native_state<10>;
+    PhiloxState rng;
+    uint4 rng_result = {0, 0, 0, 0};
+    int rng_count = 0;
+    if constexpr (USE_STOCHASTIC_ROUNDING) {
+        if (rng_state != nullptr) {
+            const size_t rng_seed = rng_state[0];
+            const size_t rng_offset = rng_state[1];
+            const size_t rng_seq = tid + (size_t)blockIdx.x * blockDim.x
+                                 + (size_t)blockIdx.y * gridDim.x * blockDim.x;
+            rng.init(rng_seed, rng_seq, rng_offset);
+            rng_result = rng.generate4();
+        } else {
+            rng.init(0, tid, 0);
+            rng_result = rng.generate4();
+        }
+    }
 
     // ========================================================================
     // Shared Memory - 32x32 BF16 Tile with Padding
@@ -557,7 +630,13 @@ void cast_transpose_mxfp4_shuffled(
                     uint8_t e8m0_scale = compute_e8m0_scale(amax, native_scale);
 
                     // Convert to FP4 using hardware instruction
-                    uint16_t fp4x4 = cvt_f32x4_to_fp4x4(v0, v1, v2, v3, native_scale);
+                    uint16_t fp4x4;
+                    if constexpr (USE_STOCHASTIC_ROUNDING) {
+                        uint32_t rbits = next_rbits(rng, rng_result, rng_count);
+                        fp4x4 = cvt_f32x4_to_fp4x4_sr(v0, v1, v2, v3, native_scale, rbits);
+                    } else {
+                        fp4x4 = cvt_f32x4_to_fp4x4(v0, v1, v2, v3, native_scale);
+                    }
 
                     // Store FP4 data to global memory
                     int global_col_base = tile_n + col_base;
@@ -630,7 +709,13 @@ void cast_transpose_mxfp4_shuffled(
                     uint8_t e8m0_scale = compute_e8m0_scale(amax, native_scale);
 
                     // Convert to FP4
-                    uint16_t fp4x4 = cvt_f32x4_to_fp4x4(v0, v1, v2, v3, native_scale);
+                    uint16_t fp4x4;
+                    if constexpr (USE_STOCHASTIC_ROUNDING) {
+                        uint32_t rbits = next_rbits(rng, rng_result, rng_count);
+                        fp4x4 = cvt_f32x4_to_fp4x4_sr(v0, v1, v2, v3, native_scale, rbits);
+                    } else {
+                        fp4x4 = cvt_f32x4_to_fp4x4(v0, v1, v2, v3, native_scale);
+                    }
 
                     // Store FP4 data to global memory (transposed layout)
                     int global_row_base = tile_m + row_base;
@@ -688,13 +773,15 @@ inline void nvte_cast_transpose_mxfp4_fused_shuffle(
     int rowwise_scale_N, int rowwise_scale_M_pad, int rowwise_scale_N_pad,
     int colwise_scale_M, int colwise_scale_N,
     int colwise_scale_M_pad, int colwise_scale_N_pad,
+    bool stochastic_rounding,
+    const int64_t* rng_state,
     hipStream_t stream
 ) {
     dim3 grid((M + 127) / 128, (N + 63) / 64);
     dim3 block(256);
 
-    #define LAUNCH_KERNEL(ROW, COL, HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES) \
-        te_mxfp4::cast_transpose_mxfp4_shuffled<ROW, COL, SHUF_SCALES, HAD, SHUF_ROW, SHUF_COL> \
+    #define LAUNCH_KERNEL(ROW, COL, HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES, SR) \
+        te_mxfp4::cast_transpose_mxfp4_shuffled<ROW, COL, SHUF_SCALES, HAD, SHUF_ROW, SHUF_COL, SR> \
             <<<grid, block, 0, stream>>>( \
                 (const uint16_t*)input, \
                 (uint8_t*)rowwise_fp4, (uint8_t*)rowwise_scale, \
@@ -702,41 +789,48 @@ inline void nvte_cast_transpose_mxfp4_fused_shuffle(
                 M, N, \
                 rowwise_scale_stride, colwise_scale_stride, \
                 rowwise_scale_N, rowwise_scale_M_pad, rowwise_scale_N_pad, \
-                colwise_scale_M, colwise_scale_N, colwise_scale_M_pad, colwise_scale_N_pad)
+                colwise_scale_M, colwise_scale_N, colwise_scale_M_pad, colwise_scale_N_pad, \
+                rng_state)
 
-    #define DISPATCH_ROWCOL(HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES)                     \
+    #define DISPATCH_ROWCOL(HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES, SR)                 \
         do {                                                                           \
             if (use_rowwise && use_colwise)                                            \
-                LAUNCH_KERNEL(true, true, HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES);     \
+                LAUNCH_KERNEL(true, true, HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES, SR); \
             else if (use_rowwise)                                                      \
-                LAUNCH_KERNEL(true, false, HAD, SHUF_ROW, false, SHUF_SCALES);        \
+                LAUNCH_KERNEL(true, false, HAD, SHUF_ROW, false, SHUF_SCALES, SR);   \
             else if (use_colwise)                                                      \
-                LAUNCH_KERNEL(false, true, HAD, false, SHUF_COL, SHUF_SCALES);        \
+                LAUNCH_KERNEL(false, true, HAD, false, SHUF_COL, SHUF_SCALES, SR);   \
         } while(0)
 
-    #define DISPATCH_SHUFFLE(HAD, SHUF_SCALES)                                         \
+    #define DISPATCH_SHUFFLE(HAD, SHUF_SCALES, SR)                                     \
         do {                                                                           \
             if (shuffle_rowwise_fp4 && shuffle_colwise_fp4)                            \
-                DISPATCH_ROWCOL(HAD, true, true, SHUF_SCALES);                        \
+                DISPATCH_ROWCOL(HAD, true, true, SHUF_SCALES, SR);                    \
             else if (shuffle_rowwise_fp4)                                              \
-                DISPATCH_ROWCOL(HAD, true, false, SHUF_SCALES);                       \
+                DISPATCH_ROWCOL(HAD, true, false, SHUF_SCALES, SR);                   \
             else if (shuffle_colwise_fp4)                                              \
-                DISPATCH_ROWCOL(HAD, false, true, SHUF_SCALES);                       \
+                DISPATCH_ROWCOL(HAD, false, true, SHUF_SCALES, SR);                   \
             else                                                                       \
-                DISPATCH_ROWCOL(HAD, false, false, SHUF_SCALES);                      \
+                DISPATCH_ROWCOL(HAD, false, false, SHUF_SCALES, SR);                  \
         } while(0)
 
-    if (shuffle_scales) {
-        if (use_hadamard) { DISPATCH_SHUFFLE(true, true); }
-        else              { DISPATCH_SHUFFLE(false, true); }
+    #define DISPATCH_HADAMARD(SHUF_SCALES, SR)                                         \
+        do {                                                                           \
+            if (use_hadamard) { DISPATCH_SHUFFLE(true, SHUF_SCALES, SR); }            \
+            else              { DISPATCH_SHUFFLE(false, SHUF_SCALES, SR); }           \
+        } while(0)
+
+    if (stochastic_rounding) {
+        if (shuffle_scales) { DISPATCH_HADAMARD(true, true); }
+        else                { DISPATCH_HADAMARD(false, true); }
     } else {
-        if (use_hadamard) { DISPATCH_SHUFFLE(true, false); }
-        else              { DISPATCH_SHUFFLE(false, false); }
+        if (shuffle_scales) { DISPATCH_HADAMARD(true, false); }
+        else                { DISPATCH_HADAMARD(false, false); }
     }
 
+    #undef DISPATCH_HADAMARD
     #undef DISPATCH_SHUFFLE
     #undef DISPATCH_ROWCOL
-
     #undef LAUNCH_KERNEL
 }  // nvte_cast_transpose_mxfp4_fused_shuffle
 

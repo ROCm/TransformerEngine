@@ -57,8 +57,11 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
 
   // Check for unsupported options
   if (quant_config_cpp.stochastic_rounding) {
-    NVTE_CHECK(output_tensor->scaling_mode == NVTE_NVFP4_1D_SCALING,
-               "Stochastic rounding is only supported for NVFP4 quantization.");
+    NVTE_CHECK(output_tensor->scaling_mode == NVTE_NVFP4_1D_SCALING
+#ifdef __HIP_PLATFORM_AMD__
+               || output_tensor->scaling_mode == NVTE_MXFP4_1D_SCALING
+#endif //#ifdef __HIP_PLATFORM_AMD__
+               , "Stochastic rounding is only supported for NVFP4 and MXFP4 quantization.");
   }
 
   NVTE_CHECK(output_tensor->has_data() || output_tensor->has_columnwise_data(),
@@ -219,8 +222,11 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
 
   // Check for unsupported options
   if (quant_config_cpp.stochastic_rounding) {
-    NVTE_CHECK(output_tensor->scaling_mode == NVTE_NVFP4_1D_SCALING,
-               "Stochastic rounding is only supported for NVFP4 quantization.");
+    NVTE_CHECK(output_tensor->scaling_mode == NVTE_NVFP4_1D_SCALING
+#ifdef __HIP_PLATFORM_AMD__
+               || output_tensor->scaling_mode == NVTE_MXFP4_1D_SCALING
+#endif //#ifdef __HIP_PLATFORM_AMD__
+               , "Stochastic rounding is only supported for NVFP4 and MXFP4 quantization.");
   }
 
   NVTE_CHECK(output_tensor->has_data() || output_tensor->has_columnwise_data(),
@@ -373,8 +379,11 @@ void group_quantize_fwd_helper(const NVTETensor input, NVTETensor *outputs,
 
   // Check for unsupported options
   if (quant_config_cpp.stochastic_rounding) {
-    NVTE_CHECK(output_tensors[0]->scaling_mode == NVTE_NVFP4_1D_SCALING,
-               "Stochastic rounding is only supported for NVFP4 quantization.");
+    NVTE_CHECK(output_tensors[0]->scaling_mode == NVTE_NVFP4_1D_SCALING
+#ifdef __HIP_PLATFORM_AMD__
+               || output_tensors[0]->scaling_mode == NVTE_MXFP4_1D_SCALING
+#endif //#ifdef __HIP_PLATFORM_AMD__
+               , "Stochastic rounding is only supported for NVFP4 and MXFP4 quantization.");
   }
 
   // Take the scaling mode of the first output tensor

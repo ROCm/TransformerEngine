@@ -578,6 +578,7 @@ class MXFP4BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     use_hadamard: bool = os.getenv("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
+    stochastic_rounding: bool = os.getenv("NVTE_MXFP4_STOCHASTIC_ROUNDING", "0") == "1"
 
     @property
     def fp8_format(self) -> Format:

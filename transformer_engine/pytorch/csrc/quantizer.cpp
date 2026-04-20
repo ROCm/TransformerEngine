@@ -1796,6 +1796,7 @@ MXFP4Quantizer::MXFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->shuffle_rowwise_data = quantizer.attr("shuffle_rowwise_data").cast<bool>();
   this->shuffle_columnwise_data = quantizer.attr("shuffle_columnwise_data").cast<bool>();
   this->shuffle_scales = quantizer.attr("shuffle_scales").cast<bool>();
+  this->stochastic_rounding = quantizer.attr("stochastic_rounding").cast<bool>();
 }
 
 void MXFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
@@ -2033,6 +2034,37 @@ void MXFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
     quant_config.set_noop_tensor(noop_flag->data());
   }
   quant_config.set_mxfp4_use_hadamard(this->use_hadamard);
+  quant_config.set_stochastic_rounding(this->stochastic_rounding);
+
+  TensorWrapper te_rng_state;
+  at::Tensor rng_state_tensor;
+  if (this->stochastic_rounding) {
+    const size_t rng_elts_per_thread = 1024;
+    auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+        std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
+
+    at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
+
+    // Extract seed and offset on the host, then copy to a device tensor.
+    // philox_unpack / nvte_extract_seed_and_offset launches a tiny GPU
+    // kernel from fused_attn which may not be compiled for every GPU
+    // architecture, so we bypass it and do the transfer ourselves.
+    NVTE_CHECK(!philox_args.captured_,
+        "MXFP4 stochastic rounding is not supported during CUDA graph capture.");
+    int64_t host_rng[2] = {
+        static_cast<int64_t>(philox_args.seed_.val),
+        static_cast<int64_t>(philox_args.offset_.val),
+    };
+    auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+    rng_state_tensor = torch::empty({2}, opts);
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(
+        rng_state_tensor.data_ptr(), host_rng, 2 * sizeof(int64_t),
+        cudaMemcpyHostToDevice, at::cuda::getCurrentCUDAStream()));
+
+    te_rng_state = makeTransformerEngineTensor(rng_state_tensor);
+    quant_config.set_rng_state(te_rng_state.data());
+  }
+
   NVTE_SCOPED_GIL_RELEASE({
     nvte_quantize_v2(input.data(), out.data(), quant_config, at::cuda::getCurrentCUDAStream());
   });

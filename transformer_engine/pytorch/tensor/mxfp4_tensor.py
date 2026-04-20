@@ -64,6 +64,7 @@ class MXFP4Quantizer(Quantizer):
         shuffle_columnwise_data: bool = False,
         shuffle_scales: bool = False,
         use_hadamard: bool = False,
+        stochastic_rounding: bool = False,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp4_dtype
@@ -71,6 +72,7 @@ class MXFP4Quantizer(Quantizer):
         self.shuffle_columnwise_data = shuffle_columnwise_data
         self.shuffle_scales = shuffle_scales
         self.use_hadamard = use_hadamard
+        self.stochastic_rounding = stochastic_rounding
         assert self.dtype == tex.DType.kFloat4E2M1, "Only E2M1 format supported for MXFP4"
 
     def copy(self) -> "MXFP4Quantizer":
@@ -83,6 +85,7 @@ class MXFP4Quantizer(Quantizer):
             shuffle_columnwise_data=self.shuffle_columnwise_data,
             shuffle_scales=self.shuffle_scales,
             use_hadamard=self.use_hadamard,
+            stochastic_rounding=self.stochastic_rounding,
         )
         quantizer.internal = self.internal
         quantizer.optimize_for_gemm = self.optimize_for_gemm
