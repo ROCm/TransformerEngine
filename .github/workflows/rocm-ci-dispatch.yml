@@ -1,0 +1,61 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
+name: PR Automatic CI
+
+on:
+  pull_request:
+    types: [ labeled, synchronize, reopened ]
+
+permissions:
+  contents: read
+
+jobs:
+  determine_level:
+    runs-on: ubuntu-latest
+    outputs:
+      test_level: ${{ steps.set_level.outputs.test_level }}
+    steps:
+      - name: Determine CI dispatch from labels
+        id: set_level
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const parseLevelLabel = (labelName) => {
+              const m = (labelName || '').match(/^ci-level\s+(\d+)$/i);
+              return m ? Number(m[1]) : 0;
+            };
+
+            const labels = (context.payload.pull_request.labels || [])
+              .map(l => parseLevelLabel(l.name));
+            const action = context.payload.action;
+            const currentLevel = labels.length ? Math.max(...labels) : 0;
+
+            let dispatch = false;
+            if (action === 'labeled') {
+              const addedLevel = parseLevelLabel(context.payload.label?.name);
+              // Only dispatch when the newly added label is (or ties) the highest level.
+              dispatch = addedLevel > 0 && addedLevel === currentLevel;
+            } else {
+              // synchronize, reopened, opened — dispatch at whatever level is set.
+              dispatch = currentLevel > 0;
+            }
+
+            const level = dispatch ? String(currentLevel) : '';
+            core.info(`action=${action}, currentLevel=${currentLevel}, dispatch=${dispatch}`);
+            core.setOutput('test_level', level);
+
+  dispatch:
+    # Run this job if there is a valid level to test, which requires
+    # that any of the following are true:
+    # - A ci-level label higher than any existing ci-level label(s) was added
+    # - A commit was pushed with existing ci-level label(s)
+    # - The PR was reopened or opened with existing ci-level label(s)
+    if: ${{ needs.determine_level.outputs.test_level != '' }}
+    needs: determine_level
+    name: CI Level ${{ needs.determine_level.outputs.test_level }}
+    uses: ./.github/workflows/rocm-ci.yml
+    secrets: inherit
+    with:
+      test_level: ${{ needs.determine_level.outputs.test_level }}

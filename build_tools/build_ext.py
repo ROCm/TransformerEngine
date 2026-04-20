@@ -27,7 +27,6 @@ from .utils import (
     cmake_bin,
     debug_build_enabled,
     found_ninja,
-    get_frameworks,
     nvcc_path,
     get_max_jobs_for_parallel_build,
 )
@@ -67,6 +66,12 @@ class CMakeExtension(setuptools.Extension):
             f"-DCMAKE_BUILD_TYPE={build_type}",
             f"-DCMAKE_INSTALL_PREFIX={install_dir}",
         ]
+        if bool(int(os.getenv("NVTE_USE_CCACHE", "0"))):
+            ccache_bin = os.getenv("NVTE_CCACHE_BIN", "ccache")
+            configure_command += [
+                f"-DCMAKE_CXX_COMPILER_LAUNCHER={ccache_bin}",
+                f"-DCMAKE_CUDA_COMPILER_LAUNCHER={ccache_bin}",
+            ]
         configure_command += self.cmake_flags
 
         import pybind11
@@ -161,8 +166,11 @@ def get_build_ext(
         def build_extensions(self):
             # For core lib + JAX install, fix build_ext from pybind11.setup_helpers
             # to handle CUDA files correctly.
+            # Upstream uses get_frameworks() here which is incorrectly works when install from
+            # release (sdist) wheel on a system with both frameworks installed.
             ext_names = [ext.name for ext in self.extensions]
-            if "transformer_engine_pytorch" not in ext_names:
+            if ("transformer_engine_torch" not in ext_names and
+                "transformer_engine_rocm_torch" not in ext_names):
                 # Ensure at least an empty list of flags for 'cxx' and 'nvcc' when
                 # extra_compile_args is a dict.
                 for ext in self.extensions:
