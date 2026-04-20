@@ -499,6 +499,14 @@ def test_rotary_position_embedding_forward_with_autocast_gives_same_result_as_wi
     )
 
 
+# AITER RoPE tests require:
+#   1. ROCm environment with `aiter` installed (pip install amd-aiter)
+#   2. NVTE_USE_AITER_ROPE=1 environment variable set before running
+# Example:
+#   NVTE_USE_AITER_ROPE=1 pytest tests/pytorch/test_fused_rope.py::test_aiter_rope_matches_te_fused -v
+#   NVTE_USE_AITER_ROPE=1 pytest tests/pytorch/test_fused_rope.py::test_aiter_rope_can_use_guard -v
+
+
 @pytest.mark.skipif(
     not FusedRoPEFunc.has_aiter_rope(), reason="AITER RoPE not available"
 )
