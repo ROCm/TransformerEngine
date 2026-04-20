@@ -423,7 +423,24 @@ class FusedAttnRunner:
             segment_ids_q, segment_pos_q, pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, num_segments_per_seq, seed=42
             )
-            seqlens_q, offsets_q = get_seqlens_and_offsets(segment_ids_q)
+            # Compute seqlens/offsets directly instead of using get_seqlens_and_offsets.
+            # get_seqlens_and_offsets uses bincount(length=max_seqlen) which cannot capture
+            # segment IDs equal to max_seqlen (when num_segments == max_seqlen_q, segment
+            # IDs range from 1 to max_seqlen_q). The missing segment plus the appended
+            # sentinel causes _fix_len_take in impl() to leak entries across batches.
+            # Since each Q segment has exactly 1 token (max_segment_size = max_seqlen_q //
+            # num_segments_per_seq = 1), we build seqlens as all-ones with no sentinels.
+            seqlens_q = jnp.ones((self.batch_size, num_segments_per_seq), dtype=jnp.int32)
+            offsets_q = jnp.concatenate(
+                [
+                    jnp.tile(
+                        jnp.arange(num_segments_per_seq, dtype=jnp.int32)[None, :],
+                        (self.batch_size, 1),
+                    ),
+                    jnp.full((self.batch_size, 1), -1, dtype=jnp.int32),
+                ],
+                axis=1,
+            )
 
         min_segment_len = None if self.window_size is None else seqlens_q
         segment_ids_kv, segment_pos_kv, pad_kv = generate_random_segment_ids(
@@ -1319,3 +1336,45 @@ def test_ck_unfused_smallseq_backend(
     runner._setup_inputs()
     # runner.test_forward()
     runner.test_backward()
+
+
+@pytest.mark.parametrize("dtype", [jnp.bfloat16], ids=["BF16"])
+@pytest.mark.parametrize(
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v",
+    [
+        pytest.param(2, 128, 256, 16, 8, 128, 128, id="2-128-256-16-8-128-128-GQA"),
+        pytest.param(2, 128, 256, 16, 1, 128, 128, id="2-128-256-16-1-128-128-MQA"),
+    ],
+)
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="CK unfused smallseq backend only available on AMD hardware"
+)
+def test_ck_unfused_smallseq_no_gqa(
+    ck_smallseq_env, b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype
+):
+    """
+    Test that GQA/MQA configs (h_q != h_kv) are properly guarded and do not enter
+    the CK small-seq path. With the h==hg guard, these should fall back to the
+    standard CK backend or skip cleanly via NVTE_No_Backend.
+    """
+    runner = FusedAttnRunner(
+        batch_size=b,
+        max_seqlen_q=s_q,
+        max_seqlen_kv=s_kv,
+        num_heads_q=h_q,
+        num_heads_kv=h_kv,
+        head_dim_qk=d_qk,
+        head_dim_v=d_v,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.PADDING_MASK,
+        dropout_prob=0.0,
+        use_old_rng=True,
+        dtype=dtype,
+        is_training=False,
+        qkv_layout=QKVLayout.THD_THD_THD,
+        bias_shape=None,
+        window_size=None,
+        seq_desc_format=SeqDescFormat.Seqlens,
+    )
+    runner._setup_inputs()
+    runner.test_forward()

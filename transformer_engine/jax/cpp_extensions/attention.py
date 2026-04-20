@@ -359,7 +359,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
             elif backend == NVTE_Fused_Attn_Backend.NVTE_CK:
                 if config.qkv_layout.is_thd():
                     # THD only: check env; run small-seq logic only when enabled
-                    if os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") != "1" or q_max_seqlen == kv_max_seqlen:
+                    if os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") != "1" or q_max_seqlen == kv_max_seqlen or attn_heads!=num_gqa_groups:
                         softmax_shape = (*batch_shape, q_max_seqlen, attn_heads, 1)
                         softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
                     else:
