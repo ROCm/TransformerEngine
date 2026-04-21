@@ -54,15 +54,17 @@ fi
 # Optional build stage
 if [[ "${1:-}" == "--build" ]]; then
   shift
-  GPU_ARCHS="gfx942;gfx950"
-  echo "[AITER-PREBUILT] Building aiter libs via QoLA for ${GPU_ARCHS} ..."
+  GPU_ARCHS=("gfx942" "gfx950")
+  echo "[AITER-PREBUILT] Building aiter libs via QoLA for ${GPU_ARCHS[*]} ..."
   QOLA_BUILD_DIR="${QOLA_DIR}/build"
+  arch_args=()
+  for a in "${GPU_ARCHS[@]}"; do arch_args+=(--arch "${a}"); done
   PYTHONPATH="${QOLA_DIR}:${PYTHONPATH:-}" \
     python3 -m qola.cli build \
       --manifest "${QOLA_MANIFEST}" \
       --aiter-root "${AITER_DIR}" \
       --output-dir "${QOLA_BUILD_DIR}" \
-      --arch "${GPU_ARCHS}"
+      "${arch_args[@]}"
 
   # Stage QoLA outputs into the cache layout expected by aiter_prebuilt.cmake.
   mkdir -p "${EXTRACT_DIR}/lib" "${EXTRACT_DIR}/include"
