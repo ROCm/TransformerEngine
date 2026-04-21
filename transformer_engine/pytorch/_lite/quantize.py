@@ -13,6 +13,16 @@ fallback path, because in lite mode tex IS this module — that would recurse.
 """
 
 import torch
+from collections import Counter as _QuantCounter
+_QUANT_CALLS = _QuantCounter()
+
+def _quant_bump(tag):
+    _QUANT_CALLS[tag] += 1
+    if sum(_QUANT_CALLS.values()) % 500 == 0:
+        print(f"[LITE-QUANT] {dict(_QUANT_CALLS)}", flush=True)
+
+_FP8_FALLBACK_DIAG_PRINTS = 0
+_FP8_FALLBACK_DIAG_MAX = 5
 
 # Lazy-loaded Triton cast functions and type checks
 _triton_cast_import_attempted = False
@@ -362,12 +372,33 @@ def quantize(tensor, quantizer, output=None, noop=None):
             and isinstance(quantizer, _Float8CurrentScalingQuantizer)
             and _aiter_dynamic_per_token_quant is not None
             and input_tensor.nelement() > 0):
+        _quant_bump("per_row_dynamic_aiter")
         return _quantize_per_row_dynamic(input_tensor, quantizer, out)
 
     # --- Triton dispatch ---
     if _Float8TensorStorage and isinstance(out, _Float8TensorStorage):
         if input_tensor.nelement() > 0:
+            global _FP8_FALLBACK_DIAG_PRINTS
+            if _FP8_FALLBACK_DIAG_PRINTS < _FP8_FALLBACK_DIAG_MAX:
+                _FP8_FALLBACK_DIAG_PRINTS += 1
+                # Also read usage from the quantizer copy the tensor holds —
+                # that's what _setup_conditional_transpose_storage looked at.
+                stored_q = getattr(out, "_quantizer", None)
+                stored_rw = getattr(stored_q, "rowwise_usage", "MISSING")
+                stored_cw = getattr(stored_q, "columnwise_usage", "MISSING")
+                print(
+                    f"[LITE-QUANT-DIAG #{_FP8_FALLBACK_DIAG_PRINTS}] Float8 path: "
+                    f"qt={type(quantizer).__name__}, "
+                    f"live_q.rw={getattr(quantizer, 'rowwise_usage', '?')}, "
+                    f"live_q.cw={getattr(quantizer, 'columnwise_usage', '?')}, "
+                    f"stored_q.rw={stored_rw}, stored_q.cw={stored_cw}, "
+                    f"transpose_none={out._transpose is None}, "
+                    f"transpose_invalid={out._transpose_invalid}, "
+                    f"shape={tuple(input_tensor.shape)}",
+                    flush=True,
+                )
             if _triton_cast_transpose_noop is not None and not out._transpose_invalid:
+                _quant_bump("float8_triton_cast_transpose")
                 # Triton Float8 cast+transpose
                 q = out._get_quantizer()
                 is_current_scaling = (
@@ -389,6 +420,7 @@ def quantize(tensor, quantizer, output=None, noop=None):
                 )
                 return out
             else:
+                _quant_bump("float8_pytorch_fallback")
                 # Float8 without valid transpose or no Triton — PyTorch fallback
                 if hasattr(out, 'remove_caches'):
                     out.remove_caches()
@@ -396,17 +428,21 @@ def quantize(tensor, quantizer, output=None, noop=None):
 
     elif _MXFP8TensorStorage and isinstance(out, _MXFP8TensorStorage):
         if _triton_cast_transpose_mxfp8 is not None:
+            _quant_bump("mxfp8_triton")
             _triton_cast_transpose_mxfp8(input_tensor, out)
             return out
         else:
+            _quant_bump("mxfp8_pytorch_fallback")
             return _quantize_mxfp8_pytorch(input_tensor, quantizer, out)
 
     elif _MXFP4TensorStorage and isinstance(out, _MXFP4TensorStorage):
         if _triton_cast_transpose_mxfp4 is not None:
+            _quant_bump("mxfp4_triton")
             _triton_cast_transpose_mxfp4(input_tensor, out)
             return out
 
     # Fallback for unrecognized types
+    _quant_bump("unrecognized_pytorch_fallback")
     return _quantize_pytorch_fallback(tensor, quantizer, output, noop)
 
 

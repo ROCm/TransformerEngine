@@ -116,8 +116,12 @@ class _LayerNormLinearLite(torch.autograd.Function):
         # Save unquantized norm output if needed for return
         ln_out_return = ln_out if return_layernorm_output else None
 
-        # Quantize norm output if not already done via fused kernel
+        # Quantize norm output if not already done via fused kernel.
+        # Set columnwise usage up front so the quantizer allocates the
+        # transpose buffer — required for the Triton cast-transpose path
+        # (otherwise _transpose_invalid=True forces the PyTorch fallback).
         if fp8 and not with_quantized_norm and input_quantizer is not None:
+            input_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled)
             ln_out = input_quantizer(ln_out)
 
         # Prepare weight

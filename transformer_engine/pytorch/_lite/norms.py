@@ -24,6 +24,14 @@ import torch
 
 from .aiter_utils import is_aiter_available
 
+from collections import Counter as _NormCounter
+_NORM_CALLS = _NormCounter()
+
+def _norm_bump(tag):
+    _NORM_CALLS[tag] += 1
+    if sum(_NORM_CALLS.values()) % 500 == 0:
+        print(f"[LITE-NORM] {dict(_NORM_CALLS)}", flush=True)
+
 # ---------------------------------------------------------------------------
 # Lazy-loaded backends. None = not yet attempted.
 # ---------------------------------------------------------------------------
@@ -78,16 +86,34 @@ def _try_load_aiter_norms():
     except (ImportError, AttributeError):
         pass
 
-    # Fused norm+quantize kernels (separate try — these may not exist in older AITER)
-    try:
-        from aiter.ops.triton.fused_fp8_quant import (
-            fused_rms_fp8_per_tensor_static_quant,
-            fused_rms_fp8_group_quant,
-        )
-        _aiter_fused_rms_fp8_static = fused_rms_fp8_per_tensor_static_quant
-        _aiter_fused_rms_fp8_group = fused_rms_fp8_group_quant
-    except (ImportError, AttributeError):
-        pass
+    # Fused norm+quantize kernels. AITER reorganized these into a `quant/`
+    # subpackage in newer versions; try the new path first, then the legacy
+    # top-level path for older installs.
+    _fused_static = None
+    _fused_group = None
+    for _mod_path in (
+        "aiter.ops.triton.quant.fused_fp8_quant",
+        "aiter.ops.triton.fused_fp8_quant",
+    ):
+        try:
+            _mod = __import__(_mod_path, fromlist=[
+                "fused_rms_fp8_per_tensor_static_quant",
+                "fused_rms_fp8_group_quant",
+            ])
+            _fused_static = getattr(_mod, "fused_rms_fp8_per_tensor_static_quant", None)
+            _fused_group = getattr(_mod, "fused_rms_fp8_group_quant", None)
+            if _fused_static is not None or _fused_group is not None:
+                break
+        except BaseException as _e:
+            print(
+                f"[LITE-NORM-DIAG] {_mod_path} import failed: "
+                f"{type(_e).__name__}: {_e}",
+                flush=True,
+            )
+    if _fused_static is not None:
+        _aiter_fused_rms_fp8_static = _fused_static
+    if _fused_group is not None:
+        _aiter_fused_rms_fp8_group = _fused_group
 
     # Fused RMSNorm + per-row dynamic FP8 quantize (current scaling)
     try:
@@ -284,6 +310,8 @@ def _get_fp8_torch_dtype(quantizer):
         return torch.float8_e4m3fnuz
 
 
+_FUSED_RMS_DIAG_PRINTED = False
+
 def _try_fused_rmsnorm_quant(input_2d, weight, eps, quantizer, zero_centered_gamma,
                              orig_shape=None):
     """Attempt fused RMSNorm+FP8 quantize via AITER.
@@ -291,6 +319,19 @@ def _try_fused_rmsnorm_quant(input_2d, weight, eps, quantizer, zero_centered_gam
     Returns (output, rsigma) on success, or None if fusion not possible.
     The output is a QuantizedTensor (Float8Tensor or MXFP8Tensor).
     """
+    global _FUSED_RMS_DIAG_PRINTED
+    if not _FUSED_RMS_DIAG_PRINTED:
+        _FUSED_RMS_DIAG_PRINTED = True
+        qtype = type(quantizer).__name__ if quantizer is not None else "None"
+        print(
+            f"[LITE-NORM-DIAG] first fused-rms attempt: "
+            f"quantizer_type={qtype}, "
+            f"fused_dynamic={_aiter_fused_rms_dynamic_quant is not None}, "
+            f"fused_static={_aiter_fused_rms_fp8_static is not None}, "
+            f"fused_group={_aiter_fused_rms_fp8_group is not None}",
+            flush=True,
+        )
+
     if orig_shape is None:
         orig_shape = input_2d.shape
 
@@ -460,10 +501,12 @@ def layernorm_fwd(input, weight, bias, eps, ln_out, quantizer, otype, sm_margin,
 
     # Try AITER Triton
     if _aiter_ln_fwd is not None:
+        _norm_bump("ln_fwd_aiter_triton")
         out, mu, rsigma = _aiter_layernorm_fwd(input_2d, weight, bias, eps,
                                                 zero_centered_gamma)
     # Try TE Triton
     elif _triton_ln_fwd is not None:
+        _norm_bump("ln_fwd_te_triton")
         if otype is None:
             otype = input.dtype
         out, mu, rsigma = _triton_ln_fwd(
@@ -477,6 +520,7 @@ def layernorm_fwd(input, weight, bias, eps, ln_out, quantizer, otype, sm_margin,
         return out, mu, rsigma
     # PyTorch fallback
     else:
+        _norm_bump("ln_fwd_pytorch")
         out, mu, rsigma = _layernorm_fwd_pytorch(input_2d, weight, bias, eps,
                                                   zero_centered_gamma)
 
@@ -518,14 +562,17 @@ def layernorm_bwd(grad_output, input, mean, rstdev, weight, sm_margin,
         rstdev = rstdev.reshape(-1)
 
     if _aiter_ln_bwd is not None:
+        _norm_bump("ln_bwd_aiter_triton")
         dx, dgamma, dbeta = _aiter_layernorm_bwd(grad_2d, input_2d, mean, rstdev,
                                                    weight, zero_centered_gamma)
     elif _triton_ln_bwd is not None:
+        _norm_bump("ln_bwd_te_triton")
         dx, dgamma, dbeta = _triton_ln_bwd(
             grad_2d, input_2d, mean, rstdev, weight, sm_margin,
             zero_centered_gamma,
         )
     else:
+        _norm_bump("ln_bwd_pytorch")
         dx, dgamma, dbeta = _layernorm_bwd_pytorch(grad_2d, input_2d, mean, rstdev,
                                                      weight, zero_centered_gamma)
 
@@ -554,16 +601,19 @@ def rmsnorm_fwd(input, weight, eps, ln_out, quantizer, otype, sm_margin,
         orig_shape=orig_shape,
     )
     if fused_result is not None:
+        _norm_bump("rms_fwd_aiter_fused_norm_quant")
         out, rsigma = fused_result
         rsigma = _restore_stats(rsigma, orig_shape)
         return out, torch.Tensor(), rsigma
 
     # Try AITER Triton (norm only, quantize separate)
     if _aiter_rms_fwd is not None:
+        _norm_bump("rms_fwd_aiter_triton_unfused")
         out, rsigma = _aiter_rmsnorm_fwd(input_2d, weight, eps, zero_centered_gamma)
         mu = torch.Tensor()
     # Try TE Triton (handles quantizer internally)
     elif _triton_rms_fwd is not None:
+        _norm_bump("rms_fwd_te_triton")
         if otype is None:
             otype = input.dtype
         out, mu, rsigma = _triton_rms_fwd(
@@ -575,6 +625,7 @@ def rmsnorm_fwd(input, weight, eps, ln_out, quantizer, otype, sm_margin,
         return out, mu, rsigma
     # PyTorch fallback
     else:
+        _norm_bump("rms_fwd_pytorch")
         out, rsigma = _rmsnorm_fwd_pytorch(input_2d, weight, eps, zero_centered_gamma)
         mu = torch.Tensor()
 
@@ -612,14 +663,17 @@ def rmsnorm_bwd(grad_output, input, rstdev, weight, sm_margin, zero_centered_gam
         rstdev = rstdev.reshape(-1)
 
     if _aiter_rms_bwd is not None:
+        _norm_bump("rms_bwd_aiter_triton")
         dx, dgamma = _aiter_rmsnorm_bwd(grad_2d, input_2d, rstdev, weight,
                                          zero_centered_gamma)
     elif _triton_rms_bwd is not None:
+        _norm_bump("rms_bwd_te_triton")
         dx, dgamma = _triton_rms_bwd(
             grad_2d, input_2d, rstdev, weight, sm_margin,
             zero_centered_gamma,
         )
     else:
+        _norm_bump("rms_bwd_pytorch")
         dx, dgamma = _rmsnorm_bwd_pytorch(grad_2d, input_2d, rstdev, weight,
                                            zero_centered_gamma)
 

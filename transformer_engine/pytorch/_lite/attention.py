@@ -21,6 +21,15 @@ from .enums import (
     NVTE_QKV_Layout, NVTE_QKV_Format,
 )
 
+# --- Debug dispatch counter (matches _lite/gemm.py probe style) ---
+from collections import Counter as _AttnCounter
+_ATTN_CALLS = _AttnCounter()
+
+def _attn_bump(tag):
+    _ATTN_CALLS[tag] += 1
+    if sum(_ATTN_CALLS.values()) % 500 == 0:
+        print(f"[LITE-ATTN] {dict(_ATTN_CALLS)}", flush=True)
+
 # ---------------------------------------------------------------------------
 # AITER raw kernel imports (lazy)
 # ---------------------------------------------------------------------------
@@ -551,6 +560,7 @@ def fused_attn_fwd(
         backend = NVTE_Fused_Attn_Backend.NVTE_SDPA
 
     if backend == NVTE_Fused_Attn_Backend.NVTE_CK:
+        _attn_bump("fwd_aiter_ck")
         out, aux_ctx_tensors = _aiter_attn_fwd(
             q, k, v, cu_seqlens_q, cu_seqlens_kv,
             max_seqlen_q, max_seqlen_kv,
@@ -559,11 +569,13 @@ def fused_attn_fwd(
             cu_seqlens_q_padded, cu_seqlens_kv_padded,
         )
     elif backend == NVTE_Fused_Attn_Backend.NVTE_Flash:
+        _attn_bump("fwd_flash_stub")
         raise NotImplementedError(
             "Flash-attention backend is stubbed in lite mode. "
             "Install AITER or use the SDPA fallback."
         )
     else:
+        _attn_bump("fwd_sdpa")
         out, aux_ctx_tensors = _sdpa_attn_fwd(
             q, k, v, cu_seqlens_q, cu_seqlens_kv,
             max_seqlen_q, max_seqlen_kv,
@@ -626,6 +638,7 @@ def fused_attn_bwd(
         backend = NVTE_Fused_Attn_Backend.NVTE_SDPA
 
     if backend == NVTE_Fused_Attn_Backend.NVTE_CK:
+        _attn_bump("bwd_aiter_ck")
         softmax_lse = aux_ctx_tensors[0] if aux_ctx_tensors else None
         rng_state = aux_ctx_tensors[1] if len(aux_ctx_tensors) > 1 else None
         dq, dk, dv = _aiter_attn_bwd(
@@ -637,10 +650,12 @@ def fused_attn_bwd(
             cu_seqlens_q_padded, cu_seqlens_kv_padded,
         )
     elif backend == NVTE_Fused_Attn_Backend.NVTE_Flash:
+        _attn_bump("bwd_flash_stub")
         raise NotImplementedError(
             "Flash-attention backward is stubbed in lite mode."
         )
     else:
+        _attn_bump("bwd_sdpa")
         dq, dk, dv = _sdpa_attn_bwd(
             d_o, q, k, v, o,
             cu_seqlens_q, cu_seqlens_kv,
