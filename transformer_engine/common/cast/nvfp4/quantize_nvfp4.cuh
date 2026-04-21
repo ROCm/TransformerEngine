@@ -674,6 +674,513 @@ inline void quantize(const Tensor &input, const Tensor *noop, Tensor *output, cu
 #endif  // FP4_TYPE_SUPPORTED
 }
 
+// ---------------------------------------------------------------------------
+// AMD TDM (Tensor Data Mover) port for gfx1250
+// ---------------------------------------------------------------------------
+#ifdef __HIP_PLATFORM_AMD__
+#if defined(__gfx1250__)
+
+}  // namespace nvfp4  (temporarily close for tdm.cuh include)
+}  // namespace dispatch
+#include "../../util/tdm.cuh"
+namespace dispatch {
+namespace nvfp4 {
+
+// Runtime check for gfx1250 TDM support.
+// Guard against re-definition when other headers include the same helper.
+#ifndef TRANSFORMER_ENGINE_NVFP4_IS_GFX1250_DEFINED_
+#define TRANSFORMER_ENGINE_NVFP4_IS_GFX1250_DEFINED_
+inline bool is_gfx1250() {
+  static int result = -1;
+  if (result < 0) {
+    int device;
+    (void)hipGetDevice(&device);
+    hipDeviceProp_t prop;
+    (void)hipGetDeviceProperties(&prop, device);
+    result = (strncmp(prop.gcnArchName, "gfx1250", 7) == 0) ? 1 : 0;
+  }
+  return result == 1;
+}
+#endif  // TRANSFORMER_ENGINE_NVFP4_IS_GFX1250_DEFINED_
+
+namespace quantize_nvfp4_tdm_kernel {
+
+using namespace quantization_SF;
+using namespace core;
+
+// TDM-specific tile dimensions — match FP8 TDM pattern (16-row buffers)
+constexpr size_t TDM_NVFP4_CHUNK_DIM_Y = 128;
+constexpr size_t TDM_NVFP4_CHUNK_DIM_X = 128;
+constexpr size_t TDM_NVFP4_THREADS_PER_CHUNK = 128;
+constexpr size_t TDM_NVFP4_BUFFERS_NUM = 2;
+
+constexpr size_t TDM_NVFP4_BUFFER_DIM_Y = 32;  // Process 32 rows per buffer (matches BUFF_DIM_Y)
+constexpr size_t TDM_NVFP4_BUFFER_DIM_X = TDM_NVFP4_CHUNK_DIM_X;  // 128
+constexpr size_t TDM_NVFP4_SHMEM_DIM_Y = TDM_NVFP4_BUFFER_DIM_Y;  // 32
+constexpr size_t TDM_NVFP4_SHMEM_DIM_X = TDM_NVFP4_BUFFER_DIM_X;  // 128
+constexpr size_t TDM_NVFP4_ITERATIONS = TDM_NVFP4_CHUNK_DIM_Y / TDM_NVFP4_BUFFER_DIM_Y;  // 4
+
+// NVFP4 scaling constants (same as NV kernel)
+constexpr size_t TDM_SCALE_DIM_Y = 32;
+constexpr size_t TDM_SCALE_DIM_X = 16;
+constexpr size_t TDM_PACK_SIZE = 8;
+constexpr size_t TDM_WAVES = TDM_SCALE_DIM_X / TDM_PACK_SIZE;  // 2
+
+// Number of 4-bit elements that span 32 banks (4-byte each) of shared memory
+constexpr size_t TDM_TOTAL_BANKS_WIDTH = (32 * 4 * 8) / 4;  // 256
+constexpr size_t TDM_THREADS_PER_BANK = TDM_TOTAL_BANKS_WIDTH / TDM_SCALE_DIM_X;  // 16
+
+// Thread tiling for rowwise processing
+constexpr size_t TDM_NVFP4_SCALING_FACTORS_PER_CHUNK_ROW =
+    TDM_NVFP4_CHUNK_DIM_X / TDM_SCALE_DIM_X;  // 8
+constexpr size_t TDM_THREADS_X_ROWWISE = TDM_NVFP4_SCALING_FACTORS_PER_CHUNK_ROW;  // 8
+constexpr size_t TDM_THREADS_Y_ROWWISE =
+    TDM_NVFP4_THREADS_PER_CHUNK / TDM_THREADS_X_ROWWISE;  // 16
+constexpr size_t TDM_ITERATIONS_ROWWISE =
+    TDM_NVFP4_BUFFER_DIM_Y / TDM_THREADS_Y_ROWWISE;  // 2
+
+/// @brief TDM-accelerated NVFP4 quantization kernel for gfx1250.
+///
+/// This kernel performs rowwise NVFP4 quantization using AMD TDM for
+/// asynchronous global<->LDS data movement instead of NVIDIA TMA.
+///
+/// @tparam IType   Input type (bf16 or fp16).
+/// @tparam OType   Colwise output FP8 type (only used when COLWISE_SCALING=true).
+template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
+          typename IType, typename OType, bool COLWISE_SCALING>
+__global__ void __launch_bounds__(TDM_NVFP4_THREADS_PER_CHUNK)
+    quantize_nvfp4_tdm_kernel(const IType *__restrict__ input_ptr,
+                              fp4e2m1x2 *__restrict__ output_rowwise_ptr,
+                              OType *__restrict__ output_colwise_ptr,
+                              fp8e4m3 *const scales_rowwise_e4m3,
+                              e8m0_t *const scales_colwise_e8m0,
+                              const float *noop,
+                              float *const amax_ptr,
+                              const float *const nvfp4_second_stage_scale_ptr,
+                              const size_t rows, const size_t cols,
+                              const size_t scale_stride_rowwise,
+                              const size_t scale_stride_colwise) {
+  using namespace transformer_engine::tdm;
+
+  constexpr bool ROWWISE_SCALING = true;
+  // NOTE: On AMD/HIP the abs_max_2x and IType2-based fast paths from the NV kernel
+  // rely on CUDA PTX instructions (max.xorsign.abs) not available on gfx1250.
+  // We always use the general float-based code path instead.
+
+  using IType2 = typename ptx::FPx2<IType>;
+
+  if constexpr (!COMPUTE_ACTIVATIONS) {
+    if (noop != nullptr && noop[0] == 1.0f) {
+      return;
+    }
+  }
+
+  constexpr size_t BUFF_IN_DIM_X = TDM_NVFP4_SHMEM_DIM_X;  // 128
+  constexpr size_t BUFF_OUT_DIM_X = (TDM_NVFP4_SHMEM_DIM_X * 4) / 8;  // 64 (packed NVFP4)
+  constexpr size_t BUFF_IN_DIM = TDM_NVFP4_SHMEM_DIM_Y * BUFF_IN_DIM_X;
+  constexpr size_t BUFF_OUT_DIM = TDM_NVFP4_SHMEM_DIM_Y * BUFF_OUT_DIM_X;
+
+  const size_t block_offset_Y = blockIdx.y * TDM_NVFP4_CHUNK_DIM_Y;
+  const size_t block_offset_X = blockIdx.x * TDM_NVFP4_CHUNK_DIM_X;
+  const int scales_block_offset_Y_rowwise = blockIdx.y * TDM_NVFP4_CHUNK_DIM_Y;
+  const int scales_block_offset_X_rowwise =
+      blockIdx.x * TDM_NVFP4_CHUNK_DIM_X / TDM_SCALE_DIM_X;
+  const int scales_block_offset_Y_colwise = blockIdx.y * TDM_NVFP4_CHUNK_DIM_Y / TDM_SCALE_DIM_Y;
+  const int scales_block_offset_X_colwise = blockIdx.x * TDM_NVFP4_CHUNK_DIM_X;
+
+  const int tid_Y_rowwise = threadIdx.x / TDM_THREADS_X_ROWWISE;
+  const int tid_X_rowwise = threadIdx.x % TDM_THREADS_X_ROWWISE;
+
+  const int thread_offset_Y_rowwise = tid_Y_rowwise;
+  const int thread_offset_X_rowwise = tid_X_rowwise * TDM_SCALE_DIM_X;
+
+  const int row_base_rowwise = block_offset_Y + thread_offset_Y_rowwise;
+
+  // Colwise threading (1 thread per column element)
+  const int tid_Y_colwise = 0;
+  const int tid_X_colwise = threadIdx.x;
+  const int thread_offset_X_colwise = tid_X_colwise;
+  const int row_base_colwise = block_offset_Y + tid_Y_colwise;
+  const int col_base_colwise = block_offset_X + thread_offset_X_colwise;
+  const bool col_out_of_bounds_colwise = (col_base_colwise >= static_cast<int>(cols));
+
+  const int scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + tid_Y_rowwise;
+  const int scales_offset_X_rowwise = scales_block_offset_X_rowwise + tid_X_rowwise;
+  const int scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
+  const int scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
+
+  const bool rowwise_scale_is_within_bounds =
+      scales_offset_X_rowwise < static_cast<int>(cols);
+  const bool colwise_scale_is_within_bounds =
+      scales_offset_X_colwise < static_cast<int>(cols);
+
+  // Bank-conflict avoidance
+  const int thread_lane = threadIdx.x % THREADS_PER_WARP;
+  const int bank_group = thread_lane / TDM_THREADS_PER_BANK;
+
+  // Compute global encoding/decoding scaling factor
+  const float S_enc =
+      (nvfp4_second_stage_scale_ptr == nullptr) ? 1.0f : 1.0f / (*nvfp4_second_stage_scale_ptr);
+
+  float thread_amax = 0.0f;
+
+  // Shared memory buffers
+  __shared__ alignas(128) IType in_sh[TDM_NVFP4_BUFFERS_NUM][TDM_NVFP4_SHMEM_DIM_Y][BUFF_IN_DIM_X];
+  __shared__ alignas(128) fp4e2m1x2
+      out_rowwise_sh[TDM_NVFP4_BUFFERS_NUM][TDM_NVFP4_SHMEM_DIM_Y][BUFF_OUT_DIM_X];
+  // Colwise output buffer (only used when COLWISE_SCALING is true, but declared always
+  // to keep shmem layout simple — compiler will optimize unused away)
+  __shared__ alignas(128) OType
+      out_colwise_sh[TDM_NVFP4_BUFFERS_NUM][TDM_NVFP4_SHMEM_DIM_Y][BUFF_IN_DIM_X];
+
+  constexpr uint32_t input_data_size =
+      transformer_engine::tdm::get_data_size_from_bits(sizeof(IType) * 8);
+  constexpr uint32_t output_nvfp4_data_size = 0;  // NVFP4 packed as uint8
+  constexpr uint32_t output_colwise_data_size =
+      transformer_engine::tdm::get_data_size_from_bits(sizeof(OType) * 8);
+
+  const uint32_t tensor_w = static_cast<uint32_t>(cols);
+  const uint32_t tensor_h = static_cast<uint32_t>(rows);
+  const uint32_t stride_in = static_cast<uint32_t>(cols);
+  // NVFP4 output: 2 elements packed per byte, so stride and width are halved
+  const uint32_t tensor_w_nvfp4 = static_cast<uint32_t>(cols / 2);
+  const uint32_t stride_nvfp4 = tensor_w_nvfp4;
+
+  // --- Prologue: TDM wave prefetches first input buffer ---
+  {
+    const uint32_t chunk_y = static_cast<uint32_t>(block_offset_Y);
+    const uint32_t chunk_x = static_cast<uint32_t>(block_offset_X);
+    copy_2d_to_shared(
+        &in_sh[0][0][0], input_ptr, chunk_x, chunk_y,
+        TDM_NVFP4_SHMEM_DIM_X, TDM_NVFP4_SHMEM_DIM_Y,
+        tensor_w, tensor_h, stride_in, input_data_size);
+  }
+
+  // --- Main loop ---
+#pragma unroll
+  for (int iter = 0; iter < TDM_NVFP4_ITERATIONS; ++iter) {
+    const int buff = iter % TDM_NVFP4_BUFFERS_NUM;
+    const int next_iter = iter + 1;
+    const size_t stage_offset_Y = iter * TDM_NVFP4_BUFFER_DIM_Y;
+
+    // Prefetch next input buffer
+    if (next_iter < TDM_NVFP4_ITERATIONS) {
+      const uint32_t next_chunk_y =
+          static_cast<uint32_t>(block_offset_Y + next_iter * TDM_NVFP4_BUFFER_DIM_Y);
+      const uint32_t chunk_x = static_cast<uint32_t>(block_offset_X);
+      const int next_buff = next_iter % TDM_NVFP4_BUFFERS_NUM;
+      copy_2d_to_shared(
+          &in_sh[next_buff][0][0], input_ptr, chunk_x, next_chunk_y,
+          TDM_NVFP4_SHMEM_DIM_X, TDM_NVFP4_SHMEM_DIM_Y,
+          tensor_w, tensor_h, stride_in, input_data_size);
+    }
+
+    // Wait for current buffer's load to complete
+    if (is_tdm_wave()) {
+      if (next_iter < TDM_NVFP4_ITERATIONS) {
+        wait_tensorcnt_1();  // 1 prefetch load outstanding
+      } else {
+        wait_tensorcnt_0();
+      }
+    }
+    __syncthreads();
+
+    // ---- Colwise scaling pass (if enabled) ----
+    float block_amax = 0.0f;
+    if constexpr (COLWISE_SCALING) {
+      const int shmem_offset_base_colwise = tid_X_colwise;
+
+      block_amax = 0.0f;
+      float in_compute_colwise[TDM_SCALE_DIM_Y];
+
+      // Read elements, compute colwise amax
+#pragma unroll
+      for (int i = 0; i < static_cast<int>(TDM_SCALE_DIM_Y); ++i) {
+        float elt = static_cast<float>(in_sh[buff][i][shmem_offset_base_colwise]);
+        if constexpr (COMPUTE_ACTIVATIONS) {
+          elt = OP(elt, {});
+        }
+        if constexpr (!std::is_same_v<IType, float>) {
+          elt = static_cast<float>(static_cast<IType>(elt));
+        }
+        if constexpr (COMPUTE_ACTIVATIONS) {
+          const bool row_out_of_bounds = (row_base_colwise + stage_offset_Y + i >= static_cast<int>(rows));
+          const bool out_of_bounds = (col_out_of_bounds_colwise || row_out_of_bounds);
+          if (!out_of_bounds) {
+            block_amax = fmaxf(block_amax, fabsf(elt));
+          }
+        } else {
+          block_amax = fmaxf(block_amax, fabsf(elt));
+        }
+        in_compute_colwise[i] = elt;
+      }
+
+      // Compute E8M0 scaling factor
+      const e8m0_t biased_exponent =
+          ptx::float_to_e8m0(block_amax * Quantized_Limits<OType>::max_norm_rcp);
+
+      const int global_scales_offset_Y = scales_offset_Y_colwise + iter;
+      const int global_scales_offset_X = scales_offset_X_colwise;
+      const int scale_idx =
+          global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
+      if (colwise_scale_is_within_bounds) {
+        scales_colwise_e8m0[scale_idx] = biased_exponent;
+      }
+      const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+
+      // Scale and store to colwise output shmem
+#pragma unroll
+      for (int i = 0; i < static_cast<int>(TDM_SCALE_DIM_Y); ++i) {
+        const float scaled_out = in_compute_colwise[i] * block_scale_inverse;
+        out_colwise_sh[buff][i][shmem_offset_base_colwise] = static_cast<OType>(scaled_out);
+      }
+    }
+
+    // ---- Rowwise NVFP4 scaling pass ----
+    if constexpr (ROWWISE_SCALING) {
+      const int stage_rowwise_scales_offset_Y = iter * TDM_NVFP4_BUFFER_DIM_Y;
+#pragma unroll
+      for (int it = 0; it < static_cast<int>(TDM_ITERATIONS_ROWWISE); ++it) {
+        const int it_thread_offset_Y_rowwise =
+            thread_offset_Y_rowwise + it * TDM_THREADS_Y_ROWWISE;
+
+        const int shmem_offset_base_rowwise_in = it_thread_offset_Y_rowwise * BUFF_IN_DIM_X;
+        const int shmem_offset_base_rowwise_out = it_thread_offset_Y_rowwise * BUFF_OUT_DIM_X;
+
+        const int it_offset_Y = stage_offset_Y + it * TDM_THREADS_Y_ROWWISE;
+
+        block_amax = 0.0f;
+        float in_compute_rowwise[TDM_SCALE_DIM_X];
+
+        // 1. Read elements and find NVFP4-block amax
+        // (Always use the general float-based path on AMD — no abs_max_2x PTX)
+#pragma unroll
+        for (int w = 0; w < static_cast<int>(TDM_WAVES); ++w) {
+          const int swizzled_group_idx =
+              ((w + bank_group) * TDM_PACK_SIZE) % TDM_SCALE_DIM_X;
+          const int swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+
+          Vec<IType, TDM_PACK_SIZE> in;
+          in.load_from(
+              &(reinterpret_cast<IType *>(&in_sh[buff][0][0])[shmem_offset_base_rowwise_in + swizzled_thread_idx]));
+#pragma unroll
+          for (int e = 0; e < static_cast<int>(TDM_PACK_SIZE); ++e) {
+            const int j = w * TDM_PACK_SIZE + e;
+            float elt = static_cast<float>(in.data.elt[e]);
+            if constexpr (COMPUTE_ACTIVATIONS) {
+              elt = OP(elt, {});
+            }
+            if constexpr (!std::is_same_v<IType, float>) {
+              elt = static_cast<float>(static_cast<IType>(elt));
+            }
+            if constexpr (COMPUTE_ACTIVATIONS) {
+              const bool row_out_of_bounds_rowwise =
+                  (row_base_rowwise + it_offset_Y >= static_cast<int>(rows));
+              const bool swizzled_col_out_of_bounds =
+                  (block_offset_X + swizzled_thread_idx >= cols);
+              const bool out_of_bounds =
+                  (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
+              if (!out_of_bounds) {
+                block_amax = fmaxf(block_amax, fabsf(elt));
+              }
+            } else {
+              block_amax = fmaxf(block_amax, fabsf(elt));
+            }
+            in_compute_rowwise[j] = elt;
+          }
+        }
+
+        // 2. Compute E4M3 scaling factor
+        const fp8e4m3 S_dec_b_fp8 = compute_decoding_scaling_factor(block_amax, S_enc);
+
+        // Direct store of scaling factors to global memory
+        if (rowwise_scale_is_within_bounds) {
+          const int scales_offset_Y =
+              scales_offset_Y_rowwise + stage_rowwise_scales_offset_Y + it * TDM_THREADS_Y_ROWWISE;
+          const int scales_offset_X = scales_offset_X_rowwise;
+          const int scale_idx_global =
+              scales_offset_Y * scale_stride_rowwise + scales_offset_X;
+          scales_rowwise_e4m3[scale_idx_global] = S_dec_b_fp8;
+        }
+
+        // Compute per-block encoding scaling factor
+        const float block_scale_inverse =
+            __fdiv_rn(S_enc, static_cast<float>(S_dec_b_fp8));
+
+// 3. Scale elements and pack to NVFP4
+#pragma unroll
+        for (int w = 0; w < static_cast<int>(TDM_WAVES); ++w) {
+          Vec<fp4e2m1x4, TDM_PACK_SIZE / 4> out;
+#pragma unroll
+          for (int e = 0; e < static_cast<int>(TDM_PACK_SIZE / 4); ++e) {
+            IType2 in01;
+            IType2 in23;
+            {
+              const int j = w * TDM_PACK_SIZE + 4 * e;
+              in01.x = in_compute_rowwise[j];
+              in01.y = in_compute_rowwise[j + 1];
+              in23.x = in_compute_rowwise[j + 2];
+              in23.y = in_compute_rowwise[j + 3];
+            }
+            fp4e2m1x4 &out_quad = reinterpret_cast<fp4e2m1x4 &>(out.data.elt[e]);
+            ptx::mul_cvt_4x(out_quad, in01, in23, block_scale_inverse);
+          }
+          const int swizzled_group_idx =
+              ((w + bank_group) * TDM_PACK_SIZE) % TDM_SCALE_DIM_X;
+          const int swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
+          const int shmem_offset_rowwise = shmem_offset_base_rowwise_out + swizzled_idx / 2;
+          out.store_to(
+              &(reinterpret_cast<fp4e2m1x2 *>(&out_rowwise_sh[buff][0][0])[shmem_offset_rowwise]));
+        }
+      }
+    }
+
+    __builtin_assume(thread_amax >= 0);
+    __builtin_assume(block_amax >= 0);
+    thread_amax = fmaxf(thread_amax, block_amax);
+
+    // Ensure all threads finished writing shmem before TDM stores
+    __syncthreads();
+
+    // TDM store: rowwise NVFP4 output shmem -> global
+    if constexpr (ROWWISE_SCALING) {
+      const uint32_t store_chunk_y =
+          static_cast<uint32_t>(block_offset_Y + iter * TDM_NVFP4_BUFFER_DIM_Y);
+      const uint32_t store_chunk_x =
+          static_cast<uint32_t>(block_offset_X / 2);  // NVFP4: halved columns
+      store_2d_to_global(
+          &out_rowwise_sh[buff][0][0], output_rowwise_ptr,
+          store_chunk_x, store_chunk_y,
+          static_cast<uint32_t>(BUFF_OUT_DIM_X), TDM_NVFP4_SHMEM_DIM_Y,
+          tensor_w_nvfp4, tensor_h, stride_nvfp4, output_nvfp4_data_size);
+    }
+    // TDM store: colwise MXFP8 output shmem -> global
+    if constexpr (COLWISE_SCALING) {
+      const uint32_t store_chunk_y =
+          static_cast<uint32_t>(block_offset_Y + iter * TDM_NVFP4_BUFFER_DIM_Y);
+      const uint32_t store_chunk_x = static_cast<uint32_t>(block_offset_X);
+      store_2d_to_global(
+          &out_colwise_sh[buff][0][0], output_colwise_ptr,
+          store_chunk_x, store_chunk_y,
+          TDM_NVFP4_SHMEM_DIM_X, TDM_NVFP4_SHMEM_DIM_Y,
+          tensor_w, tensor_h, stride_in, output_colwise_data_size);
+    }
+  }
+
+  // Drain all outstanding TDM stores
+  if (is_tdm_wave()) {
+    wait_tensorcnt_0();
+  }
+  __syncthreads();
+
+  // --- Reduce amax across block ---
+  float chunk_amax = 0.0f;
+  if (amax_ptr != nullptr) {
+    const int warp_id = threadIdx.x / THREADS_PER_WARP;
+    chunk_amax =
+        reduce_max<TDM_NVFP4_THREADS_PER_CHUNK / THREADS_PER_WARP>(thread_amax, warp_id);
+  }
+
+  if (threadIdx.x == 0 && amax_ptr != nullptr) {
+    atomicMaxFloat(amax_ptr, chunk_amax);
+  }
+}
+
+}  // namespace quantize_nvfp4_tdm_kernel
+
+// TDM launcher for NVFP4 quantize
+inline void quantize_tdm(const Tensor &input, const Tensor *noop, Tensor *output,
+                          cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
+  using namespace quantize_nvfp4_tdm_kernel;
+
+  constexpr bool COMPUTE_ACTIVATIONS = false;
+  using ParamOP = Empty;
+  constexpr float (*OP)(float, const ParamOP &) = nullptr;
+
+  NVTE_CHECK(output->has_data(), "NVFP4 Output tensor must be allocated.");
+  NVTE_CHECK(input.has_data(), "Cannot quantize tensor without rowwise data.");
+  NVTE_CHECK(is_fp4_dtype(output->data.dtype), "Output must have FP4 type.");
+  NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
+
+  bool use_colwise_scaling = output->has_columnwise_data();
+  if (use_colwise_scaling) {
+    NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr,
+               "Columnwise scaling tensor must be allocated");
+  }
+  CheckNoopTensor(*noop, "cast_noop");
+
+  const size_t rows = input.flat_first_dim();
+  const size_t cols = input.flat_last_dim();
+
+  const size_t blocks_Y = DIVUP(rows, TDM_NVFP4_CHUNK_DIM_Y);
+  const size_t blocks_X = DIVUP(cols, TDM_NVFP4_CHUNK_DIM_X);
+  const dim3 grid(blocks_X, blocks_Y);
+  const dim3 block(TDM_NVFP4_THREADS_PER_CHUNK);
+
+  const size_t scale_stride_rowwise = output->scale_inv.shape[1];
+  const size_t scale_stride_colwise =
+      use_colwise_scaling ? output->columnwise_scale_inv.shape[1] : 1;
+
+  fp8e4m3 *const scales_rowwise_e4m3_ptr =
+      reinterpret_cast<fp8e4m3 *>(output->scale_inv.dptr);
+  e8m0_t *const scales_colwise_e8m0_ptr =
+      use_colwise_scaling ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr)
+                          : nullptr;
+
+  const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
+  float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
+  const float *const nvfp4_second_stage_scale_ptr =
+      reinterpret_cast<const float *>(output->scale.dptr);
+
+  const DType output_data_type =
+      use_colwise_scaling ? output->columnwise_data.dtype : DType::kFloat8E4M3;
+
+  const ScalingType scaling_type =
+      use_colwise_scaling ? ScalingType::BIDIMENSIONAL : ScalingType::ROWWISE;
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      input.dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          output_data_type, OType,
+
+          const IType *input_data = reinterpret_cast<const IType *>(input.data.dptr);
+          fp4e2m1x2 *output_rowwise_data =
+              reinterpret_cast<fp4e2m1x2 *>(output->data.dptr);
+          OType *output_colwise_data = use_colwise_scaling
+              ? reinterpret_cast<OType *>(output->columnwise_data.dptr)
+              : nullptr;
+
+          switch (scaling_type) {
+            case ScalingType::ROWWISE: {
+              quantize_nvfp4_tdm_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, false>
+                  <<<grid, block, 0, stream>>>(
+                      input_data, output_rowwise_data, output_colwise_data,
+                      scales_rowwise_e4m3_ptr, scales_colwise_e8m0_ptr,
+                      noop_ptr, amax_ptr, nvfp4_second_stage_scale_ptr,
+                      rows, cols, scale_stride_rowwise, scale_stride_colwise);
+              break;
+            }
+            case ScalingType::BIDIMENSIONAL: {
+              quantize_nvfp4_tdm_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType, OType, true>
+                  <<<grid, block, 0, stream>>>(
+                      input_data, output_rowwise_data, output_colwise_data,
+                      scales_rowwise_e4m3_ptr, scales_colwise_e8m0_ptr,
+                      noop_ptr, amax_ptr, nvfp4_second_stage_scale_ptr,
+                      rows, cols, scale_stride_rowwise, scale_stride_colwise);
+              break;
+            }
+          }
+          NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
+  );                                              // NOLINT(*)
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+ or HIPCC.");
+#endif  // FP4_TYPE_SUPPORTED
+}
+
+#endif  // defined(__gfx1250__)
+#endif  // __HIP_PLATFORM_AMD__
+
 }  // namespace nvfp4
 }  // namespace dispatch
 }  // namespace transformer_engine

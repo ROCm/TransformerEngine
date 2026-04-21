@@ -40,6 +40,24 @@ namespace transformer_engine {
 namespace dispatch {
 namespace fp8 {
 #ifdef __HIP_PLATFORM_AMD__
+
+// Runtime check for gfx1250 TDM support.
+// Guard against re-definition when gated_fp8.cuh is included in the same TU.
+#ifndef TRANSFORMER_ENGINE_IS_GFX1250_DEFINED_
+#define TRANSFORMER_ENGINE_IS_GFX1250_DEFINED_
+inline bool is_gfx1250() {
+  static int result = -1;
+  if (result < 0) {
+    int device;
+    (void)hipGetDevice(&device);
+    hipDeviceProp_t prop;
+    (void)hipGetDeviceProperties(&prop, device);
+    result = (strncmp(prop.gcnArchName, "gfx1250", 7) == 0) ? 1 : 0;
+  }
+  return result == 1;
+}
+#endif  // TRANSFORMER_ENGINE_IS_GFX1250_DEFINED_
+
 constexpr size_t TILE_DIM = 32;
 template <typename DTypeReduce>
 __global__ void partial_reduce_kernel(const DTypeReduce* input, float* partial_output, int rows, int cols) {
@@ -89,6 +107,267 @@ void reduce_dbias_rocm(const DTypeReduce *workspace_ptr, Tensor *dbias, const si
   common::reduce_dbias<DBiasTypeOut>(partial_workspace, dbias, partial_rows, cols, stream);
 }
 
+// --- TDM (Tensor Data Mover) kernel for gfx1250 ---
+#if defined(__gfx1250__)
+}  // temporarily close namespace fp8
+}  // temporarily close namespace dispatch
+#include "../../util/tdm.cuh"
+namespace dispatch {
+namespace fp8 {
+
+namespace quantize_2D_tdm_kernel {
+
+constexpr size_t TDM_FP8_CHUNK_DIM_Y = 128;
+constexpr size_t TDM_FP8_CHUNK_DIM_X = 128;
+constexpr size_t TDM_FP8_THREADS_PER_CHUNK = 128;
+constexpr size_t TDM_FP8_BUFFERS_NUM = 2;
+constexpr size_t TDM_FP8_PREFETCH_BUFFERS_NUM = 1;
+
+constexpr size_t TDM_FP8_BUFFER_DIM_Y = 16;
+constexpr size_t TDM_FP8_BUFFER_DIM_X = TDM_FP8_CHUNK_DIM_X;  // 128
+constexpr size_t TDM_FP8_SHMEM_DIM_Y = TDM_FP8_BUFFER_DIM_Y;  // 16
+constexpr size_t TDM_FP8_SHMEM_DIM_X = TDM_FP8_BUFFER_DIM_X;  // 128
+constexpr size_t TDM_FP8_BUFF_STAGES_NUM = TDM_FP8_BUFFER_DIM_Y;               // 16
+constexpr size_t TDM_FP8_ITERATIONS = TDM_FP8_CHUNK_DIM_Y / TDM_FP8_BUFFER_DIM_Y;  // 8
+
+template <bool IS_DBIAS, bool IS_DACT, typename ParamOP, float (*OP)(float, const ParamOP &),
+          typename IType, typename OType>
+__global__ void __launch_bounds__(TDM_FP8_THREADS_PER_CHUNK)
+    cast_fp8_2D_tdm_kernel(const IType *__restrict__ input_ptr,
+                           const IType *__restrict__ act_input_ptr,
+                           OType *__restrict__ output_ptr,
+                           float *const dbias_workspace, float *const amax_ptr,
+                           float *const scale_inv_ptr, const float *const scale_ptr,
+                           const size_t rows, const size_t cols) {
+  using namespace transformer_engine::tdm;
+
+  const size_t block_offset_Y = blockIdx.y * TDM_FP8_CHUNK_DIM_Y;
+  const size_t block_offset_X = blockIdx.x * TDM_FP8_CHUNK_DIM_X;
+
+  const size_t tid_Y = threadIdx.x / TDM_FP8_THREADS_PER_CHUNK;
+  const size_t tid_X = threadIdx.x % TDM_FP8_THREADS_PER_CHUNK;
+  const size_t thread_offset_Y = tid_Y;
+  const size_t thread_offset_X = tid_X;
+
+  const size_t dbias_offset_Y = blockIdx.y + tid_Y;
+  const size_t my_column = blockIdx.x * TDM_FP8_CHUNK_DIM_X + thread_offset_X;
+  const bool col_out_of_bounds = my_column >= cols;
+  const size_t dbias_stride = cols;
+
+  float partial_dbias = 0.f;
+  float amax = 0;
+  const float scale = (scale_ptr != nullptr) ? *scale_ptr : 1;
+
+  // Shared memory buffers — matching NV kernel layout
+  __shared__ alignas(128) IType in_sh[TDM_FP8_BUFFERS_NUM][TDM_FP8_SHMEM_DIM_Y][TDM_FP8_SHMEM_DIM_X];
+  __shared__ alignas(128) IType act_in_sh[TDM_FP8_BUFFERS_NUM][TDM_FP8_SHMEM_DIM_Y][TDM_FP8_SHMEM_DIM_X];
+  __shared__ alignas(128) OType out_sh[TDM_FP8_BUFFERS_NUM][TDM_FP8_SHMEM_DIM_Y][TDM_FP8_SHMEM_DIM_X];
+
+  constexpr uint32_t input_data_size = get_data_size_from_bits(sizeof(IType) * 8);
+  constexpr uint32_t output_data_size = get_data_size_from_bits(sizeof(OType) * 8);
+  const uint32_t stride = static_cast<uint32_t>(cols);
+  const uint32_t tensor_w = static_cast<uint32_t>(cols);
+  const uint32_t tensor_h = static_cast<uint32_t>(rows);
+
+  // --- Prologue: TDM wave prefetches first buffer ---
+  {
+    const uint32_t chunk_y = static_cast<uint32_t>(block_offset_Y);
+    const uint32_t chunk_x = static_cast<uint32_t>(block_offset_X);
+    if constexpr (IS_DACT) {
+      copy_2d_to_shared_x2(
+          &in_sh[0][0][0], input_ptr, chunk_x, chunk_y,
+          &act_in_sh[0][0][0], act_input_ptr, chunk_x, chunk_y,
+          TDM_FP8_SHMEM_DIM_X, TDM_FP8_SHMEM_DIM_Y,
+          tensor_w, tensor_h, stride, input_data_size);
+    } else {
+      copy_2d_to_shared(
+          &in_sh[0][0][0], input_ptr, chunk_x, chunk_y,
+          TDM_FP8_SHMEM_DIM_X, TDM_FP8_SHMEM_DIM_Y,
+          tensor_w, tensor_h, stride, input_data_size);
+    }
+  }
+
+  // --- Main loop ---
+#pragma unroll
+  for (int iter = 0; iter < TDM_FP8_ITERATIONS; ++iter) {
+    const size_t buff = iter % TDM_FP8_BUFFERS_NUM;
+    const size_t next_iter = iter + TDM_FP8_PREFETCH_BUFFERS_NUM;
+    const size_t row_base = block_offset_Y + iter * TDM_FP8_BUFFER_DIM_Y;
+
+    // Prefetch next buffer
+    if (next_iter < TDM_FP8_ITERATIONS) {
+      const uint32_t next_chunk_y = static_cast<uint32_t>(block_offset_Y + next_iter * TDM_FP8_BUFFER_DIM_Y);
+      const uint32_t chunk_x = static_cast<uint32_t>(block_offset_X);
+      if constexpr (IS_DACT) {
+        const size_t next_buff = next_iter % TDM_FP8_BUFFERS_NUM;
+        copy_2d_to_shared_x2(
+            &in_sh[next_buff][0][0], input_ptr, chunk_x, next_chunk_y,
+            &act_in_sh[next_buff][0][0], act_input_ptr, chunk_x, next_chunk_y,
+            TDM_FP8_SHMEM_DIM_X, TDM_FP8_SHMEM_DIM_Y,
+            tensor_w, tensor_h, stride, input_data_size);
+      } else {
+        const size_t next_buff = next_iter % TDM_FP8_BUFFERS_NUM;
+        copy_2d_to_shared(
+            &in_sh[next_buff][0][0], input_ptr, chunk_x, next_chunk_y,
+            TDM_FP8_SHMEM_DIM_X, TDM_FP8_SHMEM_DIM_Y,
+            tensor_w, tensor_h, stride, input_data_size);
+      }
+    }
+
+    // Wait for current buffer's loads to complete.
+    // TENSORcnt tracks loads+stores in issue order, oldest first.
+    // IS_DACT: 2 loads per prefetch → wait(2) keeps prefetch alive; wait(0) for last.
+    // !IS_DACT: 1 load per prefetch → wait(1) keeps prefetch alive; wait(0) for last.
+    if (is_tdm_wave()) {
+      if (next_iter < TDM_FP8_ITERATIONS) {
+        if constexpr (IS_DACT) {
+          wait_tensorcnt_2();
+        } else {
+          wait_tensorcnt_1();
+        }
+      } else {
+        wait_tensorcnt_0();
+      }
+    }
+    __syncthreads();
+
+    // --- Compute: read from LDS, quantize, write to output shmem ---
+#pragma unroll
+    for (int stage = 0; stage < TDM_FP8_BUFF_STAGES_NUM; ++stage) {
+      const size_t shmem_offset_y = thread_offset_Y + stage;
+      const size_t shmem_offset_x = thread_offset_X;
+      const size_t row = row_base + shmem_offset_y;
+      const bool row_out_of_bounds = row >= rows;
+      const bool out_of_bounds = col_out_of_bounds || row_out_of_bounds;
+
+      float elt = static_cast<float>(in_sh[buff][shmem_offset_y][shmem_offset_x]);
+      if constexpr (IS_DACT) {
+        float act_in_elt = static_cast<float>(act_in_sh[buff][shmem_offset_y][shmem_offset_x]);
+        elt *= OP(act_in_elt, {});
+      }
+      if constexpr (IS_DBIAS) {
+        if constexpr (IS_DACT) {
+          if (!out_of_bounds) {
+            partial_dbias += elt;
+          }
+        } else {
+          partial_dbias += elt;
+        }
+      }
+      __builtin_assume(amax >= 0);
+      if (IS_DACT) {
+        if (!out_of_bounds) {
+          amax = fmaxf(amax, fabsf(elt));
+        }
+      } else {
+        amax = fmaxf(amax, fabsf(elt));
+      }
+      out_sh[buff][shmem_offset_y][shmem_offset_x] = static_cast<OType>(elt * scale);
+    }
+
+    // Ensure all threads finished writing shmem before TDM reads it
+    __syncthreads();
+
+    // TDM store: output shmem → global
+    {
+      const uint32_t store_chunk_y = static_cast<uint32_t>(block_offset_Y + iter * TDM_FP8_BUFFER_DIM_Y);
+      const uint32_t store_chunk_x = static_cast<uint32_t>(block_offset_X);
+      store_2d_to_global(
+          &out_sh[buff][0][0], output_ptr,
+          store_chunk_x, store_chunk_y,
+          TDM_FP8_SHMEM_DIM_X, TDM_FP8_SHMEM_DIM_Y,
+          tensor_w, tensor_h, stride, output_data_size);
+    }
+  }
+
+  // Drain final store
+  if (is_tdm_wave()) {
+    wait_tensorcnt_0();
+  }
+  __syncthreads();
+
+  // --- Reduce amax and write dbias/scale_inv ---
+  if constexpr (IS_DBIAS) {
+    const size_t dbias_offset_X = my_column;
+    const size_t dbias_offset = dbias_offset_Y * dbias_stride + dbias_offset_X;
+    if (!col_out_of_bounds) {
+      dbias_workspace[dbias_offset] = partial_dbias;
+    }
+  }
+
+  if (amax_ptr != nullptr) {
+    const int warp_id = threadIdx.x / THREADS_PER_WARP;
+    amax = reduce_max<TDM_FP8_THREADS_PER_CHUNK / THREADS_PER_WARP>(amax, warp_id);
+    if (threadIdx.x == 0) {
+      atomicMaxFloat(amax_ptr, amax);
+    }
+  }
+
+  if (threadIdx.x == 0 && blockIdx.x == 0 && (scale_inv_ptr != nullptr)) {
+    reciprocal<float>(scale_inv_ptr, scale);
+  }
+}
+}  // namespace quantize_2D_tdm_kernel
+
+// TDM launcher for FP8 2D quantize
+template <bool IS_DBIAS, bool IS_DACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
+void quantize_2D_tdm(const Tensor &input, const Tensor *act_input, Tensor *output, Tensor *dbias,
+                     Tensor *workspace, cudaStream_t stream) {
+  using namespace quantize_2D_tdm_kernel;
+
+  const size_t rows = input.flat_first_dim();
+  const size_t cols = input.flat_last_dim();
+  const size_t chunks_Y = DIVUP(rows, TDM_FP8_CHUNK_DIM_Y);
+  const size_t chunks_X = DIVUP(cols, TDM_FP8_CHUNK_DIM_X);
+
+  const size_t dbias_rows = chunks_Y;
+  const size_t dbias_cols = cols;
+
+  NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
+  NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated");
+
+  if constexpr (IS_DBIAS) {
+    NVTE_CHECK(dbias->data.dtype == input.data.dtype, "DBias must have the same type as input.");
+    NVTE_CHECK(dbias->data.shape == std::vector<size_t>{cols}, "Wrong shape of DBias.");
+    NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {dbias_rows, dbias_cols};
+      workspace->data.dtype = DType::kFloat32;
+      return;
+    }
+  }
+
+  float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
+  float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
+  float *const scale_inv_ptr = reinterpret_cast<float *>(output->scale_inv.dptr);
+  const float *const scale_ptr = reinterpret_cast<float *>(output->scale.dptr);
+
+  const dim3 block(TDM_FP8_THREADS_PER_CHUNK);
+  const dim3 grid(chunks_X, chunks_Y);
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      input.data.dtype, IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          output->data.dtype, OType,
+
+          const IType *input_data = reinterpret_cast<const IType *>(input.data.dptr);
+          const IType *act_input_data = IS_DACT ?
+              reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr;
+          OType *output_data = reinterpret_cast<OType *>(output->data.dptr);
+
+          cast_fp8_2D_tdm_kernel<IS_DBIAS, IS_DACT, ParamOP, OP, IType, OType>
+              <<<grid, block, 0, stream>>>(
+                  input_data, act_input_data, output_data,
+                  workspace_ptr, amax_ptr, scale_inv_ptr, scale_ptr, rows, cols);
+          NVTE_CHECK_CUDA(cudaGetLastError());
+
+          if constexpr (IS_DBIAS) {
+            common::reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
+          });  // NOLINT(*)
+  );           // NOLINT(*)
+}
+
+#endif  // defined(__gfx1250__)
 
 #else
 namespace quantize_2D_kernel {
@@ -613,6 +892,13 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop, 
 #ifdef __HIP_PLATFORM_AMD__
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
+
+  // gfx1250 TDM path — use TDM-accelerated 2D kernel when possible
+  if (is_gfx1250() && is_fp8_dtype(output->dtype()) && (cols % 128 == 0)) {
+    quantize_2D_tdm<IS_DBIAS, IS_DACT, ParamOP, OP>(input, act_input, output, dbias, workspace,
+                                                     stream);
+    return;
+  }
 
   if constexpr (IS_DBIAS) {
     NVTE_CHECK(workspace, "Workspace must be provided when IS_DBIAS is true.");

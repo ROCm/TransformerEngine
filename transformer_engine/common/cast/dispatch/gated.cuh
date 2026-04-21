@@ -49,7 +49,17 @@ void quantize_gated_fwd_helper(const NVTETensor nvte_input, NVTETensor nvte_outp
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
 #ifdef __HIP_PLATFORM_AMD__
+#if defined(__gfx1250__)
+      if (fp8::is_gfx1250() && is_fp8_dtype(output->dtype()) && (cols % 128 == 0)) {
+        Tensor dummy_grad_tensor;
+        fp8::cast_gated_tma_tdm</*IS_BWD=*/false, ParamOP, ActOP, nullptr>(
+            input, dummy_grad_tensor, output, p, stream);
+      } else {
+        fp8::cast_gated_fwd<ParamOP, ActOP>(input, output, p, stream);
+      }
+#else
       fp8::cast_gated_fwd<ParamOP, ActOP>(input, output, p, stream);
+#endif  // defined(__gfx1250__)
 #else
       const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
       if (use_tma_kernels) {
@@ -146,7 +156,16 @@ void quantize_gated_bwd_helper(const NVTETensor nvte_grad, const NVTETensor nvte
   switch (output->scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
 #ifdef __HIP_PLATFORM_AMD__
+#if defined(__gfx1250__)
+      if (fp8::is_gfx1250() && is_fp8_dtype(output->dtype()) && (cols % 128 == 0)) {
+        fp8::cast_gated_tma_tdm</*IS_BWD=*/true, ParamOP, ActOP, DActOP>(
+            gated_input, grad, output, p, stream);
+      } else {
+        fp8::cast_gated_bwd<ParamOP, ActOP, DActOP>(gated_input, grad, output, p, stream);
+      }
+#else
       fp8::cast_gated_bwd<ParamOP, ActOP, DActOP>(gated_input, grad, output, p, stream);
+#endif  // defined(__gfx1250__)
 #else
       const bool use_tma_kernels = (cols % 32 == 0) && is_supported_by_CC_100();
       if (use_tma_kernels) {

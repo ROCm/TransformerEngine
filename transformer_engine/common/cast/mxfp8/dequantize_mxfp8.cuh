@@ -35,7 +35,225 @@ namespace mxfp8 {
 namespace dequantize_kernel {
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_dequantize_mxfp8.cuh"
-#else
+
+// --- TDM (Tensor Data Mover) kernel for gfx1250 ---
+#if defined(__gfx1250__)
+}  // namespace dequantize_kernel (temporarily closed)
+}  // namespace mxfp8 (temporarily closed)
+}  // namespace dispatch (temporarily closed)
+#include "../../util/tdm.cuh"
+namespace dispatch {
+namespace mxfp8 {
+namespace dequantize_kernel {
+
+namespace dequantize_mxfp8_tdm_kernel {
+
+// Mirror the NV TMA kernel constants exactly.
+constexpr size_t TDM_CHUNK_DIM_Y        = 128;
+constexpr size_t TDM_CHUNK_DIM_X        = 128;
+constexpr size_t TDM_THREADS_PER_CHUNK  = 128;
+constexpr size_t TDM_BUFFERS_NUM        = 2;
+constexpr size_t TDM_PREFETCH_NUM       = 1;   // 1 buffer prefetched ahead
+
+constexpr size_t TDM_ELEMS_PER_THREAD   = 16;
+constexpr size_t TDM_BUFFER_DIM_Y       = 16;
+constexpr size_t TDM_BUFFER_DIM_X       = TDM_CHUNK_DIM_X;  // 128
+constexpr size_t TDM_SHMEM_DIM_Y        = TDM_BUFFER_DIM_Y;  // 16
+constexpr size_t TDM_SHMEM_DIM_X        = TDM_BUFFER_DIM_X;  // 128
+constexpr size_t TDM_ITERATIONS         = TDM_CHUNK_DIM_Y / TDM_BUFFER_DIM_Y;  // 8
+
+constexpr size_t TDM_THREADS_PER_CHUNK_X_ROWWISE = TDM_CHUNK_DIM_X / TDM_ELEMS_PER_THREAD;  //  8
+constexpr size_t TDM_THREADS_PER_CHUNK_X_COLWISE = TDM_CHUNK_DIM_X;                          // 128
+
+static_assert(TDM_ITERATIONS >= 1);
+static_assert(TDM_PREFETCH_NUM < TDM_BUFFERS_NUM);
+
+template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
+__global__ void __launch_bounds__(TDM_THREADS_PER_CHUNK)
+    dequantize_mxfp8_tdm_kernel(const IType *__restrict__ input_ptr,
+                                OType *__restrict__ output_ptr,
+                                const e8m0_t *const scales_ptr,
+                                const size_t rows, const size_t cols,
+                                const size_t scales_stride) {
+  using namespace transformer_engine::tdm;
+
+  constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
+
+  constexpr size_t SCALES_ROWWISE_PER_CHUNK_Y = TDM_CHUNK_DIM_Y;                // 128
+  constexpr size_t SCALES_ROWWISE_PER_CHUNK_X = TDM_CHUNK_DIM_X / SCALE_DIM_X;  //   4 = 128/32
+
+  constexpr size_t SCALES_COLWISE_PER_CHUNK_Y = TDM_CHUNK_DIM_Y / SCALE_DIM_Y;  //   4 = 128/32
+  constexpr size_t SCALES_COLWISE_PER_CHUNK_X = TDM_CHUNK_DIM_X;                // 128
+
+  constexpr size_t THREADS_PER_SCALE_X_ROWWISE =
+      DIVUP(SCALE_DIM_X, TDM_ELEMS_PER_THREAD);  // 2 = 32/16
+
+  const int chunk_offset_Y = blockIdx.y * TDM_CHUNK_DIM_Y;
+  const int chunk_offset_X = blockIdx.x * TDM_CHUNK_DIM_X;
+
+  const int scales_rowwise_chunk_offset_Y = blockIdx.y * SCALES_ROWWISE_PER_CHUNK_Y;
+  const int scales_rowwise_chunk_offset_X = blockIdx.x * SCALES_ROWWISE_PER_CHUNK_X;
+  const int scales_colwise_chunk_offset_Y = blockIdx.y * SCALES_COLWISE_PER_CHUNK_Y;
+  const int scales_colwise_chunk_offset_X = blockIdx.x * SCALES_COLWISE_PER_CHUNK_X;
+
+  const int tid_rowwise_Y = threadIdx.x / TDM_THREADS_PER_CHUNK_X_ROWWISE;
+  const int tid_rowwise_X = threadIdx.x % TDM_THREADS_PER_CHUNK_X_ROWWISE;
+  const int tid_colwise_X = threadIdx.x % TDM_THREADS_PER_CHUNK_X_COLWISE;
+
+  const int thread_offset_Y          = tid_rowwise_Y;
+  const int thread_offset_X_rowwise  = tid_rowwise_X * TDM_ELEMS_PER_THREAD;
+
+  // Shared memory buffers — double-buffered, matching NV kernel layout.
+  // 128-byte alignment required by TDM.
+  __shared__ alignas(128) IType in_sh [TDM_BUFFERS_NUM][TDM_SHMEM_DIM_Y][TDM_SHMEM_DIM_X];
+  __shared__ alignas(128) OType out_sh[TDM_BUFFERS_NUM][TDM_SHMEM_DIM_Y][TDM_SHMEM_DIM_X];
+
+  constexpr uint32_t input_data_size  = get_data_size_from_bits(sizeof(IType) * 8);
+  constexpr uint32_t output_data_size = get_data_size_from_bits(sizeof(OType) * 8);
+  const uint32_t tensor_w   = static_cast<uint32_t>(cols);
+  const uint32_t tensor_h   = static_cast<uint32_t>(rows);
+  const uint32_t stride_in  = static_cast<uint32_t>(cols);
+  const uint32_t stride_out = static_cast<uint32_t>(cols);
+
+  // --- Prologue: prefetch buffer 0 ---
+  {
+    const uint32_t chunk_y = static_cast<uint32_t>(chunk_offset_Y);
+    const uint32_t chunk_x = static_cast<uint32_t>(chunk_offset_X);
+    copy_2d_to_shared(
+        &in_sh[0][0][0], input_ptr,
+        chunk_x, chunk_y,
+        TDM_SHMEM_DIM_X, TDM_SHMEM_DIM_Y,
+        tensor_w, tensor_h, stride_in, input_data_size);
+  }
+
+  // --- Main pipeline loop (8 iterations, double-buffered) ---
+#pragma unroll
+  for (int iter = 0; iter < TDM_ITERATIONS; ++iter) {
+    const int buff      = iter % TDM_BUFFERS_NUM;
+    const int next_iter = iter + TDM_PREFETCH_NUM;
+
+    // --- Prefetch next input tile while current compute proceeds ---
+    if (next_iter < TDM_ITERATIONS) {
+      const int next_buff = next_iter % TDM_BUFFERS_NUM;
+      const uint32_t next_chunk_y =
+          static_cast<uint32_t>(chunk_offset_Y + next_iter * TDM_BUFFER_DIM_Y);
+      const uint32_t chunk_x = static_cast<uint32_t>(chunk_offset_X);
+      copy_2d_to_shared(
+          &in_sh[next_buff][0][0], input_ptr,
+          chunk_x, next_chunk_y,
+          TDM_SHMEM_DIM_X, TDM_SHMEM_DIM_Y,
+          tensor_w, tensor_h, stride_in, input_data_size);
+    }
+
+    // --- Wait for current input tile and any pending store ---
+    // TENSORcnt counts in-flight TDM ops (loads + stores) in issue order.
+    // When next_iter is valid we have 1 outstanding prefetch load → wait(1).
+    // On the last iter there is no new prefetch → wait(0) drains the store
+    // issued in the previous iteration.
+    if (is_tdm_wave()) {
+      if (next_iter < TDM_ITERATIONS) {
+        wait_tensorcnt_1();
+      } else {
+        wait_tensorcnt_0();
+      }
+    }
+    __syncthreads();
+
+    // --- Scale index computation (identical to NV kernel) ---
+    const int scale_offset_Y =
+        USE_ROWWISE_SCALING
+            ? (scales_rowwise_chunk_offset_Y + iter * TDM_BUFFER_DIM_Y + tid_rowwise_Y)
+            : (scales_colwise_chunk_offset_Y + (iter * TDM_BUFFER_DIM_Y) / SCALE_DIM_Y);
+
+    const int scale_offset_X =
+        USE_ROWWISE_SCALING
+            ? (scales_rowwise_chunk_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE)
+            : (scales_colwise_chunk_offset_X + tid_colwise_X);
+
+    const int scale_idx           = scale_offset_Y * scales_stride + scale_offset_X;
+    const e8m0_t biased_exponent  = scales_ptr[scale_idx];
+    const float block_scale       = ptx::exp2f(biased_exponent);
+
+    // --- Compute: dequantize from in_sh → out_sh ---
+    if constexpr (USE_ROWWISE_SCALING) {
+      Vec<IType, TDM_ELEMS_PER_THREAD> in;
+      Vec<OType, TDM_ELEMS_PER_THREAD> out;
+
+      const int shmem_offset_y = thread_offset_Y;
+      const int shmem_offset_x = thread_offset_X_rowwise;
+      in.load_from(&in_sh[buff][shmem_offset_y][shmem_offset_x]);
+
+#pragma unroll
+      for (int j = 0; j < TDM_ELEMS_PER_THREAD; ++j) {
+        out.data.elt[j] =
+            static_cast<OType>(block_scale * static_cast<float>(in.data.elt[j]));
+      }
+      out.store_to(&out_sh[buff][shmem_offset_y][shmem_offset_x]);
+    } else {
+#pragma unroll
+      for (int i = 0; i < TDM_BUFFER_DIM_Y; ++i) {
+        const float elt = static_cast<float>(in_sh[buff][i][tid_colwise_X]);
+        out_sh[buff][i][tid_colwise_X] = static_cast<OType>(block_scale * elt);
+      }
+    }
+
+    // Ensure all threads finished writing out_sh before TDM reads it.
+    __syncthreads();
+
+    // --- TDM store: output shmem → global ---
+    {
+      const uint32_t store_chunk_y =
+          static_cast<uint32_t>(chunk_offset_Y + iter * TDM_BUFFER_DIM_Y);
+      const uint32_t store_chunk_x = static_cast<uint32_t>(chunk_offset_X);
+      store_2d_to_global(
+          &out_sh[buff][0][0], output_ptr,
+          store_chunk_x, store_chunk_y,
+          TDM_SHMEM_DIM_X, TDM_SHMEM_DIM_Y,
+          tensor_w, tensor_h, stride_out, output_data_size);
+    }
+  }
+
+  // Drain the final pending store.
+  if (is_tdm_wave()) {
+    wait_tensorcnt_0();
+  }
+  __syncthreads();
+}
+
+}  // namespace dequantize_mxfp8_tdm_kernel
+
+// Runtime check for gfx1250 TDM support (local to mxfp8 namespace).
+inline bool is_gfx1250() {
+  static int result = -1;
+  if (result < 0) {
+    int device;
+    (void)hipGetDevice(&device);
+    hipDeviceProp_t prop;
+    (void)hipGetDeviceProperties(&prop, device);
+    result = (strncmp(prop.gcnArchName, "gfx1250", 7) == 0) ? 1 : 0;
+  }
+  return result == 1;
+}
+
+#endif  // defined(__gfx1250__)
+
+#else  // !defined(__HIP_PLATFORM_AMD__)
+constexpr size_t CHUNK_DIM_Y = 128;
+constexpr size_t CHUNK_DIM_X = 128;
+constexpr size_t THREADS_PER_CHUNK = 128;
+constexpr size_t BUFFERS_NUM = 2;
+
+constexpr size_t ELEMS_PER_THREAD = 16;
+constexpr size_t BUFFER_DIM_Y = 16;           // only 32 is supported
+constexpr size_t BUFFER_DIM_X = CHUNK_DIM_X;  // 128
+constexpr size_t SHMEM_DIM_Y = BUFFER_DIM_Y;  // 16
+constexpr size_t SHMEM_DIM_X = BUFFER_DIM_X;  // 128
+
+constexpr size_t THREADS_PER_CHUNK_X_ROWWISE = CHUNK_DIM_X / ELEMS_PER_THREAD;  //  8 = 128 / 16
+constexpr size_t THREADS_PER_CHUNK_X_COLWISE = CHUNK_DIM_X;                     //  128
+constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                       //    8 = 128 / 16
+static_assert(ITERATIONS >= 1);
+
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     dequantize_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
@@ -287,11 +505,33 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
               TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
                   output->dtype(), OType,
 #ifdef __HIP_PLATFORM_AMD__
+#if defined(__gfx1250__)
+              if (is_gfx1250() && (cols % dequantize_mxfp8_tdm_kernel::TDM_CHUNK_DIM_X == 0) &&
+                  (rows % dequantize_mxfp8_tdm_kernel::TDM_CHUNK_DIM_Y == 0)) {
+                const dim3 tdm_block(dequantize_mxfp8_tdm_kernel::TDM_THREADS_PER_CHUNK);
+                const dim3 tdm_grid(
+                    DIVUP(cols, dequantize_mxfp8_tdm_kernel::TDM_CHUNK_DIM_X),
+                    DIVUP(rows, dequantize_mxfp8_tdm_kernel::TDM_CHUNK_DIM_Y));
+                dequantize_mxfp8_tdm_kernel::dequantize_mxfp8_tdm_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
+                    <<<tdm_grid, tdm_block, 0, stream>>>(
+                        reinterpret_cast<const IType *>(input_data.dptr),
+                        reinterpret_cast<OType *>(output->data.dptr),
+                        scales_ptr, rows, cols, scales_stride);
+              } else {
+                TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                    !(cols % (32 * sizeof(OType))), IS_ALIGNED,
+                    dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
+                    <<<grid, block, 0, stream>>>(reinterpret_cast<const IType *>(input_data.dptr), reinterpret_cast<OType *>(output->data.dptr), scales_ptr,
+                                                 rows, cols, scales_stride););  // NOLINT(*)
+              }
+              (void)0  // NOLINT(*)
+#else  // !defined(__gfx1250__)
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
                   !(cols % (32 * sizeof(OType))), IS_ALIGNED,
                   dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
                   <<<grid, block, 0, stream>>>(reinterpret_cast<const IType *>(input_data.dptr), reinterpret_cast<OType *>(output->data.dptr), scales_ptr,
                                                rows, cols, scales_stride););  // NOLINT(*)
+#endif  // defined(__gfx1250__)
 #else // #ifdef __HIP_PLATFORM_AMD__
                   alignas(64) CUtensorMap tensor_map_input{};
                   alignas(64) CUtensorMap tensor_map_output{};

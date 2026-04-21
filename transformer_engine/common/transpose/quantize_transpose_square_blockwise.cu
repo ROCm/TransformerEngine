@@ -1,16 +1,22 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
 #include <cfloat>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cuda/barrier>
+#endif
 
 #include "common/common.h"
 #include "common/recipe/recipe_common.cuh"
@@ -21,6 +27,14 @@
 #if (!defined(__CUDA_MINIMUM_ARCH__) && __CUDA_ARCH__ >= 900) || \
     (defined(__CUDA_MINIMUM_ARCH__) && __CUDA_MINIMUM_ARCH__ >= 900)
 #define TMA_HW_SUPPORTED
+#endif
+
+// On AMD gfx1250, enable the same tile configuration as TMA_HW_SUPPORTED
+// (used by the TDM kernel for the shared memory transpose layout).
+#if defined(__HIP_PLATFORM_AMD__) && defined(__gfx1250__)
+#ifndef TMA_HW_SUPPORTED
+#define TMA_HW_SUPPORTED
+#endif
 #endif
 
 namespace transformer_engine {
@@ -62,6 +76,7 @@ constexpr size_t NUM_THREADS_Y_IN_WARP = kThreadsPerWarp / NUM_THREADS_X_IN_WARP
 
 #define MIN(a, b) (a < b ? a : b)
 
+#ifndef __HIP_PLATFORM_AMD__
 template <bool kReturnTranspose, typename CType, typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_BLOCK)
     block_scaled_cast_transpose_kernel(const IType* const input, OType* const output_c,
@@ -247,6 +262,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
 #endif
   }
 }
+#endif  // !__HIP_PLATFORM_AMD__
 
 template <bool kReturnTranspose, typename CType, typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose_kernel_notaligned(
@@ -456,6 +472,206 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
   }
 }
 
+// ---------------------------------------------------------------------------
+// AMD TDM (gfx1250) variant of the aligned kernel
+// ---------------------------------------------------------------------------
+#ifdef __HIP_PLATFORM_AMD__
+
+// Runtime check for gfx1250 TDM support (host-side, outside __gfx1250__ guard).
+#ifndef TRANSFORMER_ENGINE_IS_GFX1250_DEFINED_
+#define TRANSFORMER_ENGINE_IS_GFX1250_DEFINED_
+inline bool is_gfx1250() {
+  static int result = -1;
+  if (result < 0) {
+    int device;
+    (void)hipGetDevice(&device);
+    hipDeviceProp_t prop;
+    (void)hipGetDeviceProperties(&prop, device);
+    result = (strncmp(prop.gcnArchName, "gfx1250", 7) == 0) ? 1 : 0;
+  }
+  return result == 1;
+}
+#endif  // TRANSFORMER_ENGINE_IS_GFX1250_DEFINED_
+
+#if defined(__gfx1250__)
+}  // temporarily close anonymous namespace
+}  // temporarily close namespace transformer_engine
+#include "common/util/tdm.cuh"
+namespace transformer_engine {
+namespace {
+
+template <bool kReturnTranspose, typename CType, typename IType, typename OType>
+__global__ void __launch_bounds__(THREADS_PER_BLOCK)
+    block_scaled_cast_transpose_kernel_tdm(const IType* const input, OType* const output_c,
+                                           OType* const output_t, CType* const tile_scales_inv_c,
+                                           CType* const tile_scales_inv_t, const size_t row_length,
+                                           const size_t num_rows, const size_t scale_stride_x,
+                                           const size_t scale_stride_y,
+                                           const size_t scale_t_stride_x,
+                                           const size_t scale_t_stride_y, const float epsilon,
+                                           bool pow_2_scaling, const float* noop_ptr) {
+  using namespace transformer_engine::tdm;
+
+  using IVec = Vec<IType, THREAD_TILE_DIM_X>;
+  using OVecCast = Vec<OType, THREAD_TILE_DIM_X>;
+  using OVecTrans = Vec<OType, THREAD_TILE_DIM_Y>;
+
+  if (noop_ptr != nullptr && noop_ptr[0] == 1.0f) {
+    return;
+  }
+
+  // shared mem for amax reduction in entire block
+  __shared__ CType block_tile_amax_shared[NUM_WARPS_IN_BLOCK];
+
+  IVec thrd_tile_input[THREAD_TILE_DIM_Y];
+  constexpr int THREAD_TILE_DIM_X_ = kReturnTranspose ? THREAD_TILE_DIM_X : 1;
+  OVecTrans thrd_tile_out_trans[THREAD_TILE_DIM_X_];
+
+  const int tid_in_warp = threadIdx.x % kThreadsPerWarp;
+  const int tid_in_warp_x = tid_in_warp % NUM_THREADS_X_IN_WARP;
+  const int tid_in_warp_y = tid_in_warp / NUM_THREADS_X_IN_WARP;
+  const int warp_id_in_block = threadIdx.x / kThreadsPerWarp;
+  const int warp_id_in_block_x = warp_id_in_block % NUM_WARPS_X_IN_BLOCK;
+  const int warp_id_in_block_y = warp_id_in_block / NUM_WARPS_X_IN_BLOCK;
+
+  const int tile_id_x = blockIdx.x;
+  const int tile_id_y = blockIdx.y;
+
+  const size_t block_tile_start_idx =
+      tile_id_y * BLOCK_TILE_DIM * row_length + tile_id_x * BLOCK_TILE_DIM;
+  const size_t warp_tile_start_idx =
+      block_tile_start_idx +
+      warp_id_in_block_y * THREAD_TILE_DIM_Y * NUM_THREADS_Y_IN_WARP * row_length +
+      warp_id_in_block_x * THREAD_TILE_DIM_X * NUM_THREADS_X_IN_WARP;
+  const size_t thread_tile_start_idx = warp_tile_start_idx +
+                                       tid_in_warp_y * THREAD_TILE_DIM_Y * row_length +
+                                       tid_in_warp_x * THREAD_TILE_DIM_X;
+
+  CType warp_tile_amax;
+  CType block_tile_amax;
+  CType block_tile_scale;
+  CType amax = 0;
+
+  // Step 1: Load input via regular global loads (LDG) — same as NV kernel
+#pragma unroll
+  for (int i = 0; i < THREAD_TILE_DIM_Y; i++) {
+    thrd_tile_input[i].load_from(input + thread_tile_start_idx + i * row_length);
+  }
+
+  // Step 2: calculate block tile amax and scale
+  for (int i = 0; i < THREAD_TILE_DIM_Y; i++) {
+#pragma unroll
+    for (int j = 0; j < THREAD_TILE_DIM_X; j++) {
+      __builtin_assume(amax >= 0);
+      amax = fmaxf(amax, fabsf(static_cast<CType>(thrd_tile_input[i].data.elt[j])));
+    }
+  }
+  warp_tile_amax = warp_reduce_max<kThreadsPerWarp>(amax);
+  constexpr int lane_zero = 0;
+  warp_tile_amax = __shfl_sync(0xFFFFFFFF, warp_tile_amax, lane_zero);
+
+  if (tid_in_warp == 0) {
+    block_tile_amax_shared[warp_id_in_block_y * NUM_WARPS_X_IN_BLOCK + warp_id_in_block_x] =
+        warp_tile_amax;
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+    CType blk_amax = block_tile_amax_shared[0];
+#pragma unroll
+    for (int idx = 1; idx < NUM_WARPS_IN_BLOCK; idx++) {
+      blk_amax = fmaxf(blk_amax, block_tile_amax_shared[idx]);
+    }
+    block_tile_amax_shared[0] = blk_amax;
+  }
+  __syncthreads();
+  block_tile_amax = block_tile_amax_shared[0];
+
+  block_tile_scale =
+      compute_scale_from_types<IType, OType>(block_tile_amax, epsilon, pow_2_scaling);
+
+  if (threadIdx.x == 0) {
+    static_assert(std::is_same<CType, float>::value);
+    const CType scale_inv = 1.0f / block_tile_scale;
+
+    size_t row_idx = tile_id_y;
+    size_t col_idx = tile_id_x;
+    tile_scales_inv_c[row_idx * scale_stride_y + col_idx * scale_stride_x] = scale_inv;
+
+    if constexpr (kReturnTranspose) {
+      row_idx = tile_id_x;
+      col_idx = tile_id_y;
+      tile_scales_inv_t[row_idx * scale_t_stride_y + col_idx * scale_t_stride_x] = scale_inv;
+    }
+  }
+
+  // Step 3: Store cast output, Step 4: do transpose within thread tile
+  OVecCast tmp_output_c;
+
+  for (int i = 0; i < THREAD_TILE_DIM_Y; i++) {
+#pragma unroll
+    for (int j = 0; j < THREAD_TILE_DIM_X; j++) {
+      CType scale_data = block_tile_scale;
+
+      OType scaled_elt =
+          static_cast<OType>(static_cast<CType>(thrd_tile_input[i].data.elt[j]) * scale_data);
+      tmp_output_c.data.elt[j] = scaled_elt;
+      if constexpr (kReturnTranspose) {
+        thrd_tile_out_trans[j].data.elt[i] = scaled_elt;
+      }
+    }
+    tmp_output_c.store_to(output_c + thread_tile_start_idx + i * row_length);
+  }
+
+  // Step 4: store transpose into shared memory, then TDM store to global
+  if constexpr (kReturnTranspose) {
+    __shared__ alignas(128)
+        OVecTrans block_tile_trans_shared[SHARED_BLOCK_TILE_DIM_Y][SHARED_BLOCK_TILE_DIM_X_BANKS];
+    OType(*block_tile_trans_shared_otype_ptr)[BLOCK_TILE_DIM] =
+        reinterpret_cast<OType(*)[BLOCK_TILE_DIM]>(block_tile_trans_shared);
+
+#pragma unroll
+    for (int i = 0; i < THREAD_TILE_DIM_X; i++) {
+      auto warp_id_in_block_x_ = warp_id_in_block_y;
+      auto warp_id_in_block_y_ = warp_id_in_block_x;
+      int row_idx = warp_id_in_block_y_ * THREAD_TILE_DIM_X * NUM_THREADS_X_IN_WARP +
+                    tid_in_warp_x * THREAD_TILE_DIM_X + i;
+      int col_idx =
+          warp_id_in_block_x_ * (NUM_BANKS_Y_IN_WARP / NUM_BANKS_PER_SHARED_ELEM) + tid_in_warp_y;
+      block_tile_trans_shared[row_idx][col_idx] = thrd_tile_out_trans[i];
+    }
+
+    // Wait for all threads to finish writing to shared memory
+    __syncthreads();
+
+    // Step 5: TDM store transpose output from LDS to global memory
+    constexpr uint32_t output_data_size = get_data_size_from_bits(sizeof(OType) * 8);
+    // output_t has shape [row_length, num_rows] (transposed)
+    // The tile in output_t starts at (tile_id_y * BLOCK_TILE_DIM, tile_id_x * BLOCK_TILE_DIM)
+    // tensor_w = num_rows (inner dim of transposed tensor = stride)
+    // tensor_h = row_length (outer dim)
+    store_2d_to_global(
+        block_tile_trans_shared_otype_ptr,
+        output_t,
+        /*chunk_x=*/static_cast<uint32_t>(tile_id_y * BLOCK_TILE_DIM),
+        /*chunk_y=*/static_cast<uint32_t>(tile_id_x * BLOCK_TILE_DIM),
+        /*tile_dim_x=*/static_cast<uint32_t>(BLOCK_TILE_DIM),
+        /*tile_dim_y=*/static_cast<uint32_t>(BLOCK_TILE_DIM),
+        /*tensor_w=*/static_cast<uint32_t>(num_rows),
+        /*tensor_h=*/static_cast<uint32_t>(row_length),
+        /*stride=*/static_cast<uint32_t>(num_rows),
+        output_data_size);
+
+    // Wait for TDM store to finish reading from shared memory
+    if (is_tdm_wave()) {
+      wait_tensorcnt_0();
+    }
+  }
+}
+
+#endif  // defined(__gfx1250__)
+#endif  // __HIP_PLATFORM_AMD__
+
+#ifndef __HIP_PLATFORM_AMD__
 template <typename OutputType>
 CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size_t global_dim_y) {
   CUtensorMapDataType dataType;
@@ -472,6 +688,7 @@ CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size
                        /*stride_elems=*/global_dim_x, /*offset_elems=*/0, sizeof(OutputType) * 8);
   return tensor_map_output_trans;
 }
+#endif  // !__HIP_PLATFORM_AMD__
 
 }  // namespace
 }  // namespace transformer_engine
@@ -486,10 +703,12 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
   NVTE_API_CALL(quantize_transpose_square_blockwise);
   checkCuDriverContext(stream);
 
+#ifndef __HIP_PLATFORM_AMD__
   if (transformer_engine::cuda::sm_arch() >= 100) {
     NVTE_CHECK(pow_2_scale, "On Blackwell and newer, the FP8 block scaling recipe is emulated ",
                "with MXFP8, which requires using power of two scaling factors.");
   }
+#endif
 
   NVTE_CHECK(input.shape == output.shape, "Input and output must have the same shape.");
   const size_t row_length = input.shape.size() > 0 ? input.shape.back() : 1;
@@ -546,6 +765,36 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                   row_length % BLOCK_TILE_DIM == 0 && num_rows % BLOCK_TILE_DIM == 0;
 
               if (full_tile) {
+#ifdef __HIP_PLATFORM_AMD__
+#if defined(__gfx1250__)
+                // AMD gfx1250: use TDM store for transposed output
+                if (is_gfx1250()) {
+                  block_scaled_cast_transpose_kernel_tdm<kReturnTranspose, float, InputType,
+                                                         OutputType>
+                      <<<grid, THREADS_PER_BLOCK, 0, stream>>>(
+                          reinterpret_cast<const InputType*>(input.dptr),
+                          reinterpret_cast<OutputType*>(output.dptr),
+                          reinterpret_cast<OutputType*>(output_t.dptr),
+                          reinterpret_cast<float*>(scale_inv.dptr),
+                          reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
+                          scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y,
+                          epsilon, pow_2_scale, noop_ptr);
+                } else
+#endif  // defined(__gfx1250__)
+                {
+                  // Fallback: non-aligned kernel (no TMA/TDM)
+                  block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, float, InputType,
+                                                                OutputType>
+                      <<<grid, THREADS_PER_BLOCK, 0, stream>>>(
+                          reinterpret_cast<const InputType*>(input.dptr),
+                          reinterpret_cast<OutputType*>(output.dptr),
+                          reinterpret_cast<OutputType*>(output_t.dptr),
+                          reinterpret_cast<float*>(scale_inv.dptr),
+                          reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
+                          scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y,
+                          epsilon, pow_2_scale, noop_ptr);
+                }
+#else
                 CUtensorMap tensor_map_output_trans;
                 if (return_transpose) {
                   tensor_map_output_trans =
@@ -560,6 +809,7 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                         reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
                         scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
                         tensor_map_output_trans, pow_2_scale, noop_ptr);
+#endif  // __HIP_PLATFORM_AMD__
               } else {
                 block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, float, InputType,
                                                               OutputType>

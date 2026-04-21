@@ -29,6 +29,345 @@
 namespace transformer_engine {
 namespace dispatch {
 namespace fp8 {
+
+// ---------------------------------------------------------------------------
+// TDM (Tensor Data Mover) gated FP8 kernel for gfx1250
+// ---------------------------------------------------------------------------
+#if defined(__gfx1250__)
+}  // temporarily close namespace fp8
+}  // temporarily close namespace dispatch
+#include "../../util/tdm.cuh"
+namespace dispatch {
+namespace fp8 {
+
+namespace cast_gated_tdm_kernel {
+
+constexpr size_t TDM_GATED_CHUNK_DIM_Y   = 128;
+constexpr size_t TDM_GATED_CHUNK_DIM_X   = 128;
+constexpr size_t TDM_GATED_THREADS       = 128;
+constexpr size_t TDM_GATED_BUFFERS_NUM   = 2;
+constexpr size_t TDM_GATED_BUFFER_DIM_Y  = 16;
+constexpr size_t TDM_GATED_BUFFER_DIM_X  = TDM_GATED_CHUNK_DIM_X;   // 128
+constexpr size_t TDM_GATED_SHMEM_DIM_Y   = TDM_GATED_BUFFER_DIM_Y;  // 16
+constexpr size_t TDM_GATED_SHMEM_DIM_X   = TDM_GATED_BUFFER_DIM_X;  // 128
+constexpr size_t TDM_GATED_BUFF_STAGES   = TDM_GATED_BUFFER_DIM_Y;  // 16
+constexpr size_t TDM_GATED_ITERATIONS    = TDM_GATED_CHUNK_DIM_Y / TDM_GATED_BUFFER_DIM_Y;  // 8
+
+// IS_BWD=false: loads act + gate (2 loads/iter)      → wait(2) while prefetch live, wait(0) last
+// IS_BWD=true : loads grad + act + gate (3 loads/iter) → wait(3) while prefetch live, wait(0) last
+template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
+          float (*DActOP)(float, const ParamOP &), typename IType, typename OType>
+__global__ void __launch_bounds__(TDM_GATED_THREADS)
+    cast_fp8_gated_tdm_kernel(
+        // Backward only: pointer to gradient tensor (rows × cols, stride = cols)
+        const IType *__restrict__ grad_ptr,
+        // Forward activation half: interleaved in gated_input at column offset 0
+        //   gated_input layout: [rows][cols*2], act at col 0, gate at col cols
+        const IType *__restrict__ act_ptr,
+        // Gate half: same base pointer as act, column offset = cols
+        const IType *__restrict__ gate_ptr,
+        // Output act:  [rows][output_cols], act  at col 0
+        OType *__restrict__ out_act_ptr,
+        // Output gate: [rows][output_cols], gate at col cols (BWD only; ignored for FWD)
+        OType *__restrict__ out_gate_ptr,
+        float *const amax_ptr,
+        float *const scale_inv_ptr,
+        const float *const scale_ptr,
+        const size_t rows,
+        const size_t cols,
+        // Row stride of the gated_input tensor (= cols*2 for interleaved act/gate)
+        const size_t input_stride,
+        // Row stride of the grad tensor (= cols, BWD only)
+        const size_t grad_stride,
+        // Row stride of the output tensor (= output_cols = IS_BWD ? 2*cols : cols)
+        const size_t output_stride,
+        const ParamOP p) {
+  using namespace transformer_engine::tdm;
+
+  const size_t chunk_offset_Y = blockIdx.y * TDM_GATED_CHUNK_DIM_Y;
+  const size_t chunk_offset_X = blockIdx.x * TDM_GATED_CHUNK_DIM_X;
+
+  // Within-block thread coordinates
+  // All threads cover one column each (tid_X) and one row within the shmem tile (tid_Y=0 for all).
+  // Since TDM_GATED_THREADS=128 = TDM_GATED_SHMEM_DIM_X, each thread owns one column.
+  const size_t tid_X = threadIdx.x % TDM_GATED_SHMEM_DIM_X;
+  const size_t tid_Y = threadIdx.x / TDM_GATED_SHMEM_DIM_X;
+
+  float amax = 0;
+  const float scale = (scale_ptr != nullptr) ? *scale_ptr : 1;
+
+  // Shared memory buffers: double-buffered for loads, single for output
+  __shared__ alignas(128) IType in_act_sh [TDM_GATED_BUFFERS_NUM][TDM_GATED_SHMEM_DIM_Y][TDM_GATED_SHMEM_DIM_X];
+  __shared__ alignas(128) IType in_gate_sh[TDM_GATED_BUFFERS_NUM][TDM_GATED_SHMEM_DIM_Y][TDM_GATED_SHMEM_DIM_X];
+  __shared__ alignas(128) IType in_grad_sh[IS_BWD ? TDM_GATED_BUFFERS_NUM : 1][TDM_GATED_SHMEM_DIM_Y][TDM_GATED_SHMEM_DIM_X];
+  __shared__ alignas(128) OType out_act_sh [TDM_GATED_BUFFERS_NUM][TDM_GATED_SHMEM_DIM_Y][TDM_GATED_SHMEM_DIM_X];
+  __shared__ alignas(128) OType out_gate_sh[IS_BWD ? TDM_GATED_BUFFERS_NUM : 1][TDM_GATED_SHMEM_DIM_Y][TDM_GATED_SHMEM_DIM_X];
+
+  constexpr uint32_t input_data_size  = get_data_size_from_bits(sizeof(IType) * 8);
+  constexpr uint32_t output_data_size = get_data_size_from_bits(sizeof(OType) * 8);
+
+  const uint32_t tensor_w_in  = static_cast<uint32_t>(cols);
+  const uint32_t tensor_h     = static_cast<uint32_t>(rows);
+  const uint32_t stride_in    = static_cast<uint32_t>(input_stride);
+  const uint32_t stride_grad  = static_cast<uint32_t>(grad_stride);
+  const uint32_t stride_out   = static_cast<uint32_t>(output_stride);
+  // Each output sub-tensor (act or gate) is cols elements wide; stride_out is the full row stride.
+  const uint32_t tensor_w_out = static_cast<uint32_t>(cols);
+
+  // --- Prologue: prefetch iteration 0 into buffer 0 ---
+  // NOTE: grad has row stride = cols, while act/gate have row stride = cols*2 (interleaved layout).
+  // copy_2d_to_shared_x3 uses a single stride for all three tensors, so we cannot mix strides.
+  // Instead, for BWD we issue: copy_2d_to_shared (grad, stride_grad) +
+  //                            copy_2d_to_shared_x2 (act+gate, stride_in).
+  // Total TDM ops per prefetch: BWD=3, FWD=2. Wait counts below match accordingly.
+  {
+    const uint32_t cy = static_cast<uint32_t>(chunk_offset_Y);
+    const uint32_t cx = static_cast<uint32_t>(chunk_offset_X);
+    if constexpr (IS_BWD) {
+      copy_2d_to_shared(
+          &in_grad_sh[0][0][0], grad_ptr, cx, cy,
+          TDM_GATED_SHMEM_DIM_X, TDM_GATED_SHMEM_DIM_Y,
+          tensor_w_in, tensor_h, stride_grad, input_data_size);
+      copy_2d_to_shared_x2(
+          &in_act_sh [0][0][0], act_ptr,  cx, cy,
+          &in_gate_sh[0][0][0], gate_ptr, cx, cy,
+          TDM_GATED_SHMEM_DIM_X, TDM_GATED_SHMEM_DIM_Y,
+          tensor_w_in, tensor_h, stride_in, input_data_size);
+    } else {
+      copy_2d_to_shared_x2(
+          &in_act_sh [0][0][0], act_ptr,  cx, cy,
+          &in_gate_sh[0][0][0], gate_ptr, cx, cy,
+          TDM_GATED_SHMEM_DIM_X, TDM_GATED_SHMEM_DIM_Y,
+          tensor_w_in, tensor_h, stride_in, input_data_size);
+    }
+  }
+
+  // --- Main loop ---
+#pragma unroll
+  for (int iter = 0; iter < (int)TDM_GATED_ITERATIONS; ++iter) {
+    const int buff      = iter % TDM_GATED_BUFFERS_NUM;
+    const int next_iter = iter + 1;
+    const int next_buff = next_iter % TDM_GATED_BUFFERS_NUM;
+
+    // Prefetch next iteration if available
+    if (next_iter < (int)TDM_GATED_ITERATIONS) {
+      const uint32_t ncy = static_cast<uint32_t>(chunk_offset_Y + next_iter * TDM_GATED_BUFFER_DIM_Y);
+      const uint32_t ncx = static_cast<uint32_t>(chunk_offset_X);
+      if constexpr (IS_BWD) {
+        copy_2d_to_shared(
+            &in_grad_sh[next_buff][0][0], grad_ptr, ncx, ncy,
+            TDM_GATED_SHMEM_DIM_X, TDM_GATED_SHMEM_DIM_Y,
+            tensor_w_in, tensor_h, stride_grad, input_data_size);
+        copy_2d_to_shared_x2(
+            &in_act_sh [next_buff][0][0], act_ptr,  ncx, ncy,
+            &in_gate_sh[next_buff][0][0], gate_ptr, ncx, ncy,
+            TDM_GATED_SHMEM_DIM_X, TDM_GATED_SHMEM_DIM_Y,
+            tensor_w_in, tensor_h, stride_in, input_data_size);
+      } else {
+        copy_2d_to_shared_x2(
+            &in_act_sh [next_buff][0][0], act_ptr,  ncx, ncy,
+            &in_gate_sh[next_buff][0][0], gate_ptr, ncx, ncy,
+            TDM_GATED_SHMEM_DIM_X, TDM_GATED_SHMEM_DIM_Y,
+            tensor_w_in, tensor_h, stride_in, input_data_size);
+      }
+    }
+
+    // Wait for current buffer's loads.
+    // TENSORcnt counts outstanding ops oldest-first. After issuing the next
+    // prefetch, we wait for ops older than the prefetch to finish.
+    //   IS_BWD: 3 loads/iter issued before this iter's compute.
+    //   !IS_BWD: 2 loads/iter.
+    // When next_iter < ITERATIONS we keep prefetch ops in-flight (wait N),
+    // otherwise drain everything (wait 0).
+    if (is_tdm_wave()) {
+      if (next_iter < (int)TDM_GATED_ITERATIONS) {
+        if constexpr (IS_BWD) {
+          wait_tensorcnt_3();
+        } else {
+          wait_tensorcnt_2();
+        }
+      } else {
+        wait_tensorcnt_0();
+      }
+    }
+    __syncthreads();
+
+    // --- Compute ---
+#pragma unroll
+    for (int stage = 0; stage < (int)TDM_GATED_BUFF_STAGES; ++stage) {
+      const size_t shmem_y = tid_Y + stage;
+      const size_t shmem_x = tid_X;
+
+      float act_elt  = static_cast<float>(in_act_sh [buff][shmem_y][shmem_x]);
+      float gate_elt = static_cast<float>(in_gate_sh[buff][shmem_y][shmem_x]);
+
+      bool dgate_elt = true;
+      if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
+        dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;
+        gate_elt  = min(max(-p.limit, gate_elt), p.limit) + 1;
+      }
+
+      if constexpr (IS_BWD) {
+        float grad_elt = static_cast<float>(in_grad_sh[buff][shmem_y][shmem_x]);
+
+        const float x = act_elt;
+        float act_x;
+        float dact_x;
+        if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
+          const float xc = min(act_elt, p.limit);
+          const float s  = sigmoidf(p.alpha * xc);
+          act_x = xc * s;
+          if (act_elt <= p.limit) {
+            dact_x = s + s * (1 - s) * p.alpha * xc;
+          } else {
+            dact_x = 0.0f;
+          }
+        } else {
+          if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
+            const float s = sigmoidf(x);
+            act_x  = x * s;
+            dact_x = x * s * (1 - s) + s;
+          } else {
+            act_x  = ActOP(x, p);
+            dact_x = DActOP(x, p);
+          }
+        }
+        float after_dact  = dact_x * grad_elt * gate_elt;
+        float after_dgate = dgate_elt ? act_x * grad_elt : 0.0f;
+
+        out_act_sh [buff][shmem_y][shmem_x] = static_cast<OType>(scale * after_dact);
+        out_gate_sh[buff][shmem_y][shmem_x] = static_cast<OType>(scale * after_dgate);
+
+        amax = fmaxf(amax, fabsf(after_dact));
+        amax = fmaxf(amax, fabsf(after_dgate));
+      } else {
+        const float after_act = ActOP(act_elt, p) * gate_elt;
+        out_act_sh[buff][shmem_y][shmem_x] = static_cast<OType>(scale * after_act);
+        amax = fmaxf(amax, fabsf(after_act));
+      }
+    }
+
+    // Ensure all threads finished writing shmem before TDM reads it
+    __syncthreads();
+
+    // TDM store: output shmem → global
+    {
+      const uint32_t scy = static_cast<uint32_t>(chunk_offset_Y + iter * TDM_GATED_BUFFER_DIM_Y);
+      const uint32_t scx = static_cast<uint32_t>(chunk_offset_X);
+
+      store_2d_to_global(
+          &out_act_sh[buff][0][0], out_act_ptr,
+          scx, scy,
+          TDM_GATED_SHMEM_DIM_X, TDM_GATED_SHMEM_DIM_Y,
+          tensor_w_out, tensor_h, stride_out, output_data_size);
+
+      if constexpr (IS_BWD) {
+        store_2d_to_global(
+            &out_gate_sh[buff][0][0], out_gate_ptr,
+            scx, scy,
+            TDM_GATED_SHMEM_DIM_X, TDM_GATED_SHMEM_DIM_Y,
+            tensor_w_out, tensor_h, stride_out, output_data_size);
+      }
+    }
+  }
+
+  // Drain all remaining TDM ops (stores)
+  if (is_tdm_wave()) {
+    wait_tensorcnt_0();
+  }
+  __syncthreads();
+
+  // --- Reduce amax ---
+  if (amax_ptr != nullptr) {
+    const int warp_id = threadIdx.x / THREADS_PER_WARP;
+    amax = reduce_max<TDM_GATED_THREADS / THREADS_PER_WARP>(amax, warp_id);
+    if (threadIdx.x == 0) {
+      atomicMaxFloat(amax_ptr, amax);
+    }
+  }
+
+  // Update scale-inverse (only one block writes it)
+  if (threadIdx.x == 0 && blockIdx.x == 0 && (scale_inv_ptr != nullptr)) {
+    reciprocal<float>(scale_inv_ptr, scale);
+  }
+}
+
+}  // namespace cast_gated_tdm_kernel
+
+// ---------------------------------------------------------------------------
+// TDM launcher for gated FP8 cast
+// ---------------------------------------------------------------------------
+
+// Runtime check for gfx1250 TDM support.
+// Guard against re-definition when quantize_fp8.cuh is included in the same TU.
+#ifndef TRANSFORMER_ENGINE_IS_GFX1250_DEFINED_
+#define TRANSFORMER_ENGINE_IS_GFX1250_DEFINED_
+inline bool is_gfx1250() {
+  static int result = -1;
+  if (result < 0) {
+    int device;
+    (void)hipGetDevice(&device);
+    hipDeviceProp_t prop;
+    (void)hipGetDeviceProperties(&prop, device);
+    result = (strncmp(prop.gcnArchName, "gfx1250", 7) == 0) ? 1 : 0;
+  }
+  return result == 1;
+}
+#endif  // TRANSFORMER_ENGINE_IS_GFX1250_DEFINED_
+
+template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
+          float (*DActOP)(float, const ParamOP &)>
+void cast_gated_tma_tdm(const Tensor &gated_input, const Tensor &grad, Tensor *output, ParamOP &p,
+                        cudaStream_t stream) {
+  using namespace cast_gated_tdm_kernel;
+
+  NVTE_CHECK(!output->has_columnwise_data(), "Only rowwise cast supported in this function.");
+
+  const size_t rows        = gated_input.flat_first_dim();
+  const size_t cols        = gated_input.flat_last_dim() / 2;
+  const size_t output_cols = (IS_BWD ? 2 : 1) * cols;
+
+  const size_t blocks_Y = DIVUP(rows, TDM_GATED_CHUNK_DIM_Y);
+  const size_t blocks_X = DIVUP(cols, TDM_GATED_CHUNK_DIM_X);
+
+  float *const amax_ptr     = reinterpret_cast<float *>(output->amax.dptr);
+  float *const scale_inv_ptr = reinterpret_cast<float *>(output->scale_inv.dptr);
+  float *const scale_ptr    = reinterpret_cast<float *>(output->scale.dptr);
+
+  const dim3 block_dim(TDM_GATED_THREADS);
+  const dim3 grid_dim(blocks_X, blocks_Y);
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+      gated_input.dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+          output->dtype(), OType,
+
+          const IType *act_ptr  = reinterpret_cast<const IType *>(gated_input.data.dptr);
+          const IType *gate_ptr = act_ptr + cols;  // gate follows act in interleaved layout
+          const IType *grad_ptr = IS_BWD ? reinterpret_cast<const IType *>(grad.data.dptr)
+                                         : nullptr;
+
+          OType *out_act_ptr  = reinterpret_cast<OType *>(output->data.dptr);
+          OType *out_gate_ptr = IS_BWD ? out_act_ptr + cols : nullptr;
+
+          const size_t input_stride  = cols * 2;   // gated_input: [rows][cols*2]
+          const size_t grad_stride   = cols;        // grad:        [rows][cols]
+          const size_t output_stride = output_cols; // output:      [rows][output_cols]
+
+          cast_fp8_gated_tdm_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType>
+              <<<grid_dim, block_dim, 0, stream>>>(
+                  grad_ptr, act_ptr, gate_ptr,
+                  out_act_ptr, out_gate_ptr,
+                  amax_ptr, scale_inv_ptr, scale_ptr,
+                  rows, cols,
+                  input_stride, grad_stride, output_stride,
+                  p);
+          NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
+  );                                              // NOLINT(*)
+}
+
+#endif  // defined(__gfx1250__)
+
 #ifndef __HIP_PLATFORM_AMD__
 namespace kernel {
 

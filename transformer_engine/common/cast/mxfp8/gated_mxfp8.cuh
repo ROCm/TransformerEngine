@@ -36,6 +36,540 @@ namespace mxfp8 {
 namespace gated_kernel {
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_gated_mxfp8.cuh"
+
+// ---------------------------------------------------------------------------
+// TDM (Tensor Data Mover) gated MXFP8 kernel for gfx1250
+// ---------------------------------------------------------------------------
+#if defined(__gfx1250__)
+}  // temporarily close namespace gated_kernel
+}  // temporarily close namespace mxfp8
+}  // temporarily close namespace dispatch
+#include "../../util/tdm.cuh"
+namespace dispatch {
+namespace mxfp8 {
+namespace gated_kernel {
+
+namespace gated_mxfp8_tdm_kernel {
+
+constexpr size_t TDM_GATED_MXFP8_CHUNK_DIM_Y   = 64;
+constexpr size_t TDM_GATED_MXFP8_CHUNK_DIM_X   = 64;
+constexpr size_t TDM_GATED_MXFP8_THREADS       = 256;
+constexpr size_t TDM_GATED_MXFP8_BUFFERS_NUM   = 2;
+constexpr size_t TDM_GATED_MXFP8_BUFFER_DIM_Y  = 32;
+constexpr size_t TDM_GATED_MXFP8_BUFFER_DIM_X  = TDM_GATED_MXFP8_CHUNK_DIM_X;   // 64
+constexpr size_t TDM_GATED_MXFP8_SHMEM_DIM_Y   = TDM_GATED_MXFP8_BUFFER_DIM_Y;  // 32
+constexpr size_t TDM_GATED_MXFP8_SHMEM_DIM_X   = TDM_GATED_MXFP8_BUFFER_DIM_X;  // 64
+constexpr size_t TDM_GATED_MXFP8_ITERATIONS    = TDM_GATED_MXFP8_CHUNK_DIM_Y / TDM_GATED_MXFP8_BUFFER_DIM_Y;  // 2
+
+constexpr size_t TDM_GATED_MXFP8_ELEMS_PER_THREAD = 8;
+constexpr size_t TDM_GATED_MXFP8_THREADS_PER_CHUNK_X_ROWWISE =
+    TDM_GATED_MXFP8_CHUNK_DIM_X / TDM_GATED_MXFP8_ELEMS_PER_THREAD;  // 8
+constexpr size_t TDM_GATED_MXFP8_THREADS_PER_CHUNK_Y_ROWWISE =
+    TDM_GATED_MXFP8_THREADS / TDM_GATED_MXFP8_THREADS_PER_CHUNK_X_ROWWISE;  // 32
+constexpr size_t TDM_GATED_MXFP8_THREADS_PER_CHUNK_X_COLWISE = TDM_GATED_MXFP8_CHUNK_DIM_X;  // 64
+constexpr size_t TDM_GATED_MXFP8_THREADS_PER_CHUNK_Y_COLWISE =
+    TDM_GATED_MXFP8_THREADS / TDM_GATED_MXFP8_THREADS_PER_CHUNK_X_COLWISE;  // 4
+constexpr size_t TDM_GATED_MXFP8_BUFFER_STAGES_NUM_COLWISE =
+    TDM_GATED_MXFP8_BUFFER_DIM_Y / TDM_GATED_MXFP8_THREADS_PER_CHUNK_Y_COLWISE;  // 8
+
+constexpr size_t TDM_GATED_MXFP8_SUBWARP_WIDTH =
+    DIVUP(32, TDM_GATED_MXFP8_ELEMS_PER_THREAD);  // 4
+
+// IS_BWD=false: loads act + gate (2 loads/iter)
+// IS_BWD=true : loads grad + act + gate (1 + 2 = 3 loads/iter, separate strides)
+template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
+          float (*DActOP)(float, const ParamOP &), typename IType, typename OType,
+          bool ROWWISE_SCALING, bool COLWISE_SCALING>
+__global__ void __launch_bounds__(TDM_GATED_MXFP8_THREADS)
+    quantize_gated_mxfp8_tdm_kernel(
+        const IType *__restrict__ grad_ptr,
+        const IType *__restrict__ act_ptr,
+        const IType *__restrict__ gate_ptr,
+        OType *__restrict__ out_act_rowwise_ptr,
+        OType *__restrict__ out_gate_rowwise_ptr,
+        OType *__restrict__ out_act_colwise_ptr,
+        OType *__restrict__ out_gate_colwise_ptr,
+        e8m0_t *const scales_rowwise,
+        e8m0_t *const scales_colwise,
+        const size_t rows,
+        const size_t cols,
+        const size_t input_stride,
+        const size_t grad_stride,
+        const size_t output_stride,
+        const size_t scale_stride_rowwise,
+        const size_t scale_stride_colwise,
+        const ParamOP p) {
+  using namespace transformer_engine::tdm;
+
+  constexpr size_t SCALE_DIM_X = 32;
+  constexpr size_t SCALE_DIM_Y = 32;
+
+  const size_t chunk_offset_Y = blockIdx.y * TDM_GATED_MXFP8_CHUNK_DIM_Y;
+  const size_t chunk_offset_X = blockIdx.x * TDM_GATED_MXFP8_CHUNK_DIM_X;
+
+  const size_t output_cols = (IS_BWD ? 2 : 1) * cols;
+
+  const size_t scales_rowwise_chunk_offset_X = blockIdx.x * (TDM_GATED_MXFP8_CHUNK_DIM_X / SCALE_DIM_X);
+  const size_t scales_colwise_chunk_offset_Y = blockIdx.y * (TDM_GATED_MXFP8_CHUNK_DIM_Y / SCALE_DIM_Y);
+  const size_t scales_colwise_chunk_offset_X = blockIdx.x * TDM_GATED_MXFP8_CHUNK_DIM_X;
+
+  const int tid_rowwise_Y = threadIdx.x / TDM_GATED_MXFP8_THREADS_PER_CHUNK_X_ROWWISE;
+  const int tid_rowwise_X = threadIdx.x % TDM_GATED_MXFP8_THREADS_PER_CHUNK_X_ROWWISE;
+  const int thread_offset_X_rowwise = tid_rowwise_X * TDM_GATED_MXFP8_ELEMS_PER_THREAD;
+
+  const int tid_colwise_Y = threadIdx.x / TDM_GATED_MXFP8_THREADS_PER_CHUNK_X_COLWISE;
+  const int tid_colwise_X = threadIdx.x % TDM_GATED_MXFP8_THREADS_PER_CHUNK_X_COLWISE;
+
+  constexpr uint32_t input_data_size  = get_data_size_from_bits(sizeof(IType) * 8);
+  constexpr uint32_t output_data_size = get_data_size_from_bits(sizeof(OType) * 8);
+
+  const uint32_t tensor_w_in  = static_cast<uint32_t>(cols);
+  const uint32_t tensor_h     = static_cast<uint32_t>(rows);
+  const uint32_t stride_in    = static_cast<uint32_t>(input_stride);
+  const uint32_t stride_grad  = static_cast<uint32_t>(grad_stride);
+  const uint32_t stride_out   = static_cast<uint32_t>(output_stride);
+  const uint32_t tensor_w_out = static_cast<uint32_t>(cols);
+
+  // Shared memory buffers: double-buffered
+  __shared__ alignas(128) IType in_act_sh [TDM_GATED_MXFP8_BUFFERS_NUM][TDM_GATED_MXFP8_SHMEM_DIM_Y][TDM_GATED_MXFP8_SHMEM_DIM_X];
+  __shared__ alignas(128) IType in_gate_sh[TDM_GATED_MXFP8_BUFFERS_NUM][TDM_GATED_MXFP8_SHMEM_DIM_Y][TDM_GATED_MXFP8_SHMEM_DIM_X];
+  __shared__ alignas(128) IType in_grad_sh[IS_BWD ? TDM_GATED_MXFP8_BUFFERS_NUM : 1][TDM_GATED_MXFP8_SHMEM_DIM_Y][TDM_GATED_MXFP8_SHMEM_DIM_X];
+
+  // Output shmem: for colwise store via TDM, for rowwise direct global writes
+  __shared__ alignas(128) OType out_act_colwise_sh [COLWISE_SCALING ? TDM_GATED_MXFP8_BUFFERS_NUM : 1][TDM_GATED_MXFP8_SHMEM_DIM_Y][TDM_GATED_MXFP8_SHMEM_DIM_X];
+  __shared__ alignas(128) OType out_gate_colwise_sh[COLWISE_SCALING && IS_BWD ? TDM_GATED_MXFP8_BUFFERS_NUM : 1][TDM_GATED_MXFP8_SHMEM_DIM_Y][TDM_GATED_MXFP8_SHMEM_DIM_X];
+
+  // For colwise cross-thread Y reduction
+  __shared__ float stage_amax_sh[TDM_GATED_MXFP8_THREADS_PER_CHUNK_Y_COLWISE][TDM_GATED_MXFP8_CHUNK_DIM_X];
+
+  // --- Prologue: prefetch iteration 0 into buffer 0 ---
+  {
+    const uint32_t cy = static_cast<uint32_t>(chunk_offset_Y);
+    const uint32_t cx = static_cast<uint32_t>(chunk_offset_X);
+    if constexpr (IS_BWD) {
+      // grad has stride_grad, act/gate have stride_in -- cannot use x3
+      copy_2d_to_shared(
+          &in_grad_sh[0][0][0], grad_ptr, cx, cy,
+          TDM_GATED_MXFP8_SHMEM_DIM_X, TDM_GATED_MXFP8_SHMEM_DIM_Y,
+          tensor_w_in, tensor_h, stride_grad, input_data_size);
+      copy_2d_to_shared_x2(
+          &in_act_sh [0][0][0], act_ptr,  cx, cy,
+          &in_gate_sh[0][0][0], gate_ptr, cx, cy,
+          TDM_GATED_MXFP8_SHMEM_DIM_X, TDM_GATED_MXFP8_SHMEM_DIM_Y,
+          tensor_w_in, tensor_h, stride_in, input_data_size);
+    } else {
+      copy_2d_to_shared_x2(
+          &in_act_sh [0][0][0], act_ptr,  cx, cy,
+          &in_gate_sh[0][0][0], gate_ptr, cx, cy,
+          TDM_GATED_MXFP8_SHMEM_DIM_X, TDM_GATED_MXFP8_SHMEM_DIM_Y,
+          tensor_w_in, tensor_h, stride_in, input_data_size);
+    }
+  }
+
+  // --- Main loop ---
+#pragma unroll
+  for (int iter = 0; iter < (int)TDM_GATED_MXFP8_ITERATIONS; ++iter) {
+    const int buff      = iter % TDM_GATED_MXFP8_BUFFERS_NUM;
+    const int next_iter = iter + 1;
+    const int next_buff = next_iter % TDM_GATED_MXFP8_BUFFERS_NUM;
+
+    // Prefetch next iteration if available
+    if (next_iter < (int)TDM_GATED_MXFP8_ITERATIONS) {
+      const uint32_t ncy = static_cast<uint32_t>(chunk_offset_Y + next_iter * TDM_GATED_MXFP8_BUFFER_DIM_Y);
+      const uint32_t ncx = static_cast<uint32_t>(chunk_offset_X);
+      if constexpr (IS_BWD) {
+        copy_2d_to_shared(
+            &in_grad_sh[next_buff][0][0], grad_ptr, ncx, ncy,
+            TDM_GATED_MXFP8_SHMEM_DIM_X, TDM_GATED_MXFP8_SHMEM_DIM_Y,
+            tensor_w_in, tensor_h, stride_grad, input_data_size);
+        copy_2d_to_shared_x2(
+            &in_act_sh [next_buff][0][0], act_ptr,  ncx, ncy,
+            &in_gate_sh[next_buff][0][0], gate_ptr, ncx, ncy,
+            TDM_GATED_MXFP8_SHMEM_DIM_X, TDM_GATED_MXFP8_SHMEM_DIM_Y,
+            tensor_w_in, tensor_h, stride_in, input_data_size);
+      } else {
+        copy_2d_to_shared_x2(
+            &in_act_sh [next_buff][0][0], act_ptr,  ncx, ncy,
+            &in_gate_sh[next_buff][0][0], gate_ptr, ncx, ncy,
+            TDM_GATED_MXFP8_SHMEM_DIM_X, TDM_GATED_MXFP8_SHMEM_DIM_Y,
+            tensor_w_in, tensor_h, stride_in, input_data_size);
+      }
+    }
+
+    // Wait for current buffer's loads to complete.
+    // IS_BWD: 3 TDM ops/iter (1 grad + 2 act/gate), FWD: 2 TDM ops/iter.
+    // When next prefetch is live, keep those N ops in-flight; otherwise drain all.
+    if (is_tdm_wave()) {
+      if (next_iter < (int)TDM_GATED_MXFP8_ITERATIONS) {
+        if constexpr (IS_BWD) {
+          wait_tensorcnt_3();
+        } else {
+          wait_tensorcnt_2();
+        }
+      } else {
+        wait_tensorcnt_0();
+      }
+    }
+    __syncthreads();
+
+    // --- Compute: rowwise path (direct global writes) ---
+    if constexpr (ROWWISE_SCALING) {
+      const size_t row = chunk_offset_Y + iter * TDM_GATED_MXFP8_BUFFER_DIM_Y + tid_rowwise_Y;
+      const size_t col_start = chunk_offset_X + thread_offset_X_rowwise;
+      const bool row_valid = (row < rows);
+      const bool col_valid = (col_start < cols);
+
+      const int shmem_base_y = tid_rowwise_Y;
+      const int shmem_base_x = thread_offset_X_rowwise;
+
+      // Load from shmem
+      float computed_act[TDM_GATED_MXFP8_ELEMS_PER_THREAD];
+      float computed_gate[TDM_GATED_MXFP8_ELEMS_PER_THREAD];
+      float act_amax = 0.0f;
+      float gate_amax = 0.0f;
+
+#pragma unroll
+      for (int j = 0; j < (int)TDM_GATED_MXFP8_ELEMS_PER_THREAD; ++j) {
+        float act_elt  = static_cast<float>(in_act_sh [buff][shmem_base_y][shmem_base_x + j]);
+        float gate_elt = static_cast<float>(in_gate_sh[buff][shmem_base_y][shmem_base_x + j]);
+        float grad_elt = 0.0f;
+        if constexpr (IS_BWD) {
+          grad_elt = static_cast<float>(in_grad_sh[buff][shmem_base_y][shmem_base_x + j]);
+        }
+
+        compute_gated_activation<IS_BWD, ParamOP, ActOP, DActOP, IType>(
+            act_elt, gate_elt, grad_elt, p, computed_act[j], computed_gate[j]);
+
+        if (row_valid && col_valid && (col_start + j < cols)) {
+          act_amax = fmaxf(act_amax, fabsf(computed_act[j]));
+          if constexpr (IS_BWD) {
+            gate_amax = fmaxf(gate_amax, fabsf(computed_gate[j]));
+          }
+        }
+      }
+
+      // Act rowwise quantization
+      {
+        __builtin_assume(act_amax >= 0);
+        const float scale_amax = subwarp_reduce_max_broadcast<TDM_GATED_MXFP8_SUBWARP_WIDTH>(act_amax);
+        const e8m0_t biased_exp =
+            ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
+        const float scale_inv = ptx::exp2f_rcp(biased_exp);
+
+        if (row_valid && col_valid) {
+#pragma unroll
+          for (int j = 0; j < (int)TDM_GATED_MXFP8_ELEMS_PER_THREAD; ++j) {
+            if (col_start + j < cols) {
+              out_act_rowwise_ptr[row * output_stride + col_start + j] =
+                  static_cast<OType>(computed_act[j] * scale_inv);
+            }
+          }
+        }
+
+        constexpr size_t THREADS_PER_SCALE_X = DIVUP(SCALE_DIM_X, TDM_GATED_MXFP8_ELEMS_PER_THREAD);
+        if (tid_rowwise_X % (int)THREADS_PER_SCALE_X == 0 && row_valid && col_valid) {
+          const size_t scale_idx = row * scale_stride_rowwise +
+              scales_rowwise_chunk_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X;
+          scales_rowwise[scale_idx] = biased_exp;
+        }
+      }
+
+      // Gate rowwise quantization (BWD only)
+      if constexpr (IS_BWD) {
+        __builtin_assume(gate_amax >= 0);
+        const float scale_amax = subwarp_reduce_max_broadcast<TDM_GATED_MXFP8_SUBWARP_WIDTH>(gate_amax);
+        const e8m0_t biased_exp =
+            ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
+        const float scale_inv = ptx::exp2f_rcp(biased_exp);
+
+        if (row_valid && col_valid) {
+#pragma unroll
+          for (int j = 0; j < (int)TDM_GATED_MXFP8_ELEMS_PER_THREAD; ++j) {
+            if (col_start + j < cols) {
+              out_gate_rowwise_ptr[row * output_stride + col_start + j] =
+                  static_cast<OType>(computed_gate[j] * scale_inv);
+            }
+          }
+        }
+
+        constexpr size_t THREADS_PER_SCALE_X = DIVUP(SCALE_DIM_X, TDM_GATED_MXFP8_ELEMS_PER_THREAD);
+        if (tid_rowwise_X % (int)THREADS_PER_SCALE_X == 0 && row_valid && col_valid) {
+          const size_t scale_idx = row * scale_stride_rowwise +
+              scales_rowwise_chunk_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X +
+              DIVUP(cols, SCALE_DIM_X);
+          scales_rowwise[scale_idx] = biased_exp;
+        }
+      }
+    }
+
+    // --- Compute: colwise path ---
+    if constexpr (COLWISE_SCALING) {
+      const bool col_out_of_bounds = (chunk_offset_X + tid_colwise_X >= cols);
+      const size_t row_base = chunk_offset_Y + iter * TDM_GATED_MXFP8_BUFFER_DIM_Y;
+      const int iteration_scale_colwise_offset_Y = scales_colwise_chunk_offset_Y + iter;
+
+      float after_dact_reg[TDM_GATED_MXFP8_BUFFER_STAGES_NUM_COLWISE];
+      float after_dgate_reg[TDM_GATED_MXFP8_BUFFER_STAGES_NUM_COLWISE];
+
+      float thread_Y_mx_block_amax      = 0.0f;
+      float thread_Y_mx_block_amax_gate = 0.0f;
+
+      // Compute activation and accumulate column amax
+      for (int stage = 0; stage < (int)TDM_GATED_MXFP8_BUFFER_STAGES_NUM_COLWISE; ++stage) {
+        const int stage_offset_Y = stage * TDM_GATED_MXFP8_THREADS_PER_CHUNK_Y_COLWISE;
+        const int shmem_y = tid_colwise_Y + stage_offset_Y;
+
+        float act_elt  = static_cast<float>(in_act_sh [buff][shmem_y][tid_colwise_X]);
+        float gate_elt = static_cast<float>(in_gate_sh[buff][shmem_y][tid_colwise_X]);
+        float grad_elt = 0.0f;
+        if constexpr (IS_BWD) {
+          grad_elt = static_cast<float>(in_grad_sh[buff][shmem_y][tid_colwise_X]);
+        }
+
+        compute_gated_activation<IS_BWD, ParamOP, ActOP, DActOP, IType>(
+            act_elt, gate_elt, grad_elt, p, after_dact_reg[stage], after_dgate_reg[stage]);
+
+        // Cache in shmem for potential rowwise reuse (IS_CACHED_ACT_OP)
+        if constexpr (ROWWISE_SCALING) {
+          in_act_sh [buff][shmem_y][tid_colwise_X] = static_cast<IType>(after_dact_reg[stage]);
+          if constexpr (IS_BWD) {
+            in_gate_sh[buff][shmem_y][tid_colwise_X] = static_cast<IType>(after_dgate_reg[stage]);
+          }
+        }
+
+        __builtin_assume(thread_Y_mx_block_amax >= 0);
+        thread_Y_mx_block_amax = fmaxf(thread_Y_mx_block_amax, fabsf(after_dact_reg[stage]));
+        if constexpr (IS_BWD) {
+          __builtin_assume(thread_Y_mx_block_amax_gate >= 0);
+          thread_Y_mx_block_amax_gate =
+              fmaxf(thread_Y_mx_block_amax_gate, fabsf(after_dgate_reg[stage]));
+        }
+      }
+
+      const bool row_out_of_bounds = (row_base >= rows);
+      const bool out_of_bounds     = (col_out_of_bounds || row_out_of_bounds);
+
+      // Gate colwise reduction and quantization (BWD only, do first to reuse stage_amax_sh)
+      if constexpr (IS_BWD) {
+        if (tid_colwise_Y > 0) {
+          stage_amax_sh[tid_colwise_Y][tid_colwise_X] = thread_Y_mx_block_amax_gate;
+        }
+        __syncthreads();
+        if (tid_colwise_Y == 0) {
+#pragma unroll
+          for (int y = 1; y < (int)TDM_GATED_MXFP8_THREADS_PER_CHUNK_Y_COLWISE; ++y) {
+            thread_Y_mx_block_amax_gate =
+                fmaxf(thread_Y_mx_block_amax_gate, stage_amax_sh[y][tid_colwise_X]);
+          }
+          stage_amax_sh[0][tid_colwise_X] = thread_Y_mx_block_amax_gate;
+        }
+        __syncthreads();
+
+        const float mx_block_Y_amax = stage_amax_sh[0][tid_colwise_X];
+        __builtin_assume(mx_block_Y_amax >= 0);
+
+        const e8m0_t biased_exponent =
+            ptx::float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
+        const float scale_reciprocal = ptx::exp2f_rcp(biased_exponent);
+
+        if ((tid_colwise_Y == 0) && !out_of_bounds) {
+          const int global_scales_offset_Y = iteration_scale_colwise_offset_Y;
+          const int global_scales_offset_X = scales_colwise_chunk_offset_X + tid_colwise_X + cols;
+          const int scale_idx =
+              global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
+          scales_colwise[scale_idx] = biased_exponent;
+        }
+
+#pragma unroll
+        for (int stage = 0; stage < (int)TDM_GATED_MXFP8_BUFFER_STAGES_NUM_COLWISE; ++stage) {
+          const int stage_offset_Y = stage * TDM_GATED_MXFP8_THREADS_PER_CHUNK_Y_COLWISE;
+          out_gate_colwise_sh[buff][tid_colwise_Y + stage_offset_Y][tid_colwise_X] =
+              static_cast<OType>(scale_reciprocal * after_dgate_reg[stage]);
+        }
+      }
+
+      // Act colwise reduction and quantization
+      {
+        if (tid_colwise_Y > 0) {
+          stage_amax_sh[tid_colwise_Y][tid_colwise_X] = thread_Y_mx_block_amax;
+        }
+        __syncthreads();
+        if (tid_colwise_Y == 0) {
+#pragma unroll
+          for (int y = 1; y < (int)TDM_GATED_MXFP8_THREADS_PER_CHUNK_Y_COLWISE; ++y) {
+            thread_Y_mx_block_amax = fmaxf(thread_Y_mx_block_amax, stage_amax_sh[y][tid_colwise_X]);
+          }
+          stage_amax_sh[0][tid_colwise_X] = thread_Y_mx_block_amax;
+        }
+        __syncthreads();
+
+        const float mx_block_Y_amax = stage_amax_sh[0][tid_colwise_X];
+        __builtin_assume(mx_block_Y_amax >= 0);
+
+        const e8m0_t biased_exponent =
+            ptx::float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
+        const float scale_reciprocal = ptx::exp2f_rcp(biased_exponent);
+
+        if ((tid_colwise_Y == 0) && !out_of_bounds) {
+          const int global_scales_offset_Y = iteration_scale_colwise_offset_Y;
+          const int global_scales_offset_X = scales_colwise_chunk_offset_X + tid_colwise_X;
+          const int scale_idx =
+              global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
+          scales_colwise[scale_idx] = biased_exponent;
+        }
+
+#pragma unroll
+        for (int stage = 0; stage < (int)TDM_GATED_MXFP8_BUFFER_STAGES_NUM_COLWISE; ++stage) {
+          const int stage_offset_Y = stage * TDM_GATED_MXFP8_THREADS_PER_CHUNK_Y_COLWISE;
+          out_act_colwise_sh[buff][tid_colwise_Y + stage_offset_Y][tid_colwise_X] =
+              static_cast<OType>(scale_reciprocal * after_dact_reg[stage]);
+        }
+      }
+    }
+
+    // Ensure all threads finished writing shmem before TDM reads it
+    __syncthreads();
+
+    // TDM store: colwise output shmem -> global
+    if constexpr (COLWISE_SCALING) {
+      const uint32_t scy = static_cast<uint32_t>(chunk_offset_Y + iter * TDM_GATED_MXFP8_BUFFER_DIM_Y);
+      const uint32_t scx = static_cast<uint32_t>(chunk_offset_X);
+
+      store_2d_to_global(
+          &out_act_colwise_sh[buff][0][0], out_act_colwise_ptr,
+          scx, scy,
+          TDM_GATED_MXFP8_SHMEM_DIM_X, TDM_GATED_MXFP8_SHMEM_DIM_Y,
+          tensor_w_out, tensor_h, stride_out, output_data_size);
+
+      if constexpr (IS_BWD) {
+        store_2d_to_global(
+            &out_gate_colwise_sh[buff][0][0], out_gate_colwise_ptr,
+            scx, scy,
+            TDM_GATED_MXFP8_SHMEM_DIM_X, TDM_GATED_MXFP8_SHMEM_DIM_Y,
+            tensor_w_out, tensor_h, stride_out, output_data_size);
+      }
+    }
+  }
+
+  // Drain all remaining TDM ops (stores)
+  if (is_tdm_wave()) {
+    wait_tensorcnt_0();
+  }
+  __syncthreads();
+}
+
+}  // namespace gated_mxfp8_tdm_kernel
+
+// ---------------------------------------------------------------------------
+// TDM launcher for gated MXFP8 cast
+// ---------------------------------------------------------------------------
+
+// Runtime check for gfx1250 TDM support.
+#ifndef TRANSFORMER_ENGINE_IS_GFX1250_DEFINED_
+#define TRANSFORMER_ENGINE_IS_GFX1250_DEFINED_
+inline bool is_gfx1250() {
+  static int result = -1;
+  if (result < 0) {
+    int device;
+    (void)hipGetDevice(&device);
+    hipDeviceProp_t prop;
+    (void)hipGetDeviceProperties(&prop, device);
+    result = (strncmp(prop.gcnArchName, "gfx1250", 7) == 0) ? 1 : 0;
+  }
+  return result == 1;
+}
+#endif  // TRANSFORMER_ENGINE_IS_GFX1250_DEFINED_
+
+template <bool IS_BWD, typename ParamOP, float (*ActOP)(float, const ParamOP &),
+          float (*DActOP)(float, const ParamOP &)>
+void quantize_gated_mxfp8_tdm(const Tensor &gated_input, const Tensor &grad, Tensor *output,
+                               ParamOP &p, cudaStream_t stream) {
+  using namespace gated_mxfp8_tdm_kernel;
+
+  const bool USE_ROWWISE_SCALING = output->has_data();
+  const bool USE_COLWISE_SCALING = output->has_columnwise_data();
+
+  const size_t rows = gated_input.flat_first_dim();
+  const size_t cols = gated_input.flat_last_dim() / 2;
+  const size_t output_cols = (IS_BWD ? 2 : 1) * cols;
+
+  const size_t blocks_Y = DIVUP(rows, TDM_GATED_MXFP8_CHUNK_DIM_Y);
+  const size_t blocks_X = DIVUP(cols, TDM_GATED_MXFP8_CHUNK_DIM_X);
+
+  const dim3 block_dim(TDM_GATED_MXFP8_THREADS);
+  const dim3 grid_dim(blocks_X, blocks_Y);
+
+  size_t scale_stride_rowwise = USE_ROWWISE_SCALING ? output->scale_inv.shape[1] : 1;
+  size_t scale_stride_colwise = USE_COLWISE_SCALING ? output->columnwise_scale_inv.shape[1] : 1;
+
+  e8m0_t *const scales_rowwise_ptr =
+      USE_ROWWISE_SCALING ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
+  e8m0_t *const scales_colwise_ptr =
+      USE_COLWISE_SCALING ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      gated_input.dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          output->dtype(), OType,
+
+          const IType *act_ptr  = reinterpret_cast<const IType *>(gated_input.data.dptr);
+          const IType *gate_ptr = act_ptr + cols;  // gate follows act in interleaved layout
+          const IType *grad_ptr = IS_BWD ? reinterpret_cast<const IType *>(grad.data.dptr)
+                                         : nullptr;
+
+          OType *out_act_rowwise_ptr  = USE_ROWWISE_SCALING
+              ? reinterpret_cast<OType *>(output->data.dptr) : nullptr;
+          OType *out_gate_rowwise_ptr = (USE_ROWWISE_SCALING && IS_BWD)
+              ? reinterpret_cast<OType *>(output->data.dptr) + cols : nullptr;
+          OType *out_act_colwise_ptr  = USE_COLWISE_SCALING
+              ? reinterpret_cast<OType *>(output->columnwise_data.dptr) : nullptr;
+          OType *out_gate_colwise_ptr = (USE_COLWISE_SCALING && IS_BWD)
+              ? reinterpret_cast<OType *>(output->columnwise_data.dptr) + cols : nullptr;
+
+          const size_t input_stride  = cols * 2;   // gated_input: [rows][cols*2]
+          const size_t grad_stride   = cols;        // grad:        [rows][cols]
+          const size_t output_stride = output_cols; // output:      [rows][output_cols]
+
+          if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) {
+            quantize_gated_mxfp8_tdm_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType,
+                                             true, true>
+                <<<grid_dim, block_dim, 0, stream>>>(
+                    grad_ptr, act_ptr, gate_ptr,
+                    out_act_rowwise_ptr, out_gate_rowwise_ptr,
+                    out_act_colwise_ptr, out_gate_colwise_ptr,
+                    scales_rowwise_ptr, scales_colwise_ptr,
+                    rows, cols,
+                    input_stride, grad_stride, output_stride,
+                    scale_stride_rowwise, scale_stride_colwise, p);
+          } else if (USE_ROWWISE_SCALING) {
+            quantize_gated_mxfp8_tdm_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType,
+                                             true, false>
+                <<<grid_dim, block_dim, 0, stream>>>(
+                    grad_ptr, act_ptr, gate_ptr,
+                    out_act_rowwise_ptr, out_gate_rowwise_ptr,
+                    out_act_colwise_ptr, out_gate_colwise_ptr,
+                    scales_rowwise_ptr, scales_colwise_ptr,
+                    rows, cols,
+                    input_stride, grad_stride, output_stride,
+                    scale_stride_rowwise, scale_stride_colwise, p);
+          } else if (USE_COLWISE_SCALING) {
+            quantize_gated_mxfp8_tdm_kernel<IS_BWD, ParamOP, ActOP, DActOP, IType, OType,
+                                             false, true>
+                <<<grid_dim, block_dim, 0, stream>>>(
+                    grad_ptr, act_ptr, gate_ptr,
+                    out_act_rowwise_ptr, out_gate_rowwise_ptr,
+                    out_act_colwise_ptr, out_gate_colwise_ptr,
+                    scales_rowwise_ptr, scales_colwise_ptr,
+                    rows, cols,
+                    input_stride, grad_stride, output_stride,
+                    scale_stride_rowwise, scale_stride_colwise, p);
+          }
+          NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
+  );                                              // NOLINT(*)
+}
+
+#endif  // defined(__gfx1250__)
+
 #else
 constexpr size_t CHUNK_DIM_Y = 64;
 constexpr size_t CHUNK_DIM_X = 64;
@@ -784,6 +1318,14 @@ void quantize_gated(const Tensor &gated_input, const Tensor &grad, Tensor *outpu
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
 #ifdef __HIP_PLATFORM_AMD__
+#if defined(__gfx1250__)
+              // gfx1250 TDM path -- use TDM-accelerated kernel when cols is aligned
+              if (is_gfx1250() && (cols % gated_mxfp8_tdm_kernel::TDM_GATED_MXFP8_CHUNK_DIM_X == 0)) {
+                quantize_gated_mxfp8_tdm<IS_BWD, ParamOP, ActOP, DActOP>(
+                    gated_input, grad, output, p, stream);
+                return;
+              }
+#endif  // defined(__gfx1250__)
               const IType *tensor_map_grad = IS_BWD ? reinterpret_cast<const IType *>(grad.data.dptr) : nullptr;
               const IType *tensor_map_input_act = reinterpret_cast<const IType *>(gated_input.data.dptr);
               const IType *tensor_map_input_gate = reinterpret_cast<const IType *>(gated_input.data.dptr) + cols;

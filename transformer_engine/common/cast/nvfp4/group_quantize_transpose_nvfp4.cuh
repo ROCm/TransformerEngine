@@ -737,6 +737,689 @@ __global__ void __launch_bounds__(THREADS_NUM)
 #endif  // FP4_TYPE_SUPPORTED
 }  // namespace group_quantize_transpose_kernel
 
+#ifdef __HIP_PLATFORM_AMD__
+
+// Runtime check for gfx1250 TDM support.
+#ifndef TRANSFORMER_ENGINE_NVFP4_GRP_IS_GFX1250_DEFINED_
+#define TRANSFORMER_ENGINE_NVFP4_GRP_IS_GFX1250_DEFINED_
+inline bool is_gfx1250() {
+  static int result = -1;
+  if (result < 0) {
+    int device;
+    (void)hipGetDevice(&device);
+    hipDeviceProp_t prop;
+    (void)hipGetDeviceProperties(&prop, device);
+    result = (strncmp(prop.gcnArchName, "gfx1250", 7) == 0) ? 1 : 0;
+  }
+  return result == 1;
+}
+#endif  // TRANSFORMER_ENGINE_NVFP4_GRP_IS_GFX1250_DEFINED_
+
+#if defined(__gfx1250__)
+}  // temporarily close namespace nvfp4
+}  // temporarily close namespace dispatch
+#include "../../util/tdm.cuh"
+namespace dispatch {
+namespace nvfp4 {
+
+namespace group_quantize_transpose_tdm_kernel {
+
+using namespace quantization_and_transposition_SF;
+using namespace core;
+using namespace group_quantize_transpose_kernel;
+
+constexpr size_t TDM_GRP_SCALE_DIM = 16;
+
+constexpr size_t TDM_GRP_CHUNK_DIM_Y = 128;
+constexpr size_t TDM_GRP_CHUNK_DIM_X = 128;
+constexpr size_t TDM_GRP_THREADS_NUM = 128;
+
+constexpr size_t TDM_GRP_SCALES_PER_CHUNK_Y = TDM_GRP_CHUNK_DIM_Y / TDM_GRP_SCALE_DIM;
+constexpr size_t TDM_GRP_SCALES_PER_CHUNK_X = TDM_GRP_CHUNK_DIM_X / TDM_GRP_SCALE_DIM;
+
+constexpr size_t TDM_GRP_TILE_DIM_Y = 32;
+constexpr size_t TDM_GRP_TILE_DIM_X = 128;
+
+constexpr size_t TDM_GRP_TILES_Y = TDM_GRP_CHUNK_DIM_Y / TDM_GRP_TILE_DIM_Y;
+constexpr size_t TDM_GRP_TILES_X = TDM_GRP_CHUNK_DIM_X / TDM_GRP_TILE_DIM_X;
+constexpr size_t TDM_GRP_STAGES = TDM_GRP_TILES_Y * TDM_GRP_TILES_X;
+
+constexpr size_t TDM_GRP_BUFFS_NUM = 2;
+constexpr size_t TDM_GRP_BUFF_DIM_Y = TDM_GRP_TILE_DIM_Y;
+constexpr size_t TDM_GRP_BUFF_DIM_X = TDM_GRP_TILE_DIM_X;
+
+constexpr size_t TDM_GRP_BUFF_IN_DIM_Y = TDM_GRP_BUFF_DIM_Y;
+constexpr size_t TDM_GRP_BUFF_IN_DIM_X = TDM_GRP_BUFF_DIM_X;
+constexpr size_t TDM_GRP_BUFF_IN_SIZE = TDM_GRP_BUFF_IN_DIM_Y * TDM_GRP_BUFF_IN_DIM_X;
+
+constexpr size_t TDM_GRP_BUFF_OUT_DIM_Y = TDM_GRP_BUFF_DIM_Y;
+constexpr size_t TDM_GRP_BUFF_OUT_DIM_X = (TDM_GRP_BUFF_DIM_X * 4) / 8;
+constexpr size_t TDM_GRP_BUFF_OUT_SIZE = TDM_GRP_BUFF_OUT_DIM_Y * TDM_GRP_BUFF_OUT_DIM_X;
+
+constexpr size_t TDM_GRP_BUFF_OUT_T_DIM_Y = TDM_GRP_BUFF_DIM_X;
+constexpr size_t TDM_GRP_BUFF_OUT_T_DIM_X = (TDM_GRP_BUFF_DIM_Y * 4) / 8;
+constexpr size_t TDM_GRP_BUFF_OUT_T_SIZE = TDM_GRP_BUFF_OUT_T_DIM_Y * TDM_GRP_BUFF_OUT_T_DIM_X;
+
+constexpr size_t TDM_GRP_PACK_SIZE = 8;
+constexpr size_t TDM_GRP_WAVES = TDM_GRP_SCALE_DIM / TDM_GRP_PACK_SIZE;
+
+constexpr size_t TDM_GRP_THREADS_X_ROWWISE = TDM_GRP_TILE_DIM_X / TDM_GRP_SCALE_DIM;
+constexpr size_t TDM_GRP_THREADS_Y_ROWWISE = TDM_GRP_THREADS_NUM / TDM_GRP_THREADS_X_ROWWISE;
+
+constexpr size_t TDM_GRP_ITERATIONS_NORMAL = TDM_GRP_BUFF_DIM_Y / TDM_GRP_THREADS_Y_ROWWISE;
+constexpr size_t TDM_GRP_ITERATIONS_TRANSPOSE = TDM_GRP_BUFF_IN_DIM_Y / TDM_GRP_SCALE_DIM;
+constexpr size_t TDM_GRP_BUFF_OUT_IT_OFFSET = TDM_GRP_BUFF_OUT_T_DIM_X / TDM_GRP_ITERATIONS_TRANSPOSE;
+
+constexpr size_t TDM_GRP_TOTAL_BANKS_WIDTH = (32 * 4 * 8) / 4;
+constexpr size_t TDM_GRP_THREADS_PER_BANK = TDM_GRP_TOTAL_BANKS_WIDTH / TDM_GRP_SCALE_DIM;
+
+constexpr size_t TDM_GRP_SHMEM_ALIGNMENT = 128;
+
+template <bool COMPUTE_ACTIVATIONS, typename ParamOP, float (*OP)(float, const ParamOP &),
+          typename IType, bool USE_STOCHASTIC_ROUNDING, bool RETURN_TRANSPOSE>
+__global__ void __launch_bounds__(TDM_GRP_THREADS_NUM)
+    group_quantize_transpose_nvfp4_tdm_kernel(const IType *__restrict__ input_ptr,
+                                              fp4e2m1x2 *__restrict__ output_ptr,
+                                              nvfp4_scale_t *const scales_ptr, const float *noop,
+                                              const size_t rows, const size_t cols,
+                                              const size_t scale_stride, const size_t *rng_state,
+                                              MultiAmaxCastTransposeFusionArgs kernel_args) {
+  using namespace transformer_engine::tdm;
+
+  constexpr bool NO_ACTIVATIONS_NOT_FP32_INPUT =
+      (!COMPUTE_ACTIVATIONS) && (!std::is_same_v<IType, float>);
+
+  using IType2 = typename ptx::FPx2<IType>;
+
+  if constexpr (!COMPUTE_ACTIVATIONS) {
+    if (noop != nullptr && noop[0] == 1.0f) {
+      return;
+    }
+  }
+
+  const size_t rng_sequence =
+      threadIdx.x + blockIdx.x * TDM_GRP_THREADS_NUM + blockIdx.y * gridDim.x * TDM_GRP_THREADS_NUM;
+  const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
+  const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
+  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  rng.init(rng_seed, rng_sequence, rng_offset);
+  uint4 random_uint4 = USE_STOCHASTIC_ROUNDING ? rng.generate4() : uint4{0, 0, 0, 0};
+  int rnd_idx = 0;
+
+  constexpr bool IS_CACHED_ACT_OP = COMPUTE_ACTIVATIONS;
+
+  const size_t block_offset_Y = blockIdx.y * TDM_GRP_CHUNK_DIM_Y;
+  const size_t block_offset_X = blockIdx.x * TDM_GRP_CHUNK_DIM_X;
+
+  const size_t chunk_rows = rows - block_offset_Y;
+
+  const size_t scales_block_offset_Y_rowwise = blockIdx.y * TDM_GRP_CHUNK_DIM_Y;
+  const size_t scales_block_offset_X_rowwise = blockIdx.x * TDM_GRP_SCALES_PER_CHUNK_X;
+
+  const size_t tid_Y_rowwise = threadIdx.x / TDM_GRP_THREADS_X_ROWWISE;
+  const size_t tid_X_rowwise = threadIdx.x % TDM_GRP_THREADS_X_ROWWISE;
+  const size_t tid_X_colwise = threadIdx.x;
+  const size_t tid_Y_t = tid_X_colwise;
+
+  const size_t thread_offset_Y_rowwise = tid_Y_rowwise;
+  const size_t thread_offset_X_rowwise = tid_X_rowwise * TDM_GRP_SCALE_DIM;
+  const size_t thread_offset_X_colwise = tid_X_colwise;
+
+  const size_t row_base_rowwise = block_offset_Y + thread_offset_Y_rowwise;
+  const size_t row_base_colwise = block_offset_Y;
+  const size_t col_base_colwise = block_offset_X + thread_offset_X_colwise;
+
+  const bool col_out_of_bounds_colwise = (col_base_colwise >= cols);
+
+  const size_t scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + tid_Y_rowwise;
+  const size_t scales_offset_X_rowwise = scales_block_offset_X_rowwise + tid_X_rowwise;
+
+  const size_t SFs_per_row = cols / TDM_GRP_SCALE_DIM;
+
+  const bool rowwise_scale_is_within_bounds_X = scales_offset_X_rowwise < SFs_per_row;
+
+  const int thread_lane = threadIdx.x % THREADS_PER_WARP;
+  const int bank_group = thread_lane / TDM_GRP_THREADS_PER_BANK;
+
+  constexpr size_t buff_elems = TDM_GRP_BUFF_DIM_Y * TDM_GRP_BUFF_IN_DIM_X;
+  constexpr size_t buff_elems_total = TDM_GRP_BUFFS_NUM * buff_elems;
+
+  constexpr size_t buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TDM_GRP_SHMEM_ALIGNMENT);
+  constexpr size_t buff_size_aligned_out =
+      DIVUP_TO_MULTIPLE((buff_elems_total * 4) / 8, TDM_GRP_SHMEM_ALIGNMENT);
+
+  constexpr size_t in_mem = buff_size_aligned_in;
+
+  constexpr size_t out_mem_rowwise_data = buff_size_aligned_out;
+  constexpr size_t out_mem_colwise_data = buff_size_aligned_out;
+  constexpr size_t out_mem_rowwise_scales = 0;
+
+  extern __shared__ char dynamic_shmem[];
+  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
+  uintptr_t dshmem = (base_shmem_ptr + TDM_GRP_SHMEM_ALIGNMENT - 1) &
+                     ~(static_cast<uintptr_t>(TDM_GRP_SHMEM_ALIGNMENT - 1));
+
+  IType *in_sh = reinterpret_cast<IType *>(dshmem);
+  fp4e2m1x2 *out_data_sh = reinterpret_cast<fp4e2m1x2 *>(dshmem + in_mem);
+  fp4e2m1x2 *out_t_data_sh = reinterpret_cast<fp4e2m1x2 *>(dshmem + in_mem + out_mem_rowwise_data);
+
+  nvfp4_scale_t *out_rowwise_scales_sh = reinterpret_cast<nvfp4_scale_t *>(
+      dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data);
+  nvfp4_scale_t *out_colwise_scales_sh = reinterpret_cast<nvfp4_scale_t *>(
+      dshmem + in_mem + out_mem_rowwise_data + out_mem_colwise_data + out_mem_rowwise_scales);
+  IType *cached_act_sh = in_sh;
+
+  constexpr size_t shmem_buff_size = buff_size_aligned_in / TDM_GRP_BUFFS_NUM;
+
+  // TDM parameters for input (IType, e.g. bf16)
+  constexpr uint32_t input_data_size = get_data_size_from_bits(sizeof(IType) * 8);
+  // NVFP4 = 4 bits/element, packed as uint8 -> data_size=0
+  constexpr uint32_t output_data_size = 0;
+  const uint32_t input_stride = static_cast<uint32_t>(cols);
+  const uint32_t input_tensor_w = static_cast<uint32_t>(cols);
+  const uint32_t input_tensor_h = static_cast<uint32_t>(rows);
+  // For NVFP4 output: columns are halved (2 elements per byte)
+  const uint32_t output_cols_bytes = static_cast<uint32_t>(cols / 2);
+  const uint32_t output_stride = output_cols_bytes;
+  const uint32_t output_tensor_w = output_cols_bytes;
+  const uint32_t output_tensor_h = static_cast<uint32_t>(rows);
+
+  // Group-level amax/scale state
+  float *amax_rowwise_ptr = nullptr;
+  float *amax_colwise_ptr = nullptr;
+  nvfp4_scale_t *split_rowwise_scale_ptr = nullptr;
+
+  bool need_update_tensor_id = true;
+  int tensor_id = GetTensorIdAndBoundary(&kernel_args, block_offset_Y, block_offset_Y + TDM_GRP_CHUNK_DIM_Y,
+                                         &need_update_tensor_id);
+  size_t split_start = kernel_args.split_sections_range[tensor_id];
+  size_t split_end = kernel_args.split_sections_range[tensor_id + 1];
+  amax_rowwise_ptr = reinterpret_cast<float *>(kernel_args.rowwise_amax_list[tensor_id]);
+  split_rowwise_scale_ptr =
+      reinterpret_cast<nvfp4_scale_t *>(kernel_args.output_rowwise_scale_inv_list[tensor_id]);
+
+  float S_enc_rowwise = 1.0f;
+  float S_dec_rowwise = 1.0f;
+  UpdateEncodeDecodeScaleFP32(amax_rowwise_ptr, &S_enc_rowwise, &S_dec_rowwise);
+
+  float S_enc_colwise = 1.0f;
+  float S_dec_colwise = 1.0f;
+  if (amax_colwise_ptr != nullptr) {
+    UpdateEncodeDecodeScaleFP32(amax_colwise_ptr, &S_enc_colwise, &S_dec_colwise);
+  } else {
+    S_enc_colwise = S_enc_rowwise;
+    S_dec_colwise = S_dec_rowwise;
+  }
+
+  float thread_amax = 0.0f;
+
+  // --- Prologue: TDM load first tile ---
+  {
+    const uint32_t chunk_x = static_cast<uint32_t>(block_offset_X);
+    const uint32_t chunk_y = static_cast<uint32_t>(block_offset_Y);
+    copy_2d_to_shared(
+        &in_sh[0], input_ptr, chunk_x, chunk_y,
+        TDM_GRP_BUFF_IN_DIM_X, TDM_GRP_BUFF_IN_DIM_Y,
+        input_tensor_w, input_tensor_h, input_stride, input_data_size);
+  }
+
+#pragma unroll
+  for (size_t stage = 0; stage < TDM_GRP_STAGES; ++stage) {
+    const size_t buff = stage % TDM_GRP_BUFFS_NUM;
+    const size_t next_stage = stage + 1;
+    const size_t stage_offset_Y = stage * TDM_GRP_BUFF_DIM_Y;
+
+    const size_t buff_offset_in = buff * TDM_GRP_BUFF_IN_SIZE;
+    const size_t buff_offset_out = buff * TDM_GRP_BUFF_OUT_SIZE;
+    const size_t buff_offset_out_t = buff * TDM_GRP_BUFF_OUT_T_SIZE;
+
+    // Update tensor id for group splits
+    if (need_update_tensor_id && stage > 0 && (block_offset_Y + stage_offset_Y < rows)) {
+      int new_tensor_id = GetTensorId(&kernel_args, block_offset_Y + stage_offset_Y);
+      if (new_tensor_id != tensor_id) {
+        tensor_id = new_tensor_id;
+        split_start = kernel_args.split_sections_range[tensor_id];
+        split_end = kernel_args.split_sections_range[tensor_id + 1];
+        amax_rowwise_ptr = reinterpret_cast<float *>(kernel_args.rowwise_amax_list[tensor_id]);
+        UpdateEncodeDecodeScaleFP32(amax_rowwise_ptr, &S_enc_rowwise, &S_dec_rowwise);
+        split_rowwise_scale_ptr =
+            reinterpret_cast<nvfp4_scale_t *>(kernel_args.output_rowwise_scale_inv_list[tensor_id]);
+      }
+    }
+
+    // Prefetch next tile
+    if (next_stage < TDM_GRP_STAGES) {
+      const size_t next_buff = next_stage % TDM_GRP_BUFFS_NUM;
+      const size_t next_stage_offset_Y = next_stage * TDM_GRP_BUFF_DIM_Y;
+      const uint32_t next_chunk_y = static_cast<uint32_t>(block_offset_Y + next_stage_offset_Y);
+      const uint32_t chunk_x = static_cast<uint32_t>(block_offset_X);
+      const size_t next_buff_offset = next_buff * TDM_GRP_BUFF_IN_SIZE;
+      copy_2d_to_shared(
+          &in_sh[next_buff_offset], input_ptr, chunk_x, next_chunk_y,
+          TDM_GRP_BUFF_IN_DIM_X, TDM_GRP_BUFF_IN_DIM_Y,
+          input_tensor_w, input_tensor_h, input_stride, input_data_size);
+    }
+
+    // Wait for current load; keep prefetch in flight if present
+    if (is_tdm_wave()) {
+      if (next_stage < TDM_GRP_STAGES) {
+        wait_tensorcnt_1();
+      } else {
+        wait_tensorcnt_0();
+      }
+    }
+    __syncthreads();
+
+    float block_amax = 0.0f;
+
+    // COLWISE scaling
+    if constexpr (RETURN_TRANSPOSE) {
+#pragma unroll
+      for (size_t it = 0; it < TDM_GRP_ITERATIONS_TRANSPOSE; ++it) {
+        const size_t in_thread_offset_Y = 0 + it * TDM_GRP_SCALE_DIM;
+        const size_t in_thread_offset_X = thread_offset_X_colwise;
+
+        const size_t out_t_thread_offset_Y = thread_offset_X_colwise;
+        const size_t out_t_thread_offset_X = 0 + it * TDM_GRP_BUFF_OUT_IT_OFFSET;
+
+        const size_t shmem_offset_base_colwise_in =
+            buff_offset_in + in_thread_offset_Y * TDM_GRP_BUFF_IN_DIM_X + in_thread_offset_X;
+        const size_t shmem_offset_base_colwise_out_t =
+            buff_offset_out_t + out_t_thread_offset_Y * TDM_GRP_BUFF_OUT_T_DIM_X + out_t_thread_offset_X;
+
+        block_amax = 0.0f;
+        float in_compute_colwise[TDM_GRP_SCALE_DIM];
+        IType in_colwise_IType[TDM_GRP_SCALE_DIM];
+
+        if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+          IType block_amax_f16 = static_cast<IType>(0.0f);
+#pragma unroll
+          for (int i = 0; i < TDM_GRP_SCALE_DIM; ++i) {
+            const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * TDM_GRP_BUFF_IN_DIM_X;
+            in_colwise_IType[i] = in_sh[shmem_offset_colwise];
+            block_amax_f16 = __hmax(block_amax_f16, __habs(in_colwise_IType[i]));
+          }
+          block_amax = static_cast<float>(block_amax_f16);
+        } else {
+#pragma unroll
+          for (int i = 0; i < TDM_GRP_SCALE_DIM; ++i) {
+            const int shmem_offset_colwise = shmem_offset_base_colwise_in + i * TDM_GRP_BUFF_IN_DIM_X;
+            float elt = static_cast<float>(in_sh[shmem_offset_colwise]);
+            if constexpr (COMPUTE_ACTIVATIONS) {
+              elt = OP(elt, {});
+            }
+            if constexpr (!std::is_same_v<IType, float>) {
+              elt = static_cast<float>(static_cast<IType>(elt));
+            }
+            if constexpr (IS_CACHED_ACT_OP) {
+              cached_act_sh[shmem_offset_colwise] = static_cast<IType>(elt);
+            }
+            if constexpr (COMPUTE_ACTIVATIONS) {
+              const bool row_out_of_bounds_colwise =
+                  (row_base_colwise + stage_offset_Y + i >= rows);
+              const bool out_of_bounds = (col_out_of_bounds_colwise || row_out_of_bounds_colwise);
+              if (!out_of_bounds) {
+                block_amax = fmaxf(block_amax, fabsf(elt));
+              }
+            } else {
+              block_amax = fmaxf(block_amax, fabsf(elt));
+            }
+            in_compute_colwise[i] = elt;
+          }
+        }
+
+        const nvfp4_scale_t S_dec_b_fp8 =
+            compute_decoding_scaling_factor(block_amax, S_enc_colwise);
+
+        const size_t scale_idx_sh =
+            tid_Y_t * TDM_GRP_SCALES_PER_CHUNK_Y + stage * TDM_GRP_ITERATIONS_TRANSPOSE + it;
+        out_colwise_scales_sh[scale_idx_sh] = S_dec_b_fp8;
+
+        constexpr float float_max = detail::TypeExtrema<float>::max;
+        const float block_scale_inverse = fminf(
+            1.0f / (static_cast<float>(S_dec_b_fp8) * S_dec_colwise), float_max);
+        const float2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
+
+        fp4e2m1x4 regs[TDM_GRP_SCALE_DIM / 4];
+
+#pragma unroll
+        for (int e = 0; e < TDM_GRP_SCALE_DIM / 4; ++e) {
+          const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
+          if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+            const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_colwise_IType[4 * e]);
+            regs[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                elts, block_scale_inverse_2x, rbits);
+          } else {
+            const float2 in01 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e]);
+            const float2 in23 = *reinterpret_cast<float2 *>(&in_compute_colwise[4 * e + 2]);
+            regs[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                in01, in23, block_scale_inverse_2x, rbits);
+          }
+        }
+
+        const int group = thread_lane / 16;
+        uint32_t val[2];
+        uint32_t *regs_4x = reinterpret_cast<uint32_t *>(regs);
+
+        switch (group) {
+          case 0:
+            val[0] = regs_4x[0];
+            val[1] = regs_4x[1];
+            break;
+          case 1:
+            val[0] = regs_4x[1];
+            val[1] = regs_4x[0];
+            break;
+        }
+        uint32_t *out_t_data_sh_as_uint32_t =
+            reinterpret_cast<uint32_t *>(&out_t_data_sh[shmem_offset_base_colwise_out_t]);
+        out_t_data_sh_as_uint32_t[group] = val[0];
+        out_t_data_sh_as_uint32_t[(group + 1) & 1] = val[1];
+      }
+    }
+
+    // ROWWISE scaling
+    {
+      const size_t stage_rowwise_scales_offset_Y = stage * TDM_GRP_BUFF_DIM_Y;
+#pragma unroll
+      for (size_t it = 0; it < TDM_GRP_ITERATIONS_NORMAL; ++it) {
+        const size_t it_thread_offset_Y_rowwise = thread_offset_Y_rowwise + it * TDM_GRP_THREADS_Y_ROWWISE;
+
+        const size_t shmem_offset_base_rowwise_in =
+            buff_offset_in + it_thread_offset_Y_rowwise * TDM_GRP_BUFF_IN_DIM_X;
+        const size_t shmem_offset_base_rowwise_out =
+            buff_offset_out + it_thread_offset_Y_rowwise * TDM_GRP_BUFF_OUT_DIM_X;
+
+        const size_t it_offset_Y = stage_offset_Y + it * TDM_GRP_THREADS_Y_ROWWISE;
+
+        block_amax = 0.0f;
+        float in_compute_rowwise[TDM_GRP_SCALE_DIM];
+        Vec<IType, TDM_GRP_PACK_SIZE> in_cached[TDM_GRP_WAVES];
+        Vec<IType2, TDM_GRP_PACK_SIZE / 2> in_IType[TDM_GRP_WAVES];
+
+        if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+          IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+#pragma unroll
+          for (int w = 0; w < TDM_GRP_WAVES; ++w) {
+            const size_t swizzled_group_idx = ((w + bank_group) * TDM_GRP_PACK_SIZE) % TDM_GRP_SCALE_DIM;
+            const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+            const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
+            in_IType[w].load_from(&in_sh[shmem_offset_rowwise]);
+#pragma unroll
+            for (int e = 0; e < TDM_GRP_PACK_SIZE / 2; ++e) {
+              ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_IType[w].data.elt[e]);
+            }
+          }
+          block_amax =
+              static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+        } else if constexpr (IS_CACHED_ACT_OP) {
+          __syncthreads();
+          IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+#pragma unroll
+          for (int w = 0; w < TDM_GRP_WAVES; ++w) {
+            const size_t swizzled_group_idx = ((w + bank_group) * TDM_GRP_PACK_SIZE) % TDM_GRP_SCALE_DIM;
+            const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+            const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
+
+            const bool row_out_of_bounds_rowwise = (row_base_rowwise + it_offset_Y >= rows);
+            const bool swizzled_col_out_of_bounds = (block_offset_X + swizzled_thread_idx >= cols);
+            const bool out_of_bounds = (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
+
+            in_cached[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
+            if (!out_of_bounds) {
+              if constexpr (std::is_same_v<IType, float>) {
+#pragma unroll
+                for (int e = 0; e < TDM_GRP_PACK_SIZE; ++e) {
+                  block_amax = fmaxf(block_amax, fabsf(in_cached[w].data.elt[e]));
+                }
+              } else {
+#pragma unroll
+                for (int e = 0; e < TDM_GRP_PACK_SIZE; e += 2) {
+                  const IType2 in_cached_2x = {in_cached[w].data.elt[e],
+                                               in_cached[w].data.elt[e + 1]};
+                  ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
+                }
+              }
+            }
+          }
+          if constexpr (!std::is_same_v<IType, float>) {
+            block_amax =
+                static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+          }
+        } else {
+#pragma unroll
+          for (int w = 0; w < TDM_GRP_WAVES; ++w) {
+            const size_t swizzled_group_idx = ((w + bank_group) * TDM_GRP_PACK_SIZE) % TDM_GRP_SCALE_DIM;
+            const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+            const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_in + swizzled_thread_idx;
+
+            Vec<IType, TDM_GRP_PACK_SIZE> in;
+
+            in.load_from(&in_sh[shmem_offset_rowwise]);
+#pragma unroll
+            for (int e = 0; e < TDM_GRP_PACK_SIZE; ++e) {
+              const size_t j = w * TDM_GRP_PACK_SIZE + e;
+              float elt = static_cast<float>(in.data.elt[e]);
+              if constexpr (COMPUTE_ACTIVATIONS) {
+                elt = OP(elt, {});
+              }
+              if constexpr (!std::is_same_v<IType, float>) {
+                elt = static_cast<float>(static_cast<IType>(elt));
+              }
+              if constexpr (COMPUTE_ACTIVATIONS) {
+                const bool row_out_of_bounds_rowwise = (row_base_rowwise + it_offset_Y >= rows);
+                const bool swizzled_col_out_of_bounds =
+                    (block_offset_X + swizzled_thread_idx >= cols);
+                const bool out_of_bounds =
+                    (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
+                if (!out_of_bounds) {
+                  block_amax = fmaxf(block_amax, fabsf(elt));
+                }
+              } else {
+                block_amax = fmaxf(block_amax, fabsf(elt));
+              }
+              in_compute_rowwise[j] = elt;
+            }
+          }
+        }
+
+        const nvfp4_scale_t S_dec_b_fp8 =
+            compute_decoding_scaling_factor(block_amax, S_enc_rowwise);
+
+        const size_t scales_offset_Y =
+            scales_offset_Y_rowwise + stage * TDM_GRP_BUFF_DIM_Y + it * TDM_GRP_THREADS_Y_ROWWISE;
+        const size_t scales_offset_X = scales_offset_X_rowwise;
+
+        const bool rowwise_scale_is_within_bounds_Y =
+            (stage_rowwise_scales_offset_Y + it * TDM_GRP_THREADS_Y_ROWWISE) < chunk_rows;
+
+        // Map to local split coordinates
+        const size_t split_rows = split_end - split_start;
+        const size_t local_scale_row = scales_offset_Y - split_start;
+        const bool local_rowwise_scale_is_within_bounds_Y = local_scale_row < split_rows;
+        const size_t scale_idx_local = local_scale_row * scale_stride + scales_offset_X;
+
+        if (rowwise_scale_is_within_bounds_X && rowwise_scale_is_within_bounds_Y &&
+            local_rowwise_scale_is_within_bounds_Y) {
+          split_rowwise_scale_ptr[scale_idx_local] = S_dec_b_fp8;
+        }
+
+        constexpr float float_max = detail::TypeExtrema<float>::max;
+        const float block_scale_inverse = fminf(
+            1.0f / (static_cast<float>(S_dec_b_fp8) * S_dec_rowwise), float_max);
+        const float2 block_scale_inverse_2x{block_scale_inverse, block_scale_inverse};
+
+#pragma unroll
+        for (int w = 0; w < TDM_GRP_WAVES; ++w) {
+          Vec<fp4e2m1x4, TDM_GRP_PACK_SIZE / 4> out;
+#pragma unroll
+          for (int e = 0; e < TDM_GRP_PACK_SIZE / 4; ++e) {
+            const uint32_t rbits = get_rbits(rng, random_uint4, rnd_idx);
+            IType2 in01;
+            IType2 in23;
+            if constexpr (NO_ACTIVATIONS_NOT_FP32_INPUT) {
+              const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_IType[w].data.elt[2 * e]);
+              out.data.elt[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                  elts, block_scale_inverse_2x, rbits);
+            } else if constexpr (IS_CACHED_ACT_OP) {
+              const uint64_t elts = *reinterpret_cast<uint64_t *>(&in_cached[w].data.elt[4 * e]);
+              out.data.elt[e] = ptx::mul_cvt_bf16_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                  elts, block_scale_inverse_2x, rbits);
+            } else {
+              const int j = w * TDM_GRP_PACK_SIZE + 4 * e;
+              const float2 in01 = make_float2(in_compute_rowwise[j], in_compute_rowwise[j + 1]);
+              const float2 in23 = make_float2(in_compute_rowwise[j + 2], in_compute_rowwise[j + 3]);
+              out.data.elt[e] = ptx::mul_cvt_fp32_to_fp4_4x<USE_STOCHASTIC_ROUNDING>(
+                  in01, in23, block_scale_inverse_2x, rbits);
+            }
+          }
+          const size_t swizzled_group_idx = ((w + bank_group) * TDM_GRP_PACK_SIZE) % TDM_GRP_SCALE_DIM;
+          const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
+          const size_t shmem_offset_rowwise = shmem_offset_base_rowwise_out + swizzled_idx / 2;
+          out.store_to(&out_data_sh[shmem_offset_rowwise]);
+        }
+      }
+    }
+
+    __builtin_assume(thread_amax >= 0);
+    thread_amax = fmaxf(thread_amax, block_amax);
+
+    __syncthreads();
+
+    // TDM store: output shmem -> global
+    {
+      const uint32_t store_chunk_y = static_cast<uint32_t>(block_offset_Y + stage_offset_Y);
+      const uint32_t store_chunk_x_out = static_cast<uint32_t>(block_offset_X / 2);
+
+      store_2d_to_global(
+          &out_data_sh[buff_offset_out], output_ptr,
+          store_chunk_x_out, store_chunk_y,
+          static_cast<uint32_t>(TDM_GRP_BUFF_OUT_DIM_X), static_cast<uint32_t>(TDM_GRP_BUFF_OUT_DIM_Y),
+          output_tensor_w, output_tensor_h, output_stride, output_data_size);
+    }
+  }  // end of stages
+
+  // Drain all outstanding TDM stores
+  if (is_tdm_wave()) {
+    wait_tensorcnt_0();
+  }
+  __syncthreads();
+}
+
+}  // namespace group_quantize_transpose_tdm_kernel
+
+// TDM launcher for grouped NVFP4 quantize+transpose
+template <bool use_2d_quantization>
+void group_quantize_transpose_tdm(const Tensor &input, const Tensor *noop,
+                                  std::vector<Tensor *> &output_list, const size_t *split_sections,
+                                  size_t num_tensors, const QuantizationConfig *quant_config,
+                                  cudaStream_t stream) {
+  using namespace group_quantize_transpose_tdm_kernel;
+  using namespace group_quantize_transpose_kernel;
+
+  bool use_stochastic_rounding = quant_config ? quant_config->stochastic_rounding : false;
+
+  Tensor *output = nullptr;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    if (output_list[i]->has_data()) {
+      output = output_list[i];
+      break;
+    }
+  }
+  NVTE_CHECK(output != nullptr, "No output tensor found.");
+  NVTE_CHECK(output->data.dptr != nullptr, "Output data pointer is null.");
+
+  bool return_transpose = output->has_columnwise_data();
+  NVTE_CHECK(!return_transpose, "Return transpose is not supported for group quantize transpose.");
+
+  auto output_contiguous = output->data;
+
+  constexpr bool COMPUTE_ACTIVATIONS = false;
+  using ParamOP = Empty;
+  constexpr float (*OP)(float, const ParamOP &) = nullptr;
+
+  const size_t rows = input.flat_first_dim();
+  const size_t cols = input.flat_last_dim();
+
+  // Build kernel args for group splits
+  MultiAmaxCastTransposeFusionArgs kernel_args;
+  kernel_args.num_tensors = 0;
+  kernel_args.split_sections_range[0] = 0;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    if (split_sections[i] == 0) {
+      continue;
+    }
+    kernel_args.rowwise_amax_list[kernel_args.num_tensors] =
+        reinterpret_cast<void *>(output_list[i]->amax.dptr);
+    kernel_args.output_rowwise_scale_inv_list[kernel_args.num_tensors] =
+        reinterpret_cast<void *>(output_list[i]->scale_inv.dptr);
+    kernel_args.split_sections_range[kernel_args.num_tensors + 1] =
+        kernel_args.split_sections_range[kernel_args.num_tensors] + split_sections[i];
+    kernel_args.num_tensors++;
+  }
+
+  const size_t blocks_Y = DIVUP(rows, TDM_GRP_CHUNK_DIM_Y);
+  const size_t blocks_X = DIVUP(cols, TDM_GRP_CHUNK_DIM_X);
+  const dim3 grid(blocks_X, blocks_Y);
+  const size_t block_size = TDM_GRP_THREADS_NUM;
+
+  const size_t scale_stride = output->scale_inv.shape[1];
+  nvfp4_scale_t *const scales_ptr = reinterpret_cast<nvfp4_scale_t *>(output->scale_inv.dptr);
+  const float *noop_ptr = reinterpret_cast<const float *>(noop->data.dptr);
+
+  const NVTETensor rng_state_tensor = (quant_config != nullptr) ? quant_config->rng_state : nullptr;
+  const size_t *rng_state = nullptr;
+  if (rng_state_tensor != nullptr) {
+    Tensor &rng_state_te_tensor = *convertNVTETensor(rng_state_tensor);
+    rng_state = reinterpret_cast<const size_t *>(rng_state_te_tensor.data.dptr);
+  }
+
+  using IType = bf16;
+
+  constexpr size_t buff_elems = TDM_GRP_BUFF_DIM_Y * TDM_GRP_BUFF_DIM_X;
+  constexpr size_t buff_elems_total = TDM_GRP_BUFFS_NUM * buff_elems;
+  constexpr size_t buff_size_aligned_in =
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TDM_GRP_SHMEM_ALIGNMENT);
+  constexpr size_t buff_size_aligned_out =
+      DIVUP_TO_MULTIPLE((buff_elems_total * 4) / 8, TDM_GRP_SHMEM_ALIGNMENT);
+  constexpr size_t buff_size_scales = (TDM_GRP_CHUNK_DIM_Y * TDM_GRP_CHUNK_DIM_X) / 16 * sizeof(nvfp4_scale_t);
+
+  constexpr size_t in_mem = buff_size_aligned_in;
+  constexpr size_t out_data_mem = buff_size_aligned_out;
+  constexpr size_t out_data_transpose_mem = buff_size_aligned_out;
+  constexpr size_t out_scales_transpose_mem = buff_size_scales;
+  constexpr size_t out_mem = out_data_mem + out_data_transpose_mem;
+  constexpr size_t dshmem_size = in_mem + out_mem + out_scales_transpose_mem + TDM_GRP_SHMEM_ALIGNMENT;
+
+  const IType *input_data = reinterpret_cast<const IType *>(input.data.dptr);
+  fp4e2m1x2 *output_data = reinterpret_cast<fp4e2m1x2 *>(output_contiguous.dptr);
+
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+      use_stochastic_rounding, USE_STOCHASTIC_ROUNDING,
+
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(return_transpose, RETURN_TRANSPOSE, {
+        auto kernel =
+            group_quantize_transpose_nvfp4_tdm_kernel<COMPUTE_ACTIVATIONS, ParamOP, OP, IType,
+                                                       USE_STOCHASTIC_ROUNDING, RETURN_TRANSPOSE>;
+
+        if constexpr (use_2d_quantization) {
+          NVTE_ERROR("2D quantization is not supported for group quantize transpose.");
+        }
+
+        NVTE_CHECK_CUDA(
+            cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+        kernel<<<grid, block_size, dshmem_size, stream>>>(input_data, output_data,
+                                                           scales_ptr, noop_ptr, rows, cols,
+                                                           scale_stride, rng_state, kernel_args);
+        NVTE_CHECK_CUDA(cudaGetLastError());
+      }););
+}
+
+#endif  // defined(__gfx1250__)
+
+#endif  // __HIP_PLATFORM_AMD__
+
 template <bool use_2d_quantization>
 void group_quantize_transpose(const Tensor &input, const Tensor *noop,
                               std::vector<Tensor *> &output_list, const size_t *split_sections,
@@ -790,6 +1473,17 @@ void group_quantize_transpose(const Tensor &input, const Tensor *noop,
              "Number of tensor rows must be a multiple of 32");  // 16B alignment for TMA
   NVTE_CHECK(cols % 32 == 0,
              "Number of tensor cols must be a multiple of 32");  // 16B alignment for TMA
+
+#ifdef __HIP_PLATFORM_AMD__
+#if defined(__gfx1250__)
+  // gfx1250 TDM fast path
+  if (is_gfx1250() && (cols % CHUNK_DIM_X == 0)) {
+    group_quantize_transpose_tdm<use_2d_quantization>(input, noop, output_list, split_sections,
+                                                      num_tensors, quant_config, stream);
+    return;
+  }
+#endif  // defined(__gfx1250__)
+#endif  // __HIP_PLATFORM_AMD__
 
   // process the output list and produce the multi-tensor args for grouped kernel
   MultiAmaxCastTransposeFusionArgs kernel_args;
