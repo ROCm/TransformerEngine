@@ -162,9 +162,7 @@ class QuantGroupedGemmRunner : public RunnerInterface {
 
       const transformer_engine::SimpleTensor* a_src = nullptr;
       if (ctx.use_a_columnwise_data) {
-        if (!A_te->has_columnwise_data()) {
-          NVTE_ERROR("ck_tile_grouped_gemm: ctx.use_a_columnwise_data=true but columnwise_data is absent.");
-        }
+        NVTE_CHECK(A_te->has_columnwise_data(), "ck_tile_grouped_gemm: ctx.use_a_columnwise_data=true but columnwise_data is absent.");
         a_src = &A_te->columnwise_data;
       } else {
         a_src = &A_te->data;
@@ -175,9 +173,7 @@ class QuantGroupedGemmRunner : public RunnerInterface {
 
       const transformer_engine::SimpleTensor* b_src = nullptr;
       if (ctx.use_b_columnwise_data) {
-        if (!B_te->has_columnwise_data()) {
-          NVTE_ERROR("ck_tile_grouped_gemm: ctx.use_b_columnwise_data=true but columnwise_data is absent.");
-        }
+        NVTE_CHECK(B_te->has_columnwise_data(), "ck_tile_grouped_gemm: ctx.use_b_columnwise_data=true but columnwise_data is absent.");
         b_src = &B_te->columnwise_data;
       } else {
         b_src = &B_te->data;
