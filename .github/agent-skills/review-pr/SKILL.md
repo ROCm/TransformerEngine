@@ -60,6 +60,23 @@ The distinction to draw:
 - **Efficiency** (tests): Are test variants split across multiple functions when they could be a single parametrized function? Does the parametrization create excessive combinations relative to marginal coverage?
 - **Missing coverage**: Given the production change, are there scenarios that should be tested but aren't?
 
+### Phase 5: Upstream compatibility (ROCm fork)
+
+This repo is a downstream fork of NVIDIA's TransformerEngine. Every change must be classified against three rules:
+
+1. **CUDA behavior must remain unchanged.** New or divergent behavior on the ROCm path must be guarded so the CUDA execution path stays byte-identical to upstream. Acceptable guards include compile-time switches (`#ifdef USE_ROCM`, `__HIP_PLATFORM_AMD__`, `IS_HIP_COMPILE`), build-system selection (separate ROCm sources), and runtime checks (e.g., `is_rocm()`, device-type dispatch). A change to a code path that CUDA also executes is **not** ROCm-specific, even if it was motivated by a ROCm issue.
+2. **Generic bug fixes to upstream code are allowed, but must be documented.** If the PR fixes a defect that exists on both CUDA and ROCm, the PR description (or a comment near the change) must explicitly call this out so it can be upstreamed. Silent "drive-by" fixes to shared code make future IFU merges harder to reason about.
+3. **ROCm-specific behavior must be documented.** Any new ROCm-only code path, kernel, workaround, or divergence from upstream needs a brief comment (or PR-description entry) explaining *why* it diverges. This is what future IFU merges read to decide how to resolve conflicts.
+
+Flag any of the following as findings:
+- **Unguarded divergence**: changes to shared (CUDA-reachable) code that alter behavior, without a guard and without being declared as a generic bug fix.
+- **Missing guard**: ROCm-motivated changes placed in shared code where a guard would cleanly isolate them. Suggest the appropriate guard.
+- **Undocumented bug fix**: a change to shared code that looks like a generic fix but isn't called out as such — ask the author to confirm classification and document it.
+- **Undocumented ROCm divergence**: a new ROCm-only code path / file / kernel with no comment or PR-description note explaining the rationale relative to upstream.
+- **Over-broad guard**: a guard that wraps more code than necessary, making it harder to see what actually differs from upstream.
+
+Do not flag pure additions of new ROCm-only files (e.g., HIP kernels, ROCm-only build glue) as "divergence" merely for existing — they're divergent by definition. The concern is whether the *rationale* is documented.
+
 ## Output Format
 
 ```
@@ -76,6 +93,9 @@ The distinction to draw:
 
 ### Minimality and Integration
 [Scope creep, convention fit, parametrization efficiency, missing coverage]
+
+### Upstream Compatibility
+[Per change touching shared code: classify as (a) CUDA-preserving + ROCm-guarded, (b) generic bug fix (documented?), or (c) unguarded divergence (must fix). Note any ROCm-specific additions lacking rationale comments.]
 
 ### Summary
 | Area | Verdict | Key Issues |

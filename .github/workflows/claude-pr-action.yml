@@ -34,9 +34,6 @@ concurrency:
 
 jobs:
   claude:
-    # GitHub-hosted runner is sufficient — auth is via CLAUDE_CODE_OAUTH_TOKEN
-    # against api.anthropic.com, no AMD-internal network required. ubuntu-latest
-    # ships gh + jq preinstalled, so no bootstrap step is needed.
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -51,30 +48,27 @@ jobs:
       # not provide one — keeps re-runs and manual invocations functional.
       BASE_REF: ${{ github.event.client_payload.base || inputs.base || github.event.repository.default_branch }}
     steps:
-      # refs/pull/<n>/head exists on the base repo for every PR (including forks),
-      # so this works regardless of where the PR originated.
+      # refs/pull/<n>/merge is GitHub's synthetic merge commit (base tip
+      # merged with PR head). Checking it out gives us both parents in one
+      # shot: HEAD^1 = base tip, HEAD^2 = PR head — no separate base fetch
+      # needed. Caveat: the merge ref only exists when the PR is mergeable;
+      # if it's missing/stale, the workflow will fail fast on checkout, which
+      # is the right behavior for an unreviewable PR.
       - uses: actions/checkout@v4
         with:
-          ref: refs/pull/${{ env.PR_NUMBER }}/head
-          fetch-depth: 0
+          ref: refs/pull/${{ env.PR_NUMBER }}/merge
 
       # Skills live in .github/agent-skills/.
       # Stage them into .claude/skills/ at runtime so Claude Code discovers
       # them via its default `.claude/skills/<name>/SKILL.md` lookup. Source
       # from the repo default branch so a release-branch PR (which may not
       # carry the skills) still gets the latest set.
-      #
-      # Also fetch BASE_REF separately so review/diff steps can compare
-      # against the PR's actual merge target.
-      - name: Stage Claude skills and fetch base ref
+      - name: Stage Claude skills
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           git fetch origin "$DEFAULT_BRANCH"
-          if [[ "$BASE_REF" != "$DEFAULT_BRANCH" ]]; then
-            git fetch origin "$BASE_REF"
-          fi
           mkdir -p .claude/skills
           # `git archive | tar -x` materializes the skills from the default
           # branch even if the PR branch deleted or doesn't carry them.
@@ -144,12 +138,13 @@ jobs:
           prompt: |
             REPO: ${{ github.repository }}
             PR:   ${{ env.PR_NUMBER }}
-            BASE: ${{ env.BASE_REF }}   # PR's actual merge target
+            BASE: ${{ env.BASE_REF }}   # PR's actual merge target (label only)
 
-            The PR branch is checked out in the working directory. Diff
-            against `origin/${{ env.BASE_REF }}` for every comparison —
-            this is the PR's merge target, which may not be the repo's
-            default branch (e.g., release branches).
+            The synthetic merge commit `refs/pull/${{ env.PR_NUMBER }}/merge`
+            is checked out, so `HEAD^1` is the base tip (the PR's merge
+            target) and `HEAD^2` is the PR head. Use `HEAD^1` for every
+            diff/comparison — this works regardless of whether the merge
+            target is the default branch or a release branch.
 
             ## 1. Gather prior context
             Use `gh` to enumerate signals that should shape this review:
@@ -167,8 +162,8 @@ jobs:
             covers a distinct concern; neither subsumes the other.
 
             **2a. Code review** — `/review-pr` (vendored in `.claude/skills/`).
-            Pass the PR number and base branch so it scopes the diff correctly:
-              `/review-pr ${{ env.PR_NUMBER }} --base origin/${{ env.BASE_REF }}`
+            Pass the PR number and base ref so it scopes the diff correctly:
+              `/review-pr ${{ env.PR_NUMBER }} --base HEAD^1`
 
             If a prior Claude review exists (step 1a returned non-empty),
             instruct the skill to focus on commits added since the most recent
@@ -180,7 +175,7 @@ jobs:
             `qa/L0_license/copyright_checker.py` and verifies that ROCm-modified
             and ROCm-introduced files carry correct AMD headers with up-to-date
             year ranges, without altering preserved NVIDIA copyrights:
-              `/copyright-check origin/${{ env.BASE_REF }}`
+              `/copyright-check HEAD^1`
 
             Run this on every review (initial and re-review). Copyright
             findings are typically actionable on a single line, so prefer
@@ -222,11 +217,11 @@ jobs:
           prompt: |
             REPO: ${{ github.repository }}
             PR:   ${{ env.PR_NUMBER }}
-            BASE: ${{ env.BASE_REF }}   # PR's actual merge target
+            BASE: ${{ env.BASE_REF }}   # PR's actual merge target (label only)
 
-            The PR branch is checked out. Use `origin/${{ env.BASE_REF }}` as
-            the base for any diff or comparison — it is the PR's merge target,
-            which may not be the repo's default branch.
+            The synthetic merge commit `refs/pull/${{ env.PR_NUMBER }}/merge`
+            is checked out, so `HEAD^1` is the base tip and `HEAD^2` is the
+            PR head. Use `HEAD^1` for any diff or comparison.
 
             ## Goal
             Produce ONE top-level PR comment that helps a reader understand
@@ -243,7 +238,7 @@ jobs:
             reflects the current state of the PR. Otherwise, post a new one.
 
             ## 2. Build the walkthrough
-            Read the PR title/description and `git diff origin/${{ env.BASE_REF }}...HEAD`.
+            Read the PR title/description and `git diff HEAD^1...HEAD^2`.
             Use `Grep`/`Read` to ground claims in the actual code.
 
             Format the comment exactly as:
