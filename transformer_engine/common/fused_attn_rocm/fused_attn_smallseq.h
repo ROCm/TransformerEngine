@@ -75,6 +75,51 @@ void fused_attn_smallseq_bwd(size_t b,
                              size_t* workspace_size,
                              cudaStream_t stream);
 
+/** Forward (self-attn, BSHD layout): Q,K,V -> O; attention weights written to
+ *  attn_weights_buffer.  s_q == s_kv <= 17.  Uses MFMA 16x16 for all seq lengths. */
+void fused_attn_smallseq_self_fwd(size_t b,
+                                  size_t h_q,
+                                  size_t h_kv,
+                                  size_t max_seqlen,
+                                  size_t d_qk,
+                                  size_t d_v,
+                                  bool is_training,
+                                  float attn_scale,
+                                  float dropout,
+                                  const void* devPtrQ,
+                                  const void* devPtrK,
+                                  const void* devPtrV,
+                                  void* devPtrO,
+                                  void* attn_weights_buffer,
+                                  DType qkv_dtype,
+                                  void* workspace,
+                                  size_t* workspace_size,
+                                  cudaStream_t stream);
+
+/** Backward (self-attn, BSHD layout): dO, O, attn_weights -> dQ, dK, dV.
+ *  s_q == s_kv <= 17.  Uses MFMA 16x16. */
+void fused_attn_smallseq_self_bwd(size_t b,
+                                  size_t h_q,
+                                  size_t h_kv,
+                                  size_t max_seqlen,
+                                  size_t d_qk,
+                                  size_t d_v,
+                                  float attn_scale,
+                                  float dropout,
+                                  const void* devPtrQ,
+                                  const void* devPtrK,
+                                  const void* devPtrV,
+                                  const void* devPtrO,
+                                  const void* devPtrdO,
+                                  const void* attn_weights,
+                                  void* devPtrdQ,
+                                  void* devPtrdK,
+                                  void* devPtrdV,
+                                  DType qkv_dtype,
+                                  void* workspace,
+                                  size_t* workspace_size,
+                                  cudaStream_t stream);
+
 }  // namespace fused_attn_rocm
 }  // namespace transformer_engine
 

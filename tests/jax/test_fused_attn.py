@@ -1378,3 +1378,58 @@ def test_ck_unfused_smallseq_no_gqa(
     )
     runner._setup_inputs()
     runner.test_forward()
+
+
+# ROCm CK small-seq self-attention (MFMA) tests.
+@pytest.fixture
+def ck_smallseq_self_env(monkeypatch):
+    """Enable CK small-seq path for self-attn BSHD tests (no XLA GPU graph guard needed)."""
+    monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1")
+    yield
+
+@pytest.mark.parametrize("dtype", [jnp.bfloat16], ids=["BF16"])
+@pytest.mark.parametrize(
+    "b, s, h_q, h_kv, d_qk, d_v",
+    [
+        pytest.param(2048, 2, 16, 16, 128, 128, id="2048-2-16-16-128-128"),
+        pytest.param(2048, 3, 16, 16, 128, 128, id="2048-3-16-16-128-128"),
+        pytest.param(2048, 4, 16, 16, 128, 128, id="2048-4-16-16-128-128"),
+        pytest.param(2048, 5, 16, 16, 128, 128, id="2048-5-16-16-128-128"),
+        pytest.param(2048, 8, 16, 16, 128, 128, id="2048-8-16-16-128-128"),
+        pytest.param(2048, 12, 16, 16, 128, 128, id="2048-12-16-16-128-128"),
+        pytest.param(2048, 16, 16, 16, 128, 128, id="2048-16-16-16-128-128"),
+        pytest.param(2048, 17, 16, 16, 128, 128, id="2048-17-16-16-128-128"),
+    ],
+)
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="CK unfused smallseq self-attn backend only available on AMD hardware"
+)
+def test_ck_unfused_smallseq_self_backend(
+    ck_smallseq_self_env, b, s, h_q, h_kv, d_qk, d_v, dtype
+):
+    """
+    Test the CK unfused small-seq self-attention (MFMA) path on ROCm:
+    s_q == s_kv <= 17, BSHD layout.
+    ck_smallseq_self_env sets NVTE_FUSED_ATTN_CK_SMALLSEQ=1 and restores it after the test.
+    """
+    runner = FusedAttnRunner(
+        batch_size=b,
+        max_seqlen_q=s,
+        max_seqlen_kv=s,
+        num_heads_q=h_q,
+        num_heads_kv=h_kv,
+        head_dim_qk=d_qk,
+        head_dim_v=d_v,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        dropout_prob=0.0,
+        use_old_rng=True,
+        dtype=dtype,
+        is_training=True,
+        qkv_layout=QKVLayout.BSHD_BSHD_BSHD,
+        bias_shape=None,
+        window_size=None,
+        seq_desc_format=SeqDescFormat.Mask,
+    )
+    runner._setup_inputs()
+    runner.test_backward()

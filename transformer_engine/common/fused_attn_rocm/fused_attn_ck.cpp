@@ -606,6 +606,23 @@ void fused_attn_ck_fwd_impl(
     }
   }
 
+  // Self-attention small-seq MFMA path (BSHD, s_q == s_kv <= 17, BF16 only)
+  if (!is_ragged && s_q == s_kv && s_q >= 2 && s_q <= 17 &&
+      dtype == DType::kBFloat16 &&
+      nvte_smallseq && std::string(nvte_smallseq) == "1") {
+    if (nvte_log_ck_config) {
+      std::cout << std::endl << "attn_fwd(ck small-seq self-attn MFMA): ";
+      std::cout << "b: " << b << ", h: " << h << ", s: " << s_q;
+      std::cout << ", d_qk: " << d_qk << ", d_v: " << d_v << std::endl;
+    }
+    fused_attn_rocm::fused_attn_smallseq_self_fwd(
+        b, h, hg, s_q, d_qk, d_v,
+        is_training, scaling_factor, dropout_probability,
+        devPtrQ, devPtrK, devPtrV, devPtrO, devPtrSoftmaxAux,
+        dtype, workspace, workspace_size, stream);
+    return;
+  }
+
   std::array<uint64_t, 4> q_stride;
   std::array<uint64_t, 4> k_stride;
   std::array<uint64_t, 4> v_stride;
@@ -935,6 +952,24 @@ void fused_attn_ck_bwd_impl(
           dtype, workspace, workspace_size, stream);
       return;
     }
+  }
+
+  // Self-attention small-seq MFMA path (BSHD, s_q == s_kv <= 17, BF16 only)
+  if (!is_ragged && s_q == s_kv && s_q >= 2 && s_q <= 17 &&
+      dtype == DType::kBFloat16 &&
+      nvte_smallseq && std::string(nvte_smallseq) == "1") {
+    if (nvte_log_ck_config) {
+      std::cout << std::endl << "attn_bwd(ck small-seq self-attn MFMA): ";
+      std::cout << "b: " << b << ", h: " << h << ", s: " << s_q;
+      std::cout << ", d_qk: " << d_qk << ", d_v: " << d_v << std::endl;
+    }
+    fused_attn_rocm::fused_attn_smallseq_self_bwd(
+        b, h, hg, s_q, d_qk, d_v,
+        scaling_factor, dropout_probability,
+        devPtrQ, devPtrK, devPtrV, devPtrO, devPtrdO, devPtrSoftmaxAux,
+        devPtrdQ, devPtrdK, devPtrdV,
+        dtype, workspace, workspace_size, stream);
+    return;
   }
 
   std::array<uint64_t, 4> q_stride;

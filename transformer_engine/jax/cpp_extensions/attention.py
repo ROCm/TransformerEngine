@@ -378,8 +378,16 @@ class FusedAttnFwdPrimitive(BasePrimitive):
                             softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, min(kv_max_seqlen, 16))
                             softmax_dtype = dtypes.canonicalize_dtype(q_dtype)
                 else:
-                    softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
-                    softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
+                    # BSHD layout: check for self-attn small-seq MFMA path (BF16 only)
+                    if (os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") == "1"
+                            and q_max_seqlen == kv_max_seqlen
+                            and 2 <= q_max_seqlen <= 17
+                            and q_dtype == jnp.bfloat16):
+                        softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, kv_max_seqlen)
+                        softmax_dtype = dtypes.canonicalize_dtype(q_dtype)
+                    else:
+                        softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, 1)
+                        softmax_dtype = dtypes.canonicalize_dtype(jnp.float32)
             else:
                 raise ValueError(f"Unsupported {backend=}")
 

@@ -54,9 +54,10 @@ run_test_config() {
     echo ==== Run with Fused attention backend: $_fus_attn ====
     run_default_fa 1 test_custom_call_compute.py
     run_default_fa 1 test_functions.py
-    run 1 test_fused_attn.py -k 'not test_ck_unfused_smallseq_backend' # skip smallseq in normal flow
+    run 1 test_fused_attn.py -k 'not test_ck_unfused_smallseq_backend and not test_ck_unfused_smallseq_self_backend' # skip smallseq in normal flow
     XLA_FLAGS='--xla_gpu_graph_level=0' run 1 test_fused_attn.py -k 'test_ck_unfused_smallseq_backend' # CK smallseq with GPU graph disabled
-    NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run_lbl "v3" 1 test_fused_attn.py -k 'not test_ck_unfused_smallseq_backend' # Using FAv3 for forward and backward pass
+    run 1 test_fused_attn.py -k 'test_ck_unfused_smallseq_self_backend' # CK smallseq self-attn MFMA
+    NVTE_CK_USES_FWD_V3=1 NVTE_CK_USES_BWD_V3=1 run_lbl "v3" 1 test_fused_attn.py -k 'not test_ck_unfused_smallseq_backend and not test_ck_unfused_smallseq_self_backend' # Using FAv3 for forward and backward pass
     run_default_fa 1 test_helper.py
     run_default_fa 1 test_layer.py #it effectevly always uses unfused attention
     run_default_fa 1 test_sanity_import.py
