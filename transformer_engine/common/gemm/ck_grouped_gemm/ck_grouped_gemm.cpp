@@ -61,13 +61,13 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   //
   //   normalized NN: `op(A_use)=A`, `op(B_use)=B`
   //     -> rewrite B only:
-  //        `data + N` -> `columnwise_data + T`
-  //     The original NN form is not the preferred FP8 matmul encoding here.
+  //        `data, transB_use=F` -> `columnwise_data, transB_use=T`
   //
   //   normalized TN: `op(A_use)=A^T`, `op(B_use)=B`
   //     -> rewrite both operands:
-  //        A: `data + T` -> `columnwise_data + N`
-  //        B: `data + N` -> `columnwise_data + T`
+  //        A: `data, transA_use=T` -> `columnwise_data, transA_use=F`
+  //        B: `data, transB_use=F` -> `columnwise_data, transB_use=T`
+  //
   //     This avoids the extra transpose/shuffle handling path that the original
   //     TN presentation can trigger in the FP8 CK pipeline.
   if (is_8bit_float) {
