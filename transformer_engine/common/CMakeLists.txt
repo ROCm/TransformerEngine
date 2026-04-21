@@ -243,7 +243,6 @@ if(USE_CUDA)
         recipe/nvfp4.cu)
     list(APPEND transformer_engine_cuda_arch_specific_sources
         gemm/cutlass_grouped_gemm.cu
-        transpose/quantize_transpose_square_blockwise.cu
         hadamard_transform/group_hadamard_transform.cu
         transpose/quantize_transpose_square_blockwise.cu
         hadamard_transform/hadamard_transform_cast_fusion.cu

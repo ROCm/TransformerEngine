@@ -12,10 +12,10 @@ from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils
-from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type
-
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
+if IS_HIP_EXTENSION:
+    from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 

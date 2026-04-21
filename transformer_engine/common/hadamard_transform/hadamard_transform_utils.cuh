@@ -7,8 +7,6 @@
 #ifndef TRANSFORMER_ENGINE_HADAMARD_TRANSFORM_UTILS_CUH_
 #define TRANSFORMER_ENGINE_HADAMARD_TRANSFORM_UTILS_CUH_
 
-#ifndef __HIP_PLATFORM_AMD__
-
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_bf16.h>
@@ -197,5 +195,4 @@ __device__ __forceinline__ uint32_t swizzle_128B_atom_32B(uint32_t gmem_row_idx,
 
 }  // namespace transformer_engine
 
-#endif  // __HIP_PLATFORM_AMD__
 #endif  // TRANSFORMER_ENGINE_HADAMARD_TRANSFORM_UTILS_CUH_

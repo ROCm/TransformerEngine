@@ -1102,8 +1102,8 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
       // Fuse the rowwise and colwise into one when the kernel is ready
       split_quantize_nvfp4_impl_with_rht_helper(input, input_list, output_list, split_sections,
                                                 quantizers, stream);
-    } else {
-      // NVFP4 quantize without RHT
+    } else {  // NVFP4 quantize
+      // Fuse the rowwise and colwise into one when the kernel is ready
       split_quantize_nvfp4_impl_helper(input, input_list, output_list, split_sections, quantizers,
                                        stream);
     }
