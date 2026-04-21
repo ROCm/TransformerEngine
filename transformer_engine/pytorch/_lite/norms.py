@@ -383,14 +383,20 @@ def _try_fused_rmsnorm_quant(input_2d, weight, eps, quantizer, zero_centered_gam
         # AITER kernel expects dequant scale = 1/quant_scale
         dequant_scale = (1.0 / quantizer.scale).to(torch.float32)
 
-        out_fp8, _, _, _ = _aiter_fused_rms_fp8_static(
+        # Request the unquantized post-RMSNorm output so we can track its amax.
+        # Delayed scaling's history must reflect the distribution of what gets
+        # cast to FP8 (post-norm), not the pre-norm input — otherwise every
+        # computed scale is off by the RMS factor of the input, and the error
+        # compounds as activation magnitudes drift during training.
+        out_fp8, out_norm, _, _ = _aiter_fused_rms_fp8_static(
             input_2d, weight, eps, dequant_scale,
+            output_unquantized_inp1=True,
         )
 
-        # Update amax for next iteration's delayed scaling.
-        # copy_() keeps the reduction on-device; .item() would force a
-        # CPU<->GPU sync on every RMSNorm forward.
-        quantizer.amax.copy_(input_2d.abs().amax())
+        # Update amax from the post-norm (pre-cast) tensor for next step's
+        # delayed scaling. copy_() keeps the reduction on-device; .item()
+        # would force a CPU<->GPU sync on every RMSNorm forward.
+        quantizer.amax.copy_(out_norm.abs().amax())
 
         # Wrap raw FP8 data in Float8Tensor via the quantizer.
         # Create empty container with the ORIGINAL (possibly N-D) shape,
