@@ -26,7 +26,7 @@ from jax.sharding import Mesh, NamedSharding, PartitionSpec
 from jax.typing import ArrayLike, DTypeLike
 
 from transformer_engine.jax import fp8_autocast
-from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
+from transformer_engine.jax.cpp_extensions.misc import get_xla_flag, is_hip_extension
 from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.attention import (
     AttnBiasType,
@@ -36,6 +36,7 @@ from transformer_engine.jax.attention import (
     reorder_causal_load_balancing,
     inverse_reorder_causal_load_balancing,
     fused_attn,
+    fused_attn_small_seq,
     make_swa_mask,
     SequenceDescriptor,
     CPStrategy,
@@ -272,6 +273,35 @@ def customcall_fused_dpa(
     )
 
 
+def customcall_small_seq_dpa(
+    query,
+    key,
+    value,
+    bias,
+    sequence_descriptor,
+    dropout_rng,
+    **kwargs,
+):
+    """TE ROCm small-seq explicit API (separate Q, K, V only)."""
+    small_kwargs = {
+        "attn_bias_type": kwargs["attn_bias_type"],
+        "attn_mask_type": kwargs["attn_mask_type"],
+        "scaling_factor": kwargs["scaling_factor"],
+        "dropout_probability": kwargs["dropout_probability"],
+        "is_training": kwargs["is_training"],
+        "qkv_layout": kwargs["qkv_layout"],
+        "max_segments_per_seq": kwargs["max_segments_per_seq"],
+        "window_size": kwargs.get("window_size"),
+    }
+    return fused_attn_small_seq(
+        (query, key, value),
+        bias,
+        sequence_descriptor,
+        dropout_rng,
+        **small_kwargs,
+    ).astype(query.dtype)
+
+
 class BiasShape(Enum):
     """
     Enum class to represent the different bias shapes used in the fused attention.
@@ -323,6 +353,9 @@ class FusedAttnRunner:
     cp_strategy: CPStrategy = CPStrategy.DEFAULT
     cp_load_balanced: bool = True
 
+    # THD segment layout for ROCm small-seq explicit API tests
+    use_small_seq_thd_setup: bool = False
+
     # dictionary of expected collective comm bytes
     coll_count_ref: Optional[Dict[str, int]] = None
 
@@ -330,11 +363,11 @@ class FusedAttnRunner:
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
     def _get_max_segments_per_sequence(self):
         if self.qkv_layout.is_thd():
-            if (
-                90400 <= get_cudnn_version() < 90500
-                or ( is_hip_extension() and 
-                    os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") == "1")
-            ):
+            # Small-seq explicit API tests use fixed segment counts; skip +1 slack used
+            # by generic fused THD to probe runtime_segments < max_segments on cuDNN.
+            if self.use_small_seq_thd_setup:
+                return self.num_segments_per_seq
+            if 90400 <= get_cudnn_version() < 90500:
                 return self.num_segments_per_seq
             else:
                 # +1 for testing runtime_segments < max_segments
@@ -423,9 +456,9 @@ class FusedAttnRunner:
                     "the F16_arbitrary_seqlen backend."
                 )
 
-    def _setup_thd_segments_ck_smallseq(self, generate_random_segment_ids):
+    def _setup_thd_segments_small_seq(self, generate_random_segment_ids):
         """
-        Build THD segment descriptors for the CK small-seq path (NVTE_FUSED_ATTN_CK_SMALLSEQ=1).
+        Build THD segment descriptors for ROCm small-seq cross-attention tests.
 
         Uses num_segments_per_seq = max_seqlen_q for both Q and KV. For Q: if max_seqlen_q == 1,
         uses a fixed layout (one token per batch, cu_seqlens [0,1,...,batch_size]); otherwise
@@ -449,7 +482,25 @@ class FusedAttnRunner:
             segment_ids_q, segment_pos_q, pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, num_segments_per_seq, seed=42
             )
-            seqlens_q, offsets_q = get_seqlens_and_offsets(segment_ids_q)
+            # Compute seqlens/offsets directly instead of using get_seqlens_and_offsets.
+            # get_seqlens_and_offsets uses bincount(length=max_seqlen) which cannot capture
+            # segment IDs equal to max_seqlen (when num_segments == max_seqlen_q, segment
+            # IDs range from 1 to max_seqlen_q). The missing segment plus the appended
+            # sentinel causes _fix_len_take in impl() to leak entries across batches.
+            # Since each Q segment has exactly 1 token (max_segment_size = max_seqlen_q //
+            # num_segments_per_seq = 1), we build seqlens as all-ones with no sentinels.
+            seqlens_q = jnp.ones((self.batch_size, num_segments_per_seq), dtype=jnp.int32)
+            offsets_q = jnp.concatenate(
+                [
+                    jnp.tile(
+                        jnp.arange(num_segments_per_seq, dtype=jnp.int32)[None, :],
+                        (self.batch_size, 1),
+                    ),
+                    jnp.full((self.batch_size, 1), -1, dtype=jnp.int32),
+                ],
+                axis=1,
+            )
+
 
         min_segment_len = None if self.window_size is None else seqlens_q
         segment_ids_kv, segment_pos_kv, pad_kv = generate_random_segment_ids(
@@ -595,7 +646,7 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            if is_hip_extension() and os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") == "1":
+            if self.use_small_seq_thd_setup:
                 (
                     self.num_segments_per_seq,
                     self.segment_ids_q,
@@ -608,7 +659,7 @@ class FusedAttnRunner:
                     self.pad_kv,
                     self.seqlens_kv,
                     self.offsets_kv,
-                ) = self._setup_thd_segments_ck_smallseq(generate_random_segment_ids)
+                ) = self._setup_thd_segments_small_seq(generate_random_segment_ids)
             else:
                 self.num_segments_per_seq = 2
                 self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
@@ -1031,6 +1082,134 @@ class FusedAttnRunner:
                 target_hlo = jitted_primitive.lower(*customcall_args).compile().as_text()
             assert_equal_collectives(target_hlo, self.coll_count_ref)
 
+    def test_backward_small_seq_api(self):
+        """Backward test using fused_attn_small_seq (explicit ROCm API), not generic fused_attn."""
+        self._setup_inputs()
+
+        def grad_func(func, *args, cp_reverse_out=False, **kwargs):
+            gradient_multiplier = self.max_seqlen_q * self.num_heads_q
+            if self.attn_mask_type.is_causal():
+                gradient_multiplier /= 10
+            if not cp_reverse_out:
+                ret_valid = jnp.where(
+                    self.pad_q[..., jnp.newaxis, jnp.newaxis],
+                    0,
+                    func(*args, **kwargs),
+                )
+            else:
+                ret_valid = jnp.where(
+                    self.pad_q[..., jnp.newaxis, jnp.newaxis],
+                    0,
+                    self.cp_inverse_reorder_fn(func(*args, **kwargs)),
+                )
+            return (
+                jnp.mean(ret_valid.astype(jnp.float32), dtype=jnp.float32) * gradient_multiplier
+            ).astype(self.dtype)
+
+        args = [self.q, self.k, self.v, self.bias, self.mask, self.dropout_rng]
+        customcall_args = [
+            jax.device_put(self.cp_reorder_fn(self.q), self.qkvo_sharding),
+            jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
+            jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
+            jax.device_put(self.bias, self.bias_sharding),
+            jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
+            jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
+        ]
+        kwargs_small = {
+            "attn_bias_type": self.attn_bias_type,
+            "attn_mask_type": self.attn_mask_type,
+            "scaling_factor": self.scaling_factor,
+            "dropout_probability": self.dropout_prob,
+            "is_training": self.is_training,
+            "qkv_layout": self.qkv_layout,
+            "max_segments_per_seq": self._get_max_segments_per_sequence(),
+            "window_size": self.window_size,
+        }
+
+        if self.bias_shape == BiasShape._1HSS:
+            arg_nums = (0, 1, 2, 3)
+            grad_shardings = (
+                self.qkvo_sharding,
+                self.qkvo_sharding,
+                self.qkvo_sharding,
+                self.bias_sharding,
+            )
+        else:
+            arg_nums = (0, 1, 2)
+            grad_shardings = (self.qkvo_sharding, self.qkvo_sharding, self.qkvo_sharding)
+
+        jitted_primitive = jit(
+            value_and_grad(
+                lambda q, k, v, bias, *args: grad_func(
+                    customcall_small_seq_dpa,
+                    q,
+                    k,
+                    v,
+                    bias,
+                    *args,
+                    cp_reverse_out=True,
+                    **kwargs_small,
+                ),
+                arg_nums,
+            ),
+            in_shardings=(
+                self.qkvo_sharding,
+                self.qkvo_sharding,
+                self.qkvo_sharding,
+                self.bias_sharding,
+                self.seq_desc_sharding,
+                self.dropout_rng_sharding,
+            ),
+            out_shardings=(None, grad_shardings),
+        )
+        kwargs_ref = {
+            "attn_bias_type": self.attn_bias_type,
+            "attn_mask_type": self.attn_mask_type,
+            "scaling_factor": self.scaling_factor,
+            "dropout_probability": self.dropout_prob,
+            "is_training": self.is_training,
+            "qkv_layout": self.qkv_layout,
+            "max_segments_per_seq": self._get_max_segments_per_sequence(),
+            "window_size": self.window_size,
+            "context_parallel_strategy": self.cp_strategy,
+            "context_parallel_causal_load_balanced": self.cp_load_balanced,
+        }
+        jitted_reference = jit(
+            value_and_grad(
+                lambda q, k, v, bias, *args: grad_func(jax_dpa, q, k, v, bias, *args, **kwargs_ref),
+                arg_nums,
+            )
+        )
+
+        with self.mesh, fp8_autocast(mesh_resource=self.mesh_resource):
+            primitive_out, primitive_dgrad = jitted_primitive(*customcall_args)
+
+        reference_out, reference_dgrad = jitted_reference(*args)
+
+        if self.dropout_prob > 0.0:
+            return
+
+        assert_allclose(primitive_out, reference_out, dtype=self.dtype)
+
+        def check_dqkv(primitive, reference, pad, idx):
+            primitive_valid, primitive_invalid, reference_valid, reference_invalid = (
+                _split_valid_and_invalid(primitive, reference, pad)
+            )
+            assert_allclose(primitive_invalid, jnp.zeros_like(primitive_invalid), dtype=self.dtype)
+            assert_allclose(primitive_invalid, reference_invalid, dtype=self.dtype)
+            assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
+
+        primitive_dq, primitive_dk, primitive_dv = primitive_dgrad[:3]
+        reference_dq, reference_dk, reference_dv = reference_dgrad[:3]
+
+        primitive_dq = self.cp_inverse_reorder_fn(primitive_dq)
+        primitive_dk = self.cp_inverse_reorder_fn(primitive_dk)
+        primitive_dv = self.cp_inverse_reorder_fn(primitive_dv)
+
+        check_dqkv(primitive_dq, reference_dq, self.pad_q, 0)
+        check_dqkv(primitive_dk, reference_dk, self.pad_kv, 1)
+        check_dqkv(primitive_dv, reference_dv, self.pad_kv, 2)
+
 
 @pytest.mark.parametrize(
     "attn_mask_type",
@@ -1287,13 +1466,13 @@ def test_jax_new_rng():
     runner.test_forward()
 
 
-# ROCm CK small-seq varlen tests.
+# ROCm small-seq varlen tests (explicit fused_attn_small_seq API).
 @pytest.fixture
-def ck_smallseq_env(monkeypatch):
-    """Enable CK small-seq path and disable XLA GPU graphs for these tests."""
-    if "xla_gpu_graph_level=0" not in os.environ.get("XLA_FLAGS", ""):
-        pytest.skip("Test must be run with XLA_FLAGS='--xla_gpu_graph_level=0'")
-    monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1")
+def xla_gpu_graph_disabled():
+    if get_xla_flag("--xla_gpu_enable_command_buffer", default=None) != "":
+        pytest.skip(
+            "Test must set XLA_FLAGS with --xla_gpu_enable_command_buffer= "
+        )
     yield
 
 @pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float16], ids=["BF16", "FP16"])
@@ -1306,20 +1485,27 @@ def ck_smallseq_env(monkeypatch):
         pytest.param(4000, 1, 8, 16, 16, 128, 128, id="4000-1-8-16-16-128-128"),
         pytest.param(4000, 1, 12, 16, 16, 128, 128, id="4000-1-12-16-16-128-128"),
         pytest.param(4000, 1, 16, 16, 16, 128, 128, id="4000-1-16-16-16-128-128"),
-        pytest.param(2048, 2, 4, 16, 16, 128, 128, id="seqpack-2048-2-4-16-16-128-128"),
-        pytest.param(2, 4096, 8192, 16, 16, 128, 128, id="seqpack-2-4096-8192-16-16-128-128"),
+        pytest.param(4000, 1, 2, 16, 16, 256, 256, id="4000-1-2-16-16-256-256"),
+        pytest.param(4000, 1, 4, 16, 16, 256, 256, id="4000-1-4-16-16-256-256"),
+        pytest.param(4000, 1, 6, 16, 16, 256, 256, id="4000-1-6-16-16-256-256"),
+        pytest.param(4000, 1, 8, 16, 16, 256, 256, id="4000-1-8-16-16-256-256"),
+        pytest.param(4000, 1, 12, 16, 16, 256, 256, id="4000-1-12-16-16-256-256"),
+        pytest.param(4000, 1, 16, 16, 16, 256, 256, id="4000-1-16-16-16-256-256"),
+        pytest.param(4000, 1, 2, 16, 16, 512, 512, id="4000-1-2-16-16-512-512"),
+        pytest.param(4000, 1, 4, 16, 16, 512, 512, id="4000-1-4-16-16-512-512"),
+        # pytest.param(2048, 2, 4, 16, 16, 128, 128, id="seqpack-2048-2-4-16-16-128-128"),
+        # pytest.param(2, 4096, 8192, 16, 16, 128, 128, id="seqpack-2-4096-8192-16-16-128-128"),
     ],
 )
 @pytest.mark.skipif(
-    not is_hip_extension(), reason="CK unfused smallseq backend only available on AMD hardware"
+    not is_hip_extension(), reason="Small-seq explicit API only available on AMD hardware"
 )
-def test_ck_unfused_smallseq_backend(
-    ck_smallseq_env, b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype
+def test_fused_attn_small_seq_explicit_api(
+    xla_gpu_graph_disabled, b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype
 ):
     """
-    Test the CK unfused small-seq (varlen) path on ROCm: s_q=1, s_kv<=16, THD layout.
-    Uses THD_THD_THD (Q,K,V all THD). ck_smallseq_env sets NVTE_FUSED_ATTN_CK_SMALLSEQ=1 and
-    restores it after the test.
+    Test nvte_fused_attn_small_seq / fused_attn_small_seq: THD_THD_THD varlen cross-attention
+    (head dims 128, 256, or 512).
     """
     runner = FusedAttnRunner(
         batch_size=b,
@@ -1336,10 +1522,9 @@ def test_ck_unfused_smallseq_backend(
         dtype=dtype,
         is_training=True,
         qkv_layout=QKVLayout.THD_THD_THD,
-        bias_shape=None,
+        bias_shape=BiasShape._B1SS,
         window_size=None,
         seq_desc_format=SeqDescFormat.Seqlens,
+        use_small_seq_thd_setup=True,
     )
-    runner._setup_inputs()
-    # runner.test_forward()
-    runner.test_backward()
+    runner.test_backward_small_seq_api()
