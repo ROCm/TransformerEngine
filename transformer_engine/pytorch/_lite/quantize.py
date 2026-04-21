@@ -397,20 +397,36 @@ def quantize(tensor, quantizer, output=None, noop=None):
                     f"shape={tuple(input_tensor.shape)}",
                     flush=True,
                 )
-            if _triton_cast_transpose_noop is not None and not out._transpose_invalid:
-                _quant_bump("float8_triton_cast_transpose")
-                # Triton Float8 cast+transpose
+            if _triton_cast_transpose_noop is not None:
+                # Triton cast+transpose. The kernel always writes a transpose,
+                # so when the caller didn't ask for columnwise data we pass a
+                # throwaway buffer and drop it. Still much cheaper than the
+                # pure-PyTorch fallback.
                 q = out._get_quantizer()
                 is_current_scaling = (
                     _Float8CurrentScalingQuantizer is not None
                     and isinstance(q, _Float8CurrentScalingQuantizer)
                 )
+                if out._transpose is not None and not out._transpose_invalid:
+                    trans_out = out._transpose
+                    _quant_bump("float8_triton_cast_transpose")
+                else:
+                    row_length = (
+                        input_tensor.shape[-1] if input_tensor.ndim > 0 else 1
+                    )
+                    num_rows = input_tensor.numel() // row_length
+                    trans_out = torch.empty(
+                        (row_length, num_rows),
+                        dtype=torch.uint8,
+                        device=input_tensor.device,
+                    )
+                    _quant_bump("float8_triton_rowwise_only")
                 _triton_cast_transpose_noop(
                     input_tensor,
                     noop_flag,
                     input_scale=q.scale,
                     cast_out=out._data,
-                    trans_out=out._transpose,
+                    trans_out=trans_out,
                     amax_out=q.amax,
                     scale_inv_out=out._scale_inv,
                     otype=q.dtype,
@@ -421,7 +437,7 @@ def quantize(tensor, quantizer, output=None, noop=None):
                 return out
             else:
                 _quant_bump("float8_pytorch_fallback")
-                # Float8 without valid transpose or no Triton — PyTorch fallback
+                # No Triton cast kernel available — PyTorch fallback.
                 if hasattr(out, 'remove_caches'):
                     out.remove_caches()
                 return _quantize_float8_pytorch(input_tensor, quantizer, out)
