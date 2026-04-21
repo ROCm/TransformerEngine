@@ -158,8 +158,10 @@ class MXFP4Quantizer(Quantizer):
         M = math.prod(shape[:-1])
         K = shape[-1]
 
-        # Allocate FP4 data: [M, K/2]
-        rowwise_data = torch.empty(M, K // 2, dtype=torch.uint8, device=device)
+        # Allocate FP4 data: [..., K/2] (preserve N-D shape, matching NVFP4 and C++ paths)
+        rowwise_data = torch.empty(
+            _logical_to_rowwise_data_shape(tuple(shape)), dtype=torch.uint8, device=device
+        )
         
         # Allocate PADDED scale tensors for shuffle compatibility
         rowwise_scale_K = math.ceil(K / MXFP4_BLOCK_SCALING_SIZE)
@@ -170,11 +172,13 @@ class MXFP4Quantizer(Quantizer):
                 device=device,
             )
 
-        # Allocate FP4 data transpose if needed
+        # Allocate FP4 data transpose if needed (intentionally 2D, matching NVFP4)
         columnwise_data = None
         columnwise_scale_inv = None
         if self.columnwise_usage:
-            columnwise_data = torch.empty(K, M // 2, dtype=torch.uint8, device=device)
+            columnwise_data = torch.empty(
+                _logical_to_columnwise_data_shape(tuple(shape)), dtype=torch.uint8, device=device
+            )
             colwise_scale_M = math.ceil(M / MXFP4_BLOCK_SCALING_SIZE)
             columnwise_scale_inv = torch.zeros(
                     round_up_to_nearest_multiple(K, 256),
