@@ -39,8 +39,8 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   const NVTETensor* B_use = A;
   bool transA_use = transB;
   bool transB_use = transA;
-  bool use_a_columnwise_data = false;
-  bool use_b_columnwise_data = false;
+  bool use_a_colwise_data = false;
+  bool use_b_colwise_data = false;
 
   const auto caller_a_dtype = convertNVTETensorCheck(A[0])->dtype(); 
   const bool is_8bit_float = is_fp8_dtype(caller_a_dtype);
@@ -76,7 +76,7 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
     // normalized NN: op(A_use)=A, op(B_use)=B
     if (!transA_use && !transB_use) {
       if (has_b_col) {
-        use_b_columnwise_data = true;
+        use_b_colwise_data = true;
         transB_use = true;
       }
     }
@@ -84,8 +84,8 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
     // normalized TN: op(A_use)=A^T, op(B_use)=B
     else if (transA_use && !transB_use) {
       if (has_a_col && has_b_col) {
-        use_a_columnwise_data = true;
-        use_b_columnwise_data = true;
+        use_a_colwise_data = true;
+        use_b_colwise_data = true;
         transA_use = false;
         transB_use = true;
       } 
@@ -102,7 +102,7 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   int64_t b0 = 0, b1 = 0;
   int64_t d0 = 0, d1 = 0;
 
-  if (use_a_columnwise_data) {
+  if (use_a_colwise_data) {
     if (!get_columnwise_storage_2d_dims(A0_te->columnwise_data, a0, a1)) {
       NVTE_ERROR("ck_tile_grouped_gemm: expected 2D columnwise_data for A_use[0]");
       return false;
@@ -114,7 +114,7 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
     }
   }
 
-  if (use_b_columnwise_data) {
+  if (use_b_colwise_data) {
     if (!get_columnwise_storage_2d_dims(B0_te->columnwise_data, b0, b1)) {
       NVTE_ERROR("ck_tile_grouped_gemm: expected 2D columnwise_data for B_use[0]");
       return false;
@@ -160,8 +160,8 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
       ws_ptr,
       ws_bytes,
       stream,
-      use_a_columnwise_data,
-      use_b_columnwise_data,
+      use_a_colwise_data,
+      use_b_colwise_data,
       accumulate};
 
   if (is_16bit_float) {
