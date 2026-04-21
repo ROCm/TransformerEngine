@@ -53,14 +53,23 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   if (accumulate && is_8bit_float)
   	return false;
 
-  // FP8 special handling:
-  //
-  // Prefer reformulating problematic normalized layouts into NT using the
-  // alternate physical storage view when available.
-  //
-  // Cases handled:
-  //   1) normalized NN -> NT by reading B from columnwise storage
-  //   2) normalized TN -> NT by reading both A and B from columnwise storage
+// FP8 special handling.
+//
+// Re-express certain normalized FP8 GEMMs using `columnwise_data` when
+// available. This preserves the intended math and only changes the
+// storage/transpose-flag encoding seen by CK.
+//
+//   normalized NN: `op(A_use)=A`, `op(B_use)=B`
+//     -> rewrite B only:
+//        `data + N` -> `columnwise_data + T`
+//     The original NN form is not the preferred FP8 matmul encoding here.
+//
+//   normalized TN: `op(A_use)=A^T`, `op(B_use)=B`
+//     -> rewrite both operands:
+//        A: `data + T` -> `columnwise_data + N`
+//        B: `data + N` -> `columnwise_data + T`
+//     This avoids the extra transpose/shuffle handling path that the original
+//     TN presentation can trigger in the FP8 CK pipeline.
   if (is_8bit_float) {
     const bool has_a_col = A0_te->has_columnwise_data();
     const bool has_b_col = B0_te->has_columnwise_data();
