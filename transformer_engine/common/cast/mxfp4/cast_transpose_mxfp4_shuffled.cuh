@@ -297,6 +297,39 @@ __device__ __forceinline__ uint8_t compute_e8m0_scale(
  * 
  * Reference: AMD CDNA4 ISA, v_cvt_scalef32_pk_fp4_f32 (page 390)
  */
+/*
+ * Software FP32 to E2M1 (FP4) conversion with round-to-nearest-even.
+ * Returns a 4-bit encoding: bit3=sign, bits[2:0]=magnitude index.
+ *
+ * E2M1 representable magnitudes: {0, 0.5, 1, 1.5, 2, 3, 4, 6}
+ */
+__device__ __forceinline__ uint8_t cvt_f32_to_fp4_rne(float v, float scale_rcp) {
+    float scaled = v * scale_rcp;
+    uint8_t sign = (scaled < 0.0f) ? 0x8 : 0x0;
+    float mag = fabsf(scaled);
+
+    // E2M1 magnitude encoding (RNE boundaries are midpoints):
+    //   [0, 0.25)     -> 0  (0.0)
+    //   [0.25, 0.75)  -> 1  (0.5)
+    //   [0.75, 1.25)  -> 2  (1.0)
+    //   [1.25, 1.75)  -> 3  (1.5)
+    //   [1.75, 2.5)   -> 4  (2.0)
+    //   [2.5, 3.5)    -> 5  (3.0)
+    //   [3.5, 5.0)    -> 6  (4.0)
+    //   [5.0, inf)    -> 7  (6.0)
+    uint8_t code;
+    if      (mag < 0.25f)  code = 0;
+    else if (mag < 0.75f)  code = 1;
+    else if (mag < 1.25f)  code = 2;
+    else if (mag < 1.75f)  code = 3;
+    else if (mag < 2.5f)   code = 4;
+    else if (mag < 3.5f)   code = 5;
+    else if (mag < 5.0f)   code = 6;
+    else                   code = 7;
+
+    return sign | code;
+}
+
 __device__ __forceinline__ uint16_t cvt_f32x4_to_fp4x4(
     float v0, float v1, float v2, float v3,
     float scale
@@ -319,7 +352,15 @@ __device__ __forceinline__ uint16_t cvt_f32x4_to_fp4x4(
     result |= (tmp << 8);
     return (uint16_t)(result & 0xFFFF);
 #else
-    return 0;
+    float scale_rcp = 1.0f / scale;
+    uint8_t n0 = cvt_f32_to_fp4_rne(v0, scale_rcp);
+    uint8_t n1 = cvt_f32_to_fp4_rne(v1, scale_rcp);
+    uint8_t n2 = cvt_f32_to_fp4_rne(v2, scale_rcp);
+    uint8_t n3 = cvt_f32_to_fp4_rne(v3, scale_rcp);
+    // Pack: each nibble is one FP4 value, two per byte, four per uint16
+    uint16_t lo = (uint16_t)n0 | ((uint16_t)n1 << 4);
+    uint16_t hi = (uint16_t)n2 | ((uint16_t)n3 << 4);
+    return lo | (hi << 8);
 #endif
 }
 
@@ -690,8 +731,9 @@ inline void nvte_cast_transpose_mxfp4_fused_shuffle(
     int colwise_scale_M_pad, int colwise_scale_N_pad,
     hipStream_t stream
 ) {
-    dim3 grid((M + 127) / 128, (N + 63) / 64);
-    dim3 block(256);
+    dim3 grid((M + te_mxfp4::BLOCK_M - 1) / te_mxfp4::BLOCK_M,
+              (N + te_mxfp4::BLOCK_N - 1) / te_mxfp4::BLOCK_N);
+    dim3 block(te_mxfp4::THREADS_PER_BLOCK);
 
     #define LAUNCH_KERNEL(ROW, COL, HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES) \
         te_mxfp4::cast_transpose_mxfp4_shuffled<ROW, COL, SHUF_SCALES, HAD, SHUF_ROW, SHUF_COL> \

@@ -31,21 +31,11 @@
  };
  
  double2 cvt_fp4x2_to_double2(fp4e2m1x2 fp4_pair) {
-#ifdef __HIP_PLATFORM_AMD__
      uint8_t raw = *reinterpret_cast<uint8_t*>(&fp4_pair);
      // Decode manually
      float lo = E2M1_LUT[raw & 0xF];
      float hi = E2M1_LUT[(raw >> 4) & 0xF];
      return {static_cast<double>(lo), static_cast<double>(hi)};
-#else
-     const __half2_raw raw_truncated_to_fp4e2m1_pair =
-         __nv_cvt_fp4x2_to_halfraw2(*reinterpret_cast<__nv_fp4x2_storage_t*>(&fp4_pair), __NV_E2M1);
- 
-     const __half2 truncated_to_fp4e2m1_pair(raw_truncated_to_fp4e2m1_pair);
-     const double truncated_to_fp4e2m1_x = static_cast<double>(truncated_to_fp4e2m1_pair.x);
-     const double truncated_to_fp4e2m1_y = static_cast<double>(truncated_to_fp4e2m1_pair.y);
-     return {truncated_to_fp4e2m1_x, truncated_to_fp4e2m1_y};
-#endif //#ifndef __HIP_PLATFORM_AMD__
  }
  
  template <typename InputType>
@@ -405,24 +395,18 @@ void compute_ref(float (*OP)(const float),
      compareResults_mxfp4(output, ref_output.get(), ref_output_t.get(), rows, cols, atol, rtol, true, false);
 
      size_t scale_mismatches_num = 0;
-#ifdef USE_ROCM
      std::vector<size_t> mismatches_scales_indices;
-#endif
 
      compare_scaling_factors<fp8e8m0>("scales", output.rowwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                        ref_scales.get(),
                                        unpadded_blocks_Y, unpadded_blocks_X, scales_stride,
-#ifdef USE_ROCM
                                        mismatches_scales_indices,
-#endif
                                        scale_mismatches_num);
 
      compare_scaling_factors<fp8e8m0>("scales_t", output.columnwise_cpu_scale_inv_ptr<fp8e8m0>(),
                                        ref_scales_t.get(),
                                        unpadded_blocks_Y_t, unpadded_blocks_X_t, scales_stride_t,
-#ifdef USE_ROCM
                                        mismatches_scales_indices,
-#endif
                                        scale_mismatches_num);
 }
  
@@ -458,17 +442,11 @@ void compute_ref(float (*OP)(const float),
                  transformer_engine::DType>> {};
  
  TEST_P(FusedCastTransposeMXFP4TestSuite, TestFusedCastTransposeMXFP4) {
-#ifdef __HIP_PLATFORM_AMD__
     hipDeviceProp_t prop;
     hipGetDeviceProperties(&prop, 0);
     if (!(prop.major > 9 || (prop.major == 9 && prop.minor == 5))) {
         GTEST_SKIP() << "MXFP4 requires gfx950";
     }
-#else
-    if (getDeviceComputeCapability() < blackwellComputeCapability) {
-        GTEST_SKIP();
-    }
-#endif
  
      using namespace transformer_engine;
      using namespace test;

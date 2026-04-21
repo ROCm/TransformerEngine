@@ -579,11 +579,6 @@ class MXFP4BlockScaling(Recipe):
     fp8_mha: bool = False
     use_hadamard: bool = os.getenv("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
 
-    @property
-    def fp8_format(self) -> Format:
-        """Alias for fp4_format for compatibility with code that expects recipe.fp8_format."""
-        return self.fp4_format
-
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for MXFP4 scaling."
 

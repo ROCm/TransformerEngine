@@ -203,6 +203,8 @@ def mxfp4_dequantize_cpu(
     packed = fp4_packed.cpu().numpy().astype(np.uint8)
     scales_np = scales.cpu().numpy().astype(np.uint8)
 
+    if packed.ndim > 2:
+        packed = packed.reshape(-1, packed.shape[-1])
     M, halfN = packed.shape
     N = halfN * 2
     num_blocks = N // BLOCK_SIZE
