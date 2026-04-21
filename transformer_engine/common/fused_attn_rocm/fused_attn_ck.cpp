@@ -937,7 +937,7 @@ void fused_attn_ck_bwd_impl(
   if(bias_type == NVTE_Bias_Type::NVTE_ALIBI){
     // ck requires an alibi slope array even if in standard (vanilla) mode
     devPtrAlibiSlope = planner.allocate(h*sizeof(float));
-  }else if((bias_type==NVTE_Bias_Type::NVTE_POST_SCALE_BIAS) && (devPtrdBias!=nullptr)){
+  }else if(bias_type==NVTE_Bias_Type::NVTE_POST_SCALE_BIAS){
     if(bias_b!=b || bias_h!= h){
       // ck requires a buffer dbias_expanded of size BHSS if bias is not BHSS
       dbias_expanded_ptr = planner.allocate(b*h*s_q*s_kv*nvte_dtype_size(dtype));
