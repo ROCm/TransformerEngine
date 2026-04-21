@@ -1245,7 +1245,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   }
 #endif
 
-// Launch zero-out kernels before the GEMM calls to use the sync in the multi-stream GEMM
+  // Launch zero-out kernels before the GEMM calls to use the sync in the multi-stream GEMM
   size_t num_zero_outs = zero_out_dptr_list.size();
   for (int i = 0; i < num_zero_outs; i++) {
     int stream_id = i % num_streams;

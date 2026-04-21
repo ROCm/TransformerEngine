@@ -212,6 +212,26 @@ class TestDistributedLayernormMLP:
         quantization_recipe,
         with_jax_gemm,
     ):
+        if (
+            is_hip_extension()
+            and (not with_jax_gemm)
+            and use_bias
+            and (quantization_recipe is None)
+            and (dtype == jnp.bfloat16)
+        ):
+            pytest.xfail("Skip known failure case.")
+        #ROCm: skip unsupported MXFP8 layernorm MLP grad test cases
+        if isinstance(quantization_recipe, recipe.MXFP8BlockScaling):
+            _check_mxfp8_layernorm_mlp_grad_support(
+                input_shape[0]*input_shape[1],
+                INTERMEDIATE,
+                len(activation_type)*INTERMEDIATE,
+                input_shape[2],
+                input_shape[2],
+                mesh_config[1][1],
+                use_bias,
+                with_jax_gemm
+            )
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = "rmsnorm"
 
@@ -357,6 +377,18 @@ class TestDistributedLayernormMLP:
         quantization_recipe,
         with_jax_gemm,
     ):
+        #ROCm: skip unsupported MXFP8 layernorm MLP test cases
+        if isinstance(quantization_recipe, recipe.MXFP8BlockScaling):
+            _check_mxfp8_layernorm_mlp_support(
+                input_shape[0]*input_shape[1],
+                INTERMEDIATE,
+                len(activation_type)*INTERMEDIATE,
+                input_shape[2],
+                input_shape[2],
+                mesh_config[1][1],
+                use_bias,
+                with_jax_gemm
+            )
         batch, seqlen, hidden_in = input_shape
         layernorm_type = "rmsnorm"
 

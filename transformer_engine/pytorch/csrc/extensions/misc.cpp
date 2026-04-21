@@ -9,12 +9,15 @@
 #include "../extensions.h"
 
 namespace transformer_engine::pytorch {
+
 #ifndef USE_ROCM
 size_t get_cublasLt_version() { return cublasLtGetVersion(); }
 
 size_t get_cudnn_version() { return cudnnGetVersion(); }
-#endif
+#else
 void placeholder() {}
+#endif
+
 at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim) {
   NVTE_CHECK(first_dims.is_cuda(), "first_dims must be on CUDA.");
   NVTE_CHECK(first_dims.scalar_type() == at::kLong, "first_dims must have dtype int64.");

@@ -463,7 +463,7 @@ if IS_HIP_EXTENSION:
       """check whether this machine is mi200/210/250"""
       import re
       return (re.search('AMD Instinct MI2.0', torch.cuda.get_device_name(torch.cuda.current_device())) is not None)
-    
+
     @functools.lru_cache(maxsize=None)
     def is_mi308():
       """check whether this machine is mi308"""
@@ -477,18 +477,15 @@ def is_fp8_fnuz():
 get_torch_float8_e4m3_type = lambda: torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
 get_torch_float8_e5m2_type = lambda: torch.float8_e5m2fnuz if is_fp8_fnuz() else torch.float8_e5m2
 
-def is_bf16_compatible() -> None:
+def is_bf16_compatible() -> bool:
     if IS_HIP_EXTENSION:
         # only MI200 and newer machines support bf16
-        if get_device_compute_capability() in [(9, 4), (9, 5)] or is_mi200():
-            return True
-        else:
-            return False
-    else:
-        """Replaces torch.cuda.is_bf16_compatible() with an explicit
-        check on device compute capability to enforce sm_80 or higher.
-        """
-        return torch.cuda.get_device_capability()[0] >= 8
+        return get_device_compute_capability() in [(9, 4), (9, 5)] or is_mi200()
+    """Replaces torch.cuda.is_bf16_compatible() with an explicit
+    check on device compute capability to enforce sm_80 or higher.
+    """
+    return torch.cuda.get_device_capability()[0] >= 8
+
 
 def is_bf16_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
     """
@@ -519,7 +516,10 @@ def is_non_tn_fp8_gemm_supported() -> bool:
     non-TN layouts for FP8 GEMMs.
     """
     # TODO: release until rocm support non-TN fp8 gemms
-    return (not IS_HIP_EXTENSION) and (torch.cuda.get_device_capability() >= (10, 0))
+    if IS_HIP_EXTENSION:
+        return False
+    device_capability = torch.cuda.get_device_capability()
+    return (10, 0) <= device_capability < (12, 0) or device_capability >= (13, 0)
 
 
 @functools.lru_cache(maxsize=None)

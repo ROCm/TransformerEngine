@@ -20,8 +20,7 @@ namespace fused_router {
 //   2. The intermediate buffer is initialized in FP32.
 using CompType = float;
 
-#ifdef __HIP_PLATFORM_AMD__
-// TODO: remove after rocm supports NV __syncwarp equivalent
+#if defined(__HIP_PLATFORM_AMD__) && __HIP_VERSION__ < 70000000
 __device__ inline void __syncwarp()
 {
     __builtin_amdgcn_fence(__ATOMIC_RELEASE, "wavefront");
@@ -29,7 +28,6 @@ __device__ inline void __syncwarp()
     __builtin_amdgcn_fence(__ATOMIC_ACQUIRE, "wavefront");
 
 }
-
 #endif
 constexpr size_t kThreadsPerWarp = 32;
 constexpr int kThreadsPerBlock =
@@ -69,21 +67,16 @@ __device__ inline T warp_reduce_on_shmem(T *data_ptr, int data_size, ReduceFuncT
   // Reduce the value in local thread
   CompType val = lane_id < data_size ? data_ptr[lane_id] : default_val;
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
-//TODO: release after /opt/rocm/include/hip/amd_detail/amd_hip_bfloat16.h provide bf16 constructor from double
-#ifdef __HIP_PLATFORM_AMD__
-    val = reduce_func(static_cast<T>(val), data_ptr[i]);
-#else
     val = reduce_func(val, data_ptr[i]);
-#endif
   }
 
   // Warp shuffle between threads
 #ifdef __HIP_PLATFORM_AMD__
-  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 16, kThreadsPerWarp)));
-  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 8, kThreadsPerWarp)));
-  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 4, kThreadsPerWarp)));
-  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 2, kThreadsPerWarp)));
-  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 1, kThreadsPerWarp)));
+  val = reduce_func(val, __shfl_xor(val, 16, kThreadsPerWarp));
+  val = reduce_func(val, __shfl_xor(val, 8, kThreadsPerWarp));
+  val = reduce_func(val, __shfl_xor(val, 4, kThreadsPerWarp));
+  val = reduce_func(val, __shfl_xor(val, 2, kThreadsPerWarp));
+  val = reduce_func(val, __shfl_xor(val, 1, kThreadsPerWarp));
 #else
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 16));
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 8));
@@ -114,17 +107,17 @@ __device__ inline T masked_warp_reduce_on_shmem(T *data_ptr, bool *mask, int dat
   CompType val = lane_id < data_size && mask[lane_id] ? data_ptr[lane_id] : default_val;
   for (int i = lane_id + kThreadsPerWarp; i < data_size; i += kThreadsPerWarp) {
     if (mask[i]) {
-      val = reduce_func(static_cast<T>(val), data_ptr[i]);
+      val = reduce_func(val, data_ptr[i]);
     }
   }
 
   // Warp shuffle between threads
 #ifdef __HIP_PLATFORM_AMD__
-  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 16, kThreadsPerWarp)));
-  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 8, kThreadsPerWarp)));
-  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 4, kThreadsPerWarp)));
-  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 2, kThreadsPerWarp)));
-  val = reduce_func(static_cast<T>(val), static_cast<T>(__shfl_xor(val, 1, kThreadsPerWarp)));
+  val = reduce_func(val, __shfl_xor(val, 16, kThreadsPerWarp));
+  val = reduce_func(val, __shfl_xor(val, 8, kThreadsPerWarp));
+  val = reduce_func(val, __shfl_xor(val, 4, kThreadsPerWarp));
+  val = reduce_func(val, __shfl_xor(val, 2, kThreadsPerWarp));
+  val = reduce_func(val, __shfl_xor(val, 1, kThreadsPerWarp));
 #else
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 16));
   val = reduce_func(val, __shfl_xor_sync(0xffffffff, val, 8));

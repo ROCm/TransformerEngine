@@ -393,7 +393,11 @@ __global__ void fused_topk_with_score_function_backward_kernel(
       }
       // Warp reduce the sum
       for (int s = 16; s > 0; s /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+        local_sum_Output_x_Grad += __shfl_xor(local_sum_Output_x_Grad, s, kThreadsPerWarp);
+#else
         local_sum_Output_x_Grad += __shfl_xor_sync(0xffffffff, local_sum_Output_x_Grad, s);
+#endif
       }
       CompType sum_Output_x_Grad = local_sum_Output_x_Grad;
       // In-place update

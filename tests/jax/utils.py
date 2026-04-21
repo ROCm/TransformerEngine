@@ -31,11 +31,10 @@ from transformer_engine.jax.attention import (
 from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
 from transformer_engine.jax.quantize.helper import DType as TEDType
 from transformer_engine.jax.version_utils import (
-    get_jnp_float8_e4m3_type,
-    get_jnp_float8_e5m2_type,
     TRITON_EXTENSION_MIN_JAX_VERSION,
     is_triton_extension_supported,
 )
+from transformer_engine.jax.util import get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 
 PRNGKey = Any
 Shape = Tuple[int, ...]

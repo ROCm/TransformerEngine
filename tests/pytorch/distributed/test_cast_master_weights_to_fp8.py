@@ -44,6 +44,7 @@ from transformer_engine.pytorch.tensor.utils import (
 )
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.tensor.utils import post_all_gather_processing, replace_raw_data
+
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 def _get_quantization_recipe(quantization) -> Recipe:

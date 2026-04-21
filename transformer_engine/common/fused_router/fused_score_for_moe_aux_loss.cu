@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -256,7 +258,11 @@ __global__ void fused_score_for_moe_aux_loss_backward_kernel(const CompType *int
       }
       // Warp reduce the sum
       for (int s = 16; s > 0; s /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+        local_sum_Output_x_Grad += __shfl_xor(local_sum_Output_x_Grad, s, kThreadsPerWarp);
+#else
         local_sum_Output_x_Grad += __shfl_xor_sync(0xffffffff, local_sum_Output_x_Grad, s);
+#endif
       }
       CompType sum_Output_x_Grad = local_sum_Output_x_Grad;
       // In-place update

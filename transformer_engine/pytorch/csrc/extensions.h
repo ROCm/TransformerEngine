@@ -455,9 +455,9 @@ at::Tensor fused_qkv_rope_backward(const at::Tensor &q_grad_out, const at::Tenso
 #ifndef USE_ROCM
 size_t get_cublasLt_version();
 size_t get_cudnn_version();
-#endif
-
+#else
 void placeholder();
+#endif
 
 at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
 

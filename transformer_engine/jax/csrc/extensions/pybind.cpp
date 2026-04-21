@@ -1,6 +1,6 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
- * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved. 
+ * Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -102,8 +102,14 @@ pybind11::dict Registrations() {
   dict["te_fused_attn_forward_ffi"] = EncapsulateFFI(FusedAttnForwardHandler);
   dict["te_fused_attn_backward_ffi"] = EncapsulateFFI(FusedAttnBackwardHandler);
 
+  // GEMM
   dict["te_gemm_ffi"] = EncapsulateFFI(GemmHandler);
+  dict["te_gemm_v2_ffi"] = EncapsulateFFI(GemmV2Handler);
+
+  // Grouped GEMM
+  dict["te_grouped_gemm_d2h_group_sizes_ffi"] = EncapsulateFFI(GroupedGemmD2HGroupSizesHandler);
   dict["te_grouped_gemm_ffi"] = EncapsulateFFI(GroupedGemmHandler);
+  dict["te_grouped_gemm_v2_ffi"] = EncapsulateFFI(GroupedGemmV2Handler);
 #endif
   dict["te_inspect_ffi"] =
       pybind11::dict(pybind11::arg("execute") = EncapsulateFFI(InspectHandler));

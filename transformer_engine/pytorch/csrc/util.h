@@ -1,6 +1,4 @@
 /*************************************************************************
- * This file was modified for portability to AMDGPU
- * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -8,8 +6,6 @@
 
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_
-
-#ifndef USE_ROCM
 
 #include <torch/extension.h>
 
@@ -63,7 +59,5 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(TensorWrapper& input, bool roww
 
 }  // namespace pytorch
 }  // namespace transformer_engine
-
-#endif  //!USE_ROCM
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_

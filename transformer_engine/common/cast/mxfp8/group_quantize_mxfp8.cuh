@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -26,6 +28,7 @@
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
+#ifndef __HIP_PLATFORM_AMD__
 namespace group_quantize_kernel {
 
 using namespace dispatch::common;
@@ -776,12 +779,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK) group_quantize_mxfp8_kernel
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 }  // namespace group_quantize_kernel
+#endif //!__HIP_PLATFORM_AMD__
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 void group_quantize(const GroupedTensor *input, const GroupedTensor *activations,
                     const Tensor *noop, GroupedTensor *output, GroupedTensor *dbias,
                     Tensor *workspace, cudaStream_t stream) {
+#ifdef __HIP_PLATFORM_AMD__
+  NVTE_ERROR("group_quantize is not supported on ROCm yet.");
+#else
   using namespace group_quantize_kernel;
 
   checkCuDriverContext(stream);
@@ -1012,6 +1019,7 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
               NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
       );                                              // NOLINT(*)
   );                                                  // NOLINT(*)
+#endif  //__HIP_PLATFORM_AMD__
 }
 
 }  // namespace mxfp8

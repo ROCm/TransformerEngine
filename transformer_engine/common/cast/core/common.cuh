@@ -34,6 +34,8 @@ enum ShapeRepresentation {
   VARYING_BOTH_DIMS = 3
 };
 
+#ifndef __HIP_PLATFORM_AMD__
+
 inline bool full_tile_1D_tensor(const Tensor *const t, const size_t elems_per_block) {
   const size_t N = product(t->data.shape);
   const bool isFullTile = (N % elems_per_block == 0);
@@ -52,6 +54,8 @@ __device__ __forceinline__ unsigned char *align_smem_ptr_per_TMA_requirements(un
   addr = (addr + TMA_SHMEM_ALIGNMENT - 1) & ~(TMA_SHMEM_ALIGNMENT - 1);
   return reinterpret_cast<unsigned char *>(addr);
 }
+
+#endif  //!__HIP_PLATFORM_AMD__   
 
 namespace kernel {
 

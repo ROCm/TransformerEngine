@@ -284,24 +284,32 @@ def fused_attn_fwd(
         attn_scale = 1.0 / math.sqrt(d)
 
     if attn_bias_type not in ["no_bias", "alibi"]:
-        assert (
-            attn_bias is not None
-        ), "attn_bias tensor cannot be None when attn_bias_type is not no_bias or alibi."
-        assert attn_bias.dtype == q.dtype, "attn_bias tensor must be in the same dtype as q and kv."
+        if attn_bias is None:
+            raise ValueError(
+                f"attn_bias tensor cannot be None when attn_bias_type={attn_bias_type!r}."
+            )
+        if attn_bias.dtype != q.dtype:
+            raise ValueError(
+                "attn_bias tensor must have the same dtype as q and kv: "
+                f"attn_bias.dtype={attn_bias.dtype} but q.dtype={q.dtype}."
+            )
 
-    assert (
-        fused_attention_backend != FusedAttnBackend["No_Backend"]
-    ), "Fused attention does not support this input combination."
+    if fused_attention_backend == FusedAttnBackend["No_Backend"]:
+        raise ValueError(
+            "Fused attention does not support this input combination:"
+            f" qkv_layout={qkv_layout!r}, attn_bias_type={attn_bias_type!r},"
+            f" attn_mask_type={attn_mask_type!r}, q.shape={list(q.shape)},"
+            f" q.dtype={q.dtype}, backend={fused_attention_backend}."
+        )
 
     if IS_HIP_EXTENSION:
         # Both CK/aiter and aotriton follow the flash-attn rng design
         rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
-
     # BF16/FP16 fused attention API from fmha_v1 apex
     elif fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]:
-            rng_elts_per_thread = (
-                max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
-            ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
+        rng_elts_per_thread = (
+            max_seqlen_q * max_seqlen_kv + BACKEND_F16m512_FP8_THREADS_PER_CTA - 1
+        ) // BACKEND_F16m512_FP8_THREADS_PER_CTA
     # BF16/FP16 fused attention API from fmha_v2
     elif fused_attention_backend == FusedAttnBackend["F16_arbitrary_seqlen"]:
         rng_elts_per_thread = BACKEND_F16arb_ELTS_PER_THREADS
@@ -517,7 +525,7 @@ def fused_attn_bwd(
             f" q.dtype={q.dtype}, backend={fused_attention_backend}."
         )
 
-    if fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
+    if not IS_HIP_EXTENSION and fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
         if len(aux_ctx_tensors) < 1:
             raise ValueError(
                 "aux_ctx_tensors must contain rng_state as its last element,"
@@ -525,7 +533,7 @@ def fused_attn_bwd(
                 f" for backend={fused_attention_backend}."
             )
 
-    if fused_attention_backend == FusedAttnBackend["FP8"]:
+    if not IS_HIP_EXTENSION and fused_attention_backend == FusedAttnBackend["FP8"]:
         if s_quantizer is None:
             raise ValueError(
                 "s_quantizer is required for FP8 fused attention backward"

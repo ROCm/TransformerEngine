@@ -730,7 +730,7 @@ def get_attention_backend(
             )
             use_unfused_attention = False
         if qkv_format == "thd":
-            if cudnn_version < (9, 18, 0):
+            if not IS_HIP_EXTENSION and cudnn_version < (9, 18, 0):
                 logger.debug(
                     "Disabling FusedAttention for softmax_type = %s, qkv_format = thd and cuDNN"
                     " version < 9.18",
@@ -884,7 +884,7 @@ def get_attention_backend(
                 "Disabling FusedAttention as it does not support sliding window attention for FP8"
             )
             use_fused_attention = False
-        elif attention_dropout != 0.0:
+        elif not IS_HIP_EXTENSION and attention_dropout != 0.0:
             logger.debug(
                 "Disabling FusedAttention as it only supports sliding window attention "
                 "without dropout"

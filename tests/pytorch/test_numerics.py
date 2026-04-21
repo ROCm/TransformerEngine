@@ -3137,6 +3137,7 @@ def _make_grouped_tensor_uniform(
     )
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION, reason="Grouped GEMM is not yet supported in ROCm TE")
 @pytest.mark.parametrize(
     "z, m, n, k",
     [
@@ -3339,9 +3340,12 @@ def _make_grouped_tensor_quantized_mxfp8(
 def test_grouped_gemm_grouped_tensor_mxfp8(
     shape, accumulate, layout: str, case: str, dtype: torch.dtype
 ) -> None:
-    if tex.get_cublasLt_version() < 130200:
+    if not IS_HIP_EXTENSION and tex.get_cublasLt_version() < 130200:
         pytest.skip("Grouped GEMM requires cuBLAS 13.2+.")
-    if torch.cuda.get_device_capability() < (10, 0):
+    if IS_HIP_EXTENSION:
+        if not is_mxfp8_available():
+            pytest.skip("MXFP8 is not supported on this config")
+    elif torch.cuda.get_device_capability() < (10, 0):
         pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
     if dtype == torch.bfloat16 and not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
