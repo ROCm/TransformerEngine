@@ -365,13 +365,6 @@ def _try_fused_rmsnorm_quant(input_2d, weight, eps, quantizer, zero_centered_gam
         # scale_inv.numel() > 1 and route to gemm_a8w8_per_token_scale.
         if hasattr(out, '_scale_inv'):
             out._scale_inv = yscale
-        # make_empty allocated the transpose buffer (columnwise_usage was set
-        # on the quantizer) but the fused kernel only writes _data. Mark the
-        # buffer stale so update_usage/_create_transpose regenerates it from
-        # _data on demand — otherwise downstream wgrad reads uninitialized
-        # memory.
-        if hasattr(out, '_transpose') and out._transpose is not None:
-            out._transpose_invalid = True
 
         # Compute rsigma for backward pass. The fused kernel doesn't return it,
         # so cheaply recompute from input (one reduction, no FP8 cast).
@@ -403,13 +396,11 @@ def _try_fused_rmsnorm_quant(input_2d, weight, eps, quantizer, zero_centered_gam
             out._data.copy_(fp8_bytes.reshape(out._data.shape))
         if hasattr(out, '_scale_inv'):
             out._scale_inv.copy_(dequant_scale)
-        # make_empty allocated the transpose buffer (columnwise_usage was set
-        # on the quantizer) but the fused kernel only writes _data. Mark the
-        # buffer stale so update_usage/_create_transpose regenerates it from
-        # _data on demand — otherwise downstream wgrad reads uninitialized
-        # memory.
-        if hasattr(out, '_transpose') and out._transpose is not None:
-            out._transpose_invalid = True
+        # Also fill columnwise transpose if the quantizer requested it
+        if hasattr(out, '_data_transpose') and out._data_transpose is not None:
+            out._data_transpose.copy_(
+                fp8_bytes.reshape(orig_shape).transpose(-1, -2).contiguous().view(torch.uint8)
+            )
 
         # Compute rsigma for backward pass (we need it, but the fused kernel
         # doesn't return it). Cheaply recompute from input.
