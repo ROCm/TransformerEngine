@@ -29,7 +29,7 @@ class _FromMXFP4Func(torch.autograd.Function):
         if hasattr(tensor, '_data') and tensor._data is not None:
             # Return cached high-precision data (used during model initialization/teardown)
             return tensor._data.to(dtype) if tensor._data.dtype != dtype else tensor._data
-        
+
         # If no cached data, we would need to dequantize from rowwise FP4 data
         # This path should not be hit in forward-only MXFP4 training
 
@@ -77,7 +77,7 @@ class MXFP4TensorStorage(QuantizedTensorStorage):
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: torch.Tensor,
         fp4_dtype: TE_DType,
-        quantizer: Optional[Quantizer] = None,
+        quantizer: Optional[Quantizer],
         *args,
         **kwargs,
     ):
@@ -175,7 +175,7 @@ class MXFP4TensorStorage(QuantizedTensorStorage):
     ):
         """
         Update the usage of the MXFP4TensorStorage.
-    
+
         """
 
         # Default usage is based on available data

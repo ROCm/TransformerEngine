@@ -124,7 +124,7 @@ class MXFP4Quantizer(Quantizer):
 
         # Allocate FP4 data: [M, K/2]
         rowwise_data = torch.empty(M, K // 2, dtype=torch.uint8, device=device)
-        
+
         # Allocate PADDED scale tensors for shuffle compatibility
         rowwise_scale_K = math.ceil(K / MXFP4_BLOCK_SCALING_SIZE)
         rowwise_scale_inv = torch.zeros(
@@ -252,7 +252,7 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
         Construct plain PyTorch tensor from MXFP4Tensor
 
         By default the resulting tensor's dtype is the MXFP4Tensor's nominal dtype.
-        
+
         Note: For MXFP4 forward-only training, this is typically not needed as
         backward pass uses high-precision activations.
         """

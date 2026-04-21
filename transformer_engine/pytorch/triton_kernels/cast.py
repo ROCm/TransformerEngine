@@ -2,11 +2,10 @@
 # License for AMD contributions = MIT. See LICENSE for more information
 
 """Python interface for cast extensions"""
-import os
-from typing import Iterable, List, Optional, Tuple, Union
+from typing import Optional
+
 import functools
 import torch
-import warnings
 
 from ..utils import is_non_tn_fp8_gemm_supported
 
@@ -22,36 +21,34 @@ def _empty_tensor() -> torch.Tensor:
     """Get tensor with no entries and no data"""
     return torch.Tensor().cuda()
 
-def _setup_conditional_transpose_storage(
-        tensor: QuantizedTensor,
-    ) -> QuantizedTensor:
-        shape = tensor.shape
-        quantizer = tensor._get_quantizer()
+def _setup_conditional_transpose_storage(tensor: QuantizedTensor) -> None:
+    shape = tensor.shape
+    quantizer = tensor._get_quantizer()
 
-        # Allocate FP8 data transpose if needed
-        data_transpose = None
-        create_transpose = quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported(); 
-        if quantizer.columnwise_usage and create_transpose:
-            if tensor.ndim == 0:
-                # If the original tensor is a scalar, its transpose is also a scalar.
-                data_transpose = torch.empty((), dtype=torch.uint8, device=tensor.device)
-            else:
-                transposed_shape = (shape[-1],) + shape[:-1]
-                data_transpose = torch.empty(
-                    transposed_shape,
-                    dtype=torch.uint8,
-                    device=tensor.device,
-                )
+    # Allocate FP8 data transpose if needed
+    data_transpose = None
+    create_transpose = quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported()
+    if quantizer.columnwise_usage and create_transpose:
+        if tensor.ndim == 0:
+            # If the original tensor is a scalar, its transpose is also a scalar.
+            data_transpose = torch.empty((), dtype=torch.uint8, device=tensor.device)
+        else:
+            transposed_shape = (shape[-1],) + shape[:-1]
+            data_transpose = torch.empty(
+                transposed_shape,
+                dtype=torch.uint8,
+                device=tensor.device,
+            )
 
-        # Construct FP8 tensor
-        tensor._transpose = data_transpose
-        tensor._transpose_invalid = tensor._transpose is None
+    # Construct FP8 tensor
+    tensor._transpose = data_transpose
+    tensor._transpose_invalid = tensor._transpose is None
 
 def te_quantize_triton(
     tensor: torch.Tensor,
     quantizer: Quantizer,
     output: Optional[torch.Tensor] = None,
-    noop_flag: torch.Tensor = None 
+    noop_flag: torch.Tensor = None
 ) -> torch.Tensor:
     """
     Quantizes the input tensor using a specified quantizer,
@@ -61,7 +58,7 @@ def te_quantize_triton(
     fake_tensor_type = input_tensor.dtype
     if not fake_tensor_type.is_floating_point:
         fake_tensor_type = torch.float32
-    
+
     out: QuantizedTensor = None
     if output is None:
         assert quantizer is not None, "Quantizer object cannot be None. Please provide a valid quantizer."
@@ -78,7 +75,7 @@ def te_quantize_triton(
     else:
         # Create a QuantizedTensor from the provided output tensor
         out = output
-    
+
     # Construct no-op flag if needed
     if noop_flag is None:
         noop_flag = _empty_tensor()
@@ -86,7 +83,7 @@ def te_quantize_triton(
     if (isinstance(out, MXFP8TensorStorage) and out._rowwise_data is None and out._columnwise_data is None) or (not isinstance(out, MXFP8TensorStorage) and out.size().numel() == 0):
         # Return empty output if the quantized tensor has no elements
         return out
-    
+
     if isinstance(out, Float8TensorStorage):
         if input_tensor.nelement() > 0:
             if not out._transpose_invalid:
@@ -114,7 +111,7 @@ def te_quantize_triton(
                     eps = getattr(quantizer, "amax_epsilon", 0.0),
                     force_pow_2_scales = getattr(quantizer, "force_pow_2_scales", False),
                 )
-                
+
             else:
                 out.remove_caches() #Make sure to remove transpose if it is marked as invalid
                 out = tex.quantize(input_tensor, quantizer, out, noop_flag)
@@ -130,7 +127,6 @@ def te_quantize_triton(
 def te_dequantize_triton(input, dtype: tex.DType):
     if isinstance(input, MXFP8TensorStorage):
         return te_dequantize_mxfp8_triton(input, dtype)
-    elif isinstance(input, Float8TensorStorage):
+    if isinstance(input, Float8TensorStorage):
         return tex.dequantize(input, dtype)
-    else:
-        raise NotImplementedError(f"Not implemented for tensor type: '{type(input).__name__}'")
+    raise NotImplementedError(f"Not implemented for tensor type: '{type(input).__name__}'")

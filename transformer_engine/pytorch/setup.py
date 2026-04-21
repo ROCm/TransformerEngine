@@ -130,8 +130,7 @@ class CachedWheelsCommand(_bdist_wheel):
             return super().run()
 
         if FORCE_BUILD:
-            super().run()
-            return
+            return super().run()
 
         wheel_url, wheel_filename = get_wheel_url()
         print("Guessing wheel URL: ", wheel_url)
@@ -150,12 +149,11 @@ class CachedWheelsCommand(_bdist_wheel):
             wheel_path = os.path.join(self.dist_dir, archive_basename + ".whl")
             print("Raw wheel path", wheel_path)
             os.rename(wheel_filename, wheel_path)
-            return
+            return None
         except (urllib.error.HTTPError, urllib.error.URLError):
             print("Precompiled wheel not found. Building from source...")
             # If the wheel could not be downloaded, build from source
-            super().run()
-            return
+            return super().run()
 
 
 if __name__ == "__main__":

@@ -326,7 +326,9 @@ class _Linear(torch.autograd.Function):
         # Note: y = x * w^T
         # ------------------------------------------------------
         if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
-                assert weightmat._transpose is None or weightmat._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
+            assert (
+                weightmat._transpose is None or weightmat._transpose.numel() == 0
+            ), "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
 
         nvtx_range_push(f"{nvtx_label}.gemm")
         gemm_out, *_, reduce_scatter_out = general_gemm(

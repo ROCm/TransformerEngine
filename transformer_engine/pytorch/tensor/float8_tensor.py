@@ -120,12 +120,12 @@ class Float8Quantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         if IS_HIP_EXTENSION:
-            from ..triton_kernels.cast import te_quantize_triton
-            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+            use_cast_transpose_triton = bool(
+                int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0"))
+            )
             quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
             return quantize_func(tensor, self)
-        else:
-            return tex.quantize(tensor, self)
+        return tex.quantize(tensor, self)
 
     def make_empty(
         self,
@@ -348,12 +348,12 @@ class Float8CurrentScalingQuantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         if IS_HIP_EXTENSION:
-            from ..triton_kernels.cast import te_quantize_triton
-            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+            use_cast_transpose_triton = bool(
+                int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0"))
+            )
             quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
             return quantize_func(tensor, self)
-        else:
-            return tex.quantize(tensor, self)
+        return tex.quantize(tensor, self)
 
     def make_empty(
         self,

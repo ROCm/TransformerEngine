@@ -555,7 +555,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 gemm_gelu_fusion = False
         if debug:
             gemm_gelu_fusion = False
-        
+
         if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
             assert fc1_weight_final._transpose is None or fc1_weight_final._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
 
@@ -1400,7 +1400,7 @@ class _LayerNormMLP(torch.autograd.Function):
                     # Overlap FC1 DGRAD reduce-scatter with WGRAD compute
                     ub_obj_fc1_wgrad = get_ub("fc1_wgrad", ctx.fp8)
                     ub_type_fc1_wgrad = tex.CommOverlapType.RS
-            
+
 
             # --------------------------------------------------
             # FC1 DGRAD
@@ -1676,7 +1676,7 @@ class _LayerNormMLP(torch.autograd.Function):
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
             if ctx.autocast_fp8_reduction_skipped:
-                FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True)                    
+                FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True)
 
         # FIX THIS
         # Scatter Fp8 tranposed-weight buffers

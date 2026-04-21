@@ -7,12 +7,11 @@
 """Pure Python base classes for quantization."""
 
 from __future__ import annotations
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
-import os
-from typing import Optional, Tuple, Iterable, Any, Dict, Union
+
 import abc
-import warnings
 import math
+import warnings
+from typing import Any, Dict, Iterable, Optional, Tuple, Union
 
 import torch
 from torch.utils._pytree import tree_map

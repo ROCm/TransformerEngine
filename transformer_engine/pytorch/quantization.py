@@ -17,6 +17,7 @@ from collections import deque
 from typing import Callable, List, Optional, Dict, Any, Tuple, Union
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     Recipe,
@@ -30,11 +31,8 @@ from transformer_engine.common.recipe import (
 )
 from .constants import dist_group_type
 
-from .utils import get_device_compute_capability
+from .utils import get_device_compute_capability, get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
 from .jit import jit_fuser
-
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
-from .utils import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
 
 __all__ = [
     "autocast",
@@ -55,8 +53,7 @@ def check_fp8_support() -> Tuple[bool, str]:
         gpu_arch = get_device_compute_capability()
         if gpu_arch in ((9, 4), (9, 5)):
             return True, ""
-        else:
-            return False, "Device arch gfx94x or gfx95x required for FP8 execution."
+        return False, "Device arch gfx94x or gfx95x required for FP8 execution."
     if get_device_compute_capability() >= (9, 0):  # hopper and above
         return True, ""
     if get_device_compute_capability() < (8, 9):  # pre-ada
@@ -87,9 +84,9 @@ def check_mxfp8_support() -> Tuple[bool, str]:
 
 @functools.lru_cache(maxsize=None)
 def check_nvfp4_support() -> Tuple[bool, str]:
+    """Return whether NVFP4 support is available."""
     if IS_HIP_EXTENSION:
         return False, "ROCm TE currently not supporting NVFP4"
-    """Return if nvfp4 support is available"""
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
     return False, "Device compute capability 10.0 or higher required for NVFP4 execution."

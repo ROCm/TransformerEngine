@@ -623,15 +623,13 @@ def get_attention_backend(
                 )
             use_fused_attention = False
 
-    if use_flash_attention_2 and (
-        head_dim_qk > 256
-        or head_dim_qk % 8 != 0
-        or (
-            not IS_HIP_EXTENSION
-            and head_dim_qk > 192
-            and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
-        )
-    ):
+    fa2_hd_check = head_dim_qk > 256 or head_dim_qk % 8 != 0
+    fa2_hd_dcc_check = (
+        not IS_HIP_EXTENSION
+        and head_dim_qk > 192
+        and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
+    )
+    if use_flash_attention_2 and (fa2_hd_check or fa2_hd_dcc_check):
         if FlashAttentionUtils.is_installed:
             logger.debug(
                 "Disabling FlashAttention 2 due to unsupported head_dim_qk and head_dim_v. "

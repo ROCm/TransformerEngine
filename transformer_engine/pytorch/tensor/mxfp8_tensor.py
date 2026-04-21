@@ -98,12 +98,12 @@ class MXFP8Quantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         if IS_HIP_EXTENSION:
-            from ..triton_kernels.cast import te_quantize_triton
-            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+            use_cast_transpose_triton = bool(
+                int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0"))
+            )
             quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
             return quantize_func(tensor, self)
-        else:
-            return tex.quantize(tensor, self)
+        return tex.quantize(tensor, self)
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:
         """Returns whether or not given inp can be quantized"""
@@ -145,7 +145,7 @@ class MXFP8Quantizer(Quantizer):
             # ROCm TE does not implement fuse padding zeros so use zero tensor here
             if IS_HIP_EXTENSION:
                 scale_inv = torch.zeros(
-                    math.prod(shape[:-1]), 
+                    math.prod(shape[:-1]),
                     math.ceil(shape[-1] / MXFP8_BLOCK_SCALING_SIZE),
                     dtype=torch.uint8,
                     device=device,

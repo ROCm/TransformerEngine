@@ -1,7 +1,6 @@
 # Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-import torch
 import triton
 import triton.language as tl
 from itertools import product
@@ -97,7 +96,7 @@ def _rmsnorm_fwd_triton_impl(
                 x = tl.load(input_ptrs).to(tl.float32)
                 g_ptrs = g_ptr + cols
                 g = tl.load(g_ptrs).to(tl.float32)
-                if (ZERO_CENTERED_GAMMA):
+                if ZERO_CENTERED_GAMMA:
                     g += 1
                 rms_norm = x * norm_factor * g
                 output_ptrs = row_output_ptr + cols
@@ -122,7 +121,7 @@ def _rmsnorm_fwd_triton_impl(
             x = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(tl.float32)
             g_ptrs = g_ptr + cols
             g = tl.load(g_ptrs, mask=mask, other=0.0).to(tl.float32)
-            if (ZERO_CENTERED_GAMMA):
+            if ZERO_CENTERED_GAMMA:
                 g += 1
             rms_norm = x * norm_factor * g
             output_ptrs = row_output_ptr + cols
@@ -154,7 +153,7 @@ def _rmsnorm_fwd_triton_impl(
             rsigma_output_ptr = rsigma_ptr + row_idx
             tl.store(rsigma_output_ptr, norm_factor)
 
-            if (ZERO_CENTERED_GAMMA):
+            if ZERO_CENTERED_GAMMA:
                 g += 1
             rms_norm = row * norm_factor * g
 
@@ -219,7 +218,7 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
                 grad_output = tl.load(grad_output_ptrs).to(tl.float32)
                 g_ptrs = g_ptr + cols
                 g = tl.load(g_ptrs).to(tl.float32)
-                if (ZERO_CENTERED_GAMMA):
+                if ZERO_CENTERED_GAMMA:
                     g += 1.
                 grad_sum += tl.sum(grad_output * x * g, axis=0)
 
@@ -232,7 +231,7 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
             grad_output = tl.load(grad_output_ptrs, mask=mask, other=0.0).to(tl.float32)
             g_ptrs = g_ptr + cols
             g = tl.load(g_ptrs, mask=mask, other=0.0).to(tl.float32)
-            if (ZERO_CENTERED_GAMMA):
+            if ZERO_CENTERED_GAMMA:
                 g += 1.
             grad_sum += tl.sum(grad_output * x * g, axis=0)
 
@@ -254,7 +253,7 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
 
                 g_ptrs = g_ptr + cols
                 g = tl.load(g_ptrs).to(tl.float32)
-                if (ZERO_CENTERED_GAMMA):
+                if ZERO_CENTERED_GAMMA:
                     g += 1.
                 grad_input = grad_output * norm_factor * g - (norm_factor * norm_factor * norm_factor) * x * (grad_sum /
                                                                                                               n_cols)
@@ -280,7 +279,7 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
             grad_output = tl.load(grad_output_ptrs, mask=mask, other=0.0).to(tl.float32)
             g_ptrs = g_ptr + cols
             g = tl.load(g_ptrs, mask=mask, other=0.0).to(tl.float32)
-            if (ZERO_CENTERED_GAMMA):
+            if ZERO_CENTERED_GAMMA:
                 g += 1.
             grad_input = grad_output * norm_factor * g - (norm_factor * norm_factor * norm_factor) * x * (grad_sum /
                                                                                                           n_cols)
@@ -315,7 +314,7 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
             x = tl.load(input_ptrs, mask=mask, other=0.0).to(tl.float32)
             grad_output = tl.load(grad_output_ptrs, mask=mask, other=0.0).to(tl.float32)
             g = tl.load(g_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
-            if (ZERO_CENTERED_GAMMA):
+            if ZERO_CENTERED_GAMMA:
                 g += 1.
 
             norm_factor = tl.load(rsigma_ptr + row_idx).to(tl.float32)
@@ -332,8 +331,15 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
 
 
 @triton.jit
-def _rmsnorm_bwd_dg_reduce_triton(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n_cols, BLOCK_SIZE_M: tl.constexpr,
-                                  BLOCK_SIZE_N: tl.constexpr):
+def _rmsnorm_bwd_dg_reduce_triton(
+    dg_in_ptr,
+    dg_out_ptr,
+    dg_in_stride,  # pylint: disable=unused-argument
+    n_rows,
+    n_cols,
+    BLOCK_SIZE_M: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+):
     # we want parallelism in N direction
     # if N is small, we will just use one CU,
     # otherwise, it can be split by N/BLOCK_SIZE
@@ -348,4 +354,3 @@ def _rmsnorm_bwd_dg_reduce_triton(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n
 
     sum_dg = tl.sum(acc, axis=0)
     tl.store(dg_out_ptr + cols, sum_dg.to(dg_out_ptr.type.element_ty), mask=cols < n_cols)
-

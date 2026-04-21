@@ -63,26 +63,26 @@ if torch.__version__ >= "2":
 
 
 def set_jit_fusion_options() -> None:
-  if not IS_HIP_EXTENSION:
     """Set PyTorch JIT layer fusion options."""
-    # flags required to enable jit fusion kernels
-    if torch_version() >= (2, 2, 0):
-        pass
-    elif torch_version() >= (1, 10, 0):
-        # nvfuser
-        torch._C._jit_set_profiling_executor(True)
-        torch._C._jit_set_profiling_mode(True)
-        torch._C._jit_override_can_fuse_on_cpu(False)
-        torch._C._jit_override_can_fuse_on_gpu(False)
-        torch._C._jit_set_texpr_fuser_enabled(False)
-        torch._C._jit_set_nvfuser_enabled(True)
-        torch._C._debug_set_autodiff_subgraph_inlining(False)
-    else:
-        # legacy pytorch fuser
-        torch._C._jit_set_profiling_mode(False)
-        torch._C._jit_set_profiling_executor(False)
-        torch._C._jit_override_can_fuse_on_cpu(True)
-        torch._C._jit_override_can_fuse_on_gpu(True)
+    if not IS_HIP_EXTENSION:
+        # flags required to enable jit fusion kernels
+        if torch_version() >= (2, 2, 0):
+            pass
+        elif torch_version() >= (1, 10, 0):
+            # nvfuser
+            torch._C._jit_set_profiling_executor(True)
+            torch._C._jit_set_profiling_mode(True)
+            torch._C._jit_override_can_fuse_on_cpu(False)
+            torch._C._jit_override_can_fuse_on_gpu(False)
+            torch._C._jit_set_texpr_fuser_enabled(False)
+            torch._C._jit_set_nvfuser_enabled(True)
+            torch._C._debug_set_autodiff_subgraph_inlining(False)
+        else:
+            # legacy pytorch fuser
+            torch._C._jit_set_profiling_mode(False)
+            torch._C._jit_set_profiling_executor(False)
+            torch._C._jit_override_can_fuse_on_cpu(True)
+            torch._C._jit_override_can_fuse_on_gpu(True)
 
 
 @jit_fuser

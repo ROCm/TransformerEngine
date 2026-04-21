@@ -5,9 +5,13 @@
 # See LICENSE for license information.
 
 """Enums for e2e transformer"""
+
 import torch
 import torch.distributed
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
 import transformer_engine_torch as tex
+
 from .utils import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
 
 """
@@ -25,24 +29,31 @@ TE_DType = {
     torch.half: tex.DType.kFloat16,
     torch.bfloat16: tex.DType.kBFloat16,
 }
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
 if IS_HIP_EXTENSION:
-    TE_DType.update({torch.float8_e4m3fnuz: tex.DType.kFloat8E4M3, 
-                     torch.float8_e5m2fnuz: tex.DType.kFloat8E5M2})
+    TE_DType.update(
+        {
+            torch.float8_e4m3fnuz: tex.DType.kFloat8E4M3,
+            torch.float8_e5m2fnuz: tex.DType.kFloat8E5M2,
+        }
+    )
 
 _FP8_KEYS = (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2)
 
 class Custom_DType_Dict(dict):
+    """Torch dtype lookup with lazy population for FP8 aliases."""
+
     def __missing__(self, key):
         if key in _FP8_KEYS:
             value = (
                 get_torch_float8_e4m3_type() if key is tex.DType.kFloat8E4M3
                 else get_torch_float8_e5m2_type()
             )
-            self[key] = value 
+            self[key] = value
             return value
         raise KeyError(key)
-    
+
+
 TE_DType_To_Torch = Custom_DType_Dict({
     tex.DType.kByte: torch.uint8,
     tex.DType.kInt32: torch.int32,
