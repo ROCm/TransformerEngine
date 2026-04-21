@@ -1001,6 +1001,130 @@ def _fused_attn_bwd_rule(
 _fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)
 
 
+@partial(
+    jax.custom_vjp,
+    nondiff_argnums=(4, 5, 6, 7, 8, 9, 10, 11),
+)
+def _fused_attn_small_seq(
+    qkv: Tuple[jnp.ndarray, ...],
+    bias: Optional[jnp.ndarray],
+    sequence_descriptor: SequenceDescriptor,
+    seed: Optional[jnp.ndarray],
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int,
+    window_size: Optional[Tuple[int, int]],
+    context_checkpoint_name: str = "context",
+):
+    output, _ = _fused_attn_small_seq_fwd_rule(
+        qkv,
+        bias,
+        sequence_descriptor,
+        seed,
+        attn_bias_type,
+        attn_mask_type,
+        qkv_layout,
+        scaling_factor,
+        dropout_probability,
+        is_training,
+        max_segments_per_seq,
+        window_size,
+        context_checkpoint_name=context_checkpoint_name,
+    )
+    return output
+
+
+def _fused_attn_small_seq_fwd_rule(
+    qkv,
+    bias,
+    sequence_descriptor,
+    seed,
+    attn_bias_type,
+    attn_mask_type,
+    qkv_layout,
+    scaling_factor,
+    dropout_probability,
+    is_training,
+    max_segments_per_seq,
+    window_size,
+    context_checkpoint_name,
+):
+    output, softmax_aux, rng_state = tex.fused_attn_small_seq_fwd(
+        qkv,
+        bias,
+        sequence_descriptor,
+        seed,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        qkv_layout=qkv_layout,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+        window_size=window_size,
+    )
+    output = checkpoint_name(output, context_checkpoint_name)
+    softmax_aux = checkpoint_name(softmax_aux, context_checkpoint_name)
+    rng_state = checkpoint_name(rng_state, context_checkpoint_name)
+    return output, (
+        qkv,
+        bias,
+        sequence_descriptor,
+        softmax_aux,
+        rng_state,
+        output,
+    )
+
+
+def _fused_attn_small_seq_bwd_rule(
+    attn_bias_type,
+    attn_mask_type,
+    qkv_layout,
+    scaling_factor,
+    dropout_probability,
+    is_training,
+    max_segments_per_seq,
+    window_size,
+    context_checkpoint_name,
+    ctx,
+    dz,
+):
+    del context_checkpoint_name
+    (qkv, bias, sequence_descriptor, softmax_aux, rng_state, output) = ctx
+    grad_qkv, grad_bias = tex.fused_attn_small_seq_bwd(
+        qkv,
+        bias,
+        softmax_aux,
+        rng_state,
+        output,
+        dz,
+        sequence_descriptor,
+        attn_bias_type=attn_bias_type,
+        attn_mask_type=attn_mask_type,
+        qkv_layout=qkv_layout,
+        scaling_factor=scaling_factor,
+        dropout_probability=dropout_probability,
+        is_training=is_training,
+        max_segments_per_seq=max_segments_per_seq,
+        window_size=window_size,
+    )
+    if attn_bias_type == AttnBiasType.NO_BIAS:
+        grad_bias = None
+    return (
+        grad_qkv,
+        grad_bias,
+        None,
+        None,
+    )
+
+
+_fused_attn_small_seq.defvjp(_fused_attn_small_seq_fwd_rule, _fused_attn_small_seq_bwd_rule)
+
+
 def fused_attn(
     qkv: Tuple[jnp.ndarray, ...],
     bias: Optional[jnp.ndarray],
@@ -1127,3 +1251,46 @@ def fused_attn(
     )
 
     return output
+
+
+def fused_attn_small_seq(
+    qkv: Tuple[jnp.ndarray, jnp.ndarray, jnp.ndarray],
+    bias: Optional[jnp.ndarray],
+    sequence_descriptor: SequenceDescriptor,
+    seed: Optional[jnp.ndarray],
+    attn_bias_type: AttnBiasType,
+    attn_mask_type: AttnMaskType,
+    qkv_layout: QKVLayout,
+    scaling_factor: float,
+    dropout_probability: float,
+    is_training: bool,
+    max_segments_per_seq: int = 1,
+    window_size: Optional[Tuple[int, int]] = None,
+    context_checkpoint_name: str = "context",
+):
+    """
+    ROCm small-sequence varlen cross-attention (explicit backend API).
+
+    This entry point calls the dedicated small-seq kernels (not generic fused-attn backend
+    selection). Intended for THD layouts with compile-time head dimensions 128 / 256 / 512 (``d_qk == d_v``), FP16/BF16,
+    and ``AttnBiasType.NO_BIAS``.
+    Context parallelism is not supported.
+    """
+    if sequence_descriptor is None or isinstance(sequence_descriptor, jnp.ndarray):
+        raise ValueError("fused_attn_small_seq requires a SequenceDescriptor.")
+
+    return _fused_attn_small_seq(
+        qkv,
+        bias,
+        sequence_descriptor,
+        seed,
+        attn_bias_type,
+        attn_mask_type,
+        qkv_layout,
+        scaling_factor,
+        dropout_probability,
+        is_training,
+        max_segments_per_seq,
+        window_size,
+        context_checkpoint_name=context_checkpoint_name,
+    )
