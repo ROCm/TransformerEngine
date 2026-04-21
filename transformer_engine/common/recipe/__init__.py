@@ -29,11 +29,13 @@ class _FormatHelperFP8(NamedTuple):
     bwd: tuple
 
     @property
-    def max_fwd(self) -> float: 
+    def max_fwd(self) -> float:
+        """Max FP8 forward value for the active FP8 variant (OCP vs FNUZ)."""
         return self.fwd[is_fp8_fnuz()]
 
     @property
     def max_bwd(self) -> float:
+        """Max FP8 backward value for the active FP8 variant (OCP vs FNUZ)."""
         return self.bwd[is_fp8_fnuz()]
 
 class _FormatMaxVals(Enum):

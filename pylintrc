@@ -31,7 +31,10 @@ disable=too-many-locals,
         redefined-argument-from-local,
         line-too-long,
         too-many-return-statements,
-        too-many-nested-blocks
+        too-many-nested-blocks,
+        import-outside-toplevel,
+        possibly-used-before-assignment,
+        wrong-import-position
 
 [TYPECHECK]
 ignored-modules=torch

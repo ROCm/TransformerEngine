@@ -8,16 +8,18 @@ import os
 import warnings
 import operator
 from functools import partial, cache, reduce
-from packaging import version
 from typing import Optional, Union
+
+from packaging import version
 
 import jax
 import jax.numpy as jnp
 from jax import dtypes, ffi
-from jax.experimental.custom_partitioning import SdyShardingRule, BATCHING
+if version.parse(jax.__version__) >= version.parse("0.5.0"):
+    from jax.experimental.custom_partitioning import SdyShardingRule
+from jax.experimental.custom_partitioning import BATCHING
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec
-from .misc import is_hip_extension
 
 import transformer_engine_jax
 from transformer_engine_jax import NVTE_Norm_Type

@@ -51,8 +51,8 @@ def _is_package_installed_from_wheel(package) -> bool:
     if not te_wheel_file:
         return False
 
-    with te_wheel_file.open("r") as f:
-        for line in f:
+    with te_wheel_file.open("r") as wheel_f:
+        for line in wheel_f:
             if line.startswith("Root-Is-Purelib:"):
                 return line.strip().split(":")[1].strip().lower() == "true"
     return False
@@ -138,7 +138,7 @@ def get_te_core_package_info() -> Tuple[bool, str, str]:
     Check if Tranformer Engine core package is installed.
     Returns the module name and version if found.
     """
-    
+
     te_core_packages = ("transformer-engine-cu12", "transformer-engine-cu13")
     if te_rocm_build:
         te_core_packages = ("transformer-engine-rocm7",)
@@ -366,6 +366,7 @@ te_rocm_build = False
 
 @functools.cache
 def is_fp8_fnuz():
+    """Return True when TE was built with FP8 FNUZ mode (ROCm path)."""
     if te_rocm_build:
         _TE_LIB_CTYPES.nvte_uses_fp8_fnuz.restype = ctypes.c_bool
         return _TE_LIB_CTYPES.nvte_uses_fp8_fnuz()
@@ -411,13 +412,17 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
             for rocm_path in (os.getenv("ROCM_PATH"), "/opt/rocm/core", "/opt/rocm"):
                 if rocm_path and os.path.exists(os.path.join(rocm_path, ".info/version")):
                     break
-            with open(os.path.join(rocm_path, ".info/version"), "r") as f:
-                rocm_version= f.read().strip().split('.')[:2]
+            with open(os.path.join(rocm_path, ".info/version"), "r", encoding="utf-8") as ver_file:
+                rocm_version = ver_file.read().strip().split(".")[:2]
 
             # Get ROCm version from the build info file
-            with open(Path(transformer_engine.__path__[0]).parent / "transformer_engine" / "build_info.txt", 'r') as f:
-                build_info = f.read().split('\n')
-            build_rocm_version = list(filter(lambda f: f.startswith("ROCM_VERSION:"), build_info))
+            with open(
+                Path(transformer_engine.__path__[0]).parent / "transformer_engine" / "build_info.txt",
+                "r",
+                encoding="utf-8",
+            ) as build_file:
+                build_info = build_file.read().split("\n")
+            build_rocm_version = list(filter(lambda line: line.startswith("ROCM_VERSION:"), build_info))
             if build_rocm_version:
                 build_rocm_version = build_rocm_version[0].split(":")[1].strip().split('.')[:2]
             assert (rocm_version[0] == build_rocm_version[0]), f"ROCm {'.'.join(rocm_version)} is detected but the library is built for {'.'.join(build_rocm_version)}"

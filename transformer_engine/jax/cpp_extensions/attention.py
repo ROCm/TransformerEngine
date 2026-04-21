@@ -9,8 +9,9 @@ import os
 import warnings
 from dataclasses import dataclass, replace
 from functools import partial, reduce
-from packaging import version
 from typing import Optional, Tuple
+
+from packaging import version
 
 import jax
 import jax.numpy as jnp
