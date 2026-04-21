@@ -183,24 +183,14 @@ def bench_grouped_gemm(B, M, N, K, dtype):
     out_te = fwd_func_te()
     grad_out = torch.randn_like(out_te)
     bwd_func_te = lambda: bwd_func_te_inner(grad_out)
-    dx_te, dw_te = bwd_func_te()
 
     # FLOPs
     fwd_total_flops = 2 * B * M * N * K
     bwd_total_flops = 2 * fwd_total_flops
 
-    # Warmup
-    for _ in range(20):
-        fwd_func_te()
-        bwd_func_te()
-
-    torch.cuda.synchronize()
-
     # Benchmark
-    n_iters = 100
-
-    fwd_te_ms = benchmark.Timer(stmt="fn()", globals={"fn": fwd_func_te}).timeit(n_iters).mean * 1e3
-    bwd_te_ms = benchmark.Timer(stmt="fn()", globals={"fn": bwd_func_te}).timeit(n_iters).mean * 1e3
+    fwd_te_ms = benchmark.Timer(stmt="fn()", globals={"fn": fwd_func_te}).adaptive_autorange().mean * 1e3
+    bwd_te_ms = benchmark.Timer(stmt="fn()", globals={"fn": bwd_func_te}).adaptive_autorange().mean * 1e3
 
     fwd_te_tflops = fwd_total_flops / (fwd_te_ms * 1e-3) / 1e12
     bwd_te_tflops = bwd_total_flops / (bwd_te_ms * 1e-3) / 1e12
@@ -235,34 +225,24 @@ if __name__ == "__main__":
     ]
     rows = []
 
-    # Warmup run
-    c = test_cases[0]
-    print(f"\n{'='*50}")
-    print(f"WARMUP: {c}")
-    print(f"{'='*50}")
-    bench_grouped_gemm(B=c["B"], M=c["M"], N=c["N"], K=c["K"], dtype=c["dtype"])
-
     for case in test_cases:
         print(f"\n{'='*50}")
         print(f"Testing: {case}")
         print(f"{'='*50}")
-        try:
-            metrics = bench_grouped_gemm(
-                B=case["B"], M=case["M"], N=case["N"], K=case["K"], dtype=case["dtype"]
-            )
-            row = {
-                "Case": case["Case"],
-                "B": case["B"],
-                "M": case["M"],
-                "N": case["N"],
-                "K": case["K"],
-                "dtype": str(case["dtype"]),
-                **metrics,
-            }
-            rows.append(row)
-        except Exception as e:
-            print(f"FAILED: {case}: {e}")
-            raise
+
+        metrics = bench_grouped_gemm(
+            B=case["B"], M=case["M"], N=case["N"], K=case["K"], dtype=case["dtype"]
+        )
+        row = {
+            "Case": case["Case"],
+            "B": case["B"],
+            "M": case["M"],
+            "N": case["N"],
+            "K": case["K"],
+            "dtype": str(case["dtype"]),
+            **metrics,
+        }
+        rows.append(row)
 
     results = pd.DataFrame(rows, columns=columns)
 

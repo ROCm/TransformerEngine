@@ -94,29 +94,17 @@ def bench_fp8_gemm(M, N, K, dtype):
         x.grad = None
         linear.weight.grad = None
 
-    # Sanity run
-    fwd_func()
-    fwd_bwd_func()
-
     fwd_flops = 2 * M * N * K
     bwd_flops = 2 * fwd_flops
 
-    # Warmup
-    for _ in range(20):
-        fwd_func()
-        fwd_bwd_func()
-    torch.cuda.synchronize()
-
     # Benchmark
-    n_iters = 100
+    fwd_ms = benchmark.Timer(stmt="fn()", globals={"fn": fwd_func}).adaptive_autorange().mean * 1e3
+    fwd_bwd_ms = benchmark.Timer(stmt="fn()", globals={"fn": fwd_bwd_func}).adaptive_autorange().mean * 1e3
 
-    fwd_ms = benchmark.Timer(stmt="fn()", globals={"fn": fwd_func}).timeit(n_iters).mean * 1e3
-    fwd_bwd_ms = benchmark.Timer(stmt="fn()", globals={"fn": fwd_bwd_func}).timeit(n_iters).mean * 1e3
-
-    bwd_ms = max(fwd_bwd_ms - fwd_ms, 0.0)
+    bwd_ms = fwd_bwd_ms - fwd_ms
 
     fwd_tflops = fwd_flops / (fwd_ms * 1e-3) / 1e12
-    bwd_tflops = bwd_flops / (bwd_ms * 1e-3) / 1e12 if bwd_ms > 0 else 0.0
+    bwd_tflops = bwd_flops / (bwd_ms * 1e-3) / 1e12
 
     print(f"  Forward      {fwd_ms:.3f} ms | {fwd_tflops:.2f} TFLOPS")
     print(f"  Backward     {bwd_ms:.3f} ms | {bwd_tflops:.2f} TFLOPS (derived)")
@@ -143,33 +131,23 @@ if __name__ == "__main__":
     ]
     rows = []
 
-    # Warmup run
-    c = test_cases[0]
-    print(f"\n{'='*60}")
-    print(f"WARMUP: {c}")
-    print(f"{'='*60}")
-    bench_fp8_gemm(M=c["M"], N=c["N"], K=c["K"], dtype=c["dtype"])
-
     for case in test_cases:
         print(f"\n{'='*60}")
         print(f"Testing: {case}")
         print(f"{'='*60}")
-        try:
-            metrics = bench_fp8_gemm(
-                M=case["M"], N=case["N"], K=case["K"], dtype=case["dtype"]
-            )
-            row = {
-                "Case": case["Case"],
-                "M": case["M"],
-                "N": case["N"],
-                "K": case["K"],
-                "dtype": str(case["dtype"]),
-                **metrics,
-            }
-            rows.append(row)
-        except Exception as e:
-            print(f"FAILED: {case}: {e}")
-            raise
+
+        metrics = bench_fp8_gemm(
+            M=case["M"], N=case["N"], K=case["K"], dtype=case["dtype"]
+        )
+        row = {
+            "Case": case["Case"],
+            "M": case["M"],
+            "N": case["N"],
+            "K": case["K"],
+            "dtype": str(case["dtype"]),
+            **metrics,
+        }
+        rows.append(row)
 
     results = pd.DataFrame(rows, columns=columns)
 

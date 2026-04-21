@@ -83,7 +83,8 @@ def bench_cast(M, hidden_size, direction, fp8_dtype):
 
     if direction == "quantize":
         x = torch.randn(M, hidden_size, dtype=torch.bfloat16, device=device)
-        cast_func = lambda: quantizer(x)
+        out = quantizer(x)  # pre-allocate output tensor
+        cast_func = lambda: quantizer.quantize(x, out=out)
 
         # BF16 read (2 bytes) + FP8 write (1 byte)
         total_bytes = numel * (2 + 1)
@@ -95,16 +96,8 @@ def bench_cast(M, hidden_size, direction, fp8_dtype):
         # FP8 read (1 byte) + BF16 write (2 bytes)
         total_bytes = numel * (1 + 2)
 
-    cast_func()
-
-    # Warmup
-    for _ in range(20):
-        cast_func()
-    torch.cuda.synchronize()
-
     # Benchmark
-    n_iters = 100
-    ms = benchmark.Timer(stmt="fn()", globals={"fn": cast_func}).timeit(n_iters).mean * 1e3
+    ms = benchmark.Timer(stmt="fn()", globals={"fn": cast_func}).blocked_autorange().mean * 1e3
     gbps = total_bytes / (ms * 1e-3) / 1e9
 
     print(f"  {ms:.4f} ms | {gbps:.1f} GB/s")
@@ -127,36 +120,25 @@ if __name__ == "__main__":
     ]
     rows = []
 
-    # Warmup run
-    c = test_cases[0]
-    print(f"\n{'='*60}")
-    print(f"WARMUP: {c['Case']} M={c['M']} hidden={c['hidden_size']}")
-    print(f"{'='*60}")
-    bench_cast(M=c["M"], hidden_size=c["hidden_size"],
-               direction=c["direction"], fp8_dtype=c["fp8_dtype"])
-
     for case in test_cases:
         print(f"\n{'='*60}")
         print(f"Testing: {case['Case']} M={case['M']} hidden={case['hidden_size']}")
         print(f"{'='*60}")
-        try:
-            metrics = bench_cast(
-                M=case["M"],
-                hidden_size=case["hidden_size"],
-                direction=case["direction"],
-                fp8_dtype=case["fp8_dtype"],
-            )
-            row = {
-                "Case": case["Case"],
-                "M": case["M"],
-                "hidden_size": case["hidden_size"],
-                "dtype_str": case["dtype_str"],
-                **metrics,
-            }
-            rows.append(row)
-        except Exception as e:
-            print(f"FAILED: {case['Case']}: {e}")
-            raise
+
+        metrics = bench_cast(
+            M=case["M"],
+            hidden_size=case["hidden_size"],
+            direction=case["direction"],
+            fp8_dtype=case["fp8_dtype"],
+        )
+        row = {
+            "Case": case["Case"],
+            "M": case["M"],
+            "hidden_size": case["hidden_size"],
+            "dtype_str": case["dtype_str"],
+            **metrics,
+        }
+        rows.append(row)
 
     results = pd.DataFrame(rows, columns=columns)
 
