@@ -36,6 +36,8 @@ class BenchNormalization:
     params = [[1024, 2048, 4096, 8192], HIDDEN_SIZES, list(NORMS)]
     param_names = ["M", "hidden", "norm_type"]
     timeout = 120
+    _inner = 1
+    _scratch = None
 
     def setup(self, M, hidden, norm_type):
         dtype = torch.bfloat16
@@ -53,22 +55,28 @@ class BenchNormalization:
         return {"bytes": M * hidden * 10}
 
     def time_forward(self, M, hidden, norm_type):
+        if self._scratch is not None:
+            self._scratch.fill_(1.0)
         self._evt[0].record()
-        self.norm(self.x)
+        for _ in range(self._inner):
+            self.norm(self.x)
         self._evt[1].record()
         torch.cuda.synchronize()
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
 
     def time_forward_backward(self, M, hidden, norm_type):
+        if self._scratch is not None:
+            self._scratch.fill_(1.0)
         self._evt[0].record()
-        out = self.norm(self.x)
-        out.backward(self.grad_out)
+        for _ in range(self._inner):
+            out = self.norm(self.x)
+            out.backward(self.grad_out)
         self._evt[1].record()
         torch.cuda.synchronize()
         self.x.grad = None
         for p in self.norm.parameters():
             p.grad = None
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
 
 if __name__ == "__main__":
     from driver import run_as_main

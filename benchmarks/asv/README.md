@@ -30,7 +30,39 @@ python bench_gemm.py                        # run one suite directly
 python bench_gemm.py time_forward           # filter to a specific method
 python bench_gemm.py -w 5 -n 20             # custom warmup/iteration counts
 python bench_casting.py --no-save           # skip saving results
+python bench_casting.py --cold-cache        # flush cache before each sample
+python bench_gemm.py --inner 50             # fix inner-loop count to 50
+python bench_gemm.py --target-window-ms 5   # tune inner so each window >=5 ms
 ```
+
+### Timing model: inner loop and cache state
+
+Each `time_*` method runs the kernel `_inner` times inside a single CUDA event
+window and divides by `_inner`, so kernel-launch and CUDA-event jitter
+(`~0.5 µs` resolution on AMD) are amortized. By default the driver
+**auto-tunes** `_inner` per (combo, method) so each window lasts at least
+`--target-window-ms` (default `1.0 ms`):
+
+| Flag | Effect |
+|---|---|
+| `--inner auto` (default) | Probe a single invocation, then pick `_inner` so the next timed window lasts ≥ `--target-window-ms`. Capped at 10000. |
+| `--inner N` | Force a fixed `_inner = N` (overrides auto-tune). |
+| `--target-window-ms T` | Target window duration for `--inner auto` (default `1.0`). |
+| `--cold-cache` | Write a `--cache-flush-mb` byte scratch buffer before each sample to evict L2 + Infinity Cache. Implies `--inner=1` (otherwise iterations 2..N would refill the cache and the measurement degenerates back to warm-cache). |
+| `--cache-flush-mb M` | Scratch buffer size for `--cold-cache` (default `256`, sized for the MI300 Infinity Cache). |
+
+Choose the regime that matches the question you're asking:
+- **Warm cache, large `_inner`** (default): steady-state kernel throughput,
+  matches what a hot inner loop in a model sees. Lowest variance.
+- **Cold cache, `_inner=1`**: realistic cost of the kernel as an isolated
+  call into cold memory — closer to what `rocprofv3 --hip-trace` reports
+  on a freshly launched kernel. Higher variance; bandwidth-bound
+  benchmarks (cast, normalization) typically run 1.5–3× slower than warm.
+
+Caveat: the inner loop runs in Python, so each iteration carries
+~80–200 ns of interpreter overhead. For sub-microsecond kernels this is
+not removable without CUDA graph capture; pick `--inner` deliberately
+in that regime or use the cold-cache mode.
 
 ### Helper script
 
@@ -103,20 +135,32 @@ class BenchSomething:
     param_names = ["M", "config"]
     timeout = 300  # seconds, per parameter combination
 
+    # Driver overrides per (combo, method): _inner controls how many kernel
+    # invocations land in one CUDA event window; _scratch (when not None) is
+    # written to before each sample to evict the GPU cache.
+    _inner = 1
+    _scratch = None
+
     def setup(self, M, config):
         # Allocate tensors, create modules.
-        # This runs before each time_* method but is NOT timed.
+        # This runs once per (combo, method); the same instance is reused for
+        # warmup and timed iterations.
         self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
         ...
 
     def time_forward(self, M, config):
         # Use CUDA events for accurate GPU timing.
-        # Return elapsed seconds — the driver uses this instead of wall time.
+        # Return elapsed seconds per single invocation — the driver uses this
+        # instead of wall time. Looping inside the event window amortizes
+        # CUDA event resolution and kernel-launch overhead.
+        if self._scratch is not None:
+            self._scratch.fill_(1.0)        # cold-cache mode
         self._evt[0].record()
-        self.module(self.x)
+        for _ in range(self._inner):
+            self.module(self.x)
         self._evt[1].record()
         torch.cuda.synchronize()
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
 
     # Optional: define work_<name> to get throughput columns (TFLOPS / GB/s).
     def work_forward(self, M, config):
@@ -130,7 +174,13 @@ if __name__ == "__main__":
 
 Key rules:
 - Method names starting with `time_` are automatically timed.
-- Use CUDA events and return elapsed seconds for accurate GPU timing.
+- Use CUDA events and return elapsed seconds **per single invocation** —
+  divide the event delta by `self._inner` so the driver and the throughput
+  columns get per-call values regardless of inner-loop count.
+- Honor `self._inner` (loop the kernel) and `self._scratch` (write before
+  recording the start event) so the driver's `--inner` and `--cold-cache`
+  flags work for your benchmark.
 - Optionally define `work_<name>` companions to get TFLOPS or GB/s columns.
+  These return the per-call work, not per-window work.
 - Clear `.grad` attributes in backward benchmarks to prevent memory accumulation.
 - The `params` list defines a cross-product; keep the matrix size reasonable.

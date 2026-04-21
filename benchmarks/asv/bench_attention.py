@@ -24,9 +24,6 @@ Sources for model configs:
   https://huggingface.co/meta-llama/Llama-3.1-405B/blob/main/config.json
   https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/config.json
   https://huggingface.co/Qwen/Qwen2.5-72B-Instruct/blob/main/config.json
-
-Forward FLOPs  = 4 * batch * num_q_heads * seq_len^2 * head_dim
-Backward FLOPs ~ 2x forward
 """
 
 import torch
@@ -49,6 +46,8 @@ class BenchAttention:
     params = [[1024, 2048, 4096, 8192], list(MODELS)]
     param_names = ["seq_len", "model"]
     timeout = 300
+    _inner = 1
+    _scratch = None
 
     def setup(self, seq_len, model):
         n_q, n_kv, hd, tp = MODELS[model]
@@ -77,20 +76,26 @@ class BenchAttention:
         return {"flops": 3 * 4 * BATCH * qh * seq_len * seq_len * hd}
 
     def time_forward(self, seq_len, model):
+        if self._scratch is not None:
+            self._scratch.fill_(1.0)
         self._evt[0].record()
-        self.attn(self.q, self.k, self.v)
+        for _ in range(self._inner):
+            self.attn(self.q, self.k, self.v)
         self._evt[1].record()
         torch.cuda.synchronize()
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
 
     def time_forward_backward(self, seq_len, model):
+        if self._scratch is not None:
+            self._scratch.fill_(1.0)
         self._evt[0].record()
-        out = self.attn(self.q, self.k, self.v)
-        out.backward(self.grad_out)
+        for _ in range(self._inner):
+            out = self.attn(self.q, self.k, self.v)
+            out.backward(self.grad_out)
         self._evt[1].record()
         torch.cuda.synchronize()
         self.q.grad = self.k.grad = self.v.grad = None
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
 
 if __name__ == "__main__":
     from driver import run_as_main

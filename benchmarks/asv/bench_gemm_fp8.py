@@ -55,6 +55,8 @@ class BenchGemmFP8:
     params = [[1024, 2048, 4096, 8192], list(SHAPES)]
     param_names = ["M", "shape"]
     timeout = 300
+    _inner = 1
+    _scratch = None
 
     def setup(self, M, shape):
         N, K = SHAPES[shape]
@@ -73,23 +75,29 @@ class BenchGemmFP8:
         return {"flops": 3 * 2 * M * N * K}
 
     def time_forward(self, M, shape):
+        if self._scratch is not None:
+            self._scratch.fill_(1.0)
         self._evt[0].record()
         with te.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
-            self.linear(self.x)
+            for _ in range(self._inner):
+                self.linear(self.x)
         self._evt[1].record()
         torch.cuda.synchronize()
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
 
     def time_forward_backward(self, M, shape):
+        if self._scratch is not None:
+            self._scratch.fill_(1.0)
         self._evt[0].record()
-        with te.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
-            out = self.linear(self.x)
-        out.backward(self.grad_out)
+        for _ in range(self._inner):
+            with te.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
+                out = self.linear(self.x)
+            out.backward(self.grad_out)
         self._evt[1].record()
         torch.cuda.synchronize()
         self.x.grad = None
         self.linear.weight.grad = None
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
 
 if __name__ == "__main__":
     from driver import run_as_main

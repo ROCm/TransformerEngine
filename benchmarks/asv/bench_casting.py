@@ -46,6 +46,12 @@ class BenchCasting:
     params = [[1024, 2048, 4096, 8192], list(HIDDEN_SIZES), list(CAST_CONFIGS)]
     param_names = ["M", "model", "cast"]
     timeout = 120
+    # Driver overrides these per (combo, method): _inner is the number of
+    # kernel invocations per CUDA event window (amortizes launch overhead);
+    # _scratch, when not None, is fill_()ed before each sample to evict the
+    # GPU cache.
+    _inner = 1
+    _scratch = None
 
     def setup(self, M, model, cast):
         hidden = HIDDEN_SIZES[model]
@@ -76,14 +82,18 @@ class BenchCasting:
             return {"bytes": M * hidden * 3}
 
     def time_cast(self, M, model, cast):
+        if self._scratch is not None:
+            self._scratch.fill_(1.0)
         self._evt[0].record()
         if self.direction == "quantize":
-            self.quantizer.quantize(self.x)
+            for _ in range(self._inner):
+                self.quantizer.quantize(self.x)
         else:
-            self.x.dequantize(dtype=torch.bfloat16)
+            for _ in range(self._inner):
+                self.x.dequantize(dtype=torch.bfloat16)
         self._evt[1].record()
         torch.cuda.synchronize()
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
 
 if __name__ == "__main__":
     from driver import run_as_main

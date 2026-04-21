@@ -37,6 +37,8 @@ class BenchGroupedGemm:
     params = [[512, 1024, 2048, 4096], list(CONFIGS)]
     param_names = ["M", "config"]
     timeout = 300
+    _inner = 1
+    _scratch = None
 
     def setup(self, M, config):
         B, N, K = CONFIGS[config]
@@ -63,23 +65,29 @@ class BenchGroupedGemm:
         return {"flops": B * 3 * 2 * M * N * K}
 
     def time_forward(self, M, config):
+        if self._scratch is not None:
+            self._scratch.fill_(1.0)
         self._evt[0].record()
-        self.module(self.xs)
+        for _ in range(self._inner):
+            self.module(self.xs)
         self._evt[1].record()
         torch.cuda.synchronize()
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
 
     def time_forward_backward(self, M, config):
+        if self._scratch is not None:
+            self._scratch.fill_(1.0)
         self._evt[0].record()
-        outs = self.module(self.xs)
-        torch.autograd.backward(outs, self.grad_outs)
+        for _ in range(self._inner):
+            outs = self.module(self.xs)
+            torch.autograd.backward(outs, self.grad_outs)
         self._evt[1].record()
         torch.cuda.synchronize()
         for x in self.xs:
             x.grad = None
         for p in self.module.parameters():
             p.grad = None
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000
+        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
 
 if __name__ == "__main__":
     from driver import run_as_main

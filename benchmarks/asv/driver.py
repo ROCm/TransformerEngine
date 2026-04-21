@@ -19,13 +19,13 @@ import importlib
 import inspect
 import itertools
 import json
-import math
 import os
 import platform
 import subprocess
 import sys
 import textwrap
 import time
+import numpy as np
 
 
 # ---------------------------------------------------------------------------
@@ -96,15 +96,18 @@ def _get_commit_hash():
 
 
 def _compute_stats(samples):
-    """Return (median, mean, stdev, ci_lo, ci_hi, q25, q75) for *samples*."""
-    s = sorted(samples)
-    n = len(s)
-    mean = sum(s) / n
-    stdev = math.sqrt(sum((t - mean) ** 2 for t in s) / n)
-    ci = 2.576 * stdev / math.sqrt(n)  # 99 % CI half-width
-    return (s[n // 2], mean, stdev,
-            max(0, mean - ci), mean + ci,
-            s[max(0, n // 4)], s[min(n - 1, 3 * n // 4)])
+    """Return (median, mean, stdev, ci_lo, ci_hi, q25, q75) for *samples*.
+
+    Quartiles use linear interpolation (numpy default) — more meaningful at
+    small n than the index-floor approach. stdev is population stdev to
+    match the prior wire format; CI is a normal-approximation 99% half-width.
+    """
+    s = np.asarray(samples, dtype=np.float64)
+    mean = float(s.mean())
+    stdev = float(s.std(ddof=0))
+    median, q25, q75 = (float(x) for x in np.quantile(s, [0.5, 0.25, 0.75]))
+    ci = 2.576 * stdev / np.sqrt(s.size)  # 99% normal-approx half-width
+    return median, mean, stdev, max(0.0, mean - ci), mean + ci, q25, q75
 
 
 def _get_results_dir():
@@ -194,7 +197,44 @@ _ASV_META_DEFAULTS = {
 }
 
 
-def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7):
+def _make_scratch(mb):
+    """Allocate a scratch buffer used to evict the GPU cache between samples.
+
+    Sized by default to exceed the MI300 Infinity Cache (256 MB) and the L2
+    (16 MB), so a single fill writes through every level of cache.
+    """
+    import torch  # noqa: deferred import — only needed when cold-cache is on
+    n = max(1, (mb * 1024 * 1024) // 4)  # float32 = 4 bytes
+    return torch.empty(n, dtype=torch.float32, device="cuda")
+
+
+def _autotune_inner(instance, method_name, combo, target_s, max_inner=10000):
+    """Pick an inner-loop count so one timed window lasts >= target_s.
+
+    The bench class is expected to honor instance._inner inside its time_*
+    method (loop the kernel that many times in one CUDA event window and
+    divide).  This probe runs two single invocations: one to settle algorithm
+    selection / cache state, and one to estimate the per-call cost.
+    """
+    method = getattr(instance, method_name)
+    saved_inner = instance._inner
+    instance._inner = 1
+    try:
+        method(*combo)               # discard: cold cache + autotuner warmup
+        t_per = method(*combo)       # seconds per single invocation
+    finally:
+        instance._inner = saved_inner
+    if t_per is None or t_per <= 0:
+        return 1
+    return max(1, min(max_inner, int(target_s / t_per) + 1))
+
+
+def run_class(
+    suite_name, cls, class_name, method_filter=None,
+    warmup=3, iters=7,
+    inner="auto", target_window_ms=1.0,
+    cold_cache=False, cache_flush_mb=256,
+):
     """Run all benchmarks in a class, returning (results, metadata) dicts."""
     methods = sorted(m for m in dir(cls) if m.startswith("time_"))
     if method_filter:
@@ -224,12 +264,18 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
         throughput_cols.append(("bytes", "GB/s", 1e9))
 
     # Print table header
+    target_window_s = target_window_ms / 1000.0
+    inner_desc = (
+        "cold-cache (inner=1)" if cold_cache
+        else f"inner={inner}" if inner != "auto"
+        else f"inner=auto (>={target_window_ms:g}ms window)"
+    )
     print(f"\n{class_name}  ({len(combos)} combos x {len(methods)} methods, "
-          f"{warmup} warmup, {iters} timed)")
+          f"{warmup} warmup, {iters} timed, {inner_desc})")
     extra_hdr = "".join(f"  {label:>10}" for _, label, _ in throughput_cols)
     HDR = (f"  {'median':>10}  {'mean':>10}  {'stdev':>10}"
            f"  {'q25':>10}  {'q75':>10}  {'min':>10}  {'max':>10}"
-           + extra_hdr + f"  {'method':<30}  params")
+           + extra_hdr + f"  {'inner':>5}  {'method':<30}  params")
     print("-" * len(HDR))
     print(HDR)
     print("-" * len(HDR))
@@ -264,6 +310,19 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
                     lst.append(None)
                 continue
 
+            # Inner-loop and cache configuration. Cold-cache mode forces
+            # inner=1 so only the first invocation in the window sees a
+            # cold cache; otherwise the 2nd..Nth invocations would refill
+            # it and we'd be back to a warm-cache measurement.
+            if cold_cache:
+                instance._scratch = _make_scratch(cache_flush_mb)
+                instance._inner = 1
+            elif inner == "auto":
+                instance._inner = _autotune_inner(
+                    instance, method_name, combo, target_window_s)
+            else:
+                instance._inner = max(1, int(inner))
+
             method = getattr(instance, method_name)
             for _ in range(warmup):
                 method(*combo)
@@ -283,7 +342,7 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
             ci_his.append(ci_hi)
             q25s.append(q25)
             q75s.append(q75)
-            numbers.append(1)
+            numbers.append(instance._inner)
             repeats.append(iters)
 
             # Derive throughput from work_* companion
@@ -305,7 +364,7 @@ def run_class(suite_name, cls, class_name, method_filter=None, warmup=3, iters=7
                   f"{stdev*1000:>8.3f}ms  {q25*1000:>8.3f}ms  {q75*1000:>8.3f}ms  "
                   f"{s_min*1000:>8.3f}ms  {s_max*1000:>8.3f}ms"
                   f"{extra_cols}  "
-                  f"{method_name:<30}  {label}")
+                  f"{instance._inner:>5}  {method_name:<30}  {label}")
 
         duration = time.perf_counter() - t_start
         all_results[bench_key] = [
@@ -338,13 +397,34 @@ def run_as_main(caller_file=None):
                             help="Run all bench_*.py suites in the directory")
     parser.add_argument("method_filter", nargs="?", default=None,
                         help="Only run time_* methods containing this string")
-    parser.add_argument("-w", "--warmup", type=int, default=3,
+    parser.add_argument("-w", "--warmup", type=int, default=10,
                         help="Number of warmup iterations (default: 3)")
-    parser.add_argument("-n", "--iters", type=int, default=7,
+    parser.add_argument("-n", "--iters", type=int, default=20,
                         help="Number of timed iterations (default: 7)")
+    parser.add_argument("--inner", default="auto",
+                        help="Inner kernel invocations per timed window: "
+                             "'auto' (tune to --target-window-ms) or an integer "
+                             "(default: auto). Larger values amortize CUDA event "
+                             "and kernel-launch overhead.")
+    parser.add_argument("--target-window-ms", type=float, default=1.0,
+                        help="Target duration of one timed window when "
+                             "--inner=auto (default: 1.0 ms).")
+    parser.add_argument("--cold-cache", action="store_true",
+                        help="Flush the GPU cache (write a >LLC scratch buffer) "
+                             "before each sample. Forces --inner=1 because "
+                             "subsequent inner calls would refill the cache.")
+    parser.add_argument("--cache-flush-mb", type=int, default=256,
+                        help="Size in MB of the cache-flush buffer for "
+                             "--cold-cache (default: 256, sized for the MI300 "
+                             "Infinity Cache).")
     parser.add_argument("--no-save", action="store_true",
                         help="Skip saving results to ASV format")
     args = parser.parse_args()
+    if args.inner != "auto":
+        try:
+            args.inner = max(1, int(args.inner))
+        except ValueError:
+            parser.error("--inner must be 'auto' or a positive integer")
 
     if caller_file is not None:
         script_dir = os.path.dirname(os.path.abspath(caller_file))
@@ -374,7 +454,12 @@ def run_as_main(caller_file=None):
             obj = getattr(mod, name)
             if isinstance(obj, type) and name.startswith("Bench"):
                 results, meta = run_class(
-                    suite_name, obj, name, args.method_filter, args.warmup, args.iters)
+                    suite_name, obj, name, args.method_filter,
+                    warmup=args.warmup, iters=args.iters,
+                    inner=args.inner, target_window_ms=args.target_window_ms,
+                    cold_cache=args.cold_cache,
+                    cache_flush_mb=args.cache_flush_mb,
+                )
                 all_results.update(results)
                 all_meta.update(meta)
 
