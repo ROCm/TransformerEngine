@@ -57,26 +57,18 @@ def _dequantize_from_transpose(tensor):
     dequantize() raises NotImplementedError. We dequantize from _transpose
     manually: reinterpret uint8 as FP8 dtype, transpose back to logical
     shape, and multiply by the per-row or per-tensor scale.
-
-    Transpose is done on the uint8 view (fast byte-level copy) before
-    reinterpreting as FP8, so the materialization doesn't go through the
-    slower float8_copy_kernel_cuda path.
     """
     t = tensor._transpose
-    u8 = t if t.dtype == torch.uint8 else t.view(torch.uint8)
-    # _transpose is [K, d0, d1, ...] (last dim moved to front); invert to
-    # the logical [d0, d1, ..., K] on uint8, then view as FP8 and cast once.
-    if u8.ndim == 2:
-        u8_logical = u8.t().contiguous()
-    else:
-        inv_perm = list(range(1, u8.ndim)) + [0]
-        u8_logical = u8.permute(*inv_perm).contiguous()
-    if hasattr(tensor, '_fp8_dtype'):
+    if t.dtype == torch.uint8 and hasattr(tensor, '_fp8_dtype'):
         from transformer_engine.pytorch._lite.quantize import _te_dtype_to_torch_fp8
-        fp8_logical = u8_logical.view(_te_dtype_to_torch_fp8(tensor._fp8_dtype))
+        t = t.view(_te_dtype_to_torch_fp8(tensor._fp8_dtype))
+    # _transpose is [K, d0, d1, ...] (last dim moved to front); invert to
+    # the logical [d0, d1, ..., K].
+    if t.ndim == 2:
+        logical = t.t().contiguous().to(torch.bfloat16)
     else:
-        fp8_logical = u8_logical
-    logical = fp8_logical.to(torch.bfloat16)
+        inv_perm = list(range(1, t.ndim)) + [0]
+        logical = t.permute(*inv_perm).contiguous().to(torch.bfloat16)
     scale_inv = tensor._scale_inv
     if scale_inv.numel() == 1:
         return logical * scale_inv
@@ -146,44 +138,6 @@ def _is_transpose_only(tensor):
     """Return True if tensor has _data=None but _transpose set (columnwise-only)."""
     return (hasattr(tensor, '_data') and tensor._data is None
             and hasattr(tensor, '_transpose') and tensor._transpose is not None)
-
-
-def _fp8_transposed_operand(tensor, data_2d):
-    """Return the transposed 2D FP8 operand for a GEMM, preferring the tensor's
-    _transpose cache to avoid materializing a fresh transposed copy.
-
-    data_2d is the (already-flattened) rowwise [M, K] FP8 view of tensor._data.
-    If tensor._transpose is populated and valid, we reshape it to [K, M] and
-    return — the byte layout already matches what data_2d.t().contiguous()
-    would produce, at zero copy cost.
-
-    When no transpose cache is available, we transpose via the uint8 view
-    instead of the fp8 view. Same number of bytes copied, but dispatches to
-    the plain uint8 copy kernel rather than the slow float8_copy_kernel_cuda
-    that .t().contiguous() on an FP8-dtype tensor hits.
-    """
-    data_buf = getattr(tensor, '_data', None)
-    trans = getattr(tensor, '_transpose', None)
-    trans_invalid = getattr(tensor, '_transpose_invalid', True)
-    # Only use the cache when data_2d came from _data (i.e. the tensor has
-    # both buffers). If _data is None, data_2d came from _transpose already
-    # and we actually need to undo that layout via an explicit copy.
-    can_use_cache = (
-        data_buf is not None and trans is not None and not trans_invalid
-    )
-    fp8_dtype = data_2d.dtype
-    if can_use_cache:
-        t = trans
-        if t.ndim > 2:
-            t = t.reshape(t.shape[0], -1)
-        if t.dtype == torch.uint8:
-            t = t.view(fp8_dtype)
-        return t
-    # Fallback: uint8-level transpose to avoid float8_copy_kernel_cuda.
-    d = data_2d
-    if d.dtype != torch.uint8:
-        d = d.view(torch.uint8)
-    return d.t().contiguous().view(fp8_dtype)
 
 
 # ---------------------------------------------------------------------------
@@ -315,13 +269,13 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
             if b_is_blockwise:
                 x, x_scale = _get_blockwise_data(B, need_rowwise=not transB)
             else:
-                x = b_data if not effective_transB else _fp8_transposed_operand(B, b_data)
+                x = b_data if not effective_transB else b_data.t().contiguous()
                 x_scale = b_scale
 
             if a_is_blockwise:
                 w, w_scale = _get_blockwise_data(A, need_rowwise=transA)
             else:
-                w = a_data if effective_transA else _fp8_transposed_operand(A, a_data)
+                w = a_data if effective_transA else a_data.t().contiguous()
                 w_scale = a_scale
 
             if _is_per_row_scaled(x_scale) or _is_per_row_scaled(w_scale):
@@ -430,13 +384,13 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
         if b_is_blockwise:
             x, x_scale = _get_blockwise_data(B, need_rowwise=not transB)
         else:
-            x = b_data if not effective_transB else _fp8_transposed_operand(B, b_data)
+            x = b_data if not effective_transB else b_data.t().contiguous()
             x_scale = b_scale
 
         if a_is_blockwise:
             w, w_scale = _get_blockwise_data(A, need_rowwise=transA)
         else:
-            w = a_data if effective_transA else _fp8_transposed_operand(A, a_data)
+            w = a_data if effective_transA else a_data.t().contiguous()
             w_scale = a_scale
 
         if a_is_fp8 and b_is_fp8:
