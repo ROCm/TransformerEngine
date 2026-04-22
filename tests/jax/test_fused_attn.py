@@ -4,6 +4,7 @@
 #
 # See LICENSE for license information.
 """Tests for fused attention"""
+import os
 from enum import Enum, auto
 from dataclasses import dataclass, field
 from functools import partial
@@ -51,6 +52,10 @@ from transformer_engine_jax import (
 
 from distributed_test_base import assert_equal_collectives
 from utils import assert_allclose, print_debug_tensor_stats
+
+# Determinism mode is selected by the NVTE_ALLOW_NONDETERMINISTIC_ALGO env var.
+# When set to "0", deterministic-only tests run and non-determinism-only tests are skipped.
+_deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
 
 @pytest.fixture(autouse=True, scope="module")
@@ -1510,17 +1515,16 @@ def test_jax_new_rng():
 
 
 def _run_deterministic_bwd_case(
-    monkeypatch, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d,
+    qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d,
     dtype=jnp.bfloat16,
 ):
     """
     Shared helper for deterministic backward tests.
 
     Verifies that the fused attention backward pass in deterministic mode
-    produces bitwise-reproducible gradients.
+    produces bitwise-reproducible gradients. Determinism mode must be enabled
+    externally via NVTE_ALLOW_NONDETERMINISTIC_ALGO=0.
     """
-    monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
-
     runner = FusedAttnRunner(
         batch_size=b,
         max_seqlen_q=seq_len,
@@ -1567,24 +1571,16 @@ def _run_deterministic_bwd_case(
     fused_val_grad = jit(jax.value_and_grad(fused_fn, argnums=(0, 1, 2)))
 
     _, grads1 = fused_val_grad(q, k, v)
-    fused_dq1 = np.array(grads1[0].block_until_ready())
-    fused_dk1 = np.array(grads1[1].block_until_ready())
-    fused_dv1 = np.array(grads1[2].block_until_ready())
-
     _, grads2 = fused_val_grad(q, k, v)
-    fused_dq2 = np.array(grads2[0].block_until_ready())
-    fused_dk2 = np.array(grads2[1].block_until_ready())
-    fused_dv2 = np.array(grads2[2].block_until_ready())
-
-    # Bitwise reproducibility across consecutive runs
-    np.testing.assert_array_equal(fused_dq1, fused_dq2, err_msg="dQ not bitwise reproducible")
-    np.testing.assert_array_equal(fused_dk1, fused_dk2, err_msg="dK not bitwise reproducible")
-    np.testing.assert_array_equal(fused_dv1, fused_dv2, err_msg="dV not bitwise reproducible")
+    for name, x, y in zip(("dQ", "dK", "dV"), grads1, grads2):
+        # Bitwise reproducibility across consecutive runs
+        assert_allclose(x, y, atol=0, rtol=0, err_msg=f"{name} not bitwise reproducible")
 
 
 @pytest.mark.skipif(
     not is_hip_extension(), reason="Deterministic backward only applies to AMD hardware"
 )
+@pytest.mark.skipif(not _deterministic, reason="Test determinism only")
 @pytest.mark.parametrize(
     "dtype",
     [
@@ -1624,8 +1620,14 @@ def _run_deterministic_bwd_case(
         pytest.param(2, 2048, 12, 4, 128, id="b2_s2048_GQA"),
     ],
 )
-def test_deterministic_bwd_ck(monkeypatch, dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d):
-    """Test deterministic backward (CK backend): bitwise reproducibility."""
-    _run_deterministic_bwd_case(
-        monkeypatch, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d, dtype=dtype,
-    )
+class TestFusedAttnWithDeterminism:
+    """Fused attention tester (CK backend) with deterministic backward."""
+
+    @staticmethod
+    def test_backward_bitwise_reproducible(
+        dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d
+    ):
+        """Test deterministic backward (CK backend): bitwise reproducibility."""
+        _run_deterministic_bwd_case(
+            qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d, dtype=dtype,
+        )

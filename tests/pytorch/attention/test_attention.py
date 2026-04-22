@@ -80,6 +80,14 @@ if fp8_available and (device_compute_capability < (9, 0) or device_compute_capab
 seed = 1234
 reset_rng_states()
 
+# Determinism mode is selected by the NVTE_ALLOW_NONDETERMINISTIC_ALGO env var
+# (or by torch's global deterministic flag). When enabled, deterministic-only
+# tests run and non-determinism-only tests are skipped.
+_deterministic = (
+    not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+    or torch.are_deterministic_algorithms_enabled()
+)
+
 
 # Reset FP8 global state manager
 @pytest.fixture(autouse=True)
@@ -2985,6 +2993,7 @@ _DETERMINISTIC_LAYOUT_MASK_COMBOS = [
 @pytest.mark.skipif(
     not IS_HIP_EXTENSION, reason="Deterministic backward only applies to AMD hardware"
 )
+@pytest.mark.skipif(not _deterministic, reason="Test determinism only")
 @pytest.mark.parametrize(
     "dtype",
     [
@@ -3003,9 +3012,12 @@ _DETERMINISTIC_LAYOUT_MASK_COMBOS = [
     ],
 )
 def test_deterministic_bwd_ck(
-    monkeypatch, dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d
+    dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d
 ):
-    """Test deterministic backward (CK backend): bitwise reproducibility."""
+    """Test deterministic backward (CK backend): bitwise reproducibility.
+
+    Determinism mode must be enabled externally via NVTE_ALLOW_NONDETERMINISTIC_ALGO=0.
+    """
     config = ModelConfig(
         batch_size=b,
         max_seqlen_q=seq_len,
@@ -3014,8 +3026,6 @@ def test_deterministic_bwd_ck(
         num_gqa_groups=h_kv,
         attn_mask_type=attn_mask_type,
     )
-
-    monkeypatch.setenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "0")
 
     _, _, fused_attn_backends = get_available_attention_backends(
         config,
