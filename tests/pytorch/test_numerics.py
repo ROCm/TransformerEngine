@@ -58,8 +58,6 @@ from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grou
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states
-if IS_HIP_EXTENSION:
-    from utils import EnvVarCleaner
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
@@ -770,7 +768,7 @@ def _test_e2e_full_recompute(
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_reentrant", all_boolean)
 def test_gpt_full_activation_recompute(
-    dtype, bs, model, fp8, recipe, fp8_model_params, use_reentrant
+    dtype, bs, model, fp8, recipe, fp8_model_params, use_reentrant, monkeypatch
 ):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
@@ -789,10 +787,9 @@ def test_gpt_full_activation_recompute(
     torch.compiler.reset() # avoid cache size limit overflow
 
     if not use_reentrant:
-        if IS_HIP_EXTENSION:
-            env = EnvVarCleaner(["NVTE_BIAS_GELU_NVFUSION"])
         # Non-reentrant checkpoint becomes non-deterministic with bias+GELU fusion
-        os.environ["NVTE_BIAS_GELU_NVFUSION"] = "0"
+        # ROCm: we want to make sure it is cleaned of exception happens in the test
+        monkeypatch.setenv("NVTE_BIAS_GELU_NVFUSION", "0")
 
     outputs, names = _test_e2e_full_recompute(
         bs,
