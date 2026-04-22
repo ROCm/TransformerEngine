@@ -29,6 +29,14 @@ _FP8_DTYPES = (
 
 _GEMM_BACKEND = os.environ.get("NVTE_LITE_GEMM_BACKEND", "ck").lower()
 
+from collections import Counter as _GemmCounter
+_GEMM_CALLS = _GemmCounter()
+
+def _gemm_bump(tag):
+    _GEMM_CALLS[tag] += 1
+    if sum(_GEMM_CALLS.values()) % 500 == 0:
+        print(f"[LITE-GEMM] {dict(_GEMM_CALLS)}", flush=True)
+
 
 def _resolve_output_dtype(output_dtype):
     """Normalize output_dtype (TE_DType | torch.dtype | None) to torch.dtype.
@@ -328,6 +336,7 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
                     or a_is_blockwise or b_is_blockwise):
                 # Block-scale FP8 (includes Float8Blockwise)
                 if hasattr(aiter, 'gemm_a8w8_blockscale'):
+                    _gemm_bump("ck_blockscale")
                     result = aiter.gemm_a8w8_blockscale(x, w, x_scale, w_scale)
                     if len(x_leading_shape) > 1:
                         result = result.reshape(*x_leading_shape, result.shape[-1])
@@ -340,26 +349,36 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
                 # non-transposed tensor) can't use CK; fall through to Triton.
                 M = x.shape[0]
                 N = w.shape[0]
-                x_ok = (x_scale.numel() == 1 or x_scale.numel() == M)
-                w_ok = (w_scale.numel() == 1 or w_scale.numel() == N)
+                x_per_row = x_scale.numel() > 1
+                w_per_row = w_scale.numel() > 1
+                x_ok = (not x_per_row) or (x_scale.numel() == M)
+                w_ok = (not w_per_row) or (w_scale.numel() == N)
                 if x_ok and w_ok and hasattr(aiter, 'gemm_a8w8_CK'):
                     x_scale_ck = (
                         x_scale.expand(M).unsqueeze(1).contiguous()
-                        if x_scale.numel() == 1
+                        if not x_per_row
                         else x_scale.reshape(M, 1).contiguous()
                     )
                     w_scale_ck = (
                         w_scale.expand(N).unsqueeze(0).contiguous()
-                        if w_scale.numel() == 1
+                        if not w_per_row
                         else w_scale.reshape(1, N).contiguous()
                     )
+                    if x_per_row or w_per_row:
+                        _gemm_bump("ck_per_row")
+                    else:
+                        _gemm_bump("ck_per_tensor")
                     result = aiter.gemm_a8w8_CK(x, w, x_scale_ck, w_scale_ck)
                     if len(x_leading_shape) > 1:
                         result = result.reshape(*x_leading_shape, result.shape[-1])
                     return result
+                else:
+                    # Per-row scale on reduction axis — CK can't serve.
+                    _gemm_bump("ck_reject_per_row_reduction_axis")
 
         elif not a_is_fp8 and b_is_fp8:
             if hasattr(aiter, 'gemm_a16w8'):
+                _gemm_bump("ck_a16w8")
                 a_mat = _dequantize_if_needed(A)
                 if transA:
                     a_mat = a_mat.t()
@@ -462,6 +481,7 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
                 w_scale_valid = (w_scale is None or w_scale.numel() == 1
                                  or w_scale.numel() == w.shape[0])
                 if not (x_scale_valid and w_scale_valid):
+                    _gemm_bump("triton_reject_per_row_reduction_axis")
                     return None  # Let caller fall back to dequantize + bf16 GEMM
                 from aiter.ops.triton.gemm_a8w8_per_token_scale import (
                     gemm_a8w8_per_token_scale as triton_a8w8_pt,
@@ -473,12 +493,14 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
                     w_scale = w_scale.expand(w.shape[0]).unsqueeze(1)
                 elif w_scale is not None and w_scale.ndim == 1:
                     w_scale = w_scale.unsqueeze(1)
+                _gemm_bump("triton_per_row")
                 result = triton_a8w8_pt(x, w, x_scale, w_scale)
             elif (_is_block_scaled(x_scale) or _is_block_scaled(w_scale)
                     or a_is_blockwise or b_is_blockwise):
                 from aiter.ops.triton.gemm_a8w8_blockscale import (
                     gemm_a8w8_blockscale as triton_a8w8_bs,
                 )
+                _gemm_bump("triton_blockscale")
                 result = triton_a8w8_bs(x, w, x_scale, w_scale)
             else:
                 # Per-tensor FP8. gemm_a8w8 indexes the scale pointer by row
@@ -490,6 +512,7 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
                 )
                 x_scale_exp = x_scale.expand(x.shape[0]).contiguous()
                 w_scale_exp = w_scale.expand(w.shape[0]).contiguous()
+                _gemm_bump("triton_per_tensor")
                 result = triton_a8w8(x, w, x_scale_exp, w_scale_exp)
 
             # Restore the leading N-D shape from x (B operand) on the result
@@ -572,6 +595,7 @@ def _aiter_gemm(A, transA, B, transB, D, quantizer, output_dtype,
             result = _aiter_triton_gemm(*triton_args)
 
     if result is None:
+        _gemm_bump("pytorch_fallback")
         return None  # Signal caller to use PyTorch fallback
 
     # --- Post-GEMM epilogues ---
