@@ -464,10 +464,37 @@ class _Linear(torch.autograd.Function):
                 saved_inputmat = inputmat
 
             # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
-            # MXFP4: columnwise created lazily in backward (saves 37 GB persistent cache).
             if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
                 if isinstance(weightmat, QuantizedTensorStorage) and not isinstance(weightmat, MXFP4TensorStorage):
                     weightmat.update_usage(columnwise_usage=True)
+
+            # MXFP4: Pre-compute columnwise quantization in forward to avoid
+            # the expensive dequantize->re-quantize cycle in backward.
+            if (
+                is_mxfp4_enabled
+                and inp.requires_grad
+                and isinstance(weightmat, MXFP4TensorStorage)
+                and weightmat._columnwise_data is None
+            ):
+                with torch.no_grad():
+                    _src = weight if need_mxfp4_conversion else weightmat
+                    _bf16 = _src.dequantize()
+                    from ..tensor.mxfp4_tensor import MXFP4Quantizer
+                    _use_hadamard = getattr(
+                        FP8GlobalStateManager.get_fp8_recipe() if fp8 else None,
+                        "use_hadamard", False,
+                    )
+                    _q = MXFP4Quantizer(
+                        rowwise=False,
+                        columnwise=True,
+                        shuffle_B_matrix_for_aiter=True,
+                        use_hadamard=_use_hadamard,
+                    )
+                    _q.internal = True
+                    _col = _q.quantize(_bf16)
+                    weightmat._columnwise_data = _col._columnwise_data
+                    weightmat._columnwise_scale_inv = _col._columnwise_scale_inv
+                    del _bf16, _col
 
             if cpu_offloading and saved_inputmat is not None:
                 mark_activation_offload(saved_inputmat)
@@ -519,7 +546,6 @@ class _Linear(torch.autograd.Function):
             ctx.is_mxfp4_enabled = is_mxfp4_enabled
             ctx.need_mxfp4_conversion = need_mxfp4_conversion
             ctx.fp8_weight_for_dgrad = weight if need_mxfp4_conversion else None
-            ctx.persist_columnwise = getattr(module, '_mxfp4_persist_columnwise', False)
             if fuse_wgrad_accumulation and weight.requires_grad:
                 # This check is needed to ensure that main_grad is not created
                 # during the forward pass when using MCore FSDP as it creates
@@ -813,9 +839,8 @@ class _Linear(torch.autograd.Function):
                 elif ctx.ub_bulk_wgrad:
                     gemm_out = ub_obj_wgrad.get_buffer(local_chunk=False)
 
-                # Lazy columnwise for MXFP4 rowwise-only cache (saves 37 GB persistent).
-                # Must use shuffle_B_matrix_for_aiter=True to match AITER GEMM expectations.
-                # Columnwise is freed after dgrad to keep base at 107 GB (vs 143 GB both-orient).
+                # MXFP4 columnwise: pre-computed in forward pass. Fall back to
+                # lazy quantization only if forward didn't populate it (e.g. no-grad forward).
                 _mxfp4_lazy_col = False
                 if isinstance(weight_fp8, MXFP4TensorStorage) and weight_fp8._columnwise_data is None:
                     with torch.no_grad():
@@ -854,7 +879,7 @@ class _Linear(torch.autograd.Function):
                 )
                 nvtx_range_pop(f"{nvtx_label}.dgrad_gemm")
 
-                if _mxfp4_lazy_col and not ctx.persist_columnwise:
+                if _mxfp4_lazy_col:
                     weight_fp8._columnwise_data = None
                     weight_fp8._columnwise_scale_inv = None
 
