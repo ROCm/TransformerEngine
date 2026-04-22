@@ -14,6 +14,7 @@
 #include "math.h"
 #include "ptx.cuh"
 #include "rocm_vectorized_2d.cuh"
+#include "tdm.cuh"
 #include "transformer_engine/activation.h"
 #include "transformer_engine/cast.h"
 #include "../transpose/cast_transpose.h"
@@ -85,10 +86,21 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const int chunk_it_offset_y = chunk_offset_Y + iter * BUFFER_DIM_Y;
     const int chunk_it_offset_x = chunk_offset_X;
 
-    copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_sh[0][0], input_ptr, chunk_it_offset_x, 
+#if defined(__gfx1250__)
+    {
+      constexpr uint32_t data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
+      tdm::copy_2d_to_shared(&in_sh[0][0], input_ptr,
+                             chunk_it_offset_x, chunk_it_offset_y,
+                             SHMEM_DIM_X, SHMEM_DIM_Y, cols, rows, cols, data_sz);
+      tdm::wait_tensorcnt_0();
+      __syncthreads();
+    }
+#else
+    copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_sh[0][0], input_ptr, chunk_it_offset_x,
                       chunk_it_offset_y, cols, SHMEM_DIM_Y,
                       SHMEM_DIM_X, rows, cols);
     __syncthreads();
+#endif
 
     const int scale_offset_Y =
         USE_ROWWISE_SCALING ? (scales_rowwise_chunk_offset_Y + iter * BUFFER_DIM_Y + tid_rowwise_Y)
@@ -126,11 +138,22 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
     __syncthreads();
 
+#if defined(__gfx1250__)
+    {
+      constexpr uint32_t out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
+      tdm::store_2d_to_global(&out_sh[0][0], output_ptr,
+                              chunk_it_offset_x, chunk_it_offset_y,
+                              SHMEM_DIM_X, SHMEM_DIM_Y, cols, rows, cols, out_data_sz);
+      tdm::wait_tensorcnt_0();
+      __syncthreads();
+    }
+#else
     bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_sh[0][0], output_ptr, chunk_it_offset_x,
                                     chunk_it_offset_y, cols, SHMEM_DIM_Y,
                                     SHMEM_DIM_X, rows, cols);
 
     __syncthreads();
+#endif
   }
 }
 } // namespace dequantization
