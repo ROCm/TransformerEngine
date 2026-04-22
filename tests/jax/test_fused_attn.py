@@ -1537,11 +1537,13 @@ def _run_deterministic_bwd_case(
         dtype=dtype,
         is_training=True,
         qkv_layout=qkv_layout,
-        bias_shape=BiasShape._1HSS,
         window_size=None,
         seq_desc_format=SeqDescFormat.Seqlens,
     )
     runner._setup_inputs()
+
+    if runner.backend != NVTE_Fused_Attn_Backend.NVTE_CK:
+        pytest.skip("This test requires the CK fused attention backend.")
 
     q, k, v = runner.q, runner.k, runner.v
     seq_desc = runner.sequence_desciptor
@@ -1622,8 +1624,8 @@ def _run_deterministic_bwd_case(
         pytest.param(2, 2048, 12, 4, 128, id="b2_s2048_GQA"),
     ],
 )
-def test_deterministic_bwd(monkeypatch, dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d):
-    """Test deterministic backward: bitwise reproducibility."""
+def test_deterministic_bwd_ck(monkeypatch, dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d):
+    """Test deterministic backward (CK backend): bitwise reproducibility."""
     _run_deterministic_bwd_case(
         monkeypatch, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d, dtype=dtype,
     )

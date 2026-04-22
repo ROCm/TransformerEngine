@@ -156,7 +156,7 @@ Attention Backend Selection
 
    :Type: ``int`` (0 or 1)
    :Default: ``1``
-   :Description: Allow non-deterministic algorithms for Transformer Engine execution. When set to ``0``, only deterministic algorithms are allowed. This is relevant for both PyTorch and JAX attention implementations.
+   :Description: Allow non-deterministic algorithms for Transformer Engine execution. When set to ``0``, only deterministic algorithms are allowed. This is relevant for both PyTorch and JAX attention implementations. On AMD/HIP builds, setting this to ``0`` enables the deterministic backward pass of the CK FusedAttention backend (which uses a split-accumulator workspace for deterministic ``dQ``); on NVIDIA builds it disables FusedAttention paths that are known to be non-deterministic.
 
 .. envvar:: NVTE_FUSED_RING_ATTENTION_USE_SCAN
 
