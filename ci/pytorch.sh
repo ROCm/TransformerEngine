@@ -39,11 +39,9 @@ run_default_fa_lbl() {
 }
 
 with_aiter() {
-    git clone --recursive https://github.com/ROCm/aiter.git /tmp/aiter
-    (cd /tmp/aiter && git checkout v0.1.12 && python3 setup.py develop)
+    (cd ${TE_PATH}3rdparty/aiter && python3 setup.py develop)
     "$@"
     pip uninstall -y amd-aiter
-    rm -rf /tmp/aiter
 }
 
 run_test_config(){
