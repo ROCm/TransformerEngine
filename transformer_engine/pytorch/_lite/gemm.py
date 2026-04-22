@@ -32,6 +32,7 @@ _GEMM_BACKEND = os.environ.get("NVTE_LITE_GEMM_BACKEND", "ck").lower()
 from collections import Counter as _GemmCounter
 _GEMM_CALLS = _GemmCounter()
 _GEMM_BACKEND_PRINTED = False
+_CK_FAIL_DIAG_PRINTS = 0
 
 def _gemm_bump(tag):
     global _GEMM_BACKEND_PRINTED
@@ -375,7 +376,22 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
                         _gemm_bump("ck_per_row")
                     else:
                         _gemm_bump("ck_per_tensor")
-                    result = aiter.gemm_a8w8_CK(x, w, x_scale_ck, w_scale_ck)
+                    try:
+                        result = aiter.gemm_a8w8_CK(x, w, x_scale_ck, w_scale_ck)
+                    except RuntimeError as _ck_err:
+                        global _CK_FAIL_DIAG_PRINTS
+                        if _CK_FAIL_DIAG_PRINTS < 5:
+                            _CK_FAIL_DIAG_PRINTS += 1
+                            print(
+                                f"[LITE-GEMM-CK-FAIL #{_CK_FAIL_DIAG_PRINTS}] "
+                                f"x={tuple(x.shape)}/{x.dtype}/contig={x.is_contiguous()} "
+                                f"w={tuple(w.shape)}/{w.dtype}/contig={w.is_contiguous()} "
+                                f"x_scale_ck={tuple(x_scale_ck.shape)} "
+                                f"w_scale_ck={tuple(w_scale_ck.shape)} "
+                                f"err={type(_ck_err).__name__}: {_ck_err}",
+                                flush=True,
+                            )
+                        raise
                     if len(x_leading_shape) > 1:
                         result = result.reshape(*x_leading_shape, result.shape[-1])
                     return result
