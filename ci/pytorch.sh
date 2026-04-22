@@ -38,6 +38,14 @@ run_default_fa_lbl() {
     fi
 }
 
+with_aiter() {
+    git clone --recursive https://github.com/ROCm/aiter.git /tmp/aiter
+    (cd /tmp/aiter && git checkout v0.1.12 && python3 setup.py develop)
+    "$@"
+    pip uninstall -y amd-aiter
+    rm -rf /tmp/aiter
+}
+
 run_test_config(){
     echo ==== Run with Fused attention backend: $_fus_attn ====
     #_WORKERS_COUNT=$TEST_WORKERS
@@ -86,7 +94,7 @@ run_test_config(){
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_fusible_ops.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 triton_kernels/test_cast.py
     run_default_fa 1 nvfp4/
-    run_default_fa 1 mxfp4/
+    with_aiter run_default_fa 1 mxfp4/
 }
 
 run_test_config_mgpu(){
