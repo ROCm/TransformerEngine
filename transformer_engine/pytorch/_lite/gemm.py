@@ -372,34 +372,26 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
                         if not w_per_row
                         else w_scale.reshape(1, N).contiguous()
                     )
-                    # AITER's gemm_a8w8_CK wrapper rejects mixed FP8 dtypes
-                    # (E4M3 × E5M2), which is the standard FP8 training recipe
-                    # for dgrad and wgrad. Route mixed-dtype cases to PyTorch's
-                    # torch._scaled_mm (hipBLASLt-backed) which handles them
-                    # natively. Same-dtype cases stay on AITER CK.
-                    if x.dtype != w.dtype:
-                        if x_per_row or w_per_row:
-                            _gemm_bump("scaled_mm_per_row")
-                        else:
-                            _gemm_bump("scaled_mm_per_tensor")
-                        # _scaled_mm expects mat2 to be column-major; w.T
-                        # produces a (K, N) column-major view of the (N, K)
-                        # contiguous w. Scale shapes (M,1) / (1,N) match CK.
-                        result = torch._scaled_mm(
-                            x, w.t(),
-                            scale_a=x_scale_ck,
-                            scale_b=w_scale_ck,
-                            out_dtype=torch.bfloat16,
-                        )
-                        if len(x_leading_shape) > 1:
-                            result = result.reshape(*x_leading_shape, result.shape[-1])
-                        return result
-
                     if x_per_row or w_per_row:
                         _gemm_bump("ck_per_row")
                     else:
                         _gemm_bump("ck_per_tensor")
-                    result = aiter.gemm_a8w8_CK(x, w, x_scale_ck, w_scale_ck)
+                    try:
+                        result = aiter.gemm_a8w8_CK(x, w, x_scale_ck, w_scale_ck)
+                    except RuntimeError as _ck_err:
+                        global _CK_FAIL_DIAG_PRINTS
+                        if _CK_FAIL_DIAG_PRINTS < 5:
+                            _CK_FAIL_DIAG_PRINTS += 1
+                            print(
+                                f"[LITE-GEMM-CK-FAIL #{_CK_FAIL_DIAG_PRINTS}] "
+                                f"x={tuple(x.shape)}/{x.dtype}/contig={x.is_contiguous()} "
+                                f"w={tuple(w.shape)}/{w.dtype}/contig={w.is_contiguous()} "
+                                f"x_scale_ck={tuple(x_scale_ck.shape)} "
+                                f"w_scale_ck={tuple(w_scale_ck.shape)} "
+                                f"err={type(_ck_err).__name__}: {_ck_err}",
+                                flush=True,
+                            )
+                        raise
                     if len(x_leading_shape) > 1:
                         result = result.reshape(*x_leading_shape, result.shape[-1])
                     return result
