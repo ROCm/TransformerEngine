@@ -324,12 +324,7 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
                 w = a_data if effective_transA else _fp8_transposed_operand(A, a_data)
                 w_scale = a_scale
 
-            if _is_per_row_scaled(x_scale) or _is_per_row_scaled(w_scale):
-                # Per-row (per-token) FP8 — from CurrentScaling fused norm+quant.
-                # Triton-only kernel; no CK variant exists. Fall through to None
-                # so the caller tries the Triton backend next.
-                pass
-            elif (_is_block_scaled(x_scale) or _is_block_scaled(w_scale)
+            if (_is_block_scaled(x_scale) or _is_block_scaled(w_scale)
                     or a_is_blockwise or b_is_blockwise):
                 # Block-scale FP8 (includes Float8Blockwise)
                 if hasattr(aiter, 'gemm_a8w8_blockscale'):
@@ -338,13 +333,26 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
                         result = result.reshape(*x_leading_shape, result.shape[-1])
                     return result
             else:
-                # Per-tensor FP8. gemm_a8w8_CK requires (M,1) x_scale and
-                # (1,N) w_scale — passing scalar (1,) produces garbage.
-                if hasattr(aiter, 'gemm_a8w8_CK'):
-                    M = x.shape[0]
-                    N = w.shape[0]
-                    x_scale_ck = x_scale.expand(M).unsqueeze(1).contiguous()
-                    w_scale_ck = w_scale.expand(N).unsqueeze(0).contiguous()
+                # Per-tensor or per-row FP8. CK's RowwiseScale kernel accepts
+                # x_scale (M, 1) and w_scale (1, N) — a scalar broadcasts to
+                # fill, a per-row vector reshapes in place. Per-row scales on
+                # the reduction axis (wgrad edge case — scales came from the
+                # non-transposed tensor) can't use CK; fall through to Triton.
+                M = x.shape[0]
+                N = w.shape[0]
+                x_ok = (x_scale.numel() == 1 or x_scale.numel() == M)
+                w_ok = (w_scale.numel() == 1 or w_scale.numel() == N)
+                if x_ok and w_ok and hasattr(aiter, 'gemm_a8w8_CK'):
+                    x_scale_ck = (
+                        x_scale.expand(M).unsqueeze(1).contiguous()
+                        if x_scale.numel() == 1
+                        else x_scale.reshape(M, 1).contiguous()
+                    )
+                    w_scale_ck = (
+                        w_scale.expand(N).unsqueeze(0).contiguous()
+                        if w_scale.numel() == 1
+                        else w_scale.reshape(1, N).contiguous()
+                    )
                     result = aiter.gemm_a8w8_CK(x, w, x_scale_ck, w_scale_ck)
                     if len(x_leading_shape) > 1:
                         result = result.reshape(*x_leading_shape, result.shape[-1])
