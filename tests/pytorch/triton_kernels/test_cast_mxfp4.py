@@ -347,13 +347,13 @@ def test_quantize_mxfp4_standard(
 
     if rowwise:
         ref_data, ref_scale = mxfp4_quantize_cpu(
-            input_tensor, axis="row", SHUFFLE=shuffle_data
+            input_tensor, axis="row", SHUFFLE=with_gemm_swizzled_scales
         )
         num_blocks = math.ceil(K / MXFP4_BLOCK_SCALING_SIZE)
 
         y1_scales_triton = quantized_out._rowwise_scale_inv.view(torch.uint8)
         y1_scales_torch = ref_scale
-        if shuffle_data:
+        if with_gemm_swizzled_scales:
             y1_scales_triton = un_shuffle_scales(
                 y1_scales_triton.view(y1_scales_triton.shape[0] // 32, -1)
             )
@@ -392,13 +392,13 @@ def test_quantize_mxfp4_standard(
 
     if columnwise:
         ref_data, ref_scale = mxfp4_quantize_cpu(
-            input_tensor, axis="col", SHUFFLE=shuffle_data
+            input_tensor, axis="col", SHUFFLE=with_gemm_swizzled_scales
         )
         num_blocks = math.ceil(M / MXFP4_BLOCK_SCALING_SIZE)
 
         y1_scales_triton = quantized_out._columnwise_scale_inv.view(torch.uint8)
         y1_scales_torch = ref_scale
-        if shuffle_data:
+        if with_gemm_swizzled_scales:
             y1_scales_triton = un_shuffle_scales(
                 y1_scales_triton.view(y1_scales_triton.shape[0] // 32, -1)
             )

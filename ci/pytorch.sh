@@ -39,7 +39,7 @@ run_default_fa_lbl() {
 }
 
 with_aiter() {
-    (cd ${TE_PATH}3rdparty/aiter && python3 setup.py develop)
+    (cd ${TE_PATH}3rdparty/aiter && GPU_ARCHS=native  pip install -e .)
     "$@"
     pip uninstall -y amd-aiter
 }
