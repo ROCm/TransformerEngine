@@ -31,8 +31,13 @@ _GEMM_BACKEND = os.environ.get("NVTE_LITE_GEMM_BACKEND", "ck").lower()
 
 from collections import Counter as _GemmCounter
 _GEMM_CALLS = _GemmCounter()
+_GEMM_BACKEND_PRINTED = False
 
 def _gemm_bump(tag):
+    global _GEMM_BACKEND_PRINTED
+    if not _GEMM_BACKEND_PRINTED:
+        _GEMM_BACKEND_PRINTED = True
+        print(f"[LITE-GEMM-BACKEND] {_GEMM_BACKEND}", flush=True)
     _GEMM_CALLS[tag] += 1
     if sum(_GEMM_CALLS.values()) % 500 == 0:
         print(f"[LITE-GEMM] {dict(_GEMM_CALLS)}", flush=True)
@@ -274,10 +279,12 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
                    a_is_fp8, b_is_fp8, transA, transB,
                    A, B):
     """Dispatch to AITER CK/ASM kernels. Returns result tensor or None."""
+    _gemm_bump("ck_enter")
     try:
         # MXFP8: No hardware GEMM on MI300X. Fall through to dequant path.
         # TODO(MI350): Add aiter.gemm_mxfp8() dispatch when available.
         if _is_mxfp8(A) or _is_mxfp8(B):
+            _gemm_bump("ck_skip_mxfp8")
             return None
 
         # FP4 × FP4
@@ -384,12 +391,17 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
                     a_mat = a_mat.t()
                 b_mat = b_data.t() if transB else b_data
                 return aiter.gemm_a16w8(a_mat, b_mat, b_scale)
+            _gemm_bump("ck_skip_bf16_fp8_no_kernel")
 
         elif not a_is_fp8 and not b_is_fp8:
-            pass  # No CK kernel for non-FP8/FP4 individual GEMM
+            _gemm_bump("ck_skip_bf16_bf16")
 
-    except (RuntimeError, TypeError, AttributeError):
-        pass
+        else:
+            # a_is_fp8 and not b_is_fp8 — no CK branch for this combo
+            _gemm_bump("ck_skip_fp8_bf16")
+
+    except (RuntimeError, TypeError, AttributeError) as _e:
+        _gemm_bump(f"ck_exception_{type(_e).__name__}")
     return None
 
 
