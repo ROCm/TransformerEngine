@@ -224,7 +224,7 @@ class MXFP4QuantizerRef(Quantizer):
         columnwise: bool = True,
         shuffle_rowwise_data: bool = False,
         shuffle_columnwise_data: bool = False,
-        shuffle_scales: bool = False,
+        with_gemm_swizzled_scales: bool = False,
         use_hadamard: bool = False,
         use_te_quantizer: bool = False,
     ):
@@ -232,7 +232,7 @@ class MXFP4QuantizerRef(Quantizer):
         self.internal = True
         self.shuffle_rowwise_data = shuffle_rowwise_data
         self.shuffle_columnwise_data = shuffle_columnwise_data
-        self.shuffle_scales = shuffle_scales
+        self.with_gemm_swizzled_scales = with_gemm_swizzled_scales
         self.use_hadamard = use_hadamard
         self.use_te_quantizer = use_te_quantizer
     @property
@@ -359,7 +359,7 @@ class MXFP4QuantizerRef(Quantizer):
         )
         scales_torch[:num_scale_rows, :num_scale_cols] = scales_valid
 
-        if self.shuffle_scales:
+        if self.with_gemm_swizzled_scales:
             scales_torch = _shuffle_scales(scales_torch)
             scales_torch = scales_torch.view(scales_torch.shape[0] * 32, -1)
 
@@ -418,7 +418,7 @@ class MXFP4QuantizerRef(Quantizer):
                                         columnwise=self.columnwise_usage, 
                                         shuffle_rowwise_data=self.shuffle_rowwise_data, 
                                         shuffle_columnwise_data=self.shuffle_columnwise_data, 
-                                        shuffle_scales=self.shuffle_scales, 
+                                        with_gemm_swizzled_scales=self.with_gemm_swizzled_scales, 
                                         use_hadamard=self.use_hadamard)
             q_tensor = tex.quantize(tensor, te_quantizer)
             return MXFP4TensorRef(

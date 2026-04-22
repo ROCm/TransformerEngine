@@ -72,7 +72,6 @@ class MXFP4TensorStorage(QuantizedTensorStorage):
     # Whether scaling factors are in the swizzled format expected by
     # GEMM
     _with_gemm_swizzled_scales: bool
-    _shuffle_scales: bool
     _shuffle_rowwise_data: bool
     _shuffle_columnwise_data: bool
 
@@ -84,8 +83,7 @@ class MXFP4TensorStorage(QuantizedTensorStorage):
         columnwise_scale_inv: torch.Tensor,
         fp4_dtype: TE_DType,
         quantizer: Optional[Quantizer],
-        with_gemm_swizzled_scales: bool,
-        shuffle_scales: bool = False,
+        with_gemm_swizzled_scales: bool = False,
         shuffle_rowwise_data: bool = False,
         shuffle_columnwise_data: bool = False,
         *args,
@@ -99,7 +97,6 @@ class MXFP4TensorStorage(QuantizedTensorStorage):
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
-        instance._shuffle_scales = shuffle_scales
         instance._shuffle_rowwise_data = shuffle_rowwise_data
         instance._shuffle_columnwise_data = shuffle_columnwise_data
 
@@ -126,7 +123,6 @@ class MXFP4TensorStorage(QuantizedTensorStorage):
             "fp4_dtype": self._fp4_dtype,
             "quantizer": self._quantizer,
             "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
-            "shuffle_scales": self._shuffle_scales,
             "shuffle_rowwise_data": self._shuffle_rowwise_data,
             "shuffle_columnwise_data": self._shuffle_columnwise_data,
         }

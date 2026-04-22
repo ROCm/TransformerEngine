@@ -318,7 +318,7 @@ def compare_e8m0_scales(
     ],
 )
 @pytest.mark.parametrize(
-    ("rowwise", "columnwise", "shuffle_data"),
+    ("rowwise", "columnwise", "with_gemm_swizzled_scales"),
     [
         (True, False, False),
         (False, True, False),
@@ -329,7 +329,7 @@ def compare_e8m0_scales(
     ],
 )
 def test_quantize_mxfp4_standard(
-    shape, in_dtype, rowwise, columnwise, shuffle_data
+    shape, in_dtype, rowwise, columnwise, with_gemm_swizzled_scales
 ):
     """Standard MXFP4 quantization with statistical validation."""
     input_tensor = fill_uniform(shape, dtype=in_dtype)
@@ -337,9 +337,7 @@ def test_quantize_mxfp4_standard(
     quantizer = MXFP4Quantizer(
         rowwise=rowwise,
         columnwise=columnwise,
-        shuffle_rowwise_data=shuffle_data,
-        shuffle_columnwise_data=shuffle_data,
-        shuffle_scales=shuffle_data,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
     )
 
     quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer)

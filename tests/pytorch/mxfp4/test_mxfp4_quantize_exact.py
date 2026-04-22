@@ -101,7 +101,7 @@ def check_quantization_mxfp4_versus_reference(
     use_hadamard: bool = False,
     shuffle_rowwise_data: bool = False,
     shuffle_columnwise_data: bool = False,
-    shuffle_scales: bool = False,
+    with_gemm_swizzled_scales: bool = False,
 ) -> None:
     te_dtype = tex.DType.kFloat4E2M1
 
@@ -119,7 +119,7 @@ def check_quantization_mxfp4_versus_reference(
         columnwise=return_transpose,
         shuffle_rowwise_data=shuffle_rowwise_data,
         shuffle_columnwise_data=shuffle_columnwise_data,
-        shuffle_scales=shuffle_scales,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         use_hadamard=use_hadamard,
     )
     if use_cpp_allocator:
@@ -149,7 +149,7 @@ def check_quantization_mxfp4_versus_reference(
         columnwise=return_transpose,
         shuffle_rowwise_data=shuffle_rowwise_data,
         shuffle_columnwise_data=shuffle_columnwise_data,
-        shuffle_scales=shuffle_scales,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         use_hadamard=use_hadamard,
     )
     x_ref = ref_quantizer.quantize(x)
@@ -160,7 +160,7 @@ def check_quantization_mxfp4_versus_reference(
     num_scale_cols = N // BLOCK_SIZE
     sx_cmp = sx.view(torch.uint8)
     ref_scale_cmp = x_ref.scale
-    if shuffle_scales:
+    if with_gemm_swizzled_scales:
         sx_cmp = un_shuffle_scales(sx_cmp.view(sx_cmp.shape[0] // 32, -1))
         ref_scale_cmp = un_shuffle_scales(ref_scale_cmp.view(ref_scale_cmp.shape[0] // 32, -1))
 
@@ -194,7 +194,7 @@ def check_quantization_mxfp4_versus_reference(
 
         sx_t_cmp = sx_t.view(torch.uint8)
         ref_scale_t_cmp = x_ref.scale_t
-        if shuffle_scales:
+        if with_gemm_swizzled_scales:
             sx_t_cmp = un_shuffle_scales(sx_t_cmp.view(sx_t_cmp.shape[0] // 32, -1))
             ref_scale_t_cmp = un_shuffle_scales(ref_scale_t_cmp.view(ref_scale_t_cmp.shape[0] // 32, -1))
 
@@ -243,11 +243,11 @@ def check_quantization_mxfp4_versus_reference(
     "shuffle_columnwise_data", [False, True], ids=["no_columnwise_data_shuffle", "columnwise_data_shuffle"]
 )
 @pytest.mark.parametrize(
-    "shuffle_scales", [False, True], ids=["no_scale_shuffle", "scale_shuffle"]
+    "with_gemm_swizzled_scales", [False, True], ids=["no_scale_shuffle", "scale_shuffle"]
 )
 def test_quantization_versus_reference(
     M, N, x_dtype, return_transpose, use_cpp_allocator, use_hadamard,
-    shuffle_rowwise_data, shuffle_columnwise_data, shuffle_scales,
+    shuffle_rowwise_data, shuffle_columnwise_data, with_gemm_swizzled_scales,
 ):
     check_quantization_mxfp4_versus_reference(
         x_dtype=x_dtype,
@@ -258,7 +258,7 @@ def test_quantization_versus_reference(
         use_hadamard=use_hadamard,
         shuffle_rowwise_data=shuffle_rowwise_data,
         shuffle_columnwise_data=shuffle_columnwise_data,
-        shuffle_scales=shuffle_scales,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
     )
 
 
@@ -278,11 +278,11 @@ def test_quantization_versus_reference(
     "shuffle_columnwise_data", [False, True], ids=["no_columnwise_data_shuffle", "columnwise_data_shuffle"]
 )
 @pytest.mark.parametrize(
-    "shuffle_scales", [False, True], ids=["no_scale_shuffle", "scale_shuffle"]
+    "with_gemm_swizzled_scales", [False, True], ids=["no_scale_shuffle", "scale_shuffle"]
 )
 def test_quantization_extrema(
     M, N, x_dtype, extrema_high, return_transpose, use_cpp_allocator,
-    use_hadamard, shuffle_rowwise_data, shuffle_columnwise_data, shuffle_scales,
+    use_hadamard, shuffle_rowwise_data, shuffle_columnwise_data, with_gemm_swizzled_scales,
 ):
     """Test quantization with extreme values: all zeros or all max."""
     te_dtype = tex.DType.kFloat4E2M1
@@ -299,7 +299,7 @@ def test_quantization_extrema(
         columnwise=return_transpose,
         shuffle_rowwise_data=shuffle_rowwise_data,
         shuffle_columnwise_data=shuffle_columnwise_data,
-        shuffle_scales=shuffle_scales,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         use_hadamard=use_hadamard,
     )
 
@@ -335,11 +335,11 @@ def test_quantization_extrema(
     "shuffle_columnwise_data", [False, True], ids=["no_columnwise_data_shuffle", "columnwise_data_shuffle"]
 )
 @pytest.mark.parametrize(
-    "shuffle_scales", [False, True], ids=["no_scale_shuffle", "scale_shuffle"]
+    "with_gemm_swizzled_scales", [False, True], ids=["no_scale_shuffle", "scale_shuffle"]
 )
 def test_quantization_noncontiguous_inputs(
     M, N, x_dtype, return_transpose, use_cpp_allocator, use_hadamard,
-    shuffle_rowwise_data, shuffle_columnwise_data, shuffle_scales,
+    shuffle_rowwise_data, shuffle_columnwise_data, with_gemm_swizzled_scales,
 ):
     """Test that non-contiguous inputs are handled correctly."""
     te_dtype = tex.DType.kFloat4E2M1
@@ -358,7 +358,7 @@ def test_quantization_noncontiguous_inputs(
         columnwise=return_transpose,
         shuffle_rowwise_data=shuffle_rowwise_data,
         shuffle_columnwise_data=shuffle_columnwise_data,
-        shuffle_scales=shuffle_scales,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         use_hadamard=use_hadamard,
     )
 
@@ -385,7 +385,7 @@ def test_quantization_noncontiguous_inputs(
 
     sx = result._rowwise_scale_inv.view(torch.uint8)
     sx_contig = result_contig._rowwise_scale_inv.view(torch.uint8)
-    if shuffle_scales:
+    if with_gemm_swizzled_scales:
         sx = un_shuffle_scales(sx.view(sx.shape[0] // 32, -1))
         sx_contig = un_shuffle_scales(sx_contig.view(sx_contig.shape[0] // 32, -1))
     num_scale_cols = N // BLOCK_SIZE

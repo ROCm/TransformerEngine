@@ -46,7 +46,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
   bool use_colwise = output->has_columnwise_data();
 
   bool use_hadamard = quant_config.mxfp4_use_hadamard;
-  bool scale_shuffle = output->mxfp4_shuffle_scales;
+  bool scale_shuffle = output->with_gemm_swizzled_scales;
   bool data_shuffle_rowwise_fp4 = output->mxfp4_shuffle_rowwise_data;
   bool data_shuffle_columnwise_fp4 = output->mxfp4_shuffle_columnwise_data;
 

@@ -923,9 +923,6 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
       t.with_gemm_swizzled_scales = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
       break;
 #ifdef __HIP_PLATFORM_AMD__
-    case kNVTEMXFP4ShuffleScales:
-      t.mxfp4_shuffle_scales = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
-      break;
     case kNVTEMXFP4ShuffleRowwiseData:
       t.mxfp4_shuffle_rowwise_data = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
       break;
@@ -1014,9 +1011,6 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->with_gemm_swizzled_scales);
       break;
 #ifdef __HIP_PLATFORM_AMD__
-    case kNVTEMXFP4ShuffleScales:
-      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->mxfp4_shuffle_scales);
-      break;
     case kNVTEMXFP4ShuffleRowwiseData:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->mxfp4_shuffle_rowwise_data);
       break;
