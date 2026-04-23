@@ -39,7 +39,11 @@ run_default_fa_lbl() {
 }
 
 with_aiter() {
-    (cd ${TE_PATH}3rdparty/aiter && GPU_ARCHS=native  pip install -e .)
+    # flydsl is only on AMD nightlies; needed for aiter pyproject build-system requires.
+    (cd ${TE_PATH}3rdparty/aiter && \
+        PIP_FIND_LINKS="https://rocm.frameworks-nightlies.amd.com/whl/gfx942-gfx950/flydsl/" \
+        PIP_PRE=1 \
+        GPU_ARCHS=native pip install -e .)
     "$@"
     pip uninstall -y amd-aiter
 }
