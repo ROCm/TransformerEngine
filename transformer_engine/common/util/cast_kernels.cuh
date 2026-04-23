@@ -165,6 +165,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
 
 #ifndef __HIP_PLATFORM_AMD__
+  // TMA mbarriers require the expected byte count to know when the async copy is done.
+  // TDM does not need this — it uses s_wait_tensorcnt which counts outstanding ops, not bytes.
   constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
 #endif
 

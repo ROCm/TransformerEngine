@@ -92,6 +92,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   constexpr int shmem_buff_size = sizeof(in_sh) / BUFFERS_NUM;
 #ifndef __HIP_PLATFORM_AMD__
+  // TMA mbarriers require the expected byte count to know when the async copy is done.
+  // TDM does not need this — it uses s_wait_tensorcnt which counts outstanding ops, not bytes.
   constexpr int transaction_size = shmem_buff_size;
 #endif
 

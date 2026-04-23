@@ -78,11 +78,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #endif
                           float *const amax_ptr, float *const scale_inv_ptr,
                           const float *const scale_ptr, const size_t rows, const size_t cols
-#ifdef __HIP_PLATFORM_AMD__
-                          , const size_t input_act_stride, const size_t output_stride
-#endif
                           ) {
 #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
+
+#ifdef __HIP_PLATFORM_AMD__
+  // TDM needs explicit strides. For gated inputs, act and gate are interleaved → stride = 2*cols.
+  // For outputs, IS_DGATED interleaves dact/dgate → stride = 2*cols; otherwise stride = cols.
+  const size_t input_act_stride = cols * 2;
+  const size_t output_stride = IS_DGATED ? cols * 2 : cols;
+#endif
 
   const size_t chunk_offset_Y = blockIdx.y * CHUNK_DIM_Y;
   const size_t chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
@@ -123,6 +127,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   constexpr size_t out_act_mem = buff_size_aligned_out;
 #ifndef __HIP_PLATFORM_AMD__
+  // TMA mbarriers require the expected byte count to know when the async copy is done.
+  // TDM does not need this — it uses s_wait_tensorcnt which counts outstanding ops, not bytes.
   constexpr size_t in_transaction_size = buff_elems * sizeof(IType);
 #endif
 
@@ -440,13 +446,17 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                             e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
                             const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
                             const size_t scale_stride_colwise
-#ifdef __HIP_PLATFORM_AMD__
-                            , const size_t input_act_stride, const size_t output_stride
-#endif
                             ) {
 #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
   using IType2 = typename ptx::FPx2<IType>;
   using OType2 = typename ptx::FPx2<OType>;
+
+#ifdef __HIP_PLATFORM_AMD__
+  // TDM needs explicit strides. For gated inputs, act and gate are interleaved → stride = 2*cols.
+  // For outputs, IS_DGATED interleaves dact/dgate → stride = 2*cols; otherwise stride = cols.
+  const size_t input_act_stride = cols * 2;
+  const size_t output_stride = IS_DGATED ? cols * 2 : cols;
+#endif
 
   constexpr size_t STAGES = CHUNK_DIM_Y / BUFF_DIM_Y;
   static_assert(STAGES >= 1);
@@ -1192,8 +1202,7 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
           <<<grid_dim, block_dim, shmem_size, stream>>>(
               grad_ptr, input_act_ptr, input_gate_ptr,
               output_act_ptr, output_gate_ptr,
-              amax_ptr, scale_inv_ptr, scale_ptr, rows, cols,
-              cols * 2, output_cols);
+              amax_ptr, scale_inv_ptr, scale_ptr, rows, cols);
           NVTE_CHECK_CUDA(cudaGetLastError());
 #else
           alignas(64) CUtensorMap tensor_map_grad{};
@@ -1453,8 +1462,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr,
-                      rows, cols, scale_stride_rowwise, scale_stride_colwise,
-                      cols * 2, output_cols);
+                      rows, cols, scale_stride_rowwise, scale_stride_colwise);
               NVTE_CHECK_CUDA(cudaGetLastError());
             };
 
