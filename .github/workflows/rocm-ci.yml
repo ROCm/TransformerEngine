@@ -110,7 +110,7 @@ jobs:
 
       - name: Initialize required submodules
         run: |
-          git submodule update --init --recursive \
+          git submodule update --init --recursive --depth 1 \
             3rdparty/aotriton \
             3rdparty/aiter \
             3rdparty/hipify_torch
@@ -170,7 +170,7 @@ jobs:
 
       - name: Initialize required submodules
         run: |
-          git submodule update --init --recursive \
+          git submodule update --init --recursive --depth 1 \
             3rdparty/googletest \
             3rdparty/hipify_torch
 
