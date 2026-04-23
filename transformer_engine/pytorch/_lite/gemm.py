@@ -40,6 +40,68 @@ from collections import Counter as _GemmCounter
 _GEMM_CALLS = _GemmCounter()
 _GEMM_BACKEND_PRINTED = False
 _CK_FAIL_DIAG_PRINTS = 0
+_SCALED_MM_FAIL_DIAG_PRINTS = 0
+_SCALED_MM_FAIL_DIAG_MAX = 5
+
+
+def _log_scaled_mm_fail(reason, A, transA, B, transB, x=None, w=None,
+                        x_scale=None, w_scale=None, M=None, N=None,
+                        effective_transA=None, effective_transB=None, err=None):
+    """Log the first _SCALED_MM_FAIL_DIAG_MAX rejections from _try_scaled_mm.
+
+    Gated by NVTE_LITE_DIAG. Captures shapes, dtypes, scale layout, and the
+    transpose-only state of the operands so we can classify the fallthrough
+    pattern (per-row on reduction axis vs shape mismatch vs library reject).
+    """
+    if not _LITE_DIAG:
+        return
+    global _SCALED_MM_FAIL_DIAG_PRINTS
+    if _SCALED_MM_FAIL_DIAG_PRINTS >= _SCALED_MM_FAIL_DIAG_MAX:
+        return
+    _SCALED_MM_FAIL_DIAG_PRINTS += 1
+
+    def _fmt_scale(s):
+        if s is None:
+            return "None"
+        return f"shape={tuple(s.shape)} numel={s.numel()} dtype={s.dtype}"
+
+    def _fmt_operand(t, name):
+        if t is None:
+            return f"{name}=None"
+        trans_only = _is_transpose_only(t)
+        return (f"{name}: shape={tuple(t.shape)} "
+                f"dtype={getattr(t, 'dtype', '?')} "
+                f"transpose_only={trans_only}")
+
+    bits = [
+        f"[LITE-SCALED-MM-FAIL #{_SCALED_MM_FAIL_DIAG_PRINTS}] reason={reason}",
+        _fmt_operand(A, "A") + f" transA={transA}",
+        _fmt_operand(B, "B") + f" transB={transB}",
+    ]
+    if effective_transA is not None or effective_transB is not None:
+        bits.append(
+            f"eff_transA={effective_transA} eff_transB={effective_transB}"
+        )
+    if x is not None:
+        bits.append(
+            f"x: shape={tuple(x.shape)} dtype={x.dtype} "
+            f"stride_last={x.stride(-1)}"
+        )
+    if w is not None:
+        bits.append(
+            f"w: shape={tuple(w.shape)} dtype={w.dtype} "
+            f"stride_last={w.stride(-1)}"
+        )
+    bits.append(f"x_scale: {_fmt_scale(x_scale)}")
+    bits.append(f"w_scale: {_fmt_scale(w_scale)}")
+    if M is not None or N is not None:
+        bits.append(f"M={M} N={N}")
+    if err is not None:
+        msg = str(err)
+        if len(msg) > 200:
+            msg = msg[:200] + "..."
+        bits.append(f"err={type(err).__name__}: {msg}")
+    print(" | ".join(bits), flush=True)
 
 def _gemm_bump(tag):
     if not _LITE_DIAG:
@@ -322,6 +384,7 @@ def _try_scaled_mm(A, transA, B, transB, output_dtype):
 
     # Block-scaled uses a different scale layout — fall through.
     if _is_blockwise_fp8(A) or _is_blockwise_fp8(B):
+        _log_scaled_mm_fail("blockwise_fp8", A, transA, B, transB)
         return None
 
     a_data, a_scale = _get_raw_data(A)
@@ -355,13 +418,28 @@ def _try_scaled_mm(A, transA, B, transB, output_dtype):
     M = x.shape[0]
     N = w.shape[0]
     if _is_per_row_scaled(x_scale) and x_scale.numel() != M:
+        _log_scaled_mm_fail("per_row_on_reduction_x", A, transA, B, transB,
+                            x=x, w=w, x_scale=x_scale, w_scale=w_scale,
+                            M=M, N=N,
+                            effective_transA=effective_transA,
+                            effective_transB=effective_transB)
         return None
     if _is_per_row_scaled(w_scale) and w_scale.numel() != N:
+        _log_scaled_mm_fail("per_row_on_reduction_w", A, transA, B, transB,
+                            x=x, w=w, x_scale=x_scale, w_scale=w_scale,
+                            M=M, N=N,
+                            effective_transA=effective_transA,
+                            effective_transB=effective_transB)
         return None
 
     x_scale_2d = _reshape_scale_for_scaled_mm(x_scale, M, is_row=True)
     w_scale_2d = _reshape_scale_for_scaled_mm(w_scale, N, is_row=False)
     if x_scale_2d is None or w_scale_2d is None:
+        _log_scaled_mm_fail("scale_shape_mismatch", A, transA, B, transB,
+                            x=x, w=w, x_scale=x_scale, w_scale=w_scale,
+                            M=M, N=N,
+                            effective_transA=effective_transA,
+                            effective_transB=effective_transB)
         return None
 
     out_dtype = output_dtype if output_dtype is not None else torch.bfloat16
@@ -372,7 +450,13 @@ def _try_scaled_mm(A, transA, B, transB, output_dtype):
             scale_a=x_scale_2d, scale_b=w_scale_2d,
             out_dtype=out_dtype,
         )
-    except (RuntimeError, TypeError):
+    except (RuntimeError, TypeError) as _sm_err:
+        _log_scaled_mm_fail("torch._scaled_mm_raised", A, transA, B, transB,
+                            x=x, w=w, x_scale=x_scale_2d, w_scale=w_scale_2d,
+                            M=M, N=N,
+                            effective_transA=effective_transA,
+                            effective_transB=effective_transB,
+                            err=_sm_err)
         return None
 
     if len(x_leading) > 1:
