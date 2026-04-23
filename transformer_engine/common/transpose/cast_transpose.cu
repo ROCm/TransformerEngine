@@ -307,7 +307,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
                         rem, row_length, row_length, num_rows);
               }
               NVTE_CHECK_CUDA(cudaGetLastError());
-            } else
+            } else {
 #endif  // #ifdef __HIP_PLATFORM_AMD__
               {
             // Choose between runtime-compiled or statically-compiled kernel
@@ -474,6 +474,9 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
               NVTE_CHECK_CUDA(cudaGetLastError());
             }
               }
+#ifdef __HIP_PLATFORM_AMD__
+            }
+#endif  // #ifdef __HIP_PLATFORM_AMD__
           } else {
             NVTE_ERROR("Not implemented scaling mode: ", to_string(output.scaling_mode));
           });  // NOLINT(*)
