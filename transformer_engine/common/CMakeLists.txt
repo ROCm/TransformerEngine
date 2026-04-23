@@ -503,7 +503,7 @@ else()
   make_string_header_from_file(transpose/rtc/cast_transpose_fusion.hip
                               string_code_transpose_rtc_cast_transpose_fusion_cu)
   make_string_header_from_file(transpose/rtc/cast_transpose.hip
-                              string_code_transpose_rtc_cast_transpose_cu)
+                             string_code_transpose_rtc_cast_transpose_cu)
   make_string_header_from_file(transpose/rtc/transpose.hip
                               string_code_transpose_rtc_transpose_cu)
   make_string_header_from_file(transpose/rtc/swap_first_dims.hip
