@@ -96,7 +96,9 @@ run_test_config(){
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_fusible_ops.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 triton_kernels/test_cast.py
     run_default_fa 1 nvfp4/
-    with_aiter run_default_fa 1 mxfp4/
+    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
+        with_aiter run_default_fa 1 mxfp4/
+    fi
 }
 
 run_test_config_mgpu(){
