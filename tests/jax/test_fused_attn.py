@@ -1541,6 +1541,7 @@ def _run_deterministic_bwd_case(
         dtype=dtype,
         is_training=True,
         qkv_layout=qkv_layout,
+        bias_shape=BiasShape._1HSS,
         window_size=None,
         seq_desc_format=SeqDescFormat.Seqlens,
     )
