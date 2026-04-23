@@ -26,6 +26,7 @@ main() {
         "bench_quantize_mxfp8_fused"
         "bench_dequantize_mxfp8"
         "bench_gated_mxfp8"
+        "bench_casttranspose"
     )
 
     FAILED_BENCHMARKS=()
