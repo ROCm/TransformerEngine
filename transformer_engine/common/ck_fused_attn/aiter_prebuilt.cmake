@@ -88,7 +88,16 @@ function(download_aiter_prebuilt ROCM_VER_PARAM DOWNLOAD_SUCCESS)
   # Check if ${KEY}.tar.gz exists in the URL provided.
   file(DOWNLOAD "${FILE_URL}.sha256" "/tmp/aiter_prebuilt_sha256.txt" STATUS sha_status LOG sha_log)
   list(GET sha_status 0 sha_code)
+  string(REPLACE ";" ", " _aiter_sha_status_str "${sha_status}")
+  execute_process(
+    COMMAND sh -c "df -h /tmp 2>&1; echo ---; du -sh /tmp 2>&1"
+    OUTPUT_VARIABLE _aiter_tmp_storage_info
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+  )
+  message(STATUS "[AITER-PREBUILT] sha256 probe: STATUS=[${_aiter_sha_status_str}] code=${sha_code}")
+  message(STATUS "[AITER-PREBUILT] /tmp storage (df /tmp, then du -sh /tmp):\n${_aiter_tmp_storage_info}")
   if(NOT sha_code EQUAL 0)
+    message(STATUS "[AITER-PREBUILT] sha256 download log: ${sha_log}")
     message(STATUS " [AITER-PREBUILT] File with Key=${KEY} is not available at the NVTE_AITER_PREBUILT_BASE_URL provided.")
     return()
   endif()
