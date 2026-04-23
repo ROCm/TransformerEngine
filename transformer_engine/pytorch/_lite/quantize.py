@@ -14,10 +14,15 @@ fallback path, because in lite mode tex IS this module — that would recurse.
 
 import os
 import torch
+
+_LITE_DIAG = os.environ.get("NVTE_LITE_DIAG", "0") != "0"
+
 from collections import Counter as _QuantCounter
 _QUANT_CALLS = _QuantCounter()
 
 def _quant_bump(tag):
+    if not _LITE_DIAG:
+        return
     _QUANT_CALLS[tag] += 1
     if sum(_QUANT_CALLS.values()) % 500 == 0:
         print(f"[LITE-QUANT] {dict(_QUANT_CALLS)}", flush=True)
@@ -379,25 +384,26 @@ def quantize(tensor, quantizer, output=None, noop=None):
     # --- Triton dispatch ---
     if _Float8TensorStorage and isinstance(out, _Float8TensorStorage):
         if input_tensor.nelement() > 0:
-            global _FP8_FALLBACK_DIAG_PRINTS
-            if _FP8_FALLBACK_DIAG_PRINTS < _FP8_FALLBACK_DIAG_MAX:
-                _FP8_FALLBACK_DIAG_PRINTS += 1
-                # Also read usage from the quantizer copy the tensor holds —
-                # that's what _setup_conditional_transpose_storage looked at.
-                stored_q = getattr(out, "_quantizer", None)
-                stored_rw = getattr(stored_q, "rowwise_usage", "MISSING")
-                stored_cw = getattr(stored_q, "columnwise_usage", "MISSING")
-                print(
-                    f"[LITE-QUANT-DIAG #{_FP8_FALLBACK_DIAG_PRINTS}] Float8 path: "
-                    f"qt={type(quantizer).__name__}, "
-                    f"live_q.rw={getattr(quantizer, 'rowwise_usage', '?')}, "
-                    f"live_q.cw={getattr(quantizer, 'columnwise_usage', '?')}, "
-                    f"stored_q.rw={stored_rw}, stored_q.cw={stored_cw}, "
-                    f"transpose_none={out._transpose is None}, "
-                    f"transpose_invalid={out._transpose_invalid}, "
-                    f"shape={tuple(input_tensor.shape)}",
-                    flush=True,
-                )
+            if _LITE_DIAG:
+                global _FP8_FALLBACK_DIAG_PRINTS
+                if _FP8_FALLBACK_DIAG_PRINTS < _FP8_FALLBACK_DIAG_MAX:
+                    _FP8_FALLBACK_DIAG_PRINTS += 1
+                    # Also read usage from the quantizer copy the tensor holds —
+                    # that's what _setup_conditional_transpose_storage looked at.
+                    stored_q = getattr(out, "_quantizer", None)
+                    stored_rw = getattr(stored_q, "rowwise_usage", "MISSING")
+                    stored_cw = getattr(stored_q, "columnwise_usage", "MISSING")
+                    print(
+                        f"[LITE-QUANT-DIAG #{_FP8_FALLBACK_DIAG_PRINTS}] Float8 path: "
+                        f"qt={type(quantizer).__name__}, "
+                        f"live_q.rw={getattr(quantizer, 'rowwise_usage', '?')}, "
+                        f"live_q.cw={getattr(quantizer, 'columnwise_usage', '?')}, "
+                        f"stored_q.rw={stored_rw}, stored_q.cw={stored_cw}, "
+                        f"transpose_none={out._transpose is None}, "
+                        f"transpose_invalid={out._transpose_invalid}, "
+                        f"shape={tuple(input_tensor.shape)}",
+                        flush=True,
+                    )
             if _triton_cast_transpose_noop is not None:
                 # Triton cast+transpose. The kernel always writes a transpose,
                 # so when the caller didn't ask for columnwise data we pass a

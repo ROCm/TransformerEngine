@@ -29,12 +29,16 @@ _FP8_DTYPES = (
 
 _GEMM_BACKEND = os.environ.get("NVTE_LITE_GEMM_BACKEND", "ck").lower()
 
+_LITE_DIAG = os.environ.get("NVTE_LITE_DIAG", "0") != "0"
+
 from collections import Counter as _GemmCounter
 _GEMM_CALLS = _GemmCounter()
 _GEMM_BACKEND_PRINTED = False
 _CK_FAIL_DIAG_PRINTS = 0
 
 def _gemm_bump(tag):
+    if not _LITE_DIAG:
+        return
     global _GEMM_BACKEND_PRINTED
     if not _GEMM_BACKEND_PRINTED:
         _GEMM_BACKEND_PRINTED = True
@@ -379,18 +383,19 @@ def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
                     try:
                         result = aiter.gemm_a8w8_CK(x, w, x_scale_ck, w_scale_ck)
                     except RuntimeError as _ck_err:
-                        global _CK_FAIL_DIAG_PRINTS
-                        if _CK_FAIL_DIAG_PRINTS < 5:
-                            _CK_FAIL_DIAG_PRINTS += 1
-                            print(
-                                f"[LITE-GEMM-CK-FAIL #{_CK_FAIL_DIAG_PRINTS}] "
-                                f"x={tuple(x.shape)}/{x.dtype}/contig={x.is_contiguous()} "
-                                f"w={tuple(w.shape)}/{w.dtype}/contig={w.is_contiguous()} "
-                                f"x_scale_ck={tuple(x_scale_ck.shape)} "
-                                f"w_scale_ck={tuple(w_scale_ck.shape)} "
-                                f"err={type(_ck_err).__name__}: {_ck_err}",
-                                flush=True,
-                            )
+                        if _LITE_DIAG:
+                            global _CK_FAIL_DIAG_PRINTS
+                            if _CK_FAIL_DIAG_PRINTS < 5:
+                                _CK_FAIL_DIAG_PRINTS += 1
+                                print(
+                                    f"[LITE-GEMM-CK-FAIL #{_CK_FAIL_DIAG_PRINTS}] "
+                                    f"x={tuple(x.shape)}/{x.dtype}/contig={x.is_contiguous()} "
+                                    f"w={tuple(w.shape)}/{w.dtype}/contig={w.is_contiguous()} "
+                                    f"x_scale_ck={tuple(x_scale_ck.shape)} "
+                                    f"w_scale_ck={tuple(w_scale_ck.shape)} "
+                                    f"err={type(_ck_err).__name__}: {_ck_err}",
+                                    flush=True,
+                                )
                         raise
                     if len(x_leading_shape) > 1:
                         result = result.reshape(*x_leading_shape, result.shape[-1])

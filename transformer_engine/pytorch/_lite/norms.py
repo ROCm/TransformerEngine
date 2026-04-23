@@ -20,14 +20,20 @@ Fused norm+quantize is used when a compatible quantizer is provided in the
 forward pass. Otherwise falls back to norm -> quantizer.quantize() separately.
 """
 
+import os
+
 import torch
 
 from .aiter_utils import is_aiter_available
+
+_LITE_DIAG = os.environ.get("NVTE_LITE_DIAG", "0") != "0"
 
 from collections import Counter as _NormCounter
 _NORM_CALLS = _NormCounter()
 
 def _norm_bump(tag):
+    if not _LITE_DIAG:
+        return
     _NORM_CALLS[tag] += 1
     if sum(_NORM_CALLS.values()) % 500 == 0:
         print(f"[LITE-NORM] {dict(_NORM_CALLS)}", flush=True)
@@ -105,11 +111,12 @@ def _try_load_aiter_norms():
             if _fused_static is not None or _fused_group is not None:
                 break
         except BaseException as _e:
-            print(
-                f"[LITE-NORM-DIAG] {_mod_path} import failed: "
-                f"{type(_e).__name__}: {_e}",
-                flush=True,
-            )
+            if _LITE_DIAG:
+                print(
+                    f"[LITE-NORM-DIAG] {_mod_path} import failed: "
+                    f"{type(_e).__name__}: {_e}",
+                    flush=True,
+                )
     if _fused_static is not None:
         _aiter_fused_rms_fp8_static = _fused_static
     if _fused_group is not None:
@@ -319,18 +326,19 @@ def _try_fused_rmsnorm_quant(input_2d, weight, eps, quantizer, zero_centered_gam
     Returns (output, rsigma) on success, or None if fusion not possible.
     The output is a QuantizedTensor (Float8Tensor or MXFP8Tensor).
     """
-    global _FUSED_RMS_DIAG_PRINTED
-    if not _FUSED_RMS_DIAG_PRINTED:
-        _FUSED_RMS_DIAG_PRINTED = True
-        qtype = type(quantizer).__name__ if quantizer is not None else "None"
-        print(
-            f"[LITE-NORM-DIAG] first fused-rms attempt: "
-            f"quantizer_type={qtype}, "
-            f"fused_dynamic={_aiter_fused_rms_dynamic_quant is not None}, "
-            f"fused_static={_aiter_fused_rms_fp8_static is not None}, "
-            f"fused_group={_aiter_fused_rms_fp8_group is not None}",
-            flush=True,
-        )
+    if _LITE_DIAG:
+        global _FUSED_RMS_DIAG_PRINTED
+        if not _FUSED_RMS_DIAG_PRINTED:
+            _FUSED_RMS_DIAG_PRINTED = True
+            qtype = type(quantizer).__name__ if quantizer is not None else "None"
+            print(
+                f"[LITE-NORM-DIAG] first fused-rms attempt: "
+                f"quantizer_type={qtype}, "
+                f"fused_dynamic={_aiter_fused_rms_dynamic_quant is not None}, "
+                f"fused_static={_aiter_fused_rms_fp8_static is not None}, "
+                f"fused_group={_aiter_fused_rms_fp8_group is not None}",
+                flush=True,
+            )
 
     if orig_shape is None:
         orig_shape = input_2d.shape

@@ -22,10 +22,14 @@ from .enums import (
 )
 
 # --- Debug dispatch counter (matches _lite/gemm.py probe style) ---
+_LITE_DIAG = os.environ.get("NVTE_LITE_DIAG", "0") != "0"
+
 from collections import Counter as _AttnCounter
 _ATTN_CALLS = _AttnCounter()
 
 def _attn_bump(tag):
+    if not _LITE_DIAG:
+        return
     _ATTN_CALLS[tag] += 1
     if sum(_ATTN_CALLS.values()) % 500 == 0:
         print(f"[LITE-ATTN] {dict(_ATTN_CALLS)}", flush=True)
