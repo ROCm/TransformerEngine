@@ -44,78 +44,6 @@ def _gemm_bump(tag):
         print(f"[LITE-GEMM] {dict(_GEMM_CALLS)}", flush=True)
 
 
-# AITER's Triton FP8 GEMM kernels are tuned only at power-of-2 M; their own
-# tuner (screen.py) asserts M == next_power_of_2(M). Non-pow2 M falls through
-# to a slow default config. Pad M up to the next pow2 when the pad ratio is
-# small, slice back after the kernel. CK kernels handle non-pow2 M fine and
-# are not affected.
-_PAD_M_ENABLED = os.environ.get("NVTE_LITE_GEMM_PAD_M", "1") != "0"
-# Net-positive when tuned-vs-default speedup S exceeds 1/(1-ratio). Default
-# 0.33 assumes S ≥ ~1.5× (observed default-config Triton is 3-4× slower than
-# tuned on these shapes, so 0.33 leaves headroom). Tune via env var.
-_PAD_M_MAX_RATIO = float(os.environ.get("NVTE_LITE_GEMM_PAD_M_MAX_RATIO", "0.33"))
-
-
-def _next_pow2(n):
-    return 1 if n <= 1 else 1 << (n - 1).bit_length()
-
-
-def _pad_rows_fp8(x, new_rows):
-    """Zero-pad FP8/uint8 2D tensor along dim 0 via a uint8-level copy.
-    Byte 0x00 decodes as 0.0 in every FP8 flavor, so the padded rows
-    contribute nothing to the GEMM result; callers must slice back.
-    """
-    M = x.shape[0]
-    if new_rows <= M:
-        return x
-    u8_src = x if x.dtype == torch.uint8 else x.view(torch.uint8)
-    padded_u8 = torch.empty(
-        (new_rows, *u8_src.shape[1:]),
-        dtype=torch.uint8, device=x.device,
-    )
-    padded_u8[:M].copy_(u8_src)
-    padded_u8[M:].zero_()
-    return padded_u8 if x.dtype == torch.uint8 else padded_u8.view(x.dtype)
-
-
-def _pad_per_row_scale(scale, new_rows):
-    """Pad per-row scale along dim 0 with 1.0. Padded rows' outputs are
-    discarded, so the fill value only has to be finite and non-pathological.
-    """
-    M = scale.shape[0]
-    if new_rows <= M:
-        return scale
-    out_shape = (new_rows,) if scale.ndim == 1 else (new_rows, *scale.shape[1:])
-    padded = torch.full(out_shape, 1.0, dtype=scale.dtype, device=scale.device)
-    padded[:M].copy_(scale)
-    return padded
-
-
-def _maybe_pad_m_for_triton(x, x_scale):
-    """Round x.shape[0] up to next power of 2 when pad ratio is small.
-    Returns (x_out, x_scale_out, orig_M, padded).
-
-    Per-row scales (whose dim-0 matches orig_M) are padded in lockstep;
-    per-tensor (scalar) and block-scaled scales are left alone — they remain
-    valid over the padded rows.
-    """
-    orig_M = x.shape[0]
-    if not _PAD_M_ENABLED:
-        return x, x_scale, orig_M, False
-    new_M = _next_pow2(orig_M)
-    if new_M == orig_M:
-        return x, x_scale, orig_M, False
-    if (new_M - orig_M) > _PAD_M_MAX_RATIO * new_M:
-        return x, x_scale, orig_M, False
-    x_padded = _pad_rows_fp8(x, new_M)
-    x_scale_padded = x_scale
-    if (x_scale is not None and x_scale.ndim >= 1
-            and x_scale.shape[0] == orig_M):
-        x_scale_padded = _pad_per_row_scale(x_scale, new_M)
-    _gemm_bump("triton_pad_m")
-    return x_padded, x_scale_padded, orig_M, True
-
-
 def _resolve_output_dtype(output_dtype):
     """Normalize output_dtype (TE_DType | torch.dtype | None) to torch.dtype.
 
@@ -608,21 +536,15 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
                     w_scale = w_scale.expand(w.shape[0]).unsqueeze(1)
                 elif w_scale is not None and w_scale.ndim == 1:
                     w_scale = w_scale.unsqueeze(1)
-                x, x_scale, orig_M, padded_m = _maybe_pad_m_for_triton(x, x_scale)
                 _gemm_bump("triton_per_row")
                 result = triton_a8w8_pt(x, w, x_scale, w_scale)
-                if padded_m:
-                    result = result[:orig_M]
             elif (_is_block_scaled(x_scale) or _is_block_scaled(w_scale)
                     or a_is_blockwise or b_is_blockwise):
                 from aiter.ops.triton.gemm_a8w8_blockscale import (
                     gemm_a8w8_blockscale as triton_a8w8_bs,
                 )
-                x, x_scale, orig_M, padded_m = _maybe_pad_m_for_triton(x, x_scale)
                 _gemm_bump("triton_blockscale")
                 result = triton_a8w8_bs(x, w, x_scale, w_scale)
-                if padded_m:
-                    result = result[:orig_M]
             else:
                 # Per-tensor FP8. gemm_a8w8 indexes the scale pointer by row
                 # (A) / col (B), so a scalar (1,) scale reads out of bounds
@@ -631,13 +553,10 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
                 from aiter.ops.triton.gemm_a8w8 import (
                     gemm_a8w8 as triton_a8w8,
                 )
-                x, x_scale, orig_M, padded_m = _maybe_pad_m_for_triton(x, x_scale)
                 x_scale_exp = x_scale.expand(x.shape[0]).contiguous()
                 w_scale_exp = w_scale.expand(w.shape[0]).contiguous()
                 _gemm_bump("triton_per_tensor")
                 result = triton_a8w8(x, w, x_scale_exp, w_scale_exp)
-                if padded_m:
-                    result = result[:orig_M]
 
             # Restore the leading N-D shape from x (B operand) on the result
             if len(x_leading) > 1:
