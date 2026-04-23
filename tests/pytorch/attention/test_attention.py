@@ -2991,7 +2991,7 @@ _DETERMINISTIC_LAYOUT_MASK_COMBOS = [
 
 
 @pytest.mark.skipif(
-    not IS_HIP_EXTENSION, reason="Deterministic backward only applies to AMD hardware"
+    not IS_HIP_EXTENSION, reason="CK split-accumulator deterministic backward is ROCm-only"
 )
 @pytest.mark.skipif(not _deterministic, reason="Test determinism only")
 @pytest.mark.parametrize(
