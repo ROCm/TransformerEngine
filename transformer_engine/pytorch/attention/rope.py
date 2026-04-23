@@ -33,8 +33,7 @@ if IS_HIP_EXTENSION and _USE_AITER_ROPE:
         _HAVE_AITER_ROPE = True
     except Exception as _aiter_import_err:  # pylint: disable=broad-except
         raise RuntimeError(
-            f"NVTE_USE_AITER_ROPE=1 but AITER fused RoPE import failed: "
-            f"{type(_aiter_import_err).__name__}: {_aiter_import_err}"
+            f"NVTE_USE_AITER_ROPE=1 but AITER fused RoPE import failed."
         ) from _aiter_import_err
 
 
