@@ -164,7 +164,7 @@ class MXFP4Quantizer(Quantizer):
         
         # Allocate PADDED scale tensors for shuffle compatibility
         rowwise_scale_K = math.ceil(K / MXFP4_BLOCK_SCALING_SIZE)
-        rowwise_scale_inv = torch.zeros(
+        rowwise_scale_inv = torch.empty(
                 round_up_to_nearest_multiple(M, 256),
                 round_up_to_nearest_multiple(rowwise_scale_K, 8),
                 dtype=torch.uint8,
@@ -179,7 +179,7 @@ class MXFP4Quantizer(Quantizer):
                 _logical_to_columnwise_data_shape(tuple(shape)), dtype=torch.uint8, device=device
             )
             colwise_scale_M = math.ceil(M / MXFP4_BLOCK_SCALING_SIZE)
-            columnwise_scale_inv = torch.zeros(
+            columnwise_scale_inv = torch.empty(
                     round_up_to_nearest_multiple(K, 256),
                     round_up_to_nearest_multiple(colwise_scale_M, 8),
                     dtype=torch.uint8,
