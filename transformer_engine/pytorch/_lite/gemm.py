@@ -23,6 +23,7 @@ Set NVTE_LITE_GEMM_BACKEND to override:
 
 import os
 import torch
+import torch.nn.functional as F
 
 from .aiter_utils import is_aiter_available, get_aiter
 
@@ -442,6 +443,29 @@ def _try_scaled_mm(A, transA, B, transB, output_dtype):
                             effective_transB=effective_transB)
         return None
 
+    # hipBLASLt FP8 kernels require mat1's dims divisible by 16. When the
+    # tokens count isn't a clean multiple (e.g. 8184 = 2046×4), we pad the
+    # M axis of x (and its per-row scale) with zeros/ones up to the next
+    # multiple, run the GEMM, and slice the result back. K-dim misalignment
+    # hits in the wgrad corner (K = tokens after transpose) — that case also
+    # has separate per-row-on-reduction issues, so we skip it here and let
+    # the caller fall through to AITER.
+    K = x.shape[1]
+    if K % 16 != 0:
+        _log_scaled_mm_fail("k_not_div16", A, transA, B, transB,
+                            x=x, w=w, x_scale=x_scale_2d, w_scale=w_scale_2d,
+                            M=M, N=N,
+                            effective_transA=effective_transA,
+                            effective_transB=effective_transB)
+        return None
+
+    pad_rows = (-M) % 16
+    if pad_rows:
+        x = F.pad(x, (0, 0, 0, pad_rows))  # zero-pad new rows
+        # Scale rows for the padded entries: value is irrelevant (scale × 0 = 0),
+        # but must be non-NaN/Inf. 1.0 is safe.
+        x_scale_2d = F.pad(x_scale_2d, (0, 0, 0, pad_rows), value=1.0)
+
     out_dtype = output_dtype if output_dtype is not None else torch.bfloat16
 
     try:
@@ -458,6 +482,9 @@ def _try_scaled_mm(A, transA, B, transB, output_dtype):
                             effective_transB=effective_transB,
                             err=_sm_err)
         return None
+
+    if pad_rows:
+        result = result[:M]
 
     if len(x_leading) > 1:
         result = result.reshape(*x_leading, result.shape[-1])
