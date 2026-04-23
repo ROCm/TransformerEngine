@@ -639,6 +639,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   }
 
 #ifndef __HIP_PLATFORM_AMD__
+  // TDM does not use mbarriers — it uses s_wait_tensorcnt, so no barrier destroy is needed.
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #else
   tdm::wait_tensorcnt_0();
@@ -927,6 +928,7 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
   }
 
 #ifndef __HIP_PLATFORM_AMD__
+  // TDM does not use mbarriers — it uses s_wait_tensorcnt, so no barrier destroy is needed.
   destroy_barriers<FP8_ITERATIONS>(mbar, is_master_thread);
 #else
   tdm::wait_tensorcnt_0();

@@ -274,6 +274,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   // Destroy barrier. This invalidates the memory region of the barrier. If
   // further computations were to take place in the kernel, this allows the
   // memory location of the shared memory barrier to be reused.
+  // TDM does not use mbarriers — it uses s_wait_tensorcnt, so no barrier destroy is needed.
   if (is_master_thread) {
 #pragma unroll
     for (int iter = 0; iter < ITERATIONS; ++iter) {

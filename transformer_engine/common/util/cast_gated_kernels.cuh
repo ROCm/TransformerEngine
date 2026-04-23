@@ -77,8 +77,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                           const __grid_constant__ CUtensorMap tensor_map_output_gate,
 #endif
                           float *const amax_ptr, float *const scale_inv_ptr,
-                          const float *const scale_ptr, const size_t rows, const size_t cols
-                          ) {
+                          const float *const scale_ptr, const size_t rows, const size_t cols) {
 #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
 
 #ifdef __HIP_PLATFORM_AMD__
@@ -385,6 +384,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   // Destroy the barriers. This invalidates the memory region of the barrier.
   // If further computations were to take place in the kernel, this allows the
   // memory location of the shared memory barrier to be reused.
+  // TDM does not use mbarriers — it uses s_wait_tensorcnt, so no barrier destroy is needed.
   if (is_master_thread) {
 #pragma unroll
     for (int it = 0; it < ITERATIONS; ++it) {
@@ -445,8 +445,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #endif
                             e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
                             const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
-                            const size_t scale_stride_colwise
-                            ) {
+                            const size_t scale_stride_colwise) {
 #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
   using IType2 = typename ptx::FPx2<IType>;
   using OType2 = typename ptx::FPx2<OType>;
@@ -604,8 +603,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         BUFF_DIM_X, BUFF_DIM_Y,
         cols, rows, input_act_stride, mx_in_data_sz);
   }
-  tdm::wait_tensorcnt_0();
-  __syncthreads();
 #endif  // __HIP_PLATFORM_AMD__
 
 #pragma unroll
@@ -669,7 +666,19 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[stage], parity);
 #else
-    tdm::wait_tensorcnt_0();
+    // Wait for current buffer's loads (and any prior stores) to complete,
+    // but keep the just-issued prefetch for the next buffer alive.
+    if (next_stage < STAGES) {
+      // Prefetch in flight: IS_DGATED issued 3 ops (1+2), non-dgated issued 2 ops
+      if constexpr (IS_DGATED) {
+        tdm::wait_tensorcnt_3();
+      } else {
+        tdm::wait_tensorcnt_2();
+      }
+    } else {
+      // Last stage — drain all outstanding TDM ops
+      tdm::wait_tensorcnt_0();
+    }
     __syncthreads();
 #endif
 
@@ -1130,6 +1139,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
 #ifndef __HIP_PLATFORM_AMD__
   parity ^= 1;
+  // TDM does not use mbarriers — it uses s_wait_tensorcnt, so no barrier destroy is needed.
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #else
   tdm::wait_tensorcnt_0();
