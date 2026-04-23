@@ -7,11 +7,16 @@ from typing import Optional
 import functools
 import torch
 
-from ..utils import is_non_tn_fp8_gemm_supported
-
-from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
-from .cast_transpose import te_cast_transpose_mxfp4_triton, te_cast_transpose_mxfp8_triton, te_cast_transpose_noop_triton, te_dequantize_mxfp8_triton
 import transformer_engine_torch as tex
+
+from ..utils import is_non_tn_fp8_gemm_supported
+from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
+from .cast_transpose import (
+    te_cast_transpose_mxfp4_triton,
+    te_cast_transpose_mxfp8_triton,
+    te_cast_transpose_noop_triton,
+    te_dequantize_mxfp8_triton,
+)
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage

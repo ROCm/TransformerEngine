@@ -8,12 +8,15 @@
 from __future__ import annotations
 from collections.abc import Iterable
 import math
+import os
 
 from typing import Optional, Tuple, Union, Any
 import warnings
 
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
@@ -24,9 +27,7 @@ from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
 
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
-    import os
     from ..triton_kernels.cast import te_quantize_triton
 
 aten = torch.ops.aten

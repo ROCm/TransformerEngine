@@ -51,8 +51,8 @@ def _is_package_installed_from_wheel(package) -> bool:
     if not te_wheel_file:
         return False
 
-    with te_wheel_file.open("r") as wheel_f:
-        for line in wheel_f:
+    with te_wheel_file.open("r") as f:
+        for line in f:
             if line.startswith("Root-Is-Purelib:"):
                 return line.strip().split(":")[1].strip().lower() == "true"
     return False
@@ -412,16 +412,16 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
             for rocm_path in (os.getenv("ROCM_PATH"), "/opt/rocm/core", "/opt/rocm"):
                 if rocm_path and os.path.exists(os.path.join(rocm_path, ".info/version")):
                     break
-            with open(os.path.join(rocm_path, ".info/version"), "r", encoding="utf-8") as ver_file:
-                rocm_version = ver_file.read().strip().split(".")[:2]
+            with open(os.path.join(rocm_path, ".info/version"), "r", encoding="utf-8") as f:
+                rocm_version = f.read().strip().split(".")[:2]
 
             # Get ROCm version from the build info file
             with open(
                 Path(transformer_engine.__path__[0]).parent / "transformer_engine" / "build_info.txt",
                 "r",
                 encoding="utf-8",
-            ) as build_file:
-                build_info = build_file.read().split("\n")
+            ) as f:
+                build_info = f.read().split("\n")
             build_rocm_version = list(filter(lambda line: line.startswith("ROCM_VERSION:"), build_info))
             if build_rocm_version:
                 build_rocm_version = build_rocm_version[0].split(":")[1].strip().split('.')[:2]

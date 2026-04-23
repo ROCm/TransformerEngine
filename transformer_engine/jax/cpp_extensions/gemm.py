@@ -26,8 +26,6 @@ from transformer_engine_jax import (
     get_device_compute_capability,
 )
 
-from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
-
 from .base import BasePrimitive, register_primitive
 from .quantization import grouped_quantize
 
@@ -55,6 +53,8 @@ from ..sharding import (
     tpsp_axis_size,
     dp_or_fsdp_axis_size,
 )
+
+from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 
 if not is_hip_extension():
     from transformer_engine_jax import (

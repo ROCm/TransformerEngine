@@ -11,6 +11,7 @@ import math
 from typing import Any, Optional, Tuple, Union
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
@@ -19,8 +20,6 @@ from .storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStora
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
 from ..utils import devices_match, round_up_to_nearest_multiple
-
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 aten = torch.ops.aten
 

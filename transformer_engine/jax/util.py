@@ -1,6 +1,6 @@
 # Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
-"""Small JAX-side helpers shared across TE JAX code (ROCm detection, FP8 dtypes)."""
+"""JAX-side helpers shared across TE JAX code (ROCm detection, FP8 dtypes)."""
 
 import importlib.metadata
 import re
@@ -32,7 +32,7 @@ if is_hip_extension():
 
 @cache
 def is_fp8_fnuz():
-    """Return True when TE core reports FP8 FNUZ usage (matches subprocess TE check)."""
+    """Return True when TE core reports FP8 FNUZ usage."""
     if not is_hip_extension():
         return False
     proc = subprocess.run(
@@ -47,12 +47,5 @@ def is_fp8_fnuz():
     )
     return proc.returncode == 0
 
-
-def get_jnp_float8_e4m3_type():
-    """JAX FP8 e4m3 dtype for this platform (FNUZ on ROCm when applicable)."""
-    return jnp.float8_e4m3fnuz if is_fp8_fnuz() else jnp.float8_e4m3fn
-
-
-def get_jnp_float8_e5m2_type():
-    """JAX FP8 e5m2 dtype for this platform (FNUZ on ROCm when applicable)."""
-    return jnp.float8_e5m2fnuz if is_fp8_fnuz() else jnp.float8_e5m2
+get_jnp_float8_e4m3_type = lambda: jnp.float8_e4m3fnuz if is_fp8_fnuz() else jnp.float8_e4m3fn
+get_jnp_float8_e5m2_type = lambda: jnp.float8_e5m2fnuz if is_fp8_fnuz() else jnp.float8_e5m2

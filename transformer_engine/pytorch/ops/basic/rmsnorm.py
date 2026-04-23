@@ -13,14 +13,10 @@ import os
 from typing import Optional
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine_torch import rmsnorm_bwd, rmsnorm_fwd
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
-if IS_HIP_EXTENSION:
-    from ...triton_kernels.norms_common import (
-        te_rmsnorm_bwd_triton,
-        te_rmsnorm_fwd_triton
-    )
+
 from ...constants import TE_DType
 from ...cpu_offload import is_cpu_offload_enabled, mark_activation_offload
 from ...export import is_in_onnx_export_mode
@@ -33,6 +29,12 @@ from ...utils import (
 )
 from ..op import BasicOperation, OperationContext
 from .._common import maybe_autocast_dtype, maybe_dequantize
+
+if IS_HIP_EXTENSION:
+    from ...triton_kernels.norms_common import (
+        te_rmsnorm_bwd_triton,
+        te_rmsnorm_fwd_triton,
+    )
 
 
 class RMSNorm(BasicOperation):

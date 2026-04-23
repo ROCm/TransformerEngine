@@ -769,17 +769,16 @@ protected:
       }
 
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
-      if (cfg.scaling_mode < 0 ||
-          cfg.scaling_mode >= static_cast<int>(HIPBLASLT_MATMUL_MATRIX_SCALE_END)) {
-        std::cout << "[WARNING] Unsupported scaling mode at " << line << "\n";
-        continue;
-      }
+      const bool scaling_mode_unsupported =
+          cfg.scaling_mode < 0 ||
+          cfg.scaling_mode >= static_cast<int>(HIPBLASLT_MATMUL_MATRIX_SCALE_END);
 #else
-      if (cfg.scaling_mode != 0) {
+      const bool scaling_mode_unsupported = (cfg.scaling_mode != 0);
+#endif
+      if (scaling_mode_unsupported) {
         std::cout << "[WARNING] Unsupported scaling mode at " << line << "\n";
         continue;
       }
-#endif
 
       auto fp8_filter = te_fp8_fnuz()
                             ? [](const hipDataType& val) 

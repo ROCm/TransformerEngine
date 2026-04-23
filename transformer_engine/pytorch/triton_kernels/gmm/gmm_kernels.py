@@ -12,12 +12,13 @@ import json
 import os.path
 
 # Triton
-from ..common import get_arch
 import triton
 import triton.language as tl
 
 # PyTorch
 import torch
+
+from ..common import get_arch
 
 # AITER
 from .pid_preprocessing import pid_grid, remap_xcd

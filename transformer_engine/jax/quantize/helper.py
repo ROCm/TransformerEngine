@@ -26,8 +26,7 @@ import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 
-import transformer_engine_jax as tejax
-
+from transformer_engine_jax import DType
 from transformer_engine.common.recipe import (
     Recipe,
     DelayedScaling,
@@ -44,23 +43,17 @@ from transformer_engine.jax.sharding import (
     with_sharding_constraint,
 )
 
-from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
-from .device_utils import get_device_compute_capability
 from .metadata import QuantizeMeta
 from .scaling_modes import ScalingMode
+from .device_utils import get_device_compute_capability
+
+from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 
 if not is_hip_extension():
-    get_cublasLt_version = tejax.get_cublasLt_version
-    get_cuda_version = tejax.get_cuda_version
-else:
-
-    def get_cublasLt_version():
-        """CUDA-only; not used on ROCm code paths."""
-        raise RuntimeError("get_cublasLt_version is not available on ROCm")
-
-    def get_cuda_version():
-        """CUDA-only; not used on ROCm code paths."""
-        raise RuntimeError("get_cuda_version is not available on ROCm")
+    from transformer_engine_jax import (  # pylint: disable=ungrouped-imports
+        get_cublasLt_version,
+        get_cuda_version,
+    )
 
 __all__ = [
     "get_global_quantize_recipe",
@@ -312,8 +305,8 @@ class BaseQuantizeConfig(ABC):
     INITIALIZED = False
     MARGIN: float = 0.0
     COLLECTION_NAME: str = NVTE_FP8_COLLECTION_NAME
-    FWD_DTYPE: tejax.DType = None
-    BWD_DTYPE: tejax.DType = None
+    FWD_DTYPE: DType = None
+    BWD_DTYPE: DType = None
     FP8_2X_ACC_FPROP: bool = False
     FP8_2X_ACC_DGRAD: bool = False
     FP8_2X_ACC_WGRAD: bool = False

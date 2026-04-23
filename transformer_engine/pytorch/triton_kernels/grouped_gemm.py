@@ -3,11 +3,13 @@
 
 """Triton kernels for grouped GEMM"""
 
-import torch
 from typing import List, Optional
 
-from .gmm.gmm_wrapper import gmm, ptgmm
+import torch
+
 import transformer_engine_torch as tex
+
+from .gmm.gmm_wrapper import gmm, ptgmm
 
 
 def general_grouped_gemm_triton(  # pylint: disable=unused-argument

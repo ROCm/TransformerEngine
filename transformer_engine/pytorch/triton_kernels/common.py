@@ -1,11 +1,12 @@
 # Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
+from functools import cache
+
 import torch
 import triton
 import triton.language as tl
 import transformer_engine_torch as tex
-from functools import cache
 
 @cache
 def get_arch():

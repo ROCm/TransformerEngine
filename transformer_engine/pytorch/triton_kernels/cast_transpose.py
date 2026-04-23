@@ -1,17 +1,18 @@
 # Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-import torch
+import os
 
-from ..constants import MXFP8_BLOCK_SCALING_SIZE
+import torch
 import triton
 import triton.language as tl
+
+from ..constants import MXFP8_BLOCK_SCALING_SIZE
 from .common import (
     te_dtype_to_triton_dtype,
     te_dtype_to_torch_dtype,
     get_fp8_max,
 )
-import os
 
 ##########################################
 #### cast_transpose
