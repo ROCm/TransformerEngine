@@ -442,10 +442,10 @@ class FusedCastTransposeMXFP4TestSuite : public ::testing::TestWithParam
                 transformer_engine::DType>> {};
 
 TEST_P(FusedCastTransposeMXFP4TestSuite, TestFusedCastTransposeMXFP4) {
-hipDeviceProp_t prop;
-hipGetDeviceProperties(&prop, 0);
-if (!(prop.major > 9 || (prop.major == 9 && prop.minor == 5))) {
-    GTEST_SKIP() << "MXFP4 requires gfx950";
+    hipDeviceProp_t prop;
+    hipGetDeviceProperties(&prop, 0);
+    if (!(prop.major > 9 || (prop.major == 9 && prop.minor == 5))) {
+        GTEST_SKIP() << "MXFP4 requires gfx950";
 }
 
     using namespace transformer_engine;
