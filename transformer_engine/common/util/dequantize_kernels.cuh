@@ -83,8 +83,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   // The destination shared memory buffer of a bulk tensor operation should be 128-byte aligned
 #ifdef __HIP_PLATFORM_AMD__
-  alignas(128) __shared__ IType in_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
-  alignas(128) __shared__ OType out_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
+  alignas(TDM_SHMEM_ALIGNMENT) __shared__ IType in_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
+  alignas(TDM_SHMEM_ALIGNMENT) __shared__ OType out_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
 #else
   __shared__ alignas(TMA_SHMEM_ALIGNMENT) IType in_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
   __shared__ alignas(TMA_SHMEM_ALIGNMENT) OType out_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
@@ -141,8 +141,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                          chunk_offset_X, chunk_offset_Y,
                          SHMEM_DIM_X, SHMEM_DIM_Y,
                          cols, rows, cols, deq_in_data_sz);
-  tdm::wait_tensorcnt_0();
-  __syncthreads();
 #endif  // __HIP_PLATFORM_AMD__
 
 #pragma unroll
@@ -186,7 +184,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[iter], parity);
 #else
-    tdm::wait_tensorcnt_0();
+    // Wait for current buffer's loads (and any prior stores) to complete,
+    // but keep the just-issued prefetch for the next buffer alive.
+    if (next_iter < ITERATIONS) {
+      tdm::wait_tensorcnt_1();  // 1 prefetch load in flight
+    } else {
+      tdm::wait_tensorcnt_0();  // Last iteration — drain all
+    }
     __syncthreads();
 #endif
 
@@ -339,17 +343,13 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
   const size_t unpadded_scales_X_colwise = cols;
 
   const size_t scales_Y_rowwise =
-      DIVUP(unpadded_scales_Y_rowwise, scale_tensor_alignment_Y_rowwise) *
-      scale_tensor_alignment_Y_rowwise;
+      DIVUP_TO_MULTIPLE(unpadded_scales_Y_rowwise, scale_tensor_alignment_Y_rowwise);
   const size_t scales_X_rowwise =
-      DIVUP(unpadded_scales_X_rowwise, scale_tensor_alignment_X_rowwise) *
-      scale_tensor_alignment_X_rowwise;
+      DIVUP_TO_MULTIPLE(unpadded_scales_X_rowwise, scale_tensor_alignment_X_rowwise);
   const size_t scales_Y_colwise =
-      DIVUP(unpadded_scales_Y_colwise, scale_tensor_alignment_Y_colwise) *
-      scale_tensor_alignment_Y_colwise;
+      DIVUP_TO_MULTIPLE(unpadded_scales_Y_colwise, scale_tensor_alignment_Y_colwise);
   const size_t scales_X_colwise =
-      DIVUP(unpadded_scales_X_colwise, scale_tensor_alignment_X_colwise) *
-      scale_tensor_alignment_X_colwise;
+      DIVUP_TO_MULTIPLE(unpadded_scales_X_colwise, scale_tensor_alignment_X_colwise);
 
   const e8m0_t *const scales_ptr =
       use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(input.scale_inv.dptr)

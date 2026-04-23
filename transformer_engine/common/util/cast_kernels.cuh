@@ -79,10 +79,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
 
-#ifndef __HIP_PLATFORM_AMD__
   using IType2 = typename ptx::FPx2<IType>;
   using OType2 = typename ptx::FPx2<OType>;
-#endif
 
   if constexpr (NO_ACTIVATIONS) {
     if (noop != nullptr && noop[0] == 1.0f) {
@@ -135,7 +133,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int bank_group = thread_lane / THREADS_PER_BANK;
 
 #ifdef __HIP_PLATFORM_AMD__
-  constexpr size_t MX_SHMEM_ALIGNMENT = 128;
+  constexpr size_t MX_SHMEM_ALIGNMENT = TDM_SHMEM_ALIGNMENT;
 #else
   constexpr size_t MX_SHMEM_ALIGNMENT = TMA_SHMEM_ALIGNMENT;
 #endif
@@ -216,8 +214,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                            BUFF_DIM_X, BUFF_DIM_Y,
                            cols, rows, cols, mx_in_data_sz);
   }
-  tdm::wait_tensorcnt_0();
-  __syncthreads();
 #endif  // __HIP_PLATFORM_AMD__
 
 #pragma unroll
@@ -274,7 +270,19 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[stage], parity);
 #else
-    tdm::wait_tensorcnt_0();
+    // Wait for current buffer's loads (and any prior stores) to complete,
+    // but keep the just-issued prefetch for the next buffer alive.
+    if (next_stage < STAGES) {
+      // Prefetch in flight: IS_DACT issued 2 ops, non-DACT issued 1 op
+      if constexpr (IS_DACT) {
+        tdm::wait_tensorcnt_2();
+      } else {
+        tdm::wait_tensorcnt_1();
+      }
+    } else {
+      // Last iteration — drain all outstanding TDM ops
+      tdm::wait_tensorcnt_0();
+    }
     __syncthreads();
 #endif
 
@@ -287,24 +295,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-#ifdef __HIP_PLATFORM_AMD__
-        // Scalar fallback for __hmax/__habs (not available on AMD)
 #pragma unroll
         for (int i = 0; i < BUFF_DIM_Y; ++i) {
           const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
           in_colwise_IType[i] = in_sh[shmem_offset_colwise];
           thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(in_colwise_IType[i])));
         }
-#else
-        IType thread_amax_f16 = static_cast<IType>(0.0f);
-#pragma unroll
-        for (int i = 0; i < BUFF_DIM_Y; ++i) {
-          const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
-          in_colwise_IType[i] = in_sh[shmem_offset_colwise];
-          thread_amax_f16 = __hmax(thread_amax_f16, __habs(in_colwise_IType[i]));
-        }
-        thread_amax = static_cast<float>(thread_amax_f16);
-#endif
       } else {
 #pragma unroll
         for (int i = 0; i < BUFF_DIM_Y; ++i) {
@@ -382,29 +378,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       float in_compute_rowwise[SCALE_DIM_X];
       Vec<IType, PACK_SIZE> in_cached[WAVES];
 
-#ifndef __HIP_PLATFORM_AMD__
       // used as an IType container for BF16/FP16 --> MXFP8 CAST ONLY
       Vec<IType2, PACK_SIZE / 2> in_IType[WAVES];
-#endif
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-#ifdef __HIP_PLATFORM_AMD__
-        // Scalar fallback for abs_max_2x (PTX intrinsic not available on AMD)
-#pragma unroll
-        for (int w = 0; w < WAVES; ++w) {
-          const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-          const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-          const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
-          Vec<IType, PACK_SIZE> in_vec;
-          in_vec.load_from(&in_sh[shmem_offset_rowwise]);
-#pragma unroll
-          for (int e = 0; e < PACK_SIZE; ++e) {
-            in_cached[w].data.elt[e] = in_vec.data.elt[e];
-            thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(in_vec.data.elt[e])));
-          }
-        }
-#else
         IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
@@ -419,14 +397,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
         }
         thread_amax =
-            static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
-#endif
+            fmaxf(fabsf(static_cast<float>(thread_amax_2x.x)), fabsf(static_cast<float>(thread_amax_2x.y)));
       } else if constexpr (IS_CACHED_ACT_OP) {
         // ensures that all writes to cache made in the section above are visible to all threads
         __syncthreads();
-#ifndef __HIP_PLATFORM_AMD__
         IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
-#endif
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
           const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
@@ -440,13 +415,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           // Load cached elements
           in_cached[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
           if (!out_of_bounds) {
-#ifdef __HIP_PLATFORM_AMD__
-            // Scalar fallback for abs_max_2x (PTX intrinsic not available on AMD)
-#pragma unroll
-            for (int e = 0; e < PACK_SIZE; ++e) {
-              thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(in_cached[w].data.elt[e])));
-            }
-#else
             if constexpr (std::is_same_v<IType, float>) {
 #pragma unroll
               for (int e = 0; e < PACK_SIZE; ++e) {
@@ -460,15 +428,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                 ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
               }
             }
-#endif
           }
         }
-#ifndef __HIP_PLATFORM_AMD__
         if constexpr (!std::is_same_v<IType, float>) {
           thread_amax =
-              static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+              fmaxf(fabsf(static_cast<float>(thread_amax_2x.x)), fabsf(static_cast<float>(thread_amax_2x.y)));
         }
-#endif
       } else {
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
@@ -530,30 +495,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       scales_rowwise[scale_idx] = biased_exponent;
 
       const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
-#ifndef __HIP_PLATFORM_AMD__
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
-#endif
 
       // 3. Scale elements
 #pragma unroll
       for (int w = 0; w < WAVES; ++w) {
-#ifdef __HIP_PLATFORM_AMD__
-        // Scalar fallback for mul_cvt_2x (PTX intrinsic not available on AMD)
-        Vec<OType, PACK_SIZE> out;
-#pragma unroll
-        for (int e = 0; e < PACK_SIZE; ++e) {
-          float value;
-          if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
-            value = static_cast<float>(in_cached[w].data.elt[e]);
-          } else if constexpr (IS_CACHED_ACT_OP) {
-            value = static_cast<float>(in_cached[w].data.elt[e]);
-          } else {
-            const int j = w * PACK_SIZE + e;
-            value = in_compute_rowwise[j];
-          }
-          out.data.elt[e] = static_cast<OType>(value * block_scale_inverse);
-        }
-#else
         Vec<OType2, PACK_SIZE / 2> out;
 #pragma unroll
         for (int e = 0; e < PACK_SIZE / 2; ++e) {
@@ -571,7 +517,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
           ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
         }
-#endif
         const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
         const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
         const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
@@ -755,11 +700,11 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
 
   // The destination shared memory buffer of a bulk tensor operation should be 128-byte aligned
 #ifdef __HIP_PLATFORM_AMD__
-  alignas(128) __shared__
+  alignas(TDM_SHMEM_ALIGNMENT) __shared__
       IType in_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
-  alignas(128) __shared__
+  alignas(TDM_SHMEM_ALIGNMENT) __shared__
       IType act_in_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
-  alignas(128) __shared__
+  alignas(TDM_SHMEM_ALIGNMENT) __shared__
       OType out_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
 #else
   __shared__ alignas(TMA_SHMEM_ALIGNMENT)
@@ -819,8 +764,6 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
                            FP8_SHMEM_DIM_X, FP8_SHMEM_DIM_Y,
                            cols, rows, cols, fp8_in_data_sz);
   }
-  tdm::wait_tensorcnt_0();
-  __syncthreads();
 #endif  // __HIP_PLATFORM_AMD__
 
 #pragma unroll
@@ -866,7 +809,17 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[iter], parity);
 #else
-    tdm::wait_tensorcnt_0();
+    // Wait for current buffer's loads (and any prior stores) to complete,
+    // but keep the just-issued prefetch for the next buffer alive.
+    if (next_iter < FP8_ITERATIONS) {
+      if constexpr (IS_DACT) {
+        tdm::wait_tensorcnt_2();
+      } else {
+        tdm::wait_tensorcnt_1();
+      }
+    } else {
+      tdm::wait_tensorcnt_0();
+    }
     __syncthreads();
 #endif
 
@@ -1375,7 +1328,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                       constexpr size_t NV_BUFF_DIM_Y = NV_THREADS_Y;
                       constexpr size_t NV_BUFF_DIM_X = NV_CAST_DBIAS_ONLY_X;
 
-                      constexpr size_t NV_SHMEM_ALIGNMENT = 128;
+                      constexpr size_t NV_SHMEM_ALIGNMENT = TDM_SHMEM_ALIGNMENT;
                       constexpr size_t nv_buff_elems = NV_BUFF_DIM_Y * NV_BUFF_DIM_X;
                       constexpr size_t nv_buff_elems_total = mxfp8_kernel::BUFFS_NUM * nv_buff_elems;
                       constexpr size_t nv_input_type_bit_size = TypeInfo<IType>::size;

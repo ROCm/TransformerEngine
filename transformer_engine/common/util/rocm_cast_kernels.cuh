@@ -128,10 +128,10 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
   }
 
   // The destination shared memory buffer of a bulk tensor operation should be 128 e8m0_t aligned
-  alignas(128) __shared__ IType in_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
-  alignas(128) __shared__ IType act_in_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
-  alignas(128) __shared__ OType out_rowwise_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
-  alignas(128) __shared__ OType out_colwise_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
+  alignas(TDM_SHMEM_ALIGNMENT) __shared__ IType in_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
+  alignas(TDM_SHMEM_ALIGNMENT) __shared__ IType act_in_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
+  alignas(TDM_SHMEM_ALIGNMENT) __shared__ OType out_rowwise_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
+  alignas(TDM_SHMEM_ALIGNMENT) __shared__ OType out_colwise_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
 
   float block_amax = 0;
 

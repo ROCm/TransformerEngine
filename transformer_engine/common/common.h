@@ -731,6 +731,9 @@ constexpr size_t scale_tensor_alignment_X_rowwise = 1;
 constexpr size_t scale_tensor_alignment_Y_rowwise = 1;
 constexpr size_t scale_tensor_alignment_X_colwise = 1;
 constexpr size_t scale_tensor_alignment_Y_colwise = 1;
+
+// Alignment requirements for the Tensor Data Mover (TDM) on gfx1250
+constexpr size_t TDM_SHMEM_ALIGNMENT = 128;  // shared memory address alignment
 #endif
 
 inline bool is_aligned_ptr(const void *ptr, size_t alignment) {

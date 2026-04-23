@@ -22,7 +22,7 @@
 namespace transformer_engine {
 namespace gated_kernels {
 
-constexpr size_t ALIGNMENT_SIZE = 128;
+constexpr size_t ALIGNMENT_SIZE = TDM_SHMEM_ALIGNMENT;
 // TODO: Identify optimal chunk/thread size for MI350+
 constexpr size_t CHUNK_DIM_Y = 64;
 constexpr size_t CHUNK_DIM_X = 64;

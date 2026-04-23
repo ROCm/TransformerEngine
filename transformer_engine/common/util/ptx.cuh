@@ -156,6 +156,24 @@ __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
 #endif
 }
 
+template <typename T>
+struct alignas(2 * sizeof(T)) FPx2 {
+  T x;
+  T y;
+};
+
+using floatx2 = FPx2<float>;
+using bf16x2 = FPx2<bf16>;
+using fp16x2 = FPx2<fp16>;
+using fp8e4m3x2 = FPx2<fp8e4m3>;
+using fp8e5m2x2 = FPx2<fp8e5m2>;
+
+static_assert(sizeof(floatx2) == 8);
+static_assert(sizeof(bf16x2) == 4);
+static_assert(sizeof(fp16x2) == 4);
+static_assert(sizeof(fp8e4m3x2) == 2);
+static_assert(sizeof(fp8e5m2x2) == 2);
+
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor
@@ -220,24 +238,6 @@ __device__ __forceinline__ void fence_proxy_async() { asm volatile("fence.proxy.
 __device__ __forceinline__ void fence_proxy_async_shared_cta() {
   asm volatile("fence.proxy.async.shared::cta;");
 }
-
-template <typename T>
-struct alignas(2 * sizeof(T)) FPx2 {
-  T x;
-  T y;
-};
-
-using floatx2 = FPx2<float>;
-using bf16x2 = FPx2<bf16>;
-using fp16x2 = FPx2<fp16>;
-using fp8e4m3x2 = FPx2<fp8e4m3>;
-using fp8e5m2x2 = FPx2<fp8e5m2>;
-
-static_assert(sizeof(floatx2) == 8);
-static_assert(sizeof(bf16x2) == 4);
-static_assert(sizeof(fp16x2) == 4);
-static_assert(sizeof(fp8e4m3x2) == 2);
-static_assert(sizeof(fp8e5m2x2) == 2);
 
 // SIMD like "Fused" cast + multiplication (x2)
 __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const floatx2 &in,
@@ -375,6 +375,36 @@ __device__ __forceinline__ void abs_max_2x(fp16x2 &dst, const fp16x2 &p1, const 
 }
 
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
+
+#ifdef __HIP_PLATFORM_AMD__
+// AMD scalar fallbacks for PTX SIMD intrinsics.
+// These provide the same interface as the CUDA PTX versions but use
+// scalar float operations, allowing kernel code to avoid #ifdef guards.
+
+// abs_max_2x: dst = max(|dst|, max(|p1|, |p2|)) per element
+template <typename T>
+__device__ __forceinline__ void abs_max_2x(FPx2<T> &dst, const FPx2<T> &p1, const FPx2<T> &p2) {
+  float ax = fmaxf(fabsf(static_cast<float>(p1.x)), fabsf(static_cast<float>(p2.x)));
+  float ay = fmaxf(fabsf(static_cast<float>(p1.y)), fabsf(static_cast<float>(p2.y)));
+  dst.x = static_cast<T>(ax);
+  dst.y = static_cast<T>(ay);
+}
+
+// mul_cvt_2x: out = (OType)(in * scale) per element
+// float input version
+template <typename OType2T>
+__device__ __forceinline__ void mul_cvt_2x(OType2T &out, const floatx2 &in, const floatx2 &scale) {
+  out.x = static_cast<decltype(out.x)>(in.x * scale.x);
+  out.y = static_cast<decltype(out.y)>(in.y * scale.y);
+}
+
+// bf16/fp16 input version
+template <typename OType2T, typename IType2T>
+__device__ __forceinline__ void mul_cvt_2x(OType2T &out, const IType2T &in, const floatx2 &scale) {
+  out.x = static_cast<decltype(out.x)>(static_cast<float>(in.x) * scale.x);
+  out.y = static_cast<decltype(out.y)>(static_cast<float>(in.y) * scale.y);
+}
+#endif  // __HIP_PLATFORM_AMD__
 
 }  // namespace ptx
 

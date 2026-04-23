@@ -79,8 +79,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   // const int thread_offset_X_colwise = tid_colwise_X;
 
   // The destination shared memory buffer of a bulk tensor operation should be 128 e8m0_t aligned
-  alignas(128) __shared__ IType in_sh[SHMEM_DIM_Y][SHMEM_DIM_X];
-  alignas(128) __shared__ OType out_sh[SHMEM_DIM_Y][SHMEM_DIM_X];
+  alignas(TDM_SHMEM_ALIGNMENT) __shared__ IType in_sh[SHMEM_DIM_Y][SHMEM_DIM_X];
+  alignas(TDM_SHMEM_ALIGNMENT) __shared__ OType out_sh[SHMEM_DIM_Y][SHMEM_DIM_X];
 
   for (int iter = 0; iter < ITERATIONS; iter++) {
     const int chunk_it_offset_y = chunk_offset_Y + iter * BUFFER_DIM_Y;
