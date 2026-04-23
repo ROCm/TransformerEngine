@@ -19,6 +19,7 @@ if IS_HIP_EXTENSION:
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
@@ -36,8 +37,10 @@ _NUM_MAX_UB_STREAMS = 3
 def get_cublas_workspace_size_bytes() -> None:
     """Return workspace size needed for current architecture."""
     if IS_HIP_EXTENSION:
-        """Return 512 MiB (FP4 dequant buffers)."""
-        return 512 * 1024 * 1024
+        """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
+        if get_device_compute_capability() == (9, 5):
+            return 67_108_864
+        return 33_554_432
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
         # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
@@ -127,6 +130,23 @@ def general_gemm(
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
     workspace = get_cublas_workspace(get_tensor_device(A), ub is not None, False)
+
+    # On ROCm, FP4 is dequantized to BF16 in the workspace before GEMM.
+    # Compute the required extra space and extend the workspace if needed.
+    if IS_HIP_EXTENSION and (
+        isinstance(A, NVFP4TensorStorage) or isinstance(B, NVFP4TensorStorage)
+    ):
+        import math
+        bf16_size = 2  # sizeof(bfloat16)
+        fp4_extra = 0
+        if isinstance(A, NVFP4TensorStorage):
+            fp4_extra += math.prod(A.size()) * bf16_size
+            fp4_extra += A.size(0) * 4  # alpha vector (m floats)
+        if isinstance(B, NVFP4TensorStorage):
+            fp4_extra += math.prod(B.size()) * bf16_size
+        total_needed = fp4_extra + get_cublas_workspace_size_bytes()
+        if workspace.numel() < total_needed:
+            workspace = torch.empty(total_needed, dtype=torch.uint8, device=workspace.device)
 
     if ub_type is not None:
         assert ub is not None, (

@@ -319,7 +319,8 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
     ret.lda = is_A_transposed ? k : m;
   } else if (is_nvfp_scaling(A.scaling_mode)) {
-    // NVFP4
+    // NVFP4: dequant path always produces TN layout for the BF16 GEMM,
+    // but the source data may come from either rowwise or columnwise buffers.
     ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
     ret.transA = CUBLAS_OP_T;  // NVFP4 gemm is always TN layout
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
@@ -364,7 +365,8 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
     ret.ldb = is_B_transposed ? n : k;
   } else if (is_nvfp_scaling(B.scaling_mode)) {
-    // NVFP4
+    // NVFP4: dequant path always produces TN layout for the BF16 GEMM,
+    // but the source data may come from either rowwise or columnwise buffers.
     ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
     ret.transB = CUBLAS_OP_N;  // NVFP4 gemm is always TN layout
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
@@ -375,6 +377,97 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   }
 
   return ret;
+}
+
+// Dequantize FP4 inputs to BF16 in-place within the workspace and set up
+// the alpha device vector for the subsequent hipBLASLt GEMM.
+// After this call, param.A/B point to BF16 buffers within workspace,
+// param.Atype/Btype are kBFloat16, and *alpha_ptr_out points to a device vector.
+static void dequant_fp4_gemm_inputs(
+    GemmParam& param,
+    const transformer_engine::Tensor& inputA, cublasOperation_t transa,
+    const transformer_engine::Tensor& inputB, cublasOperation_t transb,
+    int m, int n, int k, float alpha,
+    void* workspace, size_t& workspaceSize,
+    const void** alpha_ptr_out, hipStream_t stream) {
+
+  const float fp4_max = 6.0f;
+  const float fp8_max = te_fp8_fnuz() ? 240.0f : 448.0f;
+  const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max * fp8_max);
+
+  const float* amax_A = (transa == CUBLAS_OP_T)
+      ? reinterpret_cast<const float*>(inputA.amax.dptr)
+      : reinterpret_cast<const float*>(inputA.columnwise_amax.dptr);
+  const float* amax_B = (transb == CUBLAS_OP_N)
+      ? reinterpret_cast<const float*>(inputB.amax.dptr)
+      : reinterpret_cast<const float*>(inputB.columnwise_amax.dptr);
+
+  // Compute total extra bytes needed from the workspace:
+  //   alpha vector:  m * sizeof(float)
+  //   dequant A:     m * k * sizeof(bf16)   (if A is FP4)
+  //   dequant B:     k * n * sizeof(bf16)   (if B is FP4)
+  const size_t alpha_vec_bytes = static_cast<size_t>(m) * sizeof(float);
+  const size_t a_bf16_bytes = is_fp4_dtype(param.Atype)
+      ? static_cast<size_t>(m) * k * sizeof(hip_bfloat16) : 0;
+  const size_t b_bf16_bytes = is_fp4_dtype(param.Btype)
+      ? static_cast<size_t>(k) * n * sizeof(hip_bfloat16) : 0;
+  const size_t fp4_total_bytes = alpha_vec_bytes + a_bf16_bytes + b_bf16_bytes;
+  NVTE_CHECK(workspaceSize >= fp4_total_bytes,
+             "NVFP4 GEMM requires at least ", fp4_total_bytes, " bytes workspace (",
+             fp4_total_bytes / (1024 * 1024), " MiB) for alpha vector + BF16 dequant buffers, "
+             "but only ", workspaceSize, " bytes (", workspaceSize / (1024 * 1024),
+             " MiB) available. Increase the cuBLAS workspace size.");
+
+  // Carve regions from the end of the workspace.
+  // Layout: [cublas workspace ... | alpha_vec | dequant_a | dequant_b]
+  workspaceSize = (workspaceSize / sizeof(float)) * sizeof(float) - fp4_total_bytes;
+  uint8_t* ws_ptr = reinterpret_cast<uint8_t*>(workspace) + workspaceSize;
+
+  float* device_alpha_vec = reinterpret_cast<float*>(ws_ptr);
+  ws_ptr += alpha_vec_bytes;
+
+  NVTE_CHECK(amax_A != nullptr, "FP4 GEMM requires amax_A");
+  NVTE_CHECK(amax_B != nullptr, "FP4 GEMM requires amax_B");
+  constexpr int kBlockSize = 256;
+  const int num_blocks = (m + kBlockSize - 1) / kBlockSize;
+  compute_fp4_alpha_vector_kernel<<<num_blocks, kBlockSize, 0, stream>>>(
+      alpha, amax_A, amax_B, factor_inv, device_alpha_vec, m);
+  *alpha_ptr_out = static_cast<const void*>(device_alpha_vec);
+
+  // Dequantize FP4 -> BF16 (block scales only, no amax folded in)
+  if (is_fp4_dtype(param.Atype)) {
+    hip_bfloat16* a_bf16 = reinterpret_cast<hip_bfloat16*>(ws_ptr);
+    ws_ptr += a_bf16_bytes;
+    const int64_t total_a = static_cast<int64_t>(m) * k;
+    const auto& a_sinv = (transa == CUBLAS_OP_T) ? inputA.scale_inv
+                                                 : inputA.columnwise_scale_inv;
+    const int64_t a_num_cols = (transa == CUBLAS_OP_T)
+        ? inputA.data.shape.back()
+        : inputA.columnwise_data.shape.back();
+    const int64_t a_scale_stride = (a_sinv.shape.size() >= 2) ? a_sinv.shape[1] : (a_num_cols / 16);
+    launch_dequant_fp4_to_bf16(param.A, param.A_scale_inv, a_bf16, total_a,
+                               a_num_cols, a_scale_stride, stream);
+    param.A = a_bf16;
+    param.Atype = DType::kBFloat16;
+    param.A_scale_inv = nullptr;
+  }
+
+  if (is_fp4_dtype(param.Btype)) {
+    hip_bfloat16* b_bf16 = reinterpret_cast<hip_bfloat16*>(ws_ptr);
+    ws_ptr += b_bf16_bytes;
+    const int64_t total_b = static_cast<int64_t>(k) * n;
+    const auto& b_sinv = (transb == CUBLAS_OP_N) ? inputB.scale_inv
+                                                 : inputB.columnwise_scale_inv;
+    const int64_t b_num_cols = (transb == CUBLAS_OP_N)
+        ? inputB.data.shape.back()
+        : inputB.columnwise_data.shape.back();
+    const int64_t b_scale_stride = (b_sinv.shape.size() >= 2) ? b_sinv.shape[1] : (b_num_cols / 16);
+    launch_dequant_fp4_to_bf16(param.B, param.B_scale_inv, b_bf16, total_b,
+                               b_num_cols, b_scale_stride, stream);
+    param.B = b_bf16;
+    param.Btype = DType::kBFloat16;
+    param.B_scale_inv = nullptr;
+  }
 }
 
 
@@ -608,19 +701,22 @@ public:
     //Make it int instead of hipblasLtMatmulMatrixScale_t for compatibility with old hipblasLt
     int scaling_mode;
     hipblasLtEpilogue_t epilogue;
+    bool fp4_alpha_device_vector;  // FP4 uses ALPHA_DEVICE_VECTOR pointer mode
 
     Key(int deviceCap_,
         hipDataType a_type_, hipDataType b_type_,
         hipDataType d_type_, hipDataType bias_type_, hipDataType aux_type_,
         int m_, int n_, int k_, int lda_, int ldb_, int ldd_,
         hipblasOperation_t transa_, hipblasOperation_t transb_,
-        int scaling_mode_, hipblasLtEpilogue_t epilogue_):
+        int scaling_mode_, hipblasLtEpilogue_t epilogue_,
+        bool fp4_alpha_device_vector_ = false):
         deviceCap(deviceCap_),
         a_type(a_type_), b_type(b_type_),
         d_type(d_type_), bias_type(bias_type_), aux_type(aux_type_),
         m(m_), n(n_), k(k_), lda(lda_), ldb(ldb_), ldd(ldd_),
         transa(transa_), transb(transb_),
-        scaling_mode(scaling_mode_), epilogue(epilogue_) {}
+        scaling_mode(scaling_mode_), epilogue(epilogue_),
+        fp4_alpha_device_vector(fp4_alpha_device_vector_) {}
 
     Key() {}
 
@@ -633,7 +729,8 @@ public:
       && (m == val.m) && (n == val.n) && (k == val.k)
       && (lda == val.lda) && (ldb == val.ldb) && (ldd == val.ldd)
       && (transa == val.transa) && (transb == val.transb)
-      && (scaling_mode == val.scaling_mode) && (epilogue == val.epilogue) );
+      && (scaling_mode == val.scaling_mode) && (epilogue == val.epilogue)
+      && (fp4_alpha_device_vector == val.fp4_alpha_device_vector) );
     }
 
     struct Comp
@@ -1051,86 +1148,9 @@ void hipblaslt_gemm(const Tensor *inputA,
   const void* alpha_ptr = static_cast<const void*>(&alpha);
   const void* beta_ptr  = static_cast<const void*>(&beta);
   if (use_fp4) {
-    const float fp4_max = 6.0f;
-    const float fp8_max = te_fp8_fnuz() ? 240.0f : 448.0f;
-    const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max * fp8_max);
-
-    const float* amax_A = (transa == CUBLAS_OP_T)
-        ? reinterpret_cast<const float*>(inputA->amax.dptr)
-        : reinterpret_cast<const float*>(inputA->columnwise_amax.dptr);
-    const float* amax_B = (transb == CUBLAS_OP_N)
-        ? reinterpret_cast<const float*>(inputB->amax.dptr)
-        : reinterpret_cast<const float*>(inputB->columnwise_amax.dptr);
-
-    // Compute total extra bytes needed from the workspace:
-    //   alpha vector:  m * sizeof(float)
-    //   dequant A:     m * k * sizeof(bf16)   (if A is FP4)
-    //   dequant B:     k * n * sizeof(bf16)   (if B is FP4)
-    const size_t alpha_vec_bytes = static_cast<size_t>(m) * sizeof(float);
-    const size_t a_bf16_bytes = is_fp4_dtype(param.Atype)
-        ? static_cast<size_t>(m) * k * sizeof(hip_bfloat16) : 0;
-    const size_t b_bf16_bytes = is_fp4_dtype(param.Btype)
-        ? static_cast<size_t>(k) * n * sizeof(hip_bfloat16) : 0;
-    const size_t fp4_total_bytes = alpha_vec_bytes + a_bf16_bytes + b_bf16_bytes;
-    NVTE_CHECK(workspaceSize >= fp4_total_bytes,
-               "NVFP4 GEMM requires at least ", fp4_total_bytes, " bytes workspace (",
-               fp4_total_bytes / (1024 * 1024), " MiB) for alpha vector + BF16 dequant buffers, "
-               "but only ", workspaceSize, " bytes (", workspaceSize / (1024 * 1024),
-               " MiB) available. Increase the cuBLAS workspace size.");
-
-    // Carve regions from the end of the workspace.
-    // Layout: [cublas workspace ... | alpha_vec | dequant_a | dequant_b]
-    workspaceSize = (workspaceSize / sizeof(float)) * sizeof(float) - fp4_total_bytes;
-    uint8_t* ws_ptr = reinterpret_cast<uint8_t*>(workspace) + workspaceSize;
-
-    float* device_alpha_vec = reinterpret_cast<float*>(ws_ptr);
-    ws_ptr += alpha_vec_bytes;
-
-    NVTE_CHECK(amax_A != nullptr, "FP4 GEMM requires amax_A");
-    NVTE_CHECK(amax_B != nullptr, "FP4 GEMM requires amax_B");
-    constexpr int kBlockSize = 256;
-    const int num_blocks = (m + kBlockSize - 1) / kBlockSize;
-    compute_fp4_alpha_vector_kernel<<<num_blocks, kBlockSize, 0, stream>>>(
-        alpha, amax_A, amax_B, factor_inv, device_alpha_vec, m);
-    alpha_ptr = static_cast<const void*>(device_alpha_vec);
-    // beta_ptr stays as host &beta
-
-    // Dequantize FP4 -> BF16 (block scales only, no amax folded in)
-    if (is_fp4_dtype(param.Atype)) {
-      hip_bfloat16* a_bf16 = reinterpret_cast<hip_bfloat16*>(ws_ptr);
-      ws_ptr += a_bf16_bytes;
-      const int64_t total_a = static_cast<int64_t>(m) * k;
-      // Determine scale stride from scale tensor shape
-      const auto& a_sinv = (transa == CUBLAS_OP_T) ? inputA->scale_inv
-                                                   : inputA->columnwise_scale_inv;
-      const int64_t a_num_cols = (transa == CUBLAS_OP_T)
-          ? inputA->data.shape.back()
-          : inputA->columnwise_data.shape.back();
-      const int64_t a_scale_stride = (a_sinv.shape.size() >= 2) ? a_sinv.shape[1] : (a_num_cols / 16);
-      launch_dequant_fp4_to_bf16(param.A, param.A_scale_inv, a_bf16, total_a,
-                                 a_num_cols, a_scale_stride, stream);
-      param.A = a_bf16;
-      param.Atype = DType::kBFloat16;
-      param.A_scale_inv = nullptr;
-    }
-
-    if (is_fp4_dtype(param.Btype)) {
-      hip_bfloat16* b_bf16 = reinterpret_cast<hip_bfloat16*>(ws_ptr);
-      ws_ptr += b_bf16_bytes;
-      const int64_t total_b = static_cast<int64_t>(k) * n;
-      // Determine scale stride from scale tensor shape
-      const auto& b_sinv = (transb == CUBLAS_OP_N) ? inputB->scale_inv
-                                                   : inputB->columnwise_scale_inv;
-      const int64_t b_num_cols = (transb == CUBLAS_OP_N)
-          ? inputB->data.shape.back()
-          : inputB->columnwise_data.shape.back();
-      const int64_t b_scale_stride = (b_sinv.shape.size() >= 2) ? b_sinv.shape[1] : (b_num_cols / 16);
-      launch_dequant_fp4_to_bf16(param.B, param.B_scale_inv, b_bf16, total_b,
-                                 b_num_cols, b_scale_stride, stream);
-      param.B = b_bf16;
-      param.Btype = DType::kBFloat16;
-      param.B_scale_inv = nullptr;
-    }
+    dequant_fp4_gemm_inputs(param, *inputA, transa, *inputB, transb,
+                            m, n, k, alpha, workspace, workspaceSize,
+                            &alpha_ptr, stream);
   }
 
   bool nvte_log_gemm_config = false;
@@ -1362,7 +1382,8 @@ void hipblaslt_gemm(const Tensor *inputA,
   GemmAlgoCache::Key gemm_cfg(algoCache.device_cap(device_id), A_type, B_type, D_type, 
     use_fp8 ? bias_type : (hipDataType)-1,
     (use_fp8 && gelu) ? aux_type : (hipDataType)-1,
-    m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, scaling_mode, epilogue );
+    m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, scaling_mode, epilogue,
+    use_fp4);
   GemmAlgoCache::Algo cached_algo;
   if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
   {

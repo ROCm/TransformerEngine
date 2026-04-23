@@ -1673,9 +1673,10 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
         // If rht_output_t was already produced by the fused amax+transform kernel above,
         // skip the separate hadamard_transform call.
 #ifdef USE_ROCM
-        if (!rht_output_t.defined())
-#endif
+        if (!rht_output_t.defined()) {
+#else
         {
+#endif
           rht_output_t =
               allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
           TensorWrapper rht_output_t_cpp;

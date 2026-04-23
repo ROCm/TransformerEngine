@@ -26,7 +26,11 @@ __global__ void compute_nvfp4_per_tensor_scale_kernel(float alpha_in, const floa
                                                       const float *amax_B, float *alpha_out) {
 #ifdef __HIP_PLATFORM_AMD__
   constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;
-  const float fp8_max = detail::TypeExtrema<fp8e4m3>::max;
+#if defined(__HIP_DEVICE_COMPILE__)
+  constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;
+#else
+  constexpr float fp8_max = 240.0f;  // host placeholder; only device path executes
+#endif
   const float fi = 1.0f / (fp4_max * fp4_max * fp8_max * fp8_max);
   *alpha_out = alpha_in * (*amax_A) * (*amax_B) * fi;
 #else

@@ -9,6 +9,8 @@
 #ifndef TRANSFORMER_ENGINE_COMMON_HADAMARD_TRANSFORM_WHT16_CUH_
 #define TRANSFORMER_ENGINE_COMMON_HADAMARD_TRANSFORM_WHT16_CUH_
 
+#include "hip/hip_runtime.h"
+
 #ifdef __HIP_PLATFORM_AMD__
 
 static constexpr int kHadamardDim     = 16;

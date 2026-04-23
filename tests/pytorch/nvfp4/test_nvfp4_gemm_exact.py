@@ -162,7 +162,9 @@ def check_nvfp4_gemm_versus_reference(
     # Allocate cuBLAS workspace
     if IS_HIP_EXTENSION:
         # On ROCm, FP4 is dequantized to BF16 in workspace before GEMM, so allocate enough space.
-        ws_bytes = M * K * 2 + K * N * 2 + 32 * 1024 * 1024
+        # Extra 32 MiB for hipBLASLt internal workspace + alpha vector
+        bf16_size = torch.bfloat16.itemsize
+        ws_bytes = M * K * bf16_size + K * N * bf16_size + 32 * 1024 * 1024
         workspace = torch.empty(ws_bytes, dtype=torch.uint8, device=device)
     else:
         workspace = torch.empty(4, dtype=torch.uint8, device=device)
