@@ -264,51 +264,50 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
             constexpr size_t otype_size = sizeof(OutputType);
 
 #ifdef __HIP_PLATFORM_AMD__
-            {
-              const char *env_p = std::getenv("NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE");
-              if (!(env_p && std::string(env_p) == "1")) {
-                size_t rows_done = rocm_cast_transpose_dispatch<InputType, OutputType>(
-                    static_cast<const InputType *>(input.data.dptr),
-                    reinterpret_cast<const CType *>(noop.data.dptr),
-                    static_cast<OutputType *>(output.data.dptr),
-                    static_cast<OutputType *>(output.columnwise_data.dptr),
-                    static_cast<const CType *>(output.scale.dptr),
-                    static_cast<CType *>(output.amax.dptr),
-                    static_cast<CType *>(output.scale_inv.dptr),
-                    row_length, num_rows, stream);
-                if (rows_done == 0) {
-                  constexpr size_t ld = 4, st = 4;
-                  const int nblk = DIVUP(row_length, ld / itype_size * THREADS_PER_WARP)
-                                 * DIVUP(num_rows, st / otype_size * THREADS_PER_WARP);
-                  cast_transpose_general_kernel<ld, st, InputType, OutputType>
-                      <<<nblk, block_size, 0, stream>>>(
-                          static_cast<const InputType *>(input.data.dptr),
-                          reinterpret_cast<const CType *>(noop.data.dptr),
-                          static_cast<OutputType *>(output.data.dptr),
-                          static_cast<OutputType *>(output.columnwise_data.dptr),
-                          static_cast<const CType *>(output.scale.dptr),
-                          static_cast<CType *>(output.amax.dptr),
-                          static_cast<CType *>(output.scale_inv.dptr),
-                          row_length, num_rows);
-                } else if (rows_done < num_rows) {
-                  size_t rem = num_rows - rows_done;
-                  const auto *in  = static_cast<const InputType *>(input.data.dptr);
-                  const auto *no  = reinterpret_cast<const CType *>(noop.data.dptr);
+            const char *env_p = std::getenv("NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE");
+            if (env_p == nullptr || std::string(env_p) != "1") {
+              size_t rows_done = rocm_cast_transpose_dispatch<InputType, OutputType>(
+                  static_cast<const InputType *>(input.data.dptr),
+                  reinterpret_cast<const CType *>(noop.data.dptr),
+                  static_cast<OutputType *>(output.data.dptr),
+                  static_cast<OutputType *>(output.columnwise_data.dptr),
+                  static_cast<const CType *>(output.scale.dptr),
+                  static_cast<CType *>(output.amax.dptr),
+                  static_cast<CType *>(output.scale_inv.dptr),
+                  row_length, num_rows, stream);
+              if (rows_done == 0) {
+                constexpr size_t ld = 4, st = 4;
+                const int nblk = DIVUP(row_length, ld / itype_size * THREADS_PER_WARP)
+                               * DIVUP(num_rows, st / otype_size * THREADS_PER_WARP);
+                cast_transpose_general_kernel<ld, st, InputType, OutputType>
+                    <<<nblk, block_size, 0, stream>>>(
+                        static_cast<const InputType *>(input.data.dptr),
+                        reinterpret_cast<const CType *>(noop.data.dptr),
+                        static_cast<OutputType *>(output.data.dptr),
+                        static_cast<OutputType *>(output.columnwise_data.dptr),
+                        static_cast<const CType *>(output.scale.dptr),
+                        static_cast<CType *>(output.amax.dptr),
+                        static_cast<CType *>(output.scale_inv.dptr),
+                        row_length, num_rows);
+              } else if (rows_done < num_rows) {
+                size_t rem = num_rows - rows_done;
+                const auto *in  = static_cast<const InputType *>(input.data.dptr);
+                const auto *no  = reinterpret_cast<const CType *>(noop.data.dptr);
 
-                  auto *oc  = static_cast<OutputType *>(output.data.dptr);
-                  auto *ot  = static_cast<OutputType *>(output.columnwise_data.dptr);
-                  rocm_cast_transpose_remainder_kernel<InputType, OutputType>
-                      <<<DIVUP(rem * row_length, (size_t)256), 256, 0, stream>>>(
-                          in + rows_done * row_length, no,
-                          oc + rows_done * row_length,
-                          ot + rows_done,
-                          static_cast<const CType *>(output.scale.dptr),
-                          static_cast<CType *>(output.amax.dptr),
-                          static_cast<CType *>(output.scale_inv.dptr),
-                          rem, row_length, row_length, num_rows);
-                }
-                NVTE_CHECK_CUDA(cudaGetLastError());
-              } else
+                auto *oc  = static_cast<OutputType *>(output.data.dptr);
+                auto *ot  = static_cast<OutputType *>(output.columnwise_data.dptr);
+                rocm_cast_transpose_remainder_kernel<InputType, OutputType>
+                    <<<DIVUP(rem * row_length, (size_t)256), 256, 0, stream>>>(
+                        in + rows_done * row_length, no,
+                        oc + rows_done * row_length,
+                        ot + rows_done,
+                        static_cast<const CType *>(output.scale.dptr),
+                        static_cast<CType *>(output.amax.dptr),
+                        static_cast<CType *>(output.scale_inv.dptr),
+                        rem, row_length, row_length, num_rows);
+              }
+              NVTE_CHECK_CUDA(cudaGetLastError());
+            } else
 #endif  // #ifdef __HIP_PLATFORM_AMD__
               {
             // Choose between runtime-compiled or statically-compiled kernel
@@ -318,15 +317,7 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
 #ifdef __HIP_PLATFORM_AMD__
               // Whether to fall back to the cost-model-based RTC kernel selection
               bool fallback_to_cost_model_rtc = true;
-              // even if we enforce to use OPTIMIZED_HIPIFIED_CAST_TRANSPOSE, may fall back to general kernel configs from NVTE cost model
-              bool nvte_use_optimized_hipified_cast_transpose = false;
-              if (const char* env_p = std::getenv("NVTE_USE_OPTIMIZED_HIPIFIED_CAST_TRANSPOSE") ) {
-                if (env_p != nullptr && std::string(env_p) == "1")
-                  nvte_use_optimized_hipified_cast_transpose = true;
-              }
-              if(nvte_use_optimized_hipified_cast_transpose &&
-                //only use the optimized kernel in fp8 setting
-                (std::is_same<OutputType, fp8e5m2>::value || std::is_same<OutputType, fp8e4m3>::value)){
+              if(std::is_same<OutputType, fp8e5m2>::value || std::is_same<OutputType, fp8e4m3>::value){
                 // Estimate number of SMs
                 // Note: H100 has 132 SMs, A100 has 108 SMs.
                 // Note: Directly querying number of SMs with cudaGetDeviceProperties is
@@ -483,9 +474,6 @@ void cast_transpose(const Tensor &input, const Tensor &noop, Tensor *output_, cu
               NVTE_CHECK_CUDA(cudaGetLastError());
             }
               }
-#ifdef __HIP_PLATFORM_AMD__
-            }
-#endif  // #ifdef __HIP_PLATFORM_AMD__
           } else {
             NVTE_ERROR("Not implemented scaling mode: ", to_string(output.scaling_mode));
           });  // NOLINT(*)
