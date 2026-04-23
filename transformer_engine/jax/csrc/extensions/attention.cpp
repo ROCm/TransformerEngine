@@ -432,8 +432,6 @@ static void SmallSeqAttnForwardImpl(
   PrepareSmallSeqAttnForwardAuxTensors(&aux_output_tensors, input_batch, attn_heads, q_max_seqlen,
                                        kv_max_seqlen, dtype, softmax_aux, rng_state);
 
-  auto workspace_tensor =
-      TensorWrapper(workspace, std::vector<size_t>{wkspace_size}, wkspace_dtype);
   auto dummy_page_table_tensor = TensorWrapper(nullptr, std::vector<size_t>{1}, DType::kInt32);
 
   auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
@@ -480,9 +478,6 @@ static void SmallSeqAttnBackwardImpl(
   nvte_tensor_pack_create(&aux_input_tensors);
   PrepareSmallSeqAttnBackwardAuxTensors(&aux_input_tensors, input_batch, attn_heads, q_max_seqlen,
                                         kv_max_seqlen, dtype, softmax_aux, rng_state);
-
-  auto workspace_tensor =
-      TensorWrapper(workspace, std::vector<size_t>{wkspace_size}, wkspace_dtype);
 
   auto q_shape = std::vector<size_t>{input_batch * q_max_seqlen, attn_heads, qk_head_dim};
   auto k_shape = std::vector<size_t>{input_batch * kv_max_seqlen, num_gqa_groups, qk_head_dim};
@@ -901,7 +896,6 @@ Error_Type SmallSeqAttnForwardFFI(cudaStream_t stream, Buffer_Type q_buf, Buffer
 XLA_FFI_DEFINE_HANDLER_SYMBOL(SmallSeqAttnForwardHandler, SmallSeqAttnForwardFFI,
                               FFI::Bind()
                                   .Ctx<FFI_Stream_Type>()
-                                  .Arg<Buffer_Type>()
                                   .Arg<Buffer_Type>()
                                   .Arg<Buffer_Type>()
                                   .Arg<Buffer_Type>()

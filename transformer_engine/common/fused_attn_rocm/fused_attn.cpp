@@ -959,7 +959,7 @@ void nvte_fused_attn_small_seq_fwd(
   for (size_t i = 0; i < wkspace->data.shape.size(); ++i) {
     workspace_bytes *= wkspace->data.shape[i];
   }
-  workspace_bytes *= nvte_dtype_size(wkspace->data.dtype);
+  workspace_bytes *= fused_attn_rocm::nvte_dtype_size(wkspace->data.dtype);
 
   fused_attn_rocm::fused_attn_small_seq_fwd(
       b, h_q, h_kv, max_seqlen_kv, d_qk, d_v, is_training, attn_scale, dropout,
@@ -1040,7 +1040,7 @@ void nvte_fused_attn_small_seq_bwd(
   for (size_t i = 0; i < wkspace->data.shape.size(); ++i) {
     workspace_bytes *= wkspace->data.shape[i];
   }
-  workspace_bytes *= nvte_dtype_size(wkspace->data.dtype);
+  workspace_bytes *= fused_attn_rocm::nvte_dtype_size(wkspace->data.dtype);
   NVTE_CHECK(workspace_bytes >= req_bytes, "nvte_fused_attn_small_seq_bwd: workspace too small.");
 
   fused_attn_rocm::fused_attn_small_seq_bwd(
