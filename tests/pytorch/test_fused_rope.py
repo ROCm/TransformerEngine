@@ -13,10 +13,7 @@ from transformer_engine.pytorch.attention.rope import (
     apply_fused_qkv_rotary_pos_emb,
 )
 
-try:
-    from torch.utils.cpp_extension import IS_HIP_EXTENSION
-except ImportError:
-    IS_HIP_EXTENSION = False
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 if IS_HIP_EXTENSION:
     import unittest.mock as mock
