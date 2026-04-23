@@ -159,11 +159,11 @@ jobs:
     name: sGPU Tests (${{ matrix.arch_label }})
     needs: [select_image, build]
     timeout-minutes: 360
-    runs-on: ${{ matrix.arch_label == 'mi325' && 'linux-te-mi325-4' || 'linux-te-mi35x-4' }}
+    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || 'linux-te-mi35x-4' }}
     strategy:
       fail-fast: false
       matrix:
-        arch_label: [mi325, mi35x]
+        arch_label: [mi30x, mi35x]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -384,11 +384,11 @@ jobs:
     name: mGPU Tests (${{ matrix.arch_label }})
     needs: [select_image, build]
     timeout-minutes: 360
-    runs-on: ${{ matrix.arch_label == 'mi300' && 'linux-te-mi300-8' || 'linux-te-mi35x-8' }}
+    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || 'linux-te-mi35x-8' }}
     strategy:
       fail-fast: false
       matrix:
-        arch_label: [mi300, mi35x]
+        arch_label: [mi30x, mi35x]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
