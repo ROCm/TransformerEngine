@@ -12,6 +12,7 @@ IMPORTANT: This module must NOT call tex.quantize/tex.dequantize in any
 fallback path, because in lite mode tex IS this module — that would recurse.
 """
 
+import os
 import torch
 from collections import Counter as _QuantCounter
 _QUANT_CALLS = _QuantCounter()
@@ -550,65 +551,219 @@ def compute_amax(input, amax):
     amax.copy_(input.abs().amax())
 
 
-def fused_amax_and_scale_update_after_reduction(
-    contiguous_amax, amax_histories, scales,
-    amax_compute_algo, fp8_dtype, margin,
-):
-    """Update amax history and FP8 scale after amax reduction (delayed scaling).
-
-    Called by FP8GlobalStateManager.reduce_and_update_fp8_tensors during
-    every training step. Mirrors the fused C++ kernel: writes the current
-    step's reduced amax into the history buffer, rolls the window, and
-    recomputes the scale from the max (or most_recent) of the history.
-
-    Args:
-        contiguous_amax: flat tensor of reduced amax values for all tensors
-        amax_histories: list of [history_len, N_i] tensors (per-module group)
-        scales: list of [N_i] scale buffers (per-module group)
-        amax_compute_algo: "max" or "most_recent" (callable handled upstream)
-        fp8_dtype: TE_DType (kFloat8E4M3 or kFloat8E5M2)
-        margin: int, scale = fp8_max / amax / 2**margin
-    """
+def _fp8_max_for_dtype(fp8_dtype):
+    """Resolve TE FP8 dtype → max representable value, honoring ROCm fnuz clamp."""
     from transformer_engine.common.recipe import _FormatMaxVals
 
-    # Map FP8 dtype → max representable value (matches get_fp8_max). On ROCm
-    # (fnuz dtypes) E4M3 is clamped to 240 instead of 448.
     try:
         is_fnuz = torch.float8_e4m3fnuz is not None and torch.cuda.is_available()
     except AttributeError:
         is_fnuz = False
     dtype_name = str(fp8_dtype).rsplit('.', 1)[-1]  # "kFloat8E4M3" or "kFloat8E5M2"
     if "E4M3" in dtype_name:
-        fp8_max = _FormatMaxVals.E4M3.value[1 if is_fnuz else 0]
-    else:
-        fp8_max = _FormatMaxVals.E5M2.value[1 if is_fnuz else 0]
+        return _FormatMaxVals.E4M3.value[1 if is_fnuz else 0]
+    return _FormatMaxVals.E5M2.value[1 if is_fnuz else 0]
 
-    # Split the flat contiguous_amax by each group's per-tensor count (last dim
-    # of history). E.g. history [1024, 3] → chunk of size 3 in contiguous_amax.
+
+# --- Fused amax / scale update (Triton + Python fallback) -------------------
+#
+# Replaces the delayed-scaling C++ kernel (common/recipe/delayed_scaling.cu
+# kernel_bulk) with a single Triton launch that processes every scale channel
+# across every amax-history tensor in the group. See also the Python fallback
+# below for the exact slot-convention contract.
+
+_triton_amax_update_loaded = False
+_triton_amax_update_kernel = None
+_amax_pack_cache = {}  # keyed by (id(amax_histories), id(scales)) → packed tensors
+
+
+def _try_load_triton_amax_update():
+    global _triton_amax_update_loaded, _triton_amax_update_kernel
+    if _triton_amax_update_loaded:
+        return _triton_amax_update_kernel is not None
+    _triton_amax_update_loaded = True
+    try:
+        import triton
+        import triton.language as tl
+    except ImportError:
+        return False
+
+    @triton.jit
+    def _kernel(
+        reduction_ptr,        # *fp32 [N_total]
+        hist_ptr_arr,         # *int64 [N_total]  device pointers
+        scale_ptr_arr,        # *int64 [N_total]
+        stride_arr,           # *int32 [N_total]  owner tensor's num_scale (= row stride)
+        local_ch_arr,         # *int32 [N_total]  channel index within owner
+        H,                    # int  amax_history_length
+        scaled_max,           # fp32  fp8_max * 2**-margin
+        ALGO: tl.constexpr,   # 0=max, 1=most_recent
+        BLOCK_H: tl.constexpr,
+    ):
+        pid = tl.program_id(0)
+
+        hist_base = tl.load(hist_ptr_arr + pid).to(tl.pointer_type(tl.float32))
+        scale_base = tl.load(scale_ptr_arr + pid).to(tl.pointer_type(tl.float32))
+        stride = tl.load(stride_arr + pid)
+        local_ch = tl.load(local_ch_arr + pid)
+        new_amax = tl.load(reduction_ptr + pid)
+
+        offs = tl.arange(0, BLOCK_H)
+        mask = offs < H
+
+        # Current column [H], with slot 0 replaced by the newly-reduced amax
+        # (matches the lite Python path's `amax_history[0].copy_(amax_chunk)`).
+        hist = tl.load(hist_base + offs * stride + local_ch, mask=mask, other=0.0)
+        hist_with_new = tl.where(offs == 0, new_amax, hist)
+
+        if ALGO == 0:
+            amax_for_max = tl.where(mask, hist_with_new, -float('inf'))
+            amax_val = tl.max(amax_for_max, axis=0)
+        else:
+            amax_val = new_amax
+
+        # Rolled history: out[0]=0, out[i]=hist[i+1] for 0<i<H-1, out[H-1]=new_amax.
+        # Second load avoids in-register gather (not available in Triton).
+        shift_offs = tl.where(offs < H - 1, offs + 1, 0)
+        shift_mask = (offs < H - 1) & mask
+        shifted = tl.load(hist_base + shift_offs * stride + local_ch,
+                          mask=shift_mask, other=0.0)
+        shifted = tl.where(offs == H - 1, new_amax, shifted)
+        out = tl.where(offs == 0, 0.0, shifted)
+        tl.store(hist_base + offs * stride + local_ch, out, mask=mask)
+
+        # Scale: valid = isfinite(amax) & amax > 0; +/-inf → FP32_MAX.
+        prev_scale = tl.load(scale_base + local_ch)
+        finite = (amax_val == amax_val) & (amax_val != float('inf')) & (amax_val != -float('inf'))
+        sf = tl.where(finite & (amax_val > 0.0), scaled_max / amax_val, prev_scale)
+        FP32_MAX = 3.4028234663852886e38
+        sf = tl.where((sf == float('inf')) | (sf == -float('inf')), FP32_MAX, sf)
+        tl.store(scale_base + local_ch, sf)
+
+    _triton_amax_update_kernel = _kernel
+    return True
+
+
+def _pack_amax_update_args(amax_histories, scales):
+    """Build (and cache) the per-channel pointer/stride/local-channel arrays.
+
+    Returns (hist_ptrs, scale_ptrs, strides, local_chs) — all on the same
+    device as the histories. Caches on list-identity because upstream's
+    global_amax_history_buffer entries are stable across steps.
+    """
+    cache_key = (id(amax_histories), id(scales),
+                 len(amax_histories),
+                 sum(h.shape[-1] for h in amax_histories))
+    cached = _amax_pack_cache.get(cache_key)
+    if cached is not None:
+        return cached
+
+    device = amax_histories[0].device
+    hist_ptrs_cpu, scale_ptrs_cpu, strides_cpu, local_chs_cpu = [], [], [], []
+    for h, s in zip(amax_histories, scales):
+        n = h.shape[-1]
+        hp = h.data_ptr()
+        sp = s.data_ptr()
+        for ch in range(n):
+            hist_ptrs_cpu.append(hp)
+            scale_ptrs_cpu.append(sp)
+            strides_cpu.append(n)
+            local_chs_cpu.append(ch)
+
+    hist_ptrs = torch.tensor(hist_ptrs_cpu, dtype=torch.int64, device=device)
+    scale_ptrs = torch.tensor(scale_ptrs_cpu, dtype=torch.int64, device=device)
+    strides = torch.tensor(strides_cpu, dtype=torch.int32, device=device)
+    local_chs = torch.tensor(local_chs_cpu, dtype=torch.int32, device=device)
+    packed = (hist_ptrs, scale_ptrs, strides, local_chs)
+    _amax_pack_cache[cache_key] = packed
+    return packed
+
+
+def _fused_amax_and_scale_update_triton(
+    contiguous_amax, amax_histories, scales, amax_compute_algo, scaled_max,
+):
+    import triton
+
+    H = amax_histories[0].shape[0]
+    # Guard the assumption that H is shared (C++ kernel_bulk also assumes this).
+    # If a caller ever violates it, fall back to the Python loop.
+    if any(h.shape[0] != H for h in amax_histories):
+        return False
+
+    hist_ptrs, scale_ptrs, strides, local_chs = _pack_amax_update_args(
+        amax_histories, scales,
+    )
+    n_total = hist_ptrs.numel()
+    algo = 1 if amax_compute_algo == "most_recent" else 0
+    block_h = max(triton.next_power_of_2(H), 16)
+
+    _triton_amax_update_kernel[(n_total,)](
+        contiguous_amax, hist_ptrs, scale_ptrs, strides, local_chs,
+        H, float(scaled_max),
+        ALGO=algo, BLOCK_H=block_h, num_warps=4,
+    )
+    return True
+
+
+def _fused_amax_and_scale_update_python(
+    contiguous_amax, amax_histories, scales, amax_compute_algo, scaled_max,
+):
+    """Per-group Python loop (fallback). Kept for A/B against the Triton path."""
     chunk_sizes = [h.shape[-1] for h in amax_histories]
     splits = contiguous_amax.split(chunk_sizes)
+    fp32_max = torch.finfo(torch.float32).max
     for amax_history, scale, amax_chunk in zip(amax_histories, scales, splits):
-        # Write current step's reduced amax into slot 0 of history
         amax_history[0].copy_(amax_chunk)
 
-        # Compute effective amax from history
         if amax_compute_algo == "most_recent":
             amax = amax_history[0].clone()
-        else:  # "max"
+        else:
             amax = amax_history.max(dim=0).values
 
-        # Roll history window: slot 0 gets zeroed for next step's write
         if amax_history.shape[0] > 1:
             amax_history.copy_(torch.roll(amax_history, -1, 0))
         amax_history[0].fill_(0.0)
 
-        # Compute scale: fp8_max / amax / 2**margin, with safe fallbacks
-        sf = (fp8_max / amax) / (2 ** margin)
-        fp32_max = torch.finfo(torch.float32).max
+        sf = scaled_max / amax
         sf = torch.where(amax > 0.0, sf, scale)
         sf = torch.where(torch.isfinite(amax), sf, scale)
         sf = torch.where(torch.isinf(sf), torch.full_like(sf, fp32_max), sf)
         scale.copy_(sf)
+
+
+def fused_amax_and_scale_update_after_reduction(
+    contiguous_amax, amax_histories, scales,
+    amax_compute_algo, fp8_dtype, margin,
+):
+    """Update amax history and FP8 scale after amax reduction (delayed scaling).
+
+    Called by FP8GlobalStateManager.reduce_and_update_fp8_tensors during every
+    training step. Dispatches to a single Triton multi-tensor-apply kernel that
+    mirrors common/recipe/delayed_scaling.cu's kernel_bulk; falls back to the
+    per-group Python loop if Triton is unavailable or NVTE_LITE_AMAX_FUSED=0.
+
+    Args:
+        contiguous_amax: flat [N_total] fp32 tensor of reduced amaxes
+        amax_histories: list of [H, N_i] fp32 tensors (H shared across list)
+        scales: list of [N_i] fp32 scale buffers
+        amax_compute_algo: "max" or "most_recent"
+        fp8_dtype: TE DType (kFloat8E4M3 or kFloat8E5M2)
+        margin: int, scaled_max = fp8_max / 2**margin
+    """
+    if len(amax_histories) == 0:
+        return
+
+    scaled_max = _fp8_max_for_dtype(fp8_dtype) / (2 ** margin)
+
+    use_triton = os.environ.get("NVTE_LITE_AMAX_FUSED", "1") != "0"
+    if use_triton and _try_load_triton_amax_update():
+        if _fused_amax_and_scale_update_triton(
+            contiguous_amax, amax_histories, scales, amax_compute_algo, scaled_max,
+        ):
+            return
+    _fused_amax_and_scale_update_python(
+        contiguous_amax, amax_histories, scales, amax_compute_algo, scaled_max,
+    )
 
 
 # ---------------------------------------------------------------------------
