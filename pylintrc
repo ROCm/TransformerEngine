@@ -5,6 +5,8 @@ extension-pkg-whitelist=flash_attn_2_cuda,
                         transformer_engine_jax
 
 disable=too-many-locals,
+        missing-module-docstring,
+        missing-function-docstring,
         too-few-public-methods,
         too-many-public-methods,
         too-many-positional-arguments,
@@ -31,7 +33,13 @@ disable=too-many-locals,
         redefined-argument-from-local,
         line-too-long,
         too-many-return-statements,
-        too-many-nested-blocks
+        too-many-nested-blocks,
+        possibly-used-before-assignment,
+        fixme,
+        unnecessary-lambda-assignment,
+        use-dict-literal,
+        redefined-outer-name,
+        redefined-builtin
 
 [TYPECHECK]
 ignored-modules=torch

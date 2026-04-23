@@ -11,6 +11,7 @@ from operator import mul as multiply_op
 import warnings
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 
@@ -77,7 +78,6 @@ from ..cpu_offload import (
     mark_activation_offload,
 )
 from ...debug.pytorch.debug_state import TEDebugState
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 __all__ = ["Linear"]
 
@@ -326,7 +326,9 @@ class _Linear(torch.autograd.Function):
         # Note: y = x * w^T
         # ------------------------------------------------------
         if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
-                assert weightmat._transpose is None or weightmat._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
+            assert (
+                weightmat._transpose is None or weightmat._transpose.numel() == 0
+            ), "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
 
         nvtx_range_push(f"{nvtx_label}.gemm")
         gemm_out, *_, reduce_scatter_out = general_gemm(

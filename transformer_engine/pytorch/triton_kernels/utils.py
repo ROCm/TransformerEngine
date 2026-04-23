@@ -47,8 +47,8 @@ def num_programs(x, sm_margin=None):
 
 def block_size(x, norm="layer"):
     max_fused_size = (65536 if norm=="rms" else 16384) // x.element_size()
-    block_size = min(max_fused_size, triton.next_power_of_2(x.shape[1]))
-    return block_size
+    _block_size = min(max_fused_size, triton.next_power_of_2(x.shape[1]))
+    return _block_size
 
 
 def use_blocked(x):
@@ -59,7 +59,9 @@ def make_ln_out(ln_out, quantizer=None, input_shape=None, out_dtype=torch.float3
 
     if ln_out is None:
         # TODO(micky774): Remove corresponding FP8Quantizer check when kernels properly support MXFP8/float8_current_scaling as a fused operation
-        if quantizer is None or isinstance(quantizer, MXFP8Quantizer) or isinstance(quantizer, Float8CurrentScalingQuantizer):
+        if quantizer is None or isinstance(
+            quantizer, (MXFP8Quantizer, Float8CurrentScalingQuantizer)
+        ):
             return torch.empty(input_shape, dtype=out_dtype, device='cuda')
         return quantizer.make_empty(input_shape, dtype=out_dtype)
 

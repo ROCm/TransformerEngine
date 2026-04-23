@@ -454,22 +454,45 @@ def assert_dim_for_fp8_exec(*tensors: List[torch.Tensor]) -> None:
 if IS_HIP_EXTENSION:
     @functools.lru_cache(maxsize=None)
     def is_mi200():
-      """check whether this machine is mi200/210/250"""
-      import re
-      return (re.search('AMD Instinct MI2.0', torch.cuda.get_device_name(torch.cuda.current_device())) is not None)
-    
+        """Return True if the current GPU is MI200-class (MI2xx)."""
+        import re
+
+        return (
+            re.search(
+                "AMD Instinct MI2.0",
+                torch.cuda.get_device_name(torch.cuda.current_device()),
+            )
+            is not None
+        )
+
     @functools.lru_cache(maxsize=None)
     def is_mi308():
-      """check whether this machine is mi308"""
-      import re
-      return (re.search('AMD Instinct MI308', torch.cuda.get_device_name(torch.cuda.current_device())) is not None)
+        """Return True if the current GPU is MI308."""
+        import re
+
+        return (
+            re.search(
+                "AMD Instinct MI308",
+                torch.cuda.get_device_name(torch.cuda.current_device()),
+            )
+            is not None
+        )
+
 
 @functools.lru_cache(maxsize=None)
-def is_fp8_fnuz():
+def is_fp8_fnuz() -> bool:
+    """True when using FP8 FNUZ dtypes (ROCm FP8 path)."""
     return IS_HIP_EXTENSION and get_device_compute_capability() == (9, 4)
 
-get_torch_float8_e4m3_type = lambda: torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
-get_torch_float8_e5m2_type = lambda: torch.float8_e5m2fnuz if is_fp8_fnuz() else torch.float8_e5m2
+
+def get_torch_float8_e4m3_type():
+    """E4M3 dtype for current platform (FNUZ on ROCm gfx94x when applicable)."""
+    return torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
+
+
+def get_torch_float8_e5m2_type():
+    """E5M2 dtype for current platform (FNUZ on ROCm gfx94x when applicable)."""
+    return torch.float8_e5m2fnuz if is_fp8_fnuz() else torch.float8_e5m2
 
 def assert_dim_for_all_gather(
     tensor: torch.Tensor, with_all_gather: bool, quantizer: Quantizer
@@ -480,18 +503,13 @@ def assert_dim_for_all_gather(
             "All-gather requires quantizable tensor for quantizer " + quantizer.__class__.__name__
         )
 
-def is_bf16_compatible() -> None:
+def is_bf16_compatible() -> bool:
+    """Whether BF16 tensor cores / ops are usable on the current device."""
     if IS_HIP_EXTENSION:
         # only MI200 and newer machines support bf16
-        if get_device_compute_capability() in [(9, 4), (9, 5)] or is_mi200():
-            return True
-        else:
-            return False
-    else:
-        """Replaces torch.cuda.is_bf16_compatible() with an explicit
-        check on device compute capability to enforce sm_80 or higher.
-        """
-        return torch.cuda.get_device_capability()[0] >= 8
+        return get_device_compute_capability() in [(9, 4), (9, 5)] or is_mi200()
+    # CUDA: require sm_80 or higher (replaces torch.cuda.is_bf16_compatible heuristic).
+    return torch.cuda.get_device_capability()[0] >= 8
 
 def is_bf16_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
     """

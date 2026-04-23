@@ -8,9 +8,13 @@
 from __future__ import annotations
 
 from typing import Any, Optional, Tuple, Iterable, Union
+import os
 import warnings
+
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
 
@@ -21,10 +25,8 @@ from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
 from ..constants import dist_group_type
 
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
     from ..triton_kernels.cast import te_quantize_triton
-    import os
 
 aten = torch.ops.aten
 
@@ -120,12 +122,12 @@ class Float8Quantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         if IS_HIP_EXTENSION:
-            from ..triton_kernels.cast import te_quantize_triton
-            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+            use_cast_transpose_triton = bool(
+                int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0"))
+            )
             quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
             return quantize_func(tensor, self)
-        else:
-            return tex.quantize(tensor, self)
+        return tex.quantize(tensor, self)
 
     def make_empty(
         self,
@@ -348,12 +350,12 @@ class Float8CurrentScalingQuantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         if IS_HIP_EXTENSION:
-            from ..triton_kernels.cast import te_quantize_triton
-            use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
+            use_cast_transpose_triton = bool(
+                int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0"))
+            )
             quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
             return quantize_func(tensor, self)
-        else:
-            return tex.quantize(tensor, self)
+        return tex.quantize(tensor, self)
 
     def make_empty(
         self,

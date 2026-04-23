@@ -12,12 +12,13 @@ import json
 import os.path
 
 # Triton
-from ..common import get_arch
 import triton
 import triton.language as tl
 
 # PyTorch
 import torch
+
+from ..common import get_arch
 
 # AITER
 from .pid_preprocessing import pid_grid, remap_xcd
@@ -49,11 +50,11 @@ def get_config(
         assert os.path.exists(config_filename) and os.path.isfile(
             config_filename
         ), f"'{config_filename}' isn't an existent file."
-        with open(config_filename, "r") as config_file:
+        with open(config_filename, "r", encoding="utf-8") as config_file:
             get_config._config_dict = json.load(config_file)
             assert all(
                 gmm_type in get_config._config_dict
-                for gmm_type in {"gmm", "ptgmm", "nptgmm"}
+                for gmm_type in ("gmm", "ptgmm", "nptgmm")
             ), "Not all GMM variants are present in the configuration file."
 
     # Heuristic-based config selection for gmm
@@ -61,7 +62,7 @@ def get_config(
     if fwd:
         k_n_ratio = K / N if N > 0 else 1.0
         n_k_ratio = N / K if K > 0 else 1.0
-        
+
         # Prioritize small shapes first (before ratio checks)
         if M < 10000 and (N <= 2048 or K <= 2048):
             key = "tiny_shapes"
@@ -85,7 +86,7 @@ def get_config(
             key = "balanced_large_n"
         else:
             key = "default"
-    
+
     bwd = gmm_type == "gmm" and not trans_rhs
     if bwd:
         k_n_ratio = K / N if N > 0 else 1.0
@@ -109,7 +110,7 @@ def get_config(
         elif K < 5000 and N > 10000:
             key = "small_k_large_n_bwd"
         else:
-            key = "default" 
+            key = "default"
 
     # Heuristic-based config selection for ptgmm
     elif gmm_type == "ptgmm":
@@ -153,15 +154,15 @@ def get_config(
     assert (
         key in get_config._config_dict[gmm_type]
     ), f"Configuration key '{key}' is absent for {gmm_type}."
-    
+
     config = get_config._config_dict[gmm_type][key].copy()
-    
+
     # Adapt block sizes to fit within hardware shared memory limits
     if dtype == torch.float32:
         config["BLOCK_SIZE_M"] = max(1, config["BLOCK_SIZE_M"] // 2)
         config["BLOCK_SIZE_K"] = max(1, config["BLOCK_SIZE_K"] // 2)
         config["BLOCK_SIZE_N"] = max(1, config["BLOCK_SIZE_N"] // 2)
-    
+
     return config
 
 # Common code shared by GMM and TGMM kernels.
@@ -255,7 +256,7 @@ def gmm_kernel(
         tl.device_assert(num_tiles >= 0, "num_tiles < 0")
 
         # Loop through tiles of current MM problem.
-        while tile >= last_mm_tile and tile < last_mm_tile + num_tiles:
+        while last_mm_tile <= tile < last_mm_tile + num_tiles:
             # Figure out tile coordinates in current MM problem.
             tile_in_mm = tile - last_mm_tile
             tl.device_assert(tile_in_mm >= 0, "tile_in_mm < 0")
@@ -424,7 +425,7 @@ def tgmm_persistent_kernel(
         tl.device_assert(m >= 0, "m < 0")
 
         # Loop through tiles of current MM problem.
-        while tile >= last_mm_tile and tile < last_mm_tile + num_tiles:
+        while last_mm_tile <= tile < last_mm_tile + num_tiles:
             # Figure out tile coordinates in current MM problem.
             tile_in_mm = tile - last_mm_tile
             tl.device_assert(tile_in_mm >= 0, "tile_in_mm < 0")

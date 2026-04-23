@@ -14,8 +14,6 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 from ..constants import TE_DType
 from ..utils import get_sm_count, _empty_tensor
-if IS_HIP_EXTENSION:
-    from ..utils import get_device_compute_capability
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
@@ -23,6 +21,8 @@ from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
 
+if IS_HIP_EXTENSION:
+    from ..utils import get_device_compute_capability
 
 __all__ = [
     "general_gemm",

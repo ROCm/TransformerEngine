@@ -88,7 +88,7 @@ def get_cublas_workspace_size_bytes() -> None:
         """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
         if get_device_compute_capability() == (9, 5):
             return 67_108_864
-        return 33_554_432        
+        return 33_554_432
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
         # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
@@ -664,6 +664,7 @@ def fill_userbuffers_buffer_for_all_gather(
             columnwise_scale_inv=columnwise_scale_inv,
             fp8_dtype=local_tensor._fp8_dtype,
             quantizer=quantizer,
+            with_gemm_swizzled_scales=local_tensor._with_gemm_swizzled_scales,
         )
         return global_tensor, local_tensor
 
@@ -1053,8 +1054,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         fp8_enabled = self.fp8 or self.fp8_calibration
         self.fp8_meta["fp8_checkpoint"] = self.fp8 or self.fp8_calibration
 
-        if IS_HIP_EXTENSION and not FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 and hasattr(self, 'use_fsdp2') and self.use_fsdp2:  
-            FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 = True 
+        if IS_HIP_EXTENSION and not FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 and hasattr(self, 'use_fsdp2') and self.use_fsdp2:
+            FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 = True
 
         if self.fp8_parameters or fp8_enabled:
             if (
@@ -1088,8 +1089,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_initialized = True
 
             self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
-            if self.fp8_meta["recipe"].mxfp8():  
-                self.keep_fp8_weight_transpose_cache = True 
+            if self.fp8_meta["recipe"].mxfp8():
+                self.keep_fp8_weight_transpose_cache = True
 
         _current_recipe = self.fp8_meta["recipe"]
         if _original_recipe is not None and not (
@@ -1357,9 +1358,9 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if IS_HIP_EXTENSION and self.use_fsdp2 and not self.primary_weights_in_fp8 and fp8_meta_index is not None:
                 self.keep_fp8_weight_transpose_cache = False
                 param = FSDPAGTensor(
-                    param, 
-                    module=self, 
-                    fp8_meta_index=fp8_meta_index, 
+                    param,
+                    module=self,
+                    fp8_meta_index=fp8_meta_index,
                     keep_fp8_weight_transpose_cache=self.keep_fp8_weight_transpose_cache
                 )
 

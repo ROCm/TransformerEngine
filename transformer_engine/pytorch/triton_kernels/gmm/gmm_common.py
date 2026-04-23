@@ -299,7 +299,7 @@ def gen_gmm_tensors(
     device: torch.device | str = DEVICE,
     input_type: torch.dtype = DTYPE,
     output_type: torch.dtype = DTYPE,
-    trans_lhs: bool = False,
+    trans_lhs: bool = False,  # pylint: disable=unused-argument
     trans_rhs: bool = TRANS_RHS,
     rng_seed: int | None = RNG_SEED,
     unif_group_sizes: bool = False,
@@ -503,11 +503,10 @@ def gen_tgmm_bias_grad(
         assert K > 0, f"Number of bias_grad rows K must be positive (K = {K})."
         assert G > 0, f"Number of groups G must be positive (G = {G})."
         return torch.empty((G, K), device=device, dtype=torch.float32)
-    else:
-        # Return dummy pointer when bias_grad is not needed.
-        # Must be float32 because atomic_add does not support bf16/fp16,
-        # and Triton validates the pointer dtype even in dead branches.
-        return torch.tensor([], device=device, dtype=torch.float32)
+    # Return dummy pointer when bias_grad is not needed.
+    # Must be float32 because atomic_add does not support bf16/fp16,
+    # and Triton validates the pointer dtype even in dead branches.
+    return torch.tensor([], device=device, dtype=torch.float32)
 
 
 def gen_tgmm_tensors(
@@ -520,7 +519,7 @@ def gen_tgmm_tensors(
     input_type: torch.dtype = DTYPE,
     output_type: torch.dtype = DTYPE,
     trans_lhs: bool = TRANS_LHS,
-    trans_rhs: bool = False,
+    trans_rhs: bool = False,  # pylint: disable=unused-argument
     rng_seed: int | None = RNG_SEED,
     unif_group_sizes: bool = False,
     use_bias: bool = False,
@@ -666,8 +665,7 @@ def get_tgmm_bias_grad(
 
         return existing_bias_grad
 
-    else:
-        return gen_tgmm_bias_grad(K, G, device=device, with_bias_grad=False)
+    return gen_tgmm_bias_grad(K, G, device=device, with_bias_grad=False)
 
 
 def get_tgmm_transposition(lhs: Tensor, rhs: Tensor, out: Tensor) -> tuple[bool, int]:

@@ -54,7 +54,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     CheckOutputTensor(*rsigma, "rsigma");
   }
 
-  NVTE_Norm_Backend norm_backend;
+  NVTE_Norm_Backend norm_backend = NVTE_Norm_Backend::Te;
   bool is_aligned = true;
 #ifndef __HIP_PLATFORM_AMD__
   bool cudnn_backend = use_cudnn_norm_fwd() || is_mxfp8_scaling(z->scaling_mode);
@@ -76,10 +76,9 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
     gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
-  } else
+  }
 #endif
-  {
-    norm_backend = NVTE_Norm_Backend::Te;
+  if (norm_backend == NVTE_Norm_Backend::Te) {
     is_aligned = is_ptr_aligned(z->data.dptr, x.data.dptr, gamma.data.dptr, rsigma->data.dptr);
   }
 
@@ -148,7 +147,7 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
     CheckOutputTensor(*dgamma, "dgamma");
   }
 
-  NVTE_Norm_Backend norm_backend;
+  NVTE_Norm_Backend norm_backend = NVTE_Norm_Backend::Te;
   bool is_aligned = true;
   bool gamma_in_weight_dtype = false;
 #ifndef __HIP_PLATFORM_AMD__
@@ -156,10 +155,9 @@ void rmsnorm_bwd(const Tensor &dz, const Tensor &x, const Tensor &rsigma, const 
     // TODO: add check for GPU ARCH
     norm_backend = NVTE_Norm_Backend::Cudnn;
     gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
-  } else
+  }
 #endif
-  {
-    norm_backend = NVTE_Norm_Backend::Te;
+  if (norm_backend == NVTE_Norm_Backend::Te) {
     is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, rsigma.data.dptr, dx->data.dptr,
                                 dz.data.dptr, dgamma->data.dptr);
   }

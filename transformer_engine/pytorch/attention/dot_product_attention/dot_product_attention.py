@@ -14,6 +14,7 @@ import logging
 
 import torch
 from torch.nn.parameter import Parameter
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
@@ -62,8 +63,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.backends import 
     FusedAttention,
     FlashAttention,
 )
-
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 
 # Setup Attention Logging

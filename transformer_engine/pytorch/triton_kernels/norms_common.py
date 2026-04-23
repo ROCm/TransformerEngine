@@ -1,9 +1,9 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
+import warnings
 import torch
 import triton
-import warnings
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer

@@ -54,7 +54,7 @@ from build_tools.jax import setup_jax_extension, install_requirements, test_requ
 from pybind11.setup_helpers import build_ext as BuildExtension
 
 if rocm_build():
-    from build_tools.hipify.hipify import copy_hipify_tools, clear_hipify_tools_copy
+    from build_tools.hipify.hipify import copy_hipify_tools, clear_hipify_tools_copy  # pylint: disable=ungrouped-imports
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
 CMakeBuildExtension = get_build_ext(BuildExtension, True)

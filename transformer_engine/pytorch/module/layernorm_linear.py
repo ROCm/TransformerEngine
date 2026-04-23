@@ -1165,14 +1165,14 @@ class LayerNormLinear(TransformerEngineBaseModule):
     keep_fp8_weight_transpose_cache: bool, default = `True`
                 Controls whether to cache the FP8 weight transpose buffer during training.
 
-                - If set to `True` (default), the FP8 weight transpose buffer is cached to avoid recomputation, 
+                - If set to `True` (default), the FP8 weight transpose buffer is cached to avoid recomputation,
                 which can improve performance but significantly increases memory usage.
-                - If set to `False`, the buffer is not cached and the FP8 weight transpose is recomputed as needed. 
+                - If set to `False`, the buffer is not cached and the FP8 weight transpose is recomputed as needed.
                 This reduces memory consumption, especially during checkpoint loading and runtime.
 
-                **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training. 
-                Caching FP8 weight transposes can double memory usage for modules such as `Linear`, 
-                `LayerNormLinear`, and `LayerNormMLP`, which may lead to excessive memory pressure and 
+                **Recommendation**: Set this to `False` when using Fully Sharded Data Parallel (FSDP) training.
+                Caching FP8 weight transposes can double memory usage for modules such as `Linear`,
+                `LayerNormLinear`, and `LayerNormMLP`, which may lead to excessive memory pressure and
                 reduced efficiency of PyTorch's caching allocator.
 
                 Use this setting to balance memory usage and performance based on your training configuration.
@@ -1231,7 +1231,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
 
         self.wgrad_store = WeightGradStore(delay_wgrad_compute, ub_bulk_wgrad)
         self.name = name
-        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True   
+        self.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache if IS_HIP_EXTENSION else True
         self.use_fsdp2 = use_fsdp2 if IS_HIP_EXTENSION else False
 
         if tp_group is None:

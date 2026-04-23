@@ -26,14 +26,7 @@ import jax
 import jax.numpy as jnp
 from flax.core.frozen_dict import FrozenDict
 
-from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
-
 from transformer_engine_jax import DType
-if not is_hip_extension():
-    from transformer_engine_jax import (
-        get_cublasLt_version,
-        get_cuda_version,
-    )
 from transformer_engine.common.recipe import (
     Recipe,
     DelayedScaling,
@@ -53,6 +46,14 @@ from transformer_engine.jax.sharding import (
 from .metadata import QuantizeMeta
 from .scaling_modes import ScalingMode
 from .device_utils import get_device_compute_capability
+
+from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
+
+if not is_hip_extension():
+    from transformer_engine_jax import (  # pylint: disable=ungrouped-imports
+        get_cublasLt_version,
+        get_cuda_version,
+    )
 
 __all__ = [
     "get_global_quantize_recipe",
@@ -99,8 +100,7 @@ def _check_delayed_scaling_fp8_support(gpu_arch) -> Tuple[bool, str]:
     if is_hip_extension():
         if gpu_arch in [94, 95]:
             return True, ""
-        else:
-            return False, "Device arch gfx94x or gfx95x required for FP8 execution."
+        return False, "Device arch gfx94x or gfx95x required for FP8 execution."
     if gpu_arch < 89:  # pre-ada
         return False, "Device compute capability 8.9 or higher required for FP8 execution."
     if get_cublasLt_version() < 120103:

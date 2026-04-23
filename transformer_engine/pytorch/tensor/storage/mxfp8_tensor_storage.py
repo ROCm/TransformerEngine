@@ -10,12 +10,13 @@ from __future__ import annotations
 from typing import Optional, Dict, Any, Tuple
 from collections.abc import Iterable
 import math
-import torch
 import os
+
+import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 

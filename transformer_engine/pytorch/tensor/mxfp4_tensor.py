@@ -9,7 +9,6 @@ import math
 from typing import Optional, Tuple, Union
 
 import torch
-from ..triton_kernels.cast import te_quantize_triton
 
 import transformer_engine_torch as tex
 from transformer_engine_torch import DType as TE_DType
@@ -17,6 +16,7 @@ from transformer_engine_torch import DType as TE_DType
 from transformer_engine.common.recipe import MXFP4BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE  # MXFP4 uses same block size
 from ..utils import devices_match, round_up_to_nearest_multiple
+from ..triton_kernels.cast import te_quantize_triton
 
 from .storage.mxfp4_tensor_storage import MXFP4TensorStorage, _FromMXFP4Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
@@ -124,7 +124,7 @@ class MXFP4Quantizer(Quantizer):
 
         # Allocate FP4 data: [M, K/2]
         rowwise_data = torch.empty(M, K // 2, dtype=torch.uint8, device=device)
-        
+
         # Allocate PADDED scale tensors for shuffle compatibility
         rowwise_scale_K = math.ceil(K / MXFP4_BLOCK_SCALING_SIZE)
         rowwise_scale_inv = torch.zeros(
@@ -252,7 +252,7 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
         Construct plain PyTorch tensor from MXFP4Tensor
 
         By default the resulting tensor's dtype is the MXFP4Tensor's nominal dtype.
-        
+
         Note: For MXFP4 forward-only training, this is typically not needed as
         backward pass uses high-precision activations.
         """

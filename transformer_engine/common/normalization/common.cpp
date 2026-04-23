@@ -544,25 +544,26 @@ NormalizationPlanBase* NormalizationPlanRegistry::getNormalizationPlan(
     plan = std::make_unique<CudnnNormalizationPlan>(NormType, NormStage, wtype, itype, otype, ctype,
                                                     batch_size, hidden_size, sm_count,
                                                     zero_centered_gamma, mode, training);
-  } else
-#endif
-  if (NormStage == NVTE_Norm_Stage::Forward) {
+  } else if (NormStage == NVTE_Norm_Stage::Forward) {
     plan = std::make_unique<TeNormalizationPlan<ForwardKernelParams>>(
         NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
-        zero_centered_gamma, is_tuned
-#ifdef __HIP_PLATFORM_AMD__
-        , mode, training
-#endif
-      );
+        zero_centered_gamma, is_tuned);
   } else {
     plan = std::make_unique<TeNormalizationPlan<BackwardKernelParams>>(
         NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
-        zero_centered_gamma, is_tuned
-#ifdef __HIP_PLATFORM_AMD__
-        , mode, training
-#endif
-        );
+        zero_centered_gamma, is_tuned);
   }
+#else
+  if (NormStage == NVTE_Norm_Stage::Forward) {
+    plan = std::make_unique<TeNormalizationPlan<ForwardKernelParams>>(
+        NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
+        zero_centered_gamma, is_tuned, mode, training);
+  } else {
+    plan = std::make_unique<TeNormalizationPlan<BackwardKernelParams>>(
+        NormType, NormStage, wtype, itype, otype, ctype, batch_size, hidden_size, sm_count,
+        zero_centered_gamma, is_tuned, mode, training);
+  }
+#endif
   normalizationPlanMap.insert({key, std::move(plan)});
   return normalizationPlanMap[key].get();
 }

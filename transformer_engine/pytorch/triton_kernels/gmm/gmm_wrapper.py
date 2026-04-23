@@ -56,7 +56,7 @@ def _gmm_grid(
         math.ceil(gs / block_size_m) for gs in group_sizes_list
     ) * num_n_tiles
     num_programs = min(grid_dim, num_tiles)
-    
+
     return (num_programs,)
 
 
@@ -163,13 +163,13 @@ def gmm(
             if key.startswith("BLOCK_SIZE_")
             else config[key] > 0
         )
-        for key in {
+        for key in (
             "BLOCK_SIZE_M",
             "BLOCK_SIZE_K",
             "BLOCK_SIZE_N",
             "GROUP_SIZE",
             "GRID_DIM",
-        }
+        )
     ), "Invalid GMM kernel config."
 
     group_sizes_list = group_sizes_list if group_sizes_list is not None else group_sizes.tolist()
@@ -337,13 +337,13 @@ def ptgmm(
             if key.startswith("BLOCK_SIZE_")
             else config[key] > 0
         )
-        for key in {
+        for key in (
             "BLOCK_SIZE_M",
             "BLOCK_SIZE_K",
             "BLOCK_SIZE_N",
             "GROUP_SIZE",
             "GRID_DIM",
-        }
+        )
     ), "Invalid PTGMM kernel config."
 
     # Bias gradient handling.
@@ -531,12 +531,12 @@ def nptgmm(
             if key.startswith("BLOCK_SIZE_")
             else config[key] > 0
         )
-        for key in {
+        for key in (
             "BLOCK_SIZE_M",
             "BLOCK_SIZE_K",
             "BLOCK_SIZE_N",
             "GROUP_SIZE",
-        }
+        )
     ), "Invalid NPTGMM kernel config."
 
     grid = _nptgmm_grid(

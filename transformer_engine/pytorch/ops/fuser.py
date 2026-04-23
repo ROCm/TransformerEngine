@@ -12,6 +12,7 @@ from typing import Any, Optional
 import itertools
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager, Recipe, DelayedScaling
 from transformer_engine.pytorch.ops.op import (
@@ -19,7 +20,6 @@ from transformer_engine.pytorch.ops.op import (
     FusibleOperation,
     OperationContext,
 )
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.ops.fused import (
     fuse_backward_activation_bias,
     fuse_backward_add_rmsnorm,
@@ -29,15 +29,16 @@ from transformer_engine.pytorch.ops.fused import (
     fuse_forward_linear_bias_add,
     fuse_forward_linear_scale_add,
 )
+from transformer_engine.pytorch.quantized_tensor import (
+    prepare_for_saving,
+    restore_from_saved,
+)
+
 if not IS_HIP_EXTENSION:
     from transformer_engine.pytorch.ops.fused import (
         fuse_userbuffers_backward_linear,
         fuse_userbuffers_forward_linear,
     )
-from transformer_engine.pytorch.quantized_tensor import (
-    prepare_for_saving,
-    restore_from_saved,
-)
 
 
 def _split_tuple(t: tuple, idx: int) -> tuple[tuple, tuple]:

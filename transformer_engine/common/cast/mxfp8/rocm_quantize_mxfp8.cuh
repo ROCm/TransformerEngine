@@ -7,6 +7,8 @@
 // drop-in replacement for rocm quantize_mxfp8 kernels
 //#include "hip/hip_runtime.h" //dummy include to prevent hipification adding this header
 
+#include <cstdint>
+
 constexpr size_t MXFP8_CHUNK_DIM_Y = 64;
 constexpr size_t MXFP8_CHUNK_DIM_X = 64;
 constexpr size_t MXFP8_THREADS_PER_CHUNK = 64;
@@ -15,7 +17,7 @@ constexpr size_t ELEMS_PER_THREAD = 16;
 constexpr size_t MXFP8_BUFFER_DIM_Y = 32;  // only 32 is supported
 
 #if defined(__gfx950__) && __HIP_DEVICE_COMPILE__
-typedef short mxfp8_v2i16_t __attribute__((ext_vector_type(2)));
+typedef int16_t mxfp8_v2i16_t __attribute__((ext_vector_type(2)));
 #endif
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,

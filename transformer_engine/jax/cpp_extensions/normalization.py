@@ -8,7 +8,6 @@ import os
 import warnings
 import operator
 from functools import partial, cache, reduce
-from packaging import version
 from typing import Optional, Union
 
 import jax
@@ -17,7 +16,6 @@ from jax import dtypes, ffi
 from jax.experimental.custom_partitioning import SdyShardingRule, BATCHING
 from jax.interpreters.mlir import ir
 from jax.sharding import PartitionSpec
-from .misc import is_hip_extension
 
 import transformer_engine_jax
 from transformer_engine_jax import NVTE_Norm_Type
@@ -648,8 +646,6 @@ class NormFwdPrimitive(BasePrimitive):
         value_types,
         result_types,
     ):
-        if version.parse(jax.__version__) < version.parse("0.5.0"):
-            raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
         del (
             zero_centered_gamma,
             epsilon,

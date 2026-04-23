@@ -9,15 +9,13 @@ import os
 import warnings
 from dataclasses import dataclass, replace
 from functools import partial, reduce
-from packaging import version
 from typing import Optional, Tuple
 
 import jax
 import jax.numpy as jnp
 from jax import dtypes, lax, ffi
 from jax.sharding import PartitionSpec, NamedSharding
-if version.parse(jax.__version__) >= version.parse("0.5.0"):
-    from jax.experimental.custom_partitioning import SdyShardingRule
+from jax.experimental.custom_partitioning import SdyShardingRule
 
 import transformer_engine_jax
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
@@ -718,8 +716,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
 
     @staticmethod
     def shardy_sharding_rule(config, mesh, value_types, result_types):
-        if version.parse(jax.__version__) < version.parse("0.5.0"):
-            raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
         del mesh, result_types
 
         # Keep in sync with `infer_sharding_from_operands`.
@@ -1200,8 +1196,6 @@ class FusedAttnBwdPrimitive(BasePrimitive):
 
     @staticmethod
     def shardy_sharding_rule(config, mesh, value_types, result_types):
-        if version.parse(jax.__version__) < version.parse("0.5.0"):
-            raise ImportError("JAX version 0.5.0 or later is required for shardy sharding.")
         del config, mesh
         # Keep in sync with `infer_sharding_from_operands`.
         input_spec = tuple((f"…{x}",) for x in range(len(value_types)))
