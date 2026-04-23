@@ -349,24 +349,27 @@ def _get_blockwise_data(tensor, need_rowwise=True):
 
 
 def _reshape_scale_for_scaled_mm(scale, dim, is_row):
-    """Reshape a Float8 _scale_inv tensor to (dim, 1) [is_row=True] or
-    (1, dim) [is_row=False] for torch._scaled_mm.
+    """Reshape a Float8 _scale_inv for torch._scaled_mm.
 
-    Handles per-tensor (scalar / 1-elem) by expand-broadcast and per-row
-    (1D of length dim, or already-2D `(dim, 1)` / `(1, dim)`). Returns None
-    when the scale shape doesn't match either convention (block-scaled etc.)
-    so the caller can fall through to the dequant path.
+    - Per-tensor scalar (numel==1): return a 0-dim tensor. hipBLASLt's
+      per-tensor FP8 kernels (same family full TE uses for DelayedScaling)
+      are selected by scalar scale shape. Broadcasting a scalar to (dim, 1)
+      would force the rowwise kernel family, which isn't tuned for
+      mixed-dtype (E4M3×E5M2) on ROCm — that's the "could not find valid
+      hipblaslt solution" error for dgrad calls.
+    - Per-row (numel==dim): return `(dim, 1)` (is_row=True) or `(1, dim)`
+      (is_row=False), the rowwise convention.
+    - Anything else: None (caller falls through).
     """
     if scale is None:
         return None
     scale = scale.to(torch.float32) if scale.dtype != torch.float32 else scale
     if scale.numel() == 1:
-        flat = scale.reshape(1).expand(dim).contiguous()
-    elif scale.numel() == dim:
+        return scale.reshape(())
+    if scale.numel() == dim:
         flat = scale.reshape(dim).contiguous()
-    else:
-        return None
-    return flat.unsqueeze(1) if is_row else flat.unsqueeze(0)
+        return flat.unsqueeze(1) if is_row else flat.unsqueeze(0)
+    return None
 
 
 def _try_scaled_mm(A, transA, B, transB, output_dtype):
@@ -462,9 +465,11 @@ def _try_scaled_mm(A, transA, B, transB, output_dtype):
     pad_rows = (-M) % 16
     if pad_rows:
         x = F.pad(x, (0, 0, 0, pad_rows))  # zero-pad new rows
-        # Scale rows for the padded entries: value is irrelevant (scale × 0 = 0),
-        # but must be non-NaN/Inf. 1.0 is safe.
-        x_scale_2d = F.pad(x_scale_2d, (0, 0, 0, pad_rows), value=1.0)
+        # Only pad x_scale_2d if it's per-row (shape (M, 1)); a 0-dim
+        # scalar per-tensor scale applies to every row automatically.
+        if x_scale_2d.ndim == 2 and x_scale_2d.shape[0] == M:
+            # Value irrelevant (scale × 0 = 0), just non-NaN/Inf.
+            x_scale_2d = F.pad(x_scale_2d, (0, 0, 0, pad_rows), value=1.0)
 
     out_dtype = output_dtype if output_dtype is not None else torch.bfloat16
 
