@@ -156,7 +156,7 @@ Attention Backend Selection
 
    :Type: ``int`` (0 or 1)
    :Default: ``1``
-   :Description: : Allow non-deterministic algorithms for Transformer Engine execution. When set to ``0``, only deterministic algorithms are allowed. This is relevant for both PyTorch and JAX attention implementations.
+   :Description: Allow non-deterministic algorithms for Transformer Engine execution. When set to ``0``, only deterministic algorithms are allowed. This is relevant for both PyTorch and JAX attention implementations.
 
 .. envvar:: NVTE_FUSED_RING_ATTENTION_USE_SCAN
 
