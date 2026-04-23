@@ -1,17 +1,26 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 from typing import Callable, Tuple, Union, List
 import math
-import unittest.mock as mock
 import torch
 import pytest
 from transformer_engine.pytorch.attention.rope import (
-    FusedRoPEFunc,
     RotaryPositionEmbedding,
     apply_rotary_pos_emb,
     apply_fused_qkv_rotary_pos_emb,
 )
+
+try:
+    from torch.utils.cpp_extension import IS_HIP_EXTENSION
+except ImportError:
+    IS_HIP_EXTENSION = False
+
+if IS_HIP_EXTENSION:
+    import unittest.mock as mock
+    from transformer_engine.pytorch.attention.rope import FusedRoPEFunc
 
 
 # Gradient is a broadcasted scalar
@@ -507,8 +516,10 @@ def test_rotary_position_embedding_forward_with_autocast_gives_same_result_as_wi
 #   NVTE_USE_AITER_ROPE=1 pytest tests/pytorch/test_fused_rope.py::test_aiter_rope_can_use_guard -v
 
 
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="AITER RoPE requires ROCm")
 @pytest.mark.skipif(
-    not FusedRoPEFunc.has_aiter_rope(), reason="AITER RoPE not available"
+    IS_HIP_EXTENSION and not FusedRoPEFunc.has_aiter_rope(),
+    reason="AITER RoPE not available",
 )
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("seq_length", [2048, 4096, 8192])
@@ -527,7 +538,7 @@ def test_aiter_rope_matches_te_fused(
     no start_positions), verify output and gradients match the TE fused kernel.
     """
 
-    device = torch.device("cuda:0")
+    device = torch.device("cuda")
     batch_size, head_num = 2, 64
     tensor_format = "sbhd"
     interleaved = False
@@ -577,6 +588,7 @@ def test_aiter_rope_matches_te_fused(
     torch.testing.assert_close(grad_aiter, grad_te)
 
 
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="AITER RoPE requires ROCm")
 @pytest.mark.parametrize(
     "tensor_format,interleaved,cu_seqlens,cp_size,start_positions,expected",
     [

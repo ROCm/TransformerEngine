@@ -7,7 +7,6 @@
 """
 Rotary Position Embedding implementation of different types along with helper functions
 """
-import os
 from typing import Optional, Tuple, Union, List
 import torch
 
@@ -22,19 +21,20 @@ except ImportError:
 _aiter_rope_fwd = None
 _aiter_rope_bwd = None
 _HAVE_AITER_ROPE = False
-_USE_AITER_ROPE = os.environ.get("NVTE_USE_AITER_ROPE", "0") == "1"
 
-if IS_HIP_EXTENSION and _USE_AITER_ROPE:
-    try:
-        from aiter.ops.rope import (  # pylint: disable=import-error
-            rope_fwd as _aiter_rope_fwd,
-            rope_bwd as _aiter_rope_bwd,
-        )
-        _HAVE_AITER_ROPE = True
-    except Exception as _aiter_import_err:  # pylint: disable=broad-except
-        raise RuntimeError(
-            f"NVTE_USE_AITER_ROPE=1 but AITER fused RoPE import failed."
-        ) from _aiter_import_err
+if IS_HIP_EXTENSION:
+    import os  # pylint: disable=wrong-import-order,wrong-import-position
+    if os.environ.get("NVTE_USE_AITER_ROPE", "0") == "1":
+        try:
+            from aiter.ops.rope import (  # pylint: disable=import-error
+                rope_fwd as _aiter_rope_fwd,
+                rope_bwd as _aiter_rope_bwd,
+            )
+            _HAVE_AITER_ROPE = True
+        except Exception as _aiter_import_err:  # pylint: disable=broad-except
+            raise RuntimeError(
+                "NVTE_USE_AITER_ROPE=1 but AITER fused RoPE import failed."
+            ) from _aiter_import_err
 
 
 __all__ = ["RotaryPositionEmbedding", "apply_rotary_pos_emb", "apply_fused_qkv_rotary_pos_emb"]
