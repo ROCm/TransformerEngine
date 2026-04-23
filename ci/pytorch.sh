@@ -39,13 +39,19 @@ run_default_fa_lbl() {
 }
 
 with_aiter() {
-    # flydsl is only on AMD nightlies; needed for aiter pyproject build-system requires.
-    (cd ${TE_PATH}3rdparty/aiter && \
-        PIP_FIND_LINKS="https://rocm.frameworks-nightlies.amd.com/whl/gfx942-gfx950/flydsl/" \
-        PIP_PRE=1 \
-        GPU_ARCHS=native pip install -e .)
+    # Only install/uninstall amd-aiter on the default FA sweep pass (same criterion as
+    # run_default_fa);
+    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
+        # flydsl is only on AMD nightlies; needed for aiter pyproject build-system requires.
+        (cd ${TE_PATH}3rdparty/aiter && \
+            PIP_FIND_LINKS="https://rocm.frameworks-nightlies.amd.com/whl/gfx942-gfx950/flydsl/" \
+            PIP_PRE=1 \
+            GPU_ARCHS=native pip install -e .)
+    fi
     "$@"
-    pip uninstall -y amd-aiter
+    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
+        pip uninstall -y amd-aiter
+    fi
 }
 
 run_test_config(){
@@ -96,9 +102,7 @@ run_test_config(){
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_fusible_ops.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 triton_kernels/test_cast.py
     run_default_fa 1 nvfp4/
-    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
-        with_aiter run_default_fa 1 mxfp4/
-    fi
+    with_aiter run_default_fa 1 mxfp4/
 }
 
 run_test_config_mgpu(){
