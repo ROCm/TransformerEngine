@@ -31,11 +31,11 @@
 #include "transformer_engine/transformer_engine.h"
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_cast_kernels.cuh"
+#include "tdm.cuh"
 #endif
 
 namespace transformer_engine {
 
-#ifndef __HIP_PLATFORM_AMD__
 namespace mxfp8_kernel {
 
 constexpr size_t SCALE_DIM_Y = 32;
@@ -53,22 +53,36 @@ constexpr size_t THREADS_PER_BANK = TOTAL_BANKS_WIDTH / SCALE_DIM_X;  // 4 = 128
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, bool ROWWISE_SCALING,
-          bool COLWISE_SCALING, size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X, size_t THREADS_PER_CHUNK>
+          bool COLWISE_SCALING,
+#ifdef __HIP_PLATFORM_AMD__
+          size_t SCALE_DIM_Y_TMPL, size_t SCALE_DIM_X_TMPL, bool IS_ALIGNED,
+#endif
+          size_t CHUNK_DIM_Y, size_t CHUNK_DIM_X, size_t THREADS_PER_CHUNK>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
-    cast_mxfp8_2D_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
+    cast_mxfp8_2D_kernel(
+#ifdef __HIP_PLATFORM_AMD__
+                         const IType *__restrict__ input_ptr,
+                         const IType *__restrict__ act_input_ptr,
+                         OType *__restrict__ output_rowwise_ptr,
+                         OType *__restrict__ output_colwise_ptr,
+#else
+                         const __grid_constant__ CUtensorMap tensor_map_input,
                          const __grid_constant__ CUtensorMap tensor_map_act_input,
                          const __grid_constant__ CUtensorMap tensor_map_output_rowwise,
                          const __grid_constant__ CUtensorMap tensor_map_output_colwise,
+#endif
                          e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
                          const float *noop, float *const dbias_workspace, float *const amax_ptr,
                          const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
                          const size_t scale_stride_colwise) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
 
+#ifndef __HIP_PLATFORM_AMD__
   using IType2 = typename ptx::FPx2<IType>;
   using OType2 = typename ptx::FPx2<OType>;
+#endif
 
   if constexpr (NO_ACTIVATIONS) {
     if (noop != nullptr && noop[0] == 1.0f) {
@@ -120,12 +134,18 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int thread_lane = threadIdx.x % THREADS_PER_WARP;
   const int bank_group = thread_lane / THREADS_PER_BANK;
 
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr size_t MX_SHMEM_ALIGNMENT = 128;
+#else
+  constexpr size_t MX_SHMEM_ALIGNMENT = TMA_SHMEM_ALIGNMENT;
+#endif
+
   constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
   constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
   constexpr size_t buff_size_aligned_in =
-      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), MX_SHMEM_ALIGNMENT);
   constexpr size_t buff_size_aligned_out =
-      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
+      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), MX_SHMEM_ALIGNMENT);
 
   constexpr size_t elt_input_mem = buff_size_aligned_in;
   constexpr size_t act_input_mem = (IS_DACT ? buff_size_aligned_in : 0);
@@ -135,10 +155,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   extern __shared__ char dynamic_shmem[];
   uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
-  // Manually align dynamic SHMEM per TMA requirements using padding
-  // __align__(128) Does not guarantee the pointer to be aligned!
-  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
-                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
+  // Manually align dynamic SHMEM per TMA/TDM requirements using padding
+  uintptr_t dshmem = (base_shmem_ptr + MX_SHMEM_ALIGNMENT - 1) &
+                     ~(static_cast<uintptr_t>(MX_SHMEM_ALIGNMENT - 1));
 
   // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   IType *in_sh = reinterpret_cast<IType *>(dshmem);
@@ -147,7 +166,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   OType *out_colwise_sh = reinterpret_cast<OType *>(dshmem + in_mem + out_mem_rowwise);
   IType *cached_act_sh = in_sh;  // in_sh is used as a cache buffer
 
+#ifndef __HIP_PLATFORM_AMD__
   constexpr size_t shmem_buff_size = buff_size_aligned_in / BUFFS_NUM;
+#endif
 
   const bool is_master_thread = (threadIdx.x == 0);
 
@@ -162,6 +183,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   float block_amax = 0.0f;
 
+#ifndef __HIP_PLATFORM_AMD__
 // Initialize shared memory barrier with the number of threads participating in the barrier.
 #pragma nv_diag_suppress static_var_with_dynamic_init
   __shared__ alignas(8) uint64_t mbar[STAGES];
@@ -178,6 +200,25 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     copy_2d_to_shared(&in_sh[0], &tensor_map_input, block_offset_X, block_offset_Y, shmem_buff_size,
                       &mbar[0], is_master_thread);
   }
+#else  // __HIP_PLATFORM_AMD__ — TDM prefetch
+  constexpr uint32_t mx_in_data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
+  constexpr uint32_t mx_out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
+
+  // Prefetch first stage
+  if constexpr (IS_DACT) {
+    tdm::copy_2d_to_shared_x2(
+        &in_sh[0], input_ptr, block_offset_X, block_offset_Y,
+        &act_in_sh[0], act_input_ptr, block_offset_X, block_offset_Y,
+        BUFF_DIM_X, BUFF_DIM_Y, cols, rows, cols, mx_in_data_sz);
+  } else {
+    tdm::copy_2d_to_shared(&in_sh[0], input_ptr,
+                           block_offset_X, block_offset_Y,
+                           BUFF_DIM_X, BUFF_DIM_Y,
+                           cols, rows, cols, mx_in_data_sz);
+  }
+  tdm::wait_tensorcnt_0();
+  __syncthreads();
+#endif  // __HIP_PLATFORM_AMD__
 
 #pragma unroll
   for (int stage = 0; stage < STAGES; ++stage) {
@@ -186,6 +227,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const size_t stage_offset_Y = stage * BUFF_DIM_Y;
 
     if (next_stage < STAGES) {
+#ifndef __HIP_PLATFORM_AMD__
       // Wait for TMA transfer to have finished reading shared memory.
       // I.e. the buffer is ready to be written to
       ptx::cp_async_bulk_wait_group_read<1>();
@@ -204,12 +246,37 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         copy_2d_to_shared(&in_sh[next_buff_offset], &tensor_map_input, global_offset_X,
                           global_offset_Y, shmem_buff_size, &mbar[next_stage], is_master_thread);
       }
+#else  // __HIP_PLATFORM_AMD__ — TDM prefetch next stage
+      {
+        const size_t next_buff = next_stage % BUFFS_NUM;
+        const size_t next_stage_offset_Y = next_stage * BUFF_DIM_Y;
+        const size_t global_offset_Y = block_offset_Y + next_stage_offset_Y;
+        const size_t global_offset_X = block_offset_X;
+        const size_t next_buff_offset = next_buff * BUFF_DIM;
+        if constexpr (IS_DACT) {
+          tdm::copy_2d_to_shared_x2(
+              &in_sh[next_buff_offset], input_ptr, global_offset_X, global_offset_Y,
+              &act_in_sh[next_buff_offset], act_input_ptr, global_offset_X, global_offset_Y,
+              BUFF_DIM_X, BUFF_DIM_Y, cols, rows, cols, mx_in_data_sz);
+        } else {
+          tdm::copy_2d_to_shared(&in_sh[next_buff_offset], input_ptr,
+                                 global_offset_X, global_offset_Y,
+                                 BUFF_DIM_X, BUFF_DIM_Y,
+                                 cols, rows, cols, mx_in_data_sz);
+        }
+      }
+#endif  // __HIP_PLATFORM_AMD__
     }
 
+#ifndef __HIP_PLATFORM_AMD__
     ptx::fence_proxy_async_shared_cta();
 
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[stage], parity);
+#else
+    tdm::wait_tensorcnt_0();
+    __syncthreads();
+#endif
 
     float thread_amax = 0.0f;
     if constexpr (COLWISE_SCALING) {
@@ -220,6 +287,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+#ifdef __HIP_PLATFORM_AMD__
+        // Scalar fallback for __hmax/__habs (not available on AMD)
+#pragma unroll
+        for (int i = 0; i < BUFF_DIM_Y; ++i) {
+          const size_t shmem_offset_colwise = shmem_offset_base_colwise + i * BUFF_DIM_X;
+          in_colwise_IType[i] = in_sh[shmem_offset_colwise];
+          thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(in_colwise_IType[i])));
+        }
+#else
         IType thread_amax_f16 = static_cast<IType>(0.0f);
 #pragma unroll
         for (int i = 0; i < BUFF_DIM_Y; ++i) {
@@ -228,6 +304,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           thread_amax_f16 = __hmax(thread_amax_f16, __habs(in_colwise_IType[i]));
         }
         thread_amax = static_cast<float>(thread_amax_f16);
+#endif
       } else {
 #pragma unroll
         for (int i = 0; i < BUFF_DIM_Y; ++i) {
@@ -278,7 +355,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       scales_colwise[scale_idx] = biased_exponent;
 
       const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+#ifndef __HIP_PLATFORM_AMD__
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
+#endif
 
 // 3. Scale elements
 #pragma unroll
@@ -303,11 +382,29 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       float in_compute_rowwise[SCALE_DIM_X];
       Vec<IType, PACK_SIZE> in_cached[WAVES];
 
+#ifndef __HIP_PLATFORM_AMD__
       // used as an IType container for BF16/FP16 --> MXFP8 CAST ONLY
       Vec<IType2, PACK_SIZE / 2> in_IType[WAVES];
+#endif
 
       // 1. Read/Compute elements. Find MXFP8-block AMAX
       if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+#ifdef __HIP_PLATFORM_AMD__
+        // Scalar fallback for abs_max_2x (PTX intrinsic not available on AMD)
+#pragma unroll
+        for (int w = 0; w < WAVES; ++w) {
+          const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+          const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
+          const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
+          Vec<IType, PACK_SIZE> in_vec;
+          in_vec.load_from(&in_sh[shmem_offset_rowwise]);
+#pragma unroll
+          for (int e = 0; e < PACK_SIZE; ++e) {
+            in_cached[w].data.elt[e] = in_vec.data.elt[e];
+            thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(in_vec.data.elt[e])));
+          }
+        }
+#else
         IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
@@ -323,10 +420,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         }
         thread_amax =
             static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
+#endif
       } else if constexpr (IS_CACHED_ACT_OP) {
         // ensures that all writes to cache made in the section above are visible to all threads
         __syncthreads();
+#ifndef __HIP_PLATFORM_AMD__
         IType2 thread_amax_2x = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+#endif
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
           const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
@@ -339,9 +439,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
           // Load cached elements
           in_cached[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
-          // Since TMA requirement for the data alignment is 16B (i.e. cols % 8 == 0, in case of BF16 elements)
-          // only single check (w.r.t. column direction) is sufficient to be sure the entire wave is inside the boundaries
           if (!out_of_bounds) {
+#ifdef __HIP_PLATFORM_AMD__
+            // Scalar fallback for abs_max_2x (PTX intrinsic not available on AMD)
+#pragma unroll
+            for (int e = 0; e < PACK_SIZE; ++e) {
+              thread_amax = fmaxf(thread_amax, fabsf(static_cast<float>(in_cached[w].data.elt[e])));
+            }
+#else
             if constexpr (std::is_same_v<IType, float>) {
 #pragma unroll
               for (int e = 0; e < PACK_SIZE; ++e) {
@@ -355,12 +460,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                 ptx::abs_max_2x(thread_amax_2x, thread_amax_2x, in_cached_2x);
               }
             }
+#endif
           }
         }
+#ifndef __HIP_PLATFORM_AMD__
         if constexpr (!std::is_same_v<IType, float>) {
           thread_amax =
               static_cast<float>(__hmax(__habs(thread_amax_2x.x), __habs(thread_amax_2x.y)));
         }
+#endif
       } else {
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
@@ -422,11 +530,30 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       scales_rowwise[scale_idx] = biased_exponent;
 
       const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+#ifndef __HIP_PLATFORM_AMD__
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
+#endif
 
       // 3. Scale elements
 #pragma unroll
       for (int w = 0; w < WAVES; ++w) {
+#ifdef __HIP_PLATFORM_AMD__
+        // Scalar fallback for mul_cvt_2x (PTX intrinsic not available on AMD)
+        Vec<OType, PACK_SIZE> out;
+#pragma unroll
+        for (int e = 0; e < PACK_SIZE; ++e) {
+          float value;
+          if constexpr (NO_ACTIVATIONS && (!IS_DBIAS) && (!std::is_same_v<IType, float>)) {
+            value = static_cast<float>(in_cached[w].data.elt[e]);
+          } else if constexpr (IS_CACHED_ACT_OP) {
+            value = static_cast<float>(in_cached[w].data.elt[e]);
+          } else {
+            const int j = w * PACK_SIZE + e;
+            value = in_compute_rowwise[j];
+          }
+          out.data.elt[e] = static_cast<OType>(value * block_scale_inverse);
+        }
+#else
         Vec<OType2, PACK_SIZE / 2> out;
 #pragma unroll
         for (int e = 0; e < PACK_SIZE / 2; ++e) {
@@ -444,6 +571,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
           ptx::mul_cvt_2x(out_pair, in, block_scale_inverse_2x);
         }
+#endif
         const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
         const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
         const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
@@ -455,6 +583,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     __builtin_assume(thread_amax >= 0);
     block_amax = fmaxf(block_amax, thread_amax);
 
+#ifndef __HIP_PLATFORM_AMD__
     // Wait for shared memory writes to be visible to TMA engine.
     ptx::fence_proxy_async_shared_cta();
     __syncthreads();
@@ -480,9 +609,32 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // Create a "bulk async-group" out of the previous bulk copy operation.
       ptx::cp_async_bulk_commit_group();
     }
+#else  // __HIP_PLATFORM_AMD__ — TDM store
+    __syncthreads();
+    {
+      const size_t global_offset_Y = block_offset_Y + stage_offset_Y;
+      const size_t global_offset_X = block_offset_X;
+      const size_t buff_offset = buff * BUFF_DIM;
+
+      if constexpr (ROWWISE_SCALING) {
+        tdm::store_2d_to_global(&out_rowwise_sh[buff_offset], output_rowwise_ptr,
+                                global_offset_X, global_offset_Y,
+                                BUFF_DIM_X, BUFF_DIM_Y, cols, rows, cols, mx_out_data_sz);
+      }
+      if constexpr (COLWISE_SCALING) {
+        tdm::store_2d_to_global(&out_colwise_sh[buff_offset], output_colwise_ptr,
+                                global_offset_X, global_offset_Y,
+                                BUFF_DIM_X, BUFF_DIM_Y, cols, rows, cols, mx_out_data_sz);
+      }
+      tdm::wait_tensorcnt_0();
+      __syncthreads();
+    }
+#endif  // __HIP_PLATFORM_AMD__
   }
 
+#ifndef __HIP_PLATFORM_AMD__
   parity ^= 1;
+#endif
 
   if constexpr (IS_DBIAS) {
     float thread_partial_dbias = 0.0f;
@@ -539,8 +691,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     atomicMaxFloat(amax_ptr, block_amax);
   }
 
+#ifndef __HIP_PLATFORM_AMD__
   destroy_barriers<STAGES>(mbar, is_master_thread);
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#else
+  tdm::wait_tensorcnt_0();
+#endif
+#endif  // #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
 }
 }  // namespace mxfp8_kernel
 
@@ -563,13 +719,20 @@ static_assert(FP8_ITERATIONS >= FP8_PREFETCH_BUFFERS_NUM);
 template <bool IS_DBIAS, bool IS_DACT, typename ParamOP, float (*OP)(float, const ParamOP &),
           typename IType, typename OType>
 __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
-    cast_fp8_2D_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
+    cast_fp8_2D_kernel(
+#ifdef __HIP_PLATFORM_AMD__
+                       const IType *__restrict__ input_ptr,
+                       const IType *__restrict__ act_input_ptr,
+                       OType *__restrict__ output_ptr,
+#else
+                       const __grid_constant__ CUtensorMap tensor_map_input,
                        const __grid_constant__ CUtensorMap tensor_map_act_input,
                        const __grid_constant__ CUtensorMap tensor_map_output,
+#endif
                        float *const dbias_workspace, float *const amax_ptr,
                        float *const scale_inv_ptr, const float *const scale_ptr, const size_t rows,
                        const size_t cols) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
 
   const size_t block_offset_Y = blockIdx.y * FP8_CHUNK_DIM_Y;
   const size_t block_offset_X = blockIdx.x * FP8_CHUNK_DIM_X;
@@ -591,17 +754,32 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
   const float scale = (scale_ptr != nullptr) ? *scale_ptr : 1;
 
   // The destination shared memory buffer of a bulk tensor operation should be 128-byte aligned
+#ifdef __HIP_PLATFORM_AMD__
+  alignas(128) __shared__
+      IType in_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
+  alignas(128) __shared__
+      IType act_in_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
+  alignas(128) __shared__
+      OType out_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
+#else
   __shared__ alignas(TMA_SHMEM_ALIGNMENT)
       IType in_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
   __shared__ alignas(TMA_SHMEM_ALIGNMENT)
       IType act_in_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
   __shared__ alignas(TMA_SHMEM_ALIGNMENT)
       OType out_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
+#endif
 
+#ifndef __HIP_PLATFORM_AMD__
   constexpr size_t shmem_buff_size = sizeof(in_sh) / FP8_BUFFERS_NUM;
+#endif
 
   const bool is_master_thread = (threadIdx.x == 0);
 
+  const size_t chunk_offset_Y = block_offset_Y;
+  const size_t chunk_offset_X = block_offset_X;
+
+#ifndef __HIP_PLATFORM_AMD__
 // Initialize shared memory barrier with the number of threads participating in the barrier.
 #pragma nv_diag_suppress static_var_with_dynamic_init
   __shared__ alignas(8) uint64_t mbar[FP8_ITERATIONS];
@@ -609,9 +787,6 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
   initialize_barriers<FP8_ITERATIONS, FP8_THREADS_PER_CHUNK>(mbar, is_master_thread);
 
   int parity = 0;
-
-  const size_t chunk_offset_Y = block_offset_Y;
-  const size_t chunk_offset_X = block_offset_X;
 
 #pragma unroll
   for (int prefetch_buff = 0; prefetch_buff < FP8_PREFETCH_BUFFERS_NUM; ++prefetch_buff) {
@@ -628,6 +803,25 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
                         is_master_thread);
     }
   }
+#else  // __HIP_PLATFORM_AMD__ — TDM prefetch
+  constexpr uint32_t fp8_in_data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
+  constexpr uint32_t fp8_out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
+
+  // Prefetch first buffer
+  if constexpr (IS_DACT) {
+    tdm::copy_2d_to_shared_x2(
+        &in_sh[0][0][0], input_ptr, chunk_offset_X, chunk_offset_Y,
+        &act_in_sh[0][0][0], act_input_ptr, chunk_offset_X, chunk_offset_Y,
+        FP8_SHMEM_DIM_X, FP8_SHMEM_DIM_Y, cols, rows, cols, fp8_in_data_sz);
+  } else {
+    tdm::copy_2d_to_shared(&in_sh[0][0][0], input_ptr,
+                           chunk_offset_X, chunk_offset_Y,
+                           FP8_SHMEM_DIM_X, FP8_SHMEM_DIM_Y,
+                           cols, rows, cols, fp8_in_data_sz);
+  }
+  tdm::wait_tensorcnt_0();
+  __syncthreads();
+#endif  // __HIP_PLATFORM_AMD__
 
 #pragma unroll
   for (int iter = 0; iter < FP8_ITERATIONS; ++iter) {
@@ -635,6 +829,7 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
     const size_t next_iter = iter + FP8_PREFETCH_BUFFERS_NUM;
     const size_t row_base = block_offset_Y + iter * FP8_BUFFER_DIM_Y;
     if (next_iter < FP8_ITERATIONS) {
+#ifndef __HIP_PLATFORM_AMD__
       const size_t next_buff = next_iter % FP8_BUFFERS_NUM;
       const size_t chunk_it_offset_y = chunk_offset_Y + next_iter * FP8_BUFFER_DIM_Y;
       const size_t chunk_it_offset_x = chunk_offset_X;
@@ -647,10 +842,33 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
         copy_2d_to_shared(&in_sh[next_buff], &tensor_map_input, chunk_it_offset_x,
                           chunk_it_offset_y, shmem_buff_size, &mbar[next_iter], is_master_thread);
       }
+#else  // __HIP_PLATFORM_AMD__ — TDM prefetch next iteration
+      {
+        const size_t next_buff = next_iter % FP8_BUFFERS_NUM;
+        const size_t chunk_it_offset_y = chunk_offset_Y + next_iter * FP8_BUFFER_DIM_Y;
+        const size_t chunk_it_offset_x = chunk_offset_X;
+        if constexpr (IS_DACT) {
+          tdm::copy_2d_to_shared_x2(
+              &in_sh[next_buff][0][0], input_ptr, chunk_it_offset_x, chunk_it_offset_y,
+              &act_in_sh[next_buff][0][0], act_input_ptr, chunk_it_offset_x, chunk_it_offset_y,
+              FP8_SHMEM_DIM_X, FP8_SHMEM_DIM_Y, cols, rows, cols, fp8_in_data_sz);
+        } else {
+          tdm::copy_2d_to_shared(&in_sh[next_buff][0][0], input_ptr,
+                                 chunk_it_offset_x, chunk_it_offset_y,
+                                 FP8_SHMEM_DIM_X, FP8_SHMEM_DIM_Y,
+                                 cols, rows, cols, fp8_in_data_sz);
+        }
+      }
+#endif  // __HIP_PLATFORM_AMD__
     }
 
+#ifndef __HIP_PLATFORM_AMD__
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[iter], parity);
+#else
+    tdm::wait_tensorcnt_0();
+    __syncthreads();
+#endif
 
 #pragma unroll
     for (int stage = 0; stage < FP8_BUFF_STAGES_NUM; ++stage) {
@@ -688,6 +906,7 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
       out_sh[buff][shmem_offset_y][shmem_offset_x] = static_cast<OType>(elt * scale);
     }
 
+#ifndef __HIP_PLATFORM_AMD__
     // Wait for shared memory writes to be visible to TMA engine.
     ptx::fence_proxy_async_shared_cta();
     __syncthreads();
@@ -707,11 +926,27 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
       // Wait for TMA transfer to have finished reading shared memory.
       ptx::cp_async_bulk_wait_group_read<FP8_PREFETCH_BUFFERS_NUM>();
     }
+#else  // __HIP_PLATFORM_AMD__ — TDM store
+    __syncthreads();
+    {
+      const size_t chunk_it_offset_y = chunk_offset_Y + iter * FP8_BUFFER_DIM_Y;
+      const size_t chunk_it_offset_x = chunk_offset_X;
+      tdm::store_2d_to_global(&out_sh[buff][0][0], output_ptr,
+                              chunk_it_offset_x, chunk_it_offset_y,
+                              FP8_SHMEM_DIM_X, FP8_SHMEM_DIM_Y,
+                              cols, rows, cols, fp8_out_data_sz);
+      tdm::wait_tensorcnt_0();
+      __syncthreads();
+    }
+#endif  // __HIP_PLATFORM_AMD__
   }
+
+#ifndef __HIP_PLATFORM_AMD__
   ptx::cp_async_bulk_wait_group_read<0>();
   __syncthreads();
 
   parity ^= 1;
+#endif
 
   if constexpr (IS_DBIAS) {
     const size_t dbias_offset_X = my_column;
@@ -736,10 +971,16 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
     reciprocal<float>(scale_inv_ptr, scale);
   }
 
+#ifndef __HIP_PLATFORM_AMD__
   destroy_barriers<FP8_ITERATIONS>(mbar, is_master_thread);
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#else
+  tdm::wait_tensorcnt_0();
+#endif
+#endif  // #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
 }
 
+#ifndef __HIP_PLATFORM_AMD__
+// 1D FP8 kernel uses 1D TMA — no TDM equivalent, NV-only
 constexpr size_t CHUNKS_PER_BLOCK = 128;
 constexpr size_t THREADS_PER_BLOCK = FP8_THREADS_PER_CHUNK;
 constexpr size_t CHUNK_SIZE = THREADS_PER_BLOCK;
@@ -907,6 +1148,7 @@ void reduce_dbias(const float *workspace_ptr, Tensor *dbias, const size_t rows, 
 }
 
 #ifndef __HIP_PLATFORM_AMD__
+// 1D FP8 kernel uses 1D TMA — no TDM equivalent, NV-only
 template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 static void cast_fp8_1D(const Tensor &input, Tensor *output, cudaStream_t stream) {
   const size_t N = product(input.data.shape);
@@ -938,11 +1180,14 @@ static void cast_fp8_1D(const Tensor &input, Tensor *output, cudaStream_t stream
   );                                                                            // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
+#endif // #ifndef __HIP_PLATFORM_AMD__ (cast_fp8_1D)
 
 template <bool IS_DBIAS, bool IS_DACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
 void cast_fp8_2D(const Tensor &input, const Tensor *act_input, Tensor *output, Tensor *dbias,
                  Tensor *workspace, cudaStream_t stream) {
+#ifndef __HIP_PLATFORM_AMD__
   checkCuDriverContext(stream);
+#endif
 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
@@ -981,6 +1226,14 @@ void cast_fp8_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           output->data.dtype, OType,
 
+#ifdef __HIP_PLATFORM_AMD__
+          cast_fp8_2D_kernel<IS_DBIAS, IS_DACT, ParamOP, OP, IType, OType>
+          <<<grid, block, 0, stream>>>(
+              reinterpret_cast<const IType *>(input.data.dptr),
+              (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
+              reinterpret_cast<OType *>(output->data.dptr),
+              workspace_ptr, amax_ptr, scale_inv_ptr, scale_ptr, rows, cols);
+#else
           alignas(64) CUtensorMap tensor_map_input{};
           alignas(64) CUtensorMap tensor_map_act_input{};
           alignas(64) CUtensorMap tensor_map_output{};
@@ -1000,6 +1253,7 @@ void cast_fp8_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
           <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_act_input, tensor_map_output,
                                        workspace_ptr, amax_ptr, scale_inv_ptr, scale_ptr, rows,
                                        cols);
+#endif
           NVTE_CHECK_CUDA(cudaGetLastError());
 
           if constexpr (IS_DBIAS) {
@@ -1007,7 +1261,6 @@ void cast_fp8_2D(const Tensor &input, const Tensor *act_input, Tensor *output, T
           });  // NOLINT(*)
   );           // NOLINT(*)
 }
-#endif // #ifndef __HIP_PLATFORM_AMD__
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
@@ -1107,18 +1360,75 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
               (use_rowwise_scaling ? 32 : 1), SCALE_DIM_X,
                 TRANSFORMER_ENGINE_SWITCH_CONDITION(
                   !(cols % (32 * sizeof(IType))), IS_ALIGNED,
-                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                      SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
-                    <<<grid, block_size, 0, stream>>>(
-                      reinterpret_cast<const IType *>(input.data.dptr), 
-                      (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
-                      reinterpret_cast<OType *>(output->data.dptr),
-                      reinterpret_cast<OType *>(output->columnwise_data.dptr),
-                      scales_rowwise_ptr, scales_colwise_ptr,
-                      reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
-                      rows, cols, scale_stride_rowwise, scale_stride_colwise);
-                  NVTE_CHECK_CUDA(cudaGetLastError());
-          )));  // NOLINT(*)
+                  {
+                    const char *env = std::getenv("NVTE_USE_NV_UPSTREAM_FLOW");
+                    if (env && std::string(env) == "1") {
+                      // NV upstream kernel with TDM
+                      constexpr bool NV_ROWWISE = (SCALE_DIM_X > 1);
+                      constexpr bool NV_COLWISE = (SCALE_DIM_Y > 1);
+                      constexpr size_t NV_CAST_DBIAS_ONLY_Y = (IS_DBIAS && (!IS_DACT) && (!IS_ACT)) ? 128 : 64;
+                      constexpr size_t NV_CAST_DBIAS_ONLY_X = NV_CAST_DBIAS_ONLY_Y;
+                      constexpr size_t NV_CAST_DBIAS_ONLY_T = NV_CAST_DBIAS_ONLY_Y;
+
+                      constexpr size_t NV_THREADS_X = NV_CAST_DBIAS_ONLY_X / mxfp8_kernel::SCALE_DIM_X;
+                      constexpr size_t NV_THREADS_Y = NV_CAST_DBIAS_ONLY_T / NV_THREADS_X;
+                      constexpr size_t NV_BUFF_DIM_Y = NV_THREADS_Y;
+                      constexpr size_t NV_BUFF_DIM_X = NV_CAST_DBIAS_ONLY_X;
+
+                      constexpr size_t NV_SHMEM_ALIGNMENT = 128;
+                      constexpr size_t nv_buff_elems = NV_BUFF_DIM_Y * NV_BUFF_DIM_X;
+                      constexpr size_t nv_buff_elems_total = mxfp8_kernel::BUFFS_NUM * nv_buff_elems;
+                      constexpr size_t nv_input_type_bit_size = TypeInfo<IType>::size;
+                      constexpr size_t nv_output_type_bit_size = TypeInfo<OType>::size;
+                      constexpr size_t nv_input_buff_size = (nv_buff_elems_total * nv_input_type_bit_size) / 8;
+                      constexpr size_t nv_output_buff_size = (nv_buff_elems_total * nv_output_type_bit_size) / 8;
+                      constexpr size_t nv_buff_size_aligned_in =
+                          DIVUP_TO_MULTIPLE(nv_input_buff_size, NV_SHMEM_ALIGNMENT);
+                      constexpr size_t nv_buff_size_aligned_out =
+                          DIVUP_TO_MULTIPLE(nv_output_buff_size, NV_SHMEM_ALIGNMENT);
+
+                      constexpr size_t nv_elt_input_mem = nv_buff_size_aligned_in;
+                      constexpr size_t nv_act_input_mem = (IS_DACT ? nv_buff_size_aligned_in : 0);
+                      constexpr size_t nv_in_mem = nv_elt_input_mem + nv_act_input_mem;
+
+                      const size_t nv_out_rowwise_mem = (use_rowwise_scaling ? nv_buff_size_aligned_out : 0);
+                      const size_t nv_out_colwise_mem = (use_colwise_scaling ? nv_buff_size_aligned_out : 0);
+                      const size_t nv_out_mem = nv_out_rowwise_mem + nv_out_colwise_mem;
+
+                      const size_t nv_dshmem_size = nv_in_mem + nv_out_mem + NV_SHMEM_ALIGNMENT;
+
+                      NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                          mxfp8_kernel::cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP,
+                              IType, OType, NV_ROWWISE, NV_COLWISE, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED,
+                              NV_CAST_DBIAS_ONLY_Y, NV_CAST_DBIAS_ONLY_X, NV_CAST_DBIAS_ONLY_T>,
+                          cudaFuncAttributeMaxDynamicSharedMemorySize, nv_dshmem_size));
+
+                      mxfp8_kernel::cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP,
+                          IType, OType, NV_ROWWISE, NV_COLWISE, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED,
+                          NV_CAST_DBIAS_ONLY_Y, NV_CAST_DBIAS_ONLY_X, NV_CAST_DBIAS_ONLY_T>
+                          <<<grid, block_size, nv_dshmem_size, stream>>>(
+                              reinterpret_cast<const IType *>(input.data.dptr),
+                              (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
+                              reinterpret_cast<OType *>(output->data.dptr),
+                              reinterpret_cast<OType *>(output->columnwise_data.dptr),
+                              scales_rowwise_ptr, scales_colwise_ptr,
+                              reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
+                              rows, cols, scale_stride_rowwise, scale_stride_colwise);
+                    } else {
+                      // Default ROCm flow
+                      cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                          SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
+                          <<<grid, block_size, 0, stream>>>(
+                              reinterpret_cast<const IType *>(input.data.dptr),
+                              (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
+                              reinterpret_cast<OType *>(output->data.dptr),
+                              reinterpret_cast<OType *>(output->columnwise_data.dptr),
+                              scales_rowwise_ptr, scales_colwise_ptr,
+                              reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
+                              rows, cols, scale_stride_rowwise, scale_stride_colwise);
+                    }
+                    NVTE_CHECK_CUDA(cudaGetLastError());
+                  })));  // NOLINT(*)
 #else // #ifdef __HIP_PLATFORM_AMD__
 
           alignas(64) CUtensorMap tensor_map_input{};

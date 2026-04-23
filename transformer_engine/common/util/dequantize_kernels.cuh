@@ -33,20 +33,26 @@
 #include "transformer_engine/transpose.h"
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_dequantize_kernels.cuh"
+#include "tdm.cuh"
 #endif
 
 namespace transformer_engine {
 
 namespace dequantization {
 
-#ifndef __HIP_PLATFORM_AMD__
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
-    dequantize_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
+    dequantize_mxfp8_kernel(
+#ifdef __HIP_PLATFORM_AMD__
+                            const IType *__restrict__ input_ptr,
+                            OType *__restrict__ output_ptr,
+#else
+                            const __grid_constant__ CUtensorMap tensor_map_input,
                             const __grid_constant__ CUtensorMap tensor_map_output,
+#endif
                             const e8m0_t *const scales_ptr, const size_t rows, const size_t cols,
                             const size_t scales_stride) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
 
   constexpr size_t SCALES_ROWWISE_PER_CHUNK_Y = CHUNK_DIM_Y;                //  128
@@ -75,15 +81,23 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int thread_offset_X_rowwise = tid_rowwise_X * ELEMS_PER_THREAD;
   // const int thread_offset_X_colwise = tid_colwise_X;
 
-  // The destination shared memory buffer of a bulk tensor operation should be 128 e8m0_t aligned
+  // The destination shared memory buffer of a bulk tensor operation should be 128-byte aligned
+#ifdef __HIP_PLATFORM_AMD__
+  alignas(128) __shared__ IType in_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
+  alignas(128) __shared__ OType out_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
+#else
   __shared__ alignas(TMA_SHMEM_ALIGNMENT) IType in_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
   __shared__ alignas(TMA_SHMEM_ALIGNMENT) OType out_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
+#endif
 
   constexpr int shmem_buff_size = sizeof(in_sh) / BUFFERS_NUM;
+#ifndef __HIP_PLATFORM_AMD__
   constexpr int transaction_size = shmem_buff_size;
+#endif
 
   const bool is_master_thread = (threadIdx.x == 0);
 
+#ifndef __HIP_PLATFORM_AMD__
 // Initialize shared memory barrier with the number of threads participating in the barrier.
 #pragma nv_diag_suppress static_var_with_dynamic_init
   __shared__ alignas(8) uint64_t mbar[ITERATIONS];
@@ -118,12 +132,25 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     // Other threads just arrive
     ptx::mbarrier_arrive(&mbar[iteration_zero]);
   }
+#else  // __HIP_PLATFORM_AMD__ — TDM prefetch
+  constexpr uint32_t deq_in_data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
+  constexpr uint32_t deq_out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
+
+  // Prefetch first iteration
+  tdm::copy_2d_to_shared(&in_sh[0][0][0], input_ptr,
+                         chunk_offset_X, chunk_offset_Y,
+                         SHMEM_DIM_X, SHMEM_DIM_Y,
+                         cols, rows, cols, deq_in_data_sz);
+  tdm::wait_tensorcnt_0();
+  __syncthreads();
+#endif  // __HIP_PLATFORM_AMD__
 
 #pragma unroll
   for (int iter = 0; iter < ITERATIONS; ++iter) {
     const int buff = iter % BUFFERS_NUM;
     const int next_iter = iter + 1;
     if (next_iter < ITERATIONS) {
+#ifndef __HIP_PLATFORM_AMD__
       if (is_master_thread) {
         const int next_buff = next_iter % BUFFERS_NUM;
         const int chunk_it_offset_y = chunk_offset_Y + next_iter * BUFFER_DIM_Y;
@@ -140,12 +167,28 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         // Other threads just arrive
         ptx::mbarrier_arrive(&mbar[next_iter]);
       }
+#else  // __HIP_PLATFORM_AMD__ — TDM prefetch next iteration
+      {
+        const int next_buff = next_iter % BUFFERS_NUM;
+        const int chunk_it_offset_y = chunk_offset_Y + next_iter * BUFFER_DIM_Y;
+        const int chunk_it_offset_x = chunk_offset_X;
+        tdm::copy_2d_to_shared(&in_sh[next_buff][0][0], input_ptr,
+                               chunk_it_offset_x, chunk_it_offset_y,
+                               SHMEM_DIM_X, SHMEM_DIM_Y,
+                               cols, rows, cols, deq_in_data_sz);
+      }
+#endif  // __HIP_PLATFORM_AMD__
     }
 
+#ifndef __HIP_PLATFORM_AMD__
     ptx::fence_proxy_async_shared_cta();
 
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[iter], parity);
+#else
+    tdm::wait_tensorcnt_0();
+    __syncthreads();
+#endif
 
     const int scale_offset_Y =
         USE_ROWWISE_SCALING ? (scales_rowwise_chunk_offset_Y + iter * BUFFER_DIM_Y + tid_rowwise_Y)
@@ -181,6 +224,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
     }
 
+#ifndef __HIP_PLATFORM_AMD__
     // Wait for shared memory writes to be visible to TMA engine.
     ptx::fence_proxy_async_shared_cta();
     __syncthreads();
@@ -200,7 +244,22 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // Wait for TMA transfer to have finished reading shared memory.
       ptx::cp_async_bulk_wait_group_read<1>();
     }
+#else  // __HIP_PLATFORM_AMD__ — TDM store
+    __syncthreads();
+    {
+      const int chunk_it_offset_y = chunk_offset_Y + iter * BUFFER_DIM_Y;
+      const int chunk_it_offset_x = chunk_offset_X;
+      tdm::store_2d_to_global(&out_sh[buff][0][0], output_ptr,
+                              chunk_it_offset_x, chunk_it_offset_y,
+                              SHMEM_DIM_X, SHMEM_DIM_Y,
+                              cols, rows, cols, deq_out_data_sz);
+      tdm::wait_tensorcnt_0();
+      __syncthreads();
+    }
+#endif  // __HIP_PLATFORM_AMD__
   }
+
+#ifndef __HIP_PLATFORM_AMD__
   ptx::cp_async_bulk_wait_group_read<0>();
   __syncthreads();
 
@@ -215,9 +274,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       ptx::mbarrier_invalid(&mbar[iter]);
     }
   }
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#else
+  tdm::wait_tensorcnt_0();
+#endif
+#endif  // #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
 }
-#endif // #ifndef __HIP_PLATFORM_AMD__
 
 static void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   NVTE_CHECK(is_fp8_dtype(input.data.dtype), "Input must have FP8 type.");
@@ -312,9 +373,24 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
 #ifdef __HIP_PLATFORM_AMD__
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
                   !(cols % (32 * sizeof(OType))), IS_ALIGNED,
-                  dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
-                  <<<grid, block, 0, stream>>>(reinterpret_cast<const IType *>(input_data.dptr), reinterpret_cast<OType *>(output->data.dptr), scales_ptr,
-                                               rows, cols, scales_stride););  // NOLINT(*)
+                  {
+                    const char *env = std::getenv("NVTE_USE_NV_UPSTREAM_FLOW");
+                    if (env && std::string(env) == "1") {
+                      // NV upstream kernel with TDM
+                      dequantization::dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
+                          <<<grid, block, 0, stream>>>(
+                              reinterpret_cast<const IType *>(input_data.dptr),
+                              reinterpret_cast<OType *>(output->data.dptr),
+                              scales_ptr, rows, cols, scales_stride);
+                    } else {
+                      // Default ROCm flow
+                      dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
+                          <<<grid, block, 0, stream>>>(
+                              reinterpret_cast<const IType *>(input_data.dptr),
+                              reinterpret_cast<OType *>(output->data.dptr),
+                              scales_ptr, rows, cols, scales_stride);
+                    }
+                  });  // NOLINT(*)
 #else // #ifdef __HIP_PLATFORM_AMD__
                   alignas(64) CUtensorMap tensor_map_input{};
                   alignas(64) CUtensorMap tensor_map_output{};

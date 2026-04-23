@@ -37,7 +37,11 @@ namespace transformer_engine {
 
 namespace gated_kernels {
 
-#ifndef __HIP_PLATFORM_AMD__
+// NV upstream flow constants — used on both NVIDIA (TMA) and AMD gfx1250 (TDM).
+// On AMD, the ROCm flow constants live in rocm_cast_gated_kernels.cuh;
+// these are in the nv_flow namespace to avoid collision.
+namespace nv_flow {
+
 constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
 constexpr size_t THREADS_PER_CHUNK = 512;
@@ -58,14 +62,24 @@ __device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
-    cast_fp8_gated_kernel(const __grid_constant__ CUtensorMap tensor_map_grad,
+    cast_fp8_gated_kernel(
+#ifdef __HIP_PLATFORM_AMD__
+                          const IType *__restrict__ grad_ptr,
+                          const IType *__restrict__ input_act_ptr,
+                          const IType *__restrict__ input_gate_ptr,
+                          OType *__restrict__ output_act_ptr,
+                          OType *__restrict__ output_gate_ptr,
+#else
+                          const __grid_constant__ CUtensorMap tensor_map_grad,
                           const __grid_constant__ CUtensorMap tensor_map_input_act,
                           const __grid_constant__ CUtensorMap tensor_map_input_gate,
                           const __grid_constant__ CUtensorMap tensor_map_output_act,
                           const __grid_constant__ CUtensorMap tensor_map_output_gate,
+#endif
                           float *const amax_ptr, float *const scale_inv_ptr,
-                          const float *const scale_ptr, const size_t rows, const size_t cols) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+                          const float *const scale_ptr, const size_t rows, const size_t cols,
+                          const size_t input_act_stride, const size_t output_stride) {
+#if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
 
   const size_t chunk_offset_Y = blockIdx.y * CHUNK_DIM_Y;
   const size_t chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
@@ -81,17 +95,20 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   extern __shared__ char dynamic_shmem[];
   uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
-  // Manually align dynamic SHMEM per TMA requirements using padding
-  // __align__(128) Does not guarantee the pointer to be aligned!
-  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
-                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr size_t SHMEM_ALIGNMENT = 128;
+#else
+  constexpr size_t SHMEM_ALIGNMENT = TMA_SHMEM_ALIGNMENT;
+#endif
+  uintptr_t dshmem = (base_shmem_ptr + SHMEM_ALIGNMENT - 1) &
+                     ~(static_cast<uintptr_t>(SHMEM_ALIGNMENT - 1));
 
   constexpr size_t buff_elems = SHMEM_DIM_Y * SHMEM_DIM_X;
   constexpr size_t buff_elems_total = BUFFERS_NUM * buff_elems;
   constexpr size_t buff_size_aligned_in =
-      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+      ((buff_elems_total * sizeof(IType) + SHMEM_ALIGNMENT - 1) / SHMEM_ALIGNMENT) * SHMEM_ALIGNMENT;
   constexpr size_t buff_size_aligned_out =
-      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
+      ((buff_elems_total * sizeof(OType) + SHMEM_ALIGNMENT - 1) / SHMEM_ALIGNMENT) * SHMEM_ALIGNMENT;
 
   constexpr size_t grad_mem = IS_DGATED ? buff_size_aligned_in : 0;
 
@@ -100,23 +117,27 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr size_t in_mem = in_act_mem + in_gate_mem;
 
   constexpr size_t out_act_mem = buff_size_aligned_out;
+#ifndef __HIP_PLATFORM_AMD__
   constexpr size_t in_transaction_size = buff_elems * sizeof(IType);
+#endif
 
-  // The destination shared memory buffer of a bulk tensor operation should be 16-byte aligned
   IType *in_grad_sh = reinterpret_cast<IType *>(dshmem);
   IType *in_act_sh = reinterpret_cast<IType *>(dshmem + grad_mem);
   IType *in_gate_sh = reinterpret_cast<IType *>(dshmem + grad_mem + in_act_mem);
   OType *out_act_sh = reinterpret_cast<OType *>(dshmem + grad_mem + in_mem);
   OType *out_gate_sh = reinterpret_cast<OType *>(dshmem + grad_mem + in_mem + out_act_mem);
 
+#ifndef __HIP_PLATFORM_AMD__
   const uint64_t *TMAP_grad_in = reinterpret_cast<const uint64_t *>(&tensor_map_grad);
   const uint64_t *TMAP_in_act = reinterpret_cast<const uint64_t *>(&tensor_map_input_act);
   const uint64_t *TMAP_in_gate = reinterpret_cast<const uint64_t *>(&tensor_map_input_gate);
   const uint64_t *TMAP_output_act = reinterpret_cast<const uint64_t *>(&tensor_map_output_act);
   const uint64_t *TMAP_output_gate = reinterpret_cast<const uint64_t *>(&tensor_map_output_gate);
+#endif
 
   const bool is_master_thread = (threadIdx.x == 0);
 
+#ifndef __HIP_PLATFORM_AMD__
 // Initialize shared memory barrier with the number of threads participating in the barrier.
 #pragma nv_diag_suppress static_var_with_dynamic_init
   __shared__ alignas(8) uint64_t mbar[ITERATIONS];
@@ -126,7 +147,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   int parity = 0;
 
   // Prefetch data of the first stage
-
   if constexpr (IS_DGATED) {
     copy_2d_to_sharedx3(in_grad_sh, TMAP_grad_in, chunk_offset_X, chunk_offset_Y, in_act_sh,
                         TMAP_in_act, chunk_offset_X, chunk_offset_Y, in_gate_sh, TMAP_in_gate,
@@ -137,15 +157,43 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                         TMAP_in_gate, chunk_offset_X, chunk_offset_Y, in_transaction_size, &mbar[0],
                         is_master_thread);
   }
+#else  // __HIP_PLATFORM_AMD__ — TDM prefetch
+  constexpr uint32_t in_data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
+  constexpr uint32_t out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
+
+  // Prefetch data of the first stage
+  if constexpr (IS_DGATED) {
+    tdm::copy_2d_to_shared(in_grad_sh, grad_ptr,
+                           chunk_offset_X, chunk_offset_Y,
+                           SHMEM_DIM_X, SHMEM_DIM_Y,
+                           cols, rows, cols, in_data_sz);
+    tdm::copy_2d_to_shared_x2(
+        in_act_sh, input_act_ptr, chunk_offset_X, chunk_offset_Y,
+        in_gate_sh, input_gate_ptr, chunk_offset_X, chunk_offset_Y,
+        SHMEM_DIM_X, SHMEM_DIM_Y,
+        cols, rows, input_act_stride, in_data_sz);
+  } else {
+    tdm::copy_2d_to_shared_x2(
+        in_act_sh, input_act_ptr, chunk_offset_X, chunk_offset_Y,
+        in_gate_sh, input_gate_ptr, chunk_offset_X, chunk_offset_Y,
+        SHMEM_DIM_X, SHMEM_DIM_Y,
+        cols, rows, input_act_stride, in_data_sz);
+  }
+  tdm::wait_tensorcnt_0();
+  __syncthreads();
+#endif  // __HIP_PLATFORM_AMD__
 
 #pragma unroll
   for (int it = 0; it < ITERATIONS; ++it) {
     const size_t buff = it % BUFFERS_NUM;
     const size_t next_it = it + 1;
+
+    // Prefetch next iteration's data
     if (next_it < ITERATIONS) {
       const size_t next_buff = next_it % BUFFERS_NUM;
       const size_t chunk_it_offset_y = chunk_offset_Y + next_it * BUFFER_DIM_Y;
       const size_t chunk_it_offset_x = chunk_offset_X;
+#ifndef __HIP_PLATFORM_AMD__
       if constexpr (IS_DGATED) {
         copy_2d_to_sharedx3(
             &in_grad_sh[next_buff * buff_elems], TMAP_grad_in, chunk_it_offset_x, chunk_it_offset_y,
@@ -158,12 +206,40 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                             chunk_it_offset_x, chunk_it_offset_y, in_transaction_size,
                             &mbar[next_it], is_master_thread);
       }
+#else  // __HIP_PLATFORM_AMD__ — TDM prefetch
+      if constexpr (IS_DGATED) {
+        tdm::copy_2d_to_shared(&in_grad_sh[next_buff * buff_elems], grad_ptr,
+                               chunk_it_offset_x, chunk_it_offset_y,
+                               SHMEM_DIM_X, SHMEM_DIM_Y,
+                               cols, rows, cols, in_data_sz);
+        tdm::copy_2d_to_shared_x2(
+            &in_act_sh[next_buff * buff_elems], input_act_ptr, chunk_it_offset_x, chunk_it_offset_y,
+            &in_gate_sh[next_buff * buff_elems], input_gate_ptr, chunk_it_offset_x, chunk_it_offset_y,
+            SHMEM_DIM_X, SHMEM_DIM_Y,
+            cols, rows, input_act_stride, in_data_sz);
+      } else {
+        tdm::copy_2d_to_shared_x2(
+            &in_act_sh[next_buff * buff_elems], input_act_ptr, chunk_it_offset_x, chunk_it_offset_y,
+            &in_gate_sh[next_buff * buff_elems], input_gate_ptr, chunk_it_offset_x, chunk_it_offset_y,
+            SHMEM_DIM_X, SHMEM_DIM_Y,
+            cols, rows, input_act_stride, in_data_sz);
+      }
+      // TDM is async — wait for the prefetch of the NEXT buffer in the NEXT iteration.
+      // For now, we use a simple wait-all pattern; double-buffering optimization can be added later.
+#endif  // __HIP_PLATFORM_AMD__
     }
 
+#ifndef __HIP_PLATFORM_AMD__
     ptx::fence_proxy_async_shared_cta();
 
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[it], parity);
+#else
+    // On TDM: wait for prefetch of current buffer (issued in previous iteration or before the loop)
+    // and for any stores from the previous iteration to complete.
+    tdm::wait_tensorcnt_0();
+    __syncthreads();
+#endif
 
     IType *in_grad_sh_curr = in_grad_sh + buff * buff_elems;
     IType *in_act_sh_curr = in_act_sh + buff * buff_elems;
@@ -171,6 +247,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     OType *out_act_sh_curr = out_act_sh + buff * buff_elems;
     OType *out_gate_sh_curr = out_gate_sh + buff * buff_elems;
 
+    // Compute — identical for TMA and TDM
 #pragma unroll
     for (int stage = 0; stage < BUFFER_STAGES_NUM; ++stage) {
       const size_t stage_offset_Y = stage * THREADS_PER_CHUNK_Y;
@@ -212,64 +289,83 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
     }
 
+    // Store computed results from shared memory to global memory
+#ifndef __HIP_PLATFORM_AMD__
     // Wait for shared memory writes to be visible to TMA engine (cross-proxy fence)
     ptx::fence_proxy_async_shared_cta();
     __syncthreads();
-    // After syncthreads, writes by all threads are visible to TMA engine.
 
     // Initiate TMA transfer to copy shared memory to global memory
     if (is_master_thread) {
       const size_t chunk_it_offset_y = chunk_offset_Y + it * BUFFER_DIM_Y;
       const size_t chunk_it_offset_x = chunk_offset_X;
 
-      // dGeLU
       ptx::cp_async_bulk_tensor_2d_shared_to_global(TMAP_output_act, chunk_it_offset_x,
                                                     chunk_it_offset_y,
                                                     reinterpret_cast<uint64_t *>(out_act_sh_curr));
 
       if constexpr (IS_DGATED) {
-        // dGate
         ptx::cp_async_bulk_tensor_2d_shared_to_global(
             TMAP_output_gate, chunk_it_offset_x, chunk_it_offset_y,
             reinterpret_cast<uint64_t *>(out_gate_sh_curr));
       }
 
-      // Create a "bulk async-group" out of the previous bulk copy operation.
       ptx::cp_async_bulk_commit_group();
-
-      // Wait for TMA transfer to have finished reading shared memory.
       ptx::cp_async_bulk_wait_group_read<BUFFERS_NUM - 1>();
     }
+#else  // __HIP_PLATFORM_AMD__ — TDM store
+    __syncthreads();
+    {
+      const size_t chunk_it_offset_y = chunk_offset_Y + it * BUFFER_DIM_Y;
+      const size_t chunk_it_offset_x = chunk_offset_X;
+
+      tdm::store_2d_to_global(out_act_sh_curr, output_act_ptr,
+                              chunk_it_offset_x, chunk_it_offset_y,
+                              SHMEM_DIM_X, SHMEM_DIM_Y,
+                              cols, rows, output_stride, out_data_sz);
+      if constexpr (IS_DGATED) {
+        tdm::store_2d_to_global(out_gate_sh_curr, output_gate_ptr,
+                                chunk_it_offset_x, chunk_it_offset_y,
+                                SHMEM_DIM_X, SHMEM_DIM_Y,
+                                cols, rows, output_stride, out_data_sz);
+      }
+      // TDM stores are async — they will be drained at the top of the next iteration
+      // (or after the loop for the last iteration).
+    }
+#endif  // __HIP_PLATFORM_AMD__
   }
+
+#ifndef __HIP_PLATFORM_AMD__
   ptx::cp_async_bulk_wait_group_read<0>();
+#else
+  tdm::wait_tensorcnt_0();
+#endif
   __syncthreads();
 
   if (amax_ptr != nullptr) {
     const int warp_id = threadIdx.x / THREADS_PER_WARP;
-    // Reduce the amax over the block
     amax = reduce_max<THREADS_PER_CHUNK / THREADS_PER_WARP>(amax, warp_id);
-    // Update the global amax
     if (is_master_thread) {
       atomicMaxFloat(amax_ptr, amax);
     }
   }
 
-  // Update scale-inverse
   if (is_master_thread && blockIdx.x == 0 && (scale_inv_ptr != nullptr)) {
     reciprocal<float>(scale_inv_ptr, scale);
   }
 
-  // Destroy the barriers. This invalidates the memory region of the barrier.
-  // If further computations were to take place in the kernel, this allows the
-  // memory location of the shared memory barrier to be reused.
+#ifndef __HIP_PLATFORM_AMD__
+  // Destroy the barriers.
   if (is_master_thread) {
 #pragma unroll
     for (int it = 0; it < ITERATIONS; ++it) {
       ptx::mbarrier_invalid(&mbar[it]);
     }
   }
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#endif
+#endif  // #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
 }
+}  // namespace nv_flow
 
 namespace mxfp8_kernel {
 
@@ -300,19 +396,33 @@ template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP 
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType,
           bool ROWWISE_SCALING, bool COLWISE_SCALING, size_t THREADS_PER_CHUNK>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
-    cast_mxfp8_gated_kernel(const __grid_constant__ CUtensorMap tensor_map_grad,
+    cast_mxfp8_gated_kernel(
+#ifdef __HIP_PLATFORM_AMD__
+                            const IType *__restrict__ grad_ptr,
+                            const IType *__restrict__ input_act_ptr,
+                            const IType *__restrict__ input_gate_ptr,
+                            OType *__restrict__ output_act_rowwise_ptr,
+                            OType *__restrict__ output_gate_rowwise_ptr,
+                            OType *__restrict__ output_act_colwise_ptr,
+                            OType *__restrict__ output_gate_colwise_ptr,
+#else
+                            const __grid_constant__ CUtensorMap tensor_map_grad,
                             const __grid_constant__ CUtensorMap tensor_map_input_act,
                             const __grid_constant__ CUtensorMap tensor_map_input_gate,
                             const __grid_constant__ CUtensorMap tensor_map_output_act_rowwise,
                             const __grid_constant__ CUtensorMap tensor_map_output_gate_rowwise,
                             const __grid_constant__ CUtensorMap tensor_map_output_act_colwise,
                             const __grid_constant__ CUtensorMap tensor_map_output_gate_colwise,
+#endif
                             e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
                             const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
-                            const size_t scale_stride_colwise) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+                            const size_t scale_stride_colwise,
+                            const size_t input_act_stride, const size_t output_stride) {
+#if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
+#ifndef __HIP_PLATFORM_AMD__
   using IType2 = typename ptx::FPx2<IType>;
   using OType2 = typename ptx::FPx2<OType>;
+#endif
 
   constexpr size_t STAGES = CHUNK_DIM_Y / BUFF_DIM_Y;
   static_assert(STAGES >= 1);
@@ -367,17 +477,20 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   extern __shared__ char dynamic_shmem[];
   uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
-  // Manually align dynamic SHMEM per TMA requirements using padding
-  // __align__(128) Does not guarantee the pointer to be aligned!
-  uintptr_t dshmem = (base_shmem_ptr + TMA_SHMEM_ALIGNMENT - 1) &
-                     ~(static_cast<uintptr_t>(TMA_SHMEM_ALIGNMENT - 1));
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr size_t MX_SHMEM_ALIGNMENT = 128;
+#else
+  constexpr size_t MX_SHMEM_ALIGNMENT = TMA_SHMEM_ALIGNMENT;
+#endif
+  uintptr_t dshmem = (base_shmem_ptr + MX_SHMEM_ALIGNMENT - 1) &
+                     ~(static_cast<uintptr_t>(MX_SHMEM_ALIGNMENT - 1));
 
   constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
   constexpr size_t buff_elems_total = BUFFS_NUM * buff_elems;
   constexpr size_t buff_size_aligned_in =
-      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+      ((buff_elems_total * sizeof(IType) + MX_SHMEM_ALIGNMENT - 1) / MX_SHMEM_ALIGNMENT) * MX_SHMEM_ALIGNMENT;
   constexpr size_t buff_size_aligned_out =
-      DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
+      ((buff_elems_total * sizeof(OType) + MX_SHMEM_ALIGNMENT - 1) / MX_SHMEM_ALIGNMENT) * MX_SHMEM_ALIGNMENT;
 
   const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
 
@@ -413,6 +526,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   const bool is_master_thread = (threadIdx.x == 0);
 
+#ifndef __HIP_PLATFORM_AMD__
 // Initialize shared memory barrier with the number of threads participating in the barrier.
 #pragma nv_diag_suppress static_var_with_dynamic_init
   __shared__ alignas(8) uint64_t mbar[STAGES];
@@ -421,6 +535,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   int parity = 0;
 
+  // TMA prefetch
   if constexpr (IS_DGATED) {
     copy_2d_to_sharedx3(&in_grad_sh[0], &tensor_map_grad, block_offset_X, block_offset_Y,
                         &in_act_sh[0], &tensor_map_input_act, block_offset_X, block_offset_Y,
@@ -431,6 +546,31 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                         &in_gate_sh[0], &tensor_map_input_gate, block_offset_X, block_offset_Y,
                         shmem_buff_size, &mbar[0], is_master_thread);
   }
+#else  // __HIP_PLATFORM_AMD__ — TDM
+  constexpr uint32_t mx_in_data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
+  constexpr uint32_t mx_out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
+
+  // TDM prefetch
+  if constexpr (IS_DGATED) {
+    tdm::copy_2d_to_shared(&in_grad_sh[0], grad_ptr,
+                           block_offset_X, block_offset_Y,
+                           BUFF_DIM_X, BUFF_DIM_Y,
+                           cols, rows, cols, mx_in_data_sz);
+    tdm::copy_2d_to_shared_x2(
+        &in_act_sh[0], input_act_ptr, block_offset_X, block_offset_Y,
+        &in_gate_sh[0], input_gate_ptr, block_offset_X, block_offset_Y,
+        BUFF_DIM_X, BUFF_DIM_Y,
+        cols, rows, input_act_stride, mx_in_data_sz);
+  } else {
+    tdm::copy_2d_to_shared_x2(
+        &in_act_sh[0], input_act_ptr, block_offset_X, block_offset_Y,
+        &in_gate_sh[0], input_gate_ptr, block_offset_X, block_offset_Y,
+        BUFF_DIM_X, BUFF_DIM_Y,
+        cols, rows, input_act_stride, mx_in_data_sz);
+  }
+  tdm::wait_tensorcnt_0();
+  __syncthreads();
+#endif  // __HIP_PLATFORM_AMD__
 
 #pragma unroll
   for (int stage = 0; stage < STAGES; ++stage) {
@@ -439,8 +579,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const size_t stage_offset_Y = stage * BUFF_DIM_Y;
 
     if (next_stage < STAGES) {
+#ifndef __HIP_PLATFORM_AMD__
       // Wait for TMA transfer to have finished reading shared memory.
-      // I.e. the buffer is ready to be written to
       ptx::cp_async_bulk_wait_group_read<1>();
 
       const size_t next_buff = next_stage % BUFFS_NUM;
@@ -460,12 +600,41 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                             global_offset_X, global_offset_Y, shmem_buff_size, &mbar[next_stage],
                             is_master_thread);
       }
+#else  // __HIP_PLATFORM_AMD__ — TDM prefetch next stage
+      const size_t next_buff = next_stage % BUFFS_NUM;
+      const size_t next_stage_offset_Y = next_stage * BUFF_DIM_Y;
+      const size_t global_offset_Y = block_offset_Y + next_stage_offset_Y;
+      const size_t global_offset_X = block_offset_X;
+      const size_t next_buff_offset = next_buff * BUFF_DIM;
+      if constexpr (IS_DGATED) {
+        tdm::copy_2d_to_shared(&in_grad_sh[next_buff_offset], grad_ptr,
+                               global_offset_X, global_offset_Y,
+                               BUFF_DIM_X, BUFF_DIM_Y,
+                               cols, rows, cols, mx_in_data_sz);
+        tdm::copy_2d_to_shared_x2(
+            &in_act_sh[next_buff_offset], input_act_ptr, global_offset_X, global_offset_Y,
+            &in_gate_sh[next_buff_offset], input_gate_ptr, global_offset_X, global_offset_Y,
+            BUFF_DIM_X, BUFF_DIM_Y,
+            cols, rows, input_act_stride, mx_in_data_sz);
+      } else {
+        tdm::copy_2d_to_shared_x2(
+            &in_act_sh[next_buff_offset], input_act_ptr, global_offset_X, global_offset_Y,
+            &in_gate_sh[next_buff_offset], input_gate_ptr, global_offset_X, global_offset_Y,
+            BUFF_DIM_X, BUFF_DIM_Y,
+            cols, rows, input_act_stride, mx_in_data_sz);
+      }
+#endif  // __HIP_PLATFORM_AMD__
     }
 
+#ifndef __HIP_PLATFORM_AMD__
     ptx::fence_proxy_async_shared_cta();
 
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[stage], parity);
+#else
+    tdm::wait_tensorcnt_0();
+    __syncthreads();
+#endif
 
     if constexpr (COLWISE_SCALING) {
       const size_t shmem_offset_base_colwise =
@@ -621,6 +790,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         const size_t shmem_offset_elt =
             shmem_offset_base_colwise + i * COLWISE_WAVEFRONT_SIZE * BUFF_DIM_X;
         if constexpr (IS_DGATED) {
+#ifdef __HIP_PLATFORM_AMD__
+          // Scalar fallback for mul_cvt_2x (PTX intrinsic not available on AMD)
+          out_act_colwise_sh[shmem_offset_elt] =
+              static_cast<OType>(block_scale_inverse_act * after_act_colwise[i]);
+          out_gate_colwise_sh[shmem_offset_elt] =
+              static_cast<OType>(block_scale_inverse_gate * after_gate_colwise[i]);
+#else
           OType2 out_pair;
           ptx::floatx2 in_pair = {after_act_colwise[i], after_gate_colwise[i]};
           const ptx::floatx2 block_scale_inverse_2x_pair = {block_scale_inverse_act,
@@ -628,6 +804,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           ptx::mul_cvt_2x(out_pair, in_pair, block_scale_inverse_2x_pair);
           out_act_colwise_sh[shmem_offset_elt] = out_pair.x;
           out_gate_colwise_sh[shmem_offset_elt] = out_pair.y;
+#endif
         } else {
           const float scaled_out_act = block_scale_inverse_act * after_act_colwise[i];
           out_act_colwise_sh[shmem_offset_elt] = static_cast<OType>(scaled_out_act);
@@ -652,8 +829,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       if constexpr (IS_CACHED_ACT_OP) {
         // ensures that all writes to cache made in the section above are visible to all threads
         __syncthreads();
+#ifndef __HIP_PLATFORM_AMD__
         IType2 thread_amax_2x_act = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
         IType2 thread_amax_2x_gate = {static_cast<IType>(0.0f), static_cast<IType>(0.0f)};
+#endif
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
           const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
@@ -672,6 +851,18 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           // Since TMA requirement for the data alignment is 16B (i.e. cols % 8 == 0, in case of BF16 elements)
           // only single check (w.r.t. column direction) is sufficient to be sure the entire wave is inside the boundaries
           if (!out_of_bounds) {
+#ifdef __HIP_PLATFORM_AMD__
+            // Scalar fallback for abs_max_2x (PTX intrinsic not available on AMD)
+#pragma unroll
+            for (int e = 0; e < PACK_SIZE; ++e) {
+              thread_amax_act = fmaxf(thread_amax_act,
+                                      fabsf(static_cast<float>(in_cached_act[w].data.elt[e])));
+              if constexpr (IS_DGATED) {
+                thread_amax_gate = fmaxf(thread_amax_gate,
+                                         fabsf(static_cast<float>(in_cached_gate[w].data.elt[e])));
+              }
+            }
+#else
             if constexpr (std::is_same_v<IType, float>) {
 #pragma unroll
               for (int e = 0; e < PACK_SIZE; ++e) {
@@ -693,8 +884,10 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                 }
               }
             }
+#endif  // __HIP_PLATFORM_AMD__
           }
         }
+#ifndef __HIP_PLATFORM_AMD__
         if constexpr (!std::is_same_v<IType, float>) {
           thread_amax_act = static_cast<float>(
               __hmax(__habs(thread_amax_2x_act.x), __habs(thread_amax_2x_act.y)));
@@ -703,6 +896,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                 __hmax(__habs(thread_amax_2x_gate.x), __habs(thread_amax_2x_gate.y)));
           }
         }
+#endif
       } else {
 #pragma unroll
         for (int w = 0; w < WAVES; ++w) {
@@ -786,11 +980,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
 
       const float block_scale_inverse_act = ptx::exp2f_rcp(biased_exponent_act);
+#ifndef __HIP_PLATFORM_AMD__
       const ptx::floatx2 block_scale_inverse_2x_act = {block_scale_inverse_act,
                                                        block_scale_inverse_act};
+#endif
 
       float block_scale_inverse_gate;
+#ifndef __HIP_PLATFORM_AMD__
       ptx::floatx2 block_scale_inverse_2x_gate;
+#endif
       if constexpr (IS_DGATED) {
         const e8m0_t biased_exponent_gate =
             ptx::float_to_e8m0(thread_amax_gate * Quantized_Limits<OType>::max_norm_rcp);
@@ -799,12 +997,43 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           scales_rowwise[scale_idx_gate] = biased_exponent_gate;
         }
         block_scale_inverse_gate = ptx::exp2f_rcp(biased_exponent_gate);
+#ifndef __HIP_PLATFORM_AMD__
         block_scale_inverse_2x_gate = {block_scale_inverse_gate, block_scale_inverse_gate};
+#endif
       }
 
 // 3. Scale elements
 #pragma unroll
       for (int w = 0; w < WAVES; ++w) {
+        const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+        const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
+        const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
+
+#ifdef __HIP_PLATFORM_AMD__
+        // Scalar fallback for mul_cvt_2x (PTX intrinsic not available on AMD)
+#pragma unroll
+        for (int e = 0; e < PACK_SIZE; ++e) {
+          float in_act_val;
+          if constexpr (IS_CACHED_ACT_OP) {
+            in_act_val = static_cast<float>(in_cached_act[w].data.elt[e]);
+          } else {
+            in_act_val = after_act_rowwise[w * PACK_SIZE + e];
+          }
+          out_act_rowwise_sh[shmem_offset_rowwise + e] =
+              static_cast<OType>(block_scale_inverse_act * in_act_val);
+
+          if constexpr (IS_DGATED) {
+            float in_gate_val;
+            if constexpr (IS_CACHED_ACT_OP) {
+              in_gate_val = static_cast<float>(in_cached_gate[w].data.elt[e]);
+            } else {
+              in_gate_val = after_gate_rowwise[w * PACK_SIZE + e];
+            }
+            out_gate_rowwise_sh[shmem_offset_rowwise + e] =
+                static_cast<OType>(block_scale_inverse_gate * in_gate_val);
+          }
+        }
+#else
         Vec<OType2, PACK_SIZE / 2> out_act;
         Vec<OType2, PACK_SIZE / 2> out_gate;
 #pragma unroll
@@ -837,16 +1066,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             ptx::mul_cvt_2x(out_gate_pair, in_gate, block_scale_inverse_2x_gate);
           }
         }
-        const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-        const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
-        const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
         out_act.store_to(&out_act_rowwise_sh[shmem_offset_rowwise]);
         if constexpr (IS_DGATED) {
           out_gate.store_to(&out_gate_rowwise_sh[shmem_offset_rowwise]);
         }
+#endif  // __HIP_PLATFORM_AMD__
       }
     }
 
+    // Store computed results from shared memory to global memory
+#ifndef __HIP_PLATFORM_AMD__
     // Wait for shared memory writes to be visible to TMA engine.
     ptx::fence_proxy_async_shared_cta();
     __syncthreads();
@@ -882,11 +1111,51 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // Create a "bulk async-group" out of the previous bulk copy operation.
       ptx::cp_async_bulk_commit_group();
     }
+#else  // __HIP_PLATFORM_AMD__ — TDM store
+    __syncthreads();
+    {
+      const size_t global_offset_Y = block_offset_Y + stage_offset_Y;
+      const size_t global_offset_X = block_offset_X;
+      const size_t buff_offset = buff * BUFF_DIM;
+
+      if constexpr (ROWWISE_SCALING) {
+        tdm::store_2d_to_global(&out_act_rowwise_sh[buff_offset], output_act_rowwise_ptr,
+                                global_offset_X, global_offset_Y,
+                                BUFF_DIM_X, BUFF_DIM_Y,
+                                cols, rows, output_stride, mx_out_data_sz);
+        if constexpr (IS_DGATED) {
+          tdm::store_2d_to_global(&out_gate_rowwise_sh[buff_offset], output_gate_rowwise_ptr,
+                                  global_offset_X, global_offset_Y,
+                                  BUFF_DIM_X, BUFF_DIM_Y,
+                                  cols, rows, output_stride, mx_out_data_sz);
+        }
+      }
+      if constexpr (COLWISE_SCALING) {
+        tdm::store_2d_to_global(&out_act_colwise_sh[buff_offset], output_act_colwise_ptr,
+                                global_offset_X, global_offset_Y,
+                                BUFF_DIM_X, BUFF_DIM_Y,
+                                cols, rows, output_stride, mx_out_data_sz);
+        if constexpr (IS_DGATED) {
+          tdm::store_2d_to_global(&out_gate_colwise_sh[buff_offset], output_gate_colwise_ptr,
+                                  global_offset_X, global_offset_Y,
+                                  BUFF_DIM_X, BUFF_DIM_Y,
+                                  cols, rows, output_stride, mx_out_data_sz);
+        }
+      }
+      // TDM stores are async — they will be drained at the top of the next iteration
+      // (or after the loop for the last iteration).
+    }
+#endif  // __HIP_PLATFORM_AMD__
   }
 
+#ifndef __HIP_PLATFORM_AMD__
   parity ^= 1;
   destroy_barriers<STAGES>(mbar, is_master_thread);
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#else
+  tdm::wait_tensorcnt_0();
+  __syncthreads();
+#endif
+#endif  // #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
 }
 }  // namespace mxfp8_kernel
 
@@ -908,14 +1177,14 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
   const size_t cols = gated_input.flat_last_dim() / 2;
   const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
 
-  const size_t blocks_Y = DIVUP(rows, CHUNK_DIM_Y);
-  const size_t blocks_X = DIVUP(cols, CHUNK_DIM_X);
+  const size_t blocks_Y = DIVUP(rows, nv_flow::CHUNK_DIM_Y);
+  const size_t blocks_X = DIVUP(cols, nv_flow::CHUNK_DIM_X);
 
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
   float *const scale_inv_ptr = reinterpret_cast<float *>(output->scale_inv.dptr);
   float *const scale_ptr = reinterpret_cast<float *>(output->scale.dptr);
 
-  const dim3 block_dim(THREADS_PER_CHUNK);
+  const dim3 block_dim(nv_flow::THREADS_PER_CHUNK);
   const dim3 grid_dim(blocks_X, blocks_Y);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
@@ -923,6 +1192,41 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           output->dtype(), OType,
 
+#ifdef __HIP_PLATFORM_AMD__
+          const IType *grad_ptr = IS_DGATED
+              ? reinterpret_cast<const IType *>(grad.data.dptr) : nullptr;
+          const IType *input_act_ptr = reinterpret_cast<const IType *>(gated_input.data.dptr);
+          const IType *input_gate_ptr = reinterpret_cast<const IType *>(gated_input.data.dptr) + cols;
+          OType *output_act_ptr = reinterpret_cast<OType *>(output->data.dptr);
+          OType *output_gate_ptr = IS_DGATED
+              ? reinterpret_cast<OType *>(output->data.dptr) + cols : nullptr;
+
+          constexpr size_t ALIGNMENT = 128;
+          constexpr size_t buff_elems_total = nv_flow::BUFFERS_NUM * nv_flow::SHMEM_DIM_Y * nv_flow::SHMEM_DIM_X;
+          const size_t buff_size_aligned_in =
+              ((buff_elems_total * sizeof(IType) + ALIGNMENT - 1) / ALIGNMENT) * ALIGNMENT;
+          const size_t buff_size_aligned_out =
+              ((buff_elems_total * sizeof(OType) + ALIGNMENT - 1) / ALIGNMENT) * ALIGNMENT;
+          const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
+          const size_t in_act_mem = buff_size_aligned_in;
+          const size_t in_gate_mem = buff_size_aligned_in;
+          const size_t out_act_mem = buff_size_aligned_out;
+          const size_t out_gate_mem = buff_size_aligned_out;
+          const size_t shmem_size = grad_mem + (in_act_mem + in_gate_mem) +
+                                    (out_act_mem + out_gate_mem) + ALIGNMENT;
+
+          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+              nv_flow::cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
+              cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+
+          nv_flow::cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>
+          <<<grid_dim, block_dim, shmem_size, stream>>>(
+              grad_ptr, input_act_ptr, input_gate_ptr,
+              output_act_ptr, output_gate_ptr,
+              amax_ptr, scale_inv_ptr, scale_ptr, rows, cols,
+              cols * 2, output_cols);
+          NVTE_CHECK_CUDA(cudaGetLastError());
+#else
           alignas(64) CUtensorMap tensor_map_grad{};
           alignas(64) CUtensorMap tensor_map_input_act{};
           alignas(64) CUtensorMap tensor_map_input_gate{};
@@ -930,23 +1234,23 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
           alignas(64) CUtensorMap tensor_map_output_gate{};
 
           if constexpr (IS_DGATED) {
-            create_2D_tensor_map(tensor_map_grad, grad.data, rows, cols, SHMEM_DIM_Y, SHMEM_DIM_X,
-                                 cols, 0, typeToNumBits(gated_input.dtype()));
+            create_2D_tensor_map(tensor_map_grad, grad.data, rows, cols, nv_flow::SHMEM_DIM_Y,
+                                 nv_flow::SHMEM_DIM_X, cols, 0, typeToNumBits(gated_input.dtype()));
           }
 
           const uint32_t tensor_stride_elems = output_cols;
 
-          create_2D_tensor_map(tensor_map_input_act, gated_input.data, rows, cols, SHMEM_DIM_Y,
-                               SHMEM_DIM_X, cols * 2, 0, typeToNumBits(gated_input.dtype()));
-          create_2D_tensor_map(tensor_map_input_gate, gated_input.data, rows, cols, SHMEM_DIM_Y,
-                               SHMEM_DIM_X, cols * 2, cols, typeToNumBits(gated_input.dtype()));
-          create_2D_tensor_map(tensor_map_output_act, output->data, rows, cols, SHMEM_DIM_Y,
-                               SHMEM_DIM_X, tensor_stride_elems, 0, typeToNumBits(output->dtype()));
-          create_2D_tensor_map(tensor_map_output_gate, output->data, rows, cols, SHMEM_DIM_Y,
-                               SHMEM_DIM_X, tensor_stride_elems, cols,
+          create_2D_tensor_map(tensor_map_input_act, gated_input.data, rows, cols, nv_flow::SHMEM_DIM_Y,
+                               nv_flow::SHMEM_DIM_X, cols * 2, 0, typeToNumBits(gated_input.dtype()));
+          create_2D_tensor_map(tensor_map_input_gate, gated_input.data, rows, cols, nv_flow::SHMEM_DIM_Y,
+                               nv_flow::SHMEM_DIM_X, cols * 2, cols, typeToNumBits(gated_input.dtype()));
+          create_2D_tensor_map(tensor_map_output_act, output->data, rows, cols, nv_flow::SHMEM_DIM_Y,
+                               nv_flow::SHMEM_DIM_X, tensor_stride_elems, 0, typeToNumBits(output->dtype()));
+          create_2D_tensor_map(tensor_map_output_gate, output->data, rows, cols, nv_flow::SHMEM_DIM_Y,
+                               nv_flow::SHMEM_DIM_X, tensor_stride_elems, cols,
                                typeToNumBits(output->dtype()));
 
-          const size_t buff_elems_total = BUFFERS_NUM * SHMEM_DIM_Y * SHMEM_DIM_X;
+          const size_t buff_elems_total = nv_flow::BUFFERS_NUM * nv_flow::SHMEM_DIM_Y * nv_flow::SHMEM_DIM_X;
           const size_t buff_size_aligned_in =
               DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
           const size_t buff_size_aligned_out =
@@ -960,904 +1264,20 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
                                     (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
 
           NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-              cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
+              nv_flow::cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
               cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
-          cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>
+          nv_flow::cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>
           <<<grid_dim, block_dim, shmem_size, stream>>>(
               tensor_map_grad, tensor_map_input_act, tensor_map_input_gate, tensor_map_output_act,
               tensor_map_output_gate, amax_ptr, scale_inv_ptr, scale_ptr, rows,
-              cols);
-          NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
-  );                                              // NOLINT(*)
-}
-#endif //#ifdef __HIP_PLATFORM_AMD__
-
-// =====================================================================================
-// NV-upstream-flow TDM kernels for gfx1250
-// These mirror the NV upstream kernel structure (128x128 chunks, 512 threads) but
-// replace CUtensorMap/TMA with raw-pointer/TDM. They are compiled only on AMD and
-// selectable via NVTE_USE_NV_UPSTREAM_FLOW env var for performance comparison.
-// =====================================================================================
-#ifdef __HIP_PLATFORM_AMD__
-
-namespace nv_upstream_tdm {
-
-// NV upstream constants (same as NV upstream, not ROCm flow)
-constexpr size_t NV_CHUNK_DIM_Y = 128;
-constexpr size_t NV_CHUNK_DIM_X = 128;
-constexpr size_t NV_THREADS_PER_CHUNK = 512;
-constexpr size_t NV_THREADS_PER_CHUNK_X = NV_CHUNK_DIM_X;
-constexpr size_t NV_THREADS_PER_CHUNK_Y = NV_THREADS_PER_CHUNK / NV_THREADS_PER_CHUNK_X;  // 4
-constexpr size_t NV_BUFFER_DIM_Y = 32;
-constexpr size_t NV_BUFFER_DIM_X = NV_CHUNK_DIM_X;  // 128
-constexpr size_t NV_SHMEM_DIM_Y = NV_BUFFER_DIM_Y;  // 32
-constexpr size_t NV_SHMEM_DIM_X = NV_BUFFER_DIM_X;  // 128
-constexpr size_t NV_BUFFER_STAGES_NUM = NV_BUFFER_DIM_Y / NV_THREADS_PER_CHUNK_Y;  // 8
-constexpr size_t NV_ITERATIONS = NV_CHUNK_DIM_Y / NV_BUFFER_DIM_Y;                  // 4
-static_assert(NV_ITERATIONS >= 1);
-
-__device__ inline float nv_sigmoidf(const float x) { return __frcp_rn(1.0f + __expf(-x)); }
-
-// ---------------------------------------------------------------------------
-// FP8 gated kernel — NV upstream flow ported to TDM
-// ---------------------------------------------------------------------------
-template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
-          float (*DActOP)(float, const ParamOP &), typename IType, typename OType>
-__global__ void __launch_bounds__(NV_THREADS_PER_CHUNK)
-    cast_fp8_gated_kernel_tdm(const IType *__restrict__ grad_ptr,
-                              const IType *__restrict__ input_act_ptr,
-                              const IType *__restrict__ input_gate_ptr,
-                              OType *__restrict__ output_act_ptr,
-                              OType *__restrict__ output_gate_ptr,
-                              float *const amax_ptr, float *const scale_inv_ptr,
-                              const float *const scale_ptr,
-                              const size_t rows, const size_t cols,
-                              const size_t input_act_stride,
-                              const size_t input_gate_stride,
-                              const size_t grad_stride,
-                              const size_t output_stride) {
-#if defined(__gfx1250__)
-  const size_t chunk_offset_Y = blockIdx.y * NV_CHUNK_DIM_Y;
-  const size_t chunk_offset_X = blockIdx.x * NV_CHUNK_DIM_X;
-
-  const size_t tid_Y = threadIdx.x / NV_THREADS_PER_CHUNK_X;
-  const size_t tid_X = threadIdx.x % NV_THREADS_PER_CHUNK_X;
-
-  float amax = 0;
-  const float scale = (scale_ptr != nullptr) ? *scale_ptr : 1;
-
-  constexpr size_t ALIGNMENT = 128;
-  constexpr size_t buff_elems = NV_SHMEM_DIM_Y * NV_SHMEM_DIM_X;
-
-  extern __shared__ char dynamic_shmem[];
-  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
-  uintptr_t dshmem = (base_shmem_ptr + ALIGNMENT - 1) & ~(static_cast<uintptr_t>(ALIGNMENT - 1));
-
-  constexpr size_t buff_size_aligned_in =
-      ((buff_elems * sizeof(IType) + ALIGNMENT - 1) / ALIGNMENT) * ALIGNMENT;
-  constexpr size_t buff_size_aligned_out =
-      ((buff_elems * sizeof(OType) + ALIGNMENT - 1) / ALIGNMENT) * ALIGNMENT;
-
-  constexpr size_t grad_mem = IS_DGATED ? buff_size_aligned_in : 0;
-  constexpr size_t in_act_mem = buff_size_aligned_in;
-  constexpr size_t in_gate_mem = buff_size_aligned_in;
-  constexpr size_t in_mem = in_act_mem + in_gate_mem;
-  constexpr size_t out_act_mem = buff_size_aligned_out;
-
-  IType *in_grad_sh = reinterpret_cast<IType *>(dshmem);
-  IType *in_act_sh = reinterpret_cast<IType *>(dshmem + grad_mem);
-  IType *in_gate_sh = reinterpret_cast<IType *>(dshmem + grad_mem + in_act_mem);
-  OType *out_act_sh = reinterpret_cast<OType *>(dshmem + grad_mem + in_mem);
-  OType *out_gate_sh = reinterpret_cast<OType *>(dshmem + grad_mem + in_mem + out_act_mem);
-
-  constexpr uint32_t in_data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
-  constexpr uint32_t out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
-
-#pragma unroll
-  for (int it = 0; it < NV_ITERATIONS; ++it) {
-    const size_t chunk_it_offset_y = chunk_offset_Y + it * NV_BUFFER_DIM_Y;
-    const size_t chunk_it_offset_x = chunk_offset_X;
-
-    // TDM load
-    if constexpr (IS_DGATED) {
-      tdm::copy_2d_to_shared(in_grad_sh, grad_ptr,
-                             chunk_it_offset_x, chunk_it_offset_y,
-                             NV_SHMEM_DIM_X, NV_SHMEM_DIM_Y,
-                             cols, rows, grad_stride, in_data_sz);
-      tdm::copy_2d_to_shared_x2(
-          in_act_sh, input_act_ptr, chunk_it_offset_x, chunk_it_offset_y,
-          in_gate_sh, input_gate_ptr, chunk_it_offset_x, chunk_it_offset_y,
-          NV_SHMEM_DIM_X, NV_SHMEM_DIM_Y,
-          cols, rows, input_act_stride, in_data_sz);
-    } else {
-      tdm::copy_2d_to_shared_x2(
-          in_act_sh, input_act_ptr, chunk_it_offset_x, chunk_it_offset_y,
-          in_gate_sh, input_gate_ptr, chunk_it_offset_x, chunk_it_offset_y,
-          NV_SHMEM_DIM_X, NV_SHMEM_DIM_Y,
-          cols, rows, input_act_stride, in_data_sz);
-    }
-    tdm::wait_tensorcnt_0();
-    __syncthreads();
-
-    // Compute
-#pragma unroll
-    for (int stage = 0; stage < NV_BUFFER_STAGES_NUM; ++stage) {
-      const size_t stage_offset_Y = stage * NV_THREADS_PER_CHUNK_Y;
-      const size_t shmem_offset_y = tid_Y + stage_offset_Y;
-      const size_t shmem_offset_x = tid_X;
-      const size_t shmem_idx = shmem_offset_y * NV_SHMEM_DIM_X + shmem_offset_x;
-
-      float act_elt = static_cast<float>(in_act_sh[shmem_idx]);
-      float gate_elt = static_cast<float>(in_gate_sh[shmem_idx]);
-
-      if constexpr (IS_DGATED) {
-        float grad_elt = static_cast<float>(in_grad_sh[shmem_idx]);
-        const float x = act_elt;
-        float act_x;
-        float dact_x;
-
-        if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
-          const float s = nv_sigmoidf(x);
-          act_x = x * s;
-          dact_x = x * s * (1 - s) + s;
-        } else {
-          act_x = ActOP(x, {});
-          dact_x = DActOP(x, {});
-        }
-
-        float after_dact = dact_x * grad_elt * gate_elt;
-        float after_dgate = act_x * grad_elt;
-
-        out_act_sh[shmem_idx] = static_cast<OType>(scale * after_dact);
-        out_gate_sh[shmem_idx] = static_cast<OType>(scale * after_dgate);
-
-        amax = fmaxf(amax, fabsf(after_dact));
-        amax = fmaxf(amax, fabsf(after_dgate));
-      } else {
-        const float after_act = ActOP(act_elt, {}) * gate_elt;
-        out_act_sh[shmem_idx] = static_cast<OType>(scale * after_act);
-        amax = fmaxf(amax, fabsf(after_act));
-      }
-    }
-
-    __syncthreads();
-
-    // TDM store
-    tdm::store_2d_to_global(out_act_sh, output_act_ptr,
-                            chunk_it_offset_x, chunk_it_offset_y,
-                            NV_SHMEM_DIM_X, NV_SHMEM_DIM_Y,
-                            cols, rows, output_stride, out_data_sz);
-    if constexpr (IS_DGATED) {
-      tdm::store_2d_to_global(out_gate_sh, output_gate_ptr,
-                              chunk_it_offset_x, chunk_it_offset_y,
-                              NV_SHMEM_DIM_X, NV_SHMEM_DIM_Y,
-                              cols, rows, output_stride, out_data_sz);
-    }
-    tdm::wait_tensorcnt_0();
-    __syncthreads();
-  }
-
-  if (amax_ptr != nullptr) {
-    const int warp_id = threadIdx.x / THREADS_PER_WARP;
-    amax = reduce_max<NV_THREADS_PER_CHUNK / THREADS_PER_WARP>(amax, warp_id);
-    if (threadIdx.x == 0) {
-      atomicMaxFloat(amax_ptr, amax);
-    }
-  }
-
-  if (threadIdx.x == 0 && blockIdx.x == 0 && (scale_inv_ptr != nullptr)) {
-    reciprocal<float>(scale_inv_ptr, scale);
-  }
-#endif  // defined(__gfx1250__)
-}
-
-// ---------------------------------------------------------------------------
-// MXFP8 gated kernel — NV upstream flow ported to TDM
-// ---------------------------------------------------------------------------
-namespace nv_mxfp8 {
-
-constexpr size_t MX_CHUNK_DIM_Y = 64;
-constexpr size_t MX_CHUNK_DIM_X = 64;
-constexpr size_t MX_THREADS_PER_CHUNK_COLWISE = 128;
-constexpr size_t MX_THREADS_PER_CHUNK_NON_COLWISE = MX_CHUNK_DIM_X;
-
-constexpr size_t MX_SCALE_DIM_Y = 32;
-constexpr size_t MX_SCALE_DIM_X = 32;
-
-constexpr size_t MX_BUFF_DIM_Y = 32;
-constexpr size_t MX_BUFF_DIM_X = MX_CHUNK_DIM_X;
-constexpr size_t MX_BUFF_DIM = MX_BUFF_DIM_Y * MX_BUFF_DIM_X;
-static_assert(MX_BUFF_DIM_Y == 32);
-
-constexpr size_t MX_PACK_SIZE = 4;
-constexpr size_t MX_WAVES = MX_SCALE_DIM_X / MX_PACK_SIZE;
-
-constexpr size_t MX_TOTAL_BANKS_WIDTH = (32 * 4) / 1;  // 128
-constexpr size_t MX_THREADS_PER_BANK = MX_TOTAL_BANKS_WIDTH / MX_SCALE_DIM_X;  // 4
-
-template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
-          float (*DActOP)(float, const ParamOP &), typename IType, typename OType,
-          bool ROWWISE_SCALING, bool COLWISE_SCALING, size_t THREADS_PER_CHUNK>
-__global__ void __launch_bounds__(THREADS_PER_CHUNK)
-    cast_mxfp8_gated_kernel_tdm(const IType *__restrict__ grad_ptr,
-                                const IType *__restrict__ input_act_ptr,
-                                const IType *__restrict__ input_gate_ptr,
-                                OType *__restrict__ output_act_rowwise_ptr,
-                                OType *__restrict__ output_gate_rowwise_ptr,
-                                OType *__restrict__ output_act_colwise_ptr,
-                                OType *__restrict__ output_gate_colwise_ptr,
-                                e8m0_t *const scales_rowwise, e8m0_t *const scales_colwise,
-                                const size_t rows, const size_t cols,
-                                const size_t scale_stride_rowwise,
-                                const size_t scale_stride_colwise,
-                                const size_t input_act_stride,
-                                const size_t input_gate_stride,
-                                const size_t grad_stride,
-                                const size_t output_stride) {
-#if defined(__gfx1250__)
-  constexpr size_t STAGES = MX_CHUNK_DIM_Y / MX_BUFF_DIM_Y;
-  static_assert(STAGES >= 1);
-
-  constexpr bool IS_CACHED_ACT_OP = ROWWISE_SCALING && COLWISE_SCALING;
-  constexpr bool ONLY_COLWISE_SCALING = COLWISE_SCALING && (!ROWWISE_SCALING);
-  constexpr size_t COLWISE_WAVEFRONT_SIZE = (THREADS_PER_CHUNK + MX_CHUNK_DIM_X - 1) / MX_CHUNK_DIM_X;
-
-  const size_t block_offset_Y = blockIdx.y * MX_CHUNK_DIM_Y;
-  const size_t block_offset_X = blockIdx.x * MX_CHUNK_DIM_X;
-  const size_t scales_block_offset_Y_rowwise = blockIdx.y * MX_CHUNK_DIM_Y;
-  const size_t scales_block_offset_X_rowwise = blockIdx.x * MX_CHUNK_DIM_X / MX_SCALE_DIM_X;
-  const size_t scales_block_offset_Y_colwise = blockIdx.y * MX_CHUNK_DIM_Y / MX_SCALE_DIM_Y;
-  const size_t scales_block_offset_X_colwise = blockIdx.x * MX_CHUNK_DIM_X;
-
-  constexpr size_t THREADS_X_ROWWISE = MX_CHUNK_DIM_X / MX_SCALE_DIM_X;
-
-  const size_t tid_Y_rowwise = threadIdx.x / THREADS_X_ROWWISE;
-  const size_t tid_X_rowwise = threadIdx.x % THREADS_X_ROWWISE;
-  const size_t tid_Y_colwise = threadIdx.x / MX_CHUNK_DIM_X;
-  const size_t tid_X_colwise = threadIdx.x % MX_CHUNK_DIM_X;
-
-  const size_t thread_offset_Y_rowwise = tid_Y_rowwise;
-  const size_t thread_offset_X_rowwise = tid_X_rowwise * MX_SCALE_DIM_X;
-  const size_t thread_offset_Y_colwise = tid_Y_colwise;
-  const size_t thread_offset_X_colwise = tid_X_colwise;
-
-  const size_t row_base_rowwise = block_offset_Y + thread_offset_Y_rowwise;
-  const size_t col_base_rowwise = block_offset_X + thread_offset_X_rowwise;
-  const size_t row_base_colwise = block_offset_Y + thread_offset_Y_colwise;
-  const size_t col_base_colwise = block_offset_X + thread_offset_X_colwise;
-
-  const bool col_out_of_bounds_rowwise = (col_base_rowwise >= cols);
-  const bool col_out_of_bounds_colwise = (col_base_colwise >= cols);
-
-  const size_t scales_offset_Y_rowwise = scales_block_offset_Y_rowwise + tid_Y_rowwise;
-  const size_t scales_offset_X_rowwise = scales_block_offset_X_rowwise + tid_X_rowwise;
-  const size_t scales_offset_Y_colwise = scales_block_offset_Y_colwise + tid_Y_colwise;
-  const size_t scales_offset_X_colwise = scales_block_offset_X_colwise + tid_X_colwise;
-
-  const size_t gate_scale_idx_offset_rowwise = (cols + MX_SCALE_DIM_X - 1) / MX_SCALE_DIM_X;
-  const size_t gate_scale_idx_offset_colwise = cols;
-
-  const int thread_lane = threadIdx.x % THREADS_PER_WARP;
-  const int bank_group = thread_lane / MX_THREADS_PER_BANK;
-
-  constexpr size_t SUBAMAX_BUFF_DIM_Y = ONLY_COLWISE_SCALING ? COLWISE_WAVEFRONT_SIZE - 1 : 1;
-  __shared__ float subamax_colwise_buff[SUBAMAX_BUFF_DIM_Y][MX_CHUNK_DIM_X];
-
-  constexpr size_t ALIGNMENT = 128;
-  extern __shared__ char dynamic_shmem[];
-  uintptr_t base_shmem_ptr = reinterpret_cast<uintptr_t>(dynamic_shmem);
-  uintptr_t dshmem = (base_shmem_ptr + ALIGNMENT - 1) & ~(static_cast<uintptr_t>(ALIGNMENT - 1));
-
-  constexpr size_t buff_elems = MX_BUFF_DIM_Y * MX_BUFF_DIM_X;
-  constexpr size_t buff_size_aligned_in =
-      ((buff_elems * sizeof(IType) + ALIGNMENT - 1) / ALIGNMENT) * ALIGNMENT;
-  constexpr size_t buff_size_aligned_out =
-      ((buff_elems * sizeof(OType) + ALIGNMENT - 1) / ALIGNMENT) * ALIGNMENT;
-
-  const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
-  const size_t in_act_mem = buff_size_aligned_in;
-  const size_t in_gate_mem = buff_size_aligned_in;
-  const size_t in_mem = in_act_mem + in_gate_mem;
-
-  const size_t out_act_mem = buff_size_aligned_out;
-  const size_t out_gate_mem = (IS_DGATED ? buff_size_aligned_out : 0);
-  const size_t out_mem = out_act_mem + out_gate_mem;
-
-  IType *in_grad_sh = reinterpret_cast<IType *>(dshmem);
-  IType *in_act_sh = reinterpret_cast<IType *>(dshmem + grad_mem);
-  IType *in_gate_sh = reinterpret_cast<IType *>(dshmem + grad_mem + in_act_mem);
-
-  OType *out_act_rowwise_sh = reinterpret_cast<OType *>(dshmem + grad_mem + in_mem);
-  OType *out_gate_rowwise_sh = reinterpret_cast<OType *>(dshmem + grad_mem + in_mem + out_act_mem);
-
-  OType *out_act_colwise_sh = out_act_rowwise_sh;
-  OType *out_gate_colwise_sh = out_gate_rowwise_sh;
-
-  if constexpr (ROWWISE_SCALING && COLWISE_SCALING) {
-    out_act_colwise_sh = reinterpret_cast<OType *>(dshmem + grad_mem + in_mem + out_mem);
-    out_gate_colwise_sh =
-        reinterpret_cast<OType *>(dshmem + grad_mem + in_mem + out_mem + out_act_mem);
-  }
-
-  IType *cached_act_sh = in_act_sh;
-  IType *cached_gate_sh = in_gate_sh;
-
-  constexpr uint32_t in_data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
-  constexpr uint32_t out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
-
-#pragma unroll
-  for (int stage = 0; stage < STAGES; ++stage) {
-    const size_t stage_offset_Y = stage * MX_BUFF_DIM_Y;
-    const size_t global_offset_Y = block_offset_Y + stage_offset_Y;
-    const size_t global_offset_X = block_offset_X;
-
-    // TDM load
-    if constexpr (IS_DGATED) {
-      tdm::copy_2d_to_shared(in_grad_sh, grad_ptr,
-                             global_offset_X, global_offset_Y,
-                             MX_BUFF_DIM_X, MX_BUFF_DIM_Y,
-                             cols, rows, grad_stride, in_data_sz);
-      tdm::copy_2d_to_shared_x2(
-          in_act_sh, input_act_ptr, global_offset_X, global_offset_Y,
-          in_gate_sh, input_gate_ptr, global_offset_X, global_offset_Y,
-          MX_BUFF_DIM_X, MX_BUFF_DIM_Y,
-          cols, rows, input_act_stride, in_data_sz);
-    } else {
-      tdm::copy_2d_to_shared_x2(
-          in_act_sh, input_act_ptr, global_offset_X, global_offset_Y,
-          in_gate_sh, input_gate_ptr, global_offset_X, global_offset_Y,
-          MX_BUFF_DIM_X, MX_BUFF_DIM_Y,
-          cols, rows, input_act_stride, in_data_sz);
-    }
-    tdm::wait_tensorcnt_0();
-    __syncthreads();
-
-    // ---- Colwise scaling pass ----
-    if constexpr (COLWISE_SCALING) {
-      const size_t shmem_offset_base_colwise = tid_Y_colwise * MX_BUFF_DIM_X + tid_X_colwise;
-      float thread_amax_act = 0.0f;
-      float thread_amax_gate = 0.0f;
-      float after_act_colwise[MX_BUFF_DIM_Y / COLWISE_WAVEFRONT_SIZE];
-      float after_gate_colwise[MX_BUFF_DIM_Y / COLWISE_WAVEFRONT_SIZE];
-
-#pragma unroll
-      for (int i = 0; i < MX_SCALE_DIM_Y / COLWISE_WAVEFRONT_SIZE; ++i) {
-        const size_t shmem_offset_colwise =
-            shmem_offset_base_colwise + i * COLWISE_WAVEFRONT_SIZE * MX_BUFF_DIM_X;
-
-        float act_elt = static_cast<float>(in_act_sh[shmem_offset_colwise]);
-        float gate_elt = static_cast<float>(in_gate_sh[shmem_offset_colwise]);
-        float after_act_elt;
-        float after_gate_elt;
-
-        if constexpr (IS_DGATED) {
-          float grad_elt = static_cast<float>(in_grad_sh[shmem_offset_colwise]);
-          const float x = act_elt;
-          float act_x;
-          float dact_x;
-
-          if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
-            const float s = nv_sigmoidf(x);
-            act_x = x * s;
-            dact_x = x * s * (1 - s) + s;
-          } else {
-            act_x = ActOP(x, {});
-            dact_x = DActOP(x, {});
-          }
-          after_act_elt = dact_x * grad_elt * gate_elt;
-          after_gate_elt = act_x * grad_elt;
-        } else {
-          after_act_elt = ActOP(act_elt, {}) * gate_elt;
-        }
-
-        if constexpr (!std::is_same_v<IType, float>) {
-          after_act_elt = static_cast<float>(static_cast<IType>(after_act_elt));
-          if constexpr (IS_DGATED) {
-            after_gate_elt = static_cast<float>(static_cast<IType>(after_gate_elt));
-          }
-        }
-
-        after_act_colwise[i] = after_act_elt;
-        if constexpr (IS_DGATED) {
-          after_gate_colwise[i] = after_gate_elt;
-        }
-
-        if constexpr (IS_CACHED_ACT_OP) {
-          cached_act_sh[shmem_offset_colwise] = static_cast<IType>(after_act_elt);
-          if constexpr (IS_DGATED) {
-            cached_gate_sh[shmem_offset_colwise] = static_cast<IType>(after_gate_elt);
-          }
-        }
-
-        const bool row_out_of_bounds_colwise = (row_base_colwise + stage_offset_Y + i >= rows);
-        const bool out_of_bounds = (col_out_of_bounds_colwise || row_out_of_bounds_colwise);
-
-        if (!out_of_bounds) {
-          thread_amax_act = fmaxf(thread_amax_act, fabsf(after_act_elt));
-          if constexpr (IS_DGATED) {
-            thread_amax_gate = fmaxf(thread_amax_gate, fabsf(after_gate_elt));
-          }
-        }
-      }
-
-      if constexpr (ONLY_COLWISE_SCALING) {
-        if (tid_Y_colwise > 0) {
-          subamax_colwise_buff[tid_Y_colwise - 1][tid_X_colwise] = thread_amax_act;
-        }
-        __syncthreads();
-        if (tid_Y_colwise == 0) {
-#pragma unroll
-          for (int t = 0; t < SUBAMAX_BUFF_DIM_Y; ++t) {
-            const float other_thread_amax = subamax_colwise_buff[t][tid_X_colwise];
-            __builtin_assume(thread_amax_act >= 0);
-            __builtin_assume(other_thread_amax >= 0);
-            thread_amax_act = fmaxf(thread_amax_act, other_thread_amax);
-          }
-          subamax_colwise_buff[0][tid_X_colwise] = thread_amax_act;
-        }
-        __syncthreads();
-        thread_amax_act = subamax_colwise_buff[0][tid_X_colwise];
-
-        if constexpr (IS_DGATED) {
-          __syncthreads();
-          if (tid_Y_colwise > 0) {
-            subamax_colwise_buff[tid_Y_colwise - 1][tid_X_colwise] = thread_amax_gate;
-          }
-          __syncthreads();
-          if (tid_Y_colwise == 0) {
-#pragma unroll
-            for (int t = 0; t < SUBAMAX_BUFF_DIM_Y; ++t) {
-              const float other_thread_amax = subamax_colwise_buff[t][tid_X_colwise];
-              __builtin_assume(thread_amax_gate >= 0);
-              __builtin_assume(other_thread_amax >= 0);
-              thread_amax_gate = fmaxf(thread_amax_gate, other_thread_amax);
-            }
-            subamax_colwise_buff[0][tid_X_colwise] = thread_amax_gate;
-          }
-          __syncthreads();
-          thread_amax_gate = subamax_colwise_buff[0][tid_X_colwise];
-        }
-      }
-
-      const e8m0_t biased_exponent_act =
-          ptx::float_to_e8m0(thread_amax_act * Quantized_Limits<OType>::max_norm_rcp);
-
-      const size_t global_scales_offset_Y = scales_offset_Y_colwise + stage;
-      const size_t global_scales_offset_X = scales_offset_X_colwise;
-      const size_t scale_idx =
-          global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
-      const bool row_out_of_bounds_colwise = (row_base_colwise + stage_offset_Y) >= rows;
-      const bool out_of_bounds_colwise_flag = row_out_of_bounds_colwise || col_out_of_bounds_colwise;
-
-      if (tid_Y_colwise == 0 && (!out_of_bounds_colwise_flag)) {
-        scales_colwise[scale_idx] = biased_exponent_act;
-      }
-
-      float block_scale_inverse_act = ptx::exp2f_rcp(biased_exponent_act);
-      float block_scale_inverse_gate;
-
-      if constexpr (IS_DGATED) {
-        const e8m0_t biased_exponent_gate =
-            ptx::float_to_e8m0(thread_amax_gate * Quantized_Limits<OType>::max_norm_rcp);
-        const size_t scale_idx_gate = scale_idx + gate_scale_idx_offset_colwise;
-        if (tid_Y_colwise == 0 && (!out_of_bounds_colwise_flag)) {
-          scales_colwise[scale_idx_gate] = biased_exponent_gate;
-        }
-        block_scale_inverse_gate = ptx::exp2f_rcp(biased_exponent_gate);
-      }
-
-#pragma unroll
-      for (int i = 0; i < MX_SCALE_DIM_Y / COLWISE_WAVEFRONT_SIZE; ++i) {
-        const size_t shmem_offset_elt =
-            shmem_offset_base_colwise + i * COLWISE_WAVEFRONT_SIZE * MX_BUFF_DIM_X;
-        if constexpr (IS_DGATED) {
-          out_act_colwise_sh[shmem_offset_elt] =
-              static_cast<OType>(block_scale_inverse_act * after_act_colwise[i]);
-          out_gate_colwise_sh[shmem_offset_elt] =
-              static_cast<OType>(block_scale_inverse_gate * after_gate_colwise[i]);
-        } else {
-          const float scaled_out_act = block_scale_inverse_act * after_act_colwise[i];
-          out_act_colwise_sh[shmem_offset_elt] = static_cast<OType>(scaled_out_act);
-        }
-      }
-    }
-
-    // ---- Rowwise scaling pass ----
-    if constexpr (ROWWISE_SCALING) {
-      const size_t shmem_offset_base_rowwise = thread_offset_Y_rowwise * MX_BUFF_DIM_X;
-
-      float thread_amax_act = 0.0f;
-      float thread_amax_gate = 0.0f;
-
-      Vec<IType, MX_PACK_SIZE> in_cached_act[MX_WAVES];
-      Vec<IType, MX_PACK_SIZE> in_cached_gate[MX_WAVES];
-
-      float after_act_rowwise[MX_SCALE_DIM_X];
-      float after_gate_rowwise[MX_SCALE_DIM_X];
-
-      if constexpr (IS_CACHED_ACT_OP) {
-        __syncthreads();
-#pragma unroll
-        for (int w = 0; w < MX_WAVES; ++w) {
-          const size_t swizzled_group_idx = ((w + bank_group) * MX_PACK_SIZE) % MX_SCALE_DIM_X;
-          const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-          const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
-
-          const bool row_out_of_bounds_rowwise = (row_base_rowwise + stage_offset_Y >= rows);
-          const bool swizzled_col_out_of_bounds = (block_offset_X + swizzled_thread_idx >= cols);
-          const bool out_of_bounds = (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
-
-          in_cached_act[w].load_from(&cached_act_sh[shmem_offset_rowwise]);
-          if constexpr (IS_DGATED) {
-            in_cached_gate[w].load_from(&cached_gate_sh[shmem_offset_rowwise]);
-          }
-          if (!out_of_bounds) {
-#pragma unroll
-            for (int e = 0; e < MX_PACK_SIZE; ++e) {
-              thread_amax_act = fmaxf(thread_amax_act,
-                                      fabsf(static_cast<float>(in_cached_act[w].data.elt[e])));
-              if constexpr (IS_DGATED) {
-                thread_amax_gate = fmaxf(thread_amax_gate,
-                                         fabsf(static_cast<float>(in_cached_gate[w].data.elt[e])));
-              }
-            }
-          }
-        }
-      } else {
-#pragma unroll
-        for (int w = 0; w < MX_WAVES; ++w) {
-          const size_t swizzled_group_idx = ((w + bank_group) * MX_PACK_SIZE) % MX_SCALE_DIM_X;
-          const size_t swizzled_thread_idx = thread_offset_X_rowwise + swizzled_group_idx;
-          const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_thread_idx;
-
-          Vec<IType, MX_PACK_SIZE> in_grad;
-          Vec<IType, MX_PACK_SIZE> in_act;
-          Vec<IType, MX_PACK_SIZE> in_gate;
-
-          in_act.load_from(&in_act_sh[shmem_offset_rowwise]);
-          in_gate.load_from(&in_gate_sh[shmem_offset_rowwise]);
-          if constexpr (IS_DGATED) {
-            in_grad.load_from(&in_grad_sh[shmem_offset_rowwise]);
-          }
-
-#pragma unroll
-          for (int e = 0; e < MX_PACK_SIZE; ++e) {
-            const int j = w * MX_PACK_SIZE + e;
-
-            float act_elt = static_cast<float>(in_act.data.elt[e]);
-            float gate_elt = static_cast<float>(in_gate.data.elt[e]);
-            float after_act_elt;
-            float after_gate_elt;
-
-            if constexpr (IS_DGATED) {
-              float grad_elt = static_cast<float>(in_grad.data.elt[e]);
-              const float x = act_elt;
-              float act_x;
-              float dact_x;
-
-              if constexpr ((ActOP == &silu<fp32, fp32>) && (DActOP == &dsilu<fp32, fp32>)) {
-                const float s = nv_sigmoidf(x);
-                act_x = x * s;
-                dact_x = x * s * (1 - s) + s;
-              } else {
-                act_x = ActOP(x, {});
-                dact_x = DActOP(x, {});
-              }
-              after_act_elt = dact_x * grad_elt * gate_elt;
-              after_gate_elt = act_x * grad_elt;
-              after_act_rowwise[j] = after_act_elt;
-              after_gate_rowwise[j] = after_gate_elt;
-            } else {
-              after_act_elt = ActOP(act_elt, {}) * gate_elt;
-              after_act_rowwise[j] = after_act_elt;
-            }
-
-            if constexpr (!std::is_same_v<IType, float>) {
-              after_act_elt = static_cast<float>(static_cast<IType>(after_act_elt));
-              if constexpr (IS_DGATED) {
-                after_gate_elt = static_cast<float>(static_cast<IType>(after_gate_elt));
-              }
-            }
-
-            const bool row_out_of_bounds_rowwise = (row_base_rowwise + stage_offset_Y >= rows);
-            const bool swizzled_col_out_of_bounds = (block_offset_X + swizzled_thread_idx >= cols);
-            const bool out_of_bounds = (row_out_of_bounds_rowwise || swizzled_col_out_of_bounds);
-            if (!out_of_bounds) {
-              thread_amax_act = fmaxf(thread_amax_act, fabsf(after_act_elt));
-              if constexpr (IS_DGATED) {
-                thread_amax_gate = fmaxf(thread_amax_gate, fabsf(after_gate_elt));
-              }
-            }
-          }
-        }
-      }
-
-      // Compute E8M0 scaling factor
-      const e8m0_t biased_exponent_act =
-          ptx::float_to_e8m0(thread_amax_act * Quantized_Limits<OType>::max_norm_rcp);
-      const size_t stage_scales_offset_Y = scales_offset_Y_rowwise + stage_offset_Y;
-      const size_t stage_scales_offset_X = scales_offset_X_rowwise;
-      const size_t scale_idx = stage_scales_offset_Y * scale_stride_rowwise + stage_scales_offset_X;
-      const bool row_out_of_bounds_rowwise = (row_base_rowwise + stage_offset_Y) >= rows;
-      const bool out_of_bounds_rowwise = row_out_of_bounds_rowwise || col_out_of_bounds_rowwise;
-      if (!out_of_bounds_rowwise) {
-        scales_rowwise[scale_idx] = biased_exponent_act;
-      }
-
-      const float block_scale_inverse_act = ptx::exp2f_rcp(biased_exponent_act);
-
-      float block_scale_inverse_gate;
-      if constexpr (IS_DGATED) {
-        const e8m0_t biased_exponent_gate =
-            ptx::float_to_e8m0(thread_amax_gate * Quantized_Limits<OType>::max_norm_rcp);
-        const size_t scale_idx_gate = scale_idx + gate_scale_idx_offset_rowwise;
-        if (!out_of_bounds_rowwise) {
-          scales_rowwise[scale_idx_gate] = biased_exponent_gate;
-        }
-        block_scale_inverse_gate = ptx::exp2f_rcp(biased_exponent_gate);
-      }
-
-      // Scale elements
-#pragma unroll
-      for (int w = 0; w < MX_WAVES; ++w) {
-        const size_t swizzled_group_idx = ((w + bank_group) * MX_PACK_SIZE) % MX_SCALE_DIM_X;
-        const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
-        const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
-
-#pragma unroll
-        for (int e = 0; e < MX_PACK_SIZE; ++e) {
-          const int j = w * MX_PACK_SIZE + e;
-          float in_act_val;
-
-          if constexpr (IS_CACHED_ACT_OP) {
-            in_act_val = static_cast<float>(in_cached_act[w].data.elt[e]);
-          } else {
-            in_act_val = after_act_rowwise[j];
-          }
-          out_act_rowwise_sh[shmem_offset_rowwise + e] =
-              static_cast<OType>(block_scale_inverse_act * in_act_val);
-
-          if constexpr (IS_DGATED) {
-            float in_gate_val;
-            if constexpr (IS_CACHED_ACT_OP) {
-              in_gate_val = static_cast<float>(in_cached_gate[w].data.elt[e]);
-            } else {
-              in_gate_val = after_gate_rowwise[j];
-            }
-            out_gate_rowwise_sh[shmem_offset_rowwise + e] =
-                static_cast<OType>(block_scale_inverse_gate * in_gate_val);
-          }
-        }
-      }
-    }
-
-    __syncthreads();
-
-    // TDM store
-    if constexpr (ROWWISE_SCALING) {
-      tdm::store_2d_to_global(out_act_rowwise_sh, output_act_rowwise_ptr,
-                              global_offset_X, global_offset_Y,
-                              MX_BUFF_DIM_X, MX_BUFF_DIM_Y,
-                              cols, rows, output_stride, out_data_sz);
-      if constexpr (IS_DGATED) {
-        tdm::store_2d_to_global(out_gate_rowwise_sh, output_gate_rowwise_ptr,
-                                global_offset_X, global_offset_Y,
-                                MX_BUFF_DIM_X, MX_BUFF_DIM_Y,
-                                cols, rows, output_stride, out_data_sz);
-      }
-    }
-    if constexpr (COLWISE_SCALING) {
-      tdm::store_2d_to_global(out_act_colwise_sh, output_act_colwise_ptr,
-                              global_offset_X, global_offset_Y,
-                              MX_BUFF_DIM_X, MX_BUFF_DIM_Y,
-                              cols, rows, output_stride, out_data_sz);
-      if constexpr (IS_DGATED) {
-        tdm::store_2d_to_global(out_gate_colwise_sh, output_gate_colwise_ptr,
-                                global_offset_X, global_offset_Y,
-                                MX_BUFF_DIM_X, MX_BUFF_DIM_Y,
-                                cols, rows, output_stride, out_data_sz);
-      }
-    }
-    tdm::wait_tensorcnt_0();
-    __syncthreads();
-  }
-#endif  // defined(__gfx1250__)
-}
-
-}  // namespace nv_mxfp8
-}  // namespace nv_upstream_tdm
-
-// ---------------------------------------------------------------------------
-// NV upstream TDM launcher: FP8 gated
-// ---------------------------------------------------------------------------
-template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
-          float (*DActOP)(float, const ParamOP &)>
-void cast_fp8_gated_nv_upstream_tdm(const Tensor &grad, const Tensor &gated_input,
-                                    Tensor *output, cudaStream_t stream) {
-  using namespace nv_upstream_tdm;
-
-  if (output->has_data()) {
-    NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
-  }
-  NVTE_CHECK(!output->has_columnwise_data(), "Only rowwise cast supported in this function.");
-
-  const size_t rows = gated_input.flat_first_dim();
-  const size_t cols = gated_input.flat_last_dim() / 2;
-  const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
-
-  const size_t blocks_Y = DIVUP(rows, NV_CHUNK_DIM_Y);
-  const size_t blocks_X = DIVUP(cols, NV_CHUNK_DIM_X);
-
-  float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
-  float *const scale_inv_ptr = reinterpret_cast<float *>(output->scale_inv.dptr);
-  float *const scale_ptr = reinterpret_cast<float *>(output->scale.dptr);
-
-  const dim3 block_dim(NV_THREADS_PER_CHUNK);
-  const dim3 grid_dim(blocks_X, blocks_Y);
-
-  TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
-      gated_input.dtype(), IType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          output->dtype(), OType,
-
-          const IType *grad_ptr = IS_DGATED
-              ? reinterpret_cast<const IType *>(grad.data.dptr) : nullptr;
-          const IType *input_act_ptr = reinterpret_cast<const IType *>(gated_input.data.dptr);
-          const IType *input_gate_ptr = reinterpret_cast<const IType *>(gated_input.data.dptr) + cols;
-          OType *output_act_ptr = reinterpret_cast<OType *>(output->data.dptr);
-          OType *output_gate_ptr = IS_DGATED
-              ? reinterpret_cast<OType *>(output->data.dptr) + cols : nullptr;
-
-          constexpr size_t ALIGNMENT = 128;
-          constexpr size_t buff_elems = NV_SHMEM_DIM_Y * NV_SHMEM_DIM_X;
-          const size_t buff_size_aligned_in =
-              ((buff_elems * sizeof(IType) + ALIGNMENT - 1) / ALIGNMENT) * ALIGNMENT;
-          const size_t buff_size_aligned_out =
-              ((buff_elems * sizeof(OType) + ALIGNMENT - 1) / ALIGNMENT) * ALIGNMENT;
-          const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
-          const size_t in_act_mem = buff_size_aligned_in;
-          const size_t in_gate_mem = buff_size_aligned_in;
-          const size_t out_act_mem = buff_size_aligned_out;
-          const size_t out_gate_mem = buff_size_aligned_out;
-          const size_t shmem_size = grad_mem + (in_act_mem + in_gate_mem) +
-                                    (out_act_mem + out_gate_mem) + ALIGNMENT;
-
-          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-              cast_fp8_gated_kernel_tdm<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
-              cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
-
-          cast_fp8_gated_kernel_tdm<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>
-              <<<grid_dim, block_dim, shmem_size, stream>>>(
-                  grad_ptr, input_act_ptr, input_gate_ptr,
-                  output_act_ptr, output_gate_ptr,
-                  amax_ptr, scale_inv_ptr, scale_ptr,
-                  rows, cols,
-                  cols * 2, cols * 2, cols, output_cols);
-          NVTE_CHECK_CUDA(cudaGetLastError()););  // NOLINT(*)
-  );                                              // NOLINT(*)
-}
-
-// ---------------------------------------------------------------------------
-// NV upstream TDM launcher: MXFP8 gated
-// ---------------------------------------------------------------------------
-template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
-          float (*DActOP)(float, const ParamOP &)>
-void cast_mxfp8_gated_nv_upstream_tdm(const Tensor &grad, const Tensor &gated_input,
-                                      Tensor *output, cudaStream_t stream) {
-  using namespace nv_upstream_tdm;
-  using namespace nv_upstream_tdm::nv_mxfp8;
-
-  const bool USE_ROWWISE_SCALING = output->has_data();
-  const bool USE_COLWISE_SCALING = output->has_columnwise_data();
-
-  if (USE_ROWWISE_SCALING) {
-    NVTE_CHECK(output->scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
-  }
-  if (USE_COLWISE_SCALING) {
-    NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
-  }
-
-  const size_t rows = gated_input.flat_first_dim();
-  const size_t cols = gated_input.flat_last_dim() / 2;
-  const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
-
-  const size_t blocks_Y = DIVUP(rows, MX_CHUNK_DIM_Y);
-  const size_t blocks_X = DIVUP(cols, MX_CHUNK_DIM_X);
-
-  const size_t THREADS_PER_CHUNK = USE_COLWISE_SCALING
-      ? MX_THREADS_PER_CHUNK_COLWISE : MX_THREADS_PER_CHUNK_NON_COLWISE;
-
-  const dim3 grid(blocks_X, blocks_Y);
-  const dim3 block_size(THREADS_PER_CHUNK);
-
-  size_t scale_stride_rowwise = USE_ROWWISE_SCALING ? output->scale_inv.shape[1] : 1;
-  size_t scale_stride_colwise = USE_COLWISE_SCALING ? output->columnwise_scale_inv.shape[1] : 1;
-
-  e8m0_t *const scales_rowwise_ptr =
-      USE_ROWWISE_SCALING ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
-  e8m0_t *const scales_colwise_ptr =
-      USE_COLWISE_SCALING ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
-
-  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
-      gated_input.dtype(), IType,
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
-          output->dtype(), OType,
-
-          const IType *grad_ptr = IS_DGATED
-              ? reinterpret_cast<const IType *>(grad.data.dptr) : nullptr;
-          const IType *input_act_ptr = reinterpret_cast<const IType *>(gated_input.data.dptr);
-          const IType *input_gate_ptr = reinterpret_cast<const IType *>(gated_input.data.dptr) + cols;
-          OType *output_act_rowwise = USE_ROWWISE_SCALING
-              ? reinterpret_cast<OType *>(output->data.dptr) : nullptr;
-          OType *output_gate_rowwise = USE_ROWWISE_SCALING
-              ? reinterpret_cast<OType *>(output->data.dptr) + cols : nullptr;
-          OType *output_act_colwise = USE_COLWISE_SCALING
-              ? reinterpret_cast<OType *>(output->columnwise_data.dptr) : nullptr;
-          OType *output_gate_colwise = USE_COLWISE_SCALING
-              ? reinterpret_cast<OType *>(output->columnwise_data.dptr) + cols : nullptr;
-
-          constexpr size_t ALIGNMENT = 128;
-          constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
-          constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
-
-          constexpr size_t buff_elems = MX_BUFF_DIM_Y * MX_BUFF_DIM_X;
-          const size_t input_buff_size = (buff_elems * input_type_bit_size) / 8;
-          const size_t output_buff_size = (buff_elems * output_type_bit_size) / 8;
-          const size_t buff_size_aligned_in =
-              ((input_buff_size + ALIGNMENT - 1) / ALIGNMENT) * ALIGNMENT;
-          const size_t buff_size_aligned_out =
-              ((output_buff_size + ALIGNMENT - 1) / ALIGNMENT) * ALIGNMENT;
-
-          const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
-          const size_t in_act_mem = buff_size_aligned_in;
-          const size_t in_gate_mem = buff_size_aligned_in;
-          const size_t in_mem = grad_mem + in_act_mem + in_gate_mem;
-
-          const size_t out_act_mem = buff_size_aligned_out;
-          const size_t out_gate_mem = (IS_DGATED ? buff_size_aligned_out : 0);
-          size_t out_mem = out_act_mem + out_gate_mem;
-          if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) { out_mem *= 2; }
-
-          const size_t shmem_size = in_mem + out_mem + ALIGNMENT;
-
-          auto launch_kernel = [&](auto rowwise_tag, auto colwise_tag, auto threads_tag) {
-            constexpr bool RW = decltype(rowwise_tag)::value;
-            constexpr bool CW = decltype(colwise_tag)::value;
-            constexpr size_t TPC = decltype(threads_tag)::value;
-
-            NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                cast_mxfp8_gated_kernel_tdm<IS_DGATED, ParamOP, ActOP, DActOP,
-                                            IType, OType, RW, CW, TPC>,
-                cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
-
-            cast_mxfp8_gated_kernel_tdm<IS_DGATED, ParamOP, ActOP, DActOP,
-                                        IType, OType, RW, CW, TPC>
-                <<<grid, block_size, shmem_size, stream>>>(
-                    grad_ptr, input_act_ptr, input_gate_ptr,
-                    output_act_rowwise, output_gate_rowwise,
-                    output_act_colwise, output_gate_colwise,
-                    scales_rowwise_ptr, scales_colwise_ptr,
-                    rows, cols, scale_stride_rowwise, scale_stride_colwise,
-                    cols * 2, cols * 2, cols, output_cols);
-            NVTE_CHECK_CUDA(cudaGetLastError());
-          };
-
-          if (USE_ROWWISE_SCALING && (!USE_COLWISE_SCALING)) {
-            launch_kernel(std::true_type{}, std::false_type{},
-                          std::integral_constant<size_t, MX_THREADS_PER_CHUNK_NON_COLWISE>{});
-          } else if ((!USE_ROWWISE_SCALING) && USE_COLWISE_SCALING) {
-            launch_kernel(std::false_type{}, std::true_type{},
-                          std::integral_constant<size_t, MX_THREADS_PER_CHUNK_COLWISE>{});
-          } else if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) {
-            launch_kernel(std::true_type{}, std::true_type{},
-                          std::integral_constant<size_t, MX_THREADS_PER_CHUNK_NON_COLWISE>{});
-          }
-      );       // NOLINT(*)
-  );           // NOLINT(*)
-}
-
+              cols, cols * 2, output_cols);
+          NVTE_CHECK_CUDA(cudaGetLastError());
 #endif  // __HIP_PLATFORM_AMD__
+      );  // NOLINT(*)
+  );      // NOLINT(*)
+}
+
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &)>
@@ -2009,26 +1429,101 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
           const size_t shmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
 
 #ifdef __HIP_PLATFORM_AMD__
-          TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
-            (USE_COLWISE_SCALING ? 32 : 1), SCALE_DIM_Y,
-            TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
-              (USE_ROWWISE_SCALING ? 32 : 1), SCALE_DIM_X,
-              TRANSFORMER_ENGINE_SWITCH_CONDITION(!(cols % (32 * sizeof(IType))), IS_ALIGNED, {
-                NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                    cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
-                                            SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>,
-                    cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+          // Check env var: NVTE_USE_NV_UPSTREAM_FLOW=1 selects NV upstream (TDM) kernel path
+          static const bool use_nv_upstream_mx = [] {
+            const char *env = std::getenv("NVTE_USE_NV_UPSTREAM_FLOW");
+            return env != nullptr && env[0] == '1' && env[1] == '\0';
+          }();
+          if (use_nv_upstream_mx) {
+            // NV upstream flow with TDM — uses mxfp8_kernel::cast_mxfp8_gated_kernel
+            constexpr size_t NV_THREADS_PER_CHUNK_COLWISE = mxfp8_kernel::THREADS_PER_CHUNK_COLWISE;
+            constexpr size_t NV_THREADS_PER_CHUNK_NON_COLWISE = mxfp8_kernel::THREADS_PER_CHUNK_NON_COLWISE;
 
-                cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
-                                        SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
-                    <<<grid, block_size, shmem_size, stream>>>(
-                        tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
-                        tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
-                        tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
-                        scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
-                        scale_stride_colwise);
-                NVTE_CHECK_CUDA(cudaGetLastError());
-          })));  // NOLINT(*)
+            // Recompute shmem size with NV upstream constants
+            constexpr size_t NV_BUFF_DIM_Y = mxfp8_kernel::BUFF_DIM_Y;
+            constexpr size_t NV_BUFF_DIM_X = mxfp8_kernel::BUFF_DIM_X;
+            constexpr size_t NV_BUFFS_NUM = mxfp8_kernel::BUFFS_NUM;
+            constexpr size_t NV_ALIGNMENT = 128;
+
+            const size_t nv_buff_elems_total = NV_BUFFS_NUM * NV_BUFF_DIM_Y * NV_BUFF_DIM_X;
+            const size_t nv_input_buff_size = (nv_buff_elems_total * input_type_bit_size) / 8;
+            const size_t nv_output_buff_size = (nv_buff_elems_total * output_type_bit_size) / 8;
+            const size_t nv_buff_size_aligned_in =
+                ((nv_input_buff_size + NV_ALIGNMENT - 1) / NV_ALIGNMENT) * NV_ALIGNMENT;
+            const size_t nv_buff_size_aligned_out =
+                ((nv_output_buff_size + NV_ALIGNMENT - 1) / NV_ALIGNMENT) * NV_ALIGNMENT;
+            const size_t nv_grad_mem = (IS_DGATED ? nv_buff_size_aligned_in : 0);
+            const size_t nv_in_act_mem = nv_buff_size_aligned_in;
+            const size_t nv_in_gate_mem = nv_buff_size_aligned_in;
+            const size_t nv_in_mem = nv_grad_mem + nv_in_act_mem + nv_in_gate_mem;
+            const size_t nv_out_act_mem = nv_buff_size_aligned_out;
+            const size_t nv_out_gate_mem = (IS_DGATED ? nv_buff_size_aligned_out : 0);
+            size_t nv_out_mem = nv_out_act_mem + nv_out_gate_mem;
+            if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) { nv_out_mem *= 2; }
+            const size_t nv_shmem_size = nv_in_mem + nv_out_mem + NV_ALIGNMENT;
+
+            const size_t nv_blocks_Y = DIVUP(rows, mxfp8_kernel::CHUNK_DIM_Y);
+            const size_t nv_blocks_X = DIVUP(cols, mxfp8_kernel::CHUNK_DIM_X);
+            const size_t NV_THREADS_PER_CHUNK = USE_COLWISE_SCALING
+                ? NV_THREADS_PER_CHUNK_COLWISE : NV_THREADS_PER_CHUNK_NON_COLWISE;
+            const dim3 nv_grid(nv_blocks_X, nv_blocks_Y);
+            const dim3 nv_block(NV_THREADS_PER_CHUNK);
+
+            auto nv_launch = [&](auto rowwise_tag, auto colwise_tag, auto threads_tag) {
+              constexpr bool RW = decltype(rowwise_tag)::value;
+              constexpr bool CW = decltype(colwise_tag)::value;
+              constexpr size_t TPC = decltype(threads_tag)::value;
+
+              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                  mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP,
+                                                        IType, OType, RW, CW, TPC>,
+                  cudaFuncAttributeMaxDynamicSharedMemorySize, nv_shmem_size));
+
+              mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP,
+                                                    IType, OType, RW, CW, TPC>
+                  <<<nv_grid, nv_block, nv_shmem_size, stream>>>(
+                      tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
+                      tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
+                      tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
+                      scales_rowwise_ptr, scales_colwise_ptr,
+                      rows, cols, scale_stride_rowwise, scale_stride_colwise,
+                      cols * 2, output_cols);
+              NVTE_CHECK_CUDA(cudaGetLastError());
+            };
+
+            if (USE_ROWWISE_SCALING && (!USE_COLWISE_SCALING)) {
+              nv_launch(std::true_type{}, std::false_type{},
+                        std::integral_constant<size_t, mxfp8_kernel::THREADS_PER_CHUNK_NON_COLWISE>{});
+            } else if ((!USE_ROWWISE_SCALING) && USE_COLWISE_SCALING) {
+              nv_launch(std::false_type{}, std::true_type{},
+                        std::integral_constant<size_t, mxfp8_kernel::THREADS_PER_CHUNK_COLWISE>{});
+            } else if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) {
+              nv_launch(std::true_type{}, std::true_type{},
+                        std::integral_constant<size_t, mxfp8_kernel::THREADS_PER_CHUNK_NON_COLWISE>{});
+            }
+          } else {
+            // ROCm flow kernel (default on AMD)
+            TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+              (USE_COLWISE_SCALING ? 32 : 1), SCALE_DIM_Y,
+              TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+                (USE_ROWWISE_SCALING ? 32 : 1), SCALE_DIM_X,
+                TRANSFORMER_ENGINE_SWITCH_CONDITION(!(cols % (32 * sizeof(IType))), IS_ALIGNED, {
+                  NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                      cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
+                                              SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>,
+                      cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+
+                  cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
+                                          SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
+                      <<<grid, block_size, shmem_size, stream>>>(
+                          tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
+                          tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
+                          tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
+                          scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
+                          scale_stride_colwise);
+                  NVTE_CHECK_CUDA(cudaGetLastError());
+            })));  // NOLINT(*)
+          }
 #else
           switch (scaling_type) {
             case ScalingType::ROWWISE:
@@ -2045,7 +1540,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
+                      scale_stride_colwise, cols * 2, output_cols);
               NVTE_CHECK_CUDA(cudaGetLastError());
               break;
             case ScalingType::COLWISE:
@@ -2062,7 +1557,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
+                      scale_stride_colwise, cols * 2, output_cols);
               NVTE_CHECK_CUDA(cudaGetLastError());
               break;
             case ScalingType::BIDIMENSIONAL:
@@ -2079,7 +1574,7 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
                       tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
                       tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
                       scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
+                      scale_stride_colwise, cols * 2, output_cols);
               NVTE_CHECK_CUDA(cudaGetLastError());
               break;
           }
@@ -2202,24 +1697,8 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
   const bool use_tma_kernels = is_fp8_rowwise_output && is_fp8_colwise_output && cols % 32 == 0;
 
   if (is_delayed_tensor_scaling(output->scaling_mode)) {
-#ifdef __HIP_PLATFORM_AMD__
-    // Check env var: NVTE_USE_NV_UPSTREAM_FLOW=1 selects NV upstream TDM kernel path
-    static const bool use_nv_upstream = [] {
-      const char *env = std::getenv("NVTE_USE_NV_UPSTREAM_FLOW");
-      return env != nullptr && env[0] == '1' && env[1] == '\0';
-    }();
-    if (use_nv_upstream && use_tma_kernels) {
-      cast_fp8_gated_nv_upstream_tdm<IS_DGATED, ParamOP, ActOP, DActOP>(
-          grad, gated_input, output, stream);
-    } else {
-      if constexpr (IS_DGATED) {
-        cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
-      } else {
-        cast_gated<ParamOP, ActOP>(gated_input, output, stream);
-      }
-    }
-#else
     if (use_tma_kernels) {
+      // cast_fp8_gated handles both NVIDIA (TMA) and AMD (TDM) internally via #ifdef
       cast_fp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
     } else {
       if constexpr (IS_DGATED) {
@@ -2228,30 +1707,14 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
         cast_gated<ParamOP, ActOP>(gated_input, output, stream);
       }
     }
-#endif
   } else if (is_mxfp_scaling(output->scaling_mode)) {
-#ifdef __HIP_PLATFORM_AMD__
-    static const bool use_nv_upstream_mx = [] {
-      const char *env = std::getenv("NVTE_USE_NV_UPSTREAM_FLOW");
-      return env != nullptr && env[0] == '1' && env[1] == '\0';
-    }();
-    if (use_nv_upstream_mx && use_tma_kernels) {
-      cast_mxfp8_gated_nv_upstream_tdm<IS_DGATED, ParamOP, ActOP, DActOP>(
-          grad, gated_input, output, stream);
-    } else if (use_tma_kernels) {
-      cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
-    } else {
-      NVTE_ERROR("Invalid input shape. Expected the last dimension to be divisible ",
-                 "by 32, got input of shape ", gated_input.data.shape);
-    }
-#else
     if (use_tma_kernels) {
+      // cast_mxfp8_gated handles both NVIDIA (TMA) and AMD (TDM) internally via #ifdef
       cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
     } else {
       NVTE_ERROR("Invalid input shape. Expected the last dimension to be divisible ",
                  "by 32, got input of shape ", gated_input.data.shape);
     }
-#endif
   } else {
     NVTE_ERROR("Not supported scaling mode");
   }
