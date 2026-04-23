@@ -58,7 +58,7 @@ run_test_config() {
     run_default_fa 1 test_custom_call_compute.py
     run_default_fa 1 test_functions.py
     run 1 test_fused_attn.py
-    NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 1 test_fused_attn.py -k "TestFusedAttnWithDeterminism"
+    NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 test_fused_attn.py -k "TestFusedAttnWithDeterminism"
     NVTE_CK_USES_FWD_V3=0 NVTE_CK_USES_BWD_V3=0 run_default_fa_lbl "v2" 3 test_fused_attn.py # Using FAv2 for forward and backward pass
     run_default_fa 1 test_layer.py # it effectively always uses unfused attention
     run_default_fa 1 test_sanity_import.py
