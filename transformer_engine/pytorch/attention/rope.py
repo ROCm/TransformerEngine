@@ -7,15 +7,12 @@
 """
 Rotary Position Embedding implementation of different types along with helper functions
 """
-import logging
 import os
 from typing import Optional, Tuple, Union, List
 import torch
 
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.cpp_extensions.fused_attn import QKVFormat
-
-logger = logging.getLogger(__name__)
 
 try:
     from torch.utils.cpp_extension import IS_HIP_EXTENSION
@@ -35,30 +32,10 @@ if IS_HIP_EXTENSION and _USE_AITER_ROPE:
         )
         _HAVE_AITER_ROPE = True
     except Exception as _aiter_import_err:  # pylint: disable=broad-except
-        _HAVE_AITER_ROPE = False
-        logger.warning(
-            "AITER fused RoPE import failed (%s: %s). "
-            "Falling back to TE native kernels. "
-            "Set NVTE_USE_AITER_ROPE=0 to silence this message.",
-            type(_aiter_import_err).__name__,
-            _aiter_import_err,
-        )
-
-if _HAVE_AITER_ROPE:
-    _aiter_version = "unknown"
-    try:
-        from aiter._version import version as _aiter_version  # pylint: disable=import-error
-    except Exception:  # pylint: disable=broad-except
-        pass
-    logger.info("Using AITER fused RoPE kernels (aiter.ops.rope, version=%s)", _aiter_version)
-else:
-    if not IS_HIP_EXTENSION:
-        _reason = "not on ROCm"
-    elif not _USE_AITER_ROPE:
-        _reason = "disabled via NVTE_USE_AITER_ROPE=0"
-    else:
-        _reason = "not available"
-    logger.debug("AITER RoPE not active (%s), using TE native kernels", _reason)
+        raise RuntimeError(
+            f"NVTE_USE_AITER_ROPE=1 but AITER fused RoPE import failed: "
+            f"{type(_aiter_import_err).__name__}: {_aiter_import_err}"
+        ) from _aiter_import_err
 
 
 __all__ = ["RotaryPositionEmbedding", "apply_rotary_pos_emb", "apply_fused_qkv_rotary_pos_emb"]
