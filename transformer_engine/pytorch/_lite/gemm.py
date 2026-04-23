@@ -568,6 +568,21 @@ def _aiter_triton_gemm(A, transA, B, transB, a_data, a_scale, b_data, b_scale,
 
         if a_is_fp8 and b_is_fp8:
 
+            # AITER Triton a8w8 kernels assume K-innermost on both operands
+            # (stride[-1] == 1). Non-K-innermost operands are numerically
+            # correct but ~10-100× slower with no diagnostic. Our
+            # _fp8_transposed_operand path and the raw _data views should
+            # both be K-innermost; assert to catch any future drift in the
+            # _transpose_invalid flag or the cast_transpose output layout.
+            assert x.stride(-1) == 1, (
+                f"lite→AITER Triton a8w8: x must be K-innermost, got strides "
+                f"{tuple(x.stride())}; shape={tuple(x.shape)}"
+            )
+            assert w.stride(-1) == 1, (
+                f"lite→AITER Triton a8w8: w must be K-innermost, got strides "
+                f"{tuple(w.stride())}; shape={tuple(w.shape)}"
+            )
+
             if _is_per_row_scaled(x_scale) or _is_per_row_scaled(w_scale):
                 # Per-row (per-token) FP8 — from CurrentScaling fused norm+quant.
                 # Per-row scales are valid only when they index the kernel's
