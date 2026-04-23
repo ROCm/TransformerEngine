@@ -14,8 +14,11 @@ Backend priority (configurable via NVTE_LITE_GEMM_BACKEND env var):
 Set NVTE_LITE_GEMM_BACKEND to override:
   "ck"      -- prefer AITER CK kernels (default)
   "triton"  -- prefer AITER Triton GEMM kernels
-  "pytorch" -- skip AITER; FP8 routes to torch._scaled_mm, rest uses
-               dequantize + torch.matmul
+  "pytorch" -- prefer torch._scaled_mm for FP8 (hipBLASLt-backed on ROCm);
+               fall back to AITER for FP8 cases _scaled_mm can't serve
+               (wgrad with per-row scale on reduction axis, block scaled,
+               unsupported dtype combos); dequantize + torch.matmul as a
+               last resort for non-FP8 or when AITER is unavailable.
 """
 
 import os
@@ -846,6 +849,23 @@ def generic_gemm(A, transA, B, transB, D, quantizer, output_dtype,
             D = quantizer.quantize(D)
 
         return D, bias_grad, gelu_input, extra_output
+
+    # When backend=="pytorch" and _scaled_mm rejected the call (wgrad with
+    # per-row scale on the reduction axis, block-scaled, unsupported dtype
+    # combo, etc.), fall back to AITER before the catastrophically-slow
+    # dequantize+matmul path. Dequant+matmul on FP8 operands runs 100-1000x
+    # slower than AITER Triton and turns a few rejected calls into
+    # multi-minute iterations.
+    if (_GEMM_BACKEND == "pytorch" and is_aiter_available()
+            and _is_quantized(A) and _is_quantized(B)):
+        _gemm_bump("pytorch_aiter_fallback_attempt")
+        aiter_result = _aiter_gemm(
+            A, transA, B, transB, D, quantizer, output_dtype,
+            bias, bias_type, gelu, gelu_in, grad, accumulate, alpha,
+        )
+        if aiter_result is not None:
+            _gemm_bump("pytorch_aiter_fallback_ok")
+            return aiter_result[0], aiter_result[1], aiter_result[2], extra_output
 
     _gemm_bump("pytorch_dequant_matmul")
     a = _dequantize_if_needed(A)
