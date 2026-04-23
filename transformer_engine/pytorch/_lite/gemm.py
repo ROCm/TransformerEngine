@@ -8,12 +8,14 @@
 Backend priority (configurable via NVTE_LITE_GEMM_BACKEND env var):
 1. AITER CK GEMM (default) -- CK/ASM kernels for FP8 precisions
 2. AITER Triton GEMM -- dedicated Triton kernels for FP8 and BF16/FP16
-3. torch.matmul -- PyTorch fallback (always available)
+3. PyTorch fallback -- torch._scaled_mm for FP8 (hipBLASLt-backed on ROCm),
+   dequantize + torch.matmul otherwise
 
 Set NVTE_LITE_GEMM_BACKEND to override:
   "ck"      -- prefer AITER CK kernels (default)
   "triton"  -- prefer AITER Triton GEMM kernels
-  "pytorch" -- skip AITER, use torch.matmul directly
+  "pytorch" -- skip AITER; FP8 routes to torch._scaled_mm, rest uses
+               dequantize + torch.matmul
 """
 
 import os
@@ -278,6 +280,101 @@ def _get_blockwise_data(tensor, need_rowwise=True):
     if tensor._rowwise_data is not None:
         return tensor._rowwise_data, tensor._rowwise_scale_inv
     return tensor._columnwise_data, tensor._columnwise_scale_inv
+
+
+def _reshape_scale_for_scaled_mm(scale, dim, is_row):
+    """Reshape a Float8 _scale_inv tensor to (dim, 1) [is_row=True] or
+    (1, dim) [is_row=False] for torch._scaled_mm.
+
+    Handles per-tensor (scalar / 1-elem) by expand-broadcast and per-row
+    (1D of length dim, or already-2D `(dim, 1)` / `(1, dim)`). Returns None
+    when the scale shape doesn't match either convention (block-scaled etc.)
+    so the caller can fall through to the dequant path.
+    """
+    if scale is None:
+        return None
+    scale = scale.to(torch.float32) if scale.dtype != torch.float32 else scale
+    if scale.numel() == 1:
+        flat = scale.reshape(1).expand(dim).contiguous()
+    elif scale.numel() == dim:
+        flat = scale.reshape(dim).contiguous()
+    else:
+        return None
+    return flat.unsqueeze(1) if is_row else flat.unsqueeze(0)
+
+
+def _try_scaled_mm(A, transA, B, transB, output_dtype):
+    """FP8×FP8 GEMM via torch._scaled_mm (hipBLASLt-backed on ROCm).
+
+    Matches AITER's NT convention: x=[M,K] (rowwise), w=[N,K] (rowwise),
+    compute x @ w.T. Uses the same `_fp8_transposed_operand` path that
+    feeds AITER Triton, so operands are K-innermost by construction.
+
+    Returns the result tensor (with original leading B dims restored), or
+    None when torch._scaled_mm is unavailable, block-scaled (not supported
+    here), or rejects the inputs (any RuntimeError falls through).
+    """
+    if not hasattr(torch, '_scaled_mm'):
+        return None
+
+    # Block-scaled uses a different scale layout — fall through.
+    if _is_blockwise_fp8(A) or _is_blockwise_fp8(B):
+        return None
+
+    a_data, a_scale = _get_raw_data(A)
+    b_data, b_scale = _get_raw_data(B)
+
+    # Resolve NT operand form, same logic as _aiter_triton_gemm.
+    a_transpose_only = _is_transpose_only(A)
+    b_transpose_only = _is_transpose_only(B)
+    effective_transA = transA ^ a_transpose_only
+    effective_transB = transB ^ b_transpose_only
+
+    x_leading = b_data.shape[:-1] if not b_transpose_only else b_data.shape[1:]
+    if b_data.ndim > 2:
+        if b_transpose_only:
+            b_data = b_data.reshape(b_data.shape[0], -1)
+        else:
+            b_data = b_data.reshape(-1, b_data.shape[-1])
+    if a_data.ndim > 2:
+        if a_transpose_only:
+            a_data = a_data.reshape(a_data.shape[0], -1)
+        else:
+            a_data = a_data.reshape(-1, a_data.shape[-1])
+
+    x = b_data if not effective_transB else _fp8_transposed_operand(B, b_data)
+    w = a_data if effective_transA else _fp8_transposed_operand(A, a_data)
+    x_scale = b_scale
+    w_scale = a_scale
+
+    # Per-row on the REDUCTION axis (wgrad corner) is not supported by
+    # per-row scaled GEMM kernels — fall through to dequant path.
+    M = x.shape[0]
+    N = w.shape[0]
+    if _is_per_row_scaled(x_scale) and x_scale.numel() != M:
+        return None
+    if _is_per_row_scaled(w_scale) and w_scale.numel() != N:
+        return None
+
+    x_scale_2d = _reshape_scale_for_scaled_mm(x_scale, M, is_row=True)
+    w_scale_2d = _reshape_scale_for_scaled_mm(w_scale, N, is_row=False)
+    if x_scale_2d is None or w_scale_2d is None:
+        return None
+
+    out_dtype = output_dtype if output_dtype is not None else torch.bfloat16
+
+    try:
+        result = torch._scaled_mm(
+            x, w.t(),
+            scale_a=x_scale_2d, scale_b=w_scale_2d,
+            out_dtype=out_dtype,
+        )
+    except (RuntimeError, TypeError):
+        return None
+
+    if len(x_leading) > 1:
+        result = result.reshape(*x_leading, result.shape[-1])
+    return result
 
 
 def _aiter_ck_gemm(aiter, a_data, a_scale, b_data, b_scale,
@@ -704,6 +801,53 @@ def generic_gemm(A, transA, B, transB, D, quantizer, output_dtype,
             return result[0], result[1], result[2], extra_output
 
     # --- PyTorch fallback ---
+    #
+    # For FP8×FP8, prefer torch._scaled_mm (hipBLASLt-backed on ROCm) — that's
+    # the same path full TE takes and skips the dequant+matmul round trip. We
+    # fall through to dequantize + torch.matmul on any exception (unsupported
+    # scale/layout/dtype combo on this ROCm build).
+    result = None
+    if _is_quantized(A) and _is_quantized(B):
+        _gemm_bump("pytorch_scaled_mm_attempt")
+        result = _try_scaled_mm(
+            A, transA, B, transB, _resolve_output_dtype(output_dtype),
+        )
+        if result is not None:
+            _gemm_bump("pytorch_scaled_mm_ok")
+
+    if result is not None:
+        # torch._scaled_mm already handled compute and leading-dim restoration;
+        # skip the dequantize+matmul block and go straight to epilogues.
+        if alpha != 1.0:
+            result = result * alpha
+
+        bias_grad = torch.Tensor()
+        if bias is not None and bias.numel() > 0:
+            if grad:
+                grad_out = _dequantize_if_needed(B)
+                bias_grad = grad_out.reshape(-1, grad_out.shape[-1]).sum(dim=0)
+            else:
+                result = result + bias
+
+        gelu_input = torch.Tensor()
+        if gelu and gelu_in is not None:
+            gelu_in.copy_(result)
+            gelu_input = gelu_in
+            result = torch.nn.functional.gelu(result, approximate='tanh')
+
+        if accumulate and D is not None:
+            D.add_(result)
+        elif D is not None:
+            D.copy_(result)
+        else:
+            D = result
+
+        if quantizer is not None and hasattr(quantizer, 'quantize'):
+            D = quantizer.quantize(D)
+
+        return D, bias_grad, gelu_input, extra_output
+
+    _gemm_bump("pytorch_dequant_matmul")
     a = _dequantize_if_needed(A)
     b = _dequantize_if_needed(B)
 
