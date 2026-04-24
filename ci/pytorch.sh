@@ -40,16 +40,21 @@ run_default_fa_lbl() {
 
 with_aiter() {
     # Only install/uninstall amd-aiter on the default FA sweep pass (same criterion as
-    # run_default_fa);
+    # run_default_fa). The wrapped command always runs; pip uninstall only if install succeeded.
+    _with_aiter_installed=0
     if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
         # flydsl is only on AMD nightlies; needed for aiter pyproject build-system requires.
-        (cd ${TE_PATH}3rdparty/aiter && \
+        if (cd ${TE_PATH}3rdparty/aiter && \
             PIP_FIND_LINKS="https://rocm.frameworks-nightlies.amd.com/whl/gfx942-gfx950/flydsl/" \
             PIP_PRE=1 \
-            GPU_ARCHS=native pip install -e .)
+            GPU_ARCHS=native pip install -e .); then
+            _with_aiter_installed=1
+        else
+            echo "with_aiter: failed to install amd-aiter" >&2
+        fi
     fi
     "$@"
-    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
+    if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ] && [ "$_with_aiter_installed" -eq 1 ]; then
         pip uninstall -y amd-aiter
     fi
 }
