@@ -421,7 +421,7 @@ class FusedAttnRunner:
             pytest.skip(
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
-        if get_device_compute_capability(0) >= 100 and self.is_training and not is_hip_extension():
+        if not is_hip_extension() and get_device_compute_capability(0) >= 100 and self.is_training:
             if FusedAttnHelper.is_non_deterministic_allowed() and (
                 (self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS)
                 or get_cudnn_version() < 90700

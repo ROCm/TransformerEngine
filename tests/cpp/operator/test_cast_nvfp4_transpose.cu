@@ -676,13 +676,8 @@ void performTest(float (*OP)(const float),
     }
     ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-#ifdef __HIP_PLATFORM_AMD__
-    const double atol = 0.05;
-    const double rtol = 0.1;
-#else
     const double atol = 1.0E-6;
     const double rtol = 1.0E-6;
-#endif
 
     // Set dump_data=true to enable dumping tensor data to files for analysis
     compareResults_nvfp4(output, ref_output.get(), ref_output_t.get(), rows, cols, atol, rtol, true, false);

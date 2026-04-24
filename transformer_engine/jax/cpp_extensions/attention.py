@@ -3609,8 +3609,8 @@ def fused_attn_bwd(
                 softmax_offset, (None, HEAD_AXES, None, None)
             )
 
-    compute_capabilities = get_all_device_compute_capability()
-    if any(x >= 100 for x in compute_capabilities) and is_training and not is_hip_extension():
+    compute_capabilities = get_all_device_compute_capability() if not is_hip_extension() else []
+    if any(x >= 100 for x in compute_capabilities) and is_training:
         assert (
             FusedAttnHelper.is_non_deterministic_allowed()
             and get_cudnn_version() >= (9, 7, 0)
