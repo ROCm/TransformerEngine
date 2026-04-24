@@ -126,7 +126,10 @@ jobs:
         timeout-minutes: 30
         uses: anthropics/claude-code-action@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # claude-code-action manages its own GitHub auth via the OIDC-exchanged
+          # App token and does not forward GITHUB_TOKEN to the model's Bash
+          # subprocess. Set GH_TOKEN explicitly so `gh` calls in the prompt work.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "github-actions[bot]"
@@ -205,7 +208,10 @@ jobs:
         timeout-minutes: 20
         uses: anthropics/claude-code-action@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # claude-code-action manages its own GitHub auth via the OIDC-exchanged
+          # App token and does not forward GITHUB_TOKEN to the model's Bash
+          # subprocess. Set GH_TOKEN explicitly so `gh` calls in the prompt work.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           allowed_bots: "github-actions[bot]"
