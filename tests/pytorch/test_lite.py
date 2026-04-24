@@ -1447,6 +1447,238 @@ class TestGemm:
 
 
 # ---------------------------------------------------------------------------
+# GEMM backend coverage (pytorch / triton / ck parity + dispatch asserts)
+# ---------------------------------------------------------------------------
+
+class _FP8Wrap:
+    """Minimal Float8Tensor shim for generic_gemm.
+
+    _is_quantized(tensor) returns True for anything with (_data, _scale_inv).
+    _get_raw_data returns (_data, _scale_inv), which is all downstream
+    dispatch paths need.
+    """
+    def __init__(self, data, scale_inv):
+        self._data = data
+        self._scale_inv = scale_inv
+
+    @property
+    def dtype(self):
+        return self._data.dtype
+
+
+def _quant_per_tensor_e4m3(x_bf16, fp8_dtype=torch.float8_e4m3fnuz):
+    """Quantize a BF16 tensor to FP8 with a single scalar per-tensor scale.
+
+    Returns (fp8_data, scale_inv_scalar) where scale_inv_scalar is a 1-elem
+    tensor carrying dequant scale (matches Float8Tensor._scale_inv layout).
+    """
+    amax = x_bf16.abs().max().clamp_min(1e-6)
+    qscale = 240.0 / amax
+    x_fp8 = (x_bf16.float() * qscale).to(fp8_dtype)
+    scale_inv = torch.tensor([1.0 / qscale.item()],
+                             dtype=torch.float32, device=x_bf16.device)
+    return x_fp8, scale_inv
+
+
+class TestGemmBackendMatrix:
+    """Ensure all three GEMM backends produce correct results and the
+    `pytorch` backend actually takes the fast `torch._scaled_mm` path.
+    """
+
+    DTYPE = torch.bfloat16
+
+    def _workspace(self, device):
+        return torch.empty(1024, device=device, dtype=torch.uint8)
+
+    def _set_backend(self, monkeypatch, backend):
+        """Swap _GEMM_BACKEND in the gemm module for one test."""
+        from transformer_engine.pytorch._lite import gemm as lite_gemm
+        monkeypatch.setattr(lite_gemm, "_GEMM_BACKEND", backend)
+
+    # -- Backend matrix: BF16 ---------------------------------------------
+
+    @pytest.mark.parametrize("backend", ["pytorch", "triton", "ck"])
+    def test_bf16_gemm_matches_reference(self, device, monkeypatch, backend):
+        """BF16 GEMM must agree with torch.matmul on every backend.
+
+        Protects against silent regressions in the ck/triton paths now
+        that `pytorch` is the default.
+        """
+        self._set_backend(monkeypatch, backend)
+        M, N, K = 32, 64, 128
+        A = torch.randn(N, K, device=device, dtype=self.DTYPE)
+        B = torch.randn(M, K, device=device, dtype=self.DTYPE)
+        ws = self._workspace(device)
+        out, _, _, _ = tex.generic_gemm(
+            A, True, B, False, None, None, None,
+            None, None, False, None, False, ws, ws.shape[0],
+            False, False,
+        )
+        ref = B @ A.t()
+        max_diff = (out.to(self.DTYPE) - ref).abs().max().item()
+        assert max_diff < 5e-2, (
+            f"[backend={backend}] BF16 GEMM max diff {max_diff:.4e}"
+        )
+
+    # -- Backend matrix: per-tensor FP8 (DelayedScaling layout) -----------
+
+    @pytest.mark.parametrize("backend", ["pytorch", "triton", "ck"])
+    def test_per_tensor_fp8_gemm_matches_dequant(
+        self, device, monkeypatch, backend,
+    ):
+        """Per-tensor FP8×FP8 GEMM (DelayedScaling shape) must match the
+        dequantized reference on every backend.
+
+        This is the recipe Megatron hard-codes. Scalar scales should route
+        to the per-tensor kernel family on all three backends. A regression
+        here means the production training path is broken.
+        """
+        from transformer_engine.pytorch._lite.gemm import is_aiter_available
+        if backend in ("triton", "ck") and not is_aiter_available():
+            pytest.skip("AITER not available")
+
+        self._set_backend(monkeypatch, backend)
+        M, N, K = 64, 128, 256
+        fp8 = torch.float8_e4m3fnuz
+
+        x_bf16 = torch.randn(M, K, device=device, dtype=self.DTYPE)
+        w_bf16 = torch.randn(N, K, device=device, dtype=self.DTYPE)
+        x_fp8, x_scale = _quant_per_tensor_e4m3(x_bf16, fp8)
+        w_fp8, w_scale = _quant_per_tensor_e4m3(w_bf16, fp8)
+
+        A = _FP8Wrap(w_fp8, w_scale)  # weight [N, K]
+        B = _FP8Wrap(x_fp8, x_scale)  # activation [M, K]
+
+        ws = self._workspace(device)
+        out, _, _, _ = tex.generic_gemm(
+            A, True, B, False, None, None, tex.DType.kBFloat16,
+            None, None, False, None, False, ws, ws.shape[0],
+            False, False,
+        )
+
+        # Dequantized reference in fp32
+        x_deq = x_fp8.float() * x_scale.item()
+        w_deq = w_fp8.float() * w_scale.item()
+        ref = x_deq @ w_deq.t()
+
+        rel_err = (
+            (out.float() - ref).abs() / (ref.abs() + 1e-3)
+        ).mean().item()
+        assert rel_err < 0.05, (
+            f"[backend={backend}] per-tensor FP8 GEMM mean rel err "
+            f"{rel_err:.4f} exceeds 5% tolerance"
+        )
+        assert out.shape == (M, N)
+        assert out.dtype == torch.bfloat16
+
+    # -- Dispatch path counters: pytorch backend must take fast path ------
+
+    def test_pytorch_backend_takes_scaled_mm_path(
+        self, device, monkeypatch,
+    ):
+        """Per-tensor FP8 under backend=pytorch must land on _scaled_mm,
+        not dequant+matmul.
+
+        The whole point of the pytorch default is hipBLASLt via _scaled_mm.
+        If a future change silently forces scalar scales into a rejected
+        layout (e.g. broadcast to (M,1)), this test catches it by reading
+        the dispatch counters.
+        """
+        from transformer_engine.pytorch._lite import gemm as lite_gemm
+        if not hasattr(torch, "_scaled_mm"):
+            pytest.skip("torch._scaled_mm not available")
+
+        self._set_backend(monkeypatch, "pytorch")
+        # Counters are gated behind _LITE_DIAG; flip on and zero them.
+        monkeypatch.setattr(lite_gemm, "_LITE_DIAG", True)
+        lite_gemm._GEMM_CALLS.clear()
+
+        M, N, K = 64, 128, 256
+        fp8 = torch.float8_e4m3fnuz
+        x_fp8, x_scale = _quant_per_tensor_e4m3(
+            torch.randn(M, K, device=device, dtype=self.DTYPE), fp8,
+        )
+        w_fp8, w_scale = _quant_per_tensor_e4m3(
+            torch.randn(N, K, device=device, dtype=self.DTYPE), fp8,
+        )
+
+        A = _FP8Wrap(w_fp8, w_scale)
+        B = _FP8Wrap(x_fp8, x_scale)
+        ws = self._workspace(device)
+        tex.generic_gemm(
+            A, True, B, False, None, None, tex.DType.kBFloat16,
+            None, None, False, None, False, ws, ws.shape[0],
+            False, False,
+        )
+
+        calls = dict(lite_gemm._GEMM_CALLS)
+        assert calls.get("pytorch_scaled_mm_ok", 0) >= 1, (
+            f"Expected pytorch_scaled_mm_ok>=1 for per-tensor FP8 under "
+            f"backend=pytorch; got counters {calls}"
+        )
+        assert calls.get("pytorch_dequant_matmul", 0) == 0, (
+            f"Per-tensor FP8 under backend=pytorch must not fall back to "
+            f"dequant+matmul (the 100-1000x slow path); got counters {calls}"
+        )
+
+    # -- Pad-M: M not divisible by 16 ------------------------------------
+
+    def test_scaled_mm_pads_m_when_not_div16(
+        self, device, monkeypatch,
+    ):
+        """hipBLASLt FP8 requires mat1 rows div-by-16. The pad-then-slice
+        path (commit 3ed9d8ae) must preserve numerical correctness.
+
+        Uses M=100 (pads to 112); no unit test currently exercises this.
+        """
+        from transformer_engine.pytorch._lite import gemm as lite_gemm
+        if not hasattr(torch, "_scaled_mm"):
+            pytest.skip("torch._scaled_mm not available")
+
+        self._set_backend(monkeypatch, "pytorch")
+        monkeypatch.setattr(lite_gemm, "_LITE_DIAG", True)
+        lite_gemm._GEMM_CALLS.clear()
+
+        M, N, K = 100, 64, 128  # M not div-by-16, K div-by-16
+        assert M % 16 != 0 and K % 16 == 0, "Shape preconditions"
+
+        fp8 = torch.float8_e4m3fnuz
+        x_bf16 = torch.randn(M, K, device=device, dtype=self.DTYPE)
+        w_bf16 = torch.randn(N, K, device=device, dtype=self.DTYPE)
+        x_fp8, x_scale = _quant_per_tensor_e4m3(x_bf16, fp8)
+        w_fp8, w_scale = _quant_per_tensor_e4m3(w_bf16, fp8)
+
+        A = _FP8Wrap(w_fp8, w_scale)
+        B = _FP8Wrap(x_fp8, x_scale)
+        ws = self._workspace(device)
+        out, _, _, _ = tex.generic_gemm(
+            A, True, B, False, None, None, tex.DType.kBFloat16,
+            None, None, False, None, False, ws, ws.shape[0],
+            False, False,
+        )
+
+        # The fast path should still fire — pad-and-slice, not dequant.
+        calls = dict(lite_gemm._GEMM_CALLS)
+        assert calls.get("pytorch_scaled_mm_ok", 0) >= 1, (
+            f"Pad-M case must still land on _scaled_mm; got {calls}"
+        )
+
+        # Output must match dequantized reference AND be sliced back to M.
+        assert out.shape == (M, N), (
+            f"Output must be sliced back to M={M}, got {out.shape}"
+        )
+        x_deq = x_fp8.float() * x_scale.item()
+        w_deq = w_fp8.float() * w_scale.item()
+        ref = x_deq @ w_deq.t()
+        rel_err = (
+            (out.float() - ref).abs() / (ref.abs() + 1e-3)
+        ).mean().item()
+        assert rel_err < 0.05, (
+            f"Pad-M FP8 GEMM mean rel err {rel_err:.4f} exceeds 5%"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Attention tests
 # ---------------------------------------------------------------------------
 
