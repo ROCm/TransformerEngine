@@ -290,7 +290,6 @@ class MXFP8Quantizer : public Quantizer {
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
 
-#ifndef USE_ROCM
 class NVFP4Quantizer : public Quantizer {
  public:
   // fp4 dtype
@@ -344,7 +343,6 @@ class NVFP4Quantizer : public Quantizer {
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                      const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 };
-#endif // #ifndef USE_ROCM
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 
