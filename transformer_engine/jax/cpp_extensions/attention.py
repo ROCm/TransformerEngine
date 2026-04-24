@@ -1528,7 +1528,7 @@ class SmallSeqAttnBwdPrimitive(BasePrimitive):
         assert q_seqlen_or_cu_seqlen_aval.dtype == kv_seqlen_or_cu_seqlen_aval.dtype
 
         (
-            batch_shape,
+            _,  # logical batch_shape; small-seq NVTE batch is cu_seqlens_q.shape[0]-1
             q_max_seqlen,
             kv_max_seqlen,
             attn_heads,
@@ -1539,9 +1539,12 @@ class SmallSeqAttnBwdPrimitive(BasePrimitive):
 
         bias_batch = bias_heads = 0
         deterministic = not FusedAttnHelper.is_non_deterministic_allowed()
-        input_batch = reduce(operator.mul, batch_shape)
+        # NVTE uses b = cu_seqlens_q.shape[0] - 1 (one packed segment per slot), not
+        # reduce(batch_shape). E.g. seqpack with max_seqlen_q>1 yields cu length
+        # batch*segments+1 while Q still has leading logical batch only.
+        small_seq_workspace_batch = q_seqlen_or_cu_seqlen_aval.shape[0] - 1
         wkspace_shape, wkspace_dtype = transformer_engine_jax.get_small_seq_attn_bwd_workspace_sizes(
-            input_batch,
+            small_seq_workspace_batch,
             bias_batch,
             q_max_seqlen,
             kv_max_seqlen,
