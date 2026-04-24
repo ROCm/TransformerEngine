@@ -277,19 +277,27 @@ def _aiter_attn_fwd(
         q_bshd = _to_bshd(q, q_fmt)
         k_bshd = _to_bshd(k, kv_fmt)
         v_bshd = _to_bshd(v, kv_fmt)
+        # Pass via keyword to stay resilient to aiter API drift — newer
+        # aiter releases inserted positional args (sink_size, *_descale)
+        # between window_size_right and return_lse.
         out, softmax_lse, _, rng_state = _aiter_fwd(
             q_bshd, k_bshd, v_bshd,
-            dropout if is_training else 0.0,
-            attn_scale,
-            causal,
-            wl, wr,
-            attn_bias,     # bias
-            None,          # alibi_slopes
-            True,          # return_lse
-            False,         # return_softmax
-            1,             # how_v3_bf16_cvt
-            cu_seqlens_q,  # cu_seqlens_q (optional for padding support)
-            cu_seqlens_kv, # cu_seqlens_kv
+            dropout_p=dropout if is_training else 0.0,
+            softmax_scale=attn_scale,
+            causal=causal,
+            window_size_left=wl,
+            window_size_right=wr,
+            sink_size=0,
+            bias=attn_bias,
+            alibi_slopes=None,
+            q_descale=None,
+            k_descale=None,
+            v_descale=None,
+            return_lse=True,
+            return_softmax=False,
+            how_v3_bf16_cvt=1,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
         )
         out = _from_bshd(out, q_fmt)
 
