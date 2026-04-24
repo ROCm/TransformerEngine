@@ -95,9 +95,10 @@ void load_2d_to_lds(const void* global_base,
   g0.globalAddr(reinterpret_cast<uintptr_t>(tile_start));
 
   g1.dataSize(data_size);
-  // tensorDim = remaining extent from tile start to tensor edge (for OOB clamping).
-  g1.tensorDim0(tensor_w - tile_col);
-  g1.tensorDim1(tensor_h - tile_row);
+  // Clamp remaining extent to avoid uint32_t underflow when a prefetch tile origin
+  // falls past the tensor boundary (e.g. last block in a non-tile-aligned dimension).
+  g1.tensorDim0(tile_col < tensor_w ? tensor_w - tile_col : 0u);
+  g1.tensorDim1(tile_row < tensor_h ? tensor_h - tile_row : 0u);
   g1.tileDim0(tile_dim_x);
   g1.tileDim1(tile_dim_y);
   g1.tensorDim0Stride(stride_elements);
@@ -134,8 +135,8 @@ void store_2d_from_lds(void* global_base,
   g0.globalAddr(reinterpret_cast<uintptr_t>(tile_start));
 
   g1.dataSize(data_size);
-  g1.tensorDim0(tensor_w - tile_col);
-  g1.tensorDim1(tensor_h - tile_row);
+  g1.tensorDim0(tile_col < tensor_w ? tensor_w - tile_col : 0u);
+  g1.tensorDim1(tile_row < tensor_h ? tensor_h - tile_row : 0u);
   g1.tileDim0(tile_dim_x);
   g1.tileDim1(tile_dim_y);
   g1.tensorDim0Stride(stride_elements);
