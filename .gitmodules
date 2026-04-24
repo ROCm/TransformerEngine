@@ -23,3 +23,6 @@
 [submodule "3rdparty/cutlass"]
 	path = 3rdparty/cutlass
 	url = https://github.com/NVIDIA/cutlass.git
+[submodule "3rdparty/QoLA"]
+	path = 3rdparty/QoLA
+	url = https://github.com/Micky774/QoLA.git
