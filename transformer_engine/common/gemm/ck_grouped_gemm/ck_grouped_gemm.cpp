@@ -42,7 +42,7 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   bool use_a_colwise_data = false;
   bool use_b_colwise_data = false;
 
-  const auto caller_a_dtype = convertNVTETensorCheck(A[0])->dtype(); 
+  const auto caller_a_dtype = convertNVTETensorCheck(A[0])->dtype();
   const bool is_8bit_float = is_fp8_dtype(caller_a_dtype);
   const bool is_16bit_float = is_fp16_dtype(caller_a_dtype);
   
@@ -50,43 +50,47 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   Tensor* B0_te = convertNVTETensorCheck(B_use[0]);
 
   // Currently the accumulate path is only supported on fp16
-  if (accumulate && is_8bit_float)
+  if (accumulate && is_8bit_float) {
   	return false;
+  }
 
   // FP8 special handling.
   //
-  // Re-express certain normalized FP8 GEMMs using `columnwise_data` when
-  // available. This preserves the intended math and only changes the
+  // A_use/B_use and transA_use/transB_use have already gone through the
+  // upstream-style grouped GEMM normalization above. This block only rewrites
+  // that normalized presentation into the CK FP8 preferred NT presentation by selecting
+  // `columnwise_data` when needed.
+  //
+  // CK FP8 target presentation:
+  //   A_use: N
+  //   B_use: T
+  //
+  // The outer condition checks whether this NT presentation is possible:
+  //   - A_use is already N, or can be made N using columnwise_data
+  //   - B_use is already T, or can be made T using columnwise_data
+  //
+  // Then each operand is rewritten independently only if needed:
+  //   NN -> rewrite B only
+  //   TN -> rewrite A and B
+  //   NT -> already in target form
+  //   TT -> rewrite A only
+  //
+  // This preserves the intended math and only changes the physical
   // storage/transpose-flag encoding seen by CK.
-  //
-  //   normalized NN: `op(A_use)=A`, `op(B_use)=B`
-  //     -> rewrite B only:
-  //        `data, transB_use=F` -> `columnwise_data, transB_use=T`
-  //
-  //   normalized TN: `op(A_use)=A^T`, `op(B_use)=B`
-  //     -> rewrite both operands:
-  //        A: `data, transA_use=T` -> `columnwise_data, transA_use=F`
-  //        B: `data, transB_use=F` -> `columnwise_data, transB_use=T`
-  //
-  //     This avoids the extra transpose/shuffle handling path that the original
-  //     TN presentation can trigger in the FP8 CK pipeline.
   if (is_8bit_float) {
     const bool has_a_col = A0_te->has_columnwise_data();
     const bool has_b_col = B0_te->has_columnwise_data();
-    // normalized NN: op(A_use)=A, op(B_use)=B
-    if (!transA_use && !transB_use) {
-      if (has_b_col) {
+
+    if ((!transA_use || has_a_col) && (transB_use || has_b_col)) {
+      if (transA_use) {
+        use_a_colwise_data = true;
+        transA_use = false;
+      }
+
+      if (!transB_use) {
         use_b_colwise_data = true;
         transB_use = true;
       }
-    } else if (transA_use && !transB_use) {
-      // normalized TN: op(A_use)=A^T, op(B_use)=B
-      if (has_a_col && has_b_col) {
-        use_a_colwise_data = true;
-        use_b_colwise_data = true;
-        transA_use = false;
-        transB_use = true;
-      } 
     }
   }
 
