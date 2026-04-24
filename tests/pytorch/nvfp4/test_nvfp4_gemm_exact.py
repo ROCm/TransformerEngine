@@ -162,9 +162,9 @@ def check_nvfp4_gemm_versus_reference(
     # Allocate cuBLAS workspace
     if IS_HIP_EXTENSION:
         # On ROCm, FP4 is dequantized to BF16 in workspace before GEMM, so allocate enough space.
-        # Extra 32 MiB for hipBLASLt internal workspace + alpha vector
+        from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace_size_bytes
         bf16_size = torch.bfloat16.itemsize
-        ws_bytes = M * K * bf16_size + K * N * bf16_size + 32 * 1024 * 1024
+        ws_bytes = M * K * bf16_size + K * N * bf16_size + get_cublas_workspace_size_bytes()
         workspace = torch.empty(ws_bytes, dtype=torch.uint8, device=device)
     else:
         workspace = torch.empty(4, dtype=torch.uint8, device=device)

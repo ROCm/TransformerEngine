@@ -136,8 +136,9 @@ def general_gemm(
     if IS_HIP_EXTENSION and (
         isinstance(A, NVFP4TensorStorage) or isinstance(B, NVFP4TensorStorage)
     ):
+        assert ub is None, "User buffers (comm overlap) are not supported with NVFP4"
         import math
-        bf16_size = 2  # sizeof(bfloat16)
+        bf16_size = torch.bfloat16.itemsize
         fp4_extra = 0
         if isinstance(A, NVFP4TensorStorage):
             fp4_extra += math.prod(A.size()) * bf16_size
