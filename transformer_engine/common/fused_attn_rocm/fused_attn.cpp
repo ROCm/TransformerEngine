@@ -4,6 +4,7 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
+#include <ck_fused_attn/ck_fused_attn.hpp>
 #include <iostream>
 #include <string>
 #include <tuple>
@@ -894,6 +895,34 @@ size_t nvte_fused_attn_small_seq_bwd_workspace_size(size_t batch, size_t attn_he
       batch, attn_heads, max_seqlen_kv, static_cast<transformer_engine::DType>(dtype));
 }
 
+namespace {
+
+// Validate runtime max s_q == 1 and max s_kv in [2, 16]; returns runtime max KV length.
+size_t nvte_assert_small_seq_runtime_max_seqlen(uint64_t b, const void *dev_ptr_cu_seqlens_q,
+                                                const void *dev_ptr_cu_seqlens_kv, void *workspace,
+                                                size_t workspace_bytes, const char *log_tag,
+                                                cudaStream_t stream) {
+  constexpr size_t runtime_seqlen_bytes = sizeof(uint64_t);
+  NVTE_CHECK(workspace_bytes >= runtime_seqlen_bytes, log_tag,
+             "workspace too small to compute runtime max seqlen (need at least ", runtime_seqlen_bytes,
+             " bytes).");
+  const size_t runtime_s_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+      b, dev_ptr_cu_seqlens_q, nullptr, workspace, stream));
+  const size_t runtime_s_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+      b, dev_ptr_cu_seqlens_kv, nullptr, workspace, stream));
+  if (const char *env_ck = std::getenv("NVTE_LOG_CK_CONFIG");
+      env_ck != nullptr && std::string(env_ck) == "1") {
+    std::cout << std::endl << log_tag << "b=" << b << ", runtime_max_seqlen_q=" << runtime_s_q
+              << ", runtime_max_seqlen_kv=" << runtime_s_kv << std::endl;
+  }
+  NVTE_CHECK(runtime_s_q == 1 && runtime_s_kv >= 2 && runtime_s_kv <= 16, log_tag,
+             "small-seq requires runtime s_q==1 and s_kv in [2,16]; got runtime_s_q=", runtime_s_q,
+             ", runtime_s_kv=", runtime_s_kv, ".");
+  return runtime_s_kv;
+}
+
+}  // namespace
+
 void nvte_fused_attn_small_seq_fwd(
     const NVTETensor Q, const NVTETensor K, const NVTETensor V, const NVTETensor Bias,
     NVTETensor S, NVTETensor O, NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens_q,
@@ -946,7 +975,7 @@ void nvte_fused_attn_small_seq_fwd(
   void *attn_weights_buf = softmax_aux_tensor->data.dptr;
 
   if (wkspace->data.dptr == nullptr) {
-    wkspace->data.shape = {1};
+    wkspace->data.shape = {sizeof(uint64_t)};
     wkspace->data.dtype = DType::kByte;
     return;
   }
@@ -961,8 +990,12 @@ void nvte_fused_attn_small_seq_fwd(
   }
   workspace_bytes *= fused_attn_rocm::nvte_dtype_size(wkspace->data.dtype);
 
+  const size_t runtime_max_seqlen_kv = nvte_assert_small_seq_runtime_max_seqlen(
+      static_cast<uint64_t>(b), input_cu_seqlens_q->data.dptr, input_cu_seqlens_kv->data.dptr,
+      wkspace->data.dptr, workspace_bytes, "attn_fwd(small-seq kernel): ", stream);
+
   fused_attn_rocm::fused_attn_small_seq_fwd(
-      b, h_q, h_kv, max_seqlen_kv, d_qk, d_v, is_training, attn_scale, dropout,
+      b, h_q, h_kv, runtime_max_seqlen_kv, d_qk, d_v, is_training, attn_scale, dropout,
       input_Q->data.dptr, input_K->data.dptr, input_V->data.dptr, output_O->data.dptr,
       attn_weights_buf, input_cu_seqlens_kv->data.dptr, input_cu_seqlens_kv_padded->data.dptr,
       dev_ptr_seed, dev_ptr_offset, input_Q->data.dtype, wkspace->data.dptr, &workspace_bytes,
@@ -1043,8 +1076,12 @@ void nvte_fused_attn_small_seq_bwd(
   workspace_bytes *= fused_attn_rocm::nvte_dtype_size(wkspace->data.dtype);
   NVTE_CHECK(workspace_bytes >= req_bytes, "nvte_fused_attn_small_seq_bwd: workspace too small.");
 
+  const size_t runtime_max_seqlen_kv = nvte_assert_small_seq_runtime_max_seqlen(
+      static_cast<uint64_t>(b), input_cu_seqlens_q->data.dptr, input_cu_seqlens_kv->data.dptr,
+      wkspace->data.dptr, workspace_bytes, "attn_bwd(small-seq kernel): ", stream);
+
   fused_attn_rocm::fused_attn_small_seq_bwd(
-      b, h_q, h_kv, max_seqlen_kv, d_qk, d_v, attn_scale, dropout, input_Q->data.dptr,
+      b, h_q, h_kv, runtime_max_seqlen_kv, d_qk, d_v, attn_scale, dropout, input_Q->data.dptr,
       input_K->data.dptr, input_V->data.dptr, input_O->data.dptr, input_dO->data.dptr,
       attn_weights_tensor->data.dptr, output_dQ->data.dptr, output_dK->data.dptr,
       output_dV->data.dptr, input_cu_seqlens_kv->data.dptr,

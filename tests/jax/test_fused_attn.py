@@ -526,7 +526,8 @@ class FusedAttnRunner:
         )
 
     def _setup_inputs(self):
-        self._check_configs()
+        if not self.use_small_seq_thd_setup:
+            self._check_configs()
 
         # Create a mesh for distributed tests
         self.devices = np.asarray(jax.devices()[: self.number_of_devices]).reshape(*self.mesh_shape)

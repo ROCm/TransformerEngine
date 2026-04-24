@@ -1003,7 +1003,7 @@ _fused_attn.defvjp(_fused_attn_fwd_rule, _fused_attn_bwd_rule)
 
 @partial(
     jax.custom_vjp,
-    nondiff_argnums=(4, 5, 6, 7, 8, 9, 10, 11),
+    nondiff_argnums=(4, 5, 6, 7, 8, 9, 10, 11, 12),
 )
 def _fused_attn_small_seq(
     qkv: Tuple[jnp.ndarray, ...],

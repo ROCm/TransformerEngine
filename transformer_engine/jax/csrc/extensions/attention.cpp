@@ -388,7 +388,11 @@ pybind11::tuple GetSmallSeqAttnForwardWorkspaceSizes(
       "GetSmallSeqAttnForwardWorkspaceSizes: configuration not supported.");
   NVTE_CHECK(bias_batch == 0 && bias_heads == 0,
              "GetSmallSeqAttnForwardWorkspaceSizes: bias not supported for small-seq.");
-  TensorWrapper query_workspace_tensor(nullptr, std::vector<size_t>{1}, DType::kByte);
+  // At least 8 bytes: nvte_fused_attn_small_seq_fwd uses the start of workspace for
+  // ck_fused_attn::get_runtime_max_seqlen
+  constexpr size_t k_small_seq_runtime_probe_bytes = 8;
+  TensorWrapper query_workspace_tensor(nullptr, std::vector<size_t>{k_small_seq_runtime_probe_bytes},
+                                         DType::kByte);
   return pybind11::make_tuple(MakeShapeVector(query_workspace_tensor.shape()),
                               query_workspace_tensor.dtype());
 }

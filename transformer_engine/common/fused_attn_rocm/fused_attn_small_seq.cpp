@@ -1070,7 +1070,7 @@ bool is_small_seq_attn_supported(
   // max_seqlen_q / max_seqlen_kv are compile-time or padded upper bounds; actual varlen
   // lengths are in cu_seqlens / offsets. Do not reject here based on those maxima — callers
   // must ensure runtime lengths and the launch-time max_seqlen_kv passed to fwd/bwd match
-  // the small-seq kernel contract (e.g. dispatch cases 2..16, effective q len 1).
+  // the small-seq kernel contract.
   (void)max_seqlen_q;
   (void)max_seqlen_kv;
 

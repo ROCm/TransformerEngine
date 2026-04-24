@@ -41,8 +41,7 @@ size_t fused_attn_small_seq_bwd_workspace_size(size_t b,
 
 /** Forward: Q,K,V -> O; attention weights written to attn_weights_buffer (same as output_S).
  *  attn_weights_buffer is also used as internal workspace (scores then overwritten by attn
- *  weights). No separate workspace required for the launcher; caller may use workspace for
- *  get_runtime_max_seqlen (8 bytes). */
+ *  weights). */
 void fused_attn_small_seq_fwd(size_t b,
                              size_t h_q,
                              size_t h_kv,
@@ -67,7 +66,8 @@ void fused_attn_small_seq_fwd(size_t b,
                              cudaStream_t stream);
 
 /** Backward: dO, O, attn_weights -> dQ, dK, dV. attn_weights is the buffer from forward
- *  (output_S). workspace must be at least fused_attn_small_seq_bwd_workspace_size. */
+ *  (output_S). workspace must be at least fused_attn_small_seq_bwd_workspace_size.
+ *  max_seqlen_kv is the runtime max KV length when invoked from nvte_fused_attn_small_seq_bwd. */
 void fused_attn_small_seq_bwd(size_t b,
                              size_t h_q,
                              size_t h_kv,
