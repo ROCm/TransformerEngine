@@ -1,7 +1,7 @@
 /*************************************************************************
  * This file was modified for portability to AMDGPU
  * Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
@@ -25,15 +25,18 @@
 namespace transformer_engine::pytorch {
 
 PyTypeObject *Float8TensorPythonClass = nullptr;  /// TODO Remove
-PyTypeObject *Float8TensorBasePythonClass = nullptr;
+PyTypeObject *Float8TensorStoragePythonClass = nullptr;
 PyTypeObject *Float8QuantizerClass = nullptr;
 PyTypeObject *Float8CurrentScalingQuantizerClass = nullptr;
 PyTypeObject *MXFP8TensorPythonClass = nullptr;  /// TODO Remove
-PyTypeObject *MXFP8TensorBasePythonClass = nullptr;
+PyTypeObject *MXFP8TensorStoragePythonClass = nullptr;
 PyTypeObject *MXFP8QuantizerClass = nullptr;
 PyTypeObject *Float8BlockwiseQTensorPythonClass = nullptr;
-PyTypeObject *Float8BlockwiseQTensorBasePythonClass = nullptr;
+PyTypeObject *Float8BlockwiseQTensorStoragePythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
+PyTypeObject *NVFP4TensorPythonClass = nullptr;
+PyTypeObject *NVFP4TensorStoragePythonClass = nullptr;
+PyTypeObject *NVFP4QuantizerClass = nullptr;
 
 void init_float8_extension() {
   if (Float8TensorPythonClass) return;
@@ -45,9 +48,9 @@ void init_float8_extension() {
   Float8TensorPythonClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "Float8Tensor"));
   auto fp8_base_module =
-      py::module_::import("transformer_engine.pytorch.tensor._internal.float8_tensor_base");
-  Float8TensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
-      PyObject_GetAttrString(fp8_base_module.ptr(), "Float8TensorBase"));
+      py::module_::import("transformer_engine.pytorch.tensor.storage.float8_tensor_storage");
+  Float8TensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_base_module.ptr(), "Float8TensorStorage"));
   NVTE_CHECK(Float8TensorPythonClass != nullptr,
              "Internal error: could not initialize pyTorch Float8 extension.");
 }
@@ -60,38 +63,54 @@ void init_mxfp8_extension() {
   MXFP8TensorPythonClass =
       reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp8_module.ptr(), "MXFP8Tensor"));
   auto fp8_base_module =
-      py::module_::import("transformer_engine.pytorch.tensor._internal.mxfp8_tensor_base");
-  MXFP8TensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
-      PyObject_GetAttrString(fp8_base_module.ptr(), "MXFP8TensorBase"));
+      py::module_::import("transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage");
+  MXFP8TensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_base_module.ptr(), "MXFP8TensorStorage"));
   NVTE_CHECK(MXFP8TensorPythonClass != nullptr,
              "Internal error: could not initialize pyTorch MXFP8 extension.");
 }
 
 void init_float8blockwise_extension() {
-  if (Float8BlockwiseQTensorBasePythonClass) return;
+  if (Float8BlockwiseQTensorStoragePythonClass) return;
   auto fp8_module =
       py::module_::import("transformer_engine.pytorch.tensor.float8_blockwise_tensor");
   auto fp8_base_module = py::module_::import(
-      "transformer_engine.pytorch.tensor._internal.float8_blockwise_tensor_base");
+      "transformer_engine.pytorch.tensor.storage.float8_blockwise_tensor_storage");
   Float8BlockwiseQuantizerClass = reinterpret_cast<PyTypeObject *>(
       PyObject_GetAttrString(fp8_module.ptr(), "Float8BlockQuantizer"));
-  Float8BlockwiseQTensorBasePythonClass = reinterpret_cast<PyTypeObject *>(
-      PyObject_GetAttrString(fp8_base_module.ptr(), "Float8BlockwiseQTensorBase"));
+  Float8BlockwiseQTensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(fp8_base_module.ptr(), "Float8BlockwiseQTensorStorage"));
   Float8BlockwiseQTensorPythonClass = reinterpret_cast<PyTypeObject *>(
       PyObject_GetAttrString(fp8_module.ptr(), "Float8BlockwiseQTensor"));
 
   NVTE_CHECK(Float8BlockwiseQuantizerClass != nullptr,
              "Internal error: could not initialize pyTorch float8blockwise extension.");
-  NVTE_CHECK(Float8BlockwiseQTensorBasePythonClass != nullptr,
+  NVTE_CHECK(Float8BlockwiseQTensorStoragePythonClass != nullptr,
              "Internal error: could not initialize pyTorch float8blockwise extension.");
   NVTE_CHECK(Float8BlockwiseQTensorPythonClass != nullptr,
              "Internal error: could not initialize pyTorch float8blockwise extension.");
+}
+
+void init_nvfp4_extensions() {
+  if (NVFP4TensorPythonClass) return;
+  auto nvfp4_module = py::module_::import("transformer_engine.pytorch.tensor.nvfp4_tensor");
+  NVFP4QuantizerClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(nvfp4_module.ptr(), "NVFP4Quantizer"));
+  NVFP4TensorPythonClass =
+      reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(nvfp4_module.ptr(), "NVFP4Tensor"));
+  auto nvfp4_base_module =
+      py::module_::import("transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage");
+  NVFP4TensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+      PyObject_GetAttrString(nvfp4_base_module.ptr(), "NVFP4TensorStorage"));
+  NVTE_CHECK(NVFP4TensorPythonClass != nullptr,
+             "Internal error: could not initialize pyTorch NVFP4 extension.");
 }
 
 void init_extension() {
   init_float8_extension();
   init_mxfp8_extension();
   init_float8blockwise_extension();
+  init_nvfp4_extensions();
 }
 
 }  // namespace transformer_engine::pytorch
@@ -138,6 +157,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("quantizer"));
   m.def("swiglu", transformer_engine::pytorch::swiglu, "SwiGLU activation", py::arg("input"),
         py::arg("quantizer"));
+  m.def("clamped_swiglu", transformer_engine::pytorch::clamped_swiglu,
+        "SwiGLU activation used in GPT OSS", py::arg("input"), py::arg("quantizer"),
+        py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f);
   /* Backward of GELU and variants */
   m.def("dgelu", transformer_engine::pytorch::dgelu, "Backward of GeLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
@@ -161,6 +183,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("fwd_input"), py::arg("quantizer"));
   m.def("dswiglu", transformer_engine::pytorch::dswiglu, "Backward of SwiGLU", py::arg("grad"),
         py::arg("fwd_input"), py::arg("quantizer"));
+  m.def("clamped_dswiglu", transformer_engine::pytorch::clamped_dswiglu,
+        "Backward of SwiGLU used in GPT OSS", py::arg("grad"), py::arg("fwd_input"),
+        py::arg("quantizer"), py::arg("limit") = 7.0f, py::arg("alpha") = 1.702f);
   /* DBias + DAct fusions*/
   m.def("dbias_dgelu", transformer_engine::pytorch::dbias_dgelu, "DGeLU + DBias + Quantize",
         py::arg("grad"), py::arg("fwd_input"), py::arg("quantizer"));
@@ -225,7 +250,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Multi-tensor quantize", py::arg("tensor_list"), py::arg("quantizer_list"));
   m.def("split_quantize", &transformer_engine::pytorch::split_quantize,
         "Split and multi-tensor quantize", py::arg("tensor"), py::arg("split_sections"),
-        py::arg("quantizer_list"));
+        py::arg("quantizer_list"), py::arg("disable_bulk_allocation") = false);
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
@@ -253,10 +278,22 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Partial cast from master weights for fp8 block scaling", py::arg("inp"), py::arg("out"),
         py::arg("scale"), py::arg("h"), py::arg("w"), py::arg("start_offset"), py::arg("block_len"),
         py::arg("out_dtype"), py::call_guard<py::gil_scoped_release>());
+  m.def("mxfp8_scaling_compute_partial_amax",
+        &transformer_engine::pytorch::mxfp8_scaling_compute_partial_amax,
+        "Compute partial amax from master weights for fp8 mxfp8 scaling", py::arg("input"),
+        py::arg("amax_rowwise"), py::arg("amax_colwise"), py::arg("rows"), py::arg("cols"),
+        py::arg("start_offset"), py::call_guard<py::gil_scoped_release>());
+  m.def("mxfp8_scaling_partial_cast", &transformer_engine::pytorch::mxfp8_scaling_partial_cast,
+        "Partial cast from master weights for fp8 mxfp8 scaling", py::arg("input"),
+        py::arg("output_rowwise"), py::arg("output_colwise"), py::arg("scale_inv_rowwise"),
+        py::arg("scale_inv_colwise"), py::arg("rows"), py::arg("cols"), py::arg("start_offset"),
+        py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_padding", &transformer_engine::pytorch::fused_multi_row_padding,
         "Fused Multi-tensor padding", py::call_guard<py::gil_scoped_release>());
   m.def("fused_multi_row_unpadding", &transformer_engine::pytorch::fused_multi_row_unpadding,
         "Fused Multi-tensor unpadding", py::call_guard<py::gil_scoped_release>());
+  m.def("swizzle_scales_for_gemm_", &transformer_engine::pytorch::inplace_swizzle_scale_for_gemm,
+        "Convert tensor block scales into GEMM swizzled format");
 
   // attention kernels
   m.def("fa_prepare_fwd", &transformer_engine::pytorch::fa_prepare_fwd,
@@ -427,6 +464,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("multi_tensor_compute_scale_and_scale_inv",
         &transformer_engine::pytorch::multi_tensor_compute_scale_and_scale_inv_cuda,
         "Fused compute scale and scale_inv from amax", py::call_guard<py::gil_scoped_release>());
+  m.def("multi_tensor_compute_scale_inv_e8m0",
+        &transformer_engine::pytorch::multi_tensor_compute_scale_inv_e8m0_cuda,
+        "Fused compute E8M0 scale_inv from amax", py::call_guard<py::gil_scoped_release>());
 
 #ifndef USE_ROCM
   // Comm+GEMM Overlap
@@ -465,7 +505,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .value("GRAD_OUTPUT3", transformer_engine::pytorch::FP8BwdTensors::GRAD_OUTPUT3)
       .value("GRAD_INPUT3", transformer_engine::pytorch::FP8BwdTensors::GRAD_INPUT3);
 
-#ifndef USE_ROCM
   py::class_<CommOverlapHelper>(m, "CommOverlapHelper")
       .def(py::init<>(), py::call_guard<py::gil_scoped_release>())
       .def(py::init<c10d::ProcessGroup *, std::optional<c10d::ProcessGroup *>>(),
@@ -505,9 +544,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
       .def("get_buffer", &CommOverlapP2P::get_buffer, py::arg("local_chunk") = false,
            py::arg("shape") = std::nullopt)
       .def("get_communication_stream", &CommOverlapP2P::get_communication_stream);
-#else
-  m.def("CommOverlapHelper", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
-  m.def("CommOverlap", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
-  m.def("CommOverlapP2P", &transformer_engine::pytorch::placeholder, "Dummy function for python side annotations");
-#endif //USE_ROCM
 }

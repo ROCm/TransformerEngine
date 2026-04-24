@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -33,11 +33,7 @@ if(USE_ROCM)
   # Disable Asserts In Code (Can't use asserts on HIP stack.)
   add_definitions(-DNDEBUG)
   add_definitions(-DUSE_ROCM)
-  if(NOT DEFINED ENV{NVTE_ROCM_ARCH})
-    SET(CMAKE_HIP_ARCHITECTURES gfx942 gfx950)
-  else()
-    SET(CMAKE_HIP_ARCHITECTURES $ENV{NVTE_ROCM_ARCH})
-  endif()
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
 else()
   if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
@@ -94,6 +90,11 @@ if(USE_CUDA)
 else()
   set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
   find_package(hip REQUIRED)
+endif()
+
+if(USE_ROCM)
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/hipify/hipify.cmake")
+  TE_Hipify(${CMAKE_CURRENT_SOURCE_DIR})
 endif()
 
 add_subdirectory(operator)

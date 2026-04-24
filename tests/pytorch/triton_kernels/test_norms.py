@@ -218,7 +218,7 @@ class TestNorms:
         gamma_tensor = fill_uniform(N, in_dtype)
         bias_tensor = fill_uniform(N, in_dtype)
 
-        self._check_skips(quantization=quantization, shape=(M, N))
+        self._check_skips(quantization=quantization, shape=(M, N), colwise=columnwise)
 
         epsilon = 1e-5
 
@@ -349,7 +349,7 @@ class TestNorms:
         fp8_dtype = tex.DType.kFloat8E4M3
         gamma_tensor = torch.tensor([2**20] + [0]*127, dtype=in_dtype, device="cuda")
 
-        self._check_skips(quantization=quantization, shape=(M, N))
+        self._check_skips(quantization=quantization, shape=(M, N), colwise=columnwise)
 
         quantizer_triton, quantizer_hip = self._make_quantizer(
             quantization=quantization,
@@ -538,15 +538,17 @@ class TestNorms:
                 msg=lambda msg: f"mu does not match triton <-> hip\n\n{msg}\n",
             )
 
-    def _check_skips(self, quantization, shape):
+    def _check_skips(self, quantization, shape, colwise):
         # Check if quantization scheme is supported
         if quantization == "fp8" and not fp8_available:
             pytest.skip(reason_for_no_fp8)
         if quantization == "mxfp8":
             if not mxfp8_available:
                 pytest.skip(reason_for_no_mxfp8)
-            if shape[0] % 32 !=0 or shape[1] % 32 !=0:
-                pytest.skip("MXFP8 quantization requires dimensions divisible by 32.")
+            if shape[0] % 32:
+                pytest.skip("MXFP8 quantization requires row dimensions divisible by 32.")
+            if colwise and shape[1] % 32:
+                pytest.skip("Colwise MXFP8 quantization requires col dimensions divisible by 32.") 
 
 
     def _make_quantizer(self, quantization, fp8_dtype, columnwise):

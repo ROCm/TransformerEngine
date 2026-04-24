@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2025, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -83,4 +83,9 @@ except FileNotFoundError as e:
                 category=RuntimeWarning,
             )
 
-__version__ = str(metadata.version("transformer_engine"))
+try:
+    __version__ = str(metadata.version("transformer_engine"))
+except metadata.PackageNotFoundError:
+    _te_core_installed, _, __version__ = transformer_engine.common.get_te_core_package_info(True)
+    if not _te_core_installed:
+        raise

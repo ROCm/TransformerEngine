@@ -58,10 +58,9 @@ run_test_config() {
     run_default_fa 1 test_custom_call_compute.py
     run_default_fa 1 test_functions.py
     run 1 test_fused_attn.py -k 'not test_fused_attn_small_seq_explicit_api' # skip smallseq in normal flow
-    XLA_FLAGS='--xla_gpu_enable_command_buffer=' run 1 test_fused_attn.py -k 'test_fused_attn_small_seq_explicit_api' # explicit small-seq API; empty command buffer (ROCm 7.2+)
+    XLA_FLAGS='--xla_gpu_enable_command_buffer=' run 1 test_fused_attn.py -k 'test_fused_attn_small_seq_explicit_api' # explicit small-seq API;
     NVTE_CK_USES_FWD_V3=0 NVTE_CK_USES_BWD_V3=0 run_default_fa_lbl "v2" 3 test_fused_attn.py -k 'not test_fused_attn_small_seq_explicit_api' # Using FAv2 for forward and backward pass
-    run_default_fa 1 test_helper.py
-    run_default_fa 1 test_layer.py #it effectevly always uses unfused attention
+    run_default_fa 1 test_layer.py # it effectively always uses unfused attention
     run_default_fa 1 test_sanity_import.py
     run_default_fa 1 test_softmax.py
 }
@@ -72,7 +71,7 @@ run_test_config_mgpu() {
 
     # Mitigate distributed tests hang by adding 5min timeout
     _timeout_args="--timeout 300 --timeout-method thread"
-    # Workaround for some distributed tests hang/abotrion
+    # Workaround for some distributed tests hang/abortion
     export XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false"
 
     if [ $_fus_attn = $_DEFAULT_FUSED_ATTN ]; then
@@ -82,13 +81,10 @@ run_test_config_mgpu() {
         _dfa_level=3
         export NVTE_JAX_UNITTEST_LEVEL=L2
     fi
-    # Do not fail automated CI if test_distributed_fused_attn is hung
-    # If the sctipt run w/o TEST_LEVEL the test error will be honored
-    if [ "$TEST_LEVEL" -le 3 ]; then
-        TEST_ERROR_IGNORE="1"
-    fi
-    run $_dfa_level test_distributed_fused_attn.py $_timeout_args
-    TEST_ERROR_IGNORE=""
+
+    run_default_fa 2 test_distributed_dense.py
+    # RCCL_MSCCL_ENABLE=0 is to avoid hangs in some distributed tests (ROCM-1719)
+    RCCL_MSCCL_ENABLE=0 run $_dfa_level test_distributed_fused_attn.py $_timeout_args
     run_default_fa 3 test_distributed_layernorm.py
     run_default_fa 2 test_distributed_layernorm_mlp.py $_timeout_args
     run_default_fa 3 test_distributed_softmax.py
@@ -96,7 +92,7 @@ run_test_config_mgpu() {
     run_default_fa 3 test_sanity_import.py
 }
 
-# Single config mode, run it synchroniously and return result
+# Single config mode, run it synchronously and return result
 if [ -n "$SINGLE_CONFIG" ]; then
     _fus_attn="$SINGLE_CONFIG"
     configure_fused_attn_env $_fus_attn && run_test_config

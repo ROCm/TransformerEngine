@@ -49,26 +49,29 @@ run_test_config(){
     fi
     run 1 test_cuda_graphs.py
     run_default_fa 1 test_deferred_init.py
-    run_default_fa 1 test_float8tensor.py
+    run_default_fa 1 test_quantized_tensor.py
     run_default_fa 1 test_float8_current_scaling_exact.py
-    test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 run 1 test_cpu_offloading.py
+    test $_fus_attn = auto -o $_fus_attn = ck && run 1 test_cpu_offloading.py
+    test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 NVTE_CPU_OFFLOAD_V1=1 run 3 test_cpu_offloading_v1.py
     run_default_fa 1 test_fused_rope.py
     run_default_fa 1 test_fused_router.py
     run_default_fa 1 test_fusible_ops.py
     run_default_fa 1 test_gemm_autotune.py
     run 1 test_gqa.py
     run 1 test_jit.py
-    run_default_fa 1 test_multi_tensor.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
+    run_default_fa 3 test_sanity_hipified_cast_transpose.py
     run_default_fa 1 test_sanity_import.py
     run_default_fa 1 attention/test_attention.py # Backend selection is controlled by the test
     run_default_fa 1 attention/test_cp_utils.py
     run_default_fa 1 attention/test_kv_cache.py
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
+    run_default_fa 1 triton_kernels/test_cast_mxfp4.py
     run_default_fa 1 triton_kernels/test_grouped_gemm.py
     run_default_fa 1 triton_kernels/test_utils.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 triton_kernels/test_norms.py
@@ -82,6 +85,8 @@ run_test_config(){
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_numerics.py
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_fusible_ops.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 triton_kernels/test_cast.py
+
+    run_default_fa 1 nvfp4/
 }
 
 run_test_config_mgpu(){
@@ -92,6 +97,8 @@ run_test_config_mgpu(){
     #run in parallel on CI and it affects timing
     run_default_fa 1 test_gemm_sm_count.py
     run_default_fa 3 test_sanity_import.py
+    run_default_fa 3 distributed/test_cast_master_weights_to_fp8.py
+    run_default_fa 3 distributed/test_comm_gemm_overlap.py
     run_default_fa 2 distributed/test_fusible_ops.py
     run_default_fa 2 distributed/test_numerics.py
     run_default_fa 1 distributed/test_torch_fsdp2.py

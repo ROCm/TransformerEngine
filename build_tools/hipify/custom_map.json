@@ -1,0 +1,30 @@
+{
+ "custom_map" : {
+        "<cuda_bf16.h>" : "<hip/hip_bfloat16.h>",
+        "<cuda_fp8.h>" : "\"common/amd_detail/hip_float8.h\"",
+        "<cuda_fp4.h>" : "<hip/hip_fp4.h>",
+        "cuda_runtime.h\"" : "hip_runtime.h\"",
+        "ATen/cudnn/Handle.h" : "ATen/miopen/Handle.h",
+        "CUfunc_cache" : "hipFuncCache_t", 
+        "<nvtx3/nvToolsExt.h>" : "<roctracer/roctx.h>",
+        "cudaFuncSetAttribute(" : "hipFuncSetAttribute((const void*)",
+        "__nv_fp8_e5m2" : "te_hip_fp8_e5m2",
+        "__nv_fp8_e4m3" : "te_hip_fp8_e4m3",
+        "cuda::getCurrentCUDAStream" : "hip::getCurrentHIPStreamMasqueradingAsCUDA",
+        "at::cuda::CUDAGuard" : "at::hip::HIPGuardMasqueradingAsCUDA",
+        "__nv_fp4_e2m1" : "__hip_fp4_e2m1",
+        "__nv_fp4x2_e2m1" : "__hip_fp4x2_e2m1",
+        "__nv_fp4x4_e2m1" : "__hip_fp4x4_e2m1",
+        "__nv_fp4x2_storage_t" : "__hip_fp4x2_storage_t",
+        "#include <cudaTypedefs.h>" : "",
+        "#include <cuda/barrier>" : "",
+        "#include <cuda_pipeline.h>" : "",
+        "cudaLaunchKernelExC": "hipLaunchKernelExC",
+        "CUmemGenericAllocationHandle": "hipMemGenericAllocationHandle_t",
+        "cudaLaunchConfig_t": "hipLaunchConfig_t",
+        "cudaLaunchAttribute": "hipLaunchAttribute",
+        "cudaLaunchAttributeCooperative": "hipLaunchAttributeCooperative",
+        "CUdeviceptr": "hipDeviceptr_t"
+ }
+}
+

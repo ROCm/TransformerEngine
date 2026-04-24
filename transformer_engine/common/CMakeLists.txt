@@ -1,6 +1,6 @@
 # This file was modified for portability to AMDGPU
-# Copyright (c) 2022-2025, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
@@ -34,15 +34,6 @@ endif()
 # Language options
 if(USE_CUDA)
 # Removed indent to minimize code diff with NV upstream
-if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
-  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
-    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
-  elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
-    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
-  else ()
-    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
-  endif()
-endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CUDA_STANDARD 17)
 set(CMAKE_CUDA_STANDARD_REQUIRED ON)
@@ -59,8 +50,62 @@ project(transformer_engine LANGUAGES CUDA CXX)
 
 # CUDA Toolkit
 find_package(CUDAToolkit REQUIRED)
-if (CUDAToolkit_VERSION VERSION_LESS 12.0)
-  message(FATAL_ERROR "CUDA 12.0+ is required, but found CUDA ${CUDAToolkit_VERSION}")
+if (CUDAToolkit_VERSION VERSION_LESS 12.1)
+  message(FATAL_ERROR "CUDA 12.1+ is required, but found CUDA ${CUDAToolkit_VERSION}")
+endif()
+
+# Process GPU architectures
+if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
+  if (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 13.0)
+    set(CMAKE_CUDA_ARCHITECTURES 75 80 89 90 100 120)
+  elseif (CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.8)
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90 100 120)
+  else ()
+    set(CMAKE_CUDA_ARCHITECTURES 70 80 89 90)
+  endif()
+endif()
+
+# Process CMAKE_CUDA_ARCHITECTURES to separate generic and specific architectures
+set(NVTE_GENERIC_ARCHS)
+set(NVTE_SPECIFIC_ARCHS)
+
+# Check for architecture 100
+list(FIND CMAKE_CUDA_ARCHITECTURES "100" arch_100_index)
+if(NOT arch_100_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "100")
+  list(APPEND NVTE_GENERIC_ARCHS "100")
+  list(APPEND NVTE_SPECIFIC_ARCHS "100a")
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
+    list(APPEND NVTE_SPECIFIC_ARCHS "103a")
+  endif()
+endif()
+
+# Check for architecture 101 (if we see this we are in toolkit <= 12.9)
+list(FIND CMAKE_CUDA_ARCHITECTURES "101" arch_101_index)
+if(NOT arch_101_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "101")
+  list(APPEND NVTE_GENERIC_ARCHS "101")
+  list(APPEND NVTE_SPECIFIC_ARCHS "101a")
+endif()
+
+# Check for architecture 110 (if we see this we are in toolkit >= 13.0)
+list(FIND CMAKE_CUDA_ARCHITECTURES "110" arch_110_index)
+if(NOT arch_110_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "110")
+  list(APPEND NVTE_GENERIC_ARCHS "110")
+  list(APPEND NVTE_SPECIFIC_ARCHS "110f")
+endif()
+
+# Check for architecture 120
+list(FIND CMAKE_CUDA_ARCHITECTURES "120" arch_120_index)
+if(NOT arch_120_index EQUAL -1)
+  list(REMOVE_ITEM CMAKE_CUDA_ARCHITECTURES "120")
+  list(APPEND NVTE_GENERIC_ARCHS "120")
+  if(CUDAToolkit_VERSION VERSION_GREATER_EQUAL 12.9)
+    list(APPEND NVTE_SPECIFIC_ARCHS "120f")
+  else()
+    list(APPEND NVTE_SPECIFIC_ARCHS "120a")
+  endif()
 endif()
 
 # cuDNN frontend API
@@ -88,23 +133,17 @@ else()
     message(FATAL_ERROR "This project requires the Ninja build system. Install it using 'pip install ninja'.")
   endif()
 
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
+
   # Disable Asserts In Code (Can't use asserts on HIP stack.)
   add_definitions(-DNDEBUG)
   add_definitions(-DUSE_ROCM)
-
-  if(NOT DEFINED ENV{NVTE_ROCM_ARCH})
-    SET(CMAKE_HIP_ARCHITECTURES gfx942 gfx950)
-  else()
-    SET(CMAKE_HIP_ARCHITECTURES $ENV{NVTE_ROCM_ARCH})
-  endif()
 
   # build error will be dup-ed parallel-jobs times
   # set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -parallel-jobs=4")
   if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(CMAKE_HIP_FLAGS "${CMAKE_HIP_FLAGS} -g")
   endif()
-
-  list(APPEND CMAKE_MODULE_PATH "/opt/rocm")
 endif()
 
 set(message_line "-------------------------------------------------------------")
@@ -122,12 +161,29 @@ find_package(Python COMPONENTS Interpreter Development.Module REQUIRED)
 # Configure Transformer Engine library
 include_directories(${PROJECT_SOURCE_DIR}/..)
 set(transformer_engine_SOURCES)
+set(transformer_engine_cpp_sources)
+set(transformer_engine_cuda_sources)
+set(transformer_engine_cuda_arch_specific_sources)
+
 # Source files in both cuda and rocm
-list(APPEND transformer_engine_SOURCES
+list(APPEND transformer_engine_cpp_sources
      transformer_engine.cpp
+     comm_gemm_overlap/userbuffers/ipcsocket.cc
+     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+     comm_gemm_overlap/comm_gemm_overlap.cpp
+     gemm/config.cpp
+     normalization/common.cpp
+     normalization/layernorm/ln_api.cpp
+     normalization/rmsnorm/rmsnorm_api.cpp
+     util/cuda_driver.cpp
+     util/cuda_runtime.cpp
+     util/multi_stream.cpp
+     util/rtc.cpp)
+
+list(APPEND transformer_engine_cuda_sources
      common.cu
+     comm_gemm_overlap/userbuffers/userbuffers.cu
      multi_tensor/adam.cu
-     multi_tensor/compute_scale.cu
      multi_tensor/l2norm.cu
      multi_tensor/scale.cu
      multi_tensor/sgd.cu
@@ -137,29 +193,17 @@ list(APPEND transformer_engine_SOURCES
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
      transpose/swap_first_dims.cu
-     activation/gelu.cu
      dropout/dropout.cu
      fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
-     activation/relu.cu
-     activation/swiglu.cu
      gemm/cublaslt_gemm.cu
-     normalization/common.cpp
-     normalization/layernorm/ln_api.cpp
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
      normalization/layernorm/ln_fwd_cuda_kernel.cu
-     normalization/rmsnorm/rmsnorm_api.cpp
      normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
-     util/cast.cu
      util/padding.cu
-     util/cuda_driver.cpp
-     util/cuda_runtime.cpp
-     util/multi_stream.cpp
-     util/rtc.cpp
-     swizzle/swizzle.cu
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
@@ -169,25 +213,99 @@ list(APPEND transformer_engine_SOURCES
      fused_router/fused_topk_with_score_function.cu
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
-     recipe/fp8_block_scaling.cu)
+     recipe/fp8_block_scaling.cu
+     swizzle/swizzle.cu)
+
+list(APPEND transformer_engine_cuda_arch_specific_sources
+     activation/gelu.cu
+     activation/relu.cu
+     activation/swiglu.cu
+     cast/cast.cu
+     hadamard_transform/hadamard_transform.cu
+     multi_tensor/compute_scale.cu
+     recipe/mxfp8_scaling.cu
+     transpose/quantize_transpose_vector_blockwise_fp4.cu)
+
 if(USE_CUDA)
-# Removed indent to minimize code diff with NV upstream
-# Files unique in cuda building
-list(APPEND transformer_engine_SOURCES
-     cudnn_utils.cpp
-     transpose/quantize_transpose_square_blockwise.cu
-     transpose/quantize_transpose_vector_blockwise.cu
-     fused_attn/fused_attn_f16_max512_seqlen.cu
-     fused_attn/fused_attn_f16_arbitrary_seqlen.cu
-     fused_attn/fused_attn_fp8.cu
-     fused_attn/fused_attn.cpp
-     fused_attn/utils.cu
-     gemm/cutlass_grouped_gemm.cu
-     util/cuda_nvml.cpp
-     comm_gemm_overlap/userbuffers/ipcsocket.cc
-     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-     comm_gemm_overlap/userbuffers/userbuffers.cu
-     comm_gemm_overlap/comm_gemm_overlap.cpp)
+#NV specific source codes
+    list(APPEND transformer_engine_cpp_sources
+        cudnn_utils.cpp
+        fused_attn/fused_attn.cpp
+        util/cuda_nvml.cpp)
+    list(APPEND transformer_engine_cuda_sources
+        transpose/quantize_transpose_vector_blockwise.cu
+        fused_attn/fused_attn_f16_max512_seqlen.cu
+        fused_attn/fused_attn_f16_arbitrary_seqlen.cu
+        fused_attn/fused_attn_fp8.cu
+        fused_attn/utils.cu
+        swizzle/swizzle_block_scaling.cu
+        recipe/nvfp4.cu)
+    list(APPEND transformer_engine_cuda_arch_specific_sources
+        gemm/cutlass_grouped_gemm.cu
+        hadamard_transform/group_hadamard_transform.cu
+        transpose/quantize_transpose_square_blockwise.cu
+        hadamard_transform/hadamard_transform_cast_fusion.cu
+        hadamard_transform/group_hadamard_transform_cast_fusion.cu
+        hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
+        transpose/quantize_transpose_square_blockwise.cu
+        transpose/quantize_transpose_vector_blockwise_fp4.cu)
+else()
+#ROCm specific source codes
+    list(APPEND transformer_engine_cpp_sources
+        comm_gemm_overlap/rocm_comm_gemm_overlap.cpp
+        fused_attn_rocm/fused_attn.cpp
+        gemm/rocm_gemm.cu
+        gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp
+        amd_detail/system.cpp)
+    list(APPEND transformer_engine_cuda_sources
+        fused_attn_rocm/fused_attn_aotriton.cpp
+        fused_attn_rocm/fused_attn_ck.cpp
+        fused_attn_rocm/fused_attn_small_seq.cpp
+        fused_attn_rocm/utils.cpp)
+endif()
+
+# Compiling the files with the worst compilation time first to hopefully overlap
+# better with the faster-compiling cpp files
+list(APPEND transformer_engine_SOURCES ${transformer_engine_cuda_arch_specific_sources}
+                                       ${transformer_engine_cuda_sources}
+                                       ${transformer_engine_cpp_sources})
+
+if(USE_CUDA)
+# Set compile options for CUDA sources with generic architectures
+foreach(cuda_source IN LISTS transformer_engine_cuda_sources)
+  set(arch_compile_options)
+  foreach(arch IN LISTS NVTE_GENERIC_ARCHS)
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
+
+  if(arch_compile_options)
+    set_property(
+      SOURCE ${cuda_source}
+      APPEND
+      PROPERTY
+      COMPILE_OPTIONS ${arch_compile_options}
+    )
+  endif()
+endforeach()
+
+# Set compile options for CUDA sources with specific architectures
+foreach(cuda_source IN LISTS transformer_engine_cuda_arch_specific_sources)
+  set(arch_compile_options)
+  foreach(arch IN LISTS NVTE_SPECIFIC_ARCHS)
+    list(APPEND arch_compile_options "--generate-code=arch=compute_${arch},code=sm_${arch}")
+  endforeach()
+
+  if(arch_compile_options)
+    set_property(
+      SOURCE ${cuda_source}
+      APPEND
+      PROPERTY
+      COMPILE_OPTIONS ${arch_compile_options}
+    )
+  endif()
+endforeach()
 
 if (NVTE_WITH_CUBLASMP)
 list(APPEND transformer_engine_SOURCES
@@ -195,62 +313,49 @@ list(APPEND transformer_engine_SOURCES
 endif()
 
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
+
 else()
-  list(APPEND transformer_engine_SOURCES
-       fused_attn_rocm/fused_attn.cpp
-       fused_attn_rocm/fused_attn_aotriton.cpp
-       fused_attn_rocm/fused_attn_ck.cpp
-       fused_attn_rocm/fused_attn_small_seq.cpp
-       fused_attn_rocm/utils.cpp
-       gemm/rocm_gemm.cu
-       amd_detail/system.cpp)
 
   # process source code files
-  set(TE ${CMAKE_CURRENT_SOURCE_DIR}/../..)
-  set(THIRDPARTY ${TE}/3rdparty)
-  list(APPEND CMAKE_MODULE_PATH "${THIRDPARTY}/hipify_torch/cmake")
-  include(Hipify)
-  message(STATUS "CMAKE_MODULE_PATH: ${CMAKE_MODULE_PATH}")
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/hipify/hipify.cmake")
+  TE_Hipify(${CMAKE_CURRENT_SOURCE_DIR})
+  TE_GetHipifiedSources("${transformer_engine_SOURCES}" ${CMAKE_CURRENT_SOURCE_DIR} te_hip_sources)
 
-  set(header_include_dir
-      ${CMAKE_CURRENT_SOURCE_DIR}/..
-      ${CMAKE_CURRENT_SOURCE_DIR}/include 
-      ${CMAKE_CURRENT_SOURCE_DIR}/util
-      ${CMAKE_CURRENT_SOURCE_DIR})
-  message(STATUS "HIPIFY CUDA_SOURCE_DIR: ${CMAKE_CURRENT_SOURCE_DIR}")
-  message(STATUS "HIPIFY HEADER_INCLUDE_DIR: ${header_include_dir}")
-  hipify(CUDA_SOURCE_DIR ${CMAKE_CURRENT_SOURCE_DIR}
-      HEADER_INCLUDE_DIR ${header_include_dir}
-      IGNORES "*/amd_detail/*"
-      IGNORES "*/aotriton/*"
-      IGNORES "*/ck_fused_attn/*"
-      IGNORES "*/pytorch/csrc/*"
-      IGNORES "*/jax/csrc/*"
-      IGNORES "*/rocshmem_api/*"
-      CUSTOM_MAP_FILE "${TE}/hipify_custom_map.json"
-      NO_MATH_REPLACE
-  )
-  get_hipified_list("${transformer_engine_SOURCES}" te_hip_sources)
   message("${message_line}")
   message(STATUS "nvte hipified sources: ${te_hip_sources}")
 
   add_library(transformer_engine SHARED ${te_hip_sources})
-  target_include_directories(transformer_engine PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}")
+
+  # Workaround for TheRock installation that moved some headers from system-wide location
+  # to rocm_sysdeps but missing it in the default include path.
+  target_include_directories(transformer_engine SYSTEM PRIVATE "${ROCM_PATH}/lib/rocm_sysdeps/include")
 endif()
 
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 if (USE_CUDA)
-if(${CMAKE_CUDA_COMPILER_VERSION} VERSION_GREATER 12.0)
-  set_source_files_properties(
-    "gemm/cutlass_grouped_gemm.cu"
-    PROPERTIES
-    COMPILE_FLAGS
-    "-gencode arch=compute_90a,code=sm_90a")
+# Grouped GEMM kernels require SM90a
+set_property(
+  SOURCE gemm/cutlass_grouped_gemm.cu
+  APPEND
+  PROPERTY
+  COMPILE_OPTIONS "--generate-code=arch=compute_90a,code=sm_90a")
+
+# CUTLASS kernels could cause hang in debug build
+set(CUTLASS_KERNEL_SOURCES
+    gemm/cutlass_grouped_gemm.cu
+    hadamard_transform/group_hadamard_transform_cast_fusion.cu
+    hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
+    hadamard_transform/hadamard_transform_cast_fusion.cu)
+set_property(
+  SOURCE ${CUTLASS_KERNEL_SOURCES}
+  APPEND
+  PROPERTY
+  COMPILE_OPTIONS "-g0;-dopt=on")
 else()
-  message(FATAL_ERROR "cutlass gemm/cutlass_grouped_gemm.cu kernel required sm 90a")
-endif()
+  set(CK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/aiter/3rdparty/composable_kernel)
+  target_include_directories(transformer_engine PRIVATE ${CK_ROOT}/include)
 endif() #USE_CUDA
 
 # Configure dependencies
@@ -261,23 +366,29 @@ target_link_libraries(transformer_engine PUBLIC
                       CUDNN::cudnn_all)
 
 target_include_directories(transformer_engine PRIVATE
-                          ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
+                           ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES})
 target_include_directories(transformer_engine SYSTEM PRIVATE
                            ${CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES}/cccl)
 target_include_directories(transformer_engine PRIVATE "${CUDNN_FRONTEND_INCLUDE_DIR}")
 target_include_directories(transformer_engine PRIVATE
                           ${CUTLASS_INCLUDE_DIR}
                           ${CUTLASS_TOOLS_INCLUDE_DIR})
+endif()
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
+# Changed
 option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
 if (NVTE_UB_WITH_MPI)
-    find_package(MPI REQUIRED)
-    target_link_libraries(transformer_engine PUBLIC MPI::MPI_CXX)
-    target_include_directories(transformer_engine PRIVATE ${MPI_CXX_INCLUDES})
+    # OpenMPI C++ headers are deprecated -- flag unused w/ MPICH
+    add_definitions(-DOMPI_SKIP_MPICXX)
+    
+    target_include_directories(transformer_engine PRIVATE "$ENV{MPI_HOME}/include")
+    target_link_directories(transformer_engine PRIVATE "$ENV{MPI_HOME}/lib")
+    target_link_libraries(transformer_engine PUBLIC mpi)
     target_compile_definitions(transformer_engine PUBLIC NVTE_UB_WITH_MPI)
 endif()
 
+if(USE_CUDA)
 option(NVTE_ENABLE_NVSHMEM "Compile with NVSHMEM library" OFF)
 if (NVTE_ENABLE_NVSHMEM)
     add_subdirectory(nvshmem_api)
@@ -393,7 +504,7 @@ else()
   make_string_header_from_file(transpose/rtc/cast_transpose_fusion.hip
                               string_code_transpose_rtc_cast_transpose_fusion_cu)
   make_string_header_from_file(transpose/rtc/cast_transpose.hip
-                              string_code_transpose_rtc_cast_transpose_cu)
+                             string_code_transpose_rtc_cast_transpose_cu)
   make_string_header_from_file(transpose/rtc/transpose.hip
                               string_code_transpose_rtc_transpose_cu)
   make_string_header_from_file(transpose/rtc/swap_first_dims.hip
@@ -407,37 +518,43 @@ target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
 # Compiler options
-set_source_files_properties(fused_softmax/scaled_masked_softmax.cu
-                            fused_softmax/scaled_upper_triang_masked_softmax.cu
-                            fused_softmax/scaled_aligned_causal_masked_softmax.cu
-                            multi_tensor/adam.cu
-                            multi_tensor/compute_scale.cu
-                            multi_tensor/l2norm.cu
-                            multi_tensor/scale.cu
-                            multi_tensor/sgd.cu
-                            fused_attn/flash_attn.cu
-                            fused_attn/context_parallel.cu
-                            fused_attn/kv_cache.cu
-                            PROPERTIES
-                            COMPILE_OPTIONS "--use_fast_math")
 if(USE_CUDA)
+set(nvte_sources_with_fast_math)
+list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
+                                        fused_softmax/scaled_upper_triang_masked_softmax.cu
+                                        fused_softmax/scaled_aligned_causal_masked_softmax.cu
+                                        multi_tensor/adam.cu
+                                        multi_tensor/compute_scale.cu
+                                        multi_tensor/l2norm.cu
+                                        multi_tensor/scale.cu
+                                        multi_tensor/sgd.cu
+                                        fused_attn/flash_attn.cu
+                                        fused_attn/context_parallel.cu
+                                        fused_attn/kv_cache.cu)
+
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
-  set_source_files_properties(activation/gelu.cu
-                              activation/relu.cu
-                              activation/swiglu.cu
-                              util/cast.cu
-                              PROPERTIES
-                              COMPILE_OPTIONS "--use_fast_math")
+  list(APPEND nvte_sources_with_fast_math activation/gelu.cu
+                                          activation/relu.cu
+                                          activation/swiglu.cu)
 endif()
+
+foreach(cuda_source IN LISTS nvte_sources_with_fast_math)
+  set_property(
+    SOURCE ${cuda_source}
+    APPEND
+    PROPERTY
+    COMPILE_OPTIONS "--use_fast_math")
+endforeach()
+
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} --expt-relaxed-constexpr")
 set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -O3")
 
 # Number of parallel build jobs
-if(ENV{MAX_JOBS})
-  set(BUILD_JOBS_STR "$ENV{MAX_JOBS}")
-elseif(ENV{NVTE_BUILD_MAX_JOBS})
-  set(BUILD_JOBS_STR "$ENV{NVTE_BUILD_MAX_JOBS}")
+if($ENV{MAX_JOBS})
+  set(BUILD_JOBS_STR $ENV{MAX_JOBS})
+elseif($ENV{NVTE_BUILD_MAX_JOBS})
+  set(BUILD_JOBS_STR $ENV{NVTE_BUILD_MAX_JOBS})
 else()
   set(BUILD_JOBS_STR "max")
 endif()
@@ -465,17 +582,14 @@ endif()
 install(TARGETS transformer_engine DESTINATION .)
 if (USE_ROCM)
   set_target_properties(transformer_engine PROPERTIES INSTALL_RPATH "$ORIGIN/lib;$ORIGIN/transformer_engine/lib")
-  if("$ENV{ROCM_PATH}" STREQUAL "")
-    set(ROCM_PATH "/opt/rocm")
-  else()
-    set(ROCM_PATH "$ENV{ROCM_PATH}")
-  endif()
   file(READ "${ROCM_PATH}/.info/version" ROCM_VER)
   string(STRIP "${ROCM_VER}" ROCM_VER)
   string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER}")
+  get_git_commit("${TE}" TE_COMMIT_ID)
   file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt"
     "ROCM_VERSION: ${ROCM_VER}\n"
     "GPU_TARGETS: ${CMAKE_HIP_ARCHITECTURES}\n"
+    "COMMIT_ID: ${TE_COMMIT_ID}\n"
   )
   install(FILES "${CMAKE_CURRENT_BINARY_DIR}/build_info.txt" DESTINATION "transformer_engine/")
 endif()

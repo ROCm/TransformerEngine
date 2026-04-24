@@ -1,17 +1,25 @@
 /*************************************************************************
- * Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+ * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include <cuda.h>
-#include <cuda_fp8.h>
 #include <cuda_runtime.h>
+#include <cuda_fp8.h>
+
+#ifdef __HIP_PLATFORM_AMD__
+#include <hip/hip_bfloat16.h>
+#define half_dtype hip_bfloat16 
+#else
 
 #if __CUDA_ARCH__ >= 800
 #define half_dtype nv_bfloat16
 #else
 #define half_dtype half
+#endif
 #endif
 
 #include <assert.h>
@@ -24,6 +32,7 @@
 
 #define MAX_THREADS 1024
 
+#ifndef __HIP_PLATFORM_AMD__
 #define ATOMIC_CONSUMER(chunk)                                             \
   if (counters) {                                                          \
     if (threadIdx.x == 0 && blockIdx.x == 0) {                             \
@@ -34,6 +43,18 @@
     }                                                                      \
     if (blockIdx.x == 0) __syncthreads();                                  \
   }
+#else
+#define ATOMIC_CONSUMER(chunk)                                             \
+  if (counters) {                                                          \
+    if (threadIdx.x == 0 && blockIdx.x == 0) {                             \
+      while (0 != (atomicCAS(((unsigned int *)counters) + chunk, 0, 0))) { \
+      }                                                                    \
+      ((unsigned int *)counters)[chunk] = 1;                               \
+      __threadfence_system();                                              \
+    }                                                                      \
+    if (blockIdx.x == 0) __syncthreads();                                  \
+  }
+#endif
 
 #define ATOMIC_PRODUCER(chunk)             \
   if (counters) {                          \
@@ -212,7 +233,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
     userptr[myrank][lineoffset + line] = sum;
   }
   __syncthreads();
+#ifdef __HIP_PLATFORM_AMD__
+  if (threadIdx.x == 0) __threadfence_system();
+#else
   if (threadIdx.x == 0) __threadfence();
+#endif
   __syncthreads();
 
   if (threadIdx.x < RANKS) {
@@ -1025,7 +1050,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
 
       // reset counter for next producer.
       ((unsigned int *)counters)[0] = 1;
+#ifndef __HIP_PLATFORM_AMD__
       asm volatile("fence.sc.gpu;\n");
+#else
+      __threadfence_system();
+#endif
     }
   }
   __syncthreads();
@@ -1116,7 +1145,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
 
         // reset counter for next producer.
         ((unsigned int *)counters)[chunk_i] = 1;
+#ifndef __HIP_PLATFORM_AMD__
         asm volatile("fence.sc.gpu;\n");
+#else
+        __threadfence_system();
+#endif
       }
     }
     __syncthreads();
@@ -1357,6 +1390,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   }
 }  // fp16 inplace allgather kernel (Volta,Hopper)
 
+#ifndef __HIP_PLATFORM_AMD__
 #define SETUP_LAUNCH_CONFIG(sms, threads, stream)                                    \
   cudaLaunchConfig_t cfg = {sms, threads, 0, stream, NULL, 0};                       \
   cudaLaunchAttribute attribute_ub[2];                                               \
@@ -1367,6 +1401,15 @@ __global__ void __launch_bounds__(MAX_THREADS)
   attribute_ub[0].id = cudaLaunchAttributeCooperative;                               \
   cfg.attrs = attribute_ub;                                                          \
   cfg.numAttrs = comm->sm_arch >= 9 ? 2 : 1;
+#else
+#define SETUP_LAUNCH_CONFIG(sms, threads, stream)                                    \
+  cudaLaunchConfig_t cfg = {sms, threads, 0, stream, NULL, 0};                       \
+  cudaLaunchAttribute attribute_ub[1];                                               \
+  attribute_ub[0].id = cudaLaunchAttributeCooperative;                               \
+  attribute_ub[0].value.cooperative = 1;                                             \
+  cfg.attrs = attribute_ub;                                                          \
+  cfg.numAttrs = 1;
+#endif
 
 #if (CUDART_VERSION >= 12030)
 #define ADD_LAUNCH_COMPLETION_EVENT(attribute_ub, comm_launch_event) \
@@ -1378,6 +1421,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
 #define NUM_LAUNCH_ATTRIBUTE_FOR_FDL_LAUNCH 2
 #endif
 
+#ifdef __HIP_PLATFORM_AMD__
+#define SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, threads, stream, comm_launch_event) \
+  cudaLaunchConfig_t cfg;                                                                  \
+  NVTE_ERROR("SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT is not supported for AMD GPUs")
+#else
 #define SETUP_LAUNCH_CONFIG_WITH_COMPLETION_EVENT(sms, threads, stream, comm_launch_event) \
   cudaLaunchConfig_t cfg = {sms, threads, 0, stream, NULL, 0};                             \
   cudaLaunchAttribute attribute_ub[NUM_LAUNCH_ATTRIBUTE_FOR_FDL_LAUNCH] = {};              \
@@ -1389,6 +1437,7 @@ __global__ void __launch_bounds__(MAX_THREADS)
   attribute_ub[0].id = cudaLaunchAttributeCooperative;                                     \
   cfg.attrs = attribute_ub;                                                                \
   cfg.numAttrs = NUM_LAUNCH_ATTRIBUTE_FOR_FDL_LAUNCH;
+#endif
 
 #define callranks_ag(x)                                                                            \
   if (ar_nvsize == x) {                                                                            \
@@ -2196,7 +2245,11 @@ __global__ void __launch_bounds__(MAX_THREADS)
     // Decrement atomic val to signal current output tile finish
     if (counters) {
       ((unsigned int *)counters)[0] = 0;
+#ifndef __HIP_PLATFORM_AMD__
       asm volatile("fence.sc.gpu;\n");
+#else
+      __threadfence_system();
+#endif
     }
   }
 }
@@ -2267,7 +2320,11 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
       // Decrement atomic val to signal current output tile finish
       if (counters) {
         ((unsigned int *)counters)[recv_chunk_id /*chunk_i+1*/] = 0;
+#ifndef __HIP_PLATFORM_AMD__
         asm volatile("fence.sc.gpu;\n");
+#else
+        __threadfence_system();
+#endif
       }
     }
 
@@ -2284,6 +2341,7 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
 // Return TRUE if two ranks share the same NV domain
 #define INTRANODE(peer) ((peer / comm->nvsize) == (comm->myrank / comm->nvsize))
 
+#ifndef __HIP_PLATFORM_AMD__ // Moved to userbuffers.h for visibility
 // Index corresponds to the type of flag:
 // 0 - Send index counter
 // 1 - CE start index counter
@@ -2303,12 +2361,13 @@ __global__ void __launch_bounds__(MAX_THREADS) kuserbuffers_pushsendrecv_multiat
    ((NVTE_REG0_OFFSET(comm) + NVTE_REG0_RECV + (recv_peer) * NVTE_MAX_REGIONS + (dsth) + \
      (index) * NVTE_MAX_NVLINK * NVTE_MAX_REGIONS) *                                     \
     sizeof(int)))
+#endif // #ifndef __HIP_PLATFORM_AMD__
 
 void userbuffers_send(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
-                      const int peer, cudaStream_t stream) {
+                      const int peer, cudaStream_t stream, int ring_id) {
   int peerlocal = peer % comm->nvsize;
-  void *flagptr = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 0);
+  void *flagptr = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, ring_id);
   // void *ce_send_start_ptr = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 1);
   // void *ce_send_end_ptr   = GET_SEND_PTR_BY_INDEX(peerlocal, comm, dsthandler, 2);
   bool signalonly = (bytes / 16 == 0) || (comm->use_ce != 0);
@@ -2317,7 +2376,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
 
   if (!(comm->launch_mode & NVTE_LAUNCH_GPU)) return;
   if (comm->push == 0) {
-    kuserbuffers_pullsend<<<1, 1, 0, stream>>>(comm->myrank, peer, &(comm->send_id[peer]),
+    kuserbuffers_pullsend<<<1, 1, 0, stream>>>(comm->myrank, peer, &(comm->send_id[peer * NVTE_ROCM_MAX_RINGS + ring_id]),
                                                reinterpret_cast<int *>(flagptr));
     NVTE_CHECK_CUDA(cudaGetLastError());
   } else {
@@ -2330,7 +2389,7 @@ void userbuffers_send(const int srchandler, const size_t srcoffset, const int ds
       // kuserbuffers_inc<<<1, 1, 0, stream>>>(reinterpret_cast<int *>(ce_send_end_ptr));
     }
     SETUP_LAUNCH_CONFIG(signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, stream);
-    int *arg1 = &comm->send_id[peer], *arg2 = reinterpret_cast<int *>(flagptr);
+    int *arg1 = &comm->send_id[peer * NVTE_ROCM_MAX_RINGS + ring_id], *arg2 = reinterpret_cast<int *>(flagptr);
     int4 *arg3 = reinterpret_cast<int4 *>(srcptr), *arg4 = reinterpret_cast<int4 *>(dstptr);
     int arg5 = signalonly ? 0 : bytes / 16;
     void *kernelArgs[] = {reinterpret_cast<void *>(&arg1), reinterpret_cast<void *>(&arg2),
@@ -2500,9 +2559,9 @@ void userbuffers_sendrecv_multiatomic(const int srchandler, const int dsthandler
 
 void userbuffers_recv(const int srchandler, const size_t srcoffset, const int dsthandler,
                       const size_t dstoffset, const size_t bytes, communicator *comm,
-                      const int peer, cudaStream_t stream) {
+                      const int peer, cudaStream_t stream, int ring_id) {
   int peerlocal = peer % comm->nvsize;
-  void *flagptr = GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 0);
+  void *flagptr = GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, ring_id);
   bool signalonly = (bytes / 16 == 0) || (comm->use_ce != 0);
 
   assert(INTRANODE(peer));
@@ -2514,12 +2573,12 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
 
     kuserbuffers_pullrecv<<<signalonly ? 1 : comm->sms, signalonly ? 1 : 1024, 0, stream>>>(
         comm->myrank, peer, comm->nvrank, peerlocal,
-        &(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]), reinterpret_cast<int *>(flagptr),
+        &(comm->recv_id[(peer * NVTE_MAX_REGIONS + dsthandler) * NVTE_ROCM_MAX_RINGS + ring_id]), reinterpret_cast<int *>(flagptr),
         reinterpret_cast<int4 *>(srcptr), reinterpret_cast<int4 *>(dstptr),
         signalonly ? 0 : bytes / 16, comm->ub_timeout);
     NVTE_CHECK_CUDA(cudaGetLastError());
     if (!signalonly) {
-      kuserbuffers_inc<<<1, 1, 0, stream>>>(&(comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler]));
+      kuserbuffers_inc<<<1, 1, 0, stream>>>(&(comm->recv_id[(peer * NVTE_MAX_REGIONS + dsthandler) * NVTE_ROCM_MAX_RINGS + ring_id]));
       NVTE_CHECK_CUDA(cudaGetLastError());
     }
     if (comm->use_ce) {
@@ -2528,7 +2587,7 @@ void userbuffers_recv(const int srchandler, const size_t srcoffset, const int ds
   } else {
     kuserbuffers_pushrecv<<<1, 1, 0, stream>>>(
         comm->myrank, peer, comm->nvrank, peerlocal,
-        &comm->recv_id[peer * NVTE_MAX_REGIONS + dsthandler], reinterpret_cast<int *>(flagptr),
+        &comm->recv_id[(peer * NVTE_MAX_REGIONS + dsthandler) * NVTE_ROCM_MAX_RINGS + ring_id], reinterpret_cast<int *>(flagptr),
         signalonly || comm->sms, comm->ub_timeout,
         reinterpret_cast<int *>(0 ?  // temporary disable
                                     GET_RECV_PTR_BY_INDEX(peer, comm, dsthandler, 1)
@@ -2576,7 +2635,11 @@ static __global__ void producer_kernel(void *atomic_ptr, int chunk_i) {
   // COMM kernel need to explicitely flash gmem.
   // GEMM kernel already executed, and can not see gmem
   // change without COMM kernel explicitely make change
+#ifndef __HIP_PLATFORM_AMD__
   asm volatile("fence.sc.gpu;\n");
+#else
+  __threadfence_system();
+#endif
 }
 
 // consumer
@@ -2586,7 +2649,11 @@ static __global__ void consumer_kernel(void *atomic_ptr, int chunk_i) {
     while (0 != (atomicCAS((unsigned int *)atomic_ptr + chunk_i, 0, 0))) {
     }
     ((unsigned int *)atomic_ptr)[chunk_i] = 1;
+#ifndef __HIP_PLATFORM_AMD__
     asm volatile("fence.sc.gpu;\n");
+#else
+    __threadfence_system();
+#endif
   }
 }
 
@@ -2598,7 +2665,11 @@ static __global__ void consumer_batch_kernel(void *atomic_ptr, int first_chunk_i
       while (0 != (atomicCAS((unsigned int *)atomic_ptr + i, 0, 0))) {
       }
       ((unsigned int *)atomic_ptr)[i] = 1;
+#ifndef __HIP_PLATFORM_AMD__
       asm volatile("fence.sc.gpu;\n");
+#else
+      __threadfence_system();
+#endif
     }
   }
 }
