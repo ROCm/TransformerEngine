@@ -20,6 +20,9 @@
 #include "../../util/vectorized_pointwise.h"
 #include "../core/common.cuh"
 #include "../fp8/quantize_fp8.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../fp8/rocm_cast.cuh"
+#endif
 #include "../mxfp8/quantize_mxfp8.cuh"
 #ifdef __HIP_PLATFORM_AMD__
 #include "../mxfp4/quantize_mxfp4.cuh"
@@ -81,9 +84,16 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
               dummy_workspace_tensor, stream);
         }
       } else if (output_tensor->has_data()) {
-        fp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
-            *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
-            dummy_workspace_tensor, stream);
+#ifdef __HIP_PLATFORM_AMD__
+        if constexpr (!IS_ACT) {
+          fp8::rocm_cast_only(*input_tensor, *noop_tensor, output_tensor, stream);
+        } else
+#endif
+        {
+          fp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
+              *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
+              dummy_workspace_tensor, stream);
+        }
       }
       break;
     }
