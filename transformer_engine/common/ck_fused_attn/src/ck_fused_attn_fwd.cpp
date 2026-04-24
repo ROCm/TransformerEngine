@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <type_traits>
 #include "ck_fused_attn/ck_fused_attn.hpp"
-#include "mha_fwd.h"
+#include "qola_mha_fwd.h"
 #include "ck_fused_attn_utils.hpp"
 
 namespace ck_fused_attn{
@@ -276,7 +276,7 @@ hipError_t _ck_attn_fwd_impl(
   if(ck_log_config){
      log_fwd_config(func_name, has_dropout, fmha_args);
   }
-  float average_runtime = aiter::mha_fwd(fmha_args, stream_config);
+  float average_runtime = QOLA_NS(mha_fwd)(fmha_args, stream_config);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
