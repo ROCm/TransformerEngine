@@ -6,19 +6,19 @@
 """GEMM operations -- multi-backend with AITER, Triton, and PyTorch fallback.
 
 Backend priority (configurable via NVTE_LITE_GEMM_BACKEND env var):
-1. AITER CK GEMM (default) -- CK/ASM kernels for FP8 precisions
+1. PyTorch torch._scaled_mm (default) -- hipBLASLt-backed on ROCm for FP8,
+   falls back to AITER for FP8 cases _scaled_mm can't serve
 2. AITER Triton GEMM -- dedicated Triton kernels for FP8 and BF16/FP16
-3. PyTorch fallback -- torch._scaled_mm for FP8 (hipBLASLt-backed on ROCm),
-   dequantize + torch.matmul otherwise
+3. AITER CK GEMM -- CK/ASM kernels for FP8 precisions
 
 Set NVTE_LITE_GEMM_BACKEND to override:
-  "ck"      -- prefer AITER CK kernels (default)
-  "triton"  -- prefer AITER Triton GEMM kernels
   "pytorch" -- prefer torch._scaled_mm for FP8 (hipBLASLt-backed on ROCm);
                fall back to AITER for FP8 cases _scaled_mm can't serve
                (wgrad with per-row scale on reduction axis, block scaled,
                unsupported dtype combos); dequantize + torch.matmul as a
-               last resort for non-FP8 or when AITER is unavailable.
+               last resort for non-FP8 or when AITER is unavailable. (default)
+  "triton"  -- prefer AITER Triton GEMM kernels
+  "ck"      -- prefer AITER CK kernels
 """
 
 import os
@@ -33,7 +33,7 @@ _FP8_DTYPES = (
     torch.float8_e4m3fnuz, torch.float8_e5m2fnuz,
 )
 
-_GEMM_BACKEND = os.environ.get("NVTE_LITE_GEMM_BACKEND", "ck").lower()
+_GEMM_BACKEND = os.environ.get("NVTE_LITE_GEMM_BACKEND", "pytorch").lower()
 
 _LITE_DIAG = os.environ.get("NVTE_LITE_DIAG", "0") != "0"
 
@@ -908,7 +908,7 @@ def generic_gemm(A, transA, B, transB, D, quantizer, output_dtype,
     Dispatches to AITER CK/Triton kernels when available, falls back to torch.matmul.
 
     Backend selection via NVTE_LITE_GEMM_BACKEND env var:
-      "ck" (default), "triton", "pytorch"
+      "pytorch" (default), "triton", "ck"
     """
     # --- AITER dispatch (all precisions) ---
     if _GEMM_BACKEND != "pytorch" and is_aiter_available():
