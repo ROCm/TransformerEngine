@@ -485,14 +485,8 @@ def is_fp8_fnuz() -> bool:
     return IS_HIP_EXTENSION and get_device_compute_capability() == (9, 4)
 
 
-def get_torch_float8_e4m3_type():
-    """E4M3 dtype for current platform (FNUZ on ROCm gfx94x when applicable)."""
-    return torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
-
-
-def get_torch_float8_e5m2_type():
-    """E5M2 dtype for current platform (FNUZ on ROCm gfx94x when applicable)."""
-    return torch.float8_e5m2fnuz if is_fp8_fnuz() else torch.float8_e5m2
+get_torch_float8_e4m3_type = lambda: torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
+get_torch_float8_e5m2_type = lambda: torch.float8_e5m2fnuz if is_fp8_fnuz() else torch.float8_e5m2
 
 def assert_dim_for_all_gather(
     tensor: torch.Tensor, with_all_gather: bool, quantizer: Quantizer

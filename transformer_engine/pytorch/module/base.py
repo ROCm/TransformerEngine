@@ -50,6 +50,8 @@ from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 if IS_HIP_EXTENSION:
     from ..tensor.fsdp2_allgather_tensor import FSDPAGTensor
     from ..triton_kernels.cast import te_quantize_triton
+
+# pylint: disable=wrong-import-position
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..utils import get_device_compute_capability, is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
@@ -58,6 +60,7 @@ from ...common.recipe import DelayedScaling, Recipe
 from ...debug.pytorch.debug_state import TEDebugState
 from ...debug.pytorch.debug_quantization import DebugQuantizer, DebugQuantizedTensor
 from ...debug.pytorch.utils import next_iter_when_debug_should_be_run, any_feature_enabled
+# pylint: enable=wrong-import-position
 
 __all__ = ["initialize_ub", "destroy_ub", "UserBufferQuantizationMode"]
 
@@ -664,7 +667,7 @@ def fill_userbuffers_buffer_for_all_gather(
             columnwise_scale_inv=columnwise_scale_inv,
             fp8_dtype=local_tensor._fp8_dtype,
             quantizer=quantizer,
-            with_gemm_swizzled_scales=local_tensor._with_gemm_swizzled_scales,
+            with_gemm_swizzled_scales=False,
         )
         return global_tensor, local_tensor
 
