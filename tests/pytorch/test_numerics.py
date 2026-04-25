@@ -2127,14 +2127,22 @@ def test_grouped_linear_accuracy(
         torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
 
 
-@pytest.mark.skipif(
-    IS_HIP_EXTENSION or torch.cuda.get_device_capability() != (9, 0),
-    reason="Only enable CUTLASS grouped gemm on Hopper",
-)
+#@pytest.mark.skipif(
+#    IS_HIP_EXTENSION or torch.cuda.get_device_capability() != (9, 0),
+#    reason="Only enable CUTLASS grouped gemm on Hopper",
+#)
 @pytest.mark.parametrize("dtype", param_types, ids=str)
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize(
+    "fp8_model_params",
+    all_boolean if IS_HIP_EXTENSION else [False],
+)
+@pytest.mark.parametrize(
+    "recipe",
+    ([recipe.MXFP8BlockScaling(), None]) if IS_HIP_EXTENSION else [None],
+)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
 def test_grouped_linear_accuracy_cutlass(
@@ -2142,17 +2150,20 @@ def test_grouped_linear_accuracy_cutlass(
     num_gemms,
     bs,
     model,
+    recipe,
+    fp8_model_params,
     fuse_wgrad_accumulation,
     delay_wgrad_compute,
 ):
     os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
+    os.environ["NVTE_ROCM_ENABLE_MXFP8"] = "1"
     test_grouped_linear_accuracy(
         dtype,
         num_gemms,
         bs,
         model,
-        None,
-        False,
+        recipe,
+        fp8_model_params,
         fuse_wgrad_accumulation,
         False,
         delay_wgrad_compute,
@@ -2161,6 +2172,7 @@ def test_grouped_linear_accuracy_cutlass(
         use_cutlass=True,
     )
     os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
+    os.environ.pop("NVTE_ROCM_ENABLE_MXFP8", None)
 
 
 @pytest.mark.parametrize("dtype", param_types, ids=str)
