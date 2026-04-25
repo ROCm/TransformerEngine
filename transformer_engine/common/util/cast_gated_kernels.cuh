@@ -172,23 +172,40 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr uint32_t in_data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
   constexpr uint32_t out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
 
+  const tdm::HIPTensorMap tmap_grad{grad_ptr,
+                                     static_cast<uint32_t>(cols),
+                                     static_cast<uint32_t>(rows),
+                                     static_cast<uint32_t>(cols),
+                                     SHMEM_DIM_X, SHMEM_DIM_Y, in_data_sz};
+  const tdm::HIPTensorMap tmap_act{input_act_ptr,
+                                    static_cast<uint32_t>(cols),
+                                    static_cast<uint32_t>(rows),
+                                    static_cast<uint32_t>(input_act_stride),
+                                    SHMEM_DIM_X, SHMEM_DIM_Y, in_data_sz};
+  const tdm::HIPTensorMap tmap_gate{input_gate_ptr,
+                                     static_cast<uint32_t>(cols),
+                                     static_cast<uint32_t>(rows),
+                                     static_cast<uint32_t>(input_act_stride),
+                                     SHMEM_DIM_X, SHMEM_DIM_Y, in_data_sz};
+  const tdm::HIPTensorMapOut tmap_out_act{output_act_ptr,
+                                           static_cast<uint32_t>(cols),
+                                           static_cast<uint32_t>(rows),
+                                           static_cast<uint32_t>(output_stride),
+                                           SHMEM_DIM_X, SHMEM_DIM_Y, out_data_sz};
+  const tdm::HIPTensorMapOut tmap_out_gate{output_gate_ptr,
+                                            static_cast<uint32_t>(cols),
+                                            static_cast<uint32_t>(rows),
+                                            static_cast<uint32_t>(output_stride),
+                                            SHMEM_DIM_X, SHMEM_DIM_Y, out_data_sz};
+
   // Prefetch data of the first stage
   if constexpr (IS_DGATED) {
-    tdm::copy_2d_to_shared(in_grad_sh, grad_ptr,
-                           chunk_offset_X, chunk_offset_Y,
-                           SHMEM_DIM_X, SHMEM_DIM_Y,
-                           cols, rows, cols, in_data_sz);
-    tdm::copy_2d_to_shared_x2(
-        in_act_sh, input_act_ptr, chunk_offset_X, chunk_offset_Y,
-        in_gate_sh, input_gate_ptr, chunk_offset_X, chunk_offset_Y,
-        SHMEM_DIM_X, SHMEM_DIM_Y,
-        cols, rows, input_act_stride, in_data_sz);
+    tdm::copy_2d_to_shared(in_grad_sh, tmap_grad, chunk_offset_X, chunk_offset_Y);
+    tdm::copy_2d_to_shared_x2(in_act_sh, tmap_act, chunk_offset_X, chunk_offset_Y,
+                               in_gate_sh, tmap_gate, chunk_offset_X, chunk_offset_Y);
   } else {
-    tdm::copy_2d_to_shared_x2(
-        in_act_sh, input_act_ptr, chunk_offset_X, chunk_offset_Y,
-        in_gate_sh, input_gate_ptr, chunk_offset_X, chunk_offset_Y,
-        SHMEM_DIM_X, SHMEM_DIM_Y,
-        cols, rows, input_act_stride, in_data_sz);
+    tdm::copy_2d_to_shared_x2(in_act_sh, tmap_act, chunk_offset_X, chunk_offset_Y,
+                               in_gate_sh, tmap_gate, chunk_offset_X, chunk_offset_Y);
   }
 #endif  // __HIP_PLATFORM_AMD__
 
@@ -217,21 +234,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
 #else  // __HIP_PLATFORM_AMD__ — TDM prefetch
       if constexpr (IS_DGATED) {
-        tdm::copy_2d_to_shared(&in_grad_sh[next_buff * buff_elems], grad_ptr,
-                               chunk_it_offset_x, chunk_it_offset_y,
-                               SHMEM_DIM_X, SHMEM_DIM_Y,
-                               cols, rows, cols, in_data_sz);
+        tdm::copy_2d_to_shared(&in_grad_sh[next_buff * buff_elems], tmap_grad,
+                               chunk_it_offset_x, chunk_it_offset_y);
         tdm::copy_2d_to_shared_x2(
-            &in_act_sh[next_buff * buff_elems], input_act_ptr, chunk_it_offset_x, chunk_it_offset_y,
-            &in_gate_sh[next_buff * buff_elems], input_gate_ptr, chunk_it_offset_x, chunk_it_offset_y,
-            SHMEM_DIM_X, SHMEM_DIM_Y,
-            cols, rows, input_act_stride, in_data_sz);
+            &in_act_sh[next_buff * buff_elems], tmap_act, chunk_it_offset_x, chunk_it_offset_y,
+            &in_gate_sh[next_buff * buff_elems], tmap_gate, chunk_it_offset_x, chunk_it_offset_y);
       } else {
         tdm::copy_2d_to_shared_x2(
-            &in_act_sh[next_buff * buff_elems], input_act_ptr, chunk_it_offset_x, chunk_it_offset_y,
-            &in_gate_sh[next_buff * buff_elems], input_gate_ptr, chunk_it_offset_x, chunk_it_offset_y,
-            SHMEM_DIM_X, SHMEM_DIM_Y,
-            cols, rows, input_act_stride, in_data_sz);
+            &in_act_sh[next_buff * buff_elems], tmap_act, chunk_it_offset_x, chunk_it_offset_y,
+            &in_gate_sh[next_buff * buff_elems], tmap_gate, chunk_it_offset_x, chunk_it_offset_y);
       }
 #endif  // __HIP_PLATFORM_AMD__
     }
@@ -342,15 +353,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const size_t chunk_it_offset_y = chunk_offset_Y + it * BUFFER_DIM_Y;
       const size_t chunk_it_offset_x = chunk_offset_X;
 
-      tdm::store_2d_to_global(out_act_sh_curr, output_act_ptr,
-                              chunk_it_offset_x, chunk_it_offset_y,
-                              SHMEM_DIM_X, SHMEM_DIM_Y,
-                              cols, rows, output_stride, out_data_sz);
+      tdm::store_2d_to_global(out_act_sh_curr, tmap_out_act,
+                              chunk_it_offset_x, chunk_it_offset_y);
       if constexpr (IS_DGATED) {
-        tdm::store_2d_to_global(out_gate_sh_curr, output_gate_ptr,
-                                chunk_it_offset_x, chunk_it_offset_y,
-                                SHMEM_DIM_X, SHMEM_DIM_Y,
-                                cols, rows, output_stride, out_data_sz);
+        tdm::store_2d_to_global(out_gate_sh_curr, tmap_out_gate,
+                                chunk_it_offset_x, chunk_it_offset_y);
       }
       // TDM stores are async — they will be drained at the top of the next iteration
       // (or after the loop for the last iteration).
@@ -585,23 +592,50 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr uint32_t mx_in_data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
   constexpr uint32_t mx_out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
 
+  const tdm::HIPTensorMap mx_tmap_grad{grad_ptr,
+                                        static_cast<uint32_t>(cols),
+                                        static_cast<uint32_t>(rows),
+                                        static_cast<uint32_t>(cols),
+                                        BUFF_DIM_X, BUFF_DIM_Y, mx_in_data_sz};
+  const tdm::HIPTensorMap mx_tmap_act{input_act_ptr,
+                                       static_cast<uint32_t>(cols),
+                                       static_cast<uint32_t>(rows),
+                                       static_cast<uint32_t>(input_act_stride),
+                                       BUFF_DIM_X, BUFF_DIM_Y, mx_in_data_sz};
+  const tdm::HIPTensorMap mx_tmap_gate{input_gate_ptr,
+                                        static_cast<uint32_t>(cols),
+                                        static_cast<uint32_t>(rows),
+                                        static_cast<uint32_t>(input_act_stride),
+                                        BUFF_DIM_X, BUFF_DIM_Y, mx_in_data_sz};
+  const tdm::HIPTensorMapOut mx_tmap_out_act_rw{output_act_rowwise_ptr,
+                                                  static_cast<uint32_t>(cols),
+                                                  static_cast<uint32_t>(rows),
+                                                  static_cast<uint32_t>(output_stride),
+                                                  BUFF_DIM_X, BUFF_DIM_Y, mx_out_data_sz};
+  const tdm::HIPTensorMapOut mx_tmap_out_gate_rw{output_gate_rowwise_ptr,
+                                                   static_cast<uint32_t>(cols),
+                                                   static_cast<uint32_t>(rows),
+                                                   static_cast<uint32_t>(output_stride),
+                                                   BUFF_DIM_X, BUFF_DIM_Y, mx_out_data_sz};
+  const tdm::HIPTensorMapOut mx_tmap_out_act_cw{output_act_colwise_ptr,
+                                                  static_cast<uint32_t>(cols),
+                                                  static_cast<uint32_t>(rows),
+                                                  static_cast<uint32_t>(output_stride),
+                                                  BUFF_DIM_X, BUFF_DIM_Y, mx_out_data_sz};
+  const tdm::HIPTensorMapOut mx_tmap_out_gate_cw{output_gate_colwise_ptr,
+                                                   static_cast<uint32_t>(cols),
+                                                   static_cast<uint32_t>(rows),
+                                                   static_cast<uint32_t>(output_stride),
+                                                   BUFF_DIM_X, BUFF_DIM_Y, mx_out_data_sz};
+
   // TDM prefetch
   if constexpr (IS_DGATED) {
-    tdm::copy_2d_to_shared(&in_grad_sh[0], grad_ptr,
-                           block_offset_X, block_offset_Y,
-                           BUFF_DIM_X, BUFF_DIM_Y,
-                           cols, rows, cols, mx_in_data_sz);
-    tdm::copy_2d_to_shared_x2(
-        &in_act_sh[0], input_act_ptr, block_offset_X, block_offset_Y,
-        &in_gate_sh[0], input_gate_ptr, block_offset_X, block_offset_Y,
-        BUFF_DIM_X, BUFF_DIM_Y,
-        cols, rows, input_act_stride, mx_in_data_sz);
+    tdm::copy_2d_to_shared(&in_grad_sh[0], mx_tmap_grad, block_offset_X, block_offset_Y);
+    tdm::copy_2d_to_shared_x2(&in_act_sh[0], mx_tmap_act, block_offset_X, block_offset_Y,
+                               &in_gate_sh[0], mx_tmap_gate, block_offset_X, block_offset_Y);
   } else {
-    tdm::copy_2d_to_shared_x2(
-        &in_act_sh[0], input_act_ptr, block_offset_X, block_offset_Y,
-        &in_gate_sh[0], input_gate_ptr, block_offset_X, block_offset_Y,
-        BUFF_DIM_X, BUFF_DIM_Y,
-        cols, rows, input_act_stride, mx_in_data_sz);
+    tdm::copy_2d_to_shared_x2(&in_act_sh[0], mx_tmap_act, block_offset_X, block_offset_Y,
+                               &in_gate_sh[0], mx_tmap_gate, block_offset_X, block_offset_Y);
   }
 #endif  // __HIP_PLATFORM_AMD__
 
@@ -641,21 +675,15 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const size_t global_offset_X = block_offset_X;
       const size_t next_buff_offset = next_buff * BUFF_DIM;
       if constexpr (IS_DGATED) {
-        tdm::copy_2d_to_shared(&in_grad_sh[next_buff_offset], grad_ptr,
-                               global_offset_X, global_offset_Y,
-                               BUFF_DIM_X, BUFF_DIM_Y,
-                               cols, rows, cols, mx_in_data_sz);
+        tdm::copy_2d_to_shared(&in_grad_sh[next_buff_offset], mx_tmap_grad,
+                               global_offset_X, global_offset_Y);
         tdm::copy_2d_to_shared_x2(
-            &in_act_sh[next_buff_offset], input_act_ptr, global_offset_X, global_offset_Y,
-            &in_gate_sh[next_buff_offset], input_gate_ptr, global_offset_X, global_offset_Y,
-            BUFF_DIM_X, BUFF_DIM_Y,
-            cols, rows, input_act_stride, mx_in_data_sz);
+            &in_act_sh[next_buff_offset], mx_tmap_act, global_offset_X, global_offset_Y,
+            &in_gate_sh[next_buff_offset], mx_tmap_gate, global_offset_X, global_offset_Y);
       } else {
         tdm::copy_2d_to_shared_x2(
-            &in_act_sh[next_buff_offset], input_act_ptr, global_offset_X, global_offset_Y,
-            &in_gate_sh[next_buff_offset], input_gate_ptr, global_offset_X, global_offset_Y,
-            BUFF_DIM_X, BUFF_DIM_Y,
-            cols, rows, input_act_stride, mx_in_data_sz);
+            &in_act_sh[next_buff_offset], mx_tmap_act, global_offset_X, global_offset_Y,
+            &in_gate_sh[next_buff_offset], mx_tmap_gate, global_offset_X, global_offset_Y);
       }
 #endif  // __HIP_PLATFORM_AMD__
     }
@@ -1108,27 +1136,19 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const size_t buff_offset = buff * BUFF_DIM;
 
       if constexpr (ROWWISE_SCALING) {
-        tdm::store_2d_to_global(&out_act_rowwise_sh[buff_offset], output_act_rowwise_ptr,
-                                global_offset_X, global_offset_Y,
-                                BUFF_DIM_X, BUFF_DIM_Y,
-                                cols, rows, output_stride, mx_out_data_sz);
+        tdm::store_2d_to_global(&out_act_rowwise_sh[buff_offset], mx_tmap_out_act_rw,
+                                global_offset_X, global_offset_Y);
         if constexpr (IS_DGATED) {
-          tdm::store_2d_to_global(&out_gate_rowwise_sh[buff_offset], output_gate_rowwise_ptr,
-                                  global_offset_X, global_offset_Y,
-                                  BUFF_DIM_X, BUFF_DIM_Y,
-                                  cols, rows, output_stride, mx_out_data_sz);
+          tdm::store_2d_to_global(&out_gate_rowwise_sh[buff_offset], mx_tmap_out_gate_rw,
+                                  global_offset_X, global_offset_Y);
         }
       }
       if constexpr (COLWISE_SCALING) {
-        tdm::store_2d_to_global(&out_act_colwise_sh[buff_offset], output_act_colwise_ptr,
-                                global_offset_X, global_offset_Y,
-                                BUFF_DIM_X, BUFF_DIM_Y,
-                                cols, rows, output_stride, mx_out_data_sz);
+        tdm::store_2d_to_global(&out_act_colwise_sh[buff_offset], mx_tmap_out_act_cw,
+                                global_offset_X, global_offset_Y);
         if constexpr (IS_DGATED) {
-          tdm::store_2d_to_global(&out_gate_colwise_sh[buff_offset], output_gate_colwise_ptr,
-                                  global_offset_X, global_offset_Y,
-                                  BUFF_DIM_X, BUFF_DIM_Y,
-                                  cols, rows, output_stride, mx_out_data_sz);
+          tdm::store_2d_to_global(&out_gate_colwise_sh[buff_offset], mx_tmap_out_gate_cw,
+                                  global_offset_X, global_offset_Y);
         }
       }
       // TDM stores are async — they will be drained at the top of the next iteration

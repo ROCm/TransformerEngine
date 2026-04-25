@@ -162,21 +162,6 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       const int chunk_it_offset_y = chunk_offset_Y + iter * MXFP8_BUFFER_DIM_Y;
       const int chunk_it_offset_x = chunk_offset_X;
       const size_t row_base = chunk_it_offset_y;
-#if defined(__gfx1250__)
-      constexpr uint32_t data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
-      if constexpr (IS_DACT) {
-        tdm::copy_2d_to_shared_x2(
-            &in_sh[0][0], input_ptr, chunk_it_offset_x, chunk_it_offset_y,
-            &act_in_sh[0][0], act_input_ptr, chunk_it_offset_x, chunk_it_offset_y,
-            MXFP8_SHMEM_DIM_X, MXFP8_SHMEM_DIM_Y, cols, rows, cols, data_sz);
-      } else {
-        tdm::copy_2d_to_shared(
-            &in_sh[0][0], input_ptr, chunk_it_offset_x, chunk_it_offset_y,
-            MXFP8_SHMEM_DIM_X, MXFP8_SHMEM_DIM_Y, cols, rows, cols, data_sz);
-      }
-      tdm::wait_tensorcnt_0();
-      __syncthreads();
-#else
       if constexpr (IS_DACT) {
         copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&act_in_sh[0][0], act_input_ptr,
                           chunk_it_offset_x, chunk_it_offset_y, cols,
@@ -186,7 +171,6 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
                         chunk_it_offset_y, cols, MXFP8_SHMEM_DIM_Y,
                         MXFP8_SHMEM_DIM_X, rows, cols);
       __syncthreads();
-#endif
 
       if constexpr (USE_ROWWISE_SCALING) {
         Vec<IType, ELEMS_PER_THREAD> in;
@@ -329,23 +313,6 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       
       __syncthreads();
 
-#if defined(__gfx1250__)
-      constexpr uint32_t out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
-      if constexpr (USE_ROWWISE_SCALING) {
-        tdm::store_2d_to_global(&out_rowwise_sh[0][0], output_rowwise,
-                                chunk_it_offset_x, chunk_it_offset_y,
-                                MXFP8_SHMEM_DIM_X, MXFP8_SHMEM_DIM_Y,
-                                cols, rows, cols, out_data_sz);
-      }
-      if constexpr (USE_COLWISE_SCALING) {
-        tdm::store_2d_to_global(&out_colwise_sh[0][0], output_colwise,
-                                chunk_it_offset_x, chunk_it_offset_y,
-                                MXFP8_SHMEM_DIM_X, MXFP8_SHMEM_DIM_Y,
-                                cols, rows, cols, out_data_sz);
-      }
-      tdm::wait_tensorcnt_0();
-      __syncthreads();
-#else
       if constexpr (USE_ROWWISE_SCALING) {
         bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_rowwise_sh[0][0], output_rowwise, chunk_it_offset_x,
                                         chunk_it_offset_y, cols, MXFP8_SHMEM_DIM_Y,
@@ -358,7 +325,6 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       }
 
       __syncthreads();
-#endif
     }
   }
 

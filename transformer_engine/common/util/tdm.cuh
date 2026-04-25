@@ -56,6 +56,35 @@ __device__ __forceinline__ bool is_tdm_wave() {
 }
 
 // ---------------------------------------------------------------------------
+// HIPTensorMap: device-side tensor descriptor (AMD analog of CUtensorMap)
+// ---------------------------------------------------------------------------
+// On NV, CUtensorMap is built on the host and encodes both full tensor shape
+// and tile shape; hardware auto-clamps at boundaries. TDM has no host-side
+// descriptor — the device supplies the tile origin, remaining extent, and tile
+// dims at each instruction. HIPTensorMap centralises that metadata so callers
+// only pass a single descriptor + tile coordinates instead of 6+ scalars.
+
+struct HIPTensorMap {
+  const void* base_ptr;  // pointer to tensor base (global memory)
+  uint32_t tensor_w;     // full tensor width in elements
+  uint32_t tensor_h;     // full tensor height in elements
+  uint32_t stride;       // row stride in elements (may differ from tensor_w)
+  uint32_t tile_dim_x;   // tile width to transfer per call
+  uint32_t tile_dim_y;   // tile height to transfer per call
+  uint32_t data_size;    // log2(sizeof(element)): 0=1B,1=2B,2=4B,3=8B
+};
+
+struct HIPTensorMapOut {
+  void* base_ptr;
+  uint32_t tensor_w;
+  uint32_t tensor_h;
+  uint32_t stride;
+  uint32_t tile_dim_x;
+  uint32_t tile_dim_y;
+  uint32_t data_size;
+};
+
+// ---------------------------------------------------------------------------
 // Core 2D load: global memory -> LDS
 // ---------------------------------------------------------------------------
 
@@ -200,6 +229,9 @@ void copy_2d_to_shared(void* lds_dst,
                        uint32_t stride,
                        uint32_t data_size) {
   if (is_tdm_wave()) {
+    if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0)
+      printf("[TDM] copy_2d_to_shared: chunk=(%u,%u) tile=(%u,%u) tensor=(%u,%u)\n",
+             chunk_x, chunk_y, tile_dim_x, tile_dim_y, tensor_w, tensor_h);
     uint32_t lds_off = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(lds_dst));
     load_2d_to_lds(global_base, lds_off,
                    tensor_w, tensor_h,
@@ -290,6 +322,80 @@ void store_2d_to_global(const void* lds_src,
   }
 }
 
+// ---------------------------------------------------------------------------
+// HIPTensorMap-based overloads (single descriptor + tile coords)
+// ---------------------------------------------------------------------------
+
+__device__ __forceinline__
+void copy_2d_to_shared(void* lds_dst,
+                       const HIPTensorMap& tmap,
+                       uint32_t chunk_x,
+                       uint32_t chunk_y) {
+  copy_2d_to_shared(lds_dst, tmap.base_ptr, chunk_x, chunk_y,
+                    tmap.tile_dim_x, tmap.tile_dim_y,
+                    tmap.tensor_w, tmap.tensor_h,
+                    tmap.stride, tmap.data_size);
+}
+
+__device__ __forceinline__
+void copy_2d_to_shared_x2(void* dst1, const HIPTensorMap& tmap1, uint32_t cx1, uint32_t cy1,
+                           void* dst2, const HIPTensorMap& tmap2, uint32_t cx2, uint32_t cy2) {
+  if (is_tdm_wave()) {
+    uint32_t lds_off1 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst1));
+    load_2d_to_lds(tmap1.base_ptr, lds_off1,
+                   tmap1.tensor_w, tmap1.tensor_h,
+                   tmap1.tile_dim_x, tmap1.tile_dim_y,
+                   tmap1.stride, tmap1.data_size,
+                   cx1, cy1);
+
+    uint32_t lds_off2 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst2));
+    load_2d_to_lds(tmap2.base_ptr, lds_off2,
+                   tmap2.tensor_w, tmap2.tensor_h,
+                   tmap2.tile_dim_x, tmap2.tile_dim_y,
+                   tmap2.stride, tmap2.data_size,
+                   cx2, cy2);
+  }
+}
+
+__device__ __forceinline__
+void copy_2d_to_shared_x3(void* dst1, const HIPTensorMap& tmap1, uint32_t cx1, uint32_t cy1,
+                           void* dst2, const HIPTensorMap& tmap2, uint32_t cx2, uint32_t cy2,
+                           void* dst3, const HIPTensorMap& tmap3, uint32_t cx3, uint32_t cy3) {
+  if (is_tdm_wave()) {
+    uint32_t lds_off1 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst1));
+    load_2d_to_lds(tmap1.base_ptr, lds_off1,
+                   tmap1.tensor_w, tmap1.tensor_h,
+                   tmap1.tile_dim_x, tmap1.tile_dim_y,
+                   tmap1.stride, tmap1.data_size,
+                   cx1, cy1);
+
+    uint32_t lds_off2 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst2));
+    load_2d_to_lds(tmap2.base_ptr, lds_off2,
+                   tmap2.tensor_w, tmap2.tensor_h,
+                   tmap2.tile_dim_x, tmap2.tile_dim_y,
+                   tmap2.stride, tmap2.data_size,
+                   cx2, cy2);
+
+    uint32_t lds_off3 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst3));
+    load_2d_to_lds(tmap3.base_ptr, lds_off3,
+                   tmap3.tensor_w, tmap3.tensor_h,
+                   tmap3.tile_dim_x, tmap3.tile_dim_y,
+                   tmap3.stride, tmap3.data_size,
+                   cx3, cy3);
+  }
+}
+
+__device__ __forceinline__
+void store_2d_to_global(const void* lds_src,
+                        const HIPTensorMapOut& tmap,
+                        uint32_t chunk_x,
+                        uint32_t chunk_y) {
+  store_2d_to_global(lds_src, tmap.base_ptr, chunk_x, chunk_y,
+                     tmap.tile_dim_x, tmap.tile_dim_y,
+                     tmap.tensor_w, tmap.tensor_h,
+                     tmap.stride, tmap.data_size);
+}
+
 #else  // !defined(__gfx1250__)
 
 // Stubs for non-gfx1250 AMD targets -- these should never be called.
@@ -304,16 +410,32 @@ __device__ __forceinline__ constexpr uint32_t get_data_size_from_bits(size_t typ
   return (type_num_bits <= 8) ? 0 : (type_num_bits <= 16) ? 1 : (type_num_bits <= 32) ? 2 : 3;
 }
 
+struct HIPTensorMap {
+  const void* base_ptr;
+  uint32_t tensor_w, tensor_h, stride, tile_dim_x, tile_dim_y, data_size;
+};
+struct HIPTensorMapOut {
+  void* base_ptr;
+  uint32_t tensor_w, tensor_h, stride, tile_dim_x, tile_dim_y, data_size;
+};
+
 __device__ __forceinline__
 void copy_2d_to_shared(void*, const void*, uint32_t, uint32_t,
                        uint32_t, uint32_t, uint32_t, uint32_t,
                        uint32_t, uint32_t) {}
 
 __device__ __forceinline__
+void copy_2d_to_shared(void*, const HIPTensorMap&, uint32_t, uint32_t) {}
+
+__device__ __forceinline__
 void copy_2d_to_shared_x2(void*, const void*, uint32_t, uint32_t,
                            void*, const void*, uint32_t, uint32_t,
                            uint32_t, uint32_t, uint32_t, uint32_t,
                            uint32_t, uint32_t) {}
+
+__device__ __forceinline__
+void copy_2d_to_shared_x2(void*, const HIPTensorMap&, uint32_t, uint32_t,
+                           void*, const HIPTensorMap&, uint32_t, uint32_t) {}
 
 __device__ __forceinline__
 void copy_2d_to_shared_x3(void*, const void*, uint32_t, uint32_t,
@@ -323,9 +445,17 @@ void copy_2d_to_shared_x3(void*, const void*, uint32_t, uint32_t,
                            uint32_t, uint32_t) {}
 
 __device__ __forceinline__
+void copy_2d_to_shared_x3(void*, const HIPTensorMap&, uint32_t, uint32_t,
+                           void*, const HIPTensorMap&, uint32_t, uint32_t,
+                           void*, const HIPTensorMap&, uint32_t, uint32_t) {}
+
+__device__ __forceinline__
 void store_2d_to_global(const void*, void*, uint32_t, uint32_t,
                         uint32_t, uint32_t, uint32_t, uint32_t,
                         uint32_t, uint32_t) {}
+
+__device__ __forceinline__
+void store_2d_to_global(const void*, const HIPTensorMapOut&, uint32_t, uint32_t) {}
 
 #endif  // defined(__gfx1250__)
 

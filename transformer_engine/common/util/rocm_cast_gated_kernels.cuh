@@ -135,28 +135,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const size_t row_base = chunk_it_offset_y; 
 
     // Initiate bulk tensor copy
-#if defined(__gfx1250__)
-    {
-      constexpr uint32_t data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
-      if constexpr (IS_DGATED) {
-        // grad uses stride=cols, act/gate use stride=2*cols -- issue separately
-        tdm::copy_2d_to_shared(
-            &in_grad_sh[0], grad_ptr, chunk_it_offset_x, chunk_it_offset_y,
-            SHMEM_DIM_X, SHMEM_DIM_Y, cols, rows, cols, data_sz);
-        tdm::copy_2d_to_shared_x2(
-            &in_act_sh[0], input_act, chunk_it_offset_x, chunk_it_offset_y,
-            &in_gate_sh[0], input_gate, chunk_it_offset_x, chunk_it_offset_y,
-            SHMEM_DIM_X, SHMEM_DIM_Y, cols, rows, 2*cols, data_sz);
-      } else {
-        tdm::copy_2d_to_shared_x2(
-            &in_act_sh[0], input_act, chunk_it_offset_x, chunk_it_offset_y,
-            &in_gate_sh[0], input_gate, chunk_it_offset_x, chunk_it_offset_y,
-            SHMEM_DIM_X, SHMEM_DIM_Y, cols, rows, 2*cols, data_sz);
-      }
-      tdm::wait_tensorcnt_0();
-      __syncthreads();
-    }
-#else
     if constexpr (IS_DGATED) {
       copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_grad_sh[0], grad_ptr, chunk_it_offset_x, chunk_it_offset_y,
                         cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
@@ -171,7 +149,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                       2*cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
 
     __syncthreads();
-#endif
 
     const int iteration_scale_colwise_offset_Y = scales_colwise_chunk_offset_Y + it;
     const int iteration_scale_rowwise_offset_Y = scales_rowwise_chunk_offset_Y + it * BUFFER_DIM_Y;
@@ -377,33 +354,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
     __syncthreads();
 
-#if defined(__gfx1250__)
-    {
-      constexpr uint32_t out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
-      if constexpr (USE_ROWWISE_SCALING) {
-        tdm::store_2d_to_global(&out_act_rowwise_sh[0], output_act_rowwise,
-                                chunk_it_offset_x, chunk_it_offset_y,
-                                SHMEM_DIM_X, SHMEM_DIM_Y, cols, rows, output_cols, out_data_sz);
-        if constexpr (IS_DGATED) {
-          tdm::store_2d_to_global(&out_gate_rowwise_sh[0], output_gate_rowwise,
-                                  chunk_it_offset_x, chunk_it_offset_y,
-                                  SHMEM_DIM_X, SHMEM_DIM_Y, cols, rows, output_cols, out_data_sz);
-        }
-      }
-      if constexpr (USE_COLWISE_SCALING) {
-        tdm::store_2d_to_global(&out_act_colwise_sh[0], output_act_colwise,
-                                chunk_it_offset_x, chunk_it_offset_y,
-                                SHMEM_DIM_X, SHMEM_DIM_Y, cols, rows, output_cols, out_data_sz);
-        if constexpr (IS_DGATED) {
-          tdm::store_2d_to_global(&out_gate_colwise_sh[0], output_gate_colwise,
-                                  chunk_it_offset_x, chunk_it_offset_y,
-                                  SHMEM_DIM_X, SHMEM_DIM_Y, cols, rows, output_cols, out_data_sz);
-        }
-      }
-      tdm::wait_tensorcnt_0();
-      __syncthreads();
-    }
-#else
     if constexpr (USE_ROWWISE_SCALING) {
       bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_act_rowwise_sh[0], output_act_rowwise, chunk_it_offset_x,
                                       chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
@@ -422,7 +372,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
     }
     __syncthreads();
-#endif
   }
 }
 } // namespace gated_kernels

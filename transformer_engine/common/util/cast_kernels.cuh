@@ -204,17 +204,33 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr uint32_t mx_in_data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
   constexpr uint32_t mx_out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
 
+  const tdm::HIPTensorMap tmap_in{input_ptr,
+                                   static_cast<uint32_t>(cols),
+                                   static_cast<uint32_t>(rows),
+                                   static_cast<uint32_t>(cols),
+                                   BUFF_DIM_X, BUFF_DIM_Y, mx_in_data_sz};
+  const tdm::HIPTensorMap tmap_act_in{act_input_ptr,
+                                       static_cast<uint32_t>(cols),
+                                       static_cast<uint32_t>(rows),
+                                       static_cast<uint32_t>(cols),
+                                       BUFF_DIM_X, BUFF_DIM_Y, mx_in_data_sz};
+  const tdm::HIPTensorMapOut tmap_rowwise{output_rowwise_ptr,
+                                           static_cast<uint32_t>(cols),
+                                           static_cast<uint32_t>(rows),
+                                           static_cast<uint32_t>(cols),
+                                           BUFF_DIM_X, BUFF_DIM_Y, mx_out_data_sz};
+  const tdm::HIPTensorMapOut tmap_colwise{output_colwise_ptr,
+                                           static_cast<uint32_t>(cols),
+                                           static_cast<uint32_t>(rows),
+                                           static_cast<uint32_t>(cols),
+                                           BUFF_DIM_X, BUFF_DIM_Y, mx_out_data_sz};
+
   // Prefetch first stage
   if constexpr (IS_DACT) {
-    tdm::copy_2d_to_shared_x2(
-        &in_sh[0], input_ptr, block_offset_X, block_offset_Y,
-        &act_in_sh[0], act_input_ptr, block_offset_X, block_offset_Y,
-        BUFF_DIM_X, BUFF_DIM_Y, cols, rows, cols, mx_in_data_sz);
+    tdm::copy_2d_to_shared_x2(&in_sh[0], tmap_in, block_offset_X, block_offset_Y,
+                               &act_in_sh[0], tmap_act_in, block_offset_X, block_offset_Y);
   } else {
-    tdm::copy_2d_to_shared(&in_sh[0], input_ptr,
-                           block_offset_X, block_offset_Y,
-                           BUFF_DIM_X, BUFF_DIM_Y,
-                           cols, rows, cols, mx_in_data_sz);
+    tdm::copy_2d_to_shared(&in_sh[0], tmap_in, block_offset_X, block_offset_Y);
   }
 #endif  // __HIP_PLATFORM_AMD__
 
@@ -252,15 +268,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         const size_t global_offset_X = block_offset_X;
         const size_t next_buff_offset = next_buff * BUFF_DIM;
         if constexpr (IS_DACT) {
-          tdm::copy_2d_to_shared_x2(
-              &in_sh[next_buff_offset], input_ptr, global_offset_X, global_offset_Y,
-              &act_in_sh[next_buff_offset], act_input_ptr, global_offset_X, global_offset_Y,
-              BUFF_DIM_X, BUFF_DIM_Y, cols, rows, cols, mx_in_data_sz);
+          tdm::copy_2d_to_shared_x2(&in_sh[next_buff_offset], tmap_in,
+                                     global_offset_X, global_offset_Y,
+                                     &act_in_sh[next_buff_offset], tmap_act_in,
+                                     global_offset_X, global_offset_Y);
         } else {
-          tdm::copy_2d_to_shared(&in_sh[next_buff_offset], input_ptr,
-                                 global_offset_X, global_offset_Y,
-                                 BUFF_DIM_X, BUFF_DIM_Y,
-                                 cols, rows, cols, mx_in_data_sz);
+          tdm::copy_2d_to_shared(&in_sh[next_buff_offset], tmap_in,
+                                 global_offset_X, global_offset_Y);
         }
       }
 #endif  // __HIP_PLATFORM_AMD__
@@ -564,14 +578,12 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       const size_t buff_offset = buff * BUFF_DIM;
 
       if constexpr (ROWWISE_SCALING) {
-        tdm::store_2d_to_global(&out_rowwise_sh[buff_offset], output_rowwise_ptr,
-                                global_offset_X, global_offset_Y,
-                                BUFF_DIM_X, BUFF_DIM_Y, cols, rows, cols, mx_out_data_sz);
+        tdm::store_2d_to_global(&out_rowwise_sh[buff_offset], tmap_rowwise,
+                                global_offset_X, global_offset_Y);
       }
       if constexpr (COLWISE_SCALING) {
-        tdm::store_2d_to_global(&out_colwise_sh[buff_offset], output_colwise_ptr,
-                                global_offset_X, global_offset_Y,
-                                BUFF_DIM_X, BUFF_DIM_Y, cols, rows, cols, mx_out_data_sz);
+        tdm::store_2d_to_global(&out_colwise_sh[buff_offset], tmap_colwise,
+                                global_offset_X, global_offset_Y);
       }
       tdm::wait_tensorcnt_0();
       __syncthreads();
@@ -755,17 +767,29 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
   constexpr uint32_t fp8_in_data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
   constexpr uint32_t fp8_out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
 
+  const tdm::HIPTensorMap fp8_tmap_in{input_ptr,
+                                       static_cast<uint32_t>(cols),
+                                       static_cast<uint32_t>(rows),
+                                       static_cast<uint32_t>(cols),
+                                       FP8_SHMEM_DIM_X, FP8_SHMEM_DIM_Y, fp8_in_data_sz};
+  const tdm::HIPTensorMap fp8_tmap_act_in{act_input_ptr,
+                                           static_cast<uint32_t>(cols),
+                                           static_cast<uint32_t>(rows),
+                                           static_cast<uint32_t>(cols),
+                                           FP8_SHMEM_DIM_X, FP8_SHMEM_DIM_Y, fp8_in_data_sz};
+  const tdm::HIPTensorMapOut fp8_tmap_out{output_ptr,
+                                           static_cast<uint32_t>(cols),
+                                           static_cast<uint32_t>(rows),
+                                           static_cast<uint32_t>(cols),
+                                           FP8_SHMEM_DIM_X, FP8_SHMEM_DIM_Y, fp8_out_data_sz};
+
   // Prefetch first buffer
   if constexpr (IS_DACT) {
-    tdm::copy_2d_to_shared_x2(
-        &in_sh[0][0][0], input_ptr, chunk_offset_X, chunk_offset_Y,
-        &act_in_sh[0][0][0], act_input_ptr, chunk_offset_X, chunk_offset_Y,
-        FP8_SHMEM_DIM_X, FP8_SHMEM_DIM_Y, cols, rows, cols, fp8_in_data_sz);
+    tdm::copy_2d_to_shared_x2(&in_sh[0][0][0], fp8_tmap_in, chunk_offset_X, chunk_offset_Y,
+                               &act_in_sh[0][0][0], fp8_tmap_act_in,
+                               chunk_offset_X, chunk_offset_Y);
   } else {
-    tdm::copy_2d_to_shared(&in_sh[0][0][0], input_ptr,
-                           chunk_offset_X, chunk_offset_Y,
-                           FP8_SHMEM_DIM_X, FP8_SHMEM_DIM_Y,
-                           cols, rows, cols, fp8_in_data_sz);
+    tdm::copy_2d_to_shared(&in_sh[0][0][0], fp8_tmap_in, chunk_offset_X, chunk_offset_Y);
   }
 #endif  // __HIP_PLATFORM_AMD__
 
@@ -794,15 +818,13 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
         const size_t chunk_it_offset_y = chunk_offset_Y + next_iter * FP8_BUFFER_DIM_Y;
         const size_t chunk_it_offset_x = chunk_offset_X;
         if constexpr (IS_DACT) {
-          tdm::copy_2d_to_shared_x2(
-              &in_sh[next_buff][0][0], input_ptr, chunk_it_offset_x, chunk_it_offset_y,
-              &act_in_sh[next_buff][0][0], act_input_ptr, chunk_it_offset_x, chunk_it_offset_y,
-              FP8_SHMEM_DIM_X, FP8_SHMEM_DIM_Y, cols, rows, cols, fp8_in_data_sz);
+          tdm::copy_2d_to_shared_x2(&in_sh[next_buff][0][0], fp8_tmap_in,
+                                     chunk_it_offset_x, chunk_it_offset_y,
+                                     &act_in_sh[next_buff][0][0], fp8_tmap_act_in,
+                                     chunk_it_offset_x, chunk_it_offset_y);
         } else {
-          tdm::copy_2d_to_shared(&in_sh[next_buff][0][0], input_ptr,
-                                 chunk_it_offset_x, chunk_it_offset_y,
-                                 FP8_SHMEM_DIM_X, FP8_SHMEM_DIM_Y,
-                                 cols, rows, cols, fp8_in_data_sz);
+          tdm::copy_2d_to_shared(&in_sh[next_buff][0][0], fp8_tmap_in,
+                                 chunk_it_offset_x, chunk_it_offset_y);
         }
       }
 #endif  // __HIP_PLATFORM_AMD__
@@ -887,10 +909,8 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
     {
       const size_t chunk_it_offset_y = chunk_offset_Y + iter * FP8_BUFFER_DIM_Y;
       const size_t chunk_it_offset_x = chunk_offset_X;
-      tdm::store_2d_to_global(&out_sh[buff][0][0], output_ptr,
-                              chunk_it_offset_x, chunk_it_offset_y,
-                              FP8_SHMEM_DIM_X, FP8_SHMEM_DIM_Y,
-                              cols, rows, cols, fp8_out_data_sz);
+      tdm::store_2d_to_global(&out_sh[buff][0][0], fp8_tmap_out,
+                              chunk_it_offset_x, chunk_it_offset_y);
       tdm::wait_tensorcnt_0();
       __syncthreads();
     }
