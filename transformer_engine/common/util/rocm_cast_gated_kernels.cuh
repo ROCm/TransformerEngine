@@ -374,4 +374,87 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   }
 }
 } // namespace gated_kernels
+
+template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
+          float (*DActOP)(float, const ParamOP &)>
+void rocm_cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *output,
+                            cudaStream_t stream) {
+  using namespace gated_kernels;
+
+  const bool USE_ROWWISE_SCALING = output->has_data();
+  const bool USE_COLWISE_SCALING = output->has_columnwise_data();
+
+  const size_t rows = gated_input.flat_first_dim();
+  const size_t cols = gated_input.flat_last_dim() / 2;
+  const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
+
+  const size_t blocks_Y = DIVUP(rows, CHUNK_DIM_Y);
+  const size_t blocks_X = DIVUP(cols, CHUNK_DIM_X);
+  const dim3 grid(blocks_X, blocks_Y);
+  const dim3 block_size(THREADS_PER_CHUNK);
+
+  size_t scale_stride_rowwise = USE_ROWWISE_SCALING ? output->scale_inv.shape[1] : 1;
+  size_t scale_stride_colwise = USE_COLWISE_SCALING ? output->columnwise_scale_inv.shape[1] : 1;
+
+  e8m0_t *const scales_rowwise_ptr =
+      USE_ROWWISE_SCALING ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
+  e8m0_t *const scales_colwise_ptr =
+      USE_COLWISE_SCALING ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      gated_input.dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          output->dtype(), OType,
+
+          const IType *grad_ptr = IS_DGATED ? reinterpret_cast<const IType *>(grad.data.dptr) : nullptr;
+          const IType *input_act_ptr = reinterpret_cast<const IType *>(gated_input.data.dptr);
+          const IType *input_gate_ptr = reinterpret_cast<const IType *>(gated_input.data.dptr) + cols;
+          OType *output_act_rowwise_ptr = USE_ROWWISE_SCALING ? reinterpret_cast<OType *>(output->data.dptr) : nullptr;
+          OType *output_gate_rowwise_ptr = USE_ROWWISE_SCALING ? reinterpret_cast<OType *>(output->data.dptr) + cols : nullptr;
+          OType *output_act_colwise_ptr = USE_COLWISE_SCALING ? reinterpret_cast<OType *>(output->columnwise_data.dptr) : nullptr;
+          OType *output_gate_colwise_ptr = USE_COLWISE_SCALING ? reinterpret_cast<OType *>(output->columnwise_data.dptr) + cols : nullptr;
+
+          constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
+          constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
+
+          const size_t buff_elems_total = BUFFERS_NUM * BUFFER_DIM_Y * BUFFER_DIM_X;
+          const size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
+          const size_t output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
+          const size_t buff_size_aligned_in =
+              DIVUP_TO_MULTIPLE(input_buff_size, ALIGNMENT_SIZE);
+          const size_t buff_size_aligned_out =
+              DIVUP_TO_MULTIPLE(output_buff_size, ALIGNMENT_SIZE);
+
+          const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
+          const size_t in_mem = grad_mem + buff_size_aligned_in + buff_size_aligned_in;
+          const size_t out_act_mem = buff_size_aligned_out;
+          const size_t out_gate_mem = buff_size_aligned_out;
+          size_t out_mem = out_act_mem + out_gate_mem;
+          if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) { out_mem *= 2; }
+          const size_t shmem_size = in_mem + out_mem + ALIGNMENT_SIZE;
+
+          TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+            (USE_COLWISE_SCALING ? 32 : 1), SCALE_DIM_Y,
+            TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+              (USE_ROWWISE_SCALING ? 32 : 1), SCALE_DIM_X,
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(!(cols % (32 * sizeof(IType))), IS_ALIGNED, {
+                NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                    cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
+                                            SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>,
+                    cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+
+                cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
+                                        SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
+                    <<<grid, block_size, shmem_size, stream>>>(
+                        grad_ptr, input_act_ptr, input_gate_ptr,
+                        output_act_rowwise_ptr, output_gate_rowwise_ptr,
+                        output_act_colwise_ptr, output_gate_colwise_ptr,
+                        scales_rowwise_ptr, scales_colwise_ptr, rows, cols,
+                        scale_stride_rowwise, scale_stride_colwise);
+                NVTE_CHECK_CUDA(cudaGetLastError());
+          })));  // NOLINT(*)
+      );       // NOLINT(*)
+  );           // NOLINT(*)
+}
+
 } // namespace transformer_engine

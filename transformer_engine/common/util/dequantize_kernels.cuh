@@ -377,22 +377,12 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
               TRANSFORMER_ENGINE_SWITCH_CONDITION(
                   !(cols % (32 * sizeof(OType))), IS_ALIGNED,
                   {
-                    const char *env = std::getenv("NVTE_USE_NV_UPSTREAM_FLOW");
-                    if (env && std::string(env) == "1") {
-                      // NV upstream kernel with TDM
-                      dequantization::dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
-                          <<<grid, block, 0, stream>>>(
-                              reinterpret_cast<const IType *>(input_data.dptr),
-                              reinterpret_cast<OType *>(output->data.dptr),
-                              scales_ptr, rows, cols, scales_stride);
-                    } else {
-                      // Default ROCm flow
-                      dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
-                          <<<grid, block, 0, stream>>>(
-                              reinterpret_cast<const IType *>(input_data.dptr),
-                              reinterpret_cast<OType *>(output->data.dptr),
-                              scales_ptr, rows, cols, scales_stride);
-                    }
+                    // TDM flow — uses dequantization::dequantize_mxfp8_kernel
+                    dequantization::dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
+                        <<<grid, block, 0, stream>>>(
+                            reinterpret_cast<const IType *>(input_data.dptr),
+                            reinterpret_cast<OType *>(output->data.dptr),
+                            scales_ptr, rows, cols, scales_stride);
                   });  // NOLINT(*)
 #else // #ifdef __HIP_PLATFORM_AMD__
                   alignas(64) CUtensorMap tensor_map_input{};
@@ -427,14 +417,24 @@ void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream)
     dequantization::fp8_dequantize(input, output, stream);
   } else if (is_mxfp_scaling(input.scaling_mode)) {
 #ifdef __HIP_PLATFORM_AMD__
-    if (1) {
+    {
+      static const bool use_nv_upstream_flow = [] {
+        const char *env = std::getenv("NVTE_USE_NV_UPSTREAM_FLOW");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+      }();
+      if (use_nv_upstream_flow) {
+        dequantization::mxfp8_dequantize(input, output, stream);
+      } else {
+        rocm_mxfp8_dequantize(input, output, stream);
+      }
+    }
 #else
     if (is_supported_by_CC_100()) {
-#endif
       dequantization::mxfp8_dequantize(input, output, stream);
     } else {
       NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
     }
+#endif
   } else {
     // TODO(kwyss): Move dequantization code from torch to C++ for NVTE_BLOCK_SCALING
     NVTE_ERROR("Not implemented scaling mode: " + to_string(input.scaling_mode) + ".");

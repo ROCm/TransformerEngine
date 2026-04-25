@@ -134,4 +134,57 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   }
 }
 } // namespace dequantization
+
+static void rocm_mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
+  using namespace dequantization;
+
+  bool use_rowwise_scaling = input.has_data();
+  bool use_colwise_scaling = input.has_columnwise_data();
+
+  const size_t scale_dim_X_rowwise = use_rowwise_scaling ? 32 : 1;
+  const size_t scale_dim_Y_colwise = use_colwise_scaling ? 32 : 1;
+
+  const size_t rows = input.flat_first_dim();
+  const size_t cols = input.flat_last_dim();
+  const size_t chunks_Y = DIVUP(rows, CHUNK_DIM_Y);
+  const size_t chunks_X = DIVUP(cols, CHUNK_DIM_X);
+
+  const size_t scales_X_rowwise = DIVUP(cols, scale_dim_X_rowwise);
+  const size_t scales_X_colwise = cols;
+
+  const e8m0_t *const scales_ptr =
+      use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(input.scale_inv.dptr)
+                          : reinterpret_cast<e8m0_t *>(input.columnwise_scale_inv.dptr);
+
+  const size_t scales_stride = use_rowwise_scaling ? scales_X_rowwise : scales_X_colwise;
+
+  const SimpleTensor &input_data = use_rowwise_scaling ? input.data : input.columnwise_data;
+
+  const dim3 block(THREADS_PER_CHUNK);
+  const dim3 grid(chunks_X, chunks_Y);
+
+  TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+      scale_dim_Y_colwise, SCALE_DIM_Y,
+      TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+          scale_dim_X_rowwise, SCALE_DIM_X,
+          TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+              input.dtype(), IType,
+              TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+                  output->dtype(), OType,
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                  !(cols % (32 * sizeof(OType))), IS_ALIGNED,
+                  {
+                    dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
+                        <<<grid, block, 0, stream>>>(
+                            reinterpret_cast<const IType *>(input_data.dptr),
+                            reinterpret_cast<OType *>(output->data.dptr),
+                            scales_ptr, rows, cols, scales_stride);
+                    NVTE_CHECK_CUDA(cudaGetLastError());
+                  });  // NOLINT(*)
+          );            // NOLINT(*)
+      );                // NOLINT(*)
+  );                    // NOLINT(*)
+  );                    // NOLINT(*)
+}
+
 } // namespace transformer_engine

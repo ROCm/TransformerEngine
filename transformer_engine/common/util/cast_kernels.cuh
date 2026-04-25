@@ -1266,17 +1266,13 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
 
-#ifdef __HIP_PLATFORM_AMD__
-  constexpr size_t CHUNK_DIM_Y = MXFP8_CHUNK_DIM_Y;
-  constexpr size_t CHUNK_DIM_X = MXFP8_CHUNK_DIM_X;
-  constexpr size_t THREADS_PER_CHUNK = MXFP8_THREADS_PER_CHUNK;
-#else
   constexpr bool CAST_DBIAS_ONLY = IS_DBIAS && (!IS_DACT) && (!IS_ACT);
 
   constexpr size_t CHUNK_DIM_Y = CAST_DBIAS_ONLY ? 128 : 64;
   constexpr size_t CHUNK_DIM_X = CAST_DBIAS_ONLY ? 128 : 64;
   constexpr size_t THREADS_PER_CHUNK = CAST_DBIAS_ONLY ? 128 : 64;
 
+#ifndef __HIP_PLATFORM_AMD__
   constexpr size_t THREADS_X = CHUNK_DIM_X / SCALE_DIM_X;
   constexpr size_t THREADS_Y = THREADS_PER_CHUNK / THREADS_X;
   constexpr size_t BUFF_DIM_Y = THREADS_Y;
@@ -1338,72 +1334,57 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                 TRANSFORMER_ENGINE_SWITCH_CONDITION(
                   !(cols % (32 * sizeof(IType))), IS_ALIGNED,
                   {
-                    const char *env = std::getenv("NVTE_USE_NV_UPSTREAM_FLOW");
-                    if (env && std::string(env) == "1") {
-                      // NV upstream kernel with TDM
-                      constexpr bool NV_ROWWISE = (SCALE_DIM_X > 1);
-                      constexpr bool NV_COLWISE = (SCALE_DIM_Y > 1);
-                      constexpr size_t NV_CAST_DBIAS_ONLY_Y = (IS_DBIAS && (!IS_DACT) && (!IS_ACT)) ? 128 : 64;
-                      constexpr size_t NV_CAST_DBIAS_ONLY_X = NV_CAST_DBIAS_ONLY_Y;
-                      constexpr size_t NV_CAST_DBIAS_ONLY_T = NV_CAST_DBIAS_ONLY_Y;
+                    // TDM flow — uses mxfp8_kernel::cast_mxfp8_2D_kernel
+                    constexpr bool NV_ROWWISE = (SCALE_DIM_X > 1);
+                    constexpr bool NV_COLWISE = (SCALE_DIM_Y > 1);
+                    constexpr size_t NV_CAST_DBIAS_ONLY_Y = (IS_DBIAS && (!IS_DACT) && (!IS_ACT)) ? 128 : 64;
+                    constexpr size_t NV_CAST_DBIAS_ONLY_X = NV_CAST_DBIAS_ONLY_Y;
+                    constexpr size_t NV_CAST_DBIAS_ONLY_T = NV_CAST_DBIAS_ONLY_Y;
 
-                      constexpr size_t NV_THREADS_X = NV_CAST_DBIAS_ONLY_X / mxfp8_kernel::SCALE_DIM_X;
-                      constexpr size_t NV_THREADS_Y = NV_CAST_DBIAS_ONLY_T / NV_THREADS_X;
-                      constexpr size_t NV_BUFF_DIM_Y = NV_THREADS_Y;
-                      constexpr size_t NV_BUFF_DIM_X = NV_CAST_DBIAS_ONLY_X;
+                    constexpr size_t NV_THREADS_X = NV_CAST_DBIAS_ONLY_X / mxfp8_kernel::SCALE_DIM_X;
+                    constexpr size_t NV_THREADS_Y = NV_CAST_DBIAS_ONLY_T / NV_THREADS_X;
+                    constexpr size_t NV_BUFF_DIM_Y = NV_THREADS_Y;
+                    constexpr size_t NV_BUFF_DIM_X = NV_CAST_DBIAS_ONLY_X;
 
-                      constexpr size_t NV_SHMEM_ALIGNMENT = TDM_SHMEM_ALIGNMENT;
-                      constexpr size_t nv_buff_elems = NV_BUFF_DIM_Y * NV_BUFF_DIM_X;
-                      constexpr size_t nv_buff_elems_total = mxfp8_kernel::BUFFS_NUM * nv_buff_elems;
-                      constexpr size_t nv_input_type_bit_size = TypeInfo<IType>::size;
-                      constexpr size_t nv_output_type_bit_size = TypeInfo<OType>::size;
-                      constexpr size_t nv_input_buff_size = (nv_buff_elems_total * nv_input_type_bit_size) / 8;
-                      constexpr size_t nv_output_buff_size = (nv_buff_elems_total * nv_output_type_bit_size) / 8;
-                      constexpr size_t nv_buff_size_aligned_in =
-                          DIVUP_TO_MULTIPLE(nv_input_buff_size, NV_SHMEM_ALIGNMENT);
-                      constexpr size_t nv_buff_size_aligned_out =
-                          DIVUP_TO_MULTIPLE(nv_output_buff_size, NV_SHMEM_ALIGNMENT);
+                    constexpr size_t NV_SHMEM_ALIGNMENT = TDM_SHMEM_ALIGNMENT;
+                    constexpr size_t nv_buff_elems = NV_BUFF_DIM_Y * NV_BUFF_DIM_X;
+                    constexpr size_t nv_buff_elems_total = mxfp8_kernel::BUFFS_NUM * nv_buff_elems;
+                    constexpr size_t nv_input_type_bit_size = TypeInfo<IType>::size;
+                    constexpr size_t nv_output_type_bit_size = TypeInfo<OType>::size;
+                    constexpr size_t nv_input_buff_size = (nv_buff_elems_total * nv_input_type_bit_size) / 8;
+                    constexpr size_t nv_output_buff_size = (nv_buff_elems_total * nv_output_type_bit_size) / 8;
+                    constexpr size_t nv_buff_size_aligned_in =
+                        DIVUP_TO_MULTIPLE(nv_input_buff_size, NV_SHMEM_ALIGNMENT);
+                    constexpr size_t nv_buff_size_aligned_out =
+                        DIVUP_TO_MULTIPLE(nv_output_buff_size, NV_SHMEM_ALIGNMENT);
 
-                      constexpr size_t nv_elt_input_mem = nv_buff_size_aligned_in;
-                      constexpr size_t nv_act_input_mem = (IS_DACT ? nv_buff_size_aligned_in : 0);
-                      constexpr size_t nv_in_mem = nv_elt_input_mem + nv_act_input_mem;
+                    constexpr size_t nv_elt_input_mem = nv_buff_size_aligned_in;
+                    constexpr size_t nv_act_input_mem = (IS_DACT ? nv_buff_size_aligned_in : 0);
+                    constexpr size_t nv_in_mem = nv_elt_input_mem + nv_act_input_mem;
 
-                      const size_t nv_out_rowwise_mem = (use_rowwise_scaling ? nv_buff_size_aligned_out : 0);
-                      const size_t nv_out_colwise_mem = (use_colwise_scaling ? nv_buff_size_aligned_out : 0);
-                      const size_t nv_out_mem = nv_out_rowwise_mem + nv_out_colwise_mem;
+                    const size_t nv_out_rowwise_mem = (use_rowwise_scaling ? nv_buff_size_aligned_out : 0);
+                    const size_t nv_out_colwise_mem = (use_colwise_scaling ? nv_buff_size_aligned_out : 0);
+                    const size_t nv_out_mem = nv_out_rowwise_mem + nv_out_colwise_mem;
 
-                      const size_t nv_dshmem_size = nv_in_mem + nv_out_mem + NV_SHMEM_ALIGNMENT;
+                    const size_t nv_dshmem_size = nv_in_mem + nv_out_mem + NV_SHMEM_ALIGNMENT;
 
-                      NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                          mxfp8_kernel::cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP,
-                              IType, OType, NV_ROWWISE, NV_COLWISE, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED,
-                              NV_CAST_DBIAS_ONLY_Y, NV_CAST_DBIAS_ONLY_X, NV_CAST_DBIAS_ONLY_T>,
-                          cudaFuncAttributeMaxDynamicSharedMemorySize, nv_dshmem_size));
+                    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                        mxfp8_kernel::cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP,
+                            IType, OType, NV_ROWWISE, NV_COLWISE, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED,
+                            NV_CAST_DBIAS_ONLY_Y, NV_CAST_DBIAS_ONLY_X, NV_CAST_DBIAS_ONLY_T>,
+                        cudaFuncAttributeMaxDynamicSharedMemorySize, nv_dshmem_size));
 
-                      mxfp8_kernel::cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP,
-                          IType, OType, NV_ROWWISE, NV_COLWISE, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED,
-                          NV_CAST_DBIAS_ONLY_Y, NV_CAST_DBIAS_ONLY_X, NV_CAST_DBIAS_ONLY_T>
-                          <<<grid, block_size, nv_dshmem_size, stream>>>(
-                              reinterpret_cast<const IType *>(input.data.dptr),
-                              (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
-                              reinterpret_cast<OType *>(output->data.dptr),
-                              reinterpret_cast<OType *>(output->columnwise_data.dptr),
-                              scales_rowwise_ptr, scales_colwise_ptr,
-                              reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
-                              rows, cols, scale_stride_rowwise, scale_stride_colwise);
-                    } else {
-                      // Default ROCm flow
-                      cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
-                                          SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
-                          <<<grid, block_size, 0, stream>>>(
-                              reinterpret_cast<const IType *>(input.data.dptr),
-                              (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
-                              reinterpret_cast<OType *>(output->data.dptr),
-                              reinterpret_cast<OType *>(output->columnwise_data.dptr),
-                              scales_rowwise_ptr, scales_colwise_ptr,
-                              reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
-                              rows, cols, scale_stride_rowwise, scale_stride_colwise);
-                    }
+                    mxfp8_kernel::cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP,
+                        IType, OType, NV_ROWWISE, NV_COLWISE, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED,
+                        NV_CAST_DBIAS_ONLY_Y, NV_CAST_DBIAS_ONLY_X, NV_CAST_DBIAS_ONLY_T>
+                        <<<grid, block_size, nv_dshmem_size, stream>>>(
+                            reinterpret_cast<const IType *>(input.data.dptr),
+                            (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
+                            reinterpret_cast<OType *>(output->data.dptr),
+                            reinterpret_cast<OType *>(output->columnwise_data.dptr),
+                            scales_rowwise_ptr, scales_colwise_ptr,
+                            reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
+                            rows, cols, scale_stride_rowwise, scale_stride_colwise);
                     NVTE_CHECK_CUDA(cudaGetLastError());
                   })));  // NOLINT(*)
 #else // #ifdef __HIP_PLATFORM_AMD__

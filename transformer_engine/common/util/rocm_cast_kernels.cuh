@@ -459,6 +459,12 @@ void reduce_dbias_rocm(const DTypeReduce *workspace_ptr, Tensor *dbias, const si
   reduce_dbias<DBiasTypeOut>(partial_workspace, dbias, partial_rows, cols, stream);
 }
 
+// Forward declaration
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &)>
+void rocm_mxfp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
+                         Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream);
+
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tensor *noop,
@@ -547,8 +553,17 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
-      mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output, dbias,
-                                                             workspace, stream);
+      static const bool use_nv_upstream_flow = [] {
+        const char *env = std::getenv("NVTE_USE_NV_UPSTREAM_FLOW");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+      }();
+      if (use_nv_upstream_flow) {
+        mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+                                                               dbias, workspace, stream);
+      } else {
+        rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+                                                                    dbias, workspace, stream);
+      }
       break;
     }
     default:
@@ -556,5 +571,73 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
   }
 }
 
+
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &)>
+void rocm_mxfp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
+                         Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream) {
+  bool use_rowwise_scaling = output->has_data();
+  bool use_colwise_scaling = output->has_columnwise_data();
+
+  const size_t rows = input.flat_first_dim();
+  const size_t cols = input.flat_last_dim();
+
+  const size_t blocks_Y = DIVUP(rows, MXFP8_CHUNK_DIM_Y);
+  const size_t blocks_X = DIVUP(cols, MXFP8_CHUNK_DIM_X);
+  const dim3 grid(blocks_X, blocks_Y);
+  const size_t block_size = MXFP8_THREADS_PER_CHUNK;
+
+  const size_t scale_stride_rowwise = use_rowwise_scaling ? output->scale_inv.shape[1] : 1;
+  const size_t scale_stride_colwise =
+      use_colwise_scaling ? output->columnwise_scale_inv.shape[1] : 1;
+
+  e8m0_t *const scales_rowwise_ptr =
+      use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
+  e8m0_t *const scales_colwise_ptr =
+      use_colwise_scaling ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
+
+  const size_t dbias_rows = blocks_Y;
+  const size_t dbias_cols = cols;
+
+  if constexpr (IS_DBIAS) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {dbias_rows, dbias_cols};
+      workspace->data.dtype = DType::kFloat32;
+      return;
+    }
+  }
+
+  float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
+  float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      input.dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          output->dtype(), OType,
+          TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+            (use_colwise_scaling ? 32 : 1), SCALE_DIM_Y,
+            TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+              (use_rowwise_scaling ? 32 : 1), SCALE_DIM_X,
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                !(cols % (32 * sizeof(IType))), IS_ALIGNED,
+                {
+                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                       SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
+                      <<<grid, block_size, 0, stream>>>(
+                          reinterpret_cast<const IType *>(input.data.dptr),
+                          (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
+                          reinterpret_cast<OType *>(output->data.dptr),
+                          reinterpret_cast<OType *>(output->columnwise_data.dptr),
+                          scales_rowwise_ptr, scales_colwise_ptr,
+                          reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
+                          rows, cols, scale_stride_rowwise, scale_stride_colwise);
+                  NVTE_CHECK_CUDA(cudaGetLastError());
+                })));  // NOLINT(*)  closes: {} SWITCH_CONDITION inner_MX outer_MX
+
+          if constexpr (IS_DBIAS) {
+            reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
+          });  // NOLINT(*)  closes FP8ONLY
+  );  // NOLINT(*)  closes NON_FP8ONLY
+}
 
 } // namespace transformer_engine
