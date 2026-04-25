@@ -33,7 +33,8 @@
 #include "./cutlass_grouped_gemm.cuh"
 #else
 #include "ck_grouped_gemm/ck_grouped_gemm.h"
-#endif
+#include "ck_mx_grouped_gemm/ck_mx_grouped_gemm.hpp"
+
 
 #ifndef __HIP_PLATFORM_AMD__
 namespace {
@@ -1163,13 +1164,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     auto A_dt = inputA->data.dtype;
     auto B_dt = inputB->data.dtype;
     auto D_dt = OutputD->data.dtype;
-    return (
-            (is_fp8_dtype(A_dt) && is_fp8_dtype(B_dt))
-          ) ||
-          (
-            (A_dt == B_dt) && (A_dt == D_dt) &&
-            (is_fp16_dtype(A_dt))
-          );
+    return (is_fp8_dtype(A_dt) && is_fp8_dtype(B_dt));
 #else
     auto A_type = get_cuda_dtype(inputA->data.dtype);
     auto B_type = get_cuda_dtype(inputB->data.dtype);
@@ -1192,11 +1187,22 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype() &&
 #ifdef __HIP_PLATFORM_AMD__
       true)                               {
-    if (!ck_tile_grouped_gemm(A, B, D, num_gemms, transa, transb, workspace, accumulate, stream)) {
-        if (warn_fallback) {
-          NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
-        }
-        cublas_path();
+    const bool mxfp8_gemm = !use_fp4 && is_mxfp8_scaling(inputA->scaling_mode);
+
+    bool handled_by_ck = false;
+    if (mxfp8_gemm) {
+      handled_by_ck = ck_tile_mx_grouped_gemm(
+          A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
+    } else {
+      handled_by_ck = ck_tile_grouped_gemm(
+          A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
+    }
+
+    if (!handled_by_ck) {
+      if (warn_fallback) {
+        NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
+      }
+      cublas_path();
     }
 #else
       all_groups_uniform_k128(B, transb)) {
