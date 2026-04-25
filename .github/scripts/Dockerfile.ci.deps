@@ -12,6 +12,8 @@ ARG FA_VERSION=v2.8.1
 ARG ROCM_VERSION=7.2
 ARG JAX_VERSION=0.8.0
 ARG PYTHON_VERSION=311
+# AITER - Required for MXFP4 FP4 GEMM kernels.
+ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
 
 RUN pip install setuptools wheel
 RUN pip install ipython pytest fire pydantic pybind11 ninja pandas
@@ -23,6 +25,13 @@ RUN git clone --branch ${FA_VERSION} --depth 1 https://github.com/Dao-AILab/flas
     && cd flash-attention \
     && FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE && FLASH_ATTENTION_SKIP_CK_BUILD=FALSE python setup.py install \
     && cd ..
+
+# AITER (submodule: composable_kernel / CK). Submodule update after checkout aligns CK with this commit.
+RUN git clone --recursive https://github.com/ROCm/aiter.git \
+    && cd aiter \
+    && git checkout ${AITER_COMMIT} \
+    && git submodule update --init --recursive \
+    && PIP_FIND_LINKS="https://rocm.frameworks-nightlies.amd.com/whl/gfx942-gfx950/flydsl/" PIP_PRE=1 GPU_ARCHS=native pip install .
 
 # Install JAX
 RUN ROCM_MAJOR=$(echo "${ROCM_VERSION}" | cut -d. -f1) && pip install \
