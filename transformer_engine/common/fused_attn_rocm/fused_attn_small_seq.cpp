@@ -1022,9 +1022,11 @@ bool is_small_seq_attn_supported(
     log = (env_p != nullptr && std::string(env_p) == "1");
   }
 
-  if (num_gqa_groups == 0 || num_attn_heads % num_gqa_groups != 0) {
+  // CK small-seq path does not enable GQA/MQA yet
+  if (num_gqa_groups == 0 || num_attn_heads != num_gqa_groups) {
     if (log) {
-      std::cout << "small-seq: heads must be divisible by GQA groups" << std::endl;
+      std::cout << "small-seq: GQA/MQA not supported; require num_attn_heads == num_kv_heads"
+                << std::endl;
     }
     return false;
   }
@@ -1047,15 +1049,6 @@ bool is_small_seq_attn_supported(
   if (dropout != 0.f) {
     if (log) {
       std::cout << "small-seq: dropout not supported in kernel path" << std::endl;
-    }
-    return false;
-  }
-
-  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  if (layout_group != NVTE_QKV_Layout_Group::NVTE_HD_HD_HD ||
-      nvte_get_qkv_format(qkv_layout) != NVTE_QKV_Format::NVTE_THD) {
-    if (log) {
-      std::cout << "small-seq: requires THD separate Q, K, V (THD_THD_THD)" << std::endl;
     }
     return false;
   }
@@ -1107,15 +1100,18 @@ bool is_small_seq_attn_supported(
     return false;
   }
 
-  if (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK ||
-      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK) {
-    if (!((window_size_left == -1 && window_size_right == -1) ||
-          (window_size_left >= 0 && window_size_right >= 0))) {
-      if (log) {
-        std::cout << "small-seq: invalid window size for mask type" << std::endl;
-      }
-      return false;
+  // Small-seq kernels never consume window bounds
+  // Full attention only: (-1,-1), or (-1,0) which nvte_fused_attn_small_seq_* normalizes via
+  // check_set_window_size (NO_MASK / PADDING_MASK). is_small_seq_attn_supported may run without
+  // that pass (e.g. JAX workspace sizing), so treat (-1,0) the same here.
+  const bool full_window =
+      (window_size_left == -1 && window_size_right == -1) ||
+      (window_size_left == -1 && window_size_right == 0);
+  if (!full_window) {
+    if (log) {
+      std::cout << "small-seq: sliding/local window attention not supported" << std::endl;
     }
+    return false;
   }
 
   return true;
