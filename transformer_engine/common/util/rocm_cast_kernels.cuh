@@ -12,7 +12,6 @@
 #include "math.h"
 #include "ptx.cuh"
 #include "rocm_vectorized_2d.cuh"
-#include "tdm.cuh"
 #include "transformer_engine/cast.h"
 #include "../transpose/cast_transpose.h"
 #include "vectorized_pointwise.h"
@@ -128,10 +127,10 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
   }
 
   // The destination shared memory buffer of a bulk tensor operation should be 128 e8m0_t aligned
-  alignas(TDM_SHMEM_ALIGNMENT) __shared__ IType in_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
-  alignas(TDM_SHMEM_ALIGNMENT) __shared__ IType act_in_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
-  alignas(TDM_SHMEM_ALIGNMENT) __shared__ OType out_rowwise_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
-  alignas(TDM_SHMEM_ALIGNMENT) __shared__ OType out_colwise_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
+  alignas(128) __shared__ IType in_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
+  alignas(128) __shared__ IType act_in_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
+  alignas(128) __shared__ OType out_rowwise_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
+  alignas(128) __shared__ OType out_colwise_sh[MXFP8_SHMEM_DIM_Y][MXFP8_SHMEM_DIM_X];
 
   float block_amax = 0;
 
@@ -163,11 +162,11 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       const int chunk_it_offset_x = chunk_offset_X;
       const size_t row_base = chunk_it_offset_y;
       if constexpr (IS_DACT) {
-        copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&act_in_sh[0][0], act_input_ptr,
-                          chunk_it_offset_x, chunk_it_offset_y, cols,
+        copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&act_in_sh[0][0], act_input_ptr, 
+                          chunk_it_offset_x, chunk_it_offset_y, cols, 
                           MXFP8_SHMEM_DIM_Y, MXFP8_SHMEM_DIM_X, rows, cols);
       }
-      copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_sh[0][0], input_ptr, chunk_it_offset_x,
+      copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_sh[0][0], input_ptr, chunk_it_offset_x, 
                         chunk_it_offset_y, cols, MXFP8_SHMEM_DIM_Y,
                         MXFP8_SHMEM_DIM_X, rows, cols);
       __syncthreads();

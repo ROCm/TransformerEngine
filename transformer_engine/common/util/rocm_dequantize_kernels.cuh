@@ -14,7 +14,6 @@
 #include "math.h"
 #include "ptx.cuh"
 #include "rocm_vectorized_2d.cuh"
-#include "tdm.cuh"
 #include "transformer_engine/activation.h"
 #include "transformer_engine/cast.h"
 #include "../transpose/cast_transpose.h"
@@ -79,14 +78,14 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   // const int thread_offset_X_colwise = tid_colwise_X;
 
   // The destination shared memory buffer of a bulk tensor operation should be 128 e8m0_t aligned
-  alignas(TDM_SHMEM_ALIGNMENT) __shared__ IType in_sh[SHMEM_DIM_Y][SHMEM_DIM_X];
-  alignas(TDM_SHMEM_ALIGNMENT) __shared__ OType out_sh[SHMEM_DIM_Y][SHMEM_DIM_X];
+  alignas(128) __shared__ IType in_sh[SHMEM_DIM_Y][SHMEM_DIM_X];
+  alignas(128) __shared__ OType out_sh[SHMEM_DIM_Y][SHMEM_DIM_X];
 
   for (int iter = 0; iter < ITERATIONS; iter++) {
     const int chunk_it_offset_y = chunk_offset_Y + iter * BUFFER_DIM_Y;
     const int chunk_it_offset_x = chunk_offset_X;
 
-    copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_sh[0][0], input_ptr, chunk_it_offset_x,
+    copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_sh[0][0], input_ptr, chunk_it_offset_x, 
                       chunk_it_offset_y, cols, SHMEM_DIM_Y,
                       SHMEM_DIM_X, rows, cols);
     __syncthreads();

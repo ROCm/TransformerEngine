@@ -13,7 +13,6 @@
 #include "math.h"
 #include "ptx.cuh"
 #include "rocm_vectorized_2d.cuh"
-#include "tdm.cuh"
 #include "transformer_engine/activation.h"
 #include "transformer_engine/cast.h"
 #include "vectorized_pointwise.h"
@@ -22,7 +21,7 @@
 namespace transformer_engine {
 namespace gated_kernels {
 
-constexpr size_t ALIGNMENT_SIZE = TDM_SHMEM_ALIGNMENT;
+constexpr size_t ALIGNMENT_SIZE = 128;
 // TODO: Identify optimal chunk/thread size for MI350+
 constexpr size_t CHUNK_DIM_Y = 64;
 constexpr size_t CHUNK_DIM_X = 64;
@@ -143,7 +142,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     // Act
     copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_act_sh[0], input_act, chunk_it_offset_x, chunk_it_offset_y,
                       2*cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
-
+    
     // Gate
     copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_gate_sh[0], input_gate, chunk_it_offset_x, chunk_it_offset_y,
                       2*cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
@@ -362,7 +361,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                                       chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
       }
     }
-
+    
     if constexpr (USE_COLWISE_SCALING) {
       bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_act_colwise_sh[0], output_act_colwise, chunk_it_offset_x,
                                       chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
