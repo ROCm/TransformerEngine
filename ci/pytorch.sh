@@ -38,16 +38,6 @@ run_default_fa_lbl() {
     fi
 }
 
-with_aiter() {
-    # flydsl is only on AMD nightlies; needed for aiter pyproject build-system requires.
-    (cd ${TE_PATH}3rdparty/aiter && \
-        PIP_FIND_LINKS="https://rocm.frameworks-nightlies.amd.com/whl/gfx942-gfx950/flydsl/" \
-        PIP_PRE=1 \
-        GPU_ARCHS=native pip install -e .)
-    "$@"
-    pip uninstall -y amd-aiter
-}
-
 run_test_config(){
     echo ==== Run with Fused attention backend: $_fus_attn ====
     #_WORKERS_COUNT=$TEST_WORKERS
@@ -96,7 +86,7 @@ run_test_config(){
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_fusible_ops.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 triton_kernels/test_cast.py
     run_default_fa 1 nvfp4/
-    with_aiter run_default_fa 1 mxfp4/
+    run_default_fa 1 mxfp4/
 }
 
 run_test_config_mgpu(){
