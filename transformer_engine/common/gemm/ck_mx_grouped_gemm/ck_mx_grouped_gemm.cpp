@@ -509,3 +509,16 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
 
 }  // namespace mx_grouped_gemm
 }  // namespace transformer_engine
+
+bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
+                             const NVTETensor* B,
+                             NVTETensor* D,
+                             int group_num,
+                             bool transA,
+                             bool transB,
+                             NVTETensor* workspace,
+                             bool accumulate,
+                             hipStream_t stream) {
+  return transformer_engine::mx_grouped_gemm::ck_tile_mx_grouped_gemm(
+      A, B, D, group_num, transA, transB, workspace, accumulate, stream);
+}
