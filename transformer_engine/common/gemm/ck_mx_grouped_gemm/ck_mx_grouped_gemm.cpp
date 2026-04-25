@@ -14,6 +14,9 @@
 #include "ck_tile/ops/gemm/kernel/mx_grouped_gemm_kernel.hpp"
 #include "ck_tile/ops/elementwise/unary_element_wise_operation.hpp"
 
+namespace transformer_engine {
+namespace mx_grouped_gemm {
+
 using RowMajor = ck_tile::tensor_layout::gemm::RowMajor;
 using ColMajor = ck_tile::tensor_layout::gemm::ColumnMajor;
 using mx_grouped_gemm_kargs = ck_tile::MxGroupedGemmHostArgs<>;
@@ -21,7 +24,6 @@ using mx_grouped_gemm_kargs = ck_tile::MxGroupedGemmHostArgs<>;
 template <typename TEScalar> struct TETypeToCKType;
 template <> struct TETypeToCKType<transformer_engine::fp8e4m3> { using type = ck_tile::fp8_t; };
 template <> struct TETypeToCKType<transformer_engine::fp8e5m2> { using type = ck_tile::bf8_t; };
-template <> struct TETypeToCKType<transformer_engine::fp8e8m0> { using type = ck_tile::e8m0_t; };
 template <> struct TETypeToCKType<transformer_engine::fp16>    { using type = ck_tile::half_t; };
 template <> struct TETypeToCKType<transformer_engine::bf16>    { using type = ck_tile::bfloat16_t; };
 template <> struct TETypeToCKType<transformer_engine::fp32>    { using type = float; };
@@ -40,6 +42,18 @@ struct GroupedGemmRunContext {
     hipStream_t stream = nullptr;
 
 };
+
+// Treat TE tensors as generalized 2D matrices by flattening:
+// (D1, D2, ..., Dn) -> (D1*...*D(n-1), Dn), consistent with TE Tensor::flat_*_dim.
+static inline bool get_flat_2d_dims(const transformer_engine::Tensor& t,
+                                    int64_t& d0, int64_t& d1) {
+  if (t.shape().size() < 2) {
+    return false;
+  }
+  d0 = static_cast<int64_t>(t.flat_first_dim());
+  d1 = static_cast<int64_t>(t.flat_last_dim());
+  return true;
+}
 
 static constexpr ck_tile::index_t ScaleBlockSize = 32;
 
@@ -247,10 +261,10 @@ bool invoke_mx_grouped_gemm(const std::vector<mx_grouped_gemm_kargs>& descs, con
                                          BType,
                                          AScaleType,
                                          BScaleType>;
-      using PipelineType = MxGemmPipelineType::CompTDMV1;
         /* make pipeline selective */
       using GemmPipeline =
-          typename MxGemmPipelineTypeSelector<PipelineType, UniversalGemmProblem>::pipeline;
+          typename MxGemmPipelineTypeSelector<MxGemmPipelineType::CompTDMV1,
+                                                UniversalGemmProblem>::pipeline;
       using GemmEpilogue = ck_tile::TdmEpilogue<
           ck_tile::CShuffleEpilogueProblem<AType,
                                            BType,
@@ -333,8 +347,10 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
   const auto* A0 = convertNVTETensorCheck(A_use[0]);
   const auto* B0 = convertNVTETensorCheck(B_use[0]);
   const auto* D0 = convertNVTETensorCheck(D[0]);
-  NVTE_CHECK(A0->scale_inv.has_data(), "ck_tile_mx_grouped_gemm: A[0] scale_inv is not initialized");
-  NVTE_CHECK(B0->scale_inv.has_data(), "ck_tile_mx_grouped_gemm: B[0] scale_inv is not initialized");
+  NVTE_CHECK(A0->scale_inv.dptr != nullptr,
+            "ck_tile_mx_grouped_gemm: A[0] scale_inv is not initialized");
+  NVTE_CHECK(B0->scale_inv.dptr != nullptr,
+            "ck_tile_mx_grouped_gemm: B[0] scale_inv is not initialized");
 
   const auto a_scale_dtype = A0->scale_inv.dtype;
   const auto b_scale_dtype = B0->scale_inv.dtype;
@@ -352,8 +368,8 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
   NVTE_CHECK(is_fp8_dtype(a_dtype), "ck_tile_mx_grouped_gemm: A dtype must be FP8");
   NVTE_CHECK(is_fp8_dtype(b_dtype), "ck_tile_mx_grouped_gemm: B dtype must be FP8");
 
-  using AScaleType = typename TETypeToCKType<transformer_engine::fp8e8m0>::type;
-  using BScaleType = typename TETypeToCKType<transformer_engine::fp8e8m0>::type;
+  using AScaleType = ck_tile::e8m0_t;
+  using BScaleType = ck_tile::e8m0_t;
 
   void* ws_ptr = nullptr;
   size_t ws_bytes = 0;
@@ -490,3 +506,6 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
   });
   return ok;
 }
+
+}  // namespace mx_grouped_gemm
+}  // namespace transformer_engine
