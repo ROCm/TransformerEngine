@@ -2253,6 +2253,7 @@ def test_grouped_linear_accuracy_cutlass(
     delay_wgrad_compute,
 ):
     os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
+    os.environ["NVTE_ROCM_ENABLE_MXFP8"] = "1"
     test_grouped_linear_accuracy(
         dtype,
         num_gemms,
@@ -2268,6 +2269,7 @@ def test_grouped_linear_accuracy_cutlass(
         use_cutlass=True,
     )
     os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
+    os.environ.pop("NVTE_ROCM_ENABLE_MXFP8", None)
 
 
 @pytest.mark.parametrize("dtype", param_types, ids=str)
