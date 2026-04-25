@@ -222,6 +222,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/swiglu.cu
      cast/cast.cu
      hadamard_transform/hadamard_transform.cu
+     hadamard_transform/hadamard_transform_cast_fusion.cu
      multi_tensor/compute_scale.cu
      recipe/mxfp8_scaling.cu
      transpose/quantize_transpose_vector_blockwise_fp4.cu)
@@ -244,7 +245,6 @@ if(USE_CUDA)
         gemm/cutlass_grouped_gemm.cu
         hadamard_transform/group_hadamard_transform.cu
         transpose/quantize_transpose_square_blockwise.cu
-        hadamard_transform/hadamard_transform_cast_fusion.cu
         hadamard_transform/group_hadamard_transform_cast_fusion.cu
         hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
         transpose/quantize_transpose_square_blockwise.cu
