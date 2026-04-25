@@ -202,6 +202,7 @@ else()
        fused_attn_rocm/fused_attn_ck.cpp
        fused_attn_rocm/utils.cpp
        gemm/rocm_gemm.cu
+       gemm/ck_mx_grouped_gemm/ck_mx_grouped_gemm.cpp
        amd_detail/system.cpp)
 
   # process source code files
