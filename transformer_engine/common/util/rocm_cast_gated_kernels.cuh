@@ -23,27 +23,25 @@ namespace gated_kernels {
 
 constexpr size_t ALIGNMENT_SIZE = 128;
 // TODO: Identify optimal chunk/thread size for MI350+
-constexpr size_t CHUNK_DIM_Y = 64;
-constexpr size_t CHUNK_DIM_X = 64;
-constexpr size_t THREADS_PER_CHUNK = 256;
-constexpr size_t THREADS_PER_CHUNK_X = 64;
-constexpr size_t THREADS_PER_CHUNK_Y = THREADS_PER_CHUNK / THREADS_PER_CHUNK_X;  // 4 = 256 / 64
-constexpr size_t BUFFERS_NUM = 1; // No async load for HIP
-constexpr size_t BUFFER_DIM_Y = 32;
-constexpr size_t BUFFER_DIM_X = CHUNK_DIM_X;  // 128
-constexpr size_t SHMEM_DIM_Y = BUFFER_DIM_Y;  // 32
-constexpr size_t SHMEM_DIM_X = BUFFER_DIM_X;  // 128
+constexpr size_t ROCM_CHUNK_DIM_Y = 64;
+constexpr size_t ROCM_CHUNK_DIM_X = 64;
+constexpr size_t ROCM_THREADS_PER_CHUNK = 256;
+constexpr size_t ROCM_THREADS_PER_CHUNK_X = 64;
+constexpr size_t ROCM_THREADS_PER_CHUNK_Y = ROCM_THREADS_PER_CHUNK / ROCM_THREADS_PER_CHUNK_X;  // 4 = 256 / 64
+constexpr size_t ROCM_BUFFERS_NUM = 1; // No async load for HIP
+constexpr size_t ROCM_ROCM_BUFFER_DIM_Y = 32;
+constexpr size_t ROCM_BUFFER_DIM_X = ROCM_CHUNK_DIM_X;  // 64
+constexpr size_t ROCM_ROCM_SHMEM_DIM_Y = ROCM_ROCM_BUFFER_DIM_Y;  // 32
+constexpr size_t ROCM_ROCM_SHMEM_DIM_X = ROCM_BUFFER_DIM_X;  // 64
 
-constexpr size_t BUFFER_STAGES_NUM = BUFFER_DIM_Y / THREADS_PER_CHUNK_Y;  //  8 =  32 / 4
-constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                 //   4 = 128 / 32
-static_assert(ITERATIONS >= 1);
-
-__device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf(-x)); }
+constexpr size_t ROCM_BUFFER_STAGES_NUM = ROCM_ROCM_BUFFER_DIM_Y / ROCM_THREADS_PER_CHUNK_Y;  //  8 =  32 / 4
+constexpr size_t ROCM_ITERATIONS = ROCM_CHUNK_DIM_Y / ROCM_ROCM_BUFFER_DIM_Y;                 //   2 = 64 / 32
+static_assert(ROCM_ITERATIONS >= 1);
 
 template <bool IS_DGATED, typename ParamOP, float (*ActOP)(float, const ParamOP &),
           float (*DActOP)(float, const ParamOP &), typename IType, typename OType,
           size_t SCALE_DIM_Y, size_t SCALE_DIM_X, bool IS_ALIGNED>
-__global__ void __launch_bounds__(THREADS_PER_CHUNK)
+__global__ void __launch_bounds__(ROCM_THREADS_PER_CHUNK)
     cast_mxfp8_gated_kernel(const IType *grad_ptr,
                             const IType *input_act,
                             const IType *input_gate,
@@ -58,22 +56,22 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr bool USE_COLWISE_SCALING = SCALE_DIM_Y > 1;
   constexpr bool COMPUTE_IN_ROWWISE_SECTION = !USE_COLWISE_SCALING;
 
-  constexpr size_t SCALES_ROWWISE_PER_CHUNK_Y = CHUNK_DIM_Y;                //  128
-  constexpr size_t SCALES_ROWWISE_PER_CHUNK_X = CHUNK_DIM_X / SCALE_DIM_X;  //    4 = 128 / 32
+  constexpr size_t SCALES_ROWWISE_PER_CHUNK_Y = ROCM_CHUNK_DIM_Y;                //  64
+  constexpr size_t SCALES_ROWWISE_PER_CHUNK_X = ROCM_CHUNK_DIM_X / SCALE_DIM_X;  //   2 = 64 / 32
 
-  constexpr size_t SCALES_COLWISE_PER_CHUNK_Y = CHUNK_DIM_Y / SCALE_DIM_Y;  //    4 = 128 / 32
-  constexpr size_t SCALES_COLWISE_PER_CHUNK_X = CHUNK_DIM_X;                //  128
+  constexpr size_t SCALES_COLWISE_PER_CHUNK_Y = ROCM_CHUNK_DIM_Y / SCALE_DIM_Y;  //   2 = 64 / 32
+  constexpr size_t SCALES_COLWISE_PER_CHUNK_X = ROCM_CHUNK_DIM_X;                //  64
 
   const int scales_rowwise_chunk_offset_Y = blockIdx.y * SCALES_ROWWISE_PER_CHUNK_Y;
   const int scales_rowwise_chunk_offset_X = blockIdx.x * SCALES_ROWWISE_PER_CHUNK_X;
   const int scales_colwise_chunk_offset_Y = blockIdx.y * SCALES_COLWISE_PER_CHUNK_Y;
   const int scales_colwise_chunk_offset_X = blockIdx.x * SCALES_COLWISE_PER_CHUNK_X;
 
-  const int chunk_offset_Y = blockIdx.y * CHUNK_DIM_Y;
-  const int chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
+  const int chunk_offset_Y = blockIdx.y * ROCM_CHUNK_DIM_Y;
+  const int chunk_offset_X = blockIdx.x * ROCM_CHUNK_DIM_X;
 
-  const int tid_Y = threadIdx.x / THREADS_PER_CHUNK_X;
-  const int tid_X = threadIdx.x % THREADS_PER_CHUNK_X;
+  const int tid_Y = threadIdx.x / ROCM_THREADS_PER_CHUNK_X;
+  const int tid_X = threadIdx.x % ROCM_THREADS_PER_CHUNK_X;
 
   constexpr size_t VECTOR_WIDTH = (IS_ALIGNED ?: 2) * 8 / sizeof(OType);
 
@@ -88,8 +86,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       DIVUP(dshmem_unaligned_as_uint, static_cast<uint64_t>(ALIGNMENT_SIZE)) * ALIGNMENT_SIZE;
   char *dshmem = reinterpret_cast<char *>(dshmem_aligned_as_uint);
 
-  const size_t buff_elems = SHMEM_DIM_Y * SHMEM_DIM_X;
-  const size_t buff_elems_total = BUFFERS_NUM * buff_elems;
+  const size_t buff_elems = ROCM_ROCM_SHMEM_DIM_Y * ROCM_ROCM_SHMEM_DIM_X;
+  const size_t buff_elems_total = ROCM_BUFFERS_NUM * buff_elems;
   const size_t buff_size_aligned_in =
       DIVUP(buff_elems_total * sizeof(IType), ALIGNMENT_SIZE) * ALIGNMENT_SIZE;
   const size_t buff_size_aligned_out =
@@ -124,44 +122,44 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         reinterpret_cast<OType *>(dshmem + grad_mem + in_mem + out_mem + out_act_mem);
   }
 
-  __shared__ float stage_amax_sh[THREADS_PER_CHUNK_Y][CHUNK_DIM_X];
+  __shared__ float stage_amax_sh[ROCM_THREADS_PER_CHUNK_Y][ROCM_CHUNK_DIM_X];
 
   __syncthreads();
 
-  for (int it = 0; it < ITERATIONS; it++) {
-    const int chunk_it_offset_y = chunk_offset_Y + it * BUFFER_DIM_Y;
+  for (int it = 0; it < ROCM_ITERATIONS; it++) {
+    const int chunk_it_offset_y = chunk_offset_Y + it * ROCM_ROCM_BUFFER_DIM_Y;
     const int chunk_it_offset_x = chunk_offset_X;
     const size_t row_base = chunk_it_offset_y; 
 
     // Initiate bulk tensor copy
     if constexpr (IS_DGATED) {
       copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_grad_sh[0], grad_ptr, chunk_it_offset_x, chunk_it_offset_y,
-                        cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
+                        cols, ROCM_ROCM_SHMEM_DIM_Y, ROCM_ROCM_SHMEM_DIM_X, rows, cols);
     }
 
     // Act
     copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_act_sh[0], input_act, chunk_it_offset_x, chunk_it_offset_y,
-                      2*cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
-    
+                      2*cols, ROCM_ROCM_SHMEM_DIM_Y, ROCM_ROCM_SHMEM_DIM_X, rows, cols);
+
     // Gate
     copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_gate_sh[0], input_gate, chunk_it_offset_x, chunk_it_offset_y,
-                      2*cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
+                      2*cols, ROCM_ROCM_SHMEM_DIM_Y, ROCM_ROCM_SHMEM_DIM_X, rows, cols);
 
     __syncthreads();
 
     const int iteration_scale_colwise_offset_Y = scales_colwise_chunk_offset_Y + it;
-    const int iteration_scale_rowwise_offset_Y = scales_rowwise_chunk_offset_Y + it * BUFFER_DIM_Y;
+    const int iteration_scale_rowwise_offset_Y = scales_rowwise_chunk_offset_Y + it * ROCM_BUFFER_DIM_Y;
 
-    float after_dact_reg[BUFFER_STAGES_NUM];
-    float after_dgate_reg[BUFFER_STAGES_NUM];
+    float after_dact_reg[ROCM_BUFFER_STAGES_NUM];
+    float after_dgate_reg[ROCM_BUFFER_STAGES_NUM];
     float thread_Y_mx_block_amax = 0.0f;
     float thread_Y_mx_block_amax_gate = 0.0f;
 
-    for (int stage = 0; stage < BUFFER_STAGES_NUM; ++stage) {
-      const int stage_offset_Y = stage * THREADS_PER_CHUNK_Y;
+    for (int stage = 0; stage < ROCM_BUFFER_STAGES_NUM; ++stage) {
+      const int stage_offset_Y = stage * ROCM_THREADS_PER_CHUNK_Y;
       const int shmem_offset_y = thread_offset_Y + stage_offset_Y;
       const int shmem_offset_x = thread_offset_X;
-      const int shmem_idx = shmem_offset_y * SHMEM_DIM_X + shmem_offset_x;
+      const int shmem_idx = shmem_offset_y * ROCM_SHMEM_DIM_X + shmem_offset_x;
 
       const size_t row = row_base + shmem_offset_y;
       const bool row_out_of_bounds = (row >= rows);
@@ -264,7 +262,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         __syncthreads();
         if (tid_Y == 0) {
 #pragma unroll
-          for (int y = 1; y < THREADS_PER_CHUNK_Y; ++y) {
+          for (int y = 1; y < ROCM_THREADS_PER_CHUNK_Y; ++y) {
             thread_Y_mx_block_amax_gate =
                 fmaxf(thread_Y_mx_block_amax_gate, stage_amax_sh[y][tid_X]);
           }
@@ -294,11 +292,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         }
 
 #pragma unroll
-        for (int stage = 0; stage < BUFFER_STAGES_NUM; ++stage) {
-          const int stage_offset_Y = stage * THREADS_PER_CHUNK_Y;
+        for (int stage = 0; stage < ROCM_BUFFER_STAGES_NUM; ++stage) {
+          const int stage_offset_Y = stage * ROCM_THREADS_PER_CHUNK_Y;
           const int shmem_offset_y = thread_offset_Y + stage_offset_Y;
           const int shmem_offset_x = thread_offset_X;
-          const int shmem_idx = shmem_offset_y * SHMEM_DIM_X + shmem_offset_x;
+          const int shmem_idx = shmem_offset_y * ROCM_ROCM_SHMEM_DIM_X + shmem_offset_x;
 
           out_gate_colwise_sh[shmem_idx] =
               static_cast<OType>(scale_reciprocal * after_dgate_reg[stage]);
@@ -311,7 +309,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       __syncthreads();
       if (tid_Y == 0) {
 #pragma unroll
-        for (int y = 1; y < THREADS_PER_CHUNK_Y; ++y) {
+        for (int y = 1; y < ROCM_THREADS_PER_CHUNK_Y; ++y) {
           thread_Y_mx_block_amax = fmaxf(thread_Y_mx_block_amax, stage_amax_sh[y][tid_X]);
         }
         stage_amax_sh[0][tid_X] = thread_Y_mx_block_amax;  // write mx column-block amax
@@ -340,11 +338,11 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
 
 #pragma unroll
-      for (int stage = 0; stage < BUFFER_STAGES_NUM; ++stage) {
-        const int stage_offset_Y = stage * THREADS_PER_CHUNK_Y;
+      for (int stage = 0; stage < ROCM_BUFFER_STAGES_NUM; ++stage) {
+        const int stage_offset_Y = stage * ROCM_THREADS_PER_CHUNK_Y;
         const int shmem_offset_y = thread_offset_Y + stage_offset_Y;
         const int shmem_offset_x = thread_offset_X;
-        const int shmem_idx = shmem_offset_y * SHMEM_DIM_X + shmem_offset_x;
+        const int shmem_idx = shmem_offset_y * ROCM_ROCM_SHMEM_DIM_X + shmem_offset_x;
 
         out_act_colwise_sh[shmem_idx] =
             static_cast<OType>(scale_reciprocal * after_dact_reg[stage]);
@@ -355,19 +353,19 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
     if constexpr (USE_ROWWISE_SCALING) {
       bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_act_rowwise_sh[0], output_act_rowwise, chunk_it_offset_x,
-                                      chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
+                                      chunk_it_offset_y, output_cols, ROCM_SHMEM_DIM_Y, ROCM_SHMEM_DIM_X, rows, cols);
       if constexpr (IS_DGATED) {
       bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_gate_rowwise_sh[0], output_gate_rowwise, chunk_it_offset_x,
-                                      chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
+                                      chunk_it_offset_y, output_cols, ROCM_SHMEM_DIM_Y, ROCM_SHMEM_DIM_X, rows, cols);
       }
     }
     
     if constexpr (USE_COLWISE_SCALING) {
       bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_act_colwise_sh[0], output_act_colwise, chunk_it_offset_x,
-                                      chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
+                                      chunk_it_offset_y, output_cols, ROCM_SHMEM_DIM_Y, ROCM_SHMEM_DIM_X, rows, cols);
       if constexpr (IS_DGATED) {
       bulk_tensor_2d_shared_to_global<OType, VECTOR_WIDTH, IS_ALIGNED>(&out_gate_colwise_sh[0], output_gate_colwise, chunk_it_offset_x,
-                                      chunk_it_offset_y, output_cols, SHMEM_DIM_Y, SHMEM_DIM_X, rows, cols);
+                                      chunk_it_offset_y, output_cols, ROCM_SHMEM_DIM_Y, ROCM_SHMEM_DIM_X, rows, cols);
       }
     }
     __syncthreads();
@@ -388,10 +386,10 @@ void rocm_cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor
   const size_t cols = gated_input.flat_last_dim() / 2;
   const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
 
-  const size_t blocks_Y = DIVUP(rows, CHUNK_DIM_Y);
-  const size_t blocks_X = DIVUP(cols, CHUNK_DIM_X);
+  const size_t blocks_Y = DIVUP(rows, ROCM_CHUNK_DIM_Y);
+  const size_t blocks_X = DIVUP(cols, ROCM_CHUNK_DIM_X);
   const dim3 grid(blocks_X, blocks_Y);
-  const dim3 block_size(THREADS_PER_CHUNK);
+  const dim3 block_size(ROCM_THREADS_PER_CHUNK);
 
   size_t scale_stride_rowwise = USE_ROWWISE_SCALING ? output->scale_inv.shape[1] : 1;
   size_t scale_stride_colwise = USE_COLWISE_SCALING ? output->columnwise_scale_inv.shape[1] : 1;
@@ -417,7 +415,7 @@ void rocm_cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor
           constexpr size_t input_type_bit_size = TypeInfo<IType>::size;
           constexpr size_t output_type_bit_size = TypeInfo<OType>::size;
 
-          const size_t buff_elems_total = BUFFERS_NUM * BUFFER_DIM_Y * BUFFER_DIM_X;
+          const size_t buff_elems_total = BUFFERS_NUM * ROCM_BUFFER_DIM_Y * BUFFER_DIM_X;
           const size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
           const size_t output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
           const size_t buff_size_aligned_in =
