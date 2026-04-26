@@ -779,10 +779,10 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
     const size_t next_iter = iter + FP8_PREFETCH_BUFFERS_NUM;
     const size_t row_base = block_offset_Y + iter * FP8_BUFFER_DIM_Y;
     if (next_iter < FP8_ITERATIONS) {
-#ifndef __HIP_PLATFORM_AMD__
       const size_t next_buff = next_iter % FP8_BUFFERS_NUM;
       const size_t chunk_it_offset_y = chunk_offset_Y + next_iter * FP8_BUFFER_DIM_Y;
       const size_t chunk_it_offset_x = chunk_offset_X;
+#ifndef __HIP_PLATFORM_AMD__
       if constexpr (IS_DACT) {
         copy_2d_to_sharedx2(&in_sh[next_buff], &tensor_map_input, chunk_it_offset_x,
                             chunk_it_offset_y, &act_in_sh[next_buff], &tensor_map_act_input,
@@ -793,19 +793,14 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
                           chunk_it_offset_y, shmem_buff_size, &mbar[next_iter], is_master_thread);
       }
 #else  // __HIP_PLATFORM_AMD__ — TDM prefetch next iteration
-      {
-        const size_t next_buff = next_iter % FP8_BUFFERS_NUM;
-        const size_t chunk_it_offset_y = chunk_offset_Y + next_iter * FP8_BUFFER_DIM_Y;
-        const size_t chunk_it_offset_x = chunk_offset_X;
-        if constexpr (IS_DACT) {
-          tdm::copy_2d_to_shared_x2(&in_sh[next_buff][0][0], fp8_tmap_in,
-                                     chunk_it_offset_x, chunk_it_offset_y,
-                                     &act_in_sh[next_buff][0][0], fp8_tmap_act_in,
-                                     chunk_it_offset_x, chunk_it_offset_y);
-        } else {
-          tdm::copy_2d_to_shared(&in_sh[next_buff][0][0], fp8_tmap_in,
-                                 chunk_it_offset_x, chunk_it_offset_y);
-        }
+      if constexpr (IS_DACT) {
+        tdm::copy_2d_to_shared_x2(&in_sh[next_buff][0][0], fp8_tmap_in,
+                                   chunk_it_offset_x, chunk_it_offset_y,
+                                   &act_in_sh[next_buff][0][0], fp8_tmap_act_in,
+                                   chunk_it_offset_x, chunk_it_offset_y);
+      } else {
+        tdm::copy_2d_to_shared(&in_sh[next_buff][0][0], fp8_tmap_in,
+                               chunk_it_offset_x, chunk_it_offset_y);
       }
 #endif  // __HIP_PLATFORM_AMD__
     }
