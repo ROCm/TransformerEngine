@@ -1405,12 +1405,41 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
           const size_t buff_size_aligned_out =
               DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
           const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
-          const size_t in_mem = grad_mem + buff_size_aligned_in + buff_size_aligned_in;
+          const size_t in_act_mem = buff_size_aligned_in;
+          const size_t in_gate_mem = buff_size_aligned_in;
+          const size_t in_mem = grad_mem + in_act_mem + in_gate_mem;
+
           const size_t out_act_mem = buff_size_aligned_out;
+#ifdef __HIP_PLATFORM_AMD__
+          const size_t out_gate_mem = buff_size_aligned_out;
+#else
           const size_t out_gate_mem = (IS_DGATED ? buff_size_aligned_out : 0);
+#endif
           size_t out_mem = out_act_mem + out_gate_mem;
           if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) { out_mem *= 2; }
           const size_t shmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
+#ifdef __HIP_PLATFORM_AMD__
+          TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+            (USE_COLWISE_SCALING ? 32 : 1), SCALE_DIM_Y,
+            TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+              (USE_ROWWISE_SCALING ? 32 : 1), SCALE_DIM_X,
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(!(cols % (32 * sizeof(IType))), IS_ALIGNED, {
+                NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+                    cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
+                                            SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>,
+                    cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
+
+                cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType,
+                                        SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
+                    <<<grid, block_size, shmem_size, stream>>>(
+                        tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
+                        tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
+                        tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
+                        scales_rowwise_ptr, scales_colwise_ptr, rows, cols, scale_stride_rowwise,
+                        scale_stride_colwise);
+                NVTE_CHECK_CUDA(cudaGetLastError());
+          })));  // NOLINT(*)
+#else
           switch (scaling_type) {
             case ScalingType::ROWWISE:
               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
