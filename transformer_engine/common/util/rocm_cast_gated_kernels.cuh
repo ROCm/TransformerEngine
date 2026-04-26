@@ -19,6 +19,9 @@
 #include "../utils.cuh"
 
 namespace transformer_engine {
+
+__device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf(-x)); }
+
 namespace gated_kernels {
 
 constexpr size_t ALIGNMENT_SIZE = 128;

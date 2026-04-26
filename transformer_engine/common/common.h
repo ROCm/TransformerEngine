@@ -728,6 +728,7 @@ constexpr size_t TMA_SHMEM_ALIGNMENT = 128;  // shared memory address alignment
 #else
 // Alignment requirements for the Tensor Data Mover (TDM) on gfx1250
 constexpr size_t TDM_SHMEM_ALIGNMENT = 128;  // shared memory address alignment
+constexpr size_t TMA_SHMEM_ALIGNMENT = TDM_SHMEM_ALIGNMENT;  // alias so shared launchers compile
 #endif
 
 inline bool is_aligned_ptr(const void *ptr, size_t alignment) {
