@@ -96,13 +96,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   // const int thread_offset_X_colwise = tid_colwise_X;
 
   // The destination shared memory buffer of a bulk tensor operation should be 128-byte aligned
-#ifdef __HIP_PLATFORM_AMD__
-  alignas(TDM_SHMEM_ALIGNMENT) __shared__ IType in_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
-  alignas(TDM_SHMEM_ALIGNMENT) __shared__ OType out_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
-#else
   __shared__ alignas(TMA_SHMEM_ALIGNMENT) IType in_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
   __shared__ alignas(TMA_SHMEM_ALIGNMENT) OType out_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
-#endif
 
   constexpr int shmem_buff_size = sizeof(in_sh) / BUFFERS_NUM;
 #ifndef __HIP_PLATFORM_AMD__
@@ -425,16 +420,15 @@ void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream)
     dequantization::fp8_dequantize(input, output, stream);
   } else if (is_mxfp_scaling(input.scaling_mode)) {
 #ifdef __HIP_PLATFORM_AMD__
-    {
-      static const bool use_nv_upstream_flow = [] {
-        const char *env = std::getenv("NVTE_USE_NV_UPSTREAM_FLOW");
-        return env != nullptr && env[0] == '1' && env[1] == '\0';
-      }();
-      if (use_nv_upstream_flow) {
-        dequantization::mxfp8_dequantize(input, output, stream);
-      } else {
-        rocm_mxfp8_dequantize(input, output, stream);
-      }
+    // On AMD gfx1250: NVTE_USE_TDM_FLOW=1 selects TDM kernel; default (0) uses ROCm flow.
+    static const bool use_tdm_flow = [] {
+      const char *env = std::getenv("NVTE_USE_TDM_FLOW");
+      return env != nullptr && env[0] == '1' && env[1] == '\0';
+    }();
+    if (use_tdm_flow) {
+      dequantization::mxfp8_dequantize(input, output, stream);
+    } else {
+      rocm_mxfp8_dequantize(input, output, stream);
     }
 #else
     if (is_supported_by_CC_100()) {

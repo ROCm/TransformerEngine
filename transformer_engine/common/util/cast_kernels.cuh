@@ -703,21 +703,12 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
   const float scale = (scale_ptr != nullptr) ? *scale_ptr : 1;
 
   // The destination shared memory buffer of a bulk tensor operation should be 128-byte aligned
-#ifdef __HIP_PLATFORM_AMD__
-  __shared__ alignas(TDM_SHMEM_ALIGNMENT)
-      IType in_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
-  __shared__ alignas(TDM_SHMEM_ALIGNMENT)
-      IType act_in_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
-  __shared__ alignas(TDM_SHMEM_ALIGNMENT)
-      OType out_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
-#else
   __shared__ alignas(TMA_SHMEM_ALIGNMENT)
       IType in_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
   __shared__ alignas(TMA_SHMEM_ALIGNMENT)
       IType act_in_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
   __shared__ alignas(TMA_SHMEM_ALIGNMENT)
       OType out_sh[FP8_BUFFERS_NUM][FP8_SHMEM_DIM_Y][FP8_SHMEM_DIM_X];
-#endif
 
 #ifndef __HIP_PLATFORM_AMD__
   constexpr size_t shmem_buff_size = sizeof(in_sh) / FP8_BUFFERS_NUM;
@@ -1636,9 +1627,19 @@ void fp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *no
                                                                     dbias, workspace, stream);
   }
 #else
-  // AMD
-  fp8_quantize_rocm<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
-                                                            dbias, workspace, stream);
+  // On AMD gfx1250: NVTE_USE_TDM_FLOW=1 selects TDM kernel; default (0) uses ROCm flow.
+  static const bool use_tdm_flow = [] {
+    const char *env = std::getenv("NVTE_USE_TDM_FLOW");
+    return env != nullptr && env[0] == '1' && env[1] == '\0';
+  }();
+  if (use_tdm_flow) {
+    fp8_quantize_arch_ge_100<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop,
+                                                                      output, dbias, workspace,
+                                                                      stream);
+  } else {
+    fp8_quantize_rocm<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+                                                               dbias, workspace, stream);
+  }
 #endif //#ifndef __HIP_PLATFORM_AMD__
 }
 
