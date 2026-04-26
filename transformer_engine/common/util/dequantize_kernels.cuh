@@ -388,16 +388,12 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
               TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
                   output->dtype(), OType,
 #ifdef __HIP_PLATFORM_AMD__
-              TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                  !(cols % (32 * sizeof(OType))), IS_ALIGNED,
-                  {
-                    // TDM flow — uses dequantization::dequantize_mxfp8_kernel
-                    dequantization::dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
-                        <<<grid, block, 0, stream>>>(
-                            reinterpret_cast<const IType *>(input_data.dptr),
-                            reinterpret_cast<OType *>(output->data.dptr),
-                            scales_ptr, rows, cols, scales_stride);
-                  });  // NOLINT(*)
+                  // TDM flow — uses dequantization::dequantize_mxfp8_kernel
+                  dequantization::dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
+                      <<<grid, block, 0, stream>>>(
+                          reinterpret_cast<const IType *>(input_data.dptr),
+                          reinterpret_cast<OType *>(output->data.dptr),
+                          scales_ptr, rows, cols, scales_stride);
 #else // #ifdef __HIP_PLATFORM_AMD__
                   alignas(64) CUtensorMap tensor_map_input{};
                   alignas(64) CUtensorMap tensor_map_output{};
@@ -409,14 +405,12 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
 
                   dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
                   <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_output, scales_ptr,
-                                               rows, cols, scales_stride););  // NOLINT(*)
+                                               rows, cols, scales_stride);
 #endif // #ifdef __HIP_PLATFORM_AMD__
           );                                                                  // NOLINT(*)
       );                                                                      // NOLINT(*)
   );                                                                          // NOLINT(*)
-#ifdef __HIP_PLATFORM_AMD__
   );                                                                          // NOLINT(*)
-#endif
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 }  // namespace dequantization
