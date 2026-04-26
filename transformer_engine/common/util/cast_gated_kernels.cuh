@@ -1196,6 +1196,19 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           output->dtype(), OType,
 
+          constexpr size_t buff_elems_total = tma_flow::BUFFERS_NUM * tma_flow::SHMEM_DIM_Y * tma_flow::SHMEM_DIM_X;
+          const size_t buff_size_aligned_in =
+              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
+          const size_t buff_size_aligned_out =
+              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
+          const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
+          const size_t in_act_mem = buff_size_aligned_in;
+          const size_t in_gate_mem = buff_size_aligned_in;
+          const size_t out_act_mem = buff_size_aligned_out;
+          const size_t out_gate_mem = buff_size_aligned_out;
+          const size_t shmem_size = grad_mem + (in_act_mem + in_gate_mem) +
+                                    (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
+
 #ifdef __HIP_PLATFORM_AMD__
           const IType *grad_ptr = IS_DGATED
               ? reinterpret_cast<const IType *>(grad.data.dptr) : nullptr;
@@ -1204,19 +1217,6 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
           OType *output_act_ptr = reinterpret_cast<OType *>(output->data.dptr);
           OType *output_gate_ptr = IS_DGATED
               ? reinterpret_cast<OType *>(output->data.dptr) + cols : nullptr;
-
-          constexpr size_t buff_elems_total = tma_flow::BUFFERS_NUM * tma_flow::SHMEM_DIM_Y * tma_flow::SHMEM_DIM_X;
-          const size_t buff_size_aligned_in =
-              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TDM_SHMEM_ALIGNMENT);
-          const size_t buff_size_aligned_out =
-              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TDM_SHMEM_ALIGNMENT);
-          const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
-          const size_t in_act_mem = buff_size_aligned_in;
-          const size_t in_gate_mem = buff_size_aligned_in;
-          const size_t out_act_mem = buff_size_aligned_out;
-          const size_t out_gate_mem = buff_size_aligned_out;
-          const size_t shmem_size = grad_mem + (in_act_mem + in_gate_mem) +
-                                    (out_act_mem + out_gate_mem) + TDM_SHMEM_ALIGNMENT;
 
           NVTE_CHECK_CUDA(cudaFuncSetAttribute(
               tma_flow::cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
@@ -1251,19 +1251,6 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
           create_2D_tensor_map(tensor_map_output_gate, output->data, rows, cols, tma_flow::SHMEM_DIM_Y,
                                tma_flow::SHMEM_DIM_X, tensor_stride_elems, cols,
                                typeToNumBits(output->dtype()));
-
-          const size_t buff_elems_total = tma_flow::BUFFERS_NUM * tma_flow::SHMEM_DIM_Y * tma_flow::SHMEM_DIM_X;
-          const size_t buff_size_aligned_in =
-              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
-          const size_t buff_size_aligned_out =
-              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
-          const size_t grad_mem = (IS_DGATED ? buff_size_aligned_in : 0);
-          const size_t in_act_mem = buff_size_aligned_in;
-          const size_t in_gate_mem = buff_size_aligned_in;
-          const size_t out_act_mem = buff_size_aligned_out;
-          const size_t out_gate_mem = buff_size_aligned_out;
-          const size_t shmem_size = grad_mem + (in_act_mem + in_gate_mem) +
-                                    (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
 
           NVTE_CHECK_CUDA(cudaFuncSetAttribute(
               tma_flow::cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
