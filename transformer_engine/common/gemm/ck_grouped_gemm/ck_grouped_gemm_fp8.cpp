@@ -6,7 +6,6 @@
 
 #include "ck_grouped_gemm_common.h"
 #include "ck_grouped_gemm_fp8.h"
-#include "common/util/cuda_runtime.h"
 
 #include "ck_tile/ops/gemm_quant/kernel/grouped_gemm_quant_kernel.hpp"
 #include "ck_tile/ops/gemm_quant/pipeline/gemm_group_quant_utils.hpp"
@@ -15,12 +14,6 @@
 
 namespace transformer_engine {
 namespace grouped_gemm {
-
-enum class GPUArch {
-  GFX942,
-  GFX950,
-  UNKNOWN
-};
 
 struct TileCfg_128x128x128_16x16x128_2x2x1 {
   static constexpr ck_tile::index_t M_Tile = 128;
@@ -55,7 +48,7 @@ struct TileCfg_128x128x128_16x16x128_2x2x1 {
 //
 // In all other compilation paths, the struct overrides the relevant fields to
 // provide the intended 32x32x16 configuration.
-#if defined(__gfx950__)
+#if defined(__gfx950__) || defined(__gfx125__)
 struct TileCfg_128x128x128_32x32x16_2x2x1
     : TileCfg_128x128x128_16x16x128_2x2x1 {};
 #else
@@ -115,8 +108,7 @@ class QuantGroupedGemmRunner : public RunnerInterface {
                                                     AccType,
                                                     GemmShape,
                                                     UniversalTraits,
-                                                    false,
-                                                    AccType>;
+                                                    false>;
 
   using Pipeline = ck_tile::GemmPipelineAgBgCrCompV3<Problem>;
 
@@ -265,18 +257,6 @@ class QuantGroupedGemmRunner : public RunnerInterface {
   }
 };
 
-static inline GPUArch detect_gpu_arch() {
-  int arch = cuda::sm_arch(0);
-
-  if (arch == 94) {
-    return GPUArch::GFX942;
-  }
-  if (arch == 95) {
-    return GPUArch::GFX950;
-  }
-  return GPUArch::UNKNOWN;
-}
-
 template <GPUArch Arch>
 struct FP8TileCfg;
 
@@ -287,6 +267,11 @@ struct FP8TileCfg<GPUArch::GFX942> {
 
 template <>
 struct FP8TileCfg<GPUArch::GFX950> {
+  using type = TileCfg_128x128x128_16x16x128_2x2x1;
+};
+
+template <>
+struct FP8TileCfg<GPUArch::GFX1250> {
   using type = TileCfg_128x128x128_16x16x128_2x2x1;
 };
 
@@ -346,8 +331,10 @@ bool ck_tile_grouped_gemm_fp8_dispatch(DType a_dtype,
       return ck_tile_grouped_gemm_fp8_dispatch_arch<GPUArch::GFX942>(a_dtype, b_dtype, d_dtype, ctx);
     case GPUArch::GFX950:
       return ck_tile_grouped_gemm_fp8_dispatch_arch<GPUArch::GFX950>(a_dtype, b_dtype, d_dtype, ctx);
+    case GPUArch::GFX1250:
+      return ck_tile_grouped_gemm_fp8_dispatch_arch<GPUArch::GFX1250>(a_dtype, b_dtype, d_dtype, ctx);
     default:
-      NVTE_ERROR("ck_tile_grouped_gemm: available architectures = {gfx942, gfx950}");
+      NVTE_ERROR("ck_tile_grouped_gemm: available architectures = {gfx942, gfx950, gfx1250}");
       return false;
   }
 }
