@@ -1048,10 +1048,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 // 3. Scale elements
 #pragma unroll
       for (int w = 0; w < WAVES; ++w) {
-        const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
-        const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
-        const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
-
         Vec<OType2, PACK_SIZE / 2> out_act;
         Vec<OType2, PACK_SIZE / 2> out_gate;
 #pragma unroll
@@ -1084,6 +1080,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             ptx::mul_cvt_2x(out_gate_pair, in_gate, block_scale_inverse_2x_gate);
           }
         }
+        const size_t swizzled_group_idx = ((w + bank_group) * PACK_SIZE) % SCALE_DIM_X;
+        const size_t swizzled_idx = swizzled_group_idx + thread_offset_X_rowwise;
+        const size_t shmem_offset_rowwise = shmem_offset_base_rowwise + swizzled_idx;
         out_act.store_to(&out_act_rowwise_sh[shmem_offset_rowwise]);
         if constexpr (IS_DGATED) {
           out_gate.store_to(&out_gate_rowwise_sh[shmem_offset_rowwise]);
