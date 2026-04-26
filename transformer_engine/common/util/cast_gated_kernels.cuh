@@ -646,16 +646,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const size_t stage_offset_Y = stage * BUFF_DIM_Y;
 
     if (next_stage < STAGES) {
-#ifndef __HIP_PLATFORM_AMD__
-      // Wait for TMA transfer to have finished reading shared memory.
-      // I.e. the buffer is ready to be written to
-      ptx::cp_async_bulk_wait_group_read<1>();
-
       const size_t next_buff = next_stage % BUFFS_NUM;
       const size_t next_stage_offset_Y = next_stage * BUFF_DIM_Y;
       const size_t global_offset_Y = block_offset_Y + next_stage_offset_Y;
       const size_t global_offset_X = block_offset_X;
       const size_t next_buff_offset = next_buff * BUFF_DIM;
+#ifndef __HIP_PLATFORM_AMD__
+      // Wait for TMA transfer to have finished reading shared memory.
+      // I.e. the buffer is ready to be written to
+      ptx::cp_async_bulk_wait_group_read<1>();
+
       if constexpr (IS_DGATED) {
         copy_2d_to_sharedx3(&in_grad_sh[next_buff_offset], &tensor_map_grad, global_offset_X,
                             global_offset_Y, &in_act_sh[next_buff_offset], &tensor_map_input_act,
@@ -669,11 +669,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                             is_master_thread);
       }
 #else  // __HIP_PLATFORM_AMD__ — TDM prefetch next stage
-      const size_t next_buff = next_stage % BUFFS_NUM;
-      const size_t next_stage_offset_Y = next_stage * BUFF_DIM_Y;
-      const size_t global_offset_Y = block_offset_Y + next_stage_offset_Y;
-      const size_t global_offset_X = block_offset_X;
-      const size_t next_buff_offset = next_buff * BUFF_DIM;
       if constexpr (IS_DGATED) {
         tdm::copy_2d_to_shared(&in_grad_sh[next_buff_offset], mx_tmap_grad,
                                global_offset_X, global_offset_Y);
