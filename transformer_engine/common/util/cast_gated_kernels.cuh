@@ -37,10 +37,10 @@ namespace transformer_engine {
 
 namespace gated_kernels {
 
-// NV upstream flow constants — used on both NVIDIA (TMA) and AMD gfx1250 (TDM).
+// TMA/TDM flow constants — used on both NVIDIA (TMA) and AMD gfx1250 (TDM).
 // On AMD, the ROCm flow constants live in rocm_cast_gated_kernels.cuh;
-// these are in the nv_flow namespace to avoid collision.
-namespace nv_flow {
+// these are in the tma_flow namespace to avoid collision.
+namespace tma_flow {
 
 constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
@@ -401,7 +401,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #endif
 #endif  // #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
 }
-}  // namespace nv_flow
+}  // namespace tma_flow
 
 namespace mxfp8_kernel {
 
@@ -1187,14 +1187,14 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
   const size_t cols = gated_input.flat_last_dim() / 2;
   const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
 
-  const size_t blocks_Y = DIVUP(rows, nv_flow::CHUNK_DIM_Y);
-  const size_t blocks_X = DIVUP(cols, nv_flow::CHUNK_DIM_X);
+  const size_t blocks_Y = DIVUP(rows, tma_flow::CHUNK_DIM_Y);
+  const size_t blocks_X = DIVUP(cols, tma_flow::CHUNK_DIM_X);
 
   float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
   float *const scale_inv_ptr = reinterpret_cast<float *>(output->scale_inv.dptr);
   float *const scale_ptr = reinterpret_cast<float *>(output->scale.dptr);
 
-  const dim3 block_dim(nv_flow::THREADS_PER_CHUNK);
+  const dim3 block_dim(tma_flow::THREADS_PER_CHUNK);
   const dim3 grid_dim(blocks_X, blocks_Y);
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
@@ -1211,7 +1211,7 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
           OType *output_gate_ptr = IS_DGATED
               ? reinterpret_cast<OType *>(output->data.dptr) + cols : nullptr;
 
-          constexpr size_t buff_elems_total = nv_flow::BUFFERS_NUM * nv_flow::SHMEM_DIM_Y * nv_flow::SHMEM_DIM_X;
+          constexpr size_t buff_elems_total = tma_flow::BUFFERS_NUM * tma_flow::SHMEM_DIM_Y * tma_flow::SHMEM_DIM_X;
           const size_t buff_size_aligned_in =
               DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TDM_SHMEM_ALIGNMENT);
           const size_t buff_size_aligned_out =
@@ -1225,10 +1225,10 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
                                     (out_act_mem + out_gate_mem) + TDM_SHMEM_ALIGNMENT;
 
           NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-              nv_flow::cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
+              tma_flow::cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
               cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
-          nv_flow::cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>
+          tma_flow::cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>
           <<<grid_dim, block_dim, shmem_size, stream>>>(
               grad_ptr, input_act_ptr, input_gate_ptr,
               output_act_ptr, output_gate_ptr,
@@ -1242,23 +1242,23 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
           alignas(64) CUtensorMap tensor_map_output_gate{};
 
           if constexpr (IS_DGATED) {
-            create_2D_tensor_map(tensor_map_grad, grad.data, rows, cols, nv_flow::SHMEM_DIM_Y,
-                                 nv_flow::SHMEM_DIM_X, cols, 0, typeToNumBits(gated_input.dtype()));
+            create_2D_tensor_map(tensor_map_grad, grad.data, rows, cols, tma_flow::SHMEM_DIM_Y,
+                                 tma_flow::SHMEM_DIM_X, cols, 0, typeToNumBits(gated_input.dtype()));
           }
 
           const uint32_t tensor_stride_elems = output_cols;
 
-          create_2D_tensor_map(tensor_map_input_act, gated_input.data, rows, cols, nv_flow::SHMEM_DIM_Y,
-                               nv_flow::SHMEM_DIM_X, cols * 2, 0, typeToNumBits(gated_input.dtype()));
-          create_2D_tensor_map(tensor_map_input_gate, gated_input.data, rows, cols, nv_flow::SHMEM_DIM_Y,
-                               nv_flow::SHMEM_DIM_X, cols * 2, cols, typeToNumBits(gated_input.dtype()));
-          create_2D_tensor_map(tensor_map_output_act, output->data, rows, cols, nv_flow::SHMEM_DIM_Y,
-                               nv_flow::SHMEM_DIM_X, tensor_stride_elems, 0, typeToNumBits(output->dtype()));
-          create_2D_tensor_map(tensor_map_output_gate, output->data, rows, cols, nv_flow::SHMEM_DIM_Y,
-                               nv_flow::SHMEM_DIM_X, tensor_stride_elems, cols,
+          create_2D_tensor_map(tensor_map_input_act, gated_input.data, rows, cols, tma_flow::SHMEM_DIM_Y,
+                               tma_flow::SHMEM_DIM_X, cols * 2, 0, typeToNumBits(gated_input.dtype()));
+          create_2D_tensor_map(tensor_map_input_gate, gated_input.data, rows, cols, tma_flow::SHMEM_DIM_Y,
+                               tma_flow::SHMEM_DIM_X, cols * 2, cols, typeToNumBits(gated_input.dtype()));
+          create_2D_tensor_map(tensor_map_output_act, output->data, rows, cols, tma_flow::SHMEM_DIM_Y,
+                               tma_flow::SHMEM_DIM_X, tensor_stride_elems, 0, typeToNumBits(output->dtype()));
+          create_2D_tensor_map(tensor_map_output_gate, output->data, rows, cols, tma_flow::SHMEM_DIM_Y,
+                               tma_flow::SHMEM_DIM_X, tensor_stride_elems, cols,
                                typeToNumBits(output->dtype()));
 
-          const size_t buff_elems_total = nv_flow::BUFFERS_NUM * nv_flow::SHMEM_DIM_Y * nv_flow::SHMEM_DIM_X;
+          const size_t buff_elems_total = tma_flow::BUFFERS_NUM * tma_flow::SHMEM_DIM_Y * tma_flow::SHMEM_DIM_X;
           const size_t buff_size_aligned_in =
               DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
           const size_t buff_size_aligned_out =
@@ -1272,10 +1272,10 @@ void cast_fp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
                                     (out_act_mem + out_gate_mem) + TMA_SHMEM_ALIGNMENT;
 
           NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-              nv_flow::cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
+              tma_flow::cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>,
               cudaFuncAttributeMaxDynamicSharedMemorySize, shmem_size));
 
-          nv_flow::cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>
+          tma_flow::cast_fp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP, IType, OType>
           <<<grid_dim, block_dim, shmem_size, stream>>>(
               tensor_map_grad, tensor_map_input_act, tensor_map_input_gate, tensor_map_output_act,
               tensor_map_output_gate, amax_ptr, scale_inv_ptr, scale_ptr, rows,
@@ -1303,7 +1303,6 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
     NVTE_CHECK(output->columnwise_scale_inv.dptr != nullptr, "Scaling tensor must be allocated.");
   }
 
-#ifndef __HIP_PLATFORM_AMD__
   ScalingType scaling_type;
   if (USE_ROWWISE_SCALING && (!USE_COLWISE_SCALING)) {
     scaling_type = ScalingType::ROWWISE;
@@ -1312,22 +1311,10 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
   } else if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) {
     scaling_type = ScalingType::BIDIMENSIONAL;
   }
-#endif
 
   const size_t rows = gated_input.flat_first_dim();
   const size_t cols = gated_input.flat_last_dim() / 2;
   const size_t output_cols = (IS_DGATED ? 2 : 1) * cols;
-
-#ifdef __HIP_PLATFORM_AMD__
-  constexpr size_t TMA_SHMEM_ALIGNMENT = ALIGNMENT_SIZE;
-
-  constexpr size_t BUFF_DIM_Y = mxfp8_kernel::BUFF_DIM_Y;
-  constexpr size_t BUFF_DIM_X = mxfp8_kernel::BUFF_DIM_X;
-  constexpr size_t BUFFS_NUM = mxfp8_kernel::BUFFS_NUM;
-
-  const size_t blocks_Y = DIVUP(rows, mxfp8_kernel::CHUNK_DIM_Y);
-  const size_t blocks_X = DIVUP(cols, mxfp8_kernel::CHUNK_DIM_X);
-#else
 
   constexpr size_t BUFF_DIM_Y = mxfp8_kernel::BUFF_DIM_Y;
   constexpr size_t BUFF_DIM_X = mxfp8_kernel::BUFF_DIM_X;
@@ -1341,12 +1328,9 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
   const size_t THREADS_PER_CHUNK = (scaling_type == ScalingType::COLWISE)
                                        ? THREADS_PER_CHUNK_COLWISE
                                        : THREADS_PER_CHUNK_NON_COLWISE;
-#endif
 
-#ifndef __HIP_PLATFORM_AMD__
   const dim3 grid(blocks_X, blocks_Y);
   const dim3 block_size(THREADS_PER_CHUNK);
-#endif
 
   size_t scale_stride_rowwise = USE_ROWWISE_SCALING ? output->scale_inv.shape[1] : 1;
   size_t scale_stride_colwise = USE_COLWISE_SCALING ? output->columnwise_scale_inv.shape[1] : 1;
@@ -1414,73 +1398,6 @@ void cast_mxfp8_gated(const Tensor &grad, const Tensor &gated_input, Tensor *out
           }
 #endif // #ifdef __HIP_PLATFORM_AMD__
 
-#ifdef __HIP_PLATFORM_AMD__
-          {
-            // TDM flow — uses mxfp8_kernel::cast_mxfp8_gated_kernel
-            constexpr size_t NV_THREADS_PER_CHUNK_COLWISE = mxfp8_kernel::THREADS_PER_CHUNK_COLWISE;
-            constexpr size_t NV_THREADS_PER_CHUNK_NON_COLWISE = mxfp8_kernel::THREADS_PER_CHUNK_NON_COLWISE;
-
-            // Recompute shmem size with NV upstream constants
-            constexpr size_t NV_BUFF_DIM_Y = mxfp8_kernel::BUFF_DIM_Y;
-            constexpr size_t NV_BUFF_DIM_X = mxfp8_kernel::BUFF_DIM_X;
-            constexpr size_t NV_BUFFS_NUM = mxfp8_kernel::BUFFS_NUM;
-            const size_t nv_buff_elems_total = NV_BUFFS_NUM * NV_BUFF_DIM_Y * NV_BUFF_DIM_X;
-            const size_t nv_input_buff_size = (nv_buff_elems_total * input_type_bit_size) / 8;
-            const size_t nv_output_buff_size = (nv_buff_elems_total * output_type_bit_size) / 8;
-            const size_t nv_buff_size_aligned_in =
-                DIVUP_TO_MULTIPLE(nv_input_buff_size, TDM_SHMEM_ALIGNMENT);
-            const size_t nv_buff_size_aligned_out =
-                DIVUP_TO_MULTIPLE(nv_output_buff_size, TDM_SHMEM_ALIGNMENT);
-            const size_t nv_grad_mem = (IS_DGATED ? nv_buff_size_aligned_in : 0);
-            const size_t nv_in_act_mem = nv_buff_size_aligned_in;
-            const size_t nv_in_gate_mem = nv_buff_size_aligned_in;
-            const size_t nv_in_mem = nv_grad_mem + nv_in_act_mem + nv_in_gate_mem;
-            const size_t nv_out_act_mem = nv_buff_size_aligned_out;
-            const size_t nv_out_gate_mem = (IS_DGATED ? nv_buff_size_aligned_out : 0);
-            size_t nv_out_mem = nv_out_act_mem + nv_out_gate_mem;
-            if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) { nv_out_mem *= 2; }
-            const size_t nv_shmem_size = nv_in_mem + nv_out_mem + TDM_SHMEM_ALIGNMENT;
-
-            const size_t nv_blocks_Y = DIVUP(rows, mxfp8_kernel::CHUNK_DIM_Y);
-            const size_t nv_blocks_X = DIVUP(cols, mxfp8_kernel::CHUNK_DIM_X);
-            const size_t NV_THREADS_PER_CHUNK = USE_COLWISE_SCALING
-                ? NV_THREADS_PER_CHUNK_COLWISE : NV_THREADS_PER_CHUNK_NON_COLWISE;
-            const dim3 nv_grid(nv_blocks_X, nv_blocks_Y);
-            const dim3 nv_block(NV_THREADS_PER_CHUNK);
-
-            auto nv_launch = [&](auto rowwise_tag, auto colwise_tag, auto threads_tag) {
-              constexpr bool RW = decltype(rowwise_tag)::value;
-              constexpr bool CW = decltype(colwise_tag)::value;
-              constexpr size_t TPC = decltype(threads_tag)::value;
-
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                  mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP,
-                                                        IType, OType, RW, CW, TPC>,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize, nv_shmem_size));
-
-              mxfp8_kernel::cast_mxfp8_gated_kernel<IS_DGATED, ParamOP, ActOP, DActOP,
-                                                    IType, OType, RW, CW, TPC>
-                  <<<nv_grid, nv_block, nv_shmem_size, stream>>>(
-                      tensor_map_grad, tensor_map_input_act, tensor_map_input_gate,
-                      tensor_map_output_act_rowwise, tensor_map_output_gate_rowwise,
-                      tensor_map_output_act_colwise, tensor_map_output_gate_colwise,
-                      scales_rowwise_ptr, scales_colwise_ptr,
-                      rows, cols, scale_stride_rowwise, scale_stride_colwise);
-              NVTE_CHECK_CUDA(cudaGetLastError());
-            };
-
-            if (USE_ROWWISE_SCALING && (!USE_COLWISE_SCALING)) {
-              nv_launch(std::true_type{}, std::false_type{},
-                        std::integral_constant<size_t, mxfp8_kernel::THREADS_PER_CHUNK_NON_COLWISE>{});
-            } else if ((!USE_ROWWISE_SCALING) && USE_COLWISE_SCALING) {
-              nv_launch(std::false_type{}, std::true_type{},
-                        std::integral_constant<size_t, mxfp8_kernel::THREADS_PER_CHUNK_COLWISE>{});
-            } else if (USE_ROWWISE_SCALING && USE_COLWISE_SCALING) {
-              nv_launch(std::true_type{}, std::true_type{},
-                        std::integral_constant<size_t, mxfp8_kernel::THREADS_PER_CHUNK_NON_COLWISE>{});
-            }
-          }
-#else
           const size_t buff_elems_total = BUFFS_NUM * BUFF_DIM_Y * BUFF_DIM_X;
           const size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
           const size_t output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
@@ -1668,8 +1585,24 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
 
   if (is_delayed_tensor_scaling(output->scaling_mode)) {
     if (use_tma_kernels) {
-      // cast_fp8_gated handles both NVIDIA (TMA) and AMD (TDM) internally via #ifdef
+#ifdef __HIP_PLATFORM_AMD__
+      // On AMD gfx1250: NVTE_USE_TDM_FLOW=1 selects TDM kernel; default (0) uses ROCm flow.
+      static const bool use_tdm_flow_fp8 = [] {
+        const char *env = std::getenv("NVTE_USE_TDM_FLOW");
+        return env != nullptr && env[0] == '1' && env[1] == '\0';
+      }();
+      if (use_tdm_flow_fp8) {
+        cast_fp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+      } else {
+        if constexpr (IS_DGATED) {
+          cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+        } else {
+          cast_gated<ParamOP, ActOP>(gated_input, output, stream);
+        }
+      }
+#else
       cast_fp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+#endif
     } else {
       if constexpr (IS_DGATED) {
         cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
@@ -1680,11 +1613,12 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
   } else if (is_mxfp_scaling(output->scaling_mode)) {
     if (use_tma_kernels) {
 #ifdef __HIP_PLATFORM_AMD__
-      static const bool use_nv_upstream_flow = [] {
-        const char *env = std::getenv("NVTE_USE_NV_UPSTREAM_FLOW");
+      // On AMD gfx1250: NVTE_USE_TDM_FLOW=1 selects TDM kernel; default (0) uses ROCm flow.
+      static const bool use_tdm_flow = [] {
+        const char *env = std::getenv("NVTE_USE_TDM_FLOW");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
       }();
-      if (use_nv_upstream_flow) {
+      if (use_tdm_flow) {
         cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       } else {
         rocm_cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
