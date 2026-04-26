@@ -40,6 +40,20 @@ namespace transformer_engine {
 
 namespace dequantization {
 
+constexpr size_t CHUNK_DIM_Y = 128;
+constexpr size_t CHUNK_DIM_X = 128;
+constexpr size_t THREADS_PER_CHUNK = 128;
+constexpr size_t BUFFERS_NUM = 2;
+
+constexpr size_t ELEMS_PER_THREAD = 16;
+constexpr size_t BUFFER_DIM_Y = 16;
+constexpr size_t SHMEM_DIM_Y = BUFFER_DIM_Y;  // 16
+constexpr size_t SHMEM_DIM_X = CHUNK_DIM_X;   // 128
+
+constexpr size_t THREADS_PER_CHUNK_X_ROWWISE = CHUNK_DIM_X / ELEMS_PER_THREAD;  //   8 = 128 / 16
+constexpr size_t THREADS_PER_CHUNK_X_COLWISE = CHUNK_DIM_X;                     // 128
+constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                       //   8 = 128 / 16
+
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     dequantize_mxfp8_kernel(
