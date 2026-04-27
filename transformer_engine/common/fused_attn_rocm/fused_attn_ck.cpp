@@ -354,13 +354,15 @@ void pad_remap(
     });
 }
 
-// cuda kernel to copy softmax lse between padded and unpadded layouts.
+// Cuda kernel to copy softmax lse between padded and unpadded layouts.
+// Also performs a format conversion between CK[h, total_tokens_q] and
+// NVTE[total_tokens_q, h] formats. 
 // padded layout (selected by is_ragged):
 //   is_ragged=false: [b, h, s_q]
 //   is_ragged=true : [max_tokens_q with padding, h]
 // unpadded layout: [h, max_tokens_q]
-// one wavefront in charge of one token index (h*sizeof(float) bytes)
-// one workitem (thread) in one wavefront is charge of one element in THREADS_PER_WAVE_FRONT(64) segment trunk of h
+// One wavefront in charge of one token index (h*sizeof(float) bytes)
+// One workitem (thread) in one wavefront is charge of one element in THREADS_PER_WAVE_FRONT(64) segment trunk of h
 template<bool is_ragged, PadDirection dir>
 __global__ void pad_remap_lse_kernel(
   uint64_t b, uint64_t h, uint64_t s_q,
