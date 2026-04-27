@@ -79,6 +79,9 @@ struct CKAttnCommonArgs {
   void* philox_seed_ptr = nullptr;
   void* philox_offset_ptr = nullptr;
 
+  // O layout (o_ptr lives in derived because fwd writes it / bwd reads it)
+  uint64_t stride_b_o = 0, stride_h_o = 0, stride_s_o = 0;
+
   // V3 ASM kernel selection (shared knob)
   int how_v3_bf16_cvt = 0;
 
@@ -91,7 +94,6 @@ struct CKAttnFwdArgs : CKAttnCommonArgs {
 
   // Output (writable)
   void* o_ptr = nullptr;
-  uint64_t stride_b_o = 0, stride_h_o = 0, stride_s_o = 0;
   void* lse_ptr = nullptr;
 
   // V3 ASM kernel selection
@@ -104,7 +106,6 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
 
   // O / LSE / dO (forward outputs feeding the backward; read-only)
   const void* o_ptr = nullptr;
-  uint64_t stride_b_o = 0, stride_h_o = 0, stride_s_o = 0;
   const void* lse_ptr = nullptr;
   const void* do_ptr = nullptr;
   uint64_t stride_b_do = 0, stride_h_do = 0, stride_s_do = 0;

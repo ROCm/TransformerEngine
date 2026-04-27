@@ -49,8 +49,7 @@ std::string get_data_type_str(DType dtype);
 BiasShape get_bias_shape(uint64_t b, uint64_t h, uint64_t bias_b, uint64_t bias_h);
 
 //get ck_tile bias_type and CK_FUSED_ATTN bias_shape from a fwd/bwd args struct
-template <typename ArgsT>
-std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(const ArgsT* args);
+std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(const CKAttnCommonArgs* args);
 
 uint64_t get_runtime_max_seqlen(uint64_t b, const void* cu_seqlen_ptr, const void* cu_seqlen_padded_ptr, void* workspace, hipStream_t stream);
 

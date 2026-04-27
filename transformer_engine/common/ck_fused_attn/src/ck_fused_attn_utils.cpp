@@ -174,8 +174,7 @@ BiasShape get_bias_shape(uint64_t b, uint64_t h, uint64_t bias_b, uint64_t bias_
 }
 
 //get ck_tile bias_type and CK_FUSED_ATTN bias_shape from a fwd/bwd args struct
-template <typename ArgsT>
-std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(const ArgsT* args){
+std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(const CKAttnCommonArgs* args){
   bias_enum bias_type;
   BiasShape bias_shape;
   if (args->attn_bias_type==BiasType::no_bias){
@@ -191,9 +190,6 @@ std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(const ArgsT* args){
   }
   return std::make_pair(bias_type, bias_shape);
 }
-
-template std::pair<bias_enum, BiasShape> get_ck_bias_type_shape<CKAttnFwdArgs>(const CKAttnFwdArgs*);
-template std::pair<bias_enum, BiasShape> get_ck_bias_type_shape<CkAttnBwdArgs>(const CkAttnBwdArgs*);
 
 __global__ void get_runtime_max_seqlen_kernel(
   uint64_t b,
