@@ -144,7 +144,7 @@ class QuantGroupedGemmRunner : public RunnerInterface {
   using HostArgs = ck_tile::QuantGroupedGemmHostArgs;
 
  public:
-  static std::vector<HostArgs> build_descs(const GroupedGemmRunContext& ctx) {
+  static std::vector<HostArgs> build_descs(const CKGemmRunContext& ctx) {
     if (!has_sufficient_workspace<Kernel>(ctx)) {
       return {};
     }
@@ -256,7 +256,7 @@ class QuantGroupedGemmRunner : public RunnerInterface {
   }
 
   bool run(const ck_tile::stream_config& stream_cfg,
-           const GroupedGemmRunContext& ctx) override {
+           const CKGemmRunContext& ctx) override {
     auto descs = build_descs(ctx);
     if (descs.empty()) {
       return false;
@@ -294,7 +294,7 @@ template <GPUArch Arch>
 static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
                                                    DType b_dtype,
                                                    DType d_dtype,
-                                                   const GroupedGemmRunContext& ctx) {
+                                                   const CKGemmRunContext& ctx) {
   const ck_tile::stream_config s{ctx.stream};
   std::unique_ptr<RunnerInterface> runner = nullptr;
 
@@ -340,7 +340,7 @@ static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
 bool ck_tile_grouped_gemm_fp8_dispatch(DType a_dtype,
                                        DType b_dtype,
                                        DType d_dtype,
-                                       const GroupedGemmRunContext& ctx) {
+                                       const CKGemmRunContext& ctx) {
   switch (detect_gpu_arch()) {
     case GPUArch::GFX942:
       return ck_tile_grouped_gemm_fp8_dispatch_arch<GPUArch::GFX942>(a_dtype, b_dtype, d_dtype, ctx);

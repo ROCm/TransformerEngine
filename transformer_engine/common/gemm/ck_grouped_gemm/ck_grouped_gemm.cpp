@@ -4,6 +4,7 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
+#include "../ck_gemm_common.h"
 #include "ck_grouped_gemm_common.h"
 #include "ck_grouped_gemm_fp16.h"
 #include "ck_grouped_gemm_fp8.h"
@@ -32,67 +33,39 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
     ws_bytes = ws_te->data.numel() * typeToSize(ws_te->data.dtype);
   }
 
-  // Normalize similar to upstream
-  // See https://github.com/NVIDIA/TransformerEngine/blob/59f6f3876767d07045152bfae07b5dd4c54e1725/transformer_engine/common/gemm/cutlass_grouped_gemm.cu#L54-L68
-  // I.e., swap A and B, as well as transa and transb.
-  const NVTETensor* A_use = B;
-  const NVTETensor* B_use = A;
-  bool transA_use = transB;
-  bool transB_use = transA;
+  const auto norm = normalize_gemm_inputs(A, B, transA, transB);
+  const NVTETensor* A_use = norm.A;
+  const NVTETensor* B_use = norm.B;
+  bool transA_use = norm.transA;
+  bool transB_use = norm.transB;
+
   bool use_a_colwise_data = false;
   bool use_b_colwise_data = false;
 
   const auto caller_a_dtype = convertNVTETensorCheck(A[0])->dtype();
   const bool is_8bit_float = is_fp8_dtype(caller_a_dtype);
   const bool is_16bit_float = is_fp16_dtype(caller_a_dtype);
-  
+
   Tensor* A0_te = convertNVTETensorCheck(A_use[0]);
   Tensor* B0_te = convertNVTETensorCheck(B_use[0]);
 
-  // Currently the accumulate path is only supported on fp16
+  // Currently the accumulate path is only supported for fp16.
   if (accumulate && is_8bit_float) {
-  	return false;
+    return false;
   }
 
-  // FP8 special handling.
-  //
-  // A_use/B_use and transA_use/transB_use have already gone through the
-  // upstream-style grouped GEMM normalization above. This block only rewrites
-  // that normalized presentation into the CK FP8 preferred NT presentation by selecting
-  // `columnwise_data` when needed.
-  //
-  // CK FP8 target presentation:
-  //   A_use: N
-  //   B_use: T
-  //
-  // The outer condition checks whether this NT presentation is possible:
-  //   - A_use is already N, or can be made N using columnwise_data
-  //   - B_use is already T, or can be made T using columnwise_data
-  //
-  // Then each operand is rewritten independently only if needed:
-  //   NN -> rewrite B only
-  //   TN -> rewrite A and B
-  //   NT -> already in target form
-  //   TT -> rewrite A only
-  //
-  // This preserves the intended math and only changes the physical
-  // storage/transpose-flag encoding seen by CK.
-  if (is_8bit_float) {
-    const bool has_a_col = A0_te->has_columnwise_data();
-    const bool has_b_col = B0_te->has_columnwise_data();
+  // Select CK's preferred FP8 NT presentation when columnwise storage is available.
+  const auto presentation = select_ck_fp8_nt_presentation(
+    is_8bit_float,
+    transA_use,
+    transB_use,
+    A0_te->has_columnwise_data(),
+    B0_te->has_columnwise_data());
 
-    if ((!transA_use || has_a_col) && (transB_use || has_b_col)) {
-      if (transA_use) {
-        use_a_colwise_data = true;
-        transA_use = false;
-      }
-
-      if (!transB_use) {
-        use_b_colwise_data = true;
-        transB_use = true;
-      }
-    }
-  }
+  transA_use = presentation.transA;
+  transB_use = presentation.transB;
+  use_a_colwise_data = presentation.use_a_colwise_data;
+  use_b_colwise_data = presentation.use_b_colwise_data;
 
   const auto a_dtype = convertNVTETensorCheck(A_use[0])->dtype();
   const auto b_dtype = convertNVTETensorCheck(B_use[0])->dtype();
@@ -151,7 +124,7 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
     return false;
   }
 
-  GroupedGemmRunContext ctx = {
+  CKGemmRunContext ctx = {
       A_use,
       B_use,
       D,

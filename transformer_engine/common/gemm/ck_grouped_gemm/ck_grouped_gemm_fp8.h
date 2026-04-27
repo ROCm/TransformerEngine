@@ -12,7 +12,7 @@ namespace grouped_gemm {
 bool ck_tile_grouped_gemm_fp8_dispatch(DType a_dtype,
                                     DType b_dtype,
                                     DType d_dtype,
-                                    const GroupedGemmRunContext& ctx);
+                                    const CKGemmRunContext& ctx);
 
 }  // namespace grouped_gemm
 }  // namespace transformer_engine

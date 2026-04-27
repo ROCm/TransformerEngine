@@ -110,7 +110,7 @@ class GroupedGemmRunner : public RunnerInterface {
                                       ck_tile::GroupedGemmHostArgs<0>>;
 
  public:
-  static std::vector<HostArgs> build_descs(const GroupedGemmRunContext& ctx) {
+  static std::vector<HostArgs> build_descs(const CKGemmRunContext& ctx) {
     if (!has_sufficient_workspace<Kernel>(ctx)) {
       return {};
     }
@@ -187,7 +187,7 @@ class GroupedGemmRunner : public RunnerInterface {
   }
 
   bool run(const ck_tile::stream_config& stream_cfg,
-           const GroupedGemmRunContext& ctx) override {
+           const CKGemmRunContext& ctx) override {
     auto descs = build_descs(ctx);
     if (descs.empty()) {
       return false;
@@ -212,7 +212,7 @@ class GroupedGemmRunner : public RunnerInterface {
 bool ck_tile_grouped_gemm_fp16_dispatch(DType a_dtype,
                                         DType b_dtype,
                                         DType d_dtype,
-                                        const GroupedGemmRunContext& ctx) {
+                                        const CKGemmRunContext& ctx) {
   const ck_tile::stream_config s{ctx.stream};
   std::unique_ptr<RunnerInterface> runner = nullptr;
 
