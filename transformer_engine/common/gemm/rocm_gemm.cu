@@ -434,40 +434,33 @@ static void dequant_fp4_gemm_inputs(
       alpha, amax_A, amax_B, factor_inv, device_alpha_vec, m);
   *alpha_ptr_out = static_cast<const void*>(device_alpha_vec);
 
-  // Dequantize FP4 -> BF16 (block scales only, no amax folded in)
-  if (is_fp4_dtype(param.Atype)) {
-    hip_bfloat16* a_bf16 = reinterpret_cast<hip_bfloat16*>(ws_ptr);
-    ws_ptr += a_bf16_bytes;
-    const int64_t total_a = static_cast<int64_t>(m) * k;
-    const auto& a_sinv = (transa == CUBLAS_OP_T) ? inputA.scale_inv
-                                                 : inputA.columnwise_scale_inv;
-    const int64_t a_num_cols = (transa == CUBLAS_OP_T)
-        ? inputA.data.shape.back()
-        : inputA.columnwise_data.shape.back();
-    const int64_t a_scale_stride = (a_sinv.shape.size() >= 2) ? a_sinv.shape[1] : (a_num_cols / 16);
-    launch_dequant_fp4_to_bf16(param.A, param.A_scale_inv, a_bf16, total_a,
-                               a_num_cols, a_scale_stride, stream);
-    param.A = a_bf16;
-    param.Atype = DType::kBFloat16;
-    param.A_scale_inv = nullptr;
-  }
+  // Stage FP4 operand: dequantize to BF16 in workspace and update GEMM param.
+  auto stage_fp4_operand = [&](DType& op_type, void*& op_data,
+                               void*& op_scale_inv,
+                               const transformer_engine::Tensor& input,
+                               bool use_rowwise, int64_t rows, int64_t cols,
+                               size_t bf16_bytes) {
+    if (!is_fp4_dtype(op_type))
+      return;
 
-  if (is_fp4_dtype(param.Btype)) {
-    hip_bfloat16* b_bf16 = reinterpret_cast<hip_bfloat16*>(ws_ptr);
-    ws_ptr += b_bf16_bytes;
-    const int64_t total_b = static_cast<int64_t>(k) * n;
-    const auto& b_sinv = (transb == CUBLAS_OP_N) ? inputB.scale_inv
-                                                 : inputB.columnwise_scale_inv;
-    const int64_t b_num_cols = (transb == CUBLAS_OP_N)
-        ? inputB.data.shape.back()
-        : inputB.columnwise_data.shape.back();
-    const int64_t b_scale_stride = (b_sinv.shape.size() >= 2) ? b_sinv.shape[1] : (b_num_cols / 16);
-    launch_dequant_fp4_to_bf16(param.B, param.B_scale_inv, b_bf16, total_b,
-                               b_num_cols, b_scale_stride, stream);
-    param.B = b_bf16;
-    param.Btype = DType::kBFloat16;
-    param.B_scale_inv = nullptr;
-  }
+    hip_bfloat16* bf16_buf = reinterpret_cast<hip_bfloat16*>(ws_ptr);
+    ws_ptr += bf16_bytes;
+    const auto& sinv = use_rowwise ? input.scale_inv : input.columnwise_scale_inv;
+    const int64_t num_cols = use_rowwise ? input.data.shape.back()
+                                        : input.columnwise_data.shape.back();
+    const int64_t scale_stride = (sinv.shape.size() >= 2) ? sinv.shape[1] : (num_cols / 16);
+    launch_dequant_fp4_to_bf16(op_data, op_scale_inv, bf16_buf,
+                               rows * cols, num_cols, scale_stride, stream);
+    op_data = bf16_buf;
+    op_type = DType::kBFloat16;
+    op_scale_inv = nullptr;
+  };
+
+  // Dequantize FP4 -> BF16 (block scales only, no amax folded in)
+  stage_fp4_operand(param.Atype, param.A, param.A_scale_inv,
+                    inputA, transa == CUBLAS_OP_T, m, k, a_bf16_bytes);
+  stage_fp4_operand(param.Btype, param.B, param.B_scale_inv,
+                    inputB, transb == CUBLAS_OP_N, k, n, b_bf16_bytes);
 }
 
 
