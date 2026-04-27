@@ -48,6 +48,10 @@ __global__ void __launch_bounds__(ROCM_THREADS_PER_CHUNK)
                             OType *output_ptr,
                             const e8m0_t *const scales_ptr, const size_t rows, const size_t cols,
                             const size_t scales_stride) {
+  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0) {
+    printf("[DBG dequantize_mxfp8_kernel ROCm] plain ROCm kernel executing rows=%zu cols=%zu\n",
+           (size_t)rows, (size_t)cols);
+  }
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
   constexpr bool USE_COLWISE_SCALING = SCALE_DIM_Y > 1;
 
@@ -147,6 +151,8 @@ static void rocm_mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStrea
 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
+  fprintf(stderr, "[DBG rocm_mxfp8_dequantize] rows=%zu cols=%zu — launching dequantize_mxfp8_kernel\n",
+          rows, cols);
   const size_t chunks_Y = DIVUP(rows, ROCM_CHUNK_DIM_Y);
   const size_t chunks_X = DIVUP(cols, ROCM_CHUNK_DIM_X);
 

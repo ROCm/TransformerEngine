@@ -9,6 +9,7 @@
 #include <hip/hip_runtime.h>
 
 #include "../common.h"
+#include "cuda_runtime.h"
 #include "math.h"
 #include "ptx.cuh"
 #include "rocm_vectorized_2d.cuh"
@@ -62,6 +63,10 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
                          const size_t scale_stride_colwise) {
   if constexpr (!IS_DBIAS && !IS_DACT && !IS_ACT) {
     if (noop != nullptr && noop[0] == 1.0f) return;
+  }
+  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0) {
+    printf("[DBG cast_mxfp8_2D_kernel ROCm] plain ROCm kernel executing rows=%zu cols=%zu\n",
+           (size_t)rows, (size_t)cols);
   }
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
   constexpr bool USE_COLWISE_SCALING = SCALE_DIM_Y > 1;
@@ -549,19 +554,23 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
-#if defined(__gfx1250__)
+#ifdef NVTE_ARCH_HAS_TDM
       static const bool use_tdm_flow = [] {
         const char *env = std::getenv("NVTE_USE_TDM_FLOW");
-        return env != nullptr && env[0] == '1' && env[1] == '\0';
+        return env != nullptr && env[0] == '1' && env[1] == '\0' &&
+               cuda::sm_arch_name().find("gfx1250") != std::string::npos;
       }();
       if (use_tdm_flow) {
+        fprintf(stderr, "[DBG fp8_quantize_rocm] gfx1250 TDM branch -> mxfp8_quantize\n");
         mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                dbias, workspace, stream);
       } else {
+        fprintf(stderr, "[DBG fp8_quantize_rocm] gfx1250 ROCm branch -> rocm_mxfp8_quantize\n");
         rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                     dbias, workspace, stream);
       }
 #else
+      fprintf(stderr, "[DBG fp8_quantize_rocm] non-gfx1250 AMD -> rocm_mxfp8_quantize\n");
       rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                    dbias, workspace, stream);
 #endif
@@ -582,6 +591,8 @@ void rocm_mxfp8_quantize(const Tensor &input, const Tensor *act_input, const Ten
 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
+  fprintf(stderr, "[DBG rocm_mxfp8_quantize] rows=%zu cols=%zu — launching cast_mxfp8_2D_kernel\n",
+          rows, cols);
 
   const size_t blocks_Y = DIVUP(rows, MXFP8_CHUNK_DIM_Y);
   const size_t blocks_X = DIVUP(cols, MXFP8_CHUNK_DIM_X);

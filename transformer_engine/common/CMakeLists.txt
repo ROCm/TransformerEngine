@@ -86,6 +86,13 @@ else()
     SET(CMAKE_HIP_ARCHITECTURES $ENV{NVTE_ROCM_ARCH})
   endif()
 
+  # Set NVTE_ARCH_HAS_TDM when building for gfx1250, which has the Tensor Data Mover (TDM).
+  # This define is visible to both host and device compilation, unlike __gfx1250__ which is
+  # device-only. Used to gate TDM dispatch in host functions.
+  if("gfx1250" IN_LIST CMAKE_HIP_ARCHITECTURES)
+    add_definitions(-DNVTE_ARCH_HAS_TDM)
+  endif()
+
   set(CMAKE_CXX_STANDARD 17)
   project(transformer_engine LANGUAGES HIP CXX)
 
