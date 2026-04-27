@@ -169,11 +169,11 @@ INSTANTIATE_TEST_SUITE_P(
 
 #ifdef __HIP_PLATFORM_AMD__
 
-// AITER 32x8 swizzle test (gfx1250 layout)
+// MX 32x8 pre-swizzle test (gfx1250 preSwizzle({32, 8, 4}) layout)
 
-// CPU reference for AITER e8m0_shuffle permutation.
+// CPU reference for gfx1250 MX scale pre-swizzle permutation.
 // Row-major input [M, K], output is a flat array of 256-byte tiles.
-void compute_ref_aiter_swizzle_row(const uint8_t *h_input, uint8_t *h_output,
+void compute_ref_mx_swizzle_row(const uint8_t *h_input, uint8_t *h_output,
                                    const int M, const int K,
                                    const int orig_M, const int orig_K) {
   constexpr int TILE_M = 32;
@@ -189,18 +189,19 @@ void compute_ref_aiter_swizzle_row(const uint8_t *h_input, uint8_t *h_output,
       int tile_col = k / TILE_K;
       int local_row = m % TILE_M;
       int local_col = k % TILE_K;
-      int i1 = local_row >> 4;
-      int i2 = local_row & 0xF;
-      int i4 = local_col >> 2;
-      int i5 = local_col & 0x3;
+      int d0 = local_col & 1;
+      int d1 = (local_col >> 1) & 1;
+      int d2 = local_col >> 2;
+      int d4 = local_row & 0xF;
+      int d6 = local_row >> 4;
       int tile_offset = (tile_row * (K / TILE_K) + tile_col) * 256;
-      int within_tile = (i5 << 6) | (i2 << 2) | (i4 << 1) | i1;
+      int within_tile = (d0 << 7) | (d4 << 3) | (d1 << 2) | (d2 << 1) | d6;
       h_output[tile_offset + within_tile] = val;
     }
   }
 }
 
-void compute_ref_aiter_swizzle_col(const uint8_t *h_input, uint8_t *h_output,
+void compute_ref_mx_swizzle_col(const uint8_t *h_input, uint8_t *h_output,
                                    const int M, const int K,
                                    const int orig_M, const int orig_K) {
   constexpr int TILE_M = 32;
@@ -215,12 +216,13 @@ void compute_ref_aiter_swizzle_col(const uint8_t *h_input, uint8_t *h_output,
       int tile_col = k / TILE_K;
       int local_row = m % TILE_M;
       int local_col = k % TILE_K;
-      int i1 = local_row >> 4;
-      int i2 = local_row & 0xF;
-      int i4 = local_col >> 2;
-      int i5 = local_col & 0x3;
+      int d0 = local_col & 1;
+      int d1 = (local_col >> 1) & 1;
+      int d2 = local_col >> 2;
+      int d4 = local_row & 0xF;
+      int d6 = local_row >> 4;
       int tile_offset = (tile_row * (K / TILE_K) + tile_col) * 256;
-      int within_tile = (i5 << 6) | (i2 << 2) | (i4 << 1) | i1;
+      int within_tile = (d0 << 7) | (d4 << 3) | (d1 << 2) | (d2 << 1) | d6;
       h_output[tile_offset + within_tile] = val;
     }
   }
@@ -230,11 +232,11 @@ static size_t roundup_sz(size_t val, size_t mult) {
   return ((val + mult - 1) / mult) * mult;
 }
 
-class AiterSwizzleTestSuite
+class MxSwizzleTestSuite
     : public ::testing::TestWithParam<
           std::tuple<std::pair<int, int>, bool>> {};
 
-TEST_P(AiterSwizzleTestSuite, TestAiterSwizzle) {
+TEST_P(MxSwizzleTestSuite, TestMxSwizzle) {
   using namespace transformer_engine;
   using namespace test;
 
@@ -245,7 +247,7 @@ TEST_P(AiterSwizzleTestSuite, TestAiterSwizzle) {
   const size_t orig_M = dims.first;
   const size_t orig_K = dims.second;
 
-  // Padded dimensions for AITER kernel (M multiple of 32, K multiple of 8)
+  // Padded dimensions for MX pre-swizzle kernel (M multiple of 32, K multiple of 8)
   const size_t M = roundup_sz(orig_M, 32);
   const size_t K = roundup_sz(orig_K, 8);
 
@@ -296,7 +298,7 @@ TEST_P(AiterSwizzleTestSuite, TestAiterSwizzle) {
     output_tw.set_columnwise_scale_inv(d_output, DType::kFloat8E8M0, scale_shape_out);
   }
 
-  nvte_swizzle_scaling_factors_aiter(input_tw.data(), output_tw.data(), 0);
+  nvte_swizzle_scaling_factors_mx(input_tw.data(), output_tw.data(), 0);
 
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   auto err = cudaGetLastError();
@@ -311,13 +313,13 @@ TEST_P(AiterSwizzleTestSuite, TestAiterSwizzle) {
   std::unique_ptr<uint8_t[]> h_ref(new uint8_t[output_size]);
   memset(h_ref.get(), 0, output_size);
   if (rowwise) {
-    compute_ref_aiter_swizzle_row(h_input.get(), h_ref.get(), M, K, orig_M, orig_K);
+    compute_ref_mx_swizzle_row(h_input.get(), h_ref.get(), M, K, orig_M, orig_K);
   } else {
-    compute_ref_aiter_swizzle_col(h_input.get(), h_ref.get(), M, K, orig_M, orig_K);
+    compute_ref_mx_swizzle_col(h_input.get(), h_ref.get(), M, K, orig_M, orig_K);
   }
 
   // Compare
-  compareResults("aiter_swizzle", h_output.get(), h_ref.get(), output_size);
+  compareResults("mx_swizzle", h_output.get(), h_ref.get(), output_size);
 
   cudaFree(d_input);
   cudaFree(d_output);
@@ -329,7 +331,7 @@ namespace {
 // multiples of 32 (M) and 8 (K) since CheckScaleTensorShape
 // validates consistency between data and scale shapes.
 // In production, quantizer.get_scale_shape() handles the padding.
-std::vector<std::pair<int, int>> aiter_scale_dims = {
+std::vector<std::pair<int, int>> mx_scale_dims = {
   {32, 8},       // minimal, single tile
   {64, 16},      // 2x2 tiles
   {32, 24},      // multiple K tiles
@@ -342,12 +344,12 @@ std::vector<std::pair<int, int>> aiter_scale_dims = {
 
 INSTANTIATE_TEST_SUITE_P(
   OperatorTest,
-  AiterSwizzleTestSuite,
+  MxSwizzleTestSuite,
   ::testing::Combine(
-    ::testing::ValuesIn(aiter_scale_dims),
+    ::testing::ValuesIn(mx_scale_dims),
     ::testing::Values(true, false)
   ),
-  [](const testing::TestParamInfo<AiterSwizzleTestSuite::ParamType>& info) {
+  [](const testing::TestParamInfo<MxSwizzleTestSuite::ParamType>& info) {
     std::string name = "M" + std::to_string(std::get<0>(info.param).first) +
       "_K" + std::to_string(std::get<0>(info.param).second) +
       (std::get<1>(info.param) ? "_row" : "_col");

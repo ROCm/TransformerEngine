@@ -349,38 +349,38 @@ __global__ void multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_
 }
 
 // ============================================================================
-// AITER e8m0_shuffle swizzle kernels for gfx1250 (MI450)
+// MX scale pre-swizzle kernels for gfx1250 (MI450)
 //
 // This implements the scale layout expected by hipBLASLt's
 // HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT mode.
 //
-// The layout matches AITER's e8m0_shuffle:
-//   scale = scale.view(M//32, 2, 16, N//8, 2, 4)
-//   scale = scale.permute(0, 3, 5, 2, 4, 1).contiguous()
-//   scale = scale.view(M, N)
+// The layout is derived from PreSwizzle.hpp with parameters
+// {tileMN=32, tileK=8, subTileK=4} which produces:
+//   srcSizes = {2, 2, 2, numCols/8, 16, 1, 2, numRows/32}
+//   dimOrder = {6, 2, 1, 3, 4, 5, 0, 7}
 //
 // Input:  compact E8M0 scales [M, N] in row-major (N contiguous)
-// Output: swizzled E8M0 scales in 32x8 tiles with the above permutation
+// Output: swizzled E8M0 scales in 32x8 tiles
 //
 // Within each 32-row x 8-col tile, for input position (row, col):
-//   i1 = row / 16,  i2 = row % 16
-//   i4 = col / 4,   i5 = col % 4
-//   output_offset = i5*64 + i2*4 + i4*2 + i1
+//   d0 = col & 1,  d1 = (col >> 1) & 1,  d2 = col >> 2
+//   d4 = row & 0xF,  d6 = row >> 4
+//   output_offset = (d0 << 7) | (d4 << 3) | (d1 << 2) | (d2 << 1) | d6
 // ============================================================================
 
-constexpr int AITER_SF_TILE_DIM_M = 32;
-constexpr int AITER_SF_TILE_DIM_K = 8;
+constexpr int MX_PRESWIZZLE_TILE_M = 32;
+constexpr int MX_PRESWIZZLE_TILE_K = 8;
 
 // Row-wise: input is [M, N] row-major (N = K/block_size, N is contiguous)
 __global__ void __launch_bounds__(256)
-    swizzle_row_scaling_aiter_kernel(const uint8_t* __restrict__ input,
+    swizzle_row_scaling_mx_kernel(const uint8_t* __restrict__ input,
                                     uint8_t* __restrict__ output,
                                     const int M, const int N,
                                     const int original_M, const int original_N) {
   const int local_row = threadIdx.y;  // 0..31
   const int local_col = threadIdx.x;  // 0..7
-  const int row = blockIdx.y * AITER_SF_TILE_DIM_M + local_row;
-  const int col = blockIdx.x * AITER_SF_TILE_DIM_K + local_col;
+  const int row = blockIdx.y * MX_PRESWIZZLE_TILE_M + local_row;
+  const int col = blockIdx.x * MX_PRESWIZZLE_TILE_K + local_col;
 
   // Read with identity-scale padding (E8M0 127 = 2^0 = 1.0)
   uint8_t val = 127;
@@ -388,16 +388,17 @@ __global__ void __launch_bounds__(256)
     val = input[row * original_N + col];
   }
 
-  // Decompose within-tile indices for permutation
-  const int i1 = local_row >> 4;         // (row % 32) / 16
-  const int i2 = local_row & 0xF;        // row % 16
-  const int i4 = local_col >> 2;         // (col % 8) / 4
-  const int i5 = local_col & 0x3;        // col % 4
+  // Decompose within-tile indices for preSwizzle({32, 8, 4})
+  const int d0 = local_col & 1;          // col bit 0
+  const int d1 = (local_col >> 1) & 1;   // col bit 1
+  const int d2 = local_col >> 2;         // col bit 2
+  const int d4 = local_row & 0xF;        // row low 4 bits
+  const int d6 = local_row >> 4;         // row / 16
 
   // Tile offset: tiles are laid out as (M/32) x (N/8) blocks of 256 bytes each
-  const int tile_offset = (blockIdx.y * (N / AITER_SF_TILE_DIM_K) + blockIdx.x) * 256;
-  // Within-tile offset from permute(0, 3, 5, 2, 4, 1)
-  const int within_tile = (i5 << 6) | (i2 << 2) | (i4 << 1) | i1;
+  const int tile_offset = (blockIdx.y * (N / MX_PRESWIZZLE_TILE_K) + blockIdx.x) * 256;
+  // Within-tile offset from dimOrder {6, 2, 1, 3, 4, 5, 0, 7}
+  const int within_tile = (d0 << 7) | (d4 << 3) | (d1 << 2) | (d2 << 1) | d6;
 
   output[tile_offset + within_tile] = val;
 }
@@ -406,14 +407,14 @@ __global__ void __launch_bounds__(256)
 // the column-wise scale matrix logically shaped [M, N].
 // Logical (row, col) maps to physical address col * original_M + row.
 __global__ void __launch_bounds__(256)
-    swizzle_col_scaling_aiter_kernel(const uint8_t* __restrict__ input,
+    swizzle_col_scaling_mx_kernel(const uint8_t* __restrict__ input,
                                     uint8_t* __restrict__ output,
                                     const int M, const int N,
                                     const int original_M, const int original_N) {
   const int local_row = threadIdx.y;  // 0..31
   const int local_col = threadIdx.x;  // 0..7
-  const int row = blockIdx.y * AITER_SF_TILE_DIM_M + local_row;
-  const int col = blockIdx.x * AITER_SF_TILE_DIM_K + local_col;
+  const int row = blockIdx.y * MX_PRESWIZZLE_TILE_M + local_row;
+  const int col = blockIdx.x * MX_PRESWIZZLE_TILE_K + local_col;
 
   // Column-major read: logical (row, col) -> physical (col * original_M + row)
   uint8_t val = 127;
@@ -421,24 +422,25 @@ __global__ void __launch_bounds__(256)
     val = input[col * original_M + row];
   }
 
-  const int i1 = local_row >> 4;
-  const int i2 = local_row & 0xF;
-  const int i4 = local_col >> 2;
-  const int i5 = local_col & 0x3;
+  const int d0 = local_col & 1;
+  const int d1 = (local_col >> 1) & 1;
+  const int d2 = local_col >> 2;
+  const int d4 = local_row & 0xF;
+  const int d6 = local_row >> 4;
 
-  const int tile_offset = (blockIdx.y * (N / AITER_SF_TILE_DIM_K) + blockIdx.x) * 256;
-  const int within_tile = (i5 << 6) | (i2 << 2) | (i4 << 1) | i1;
+  const int tile_offset = (blockIdx.y * (N / MX_PRESWIZZLE_TILE_K) + blockIdx.x) * 256;
+  const int within_tile = (d0 << 7) | (d4 << 3) | (d1 << 2) | (d2 << 1) | d6;
 
   output[tile_offset + within_tile] = val;
 }
 
 }  // namespace
 
-void swizzle_scaling_factors_aiter(const Tensor* input, Tensor* output, cudaStream_t stream) {
+void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_t stream) {
   // Check scaling mode
   const auto& scaling_mode = input->scaling_mode;
   NVTE_CHECK(scaling_mode == NVTE_MXFP8_1D_SCALING,
-             "AITER swizzle only supports MXFP8 scaling mode (got ",
+             "MX pre-swizzle only supports MXFP8 scaling mode (got ",
              to_string(input->scaling_mode), ").");
 
   // Check tensors
@@ -474,12 +476,12 @@ void swizzle_scaling_factors_aiter(const Tensor* input, Tensor* output, cudaStre
     k = input->columnwise_scale_inv.shape[0];
   }
 
-  // Check dims -- AITER format requires 32-row x 8-col tiles
-  NVTE_CHECK(m % AITER_SF_TILE_DIM_M == 0,
-             "Scale M dimension must be padded to multiple of ", AITER_SF_TILE_DIM_M,
+  // Check dims -- MX pre-swizzle format requires 32-row x 8-col tiles
+  NVTE_CHECK(m % MX_PRESWIZZLE_TILE_M == 0,
+             "Scale M dimension must be padded to multiple of ", MX_PRESWIZZLE_TILE_M,
              ", got ", m, ".");
-  NVTE_CHECK(k % AITER_SF_TILE_DIM_K == 0,
-             "Scale K dimension must be padded to multiple of ", AITER_SF_TILE_DIM_K,
+  NVTE_CHECK(k % MX_PRESWIZZLE_TILE_K == 0,
+             "Scale K dimension must be padded to multiple of ", MX_PRESWIZZLE_TILE_K,
              ", got ", k, ".");
 
   // Validate output dimensions match
@@ -498,14 +500,14 @@ void swizzle_scaling_factors_aiter(const Tensor* input, Tensor* output, cudaStre
                output->columnwise_scale_inv.shape, ".");
   }
 
-  const dim3 block_size(AITER_SF_TILE_DIM_K, AITER_SF_TILE_DIM_M);  // (8, 32) = 256 threads
-  const dim3 grid_size(k / AITER_SF_TILE_DIM_K, m / AITER_SF_TILE_DIM_M);
+  const dim3 block_size(MX_PRESWIZZLE_TILE_K, MX_PRESWIZZLE_TILE_M);  // (8, 32) = 256 threads
+  const dim3 grid_size(k / MX_PRESWIZZLE_TILE_K, m / MX_PRESWIZZLE_TILE_M);
 
   // Row-wise swizzle
   if (has_rowwise_scale_inv) {
     const int original_M = input->flat_first_dim();
     const int original_K = input->flat_last_dim() / MXFP8_BLOCK_SIZE;
-    swizzle_row_scaling_aiter_kernel<<<grid_size, block_size, 0, stream>>>(
+    swizzle_row_scaling_mx_kernel<<<grid_size, block_size, 0, stream>>>(
         reinterpret_cast<const uint8_t*>(input->scale_inv.dptr),
         reinterpret_cast<uint8_t*>(output->scale_inv.dptr),
         m, k, original_M, original_K);
@@ -516,7 +518,7 @@ void swizzle_scaling_factors_aiter(const Tensor* input, Tensor* output, cudaStre
   if (has_columnwise_scale_inv) {
     const int original_M = input->flat_last_dim();
     const int original_K = input->flat_first_dim() / MXFP8_BLOCK_SIZE;
-    swizzle_col_scaling_aiter_kernel<<<grid_size, block_size, 0, stream>>>(
+    swizzle_col_scaling_mx_kernel<<<grid_size, block_size, 0, stream>>>(
         reinterpret_cast<const uint8_t*>(input->columnwise_scale_inv.dptr),
         reinterpret_cast<uint8_t*>(output->columnwise_scale_inv.dptr),
         m, k, original_M, original_K);
@@ -525,10 +527,10 @@ void swizzle_scaling_factors_aiter(const Tensor* input, Tensor* output, cudaStre
 }
 
 void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t stream) {
-  // On gfx1250, MXFP8 uses the AITER e8m0_shuffle layout (32x8 tiles)
+  // On gfx1250, MXFP8 uses the MX pre-swizzle layout (32x8 tiles)
   // instead of the standard 128x4 interleaved layout.
   if (input->scaling_mode == NVTE_MXFP8_1D_SCALING && cuda::sm_arch() == 170) {
-    swizzle_scaling_factors_aiter(input, output, stream);
+    swizzle_scaling_factors_mx(input, output, stream);
     return;
   }
 
@@ -849,8 +851,8 @@ void launch_multi_tensor_swizzle_scaling_factors(MultiSwizzleArgs& kernel_args,
 
 void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
                                           std::vector<Tensor*>& output, cudaStream_t stream) {
-  // On gfx1250, MXFP8 uses the AITER e8m0_shuffle layout.
-  // Dispatch each tensor individually through the aiter swizzle path.
+  // On gfx1250, MXFP8 uses the MX pre-swizzle layout.
+  // Dispatch each tensor individually through the MX pre-swizzle path.
   if (cuda::sm_arch() == 170) {
     bool any_mxfp8 = false;
     for (size_t i = 0; i < input.size(); i++) {
@@ -860,7 +862,7 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
     }
     if (any_mxfp8) {
       for (size_t i = 0; i < input.size(); i++) {
-        swizzle_scaling_factors_aiter(input[i], output[i], stream);
+        swizzle_scaling_factors_mx(input[i], output[i], stream);
       }
       return;
     }
@@ -1059,10 +1061,10 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
   multi_tensor_swizzle_scaling_factors(input_list, output_list, stream);
 }
 
-void nvte_swizzle_scaling_factors_aiter(const NVTETensor input, NVTETensor output,
+void nvte_swizzle_scaling_factors_mx(const NVTETensor input, NVTETensor output,
                                         cudaStream_t stream) {
-  NVTE_API_CALL(nvte_swizzle_scaling_factors_aiter);
+  NVTE_API_CALL(nvte_swizzle_scaling_factors_mx);
   using namespace transformer_engine;
-  swizzle_scaling_factors_aiter(convertNVTETensorCheck(input), convertNVTETensorCheck(output),
+  swizzle_scaling_factors_mx(convertNVTETensorCheck(input), convertNVTETensorCheck(output),
                                 stream);
 }
