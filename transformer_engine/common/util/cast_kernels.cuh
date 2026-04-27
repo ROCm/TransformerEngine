@@ -32,6 +32,14 @@
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_cast_kernels.cuh"
 #include "tdm.cuh"
+// ROCm defines __habs/__hmax only for __hip_bfloat16, not hip_bfloat16 (TE's bf16 alias).
+// Provide the missing overloads so the TDM kernel compiles for bfloat16 inputs.
+__device__ __forceinline__ hip_bfloat16 __habs(hip_bfloat16 x) {
+  return static_cast<hip_bfloat16>(fabsf(static_cast<float>(x)));
+}
+__device__ __forceinline__ hip_bfloat16 __hmax(hip_bfloat16 x, hip_bfloat16 y) {
+  return static_cast<float>(x) >= static_cast<float>(y) ? x : y;
+}
 #endif
 
 namespace transformer_engine {
@@ -1223,8 +1231,8 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
 void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                     const Tensor *noop,  // TODO (ksivamani)
                     Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream) {
-#ifndef __HIP_PLATFORM_AMD__
   using namespace mxfp8_kernel;
+#ifndef __HIP_PLATFORM_AMD__
   checkCuDriverContext(stream);
 #endif
 
@@ -1355,10 +1363,12 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
 
           switch (scaling_type) {
             case ScalingType::ROWWISE:
+#ifndef __HIP_PLATFORM_AMD__
               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
                                        false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+#endif
               cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
                                    false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
                   <<<grid, block_size, dshmem_size, stream>>>(
@@ -1369,10 +1379,12 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
               NVTE_CHECK_CUDA(cudaGetLastError());
               break;
             case ScalingType::COLWISE:
+#ifndef __HIP_PLATFORM_AMD__
               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, false,
                                        true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+#endif
               cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, false,
                                    true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
                   <<<grid, block_size, dshmem_size, stream>>>(
@@ -1383,10 +1395,12 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
               NVTE_CHECK_CUDA(cudaGetLastError());
               break;
             case ScalingType::BIDIMENSIONAL:
+#ifndef __HIP_PLATFORM_AMD__
               NVTE_CHECK_CUDA(cudaFuncSetAttribute(
                   cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
                                        true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
+#endif
               cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
                                    true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
                   <<<grid, block_size, dshmem_size, stream>>>(
