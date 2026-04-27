@@ -226,7 +226,10 @@ class MXFP4QuantizerRef(Quantizer):
         shuffle_columnwise_data: bool = False,
         with_gemm_swizzled_scales: bool = False,
         use_hadamard: bool = False,
+        with_rht: bool = False,
         use_te_quantizer: bool = False,
+        _rht_masks_row: Optional[int] = None,
+        _rht_masks_col: Optional[int] = None,
     ):
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.internal = True
@@ -234,7 +237,20 @@ class MXFP4QuantizerRef(Quantizer):
         self.shuffle_columnwise_data = shuffle_columnwise_data
         self.with_gemm_swizzled_scales = with_gemm_swizzled_scales
         self.use_hadamard = use_hadamard
+        self.with_rht = with_rht
+        self._rht_row_pack = 0
+        self._rht_col_pack = 0
+        if with_rht and use_hadamard:
+            if _rht_masks_row is not None:
+                assert _rht_masks_col is not None
+                self._rht_row_pack = int(_rht_masks_row)
+                self._rht_col_pack = int(_rht_masks_col)
+            else:
+                from transformer_engine.pytorch.tensor.mxfp4_tensor import pack_mxfp4_rht_masks
+
+                self._rht_row_pack, self._rht_col_pack = pack_mxfp4_rht_masks(True)
         self.use_te_quantizer = use_te_quantizer
+
     @property
     def custom(self) -> bool:
         return True
@@ -256,13 +272,8 @@ class MXFP4QuantizerRef(Quantizer):
             h = np.block([[h, h], [h, -h]])
         return h
 
-    def _apply_hadamard(self, data: np.ndarray) -> np.ndarray:
-        """Apply fixed 16-point Hadamard to each 32-element block.
-
-        Each block of 32 contiguous values is split into two halves of 16.
-        Each half is independently transformed by H16 and scaled by
-        ``1/sqrt(16)``.  This matches the kernel's ``hadamard16_inplace``.
-        """
+    def _apply_hadamard(self, data: np.ndarray, packed_rht_masks: int = 0) -> np.ndarray:
+        """Apply 16-point Hadamard per half-block; optional RHT diagonal (packed uint32)."""
         if not self.use_hadamard:
             return data
 
@@ -272,8 +283,14 @@ class MXFP4QuantizerRef(Quantizer):
         transform = H * scale  # (16, 16)
 
         M, N = data.shape
-        # (M, num_blocks, 2, 16) — two independent 16-element halves per block
         reshaped = data.reshape(M, N // MXFP4_BLOCK_SIZE, 2, dim)
+        if packed_rht_masks:
+            lo = packed_rht_masks & 0xFFFF
+            hi = (packed_rht_masks >> 16) & 0xFFFF
+            signs0 = np.array([1.0 - 2 * ((lo >> i) & 1) for i in range(16)], dtype=np.float32)
+            signs1 = np.array([1.0 - 2 * ((hi >> i) & 1) for i in range(16)], dtype=np.float32)
+            reshaped[:, :, 0, :] *= signs0
+            reshaped[:, :, 1, :] *= signs1
         transformed = np.einsum("...j,jk->...k", reshaped, transform)
         return transformed.reshape(M, N)
 
@@ -283,6 +300,8 @@ class MXFP4QuantizerRef(Quantizer):
 
     def _quantize(
         self, tensor: torch.Tensor, shuffle_data: bool = False,
+        *,
+        rht_packed: int = 0,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Quantize a 2-D tensor to packed FP4 + E8M0 scales.
 
@@ -306,7 +325,7 @@ class MXFP4QuantizerRef(Quantizer):
         data = tensor.cpu().float().numpy()
 
         # Optional Hadamard transform (applied before scale computation)
-        data = self._apply_hadamard(data)
+        data = self._apply_hadamard(data, packed_rht_masks=rht_packed)
 
         num_blocks = N // MXFP4_BLOCK_SIZE
         data_blocks = data.reshape(M, num_blocks, MXFP4_BLOCK_SIZE)
@@ -414,12 +433,17 @@ class MXFP4QuantizerRef(Quantizer):
         if tensor.ndim > 2:
             tensor = tensor.view(-1, tensor.shape[-1])
         if self.use_te_quantizer:
-            te_quantizer = MXFP4Quantizer(rowwise=self.rowwise_usage, 
-                                        columnwise=self.columnwise_usage, 
-                                        shuffle_rowwise_data=self.shuffle_rowwise_data, 
-                                        shuffle_columnwise_data=self.shuffle_columnwise_data, 
-                                        with_gemm_swizzled_scales=self.with_gemm_swizzled_scales, 
-                                        use_hadamard=self.use_hadamard)
+            te_quantizer = MXFP4Quantizer(
+                rowwise=self.rowwise_usage,
+                columnwise=self.columnwise_usage,
+                shuffle_rowwise_data=self.shuffle_rowwise_data,
+                shuffle_columnwise_data=self.shuffle_columnwise_data,
+                with_gemm_swizzled_scales=self.with_gemm_swizzled_scales,
+                use_hadamard=self.use_hadamard,
+                with_rht=self.with_rht,
+                _rht_masks_row=self._rht_row_pack,
+                _rht_masks_col=self._rht_col_pack,
+            )
             q_tensor = tex.quantize(tensor, te_quantizer)
             return MXFP4TensorRef(
                 data=q_tensor._rowwise_data,
@@ -433,13 +457,17 @@ class MXFP4QuantizerRef(Quantizer):
             )
 
         if self.rowwise_usage:
-            qx, sx = self._quantize(tensor, shuffle_data=self.shuffle_rowwise_data)
+            qx, sx = self._quantize(
+                tensor, shuffle_data=self.shuffle_rowwise_data, rht_packed=self._rht_row_pack
+            )
         else:
             qx = sx = None
 
         if self.columnwise_usage:
             t_input = tensor.t().contiguous()
-            qx_t, sx_t = self._quantize(t_input, shuffle_data=self.shuffle_columnwise_data)
+            qx_t, sx_t = self._quantize(
+                t_input, shuffle_data=self.shuffle_columnwise_data, rht_packed=self._rht_col_pack
+            )
         else:
             qx_t = sx_t = None
 

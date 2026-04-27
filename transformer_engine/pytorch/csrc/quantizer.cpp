@@ -1793,6 +1793,9 @@ std::vector<size_t> NVFP4Quantizer::get_scale_shape(const std::vector<size_t>& s
 MXFP4Quantizer::MXFP4Quantizer(const py::handle& quantizer) : Quantizer(quantizer) {
   this->dtype = quantizer.attr("dtype").cast<DType>();
   this->use_hadamard = quantizer.attr("use_hadamard").cast<bool>();
+  this->with_rht = quantizer.attr("with_rht").cast<bool>();
+  this->mxfp4_rht_sign_masks_row = quantizer.attr("_rht_masks_row").cast<uint32_t>();
+  this->mxfp4_rht_sign_masks_col = quantizer.attr("_rht_masks_col").cast<uint32_t>();
   this->shuffle_rowwise_data = quantizer.attr("shuffle_rowwise_data").cast<bool>();
   this->shuffle_columnwise_data = quantizer.attr("shuffle_columnwise_data").cast<bool>();
   this->with_gemm_swizzled_scales = quantizer.attr("with_gemm_swizzled_scales").cast<bool>();
@@ -2024,6 +2027,8 @@ void MXFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
     quant_config.set_noop_tensor(noop_flag->data());
   }
   quant_config.set_mxfp4_use_hadamard(this->use_hadamard);
+  quant_config.set_mxfp4_rht_sign_masks_row(this->mxfp4_rht_sign_masks_row);
+  quant_config.set_mxfp4_rht_sign_masks_col(this->mxfp4_rht_sign_masks_col);
   quant_config.set_stochastic_rounding(this->stochastic_rounding);
 
   TensorWrapper te_rng_state;

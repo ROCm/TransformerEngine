@@ -580,10 +580,14 @@ class MXFP4BlockScaling(Recipe):
     fp8_dpa: bool = False
     fp8_mha: bool = False
     use_hadamard: bool = os.getenv("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
+    """If True, apply random-diagonal Hadamard (RHT) before MXFP4 cast; implies use_hadamard."""
+    with_rht: bool = os.getenv("NVTE_MXFP4_WITH_RHT", "0") == "1"
     stochastic_rounding: bool = os.getenv("NVTE_MXFP4_STOCHASTIC_ROUNDING", "0") == "1"
 
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for MXFP4 scaling."
+        if self.with_rht:
+            self.use_hadamard = True
 
     def __repr__(self) -> str:
         return (

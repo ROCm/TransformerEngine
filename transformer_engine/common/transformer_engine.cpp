@@ -1133,6 +1133,12 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigMXFP4UseHadamard:
       bool_to_uint8(config_.mxfp4_use_hadamard, buf);
       break;
+    case kNVTEQuantizationConfigMXFP4RhtSignMasksRow:
+      std::memcpy(buf, &config_.mxfp4_rht_sign_masks_row, attr_size);
+      break;
+    case kNVTEQuantizationConfigMXFP4RhtSignMasksCol:
+      std::memcpy(buf, &config_.mxfp4_rht_sign_masks_col, attr_size);
+      break;
 #endif
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
@@ -1192,6 +1198,12 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
 #ifdef __HIP_PLATFORM_AMD__
     case kNVTEQuantizationConfigMXFP4UseHadamard:
       uint8_to_bool(buf, config_.mxfp4_use_hadamard);
+      break;
+    case kNVTEQuantizationConfigMXFP4RhtSignMasksRow:
+      std::memcpy(&config_.mxfp4_rht_sign_masks_row, buf, attr_size);
+      break;
+    case kNVTEQuantizationConfigMXFP4RhtSignMasksCol:
+      std::memcpy(&config_.mxfp4_rht_sign_masks_col, buf, attr_size);
       break;
 #endif
     default:

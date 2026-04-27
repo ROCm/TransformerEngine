@@ -101,6 +101,8 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
       colwise_scale_M, colwise_scale_N,
       colwise_scale_M_pad, colwise_scale_N_pad,
       stochastic_rounding, rng_state_ptr,
+      quant_config.mxfp4_rht_sign_masks_row,
+      quant_config.mxfp4_rht_sign_masks_col,
       stream);
 }
 

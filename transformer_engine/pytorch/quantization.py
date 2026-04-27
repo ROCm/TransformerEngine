@@ -1376,6 +1376,7 @@ class MXFP4BlockScalingRecipeState(RecipeState):
         from .tensor.mxfp4_tensor import MXFP4Quantizer
 
         use_hadamard = self.recipe.use_hadamard
+        with_rht = self.recipe.with_rht
         stochastic_rounding = self.recipe.stochastic_rounding
 
         if self.mode == "forward":
@@ -1400,7 +1401,8 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                     shuffle_columnwise_data=shuffle_columnwise_data,
                     with_gemm_swizzled_scales=True,
                     use_hadamard=use_hadamard,
-                    stochastic_rounding=stochastic_rounding,
+                    with_rht=with_rht,
+                    stochastic_rounding=False,
                 )
 
             return [_make_quantizer(idx) for idx in range(self.num_quantizers)]
@@ -1415,7 +1417,8 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                     shuffle_columnwise_data=False,
                     with_gemm_swizzled_scales=True,
                     use_hadamard=use_hadamard,
-                    stochastic_rounding=stochastic_rounding,
+                    with_rht=with_rht,
+                    stochastic_rounding=True,
                 )
                 for _ in range(self.num_quantizers)
             ]

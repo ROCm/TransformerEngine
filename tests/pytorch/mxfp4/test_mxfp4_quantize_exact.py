@@ -8,6 +8,8 @@ Validates that MXFP4Quantizer produces identical packed FP4 data and E8M0
 scales as the MXFP4QuantizerRef pure-Python reference implementation.
 """
 
+from typing import Optional
+
 import numpy as np
 import os
 import pytest
@@ -102,7 +104,11 @@ def check_quantization_mxfp4_versus_reference(
     shuffle_rowwise_data: bool = False,
     shuffle_columnwise_data: bool = False,
     with_gemm_swizzled_scales: bool = False,
+    with_rht: bool = False,
 ) -> None:
+    if with_rht:
+        assert use_hadamard, "with_rht requires use_hadamard=True"
+
     te_dtype = tex.DType.kFloat4E2M1
 
     device = "cuda"
@@ -111,6 +117,13 @@ def check_quantization_mxfp4_versus_reference(
     torch.cuda.manual_seed(seed)
 
     x = torch.randn((M, N), dtype=x_dtype, device=device)
+
+    rht_row: Optional[int] = None
+    rht_col: Optional[int] = None
+    if with_rht:
+        from transformer_engine.pytorch.tensor.mxfp4_tensor import pack_mxfp4_rht_masks
+
+        rht_row, rht_col = pack_mxfp4_rht_masks(True)
 
     # Native MXFP4 quantization
     mxfp4_quantizer = MXFP4Quantizer(
@@ -121,6 +134,12 @@ def check_quantization_mxfp4_versus_reference(
         shuffle_columnwise_data=shuffle_columnwise_data,
         with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         use_hadamard=use_hadamard,
+        with_rht=with_rht,
+        **(
+            {"_rht_masks_row": rht_row, "_rht_masks_col": rht_col}
+            if with_rht
+            else {}
+        ),
     )
     if use_cpp_allocator:
         x_mxfp4_sut = mxfp4_quantizer(x)
@@ -151,6 +170,12 @@ def check_quantization_mxfp4_versus_reference(
         shuffle_columnwise_data=shuffle_columnwise_data,
         with_gemm_swizzled_scales=with_gemm_swizzled_scales,
         use_hadamard=use_hadamard,
+        with_rht=with_rht,
+        **(
+            {"_rht_masks_row": rht_row, "_rht_masks_col": rht_col}
+            if with_rht
+            else {}
+        ),
     )
     x_ref = ref_quantizer.quantize(x)
 
@@ -391,4 +416,30 @@ def test_quantization_noncontiguous_inputs(
     num_scale_cols = N // BLOCK_SIZE
     torch.testing.assert_close(
         sx[:M, :num_scale_cols], sx_contig[:M, :num_scale_cols], atol=0, rtol=0
+    )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(_USE_TRITON, reason="MXFP4 RHT is not applied on the Triton cast path")
+@pytest.mark.parametrize("M, N", [(128, 256), (256, 512)])
+@pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
+@pytest.mark.parametrize("return_transpose", [True, False], ids=["with_transpose", "no_transpose"])
+@pytest.mark.parametrize(
+    "use_cpp_allocator", [True, False], ids=["cpp_alloc", "python_alloc"]
+)
+def test_quantization_versus_reference_rht(
+    M, N, x_dtype, return_transpose, use_cpp_allocator,
+):
+    """RHT uses shared row/col masks so native and reference stay aligned."""
+    check_quantization_mxfp4_versus_reference(
+        x_dtype=x_dtype,
+        M=M,
+        N=N,
+        return_transpose=return_transpose,
+        use_cpp_allocator=use_cpp_allocator,
+        use_hadamard=True,
+        shuffle_rowwise_data=False,
+        shuffle_columnwise_data=False,
+        with_gemm_swizzled_scales=False,
+        with_rht=True,
     )

@@ -26,6 +26,25 @@ from ..triton_kernels.cast import te_quantize_triton
 
 MXFP4_BLOCK_SCALING_SIZE = MXFP8_BLOCK_SCALING_SIZE
 
+
+def pack_mxfp4_rht_masks(with_rht: bool) -> tuple[int, int]:
+    """Build packed uint32 sign masks (two uint16 per 32-wide MX block) for row/col paths."""
+    if not with_rht:
+        return (0, 0)
+    from transformer_engine.pytorch.tensor.nvfp4_tensor import (  # noqa: PLC0415
+        get_random_sign_mask_for_rht,
+    )
+
+    dev = torch.cuda.current_device()
+    lo = get_random_sign_mask_for_rht(True, dev)
+    hi = get_random_sign_mask_for_rht(True, dev)
+    row_packed = int(lo | (hi << 16))
+    lo_c = get_random_sign_mask_for_rht(True, dev)
+    hi_c = get_random_sign_mask_for_rht(True, dev)
+    col_packed = int(lo_c | (hi_c << 16))
+    return (row_packed, col_packed)
+
+
 aten = torch.ops.aten
 
 
@@ -64,7 +83,10 @@ class MXFP4Quantizer(Quantizer):
         shuffle_columnwise_data: bool = False,
         with_gemm_swizzled_scales: bool = False,
         use_hadamard: bool = False,
+        with_rht: bool = False,
         stochastic_rounding: bool = False,
+        _rht_masks_row: Optional[int] = None,
+        _rht_masks_col: Optional[int] = None,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
         self.dtype = fp4_dtype
@@ -72,6 +94,14 @@ class MXFP4Quantizer(Quantizer):
         self.shuffle_columnwise_data = shuffle_columnwise_data
         self.with_gemm_swizzled_scales = with_gemm_swizzled_scales
         self.use_hadamard = use_hadamard
+        self.with_rht = with_rht
+        if _rht_masks_row is not None:
+            self._rht_masks_row = int(_rht_masks_row)
+            self._rht_masks_col = int(_rht_masks_col)
+        else:
+            self._rht_masks_row, self._rht_masks_col = pack_mxfp4_rht_masks(
+                with_rht and use_hadamard
+            )
         self.stochastic_rounding = stochastic_rounding
         assert self.dtype == tex.DType.kFloat4E2M1, "Only E2M1 format supported for MXFP4"
 
@@ -85,7 +115,10 @@ class MXFP4Quantizer(Quantizer):
             shuffle_columnwise_data=self.shuffle_columnwise_data,
             with_gemm_swizzled_scales=self.with_gemm_swizzled_scales,
             use_hadamard=self.use_hadamard,
+            with_rht=self.with_rht,
             stochastic_rounding=self.stochastic_rounding,
+            _rht_masks_row=self._rht_masks_row,
+            _rht_masks_col=self._rht_masks_col,
         )
         quantizer.internal = self.internal
         return quantizer

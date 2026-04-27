@@ -451,6 +451,8 @@ struct QuantizationConfig {
   bool use_fast_math = false;
 #ifdef __HIP_PLATFORM_AMD__
   bool mxfp4_use_hadamard = false;
+  uint32_t mxfp4_rht_sign_masks_row = 0;
+  uint32_t mxfp4_rht_sign_masks_col = 0;
 #endif
 
   static constexpr size_t attr_sizes[] = {
@@ -463,7 +465,9 @@ struct QuantizationConfig {
       sizeof(uint8_t),                       // stochastic_rounding
       sizeof(uint8_t),                       // use_fast_math
 #ifdef __HIP_PLATFORM_AMD__
-      sizeof(uint8_t)                        // mxfp4_use_hadamard
+      sizeof(uint8_t),                       // mxfp4_use_hadamard
+      sizeof(uint32_t),                      // mxfp4_rht_sign_masks_row
+      sizeof(uint32_t)                       // mxfp4_rht_sign_masks_col
 #endif
   };
 };

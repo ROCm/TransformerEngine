@@ -18,6 +18,7 @@
 #include <c10/macros/Macros.h>
 #include <c10/util/Float8_e4m3fn.h>
 #include <c10/util/Float8_e5m2.h>
+#include <cstdint>
 #ifndef USE_ROCM
 #include <cublasLt.h>
 #include <cuda.h>
@@ -295,6 +296,9 @@ class MXFP4Quantizer : public Quantizer {
  public:
   DType dtype;
   bool use_hadamard;
+  bool with_rht;
+  uint32_t mxfp4_rht_sign_masks_row;
+  uint32_t mxfp4_rht_sign_masks_col;
   bool shuffle_rowwise_data;
   bool shuffle_columnwise_data;
   bool with_gemm_swizzled_scales;

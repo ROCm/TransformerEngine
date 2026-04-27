@@ -15,6 +15,7 @@
  * Key Features:
  *   - Dual-mode quantization: rowwise and/or columnwise
  *   - Optional Hadamard transform for improved quantization
+ *   - Optional RHT (random diagonal signs before H16), packed per 32-wide block
  *   - Configurable memory layout shuffling for optimal GEMM performance
  *   - Optimized for AMD CDNA architecture (gfx950)
  * 
@@ -183,24 +184,31 @@ __device__ __forceinline__ float warp_reduce_max_8_dpp(float val) {
 // ============================================================================
 
 /*
- * 16-Point Hadamard Transform
- * ----------------------------
+ * 16-Point Hadamard Transform (optional RHT diagonal)
+ * ----------------------------------------------------
  * Performs a fast Hadamard transform across 4 threads (16 elements total).
- * This can improve quantization quality by decorrelating values.
- * 
- * Structure:
- *   - Stage 1: Local 4-point Hadamard within each thread's values
- *   - Stage 2: Cross-thread exchange (XOR 1) for second dimension
- *   - Stage 3: Cross-thread exchange (XOR 2) for third dimension
- *   - Normalization: Scale by 1/sqrt(16) = 0.25
- * 
- * Note: 16-point Hadamard empirically shows better performance than 32-point
+ * packed_sign_masks: low 16 bits = sign mask for thread_in_row 0..3 (first H16 in
+ *                    the 32-wide MX block), high 16 bits for thread_in_row 4..7.
+ *                    Bit layout matches NVFP4 wht16: thread k uses bits [4k..4k+3].
+ *                    Mask 0 => all +1 (fixed Hadamard, same as before RHT).
  */
 __device__ __forceinline__ void hadamard16_inplace(
     float& v0, float& v1, float& v2, float& v3,
-    int thread_in_row
+    int thread_in_row,
+    uint32_t packed_sign_masks
 ) {
-    const int tid = thread_in_row & 3;
+    const int tid = (thread_in_row < 4) ? thread_in_row : (thread_in_row - 4);
+    const uint16_t mask = (thread_in_row < 4)
+        ? static_cast<uint16_t>(packed_sign_masks & 0xFFFFu)
+        : static_cast<uint16_t>(packed_sign_masks >> 16);
+
+    auto sgn = [&](int k) -> float {
+        return ((mask >> (tid * 4 + k)) & 1u) ? -1.f : 1.f;
+    };
+    v0 *= sgn(0);
+    v1 *= sgn(1);
+    v2 *= sgn(2);
+    v3 *= sgn(3);
 
     // Stage 1: Local 4-point Hadamard transform
     // H4 = [[1,1,1,1], [1,-1,1,-1], [1,1,-1,-1], [1,-1,-1,1]]
@@ -534,7 +542,9 @@ void cast_transpose_mxfp4_shuffled(
     const int colwise_scale_N,
     const int colwise_scale_M_pad,
     const int colwise_scale_N_pad,
-    const int64_t* __restrict__ rng_state = nullptr
+    const int64_t* __restrict__ rng_state = nullptr,
+    uint32_t mxfp4_rht_masks_row = 0,
+    uint32_t mxfp4_rht_masks_col = 0
 ) {
     // ========================================================================
     // Thread and Block Identification
@@ -656,7 +666,7 @@ void cast_transpose_mxfp4_shuffled(
 
                     // Optional: Apply Hadamard transform
                     if constexpr (USE_HADAMARD) {
-                        hadamard16_inplace(v0, v1, v2, v3, thread_in_row);
+                        hadamard16_inplace(v0, v1, v2, v3, thread_in_row, mxfp4_rht_masks_row);
                     }
 
                     // Find maximum absolute value across 8 threads (32 elements)
@@ -735,7 +745,7 @@ void cast_transpose_mxfp4_shuffled(
 
                     // Optional: Apply Hadamard transform
                     if constexpr (USE_HADAMARD) {
-                        hadamard16_inplace(v0, v1, v2, v3, thread_in_row);
+                        hadamard16_inplace(v0, v1, v2, v3, thread_in_row, mxfp4_rht_masks_col);
                     }
 
                     // Find maximum absolute value
@@ -816,6 +826,8 @@ inline void nvte_cast_transpose_mxfp4_fused_shuffle(
     int colwise_scale_M_pad, int colwise_scale_N_pad,
     bool stochastic_rounding,
     const int64_t* rng_state,
+    uint32_t mxfp4_rht_masks_row,
+    uint32_t mxfp4_rht_masks_col,
     hipStream_t stream
 ) {
     dim3 grid((M + te_mxfp4::BLOCK_M - 1) / te_mxfp4::BLOCK_M,
@@ -832,7 +844,7 @@ inline void nvte_cast_transpose_mxfp4_fused_shuffle(
                 rowwise_scale_stride, colwise_scale_stride, \
                 rowwise_scale_N, rowwise_scale_M_pad, rowwise_scale_N_pad, \
                 colwise_scale_M, colwise_scale_N, colwise_scale_M_pad, colwise_scale_N_pad, \
-                rng_state)
+                rng_state, mxfp4_rht_masks_row, mxfp4_rht_masks_col)
 
     #define DISPATCH_ROWCOL(HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES, SR)                 \
         do {                                                                           \

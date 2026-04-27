@@ -384,6 +384,10 @@ enum NVTEQuantizationConfigAttribute {
 #ifdef USE_ROCM
   /*! Whether to apply Hadamard transform before MXFP4 quantization */
   kNVTEQuantizationConfigMXFP4UseHadamard = 8,
+  /*! Packed RHT sign masks for MXFP4 rowwise H16 halves (low/high 16 bits); 0 = fixed H */
+  kNVTEQuantizationConfigMXFP4RhtSignMasksRow = 9,
+  /*! Packed RHT sign masks for MXFP4 columnwise path */
+  kNVTEQuantizationConfigMXFP4RhtSignMasksCol = 10,
 #endif
   kNVTEQuantizationConfigNumAttributes
 };
@@ -1105,6 +1109,16 @@ class QuantizationConfigWrapper {
     const auto val = static_cast<uint8_t>(use_hadamard);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigMXFP4UseHadamard, &val,
                                            sizeof(val));
+  }
+
+  void set_mxfp4_rht_sign_masks_row(uint32_t masks) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigMXFP4RhtSignMasksRow,
+                                           &masks, sizeof(masks));
+  }
+
+  void set_mxfp4_rht_sign_masks_col(uint32_t masks) {
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigMXFP4RhtSignMasksCol,
+                                           &masks, sizeof(masks));
   }
 #endif
 
