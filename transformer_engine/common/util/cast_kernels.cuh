@@ -1302,6 +1302,7 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
       TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
           output->dtype(), OType,
 #ifdef __HIP_PLATFORM_AMD__
+          // AMD (TDM): pass raw pointers directly to the kernel
           const IType *tensor_map_input = reinterpret_cast<const IType *>(input.data.dptr);
           const IType *tensor_map_act_input =
               IS_DACT ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr;
@@ -1309,66 +1310,8 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
               use_rowwise_scaling ? reinterpret_cast<OType *>(output->data.dptr) : nullptr;
           OType *tensor_map_output_colwise =
               use_colwise_scaling ? reinterpret_cast<OType *>(output->columnwise_data.dptr) : nullptr;
-
-          constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
-          constexpr size_t buff_elems_total = mxfp8_kernel::BUFFS_NUM * buff_elems;
-          constexpr size_t buff_size_aligned_in =
-              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TDM_SHMEM_ALIGNMENT);
-          constexpr size_t buff_size_aligned_out =
-              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TDM_SHMEM_ALIGNMENT);
-          constexpr size_t elt_input_mem = buff_size_aligned_in;
-          constexpr size_t act_input_mem = (IS_DACT ? buff_size_aligned_in : 0);
-          constexpr size_t in_mem = elt_input_mem + act_input_mem;
-          const size_t out_rowwise_mem = (use_rowwise_scaling ? buff_size_aligned_out : 0);
-          const size_t out_colwise_mem = (use_colwise_scaling ? buff_size_aligned_out : 0);
-          const size_t dshmem_size = in_mem + out_rowwise_mem + out_colwise_mem + TDM_SHMEM_ALIGNMENT;
-
-          switch (scaling_type) {
-            case ScalingType::ROWWISE:
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
-                                       false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-              cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
-                                   false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
-                  <<<grid, block_size, dshmem_size, stream>>>(
-                      tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
-              NVTE_CHECK_CUDA(cudaGetLastError());
-              break;
-            case ScalingType::COLWISE:
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, false,
-                                       true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-              cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, false,
-                                   true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
-                  <<<grid, block_size, dshmem_size, stream>>>(
-                      tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
-              NVTE_CHECK_CUDA(cudaGetLastError());
-              break;
-            case ScalingType::BIDIMENSIONAL:
-              NVTE_CHECK_CUDA(cudaFuncSetAttribute(
-                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
-                                       true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
-                  cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-              cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
-                                   true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
-                  <<<grid, block_size, dshmem_size, stream>>>(
-                      tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
-                      tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
-                      workspace_ptr, amax_ptr, rows, cols, scale_stride_rowwise,
-                      scale_stride_colwise);
-              NVTE_CHECK_CUDA(cudaGetLastError());
-              break;
-          }
-#else // #ifdef __HIP_PLATFORM_AMD__
-
+#else
+          // NV (TMA): build descriptor objects and register tensor layouts
           alignas(64) CUtensorMap tensor_map_input{};
           alignas(64) CUtensorMap tensor_map_act_input{};
           alignas(64) CUtensorMap tensor_map_output_rowwise{};
@@ -1394,25 +1337,21 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
             create_2D_tensor_map(tensor_map_output_colwise, output->columnwise_data, rows, cols,
                                  BUFF_DIM_Y, BUFF_DIM_X, cols, 0, output_type_bit_size);
           }
+#endif  // __HIP_PLATFORM_AMD__
 
+          // Shared launch: TMA_SHMEM_ALIGNMENT == TDM_SHMEM_ALIGNMENT == 128
           constexpr size_t buff_elems = BUFF_DIM_Y * BUFF_DIM_X;
           constexpr size_t buff_elems_total = mxfp8_kernel::BUFFS_NUM * buff_elems;
-          constexpr size_t input_buff_size = (buff_elems_total * input_type_bit_size) / 8;
-          constexpr size_t output_buff_size = (buff_elems_total * output_type_bit_size) / 8;
           constexpr size_t buff_size_aligned_in =
-              DIVUP_TO_MULTIPLE(input_buff_size, TMA_SHMEM_ALIGNMENT);
+              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(IType), TMA_SHMEM_ALIGNMENT);
           constexpr size_t buff_size_aligned_out =
-              DIVUP_TO_MULTIPLE(output_buff_size, TMA_SHMEM_ALIGNMENT);
-
+              DIVUP_TO_MULTIPLE(buff_elems_total * sizeof(OType), TMA_SHMEM_ALIGNMENT);
           constexpr size_t elt_input_mem = buff_size_aligned_in;
           constexpr size_t act_input_mem = (IS_DACT ? buff_size_aligned_in : 0);
           constexpr size_t in_mem = elt_input_mem + act_input_mem;
-
           const size_t out_rowwise_mem = (use_rowwise_scaling ? buff_size_aligned_out : 0);
           const size_t out_colwise_mem = (use_colwise_scaling ? buff_size_aligned_out : 0);
-          const size_t out_mem = out_rowwise_mem + out_colwise_mem;
-
-          const size_t dshmem_size = in_mem + out_mem + TMA_SHMEM_ALIGNMENT;
+          const size_t dshmem_size = in_mem + out_rowwise_mem + out_colwise_mem + TMA_SHMEM_ALIGNMENT;
 
           switch (scaling_type) {
             case ScalingType::ROWWISE:
@@ -1420,7 +1359,6 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                   cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
                                        false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-
               cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
                                    false, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
                   <<<grid, block_size, dshmem_size, stream>>>(
@@ -1435,7 +1373,6 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                   cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, false,
                                        true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-
               cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, false,
                                    true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
                   <<<grid, block_size, dshmem_size, stream>>>(
@@ -1450,9 +1387,8 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
                   cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
                                        true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>,
                   cudaFuncAttributeMaxDynamicSharedMemorySize, dshmem_size));
-
-              cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true, true,
-                                   CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
+              cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType, true,
+                                   true, CHUNK_DIM_Y, CHUNK_DIM_X, THREADS_PER_CHUNK>
                   <<<grid, block_size, dshmem_size, stream>>>(
                       tensor_map_input, tensor_map_act_input, tensor_map_output_rowwise,
                       tensor_map_output_colwise, scales_rowwise_ptr, scales_colwise_ptr, noop_ptr,
@@ -1461,7 +1397,6 @@ void mxfp8_quantize(const Tensor &input, const Tensor *act_input,
               NVTE_CHECK_CUDA(cudaGetLastError());
               break;
           }
-#endif // #ifdef __HIP_PLATFORM_AMD__
 
           if constexpr (IS_DBIAS) {
             reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
