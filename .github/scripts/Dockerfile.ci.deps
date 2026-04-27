@@ -20,13 +20,13 @@ RUN pip install ipython pytest fire pydantic pybind11 ninja pandas
 RUN apt-get update && apt-get install -y vim
 
 # Install flash-attention
-ENV GPU_ARCHS=gfx950;gfx942
-RUN git clone --branch ${FA_VERSION} --depth 1 https://github.com/Dao-AILab/flash-attention.git \
+RUN export GPU_ARCHS="gfx950;gfx942" \
+    && git clone --branch ${FA_VERSION} --depth 1 https://github.com/Dao-AILab/flash-attention.git \
     && cd flash-attention \
-    && FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE && FLASH_ATTENTION_SKIP_CK_BUILD=FALSE python setup.py install \
+    && FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE FLASH_ATTENTION_SKIP_CK_BUILD=FALSE python setup.py install \
     && cd ..
 
-# AITER (submodule: composable_kernel / CK). Submodule update after checkout aligns CK with this commit.
+# Install AITER
 RUN git clone --recursive https://github.com/ROCm/aiter.git \
     && cd aiter \
     && git checkout ${AITER_COMMIT} \
