@@ -11,6 +11,24 @@ set(AITER_MHA_INSTALL_PREFIX "transformer_engine" CACHE STRING "aiter mha shared
 set(__AITER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA/3rdparty/aiter")
 set(__CK_SOURCE_DIR "${__AITER_SOURCE_DIR}/3rdparty/composable_kernel")
 
+set(CK_INCLUDE_DIR "${__CK_SOURCE_DIR}/include")
+message(STATUS "ck_include_dir: ${CK_INCLUDE_DIR}")
+if(NOT EXISTS "${CK_INCLUDE_DIR}")
+  message(FATAL_ERROR
+          "Could not find CK API. "
+          "Try running 'git submodule update --init --recursive' "
+          "within the Transformer Engine source.")
+endif()
+
+set(AITER_INCLUDE_DIR "${__AITER_SOURCE_DIR}/csrc/include")
+message(STATUS "aiter_include_dir: ${AITER_INCLUDE_DIR}")
+if(NOT EXISTS "${AITER_INCLUDE_DIR}")
+  message(FATAL_ERROR
+          "Could not find AITER API. "
+          "Try running 'git submodule update --init --recursive' "
+          "within the Transformer Engine source.")
+endif()
+
 if(NOT Python_EXECUTABLE)
   find_package(Python COMPONENTS Interpreter QUIET)
 endif()
@@ -116,25 +134,6 @@ foreach(ARCH IN LISTS V3_ASM_ARCHS)
   list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS --offload-arch=${ARCH})
 endforeach()
 
-set(CK_INCLUDE_DIR "${__CK_SOURCE_DIR}/include")
-message(STATUS "ck_include_dir: ${CK_INCLUDE_DIR}")
-
-if(NOT EXISTS "${CK_INCLUDE_DIR}")
-  message(FATAL_ERROR
-          "Could not find CK API. "
-          "Try running 'git submodule update --init --recursive' "
-          "within the Transformer Engine source.")
-endif()
-
-set(AITER_INCLUDE_DIR "${__AITER_SOURCE_DIR}/csrc/include")
-message(STATUS "aiter_include_dir: ${AITER_INCLUDE_DIR}")
-
-if(NOT EXISTS "${AITER_INCLUDE_DIR}")
-  message(FATAL_ERROR
-          "Could not find AITER API. "
-          "Try running 'git submodule update --init --recursive' "
-          "within the Transformer Engine source.")
-endif()
 
 # Public QoLA headers ship alongside the .so libs in ${__AITER_MHA_PATH}/../include
 # (emitted by qola.cli build, or copied from the QoLA build dir above for the
