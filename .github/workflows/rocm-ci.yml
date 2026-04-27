@@ -139,12 +139,9 @@ jobs:
           git submodule foreach --recursive 'git config --global --add safe.directory /workspace/$sm_path'
           NVTE_RELEASE_BUILD=1 pip wheel --no-build-isolation --no-deps -v . -w /workspace/dist/ 2>&1
 
-          mkdir -p /tmp/sdist
-          (cd transformer_engine/pytorch && NVTE_RELEASE_BUILD=1 python setup.py sdist -d /tmp/sdist/)
-          (cd transformer_engine/jax && NVTE_RELEASE_BUILD=1 python setup.py sdist -d /tmp/sdist/)
-
-          pip wheel --no-build-isolation --no-deps -v /tmp/sdist/transformer_engine_rocm_torch-*.tar.gz -w /workspace/dist/ 2>&1
-          pip wheel --no-build-isolation --no-deps -v /tmp/sdist/transformer_engine_rocm_jax-*.tar.gz -w /workspace/dist/ 2>&1
+          # Framework extensions ship as sdists as tar.gz. Wheels are build against the consumer's torch/jax at install time
+          (cd transformer_engine/pytorch && NVTE_RELEASE_BUILD=1 python setup.py sdist -d /workspace/dist/)
+          (cd transformer_engine/jax && NVTE_RELEASE_BUILD=1 python setup.py sdist -d /workspace/dist/)
           EOF
           )"
 
@@ -235,8 +232,8 @@ jobs:
           pip install --no-deps "$TE_CORE_PKG" 2>&1
 
           if [ "$TE_SPLIT_LAYOUT" = "1" ]; then
-            TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.whl' | sort | head -n 1)
-            TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.whl' | sort | head -n 1)
+            TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
+            TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
           else
             TE_TORCH_PKG=""
             TE_JAX_PKG=""
@@ -452,8 +449,8 @@ jobs:
           pip install --no-deps "$TE_CORE_PKG" 2>&1
 
           if [ "$TE_SPLIT_LAYOUT" = "1" ]; then
-            TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.whl' | sort | head -n 1)
-            TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.whl' | sort | head -n 1)
+            TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
+            TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
           else
             TE_TORCH_PKG=""
             TE_JAX_PKG=""
