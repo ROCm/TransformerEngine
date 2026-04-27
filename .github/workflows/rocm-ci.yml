@@ -113,7 +113,8 @@ jobs:
           git submodule update --init --recursive --depth 1 \
             3rdparty/aotriton \
             3rdparty/aiter \
-            3rdparty/hipify_torch
+            3rdparty/hipify_torch \
+            3rdparty/QoLA
 
       - name: Pull Docker Image
         run: |
