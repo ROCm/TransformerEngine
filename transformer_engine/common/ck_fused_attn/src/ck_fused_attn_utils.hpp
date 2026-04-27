@@ -8,8 +8,10 @@
 #define CK_FUSED_ATTN_UTILS_H
 
 #include<fstream>
+#include<utility>
 #include<hip/hip_runtime.h>
 #include "ck_tile/host.hpp"
+#include "ck_fused_attn/ck_fused_attn.hpp"
 
 //forward declaration for ck_tile enum
 enum class mask_enum;
@@ -43,16 +45,12 @@ enum class BiasShape{
   kNumBiasShapes  /*!< Number of supported bias shapes */
 };
 
-//forward declaration of ck_fused_attn::DType
-enum class DType ;
-//forward declaration of ck_fused_attn::MaskType
-enum class MaskType;
-//forward declaration of ck_fused_attn::BiasType
-enum class BiasType;
-
 std::string get_data_type_str(DType dtype);
 BiasShape get_bias_shape(uint64_t b, uint64_t h, uint64_t bias_b, uint64_t bias_h);
-std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(BiasType attn_bias_type, uint64_t b, uint64_t h, uint64_t bias_b, uint64_t bias_h);
+
+//get ck_tile bias_type and CK_FUSED_ATTN bias_shape from a fwd/bwd args struct
+template <typename ArgsT>
+std::pair<bias_enum, BiasShape> get_ck_bias_type_shape(const ArgsT* args);
 
 uint64_t get_runtime_max_seqlen(uint64_t b, const void* cu_seqlen_ptr, const void* cu_seqlen_padded_ptr, void* workspace, hipStream_t stream);
 

@@ -458,8 +458,8 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
 
   bias_enum bias_type = bias_enum::no_bias;
   BiasShape bias_shape = BiasShape::k11SS;
-  if (!args.is_group_mode) {
-    std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(args.attn_bias_type, args.b, args.h, args.bias_b, args.bias_h);
+  if (!args.is_group_mode()) {
+    std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(&args);
   }
 
   aiter::mha_bwd_args fmha_args{};
@@ -472,9 +472,9 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.hdim_q = args.d_qk;
   fmha_args.hdim_v = args.d_v;
   fmha_args.data_type = get_data_type_str(args.dtype);
-  fmha_args.is_group_mode = args.is_group_mode;
+  fmha_args.is_group_mode = args.is_group_mode();
   fmha_args.bias_type = static_cast<int>(bias_type);
-  fmha_args.has_dbias = (!args.is_group_mode) && has_dbias;
+  fmha_args.has_dbias = (!args.is_group_mode()) && has_dbias;
   fmha_args.has_dropout = has_dropout;
   fmha_args.is_store_randval = false;
   fmha_args.is_deterministic = args.deterministic;
@@ -482,7 +482,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.q_ptr = args.q_ptr;
   fmha_args.k_ptr = args.k_ptr;
   fmha_args.v_ptr = args.v_ptr;
-  fmha_args.bias_ptr = (bias_type==bias_enum::no_bias || args.is_group_mode) ? nullptr
+  fmha_args.bias_ptr = (bias_type==bias_enum::no_bias || args.is_group_mode()) ? nullptr
                          : (bias_type==bias_enum::alibi? args.alibi_slope_ptr : args.bias_ptr);
   fmha_args.o_ptr = args.o_ptr;
   fmha_args.lse_ptr = args.lse_ptr;
@@ -492,12 +492,12 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.dq_ptr = args.dq_ptr;
   fmha_args.dk_ptr = is_mqa_gqa? args.dk_expanded_ptr : args.dk_ptr;
   fmha_args.dv_ptr = is_mqa_gqa? args.dv_expanded_ptr : args.dv_ptr;
-  fmha_args.dbias_ptr = ((!args.is_group_mode) && has_dbias)
+  fmha_args.dbias_ptr = ((!args.is_group_mode()) && has_dbias)
                           ? (bias_shape==BiasShape::kBHSS ? args.dbias_ptr : args.dbias_expanded_ptr)
                           : nullptr;
   fmha_args.dq_acc_ptr = args.dq_acc_ptr;
 
-  if (args.is_group_mode) {
+  if (args.is_group_mode()) {
     fmha_args.seqstart_q_ptr = args.cu_seqlen_q_padded_ptr==nullptr? args.cu_seqlen_q_ptr : args.cu_seqlen_q_padded_ptr;
     fmha_args.seqstart_k_ptr = args.cu_seqlen_kv_padded_ptr==nullptr? args.cu_seqlen_kv_ptr : args.cu_seqlen_kv_padded_ptr;
     fmha_args.cu_seqlen_q_ptr = args.cu_seqlen_q_ptr;
@@ -525,7 +525,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.stride_k = args.stride_s_k;
   fmha_args.stride_v = args.stride_s_v;
   // bias of shape (bias_b, bias_h, s_q, s_kv)
-  fmha_args.stride_bias = (!args.is_group_mode && bias_type!=bias_enum::alibi) ? args.s_kv : 0;
+  fmha_args.stride_bias = (!args.is_group_mode() && bias_type!=bias_enum::alibi) ? args.s_kv : 0;
   fmha_args.stride_o = args.stride_s_o;
   fmha_args.stride_randval = args.s_kv;
   fmha_args.stride_do = args.stride_s_do;
@@ -536,41 +536,41 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.stride_dv = is_mqa_gqa? args.stride_s_dv_expanded : args.stride_s_dv;
   // dbias is of the same shape as bias
   // but ck only take dbias with BHSS
-  fmha_args.stride_dbias = (!args.is_group_mode && bias_type!=bias_enum::alibi) ? args.s_kv : 0;
+  fmha_args.stride_dbias = (!args.is_group_mode() && bias_type!=bias_enum::alibi) ? args.s_kv : 0;
 
   // setup nhead_stride_* arguments
   fmha_args.nhead_stride_q = args.stride_h_q;
   fmha_args.nhead_stride_k = args.stride_h_k;
   fmha_args.nhead_stride_v = args.stride_h_v;
   // bias input can be of different shapes (11SS, 1HSS, B1SS, and BHSS), but dbias must be of BHSS
-  fmha_args.nhead_stride_bias = get_nhead_stride_bias(bias_shape, args.s_q, args.s_kv, args.is_group_mode);
+  fmha_args.nhead_stride_bias = get_nhead_stride_bias(bias_shape, args.s_q, args.s_kv, args.is_group_mode());
   fmha_args.nhead_stride_o = args.stride_h_o;
-  fmha_args.nhead_stride_randval = args.is_group_mode ? 0 : args.s_q * args.s_kv;
+  fmha_args.nhead_stride_randval = args.is_group_mode() ? 0 : args.s_q * args.s_kv;
   fmha_args.nhead_stride_do = args.stride_h_do;
-  fmha_args.nhead_stride_lsed = args.is_group_mode ? args.max_tokens_q : args.s_q;
-  fmha_args.nhead_stride_dq_acc = static_cast<int64_t>((args.is_group_mode ? args.max_tokens_q : args.s_q) * args.d_qk);
+  fmha_args.nhead_stride_lsed = args.is_group_mode() ? args.max_tokens_q : args.s_q;
+  fmha_args.nhead_stride_dq_acc = static_cast<int64_t>((args.is_group_mode() ? args.max_tokens_q : args.s_q) * args.d_qk);
   fmha_args.nhead_stride_dq = args.stride_h_dq;
   fmha_args.nhead_stride_dk = is_mqa_gqa? args.stride_h_dk_expanded : args.stride_h_dk;
   fmha_args.nhead_stride_dv = is_mqa_gqa? args.stride_h_dv_expanded : args.stride_h_dv;
   // dbias can only be of BHSS
-  fmha_args.nhead_stride_dbias = args.is_group_mode? 0 : args.s_q * args.s_kv;
+  fmha_args.nhead_stride_dbias = args.is_group_mode()? 0 : args.s_q * args.s_kv;
 
   // setup batch_stride_* arguments
-  fmha_args.batch_stride_q = args.is_group_mode ? 0 : args.stride_b_q;
-  fmha_args.batch_stride_k = args.is_group_mode ? 0 : args.stride_b_k;
-  fmha_args.batch_stride_v = args.is_group_mode ? 0 : args.stride_b_v;
-  fmha_args.batch_stride_bias = get_batch_stride_bias(args.bias_h, bias_shape, args.s_q, args.s_kv, args.is_group_mode, false);
-  fmha_args.batch_stride_o = args.is_group_mode ? 0 : args.stride_b_o;
-  fmha_args.batch_stride_randval = args.is_group_mode ? 0 : args.h * args.s_q * args.s_kv;
-  fmha_args.batch_stride_do = args.is_group_mode ? 0 : args.stride_b_do;
-  fmha_args.batch_stride_lsed = args.is_group_mode ? 0 : args.h * args.s_q;
-  fmha_args.batch_stride_dq_acc = args.is_group_mode ? 0 : static_cast<int64_t>(args.h * args.s_q * args.d_qk);
-  fmha_args.batch_stride_dq = args.is_group_mode ? 0 : args.stride_b_dq;
-  fmha_args.batch_stride_dk = args.is_group_mode ? 0 : (is_mqa_gqa? args.stride_b_dk_expanded : args.stride_b_dk);
-  fmha_args.batch_stride_dv = args.is_group_mode ? 0 : (is_mqa_gqa? args.stride_b_dv_expanded : args.stride_b_dv);
+  fmha_args.batch_stride_q = args.is_group_mode() ? 0 : args.stride_b_q;
+  fmha_args.batch_stride_k = args.is_group_mode() ? 0 : args.stride_b_k;
+  fmha_args.batch_stride_v = args.is_group_mode() ? 0 : args.stride_b_v;
+  fmha_args.batch_stride_bias = get_batch_stride_bias(args.bias_h, bias_shape, args.s_q, args.s_kv, args.is_group_mode(), false);
+  fmha_args.batch_stride_o = args.is_group_mode() ? 0 : args.stride_b_o;
+  fmha_args.batch_stride_randval = args.is_group_mode() ? 0 : args.h * args.s_q * args.s_kv;
+  fmha_args.batch_stride_do = args.is_group_mode() ? 0 : args.stride_b_do;
+  fmha_args.batch_stride_lsed = args.is_group_mode() ? 0 : args.h * args.s_q;
+  fmha_args.batch_stride_dq_acc = args.is_group_mode() ? 0 : static_cast<int64_t>(args.h * args.s_q * args.d_qk);
+  fmha_args.batch_stride_dq = args.is_group_mode() ? 0 : args.stride_b_dq;
+  fmha_args.batch_stride_dk = args.is_group_mode() ? 0 : (is_mqa_gqa? args.stride_b_dk_expanded : args.stride_b_dk);
+  fmha_args.batch_stride_dv = args.is_group_mode() ? 0 : (is_mqa_gqa? args.stride_b_dv_expanded : args.stride_b_dv);
   // for dbias, use h since h can be different from bias_h
-  fmha_args.batch_stride_dbias = args.is_group_mode ? 0 : args.h * args.s_q * args.s_kv;
-  fmha_args.split_stride_dq_acc = static_cast<int>(args.is_group_mode ? (args.max_tokens_q * args.h * args.d_qk) : (args.b * args.h * args.s_q * args.d_qk));
+  fmha_args.batch_stride_dbias = args.is_group_mode() ? 0 : args.h * args.s_q * args.s_kv;
+  fmha_args.split_stride_dq_acc = static_cast<int>(args.is_group_mode() ? (args.max_tokens_q * args.h * args.d_qk) : (args.b * args.h * args.s_q * args.d_qk));
 
   fmha_args.window_size_left = args.window_size_left;
   fmha_args.window_size_right = args.window_size_right;
@@ -581,7 +581,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   // modify the max_seqlen_q for better performance in 0-length cases
   // lse_workspace_ptr used as buffer
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")) {
-    if(args.is_group_mode && std::string(env_p) == "1"){
+    if(args.is_group_mode() && std::string(env_p) == "1"){
       if(ck_log_config){
         std::cout << "attn_bwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
       }
@@ -606,7 +606,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   // Post-dispatch reductions for MQA/GQA: reduce dk_expanded/dv_expanded into dk/dv.
   // Batch and group modes use different kernels (batch carves by stride_b; group carves by cu_seqlen).
   if(is_mqa_gqa){
-    if(args.is_group_mode){
+    if(args.is_group_mode()){
       dim3 grid(args.max_tokens_kv, args.hg);
       if(args.d_qk == args.d_v){
         dim3 block(args.d_qk);
@@ -756,7 +756,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   }
 
   // dbias reduction (batch mode only) when bias shape isn't already BHSS
-  if(!args.is_group_mode && has_dbias && bias_shape!=BiasShape::kBHSS){
+  if(!args.is_group_mode() && has_dbias && bias_shape!=BiasShape::kBHSS){
     assert(args.dbias_ptr != args.dbias_expanded_ptr);
     constexpr int THREADS_PER_BLOCK = 1024;
     dim3 block(THREADS_PER_BLOCK);

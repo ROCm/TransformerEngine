@@ -99,7 +99,7 @@ void dump_fwd_timings(const char* dump_path, float average_runtime){
   file << average_runtime << "\n";
 }
 
-hipError_t ck_attn_fwd(const CkAttnFwdArgs& args, hipStream_t stream){
+hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
 
   bool has_dropout = (args.is_training && args.dropout_probability > 0.f);
 
@@ -114,8 +114,8 @@ hipError_t ck_attn_fwd(const CkAttnFwdArgs& args, hipStream_t stream){
 
   bias_enum bias_type = bias_enum::no_bias;
   BiasShape bias_shape = BiasShape::k11SS;
-  if (!args.is_group_mode) {
-    std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(args.attn_bias_type, args.b, args.h, args.bias_b, args.bias_h);
+  if (!args.is_group_mode()) {
+    std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(&args);
   }
 
   aiter::mha_fwd_args fmha_args{};
@@ -140,7 +140,7 @@ hipError_t ck_attn_fwd(const CkAttnFwdArgs& args, hipStream_t stream){
   fmha_args.batch_stride_k = args.stride_b_k;
   fmha_args.batch_stride_v = args.stride_b_v;
 
-  if (args.is_group_mode) {
+  if (args.is_group_mode()) {
     fmha_args.seqstart_q_ptr = args.cu_seqlen_q_padded_ptr==nullptr? args.cu_seqlen_q_ptr : args.cu_seqlen_q_padded_ptr;
     fmha_args.seqstart_k_ptr = args.cu_seqlen_kv_padded_ptr==nullptr? args.cu_seqlen_kv_ptr : args.cu_seqlen_kv_padded_ptr;
     fmha_args.cu_seqlen_q_ptr = args.cu_seqlen_q_ptr;
@@ -169,13 +169,13 @@ hipError_t ck_attn_fwd(const CkAttnFwdArgs& args, hipStream_t stream){
   fmha_args.logits_soft_cap = 0.f;
 
   // bias is of shape [b, h , s_q, s_kv]
-  fmha_args.stride_bias = args.is_group_mode? 0 : (bias_type==bias_enum::alibi? 0: args.s_kv);
+  fmha_args.stride_bias = args.is_group_mode()? 0 : (bias_type==bias_enum::alibi? 0: args.s_kv);
   fmha_args.stride_o          = args.stride_s_o;
-  fmha_args.nhead_stride_bias = get_nhead_stride_bias(bias_shape, args.s_q, args.s_kv, args.is_group_mode);
-  fmha_args.batch_stride_bias = get_batch_stride_bias(args.bias_h, bias_shape, args.s_q, args.s_kv, args.is_group_mode, true);
+  fmha_args.nhead_stride_bias = get_nhead_stride_bias(bias_shape, args.s_q, args.s_kv, args.is_group_mode());
+  fmha_args.batch_stride_bias = get_batch_stride_bias(args.bias_h, bias_shape, args.s_q, args.s_kv, args.is_group_mode(), true);
   // softmax_lse is of shape [b, h, s_q]
-  fmha_args.nhead_stride_lse  = args.is_group_mode? args.max_tokens_q : args.s_q;
-  fmha_args.batch_stride_lse  = args.is_group_mode? 0 : args.h * args.s_q;
+  fmha_args.nhead_stride_lse  = args.is_group_mode()? args.max_tokens_q : args.s_q;
+  fmha_args.batch_stride_lse  = args.is_group_mode()? 0 : args.h * args.s_q;
   fmha_args.nhead_stride_o    = args.stride_h_o;
   fmha_args.batch_stride_o    = args.stride_b_o;
 
@@ -203,7 +203,7 @@ hipError_t ck_attn_fwd(const CkAttnFwdArgs& args, hipStream_t stream){
   fmha_args.how_v3_bf16_cvt = args.how_v3_bf16_cvt;
   fmha_args.v3_api_check    = false;
   fmha_args.data_type       = get_data_type_str(args.dtype);
-  fmha_args.is_group_mode   = args.is_group_mode;
+  fmha_args.is_group_mode   = args.is_group_mode();
   fmha_args.bias_type       = static_cast<int>(bias_type);
   fmha_args.has_lse         = args.lse_ptr!=nullptr;
   fmha_args.qscale_type     = static_cast<int>(quant_scale_enum::no_scale);
@@ -217,7 +217,7 @@ hipError_t ck_attn_fwd(const CkAttnFwdArgs& args, hipStream_t stream){
   fmha_args.block_scale_size_kv = 0;
 
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")){
-    if(args.is_group_mode && std::string(env_p) == "1"){
+    if(args.is_group_mode() && std::string(env_p) == "1"){
       if(ck_log_config){
         std::cout << "attn_fwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
       }

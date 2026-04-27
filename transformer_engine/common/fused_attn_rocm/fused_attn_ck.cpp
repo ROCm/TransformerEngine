@@ -740,7 +740,7 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<std::endl;
   }
   // Common fields filled here; mode-specific fields are overwritten below.
-  ck_fused_attn::CkAttnFwdArgs ck_args;
+  ck_fused_attn::CKAttnFwdArgs ck_args;
   ck_args.dtype = nvte_to_ck_dtype(dtype);
   ck_args.b = b; ck_args.h = h; ck_args.hg = hg;
   ck_args.s_q = s_q; ck_args.s_kv = s_kv; ck_args.d_qk = d_qk; ck_args.d_v = d_v;
@@ -762,7 +762,6 @@ void fused_attn_ck_fwd_impl(
     remove_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, false, v_stride[0], v_stride[1], v_stride[2], devPtrV, devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV, devPtrVWithoutPadding, stream);
     // call varlen api using without_padding ptrs
     // for BSHD/SBHD, after padding removal, THD require stride_s update
-    ck_args.is_group_mode = true;
     ck_args.max_tokens_q = max_tokens_q;
     ck_args.q_ptr = devPtrQWithoutPadding;
     ck_args.stride_h_q = q_stride[1]; ck_args.stride_s_q = q_stride[0];
@@ -780,7 +779,6 @@ void fused_attn_ck_fwd_impl(
     add_padding(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrOWithoutPadding, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrO, stream);
     add_padding_softmax_lse(b, h, s_q, max_tokens_q, false, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxAux, stream);
   }else if(bshd_to_thd || is_ragged){
-    ck_args.is_group_mode = true;
     ck_args.max_tokens_q = max_tokens_q;
     ck_args.q_ptr = devPtrQ;
     ck_args.stride_h_q = q_stride[1]; ck_args.stride_s_q = q_stride[2];
@@ -1173,7 +1171,6 @@ void fused_attn_ck_bwd_impl(
     remove_padding(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrdO, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdOWithoutPadding, stream);
     // also remove the padding for softmax lse
     remove_padding_softmax_lse(b, h, s_q, max_tokens_q, false, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrSoftmaxLSEWithoutPadding, stream);
-    ck_args.is_group_mode = true;
     ck_args.max_tokens_q = max_tokens_q; ck_args.max_tokens_kv = max_tokens_kv;
     ck_args.q_ptr = devPtrQWithoutPadding;
     ck_args.stride_h_q = q_stride[1]; ck_args.stride_s_q = q_stride[0];
@@ -1208,7 +1205,6 @@ void fused_attn_ck_bwd_impl(
     add_padding(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrdVWithoutPadding, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdV, stream);
   }else if(bshd_to_thd || is_ragged){
     remove_padding_softmax_lse(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxLSEWithoutPadding, stream);
-    ck_args.is_group_mode = true;
     ck_args.max_tokens_q = max_tokens_q; ck_args.max_tokens_kv = max_tokens_kv;
     ck_args.q_ptr = devPtrQ;
     ck_args.stride_h_q = q_stride[1]; ck_args.stride_s_q = q_stride[2];
