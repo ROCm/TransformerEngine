@@ -5,9 +5,7 @@
  ************************************************************************/
 
 #include <utility>
-#include <dlfcn.h>
 #include <filesystem>
-#include <mutex> //once_flag
 
 #include <hip/hip_runtime_api.h>
 
@@ -72,39 +70,6 @@ ck_tile::index_t get_nhead_stride_bias(
   }
 }
 
-void set_aiter_asm_dir() {
-  static std::once_flag aiter_asm_dir_once;
-  std::call_once(aiter_asm_dir_once, []() {
-    Dl_info info;
-    dladdr((void*)set_aiter_asm_dir, &info);
-    const char* log_ck_config_env = std::getenv("NVTE_LOG_CK_CONFIG");
-    bool log_ck_config = log_ck_config_env && std::string(log_ck_config_env) == "1";
-    // Check if user has set AITER_ASM_DIR, if yes, skip auto setting and log
-    // the value if NVTE_LOG_CK_CONFIG is set
-    const char* aiter_asm_dir = std::getenv("AITER_ASM_DIR");
-    if (aiter_asm_dir) {
-      if (log_ck_config) {
-        std::cout << "AITER_ASM_DIR is set by user to: " << aiter_asm_dir << std::endl;
-      }
-      return;
-    }
-    // Check standard path
-    auto install_lib_path = std::filesystem::path(info.dli_fname).parent_path() / "aiter";
-    if(std::filesystem::exists(install_lib_path)) {
-      setenv("AITER_ASM_DIR", install_lib_path.c_str(), 1);
-      if (log_ck_config) {
-        std::cout << "AITER_ASM_DIR set to: " << getenv("AITER_ASM_DIR") << std::endl;
-      }
-      return;
-    }
-    if(log_ck_config) {
-      std::cout << "Checked AITER_ASM_DIR path: " << install_lib_path << " does not exist." << std::endl;
-    }
-  });
-}
-
-
-const bool aiterAsmDirInitialized = (set_aiter_asm_dir(), true);
 
 bool open_ck_fused_attn_log_file(std::ofstream& log_file, const char* file_prefix, const std::string& log_dir_str) {
   // Explicitly use std::cout as a fallback

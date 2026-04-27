@@ -18,6 +18,7 @@
         "__nv_fp4x2_storage_t" : "__hip_fp4x2_storage_t",
         "#include <cudaTypedefs.h>" : "",
         "#include <cuda/barrier>" : "",
+        "#include <cuda_pipeline.h>" : "",
         "cudaLaunchKernelExC": "hipLaunchKernelExC",
         "CUmemGenericAllocationHandle": "hipMemGenericAllocationHandle_t",
         "cudaLaunchConfig_t": "hipLaunchConfig_t",

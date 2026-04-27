@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <type_traits>
 #include "ck_fused_attn/ck_fused_attn.hpp"
-#include "mha_bwd.h"
+#include "qola_mha_bwd.h"
 #include "ck_fused_attn_utils.hpp"
 
 namespace ck_fused_attn{
@@ -594,7 +594,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   if(ck_log_config){
     log_bwd_config(__FUNCTION__, fmha_args);
   }
-  float average_runtime = aiter::mha_bwd(fmha_args, stream_config);
+  float average_runtime = QOLA_NS(mha_bwd)(fmha_args, stream_config);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
