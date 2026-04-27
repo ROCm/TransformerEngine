@@ -1570,6 +1570,9 @@ def test_backward_bias_all_neg_inf(
     )
     runner._setup_inputs()
 
+    if runner.backend != NVTE_Fused_Attn_Backend.NVTE_CK:
+        pytest.skip("All-neg-inf bias NaN fix is CK-specific")
+
     # Build a binary bias with only two values: 0 and -inf.
     # Shape depends on bias_shape: B1SS=(b,1,s_q,s_kv), 1HSS=(1,h_q,s_q,s_kv), etc.
     shape_map = {
