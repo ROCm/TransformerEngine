@@ -28,7 +28,7 @@ _ops_to_preserve_subclass = {
 
 
 class FSDPAGTensor(torch.Tensor):
-    """Tensor subclass carrying FSDP metadata for quantized all-gather."""
+    """A wrapper subclass for stateful FSDP transport"""
 
     @staticmethod
     def __new__(cls, elem: torch.Tensor, **kwargs):

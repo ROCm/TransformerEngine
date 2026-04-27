@@ -484,7 +484,6 @@ def is_fp8_fnuz() -> bool:
     """True when using FP8 FNUZ dtypes (ROCm FP8 path)."""
     return IS_HIP_EXTENSION and get_device_compute_capability() == (9, 4)
 
-
 get_torch_float8_e4m3_type = lambda: torch.float8_e4m3fnuz if is_fp8_fnuz() else torch.float8_e4m3fn
 get_torch_float8_e5m2_type = lambda: torch.float8_e5m2fnuz if is_fp8_fnuz() else torch.float8_e5m2
 

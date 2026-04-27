@@ -14,13 +14,14 @@ import warnings
 
 import torch
 from torch.distributed._tensor import DTensor
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
-
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
-from transformer_engine.pytorch.utils import is_fp8_fnuz
 from .multi_tensor_apply import multi_tensor_applier
+# pylint: disable=wrong-import-order,ungrouped-imports
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+from transformer_engine.pytorch.utils import is_fp8_fnuz
+# pylint: enable=wrong-import-order,ungrouped-imports
 
 
 def get_fp8_meta(fp8_tensor):

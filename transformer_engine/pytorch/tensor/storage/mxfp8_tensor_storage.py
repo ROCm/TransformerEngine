@@ -7,11 +7,10 @@
 """Mixin class holding data specific for MXFP8Tensor"""
 
 from __future__ import annotations
+import os
 from typing import Optional, Dict, Any, Tuple
 from collections.abc import Iterable
 import math
-import os
-
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 

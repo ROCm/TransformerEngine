@@ -5,7 +5,6 @@
 # See LICENSE for license information.
 
 """Enums for e2e transformer"""
-
 import torch
 import torch.distributed
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
@@ -52,7 +51,6 @@ class Custom_DType_Dict(dict):
             self[key] = value
             return value
         raise KeyError(key)
-
 
 TE_DType_To_Torch = Custom_DType_Dict({
     tex.DType.kByte: torch.uint8,

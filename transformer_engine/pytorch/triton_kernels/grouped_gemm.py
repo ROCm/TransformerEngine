@@ -11,7 +11,6 @@ import transformer_engine_torch as tex
 
 from .gmm.gmm_wrapper import gmm, ptgmm
 
-
 def general_grouped_gemm_triton(  # pylint: disable=unused-argument
     A: List[torch.Tensor],
     B: List[torch.Tensor],
