@@ -419,8 +419,8 @@ void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream)
   if (is_tensor_scaling(input.scaling_mode)) {
     dequantization::fp8_dequantize(input, output, stream);
   } else if (is_mxfp_scaling(input.scaling_mode)) {
-#ifdef __HIP_PLATFORM_AMD__
-    // On AMD gfx1250: NVTE_USE_TDM_FLOW=1 selects TDM kernel; default (0) uses ROCm flow.
+#if defined(__HIP_PLATFORM_AMD__) && defined(__gfx1250__)
+    // On gfx1250: NVTE_USE_TDM_FLOW=1 selects TDM kernel; default (0) uses ROCm flow.
     static const bool use_tdm_flow = [] {
       const char *env = std::getenv("NVTE_USE_TDM_FLOW");
       return env != nullptr && env[0] == '1' && env[1] == '\0';
@@ -430,6 +430,8 @@ void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream)
     } else {
       rocm_mxfp8_dequantize(input, output, stream);
     }
+#elif defined(__HIP_PLATFORM_AMD__)
+    rocm_mxfp8_dequantize(input, output, stream);
 #else
     if (is_supported_by_CC_100()) {
       dequantization::mxfp8_dequantize(input, output, stream);

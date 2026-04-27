@@ -1566,8 +1566,8 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
 
   if (is_delayed_tensor_scaling(output->scaling_mode)) {
     if (use_tma_kernels) {
-#ifdef __HIP_PLATFORM_AMD__
-      // On AMD gfx1250: NVTE_USE_TDM_FLOW=1 selects TDM kernel; default (0) uses ROCm flow.
+#if defined(__HIP_PLATFORM_AMD__) && defined(__gfx1250__)
+      // On gfx1250: NVTE_USE_TDM_FLOW=1 selects TDM kernel; default (0) uses ROCm flow.
       static const bool use_tdm_flow_fp8 = [] {
         const char *env = std::getenv("NVTE_USE_TDM_FLOW");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
@@ -1581,6 +1581,12 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
           cast_gated<ParamOP, ActOP>(gated_input, output, stream);
         }
       }
+#elif defined(__HIP_PLATFORM_AMD__)
+      if constexpr (IS_DGATED) {
+        cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+      } else {
+        cast_gated<ParamOP, ActOP>(gated_input, output, stream);
+      }
 #else
       cast_fp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
 #endif
@@ -1593,8 +1599,8 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
     }
   } else if (is_mxfp_scaling(output->scaling_mode)) {
     if (use_tma_kernels) {
-#ifdef __HIP_PLATFORM_AMD__
-      // On AMD gfx1250: NVTE_USE_TDM_FLOW=1 selects TDM kernel; default (0) uses ROCm flow.
+#if defined(__HIP_PLATFORM_AMD__) && defined(__gfx1250__)
+      // On gfx1250: NVTE_USE_TDM_FLOW=1 selects TDM kernel; default (0) uses ROCm flow.
       static const bool use_tdm_flow = [] {
         const char *env = std::getenv("NVTE_USE_TDM_FLOW");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
@@ -1604,6 +1610,8 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
       } else {
         rocm_cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       }
+#elif defined(__HIP_PLATFORM_AMD__)
+      rocm_cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
 #else
       cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
 #endif

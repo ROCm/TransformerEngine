@@ -549,6 +549,7 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
+#if defined(__gfx1250__)
       static const bool use_tdm_flow = [] {
         const char *env = std::getenv("NVTE_USE_TDM_FLOW");
         return env != nullptr && env[0] == '1' && env[1] == '\0';
@@ -560,6 +561,10 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
         rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                     dbias, workspace, stream);
       }
+#else
+      rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+                                                                   dbias, workspace, stream);
+#endif
       break;
     }
     default:
