@@ -64,6 +64,28 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
 void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input, NVTETensor output,
                                                          cudaStream_t stream);
 
+/*! \brief Swizzling scaling factors into the AITER e8m0_shuffle layout for GEMM
+ *
+ *  This produces the scale layout expected by hipBLASLt's
+ *  HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT mode (gfx1250/MI450).
+ *
+ *  The layout matches AITER's e8m0_shuffle:
+ *    scale = scale.view(M//32, 2, 16, N//8, 2, 4)
+ *    scale = scale.permute(0, 3, 5, 2, 4, 1).contiguous()
+ *    scale = scale.view(M, N)
+ *
+ *  \param[in]     input        Input tensor with non-swizzled scale_inv (MXFP8).
+ *  \param[in,out] output       Output tensor which hosts swizzled scale_inv.
+ *  \param[in]     stream       CUDA stream used for the operation.
+ *
+ *  Requirements:
+ *  - Input scaling mode is NVTE_MXFP8_1D_SCALING.
+ *  - scale_inv M dimension is padded to a multiple of 32.
+ *  - scale_inv K dimension is padded to a multiple of 8.
+ */
+void nvte_swizzle_scaling_factors_aiter(const NVTETensor input, NVTETensor output,
+                                        cudaStream_t stream);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

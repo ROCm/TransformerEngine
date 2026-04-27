@@ -166,3 +166,192 @@ INSTANTIATE_TEST_SUITE_P(
       std::to_string(std::get<2>(info.param));
     return name;
     });
+
+#ifdef __HIP_PLATFORM_AMD__
+
+// AITER 32x8 swizzle test (gfx1250 layout)
+
+// CPU reference for AITER e8m0_shuffle permutation.
+// Row-major input [M, K], output is a flat array of 256-byte tiles.
+void compute_ref_aiter_swizzle_row(const uint8_t *h_input, uint8_t *h_output,
+                                   const int M, const int K,
+                                   const int orig_M, const int orig_K) {
+  constexpr int TILE_M = 32;
+  constexpr int TILE_K = 8;
+  for (int m = 0; m < M; m++) {
+    for (int k = 0; k < K; k++) {
+      // Read with identity padding (E8M0 127 = 2^0 = 1.0)
+      uint8_t val = 127;
+      if (m < orig_M && k < orig_K) {
+        val = h_input[m * orig_K + k];
+      }
+      int tile_row = m / TILE_M;
+      int tile_col = k / TILE_K;
+      int local_row = m % TILE_M;
+      int local_col = k % TILE_K;
+      int i1 = local_row >> 4;
+      int i2 = local_row & 0xF;
+      int i4 = local_col >> 2;
+      int i5 = local_col & 0x3;
+      int tile_offset = (tile_row * (K / TILE_K) + tile_col) * 256;
+      int within_tile = (i5 << 6) | (i2 << 2) | (i4 << 1) | i1;
+      h_output[tile_offset + within_tile] = val;
+    }
+  }
+}
+
+void compute_ref_aiter_swizzle_col(const uint8_t *h_input, uint8_t *h_output,
+                                   const int M, const int K,
+                                   const int orig_M, const int orig_K) {
+  constexpr int TILE_M = 32;
+  constexpr int TILE_K = 8;
+  for (int m = 0; m < M; m++) {
+    for (int k = 0; k < K; k++) {
+      uint8_t val = 127;
+      if (m < orig_M && k < orig_K) {
+        val = h_input[k * orig_M + m];
+      }
+      int tile_row = m / TILE_M;
+      int tile_col = k / TILE_K;
+      int local_row = m % TILE_M;
+      int local_col = k % TILE_K;
+      int i1 = local_row >> 4;
+      int i2 = local_row & 0xF;
+      int i4 = local_col >> 2;
+      int i5 = local_col & 0x3;
+      int tile_offset = (tile_row * (K / TILE_K) + tile_col) * 256;
+      int within_tile = (i5 << 6) | (i2 << 2) | (i4 << 1) | i1;
+      h_output[tile_offset + within_tile] = val;
+    }
+  }
+}
+
+static size_t roundup_sz(size_t val, size_t mult) {
+  return ((val + mult - 1) / mult) * mult;
+}
+
+class AiterSwizzleTestSuite
+    : public ::testing::TestWithParam<
+          std::tuple<std::pair<int, int>, bool>> {};
+
+TEST_P(AiterSwizzleTestSuite, TestAiterSwizzle) {
+  using namespace transformer_engine;
+  using namespace test;
+
+  const auto dims = std::get<0>(GetParam());
+  const bool rowwise = std::get<1>(GetParam());
+
+  // Original (unpadded) scale dimensions
+  const size_t orig_M = dims.first;
+  const size_t orig_K = dims.second;
+
+  // Padded dimensions for AITER kernel (M multiple of 32, K multiple of 8)
+  const size_t M = roundup_sz(orig_M, 32);
+  const size_t K = roundup_sz(orig_K, 8);
+
+  // Allocate host input (unpadded) and fill with random data
+  const size_t input_size = orig_M * orig_K;
+  std::unique_ptr<uint8_t[]> h_input(new uint8_t[input_size]);
+  std::mt19937 rng(42);
+  for (size_t i = 0; i < input_size; i++) {
+    h_input[i] = static_cast<uint8_t>(rng() % 256);
+  }
+
+  // Allocate device input
+  uint8_t *d_input = nullptr;
+  ASSERT_EQ(cudaMalloc(&d_input, input_size), cudaSuccess);
+  ASSERT_EQ(cudaMemcpy(d_input, h_input.get(), input_size, cudaMemcpyHostToDevice), cudaSuccess);
+
+  // Allocate device output (padded size)
+  const size_t output_size = M * K;
+  uint8_t *d_output = nullptr;
+  ASSERT_EQ(cudaMalloc(&d_output, output_size), cudaSuccess);
+  ASSERT_EQ(cudaMemset(d_output, 0, output_size), cudaSuccess);
+
+  // Build TensorWrapper for input and output
+  TensorWrapper input_tw(NVTE_MXFP8_1D_SCALING);
+  TensorWrapper output_tw(NVTE_MXFP8_1D_SCALING);
+  output_tw.set_with_gemm_swizzled_scales(true);
+
+  // Data shape must be consistent with scale shape for validation.
+  // Scale shapes use padded dims (kernel requires multiples of 32x8).
+  // Data shapes use unpadded dims (kernel derives original_M/K from them).
+  if (rowwise) {
+    std::vector<size_t> data_shape_in = {orig_M, orig_K * 32};
+    std::vector<size_t> data_shape_out = {M, K * 32};
+    std::vector<size_t> scale_shape_in = {M, K};
+    std::vector<size_t> scale_shape_out = {M, K};
+    input_tw.set_rowwise_data(nullptr, DType::kFloat8E4M3, data_shape_in);
+    input_tw.set_rowwise_scale_inv(d_input, DType::kFloat8E8M0, scale_shape_in);
+    output_tw.set_rowwise_data(nullptr, DType::kFloat8E4M3, data_shape_out);
+    output_tw.set_rowwise_scale_inv(d_output, DType::kFloat8E8M0, scale_shape_out);
+  } else {
+    std::vector<size_t> data_shape_in = {orig_K * 32, orig_M};
+    std::vector<size_t> data_shape_out = {K * 32, M};
+    std::vector<size_t> scale_shape_in = {K, M};
+    std::vector<size_t> scale_shape_out = {K, M};
+    input_tw.set_columnwise_data(nullptr, DType::kFloat8E4M3, data_shape_in);
+    input_tw.set_columnwise_scale_inv(d_input, DType::kFloat8E8M0, scale_shape_in);
+    output_tw.set_columnwise_data(nullptr, DType::kFloat8E4M3, data_shape_out);
+    output_tw.set_columnwise_scale_inv(d_output, DType::kFloat8E8M0, scale_shape_out);
+  }
+
+  nvte_swizzle_scaling_factors_aiter(input_tw.data(), output_tw.data(), 0);
+
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  auto err = cudaGetLastError();
+  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+  // Copy output back to host
+  std::unique_ptr<uint8_t[]> h_output(new uint8_t[output_size]);
+  ASSERT_EQ(cudaMemcpy(h_output.get(), d_output, output_size, cudaMemcpyDeviceToHost),
+            cudaSuccess);
+
+  // Compute reference
+  std::unique_ptr<uint8_t[]> h_ref(new uint8_t[output_size]);
+  memset(h_ref.get(), 0, output_size);
+  if (rowwise) {
+    compute_ref_aiter_swizzle_row(h_input.get(), h_ref.get(), M, K, orig_M, orig_K);
+  } else {
+    compute_ref_aiter_swizzle_col(h_input.get(), h_ref.get(), M, K, orig_M, orig_K);
+  }
+
+  // Compare
+  compareResults("aiter_swizzle", h_output.get(), h_ref.get(), output_size);
+
+  cudaFree(d_input);
+  cudaFree(d_output);
+}
+
+namespace {
+
+// Scale dimensions (M_scale, K_scale) -- must be pre-padded to
+// multiples of 32 (M) and 8 (K) since CheckScaleTensorShape
+// validates consistency between data and scale shapes.
+// In production, quantizer.get_scale_shape() handles the padding.
+std::vector<std::pair<int, int>> aiter_scale_dims = {
+  {32, 8},       // minimal, single tile
+  {64, 16},      // 2x2 tiles
+  {32, 24},      // multiple K tiles
+  {96, 8},       // multiple M tiles
+  {128, 32},     // larger
+  {256, 64},     // big
+};
+
+}  // namespace
+
+INSTANTIATE_TEST_SUITE_P(
+  OperatorTest,
+  AiterSwizzleTestSuite,
+  ::testing::Combine(
+    ::testing::ValuesIn(aiter_scale_dims),
+    ::testing::Values(true, false)
+  ),
+  [](const testing::TestParamInfo<AiterSwizzleTestSuite::ParamType>& info) {
+    std::string name = "M" + std::to_string(std::get<0>(info.param).first) +
+      "_K" + std::to_string(std::get<0>(info.param).second) +
+      (std::get<1>(info.param) ? "_row" : "_col");
+    return name;
+  });
+
+#endif  // __HIP_PLATFORM_AMD__
