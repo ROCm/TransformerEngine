@@ -62,7 +62,7 @@ class MXFP4Quantizer(Quantizer):
         columnwise: bool = True,
         shuffle_rowwise_data: bool = False,
         shuffle_columnwise_data: bool = False,
-        shuffle_scales: bool = False,
+        with_gemm_swizzled_scales: bool = False,
         use_hadamard: bool = False,
         stochastic_rounding: bool = False,
     ) -> None:
@@ -70,7 +70,7 @@ class MXFP4Quantizer(Quantizer):
         self.dtype = fp4_dtype
         self.shuffle_rowwise_data = shuffle_rowwise_data
         self.shuffle_columnwise_data = shuffle_columnwise_data
-        self.shuffle_scales = shuffle_scales
+        self.with_gemm_swizzled_scales = with_gemm_swizzled_scales
         self.use_hadamard = use_hadamard
         self.stochastic_rounding = stochastic_rounding
         assert self.dtype == tex.DType.kFloat4E2M1, "Only E2M1 format supported for MXFP4"
@@ -83,12 +83,11 @@ class MXFP4Quantizer(Quantizer):
             columnwise=self.columnwise_usage,
             shuffle_rowwise_data=self.shuffle_rowwise_data,
             shuffle_columnwise_data=self.shuffle_columnwise_data,
-            shuffle_scales=self.shuffle_scales,
+            with_gemm_swizzled_scales=self.with_gemm_swizzled_scales,
             use_hadamard=self.use_hadamard,
             stochastic_rounding=self.stochastic_rounding,
         )
         quantizer.internal = self.internal
-        quantizer.optimize_for_gemm = self.optimize_for_gemm
         return quantizer
 
     def update_quantized(
@@ -161,8 +160,10 @@ class MXFP4Quantizer(Quantizer):
         M = math.prod(shape[:-1])
         K = shape[-1]
 
-        # Allocate FP4 data: [M, K/2]
-        rowwise_data = torch.empty(M, K // 2, dtype=torch.uint8, device=device)
+        # Allocate FP4 data: [..., K/2] (preserve N-D shape, matching NVFP4 and C++ paths)
+        rowwise_data = torch.empty(
+            _logical_to_rowwise_data_shape(tuple(shape)), dtype=torch.uint8, device=device
+        )
         
         # Allocate PADDED scale tensors for shuffle compatibility
         rowwise_scale_K = math.ceil(K / MXFP4_BLOCK_SCALING_SIZE)
@@ -173,11 +174,13 @@ class MXFP4Quantizer(Quantizer):
                 device=device,
             )
 
-        # Allocate FP4 data transpose if needed
+        # Allocate FP4 data transpose if needed (intentionally 2D, matching NVFP4)
         columnwise_data = None
         columnwise_scale_inv = None
         if self.columnwise_usage:
-            columnwise_data = torch.empty(K, M // 2, dtype=torch.uint8, device=device)
+            columnwise_data = torch.empty(
+                _logical_to_columnwise_data_shape(tuple(shape)), dtype=torch.uint8, device=device
+            )
             colwise_scale_M = math.ceil(M / MXFP4_BLOCK_SCALING_SIZE)
             columnwise_scale_inv = torch.zeros(
                     round_up_to_nearest_multiple(K, 256),
@@ -197,8 +200,7 @@ class MXFP4Quantizer(Quantizer):
             columnwise_scale_inv=columnwise_scale_inv,
             quantizer=self,
             requires_grad=requires_grad,
-            with_gemm_swizzled_scales=self.optimize_for_gemm,
-            shuffle_scales=self.shuffle_scales,
+            with_gemm_swizzled_scales=self.with_gemm_swizzled_scales,
             shuffle_rowwise_data=self.shuffle_rowwise_data,
             shuffle_columnwise_data=self.shuffle_columnwise_data,
         )
@@ -227,7 +229,6 @@ class MXFP4Quantizer(Quantizer):
             fp4_dtype=fp4_dtype,
             quantizer=self,
             with_gemm_swizzled_scales=False,
-            shuffle_scales=False,
             shuffle_rowwise_data=False,
             shuffle_columnwise_data=False,
         )
@@ -272,7 +273,6 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
         fp4_dtype: TE_DType,
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool = False,
-        shuffle_scales: bool = False,
         shuffle_rowwise_data: bool = False,
         shuffle_columnwise_data: bool = False,
         **kwargs,
@@ -286,7 +286,6 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
             fp4_dtype,
             quantizer,
             with_gemm_swizzled_scales,
-            shuffle_scales,
             shuffle_rowwise_data,
             shuffle_columnwise_data,
             *args,
@@ -430,7 +429,6 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
                 requires_grad=False,
                 fp4_dtype=tensor._fp4_dtype,
                 with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
-                shuffle_scales=tensor._shuffle_scales,
                 shuffle_rowwise_data=tensor._shuffle_rowwise_data,
                 shuffle_columnwise_data=tensor._shuffle_columnwise_data,
             )
@@ -450,7 +448,6 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
         shape: torch.shape,
         quantizer: Optional[Quantizer] = None,
         with_gemm_swizzled_scales: bool = False,
-        shuffle_scales: bool = False,
         shuffle_rowwise_data: bool = False,
         shuffle_columnwise_data: bool = False,
     ) -> MXFP4Tensor:
@@ -470,7 +467,6 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
             shape=shape,
             quantizer=quantizer,
             with_gemm_swizzled_scales=with_gemm_swizzled_scales,
-            shuffle_scales=shuffle_scales,
             shuffle_rowwise_data=shuffle_rowwise_data,
             shuffle_columnwise_data=shuffle_columnwise_data,
         )
@@ -489,7 +485,6 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
                 self.shape,
                 self._quantizer,
                 self._with_gemm_swizzled_scales,
-                self._shuffle_scales,
                 self._shuffle_rowwise_data,
                 self._shuffle_columnwise_data,
             ),
@@ -542,7 +537,6 @@ class MXFP4Tensor(MXFP4TensorStorage, QuantizedTensor):
             self._rowwise_scale_inv = tensor._rowwise_scale_inv
             self._columnwise_scale_inv = tensor._columnwise_scale_inv
             self._with_gemm_swizzled_scales = tensor._with_gemm_swizzled_scales
-            self._shuffle_scales = tensor._shuffle_scales
             self._shuffle_rowwise_data = tensor._shuffle_rowwise_data
             self._shuffle_columnwise_data = tensor._shuffle_columnwise_data
             return
@@ -616,7 +610,6 @@ class _ViewFunc(torch.autograd.Function):
             fp4_dtype=tensor._fp4_dtype,
             quantizer=tensor._quantizer,
             with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
-            shuffle_scales=tensor._shuffle_scales,
             shuffle_rowwise_data=tensor._shuffle_rowwise_data,
             shuffle_columnwise_data=tensor._shuffle_columnwise_data,
         )
@@ -649,7 +642,6 @@ class _ViewFunc(torch.autograd.Function):
                 fp4_dtype=grad._fp4_dtype,
                 quantizer=grad._quantizer,
                 with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
-                shuffle_scales=grad._shuffle_scales,
                 shuffle_rowwise_data=grad._shuffle_rowwise_data,
                 shuffle_columnwise_data=grad._shuffle_columnwise_data,
             )
@@ -716,7 +708,6 @@ class _ReshapeFunc(torch.autograd.Function):
             fp4_dtype=tensor._fp4_dtype,
             quantizer=tensor._quantizer,
             with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
-            shuffle_scales=tensor._shuffle_scales,
             shuffle_rowwise_data=tensor._shuffle_rowwise_data,
             shuffle_columnwise_data=tensor._shuffle_columnwise_data,
         )
@@ -748,7 +739,6 @@ class _ReshapeFunc(torch.autograd.Function):
                 fp4_dtype=grad._fp4_dtype,
                 quantizer=grad._quantizer,
                 with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
-                shuffle_scales=grad._shuffle_scales,
                 shuffle_rowwise_data=grad._shuffle_rowwise_data,
                 shuffle_columnwise_data=grad._shuffle_columnwise_data,
             )

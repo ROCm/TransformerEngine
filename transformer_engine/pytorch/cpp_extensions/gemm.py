@@ -185,20 +185,26 @@ def mxfp4_gemm(
         NN: A=weight, B=grad_output -> dgrad: grad_output @ weight
         NT: A=input, B=grad_output  -> wgrad: grad_output^T @ input
     """
+    # Capture the logical batch shape from the wrapper tensor (B) before
+    # extracting raw _rowwise_data/_columnwise_data buffers. The wrapper's
+    # .size() reflects the original N-D logical shape, which we need to
+    # restore after the 2D GEMM kernel. Reading from _rowwise_data.shape
+    # alone would lose leading dims if storage was flattened to 2D.
+    a_logical_shape = B.size()
+    a_batch_shape = a_logical_shape[:-1]
+
     if layout == "TN":
         A_fp4 = B._rowwise_data
         A_scales = B._rowwise_scale_inv
         B_fp4 = A._rowwise_data
         B_scales = A._rowwise_scale_inv
         b_pre_shuffled = A._shuffle_rowwise_data
-
     elif layout == "NN":
         A_fp4 = B._rowwise_data
         A_scales = B._rowwise_scale_inv
         B_fp4 = A._columnwise_data
         B_scales = A._columnwise_scale_inv
         b_pre_shuffled = A._shuffle_columnwise_data
-
     elif layout == "NT":
         A_fp4 = B._columnwise_data
         A_scales = B._columnwise_scale_inv
@@ -209,10 +215,8 @@ def mxfp4_gemm(
     else:
         raise ValueError(f"Unsupported layout for FP4 GEMM: {layout}")
 
-    # AITER a4w4 kernels require 2D inputs (M, K/2). Activations quantized
-    # from a >=3D tensor keep their leading dims, e.g. (batch, seq, K/2),
-    # so flatten to (M_total, K/2) and restore the batch shape afterward.
-    a_batch_shape = A_fp4.shape[:-1]
+    # AITER a4w4 kernels require 2D inputs (M, K/2). Flatten to
+    # (M_total, K/2) and restore the batch shape afterward.
     if A_fp4.ndim > 2:
         A_fp4 = A_fp4.reshape(-1, A_fp4.shape[-1])
 

@@ -1398,7 +1398,7 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                     columnwise=True,
                     shuffle_rowwise_data=shuffle_rowwise_data,
                     shuffle_columnwise_data=shuffle_columnwise_data,
-                    shuffle_scales=True,
+                    with_gemm_swizzled_scales=True,
                     use_hadamard=use_hadamard,
                     stochastic_rounding=stochastic_rounding,
                 )
@@ -1413,7 +1413,7 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                     columnwise=True,
                     shuffle_rowwise_data=False,
                     shuffle_columnwise_data=False,
-                    shuffle_scales=True,
+                    with_gemm_swizzled_scales=True,
                     use_hadamard=use_hadamard,
                     stochastic_rounding=stochastic_rounding,
                 )

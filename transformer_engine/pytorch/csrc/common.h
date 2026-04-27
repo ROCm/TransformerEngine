@@ -297,7 +297,7 @@ class MXFP4Quantizer : public Quantizer {
   bool use_hadamard;
   bool shuffle_rowwise_data;
   bool shuffle_columnwise_data;
-  bool shuffle_scales;
+  bool with_gemm_swizzled_scales;
   bool stochastic_rounding;
 
   explicit MXFP4Quantizer(const py::handle& quantizer);

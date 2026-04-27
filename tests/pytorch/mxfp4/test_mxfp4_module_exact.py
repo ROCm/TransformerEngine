@@ -51,14 +51,14 @@ def get_mxfp4_quantizer_factory(use_hadamard: bool = False):
     """Create a quantizer factory for MXFP4 reference implementation."""
     def factory(role):  
         if role == "linear_input":
-            return MXFP4QuantizerRef(rowwise=True, columnwise=True, shuffle_rowwise_data=False, shuffle_columnwise_data=False, shuffle_scales=False, use_hadamard=use_hadamard, use_te_quantizer=True)
+            return MXFP4QuantizerRef(rowwise=True, columnwise=True, shuffle_rowwise_data=False, shuffle_columnwise_data=False, with_gemm_swizzled_scales=False, use_hadamard=use_hadamard, use_te_quantizer=True)
         if role == "linear_weight":
-            return MXFP4QuantizerRef(rowwise=True, columnwise=True, shuffle_rowwise_data=False, shuffle_columnwise_data=False, shuffle_scales=False, use_hadamard=use_hadamard, use_te_quantizer=True)
+            return MXFP4QuantizerRef(rowwise=True, columnwise=True, shuffle_rowwise_data=False, shuffle_columnwise_data=False, with_gemm_swizzled_scales=False, use_hadamard=use_hadamard, use_te_quantizer=True)
         elif role == "linear_output":
             # Output quantization not used
             return None
         if role == "linear_grad_output":
-            return MXFP4QuantizerRef(rowwise=True, columnwise=True, shuffle_rowwise_data=False, shuffle_columnwise_data=False, shuffle_scales=False, use_hadamard=use_hadamard, use_te_quantizer=True)
+            return MXFP4QuantizerRef(rowwise=True, columnwise=True, shuffle_rowwise_data=False, shuffle_columnwise_data=False, with_gemm_swizzled_scales=False, use_hadamard=use_hadamard, use_te_quantizer=True)
         elif role == "linear_grad_input":
             # Grad input quantization not used
             return None

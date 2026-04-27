@@ -57,7 +57,7 @@ def check_mxfp4_gemm_versus_reference(
         columnwise=True,
         shuffle_rowwise_data=False,
         shuffle_columnwise_data=False,
-        shuffle_scales=True,
+        with_gemm_swizzled_scales=True,
         use_hadamard=False,
     )
     w_quantizer = MXFP4Quantizer(
@@ -66,7 +66,7 @@ def check_mxfp4_gemm_versus_reference(
         columnwise=True,
         shuffle_rowwise_data=True,
         shuffle_columnwise_data=True,
-        shuffle_scales=True,
+        with_gemm_swizzled_scales=True,
         use_hadamard=False,
     )
 
@@ -77,7 +77,7 @@ def check_mxfp4_gemm_versus_reference(
         columnwise=True,
         shuffle_rowwise_data=False,
         shuffle_columnwise_data=False,
-        shuffle_scales=False,
+        with_gemm_swizzled_scales=False,
         use_hadamard=False,
     )
     w_quantizer_ref = MXFP4Quantizer(
@@ -86,7 +86,7 @@ def check_mxfp4_gemm_versus_reference(
         columnwise=True,
         shuffle_rowwise_data=False,
         shuffle_columnwise_data=False,
-        shuffle_scales=False,
+        with_gemm_swizzled_scales=False,
         use_hadamard=False,
     )
 

@@ -161,7 +161,6 @@ struct Tensor {
   bool with_gemm_swizzled_scales = false;
 
 #ifdef __HIP_PLATFORM_AMD__
-  bool mxfp4_shuffle_scales = false;
   bool mxfp4_shuffle_rowwise_data = false;
   bool mxfp4_shuffle_columnwise_data = false;
 #endif
@@ -177,7 +176,6 @@ struct Tensor {
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
       sizeof(uint8_t),          // kNVTEWithGEMMSwizzledScales
 #ifdef __HIP_PLATFORM_AMD__
-      sizeof(uint8_t),          // kNVTEMXFP4ShuffleScales
       sizeof(uint8_t),          // kNVTEMXFP4ShuffleRowwiseData
       sizeof(uint8_t)           // kNVTEMXFP4ShuffleColumnwiseData
 #endif
@@ -197,7 +195,6 @@ struct Tensor {
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     with_gemm_swizzled_scales = false;
 #ifdef __HIP_PLATFORM_AMD__
-    mxfp4_shuffle_scales = false;
     mxfp4_shuffle_rowwise_data = false;
     mxfp4_shuffle_columnwise_data = false;
 #endif

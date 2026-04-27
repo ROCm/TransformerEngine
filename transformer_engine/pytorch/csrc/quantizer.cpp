@@ -1795,7 +1795,7 @@ MXFP4Quantizer::MXFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->use_hadamard = quantizer.attr("use_hadamard").cast<bool>();
   this->shuffle_rowwise_data = quantizer.attr("shuffle_rowwise_data").cast<bool>();
   this->shuffle_columnwise_data = quantizer.attr("shuffle_columnwise_data").cast<bool>();
-  this->shuffle_scales = quantizer.attr("shuffle_scales").cast<bool>();
+  this->with_gemm_swizzled_scales = quantizer.attr("with_gemm_swizzled_scales").cast<bool>();
   this->stochastic_rounding = quantizer.attr("stochastic_rounding").cast<bool>();
 }
 
@@ -1804,9 +1804,6 @@ void MXFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
 std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(const std::vector<size_t>& shape,
                                                                    DType dtype) const {
   using namespace pybind11::literals;
-
-  // Scaling factor format
-  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
 
   // Tensor dimensions
   const std::vector<int64_t> shape_int64(shape.begin(), shape.end());
@@ -1859,8 +1856,7 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(const std::ve
     py::handle MXFP4TensorClass(reinterpret_cast<PyObject*>(MXFP4TensorStoragePythonClass));
     out_py = MXFP4TensorClass(rowwise_data_py, rowwise_scale_inv_py, columnwise_data_py,
                               columnwise_scale_inv_py, this->dtype, this->quantizer,
-                              with_gemm_swizzled_scales,
-                              this->shuffle_scales, this->shuffle_rowwise_data,
+                              this->with_gemm_swizzled_scales, this->shuffle_rowwise_data,
                               this->shuffle_columnwise_data);
   } else {
     py::handle MXFP4TensorClass(reinterpret_cast<PyObject*>(MXFP4TensorPythonClass));
@@ -1869,8 +1865,8 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(const std::ve
         "rowwise_data"_a = rowwise_data_py, "columnwise_data"_a = columnwise_data_py,
         "rowwise_scale_inv"_a = rowwise_scale_inv_py,
         "columnwise_scale_inv"_a = columnwise_scale_inv_py, "fp4_dtype"_a = this->dtype,
-        "quantizer"_a = this->quantizer, "with_gemm_swizzled_scales"_a = with_gemm_swizzled_scales,
-        "shuffle_scales"_a = this->shuffle_scales,
+        "quantizer"_a = this->quantizer,
+        "with_gemm_swizzled_scales"_a = this->with_gemm_swizzled_scales,
         "shuffle_rowwise_data"_a = this->shuffle_rowwise_data,
         "shuffle_columnwise_data"_a = this->shuffle_columnwise_data);
   }
@@ -1887,8 +1883,7 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(const std::ve
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv_tensor.data_ptr(), DType::kFloat8E8M0,
                                      columnwise_scale_inv_shape);
   }
-  out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
-  out_cpp.set_mxfp4_shuffle_scales(this->shuffle_scales);
+  out_cpp.set_with_gemm_swizzled_scales(this->with_gemm_swizzled_scales);
   out_cpp.set_mxfp4_shuffle_rowwise_data(this->shuffle_rowwise_data);
   out_cpp.set_mxfp4_shuffle_columnwise_data(this->shuffle_columnwise_data);
   this->set_quantization_params(&out_cpp);
@@ -1899,9 +1894,6 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(const std::ve
 std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
     py::object tensor) const {
   NVTE_CHECK(detail::IsMXFP4Tensor(tensor.ptr()), "MXFP4Quantizer must output to MXFP4Tensor.");
-
-  // Scaling factor format
-  const bool with_gemm_swizzled_scales = this->optimize_for_gemm;
 
   // Extract buffers from Python tensor
   auto get_tensor = [&tensor](const char* name) -> std::optional<at::Tensor> {
@@ -1996,8 +1988,7 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
 
   // Coerce other attrs
   tensor.attr("_fp4_dtype") = dtype;
-  tensor.attr("_with_gemm_swizzled_scales") = with_gemm_swizzled_scales;
-  tensor.attr("_shuffle_scales") = this->shuffle_scales;
+  tensor.attr("_with_gemm_swizzled_scales") = this->with_gemm_swizzled_scales;
   tensor.attr("_shuffle_rowwise_data") = this->shuffle_rowwise_data;
   tensor.attr("_shuffle_columnwise_data") = this->shuffle_columnwise_data;
 
@@ -2015,8 +2006,7 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
     out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
                                      getTensorShape(*columnwise_scale_inv));
   }
-  out_cpp.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
-  out_cpp.set_mxfp4_shuffle_scales(this->shuffle_scales);
+  out_cpp.set_with_gemm_swizzled_scales(this->with_gemm_swizzled_scales);
   out_cpp.set_mxfp4_shuffle_rowwise_data(this->shuffle_rowwise_data);
   out_cpp.set_mxfp4_shuffle_columnwise_data(this->shuffle_columnwise_data);
   this->set_quantization_params(&out_cpp);

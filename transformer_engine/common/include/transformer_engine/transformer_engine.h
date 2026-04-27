@@ -75,9 +75,8 @@ enum NVTETensorParam {
   kNVTEColumnwiseAmax = 6,         /*!< Columnwise Amax tensor */
   kNVTEWithGEMMSwizzledScales = 7, /*!< Whether scaling factors are in format expected by GEMM */
 #ifdef USE_ROCM
-  kNVTEMXFP4ShuffleScales = 8,           /*!< Whether MXFP4 scales are shuffled for AITER GEMM */
-  kNVTEMXFP4ShuffleRowwiseData = 9,      /*!< Whether MXFP4 rowwise data is shuffled for AITER GEMM */
-  kNVTEMXFP4ShuffleColumnwiseData = 10,  /*!< Whether MXFP4 columnwise data is shuffled for AITER GEMM */
+  kNVTEMXFP4ShuffleRowwiseData = 8,      /*!< Whether MXFP4 rowwise data is shuffled for AITER GEMM */
+  kNVTEMXFP4ShuffleColumnwiseData = 9,  /*!< Whether MXFP4 columnwise data is shuffled for AITER GEMM */
 #endif
   kNVTENumTensorParams
 };
@@ -770,10 +769,6 @@ class TensorWrapper {
   }
 
 #ifdef USE_ROCM
-  void set_mxfp4_shuffle_scales(bool shuffle_scales) {
-    const auto val = static_cast<uint8_t>(shuffle_scales);
-    nvte_set_tensor_param_v2(tensor_, kNVTEMXFP4ShuffleScales, &val, sizeof(val));
-  }
 
   void set_mxfp4_shuffle_rowwise_data(bool shuffle_rowwise_data) {
     const auto val = static_cast<uint8_t>(shuffle_rowwise_data);
@@ -823,12 +818,6 @@ class TensorWrapper {
   }
 
 #ifdef USE_ROCM
-  bool get_mxfp4_shuffle_scales() const {
-    uint8_t val = 0;
-    nvte_get_tensor_param_v2(tensor_, kNVTEMXFP4ShuffleScales, &val, sizeof(val), nullptr);
-    return static_cast<bool>(val);
-  }
-
   bool get_mxfp4_shuffle_rowwise_data() const {
     uint8_t val = 0;
     nvte_get_tensor_param_v2(tensor_, kNVTEMXFP4ShuffleRowwiseData, &val, sizeof(val), nullptr);

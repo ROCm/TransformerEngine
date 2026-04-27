@@ -54,7 +54,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
                "MXFP4 stochastic rounding requires rng_state tensor of shape {2}.");
     rng_state_ptr = static_cast<const int64_t*>(rng_tensor->data.dptr);
   }
-  bool scale_shuffle = output->mxfp4_shuffle_scales;
+  bool scale_shuffle = output->with_gemm_swizzled_scales;
   bool data_shuffle_rowwise_fp4 = output->mxfp4_shuffle_rowwise_data;
   bool data_shuffle_columnwise_fp4 = output->mxfp4_shuffle_columnwise_data;
 

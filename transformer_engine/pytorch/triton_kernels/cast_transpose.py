@@ -914,7 +914,7 @@ def te_cast_transpose_mxfp4_triton(input, out, noop_flag=None):
     M = input.numel() // N
     input_2d_view = input.reshape(M, N).contiguous()
     out_metadata = out.get_metadata()
-    shuffle_scales = out_metadata["quantizer"].shuffle_scales
+    shuffle_scales = out_metadata["quantizer"].with_gemm_swizzled_scales
 
     USE_ROWWISE_SCALING = out_metadata["rowwise_data"] is not None
     USE_COLWISE_SCALING = out_metadata["columnwise_data"] is not None
