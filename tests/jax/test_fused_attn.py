@@ -1511,29 +1511,18 @@ class TestFusedAttn:
     not is_hip_extension(), reason="Bias all-neg-inf NaN fix is ROCm-specific (SWDEV-561757)"
 )
 @pytest.mark.parametrize(
-    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout, bias_shape",
+    "s_kv, h_kv, bias_shape",
     [
-        pytest.param(
-            2, 1024, 1024, 12, 12, 64, 64, jnp.bfloat16, QKVLayout.BSHD_BSHD_BSHD,
-            BiasShape._B1SS, id="B1SS-SELF",
-        ),
-        pytest.param(
-            2, 1024, 512, 12, 12, 64, 64, jnp.bfloat16, QKVLayout.BSHD_BSHD_BSHD,
-            BiasShape._B1SS, id="B1SS-CROSS",
-        ),
-        pytest.param(
-            2, 1024, 1024, 12, 6, 64, 64, jnp.bfloat16, QKVLayout.BSHD_BSHD_BSHD,
-            BiasShape._1HSS, id="1HSS-GQA",
-        ),
-        pytest.param(
-            2, 1024, 1024, 12, 12, 64, 64, jnp.bfloat16, QKVLayout.BSHD_BSHD_BSHD,
-            BiasShape._BHSS, id="BHSS-SELF",
-        ),
-        pytest.param(
-            2, 1024, 1024, 12, 12, 64, 64, jnp.bfloat16, QKVLayout.BSHD_BSHD_BSHD,
-            BiasShape._11SS, id="11SS-SELF",
-        ),
+        pytest.param(1024, 12, BiasShape._B1SS, id="B1SS-SELF"),
+        pytest.param(512,  12, BiasShape._B1SS, id="B1SS-CROSS"),
+        pytest.param(1024, 6,  BiasShape._1HSS, id="1HSS-GQA"),
+        pytest.param(1024, 12, BiasShape._BHSS, id="BHSS-SELF"),
+        pytest.param(1024, 12, BiasShape._11SS, id="11SS-SELF"),
     ],
+)
+@pytest.mark.parametrize(
+    "b, s_q, h_q, d_qk, d_v, dtype, qkv_layout",
+    [(2, 1024, 12, 64, 64, jnp.bfloat16, QKVLayout.BSHD_BSHD_BSHD)],
 )
 def test_backward_bias_all_neg_inf(
     b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout, bias_shape
