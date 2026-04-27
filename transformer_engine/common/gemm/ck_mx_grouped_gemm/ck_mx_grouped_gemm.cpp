@@ -24,11 +24,16 @@
 #include "ck_tile/ops/gemm_mx/kernel/scale_pointer.hpp"
 #include "ck_tile/ops/gemm_mx/pipeline/gemm_pipeline_ag_bg_cr_comp_async.hpp"
 
+using ck_tile::address_space_enum;
+using ck_tile::safe_underlying_type_t;
+
 using AScaleType = ck_tile::e8m0_t;
 using BScaleType = ck_tile::e8m0_t;
 using ScaleType = ck_tile::e8m0_t;
 using ScaleM = ck_tile::MXScalePointer<ScaleType, 1, 32>;
 using ScaleN = ck_tile::MXScalePointer<ScaleType, 1, 32>;
+
+static constexpr int ScaleBlockSize = 32;
 
 struct MXGemmConfig
 {
@@ -308,6 +313,8 @@ void launch_pack_scales(const ScaleType* src,
   NVTE_CHECK_CUDA(hipGetLastError());
 }
 
+namespace transformer_engine {
+
 template <typename GemmConfig, typename AType, typename BType, typename CType, typename AccType=float>
 bool invoke_mx_grouped_gemm(const std::vector<MXGroupedHostDesc>& descs, const CKGemmRunContext& ctx, const ck_tile::stream_config& stream_cfg) {
     using GemmShape =
@@ -388,6 +395,8 @@ bool invoke_mx_grouped_gemm(const std::vector<MXGroupedHostDesc>& descs, const C
 
 }
 
+} // namespace transformer_engine
+
 bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
                           const NVTETensor* B,
                           NVTETensor* D,
@@ -400,6 +409,8 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
   if (accumulate || group_num <= 0) {
     return true;
   }
+
+  using namespace transformer_engine;
 
   void* ws_ptr = nullptr;
   size_t ws_bytes = 0;

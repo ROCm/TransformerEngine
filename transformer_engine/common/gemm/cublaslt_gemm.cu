@@ -32,7 +32,8 @@
 #ifndef __HIP_PLATFORM_AMD__
 #include "./cutlass_grouped_gemm.cuh"
 #else
-#include "ck_grouped_gemm/ck_grouped_gemm.h"
+#include "ck_mx_grouped_gemm/ck_mx_grouped_gemm.h"
+// #include "ck_grouped_gemm/ck_grouped_gemm.h"
 #endif
 
 #ifndef __HIP_PLATFORM_AMD__
@@ -1192,7 +1193,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype() &&
 #ifdef __HIP_PLATFORM_AMD__
       true)                               {
-    if (!ck_tile_grouped_gemm(A, B, D, num_gemms, transa, transb, workspace, accumulate, stream)) {
+    if (!ck_tile_mx_grouped_gemm(A, B, D, num_gemms, transa, transb, workspace, accumulate, stream)) {
         if (warn_fallback) {
           NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
         }

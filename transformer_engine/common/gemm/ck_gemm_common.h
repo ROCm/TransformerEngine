@@ -4,6 +4,8 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
+#pragma once
+
 #include "../common.h"
 
 #include "ck_tile/core.hpp"
@@ -11,7 +13,6 @@
 #include "ck_tile/ops/gemm.hpp"
 
 namespace transformer_engine {
-namespace grouped_gemm {
 
 using RowMajor = ck_tile::tensor_layout::gemm::RowMajor;
 using ColMajor = ck_tile::tensor_layout::gemm::ColumnMajor;
@@ -174,5 +175,4 @@ inline CkFp8NtPresentation select_ck_fp8_nt_presentation(
   return out;
 }
 
-}  // namespace grouped_gemm
 }  // namespace transformer_engine
