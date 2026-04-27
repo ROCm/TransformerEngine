@@ -759,10 +759,10 @@ class FusedAttnRunner:
                 else:
                     # Force kv_len >= q_len for swa, otherwise, cuDNN kernels don't support
                     min_segment_len = None
-                if (
-                    self.window_size is not None or self.attn_mask_type.is_bottom_right()
-                ):  # SWA or BRCM requires kv_len >= q_len
-                    min_segment_len = self.seqlens_q
+                    if (
+                        self.window_size is not None or self.attn_mask_type.is_bottom_right()
+                    ):  # SWA or BRCM requires kv_len >= q_len
+                        min_segment_len = self.seqlens_q
                     self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = generate_random_segment_ids(
                         self.batch_size,
                         self.max_seqlen_kv,
