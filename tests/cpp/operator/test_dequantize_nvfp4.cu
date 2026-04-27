@@ -109,7 +109,7 @@ void compute_ref(const fp4e2m1* input,
                  const size_t cols,
                  const size_t scale_stride) {
 #ifdef __HIP_PLATFORM_AMD__
-    const float fp8_max = te_fp8_fnuz() ? 240.0f : 448.0f;
+    const float fp8_max = Numeric_Traits<fp8e4m3>::maxNorm;
     const float factor_inv = 1.0f / (6.0f * fp8_max);
 #else
     constexpr float factor_inv = 1.0f / (6.0f * 448.0f);
