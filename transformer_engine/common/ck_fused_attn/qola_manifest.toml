@@ -9,9 +9,11 @@ architectures = ["gfx950", "gfx942"]
 [[modules]]
 name = "libmha_fwd"
 mode = "cpp_itfs"
+receipt = 700
 drop_srcs = ["mha_fwd_split.cu", "mha_fwd_batch_prefill.cu"]
 drop_directions = ["fwd_splitkv", "batch_prefill"]
 
 [[modules]]
 name = "libmha_bwd"
 mode = "cpp_itfs"
+receipt = 700
