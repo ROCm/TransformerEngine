@@ -1677,9 +1677,15 @@ void quantize_helper(const NVTETensor input, const NVTETensor grad, NVTETensor o
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
+#ifdef __HIP_PLATFORM_AMD__
+      fp8_quantize_rocm<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
+          *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
+          workspace_tensor, stream);
+#else
       mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(
           *input_tensor, activation_input_tensor, &noop_tensor, output_tensor, dbias_tensor,
           workspace_tensor, stream);
+#endif
       break;
     }
 #ifndef __HIP_PLATFORM_AMD__
