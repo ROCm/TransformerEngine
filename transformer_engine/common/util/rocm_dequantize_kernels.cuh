@@ -150,7 +150,8 @@ static void rocm_mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStrea
   const size_t chunks_Y = DIVUP(rows, ROCM_CHUNK_DIM_Y);
   const size_t chunks_X = DIVUP(cols, ROCM_CHUNK_DIM_X);
 
-  const size_t scales_X_rowwise = DIVUP(cols, scale_dim_X_rowwise);
+  const size_t scales_X_rowwise =
+      DIVUP_TO_MULTIPLE(DIVUP(cols, scale_dim_X_rowwise), scale_tensor_alignment_X_rowwise);
   const size_t scales_X_colwise = cols;
 
   const e8m0_t *const scales_ptr =
