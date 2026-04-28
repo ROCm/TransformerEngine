@@ -19,6 +19,7 @@ if IS_HIP_EXTENSION:
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
@@ -36,18 +37,55 @@ _NUM_MAX_UB_STREAMS = 3
 def get_cublas_workspace_size_bytes() -> None:
     """Return workspace size needed for current architecture."""
     if IS_HIP_EXTENSION:
-        """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
+        # 64 MiB for gfx50x, 32 MiB for all other architectures
         if get_device_compute_capability() == (9, 5):
             return 67_108_864
         return 33_554_432
-    """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
         # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
         return 32 * 1024 * 1024 + 1024
     return 4_194_304
 
 
-@functools.lru_cache(maxsize=None)
+def _hipkittens_workspace_bytes(m: int, n: int, k: int, layout: str) -> int:
+    """Compute workspace bytes needed for HipKittens MXFP8 GEMM."""
+    k_iters = k // 128
+    scale_k = k // 32
+    align   = 256
+
+    def _align(x):
+        return (x + align - 1) & ~(align - 1)
+
+    sa_pk = _align(k_iters * m * 4)
+    sb_pk = k_iters * n * 4
+
+    if layout == "TN":
+        return _align(sa_pk) + sb_pk
+    elif layout == "NN":
+        a_tr  = _align(m * k)
+        sa_tr = _align(m * scale_k)
+        return a_tr + sa_tr + _align(sa_pk) + sb_pk
+    elif layout == "NT":
+        a_tr  = _align(m * k)
+        b_tr  = _align(n * k)
+        sa_tr = _align(m * scale_k)
+        sb_tr = _align(n * scale_k)
+        return a_tr + b_tr + sa_tr + sb_tr + _align(sa_pk) + sb_pk
+    return 0
+
+
+_workspace_cache: dict[tuple[int, bool, bool], torch.Tensor] = {}
+
+
+def _use_hipkittens() -> bool:
+    """Check if HipKittens MXFP8 backend is active."""
+    if not IS_HIP_EXTENSION:
+        return False
+    if get_device_compute_capability() != (9, 5):
+        return False
+    return os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "0") != "1"
+
+
 def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Tensor:
     """Returns workspace for cublas GEMM."""
     assert not (ub and grouped_gemm), "UB is unsupported for grouped GEMM."
@@ -66,7 +104,21 @@ def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Ten
             )
         return _multi_stream_cublas_workspace
 
-    return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
+    key = (device, ub, grouped_gemm)
+    ws = _workspace_cache.get(key)
+    if ws is None:
+        ws = torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
+        _workspace_cache[key] = ws
+    return ws
+
+
+def check_mxfp8_workspace(device: int, needed: int) -> None:
+    """Grow the workspace to required size"""
+    key = (device, False, False)
+    ws = _workspace_cache.get(key)
+    if ws is not None and ws.shape[0] >= needed:
+        return
+    _workspace_cache[key] = torch.empty(needed, dtype=torch.uint8, device=device)
 
 
 def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
@@ -128,6 +180,17 @@ def general_gemm(
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
+
+    is_mxfp8 = isinstance(A, MXFP8TensorStorage) or isinstance(B, MXFP8TensorStorage)
+    if is_mxfp8 and _use_hipkittens() and layout in ("NN", "NT"):
+        a_size = A.size() if hasattr(A, "size") and callable(A.size) else A.shape
+        b_size = B.size() if hasattr(B, "size") and callable(B.size) else B.shape
+        m  = a_size[0] if transa else a_size[-1]
+        n  = b_size[-1] if transb else b_size[0]
+        k  = a_size[-1] if transa else a_size[0]
+        needed = _hipkittens_workspace_bytes(m, n, k, layout)
+        check_mxfp8_workspace(get_tensor_device(A), needed)
+
     workspace = get_cublas_workspace(get_tensor_device(A), ub is not None, False)
 
     if ub_type is not None:

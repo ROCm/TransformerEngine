@@ -26,3 +26,6 @@
 [submodule "3rdparty/QoLA"]
 	path = 3rdparty/QoLA
 	url = https://github.com/Micky774/QoLA.git
+[submodule "3rdparty/hipkittens"]
+	path = 3rdparty/hipkittens
+	url = https://github.com/HazyResearch/HipKittens.git

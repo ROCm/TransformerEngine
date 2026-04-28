@@ -61,8 +61,9 @@ def _check_mxfp8_gemm_support(with_jax_gemm, m, n, k, use_bias=False):
             pytest.skip(
                 f"Input shape {(m, k)} x {(k, n)} is not supported by hipblaslt MXFP8 GEMM."
             )
-        if use_bias:
-            pytest.skip("hipblaslt GEMM does not yet support MXFP8 with bias.")
+        hipkittens_eligible = (m % 256 == 0) and (n % 256 == 0) and (k >= 256)
+        if use_bias and not hipkittens_eligible:
+            pytest.skip("hipblaslt GEMM does not support MXFP8 with bias.")
     else:
         jax_version = version.parse(jax.__version__)
         if jax_version < version.parse("0.8.2"):

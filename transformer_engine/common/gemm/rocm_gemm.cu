@@ -29,6 +29,10 @@
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
 
+#ifdef USE_HIPKITTENS_GEMM
+#include "kittens/mxfp8_gemm.h"
+#endif
+
 namespace transformer_engine {
 
 namespace {
@@ -1524,10 +1528,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
              ")");
   // Check that K is a multiple of 128, and M/N are multiples of 16 for MXFP8 GEMM
   if (inputA->scaling_mode == NVTE_MXFP8_1D_SCALING || inputB->scaling_mode == NVTE_MXFP8_1D_SCALING) {
-    NVTE_CHECK(inputBias->data.dptr == nullptr, "MXFP8 GEMM does not yet support bias.");
     NVTE_CHECK((k % 128) == 0, "GEMM K dimension must be multiple of 128 for MXFP8 scaling (got K=", k, ")");
-    NVTE_CHECK((m % 16) == 0, "GEMM M dimension must be multiple of 16 for MXFP8 scaling (got M=", m, ")");
-    NVTE_CHECK((n % 16) == 0, "GEMM N dimension must be multiple of 16 for MXFP8 scaling (got N=", n, ")");
+    NVTE_CHECK((m % 16)  == 0, "GEMM M dimension must be multiple of 16 for MXFP8 scaling (got M=", m, ")");
+    NVTE_CHECK((n % 16)  == 0, "GEMM N dimension must be multiple of 16 for MXFP8 scaling (got N=", n, ")");
+#ifndef USE_HIPKITTENS_GEMM
+    NVTE_CHECK(inputBias->data.dptr == nullptr, "hipBLASlt MXFP8 GEMM does not support bias.");
+#endif
   }
 
   const int lda = is_transa ? k : m;
@@ -1554,12 +1560,56 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     handle = hipblaslt_handles[compute_stream_offset];
   }
 
-  hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, m, n, k, lda, ldb, ldd, transa,
-                 transb, grad, workspace, workspaceSize, alpha, beta, use_split_accumulator,
-                 math_sm_count, use_service_stream ? ss_ctl.stream : stream, handle);
+#ifdef USE_HIPKITTENS_GEMM
+  static bool is_gfx950 = false;
+  static std::once_flag gfx950_flag;
+  std::call_once(gfx950_flag, [&]() {
+    hipDeviceProp_t prop;
+    hipGetDeviceProperties(&prop, 0);
+    is_gfx950 = (prop.major == 9 && prop.minor == 5);
+  });
 
-  if (use_service_stream)
-  {
+  bool force_hipblaslt = false;
+  if (const char *env_p = std::getenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8")) {
+    force_hipblaslt = (strcmp(env_p, "1") == 0);
+  }
+
+  bool is_mxfp8 = inputA->scaling_mode == NVTE_MXFP8_1D_SCALING
+               || inputB->scaling_mode == NVTE_MXFP8_1D_SCALING;
+
+  bool use_hipkittens = is_gfx950 && !force_hipblaslt && is_mxfp8
+                     && m % 256 == 0 && n % 256 == 0 && k % 128 == 0 && k >= 256;
+
+  if (use_hipkittens) {
+    auto param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
+    
+    hipStream_t s = use_service_stream ? ss_ctl.stream : stream;
+
+    kittens_mxfp8_gemm(param.A, param.B, outputD->data.dptr,
+                       param.A_scale_inv, param.B_scale_inv,
+                       m, n, k, is_transa, is_transb,
+                       static_cast<int>(param.Atype),
+                       static_cast<int>(param.Btype),
+                       inputBias->data.dptr,
+                       static_cast<int>(inputBias->data.dtype),
+                       outputPreGelu->data.dptr,
+                       static_cast<int>(outputD->data.dtype),
+                       static_cast<int>(outputPreGelu->data.dtype),
+                       workspace, workspaceSize, s);
+  } else {
+#endif
+    if (inputA->scaling_mode == NVTE_MXFP8_1D_SCALING || inputB->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+      NVTE_CHECK(inputBias->data.dptr == nullptr, "MXFP8 GEMM does not yet support bias.");
+    }
+
+    hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, m, n, k, lda, ldb, ldd, transa,
+                   transb, grad, workspace, workspaceSize, alpha, beta, use_split_accumulator,
+                   math_sm_count, use_service_stream ? ss_ctl.stream : stream, handle);
+#ifdef USE_HIPKITTENS_GEMM
+  }
+#endif
+
+  if (use_service_stream) {
     release_service_stream(stream, ss_ctl);
   }
 }
