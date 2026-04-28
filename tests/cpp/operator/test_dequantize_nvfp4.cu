@@ -169,7 +169,11 @@ void run_single_case(const std::string& case_name,
 // Only tests row-wise 1D dequant since the kernel is hardwired for that.
 template <typename OutputType>
 void performTest(const size_t rows, const size_t cols, DType otype) {
+#ifdef __HIP_PLATFORM_AMD__
+    const std::array<size_t, 4> scale_dims = get_scale_tensor_dims(rows, cols, 1, 16, NVTE_NVFP4_1D_SCALING);
+#else
     const std::array<size_t, 4> scale_dims = get_scale_tensor_dims(rows, cols, 1, 16);
+#endif //#ifdef __HIP_PLATFORM_AMD__
 
     const size_t unpadded_blocks_Y = scale_dims[0];
     const size_t unpadded_blocks_X = scale_dims[1];
