@@ -47,11 +47,7 @@ __device__ inline OType dgelu(const IType val, const Empty&) {
 template <typename OType, typename IType>
 __device__ inline OType sigmoid(const IType val, const Empty&) {
   const float cval = val;
-#ifdef __HIP_PLATFORM_AMD__
-  return __frcp_rn(1.0f + __expf(-cval));
-#else
   return 1.f / (1.f + expf(-cval));
-#endif
 }
 
 __device__ inline float sigmoidf(const float x) { return __frcp_rn(1.0f + __expf(-x)); }
@@ -103,8 +99,7 @@ __device__ inline OType clamped_silu(const IType val, const ClampedSwiGLUParam& 
 template <typename OType, typename IType>
 __device__ inline OType dsilu(const IType val, const Empty& e) {
   const float cval = val;
-  const float s = sigmoid<float, float>(cval, e);
-  return s * (1.f + cval * (1.f - s));
+  return cval * dsigmoid<float, float>(cval, e) + sigmoid<float, float>(cval, e);
 }
 
 template <typename OType, typename IType>
