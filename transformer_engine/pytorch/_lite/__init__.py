@@ -50,7 +50,8 @@ from .quantize import (
     compute_amax, fused_amax_and_scale_update_after_reduction,
     fp8_block_scaling_compute_partial_amax, fp8_block_scaling_partial_cast,
 )
-from .gemm import generic_gemm, te_general_grouped_gemm
+from .gemm import generic_gemm
+from .grouped_gemm import te_general_grouped_gemm
 from .softmax import (
     scaled_softmax_forward, scaled_softmax_backward,
     scaled_masked_softmax_forward, scaled_masked_softmax_backward,

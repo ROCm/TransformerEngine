@@ -54,7 +54,8 @@ class TestImport:
     def test_key_symbols_exist(self):
         required = [
             "DType", "FP8TensorMeta", "NVTE_Fused_Attn_Backend",
-            "generic_gemm", "layernorm_fwd", "layernorm_bwd",
+            "generic_gemm", "te_general_grouped_gemm",
+            "layernorm_fwd", "layernorm_bwd",
             "rmsnorm_fwd", "rmsnorm_bwd", "gelu", "silu", "swiglu",
             "multi_tensor_adam", "multi_tensor_scale",
         ]
@@ -4206,6 +4207,46 @@ class TestGroupedLinear:
         torch.cuda.synchronize()
         assert torch.isfinite(y).all()
         assert torch.isfinite(x.grad).all()
+
+
+# ---------------------------------------------------------------------------
+# Grouped-GEMM dispatcher (lite) — Phase 1 covers BF16 only via
+# `general_grouped_gemm_triton`. FP8 operands must fail loudly until the
+# Phase 2 fused-MoE path lands; otherwise they would silently misroute
+# through the BF16 kernel and either crash or miscompute.
+# ---------------------------------------------------------------------------
+
+class TestGroupedGemmDispatch:
+    """Verify lite's te_general_grouped_gemm dispatcher gating."""
+
+    NUM_GEMMS = 2
+    IN_FEATURES = 64
+    OUT_FEATURES = 64
+    M_SPLITS = [4, 4]
+
+    def test_fp8_operands_raise_not_implemented(self, device):
+        total = sum(self.M_SPLITS)
+        A = [
+            torch.empty(self.OUT_FEATURES, self.IN_FEATURES,
+                        device=device, dtype=torch.float8_e4m3fn)
+            for _ in range(self.NUM_GEMMS)
+        ]
+        B = [
+            torch.empty(m, self.IN_FEATURES,
+                        device=device, dtype=torch.float8_e4m3fn)
+            for m in self.M_SPLITS
+        ]
+        out = [
+            torch.empty(m, self.OUT_FEATURES, device=device, dtype=torch.bfloat16)
+            for m in self.M_SPLITS
+        ]
+        ws = [torch.empty(1024, device=device, dtype=torch.uint8)]
+        with pytest.raises(NotImplementedError, match="FP8 grouped GEMM"):
+            tex.te_general_grouped_gemm(
+                A, True, B, False, out, torch.bfloat16, self.M_SPLITS,
+                [], None, False, [], False, ws, ws[0].shape[0],
+                False, False, 0,
+            )
 
 
 # ---------------------------------------------------------------------------
