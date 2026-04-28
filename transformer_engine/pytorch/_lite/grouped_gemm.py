@@ -73,6 +73,24 @@ def te_general_grouped_gemm(
             "grouped-GEMM dispatcher."
         )
 
+    # Empty-token short-circuit: when MoE token routing sends zero tokens to
+    # this rank's local expert(s) (common in early training before the
+    # auxiliary load-balancing loss kicks in), AITER's gmm asserts M > 0.
+    # That's a legal MoE state from Megatron's side, so handle it here.
+    # Forward / dgrad outputs are (M, ...) so already empty; wgrad output
+    # is (G, K, N) and represents zero contribution from this microbatch:
+    #   accumulate=True  -> leave existing_out alone (no-op contribution),
+    #   accumulate=False -> zero existing_out so caller sees sane state.
+    if m_splits is not None and sum(m_splits) == 0:
+        is_wgrad = transa and not transb and grad
+        if is_wgrad and not accumulate:
+            for o in out:
+                o.zero_()
+        # bias / grad-bias: forward path returns the input bias list as-is;
+        # wgrad path would normally return per-group grad-bias tensors, which
+        # are also zero contribution under M=0. Match the empty-bias case.
+        return [None] * len(m_splits) if (bias is None or len(bias) == 0) else bias
+
     try:
         from transformer_engine.pytorch.triton_kernels.grouped_gemm import (
             general_grouped_gemm_triton,

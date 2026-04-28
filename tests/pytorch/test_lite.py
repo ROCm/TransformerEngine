@@ -4248,6 +4248,54 @@ class TestGroupedGemmDispatch:
                 False, False, 0,
             )
 
+    def test_empty_tokens_short_circuit_forward(self, device):
+        """MoE routing can produce zero local tokens in early training; the
+        underlying AITER gmm asserts M > 0, so the lite wrapper must
+        short-circuit instead of forwarding."""
+        m_splits = [0, 0]
+        A = [
+            torch.randn(self.OUT_FEATURES, self.IN_FEATURES,
+                        device=device, dtype=torch.bfloat16)
+            for _ in range(self.NUM_GEMMS)
+        ]
+        # Empty input: (0, in_features)
+        B = [torch.empty(0, self.IN_FEATURES, device=device, dtype=torch.bfloat16)]
+        out = [torch.empty(0, self.OUT_FEATURES, device=device, dtype=torch.bfloat16)]
+        ws = [torch.empty(1024, device=device, dtype=torch.uint8)]
+        # Forward layout (transa=True, transb=False), grad=False.
+        # Should return without raising, with the empty out tensor untouched.
+        tex.te_general_grouped_gemm(
+            A, True, B, False, out, torch.bfloat16, m_splits,
+            [], None, True, [], False, ws, ws[0].shape[0],
+            False, False, 0,
+        )
+        assert out[0].shape == (0, self.OUT_FEATURES)
+
+    def test_empty_tokens_short_circuit_wgrad_zeros_out(self, device):
+        """Wgrad with zero tokens must zero its (G, K, N) output when
+        accumulate=False so the caller sees the correct zero contribution."""
+        m_splits = [0, 0]
+        A = [torch.empty(0, self.IN_FEATURES, device=device, dtype=torch.bfloat16)]
+        B = [torch.empty(0, self.OUT_FEATURES, device=device, dtype=torch.bfloat16)]
+        # Pre-fill out with garbage so we can verify the zero_() actually fired.
+        out = [
+            torch.full((self.OUT_FEATURES, self.IN_FEATURES), 7.0,
+                       device=device, dtype=torch.bfloat16)
+            for _ in range(self.NUM_GEMMS)
+        ]
+        ws = [torch.empty(1024, device=device, dtype=torch.uint8)]
+        # Wgrad layout: transa=True (wgrad layout NT in the upstream wrapper
+        # corresponds to transa=False, transb=True from the C++ binding's view
+        # — but our lite wrapper checks `transa and not transb and grad`, so
+        # invoke with (transa=True, transb=False, grad=True) to hit it).
+        tex.te_general_grouped_gemm(
+            A, True, B, False, out, torch.bfloat16, m_splits,
+            [], None, True, [], True, ws, ws[0].shape[0],
+            False, False, 0,
+        )
+        for o in out:
+            assert torch.all(o == 0), "wgrad output not zeroed under M=0"
+
 
 # ---------------------------------------------------------------------------
 # FSDP2 weight-wrap tests — lite's compound modules must wrap FP8 weights in
