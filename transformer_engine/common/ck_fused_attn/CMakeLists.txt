@@ -41,10 +41,17 @@ include("${CMAKE_CURRENT_LIST_DIR}/aiter_prebuilt.cmake")
 
 if(Python_EXECUTABLE)
   set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
+  # Redirect GIT_CONFIG_GLOBAL to a tempfile carrying `safe.directory = *` so
+  # git operations inside the QoLA-nested AITER tree (and its recursive
+  # submodules) work in containerized builds where the bind-mounted .git is
+  # owned by a different UID than the build process. Mirrors the pattern in
+  # transformer_engine/common/CMakeLists.txt:get_git_commit().
   execute_process(
-    COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${__QOLA_DIR}:$ENV{PYTHONPATH}"
-            ${Python_EXECUTABLE} -c
-            "from qola.build_tools.submodule import ensure_aiter_commit; ensure_aiter_commit(r'${__AITER_SOURCE_DIR}', r'${AITER_SHA}')"
+    COMMAND sh -c
+      "tmp=$(mktemp /tmp/gitconfig.XXXXXX) || exit 1; \
+GIT_CONFIG_GLOBAL=$tmp git config --global --add safe.directory '*' >/dev/null 2>&1; \
+GIT_CONFIG_GLOBAL=$tmp PYTHONPATH=\"${__QOLA_DIR}:$PYTHONPATH\" '${Python_EXECUTABLE}' -c 'from qola.build_tools.submodule import ensure_aiter_commit; ensure_aiter_commit(r\"${__AITER_SOURCE_DIR}\", r\"${AITER_SHA}\")'; \
+rc=$?; rm -f \"$tmp\"; exit $rc"
     RESULT_VARIABLE AITER_CHECKOUT_RESULT
     OUTPUT_VARIABLE AITER_CHECKOUT_OUTPUT
     ERROR_VARIABLE AITER_CHECKOUT_ERROR
@@ -114,13 +121,19 @@ else()
     set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
     set(__QOLA_BUILD_DIR "${__QOLA_DIR}/build")
     set(__QOLA_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/qola_manifest.toml")
+    # Same GIT_CONFIG_GLOBAL trick as the early `ensure_aiter_commit` call:
+    # qola.cli build re-invokes ensure_aiter_commit internally and will hit
+    # the same dubious-ownership trap without it.
     execute_process(
-      COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${__QOLA_DIR}:$ENV{PYTHONPATH}"
-              ${Python_EXECUTABLE} -m qola.cli build
-              --manifest ${__QOLA_MANIFEST}
-              --aiter-root ${__AITER_SOURCE_DIR}
-              --output-dir ${__QOLA_BUILD_DIR}
-              --arch "${V3_ASM_ARCHS_STR}"
+      COMMAND sh -c
+        "tmp=$(mktemp /tmp/gitconfig.XXXXXX) || exit 1; \
+GIT_CONFIG_GLOBAL=$tmp git config --global --add safe.directory '*' >/dev/null 2>&1; \
+GIT_CONFIG_GLOBAL=$tmp PYTHONPATH=\"${__QOLA_DIR}:$PYTHONPATH\" '${Python_EXECUTABLE}' -m qola.cli build \
+--manifest '${__QOLA_MANIFEST}' \
+--aiter-root '${__AITER_SOURCE_DIR}' \
+--output-dir '${__QOLA_BUILD_DIR}' \
+--arch '${V3_ASM_ARCHS_STR}'; \
+rc=$?; rm -f \"$tmp\"; exit $rc"
       RESULT_VARIABLE QOLA_BUILD_RESULT
     )
     if(NOT QOLA_BUILD_RESULT EQUAL 0)
@@ -155,7 +168,8 @@ endforeach()
 add_library(ck_fused_attn SHARED ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
 list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
-    -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT})
+    -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
+    -DENABLE_CK=1)
 
 foreach(ARCH IN LISTS V3_ASM_ARCHS)
   list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS --offload-arch=${ARCH})
