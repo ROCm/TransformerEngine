@@ -7,6 +7,13 @@ ARG BASE_DOCKER=registry-sc-harbor.amd.com/framework/compute-rocm-rel-7.2:57_ubu
 FROM $BASE_DOCKER
 WORKDIR /
 
+# Updated git via git-core PPA
+RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common \
+    && add-apt-repository ppa:git-core/ppa -y \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends git vim \
+    && rm -rf /var/lib/apt/lists/*
+
 # Build arguments
 ARG FA_VERSION=v2.8.1
 ARG ROCM_VERSION=7.2
@@ -17,13 +24,11 @@ ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
 
 RUN pip install setuptools wheel
 RUN pip install ipython pytest fire pydantic pybind11 ninja pandas
-RUN apt-get update && apt-get install -y vim
 
 # Install flash-attention
 RUN git clone --branch ${FA_VERSION} --depth 1 https://github.com/Dao-AILab/flash-attention.git \
     && cd flash-attention \
-    && export GPU_ARCHS="gfx950;gfx942" \
-    && FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE FLASH_ATTENTION_SKIP_CK_BUILD=FALSE python setup.py install \
+    && GPU_ARCHS="gfx950;gfx942" FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE FLASH_ATTENTION_SKIP_CK_BUILD=FALSE python setup.py install \
     && cd ..
 
 # Install AITER
@@ -31,7 +36,7 @@ RUN git clone --no-checkout https://github.com/ROCm/aiter.git \
     && cd aiter \
     && git checkout ${AITER_COMMIT} \
     && git submodule update --init --recursive \
-    && GPU_ARCHS=native pip install .
+    && pip install .
 
 # Install JAX
 RUN ROCM_MAJOR=$(echo "${ROCM_VERSION}" | cut -d. -f1) && pip install \
