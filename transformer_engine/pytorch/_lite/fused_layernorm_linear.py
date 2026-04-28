@@ -5,6 +5,7 @@
 
 """Lite-native LayerNormLinear: fused normalization + linear projection."""
 
+import os
 from typing import Callable, Optional, Tuple, Union, List
 
 import torch
@@ -27,8 +28,40 @@ from transformer_engine.pytorch.utils import (
     init_method_constant,
 )
 
+from .amax_utils import update_amax_from_bf16
+from .gemm import _gemm_bump
+
 
 __all__ = ["LayerNormLinear"]
+
+
+# Opt-in: skip the FP8 cast on the dgrad GEMM output when the only consumer
+# is the norm backward (which dequantizes immediately). Eliminates the
+# BF16 -> FP8 -> BF16 round-trip; preserves DelayedScaling amax bookkeeping
+# via a standalone reduction. See amax_utils.update_amax_from_bf16.
+_SKIP_FP8_DGRAD_FOR_NORM = (
+    os.environ.get("NVTE_LITE_SKIP_FP8_DGRAD_FOR_NORM", "0") != "0"
+)
+
+
+def _can_skip_dgrad_cast(fp8, requires_dgrad, grad_input_quantizer):
+    """Whether the bwd dgrad path can emit BF16 instead of FP8.
+
+    Decoupled from the specific ctx attribute name so both LayerNormLinear
+    (ctx.grad_input_quantizer) and LayerNormMLP (ctx.fc1_grad_input_quantizer)
+    can share the predicate.
+    """
+    if not _SKIP_FP8_DGRAD_FOR_NORM:
+        return False
+    if not (fp8 and requires_dgrad):
+        return False
+    if grad_input_quantizer is None:
+        return False
+    # MXFP8 uses block scales computed at quantize time; amax-only shortcut
+    # doesn't reconstruct the per-block state. Scope to per-tensor/per-row.
+    return type(grad_input_quantizer).__name__ in (
+        "Float8Quantizer", "Float8CurrentScalingQuantizer",
+    )
 
 
 def _get_normalization_funcs(normalization: str):
@@ -221,8 +254,11 @@ class _LayerNormLinearLite(torch.autograd.Function):
         d_ln_out = None
         if ctx.requires_dgrad:
             # Configure grad_input quantizer for dgrad output
+            skip_cast = _can_skip_dgrad_cast(
+                ctx.fp8, ctx.requires_dgrad, ctx.grad_input_quantizer,
+            )
             dgrad_quantizer = None
-            if ctx.fp8 and ctx.grad_input_quantizer is not None:
+            if not skip_cast and ctx.fp8 and ctx.grad_input_quantizer is not None:
                 ctx.grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
                 dgrad_quantizer = ctx.grad_input_quantizer
 
@@ -233,7 +269,7 @@ class _LayerNormLinearLite(torch.autograd.Function):
                 grad_output,     # B
                 False,           # transB
                 None,            # D
-                dgrad_quantizer, # quantizer — FP8 dgrad output
+                dgrad_quantizer, # quantizer — FP8 dgrad output (None when skip_cast)
                 TE_DType[ctx.activation_dtype] if ctx.activation_dtype in TE_DType else None,
                 None,            # bias
                 bias_dtype,      # bias_type
@@ -245,6 +281,13 @@ class _LayerNormLinearLite(torch.autograd.Function):
                 False,           # accumulate
                 False,           # use_split_accumulator
             )
+
+            if skip_cast:
+                # d_ln_out stays BF16; norm bwd consumes it directly.
+                # Replace the amax side-effect of the FP8 cast with a
+                # standalone reduction so DelayedScaling history stays current.
+                update_amax_from_bf16(ctx.grad_input_quantizer, d_ln_out)
+                _gemm_bump("dgrad_skip_fp8_cast")
 
         # ---- WGRAD: dW = grad_output^T @ ln_out (NT layout) ----
         dweight = None

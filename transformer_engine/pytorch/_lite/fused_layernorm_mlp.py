@@ -28,7 +28,9 @@ from transformer_engine.pytorch.utils import (
     init_method_constant,
 )
 
-from .fused_layernorm_linear import _get_normalization_funcs
+from .amax_utils import update_amax_from_bf16
+from .fused_layernorm_linear import _can_skip_dgrad_cast, _get_normalization_funcs
+from .gemm import _gemm_bump
 
 
 __all__ = ["LayerNormMLP"]
@@ -322,8 +324,11 @@ class _LayerNormMLPLite(torch.autograd.Function):
         d_ln_out = None
         if ctx.requires_dgrad:
             # Quantize FC1 dgrad output
+            skip_cast = _can_skip_dgrad_cast(
+                ctx.fp8, ctx.requires_dgrad, ctx.fc1_grad_input_quantizer,
+            )
             dgrad_quantizer = None
-            if ctx.fp8 and ctx.fc1_grad_input_quantizer is not None:
+            if not skip_cast and ctx.fp8 and ctx.fc1_grad_input_quantizer is not None:
                 ctx.fc1_grad_input_quantizer.set_usage(rowwise=True, columnwise=False)
                 dgrad_quantizer = ctx.fc1_grad_input_quantizer
 
@@ -331,6 +336,11 @@ class _LayerNormMLPLite(torch.autograd.Function):
                 fc1_weightmat, False, dfc1_out, False,
                 bias=None, grad=False, quantizer=dgrad_quantizer, output_dtype=out_dtype,
             )
+
+            if skip_cast:
+                # d_ln_out stays BF16; norm bwd consumes it directly.
+                update_amax_from_bf16(ctx.fc1_grad_input_quantizer, d_ln_out)
+                _gemm_bump("dgrad_skip_fp8_cast")
 
         # ---- FC1 WGRAD: dW1 = dfc1_out^T @ ln_out (NT layout) ----
         dfc1_weight = None
