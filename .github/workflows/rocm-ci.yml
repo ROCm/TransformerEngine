@@ -391,6 +391,7 @@ jobs:
             -e TEST_SCRIPT=$TEST_SCRIPT \
             -e LOG_FILE=$LOG_FILE \
             -e SUITE_NAME=$SUITE_NAME \
+            -e NVTE_FRAMEWORK=${{ matrix.framework }} \
             -e HF_TOKEN="$HF_TOKEN" \
             te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
