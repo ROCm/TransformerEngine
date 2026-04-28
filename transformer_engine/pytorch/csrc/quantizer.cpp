@@ -1106,17 +1106,16 @@ std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& s
              "MXFP8 requires tensor dims that are divisible by ", MXFP8_BLOCK_SIZE,
              " (got shape=", shape, ")");
 #ifdef USE_ROCM
-  // gfx1250 MX pre-swizzle layout uses 32x8 tiles, requiring padding.
+  // gfx1250 MX pre-swizzle (Tensile 3D) layout requires M padded to multiple of 4.
   // Other ROCm architectures use 128x4 tiles but currently skip padding
   // (the swizzle kernel handles out-of-bounds reads).
   if (transformer_engine::cuda::sm_arch() == 170) {
-    // gfx1250: pad M to multiple of 32, K/32 to multiple of 8
     size_t m_dim = numel / last_dim;
     size_t k_scale = last_dim / MXFP8_BLOCK_SIZE;
     if (!columnwise) {
-      return {roundup(m_dim, 32), roundup(k_scale, 8)};
+      return {roundup(m_dim, 4), k_scale};
     } else {
-      return {roundup(k_scale, 8), roundup(m_dim, 32)};
+      return {k_scale, roundup(m_dim, 4)};
     }
   }
 

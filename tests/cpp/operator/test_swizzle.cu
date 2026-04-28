@@ -169,34 +169,27 @@ INSTANTIATE_TEST_SUITE_P(
 
 #ifdef __HIP_PLATFORM_AMD__
 
-// MX 32x8 pre-swizzle test (gfx1250 preSwizzle({32, 8, 4}) layout)
+// MX pre-swizzle test (gfx1250 Tensile 3D layout)
+//
+// Tensile 3D: {K_scale, M}.reshape({K_scale, padM/4, 4}).permute({1, 0, 2})
+// For source (m, k): dst = (m/4) * (K*4) + k*4 + (m%4)
 
-// CPU reference for gfx1250 MX scale pre-swizzle permutation.
-// Row-major input [M, K], output is a flat array of 256-byte tiles.
+// CPU reference for Tensile 3D MX scale pre-swizzle.
+// Row-major input [M, K], output is a flat permuted array.
 void compute_ref_mx_swizzle_row(const uint8_t *h_input, uint8_t *h_output,
                                    const int M, const int K,
                                    const int orig_M, const int orig_K) {
-  constexpr int TILE_M = 32;
-  constexpr int TILE_K = 8;
+  constexpr int GROUP = 4;
   for (int m = 0; m < M; m++) {
     for (int k = 0; k < K; k++) {
-      // Read with identity padding (E8M0 127 = 2^0 = 1.0)
-      uint8_t val = 127;
+      uint8_t val = 127;  // E8M0 identity: 2^0 = 1.0
       if (m < orig_M && k < orig_K) {
         val = h_input[m * orig_K + k];
       }
-      int tile_row = m / TILE_M;
-      int tile_col = k / TILE_K;
-      int local_row = m % TILE_M;
-      int local_col = k % TILE_K;
-      int d0 = local_col & 1;
-      int d1 = (local_col >> 1) & 1;
-      int d2 = local_col >> 2;
-      int d4 = local_row & 0xF;
-      int d6 = local_row >> 4;
-      int tile_offset = (tile_row * (K / TILE_K) + tile_col) * 256;
-      int within_tile = (d0 << 7) | (d4 << 3) | (d1 << 2) | (d2 << 1) | d6;
-      h_output[tile_offset + within_tile] = val;
+      int group = m / GROUP;
+      int within = m % GROUP;
+      int dst = group * (K * GROUP) + k * GROUP + within;
+      h_output[dst] = val;
     }
   }
 }
@@ -204,26 +197,17 @@ void compute_ref_mx_swizzle_row(const uint8_t *h_input, uint8_t *h_output,
 void compute_ref_mx_swizzle_col(const uint8_t *h_input, uint8_t *h_output,
                                    const int M, const int K,
                                    const int orig_M, const int orig_K) {
-  constexpr int TILE_M = 32;
-  constexpr int TILE_K = 8;
+  constexpr int GROUP = 4;
   for (int m = 0; m < M; m++) {
     for (int k = 0; k < K; k++) {
       uint8_t val = 127;
       if (m < orig_M && k < orig_K) {
         val = h_input[k * orig_M + m];
       }
-      int tile_row = m / TILE_M;
-      int tile_col = k / TILE_K;
-      int local_row = m % TILE_M;
-      int local_col = k % TILE_K;
-      int d0 = local_col & 1;
-      int d1 = (local_col >> 1) & 1;
-      int d2 = local_col >> 2;
-      int d4 = local_row & 0xF;
-      int d6 = local_row >> 4;
-      int tile_offset = (tile_row * (K / TILE_K) + tile_col) * 256;
-      int within_tile = (d0 << 7) | (d4 << 3) | (d1 << 2) | (d2 << 1) | d6;
-      h_output[tile_offset + within_tile] = val;
+      int group = m / GROUP;
+      int within = m % GROUP;
+      int dst = group * (K * GROUP) + k * GROUP + within;
+      h_output[dst] = val;
     }
   }
 }
@@ -247,9 +231,9 @@ TEST_P(MxSwizzleTestSuite, TestMxSwizzle) {
   const size_t orig_M = dims.first;
   const size_t orig_K = dims.second;
 
-  // Padded dimensions for MX pre-swizzle kernel (M multiple of 32, K multiple of 8)
-  const size_t M = roundup_sz(orig_M, 32);
-  const size_t K = roundup_sz(orig_K, 8);
+  // Padded dimensions: Tensile 3D requires M padded to multiple of 4
+  const size_t M = roundup_sz(orig_M, 4);
+  const size_t K = orig_K;
 
   // Allocate host input (unpadded) and fill with random data
   const size_t input_size = orig_M * orig_K;
@@ -276,8 +260,8 @@ TEST_P(MxSwizzleTestSuite, TestMxSwizzle) {
   output_tw.set_with_gemm_swizzled_scales(true);
 
   // Data shape must be consistent with scale shape for validation.
-  // Scale shapes use padded dims (kernel requires multiples of 32x8).
-  // Data shapes use unpadded dims (kernel derives original_M/K from them).
+  // Scale shapes use padded M; data shapes use unpadded dims
+  // (kernel derives original_M/K from them).
   if (rowwise) {
     std::vector<size_t> data_shape_in = {orig_M, orig_K * 32};
     std::vector<size_t> data_shape_out = {M, K * 32};
@@ -327,17 +311,16 @@ TEST_P(MxSwizzleTestSuite, TestMxSwizzle) {
 
 namespace {
 
-// Scale dimensions (M_scale, K_scale) -- must be pre-padded to
-// multiples of 32 (M) and 8 (K) since CheckScaleTensorShape
-// validates consistency between data and scale shapes.
-// In production, quantizer.get_scale_shape() handles the padding.
+// Scale dimensions (M_scale, K_scale).
+// M will be padded to multiple of 4 by the test.
 std::vector<std::pair<int, int>> mx_scale_dims = {
-  {32, 8},       // minimal, single tile
-  {64, 16},      // 2x2 tiles
-  {32, 24},      // multiple K tiles
-  {96, 8},       // multiple M tiles
-  {128, 32},     // larger
-  {256, 64},     // big
+  {4, 1},        // minimal
+  {8, 4},        // small
+  {32, 8},       // medium
+  {64, 16},      // larger
+  {96, 8},       // non-power-of-2 M
+  {128, 32},     // big
+  {256, 64},     // bigger
 };
 
 }  // namespace

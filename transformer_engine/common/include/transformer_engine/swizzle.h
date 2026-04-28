@@ -64,13 +64,10 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
 void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input, NVTETensor output,
                                                          cudaStream_t stream);
 
-/*! \brief Swizzling scaling factors into the gfx1250 MX pre-swizzle layout for GEMM
+/*! \brief Swizzle MX (E8M0) scaling factors into gfx1250 Tensile 3D layout for GEMM
  *
- *  This produces the scale layout expected by hipBLASLt's
- *  HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT mode (gfx1250/MI450).
- *
- *  The layout is derived from PreSwizzle.hpp with parameters
- *  {tileMN=32, tileK=8, subTileK=4}, producing dimOrder {6, 2, 1, 3, 4, 5, 0, 7}.
+ *  Tensile 3D layout: groups M into blocks of 4, then permutes {1, 0, 2}.
+ *  For source (m, k): dst = (m/4) * (K_scale * 4) + k * 4 + (m % 4)
  *
  *  \param[in]     input        Input tensor with non-swizzled scale_inv (MXFP8).
  *  \param[in,out] output       Output tensor which hosts swizzled scale_inv.
@@ -78,8 +75,7 @@ void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input,
  *
  *  Requirements:
  *  - Input scaling mode is NVTE_MXFP8_1D_SCALING.
- *  - scale_inv M dimension is padded to a multiple of 32.
- *  - scale_inv K dimension is padded to a multiple of 8.
+ *  - scale_inv M dimension is padded to a multiple of 4.
  */
 void nvte_swizzle_scaling_factors_mx(const NVTETensor input, NVTETensor output,
                                         cudaStream_t stream);

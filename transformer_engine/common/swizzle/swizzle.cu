@@ -349,89 +349,74 @@ __global__ void multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_
 }
 
 // ============================================================================
-// MX scale pre-swizzle kernels for gfx1250 (MI450)
+// MX scale pre-swizzle kernel for gfx1250 — Tensile 3D layout
 //
-// This implements the scale layout expected by hipBLASLt's
-// HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT mode.
+// Tensile expects scales in a permuted 3D layout:
+//   Tensor({K_scale, M}).pad(M to mult of 4).reshape({K_scale, padM/4, 4}).permute({1, 0, 2})
 //
-// The layout is derived from PreSwizzle.hpp with parameters
-// {tileMN=32, tileK=8, subTileK=4} which produces:
-//   srcSizes = {2, 2, 2, numCols/8, 16, 1, 2, numRows/32}
-//   dimOrder = {6, 2, 1, 3, 4, 5, 0, 7}
+// For source position (m, k) in the [M, K_scale] scale matrix:
+//   group  = m / 4
+//   within = m % 4
+//   dst    = group * (K_scale * 4) + k * 4 + within
 //
-// Input:  compact E8M0 scales [M, N] in row-major (N contiguous)
-// Output: swizzled E8M0 scales in 32x8 tiles
-//
-// Within each 32-row x 8-col tile, for input position (row, col):
-//   d0 = col & 1,  d1 = (col >> 1) & 1,  d2 = col >> 2
-//   d4 = row & 0xF,  d6 = row >> 4
-//   output_offset = (d0 << 7) | (d4 << 3) | (d1 << 2) | (d2 << 1) | d6
+// Padding: M to multiple of 4.  No K_scale padding required.
+// Identity padding value: E8M0 127 = 2^0 = 1.0
 // ============================================================================
 
-constexpr int MX_PRESWIZZLE_TILE_M = 32;
-constexpr int MX_PRESWIZZLE_TILE_K = 8;
+constexpr int MX_PRESWIZZLE_GROUP_SIZE = 4;
 
-// Row-wise: input is [M, N] row-major (N = K/block_size, N is contiguous)
+// Row-wise: input is [M, K_scale] row-major (K_scale contiguous)
 __global__ void __launch_bounds__(256)
     swizzle_row_scaling_mx_kernel(const uint8_t* __restrict__ input,
                                     uint8_t* __restrict__ output,
-                                    const int M, const int N,
-                                    const int original_M, const int original_N) {
-  const int local_row = threadIdx.y;  // 0..31
-  const int local_col = threadIdx.x;  // 0..7
-  const int row = blockIdx.y * MX_PRESWIZZLE_TILE_M + local_row;
-  const int col = blockIdx.x * MX_PRESWIZZLE_TILE_K + local_col;
+                                    const int M, const int K_scale,
+                                    const int original_M, const int original_K) {
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total = M * K_scale;
+  if (idx >= total) return;
 
-  // Read with identity-scale padding (E8M0 127 = 2^0 = 1.0)
-  uint8_t val = 127;
-  if (row < original_M && col < original_N) {
-    val = input[row * original_N + col];
+  const int m = idx / K_scale;
+  const int k = idx % K_scale;
+
+  uint8_t val = 127;  // E8M0 identity: 2^0 = 1.0
+  if (m < original_M && k < original_K) {
+    val = input[m * original_K + k];
   }
 
-  // Decompose within-tile indices for preSwizzle({32, 8, 4})
-  const int d0 = local_col & 1;          // col bit 0
-  const int d1 = (local_col >> 1) & 1;   // col bit 1
-  const int d2 = local_col >> 2;         // col bit 2
-  const int d4 = local_row & 0xF;        // row low 4 bits
-  const int d6 = local_row >> 4;         // row / 16
+  const int group = m / MX_PRESWIZZLE_GROUP_SIZE;
+  const int within = m % MX_PRESWIZZLE_GROUP_SIZE;
+  const int dst = group * (K_scale * MX_PRESWIZZLE_GROUP_SIZE)
+                + k * MX_PRESWIZZLE_GROUP_SIZE + within;
 
-  // Tile offset: tiles are laid out as (M/32) x (N/8) blocks of 256 bytes each
-  const int tile_offset = (blockIdx.y * (N / MX_PRESWIZZLE_TILE_K) + blockIdx.x) * 256;
-  // Within-tile offset from dimOrder {6, 2, 1, 3, 4, 5, 0, 7}
-  const int within_tile = (d0 << 7) | (d4 << 3) | (d1 << 2) | (d2 << 1) | d6;
-
-  output[tile_offset + within_tile] = val;
+  output[dst] = val;
 }
 
-// Col-wise: input is [N, M] row-major (M is contiguous), representing
-// the column-wise scale matrix logically shaped [M, N].
-// Logical (row, col) maps to physical address col * original_M + row.
+// Col-wise: input is [K_scale, M] row-major (M contiguous), representing
+// the column-wise scale matrix logically shaped [M, K_scale].
+// Logical (m, k) maps to physical address k * original_M + m.
 __global__ void __launch_bounds__(256)
     swizzle_col_scaling_mx_kernel(const uint8_t* __restrict__ input,
                                     uint8_t* __restrict__ output,
-                                    const int M, const int N,
-                                    const int original_M, const int original_N) {
-  const int local_row = threadIdx.y;  // 0..31
-  const int local_col = threadIdx.x;  // 0..7
-  const int row = blockIdx.y * MX_PRESWIZZLE_TILE_M + local_row;
-  const int col = blockIdx.x * MX_PRESWIZZLE_TILE_K + local_col;
+                                    const int M, const int K_scale,
+                                    const int original_M, const int original_K) {
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total = M * K_scale;
+  if (idx >= total) return;
 
-  // Column-major read: logical (row, col) -> physical (col * original_M + row)
+  const int m = idx / K_scale;
+  const int k = idx % K_scale;
+
   uint8_t val = 127;
-  if (row < original_M && col < original_N) {
-    val = input[col * original_M + row];
+  if (m < original_M && k < original_K) {
+    val = input[k * original_M + m];  // column-major read
   }
 
-  const int d0 = local_col & 1;
-  const int d1 = (local_col >> 1) & 1;
-  const int d2 = local_col >> 2;
-  const int d4 = local_row & 0xF;
-  const int d6 = local_row >> 4;
+  const int group = m / MX_PRESWIZZLE_GROUP_SIZE;
+  const int within = m % MX_PRESWIZZLE_GROUP_SIZE;
+  const int dst = group * (K_scale * MX_PRESWIZZLE_GROUP_SIZE)
+                + k * MX_PRESWIZZLE_GROUP_SIZE + within;
 
-  const int tile_offset = (blockIdx.y * (N / MX_PRESWIZZLE_TILE_K) + blockIdx.x) * 256;
-  const int within_tile = (d0 << 7) | (d4 << 3) | (d1 << 2) | (d2 << 1) | d6;
-
-  output[tile_offset + within_tile] = val;
+  output[dst] = val;
 }
 
 }  // namespace
@@ -476,13 +461,10 @@ void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_
     k = input->columnwise_scale_inv.shape[0];
   }
 
-  // Check dims -- MX pre-swizzle format requires 32-row x 8-col tiles
-  NVTE_CHECK(m % MX_PRESWIZZLE_TILE_M == 0,
-             "Scale M dimension must be padded to multiple of ", MX_PRESWIZZLE_TILE_M,
+  // Check dims -- Tensile 3D layout requires M padded to multiple of 4
+  NVTE_CHECK(m % MX_PRESWIZZLE_GROUP_SIZE == 0,
+             "Scale M dimension must be padded to multiple of ", MX_PRESWIZZLE_GROUP_SIZE,
              ", got ", m, ".");
-  NVTE_CHECK(k % MX_PRESWIZZLE_TILE_K == 0,
-             "Scale K dimension must be padded to multiple of ", MX_PRESWIZZLE_TILE_K,
-             ", got ", k, ".");
 
   // Validate output dimensions match
   if (has_rowwise_scale_inv) {
@@ -500,14 +482,15 @@ void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_
                output->columnwise_scale_inv.shape, ".");
   }
 
-  const dim3 block_size(MX_PRESWIZZLE_TILE_K, MX_PRESWIZZLE_TILE_M);  // (8, 32) = 256 threads
-  const dim3 grid_size(k / MX_PRESWIZZLE_TILE_K, m / MX_PRESWIZZLE_TILE_M);
+  const int total = m * k;
+  constexpr int block = 256;
+  const int grid = (total + block - 1) / block;
 
   // Row-wise swizzle
   if (has_rowwise_scale_inv) {
     const int original_M = input->flat_first_dim();
     const int original_K = input->flat_last_dim() / MXFP8_BLOCK_SIZE;
-    swizzle_row_scaling_mx_kernel<<<grid_size, block_size, 0, stream>>>(
+    swizzle_row_scaling_mx_kernel<<<grid, block, 0, stream>>>(
         reinterpret_cast<const uint8_t*>(input->scale_inv.dptr),
         reinterpret_cast<uint8_t*>(output->scale_inv.dptr),
         m, k, original_M, original_K);
@@ -518,7 +501,7 @@ void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_
   if (has_columnwise_scale_inv) {
     const int original_M = input->flat_last_dim();
     const int original_K = input->flat_first_dim() / MXFP8_BLOCK_SIZE;
-    swizzle_col_scaling_mx_kernel<<<grid_size, block_size, 0, stream>>>(
+    swizzle_col_scaling_mx_kernel<<<grid, block, 0, stream>>>(
         reinterpret_cast<const uint8_t*>(input->columnwise_scale_inv.dptr),
         reinterpret_cast<uint8_t*>(output->columnwise_scale_inv.dptr),
         m, k, original_M, original_K);
