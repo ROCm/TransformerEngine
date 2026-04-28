@@ -86,6 +86,7 @@ jobs:
           git submodule update --init --recursive --depth 1 \
             3rdparty/aotriton \
             3rdparty/aiter \
+            3rdparty/QoLA \
             3rdparty/hipify_torch
 
       - name: Derive Docker image tag
