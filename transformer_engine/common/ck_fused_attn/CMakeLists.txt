@@ -33,9 +33,37 @@ if(NOT Python_EXECUTABLE)
   find_package(Python COMPONENTS Interpreter QUIET)
 endif()
 
+# Resolve the manifest-pinned AITER commit (defines AITER_SHA) and bring the
+# QoLA-nested AITER source tree to that commit before any consumer reads it
+# (header validation below, header includes for the .cpp build later, and
+# QoLA's own kernel build if the prebuilt cache misses).
+include("${CMAKE_CURRENT_LIST_DIR}/aiter_prebuilt.cmake")
+
 if(Python_EXECUTABLE)
+  set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
   execute_process(
-    COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/check_aiter_mha_args.py --mode both --te-dir "${CMAKE_CURRENT_LIST_DIR}/../../.."
+    COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${__QOLA_DIR}:$ENV{PYTHONPATH}"
+            ${Python_EXECUTABLE} -c
+            "from qola.build_tools.submodule import ensure_aiter_commit; ensure_aiter_commit(r'${__AITER_SOURCE_DIR}', r'${AITER_SHA}')"
+    RESULT_VARIABLE AITER_CHECKOUT_RESULT
+    OUTPUT_VARIABLE AITER_CHECKOUT_OUTPUT
+    ERROR_VARIABLE AITER_CHECKOUT_ERROR
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+    ERROR_STRIP_TRAILING_WHITESPACE
+  )
+  if(NOT AITER_CHECKOUT_RESULT EQUAL 0)
+    message(FATAL_ERROR
+            "Failed to sync AITER source tree at ${__AITER_SOURCE_DIR} to "
+            "manifest-pinned commit ${AITER_SHA}.\n"
+            "${AITER_CHECKOUT_OUTPUT}\n${AITER_CHECKOUT_ERROR}")
+  endif()
+  message(STATUS "[AITER] Synced ${__AITER_SOURCE_DIR} to ${AITER_SHA}")
+
+  execute_process(
+    COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/check_aiter_mha_args.py
+            --mode both
+            --te-dir "${CMAKE_CURRENT_LIST_DIR}/../../.."
+            --aiter-root "${__AITER_SOURCE_DIR}"
     RESULT_VARIABLE AITER_ARG_CHECK_RESULT
     OUTPUT_VARIABLE AITER_ARG_CHECK_OUTPUT
     ERROR_VARIABLE AITER_ARG_CHECK_ERROR
@@ -50,7 +78,7 @@ if(Python_EXECUTABLE)
   endif()
   message(STATUS "AITER API validation passed via check_aiter_mha_args.py")
 else()
-  message(WARNING "Python interpreter not found; skipping AITER API validation.")
+  message(WARNING "Python interpreter not found; skipping AITER source-tree sync and API validation.")
 endif()
 
 # so far, there are only gfx942 and gfx950 v3 kernels
@@ -78,7 +106,6 @@ if(DEFINED AITER_MHA_PATH)
   set(__AITER_MHA_PATH ${AITER_MHA_PATH})
 else()
   set(__AITER_MHA_PATH "")
-  include("${CMAKE_CURRENT_LIST_DIR}/aiter_prebuilt.cmake")
   get_prebuilt_aiter(__AITER_MHA_PATH)
 
   if(__AITER_MHA_PATH STREQUAL "")

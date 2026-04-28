@@ -527,6 +527,8 @@ hipError_t _ck_attn_bwd_impl(
   }
 
   aiter::mha_bwd_args fmha_args{};
+  fmha_args.sink_ptr=nullptr;
+  fmha_args.d_sink_ptr=nullptr;
   fmha_args.mask_type = static_cast<int>(mask_type);
   fmha_args.use_asm_v3 = uses_bwd_v3;
   fmha_args.v3_atomic_fp32 = is_v3_atomic_fp32;
