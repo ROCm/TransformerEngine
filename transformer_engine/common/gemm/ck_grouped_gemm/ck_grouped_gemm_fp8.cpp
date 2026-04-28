@@ -160,14 +160,20 @@ class QuantGroupedGemmRunner : public RunnerInterface {
       transformer_engine::Tensor* D_te =
           transformer_engine::convertNVTETensorCheck(ctx.D[i]);
 
-      const auto& a = data_view(*A_te);
+      const transformer_engine::SimpleTensor* a_src = nullptr;
+      if (ctx.use_a_columnwise_data) {
+        NVTE_CHECK(A_te->has_columnwise_data(), "ck_tile_grouped_gemm: ctx.use_a_columnwise_data=true but columnwise_data is absent.");
+        a_src = &A_te->columnwise_data;
+      } else {
+        a_src = &A_te->data;
+      }
+
+      const auto& a = *a_src;
       const auto& d = data_view(*D_te);
 
       const transformer_engine::SimpleTensor* b_src = nullptr;
       if (ctx.use_b_columnwise_data) {
-        if (!B_te->has_columnwise_data()) {
-          NVTE_ERROR("ck_tile_grouped_gemm: ctx.use_b_columnwise_data=true but columnwise_data is absent.");
-        }
+        NVTE_CHECK(B_te->has_columnwise_data(), "ck_tile_grouped_gemm: ctx.use_b_columnwise_data=true but columnwise_data is absent.");
         b_src = &B_te->columnwise_data;
       } else {
         b_src = &B_te->data;
@@ -176,8 +182,15 @@ class QuantGroupedGemmRunner : public RunnerInterface {
       const auto& b = *b_src;
 
       int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0, Dd0 = 0, Dd1 = 0;
-      if (!get_flat_2d_dims(*A_te, Ad0, Ad1)) {
-        NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for normalized A in group ", i);
+
+      if (ctx.use_a_columnwise_data) {
+        if (!get_columnwise_storage_2d_dims(A_te->columnwise_data, Ad0, Ad1)) {
+          NVTE_ERROR("ck_tile_grouped_gemm: expected 2D columnwise_data for A in group ", i);
+        }
+      } else {
+        if (!get_flat_2d_dims(*A_te, Ad0, Ad1)) {
+          NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for normalized A in group ", i);
+        }
       }
 
       if (ctx.use_b_columnwise_data) {

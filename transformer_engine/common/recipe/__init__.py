@@ -574,6 +574,8 @@ class MXFP4BlockScaling(Recipe):
 
     margin: int = 0
     fp4_format: Format = Format.E2M1
+    # Must remain set: Recipe paths expect a valid `fp8_format` even
+    # though the MXFP4 code path is FP4-only. Changing it can break compatibility.
     fp8_format: Format = Format.E4M3
     fp8_dpa: bool = False
     fp8_mha: bool = False
