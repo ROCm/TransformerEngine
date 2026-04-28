@@ -164,40 +164,15 @@ jobs:
           # core (cpp) tests build via cmake inside the repo; allow git ops in-tree.
           git config --global --add safe.directory '*'
 
-          install_if_present() {
-            pkg="$1"
-            label="$2"
-            if [ -n "$pkg" ]; then
-              echo "Installing $label package: $pkg"
-              pip install --no-build-isolation --no-deps "$pkg" 2>&1
-            else
-              echo "No $label package found; using the monolithic wheel layout."
-            fi
-          }
-
           TE_CORE_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm[0-9]*.whl' | sort | head -n 1)
-          TE_SPLIT_LAYOUT=1
-          if [ -z "$TE_CORE_PKG" ]; then
-            TE_CORE_PKG=$(find /workspace/dist -type f -name 'transformer_engine-[0-9]*.whl' | sort | head -n 1)
-            TE_SPLIT_LAYOUT=0
-          fi
-          test -n "$TE_CORE_PKG"
-          pip install --no-deps "$TE_CORE_PKG" 2>&1
+          TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
+          TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
+          test -n "$TE_CORE_PKG" && test -n "$TE_TORCH_PKG" && test -n "$TE_JAX_PKG"
 
-          if [ "$TE_SPLIT_LAYOUT" = "1" ]; then
-            TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
-            TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
-          else
-            TE_TORCH_PKG=""
-            TE_JAX_PKG=""
-          fi
-
-          if [ -n "$TE_TORCH_PKG$TE_JAX_PKG" ]; then
-            pip install ninja pybind11[global] 2>&1
-          fi
-
-          install_if_present "$TE_TORCH_PKG" "PyTorch"
-          install_if_present "$TE_JAX_PKG" "JAX"
+          pip install --no-deps "$TE_CORE_PKG"
+          pip install ninja pybind11[global]
+          pip install --no-build-isolation --no-deps "$TE_TORCH_PKG"
+          pip install --no-build-isolation --no-deps "$TE_JAX_PKG"
           EOF
           )"
 
@@ -383,40 +358,15 @@ jobs:
           docker exec te-runner bash -c "$(cat <<'EOF'
           set -ex
 
-          install_if_present() {
-            pkg="$1"
-            label="$2"
-            if [ -n "$pkg" ]; then
-              echo "Installing $label package: $pkg"
-              pip install --no-build-isolation --no-deps "$pkg" 2>&1
-            else
-              echo "No $label package found; using the monolithic wheel layout."
-            fi
-          }
-
           TE_CORE_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm[0-9]*.whl' | sort | head -n 1)
-          TE_SPLIT_LAYOUT=1
-          if [ -z "$TE_CORE_PKG" ]; then
-            TE_CORE_PKG=$(find /workspace/dist -type f -name 'transformer_engine-[0-9]*.whl' | sort | head -n 1)
-            TE_SPLIT_LAYOUT=0
-          fi
-          test -n "$TE_CORE_PKG"
-          pip install --no-deps "$TE_CORE_PKG" 2>&1
+          TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
+          TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
+          test -n "$TE_CORE_PKG" && test -n "$TE_TORCH_PKG" && test -n "$TE_JAX_PKG"
 
-          if [ "$TE_SPLIT_LAYOUT" = "1" ]; then
-            TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
-            TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
-          else
-            TE_TORCH_PKG=""
-            TE_JAX_PKG=""
-          fi
-
-          if [ -n "$TE_TORCH_PKG$TE_JAX_PKG" ]; then
-            pip install ninja pybind11[global] 2>&1
-          fi
-
-          install_if_present "$TE_TORCH_PKG" "PyTorch"
-          install_if_present "$TE_JAX_PKG" "JAX"
+          pip install --no-deps "$TE_CORE_PKG"
+          pip install ninja pybind11[global]
+          pip install --no-build-isolation --no-deps "$TE_TORCH_PKG"
+          pip install --no-build-isolation --no-deps "$TE_JAX_PKG"
           EOF
           )"
 
