@@ -100,58 +100,9 @@ jobs:
           echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
 
   build:
-    name: Build Wheel
-    needs: select_image
-    timeout-minutes: 120
-    runs-on: build-only-te
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-
-      - name: Initialize required submodules
-        run: |
-          git submodule update --init --recursive --depth 1 \
-            3rdparty/aotriton \
-            3rdparty/aiter \
-            3rdparty/hipify_torch \
-            3rdparty/QoLA
-
-      - name: Pull Docker Image
-        run: |
-          docker pull ${{ needs.select_image.outputs.image-tag }}
-
-      - name: Build Wheel
-        run: |
-          docker run --rm \
-            --network=host \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            ${{ needs.select_image.outputs.image-tag }} \
-            bash -c "$(cat <<'EOF'
-          set -ex
-
-          export HIP_PATH=""
-          export PYTORCH_ROCM_ARCH="gfx942;gfx950"
-          export NVTE_ROCM_ARCH="gfx942;gfx950"
-          export NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1
-          export NVTE_AITER_PREBUILT_BASE_URL=https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts
-          pip install ninja
-          git config --global --add safe.directory /workspace
-          git submodule foreach --recursive 'git config --global --add safe.directory /workspace/$sm_path'
-          NVTE_RELEASE_BUILD=1 pip wheel --no-build-isolation --no-deps -v . -w /workspace/dist/ 2>&1
-
-          # Framework extensions ship as sdists as tar.gz. Wheels are build against the consumer's torch/jax at install time
-          (cd transformer_engine/pytorch && NVTE_RELEASE_BUILD=1 python setup.py sdist -d /workspace/dist/)
-          (cd transformer_engine/jax && NVTE_RELEASE_BUILD=1 python setup.py sdist -d /workspace/dist/)
-          EOF
-          )"
-
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: te-wheel
-          path: dist/*
-          retention-days: 1
+    # Delegate wheel building to the reusable workflow on dev. It produces a core .whl plus framework .tar.gz sdists under artifact name `te-rocm-wheels`.
+    uses: ./.github/workflows/rocm-wheels-build.yml
+    secrets: inherit
 
   sgpu_tests:
     name: sGPU Tests (${{ matrix.arch_label }})
@@ -175,6 +126,7 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
+          name: te-rocm-wheels
           path: dist/
 
       - name: Host Diagnostics
@@ -379,7 +331,7 @@ jobs:
         run: docker rm -f te-runner || true
 
   mgpu_tests:
-    name: mGPU Tests (${{ matrix.arch_label }})
+    name: mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})
     needs: [select_image, build]
     timeout-minutes: 360
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || 'linux-te-mi35x-8' }}
@@ -387,6 +339,7 @@ jobs:
       fail-fast: false
       matrix:
         arch_label: [mi30x, mi35x]
+        framework: [pytorch, jax]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -394,6 +347,7 @@ jobs:
       - name: Download build artifacts
         uses: actions/download-artifact@v4
         with:
+          name: te-rocm-wheels
           path: dist/
 
       - name: Host Diagnostics
@@ -471,62 +425,43 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          rm -f FAIL_*
+          case "${{ matrix.framework }}" in
+            pytorch) TEST_SCRIPT=ci/pytorch.sh; LOG_FILE=/workspace/torch_mgpu.log; SUITE_NAME=PyTorch ;;
+            jax)     TEST_SCRIPT=ci/jax.sh;     LOG_FILE=/workspace/jax_mgpu.log;   SUITE_NAME=JAX     ;;
+            *)       echo "::error::Unknown framework: ${{ matrix.framework }}"; exit 1 ;;
+          esac
 
           docker exec \
             -e TEST_MGPU=1 \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
+            -e TEST_SCRIPT=$TEST_SCRIPT \
+            -e LOG_FILE=$LOG_FILE \
+            -e SUITE_NAME=$SUITE_NAME \
             -e HF_TOKEN="$HF_TOKEN" \
             te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
           set -x -o pipefail
           ulimit -c 0 # Disable core dumps
 
-          ci/pytorch.sh > /workspace/torch_mgpu.log 2>&1
-          torch_rc=$?
+          "$TEST_SCRIPT" > "$LOG_FILE" 2>&1
+          test_rc=$?
 
-          ci/jax.sh > /workspace/jax_mgpu.log 2>&1
-          jax_rc=$?
-
-          if [ $torch_rc -ne 0 ]; then
-            echo "::group::[FAILED] PyTorch mGPU Log"
-            cat /workspace/torch_mgpu.log
+          if [ $test_rc -ne 0 ]; then
+            echo "::group::[FAILED] ${SUITE_NAME} mGPU Log"
+            cat "$LOG_FILE"
             echo "::endgroup::"
-            echo "::error::PyTorch mGPU tests FAILED."
-            touch /workspace/FAIL_TORCH_MGPU
+            echo "::error::${SUITE_NAME} mGPU tests FAILED."
           fi
 
-          if [ $jax_rc -ne 0 ]; then
-            echo "::group::[FAILED] JAX mGPU Log"
-            cat /workspace/jax_mgpu.log
-            echo "::endgroup::"
-            echo "::error::JAX mGPU tests FAILED."
-            touch /workspace/FAIL_JAX_MGPU
-          fi
-
-          test $torch_rc -eq 0 -a $jax_rc -eq 0
+          exit $test_rc
           EOF
           )"
-
-      - name: Check mGPU failure status
-        if: always()
-        run: |
-          EXIT_STATUS=0
-          if [[ -f FAIL_TORCH_MGPU ]]; then
-            echo "::error::PyTorch mGPU tests failed."
-            EXIT_STATUS=1
-          fi
-          if [[ -f FAIL_JAX_MGPU ]]; then
-            echo "::error::JAX mGPU tests failed."
-            EXIT_STATUS=1
-          fi
-          exit $EXIT_STATUS
 
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: logs-mgpu-${{ matrix.arch_label }}
+          name: logs-mgpu-${{ matrix.arch_label }}-${{ matrix.framework }}
           path: |
             *.log
           if-no-files-found: ignore

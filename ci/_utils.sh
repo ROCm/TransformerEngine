@@ -266,7 +266,7 @@ pytest_run() {
     check_test_filter $_test_name_tag || return
     _start_ts=`date +%s`
     echo "Run [$_test_variant_tag] $@ at `time_elapsed $TEST_START_TS`"
-    pytest -v -rfEs `get_pytest_junitxml $_test_name_tag` "$TEST_DIR/$@"
+    pytest -v -rfEs `get_pytest_junitxml $_test_name_tag` $TEST_PYTEST_ARGS "$TEST_DIR/$@"
     test $? -eq 0 || test_run_error "[$_test_variant_tag] $1"
     echo "Done [$_test_variant_tag] $1 in `time_elapsed $_start_ts`"
 }
