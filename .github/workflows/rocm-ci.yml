@@ -354,19 +354,23 @@ jobs:
             ${{ needs.select_image.outputs.image-tag }}
 
       - name: Install packages
+        env:
+          FRAMEWORK: ${{ matrix.framework }}
         run: |
-          docker exec te-runner bash -c "$(cat <<'EOF'
+          docker exec -e FRAMEWORK="$FRAMEWORK" te-runner bash -c "$(cat <<'EOF'
           set -ex
 
           TE_CORE_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm[0-9]*.whl' | sort | head -n 1)
-          TE_TORCH_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
-          TE_JAX_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
-          test -n "$TE_CORE_PKG" && test -n "$TE_TORCH_PKG" && test -n "$TE_JAX_PKG"
+          if [ "$FRAMEWORK" = "pytorch" ]; then
+            TE_FW_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_torch*.tar.gz' | sort | head -n 1)
+          else
+            TE_FW_PKG=$(find /workspace/dist -type f -name 'transformer_engine_rocm_jax*.tar.gz' | sort | head -n 1)
+          fi
+          test -n "$TE_CORE_PKG" && test -n "$TE_FW_PKG"
 
           pip install --no-deps "$TE_CORE_PKG"
           pip install ninja pybind11[global]
-          pip install --no-build-isolation --no-deps "$TE_TORCH_PKG"
-          pip install --no-build-isolation --no-deps "$TE_JAX_PKG"
+          pip install --no-build-isolation --no-deps "$TE_FW_PKG"
           EOF
           )"
 
@@ -420,23 +424,3 @@ jobs:
       - name: Cleanup container
         if: always()
         run: docker rm -f te-runner || true
-
-  check_results:
-    name: CI Result
-    if: always()
-    needs: [build, sgpu_tests, mgpu_tests]
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Evaluate job results
-        run: |
-          echo "Build:      ${{ needs.build.result }}"
-          echo "sGPU Tests: ${{ needs.sgpu_tests.result }}"
-          echo "mGPU Tests: ${{ needs.mgpu_tests.result }}"
-
-          if [[ "${{ needs.build.result }}" != "success" ]] || \
-             [[ "${{ needs.sgpu_tests.result }}" != "success" ]] || \
-             [[ "${{ needs.mgpu_tests.result }}" != "success" ]]; then
-            echo "::error::One or more CI jobs did not succeed."
-            exit 1
-          fi
