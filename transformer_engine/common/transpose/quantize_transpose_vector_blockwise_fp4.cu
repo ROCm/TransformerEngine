@@ -140,27 +140,36 @@ constexpr int kThreadsPerWarp = 32;
 constexpr int kNFP4PerContainer = 2;
 
 // Hyperparameters for performance tuning
+#ifndef __HIP_PLATFORM_AMD__
 constexpr int kTileDim = 128;
+#endif
 // constexpr int kScaleDim = 32;
 constexpr int kNVecIn = 8;             // The number of elements each LDG touches
 constexpr int kNVecOut = 16;           // The number of elements each STG touches
 constexpr int kNVecSMem = 2;           // The number of elements each LDS/STS touches
+#ifndef __HIP_PLATFORM_AMD__
 constexpr int kThreadsPerBlock = 256;  // Thread block size, 8 warps in total
+#endif
+
+// Tile dimension and thread block size:
+//   gfx942:          kTileDim=64  (64 KB LDS, kThreadsPerBlock=128, 4 warps)
+//   gfx950 / NVIDIA: kTileDim=128 (128 KB LDS, kThreadsPerBlock=256, 8 warps)
+// On AMD, __gfx950__ is only defined during device compilation, so the host
+// must select tile_dim at runtime via cuda::sm_arch() using the constants below.
+#ifdef __HIP_PLATFORM_AMD__
+constexpr int kTileDimGfx950 = 128;
+constexpr int kTileDimGfx942 = 64;
+#if !defined(__gfx950__)
+constexpr int kTileDim = kTileDimGfx942;
+#else
+constexpr int kTileDim = kTileDimGfx950;
+#endif
+constexpr int kThreadsPerBlock = 2 * kTileDim;
+#endif
 
 // Auto-calculated constants, do not modify directly)
 static_assert(kNVecIn % kNVecSMem == 0, "kNVecIn must be divisible by kNVecSMem");
 static_assert(kNVecOut % kNVecSMem == 0, "kNVecOut must be divisible by kNVecSMem");
-
-#ifdef __HIP_PLATFORM_AMD__
-// On AMD, kTileDim_ is a template parameter of the kernel for runtime dispatch:
-//   gfx942: kTileDim_=64  (64 KB LDS, kThreadsPerBlock=128, 4 warps)
-//   gfx950: kTileDim_=128 (128 KB LDS, kThreadsPerBlock=256, 8 warps)
-constexpr int smem_size_for_tile(int tile_dim) {
-  return tile_dim * ((tile_dim / kNVecSMem) + 1) * kNVecSMem;
-}
-#else
-constexpr int kTileDim = 128;
-constexpr int kThreadsPerBlock = 256;  // Thread block size, 8 warps in total
 constexpr int kSMemRow = kTileDim;
 constexpr int kSMemCol = (kTileDim / kNVecSMem) + 1;
 constexpr int kSMemSize = kSMemRow * kSMemCol * kNVecSMem;
@@ -169,7 +178,14 @@ constexpr int kNumThreadsStore = kTileDim / kNVecOut;  // 8
 // constexpr int kNumThreadsReduce = kScaleDim / kNVecOut;
 static_assert(kNumThreadsLoad <= kThreadsPerWarp, "kNumThreadsLoad must be <= kThreadsPerWarp");
 static_assert(kNumThreadsStore <= kThreadsPerWarp, "kNumThreadsStore must be <= kThreadsPerWarp");
-#endif //__HIP_PLATFORM_AMD__
+
+#ifdef __HIP_PLATFORM_AMD__
+// Host-side helper: computes shared memory size for a runtime tile dimension.
+// Needed because the host determines tile_dim at runtime via cuda::sm_arch().
+constexpr int smem_size_for_tile(int tile_dim) {
+  return tile_dim * ((tile_dim / kNVecSMem) + 1) * kNVecSMem;
+}
+#endif
 
 // for 2D block scaling, we need to reduce amax in warp
 static __device__ constexpr unsigned int WARP_REDUCE_AMAX_GROUP_MASKS[8] = {
@@ -414,38 +430,16 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x(const float2 in01,
   }
 }
 
-template <
-#ifdef __HIP_PLATFORM_AMD__
-          int kTileDim_,
-#endif
-          bool kReturnIdentity, bool kReturnTranspose, bool kIsE8Scaling,
-          bool kAligned, typename CType, typename IType, typename OType, typename ScaleType,
-          bool kSwizzledScale, bool kApplyStochasticRounding, bool kIs2DBlockScaling>
-__global__ void __launch_bounds__(
-#ifdef __HIP_PLATFORM_AMD__
-    kTileDim_ * 2
-#else
-    kThreadsPerBlock
-#endif
-) block_scaled_1d_cast_transpose_kernel(
+template <bool kReturnIdentity, bool kReturnTranspose, bool kIsE8Scaling, bool kAligned,
+          typename CType, typename IType, typename OType, typename ScaleType, bool kSwizzledScale,
+          bool kApplyStochasticRounding, bool kIs2DBlockScaling>
+__global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpose_kernel(
     const IType* const input, const float* global_amax, OType* const output_c,
     OType* const output_t, ScaleType* const tile_scales_inv_c, ScaleType* const tile_scales_inv_t,
     const size_t row_length, const size_t num_rows, const size_t scale_stride_x,
     const size_t scale_stride_y, const size_t scale_t_stride_x, const size_t scale_t_stride_y,
     const size_t kScaleBlockDim, const float epsilon, const size_t* rng_state,
     const float* noop_ptr) {
-  // Tile-dependent constants
-#ifdef __HIP_PLATFORM_AMD__
-  // Redirect kTileDim to the template parameter for runtime gfx942/gfx950 dispatch
-#define kTileDim kTileDim_
-  constexpr int kThreadsPerBlock = kTileDim * 2;
-  constexpr int kSMemCol = (kTileDim / kNVecSMem) + 1;
-  constexpr int kNumThreadsLoad = kTileDim / kNVecIn;
-  constexpr int kNumThreadsStore = kTileDim / kNVecOut;
-  static_assert(kNumThreadsLoad <= kThreadsPerWarp, "kNumThreadsLoad must be <= kThreadsPerWarp");
-  static_assert(kNumThreadsStore <= kThreadsPerWarp, "kNumThreadsStore must be <= kThreadsPerWarp");
-#endif
-
   constexpr int kNVecContainer = kNVecOut / kNFP4PerContainer;
   using SMemVec = Vec<IType, kNVecSMem>;
   using OVec = Vec<OType, kNVecContainer>;
@@ -819,9 +813,6 @@ __global__ void __launch_bounds__(
       }
     }
   }
-#ifdef __HIP_PLATFORM_AMD__
-#undef kTileDim
-#endif
 }
 
 }  // namespace
@@ -882,10 +873,9 @@ void quantize_transpose_vector_blockwise_fp4(
   using namespace transformer_engine::quantize_transpose_nvfp4;
 
 #ifdef __HIP_PLATFORM_AMD__
-  // Runtime tile dimension selection:
-  //   gfx942 (64 KB LDS): tile_dim=64, threads=128
-  //   gfx950 (128 KB LDS): tile_dim=128, threads=256
-  const int tile_dim = (cuda::sm_arch() >= 95) ? 128 : 64;
+  // Tile dimension is selected at compile time based on the target architecture.
+  // The host still needs the runtime value for grid/smem computation.
+  const int tile_dim = (cuda::sm_arch() >= 95) ? kTileDimGfx950 : kTileDimGfx942;
   const size_t num_blocks_x = DIVUP(row_length, static_cast<size_t>(tile_dim));
   const size_t num_blocks_y = DIVUP(num_rows, static_cast<size_t>(tile_dim));
 #else
@@ -905,36 +895,6 @@ void quantize_transpose_vector_blockwise_fp4(
                "Shape of the RNG state should be [2], but got ", rng_state_te_tensor.data.shape);
     rng_state = reinterpret_cast<const size_t*>(rng_state_te_tensor.data.dptr);
   }
-
-#ifdef __HIP_PLATFORM_AMD__
-  // Macro to instantiate and launch the kernel for a given tile dimension.
-  // TILE_DIM must be a compile-time constant (64 or 128).
-#define LAUNCH_FP4_CT_KERNEL(TILE_DIM)                                                           \
-  do {                                                                                           \
-    constexpr int kTD = TILE_DIM;                                                                \
-    size_t smem_bytes = smem_size_for_tile(kTD) * sizeof(InputType);                             \
-    auto kernel = block_scaled_1d_cast_transpose_kernel<                                         \
-        kTD, kReturnIdentity, kReturnTranspose, kPow2Scale, kAligned,                            \
-        float, InputType, OutputType, ScaleType, kSwizzledScale,                                 \
-        kApplyStochasticRounding, kIs2DBlockScaling>;                                            \
-    if (smem_bytes >= 48 * 1024) {                                                               \
-      cudaError_t err = cudaFuncSetAttribute(                                                    \
-          kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);                      \
-      NVTE_CHECK(err == cudaSuccess,                                                             \
-                 "Failed to set dynamic shared memory size.");                                   \
-    }                                                                                            \
-    kernel<<<grid, kTD * 2, smem_bytes, stream>>>(                                               \
-        reinterpret_cast<const InputType*>(input.dptr),                                          \
-        reinterpret_cast<const float*>(global_amax.dptr),                                        \
-        reinterpret_cast<OutputType*>(output.dptr),                                              \
-        reinterpret_cast<OutputType*>(output_t.dptr),                                            \
-        reinterpret_cast<ScaleType*>(scale_inv.dptr),                                            \
-        reinterpret_cast<ScaleType*>(scale_inv_t.dptr), row_length,                              \
-        num_rows, scale_stride_x, scale_stride_y, scale_t_stride_x,                             \
-        scale_t_stride_y, kScaleBlockDim, epsilon, rng_state,                                    \
-        noop_ptr);                                                                               \
-  } while (0)
-#endif  // __HIP_PLATFORM_AMD__
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
       input.dtype, InputType,
@@ -972,14 +932,10 @@ void quantize_transpose_vector_blockwise_fp4(
                                   use_2d_quantization, kIs2DBlockScaling,
 
 #ifdef __HIP_PLATFORM_AMD__
-                                  if (tile_dim == 64) {
-                                    LAUNCH_FP4_CT_KERNEL(64);
-                                  } else {
-                                    LAUNCH_FP4_CT_KERNEL(128);
-                                  }
-                                  )  // kIs2DBlockScaling
+                                  size_t smem_bytes = smem_size_for_tile(tile_dim) * sizeof(InputType);
 #else
                                   size_t smem_bytes = kSMemSize * sizeof(InputType);
+#endif
                                   auto kernel = block_scaled_1d_cast_transpose_kernel<
                                       kReturnIdentity, kReturnTranspose, kPow2Scale, kAligned,
                                       float, InputType, OutputType, ScaleType, kSwizzledScale,
@@ -990,8 +946,13 @@ void quantize_transpose_vector_blockwise_fp4(
                                         smem_bytes);
                                     NVTE_CHECK(err == cudaSuccess,
                                                "Failed to set dynamic shared memory size.");
+#ifdef __HIP_PLATFORM_AMD__
+                                  } kernel<<<grid, tile_dim * 2, smem_bytes,
+                                             stream>>>(
+#else
                                   } kernel<<<grid, kThreadsPerBlock, smem_bytes,
                                              stream>>>(
+#endif
                                       reinterpret_cast<const InputType*>(input.dptr),
                                       reinterpret_cast<const float*>(global_amax.dptr),
                                       reinterpret_cast<OutputType*>(output.dptr),
@@ -1001,7 +962,6 @@ void quantize_transpose_vector_blockwise_fp4(
                                       num_rows, scale_stride_x, scale_stride_y, scale_t_stride_x,
                                       scale_t_stride_y, kScaleBlockDim, epsilon, rng_state,
                                       noop_ptr);)  // kIs2DBlockScaling
-#endif //__HIP_PLATFORM_AMD__
                               )                    // kApplyStochasticRounding
                           )                        // kSwizzledScale
                       )                            // kAligned
@@ -1009,10 +969,6 @@ void quantize_transpose_vector_blockwise_fp4(
               )                                    // kReturnIdentity
           )                                        // OutputType
       )                                            // InputType
-
-#ifdef __HIP_PLATFORM_AMD__
-#undef LAUNCH_FP4_CT_KERNEL
-#endif
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else

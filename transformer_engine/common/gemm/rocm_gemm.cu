@@ -853,7 +853,7 @@ protected:
     fs << "dev_cap" << "m" << "n"  << "k" << "trans_a" << "trans_b" 
     << "type_a" << "type_b" << "type_d" << "bias_type" << "aux_type"
     << "lda" << "ldb" << "ldd" << "scale_mode" << "epi" << "comp" << "scale_type"
-    << "ws_min" << "ws_max" << "algo_id" << "aidx" << "fp4_alpha";
+    << "fp4_alpha" << "ws_min" << "ws_max" << "algo_id" << "aidx";
   }
   
   void load_()
@@ -924,11 +924,8 @@ protected:
       std::getline(is, epi, csv_sep);
       std::getline(is, comp, csv_sep);
       std::getline(is, scale, csv_sep);
-      is >> ws_min >> c >> ws_max >> c >> algo_id >> c >> algo_idx;
       int fp4_alpha = 0;
-      if (is.peek() == csv_sep) {
-        is >> c >> fp4_alpha;
-      }
+      is >> fp4_alpha >> c >> ws_min >> c >> ws_max >> c >> algo_id >> c >> algo_idx;
       cfg.fp4_alpha_device_vector = (fp4_alpha != 0);
   
       if (is.bad())
@@ -1064,8 +1061,9 @@ protected:
       << ((cfg.aux_type == (hipDataType)-1) ? "-" : typeNameMapper.getName(cfg.aux_type))
       << cfg.lda << cfg.ldb << cfg.ldd << cfg.scaling_mode << epilogueNameMapper.getName(cfg.epilogue)
       << computeNameMapper.getName(HIPBLAS_COMPUTE_32F) << typeNameMapper.getName(HIP_R_32F)
+      << (cfg.fp4_alpha_device_vector ? 1 : 0)
       << algo.ws_size_min << algo.ws_size_max << algo.algoId << algo.index
-      << (cfg.fp4_alpha_device_vector ? 1 : 0) << csv_helper::end() << "\n";
+      << csv_helper::end() << "\n";
   }
 
 private:
