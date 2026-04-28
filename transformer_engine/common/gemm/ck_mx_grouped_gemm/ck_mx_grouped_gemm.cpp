@@ -4,10 +4,6 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
-#ifndef CK_USE_OCP_FP8
-#define CK_USE_OCP_FP8 1
-#endif
-
 #include <hip/hip_runtime.h>
 
 #include <stdexcept>
@@ -27,8 +23,6 @@
 using ck_tile::address_space_enum;
 using ck_tile::safe_underlying_type_t;
 
-using AScaleType = ck_tile::e8m0_t;
-using BScaleType = ck_tile::e8m0_t;
 using ScaleType = ck_tile::e8m0_t;
 using ScaleM = ck_tile::MXScalePointer<ScaleType, 1, 32>;
 using ScaleN = ck_tile::MXScalePointer<ScaleType, 1, 32>;
@@ -61,7 +55,7 @@ struct MXGemmConfig
     static constexpr int TilePartitionerM01          = 4;
     static constexpr auto Scheduler                 = ck_tile::GemmPipelineScheduler::Intrawave;
     static constexpr ck_tile::index_t NumWaveGroups = 1;
-    static constexpr bool DoubleSmemBuffer          = true;
+    static constexpr bool DoubleSmemBuffer          = false;
     static constexpr bool Preshuffle                = false;
 
     static constexpr int N_Repeat          = N_Tile / N_Warp_Tile / N_Warp;
@@ -74,6 +68,15 @@ struct MXfp8_GemmConfig_256x64x128 : MXGemmConfig
     static constexpr ck_tile::index_t N_Tile = 64;
     static constexpr ck_tile::index_t K_Tile = 128;
 };
+
+// GEMM config with 16x16 warp tile
+struct MXfp8_GemmConfig_64x64x256 : MXGemmConfig
+{
+    static constexpr ck_tile::index_t M_Tile = 64;
+    static constexpr ck_tile::index_t N_Tile = 64;
+    static constexpr ck_tile::index_t K_Tile = 256;
+};
+
 
 template <typename ScaleM, typename ScaleN, ck_tile::index_t NumDTensor = 0>
 struct MXGroupedGemmHostArgs : public ck_tile::GroupedGemmHostArgs<NumDTensor>
@@ -316,7 +319,11 @@ void launch_pack_scales(const ScaleType* src,
 namespace transformer_engine {
 
 template <typename GemmConfig, typename AType, typename BType, typename CType, typename AccType=float>
-bool invoke_mx_grouped_gemm(const std::vector<MXGroupedHostDesc>& descs, const CKGemmRunContext& ctx, const ck_tile::stream_config& stream_cfg) {
+bool invoke_mx_grouped_gemm(const std::vector<MXGroupedHostDesc>& descs,
+                            const CKGemmRunContext& ctx,
+                            const ck_tile::stream_config& stream_cfg,
+                            void* kargs_workspace,
+                            size_t kargs_workspace_bytes) {
     using GemmShape =
         ck_tile::TileGemmShape<ck_tile::sequence<GemmConfig::M_Tile, GemmConfig::N_Tile, GemmConfig::K_Tile>,
                                ck_tile::sequence<GemmConfig::M_Warp, GemmConfig::N_Warp, GemmConfig::K_Warp>,
@@ -366,13 +373,13 @@ bool invoke_mx_grouped_gemm(const std::vector<MXGroupedHostDesc>& descs, const C
     const size_t needed_workspace =
         kargs.size() * sizeof(typename decltype(kargs)::value_type);
 
-    if (!ctx.workspace || ctx.workspace_bytes < needed_workspace) {
-    NVTE_WARN("ck_tile_mx_grouped_gemm: insufficient workspace. Needed bytes=",
-                needed_workspace, ", available bytes=", ctx.workspace_bytes);
+    if (!kargs_workspace || kargs_workspace_bytes < needed_workspace) {
+    NVTE_WARN("ck_tile_mx_grouped_gemm: insufficient kargs workspace. Needed bytes=",
+                needed_workspace, ", available bytes=", kargs_workspace_bytes);
     return false;
     }
 
-    NVTE_CHECK_CUDA(hipMemcpyAsync(ctx.workspace,
+    NVTE_CHECK_CUDA(hipMemcpyAsync(kargs_workspace,
                                     kargs.data(),
                                     needed_workspace,
                                     hipMemcpyHostToDevice,
@@ -388,7 +395,7 @@ bool invoke_mx_grouped_gemm(const std::vector<MXGroupedHostDesc>& descs, const C
             grids,
             blocks,
             0,
-            ck_tile::cast_pointer_to_constant_address_space(ctx.workspace),
+            ck_tile::cast_pointer_to_constant_address_space(kargs_workspace),
             static_cast<ck_tile::index_t>(kargs.size())));
 
     return true;
@@ -524,10 +531,12 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
   std::vector<MXGroupedHostDesc> descs;
   descs.reserve(group_num);
 
-  std::vector<std::unique_ptr<ck_tile::DeviceMem>> a_scale_packed_bufs;
-  std::vector<std::unique_ptr<ck_tile::DeviceMem>> b_scale_packed_bufs;
-  a_scale_packed_bufs.reserve(group_num);
-  b_scale_packed_bufs.reserve(group_num);
+  auto align_up = [](size_t x, size_t a) -> size_t {
+    return (x + a - 1) / a * a;
+  };
+
+  char* ws_cursor = static_cast<char*>(ws_ptr);
+  size_t ws_remaining = ws_bytes;
   for (int i = 0; i < group_num; i++) {
     const transformer_engine::Tensor* const A_te =
         transformer_engine::convertNVTETensorCheck(ctx.A[i]);
@@ -663,15 +672,22 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
     const size_t b_pack_elems =
         static_cast<size_t>(N / NXdlPackEff) * static_cast<size_t>(KScale / KXdlPackEff);
 
-    a_scale_packed_bufs.push_back(
-        std::make_unique<ck_tile::DeviceMem>(a_pack_elems * sizeof(int32_t)));
-    b_scale_packed_bufs.push_back(
-        std::make_unique<ck_tile::DeviceMem>(b_pack_elems * sizeof(int32_t)));
+    const size_t a_pack_bytes = align_up(a_pack_elems * sizeof(int32_t), 16);
+    const size_t b_pack_bytes = align_up(b_pack_elems * sizeof(int32_t), 16);
 
-    auto* p_scale_a =
-        reinterpret_cast<ScaleType*>(a_scale_packed_bufs.back()->GetDeviceBuffer());
-    auto* p_scale_b =
-        reinterpret_cast<ScaleType*>(b_scale_packed_bufs.back()->GetDeviceBuffer());
+    if (ws_remaining < a_pack_bytes + b_pack_bytes) {
+      NVTE_WARN("ck_tile_mx_grouped_gemm: insufficient workspace for packed scales. Needed bytes=",
+                a_pack_bytes + b_pack_bytes, ", available bytes=", ws_remaining);
+      return false;
+    }
+
+    auto* p_scale_a = reinterpret_cast<ScaleType*>(ws_cursor);
+    ws_cursor += a_pack_bytes;
+    ws_remaining -= a_pack_bytes;
+
+    auto* p_scale_b = reinterpret_cast<ScaleType*>(ws_cursor);
+    ws_cursor += b_pack_bytes;
+    ws_remaining -= b_pack_bytes;
 
     if (a_scales_m_k) {
     // physical/logical [M, KScale]
@@ -742,7 +758,7 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(d_dtype, d_te_type, {
         using CType = typename TETypeToCKType<d_te_type>::type;
           ok = invoke_mx_grouped_gemm<MxGemmConfig, AType, BType, CType>(
-            descs, ctx, s);
+            descs, ctx, s, ws_cursor, ws_remaining);
       });
     });
   });

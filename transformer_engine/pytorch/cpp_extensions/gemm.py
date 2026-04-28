@@ -52,21 +52,33 @@ def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Ten
     """Returns workspace for cublas GEMM."""
     assert not (ub and grouped_gemm), "UB is unsupported for grouped GEMM."
 
+    base_size = get_cublas_workspace_size_bytes()
+
+    # Extra scratch for ROCm CK MXFlatmm grouped GEMM:
+    # B preshuffle + A-scale preshuffle + B-scale preshuffle + grouped kargs.
+    #
+    # Your failing case needed ~52 MB just for MXFlatmm preshuffle buffers
+    # after previous carving, so 64 MiB is marginal for some grouped shapes.
+    extra_size = int(os.getenv(
+        "NVTE_CK_MXFLAT_GROUPED_EXTRA_WORKSPACE_BYTES",
+        str(128 * 1024 * 1024),
+    ))
+
     if ub:
         return torch.empty(
-            get_cublas_workspace_size_bytes() * _NUM_MAX_UB_STREAMS,
+            base_size * _NUM_MAX_UB_STREAMS,
             dtype=torch.uint8,
             device=device,
         )
-    if grouped_gemm:
-        _multi_stream_cublas_workspace = []
-        for _ in range(tex.get_num_cublas_streams()):
-            _multi_stream_cublas_workspace.append(
-                torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
-            )
-        return _multi_stream_cublas_workspace
 
-    return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
+    if grouped_gemm:
+        workspace_size = base_size + extra_size
+        return [
+            torch.empty(workspace_size, dtype=torch.uint8, device=device)
+            for _ in range(tex.get_num_cublas_streams())
+        ]
+
+    return torch.empty(base_size, dtype=torch.uint8, device=device)
 
 
 def validate_gemm_scale(scale: Optional[float], required: bool) -> float:

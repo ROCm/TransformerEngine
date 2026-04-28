@@ -33,6 +33,7 @@
 #include "./cutlass_grouped_gemm.cuh"
 #else
 #include "ck_mx_grouped_gemm/ck_mx_grouped_gemm.h"
+#include "ck_mx_grouped_gemm/ck_mxflat_grouped_gemm.h"
 // #include "ck_grouped_gemm/ck_grouped_gemm.h"
 #endif
 
@@ -1193,12 +1194,29 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype() &&
 #ifdef __HIP_PLATFORM_AMD__
       true)                               {
-    if (!ck_tile_mx_grouped_gemm(A, B, D, num_gemms, transa, transb, workspace, accumulate, stream)) {
-        if (warn_fallback) {
-          NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
-        }
-        cublas_path();
-    }
+const char* ck_backend_env = std::getenv("NVTE_CK_MXFP8_GROUPED_BACKEND");
+const std::string ck_backend =
+    (ck_backend_env == nullptr || ck_backend_env[0] == '\0') ? "mxgemm" : ck_backend_env;
+
+bool ck_ok = false;
+
+if (ck_backend == "mxflat") {
+  ck_ok = ck_tile_mxflat_grouped_gemm(
+      A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
+} else if (ck_backend == "mxgemm") {
+  ck_ok = ck_tile_mx_grouped_gemm(
+      A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
+} else {
+  NVTE_WARN("Unknown NVTE_CK_MXFP8_GROUPED_BACKEND=", ck_backend,
+            "; falling back to cuBLAS grouped GEMM.");
+}
+
+if (!ck_ok) {
+  if (warn_fallback) {
+    NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
+  }
+  cublas_path();
+}
 #else
       all_groups_uniform_k128(B, transb)) {
     cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
