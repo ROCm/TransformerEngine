@@ -1,0 +1,233 @@
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
+# GitHub Actions workflow to build TransformerEngine release wheels for ROCm
+# on a manylinux_2_28_x86_64 base image.
+#
+# Single-job pipeline that:
+#   1. Checks Harbor for existing ROCm Docker image or builds new one
+#   2. Runs the image to compile and package TE wheels
+#
+
+name: ROCm Wheels Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      use_local_version:
+        description: 'Use local version suffix for generated wheels.'
+        type: boolean
+        required: false
+        default: true
+      use_prebuilt_aiter:
+        description: 'Use precompiled aiter instead of building from source.'
+        type: boolean
+        required: false
+        default: true
+      rocm_repo_url:
+        description: 'ROCm TheRock repository URL used inside the Docker image.'
+        type: string
+        required: true
+        default: 'https://repo.amd.com/rocm/packages/rhel8/x86_64/'
+      force_build_image:
+        description: 'Force building of ROCm Docker image, skip checking intermediate storage.'
+        type: boolean
+        required: false
+        default: true
+      upload_image:
+        description: 'Upload built ROCm Docker image to intermediate storage.'
+        type: boolean
+        required: false
+        default: false
+      docker_image_tag_override:
+        description: 'Override the auto-generated ROCm Docker image tag.'
+        type: string
+        required: false
+        default: ''
+  workflow_call:
+    inputs:
+      use_local_version:
+        type: boolean
+        default: true
+      use_prebuilt_aiter:
+        type: boolean
+        default: true
+      rocm_repo_url:
+        type: string
+        default: 'https://repo.amd.com/rocm/packages/rhel8/x86_64/'
+      force_build_image:
+        type: boolean
+        default: true
+      upload_image:
+        type: boolean
+        default: false
+      docker_image_tag_override:
+        type: string
+        default: ''
+
+env:
+  DOCKER_IMAGE_NAME: te-rocm-manylinux-x86
+  MANYLINUX_PLATFORM: manylinux_2_28_x86_64
+
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+
+  build-rocm-wheels:
+    name: Build ROCm Docker image and TransformerEngine wheels
+    runs-on: build-only-te
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+
+      - name: Initialize required submodules
+        run: |
+          git submodule update --init --recursive --depth 1 \
+            3rdparty/aotriton \
+            3rdparty/aiter \
+            3rdparty/QoLA \
+            3rdparty/hipify_torch
+
+      - name: Derive Docker image tag
+        id: set-tag
+        run: |
+          # Harbor registry configuration
+          HARBOR_REGISTRY="registry-sc-harbor.amd.com"
+          HARBOR_PROJECT="framework/te-ci"
+          
+          # Build the image tag
+          if [ -n "${{ inputs.docker_image_tag_override }}" ]; then
+            # Use override if provided
+            IMAGE_TAG="${{ inputs.docker_image_tag_override }}"
+            echo "Using override tag: ${IMAGE_TAG}"
+          else
+            # Get current year-month
+            YEAR_MONTH=$(date +"%Y%m")
+            
+            # Try to detect ROCm revision from repomd.xml
+            ROCM_URL="${{ inputs.rocm_repo_url }}"
+            ROCM_REVISION=$(curl -s "${ROCM_URL}/repodata/repomd.xml" 2>/dev/null | grep -oP '(?<=<revision>)[^<]+' | head -n1 || echo "")
+            
+            if [ -n "$ROCM_REVISION" ]; then
+              # Use year-month with ROCm revision
+              IMAGE_TAG="${YEAR_MONTH}-${ROCM_REVISION}"
+              echo "Generated tag with ROCm revision: ${IMAGE_TAG}"
+            else
+              # Use year-month only (fallback)
+              IMAGE_TAG="${YEAR_MONTH}"
+              echo "Generated tag without ROCm revision (failed to detect): ${IMAGE_TAG}"
+            fi
+          fi
+          
+          # Set local and Harbor image tags
+          LOCAL_IMAGE_TAG="${{ env.DOCKER_IMAGE_NAME }}:${IMAGE_TAG}"
+          HARBOR_IMAGE_TAG="${HARBOR_REGISTRY}/${HARBOR_PROJECT}/${{ env.DOCKER_IMAGE_NAME }}:${IMAGE_TAG}"
+          
+          echo "Image tag: ${LOCAL_IMAGE_TAG}"
+          
+          echo "image_tag=${LOCAL_IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "harbor_image_tag=${HARBOR_IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "harbor_registry=${HARBOR_REGISTRY}" >> "$GITHUB_OUTPUT"
+
+      - name: Check for existing image in Harbor
+        id: check-harbor
+        if: ${{ !inputs.force_build_image }}
+        run: |
+          echo "Checking if image exists in Harbor: ${{ steps.set-tag.outputs.harbor_image_tag }}"
+          
+          # Try to pull the image from Harbor (no authentication needed for pull)
+          if docker pull "${{ steps.set-tag.outputs.harbor_image_tag }}" 2>/dev/null; then
+            echo "Image found in Harbor, will reuse"
+            # Tag the Harbor image with local tag for consistency
+            docker tag "${{ steps.set-tag.outputs.harbor_image_tag }}" "${{ steps.set-tag.outputs.image_tag }}"
+            echo "image_exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Image not found in Harbor, will build new image"
+            echo "image_exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # The build context is build_tools/wheel_utils/ because the Dockerfile
+      # COPYs build_wheels.sh from that directory.
+      - name: Build Docker image
+        if: ${{ inputs.force_build_image || steps.check-harbor.outputs.image_exists != 'true' }}
+        run: |
+          echo "Building Docker image: ${{ steps.set-tag.outputs.image_tag }}"
+          docker build \
+            --no-cache \
+            --build-arg ROCM_REPO_URL="${{ inputs.rocm_repo_url }}" \
+            --tag "${{ steps.set-tag.outputs.image_tag }}" \
+            --file build_tools/wheel_utils/Dockerfile.rocm.manylinux.x86 \
+            build_tools/wheel_utils/
+
+      - name: Upload Docker image to Harbor
+        if: ${{ inputs.upload_image && (inputs.force_build_image || steps.check-harbor.outputs.image_exists != 'true') }}
+        env:
+          HARBOR_USERNAME: ${{ secrets.HARBOR_USERNAME }}
+          HARBOR_PASSWORD: ${{ secrets.HARBOR_PASSWORD }}
+        run: |
+          HARBOR_REGISTRY="${{ steps.set-tag.outputs.harbor_registry }}"
+          
+          echo "Logging in to Harbor registry: ${HARBOR_REGISTRY}"
+          echo "$HARBOR_PASSWORD" | docker login "${HARBOR_REGISTRY}" -u "$HARBOR_USERNAME" --password-stdin
+          
+          echo "Tagging image for Harbor"
+          docker tag "${{ steps.set-tag.outputs.image_tag }}" "${{ steps.set-tag.outputs.harbor_image_tag }}"
+          
+          echo "Pushing image to Harbor: ${{ steps.set-tag.outputs.harbor_image_tag }}"
+          docker push "${{ steps.set-tag.outputs.harbor_image_tag }}"
+          
+          echo "Logging out from Harbor"
+          docker logout "${HARBOR_REGISTRY}"
+
+      - name: Create wheelhouse directory
+        run: mkdir -p "${{ runner.temp }}/wheelhouse"
+
+      # Mount the checked-out workspace to /TransformerEngine in the container.
+      # The container writes all wheels and logs under /wheelhouse.
+      - name: Build TransformerEngine wheels
+        run: |
+          NVTE_AITER_PREBUILT_BASE_URL="https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts"
+          docker run --rm \
+            --env LOCAL_TREE_BUILD=1 \
+            --env NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1 \
+            --env TARGET_BRANCH="${{ github.ref_name }}" \
+            ${{ inputs.use_local_version && '--env NVTE_USE_LOCAL_VERSION=1' || '' }} \
+            ${{ inputs.use_prebuilt_aiter && '--env NVTE_AITER_PREBUILT_BASE_URL="${NVTE_AITER_PREBUILT_BASE_URL}"' || '' }} \
+            --volume "${{ github.workspace }}:/TransformerEngine" \
+            --volume "${{ runner.temp }}/wheelhouse:/wheelhouse" \
+            "${{ steps.set-tag.outputs.image_tag }}"
+
+      - name: List built artifacts
+        if: always()
+        run: |
+          echo "=== Wheels and source distributions ==="
+          find "${{ runner.temp }}/wheelhouse" \
+            \( -name "*.whl" -o -name "*.tar.gz" \) | sort
+
+          echo ""
+          echo "=== Build logs ==="
+          LOG_DIR="${{ runner.temp }}/wheelhouse/logs"
+          if [ -d "$LOG_DIR" ]; then
+            find "$LOG_DIR" -type f | sort
+          fi
+
+      - name: Upload wheels as GitHub Actions artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: te-rocm-wheels
+          path: |
+            ${{ runner.temp }}/wheelhouse/*.whl
+            ${{ runner.temp }}/wheelhouse/*.tar.gz
+          retention-days: 1
+          if-no-files-found: error
+
+      - name: Upload build logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: te-rocm-build-logs
+          path: ${{ runner.temp }}/wheelhouse/logs/
+          retention-days: 30
+          if-no-files-found: warn
