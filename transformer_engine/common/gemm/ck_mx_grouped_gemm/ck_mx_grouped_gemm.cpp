@@ -636,12 +636,22 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
     constexpr ck_tile::index_t XdlMNThread = MxGemmConfig::M_Warp_Tile;
     constexpr ck_tile::index_t XdlKThread = 64 / XdlMNThread;
 
-    if (a_scales.shape[0] != M || a_scales.shape[1] != KScale) {
-    NVTE_ERROR("ck_tile_mx_grouped_gemm: expected A scales shape [M, KScale].");
+    const bool a_scales_m_k =
+        (a_scales.shape[0] == M && a_scales.shape[1] == KScale);
+    const bool a_scales_k_m =
+        (a_scales.shape[0] == KScale && a_scales.shape[1] == M);
+
+    if (!a_scales_m_k && !a_scales_k_m) {
+    NVTE_ERROR("ck_tile_mx_grouped_gemm: expected A scales shape [M, KScale] or [KScale, M].");
     }
 
-    if (b_scales.shape[0] != KScale || b_scales.shape[1] != N) {
-    NVTE_ERROR("ck_tile_mx_grouped_gemm: expected B scales shape [KScale, N].");
+    const bool b_scales_n_k =
+        (b_scales.shape[0] == N && b_scales.shape[1] == KScale);
+    const bool b_scales_k_n =
+        (b_scales.shape[0] == KScale && b_scales.shape[1] == N);
+
+    if (!b_scales_n_k && !b_scales_k_n) {
+    NVTE_ERROR("ck_tile_mx_grouped_gemm: expected B scales shape [N, KScale] or [KScale, N].");
     }
 
     if (M % MXdlPackEff != 0 || N % NXdlPackEff != 0 || KScale % KXdlPackEff != 0) {
@@ -663,23 +673,49 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
     auto* p_scale_b =
         reinterpret_cast<ScaleType*>(b_scale_packed_bufs.back()->GetDeviceBuffer());
 
+    if (a_scales_m_k) {
+    // physical/logical [M, KScale]
     launch_pack_scales<ScaleType, true, MXdlPackEff, KXdlPackEff, XdlMNThread, XdlKThread>(
         reinterpret_cast<const ScaleType*>(a_scales.dptr),
-         reinterpret_cast<int32_t*>(p_scale_a),
+        reinterpret_cast<int32_t*>(p_scale_a),
         static_cast<int>(M),
         static_cast<int>(KScale),
         static_cast<int>(a_scales.shape[1]),
         1,
         stream);
+    } else {
+    // physical [KScale, M], but pack kernel expects logical [M, KScale]
+    launch_pack_scales<ScaleType, true, MXdlPackEff, KXdlPackEff, XdlMNThread, XdlKThread>(
+        reinterpret_cast<const ScaleType*>(a_scales.dptr),
+        reinterpret_cast<int32_t*>(p_scale_a),
+        static_cast<int>(M),
+        static_cast<int>(KScale),
+        1,
+        static_cast<int>(M),
+        stream);
+    }
 
+    if (b_scales_k_n) {
+    // physical/logical [KScale, N]
     launch_pack_scales<ScaleType, false, NXdlPackEff, KXdlPackEff, XdlMNThread, XdlKThread>(
         reinterpret_cast<const ScaleType*>(b_scales.dptr),
-         reinterpret_cast<int32_t*>(p_scale_b),
+        reinterpret_cast<int32_t*>(p_scale_b),
+        static_cast<int>(N),
+        static_cast<int>(KScale),
+        static_cast<int>(b_scales.shape[1]),
+        1,
+        stream);
+    } else {
+    // physical/logical [N, KScale]
+    launch_pack_scales<ScaleType, false, NXdlPackEff, KXdlPackEff, XdlMNThread, XdlKThread>(
+        reinterpret_cast<const ScaleType*>(b_scales.dptr),
+        reinterpret_cast<int32_t*>(p_scale_b),
         static_cast<int>(N),
         static_cast<int>(KScale),
         1,
-        static_cast<int>(KScale),
+        static_cast<int>(b_scales.shape[1]),
         stream);
+    }
 
     descs.emplace_back(
         a.dptr,
