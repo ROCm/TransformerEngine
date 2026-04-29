@@ -163,21 +163,11 @@ def _get_qkv_format(qkv_layout) -> Tuple[str, str]:
 
 
 def _to_bshd(t: torch.Tensor, fmt: str) -> torch.Tensor:
-    """Convert tensor from *fmt* to BSHD layout.
-
-    For sbhd, returns a strided BSHD view (no .contiguous()). Aiter's
-    maybe_contiguous (aiter/ops/mha.py) only forces a copy when stride(-1)
-    != 1; a transpose(0, 1) of an SBHD-contiguous tensor preserves
-    head-dim stride 1, so the kernel reads the view directly. Output
-    bit-identical to the materialized version (verified empirically).
-    Saves the q/k/v fwd copies and lets bwd's empty_like-allocated
-    dq/dk/dv inherit the same view, making _from_bshd's later
-    transpose+contiguous a no-op for gradients.
-    """
+    """Convert tensor from *fmt* to BSHD layout. Returns a contiguous tensor."""
     if fmt == "bshd":
         return t
     if fmt == "sbhd":
-        return t.transpose(0, 1)
+        return t.transpose(0, 1).contiguous()
     raise ValueError(f"_to_bshd does not handle format '{fmt}' (use varlen path for thd)")
 
 
