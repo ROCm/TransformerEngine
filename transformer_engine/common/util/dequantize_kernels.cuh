@@ -68,10 +68,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                             const e8m0_t *const scales_ptr, const size_t rows, const size_t cols,
                             const size_t scales_stride) {
 #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
-  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0) {
-    printf("[DBG mxfp8_dequantize TDM kernel] executing rows=%zu cols=%zu\n",
-           (size_t)rows, (size_t)cols);
-  }
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
 
   constexpr size_t SCALES_ROWWISE_PER_CHUNK_Y = CHUNK_DIM_Y;                //  128
@@ -431,14 +427,11 @@ void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream)
              cuda::sm_arch_name().find("gfx1250") != std::string::npos;
     }();
     if (use_tdm_flow) {
-      fprintf(stderr, "[DBG dequantize_helper] gfx1250 TDM -> mxfp8_dequantize\n");
       dequantization::mxfp8_dequantize(input, output, stream);
     } else {
-      fprintf(stderr, "[DBG dequantize_helper] gfx1250 ROCm -> rocm_mxfp8_dequantize\n");
       rocm_mxfp8_dequantize(input, output, stream);
     }
 #elif defined(__HIP_PLATFORM_AMD__)
-    fprintf(stderr, "[DBG dequantize_helper] non-gfx1250 AMD -> rocm_mxfp8_dequantize\n");
     rocm_mxfp8_dequantize(input, output, stream);
 #else
     if (is_supported_by_CC_100()) {

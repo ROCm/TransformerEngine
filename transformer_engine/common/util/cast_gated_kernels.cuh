@@ -76,11 +76,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                           float *const amax_ptr, float *const scale_inv_ptr,
                           const float *const scale_ptr, const size_t rows, const size_t cols) {
 #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
-  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0) {
-    printf("[DBG cast_fp8_gated_kernel] TDM kernel executing rows=%zu cols=%zu\n",
-           (size_t)rows, (size_t)cols);
-  }
-
 #ifdef __HIP_PLATFORM_AMD__
   // TDM needs explicit strides. For gated inputs, act and gate are interleaved → stride = 2*cols.
   // For outputs, IS_DGATED interleaves dact/dgate → stride = 2*cols; otherwise stride = cols.
@@ -453,10 +448,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                             const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
                             const size_t scale_stride_colwise) {
 #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
-  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0) {
-    printf("[DBG cast_mxfp8_gated_kernel] TDM kernel executing rows=%zu cols=%zu\n",
-           (size_t)rows, (size_t)cols);
-  }
   using IType2 = typename ptx::FPx2<IType>;
   using OType2 = typename ptx::FPx2<OType>;
 
@@ -1582,10 +1573,8 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
                cuda::sm_arch_name().find("gfx1250") != std::string::npos;
       }();
       if (use_tdm_flow_fp8) {
-        fprintf(stderr, "[DBG gated delayed_scaling] gfx1250 TDM -> cast_fp8_gated\n");
         cast_fp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       } else {
-        fprintf(stderr, "[DBG gated delayed_scaling] gfx1250 ROCm -> cast_gated/cast_dgated\n");
         if constexpr (IS_DGATED) {
           cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
         } else {
@@ -1593,7 +1582,6 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
         }
       }
 #elif defined(__HIP_PLATFORM_AMD__)
-      fprintf(stderr, "[DBG gated delayed_scaling] non-gfx1250 AMD -> cast_gated/cast_dgated\n");
       if constexpr (IS_DGATED) {
         cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       } else {
@@ -1618,14 +1606,11 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
                cuda::sm_arch_name().find("gfx1250") != std::string::npos;
       }();
       if (use_tdm_flow) {
-        fprintf(stderr, "[DBG gated mxfp_scaling] gfx1250 TDM -> cast_mxfp8_gated\n");
         cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       } else {
-        fprintf(stderr, "[DBG gated mxfp_scaling] gfx1250 ROCm -> rocm_cast_mxfp8_gated\n");
         rocm_cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       }
 #elif defined(__HIP_PLATFORM_AMD__)
-      fprintf(stderr, "[DBG gated mxfp_scaling] non-gfx1250 AMD -> rocm_cast_mxfp8_gated\n");
       rocm_cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
 #else
       cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);

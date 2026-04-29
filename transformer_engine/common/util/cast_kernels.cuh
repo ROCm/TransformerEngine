@@ -80,10 +80,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                          const size_t rows, const size_t cols, const size_t scale_stride_rowwise,
                          const size_t scale_stride_colwise) {
 #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
-  if (blockIdx.x == 0 && blockIdx.y == 0 && threadIdx.x == 0) {
-    printf("[DBG cast_mxfp8_2D_kernel] TDM kernel executing rows=%zu cols=%zu\n",
-           (size_t)rows, (size_t)cols);
-  }
   constexpr bool COMPUTE_ACTIVATIONS = IS_DACT || IS_ACT;
   constexpr bool NO_ACTIVATIONS = !COMPUTE_ACTIVATIONS;
 
