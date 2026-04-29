@@ -89,7 +89,7 @@ def check_mxfp8_support() -> Tuple[bool, str]:
 @functools.lru_cache(maxsize=None)
 def check_nvfp4_support() -> Tuple[bool, str]:
     if IS_HIP_EXTENSION:
-        return False, "ROCm TE currently not supporting NVFP4"
+        return True, ""
     """Return if nvfp4 support is available"""
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""

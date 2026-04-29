@@ -778,7 +778,6 @@ def test_gpt_full_activation_recompute(
         if (dtype == torch.bfloat16
             and not fp8
             and not use_reentrant
-            and recipe.float8_per_tensor_scaling()
             ):
             pytest.skip("hipBLASLt does not provide suitable algorithms on GFX950 for this config.")
     if fp8 and recipe.nvfp4():
