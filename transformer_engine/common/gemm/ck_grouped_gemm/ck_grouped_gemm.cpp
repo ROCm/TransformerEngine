@@ -57,19 +57,19 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   // FP8 special handling.
   //
   // A_use/B_use and transA_use/transB_use have already gone through the
-  // upstream-style grouped GEMM normalization above. This block only rewrites
-  // that normalized presentation into the CK FP8 preferred NT presentation by selecting
-  // `columnwise_data` when needed.
+  // upstream-style grouped GEMM normalization above. CK FP8 grouped GEMM is
+  // compiled only for the preferred NT presentation:
   //
-  // CK FP8 target presentation:
-  //   A_use: N
-  //   B_use: T
+  //   transA_use = false
+  //   transB_use = true
   //
-  // The outer condition checks whether this NT presentation is possible:
-  //   - A_use is already N, or can be made N using columnwise_data
-  //   - B_use is already T, or can be made T using columnwise_data
+  // This block rewrites the normalized presentation into that NT form by
+  // selecting columnwise_data when needed. If the required columnwise_data view
+  // is unavailable, this CK FP8 backend cannot represent the GEMM in its
+  // supported layout form, so we fall back instead of compiling/running an
+  // unsupported layout variant.
   //
-  // Then each operand is rewritten independently only if needed:
+  // Rewrite cases:
   //   NN -> rewrite B only
   //   TN -> rewrite A and B
   //   NT -> already in target form
@@ -81,16 +81,23 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
     const bool has_a_col = A0_te->has_columnwise_data();
     const bool has_b_col = B0_te->has_columnwise_data();
 
-    if ((!transA_use || has_a_col) && (transB_use || has_b_col)) {
-      if (transA_use) {
-        use_a_colwise_data = true;
-        transA_use = false;
-      }
+    const bool can_make_a_nt = !transA_use || has_a_col;
+    const bool can_make_b_nt = transB_use || has_b_col;
 
-      if (!transB_use) {
-        use_b_colwise_data = true;
-        transB_use = true;
-      }
+    if (!can_make_a_nt || !can_make_b_nt) {
+      NVTE_WARN("ck_tile_grouped_gemm: FP8 grouped GEMM requires NT presentation. "
+                "Missing required columnwise_data for layout rewrite; falling back.");
+      return false;
+    }
+
+    if (transA_use) {
+      use_a_colwise_data = true;
+      transA_use = false;
+    }
+
+    if (!transB_use) {
+      use_b_colwise_data = true;
+      transB_use = true;
     }
   }
 
