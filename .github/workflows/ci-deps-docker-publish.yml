@@ -23,7 +23,7 @@ on:
 
 jobs:
   build-and-push:
-    runs-on: te_builder
+    runs-on: build-only-te
     timeout-minutes: 720
     steps:
       - name: Checkout repository
