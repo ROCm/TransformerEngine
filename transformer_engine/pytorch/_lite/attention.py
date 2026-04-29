@@ -277,6 +277,18 @@ def _aiter_attn_fwd(
         q_bshd = _to_bshd(q, q_fmt)
         k_bshd = _to_bshd(k, kv_fmt)
         v_bshd = _to_bshd(v, kv_fmt)
+        if _LITE_DIAG and _ATTN_CALLS.get("fwd_aiter_ck", 0) <= 1:
+            _drop = dropout if is_training else 0.0
+            _b, _s, _hq, _hd = q_bshd.shape
+            _hk = k_bshd.shape[2]
+            print(
+                f"[LITE-ATTN-FWD-PROBE] dtype={q_bshd.dtype} "
+                f"q={tuple(q_bshd.shape)} k={tuple(k_bshd.shape)} v={tuple(v_bshd.shape)} "
+                f"hd_q={_hd} hd_v={v_bshd.shape[3]} nh_q={_hq} nh_k={_hk} "
+                f"bias_is_none={attn_bias is None} causal={causal} "
+                f"window=({wl},{wr}) dropout_p={_drop} seqlen_q={_s}",
+                flush=True,
+            )
         # Pass via keyword to stay resilient to aiter API drift — newer
         # aiter releases inserted positional args (sink_size, *_descale)
         # between window_size_right and return_lse.
