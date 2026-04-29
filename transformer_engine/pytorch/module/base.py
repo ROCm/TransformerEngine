@@ -648,6 +648,51 @@ def fill_userbuffers_buffer_for_all_gather(
     raise ValueError(f"Unsupported quantizer for Userbuffers ({quantizer})")
 
 
+# --- TE-lite diagnostic: identify producers of non-contiguous inputs ---
+_LITE_NONCONTIG_SEEN = set()
+_LITE_NONCONTIG_PRINT_CAP = 20
+
+
+def _lite_log_noncontig_input(module_class: str, inp: torch.Tensor) -> None:
+    """Log first-time-seen non-contiguous inputs reaching prepare_forward.
+
+    Helps identify which lite Triton fused kernel is emitting tensors with
+    non-standard strides that downstream TE/Megatron then materializes via
+    .contiguous(). Each unique (module, shape, stride-signature, caller)
+    is logged once, capped at _LITE_NONCONTIG_PRINT_CAP entries.
+    """
+    if len(_LITE_NONCONTIG_SEEN) >= _LITE_NONCONTIG_PRINT_CAP:
+        return
+    import traceback
+    # Walk the stack to find the first frame outside transformer_engine
+    # (i.e., the caller-side producer of the non-contiguous tensor).
+    caller = "<unknown>"
+    for fr in reversed(traceback.extract_stack()[:-1]):
+        if "transformer_engine/pytorch/module/base.py" in fr.filename:
+            continue
+        caller = f"{fr.filename}:{fr.lineno} ({fr.name})"
+        break
+    sig = (module_class, tuple(inp.shape), inp.stride(), caller)
+    if sig in _LITE_NONCONTIG_SEEN:
+        return
+    _LITE_NONCONTIG_SEEN.add(sig)
+    print(
+        f"[LITE-NONCONTIG] module={module_class} dtype={inp.dtype} "
+        f"shape={tuple(inp.shape)} stride={inp.stride()} "
+        f"contig_strides_would_be={_contig_strides(inp.shape)} "
+        f"caller={caller}",
+        flush=True,
+    )
+
+
+def _contig_strides(shape) -> tuple:
+    """Reference contiguous strides for a shape, for stride-diff comparison."""
+    out = [1] * len(shape)
+    for i in range(len(shape) - 2, -1, -1):
+        out[i] = out[i + 1] * int(shape[i + 1])
+    return tuple(out)
+
+
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
     """Base TE module."""
 
@@ -1125,6 +1170,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         with torch.cuda.nvtx.range(self.__class__.__name__ + " forward"):
             if not allow_non_contiguous and not inp.is_contiguous():
+                if os.environ.get("NVTE_LITE_DIAG", "0") != "0":
+                    _lite_log_noncontig_input(self.__class__.__name__, inp)
                 inp = inp.contiguous()
             yield inp
 
