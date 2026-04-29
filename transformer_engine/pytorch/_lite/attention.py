@@ -296,8 +296,11 @@ def _aiter_attn_fwd(
             return_lse=True,
             return_softmax=False,
             how_v3_bf16_cvt=1,
-            cu_seqlens_q=cu_seqlens_q,
-            cu_seqlens_kv=cu_seqlens_kv,
+            # bshd/sbhd is fixed-length per batch; passing non-None cu_seqlens
+            # here forces aiter off its AOT v3 fwd kernel onto the slower JIT
+            # ck_tile mha_fwd path (see can_impl_fmha_v3_fwd in aiter mha.py).
+            cu_seqlens_q=None,
+            cu_seqlens_kv=None,
         )
         out = _from_bshd(out, q_fmt)
 
