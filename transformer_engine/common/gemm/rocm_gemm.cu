@@ -198,6 +198,79 @@ struct GemmParam {
   int ldb = 0;  // B column strides
 };
 
+// FP4 e2m1 lookup table
+__device__ constexpr float kFP4E2M1Table[16] = {
+    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
+   -0.0f,-0.5f,-1.0f,-1.5f,-2.0f,-3.0f,-4.0f,-6.0f
+};
+
+// Dequantize FP4 (e2m1) packed data with FP8 e4m3 block scales to BF16.
+// Only applies block scales: output = fp4_value * block_scale.
+// The per-tensor amax correction is applied separately via the GEMM alpha scalar.
+//
+// Scale layout: 2D tensor of shape {num_rows_padded, scale_stride} where
+// scale_stride = roundup(num_cols / 16, 4).  Each scale covers a block of 16
+// consecutive elements along the fast (column) dimension.
+__global__ void dequant_fp4_to_bf16_kernel(
+    const uint8_t* __restrict__ data,
+    const fp8e4m3* __restrict__ scale_inv,
+    hip_bfloat16* __restrict__ output,
+    int64_t total_elements,
+    int64_t num_cols,
+    int64_t scale_stride)
+{
+  // Process 2 elements (1 byte) per iteration for coalesced access
+  const int64_t pair_idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  const int64_t total_pairs = total_elements / 2;
+  if (pair_idx >= total_pairs) return;
+
+  const uint8_t byte = data[pair_idx];
+  const uint8_t lo_nibble = byte & 0xF;
+  const uint8_t hi_nibble = byte >> 4;
+
+  const int64_t elem_base = pair_idx * 2;
+  const int64_t row0 = elem_base / num_cols;
+  const int64_t col0 = elem_base % num_cols;
+  const int64_t row1 = (elem_base + 1) / num_cols;
+  const int64_t col1 = (elem_base + 1) % num_cols;
+  const float s0 = static_cast<float>(scale_inv[row0 * scale_stride + col0 / 16]);
+  const float s1 = static_cast<float>(scale_inv[row1 * scale_stride + col1 / 16]);
+
+  output[elem_base]     = static_cast<hip_bfloat16>(kFP4E2M1Table[lo_nibble] * s0);
+  output[elem_base + 1] = static_cast<hip_bfloat16>(kFP4E2M1Table[hi_nibble] * s1);
+}
+
+// Launch helper for dequant kernel
+static void launch_dequant_fp4_to_bf16(
+    const void* data, const void* scale_inv,
+    void* output, int64_t total_elements,
+    int64_t num_cols, int64_t scale_stride,
+    hipStream_t stream)
+{
+  constexpr int kBlockSize = 256;
+  const int64_t total_pairs = total_elements / 2;
+  const int64_t num_blocks = (total_pairs + kBlockSize - 1) / kBlockSize;
+
+  dequant_fp4_to_bf16_kernel<<<num_blocks, kBlockSize, 0, stream>>>(
+      reinterpret_cast<const uint8_t*>(data),
+      reinterpret_cast<const fp8e4m3*>(scale_inv),
+      reinterpret_cast<hip_bfloat16*>(output),
+      total_elements, num_cols, scale_stride);
+}
+
+// Compute per-row alpha vector on device for NVFP4 GEMM:
+//   alpha_out[i] = alpha_in * amax_A * amax_B / (fp4_max^2 * fp8_max^2)  for i in [0, m)
+// Used with HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST, which
+// expects a device vector of length m for alpha, while beta stays on the host.
+__global__ void compute_fp4_alpha_vector_kernel(float alpha_in, const float* __restrict__ amax_A,
+                                                const float* __restrict__ amax_B, float factor_inv,
+                                                float* __restrict__ alpha_out, int m) {
+  const float alpha_val = alpha_in * (*amax_A) * (*amax_B) * factor_inv;
+  for (int i = blockIdx.x * blockDim.x + threadIdx.x; i < m; i += blockDim.x * gridDim.x) {
+    alpha_out[i] = alpha_val;
+  }
+}
+
 GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cublasOperation_t transA,
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
                                 const int m, const int n, const int k) {
@@ -246,6 +319,14 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
     ret.lda = is_A_transposed ? k : m;
+  } else if (is_nvfp_scaling(A.scaling_mode)) {
+    // NVFP4: dequant path always produces TN layout for the BF16 GEMM,
+    // but the source data may come from either rowwise or columnwise buffers.
+    ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
+    ret.transA = CUBLAS_OP_T;  // NVFP4 gemm is always TN layout
+    ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
+    ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
+    ret.lda = k;
   } else {
     NVTE_ERROR("A has unsupported scaling mode");
   }
@@ -284,11 +365,103 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
     ret.ldb = is_B_transposed ? n : k;
+  } else if (is_nvfp_scaling(B.scaling_mode)) {
+    // NVFP4: dequant path always produces TN layout for the BF16 GEMM,
+    // but the source data may come from either rowwise or columnwise buffers.
+    ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
+    ret.transB = CUBLAS_OP_N;  // NVFP4 gemm is always TN layout
+    ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
+    ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
+    ret.ldb = k;
   } else {
     NVTE_ERROR("B has unsupported scaling mode");
   }
 
   return ret;
+}
+
+// Dequantize FP4 inputs to BF16 in-place within the workspace and set up
+// the alpha device vector for the subsequent hipBLASLt GEMM.
+// After this call, param.A/B point to BF16 buffers within workspace,
+// param.Atype/Btype are kBFloat16, and *alpha_ptr_out points to a device vector.
+static void dequant_fp4_gemm_inputs(
+    GemmParam& param,
+    const transformer_engine::Tensor& inputA, cublasOperation_t transa,
+    const transformer_engine::Tensor& inputB, cublasOperation_t transb,
+    int m, int n, int k, float alpha,
+    void* workspace, size_t& workspaceSize,
+    const void** alpha_ptr_out, hipStream_t stream) {
+
+  const float fp4_max = 6.0f;
+  const float fp8_max = te_fp8_fnuz() ? 240.0f : 448.0f;
+  const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max * fp8_max);
+
+  const float* amax_A = (transa == CUBLAS_OP_T)
+      ? reinterpret_cast<const float*>(inputA.amax.dptr)
+      : reinterpret_cast<const float*>(inputA.columnwise_amax.dptr);
+  const float* amax_B = (transb == CUBLAS_OP_N)
+      ? reinterpret_cast<const float*>(inputB.amax.dptr)
+      : reinterpret_cast<const float*>(inputB.columnwise_amax.dptr);
+
+  // Compute total extra bytes needed from the workspace:
+  //   alpha vector:  m * sizeof(float)
+  //   dequant A:     m * k * sizeof(bf16)   (if A is FP4)
+  //   dequant B:     k * n * sizeof(bf16)   (if B is FP4)
+  const size_t alpha_vec_bytes = static_cast<size_t>(m) * sizeof(float);
+  const size_t a_bf16_bytes = is_fp4_dtype(param.Atype)
+      ? static_cast<size_t>(m) * k * sizeof(hip_bfloat16) : 0;
+  const size_t b_bf16_bytes = is_fp4_dtype(param.Btype)
+      ? static_cast<size_t>(k) * n * sizeof(hip_bfloat16) : 0;
+  const size_t fp4_total_bytes = alpha_vec_bytes + a_bf16_bytes + b_bf16_bytes;
+  NVTE_CHECK(workspaceSize >= fp4_total_bytes,
+             "NVFP4 GEMM requires at least ", fp4_total_bytes, " bytes workspace (",
+             fp4_total_bytes / (1024 * 1024), " MiB) for alpha vector + BF16 dequant buffers, "
+             "but only ", workspaceSize, " bytes (", workspaceSize / (1024 * 1024),
+             " MiB) available. Increase the cuBLAS workspace size.");
+
+  // Carve regions from the end of the workspace.
+  // Layout: [cublas workspace ... | alpha_vec | dequant_a | dequant_b]
+  workspaceSize = (workspaceSize / sizeof(float)) * sizeof(float) - fp4_total_bytes;
+  uint8_t* ws_ptr = reinterpret_cast<uint8_t*>(workspace) + workspaceSize;
+
+  float* device_alpha_vec = reinterpret_cast<float*>(ws_ptr);
+  ws_ptr += alpha_vec_bytes;
+
+  NVTE_CHECK(amax_A != nullptr, "FP4 GEMM requires amax_A");
+  NVTE_CHECK(amax_B != nullptr, "FP4 GEMM requires amax_B");
+  constexpr int kBlockSize = 256;
+  const int num_blocks = (m + kBlockSize - 1) / kBlockSize;
+  compute_fp4_alpha_vector_kernel<<<num_blocks, kBlockSize, 0, stream>>>(
+      alpha, amax_A, amax_B, factor_inv, device_alpha_vec, m);
+  *alpha_ptr_out = static_cast<const void*>(device_alpha_vec);
+
+  // Stage FP4 operand: dequantize to BF16 in workspace and update GEMM param.
+  auto stage_fp4_operand = [&](DType& op_type, void*& op_data,
+                               void*& op_scale_inv,
+                               const transformer_engine::Tensor& input,
+                               bool use_rowwise, int64_t rows, int64_t cols,
+                               size_t bf16_bytes) {
+    if (!is_fp4_dtype(op_type))
+      return;
+
+    hip_bfloat16* bf16_buf = reinterpret_cast<hip_bfloat16*>(ws_ptr);
+    ws_ptr += bf16_bytes;
+    const auto& sinv = use_rowwise ? input.scale_inv : input.columnwise_scale_inv;
+    const int64_t num_cols = use_rowwise ? input.data.shape.back()
+                                        : input.columnwise_data.shape.back();
+    const int64_t scale_stride = (sinv.shape.size() >= 2) ? sinv.shape[1] : (num_cols / 16);
+    launch_dequant_fp4_to_bf16(op_data, op_scale_inv, bf16_buf,
+                               rows * cols, num_cols, scale_stride, stream);
+    op_data = bf16_buf;
+    op_type = DType::kBFloat16;
+    op_scale_inv = nullptr;
+  };
+
+  // Dequantize FP4 -> BF16 (block scales only, no amax folded in)
+  stage_fp4_operand(param.Atype, param.A, param.A_scale_inv,
+                    inputA, transa == CUBLAS_OP_T, m, k, a_bf16_bytes);
+  stage_fp4_operand(param.Btype, param.B, param.B_scale_inv,
+                    inputB, transb == CUBLAS_OP_N, k, n, b_bf16_bytes);
 }
 
 
@@ -522,19 +695,22 @@ public:
     //Make it int instead of hipblasLtMatmulMatrixScale_t for compatibility with old hipblasLt
     int scaling_mode;
     hipblasLtEpilogue_t epilogue;
+    bool fp4_alpha_device_vector;  // FP4 uses ALPHA_DEVICE_VECTOR pointer mode
 
     Key(int deviceCap_,
         hipDataType a_type_, hipDataType b_type_,
         hipDataType d_type_, hipDataType bias_type_, hipDataType aux_type_,
         int m_, int n_, int k_, int lda_, int ldb_, int ldd_,
         hipblasOperation_t transa_, hipblasOperation_t transb_,
-        int scaling_mode_, hipblasLtEpilogue_t epilogue_):
+        int scaling_mode_, hipblasLtEpilogue_t epilogue_,
+        bool fp4_alpha_device_vector_):
         deviceCap(deviceCap_),
         a_type(a_type_), b_type(b_type_),
         d_type(d_type_), bias_type(bias_type_), aux_type(aux_type_),
         m(m_), n(n_), k(k_), lda(lda_), ldb(ldb_), ldd(ldd_),
         transa(transa_), transb(transb_),
-        scaling_mode(scaling_mode_), epilogue(epilogue_) {}
+        scaling_mode(scaling_mode_), epilogue(epilogue_),
+        fp4_alpha_device_vector(fp4_alpha_device_vector_) {}
 
     Key() {}
 
@@ -547,7 +723,8 @@ public:
       && (m == val.m) && (n == val.n) && (k == val.k)
       && (lda == val.lda) && (ldb == val.ldb) && (ldd == val.ldd)
       && (transa == val.transa) && (transb == val.transb)
-      && (scaling_mode == val.scaling_mode) && (epilogue == val.epilogue) );
+      && (scaling_mode == val.scaling_mode) && (epilogue == val.epilogue)
+      && (fp4_alpha_device_vector == val.fp4_alpha_device_vector) );
     }
 
     struct Comp
@@ -677,7 +854,7 @@ protected:
     fs << "dev_cap" << "m" << "n"  << "k" << "trans_a" << "trans_b" 
     << "type_a" << "type_b" << "type_d" << "bias_type" << "aux_type"
     << "lda" << "ldb" << "ldd" << "scale_mode" << "epi" << "comp" << "scale_type"
-    << "ws_min" << "ws_max" << "algo_id" << "aidx";
+    << "fp4_alpha" << "ws_min" << "ws_max" << "algo_id" << "aidx";
   }
   
   void load_()
@@ -748,7 +925,9 @@ protected:
       std::getline(is, epi, csv_sep);
       std::getline(is, comp, csv_sep);
       std::getline(is, scale, csv_sep);
-      is >> ws_min >> c >> ws_max >> c >> algo_id >> c >> algo_idx;
+      int fp4_alpha = 0;
+      is >> fp4_alpha >> c >> ws_min >> c >> ws_max >> c >> algo_id >> c >> algo_idx;
+      cfg.fp4_alpha_device_vector = (fp4_alpha != 0);
   
       if (is.bad())
       {
@@ -883,7 +1062,9 @@ protected:
       << ((cfg.aux_type == (hipDataType)-1) ? "-" : typeNameMapper.getName(cfg.aux_type))
       << cfg.lda << cfg.ldb << cfg.ldd << cfg.scaling_mode << epilogueNameMapper.getName(cfg.epilogue)
       << computeNameMapper.getName(HIPBLAS_COMPUTE_32F) << typeNameMapper.getName(HIP_R_32F)
-      << algo.ws_size_min << algo.ws_size_max << algo.algoId << algo.index << csv_helper::end() << "\n";
+      << (cfg.fp4_alpha_device_vector ? 1 : 0)
+      << algo.ws_size_min << algo.ws_size_max << algo.algoId << algo.index
+      << csv_helper::end() << "\n";
   }
 
 private:
@@ -952,7 +1133,23 @@ void hipblaslt_gemm(const Tensor *inputA,
   }
   NVTE_CHECK(k > 0);
 
-  const GemmParam &param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
+  GemmParam param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
+
+  // FP4 dequant path: hipBLASLt does not support FP4 natively,
+  // so we dequantize FP4 -> BF16 (block scales only) and run a standard BF16 GEMM.
+  //
+  // The per-tensor amax correction is computed on-device as a per-row alpha vector:
+  //   alpha'[i] = alpha * amax_A * amax_B / (fp4_max^2 * fp8_max^2)
+  // Alpha is passed as a device vector of length m via
+  // HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST. Beta stays on host.
+  const bool use_fp4 = is_fp4_dtype(param.Atype) || is_fp4_dtype(param.Btype);
+  const void* alpha_ptr = static_cast<const void*>(&alpha);
+  const void* beta_ptr  = static_cast<const void*>(&beta);
+  if (use_fp4) {
+    dequant_fp4_gemm_inputs(param, *inputA, transa, *inputB, transb,
+                            m, n, k, alpha, workspace, workspaceSize,
+                            &alpha_ptr, stream);
+  }
 
   bool nvte_log_gemm_config = false;
   if (const char* env_p = std::getenv("NVTE_LOG_GEMM_CONFIG") ) {
@@ -1181,10 +1378,18 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                    HIPBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
 
+    if (use_fp4) {
+    int32_t pointer_mode = HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST;
+    NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
+        operationDesc, HIPBLASLT_MATMUL_DESC_POINTER_MODE,
+        &pointer_mode, sizeof(pointer_mode)));
+  }
+
   GemmAlgoCache::Key gemm_cfg(algoCache.device_cap(device_id), A_type, B_type, D_type, 
     use_fp8 ? bias_type : (hipDataType)-1,
     (use_fp8 && gelu) ? aux_type : (hipDataType)-1,
-    m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, scaling_mode, epilogue );
+    m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, scaling_mode, epilogue,
+    use_fp4);
   GemmAlgoCache::Algo cached_algo;
   if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
   {
@@ -1202,10 +1407,10 @@ void hipblaslt_gemm(const Tensor *inputA,
         if (HIPBLAS_STATUS_SUCCESS == hipblaslt_ext::matmulIsAlgoSupported(
           handle,
           operationDesc, 
-          static_cast<const void*>(&alpha),
+          alpha_ptr,
           Adesc, 
           Bdesc, 
-          static_cast<const void*>(&beta),
+          beta_ptr,
           Ddesc,
           Ddesc,
           algo_arr[0].algo,
@@ -1282,12 +1487,12 @@ void hipblaslt_gemm(const Tensor *inputA,
             // Warm-up call
             NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                             operationDesc,
-                                            static_cast<const void*>(&alpha),         /* alpha */
+                                            alpha_ptr,                                /* alpha */
                                             param.A,                                      /* A */
                                             Adesc,
                                             param.B,                                      /* B */
                                             Bdesc,
-                                            static_cast<const void*>(&beta),        /* beta */
+                                            beta_ptr,                                 /* beta */
                                             C,                                      /* C */
                                             Cdesc,
                                             D,                                      /* D */
@@ -1304,12 +1509,12 @@ void hipblaslt_gemm(const Tensor *inputA,
           {
             NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                             operationDesc,
-                                            static_cast<const void*>(&alpha),         /* alpha */
+                                            alpha_ptr,                                /* alpha */
                                             param.A,                                      /* A */
                                             Adesc,
                                             param.B,                                      /* B */
                                             Bdesc,
-                                            static_cast<const void*>(&beta),        /* beta */
+                                            beta_ptr,                                 /* beta */
                                             C,                                      /* C */
                                             Cdesc,
                                             D,                                      /* D */
@@ -1365,12 +1570,12 @@ void hipblaslt_gemm(const Tensor *inputA,
   // D = alpha * (A * B) + beta * C
   NVTE_CHECK_HIPBLASLT(hipblasLtMatmul(handle,
                                    operationDesc,
-                                   static_cast<const void*>(&alpha),         /* alpha */
+                                   alpha_ptr,                              /* alpha */
                                    param.A,                                      /* A */
                                    Adesc,
                                    param.B,                                      /* B */
                                    Bdesc,
-                                   static_cast<const void*>(&beta),        /* beta */
+                                   beta_ptr,                               /* beta */
                                    C,                                      /* C */
                                    Cdesc,
                                    D,                                      /* D */

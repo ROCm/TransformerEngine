@@ -57,6 +57,8 @@ if(NOT DEFINED AOTRITON_PATH)
             "${__AOTRITON_INSTALL_DIR}"
             BUILD_BYPRODUCTS
             "${__AOTRITON_INSTALL_DIR}/lib/aotriton.images/${image}/__signature__"
+            LOG_DOWNLOAD ON           # redirect download stdout to log file
+            LOG_OUTPUT_ON_FAILURE ON  # but still show output if build fails
         )
         message(STATUS "Download AOTriton pre-compiled GPU images from ${__AOTRITON_URL}.")
     endfunction()
@@ -79,6 +81,8 @@ if(NOT DEFINED AOTRITON_PATH)
             -DTE_AOTRITON_COMMIT_SHA1=${AOTRITON_SHA}
             -DCMAKE_PROJECT_INCLUDE=${CMAKE_CURRENT_LIST_DIR}/aotriton_custom.cmake
             BUILD_BYPRODUCTS "${__AOTRITON_INSTALL_DIR}/lib/libaotriton${__AOTRITON_SUFFIX}_v2.so"
+            LOG_BUILD ON           # redirect build stdout to log file
+            LOG_OUTPUT_ON_FAILURE ON  # but still show output if build fails
         )
         message(STATUS "Adding AOTriton library.")
         add_dependencies(aotriton aotriton_external)

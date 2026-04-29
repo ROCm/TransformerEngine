@@ -38,7 +38,8 @@ if(USE_CUDA)
               test_cast_float8blockwise.cu)
 else()
   list(APPEND test_cuda_sources
-              test_cublaslt_gemm.cu)
+              test_cublaslt_gemm.cu
+              test_cast_mxfp4_transpose.cu)
 endif()
 
 if(USE_CUDA)
