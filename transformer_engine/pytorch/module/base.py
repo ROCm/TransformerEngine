@@ -664,17 +664,28 @@ def _lite_log_noncontig_input(module_class: str, inp: torch.Tensor) -> None:
     if len(_LITE_NONCONTIG_SEEN) >= _LITE_NONCONTIG_PRINT_CAP:
         return
     import traceback
-    # Walk the stack to find the first user-code frame. prepare_forward is
-    # a @contextmanager, so the immediate frames above are contextlib
-    # internals; skip those plus base.py itself. Capture 3 frames of
-    # context to identify the producer chain (innermost = direct caller).
-    SKIP = ("transformer_engine/pytorch/module/base.py", "/contextlib.py")
+    # Walk the stack to find user-code frames. prepare_forward is a
+    # @contextmanager so the immediate frames above are contextlib /
+    # base.py internals; under torch.compile the chain also goes through
+    # _dynamo/eval_frame.py and the TE Linear/LayerNormLinear forward
+    # wrapper itself, none of which identify the producer of the
+    # non-contiguous tensor. Skip those, then capture up to 8 frames so
+    # we can see the call chain back to the layer that emitted the
+    # non-contiguous activation (e.g., a transpose without contiguous).
+    SKIP = (
+        "transformer_engine/pytorch/module/base.py",
+        "transformer_engine/pytorch/module/linear.py",
+        "transformer_engine/pytorch/module/layernorm_linear.py",
+        "/contextlib.py",
+        "torch/_dynamo/",
+        "torch/nn/modules/module.py",
+    )
     user_frames = []
     for fr in reversed(traceback.extract_stack()[:-1]):
         if any(s in fr.filename for s in SKIP):
             continue
         user_frames.append(f"{fr.filename}:{fr.lineno} ({fr.name})")
-        if len(user_frames) >= 3:
+        if len(user_frames) >= 8:
             break
     caller = " <- ".join(user_frames) if user_frames else "<unknown>"
     sig = (module_class, tuple(inp.shape), inp.stride(), caller)
