@@ -1188,7 +1188,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if not allow_non_contiguous and not inp.is_contiguous():
                 if os.environ.get("NVTE_LITE_DIAG", "0") != "0":
                     _lite_log_noncontig_input(self.__class__.__name__, inp)
-                inp = inp.contiguous()
+                # NVTE_LITE_SKIP_NONCONTIG=1: experimental bypass of the
+                # defensive .contiguous() materialize. Tests whether the
+                # downstream GEMM (hipBLASLt via _scaled_mm in lite, cuBLAS
+                # in full) can consume strided 3D activations directly. Off
+                # by default. Default behavior unchanged when unset.
+                if os.environ.get("NVTE_LITE_SKIP_NONCONTIG", "0") == "0":
+                    inp = inp.contiguous()
             yield inp
 
         if self.fp8 and in_fp8_activation_recompute_phase():
