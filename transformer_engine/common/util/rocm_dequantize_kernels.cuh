@@ -147,6 +147,8 @@ static void rocm_mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStrea
 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
+  fprintf(stderr, "[DBG rocm_mxfp8_dequantize] rows=%zu cols=%zu — launching dequantize_mxfp8_kernel\n",
+          rows, cols);
   const size_t chunks_Y = DIVUP(rows, ROCM_CHUNK_DIM_Y);
   const size_t chunks_X = DIVUP(cols, ROCM_CHUNK_DIM_X);
 

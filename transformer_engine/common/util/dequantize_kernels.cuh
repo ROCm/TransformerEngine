@@ -427,11 +427,14 @@ void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream)
              cuda::sm_arch_name().find("gfx1250") != std::string::npos;
     }();
     if (use_tdm_flow) {
+      fprintf(stderr, "[DBG dequantize_helper] gfx1250 TDM -> mxfp8_dequantize\n");
       dequantization::mxfp8_dequantize(input, output, stream);
     } else {
+      fprintf(stderr, "[DBG dequantize_helper] gfx1250 ROCm -> rocm_mxfp8_dequantize\n");
       rocm_mxfp8_dequantize(input, output, stream);
     }
 #elif defined(__HIP_PLATFORM_AMD__)
+    fprintf(stderr, "[DBG dequantize_helper] non-gfx1250 AMD -> rocm_mxfp8_dequantize\n");
     rocm_mxfp8_dequantize(input, output, stream);
 #else
     if (is_supported_by_CC_100()) {
