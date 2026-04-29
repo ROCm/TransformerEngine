@@ -331,9 +331,8 @@ __global__ void dbias_reduce_b1ss(
 }
 
 // print the fmha_traits and args passed into ck apis
-void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args){
+void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args, std::ostream* log_file){
 
-  std::ostream* log_file = get_ck_log_stream();
   (*log_file) << "\n" << func_name << "\n";
 
   // fmha_traits debug
@@ -447,14 +446,10 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   bool has_dbias = args.dbias_ptr != nullptr;
   bool is_mqa_gqa = (args.h > args.hg);
 
-  bool ck_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      ck_log_config = true;
-  }
+  auto* log_file = get_ck_log_stream();
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, log_file != nullptr};
 
   bias_enum bias_type = bias_enum::no_bias;
   BiasShape bias_shape = BiasShape::k11SS;
@@ -584,8 +579,8 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   // lse_workspace_ptr used as buffer
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")) {
     if(args.is_group_mode() && std::string(env_p) == "1"){
-      if(ck_log_config){
-        std::cout << "attn_bwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
+      if(log_file){
+        *log_file << "attn_bwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
       }
       fmha_args.max_seqlen_q = get_runtime_max_seqlen(args.b, args.cu_seqlen_q_ptr, nullptr, args.lse_workspace_ptr, stream);
       fmha_args.max_seqlen_k = get_runtime_max_seqlen(args.b, args.cu_seqlen_kv_ptr, nullptr, args.lse_workspace_ptr, stream);
@@ -593,8 +588,8 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   }
 
   // print ck traits and args when needed
-  if(ck_log_config){
-    log_bwd_config(__FUNCTION__, fmha_args);
+  if(log_file){
+    log_bwd_config(__FUNCTION__, fmha_args, log_file);
   }
   float average_runtime = QOLA_NS(mha_bwd)(fmha_args, stream_config);
   if(average_runtime < 0){
@@ -612,7 +607,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
       dim3 grid(args.max_tokens_kv, args.hg);
       if(args.d_qk == args.d_v){
         dim3 block(args.d_qk);
-        if (auto* log_file = get_ck_log_stream()) {
+        if (log_file) {
           *log_file << "\n" << "run dk_dv_reduce_thd: " << "\n";
           *log_file << "cu_seqlen_kv_ptr: " << args.cu_seqlen_kv_ptr << "\n";
           *log_file << "cu_seqlen_kv_padded_ptr: " << args.cu_seqlen_kv_padded_ptr << "\n";
@@ -639,7 +634,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
             args.stride_h_dk, args.stride_s_dk););
       } else {
         dim3 block_dk(args.d_qk);
-        if (auto* log_file = get_ck_log_stream()) {
+        if (log_file) {
           *log_file << "\n" << "run dk_or_dv_reduce_thd on dk: " << "\n";
           *log_file << "cu_seqlen_kv_ptr: " << args.cu_seqlen_kv_ptr << "\n";
           *log_file << "cu_seqlen_kv_padded_ptr: " << args.cu_seqlen_kv_padded_ptr << "\n";
@@ -662,7 +657,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
             args.stride_h_dk, args.stride_s_dk););
 
         dim3 block_dv(args.d_v);
-        if (auto* log_file = get_ck_log_stream()) {
+        if (log_file) {
           *log_file << "\n" << "run dk_or_dv_reduce_thd on dv: " << "\n";
           *log_file << "cu_seqlen_kv_ptr: " << args.cu_seqlen_kv_ptr << "\n";
           *log_file << "cu_seqlen_kv_padded_ptr: " << args.cu_seqlen_kv_padded_ptr << "\n";
@@ -688,7 +683,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
       dim3 grid(args.b, args.s_kv, args.hg);
       if(args.d_qk == args.d_v){
         dim3 block(args.d_qk);
-        if (auto* log_file = get_ck_log_stream()) {
+        if (log_file) {
           *log_file << "\n" << "run dk_dv_reduce: " << "\n";
           *log_file << "dk_expanded_ptr: " << args.dk_expanded_ptr << "\n";
           *log_file << "dv_expanded_ptr: " << args.dv_expanded_ptr << "\n";
@@ -713,7 +708,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
             args.stride_b_dk, args.stride_h_dk, args.stride_s_dk););
       } else {
         dim3 block_dk(args.d_qk);
-        if (auto* log_file = get_ck_log_stream()) {
+        if (log_file) {
           *log_file << "\n" << "run dk_or_dv_reduce on dk: " << "\n";
           *log_file << "dk_expanded_ptr: " << args.dk_expanded_ptr << "\n";
           *log_file << "stride_b_dk_expanded: " << args.stride_b_dk_expanded << "\n";
@@ -734,7 +729,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
             args.stride_b_dk, args.stride_h_dk, args.stride_s_dk););
 
         dim3 block_dv(args.d_v);
-        if (auto* log_file = get_ck_log_stream()) {
+        if (log_file) {
           *log_file << "\n" << "run dk_or_dv_reduce on dv: " << "\n";
           *log_file << "dv_expanded_ptr: " << args.dv_expanded_ptr << "\n";
           *log_file << "stride_b_dv_expanded: " << args.stride_b_dv_expanded << "\n";
@@ -764,7 +759,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
     dim3 block(THREADS_PER_BLOCK);
     dim3 grid(ceil(1.0 * args.s_q * args.s_kv / THREADS_PER_BLOCK));
     if(bias_shape==BiasShape::k11SS){
-      if (auto* log_file = get_ck_log_stream()) {
+      if (log_file) {
         *log_file << "\n" << "run dbias_reduce_11SS: " << "\n";
         *log_file << "dbias_ptr: " << args.dbias_ptr << "\n";
         *log_file << "dbias_expanded_ptr: " << args.dbias_expanded_ptr << "\n";
@@ -776,7 +771,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
           static_cast<CK_TILE_TYPE*>(args.dbias_expanded_ptr),
           static_cast<CK_TILE_TYPE*>(args.dbias_ptr)););
     }else if(bias_shape==BiasShape::k1HSS){
-      if (auto* log_file = get_ck_log_stream()) {
+      if (log_file) {
         *log_file << "\n" << "run dbias_reduce_1HSS: " << "\n";
         *log_file << "dbias_ptr: " << args.dbias_ptr << "\n";
         *log_file << "dbias_expanded_ptr: " << args.dbias_expanded_ptr << "\n";
@@ -788,7 +783,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
           static_cast<CK_TILE_TYPE*>(args.dbias_expanded_ptr),
           static_cast<CK_TILE_TYPE*>(args.dbias_ptr)););
     }else if(bias_shape==BiasShape::kB1SS){
-      if (auto* log_file = get_ck_log_stream()) {
+      if (log_file) {
         *log_file << "\n" << "run dbias_reduce_B1SS: " << "\n";
         *log_file << "dbias_ptr: " << args.dbias_ptr << "\n";
         *log_file << "dbias_expanded_ptr: " << args.dbias_expanded_ptr << "\n";
