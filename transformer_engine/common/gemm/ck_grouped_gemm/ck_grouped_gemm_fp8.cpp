@@ -38,6 +38,29 @@ struct TileCfg_128x128x128_16x16x128_2x2x1 {
   static constexpr ck_tile::index_t TilePartitionerM01 = 8;
 };
 
+struct TileCfg_128x128x128_16x16x64_2x2x1 {
+  static constexpr ck_tile::index_t M_Tile = 128;
+  static constexpr ck_tile::index_t N_Tile = 128;
+  static constexpr ck_tile::index_t K_Tile = 128;
+
+  static constexpr ck_tile::index_t M_Warp = 2;
+  static constexpr ck_tile::index_t N_Warp = 2;
+  static constexpr ck_tile::index_t K_Warp = 1;
+
+  static constexpr ck_tile::index_t M_Warp_Tile = 16;
+  static constexpr ck_tile::index_t N_Warp_Tile = 16;
+  static constexpr ck_tile::index_t K_Warp_Tile = 64;
+
+  static constexpr bool kPadM = false;
+  static constexpr bool kPadN = false;
+  static constexpr bool kPadK = false;
+
+  static constexpr bool DoubleSmemBuffer = false;
+
+  static constexpr ck_tile::index_t TilePartitionerGroupNum = 16;
+  static constexpr ck_tile::index_t TilePartitionerM01 = 8;
+};
+
 // gfx950 device compilation cannot instantiate the literal 32x32x16 FP8 tile
 // configuration due to an unsupported warp GEMM dispatcher configuration.
 // See: ck_tile/ops/gemm/warp/warp_gemm_dispatcher.hpp for supported variants.
@@ -48,7 +71,7 @@ struct TileCfg_128x128x128_16x16x128_2x2x1 {
 //
 // In all other compilation paths, the struct overrides the relevant fields to
 // provide the intended 32x32x16 configuration.
-#if defined(__gfx950__) || defined(__gfx125__)
+#if defined(__gfx950__)
 struct TileCfg_128x128x128_32x32x16_2x2x1
     : TileCfg_128x128x128_16x16x128_2x2x1 {};
 #else
@@ -272,7 +295,7 @@ struct FP8TileCfg<GPUArch::GFX950> {
 
 template <>
 struct FP8TileCfg<GPUArch::GFX1250> {
-  using type = TileCfg_128x128x128_16x16x128_2x2x1;
+  using type = TileCfg_128x128x128_16x16x64_2x2x1;
 };
 
 template <GPUArch Arch>
@@ -286,31 +309,38 @@ static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
   using CTypeLayout = RowMajor;
   using TileCfg = typename FP8TileCfg<Arch>::type;
 
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(ctx.transA, kTransA, {
-    using ALayout = std::conditional_t<kTransA, ColMajor, RowMajor>;
+  // FP8 grouped GEMM is only compiled for CK's preferred NT presentation:
+  //   transA=false, transB=true
+  // which maps to:
+  //   ALayout=RowMajor, BLayout=ColMajor.
+  //
+  // The caller is responsible for rewriting other FP8 layouts into this form
+  // using columnwise_data when needed. Reject anything that did not normalize
+  // successfully so we do not instantiate unreachable/unsupported layout variants.
+  if (ctx.transA || !ctx.transB) {
+    return false;
+  }
 
-    TRANSFORMER_ENGINE_SWITCH_CONDITION(ctx.transB, kTransB, {
-      using BLayout = std::conditional_t<kTransB, ColMajor, RowMajor>;
+  using ALayout = RowMajor;
+  using BLayout = ColMajor;
 
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(a_dtype, a_te_type, {
-        using AType = typename TETypeToCKType<a_te_type>::type;
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(a_dtype, a_te_type, {
+    using AType = typename TETypeToCKType<a_te_type>::type;
 
-        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(b_dtype, b_te_type, {
-          using BType = typename TETypeToCKType<b_te_type>::type;
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(b_dtype, b_te_type, {
+      using BType = typename TETypeToCKType<b_te_type>::type;
 
-          TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(d_dtype, d_te_type, {
-            using CType = typename TETypeToCKType<d_te_type>::type;
-            using Runner = QuantGroupedGemmRunner<AType,
-                                                  BType,
-                                                  CType,
-                                                  ALayout,
-                                                  BLayout,
-                                                  CTypeLayout,
-                                                  TileCfg,
-                                                  ck_tile::memory_operation_enum::set>;
-            runner = std::make_unique<Runner>();
-          });
-        });
+      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(d_dtype, d_te_type, {
+        using CType = typename TETypeToCKType<d_te_type>::type;
+        using Runner = QuantGroupedGemmRunner<AType,
+                                              BType,
+                                              CType,
+                                              ALayout,
+                                              BLayout,
+                                              CTypeLayout,
+                                              TileCfg,
+                                              ck_tile::memory_operation_enum::set>;
+        runner = std::make_unique<Runner>();
       });
     });
   });
