@@ -143,6 +143,12 @@ void launch_rmsnorm_fwd_general_(LaunchParams<ForwardKernelParams> &launch_param
 // Create rmsnorm tuned launch function and register. Macro signature:
 //  HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG
 
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, tuned, 128, fp32, fp32, fp32, fp32, 1, 4, 1, 16);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, tuned, 128, fp16, fp16, fp16, fp32, 1, 4, 1, 8);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, tuned, 128, fp32, fp32, fp16, fp32, 1, 4, 1, 8);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, tuned, 128, bf16, bf16, bf16, fp32, 1, 4, 1, 8);
+REGISTER_NORM_LAUNCHER(RMSNorm, Forward, tuned, 128, fp32, fp32, bf16, fp32, 1, 4, 1, 8);
+
 REGISTER_NORM_LAUNCHER(RMSNorm, Forward, tuned, 512, bf16, bf16, fp8e4m3, fp32, 1, 4, 1, 16);
 REGISTER_NORM_LAUNCHER(RMSNorm, Forward, tuned, 512, fp16, fp16, fp8e4m3, fp32, 1, 4, 1, 16);
 REGISTER_NORM_LAUNCHER(RMSNorm, Forward, tuned, 512, fp32, fp32, fp8e4m3, fp32, 1, 4, 1, 16);
