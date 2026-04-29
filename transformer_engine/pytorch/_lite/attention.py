@@ -26,6 +26,7 @@ _LITE_DIAG = os.environ.get("NVTE_LITE_DIAG", "0") != "0"
 
 from collections import Counter as _AttnCounter
 _ATTN_CALLS = _AttnCounter()
+_FWD_ARGS_PRINTED = False
 
 def _attn_bump(tag):
     if not _LITE_DIAG:
@@ -33,6 +34,26 @@ def _attn_bump(tag):
     _ATTN_CALLS[tag] += 1
     if sum(_ATTN_CALLS.values()) % 500 == 0:
         print(f"[LITE-ATTN] {dict(_ATTN_CALLS)}", flush=True)
+
+
+def _attn_probe_fwd_args(q_fmt, q, k, v, attn_bias, causal, wl, wr, dropout_p):
+    """One-shot dump of fwd arg shape/flags (NVTE_LITE_DIAG=1 only).
+
+    Mirrors the conditions aiter uses to gate its AOT fmha_v3_fwd vs the
+    slower JIT ck_tile mha_fwd path (see can_impl_fmha_v3_fwd in aiter
+    mha.py). Helpful when an attention backend regression appears.
+    """
+    global _FWD_ARGS_PRINTED
+    if not _LITE_DIAG or _FWD_ARGS_PRINTED:
+        return
+    _FWD_ARGS_PRINTED = True
+    print(
+        f"[LITE-ATTN-FWD] fmt={q_fmt} dtype={q.dtype} "
+        f"q={tuple(q.shape)} k={tuple(k.shape)} v={tuple(v.shape)} "
+        f"causal={causal} window=({wl},{wr}) dropout_p={dropout_p} "
+        f"bias={attn_bias is not None}",
+        flush=True,
+    )
 
 # ---------------------------------------------------------------------------
 # AITER raw kernel imports (lazy)
@@ -255,8 +276,10 @@ def _aiter_attn_fwd(
     """AITER CK attention forward via raw _flash_attn_*_forward."""
     q_fmt, kv_fmt = _get_qkv_format(qkv_layout)
     wl, wr = window_size
+    _drop = dropout if is_training else 0.0
 
     if q_fmt == "thd":
+        _attn_probe_fwd_args(q_fmt, q, k, v, attn_bias, causal, wl, wr, _drop)
         # Q/K/V already in (total, heads, dim) -- use varlen API
         out, softmax_lse, _, rng_state = _aiter_varlen_fwd(
             q, k, v,
@@ -264,7 +287,7 @@ def _aiter_attn_fwd(
             cu_seqlens_q_padded, cu_seqlens_kv_padded,
             max_seqlen_q, max_seqlen_kv,
             0,  # min_seqlen_q
-            dropout if is_training else 0.0,
+            _drop,
             attn_scale,
             causal=causal,
             window_size_left=wl,
@@ -277,24 +300,13 @@ def _aiter_attn_fwd(
         q_bshd = _to_bshd(q, q_fmt)
         k_bshd = _to_bshd(k, kv_fmt)
         v_bshd = _to_bshd(v, kv_fmt)
-        if _LITE_DIAG and _ATTN_CALLS.get("fwd_aiter_ck", 0) <= 1:
-            _drop = dropout if is_training else 0.0
-            _b, _s, _hq, _hd = q_bshd.shape
-            _hk = k_bshd.shape[2]
-            print(
-                f"[LITE-ATTN-FWD-PROBE] dtype={q_bshd.dtype} "
-                f"q={tuple(q_bshd.shape)} k={tuple(k_bshd.shape)} v={tuple(v_bshd.shape)} "
-                f"hd_q={_hd} hd_v={v_bshd.shape[3]} nh_q={_hq} nh_k={_hk} "
-                f"bias_is_none={attn_bias is None} causal={causal} "
-                f"window=({wl},{wr}) dropout_p={_drop} seqlen_q={_s}",
-                flush=True,
-            )
+        _attn_probe_fwd_args(q_fmt, q_bshd, k_bshd, v_bshd, attn_bias, causal, wl, wr, _drop)
         # Pass via keyword to stay resilient to aiter API drift — newer
         # aiter releases inserted positional args (sink_size, *_descale)
         # between window_size_right and return_lse.
         out, softmax_lse, _, rng_state = _aiter_fwd(
             q_bshd, k_bshd, v_bshd,
-            dropout_p=dropout if is_training else 0.0,
+            dropout_p=_drop,
             softmax_scale=attn_scale,
             causal=causal,
             window_size_left=wl,
