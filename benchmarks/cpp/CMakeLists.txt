@@ -15,6 +15,15 @@ find_package(HIP REQUIRED)
 
 include(FetchContent)
 FetchContent_Declare(
+  googletest
+  GIT_REPOSITORY https://github.com/google/googletest.git
+  GIT_TAG v1.14.0
+)
+set(BUILD_GMOCK OFF CACHE BOOL "" FORCE)
+set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
+FetchContent_MakeAvailable(googletest)
+
+FetchContent_Declare(
   benchmark
   GIT_REPOSITORY https://github.com/google/benchmark.git
   GIT_TAG v1.8.3
@@ -22,6 +31,17 @@ FetchContent_Declare(
 set(BENCHMARK_ENABLE_TESTING OFF CACHE BOOL "Disable benchmark tests" FORCE)
 set(BENCHMARK_ENABLE_GTEST_TESTS OFF CACHE BOOL "Disable gtest in benchmark" FORCE)
 FetchContent_MakeAvailable(benchmark)
+# Suppress clang warnings from benchmark headers that fire under -pedantic-errors
+# on newer ROCm toolchains (gfx1250): __COUNTER__ classified as C2y extension,
+# and kDefaultMinTimeStr triggers -Wunused-const-variable when benchmark.h is
+# compiled as a standalone TU by hipcc.
+set_target_properties(benchmark benchmark_main PROPERTIES LINKER_LANGUAGE CXX)
+foreach(_bench_target benchmark benchmark_main)
+    target_compile_options(${_bench_target} PRIVATE
+        -Wno-c2y-extensions
+        -Wno-unused-const-variable
+    )
+endforeach()
 
 set(TESTS_CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../../tests/cpp)
 
@@ -77,6 +97,7 @@ function(add_te_benchmark TARGET_NAME SOURCE_FILE)
   target_compile_definitions(${TARGET_NAME} PRIVATE NVTE_ROCM_BENCHMARK)
   target_link_libraries(${TARGET_NAME} PRIVATE
     benchmark::benchmark
+    GTest::gtest
     ${TRANSFORMER_ENGINE_LIB}
     hiprand
   )
