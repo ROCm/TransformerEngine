@@ -12,6 +12,51 @@ permissions:
   contents: read
 
 jobs:
+  # To determine whether to upload AITER prebuilt to Artifactory
+  aiter_upload_trigger:
+    name: PR — set trigger_aiter_upload
+    runs-on: ubuntu-latest
+    outputs:
+      trigger_aiter_upload: ${{ steps.set.outputs.trigger_aiter_upload }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - uses: dorny/paths-filter@v3
+        id: paths
+        if: github.event.action == 'synchronize'
+        with:
+          filters: |
+            aiter:
+              - '3rdparty/aiter/**'
+
+      - name: Detect skip_aiter_upload label
+        id: skip_label
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const labels = context.payload.pull_request?.labels || [];
+            const skip = labels.some((l) => l.name === 'skip_aiter_upload');
+            core.setOutput('skip', skip ? 'true' : 'false');
+
+      - id: set
+        run: |
+          set -euo pipefail
+          if [ '${{ github.event.action }}' != "synchronize" ]; then
+            echo "trigger_aiter_upload=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ '${{ steps.skip_label.outputs.skip }}' = 'true' ]; then
+            echo "trigger_aiter_upload=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ "${{ steps.paths.outputs.aiter }}" = "true" ]; then
+            echo "trigger_aiter_upload=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "trigger_aiter_upload=false" >> "$GITHUB_OUTPUT"
+          fi
+
   determine_level:
     runs-on: ubuntu-latest
     outputs:
@@ -53,9 +98,10 @@ jobs:
     # - A commit was pushed with existing ci-level label(s)
     # - The PR was reopened or opened with existing ci-level label(s)
     if: ${{ needs.determine_level.outputs.test_level != '' }}
-    needs: determine_level
+    needs: [determine_level, aiter_upload_trigger]
     name: CI Level ${{ needs.determine_level.outputs.test_level }}
     uses: ./.github/workflows/rocm-ci.yml
     secrets: inherit
     with:
       test_level: ${{ needs.determine_level.outputs.test_level }}
+      trigger_aiter_upload: ${{ needs.aiter_upload_trigger.outputs.trigger_aiter_upload == 'true' }}

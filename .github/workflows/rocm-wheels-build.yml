@@ -76,6 +76,8 @@ jobs:
   build-rocm-wheels:
     name: Build ROCm Docker image and TransformerEngine wheels
     runs-on: build-only-te
+    env:
+      NVTE_AITER_PREBUILT_BASE_URL: ${{ vars.NVTE_AITER_PREBUILT_BASE_URL }}
 
     steps:
       - name: Checkout repository
@@ -88,6 +90,19 @@ jobs:
             3rdparty/aiter \
             3rdparty/QoLA \
             3rdparty/hipify_torch
+
+      # Verify this runner can reach Artifactory for anonymous prebuilt downloads (informational; does not fail CI).
+      - name: Artifactory reachability from build runner
+        if: ${{ inputs.use_prebuilt_aiter }}
+        continue-on-error: true
+        run: |
+          set -euo pipefail
+          if bash .github/scripts/aiter_prebuild_upload.sh --preflight --download; then
+            echo "::notice::build-only-te can reach prebuilt Artifactory for downloads."
+            exit 0
+          fi
+          echo "::warning::Prebuilt Artifactory check failed on build-only-te — see script output above."
+          exit 1
 
       - name: Derive Docker image tag
         id: set-tag
@@ -187,7 +202,7 @@ jobs:
       # The container writes all wheels and logs under /wheelhouse.
       - name: Build TransformerEngine wheels
         run: |
-          NVTE_AITER_PREBUILT_BASE_URL="https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts"
+          set -euo pipefail
           docker run --rm \
             --env LOCAL_TREE_BUILD=1 \
             --env NVTE_SKIP_SUBMODULE_CHECKS_DURING_BUILD=1 \

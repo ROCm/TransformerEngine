@@ -26,6 +26,11 @@ on:
         required: false
         default: false
         type: boolean
+      trigger_aiter_upload:
+        description: 'True when 3rdparty/aiter changed on the PR (set by rocm-ci-dispatch)'
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
     inputs:
       test_level:
@@ -99,8 +104,19 @@ jobs:
           echo "Selected image: $IMAGE_TO_USE"
           echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
 
+  upload_aiter_prebuilt:
+    name: Build and upload AITER prebuilt
+    needs: select_image
+    if: ${{ (github.event_name == 'workflow_call' && inputs.trigger_aiter_upload == 'true') }}
+    uses: ./.github/workflows/aiter-prebuilt-upload.yml
+    with:
+      docker_image: ${{ needs.select_image.outputs.image-tag }}
+    secrets: inherit
+
   build:
     # Delegate wheel building to the reusable workflow on dev. It produces a core .whl plus framework .tar.gz sdists under artifact name `te-rocm-wheels`.
+    needs: [select_image, upload_aiter_prebuilt]
+    if: always() && needs.select_image.result == 'success' && (needs.upload_aiter_prebuilt.result == 'skipped' || needs.upload_aiter_prebuilt.result == 'success')
     uses: ./.github/workflows/rocm-wheels-build.yml
     secrets: inherit
 
