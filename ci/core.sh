@@ -33,6 +33,11 @@ if [ $? -eq 0 ]; then
     echo ===== Run non GEMM tests =====
     ctest --test-dir build -j"$n_parallel_jobs" -V --output-on-failure -E "GEMMTestSuite"
     test $? -eq 0 || test_run_error "non-GEMM"
+
+    echo ===== Run non GEMM tests with NV upstream TDM flow =====
+    NVTE_USE_NV_UPSTREAM_FLOW=1 ctest --test-dir build -j"$n_parallel_jobs" -V --output-on-failure \
+        -R "FusedCastMXFP8TestSuite|CastMXFP8_GatedActTestSuite|DequantizeMXFP8TestSuite"
+    test $? -eq 0 || test_run_error "non-GEMM NV upstream flow"
 fi
 
 check_test_filter "gemm"

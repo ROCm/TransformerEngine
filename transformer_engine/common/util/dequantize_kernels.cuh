@@ -24,6 +24,7 @@
 #include <limits>
 
 #include "../common.h"
+#include "cuda_runtime.h"
 #include "../transpose/cast_transpose.h"
 #include "../util/vectorized_pointwise.h"
 #include "../utils.cuh"
@@ -33,20 +34,42 @@
 #include "transformer_engine/transpose.h"
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_dequantize_kernels.cuh"
+#include "tdm.cuh"
 #endif
 
 namespace transformer_engine {
 
 namespace dequantization {
 
-#ifndef __HIP_PLATFORM_AMD__
+constexpr size_t CHUNK_DIM_Y = 128;
+constexpr size_t CHUNK_DIM_X = 128;
+constexpr size_t THREADS_PER_CHUNK = 128;
+constexpr size_t BUFFERS_NUM = 2;
+constexpr size_t PREFETCH_BUFFERS_NUM = 1;
+static_assert(PREFETCH_BUFFERS_NUM < BUFFERS_NUM);
+
+constexpr size_t ELEMS_PER_THREAD = 16;
+constexpr size_t BUFFER_DIM_Y = 16;
+constexpr size_t SHMEM_DIM_Y = BUFFER_DIM_Y;  // 16
+constexpr size_t SHMEM_DIM_X = CHUNK_DIM_X;   // 128
+
+constexpr size_t THREADS_PER_CHUNK_X_ROWWISE = CHUNK_DIM_X / ELEMS_PER_THREAD;  //   8 = 128 / 16
+constexpr size_t THREADS_PER_CHUNK_X_COLWISE = CHUNK_DIM_X;                     // 128
+constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                       //   8 = 128 / 16
+
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
-    dequantize_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
+    dequantize_mxfp8_kernel(
+#ifdef __HIP_PLATFORM_AMD__
+                            const IType *__restrict__ input_ptr,
+                            OType *__restrict__ output_ptr,
+#else
+                            const __grid_constant__ CUtensorMap tensor_map_input,
                             const __grid_constant__ CUtensorMap tensor_map_output,
+#endif
                             const e8m0_t *const scales_ptr, const size_t rows, const size_t cols,
                             const size_t scales_stride) {
-#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
 
   constexpr size_t SCALES_ROWWISE_PER_CHUNK_Y = CHUNK_DIM_Y;                //  128
@@ -75,15 +98,20 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   const int thread_offset_X_rowwise = tid_rowwise_X * ELEMS_PER_THREAD;
   // const int thread_offset_X_colwise = tid_colwise_X;
 
-  // The destination shared memory buffer of a bulk tensor operation should be 128 e8m0_t aligned
+  // The destination shared memory buffer of a bulk tensor operation should be 128-byte aligned
   __shared__ alignas(TMA_SHMEM_ALIGNMENT) IType in_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
   __shared__ alignas(TMA_SHMEM_ALIGNMENT) OType out_sh[BUFFERS_NUM][SHMEM_DIM_Y][SHMEM_DIM_X];
 
   constexpr int shmem_buff_size = sizeof(in_sh) / BUFFERS_NUM;
+#ifndef __HIP_PLATFORM_AMD__
+  // TMA mbarriers require the expected byte count to know when the async copy is done.
+  // TDM does not need this — it uses s_wait_tensorcnt which counts outstanding ops, not bytes.
   constexpr int transaction_size = shmem_buff_size;
+#endif
 
   const bool is_master_thread = (threadIdx.x == 0);
 
+#ifndef __HIP_PLATFORM_AMD__
 // Initialize shared memory barrier with the number of threads participating in the barrier.
 #pragma nv_diag_suppress static_var_with_dynamic_init
   __shared__ alignas(8) uint64_t mbar[ITERATIONS];
@@ -118,12 +146,23 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     // Other threads just arrive
     ptx::mbarrier_arrive(&mbar[iteration_zero]);
   }
+#else  // __HIP_PLATFORM_AMD__ — TDM prefetch
+  constexpr uint32_t deq_in_data_sz = tdm::get_data_size_from_bits(sizeof(IType) * 8);
+  constexpr uint32_t deq_out_data_sz = tdm::get_data_size_from_bits(sizeof(OType) * 8);
+
+  // Prefetch first iteration
+  tdm::copy_2d_to_shared(&in_sh[0][0][0], input_ptr,
+                         chunk_offset_X, chunk_offset_Y,
+                         SHMEM_DIM_X, SHMEM_DIM_Y,
+                         cols, rows, cols, deq_in_data_sz);
+#endif  // __HIP_PLATFORM_AMD__
 
 #pragma unroll
   for (int iter = 0; iter < ITERATIONS; ++iter) {
     const int buff = iter % BUFFERS_NUM;
     const int next_iter = iter + 1;
     if (next_iter < ITERATIONS) {
+#ifndef __HIP_PLATFORM_AMD__
       if (is_master_thread) {
         const int next_buff = next_iter % BUFFERS_NUM;
         const int chunk_it_offset_y = chunk_offset_Y + next_iter * BUFFER_DIM_Y;
@@ -140,12 +179,34 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         // Other threads just arrive
         ptx::mbarrier_arrive(&mbar[next_iter]);
       }
+#else  // __HIP_PLATFORM_AMD__ — TDM prefetch next iteration
+      {
+        const int next_buff = next_iter % BUFFERS_NUM;
+        const int chunk_it_offset_y = chunk_offset_Y + next_iter * BUFFER_DIM_Y;
+        const int chunk_it_offset_x = chunk_offset_X;
+        tdm::copy_2d_to_shared(&in_sh[next_buff][0][0], input_ptr,
+                               chunk_it_offset_x, chunk_it_offset_y,
+                               SHMEM_DIM_X, SHMEM_DIM_Y,
+                               cols, rows, cols, deq_in_data_sz);
+      }
+#endif  // __HIP_PLATFORM_AMD__
     }
 
+#ifndef __HIP_PLATFORM_AMD__
     ptx::fence_proxy_async_shared_cta();
 
     // Wait for the data to have arrived
     ptx::mbarrier_wait_parity(&mbar[iter], parity);
+#else
+    // Wait for current buffer's loads (and any prior stores) to complete,
+    // but keep the just-issued prefetch for the next buffer alive.
+    if (next_iter < ITERATIONS) {
+      tdm::wait_tensorcnt_1();  // 1 prefetch load in flight
+    } else {
+      tdm::wait_tensorcnt_0();  // Last iteration — drain all
+    }
+    __syncthreads();
+#endif
 
     const int scale_offset_Y =
         USE_ROWWISE_SCALING ? (scales_rowwise_chunk_offset_Y + iter * BUFFER_DIM_Y + tid_rowwise_Y)
@@ -181,6 +242,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
     }
 
+#ifndef __HIP_PLATFORM_AMD__
     // Wait for shared memory writes to be visible to TMA engine.
     ptx::fence_proxy_async_shared_cta();
     __syncthreads();
@@ -200,7 +262,28 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // Wait for TMA transfer to have finished reading shared memory.
       ptx::cp_async_bulk_wait_group_read<1>();
     }
+#else  // __HIP_PLATFORM_AMD__ — TDM store
+    __syncthreads();
+    {
+      const int chunk_it_offset_y = chunk_offset_Y + iter * BUFFER_DIM_Y;
+      const int chunk_it_offset_x = chunk_offset_X;
+      tdm::store_2d_to_global(&out_sh[buff][0][0], output_ptr,
+                              chunk_it_offset_x, chunk_it_offset_y,
+                              SHMEM_DIM_X, SHMEM_DIM_Y,
+                              cols, rows, cols, deq_out_data_sz);
+      // Leave the prefetched next-iteration load in flight while we move on.
+      // On the last iteration there is no prefetch, so drain completely.
+      if (next_iter < ITERATIONS) {
+        tdm::wait_tensorcnt<PREFETCH_BUFFERS_NUM>();
+      } else {
+        tdm::wait_tensorcnt<0>();
+      }
+      __syncthreads();
+    }
+#endif  // __HIP_PLATFORM_AMD__
   }
+
+#ifndef __HIP_PLATFORM_AMD__
   ptx::cp_async_bulk_wait_group_read<0>();
   __syncthreads();
 
@@ -209,15 +292,18 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   // Destroy barrier. This invalidates the memory region of the barrier. If
   // further computations were to take place in the kernel, this allows the
   // memory location of the shared memory barrier to be reused.
+  // TDM does not use mbarriers — it uses s_wait_tensorcnt, so no barrier destroy is needed.
   if (is_master_thread) {
 #pragma unroll
     for (int iter = 0; iter < ITERATIONS; ++iter) {
       ptx::mbarrier_invalid(&mbar[iter]);
     }
   }
-#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+#else
+  tdm::wait_tensorcnt_0();
+#endif
+#endif  // #if defined(__gfx1250__) || ((defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000))
 }
-#endif // #ifndef __HIP_PLATFORM_AMD__
 
 static void fp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t stream) {
   NVTE_CHECK(is_fp8_dtype(input.data.dtype), "Input must have FP8 type.");
@@ -278,17 +364,13 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
   const size_t unpadded_scales_X_colwise = cols;
 
   const size_t scales_Y_rowwise =
-      DIVUP(unpadded_scales_Y_rowwise, scale_tensor_alignment_Y_rowwise) *
-      scale_tensor_alignment_Y_rowwise;
+      DIVUP_TO_MULTIPLE(unpadded_scales_Y_rowwise, scale_tensor_alignment_Y_rowwise);
   const size_t scales_X_rowwise =
-      DIVUP(unpadded_scales_X_rowwise, scale_tensor_alignment_X_rowwise) *
-      scale_tensor_alignment_X_rowwise;
+      DIVUP_TO_MULTIPLE(unpadded_scales_X_rowwise, scale_tensor_alignment_X_rowwise);
   const size_t scales_Y_colwise =
-      DIVUP(unpadded_scales_Y_colwise, scale_tensor_alignment_Y_colwise) *
-      scale_tensor_alignment_Y_colwise;
+      DIVUP_TO_MULTIPLE(unpadded_scales_Y_colwise, scale_tensor_alignment_Y_colwise);
   const size_t scales_X_colwise =
-      DIVUP(unpadded_scales_X_colwise, scale_tensor_alignment_X_colwise) *
-      scale_tensor_alignment_X_colwise;
+      DIVUP_TO_MULTIPLE(unpadded_scales_X_colwise, scale_tensor_alignment_X_colwise);
 
   const e8m0_t *const scales_ptr =
       use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(input.scale_inv.dptr)
@@ -310,11 +392,12 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
               TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
                   output->dtype(), OType,
 #ifdef __HIP_PLATFORM_AMD__
-              TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                  !(cols % (32 * sizeof(OType))), IS_ALIGNED,
-                  dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
-                  <<<grid, block, 0, stream>>>(reinterpret_cast<const IType *>(input_data.dptr), reinterpret_cast<OType *>(output->data.dptr), scales_ptr,
-                                               rows, cols, scales_stride););  // NOLINT(*)
+                  // TDM flow — uses dequantization::dequantize_mxfp8_kernel
+                  dequantization::dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
+                      <<<grid, block, 0, stream>>>(
+                          reinterpret_cast<const IType *>(input_data.dptr),
+                          reinterpret_cast<OType *>(output->data.dptr),
+                          scales_ptr, rows, cols, scales_stride);
 #else // #ifdef __HIP_PLATFORM_AMD__
                   alignas(64) CUtensorMap tensor_map_input{};
                   alignas(64) CUtensorMap tensor_map_output{};
@@ -326,14 +409,12 @@ static void mxfp8_dequantize(const Tensor &input, Tensor *output, cudaStream_t s
 
                   dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
                   <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_output, scales_ptr,
-                                               rows, cols, scales_stride););  // NOLINT(*)
+                                               rows, cols, scales_stride);
 #endif // #ifdef __HIP_PLATFORM_AMD__
           );                                                                  // NOLINT(*)
       );                                                                      // NOLINT(*)
   );                                                                          // NOLINT(*)
-#ifdef __HIP_PLATFORM_AMD__
   );                                                                          // NOLINT(*)
-#endif
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 }  // namespace dequantization
@@ -347,15 +428,26 @@ void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t stream)
   if (is_tensor_scaling(input.scaling_mode)) {
     dequantization::fp8_dequantize(input, output, stream);
   } else if (is_mxfp_scaling(input.scaling_mode)) {
-#ifdef __HIP_PLATFORM_AMD__
-    if (1) {
+#if defined(__HIP_PLATFORM_AMD__) && defined(NVTE_ARCH_HAS_TDM)
+    static const bool use_tdm_flow = [] {
+      const char *env = std::getenv("NVTE_USE_TDM_FLOW");
+      return env != nullptr && env[0] == '1' && env[1] == '\0' &&
+             cuda::sm_arch_name().find("gfx1250") != std::string::npos;
+    }();
+    if (use_tdm_flow) {
+      dequantization::mxfp8_dequantize(input, output, stream);
+    } else {
+      rocm_mxfp8_dequantize(input, output, stream);
+    }
+#elif defined(__HIP_PLATFORM_AMD__)
+    rocm_mxfp8_dequantize(input, output, stream);
 #else
     if (is_supported_by_CC_100()) {
-#endif
       dequantization::mxfp8_dequantize(input, output, stream);
     } else {
       NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
     }
+#endif
   } else {
     // TODO(kwyss): Move dequantization code from torch to C++ for NVTE_BLOCK_SCALING
     NVTE_ERROR("Not implemented scaling mode: " + to_string(input.scaling_mode) + ".");

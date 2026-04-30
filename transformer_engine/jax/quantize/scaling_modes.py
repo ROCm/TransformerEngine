@@ -1,5 +1,3 @@
-# This file was modified for portability to AMDGPU
-# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -25,7 +23,6 @@ import jax.numpy as jnp
 
 from transformer_engine_jax import JAXX_Scaling_Mode, QuantizeLayout
 from .device_utils import is_fp8_gemm_with_all_layouts_supported
-from ..util import is_hip_extension
 
 
 __all__ = [
@@ -369,11 +366,7 @@ class BlockScalingModeMetadataImpl(ScalingModeMetadataImpl):
             block_dims: Dimensions of the scaling blocks
         """
         self._block_dims = block_dims
-        if is_hip_extension():
-            self._block_alignment = (1, 1)
-        else:
-            self._block_alignment = (128, 4)
-        
+        self._block_alignment = (128, 4)
 
     def get_scale_dtype(self) -> jnp.dtype:
         """Get the data type for scale tensors in block scaling.

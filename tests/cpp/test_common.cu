@@ -17,7 +17,9 @@
 #include <cmath>
 #include <string>
 
+#ifndef NVTE_ROCM_BENCHMARK
 #include <gtest/gtest.h>
+#endif
 #include <omp.h>
 
 #include <transformer_engine/transformer_engine.h>
@@ -28,9 +30,13 @@
 namespace test {
 
 size_t create_seed_from_tensor_name(const std::string& tensor_name) {
+#ifndef NVTE_ROCM_BENCHMARK
   auto full_name = std::string(testing::UnitTest::GetInstance()->current_test_info()->name()) +
                    "/" + tensor_name;
   return std::hash<std::string>{}(full_name);
+#else
+  return std::hash<std::string>{}(tensor_name);
+#endif
 }
 
 std::vector<DType> all_fp_types = {DType::kFloat32,
@@ -147,11 +153,7 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     scale_inv_meta ret_rowwise, ret_colwise;
 
-#ifdef __HIP_PLATFORM_AMD__
-    auto block_alignment = std::vector<size_t>{1ul, 1ul};
-#else
     auto block_alignment = std::vector<size_t>{128ul, 4ul};
-#endif
     {
       auto alignment = block_alignment[0];
       auto scale_dim_0 = DIVUP(DIVUP(first_dim, static_cast<size_t>(1)), alignment) * alignment;
@@ -185,20 +187,12 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     {
       auto scale_dim_0 = DIVUP(first_dim, static_cast<size_t>(128));
-#ifdef __HIP_PLATFORM_AMD__
-      auto scale_dim_1 = DIVUP(last_dim, static_cast<size_t>(128));
-#else
       auto scale_dim_1 = DIVUP(DIVUP(last_dim, static_cast<size_t>(128)), 4) * 4;
-#endif
       ret_rowwise.shape = {scale_dim_0, scale_dim_1};
     }
     {
       auto scale_dim_0 = DIVUP(last_dim, static_cast<size_t>(128));
-#ifdef __HIP_PLATFORM_AMD__
-      auto scale_dim_1 = DIVUP(first_dim, static_cast<size_t>(128));
-#else
       auto scale_dim_1 = DIVUP(DIVUP(first_dim, static_cast<size_t>(128)), 4) * 4;
-#endif
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
     ret_rowwise.type = DType::kFloat32;
@@ -219,20 +213,12 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     {
       auto scale_dim_0 = DIVUP(last_dim, static_cast<size_t>(128));
-#ifdef __HIP_PLATFORM_AMD__
-      auto scale_dim_1 = first_dim;
-#else 
       auto scale_dim_1 = DIVUP(first_dim, 4) * 4;
-#endif
       ret_rowwise.shape = {scale_dim_0, scale_dim_1};
     }
     {
       auto scale_dim_0 = DIVUP(first_dim, static_cast<size_t>(128));
-#ifdef __HIP_PLATFORM_AMD__
-      auto scale_dim_1 = last_dim;
-#else 
       auto scale_dim_1 = DIVUP(last_dim, 4) * 4;
-#endif
       ret_colwise.shape = {scale_dim_0, scale_dim_1};
     }
     ret_rowwise.type = DType::kFloat32;
@@ -292,7 +278,6 @@ Tensor::Tensor(const std::string& name,
   }
 
   tensor_ = TensorWrapper(scaling_mode);
-
   if (total_size != 0) {
     if (rowwise) {
       (void)cudaMalloc((void**)&dptr_rowwise, total_size);  // NOLINT(*)
@@ -548,6 +533,8 @@ std::vector<size_t> unravel(const size_t i, const NVTEShape &shape) {
   return ret;
 }
 
+#ifndef NVTE_ROCM_BENCHMARK
+
 void compareResults_sequential(const std::string &name, const Tensor &test,
                                const void *ref, const bool rowwise,
                                double atol, double rtol, bool if_on_gpus,
@@ -789,6 +776,8 @@ void adjust_ref_for_e8m0_scale_error(const std::string &name,
   }
 }
 #endif // #ifdef __HIP_PLATFORM_AMD__
+
+#endif  // NVTE_ROCM_BENCHMARK
 
 std::pair<double, double> getTolerances(const DType type) {
   switch(type) {

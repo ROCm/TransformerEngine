@@ -9,6 +9,7 @@
 #include <hip/hip_runtime.h>
 
 #include "../common.h"
+#include "cuda_runtime.h"
 #include "math.h"
 #include "ptx.cuh"
 #include "rocm_vectorized_2d.cuh"
@@ -33,19 +34,19 @@ constexpr size_t MXFP8_CHUNKS_PER_BLOCK_X = 1;
 constexpr size_t MXFP8_CHUNKS_PER_BLOCK = MXFP8_CHUNKS_PER_BLOCK_Y * MXFP8_CHUNKS_PER_BLOCK_X;
 constexpr size_t MXFP8_THREADS_PER_CHUNK = 64;
 
-constexpr size_t ELEMS_PER_THREAD = 16;
+constexpr size_t ROCM_ELEMS_PER_THREAD = 16;
 constexpr size_t MXFP8_BUFFER_DIM_Y = 32;                 // only 32 is supported
 constexpr size_t MXFP8_BUFFER_DIM_X = MXFP8_CHUNK_DIM_X;  // 64
 constexpr size_t MXFP8_SHMEM_DIM_Y = MXFP8_BUFFER_DIM_Y;  // 32
 constexpr size_t MXFP8_SHMEM_DIM_X = MXFP8_BUFFER_DIM_X;  // 64
 
-constexpr size_t THREADS_PER_CHUNK_X_ROWWISE =
-    MXFP8_CHUNK_DIM_X / ELEMS_PER_THREAD;  //   4 = 64 / 16
-constexpr size_t THREADS_PER_CHUNK_Y_ROWWISE =
-    MXFP8_THREADS_PER_CHUNK / THREADS_PER_CHUNK_X_ROWWISE;         //  16 = 64 / 4
-constexpr size_t THREADS_PER_CHUNK_X_COLWISE = MXFP8_CHUNK_DIM_X;  //  64
+constexpr size_t ROCM_THREADS_PER_CHUNK_X_ROWWISE =
+    MXFP8_CHUNK_DIM_X / ROCM_ELEMS_PER_THREAD;  //   4 = 64 / 16
+constexpr size_t ROCM_THREADS_PER_CHUNK_Y_ROWWISE =
+    MXFP8_THREADS_PER_CHUNK / ROCM_THREADS_PER_CHUNK_X_ROWWISE;         //  16 = 64 / 4
+constexpr size_t ROCM_THREADS_PER_CHUNK_X_COLWISE = MXFP8_CHUNK_DIM_X;  //  64
 constexpr size_t MXFP8_BUFF_STAGES_NUM =
-    MXFP8_BUFFER_DIM_Y / THREADS_PER_CHUNK_Y_ROWWISE;                        //   2 = 32 / 16
+    MXFP8_BUFFER_DIM_Y / ROCM_THREADS_PER_CHUNK_Y_ROWWISE;                        //   2 = 32 / 16
 constexpr size_t MXFP8_ITERATIONS = MXFP8_CHUNK_DIM_Y / MXFP8_BUFFER_DIM_Y;  //   2 = 64 / 32
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
@@ -82,7 +83,7 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       SCALES_COLWISE_PER_CHUNK_X * MXFP8_CHUNKS_PER_BLOCK_X;  //  64 = 64 * 1
 
   constexpr size_t THREADS_PER_SCALE_X_ROWWISE =
-      DIVUP(SCALE_DIM_X, ELEMS_PER_THREAD);                      //   2 = 32 / 16
+      DIVUP(SCALE_DIM_X, ROCM_ELEMS_PER_THREAD);                      //   2 = 32 / 16
   constexpr size_t SUBWARP_WIDTH = THREADS_PER_SCALE_X_ROWWISE;  //   2
   constexpr size_t VECTOR_WIDTH = (IS_ALIGNED ?: 2) * 8 / sizeof(OType);
 
@@ -93,13 +94,13 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
   const int scales_colwise_block_offset_Y = blockIdx.y * SCALES_COLWISE_PER_BLOCK_Y;
   const int scales_colwise_block_offset_X = blockIdx.x * SCALES_COLWISE_PER_BLOCK_X;
 
-  const int tid_rowwise_Y = threadIdx.x / THREADS_PER_CHUNK_X_ROWWISE;
-  const int tid_rowwise_X = threadIdx.x % THREADS_PER_CHUNK_X_ROWWISE;
-  // const int tid_colwise_Y = threadIdx.x / THREADS_PER_CHUNK_X_COLWISE;
-  const int tid_colwise_X = threadIdx.x % THREADS_PER_CHUNK_X_COLWISE;
+  const int tid_rowwise_Y = threadIdx.x / ROCM_THREADS_PER_CHUNK_X_ROWWISE;
+  const int tid_rowwise_X = threadIdx.x % ROCM_THREADS_PER_CHUNK_X_ROWWISE;
+  // const int tid_colwise_Y = threadIdx.x / ROCM_THREADS_PER_CHUNK_X_COLWISE;
+  const int tid_colwise_X = threadIdx.x % ROCM_THREADS_PER_CHUNK_X_COLWISE;
 
   const int thread_offset_Y = tid_rowwise_Y;
-  const int thread_offset_X_rowwise = tid_rowwise_X * ELEMS_PER_THREAD;
+  const int thread_offset_X_rowwise = tid_rowwise_X * ROCM_ELEMS_PER_THREAD;
   // const int thread_offset_X_colwise = tid_colwise_X;
 
   const int dbias_rowwise_offset_Y = blockIdx.y * MXFP8_CHUNKS_PER_BLOCK_Y + tid_rowwise_Y;
@@ -110,7 +111,7 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       blockIdx.x * MXFP8_CHUNKS_PER_BLOCK_X * MXFP8_CHUNK_DIM_X + tid_colwise_X;
   const int dbias_stride = cols;
 
-  Vec<float, ELEMS_PER_THREAD> partial_dbias_rowwise[MXFP8_CHUNKS_PER_BLOCK_X];
+  Vec<float, ROCM_ELEMS_PER_THREAD> partial_dbias_rowwise[MXFP8_CHUNKS_PER_BLOCK_X];
   float partial_dbias_colwise[MXFP8_CHUNKS_PER_BLOCK_X];
   if constexpr (IS_DBIAS) {
     if constexpr (COMPUTE_DBIAS_IN_ROWWISE_SECTION) {
@@ -172,16 +173,16 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       __syncthreads();
 
       if constexpr (USE_ROWWISE_SCALING) {
-        Vec<IType, ELEMS_PER_THREAD> in;
-        Vec<IType, ELEMS_PER_THREAD> act_in;
-        Vec<OType, ELEMS_PER_THREAD> out_c;
+        Vec<IType, ROCM_ELEMS_PER_THREAD> in;
+        Vec<IType, ROCM_ELEMS_PER_THREAD> act_in;
+        Vec<OType, ROCM_ELEMS_PER_THREAD> out_c;
 
         const int iteration_scale_rowwise_offset_Y =
             scales_rowwise_chunk_offset_Y + iter * MXFP8_BUFFER_DIM_Y;
 
 #pragma unroll
         for (int stage = 0; stage < MXFP8_BUFF_STAGES_NUM; stage++) {
-          const int stage_offset_Y = stage * THREADS_PER_CHUNK_Y_ROWWISE;
+          const int stage_offset_Y = stage * ROCM_THREADS_PER_CHUNK_Y_ROWWISE;
           const int shmem_offset_y = thread_offset_Y + stage_offset_Y;
           const int shmem_offset_x = thread_offset_X_rowwise;
 
@@ -194,10 +195,10 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
           }
 
           float thread_amax = 0;
-          float in_compute[ELEMS_PER_THREAD];
+          float in_compute[ROCM_ELEMS_PER_THREAD];
 
 #pragma unroll
-          for (int j = 0; j < ELEMS_PER_THREAD; j++) {
+          for (int j = 0; j < ROCM_ELEMS_PER_THREAD; j++) {
             const bool col_out_of_bounds = (dbias_rowwise_offset_X + j >= cols);
             const bool out_of_bounds = (col_out_of_bounds || row_out_of_bounds);
 
@@ -232,8 +233,7 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
           const e8m0_t biased_exponent =
               ptx::float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
           // Only single thread writes the computed scaling factor
-          const bool col_out_of_bounds = dbias_rowwise_offset_X >= cols;
-          if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0 && !(row_out_of_bounds || col_out_of_bounds)) {
+          if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0) {
             const int global_scales_offset_Y =
                 iteration_scale_rowwise_offset_Y + stage_offset_Y + tid_rowwise_Y;
             const int global_scales_offset_X =
@@ -246,7 +246,7 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
           const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
 
 #pragma unroll
-          for (int j = 0; j < ELEMS_PER_THREAD; j++) {
+          for (int j = 0; j < ROCM_ELEMS_PER_THREAD; j++) {
             out_c.data.elt[j] = static_cast<OType>(in_compute[j] * block_scale_inverse);
           }
           out_c.store_to(&out_rowwise_sh[shmem_offset_y][shmem_offset_x]);
@@ -297,10 +297,7 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
         const int global_scales_offset_X = scales_colwise_chunk_offset_X + tid_colwise_X;
         const int scale_idx =
             global_scales_offset_Y * scale_stride_colwise + global_scales_offset_X;
-        const bool row_out_of_bounds = row_base >= rows;
-        if (!(row_out_of_bounds || col_out_of_bounds)) {
-          scales_colwise[scale_idx] = biased_exponent;
-        }
+        scales_colwise[scale_idx] = biased_exponent;
 
         const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
 #pragma unroll
@@ -330,9 +327,9 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
   if constexpr (IS_DBIAS) {
     if constexpr (COMPUTE_DBIAS_IN_ROWWISE_SECTION) {
       constexpr size_t CZ = MXFP8_CHUNKS_PER_BLOCK_X;
-      constexpr size_t Y = THREADS_PER_CHUNK_Y_ROWWISE - 1;
-      constexpr size_t X = THREADS_PER_CHUNK_X_ROWWISE;
-      __shared__ float shmem_partial_dbias_rowwise[CZ][Y][X][ELEMS_PER_THREAD];
+      constexpr size_t Y = ROCM_THREADS_PER_CHUNK_Y_ROWWISE - 1;
+      constexpr size_t X = ROCM_THREADS_PER_CHUNK_X_ROWWISE;
+      __shared__ float shmem_partial_dbias_rowwise[CZ][Y][X][ROCM_ELEMS_PER_THREAD];
 
       if (tid_rowwise_Y > 0) {
 #pragma unroll
@@ -346,18 +343,18 @@ __global__ void __launch_bounds__(MXFP8_THREADS_PER_CHUNK)
       if (tid_rowwise_Y == 0) {
 #pragma unroll
         for (int c = 0; c < MXFP8_CHUNKS_PER_BLOCK_X; c++) {
-          Vec<float, ELEMS_PER_THREAD> other_row_dbias;
+          Vec<float, ROCM_ELEMS_PER_THREAD> other_row_dbias;
           const int dbias_rowwise_offset_X = dbias_rowwise_block_offset_X + c * MXFP8_CHUNK_DIM_X;
           const int dbias_offset = dbias_rowwise_offset_Y * dbias_stride + dbias_rowwise_offset_X;
 
           const int left_bound = dbias_rowwise_offset_X;
-          const int right_bound = dbias_rowwise_offset_X + ELEMS_PER_THREAD - 1;
+          const int right_bound = dbias_rowwise_offset_X + ROCM_ELEMS_PER_THREAD - 1;
 
 #pragma unroll
           for (int i = 0; i < Y; i++) {
             other_row_dbias.load_from(&shmem_partial_dbias_rowwise[c][i][tid_rowwise_X]);
 #pragma unroll
-            for (int j = 0; j < ELEMS_PER_THREAD; j++) {
+            for (int j = 0; j < ROCM_ELEMS_PER_THREAD; j++) {
               partial_dbias_rowwise[c].data.elt[j] += other_row_dbias.data.elt[j];
             }
           }
@@ -410,13 +407,13 @@ template <typename ParamOP, float (*OP)(float, const ParamOP &)>
 void CastVectorizedUnaryGradKernelLauncher(const Tensor &grad, const Tensor *input, Tensor *output,
                                            hipStream_t stream);
 
-constexpr size_t TILE_DIM = 32;
+constexpr size_t ROCM_TILE_DIM = 32;
 template <typename DTypeReduce>
 __global__ void partial_reduce_kernel(const DTypeReduce* input, float* partial_output, int rows, int cols) {
-  __shared__ float tile[TILE_DIM][TILE_DIM];
+  __shared__ float tile[ROCM_TILE_DIM][ROCM_TILE_DIM];
 
-  int tile_start_col = blockIdx.x * TILE_DIM;
-  int tile_start_row = blockIdx.y * TILE_DIM;
+  int tile_start_col = blockIdx.x * ROCM_TILE_DIM;
+  int tile_start_row = blockIdx.y * ROCM_TILE_DIM;
   int thread_col_in_tile = threadIdx.x;
   int thread_row_in_tile = threadIdx.y;
 
@@ -430,7 +427,7 @@ __global__ void partial_reduce_kernel(const DTypeReduce* input, float* partial_o
   }
   __syncthreads();
 
-  for (int stride = TILE_DIM / 2; stride > 0; stride /= 2) {
+  for (int stride = ROCM_TILE_DIM / 2; stride > 0; stride /= 2) {
     if (thread_row_in_tile < stride) {
       tile[thread_row_in_tile][thread_col_in_tile] += tile[thread_row_in_tile + stride][thread_col_in_tile];
     }
@@ -445,8 +442,8 @@ __global__ void partial_reduce_kernel(const DTypeReduce* input, float* partial_o
 template <typename DTypeReduce, typename DBiasTypeOut>
 void reduce_dbias_rocm(const DTypeReduce *workspace_ptr, Tensor *dbias, const size_t rows,
                        const size_t cols, hipStream_t stream, Tensor* partial_sum_workspace) {
-  dim3 block_dim_partial(TILE_DIM, TILE_DIM);
-  dim3 grid_dim_partial(DIVUP(cols, TILE_DIM), DIVUP(rows, TILE_DIM));
+  dim3 block_dim_partial(ROCM_TILE_DIM, ROCM_TILE_DIM);
+  dim3 grid_dim_partial(DIVUP(cols, ROCM_TILE_DIM), DIVUP(rows, ROCM_TILE_DIM));
 
   const size_t partial_rows = grid_dim_partial.y;
   float* partial_workspace = reinterpret_cast<float*>(partial_sum_workspace->data.dptr);
@@ -458,6 +455,12 @@ void reduce_dbias_rocm(const DTypeReduce *workspace_ptr, Tensor *dbias, const si
 
   reduce_dbias<DBiasTypeOut>(partial_workspace, dbias, partial_rows, cols, stream);
 }
+
+// Forward declaration
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &)>
+void rocm_mxfp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
+                         Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream);
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
@@ -474,7 +477,7 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
         NVTE_CHECK(workspace, "Workspace must be provided when IS_DBIAS is true.");
         if (workspace->data.dptr == nullptr) {
           if constexpr (IS_DACT) {
-            const size_t partial_rows = DIVUP(rows, TILE_DIM);
+            const size_t partial_rows = DIVUP(rows, ROCM_TILE_DIM);
             size_t total_elements = (rows * cols) + (partial_rows * cols);
             workspace->data.shape = {total_elements};
             workspace->data.dtype = DType::kFloat32;
@@ -499,7 +502,7 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
           // The values to reduce are the result of the dAct function.
           NVTE_CHECK(act_input, "Gradient tensor must be provided for DBias + DACT.");
 
-          const size_t partial_rows = DIVUP(rows, TILE_DIM);
+          const size_t partial_rows = DIVUP(rows, ROCM_TILE_DIM);
           const size_t full_size_bytes = rows * cols * sizeof(float);
           workspace_buffer = *workspace;
           workspace_buffer.data.shape = {rows, cols};
@@ -547,8 +550,23 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
-      mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output, dbias,
-                                                             workspace, stream);
+#ifdef NVTE_ARCH_HAS_TDM
+      static const bool use_tdm_flow = [] {
+        const char *env = std::getenv("NVTE_USE_TDM_FLOW");
+        return env != nullptr && env[0] == '1' && env[1] == '\0' &&
+               cuda::sm_arch_name().find("gfx1250") != std::string::npos;
+      }();
+      if (use_tdm_flow) {
+        mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+                                                                dbias, workspace, stream);
+      } else {
+        rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+                                                                     dbias, workspace, stream);
+      }
+#else
+      rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+                                                                   dbias, workspace, stream);
+#endif
       break;
     }
     default:
@@ -556,5 +574,72 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
   }
 }
 
+
+template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
+          float (*OP)(float, const ParamOP &)>
+void rocm_mxfp8_quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
+                         Tensor *output, Tensor *dbias, Tensor *workspace, cudaStream_t stream) {
+  bool use_rowwise_scaling = output->has_data();
+  bool use_colwise_scaling = output->has_columnwise_data();
+
+  const size_t rows = input.flat_first_dim();
+  const size_t cols = input.flat_last_dim();
+  const size_t blocks_Y = DIVUP(rows, MXFP8_CHUNK_DIM_Y);
+  const size_t blocks_X = DIVUP(cols, MXFP8_CHUNK_DIM_X);
+  const dim3 grid(blocks_X, blocks_Y);
+  const size_t block_size = MXFP8_THREADS_PER_CHUNK;
+
+  const size_t scale_stride_rowwise = use_rowwise_scaling ? output->scale_inv.shape[1] : 1;
+  const size_t scale_stride_colwise =
+      use_colwise_scaling ? output->columnwise_scale_inv.shape[1] : 1;
+
+  e8m0_t *const scales_rowwise_ptr =
+      use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(output->scale_inv.dptr) : nullptr;
+  e8m0_t *const scales_colwise_ptr =
+      use_colwise_scaling ? reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr) : nullptr;
+
+  const size_t dbias_rows = blocks_Y;
+  const size_t dbias_cols = cols;
+
+  if constexpr (IS_DBIAS) {
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {dbias_rows, dbias_cols};
+      workspace->data.dtype = DType::kFloat32;
+      return;
+    }
+  }
+
+  float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
+  float *const amax_ptr = reinterpret_cast<float *>(output->amax.dptr);
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      input.dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          output->dtype(), OType,
+          TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+            (use_colwise_scaling ? 32 : 1), SCALE_DIM_Y,
+            TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+              (use_rowwise_scaling ? 32 : 1), SCALE_DIM_X,
+              TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                !(cols % (32 * sizeof(IType))), IS_ALIGNED,
+                {
+                  cast_mxfp8_2D_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                       SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED>
+                      <<<grid, block_size, 0, stream>>>(
+                          reinterpret_cast<const IType *>(input.data.dptr),
+                          (IS_DACT) ? reinterpret_cast<const IType *>(act_input->data.dptr) : nullptr,
+                          reinterpret_cast<OType *>(output->data.dptr),
+                          reinterpret_cast<OType *>(output->columnwise_data.dptr),
+                          scales_rowwise_ptr, scales_colwise_ptr,
+                          reinterpret_cast<const float *>(noop->data.dptr), workspace_ptr, amax_ptr,
+                          rows, cols, scale_stride_rowwise, scale_stride_colwise);
+                  NVTE_CHECK_CUDA(cudaGetLastError());
+                })));  // NOLINT(*)  closes: {} SWITCH_CONDITION inner_MX outer_MX
+
+          if constexpr (IS_DBIAS) {
+            reduce_dbias<IType>(workspace_ptr, dbias, dbias_rows, dbias_cols, stream);
+          });  // NOLINT(*)  closes FP8ONLY
+  );  // NOLINT(*)  closes NON_FP8ONLY
+}
 
 } // namespace transformer_engine
