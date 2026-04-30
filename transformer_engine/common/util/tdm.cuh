@@ -229,9 +229,6 @@ void copy_2d_to_shared(void* lds_dst,
                        uint32_t stride,
                        uint32_t data_size) {
   if (is_tdm_wave()) {
-    if (threadIdx.x == 0 && threadIdx.y == 0 && blockIdx.x == 0 && blockIdx.y == 0)
-      printf("[TDM] copy_2d_to_shared: chunk=(%u,%u) tile=(%u,%u) tensor=(%u,%u)\n",
-             chunk_x, chunk_y, tile_dim_x, tile_dim_y, tensor_w, tensor_h);
     uint32_t lds_off = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(lds_dst));
     load_2d_to_lds(global_base, lds_off,
                    tensor_w, tensor_h,
