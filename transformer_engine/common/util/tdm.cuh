@@ -48,11 +48,11 @@ __device__ __forceinline__ constexpr uint32_t get_data_size_from_bits(size_t typ
 // Wave guard
 // ---------------------------------------------------------------------------
 
-//! Returns true for threads in the first wavefront (wave 0) of the block.
-//! TDM instructions are wave-level -- only wave 0 should issue them.
-__device__ __forceinline__ bool is_tdm_wave() {
+//! Returns true for thread 0 only. TDM instructions are wave-level (EXEC
+//! mask ignored), so a single thread per wave suffices to issue them.
+__device__ __forceinline__ bool is_tdm_lane() {
   const int linear_tid = threadIdx.x + threadIdx.y * blockDim.x;
-  return (linear_tid < 32);
+  return (linear_tid == 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -191,7 +191,7 @@ __device__ __forceinline__ void wait_tensorcnt_4() { wait_tensorcnt<4>(); }
 // ---------------------------------------------------------------------------
 // Higher-level helpers (matching ptx.cuh copy_2d_to_shared interface)
 // ---------------------------------------------------------------------------
-// These handle the is_tdm_wave() guard internally.
+// These handle the is_tdm_lane() guard internally.
 // The caller is responsible for __syncthreads() AFTER calling these,
 // matching the TMA pattern where mbarrier_wait + syncthreads follows.
 
@@ -219,7 +219,7 @@ void copy_2d_to_shared(void* lds_dst,
                        uint32_t tensor_h,
                        uint32_t stride,
                        uint32_t data_size) {
-  if (is_tdm_wave()) {
+  if (is_tdm_lane()) {
     uint32_t lds_off = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(lds_dst));
     load_2d_to_lds(global_base, lds_off,
                    tensor_w, tensor_h,
@@ -236,7 +236,7 @@ void copy_2d_to_shared_x2(void* dst1, const void* src1, uint32_t cx1, uint32_t c
                            uint32_t tile_dim_x, uint32_t tile_dim_y,
                            uint32_t tensor_w, uint32_t tensor_h,
                            uint32_t stride, uint32_t data_size) {
-  if (is_tdm_wave()) {
+  if (is_tdm_lane()) {
     uint32_t lds_off1 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst1));
     load_2d_to_lds(src1, lds_off1,
                    tensor_w, tensor_h,
@@ -261,7 +261,7 @@ void copy_2d_to_shared_x3(void* dst1, const void* src1, uint32_t cx1, uint32_t c
                            uint32_t tile_dim_x, uint32_t tile_dim_y,
                            uint32_t tensor_w, uint32_t tensor_h,
                            uint32_t stride, uint32_t data_size) {
-  if (is_tdm_wave()) {
+  if (is_tdm_lane()) {
     uint32_t lds_off1 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst1));
     load_2d_to_lds(src1, lds_off1,
                    tensor_w, tensor_h,
@@ -300,7 +300,7 @@ void store_2d_to_global(const void* lds_src,
                         uint32_t tensor_h,
                         uint32_t stride,
                         uint32_t data_size) {
-  if (is_tdm_wave()) {
+  if (is_tdm_lane()) {
     uint32_t lds_off = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(lds_src));
     store_2d_from_lds(global_base, lds_off,
                       tensor_w, tensor_h,
@@ -328,7 +328,7 @@ void copy_2d_to_shared(void* lds_dst,
 __device__ __forceinline__
 void copy_2d_to_shared_x2(void* dst1, const HIPTensorMap& tmap1, uint32_t cx1, uint32_t cy1,
                            void* dst2, const HIPTensorMap& tmap2, uint32_t cx2, uint32_t cy2) {
-  if (is_tdm_wave()) {
+  if (is_tdm_lane()) {
     uint32_t lds_off1 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst1));
     load_2d_to_lds(tmap1.base_ptr, lds_off1,
                    tmap1.tensor_w, tmap1.tensor_h,
@@ -349,7 +349,7 @@ __device__ __forceinline__
 void copy_2d_to_shared_x3(void* dst1, const HIPTensorMap& tmap1, uint32_t cx1, uint32_t cy1,
                            void* dst2, const HIPTensorMap& tmap2, uint32_t cx2, uint32_t cy2,
                            void* dst3, const HIPTensorMap& tmap3, uint32_t cx3, uint32_t cy3) {
-  if (is_tdm_wave()) {
+  if (is_tdm_lane()) {
     uint32_t lds_off1 = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(dst1));
     load_2d_to_lds(tmap1.base_ptr, lds_off1,
                    tmap1.tensor_w, tmap1.tensor_h,
@@ -387,7 +387,7 @@ void store_2d_to_global(const void* lds_src,
 #else  // !defined(__gfx1250__)
 
 // Stubs for non-gfx1250 AMD targets -- these should never be called.
-__device__ __forceinline__ bool is_tdm_wave() { return false; }
+__device__ __forceinline__ bool is_tdm_lane() { return false; }
 __device__ __forceinline__ void wait_tensorcnt_0() {}
 __device__ __forceinline__ void wait_tensorcnt_1() {}
 __device__ __forceinline__ void wait_tensorcnt_2() {}
