@@ -1573,19 +1573,16 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
                cuda::sm_arch_name().find("gfx1250") != std::string::npos;
       }();
       if (use_tdm_flow_fp8) {
-        fprintf(stderr, "[DBG gated delayed_scaling] gfx1250 TDM -> cast_fp8_gated\n");
-        cast_fp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+cast_fp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       } else {
-        fprintf(stderr, "[DBG gated delayed_scaling] gfx1250 ROCm -> cast_gated/cast_dgated\n");
-        if constexpr (IS_DGATED) {
+if constexpr (IS_DGATED) {
           cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
         } else {
           cast_gated<ParamOP, ActOP>(gated_input, output, stream);
         }
       }
 #elif defined(__HIP_PLATFORM_AMD__)
-      fprintf(stderr, "[DBG gated delayed_scaling] non-gfx1250 AMD -> cast_gated/cast_dgated\n");
-      if constexpr (IS_DGATED) {
+if constexpr (IS_DGATED) {
         cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       } else {
         cast_gated<ParamOP, ActOP>(gated_input, output, stream);
@@ -1609,15 +1606,12 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
                cuda::sm_arch_name().find("gfx1250") != std::string::npos;
       }();
       if (use_tdm_flow) {
-        fprintf(stderr, "[DBG gated mxfp_scaling] gfx1250 TDM -> cast_mxfp8_gated\n");
-        cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       } else {
-        fprintf(stderr, "[DBG gated mxfp_scaling] gfx1250 ROCm -> rocm_cast_mxfp8_gated\n");
-        rocm_cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+rocm_cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       }
 #elif defined(__HIP_PLATFORM_AMD__)
-      fprintf(stderr, "[DBG gated mxfp_scaling] non-gfx1250 AMD -> rocm_cast_mxfp8_gated\n");
-      rocm_cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+rocm_cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
 #else
       cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
 #endif

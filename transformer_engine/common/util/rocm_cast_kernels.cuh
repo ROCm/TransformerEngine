@@ -557,17 +557,14 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
                cuda::sm_arch_name().find("gfx1250") != std::string::npos;
       }();
       if (use_tdm_flow) {
-        fprintf(stderr, "[DBG fp8_quantize_rocm] gfx1250 TDM branch -> mxfp8_quantize\n");
-        mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                dbias, workspace, stream);
       } else {
-        fprintf(stderr, "[DBG fp8_quantize_rocm] gfx1250 ROCm branch -> rocm_mxfp8_quantize\n");
-        rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                     dbias, workspace, stream);
       }
 #else
-      fprintf(stderr, "[DBG fp8_quantize_rocm] non-gfx1250 AMD -> rocm_mxfp8_quantize\n");
-      rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                    dbias, workspace, stream);
 #endif
       break;
@@ -587,10 +584,7 @@ void rocm_mxfp8_quantize(const Tensor &input, const Tensor *act_input, const Ten
 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
-  fprintf(stderr, "[DBG rocm_mxfp8_quantize] rows=%zu cols=%zu — launching cast_mxfp8_2D_kernel\n",
-          rows, cols);
-
-  const size_t blocks_Y = DIVUP(rows, MXFP8_CHUNK_DIM_Y);
+const size_t blocks_Y = DIVUP(rows, MXFP8_CHUNK_DIM_Y);
   const size_t blocks_X = DIVUP(cols, MXFP8_CHUNK_DIM_X);
   const dim3 grid(blocks_X, blocks_Y);
   const size_t block_size = MXFP8_THREADS_PER_CHUNK;

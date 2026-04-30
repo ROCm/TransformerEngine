@@ -6,6 +6,23 @@
 
 #include <benchmark/benchmark.h>
 #include <hip/hip_runtime.h>
+#include <execinfo.h>
+#include <signal.h>
+#include <unistd.h>
+static void segv_handler(int sig) {
+  void *buf[64];
+  int n = backtrace(buf, 64);
+  fprintf(stderr, "[BACKTRACE] signal %d:\n", sig);
+  backtrace_symbols_fd(buf, n, STDERR_FILENO);
+  _exit(1);
+}
+__attribute__((constructor)) static void install_handler() {
+  struct sigaction sa{};
+  sa.sa_handler = segv_handler;
+  sigemptyset(&sa.sa_mask);
+  sa.sa_flags = SA_RESETHAND;
+  sigaction(SIGSEGV, &sa, nullptr);
+}
 #include <hip/hip_fp16.h>
 #include <hip/hip_bfloat16.h>
 #include "amd_detail/hip_float8.h"
@@ -75,12 +92,11 @@ static void BM_QuantizeMXFP8_Fused(benchmark::State &state) {
                 (std::is_same_v<IType, hip_bfloat16> ? DType::kBFloat16 : DType::kFloat32);
   DType otype = std::is_same_v<OType, fp8_e4m3> ? DType::kFloat8E4M3 : DType::kFloat8E5M2;
 
-  test::Tensor &input_tensor  = TensorCache::get_or_create("input", shape, itype, true, false,
+test::Tensor &input_tensor  = TensorCache::get_or_create("input", shape, itype, true, false,
                                                            NVTE_DELAYED_TENSOR_SCALING, true);
-  test::Tensor &output_tensor = TensorCache::get_or_create("output", shape, otype, USE_ROWWISE, USE_COLWISE,
+test::Tensor &output_tensor = TensorCache::get_or_create("output", shape, otype, USE_ROWWISE, USE_COLWISE,
                                                             NVTE_MXFP8_1D_SCALING, false);
-
-  test::Tensor *grad_tensor_ptr = nullptr, *dbias_tensor_ptr = nullptr,  *workspace_tensor_ptr = nullptr;
+test::Tensor *grad_tensor_ptr = nullptr, *dbias_tensor_ptr = nullptr,  *workspace_tensor_ptr = nullptr;
 
   if constexpr (PROC_METHOD == CAST_DBIAS || PROC_METHOD == CAST_DBIAS_DACT) {
     std::vector<size_t> bias_shape = {cols};
@@ -102,9 +118,8 @@ static void BM_QuantizeMXFP8_Fused(benchmark::State &state) {
   HIP_CHECK(hipEventCreate(&start));
   HIP_CHECK(hipEventCreate(&stop));
 
-  warmup_gpu();
-
-  for (auto _ : state) {
+warmup_gpu();
+for (auto _ : state) {
     HIP_CHECK(hipEventRecord(start, stream));
 
     if constexpr (PROC_METHOD == CAST_ONLY) {

@@ -191,9 +191,8 @@ class TensorCache {
 
     auto it = cache->find(key);
     if (it == cache->end()) {
-      auto tensor_ptr = std::make_unique<test::Tensor>(name, shape, dtype, rowwise, colwise, scaling_mode);
-
-      if (initialize_random && dtype != transformer_engine::DType::kFloat8E4M3 &&
+auto tensor_ptr = std::make_unique<test::Tensor>(name, shape, dtype, rowwise, colwise, scaling_mode);
+if (initialize_random && dtype != transformer_engine::DType::kFloat8E4M3 &&
           dtype != transformer_engine::DType::kFloat8E5M2) {
         hipStream_t stream;
         HIP_CHECK(hipStreamCreate(&stream));

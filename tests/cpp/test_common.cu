@@ -17,7 +17,9 @@
 #include <cmath>
 #include <string>
 
+#ifndef NVTE_ROCM_BENCHMARK
 #include <gtest/gtest.h>
+#endif
 #include <omp.h>
 
 #include <transformer_engine/transformer_engine.h>
@@ -28,9 +30,13 @@
 namespace test {
 
 size_t create_seed_from_tensor_name(const std::string& tensor_name) {
+#ifndef NVTE_ROCM_BENCHMARK
   auto full_name = std::string(testing::UnitTest::GetInstance()->current_test_info()->name()) +
                    "/" + tensor_name;
   return std::hash<std::string>{}(full_name);
+#else
+  return std::hash<std::string>{}(tensor_name);
+#endif
 }
 
 std::vector<DType> all_fp_types = {DType::kFloat32,
@@ -229,13 +235,13 @@ Tensor::Tensor(const std::string& name,
                const NVTEShape &shape, const DType type,
                const bool rowwise, const bool columnwise,
                const NVTEScalingMode &scaling_mode) {
-  name_ = name;
+name_ = name;
   const size_t seed = create_seed_from_tensor_name(name);
   gen_.seed(seed);
   rowwise_ = rowwise;
   columnwise_ = columnwise;
-  size_t total_size = bytes(shape, type);
-  void *dptr_rowwise = nullptr;
+size_t total_size = bytes(shape, type);
+void *dptr_rowwise = nullptr;
   void *dptr_columnwise = nullptr;
   cpu_data_rowwise_ = nullptr;
   cpu_data_columnwise_ = nullptr;
@@ -251,7 +257,7 @@ Tensor::Tensor(const std::string& name,
   std::vector<size_t> normalized_shape_v = {product(shape, 0, shape.ndim - 1),
                                             shape.data[shape.ndim - 1]};
   NVTEShape normalized_shape = convertShape(normalized_shape_v);
-  NVTEShape columnwise_shape = {};
+NVTEShape columnwise_shape = {};
 
   std::vector<size_t> columnwise_shape_vec;
   if (scaling_mode == NVTE_DELAYED_TENSOR_SCALING || scaling_mode == NVTE_BLOCK_SCALING_1D || scaling_mode == NVTE_BLOCK_SCALING_2D) {
@@ -271,12 +277,11 @@ Tensor::Tensor(const std::string& name,
     columnwise_shape = nvte_make_shape(columnwise_shape_vec.data(), columnwise_shape_vec.size());
   }
 
-  tensor_ = TensorWrapper(scaling_mode);
-
-  if (total_size != 0) {
+tensor_ = TensorWrapper(scaling_mode);
+if (total_size != 0) {
     if (rowwise) {
-      (void)cudaMalloc((void**)&dptr_rowwise, total_size);  // NOLINT(*)
-      (void)cudaMemset(dptr_rowwise, 0, total_size);
+(void)cudaMalloc((void**)&dptr_rowwise, total_size);  // NOLINT(*)
+(void)cudaMemset(dptr_rowwise, 0, total_size);
       cpu_data_rowwise_ = std::make_unique<unsigned char[]>(total_size);
       std::fill_n(cpu_data_rowwise_.get(), total_size, 0);
     }
@@ -528,6 +533,8 @@ std::vector<size_t> unravel(const size_t i, const NVTEShape &shape) {
   return ret;
 }
 
+#ifndef NVTE_ROCM_BENCHMARK
+
 void compareResults_sequential(const std::string &name, const Tensor &test,
                                const void *ref, const bool rowwise,
                                double atol, double rtol, bool if_on_gpus,
@@ -769,6 +776,8 @@ void adjust_ref_for_e8m0_scale_error(const std::string &name,
   }
 }
 #endif // #ifdef __HIP_PLATFORM_AMD__
+
+#endif  // NVTE_ROCM_BENCHMARK
 
 std::pair<double, double> getTolerances(const DType type) {
   switch(type) {
