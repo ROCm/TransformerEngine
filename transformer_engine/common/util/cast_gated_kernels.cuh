@@ -251,16 +251,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #else
     // Wait for current buffer's loads (and any prior stores) to complete,
     // but keep the just-issued prefetch for the next buffer alive.
+    // IS_DGATED issues 3 loads (grad + act + gate); non-DGATED issues 2 (act + gate).
+    constexpr int TDM_PREFETCH_LOADS = IS_DGATED ? 3 : 2;
     if (next_it < ITERATIONS) {
-      // Prefetch in flight: IS_DGATED issued 3 ops (1+2), non-dgated issued 2 ops
-      if constexpr (IS_DGATED) {
-        tdm::wait_tensorcnt_3();
-      } else {
-        tdm::wait_tensorcnt_2();
-      }
+      tdm::wait_tensorcnt<TDM_PREFETCH_LOADS>();
     } else {
       // Last iteration — drain all outstanding TDM ops
-      tdm::wait_tensorcnt_0();
+      tdm::wait_tensorcnt<0>();
     }
     __syncthreads();
 #endif
@@ -685,16 +682,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 #else
     // Wait for current buffer's loads (and any prior stores) to complete,
     // but keep the just-issued prefetch for the next buffer alive.
+    // IS_DGATED issues 3 loads (grad + act + gate); non-DGATED issues 2 (act + gate).
+    constexpr int TDM_PREFETCH_LOADS = IS_DGATED ? 3 : 2;
     if (next_stage < STAGES) {
-      // Prefetch in flight: IS_DGATED issued 3 ops (1+2), non-dgated issued 2 ops
-      if constexpr (IS_DGATED) {
-        tdm::wait_tensorcnt_3();
-      } else {
-        tdm::wait_tensorcnt_2();
-      }
+      tdm::wait_tensorcnt<TDM_PREFETCH_LOADS>();
     } else {
       // Last stage — drain all outstanding TDM ops
-      tdm::wait_tensorcnt_0();
+      tdm::wait_tensorcnt<0>();
     }
     __syncthreads();
 #endif
