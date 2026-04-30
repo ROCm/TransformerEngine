@@ -13,16 +13,11 @@ permissions:
 
 jobs:
   # To determine whether to upload AITER prebuilt to Artifactory
-  aiter_upload_trigger:
-    name: PR - set trigger_aiter_upload
+  aiter_prebuilt_upload_trigger:
     runs-on: ubuntu-latest
     outputs:
       trigger_aiter_upload: ${{ steps.set.outputs.trigger_aiter_upload }}
     steps:
-      - uses: actions/checkout@v6
-        with:
-          fetch-depth: 0
-
       - uses: dorny/paths-filter@v3
         id: paths
         if: github.event.action == 'synchronize'
@@ -40,7 +35,8 @@ jobs:
             const skip = labels.some((l) => l.name === 'skip_aiter_upload');
             core.setOutput('skip', skip ? 'true' : 'false');
 
-      - id: set
+      - name: Set aiter upload trigger from paths and labels
+        id: set
         run: |
           set -euo pipefail
           if [ '${{ github.event.action }}' != "synchronize" ]; then
@@ -98,10 +94,10 @@ jobs:
     # - A commit was pushed with existing ci-level label(s)
     # - The PR was reopened or opened with existing ci-level label(s)
     if: ${{ needs.determine_level.outputs.test_level != '' }}
-    needs: [determine_level, aiter_upload_trigger]
+    needs: [determine_level, aiter_prebuilt_upload_trigger]
     name: CI Level ${{ needs.determine_level.outputs.test_level }}
     uses: ./.github/workflows/rocm-ci.yml
     secrets: inherit
     with:
       test_level: ${{ needs.determine_level.outputs.test_level }}
-      trigger_aiter_upload: ${{ needs.aiter_upload_trigger.outputs.trigger_aiter_upload == 'true' }}
+      trigger_aiter_upload: ${{ needs.aiter_prebuilt_upload_trigger.outputs.trigger_aiter_upload == 'true' }}
