@@ -1188,7 +1188,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if not allow_non_contiguous and not inp.is_contiguous():
                 if os.environ.get("NVTE_LITE_DIAG", "0") != "0":
                     _lite_log_noncontig_input(self.__class__.__name__, inp)
-                inp = inp.contiguous()
+                from .. import _contig_diag
+                inp = _contig_diag.time_contiguous(self.__class__.__name__, inp)
             yield inp
 
         if self.fp8 and in_fp8_activation_recompute_phase():
