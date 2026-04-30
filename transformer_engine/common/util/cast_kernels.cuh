@@ -894,7 +894,13 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
       const size_t chunk_it_offset_x = chunk_offset_X;
       tdm::store_2d_to_global(&out_sh[buff][0][0], fp8_tmap_out,
                               chunk_it_offset_x, chunk_it_offset_y);
-      tdm::wait_tensorcnt_0();
+      // Leave the prefetched next-iteration load in flight while we move on.
+      // On the last iteration there is no prefetch, so drain completely.
+      if (next_iter < FP8_ITERATIONS) {
+        tdm::wait_tensorcnt_1();
+      } else {
+        tdm::wait_tensorcnt_0();
+      }
       __syncthreads();
     }
 #endif  // __HIP_PLATFORM_AMD__

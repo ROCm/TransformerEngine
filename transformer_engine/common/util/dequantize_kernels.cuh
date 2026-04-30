@@ -269,7 +269,13 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                               chunk_it_offset_x, chunk_it_offset_y,
                               SHMEM_DIM_X, SHMEM_DIM_Y,
                               cols, rows, cols, deq_out_data_sz);
-      tdm::wait_tensorcnt_0();
+      // Leave the prefetched next-iteration load in flight while we move on.
+      // On the last iteration there is no prefetch, so drain completely.
+      if (next_iter < ITERATIONS) {
+        tdm::wait_tensorcnt_1();
+      } else {
+        tdm::wait_tensorcnt_0();
+      }
       __syncthreads();
     }
 #endif  // __HIP_PLATFORM_AMD__
