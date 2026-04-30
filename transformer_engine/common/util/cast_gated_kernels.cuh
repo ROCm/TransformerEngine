@@ -1573,16 +1573,16 @@ void quantize_gated(const Tensor &grad, const Tensor &gated_input, Tensor *outpu
                cuda::sm_arch_name().find("gfx1250") != std::string::npos;
       }();
       if (use_tdm_flow_fp8) {
-cast_fp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+        cast_fp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       } else {
-if constexpr (IS_DGATED) {
+        if constexpr (IS_DGATED) {
           cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
         } else {
           cast_gated<ParamOP, ActOP>(gated_input, output, stream);
         }
       }
 #elif defined(__HIP_PLATFORM_AMD__)
-if constexpr (IS_DGATED) {
+      if constexpr (IS_DGATED) {
         cast_dgated<ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       } else {
         cast_gated<ParamOP, ActOP>(gated_input, output, stream);
@@ -1606,12 +1606,12 @@ if constexpr (IS_DGATED) {
                cuda::sm_arch_name().find("gfx1250") != std::string::npos;
       }();
       if (use_tdm_flow) {
-cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+        cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       } else {
-rocm_cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+        rocm_cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
       }
 #elif defined(__HIP_PLATFORM_AMD__)
-rocm_cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
+      rocm_cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
 #else
       cast_mxfp8_gated<IS_DGATED, ParamOP, ActOP, DActOP>(grad, gated_input, output, stream);
 #endif

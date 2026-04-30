@@ -584,7 +584,7 @@ void rocm_mxfp8_quantize(const Tensor &input, const Tensor *act_input, const Ten
 
   const size_t rows = input.flat_first_dim();
   const size_t cols = input.flat_last_dim();
-const size_t blocks_Y = DIVUP(rows, MXFP8_CHUNK_DIM_Y);
+  const size_t blocks_Y = DIVUP(rows, MXFP8_CHUNK_DIM_Y);
   const size_t blocks_X = DIVUP(cols, MXFP8_CHUNK_DIM_X);
   const dim3 grid(blocks_X, blocks_Y);
   const size_t block_size = MXFP8_THREADS_PER_CHUNK;
