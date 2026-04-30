@@ -557,14 +557,14 @@ void fp8_quantize_rocm(const Tensor &input, const Tensor *act_input, const Tenso
                cuda::sm_arch_name().find("gfx1250") != std::string::npos;
       }();
       if (use_tdm_flow) {
-mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
-                                                               dbias, workspace, stream);
+        mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+                                                                dbias, workspace, stream);
       } else {
-rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
-                                                                    dbias, workspace, stream);
+        rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+                                                                     dbias, workspace, stream);
       }
 #else
-rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
+      rocm_mxfp8_quantize<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP>(input, act_input, noop, output,
                                                                    dbias, workspace, stream);
 #endif
       break;
