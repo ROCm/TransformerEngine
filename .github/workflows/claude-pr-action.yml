@@ -63,6 +63,7 @@ jobs:
       action: ${{ steps.resolve.outputs.action }}
       pr:     ${{ steps.resolve.outputs.pr }}
       base:   ${{ steps.resolve.outputs.base }}
+      help:   ${{ steps.resolve.outputs.help }}
     steps:
       - name: Resolve action, PR number, and base branch
         id: resolve
@@ -97,11 +98,23 @@ jobs:
                 OWNER|MEMBER|COLLABORATOR) ;;
                 *) echo "Ignoring comment from $AUTHOR_ASSOC"; exit 0 ;;
               esac
-              # Match `/claude <cmd>` as the first non-whitespace token.
-              cmd=$(printf '%s' "$COMMENT_BODY" | awk 'NR==1 && $1=="/claude" {print $2}')
+              # Look at the first whitespace-separated token. If it's not
+              # `/claude`, this isn't addressed to us — stay silent.
+              first=$(printf '%s' "$COMMENT_BODY" | awk 'NR==1 {print $1}')
+              if [[ "$first" != "/claude" ]]; then
+                echo "Not a /claude command; ignoring."
+                exit 0
+              fi
+              # Second token is the subcommand. Unknown/missing → post help.
+              cmd=$(printf '%s' "$COMMENT_BODY" | awk 'NR==1 {print $2}')
               case "$cmd" in
                 review)  action="review"  ;;
                 summary) action="summary" ;;
+                *)
+                  echo "Unknown /claude subcommand: '${cmd:-<empty>}'"
+                  echo "help=1" >> "$GITHUB_OUTPUT"
+                  exit 0
+                  ;;
               esac
               pr="$PR_FROM_COMMENT"
               ;;
@@ -115,6 +128,11 @@ jobs:
           if [[ -z "$action" ]]; then
             echo "No matching action; nothing to do."
             exit 0
+          fi
+
+          if [[ -z "$pr" ]]; then
+            echo "::error::pr_number is required" >&2
+            exit 1
           fi
 
           # Comment triggers (and workflow_dispatch w/o base) — look up the
@@ -139,6 +157,31 @@ jobs:
             --method POST \
             "/repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
             -f content=eyes || true
+
+      - name: Post help comment (invalid /claude command)
+        if: steps.resolve.outputs.help == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # React with confused emoji so the user sees immediate feedback,
+          # then post a one-shot usage reply.
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            --method POST \
+            "/repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=confused || true
+
+          gh pr comment "${{ github.event.issue.number }}" \
+            --repo "${{ github.repository }}" \
+            --body-file - <<'EOF'
+          **Claude PR commands**
+
+          - `/claude review` — request a code review of this PR
+          - `/claude summary` — generate (or update) a walkthrough comment
+
+          You can also add a label to the PR: `claude-review` or `claude-summary`.
+          <!-- by:claude -->
+          EOF
 
   claude:
     needs: resolve
