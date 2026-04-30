@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   # To determine whether to upload AITER prebuilt to Artifactory
@@ -18,7 +19,8 @@ jobs:
     outputs:
       trigger_aiter_upload: ${{ steps.set.outputs.trigger_aiter_upload }}
     steps:
-      - uses: dorny/paths-filter@v3
+      - name: Detect PR changes under 3rdparty/aiter
+        uses: dorny/paths-filter@v3
         id: paths
         if: github.event.action == 'synchronize'
         with:
@@ -33,24 +35,39 @@ jobs:
           script: |
             const labels = context.payload.pull_request?.labels || [];
             const skip = labels.some((l) => l.name === 'skip_aiter_upload');
+            core.info(`skip_aiter_upload label : ${skip}`);
             core.setOutput('skip', skip ? 'true' : 'false');
 
-      - name: Set aiter upload trigger from paths and labels
+      - name: Set trigger_aiter_upload from paths and labels
         id: set
         run: |
           set -euo pipefail
-          if [ '${{ github.event.action }}' != "synchronize" ]; then
+          ACTION='${{ github.event.action }}'
+          echo "PR action=${ACTION}"
+
+          if [ "$ACTION" != "synchronize" ]; then
             echo "trigger_aiter_upload=false" >> "$GITHUB_OUTPUT"
+            echo "Not synchronize - trigger_aiter_upload = false"
             exit 0
           fi
-          if [ '${{ steps.skip_label.outputs.skip }}' = 'true' ]; then
+
+          SKIP='${{ steps.skip_label.outputs.skip }}'
+          echo "skip_aiter_upload label : ${SKIP}"
+
+          if [ "$SKIP" = 'true' ]; then
             echo "trigger_aiter_upload=false" >> "$GITHUB_OUTPUT"
+            echo "skip_aiter_upload label set - trigger_aiter_upload = false"
             exit 0
           fi
-          if [ "${{ steps.paths.outputs.aiter }}" = "true" ]; then
+
+          AITER_PATHS='${{ steps.paths.outputs.aiter }}'
+
+          if [ "$AITER_PATHS" = "true" ]; then
             echo "trigger_aiter_upload=true" >> "$GITHUB_OUTPUT"
+            echo "3rdparty/aiter changed on PR - trigger_aiter_upload = true"
           else
             echo "trigger_aiter_upload=false" >> "$GITHUB_OUTPUT"
+            echo "No 3rdparty/aiter changes on PR - trigger_aiter_upload = false"
           fi
 
   determine_level:
