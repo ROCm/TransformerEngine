@@ -897,9 +897,9 @@ __global__ void __launch_bounds__(FP8_THREADS_PER_CHUNK)
       // Leave the prefetched next-iteration load in flight while we move on.
       // On the last iteration there is no prefetch, so drain completely.
       if (next_iter < FP8_ITERATIONS) {
-        tdm::wait_tensorcnt_1();
+        tdm::wait_tensorcnt<FP8_PREFETCH_BUFFERS_NUM>();
       } else {
-        tdm::wait_tensorcnt_0();
+        tdm::wait_tensorcnt<0>();
       }
       __syncthreads();
     }

@@ -45,6 +45,8 @@ constexpr size_t CHUNK_DIM_Y = 128;
 constexpr size_t CHUNK_DIM_X = 128;
 constexpr size_t THREADS_PER_CHUNK = 128;
 constexpr size_t BUFFERS_NUM = 2;
+constexpr size_t PREFETCH_BUFFERS_NUM = 1;
+static_assert(PREFETCH_BUFFERS_NUM < BUFFERS_NUM);
 
 constexpr size_t ELEMS_PER_THREAD = 16;
 constexpr size_t BUFFER_DIM_Y = 16;
@@ -272,9 +274,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // Leave the prefetched next-iteration load in flight while we move on.
       // On the last iteration there is no prefetch, so drain completely.
       if (next_iter < ITERATIONS) {
-        tdm::wait_tensorcnt_1();
+        tdm::wait_tensorcnt<PREFETCH_BUFFERS_NUM>();
       } else {
-        tdm::wait_tensorcnt_0();
+        tdm::wait_tensorcnt<0>();
       }
       __syncthreads();
     }

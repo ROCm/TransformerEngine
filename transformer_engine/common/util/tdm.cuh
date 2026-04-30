@@ -177,25 +177,16 @@ void store_2d_from_lds(void* global_base,
 // Wait helpers (argument must be compile-time immediate)
 // ---------------------------------------------------------------------------
 
-__device__ __forceinline__ void wait_tensorcnt_0() {
-  __builtin_amdgcn_s_wait_tensorcnt(0);
+template <int N>
+__device__ __forceinline__ void wait_tensorcnt() {
+  __builtin_amdgcn_s_wait_tensorcnt(N);
 }
 
-__device__ __forceinline__ void wait_tensorcnt_1() {
-  __builtin_amdgcn_s_wait_tensorcnt(1);
-}
-
-__device__ __forceinline__ void wait_tensorcnt_2() {
-  __builtin_amdgcn_s_wait_tensorcnt(2);
-}
-
-__device__ __forceinline__ void wait_tensorcnt_3() {
-  __builtin_amdgcn_s_wait_tensorcnt(3);
-}
-
-__device__ __forceinline__ void wait_tensorcnt_4() {
-  __builtin_amdgcn_s_wait_tensorcnt(4);
-}
+__device__ __forceinline__ void wait_tensorcnt_0() { wait_tensorcnt<0>(); }
+__device__ __forceinline__ void wait_tensorcnt_1() { wait_tensorcnt<1>(); }
+__device__ __forceinline__ void wait_tensorcnt_2() { wait_tensorcnt<2>(); }
+__device__ __forceinline__ void wait_tensorcnt_3() { wait_tensorcnt<3>(); }
+__device__ __forceinline__ void wait_tensorcnt_4() { wait_tensorcnt<4>(); }
 
 // ---------------------------------------------------------------------------
 // Higher-level helpers (matching ptx.cuh copy_2d_to_shared interface)
