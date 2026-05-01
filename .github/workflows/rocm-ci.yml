@@ -107,7 +107,7 @@ jobs:
   upload_aiter_prebuilt:
     name: Build and upload AITER prebuilt
     needs: select_image
-    if: ${{ (github.event_name == 'workflow_call' && inputs.trigger_aiter_upload == 'true') }}
+    if: ${{ github.event_name == 'workflow_call' && inputs.trigger_aiter_upload }}
     uses: ./.github/workflows/aiter-prebuilt-upload.yml
     with:
       docker_image: ${{ needs.select_image.outputs.image-tag }}
