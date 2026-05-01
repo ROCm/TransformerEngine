@@ -31,11 +31,16 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      # Fails early if the prebuilt artifact URL is unreachable or upload credentials are invalid
-      - name: Validate prebuilt upload to Artifactory
+      # Verify this runner can reach Artifactory for uploads
+      - name: "Preflight: Artifactory upload reachability"
         run: |
           set -euo pipefail
-          bash .github/scripts/aiter_prebuild_upload.sh --preflight --upload
+          if bash .github/scripts/aiter_prebuild_upload.sh --preflight --upload; then
+            echo "::notice::Preflight upload reachability succeeded"
+            exit 0
+          fi
+          echo "::error::Preflight upload reachability failed"
+          exit 1
 
       - name: Resolve docker image
         id: cfg

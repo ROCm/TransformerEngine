@@ -20,7 +20,7 @@ jobs:
       trigger_aiter_upload: ${{ steps.set.outputs.trigger_aiter_upload }}
     steps:
       - name: Detect PR changes under 3rdparty/aiter
-        uses: dorny/paths-filter@v3
+        uses: dorny/paths-filter@v4
         id: paths
         if: github.event.action == 'synchronize'
         with:

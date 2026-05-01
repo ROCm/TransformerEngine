@@ -32,6 +32,20 @@ _aiter_curl_artifactory_system_ping() {
   curl -fsS --connect-timeout 25 --max-time 60 "${_AITER_ARTIFACTORY_SYSTEM_PING_URL}" >/dev/null
 }
 
+_aiter_preflight_head_ok() {
+  local mode=$1
+  local code=$2
+  case "${code}" in
+    404|200)
+      echo "[AITER-PREBUILT] Preflight ${mode}: HTTP ${code} (success)"
+      ;;
+    *)
+      echo "[AITER-PREBUILT] Preflight ${mode}: HTTP ${code} (failed)" >&2
+      exit 1
+      ;;
+  esac
+}
+
 _aiter_check_artifactory_upload() {
   _aiter_set_artifactory_check_urls
   if [[ -z "${NVTE_AITER_PREBUILT_UPLOAD_TOKEN:-}" ]]; then
@@ -44,57 +58,17 @@ _aiter_check_artifactory_upload() {
   code="$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 25 --max-time 90 \
     -H "Authorization: Bearer ${NVTE_AITER_PREBUILT_UPLOAD_TOKEN}" \
     -I "${_AITER_PREBUILT_BASE_ACCESS_PROBE_URL}" || true)"
-  case "${code}" in
-    404|200)
-      echo "[AITER-PREBUILT] Preflight OK (upload; HTTP ${code})."
-      ;;
-    401)
-      echo "Preflight: HTTP 401 - invalid or expired token." >&2
-      exit 1
-      ;;
-    403)
-      echo "Preflight: HTTP 403 - token cannot access this repository path." >&2
-      exit 1
-      ;;
-    000|'')
-      echo "Preflight: no HTTP response for HEAD probe." >&2
-      exit 1
-      ;;
-    *)
-      echo "Preflight: unexpected HTTP ${code} for HEAD ${_AITER_PREBUILT_BASE_ACCESS_PROBE_URL}." >&2
-      exit 1
-      ;;
-  esac
+  _aiter_preflight_head_ok upload "${code}"
 }
 
 _aiter_check_artifactory_download() {
   _aiter_set_artifactory_check_urls
   _aiter_curl_artifactory_system_ping
-  echo "[AITER-PREBUILT] Preflight (download): HEAD ${_AITER_PREBUILT_BASE_ACCESS_PROBE_URL} (anonymous; CMake file(DOWNLOAD)) ..."
+  echo "[AITER-PREBUILT] Preflight (download): HEAD ${_AITER_PREBUILT_BASE_ACCESS_PROBE_URL} (anonymous) ..."
   local code
   code="$(curl -sS -o /dev/null -w "%{http_code}" --connect-timeout 25 --max-time 90 \
     -I "${_AITER_PREBUILT_BASE_ACCESS_PROBE_URL}" || true)"
-  case "${code}" in
-    404|200)
-      echo "[AITER-PREBUILT] Preflight OK (download; HTTP ${code})."
-      ;;
-    401)
-      echo "Preflight: HTTP 401 - anonymous read denied (CMake download may fail)." >&2
-      exit 1
-      ;;
-    403)
-      echo "Preflight: HTTP 403 - anonymous access forbidden for this path." >&2
-      exit 1
-      ;;
-    000|'')
-      echo "Preflight: no HTTP response for HEAD probe." >&2
-      exit 1
-      ;;
-    *)
-      echo "Preflight: unexpected HTTP ${code} for HEAD ${_AITER_PREBUILT_BASE_ACCESS_PROBE_URL}." >&2
-      exit 1
-      ;;
-  esac
+  _aiter_preflight_head_ok download "${code}"
 }
 
 if [[ "${1:-}" == "--preflight" ]]; then
