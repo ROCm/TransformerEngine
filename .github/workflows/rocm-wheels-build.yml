@@ -70,10 +70,8 @@ env:
   DOCKER_IMAGE_NAME: te-rocm-manylinux-x86
   MANYLINUX_PLATFORM: manylinux_2_28_x86_64
 
-# Same group as rocm-ci / dispatch so a new PR push cancels this nested workflow too.
-concurrency:
-  group: te-rocm-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
-  cancel-in-progress: true
+# No workflow-level concurrency: rocm-ci.yml already gates PRs; sharing the same group
+# with a parent reusable workflow causes GitHub deadlock detection.
 
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:

@@ -12,11 +12,6 @@ permissions:
   contents: read
   pull-requests: read
 
-# One in-flight run per PR: new pushes cancel earlier dispatch + nested workflows that
-# share the same concurrency group (see rocm-ci.yml, rocm-wheels-build.yml).
-concurrency:
-  group: te-rocm-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
-  cancel-in-progress: true
 
 jobs:
   # To determine whether to upload AITER prebuilt to Artifactory
