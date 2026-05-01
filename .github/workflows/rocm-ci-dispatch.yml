@@ -47,11 +47,11 @@ jobs:
           ACTION='${{ github.event.action }}'
           echo "PR action=${ACTION}"
 
-          if [ "$ACTION" != "synchronize" ]; then
-            echo "trigger_aiter_upload=false" >> "$GITHUB_OUTPUT"
-            echo "Not synchronize - trigger_aiter_upload = false"
-            exit 0
-          fi
+          # if [ "$ACTION" != "synchronize" ]; then
+          #   echo "trigger_aiter_upload=false" >> "$GITHUB_OUTPUT"
+          #   echo "Not synchronize - trigger_aiter_upload = false"
+          #   exit 0
+          # fi
 
           SKIP='${{ steps.skip_label.outputs.skip }}'
           echo "skip_aiter_upload label : ${SKIP}"
