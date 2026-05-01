@@ -169,6 +169,230 @@ INSTANTIATE_TEST_SUITE_P(
 
 #ifdef __HIP_PLATFORM_AMD__
 
+// ============================================================================
+// End-to-end MXFP8 GEMM test with pre-swizzled scales
+//
+// Verifies that the full pipeline works:
+//   1. Create MXFP8 FP8 tensors with random data + scales
+//   2. Run a reference GEMM (using un-swizzled scales)
+//   3. Swizzle the scales via nvte_swizzle_scaling_factors
+//   4. Run the actual hipBLASlt GEMM
+//   5. Compare results
+// ============================================================================
+
+#include <transformer_engine/gemm.h>
+
+// Helper: swizzle the MXFP8 scale_inv of a test::Tensor in-place.
+// Allocates a temp device buffer, swizzles into it, copies back.
+static void swizzle_tensor_scales(test::Tensor &t, bool rowwise) {
+  using namespace transformer_engine;
+
+  void *scale_ptr = rowwise ? t.rowwise_scale_inv_dptr()
+                            : t.columnwise_scale_inv_dptr();
+  if (!scale_ptr) return;
+
+  const NVTEShape scale_shape = rowwise ? t.rowwise_scale_inv_shape()
+                                        : t.columnwise_scale_inv_shape();
+  const NVTEShape data_shape = rowwise ? t.rowwise_shape()
+                                       : t.columnwise_shape();
+
+  size_t num_scales = 1;
+  for (size_t d = 0; d < scale_shape.ndim; d++) {
+    num_scales *= scale_shape.data[d];
+  }
+
+  // Allocate temp buffer for swizzled output
+  uint8_t *d_tmp = nullptr;
+  ASSERT_EQ(cudaMalloc(&d_tmp, num_scales), cudaSuccess);
+
+  // Build TensorWrapper pair for the swizzle call
+  TensorWrapper input_tw(NVTE_MXFP8_1D_SCALING);
+  TensorWrapper output_tw(NVTE_MXFP8_1D_SCALING);
+  output_tw.set_with_gemm_swizzled_scales(true);
+
+  if (rowwise) {
+    input_tw.set_rowwise_data(nullptr, t.dtype(), data_shape);
+    input_tw.set_rowwise_scale_inv(scale_ptr, DType::kFloat8E8M0, scale_shape);
+    output_tw.set_rowwise_data(nullptr, t.dtype(), data_shape);
+    output_tw.set_rowwise_scale_inv(d_tmp, DType::kFloat8E8M0, scale_shape);
+  } else {
+    input_tw.set_columnwise_data(nullptr, t.dtype(), data_shape);
+    input_tw.set_columnwise_scale_inv(scale_ptr, DType::kFloat8E8M0, scale_shape);
+    output_tw.set_columnwise_data(nullptr, t.dtype(), data_shape);
+    output_tw.set_columnwise_scale_inv(d_tmp, DType::kFloat8E8M0, scale_shape);
+  }
+
+  nvte_swizzle_scaling_factors(input_tw.data(), output_tw.data(), 0);
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+
+  // Copy swizzled scales back over the original
+  ASSERT_EQ(cudaMemcpy(scale_ptr, d_tmp, num_scales, cudaMemcpyDeviceToDevice), cudaSuccess);
+  cudaFree(d_tmp);
+
+  // Mark tensor as having swizzled scales
+  t.set_with_gemm_swizzled_scales(true);
+}
+
+// Simple GPU reference kernel for MXFP8 GEMM: D = A * B^T  (TN layout)
+// A is [M, K] row-major, B is [N, K] row-major, D is [M, N] column-major
+// Scales are E8M0, one per group of 32 elements along K.
+__global__ void mxfp8_gemm_ref_kernel(
+    const test::fp8e4m3 *a_data, const uint8_t *a_scale, size_t a_scale_ld,
+    const test::fp8e4m3 *b_data, const uint8_t *b_scale, size_t b_scale_ld,
+    test::bf16 *d_data,
+    size_t M, size_t K, size_t N) {
+  const size_t i = blockIdx.y * blockDim.y + threadIdx.y;
+  const size_t j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= M || j >= N) return;
+
+  float acc = 0.0f;
+  for (size_t kk = 0; kk < K; kk++) {
+    size_t kc = kk / 32;
+    float a_sinv = exp2f(static_cast<float>(a_scale[i * a_scale_ld + kc]) - 127.0f);
+    float b_sinv = exp2f(static_cast<float>(b_scale[j * b_scale_ld + kc]) - 127.0f);
+    float a_val = static_cast<float>(a_data[i * K + kk]);
+    float b_val = static_cast<float>(b_data[j * K + kk]);
+    acc += a_sinv * a_val * b_sinv * b_val;
+  }
+  d_data[i + j * M] = static_cast<test::bf16>(acc);
+}
+
+struct MxGemmParams {
+  size_t m, k, n;
+};
+
+class MxGemmTestSuite
+    : public ::testing::TestWithParam<MxGemmParams> {};
+
+TEST_P(MxGemmTestSuite, TestMxfp8GemmE2E) {
+  using namespace transformer_engine;
+  using namespace test;
+
+  const auto &p = GetParam();
+  const size_t M = p.m;
+  const size_t K = p.k;
+  const size_t N = p.n;
+
+  cudaDeviceProp prop;
+  ASSERT_EQ(cudaGetDeviceProperties(&prop, 0), cudaSuccess);
+
+  // MXFP8 requires gfx950+ (MI350) or gfx1250 (MI450)
+  bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) ||
+                          (prop.major >= 10);
+  if (!mxfp8_supported) {
+    GTEST_SKIP() << "MXFP8 GEMM not supported on this GPU";
+  }
+
+  // TN layout: A is [M, K], B is [N, K]
+  const bool transa = true;
+  const bool transb = false;
+
+  Tensor A("A", std::vector<size_t>{M, K}, DType::kFloat8E4M3, true, false, NVTE_MXFP8_1D_SCALING);
+  Tensor B("B", std::vector<size_t>{N, K}, DType::kFloat8E4M3, true, false, NVTE_MXFP8_1D_SCALING);
+  Tensor D("D", std::vector<size_t>{N, M}, DType::kBFloat16);
+  Tensor RefD("RefD", std::vector<size_t>{N, M}, DType::kBFloat16);
+  Tensor bias;
+  Tensor pre_gelu_out;
+
+  fillUniform(&A);
+  fillUniform(&B);
+
+  // --- GPU reference with un-swizzled scales ---
+  const auto a_scale_shape = A.rowwise_scale_inv_shape();
+  const auto b_scale_shape = B.rowwise_scale_inv_shape();
+
+  std::cout << "  A_scale shape: [" << a_scale_shape.data[0] << ", " << a_scale_shape.data[1]
+            << "], B_scale shape: [" << b_scale_shape.data[0] << ", " << b_scale_shape.data[1]
+            << "]" << std::endl;
+
+  {
+    dim3 block(16, 16);
+    dim3 grid((N + block.x - 1) / block.x, (M + block.y - 1) / block.y);
+    mxfp8_gemm_ref_kernel<<<grid, block>>>(
+        static_cast<const fp8e4m3 *>(A.rowwise_dptr()),
+        static_cast<const uint8_t *>(A.rowwise_scale_inv_dptr()),
+        a_scale_shape.data[1],
+        static_cast<const fp8e4m3 *>(B.rowwise_dptr()),
+        static_cast<const uint8_t *>(B.rowwise_scale_inv_dptr()),
+        b_scale_shape.data[1],
+        static_cast<bf16 *>(RefD.rowwise_dptr()),
+        M, K, N);
+    ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  }
+
+  // --- Run actual GEMM ---
+  // On gfx1250, hipBLASlt BLK32_UE8M0_32_8_EXT expects pre-swizzled scales.
+  // Swizzle scales AFTER the reference computation (which uses raw layout).
+  if (prop.major >= 12) {
+    swizzle_tensor_scales(A, /*rowwise=*/true);
+    swizzle_tensor_scales(B, /*rowwise=*/true);
+  }
+
+  size_t workspace_size = 134217728;  // 128MB
+  Tensor Workspace("Workspace", std::vector<size_t>{workspace_size}, DType::kByte);
+
+  nvte_cublas_gemm(A.data(), B.data(), D.data(),
+                   bias.data(), pre_gelu_out.data(),
+                   transa, transb,
+                   /*grad=*/false,
+                   Workspace.data(),
+                   /*accumulate=*/false,
+                   /*use_split_accumulator=*/false,
+                   prop.multiProcessorCount,
+                   0);
+
+  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
+  auto err = cudaGetLastError();
+  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+  // --- Compare ---
+  D.to_cpu();
+  RefD.to_cpu();
+
+  const bf16 *d_ptr = D.rowwise_cpu_dptr<bf16>();
+  const bf16 *ref_ptr = RefD.rowwise_cpu_dptr<bf16>();
+  double max_atol = 0.0;
+  double max_rtol = 0.0;
+  int mismatch_count = 0;
+  for (size_t i = 0; i < M * N; i++) {
+    float actual = static_cast<float>(d_ptr[i]);
+    float expected = static_cast<float>(ref_ptr[i]);
+    double diff = std::abs(actual - expected);
+    double denom = std::max(std::abs((double)expected), 1e-6);
+    if (diff > 5e-2 && mismatch_count < 10) {
+      size_t row = i / N;
+      size_t col = i % N;
+      std::cout << "  MISMATCH [" << row << "," << col << "]: actual=" << actual
+                << " expected=" << expected << " diff=" << diff << std::endl;
+      mismatch_count++;
+    }
+    max_atol = std::max(max_atol, diff);
+    max_rtol = std::max(max_rtol, diff / denom);
+  }
+
+  // MXFP8 GEMM tolerance
+  constexpr double ATOL = 5e-2;
+  constexpr double RTOL = 5e-2;
+  EXPECT_LE(max_atol, ATOL) << "Absolute error too large: " << max_atol;
+  EXPECT_LE(max_rtol, RTOL) << "Relative error too large: " << max_rtol;
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    OperatorTest,
+    MxGemmTestSuite,
+    ::testing::Values(
+        MxGemmParams{32, 128, 16},
+        MxGemmParams{64, 128, 32},
+        MxGemmParams{128, 128, 64},
+        MxGemmParams{64, 256, 32},
+        MxGemmParams{128, 384, 64}
+    ),
+    [](const testing::TestParamInfo<MxGemmTestSuite::ParamType> &info) {
+      return "M" + std::to_string(info.param.m) +
+             "_K" + std::to_string(info.param.k) +
+             "_N" + std::to_string(info.param.n);
+    });
+
 // MX pre-swizzle test (gfx1250 Tensile 3D layout)
 //
 // Tensile 3D: {K_scale, M}.reshape({K_scale, padM/4, 4}).permute({1, 0, 2})
