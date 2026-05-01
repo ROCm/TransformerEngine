@@ -34,7 +34,7 @@
 #else
 #include "ck_mx_grouped_gemm/ck_mx_grouped_gemm.h"
 #include "ck_mx_grouped_gemm/ck_mxflat_grouped_gemm.h"
-// #include "ck_grouped_gemm/ck_grouped_gemm.h"
+#include "ck_grouped_gemm/ck_grouped_gemm.h"
 #endif
 
 #ifndef __HIP_PLATFORM_AMD__
@@ -1205,6 +1205,9 @@ if (ck_backend == "mxflat") {
       A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
 } else if (ck_backend == "mxgemm") {
   ck_ok = ck_tile_mx_grouped_gemm(
+      A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
+} else if (ck_backend == "fp16fp8") {
+  ck_ok = ck_tile_grouped_gemm(
       A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
 } else {
   NVTE_WARN("Unknown NVTE_CK_MXFP8_GROUPED_BACKEND=", ck_backend,

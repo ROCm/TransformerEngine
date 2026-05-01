@@ -14,7 +14,7 @@ namespace grouped_gemm {
 // Tile configs: FP16/BF16
 // -------------------------
 
-struct TileCfg_256x256x64 {
+struct TileCfg_256x256x64_MFMA {
   static constexpr ck_tile::index_t M_Tile = 256;
   static constexpr ck_tile::index_t N_Tile = 256;
   static constexpr ck_tile::index_t K_Tile = 64;
@@ -37,12 +37,35 @@ struct TileCfg_256x256x64 {
   static constexpr ck_tile::index_t TilePartitionerM01 = 4;
 };
 
-struct TileCfg_256x128x64 : TileCfg_256x256x64 {
+struct TileCfg_256x128x64_MFMA : TileCfg_256x256x64_MFMA {
   static constexpr ck_tile::index_t N_Tile = 128;
 };
 
-struct TileCfg_256x128x64_padding : TileCfg_256x128x64 {
+struct TileCfg_256x128x64_MFMA_padding : TileCfg_256x128x64_MFMA {
   static constexpr bool kPadN = true;
+};
+
+struct TileCfg_256x256x64_WMMA {
+  static constexpr ck_tile::index_t M_Tile = 256;
+  static constexpr ck_tile::index_t N_Tile = 256;
+  static constexpr ck_tile::index_t K_Tile = 64;
+
+  static constexpr ck_tile::index_t M_Warp = 2;
+  static constexpr ck_tile::index_t N_Warp = 2;
+  static constexpr ck_tile::index_t K_Warp = 1;
+
+  static constexpr ck_tile::index_t M_Warp_Tile = 16;
+  static constexpr ck_tile::index_t N_Warp_Tile = 16;
+  static constexpr ck_tile::index_t K_Warp_Tile = 32;
+
+  static constexpr bool kPadM = true;
+  static constexpr bool kPadN = true;
+  static constexpr bool kPadK = true;
+
+  static constexpr bool DoubleSmemBuffer = false;
+
+  static constexpr ck_tile::index_t TilePartitionerGroupNum = 8;
+  static constexpr ck_tile::index_t TilePartitionerM01 = 4;
 };
 
 template <typename AType,
@@ -209,7 +232,26 @@ class GroupedGemmRunner : public RunnerInterface {
     runner = std::make_unique<Runner>();                               \
   })
 
-bool ck_tile_grouped_gemm_fp16_dispatch(DType a_dtype,
+template <GPUArch Arch>
+struct FP16TileCfg;
+
+template <>
+struct FP16TileCfg<GPUArch::GFX942> {
+  using type = TileCfg_256x256x64_MFMA;
+};
+
+template <>
+struct FP16TileCfg<GPUArch::GFX950> {
+  using type = TileCfg_256x256x64_MFMA;
+};
+
+template <>
+struct FP16TileCfg<GPUArch::GFX1250> {
+  using type = TileCfg_256x256x64_WMMA;
+};
+
+template <GPUArch Arch>
+bool ck_tile_grouped_gemm_fp16_dispatch_arch(DType a_dtype,
                                         DType b_dtype,
                                         DType d_dtype,
                                         const CKGemmRunContext& ctx) {
@@ -229,13 +271,17 @@ bool ck_tile_grouped_gemm_fp16_dispatch(DType a_dtype,
 
         TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(d_dtype, d_te_type, {
           using CType = typename TETypeToCKType<d_te_type>::type;
-
-          if (ctx.N % 256 == 0) {
-            MAKE_RUNNER(TileCfg_256x256x64);
-          } else if (ctx.N % 128 == 0) {
-            MAKE_RUNNER(TileCfg_256x128x64);
+          
+          if constexpr (Arch == GPUArch::GFX1250) {
+            MAKE_RUNNER(TileCfg_256x256x64_WMMA);
           } else {
-            MAKE_RUNNER(TileCfg_256x128x64_padding);
+            if (ctx.N % 256 == 0) {
+                MAKE_RUNNER(TileCfg_256x256x64_MFMA);
+            } else if (ctx.N % 128 == 0) {
+                MAKE_RUNNER(TileCfg_256x128x64_MFMA);
+            } else {
+                MAKE_RUNNER(TileCfg_256x128x64_MFMA_padding);
+            }
           }
         });
       });
@@ -247,6 +293,23 @@ bool ck_tile_grouped_gemm_fp16_dispatch(DType a_dtype,
   }
 
   return runner->run(s, ctx);
+}
+
+bool ck_tile_grouped_gemm_fp16_dispatch(DType a_dtype,
+                                       DType b_dtype,
+                                       DType d_dtype,
+                                       const CKGemmRunContext& ctx) {
+  switch (detect_gpu_arch()) {
+    case GPUArch::GFX942:
+      return ck_tile_grouped_gemm_fp16_dispatch_arch<GPUArch::GFX942>(a_dtype, b_dtype, d_dtype, ctx);
+    case GPUArch::GFX950:
+      return ck_tile_grouped_gemm_fp16_dispatch_arch<GPUArch::GFX950>(a_dtype, b_dtype, d_dtype, ctx);
+    case GPUArch::GFX1250:
+      return ck_tile_grouped_gemm_fp16_dispatch_arch<GPUArch::GFX1250>(a_dtype, b_dtype, d_dtype, ctx);
+    default:
+      NVTE_ERROR("ck_tile_grouped_gemm: available architectures = {gfx942, gfx950, gfx1250}");
+      return false;
+  }
 }
 
 #undef MAKE_RUNNER

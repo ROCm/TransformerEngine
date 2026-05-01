@@ -463,6 +463,310 @@ void launch_copy_c_unpad_once(const T* src,
   NVTE_CHECK_CUDA(hipGetLastError());
 }
 
+
+// -----------------------------------------------------------------------------
+// Grouped MXFlatmm preprocessing kernels.
+//
+// The original TE integration launched staging/preshuffle kernels once per expert:
+//   E x A staging + E x B preshuffle + E x A-scale preshuffle + E x B-scale
+// preshuffle (+ optional E x C copyback).  These descriptor-driven wrappers keep
+// the exact same per-element transforms, but launch one kernel per transform type
+// across all experts.
+// -----------------------------------------------------------------------------
+
+template <typename T>
+struct GroupedStageADesc {
+  const T* src;
+  T* dst;
+  int M;
+  int M_padded;
+  int K;
+  int64_t src_stride0;
+  int64_t src_stride1;
+  bool src_is_km;
+  int blocks;
+};
+
+template <typename T>
+__global__ void grouped_stage_a_rowmajor_kernel(const GroupedStageADesc<T>* __restrict__ descs,
+                                                int group_count) {
+  constexpr int threads = 256;
+  const int g = static_cast<int>(blockIdx.x);
+  if (g >= group_count) return;
+
+  const auto desc = descs[g];
+  const int block_linear = static_cast<int>(blockIdx.y);
+  if (block_linear >= desc.blocks) return;
+
+  const int linear = block_linear * threads + static_cast<int>(threadIdx.x);
+  const int total = desc.M_padded * desc.K;
+  if (linear >= total) return;
+
+  const int m = linear / desc.K;
+  const int k = linear % desc.K;
+
+  T value{};
+  if (m < desc.M) {
+    value = desc.src_is_km ? desc.src[k * desc.src_stride0 + m * desc.src_stride1]
+                           : desc.src[m * desc.src_stride0 + k * desc.src_stride1];
+  }
+  desc.dst[m * desc.K + k] = value;
+}
+
+template <typename T>
+void launch_grouped_stage_a_rowmajor(const std::vector<GroupedStageADesc<T>>& descs_host,
+                                     GroupedStageADesc<T>* descs_dev,
+                                     hipStream_t stream) {
+  if (descs_host.empty()) return;
+
+  int max_blocks = 0;
+  for (const auto& desc : descs_host) max_blocks = std::max(max_blocks, desc.blocks);
+  if (max_blocks <= 0) return;
+
+  NVTE_CHECK_CUDA(hipMemcpyAsync(descs_dev,
+                                 descs_host.data(),
+                                 descs_host.size() * sizeof(GroupedStageADesc<T>),
+                                 hipMemcpyHostToDevice,
+                                 stream));
+
+  hipLaunchKernelGGL((grouped_stage_a_rowmajor_kernel<T>),
+                     dim3(static_cast<unsigned int>(descs_host.size()),
+                          static_cast<unsigned int>(max_blocks),
+                          1),
+                     dim3(256),
+                     0,
+                     stream,
+                     descs_dev,
+                     static_cast<int>(descs_host.size()));
+  NVTE_CHECK_CUDA(hipGetLastError());
+}
+
+template <typename T>
+struct GroupedWeightPreshuffleDesc {
+  const T* src;
+  T* dst;
+  int K;
+  int N;
+  int64_t src_stride0;
+  int64_t src_stride1;
+  bool src_is_nk;
+  int blocks;
+};
+
+template <typename T, int NLane>
+__global__ void grouped_preshuffle_weight_kernel(const GroupedWeightPreshuffleDesc<T>* __restrict__ descs,
+                                                 int group_count) {
+  constexpr int threads = 256;
+  constexpr int packed_size = ck_tile::numeric_traits<T>::PackedSize;
+  constexpr int KPack = std::is_same_v<T, ck_tile::pk_fp6x16_t> ? 32 : 16 * packed_size;
+  constexpr int KLane = 64 / NLane;
+
+  const int g = static_cast<int>(blockIdx.x);
+  if (g >= group_count) return;
+
+  const auto desc = descs[g];
+  const int block_linear = static_cast<int>(blockIdx.y);
+  if (block_linear >= desc.blocks) return;
+
+  const int linear = block_linear * threads + static_cast<int>(threadIdx.x);
+  const int total = desc.N * (desc.K / packed_size);
+  if (linear >= total) return;
+
+  const int K0 = desc.K / (KLane * KPack);
+  const int n = linear / (desc.K / packed_size);
+  const int k = (linear % (desc.K / packed_size)) * packed_size;
+
+  const int n0 = n / NLane;
+  const int n1 = n % NLane;
+
+  const int k0 = k / (KLane * KPack);
+  const int tempk = k % (KLane * KPack);
+  const int k1 = tempk / KPack;
+  const int k2 = tempk % KPack;
+
+  const int outputIndex = n0 * KPack * NLane * KLane * K0 +
+                          k0 * KPack * NLane * KLane +
+                          k1 * KPack * NLane + n1 * KPack + k2;
+
+  desc.dst[outputIndex] = desc.src_is_nk ? desc.src[n * desc.src_stride0 + k * desc.src_stride1]
+                                         : desc.src[k * desc.src_stride0 + n * desc.src_stride1];
+}
+
+template <typename T>
+void launch_grouped_weight_preshuffle(const std::vector<GroupedWeightPreshuffleDesc<T>>& descs_host,
+                                      GroupedWeightPreshuffleDesc<T>* descs_dev,
+                                      hipStream_t stream) {
+  if (descs_host.empty()) return;
+
+  int max_blocks = 0;
+  for (const auto& desc : descs_host) max_blocks = std::max(max_blocks, desc.blocks);
+  if (max_blocks <= 0) return;
+
+  NVTE_CHECK_CUDA(hipMemcpyAsync(descs_dev,
+                                 descs_host.data(),
+                                 descs_host.size() * sizeof(GroupedWeightPreshuffleDesc<T>),
+                                 hipMemcpyHostToDevice,
+                                 stream));
+
+  hipLaunchKernelGGL((grouped_preshuffle_weight_kernel<T, 16>),
+                     dim3(static_cast<unsigned int>(descs_host.size()),
+                          static_cast<unsigned int>(max_blocks),
+                          1),
+                     dim3(256),
+                     0,
+                     stream,
+                     descs_dev,
+                     static_cast<int>(descs_host.size()));
+  NVTE_CHECK_CUDA(hipGetLastError());
+}
+
+struct GroupedScalePreshuffleDesc {
+  const ScaleType* src;
+  ScaleType* dst;
+  int MN_src;
+  int MN_dst;
+  int K;
+  int64_t src_stride0;
+  int64_t src_stride1;
+  bool k_last;
+  int blocks;
+};
+
+template <int XdlMNThread>
+__global__ void grouped_preshuffle_scale_kernel(const GroupedScalePreshuffleDesc* __restrict__ descs,
+                                                int group_count) {
+  constexpr int threads = 256;
+  constexpr int MNXdlPack = 2;
+  constexpr int KXdlPack = 2;
+  constexpr int XdlKThread = 64 / XdlMNThread;
+
+  const int g = static_cast<int>(blockIdx.x);
+  if (g >= group_count) return;
+
+  const auto desc = descs[g];
+  const int block_linear = static_cast<int>(blockIdx.y);
+  if (block_linear >= desc.blocks) return;
+
+  const int linear = block_linear * threads + static_cast<int>(threadIdx.x);
+  const int MN_padded = ((desc.MN_dst + XdlMNThread * MNXdlPack - 1) /
+                         (XdlMNThread * MNXdlPack)) *
+                        (XdlMNThread * MNXdlPack);
+  const int total = MN_padded * desc.K;
+  if (linear >= total) return;
+
+  const int n = linear / desc.K;
+  const int k = linear % desc.K;
+
+  const int n0 = n / (XdlMNThread * MNXdlPack);
+  const int tempn = n % (XdlMNThread * MNXdlPack);
+  const int n1 = tempn % XdlMNThread;
+  const int n2 = tempn / XdlMNThread;
+
+  const int k0 = k / (XdlKThread * KXdlPack);
+  const int tempk = k % (XdlKThread * KXdlPack);
+  const int k1 = tempk % XdlKThread;
+  const int k2 = tempk / XdlKThread;
+
+  const int K0 = desc.K / KXdlPack / XdlKThread;
+  const int outputIndex =
+      n0 * MNXdlPack * KXdlPack * XdlMNThread * XdlKThread * K0 +
+      k0 * MNXdlPack * KXdlPack * XdlMNThread * XdlKThread +
+      k1 * MNXdlPack * KXdlPack * XdlMNThread + n1 * MNXdlPack * KXdlPack +
+      k2 * MNXdlPack + n2;
+
+  ScaleType value{};
+  if (n < desc.MN_src) {
+    value = desc.k_last ? desc.src[n * desc.src_stride0 + k * desc.src_stride1]
+                        : desc.src[k * desc.src_stride0 + n * desc.src_stride1];
+  }
+  desc.dst[outputIndex] = value;
+}
+
+inline void launch_grouped_scale_preshuffle(const std::vector<GroupedScalePreshuffleDesc>& descs_host,
+                                            GroupedScalePreshuffleDesc* descs_dev,
+                                            hipStream_t stream) {
+  if (descs_host.empty()) return;
+
+  int max_blocks = 0;
+  for (const auto& desc : descs_host) max_blocks = std::max(max_blocks, desc.blocks);
+  if (max_blocks <= 0) return;
+
+  NVTE_CHECK_CUDA(hipMemcpyAsync(descs_dev,
+                                 descs_host.data(),
+                                 descs_host.size() * sizeof(GroupedScalePreshuffleDesc),
+                                 hipMemcpyHostToDevice,
+                                 stream));
+
+  hipLaunchKernelGGL((grouped_preshuffle_scale_kernel<16>),
+                     dim3(static_cast<unsigned int>(descs_host.size()),
+                          static_cast<unsigned int>(max_blocks),
+                          1),
+                     dim3(256),
+                     0,
+                     stream,
+                     descs_dev,
+                     static_cast<int>(descs_host.size()));
+  NVTE_CHECK_CUDA(hipGetLastError());
+}
+
+template <typename T>
+struct GroupedCopyCDesc {
+  const T* src;
+  T* dst;
+  int M;
+  int N;
+  int64_t dst_stride;
+  int blocks;
+};
+
+template <typename T>
+__global__ void grouped_copy_c_unpad_kernel(const GroupedCopyCDesc<T>* __restrict__ descs,
+                                            int group_count) {
+  constexpr int threads = 256;
+  const int g = static_cast<int>(blockIdx.x);
+  if (g >= group_count) return;
+
+  const auto desc = descs[g];
+  const int block_linear = static_cast<int>(blockIdx.y);
+  if (block_linear >= desc.blocks) return;
+
+  const int linear = block_linear * threads + static_cast<int>(threadIdx.x);
+  const int total = desc.M * desc.N;
+  if (linear >= total) return;
+
+  const int m = linear / desc.N;
+  const int n = linear % desc.N;
+  desc.dst[m * desc.dst_stride + n] = desc.src[m * desc.N + n];
+}
+
+template <typename T>
+void launch_grouped_copy_c_unpad(const std::vector<GroupedCopyCDesc<T>>& descs_host,
+                                 GroupedCopyCDesc<T>* descs_dev,
+                                 hipStream_t stream) {
+  if (descs_host.empty()) return;
+
+  int max_blocks = 0;
+  for (const auto& desc : descs_host) max_blocks = std::max(max_blocks, desc.blocks);
+  if (max_blocks <= 0) return;
+
+  NVTE_CHECK_CUDA(hipMemcpyAsync(descs_dev,
+                                 descs_host.data(),
+                                 descs_host.size() * sizeof(GroupedCopyCDesc<T>),
+                                 hipMemcpyHostToDevice,
+                                 stream));
+
+  hipLaunchKernelGGL((grouped_copy_c_unpad_kernel<T>),
+                     dim3(static_cast<unsigned int>(descs_host.size()),
+                          static_cast<unsigned int>(max_blocks),
+                          1),
+                     dim3(256),
+                     0,
+                     stream,
+                     descs_dev,
+                     static_cast<int>(descs_host.size()));
+  NVTE_CHECK_CUDA(hipGetLastError());
+}
+
 namespace ck_tile {
 
 template <class ScaleM = FlatmmScalePointer<-1>,
@@ -930,14 +1234,11 @@ bool invoke_mxflat_grouped_gemm_from_te(const CKGemmRunContext& ctx,
   std::vector<ScaleA> scale_a_host;
   std::vector<ScaleB> scale_b_host;
 
-  struct CCopyBack {
-    const CType* src;
-    CType* dst;
-    int M;
-    int N;
-    int64_t dst_stride;
-  };
-  std::vector<CCopyBack> c_copybacks;
+  std::vector<GroupedStageADesc<AType>> a_stage_descs;
+  std::vector<GroupedWeightPreshuffleDesc<BType>> b_preshuffle_descs;
+  std::vector<GroupedScalePreshuffleDesc> a_scale_preshuffle_descs;
+  std::vector<GroupedScalePreshuffleDesc> b_scale_preshuffle_descs;
+  std::vector<GroupedCopyCDesc<CType>> c_copyback_descs;
 
   Ms_host.reserve(ctx.group_num);
   Ns_host.reserve(ctx.group_num);
@@ -950,6 +1251,11 @@ bool invoke_mxflat_grouped_gemm_from_te(const CKGemmRunContext& ctx,
   c_ptrs_host.reserve(ctx.group_num);
   scale_a_host.reserve(ctx.group_num);
   scale_b_host.reserve(ctx.group_num);
+  a_stage_descs.reserve(ctx.group_num);
+  b_preshuffle_descs.reserve(ctx.group_num);
+  a_scale_preshuffle_descs.reserve(ctx.group_num);
+  b_scale_preshuffle_descs.reserve(ctx.group_num);
+  c_copyback_descs.reserve(ctx.group_num);
 
   for (int i = 0; i < ctx.group_num; ++i) {
     const Tensor* const A_te = convertNVTETensorCheck(ctx.A[i]);
@@ -1103,23 +1409,27 @@ bool invoke_mxflat_grouped_gemm_from_te(const CKGemmRunContext& ctx,
       return false;
     }
 
-    // Mirror the passing standalone semantics:
-    //   A passed to MXFlatmm is a dense row-major [M_padded, K] buffer.
-    //   Rows M..M_padded-1 are zero-filled by the staging kernel.
-    launch_stage_a_rowmajor_once<AType>(
+    constexpr int preprocess_threads = 256;
+
+    // Build grouped preprocessing descriptors.  These preserve the exact same
+    // per-expert transforms as the original one-launch-per-expert path, but are
+    // launched after this loop as one grouped kernel per transform type.
+    const int a_stage_total = static_cast<int>(M_padded) * static_cast<int>(K);
+    a_stage_descs.push_back(GroupedStageADesc<AType>{
         reinterpret_cast<const AType*>(a.dptr),
         a_stage,
         static_cast<int>(M),
         static_cast<int>(M_padded),
         static_cast<int>(K),
-        ctx.transA ? static_cast<int64_t>(Ad1) : static_cast<int64_t>(Ad1),
+        static_cast<int64_t>(Ad1),
         1,
         ctx.transA,
-        ctx.stream);
+        (a_stage_total + preprocess_threads - 1) / preprocess_threads});
 
-    // MXFlatmm requires B to be in its preshuffled physical layout.  Read the
-    // logical [K, N] matrix from either physical [K, N] or physical [N, K].
-    launch_weight_preshuffle_strided_once<BType>(
+    const int b_preshuffle_total =
+        static_cast<int>(N) *
+        (static_cast<int>(K) / ck_tile::numeric_traits<BType>::PackedSize);
+    b_preshuffle_descs.push_back(GroupedWeightPreshuffleDesc<BType>{
         reinterpret_cast<const BType*>(b.dptr),
         b_shuf,
         static_cast<int>(K),
@@ -1127,54 +1437,39 @@ bool invoke_mxflat_grouped_gemm_from_te(const CKGemmRunContext& ctx,
         static_cast<int64_t>(Bd1),
         1,
         ctx.transB,
-        ctx.stream);
+        (b_preshuffle_total + preprocess_threads - 1) / preprocess_threads});
 
-    // MXFlatmm scale preshuffle expects:
-    //   A scale logical [M, KScale] when KLast=true
-    //   B scale logical [KScale, N] when KLast=false
-    if (a_scales_m_k) {
-      launch_scale_preshuffle_strided_once<ScaleType, true>(
-          reinterpret_cast<const ScaleType*>(a_scales.dptr),
-          a_scale_shuf,
-          static_cast<int>(M),
-          static_cast<int>(M_padded),
-          static_cast<int>(KScale),
-          static_cast<int64_t>(a_scales.shape[1]),
-          1,
-          ctx.stream);
-    } else {
-      launch_scale_preshuffle_strided_once<ScaleType, false>(
-          reinterpret_cast<const ScaleType*>(a_scales.dptr),
-          a_scale_shuf,
-          static_cast<int>(M),
-          static_cast<int>(M_padded),
-          static_cast<int>(KScale),
-          static_cast<int64_t>(a_scales.shape[1]),
-          1,
-          ctx.stream);
-    }
+    const auto make_scale_blocks = [=](int MN_dst, int K) {
+      constexpr int XdlMNThread = 16;
+      constexpr int MNXdlPack = 2;
+      const int MN_padded =
+          ((MN_dst + XdlMNThread * MNXdlPack - 1) / (XdlMNThread * MNXdlPack)) *
+          (XdlMNThread * MNXdlPack);
+      const int total = MN_padded * K;
+      return (total + preprocess_threads - 1) / preprocess_threads;
+    };
 
-    if (b_scales_k_n) {
-      launch_scale_preshuffle_strided_once<ScaleType, false>(
-          reinterpret_cast<const ScaleType*>(b_scales.dptr),
-          b_scale_shuf,
-          static_cast<int>(N),
-          static_cast<int>(N),
-          static_cast<int>(KScale),
-          static_cast<int64_t>(b_scales.shape[1]),
-          1,
-          ctx.stream);
-    } else {
-      launch_scale_preshuffle_strided_once<ScaleType, true>(
-          reinterpret_cast<const ScaleType*>(b_scales.dptr),
-          b_scale_shuf,
-          static_cast<int>(N),
-          static_cast<int>(N),
-          static_cast<int>(KScale),
-          static_cast<int64_t>(b_scales.shape[1]),
-          1,
-          ctx.stream);
-    }
+    a_scale_preshuffle_descs.push_back(GroupedScalePreshuffleDesc{
+        reinterpret_cast<const ScaleType*>(a_scales.dptr),
+        a_scale_shuf,
+        static_cast<int>(M),
+        static_cast<int>(M_padded),
+        static_cast<int>(KScale),
+        static_cast<int64_t>(a_scales.shape[1]),
+        1,
+        a_scales_m_k,
+        make_scale_blocks(static_cast<int>(M_padded), static_cast<int>(KScale))});
+
+    b_scale_preshuffle_descs.push_back(GroupedScalePreshuffleDesc{
+        reinterpret_cast<const ScaleType*>(b_scales.dptr),
+        b_scale_shuf,
+        static_cast<int>(N),
+        static_cast<int>(N),
+        static_cast<int>(KScale),
+        static_cast<int64_t>(b_scales.shape[1]),
+        1,
+        !b_scales_k_n,
+        make_scale_blocks(static_cast<int>(N), static_cast<int>(KScale))});
 
     void* c_ptr_for_kernel = (c_stage_bytes == 0) ? d.dptr : static_cast<void*>(c_stage);
     const ck_tile::index_t stride_C_for_kernel =
@@ -1193,14 +1488,51 @@ bool invoke_mxflat_grouped_gemm_from_te(const CKGemmRunContext& ctx,
     scale_b_host.push_back(ScaleB{b_scale_shuf, static_cast<ck_tile::index_t>(N)});
 
     if (c_stage_bytes != 0) {
-      c_copybacks.push_back(CCopyBack{
+      const int c_copy_total = static_cast<int>(M) * static_cast<int>(N);
+      c_copyback_descs.push_back(GroupedCopyCDesc<CType>{
           c_stage,
           reinterpret_cast<CType*>(d.dptr),
           static_cast<int>(M),
           static_cast<int>(N),
-          static_cast<int64_t>(stride_E)});
+          static_cast<int64_t>(stride_E),
+          (c_copy_total + 256 - 1) / 256});
     }
   }
+
+
+  auto* a_stage_descs_dev = reinterpret_cast<GroupedStageADesc<AType>*>(
+      carve_workspace_from_end(a_stage_descs.size() * sizeof(GroupedStageADesc<AType>),
+                               alignof(GroupedStageADesc<AType>),
+                               "A staging descriptor buffer"));
+  auto* b_preshuffle_descs_dev = reinterpret_cast<GroupedWeightPreshuffleDesc<BType>*>(
+      carve_workspace_from_end(b_preshuffle_descs.size() * sizeof(GroupedWeightPreshuffleDesc<BType>),
+                               alignof(GroupedWeightPreshuffleDesc<BType>),
+                               "B preshuffle descriptor buffer"));
+  auto* a_scale_descs_dev = reinterpret_cast<GroupedScalePreshuffleDesc*>(
+      carve_workspace_from_end(a_scale_preshuffle_descs.size() * sizeof(GroupedScalePreshuffleDesc),
+                               alignof(GroupedScalePreshuffleDesc),
+                               "A scale preshuffle descriptor buffer"));
+  auto* b_scale_descs_dev = reinterpret_cast<GroupedScalePreshuffleDesc*>(
+      carve_workspace_from_end(b_scale_preshuffle_descs.size() * sizeof(GroupedScalePreshuffleDesc),
+                               alignof(GroupedScalePreshuffleDesc),
+                               "B scale preshuffle descriptor buffer"));
+  auto* c_copyback_descs_dev = reinterpret_cast<GroupedCopyCDesc<CType>*>(
+      carve_workspace_from_end(c_copyback_descs.size() * sizeof(GroupedCopyCDesc<CType>),
+                               alignof(GroupedCopyCDesc<CType>),
+                               "C copyback descriptor buffer"));
+
+  if ((a_stage_descs.empty() == false && a_stage_descs_dev == nullptr) ||
+      (b_preshuffle_descs.empty() == false && b_preshuffle_descs_dev == nullptr) ||
+      (a_scale_preshuffle_descs.empty() == false && a_scale_descs_dev == nullptr) ||
+      (b_scale_preshuffle_descs.empty() == false && b_scale_descs_dev == nullptr) ||
+      (c_copyback_descs.empty() == false && c_copyback_descs_dev == nullptr)) {
+    return false;
+  }
+
+  launch_grouped_stage_a_rowmajor<AType>(a_stage_descs, a_stage_descs_dev, ctx.stream);
+  launch_grouped_weight_preshuffle<BType>(b_preshuffle_descs, b_preshuffle_descs_dev, ctx.stream);
+  launch_grouped_scale_preshuffle(a_scale_preshuffle_descs, a_scale_descs_dev, ctx.stream);
+  launch_grouped_scale_preshuffle(b_scale_preshuffle_descs, b_scale_descs_dev, ctx.stream);
 
   const bool launched = invoke_grouped_mx_flatmm_raw<MXTraits,
                                                   AType,
@@ -1229,11 +1561,9 @@ bool invoke_mxflat_grouped_gemm_from_te(const CKGemmRunContext& ctx,
     return false;
   }
 
-  // If a group needed padded C workspace, copy only the real M rows back to TE's D.
-  // This is a device kernel only; no hipMalloc/hipFree and no host-device memcpy.
-  for (const auto& cb : c_copybacks) {
-    launch_copy_c_unpad_once<CType>(cb.src, cb.dst, cb.M, cb.N, cb.dst_stride, ctx.stream);
-  }
+  // If any group needed padded C workspace, copy only the real M rows back to TE's D
+  // with one grouped copyback launch.
+  launch_grouped_copy_c_unpad<CType>(c_copyback_descs, c_copyback_descs_dev, ctx.stream);
 
   return true;
 }

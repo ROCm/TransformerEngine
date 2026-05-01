@@ -316,6 +316,105 @@ void launch_pack_scales(const ScaleType* src,
   NVTE_CHECK_CUDA(hipGetLastError());
 }
 
+
+struct GroupedScalePackJob {
+  const ScaleType* src;
+  int32_t* dst;
+  int MN;
+  int K_scale;
+  int stride_dim0;
+  int stride_dim1;
+  int total;
+};
+
+template <typename ScaleT, bool KLast, int MNPack, int KPack, int XdlMNThread, int XdlKThread>
+__global__ void grouped_pack_scales_mnxk_kernel(const GroupedScalePackJob* __restrict__ jobs) {
+  const int group = blockIdx.y;
+  const auto job = jobs[group];
+
+  const int linear = blockIdx.x * blockDim.x + threadIdx.x;
+  if (linear >= job.total) return;
+
+  const int K_packed = job.K_scale / KPack;
+  const int packed_mn = linear / K_packed;
+  const int packed_k  = linear % K_packed;
+
+  int32_t val        = 0;
+  const int mn_lane  = packed_mn % XdlMNThread;
+  const int mn_group = packed_mn / XdlMNThread;
+  const int k_lane   = packed_k % XdlKThread;
+  const int k_group  = packed_k / XdlKThread;
+
+  for (int ik = 0; ik < KPack; ++ik) {
+    for (int imn = 0; imn < MNPack; ++imn) {
+      const int byteIdx = ik * MNPack + imn;
+      const int orig_mn = mn_group * XdlMNThread * MNPack + imn * XdlMNThread + mn_lane;
+      const int orig_k  = k_group * XdlKThread * KPack + ik * XdlKThread + k_lane;
+
+      ScaleT v{};
+      if constexpr (KLast) {
+        // src is logical [MN, K_scale]
+        v = job.src[orig_mn * job.stride_dim0 + orig_k * job.stride_dim1];
+      } else {
+        // src is logical [K_scale, MN]
+        v = job.src[orig_k * job.stride_dim0 + orig_mn * job.stride_dim1];
+      }
+      val |= (static_cast<int32_t>(v.get()) << (byteIdx * 8));
+    }
+  }
+
+  job.dst[packed_mn * K_packed + packed_k] = val;
+}
+
+template <typename ScaleT, bool KLast, int MNPack, int KPack, int XdlMNThread, int XdlKThread>
+bool launch_grouped_pack_scales(const std::vector<GroupedScalePackJob>& jobs_host,
+                                char*& ws_cursor,
+                                size_t& ws_remaining,
+                                hipStream_t stream,
+                                const char* label) {
+  if (jobs_host.empty()) return true;
+
+  auto align_up = [](size_t x, size_t a) -> size_t { return (x + a - 1) / a * a; };
+
+  const size_t jobs_bytes = align_up(jobs_host.size() * sizeof(GroupedScalePackJob), 16);
+  if (ws_remaining < jobs_bytes) {
+    NVTE_WARN("ck_tile_mx_grouped_gemm: insufficient workspace for grouped scale-pack job descriptors for ",
+              label,
+              ". Needed bytes=",
+              jobs_bytes,
+              ", available bytes=",
+              ws_remaining);
+    return false;
+  }
+
+  auto* jobs_dev = reinterpret_cast<GroupedScalePackJob*>(ws_cursor);
+  ws_cursor += jobs_bytes;
+  ws_remaining -= jobs_bytes;
+
+  NVTE_CHECK_CUDA(hipMemcpyAsync(jobs_dev,
+                                 jobs_host.data(),
+                                 jobs_host.size() * sizeof(GroupedScalePackJob),
+                                 hipMemcpyHostToDevice,
+                                 stream));
+
+  int max_total = 0;
+  for (const auto& job : jobs_host) max_total = std::max(max_total, job.total);
+
+  constexpr int threads = 256;
+  const int blocks_x = (max_total + threads - 1) / threads;
+
+  hipLaunchKernelGGL(
+      (grouped_pack_scales_mnxk_kernel<ScaleT, KLast, MNPack, KPack, XdlMNThread, XdlKThread>),
+      dim3(blocks_x, static_cast<unsigned int>(jobs_host.size()), 1),
+      dim3(threads),
+      0,
+      stream,
+      jobs_dev);
+
+  NVTE_CHECK_CUDA(hipGetLastError());
+  return true;
+}
+
 namespace transformer_engine {
 
 template <typename GemmConfig, typename AType, typename BType, typename CType, typename AccType=float>
@@ -526,10 +625,19 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
 
   const ck_tile::stream_config s{ctx.stream};
 
-  using MxGemmConfig = MXfp8_GemmConfig_256x64x128;
+  using MxGemmConfig = MXfp8_GemmConfig_64x64x256;//MXfp8_GemmConfig_256x64x128;
 
   std::vector<MXGroupedHostDesc> descs;
   descs.reserve(group_num);
+
+  std::vector<GroupedScalePackJob> a_scale_pack_k_last_jobs;
+  std::vector<GroupedScalePackJob> a_scale_pack_k_first_jobs;
+  std::vector<GroupedScalePackJob> b_scale_pack_k_last_jobs;
+  std::vector<GroupedScalePackJob> b_scale_pack_k_first_jobs;
+  a_scale_pack_k_last_jobs.reserve(group_num);
+  a_scale_pack_k_first_jobs.reserve(group_num);
+  b_scale_pack_k_last_jobs.reserve(group_num);
+  b_scale_pack_k_first_jobs.reserve(group_num);
 
   auto align_up = [](size_t x, size_t a) -> size_t {
     return (x + a - 1) / a * a;
@@ -689,48 +797,51 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
     ws_cursor += b_pack_bytes;
     ws_remaining -= b_pack_bytes;
 
+    const int a_total = static_cast<int>(a_pack_elems);
+    const int b_total = static_cast<int>(b_pack_elems);
+
     if (a_scales_m_k) {
-    // physical/logical [M, KScale]
-    launch_pack_scales<ScaleType, true, MXdlPackEff, KXdlPackEff, XdlMNThread, XdlKThread>(
-        reinterpret_cast<const ScaleType*>(a_scales.dptr),
-        reinterpret_cast<int32_t*>(p_scale_a),
-        static_cast<int>(M),
-        static_cast<int>(KScale),
-        static_cast<int>(a_scales.shape[1]),
-        1,
-        stream);
+      // physical/logical [M, KScale]
+      a_scale_pack_k_last_jobs.push_back(GroupedScalePackJob{
+          reinterpret_cast<const ScaleType*>(a_scales.dptr),
+          reinterpret_cast<int32_t*>(p_scale_a),
+          static_cast<int>(M),
+          static_cast<int>(KScale),
+          static_cast<int>(a_scales.shape[1]),
+          1,
+          a_total});
     } else {
-    // physical [KScale, M], but pack kernel expects logical [M, KScale]
-    launch_pack_scales<ScaleType, true, MXdlPackEff, KXdlPackEff, XdlMNThread, XdlKThread>(
-        reinterpret_cast<const ScaleType*>(a_scales.dptr),
-        reinterpret_cast<int32_t*>(p_scale_a),
-        static_cast<int>(M),
-        static_cast<int>(KScale),
-        1,
-        static_cast<int>(M),
-        stream);
+      // physical [KScale, M], but pack kernel expects logical [M, KScale]
+      a_scale_pack_k_last_jobs.push_back(GroupedScalePackJob{
+          reinterpret_cast<const ScaleType*>(a_scales.dptr),
+          reinterpret_cast<int32_t*>(p_scale_a),
+          static_cast<int>(M),
+          static_cast<int>(KScale),
+          1,
+          static_cast<int>(M),
+          a_total});
     }
 
     if (b_scales_k_n) {
-    // physical/logical [KScale, N]
-    launch_pack_scales<ScaleType, false, NXdlPackEff, KXdlPackEff, XdlMNThread, XdlKThread>(
-        reinterpret_cast<const ScaleType*>(b_scales.dptr),
-        reinterpret_cast<int32_t*>(p_scale_b),
-        static_cast<int>(N),
-        static_cast<int>(KScale),
-        static_cast<int>(b_scales.shape[1]),
-        1,
-        stream);
+      // physical/logical [KScale, N]
+      b_scale_pack_k_first_jobs.push_back(GroupedScalePackJob{
+          reinterpret_cast<const ScaleType*>(b_scales.dptr),
+          reinterpret_cast<int32_t*>(p_scale_b),
+          static_cast<int>(N),
+          static_cast<int>(KScale),
+          static_cast<int>(b_scales.shape[1]),
+          1,
+          b_total});
     } else {
-    // physical/logical [N, KScale]
-    launch_pack_scales<ScaleType, false, NXdlPackEff, KXdlPackEff, XdlMNThread, XdlKThread>(
-        reinterpret_cast<const ScaleType*>(b_scales.dptr),
-        reinterpret_cast<int32_t*>(p_scale_b),
-        static_cast<int>(N),
-        static_cast<int>(KScale),
-        1,
-        static_cast<int>(b_scales.shape[1]),
-        stream);
+      // physical/logical [N, KScale]
+      b_scale_pack_k_first_jobs.push_back(GroupedScalePackJob{
+          reinterpret_cast<const ScaleType*>(b_scales.dptr),
+          reinterpret_cast<int32_t*>(p_scale_b),
+          static_cast<int>(N),
+          static_cast<int>(KScale),
+          1,
+          static_cast<int>(b_scales.shape[1]),
+          b_total});
     }
 
     descs.emplace_back(
@@ -748,6 +859,44 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
         stride_B,
         std::array<ck_tile::index_t, 0>{},
         stride_E);
+  }
+
+  constexpr ck_tile::index_t MPerXdlGrouped = MxGemmConfig::M_Warp_Tile;
+  constexpr ck_tile::index_t NPerXdlGrouped = MxGemmConfig::N_Warp_Tile;
+  constexpr ck_tile::index_t KPerXdlGrouped = MxGemmConfig::K_Warp_Tile;
+  constexpr ck_tile::index_t MIterPerWarpGrouped =
+      MxGemmConfig::M_Tile / (MxGemmConfig::M_Warp * MPerXdlGrouped);
+  constexpr ck_tile::index_t NIterPerWarpGrouped =
+      MxGemmConfig::N_Tile / (MxGemmConfig::N_Warp * NPerXdlGrouped);
+  constexpr ck_tile::index_t KIterPerWarpGrouped = MxGemmConfig::K_Tile / KPerXdlGrouped;
+  constexpr ck_tile::index_t MXdlPackEffGrouped =
+      (MIterPerWarpGrouped >= 2 && MIterPerWarpGrouped % 2 == 0) ? 2 : 1;
+  constexpr ck_tile::index_t NXdlPackEffGrouped =
+      (NIterPerWarpGrouped >= 2 && NIterPerWarpGrouped % 2 == 0) ? 2 : 1;
+  constexpr ck_tile::index_t KXdlPackEffGrouped =
+      (KIterPerWarpGrouped >= 2 && KIterPerWarpGrouped % 2 == 0) ? 2 : 1;
+  constexpr ck_tile::index_t XdlMNThreadGrouped = MxGemmConfig::M_Warp_Tile;
+  constexpr ck_tile::index_t XdlKThreadGrouped = 64 / XdlMNThreadGrouped;
+
+  // Run scale preprocessing as grouped kernels instead of launching one A-scale
+  // pack and one B-scale pack kernel per expert.  This keeps the same packed
+  // scale layout and workspace contract, but removes unnecessary serialized
+  // preprocessing launches before the grouped MXGemm kernel.
+  if (!launch_grouped_pack_scales<ScaleType, true, MXdlPackEffGrouped, KXdlPackEffGrouped, XdlMNThreadGrouped, XdlKThreadGrouped>(
+          a_scale_pack_k_last_jobs, ws_cursor, ws_remaining, stream, "A scales KLast")) {
+    return false;
+  }
+  if (!launch_grouped_pack_scales<ScaleType, false, MXdlPackEffGrouped, KXdlPackEffGrouped, XdlMNThreadGrouped, XdlKThreadGrouped>(
+          a_scale_pack_k_first_jobs, ws_cursor, ws_remaining, stream, "A scales KFirst")) {
+    return false;
+  }
+  if (!launch_grouped_pack_scales<ScaleType, true, NXdlPackEffGrouped, KXdlPackEffGrouped, XdlMNThreadGrouped, XdlKThreadGrouped>(
+          b_scale_pack_k_last_jobs, ws_cursor, ws_remaining, stream, "B scales KLast")) {
+    return false;
+  }
+  if (!launch_grouped_pack_scales<ScaleType, false, NXdlPackEffGrouped, KXdlPackEffGrouped, XdlMNThreadGrouped, XdlKThreadGrouped>(
+          b_scale_pack_k_first_jobs, ws_cursor, ws_remaining, stream, "B scales KFirst")) {
+    return false;
   }
 
   bool ok = false;

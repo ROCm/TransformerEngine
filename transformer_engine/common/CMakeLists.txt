@@ -255,9 +255,9 @@ else()
         comm_gemm_overlap/rocm_comm_gemm_overlap.cpp
         fused_attn_rocm/fused_attn.cpp
         gemm/rocm_gemm.cu
-        #gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
-        #gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
-        #gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp
         gemm/ck_mx_grouped_gemm/ck_mx_grouped_gemm.cpp
         gemm/ck_mx_grouped_gemm/ck_mxflat_grouped_gemm.cpp
         amd_detail/system.cpp)

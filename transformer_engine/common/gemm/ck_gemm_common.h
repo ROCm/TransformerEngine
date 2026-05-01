@@ -6,7 +6,11 @@
 
 #pragma once
 
+#include <hip/hip_runtime.h>
+#include "common/util/cuda_runtime.h"
+
 #include "../common.h"
+
 
 #include "ck_tile/core.hpp"
 #include "ck_tile/ops/epilogue.hpp"
@@ -37,6 +41,28 @@ struct CkFp8NtPresentation {
   bool use_a_colwise_data;
   bool use_b_colwise_data;
 };
+
+enum class GPUArch {
+  GFX942,
+  GFX950,
+  GFX1250,
+  UNKNOWN
+};
+
+static inline GPUArch detect_gpu_arch() {
+  int arch = cuda::sm_arch(0);
+
+  if (arch == 94) {
+    return GPUArch::GFX942;
+  }
+  if (arch == 95) {
+    return GPUArch::GFX950;
+  }
+  if (arch == 125 || arch == 1250) {
+    return GPUArch::GFX1250;
+  }
+  return GPUArch::UNKNOWN;
+}
 
 struct CKGemmRunContext {
     const NVTETensor* A = nullptr;
@@ -160,19 +186,24 @@ inline CkFp8NtPresentation select_ck_fp8_nt_presentation(
     return out;
   }
 
-  if ((!out.transA || has_a_colwise_data) && (out.transB || has_b_colwise_data)) {
-    if (out.transA) {
-      out.use_a_colwise_data = true;
-      out.transA = false;
-    }
+  const bool can_make_a_nt = !out.transA || has_a_colwise_data;
+  const bool can_make_b_nt = out.transB || has_b_colwise_data;
 
-    if (!out.transB) {
-      out.use_b_colwise_data = true;
-      out.transB = true;
-    }
+  if (!can_make_a_nt || !can_make_b_nt) {
+    NVTE_ERROR("ck_tile_grouped_gemm: FP8 grouped GEMM requires NT presentation. "
+              "Missing required columnwise_data for layout rewrite.",0);
+  }
+
+  if (out.transA) {
+    out.use_a_colwise_data = true;
+    out.transA = false;
+  }
+
+  if (!out.transB) {
+    out.use_b_colwise_data = true;
+    out.transB = true;
   }
 
   return out;
-}
-
+} 
 }  // namespace transformer_engine
