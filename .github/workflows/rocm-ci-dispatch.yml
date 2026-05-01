@@ -119,4 +119,4 @@ jobs:
     secrets: inherit
     with:
       test_level: ${{ needs.determine_level.outputs.test_level }}
-      trigger_aiter_upload: ${{ needs.aiter_prebuilt_upload_trigger.outputs.trigger_aiter_upload }}
+      trigger_aiter_upload: ${{ needs.aiter_prebuilt_upload_trigger.outputs.trigger_aiter_upload == 'true' }}
