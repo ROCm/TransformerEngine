@@ -64,11 +64,14 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Check aiter args usage vs header definition")
     parser.add_argument("--mode", choices=["fwd", "bwd", "both"], default="both", help="Mode: fwd, bwd, or both")
     parser.add_argument("--te-dir", type=Path, default=Path(__file__).parent.parent.parent.parent, help="Root directory of TransformerEngine")
+    parser.add_argument("--aiter-root", type=Path, default=None,
+                        help="AITER source tree root. Defaults to <te-dir>/3rdparty/aiter.")
     args = parser.parse_args()
+    aiter_root = args.aiter_root if args.aiter_root else args.te_dir / "3rdparty/aiter"
     modes = ["fwd", "bwd"] if args.mode == "both" else [args.mode]
     mismatch = 0
     for mode in modes:
-        header_path = args.te_dir / f"3rdparty/aiter/csrc/include/mha_{mode}.h"
+        header_path = aiter_root / f"csrc/include/mha_{mode}.h"
         source_path = args.te_dir / f"transformer_engine/common/ck_fused_attn/src/ck_fused_attn_{mode}.cpp"
         header_text = header_path.read_text(encoding="utf-8")
         source_text = source_path.read_text(encoding="utf-8")
