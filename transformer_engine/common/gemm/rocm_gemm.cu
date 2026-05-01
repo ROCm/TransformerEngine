@@ -314,7 +314,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       NVTE_CHECK(A.has_columnwise_data(), "Input A is missing column-wise usage");
     }
     ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
-    ret.transA = transA;
+    ret.transA = is_A_transposed ? transA : CUBLAS_OP_T;
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
     ret.lda = is_A_transposed ? k : m;
@@ -360,7 +360,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
     }
     ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
-    ret.transB = transB;
+    ret.transB = is_B_transposed ? CUBLAS_OP_N : transB;
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
     ret.ldb = is_B_transposed ? n : k;
