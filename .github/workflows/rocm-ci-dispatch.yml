@@ -24,9 +24,11 @@ jobs:
         id: paths
         if: github.event.action == 'synchronize'
         with:
+          # Include gitlink path: submodule bumps appear as `3rdparty/aiter`, not under **.
           filters: |
             aiter:
               - '3rdparty/aiter/**'
+              - '3rdparty/aiter'
 
       - name: Detect skip_aiter_upload label
         id: skip_label
@@ -62,7 +64,7 @@ jobs:
 
           AITER_PATHS='${{ steps.paths.outputs.aiter }}'
 
-          if [ "$AITER_PATHS" = "true" ]; then
+          if [ "$AITER_PATHS" = "false" ]; then
             echo "trigger_aiter_upload=true" >> "$GITHUB_OUTPUT"
             echo "3rdparty/aiter changed on PR - trigger_aiter_upload = true"
           else
@@ -117,4 +119,4 @@ jobs:
     secrets: inherit
     with:
       test_level: ${{ needs.determine_level.outputs.test_level }}
-      trigger_aiter_upload: ${{ needs.aiter_prebuilt_upload_trigger.outputs.trigger_aiter_upload == 'true' }}
+      trigger_aiter_upload: ${{ needs.aiter_prebuilt_upload_trigger.outputs.trigger_aiter_upload }}
