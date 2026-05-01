@@ -46,8 +46,10 @@ on:
         type: boolean
         default: false
 
+# Match rocm-ci-dispatch / wheel workflows: PR number keys the group so superseding pushes
+# cancel reliably (reusable workflows + refs/pull/merge were easy to mismatch vs workflow name + ref).
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: te-rocm-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
   cancel-in-progress: true
 
 env:

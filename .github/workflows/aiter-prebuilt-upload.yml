@@ -17,6 +17,10 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: te-rocm-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
+  cancel-in-progress: true
+
 jobs:
   upload:
     runs-on: build-only-te
