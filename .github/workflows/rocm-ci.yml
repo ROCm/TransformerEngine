@@ -71,6 +71,14 @@ jobs:
     outputs:
       image-tag: ${{ steps.select-image.outputs.image-tag }}
     steps:
+      - name: Debug — event_name and inputs (AITER upload job gate)
+        run: |
+          echo "github.event_name=${{ github.event_name }}"
+          echo "inputs.trigger_aiter_upload=${{ inputs.trigger_aiter_upload }}"
+          echo "inputs.aiter_flow_test_only=${{ inputs.aiter_flow_test_only }}"
+          echo "upload_aiter_prebuilt would run if: workflow_call && (trigger true as bool or string)"
+          echo "check_expression workflow_call=$([[ '${{ github.event_name }}' == 'workflow_call' ]] && echo yes || echo no)"
+
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
