@@ -71,14 +71,6 @@ jobs:
     outputs:
       image-tag: ${{ steps.select-image.outputs.image-tag }}
     steps:
-      - name: Debug — event_name and inputs (AITER upload job gate)
-        run: |
-          echo "github.event_name=${{ github.event_name }}"
-          echo "inputs.trigger_aiter_upload=${{ inputs.trigger_aiter_upload }}"
-          echo "inputs.aiter_flow_test_only=${{ inputs.aiter_flow_test_only }}"
-          echo "upload_aiter_prebuilt would run if: workflow_call && (trigger true as bool or string)"
-          echo "check_expression workflow_call=$([[ '${{ github.event_name }}' == 'workflow_call' ]] && echo yes || echo no)"
-
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
@@ -125,8 +117,9 @@ jobs:
   upload_aiter_prebuilt:
     name: Build and upload AITER prebuilt
     needs: select_image
-    # Skipped when this is false. Accept boolean true and string 'true' (workflow_call coercion varies).
-    if: ${{ github.event_name == 'workflow_call' && (inputs.trigger_aiter_upload == true || inputs.trigger_aiter_upload == 'true') }}
+    # Gate on inputs only: reusable runs from PR may report github.event_name as pull_request, not workflow_call.
+    # push-triggered runs leave inputs.trigger_aiter_upload unset/false (default).
+    if: ${{ inputs.trigger_aiter_upload == true || inputs.trigger_aiter_upload == 'true' }}
     uses: ./.github/workflows/aiter-prebuilt-upload.yml
     with:
       docker_image: ${{ needs.select_image.outputs.image-tag }}
