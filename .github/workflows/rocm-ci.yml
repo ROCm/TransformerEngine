@@ -31,6 +31,11 @@ on:
         required: false
         default: false
         type: boolean
+      aiter_flow_test_only:
+        description: 'Skip wheel build + GPU tests (AITER path validation only). Cannot use env in job if; use this input.'
+        required: false
+        default: false
+        type: boolean
   workflow_dispatch:
     inputs:
       test_level:
@@ -45,6 +50,10 @@ on:
         description: 'DEBUG: Use config.json from current source branch instead of dev'
         type: boolean
         default: false
+      aiter_flow_test_only:
+        description: 'Skip wheel build + GPU tests (AITER path validation only)'
+        type: boolean
+        default: false
 
 # Single concurrency anchor for this PR/branch pipeline. Nested reusable workflows
 concurrency:
@@ -53,9 +62,6 @@ concurrency:
 
 env:
   TEST_LEVEL: ${{ (github.event_name == 'push' && '3') || inputs.test_level || '1' }}
-  # When 'true', skips wheel build + sGPU/mGPU jobs so only select_image + optional AITER upload run.
-  # Set back to 'false' before merging (restore full ROCm CI).
-  AITER_FLOW_TEST_ONLY: 'true'
 
 jobs:
   select_image:
@@ -120,13 +126,14 @@ jobs:
   build:
     # Delegate wheel building to the reusable workflow on dev. It produces a core .whl plus framework .tar.gz sdists under artifact name `te-rocm-wheels`.
     needs: [select_image, upload_aiter_prebuilt]
-    if: ${{ env.AITER_FLOW_TEST_ONLY != 'true' && always() && needs.select_image.result == 'success' && (needs.upload_aiter_prebuilt.result == 'skipped' || needs.upload_aiter_prebuilt.result == 'success') }}
+    # job.if cannot use env.* — use inputs.aiter_flow_test_only; push runs skip that input (full CI).
+    if: ${{ (github.event_name == 'push' || inputs.aiter_flow_test_only != true) && always() && needs.select_image.result == 'success' && (needs.upload_aiter_prebuilt.result == 'skipped' || needs.upload_aiter_prebuilt.result == 'success') }}
     uses: ./.github/workflows/rocm-wheels-build.yml
     secrets: inherit
 
   sgpu_tests:
     name: sGPU Tests (${{ matrix.arch_label }})
-    if: ${{ env.AITER_FLOW_TEST_ONLY != 'true' }}
+    if: ${{ github.event_name == 'push' || inputs.aiter_flow_test_only != true }}
     needs: [select_image, build]
     timeout-minutes: 360
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || 'linux-te-mi35x-4' }}
@@ -328,7 +335,7 @@ jobs:
 
   mgpu_tests:
     name: mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})
-    if: ${{ env.AITER_FLOW_TEST_ONLY != 'true' }}
+    if: ${{ github.event_name == 'push' || inputs.aiter_flow_test_only != true }}
     needs: [select_image, build]
     timeout-minutes: 360
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || 'linux-te-mi35x-8' }}

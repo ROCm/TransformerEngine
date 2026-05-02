@@ -122,3 +122,5 @@ jobs:
     with:
       test_level: ${{ needs.determine_level.outputs.test_level }}
       trigger_aiter_upload: ${{ needs.aiter_prebuilt_upload_trigger.outputs.trigger_aiter_upload == 'true' }}
+      # true = select_image + optional AITER upload only (skip wheels/GPU). Keep false on default branch.
+      aiter_flow_test_only: true
