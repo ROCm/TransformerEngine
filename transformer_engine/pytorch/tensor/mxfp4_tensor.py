@@ -123,6 +123,21 @@ class MXFP4Quantizer(Quantizer):
         quantizer.internal = self.internal
         return quantizer
 
+    def _triton_supported(self) -> bool:
+        """Return True when the Triton MXFP4 cast kernel can handle this config.
+
+        The Triton path does not implement Hadamard transforms, RHT,
+        stochastic rounding, or FP4 data shuffling.  Fall back to the
+        C++ / HIP kernel for any of those features.
+        """
+        return not (
+            self.use_hadamard
+            or self.with_rht
+            or self.stochastic_rounding
+            or self.shuffle_rowwise_data
+            or self.shuffle_columnwise_data
+        )
+
     def update_quantized(
         self,
         src: torch.Tensor,
@@ -140,10 +155,10 @@ class MXFP4Quantizer(Quantizer):
             src = src.contiguous()
 
         # Launch cast kernel
-        use_cast_transpose_triton = bool(
+        use_triton = bool(
             int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0"))
-        )
-        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+        ) and self._triton_supported()
+        quantize_func = te_quantize_triton if use_triton else tex.quantize
         quantize_func(src, self, dst, noop_flag)
 
         # Update FP4 dtype
@@ -153,10 +168,10 @@ class MXFP4Quantizer(Quantizer):
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
-        use_cast_transpose_triton = bool(
+        use_triton = bool(
             int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0"))
-        )
-        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+        ) and self._triton_supported()
+        quantize_func = te_quantize_triton if use_triton else tex.quantize
         return quantize_func(tensor, self)
 
     def is_quantizable(self, inp: torch.Tensor) -> bool:

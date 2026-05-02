@@ -90,15 +90,11 @@ def check_mxfp4_gemm_versus_reference(
         use_hadamard=False,
     )
 
-    x_mxfp4 = x_quantizer.make_empty((M, K), dtype=x_dtype, device=device, requires_grad=False)
-    x_mxfp4 = x_quantizer.update_quantized(x, x_mxfp4)
-    w_mxfp4 = w_quantizer.make_empty((N, K), dtype=w_dtype, device=device, requires_grad=False)
-    w_mxfp4 = w_quantizer.update_quantized(w, w_mxfp4)
+    x_mxfp4 = tex.quantize(x, x_quantizer)
+    w_mxfp4 = tex.quantize(w, w_quantizer)
 
-    x_mxfp4_ref = x_quantizer_ref.make_empty((M, K), dtype=x_dtype, device=device, requires_grad=False)
-    x_mxfp4_ref = x_quantizer_ref.update_quantized(x, x_mxfp4_ref)
-    w_mxfp4_ref = w_quantizer_ref.make_empty((N, K), dtype=w_dtype, device=device, requires_grad=False)
-    w_mxfp4_ref = w_quantizer_ref.update_quantized(w, w_mxfp4_ref)
+    x_mxfp4_ref = tex.quantize(x, x_quantizer_ref)
+    w_mxfp4_ref = tex.quantize(w, w_quantizer_ref)
 
     # Extract un-shuffled quantized data for the reference GEMM
     qx_data = x_mxfp4_ref._rowwise_data.view(dtype=torch.uint8)[:M, :]

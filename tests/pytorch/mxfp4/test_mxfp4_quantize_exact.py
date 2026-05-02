@@ -24,7 +24,7 @@ recipe_available, reason_for_no_recipe = te.is_mxfp4_available(return_reason=Tru
 
 BLOCK_SIZE = 32
 
-_USE_TRITON = bool(int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0")))
+_TRITON_ENV = bool(int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0")))
 
 
 def un_shuffle_scales(scales_shuffled: torch.Tensor) -> torch.Tensor:
@@ -193,10 +193,14 @@ def check_quantization_mxfp4_versus_reference(
     # The Triton backend uses software thresholds matching the reference exactly,
     # while the C++ HIP kernel uses hardware FP4 conversion which may round
     # differently at threshold boundaries (±1 nibble / ±1 exponent).
+    # When the env var is set but the quantizer falls back to HIP (because
+    # Triton lacks hadamard/shuffle/SR support), use HIP tolerances.
+    used_triton = _TRITON_ENV and mxfp4_quantizer._triton_supported()
+
     qx_unpacked = unpack_fp4(qx)
     qx_ref_unpacked = unpack_fp4(x_ref.data.view(dtype=torch.uint8))
 
-    if _USE_TRITON:
+    if used_triton:
         torch.testing.assert_close(qx_unpacked, qx_ref_unpacked, atol=0, rtol=0)
         torch.testing.assert_close(
             sx_cmp[:M, :num_scale_cols], ref_scale_cmp[:M, :num_scale_cols], atol=0, rtol=0,
@@ -223,7 +227,7 @@ def check_quantization_mxfp4_versus_reference(
             sx_t_cmp = un_shuffle_scales(sx_t_cmp.view(sx_t_cmp.shape[0] // 32, -1))
             ref_scale_t_cmp = un_shuffle_scales(ref_scale_t_cmp.view(ref_scale_t_cmp.shape[0] // 32, -1))
 
-        if _USE_TRITON:
+        if used_triton:
             torch.testing.assert_close(qx_t_unpacked, qx_t_ref_unpacked, atol=0, rtol=0)
             torch.testing.assert_close(
                 sx_t_cmp[:N, :num_scale_cols_t], ref_scale_t_cmp[:N, :num_scale_cols_t],
@@ -420,7 +424,6 @@ def test_quantization_noncontiguous_inputs(
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.skipif(_USE_TRITON, reason="MXFP4 RHT is not applied on the Triton cast path")
 @pytest.mark.parametrize("M, N", [(128, 256), (256, 512)])
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("return_transpose", [True, False], ids=["with_transpose", "no_transpose"])
