@@ -53,6 +53,9 @@ concurrency:
 
 env:
   TEST_LEVEL: ${{ (github.event_name == 'push' && '3') || inputs.test_level || '1' }}
+  # When 'true', skips wheel build + sGPU/mGPU jobs so only select_image + optional AITER upload run.
+  # Set back to 'false' before merging (restore full ROCm CI).
+  AITER_FLOW_TEST_ONLY: 'true'
 
 jobs:
   select_image:
@@ -117,12 +120,13 @@ jobs:
   build:
     # Delegate wheel building to the reusable workflow on dev. It produces a core .whl plus framework .tar.gz sdists under artifact name `te-rocm-wheels`.
     needs: [select_image, upload_aiter_prebuilt]
-    if: always() && needs.select_image.result == 'success' && (needs.upload_aiter_prebuilt.result == 'skipped' || needs.upload_aiter_prebuilt.result == 'success')
+    if: ${{ env.AITER_FLOW_TEST_ONLY != 'true' && always() && needs.select_image.result == 'success' && (needs.upload_aiter_prebuilt.result == 'skipped' || needs.upload_aiter_prebuilt.result == 'success') }}
     uses: ./.github/workflows/rocm-wheels-build.yml
     secrets: inherit
 
   sgpu_tests:
     name: sGPU Tests (${{ matrix.arch_label }})
+    if: ${{ env.AITER_FLOW_TEST_ONLY != 'true' }}
     needs: [select_image, build]
     timeout-minutes: 360
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || 'linux-te-mi35x-4' }}
@@ -324,6 +328,7 @@ jobs:
 
   mgpu_tests:
     name: mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})
+    if: ${{ env.AITER_FLOW_TEST_ONLY != 'true' }}
     needs: [select_image, build]
     timeout-minutes: 360
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || 'linux-te-mi35x-8' }}
