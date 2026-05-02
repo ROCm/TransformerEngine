@@ -6,7 +6,8 @@ name: PR Automatic CI
 
 on:
   pull_request:
-    types: [ labeled, synchronize, reopened ]
+    # Include opened: push-only types miss PR creation (first commit uses synchronize only after push).
+    types: [ opened, labeled, synchronize, reopened ]
 
 permissions:
   contents: read
