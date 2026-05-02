@@ -6,13 +6,16 @@
 
 #include <transformer_engine/transformer_engine.h>
 #include "../../common.h"
+
 #include "ck_tile/core.hpp"
-#include "ck_tile/host.hpp"
 #include "ck_tile/host/kernel_launch.hpp"
 #include "ck_tile/ops/epilogue.hpp"
 #include "ck_tile/ops/gemm.hpp"
 #include "ck_tile/ops/gemm/kernel/mx_grouped_gemm_kernel.hpp"
 #include "ck_tile/ops/elementwise/unary_element_wise_operation.hpp"
+
+#include <algorithm>
+#include <vector>
 
 namespace transformer_engine {
 namespace mx_grouped_gemm {
@@ -509,6 +512,21 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
       if (Dd0 != M || Dd1 != N) {
         NVTE_ERROR("ck_tile_mx_grouped_gemm: D shape mismatch in group ", i,
                    ". D=", Dd0, "x", Dd1, ", expected=", M, "x", N);
+      }
+
+      if (i == 0) {
+        printf("[MX CK] transA=%d transB=%d use_a_col=%d use_b_col=%d "
+              "M=%ld N=%ld K=%ld Ad=[%ld,%ld] Bd=[%ld,%ld] "
+              "a_scale_shape=[%zu,%zu] b_scale_shape=[%zu,%zu]\n",
+              static_cast<int>(ctx.transA),
+              static_cast<int>(ctx.transB),
+              static_cast<int>(ctx.use_a_colwise_data),
+              static_cast<int>(ctx.use_b_colwise_data),
+              M, N, K, Ad0, Ad1, Bd0, Bd1,
+              a_scales.shape.size() > 0 ? a_scales.shape[0] : 0,
+              a_scales.shape.size() > 1 ? a_scales.shape[1] : 0,
+              b_scales.shape.size() > 0 ? b_scales.shape[0] : 0,
+              b_scales.shape.size() > 1 ? b_scales.shape[1] : 0);
       }
 
       const ck_tile::index_t stride_A = static_cast<ck_tile::index_t>(Ad1);

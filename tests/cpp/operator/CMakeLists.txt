@@ -14,6 +14,7 @@ list(APPEND test_cuda_sources
             test_qdq.cu
             test_cast_mxfp8.cu
             test_dequantize_mxfp8.cu
+            test_te_ck_grouped_mxfp8_forward_refs.cu
             test_transpose.cu
             test_cast_transpose.cu
             test_cast_transpose_current_scaling.cu
@@ -29,7 +30,8 @@ list(APPEND test_cuda_sources
             test_causal_softmax.cu
             test_swizzle.cu
             test_swap_first_dims.cu
-	          ../test_common.cu)
+            ../test_common.cu)
+
 if(USE_CUDA)
   list(APPEND test_cuda_sources
               test_cast_float8blockwise.cu)
@@ -49,12 +51,14 @@ else()
 endif()
 
 find_package(OpenMP REQUIRED)
+
 if(USE_CUDA)
   list(APPEND test_operator_LINKER_LIBS CUDA::cudart GTest::gtest_main ${TE_LIB} CUDA::nvrtc CUDNN::cudnn)
   target_link_libraries(test_operator PUBLIC ${test_operator_LINKER_LIBS} OpenMP::OpenMP_CXX)
 else()
   target_link_libraries(test_operator PUBLIC hip::host hip::device GTest::gtest_main ${TE_LIB} OpenMP::OpenMP_CXX hiprand)
 endif()
+
 target_compile_options(test_operator PRIVATE -O2 -fopenmp)
 
 include(GoogleTest)
