@@ -448,6 +448,7 @@ struct QuantizationConfig {
   NVTETensor rng_state = nullptr;
   bool nvfp4_2d_quantization = false;
   bool stochastic_rounding = false;
+  bool stochastic_rounding_columnwise = false;
   bool use_fast_math = false;
 #ifdef __HIP_PLATFORM_AMD__
   bool mxfp4_use_hadamard = false;
@@ -463,6 +464,7 @@ struct QuantizationConfig {
       sizeof(NVTETensor),                    // rng_seed and offset
       sizeof(uint8_t),                       // nvfp4_2d_quantization
       sizeof(uint8_t),                       // stochastic_rounding
+      sizeof(uint8_t),                       // stochastic_rounding_columnwise
       sizeof(uint8_t),                       // use_fast_math
 #ifdef __HIP_PLATFORM_AMD__
       sizeof(uint8_t),                       // mxfp4_use_hadamard

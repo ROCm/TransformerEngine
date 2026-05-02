@@ -1403,6 +1403,7 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                     use_hadamard=use_hadamard,
                     with_rht=with_rht,
                     stochastic_rounding=False,
+                    stochastic_rounding_columnwise=True,
                 )
 
             return [_make_quantizer(idx) for idx in range(self.num_quantizers)]
@@ -1419,6 +1420,7 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                     use_hadamard=use_hadamard,
                     with_rht=with_rht,
                     stochastic_rounding=True,
+                    stochastic_rounding_columnwise=True,
                 )
                 for _ in range(self.num_quantizers)
             ]

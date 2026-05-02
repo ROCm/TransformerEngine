@@ -71,6 +71,7 @@ def dequantize_mxfp4(
 def quantize_mxfp4(
     x: torch.Tensor,
     stochastic_rounding: bool,
+    stochastic_rounding_columnwise: bool = False,
     use_hadamard: bool = False,
 ):
     """Quantize using MXFP4Quantizer, return (fp4_packed, scales, fp4_packed_t, scales_t).
@@ -82,6 +83,7 @@ def quantize_mxfp4(
         rowwise=True,
         columnwise=True,
         stochastic_rounding=stochastic_rounding,
+        stochastic_rounding_columnwise=stochastic_rounding_columnwise,
         use_hadamard=use_hadamard,
     )
     result = tex.quantize(x, quantizer)
@@ -98,6 +100,8 @@ def check_sr_versus_rn(
     M: int,
     N: int,
     use_hadamard: bool,
+    sr_rowwise: bool = True,
+    sr_colwise: bool = True,
     n_iters: int = 50,
 ) -> None:
     device = "cuda"
@@ -123,7 +127,10 @@ def check_sr_versus_rn(
 
     for _ in range(n_iters):
         qx_sr, sx_sr, qx_t_sr, sx_t_sr = quantize_mxfp4(
-            x, stochastic_rounding=True, use_hadamard=use_hadamard,
+            x,
+            stochastic_rounding=sr_rowwise,
+            stochastic_rounding_columnwise=sr_colwise,
+            use_hadamard=use_hadamard,
         )
         sr_accum += dequantize_mxfp4(qx_sr, sx_sr, M, N).float()
         sr_t_accum += dequantize_mxfp4(qx_t_sr, sx_t_sr, N, M).float()
@@ -134,21 +141,25 @@ def check_sr_versus_rn(
     sr_t_mean = sr_t_accum / n_iters
     mae_t_sr = (sr_t_mean - y.float()).abs().mean()
 
-    print(f"Rowwise  — MAE SR: {mae_sr:.3e} | MAE RN: {mae_rn:.3e}")
-    print(f"Colwise  — MAE SR: {mae_t_sr:.3e} | MAE RN: {mae_t_rn:.3e}")
+    print(f"Rowwise  — MAE SR: {mae_sr:.3e} | MAE RN: {mae_rn:.3e} (sr_row={sr_rowwise})")
+    print(f"Colwise  — MAE SR: {mae_t_sr:.3e} | MAE RN: {mae_t_rn:.3e} (sr_col={sr_colwise})")
 
-    assert mae_sr < mae_rn, (
-        f"SR rowwise MAE ({mae_sr:.3e}) should be smaller than RN ({mae_rn:.3e})"
-    )
-    assert mae_t_sr < mae_t_rn, (
-        f"SR colwise MAE ({mae_t_sr:.3e}) should be smaller than RN ({mae_t_rn:.3e})"
-    )
+    if sr_rowwise:
+        assert mae_sr < mae_rn, (
+            f"SR rowwise MAE ({mae_sr:.3e}) should be smaller than RN ({mae_rn:.3e})"
+        )
+    if sr_colwise:
+        assert mae_t_sr < mae_t_rn, (
+            f"SR colwise MAE ({mae_t_sr:.3e}) should be smaller than RN ({mae_t_rn:.3e})"
+        )
 
 
 def check_sr_nondeterminism(
     x_dtype: torch.dtype,
     M: int,
     N: int,
+    sr_rowwise: bool = True,
+    sr_colwise: bool = True,
 ) -> None:
     """Verify that SR produces different outputs across invocations."""
     device = "cuda"
@@ -157,12 +168,21 @@ def check_sr_nondeterminism(
 
     x = torch.randn((M, N), dtype=x_dtype, device=device)
 
-    qx1, _, _, _ = quantize_mxfp4(x, stochastic_rounding=True)
-    qx2, _, _, _ = quantize_mxfp4(x, stochastic_rounding=True)
-
-    assert not torch.equal(qx1, qx2), (
-        "Two SR quantizations of the same input should (almost surely) differ"
+    qx1, _, qt1, _ = quantize_mxfp4(
+        x, stochastic_rounding=sr_rowwise, stochastic_rounding_columnwise=sr_colwise,
     )
+    qx2, _, qt2, _ = quantize_mxfp4(
+        x, stochastic_rounding=sr_rowwise, stochastic_rounding_columnwise=sr_colwise,
+    )
+
+    if sr_rowwise:
+        assert not torch.equal(qx1, qx2), (
+            "Two SR rowwise quantizations of the same input should (almost surely) differ"
+        )
+    if sr_colwise:
+        assert not torch.equal(qt1, qt2), (
+            "Two SR colwise quantizations of the same input should (almost surely) differ"
+        )
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
@@ -176,19 +196,33 @@ def check_sr_nondeterminism(
 )
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("use_hadamard", [False, True], ids=["no_hadamard", "hadamard"])
-def test_sr_versus_rn(M, N, x_dtype, use_hadamard):
+@pytest.mark.parametrize(
+    "sr_rowwise,sr_colwise",
+    [(True, True), (True, False), (False, True)],
+    ids=["sr_both", "sr_row_only", "sr_col_only"],
+)
+def test_sr_versus_rn(M, N, x_dtype, use_hadamard, sr_rowwise, sr_colwise):
     """SR mean over many iterations should have lower MAE than RN."""
     check_sr_versus_rn(
         x_dtype=x_dtype,
         M=M,
         N=N,
         use_hadamard=use_hadamard,
+        sr_rowwise=sr_rowwise,
+        sr_colwise=sr_colwise,
     )
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize("M, N", [(256, 256)])
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
-def test_sr_nondeterminism(M, N, x_dtype):
+@pytest.mark.parametrize(
+    "sr_rowwise,sr_colwise",
+    [(True, True), (True, False), (False, True)],
+    ids=["sr_both", "sr_row_only", "sr_col_only"],
+)
+def test_sr_nondeterminism(M, N, x_dtype, sr_rowwise, sr_colwise):
     """Consecutive SR quantizations must produce different bit patterns."""
-    check_sr_nondeterminism(x_dtype=x_dtype, M=M, N=N)
+    check_sr_nondeterminism(
+        x_dtype=x_dtype, M=M, N=N, sr_rowwise=sr_rowwise, sr_colwise=sr_colwise,
+    )

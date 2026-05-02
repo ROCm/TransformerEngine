@@ -46,9 +46,10 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
   bool use_colwise = output->has_columnwise_data();
 
   bool use_hadamard = quant_config.mxfp4_use_hadamard;
-  bool stochastic_rounding = quant_config.stochastic_rounding;
+  bool sr_rowwise = quant_config.stochastic_rounding;
+  bool sr_colwise = quant_config.stochastic_rounding_columnwise;
   const int64_t* rng_state_ptr = nullptr;
-  if (stochastic_rounding && quant_config.rng_state != nullptr) {
+  if ((sr_rowwise || sr_colwise) && quant_config.rng_state != nullptr) {
     const Tensor *rng_tensor = convertNVTETensorCheck(quant_config.rng_state);
     NVTE_CHECK(rng_tensor->data.shape.size() == 1 && rng_tensor->data.shape[0] == 2,
                "MXFP4 stochastic rounding requires rng_state tensor of shape {2}.");
@@ -100,7 +101,7 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
       rowwise_scale_N, rowwise_scale_M_pad, rowwise_scale_N_pad,
       colwise_scale_M, colwise_scale_N,
       colwise_scale_M_pad, colwise_scale_N_pad,
-      stochastic_rounding, rng_state_ptr,
+      sr_rowwise, sr_colwise, rng_state_ptr,
       quant_config.mxfp4_rht_sign_masks_row,
       quant_config.mxfp4_rht_sign_masks_col,
       stream);

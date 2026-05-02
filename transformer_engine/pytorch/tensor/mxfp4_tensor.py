@@ -85,6 +85,7 @@ class MXFP4Quantizer(Quantizer):
         use_hadamard: bool = False,
         with_rht: bool = False,
         stochastic_rounding: bool = False,
+        stochastic_rounding_columnwise: bool = False,
         _rht_masks_row: Optional[int] = None,
         _rht_masks_col: Optional[int] = None,
     ) -> None:
@@ -103,6 +104,7 @@ class MXFP4Quantizer(Quantizer):
                 with_rht and use_hadamard
             )
         self.stochastic_rounding = stochastic_rounding
+        self.stochastic_rounding_columnwise = stochastic_rounding_columnwise
         assert self.dtype == tex.DType.kFloat4E2M1, "Only E2M1 format supported for MXFP4"
 
     def copy(self) -> "MXFP4Quantizer":
@@ -117,6 +119,7 @@ class MXFP4Quantizer(Quantizer):
             use_hadamard=self.use_hadamard,
             with_rht=self.with_rht,
             stochastic_rounding=self.stochastic_rounding,
+            stochastic_rounding_columnwise=self.stochastic_rounding_columnwise,
             _rht_masks_row=self._rht_masks_row,
             _rht_masks_col=self._rht_masks_col,
         )
@@ -134,6 +137,7 @@ class MXFP4Quantizer(Quantizer):
             self.use_hadamard
             or self.with_rht
             or self.stochastic_rounding
+            or self.stochastic_rounding_columnwise
             or self.shuffle_rowwise_data
             or self.shuffle_columnwise_data
         )

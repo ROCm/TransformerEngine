@@ -1126,6 +1126,9 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigStochasticRounding:
       bool_to_uint8(config_.stochastic_rounding, buf);
       break;
+    case kNVTEQuantizationConfigStochasticRoundingColumnwise:
+      bool_to_uint8(config_.stochastic_rounding_columnwise, buf);
+      break;
     case kNVTEQuantizationConfigUseFastMath:
       bool_to_uint8(config_.use_fast_math, buf);
       break;
@@ -1191,6 +1194,9 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
       break;
     case kNVTEQuantizationConfigStochasticRounding:
       uint8_to_bool(buf, config_.stochastic_rounding);
+      break;
+    case kNVTEQuantizationConfigStochasticRoundingColumnwise:
+      uint8_to_bool(buf, config_.stochastic_rounding_columnwise);
       break;
     case kNVTEQuantizationConfigUseFastMath:
       uint8_to_bool(buf, config_.use_fast_math);

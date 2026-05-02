@@ -373,21 +373,23 @@ enum NVTEQuantizationConfigAttribute {
   kNVTEQuantizationConfigRNGState = 4,
   /*! Whether to use 2D block scaling for NVFP4 */
   kNVTEQuantizationConfigNVFP42DQuantization = 5,
-  /*! Whether to enable stochastic rounding */
+  /*! Whether to enable stochastic rounding (rowwise) */
   kNVTEQuantizationConfigStochasticRounding = 6,
+  /*! Whether to enable stochastic rounding for columnwise quantization */
+  kNVTEQuantizationConfigStochasticRoundingColumnwise = 7,
   /*! Whether to enable fast math operations with reduced accuracy.
    *
    *  Optimizations are kernel-specific and they may be applied
    *  inconsistently between kernels.
    */
-  kNVTEQuantizationConfigUseFastMath = 7,
+  kNVTEQuantizationConfigUseFastMath = 8,
 #ifdef USE_ROCM
   /*! Whether to apply Hadamard transform before MXFP4 quantization */
-  kNVTEQuantizationConfigMXFP4UseHadamard = 8,
+  kNVTEQuantizationConfigMXFP4UseHadamard = 9,
   /*! Packed RHT sign masks for MXFP4 rowwise H16 halves (low/high 16 bits); 0 = fixed H */
-  kNVTEQuantizationConfigMXFP4RhtSignMasksRow = 9,
+  kNVTEQuantizationConfigMXFP4RhtSignMasksRow = 10,
   /*! Packed RHT sign masks for MXFP4 columnwise path */
-  kNVTEQuantizationConfigMXFP4RhtSignMasksCol = 10,
+  kNVTEQuantizationConfigMXFP4RhtSignMasksCol = 11,
 #endif
   kNVTEQuantizationConfigNumAttributes
 };
@@ -1089,10 +1091,17 @@ class QuantizationConfigWrapper {
                                            &val, sizeof(val));
   }
 
-  /*! \brief Set whether to use stochastic rounding */
+  /*! \brief Set whether to use stochastic rounding (rowwise) */
   void set_stochastic_rounding(bool stochastic_rounding) {
     const auto val = static_cast<uint8_t>(stochastic_rounding);
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRounding, &val,
+                                           sizeof(val));
+  }
+
+  /*! \brief Set whether to use stochastic rounding for columnwise quantization */
+  void set_stochastic_rounding_columnwise(bool stochastic_rounding_columnwise) {
+    const auto val = static_cast<uint8_t>(stochastic_rounding_columnwise);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigStochasticRoundingColumnwise, &val,
                                            sizeof(val));
   }
 

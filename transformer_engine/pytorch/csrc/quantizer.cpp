@@ -1800,6 +1800,7 @@ MXFP4Quantizer::MXFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
   this->shuffle_columnwise_data = quantizer.attr("shuffle_columnwise_data").cast<bool>();
   this->with_gemm_swizzled_scales = quantizer.attr("with_gemm_swizzled_scales").cast<bool>();
   this->stochastic_rounding = quantizer.attr("stochastic_rounding").cast<bool>();
+  this->stochastic_rounding_columnwise = quantizer.attr("stochastic_rounding_columnwise").cast<bool>();
 }
 
 void MXFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
@@ -2030,10 +2031,11 @@ void MXFP4Quantizer::quantize(const TensorWrapper& input, TensorWrapper& out,
   quant_config.set_mxfp4_rht_sign_masks_row(this->mxfp4_rht_sign_masks_row);
   quant_config.set_mxfp4_rht_sign_masks_col(this->mxfp4_rht_sign_masks_col);
   quant_config.set_stochastic_rounding(this->stochastic_rounding);
+  quant_config.set_stochastic_rounding_columnwise(this->stochastic_rounding_columnwise);
 
   TensorWrapper te_rng_state;
   at::Tensor rng_state_tensor;
-  if (this->stochastic_rounding) {
+  if (this->stochastic_rounding || this->stochastic_rounding_columnwise) {
     const size_t rng_elts_per_thread = 1024;
     auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
         std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());

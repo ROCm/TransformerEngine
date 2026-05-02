@@ -522,7 +522,8 @@ template<
     bool USE_HADAMARD,
     bool SHUFFLE_ROWWISE_FP4,
     bool SHUFFLE_COLWISE_FP4,
-    bool USE_STOCHASTIC_ROUNDING = false
+    bool USE_SR_ROWWISE = false,
+    bool USE_SR_COLWISE = false
 >
 __global__ __launch_bounds__(256, 8)
 void cast_transpose_mxfp4_shuffled(
@@ -578,7 +579,7 @@ void cast_transpose_mxfp4_shuffled(
     PhiloxState rng;
     uint4 rng_result = {0, 0, 0, 0};
     int rng_count = 0;
-    if constexpr (USE_STOCHASTIC_ROUNDING) {
+    if constexpr (USE_SR_ROWWISE || USE_SR_COLWISE) {
         if (rng_state != nullptr) {
             const size_t rng_seed = rng_state[0];
             const size_t rng_offset = rng_state[1];
@@ -682,7 +683,7 @@ void cast_transpose_mxfp4_shuffled(
 
                     // Convert to FP4 using hardware instruction
                     uint16_t fp4x4;
-                    if constexpr (USE_STOCHASTIC_ROUNDING) {
+                    if constexpr (USE_SR_ROWWISE) {
                         uint32_t rbits = next_rbits(rng, rng_result, rng_count);
                         fp4x4 = cvt_f32x4_to_fp4x4_sr(v0, v1, v2, v3, native_scale, rbits);
                     } else {
@@ -761,7 +762,7 @@ void cast_transpose_mxfp4_shuffled(
 
                     // Convert to FP4
                     uint16_t fp4x4;
-                    if constexpr (USE_STOCHASTIC_ROUNDING) {
+                    if constexpr (USE_SR_COLWISE) {
                         uint32_t rbits = next_rbits(rng, rng_result, rng_count);
                         fp4x4 = cvt_f32x4_to_fp4x4_sr(v0, v1, v2, v3, native_scale, rbits);
                     } else {
@@ -824,7 +825,8 @@ inline void nvte_cast_transpose_mxfp4_fused_shuffle(
     int rowwise_scale_N, int rowwise_scale_M_pad, int rowwise_scale_N_pad,
     int colwise_scale_M, int colwise_scale_N,
     int colwise_scale_M_pad, int colwise_scale_N_pad,
-    bool stochastic_rounding,
+    bool sr_rowwise,
+    bool sr_colwise,
     const int64_t* rng_state,
     uint32_t mxfp4_rht_masks_row,
     uint32_t mxfp4_rht_masks_col,
@@ -834,8 +836,8 @@ inline void nvte_cast_transpose_mxfp4_fused_shuffle(
               (N + te_mxfp4::BLOCK_N - 1) / te_mxfp4::BLOCK_N);
     dim3 block(te_mxfp4::THREADS_PER_BLOCK);
 
-    #define LAUNCH_KERNEL(ROW, COL, HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES, SR) \
-        te_mxfp4::cast_transpose_mxfp4_shuffled<ROW, COL, SHUF_SCALES, HAD, SHUF_ROW, SHUF_COL, SR> \
+    #define LAUNCH_KERNEL(ROW, COL, HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES, SR_ROW, SR_COL) \
+        te_mxfp4::cast_transpose_mxfp4_shuffled<ROW, COL, SHUF_SCALES, HAD, SHUF_ROW, SHUF_COL, SR_ROW, SR_COL> \
             <<<grid, block, 0, stream>>>( \
                 (const uint16_t*)input, \
                 (uint8_t*)rowwise_fp4, (uint8_t*)rowwise_scale, \
@@ -846,42 +848,46 @@ inline void nvte_cast_transpose_mxfp4_fused_shuffle(
                 colwise_scale_M, colwise_scale_N, colwise_scale_M_pad, colwise_scale_N_pad, \
                 rng_state, mxfp4_rht_masks_row, mxfp4_rht_masks_col)
 
-    #define DISPATCH_ROWCOL(HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES, SR)                 \
+    #define DISPATCH_ROWCOL(HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES, SR_ROW, SR_COL)     \
         do {                                                                           \
             if (use_rowwise && use_colwise)                                            \
-                LAUNCH_KERNEL(true, true, HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES, SR); \
+                LAUNCH_KERNEL(true, true, HAD, SHUF_ROW, SHUF_COL, SHUF_SCALES, SR_ROW, SR_COL); \
             else if (use_rowwise)                                                      \
-                LAUNCH_KERNEL(true, false, HAD, SHUF_ROW, false, SHUF_SCALES, SR);   \
+                LAUNCH_KERNEL(true, false, HAD, SHUF_ROW, false, SHUF_SCALES, SR_ROW, false); \
             else if (use_colwise)                                                      \
-                LAUNCH_KERNEL(false, true, HAD, false, SHUF_COL, SHUF_SCALES, SR);   \
+                LAUNCH_KERNEL(false, true, HAD, false, SHUF_COL, SHUF_SCALES, false, SR_COL); \
         } while(0)
 
-    #define DISPATCH_SHUFFLE(HAD, SHUF_SCALES, SR)                                     \
+    #define DISPATCH_SHUFFLE(HAD, SHUF_SCALES, SR_ROW, SR_COL)                         \
         do {                                                                           \
             if (shuffle_rowwise_fp4 && shuffle_colwise_fp4)                            \
-                DISPATCH_ROWCOL(HAD, true, true, SHUF_SCALES, SR);                    \
+                DISPATCH_ROWCOL(HAD, true, true, SHUF_SCALES, SR_ROW, SR_COL);        \
             else if (shuffle_rowwise_fp4)                                              \
-                DISPATCH_ROWCOL(HAD, true, false, SHUF_SCALES, SR);                   \
+                DISPATCH_ROWCOL(HAD, true, false, SHUF_SCALES, SR_ROW, SR_COL);       \
             else if (shuffle_colwise_fp4)                                              \
-                DISPATCH_ROWCOL(HAD, false, true, SHUF_SCALES, SR);                   \
+                DISPATCH_ROWCOL(HAD, false, true, SHUF_SCALES, SR_ROW, SR_COL);       \
             else                                                                       \
-                DISPATCH_ROWCOL(HAD, false, false, SHUF_SCALES, SR);                  \
+                DISPATCH_ROWCOL(HAD, false, false, SHUF_SCALES, SR_ROW, SR_COL);      \
         } while(0)
 
-    #define DISPATCH_HADAMARD(SHUF_SCALES, SR)                                         \
+    #define DISPATCH_HADAMARD(SHUF_SCALES, SR_ROW, SR_COL)                             \
         do {                                                                           \
-            if (use_hadamard) { DISPATCH_SHUFFLE(true, SHUF_SCALES, SR); }            \
-            else              { DISPATCH_SHUFFLE(false, SHUF_SCALES, SR); }           \
+            if (use_hadamard) { DISPATCH_SHUFFLE(true, SHUF_SCALES, SR_ROW, SR_COL); } \
+            else              { DISPATCH_SHUFFLE(false, SHUF_SCALES, SR_ROW, SR_COL); } \
         } while(0)
 
-    if (stochastic_rounding) {
-        if (shuffle_scales) { DISPATCH_HADAMARD(true, true); }
-        else                { DISPATCH_HADAMARD(false, true); }
-    } else {
-        if (shuffle_scales) { DISPATCH_HADAMARD(true, false); }
-        else                { DISPATCH_HADAMARD(false, false); }
-    }
+    #define DISPATCH_SR(SHUF_SCALES)                                                    \
+        do {                                                                           \
+            if (sr_rowwise && sr_colwise)       { DISPATCH_HADAMARD(SHUF_SCALES, true, true); }   \
+            else if (sr_rowwise)               { DISPATCH_HADAMARD(SHUF_SCALES, true, false); }  \
+            else if (sr_colwise)               { DISPATCH_HADAMARD(SHUF_SCALES, false, true); }  \
+            else                               { DISPATCH_HADAMARD(SHUF_SCALES, false, false); } \
+        } while(0)
 
+    if (shuffle_scales) { DISPATCH_SR(true); }
+    else                { DISPATCH_SR(false); }
+
+    #undef DISPATCH_SR
     #undef DISPATCH_HADAMARD
     #undef DISPATCH_SHUFFLE
     #undef DISPATCH_ROWCOL

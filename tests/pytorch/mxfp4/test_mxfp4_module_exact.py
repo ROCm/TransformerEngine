@@ -215,13 +215,16 @@ def check_mxfp4_module_versus_reference(
             }
         )
 
-    # The native MXFP4BlockScaling recipe hardcodes stochastic rounding
-    # for backward quantization while the reference uses round-to-nearest.
-    # SR introduces per-element noise that amplifies through the GEMM, so
-    # backward tolerances must be significantly looser than forward.
+    # The native MXFP4BlockScaling recipe uses:
+    #   Forward: rowwise RNE, columnwise SR (stored for backward reuse)
+    #   Backward: rowwise SR, columnwise SR
+    # The reference uses RNE for everything.
+    # Forward output is computed from rowwise data (RNE), so it matches tightly.
+    # Backward gradients are affected by both the backward SR and the
+    # forward columnwise SR (reused as backward operands), amplifying noise.
     fwd_atol, fwd_rtol = 8e-3, 8e-3
     grad_atol, grad_rtol = 2.0, 1.0
-    wgrad_atol, wgrad_rtol = 80.0, 1.0
+    wgrad_atol, wgrad_rtol = 100.0, 1.0
 
     for step in range(num_steps):
         native_out = native_outputs[step]
@@ -407,7 +410,9 @@ def check_mxfp4_layernorm_linear_versus_reference(
             }
         )
 
-    # Same SR-induced backward tolerance as check_mxfp4_module_versus_reference.
+    # Same SR-induced tolerance as check_mxfp4_module_versus_reference:
+    # Forward uses rowwise RNE (tight), backward affected by both forward
+    # columnwise SR and backward SR (loose).
     fwd_atol, fwd_rtol = 8e-3, 8e-3
     grad_atol, grad_rtol = 2.0, 1.0
     wgrad_atol, wgrad_rtol = 80.0, 1.0

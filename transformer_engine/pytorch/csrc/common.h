@@ -303,6 +303,7 @@ class MXFP4Quantizer : public Quantizer {
   bool shuffle_columnwise_data;
   bool with_gemm_swizzled_scales;
   bool stochastic_rounding;
+  bool stochastic_rounding_columnwise;
 
   explicit MXFP4Quantizer(const py::handle& quantizer);
 
