@@ -47,7 +47,6 @@ on:
         default: false
 
 # Single concurrency anchor for this PR/branch pipeline. Nested reusable workflows
-# (rocm-wheels-build, aiter-prebuilt-upload) must NOT reuse this group or GitHub deadlocks.
 concurrency:
   group: te-rocm-${{ github.event.pull_request.number && format('pr-{0}', github.event.pull_request.number) || github.ref }}
   cancel-in-progress: true
