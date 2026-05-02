@@ -41,6 +41,8 @@ struct GroupedGemmRunContext {
     size_t workspace_bytes = 0;
     hipStream_t stream = nullptr;
 
+    bool use_a_colwise_data = false;
+    bool use_b_colwise_data = false;
 };
 
 // Treat TE tensors as generalized 2D matrices by flattening:
@@ -52,6 +54,19 @@ static inline bool get_flat_2d_dims(const transformer_engine::Tensor& t,
   }
   d0 = static_cast<int64_t>(t.flat_first_dim());
   d1 = static_cast<int64_t>(t.flat_last_dim());
+  return true;
+}
+
+// Columnwise storage is the physical transposed view used to rewrite a
+// normalized GEMM into CK's preferred NT presentation.  Interpret its
+// 2D shape consistently with the FP8 grouped GEMM path.
+static inline bool get_columnwise_storage_2d_dims(const transformer_engine::SimpleTensor& t,
+                                                  int64_t& d0, int64_t& d1) {
+  if (t.shape.size() != 2) {
+    return false;
+  }
+  d0 = static_cast<int64_t>(t.shape[1]);
+  d1 = static_cast<int64_t>(t.shape[0]);
   return true;
 }
 
@@ -81,19 +96,11 @@ struct MxGemmPipelineTypeSelector<MxGemmPipelineType::CompTDMV2, Problem>
     static constexpr auto GetName() { return "GemmPipelineAgBgCrCompTDMV2"; }
 };
 
-static inline const transformer_engine::SimpleTensor& data_view(const transformer_engine::Tensor& t) {
-  return t.data;
-}
-
-static inline const transformer_engine::SimpleTensor& scale_inv_view(const transformer_engine::Tensor& t) {
-  return t.scale_inv;
-}
-
 template <typename Kernel>
 static inline bool has_sufficient_workspace(const GroupedGemmRunContext& ctx) {
   const size_t needed = Kernel::GetWorkSpaceSize(ctx.group_num);
   if (!ctx.workspace || ctx.workspace_bytes < needed) {
-    NVTE_WARN("ck_tile_grouped_gemm: insufficient workspace for CK path. Needed bytes=", needed,
+    NVTE_WARN("ck_tile_mx_grouped_gemm: insufficient workspace for CK path. Needed bytes=", needed,
               ", available bytes=", ctx.workspace_bytes, ". Falling back.");
     return false;
   }
@@ -161,11 +168,11 @@ __global__ void preshuffle_scale_gfx1250_kernel(const ScaleType* __restrict__ sr
 
 template <typename ScaleType, ck_tile::index_t ScaleBlockSize, bool KStride>
 void preShuffleScaleBuffer_gfx1250(const ScaleType* src,
-                                                 ScaleType* dst,
-                                                 int actual_rows,
-                                                 int output_rows,
-                                                 int KScale,
-                                                 hipStream_t stream)
+                                   ScaleType* dst,
+                                   int actual_rows,
+                                   int output_rows,
+                                   int KScale,
+                                   hipStream_t stream)
 {
     constexpr int KPerXdlops = 128;
     constexpr int KStep      = KPerXdlops / ScaleBlockSize; // 4
@@ -334,39 +341,75 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
     return true;
   }
 
-  // Normalize input mats
+  // Normalize input mats similar to the FP8 grouped path.
   // I.e., swap A and B, as well as transa and transb.
   const NVTETensor* A_use = B;
   const NVTETensor* B_use = A;
   bool transA_use = transB;
   bool transB_use = transA;
 
-  // Validate scale type / data type combination
+  bool use_a_colwise_data = false;
+  bool use_b_colwise_data = false;
+
+  Tensor* A0_te = convertNVTETensorCheck(A_use[0]);
+  Tensor* B0_te = convertNVTETensorCheck(B_use[0]);
+
+  // CK MX grouped GEMM is presented as normalized NT, matching the FP8 grouped path.
+  // Selecting columnwise_data rewrites the physical storage and effective dims used by CK
+  // while preserving the original math.
+  if (transA_use) {
+    if (!A0_te->has_columnwise_data() || A0_te->columnwise_scale_inv.dptr == nullptr) {
+      NVTE_WARN("ck_tile_mx_grouped_gemm: missing A columnwise MXFP8 view for NT rewrite; falling back.");
+      return false;
+    }
+    use_a_colwise_data = true;
+    transA_use = false;
+  }
+
+  if (!transB_use) {
+    if (!B0_te->has_columnwise_data() || B0_te->columnwise_scale_inv.dptr == nullptr) {
+      NVTE_WARN("ck_tile_mx_grouped_gemm: missing B columnwise MXFP8 view for NT rewrite; falling back.");
+      return false;
+    }
+    use_b_colwise_data = true;
+    transB_use = true;
+  }
+
+  // Validate scale type / data type combination using the effective storage
+  // selected by the NT canonicalization above.
   // Expected input data format: fp8/bf8 (e4m3/e5m2)
   // Expected scale data format: e8m0
-  const auto* A0 = convertNVTETensorCheck(A_use[0]);
-  const auto* B0 = convertNVTETensorCheck(B_use[0]);
   const auto* D0 = convertNVTETensorCheck(D[0]);
-  NVTE_CHECK(A0->scale_inv.dptr != nullptr,
-            "ck_tile_mx_grouped_gemm: A[0] scale_inv is not initialized");
-  NVTE_CHECK(B0->scale_inv.dptr != nullptr,
-            "ck_tile_mx_grouped_gemm: B[0] scale_inv is not initialized");
 
-  const auto a_scale_dtype = A0->scale_inv.dtype;
-  const auto b_scale_dtype = B0->scale_inv.dtype;
+  const auto& A0_data = use_a_colwise_data ? A0_te->columnwise_data : A0_te->data;
+  const auto& B0_data = use_b_colwise_data ? B0_te->columnwise_data : B0_te->data;
+  const auto& A0_scale = use_a_colwise_data ? A0_te->columnwise_scale_inv : A0_te->scale_inv;
+  const auto& B0_scale = use_b_colwise_data ? B0_te->columnwise_scale_inv : B0_te->scale_inv;
+
+  NVTE_CHECK(A0_data.dptr != nullptr,
+             "ck_tile_mx_grouped_gemm: effective A[0] data is not initialized");
+  NVTE_CHECK(B0_data.dptr != nullptr,
+             "ck_tile_mx_grouped_gemm: effective B[0] data is not initialized");
+  NVTE_CHECK(A0_scale.dptr != nullptr,
+             "ck_tile_mx_grouped_gemm: effective A[0] scale_inv is not initialized");
+  NVTE_CHECK(B0_scale.dptr != nullptr,
+             "ck_tile_mx_grouped_gemm: effective B[0] scale_inv is not initialized");
+
+  const auto a_scale_dtype = A0_scale.dtype;
+  const auto b_scale_dtype = B0_scale.dtype;
   NVTE_CHECK(a_scale_dtype == DType::kFloat8E8M0,
         "ck_tile_mx_grouped_gemm: A scale_inv dtype must be Float8E8M0, got ",
         static_cast<int>(a_scale_dtype));
-  
+
   NVTE_CHECK(b_scale_dtype == DType::kFloat8E8M0,
         "ck_tile_mx_grouped_gemm: B scale_inv dtype must be Float8E8M0, got ",
         static_cast<int>(b_scale_dtype));
-  
-  const auto a_dtype = A0->dtype();
-  const auto b_dtype = B0->dtype();
+
+  const auto a_dtype = A0_data.dtype;
+  const auto b_dtype = B0_data.dtype;
   const auto d_dtype = D0->dtype();
-  NVTE_CHECK(is_fp8_dtype(a_dtype), "ck_tile_mx_grouped_gemm: A dtype must be FP8");
-  NVTE_CHECK(is_fp8_dtype(b_dtype), "ck_tile_mx_grouped_gemm: B dtype must be FP8");
+  NVTE_CHECK(is_fp8_dtype(a_dtype), "ck_tile_mx_grouped_gemm: effective A dtype must be FP8");
+  NVTE_CHECK(is_fp8_dtype(b_dtype), "ck_tile_mx_grouped_gemm: effective B dtype must be FP8");
 
   using AScaleType = ck_tile::e8m0_t;
   using BScaleType = ck_tile::e8m0_t;
@@ -378,7 +421,7 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
     ws_ptr = ws_te->data.dptr;
     ws_bytes = ws_te->data.numel() * typeToSize(ws_te->data.dtype);
   }
-  
+
   GroupedGemmRunContext ctx = {
       A_use,
       B_use,
@@ -388,7 +431,9 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
       transB_use,
       ws_ptr,
       ws_bytes,
-      stream};
+      stream,
+      use_a_colwise_data,
+      use_b_colwise_data};
 
   const ck_tile::stream_config s{ctx.stream};
 
@@ -407,20 +452,48 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
           transformer_engine::convertNVTETensorCheck(ctx.B[i]);
       transformer_engine::Tensor* D_te =
           transformer_engine::convertNVTETensorCheck(ctx.D[i]);
-      const auto& a = data_view(*A_te);
-      const auto& b = data_view(*B_te);
-      const auto& d = data_view(*D_te);
+
+      const auto& a = ctx.use_a_colwise_data ? A_te->columnwise_data : A_te->data;
+      const auto& b = ctx.use_b_colwise_data ? B_te->columnwise_data : B_te->data;
+      const auto& d = D_te->data;
+      const auto& a_scales =
+          ctx.use_a_colwise_data ? A_te->columnwise_scale_inv : A_te->scale_inv;
+      const auto& b_scales =
+          ctx.use_b_colwise_data ? B_te->columnwise_scale_inv : B_te->scale_inv;
+
       int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0, Dd0 = 0, Dd1 = 0;
-      if (!get_flat_2d_dims(*A_te, Ad0, Ad1) ||
-          !get_flat_2d_dims(*B_te, Bd0, Bd1) ||
-          !get_flat_2d_dims(*D_te, Dd0, Dd1)) {
-        NVTE_ERROR("ck_tile_mx_grouped_gemm: expected all groups to be rank>=2.");
+
+      if (ctx.use_a_colwise_data) {
+        if (!get_columnwise_storage_2d_dims(A_te->columnwise_data, Ad0, Ad1)) {
+          NVTE_ERROR("ck_tile_mx_grouped_gemm: expected 2D columnwise_data for A in group ", i);
+        }
+      } else {
+        if (!get_flat_2d_dims(*A_te, Ad0, Ad1)) {
+          NVTE_ERROR("ck_tile_mx_grouped_gemm: expected rank>=2 for normalized A in group ", i);
+        }
       }
-      const auto& a_scales = scale_inv_view(*A_te);
-      const auto& b_scales = scale_inv_view(*B_te);
+
+      if (ctx.use_b_colwise_data) {
+        if (!get_columnwise_storage_2d_dims(B_te->columnwise_data, Bd0, Bd1)) {
+          NVTE_ERROR("ck_tile_mx_grouped_gemm: expected 2D columnwise_data for B in group ", i);
+        }
+      } else {
+        if (!get_flat_2d_dims(*B_te, Bd0, Bd1)) {
+          NVTE_ERROR("ck_tile_mx_grouped_gemm: expected rank>=2 for normalized B in group ", i);
+        }
+      }
+
+      if (!get_flat_2d_dims(*D_te, Dd0, Dd1)) {
+        NVTE_ERROR("ck_tile_mx_grouped_gemm: expected rank>=2 for normalized D in group ", i);
+      }
+      if (a.dptr == nullptr || b.dptr == nullptr || a_scales.dptr == nullptr ||
+          b_scales.dptr == nullptr) {
+        NVTE_ERROR("ck_tile_mx_grouped_gemm: effective A/B data or scale_inv is missing.");
+      }
       if (a_scales.shape.size() != 2 || b_scales.shape.size() != 2) {
-        NVTE_ERROR("ck_tile_mx_grouped_gemm: expected A/B scale_inv tensors to be rank-2.");
+        NVTE_ERROR("ck_tile_mx_grouped_gemm: expected effective A/B scale_inv tensors to be rank-2.");
       }
+
       const int64_t M = ctx.transA ? Ad1 : Ad0;
       const int64_t K = ctx.transA ? Ad0 : Ad1;
       const int64_t N = ctx.transB ? Bd0 : Bd1;
@@ -430,15 +503,20 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
       }
       const int KScale = static_cast<int>(K / ScaleBlockSize);
       if (Kb != K) {
-        NVTE_ERROR("ck_tile_mx_grouped_gemm: K mismatch between A and B in group ", i);
+        NVTE_ERROR("ck_tile_mx_grouped_gemm: K mismatch between A and B in group ", i,
+                   ". op(A)=", M, "x", K, ", op(B)=", Kb, "x", N);
       }
       if (Dd0 != M || Dd1 != N) {
-        NVTE_ERROR("ck_tile_mx_grouped_gemm: D shape mismatch in group ", i);
+        NVTE_ERROR("ck_tile_mx_grouped_gemm: D shape mismatch in group ", i,
+                   ". D=", Dd0, "x", Dd1, ", expected=", M, "x", N);
       }
+
       const ck_tile::index_t stride_A = static_cast<ck_tile::index_t>(Ad1);
       const ck_tile::index_t stride_B = static_cast<ck_tile::index_t>(Bd1);
       const ck_tile::index_t stride_E = static_cast<ck_tile::index_t>(Dd1);
-      // Pre-shuffle scale buffers for the hardware
+
+      // Pre-shuffle scale buffers for the hardware.
+      // For the NT-normalized presentation, A scales are MxKScale and B scales are NxKScale.
       const int a_scale_actual_rows = static_cast<int>(M);
       const int a_scale_output_rows =
       ck_tile::integer_least_multiple(
