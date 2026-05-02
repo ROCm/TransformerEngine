@@ -846,15 +846,29 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   };
 #endif
 
+#ifdef __HIP_PLATFORM_AMD__
+  auto effective_dtype = [](const transformer_engine::Tensor *t) {
+    if (t->has_data()) {
+      return t->data.dtype;
+    }
+    if (t->has_columnwise_data()) {
+      return t->columnwise_data.dtype;
+    }
+    return t->data.dtype;
+  };
+#endif
+
   auto is_supported_dtype = [&]() -> bool {
     auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
     auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
     auto *OutputD = transformer_engine::convertNVTETensorCheck(D[0]);
 #ifdef __HIP_PLATFORM_AMD__
-    auto A_dt = inputA->data.dtype;
-    auto B_dt = inputB->data.dtype;
+    auto A_dt = effective_dtype(inputA);
+    auto B_dt = effective_dtype(inputB);
     auto D_dt = OutputD->data.dtype;
-    return (is_fp8_dtype(A_dt) && is_fp8_dtype(B_dt));
+    
+    return ((is_fp8_dtype(A_dt) && is_fp8_dtype(B_dt)) ||
+            ((A_dt == B_dt) && (A_dt == D_dt) && is_fp16_dtype(A_dt)));
 #else
     auto A_type = get_cuda_dtype(inputA->data.dtype);
     auto B_type = get_cuda_dtype(inputB->data.dtype);
