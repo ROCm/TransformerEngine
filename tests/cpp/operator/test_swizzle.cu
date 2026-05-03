@@ -276,7 +276,7 @@ TEST_P(MxGemmTestSuite, TestMxfp8GemmE2E) {
   cudaDeviceProp prop;
   ASSERT_EQ(cudaGetDeviceProperties(&prop, 0), cudaSuccess);
 
-  // MXFP8 requires gfx950+ (MI350) or gfx1250 (MI450)
+  // MXFP8 requires gfx950+
   bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) ||
                           (prop.major >= 10);
   if (!mxfp8_supported) {
@@ -371,13 +371,14 @@ TEST_P(MxGemmTestSuite, TestMxfp8GemmE2E) {
   const bf16 *ref_ptr = RefD.rowwise_cpu_dptr<bf16>();
   double max_atol = 0.0;
   double max_rtol = 0.0;
+  const double log_threshold = 5e-2 + K * 2e-4;
   int mismatch_count = 0;
   for (size_t i = 0; i < M * N; i++) {
     float actual = static_cast<float>(d_ptr[i]);
     float expected = static_cast<float>(ref_ptr[i]);
     double diff = std::abs(actual - expected);
     double denom = std::max(std::abs((double)expected), 1e-6);
-    if (diff > 5e-2 && mismatch_count < 10) {
+    if (diff > log_threshold && mismatch_count < 10) {
       size_t row = i / N;
       size_t col = i % N;
       std::cout << "  MISMATCH [" << row << "," << col << "]: actual=" << actual
@@ -388,9 +389,10 @@ TEST_P(MxGemmTestSuite, TestMxfp8GemmE2E) {
     max_rtol = std::max(max_rtol, diff / denom);
   }
 
-  // MXFP8 GEMM tolerance
-  constexpr double ATOL = 5e-2;
-  constexpr double RTOL = 5e-2;
+  // MXFP8 GEMM tolerance: FP8 E4M3 accumulation errors grow with K
+  // because hardware and reference kernels use different reduction orders.
+  const double ATOL = 5e-2 + K * 2e-4;
+  constexpr double RTOL = 1.5e-2;
   EXPECT_LE(max_atol, ATOL) << "Absolute error too large: " << max_atol;
   EXPECT_LE(max_rtol, RTOL) << "Relative error too large: " << max_rtol;
 }
@@ -403,7 +405,11 @@ INSTANTIATE_TEST_SUITE_P(
         MxGemmParams{64, 128, 32},
         MxGemmParams{128, 128, 64},
         MxGemmParams{64, 256, 32},
-        MxGemmParams{128, 384, 64}
+        MxGemmParams{128, 384, 64},
+        MxGemmParams{256, 512, 128},
+        MxGemmParams{512, 1024, 256},
+        MxGemmParams{1024, 2048, 128},
+        MxGemmParams{4096, 8192, 64}
     ),
     [](const testing::TestParamInfo<MxGemmTestSuite::ParamType> &info) {
       return "M" + std::to_string(info.param.m) +
@@ -563,6 +569,9 @@ std::vector<std::pair<int, int>> mx_scale_dims = {
   {96, 8},       // non-power-of-2 M
   {128, 32},     // big
   {256, 64},     // bigger
+  {512, 128},    // stress inter-tile
+  {1024, 256},   // large
+  {4096, 256},   // max stress
 };
 
 }  // namespace
