@@ -10,9 +10,6 @@
 //   1. TE nvte_multi_tensor_gemm grouped path (CK backend selected by env)
 //   2. ck_tile::reference_mx_gemm host reference, using exact quantized operands/scales
 //   3. TE HIP reference kernel adapted from test_cublaslt_gemm.cu compute_ref_kernel
-//
-// Intended drop-in location:
-//   TransformerEngine/tests/cpp/operator/test_te_ck_grouped_mxfp8.cu
 
 #ifndef CK_TILE_USE_OCP_FP8
 #define CK_TILE_USE_OCP_FP8 1
@@ -478,12 +475,11 @@ static void run_case_typed(const CaseConfig& cfg) {
   cudaDeviceProp prop;
   NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
 #ifdef __HIP_PLATFORM_AMD__
-  const bool is_gfx950_or_newer_cdna = (prop.major == 9 && prop.minor >= 5);
   const bool is_gfx1250 = (prop.major == 12 && prop.minor == 5);
 
-  if (!is_gfx950_or_newer_cdna && !is_gfx1250) {
-    GTEST_SKIP() << "MXFP8 requires gfx950+ or gfx1250 in this test. GPU=" << prop.name
-                 << " major=" << prop.major << " minor=" << prop.minor;
+  if (!is_gfx1250) {
+    GTEST_SKIP() << "This MXFP8 grouped GEMM test currently exercises the gfx1250-compatible CK pipeline only. GPU="
+                 << prop.name << " major=" << prop.major << " minor=" << prop.minor;
   }
 #endif
 

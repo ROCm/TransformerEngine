@@ -188,7 +188,7 @@ void preShuffleScaleBuffer_gfx1250(const ScaleType* src,
     NVTE_CHECK_CUDA(hipGetLastError());
 }
 
-template <typename MXFP8GemmConfig, typename AType, typename BType, typename CType, typename AScaleType, typename BScaleType, typename AccType = float>
+template <typename MXFP8GemmConfig, typename AType, typename BType, typename CType, typename AScaleType, typename BScaleType, typename AccType = float,  MxGemmPipelineType PipelineType = MxGemmPipelineType::CompTDMV1>
 bool invoke_mx_grouped_gemm(const std::vector<mx_grouped_gemm_kargs>& descs, const GroupedGemmRunContext& ctx, const ck_tile::stream_config& stream_cfg)
 {
   // check hardware WMMA support for the warp tile
@@ -261,7 +261,7 @@ bool invoke_mx_grouped_gemm(const std::vector<mx_grouped_gemm_kargs>& descs, con
                                          BScaleType>;
         /* make pipeline selective */
       using GemmPipeline =
-          typename MxGemmPipelineTypeSelector<MxGemmPipelineType::CompTDMV1,
+          typename MxGemmPipelineTypeSelector<PipelineType,
                                                 UniversalGemmProblem>::pipeline;
       using GemmEpilogue = ck_tile::TdmEpilogue<
           ck_tile::CShuffleEpilogueProblem<AType,
@@ -332,13 +332,17 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
     return true;
   }
 
-  // Normalize input mats similar to the FP8 grouped path.
+  // Normalize input mats
   // I.e., swap A and B, as well as transa and transb.
   const NVTETensor* A_use = B;
   const NVTETensor* B_use = A;
   bool transA_use = transB;
   bool transB_use = transA;
 
+  // Note: for MXFP8, row-wise and col-wise data are scaled along different
+  // dims, with the mat interpreted in row-major.
+  // Use the operand transpose flags to select the correct view.
+  // Scale view needs to match data view.
   const bool use_a_colwise_data = transA_use;
   const bool use_b_colwise_data = !transB_use;
 
@@ -356,13 +360,13 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
   const auto& B0_scale = use_b_colwise_data ? B0_te->columnwise_scale_inv : B0_te->scale_inv;
 
   NVTE_CHECK(A0_data.dptr != nullptr,
-             "ck_tile_mx_grouped_gemm: effective A[0] data is not initialized");
+             "ck_tile_mx_grouped_gemm: A[0] data is not initialized");
   NVTE_CHECK(B0_data.dptr != nullptr,
-             "ck_tile_mx_grouped_gemm: effective B[0] data is not initialized");
+             "ck_tile_mx_grouped_gemm: B[0] data is not initialized");
   NVTE_CHECK(A0_scale.dptr != nullptr,
-             "ck_tile_mx_grouped_gemm: effective A[0] scale_inv is not initialized");
+             "ck_tile_mx_grouped_gemm: A[0] scale_inv is not initialized");
   NVTE_CHECK(B0_scale.dptr != nullptr,
-             "ck_tile_mx_grouped_gemm: effective B[0] scale_inv is not initialized");
+             "ck_tile_mx_grouped_gemm: B[0] scale_inv is not initialized");
 
   const auto a_scale_dtype = A0_scale.dtype;
   const auto b_scale_dtype = B0_scale.dtype;
@@ -377,8 +381,8 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
   const auto a_dtype = A0_data.dtype;
   const auto b_dtype = B0_data.dtype;
   const auto d_dtype = D0->dtype();
-  NVTE_CHECK(is_fp8_dtype(a_dtype), "ck_tile_mx_grouped_gemm: effective A dtype must be FP8");
-  NVTE_CHECK(is_fp8_dtype(b_dtype), "ck_tile_mx_grouped_gemm: effective B dtype must be FP8");
+  NVTE_CHECK(is_fp8_dtype(a_dtype), "ck_tile_mx_grouped_gemm: A dtype must be FP8");
+  NVTE_CHECK(is_fp8_dtype(b_dtype), "ck_tile_mx_grouped_gemm: B dtype must be FP8");
 
   using AScaleType = ck_tile::e8m0_t;
   using BScaleType = ck_tile::e8m0_t;
@@ -432,11 +436,6 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
 
       int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0, Dd0 = 0, Dd1 = 0;
 
-      // MXFP8 columnwise_data is not a physical transpose. It has the same
-      // logical tensor shape as rowwise data, but is quantized with scales
-      // along the other dimension. Therefore dims/strides must always be
-      // derived from the TE tensor shape, not from columnwise_data.shape
-      // interpreted as a transposed storage view.
       if (!get_flat_2d_dims(*A_te, Ad0, Ad1)) {
         NVTE_ERROR("ck_tile_mx_grouped_gemm: expected rank>=2 for normalized A in group ", i);
       }
@@ -473,27 +472,11 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
                    ". D=", Dd0, "x", Dd1, ", expected=", M, "x", N);
       }
 
-      if (i == 0) {
-        printf("[MX CK] transA=%d transB=%d use_a_col=%d use_b_col=%d "
-              "M=%ld N=%ld K=%ld Ad=[%ld,%ld] Bd=[%ld,%ld] "
-              "a_scale_shape=[%zu,%zu] b_scale_shape=[%zu,%zu]\n",
-              static_cast<int>(ctx.transA),
-              static_cast<int>(ctx.transB),
-              static_cast<int>(ctx.use_a_colwise_data),
-              static_cast<int>(ctx.use_b_colwise_data),
-              M, N, K, Ad0, Ad1, Bd0, Bd1,
-              a_scales.shape.size() > 0 ? a_scales.shape[0] : 0,
-              a_scales.shape.size() > 1 ? a_scales.shape[1] : 0,
-              b_scales.shape.size() > 0 ? b_scales.shape[0] : 0,
-              b_scales.shape.size() > 1 ? b_scales.shape[1] : 0);
-      }
-
       const ck_tile::index_t stride_A = static_cast<ck_tile::index_t>(Ad1);
       const ck_tile::index_t stride_B = static_cast<ck_tile::index_t>(Bd1);
       const ck_tile::index_t stride_E = static_cast<ck_tile::index_t>(Dd1);
 
       // Pre-shuffle scale buffers for the hardware.
-      // For the NT-normalized presentation, A scales are MxKScale and B scales are NxKScale.
       const int a_scale_actual_rows = static_cast<int>(M);
       const int a_scale_output_rows =
       ck_tile::integer_least_multiple(

@@ -14,7 +14,7 @@ list(APPEND test_cuda_sources
             test_qdq.cu
             test_cast_mxfp8.cu
             test_dequantize_mxfp8.cu
-            test_te_ck_grouped_mxfp8.cu
+            test_ck_grouped_mxfp8.cu
             test_transpose.cu
             test_cast_transpose.cu
             test_cast_transpose_current_scaling.cu
