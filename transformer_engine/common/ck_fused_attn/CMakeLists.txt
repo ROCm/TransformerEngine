@@ -8,6 +8,12 @@ project(ck_fused_attn LANGUAGES HIP CXX)
 
 set(AITER_MHA_INSTALL_PREFIX "transformer_engine" CACHE STRING "aiter mha shared lib install prefix in TE")
 
+#Corresponding runtime check is in nvte_get_fused_attn_backend()
+list(FIND CMAKE_HIP_ARCHITECTURES "gfx1250" _gfx1250_idx)
+if(NOT _gfx1250_idx EQUAL -1)
+  message(WARNING "gfx1250 is not supported by AITER/CK fused attention; removing fromCMAKE_HIP_ARCHITECTURES for ck_fused_attn build.")
+  list(REMOVE_ITEM CMAKE_HIP_ARCHITECTURES "gfx1250")
+endif()
 set(__AITER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA/3rdparty/aiter")
 set(__CK_SOURCE_DIR "${__AITER_SOURCE_DIR}/3rdparty/composable_kernel")
 

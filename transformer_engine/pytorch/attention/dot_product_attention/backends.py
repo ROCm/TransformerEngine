@@ -92,7 +92,7 @@ _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
 
-if IS_HIP_EXTENSION and os.getenv("NVTE_FLASH_ATTN_AITER", "1") == "1":
+if IS_HIP_EXTENSION and os.getenv("NVTE_FLASH_ATTN_AITER", "0") == "1":
     try:
         import aiter
         import triton
