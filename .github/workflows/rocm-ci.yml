@@ -170,7 +170,7 @@ jobs:
           test -n "$TE_CORE_PKG" && test -n "$TE_TORCH_PKG" && test -n "$TE_JAX_PKG"
 
           pip install --no-deps "$TE_CORE_PKG"
-          pip install ninja pybind11[global]
+          pip install ninja pybind11[global] setuptools
           pip install --no-build-isolation --no-deps "$TE_TORCH_PKG"
           pip install --no-build-isolation --no-deps "$TE_JAX_PKG"
           EOF
@@ -369,7 +369,7 @@ jobs:
           test -n "$TE_CORE_PKG" && test -n "$TE_FW_PKG"
 
           pip install --no-deps "$TE_CORE_PKG"
-          pip install ninja pybind11[global]
+          pip install ninja pybind11[global] setuptools
           pip install --no-build-isolation --no-deps "$TE_FW_PKG"
           EOF
           )"
