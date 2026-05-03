@@ -15,6 +15,7 @@
 #include "ck_tile/ops/elementwise/unary_element_wise_operation.hpp"
 
 #include <algorithm>
+#include <memory>
 #include <vector>
 
 namespace transformer_engine {
@@ -57,19 +58,6 @@ static inline bool get_flat_2d_dims(const transformer_engine::Tensor& t,
   }
   d0 = static_cast<int64_t>(t.flat_first_dim());
   d1 = static_cast<int64_t>(t.flat_last_dim());
-  return true;
-}
-
-// Columnwise storage is the physical transposed view used to rewrite a
-// normalized GEMM into CK's preferred NT presentation.  Interpret its
-// 2D shape consistently with the FP8 grouped GEMM path.
-static inline bool get_columnwise_storage_2d_dims(const transformer_engine::SimpleTensor& t,
-                                                  int64_t& d0, int64_t& d1) {
-  if (t.shape.size() != 2) {
-    return false;
-  }
-  d0 = static_cast<int64_t>(t.shape[1]);
-  d1 = static_cast<int64_t>(t.shape[0]);
   return true;
 }
 
@@ -351,35 +339,13 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
   bool transA_use = transB;
   bool transB_use = transA;
 
-  bool use_a_colwise_data = false;
-  bool use_b_colwise_data = false;
+  const bool use_a_colwise_data = transA_use;
+  const bool use_b_colwise_data = !transB_use;
 
   Tensor* A0_te = convertNVTETensorCheck(A_use[0]);
   Tensor* B0_te = convertNVTETensorCheck(B_use[0]);
 
-  // CK MX grouped GEMM is presented as normalized NT, matching the FP8 grouped path.
-  // Selecting columnwise_data rewrites the physical storage and effective dims used by CK
-  // while preserving the original math.
-  if (transA_use) {
-    if (!A0_te->has_columnwise_data() || A0_te->columnwise_scale_inv.dptr == nullptr) {
-      NVTE_WARN("ck_tile_mx_grouped_gemm: missing A columnwise MXFP8 view for NT rewrite; falling back.");
-      return false;
-    }
-    use_a_colwise_data = true;
-    transA_use = false;
-  }
-
-  if (!transB_use) {
-    if (!B0_te->has_columnwise_data() || B0_te->columnwise_scale_inv.dptr == nullptr) {
-      NVTE_WARN("ck_tile_mx_grouped_gemm: missing B columnwise MXFP8 view for NT rewrite; falling back.");
-      return false;
-    }
-    use_b_colwise_data = true;
-    transB_use = true;
-  }
-
-  // Validate scale type / data type combination using the effective storage
-  // selected by the NT canonicalization above.
+  // Validate scale type / data type combination.
   // Expected input data format: fp8/bf8 (e4m3/e5m2)
   // Expected scale data format: e8m0
   const auto* D0 = convertNVTETensorCheck(D[0]);
@@ -466,24 +432,17 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
 
       int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0, Dd0 = 0, Dd1 = 0;
 
-      if (ctx.use_a_colwise_data) {
-        if (!get_columnwise_storage_2d_dims(A_te->columnwise_data, Ad0, Ad1)) {
-          NVTE_ERROR("ck_tile_mx_grouped_gemm: expected 2D columnwise_data for A in group ", i);
-        }
-      } else {
-        if (!get_flat_2d_dims(*A_te, Ad0, Ad1)) {
-          NVTE_ERROR("ck_tile_mx_grouped_gemm: expected rank>=2 for normalized A in group ", i);
-        }
+      // MXFP8 columnwise_data is not a physical transpose. It has the same
+      // logical tensor shape as rowwise data, but is quantized with scales
+      // along the other dimension. Therefore dims/strides must always be
+      // derived from the TE tensor shape, not from columnwise_data.shape
+      // interpreted as a transposed storage view.
+      if (!get_flat_2d_dims(*A_te, Ad0, Ad1)) {
+        NVTE_ERROR("ck_tile_mx_grouped_gemm: expected rank>=2 for normalized A in group ", i);
       }
 
-      if (ctx.use_b_colwise_data) {
-        if (!get_columnwise_storage_2d_dims(B_te->columnwise_data, Bd0, Bd1)) {
-          NVTE_ERROR("ck_tile_mx_grouped_gemm: expected 2D columnwise_data for B in group ", i);
-        }
-      } else {
-        if (!get_flat_2d_dims(*B_te, Bd0, Bd1)) {
-          NVTE_ERROR("ck_tile_mx_grouped_gemm: expected rank>=2 for normalized B in group ", i);
-        }
+      if (!get_flat_2d_dims(*B_te, Bd0, Bd1)) {
+        NVTE_ERROR("ck_tile_mx_grouped_gemm: expected rank>=2 for normalized B in group ", i);
       }
 
       if (!get_flat_2d_dims(*D_te, Dd0, Dd1)) {
@@ -556,20 +515,46 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
           std::make_unique<ck_tile::DeviceMem>(b_scale_shuffled_bytes));
       void* a_scale_shuffled_ptr = a_scale_shuffled_bufs.back()->GetDeviceBuffer();
       void* b_scale_shuffled_ptr = b_scale_shuffled_bufs.back()->GetDeviceBuffer();
-      preShuffleScaleBuffer_gfx1250<AScaleType, ScaleBlockSize, true>(
-          reinterpret_cast<const AScaleType*>(a_scales.dptr),
-          reinterpret_cast<AScaleType*>(a_scale_shuffled_ptr),
-          a_scale_actual_rows,
-          a_scale_output_rows,
-          KScale,
-          stream);
-      preShuffleScaleBuffer_gfx1250<BScaleType, ScaleBlockSize, true>(
-          reinterpret_cast<const BScaleType*>(b_scales.dptr),
-          reinterpret_cast<BScaleType*>(b_scale_shuffled_ptr),
-          b_scale_actual_rows,
-          b_scale_output_rows,
-          KScale,
-          stream);
+      // CK expects canonical pre-shuffled scale buffers laid out as
+      // A: [M, KScale] and B: [N, KScale], independent of A/B data layouts.
+      // TE rowwise MXFP8 scale_inv is [rows, KScale] and can be read with
+      // KStride=true. TE columnwise_scale_inv is [KScale, rows] and must be
+      // read with KStride=false before writing CK's canonical shuffled layout.
+      if (ctx.use_a_colwise_data) {
+        preShuffleScaleBuffer_gfx1250<AScaleType, ScaleBlockSize, false>(
+            reinterpret_cast<const AScaleType*>(a_scales.dptr),
+            reinterpret_cast<AScaleType*>(a_scale_shuffled_ptr),
+            a_scale_actual_rows,
+            a_scale_output_rows,
+            KScale,
+            stream);
+      } else {
+        preShuffleScaleBuffer_gfx1250<AScaleType, ScaleBlockSize, true>(
+            reinterpret_cast<const AScaleType*>(a_scales.dptr),
+            reinterpret_cast<AScaleType*>(a_scale_shuffled_ptr),
+            a_scale_actual_rows,
+            a_scale_output_rows,
+            KScale,
+            stream);
+      }
+
+      if (ctx.use_b_colwise_data) {
+        preShuffleScaleBuffer_gfx1250<BScaleType, ScaleBlockSize, false>(
+            reinterpret_cast<const BScaleType*>(b_scales.dptr),
+            reinterpret_cast<BScaleType*>(b_scale_shuffled_ptr),
+            b_scale_actual_rows,
+            b_scale_output_rows,
+            KScale,
+            stream);
+      } else {
+        preShuffleScaleBuffer_gfx1250<BScaleType, ScaleBlockSize, true>(
+            reinterpret_cast<const BScaleType*>(b_scales.dptr),
+            reinterpret_cast<BScaleType*>(b_scale_shuffled_ptr),
+            b_scale_actual_rows,
+            b_scale_output_rows,
+            KScale,
+            stream);
+      }
       descs.emplace_back(mx_grouped_gemm_kargs(
                          a.dptr,
                          a_scale_shuffled_ptr,
