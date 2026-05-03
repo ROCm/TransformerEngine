@@ -297,7 +297,7 @@ TEST_P(MxGemmTestSuite, TestMxfp8GemmE2E) {
   fillUniform(&A);
   fillUniform(&B);
 
-  // --- GPU reference with un-swizzled scales ---
+  // GPU reference with un-swizzled scales
   const auto a_scale_shape = A.rowwise_scale_inv_shape();
   const auto b_scale_shape = B.rowwise_scale_inv_shape();
 
@@ -320,14 +320,35 @@ TEST_P(MxGemmTestSuite, TestMxfp8GemmE2E) {
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   }
 
-  // --- Run actual GEMM ---
-  // On gfx1250, hipBLASlt BLK32_UE8M0_32_8_EXT expects pre-swizzled scales.
-  // Swizzle scales AFTER the reference computation (which uses raw layout).
+  // Reorder scales for hipBLASlt
+  // hipBLASlt with VEC32_UE8M0 on gfx1250 expects scales in K-tiled layout:
+  //   [n_tiles, M, 4] where n_tiles = K/128, 4 = 128/32 scale groups per tile
+  // Our scale data is [M, K/32] row-major. For K=128 (1 tile) these are identical.
+  // For K>128 we must reorder from [M, n_tiles, 4] to [n_tiles, M, 4].
+  auto reorder_scales_k_tiled = [](void *scale_ptr, size_t rows, size_t k_scale) {
+    if (k_scale <= 4) return;  // Single tile, no reorder needed
+    size_t total = rows * k_scale;
+    std::vector<uint8_t> src(total), dst(total);
+    cudaMemcpy(src.data(), scale_ptr, total, cudaMemcpyDeviceToHost);
+    for (size_t row = 0; row < rows; row++) {
+      for (size_t kc = 0; kc < k_scale; kc++) {
+        size_t k_tile = kc / 4;
+        size_t kc_local = kc % 4;
+        size_t src_off = row * k_scale + kc;
+        size_t dst_off = k_tile * rows * 4 + row * 4 + kc_local;
+        dst[dst_off] = src[src_off];
+      }
+    }
+    cudaMemcpy(scale_ptr, dst.data(), total, cudaMemcpyHostToDevice);
+  };
+
   if (prop.major >= 12) {
-    swizzle_tensor_scales(A, /*rowwise=*/true);
-    swizzle_tensor_scales(B, /*rowwise=*/true);
+    //gfx1250
+    reorder_scales_k_tiled(A.rowwise_scale_inv_dptr(), M, a_scale_shape.data[1]);
+    reorder_scales_k_tiled(B.rowwise_scale_inv_dptr(), N, b_scale_shape.data[1]);
   }
 
+  // Run actual GEMM
   size_t workspace_size = 134217728;  // 128MB
   Tensor Workspace("Workspace", std::vector<size_t>{workspace_size}, DType::kByte);
 
@@ -345,7 +366,7 @@ TEST_P(MxGemmTestSuite, TestMxfp8GemmE2E) {
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
-  // --- Compare ---
+  // Compare
   D.to_cpu();
   RefD.to_cpu();
 
