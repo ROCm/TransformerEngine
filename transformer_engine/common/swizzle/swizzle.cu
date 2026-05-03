@@ -349,18 +349,21 @@ __global__ void multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_
 }
 
 // ============================================================================
-// MX scale pre-swizzle kernel for gfx1250 — Tensile 3D layout
+// MX scale pre-swizzle kernel for gfx1250 — K-tiled 3D layout
 //
-// Tensile expects scales in a permuted 3D layout:
-//   Tensor({K_scale, M}).pad(M to mult of 4).reshape({K_scale, padM/4, 4}).permute({1, 0, 2})
+// hipBLASlt Tensile kernels expect scales in a permuted 3D layout that
+// groups K_scale into tiles of 4 (= 128 / MXBlock32):
+//   Tensor({M, K_scale}).pad(K_scale to mult of 4).reshape({M, K_scale/4, 4}).permute({1, 0, 2})
 //
 // For source position (m, k) in the [M, K_scale] scale matrix:
-//   group  = m / 4
-//   within = m % 4
-//   dst    = group * (K_scale * 4) + k * 4 + within
+//   group  = k / 4
+//   within = k % 4
+//   dst    = group * (M * 4) + m * 4 + within
 //
-// Padding: M to multiple of 4.  No K_scale padding required.
+// Padding: K_scale to multiple of 4.  No M padding required.
 // Identity padding value: E8M0 127 = 2^0 = 1.0
+//
+// Reference: swizzle_mx_scale() in hipblaslt/clients/common/include/testing_matmul.hpp
 // ============================================================================
 
 constexpr int MX_PRESWIZZLE_GROUP_SIZE = 4;
@@ -383,10 +386,10 @@ __global__ void __launch_bounds__(256)
     val = input[m * original_K + k];
   }
 
-  const int group = m / MX_PRESWIZZLE_GROUP_SIZE;
-  const int within = m % MX_PRESWIZZLE_GROUP_SIZE;
-  const int dst = group * (K_scale * MX_PRESWIZZLE_GROUP_SIZE)
-                + k * MX_PRESWIZZLE_GROUP_SIZE + within;
+  const int group = k / MX_PRESWIZZLE_GROUP_SIZE;
+  const int within = k % MX_PRESWIZZLE_GROUP_SIZE;
+  const int dst = group * (M * MX_PRESWIZZLE_GROUP_SIZE)
+                + m * MX_PRESWIZZLE_GROUP_SIZE + within;
 
   output[dst] = val;
 }
@@ -411,10 +414,10 @@ __global__ void __launch_bounds__(256)
     val = input[k * original_M + m];  // column-major read
   }
 
-  const int group = m / MX_PRESWIZZLE_GROUP_SIZE;
-  const int within = m % MX_PRESWIZZLE_GROUP_SIZE;
-  const int dst = group * (K_scale * MX_PRESWIZZLE_GROUP_SIZE)
-                + k * MX_PRESWIZZLE_GROUP_SIZE + within;
+  const int group = k / MX_PRESWIZZLE_GROUP_SIZE;
+  const int within = k % MX_PRESWIZZLE_GROUP_SIZE;
+  const int dst = group * (M * MX_PRESWIZZLE_GROUP_SIZE)
+                + m * MX_PRESWIZZLE_GROUP_SIZE + within;
 
   output[dst] = val;
 }
@@ -461,10 +464,10 @@ void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_
     k = input->columnwise_scale_inv.shape[0];
   }
 
-  // Check dims -- Tensile 3D layout requires M padded to multiple of 4
-  NVTE_CHECK(m % MX_PRESWIZZLE_GROUP_SIZE == 0,
-             "Scale M dimension must be padded to multiple of ", MX_PRESWIZZLE_GROUP_SIZE,
-             ", got ", m, ".");
+  // Check dims -- K-tiled layout requires K_scale padded to multiple of 4
+  NVTE_CHECK(k % MX_PRESWIZZLE_GROUP_SIZE == 0,
+             "Scale K dimension must be padded to multiple of ", MX_PRESWIZZLE_GROUP_SIZE,
+             ", got ", k, ".");
 
   // Validate output dimensions match
   if (has_rowwise_scale_inv) {
@@ -510,8 +513,8 @@ void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_
 }
 
 void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t stream) {
-  // On gfx1250, MXFP8 uses the MX pre-swizzle layout (32x8 tiles)
-  // instead of the standard 128x4 interleaved layout.
+  // On gfx1250, MXFP8 uses the K-tiled pre-swizzle layout
+  // (K_scale grouped by 4, matching hipBLASlt BLK32_UE8M0_32_8_EXT).
   if (input->scaling_mode == NVTE_MXFP8_1D_SCALING && cuda::sm_arch() == 125) {
     swizzle_scaling_factors_mx(input, output, stream);
     return;

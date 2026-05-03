@@ -297,7 +297,24 @@ TEST_P(MxGemmTestSuite, TestMxfp8GemmE2E) {
   fillUniform(&A);
   fillUniform(&B);
 
-  // GPU reference with un-swizzled scales
+  // Override scales with values in [120,127] so layout errors are detectable.
+  // Default random [0,127] produces mostly tiny scales (2^(-127)..2^0),
+  // making the test insensitive to permutation errors.
+  {
+    auto fill_discriminating_scales = [](void *scale_ptr, size_t count) {
+      std::vector<uint8_t> h(count);
+      std::mt19937 rng(42);
+      std::uniform_int_distribution<uint8_t> dist(120, 127);
+      for (size_t i = 0; i < count; i++) h[i] = dist(rng);
+      cudaMemcpy(scale_ptr, h.data(), count, cudaMemcpyHostToDevice);
+    };
+    auto a_sh = A.rowwise_scale_inv_shape();
+    auto b_sh = B.rowwise_scale_inv_shape();
+    fill_discriminating_scales(A.rowwise_scale_inv_dptr(), a_sh.data[0] * a_sh.data[1]);
+    fill_discriminating_scales(B.rowwise_scale_inv_dptr(), b_sh.data[0] * b_sh.data[1]);
+  }
+
+  // GPU reference with un-swizzled (compact) scales
   const auto a_scale_shape = A.rowwise_scale_inv_shape();
   const auto b_scale_shape = B.rowwise_scale_inv_shape();
 
@@ -320,32 +337,12 @@ TEST_P(MxGemmTestSuite, TestMxfp8GemmE2E) {
     ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   }
 
-  // Reorder scales for hipBLASlt
-  // hipBLASlt with VEC32_UE8M0 on gfx1250 expects scales in K-tiled layout:
-  //   [n_tiles, M, 4] where n_tiles = K/128, 4 = 128/32 scale groups per tile
-  // Our scale data is [M, K/32] row-major. For K=128 (1 tile) these are identical.
-  // For K>128 we must reorder from [M, n_tiles, 4] to [n_tiles, M, 4].
-  auto reorder_scales_k_tiled = [](void *scale_ptr, size_t rows, size_t k_scale) {
-    if (k_scale <= 4) return;  // Single tile, no reorder needed
-    size_t total = rows * k_scale;
-    std::vector<uint8_t> src(total), dst(total);
-    cudaMemcpy(src.data(), scale_ptr, total, cudaMemcpyDeviceToHost);
-    for (size_t row = 0; row < rows; row++) {
-      for (size_t kc = 0; kc < k_scale; kc++) {
-        size_t k_tile = kc / 4;
-        size_t kc_local = kc % 4;
-        size_t src_off = row * k_scale + kc;
-        size_t dst_off = k_tile * rows * 4 + row * 4 + kc_local;
-        dst[dst_off] = src[src_off];
-      }
-    }
-    cudaMemcpy(scale_ptr, dst.data(), total, cudaMemcpyHostToDevice);
-  };
-
+  // Swizzle scales to K-tiled layout for hipBLASlt BLK32_UE8M0_32_8_EXT on gfx1250.
+  // Layout: {M, K_scale}.reshape({M, K_scale/4, 4}).permute({1,0,2})
+  //   dst(m,k) = (k/4)*M*4 + m*4 + (k%4)
   if (prop.major >= 12) {
-    //gfx1250
-    reorder_scales_k_tiled(A.rowwise_scale_inv_dptr(), M, a_scale_shape.data[1]);
-    reorder_scales_k_tiled(B.rowwise_scale_inv_dptr(), N, b_scale_shape.data[1]);
+    swizzle_tensor_scales(A, true);
+    swizzle_tensor_scales(B, true);
   }
 
   // Run actual GEMM
@@ -431,9 +428,9 @@ void compute_ref_mx_swizzle_row(const uint8_t *h_input, uint8_t *h_output,
       if (m < orig_M && k < orig_K) {
         val = h_input[m * orig_K + k];
       }
-      int group = m / GROUP;
-      int within = m % GROUP;
-      int dst = group * (K * GROUP) + k * GROUP + within;
+      int group = k / GROUP;
+      int within = k % GROUP;
+      int dst = group * (M * GROUP) + m * GROUP + within;
       h_output[dst] = val;
     }
   }
@@ -449,9 +446,9 @@ void compute_ref_mx_swizzle_col(const uint8_t *h_input, uint8_t *h_output,
       if (m < orig_M && k < orig_K) {
         val = h_input[k * orig_M + m];
       }
-      int group = m / GROUP;
-      int within = m % GROUP;
-      int dst = group * (K * GROUP) + k * GROUP + within;
+      int group = k / GROUP;
+      int within = k % GROUP;
+      int dst = group * (M * GROUP) + m * GROUP + within;
       h_output[dst] = val;
     }
   }
@@ -476,9 +473,9 @@ TEST_P(MxSwizzleTestSuite, TestMxSwizzle) {
   const size_t orig_M = dims.first;
   const size_t orig_K = dims.second;
 
-  // Padded dimensions: Tensile 3D requires M padded to multiple of 4
-  const size_t M = roundup_sz(orig_M, 4);
-  const size_t K = orig_K;
+  // Padded dimensions: K-tiled layout requires K_scale padded to multiple of 4
+  const size_t M = orig_M;
+  const size_t K = roundup_sz(orig_K, 4);
 
   // Allocate host input (unpadded) and fill with random data
   const size_t input_size = orig_M * orig_K;
@@ -505,7 +502,7 @@ TEST_P(MxSwizzleTestSuite, TestMxSwizzle) {
   output_tw.set_with_gemm_swizzled_scales(true);
 
   // Data shape must be consistent with scale shape for validation.
-  // Scale shapes use padded M; data shapes use unpadded dims
+  // Scale shapes use padded K; data shapes use unpadded dims
   // (kernel derives original_M/K from them).
   if (rowwise) {
     std::vector<size_t> data_shape_in = {orig_M, orig_K * 32};
@@ -557,9 +554,9 @@ TEST_P(MxSwizzleTestSuite, TestMxSwizzle) {
 namespace {
 
 // Scale dimensions (M_scale, K_scale).
-// M will be padded to multiple of 4 by the test.
+// K_scale will be padded to multiple of 4 by the test.
 std::vector<std::pair<int, int>> mx_scale_dims = {
-  {4, 1},        // minimal
+  {4, 4},        // minimal
   {8, 4},        // small
   {32, 8},       // medium
   {64, 16},      // larger
