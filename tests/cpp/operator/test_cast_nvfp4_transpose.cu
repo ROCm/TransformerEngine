@@ -32,13 +32,6 @@ enum ActivationType {
     SReLU
 };
 
-#ifdef __HIP_PLATFORM_AMD__
-static constexpr float E2M1_LUT[16] = {
-     0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
-    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
-};
-#endif
-
 double2 cvt_fp4x2_to_double2(fp4e2m1x2 fp4_pair) {
 #ifdef __HIP_PLATFORM_AMD__
     uint8_t raw = *reinterpret_cast<uint8_t*>(&fp4_pair);
@@ -72,7 +65,11 @@ std::vector<InputType> create_transpose(const InputType* const input, const size
 
 // Compute the global encode scale factor for a given global amax
 float compute_global_encode_scaling_factor_FP4(const float global_amax) {
+#ifdef __HIP_PLATFORM_AMD__
+  const float fp8_max = Numeric_Traits<fp8e4m3>::maxNorm;
+#else
   constexpr float fp8_max = 448.0f;     // 448.0f;
+#endif
   constexpr float fp4_max = 6.0f;       // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
   // If scale is infinity, return max value of float32
@@ -547,8 +544,13 @@ void performTest(float (*OP)(const float),
 
     // Use get_scale_tensor_dims for NVFP4 scale tensor dimensions
     // Now that CheckScaleTensorShape is fixed, this should work correctly
+#ifdef __HIP_PLATFORM_AMD__
+    const std::array<size_t,4> scale_dims = get_scale_tensor_dims(rows, cols, 1, 16, NVTE_NVFP4_1D_SCALING);
+    const std::array<size_t,4> scale_dims_t = get_scale_tensor_dims(cols, rows, 1, 16, NVTE_NVFP4_1D_SCALING);
+#else
     const std::array<size_t,4> scale_dims = get_scale_tensor_dims(rows, cols, 1, 16);
     const std::array<size_t,4> scale_dims_t = get_scale_tensor_dims(cols, rows, 1, 16);
+#endif //#ifdef __HIP_PLATFORM_AMD__
 
     const size_t unpadded_blocks_Y = scale_dims[0];
     const size_t unpadded_blocks_X = scale_dims[1];

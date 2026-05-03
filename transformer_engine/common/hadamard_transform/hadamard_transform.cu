@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -16,11 +18,16 @@
 #include "common/common.h"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
+#ifndef __HIP_PLATFORM_AMD__
 #include "hadamard_transform_utils.cuh"
+#else
+#include "../util/cuda_runtime.h" //cuda::sm_arch
+#endif
 
 namespace transformer_engine {
 namespace {
 
+#ifndef __HIP_PLATFORM_AMD__
 constexpr int kThreadsPerWarp = 32;
 
 template <typename IType, int kHadamardDimension, int BUFF_DIM_Y, int BUFF_DIM_X,
@@ -161,6 +168,7 @@ __device__ __forceinline__ void ReduceMax(const float pre_rht_amax, const float 
     }
   }
 }
+#endif
 
 __launch_bounds__(1) __global__ void ZeroAmaxKernel(float* __restrict__ output_pre_rht_amax_ptr,
                                                     float* __restrict__ output_identity_amax_ptr,
@@ -176,6 +184,7 @@ __launch_bounds__(1) __global__ void ZeroAmaxKernel(float* __restrict__ output_p
   }
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 template <typename IType, int kHadamardDimension, int CHUNK_DIM_Y, int CHUNK_DIM_X, int BUFF_DIM_Y,
           int BUFF_DIM_X, int THREADS_PER_CHUNK, int THREADS_PER_Y, bool kReturnPreRhtAmax,
           bool kReturnIdentityAmax, bool kReturnTransposedAmax>
@@ -485,6 +494,326 @@ __global__ void HadamardTransformKernel(const T* __restrict__ input, T* __restri
 #endif  // defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
 }
 
+#endif  // __HIP_PLATFORM_AMD__
+
+#ifdef __HIP_PLATFORM_AMD__
+
+// Tiling / layout constants
+//
+// A 16-point WHT operates on tiles of kHadamardDim (16) elements.
+// Each tile is processed by kThreadsPerWHT (4) threads, each holding
+// kElemsPerThread (4) values, so one wavefront of kWarpSize (64) lanes
+// handles kRowsPerWarp (16) independent tiles (= rows) simultaneously.
+// kWarpsPerBlock wavefronts are combined into a thread-block that covers
+// kRowsPerBlock (64) consecutive rows.
+static constexpr int kHadamardDim     = 16;   // WHT dimension (H16)
+static constexpr int kWarpSize        = 64;   // Wavefront width
+static constexpr int kThreadsPerWHT   = 4;    // threads per 16-pt WHT
+static constexpr int kElemsPerThread  = 4;    // elements each thread owns
+static constexpr int kRowsPerWarp     = kWarpSize / kThreadsPerWHT;   // 16
+static constexpr int kWarpsPerBlock   = 4;
+static constexpr int kRowsPerBlock    = kRowsPerWarp * kWarpsPerBlock; // 64
+static constexpr int kThreadsPerBlock = kWarpSize   * kWarpsPerBlock;  // 256
+static constexpr float kHadamardScale = 0.25f; // 1/sqrt(16)
+
+// Reduce per-warp amax values in warp 0 and atomically update a global amax.
+__device__ __forceinline__ void reduce_block_amax(
+        const float* __restrict__ warp_amax, int lane_id,
+        float* __restrict__ global_amax) {
+    float val = (lane_id < kWarpsPerBlock) ? warp_amax[lane_id] : 0.f;
+    for (int off = kWarpSize / 2; off >= 1; off >>= 1)
+        val = fmaxf(val, __shfl_xor(val, off));
+    if (lane_id == 0)
+        atomicMaxFloat(global_amax, val);
+}
+
+// ds_swizzle: sub-wavefront exchange without LDS.
+// Same instructions as cast_transpose_mxfp4_kernel_shuffled.cu.
+__device__ __forceinline__ float ds_swizzle_xor1(float v) {
+    float r;
+#ifndef __gfx1250__ //instruction not supported on this GPU
+    asm volatile("ds_swizzle_b32 %0, %1 offset:0x041F\n\t"
+                 "s_waitcnt lgkmcnt(0)" : "=v"(r) : "v"(v));
+#endif
+    return r;
+}
+
+__device__ __forceinline__ float ds_swizzle_xor2(float v) {
+    float r;
+#ifndef __gfx1250__ //instruction not supported on this GPU
+    asm volatile("ds_swizzle_b32 %0, %1 offset:0x081F\n\t"
+                 "s_waitcnt lgkmcnt(0)" : "=v"(r) : "v"(v));
+#endif
+    return r;
+}
+
+// BF16 helpers
+__device__ __forceinline__ float          to_f32 (__hip_bfloat16 v) { return static_cast<float>(v); }
+__device__ __forceinline__ __hip_bfloat16 to_bf16(float v)          { return static_cast<__hip_bfloat16>(v); }
+
+// Bit-cast __hip_bfloat16->uint16_t without address-of-temporary.
+__device__ __forceinline__ uint16_t bf16_to_bits(__hip_bfloat16 v) {
+    return __builtin_bit_cast(uint16_t, v);
+}
+
+// Unpack/pack 4 BF16 values as uint64_t (vectorised global load/store).
+// Same trick as cast_transpose_mxfp4_kernel_shuffled.cu::bf16x4_to_float4.
+__device__ __forceinline__ void unpack_bf16x4(uint64_t p,
+                                              float& v0, float& v1, float& v2, float& v3) {
+    v0 = __uint_as_float(((uint32_t)( p        & 0xFFFF)) << 16);
+    v1 = __uint_as_float(((uint32_t)((p >> 16) & 0xFFFF)) << 16);
+    v2 = __uint_as_float(((uint32_t)((p >> 32) & 0xFFFF)) << 16);
+    v3 = __uint_as_float(((uint32_t)((p >> 48) & 0xFFFF)) << 16);
+}
+
+__device__ __forceinline__ uint64_t pack_bf16x4(float v0, float v1, float v2, float v3) {
+    return  (uint64_t)bf16_to_bits(to_bf16(v0))
+         | ((uint64_t)bf16_to_bits(to_bf16(v1)) << 16)
+         | ((uint64_t)bf16_to_bits(to_bf16(v2)) << 32)
+         | ((uint64_t)bf16_to_bits(to_bf16(v3)) << 48);
+}
+
+// -----------------------------------------------------------------------
+// 16-point WHT via the Kronecker trick  (no shared memory)
+// -----------------------------------------------------------------------
+//
+// 1. The vec operator
+//    vec() flattens a matrix into a column vector by stacking its
+//    columns one on top of the other:
+//
+//        X = |a  c|         vec(X) = |a|
+//            |b  d|                  |b|
+//                                    |c|
+//                                    |d|
+//
+// 2. The "Kronecker trick" for 1D -> 2D
+//    The fundamental identity that connects these concepts is:
+//
+//        vec(B . X . A^T) = (A (x) B) . vec(X)
+//
+//    For a 16-point Hadamard transform (H16 = H4 (x) H4),
+//    set A = H4 and B = H4.  The formula becomes:
+//
+//        H16 . x = vec(H4 . X . H4^T)
+//
+// 3. Data layout  (column-major, one column per thread)
+//    Reshape the 16-element 1D vector x into a 4x4 matrix X
+//    by filling columns first:
+//
+//        X = | x0   x4   x8   x12 |    thread 0 holds col 0: v0..v3 = x0 ..x3
+//            | x1   x5   x9   x13 |    thread 1 holds col 1: v0..v3 = x4 ..x7
+//            | x2   x6   x10  x14 |    thread 2 holds col 2: v0..v3 = x8 ..x11
+//            | x3   x7   x11  x15 |    thread 3 holds col 3: v0..v3 = x12..x15
+//
+// 4. Three-stage computation
+//    Stage 1 (local H4)   : left-multiply   H4 . X    (within each thread)
+//    Stage 2 (xor-1 swap) : \                         (across 4 threads)
+//    Stage 3 (xor-2 swap) : / right-multiply . H4^T   together these two butterfly stages = H4^T
+//
+//    Result: vec(H4 . X . H4^T) = H16 . x
+//
+// 5. Randomised Hadamard Transform (RHT)
+//    A diagonal sign matrix D (from sign_mask) is applied either
+//    before the WHT (apply_pre=true, forward) or after (inverse).
+//
+// Adapted from cast_transpose_mxfp4_kernel_shuffled.cu::hadamard16_inplace,
+// extended with NV random_sign_mask (uint16_t bitmask).
+// thread_in_group [0,3]: drives ds_swizzle polarity (identical to MLPerf tid & 3).
+// apply_pre=true -> D before WHT (forward); false -> D after WHT (inverse).
+__device__ __forceinline__ void wht16(
+        float& v0, float& v1, float& v2, float& v3,
+        int thread_in_group, uint16_t sign_mask, bool apply_pre) {
+    auto sgn = [&](int k) -> float {
+        return ((sign_mask >> (thread_in_group * kElemsPerThread + k)) & 1u) ? -1.f : 1.f;
+    };
+
+    if (apply_pre) {
+      v0*=sgn(0); v1*=sgn(1); v2*=sgn(2); v3*=sgn(3);
+    }
+
+    // Stage 1: local H4
+    float a0=v0+v1, a1=v0-v1, a2=v2+v3, a3=v2-v3;
+    v0=a0+a2; v2=a0-a2; v1=a1+a3; v3=a1-a3;
+
+    // Stage 2: cross-thread XOR-1
+    { float p0=ds_swizzle_xor1(v0), p1=ds_swizzle_xor1(v1),
+            p2=ds_swizzle_xor1(v2), p3=ds_swizzle_xor1(v3);
+      bool up=(thread_in_group&1);
+      v0=up?(p0-v0):(p0+v0); v1=up?(p1-v1):(p1+v1);
+      v2=up?(p2-v2):(p2+v2); v3=up?(p3-v3):(p3+v3); }
+
+    // Stage 3: cross-thread XOR-2
+    { float p0=ds_swizzle_xor2(v0), p1=ds_swizzle_xor2(v1),
+            p2=ds_swizzle_xor2(v2), p3=ds_swizzle_xor2(v3);
+      bool up=(thread_in_group>>1)&1;
+      v0=up?(p0-v0):(p0+v0); v1=up?(p1-v1):(p1+v1);
+      v2=up?(p2-v2):(p2+v2); v3=up?(p3-v3):(p3+v3); }
+
+    v0*=kHadamardScale; v1*=kHadamardScale; v2*=kHadamardScale; v3*=kHadamardScale;
+
+    if (!apply_pre) {
+      v0*=sgn(0); v1*=sgn(1); v2*=sgn(2); v3*=sgn(3);
+    }
+}
+
+// Grid:  blockIdx.x = col tile [0, row_length/16)
+//        blockIdx.y = row batch [0, ceil(num_rows/64))
+// Block: 256 threads = 4 wavefronts of 64 lanes.
+//   lane/4 = row_in_warp (0..15), lane%4 = thread_in_grp (0..3)
+template <bool kComputeIdentity, bool kComputeTransposed,
+          bool kUpdateAmax,      bool kUpdateAmaxT,
+          bool kUpdatePreRhtAmax = false>
+__global__ __launch_bounds__(kThreadsPerBlock, 4)
+void HadamardTransformKernel(
+        const __hip_bfloat16* __restrict__ input,
+        __hip_bfloat16*       __restrict__ output,
+        __hip_bfloat16*       __restrict__ output_t,
+        uint16_t random_sign_mask, uint16_t random_sign_mask_t,
+        uint64_t num_rows, uint64_t row_length,
+        float* __restrict__ amax, float* __restrict__ amax_t,
+        float* __restrict__ pre_rht_amax,
+        bool inverse_hadamard) {
+    const int tid           = threadIdx.x;
+    const int warp_id       = tid / kWarpSize;
+    const int lane_id       = tid % kWarpSize;
+    const int row_in_warp   = lane_id / kThreadsPerWHT;
+    const int thread_in_grp = lane_id % kThreadsPerWHT;
+    const uint64_t col_tile_base = (uint64_t)blockIdx.x * kHadamardDim;
+    const uint64_t row_batch     = (uint64_t)blockIdx.y * kRowsPerBlock;
+    const uint64_t global_row    = row_batch + (uint64_t)warp_id*kRowsPerWarp + row_in_warp;
+    const uint64_t col_base      = col_tile_base + (uint64_t)thread_in_grp * kElemsPerThread;
+
+    const bool apply_pre = !inverse_hadamard;
+    const bool in_bounds = (global_row < num_rows) && (col_base + kElemsPerThread - 1 < row_length);
+
+    // Smem for transposed path: 64*(16+1) BF16; +1 avoids LDS bank conflict.
+    __shared__ __hip_bfloat16 smem[kRowsPerBlock][kHadamardDim + 1];
+
+    __shared__ float block_amax[kWarpsPerBlock];
+    __shared__ float block_amax_t[kWarpsPerBlock];
+    __shared__ float block_pre_rht_amax[kWarpsPerBlock];
+
+    float v0=0.f, v1=0.f, v2=0.f, v3=0.f;
+    if (in_bounds) {
+        unpack_bf16x4(*reinterpret_cast<const uint64_t*>(
+            &input[global_row * row_length + col_base]), v0, v1, v2, v3);
+    }
+
+    // Pre-RHT amax: max|input| before any transform
+    if constexpr (kUpdatePreRhtAmax) {
+        float local_pre = 0.f;
+        if (in_bounds) {
+            local_pre = fmaxf(fmaxf(fabsf(v0), fabsf(v1)),
+                              fmaxf(fabsf(v2), fabsf(v3)));
+        }
+        for (int off = kWarpSize / 2; off >= 1; off >>= 1)
+            local_pre = fmaxf(local_pre, __shfl_xor(local_pre, off));
+        if (lane_id == 0)
+            block_pre_rht_amax[warp_id] = local_pre;
+    }
+
+    // Identity path: WHT along row dimension
+    if constexpr (kComputeIdentity || kUpdateAmax) {
+        float r0=v0, r1=v1, r2=v2, r3=v3;
+        float local_amax = 0.f;
+        if (global_row < num_rows) {
+            wht16(r0, r1, r2, r3, thread_in_grp, random_sign_mask, apply_pre);
+            if constexpr (kUpdateAmax) {
+                // Down-cast to BF16 and back so the amax matches the
+                // stored/output precision (matches upstream NV behaviour).
+                const float r0_bf16 = to_f32(to_bf16(r0));
+                const float r1_bf16 = to_f32(to_bf16(r1));
+                const float r2_bf16 = to_f32(to_bf16(r2));
+                const float r3_bf16 = to_f32(to_bf16(r3));
+                local_amax = fmaxf(fmaxf(fabsf(r0_bf16), fabsf(r1_bf16)),
+                                   fmaxf(fabsf(r2_bf16), fabsf(r3_bf16)));
+                for (int off=kWarpSize/2; off>=1; off>>=1)
+                  local_amax=fmaxf(local_amax,__shfl_xor(local_amax,off));
+            }
+            if constexpr (kComputeIdentity)
+                if (output && in_bounds)
+                    *reinterpret_cast<uint64_t*>(&output[global_row*row_length+col_base]) =
+                        pack_bf16x4(r0,r1,r2,r3);
+        }
+        if constexpr (kUpdateAmax) {
+            if (lane_id == 0)
+              block_amax[warp_id] = local_amax;
+        }
+    }
+
+    // Transposed path: WHT along column dimension via smem transpose
+    if constexpr (kComputeTransposed || kUpdateAmaxT) {
+        const int local_row  = warp_id * kRowsPerWarp + row_in_warp;
+        const int col_offset = thread_in_grp * kElemsPerThread;
+        float local_amax = 0.f;
+        smem[local_row][col_offset+0] = to_bf16(global_row < num_rows ? v0 : 0.f);
+        smem[local_row][col_offset+1] = to_bf16(global_row < num_rows ? v1 : 0.f);
+        smem[local_row][col_offset+2] = to_bf16(global_row < num_rows ? v2 : 0.f);
+        smem[local_row][col_offset+3] = to_bf16(global_row < num_rows ? v3 : 0.f);
+        __syncthreads();
+
+        // Re-read: row_in_warp -> column index, thread_in_grp -> 4 rows
+        const int t_col      = row_in_warp;
+        const int smem_rbase = warp_id*kRowsPerWarp + thread_in_grp*kElemsPerThread;
+
+        float c0=to_f32(smem[smem_rbase+0][t_col]), c1=to_f32(smem[smem_rbase+1][t_col]);
+        float c2=to_f32(smem[smem_rbase+2][t_col]), c3=to_f32(smem[smem_rbase+3][t_col]);
+
+        wht16(c0, c1, c2, c3, thread_in_grp, random_sign_mask_t, apply_pre);
+
+        if constexpr (kUpdateAmaxT) {
+            // Down-cast to BF16 and back so the amax matches the
+            // stored/output precision (matches upstream NV behaviour).
+            const float c0_bf16 = to_f32(to_bf16(c0));
+            const float c1_bf16 = to_f32(to_bf16(c1));
+            const float c2_bf16 = to_f32(to_bf16(c2));
+            const float c3_bf16 = to_f32(to_bf16(c3));
+            local_amax = fmaxf(fmaxf(fabsf(c0_bf16), fabsf(c1_bf16)),
+                               fmaxf(fabsf(c2_bf16), fabsf(c3_bf16)));
+
+            for (int off=kWarpSize/2; off>=1; off>>=1)
+              local_amax=fmaxf(local_amax,__shfl_xor(local_amax,off));
+        }
+
+        if constexpr (kComputeTransposed) {
+            if (output_t) {
+                const uint64_t global_col   = col_tile_base + t_col;
+                const uint64_t out_row_base = row_batch + (uint64_t)warp_id*kRowsPerWarp
+                                              + (uint64_t)thread_in_grp*kElemsPerThread;
+                if (global_col < row_length && out_row_base+kElemsPerThread-1 < num_rows)
+                    *reinterpret_cast<uint64_t*>(
+                        &output_t[global_col*num_rows+out_row_base]) =
+                            pack_bf16x4(c0,c1,c2,c3);
+            }
+        }
+
+        if constexpr (kUpdateAmaxT) {
+            if (lane_id == 0)
+              block_amax_t[warp_id] = local_amax;
+        }
+    }
+
+    if constexpr (kUpdateAmax || kUpdateAmaxT || kUpdatePreRhtAmax) {
+        __syncthreads();
+
+        if (warp_id == 0) {
+            if constexpr (kUpdateAmax)
+                reduce_block_amax(block_amax, lane_id, amax);
+            if constexpr (kUpdateAmaxT)
+                reduce_block_amax(block_amax_t, lane_id, amax_t);
+            if constexpr (kUpdatePreRhtAmax)
+                reduce_block_amax(block_pre_rht_amax, lane_id, pre_rht_amax);
+        }
+    }
+}
+
+static inline dim3 transform_grid(uint64_t num_rows, uint64_t row_length) {
+    return dim3((uint32_t)(row_length / kHadamardDim),
+                (uint32_t)DIVUP(num_rows, (uint64_t)kRowsPerBlock));
+}
+
+#endif  // __HIP_PLATFORM_AMD__
+
 }  // namespace
 
 void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_sign_mask,
@@ -514,7 +843,9 @@ void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_s
     return;
   }
 
+#ifndef __HIP_PLATFORM_AMD__
   checkCuDriverContext(stream);
+#endif
 
   const size_t ndim = input.shape.size();
   const size_t row_length = input.shape[ndim - 1];
@@ -523,14 +854,23 @@ void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_s
     num_rows *= input.shape[i];
   }
 
+#ifdef __HIP_PLATFORM_AMD__
+  using IType = __hip_bfloat16;
+  constexpr int kHadamardDimension = kHadamardDim;
+#else
   using IType = bf16;
 
   constexpr int kHadamardDimension = 16;
+#endif
   NVTE_CHECK(row_length % kHadamardDimension == 0,
              "row_length must be divisible by hadamard_dimension.");
   NVTE_CHECK(num_rows % kHadamardDimension == 0,
              "num_rows must be divisible by hadamard_dimension");
 
+#ifdef __HIP_PLATFORM_AMD__
+  dim3 block(kThreadsPerBlock);
+  dim3 grid = transform_grid(num_rows, row_length);
+#else
   constexpr uint64_t kThreadBlockX = 4;
   // Configure 4 is used for Hopper, 8 is used for Blackwell for extra memory bandwidth.
   constexpr uint64_t kThreadBlockY = 4;
@@ -544,6 +884,7 @@ void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_s
 
   dim3 grid(DIVUP(row_length / kHadamardDimension, kThreadBlockX),
             DIVUP(num_rows / kHadamardDimension, kThreadBlockY));
+#endif
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       return_transposed, kReturnTransposed,
@@ -551,6 +892,15 @@ void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_s
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
           return_identity, kReturnIdentity,
 
+#ifdef __HIP_PLATFORM_AMD__
+          HadamardTransformKernel<kReturnIdentity, kReturnTransposed, false, false>
+              <<<grid, block, 0, stream>>>(
+                  reinterpret_cast<const IType*>(input.dptr),
+                  reinterpret_cast<IType*>(output.dptr),
+                  reinterpret_cast<IType*>(output_t.dptr), random_sign_mask,
+                  random_sign_mask_t, static_cast<uint64_t>(num_rows),
+                  static_cast<uint64_t>(row_length), nullptr, nullptr, nullptr, false);););
+#else
           auto kernel =
               HadamardTransformKernel<IType, kHadamardDimension, kReturnIdentity, kReturnTransposed,
                                       kReturnIdentity, kReturnTransposed, false, false, true>;
@@ -561,6 +911,7 @@ void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_s
               reinterpret_cast<const IType*>(input.dptr), reinterpret_cast<IType*>(output.dptr),
               reinterpret_cast<IType*>(output_t.dptr), random_sign_mask, random_sign_mask_t,
               num_rows, row_length, nullptr, nullptr, false);););
+#endif
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
@@ -570,7 +921,7 @@ void hadamard_transform(const Tensor& input_, Tensor& output_, uint16_t random_s
 void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t random_sign_mask,
                              uint16_t random_sign_mask_t, cudaStream_t stream) {
   NVTE_API_CALL(hadamard_transform_amax);
-#if CUDA_VERSION >= 12080
+#if CUDA_VERSION >= 12080 || defined(__HIP_PLATFORM_AMD__)
 
   // Check input tensor
   NVTE_CHECK(input_.scaling_mode == NVTE_DELAYED_TENSOR_SCALING,
@@ -586,6 +937,11 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
   SimpleTensor output_identity_amax;
   SimpleTensor& output_transpose_amax = output_.columnwise_amax;
 
+#ifdef __HIP_PLATFORM_AMD__
+  // Check for optional transposed output buffer (written alongside amax)
+  SimpleTensor& output_t = output_.data;
+#endif
+
   // Check requested outputs
   const bool return_pre_rht_amax = output_pre_rht_amax.dptr != nullptr;
   const bool return_identity_amax = output_identity_amax.dptr != nullptr;
@@ -595,6 +951,7 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
     return;
   }
 
+#ifndef __HIP_PLATFORM_AMD__
   // Zero out amaxes if needed
   ZeroAmaxKernel<<<1, 1, 0, stream>>>(reinterpret_cast<float*>(output_pre_rht_amax.dptr),
                                       reinterpret_cast<float*>(output_identity_amax.dptr),
@@ -604,6 +961,7 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
   checkCuDriverContext(stream);
 
   using IType = bf16;
+#endif
 
   const size_t ndim = input.shape.size();
   const size_t row_length = input.shape[ndim - 1];
@@ -612,6 +970,25 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
     num_rows *= input.shape[i];
   }
 
+#ifdef __HIP_PLATFORM_AMD__
+  auto* pre_amax_ptr = reinterpret_cast<float*>(output_pre_rht_amax.dptr);
+  auto* id_amax_ptr = reinterpret_cast<float*>(output_identity_amax.dptr);
+  auto* tr_amax_ptr = reinterpret_cast<float*>(output_transpose_amax.dptr);
+  // Only use output_.data as transposed output buffer if it's actually BF16.
+  // When called from the fused path, output_.data is a BF16 buffer for RHT output.
+  // When called from the non-fused path, output_.data is an FP4 buffer (wrong type/size).
+  auto* out_t_ptr = (output_t.dtype == transformer_engine::DType::kBFloat16)
+      ? reinterpret_cast<__hip_bfloat16*>(output_t.dptr)
+      : static_cast<__hip_bfloat16*>(nullptr);
+
+  NVTE_CHECK(row_length % kHadamardDim == 0, "row_length must be divisible by 16.");
+  NVTE_CHECK(num_rows % kHadamardDim == 0, "num_rows must be divisible by 16.");
+
+  auto* in_ptr = reinterpret_cast<const __hip_bfloat16*>(input.dptr);
+
+  ZeroAmaxKernel<<<1, 1, 0, stream>>>(pre_amax_ptr, id_amax_ptr, tr_amax_ptr);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+#else
   constexpr int kHadamardDimension = 16;
   NVTE_CHECK(row_length % kHadamardDimension == 0,
              "row_length must be divisible by hadamard_dimension.");
@@ -644,6 +1021,7 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
   dim3 block(kThreadBlockX * kThreadsPerWarp, kThreadBlockY);
 
   dim3 grid(DIVUP(row_length, kChunkBlockXSmall), DIVUP(num_rows, kChunkBlockYSmall));
+#endif
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(
       return_transposed_amax, kReturnTransposedAmax,
@@ -651,6 +1029,29 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
       TRANSFORMER_ENGINE_SWITCH_CONDITION(
           return_identity_amax, kReturnIdentityAmax,
 
+#ifdef __HIP_PLATFORM_AMD__
+          {
+            // Compute transposed path if we need transposed amax or have an output buffer.
+            const bool compute_transposed = kReturnTransposedAmax || (out_t_ptr != nullptr);
+            dim3 grid = transform_grid(num_rows, row_length), block(kThreadsPerBlock);
+            TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                return_pre_rht_amax, kReturnPreRhtAmax,
+                TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                    compute_transposed, kComputeTransposed,
+                    if (kReturnIdentityAmax || kComputeTransposed || kReturnPreRhtAmax) {
+                      HadamardTransformKernel<kReturnIdentityAmax, kComputeTransposed,
+                                              kReturnIdentityAmax, kReturnTransposedAmax,
+                                              kReturnPreRhtAmax>
+                          <<<grid, block, 0, stream>>>(
+                              in_ptr, nullptr, out_t_ptr, random_sign_mask,
+                              random_sign_mask_t, static_cast<uint64_t>(num_rows),
+                              static_cast<uint64_t>(row_length), id_amax_ptr,
+                              tr_amax_ptr, pre_amax_ptr, false);
+                    }
+                ));
+          }
+        ));
+#else
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               return_pre_rht_amax, kReturnPreRhtAmax,
 
@@ -674,12 +1075,13 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
                   reinterpret_cast<float*>(output_identity_amax.dptr),
                   reinterpret_cast<float*>(output_transpose_amax.dptr), random_sign_mask,
                   random_sign_mask_t, num_rows, row_length);)));
+#endif
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   NVTE_ERROR("Hadamard transform requires CUDA 12.8+, but compile-time CUDA version is ",
              CUDA_VERSION);
-#endif  // CUDA_VERSION >= 12080
+#endif  // CUDA_VERSION >= 12080 || __HIP_PLATFORM_AMD__
 }
 
 }  // namespace transformer_engine
@@ -688,6 +1090,12 @@ void nvte_hadamard_transform(const NVTETensor input, NVTETensor output, int rand
                              int random_sign_mask_t, cudaStream_t stream) {
   NVTE_API_CALL(nvte_hadamard_transform);
   using namespace transformer_engine;
+#ifdef __HIP_PLATFORM_AMD__
+  //TODO: remove when enable HW code
+  if (cuda::sm_arch(cuda::current_device()) == 125) {
+    NVTE_ERROR("Hadamard transform is not yet supported on this GPU");
+  }
+#endif
   hadamard_transform(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
                      static_cast<uint16_t>(random_sign_mask),
                      static_cast<uint16_t>(random_sign_mask_t), stream);
@@ -697,6 +1105,12 @@ void nvte_hadamard_transform_amax(const NVTETensor input, NVTETensor output, int
                                   int random_sign_mask_t, cudaStream_t stream) {
   NVTE_API_CALL(nvte_hadamard_transform_amax);
   using namespace transformer_engine;
+#ifdef __HIP_PLATFORM_AMD__
+  //TODO: remove when enable HW code
+  if (cuda::sm_arch(cuda::current_device()) == 125) {
+    NVTE_ERROR("Hadamard transform is not yet supported on this GPU");
+  }
+#endif
   hadamard_transform_amax(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
                           static_cast<uint16_t>(random_sign_mask),
                           static_cast<uint16_t>(random_sign_mask_t), stream);

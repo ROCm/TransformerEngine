@@ -133,14 +133,14 @@ def _get_shared_object_file(library: str) -> Path:
     )
 
 
-def get_te_core_package_info() -> Tuple[bool, str, str]:
+def get_te_core_package_info(rocm:bool) -> Tuple[bool, str, str]:
     """
     Check if Tranformer Engine core package is installed.
     Returns the module name and version if found.
     """
     
     te_core_packages = ("transformer-engine-cu12", "transformer-engine-cu13")
-    if te_rocm_build:
+    if rocm:
         te_core_packages = ("transformer-engine-rocm7",)
     for package in te_core_packages:
         if _is_package_installed(package):
@@ -162,14 +162,23 @@ def load_framework_extension(framework: str) -> None:
     module_name = f"transformer_engine_{framework}"
 
     # Name of the pip extra dependency for framework extensions from PyPI.
-    extra_dep_name = module_name
+    # ROCm: here is a bug in upstream code - using module name whereas it should be framework name.
+    extra_dep_name = framework
     if framework == "torch":
         extra_dep_name = "pytorch"
 
+    global te_rocm_build
+    package_name = module_name
+    if te_rocm_build:
+        package_name = f"transformer_engine_rocm_{framework}"
+        extra_dep_name = f"rocm_{extra_dep_name}"
+
     # Find the TE packages. The core and framework packages can only be installed via PyPI.
     # For the `transformer-engine` package, we need to check explicity.
-    te_core_installed, te_core_package_name, te_core_version = get_te_core_package_info()
-    te_framework_installed = _is_package_installed(module_name)
+    te_core_installed, te_core_package_name, te_core_version = get_te_core_package_info(
+        te_rocm_build
+        )
+    te_framework_installed = _is_package_installed(package_name)
     te_installed = _is_package_installed("transformer_engine")
     te_installed_via_pypi = _is_package_installed_from_wheel("transformer_engine")
 
@@ -183,16 +192,25 @@ def load_framework_extension(framework: str) -> None:
     # If the framework extension pip package is installed, it means that TE is installed via
     # PyPI. For this case we need to make sure that the metapackage, the core lib, and framework
     # extension are all installed via PyPI and have matching versions.
+    # Metapackage and core lib matching is checked in `sanity_checks_for_pypi_installation()`,
+    # so here we only need to check the framework extension.
     if te_framework_installed:
         assert te_installed_via_pypi, "Could not find `transformer-engine` PyPI package."
         assert te_core_installed, ( "Could not find TE core package "
                                    f"`transformer-engine-{'rocm' if te_rocm_build else 'cu'}*`." )
 
-        assert version(module_name) == version("transformer-engine") == te_core_version, (
+        assert version(package_name) == te_core_version, (
             "Transformer Engine package version mismatch. Found"
-            f" {module_name} v{version(module_name)}, transformer-engine"
-            f" v{version('transformer-engine')}, and {te_core_package_name}"
+            f" {package_name} v{version(package_name)} and {te_core_package_name}"
             f" v{te_core_version}. Install transformer-engine using "
+            f"'pip3 install --no-build-isolation transformer-engine[{extra_dep_name}]==VERSION'"
+        )
+    else:
+        # If the framework extension package is not installed, it means that TE is either not
+        # installed via PyPI or it's an invalid installation with missing framework extension.
+        assert not te_installed_via_pypi, (
+            f"Found `transformer-engine` PyPI package but not {package_name}."
+            " Install transformer-engine using "
             f"'pip3 install --no-build-isolation transformer-engine[{extra_dep_name}]==VERSION'"
         )
 
@@ -206,14 +224,29 @@ def load_framework_extension(framework: str) -> None:
 def sanity_checks_for_pypi_installation() -> None:
     """Ensure that package is installed correctly if using PyPI."""
 
-    te_core_installed, te_core_package_name, te_core_version = get_te_core_package_info()
+    global te_rocm_build
+    te_core_installed, te_core_package_name, te_core_version = get_te_core_package_info(True)
+    _nv_core_installed, _nv_core_package_name, _nv_core_version = get_te_core_package_info(False)
+    if te_core_installed:
+        te_rocm_build = True
+        assert not _nv_core_installed, (
+            f"Multiple  core packages found: {te_core_package_name} and {_nv_core_package_name}."
+            " Please uninstall all `transformer-engine*` packages and reinstall the correct one."
+        )
+    elif _nv_core_installed:
+        te_rocm_build = False
+        te_core_installed, te_core_package_name, te_core_version = (
+            _nv_core_installed, _nv_core_package_name, _nv_core_version
+        )
     te_installed = _is_package_installed("transformer_engine")
     te_installed_via_pypi = _is_package_installed_from_wheel("transformer_engine")
 
-    assert te_installed, "Could not find `transformer-engine`."
+    # Meta package is optional for ROCm build.
+    if not te_rocm_build:
+        assert te_installed, "Could not find `transformer-engine`."
 
     # If the core package is installed via PyPI.
-    if te_core_installed:
+    if te_core_installed and te_installed:
         assert te_installed_via_pypi, "Could not find `transformer-engine` PyPI package."
         assert version("transformer-engine") == te_core_version, (
             "Transformer Engine package version mismatch. Found "
@@ -225,7 +258,10 @@ def sanity_checks_for_pypi_installation() -> None:
     elif te_installed_via_pypi:
         raise RuntimeError(
             "Found empty `transformer-engine` meta package installed. "
-            "Install `transformer-engine` with framework extensions via"
+            "Install `transformer-engine` with framework extensions via "
+            "'pip3 install --no-build-isolation transformer-engine[rocm_pytorch,rocm_jax]'"
+            " or 'pip3 install transformer-engine[rocm]' for the ROCm TE core lib only."
+            " Or if you are using CUDA, install with "
             "'pip3 install --no-build-isolation transformer-engine[pytorch,jax]==VERSION'"
             " or 'pip3 install transformer-engine[core]` for the TE core lib only. The `core_cu12`"
             " or `core_cu13` extra deps can be used to specify CUDA version for the TE core lib."
@@ -362,7 +398,7 @@ def _load_cuda_library(lib_name: str):
 
     raise RuntimeError(f"{lib_name} shared object not found.")
 
-te_rocm_build = False
+te_rocm_build = None
 
 @functools.cache
 def is_fp8_fnuz():
@@ -378,33 +414,40 @@ def _load_core_library():
 
 
 if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
-    try:
-        sanity_checks_for_pypi_installation()
+    sanity_checks_for_pypi_installation()
+    if not te_rocm_build:
+        try:
+            # `_load_cuda_library` is used for packages that must be loaded
+            # during runtime. Both system and pypi packages are searched
+            # and an error is thrown if not found.
+            _, _CUDNN_LIB_CTYPES = _load_cuda_library("cudnn")
+            system_nvrtc, _NVRTC_LIB_CTYPES = _load_cuda_library("nvrtc")
+            system_curand, _CURAND_LIB_CTYPES = _load_cuda_library("curand")
 
-        # `_load_cuda_library` is used for packages that must be loaded
-        # during runtime. Both system and pypi packages are searched
-        # and an error is thrown if not found.
-        _, _CUDNN_LIB_CTYPES = _load_cuda_library("cudnn")
-        system_nvrtc, _NVRTC_LIB_CTYPES = _load_cuda_library("nvrtc")
-        system_curand, _CURAND_LIB_CTYPES = _load_cuda_library("curand")
+            # This additional step is necessary to be able to install TE wheels
+            # and import TE (without any guards) in an environment where the cuda
+            # toolkit might be absent without being guarded
+            load_libs_for_no_ctk = not system_nvrtc and not system_curand
+            if load_libs_for_no_ctk:
+                _CUBLAS_LIB_CTYPES = _load_cuda_library_from_python("cublas", strict=True)
+                _CUDART_LIB_CTYPES = _load_cuda_library_from_python("cudart", strict=True)
+                _CUDNN_ALL_LIB_CTYPES = _load_cuda_library_from_python("cudnn", strict=True)
+        except (OSError, RuntimeError, subprocess.CalledProcessError):
+            pass
 
-        # This additional step is necessary to be able to install TE wheels
-        # and import TE (without any guards) in an environment where the cuda
-        # toolkit might be absent without being guarded
-        load_libs_for_no_ctk = not system_nvrtc and not system_curand
-        if load_libs_for_no_ctk:
-            _CUBLAS_LIB_CTYPES = _load_cuda_library_from_python("cublas", strict=True)
-            _CUDART_LIB_CTYPES = _load_cuda_library_from_python("cudart", strict=True)
-            _CUDNN_ALL_LIB_CTYPES = _load_cuda_library_from_python("cudnn", strict=True)
-    except (OSError, RuntimeError, subprocess.CalledProcessError):
-        pass
-    finally:
-        _TE_LIB_CTYPES = _load_core_library()
+    _TE_LIB_CTYPES = _load_core_library()
     try:
-        te_rocm_build = _TE_LIB_CTYPES.nvte_is_rocm_build()
+        _te_rocm_build = _TE_LIB_CTYPES.nvte_is_rocm_build()
     except AttributeError:
         # If the function is not available, we assume it's not a ROCm build
-        te_rocm_build = False
+        _te_rocm_build = False
+    if te_rocm_build is not None:
+        assert te_rocm_build == _te_rocm_build, (
+            f"ROCm build mismatch. Detected ROCm installation: {te_rocm_build},"
+            f" but library API returns: {_te_rocm_build}."
+        )
+    te_rocm_build = _te_rocm_build
+
     if te_rocm_build:
         try:
             # Get installed ROCm version

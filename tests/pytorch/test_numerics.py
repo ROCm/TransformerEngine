@@ -774,7 +774,7 @@ def test_gpt_full_activation_recompute(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if (IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 5), (12, 5))
         and dtype == torch.bfloat16 and not fp8 and not use_reentrant
-        and recipe.float8_per_tensor_scaling()
+        and recipe.float8_per_tensor_scaling() #PIV
         ):
         pytest.skip("hipBLASLt does not provide suitable algorithms for this config on this GPU.")
     if fp8 and recipe.nvfp4():
@@ -2233,6 +2233,14 @@ def test_grouped_linear_accuracy(
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize(
+    "fp8_model_params",
+    all_boolean if IS_HIP_EXTENSION else [False],
+)
+@pytest.mark.parametrize(
+    "recipe",
+    (fp8_recipes + [None]) if IS_HIP_EXTENSION else [None],
+)
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
 def test_grouped_linear_accuracy_cutlass(
@@ -2240,6 +2248,8 @@ def test_grouped_linear_accuracy_cutlass(
     num_gemms,
     bs,
     model,
+    recipe,
+    fp8_model_params,
     fuse_wgrad_accumulation,
     delay_wgrad_compute,
 ):
@@ -2249,8 +2259,8 @@ def test_grouped_linear_accuracy_cutlass(
         num_gemms,
         bs,
         model,
-        None,
-        False,
+        recipe,
+        fp8_model_params,
         fuse_wgrad_accumulation,
         False,
         delay_wgrad_compute,

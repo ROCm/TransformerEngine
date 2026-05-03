@@ -69,6 +69,11 @@ class MXFP4TensorStorage(QuantizedTensorStorage):
     _fp4_dtype: TE_DType
     _rowwise_scale_inv: torch.Tensor  # [M, K/32] uint8 E8M0
     _columnwise_scale_inv: torch.Tensor  # [K, M/32] uint8 E8M0
+    # Whether scaling factors are in the swizzled format expected by
+    # GEMM
+    _with_gemm_swizzled_scales: bool
+    _shuffle_rowwise_data: bool
+    _shuffle_columnwise_data: bool
 
     def __new__(
         cls,
@@ -77,7 +82,10 @@ class MXFP4TensorStorage(QuantizedTensorStorage):
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: torch.Tensor,
         fp4_dtype: TE_DType,
-        quantizer: Optional[Quantizer] = None,
+        quantizer: Optional[Quantizer],
+        with_gemm_swizzled_scales: bool = False,
+        shuffle_rowwise_data: bool = False,
+        shuffle_columnwise_data: bool = False,
         *args,
         **kwargs,
     ):
@@ -88,6 +96,9 @@ class MXFP4TensorStorage(QuantizedTensorStorage):
         instance._fp4_dtype = fp4_dtype
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
+        instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
+        instance._shuffle_rowwise_data = shuffle_rowwise_data
+        instance._shuffle_columnwise_data = shuffle_columnwise_data
 
         return instance
 
@@ -111,6 +122,9 @@ class MXFP4TensorStorage(QuantizedTensorStorage):
             "columnwise_scale_inv": self._columnwise_scale_inv,
             "fp4_dtype": self._fp4_dtype,
             "quantizer": self._quantizer,
+            "with_gemm_swizzled_scales": self._with_gemm_swizzled_scales,
+            "shuffle_rowwise_data": self._shuffle_rowwise_data,
+            "shuffle_columnwise_data": self._shuffle_columnwise_data,
         }
 
     def prepare_for_saving(self) -> Tuple[list[Optional[torch.Tensor]], MXFP4TensorStorage]:

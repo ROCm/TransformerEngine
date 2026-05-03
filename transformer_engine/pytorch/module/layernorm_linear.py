@@ -312,6 +312,11 @@ class _LayerNormLinear(torch.autograd.Function):
                 weight_quantizer = weight._quantizer
             elif weight_quantizer is not None:
                 weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and keep_fp8_weight_transpose_cache)
+                # NVFP4 must produce columnwise data at quantization time
+                # (no lazy transpose like Float8Tensor)
+                from ..tensor.nvfp4_tensor import NVFP4Quantizer
+                if isinstance(weight_quantizer, NVFP4Quantizer) and is_grad_enabled:
+                    weight_quantizer.set_usage(columnwise=True)
 
             # Get quantized weight
             update_workspace = is_first_microbatch is None or is_first_microbatch
@@ -369,7 +374,9 @@ class _LayerNormLinear(torch.autograd.Function):
         # Forward GEMM
         # Note: y = x * w^T
         # ------------------------------------------------------
-        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
+        # NVFP4TensorStorage doesn't have _transpose (no lazy transpose like Float8Tensor),
+        # so guard with hasattr.
+        if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache and hasattr(weightmat, '_transpose'):
             assert weightmat._transpose is None or weightmat._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
         nvtx_range_push(f"{nvtx_label}.gemm")
         gemm_out, *_, reduce_scatter_out = general_gemm(
@@ -1861,5 +1868,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
         weight_quantizer = self.quantizers["scaling_fwd"][tex.FP8FwdTensors.GEMM1_WEIGHT]
         weight_quantizer.internal = True
         if IS_HIP_EXTENSION:
-            weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
+            # NVFP4 must always produce columnwise data at quantization time
+            # (no lazy transpose like Float8Tensor), so force columnwise=True.
+            from ..tensor.nvfp4_tensor import NVFP4Quantizer
+            is_nvfp4 = isinstance(weight_quantizer, NVFP4Quantizer)
+            weight_quantizer.set_usage(columnwise=True if is_nvfp4 else self.keep_fp8_weight_transpose_cache)
         return [weight_quantizer]

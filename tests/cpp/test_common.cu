@@ -17,7 +17,9 @@
 #include <cmath>
 #include <string>
 
+#ifndef NVTE_ROCM_BENCHMARK
 #include <gtest/gtest.h>
+#endif
 #include <omp.h>
 
 #include <transformer_engine/transformer_engine.h>
@@ -28,9 +30,13 @@
 namespace test {
 
 size_t create_seed_from_tensor_name(const std::string& tensor_name) {
+#ifndef NVTE_ROCM_BENCHMARK
   auto full_name = std::string(testing::UnitTest::GetInstance()->current_test_info()->name()) +
                    "/" + tensor_name;
   return std::hash<std::string>{}(full_name);
+#else
+  return std::hash<std::string>{}(tensor_name);
+#endif
 }
 
 std::vector<DType> all_fp_types = {DType::kFloat32,
@@ -205,7 +211,8 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     return {ret_rowwise, ret_colwise};
   }
-  if (scaling_mode == NVTE_MXFP8_1D_SCALING) {
+#ifdef __HIP_PLATFORM_AMD__
+  if (scaling_mode == NVTE_MXFP4_1D_SCALING) {
     std::vector<size_t> shape_vec;
     for (size_t i = 0; i < shape.ndim; ++i) {
       shape_vec.push_back(shape.data[i]);
@@ -213,25 +220,29 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
     size_t first_dim = first_dimension(shape_vec);
     size_t last_dim = last_dimension(shape_vec);
 
+    NVTE_CHECK(last_dim % 32 == 0);
+    NVTE_CHECK(first_dim % 32 == 0);
+
     scale_inv_meta ret_rowwise, ret_colwise;
 
-    const size_t block_size_X_rowwise = 32;
-    size_t scale_dim_Y_rowwise = DIVUP_TO_MULTIPLE(first_dim, scale_tensor_alignment_Y_rowwise);
-    size_t scale_dim_X_rowwise = DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_size_X_rowwise), scale_tensor_alignment_X_rowwise);
-    ret_rowwise.shape = {scale_dim_Y_rowwise, scale_dim_X_rowwise};
+    constexpr size_t mxfp4_align_Y = mxfp4_scale_tensor_alignment_Y_rowwise;
+    constexpr size_t mxfp4_align_X = mxfp4_scale_tensor_alignment_X_rowwise;
+    size_t scale_dim_Y = DIVUP_TO_MULTIPLE(first_dim, mxfp4_align_Y);
+    size_t scale_dim_X = DIVUP_TO_MULTIPLE(DIVUP(last_dim, 32lu), mxfp4_align_X);
+    ret_rowwise.shape = {scale_dim_Y, scale_dim_X};
 
-    const size_t block_size_Y_colwise = 32;
-    size_t scale_dim_Y_colwise = DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_size_Y_colwise), scale_tensor_alignment_Y_colwise);
-    size_t scale_dim_X_colwise = DIVUP_TO_MULTIPLE(last_dim, scale_tensor_alignment_X_colwise);
-    ret_colwise.shape = {scale_dim_Y_colwise, scale_dim_X_colwise};
+    size_t scale_dim_Y_t = DIVUP_TO_MULTIPLE(last_dim, mxfp4_align_Y);
+    size_t scale_dim_X_t = DIVUP_TO_MULTIPLE(DIVUP(first_dim, 32lu), mxfp4_align_X);
+    ret_colwise.shape = {scale_dim_Y_t, scale_dim_X_t};
 
     ret_rowwise.type = DType::kFloat8E8M0;
-    ret_colwise.type = DType::kFloat8E8M0;
     ret_rowwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
+    ret_colwise.type = DType::kFloat8E8M0;
     ret_colwise.type_size_bits = typeToNumBits(DType::kFloat8E8M0);
 
     return {ret_rowwise, ret_colwise};
   }
+#endif
   if (scaling_mode == NVTE_BLOCK_SCALING_2D) {
     std::vector<size_t> shape_vec;
     for (size_t i = 0; i < shape.ndim; ++i) {
@@ -351,7 +362,12 @@ Tensor::Tensor(const std::string& name,
 
   // Set tensor row-wise data
   if (rowwise) {
-    const DType rowwise_type = (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat4E2M1 : type;
+    const bool is_fp4_scaling = (scaling_mode == NVTE_NVFP4_1D_SCALING)
+#ifdef __HIP_PLATFORM_AMD__
+      || (scaling_mode == NVTE_MXFP4_1D_SCALING)
+#endif
+      ;
+    const DType rowwise_type = is_fp4_scaling ? DType::kFloat4E2M1 : type;
     tensor_.set_rowwise_data(dptr_rowwise, rowwise_type, shape);
   }
 
@@ -373,7 +389,11 @@ Tensor::Tensor(const std::string& name,
       break;
     }
     case NVTE_MXFP8_1D_SCALING:
-    case NVTE_NVFP4_1D_SCALING: {
+    case NVTE_NVFP4_1D_SCALING:
+#ifdef __HIP_PLATFORM_AMD__
+    case NVTE_MXFP4_1D_SCALING:
+#endif
+    {
       // Column-wise data matches shape
       for (size_t i = 0; i < shape.ndim; ++i) {
         columnwise_shape_vec.emplace_back(shape.data[i]);
@@ -387,7 +407,12 @@ Tensor::Tensor(const std::string& name,
                                                   columnwise_shape_vec.size());
 
     // Set column-wise data buffer
-    const DType colwise_type = (scaling_mode == NVTE_NVFP4_1D_SCALING) ? DType::kFloat4E2M1 : type;
+    const bool is_fp4_scaling = (scaling_mode == NVTE_NVFP4_1D_SCALING)
+#ifdef __HIP_PLATFORM_AMD__
+      || (scaling_mode == NVTE_MXFP4_1D_SCALING)
+#endif
+      ;
+    const DType colwise_type = is_fp4_scaling ? DType::kFloat4E2M1 : type;
     tensor_.set_columnwise_data(dptr_columnwise, colwise_type, columnwise_shape);
   }
 
@@ -639,6 +664,8 @@ std::vector<size_t> unravel(const size_t i, const NVTEShape &shape) {
   std::reverse(ret.begin(), ret.end());
   return ret;
 }
+
+#ifndef NVTE_ROCM_BENCHMARK
 
 void compareResults_sequential(const std::string &name, const Tensor &test,
                                const void *ref, const bool rowwise,
@@ -944,6 +971,7 @@ void compare_scaling_factors<fp8e4m3>(const std::string &name, const fp8e4m3 *te
                                       const double abs_tolerable_mismatches_limit,
                                       const double rel_tolerable_mismatches_limit);
 
+#endif  // NVTE_ROCM_BENCHMARK
 
 std::pair<double, double> getTolerances(const DType type) {
   switch(type) {
@@ -1245,17 +1273,30 @@ size_t last_dimension(const std::vector<size_t> &shape) {
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
                                             const size_t cols,
                                             const size_t block_size_rows,
-                                            const size_t block_size_cols) {
+                                            const size_t block_size_cols
+#ifdef __HIP_PLATFORM_AMD__
+                                            ,const NVTEScalingMode scaling_mode
+#endif
+                                          ) {
     const bool is_rowwise = (block_size_rows == 1)
                             && ((block_size_cols == 32) || (block_size_cols == 16));
 
 #ifdef __HIP_PLATFORM_AMD__
-    // On AMD, MXFP8 scales (block_size=32) are allocated unpadded to match
-    // TE's internal allocation (which avoids padding for hipBLASlt compatibility).
-    // NVFP4 scales (block_size=16) still require [128,4] padding for kernel indexing.
-    const bool needs_padding = (block_size_cols == 16 || block_size_rows == 16);
-    const size_t alignment_Y = needs_padding ? (is_rowwise ? nvfp4_scale_tensor_alignment_Y_rowwise : nvfp4_scale_tensor_alignment_Y_colwise) : 1;
-    const size_t alignment_X = needs_padding ? (is_rowwise ? nvfp4_scale_tensor_alignment_X_rowwise : nvfp4_scale_tensor_alignment_X_colwise) : 1;
+    size_t alignment_Y, alignment_X;
+    if (scaling_mode == NVTE_MXFP4_1D_SCALING) {
+      alignment_Y = is_rowwise ? mxfp4_scale_tensor_alignment_Y_rowwise
+                               : mxfp4_scale_tensor_alignment_Y_colwise;
+      alignment_X = is_rowwise ? mxfp4_scale_tensor_alignment_X_rowwise
+                               : mxfp4_scale_tensor_alignment_X_colwise;
+    } else if (scaling_mode == NVTE_NVFP4_1D_SCALING) {
+      alignment_Y = is_rowwise ? nvfp4_scale_tensor_alignment_Y_rowwise
+                               : nvfp4_scale_tensor_alignment_Y_colwise;
+      alignment_X = is_rowwise ? nvfp4_scale_tensor_alignment_X_rowwise
+                               : nvfp4_scale_tensor_alignment_X_colwise;
+    } else {
+      alignment_Y = 1;
+      alignment_X = 1;
+    }
 #else
     const size_t alignment_Y = is_rowwise
                                ? scale_tensor_alignment_Y_rowwise
@@ -1263,7 +1304,7 @@ std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
     const size_t alignment_X = is_rowwise
                                ? scale_tensor_alignment_X_rowwise
                                : scale_tensor_alignment_X_colwise;
-#endif
+#endif //#ifndef __HIP_PLATFORM_AMD__
 
     const size_t unpadded_blocks_Y = divide_round_up(rows, block_size_rows);
     const size_t unpadded_blocks_X = divide_round_up(cols, block_size_cols);
