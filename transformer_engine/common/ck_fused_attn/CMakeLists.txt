@@ -11,8 +11,16 @@ set(AITER_MHA_INSTALL_PREFIX "transformer_engine" CACHE STRING "aiter mha shared
 #Corresponding runtime check is in nvte_get_fused_attn_backend()
 list(FIND CMAKE_HIP_ARCHITECTURES "gfx1250" _gfx1250_idx)
 if(NOT _gfx1250_idx EQUAL -1)
-  message(WARNING "gfx1250 is not supported by AITER/CK fused attention; removing fromCMAKE_HIP_ARCHITECTURES for ck_fused_attn build.")
+  message(WARNING
+    "Removing unsupported gfx1250 from CMAKE_HIP_ARCHITECTURES for ck_fused_attn build.")
   list(REMOVE_ITEM CMAKE_HIP_ARCHITECTURES "gfx1250")
+  list(LENGTH CMAKE_HIP_ARCHITECTURES _hip_arch_count)
+  if(_hip_arch_count EQUAL 0)
+    message(FATAL_ERROR
+            "No supported architectures remain for the ck_fused_attn build. "
+            "Re-run the build with FUSED_ATTN_CK backend disabled.")
+  endif()
+  set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
 endif()
 set(__AITER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA/3rdparty/aiter")
 set(__CK_SOURCE_DIR "${__AITER_SOURCE_DIR}/3rdparty/composable_kernel")
@@ -117,11 +125,6 @@ add_library(ck_fused_attn SHARED ${ck_fused_attn_SOURCES})
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
 list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
     -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT})
-
-foreach(ARCH IN LISTS CMAKE_HIP_ARCHITECTURES)
-  list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS --offload-arch=${ARCH})
-endforeach()
-
 
 # Public QoLA headers ship alongside the .so libs in ${__AITER_MHA_PATH}/../include
 # (emitted by qola.cli build, or copied from the QoLA build dir above for the

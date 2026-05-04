@@ -106,7 +106,10 @@ if IS_HIP_EXTENSION and os.getenv("NVTE_FLASH_ATTN_AITER", "0") == "1":
             flash_attn_onekernel_backward as _flash_attn_varlen_bwd,
         )
     except ImportError as e:
-        pass
+        attn_log.fa_logger.warning(
+            "NVTE_FLASH_ATTN_AITER is set but AITER Triton is not available."
+            " Falling back to standalone FlashAttn if available"
+            )
     else:
         fa_utils.use_aiter_triton = True
         # Setup Flash attention utils

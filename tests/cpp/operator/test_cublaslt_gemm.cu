@@ -490,7 +490,6 @@ void performTest(const TestParams& params) {
 
   size_t workspace_size = 33554432;
 #ifdef __HIP_PLATFORM_AMD__
-  //TODO: gfx1250 WS size requirements
   if ((prop.major == 9 && prop.minor == 5) || prop.major >= 12) {
     workspace_size = 67108864;
   }

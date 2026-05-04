@@ -54,6 +54,9 @@ def is_mxfp8_supported():
 def is_nvfp4_supported():
     """Return if FP8 has hardware supported"""
     gpu_arch = get_device_compute_capability(0)
+    if is_hip_extension():
+        # only GFX12.5 machines support nvfp4
+        return False #TODO add gfx1250 (gpu_arch == 125) when ready
     return gpu_arch >= 100
 
 
