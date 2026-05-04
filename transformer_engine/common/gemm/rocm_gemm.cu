@@ -1282,11 +1282,7 @@ void hipblaslt_gemm(const Tensor *inputA,
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
       scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
     } else if ((is_block_scaling(inputA->scaling_mode) && is_block_scaling(inputB->scaling_mode))) {
-      if (cuda::sm_arch() == 125) {
-        scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT;
-      } else {
-        scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
-      }
+      scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
       NVTE_CHECK(!is_fp8_dtype(outputD->data.dtype), "FP8 output is not supported with block scaling mode.");
 #endif
     } else {
