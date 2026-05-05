@@ -99,34 +99,6 @@ __device__ __forceinline__ void bf16x4_to_float4(
 }
 
 // ============================================================================
-// WARP PRIMITIVES - AMD-Specific DPP/Swizzle Instructions
-// ============================================================================
-
-/*
- * ds_swizzle Instructions
- * -----------------------
- * These perform intra-wavefront data exchange without shared memory.
- * The offset parameter encodes the permutation pattern.
- *
- * Format: offset = (AND_mask << 10) | (OR_mask << 5) | XOR_mask
- *
- * Common patterns:
- *   - 0x041F: XOR with lane 1 (exchange with adjacent thread)
- *   - 0x081F: XOR with lane 2 (exchange 2 positions away)
- *   - 0x101F: XOR with lane 4 (exchange 4 positions away)
- *
- * Reference: AMD CDNA4 ISA, ds_swizzle_b32 (page 480)
- */
-
-__device__ __forceinline__ float ds_swizzle_xor1(float val) {
-    return __shfl_xor(val, 1);
-}
-
-__device__ __forceinline__ float ds_swizzle_xor2(float val) {
-    return __shfl_xor(val, 2);
-}
-
-// ============================================================================
 // REDUCTION OPERATIONS - Finding Maximum Absolute Value
 // ============================================================================
 
@@ -188,10 +160,10 @@ __device__ __forceinline__ void hadamard16_inplace(
     v3 = a1 - a3;
 
     // Stage 2: Cross-thread exchange (XOR 1) - combine pairs
-    float p0 = ds_swizzle_xor1(v0);
-    float p1 = ds_swizzle_xor1(v1);
-    float p2 = ds_swizzle_xor1(v2);
-    float p3 = ds_swizzle_xor1(v3);
+    float p0 = __shfl_xor(v0, 1);
+    float p1 = __shfl_xor(v1, 1);
+    float p2 = __shfl_xor(v2, 1);
+    float p3 = __shfl_xor(v3, 1);
 
     bool sign2 = (tid & 1);
     v0 = sign2 ? (p0 - v0) : (p0 + v0);
@@ -200,10 +172,10 @@ __device__ __forceinline__ void hadamard16_inplace(
     v3 = sign2 ? (p3 - v3) : (p3 + v3);
 
     // Stage 3: Cross-thread exchange (XOR 2) - final combination
-    p0 = ds_swizzle_xor2(v0);
-    p1 = ds_swizzle_xor2(v1);
-    p2 = ds_swizzle_xor2(v2);
-    p3 = ds_swizzle_xor2(v3);
+    p0 = __shfl_xor(v0, 2);
+    p1 = __shfl_xor(v1, 2);
+    p2 = __shfl_xor(v2, 2);
+    p3 = __shfl_xor(v3, 2);
 
     bool sign3 = (tid >> 1) & 1;
     float t0 = sign3 ? (p0 - v0) : (p0 + v0);
