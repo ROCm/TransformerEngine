@@ -171,6 +171,7 @@ jobs:
 
           pip install --no-deps "$TE_CORE_PKG"
           pip install ninja pybind11[global]
+          pip install --upgrade hypothesis setuptools
           pip install --no-build-isolation --no-deps "$TE_TORCH_PKG"
           pip install --no-build-isolation --no-deps "$TE_JAX_PKG"
           EOF
@@ -370,6 +371,7 @@ jobs:
 
           pip install --no-deps "$TE_CORE_PKG"
           pip install ninja pybind11[global]
+          pip install --upgrade hypothesis setuptools
           pip install --no-build-isolation --no-deps "$TE_FW_PKG"
           EOF
           )"
