@@ -102,6 +102,7 @@ def check_mxfp8_workspace(device: int, needed: int) -> None:
     ws = _workspace_cache.get(key)
     if ws is not None and ws.shape[0] >= needed:
         return
+    needed = max(needed, get_cublas_workspace_size_bytes())
     _workspace_cache[key] = torch.empty(needed, dtype=torch.uint8, device=device)
 
 
