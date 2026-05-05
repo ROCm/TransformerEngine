@@ -20,11 +20,8 @@ if IS_HIP_EXTENSION:
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
-<<<<<<< HEAD
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
-=======
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
->>>>>>> origin/dev
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
