@@ -8,8 +8,7 @@
         "<nvtx3/nvToolsExt.h>" : "<roctracer/roctx.h>",
         "cudaFuncSetAttribute(" : "hipFuncSetAttribute((const void*)",
         "__nv_bfloat162":"__hip_bfloat162",
-        "cuda::getCurrentCUDAStream" : "hip::getCurrentHIPStreamMasqueradingAsCUDA",
-        "cuda::CUDAGuard" : "hip::HIPGuardMasqueradingAsCUDA"
+        "cuda::getCurrentCUDAStream" : "hip::getCurrentHIPStreamMasqueradingAsCUDA"
  }
 }
 
