@@ -439,7 +439,7 @@ void mxfp8_data_transpose(const uint8_t *__restrict__ src, uint8_t *__restrict__
 // Scale transpose: [rows, cols] -> [cols, rows]
 constexpr int SC_TILE = 32;
 
-__global__ void transpose_mxfp8_scales(const uint8_t *__restrict__ src, uint8_t *__restrict__ dst, int rows, int cols) {
+__global__ void mxfp8_transpose_scales(const uint8_t *__restrict__ src, uint8_t *__restrict__ dst, int rows, int cols) {
     __shared__ uint8_t smem[SC_TILE][SC_TILE + 1];
     int bx = blockIdx.x * SC_TILE, by = blockIdx.y * SC_TILE;
     int tx = threadIdx.x % SC_TILE, ty = threadIdx.x / SC_TILE;
@@ -667,7 +667,7 @@ static bool mxfp8_gemm_nn(
         (const uint8_t *)A, a_tr, K, M);
 
     dim3 grid_sc((M + 31) / 32, (scale_K + 31) / 32);
-    transpose_mxfp8_scales<<<grid_sc, 256, 0, stream>>>(
+    mxfp8_transpose_scales<<<grid_sc, 256, 0, stream>>>(
         (const uint8_t *)scale_A, sa_tr, scale_K, M);
 
     launch_pack_scales(sa_tr, packed_sa, M, scale_K, k_iters, stream);
@@ -729,11 +729,11 @@ static bool mxfp8_gemm_nt(
         (const uint8_t *)B, b_tr, K, N);
 
     dim3 grid_sc_a((M + 31) / 32, (scale_K + 31) / 32);
-    transpose_mxfp8_scales<<<grid_sc_a, 256, 0, stream>>>(
+    mxfp8_transpose_scales<<<grid_sc_a, 256, 0, stream>>>(
         (const uint8_t *)scale_A, sa_tr, scale_K, M);
 
     dim3 grid_sc_b((N + 31) / 32, (scale_K + 31) / 32);
-    transpose_mxfp8_scales<<<grid_sc_b, 256, 0, stream>>>(
+    mxfp8_transpose_scales<<<grid_sc_b, 256, 0, stream>>>(
         (const uint8_t *)scale_B, sb_tr, scale_K, N);
 
     launch_pack_scales(sa_tr, packed_sa, M, scale_K, k_iters, stream);
@@ -748,18 +748,41 @@ static bool mxfp8_gemm_nt(
     return true;
 }
 
-// NVTEDType constants used for dtype dispatch
-constexpr int DTYPE_FP16  = 5;
-constexpr int DTYPE_BF16  = 6;
-constexpr int DTYPE_FP8E5 = 8;
+constexpr size_t kMXFP8GroupSize = 32;
+constexpr size_t kKTileSize      = 128;
+constexpr size_t kAlignment      = 256;
+
+size_t kittens_mxfp8_workspace_bytes(int M, int N, int K, bool transa, bool transb) {
+    size_t workspace_bytes = 0;
+
+    size_t k_iters = K / kKTileSize;
+    size_t scale_K = K / kMXFP8GroupSize;
+    size_t sa_pk   = align_up(k_iters * M * 4, kAlignment);
+    size_t sb_pk   = k_iters * N * 4;
+
+    if (transa && !transb) {
+        workspace_bytes = align_up(sa_pk, kAlignment) + sb_pk;
+    } else if (!transa && !transb) {
+        workspace_bytes = align_up((size_t)M * K, kAlignment)
+                        + align_up((size_t)M * scale_K, kAlignment)
+                        + align_up(sa_pk, kAlignment) + sb_pk;
+    } else if (!transa && transb) {
+        workspace_bytes = align_up((size_t)M * K, kAlignment)
+                        + align_up((size_t)N * K, kAlignment)
+                        + align_up((size_t)M * scale_K, kAlignment)
+                        + align_up((size_t)N * scale_K, kAlignment)
+                        + align_up(sa_pk, kAlignment) + sb_pk;
+    }
+    return workspace_bytes;
+}
 
 static int fp8_code(int dt) {
-    return (dt == DTYPE_FP8E5) ? 1 : 0;
+    return (dt == KITTENS_FP8E5M2) ? 1 : 0;
 }
 
 static int out_code(int dt) {
-    if (dt == DTYPE_BF16) { return 1; }
-    if (dt == DTYPE_FP16) { return 2; }
+    if (dt == KITTENS_BFLOAT16) { return 1; }
+    if (dt == KITTENS_FLOAT16)  { return 2; }
     return 0;
 }
 

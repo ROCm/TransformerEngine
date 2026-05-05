@@ -26,6 +26,7 @@
 #include <cstdint>
 
 #include "../common.h"
+#include "../util/cuda_runtime.h"
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
 
@@ -1561,13 +1562,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   }
 
 #ifdef USE_HIPKITTENS_GEMM
-  static bool is_gfx950 = false;
-  static std::once_flag gfx950_flag;
-  std::call_once(gfx950_flag, [&]() {
-    hipDeviceProp_t prop;
-    hipGetDeviceProperties(&prop, 0);
-    is_gfx950 = (prop.major == 9 && prop.minor == 5);
-  });
+  bool is_gfx950 = (cuda::sm_arch() == 95);
 
   bool force_hipblaslt = false;
   if (const char *env_p = std::getenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8")) {

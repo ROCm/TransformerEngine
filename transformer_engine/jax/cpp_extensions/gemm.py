@@ -32,6 +32,8 @@ if not is_hip_extension():
         initialize_cgemm_communicator,
         get_cgemm_num_max_streams,
     )
+else:
+    from transformer_engine_jax import kittens_mxfp8_workspace_bytes
 
 from .base import BasePrimitive, register_primitive
 from .quantization import grouped_quantize
@@ -86,29 +88,9 @@ num_cublas_streams = get_num_compute_streams()
 
 def _hipkittens_workspace_bytes(m: int, n: int, k: int, layout: str) -> int:
     """Compute workspace bytes needed for HipKittens MXFP8 GEMM."""
-    k_iters = k // 128
-    scale_k = k // 32
-    align   = 256
-
-    def _align(x):
-        return (x + align - 1) & ~(align - 1)
-
-    sa_pk = _align(k_iters * m * 4)
-    sb_pk = k_iters * n * 4
-
-    if layout == "TN":
-        return _align(sa_pk) + sb_pk
-    elif layout == "NN":
-        a_tr  = _align(m * k)
-        sa_tr = _align(m * scale_k)
-        return a_tr + sa_tr + _align(sa_pk) + sb_pk
-    elif layout == "NT":
-        a_tr  = _align(m * k)
-        b_tr  = _align(n * k)
-        sa_tr = _align(m * scale_k)
-        sb_tr = _align(n * scale_k)
-        return a_tr + b_tr + sa_tr + sb_tr + _align(sa_pk) + sb_pk
-    return 0
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+    return kittens_mxfp8_workspace_bytes(m, n, k, transa, transb)
 
 
 def get_cublas_workspace_size_bytes() -> None:

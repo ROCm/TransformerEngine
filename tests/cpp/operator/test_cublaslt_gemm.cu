@@ -170,18 +170,17 @@ __global__ void compute_ref_kernel(
 }
 
 
-static size_t align256(size_t x) {
-  return (x + 255) & ~(size_t)255;
-}
+constexpr size_t kMXFP8GroupSize = 32;
+constexpr size_t kKTileSize      = 128;
 
 static size_t compute_mxfp8_workspace_size(size_t m, size_t k, size_t n, bool transa, bool transb, size_t base_size) {
-  size_t k_iters = k / 128;
-  size_t scale_k = k / 32;
-  size_t sa_pk   = align256(k_iters * m * 4);
+  size_t k_iters = k / kKTileSize;
+  size_t scale_k = k / kMXFP8GroupSize;
+  size_t sa_pk   = round_up_to_nearest_multiple(k_iters * m * 4, 256);
   size_t sb_pk   = k_iters * n * 4;
-  size_t needed  = align256(sa_pk) + sb_pk;
-  if (!transa) needed += align256(m * k) + align256(m * scale_k) + align256(sa_pk);
-  if (transb)  needed += align256(n * k) + align256(n * scale_k) + align256(sb_pk);
+  size_t needed  = round_up_to_nearest_multiple(sa_pk, 256) + sb_pk;
+  if (!transa) needed += round_up_to_nearest_multiple(m * k, 256) + round_up_to_nearest_multiple(m * scale_k, 256) + round_up_to_nearest_multiple(sa_pk, 256);
+  if (transb)  needed += round_up_to_nearest_multiple(n * k, 256) + round_up_to_nearest_multiple(n * scale_k, 256) + round_up_to_nearest_multiple(sb_pk, 256);
   return std::max(base_size, needed);
 }
 
@@ -373,7 +372,7 @@ void performTest(const TestParams& params) {
       GTEST_SKIP() << "MXFP8 requires K to be a multiple of 128";
     }
     if (!params.force_hipblaslt && (params.m % 256 || params.n % 256 || params.k < 256)) {
-      GTEST_SKIP() << "HipKittens requires (M%256, N%256, K>=256)";
+      GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
     }
   }
 
@@ -605,7 +604,7 @@ void performDqTest(const TestParams &params) {
     GTEST_SKIP() << "DqGEMMTestSuite does not yet have reference for bias/gelu epilogues";
   }
   if (!params.force_hipblaslt && (params.m % 256 || params.n % 256 || params.k % 128 || params.k < 256)) {
-    GTEST_SKIP() << "HipKittens requires (M%256, N%256, K>=256)";
+    GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
   }
 
   DType ref_type = dtype;

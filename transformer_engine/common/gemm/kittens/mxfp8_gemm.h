@@ -8,8 +8,23 @@
 #include <hip/hip_runtime.h>
 #include <cstddef>
 
-// dtype codes match NVTEDType values:
-//   4 = float32, 5 = float16, 6 = bfloat16, 7 = fp8e4m3, 8 = fp8e5m2
+enum KittensDType {
+    KITTENS_FLOAT32  = 4,
+    KITTENS_FLOAT16  = 5,
+    KITTENS_BFLOAT16 = 6,
+    KITTENS_FP8E4M3  = 7,
+    KITTENS_FP8E5M2  = 8,
+};
+
+// Workspace sizing (all sub-allocations 256-byte aligned):
+//   k_iters = K / 128,  scale_K = K / 32
+//   TN:  k_iters*M*4  + k_iters*N*4
+//   NN:  M*K + M*scale_K + k_iters*M*4 + k_iters*N*4
+//   NT:  M*K + N*K + M*scale_K + N*scale_K + k_iters*M*4 + k_iters*N*4
+// Returns false if workspace_size is insufficient.
+
+size_t kittens_mxfp8_workspace_bytes(
+    int M, int N, int K, bool transa, bool transb);
 
 bool kittens_mxfp8_gemm(
     const void *A, const void *B, void *C,
