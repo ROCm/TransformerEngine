@@ -68,6 +68,7 @@ run_test_config(){
     run_default_fa 3 test_sanity_hipified_cast_transpose.py
     run_default_fa 1 test_sanity_import.py
     run_default_fa 1 attention/test_attention.py # Backend selection is controlled by the test
+    NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 attention/test_attention.py -k "test_deterministic_bwd_ck"
     run_default_fa 1 attention/test_cp_utils.py
     run_default_fa 1 attention/test_kv_cache.py
     run_default_fa 1 triton_kernels/test_cast.py
@@ -86,8 +87,8 @@ run_test_config(){
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_numerics.py
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_fusible_ops.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 triton_kernels/test_cast.py
-
     run_default_fa 1 nvfp4/
+    run_default_fa 1 mxfp4/
 }
 
 run_test_config_mgpu(){

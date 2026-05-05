@@ -540,8 +540,13 @@ void performTest(float (*OP)(const float),
 
     // Use get_scale_tensor_dims for NVFP4 scale tensor dimensions
     // Now that CheckScaleTensorShape is fixed, this should work correctly
+#ifdef __HIP_PLATFORM_AMD__
+    const std::array<size_t,4> scale_dims = get_scale_tensor_dims(rows, cols, 1, 16, NVTE_NVFP4_1D_SCALING);
+    const std::array<size_t,4> scale_dims_t = get_scale_tensor_dims(cols, rows, 1, 16, NVTE_NVFP4_1D_SCALING);
+#else
     const std::array<size_t,4> scale_dims = get_scale_tensor_dims(rows, cols, 1, 16);
     const std::array<size_t,4> scale_dims_t = get_scale_tensor_dims(cols, rows, 1, 16);
+#endif //#ifdef __HIP_PLATFORM_AMD__
 
     const size_t unpadded_blocks_Y = scale_dims[0];
     const size_t unpadded_blocks_X = scale_dims[1];
