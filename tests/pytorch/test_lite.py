@@ -3745,6 +3745,203 @@ class TestRecipeIntegration:
 
 
 # ---------------------------------------------------------------------------
+# Per-row FP8 (CurrentScaling) end-to-end integration
+#
+# Exercises the per-row dispatch chain a full Linear/LayerNormLinear under
+# Float8CurrentScaling:
+#   Fwd:  fused RMSNorm + dynamic_per_token_quant -> gemm_a8w8_per_token_scale
+#   Bwd:  dynamic_per_token_quant_fp8_i8(dY)      -> gemm_a8w8_per_token_scale (dgrad)
+#                                                    gemm_a8w8 per-tensor (wgrad fallback)
+#
+# Asserts that the fused/per-row AITER kernels actually fire (catches silent
+# fallback to per-tensor) and that fwd+bwd numerics stay close to a BF16
+# reference at FP8-appropriate tolerances.
+# ---------------------------------------------------------------------------
+
+def _aiter_per_row_kernels_available():
+    """All three AITER kernels needed by the per-row CurrentScaling path."""
+    try:
+        from aiter.ops.triton.rmsnorm import rmsnorm2d_fwd_with_dynamicquant  # noqa: F401
+        from aiter.ops.triton.quant import dynamic_per_token_quant_fp8_i8  # noqa: F401
+        from aiter.ops.triton.gemm_a8w8_per_token_scale import (  # noqa: F401
+            gemm_a8w8_per_token_scale,
+        )
+        return True
+    except (ImportError, AttributeError):
+        return False
+
+
+class TestLitePerRowFP8:
+    """End-to-end tests for the per-row FP8 (CurrentScaling) training path."""
+
+    DTYPE = torch.bfloat16
+    M = 64    # tokens (rows) — must be divisible by 8 for FP8 alignment
+    K = 256   # in_features
+    N = 128   # out_features
+
+    @pytest.fixture(autouse=True)
+    def _reset_fp8_state(self):
+        yield
+        FP8GlobalStateManager.reset()
+
+    @pytest.fixture
+    def per_row_counts(self, monkeypatch):
+        """Wrap the two AITER per-row kernel module-attrs with counters.
+
+        Triggers the lazy loaders first so the originals are present, then
+        monkeypatches the module globals. The dispatch sites read these as
+        module-level names, so wrapping the attr is enough to intercept.
+        """
+        if not _aiter_per_row_kernels_available():
+            pytest.skip("AITER per-row kernels not available")
+
+        # `_lite.quantize` is shadowed in the package namespace by the
+        # re-exported `quantize` function, so even `import a.b.c as x`
+        # resolves to the function via attribute lookup. Pull from sys.modules
+        # to get the actual submodule object.
+        import sys
+        import transformer_engine.pytorch._lite.norms  # noqa: F401
+        import transformer_engine.pytorch._lite.quantize  # noqa: F401
+        _ln = sys.modules["transformer_engine.pytorch._lite.norms"]
+        _qz = sys.modules["transformer_engine.pytorch._lite.quantize"]
+
+        _ln._try_load_aiter_norms()
+        _qz._try_load_aiter_quant()
+
+        if _ln._aiter_fused_rms_dynamic_quant is None:
+            pytest.skip("rmsnorm2d_fwd_with_dynamicquant not loaded")
+        if _qz._aiter_dynamic_per_token_quant is None:
+            pytest.skip("dynamic_per_token_quant_fp8_i8 not loaded")
+
+        counts = {"fused_rms_quant": 0, "dyn_per_token_quant": 0}
+        orig_rms = _ln._aiter_fused_rms_dynamic_quant
+        orig_dyn = _qz._aiter_dynamic_per_token_quant
+
+        def rms_wrap(*args, **kwargs):
+            counts["fused_rms_quant"] += 1
+            return orig_rms(*args, **kwargs)
+
+        def dyn_wrap(*args, **kwargs):
+            counts["dyn_per_token_quant"] += 1
+            return orig_dyn(*args, **kwargs)
+
+        monkeypatch.setattr(_ln, "_aiter_fused_rms_dynamic_quant", rms_wrap)
+        monkeypatch.setattr(_qz, "_aiter_dynamic_per_token_quant", dyn_wrap)
+        return counts
+
+    def _make_module(self, device):
+        return te.LayerNormLinear(
+            self.K, self.N, bias=True, normalization="RMSNorm",
+        ).to(dtype=self.DTYPE, device=device)
+
+    def _recipe(self):
+        return recipe.Float8CurrentScaling()
+
+    def test_fwd_dispatches_per_row(self, device, per_row_counts):
+        """Fwd through LayerNormLinear under CurrentScaling routes the input
+        through the fused RMSNorm + per-row dynamic FP8 quantize kernel."""
+        torch.manual_seed(0)
+        mod = self._make_module(device)
+        x = torch.randn(self.M, self.K, device=device, dtype=self.DTYPE)
+
+        with te.autocast(enabled=True, recipe=self._recipe()):
+            y = mod(x)
+
+        assert y.shape == (self.M, self.N)
+        assert per_row_counts["fused_rms_quant"] >= 1, (
+            "fused RMSNorm + per-row quant kernel did not fire — "
+            "dispatch fell back to a non-fused path. "
+            f"counts={per_row_counts}"
+        )
+
+    def test_bwd_dispatches_per_row(self, device, per_row_counts):
+        """Bwd quantizes dY via the per-row dynamic quant kernel."""
+        torch.manual_seed(0)
+        mod = self._make_module(device)
+        x = torch.randn(
+            self.M, self.K, device=device, dtype=self.DTYPE, requires_grad=True,
+        )
+
+        with te.autocast(enabled=True, recipe=self._recipe()):
+            y = mod(x)
+        y.sum().backward()
+
+        assert x.grad is not None and x.grad.shape == x.shape
+        assert mod.weight.grad is not None
+        assert mod.layer_norm_weight.grad is not None
+        assert mod.bias.grad is not None
+        assert per_row_counts["dyn_per_token_quant"] >= 1, (
+            "per-row dY quant kernel did not fire on backward; "
+            f"counts={per_row_counts}"
+        )
+
+    def test_numerics_vs_bf16(self, device, per_row_counts):
+        """Per-row FP8 fwd+bwd stay within FP8-appropriate tolerance of the
+        same module run in BF16. Tolerances are relative-to-RMS so they don't
+        spuriously pass on near-zero outputs."""
+        torch.manual_seed(0)
+        mod_fp8 = self._make_module(device)
+        mod_bf16 = self._make_module(device)
+        with torch.no_grad():
+            mod_bf16.weight.copy_(mod_fp8.weight)
+            mod_bf16.layer_norm_weight.copy_(mod_fp8.layer_norm_weight)
+            if (hasattr(mod_bf16, "layer_norm_bias")
+                    and mod_bf16.layer_norm_bias is not None):
+                mod_bf16.layer_norm_bias.copy_(mod_fp8.layer_norm_bias)
+            mod_bf16.bias.copy_(mod_fp8.bias)
+
+        x = torch.randn(self.M, self.K, device=device, dtype=self.DTYPE)
+        x_fp8 = x.clone().requires_grad_(True)
+        x_bf16 = x.clone().requires_grad_(True)
+
+        with te.autocast(enabled=True, recipe=self._recipe()):
+            y_fp8 = mod_fp8(x_fp8)
+        y_fp8.sum().backward()
+
+        y_bf16 = mod_bf16(x_bf16)
+        y_bf16.sum().backward()
+
+        def _cos(out, ref):
+            o = out.float().flatten()
+            r = ref.float().flatten()
+            return F.cosine_similarity(o, r, dim=0).item()
+
+        def _rel_rms(out, ref):
+            ref_rms = ref.float().pow(2).mean().sqrt().item() + 1e-8
+            err_rms = (out.float() - ref.float()).pow(2).mean().sqrt().item()
+            return err_rms / ref_rms
+
+        # Direction (cosine) catches drift; rel-RMS catches scale drift.
+        # Max-abs would be dominated by individual E4M3 outliers (~6%
+        # quantization step) that don't reflect tensor-level correctness.
+        for name, out, ref in (
+            ("fwd",        y_fp8,                y_bf16),
+            ("x.grad",     x_fp8.grad,           x_bf16.grad),
+            ("weight.grad", mod_fp8.weight.grad, mod_bf16.weight.grad),
+        ):
+            cos = _cos(out, ref)
+            err = _rel_rms(out, ref)
+            # 0.99 cosine, 5% rel-RMS — within FP8/per-row budget for a single
+            # LayerNormLinear at K=256. weight.grad uses per-tensor fallback
+            # (per-row scales lie on the reduction axis for dW) so its budget
+            # is looser.
+            # Per-tensor wgrad fallback gets the loosest budget; x.grad
+            # compounds dY quant + weight quant so it's looser than fwd.
+            if name == "weight.grad":
+                cos_min, err_max = 0.95, 0.15
+            elif name == "x.grad":
+                cos_min, err_max = 0.99, 0.08
+            else:
+                cos_min, err_max = 0.99, 0.05
+            assert cos > cos_min, f"{name}: cos {cos:.4f} < {cos_min}"
+            assert err < err_max, f"{name}: rel-RMS {err:.4f} > {err_max}"
+
+        # Confirm both per-row paths actually fired (not silent fallback).
+        assert per_row_counts["fused_rms_quant"] >= 1
+        assert per_row_counts["dyn_per_token_quant"] >= 1
+
+
+# ---------------------------------------------------------------------------
 # API contract tests — verify lite exposes the symbols the full TE does,
 # with compatible constructor signatures. Catches cases like "accepted kwarg
 # but silently dropped it" (the return_bias bug we just fixed).
