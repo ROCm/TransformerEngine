@@ -166,6 +166,7 @@ __device__ __forceinline__ void ReduceMax(const float pre_rht_amax, const float 
     }
   }
 }
+#endif
 
 __launch_bounds__(1) __global__ void ZeroAmaxKernel(float* __restrict__ output_pre_rht_amax_ptr,
                                                     float* __restrict__ output_identity_amax_ptr,
@@ -181,6 +182,7 @@ __launch_bounds__(1) __global__ void ZeroAmaxKernel(float* __restrict__ output_p
   }
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 template <typename IType, int kHadamardDimension, int CHUNK_DIM_Y, int CHUNK_DIM_X, int BUFF_DIM_Y,
           int BUFF_DIM_X, int THREADS_PER_CHUNK, int THREADS_PER_Y, bool kReturnPreRhtAmax,
           bool kReturnIdentityAmax, bool kReturnTransposedAmax>
@@ -978,15 +980,8 @@ void hadamard_transform_amax(const Tensor& input_, Tensor& output_, uint16_t ran
 
   auto* in_ptr = reinterpret_cast<const __hip_bfloat16*>(input.dptr);
 
-  if (pre_amax_ptr) {
-    NVTE_CHECK_CUDA(cudaMemsetAsync(pre_amax_ptr, 0, sizeof(float), stream));
-  }
-  if (id_amax_ptr) {
-    NVTE_CHECK_CUDA(cudaMemsetAsync(id_amax_ptr, 0, sizeof(float), stream));
-  }
-  if (tr_amax_ptr) {
-    NVTE_CHECK_CUDA(cudaMemsetAsync(tr_amax_ptr, 0, sizeof(float), stream));
-  }
+  ZeroAmaxKernel<<<1, 1, 0, stream>>>(pre_amax_ptr, id_amax_ptr, tr_amax_ptr);
+  NVTE_CHECK_CUDA(cudaGetLastError());
 #else
   constexpr int kHadamardDimension = 16;
   NVTE_CHECK(row_length % kHadamardDimension == 0,

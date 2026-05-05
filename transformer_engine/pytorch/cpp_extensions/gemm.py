@@ -20,7 +20,11 @@ if IS_HIP_EXTENSION:
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+<<<<<<< HEAD
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+=======
+from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
+>>>>>>> origin/dev
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
@@ -330,6 +334,24 @@ def general_gemm(
         check_mxfp8_workspace(get_tensor_device(A), needed)
 
     workspace = get_cublas_workspace(get_tensor_device(A), ub is not None, False)
+
+    # On ROCm, FP4 is dequantized to BF16 in the workspace before GEMM.
+    # Compute the required extra space and extend the workspace if needed.
+    if IS_HIP_EXTENSION and (
+        isinstance(A, NVFP4TensorStorage) or isinstance(B, NVFP4TensorStorage)
+    ):
+        assert ub is None, "User buffers (comm overlap) are not supported with NVFP4"
+        import math
+        bf16_size = torch.bfloat16.itemsize
+        fp4_extra = 0
+        if isinstance(A, NVFP4TensorStorage):
+            fp4_extra += math.prod(A.size()) * bf16_size
+            fp4_extra += A.size(0) * 4  # alpha vector (m floats)
+        if isinstance(B, NVFP4TensorStorage):
+            fp4_extra += math.prod(B.size()) * bf16_size
+        total_needed = fp4_extra + get_cublas_workspace_size_bytes()
+        if workspace.numel() < total_needed:
+            workspace = torch.empty(total_needed, dtype=torch.uint8, device=workspace.device)
 
     if ub_type is not None:
         assert ub is not None, (
