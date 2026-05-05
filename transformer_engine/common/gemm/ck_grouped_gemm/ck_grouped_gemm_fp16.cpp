@@ -41,8 +41,11 @@ struct TileCfg_256x128x64 : TileCfg_256x256x64 {
   static constexpr ck_tile::index_t N_Tile = 128;
 };
 
-struct TileCfg_256x128x64_padding : TileCfg_256x128x64 {
-  static constexpr bool kPadN = true;
+template <typename Base, bool PadM_, bool PadN_, bool PadK_>
+struct WithPadding : Base {
+  static constexpr bool kPadM = PadM_;
+  static constexpr bool kPadN = PadN_;
+  static constexpr bool kPadK = PadK_;
 };
 
 template <typename AType,
@@ -196,7 +199,7 @@ class GroupedGemmRunner : public RunnerInterface {
   }
 };
 
-#define MAKE_RUNNER(TileCfg_)                                          \
+#define MAKE_RUNNER(BaseCfg_, kPadM_, kPadN_, kPadK_)                  \
   TRANSFORMER_ENGINE_SWITCH_CONDITION(ctx.accumulate, accum_option, {  \
     using Runner = GroupedGemmRunner<AType,                            \
                                      BType,                            \
@@ -204,7 +207,7 @@ class GroupedGemmRunner : public RunnerInterface {
                                      ALayout,                          \
                                      BLayout,                          \
                                      CLayout,                          \
-                                     TileCfg_,                         \
+                                     WithPadding<BaseCfg_, kPadM_, kPadN_, kPadK_>, \
                                      accum_option>;                    \
     runner = std::make_unique<Runner>();                               \
   })
@@ -215,6 +218,37 @@ bool ck_tile_grouped_gemm_fp16_dispatch(DType a_dtype,
                                         const GroupedGemmRunContext& ctx) {
   const ck_tile::stream_config s{ctx.stream};
   std::unique_ptr<RunnerInterface> runner = nullptr;
+
+  // Check M and K alignment across all groups.
+  // All tile configs share the same M_Tile (256) and K_Tile (64).
+  constexpr ck_tile::index_t M_Tile = TileCfg_256x256x64::M_Tile;
+  constexpr ck_tile::index_t K_Tile = TileCfg_256x256x64::K_Tile;
+
+  bool need_m_pad = false;
+  bool need_k_pad = false;
+
+  for (int i = 0; i < ctx.group_num; ++i) {
+    const transformer_engine::Tensor* A_te =
+        transformer_engine::convertNVTETensorCheck(ctx.A[i]);
+    int64_t Ad0 = 0, Ad1 = 0;
+    if (get_flat_2d_dims(*A_te, Ad0, Ad1)) {
+      const int64_t M = ctx.transA ? Ad1 : Ad0;
+      const int64_t K = ctx.transA ? Ad0 : Ad1;
+
+      if (M % M_Tile != 0)
+        need_m_pad = true;
+      if (K % K_Tile != 0)
+        need_k_pad = true;
+      if (need_m_pad && need_k_pad)
+        break;
+    }
+  }
+
+  // CK tile kernel produces incorrect results with kPadK + ColMajor B.
+  // Fall back to cuBLAS for this combination.
+  if (need_k_pad && ctx.transB) {
+    return false;
+  }
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(ctx.transA, kTransA, {
     using ALayout = std::conditional_t<kTransA, ColMajor, RowMajor>;
@@ -230,13 +264,17 @@ bool ck_tile_grouped_gemm_fp16_dispatch(DType a_dtype,
         TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(d_dtype, d_te_type, {
           using CType = typename TETypeToCKType<d_te_type>::type;
 
-          if (ctx.N % 256 == 0) {
-            MAKE_RUNNER(TileCfg_256x256x64);
-          } else if (ctx.N % 128 == 0) {
-            MAKE_RUNNER(TileCfg_256x128x64);
-          } else {
-            MAKE_RUNNER(TileCfg_256x128x64_padding);
-          }
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(need_m_pad, kPadM, {
+            TRANSFORMER_ENGINE_SWITCH_CONDITION(need_k_pad, kPadK, {
+              if (ctx.N % 256 == 0) {
+                MAKE_RUNNER(TileCfg_256x256x64, kPadM, false, kPadK);
+              } else if (ctx.N % 128 == 0) {
+                MAKE_RUNNER(TileCfg_256x128x64, kPadM, false, kPadK);
+              } else {
+                MAKE_RUNNER(TileCfg_256x128x64, kPadM, true, kPadK);
+              }
+            });
+          });
         });
       });
     });
