@@ -299,7 +299,11 @@ __forceinline__ __device__ int binary_search(int32_t target, const int32_t *arra
   return left - 1;
 }
 
+#if !defined(__HIP_DEVICE_COMPILE__) || defined(__gfx1250__)
 constexpr int THREADS_PER_WAVEFRONT = 32;
+#else
+constexpr int THREADS_PER_WAVEFRONT = 64;
+#endif
 // Direction for pad_remap / pad_remap_lse:
 //   Remove: padded -> unpadded
 //   Add   : unpadded -> padded
@@ -365,7 +369,7 @@ void pad_remap(
   constexpr int THREADS_PER_BLOCK = 256;
   // parallel over h*d dimension
   dim3 block(THREADS_PER_BLOCK);
-  dim3 grid(ceil(1.0 * max_tokens * THREADS_PER_WAVEFRONT/THREADS_PER_BLOCK));
+  dim3 grid(ceil(1.0 * max_tokens * cuda::warp_size()/THREADS_PER_BLOCK));
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, DataType,
     if(is_ragged){
@@ -443,7 +447,7 @@ void pad_remap_lse(
 
   constexpr int THREADS_PER_BLOCK = 256;
   dim3 block(THREADS_PER_BLOCK);
-  dim3 grid(ceil(1.0 * max_tokens_q * THREADS_PER_WAVEFRONT/THREADS_PER_BLOCK));
+  dim3 grid(ceil(1.0 * max_tokens_q * cuda::warp_size()/THREADS_PER_BLOCK));
   if(is_ragged){
     pad_remap_lse_kernel<true, dir><<<grid, block, 0, stream>>>(
       b, h, s_q, max_tokens_q,
