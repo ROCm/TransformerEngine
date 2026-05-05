@@ -119,23 +119,11 @@ __device__ __forceinline__ void bf16x4_to_float4(
  */
 
 __device__ __forceinline__ float ds_swizzle_xor1(float val) {
-    float result;
-    asm volatile(
-        "ds_swizzle_b32 %0, %1 offset:0x041F\n\t"
-        "s_waitcnt lgkmcnt(0)"
-        : "=v"(result) : "v"(val)
-    );
-    return result;
+    return __shfl_xor(val, 1);
 }
 
 __device__ __forceinline__ float ds_swizzle_xor2(float val) {
-    float result;
-    asm volatile(
-        "ds_swizzle_b32 %0, %1 offset:0x081F\n\t"
-        "s_waitcnt lgkmcnt(0)"
-        : "=v"(result) : "v"(val)
-    );
-    return result;
+    return __shfl_xor(val, 2);
 }
 
 // ============================================================================
@@ -154,25 +142,14 @@ __device__ __forceinline__ float ds_swizzle_xor2(float val) {
  *   Step 3: XOR 1 - reduce 2 values to 1 (thread 0)
  */
 __device__ __forceinline__ float warp_reduce_max_8_dpp(float val) {
-    uint32_t v = float_as_uint(val);
-    uint32_t tmp;
-
     // Step 1: Exchange with thread 4 positions away
-    asm volatile("ds_swizzle_b32 %0, %1 offset:0x101F" : "=v"(tmp) : "v"(v));
-    asm volatile("s_waitcnt lgkmcnt(0)" :::);
-    val = fmaxf(val, uint_as_float(tmp));
-    v = float_as_uint(val);
+    val = fmaxf(val, __shfl_xor(val, 4));
 
     // Step 2: Exchange with thread 2 positions away
-    asm volatile("ds_swizzle_b32 %0, %1 offset:0x081F" : "=v"(tmp) : "v"(v));
-    asm volatile("s_waitcnt lgkmcnt(0)" :::);
-    val = fmaxf(val, uint_as_float(tmp));
-    v = float_as_uint(val);
+    val = fmaxf(val, __shfl_xor(val, 2));
 
     // Step 3: Exchange with adjacent thread
-    asm volatile("ds_swizzle_b32 %0, %1 offset:0x041F" : "=v"(tmp) : "v"(v));
-    asm volatile("s_waitcnt lgkmcnt(0)" :::);
-    val = fmaxf(val, uint_as_float(tmp));
+    val = fmaxf(val, __shfl_xor(val, 1));
 
     return val;
 }

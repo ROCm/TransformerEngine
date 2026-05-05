@@ -528,17 +528,11 @@ __device__ __forceinline__ void reduce_block_amax(
 // ds_swizzle: sub-wavefront exchange without LDS.
 // Same instructions as cast_transpose_mxfp4_kernel_shuffled.cu.
 __device__ __forceinline__ float ds_swizzle_xor1(float v) {
-    float r;
-    asm volatile("ds_swizzle_b32 %0, %1 offset:0x041F\n\t"
-                 "s_waitcnt lgkmcnt(0)" : "=v"(r) : "v"(v));
-    return r;
+    return __shfl_xor(v, 1);
 }
 
 __device__ __forceinline__ float ds_swizzle_xor2(float v) {
-    float r;
-    asm volatile("ds_swizzle_b32 %0, %1 offset:0x081F\n\t"
-                 "s_waitcnt lgkmcnt(0)" : "=v"(r) : "v"(v));
-    return r;
+    return __shfl_xor(v, 2);
 }
 
 // BF16 helpers
