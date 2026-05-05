@@ -774,7 +774,6 @@ def test_gpt_full_activation_recompute(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if (IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 5), (12, 5))
         and dtype == torch.bfloat16 and not fp8 and not use_reentrant
-        and recipe.float8_per_tensor_scaling() #PIV
         ):
         pytest.skip("hipBLASLt does not provide suitable algorithms for this config on this GPU.")
     if fp8 and recipe.nvfp4():
