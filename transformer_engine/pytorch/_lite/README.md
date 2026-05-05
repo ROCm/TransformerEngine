@@ -48,7 +48,8 @@ Most subsystems follow a tiered fallback:
 2. **Triton kernels** (bundled in `transformer_engine/pytorch/triton_kernels/`)
 3. **PyTorch-native ops** -- always available, no extra dependencies
 
-GEMM backend can be forced via `NVTE_LITE_GEMM_BACKEND={ck,triton,pytorch}`.
+GEMM backend can be forced via `NVTE_LITE_GEMM_BACKEND={pytorch,triton,ck}`
+(default `pytorch`, which prefers `torch._scaled_mm` and falls back to AITER).
 
 ## Environment Variables
 
@@ -56,7 +57,10 @@ GEMM backend can be forced via `NVTE_LITE_GEMM_BACKEND={ck,triton,pytorch}`.
 |----------|-------|--------|---------|---------|
 | `NVTE_LITE_ONLY` | build-time | `0` / `1` | `0` | When `1`, `setup.py` produces the `tealite` wheel (Python + Triton only, no C++ extensions) and embeds a `LITE_BUILD` marker so lite mode activates automatically at import. |
 | `NVTE_LITE` | runtime | `0` / `1` | `0` | When `1`, forces lite dispatch at import time on a full build — `transformer_engine.pytorch` registers `_lite` as `transformer_engine_torch` in `sys.modules` instead of loading the C++ extension. Set automatically by `tealite` wheels via the `LITE_BUILD` marker. |
-| `NVTE_LITE_GEMM_BACKEND` | runtime | `ck`, `triton`, `pytorch` | `ck` | Forces the GEMM backend in `_lite/gemm.py`. `ck` and `triton` route to AITER (falling back to `torch.matmul` if AITER is missing); `pytorch` skips AITER entirely and uses `torch.matmul`. Read once at module import. |
+| `NVTE_LITE_GEMM_BACKEND` | runtime | `pytorch`, `triton`, `ck` | `pytorch` | Forces the GEMM backend in `_lite/gemm.py`. `pytorch` prefers `torch._scaled_mm` (hipBLASLt-backed on ROCm) for FP8 and falls back to AITER for FP8 shapes `_scaled_mm` can't serve (per-row scale on the reduction axis, block-scaled, unsupported dtype combos), with dequantize + `torch.matmul` as last resort. `triton` and `ck` route directly to AITER's Triton or CK kernels respectively. Read once at module import. |
+| `NVTE_LITE_AMAX_FUSED` | runtime | `0` / `1` | `1` | When `1` (default), `fused_amax_and_scale_update_after_reduction` dispatches to a single Triton multi-tensor-apply kernel that mirrors `delayed_scaling.cu`'s `kernel_bulk`. Set to `0` to fall back to the per-group Python loop (e.g. for debugging or on a system where the Triton kernel fails to load). |
+| `NVTE_LITE_SKIP_FP8_DGRAD_FOR_NORM` | runtime | `0` / `1` | `0` | Opt-in optimization for `LayerNormLinear` / `LayerNormMLP` fused modules: when set, the dgrad GEMM emits BF16 instead of FP8 if the only downstream consumer is the norm backward (which would dequantize anyway). Eliminates a BF16 → FP8 → BF16 round-trip; DelayedScaling amax bookkeeping is preserved via a standalone reduction (`amax_utils.update_amax_from_bf16`). Scoped to `Float8Quantizer` and `Float8CurrentScalingQuantizer`; MXFP8 is skipped because per-block scales can't be reconstructed from amax alone. |
+| `NVTE_LITE_DIAG` | runtime | `0` / `1` | `0` | Enables one-shot diagnostic prints from `_lite/{gemm,norms,attention,quantize}.py` (and `module/base.py`) capturing shapes, dtypes, scale layout, scaled-mm rejection reasons, etc. Off by default; intended for triaging numerical or dispatch issues. |
 
 ## Module Structure
 
@@ -65,10 +69,12 @@ _lite/
   __init__.py          # Public API -- mirrors transformer_engine_torch exports
   enums.py             # Pure-Python re-declarations of C++ enum types
   aiter_utils.py       # Shared AITER availability detection (lru_cache)
+  amax_utils.py        # BF16 amax-update helper for skip-FP8-dgrad path
 
   # Compute kernels
-  gemm.py              # GEMM dispatch (AITER CK/Triton, PyTorch matmul)
-  attention.py          # Fused attention (AITER CK, flash-attn stub, SDPA)
+  gemm.py              # GEMM dispatch (torch._scaled_mm, AITER CK/Triton, PyTorch matmul)
+  grouped_gemm.py      # Grouped GEMM for MoE (AITER Triton GMM, BF16/FP16; FP8 NYI)
+  attention.py         # Fused attention (AITER CK, flash-attn stub, SDPA)
   norms.py             # LayerNorm / RMSNorm (Triton, PyTorch)
   activations.py       # Activation functions (AITER fused gated, PyTorch)
   rope.py              # Rotary position embeddings (AITER, PyTorch)
@@ -76,6 +82,11 @@ _lite/
   softmax.py           # Scaled/masked softmax variants (PyTorch)
   dropout.py           # Dropout (PyTorch)
   transpose.py         # FP8 transpose ops
+
+  # Compound modules (pure-Python autograd Functions, lazy-loaded to avoid
+  # circular import with tex registration; see __init__.py)
+  fused_layernorm_linear.py  # LayerNorm+Linear fused autograd Function
+  fused_layernorm_mlp.py     # LayerNorm+MLP fused autograd Function
 
   # Structured / MOE
   permutation.py       # MOE token permutation (Triton sort, PyTorch gather)
@@ -117,8 +128,12 @@ Each section below compares the lite module against the full C++ build.
 | Multi-stream cuBLAS | No | Yes |
 
 **Gaps:** No multi-stream execution. Performance depends on AITER kernel
-maturity for each precision/shape combination. PyTorch fallback dequantizes to
-BF16 before `torch.matmul`, losing the FP8 memory bandwidth advantage.
+maturity for each precision/shape combination. The default `pytorch` backend
+routes FP8×FP8 through `torch._scaled_mm` (hipBLASLt-backed on ROCm), which
+keeps FP8 memory bandwidth — only when `_scaled_mm` rejects the combo
+(per-row scale on the reduction axis, certain block-scaled or unsupported
+dtype combos) does the GEMM fall through to dequantize + `torch.matmul`,
+which loses the FP8 bandwidth advantage.
 
 ---
 
@@ -346,10 +361,25 @@ instead of `(1,)`, and the GEMM dispatch detects this and routes to
 | Top-k routing | Fused Triton kernel | CUDA fused kernel |
 | Auxiliary load-balancing loss | Fused Triton kernel | CUDA fused kernel |
 | Score functions (softmax, sigmoid) | Fused Triton kernel | CUDA fused kernel |
+| Grouped GEMM — BF16 / FP16 (fwd / dgrad / wgrad) | AITER Triton GMM (`gmm` / `ptgmm`) | cuBLAS grouped |
+| Grouped GEMM — FP8 | **Not yet supported** (NYI) | cuBLAS grouped |
+| `te.GroupedLinear` / `GroupedMLP` (BF16) | Yes — `tex.te_general_grouped_gemm` hot-swap | Yes |
 
-**Gaps:** Functionally complete. Router ops use a fused Triton kernel that
-combines topk, scoring, and aux loss in a single pass. The full build uses fused
-CUDA kernels. Performance difference is most visible at high expert counts.
+**Gaps:** Router and permutation ops are functionally complete (fused Triton
+kernel for topk/scoring/aux-loss in a single pass; full build uses fused CUDA
+kernels). Performance difference is most visible at high expert counts.
+
+The expert compute path for `GroupedLinear` / `GroupedMLP` is served by
+`_lite/grouped_gemm.py`, which adapts AITER's Triton GMM kernels (`gmm`,
+`ptgmm`) to the C++ `te_general_grouped_gemm` signature — no `_lite/`
+GroupedLinear module is needed; the tex hot-swap is sufficient. **FP8 grouped
+GEMM is not yet supported**: AITER's generic GMM family is BF16/FP16 only
+(the `p`/`np` prefix is persistent vs non-persistent kernel, not per-tensor
+scaling), and FP8 expert compute lives in AITER as a separate fused-MoE op
+(`aiter.fused_moe`, `moe_op_gemm_a8w8_blockscale`) with a different API
+shape. Run with `TE_FP8=0` for MoE training in lite mode until the Phase 2
+dispatcher lands. See also the `TestGroupedLinear::test_fp8_forward` xfail
+under [Known xfails](#known-xfails).
 
 ---
 
@@ -512,14 +542,14 @@ The suite is the primary gate against regressions in the lite build.
 
 | Subsystem | Functional Coverage | Performance | Key Backend |
 |-----------|-------------------|-------------|-------------|
-| GEMM | Full (incl. per-row FP8) | Good (AITER) | AITER CK/Triton |
+| GEMM | Full (incl. per-row FP8) | Good | `torch._scaled_mm` (hipBLASLt) / AITER CK / Triton |
 | Attention | Full | Good (AITER) | AITER CK / SDPA |
 | Norms | Full + fused norm+quant | Good (AITER) | AITER Triton / TE Triton |
 | FP8 Training | Full (3 recipes) | **Best** (fused per-row) | AITER fused kernels |
 | Activations | Full | Moderate | AITER (2 ops) / PyTorch |
 | Quantization | Full + per-row dynamic | Good (AITER/Triton) | AITER / Triton cast |
 | RoPE | Basic + CP | Moderate | AITER / PyTorch |
-| MOE | Full | Good (Triton) | Triton fused router |
+| MOE | BF16 full; FP8 grouped GEMM NYI | Good (Triton) | Triton fused router + AITER Triton GMM |
 | Expert parallelism | Full (standalone) | Good (MORI) | MORI XGMI/RDMA |
 | Comm-overlap | **None** | N/A | Stubs |
 | Multi-tensor ops | Full | Lower | PyTorch loops |
@@ -531,5 +561,7 @@ fusion** is a lite-only optimization that outperforms the full build's per-tenso
 path by eliminating two HBM round-trips per norm+quantize operation. Expert
 parallelism is available via MORI for distributed MoE workloads. The remaining
 primary gaps are **comm-overlap** (not available), **tensor/sequence
-parallelism** (no built-in support in lite's compound modules), and a handful of
-FP8 attention paths (`fp8_dpa` / `fp8_mha` — see the Attention section).
+parallelism** (no built-in support in lite's compound modules), **FP8 grouped
+GEMM** (BF16/FP16 only — blocks FP8 MoE training, see the MOE section), and a
+handful of FP8 attention paths (`fp8_dpa` / `fp8_mha` — see the Attention
+section).
