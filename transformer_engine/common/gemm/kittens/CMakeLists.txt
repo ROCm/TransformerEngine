@@ -18,9 +18,9 @@ set(kittens_gemm_SOURCES
     mxfp8_gemm.hip)
 
 add_library(kittens_gemm SHARED ${kittens_gemm_SOURCES})
+set_target_properties(kittens_gemm PROPERTIES HIP_ARCHITECTURES "gfx950")
 
 set(KITTENS_GEMM_COMPILE_OPTIONS
-    --offload-arch=gfx950
     -DKITTENS_CDNA4
     -fno-gpu-rdc
     -O3)
