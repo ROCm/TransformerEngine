@@ -1123,7 +1123,8 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   if (!use_cutlass || num_gemms == 1) {
 #else
   // Currently only support cutlass group gemm on Hopper Arch
-  if (!(is_hopper && use_cutlass)) {
+  // if (!(is_hopper && use_cutlass)) {
+  if (!use_cutlass) {
 #endif
     if (warn_fallback) {
       NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
