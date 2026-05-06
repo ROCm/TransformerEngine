@@ -35,6 +35,7 @@
 #include <hip/hip_runtime.h>
 #include <hip/hip_bf16.h>
 #include <cstdint>
+#include "../util/cuda_runtime.h" //cuda::sm_arch
 
 namespace te_mxfp4 {
 
@@ -120,21 +121,25 @@ __device__ __forceinline__ void bf16x4_to_float4(
 
 __device__ __forceinline__ float ds_swizzle_xor1(float val) {
     float result;
+#ifndef __gfx1250__ //instruction not supported on this GPU
     asm volatile(
         "ds_swizzle_b32 %0, %1 offset:0x041F\n\t"
         "s_waitcnt lgkmcnt(0)"
         : "=v"(result) : "v"(val)
     );
+#endif
     return result;
 }
 
 __device__ __forceinline__ float ds_swizzle_xor2(float val) {
     float result;
+#ifndef __gfx1250__ //instruction not supported on this GPU
     asm volatile(
         "ds_swizzle_b32 %0, %1 offset:0x081F\n\t"
         "s_waitcnt lgkmcnt(0)"
         : "=v"(result) : "v"(val)
     );
+#endif
     return result;
 }
 
@@ -154,6 +159,7 @@ __device__ __forceinline__ float ds_swizzle_xor2(float val) {
  *   Step 3: XOR 1 - reduce 2 values to 1 (thread 0)
  */
 __device__ __forceinline__ float warp_reduce_max_8_dpp(float val) {
+#ifndef __gfx1250__ //instruction not supported on this GPU
     uint32_t v = float_as_uint(val);
     uint32_t tmp;
 
@@ -173,6 +179,7 @@ __device__ __forceinline__ float warp_reduce_max_8_dpp(float val) {
     asm volatile("ds_swizzle_b32 %0, %1 offset:0x041F" : "=v"(tmp) : "v"(v));
     asm volatile("s_waitcnt lgkmcnt(0)" :::);
     val = fmaxf(val, uint_as_float(tmp));
+#endif
 
     return val;
 }
@@ -731,6 +738,10 @@ inline void nvte_cast_transpose_mxfp4_fused_shuffle(
     int colwise_scale_M_pad, int colwise_scale_N_pad,
     hipStream_t stream
 ) {
+    //TODO: remove when enable HW code
+    if (transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device()) == 125) {
+        NVTE_ERROR("Hadamard transform is not yet supported on this GPU");
+    }
     dim3 grid((M + te_mxfp4::BLOCK_M - 1) / te_mxfp4::BLOCK_M,
               (N + te_mxfp4::BLOCK_N - 1) / te_mxfp4::BLOCK_N);
     dim3 block(te_mxfp4::THREADS_PER_BLOCK);
