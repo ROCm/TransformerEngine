@@ -33,7 +33,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v6
         with:
-          ref: ${{ inputs.test_config_from_source && github.ref_name || github.event.repository.default_branch || 'dev' }}
+          ref: ${{ inputs.test_config_from_source && github.ref || github.event.repository.default_branch || 'dev' }}
           sparse-checkout: ci/ci_config.json
           sparse-checkout-cone-mode: false
 
@@ -41,7 +41,7 @@ jobs:
         id: select
         run: |
           if [[ "${{ inputs.test_config_from_source }}" == "true" ]]; then
-             echo "::notice::Debugging mode: Using ci/ci_config.json from ${{ github.ref_name }}"
+             echo "::notice::Debugging mode: Using ci/ci_config.json from ${{ github.ref }} (${{ github.ref_name }})"
           else
              echo "::notice::Using ci/ci_config.json from ${{ github.event.repository.default_branch || 'dev' }}"
           fi
