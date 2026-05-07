@@ -6,19 +6,36 @@ name: AITER Prebuilt Upload
 on:
   workflow_dispatch:
     inputs:
-      docker_image:
-        description: "Docker image"
+      docker_image_override:
+        description: "Manual Docker Image (Leave empty to use config file value)"
         required: false
-        default: ""
+        type: string
   workflow_call:
     inputs:
-      docker_image:
-        description: "Docker image URI from rocm-ci select_image.outputs.image-tag"
+      docker_image_override:
+        description: "Manual Docker Image (Leave empty to use config file value)"
         required: true
         type: string
+      aiter_upload_cache_key:
+        description: "If non-empty, save Actions cache after success (same key as rocm-ci-dispatch restore)."
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  actions: write
+  contents: read
 
 jobs:
+  # Same resolver as rocm-ci / dispatch; override comes from inputs for both workflow_dispatch and workflow_call.
+  select_docker_image:
+    uses: ./.github/workflows/select-docker-image.yml
+    with:
+      docker_image_override: ${{ inputs.docker_image_override }}
+      test_config_from_source: true
+
   upload:
+    needs: [select_docker_image]
     runs-on: build-only-te
     env:
       NVTE_AITER_PREBUILT_BASE_URL: ${{ vars.NVTE_AITER_PREBUILT_BASE_URL }}
@@ -42,33 +59,8 @@ jobs:
           echo "::error::Preflight upload reachability failed"
           exit 1
 
-      - name: Resolve docker image
-        id: cfg
-        run: |
-          set -euo pipefail
-          EVENT="${{ github.event_name }}"
-          if [ "$EVENT" = "workflow_call" ]; then
-            IMAGE="${{ inputs.docker_image }}"
-            if [ -z "$IMAGE" ]; then
-              echo "workflow_call requires non-empty docker_image." >&2
-              exit 1
-            fi
-            echo "Using docker_image from caller."
-            echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          IMAGE="${{ inputs.docker_image }}"
-          if [ -z "$IMAGE" ]; then
-            IMAGE="${{ vars.DEV_DOCKER_IMAGE }}"
-          fi
-          if [ -z "$IMAGE" ]; then
-            echo "No docker image provided and vars.DEV_DOCKER_IMAGE is empty." >&2
-            exit 1
-          fi
-          echo "image=${IMAGE}" >> "$GITHUB_OUTPUT"
-
       - name: Pull docker image
-        run: docker pull ${{ steps.cfg.outputs.image }}
+        run: docker pull ${{ needs.select_docker_image.outputs.image_tag }}
 
       - name: Run container
         run: |
@@ -79,7 +71,7 @@ jobs:
             --pid=host \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            ${{ steps.cfg.outputs.image }}
+            ${{ needs.select_docker_image.outputs.image_tag }}
 
       - name: Build and upload aiter prebuilt
         run: |
@@ -93,6 +85,17 @@ jobs:
           bash .github/scripts/aiter_prebuild_upload.sh --build
           EOF
           )"
+
+      - name: Record successful AITER prebuilt upload (cache marker)
+        if: success() && inputs.aiter_upload_cache_key != ''
+        run: echo ok > .aiter-upload-success
+
+      - name: Save AITER upload success cache
+        if: success() && inputs.aiter_upload_cache_key != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .aiter-upload-success
+          key: ${{ inputs.aiter_upload_cache_key }}
 
       - name: Cleanup container
         if: always()

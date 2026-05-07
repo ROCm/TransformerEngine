@@ -1,0 +1,74 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
+
+name: Select Docker Image
+
+on:
+  workflow_call:
+    inputs:
+      docker_image_override:
+        description: 'Manual Docker Image (Leave empty to use config file value)'
+        required: false
+        default: ''
+        type: string
+      test_config_from_source:
+        description: 'Use ci/ci_config.json from the caller ref instead of default branch'
+        required: false
+        default: false
+        type: boolean
+    outputs:
+      image_tag:
+        description: 'Docker image URI from ci/ci_config.json (or override)'
+        value: ${{ jobs.select.outputs.image_tag }}
+
+jobs:
+  select:
+    name: Select Docker Image
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      image_tag: ${{ steps.select.outputs.image_tag }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ inputs.test_config_from_source && github.ref_name || github.event.repository.default_branch || 'dev' }}
+          sparse-checkout: ci/ci_config.json
+          sparse-checkout-cone-mode: false
+
+      - name: Select Docker Image Tag
+        id: select
+        run: |
+          if [[ "${{ inputs.test_config_from_source }}" == "true" ]]; then
+             echo "::notice::Debugging mode: Using ci/ci_config.json from ${{ github.ref_name }}"
+          else
+             echo "::notice::Using ci/ci_config.json from ${{ github.event.repository.default_branch || 'dev' }}"
+          fi
+
+          if [[ ! -f "ci/ci_config.json" ]]; then
+             echo "::error::Config file not found in checkout."
+             exit 1
+          fi
+
+          BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
+          echo "Determining image for branch: $BRANCH_NAME"
+          VERSION_KEY="$BRANCH_NAME"
+
+          if jq -e --arg key "$VERSION_KEY" '.docker_images[$key]' ci/ci_config.json > /dev/null; then
+            JSON_KEY="$VERSION_KEY"
+          else
+            JSON_KEY="default"
+          fi
+
+          echo "Selected config key: $JSON_KEY"
+          IMAGE_TO_USE=$(jq -r --arg key "$JSON_KEY" '.docker_images[$key]' ci/ci_config.json)
+
+          MANUAL_OVERRIDE="${{ inputs.docker_image_override }}"
+          if [[ -n "$MANUAL_OVERRIDE" ]]; then
+            echo "::notice::Manual override detected: $MANUAL_OVERRIDE"
+            IMAGE_TO_USE="$MANUAL_OVERRIDE"
+          fi
+
+          echo "Selected image: $IMAGE_TO_USE"
+          echo "image_tag=$IMAGE_TO_USE" >> "$GITHUB_OUTPUT"

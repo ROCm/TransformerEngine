@@ -19,7 +19,7 @@ on:
         type: string
       docker_image_override:
         description: 'Manual Docker Image (Leave empty to use config file value)'
-        required: false
+        required: true
         type: string
       test_config_from_source:
         description: 'DEBUG: Use config.json from current source branch instead of dev'
@@ -31,6 +31,11 @@ on:
         required: false
         default: false
         type: boolean
+      aiter_upload_cache_key:
+        description: 'Actions cache key for upload success (computed in rocm-ci-dispatch; empty otherwise)'
+        required: false
+        default: ''
+        type: string
   workflow_dispatch:
     inputs:
       test_level:
@@ -56,53 +61,10 @@ env:
 jobs:
   select_image:
     name: Select Docker Image
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    outputs:
-      image-tag: ${{ steps.select-image.outputs.image-tag }}
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ inputs.test_config_from_source && github.ref_name || github.event.repository.default_branch || 'dev' }}
-          sparse-checkout: ci/ci_config.json
-          sparse-checkout-cone-mode: false
-
-      - name: Select Docker Image Tag
-        id: select-image
-        run: |
-          if [[ "${{ inputs.test_config_from_source }}" == "true" ]]; then
-             echo "::notice::Debugging mode: Using ci/ci_config.json from ${{ github.ref_name }}"
-          else
-             echo "::notice::Using ci/ci_config.json from ${{ github.event.repository.default_branch || 'dev' }}"
-          fi
-
-          if [[ ! -f "ci/ci_config.json" ]]; then
-             echo "::error::Config file not found in checkout."
-             exit 1
-          fi
-
-          BRANCH_NAME="${{ github.base_ref || github.ref_name }}"
-          echo "Determining image for branch: $BRANCH_NAME"
-          VERSION_KEY="$BRANCH_NAME"
-
-          if jq -e --arg key "$VERSION_KEY" '.docker_images[$key]' ci/ci_config.json > /dev/null; then
-            JSON_KEY="$VERSION_KEY"
-          else
-            JSON_KEY="default"
-          fi
-
-          echo "Selected config key: $JSON_KEY"
-          IMAGE_TO_USE=$(jq -r --arg key "$JSON_KEY" '.docker_images[$key]' ci/ci_config.json)
-
-          MANUAL_OVERRIDE="${{ inputs.docker_image_override }}"
-          if [[ -n "$MANUAL_OVERRIDE" ]]; then
-            echo "::notice::Manual override detected: $MANUAL_OVERRIDE"
-            IMAGE_TO_USE="$MANUAL_OVERRIDE"
-          fi
-
-          echo "Selected image: $IMAGE_TO_USE"
-          echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
+    uses: ./.github/workflows/select-docker-image.yml
+    with:
+      docker_image_override: ${{ inputs.docker_image_override }}
+      test_config_from_source: ${{ inputs.test_config_from_source }}
 
   upload_aiter_prebuilt:
     name: Build and upload AITER prebuilt
@@ -110,7 +72,8 @@ jobs:
     if: ${{ (github.event_name == 'pull_request' && inputs.trigger_aiter_upload == 'true') }}
     uses: ./.github/workflows/aiter-prebuilt-upload.yml
     with:
-      docker_image: ${{ needs.select_image.outputs.image-tag }}
+      docker_image_override: ${{ needs.select_image.outputs.image_tag }}
+      aiter_upload_cache_key: ${{ inputs.aiter_upload_cache_key }}
     secrets: inherit
 
   build:
@@ -156,7 +119,7 @@ jobs:
 
       - name: Pull Docker Image
         run: |
-          docker pull ${{ needs.select_image.outputs.image-tag }}
+          docker pull ${{ needs.select_image.outputs.image_tag }}
 
       - name: Run Container
         run: |
@@ -171,7 +134,7 @@ jobs:
             --group-add $(getent group video | cut -d: -f3) \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            ${{ needs.select_image.outputs.image-tag }}
+            ${{ needs.select_image.outputs.image_tag }}
 
       - name: Install packages
         run: |
@@ -352,7 +315,7 @@ jobs:
 
       - name: Pull Docker Image
         run: |
-          docker pull ${{ needs.select_image.outputs.image-tag }}
+          docker pull ${{ needs.select_image.outputs.image_tag }}
 
       - name: Run Container
         run: |
@@ -367,7 +330,7 @@ jobs:
             --group-add $(getent group video | cut -d: -f3) \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            ${{ needs.select_image.outputs.image-tag }}
+            ${{ needs.select_image.outputs.image_tag }}
 
       - name: Install packages
         env:
