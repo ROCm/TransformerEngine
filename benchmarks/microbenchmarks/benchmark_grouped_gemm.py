@@ -7,7 +7,7 @@
 
 import os
 import torch
-import torch.utils.benchmark as benchmark
+from utils import time_func, compute_tflops, run_benchmarks
 
 def generate_grouped_gemm_group_lens(b, m, balance: bool):
     if balance:
@@ -19,8 +19,8 @@ def generate_grouped_gemm_group_lens(b, m, balance: bool):
         error = b * m - group_lens.sum()
         group_lens[-1] += error
         return group_lens
-    
-M_SIZE_LIST = [512, 1024, 2048, 4096]#, 8192, 16384]
+
+M_SIZE_LIST = [512, 1024, 2048, 4096]
 EP_SIZE_LIST = [32, 16, 8]
 
 
@@ -98,7 +98,6 @@ def make_fwd_bwd_funcs_te(x, w, group_lens, activation_dtype):
     xs = list(torch.split(x_view, m_splits))
     weights = [w[i] for i in range(B)]
 
-    # Forward output buffer
     out = torch.empty((sum_M, N), device=x.device, dtype=activation_dtype)
 
     def fwd_func_te():
@@ -116,11 +115,9 @@ def make_fwd_bwd_funcs_te(x, w, group_lens, activation_dtype):
         )
         return out
 
-    # dx buffers
     dx = torch.empty((sum_M, K), device=x.device, dtype=activation_dtype)
     dxs = list(torch.split(dx, m_splits))
 
-    # dw buffers
     dw_stacked = torch.empty((B, N, K), device=x.device, dtype=activation_dtype)
     dws = [dw_stacked[i] for i in range(B)]
 
@@ -162,7 +159,7 @@ def make_fwd_bwd_funcs_te(x, w, group_lens, activation_dtype):
     return fwd_func_te, bwd_func_te
 
 
-def bench_grouped_gemm(B, M, N, K, dtype):
+def bench_grouped_gemm(Case, B, M, N, K, dtype):
     device = "cuda"
 
     x = torch.randn((B * M, K), dtype=dtype, device=device, requires_grad=True)
@@ -173,7 +170,6 @@ def bench_grouped_gemm(B, M, N, K, dtype):
     os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
     os.environ["NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK"] = "1"
 
-    # TE grouped (CK_Tile)
     x_te = x.clone().detach()
     w_te = w.clone().detach()
     fwd_func_te, bwd_func_te_inner = make_fwd_bwd_funcs_te(
@@ -184,16 +180,14 @@ def bench_grouped_gemm(B, M, N, K, dtype):
     grad_out = torch.randn_like(out_te)
     bwd_func_te = lambda: bwd_func_te_inner(grad_out)
 
-    # FLOPs
     fwd_total_flops = 2 * B * M * N * K
     bwd_total_flops = 2 * fwd_total_flops
 
-    # Benchmark
-    fwd_te_ms = benchmark.Timer(stmt="fn()", globals={"fn": fwd_func_te}).adaptive_autorange().mean * 1e3
-    bwd_te_ms = benchmark.Timer(stmt="fn()", globals={"fn": bwd_func_te}).adaptive_autorange().mean * 1e3
+    fwd_te_ms = time_func(fwd_func_te)
+    bwd_te_ms = time_func(bwd_func_te)
 
-    fwd_te_tflops = fwd_total_flops / (fwd_te_ms * 1e-3) / 1e12
-    bwd_te_tflops = bwd_total_flops / (bwd_te_ms * 1e-3) / 1e12
+    fwd_te_tflops = compute_tflops(fwd_total_flops, fwd_te_ms)
+    bwd_te_tflops = compute_tflops(bwd_total_flops, bwd_te_ms)
 
     print(f"TE (CK_Tile)     Forward  {fwd_te_ms:.3f} ms | {fwd_te_tflops:.2f} TFLOPS")
     print(f"TE (CK_Tile)     Backward {bwd_te_ms:.3f} ms | {bwd_te_tflops:.2f} TFLOPS")
@@ -207,8 +201,6 @@ def bench_grouped_gemm(B, M, N, K, dtype):
 
 
 if __name__ == "__main__":
-    import pandas as pd
-
     test_cases = (
         generate_deepseekv2_lite_test_cases()
         + generate_deepseekv2_test_cases()
@@ -216,36 +208,13 @@ if __name__ == "__main__":
         + generate_grok_v2_test_cases()
     )
 
-    columns = [
-        "Case", "B", "M", "N", "K", "dtype",
-        "TE (CK_Tile) Forward Time (ms)",
-        "TE (CK_Tile) Forward TFLOPS",
-        "TE (CK_Tile) Backward Time (ms)",
-        "TE (CK_Tile) Backward TFLOPS",
-    ]
-    rows = []
-
-    for case in test_cases:
-        print(f"\n{'='*50}")
-        print(f"Testing: {case}")
-        print(f"{'='*50}")
-
-        metrics = bench_grouped_gemm(
-            B=case["B"], M=case["M"], N=case["N"], K=case["K"], dtype=case["dtype"]
-        )
-        row = {
-            "Case": case["Case"],
-            "B": case["B"],
-            "M": case["M"],
-            "N": case["N"],
-            "K": case["K"],
-            "dtype": str(case["dtype"]),
-            **metrics,
-        }
-        rows.append(row)
-
-    results = pd.DataFrame(rows, columns=columns)
-
-    out_csv = "benchmark_grouped_gemm.csv"
-    results.to_csv(out_csv, index=False)
-    print(f"\nResults saved to {out_csv}")
+    run_benchmarks(
+        test_cases=test_cases,
+        bench_fn=bench_grouped_gemm,
+        param_columns=["Case", "B", "M", "N", "K", "dtype"],
+        metric_columns=[
+            "TE (CK_Tile) Forward Time (ms)", "TE (CK_Tile) Forward TFLOPS",
+            "TE (CK_Tile) Backward Time (ms)", "TE (CK_Tile) Backward TFLOPS",
+        ],
+        default_csv="benchmark_grouped_gemm.csv",
+    )

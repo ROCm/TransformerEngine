@@ -7,42 +7,18 @@
 """
 Normalization micro-benchmark using te.LayerNorm and te.RMSNorm.
 
-Shapes are derived from training workloads:
-  - Llama 3   8B, 70B, 405B (all use RMSNorm)
-  - Qwen 2.5  7B, 72B       (all use RMSNorm)
-
-Modern models predominantly use RMSNorm, but we benchmark both
-LayerNorm and RMSNorm since TE supports both and they share the
-same kernel infrastructure.
-
+Both LayerNorm and RMSNorm share the same kernel infrastructure.
 The M dimension (batch * seq_len) is swept across typical training sizes.
-
-Sources for model configs:
-  https://huggingface.co/meta-llama/Llama-3.1-8B/blob/main/config.json
-  https://huggingface.co/meta-llama/Llama-3.1-70B/blob/main/config.json
-  https://huggingface.co/meta-llama/Llama-3.1-405B/blob/main/config.json
-  https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/config.json
-  https://huggingface.co/Qwen/Qwen2.5-72B-Instruct/blob/main/config.json
 
 Output: benchmark_normalization.csv (written to cwd)
 """
 
 import torch
-import torch.utils.benchmark as benchmark
-
 import transformer_engine.pytorch as te
-
-# Sequence / batch-token sizes to sweep
-M_SIZE_LIST = [1024, 2048, 4096, 8192]
-
-# (model_name, hidden_size)
-MODEL_HIDDEN_SIZES = [
-    ("Llama3-8B",   4096),
-    ("Llama3-70B",  8192),
-    ("Llama3-405B", 16384),
-    ("Qwen2.5-7B",  3584),
-    ("Qwen2.5-72B", 8192),
-]
+from utils import (
+    MODEL_HIDDEN_SIZES, M_SIZE_LIST,
+    time_func, compute_gbps, run_benchmarks,
+)
 
 NORM_TYPES = [
     ("RMSNorm",   te.RMSNorm),
@@ -66,7 +42,7 @@ def _generate_norm_test_cases():
     return test_cases
 
 
-def bench_norm(M, hidden_size, norm_cls, dtype):
+def bench_norm(Case, M, hidden_size, norm_name, norm_cls, dtype):
     device = "cuda"
 
     norm = norm_cls(hidden_size).to(device=device, dtype=dtype)
@@ -85,23 +61,16 @@ def bench_norm(M, hidden_size, norm_cls, dtype):
 
     fwd_bwd_func()
 
-    # Normalization is memory-bound; report bandwidth instead of FLOPS.
-    # Each element is read once (fwd) or read+written (bwd), plus the
-    # weight/bias vectors. We report effective GB/s based on the
-    # minimum data movement: fwd reads x and writes y, bwd reads
-    # grad_out+x+saved_stats and writes grad_x+grad_weight.
     elem_bytes = x.element_size()
     fwd_bytes = 2 * M * hidden_size * elem_bytes   # read x, write y
     bwd_bytes = 4 * M * hidden_size * elem_bytes   # read grad+x+y, write grad_x
 
-    # Benchmark
-    fwd_ms = benchmark.Timer(stmt="fn()", globals={"fn": fwd_func}).adaptive_autorange().mean * 1e3
-    fwd_bwd_ms = benchmark.Timer(stmt="fn()", globals={"fn": fwd_bwd_func}).adaptive_autorange().mean * 1e3
-
+    fwd_ms = time_func(fwd_func)
+    fwd_bwd_ms = time_func(fwd_bwd_func)
     bwd_ms = fwd_bwd_ms - fwd_ms
 
-    fwd_gbps = fwd_bytes / (fwd_ms * 1e-3) / 1e9
-    bwd_gbps = bwd_bytes / (bwd_ms * 1e-3) / 1e9
+    fwd_gbps = compute_gbps(fwd_bytes, fwd_ms)
+    bwd_gbps = compute_gbps(bwd_bytes, bwd_ms)
 
     print(f"  Forward      {fwd_ms:.3f} ms | {fwd_gbps:.1f} GB/s")
     print(f"  Backward     {bwd_ms:.3f} ms | {bwd_gbps:.1f} GB/s (derived)")
@@ -115,41 +84,13 @@ def bench_norm(M, hidden_size, norm_cls, dtype):
 
 
 if __name__ == "__main__":
-    import pandas as pd
-
-    test_cases = _generate_norm_test_cases()
-
-    columns = [
-        "Case", "M", "hidden_size", "dtype",
-        "TE Forward Time (ms)",
-        "TE Forward GB/s",
-        "TE Backward Time (ms)",
-        "TE Backward GB/s",
-    ]
-    rows = []
-
-    for case in test_cases:
-        print(f"\n{'='*60}")
-        print(f"Testing: {case['Case']} M={case['M']} hidden={case['hidden_size']}")
-        print(f"{'='*60}")
-
-        metrics = bench_norm(
-            M=case["M"],
-            hidden_size=case["hidden_size"],
-            norm_cls=case["norm_cls"],
-            dtype=case["dtype"],
-        )
-        row = {
-            "Case": case["Case"],
-            "M": case["M"],
-            "hidden_size": case["hidden_size"],
-            "dtype": str(case["dtype"]),
-            **metrics,
-        }
-        rows.append(row)
-
-    results = pd.DataFrame(rows, columns=columns)
-
-    out_csv = "benchmark_normalization.csv"
-    results.to_csv(out_csv, index=False)
-    print(f"\nResults saved to {out_csv}")
+    run_benchmarks(
+        test_cases=_generate_norm_test_cases(),
+        bench_fn=bench_norm,
+        param_columns=["Case", "M", "hidden_size", "dtype"],
+        metric_columns=[
+            "TE Forward Time (ms)", "TE Forward GB/s",
+            "TE Backward Time (ms)", "TE Backward GB/s",
+        ],
+        default_csv="benchmark_normalization.csv",
+    )

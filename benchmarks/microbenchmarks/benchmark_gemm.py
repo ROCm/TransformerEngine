@@ -7,65 +7,42 @@
 
 
 import torch
-import torch.utils.benchmark as benchmark
-
 import transformer_engine.pytorch as te
+from utils import (
+    MODEL_CONFIGS, M_SIZE_LIST, gemm_shapes,
+    time_func, compute_tflops, run_benchmarks,
+)
 
-# Sequence / batch-token sizes to sweep
-M_SIZE_LIST = [1024, 2048, 4096, 8192]
-
-# Model configurations
-# Sources:
-# - Llama 3 8B (hidden=4096, intermediate=14336, heads=32, kv_heads=8, head_dim=128)
-#   https://huggingface.co/meta-llama/Llama-3.1-8B/blob/main/config.json
-
-# - Llama 3 70B (hidden=8192, intermediate=28672, heads=64, kv_heads=8, head_dim=128)
-#   https://huggingface.co/meta-llama/Llama-3.1-70B/blob/main/config.json
-
-# - Llama 3 405B (hidden=16384, intermediate=53248, heads=128, kv_heads=8, head_dim=128)
-#   https://huggingface.co/meta-llama/Llama-3.1-405B/blob/main/config.json
-
-# - Qwen 2.5 7B (hidden=3584, intermediate=18944, heads=28, kv_heads=4, head_dim=128)
-#   https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/config.json
-
-# - Qwen 2.5 72B (hidden=8192, intermediate=29568, heads=64, kv_heads=8, head_dim=128)
-#   https://huggingface.co/Qwen/Qwen2.5-72B-Instruct/blob/main/config.json
-
-MODEL_CONFIGS = [
-    # (name, hidden, intermediate, num_q_heads, num_kv_heads, head_dim, tp)
-    ("Llama3-8B/TP1",   4096,  14336,  32,  8, 128,  1),
-    ("Llama3-8B/TP8",   4096,  14336,  32,  8, 128,  8),
-    ("Llama3-70B/TP8",  8192,  28672,  64,  8, 128,  8),
-    ("Llama3-405B/TP8", 16384, 53248, 128,  8, 128,  8),
-    ("Qwen2.5-7B/TP1",  3584, 18944,  28,  4, 128,  1),
-    ("Qwen2.5-72B/TP8", 8192, 29568,  64,  8, 128,  8),
+# Select which configs / shapes to run (comment/uncomment as needed)
+ACTIVE_CONFIGS = [
+    MODEL_CONFIGS[0],   # Llama3-8B/TP1
+    # MODEL_CONFIGS[1], # Llama3-8B/TP8
+    # MODEL_CONFIGS[2], # Llama3-70B/TP8
+    # MODEL_CONFIGS[3], # Llama3-405B/TP8
+    # MODEL_CONFIGS[4], # Qwen2.5-7B/TP1
+    # MODEL_CONFIGS[5], # Qwen2.5-72B/TP8
 ]
+
+ACTIVE_SHAPES = gemm_shapes(ACTIVE_CONFIGS)
+# To restrict shapes, filter the dict:
+ACTIVE_SHAPES = {k: v for k, v in ACTIVE_SHAPES.items() if "QKV" in k}
 
 
 def _generate_gemm_test_cases():
     test_cases = []
-
-    for (name, hidden, intermediate, n_q, n_kv, hd, tp) in MODEL_CONFIGS:
-        shapes = {
-            f"{name}-QKV":     ((n_q * hd + 2 * n_kv * hd) // tp, hidden),
-            f"{name}-AttnOut": (hidden,                             (n_q * hd) // tp),
-            f"{name}-GateUp":  ((2 * intermediate) // tp,           hidden),
-            f"{name}-Down":    (hidden,                             intermediate // tp),
-        }
-
-        for M in M_SIZE_LIST:
-            for case_name, (N, K) in shapes.items():
-                test_cases.append({
-                    "Case": case_name,
-                    "M": M,
-                    "N": N,
-                    "K": K,
-                    "dtype": torch.bfloat16,
-                })
+    for M in M_SIZE_LIST:
+        for case_name, (N, K) in ACTIVE_SHAPES.items():
+            test_cases.append({
+                "Case": case_name,
+                "M": M,
+                "N": N,
+                "K": K,
+                "dtype": torch.bfloat16,
+            })
     return test_cases
 
 
-def bench_gemm(M, N, K, dtype):
+def bench_gemm(Case, M, N, K, dtype):
     device = "cuda"
 
     linear = te.Linear(K, N, bias=False).to(device=device, dtype=dtype)
@@ -78,7 +55,6 @@ def bench_gemm(M, N, K, dtype):
     def bwd_func():
         out = linear(x)
         out.backward(grad_out)
-        # Clear grads so they don't accumulate across iterations
         x.grad = None
         linear.weight.grad = None
 
@@ -87,14 +63,12 @@ def bench_gemm(M, N, K, dtype):
     fwd_flops = 2 * M * N * K
     bwd_flops = 2 * fwd_flops  # dX + dW
 
-    # Benchmark
-    fwd_ms = benchmark.Timer(stmt="fn()", globals={"fn": fwd_func}).adaptive_autorange().mean * 1e3
-    fwd_bwd_ms = benchmark.Timer(stmt="fn()", globals={"fn": bwd_func}).adaptive_autorange().mean * 1e3
-
+    fwd_ms = time_func(fwd_func)
+    fwd_bwd_ms = time_func(bwd_func)
     bwd_ms = fwd_bwd_ms - fwd_ms
 
-    fwd_tflops = fwd_flops / (fwd_ms * 1e-3) / 1e12
-    bwd_tflops = bwd_flops / (bwd_ms * 1e-3) / 1e12
+    fwd_tflops = compute_tflops(fwd_flops, fwd_ms)
+    bwd_tflops = compute_tflops(bwd_flops, bwd_ms)
 
     print(f"  Forward      {fwd_ms:.3f} ms | {fwd_tflops:.2f} TFLOPS")
     print(f"  Backward     {bwd_ms:.3f} ms | {bwd_tflops:.2f} TFLOPS (derived)")
@@ -108,39 +82,13 @@ def bench_gemm(M, N, K, dtype):
 
 
 if __name__ == "__main__":
-    import pandas as pd
-
-    test_cases = _generate_gemm_test_cases()
-
-    columns = [
-        "Case", "M", "N", "K", "dtype",
-        "TE Forward Time (ms)",
-        "TE Forward TFLOPS",
-        "TE Backward Time (ms)",
-        "TE Backward TFLOPS",
-    ]
-    rows = []
-
-    for case in test_cases:
-        print(f"\n{'='*60}")
-        print(f"Testing: {case}")
-        print(f"{'='*60}")
-
-        metrics = bench_gemm(
-            M=case["M"], N=case["N"], K=case["K"], dtype=case["dtype"]
-        )
-        row = {
-            "Case": case["Case"],
-            "M": case["M"],
-            "N": case["N"],
-            "K": case["K"],
-            "dtype": str(case["dtype"]),
-            **metrics,
-        }
-        rows.append(row)
-
-    results = pd.DataFrame(rows, columns=columns)
-
-    out_csv = "benchmark_gemm.csv"
-    results.to_csv(out_csv, index=False)
-    print(f"\nResults saved to {out_csv}")
+    run_benchmarks(
+        test_cases=_generate_gemm_test_cases(),
+        bench_fn=bench_gemm,
+        param_columns=["Case", "M", "N", "K", "dtype"],
+        metric_columns=[
+            "TE Forward Time (ms)", "TE Forward TFLOPS",
+            "TE Backward Time (ms)", "TE Backward TFLOPS",
+        ],
+        default_csv="benchmark_gemm.csv",
+    )

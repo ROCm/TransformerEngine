@@ -10,43 +10,21 @@ FP8 casting micro-benchmark.
 Benchmarks quantization (BF16 -> FP8) and dequantization (FP8 -> BF16) for
 both E4M3 (activations/weights) and E5M2 (gradients) formats.
 
-Shapes are (M, hidden_size) matching the activation tensors from models:
-  - Llama 3.1 8B, 70B, 405B
-  - Qwen 2.5  7B, 72B
-
 These casts are memory-bound; we report GB/s (input + output bytes).
-
-Sources for model configs:
-  https://huggingface.co/meta-llama/Llama-3.1-8B/blob/main/config.json
-  https://huggingface.co/meta-llama/Llama-3.1-70B/blob/main/config.json
-  https://huggingface.co/meta-llama/Llama-3.1-405B/blob/main/config.json
-  https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/config.json
-  https://huggingface.co/Qwen/Qwen2.5-72B-Instruct/blob/main/config.json
-
 Output: benchmark_casting.csv (written to cwd)
 """
 
 import torch
-import torch.utils.benchmark as benchmark
 import transformer_engine
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import Float8Quantizer
-
+from utils import (
+    MODEL_HIDDEN_SIZES, M_SIZE_LIST,
+    time_func, compute_gbps, run_benchmarks,
+)
 
 TE_FP8_E4M3 = tex.DType.kFloat8E4M3
 TE_FP8_E5M2 = tex.DType.kFloat8E5M2
-
-# Sequence / batch-token sizes to sweep
-M_SIZE_LIST = [1024, 2048, 4096, 8192]
-
-# (model_name, hidden_size)
-MODEL_HIDDEN_SIZES = [
-    ("Llama3-8B",   4096),
-    ("Llama3-70B",  8192),
-    ("Llama3-405B", 16384),
-    ("Qwen2.5-7B",  3584),
-    ("Qwen2.5-72B", 8192),
-]
 
 CAST_CONFIGS = [
     # (name, direction, fp8_dtype)
@@ -73,7 +51,7 @@ def _generate_cast_test_cases():
     return test_cases
 
 
-def bench_cast(M, hidden_size, direction, fp8_dtype):
+def bench_cast(Case, M, hidden_size, direction, fp8_dtype, dtype_str):
     device = "cuda"
 
     numel = M * hidden_size
@@ -83,22 +61,17 @@ def bench_cast(M, hidden_size, direction, fp8_dtype):
 
     if direction == "quantize":
         x = torch.randn(M, hidden_size, dtype=torch.bfloat16, device=device)
-        out = quantizer(x)  # pre-allocate output tensor
+        out = quantizer(x)
         cast_func = lambda: quantizer.quantize(x, out=out)
-
-        # BF16 read (2 bytes) + FP8 write (1 byte)
-        total_bytes = numel * (2 + 1)
+        total_bytes = numel * (2 + 1)  # BF16 read + FP8 write
     else:
         x = torch.randn(M, hidden_size, dtype=torch.bfloat16, device=device)
         fp8_tensor = quantizer(x)
         cast_func = lambda: fp8_tensor.dequantize()
+        total_bytes = numel * (1 + 2)  # FP8 read + BF16 write
 
-        # FP8 read (1 byte) + BF16 write (2 bytes)
-        total_bytes = numel * (1 + 2)
-
-    # Benchmark
-    ms = benchmark.Timer(stmt="fn()", globals={"fn": cast_func}).blocked_autorange().mean * 1e3
-    gbps = total_bytes / (ms * 1e-3) / 1e9
+    ms = time_func(cast_func, method="blocked")
+    gbps = compute_gbps(total_bytes, ms)
 
     print(f"  {ms:.4f} ms | {gbps:.1f} GB/s")
 
@@ -109,39 +82,10 @@ def bench_cast(M, hidden_size, direction, fp8_dtype):
 
 
 if __name__ == "__main__":
-    import pandas as pd
-
-    test_cases = _generate_cast_test_cases()
-
-    columns = [
-        "Case", "M", "hidden_size", "dtype_str",
-        "Cast Time (ms)",
-        "Cast GB/s",
-    ]
-    rows = []
-
-    for case in test_cases:
-        print(f"\n{'='*60}")
-        print(f"Testing: {case['Case']} M={case['M']} hidden={case['hidden_size']}")
-        print(f"{'='*60}")
-
-        metrics = bench_cast(
-            M=case["M"],
-            hidden_size=case["hidden_size"],
-            direction=case["direction"],
-            fp8_dtype=case["fp8_dtype"],
-        )
-        row = {
-            "Case": case["Case"],
-            "M": case["M"],
-            "hidden_size": case["hidden_size"],
-            "dtype_str": case["dtype_str"],
-            **metrics,
-        }
-        rows.append(row)
-
-    results = pd.DataFrame(rows, columns=columns)
-
-    out_csv = "benchmark_casting.csv"
-    results.to_csv(out_csv, index=False)
-    print(f"\nResults saved to {out_csv}")
+    run_benchmarks(
+        test_cases=_generate_cast_test_cases(),
+        bench_fn=bench_cast,
+        param_columns=["Case", "M", "hidden_size", "dtype_str"],
+        metric_columns=["Cast Time (ms)", "Cast GB/s"],
+        default_csv="benchmark_casting.csv",
+    )
