@@ -139,16 +139,23 @@ def _indexer_impl_triton(Q, K, W_uq, W_dq, W_k, weights, **fp8_kwargs):
 def _indexer_impl_hybrid(Q, K, W_uq, W_dq, W_k, W_w,
                          scale_q=None, scale_k=None,
                          scale_wq=None, scale_wd=None, scale_wk=None,
-                         out_dtype=None):
+                         out_dtype=None,
+                         fp8_score=False):
     """Einsum projections + Triton score-relu-reduce.
 
     Mirrors ``_indexer_impl_reference`` for the four projections (which
-    lower to hipBLASLt GEMMs), then hands Hq / Hk / W_o to a fused Triton
-    kernel that does score+relu+H-reduction in registers — eliminating the
-    16+ GB pre-relu-score HBM round-trip the pure-einsum path pays.
+    lower to hipBLASLt bf16 GEMMs), then hands Hq / Hk / W_o to a fused
+    Triton kernel that does score+relu+H-reduction in registers —
+    eliminating the (B, oH, T, H, S) pre-relu-score HBM round-trip the
+    pure-einsum path pays.
 
-    bf16 only for now. FP8 inputs are dequantized to bf16 just like the
-    reference; native FP8 GEMM is not available on ROCm anyway.
+    fp8_score (default True): per-tensor amax-quantize Hq and Hk to fp8
+    e4m3 just before the kernel call. The kernel's score MFMA then runs
+    native fp8-fp8 (`v_mfma_f32_*_fp8_fp8` on gfx950) and Hq's HBM
+    footprint halves, which dominates the kernel's read bandwidth at
+    production sizes. The two scales fold into one fp32 multiply at the
+    end of the kernel (relu commutes with positive scaling). W_o stays
+    bf16 since it's tiny.
     """
     from transformer_engine.jax.triton_extensions.indexer import score_reduce_triton
 
@@ -178,8 +185,15 @@ def _indexer_impl_hybrid(Q, K, W_uq, W_dq, W_k, W_w,
     H_k = jnp.einsum("...sd,di->...si", K_d, W_k_d)          # (..., S, d_i)
     W_o = jnp.einsum("...td,dh->...th", Q_d, W_w.astype(wp)) # (..., T, H)
 
-    O = score_reduce_triton(H_q, H_k, W_o,
-                            out_dtype=out_dtype if out_dtype else wp)
+    if fp8_score:
+        H_q_fp8, sq = quantize_to_fp8(H_q, dtype=jnp.float8_e4m3fn)
+        H_k_fp8, sk = quantize_to_fp8(H_k, dtype=jnp.float8_e4m3fn)
+        O = score_reduce_triton(H_q_fp8, H_k_fp8, W_o,
+                                scale_hq=sq, scale_hk=sk,
+                                out_dtype=out_dtype if out_dtype else wp)
+    else:
+        O = score_reduce_triton(H_q, H_k, W_o,
+                                out_dtype=out_dtype if out_dtype else wp)
     return O
 
 
@@ -212,11 +226,11 @@ def indexer_topk(Q, K, W_uq, W_dq, W_k, weights, *, k, backend="triton"):
 
 # --- Top-level dispatch ---------------------------------------------------------
 
-@functools.partial(jax.jit, static_argnames=("backend", "out_dtype"))
+@functools.partial(jax.jit, static_argnames=("backend", "out_dtype", "fp8_score"))
 def indexer(Q, K, W_uq, W_dq, W_k, weights, *,
             scale_q=None, scale_k=None,
             scale_wq=None, scale_wd=None, scale_wk=None,
-            out_dtype=None, backend="reference"):
+            out_dtype=None, backend="reference", fp8_score=False):
     """Low-rank lightning-indexer.
 
     Args:
@@ -233,7 +247,12 @@ def indexer(Q, K, W_uq, W_dq, W_k, weights, *,
                  W_dq itself is FP8.
         out_dtype: output dtype override (defaults to Q.dtype, or weights.dtype
                  in FP8 mode).
-        backend: "reference", "fused" (Pallas), or "triton".
+        backend: "reference", "fused" (Pallas), "triton", or "hybrid".
+        fp8_score: hybrid backend only — when True, quantize Hq and Hk to
+                 fp8 e4m3 before the score-reduce kernel so the score MFMA
+                 runs native fp8 and Hq's HBM footprint halves. Pays off
+                 once Hq is large enough that the savings exceed the
+                 amax-quantize cost (typically production-sized shapes).
 
     Returns:
         O of shape (..., T, S).
@@ -250,7 +269,8 @@ def indexer(Q, K, W_uq, W_dq, W_k, weights, *,
     if backend == "triton":
         return _indexer_impl_triton(Q, K, W_uq, W_dq, W_k, weights, **fp8_kwargs)
     if backend == "hybrid":
-        return _indexer_impl_hybrid(Q, K, W_uq, W_dq, W_k, weights, **fp8_kwargs)
+        return _indexer_impl_hybrid(Q, K, W_uq, W_dq, W_k, weights,
+                                     fp8_score=fp8_score, **fp8_kwargs)
     raise ValueError(
         f"unknown backend {backend!r}; expected 'reference', 'fused', 'triton', "
         f"or 'hybrid'"

@@ -430,12 +430,13 @@ def _score_reduce_autotune_configs():
     return cfgs
 
 
-@triton.autotune(configs=_score_reduce_autotune_configs(), key=["H", "d_i"])
+@triton.autotune(configs=_score_reduce_autotune_configs(), key=["H", "d_i", "IS_FP8"])
 @triton.jit
 def _score_reduce_kernel(
-    Hq_ptr,       # (B, oH, T_t, H, d_i) — produced by einsum("...tc,hci->...thi")
-    Hk_ptr,       # (B, oH, T_s, d_i)
-    W_o_ptr,      # (B, oH, T_t, H)
+    Hq_ptr,       # (B, oH, T_t, H, d_i)  bf16 OR fp8 e4m3
+    Hk_ptr,       # (B, oH, T_s, d_i)    same dtype as Hq
+    W_o_ptr,      # (B, oH, T_t, H)      bf16 always
+    scale_ptr,    # 0-D fp32: combined scale_hq * scale_hk (1.0 in bf16 mode)
     O_ptr,        # (B, oH, T_t, T_s)
     B: tl.constexpr,
     oH: tl.constexpr,
@@ -445,6 +446,7 @@ def _score_reduce_kernel(
     d_i: tl.constexpr,
     BLOCK_T: tl.constexpr,
     BLOCK_S: tl.constexpr,
+    IS_FP8: tl.constexpr,
 ):
     """Compute one (BLOCK_T, BLOCK_S) tile of O for one (b, h_outer) slice.
 
@@ -454,6 +456,10 @@ def _score_reduce_kernel(
     and vary only in S — they all read the same per-head Hq slab, hitting
     L2 instead of HBM. Hq layout is the natural einsum output
     (..., T, H, d_i); per-head loads are strided in T (stride H*d_i).
+
+    FP8 mode (IS_FP8=True): Hq and Hk are e4m3 with per-tensor fp32 scales.
+    The two scales fold into one fp32 multiply at the end (relu commutes
+    with positive scaling). The score MFMA runs native fp8-fp8.
     """
     pid_s = tl.program_id(0)
     pid_t = tl.program_id(1)
@@ -489,9 +495,19 @@ def _score_reduce_kernel(
         wo_ptrs = W_o_ptr + wo_base + rt * H + h
         w_h = tl.load(wo_ptrs, mask=rt_mask, other=0.0)
 
+        # tl.dot lowers to native fp8-fp8 MFMA when both inputs are fp8;
+        # otherwise bf16-bf16 MFMA. Output is fp32 in both cases.
         score = tl.dot(Hq_h, Hk_T)
         score = tl.maximum(score, 0.0)
         acc += score * w_h[:, None].to(tl.float32)
+
+    # Apply the combined per-tensor dequant scale at the very end. relu is
+    # invariant under multiplication by a positive scalar (sq * sk > 0),
+    # so this is mathematically equivalent to scaling Hq_h and Hk_T per
+    # iteration but costs one fp32 multiply per output element instead of
+    # one per dot input.
+    scale = tl.load(scale_ptr)
+    acc = acc * scale
 
     o_ptrs = O_ptr + o_base + rt[:, None] * T_s + rs[None, :]
     tl.store(o_ptrs, acc.to(O_ptr.dtype.element_ty),
@@ -503,8 +519,8 @@ _score_reduce_p.multiple_results = True
 
 
 @_score_reduce_p.def_abstract_eval
-def _score_reduce_abstract(Hq, Hk, W_o, *, out_dtype):
-    del W_o
+def _score_reduce_abstract(Hq, Hk, W_o, scale, *, out_dtype):
+    del W_o, scale
     # Hq layout: (B, oH, T_t, H, d_i)
     B, oH, T_t, _H, _d_i = Hq.shape
     T_s = Hk.shape[2]
@@ -514,12 +530,13 @@ def _score_reduce_abstract(Hq, Hk, W_o, *, out_dtype):
 _score_reduce_p.def_impl(functools.partial(xla.apply_primitive, _score_reduce_p))
 
 
-def _score_reduce_lowering(ctx, Hq, Hk, W_o, *, out_dtype):
+def _score_reduce_lowering(ctx, Hq, Hk, W_o, scale, *, out_dtype):
     del out_dtype
     Hq_aval = ctx.avals_in[0]
     Hk_aval = ctx.avals_in[1]
     B, oH, T_t, H, d_i = Hq_aval.shape
     T_s = Hk_aval.shape[2]
+    is_fp8 = _is_fp8_dtype(Hq_aval.dtype)
 
     def grid_fn(merged_kwargs):
         bt = merged_kwargs.get("BLOCK_T", 64)
@@ -531,7 +548,7 @@ def _score_reduce_lowering(ctx, Hq, Hk, W_o, *, out_dtype):
     return triton_call_lowering(
         ctx,
         _score_reduce_kernel,
-        Hq, Hk, W_o,
+        Hq, Hk, W_o, scale,
         grid=grid_fn,
         num_warps=4,
         num_stages=2,
@@ -542,6 +559,7 @@ def _score_reduce_lowering(ctx, Hq, Hk, W_o, *, out_dtype):
             "T_s": T_s,
             "H": H,
             "d_i": d_i,
+            "IS_FP8": is_fp8,
         },
     )
 
@@ -550,7 +568,8 @@ mlir.register_lowering(_score_reduce_p, _score_reduce_lowering, platform="rocm")
 mlir.register_lowering(_score_reduce_p, _score_reduce_lowering, platform="cuda")
 
 
-def score_reduce_triton(Hq, Hk, W_o, *, out_dtype=None):
+def score_reduce_triton(Hq, Hk, W_o, *,
+                        scale_hq=None, scale_hk=None, out_dtype=None):
     """Triton fused score-matmul + relu + per-(t, h) weighted H-reduction.
 
     Replaces the pattern:
@@ -563,10 +582,13 @@ def score_reduce_triton(Hq, Hk, W_o, *, out_dtype=None):
     pays (the dominant cost in profile_indexer's einsum baseline).
 
     Args:
-        Hq:  (B, oH, T_t, H, d_i)
-        Hk:  (B, oH, T_s, d_i)
-        W_o: (B, oH, T_t, H)
-        out_dtype: defaults to Hq.dtype.
+        Hq:  (B, oH, T_t, H, d_i)   bf16 OR fp8 e4m3
+        Hk:  (B, oH, T_s, d_i)      must match Hq.dtype
+        W_o: (B, oH, T_t, H)        bf16
+        scale_hq, scale_hk:
+                 per-tensor fp32 dequant scales for Hq / Hk. Required when
+                 Hq is FP8; ignored otherwise.
+        out_dtype: defaults to Hq.dtype (or W_o.dtype in FP8 mode).
 
     Returns:
         O: (B, oH, T_t, T_s)
@@ -599,11 +621,28 @@ def score_reduce_triton(Hq, Hk, W_o, *, out_dtype=None):
             f"(B={B}, oH={oH}, T_t={T_t}, H={H})"
         )
 
-    if out_dtype is None:
-        out_dtype = Hq.dtype
+    is_fp8 = _is_fp8_dtype(Hq.dtype)
+    if is_fp8:
+        if Hk.dtype != Hq.dtype:
+            raise ValueError(
+                f"FP8 mode requires Hk.dtype == Hq.dtype; "
+                f"Hq is {Hq.dtype} but Hk is {Hk.dtype}."
+            )
+        if scale_hq is None or scale_hk is None:
+            raise ValueError("FP8 mode requires scale_hq and scale_hk.")
+        scale_combined = jnp.asarray(
+            jnp.float32(scale_hq) * jnp.float32(scale_hk),
+            dtype=jnp.float32,
+        )
+        if out_dtype is None:
+            out_dtype = W_o.dtype
+    else:
+        scale_combined = jnp.asarray(1.0, dtype=jnp.float32)
+        if out_dtype is None:
+            out_dtype = Hq.dtype
 
     return _score_reduce_p.bind(
-        Hq, Hk, W_o, out_dtype=jnp.dtype(out_dtype)
+        Hq, Hk, W_o, scale_combined, out_dtype=jnp.dtype(out_dtype)
     )[0]
 
 
