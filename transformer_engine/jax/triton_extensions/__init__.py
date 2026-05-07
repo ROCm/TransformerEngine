@@ -58,8 +58,4 @@ Usage:
 
 from .utils import *
 from .permutation import *
-from .indexer import (
-    indexer_fused_triton,
-    indexer_fused_topk_triton,
-    score_reduce_triton,
-)
+from .indexer import score_reduce_triton
