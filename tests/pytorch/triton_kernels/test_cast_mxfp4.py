@@ -203,6 +203,8 @@ def mxfp4_dequantize_cpu(
     packed = fp4_packed.cpu().numpy().astype(np.uint8)
     scales_np = scales.cpu().numpy().astype(np.uint8)
 
+    if packed.ndim > 2:
+        packed = packed.reshape(-1, packed.shape[-1])
     M, halfN = packed.shape
     N = halfN * 2
     num_blocks = N // BLOCK_SIZE
@@ -316,7 +318,7 @@ def compare_e8m0_scales(
     ],
 )
 @pytest.mark.parametrize(
-    ("rowwise", "columnwise", "shuffle_B_matrix_for_aiter"),
+    ("rowwise", "columnwise", "with_gemm_swizzled_scales"),
     [
         (True, False, False),
         (False, True, False),
@@ -327,7 +329,7 @@ def compare_e8m0_scales(
     ],
 )
 def test_quantize_mxfp4_standard(
-    shape, in_dtype, rowwise, columnwise, shuffle_B_matrix_for_aiter
+    shape, in_dtype, rowwise, columnwise, with_gemm_swizzled_scales
 ):
     """Standard MXFP4 quantization with statistical validation."""
     input_tensor = fill_uniform(shape, dtype=in_dtype)
@@ -335,7 +337,7 @@ def test_quantize_mxfp4_standard(
     quantizer = MXFP4Quantizer(
         rowwise=rowwise,
         columnwise=columnwise,
-        shuffle_B_matrix_for_aiter=shuffle_B_matrix_for_aiter,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
     )
 
     quantized_out = te_quantize_triton(input_tensor, quantizer=quantizer)
@@ -345,13 +347,13 @@ def test_quantize_mxfp4_standard(
 
     if rowwise:
         ref_data, ref_scale = mxfp4_quantize_cpu(
-            input_tensor, axis="row", SHUFFLE=shuffle_B_matrix_for_aiter
+            input_tensor, axis="row", SHUFFLE=with_gemm_swizzled_scales
         )
         num_blocks = math.ceil(K / MXFP4_BLOCK_SCALING_SIZE)
 
         y1_scales_triton = quantized_out._rowwise_scale_inv.view(torch.uint8)
         y1_scales_torch = ref_scale
-        if shuffle_B_matrix_for_aiter:
+        if with_gemm_swizzled_scales:
             y1_scales_triton = un_shuffle_scales(
                 y1_scales_triton.view(y1_scales_triton.shape[0] // 32, -1)
             )
@@ -390,13 +392,13 @@ def test_quantize_mxfp4_standard(
 
     if columnwise:
         ref_data, ref_scale = mxfp4_quantize_cpu(
-            input_tensor, axis="col", SHUFFLE=shuffle_B_matrix_for_aiter
+            input_tensor, axis="col", SHUFFLE=with_gemm_swizzled_scales
         )
         num_blocks = math.ceil(M / MXFP4_BLOCK_SCALING_SIZE)
 
         y1_scales_triton = quantized_out._columnwise_scale_inv.view(torch.uint8)
         y1_scales_torch = ref_scale
-        if shuffle_B_matrix_for_aiter:
+        if with_gemm_swizzled_scales:
             y1_scales_triton = un_shuffle_scales(
                 y1_scales_triton.view(y1_scales_triton.shape[0] // 32, -1)
             )
