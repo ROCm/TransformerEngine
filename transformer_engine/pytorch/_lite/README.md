@@ -211,11 +211,11 @@ fused + gelu/silu/relu for basic) fall back to unfused PyTorch ops.
 | Fused LayerNormLinear | Yes (pure-Python autograd Function) | Yes (CUDA) |
 | Fused LayerNormMLP | Yes (pure-Python autograd Function) | Yes (CUDA) |
 | SM margin (backward) | Ignored | Full per-stage control |
-| Tensor / sequence parallelism | No | Yes |
-| FSDP2 integration | No | Yes |
 
 **Gaps:** No cuDNN backend or pre-tuned CUDA kernels. SM margin control is
-ignored in the backward pass. No distributed parallelism integration (TP/SP).
+ignored in the backward pass. Distributed-parallelism status (TP/SP/FSDP2)
+for the fused compound modules is documented in the
+[Communication / Distributed](#communication--distributed) section.
 
 `LayerNormLinear` and `LayerNormMLP` are implemented as pure-Python
 `torch.autograd.Function` subclasses in `_lite/fused_layernorm_linear.py` and
@@ -223,8 +223,7 @@ ignored in the backward pass. No distributed parallelism integration (TP/SP).
 when FP8 is active, then chain to the Linear/MLP GEMMs. This is not the same
 thing as the full build's single CUDA kernel, but functionally covers the same
 API surface — including `return_bias`, `return_layernorm_output`, and all
-supported activations. Tensor parallelism and FSDP2 integration are the
-features missing from lite's compound modules.
+supported activations.
 
 The core norm operations are the strongest lite subsystem. AITER Triton kernels
 are the primary backend with TE Triton and PyTorch fallbacks. The fused
@@ -391,16 +390,23 @@ under [Known xfails](#known-xfails).
 | NVSHMEM integration | **Not available** | Full support |
 | Expert parallelism (EP) | MORI dispatch/combine | NCCL / NVSHMEM |
 | `torch.distributed` | Works normally | Works normally |
-| Tensor parallelism | No built-in support | Integrated in modules |
-| Sequence parallelism | No built-in support | Integrated in modules |
-| Context parallelism helpers | THD <-> BSHD conversion only | Full support |
+| FSDP2 integration | Yes — `use_fsdp2=True` wraps weights in `FSDPAGTensor` (1D mesh; HSDP / 2D mesh not yet plumbed) | Yes |
+| Tensor parallelism | No built-in support (compound modules accept `tp_size`/`tp_group`/`parallel_mode` for API compat but ignore them; hardcoded `tp_size=1`) | Integrated in modules |
+| Sequence parallelism (Megatron-style) | No built-in support (requires TP) | Integrated in modules |
+| Context parallelism | RoPE + attention CP supported; THD <-> BSHD conversion helpers | Full support |
 
-**Gaps:** Comm-overlap APIs remain stubs. Multi-GPU training works via standard
-`torch.distributed` (DDP, FSDP), but fused communication + compute overlap is
-not available. Tensor and sequence parallelism have no built-in support.
+**Gaps:** Comm-overlap APIs remain stubs. Tensor parallelism and Megatron-style
+sequence parallelism (which is a TP optimization) have no built-in support in
+lite's fused compound modules — `LayerNormLinear` / `LayerNormMLP` accept the
+related kwargs for API compatibility but hardcode `tp_size=1`. The multi-node
+story for lite is therefore FSDP/HSDP-shaped, not TP-shaped. FSDP2 with a 1D
+mesh is supported and tested; HSDP (2D mesh) requires `device_mesh` plumbing
+through the compound modules and is not yet wired.
 
-Expert parallelism is now supported via the MORI integration (see below), which
-bridges the most significant distributed gap for MoE workloads.
+Expert parallelism is supported via the MORI integration (see below), which
+bridges the most significant distributed gap for MoE workloads. Context
+parallelism (sequence sharding without TP, e.g. Ulysses-style) is supported
+in attention and RoPE.
 
 ---
 
