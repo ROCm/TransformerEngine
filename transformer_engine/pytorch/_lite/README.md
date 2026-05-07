@@ -1,5 +1,17 @@
 # Transformer Engine Lite (`tealite`)
 
+```
+            )
+           (
+            )                _              _ _ _
+         ___|___            | |_ ___  __ _ | (_) |_ ___
+        [_______]           | __/ _ \/ _` || | | __/ _ \
+                            | ||  __/ (_| || | | ||  __/
+                             \__\___|\__,_||_|_|\__\___|
+
+                       TransformerEngine, by candlelight
+```
+
 A pure-Python drop-in replacement for the `transformer_engine_torch` C++ extension
 module. It targets **ROCm / AMD GPUs** and eliminates the need for C++ compilation
 by dispatching to [AITER](https://github.com/ROCm/aiter) kernels (CK / Triton),
