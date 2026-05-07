@@ -13,19 +13,7 @@ from utils import (
     time_func, compute_tflops, run_benchmarks,
 )
 
-# Select which configs / shapes to run (comment/uncomment as needed)
-ACTIVE_CONFIGS = [
-    MODEL_CONFIGS[0],   # Llama3-8B/TP1
-    # MODEL_CONFIGS[1], # Llama3-8B/TP8
-    # MODEL_CONFIGS[2], # Llama3-70B/TP8
-    # MODEL_CONFIGS[3], # Llama3-405B/TP8
-    # MODEL_CONFIGS[4], # Qwen2.5-7B/TP1
-    # MODEL_CONFIGS[5], # Qwen2.5-72B/TP8
-]
-
-ACTIVE_SHAPES = gemm_shapes(ACTIVE_CONFIGS)
-# To restrict shapes, filter the dict:
-ACTIVE_SHAPES = {k: v for k, v in ACTIVE_SHAPES.items() if "QKV" in k}
+ACTIVE_SHAPES = gemm_shapes(MODEL_CONFIGS)
 
 
 def _generate_gemm_test_cases():
@@ -52,19 +40,19 @@ def bench_gemm(Case, M, N, K, dtype):
     out = fwd_func()
     grad_out = torch.randn_like(out)
 
-    def bwd_func():
+    def fwd_bwd_func():
         out = linear(x)
         out.backward(grad_out)
         x.grad = None
         linear.weight.grad = None
 
-    bwd_func()
+    fwd_bwd_func()
 
     fwd_flops = 2 * M * N * K
     bwd_flops = 2 * fwd_flops  # dX + dW
 
     fwd_ms = time_func(fwd_func)
-    fwd_bwd_ms = time_func(bwd_func)
+    fwd_bwd_ms = time_func(fwd_bwd_func)
     bwd_ms = fwd_bwd_ms - fwd_ms
 
     fwd_tflops = compute_tflops(fwd_flops, fwd_ms)

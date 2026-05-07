@@ -56,7 +56,7 @@ def bench_fp8_gemm(Case, M, N, K, dtype):
     def fwd_bwd_func():
         with te.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
             out = linear(x)
-        out.backward(grad_out)
+            out.backward(grad_out)
         x.grad = None
         linear.weight.grad = None
 

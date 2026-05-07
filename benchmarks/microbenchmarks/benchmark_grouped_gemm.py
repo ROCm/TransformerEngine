@@ -5,7 +5,6 @@
 # See LICENSE for license information.
 ###############################################################################
 
-import os
 import torch
 from utils import time_func, compute_tflops, run_benchmarks
 
@@ -165,10 +164,6 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype):
     x = torch.randn((B * M, K), dtype=dtype, device=device, requires_grad=True)
     w = torch.randn((B, N, K), dtype=dtype, device=device, requires_grad=True)
     group_lens = generate_grouped_gemm_group_lens(B, M, balance=True).to(device)
-    print("group_lens: ", group_lens)
-
-    os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
-    os.environ["NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK"] = "1"
 
     x_te = x.clone().detach()
     w_te = w.clone().detach()
@@ -189,14 +184,14 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype):
     fwd_te_tflops = compute_tflops(fwd_total_flops, fwd_te_ms)
     bwd_te_tflops = compute_tflops(bwd_total_flops, bwd_te_ms)
 
-    print(f"TE (CK_Tile)     Forward  {fwd_te_ms:.3f} ms | {fwd_te_tflops:.2f} TFLOPS")
-    print(f"TE (CK_Tile)     Backward {bwd_te_ms:.3f} ms | {bwd_te_tflops:.2f} TFLOPS")
+    print(f"  Forward      {fwd_te_ms:.3f} ms | {fwd_te_tflops:.2f} TFLOPS")
+    print(f"  Backward     {bwd_te_ms:.3f} ms | {bwd_te_tflops:.2f} TFLOPS")
 
     return {
-        "TE (CK_Tile) Forward Time (ms)": f"{fwd_te_ms:.2f}",
-        "TE (CK_Tile) Forward TFLOPS": f"{fwd_te_tflops:.2f}",
-        "TE (CK_Tile) Backward Time (ms)": f"{bwd_te_ms:.2f}",
-        "TE (CK_Tile) Backward TFLOPS": f"{bwd_te_tflops:.2f}",
+        "TE Forward Time (ms)": f"{fwd_te_ms:.2f}",
+        "TE Forward TFLOPS": f"{fwd_te_tflops:.2f}",
+        "TE Backward Time (ms)": f"{bwd_te_ms:.2f}",
+        "TE Backward TFLOPS": f"{bwd_te_tflops:.2f}",
     }
 
 
@@ -213,8 +208,8 @@ if __name__ == "__main__":
         bench_fn=bench_grouped_gemm,
         param_columns=["Case", "B", "M", "N", "K", "dtype"],
         metric_columns=[
-            "TE (CK_Tile) Forward Time (ms)", "TE (CK_Tile) Forward TFLOPS",
-            "TE (CK_Tile) Backward Time (ms)", "TE (CK_Tile) Backward TFLOPS",
+            "TE Forward Time (ms)", "TE Forward TFLOPS",
+            "TE Backward Time (ms)", "TE Backward TFLOPS",
         ],
         default_csv="benchmark_grouped_gemm.csv",
     )
