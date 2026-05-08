@@ -11,11 +11,11 @@ from functools import cache
 def get_arch():
     return triton.runtime.driver.active.get_current_target().arch
 
-def is_cdna4():
-    return get_arch() == "gfx950"
+def is_cdna3():
+    return get_arch() == "gfx942"
 
-get_torch_e4m3_type = lambda: torch.float8_e4m3fn if is_cdna4() else torch.float8_e4m3fnuz
-get_torch_e5m2_type = lambda: torch.float8_e5m2 if is_cdna4() else torch.float8_e5m2fnuz
+get_torch_e4m3_type = lambda: torch.float8_e4m3fn if not is_cdna3() else torch.float8_e4m3fnuz
+get_torch_e5m2_type = lambda: torch.float8_e5m2 if not is_cdna3() else torch.float8_e5m2fnuz
 
 # Convert te dtype to torch type.
 def te_dtype_to_torch_dtype(te_dtype):
@@ -87,9 +87,9 @@ def is_fp8_torch_dtype(dtype):
 
 def te_dtype_to_triton_dtype(dtype: tex.DType):
     if dtype == tex.DType.kFloat8E4M3:
-        return tl.float8e4b8 if not is_cdna4() else tl.float8e4nv
+        return tl.float8e4b8 if is_cdna3() else tl.float8e4nv
     if dtype == tex.DType.kFloat8E5M2:
-        return tl.float8e5b16 if not is_cdna4() else tl.float8e5
+        return tl.float8e5b16 if is_cdna3() else tl.float8e5
     if dtype == tex.DType.kFloat32:
         return tl.float32
     if dtype == tex.DType.kFloat16:
@@ -99,6 +99,6 @@ def te_dtype_to_triton_dtype(dtype: tex.DType):
 
 def get_fp8_max(dtype: tex.DType):
     if dtype == tex.DType.kFloat8E4M3:
-        return 240.0 if not is_cdna4() else 448.0
+        return 240.0 if is_cdna3() else 448.0
     if dtype == tex.DType.kFloat8E5M2:
         return 57344.0

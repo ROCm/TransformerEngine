@@ -1,6 +1,8 @@
 # Copyright (c) 2022-2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
+include_guard(GLOBAL)
+
 #Determine ROCM_PATH
 if(NOT "$ENV{ROCM_PATH}" STREQUAL "")
     set(ROCM_PATH "$ENV{ROCM_PATH}")
