@@ -16,6 +16,7 @@ from typing import Any, Dict, Generator, List, Optional, Set, Tuple, Union
 from contextlib import contextmanager
 import logging
 from types import MethodType
+from itertools import chain
 
 import torch
 import torch.nn.functional as F
@@ -31,6 +32,7 @@ from ..quantization import (
     DelayedScalingRecipeState,
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
+    MXFP4BlockScalingRecipeState,
     NVFP4BlockScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
@@ -51,6 +53,7 @@ if IS_HIP_EXTENSION:
     from ..triton_kernels.cast import te_quantize_triton
 from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..utils import get_device_compute_capability, is_non_tn_fp8_gemm_supported, torch_get_autocast_gpu_dtype
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ...common.recipe import DelayedScaling, Recipe
@@ -84,10 +87,10 @@ class UserBufferQuantizationMode(Enum):
 def get_cublas_workspace_size_bytes() -> None:
     """Return workspace size needed for current architecture"""
     if IS_HIP_EXTENSION:
-        """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
-        if get_device_compute_capability() == (9, 5):
+        """Return 64 MiB for gfx50x+, 32 MiB for all other architectures."""
+        if get_device_compute_capability() in ((9, 5), (12, 5)):
             return 67_108_864
-        return 33_554_432        
+        return 33_554_432
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
     if torch.cuda.get_device_properties(torch.cuda.current_device()).major >= 9:
         # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
@@ -288,16 +291,6 @@ def initialize_ub(
                 flush=True,
             )
 
-    # Allocate cuBLAS workspace with expanded size for chunking in overlapping GEMM calls
-    global _cublas_workspace
-    if _cublas_workspace is None:
-        _cublas_workspace = get_workspace().repeat(_NUM_MAX_UB_STREAMS)
-    elif _cublas_workspace.numel() != get_cublas_workspace_size_bytes() * _NUM_MAX_UB_STREAMS:
-        # This ensures we don't do `.repeat()` on an already expanded workspace
-        _cublas_workspace = torch.empty(
-            get_cublas_workspace_size_bytes(), dtype=torch.uint8, device="cuda"
-        ).repeat(_NUM_MAX_UB_STREAMS)
-
     # Default buffer precision: AllGather buffers use fp8 when using fp8 recipe
     layers_all_gather_overlap = [
         "qkv_fprop",
@@ -312,22 +305,43 @@ def initialize_ub(
     layers_reduce_scatter_overlap = ["proj_fprop", "fc2_fprop", "qkv_wgrad", "fc1_wgrad"]
     dgrad_reduce_scatter_overlap = ["qkv_dgrad", "fc1_dgrad"]
     # Default overlap methods for layers
-    methods = {
-        "ring_exchange": [
-            "qkv_fprop",
-            "fc1_fprop",
-            "proj_dgrad",
-            "fc2_dgrad",
-        ],
-        "pipeline": ["proj_fprop", "fc2_fprop"],
-        "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
-        "external": ["proj_wgrad", "fc2_wgrad"],
-    }
+    if IS_HIP_EXTENSION:
+        methods = {
+            "ring_exchange": [
+                "qkv_fprop",
+                "fc1_fprop",
+                "proj_dgrad",
+                "fc2_dgrad",
+                "proj_wgrad",
+                "fc2_wgrad",
+                "proj_fprop",
+                "fc2_fprop",
+                "qkv_dgrad",
+                "fc1_dgrad",
+                "qkv_wgrad",
+                "fc1_wgrad"
+            ],
+            "pipeline": [],
+            # TODO: Investigate issues with qkv_dgrad and fc1_dgrad overlap on ROCm
+            "bulk": [],
+        }
+    else:
+        methods = {
+            "ring_exchange": [
+                "qkv_fprop",
+                "fc1_fprop",
+                "proj_dgrad",
+                "fc2_dgrad",
+            ],
+            "pipeline": ["proj_fprop", "fc2_fprop"],
+            "bulk": ["qkv_dgrad", "qkv_wgrad", "fc1_dgrad", "fc1_wgrad"],
+            "external": ["proj_wgrad", "fc2_wgrad"],
+        }
 
     # AG-RS overlap pairs of layers forming a tensor-parallel block
     ag_rs_pairs = {"qkv_fprop": "proj_fprop", "fc1_fprop": "fc2_fprop"}
     rs_ag_pairs = {v: k for k, v in ag_rs_pairs.items()}
-    external_gemm_to_overlap = {"proj_wgrad": "proj_dgrad", "fc2_wgrad": "fc2_dgrad"}
+    external_gemm_to_overlap = {} if IS_HIP_EXTENSION else {"proj_wgrad": "proj_dgrad", "fc2_wgrad": "fc2_dgrad"}
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
 
@@ -348,7 +362,7 @@ def initialize_ub(
             "is_reduce_scatter": is_reduce_scatter,
             "num_sm": 1 if method == "ring_exchange" else 16,
             "cga_size": 1 if method == "ring_exchange" else 2,
-            "set_sm_margin": not method == "ring_exchange",
+            "set_sm_margin": not method == "ring_exchange" and not IS_HIP_EXTENSION, # Default set to False for HIP for performance
             "num_splits": tp_size if method == "ring_exchange" else 4,
             "aggregate": False,
             "atomic_gemm": False,
@@ -428,6 +442,7 @@ def initialize_ub(
             if (quantization_mode == UserBufferQuantizationMode.FP8 and fp8_buf)
             else dtype
         )
+
         if method == "ring_exchange":
             ub_obj = tex.CommOverlapP2P(
                 shape,  # Communication buffer shape
@@ -473,16 +488,26 @@ def initialize_ub(
                 ):
                     wgrad_name = name.replace("dgrad", "wgrad")
                     assert wgrad_name not in user_ub_cfg
-                    layers_reduce_scatter_overlap.remove(wgrad_name)
-                    layers_all_gather_overlap.remove(name)
-                    layers_reduce_scatter_overlap.append(name)
-                    methods["bulk"].remove(name)
+                    if wgrad_name in layers_reduce_scatter_overlap:
+                        layers_reduce_scatter_overlap.remove(wgrad_name)
+                    if name in layers_all_gather_overlap:
+                        layers_all_gather_overlap.remove(name)
+                    if name not in layers_reduce_scatter_overlap:
+                        layers_reduce_scatter_overlap.append(name)
+                    if name in methods["bulk"]:
+                        methods["bulk"].remove(name)
                     new_method = user_ub_cfg[name]["method"]
-                    methods[new_method].append(name)
+                    if name not in methods[new_method]:
+                        methods[new_method].append(name)
 
-        for name in (
-            methods["ring_exchange"] + methods["pipeline"] + methods["bulk"] + methods["external"]
-        ):
+        if IS_HIP_EXTENSION and user_ub_cfg is not None:
+            for name, cfg in user_ub_cfg.items():
+                assert cfg.get("method") != "bulk", (
+                    f"Bulk overlap method for '{name}' is not supported on HIP/ROCm. "
+                    "Please use 'ring_exchange' method instead."
+                )
+
+        for name in chain.from_iterable(methods.values()):
             ub_cfg = get_default_config(name)
             if user_ub_cfg is not None and name in user_ub_cfg:
                 fp8_buf = (name in layers_all_gather_overlap) or (
@@ -836,6 +861,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 recipe_state, Float8BlockScalingRecipeState
             ):
                 return
+            if recipe.mxfp4() and isinstance(recipe_state, MXFP4BlockScalingRecipeState):
+                return
             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return
 
@@ -1126,8 +1153,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_initialized = True
 
             self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
-            if self.fp8_meta["recipe"].mxfp8():  
-                self.keep_fp8_weight_transpose_cache = True 
+            if self.fp8_meta["recipe"].mxfp8() or self.fp8_meta["recipe"].mxfp4():
+                self.keep_fp8_weight_transpose_cache = True
 
         _current_recipe = self.fp8_meta["recipe"]
         if _original_recipe is not None and not (
@@ -1523,6 +1550,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 ):
                     reset_cache = True
             elif isinstance(out, MXFP8TensorStorage):
+                if quantizer.rowwise_usage and out._rowwise_data is None:
+                    reset_cache = True
+                elif quantizer.columnwise_usage and out._columnwise_data is None:
+                    reset_cache = True
+            elif isinstance(out, NVFP4TensorStorage):
                 if quantizer.rowwise_usage and out._rowwise_data is None:
                     reset_cache = True
                 elif quantizer.columnwise_usage and out._columnwise_data is None:

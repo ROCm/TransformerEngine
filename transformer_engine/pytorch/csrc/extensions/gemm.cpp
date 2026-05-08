@@ -20,6 +20,13 @@
 #include "transformer_engine/transformer_engine.h"
 #include "util.h"
 
+#include <torch/version.h>
+#if USE_ROCM && TORCH_VERSION_MINOR < 11
+using TECUDAGuard = at::hip::HIPGuardMasqueradingAsCUDA;
+#else
+using TECUDAGuard = at::cuda::CUDAGuard;
+#endif
+
 namespace {
 
 void* get_data_ptr(transformer_engine::pytorch::MaybeTensor tensor) {
@@ -45,10 +52,10 @@ bool is_low_precision(const DType type) {
 std::vector<size_t> getGemmOutputShape(const NVTEShape& A_shape, const bool transa,
                                        const NVTEShape& B_shape, const bool transb) {
   // Flatten outer dims to get 2D matrices
-  const size_t A0 = product(A_shape, 0, A_shape.ndim - 1);
-  const size_t A1 = A_shape.data[A_shape.ndim - 1];
-  const size_t B0 = product(B_shape, 0, B_shape.ndim - 1);
-  const size_t B1 = B_shape.data[B_shape.ndim - 1];
+  const size_t A0 = A_shape.ndim > 0 ? product(A_shape, 0, A_shape.ndim - 1) : 1;
+  const size_t A1 = A_shape.ndim > 0 ? A_shape.data[A_shape.ndim - 1] : 1;
+  const size_t B0 = B_shape.ndim > 0 ? product(B_shape, 0, B_shape.ndim - 1) : 1;
+  const size_t B1 = B_shape.ndim > 0 ? B_shape.data[B_shape.ndim - 1] : 1;
 
   // Check matrix dims
   NVTE_CHECK((transa ? A1 : A0) == (transb ? B0 : B1), "Invalid matrix dimensions for GEMM (A=(",
@@ -96,6 +103,11 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                              std::optional<CommOverlapType> comm_type, MaybeTensor extra_output,
                              bool bulk_overlap, float alpha, std::optional<float> beta) {
   using namespace transformer_engine::pytorch::detail;
+
+  // Ensure that cublasLt handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  TECUDAGuard device_guard(workspace.device());
 
   // Input tensors
   NVTE_CHECK(!A.is_none(), "Tensor A has not been provided");
@@ -240,9 +252,12 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   if (A_tensor.numel() != 0 && B_tensor.numel() != 0) {
 #ifndef USE_ROCM
     // Optionally swizzle the scaling factors
-    swizzled_scale_inverses_list.emplace_back(std::move(swizzle_scaling_factors(A_tensor, transa)));
-    swizzled_scale_inverses_list.emplace_back(
-        std::move(swizzle_scaling_factors(B_tensor, !transb)));
+    auto [A_row_scales, A_col_scales] = swizzle_scales_for_gemm(A_tensor, transa, !transa);
+    auto [B_row_scales, B_col_scales] = swizzle_scales_for_gemm(B_tensor, !transb, transb);
+    swizzled_scale_inverses_list.emplace_back(std::move(A_row_scales));
+    swizzled_scale_inverses_list.emplace_back(std::move(A_col_scales));
+    swizzled_scale_inverses_list.emplace_back(std::move(B_row_scales));
+    swizzled_scale_inverses_list.emplace_back(std::move(B_col_scales));
 
     // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer
     // as it is not natively supported by cublasLt
@@ -259,7 +274,6 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
 #endif
 
     if (comm_overlap) {
-#ifndef USE_ROCM
       // Prepare extra output tensor
       TensorWrapper extra_output_tensor;
       if (extra_output.has_value()) {
@@ -268,7 +282,6 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
         extra_output_tensor =
             makeTransformerEngineTensor(nullptr, std::vector<size_t>{0}, DType::kByte);
       }
-
       // Direct GEMM call to the correct overlap
       if (bulk_overlap) {
         NVTE_SCOPED_GIL_RELEASE({
@@ -285,6 +298,15 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                                                  accumulate, use_split_accumulator,
                                                  extra_output_tensor, main_stream);
           });
+#ifdef __HIP_PLATFORM_AMD__
+        } else if (!comm_overlap->is_aggregate()) {
+          NVTE_SCOPED_GIL_RELEASE({
+            comm_overlap->rocm_split_overlap_ag(A_tensor, transa, B_tensor, transb, D_tensor,
+                                                bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                                accumulate, use_split_accumulator,
+                                                extra_output_tensor, main_stream);
+          });
+#endif // #ifdef __HIP_PLATFORM_AMD
         } else {
           NVTE_SCOPED_GIL_RELEASE({
             comm_overlap->split_overlap_ag(A_tensor, transa, B_tensor, transb, out_tensor,
@@ -302,17 +324,26 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                                                  extra_output_tensor, main_stream);
           });
         } else {
+#ifdef __HIP_PLATFORM_AMD__
+          if (comm_overlap->is_p2p_overlap()) {
+            NVTE_SCOPED_GIL_RELEASE({
+              comm_overlap->rocm_split_overlap_rs(A_tensor, transa, B_tensor, transb, out_tensor,
+                                                  bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                                  accumulate, use_split_accumulator, extra_output_tensor,
+                                                  main_stream);
+            });
+          } else 
+#endif
+          {
           NVTE_SCOPED_GIL_RELEASE({
             comm_overlap->split_overlap_rs(A_tensor, transa, B_tensor, transb, out_tensor,
-                                           bias_tensor, te_pre_gelu_out, te_workspace, grad,
-                                           accumulate, use_split_accumulator, extra_output_tensor,
-                                           main_stream);
+                                          bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                          accumulate, use_split_accumulator, extra_output_tensor,
+                                          main_stream);
           });
+          }
         }
       }
-#else
-    NVTE_ERROR("ROCm TE does not support comm_overlap\n");
-#endif //!USE_ROCM
     } else {
       // Launch GEMM
       NVTE_SCOPED_GIL_RELEASE({
@@ -361,6 +392,11 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
                     at::Tensor workspace, size_t workspaceSize, bool accumulate,
                     bool use_split_accumulator, int math_sm_count, int m_split, int n_split,
                     bool gemm_producer, at::Tensor counter) {
+  // Ensure that cublasLt handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  TECUDAGuard device_guard(workspace.device());
+
   // TODO: Handle scaling modes
   NVTEScalingMode nvte_scaling_modeA = NVTE_DELAYED_TENSOR_SCALING;
   NVTEScalingMode nvte_scaling_modeB = NVTE_DELAYED_TENSOR_SCALING;
@@ -409,6 +445,11 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   if (single_output && D == std::nullopt) {
     NVTE_ERROR("not implemented, D should be allocated for single output case.");
   }
+
+  // Ensure that cublasLt handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  TECUDAGuard device_guard(workspace[0].device());
 
   void* output_data_ptr = nullptr;
   if (single_output) {
@@ -497,9 +538,9 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
 
   // Optionally swizzle the scaling factors
   swizzled_scale_inverses_list.emplace_back(
-      multi_tensor_swizzle_scaling_factors(te_A_wrappers, transa));
+      multi_tensor_swizzle_scales_for_gemm(te_A_wrappers, transa, !transa));
   swizzled_scale_inverses_list.emplace_back(
-      multi_tensor_swizzle_scaling_factors(te_B_wrappers, !transb));
+      multi_tensor_swizzle_scales_for_gemm(te_B_wrappers, !transb, transb));
 
   // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer
   // as it is not natively supported by cublasLt

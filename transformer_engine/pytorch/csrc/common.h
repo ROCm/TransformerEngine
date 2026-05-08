@@ -30,9 +30,7 @@
 #include <transformer_engine/activation.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/cast_transpose_noop.h>
-#ifndef USE_ROCM
 #include <transformer_engine/comm_gemm_overlap.h>
-#endif
 #include <transformer_engine/fused_attn.h>
 #include <transformer_engine/fused_rope.h>
 #include <transformer_engine/fused_router.h>
@@ -130,6 +128,7 @@ class Quantizer {
   bool rowwise_usage = true;
   bool columnwise_usage = true;
   bool internal = false;
+  bool optimize_for_gemm = false;
   py::handle quantizer;
 
  protected:
@@ -241,8 +240,6 @@ class Float8BlockQuantizer : public Quantizer {
   bool force_pow_2_scales = false;
   // Amax within quantization tile has a floor of epsilon.
   float amax_epsilon = 0.0;
-  // Whether quantized tensor will be used in an all-gather
-  bool all_gather_usage = false;
 
  private:
   int block_scaling_dim = 2;
@@ -293,7 +290,33 @@ class MXFP8Quantizer : public Quantizer {
   std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
 };
 
-#ifndef USE_ROCM
+#ifdef USE_ROCM
+class MXFP4Quantizer : public Quantizer {
+ public:
+  DType dtype;
+  bool use_hadamard;
+  bool shuffle_rowwise_data;
+  bool shuffle_columnwise_data;
+  bool with_gemm_swizzled_scales;
+
+  explicit MXFP4Quantizer(const py::handle& quantizer);
+
+  NVTEScalingMode get_scaling_mode() const override { return NVTE_MXFP4_1D_SCALING; }
+
+  void set_quantization_params(TensorWrapper* tensor) const override;
+
+  std::pair<TensorWrapper, py::object> create_tensor(const std::vector<size_t>& shape,
+                                                     DType dtype) const override;
+
+  std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
+
+  void quantize(const TensorWrapper& input, TensorWrapper& out,
+                const std::optional<TensorWrapper>& noop_flag = std::nullopt) override;
+
+  std::vector<size_t> get_scale_shape(const std::vector<size_t>& shape, bool columnwise) const;
+};
+#endif //#ifdef USE_ROCM
+
 class NVFP4Quantizer : public Quantizer {
  public:
   // fp4 dtype
@@ -347,7 +370,6 @@ class NVFP4Quantizer : public Quantizer {
   void quantize_impl(const TensorWrapper& input, TensorWrapper& out,
                      const std::optional<TensorWrapper>& noop_flag, bool compute_amax);
 };
-#endif // #ifndef USE_ROCM
 
 std::unique_ptr<Quantizer> convert_quantizer(py::handle quantizer);
 
@@ -370,11 +392,12 @@ inline size_t typeToNumBits(transformer_engine::DType t) {
     case transformer_engine::DType::kByte:
     case transformer_engine::DType::kFloat8E4M3:
     case transformer_engine::DType::kFloat8E5M2:
+    case transformer_engine::DType::kFloat8E8M0:
       return 8;
     case transformer_engine::DType::kFloat4E2M1:
       return 4;
     default:
-      NVTE_ERROR("Invalid type");
+      NVTE_ERROR("Invalid type (", static_cast<int>(t), ").");
   }
 }
 
@@ -406,8 +429,10 @@ inline at::ScalarType GetATenDType(transformer_engine::DType t) {
 #else
       return te_fp8_fnuz()? at::kFloat8_e5m2fnuz : at::kFloat8_e5m2;
 #endif // USE_ROCM
+    case transformer_engine::DType::kFloat8E8M0:
+      return at::kByte;  // e8m0 dtype requires PyTorch 2.7.0+
     default:
-      NVTE_ERROR("Invalid type");
+      NVTE_ERROR("Invalid type (", static_cast<int>(t), ").");
   }
 }
 
@@ -440,8 +465,7 @@ inline transformer_engine::DType GetTransformerEngineDType(at::ScalarType t) {
     case torch::kInt64:
       return transformer_engine::DType::kInt64;
     default:
-      std::cout << "Type: " << static_cast<int>(t) << std::endl;
-      NVTE_ERROR("Invalid type");
+      NVTE_ERROR("Invalid type (", static_cast<int>(t), ").");
   }
 }
 
@@ -503,7 +527,9 @@ void* getDataPtr(at::Tensor tensor, int offset = 0);
 
 std::vector<size_t> convertShape(const NVTEShape& shape);
 
-size_t roundup(const size_t value, const size_t multiple);
+size_t roundup(size_t value, size_t multiple);
+
+size_t ceildiv(size_t numer, size_t denom);
 
 NVTEShape convertTorchShape(const c10::IntArrayRef torch_shape);
 

@@ -11,6 +11,7 @@
 #include "fused_attn_aotriton.h"
 #include "fused_attn_ck.h"
 #include "../common.h"
+#include "../util/cuda_runtime.h" //cuda::sm_arch
 #include "utils.h"
 
 // map NVTE_QKV_Layout to NVTE_QKV_Layout_Group
@@ -281,6 +282,12 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, 
     int64_t window_size_right, bool return_max_logit, bool cuda_graph) {
   using namespace transformer_engine;
+
+  //gfx1250 is disabled in ck_fused_attn/CMakeLists.txt and is not supported by curretnt aotriton
+  const int gpu_arch = cuda::sm_arch(cuda::current_device());
+  if (gpu_arch == 125) {
+    return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+  }
   
   // TODO: Add return_max_logit support
   if (return_max_logit) return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
@@ -488,7 +495,7 @@ void nvte_fused_attn_bwd_qkvpacked(
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
-      false, // TODO: enable deterministic after CK team show us how
+      deterministic,
       input_QKV, input_O, input_dO, input_Bias, output_S,
       output_dQKV, output_dBias,
       input_cu_seqlens, input_cu_seqlens_padded,
@@ -677,7 +684,7 @@ void nvte_fused_attn_bwd_kvpacked(
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
-      false, // TODO: enable deterministic after CK team show us how
+      deterministic,
       input_Q, input_KV, input_O, input_dO, input_Bias, 
       output_S,
       output_dQ, output_dKV, output_dBias,
@@ -863,7 +870,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       attn_scale, dropout, 
       qkv_layout, bias_type, attn_mask_type,
       window_size_left, window_size_right,
-      false, // TODO: enable deterministic after CK team show us how
+      deterministic,
       input_Q, input_K, input_V, input_O, input_dO, input_Bias, 
       output_S,
       output_dQ, output_dK, output_dV, output_dBias,

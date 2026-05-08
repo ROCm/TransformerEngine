@@ -49,12 +49,12 @@ from ..quantize import (
     Quantizer,
     GroupedQuantizer,
     QuantizerSet,
-    QuantizeLayout,
     noop_quantizer_set,
     is_fp8_gemm_with_all_layouts_supported,
     apply_padding_to_scale_inv,
     get_quantize_config_with_recipe,
     get_global_quantize_recipe,
+    QuantizeLayout,
 )
 from .misc import get_padded_spec, is_all_reduce_in_float32
 from ..sharding import (
@@ -87,8 +87,8 @@ num_cublas_streams = get_num_compute_streams()
 def get_cublas_workspace_size_bytes() -> None:
     """Return workspace size needed for current architecture"""
     if is_hip_extension():
-        """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
-        if get_device_compute_capability(0) == 95:
+        """Return 64 MiB for gfx50x+, 32 MiB for all other architectures."""
+        if get_device_compute_capability(0) in (95, 125):
             return 67_108_864
         return 33_554_432
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""

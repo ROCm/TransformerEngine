@@ -16,3 +16,9 @@ If JUNITXML_PREFIX contains a path component, it is the caller's responsibility 
 If `JUNITXML_PREFIX` contains only a directory (no filename prefix), it should end with `/`.
 Test scripts do not add any extension to the log filename so it is advised to end `JUNITXML_SUFFIX` with `.xml`.
 It is the caller's responsibility to clean up generated files.
+
+## CI Docker images
+
+Default and release-specific TE CI images are listed in [`ci_config.json`](ci_config.json) under `docker_images`.
+
+The default image is built from [`.github/scripts/Dockerfile.ci.deps`](../.github/scripts/Dockerfile.ci.deps). It pins [ROCm/aiter](https://github.com/ROCm/aiter) at commit [`77455e3ecf4f0d28756afc452e914940c45b944b`](https://github.com/ROCm/aiter/commit/77455e3ecf4f0d28756afc452e914940c45b944b). That revision was validated in CI for **MXFP4 FP4 GEMM** kernel coverage.

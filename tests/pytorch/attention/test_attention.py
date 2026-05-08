@@ -80,6 +80,14 @@ if fp8_available and (device_compute_capability < (9, 0) or device_compute_capab
 seed = 1234
 reset_rng_states()
 
+# Determinism mode is selected by the NVTE_ALLOW_NONDETERMINISTIC_ALGO env var
+# (or by torch's global deterministic flag). When enabled, deterministic-only
+# tests run and non-determinism-only tests are skipped.
+_deterministic = (
+    not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+    or torch.are_deterministic_algorithms_enabled()
+)
+
 
 # Reset FP8 global state manager
 @pytest.fixture(autouse=True)
@@ -195,7 +203,14 @@ def test_dot_product_mem_calc():
 @pytest.mark.parametrize("swa", [False])
 @pytest.mark.parametrize("pad_between_seqs", [False])
 def test_dot_product_attention(
-    dtype, model_configs, model, ckpt_attn, workspace_opt, qkv_layout, swa, pad_between_seqs
+    dtype,
+    model_configs,
+    model,
+    ckpt_attn,
+    workspace_opt,
+    qkv_layout,
+    swa,
+    pad_between_seqs,
 ):
     """Test DotProductAttention module"""
 
@@ -416,6 +431,31 @@ def test_dpa_max_logit(dtype, model_configs, model, qkv_layout):
     config = model_configs[model]
     config.return_max_logit = True
     test_dot_product_attention(dtype, model_configs, model, False, True, qkv_layout, False, False)
+
+
+model_configs_num_splits = {
+    # test: ModelConfig(b, sq, hq, dqk)
+    "num_splits_1_0": ModelConfig(2, 2048, 24, 128, num_splits=2),
+    "num_splits_1_1": ModelConfig(1, 2048, 24, 128, max_seqlen_kv=4096, num_splits=4),
+}
+
+
+@pytest.mark.skipif(get_cudnn_version() < (8, 9, 1), reason="cuDNN 8.9.1+ is required.")
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("model_configs", [model_configs_num_splits])
+@pytest.mark.parametrize("model", model_configs_num_splits.keys())
+def test_dpa_num_splits(dtype, model_configs, model):
+    """Test DotProductAttention with FlashAttention-3 num_splits enabled"""
+    test_dot_product_attention(
+        dtype,
+        model_configs,
+        model,
+        False,
+        True,
+        None,
+        False,
+        False,
+    )
 
 
 model_configs_softmax = {
@@ -964,6 +1004,8 @@ def test_dpa_qkv_layout_thd_mqa_gqa(dtype, model_configs, model, qkv_layout, pad
 
     for num_q_per_gqa_group in num_querys_per_gqa_group:
         config.num_gqa_groups = config.num_heads // num_q_per_gqa_group
+        if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
+            continue
         test_dot_product_attention(
             dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
         )
@@ -1282,6 +1324,8 @@ def _run_dot_product_attention(
         core_attention_bias=bias,
         alibi_slopes=alibi_slopes,
         fast_zero_fill=True,
+        # Only pass num_splits when exercising the FlashAttention path
+        num_splits=config.num_splits if backend == "FlashAttention" else 1,
     )
     max_logit = None
     if config.return_max_logit:
@@ -1978,9 +2022,10 @@ def test_mha_fp8_vs_f16(
         fp8_meta=fp8_meta,
         is_training=is_training,
     )
-    flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
-    if flash_attn_supported + fused_attn_supported < 1:
+    flash_attn_supported, fused_attn_supported_fp8, unfused_attn_supported = available_backends
+    if flash_attn_supported + fused_attn_supported_fp8 < 1:
         pytest.skip("No FP8 attention backend available.")
+    fused_attn_supported_f16 = False
     if not fp8_dpa_bwd:
         available_backends, _, fused_attn_backends = get_available_attention_backends(
             config,
@@ -1988,8 +2033,8 @@ def test_mha_fp8_vs_f16(
             qkv_layout=qkv_format.replace("hd", "h3d"),
             is_training=is_training,
         )
-        _, fused_attn_supported, _ = available_backends
-        if not fused_attn_supported:
+        _, fused_attn_supported_f16, _ = available_backends
+        if not fused_attn_supported_f16:
             pytest.skip("No attention backend available.")
 
     if flash_attn_supported:
@@ -2001,23 +2046,28 @@ def test_mha_fp8_vs_f16(
             dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
         )
 
-    os.environ["NVTE_FLASH_ATTN"] = "0"
-    os.environ["NVTE_FUSED_ATTN"] = "1"
-    _attention_backends["backend_selection_requires_update"] = True
-    logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
-    fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
-        dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
-    )
+    if fused_attn_supported_fp8:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        _attention_backends["backend_selection_requires_update"] = True
+        logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = True")
+        fused_attn_fwd_fp8, param_names, fused_attn_bwd_fp8 = _run_mha_fp8_vs_f16(
+            dtype, config, True, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
+        )
 
-    logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = False")
-    fused_attn_fwd_f16, param_names, fused_attn_bwd_f16 = _run_mha_fp8_vs_f16(
-        dtype, config, False, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
-    )
+    if fused_attn_supported_f16:
+        os.environ["NVTE_FLASH_ATTN"] = "0"
+        os.environ["NVTE_FUSED_ATTN"] = "1"
+        _attention_backends["backend_selection_requires_update"] = True
+        logging.info("[test_mha_fp8_vs_f16]: run with fp8_mha = False")
+        fused_attn_fwd_f16, param_names, fused_attn_bwd_f16 = _run_mha_fp8_vs_f16(
+            dtype, config, False, qkv_format, input_layernorm, RoPE, is_training, fp8_recipe
+        )
 
     atol = 5e-1
     rtol = 5e-1
     rmse_tol = 0.15
-    if flash_attn_supported:
+    if flash_attn_supported and fused_attn_supported_f16:
         logging.debug("========== {:^25s} ==========".format("flash fp8 vs fused f16:"))
         logging.debug("========== {:^25s} ==========".format("forward output"))
         compare_and_assert(
@@ -2030,32 +2080,33 @@ def test_mha_fp8_vs_f16(
             rmse_tol,
             True,
         )
-    logging.debug("========== {:^25s} ==========".format("fused fp8 vs fused f16:"))
-    logging.debug("========== {:^25s} ==========".format("forward output"))
-    compare_and_assert(
-        fused_attn_fwd_fp8,
-        fused_attn_fwd_f16,
-        "fused_attn_fwd_fp8",
-        "fused_attn_fwd_f16",
-        atol,
-        rtol,
-        rmse_tol,
-        True,
-    )
+    if fused_attn_supported_fp8 and fused_attn_supported_f16:
+        logging.debug("========== {:^25s} ==========".format("fused fp8 vs fused f16:"))
+        logging.debug("========== {:^25s} ==========".format("forward output"))
+        compare_and_assert(
+            fused_attn_fwd_fp8,
+            fused_attn_fwd_f16,
+            "fused_attn_fwd_fp8",
+            "fused_attn_fwd_f16",
+            atol,
+            rtol,
+            rmse_tol,
+            True,
+        )
 
-    if is_training:
-        for i in range(len(param_names[:1])):
-            logging.debug("========== {:^25s} ==========".format(param_names[i]))
-            compare_and_assert(
-                fused_attn_bwd_fp8[i],
-                fused_attn_bwd_f16[i],
-                f"fused_attn_bwd_fp8[{i}]",
-                f"fused_attn_bwd_f16[{i}]",
-                atol,
-                rtol,
-                rmse_tol,
-                True,
-            )
+        if is_training:
+            for i in range(len(param_names[:1])):
+                logging.debug("========== {:^25s} ==========".format(param_names[i]))
+                compare_and_assert(
+                    fused_attn_bwd_fp8[i],
+                    fused_attn_bwd_f16[i],
+                    f"fused_attn_bwd_fp8[{i}]",
+                    f"fused_attn_bwd_f16[{i}]",
+                    atol,
+                    rtol,
+                    rmse_tol,
+                    True,
+                )
 
 
 def _run_mha_fp8_vs_f16(
@@ -2683,7 +2734,6 @@ class _custom_mha_fp8(torch.autograd.Function):
         max_s: int,
         fast_zero_fill: bool,
         fp8_meta: Dict[str, Any],
-        workspace: torch.Tensor,
         is_training: bool,
         mask_type: str,
         quantizers: list[Quantizer],
@@ -2712,7 +2762,6 @@ class _custom_mha_fp8(torch.autograd.Function):
         qkv, *_ = ext.general_gemm(
             qkv_weight_fp8,
             inp_fp8,
-            workspace,
             bias=qkv_bias,
             out_dtype=qkv_weight_fp8.dtype,
             quantization_params=qkv_quantizer,
@@ -2754,9 +2803,7 @@ class _custom_mha_fp8(torch.autograd.Function):
             s_quantizer=s_quantizer,
         )
 
-        tensors_to_save, tensor_objects = prepare_for_saving(
-            q, k, v, inp_fp8, qkv_weight_fp8, workspace, out
-        )
+        tensors_to_save, tensor_objects = prepare_for_saving(q, k, v, inp_fp8, qkv_weight_fp8, out)
 
         ctx.save_for_backward(*tensors_to_save)
         ctx.tensor_objects = tensor_objects
@@ -2786,7 +2833,7 @@ class _custom_mha_fp8(torch.autograd.Function):
     def backward(ctx, grad_output: torch.Tensor) -> Tuple[Union[torch.Tensor, None], ...]:
         with torch.cuda.nvtx.range("_DPA"):
             saved_tensors = ctx.saved_tensors
-            (q, k, v, inp_fp8, qkv_weight_fp8, workspace, out) = restore_from_saved(
+            (q, k, v, inp_fp8, qkv_weight_fp8, out) = restore_from_saved(
                 ctx.tensor_objects, saved_tensors
             )
 
@@ -2842,7 +2889,6 @@ class _custom_mha_fp8(torch.autograd.Function):
             qkv_dgrad, *_ = ext.general_gemm(
                 qkv_weight_fp8,
                 dqkv_c,
-                workspace,
                 ctx.dtype,
                 use_split_accumulator=_2X_ACC_DGRAD,
                 layout="NN",
@@ -2852,7 +2898,6 @@ class _custom_mha_fp8(torch.autograd.Function):
             qkv_wgrad, *_ = ext.general_gemm(
                 inp_fp8,
                 dqkv,
-                workspace,
                 ctx.dtype,
                 use_split_accumulator=_2X_ACC_WGRAD,
                 layout="NT",
@@ -2903,9 +2948,6 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
         with torch.no_grad():
             self.qkv_bias.zero_()
             self.qkv_weight.fill_(1.0)
-        self.workspace = torch.empty(
-            _CUBLASLT_WORKSPACE_SIZE_BYTES, dtype=torch.int8, device="cuda"
-        )
 
     def forward(
         self,
@@ -2924,9 +2966,92 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
                 max_s,
                 self.fast_zero_fill,
                 self.fp8_meta,
-                self.workspace,
                 self.training,
                 self.mask_type,
                 self.quantizers,
             )
         return out
+
+
+# ---------------------- Deterministic Backward Tests ----------------------
+
+
+_DETERMINISTIC_LAYOUT_MASK_COMBOS = [
+    pytest.param(layout, mask, id=f"{layout.upper()}-{mask.upper()}")
+    for layout in ("bshd_bshd_bshd", "bs3hd", "bshd_bs2hd", "thd_thd_thd")
+    for mask in (
+        "no_mask",
+        "causal",
+        "padding",
+        "padding_causal",
+        "padding_causal_bottom_right",
+    )
+    if not (layout.startswith("thd") and "padding" not in mask)
+]
+
+
+@pytest.mark.skipif(
+    not IS_HIP_EXTENSION, reason="CK split-accumulator deterministic backward is ROCm-only"
+)
+@pytest.mark.skipif(not _deterministic, reason="Test determinism only")
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pytest.param(torch.bfloat16, id="BF16"),
+        pytest.param(torch.float16, id="FP16"),
+    ],
+)
+@pytest.mark.parametrize("qkv_layout, attn_mask_type", _DETERMINISTIC_LAYOUT_MASK_COMBOS)
+@pytest.mark.parametrize(
+    "b, seq_len, h_q, h_kv, d",
+    [
+        pytest.param(2, 256, 8, 8, 128, id="b2_s256_MHA"),
+        pytest.param(2, 512, 8, 8, 128, id="b2_s512_MHA"),
+        pytest.param(2, 2048, 8, 8, 128, id="b2_s2048_MHA"),
+        pytest.param(2, 2048, 12, 4, 128, id="b2_s2048_GQA"),
+    ],
+)
+def test_deterministic_bwd_ck(
+    dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d
+):
+    """Test deterministic backward (CK backend): bitwise reproducibility.
+
+    Determinism mode must be enabled externally via NVTE_ALLOW_NONDETERMINISTIC_ALGO=0.
+    """
+    config = ModelConfig(
+        batch_size=b,
+        max_seqlen_q=seq_len,
+        num_heads=h_q,
+        head_dim_qk=d,
+        num_gqa_groups=h_kv,
+        attn_mask_type=attn_mask_type,
+    )
+
+    _, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        deterministic=True,
+        is_training=True,
+    )
+    if FusedAttnBackend["CK"] not in fused_attn_backends:
+        pytest.skip("This test requires the CK fused attention backend.")
+
+    kwargs = dict(
+        dtype=dtype,
+        config=config,
+        backend="FusedAttention",
+        ckpt_attn=False,
+        qkv_layout=qkv_layout,
+        workspace_opt=False,
+        pad_between_seqs=False,
+        is_training=True,
+    )
+
+    out1, _, grads1 = _run_dot_product_attention(**kwargs)
+    out2, _, grads2 = _run_dot_product_attention(**kwargs)
+
+    # Bitwise reproducibility across consecutive runs (output + gradients)
+    torch.testing.assert_close(out1, out2, atol=0, rtol=0, msg="output not bitwise reproducible")
+    for name, x, y in zip(("dQ", "dK", "dV"), grads1[:3], grads2[:3]):
+        torch.testing.assert_close(x, y, atol=0, rtol=0, msg=f"{name} not bitwise reproducible")

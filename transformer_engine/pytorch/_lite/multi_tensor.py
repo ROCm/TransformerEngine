@@ -219,3 +219,13 @@ def multi_tensor_compute_scale_and_scale_inv(amax_list, scale_list, scale_inv_li
         sf = (fp8_max / safe_amax) / (2 ** margin)
         scale.copy_(sf)
         scale_inv.copy_(1.0 / sf)
+
+
+def multi_tensor_compute_scale_inv_e8m0(*args, **kwargs):
+    """Compute e8m0 scale_inv from amax (MXFP8/MXFP4 master-weight cast path).
+
+    TODO: Implement when needed.
+    """
+    raise NotImplementedError(
+        "multi_tensor_compute_scale_inv_e8m0 not yet implemented in lite mode."
+    )

@@ -22,7 +22,12 @@ from transformer_engine.pytorch.utils import (
     get_device_compute_capability,
     split_tensor_along_dim,
 )
-from transformer_engine.pytorch.utils import attention_mask_func, nvtx_range_push, nvtx_range_pop
+from transformer_engine.pytorch.utils import (
+    attention_mask_func,
+    nvtx_range_push,
+    nvtx_range_pop,
+    get_nvtx_range_context,
+)
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
@@ -86,7 +91,34 @@ _flash_attn_fwd = None
 _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
+
+if IS_HIP_EXTENSION and os.getenv("NVTE_FLASH_ATTN_AITER", "0") == "1":
+    try:
+        import aiter
+        import triton
+        from aiter.ops.triton.mha import flash_attn_func, flash_attn_varlen_func
+        from aiter.ops.triton.mha import _flash_attn_forward as _flash_attn_fwd
+        from aiter.ops.triton.mha import flash_attn_onekernel_backward as _flash_attn_bwd
+        from aiter.ops.triton.mha import (
+            _flash_attn_forward as _flash_attn_varlen_fwd,
+        )
+        from aiter.ops.triton.mha import (
+            flash_attn_onekernel_backward as _flash_attn_varlen_bwd,
+        )
+    except ImportError as e:
+        attn_log.fa_logger.warning(
+            "NVTE_FLASH_ATTN_AITER is set but AITER Triton is not available."
+            " Falling back to standalone FlashAttn if available"
+            )
+    else:
+        fa_utils.use_aiter_triton = True
+        # Setup Flash attention utils
+        fa_utils.version = PkgVersion("2.7.1")  #masqurade as FA 2.7.1
+        fa_utils.set_flash_attention_version()
+        attn_log.fa_logger.info("Using AITER Triton for FlashAttn.")
 try:
+    if fa_utils.use_aiter_triton:
+        raise PackageNotFoundError  # skip version check for aiter triton
     fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
@@ -684,6 +716,7 @@ class FlashAttention(torch.nn.Module):
         inference_params: Optional[InferenceParams] = None,
         flash_attention_backend: Optional[PkgVersion] = PkgVersion("0"),
         fp8_output: bool = False,
+        num_splits: Optional[int] = 1,
     ) -> torch.Tensor:
         """flash-attn fprop"""
 
@@ -960,6 +993,7 @@ class FlashAttention(torch.nn.Module):
                 else:
                     fa_3_optional_forward_kwargs = {}
                     fa_3_optional_forward_kwargs["window_size"] = window_size
+                    fa_3_optional_forward_kwargs["num_splits"] = num_splits
                     if inference_params is None:
                         fa_3_optional_forward_kwargs["deterministic"] = self.deterministic
                     else:
@@ -1453,7 +1487,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dk = dk[..., : d_out.shape[-1]]
             dv = dv[..., : d_out.shape[-1]]
         else:
-            with torch.cuda.nvtx.range("FusedAttnFunc.backward"):
+            with get_nvtx_range_context("FusedAttnFunc.backward"):
                 # get nominal data type of dq, dk, dv
                 # FP16/BF16 attention: torch.float16 or torch.bfloat16
                 # FP8 attention:       torch.float16 or torch.bfloat16

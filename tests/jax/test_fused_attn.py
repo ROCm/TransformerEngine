@@ -4,6 +4,7 @@
 #
 # See LICENSE for license information.
 """Tests for fused attention"""
+import os
 from enum import Enum, auto
 from dataclasses import dataclass, field
 from functools import partial
@@ -30,6 +31,7 @@ from transformer_engine.jax.sharding import MeshResource
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
+    AttnSoftmaxType,
     QKVLayout,
     QKVFormat,
     reorder_causal_load_balancing,
@@ -51,6 +53,10 @@ from transformer_engine_jax import (
 from distributed_test_base import assert_equal_collectives
 from utils import assert_allclose, print_debug_tensor_stats
 
+# Determinism mode is selected by the NVTE_ALLOW_NONDETERMINISTIC_ALGO env var.
+# When set to "0", deterministic-only tests run and non-determinism-only tests are skipped.
+_deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+
 
 @pytest.fixture(autouse=True, scope="module")
 def init():
@@ -62,14 +68,16 @@ def init():
     yield
 
 
-@partial(jax.jit, static_argnums=(5, 6, 7, 9))
+@partial(jax.jit, static_argnums=(6, 7, 8, 9, 11))
 def general_dot_product_attention(
     query: ArrayLike,
     key: ArrayLike,
     value: ArrayLike,
+    softmax_offset: Optional[ArrayLike],
     bias: ArrayLike,
     mask: ArrayLike,
     deterministic: bool,
+    softmax_type: AttnSoftmaxType,
     scale_factor: float,
     dropout_rate: float,
     dropout_rng: ArrayLike,
@@ -94,6 +102,13 @@ def general_dot_product_attention(
         logits = logits.reshape((b, h_kv * num_groups, s_q, s_kv))
         # apply post-scale bias
         logits = logits + bias
+        # [ROCm] Detect query rows where ALL bias values are -inf (fully masked out).
+        # These rows would produce NaN in softmax; zero logits to prevent NaN since
+        # the softmax output for these rows is zeroed out below anyway.
+        # Use equality check against -inf so real-valued bias (e.g. 1HSS) is unaffected.
+        if is_hip_extension():
+            bias_all_neg_mask = jnp.all(bias == -jnp.inf, axis=-1, keepdims=True)
+            logits = jnp.where(bias_all_neg_mask, 0, logits)
         # reshape logits back to original
         logits = logits.reshape((b, h_kv, num_groups, s_q, s_kv))
 
@@ -102,7 +117,34 @@ def general_dot_product_attention(
             mask = jnp.expand_dims(mask, axis=-3)
         logits = jnp.where(mask, jnp.finfo(dtype).min, logits)
 
-    softmax_out = jax.nn.softmax(logits).astype(dtype)
+    match softmax_type:
+        case AttnSoftmaxType.VANILLA_SOFTMAX:
+            softmax_out = jax.nn.softmax(logits).astype(dtype)
+        case AttnSoftmaxType.OFF_BY_ONE_SOFTMAX:
+            # Softmax with +1 in denominator: exp(x_i) / (sum(exp(x_j)) + 1)
+            # Append a zero logit, apply standard softmax, then remove last column
+            zero_logit = jnp.zeros(logits.shape[:-1] + (1,), dtype=logits.dtype)
+            logits_with_extra = jnp.concatenate([logits, zero_logit], axis=-1)
+            softmax_with_extra = jax.nn.softmax(logits_with_extra, axis=-1)
+            softmax_out = softmax_with_extra[..., :-1].astype(dtype)
+        case AttnSoftmaxType.LEARNABLE_SOFTMAX:
+            # Append learnable offset logit, apply standard softmax, then remove last column
+            learnable_logit = softmax_offset.reshape(1, h_kv, num_groups, 1, 1)
+            learnable_logit = jnp.broadcast_to(learnable_logit, logits.shape[:-1] + (1,))
+            logits_with_extra = jnp.concatenate([logits, learnable_logit], axis=-1)
+            softmax_with_extra = jax.nn.softmax(logits_with_extra, axis=-1)
+            softmax_out = softmax_with_extra[..., :-1].astype(dtype)
+        case _:
+            raise NotImplementedError(f"Unknown {softmax_type=}")
+
+    # [ROCm] Zero out softmax for fully-masked rows to prevent NaN propagation in backward
+    # Reuses bias_all_neg_mask from the pre-softmax block above to avoid drift.
+    if bias is not None and is_hip_extension():
+        # Reshape 4D mask to 5D to match softmax_out (b, h_kv, num_groups, s_q, s_kv)
+        ms = bias_all_neg_mask.shape  # (batch_or_1, h_or_1, s_q, 1)
+        hkv = min(ms[1], h_kv)  # 1 for B1SS/11SS, h_kv for 1HSS
+        mask_5d = bias_all_neg_mask.reshape(ms[0], hkv, -1, ms[2], ms[3])
+        softmax_out = jnp.where(mask_5d, 0, softmax_out)
 
     if not deterministic and dropout_rate > 0.0:
         keep_prob = 1.0 - dropout_rate
@@ -241,7 +283,7 @@ def _split_valid_and_invalid(primitive, reference, pad):
     return primitive_valid, primitive_invalid, reference_valid, reference_invalid
 
 
-def jax_dpa(query, key, value, bias, mask, dropout_rng, **kwargs):
+def jax_dpa(query, key, value, bias, softmax_offset, mask, dropout_rng, **kwargs):
     """
     JAX native dot product attention implementation
     """
@@ -249,11 +291,13 @@ def jax_dpa(query, key, value, bias, mask, dropout_rng, **kwargs):
         query,
         key,
         value,
+        softmax_offset,
         bias,
         mask,
         deterministic=not kwargs["is_training"],
         scale_factor=kwargs["scaling_factor"],
         dropout_rate=kwargs["dropout_probability"],
+        softmax_type=kwargs["softmax_type"],
         dropout_rng=dropout_rng,
         dtype=jnp.float32,
     )
@@ -265,6 +309,7 @@ def customcall_fused_dpa(
     key,
     value,
     bias,
+    softmax_offset,
     sequence_descriptor,
     dropout_rng,
     **kwargs,
@@ -286,9 +331,9 @@ def customcall_fused_dpa(
             qkv_args = (query, key, value)
         case _:
             raise ValueError(f"Unsupported {qkv_layout=}")
-    return fused_attn(qkv_args, bias, sequence_descriptor, dropout_rng, **kwargs).astype(
-        query.dtype
-    )
+    return fused_attn(
+        qkv_args, bias, sequence_descriptor, dropout_rng, softmax_offset=softmax_offset, **kwargs
+    ).astype(query.dtype)
 
 
 class BiasShape(Enum):
@@ -323,6 +368,7 @@ class FusedAttnRunner:
     head_dim_v: int
     attn_bias_type: AttnBiasType
     attn_mask_type: AttnMaskType
+    softmax_type: AttnSoftmaxType
     dropout_prob: float
     use_old_rng: bool
     dtype: DTypeLike
@@ -331,6 +377,8 @@ class FusedAttnRunner:
     bias_shape: BiasShape
     window_size: Tuple[int, int]
     seq_desc_format: SeqDescFormat
+    stripe_size: int | None = None
+    num_segments_per_seq: int | None = None
 
     # Specifies sharding resources for distributed tests
     number_of_devices: int = 1
@@ -344,6 +392,14 @@ class FusedAttnRunner:
 
     # dictionary of expected collective comm bytes
     coll_count_ref: Optional[Dict[str, int]] = None
+
+    def __post_init__(self):
+        # Reset defaults for num_segments_per_seq if not explicitly passed
+        if self.num_segments_per_seq is None:
+            if self.qkv_layout.is_thd():
+                self.num_segments_per_seq = 2
+            else:
+                self.num_segments_per_seq = 1
 
     # See https://docs.nvidia.com/deeplearning/cudnn/latest/release-notes.html#cudnn-9-4-0 for known issue
     # generating zero-length ragged tensors. This setting adjusts the test to avoid the zero-length cases.
@@ -419,6 +475,7 @@ class FusedAttnRunner:
             self.qkv_layout,
             self.attn_bias_type,
             self.attn_mask_type,
+            self.softmax_type,
             self.dropout_prob,
             self.num_heads_q,
             self.num_heads_kv,
@@ -431,6 +488,18 @@ class FusedAttnRunner:
         if is_hip_extension():
             if self.backend == NVTE_Fused_Attn_Backend.NVTE_No_Backend:
                 pytest.skip("Unsupported inputs combination or device compute capability.")
+            # CK set_ck_mask maps NO_MASK/PADDING + SWA to mask_bottom_right, which uses
+            # bottom-right diagonal alignment. For cross-attention (s_q != s_kv) this
+            # produces different attention patterns than the top-left aligned reference.
+            if (
+                self.window_size is not None
+                and self.max_seqlen_q != self.max_seqlen_kv
+                and not self.attn_mask_type.is_causal()
+            ):
+                pytest.skip(
+                    "CK backend uses bottom-right mask alignment for non-causal SWA,"
+                    " which diverges from the top-left reference for cross-attention"
+                )
         else:
             if self.backend != NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
                 pytest.skip("Unsupported inputs combination or device compute capability.")
@@ -465,7 +534,7 @@ class FusedAttnRunner:
         else:
             key = jax.random.PRNGKey(0)
 
-        q_key, k_key, v_key, bias_key, dropout_key = jax.random.split(key, 5)
+        q_key, k_key, v_key, bias_key, dropout_key, softmax_key = jax.random.split(key, 6)
 
         q_shape = (self.batch_size, self.max_seqlen_q, self.num_heads_q, self.head_dim_qk)
         k_shape = (self.batch_size, self.max_seqlen_kv, self.num_heads_kv, self.head_dim_qk)
@@ -515,6 +584,13 @@ class FusedAttnRunner:
             pad_ratio = 0.3
         else:
             pad_ratio = 0.0
+
+        if self.softmax_type == AttnSoftmaxType.LEARNABLE_SOFTMAX:
+            self.softmax_offset = jax.random.uniform(
+                softmax_key, (1, self.num_heads_q, 1, 1), jnp.float32, -1.0
+            )
+        else:
+            self.softmax_offset = None
 
         def gen_valid(bs, max_seqlen, pad_ratio):
             pad_len = int(max_seqlen * pad_ratio)
@@ -570,7 +646,6 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            self.num_segments_per_seq = 2
             self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
             )
@@ -596,7 +671,6 @@ class FusedAttnRunner:
                 )
             self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
         else:
-            self.num_segments_per_seq = 1
             self.segment_ids_q, self.pad_q = gen_valid(
                 self.batch_size, self.max_seqlen_q, pad_ratio
             )
@@ -628,12 +702,14 @@ class FusedAttnRunner:
                 strategy=reorder_strategy,
                 cp_size=self.cp_size,
                 seq_dim=seq_dim,
+                stripe_size=self.stripe_size,
             )
             self.cp_inverse_reorder_fn = partial(
                 inverse_reorder_causal_load_balancing,
                 strategy=reorder_strategy,
                 cp_size=self.cp_size,
                 seq_dim=seq_dim,
+                stripe_size=self.stripe_size,
             )
         else:
             # no-ops for non cp or non load balanced
@@ -651,14 +727,24 @@ class FusedAttnRunner:
                         (self.offsets_q, self.offsets_kv),
                     )
                 case SeqDescFormat.SegmentIDs:
+                    # Exercise the path to generate the segment_pos in from_segment_ids_and_pos()
+                    # if no CP and load balancing, else explicitly pass the segment_pos
                     self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
                         (
                             self.cp_reorder_fn(self.segment_ids_q),
                             self.cp_reorder_fn(self.segment_ids_kv),
                         ),
                         (
-                            self.cp_reorder_fn(self.segment_pos_q),
-                            self.cp_reorder_fn(self.segment_pos_kv),
+                            (
+                                self.cp_reorder_fn(self.segment_pos_q),
+                                self.cp_reorder_fn(self.segment_pos_kv),
+                            )
+                            if self.cp_size > 1 and self.cp_load_balanced
+                            else None
+                        ),
+                        is_thd=self.qkv_layout.is_thd(),
+                        is_segment_ids_reordered=(
+                            True if self.cp_size > 1 and self.cp_load_balanced else False
                         ),
                     )
                 case _:
@@ -687,6 +773,8 @@ class FusedAttnRunner:
                     self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
                         (self.segment_ids_q, self.segment_ids_kv),
                         None,
+                        is_thd=self.qkv_layout.is_thd(),
+                        is_segment_ids_reordered=False,
                     )
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")
@@ -739,14 +827,26 @@ class FusedAttnRunner:
             self.bias_pspec = PartitionSpec()
         self.bias_sharding = NamedSharding(self.mesh, self.bias_pspec)
 
+        # Softmax offset sharding (1, num_heads, 1, 1)
+        # Use the same logic as HEAD_AXES: tpsp_resource if enabled, else tp_resource
+        head_resource = (
+            self.mesh_resource.tpsp_resource
+            if self.mesh_resource.tpsp_resource is not None
+            else self.mesh_resource.tp_resource
+        )
+        self.softmax_offset_pspec = PartitionSpec(None, head_resource, None, None)
+        self.softmax_offset_sharding = NamedSharding(self.mesh, self.softmax_offset_pspec)
+
+        self.dropout_rng_pspec = PartitionSpec(
+            None,
+        )
         # New-style RNG fix is only applied for AMD GPUs
-        if is_hip_extension():
-            if self.dropout_rng is not None and jnp.issubdtype(self.dropout_rng.dtype, jax.dtypes.prng_key):
-                self.dropout_rng_pspec = PartitionSpec()
-            else:
-                self.dropout_rng_pspec = PartitionSpec(None,)
-        else:
-            self.dropout_rng_pspec = PartitionSpec(None,)
+        if (
+            is_hip_extension() and
+            self.dropout_rng is not None and
+            jnp.issubdtype(self.dropout_rng.dtype, jax.dtypes.prng_key)
+        ):
+            self.dropout_rng_pspec = PartitionSpec()
 
         self.dropout_rng_sharding = NamedSharding(self.mesh, self.dropout_rng_pspec)
 
@@ -760,11 +860,11 @@ class FusedAttnRunner:
 
     def test_forward(self):
         """
-        Test forward without JIT
+        Test forward with JITted primitive and unJITted reference
         """
         self._setup_inputs()
 
-        args = [self.q, self.k, self.v, self.bias, self.mask, self.dropout_rng]
+        args = [self.q, self.k, self.v, self.bias, self.softmax_offset, self.mask, self.dropout_rng]
 
         customcall_args = [
             # Put test data onto each GPU for distributed.
@@ -774,12 +874,14 @@ class FusedAttnRunner:
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
             jax.device_put(self.bias, self.bias_sharding),
+            jax.device_put(self.softmax_offset, self.softmax_offset_sharding),
             jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
             jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
         ]
         kwargs = {
             "attn_bias_type": self.attn_bias_type,
             "attn_mask_type": self.attn_mask_type,
+            "softmax_type": self.softmax_type,
             "scaling_factor": self.scaling_factor,
             "dropout_probability": self.dropout_prob,
             "is_training": self.is_training,
@@ -788,6 +890,7 @@ class FusedAttnRunner:
             "window_size": self.window_size,
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
+            "stripe_size": self.stripe_size,
         }
 
         customcall_fused_dpa_jit = jit(
@@ -798,6 +901,7 @@ class FusedAttnRunner:
                 self.qkvo_sharding,
                 self.qkvo_sharding,
                 self.bias_sharding,
+                self.softmax_offset_sharding,
                 self.seq_desc_sharding,
                 self.dropout_rng_sharding,
             ],
@@ -858,7 +962,7 @@ class FusedAttnRunner:
                 jnp.mean(ret_valid.astype(jnp.float32), dtype=jnp.float32) * gradient_multiplier
             ).astype(self.dtype)
 
-        args = [self.q, self.k, self.v, self.bias, self.mask, self.dropout_rng]
+        args = [self.q, self.k, self.v, self.bias, self.softmax_offset, self.mask, self.dropout_rng]
         customcall_args = [
             # TODO(mgoldfarb-nvidia): We will need to add reordering for bias, mas and
             # THD params once we support those features on CP.
@@ -866,12 +970,14 @@ class FusedAttnRunner:
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
             jax.device_put(self.bias, self.bias_sharding),
+            jax.device_put(self.softmax_offset, self.softmax_offset_sharding),
             jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
             jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
         ]
         kwargs = {
             "attn_bias_type": self.attn_bias_type,
             "attn_mask_type": self.attn_mask_type,
+            "softmax_type": self.softmax_type,
             "scaling_factor": self.scaling_factor,
             "dropout_probability": self.dropout_prob,
             "is_training": self.is_training,
@@ -880,6 +986,7 @@ class FusedAttnRunner:
             "window_size": self.window_size,
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
+            "stripe_size": self.stripe_size,
         }
 
         # We can compute dBias only for the [1, h, s, s] layout
@@ -898,8 +1005,16 @@ class FusedAttnRunner:
         # Use FP16/BF16 to sum the results may cause overflow, use FP32 for the summation
         jitted_primitive = jit(
             value_and_grad(
-                lambda q, k, v, bias, *args: grad_func(
-                    customcall_fused_dpa, q, k, v, bias, *args, cp_reverse_out=True, **kwargs
+                lambda q, k, v, bias, softmax_offset, *args: grad_func(
+                    customcall_fused_dpa,
+                    q,
+                    k,
+                    v,
+                    bias,
+                    softmax_offset,
+                    *args,
+                    cp_reverse_out=True,
+                    **kwargs,
                 ),
                 arg_nums,
             ),
@@ -908,6 +1023,7 @@ class FusedAttnRunner:
                 self.qkvo_sharding,
                 self.qkvo_sharding,
                 self.bias_sharding,
+                self.softmax_offset_sharding,
                 self.seq_desc_sharding,
                 self.dropout_rng_sharding,
             ),
@@ -915,7 +1031,9 @@ class FusedAttnRunner:
         )
         jitted_reference = jit(
             value_and_grad(
-                lambda q, k, v, bias, *args: grad_func(jax_dpa, q, k, v, bias, *args, **kwargs),
+                lambda q, k, v, bias, softmax_offset, *args: grad_func(
+                    jax_dpa, q, k, v, bias, softmax_offset, *args, **kwargs
+                ),
                 arg_nums,
             )
         )
@@ -928,6 +1046,12 @@ class FusedAttnRunner:
         # Skip elementwise comparison when dropout enabled
         if self.dropout_prob > 0.0:
             return
+
+        # [ROCm] Verify no NaN or Inf in forward outputs
+        if is_hip_extension():
+            for name, out in [("Fused", primitive_out), ("Reference", reference_out)]:
+                assert not jnp.any(jnp.isnan(out)), f"{name} attention output contains NaN"
+                assert not jnp.any(jnp.isinf(out)), f"{name} attention output contains Inf"
 
         print_debug_tensor_stats(f"primitive_out", primitive_out)
         print_debug_tensor_stats(f"reference_grad_valid", reference_out)
@@ -955,6 +1079,17 @@ class FusedAttnRunner:
         primitive_dq = self.cp_inverse_reorder_fn(primitive_dq)
         primitive_dk = self.cp_inverse_reorder_fn(primitive_dk)
         primitive_dv = self.cp_inverse_reorder_fn(primitive_dv)
+
+        # [ROCm] Verify no NaN or Inf in gradients
+        if is_hip_extension():
+            for grad_name, p_grad, r_grad in [
+                ("dq", primitive_dq, reference_dq),
+                ("dk", primitive_dk, reference_dk),
+                ("dv", primitive_dv, reference_dv),
+            ]:
+                for src_name, grad in [("Fused", p_grad), ("Reference", r_grad)]:
+                    assert not jnp.any(jnp.isnan(grad)), f"{src_name} {grad_name} contains NaN"
+                    assert not jnp.any(jnp.isinf(grad)), f"{src_name} {grad_name} contains Inf"
 
         check_dqkv(primitive_dq, reference_dq, self.pad_q, 0)
         check_dqkv(primitive_dk, reference_dk, self.pad_kv, 1)
@@ -1009,22 +1144,67 @@ class FusedAttnRunner:
     ],
 )
 @pytest.mark.parametrize(
-    "qkv_layout",
+    "softmax_type",
     [
-        pytest.param(QKVLayout.BS3HD, id="QKV_PACKED"),
-        pytest.param(QKVLayout.BSHD_BS2HD, id="KV_PACKED"),
-        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id="SEPARATE"),
-        pytest.param(QKVLayout.T3HD, id="RAGGED_QKV_PACKED"),
-        pytest.param(QKVLayout.THD_T2HD, id="RAGGED_KV_PACKED"),
-        pytest.param(QKVLayout.THD_THD_THD, id="RAGGED_SEPARATE"),
+        pytest.param(AttnSoftmaxType.VANILLA_SOFTMAX, id="VANILLA_SOFTMAX"),
+        pytest.param(AttnSoftmaxType.OFF_BY_ONE_SOFTMAX, id="OFF_BY_ONE_SOFTMAX"),
+        pytest.param(AttnSoftmaxType.LEARNABLE_SOFTMAX, id="LEARNABLE_SOFTMAX"),
     ],
 )
 @pytest.mark.parametrize(
-    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype",
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout",
     [
+        # large data size + bf16 + qkv packed
         pytest.param(
-            2, 2048, 2048, 12, 12, 64, 64, jnp.bfloat16, id="2-2048-2048-12-12-64-64-BF16-SELF"
+            2,
+            2048,
+            2048,
+            12,
+            12,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.BS3HD,
+            id="2-2048-2048-12-12-64-64-BF16-SELF-QKV_PACKED",
         ),
+        pytest.param(
+            2,
+            2048,
+            2048,
+            12,
+            12,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.T3HD,
+            id="2-2048-2048-12-12-64-64-BF16-SELF-RAGGED_QKV_PACKED",
+        ),
+        # mid data size + bf16 + cross attn + kv packed
+        pytest.param(
+            2,
+            512,
+            1024,
+            12,
+            12,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BS2HD,
+            id="2-512-1024-12-12-64-64-BF16-CROSS-KV_PACKED",
+        ),
+        pytest.param(
+            2,
+            512,
+            1024,
+            12,
+            12,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.THD_T2HD,
+            id="2-512-1024-12-12-64-64-BF16-CROSS-RAGGED_KV_PACKED",
+        ),
+        # large data size + bf16 + cross attn + diff hidden v dim + qkv separate
         pytest.param(
             2,
             2048,
@@ -1032,18 +1212,10 @@ class FusedAttnRunner:
             12,
             12,
             64,
-            64,
+            32,
             jnp.bfloat16,
-            id="2-2048-1024-12-12-64-64-BF16-CROSS",
-        ),
-        pytest.param(
-            2, 2048, 2048, 12, 6, 64, 64, jnp.bfloat16, id="2-2048-2048-12-6-64-64-BF16-GQA"
-        ),
-        pytest.param(
-            4, 128, 128, 16, 16, 64, 64, jnp.float16, id="4-128-128-16-16-64-64-FP16-SELF"
-        ),
-        pytest.param(
-            4, 128, 128, 16, 16, 64, 32, jnp.float16, id="4-128-128-16-16-64-32-FP16-SELF"
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-2048-1024-12-12-64-32-BF16-CROSS-SEPARATE",
         ),
         pytest.param(
             2,
@@ -1054,16 +1226,132 @@ class FusedAttnRunner:
             64,
             32,
             jnp.bfloat16,
-            id="2-2048-1024-12-12-64-32-BF16-CROSS",
+            QKVLayout.THD_THD_THD,
+            id="2-2048-1024-12-12-64-32-BF16-CROSS-RAGGED_SEPARATE",
+        ),
+        # large data size + bf16 + gqa + kv packed
+        pytest.param(
+            2,
+            2048,
+            2048,
+            12,
+            6,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BS2HD,
+            id="2-2048-2048-12-6-64-64-BF16-GQA-KV_PACKED",
         ),
         pytest.param(
-            2, 2048, 2048, 12, 6, 128, 64, jnp.float16, id="2-2048-2048-12-6-128-64-FP16-GQA"
+            2,
+            2048,
+            2048,
+            12,
+            6,
+            64,
+            64,
+            jnp.bfloat16,
+            QKVLayout.THD_T2HD,
+            id="2-2048-2048-12-6-64-64-BF16-GQA-RAGGED_KV_PACKED",
+        ),
+        # small data size + fp16 + diff hidden v dim + qkv packed
+        pytest.param(
+            4,
+            128,
+            128,
+            16,
+            16,
+            64,
+            32,
+            jnp.float16,
+            QKVLayout.BS3HD,
+            id="4-128-128-16-16-64-32-FP16-SELF-QKV_PACKED",
         ),
         pytest.param(
-            10, 4096, 4096, 16, 16, 192, 128, jnp.float16, id="10-4096-4096-16-16-192-128-FP16-MLA",
+            4,
+            128,
+            128,
+            16,
+            16,
+            64,
+            32,
+            jnp.float16,
+            QKVLayout.T3HD,
+            id="4-128-128-16-16-64-32-FP16-SELF-RAGGED_QKV_PACKED",
+        ),
+        # small data size + fp16 + kv packed
+        pytest.param(
+            4,
+            128,
+            128,
+            16,
+            16,
+            64,
+            64,
+            jnp.float16,
+            QKVLayout.BSHD_BS2HD,
+            id="4-128-128-16-16-64-64-FP16-SELF-KV_PACKED",
         ),
         pytest.param(
-            10, 4096, 4096, 16, 16, 192, 128, jnp.bfloat16, id="10-4096-4096-16-16-192-128-BF16-MLA",
+            4,
+            128,
+            128,
+            16,
+            16,
+            64,
+            64,
+            jnp.float16,
+            QKVLayout.THD_T2HD,
+            id="4-128-128-16-16-64-64-FP16-SELF-RAGGED_KV_PACKED",
+        ),
+        # large data size + fp16 + cross attn + gqa + diff hidden v dim + qkv separate
+        pytest.param(
+            2,
+            1024,
+            2048,
+            12,
+            6,
+            128,
+            64,
+            jnp.float16,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-1024-2048-12-6-128-64-FP16-CROSS-GQA-SEPARATE",
+        ),
+        pytest.param(
+            2,
+            1024,
+            2048,
+            12,
+            6,
+            128,
+            64,
+            jnp.float16,
+            QKVLayout.THD_THD_THD,
+            id="2-1024-2048-12-6-128-64-FP16-CROSS-GQA-RAGGED_SEPARATE",
+        ),
+        pytest.param(
+            10,
+            4096,
+            4096,
+            16,
+            16,
+            192,
+            128,
+            jnp.float16,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="10-4096-4096-16-16-192-128-FP16-MLA",
+        ),
+        pytest.param(
+            10,
+            4096,
+            4096,
+            16,
+            16,
+            192,
+            128,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="10-4096-4096-16-16-192-128-BF16-MLA",
         ),
     ],
 )
@@ -1129,6 +1417,7 @@ class TestFusedAttn:
         d_v,
         attn_bias_type,
         attn_mask_type,
+        softmax_type,
         dropout_prob,
         use_old_rng,
         dtype,
@@ -1156,6 +1445,7 @@ class TestFusedAttn:
             d_v,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             dropout_prob,
             use_old_rng,
             dtype,
@@ -1185,6 +1475,7 @@ class TestFusedAttn:
         d_v,
         attn_bias_type,
         attn_mask_type,
+        softmax_type,
         dropout_prob,
         use_old_rng,
         dtype,
@@ -1209,6 +1500,7 @@ class TestFusedAttn:
             d_v,
             attn_bias_type,
             attn_mask_type,
+            softmax_type,
             dropout_prob,
             use_old_rng,
             dtype,
@@ -1219,6 +1511,87 @@ class TestFusedAttn:
             seq_desc_format,
         )
         runner.test_backward()
+
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="Bias all-neg-inf NaN fix is ROCm-specific (SWDEV-561757)"
+)
+@pytest.mark.parametrize(
+    "s_kv, h_kv, bias_shape",
+    [
+        pytest.param(1024, 12, BiasShape._B1SS, id="B1SS-SELF"),
+        pytest.param(512,  12, BiasShape._B1SS, id="B1SS-CROSS"),
+        pytest.param(1024, 6,  BiasShape._1HSS, id="1HSS-GQA"),
+        pytest.param(1024, 12, BiasShape._BHSS, id="BHSS-SELF"),
+        pytest.param(1024, 12, BiasShape._11SS, id="11SS-SELF"),
+    ],
+)
+@pytest.mark.parametrize(
+    "b, s_q, h_q, d_qk, d_v, dtype, qkv_layout",
+    [(2, 1024, 12, 64, 64, jnp.bfloat16, QKVLayout.BSHD_BSHD_BSHD)],
+)
+def test_backward_bias_all_neg_inf(
+    b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout, bias_shape
+):
+    """
+    Test backward with bias containing true -inf values for all supported bias shapes.
+    Regression test for SWDEV-561757: when bias rows are ALL -inf (fully masked-out query
+    positions), softmax produces NaN which propagates into dq/dk/dv. The CK kernel fix and
+    the reference fix in general_dot_product_attention handle this by zeroing out fully-masked
+    rows before and after softmax.
+
+    The bias is a binary mask with only two values: 0 and -inf. Some rows are entirely -inf
+    (fully masked-out), while other rows have a mix of 0 and -inf (partially masked).
+    """
+    runner = FusedAttnRunner(
+        batch_size=b,
+        max_seqlen_q=s_q,
+        max_seqlen_kv=s_kv,
+        num_heads_q=h_q,
+        num_heads_kv=h_kv,
+        head_dim_qk=d_qk,
+        head_dim_v=d_v,
+        attn_bias_type=AttnBiasType.POST_SCALE_BIAS,
+        attn_mask_type=AttnMaskType.NO_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_prob=0.0,
+        use_old_rng=True,
+        dtype=dtype,
+        is_training=True,
+        qkv_layout=qkv_layout,
+        bias_shape=bias_shape,
+        window_size=None,
+        seq_desc_format=SeqDescFormat.Mask,
+    )
+    runner._setup_inputs()
+
+    if runner.backend != NVTE_Fused_Attn_Backend.NVTE_CK:
+        pytest.skip("All-neg-inf bias NaN fix is CK-specific")
+
+    # Build a binary bias with only two values: 0 and -inf.
+    # Shape depends on bias_shape: B1SS=(b,1,s_q,s_kv), 1HSS=(1,h_q,s_q,s_kv), etc.
+    shape_map = {
+        BiasShape._B1SS: (b, 1, s_q, s_kv),
+        BiasShape._1HSS: (1, h_q, s_q, s_kv),
+        BiasShape._BHSS: (b, h_q, s_q, s_kv),
+        BiasShape._11SS: (1, 1, s_q, s_kv),
+    }
+    concrete_shape = shape_map[bias_shape]
+    bias = jnp.full(concrete_shape, -jnp.inf, dtype=dtype)
+    # Use an explicit block-diagonal pattern with guaranteed gaps so that:
+    #   - Rows inside a block have a mix of 0 (within-block columns) and -inf (outside)
+    #   - Rows in the gaps between blocks are entirely -inf (fully masked-out)
+    block_size = min(s_q, s_kv) // 8
+    gap_size = block_size // 2
+    pos = 0
+    while pos + block_size <= min(s_q, s_kv):
+        bias = bias.at[:, :, pos : pos + block_size, pos : pos + block_size].set(0.0)
+        pos += block_size + gap_size  # leave a gap of all-neg-inf rows
+    runner.bias = bias
+
+    # Prevent test_backward from re-running _setup_inputs which would regenerate bias
+    runner._setup_inputs = lambda: None
+    runner.test_backward()
+
 
 # Single test with new-style RNG
 @pytest.mark.skipif(
@@ -1241,6 +1614,7 @@ def test_jax_new_rng():
         head_dim_v = 64,
         attn_bias_type = AttnBiasType.NO_BIAS,
         attn_mask_type = AttnMaskType.NO_MASK,
+        softmax_type = AttnSoftmaxType.VANILLA_SOFTMAX,
         dropout_prob = 0.1,
         use_old_rng = False,
         dtype = jnp.bfloat16,
@@ -1252,3 +1626,123 @@ def test_jax_new_rng():
     )
     runner = FusedAttnRunner(**kwargs)
     runner.test_forward()
+
+
+def _run_deterministic_bwd_case(
+    qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d,
+    dtype=jnp.bfloat16,
+):
+    """
+    Shared helper for deterministic backward tests.
+
+    Verifies that the fused attention backward pass in deterministic mode
+    produces bitwise-reproducible gradients. Determinism mode must be enabled
+    externally via NVTE_ALLOW_NONDETERMINISTIC_ALGO=0.
+    """
+    runner = FusedAttnRunner(
+        batch_size=b,
+        max_seqlen_q=seq_len,
+        max_seqlen_kv=seq_len,
+        num_heads_q=h_q,
+        num_heads_kv=h_kv,
+        head_dim_qk=d,
+        head_dim_v=d,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=attn_mask_type,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_prob=0.0,
+        use_old_rng=False,
+        dtype=dtype,
+        is_training=True,
+        qkv_layout=qkv_layout,
+        bias_shape=BiasShape._1HSS,
+        window_size=None,
+        seq_desc_format=SeqDescFormat.Seqlens,
+    )
+    runner._setup_inputs()
+
+    if runner.backend != NVTE_Fused_Attn_Backend.NVTE_CK:
+        pytest.skip("This test requires the CK fused attention backend.")
+
+    q, k, v = runner.q, runner.k, runner.v
+    seq_desc = runner.sequence_desciptor
+
+    kwargs = dict(
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=attn_mask_type,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        scaling_factor=runner.scaling_factor,
+        dropout_probability=0.0,
+        is_training=True,
+        qkv_layout=qkv_layout,
+    )
+
+    # Fused backward — JIT-compiled, run twice for bitwise reproducibility
+    def fused_fn(q, k, v):
+        return customcall_fused_dpa(
+            q, k, v, None, None, seq_desc, None, **kwargs
+        ).astype(jnp.float32).sum()
+
+    fused_val_grad = jit(jax.value_and_grad(fused_fn, argnums=(0, 1, 2)))
+
+    _, grads1 = fused_val_grad(q, k, v)
+    _, grads2 = fused_val_grad(q, k, v)
+    for name, x, y in zip(("dQ", "dK", "dV"), grads1, grads2):
+        # Bitwise reproducibility across consecutive runs
+        assert_allclose(x, y, atol=0, rtol=0, err_msg=f"{name} not bitwise reproducible")
+
+
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="Deterministic backward only applies to AMD hardware"
+)
+@pytest.mark.skipif(not _deterministic, reason="Test determinism only")
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pytest.param(jnp.bfloat16, id="BF16"),
+        pytest.param(jnp.float16, id="FP16"),
+    ],
+)
+@pytest.mark.parametrize(
+    "qkv_layout",
+    [
+        pytest.param(QKVLayout.BS3HD, id="BS3HD"),
+        pytest.param(QKVLayout.BSHD_BS2HD, id="BSHD_BS2HD"),
+        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id="BSHD_BSHD_BSHD"),
+        pytest.param(QKVLayout.T3HD, id="T3HD"),
+        pytest.param(QKVLayout.THD_T2HD, id="THD_T2HD"),
+        pytest.param(QKVLayout.THD_THD_THD, id="THD_THD_THD"),
+    ],
+)
+@pytest.mark.parametrize(
+    "attn_mask_type",
+    [
+        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
+        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
+        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
+        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+        pytest.param(
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK, id="PADDING_CAUSAL_BOTTOM_RIGHT"
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "b, seq_len, h_q, h_kv, d",
+    [
+        pytest.param(2, 256, 8, 8, 128, id="b2_s256_MHA"),
+        pytest.param(2, 512, 8, 8, 128, id="b2_s512_MHA"),
+        pytest.param(2, 2048, 8, 8, 128, id="b2_s2048_MHA"),
+        pytest.param(2, 2048, 12, 4, 128, id="b2_s2048_GQA"),
+    ],
+)
+class TestFusedAttnWithDeterminism:
+    """Fused attention tester (CK backend) with deterministic backward."""
+
+    @staticmethod
+    def test_backward_bitwise_reproducible(
+        dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d
+    ):
+        """Test deterministic backward (CK backend): bitwise reproducibility."""
+        _run_deterministic_bwd_case(
+            qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d, dtype=dtype,
+        )

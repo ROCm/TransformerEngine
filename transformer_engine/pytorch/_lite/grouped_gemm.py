@@ -125,7 +125,9 @@ def te_general_grouped_gemm(
             out_dtype = out[0].dtype
 
     _, bias_or_grad_bias, _ = general_grouped_gemm_triton(
-        A, B, out, out_dtype, workspaces,
+        A, B, out,
+        quantization_params=None,
+        out_dtype=out_dtype,
         layout=layout,
         m_splits=m_splits,
         gelu=gelu,

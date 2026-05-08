@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -57,8 +59,18 @@ __global__ void __launch_bounds__(512)
   fp4vec value;
   value.vec = input_vectorized[my_index];
   fp8e4m3 scale = scales[my_scale_index];
+  // NVFP4 may reach this path with scale present but no separate amax buffer.
+  // Use 1.0f as the neutral fallback when tensor_amax is not provided on HIP.
+#ifndef __HIP_PLATFORM_AMD__
   float amax = *tensor_amax;
+#else
+  float amax = (tensor_amax != nullptr) ? *tensor_amax : 1.0f;
+#endif
+#if defined(__HIP_DEVICE_COMPILE__)
+  constexpr float factor_inv = 1.0f / (detail::TypeExtrema<fp4e2m1>::max * detail::TypeExtrema<fp8e4m3>::max);
+#else
   constexpr float factor_inv = 1.0 / (6.0 * 448.0);
+#endif
   float final_scale = static_cast<float>(scale) * amax * factor_inv;
 #pragma unroll
   for (int i = 0; i < 4; i++) {
@@ -80,6 +92,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   CheckInputTensor(input, "input");
   CheckOutputTensor(*output, "output");
   NVTE_CHECK(input.data.dtype == DType::kFloat4E2M1, "Input must have FP4 type.");
+  NVTE_CHECK(!input.with_gemm_swizzled_scales, "Input must have scales in compact format.");
   NVTE_CHECK(is_high_precision_dtype(output->data.dtype), "Output must be in higher precision.");
   NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
 

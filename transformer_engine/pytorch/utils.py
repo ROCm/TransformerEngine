@@ -10,12 +10,13 @@ import functools
 import math
 import os
 from typing import Any, Callable, List, Optional, Sequence, Tuple, Union
+from contextlib import nullcontext
 import numpy as np
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
-from . import torch_version
 from .quantized_tensor import Quantizer
+from .torch_version import torch_version
 from ..debug.pytorch.debug_quantization import DebugQuantizedTensor
 
 
@@ -482,7 +483,7 @@ def assert_dim_for_all_gather(
 def is_bf16_compatible() -> None:
     if IS_HIP_EXTENSION:
         # only MI200 and newer machines support bf16
-        if get_device_compute_capability() in [(9, 4), (9, 5)] or is_mi200():
+        if get_device_compute_capability() in ((9, 4), (9, 5), (12, 5)) or is_mi200():
             return True
         else:
             return False
@@ -624,6 +625,24 @@ def _nvtx_enabled() -> bool:
 _nvtx_range_messages: list[str] = []
 
 
+def get_nvtx_range_context(msg: str):
+    """Get NVTX context manager to tag module forward and backward passes.
+
+    Set `NVTE_NVTX_ENABLED=1` in the environment to enable NVTX
+    context manager for module level profiling tags.
+
+    Parameters
+    ----------
+    msg : str
+        Message to associate with profiling context.
+
+    """
+
+    if _nvtx_enabled():
+        return torch.cuda.nvtx.range(msg)
+    return nullcontext()
+
+
 def nvtx_range_push(msg: str) -> None:
     """Push NVTX range onto stack, if NVTX range profiling is enabled
 
@@ -632,7 +651,7 @@ def nvtx_range_push(msg: str) -> None:
 
     Parameters
     ----------
-    msg: str
+    msg : str
         Message to associate with range
 
     """
@@ -650,7 +669,7 @@ def nvtx_range_pop(msg: Optional[str] = None) -> None:
 
     Parameters
     ----------
-    msg: str, optional
+    msg : str, optional
         Message associated with range
 
     """

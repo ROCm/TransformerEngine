@@ -59,6 +59,7 @@ def do_hipify(te_root: Union[Path, str], src_dir: Union[Path, str],
         is_pytorch_extension=True,
         hipify_extra_files_only=False,
         show_detailed=False,
+        show_progress=False,
         no_math_replace=True)
     
     # Convert hipify objects to dictionaries for consistent behavior

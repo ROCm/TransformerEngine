@@ -15,15 +15,14 @@
 
 #ifndef USE_ROCM
 #define FP4_TYPE_SUPPORTED (CUDA_VERSION >= 12080)
+#else
+#define FP4_TYPE_SUPPORTED (true)
+#endif
+
 #include <cuda_bf16.h>
 #include <cuda_fp8.h>
 #if FP4_TYPE_SUPPORTED
 #include <cuda_fp4.h>
-#endif
-#else
-#define FP4_TYPE_SUPPORTED (false)
-#include <hip/hip_bfloat16.h>
-#include "amd_detail/hip_float8.h"
 #endif
 #include <cuda_runtime_api.h>
 
@@ -302,6 +301,10 @@ class Tensor {
     tensor_.set_amax(nullptr, DType::kFloat32, tensor_.defaultShape);
   }
 
+  void set_with_gemm_swizzled_scales(bool with_gemm_swizzled_scales){
+    tensor_.set_with_gemm_swizzled_scales(with_gemm_swizzled_scales);
+  }
+
   void to_cpu() const;
   void from_cpu() const;
   void set_scale(float scale);
@@ -339,15 +342,34 @@ constexpr uint32_t FP32_MANTISSA_BITS = 23;
 
 // [128,4] rowwise and [4,128] colwise alignment requirement
 #ifdef __HIP_PLATFORM_AMD__
+// For mxfp8:
 constexpr size_t scale_tensor_alignment_X_rowwise = 1;
 constexpr size_t scale_tensor_alignment_Y_rowwise = 1;
 constexpr size_t scale_tensor_alignment_X_colwise = 1;
 constexpr size_t scale_tensor_alignment_Y_colwise = 1;
+
+// For nvfp4:
+constexpr size_t nvfp4_scale_tensor_alignment_Y_rowwise = 128;
+constexpr size_t nvfp4_scale_tensor_alignment_X_rowwise = 4;
+constexpr size_t nvfp4_scale_tensor_alignment_Y_colwise = 4;
+constexpr size_t nvfp4_scale_tensor_alignment_X_colwise = 128;
+
+constexpr size_t mxfp4_scale_tensor_alignment_Y_rowwise = 256;
+constexpr size_t mxfp4_scale_tensor_alignment_X_rowwise = 8;
+constexpr size_t mxfp4_scale_tensor_alignment_Y_colwise = 8;
+constexpr size_t mxfp4_scale_tensor_alignment_X_colwise = 256;
 #else
 constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t scale_tensor_alignment_X_rowwise = 4;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 constexpr size_t scale_tensor_alignment_X_colwise = 128;
+#endif
+
+#ifdef __HIP_PLATFORM_AMD__
+static constexpr float E2M1_LUT[16] = {
+     0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
+    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
+};
 #endif
 
 inline size_t divide_round_up(const size_t N, const size_t M) {
@@ -513,7 +535,7 @@ template <typename T>
 void compare_scaling_factors(const std::string &name, const T *test, const T *ref,
                              const size_t row_blocks, const size_t col_blocks, const size_t stride,
 #ifdef USE_ROCM
-                             std::vector<size_t>& mismatch_indices, 
+                             std::vector<size_t>& mismatch_indices,
 #endif  //#ifdef USE_ROCM
                              size_t& mismatches_num,
                              const size_t scale_diff_abs_tolerance = 0,
@@ -529,7 +551,11 @@ void adjust_ref_for_e8m0_scale_error(const std::string &name,
 #endif
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
-                                            const size_t block_size_rows, const size_t block_size_cols);
+                                            const size_t block_size_rows, const size_t block_size_cols
+#ifdef USE_ROCM
+                                            , const NVTEScalingMode scaling_mode = NVTE_MXFP8_1D_SCALING
+#endif
+                                          );
 
 std::pair<double, double> getTolerances(const DType type);
 

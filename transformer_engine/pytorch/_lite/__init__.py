@@ -82,6 +82,7 @@ from .multi_tensor import (
     multi_tensor_adam_capturable, multi_tensor_adam_capturable_master,
     multi_tensor_sgd,
     multi_tensor_compute_scale_and_scale_inv,
+    multi_tensor_compute_scale_inv_e8m0,
 )
 from .router import (
     fused_topk_with_score_function_fwd, fused_topk_with_score_function_bwd,

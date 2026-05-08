@@ -40,6 +40,14 @@ int sm_arch(int device_id = -1);
  * \return GPU arch name and compute capabilities string.
  */
 const std::string &sm_arch_name(int device_id = -1);
+
+/* \brief Warp/wavefront size on a device
+ *
+ * \param[in] device_id CUDA/HIP device (default is current device)
+ *
+ * \return Number of threads per warp (NVIDIA) or wavefront (AMD)
+ */
+int warp_size(int device_id = -1);
 #endif
 
 /* \brief Number of multiprocessors on a device
@@ -50,7 +58,6 @@ const std::string &sm_arch_name(int device_id = -1);
  */
 int sm_count(int device_id = -1);
 
-#ifndef __HIP_PLATFORM_AMD__
 /* \brief Minimum and maximum stream priorities supported on device
  *
  * \param[in] device_id CUDA device (default is current device)
@@ -68,7 +75,6 @@ void stream_priority_range(int *low_priority, int *high_priority, int device_id 
  * \return CUDA multicast support flag
  */
 bool supports_multicast(int device_id = -1);
-#endif
 
 /* \brief Path to CUDA/ROCm Toolkit headers
  *

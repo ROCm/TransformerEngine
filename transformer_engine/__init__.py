@@ -98,9 +98,7 @@ except metadata.PackageNotFoundError:
                 __version__ = te_version() + "+lite"
             except Exception:
                 __version__ = "0.0.0+lite"
-    elif not transformer_engine.common.te_rocm_build:
-        raise
     else:
-        _te_core_installed, _, __version__ = transformer_engine.common.get_te_core_package_info()
+        _te_core_installed, _, __version__ = transformer_engine.common.get_te_core_package_info(True)
         if not _te_core_installed:
             raise

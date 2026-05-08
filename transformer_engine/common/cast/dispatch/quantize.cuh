@@ -20,8 +20,16 @@
 #include "../../util/vectorized_pointwise.h"
 #include "../core/common.cuh"
 #include "../fp8/quantize_fp8.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../fp8/rocm_cast.cuh"
+#endif
 #include "../mxfp8/quantize_mxfp8.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "../mxfp4/quantize_mxfp4.cuh"
+#endif //#ifdef __HIP_PLATFORM_AMD__
+//TODO: ROCm TE does not support nvfp4 yet
 #ifndef __HIP_PLATFORM_AMD__
+#include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "../nvfp4/quantize_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
 #endif //#ifndef __HIP_PLATFORM_AMD__
@@ -76,9 +84,16 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
               dummy_workspace_tensor, stream);
         }
       } else if (output_tensor->has_data()) {
-        fp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
-            *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
-            dummy_workspace_tensor, stream);
+#ifdef __HIP_PLATFORM_AMD__
+        if constexpr (!IS_ACT) {
+          fp8::rocm_cast_only(*input_tensor, *noop_tensor, output_tensor, stream);
+        } else
+#endif
+        {
+          fp8::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
+              *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
+              dummy_workspace_tensor, stream);
+        }
       }
       break;
     }
@@ -91,7 +106,17 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
           dummy_workspace_tensor, stream);
       break;
     }
-#ifndef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
+    case NVTE_MXFP4_1D_SCALING: {
+      const Tensor *dummy_input_tensor = nullptr;
+      Tensor *dummy_dbias_tensor = nullptr;
+      Tensor *dummy_workspace_tensor = nullptr;
+      mxfp4::quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
+          *input_tensor, dummy_input_tensor, noop_tensor, output_tensor, dummy_dbias_tensor,
+          dummy_workspace_tensor, quant_config_cpp, stream);
+      break;
+    }
+#endif //#ifdef __HIP_PLATFORM_AMD__
     case NVTE_NVFP4_1D_SCALING: {
       NVTE_CHECK(!IS_ACT, "IS_ACT is not supported by FWD NVTE_NVFP4_1D_SCALING");
 
@@ -108,6 +133,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                                   (cols % 32 == 0) && output_tensor->has_data();
 
       // Launch NVFP4 quantize kernel
+#ifndef __HIP_PLATFORM_AMD__
       if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
           nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
@@ -117,6 +143,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
               *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
         }
       } else {
+#endif
         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
                                                                   : output_tensor->columnwise_amax;
         quantize_transpose_vector_blockwise_fp4(
@@ -131,9 +158,12 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
+#ifndef __HIP_PLATFORM_AMD__
       }
+#endif
       break;
     }
+#ifndef __HIP_PLATFORM_AMD__
     case NVTE_BLOCK_SCALING_2D: {
       // TODO(kwyss): IS_ACT, ParamOP, OP parameters support.
       NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for FWD NVTE_BLOCK_SCALING_2D");
@@ -154,17 +184,10 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
       FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
       if (output_tensor->has_data()) {
-        bool rowwise_compact = (quant_config_cpp.float8_block_scale_tensor_format ==
-                                Float8BlockScaleTensorFormat::COMPACT);
-        rowwise_option = rowwise_compact ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
-                                         : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
+        rowwise_option = FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
       }
       if (output_tensor->has_columnwise_data()) {
-        bool columnwise_compact = (quant_config_cpp.float8_block_scale_tensor_format ==
-                                   Float8BlockScaleTensorFormat::COMPACT);
-        columnwise_option = columnwise_compact
-                                ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
-                                : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
+        columnwise_option = FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
       }
       quantize_transpose_vector_blockwise(
           input_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
@@ -238,7 +261,14 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
           stream);
       break;
     }
-#ifndef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
+    case NVTE_MXFP4_1D_SCALING: {
+      mxfp4::quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
+          *grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
+          quant_config_cpp, stream);
+      break;
+    }
+#endif
     case NVTE_NVFP4_1D_SCALING: {
       NVTE_CHECK((!IS_DBIAS && !IS_DACT),
                  "IS_DBIAS and IS_DACT are not supported by BWD NVTE_NVFP4_1D_SCALING");
@@ -256,6 +286,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
                                   (cols % 32 == 0) && output_tensor->has_data();
 
       // Launch NVFP4 quantize kernel
+#ifndef __HIP_PLATFORM_AMD__
       if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
           nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
@@ -265,6 +296,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
               *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
         }
       } else {
+#endif
         auto &global_amax = (output_tensor->amax.dptr != nullptr) ? output_tensor->amax
                                                                   : output_tensor->columnwise_amax;
         quantize_transpose_vector_blockwise_fp4(
@@ -279,9 +311,12 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
+#ifndef __HIP_PLATFORM_AMD__
       }
+#endif
       break;
     }
+#ifndef __HIP_PLATFORM_AMD__
     case NVTE_BLOCK_SCALING_2D: {
       // TODO(kwyss): IS_BIAS, IS_DACT, ParamOP, OP parameters support.
       NVTE_CHECK((!IS_DBIAS && !IS_DACT),
@@ -304,17 +339,10 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       FP8BlockwiseRowwiseOption rowwise_option = FP8BlockwiseRowwiseOption::NONE;
       FP8BlockwiseColumnwiseOption columnwise_option = FP8BlockwiseColumnwiseOption::NONE;
       if (output_tensor->has_data()) {
-        bool rowwise_compact = (quant_config_cpp.float8_block_scale_tensor_format ==
-                                Float8BlockScaleTensorFormat::COMPACT);
-        rowwise_option = rowwise_compact ? FP8BlockwiseRowwiseOption::ROWWISE_COMPACT
-                                         : FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
+        rowwise_option = FP8BlockwiseRowwiseOption::ROWWISE_GEMM_READY;
       }
       if (output_tensor->has_columnwise_data()) {
-        bool columnwise_compact = (quant_config_cpp.float8_block_scale_tensor_format ==
-                                   Float8BlockScaleTensorFormat::COMPACT);
-        columnwise_option = columnwise_compact
-                                ? FP8BlockwiseColumnwiseOption::COLUMNWISE_COMPACT
-                                : FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
+        columnwise_option = FP8BlockwiseColumnwiseOption::COLUMNWISE_GEMM_READY;
       }
       quantize_transpose_vector_blockwise(
           grad_tensor->data, output_tensor->scale_inv, output_tensor->columnwise_scale_inv,
@@ -325,6 +353,72 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
 #endif //#ifndef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
+  }
+}
+
+template <bool IS_ACT, typename ParamOP, float (*OP)(float, const ParamOP &)>
+void group_quantize_fwd_helper(const NVTETensor input, NVTETensor *outputs,
+                               const size_t *split_sections, const size_t num_tensors,
+                               const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
+  using namespace detail;
+
+  const Tensor *input_tensor = convertNVTETensorCheck(input);
+  std::vector<Tensor *> output_tensors;
+  for (size_t i = 0; i < num_tensors; ++i) {
+    output_tensors.push_back(convertNVTETensorCheck(outputs[i]));
+  }
+
+  // Quantization config
+  QuantizationConfig quant_config_cpp;
+  if (quant_config != nullptr) {
+    quant_config_cpp = *reinterpret_cast<QuantizationConfig *>(quant_config);
+  }
+
+  // Noop flag
+  Tensor dummy_tensor;
+  Tensor *noop_tensor = &dummy_tensor;
+  if (quant_config_cpp.noop_tensor != nullptr) {
+    noop_tensor = convertNVTETensorCheck(quant_config_cpp.noop_tensor);
+  }
+
+  // Check for unsupported options
+  if (quant_config_cpp.stochastic_rounding) {
+    NVTE_CHECK(output_tensors[0]->scaling_mode == NVTE_NVFP4_1D_SCALING,
+               "Stochastic rounding is only supported for NVFP4 quantization.");
+  }
+
+  // Take the scaling mode of the first output tensor
+  auto scaling_mode = output_tensors[0]->scaling_mode;
+
+  // Dispatch to quantization kernel depending on data format
+  switch (scaling_mode) {
+#ifndef __HIP_PLATFORM_AMD__
+    case NVTE_NVFP4_1D_SCALING: {
+      NVTE_CHECK(!IS_ACT, "IS_ACT is not supported by FWD NVTE_NVFP4_1D_SCALING");
+
+      // Check tensors
+      CheckNoopTensor(*noop_tensor, "cast_noop");
+      CheckInputTensor(*input_tensor, "input");
+      // Skip checking output tensor list
+      // output list here is allowed to have empty tensor
+
+      // Choose kernel
+      int32_t rows = input_tensor->flat_first_dim();
+      int32_t cols = input_tensor->flat_last_dim();
+      auto dtype = input_tensor->dtype();
+
+      NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
+                 "2D quantization is not supported for group quantize.");
+
+      // Launch NVFP4 group quantize kernel
+      nvfp4::group_quantize_transpose</*use_2d_quantization*/ false>(
+          *input_tensor, noop_tensor, output_tensors, split_sections, num_tensors,
+          &quant_config_cpp, stream);
+      break;
+    }
+#endif //#ifndef __HIP_PLATFORM_AMD__
+    default:
+      NVTE_ERROR("Not implemented scaling mode: " + to_string(scaling_mode) + ".");
   }
 }
 

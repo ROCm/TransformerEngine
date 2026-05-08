@@ -10,6 +10,13 @@
 #include "common/util/system.h"
 #include "pybind.h"
 
+#include <torch/version.h>
+#if USE_ROCM && TORCH_VERSION_MINOR < 11
+using TECUDAGuard = at::hip::HIPGuardMasqueradingAsCUDA;
+#else
+using TECUDAGuard = at::cuda::CUDAGuard;
+#endif
+
 namespace transformer_engine::pytorch {
 
 std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
@@ -66,6 +73,11 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
                                       const bool zero_centered_gamma) {
   using namespace transformer_engine::pytorch::detail;
 
+  // Ensure that cuDNN handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  TECUDAGuard device_guard(input.cast<at::Tensor>().device());
+
   // Input and param tensors
   auto none = py::none();
   const TensorWrapper &input_nvte = makeTransformerEngineTensor(input, none);
@@ -86,14 +98,8 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   TensorWrapper mu_nvte = makeTransformerEngineTensor(mu_py);
   TensorWrapper rsigma_nvte = makeTransformerEngineTensor(rsigma_py);
 
-  // Output tensor
+  // Quantizer
   auto quantizer_cpp = convert_quantizer(quantizer);
-  TensorWrapper out_nvte;
-  if (out.is_none()) {
-    std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);
-  } else {
-    out_nvte = makeTransformerEngineTensor(out, quantizer);
-  }
 
   // Choose implementation
   enum class Impl {
@@ -135,6 +141,19 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
     }
   }
   #endif
+
+  // Output tensor
+  TensorWrapper out_nvte;
+  if (out.is_none()) {
+    if (impl == Impl::FULLY_FUSED) {
+      // FP8 has no special logic to optimize for GEMM, MXFP8 cuDNN
+      // kernel does not support GEMM swizzled scales
+      quantizer_cpp->optimize_for_gemm = false;
+    }
+    std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);
+  } else {
+    out_nvte = makeTransformerEngineTensor(out, quantizer);
+  }
 
   // Construct unquantized output tensor if needed
   TensorWrapper unquantized_out_nvte;
@@ -304,6 +323,11 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
                                     const int sm_margin, const bool zero_centered_gamma) {
   using namespace transformer_engine::pytorch::detail;
 
+  // Ensure that cuDNN handle is created on the correct device,
+  // overriding torch.cuda.set_device calls from user side.
+  // Assumes all tensors passed are on the same device.
+  TECUDAGuard device_guard(input.cast<at::Tensor>().device());
+
   // Input and param tensors
   auto none = py::none();
   const TensorWrapper &input_nvte = makeTransformerEngineTensor(input, none);
@@ -318,14 +342,8 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   at::Tensor rsigma_py = at::empty({static_cast<int64_t>(outer_size)}, at::CUDA(at::kFloat));
   TensorWrapper rsigma_nvte = makeTransformerEngineTensor(rsigma_py);
 
-  // Output tensor
+  // Quantizer
   auto quantizer_cpp = convert_quantizer(quantizer);
-  TensorWrapper out_nvte;
-  if (out.is_none()) {
-    std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);
-  } else {
-    out_nvte = makeTransformerEngineTensor(out, quantizer);
-  }
 
   // Choose implementation
   enum class Impl {
@@ -367,6 +385,19 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
     }
   }
 #endif
+
+  // Output tensor
+  TensorWrapper out_nvte;
+  if (out.is_none()) {
+    if (impl == Impl::FULLY_FUSED) {
+      // FP8 has no special logic to optimize for GEMM, MXFP8 cuDNN
+      // kernel does not support GEMM swizzled scales
+      quantizer_cpp->optimize_for_gemm = false;
+    }
+    std::tie(out_nvte, out) = quantizer_cpp->create_tensor(shape, out_dtype);
+  } else {
+    out_nvte = makeTransformerEngineTensor(out, quantizer);
+  }
 
   // Construct unquantized output tensor if needed
   TensorWrapper unquantized_out_nvte;

@@ -36,6 +36,22 @@ namespace dequantize_kernel {
 #ifdef __HIP_PLATFORM_AMD__
 #include "rocm_dequantize_mxfp8.cuh"
 #else
+constexpr size_t CHUNK_DIM_Y = 128;
+constexpr size_t CHUNK_DIM_X = 128;
+constexpr size_t THREADS_PER_CHUNK = 128;
+constexpr size_t BUFFERS_NUM = 2;
+
+constexpr size_t ELEMS_PER_THREAD = 16;
+constexpr size_t BUFFER_DIM_Y = 16;           // only 32 is supported
+constexpr size_t BUFFER_DIM_X = CHUNK_DIM_X;  // 128
+constexpr size_t SHMEM_DIM_Y = BUFFER_DIM_Y;  // 16
+constexpr size_t SHMEM_DIM_X = BUFFER_DIM_X;  // 128
+
+constexpr size_t THREADS_PER_CHUNK_X_ROWWISE = CHUNK_DIM_X / ELEMS_PER_THREAD;  //  8 = 128 / 16
+constexpr size_t THREADS_PER_CHUNK_X_COLWISE = CHUNK_DIM_X;                     //  128
+constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                       //    8 = 128 / 16
+static_assert(ITERATIONS >= 1);
+
 template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     dequantize_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
@@ -224,8 +240,7 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
   checkCuDriverContext(stream);
 #endif
 
-  const auto &input_shape = input.data.shape;
-  NVTE_CHECK(input_shape.size() >= 2, "Input must have at least 2 dimensions.");
+  NVTE_CHECK(input.dim() >= 2, "Input must have at least 2 dimensions.");
 
   if (use_rowwise_scaling) {
     NVTE_CHECK(input.has_data(), "Cannot dequantize tensor without rowwise data.");
@@ -237,8 +252,9 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
     NVTE_CHECK(is_fp8_dtype(input.columnwise_data.dtype), "Input must have FP8 type.");
   }
 
+  NVTE_CHECK(!input.with_gemm_swizzled_scales, "Input must have scales in compact format.");
   NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
-  NVTE_CHECK(output->data.shape == input.data.shape, "Input and output shapes need to match.");
+  NVTE_CHECK(output->shape() == input.shape(), "Input and output shapes need to match.");
 
   // TODO: Make more general
   const size_t scale_dim_X_rowwise = use_rowwise_scaling ? 32 : 1;

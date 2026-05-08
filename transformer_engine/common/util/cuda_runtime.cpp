@@ -27,7 +27,7 @@ namespace {
 #include "string_path_cuda_include.h"
 
 }  // namespace
-#endif // __HIP_PLATFORM_AMD__
+#endif // #ifndef __HIP_PLATFORM_AMD__
 
 int num_devices() {
   auto query_num_devices = []() -> int {
@@ -85,6 +85,22 @@ const std::string &sm_arch_name(int device_id) {
   std::call_once(flags[device_id], init);
   return cache[device_id];
 }
+
+int warp_size(int device_id) {
+  static std::vector<int> cache(num_devices(), -1);
+  static std::vector<std::once_flag> flags(num_devices());
+  if (device_id < 0) {
+    device_id = current_device();
+  }
+  NVTE_CHECK(0 <= device_id && device_id < num_devices(), "invalid CUDA device ID");
+  auto init = [&]() {
+    cudaDeviceProp prop;
+    NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, device_id));
+    cache[device_id] = prop.warpSize;
+  };
+  std::call_once(flags[device_id], init);
+  return cache[device_id];
+}
 #endif // __HIP_PLATFORM_AMD__
 
 int sm_count(int device_id) {
@@ -103,7 +119,6 @@ int sm_count(int device_id) {
   return cache[device_id];
 }
 
-#ifndef __HIP_PLATFORM_AMD__
 void stream_priority_range(int *low_priority, int *high_priority, int device_id) {
   static std::vector<std::pair<int, int>> cache(num_devices());
   static std::vector<std::once_flag> flags(num_devices());
@@ -124,6 +139,11 @@ void stream_priority_range(int *low_priority, int *high_priority, int device_id)
   *high_priority = cache[device_id].second;
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+bool supports_multicast(int _) {
+  return false;
+}
+#else
 bool supports_multicast(int device_id) {
 #if CUDART_VERSION >= 12010
   // NOTE: This needs to be guarded at compile-time and run-time because the
@@ -174,6 +194,7 @@ const std::string &include_directory(bool required) {
 #ifdef __HIP_PLATFORM_AMD__
     std::vector<std::pair<std::string, Path>> search_paths = {{"ROCM_PATH", ""},
                                                               {"HIP_PATH", ""},
+                                                              {"", "/opt/rocm/core"},
                                                               {"", "/opt/rocm"}};
 #else
     std::vector<std::pair<std::string, Path>> search_paths = {{"NVTE_CUDA_INCLUDE_DIR", ""},

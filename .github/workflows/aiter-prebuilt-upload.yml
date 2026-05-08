@@ -13,7 +13,7 @@ on:
 
 jobs:
   upload:
-    runs-on: linux-te-mi325-8
+    runs-on: build-only-te
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
@@ -44,11 +44,7 @@ jobs:
             --rm \
             --name te-aiter-upload \
             --network=host \
-            --device=/dev/dri --device=/dev/kfd \
-            --shm-size=16G \
             --pid=host \
-            --group-add $(getent group render | cut -d: -f3) \
-            --group-add $(getent group video | cut -d: -f3) \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
             ${{ steps.cfg.outputs.image }}

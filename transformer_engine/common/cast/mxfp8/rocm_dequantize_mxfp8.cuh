@@ -41,7 +41,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
   constexpr size_t THREADS_PER_SCALE_X_ROWWISE =
       DIVUP(SCALE_DIM_X, ELEMS_PER_THREAD);                      // 2 = 32 / 16
-  constexpr size_t VECTOR_WIDTH = (IS_ALIGNED ?: 2) * 8 / sizeof(IType);
+  constexpr size_t VECTOR_WIDTH = IS_ALIGNED ? 8 : 16;
 
   const int chunk_offset_Y = blockIdx.y * CHUNK_DIM_Y;
   const int chunk_offset_X = blockIdx.x * CHUNK_DIM_X;
@@ -68,7 +68,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     const int chunk_it_offset_y = chunk_offset_Y + iter * BUFFER_DIM_Y;
     const int chunk_it_offset_x = chunk_offset_X;
 
-    copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_sh[0][0], input_ptr, chunk_it_offset_x, 
+    copy_2d_to_shared<IType, VECTOR_WIDTH, IS_ALIGNED>(&in_sh[0][0], input_ptr, chunk_it_offset_x,
                       chunk_it_offset_y, cols, SHMEM_DIM_Y,
                       SHMEM_DIM_X, rows, cols);
     __syncthreads();
