@@ -675,8 +675,6 @@ class FP8GlobalStateManager:
             # delayed scaling only function, for other recipes (current scaling with any granularity),
             # this is noop for other recipes because cls.global_amax_buffer is empty list
             cls.reduce_and_update_fp8_tensors(forward=True)
-            from . import _contig_diag
-            _contig_diag.tick_step()
 
     @classmethod
     def copy_forward_fp8_meta_tensors_for_recompute(cls, fp8_meta: Dict[str, Any]) -> None:
