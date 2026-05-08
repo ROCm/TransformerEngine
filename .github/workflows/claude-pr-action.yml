@@ -1,16 +1,34 @@
 name: Claude PR Action
 
-# Worker workflow: performs a code review or an explanatory summary on a PR.
-# Triggered by claude-pr-trigger.yml via repository_dispatch, or manually.
+# Single workflow: PR review or summary, triggered by label, comment, or manually.
 #
-# client_payload schema:
-#   action:      "review" | "summary"
-#   pull_number: number
-#   base:        string (PR's merge target ref, e.g. "dev" or "release_v2.0_rocm")
+# Triggers:
+#   - Label `claude-review` / `claude-summary` on a PR
+#   - Comment `/claude review` / `/claude summary` from a writer on a PR
+#   - Manual workflow_dispatch (re-runs)
+#
+# Auth model:
+#   - Anthropic: subscription via CLAUDE_CODE_OAUTH_TOKEN.
+#   - GitHub:    workflow's GITHUB_TOKEN passed as `github_token` to
+#                claude-code-action. This skips the Anthropic OIDC App-token
+#                exchange (which rejects pull_request_target / issue_comment
+#                subjects), so this workflow can run directly on those events
+#                with no repository_dispatch indirection and no PAT. Cost:
+#                comments post as `github-actions[bot]` instead of
+#                `claude[bot]`. Dedup across runs uses an HTML marker
+#                (`<!-- by:claude -->`) appended to every Claude-posted
+#                comment, so the filter is login-agnostic.
+#
+# Migrating to a custom GitHub App later: replace `secrets.GITHUB_TOKEN` in
+# the two `github_token:` inputs (and the `GH_TOKEN` env on those steps) with
+# an installation token from `actions/create-github-app-token@v1`. No other
+# changes needed — the marker-based dedup keeps working across the swap.
 
 on:
-  repository_dispatch:
-    types: [claude-pr-action]
+  pull_request_target:
+    types: [labeled]
+  issue_comment:
+    types: [created]
   workflow_dispatch:
     inputs:
       action:
@@ -27,26 +45,160 @@ on:
         required: false
         type: string
 
-concurrency:
-  # One Claude job per (PR, action) at a time; cancel superseded runs.
-  group: claude-pr-${{ github.event.client_payload.pull_number || inputs.pr_number }}-${{ github.event.client_payload.action || inputs.action }}
-  cancel-in-progress: true
+permissions:
+  contents: read
+  pull-requests: write
+  issues: write
 
 jobs:
+  resolve:
+    # Fast dispatcher: parse the event, decide whether to act, ack the user.
+    # Kept lightweight so PR label/comment churn doesn't queue heavy jobs.
+    runs-on: ubuntu-latest
+    if: >
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+    outputs:
+      action: ${{ steps.resolve.outputs.action }}
+      pr:     ${{ steps.resolve.outputs.pr }}
+      base:   ${{ steps.resolve.outputs.base }}
+      help:   ${{ steps.resolve.outputs.help }}
+    steps:
+      - name: Resolve action, PR number, and base branch
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          AUTHOR_ASSOC: ${{ github.event.comment.author_association }}
+          PR_FROM_LABEL: ${{ github.event.pull_request.number }}
+          PR_FROM_COMMENT: ${{ github.event.issue.number }}
+          BASE_FROM_LABEL: ${{ github.event.pull_request.base.ref }}
+          INPUT_ACTION: ${{ inputs.action }}
+          INPUT_PR: ${{ inputs.pr_number }}
+          INPUT_BASE: ${{ inputs.base }}
+        run: |
+          set -euo pipefail
+          action=""; pr=""; base=""
+
+          case "$EVENT_NAME" in
+            pull_request_target)
+              case "$LABEL_NAME" in
+                claude-review)  action="review"  ;;
+                claude-summary) action="summary" ;;
+              esac
+              pr="$PR_FROM_LABEL"
+              base="$BASE_FROM_LABEL"
+              ;;
+            issue_comment)
+              # Only writers can trigger — drop bots and outside contributors.
+              case "$AUTHOR_ASSOC" in
+                OWNER|MEMBER|COLLABORATOR) ;;
+                *) echo "Ignoring comment from $AUTHOR_ASSOC"; exit 0 ;;
+              esac
+              # Look at the first whitespace-separated token. If it's not
+              # `/claude`, this isn't addressed to us — stay silent.
+              first=$(printf '%s' "$COMMENT_BODY" | awk 'NR==1 {print $1}')
+              if [[ "$first" != "/claude" ]]; then
+                echo "Not a /claude command; ignoring."
+                exit 0
+              fi
+              # Second token is the subcommand. Unknown/missing → post help.
+              cmd=$(printf '%s' "$COMMENT_BODY" | awk 'NR==1 {print $2}')
+              case "$cmd" in
+                review)  action="review"  ;;
+                summary) action="summary" ;;
+                *)
+                  echo "Unknown /claude subcommand: '${cmd:-<empty>}'"
+                  echo "help=1" >> "$GITHUB_OUTPUT"
+                  exit 0
+                  ;;
+              esac
+              pr="$PR_FROM_COMMENT"
+              ;;
+            workflow_dispatch)
+              action="$INPUT_ACTION"
+              pr="$INPUT_PR"
+              base="$INPUT_BASE"
+              ;;
+          esac
+
+          if [[ -z "$action" ]]; then
+            echo "No matching action; nothing to do."
+            exit 0
+          fi
+
+          if [[ -z "$pr" ]]; then
+            echo "::error::pr_number is required" >&2
+            exit 1
+          fi
+
+          # Comment triggers (and workflow_dispatch w/o base) — look up the
+          # PR's actual merge target so the worker diffs against it.
+          if [[ -z "$base" ]]; then
+            base=$(gh pr view "$pr" \
+                     --repo "${{ github.repository }}" \
+                     --json baseRefName -q .baseRefName)
+          fi
+
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+          echo "pr=$pr"         >> "$GITHUB_OUTPUT"
+          echo "base=$base"     >> "$GITHUB_OUTPUT"
+
+      - name: React to comment (acknowledge)
+        if: steps.resolve.outputs.action != '' && github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            --method POST \
+            "/repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=eyes || true
+
+      - name: Post help comment (invalid /claude command)
+        if: steps.resolve.outputs.help == '1'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # React with confused emoji so the user sees immediate feedback,
+          # then post a one-shot usage reply.
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            --method POST \
+            "/repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=confused || true
+
+          gh pr comment "${{ github.event.issue.number }}" \
+            --repo "${{ github.repository }}" \
+            --body-file - <<'EOF'
+          **Claude PR commands**
+
+          - `/claude review` — request a code review of this PR
+          - `/claude summary` — generate (or update) a walkthrough comment
+
+          You can also add a label to the PR: `claude-review` or `claude-summary`.
+          <!-- by:claude -->
+          EOF
+
   claude:
+    needs: resolve
+    if: needs.resolve.outputs.action != ''
     runs-on: ubuntu-latest
     permissions:
       contents: read
       pull-requests: write
       issues: write
-      id-token: write  # Required for claude-code-action OIDC exchange.
+    concurrency:
+      # One Claude job per (PR, action) at a time; cancel superseded runs.
+      group: claude-pr-${{ needs.resolve.outputs.pr }}-${{ needs.resolve.outputs.action }}
+      cancel-in-progress: true
     env:
-      ACTION: ${{ github.event.client_payload.action || inputs.action }}
-      PR_NUMBER: ${{ github.event.client_payload.pull_number || inputs.pr_number }}
-      # Diff against the PR's actual merge target. Falls back to the repo
-      # default branch only if the dispatcher (or workflow_dispatch input) did
-      # not provide one — keeps re-runs and manual invocations functional.
-      BASE_REF: ${{ github.event.client_payload.base || inputs.base || github.event.repository.default_branch }}
+      ACTION:    ${{ needs.resolve.outputs.action }}
+      PR_NUMBER: ${{ needs.resolve.outputs.pr }}
+      BASE_REF:  ${{ needs.resolve.outputs.base }}
     steps:
       # refs/pull/<n>/merge is GitHub's synthetic merge commit (base tip
       # merged with PR head). Checking it out gives us both parents in one
@@ -93,8 +245,8 @@ jobs:
           timeout 60 claude --print -p "Say OK" || echo "Warmup complete"
 
       # claude-code-action only auto-configures the inline-comment MCP server
-      # for pull_request* events. We trigger via repository_dispatch, so wire
-      # it up manually with the PR number from the payload.
+      # for pull_request* events. Wire it up manually so it works regardless
+      # of trigger event.
       - name: Configure inline-comment MCP
         id: mcp
         run: |
@@ -126,9 +278,19 @@ jobs:
         timeout-minutes: 30
         uses: anthropics/claude-code-action@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Same token is exposed to the model's `gh` subprocess so it can
+          # comment on the PR. Mirrors the `github_token:` input below.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # Setting github_token short-circuits the Anthropic OIDC → App-token
+          # exchange in claude-code-action (src/github/token.ts). Without this
+          # the action would try to exchange the workflow's OIDC subject for
+          # the official `claude[bot]` App token, which Anthropic rejects on
+          # pull_request_target / issue_comment events. Trade-off: comments
+          # post as github-actions[bot]. Dedup uses the HTML marker in the
+          # prompt rather than the bot login, so this is identity-portable.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           allowed_bots: "github-actions[bot]"
           show_full_output: true
           claude_args: |
@@ -146,16 +308,24 @@ jobs:
             diff/comparison — this works regardless of whether the merge
             target is the default branch or a release branch.
 
+            ## Identity & dedup
+            This workflow posts as `github-actions[bot]` (until a dedicated
+            GitHub App is provisioned). To make prior-Claude lookups robust
+            across that future swap, every Claude-posted comment carries the
+            HTML marker `<!-- by:claude -->`. You MUST append that marker on
+            its own line at the end of every comment you post in step 3.
+
             ## 1. Gather prior context
             Use `gh` to enumerate signals that should shape this review:
               a. Prior Claude inline comments (top-level only):
                  ```
                  gh api --paginate "repos/${{ github.repository }}/pulls/${{ env.PR_NUMBER }}/comments" \
-                   | jq -s 'add // [] | [.[] | select(.user.login == "claude[bot]" and .in_reply_to_id == null)]'
+                   | jq -s 'add // [] | [.[] | select((.body | test("<!-- by:claude -->")) and .in_reply_to_id == null)]'
                  ```
               b. Prior human reviews and review comments — note any unresolved
                  threads or themes already raised by reviewers; do not duplicate.
-              c. Top-level PR comments from `claude[bot]` (prior summaries).
+              c. Top-level PR comments containing `<!-- by:claude -->` (prior
+                 summaries / review verdicts).
 
             ## 2. Produce findings
             Run BOTH skills below and merge their findings before posting. Each
@@ -167,8 +337,8 @@ jobs:
 
             If a prior Claude review exists (step 1a returned non-empty),
             instruct the skill to focus on commits added since the most recent
-            claude[bot] inline-comment timestamp — re-reading the entire diff
-            is wasteful and produces duplicate noise.
+            marker-tagged inline-comment timestamp — re-reading the entire
+            diff is wasteful and produces duplicate noise.
 
             **2b. Copyright header audit** — `/copyright-check` (vendored in
             `.claude/skills/`). This is the AMD-side counterpart to
@@ -187,15 +357,18 @@ jobs:
             ## 3. Post results
             - For each finding (from 2a or 2b), call
               `mcp__github_inline_comment__create_inline_comment` on the
-              relevant diff line. Skip findings that duplicate any comment
-              from step 1 (Claude's or a human reviewer's).
+              relevant diff line. End every comment body with a newline and
+              `<!-- by:claude -->` so subsequent runs can identify it.
+              Skip findings that duplicate any comment from step 1
+              (Claude's or a human reviewer's).
             - Post ONE short top-level summary via `gh pr comment` describing
-              what was reviewed and the high-level verdict. Mention the
-              copyright audit result as a single line (e.g. "Copyright
-              headers: OK" or "Copyright headers: 3 files need updates —
-              see inline comments"). Do not repeat individual findings.
+              what was reviewed and the high-level verdict; end with
+              `<!-- by:claude -->`. Mention the copyright audit result as a
+              single line (e.g. "Copyright headers: OK" or "Copyright
+              headers: 3 files need updates — see inline comments"). Do not
+              repeat individual findings.
             - If this is a re-review and there are no new findings, post a
-              brief top-level comment saying so.
+              brief top-level comment saying so (still with the marker).
             - Do NOT post intermediate analysis or thinking to the PR.
 
       # ---- SUMMARY / WALKTHROUGH ----
@@ -205,9 +378,11 @@ jobs:
         timeout-minutes: 20
         uses: anthropics/claude-code-action@v1
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          # See the review step above for why github_token is set explicitly.
+          github_token: ${{ secrets.GITHUB_TOKEN }}
           allowed_bots: "github-actions[bot]"
           show_full_output: true
           claude_args: |
@@ -229,13 +404,16 @@ jobs:
             explanatory artifact, NOT a review — do not flag issues here.
 
             ## 1. Check for prior summaries
+            This workflow posts as `github-actions[bot]`; prior Claude
+            artifacts are tagged with the HTML marker `<!-- by:claude -->`.
             ```
             gh api --paginate "repos/${{ github.repository }}/issues/${{ env.PR_NUMBER }}/comments" \
-              | jq -s 'add // [] | [.[] | select(.user.login == "claude[bot]") | .body] | .[] | select(test("Claude Walkthrough"))'
+              | jq -s 'add // [] | [.[] | select(.body | test("<!-- by:claude -->")) | select(.body | test("Claude Walkthrough"))]'
             ```
-            If a prior summary exists, edit it (gh api PATCH on the comment id)
-            instead of posting a new one — keep one canonical walkthrough that
-            reflects the current state of the PR. Otherwise, post a new one.
+            If a prior summary exists, edit it (gh api PATCH on the comment
+            id from the response above) instead of posting a new one — keep
+            one canonical walkthrough that reflects the current state of the
+            PR. Otherwise, post a new one.
 
             ## 2. Build the walkthrough
             Read the PR title/description and `git diff HEAD^1...HEAD^2`.
@@ -266,6 +444,7 @@ jobs:
 
             ---
             _Generated by Claude. To request a code review, comment `/claude review`._
+            <!-- by:claude -->
             ```
 
             Keep it tight. A reader should be able to skim it in under a minute
@@ -281,7 +460,7 @@ jobs:
           path: ${{ steps.review.outputs.execution_file || steps.summary.outputs.execution_file }}
 
       - name: Remove trigger label
-        if: always() && github.event_name == 'repository_dispatch'
+        if: always() && github.event_name == 'pull_request_target'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
