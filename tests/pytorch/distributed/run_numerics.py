@@ -216,6 +216,9 @@ def _get_tolerances(dtype):
         return {"rtol": 0.4, "atol": 0.25}
     elif QUANTIZATION == "nvfp4":
         # TODO(zhongboz): investigate why the tolerance is so large
+        if IS_HIP_EXTENSION:
+            # Higher tolerance for AMDGPU to account for intermediate bf16 step in GEMM
+            return {"rtol": 0.125, "atol": 0.15}
         return {"rtol": 0.125, "atol": 0.12}
     elif QUANTIZATION is not None:
         return {"rtol": 0.125, "atol": 0.0625}
