@@ -20,6 +20,8 @@
 #include "common/utils.cuh"
 #ifndef __HIP_PLATFORM_AMD__
 #include "hadamard_transform_utils.cuh"
+#else
+#include "../util/cuda_runtime.h" //cuda::sm_arch
 #endif
 
 namespace transformer_engine {
@@ -529,15 +531,19 @@ __device__ __forceinline__ void reduce_block_amax(
 // Same instructions as cast_transpose_mxfp4_kernel_shuffled.cu.
 __device__ __forceinline__ float ds_swizzle_xor1(float v) {
     float r;
+#ifndef __gfx1250__ //instruction not supported on this GPU
     asm volatile("ds_swizzle_b32 %0, %1 offset:0x041F\n\t"
                  "s_waitcnt lgkmcnt(0)" : "=v"(r) : "v"(v));
+#endif
     return r;
 }
 
 __device__ __forceinline__ float ds_swizzle_xor2(float v) {
     float r;
+#ifndef __gfx1250__ //instruction not supported on this GPU
     asm volatile("ds_swizzle_b32 %0, %1 offset:0x081F\n\t"
                  "s_waitcnt lgkmcnt(0)" : "=v"(r) : "v"(v));
+#endif
     return r;
 }
 
@@ -1084,6 +1090,12 @@ void nvte_hadamard_transform(const NVTETensor input, NVTETensor output, int rand
                              int random_sign_mask_t, cudaStream_t stream) {
   NVTE_API_CALL(nvte_hadamard_transform);
   using namespace transformer_engine;
+#ifdef __HIP_PLATFORM_AMD__
+  //TODO: remove when enable HW code
+  if (cuda::sm_arch(cuda::current_device()) == 125) {
+    NVTE_ERROR("Hadamard transform is not yet supported on this GPU");
+  }
+#endif
   hadamard_transform(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
                      static_cast<uint16_t>(random_sign_mask),
                      static_cast<uint16_t>(random_sign_mask_t), stream);
@@ -1093,6 +1105,12 @@ void nvte_hadamard_transform_amax(const NVTETensor input, NVTETensor output, int
                                   int random_sign_mask_t, cudaStream_t stream) {
   NVTE_API_CALL(nvte_hadamard_transform_amax);
   using namespace transformer_engine;
+#ifdef __HIP_PLATFORM_AMD__
+  //TODO: remove when enable HW code
+  if (cuda::sm_arch(cuda::current_device()) == 125) {
+    NVTE_ERROR("Hadamard transform is not yet supported on this GPU");
+  }
+#endif
   hadamard_transform_amax(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
                           static_cast<uint16_t>(random_sign_mask),
                           static_cast<uint16_t>(random_sign_mask_t), stream);

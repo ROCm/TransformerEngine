@@ -25,8 +25,8 @@ def is_bf16_supported():
     """Return if BF16 has hardware supported"""
     gpu_arch = get_device_compute_capability(0)
     if is_hip_extension():
-        # only GFX9.4+ and MI200 machines support bf16
-        return 100 > gpu_arch >= 94 or is_mi200()
+        # only GFX9.4+, GFX12+ and MI200 machines support bf16, that excludes GFX10 and GFX11
+        return 100 > gpu_arch >= 94 or gpu_arch >= 120 or is_mi200()
     return gpu_arch >= 80
 
 
@@ -35,8 +35,8 @@ def is_fp8_supported():
     """Return if FP8 has hardware supported"""
     gpu_arch = get_device_compute_capability(0)
     if is_hip_extension():
-        # only GFX9.4+ machines support fp8
-        return 100 > gpu_arch >= 94
+        # only GFX9.4+ and GFX12+ machines support fp8, that excludes GFX10 and GFX11
+        return 100 > gpu_arch >= 94 or gpu_arch >= 120
     return gpu_arch >= 90
 
 
@@ -45,8 +45,8 @@ def is_mxfp8_supported():
     """Return if FP8 has hardware supported"""
     gpu_arch = get_device_compute_capability(0)
     if is_hip_extension():
-        # only GFX9.5+ machines support fp8
-        return 100 > gpu_arch >= 95
+        # only GFX9.5 and GFX12+ machines support fp8, that excludes GFX10 and GFX11
+        return 100 > gpu_arch >= 95 or gpu_arch >= 120
     return gpu_arch >= 100
 
 
@@ -54,6 +54,9 @@ def is_mxfp8_supported():
 def is_nvfp4_supported():
     """Return if FP8 has hardware supported"""
     gpu_arch = get_device_compute_capability(0)
+    if is_hip_extension():
+        # only GFX12.5 machines support nvfp4
+        return False #TODO add gfx1250 (gpu_arch == 125) when ready
     return gpu_arch >= 100
 
 
