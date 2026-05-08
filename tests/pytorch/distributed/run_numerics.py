@@ -142,25 +142,15 @@ def main(argv=None, namespace=None):
         BATCH_SIZE = 128
         HIDDEN_SIZE = 512
 
-    # FIXME: hipBLASLt BF16xBF16->FP32 GEMM algos with ALPHA_DEVICE_VECTOR produce
-    # incorrect results intermittently on AMDGPU. Skip backward-containing sub-tests for
-    # nvfp4.
-    if IS_HIP_EXTENSION and QUANTIZATION == "nvfp4":
-        test_dict = [
-            test_quantizer,
-            test_quantized_all_gather,
-            test_layernorm,
-        ]
-    else:
-        test_dict = [
-            test_quantizer,
-            test_quantized_all_gather,
-            test_linear,
-            test_layernorm,
-            test_layernorm_linear,
-            test_layernorm_mlp,
-            test_transformer_layer,
-        ]
+    test_dict = [
+        test_quantizer,
+        test_quantized_all_gather,
+        test_linear,
+        test_layernorm,
+        test_layernorm_linear,
+        test_layernorm_mlp,
+        test_transformer_layer,
+    ]
 
     for test in test_dict:
         test()
