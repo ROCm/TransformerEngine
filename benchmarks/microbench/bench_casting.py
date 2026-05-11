@@ -26,6 +26,8 @@ import torch
 from transformer_engine.pytorch import Float8CurrentScalingQuantizer
 from transformer_engine_torch import DType as TE_DType
 
+from driver import time_func
+
 HIDDEN_SIZES = {
     "Llama3-8B": 4096,
     "Llama3-70B": 8192,
@@ -46,12 +48,6 @@ class BenchCasting:
     params = [[1024, 2048, 4096, 8192], list(HIDDEN_SIZES), list(CAST_CONFIGS)]
     param_names = ["M", "model", "cast"]
     timeout = 120
-    # Driver overrides these per (combo, method): _inner is the number of
-    # kernel invocations per CUDA event window (amortizes launch overhead);
-    # _scratch, when not None, is fill_()ed before each sample to evict the
-    # GPU cache.
-    _inner = 1
-    _scratch = None
 
     def setup(self, M, model, cast):
         hidden = HIDDEN_SIZES[model]
@@ -69,31 +65,18 @@ class BenchCasting:
         else:
             self.x = torch.randn(M, hidden, dtype=torch.bfloat16, device="cuda")
             self.quantizer = quantizer
-        self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 
     def work_cast(self, M, model, cast):
         hidden = HIDDEN_SIZES[model]
-        direction = CAST_CONFIGS[cast][0]
-        if direction == "quantize":
-            # Read BF16 (2B) + write FP8 (1B) + write scale
-            return {"bytes": M * hidden * 3}
-        else:
-            # Read FP8 (1B) + read scale + write BF16 (2B)
-            return {"bytes": M * hidden * 3}
+        # Read input (1B FP8 or 2B BF16) + write output + scale (~hidden bytes total)
+        # Approximated as 3 bytes per element either direction.
+        return {"bytes": M * hidden * 3}
 
     def time_cast(self, M, model, cast):
-        if self._scratch is not None:
-            self._scratch.fill_(1.0)
-        self._evt[0].record()
         if self.direction == "quantize":
-            for _ in range(self._inner):
-                self.quantizer.quantize(self.x)
-        else:
-            for _ in range(self._inner):
-                self.x.dequantize(dtype=torch.bfloat16)
-        self._evt[1].record()
-        torch.cuda.synchronize()
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
+            return time_func(lambda: self.quantizer.quantize(self.x))
+        return time_func(lambda: self.x.dequantize(dtype=torch.bfloat16))
+
 
 if __name__ == "__main__":
     from driver import run_as_main

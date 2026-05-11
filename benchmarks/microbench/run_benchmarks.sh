@@ -4,17 +4,16 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-BENCH_DIR="benchmarks/asv"
-ASV_CONF="$(pwd)/$BENCH_DIR/asv.conf.json"
+BENCH_DIR="benchmarks/microbench"
 
 usage() {
     cat <<EOF
-Usage: bash benchmarks/asv/run_benchmarks.sh <command> [options]
+Usage: bash benchmarks/microbench/run_benchmarks.sh <command> [options]
 
 Commands:
   run [-w W] [-n N] [SUITE] [METHOD]
-                        Run benchmarks in-process (saves ASV-compatible results)
-  view                  Build the ASV HTML dashboard from saved results and serve it
+                        Run benchmarks in-process (writes long-format CSV to
+                        benchmarks/.bench-results/<machine>/<commit>.csv)
   list                  List available benchmark suites
 
 EOF
@@ -28,11 +27,6 @@ case "${1:-}" in
         else
             python "$BENCH_DIR/driver.py" "$@"
         fi
-        ;;
-    view)
-        asv publish --config "$ASV_CONF"
-        echo "Starting preview server at http://localhost:8080"
-        asv preview --config "$ASV_CONF"
         ;;
     list)
         echo "Available benchmark suites:"

@@ -14,6 +14,8 @@ https://github.com/AMD-AGI/Primus-Turbo/blob/main/benchmark/ops/config.py
 import torch
 import transformer_engine.pytorch as te
 
+from driver import time_func
+
 # (n_routed_experts, moe_intermediate_size, hidden_size)
 MOE_MODELS = {
     "DSV2-Lite": (64, 1408, 2048),
@@ -37,8 +39,6 @@ class BenchGroupedGemm:
     params = [[512, 1024, 2048, 4096], list(CONFIGS)]
     param_names = ["M", "config"]
     timeout = 300
-    _inner = 1
-    _scratch = None
 
     def setup(self, M, config):
         B, N, K = CONFIGS[config]
@@ -54,7 +54,6 @@ class BenchGroupedGemm:
         ]
         outs = self.module(self.xs)
         self.grad_outs = [torch.randn_like(o) for o in outs]
-        self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 
     def work_forward(self, M, config):
         B, N, K = CONFIGS[config]
@@ -65,29 +64,14 @@ class BenchGroupedGemm:
         return {"flops": B * 3 * 2 * M * N * K}
 
     def time_forward(self, M, config):
-        if self._scratch is not None:
-            self._scratch.fill_(1.0)
-        self._evt[0].record()
-        for _ in range(self._inner):
-            self.module(self.xs)
-        self._evt[1].record()
-        torch.cuda.synchronize()
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
+        return time_func(lambda: self.module(self.xs))
 
     def time_forward_backward(self, M, config):
-        if self._scratch is not None:
-            self._scratch.fill_(1.0)
-        self._evt[0].record()
-        for _ in range(self._inner):
+        def fn():
             outs = self.module(self.xs)
             torch.autograd.backward(outs, self.grad_outs)
-        self._evt[1].record()
-        torch.cuda.synchronize()
-        for x in self.xs:
-            x.grad = None
-        for p in self.module.parameters():
-            p.grad = None
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
+        return time_func(fn)
+
 
 if __name__ == "__main__":
     from driver import run_as_main

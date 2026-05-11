@@ -29,6 +29,8 @@ Sources for model configs:
 import torch
 import transformer_engine.pytorch as te
 
+from driver import time_func
+
 BATCH = 2
 
 # (num_q_heads, num_kv_heads, head_dim, tp)
@@ -46,8 +48,6 @@ class BenchAttention:
     params = [[1024, 2048, 4096, 8192], list(MODELS)]
     param_names = ["seq_len", "model"]
     timeout = 300
-    _inner = 1
-    _scratch = None
 
     def setup(self, seq_len, model):
         n_q, n_kv, hd, tp = MODELS[model]
@@ -63,7 +63,6 @@ class BenchAttention:
         self.k = torch.randn(seq_len, BATCH, kvh, hd, dtype=dtype, device="cuda", requires_grad=True)
         self.v = torch.randn(seq_len, BATCH, kvh, hd, dtype=dtype, device="cuda", requires_grad=True)
         self.grad_out = torch.randn_like(self.attn(self.q, self.k, self.v))
-        self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 
     def work_forward(self, seq_len, model):
         n_q, n_kv, hd, tp = MODELS[model]
@@ -76,26 +75,14 @@ class BenchAttention:
         return {"flops": 3 * 4 * BATCH * qh * seq_len * seq_len * hd}
 
     def time_forward(self, seq_len, model):
-        if self._scratch is not None:
-            self._scratch.fill_(1.0)
-        self._evt[0].record()
-        for _ in range(self._inner):
-            self.attn(self.q, self.k, self.v)
-        self._evt[1].record()
-        torch.cuda.synchronize()
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
+        return time_func(lambda: self.attn(self.q, self.k, self.v))
 
     def time_forward_backward(self, seq_len, model):
-        if self._scratch is not None:
-            self._scratch.fill_(1.0)
-        self._evt[0].record()
-        for _ in range(self._inner):
+        def fn():
             out = self.attn(self.q, self.k, self.v)
             out.backward(self.grad_out)
-        self._evt[1].record()
-        torch.cuda.synchronize()
-        self.q.grad = self.k.grad = self.v.grad = None
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
+        return time_func(fn)
+
 
 if __name__ == "__main__":
     from driver import run_as_main

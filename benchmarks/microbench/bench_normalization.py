@@ -28,6 +28,8 @@ Sources for model configs:
 import torch
 import transformer_engine.pytorch as te
 
+from driver import time_func
+
 NORMS = {"RMSNorm": te.RMSNorm, "LayerNorm": te.LayerNorm}
 HIDDEN_SIZES = [3584, 4096, 8192, 16384]
 
@@ -36,15 +38,12 @@ class BenchNormalization:
     params = [[1024, 2048, 4096, 8192], HIDDEN_SIZES, list(NORMS)]
     param_names = ["M", "hidden", "norm_type"]
     timeout = 120
-    _inner = 1
-    _scratch = None
 
     def setup(self, M, hidden, norm_type):
         dtype = torch.bfloat16
         self.norm = NORMS[norm_type](hidden).to(device="cuda", dtype=dtype)
         self.x = torch.randn(M, hidden, dtype=dtype, device="cuda", requires_grad=True)
         self.grad_out = torch.randn_like(self.norm(self.x))
-        self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
 
     def work_forward(self, M, hidden, norm_type):
         # Read input (2B) + write output (2B) = 4 bytes per element
@@ -55,28 +54,14 @@ class BenchNormalization:
         return {"bytes": M * hidden * 10}
 
     def time_forward(self, M, hidden, norm_type):
-        if self._scratch is not None:
-            self._scratch.fill_(1.0)
-        self._evt[0].record()
-        for _ in range(self._inner):
-            self.norm(self.x)
-        self._evt[1].record()
-        torch.cuda.synchronize()
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
+        return time_func(lambda: self.norm(self.x))
 
     def time_forward_backward(self, M, hidden, norm_type):
-        if self._scratch is not None:
-            self._scratch.fill_(1.0)
-        self._evt[0].record()
-        for _ in range(self._inner):
+        def fn():
             out = self.norm(self.x)
             out.backward(self.grad_out)
-        self._evt[1].record()
-        torch.cuda.synchronize()
-        self.x.grad = None
-        for p in self.norm.parameters():
-            p.grad = None
-        return self._evt[0].elapsed_time(self._evt[1]) / 1000 / self._inner
+        return time_func(fn)
+
 
 if __name__ == "__main__":
     from driver import run_as_main

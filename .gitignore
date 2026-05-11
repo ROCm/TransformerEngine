@@ -58,5 +58,5 @@ artifacts/
 **/times.csv
 transformer_engine/build_info.txt
 transformer_engine/common/util/hip_nvml.*
-.asv/
+.bench-results/
 *.DS_Store
