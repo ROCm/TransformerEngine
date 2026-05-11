@@ -228,6 +228,29 @@ const std::unordered_map<NVTE_Mask_Type, std::string> mNVTEMaskTypeStr = {
   {NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK, "PADDING_CAUSAL_BOTTOM_RIGHT_MASK"},
 };
 
+// True for the two *_BOTTOM_RIGHT_MASK variants, false otherwise.
+inline bool implied_bottom_right_diagonal(NVTE_Mask_Type attn_mask_type) {
+  return attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
+         attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK;
+}
+
+// The ROCm/AITER fused-attn backend derives mask anchoring solely from the
+// NVTE_Mask_Type enum and does not consume `bottom_right_diagonal`. Any
+// divergence between the boolean and the alignment implied by the mask type
+// would silently produce numerically incorrect attention, so we reject it
+// here until AITER plumbs an explicit alignment parameter.
+inline void check_bottom_right_diagonal(NVTE_Mask_Type attn_mask_type,
+                                        bool bottom_right_diagonal) {
+  if (bottom_right_diagonal != implied_bottom_right_diagonal(attn_mask_type)) {
+    NVTE_ERROR(
+        "ROCm fused attention does not support a `bottom_right_diagonal` value "
+        "that diverges from the alignment implied by `attn_mask_type`. Use "
+        "NVTE_CAUSAL_BOTTOM_RIGHT_MASK or NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK "
+        "for bottom-right alignment, or the corresponding non-bottom-right "
+        "mask types for top-left alignment.");
+  }
+}
+
 void log_fused_attn_config(
     const char* func_name, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout, 
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float dropout, size_t batch_size, 
@@ -358,6 +381,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
                                    NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd_qkvpacked);
   using namespace transformer_engine;
+  check_bottom_right_diagonal(attn_mask_type, bottom_right_diagonal);
 
   const Tensor *input_cu_seqlens = convertNVTETensorCheck(cu_seqlens);
   const Tensor *input_cu_seqlens_padded = convertNVTETensorCheck(cu_seqlens_padded);
@@ -436,6 +460,7 @@ void nvte_fused_attn_bwd_qkvpacked(
     bool deterministic, bool cuda_graph, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd_qkvpacked);
   using namespace transformer_engine;
+  check_bottom_right_diagonal(attn_mask_type, bottom_right_diagonal);
 
   const Tensor *input_cu_seqlens = convertNVTETensorCheck(cu_seqlens);
   const Tensor *input_cu_seqlens_padded = convertNVTETensorCheck(cu_seqlens_padded);
@@ -530,6 +555,7 @@ void nvte_fused_attn_fwd_kvpacked(
  
   NVTE_API_CALL(nvte_flash_attn_fwd_kvpacked);
   using namespace transformer_engine;
+  check_bottom_right_diagonal(attn_mask_type, bottom_right_diagonal);
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
   const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
@@ -621,6 +647,7 @@ void nvte_fused_attn_bwd_kvpacked(
     NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd_kvpacked);
   using namespace transformer_engine;
+  check_bottom_right_diagonal(attn_mask_type, bottom_right_diagonal);
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
   const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
@@ -729,6 +756,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd);
   using namespace transformer_engine;
+  check_bottom_right_diagonal(attn_mask_type, bottom_right_diagonal);
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
   const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
@@ -816,6 +844,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          bool cuda_graph, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
+  check_bottom_right_diagonal(attn_mask_type, bottom_right_diagonal);
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
   const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
