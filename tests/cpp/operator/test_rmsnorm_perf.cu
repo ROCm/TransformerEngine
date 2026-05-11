@@ -10,8 +10,9 @@ using namespace test;
 namespace {
 
 std::vector<std::pair<size_t, size_t>> tensor_dims = {
-    {8192, 1536},
-    {8192, 7168},
+    // {8192, 128}, // Qwen
+    {8192, 1536}, // DS
+    {8192, 7168}, // DS
 };
 
 template <typename Fn>
@@ -90,12 +91,27 @@ void performTest(const size_t N, const size_t H) {
                         prop.multiProcessorCount, false, 0);
     });
 
+    // Effective bandwidth using a simple algorithmic convention:
+    // FWD counts one full read of x and one full write of z.
+    // BWD counts the dominant full-tensor streams: read dz, read x,
+    // read gamma/logical weight stream, and write dx.
+    const double elem_bytes = static_cast<double>(sizeof(OutputType));
+    const double numel = static_cast<double>(N) * static_cast<double>(H);
+
+    const double fwd_bytes = 2.0 * numel * elem_bytes;
+    const double bwd_bytes = 4.0 * numel * elem_bytes;
+
+    const double fwd_gbps = fwd_bytes / (fwd_ms * 1.0e-3) / 1.0e9;
+    const double bwd_gbps = bwd_bytes / (bwd_ms * 1.0e-3) / 1.0e9;
+
     std::cout << "RMSNORM_PERF"
             << " N=" << N
             << " H=" << H
             << " dtype=" << typeName(otype)
             << " fwd_ms=" << fwd_ms
+            << " fwd_GBps=" << fwd_gbps
             << " bwd_ms=" << bwd_ms
+            << " bwd_GBps=" << bwd_gbps
             << std::endl;
 
 }

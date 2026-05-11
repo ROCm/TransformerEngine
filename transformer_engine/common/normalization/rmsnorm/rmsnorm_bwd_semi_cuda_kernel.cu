@@ -167,6 +167,12 @@ REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 1024, fp32, fp32, fp32, fp32, 1
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 1024, fp16, fp16, fp16, fp32, 1, 4, 1, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 1024, bf16, bf16, bf16, fp32, 1, 4, 1, 16, 4);
 
+#ifdef __HIP_PLATFORM_AMD__
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 1536, fp32, fp32, fp32, fp32, 1, 4, 1, 16, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 1536, fp16, fp16, fp16, fp32, 1, 4, 1, 16, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 1536, bf16, bf16, bf16, fp32, 1, 4, 1, 16, 4);
+#endif
+
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 2048, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 2048, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 2048, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4);
@@ -174,6 +180,12 @@ REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 2048, bf16, bf16, bf16, fp32, 1
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 4096, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 4096, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 4096, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4);
+
+#ifdef __HIP_PLATFORM_AMD__
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 7168, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 7168, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 7168, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4);
+#endif
 
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 8192, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 8192, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4);
