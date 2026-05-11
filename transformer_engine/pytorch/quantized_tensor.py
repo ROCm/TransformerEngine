@@ -383,6 +383,11 @@ class QuantizedTensor(torch.Tensor):
         # C++ code, we provide the stride computed from shape in C++ to avoid the
         # PyobjectVectorCall overhead of calling _stride_from_shape from C++ to Python.
         stride = _stride_from_shape(shape) if stride is None else stride
+        if IS_HIP_EXTENSION and device == torch.device("cuda"):
+            # Without passing explicit device index to _make_wrapper_subclass tests fail with
+            # RuntimeError at autograd: 0 <= device.index() &&
+            # device.index() < static_cast<c10::DeviceIndex>(device_ready_queues_.size())
+            device = torch.device("cuda", torch.cuda.current_device())
         instance = torch.Tensor._make_wrapper_subclass(
             cls,
             shape,

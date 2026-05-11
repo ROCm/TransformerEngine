@@ -968,9 +968,12 @@ def get_attention_backend(
         ):
             fu_core_attention_bias_shape = "bhss"
 
-    # rocm ck backend support all 4 bias shapes (11ss, 1hss, b1ss, and bhss)
-    if (
-        not IS_HIP_EXTENSION and
+    # rocm ck backend support 4 bias shapes (11ss, 1hss, b1ss, and bhss)
+    if IS_HIP_EXTENSION:
+        if use_fused_attention and fu_core_attention_bias_shape == "111s":
+            logger.debug("Disabling FusedAttention as ROCm backends do not support 111s")
+            use_fused_attention = False
+    elif (
         use_fused_attention
         and fu_core_attention_bias_type == "post_scale_bias"
         and fu_core_attention_bias_shape != "1hss"

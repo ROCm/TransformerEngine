@@ -15,6 +15,7 @@ import jax
 import jax.numpy as jnp
 from jax import dtypes, lax, ffi
 from jax.sharding import PartitionSpec, NamedSharding
+from jax.experimental.custom_partitioning import SdyShardingRule
 
 import transformer_engine_jax
 from transformer_engine_jax import NVTE_Fused_Attn_Backend
