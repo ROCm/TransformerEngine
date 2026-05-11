@@ -126,14 +126,14 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 
 else()
   set(CMAKE_CXX_STANDARD 17)
+  #define GPU ARCH before enabling HIP to avoid potential failures with arch detection
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
   project(transformer_engine LANGUAGES HIP CXX)
 
   # If using ROCm, ninja must be installed to build TE.
   if (NOT CMAKE_GENERATOR STREQUAL "Ninja")
     message(FATAL_ERROR "This project requires the Ninja build system. Install it using 'pip install ninja'.")
   endif()
-
-  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
 
   # Disable Asserts In Code (Can't use asserts on HIP stack.)
   add_definitions(-DNDEBUG)
@@ -214,6 +214,7 @@ list(APPEND transformer_engine_cuda_sources
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      recipe/fp8_block_scaling.cu
+     recipe/nvfp4.cu
      swizzle/swizzle.cu)
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
@@ -221,6 +222,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/relu.cu
      activation/swiglu.cu
      cast/cast.cu
+     hadamard_transform/hadamard_transform.cu
      multi_tensor/compute_scale.cu
      recipe/mxfp8_scaling.cu
      transpose/quantize_transpose_vector_blockwise_fp4.cu)
@@ -243,7 +245,6 @@ if(USE_CUDA)
         gemm/cutlass_grouped_gemm.cu
         hadamard_transform/group_hadamard_transform.cu
         transpose/quantize_transpose_square_blockwise.cu
-        hadamard_transform/hadamard_transform.cu
         hadamard_transform/hadamard_transform_cast_fusion.cu
         hadamard_transform/group_hadamard_transform_cast_fusion.cu
         hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
@@ -503,7 +504,7 @@ else()
   make_string_header_from_file(transpose/rtc/cast_transpose_fusion.hip
                               string_code_transpose_rtc_cast_transpose_fusion_cu)
   make_string_header_from_file(transpose/rtc/cast_transpose.hip
-                              string_code_transpose_rtc_cast_transpose_cu)
+                             string_code_transpose_rtc_cast_transpose_cu)
   make_string_header_from_file(transpose/rtc/transpose.hip
                               string_code_transpose_rtc_transpose_cu)
   make_string_header_from_file(transpose/rtc/swap_first_dims.hip
