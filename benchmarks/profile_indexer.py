@@ -108,12 +108,7 @@ def _is_fp8(dt):
 
 
 def _bind_scales(fn, scales, *, backend=None):
-    """Return a 6-arg jit-able function that internally adds scale kwargs.
-
-    If ``backend`` is given, it is forwarded as a kwarg to ``fn`` (used to
-    select between einsum / hybrid / pure-triton via the same ``indexer``
-    entry point).
-    """
+    """Return a 6-arg jit-able function that internally adds scale kwargs."""
     extra = {}
     if backend is not None:
         extra["backend"] = backend
@@ -133,7 +128,9 @@ def _build_impls(scales):
         ("baseline", _bind_scales(indexer, scales, backend="reference")),
     ]
     if _HAVE_HYBRID:
-        impls.append(("hybrid", _bind_scales(indexer, scales, backend="hybrid")))
+        impls.append(
+            ("hybrid", _bind_scales(indexer, scales, backend="hybrid"))
+        )
     return impls
 
 
