@@ -16,7 +16,6 @@ list(APPEND test_cuda_sources
             test_dequantize_mxfp8.cu
             test_dequantize_nvfp4.cu
             test_cast_nvfp4_transpose.cu
-            test_ck_grouped_mxfp8.cu
             test_transpose.cu
             test_cast_transpose.cu
             test_cast_transpose_current_scaling.cu
@@ -41,7 +40,8 @@ if(USE_CUDA)
 else()
   list(APPEND test_cuda_sources
               test_cublaslt_gemm.cu
-              test_cast_mxfp4_transpose.cu)
+              test_cast_mxfp4_transpose.cu
+              test_ck_grouped_mxfp8.cu)
 endif()
 
 if(USE_CUDA)
