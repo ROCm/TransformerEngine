@@ -76,16 +76,12 @@ def setup_common_extension() -> CMakeExtension:
                 os.getenv("MPI_HOME") is not None
             ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
             cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
-    
+
     if rocm_build():
         cmake_flags.append("-DUSE_ROCM=ON")
-        if os.getenv("NVTE_AOTRITON_PATH"):
-            aotriton_path = Path(os.getenv("NVTE_AOTRITON_PATH"))
-            cmake_flags.append(f"-DAOTRITON_PATH={aotriton_path}")
-        cmake_flags.append(f"-DCK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT={os.getenv('NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT', 3)}")
-        if os.getenv("NVTE_CK_FUSED_ATTN_PATH"):
-            ck_path = Path(os.getenv("NVTE_CK_FUSED_ATTN_PATH"))
-            cmake_flags.append(f"-DAITER_MHA_PATH={ck_path}")
+        cmake_flags.append(
+            f"-DCK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT={os.getenv('NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT', '3')}"
+        )
 
         if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=OFF")
