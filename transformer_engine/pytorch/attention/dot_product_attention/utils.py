@@ -143,6 +143,7 @@ class FlashAttentionUtils:
 (4) mkdir -p $python_path/flash_attn_3
 (5) cp flash_attn_interface.py $python_path/flash_attn_3/flash_attn_interface.py"""
     v3_warning_printed = False
+    use_aiter_triton = False #ROCm
 
     @staticmethod
     def set_flash_attention_version():
@@ -1077,15 +1078,6 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention for determinism reasons on Blackwell")
             use_fused_attention = False
             fused_attention_backend = None
-    # TODO: remove the filtering after ck team tells us how to enable more deterministic bwd kernels
-    if use_fused_attention and deterministic and IS_HIP_EXTENSION:
-        if (
-            fused_attention_backend == FusedAttnBackend["CK"]
-            and is_training
-        ):
-            logger.debug("Disabling FusedAttention for determinism reasons")
-            use_fused_attention = False
-            fused_attention_backend = None #TODO: switch to AOTriton when supported
     # use_flash_attention may have been set above
     use_flash_attention_2 = use_flash_attention and use_flash_attention_2
     use_flash_attention_3 = use_flash_attention and use_flash_attention_3

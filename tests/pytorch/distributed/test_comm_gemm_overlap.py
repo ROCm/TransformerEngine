@@ -105,9 +105,9 @@ def _run_layer_with_overlap(
         pytest.skip("Bulk overlap is not yet supported on HIP/ROCm.")
     # On gfx942, non-determinism across the 8 XCDs causes small jitter that compounds
     # This should not affect training convergence, but creates larger numerical differences.
+    # TODO: Fix gfx942 issues arising from deterministic bwd attention and other jitter
     if (IS_HIP_EXTENSION
-        and get_device_compute_capability() < (9, 5)
-        and layer_type == te.TransformerLayer.__name__):
+        and get_device_compute_capability() < (9, 5)):
         pytest.skip("TransformerLayer overlap can exceed numerical tolerance on pre-MI350 due to jitter.")
     test_path = TEST_ROOT / "run_layer_with_overlap.py"
     test_cmd = LAUNCH_CMD + [

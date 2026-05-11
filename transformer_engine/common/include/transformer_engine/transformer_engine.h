@@ -74,6 +74,10 @@ enum NVTETensorParam {
   kNVTEColumnwiseScaleInv = 5,     /*!< Scale inverse tensor for decoding Columnwise Data */
   kNVTEColumnwiseAmax = 6,         /*!< Columnwise Amax tensor */
   kNVTEWithGEMMSwizzledScales = 7, /*!< Whether scaling factors are in format expected by GEMM */
+#ifdef USE_ROCM
+  kNVTEMXFP4ShuffleRowwiseData = 8,      /*!< Whether MXFP4 rowwise data is shuffled for AITER GEMM */
+  kNVTEMXFP4ShuffleColumnwiseData = 9,  /*!< Whether MXFP4 columnwise data is shuffled for AITER GEMM */
+#endif
   kNVTENumTensorParams
 };
 
@@ -99,6 +103,11 @@ enum NVTEScalingMode {
   /*! Single scale per block of 16 elements consecutive in either
    * rowwise or columnwise direction */
   NVTE_NVFP4_1D_SCALING = 4,
+#ifdef USE_ROCM
+  /*! Single scale per block of 32 elements consecutive in either
+      rowwise or columnwise direction */
+  NVTE_MXFP4_1D_SCALING = 50,
+#endif
   NVTE_INVALID_SCALING = 100
 };
 
@@ -372,6 +381,10 @@ enum NVTEQuantizationConfigAttribute {
    *  inconsistently between kernels.
    */
   kNVTEQuantizationConfigUseFastMath = 7,
+#ifdef USE_ROCM
+  /*! Whether to apply Hadamard transform before MXFP4 quantization */
+  kNVTEQuantizationConfigMXFP4UseHadamard = 8,
+#endif
   kNVTEQuantizationConfigNumAttributes
 };
 
@@ -565,6 +578,17 @@ enum class DType {
   kNumTypes
 };
 
+#ifdef USE_ROCM
+/*! \brief Check if TE datatype is FP16
+ *
+ * Return true if TE datatype is FP16
+ *  \param[in] DType      TE Datatype of interest
+ */
+inline bool is_fp16_dtype(const DType t) {
+  return t == DType::kFloat16 || t == DType::kBFloat16;
+}
+#endif
+
 /*! \brief Check if TE datatype is FP8
  *
  * Return true if TE datatype is FP8
@@ -744,6 +768,19 @@ class TensorWrapper {
     nvte_set_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val, sizeof(val));
   }
 
+#ifdef USE_ROCM
+
+  void set_mxfp4_shuffle_rowwise_data(bool shuffle_rowwise_data) {
+    const auto val = static_cast<uint8_t>(shuffle_rowwise_data);
+    nvte_set_tensor_param_v2(tensor_, kNVTEMXFP4ShuffleRowwiseData, &val, sizeof(val));
+  }
+
+  void set_mxfp4_shuffle_columnwise_data(bool shuffle_columnwise_data) {
+    const auto val = static_cast<uint8_t>(shuffle_columnwise_data);
+    nvte_set_tensor_param_v2(tensor_, kNVTEMXFP4ShuffleColumnwiseData, &val, sizeof(val));
+  }
+#endif
+
   // Parameter getters
 
   NVTEBasicTensor get_parameter(const NVTETensorParam param) const noexcept {
@@ -779,6 +816,20 @@ class TensorWrapper {
     nvte_get_tensor_param_v2(tensor_, kNVTEWithGEMMSwizzledScales, &val, sizeof(val), nullptr);
     return static_cast<bool>(val);
   }
+
+#ifdef USE_ROCM
+  bool get_mxfp4_shuffle_rowwise_data() const {
+    uint8_t val = 0;
+    nvte_get_tensor_param_v2(tensor_, kNVTEMXFP4ShuffleRowwiseData, &val, sizeof(val), nullptr);
+    return static_cast<bool>(val);
+  }
+
+  bool get_mxfp4_shuffle_columnwise_data() const {
+    uint8_t val = 0;
+    nvte_get_tensor_param_v2(tensor_, kNVTEMXFP4ShuffleColumnwiseData, &val, sizeof(val), nullptr);
+    return static_cast<bool>(val);
+  }
+#endif
 
   /*! \brief Get an underlying NVTETensor.
    *
@@ -1047,6 +1098,15 @@ class QuantizationConfigWrapper {
     nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigUseFastMath, &val,
                                            sizeof(val));
   }
+
+#ifdef USE_ROCM
+  /*! \brief Set whether to apply Hadamard transform before MXFP4 quantization */
+  void set_mxfp4_use_hadamard(bool use_hadamard) {
+    const auto val = static_cast<uint8_t>(use_hadamard);
+    nvte_set_quantization_config_attribute(config_, kNVTEQuantizationConfigMXFP4UseHadamard, &val,
+                                           sizeof(val));
+  }
+#endif
 
  private:
   /*! \brief Wrapped NVTEQuantizationConfig. */

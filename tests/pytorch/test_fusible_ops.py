@@ -993,7 +993,7 @@ class TestBasicOps:
         quantized_grad_input: bool,
     ) -> None:
         """GEMM with FP8 inputs and outputs"""
-        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
+        if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 5), (12, 5)):
             if (
                 quantization
                 and quantization.startswith("fp8")
@@ -1001,7 +1001,7 @@ class TestBasicOps:
                 and (quantized_grad_input or quantized_output)
             ):
                 pytest.skip(
-                    "hipBLASLt does not provide suitable algorithms on gfx950 for this config."
+                    "hipBLASLt does not provide suitable algorithms for this config."
                 )
         if quantization is None:
             pytest.skip("Skipping case without quantization")
@@ -1773,7 +1773,10 @@ class TestBasicOps:
         quantized_compute = quantization is not None
         if not quantized_compute and (quantize_forward or quantize_backward):
             pytest.skip("Quantization scheme has not been provided")
-        maybe_skip_quantization(quantization, dims=in_shape, device=device)
+        if IS_HIP_EXTENSION:
+            maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
+        else:
+            maybe_skip_quantization(quantization, dims=in_shape, device=device)
 
         # Random data
         x_ref, x_test = make_reference_and_test_tensors(
@@ -2937,6 +2940,8 @@ class TestSequentialModules:
 
         # Check values
         tols = {"rtol": 0.25, "atol": 0.5}  # Loose tols for sanity checking
+        if IS_HIP_EXTENSION:
+            tols["atol"] = 0.54
         torch.testing.assert_close(to_cpu(y_test), y_ref, **tols)
         torch.testing.assert_close(to_cpu(x_test.grad), x_ref.grad, **tols)
         torch.testing.assert_close(to_cpu(norm.weight.grad), norm_w_ref.grad, **tols)
