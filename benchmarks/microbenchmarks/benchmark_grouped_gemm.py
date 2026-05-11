@@ -6,7 +6,14 @@
 ###############################################################################
 
 import torch
-from utils import time_func, compute_tflops, run_benchmarks
+from utils import (
+    time_func,
+    compute_tflops,
+    make_forward_backward_metric_records,
+    run_benchmarks,
+)
+
+BENCHMARK_LABEL = "BF16 Grouped GEMM"
 
 def generate_grouped_gemm_group_lens(b, m, balance: bool):
     if balance:
@@ -184,15 +191,14 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype):
     fwd_te_tflops = compute_tflops(fwd_total_flops, fwd_te_ms)
     bwd_te_tflops = compute_tflops(bwd_total_flops, bwd_te_ms)
 
-    print(f"  Forward      {fwd_te_ms:.3f} ms | {fwd_te_tflops:.2f} TFLOPS")
-    print(f"  Backward     {bwd_te_ms:.3f} ms | {bwd_te_tflops:.2f} TFLOPS")
-
-    return {
-        "TE Forward Time (ms)": f"{fwd_te_ms:.2f}",
-        "TE Forward TFLOPS": f"{fwd_te_tflops:.2f}",
-        "TE Backward Time (ms)": f"{bwd_te_ms:.2f}",
-        "TE Backward TFLOPS": f"{bwd_te_tflops:.2f}",
-    }
+    return make_forward_backward_metric_records(
+        BENCHMARK_LABEL,
+        "TFLOPS",
+        fwd_te_ms,
+        fwd_te_tflops,
+        bwd_te_ms,
+        bwd_te_tflops,
+    )
 
 
 if __name__ == "__main__":
@@ -207,9 +213,5 @@ if __name__ == "__main__":
         test_cases=test_cases,
         bench_fn=bench_grouped_gemm,
         param_columns=["Case", "B", "M", "N", "K", "dtype"],
-        metric_columns=[
-            "TE Forward Time (ms)", "TE Forward TFLOPS",
-            "TE Backward Time (ms)", "TE Backward TFLOPS",
-        ],
         default_csv="benchmark_grouped_gemm.csv",
     )

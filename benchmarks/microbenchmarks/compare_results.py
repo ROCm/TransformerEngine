@@ -5,14 +5,14 @@
 # See LICENSE for license information.
 ###############################################################################
 """
-Compare two CSVs from the same benchmark (base branch vs PR branch).
+Compare two CSVs from the same benchmark suite.
 
-Auto-detects metric columns (containing "TFLOPS"/ "GB/s") and key columns.
+Auto-detects metric columns (containing "TFLOPS" or "GB/s") and key columns.
 Outputs a markdown <details> block to stdout with per-config results,
 and optionally appends a summary table row to --summary-file.
 
 Usage:
-    python compare_results.py base.csv pr.csv --bench-name NAME --summary-file FILE
+    python compare_results.py baseline.csv candidate.csv --bench-name NAME --summary-file FILE
 """
 
 import argparse
@@ -22,6 +22,7 @@ import numpy as np
 import pandas as pd
 
 SKIP_COLS = {"TestID", "Label"}
+DEFAULT_MIN_BASELINE_METRIC = 0.5
 
 
 def auto_detect_columns(df):
@@ -36,30 +37,45 @@ def auto_detect_columns(df):
 
 def main():
     parser = argparse.ArgumentParser(description="Compare benchmark CSVs")
-    parser.add_argument("base_csv", help="Base branch CSV")
-    parser.add_argument("pr_csv", help="PR branch CSV")
+    parser.add_argument("baseline_csv", help="Baseline CSV")
+    parser.add_argument("candidate_csv", help="Candidate CSV")
     parser.add_argument("--bench-name", default="benchmark",
                         help="Benchmark name for markdown output")
     parser.add_argument("--summary-file", default=None,
                         help="Append a summary table row (markdown) to this file")
+    parser.add_argument(
+        "--min-baseline-metric",
+        type=float,
+        default=DEFAULT_MIN_BASELINE_METRIC,
+        help=(
+            "Small baseline metrics can produce noisy speedups; skip speedup "
+            "calculations when the baseline metric is below this threshold. "
+            "Set to 0 to disable the filter."
+        ),
+    )
     args = parser.parse_args()
 
-    base_df = pd.read_csv(args.base_csv)
-    pr_df = pd.read_csv(args.pr_csv)
+    baseline_df = pd.read_csv(args.baseline_csv)
+    candidate_df = pd.read_csv(args.candidate_csv)
 
-    key_cols, metric_cols = auto_detect_columns(base_df)
+    key_cols, metric_cols = auto_detect_columns(baseline_df)
 
     if not metric_cols:
         print("No metric columns found.")
         return 0
 
     for col in metric_cols:
-        base_df[col] = pd.to_numeric(base_df[col], errors="coerce")
-        pr_df[col] = pd.to_numeric(pr_df[col], errors="coerce")
+        baseline_df[col] = pd.to_numeric(baseline_df[col], errors="coerce")
+        candidate_df[col] = pd.to_numeric(candidate_df[col], errors="coerce")
 
-    merged = base_df.merge(pr_df, on=key_cols, suffixes=("_base", "_pr"), how="inner")
+    merged = baseline_df.merge(
+        candidate_df,
+        on=key_cols,
+        suffixes=("_baseline", "_candidate"),
+        how="inner",
+    )
     if merged.empty:
-        print("WARNING: No matching rows between base and PR.")
+        print("WARNING: No matching rows between baseline and candidate CSVs.")
         return 0
 
     all_speedups = []
@@ -70,16 +86,30 @@ def main():
         row_metrics = {}
 
         for metric in metric_cols:
-            bc, pc = f"{metric}_base", f"{metric}_pr"
-            bv = merged.loc[idx, bc]
-            pv = merged.loc[idx, pc]
+            baseline_col = f"{metric}_baseline"
+            candidate_col = f"{metric}_candidate"
+            baseline_value = merged.loc[idx, baseline_col]
+            candidate_value = merged.loc[idx, candidate_col]
 
-            if pd.isna(bv) or pd.isna(pv) or bv < 0.5:
+            if pd.isna(baseline_value) or pd.isna(candidate_value):
+                continue
+            if not np.isfinite(baseline_value) or not np.isfinite(candidate_value):
+                continue
+            if baseline_value <= 0:
+                continue
+            if (
+                args.min_baseline_metric > 0
+                and baseline_value < args.min_baseline_metric
+            ):
                 continue
 
-            speedup = pv / bv
+            speedup = candidate_value / baseline_value
             all_speedups.append(speedup)
-            row_metrics[metric] = {"base": bv, "pr": pv, "speedup": speedup}
+            row_metrics[metric] = {
+                "baseline": baseline_value,
+                "candidate": candidate_value,
+                "speedup": speedup,
+            }
 
         if row_metrics:
             per_row_data.append({"keys": row_keys, "metrics": row_metrics})
@@ -102,7 +132,11 @@ def main():
     header_cols = list(key_cols)
     for m in metric_cols:
         short = m.replace(" TFLOPS", "")
-        header_cols.extend([f"{short} Base", f"{short} PR", f"{short} Speedup"])
+        header_cols.extend([
+            f"{short} Baseline",
+            f"{short} Candidate",
+            f"{short} Speedup",
+        ])
 
     print("| " + " | ".join(header_cols) + " |")
     print("|" + "|".join(["---"] * len(header_cols)) + "|")
@@ -112,8 +146,8 @@ def main():
         for metric in metric_cols:
             if metric in row["metrics"]:
                 v = row["metrics"][metric]
-                cells.append(f"{v['base']:.2f}")
-                cells.append(f"{v['pr']:.2f}")
+                cells.append(f"{v['baseline']:.2f}")
+                cells.append(f"{v['candidate']:.2f}")
                 cells.append(f"{v['speedup']:.3f}x")
             else:
                 cells.extend(["", "", ""])

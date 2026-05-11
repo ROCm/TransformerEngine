@@ -91,6 +91,86 @@ def compute_gbps(nbytes, ms):
     return nbytes / (ms * 1e-3) / 1e9
 
 
+def make_metric_record(label, ms, unit, value, derived=False,
+                       ms_precision=3, value_precision=2):
+    """Create a structured metric record for stdout and CSV generation."""
+    return {
+        "label": label,
+        "ms": ms,
+        "unit": unit,
+        "value": value,
+        "derived": derived,
+        "ms_precision": ms_precision,
+        "value_precision": value_precision,
+    }
+
+
+def make_forward_backward_metric_records(label_prefix, unit,
+                                         forward_ms, forward_value,
+                                         backward_ms, backward_value,
+                                         backward_derived=False,
+                                         ms_precision=3,
+                                         value_precision=2):
+    """Create standard forward/backward metric records for a benchmark."""
+    return [
+        make_metric_record(
+            f"{label_prefix} Forward",
+            forward_ms,
+            unit,
+            forward_value,
+            ms_precision=ms_precision,
+            value_precision=value_precision,
+        ),
+        make_metric_record(
+            f"{label_prefix} Backward",
+            backward_ms,
+            unit,
+            backward_value,
+            derived=backward_derived,
+            ms_precision=ms_precision,
+            value_precision=value_precision,
+        ),
+    ]
+
+
+def _metric_time_key(metric):
+    return f"{metric['label']} Time (ms)"
+
+
+def _metric_value_key(metric):
+    return f"{metric['label']} {metric['unit']}"
+
+
+def _format_metric_number(value, precision):
+    return f"{value:.{precision}f}"
+
+
+def _metric_row_from_records(metric_records):
+    row = {}
+    for metric in metric_records:
+        row[_metric_time_key(metric)] = _format_metric_number(
+            metric["ms"], metric.get("ms_precision", 3)
+        )
+        row[_metric_value_key(metric)] = _format_metric_number(
+            metric["value"], metric.get("value_precision", 2)
+        )
+    return row
+
+
+def _print_metric_records(metric_records):
+    label_width = max(24, *(len(metric["label"]) for metric in metric_records))
+    for metric in metric_records:
+        ms_str = _format_metric_number(metric["ms"], metric.get("ms_precision", 3))
+        value_str = _format_metric_number(
+            metric["value"], metric.get("value_precision", 2)
+        )
+        derived_suffix = " (derived)" if metric.get("derived", False) else ""
+        print(
+            f"  {metric['label']:<{label_width}} {ms_str} ms | "
+            f"{value_str} {metric['unit']}{derived_suffix}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Benchmark runner
 # ---------------------------------------------------------------------------
@@ -103,8 +183,7 @@ def add_csv_arg(parser):
     )
 
 
-def run_benchmarks(test_cases, bench_fn, param_columns, metric_columns,
-                   default_csv=None):
+def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None):
     """Iterate *test_cases*, call *bench_fn*, and optionally write a CSV.
 
     Parameters
@@ -113,12 +192,10 @@ def run_benchmarks(test_cases, bench_fn, param_columns, metric_columns,
         Each dict has at least the keys in *param_columns* plus any extra
         keys the bench_fn needs (passed as **case).
     bench_fn : callable
-        Called as ``bench_fn(**case)`` and must return a dict whose keys
-        match *metric_columns*.
+        Called as ``bench_fn(**case)`` and must return a list of metric
+        records created by ``make_metric_record``.
     param_columns : list[str]
         Column names to pull from each test case into the output row.
-    metric_columns : list[str]
-        Column names to pull from the bench_fn return value.
     default_csv : str or None
         Default CSV filename used when ``--csv`` is passed without a
         filename.  CSV output is only written when the caller passes
@@ -128,8 +205,8 @@ def run_benchmarks(test_cases, bench_fn, param_columns, metric_columns,
     add_csv_arg(parser)
     args, _ = parser.parse_known_args()
 
-    columns = param_columns + metric_columns
     rows = []
+    resolved_metric_columns = None
 
     for case in test_cases:
         label = "  ".join(f"{k}={case[k]}" for k in param_columns)
@@ -137,16 +214,28 @@ def run_benchmarks(test_cases, bench_fn, param_columns, metric_columns,
         print(f"Testing: {label}")
         print(f"{'='*60}")
 
-        metrics = bench_fn(**case)
+        metric_records = bench_fn(**case)
+        metric_row = _metric_row_from_records(metric_records)
+        _print_metric_records(metric_records)
+        current_metric_columns = list(metric_row.keys())
+
+        if resolved_metric_columns is None:
+            resolved_metric_columns = current_metric_columns
+        elif current_metric_columns != resolved_metric_columns:
+            raise ValueError(
+                f"Inconsistent metric columns for case {case}: "
+                f"expected {resolved_metric_columns}, got {current_metric_columns}"
+            )
 
         row = {k: (str(case[k]) if isinstance(case[k], torch.dtype) else case[k])
                for k in param_columns}
-        row.update(metrics)
+        row.update(metric_row)
         rows.append(row)
 
     if args.csv is not None:
         import pandas as pd
         out_csv = args.csv if isinstance(args.csv, str) else default_csv
+        columns = param_columns + (resolved_metric_columns or [])
         results = pd.DataFrame(rows, columns=columns)
         results.to_csv(out_csv, index=False)
         print(f"\nResults saved to {out_csv}")

@@ -17,13 +17,15 @@ import torch
 import transformer_engine.pytorch as te
 from utils import (
     MODEL_HIDDEN_SIZES, M_SIZE_LIST,
-    time_func, compute_gbps, run_benchmarks,
+    time_func, compute_gbps, make_forward_backward_metric_records, run_benchmarks,
 )
 
 NORM_TYPES = [
     ("RMSNorm",   te.RMSNorm),
     ("LayerNorm", te.LayerNorm),
 ]
+
+BENCHMARK_LABEL = "Normalization"
 
 
 def _generate_norm_test_cases():
@@ -72,15 +74,15 @@ def bench_norm(Case, M, hidden_size, norm_name, norm_cls, dtype):
     fwd_gbps = compute_gbps(fwd_bytes, fwd_ms)
     bwd_gbps = compute_gbps(bwd_bytes, bwd_ms)
 
-    print(f"  Forward      {fwd_ms:.3f} ms | {fwd_gbps:.1f} GB/s")
-    print(f"  Backward     {bwd_ms:.3f} ms | {bwd_gbps:.1f} GB/s (derived)")
-
-    return {
-        "TE Forward Time (ms)": f"{fwd_ms:.4f}",
-        "TE Forward GB/s": f"{fwd_gbps:.1f}",
-        "TE Backward Time (ms)": f"{bwd_ms:.4f}",
-        "TE Backward GB/s": f"{bwd_gbps:.1f}",
-    }
+    return make_forward_backward_metric_records(
+        BENCHMARK_LABEL,
+        "GB/s",
+        fwd_ms,
+        fwd_gbps,
+        bwd_ms,
+        bwd_gbps,
+        backward_derived=True
+    )
 
 
 if __name__ == "__main__":
@@ -88,9 +90,5 @@ if __name__ == "__main__":
         test_cases=_generate_norm_test_cases(),
         bench_fn=bench_norm,
         param_columns=["Case", "M", "hidden_size", "dtype"],
-        metric_columns=[
-            "TE Forward Time (ms)", "TE Forward GB/s",
-            "TE Backward Time (ms)", "TE Backward GB/s",
-        ],
         default_csv="benchmark_normalization.csv",
     )

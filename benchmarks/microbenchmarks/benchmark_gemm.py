@@ -10,10 +10,12 @@ import torch
 import transformer_engine.pytorch as te
 from utils import (
     MODEL_CONFIGS, M_SIZE_LIST, gemm_shapes,
-    time_func, compute_tflops, run_benchmarks,
+    time_func, compute_tflops, make_forward_backward_metric_records, run_benchmarks,
 )
 
 ACTIVE_SHAPES = gemm_shapes(MODEL_CONFIGS)
+
+BENCHMARK_LABEL = "BF16 GEMM"
 
 
 def _generate_gemm_test_cases():
@@ -58,15 +60,15 @@ def bench_gemm(Case, M, N, K, dtype):
     fwd_tflops = compute_tflops(fwd_flops, fwd_ms)
     bwd_tflops = compute_tflops(bwd_flops, bwd_ms)
 
-    print(f"  Forward      {fwd_ms:.3f} ms | {fwd_tflops:.2f} TFLOPS")
-    print(f"  Backward     {bwd_ms:.3f} ms | {bwd_tflops:.2f} TFLOPS (derived)")
-
-    return {
-        "TE Forward Time (ms)": f"{fwd_ms:.2f}",
-        "TE Forward TFLOPS": f"{fwd_tflops:.2f}",
-        "TE Backward Time (ms)": f"{bwd_ms:.2f}",
-        "TE Backward TFLOPS": f"{bwd_tflops:.2f}",
-    }
+    return make_forward_backward_metric_records(
+        BENCHMARK_LABEL,
+        "TFLOPS",
+        fwd_ms,
+        fwd_tflops,
+        bwd_ms,
+        bwd_tflops,
+        backward_derived=True,
+    )
 
 
 if __name__ == "__main__":
@@ -74,9 +76,5 @@ if __name__ == "__main__":
         test_cases=_generate_gemm_test_cases(),
         bench_fn=bench_gemm,
         param_columns=["Case", "M", "N", "K", "dtype"],
-        metric_columns=[
-            "TE Forward Time (ms)", "TE Forward TFLOPS",
-            "TE Backward Time (ms)", "TE Backward TFLOPS",
-        ],
         default_csv="benchmark_gemm.csv",
     )

@@ -16,7 +16,7 @@ import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import DelayedScaling, Format
 from utils import (
     MODEL_CONFIGS, M_SIZE_LIST, gemm_shapes,
-    time_func, compute_tflops, run_benchmarks,
+    time_func, compute_tflops, make_forward_backward_metric_records, run_benchmarks,
 )
 
 FP8_RECIPE = DelayedScaling(
@@ -26,6 +26,8 @@ FP8_RECIPE = DelayedScaling(
 )
 
 ACTIVE_SHAPES = gemm_shapes(MODEL_CONFIGS)
+
+BENCHMARK_LABEL = "FP8 GEMM"
 
 
 def _generate_gemm_test_cases():
@@ -70,15 +72,15 @@ def bench_fp8_gemm(Case, M, N, K, dtype):
     fwd_tflops = compute_tflops(fwd_flops, fwd_ms)
     bwd_tflops = compute_tflops(bwd_flops, bwd_ms)
 
-    print(f"  Forward      {fwd_ms:.3f} ms | {fwd_tflops:.2f} TFLOPS")
-    print(f"  Backward     {bwd_ms:.3f} ms | {bwd_tflops:.2f} TFLOPS (derived)")
-
-    return {
-        "FP8 Forward Time (ms)": f"{fwd_ms:.2f}",
-        "FP8 Forward TFLOPS": f"{fwd_tflops:.2f}",
-        "FP8 Backward Time (ms)": f"{bwd_ms:.2f}",
-        "FP8 Backward TFLOPS": f"{bwd_tflops:.2f}",
-    }
+    return make_forward_backward_metric_records(
+        BENCHMARK_LABEL,
+        "TFLOPS",
+        fwd_ms,
+        fwd_tflops,
+        bwd_ms,
+        bwd_tflops,
+        backward_derived=True,
+    )
 
 
 if __name__ == "__main__":
@@ -86,9 +88,5 @@ if __name__ == "__main__":
         test_cases=_generate_gemm_test_cases(),
         bench_fn=bench_fp8_gemm,
         param_columns=["Case", "M", "N", "K", "dtype"],
-        metric_columns=[
-            "FP8 Forward Time (ms)", "FP8 Forward TFLOPS",
-            "FP8 Backward Time (ms)", "FP8 Backward TFLOPS",
-        ],
         default_csv="benchmark_gemm_fp8.csv",
     )

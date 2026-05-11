@@ -20,11 +20,13 @@ import transformer_engine_torch as tex
 from transformer_engine.pytorch import Float8Quantizer
 from utils import (
     MODEL_HIDDEN_SIZES, M_SIZE_LIST,
-    time_func, compute_gbps, run_benchmarks,
+    time_func, compute_gbps, make_metric_record, run_benchmarks,
 )
 
 TE_FP8_E4M3 = tex.DType.kFloat8E4M3
 TE_FP8_E5M2 = tex.DType.kFloat8E5M2
+
+CAST_LABEL = "Cast"
 
 CAST_CONFIGS = [
     # (name, direction, fp8_dtype)
@@ -73,12 +75,7 @@ def bench_cast(Case, M, hidden_size, direction, fp8_dtype, dtype_str):
     ms = time_func(cast_func, method="blocked")
     gbps = compute_gbps(total_bytes, ms)
 
-    print(f"  {ms:.4f} ms | {gbps:.1f} GB/s")
-
-    return {
-        "Cast Time (ms)": f"{ms:.4f}",
-        "Cast GB/s": f"{gbps:.1f}",
-    }
+    return [make_metric_record(CAST_LABEL, ms, "GB/s", gbps)]
 
 
 if __name__ == "__main__":
@@ -86,6 +83,5 @@ if __name__ == "__main__":
         test_cases=_generate_cast_test_cases(),
         bench_fn=bench_cast,
         param_columns=["Case", "M", "hidden_size", "dtype_str"],
-        metric_columns=["Cast Time (ms)", "Cast GB/s"],
         default_csv="benchmark_casting.csv",
     )
