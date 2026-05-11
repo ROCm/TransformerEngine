@@ -15,33 +15,21 @@ import torch
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import DelayedScaling, Format
 from utils import (
-    MODEL_CONFIGS, M_SIZE_LIST, gemm_shapes,
+    generate_gemm_test_cases,
     time_func, compute_tflops, make_forward_backward_metric_records, run_benchmarks,
 )
 
-FP8_RECIPE = DelayedScaling(
-    fp8_format=Format.HYBRID,
-    amax_history_len=16,
-    amax_compute_algo="max",
-)
+RECIPES = {
+    "hybrid": DelayedScaling(
+        fp8_format=Format.HYBRID,
+        amax_history_len=16,
+        amax_compute_algo="max",
+    ),
+}
 
-ACTIVE_SHAPES = gemm_shapes(MODEL_CONFIGS)
+FP8_RECIPE = RECIPES["hybrid"]
 
 BENCHMARK_LABEL = "FP8 GEMM"
-
-
-def _generate_gemm_test_cases():
-    test_cases = []
-    for M in M_SIZE_LIST:
-        for case_name, (N, K) in ACTIVE_SHAPES.items():
-            test_cases.append({
-                "Case": case_name,
-                "M": M,
-                "N": N,
-                "K": K,
-                "dtype": torch.bfloat16,
-            })
-    return test_cases
 
 
 def bench_fp8_gemm(Case, M, N, K, dtype):
@@ -85,8 +73,7 @@ def bench_fp8_gemm(Case, M, N, K, dtype):
 
 if __name__ == "__main__":
     run_benchmarks(
-        test_cases=_generate_gemm_test_cases(),
+        test_cases=generate_gemm_test_cases(),
         bench_fn=bench_fp8_gemm,
         param_columns=["Case", "M", "N", "K", "dtype"],
-        default_csv="benchmark_gemm_fp8.csv",
     )

@@ -16,7 +16,7 @@ Output: benchmark_normalization.csv (written to cwd)
 import torch
 import transformer_engine.pytorch as te
 from utils import (
-    MODEL_HIDDEN_SIZES, M_SIZE_LIST,
+    DTYPE_LIST, MODEL_HIDDEN_SIZES, M_SIZE_LIST,
     time_func, compute_gbps, make_forward_backward_metric_records, run_benchmarks,
 )
 
@@ -33,14 +33,15 @@ def _generate_norm_test_cases():
     for model_name, hidden in MODEL_HIDDEN_SIZES:
         for norm_name, norm_cls in NORM_TYPES:
             for M in M_SIZE_LIST:
-                test_cases.append({
-                    "Case": f"{model_name}/{norm_name}",
-                    "M": M,
-                    "hidden_size": hidden,
-                    "norm_name": norm_name,
-                    "norm_cls": norm_cls,
-                    "dtype": torch.bfloat16,
-                })
+                for dtype in DTYPE_LIST:
+                    test_cases.append({
+                        "Case": f"{model_name}/{norm_name}",
+                        "M": M,
+                        "hidden_size": hidden,
+                        "norm_name": norm_name,
+                        "norm_cls": norm_cls,
+                        "dtype": dtype,
+                    })
     return test_cases
 
 
@@ -90,5 +91,4 @@ if __name__ == "__main__":
         test_cases=_generate_norm_test_cases(),
         bench_fn=bench_norm,
         param_columns=["Case", "M", "hidden_size", "dtype"],
-        default_csv="benchmark_normalization.csv",
     )

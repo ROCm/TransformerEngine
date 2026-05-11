@@ -15,6 +15,12 @@ import torch.utils.benchmark as benchmark
 # ---------------------------------------------------------------------------
 M_SIZE_LIST = [1024, 2048, 4096, 8192]
 
+# Shared dtype sweep for TE activation benchmarks. Extend this list to add
+# additional precisions such as torch.float16.
+DTYPE_LIST = [torch.bfloat16]
+
+DEFAULT_MIN_RUN_TIME_SECONDS = 0.2
+
 # ---------------------------------------------------------------------------
 # Model configurations
 # ---------------------------------------------------------------------------
@@ -61,11 +67,28 @@ def gemm_shapes(configs=None):
     return shapes
 
 
+def generate_gemm_test_cases(configs=None, m_sizes=None, dtypes=None):
+    """Generate dense GEMM benchmark cases shared by BF16 and FP8 GEMM."""
+    test_cases = []
+    active_shapes = gemm_shapes(configs)
+    for m_value in (m_sizes or M_SIZE_LIST):
+        for case_name, (n_value, k_value) in active_shapes.items():
+            for dtype in (dtypes or DTYPE_LIST):
+                test_cases.append({
+                    "Case": case_name,
+                    "M": m_value,
+                    "N": n_value,
+                    "K": k_value,
+                    "dtype": dtype,
+                })
+    return test_cases
+
+
 # ---------------------------------------------------------------------------
 # Timing helpers
 # ---------------------------------------------------------------------------
 
-def time_func(fn, method="adaptive"):
+def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
     """Time *fn* and return elapsed milliseconds.
 
     method: "adaptive" uses adaptive_autorange (good for compute-bound),
@@ -73,8 +96,8 @@ def time_func(fn, method="adaptive"):
     """
     timer = benchmark.Timer(stmt="fn()", globals={"fn": fn})
     if method == "blocked":
-        return timer.blocked_autorange().mean * 1e3
-    return timer.adaptive_autorange().mean * 1e3
+        return timer.blocked_autorange(min_run_time=min_run_time).mean * 1e3
+    return timer.adaptive_autorange(min_run_time=min_run_time).mean * 1e3
 
 
 # ---------------------------------------------------------------------------
@@ -91,44 +114,49 @@ def compute_gbps(nbytes, ms):
     return nbytes / (ms * 1e-3) / 1e9
 
 
-def make_metric_record(label, ms, unit, value, derived=False,
-                       ms_precision=3, value_precision=2):
-    """Create a structured metric record for stdout and CSV generation."""
+def make_metric_record(label, ms, unit, throughput, derived=False,
+                       ms_precision=3, throughput_precision=2):
+    """Create a structured metric record for stdout and CSV generation.
+
+    Each record describes one benchmark line item such as "GEMM Forward".
+    ``run_benchmarks`` formats these records for stdout and expands them into
+    ``<label> Time (ms)`` and ``<label> <unit>`` CSV columns.
+    """
     return {
         "label": label,
         "ms": ms,
         "unit": unit,
-        "value": value,
+        "throughput": throughput,
         "derived": derived,
         "ms_precision": ms_precision,
-        "value_precision": value_precision,
+        "throughput_precision": throughput_precision,
     }
 
 
 def make_forward_backward_metric_records(label_prefix, unit,
-                                         forward_ms, forward_value,
-                                         backward_ms, backward_value,
+                                         forward_ms, forward_throughput,
+                                         backward_ms, backward_throughput,
                                          backward_derived=False,
                                          ms_precision=3,
-                                         value_precision=2):
+                                         throughput_precision=2):
     """Create standard forward/backward metric records for a benchmark."""
     return [
         make_metric_record(
             f"{label_prefix} Forward",
             forward_ms,
             unit,
-            forward_value,
+            forward_throughput,
             ms_precision=ms_precision,
-            value_precision=value_precision,
+            throughput_precision=throughput_precision,
         ),
         make_metric_record(
             f"{label_prefix} Backward",
             backward_ms,
             unit,
-            backward_value,
+            backward_throughput,
             derived=backward_derived,
             ms_precision=ms_precision,
-            value_precision=value_precision,
+            throughput_precision=throughput_precision,
         ),
     ]
 
@@ -137,7 +165,7 @@ def _metric_time_key(metric):
     return f"{metric['label']} Time (ms)"
 
 
-def _metric_value_key(metric):
+def _metric_throughput_key(metric):
     return f"{metric['label']} {metric['unit']}"
 
 
@@ -151,8 +179,8 @@ def _metric_row_from_records(metric_records):
         row[_metric_time_key(metric)] = _format_metric_number(
             metric["ms"], metric.get("ms_precision", 3)
         )
-        row[_metric_value_key(metric)] = _format_metric_number(
-            metric["value"], metric.get("value_precision", 2)
+        row[_metric_throughput_key(metric)] = _format_metric_number(
+            metric["throughput"], metric.get("throughput_precision", 2)
         )
     return row
 
@@ -161,14 +189,20 @@ def _print_metric_records(metric_records):
     label_width = max(24, *(len(metric["label"]) for metric in metric_records))
     for metric in metric_records:
         ms_str = _format_metric_number(metric["ms"], metric.get("ms_precision", 3))
-        value_str = _format_metric_number(
-            metric["value"], metric.get("value_precision", 2)
+        throughput_str = _format_metric_number(
+            metric["throughput"], metric.get("throughput_precision", 2)
         )
         derived_suffix = " (derived)" if metric.get("derived", False) else ""
         print(
             f"  {metric['label']:<{label_width}} {ms_str} ms | "
-            f"{value_str} {metric['unit']}{derived_suffix}"
+            f"{throughput_str} {metric['unit']}{derived_suffix}"
         )
+
+
+def _default_csv_name(bench_fn):
+    import inspect
+    from pathlib import Path
+    return Path(inspect.getfile(bench_fn)).with_suffix(".csv").name
 
 
 # ---------------------------------------------------------------------------
@@ -193,12 +227,15 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None):
         keys the bench_fn needs (passed as **case).
     bench_fn : callable
         Called as ``bench_fn(**case)`` and must return a list of metric
-        records created by ``make_metric_record``.
+        records created by ``make_metric_record``. Each record corresponds to
+        one stdout line and expands to a time column plus a throughput column in
+        the CSV output.
     param_columns : list[str]
         Column names to pull from each test case into the output row.
     default_csv : str or None
         Default CSV filename used when ``--csv`` is passed without a
-        filename.  CSV output is only written when the caller passes
+        filename. If omitted, the CSV name is derived from the caller's
+        file name. CSV output is only written when the caller passes
         ``--csv`` on the command line.
     """
     parser = argparse.ArgumentParser(add_help=False)
@@ -234,7 +271,9 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None):
 
     if args.csv is not None:
         import pandas as pd
-        out_csv = args.csv if isinstance(args.csv, str) else default_csv
+        out_csv = args.csv if isinstance(args.csv, str) else (
+            default_csv or _default_csv_name(bench_fn)
+        )
         columns = param_columns + (resolved_metric_columns or [])
         results = pd.DataFrame(rows, columns=columns)
         results.to_csv(out_csv, index=False)

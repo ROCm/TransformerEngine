@@ -1,19 +1,20 @@
 #!/usr/bin/env python
 ###############################################################################
-# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
 
 import torch
 from utils import (
+    DTYPE_LIST,
     time_func,
     compute_tflops,
     make_forward_backward_metric_records,
     run_benchmarks,
 )
 
-BENCHMARK_LABEL = "BF16 Grouped GEMM"
+BENCHMARK_LABEL = "Grouped GEMM"
 
 def generate_grouped_gemm_group_lens(b, m, balance: bool):
     if balance:
@@ -26,7 +27,9 @@ def generate_grouped_gemm_group_lens(b, m, balance: bool):
         group_lens[-1] += error
         return group_lens
 
-M_SIZE_LIST = [512, 1024, 2048, 4096]
+# Grouped GEMM scales with expert count B, so we sweep smaller M values than
+# the dense GEMM benchmarks to keep the working set and runtime reasonable.
+GROUPED_GEMM_M_SIZE_LIST = [512, 1024, 2048, 4096]
 EP_SIZE_LIST = [32, 16, 8]
 
 
@@ -48,9 +51,9 @@ def _generate_moe_test_cases(
         B = n_routed_experts // ep
         if B < 1:
             continue
-        for M in M_SIZE_LIST:
+        for M in GROUPED_GEMM_M_SIZE_LIST:
             for name, (N, K) in shapes_dict.items():
-                for dtype in [torch.bfloat16]:
+                for dtype in DTYPE_LIST:
                     test_cases.append(
                         {
                             "Case": name,
@@ -213,5 +216,4 @@ if __name__ == "__main__":
         test_cases=test_cases,
         bench_fn=bench_grouped_gemm,
         param_columns=["Case", "B", "M", "N", "K", "dtype"],
-        default_csv="benchmark_grouped_gemm.csv",
     )

@@ -35,6 +35,20 @@ def auto_detect_columns(df):
     return key_cols, metric_cols
 
 
+def print_key_table(title, rows_df, key_cols):
+    if rows_df.empty:
+        return
+
+    print(title)
+    print()
+    print("| " + " | ".join(key_cols) + " |")
+    print("|" + "|".join(["---"] * len(key_cols)) + "|")
+    for idx in rows_df.index:
+        cells = [str(rows_df.loc[idx, key]) for key in key_cols]
+        print("| " + " | ".join(cells) + " |")
+    print()
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compare benchmark CSVs")
     parser.add_argument("baseline_csv", help="Baseline CSV")
@@ -72,24 +86,29 @@ def main():
         candidate_df,
         on=key_cols,
         suffixes=("_baseline", "_candidate"),
-        how="inner",
+        how="outer",
+        indicator=True,
     )
     if merged.empty:
-        print("WARNING: No matching rows between baseline and candidate CSVs.")
+        print("WARNING: No rows found in baseline or candidate CSVs.")
         return 0
+
+    matched = merged[merged["_merge"] == "both"]
+    baseline_only = merged[merged["_merge"] == "left_only"]
+    candidate_only = merged[merged["_merge"] == "right_only"]
 
     all_speedups = []
     per_row_data = []
 
-    for idx in merged.index:
-        row_keys = {k: merged.loc[idx, k] for k in key_cols}
+    for idx in matched.index:
+        row_keys = {k: matched.loc[idx, k] for k in key_cols}
         row_metrics = {}
 
         for metric in metric_cols:
             baseline_col = f"{metric}_baseline"
             candidate_col = f"{metric}_candidate"
-            baseline_value = merged.loc[idx, baseline_col]
-            candidate_value = merged.loc[idx, candidate_col]
+            baseline_value = matched.loc[idx, baseline_col]
+            candidate_value = matched.loc[idx, candidate_col]
 
             if pd.isna(baseline_value) or pd.isna(candidate_value):
                 continue
@@ -114,53 +133,75 @@ def main():
         if row_metrics:
             per_row_data.append({"keys": row_keys, "metrics": row_metrics})
 
-    if not all_speedups:
-        print("WARNING: No valid comparisons found.")
-        return 0
+    summary_row = None
 
-    speedups = np.array(all_speedups)
-    median_sp = float(np.median(speedups))
-    min_sp = float(np.min(speedups))
-    max_sp = float(np.max(speedups))
+    if all_speedups:
+        speedups = np.array(all_speedups)
+        median_sp = float(np.median(speedups))
+        min_sp = float(np.min(speedups))
+        max_sp = float(np.max(speedups))
+        summary_row = (
+            f"| {args.bench_name} | {median_sp:.3f}x | {min_sp:.3f}x | {max_sp:.3f}x |\n"
+        )
+        summary = (
+            f"<summary><b>{args.bench_name}</b> "
+            f"(median {median_sp:.3f}x, min {min_sp:.3f}x, max {max_sp:.3f}x)</summary>"
+        )
+    elif not matched.empty:
+        summary = (
+            f"<summary><b>{args.bench_name}</b> "
+            f"(no valid speedups after filtering)</summary>"
+        )
+    else:
+        summary = f"<summary><b>{args.bench_name}</b> (no overlapping rows)</summary>"
 
     # Details block
     print("<details>")
-    print(f"<summary><b>{args.bench_name}</b> "
-          f"(median {median_sp:.3f}x, min {min_sp:.3f}x, max {max_sp:.3f}x)</summary>")
+    print(summary)
     print()
 
-    header_cols = list(key_cols)
-    for m in metric_cols:
-        short = m.replace(" TFLOPS", "")
-        header_cols.extend([
-            f"{short} Baseline",
-            f"{short} Candidate",
-            f"{short} Speedup",
-        ])
+    if per_row_data:
+        header_cols = list(key_cols)
+        for m in metric_cols:
+            short = m.replace(" TFLOPS", "")
+            header_cols.extend([
+                f"{short} Baseline",
+                f"{short} Candidate",
+                f"{short} Speedup",
+            ])
 
-    print("| " + " | ".join(header_cols) + " |")
-    print("|" + "|".join(["---"] * len(header_cols)) + "|")
+        print("| " + " | ".join(header_cols) + " |")
+        print("|" + "|".join(["---"] * len(header_cols)) + "|")
 
-    for row in per_row_data:
-        cells = [str(row["keys"].get(k, "")) for k in key_cols]
-        for metric in metric_cols:
-            if metric in row["metrics"]:
-                v = row["metrics"][metric]
-                cells.append(f"{v['baseline']:.2f}")
-                cells.append(f"{v['candidate']:.2f}")
-                cells.append(f"{v['speedup']:.3f}x")
-            else:
-                cells.extend(["", "", ""])
-        print("| " + " | ".join(cells) + " |")
+        for row in per_row_data:
+            cells = [str(row["keys"].get(k, "")) for k in key_cols]
+            for metric in metric_cols:
+                if metric in row["metrics"]:
+                    v = row["metrics"][metric]
+                    cells.append(f"{v['baseline']:.2f}")
+                    cells.append(f"{v['candidate']:.2f}")
+                    cells.append(f"{v['speedup']:.3f}x")
+                else:
+                    cells.extend(["", "", ""])
+            print("| " + " | ".join(cells) + " |")
+        print()
+    elif not matched.empty:
+        print("No overlapping metric rows produced a valid speedup after filtering.")
+        print()
 
-    print()
+    print_key_table("Rows only in candidate", candidate_only, key_cols)
+    print_key_table("Rows only in baseline", baseline_only, key_cols)
+
     print("</details>")
     print()
 
     # Summary row
     if args.summary_file:
         with open(args.summary_file, "a") as f:
-            f.write(f"| {args.bench_name} | {median_sp:.3f}x | {min_sp:.3f}x | {max_sp:.3f}x |\n")
+            if summary_row is not None:
+                f.write(summary_row)
+            else:
+                f.write(f"| {args.bench_name} | n/a | n/a | n/a |\n")
 
     return 0
 

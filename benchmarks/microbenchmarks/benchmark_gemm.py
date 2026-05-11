@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 ###############################################################################
-# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 ###############################################################################
@@ -9,27 +9,11 @@
 import torch
 import transformer_engine.pytorch as te
 from utils import (
-    MODEL_CONFIGS, M_SIZE_LIST, gemm_shapes,
+    generate_gemm_test_cases,
     time_func, compute_tflops, make_forward_backward_metric_records, run_benchmarks,
 )
 
-ACTIVE_SHAPES = gemm_shapes(MODEL_CONFIGS)
-
-BENCHMARK_LABEL = "BF16 GEMM"
-
-
-def _generate_gemm_test_cases():
-    test_cases = []
-    for M in M_SIZE_LIST:
-        for case_name, (N, K) in ACTIVE_SHAPES.items():
-            test_cases.append({
-                "Case": case_name,
-                "M": M,
-                "N": N,
-                "K": K,
-                "dtype": torch.bfloat16,
-            })
-    return test_cases
+BENCHMARK_LABEL = "GEMM"
 
 
 def bench_gemm(Case, M, N, K, dtype):
@@ -73,8 +57,7 @@ def bench_gemm(Case, M, N, K, dtype):
 
 if __name__ == "__main__":
     run_benchmarks(
-        test_cases=_generate_gemm_test_cases(),
+        test_cases=generate_gemm_test_cases(),
         bench_fn=bench_gemm,
         param_columns=["Case", "M", "N", "K", "dtype"],
-        default_csv="benchmark_gemm.csv",
     )

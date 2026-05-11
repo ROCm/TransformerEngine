@@ -83,5 +83,4 @@ if __name__ == "__main__":
         test_cases=_generate_cast_test_cases(),
         bench_fn=bench_cast,
         param_columns=["Case", "M", "hidden_size", "dtype_str"],
-        default_csv="benchmark_casting.csv",
     )
