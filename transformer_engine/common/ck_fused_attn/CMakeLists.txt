@@ -99,7 +99,7 @@ if(__AITER_CACHE_DIR STREQUAL "")
       set(__CK_JIT_SOURCE_DIR $ENV{NVTE_CK_JIT_DIR})
     else()
       set(__CK_JIT_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/ck_jit")
-    endif()    
+    endif()
     execute_process(
       COMMAND ${Python_EXECUTABLE} "${__CK_JIT_SOURCE_DIR}/ck_jit_build.py" full
           --with-qola
@@ -129,7 +129,7 @@ if(__AITER_CACHE_DIR STREQUAL "")
     message(FATAL_ERROR "[AITER-BUILD] QoLA build failed.")
   endif()
 
-  if("$ENV{NVTE_CK_JIT}" STREQUAL "1")
+  if(__USE_CK_JIT)
     set(__AITER_MHA_PATH ${AITER_MHA_INSTALL_DIR})
     set(__QOLA_INCLUDE_DIR "${__QOLA_BUILD_DIR}/include")
   else()
