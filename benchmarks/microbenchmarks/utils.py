@@ -21,17 +21,17 @@ M_SIZE_LIST = [1024, 2048, 4096, 8192]
 # (name, hidden, intermediate, num_q_heads, num_kv_heads, head_dim, tp)
 #
 # Sources:
-# - Llama 3 8B   https://huggingface.co/meta-llama/Llama-3.1-8B/blob/main/config.json
-# - Llama 3 70B  https://huggingface.co/meta-llama/Llama-3.1-70B/blob/main/config.json
-# - Llama 3 405B https://huggingface.co/meta-llama/Llama-3.1-405B/blob/main/config.json
+# - Llama 3.1 8B   https://huggingface.co/meta-llama/Llama-3.1-8B/blob/main/config.json
+# - Llama 3.1 70B  https://huggingface.co/meta-llama/Llama-3.1-70B/blob/main/config.json
+# - Llama 3.1 405B https://huggingface.co/meta-llama/Llama-3.1-405B/blob/main/config.json
 # - Qwen 2.5 7B  https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/config.json
 # - Qwen 2.5 72B https://huggingface.co/Qwen/Qwen2.5-72B-Instruct/blob/main/config.json
 
 MODEL_CONFIGS = [
-    ("Llama3-8B/TP1",   4096,  14336,  32,  8, 128,  1),
-    ("Llama3-8B/TP8",   4096,  14336,  32,  8, 128,  8),
-    ("Llama3-70B/TP8",  8192,  28672,  64,  8, 128,  8),
-    ("Llama3-405B/TP8", 16384, 53248, 128,  8, 128,  8),
+    ("Llama3.1-8B/TP1",   4096,  14336,  32,  8, 128,  1),
+    ("Llama3.1-8B/TP8",   4096,  14336,  32,  8, 128,  8),
+    ("Llama3.1-70B/TP8",  8192,  28672,  64,  8, 128,  8),
+    ("Llama3.1-405B/TP8", 16384, 53248, 128,  8, 128,  8),
     ("Qwen2.5-7B/TP1",  3584, 18944,  28,  4, 128,  1),
     ("Qwen2.5-72B/TP8", 8192, 29568,  64,  8, 128,  8),
 ]
