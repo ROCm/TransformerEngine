@@ -203,6 +203,43 @@ TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
                      bool is_tuned, NVTEScalingMode mode = NVTE_DELAYED_TENSOR_SCALING,
                      bool training = true, bool gamma_in_weight_dtype = false);
 
+inline DType decode_itype(uint64_t general_key) {
+  return static_cast<DType>(general_key & 0x1F);
+}
+
+inline DType decode_otype(uint64_t general_key) {
+  return static_cast<DType>((general_key >> 5) & 0x1F);
+}
+
+inline DType decode_ctype(uint64_t general_key) {
+  return static_cast<DType>((general_key >> 10) & 0x1F);
+}
+
+inline DType decode_wtype(uint64_t general_key) {
+  return static_cast<DType>((general_key >> 15) & 0x1F);
+}
+
+inline const char* dtype_to_string(DType dtype) {
+  switch (dtype) {
+    case DType::kFloat32:
+      return "fp32";
+    case DType::kFloat16:
+      return "fp16";
+    case DType::kBFloat16:
+      return "bf16";
+    case DType::kFloat8E4M3:
+      return "fp8e4m3";
+    case DType::kFloat8E5M2:
+      return "fp8e5m2";
+    case DType::kByte:
+      return "byte";
+    case DType::kInt32:
+      return "int32";
+    default:
+      return "unknown";
+  }
+}
+
 template <typename KernelParamsType>
 class TeNormalizationRegistry {
  private:
@@ -227,7 +264,7 @@ class TeNormalizationRegistry {
       getInstance().general_function_map[general_key].emplace(hidden_size, Function(func));
     return 0;
   }
-
+  
   static Function getKernel(TupleKeyType key) {
     auto& instance = getInstance();
     auto [general_key, batch_size, hidden_size, is_tuned] = key;
@@ -238,10 +275,16 @@ class TeNormalizationRegistry {
       static thread_local std::unordered_set<TupleKeyType, TupleHash> warned_keys;
       if (warned_keys.insert(key).second) {
         NVTE_WARN("Falling back to general normalization kernel because no tuned kernel "
-                  "is available for this config. batch_size=",
-                  batch_size,
-                  ", hidden_size=",
-                  hidden_size);
+                  "is available for this config. hidden_size=",
+                  hidden_size,
+                  ", wtype=",
+                  dtype_to_string(decode_wtype(general_key)),
+                  ", itype=",
+                  dtype_to_string(decode_itype(general_key)),
+                  ", otype=",
+                  dtype_to_string(decode_otype(general_key)),
+                  ", ctype=",
+                  dtype_to_string(decode_ctype(general_key)));
       }
     } 
     if (instance.general_function_map.count(general_key) == 0) {
