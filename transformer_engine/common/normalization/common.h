@@ -24,6 +24,7 @@
 #include <typeindex>
 #include <unordered_map>
 #include <vector>
+#include <unordered_set>
 
 #include "../common.h"
 #ifndef __HIP_PLATFORM_AMD__
@@ -233,7 +234,16 @@ class TeNormalizationRegistry {
     if (is_tuned) {
       auto it = instance.tuned_function_map.find(key);
       if (it != instance.tuned_function_map.end()) return it->second;
-    }
+
+      static thread_local std::unordered_set<TupleKeyType, TupleHash> warned_keys;
+      if (warned_keys.insert(key).second) {
+        NVTE_WARN("Falling back to general normalization kernel because no tuned kernel "
+                  "is available for this config. batch_size=",
+                  batch_size,
+                  ", hidden_size=",
+                  hidden_size);
+      }
+    } 
     if (instance.general_function_map.count(general_key) == 0) {
       NVTE_ERROR("Unavailable kernel for this normalization config.");
     }
