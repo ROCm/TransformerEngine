@@ -281,7 +281,9 @@ class TestMoriExpertParallelDispatchCombine:
         mock_op.dispatch.assert_called_once()
         assert n_recv == num_recv
         assert recv_tokens.shape == (num_recv, hidden_dim)
-        mock_sync.assert_called()
+        # Phase 1: explicit torch.cuda.synchronize() removed; dispatch now runs
+        # on the comm stream and the .item() on total_recv handles host sync.
+        mock_sync.assert_not_called()
 
     @patch("torch.cuda.synchronize")
     def test_combine_calls_mori_op(self, mock_sync):
@@ -303,7 +305,9 @@ class TestMoriExpertParallelDispatchCombine:
 
         mock_op.combine.assert_called_once()
         assert output.shape == (max_tokens, hidden_dim)
-        mock_sync.assert_called()
+        # Phase 1: explicit torch.cuda.synchronize() removed; combine now runs
+        # on the comm stream and wait_stream() handles GPU-side ordering.
+        mock_sync.assert_not_called()
 
     def test_reset_calls_mori_op(self):
         ep, mock_op = self._make_ep_with_mock_op()
@@ -593,10 +597,11 @@ class TestMoriEPCycleState:
         assert state.fwd_weights is None
         assert state.fwd_indices is None
         assert state.fwd_num_input == 0
-        assert state.fwd_num_recv == 0
+        # Phase 3: total-recv counts are device tensors; uninitialized => None.
+        assert state.fwd_total_recv is None
         assert state.bwd_recv_weights is None
         assert state.bwd_recv_indices is None
-        assert state.bwd_num_recv == 0
+        assert state.bwd_total_recv is None
 
 
 class TestMoriEPDispatchAutograd:
@@ -630,14 +635,17 @@ class TestMoriEPDispatchAutograd:
         from transformer_engine.pytorch._lite.mori_ep import MoriEPDispatch
 
         ep, mock_op = self._make_ep_and_mock()
-        hidden_dim, topk, num_recv = 64, 2, 5
+        hidden_dim, topk = 64, 2
+        # Phase 3: dispatch returns the full padded buffer + a device-side
+        # total_recv tensor. Simulate padding by having max_recv > total_recv.
+        max_recv, total_recv_value = 8, 5
 
         mock_op.dispatch.return_value = (
-            torch.randn(num_recv, hidden_dim),
-            torch.rand(num_recv, topk),
+            torch.randn(max_recv, hidden_dim),
+            torch.rand(max_recv, topk),
             None,
-            torch.randint(0, 8, (num_recv, topk), dtype=torch.int32),
-            torch.tensor([num_recv], dtype=torch.int32),
+            torch.randint(0, 8, (max_recv, topk), dtype=torch.int32),
+            torch.tensor([total_recv_value], dtype=torch.int32),
         )
 
         state = ep.new_cycle()
@@ -645,17 +653,21 @@ class TestMoriEPDispatchAutograd:
         weights = torch.rand(4, topk)
         indices = torch.randint(0, 8, (4, topk), dtype=torch.int32)
 
-        recv, recv_w, recv_idx = MoriEPDispatch.apply(
+        recv, recv_w, recv_idx, total_recv = MoriEPDispatch.apply(
             input_t, weights, indices, state,
         )
 
-        # Check state was populated
+        # Phase 3 contract: dispatch returns padded buffers + device tensor.
         assert state.fwd_num_input == 4
-        assert state.fwd_num_recv == num_recv
+        assert isinstance(state.fwd_total_recv, torch.Tensor)
+        assert state.fwd_total_recv.flatten()[0].item() == total_recv_value
         assert state.fwd_weights is not None
         assert state.fwd_indices is not None
-        assert recv.shape == (num_recv, hidden_dim)
-        assert recv_w.shape == (num_recv, topk)
+        # Padded shape — caller masks via total_recv on device.
+        assert recv.shape == (max_recv, hidden_dim)
+        assert recv_w.shape == (max_recv, topk)
+        assert isinstance(total_recv, torch.Tensor)
+        assert total_recv.flatten()[0].item() == total_recv_value
 
     @patch("torch.cuda.synchronize")
     def test_dispatch_backward_calls_combine(self, mock_sync):
@@ -664,15 +676,16 @@ class TestMoriEPDispatchAutograd:
 
         ep, mock_op = self._make_ep_and_mock()
         hidden_dim, topk = 64, 2
-        num_recv = 5
+        # Phase 3: padded buffers with max_recv > total_recv.
+        max_recv, total_recv_value = 8, 5
         num_input = 4
 
         mock_op.dispatch.return_value = (
-            torch.randn(num_recv, hidden_dim),
-            torch.rand(num_recv, topk),
+            torch.randn(max_recv, hidden_dim),
+            torch.rand(max_recv, topk),
             None,
-            torch.randint(0, 8, (num_recv, topk), dtype=torch.int32),
-            torch.tensor([num_recv], dtype=torch.int32),
+            torch.randint(0, 8, (max_recv, topk), dtype=torch.int32),
+            torch.tensor([total_recv_value], dtype=torch.int32),
         )
         mock_op.combine.return_value = (
             torch.randn(16, hidden_dim),  # max_tokens=16
@@ -684,22 +697,27 @@ class TestMoriEPDispatchAutograd:
         weights = torch.rand(num_input, topk)
         indices = torch.randint(0, 8, (num_input, topk), dtype=torch.int32)
 
-        recv, recv_w, recv_idx = MoriEPDispatch.apply(
+        recv, recv_w, recv_idx, total_recv = MoriEPDispatch.apply(
             input_t, weights, indices, state,
         )
 
-        # Simulate backward: set bwd state as if combine.backward ran first
-        state.bwd_recv_weights = torch.rand(num_recv, topk)
-        state.bwd_recv_indices = torch.randint(0, 8, (num_recv, topk), dtype=torch.int32)
-        state.bwd_num_recv = num_recv
+        # Simulate backward: combine.backward populates these state fields
+        # with padded buffers + device-side bwd_total_recv.
+        state.bwd_recv_weights = torch.rand(max_recv, topk)
+        state.bwd_recv_indices = torch.randint(0, 8, (max_recv, topk), dtype=torch.int32)
+        state.bwd_total_recv = torch.tensor([total_recv_value], dtype=torch.int32)
 
-        # Trigger backward
         loss = recv.sum()
         loss.backward()
 
-        # Verify combine was called in backward
         mock_op.combine.assert_called_once()
         mock_op.reset.assert_called_once()
+        # MORI's combine should have been invoked with the *sliced* (total_recv)
+        # view of the padded buffers — that's the deferred-sync slicing.
+        combine_args = mock_op.combine.call_args.args
+        assert combine_args[0].shape == (total_recv_value, hidden_dim)
+        assert combine_args[1].shape == (total_recv_value, topk)
+        assert combine_args[2].shape == (total_recv_value, topk)
         assert input_t.grad is not None
         assert input_t.grad.shape == (num_input, hidden_dim)
 
@@ -738,6 +756,9 @@ class TestMoriEPCombineAutograd:
         ep, mock_op = self._make_ep_and_mock()
         hidden_dim, topk = 64, 2
         num_input = 4
+        # Phase 3: caller passes padded buffers; combine slices internally
+        # using the device-side fwd_total_recv saved by dispatch.
+        max_recv, total_recv_value = 8, 5
 
         mock_op.combine.return_value = (
             torch.randn(16, hidden_dim),
@@ -745,16 +766,20 @@ class TestMoriEPCombineAutograd:
         )
 
         state = ep.new_cycle()
-        state.fwd_num_input = num_input  # as if dispatch already ran
+        state.fwd_num_input = num_input
+        state.fwd_total_recv = torch.tensor([total_recv_value], dtype=torch.int32)
 
-        expert_out = torch.randn(5, hidden_dim, requires_grad=True)
-        recv_w = torch.rand(5, topk)
-        recv_idx = torch.randint(0, 8, (5, topk), dtype=torch.int32)
+        expert_out = torch.randn(max_recv, hidden_dim, requires_grad=True)
+        recv_w = torch.rand(max_recv, topk)
+        recv_idx = torch.randint(0, 8, (max_recv, topk), dtype=torch.int32)
 
         output, output_w = MoriEPCombine.apply(expert_out, recv_w, recv_idx, state)
 
         mock_op.combine.assert_called_once()
         mock_op.reset.assert_called_once()
+        # Deferred-sync slice: MORI sees only total_recv rows.
+        combine_args = mock_op.combine.call_args.args
+        assert combine_args[0].shape == (total_recv_value, hidden_dim)
         assert output.shape == (num_input, hidden_dim)
 
     @patch("torch.cuda.synchronize")
@@ -765,46 +790,51 @@ class TestMoriEPCombineAutograd:
         ep, mock_op = self._make_ep_and_mock()
         hidden_dim, topk = 64, 2
         num_input = 4
-        num_expert_tokens = 5  # tokens this rank received from dispatch
+        # Phase 3: padded buffers; max_recv > total_recv.
+        max_recv, total_recv_value = 8, 5
 
         mock_op.combine.return_value = (
             torch.randn(16, hidden_dim),
             torch.rand(16, topk),
         )
-        # Mock the backward dispatch call -- in a real scenario, the backward
-        # dispatch uses the same routing as forward, so the number of received
-        # gradient tokens matches the forward expert_output count.
+        # Backward dispatch reuses forward routing; the mock returns a padded
+        # buffer plus a device-side bwd total_recv count.
         mock_op.dispatch.return_value = (
-            torch.randn(num_expert_tokens, hidden_dim),
-            torch.rand(num_expert_tokens, topk),
+            torch.randn(max_recv, hidden_dim),
+            torch.rand(max_recv, topk),
             None,
-            torch.randint(0, 8, (num_expert_tokens, topk), dtype=torch.int32),
-            torch.tensor([num_expert_tokens], dtype=torch.int32),
+            torch.randint(0, 8, (max_recv, topk), dtype=torch.int32),
+            torch.tensor([total_recv_value], dtype=torch.int32),
         )
 
         state = ep.new_cycle()
         state.fwd_num_input = num_input
         state.fwd_weights = torch.rand(num_input, topk)
         state.fwd_indices = torch.randint(0, 8, (num_input, topk), dtype=torch.int32)
+        state.fwd_total_recv = torch.tensor([total_recv_value], dtype=torch.int32)
 
-        expert_out = torch.randn(num_expert_tokens, hidden_dim, requires_grad=True)
-        recv_w = torch.rand(num_expert_tokens, topk)
-        recv_idx = torch.randint(0, 8, (num_expert_tokens, topk), dtype=torch.int32)
+        expert_out = torch.randn(max_recv, hidden_dim, requires_grad=True)
+        recv_w = torch.rand(max_recv, topk)
+        recv_idx = torch.randint(0, 8, (max_recv, topk), dtype=torch.int32)
 
         output, output_w = MoriEPCombine.apply(expert_out, recv_w, recv_idx, state)
 
-        # Reset mock counters (combine was called in forward, reset was called)
         mock_op.reset.reset_mock()
 
         loss = output.sum()
         loss.backward()
 
-        # Verify dispatch was called in backward for gradient communication
+        # Backward dispatch was called once for gradient communication.
         assert mock_op.dispatch.call_count == 1
+        # Phase 3: backward saves padded buffers + device-side bwd_total_recv.
+        assert isinstance(state.bwd_total_recv, torch.Tensor)
+        assert state.bwd_recv_weights.shape == (max_recv, topk)
         assert expert_out.grad is not None
-        assert expert_out.grad.shape == (num_expert_tokens, hidden_dim)
-        # Verify backward state was saved
-        assert state.bwd_num_recv == num_expert_tokens
+        # Gradient w.r.t. expert_output is the padded grad_expert_output from
+        # backward dispatch, so it carries the padded shape.
+        assert expert_out.grad.shape == (max_recv, hidden_dim)
+        # Verify backward state's device count was saved.
+        assert state.bwd_total_recv.flatten()[0].item() == total_recv_value
 
 
 class TestMoriEPFullAutogradCycle:
@@ -835,7 +865,7 @@ class TestMoriEPFullAutogradCycle:
 
     @patch("torch.cuda.synchronize")
     def test_full_forward_backward_cycle(self, mock_sync):
-        """Test complete dispatch → expert → combine → backward flow."""
+        """Test complete dispatch → expert → combine → backward flow (Phase 3 API)."""
         from transformer_engine.pytorch._lite.mori_ep import (
             MoriEPDispatch, MoriEPCombine,
         )
@@ -843,22 +873,17 @@ class TestMoriEPFullAutogradCycle:
         ep, mock_op = self._make_ep_and_mock()
         hidden_dim, topk = 64, 2
         num_input = 4
-        num_recv = 6
+        # Phase 3: padded buffers carry max_recv rows, only total_recv valid.
+        max_recv, total_recv_value = 8, 6
 
-        # Forward dispatch mock
-        fwd_recv_tokens = torch.randn(num_recv, hidden_dim)
-        fwd_recv_weights = torch.rand(num_recv, topk)
-        fwd_recv_indices = torch.randint(0, 8, (num_recv, topk), dtype=torch.int32)
-
+        # Forward dispatch mock — full padded buffers + device count tensor.
         mock_op.dispatch.return_value = (
-            fwd_recv_tokens,
-            fwd_recv_weights,
+            torch.randn(max_recv, hidden_dim),
+            torch.rand(max_recv, topk),
             None,
-            fwd_recv_indices,
-            torch.tensor([num_recv], dtype=torch.int32),
+            torch.randint(0, 8, (max_recv, topk), dtype=torch.int32),
+            torch.tensor([total_recv_value], dtype=torch.int32),
         )
-
-        # Forward combine mock
         mock_op.combine.return_value = (
             torch.randn(16, hidden_dim),
             torch.rand(16, topk),
@@ -870,34 +895,32 @@ class TestMoriEPFullAutogradCycle:
         weights = torch.rand(num_input, topk)
         indices = torch.randint(0, 8, (num_input, topk), dtype=torch.int32)
 
-        # Step 1: Dispatch
-        recv, recv_w, recv_idx = MoriEPDispatch.apply(
+        recv, recv_w, recv_idx, total_recv = MoriEPDispatch.apply(
             input_t, weights, indices, state,
         )
+        assert recv.shape == (max_recv, hidden_dim)
+        assert isinstance(total_recv, torch.Tensor)
 
-        # Step 2: Expert computation (simple linear, differentiable)
+        # Expert compute on padded buffer — in real use the caller would mask
+        # invalid rows; for this mock test we just multiply, padded or not.
         expert_weight = torch.randn(hidden_dim, hidden_dim, requires_grad=True)
         expert_out = recv @ expert_weight
 
-        # Step 3: Combine
         output, output_w = MoriEPCombine.apply(
             expert_out, recv_w, recv_idx, state,
         )
 
-        # Verify forward calls
-        assert mock_op.dispatch.call_count == 1  # forward dispatch
-        assert mock_op.combine.call_count == 1   # forward combine
-        assert mock_op.reset.call_count == 1     # forward reset
+        assert mock_op.dispatch.call_count == 1
+        assert mock_op.combine.call_count == 1
+        assert mock_op.reset.call_count == 1
 
-        # --- Backward ---
-        # Set up backward mocks (dispatch in combine.bwd, combine in dispatch.bwd)
-        bwd_recv = torch.randn(num_recv, hidden_dim)
+        # --- Backward --- set up backward mocks (padded, device count).
         mock_op.dispatch.return_value = (
-            bwd_recv,
-            torch.rand(num_recv, topk),
+            torch.randn(max_recv, hidden_dim),
+            torch.rand(max_recv, topk),
             None,
-            torch.randint(0, 8, (num_recv, topk), dtype=torch.int32),
-            torch.tensor([num_recv], dtype=torch.int32),
+            torch.randint(0, 8, (max_recv, topk), dtype=torch.int32),
+            torch.tensor([total_recv_value], dtype=torch.int32),
         )
         mock_op.combine.return_value = (
             torch.randn(16, hidden_dim),
@@ -907,16 +930,786 @@ class TestMoriEPFullAutogradCycle:
         loss = output.sum()
         loss.backward()
 
-        # Verify backward calls
-        assert mock_op.dispatch.call_count == 2  # fwd dispatch + bwd dispatch (in combine.bwd)
-        assert mock_op.combine.call_count == 2   # fwd combine + bwd combine (in dispatch.bwd)
-        assert mock_op.reset.call_count == 2     # fwd reset + bwd reset
-
-        # Verify gradients exist
+        assert mock_op.dispatch.call_count == 2
+        assert mock_op.combine.call_count == 2
+        assert mock_op.reset.call_count == 2
         assert input_t.grad is not None
         assert input_t.grad.shape == (num_input, hidden_dim)
         assert expert_weight.grad is not None
         assert expert_weight.grad.shape == (hidden_dim, hidden_dim)
+
+
+# ---------------------------------------------------------------------------
+# Phase 3 — Deferred-sync API tests
+# ---------------------------------------------------------------------------
+# These tests exercise the contract that:
+#   1. MoriEPDispatch.forward returns padded buffers + a device-side
+#      total_recv tensor (no .item() in dispatch).
+#   2. MoriEPCombine.forward / backward perform the host sync exactly once,
+#      slicing the padded inputs to MORI's exact-size requirement only at
+#      the point of the MORI op call.
+#   3. The device-side helpers (compute_tokens_per_expert_device,
+#      rebase_global_to_local_indices) operate without host syncs and
+#      correctly handle invalid rows.
+
+
+class TestPhase3Helpers:
+    """Device-side helpers for sync-free dispatch consumers."""
+
+    def test_compute_tokens_per_expert_matches_bincount(self):
+        """The scatter_add path matches torch.bincount on valid indices."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            compute_tokens_per_expert_device,
+        )
+        torch.manual_seed(0)
+        num_local_experts = 4
+        # Fully valid indices in [0, num_local_experts).
+        idx = torch.randint(0, num_local_experts, (20, 2), dtype=torch.int32)
+        got = compute_tokens_per_expert_device(idx, num_local_experts)
+        expected = torch.bincount(
+            idx.flatten().long(), minlength=num_local_experts,
+        ).to(torch.int32)
+        assert torch.equal(got, expected)
+
+    def test_compute_tokens_per_expert_ignores_sentinels(self):
+        """Entries with value -1 (or out-of-range) must not contribute."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            compute_tokens_per_expert_device,
+        )
+        num_local_experts = 3
+        # 4 tokens, topk=2 — some routed locally, some marked invalid.
+        idx = torch.tensor([
+            [0, -1],   # one valid, one sentinel
+            [1, 2],    # both valid
+            [-1, -1],  # both sentinel
+            [5, 0],    # 5 is out-of-range (>= num_local_experts), 0 valid
+        ], dtype=torch.int32)
+        got = compute_tokens_per_expert_device(idx, num_local_experts)
+        # Expert 0: 2 (from rows 0 and 3); expert 1: 1; expert 2: 1.
+        assert torch.equal(
+            got, torch.tensor([2, 1, 1], dtype=torch.int32),
+        )
+
+    def test_compute_tokens_per_expert_all_invalid(self):
+        """All -1 input → all-zero counts."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            compute_tokens_per_expert_device,
+        )
+        idx = torch.full((10, 2), -1, dtype=torch.int32)
+        got = compute_tokens_per_expert_device(idx, 4)
+        assert torch.equal(got, torch.zeros(4, dtype=torch.int32))
+
+    def test_compute_tokens_per_expert_all_to_one(self):
+        """All tokens to one expert → other counts are 0."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            compute_tokens_per_expert_device,
+        )
+        idx = torch.full((7, 2), 2, dtype=torch.int32)
+        got = compute_tokens_per_expert_device(idx, 4)
+        assert torch.equal(got, torch.tensor([0, 0, 14, 0], dtype=torch.int32))
+
+    def test_compute_tokens_per_expert_returns_int32(self):
+        """Returned dtype is int32 regardless of input dtype."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            compute_tokens_per_expert_device,
+        )
+        idx_i64 = torch.randint(0, 4, (5, 2), dtype=torch.int64)
+        got = compute_tokens_per_expert_device(idx_i64, 4)
+        assert got.dtype == torch.int32
+
+    def test_rebase_local_range_mapping(self):
+        """Indices in this rank's range get rebased to [0, num_local_experts)."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            rebase_global_to_local_indices,
+        )
+        # rank=1, num_local_experts=4 → local range is [4, 8).
+        rank, n_local = 1, 4
+        # 4 rows of topk=2 global IDs; all rows valid (total_recv = 4).
+        global_idx = torch.tensor([
+            [4, 7],   # both in local range → [0, 3]
+            [5, 5],   # both → [1, 1]
+            [4, 6],   # both → [0, 2]
+            [6, 7],   # both → [2, 3]
+        ], dtype=torch.int32)
+        total_recv = torch.tensor([4], dtype=torch.int32)
+        got = rebase_global_to_local_indices(global_idx, total_recv, rank, n_local)
+        expected = torch.tensor([
+            [0, 3], [1, 1], [0, 2], [2, 3],
+        ], dtype=torch.int32)
+        assert torch.equal(got, expected)
+
+    def test_rebase_out_of_local_range_becomes_sentinel(self):
+        """Tokens routed to other ranks' experts → -1."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            rebase_global_to_local_indices,
+        )
+        rank, n_local = 0, 4  # local range [0, 4)
+        global_idx = torch.tensor([
+            [0, 5],    # 5 is not local → -1
+            [9, 10],   # both non-local → [-1, -1]
+            [2, 3],    # both local → [2, 3]
+        ], dtype=torch.int32)
+        total_recv = torch.tensor([3], dtype=torch.int32)
+        got = rebase_global_to_local_indices(global_idx, total_recv, rank, n_local)
+        expected = torch.tensor([
+            [0, -1], [-1, -1], [2, 3],
+        ], dtype=torch.int32)
+        assert torch.equal(got, expected)
+
+    def test_rebase_padding_rows_become_sentinel(self):
+        """Rows beyond total_recv must be marked invalid regardless of value."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            rebase_global_to_local_indices,
+        )
+        rank, n_local = 0, 4
+        # Padded buffer of 5 rows, only 2 valid.
+        global_idx = torch.tensor([
+            [1, 2],   # row 0, valid in-range
+            [0, 3],   # row 1, valid in-range
+            [1, 2],   # row 2, PADDING — should be -1 even though values are local
+            [3, 0],   # row 3, PADDING
+            [2, 1],   # row 4, PADDING
+        ], dtype=torch.int32)
+        total_recv = torch.tensor([2], dtype=torch.int32)
+        got = rebase_global_to_local_indices(global_idx, total_recv, rank, n_local)
+        # First two rows valid, last three all -1.
+        assert torch.equal(got[:2], torch.tensor([[1, 2], [0, 3]], dtype=torch.int32))
+        assert torch.equal(got[2:], torch.full((3, 2), -1, dtype=torch.int32))
+
+    def test_rebase_zero_total_recv(self):
+        """total_recv=0 → entire output is -1."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            rebase_global_to_local_indices,
+        )
+        global_idx = torch.randint(0, 8, (4, 2), dtype=torch.int32)
+        total_recv = torch.tensor([0], dtype=torch.int32)
+        got = rebase_global_to_local_indices(global_idx, total_recv, 0, 4)
+        assert torch.equal(got, torch.full_like(global_idx, -1))
+
+    def test_helpers_compose_correctly(self):
+        """rebase + tokens_per_expert: padding and non-local tokens are excluded."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            compute_tokens_per_expert_device,
+            rebase_global_to_local_indices,
+        )
+        rank, n_local = 1, 4  # local range [4, 8)
+        global_idx = torch.tensor([
+            [4, 5],   # local → [0, 1]
+            [4, 9],   # one local [0], one non-local [-1]
+            [5, 5],   # local → [1, 1]
+            [9, 9],   # both non-local
+            [7, 6],   # PADDING — these would normally count but rows >= total_recv
+        ], dtype=torch.int32)
+        total_recv = torch.tensor([4], dtype=torch.int32)
+        local_idx = rebase_global_to_local_indices(
+            global_idx, total_recv, rank, n_local,
+        )
+        counts = compute_tokens_per_expert_device(local_idx, n_local)
+        # Expert 0: 2 (rows 0, 1); expert 1: 3 (row 0, row 2 twice);
+        # expert 2: 0; expert 3: 0.
+        assert torch.equal(counts, torch.tensor([2, 3, 0, 0], dtype=torch.int32))
+
+
+class TestPhase3DispatchCombineContract:
+    """Phase 3 deferred-sync API contract checks."""
+
+    def _make_ep_and_mock(self):
+        import transformer_engine.pytorch._lite.mori_ep as mod
+        mock_mori = MagicMock()
+        mock_kt = MagicMock()
+        mock_kt.IntraNode = "IntraNode"
+        mock_mori.ops.EpDispatchCombineKernelType = mock_kt
+        mock_mori.ops.EpDispatchCombineConfig = MagicMock()
+        mock_op = MagicMock()
+        mock_mori.ops.EpDispatchCombineOp.return_value = mock_op
+        with mock.patch.object(mod, "_mori_available", True), \
+             mock.patch.object(mod, "_mori", mock_mori), \
+             mock.patch.object(mod, "_mori_shmem_initialized", True):
+            ep = mod.MoriExpertParallel(
+                rank=0, world_size=2, hidden_dim=64,
+                num_experts_per_rank=4, num_experts_per_token=2,
+                max_num_inp_token_per_rank=16,
+            )
+        return ep, mock_op
+
+    @patch("torch.cuda.synchronize")
+    def test_dispatch_apply_returns_four_values(self, mock_sync):
+        """MoriEPDispatch.apply contract: returns 4-tuple, 4th is a Tensor."""
+        from transformer_engine.pytorch._lite.mori_ep import MoriEPDispatch
+        ep, mock_op = self._make_ep_and_mock()
+        hidden_dim, topk = 64, 2
+        max_recv, total_recv_value = 8, 5
+        mock_op.dispatch.return_value = (
+            torch.randn(max_recv, hidden_dim),
+            torch.rand(max_recv, topk),
+            None,
+            torch.randint(0, 8, (max_recv, topk), dtype=torch.int32),
+            torch.tensor([total_recv_value], dtype=torch.int32),
+        )
+
+        state = ep.new_cycle()
+        out = MoriEPDispatch.apply(
+            torch.randn(4, hidden_dim, requires_grad=True),
+            torch.rand(4, topk),
+            torch.randint(0, 8, (4, topk), dtype=torch.int32),
+            state,
+        )
+        assert len(out) == 4
+        recv, recv_w, recv_idx, total_recv = out
+        assert isinstance(total_recv, torch.Tensor)
+        # Crucially: total_recv is a device-side tensor, not a Python int.
+        assert not isinstance(total_recv, int)
+        assert total_recv.flatten()[0].item() == total_recv_value
+
+    @patch("torch.cuda.synchronize")
+    def test_combine_slices_to_state_total_recv(self, mock_sync):
+        """Combine's call into MORI sees exactly state.fwd_total_recv rows."""
+        from transformer_engine.pytorch._lite.mori_ep import MoriEPCombine
+        ep, mock_op = self._make_ep_and_mock()
+        hidden_dim, topk = 64, 2
+        num_input = 4
+        max_recv, total_recv_value = 16, 7  # padded buffer, only 7 valid
+        mock_op.combine.return_value = (
+            torch.randn(16, hidden_dim), torch.rand(16, topk),
+        )
+
+        state = ep.new_cycle()
+        state.fwd_num_input = num_input
+        state.fwd_total_recv = torch.tensor([total_recv_value], dtype=torch.int32)
+
+        expert_out = torch.randn(max_recv, hidden_dim, requires_grad=True)
+        recv_w = torch.rand(max_recv, topk)
+        recv_idx = torch.randint(0, 8, (max_recv, topk), dtype=torch.int32)
+        MoriEPCombine.apply(expert_out, recv_w, recv_idx, state)
+
+        # Phase 3 contract: MORI was called with sliced (total_recv) inputs,
+        # not the padded buffer.
+        combine_args = mock_op.combine.call_args.args
+        assert combine_args[0].shape == (total_recv_value, hidden_dim)
+        assert combine_args[1].shape == (total_recv_value, topk)
+        assert combine_args[2].shape == (total_recv_value, topk)
+        # The padded rows after total_recv must NOT have been seen by MORI.
+        assert combine_args[0].shape[0] < max_recv
+
+    @patch("torch.cuda.synchronize")
+    def test_backward_combine_slices_to_bwd_total_recv(self, mock_sync):
+        """Backward path: dispatch.backward slices grad buffers to bwd_total_recv."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            MoriEPDispatch, MoriEPCombine,
+        )
+        ep, mock_op = self._make_ep_and_mock()
+        hidden_dim, topk = 64, 2
+        num_input = 4
+        max_recv, total_recv_value = 12, 5
+        mock_op.dispatch.return_value = (
+            torch.randn(max_recv, hidden_dim),
+            torch.rand(max_recv, topk),
+            None,
+            torch.randint(0, 8, (max_recv, topk), dtype=torch.int32),
+            torch.tensor([total_recv_value], dtype=torch.int32),
+        )
+        mock_op.combine.return_value = (
+            torch.randn(16, hidden_dim), torch.rand(16, topk),
+        )
+
+        state = ep.new_cycle()
+        input_t = torch.randn(num_input, hidden_dim, requires_grad=True)
+        weights = torch.rand(num_input, topk)
+        indices = torch.randint(0, 8, (num_input, topk), dtype=torch.int32)
+        recv, recv_w, recv_idx, total_recv = MoriEPDispatch.apply(
+            input_t, weights, indices, state,
+        )
+        expert_out = recv * 2.0  # trivial differentiable op
+        output, _ = MoriEPCombine.apply(expert_out, recv_w, recv_idx, state)
+
+        # Track the call shapes after triggering backward.
+        loss = output.sum()
+        loss.backward()
+
+        # MORI's combine was called twice: once in forward (sliced to
+        # fwd_total_recv) and once in dispatch.backward (sliced to bwd_total_recv).
+        assert mock_op.combine.call_count == 2
+        bwd_combine_args = mock_op.combine.call_args_list[1].args
+        assert bwd_combine_args[0].shape == (total_recv_value, hidden_dim)
+        assert bwd_combine_args[1].shape == (total_recv_value, topk)
+
+
+class TestPhase3ColdRank:
+    """Edge case: a rank receives zero tokens (total_recv == 0)."""
+
+    def _make_ep_and_mock(self):
+        import transformer_engine.pytorch._lite.mori_ep as mod
+        mock_mori = MagicMock()
+        mock_kt = MagicMock()
+        mock_kt.IntraNode = "IntraNode"
+        mock_mori.ops.EpDispatchCombineKernelType = mock_kt
+        mock_mori.ops.EpDispatchCombineConfig = MagicMock()
+        mock_op = MagicMock()
+        mock_mori.ops.EpDispatchCombineOp.return_value = mock_op
+        with mock.patch.object(mod, "_mori_available", True), \
+             mock.patch.object(mod, "_mori", mock_mori), \
+             mock.patch.object(mod, "_mori_shmem_initialized", True):
+            ep = mod.MoriExpertParallel(
+                rank=0, world_size=2, hidden_dim=64,
+                num_experts_per_rank=4, num_experts_per_token=2,
+                max_num_inp_token_per_rank=16,
+            )
+        return ep, mock_op
+
+    @patch("torch.cuda.synchronize")
+    def test_cold_rank_forward_combines_zero_rows(self, mock_sync):
+        """total_recv=0 → combine receives 0-row input, no errors."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            MoriEPDispatch, MoriEPCombine,
+        )
+        ep, mock_op = self._make_ep_and_mock()
+        hidden_dim, topk = 64, 2
+        max_recv = 8
+        num_input = 4
+        # Padded buffer with NO valid rows.
+        mock_op.dispatch.return_value = (
+            torch.randn(max_recv, hidden_dim),
+            torch.rand(max_recv, topk),
+            None,
+            torch.randint(0, 8, (max_recv, topk), dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32),  # cold rank
+        )
+        mock_op.combine.return_value = (
+            torch.randn(16, hidden_dim), torch.rand(16, topk),
+        )
+
+        state = ep.new_cycle()
+        input_t = torch.randn(num_input, hidden_dim, requires_grad=True)
+        recv, recv_w, recv_idx, total_recv = MoriEPDispatch.apply(
+            input_t,
+            torch.rand(num_input, topk),
+            torch.randint(0, 8, (num_input, topk), dtype=torch.int32),
+            state,
+        )
+        assert total_recv.flatten()[0].item() == 0
+
+        # Even with zero valid rows, combine should run; MORI sees a 0-row slice.
+        output, _ = MoriEPCombine.apply(recv * 2.0, recv_w, recv_idx, state)
+        combine_args = mock_op.combine.call_args.args
+        assert combine_args[0].shape == (0, hidden_dim)
+        assert output.shape == (num_input, hidden_dim)
+
+    @patch("torch.cuda.synchronize")
+    def test_cold_rank_helpers_produce_all_zero_counts(self, mock_sync):
+        """The rebase + per-expert helpers handle total_recv=0 correctly."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            compute_tokens_per_expert_device,
+            rebase_global_to_local_indices,
+        )
+        max_recv, num_local_experts = 8, 4
+        global_idx = torch.randint(0, 8, (max_recv, 2), dtype=torch.int32)
+        total_recv = torch.tensor([0], dtype=torch.int32)
+
+        local = rebase_global_to_local_indices(
+            global_idx, total_recv, rank=0, num_local_experts=num_local_experts,
+        )
+        # All rows are padding → all -1.
+        assert torch.equal(local, torch.full_like(global_idx, -1))
+
+        counts = compute_tokens_per_expert_device(local, num_local_experts)
+        assert torch.equal(counts, torch.zeros(num_local_experts, dtype=torch.int32))
+
+    @patch("torch.cuda.synchronize")
+    def test_cold_rank_backward_zero_recv(self, mock_sync):
+        """End-to-end backward works when backward dispatch also returns 0."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            MoriEPDispatch, MoriEPCombine,
+        )
+        ep, mock_op = self._make_ep_and_mock()
+        hidden_dim, topk = 64, 2
+        max_recv = 8
+        num_input = 4
+        mock_op.dispatch.return_value = (
+            torch.randn(max_recv, hidden_dim),
+            torch.rand(max_recv, topk),
+            None,
+            torch.randint(0, 8, (max_recv, topk), dtype=torch.int32),
+            torch.tensor([0], dtype=torch.int32),
+        )
+        mock_op.combine.return_value = (
+            torch.randn(16, hidden_dim), torch.rand(16, topk),
+        )
+
+        state = ep.new_cycle()
+        input_t = torch.randn(num_input, hidden_dim, requires_grad=True)
+        recv, recv_w, recv_idx, _ = MoriEPDispatch.apply(
+            input_t,
+            torch.rand(num_input, topk),
+            torch.randint(0, 8, (num_input, topk), dtype=torch.int32),
+            state,
+        )
+        output, _ = MoriEPCombine.apply(recv * 2.0, recv_w, recv_idx, state)
+
+        loss = output.sum()
+        loss.backward()  # must not error
+        assert input_t.grad is not None
+        assert input_t.grad.shape == (num_input, hidden_dim)
+
+
+# ---------------------------------------------------------------------------
+# Megatron adapter tests (MOE_MORI_BACKEND=tealite path)
+# ---------------------------------------------------------------------------
+# These exercise the adapter functions that wire tealite's autograd Functions
+# into Megatron's _MoriManager via the env-var backend switch in
+# megatron/core/transformer/moe/fused_a2a.py. The mock simulates MORI's
+# op.dispatch / op.combine; the adapter is exercised through its public
+# Megatron-shape signature.
+
+
+class TestMegatronAdapter:
+    """Adapter that exposes tealite's MoriEPDispatch/Combine in Megatron's API."""
+
+    def _make_mocked_module(self, world_size=2, num_local_experts=4, topk=2,
+                            hidden_dim=64, max_tokens=16):
+        """Set up a mocked tealite mori_ep module + mock MORI op handle."""
+        import transformer_engine.pytorch._lite.mori_ep as mod
+
+        # Reset adapter singletons so each test gets a fresh wrapper.
+        mod._megatron_adapter_ep = None
+        mod._megatron_adapter_state = None
+
+        mock_mori = MagicMock()
+        mock_kt = MagicMock()
+        mock_kt.IntraNode = "IntraNode"
+        mock_kt.InterNodeV1 = "InterNodeV1"
+        mock_mori.ops.EpDispatchCombineKernelType = mock_kt
+        mock_mori.ops.EpDispatchCombineConfig = MagicMock()
+        mock_op = MagicMock()
+        mock_mori.ops.EpDispatchCombineOp.return_value = mock_op
+
+        # Mock torch.distributed.get_rank and group.size() so the adapter can
+        # build a MoriExpertParallel without a real distributed runtime.
+        mock_group = MagicMock()
+        mock_group.size.return_value = world_size
+
+        ctx = (
+            mock.patch.object(mod, "_mori_available", True),
+            mock.patch.object(mod, "_mori", mock_mori),
+            mock.patch.object(mod, "_mori_shmem_initialized", True),
+            mock.patch("torch.distributed.get_rank", return_value=0),
+        )
+        return mod, mock_op, mock_group, ctx
+
+    def _enter_all(self, ctx_tuple):
+        """Helper to enter a tuple of context managers (returns the patchers)."""
+        return [c.__enter__() for c in ctx_tuple]
+
+    def _exit_all(self, ctx_tuple):
+        for c in ctx_tuple:
+            c.__exit__(None, None, None)
+
+    @patch("torch.cuda.synchronize")
+    def test_adapter_dispatch_returns_megatron_5tuple(self, mock_sync):
+        """Adapter returns Megatron's 5-tuple, sliced to total_recv."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            tealite_mori_dispatch_for_megatron, _reset_megatron_adapter,
+        )
+
+        world_size, num_local_experts, topk, hidden_dim, max_tokens = 2, 4, 2, 64, 16
+        max_recv, total_recv_value = 12, 7
+
+        mod, mock_op, mock_group, ctx = self._make_mocked_module(
+            world_size, num_local_experts, topk, hidden_dim, max_tokens,
+        )
+        self._enter_all(ctx)
+        try:
+            mock_op.dispatch.return_value = (
+                torch.randn(max_recv, hidden_dim),
+                torch.rand(max_recv, topk),
+                None,
+                # GLOBAL expert IDs in [0, world_size * num_local_experts)
+                torch.randint(0, world_size * num_local_experts,
+                              (max_recv, topk), dtype=torch.int32),
+                torch.tensor([total_recv_value], dtype=torch.int32),
+            )
+
+            num_tokens = 4
+            x = torch.randn(num_tokens, hidden_dim)
+            indices = torch.randint(0, world_size * num_local_experts,
+                                    (num_tokens, topk), dtype=torch.int64)
+            probs = torch.rand(num_tokens, topk, dtype=torch.float32)
+
+            result = tealite_mori_dispatch_for_megatron(
+                x, indices, probs,
+                num_experts=world_size * num_local_experts,
+                group=mock_group,
+                num_local_experts=num_local_experts,
+                router_topk=topk,
+                max_num_tokens_per_rank=max_tokens,
+            )
+
+            assert len(result) == 5
+            recv_x, recv_idx_local, recv_probs, tokens_per_expert, recv_idx_global = result
+            # All five must be sliced to total_recv (Megatron's contract).
+            assert recv_x.shape == (total_recv_value, hidden_dim)
+            assert recv_idx_local.shape == (total_recv_value, topk)
+            assert recv_probs.shape == (total_recv_value, topk)
+            assert recv_idx_global.shape == (total_recv_value, topk)
+            # tokens_per_expert is a per-local-expert count.
+            assert tokens_per_expert.shape == (num_local_experts,)
+            # And the adapter cached a cycle state for the upcoming combine.
+            assert mod._megatron_adapter_state is not None
+        finally:
+            self._exit_all(ctx)
+            _reset_megatron_adapter()
+
+    @patch("torch.cuda.synchronize")
+    def test_adapter_rebase_marks_non_local_sentinels(self, mock_sync):
+        """Global indices outside [rank*N, (rank+1)*N) become -1."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            tealite_mori_dispatch_for_megatron, _reset_megatron_adapter,
+        )
+
+        world_size, num_local_experts, topk = 2, 4, 2  # local range for rank 0: [0, 4)
+        hidden_dim, max_tokens = 64, 16
+        total_recv_value = 4
+
+        # Hand-crafted indices: row 0 both local, row 1 mixed, row 2 both non-local,
+        # row 3 both local.
+        crafted_indices = torch.tensor([
+            [0, 3],  # both local
+            [1, 5],  # 5 is non-local
+            [6, 7],  # both non-local
+            [2, 0],  # both local
+        ], dtype=torch.int32)
+
+        mod, mock_op, mock_group, ctx = self._make_mocked_module(
+            world_size, num_local_experts, topk, hidden_dim, max_tokens,
+        )
+        self._enter_all(ctx)
+        try:
+            mock_op.dispatch.return_value = (
+                torch.randn(total_recv_value, hidden_dim),
+                torch.rand(total_recv_value, topk),
+                None,
+                crafted_indices,
+                torch.tensor([total_recv_value], dtype=torch.int32),
+            )
+
+            x = torch.randn(2, hidden_dim)
+            result = tealite_mori_dispatch_for_megatron(
+                x,
+                torch.randint(0, 8, (2, topk), dtype=torch.int64),
+                torch.rand(2, topk, dtype=torch.float32),
+                num_experts=world_size * num_local_experts,
+                group=mock_group,
+                num_local_experts=num_local_experts,
+                router_topk=topk,
+                max_num_tokens_per_rank=max_tokens,
+            )
+
+            recv_idx_local = result[1]
+            recv_idx_global = result[4]
+
+            # Local indices: non-local slots → -1, local slots → global - 0 (rank 0).
+            expected_local = torch.tensor([
+                [0, 3],
+                [1, -1],
+                [-1, -1],
+                [2, 0],
+            ], dtype=torch.int64)
+            assert torch.equal(recv_idx_local, expected_local)
+
+            # Global indices preserved unchanged.
+            assert torch.equal(recv_idx_global, crafted_indices)
+
+            # tokens_per_expert via the sync-free helper: expert 0 has 2
+            # (rows 0 & 3), expert 1 has 1, expert 2 has 1, expert 3 has 1.
+            assert torch.equal(
+                result[3], torch.tensor([2, 1, 1, 1], dtype=torch.int32),
+            )
+        finally:
+            self._exit_all(ctx)
+            _reset_megatron_adapter()
+
+    @patch("torch.cuda.synchronize")
+    def test_adapter_combine_uses_state_from_dispatch(self, mock_sync):
+        """Combine reads the state stashed by dispatch; resets afterwards."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            tealite_mori_dispatch_for_megatron,
+            tealite_mori_combine_for_megatron,
+            _reset_megatron_adapter,
+        )
+
+        world_size, num_local_experts, topk, hidden_dim, max_tokens = 2, 4, 2, 64, 16
+        total_recv_value = 5
+        num_tokens = 4
+
+        mod, mock_op, mock_group, ctx = self._make_mocked_module(
+            world_size, num_local_experts, topk, hidden_dim, max_tokens,
+        )
+        self._enter_all(ctx)
+        try:
+            mock_op.dispatch.return_value = (
+                torch.randn(total_recv_value, hidden_dim),
+                torch.rand(total_recv_value, topk),
+                None,
+                torch.randint(0, num_local_experts, (total_recv_value, topk), dtype=torch.int32),
+                torch.tensor([total_recv_value], dtype=torch.int32),
+            )
+            mock_op.combine.return_value = (
+                torch.randn(max_tokens, hidden_dim),
+                torch.rand(max_tokens, topk),
+            )
+
+            x = torch.randn(num_tokens, hidden_dim)
+            indices = torch.randint(0, 8, (num_tokens, topk), dtype=torch.int64)
+            probs = torch.rand(num_tokens, topk, dtype=torch.float32)
+
+            result = tealite_mori_dispatch_for_megatron(
+                x, indices, probs,
+                num_experts=world_size * num_local_experts,
+                group=mock_group,
+                num_local_experts=num_local_experts,
+                router_topk=topk,
+                max_num_tokens_per_rank=max_tokens,
+            )
+            recv_x, recv_idx_local, recv_probs, tokens_per_expert, recv_idx_global = result
+            assert mod._megatron_adapter_state is not None
+
+            # Run combine — should consume the same state.
+            expert_output = recv_x * 2.0  # arbitrary expert computation
+            combined = tealite_mori_combine_for_megatron(
+                expert_output,
+                mock_group,
+                indices,
+                recv_idx_global,
+                recv_probs,
+                num_local_experts=num_local_experts,
+                router_topk=topk,
+                max_num_tokens_per_rank=max_tokens,
+            )
+
+            # State cleared after combine — ready for next layer's cycle.
+            assert mod._megatron_adapter_state is None
+            # Output sliced to sender-side num_tokens.
+            assert combined.shape == (num_tokens, hidden_dim)
+        finally:
+            self._exit_all(ctx)
+            _reset_megatron_adapter()
+
+    def test_adapter_combine_without_dispatch_raises(self):
+        """Calling combine without a paired dispatch raises a clear error."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            tealite_mori_combine_for_megatron, _reset_megatron_adapter,
+        )
+
+        _reset_megatron_adapter()
+        with pytest.raises(RuntimeError, match="without a paired dispatch"):
+            tealite_mori_combine_for_megatron(
+                torch.randn(4, 64),
+                MagicMock(),
+                torch.randint(0, 8, (4, 2), dtype=torch.int64),
+                torch.randint(0, 8, (4, 2), dtype=torch.int32),
+                torch.rand(4, 2, dtype=torch.float32),
+                num_local_experts=4,
+                router_topk=2,
+                max_num_tokens_per_rank=16,
+            )
+
+    def test_adapter_fp8_raises_not_implemented(self):
+        """FP8 dispatch is not yet supported; the adapter should say so."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            tealite_mori_dispatch_for_megatron, tealite_mori_combine_for_megatron,
+            _reset_megatron_adapter,
+        )
+
+        _reset_megatron_adapter()
+        with pytest.raises(NotImplementedError, match="FP8 dispatch"):
+            tealite_mori_dispatch_for_megatron(
+                torch.randn(4, 64),
+                torch.randint(0, 8, (4, 2), dtype=torch.int64),
+                torch.rand(4, 2, dtype=torch.float32),
+                num_experts=8, group=MagicMock(), num_local_experts=4,
+                router_topk=2, max_num_tokens_per_rank=16, fp8_dispatch=True,
+            )
+        with pytest.raises(NotImplementedError, match="FP8 combine"):
+            tealite_mori_combine_for_megatron(
+                torch.randn(4, 64), MagicMock(),
+                torch.randint(0, 8, (4, 2), dtype=torch.int64),
+                torch.randint(0, 8, (4, 2), dtype=torch.int32),
+                torch.rand(4, 2, dtype=torch.float32),
+                num_local_experts=4, router_topk=2,
+                max_num_tokens_per_rank=16, fp8_dispatch=True,
+            )
+
+    @patch("torch.cuda.synchronize")
+    def test_adapter_full_forward_backward(self, mock_sync):
+        """End-to-end forward + backward through both adapters."""
+        from transformer_engine.pytorch._lite.mori_ep import (
+            tealite_mori_dispatch_for_megatron,
+            tealite_mori_combine_for_megatron,
+            _reset_megatron_adapter,
+        )
+
+        world_size, num_local_experts, topk, hidden_dim, max_tokens = 2, 4, 2, 64, 16
+        total_recv_value = 6
+        num_tokens = 4
+
+        mod, mock_op, mock_group, ctx = self._make_mocked_module(
+            world_size, num_local_experts, topk, hidden_dim, max_tokens,
+        )
+        self._enter_all(ctx)
+        try:
+            mock_op.dispatch.return_value = (
+                torch.randn(total_recv_value, hidden_dim),
+                torch.rand(total_recv_value, topk),
+                None,
+                torch.randint(0, num_local_experts, (total_recv_value, topk), dtype=torch.int32),
+                torch.tensor([total_recv_value], dtype=torch.int32),
+            )
+            mock_op.combine.return_value = (
+                torch.randn(max_tokens, hidden_dim),
+                torch.rand(max_tokens, topk),
+            )
+
+            x = torch.randn(num_tokens, hidden_dim, requires_grad=True)
+            indices = torch.randint(0, 8, (num_tokens, topk), dtype=torch.int64)
+            probs = torch.rand(num_tokens, topk, dtype=torch.float32)
+
+            recv_x, _, recv_probs, _, recv_idx_global = (
+                tealite_mori_dispatch_for_megatron(
+                    x, indices, probs,
+                    num_experts=world_size * num_local_experts,
+                    group=mock_group,
+                    num_local_experts=num_local_experts,
+                    router_topk=topk,
+                    max_num_tokens_per_rank=max_tokens,
+                )
+            )
+            # Simple differentiable expert: multiply by trainable weight.
+            expert_weight = torch.randn(hidden_dim, hidden_dim, requires_grad=True)
+            expert_output = recv_x @ expert_weight
+
+            output = tealite_mori_combine_for_megatron(
+                expert_output, mock_group, indices, recv_idx_global, recv_probs,
+                num_local_experts=num_local_experts, router_topk=topk,
+                max_num_tokens_per_rank=max_tokens,
+            )
+
+            # Reset call counters before triggering backward so we can count
+            # backward calls cleanly.
+            n_dispatch_forward = mock_op.dispatch.call_count
+            n_combine_forward = mock_op.combine.call_count
+
+            loss = output.sum()
+            loss.backward()
+
+            # Backward must invoke both ops once more each.
+            assert mock_op.dispatch.call_count == n_dispatch_forward + 1
+            assert mock_op.combine.call_count == n_combine_forward + 1
+            assert x.grad is not None
+            assert x.grad.shape == (num_tokens, hidden_dim)
+            assert expert_weight.grad is not None
+            assert expert_weight.grad.shape == (hidden_dim, hidden_dim)
+        finally:
+            self._exit_all(ctx)
+            _reset_megatron_adapter()
 
 
 # ---------------------------------------------------------------------------

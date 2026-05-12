@@ -26,13 +26,25 @@ Inference usage::
     output, _ = ep.combine(expert_out, recv_w, recv_idx)
     ep.reset()
 
-Training usage (with autograd)::
+Training usage (with autograd, Phase 3 deferred-sync API)::
 
     state = ep.new_cycle()
-    recv, recv_w, recv_idx = MoriEPDispatch.apply(tokens, weights, indices, state)
-    expert_out = run_experts(recv)           # normal autograd
-    weighted = expert_out * recv_w[..., None]  # apply routing weights
-    output, _ = MoriEPCombine.apply(weighted, recv_w, recv_idx, state)
+    # Returns padded buffers + a device-resident total_recv scalar tensor.
+    # No host sync at the dispatch site.
+    recv, recv_w, recv_idx, total_recv = MoriEPDispatch.apply(
+        tokens, weights, indices, state,
+    )
+
+    # Process on device using total_recv as a row mask. For example:
+    local_idx = rebase_global_to_local_indices(
+        recv_idx, total_recv, rank, num_local_experts,
+    )
+    m_splits = compute_tokens_per_expert_device(local_idx, num_local_experts)
+    # ... permute & grouped GEMM with m_splits as a device tensor ...
+
+    # Combine accepts padded inputs; the single host .item() is deferred to
+    # here, where dispatch (on the comm stream) is already done.
+    output, _ = MoriEPCombine.apply(weighted_padded, recv_w, recv_idx, state)
     loss = loss_fn(output[:num_tokens])
     loss.backward()  # gradients flow through combine → expert → dispatch
 """
@@ -116,6 +128,59 @@ def finalize_mori_ep() -> None:
 def is_mori_ep_initialized() -> bool:
     """Return whether MORI shmem has been initialized."""
     return _mori_shmem_initialized
+
+
+# ---------------------------------------------------------------------------
+# Comm-stream / async helpers
+# ---------------------------------------------------------------------------
+# Process-wide high-priority CUDA stream dedicated to MORI dispatch/combine
+# launches. Mirrors the MCore-side ``_mori_comm_stream`` pattern so MORI's
+# comm kernels can overlap with non-dependent compute on the default stream.
+# A host sync (``.item()`` on ``total_recv``) still serializes dispatch when
+# the caller needs the receive count to slice the output buffer — eliminating
+# that is the Phase 3 sync-free refactor, not this phase.
+_mori_comm_stream = None
+
+
+def _get_mori_comm_stream():
+    """Return a process-wide high-priority CUDA stream for MORI launches.
+
+    Lazily allocated on first use; cached for the lifetime of the process.
+    Priority ``-1`` keeps MORI's communication kernels from being preempted
+    by lower-priority compute on the default stream.
+    """
+    global _mori_comm_stream
+    if _mori_comm_stream is None and torch.cuda.is_available():
+        _mori_comm_stream = torch.cuda.Stream(
+            device=torch.cuda.current_device(), priority=-1
+        )
+    return _mori_comm_stream
+
+
+def _run_mori_op_on_stream(fn, async_finish: bool, allocate_on_comm_stream: bool):
+    """Run a MORI op on the dedicated comm stream when both flags are True.
+
+    When enabled, the kernel launch is placed on a high-priority comm stream
+    bracketed by ``wait_stream()`` calls so the comm stream sees the inputs
+    and the compute stream sees the outputs. Otherwise ``fn()`` runs on the
+    current stream (legacy synchronous behavior).
+
+    MORI's ``op.dispatch()`` / ``op.combine()`` take no async kwargs of their
+    own; their kernel launches are already CUDA-async. This helper just
+    places them on a non-default stream so they can overlap with unrelated
+    compute on the default stream.
+    """
+    if not (async_finish and allocate_on_comm_stream and torch.cuda.is_available()):
+        return fn()
+    comm_stream = _get_mori_comm_stream()
+    if comm_stream is None:
+        return fn()
+    current_stream = torch.cuda.current_stream()
+    comm_stream.wait_stream(current_stream)
+    with torch.cuda.stream(comm_stream):
+        result = fn()
+    current_stream.wait_stream(comm_stream)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -220,6 +285,101 @@ def index_to_mask(
         probs[row_idx, indices.long()] = weights
 
     return routing_map, probs
+
+
+# ---------------------------------------------------------------------------
+# Device-side helpers for sync-free dispatch consumers
+# ---------------------------------------------------------------------------
+# These let a caller process MORI's padded dispatch output entirely on the
+# GPU — no .item() / .tolist() / bincount required. The host sync moves from
+# "immediately after dispatch" to "when grouped GEMM needs m_splits as a
+# Python list" (inside AITER's gmm wrapper), naturally overlapping with the
+# dispatch kernel that runs on the comm stream.
+
+
+def compute_tokens_per_expert_device(
+    local_idx: torch.Tensor,
+    num_local_experts: int,
+) -> torch.Tensor:
+    """Count tokens routed to each local expert, on device, with no host sync.
+
+    Equivalent to ``torch.bincount(local_idx.flatten(), minlength=num_local_experts)``
+    but avoids ``bincount``'s internal ``.max().item()`` (which forces a host
+    sync to size the output buffer). Entries with value ``-1`` or out of the
+    ``[0, num_local_experts)`` range are treated as invalid (e.g. tokens
+    routed to a different rank, or rows beyond ``total_recv``).
+
+    Args:
+        local_idx: Local expert IDs, shape ``[N, topk]`` or ``[N*topk]``,
+            integer dtype. ``-1`` marks invalid entries.
+        num_local_experts: Number of experts owned by this rank.
+
+    Returns:
+        ``[num_local_experts]`` int32 tensor of token counts.
+    """
+    flat = local_idx.flatten().long()
+    # Map invalid entries to an "overflow bucket" at index num_local_experts
+    # rather than using boolean-mask indexing (which would force a host sync
+    # to determine the masked output's shape).
+    in_range = (flat >= 0) & (flat < num_local_experts)
+    safe = torch.where(
+        in_range, flat, torch.full_like(flat, num_local_experts),
+    )
+    counts = torch.zeros(
+        num_local_experts + 1, dtype=torch.int64, device=flat.device,
+    )
+    counts.scatter_add_(0, safe, torch.ones_like(flat, dtype=torch.int64))
+    return counts[:num_local_experts].to(torch.int32)
+
+
+def rebase_global_to_local_indices(
+    global_idx: torch.Tensor,
+    total_recv: torch.Tensor,
+    rank: int,
+    num_local_experts: int,
+) -> torch.Tensor:
+    """Convert MORI's global expert IDs to local IDs with ``-1`` sentinels.
+
+    MORI's dispatch returns expert IDs in the global ``[0, num_total_experts)``
+    range. The expert-MLP layer needs them in the local ``[0, num_local_experts)``
+    range, with non-local tokens and padding rows (beyond ``total_recv``)
+    marked as invalid so downstream permute/grouped GEMM can skip them.
+
+    This runs entirely on device — no host sync.
+
+    Args:
+        global_idx: Global expert IDs from MORI dispatch, shape
+            ``[max_recv, topk]``, integer dtype.
+        total_recv: Device-resident scalar tensor (shape ``[1]`` or ``[]``)
+            giving the count of valid rows. Rows ``>= total_recv`` are padding.
+        rank: This rank's number in the expert-parallel group.
+        num_local_experts: Number of experts owned by each rank.
+
+    Returns:
+        ``[max_recv, topk]`` tensor of the same dtype as ``global_idx``.
+        Entries are local IDs in ``[0, num_local_experts)`` for tokens routed
+        to this rank, ``-1`` otherwise (other ranks' experts, or padding rows).
+    """
+    lo = rank * num_local_experts
+    hi = lo + num_local_experts
+
+    local_id = global_idx - lo
+    in_local_range = (global_idx >= lo) & (global_idx < hi)
+
+    # Row-index mask: rows >= total_recv are padding. Broadcast total_recv
+    # (which may be shape [1] or [] depending on MORI) against the row axis.
+    max_recv = global_idx.shape[0]
+    row_idx = torch.arange(
+        max_recv, device=global_idx.device, dtype=global_idx.dtype,
+    ).unsqueeze(1)
+    total_recv_scalar = total_recv.flatten()[0]
+    in_valid_rows = row_idx < total_recv_scalar.to(global_idx.dtype)
+
+    return torch.where(
+        in_local_range & in_valid_rows,
+        local_id,
+        torch.full_like(global_idx, -1),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -338,6 +498,8 @@ class MoriExpertParallel:
         scales: Optional[torch.Tensor] = None,
         block_num: int = -1,
         warp_per_block: int = -1,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, int]:
         """Dispatch tokens to expert-owning ranks.
 
@@ -350,6 +512,11 @@ class MoriExpertParallel:
             scales: Optional per-token scales for quantized paths.
             block_num: Override GPU block count for this launch.
             warp_per_block: Override warps-per-block for this launch.
+            async_finish: When True (with ``allocate_on_comm_stream=True``),
+                run the MORI dispatch on the high-priority comm stream so it
+                can overlap with unrelated compute on the default stream.
+                The host ``.item()`` on the receive count still serializes.
+            allocate_on_comm_stream: See ``async_finish``.
 
         Returns:
             Tuple of ``(recv_tokens, recv_weights, recv_indices, num_recv_tokens)``:
@@ -369,13 +536,18 @@ class MoriExpertParallel:
                 input.size(0), 0, dtype=torch.float32, device=input.device,
             )
 
-        out, out_weights, _out_scales, out_indices, total_recv = self._op.dispatch(
-            input, weights, scales, indices,
-            block_num=block_num,
-            warp_per_block=warp_per_block,
+        out, out_weights, _out_scales, out_indices, total_recv = _run_mori_op_on_stream(
+            lambda: self._op.dispatch(
+                input, weights, scales, indices,
+                block_num=block_num,
+                warp_per_block=warp_per_block,
+            ),
+            async_finish,
+            allocate_on_comm_stream,
         )
 
-        torch.cuda.synchronize()
+        # .item() is the host sync here; wait_stream() inside the helper
+        # already made total_recv visible on the current stream.
         num_recv = total_recv[0].item()
 
         return out, out_weights, out_indices, num_recv
@@ -387,6 +559,8 @@ class MoriExpertParallel:
         indices: torch.Tensor,
         block_num: int = -1,
         warp_per_block: int = -1,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Combine expert outputs back to original ranks.
 
@@ -397,6 +571,12 @@ class MoriExpertParallel:
             indices: Expert indices returned from :meth:`dispatch`.
             block_num: Override GPU block count for this launch.
             warp_per_block: Override warps-per-block for this launch.
+            async_finish: When True (with ``allocate_on_comm_stream=True``),
+                run the MORI combine on the high-priority comm stream so it
+                can overlap with unrelated compute on the default stream.
+                No host sync is needed; the compute stream's wait_stream()
+                handles ordering for downstream consumers.
+            allocate_on_comm_stream: See ``async_finish``.
 
         Returns:
             Tuple of ``(output, output_weights)``:
@@ -410,13 +590,16 @@ class MoriExpertParallel:
         if indices.dtype != torch.int32:
             indices = indices.to(torch.int32)
 
-        output, output_weights = self._op.combine(
-            input, weights, indices,
-            block_num=block_num,
-            warp_per_block=warp_per_block,
+        output, output_weights = _run_mori_op_on_stream(
+            lambda: self._op.combine(
+                input, weights, indices,
+                block_num=block_num,
+                warp_per_block=warp_per_block,
+            ),
+            async_finish,
+            allocate_on_comm_stream,
         )
 
-        torch.cuda.synchronize()
         return output, output_weights
 
     # ------------------------------------------------------------------
@@ -434,6 +617,8 @@ class MoriExpertParallel:
         block_num: int = -1,
         rdma_block_num: int = -1,
         warp_per_block: int = -1,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Dispatch tokens and output in per-expert layout for grouped GEMM.
 
@@ -478,14 +663,17 @@ class MoriExpertParallel:
                 input.size(0), 0, dtype=torch.float32, device=input.device,
             )
 
-        packed_tokens, recv_count, src_info, _ = self._op.dispatch_standard_moe(
-            input, weights, scales, indices,
-            block_num=block_num,
-            rdma_block_num=rdma_block_num,
-            warp_per_block=warp_per_block,
+        packed_tokens, recv_count, src_info, _ = _run_mori_op_on_stream(
+            lambda: self._op.dispatch_standard_moe(
+                input, weights, scales, indices,
+                block_num=block_num,
+                rdma_block_num=rdma_block_num,
+                warp_per_block=warp_per_block,
+            ),
+            async_finish,
+            allocate_on_comm_stream,
         )
 
-        torch.cuda.synchronize()
         return packed_tokens, recv_count, src_info
 
     def combine_standard_moe(
@@ -496,6 +684,8 @@ class MoriExpertParallel:
         block_num: int = -1,
         rdma_block_num: int = -1,
         warp_per_block: int = -1,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
         """Combine expert outputs from per-expert layout back to original ranks.
 
@@ -529,14 +719,17 @@ class MoriExpertParallel:
         if indices.dtype != torch.int32:
             indices = indices.to(torch.int32)
 
-        output, output_weights = self._op.combine_standard_moe(
-            expert_output, weights, indices,
-            block_num=block_num,
-            rdma_block_num=rdma_block_num,
-            warp_per_block=warp_per_block,
+        output, output_weights = _run_mori_op_on_stream(
+            lambda: self._op.combine_standard_moe(
+                expert_output, weights, indices,
+                block_num=block_num,
+                rdma_block_num=rdma_block_num,
+                warp_per_block=warp_per_block,
+            ),
+            async_finish,
+            allocate_on_comm_stream,
         )
 
-        torch.cuda.synchronize()
         return output, output_weights
 
     def convert_dispatch_to_standard(
@@ -545,6 +738,8 @@ class MoriExpertParallel:
         dispatch_indices: torch.Tensor,
         block_num: int = -1,
         warp_per_block: int = -1,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Convert flat dispatch output to per-expert layout.
 
@@ -569,13 +764,16 @@ class MoriExpertParallel:
         if dispatch_indices.dtype != torch.int32:
             dispatch_indices = dispatch_indices.to(torch.int32)
 
-        packed_tokens, recv_count, src_info, _ = self._op.convert_dispatch_output(
-            dispatch_tokens, dispatch_indices,
-            block_num=block_num,
-            warp_per_block=warp_per_block,
+        packed_tokens, recv_count, src_info, _ = _run_mori_op_on_stream(
+            lambda: self._op.convert_dispatch_output(
+                dispatch_tokens, dispatch_indices,
+                block_num=block_num,
+                warp_per_block=warp_per_block,
+            ),
+            async_finish,
+            allocate_on_comm_stream,
         )
 
-        torch.cuda.synchronize()
         return packed_tokens, recv_count, src_info
 
     def convert_standard_to_combine_input(
@@ -584,6 +782,8 @@ class MoriExpertParallel:
         src_info: torch.Tensor,
         block_num: int = -1,
         warp_per_block: int = -1,
+        async_finish: bool = True,
+        allocate_on_comm_stream: bool = True,
     ) -> torch.Tensor:
         """Convert per-expert layout back to flat layout for :meth:`combine`.
 
@@ -608,13 +808,16 @@ class MoriExpertParallel:
         """
         layout_range = torch.empty(0, dtype=torch.int64, device=packed_tokens.device)
 
-        flat_input = self._op.convert_combine_input(
-            packed_tokens, src_info, layout_range,
-            block_num=block_num,
-            warp_per_block=warp_per_block,
+        flat_input = _run_mori_op_on_stream(
+            lambda: self._op.convert_combine_input(
+                packed_tokens, src_info, layout_range,
+                block_num=block_num,
+                warp_per_block=warp_per_block,
+            ),
+            async_finish,
+            allocate_on_comm_stream,
         )
 
-        torch.cuda.synchronize()
         return flat_input
 
     def reset(self) -> None:
@@ -704,6 +907,13 @@ class _MoriEPCycleState:
         Forward:  dispatch(fwd)  →  expert_fn  →  combine(fwd)  →  reset
         Backward: dispatch(bwd)  →  expert.bwd →  combine(bwd)  →  reset
                   ↑ in combine.backward         ↑ in dispatch.backward
+
+    Sync model (Phase 3 deferred sync): dispatch returns ``total_recv`` as a
+    device-resident scalar tensor and saves it here. The single host sync per
+    half-cycle (``.item()``) is deferred to the start of the *next* MORI call
+    that needs the count to slice MORI's exact-sized input buffer. By then
+    the dispatch on the comm stream has long completed, so the ``.item()``
+    returns immediately without stalling the host.
     """
 
     def __init__(self, ep: MoriExpertParallel):
@@ -711,28 +921,45 @@ class _MoriEPCycleState:
         # Saved from forward dispatch for backward combine
         self.fwd_weights: Optional[torch.Tensor] = None
         self.fwd_indices: Optional[torch.Tensor] = None
+        # Number of input tokens on this rank — Python int from ``input.shape[0]``,
+        # no GPU sync required.
         self.fwd_num_input: int = 0
-        self.fwd_num_recv: int = 0
+        # Device-resident count of valid received rows from the forward dispatch.
+        # Shape ``[1]`` int32. ``.item()``-ed only inside MoriEPCombine.forward
+        # when MORI needs the count to size its combine input.
+        self.fwd_total_recv: Optional[torch.Tensor] = None
         # Saved from backward dispatch (in combine.backward) for backward combine
-        # (in dispatch.backward)
+        # (in dispatch.backward) — padded buffers, plus the device-side count
+        # for the backward cycle.
         self.bwd_recv_weights: Optional[torch.Tensor] = None
         self.bwd_recv_indices: Optional[torch.Tensor] = None
-        self.bwd_num_recv: int = 0
+        self.bwd_total_recv: Optional[torch.Tensor] = None
 
 
 class MoriEPDispatch(torch.autograd.Function):
-    """Autograd-aware MORI EP dispatch.
+    """Autograd-aware MORI EP dispatch (Phase 3 — deferred sync).
 
-    Forward: dispatches tokens to expert-owning ranks.
+    Forward: dispatches tokens to expert-owning ranks. Returns the *full
+    padded* buffers (shape ``[max_recv, ...]``) plus a device-resident
+    ``total_recv`` scalar tensor. The caller is responsible for masking /
+    slicing using ``total_recv`` if they need only the valid rows. Crucially,
+    no ``.item()`` is performed here — the dispatch kernel can complete on
+    the comm stream concurrently with the host preparing the next op.
+
     Backward: combines gradients back from expert ranks (completing the
     backward MORI cycle started by :class:`MoriEPCombine`'s backward).
 
     Usage::
 
         state = ep.new_cycle()
-        recv_tokens, recv_weights, recv_indices = MoriEPDispatch.apply(
+        recv_padded, recv_w_padded, recv_idx_padded, total_recv = MoriEPDispatch.apply(
             input, weights, indices, state,
         )
+        # Compute on device using total_recv to mask invalid rows, e.g.:
+        #   local_idx = rebase_global_to_local_indices(recv_idx_padded, total_recv,
+        #                                              rank, num_local_experts)
+        #   m_splits = compute_tokens_per_expert_device(local_idx, num_local_experts)
+        # ... pass results to grouped GEMM ...
     """
 
     @staticmethod
@@ -742,7 +969,7 @@ class MoriEPDispatch(torch.autograd.Function):
         weights: torch.Tensor,
         indices: torch.Tensor,
         state: _MoriEPCycleState,
-    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         if indices.dtype != torch.int32:
             indices = indices.to(torch.int32)
 
@@ -750,25 +977,29 @@ class MoriEPDispatch(torch.autograd.Function):
             input.size(0), 0, dtype=torch.float32, device=input.device,
         )
 
-        out, out_w, _out_s, out_idx, total_recv = state.ep._op.dispatch(
-            input, weights, scales, indices,
+        out, out_w, _out_s, out_idx, total_recv = _run_mori_op_on_stream(
+            lambda: state.ep._op.dispatch(input, weights, scales, indices),
+            async_finish=True,
+            allocate_on_comm_stream=True,
         )
-        torch.cuda.synchronize()
-        num_recv = total_recv[0].item()
 
-        # Save routing info for backward
+        # Save routing info for backward. fwd_num_input is a Python int from
+        # input.shape[0] — no GPU sync. fwd_total_recv is a *device tensor*;
+        # the .item() that used to happen here is deferred to MoriEPCombine.
         state.fwd_weights = weights.detach()
         state.fwd_indices = indices.detach()
         state.fwd_num_input = input.shape[0]
-        state.fwd_num_recv = num_recv
+        state.fwd_total_recv = total_recv.detach().clone()
 
         ctx.state = state
 
-        # Return only valid rows -- clone to decouple from MORI's internal buffers
+        # Return the full padded buffers — caller masks via total_recv on device.
+        # Clone to decouple from MORI's internal buffers (reset on next cycle).
         return (
-            out[:num_recv].clone(),
-            out_w[:num_recv].clone(),
-            out_idx[:num_recv].clone(),
+            out.clone(),
+            out_w.clone(),
+            out_idx.clone(),
+            total_recv.detach().clone(),
         )
 
     @staticmethod
@@ -777,22 +1008,36 @@ class MoriEPDispatch(torch.autograd.Function):
         grad_recv_tokens: torch.Tensor,
         grad_recv_weights: torch.Tensor,
         grad_recv_indices: torch.Tensor,
+        grad_total_recv: Optional[torch.Tensor],
     ) -> Tuple[Optional[torch.Tensor], None, None, None]:
         """Complete the backward MORI cycle: combine gradients back to source ranks.
 
         The backward dispatch (which sent grad_output to expert ranks) was
-        already initiated by :meth:`MoriEPCombine.backward`. Now we combine
-        the gradients that flowed through ``expert.backward`` back to the
-        original token-owning ranks.
+        already initiated by :meth:`MoriEPCombine.backward` and saved padded
+        buffers in ``state``. We now slice them to MORI's exact-size combine
+        input using the device-resident ``bwd_total_recv``. By this point the
+        backward dispatch has had ample time to complete on the comm stream,
+        so the ``.item()`` returns immediately.
+
+        ``grad_total_recv`` is the upstream gradient w.r.t. our forward's
+        ``total_recv`` output and is always ``None`` — total_recv is an
+        integer count, not a differentiable quantity.
         """
+        del grad_recv_weights, grad_recv_indices, grad_total_recv  # unused
         state = ctx.state
 
-        output, _ = state.ep._op.combine(
-            grad_recv_tokens,
-            state.bwd_recv_weights,
-            state.bwd_recv_indices,
+        # Deferred sync — backward dispatch is long done by now.
+        bwd_n = state.bwd_total_recv.flatten()[0].item()
+
+        output, _ = _run_mori_op_on_stream(
+            lambda: state.ep._op.combine(
+                grad_recv_tokens[:bwd_n],
+                state.bwd_recv_weights[:bwd_n],
+                state.bwd_recv_indices[:bwd_n],
+            ),
+            async_finish=True,
+            allocate_on_comm_stream=True,
         )
-        torch.cuda.synchronize()
         state.ep._op.reset()
 
         grad_input = output[:state.fwd_num_input]
@@ -800,17 +1045,23 @@ class MoriEPDispatch(torch.autograd.Function):
 
 
 class MoriEPCombine(torch.autograd.Function):
-    """Autograd-aware MORI EP combine.
+    """Autograd-aware MORI EP combine (Phase 3 — deferred sync).
 
-    Forward: combines expert outputs back to original ranks and resets
-    the forward MORI cycle.
+    Forward: combines expert outputs back to original ranks. Accepts the
+    *padded* expert output ``[max_recv, ...]`` produced downstream of
+    :class:`MoriEPDispatch`. The single ``.item()`` on ``state.fwd_total_recv``
+    happens here, deferred from the original dispatch site — by this point
+    dispatch has had time to complete on the comm stream and the sync is
+    effectively free.
+
     Backward: dispatches gradients to expert-owning ranks (starting the
     backward MORI cycle that :class:`MoriEPDispatch`'s backward completes).
+    Saves the padded backward buffers plus a device-resident ``bwd_total_recv``.
 
     Usage::
 
         output, output_weights = MoriEPCombine.apply(
-            expert_output, recv_weights, recv_indices, state,
+            expert_output_padded, recv_weights_padded, recv_indices_padded, state,
         )
     """
 
@@ -825,10 +1076,21 @@ class MoriEPCombine(torch.autograd.Function):
         if recv_indices.dtype != torch.int32:
             recv_indices = recv_indices.to(torch.int32)
 
-        output, output_w = state.ep._op.combine(
-            expert_output, recv_weights, recv_indices,
+        # Deferred host sync — dispatch ran on the comm stream while host was
+        # busy with permute/grouped-gemm/etc., so this .item() resolves
+        # immediately. MORI's combine requires its input slice to be exactly
+        # total_recv rows; we slice the padded buffers here.
+        n_recv = state.fwd_total_recv.flatten()[0].item()
+
+        output, output_w = _run_mori_op_on_stream(
+            lambda: state.ep._op.combine(
+                expert_output[:n_recv],
+                recv_weights[:n_recv],
+                recv_indices[:n_recv],
+            ),
+            async_finish=True,
+            allocate_on_comm_stream=True,
         )
-        torch.cuda.synchronize()
         state.ep._op.reset()  # forward cycle complete
 
         ctx.state = state
@@ -852,29 +1114,33 @@ class MoriEPCombine(torch.autograd.Function):
         expert-owning ranks, using the same routing as the forward dispatch.
         The dispatched gradients then flow through ``expert.backward`` via
         normal autograd, and finally :meth:`MoriEPDispatch.backward` combines
-        them back.
+        them back. No ``.item()`` here — backward stays on the device and the
+        sync is deferred to :meth:`MoriEPDispatch.backward`.
         """
+        del grad_output_weights  # unused — accumulated weights have no upstream grad
         state = ctx.state
 
         # Dispatch gradients using the same routing as forward
         scales = torch.empty(
             grad_output.size(0), 0, dtype=torch.float32, device=grad_output.device,
         )
-        out, out_w, _out_s, out_idx, total_recv = state.ep._op.dispatch(
-            grad_output,
-            state.fwd_weights,
-            scales,
-            state.fwd_indices,
+        out, out_w, _out_s, out_idx, total_recv = _run_mori_op_on_stream(
+            lambda: state.ep._op.dispatch(
+                grad_output,
+                state.fwd_weights,
+                scales,
+                state.fwd_indices,
+            ),
+            async_finish=True,
+            allocate_on_comm_stream=True,
         )
-        torch.cuda.synchronize()
-        bwd_num_recv = total_recv[0].item()
 
-        # Save for dispatch.backward to complete the backward cycle
-        state.bwd_recv_weights = out_w[:bwd_num_recv]
-        state.bwd_recv_indices = out_idx[:bwd_num_recv]
-        state.bwd_num_recv = bwd_num_recv
+        # Save padded buffers + device-resident count for MoriEPDispatch.backward.
+        state.bwd_recv_weights = out_w.detach().clone()
+        state.bwd_recv_indices = out_idx.detach().clone()
+        state.bwd_total_recv = total_recv.detach().clone()
 
-        grad_expert_output = out[:bwd_num_recv].clone()
+        grad_expert_output = out.clone()
         return grad_expert_output, None, None, None
 
 
@@ -938,10 +1204,13 @@ class MoriEPDispatchStdMoE(torch.autograd.Function):
             input.size(0), 0, dtype=torch.float32, device=input.device,
         )
 
-        packed, recv_count, src_info, _ = state.ep._op.dispatch_standard_moe(
-            input, weights, scales, indices,
+        packed, recv_count, src_info, _ = _run_mori_op_on_stream(
+            lambda: state.ep._op.dispatch_standard_moe(
+                input, weights, scales, indices,
+            ),
+            async_finish=True,
+            allocate_on_comm_stream=True,
         )
-        torch.cuda.synchronize()
 
         state.fwd_weights = weights.detach()
         state.fwd_indices = indices.detach()
@@ -962,12 +1231,15 @@ class MoriEPDispatchStdMoE(torch.autograd.Function):
     ) -> Tuple[Optional[torch.Tensor], None, None, None]:
         state = ctx.state
 
-        output, _ = state.ep._op.combine_standard_moe(
-            grad_packed,
-            state.bwd_recv_count,  # dummy -- combine uses internal state
-            state.bwd_src_info,    # not directly used but kept for consistency
+        output, _ = _run_mori_op_on_stream(
+            lambda: state.ep._op.combine_standard_moe(
+                grad_packed,
+                state.bwd_recv_count,  # dummy -- combine uses internal state
+                state.bwd_src_info,    # not directly used but kept for consistency
+            ),
+            async_finish=True,
+            allocate_on_comm_stream=True,
         )
-        torch.cuda.synchronize()
         state.ep._op.reset()
 
         grad_input = output[:state.fwd_num_input]
@@ -999,10 +1271,13 @@ class MoriEPCombineStdMoE(torch.autograd.Function):
         if indices.dtype != torch.int32:
             indices = indices.to(torch.int32)
 
-        output, output_w = state.ep._op.combine_standard_moe(
-            expert_output, weights, indices,
+        output, output_w = _run_mori_op_on_stream(
+            lambda: state.ep._op.combine_standard_moe(
+                expert_output, weights, indices,
+            ),
+            async_finish=True,
+            allocate_on_comm_stream=True,
         )
-        torch.cuda.synchronize()
         state.ep._op.reset()
 
         ctx.state = state
@@ -1024,15 +1299,275 @@ class MoriEPCombineStdMoE(torch.autograd.Function):
         scales = torch.empty(
             grad_output.size(0), 0, dtype=torch.float32, device=grad_output.device,
         )
-        packed, recv_count, src_info, _ = state.ep._op.dispatch_standard_moe(
-            grad_output,
-            state.fwd_weights,
-            scales,
-            state.fwd_indices,
+        packed, recv_count, src_info, _ = _run_mori_op_on_stream(
+            lambda: state.ep._op.dispatch_standard_moe(
+                grad_output,
+                state.fwd_weights,
+                scales,
+                state.fwd_indices,
+            ),
+            async_finish=True,
+            allocate_on_comm_stream=True,
         )
-        torch.cuda.synchronize()
 
         state.bwd_recv_count = recv_count
         state.bwd_src_info = src_info
 
         return packed.clone(), None, None, None
+
+
+# ---------------------------------------------------------------------------
+# Megatron-compatible adapters
+# ---------------------------------------------------------------------------
+# These wrap tealite's MoriEPDispatch / MoriEPCombine so they can be dropped
+# into Megatron's ``_MoriManager`` via the ``MOE_MORI_BACKEND=tealite`` env var
+# (handled in megatron/core/transformer/moe/fused_a2a.py). The adapters slice
+# padded outputs back to total_recv at this boundary to match Megatron's
+# contract — _MoriManager's downstream code (``_indices_to_multihot``, the
+# permute step, GroupedLinear's m_splits list) all consume sliced buffers.
+#
+# Accepting the ``.item()`` at the adapter boundary means we lose tealite's
+# deferred-sync benefit on the dispatch side. The intent here is to validate
+# correctness of the tealite primitives under Megatron's real workload before
+# committing to a deeper _MoriManager refactor that consumes padded buffers
+# end-to-end.
+
+_megatron_adapter_ep: Optional["MoriExpertParallel"] = None
+_megatron_adapter_state: Optional["_MoriEPCycleState"] = None
+
+
+def _adapter_bootstrap_shmem_flag() -> None:
+    """Tell tealite that MORI shmem is already initialized externally.
+
+    Megatron's ``pretrain_gpt.py`` calls ``mori.shmem.shmem_torch_process_group_init()``
+    directly during entry, before any tealite code runs. That bypasses
+    :func:`init_mori_ep`, so :data:`_mori_shmem_initialized` is still False
+    when the adapter first creates a :class:`MoriExpertParallel`. We flip the
+    flag here to allow construction without re-initializing MORI shmem
+    (which would error).
+    """
+    global _mori_shmem_initialized
+    _mori_shmem_initialized = True
+
+
+def _get_megatron_adapter_ep(
+    group: "torch.distributed.ProcessGroup",
+    hidden_dim: int,
+    num_local_experts: int,
+    router_topk: int,
+    max_num_tokens_per_rank: int,
+    dtype: torch.dtype,
+) -> "MoriExpertParallel":
+    """Lazily create the process-wide ``MoriExpertParallel`` for the adapter.
+
+    Mirrors Megatron's :func:`get_mori_op` singleton pattern. The wrapper is
+    created on the first dispatch call and reused for the lifetime of the
+    process. Megatron's training loop holds (hidden_dim, world_size,
+    num_local_experts, router_topk, max_num_tokens_per_rank) constant across
+    layers and steps, so a single instance suffices.
+    """
+    global _megatron_adapter_ep
+    if _megatron_adapter_ep is not None:
+        return _megatron_adapter_ep
+
+    if not is_mori_ep_initialized():
+        _adapter_bootstrap_shmem_flag()
+
+    rank = torch.distributed.get_rank(group)
+    world_size = group.size()
+    # Match Megatron's kernel-type heuristic (fused_a2a.py:665-669).
+    kernel_type = "intra_node" if world_size <= 8 else "inter_node_v1"
+
+    _megatron_adapter_ep = MoriExpertParallel(
+        rank=rank,
+        world_size=world_size,
+        hidden_dim=hidden_dim,
+        num_experts_per_rank=num_local_experts,
+        num_experts_per_token=router_topk,
+        max_num_inp_token_per_rank=max_num_tokens_per_rank,
+        dtype=dtype,
+        kernel_type=kernel_type,
+    )
+    return _megatron_adapter_ep
+
+
+def _reset_megatron_adapter() -> None:
+    """Drop the cached EP wrapper and any pending cycle state.
+
+    Call when EP layout changes (e.g., between test parametrizations) so the
+    next dispatch reconfigures the underlying MORI op. The state object
+    survives via autograd ctx references regardless of clearing here.
+    """
+    global _megatron_adapter_ep, _megatron_adapter_state
+    if _megatron_adapter_ep is not None:
+        _megatron_adapter_ep.reset()
+    _megatron_adapter_ep = None
+    _megatron_adapter_state = None
+
+
+def tealite_mori_dispatch_for_megatron(
+    x: torch.Tensor,
+    token_indices: torch.Tensor,
+    token_probs: torch.Tensor,
+    num_experts: int,
+    group: "torch.distributed.ProcessGroup",
+    num_local_experts: int,
+    router_topk: int,
+    max_num_tokens_per_rank: int,
+    fp8_dispatch: bool = False,
+    async_finish: bool = True,
+    allocate_on_comm_stream: bool = True,
+) -> Tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+]:
+    """Megatron-shape dispatch adapter, internals routed through tealite.
+
+    Drop-in for Megatron's ``mori_dispatch``: same call signature, same
+    5-tuple return, all tensors sliced to ``total_recv``. The autograd
+    Functions invoked are :class:`MoriEPDispatch` from tealite.
+
+    Returns
+    -------
+    (recv_x, recv_token_indices_local, recv_token_probs, tokens_per_expert,
+     recv_token_indices_global)
+
+    Notes
+    -----
+    The host ``.item()`` for slicing happens here at the adapter boundary,
+    matching Megatron's contract. Tealite's deferred-sync benefit is
+    intentionally not realized in this adapter; that requires _MoriManager
+    to consume padded buffers, which is a separate refactor. The
+    ``tokens_per_expert`` count uses the sync-free :func:`compute_tokens_per_expert_device`
+    helper instead of ``torch.bincount`` — a small win that's free here
+    because the upstream ``.item()`` already serialized the host.
+    """
+    if fp8_dispatch:
+        raise NotImplementedError(
+            "FP8 dispatch is not yet supported in the tealite MORI adapter. "
+            "Run with MOE_MORI_BACKEND=megatron or TE_FP8=0 for now."
+        )
+    del num_experts, async_finish, allocate_on_comm_stream  # not threaded yet
+
+    global _megatron_adapter_state
+
+    ep = _get_megatron_adapter_ep(
+        group=group,
+        hidden_dim=x.shape[1],
+        num_local_experts=num_local_experts,
+        router_topk=router_topk,
+        max_num_tokens_per_rank=max_num_tokens_per_rank,
+        dtype=x.dtype,
+    )
+
+    state = ep.new_cycle()
+    _megatron_adapter_state = state
+
+    # Tealite dispatch — returns padded buffers + device-side total_recv.
+    out_padded, out_w_padded, out_idx_padded, total_recv_dev = MoriEPDispatch.apply(
+        x,
+        token_probs.float() if token_probs.dtype != torch.float32 else token_probs,
+        token_indices,
+        state,
+    )
+
+    # Boundary slice — Megatron's _MoriManager expects exact-size buffers.
+    total_recv = total_recv_dev.flatten()[0].item()
+    recv_x = out_padded[:total_recv]
+    recv_token_probs = out_w_padded[:total_recv]
+    recv_token_indices_global = out_idx_padded[:total_recv]
+
+    # Rebase global expert IDs to local space with -1 sentinels (matches
+    # the contract _indices_to_multihot expects). Same logic as Megatron's
+    # MoriDispatch.forward:779-790.
+    my_rank = torch.distributed.get_rank(group)
+    local_id_start = my_rank * num_local_experts
+    local_id_end = local_id_start + num_local_experts
+    is_local = (recv_token_indices_global >= local_id_start) & (
+        recv_token_indices_global < local_id_end
+    )
+    recv_token_indices = (recv_token_indices_global - local_id_start).to(torch.int64)
+    recv_token_indices = torch.where(
+        is_local,
+        recv_token_indices,
+        torch.full_like(recv_token_indices, -1),
+    )
+
+    # Sync-free per-local-expert count via the tealite helper. Equivalent to
+    # Megatron's ``torch.bincount(recv_token_indices[is_local], ...)`` but
+    # avoids both the boolean-mask indexing sync and bincount's internal
+    # ``.max().item()``.
+    tokens_per_expert = compute_tokens_per_expert_device(
+        recv_token_indices, num_local_experts,
+    )
+
+    return (
+        recv_x,
+        recv_token_indices,
+        recv_token_probs,
+        tokens_per_expert,
+        recv_token_indices_global,
+    )
+
+
+def tealite_mori_combine_for_megatron(
+    x: torch.Tensor,
+    group: "torch.distributed.ProcessGroup",
+    token_indices: torch.Tensor,
+    recv_token_indices: torch.Tensor,
+    token_probs: torch.Tensor,
+    num_local_experts: int,
+    router_topk: int,
+    max_num_tokens_per_rank: int,
+    fp8_dispatch: bool = False,
+    async_finish: bool = True,
+    allocate_on_comm_stream: bool = True,
+) -> torch.Tensor:
+    """Megatron-shape combine adapter, internals routed through tealite.
+
+    Drop-in for Megatron's ``mori_combine``. Reads the cycle state set by
+    :func:`tealite_mori_dispatch_for_megatron` and resets it afterwards
+    (the state survives into backward via autograd ctx references).
+
+    Parameters mirror Megatron's mori_combine — ``recv_token_indices`` is the
+    receiver-side GLOBAL indices (size [total_recv, topk]) and ``token_probs``
+    is the receiver-side probs. Both have already been sliced to total_recv
+    by the dispatch adapter.
+    """
+    if fp8_dispatch:
+        raise NotImplementedError(
+            "FP8 combine is not yet supported in the tealite MORI adapter."
+        )
+    del group, num_local_experts, router_topk, max_num_tokens_per_rank  # unused
+    del async_finish, allocate_on_comm_stream
+
+    global _megatron_adapter_state
+    state = _megatron_adapter_state
+    if state is None:
+        raise RuntimeError(
+            "tealite_mori_combine_for_megatron called without a paired "
+            "dispatch; ensure tealite_mori_dispatch_for_megatron ran first."
+        )
+
+    num_tokens = token_indices.shape[0]
+
+    # MoriEPCombine.forward slices its padded inputs to state.fwd_total_recv.
+    # Since the dispatch adapter already sliced down to total_recv, x is
+    # already exact-size — fwd_total_recv equals x.shape[0] and the internal
+    # slice is a no-op. The deferred .item() on state.fwd_total_recv here is
+    # essentially free (the value was already materialized).
+    output, _ = MoriEPCombine.apply(
+        x,
+        token_probs.float() if token_probs.dtype != torch.float32 else token_probs,
+        recv_token_indices,
+        state,
+    )
+
+    _megatron_adapter_state = None
+
+    # MoriEPCombine returned output sliced to state.fwd_num_input (= sender-side
+    # num_tokens captured at dispatch). Defensive re-slice in case the consumer
+    # passed a wrapped tensor whose shape doesn't match (shouldn't happen).
+    if output.shape[0] != num_tokens:
+        output = output[:num_tokens]
+
+    return output
