@@ -68,6 +68,7 @@ def _use_hipkittens() -> bool:
     return os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "0") != "1"
 
 
+@functools.lru_cache(maxsize=None)
 def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Tensor:
     """Returns workspace for cublas GEMM."""
     assert not (ub and grouped_gemm), "UB is unsupported for grouped GEMM."

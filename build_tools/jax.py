@@ -122,6 +122,13 @@ def setup_jax_extension(
     
     if rocm_build():
         cxx_flags.extend(["-D__HIP_PLATFORM_AMD__", "-DUSE_ROCM"])
+        rocm_archs = os.environ.get("NVTE_ROCM_ARCH", "gfx942;gfx950")
+        hipkittens_header = (
+            Path(__file__).resolve().parent.parent
+            / "3rdparty" / "hipkittens" / "include" / "kittens.cuh"
+        )
+        if "gfx950" in rocm_archs and hipkittens_header.exists():
+            cxx_flags.append("-DUSE_HIPKITTENS_GEMM")
 
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
