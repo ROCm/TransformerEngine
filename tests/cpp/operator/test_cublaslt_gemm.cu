@@ -358,9 +358,6 @@ void performTest(const TestParams& params) {
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
   const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
 
-  if (!use_mxfp8 && params.force_hipblaslt) {
-    GTEST_SKIP() << "force_hipblaslt only relevant for MXFP8";
-  }
   if (use_mxfp8) {
     if (!has_fp8) {
       GTEST_SKIP() << "MXFP8 scaling mode requires Float8 types";
@@ -503,7 +500,7 @@ void performTest(const TestParams& params) {
   if (prop.major == 9 && prop.minor == 5) {
     workspace_size = 67108864;
   }
-  if (use_mxfp8) {
+  if (use_mxfp8 && !params.force_hipblaslt) {
     workspace_size = compute_mxfp8_workspace_size(params.m, params.k, params.n,
                                                   params.transa, params.transb,
                                                   workspace_size);
@@ -564,12 +561,12 @@ void performTest(const TestParams& params) {
   auto [atol, rtol] = getTestTolerances(dtype, has_fp8, use_mxfp8);
   size_t mismatch_limit = use_mxfp8 ? std::max((size_t)1, params.m * params.n / 1'000'000) : 0;
   RefD.to_cpu();
-  compareResults("D", D, RefD.rowwise_cpu_dptr<D_Type>(), true, atol, rtol, true, mismatch_limit);
+  compareResults("D", D, RefD.rowwise_cpu_dptr<D_Type>(), true, atol, rtol);
 
   if(params.use_gelu){
     auto [atol, rtol] = getTestTolerances(gelu_type, has_fp8, use_mxfp8);
     RefPreGeluOut.to_cpu();
-    compareResults("gelu", pre_gelu_out, RefPreGeluOut.rowwise_cpu_dptr<Gelu_Type>(), true, atol, rtol, true, mismatch_limit);
+    compareResults("gelu", pre_gelu_out, RefPreGeluOut.rowwise_cpu_dptr<Gelu_Type>(), true, atol, rtol);
   }
 }
 
@@ -598,9 +595,6 @@ void performDqTest(const TestParams &params) {
     GTEST_SKIP() << "MXFP8 is not supported in current config";
   }
   if (params.use_bias || params.use_gelu) {
-    if (params.force_hipblaslt) {
-      GTEST_SKIP() << "MXFP8 GEMM with bias/GELU is not supported by hipBLASLt";
-    }
     GTEST_SKIP() << "DqGEMMTestSuite does not yet have reference for bias/gelu epilogues";
   }
   if (!params.force_hipblaslt && (params.m % 256 || params.n % 256 || params.k % 128 || params.k < 256)) {
@@ -747,21 +741,32 @@ static inline auto MKN(const std::tuple<size_t, size_t, size_t>& shape) {
          std::to_string(std::get<2>(shape));
 }
 
+static std::string GEMMTestName(const testing::TestParamInfo<GEMMTestSuite::ParamType>& info) {
+  return MKN(std::get<0>(info.param)) + "x" +
+         std::to_string(std::get<1>(info.param)) + "x" +
+         std::to_string(std::get<2>(info.param)) + "x" +
+         TN(std::get<3>(info.param)) + "x" +
+         (std::get<4>(info.param) ? "M" : "S") + "x" +
+         (std::get<5>(info.param) ? "HB" : "HK");
+}
+
 INSTANTIATE_TEST_SUITE_P(OperatorTest, GEMMTestSuite,
                          ::testing::Combine(::testing::ValuesIn(test_case_sizes),
                                             ::testing::Values(false, true),   //use bias
                                             ::testing::Values(false, true),   //use_gelu
                                             ::testing::ValuesIn(kLayouts),    //transa,transb
-                                            ::testing::Values(false, true),   //use mxfp8
+                                            ::testing::Values(false),         //use mxfp8
+                                            ::testing::Values(false)),        //force hipblaslt
+                         GEMMTestName);
+
+INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP8, GEMMTestSuite,
+                         ::testing::Combine(::testing::ValuesIn(test_case_sizes),
+                                            ::testing::Values(false, true),   //use bias
+                                            ::testing::Values(false, true),   //use_gelu
+                                            ::testing::ValuesIn(kLayouts),    //transa,transb
+                                            ::testing::Values(true),          //use mxfp8
                                             ::testing::Values(false, true)),  //force hipblaslt
-                         [](const testing::TestParamInfo<GEMMTestSuite::ParamType>& info) {
-                           return MKN(std::get<0>(info.param)) + "x" +
-                                  std::to_string(std::get<1>(info.param)) + "x" +
-                                  std::to_string(std::get<2>(info.param)) + "x" +
-                                  TN(std::get<3>(info.param)) + "x" +
-                                  (std::get<4>(info.param) ? "M" : "S") + "x" +
-                                  (std::get<5>(info.param) ? "HB" : "HK");
-                         });
+                         GEMMTestName);
 
 #ifdef __HIP_PLATFORM_AMD__
 class DqGEMMTestSuite: public GEMMTestSuite {};
@@ -786,8 +791,6 @@ INSTANTIATE_TEST_SUITE_P(OperatorTest, DqGEMMTestSuite,
                                             ::testing::Values(false, true)), // force hipblaslt
                          [](const testing::TestParamInfo<DqGEMMTestSuite::ParamType>& info) {
                            return MKN(std::get<0>(info.param)) + "x" +
-                                  std::to_string(std::get<1>(info.param)) + "x" +
-                                  std::to_string(std::get<2>(info.param)) + "x" +
                                   TN(std::get<3>(info.param)) + "x" +
                                   (std::get<5>(info.param) ? "HB" : "HK");
                          });

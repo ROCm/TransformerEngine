@@ -542,32 +542,22 @@ static void dispatch_tn_gemm(
     const void *bias, int bias_dtype, void *aux_gelu,
     int M, int N, int K, OutDtype out_dtype, OutDtype aux_dtype, hipStream_t stream) {
 
+#define DISPATCH_EPILOGUE_CASE(EPI)                                       \
+    case EPI: {                                                          \
+        dispatch_fp8_types<EPI>(a_fp8, b_fp8, A, B, C, packed_sa,        \
+                                packed_sb, bias, bias_dtype, aux_gelu,   \
+                                M, N, K, out_dtype, aux_dtype, stream);  \
+        break;                                                           \
+    }
+
     switch (epilogue) {
-    case GemmEpilogue::DEFAULT: {
-        dispatch_fp8_types<GemmEpilogue::DEFAULT>(
-            a_fp8, b_fp8, A, B, C, packed_sa, packed_sb, bias, bias_dtype,
-            aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
-        break;
+        DISPATCH_EPILOGUE_CASE(GemmEpilogue::DEFAULT)
+        DISPATCH_EPILOGUE_CASE(GemmEpilogue::BIAS)
+        DISPATCH_EPILOGUE_CASE(GemmEpilogue::GELU_AUX)
+        DISPATCH_EPILOGUE_CASE(GemmEpilogue::GELU_AUX_BIAS)
     }
-    case GemmEpilogue::BIAS: {
-        dispatch_fp8_types<GemmEpilogue::BIAS>(
-            a_fp8, b_fp8, A, B, C, packed_sa, packed_sb, bias, bias_dtype,
-            aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
-        break;
-    }
-    case GemmEpilogue::GELU_AUX: {
-        dispatch_fp8_types<GemmEpilogue::GELU_AUX>(
-            a_fp8, b_fp8, A, B, C, packed_sa, packed_sb, bias, bias_dtype,
-            aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
-        break;
-    }
-    case GemmEpilogue::GELU_AUX_BIAS: {
-        dispatch_fp8_types<GemmEpilogue::GELU_AUX_BIAS>(
-            a_fp8, b_fp8, A, B, C, packed_sa, packed_sb, bias, bias_dtype,
-            aux_gelu, M, N, K, out_dtype, aux_dtype, stream);
-        break;
-    }
-    }
+
+#undef DISPATCH_EPILOGUE_CASE
 }
 
 static void launch_pack_scales(const uint8_t *scales, uint32_t *packed, int dim, 
@@ -818,6 +808,9 @@ bool kittens_mxfp8_gemm(
                              a_fp8, b_fp8, bias, bias_dc,
                              aux_gelu, out_dc, aux_dc,
                              workspace, workspace_size, stream);
+    } else {
+        assert(false && "kittens_mxfp8_gemm: TT layout is not supported");
     }
     return false;
+
 }

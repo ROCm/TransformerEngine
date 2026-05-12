@@ -51,14 +51,12 @@ def get_cublas_workspace_size_bytes() -> None:
     return 4_194_304
 
 
-def _hipkittens_workspace_bytes(m: int, n: int, k: int, layout: str) -> int:
-    """Compute workspace bytes needed for HipKittens MXFP8 GEMM."""
-    transa = layout[0] == "T"
-    transb = layout[1] == "T"
-    return tex.kittens_mxfp8_workspace_bytes(m, n, k, transa, transb)
-
-
-_workspace_cache: dict[tuple[int, bool, bool], torch.Tensor] = {}
+if IS_HIP_EXTENSION:
+    def _hipkittens_workspace_bytes(m: int, n: int, k: int, layout: str) -> int:
+        """Compute workspace bytes needed for HipKittens MXFP8 GEMM."""
+        transa = layout[0] == "T"
+        transb = layout[1] == "T"
+        return tex.kittens_mxfp8_workspace_bytes(m, n, k, transa, transb)
 
 
 def _use_hipkittens() -> bool:
@@ -88,22 +86,7 @@ def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Ten
             )
         return _multi_stream_cublas_workspace
 
-    key = (device, ub, grouped_gemm)
-    ws = _workspace_cache.get(key)
-    if ws is None:
-        ws = torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
-        _workspace_cache[key] = ws
-    return ws
-
-
-def check_mxfp8_workspace(device: int, needed: int) -> None:
-    """Grow the workspace to required size"""
-    key = (device, False, False)
-    ws = _workspace_cache.get(key)
-    if ws is not None and ws.shape[0] >= needed:
-        return
-    needed = max(needed, get_cublas_workspace_size_bytes())
-    _workspace_cache[key] = torch.empty(needed, dtype=torch.uint8, device=device)
+    return torch.empty(get_cublas_workspace_size_bytes(), dtype=torch.uint8, device=device)
 
 
 def validate_gemm_scale(scale: Optional[float], required: bool) -> float:
@@ -328,10 +311,11 @@ def general_gemm(
         m  = a_size[0] if transa else a_size[-1]
         n  = b_size[-1] if transb else b_size[0]
         k  = a_size[-1] if transa else a_size[0]
-        needed = _hipkittens_workspace_bytes(m, n, k, layout)
-        check_mxfp8_workspace(get_tensor_device(A), needed)
-
-    workspace = get_cublas_workspace(get_tensor_device(A), ub is not None, False)
+        needed = max(_hipkittens_workspace_bytes(m, n, k, layout),
+                     get_cublas_workspace_size_bytes())
+        workspace = torch.empty(needed, dtype=torch.uint8, device=get_tensor_device(A))
+    else:
+        workspace = get_cublas_workspace(get_tensor_device(A), ub is not None, False)
 
     # On ROCm, FP4 is dequantized to BF16 in the workspace before GEMM.
     # Compute the required extra space and extend the workspace if needed.

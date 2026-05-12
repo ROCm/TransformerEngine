@@ -8,6 +8,7 @@
 #include <hip/hip_runtime.h>
 #include <cstddef>
 
+// Values match NVTEDType in transformer_engine.h
 enum KittensDType {
     KITTENS_FLOAT32  = 4,
     KITTENS_FLOAT16  = 5,
@@ -23,8 +24,7 @@ enum KittensDType {
 //   NT:  M*K + N*K + M*scale_K + N*scale_K + k_iters*M*4 + k_iters*N*4
 // Returns false if workspace_size is insufficient.
 
-size_t kittens_mxfp8_workspace_bytes(
-    int M, int N, int K, bool transa, bool transb);
+size_t kittens_mxfp8_workspace_bytes(int M, int N, int K, bool transa, bool transb);
 
 bool kittens_mxfp8_gemm(
     const void *A, const void *B, void *C,
