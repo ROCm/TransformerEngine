@@ -155,6 +155,12 @@ void launch_rmsnorm_bwd_general_(LaunchParams<BackwardKernelParams> &launch_para
 //  HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, ...
 //                             WARPS_M, WARPS_N, BYTES_PER_LDG, BYTES_PER_LDG_FINAL
 
+#ifdef __HIP_PLATFORM_AMD__
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 128, fp32, fp32, fp32, fp32, 1, 4, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 128, fp16, fp16, fp16, fp32, 1, 4, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 128, bf16, bf16, bf16, fp32, 1, 4, 1, 4, 4);
+#endif
+
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 512, fp32, fp32, fp32, fp32, 1, 4, 1, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 512, fp16, fp16, fp16, fp32, 1, 4, 1, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 512, bf16, bf16, bf16, fp32, 1, 4, 1, 16, 4);

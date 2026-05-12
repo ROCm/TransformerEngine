@@ -10,7 +10,7 @@ using namespace test;
 namespace {
 
 std::vector<std::pair<size_t, size_t>> tensor_dims = {
-    // {8192, 128}, // Qwen
+    {8192, 128}, // Qwen
     {8192, 1536}, // DS
     {8192, 7168}, // DS
 };
