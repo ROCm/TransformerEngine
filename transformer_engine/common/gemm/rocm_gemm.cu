@@ -1765,18 +1765,19 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   }
 
 #ifdef USE_HIPKITTENS_GEMM
-  bool is_gfx950 = (cuda::sm_arch() == 95);
-
-  bool force_hipblaslt = false;
-  if (const char *env_p = std::getenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8")) {
-    force_hipblaslt = (strcmp(env_p, "1") == 0);
-  }
-
   bool is_mxfp8 = inputA->scaling_mode == NVTE_MXFP8_1D_SCALING
                || inputB->scaling_mode == NVTE_MXFP8_1D_SCALING;
 
-  bool use_hipkittens = is_gfx950 && !force_hipblaslt && is_mxfp8
-                     && m % 256 == 0 && n % 256 == 0 && k % 128 == 0 && k >= 256;
+  bool use_hipkittens = false;
+  if (is_mxfp8) {
+    bool is_gfx950 = (cuda::sm_arch() == 95);
+    bool force_hipblaslt = false;
+    if (const char *env_p = std::getenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8")) {
+      force_hipblaslt = (strcmp(env_p, "1") == 0);
+    }
+    use_hipkittens = is_gfx950 && !force_hipblaslt
+                  && m % 256 == 0 && n % 256 == 0 && k % 128 == 0 && k >= 256;
+  }
 
   if (use_hipkittens) {
     auto param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
