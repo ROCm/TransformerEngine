@@ -99,46 +99,6 @@ __device__ __forceinline__ void bf16x4_to_float4(
 }
 
 // ============================================================================
-// WARP PRIMITIVES - AMD-Specific DPP/Swizzle Instructions
-// ============================================================================
-
-/*
- * ds_swizzle Instructions
- * -----------------------
- * These perform intra-wavefront data exchange without shared memory.
- * The offset parameter encodes the permutation pattern.
- * 
- * Format: offset = (AND_mask << 10) | (OR_mask << 5) | XOR_mask
- * 
- * Common patterns:
- *   - 0x041F: XOR with lane 1 (exchange with adjacent thread)
- *   - 0x081F: XOR with lane 2 (exchange 2 positions away)
- *   - 0x101F: XOR with lane 4 (exchange 4 positions away)
- * 
- * Reference: AMD CDNA4 ISA, ds_swizzle_b32 (page 480)
- */
-
-__device__ __forceinline__ float ds_swizzle_xor1(float val) {
-    float result;
-    asm volatile(
-        "ds_swizzle_b32 %0, %1 offset:0x041F\n\t"
-        "s_waitcnt lgkmcnt(0)"
-        : "=v"(result) : "v"(val)
-    );
-    return result;
-}
-
-__device__ __forceinline__ float ds_swizzle_xor2(float val) {
-    float result;
-    asm volatile(
-        "ds_swizzle_b32 %0, %1 offset:0x081F\n\t"
-        "s_waitcnt lgkmcnt(0)"
-        : "=v"(result) : "v"(val)
-    );
-    return result;
-}
-
-// ============================================================================
 // REDUCTION OPERATIONS - Finding Maximum Absolute Value
 // ============================================================================
 
@@ -154,25 +114,14 @@ __device__ __forceinline__ float ds_swizzle_xor2(float val) {
  *   Step 3: XOR 1 - reduce 2 values to 1 (thread 0)
  */
 __device__ __forceinline__ float warp_reduce_max_8_dpp(float val) {
-    uint32_t v = float_as_uint(val);
-    uint32_t tmp;
-
     // Step 1: Exchange with thread 4 positions away
-    asm volatile("ds_swizzle_b32 %0, %1 offset:0x101F" : "=v"(tmp) : "v"(v));
-    asm volatile("s_waitcnt lgkmcnt(0)" :::);
-    val = fmaxf(val, uint_as_float(tmp));
-    v = float_as_uint(val);
+    val = fmaxf(val, __shfl_xor(val, 4));
 
     // Step 2: Exchange with thread 2 positions away
-    asm volatile("ds_swizzle_b32 %0, %1 offset:0x081F" : "=v"(tmp) : "v"(v));
-    asm volatile("s_waitcnt lgkmcnt(0)" :::);
-    val = fmaxf(val, uint_as_float(tmp));
-    v = float_as_uint(val);
+    val = fmaxf(val, __shfl_xor(val, 2));
 
     // Step 3: Exchange with adjacent thread
-    asm volatile("ds_swizzle_b32 %0, %1 offset:0x041F" : "=v"(tmp) : "v"(v));
-    asm volatile("s_waitcnt lgkmcnt(0)" :::);
-    val = fmaxf(val, uint_as_float(tmp));
+    val = fmaxf(val, __shfl_xor(val, 1));
 
     return val;
 }
@@ -211,10 +160,10 @@ __device__ __forceinline__ void hadamard16_inplace(
     v3 = a1 - a3;
 
     // Stage 2: Cross-thread exchange (XOR 1) - combine pairs
-    float p0 = ds_swizzle_xor1(v0);
-    float p1 = ds_swizzle_xor1(v1);
-    float p2 = ds_swizzle_xor1(v2);
-    float p3 = ds_swizzle_xor1(v3);
+    float p0 = __shfl_xor(v0, 1);
+    float p1 = __shfl_xor(v1, 1);
+    float p2 = __shfl_xor(v2, 1);
+    float p3 = __shfl_xor(v3, 1);
 
     bool sign2 = (tid & 1);
     v0 = sign2 ? (p0 - v0) : (p0 + v0);
@@ -223,10 +172,10 @@ __device__ __forceinline__ void hadamard16_inplace(
     v3 = sign2 ? (p3 - v3) : (p3 + v3);
 
     // Stage 3: Cross-thread exchange (XOR 2) - final combination
-    p0 = ds_swizzle_xor2(v0);
-    p1 = ds_swizzle_xor2(v1);
-    p2 = ds_swizzle_xor2(v2);
-    p3 = ds_swizzle_xor2(v3);
+    p0 = __shfl_xor(v0, 2);
+    p1 = __shfl_xor(v1, 2);
+    p2 = __shfl_xor(v2, 2);
+    p3 = __shfl_xor(v3, 2);
 
     bool sign3 = (tid >> 1) & 1;
     float t0 = sign3 ? (p0 - v0) : (p0 + v0);

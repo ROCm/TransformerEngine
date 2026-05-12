@@ -402,10 +402,12 @@ void performTest(const TestParams& params) {
 
   if (has_fp8)
   {
-    if (prop.major != 9 || prop.minor < 4) {
+    bool fp8_supported = (prop.major == 9 && prop.minor >= 4) || prop.major >= 12;
+    if (!fp8_supported) {
       GTEST_SKIP() << "FP8 is not supported in current config";
     }
-    if (use_mxfp8 && prop.minor < 5) {
+    bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
+    if (use_mxfp8 && !mxfp8_supported) {
       GTEST_SKIP() << "MXFP8 is not supported in current config";
     }
     if (use_mxfp8 && params.use_bias && params.force_hipblaslt) {
@@ -497,7 +499,7 @@ void performTest(const TestParams& params) {
 
   size_t workspace_size = 33554432;
 #ifdef __HIP_PLATFORM_AMD__
-  if (prop.major == 9 && prop.minor == 5) {
+  if ((prop.major == 9 && prop.minor == 5) || prop.major >= 12) {
     workspace_size = 67108864;
   }
   if (use_mxfp8 && !params.force_hipblaslt) {
@@ -590,7 +592,7 @@ void performDqTest(const TestParams &params) {
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-  bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5);
+  bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
   if (!mxfp8_supported) {
     GTEST_SKIP() << "MXFP8 is not supported in current config";
   }

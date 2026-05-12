@@ -96,8 +96,8 @@ def _hipkittens_workspace_bytes(m: int, n: int, k: int, layout: str) -> int:
 def get_cublas_workspace_size_bytes() -> None:
     """Return workspace size needed for current architecture"""
     if is_hip_extension():
-        """Return 64 MiB for gfx50x, 32 MiB for all other architectures."""
-        if get_device_compute_capability(0) == 95:
+        """Return 64 MiB for gfx50x+, 32 MiB for all other architectures."""
+        if get_device_compute_capability(0) in (95, 125):
             return 67_108_864
         return 33_554_432
     """Return 32 MiB if using hopper, 4 MiB for all other architectures."""
