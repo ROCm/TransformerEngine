@@ -8,41 +8,30 @@ project(ck_fused_attn LANGUAGES HIP CXX)
 
 set(AITER_MHA_INSTALL_PREFIX "transformer_engine" CACHE STRING "aiter mha shared lib install prefix in TE")
 
-set(__AITER_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA/3rdparty/aiter")
+# QoLA no longer vendors AITER as a submodule; it clones on demand into
+# build/third_party/aiter (git-ignored) via `qola checkout`. Mirror that
+# default here so the source-build path and the header-include paths
+# resolve to the same tree.
+set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
+set(__AITER_SOURCE_DIR "${__QOLA_DIR}/build/third_party/aiter")
 set(__CK_SOURCE_DIR "${__AITER_SOURCE_DIR}/3rdparty/composable_kernel")
-
 set(CK_INCLUDE_DIR "${__CK_SOURCE_DIR}/include")
-message(STATUS "ck_include_dir: ${CK_INCLUDE_DIR}")
-if(NOT EXISTS "${CK_INCLUDE_DIR}")
-  message(FATAL_ERROR
-          "Could not find CK API. "
-          "Try running 'git submodule update --init --recursive' "
-          "within the Transformer Engine source.")
-endif()
-
 set(AITER_INCLUDE_DIR "${__AITER_SOURCE_DIR}/csrc/include")
-message(STATUS "aiter_include_dir: ${AITER_INCLUDE_DIR}")
-if(NOT EXISTS "${AITER_INCLUDE_DIR}")
-  message(FATAL_ERROR
-          "Could not find AITER API. "
-          "Try running 'git submodule update --init --recursive' "
-          "within the Transformer Engine source.")
-endif()
 
 if(NOT Python_EXECUTABLE)
   find_package(Python COMPONENTS Interpreter QUIET)
 endif()
 
 # Resolve the manifest-pinned AITER commit (defines AITER_SHA) and bring the
-# QoLA-nested AITER source tree to that commit before any consumer reads it
+# QoLA-managed AITER source tree to that commit before any consumer reads it
 # (header validation below, header includes for the .cpp build later, and
 # QoLA's own kernel build if the prebuilt cache misses).
 include("${CMAKE_CURRENT_LIST_DIR}/aiter_prebuilt.cmake")
 
 if(Python_EXECUTABLE)
-  set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
+  set(__QOLA_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/qola_manifest.toml")
   # Redirect GIT_CONFIG_GLOBAL to a tempfile carrying `safe.directory = *` so
-  # git operations inside the QoLA-nested AITER tree (and its recursive
+  # git operations inside the QoLA-managed AITER tree (and its recursive
   # submodules) work in containerized builds where the bind-mounted .git is
   # owned by a different UID than the build process. Mirrors the pattern in
   # transformer_engine/common/CMakeLists.txt:get_git_commit().
@@ -50,7 +39,9 @@ if(Python_EXECUTABLE)
     COMMAND sh -c
       "tmp=$(mktemp /tmp/gitconfig.XXXXXX) || exit 1; \
 GIT_CONFIG_GLOBAL=$tmp git config --global --add safe.directory '*' >/dev/null 2>&1; \
-GIT_CONFIG_GLOBAL=$tmp PYTHONPATH=\"${__QOLA_DIR}:$PYTHONPATH\" '${Python_EXECUTABLE}' -c 'from qola.build_tools.submodule import ensure_aiter_commit; ensure_aiter_commit(r\"${__AITER_SOURCE_DIR}\", r\"${AITER_SHA}\")'; \
+GIT_CONFIG_GLOBAL=$tmp PYTHONPATH=\"${__QOLA_DIR}:$PYTHONPATH\" '${Python_EXECUTABLE}' -m qola.cli checkout \
+--manifest '${__QOLA_MANIFEST}' \
+--aiter-root '${__AITER_SOURCE_DIR}'; \
 rc=$?; rm -f \"$tmp\"; exit $rc"
     RESULT_VARIABLE AITER_CHECKOUT_RESULT
     OUTPUT_VARIABLE AITER_CHECKOUT_OUTPUT
@@ -88,6 +79,23 @@ else()
   message(WARNING "Python interpreter not found; skipping AITER source-tree sync and API validation.")
 endif()
 
+# Sanity-check the resolved include directories now that `qola checkout` has
+# materialized the AITER tree.
+message(STATUS "ck_include_dir: ${CK_INCLUDE_DIR}")
+if(NOT EXISTS "${CK_INCLUDE_DIR}")
+  message(FATAL_ERROR
+          "Could not find CK API at ${CK_INCLUDE_DIR}. "
+          "Re-run the build to let `qola checkout` clone AITER and its "
+          "composable_kernel submodule.")
+endif()
+
+message(STATUS "aiter_include_dir: ${AITER_INCLUDE_DIR}")
+if(NOT EXISTS "${AITER_INCLUDE_DIR}")
+  message(FATAL_ERROR
+          "Could not find AITER API at ${AITER_INCLUDE_DIR}. "
+          "Re-run the build to let `qola checkout` clone AITER.")
+endif()
+
 # so far, there are only gfx942 and gfx950 v3 kernels
 SET(V3_ASM_ARCHS_SUPPORTED "gfx942;gfx950")
 
@@ -118,11 +126,9 @@ else()
   if(__AITER_MHA_PATH STREQUAL "")
     # If not available, fallback: Build from source via QoLA
     message(STATUS "[AITER-BUILD] Building AITER kernels via QoLA.")
-    set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
     set(__QOLA_BUILD_DIR "${__QOLA_DIR}/build")
-    set(__QOLA_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/qola_manifest.toml")
-    # Same GIT_CONFIG_GLOBAL trick as the early `ensure_aiter_commit` call:
-    # qola.cli build re-invokes ensure_aiter_commit internally and will hit
+    # Same GIT_CONFIG_GLOBAL trick as the earlier `qola.cli checkout` call:
+    # `qola.cli build` re-invokes ensure_aiter_commit internally and will hit
     # the same dubious-ownership trap without it.
     execute_process(
       COMMAND sh -c
