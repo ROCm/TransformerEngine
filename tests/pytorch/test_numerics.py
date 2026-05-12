@@ -2999,7 +2999,15 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
 @pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize("use_cutlass", use_cutlass_grouped_gemm)
-def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
+@pytest.mark.parametrize("fp32_output", [False, True], ids=["out=input", "out=fp32"])
+def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass, fp32_output, monkeypatch):
+    # Mixed-precision output (bf16/bf16/fp32, fp16/fp16/fp32) only goes
+    # through the CUTLASS / CK grouped GEMM path; the multi-stream cublasLt
+    # fallback requires A_dt == B_dt == D_dt, and accumulate is incompatible
+    # with the mixed-precision output path.
+    if fp32_output and (not use_cutlass or accumulate):
+        pytest.skip("fp32 output requires use_cutlass=True and accumulate=False")
+
     torch.manual_seed(0)
     z, m, k, n = shape
 
@@ -3008,10 +3016,12 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
     assert m_splits.sum() == m and len(m_splits) == z
     m_splits = m_splits.tolist()
 
+    out_dtype = torch.float32 if fp32_output else dtype
+
     if layout == "TN":
         A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
         B = list(torch.split(torch.randn(m, k, dtype=dtype, device="cuda"), m_splits))  # input
-        out = [torch.randn(m, n, dtype=dtype, device="cuda")]  # output
+        out = [torch.randn(m, n, dtype=out_dtype, device="cuda")]  # output
         out_ref = [o.clone() for o in torch.split(out[0], m_splits)]
         grad = False
         single_output = True
@@ -3020,7 +3030,7 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
         B = list(
             torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)
         )  # grad_output
-        out = [torch.randn(m, k, dtype=dtype, device="cuda")]  # dgrad
+        out = [torch.randn(m, k, dtype=out_dtype, device="cuda")]  # dgrad
         out_ref = [o.clone() for o in torch.split(out[0], m_splits)]
         grad = True
         single_output = True
@@ -3029,19 +3039,19 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
         B = list(
             torch.split(torch.randn(m, n, dtype=dtype, device="cuda"), m_splits)
         )  # grad_output
-        out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
+        out = [torch.randn(n, k, dtype=out_dtype, device="cuda") for _ in range(z)]  # wgrad
         out_ref = [o.clone() for o in out]
         grad = True
         single_output = False
 
     if use_cutlass:
-        os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
+        monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
 
     for i in range(z):
         general_gemm(
             A[i],
             B[i],
-            dtype,
+            out_dtype,
             grad=grad,
             accumulate=accumulate,
             layout=layout,
@@ -3055,7 +3065,7 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
         B,
         out,
         [None] * z,
-        dtype,
+        out_dtype,
         m_splits=m_splits,
         grad=grad,
         accumulate=accumulate,
@@ -3073,71 +3083,6 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
             torch.testing.assert_close(o, o_ref, rtol=4e-2, atol=4e-2)
         else:
             torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
-
-    if use_cutlass:
-        os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
-
-
-@pytest.mark.skipif(
-    torch.cuda.get_device_capability() != (9, 0) and not IS_HIP_EXTENSION,
-    reason="Only enable CUTLASS / CK grouped gemm on Hopper or ROCm",
-)
-@pytest.mark.parametrize("input_dtype", [torch.bfloat16, torch.float16])
-@pytest.mark.parametrize("layout", ["TN", "NT"])
-def test_grouped_gemm_fp32_output(input_dtype, layout):
-    """Verify grouped GEMM with fp16/bf16 inputs and fp32 output goes through
-    the CUTLASS / CK grouped GEMM path (not the per-expert fallback). Exercises
-    the dispatcher is_supported_dtype check for the common bf16/bf16/fp32 case
-    used during training with fp32 gradient accumulation."""
-    if input_dtype == torch.bfloat16 and not is_bf16_available():
-        pytest.skip("bf16 requires sm_80+")
-    torch.manual_seed(0)
-    z, m, k, n = 8, 1027, 128, 512
-
-    dist = torch.sort(torch.randint(0, m, (z - 1,))).values.tolist()
-    m_splits = (torch.tensor(dist + [m]) - torch.tensor([0] + dist)).tolist()
-
-    if layout == "TN":
-        A = [torch.randn(n, k, dtype=input_dtype, device="cuda") for _ in range(z)]
-        B = list(torch.split(torch.randn(m, k, dtype=input_dtype, device="cuda"), m_splits))
-        out = [torch.empty(m, n, dtype=torch.float32, device="cuda")]
-        out_ref = [o.clone() for o in torch.split(out[0], m_splits)]
-        single_output = True
-        grad = False
-    else:  # "NT" wgrad: weight gradient in fp32
-        A = list(torch.split(torch.randn(m, k, dtype=input_dtype, device="cuda"), m_splits))
-        B = list(torch.split(torch.randn(m, n, dtype=input_dtype, device="cuda"), m_splits))
-        out = [torch.empty(n, k, dtype=torch.float32, device="cuda") for _ in range(z)]
-        out_ref = [o.clone() for o in out]
-        single_output = False
-        grad = True
-
-    os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
-    try:
-        for i in range(z):
-            general_gemm(
-                A[i], B[i],
-                out_dtype=torch.float32,
-                grad=grad,
-                layout=layout,
-                out=out_ref[i],
-            )
-        if single_output:
-            out_ref = [torch.cat(out_ref)]
-
-        general_grouped_gemm(
-            A, B, out, [None] * z,
-            out_dtype=torch.float32,
-            m_splits=m_splits,
-            grad=grad,
-            layout=layout,
-            single_output=single_output,
-        )
-
-        for o, o_ref in zip(out, out_ref):
-            torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
-    finally:
-        os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
 
 
 @pytest.mark.parametrize("N", [32])

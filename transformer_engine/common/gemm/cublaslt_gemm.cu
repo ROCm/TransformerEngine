@@ -1163,7 +1163,6 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     auto A_dt = inputA->data.dtype;
     auto B_dt = inputB->data.dtype;
     auto D_dt = OutputD->data.dtype;
-    // CK fp16 dispatcher accepts D in {fp32, fp16, bf16} when A==B is fp16/bf16.
     return (
             (is_fp8_dtype(A_dt) && is_fp8_dtype(B_dt))
           ) ||
