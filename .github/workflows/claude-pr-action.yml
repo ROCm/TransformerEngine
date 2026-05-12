@@ -332,14 +332,18 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           allowed_bots: "github-actions[bot]"
           show_full_output: true
-          # Strict allowlist (no disallowedTools). Patterns match against the
-          # literal command string, so `Bash(gh api repos/*)` permits read
-          # paths like `gh api repos/foo/bar/pulls/1/comments` but rejects
-          # `gh api --method DELETE repos/...` because the next token after
-          # `gh api` isn't `repos/*`. Add new entries here when a skill needs
-          # a new subcommand — never widen to `Bash(gh *)` or `Bash(git *)`.
+          # Strict allowlist for Bash(...) and MCP tools (no disallowedTools).
+          # The matcher splits chained commands on `;`/`&&`/`|` and checks
+          # each segment, so `Bash(git diff *)` covers `BASE=…; git diff …`
+          # but `Bash(echo *)` is still needed for the `echo "---"` segment.
+          # Built-in tools (Read, Grep, Glob, Skill, TodoWrite, ToolSearch,
+          # Write, Edit) bypass --allowedTools enforcement, but Read/Grep/
+          # Glob/Skill are listed for documentation. Patterns are verified
+          # against past run transcripts; widen only when a transcript shows
+          # a needed command being denied — never to `Bash(gh *)`/`Bash(git
+          # *)`/`Bash(*)`.
           claude_args: |
-            --model claude-opus-4-7 --effort xhigh --allowedTools "Skill,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view *),Bash(gh pr comment *),Bash(gh pr diff *),Bash(gh api repos/*),Bash(gh api /repos/*),Bash(gh api --paginate repos/*),Bash(gh api --paginate /repos/*),Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git cat-file *),Bash(git ls-files *),Bash(git rev-parse *),Bash(jq *),Bash(head *),Bash(grep *),Read,Grep,Glob" --mcp-config ${{ steps.mcp.outputs.file }}
+            --model claude-opus-4-7 --effort xhigh --allowedTools "Skill,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view *),Bash(gh pr comment *),Bash(gh pr diff *),Bash(gh api repos/*),Bash(gh api /repos/*),Bash(gh api --paginate repos/*),Bash(gh api --paginate /repos/*),Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git cat-file *),Bash(git ls-files *),Bash(git rev-parse *),Bash(git rev-list *),Bash(git ls-remote *),Bash(git merge-base *),Bash(git fetch *),Bash(git status),Bash(git status *),Bash(jq *),Bash(head *),Bash(grep *),Bash(echo *),Bash(ls),Bash(ls *),Read,Grep,Glob" --mcp-config ${{ steps.mcp.outputs.file }}
           settings: |
             { "hasCompletedOnboarding": true }
           prompt: |
@@ -430,11 +434,19 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           allowed_bots: "github-actions[bot]"
           show_full_output: true
-          # Strict allowlist (see review step for rationale). Summary may
-          # PATCH a prior walkthrough comment, so `gh api --method PATCH
-          # repos/*` is included; review intentionally does not allow PATCH.
+          # Strict allowlist for Bash(...) and MCP (see review step for the
+          # full rationale). Summary additionally needs:
+          #   - `gh api -X{POST,PATCH} repos/*/issues/*/comments` to create
+          #     or update the walkthrough top-level comment (past runs use
+          #     either `gh api -F body=@-` or `gh pr comment --body-file`);
+          #   - `cat *` for `cat > /tmp/walkthrough.md <<EOF` heredocs the
+          #     model uses to stage the body before posting;
+          #   - `git fetch *` / `git merge-base *` for shallow-clone deepening
+          #     when the synthetic merge commit's parents aren't reachable.
+          # Review intentionally does NOT allow POST/PATCH against the issues
+          # comments endpoint; it posts inline via the MCP tool instead.
           claude_args: |
-            --model claude-opus-4-7 --effort xhigh --allowedTools "Skill,Bash(gh pr view *),Bash(gh pr comment *),Bash(gh pr diff *),Bash(gh api repos/*),Bash(gh api /repos/*),Bash(gh api --paginate repos/*),Bash(gh api --paginate /repos/*),Bash(gh api --method PATCH repos/*),Bash(gh api --method PATCH /repos/*),Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git cat-file *),Bash(git ls-files *),Bash(git rev-parse *),Bash(jq *),Read,Grep,Glob"
+            --model claude-opus-4-7 --effort xhigh --allowedTools "Skill,Bash(gh pr view *),Bash(gh pr comment *),Bash(gh pr diff *),Bash(gh api repos/*),Bash(gh api /repos/*),Bash(gh api --paginate repos/*),Bash(gh api --paginate /repos/*),Bash(gh api --method POST repos/*),Bash(gh api --method POST /repos/*),Bash(gh api -X POST repos/*),Bash(gh api -X POST /repos/*),Bash(gh api --method PATCH repos/*),Bash(gh api --method PATCH /repos/*),Bash(gh api -X PATCH repos/*),Bash(gh api -X PATCH /repos/*),Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git cat-file *),Bash(git ls-files *),Bash(git rev-parse *),Bash(git rev-list *),Bash(git merge-base *),Bash(git fetch *),Bash(git status),Bash(git status *),Bash(jq *),Bash(echo *),Bash(cat *),Bash(ls),Bash(ls *),Read,Grep,Glob"
           settings: |
             { "hasCompletedOnboarding": true }
           prompt: |
