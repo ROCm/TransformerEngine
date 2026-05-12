@@ -30,19 +30,6 @@ python bench_casting.py --csv out.csv       # custom output path
 python bench_casting.py --append            # append to existing CSV
 ```
 
-### Helper script
-
-`run_benchmarks.sh` wraps common tasks and can be run from anywhere.
-
-```bash
-bash benchmarks/microbench/run_benchmarks.sh <command> [options]
-```
-
-| Command | Description |
-|---|---|
-| `run [suite] [method]` | Run benchmarks in-process and write CSV |
-| `list` | List available benchmark suites |
-
 ## Output format
 
 Long-format CSV — one row per `torch.utils.benchmark` block. Default location
