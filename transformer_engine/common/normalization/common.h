@@ -219,6 +219,10 @@ inline DType decode_wtype(uint64_t general_key) {
   return static_cast<DType>((general_key >> 15) & 0x1F);
 }
 
+inline NVTE_Norm_Type decode_norm_type(uint64_t general_key) {
+  return static_cast<NVTE_Norm_Type>((general_key >> 20) & 0x3);
+}
+
 inline const char* dtype_to_string(DType dtype) {
   switch (dtype) {
     case DType::kFloat32:
@@ -235,6 +239,17 @@ inline const char* dtype_to_string(DType dtype) {
       return "byte";
     case DType::kInt32:
       return "int32";
+    default:
+      return "unknown";
+  }
+}
+
+inline const char* norm_type_to_string(NVTE_Norm_Type norm_type) {
+  switch (norm_type) {
+    case NVTE_Norm_Type::LayerNorm:
+      return "LayerNorm";
+    case NVTE_Norm_Type::RMSNorm:
+      return "RMSNorm";
     default:
       return "unknown";
   }
@@ -275,7 +290,9 @@ class TeNormalizationRegistry {
       static thread_local std::unordered_set<TupleKeyType, TupleHash> warned_keys;
       if (warned_keys.insert(key).second) {
         NVTE_WARN("Falling back to general normalization kernel because no tuned kernel "
-                  "is available for this config. hidden_size=",
+                  "is available for this config. norm_type=",
+                  norm_type_to_string(decode_norm_type(general_key)),
+                  ", hidden_size=",
                   hidden_size,
                   ", wtype=",
                   dtype_to_string(decode_wtype(general_key)),
