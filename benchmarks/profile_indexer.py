@@ -1,4 +1,4 @@
-"""Profile the low-rank lightning-indexer at realistic shapes.
+"""Profile the low-rank lightning-indexer at realistic shapes (bf16).
 
 Measures wall time and effective TFLOPS for the einsum baseline vs the
 fused Triton kernel.
@@ -12,9 +12,8 @@ import time
 import jax
 import jax.numpy as jnp
 
-from transformer_engine.jax.indexer import indexer, quantize_to_fp8
+from transformer_engine.jax.indexer import indexer
 
-# Triton hybrid backend: einsum projections + Triton score-relu-reduce.
 try:
     from transformer_engine.jax.triton_extensions.indexer import score_reduce_triton  # noqa: F401
     _HAVE_HYBRID = True
@@ -32,33 +31,8 @@ def make_inputs(B, oH, T, S, d, d_c, H, d_i, dtype, seed=0):
     W_uq = jax.random.normal(keys[2], (H, d_c, d_i), dtype=dtype)
     W_dq = jax.random.normal(keys[3], (d, d_c),      dtype=dtype)
     W_k  = jax.random.normal(keys[4], (d, d_i),      dtype=dtype)
-    # Learnable per-(token, indexer-head) weight projection: W_o = Q @ W_w.
     W_w  = jax.random.normal(keys[5], (d, H),        dtype=dtype)
     return Q, K, W_uq, W_dq, W_k, W_w
-
-
-def make_fp8_inputs(B, oH, T, S, d, d_c, H, d_i, *,
-                    fp8_dtype=jnp.float8_e4m3fn, weights_dtype=jnp.bfloat16,
-                    seed=0):
-    """Sample bf16 tensors then quantize Q/K/W_uq/W_dq/W_k to FP8.
-
-    W_w stays in ``weights_dtype`` (bf16) — the reference impl does not
-    dequantize it.
-
-    Returns (Q, K, W_uq, W_dq, W_k, W_w, scales_dict).
-    """
-    Q, K, W_uq, W_dq, W_k, W_w = make_inputs(
-        B, oH, T, S, d, d_c, H, d_i, jnp.bfloat16, seed=seed
-    )
-    Q_q,  sq   = quantize_to_fp8(Q,   dtype=fp8_dtype)
-    K_q,  sk   = quantize_to_fp8(K,   dtype=fp8_dtype)
-    Wuq_q, swq = quantize_to_fp8(W_uq, dtype=fp8_dtype)
-    Wdq_q, swd = quantize_to_fp8(W_dq, dtype=fp8_dtype)
-    Wk_q,  swk = quantize_to_fp8(W_k,  dtype=fp8_dtype)
-    W_w = W_w.astype(weights_dtype)
-    scales = dict(scale_q=sq, scale_k=sk,
-                  scale_wq=swq, scale_wd=swd, scale_wk=swk)
-    return Q_q, K_q, Wuq_q, Wdq_q, Wk_q, W_w, scales
 
 
 def theoretical_flops(B, oH, T, S, d, d_c, H, d_i):
@@ -95,47 +69,16 @@ def time_fn(fn, args, n_warmup=15, n_iter=50):
 # --- Driver ---------------------------------------------------------------------
 
 CONFIGS = [
-    #(B, oH, T,    S,    d,   d_c,  H,  d_i, dtype)
-    ( 2, 64, 1024, 1024, 512, 1024, 64, 128, jnp.bfloat16),
+    #(B, oH, T,    S,    d,   d_c,  H,  d_i)
+    ( 2, 64, 1024, 1024, 512, 1024, 64, 128),
 ]
 
 
-def _is_fp8(dt):
-    return jnp.dtype(dt) in (
-        jnp.dtype("float8_e4m3fn"), jnp.dtype("float8_e5m2"),
-        jnp.dtype("float8_e4m3fnuz"), jnp.dtype("float8_e5m2fnuz"),
-    )
-
-
-def _bind_scales(fn, scales, *, backend=None):
-    """Return a 6-arg jit-able function that internally adds scale kwargs."""
-    extra = {}
-    if backend is not None:
-        extra["backend"] = backend
-    if scales is None and not extra:
-        return jax.jit(fn)
+def _build_impl(backend):
     @jax.jit
-    def wrapped(Q, K, W_uq, W_dq, W_k, W_w):
-        kwargs = dict(extra)
-        if scales is not None:
-            kwargs.update(scales)
-        return fn(Q, K, W_uq, W_dq, W_k, W_w, **kwargs)
-    return wrapped
-
-
-def _build_impls(scales):
-    impls = [
-        ("baseline", _bind_scales(indexer, scales, backend="reference")),
-    ]
-    if _HAVE_HYBRID:
-        impls.append(
-            ("hybrid", _bind_scales(indexer, scales, backend="hybrid"))
-        )
-    return impls
-
-
-if not _HAVE_HYBRID:
-    print(f"[profile_indexer] Hybrid backend unavailable: {_HYBRID_IMPORT_ERROR}")
+    def fn(Q, K, W_uq, W_dq, W_k, W_w):
+        return indexer(Q, K, W_uq, W_dq, W_k, W_w, backend=backend)
+    return fn
 
 
 def _dump_autotuner_winner():
@@ -156,27 +99,26 @@ def _dump_autotuner_winner():
         print(f"    [autotune] key={key} -> {cfg}")
 
 
+if not _HAVE_HYBRID:
+    print(f"[profile_indexer] Hybrid backend unavailable: {_HYBRID_IMPORT_ERROR}")
+
+
 def main():
     print(f"jax devices: {jax.devices()}\n")
-    for cfg in CONFIGS:
-        B, oH, T, S, d, d_c, H, d_i, dtype = cfg
-        is_fp8 = _is_fp8(dtype)
-        if is_fp8:
-            Q, K, W_uq, W_dq, W_k, W_w, scales = make_fp8_inputs(
-                B, oH, T, S, d, d_c, H, d_i, fp8_dtype=dtype
-            )
-        else:
-            Q, K, W_uq, W_dq, W_k, W_w = make_inputs(
-                B, oH, T, S, d, d_c, H, d_i, dtype
-            )
-            scales = None
+    for B, oH, T, S, d, d_c, H, d_i in CONFIGS:
+        Q, K, W_uq, W_dq, W_k, W_w = make_inputs(
+            B, oH, T, S, d, d_c, H, d_i, jnp.bfloat16
+        )
         args = (Q, K, W_uq, W_dq, W_k, W_w)
-        impls = _build_impls(scales)
         flops = theoretical_flops(B, oH, T, S, d, d_c, H, d_i)
 
-        print(f"--- B={B} oH={oH} T={T} S={S} d={d} d_c={d_c} H={H} d_i={d_i} "
-              f"{dtype.dtype.name} ---")
+        print(f"--- B={B} oH={oH} T={T} S={S} d={d} d_c={d_c} H={H} d_i={d_i} bfloat16 ---")
         print(f"    theoretical work = {flops/1e9:.2f} GFLOPs/call")
+
+        impls = [("baseline", _build_impl("reference"))]
+        if _HAVE_HYBRID:
+            impls.append(("hybrid", _build_impl("hybrid")))
+
         baseline_ms = None
         for name, fn in impls:
             try:

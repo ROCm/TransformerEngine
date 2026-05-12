@@ -1,4 +1,4 @@
-"""Profile indexer + per-row top-k along T_s.
+"""Profile indexer + per-row top-k along T_s (bf16).
 
 Same canonical backends as ``profile_indexer.py`` (reference einsum vs
 hybrid einsum+Triton score-reduce), with ``jax.lax.top_k`` applied to the
@@ -14,9 +14,8 @@ import time
 import jax
 import jax.numpy as jnp
 
-from transformer_engine.jax.indexer import indexer, quantize_to_fp8
+from transformer_engine.jax.indexer import indexer
 
-# Triton hybrid backend: einsum projections + Triton score-relu-reduce.
 try:
     from transformer_engine.jax.triton_extensions.indexer import score_reduce_triton  # noqa: F401
     _HAVE_HYBRID = True
@@ -37,23 +36,6 @@ def make_inputs(B, oH, T, S, d, d_c, H, d_i, dtype, seed=0):
     W_k  = jax.random.normal(keys[4], (d, d_i),      dtype=dtype)
     W_w  = jax.random.normal(keys[5], (d, H),        dtype=dtype)
     return Q, K, W_uq, W_dq, W_k, W_w
-
-
-def make_fp8_inputs(B, oH, T, S, d, d_c, H, d_i, *,
-                    fp8_dtype=jnp.float8_e4m3fn, weights_dtype=jnp.bfloat16,
-                    seed=0):
-    Q, K, W_uq, W_dq, W_k, W_w = make_inputs(
-        B, oH, T, S, d, d_c, H, d_i, jnp.bfloat16, seed=seed
-    )
-    Q_q,  sq   = quantize_to_fp8(Q,   dtype=fp8_dtype)
-    K_q,  sk   = quantize_to_fp8(K,   dtype=fp8_dtype)
-    Wuq_q, swq = quantize_to_fp8(W_uq, dtype=fp8_dtype)
-    Wdq_q, swd = quantize_to_fp8(W_dq, dtype=fp8_dtype)
-    Wk_q,  swk = quantize_to_fp8(W_k,  dtype=fp8_dtype)
-    W_w = W_w.astype(weights_dtype)
-    scales = dict(scale_q=sq, scale_k=sk,
-                  scale_wq=swq, scale_wd=swd, scale_wk=swk)
-    return Q_q, K_q, Wuq_q, Wdq_q, Wk_q, W_w, scales
 
 
 def theoretical_flops(B, oH, T, S, d, d_c, H, d_i):
@@ -83,45 +65,19 @@ def time_fn(fn, args, n_warmup=15, n_iter=50):
 # --- Driver ---------------------------------------------------------------------
 
 CONFIGS = [
-    #(B, oH, T,    S,    d,   d_c,  H,  d_i, dtype)
-    ( 2, 64, 1024, 1024, 512, 1024, 64, 128, jnp.bfloat16),
+    #(B, oH, T,    S,    d,   d_c,  H,  d_i)
+    ( 2, 64, 1024, 1024, 512, 1024, 64, 128),
 ]
 
-K_TOPK = 64
+K_TOPK = 512
 
 
-def _is_fp8(dt):
-    return jnp.dtype(dt) in (
-        jnp.dtype("float8_e4m3fn"), jnp.dtype("float8_e5m2"),
-        jnp.dtype("float8_e4m3fnuz"), jnp.dtype("float8_e5m2fnuz"),
-    )
-
-
-def _bind_topk(scales, *, backend, k):
-    """Build a jit'd indexer-then-topk closure for the given backend + scales."""
-    extra = {"backend": backend}
-    if scales is not None:
-        merged = dict(extra, **scales)
-    else:
-        merged = extra
-
+def _build_topk(backend, k):
     @jax.jit
     def fn(Q, K, W_uq, W_dq, W_k, W_w):
-        scores = indexer(Q, K, W_uq, W_dq, W_k, W_w, **merged)
+        scores = indexer(Q, K, W_uq, W_dq, W_k, W_w, backend=backend)
         return jax.lax.top_k(scores, k)
-
     return fn
-
-
-def _build_impls(scales, k):
-    impls = [
-        ("baseline+topk", _bind_topk(scales, backend="reference", k=k)),
-    ]
-    if _HAVE_HYBRID:
-        impls.append(
-            ("hybrid+topk",  _bind_topk(scales, backend="hybrid", k=k))
-        )
-    return impls
 
 
 @jax.jit
@@ -135,25 +91,20 @@ if not _HAVE_HYBRID:
 
 def main():
     print(f"jax devices: {jax.devices()}\nk = {K_TOPK}\n")
-    for cfg in CONFIGS:
-        B, oH, T, S, d, d_c, H, d_i, dtype = cfg
-        is_fp8 = _is_fp8(dtype)
-        if is_fp8:
-            Q, K, W_uq, W_dq, W_k, W_w, scales = make_fp8_inputs(
-                B, oH, T, S, d, d_c, H, d_i, fp8_dtype=dtype
-            )
-        else:
-            Q, K, W_uq, W_dq, W_k, W_w = make_inputs(
-                B, oH, T, S, d, d_c, H, d_i, dtype
-            )
-            scales = None
+    for B, oH, T, S, d, d_c, H, d_i in CONFIGS:
+        Q, K, W_uq, W_dq, W_k, W_w = make_inputs(
+            B, oH, T, S, d, d_c, H, d_i, jnp.bfloat16
+        )
         args = (Q, K, W_uq, W_dq, W_k, W_w)
-        impls = _build_impls(scales, K_TOPK)
         flops = theoretical_flops(B, oH, T, S, d, d_c, H, d_i)
 
-        print(f"--- B={B} oH={oH} T={T} S={S} d={d} d_c={d_c} H={H} d_i={d_i} "
-              f"{dtype.dtype.name} ---")
+        print(f"--- B={B} oH={oH} T={T} S={S} d={d} d_c={d_c} H={H} d_i={d_i} bfloat16 ---")
         print(f"    theoretical work = {flops/1e9:.2f} GFLOPs/call (top-k = 0 FLOP)")
+
+        impls = [("baseline+topk", _build_topk("reference", K_TOPK))]
+        if _HAVE_HYBRID:
+            impls.append(("hybrid+topk", _build_topk("hybrid", K_TOPK)))
+
         baseline_ms = None
         for name, fn in impls:
             try:
@@ -172,8 +123,7 @@ def main():
         # Time top_k alone on a precomputed (reference) score matrix to
         # isolate the top-k cost from the indexer compute.
         try:
-            kw = {"backend": "reference", **(scales or {})}
-            scores_mat = indexer(*args, **kw)
+            scores_mat = indexer(*args, backend="reference")
             sec = time_fn(_topk_only, (scores_mat,))
             print(f"    {'(top_k alone)':<14} {sec*1e3:8.3f} ms")
         except Exception as e:  # noqa: BLE001
