@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -7,6 +9,13 @@
 #include "../extensions.h"
 #include "common.h"
 #include "pybind.h"
+
+#include <torch/version.h>
+#if USE_ROCM && TORCH_VERSION_MINOR < 11
+using TECUDAGuard = at::hip::HIPGuardMasqueradingAsCUDA;
+#else
+using TECUDAGuard = at::cuda::CUDAGuard;
+#endif
 
 namespace {
 
@@ -111,7 +120,7 @@ std::vector<py::object> fused_attn_fwd(
   // Ensure that cuDNN handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(cu_seqlens_q.device());
+  TECUDAGuard device_guard(cu_seqlens_q.device());
 
   auto none = py::none();
 
