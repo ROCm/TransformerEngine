@@ -507,8 +507,9 @@ void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t s
   // (K_scale grouped by 4, matching hipBLASlt BLK32_UE8M0_32_8_EXT).
   if (input->scaling_mode == NVTE_MXFP8_1D_SCALING && cuda::sm_arch() == 125) {
     swizzle_scaling_factors_mx(input, output, stream);
-    return;
   }
+  // No other scale swizzle formats supported on AMD
+  return;
 #endif  // __HIP_PLATFORM_AMD__
 
   // Check scaling mode
@@ -842,9 +843,10 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       for (size_t i = 0; i < input.size(); i++) {
         swizzle_scaling_factors_mx(input[i], output[i], stream);
       }
-      return;
     }
   }
+  // No other scale swizzle formats supported on AMD
+  return;
 #endif  // __HIP_PLATFORM_AMD__
 
   auto num_tensors = input.size();
@@ -1039,13 +1041,3 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
   }
   multi_tensor_swizzle_scaling_factors(input_list, output_list, stream);
 }
-
-#ifdef __HIP_PLATFORM_AMD__
-void nvte_swizzle_scaling_factors_mx(const NVTETensor input, NVTETensor output,
-                                        cudaStream_t stream) {
-  NVTE_API_CALL(nvte_swizzle_scaling_factors_mx);
-  using namespace transformer_engine;
-  swizzle_scaling_factors_mx(convertNVTETensorCheck(input), convertNVTETensorCheck(output),
-                                stream);
-}
-#endif  // __HIP_PLATFORM_AMD__

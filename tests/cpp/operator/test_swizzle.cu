@@ -282,7 +282,7 @@ TEST_P(MxSwizzleTestSuite, TestMxSwizzle) {
     output_tw.set_columnwise_scale_inv(d_output, DType::kFloat8E8M0, scale_shape_out);
   }
 
-  nvte_swizzle_scaling_factors_mx(input_tw.data(), output_tw.data(), 0);
+  nvte_swizzle_scaling_factors(input_tw.data(), output_tw.data(), 0);
 
   ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
   auto err = cudaGetLastError();

@@ -9,8 +9,6 @@
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_
 
-#ifndef USE_ROCM
-
 #include <torch/extension.h>
 
 #include <optional>
@@ -37,6 +35,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(std::vector<Tenso
                                                                bool rowwise_usage,
                                                                bool columnwise_usage);
 
+#ifndef USE_ROCM
 /*! \brief Convert a block scaling tensor to an mxfp8 tensor in-place.
  *
  *  If rowwise==false, the columnwise data will be reinterpreted as
@@ -50,10 +49,9 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(std::vector<Tenso
  *  during the GEMM.
  */
 at::Tensor convert_block_scaling_to_mxfp8_tensor(TensorWrapper& input, bool rowwise);
+#endif  //!USE_ROCM
 
 }  // namespace pytorch
 }  // namespace transformer_engine
-
-#endif  //!USE_ROCM
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_

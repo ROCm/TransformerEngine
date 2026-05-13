@@ -80,12 +80,31 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
                  "Inverse scale factors need to have an 8-bit data type.");
     }
     if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
-      // Assume MXFP8 scales are already swizzled
       if (rowwise) {
         input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       } else {
         input.set_columnwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       }
+#ifdef USE_ROCM
+      // On gfx1250, pre-swizzle MXFP8 scales for hipBLASLt
+      if (transformer_engine::cuda::sm_arch() == 125 && swizzle_scale_ptr) {
+        TensorWrapper output(get_nvte_scaling_mode(scaling_mode));
+        if (rowwise) {
+          output.set_rowwise_data(buffer.untyped_data(), input_dtype, input_shape);
+          output.set_rowwise_scale_inv(swizzle_scale_ptr, scale_dtype, scale_shape);
+        } else {
+          output.set_columnwise_data(buffer.untyped_data(), input_dtype, input_shape);
+          output.set_columnwise_scale_inv(swizzle_scale_ptr, scale_dtype, scale_shape);
+        }
+        output.set_with_gemm_swizzled_scales(true);
+        nvte_swizzle_scaling_factors(input.data(), output.data(), stream);
+        if (rowwise) {
+          input.set_rowwise_scale_inv(swizzle_scale_ptr, scale_dtype, scale_shape);
+        } else {
+          input.set_columnwise_scale_inv(swizzle_scale_ptr, scale_dtype, scale_shape);
+        }
+      }
+#endif
       input.set_with_gemm_swizzled_scales(true);
     } else if (is_nvfp4) {  // Swizzle for NVFP4
 #ifdef USE_ROCM
@@ -195,7 +214,12 @@ Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_i
   auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
   workspace_ptr = move_ptr_to_next_256B_aligned(workspace_ptr);
   size_t workspace_size = static_cast<size_t>(workspace->element_count()) - 256;
-  if (is_nvfp4_scaling(scaling_mode)) {
+  if (is_nvfp4_scaling(scaling_mode)
+#ifdef USE_ROCM
+      || (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING
+          && transformer_engine::cuda::sm_arch() == 125)
+#endif
+  ) {
     auto lhs_scale_size = product(lhs_scale_inv.dimensions());
     auto rhs_scale_size = product(rhs_scale_inv.dimensions());
     workspace_size = workspace_size - lhs_scale_size - rhs_scale_size;
