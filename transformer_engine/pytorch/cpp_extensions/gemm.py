@@ -59,6 +59,19 @@ if IS_HIP_EXTENSION:
         return tex.kittens_mxfp8_workspace_bytes(m, n, k, transa, transb)
 
 
+_workspace_cache: dict[int, torch.Tensor] = {}
+
+
+def _get_or_grow_workspace(device: int, needed: int) -> torch.Tensor:
+    """Return a cached workspace tensor, growing it if needed."""
+    needed = max(needed, get_cublas_workspace_size_bytes())
+    ws = _workspace_cache.get(device)
+    if ws is None or ws.shape[0] < needed:
+        ws = torch.empty(needed, dtype=torch.uint8, device=device)
+        _workspace_cache[device] = ws
+    return ws
+
+
 def _use_hipkittens() -> bool:
     """Check if HipKittens MXFP8 backend is active."""
     if not IS_HIP_EXTENSION:
@@ -306,15 +319,14 @@ def general_gemm(
     beta = validate_gemm_scale(beta, accumulate)
 
     is_mxfp8 = isinstance(A, MXFP8TensorStorage) or isinstance(B, MXFP8TensorStorage)
-    if is_mxfp8 and _use_hipkittens() and layout in ("NN", "NT"):
+    if is_mxfp8 and _use_hipkittens():
         a_size = A.size() if hasattr(A, "size") and callable(A.size) else A.shape
         b_size = B.size() if hasattr(B, "size") and callable(B.size) else B.shape
         m  = a_size[0] if transa else a_size[-1]
         n  = b_size[-1] if transb else b_size[0]
         k  = a_size[-1] if transa else a_size[0]
-        needed = max(_hipkittens_workspace_bytes(m, n, k, layout),
-                     get_cublas_workspace_size_bytes())
-        workspace = torch.empty(needed, dtype=torch.uint8, device=get_tensor_device(A))
+        needed = _hipkittens_workspace_bytes(m, n, k, layout)
+        workspace = _get_or_grow_workspace(get_tensor_device(A), needed)
     else:
         workspace = get_cublas_workspace(get_tensor_device(A), ub is not None, False)
 
