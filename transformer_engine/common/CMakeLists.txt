@@ -126,14 +126,14 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 
 else()
   set(CMAKE_CXX_STANDARD 17)
+  #define GPU ARCH before enabling HIP to avoid potential failures with arch detection
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
   project(transformer_engine LANGUAGES HIP CXX)
 
   # If using ROCm, ninja must be installed to build TE.
   if (NOT CMAKE_GENERATOR STREQUAL "Ninja")
     message(FATAL_ERROR "This project requires the Ninja build system. Install it using 'pip install ninja'.")
   endif()
-
-  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
 
   # Disable Asserts In Code (Can't use asserts on HIP stack.)
   add_definitions(-DNDEBUG)
@@ -236,7 +236,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      $<${GX_CUDA}:gemm/cutlass_grouped_gemm.cu>
      $<${GX_CUDA}:hadamard_transform/group_hadamard_transform.cu>
      $<${GX_CUDA}:hadamard_transform/graph_safe_group_hadamard_transform.cu>
-     $<${GX_CUDA}:hadamard_transform/hadamard_transform.cu>
+     hadamard_transform/hadamard_transform.cu
      $<${GX_CUDA}:hadamard_transform/hadamard_transform_cast_fusion.cu>
      $<${GX_CUDA}:hadamard_transform/group_hadamard_transform_cast_fusion.cu>
      $<${GX_CUDA}:hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu>
@@ -255,7 +255,7 @@ list(APPEND transformer_engine_SOURCES ${transformer_engine_cuda_arch_specific_s
 
 if(USE_ROCM)
   #ROCm specific source codes
-  list(APPEND transformer_engine_SOURCES
+  list(INSERT transformer_engine_SOURCES 0
       amd_detail/system.cpp
       comm_gemm_overlap/rocm_comm_gemm_overlap.cpp
       fused_attn_rocm/fused_attn.cpp
@@ -510,7 +510,7 @@ make_string_header_from_file(utils.cuh
                              string_code_utils_cuh)
 else()
   make_string_header_from_file(utils_hip.cuh
-                               string_code_utils_cuh)
+                              string_code_utils_cuh)
   make_string_header_from_file(transpose/rtc/cast_transpose_fusion.hip
                               string_code_transpose_rtc_cast_transpose_fusion_cu)
   make_string_header_from_file(transpose/rtc/cast_transpose.hip
@@ -520,7 +520,7 @@ else()
   make_string_header_from_file(transpose/rtc/swap_first_dims.hip
                               string_code_transpose_rtc_swap_first_dims_cu)
   make_string_header_from_file(amd_detail/hip_float8.h
-                               string_code_amd_detail_hip_float8_h)
+                              string_code_amd_detail_hip_float8_h)
 endif()
 make_string_header_from_file(util/math.h
                              string_code_util_math_h)

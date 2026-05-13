@@ -7,6 +7,8 @@
 // drop-in replacement for rocm quantize_mxfp8 kernels
 //#include "hip/hip_runtime.h" //dummy include to prevent hipification adding this header
 
+#include "../../util/rocm_device_utils.cuh"
+
 constexpr size_t MXFP8_CHUNK_DIM_Y = 64;
 constexpr size_t MXFP8_CHUNK_DIM_X = 64;
 constexpr size_t MXFP8_THREADS_PER_CHUNK = 64;
@@ -14,9 +16,9 @@ constexpr size_t MXFP8_THREADS_PER_CHUNK = 64;
 constexpr size_t ELEMS_PER_THREAD = 16;
 constexpr size_t MXFP8_BUFFER_DIM_Y = 32;  // only 32 is supported
 
-#if defined(__gfx950__) && __HIP_DEVICE_COMPILE__
+#ifdef HAS_CVT_4xFLOAT8
 typedef short mxfp8_v2i16_t __attribute__((ext_vector_type(2)));
-#endif
+#endif  // #ifdef HAS_CVT_4xFLOAT8
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &), typename IType, typename OType, size_t SCALE_DIM_Y,
@@ -61,9 +63,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   constexpr size_t THREADS_PER_SCALE_X_ROWWISE =
       DIVUP(SCALE_DIM_X, ELEMS_PER_THREAD);                      //   2 = 32 / 16
   constexpr size_t SUBWARP_WIDTH = THREADS_PER_SCALE_X_ROWWISE;  //   2
-  // Cap vector width so each load/store is at most 16 bytes (AMD max: global_load_dwordx4)
-  constexpr size_t VECTOR_WIDTH_IN  = 16 / sizeof(IType);   // BF16/FP16: 8, FP32: 4
-  constexpr size_t VECTOR_WIDTH_OUT = 16 / sizeof(OType);   // FP8: 16
+  constexpr size_t VECTOR_WIDTH_IN  = ROCM_VEC_BYTES / sizeof(IType);   // BF16/FP16: 8, FP32: 4
+  constexpr size_t VECTOR_WIDTH_OUT = ROCM_VEC_BYTES / sizeof(OType);   // FP8: 16
 
   const int block_offset_Y = blockIdx.y * CHUNK_DIM_Y;
   const int block_offset_X = blockIdx.x * CHUNK_DIM_X;
@@ -168,15 +169,21 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
       {
         constexpr size_t SCALES_PER_GROUP = THREADS_PER_CHUNK_X_ROWWISE / THREADS_PER_SCALE_X_ROWWISE;
+        static_assert(SCALES_PER_GROUP < 4 || SCALES_PER_GROUP % 4 == 0,
+            "SCALES_PER_GROUP must be < 4 or a multiple of 4");
         uint32_t my_scale = static_cast<uint32_t>(biased_exponent);
         if constexpr (SCALES_PER_GROUP >= 4) {
-          uint32_t s1 = __shfl_down(my_scale, 1 * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
-          uint32_t s2 = __shfl_down(my_scale, 2 * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
-          uint32_t s3 = __shfl_down(my_scale, 3 * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
-          uint32_t packed = (my_scale & 0xFF) | ((s1 & 0xFF) << 8) | ((s2 & 0xFF) << 16) | ((s3 & 0xFF) << 24);
-          if (tid_rowwise_X == 0 && row_valid && col_valid) {
-            const int scale_idx = row * scale_stride_rowwise + scales_rowwise_block_offset_X;
-            reinterpret_cast<uint32_t*>(&scales_rowwise[scale_idx])[0] = packed;
+#pragma unroll
+          for (int g = 0; g < SCALES_PER_GROUP / 4; g++) {
+            uint32_t s0 = __shfl_down(my_scale, (g*4+0) * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
+            uint32_t s1 = __shfl_down(my_scale, (g*4+1) * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
+            uint32_t s2 = __shfl_down(my_scale, (g*4+2) * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
+            uint32_t s3 = __shfl_down(my_scale, (g*4+3) * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
+            uint32_t packed = (s0 & 0xFF) | ((s1 & 0xFF) << 8) | ((s2 & 0xFF) << 16) | ((s3 & 0xFF) << 24);
+            if (tid_rowwise_X == 0 && row_valid && col_valid) {
+              const int scale_idx = row * scale_stride_rowwise + scales_rowwise_block_offset_X;
+              reinterpret_cast<uint32_t*>(&scales_rowwise[scale_idx])[g] = packed;
+            }
           }
         } else {
           if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0 && row_valid && col_valid) {
@@ -189,7 +196,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
 
       Vec<OType, ELEMS_PER_THREAD> out_c;
-#if defined(__gfx950__) && __HIP_DEVICE_COMPILE__
+#ifdef HAS_CVT_4xFLOAT8
       {
         const float cvt_scale = (biased_exponent == 0) ? 1.0f : ptx::exp2f(biased_exponent);
         union {
@@ -198,17 +205,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         } cvt_out{};
 #pragma unroll
         for (int p = 0; p < ELEMS_PER_THREAD / 4; p++) {
-          if constexpr (std::is_same_v<OType, fp8e4m3>) {
-            cvt_out.v2i16[p] = __builtin_amdgcn_cvt_scalef32_pk_fp8_f32(
-                cvt_out.v2i16[p], in_compute[p*4+0], in_compute[p*4+1], cvt_scale, false);
-            cvt_out.v2i16[p] = __builtin_amdgcn_cvt_scalef32_pk_fp8_f32(
-                cvt_out.v2i16[p], in_compute[p*4+2], in_compute[p*4+3], cvt_scale, true);
-          } else {
-            cvt_out.v2i16[p] = __builtin_amdgcn_cvt_scalef32_pk_bf8_f32(
-                cvt_out.v2i16[p], in_compute[p*4+0], in_compute[p*4+1], cvt_scale, false);
-            cvt_out.v2i16[p] = __builtin_amdgcn_cvt_scalef32_pk_bf8_f32(
-                cvt_out.v2i16[p], in_compute[p*4+2], in_compute[p*4+3], cvt_scale, true);
-          }
+          cvt_out.packed[p] = rocm_cvt_4xfloat8<OType>(
+              in_compute[p*4+0], in_compute[p*4+1],
+              in_compute[p*4+2], in_compute[p*4+3], cvt_scale);
         }
         memcpy(out_c.data.elt, cvt_out.packed, ELEMS_PER_THREAD * sizeof(OType));
       }
@@ -220,7 +219,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           out_c.data.elt[j] = static_cast<OType>(in_compute[j] * block_scale_inverse);
         }
       }
-#endif
+#endif  // #ifdef HAS_CVT_4xFLOAT8
 
       if (row_valid && col_valid) {
         if (IS_ALIGNED || col_start + ELEMS_PER_THREAD <= cols) {
@@ -316,14 +315,21 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
           {
             constexpr size_t SCALES_PER_GROUP = THREADS_PER_CHUNK_X_ROWWISE / THREADS_PER_SCALE_X_ROWWISE;
+            static_assert(SCALES_PER_GROUP < 4 || SCALES_PER_GROUP % 4 == 0,
+                "SCALES_PER_GROUP must be < 4 or a multiple of 4");
             uint32_t my_scale = static_cast<uint32_t>(biased_exponent);
             if constexpr (SCALES_PER_GROUP >= 4) {
-              uint32_t s1 = __shfl_down(my_scale, 1 * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
-              uint32_t s2 = __shfl_down(my_scale, 2 * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
-              uint32_t s3 = __shfl_down(my_scale, 3 * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
-              uint32_t packed = (my_scale & 0xFF) | ((s1 & 0xFF) << 8) | ((s2 & 0xFF) << 16) | ((s3 & 0xFF) << 24);
-              if (tid_rowwise_X == 0 && row_valid && col_valid) {
-                reinterpret_cast<uint32_t*>(&scales_rowwise[row * scale_stride_rowwise + scales_rowwise_block_offset_X])[0] = packed;
+#pragma unroll
+              for (int g = 0; g < SCALES_PER_GROUP / 4; g++) {
+                uint32_t s0 = __shfl_down(my_scale, (g*4+0) * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
+                uint32_t s1 = __shfl_down(my_scale, (g*4+1) * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
+                uint32_t s2 = __shfl_down(my_scale, (g*4+2) * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
+                uint32_t s3 = __shfl_down(my_scale, (g*4+3) * THREADS_PER_SCALE_X_ROWWISE, THREADS_PER_CHUNK_X_ROWWISE);
+                uint32_t packed = (s0 & 0xFF) | ((s1 & 0xFF) << 8) | ((s2 & 0xFF) << 16) | ((s3 & 0xFF) << 24);
+                if (tid_rowwise_X == 0 && row_valid && col_valid) {
+                  const int scale_idx = row * scale_stride_rowwise + scales_rowwise_block_offset_X;
+                  reinterpret_cast<uint32_t*>(&scales_rowwise[scale_idx])[g] = packed;
+                }
               }
             } else {
               if (tid_rowwise_X % THREADS_PER_SCALE_X_ROWWISE == 0 && row_valid && col_valid) {
@@ -335,7 +341,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           }
 
           Vec<OType, ELEMS_PER_THREAD> out_c;
-#if defined(__gfx950__) && __HIP_DEVICE_COMPILE__
+#ifdef HAS_CVT_4xFLOAT8
           {
             const float cvt_scale = (biased_exponent == 0) ? 1.0f : ptx::exp2f(biased_exponent);
             union {
@@ -344,17 +350,9 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             } cvt_out{};
 #pragma unroll
             for (int p = 0; p < ELEMS_PER_THREAD / 4; p++) {
-              if constexpr (std::is_same_v<OType, fp8e4m3>) {
-                cvt_out.v2i16[p] = __builtin_amdgcn_cvt_scalef32_pk_fp8_f32(
-                    cvt_out.v2i16[p], in_compute[p*4+0], in_compute[p*4+1], cvt_scale, false);
-                cvt_out.v2i16[p] = __builtin_amdgcn_cvt_scalef32_pk_fp8_f32(
-                    cvt_out.v2i16[p], in_compute[p*4+2], in_compute[p*4+3], cvt_scale, true);
-              } else {
-                cvt_out.v2i16[p] = __builtin_amdgcn_cvt_scalef32_pk_bf8_f32(
-                    cvt_out.v2i16[p], in_compute[p*4+0], in_compute[p*4+1], cvt_scale, false);
-                cvt_out.v2i16[p] = __builtin_amdgcn_cvt_scalef32_pk_bf8_f32(
-                    cvt_out.v2i16[p], in_compute[p*4+2], in_compute[p*4+3], cvt_scale, true);
-              }
+              cvt_out.packed[p] = rocm_cvt_4xfloat8<OType>(
+                  in_compute[p*4+0], in_compute[p*4+1],
+                  in_compute[p*4+2], in_compute[p*4+3], cvt_scale);
             }
             memcpy(out_c.data.elt, cvt_out.packed, ELEMS_PER_THREAD * sizeof(OType));
           }
@@ -366,7 +364,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
               out_c.data.elt[j] = static_cast<OType>(in_compute[j] * block_scale_inverse);
             }
           }
-#endif
+#endif  // #ifdef HAS_CVT_4xFLOAT8
 
           if (row_valid && col_valid) {
             if (IS_ALIGNED || col_start + ELEMS_PER_THREAD <= cols) {
@@ -426,26 +424,16 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           scales_colwise[scale_idx] = biased_exponent;
         }
 
-#if defined(__gfx950__) && __HIP_DEVICE_COMPILE__
+#ifdef HAS_CVT_4xFLOAT8
         {
           const float cvt_scale = (biased_exponent == 0) ? 1.0f : ptx::exp2f(biased_exponent);
 #pragma unroll
           for (int i = 0; i < SCALE_DIM_Y; i += 2) {
-            union {
-              uint32_t packed;
-              mxfp8_v2i16_t v2i16;
-              uint8_t bytes[4];
-            } cvt_out{};
-            if constexpr (std::is_same_v<OType, fp8e4m3>) {
-              cvt_out.v2i16 = __builtin_amdgcn_cvt_scalef32_pk_fp8_f32(
-                  cvt_out.v2i16, in_compute[i], in_compute[i+1], cvt_scale, false);
-            } else {
-              cvt_out.v2i16 = __builtin_amdgcn_cvt_scalef32_pk_bf8_f32(
-                  cvt_out.v2i16, in_compute[i], in_compute[i+1], cvt_scale, false);
-            }
+            uint32_t packed = rocm_cvt_4xfloat8<OType>(
+                in_compute[i], in_compute[i+1], 0.0f, 0.0f, cvt_scale);
             OType val0, val1;
-            memcpy(&val0, &cvt_out.bytes[0], sizeof(OType));
-            memcpy(&val1, &cvt_out.bytes[1], sizeof(OType));
+            memcpy(&val0, &packed, sizeof(OType));
+            memcpy(&val1, reinterpret_cast<uint8_t *>(&packed) + 1, sizeof(OType));
             out_colwise_sh[i][tid_colwise_X] = val0;
             if (i + 1 < SCALE_DIM_Y) {
               out_colwise_sh[i+1][tid_colwise_X] = val1;
@@ -461,7 +449,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
                 static_cast<OType>(in_compute[i] * block_scale_inverse);
           }
         }
-#endif
+#endif  // #ifdef HAS_CVT_4xFLOAT8
       }
 
       __syncthreads();

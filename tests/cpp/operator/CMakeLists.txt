@@ -42,7 +42,8 @@ if(USE_ROCM)
   get_target_property(test_cuda_sources test_operator SOURCES)
   list(APPEND test_cuda_sources
               test_dequantize_nvfp4.cu
-              test_cublaslt_gemm.cu)
+              test_cublaslt_gemm.cu
+              test_cast_mxfp4_transpose.cu)
   TE_GetHipifiedSources("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR} test_hip_sources)
   message("${message_line}")
   message(STATUS "test_operator hipified sources: ${test_hip_sources}")

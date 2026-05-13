@@ -34,6 +34,11 @@ PyTypeObject *MXFP8QuantizerClass = nullptr;
 PyTypeObject *Float8BlockwiseQTensorPythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQTensorStoragePythonClass = nullptr;
 PyTypeObject *Float8BlockwiseQuantizerClass = nullptr;
+#ifdef USE_ROCM
+PyTypeObject *MXFP4TensorPythonClass = nullptr;
+PyTypeObject *MXFP4TensorStoragePythonClass = nullptr;
+PyTypeObject *MXFP4QuantizerClass = nullptr;
+#endif //#ifdef USE_ROCM
 PyTypeObject *NVFP4TensorPythonClass = nullptr;
 PyTypeObject *NVFP4TensorStoragePythonClass = nullptr;
 PyTypeObject *NVFP4QuantizerClass = nullptr;
@@ -91,6 +96,23 @@ void init_float8blockwise_extension() {
              "Internal error: could not initialize pyTorch float8blockwise extension.");
 }
 
+#ifdef USE_ROCM
+void init_mxfp4_extension() {
+  if (MXFP4TensorPythonClass) return;
+  auto fp4_module = py::module_::import("transformer_engine.pytorch.tensor.mxfp4_tensor");
+  MXFP4QuantizerClass = 
+  reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp4_module.ptr(), "MXFP4Quantizer"));
+  MXFP4TensorPythonClass =
+  reinterpret_cast<PyTypeObject *>(PyObject_GetAttrString(fp4_module.ptr(), "MXFP4Tensor"));
+  auto fp4_base_module =
+      py::module_::import("transformer_engine.pytorch.tensor.storage.mxfp4_tensor_storage");
+  MXFP4TensorStoragePythonClass = reinterpret_cast<PyTypeObject *>(
+  PyObject_GetAttrString(fp4_base_module.ptr(), "MXFP4TensorStorage"));
+  NVTE_CHECK(MXFP4TensorPythonClass != nullptr,
+              "Internal error: could not initialize pyTorch MXFP4 extension.");
+}
+#endif //#ifdef USE_ROCM
+
 void init_nvfp4_extensions() {
   auto nvfp4_module = py::module_::import("transformer_engine.pytorch.tensor.nvfp4_tensor");
   NVFP4QuantizerClass = reinterpret_cast<PyTypeObject *>(
@@ -125,6 +147,9 @@ void init_extension() {
   std::call_once(extension_init_flag, []() {
     init_float8_extension();
     init_mxfp8_extension();
+#ifdef USE_ROCM
+    init_mxfp4_extension();
+#endif //#ifdef USE_ROCM
     init_float8blockwise_extension();
     init_nvfp4_extensions();
     init_grouped_tensor_extension();

@@ -20,6 +20,13 @@
 #include "transformer_engine/transformer_engine.h"
 #include "util.h"
 
+#include <torch/version.h>
+#if USE_ROCM && TORCH_VERSION_MINOR < 11
+using TECUDAGuard = at::hip::HIPGuardMasqueradingAsCUDA;
+#else
+using TECUDAGuard = at::cuda::CUDAGuard;
+#endif
+
 namespace {
 
 void* get_data_ptr(transformer_engine::pytorch::MaybeTensor tensor) {
@@ -140,7 +147,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   // Ensure that cublasLt handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(workspace.device());
+  TECUDAGuard device_guard(workspace.device());
 
   // Input tensors
   NVTE_CHECK(!A.is_none(), "Tensor A has not been provided");
@@ -428,7 +435,7 @@ void te_atomic_gemm(at::Tensor A, at::Tensor A_scale_inverse, DType A_type,
   // Ensure that cublasLt handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(workspace.device());
+  TECUDAGuard device_guard(workspace.device());
 
   // TODO: Handle scaling modes
   NVTEScalingMode nvte_scaling_modeA = NVTE_DELAYED_TENSOR_SCALING;
@@ -482,7 +489,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   // Ensure that cublasLt handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(workspace[0].device());
+  TECUDAGuard device_guard(workspace[0].device());
 
   void* output_data_ptr = nullptr;
   if (single_output) {

@@ -39,6 +39,14 @@ int sm_arch(int device_id = -1);
  * \return GPU arch name and compute capabilities string.
  */
 const std::string &sm_arch_name(int device_id = -1);
+
+/* \brief Warp/wavefront size on a device
+ *
+ * \param[in] device_id CUDA/HIP device (default is current device)
+ *
+ * \return Number of threads per warp (NVIDIA) or wavefront (AMD)
+ */
+int warp_size(int device_id = -1);
 #endif
 
 /* \brief Number of multiprocessors on a device

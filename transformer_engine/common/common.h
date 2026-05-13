@@ -70,8 +70,19 @@ inline bool is_nvfp4_scaling(const NVTEScalingMode &mode) { return mode == NVTE_
 
 inline bool is_mxfp8_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
 
-inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
+#ifdef __HIP_PLATFORM_AMD__
+inline bool is_mxfp4_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP4_1D_SCALING; }
+#endif //#ifdef __HIP_PLATFORM_AMD__
 
+#ifdef __HIP_PLATFORM_AMD__
+inline bool is_mxfp_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_MXFP8_1D_SCALING || mode == NVTE_MXFP4_1D_SCALING;
+}
+#else
+inline bool is_mxfp_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_MXFP8_1D_SCALING;
+}
+#endif //#ifdef __HIP_PLATFORM_AMD__
 inline bool is_nvfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_NVFP4_1D_SCALING; }
 
 inline size_t product(const std::vector<size_t> &shape, const size_t begin, const size_t end) {
@@ -157,6 +168,11 @@ struct Tensor {
    */
   bool with_gemm_swizzled_scales = false;
 
+#ifdef __HIP_PLATFORM_AMD__
+  bool mxfp4_shuffle_rowwise_data = false;
+  bool mxfp4_shuffle_columnwise_data = false;
+#endif
+
   /*! Map from NVTETensorParam to parameter sizes */
   static constexpr size_t attr_sizes[] = {
       sizeof(NVTEBasicTensor),  // kNVTERowwiseData
@@ -166,7 +182,11 @@ struct Tensor {
       sizeof(NVTEBasicTensor),  // kNVTERowwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
-      sizeof(uint8_t)           // kNVTEWithGEMMSwizzledScales
+      sizeof(uint8_t),          // kNVTEWithGEMMSwizzledScales
+#ifdef __HIP_PLATFORM_AMD__
+      sizeof(uint8_t),          // kNVTEMXFP4ShuffleRowwiseData
+      sizeof(uint8_t)           // kNVTEMXFP4ShuffleColumnwiseData
+#endif
   };
 
   Tensor() : scaling_mode{NVTE_DELAYED_TENSOR_SCALING}, nvte_tensor{0} {}
@@ -182,6 +202,10 @@ struct Tensor {
     columnwise_scale_inv.clear();
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     with_gemm_swizzled_scales = false;
+#ifdef __HIP_PLATFORM_AMD__
+    mxfp4_shuffle_rowwise_data = false;
+    mxfp4_shuffle_columnwise_data = false;
+#endif
   }
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
@@ -238,7 +262,11 @@ struct Tensor {
       case NVTE_DELAYED_TENSOR_SCALING:
       case NVTE_BLOCK_SCALING_1D:
       case NVTE_BLOCK_SCALING_2D:
-      case NVTE_NVFP4_1D_SCALING: {
+      case NVTE_NVFP4_1D_SCALING:
+#ifdef __HIP_PLATFORM_AMD__
+      case NVTE_MXFP4_1D_SCALING:
+#endif
+      {
         // Row-wise data shape matches tensor logical shape,
         // column-wise data shape is transpose of logical shape
         if (!has_data() && has_columnwise_data()) {
@@ -453,6 +481,9 @@ struct QuantizationConfig {
   bool nvfp4_2d_quantization = false;
   bool stochastic_rounding = false;
   bool use_fast_math = false;
+#ifdef __HIP_PLATFORM_AMD__
+  bool mxfp4_use_hadamard = false;
+#endif
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -462,7 +493,10 @@ struct QuantizationConfig {
       sizeof(NVTETensor),                    // rng_seed and offset
       sizeof(uint8_t),                       // nvfp4_2d_quantization
       sizeof(uint8_t),                       // stochastic_rounding
-      sizeof(uint8_t)                        // use_fast_math
+      sizeof(uint8_t),                       // use_fast_math
+#ifdef __HIP_PLATFORM_AMD__
+      sizeof(uint8_t)                        // mxfp4_use_hadamard
+#endif
   };
 };
 

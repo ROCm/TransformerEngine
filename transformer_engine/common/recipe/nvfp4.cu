@@ -66,16 +66,29 @@ namespace nvfp4_recipe {
  * ---------------------------------------------------------------------------
  */
 
+#ifndef __HIP_PLATFORM_AMD__
 // constexpr float factor = 6.0 * 6.0 * 448.0 * 448.0;
 constexpr float factor_inv = 1.0 / (6.0 * 6.0 * 448.0 * 448.0);
+#endif
 constexpr int kTileDim = 16;
 constexpr int kThreadsPerBlock = 256;
 
 // Kernel to compute alpha *= amax_A * amax_B / factor
 __global__ void compute_nvfp4_per_tensor_scale_kernel(float alpha_in, const float *amax_A,
                                                       const float *amax_B, float *alpha_out) {
+#ifdef __HIP_PLATFORM_AMD__
+  constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;
+#if defined(__HIP_DEVICE_COMPILE__)
+  constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;
+#else
+  constexpr float fp8_max = 240.0f;  // host placeholder; only device path executes
+#endif
+  const float fi = 1.0f / (fp4_max * fp4_max * fp8_max * fp8_max);
+  *alpha_out = alpha_in * (*amax_A) * (*amax_B) * fi;
+#else
   // factor is defined in the enclosing namespace
   *alpha_out = alpha_in * (*amax_A) * (*amax_B) * factor_inv;
+#endif
 }
 
 template <typename IType>
