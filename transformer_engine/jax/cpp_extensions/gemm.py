@@ -32,9 +32,6 @@ if not is_hip_extension():
         initialize_cgemm_communicator,
         get_cgemm_num_max_streams,
     )
-else:
-    from transformer_engine_jax import kittens_mxfp8_workspace_bytes
-
 from .base import BasePrimitive, register_primitive
 from .quantization import grouped_quantize
 
@@ -88,9 +85,21 @@ num_cublas_streams = get_num_compute_streams()
 
 def _hipkittens_workspace_bytes(m: int, n: int, k: int, layout: str) -> int:
     """Compute workspace bytes needed for HipKittens MXFP8 GEMM."""
+    def _align(x: int) -> int:
+        return (x + 255) & ~255
+
     transa = layout[0] == "T"
     transb = layout[1] == "T"
-    return kittens_mxfp8_workspace_bytes(m, n, k, transa, transb)
+    k_iters = k // 128
+    scale_k = k // 32
+    sa_pk = _align(k_iters * m * 4)
+    sb_pk = k_iters * n * 4
+    needed = _align(sa_pk) + sb_pk
+    if not transa:
+        needed += _align(m * k) + _align(m * scale_k)
+    if transb:
+        needed += _align(n * k) + _align(n * scale_k) + _align(sb_pk)
+    return needed
 
 
 def get_cublas_workspace_size_bytes() -> None:
@@ -566,7 +575,7 @@ class GemmPrimitive(BasePrimitive):
         if scaling_mode.is_nvfp4_scaling:
             workspace_size += lhs_scale_inv.size + rhs_scale_inv.size
         # HipKittens MXFP8 NN/NT kernels need workspace for transposed data and scales
-        if scaling_mode.is_mxfp8_scaling and is_hip_extension():
+        if scaling_mode.is_mxfp8_scaling and is_hip_extension() and get_device_compute_capability(0) == 95:
             m = reduce(operator.mul, lhs_non_contracting_shape)
             n = reduce(operator.mul, rhs_non_contracting_shape)
             k = lhs_contracting_size

@@ -142,9 +142,6 @@ void init_extension() {
 
 #include "common/util/pybind_helper.h"
 
-#ifdef USE_HIPKITTENS_GEMM
-#include "common/gemm/kittens/mxfp8_gemm.h"
-#endif
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)
@@ -393,12 +390,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #endif
   m.def("get_num_cublas_streams", &nvte_get_num_compute_streams, "Get number of compute streams",
         py::call_guard<py::gil_scoped_release>());
-#ifdef USE_HIPKITTENS_GEMM
-  m.def("kittens_mxfp8_workspace_bytes", &kittens_mxfp8_workspace_bytes,
-        "Compute workspace bytes for HipKittens MXFP8 GEMM",
-        py::arg("M"), py::arg("N"), py::arg("K"), py::arg("transa"), py::arg("transb"));
-#endif
-
   // Support THD format for Context Parallel
   m.def("thd_read_half_tensor", &transformer_engine::pytorch::thd_read_half_tensor,
         "Read the first half(half_idx=0) or the second half(half_idx=1) of each sequence in a THD "

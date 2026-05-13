@@ -12,9 +12,6 @@
 #endif //#ifndef USE_ROCM
 #include "common/util/cuda_runtime.h"
 
-#ifdef USE_HIPKITTENS_GEMM
-#include "common/gemm/kittens/mxfp8_gemm.h"
-#endif
 
 namespace transformer_engine {
 namespace jax {
@@ -123,12 +120,6 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
-#ifdef USE_HIPKITTENS_GEMM
-  m.def("kittens_mxfp8_workspace_bytes", &kittens_mxfp8_workspace_bytes,
-        "Compute workspace bytes for HipKittens MXFP8 GEMM",
-        pybind11::arg("M"), pybind11::arg("N"), pybind11::arg("K"),
-        pybind11::arg("transa"), pybind11::arg("transb"));
-#endif
 #ifndef USE_ROCM
   m.def("initialize_cgemm_communicator", &InitializeCgemmCommunicator);
   m.def("get_cgemm_num_max_streams", &GetCgemmNumMaxStreams);

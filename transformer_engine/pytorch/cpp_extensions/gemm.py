@@ -51,12 +51,23 @@ def get_cublas_workspace_size_bytes() -> None:
     return 4_194_304
 
 
-if IS_HIP_EXTENSION:
-    def _hipkittens_workspace_bytes(m: int, n: int, k: int, layout: str) -> int:
-        """Compute workspace bytes needed for HipKittens MXFP8 GEMM."""
-        transa = layout[0] == "T"
-        transb = layout[1] == "T"
-        return tex.kittens_mxfp8_workspace_bytes(m, n, k, transa, transb)
+def _hipkittens_workspace_bytes(m: int, n: int, k: int, layout: str) -> int:
+    """Compute workspace bytes needed for HipKittens MXFP8 GEMM."""
+    def _align(x: int) -> int:
+        return (x + 255) & ~255
+
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+    k_iters = k // 128
+    scale_k = k // 32
+    sa_pk = _align(k_iters * m * 4)
+    sb_pk = k_iters * n * 4
+    needed = _align(sa_pk) + sb_pk
+    if not transa:
+        needed += _align(m * k) + _align(m * scale_k)
+    if transb:
+        needed += _align(n * k) + _align(n * scale_k) + _align(sb_pk)
+    return needed
 
 
 _workspace_cache: dict[int, torch.Tensor] = {}

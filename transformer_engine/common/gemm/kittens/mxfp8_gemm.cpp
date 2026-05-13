@@ -738,34 +738,6 @@ static bool mxfp8_gemm_nt(
     return true;
 }
 
-constexpr size_t kMXFP8GroupSize = 32;
-constexpr size_t kKTileSize      = 128;
-constexpr size_t kAlignment      = 256;
-
-size_t kittens_mxfp8_workspace_bytes(int M, int N, int K, bool transa, bool transb) {
-    size_t workspace_bytes = 0;
-
-    size_t k_iters = K / kKTileSize;
-    size_t scale_K = K / kMXFP8GroupSize;
-    size_t sa_pk   = align_up(k_iters * M * 4, kAlignment);
-    size_t sb_pk   = k_iters * N * 4;
-
-    if (transa && !transb) {
-        workspace_bytes = align_up(sa_pk, kAlignment) + sb_pk;
-    } else if (!transa && !transb) {
-        workspace_bytes = align_up((size_t)M * K, kAlignment)
-                        + align_up((size_t)M * scale_K, kAlignment)
-                        + align_up(sa_pk, kAlignment) + sb_pk;
-    } else if (!transa && transb) {
-        workspace_bytes = align_up((size_t)M * K, kAlignment)
-                        + align_up((size_t)N * K, kAlignment)
-                        + align_up((size_t)M * scale_K, kAlignment)
-                        + align_up((size_t)N * scale_K, kAlignment)
-                        + align_up(sa_pk, kAlignment) + sb_pk;
-    }
-    return workspace_bytes;
-}
-
 static int fp8_code(int dt) {
     return (dt == KITTENS_FP8E5M2) ? 1 : 0;
 }
