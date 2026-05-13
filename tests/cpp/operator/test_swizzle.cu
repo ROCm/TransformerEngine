@@ -245,14 +245,14 @@ TEST_P(MxSwizzleTestSuite, TestMxSwizzle) {
 
   // Allocate device input
   uint8_t *d_input = nullptr;
-  ASSERT_EQ(cudaMalloc(&d_input, input_size), cudaSuccess);
-  ASSERT_EQ(cudaMemcpy(d_input, h_input.get(), input_size, cudaMemcpyHostToDevice), cudaSuccess);
+  NVTE_CHECK_CUDA(cudaMalloc(&d_input, input_size));
+  NVTE_CHECK_CUDA(cudaMemcpy(d_input, h_input.get(), input_size, cudaMemcpyHostToDevice));
 
   // Allocate device output (padded size)
   const size_t output_size = M * K;
   uint8_t *d_output = nullptr;
-  ASSERT_EQ(cudaMalloc(&d_output, output_size), cudaSuccess);
-  ASSERT_EQ(cudaMemset(d_output, 0, output_size), cudaSuccess);
+  NVTE_CHECK_CUDA(cudaMalloc(&d_output, output_size));
+  NVTE_CHECK_CUDA(cudaMemset(d_output, 0, output_size));
 
   // Build TensorWrapper for input and output
   TensorWrapper input_tw(NVTE_MXFP8_1D_SCALING);
@@ -284,14 +284,11 @@ TEST_P(MxSwizzleTestSuite, TestMxSwizzle) {
 
   nvte_swizzle_scaling_factors(input_tw.data(), output_tw.data(), 0);
 
-  ASSERT_EQ(cudaDeviceSynchronize(), cudaSuccess);
-  auto err = cudaGetLastError();
-  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 
   // Copy output back to host
   std::unique_ptr<uint8_t[]> h_output(new uint8_t[output_size]);
-  ASSERT_EQ(cudaMemcpy(h_output.get(), d_output, output_size, cudaMemcpyDeviceToHost),
-            cudaSuccess);
+  NVTE_CHECK_CUDA(cudaMemcpy(h_output.get(), d_output, output_size, cudaMemcpyDeviceToHost));
 
   // Compute reference
   std::unique_ptr<uint8_t[]> h_ref(new uint8_t[output_size]);
