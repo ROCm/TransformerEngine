@@ -68,6 +68,28 @@ void nvte_multi_tensor_unscale_l2norm_cuda(int chunk_size, NVTETensor noop_flag,
                                            int per_tensor, int max_chunks_per_tensor,
                                            cudaStream_t stream);
 
+/*!  \brief Computes cumulative L2 norm for a list of tensors from precomputed chunk metadata.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ */
+void nvte_multi_tensor_l2norm_cuda_custom(int chunk_size, NVTETensor noop_flag,
+                                          const NVTEDType input_dtype, const int64_t *addresses,
+                                          const int *sizes, const int *block_to_tensor,
+                                          const int *chunk_offsets, int total_chunks,
+                                          NVTETensor output,
+                                          NVTETensor ret, cudaStream_t stream);
+
+/*!  \brief Computes cumulative L2 norm for a list of tensors after unscaling from precomputed
+ *          chunk metadata.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ */
+void nvte_multi_tensor_unscale_l2norm_cuda_custom(
+    int chunk_size, NVTETensor noop_flag, const NVTEDType input_dtype,
+    const int64_t *addresses, const int *sizes, const int *block_to_tensor,
+    const int *chunk_offsets, int total_chunks,
+    NVTETensor output, NVTETensor ret, NVTETensor inv_scale, cudaStream_t stream);
+
 /*!  \brief Compute and apply gradient update to parameters for Adam optimizer.
  *
  * \warning   This API is **experimental** and subject to change.

@@ -31,6 +31,17 @@ __device__ __forceinline__ void load_store(T *dst, T *src, int dst_offset, int s
   ((LT *)dst)[dst_offset] = ((LT *)src)[src_offset];  // NOLINT(*)
 }
 
+template <int N, typename T>
+__device__ __forceinline__ bool is_aligned_n(T *p) {
+  return ((uint64_t)p) % (N * sizeof(T)) == 0;
+}
+
+template <int N, typename T>
+__device__ __forceinline__ void load_store_n(T *dst, T *src, int dst_offset, int src_offset) {
+  typedef typename std::aligned_storage<N * sizeof(T), N * alignof(T)>::type LT;
+  ((LT *)dst)[dst_offset] = ((LT *)src)[src_offset];  // NOLINT(*)
+}
+
 template <typename T>
 __device__ __forceinline__ T
 reduce_block_into_lanes(T *x, T val, int lanes = 1,
@@ -261,6 +272,158 @@ struct UnscaleL2NormFunctor {
   }
 };
 
+template <typename x_t, bool UNSCALE>
+__global__ void custom_multi_tensor_l2norm_kernel(
+    int chunk_size, volatile int * __restrict__ noop_gmem,
+    const int64_t * __restrict__ addresses, const int * __restrict__ sizes,
+    const int * __restrict__ block_to_tensor, const int * __restrict__ chunk_offsets,
+    int total_chunks, const float * __restrict__ inv_scale,
+    float * __restrict__ output) {
+  constexpr int CILP = 8;
+  const int global_chunk = blockIdx.x;
+  __shared__ float s_vals[512];
+
+  const float inv_scale_val = UNSCALE ? *inv_scale : 0.f;
+
+  int n = 0;
+  x_t *x = nullptr;
+  if (global_chunk < total_chunks) {
+    const int tensor_loc = block_to_tensor[global_chunk];
+    const int chunk_idx = global_chunk - chunk_offsets[tensor_loc];
+    n = sizes[tensor_loc];
+
+    x = reinterpret_cast<x_t *>(static_cast<uintptr_t>(addresses[tensor_loc]));
+    x += static_cast<size_t>(chunk_idx) * chunk_size;
+    n -= chunk_idx * chunk_size;
+  }
+
+  float vals[CILP];
+  x_t r_x[CILP];
+  for (int i = 0; i < CILP; i++) {
+    vals[i] = 0.f;
+    r_x[i] = 0.f;
+  }
+
+  if (global_chunk < total_chunks) {
+    if (n % CILP == 0 && chunk_size % CILP == 0 && is_aligned_n<CILP>(x)) {
+      for (int i_start = threadIdx.x; i_start * CILP < n && i_start * CILP < chunk_size;
+           i_start += blockDim.x) {
+        load_store_n<CILP>(r_x, x, 0, i_start);
+#pragma unroll
+        for (int ii = 0; ii < CILP; ii++) {
+          float next = static_cast<float>(r_x[ii]);
+          if constexpr (UNSCALE) {
+            next *= inv_scale_val;
+          }
+          vals[ii] += next * next;
+        }
+      }
+    } else {
+      for (int i_start = 0; i_start < n && i_start < chunk_size; i_start += blockDim.x * CILP) {
+#pragma unroll
+        for (int ii = 0; ii < CILP; ii++) {
+          int i = i_start + threadIdx.x + ii * blockDim.x;
+          if (i < n && i < chunk_size) {
+            float next = static_cast<float>(x[i]);
+            if constexpr (UNSCALE) {
+              next *= inv_scale_val;
+            }
+            vals[ii] += next * next;
+          }
+        }
+      }
+    }
+  }
+
+  float val = 0.f;
+  for (int i = 0; i < CILP; i++) val += vals[i];
+
+  float final = reduce_block_into_lanes(s_vals, val);
+
+  if (threadIdx.x == 0) {
+    if (!isfinite(final)) {
+      *noop_gmem = 1;
+    }
+    output[global_chunk] = final;
+  }
+}
+
+__global__ void custom_multi_tensor_l2norm_reduce(
+    const float * __restrict__ output, float * __restrict__ ret, int total_chunks) {
+  __shared__ float s_vals[512];
+
+  float val = 0.f;
+  for (int i = threadIdx.x; i < total_chunks; i += blockDim.x) {
+    val += output[i];
+  }
+
+  float final = reduce_block_into_lanes(s_vals, val);
+
+  if (threadIdx.x == 0) {
+    *ret = sqrtf(final);
+  }
+}
+
+void multi_tensor_l2norm_cuda_custom(int chunk_size, NVTETensor noop_flag_tensor,
+                                     DType input_dtype, const int64_t *addresses,
+                                     const int *sizes, const int *block_to_tensor,
+                                     const int *chunk_offsets, int total_chunks,
+                                     NVTETensor output_tensor,
+                                     NVTETensor ret_tensor, cudaStream_t stream) {
+  auto *noop_flag = convertNVTETensorCheck(noop_flag_tensor);
+  auto *output = convertNVTETensorCheck(output_tensor);
+  auto *ret = convertNVTETensorCheck(ret_tensor);
+
+  if (total_chunks == 0) {
+    nvte_memset(ret->data.dptr, 0, sizeof(float), stream);
+    return;
+  }
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      input_dtype, dtype,
+      custom_multi_tensor_l2norm_kernel<dtype, false><<<total_chunks, BLOCK_SIZE, 0, stream>>>(
+          chunk_size, reinterpret_cast<int *>(noop_flag->data.dptr), addresses, sizes,
+          block_to_tensor, chunk_offsets, total_chunks, nullptr,
+          reinterpret_cast<float *>(output->data.dptr));)
+  NVTE_CHECK_CUDA(cudaGetLastError());
+
+  custom_multi_tensor_l2norm_reduce<<<1, BLOCK_SIZE, 0, stream>>>(
+      reinterpret_cast<float *>(output->data.dptr),
+      reinterpret_cast<float *>(ret->data.dptr), total_chunks);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
+void multi_tensor_unscale_l2norm_cuda_custom(int chunk_size, NVTETensor noop_flag_tensor,
+                                             DType input_dtype, const int64_t *addresses,
+                                             const int *sizes, const int *block_to_tensor,
+                                             const int *chunk_offsets, int total_chunks,
+                                             NVTETensor output_tensor, NVTETensor ret_tensor,
+                                             NVTETensor inv_scale_tensor, cudaStream_t stream) {
+  auto *noop_flag = convertNVTETensorCheck(noop_flag_tensor);
+  auto *output = convertNVTETensorCheck(output_tensor);
+  auto *ret = convertNVTETensorCheck(ret_tensor);
+  auto *inv_scale = convertNVTETensorCheck(inv_scale_tensor);
+
+  if (total_chunks == 0) {
+    nvte_memset(ret->data.dptr, 0, sizeof(float), stream);
+    return;
+  }
+
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      input_dtype, dtype,
+      custom_multi_tensor_l2norm_kernel<dtype, true><<<total_chunks, BLOCK_SIZE, 0, stream>>>(
+          chunk_size, reinterpret_cast<int *>(noop_flag->data.dptr), addresses, sizes,
+          block_to_tensor, chunk_offsets, total_chunks,
+          reinterpret_cast<const float *>(inv_scale->data.dptr),
+          reinterpret_cast<float *>(output->data.dptr));)
+  NVTE_CHECK_CUDA(cudaGetLastError());
+
+  custom_multi_tensor_l2norm_reduce<<<1, BLOCK_SIZE, 0, stream>>>(
+      reinterpret_cast<float *>(output->data.dptr),
+      reinterpret_cast<float *>(ret->data.dptr), total_chunks);
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+
 // Probably better to template, but since we are not likely to support other norm
 template <typename x_t>
 struct MaxNormFunctor {
@@ -415,9 +578,6 @@ void multi_tensor_l2norm_cuda(int chunk_size, Tensor noop_flag,
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 
-  // This involves one more small kernel launches, but will be negligible end to end.
-  // I could get rid of these by hacking the functor + multi tensor harness with persistence
-  // logic, but keeping it simple for now
   cleanup<<<per_tensor ? tensor_lists[0].size() : 1, 512, 0, stream>>>(
       reinterpret_cast<float *>(output.data.dptr),
       per_tensor ? reinterpret_cast<float *>(output_per_tensor.data.dptr) : nullptr,
@@ -443,9 +603,6 @@ void multi_tensor_unscale_l2norm_cuda(int chunk_size, Tensor noop_flag,
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 
-  // This involves one more small kernel launches, but will be negligible end to end.
-  // I could get rid of these by hacking the functor + multi tensor harness with persistence
-  // logic, but keeping it simple for now
   cleanup<<<per_tensor ? tensor_lists[0].size() : 1, 512, 0, stream>>>(
       reinterpret_cast<float *>(output.data.dptr),
       per_tensor ? reinterpret_cast<float *>(output_per_tensor.data.dptr) : nullptr,
@@ -457,6 +614,33 @@ void multi_tensor_unscale_l2norm_cuda(int chunk_size, Tensor noop_flag,
 
 }  // namespace multi_tensor_l2norm
 }  // namespace transformer_engine
+
+void nvte_multi_tensor_l2norm_cuda_custom(int chunk_size, NVTETensor noop_flag,
+                      const NVTEDType input_dtype, const int64_t *addresses,
+                      const int *sizes, const int *block_to_tensor,
+                      const int *chunk_offsets, int total_chunks,
+                      NVTETensor output,
+                      NVTETensor ret, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_l2norm_cuda_custom);
+  using namespace transformer_engine;
+
+  multi_tensor_l2norm::multi_tensor_l2norm_cuda_custom(
+    chunk_size, noop_flag, static_cast<DType>(input_dtype), addresses, sizes, block_to_tensor,
+    chunk_offsets, total_chunks, output, ret, stream);
+}
+
+void nvte_multi_tensor_unscale_l2norm_cuda_custom(
+  int chunk_size, NVTETensor noop_flag, const NVTEDType input_dtype,
+  const int64_t *addresses, const int *sizes, const int *block_to_tensor,
+  const int *chunk_offsets, int total_chunks,
+  NVTETensor output, NVTETensor ret, NVTETensor inv_scale, cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_tensor_unscale_l2norm_cuda_custom);
+  using namespace transformer_engine;
+
+  multi_tensor_l2norm::multi_tensor_unscale_l2norm_cuda_custom(
+    chunk_size, noop_flag, static_cast<DType>(input_dtype), addresses, sizes, block_to_tensor,
+    chunk_offsets, total_chunks, output, ret, inv_scale, stream);
+}
 
 void nvte_multi_tensor_l2norm_cuda(int chunk_size, NVTETensor noop_flag, NVTETensor **tensor_lists,
                                    const size_t num_tensor_lists, const size_t num_tensors_per_list,
