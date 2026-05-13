@@ -889,10 +889,10 @@ struct MxGemmParams {
   size_t m, k, n;
 };
 
-class MxGemmTestSuite
+class MxGemmSwizzleGfx1250TestSuite
     : public ::testing::TestWithParam<MxGemmParams> {};
 
-TEST_P(MxGemmTestSuite, TestMxfp8GemmE2E) {
+TEST_P(MxGemmSwizzleGfx1250TestSuite, TestMxfp8GemmE2E) {
   using namespace transformer_engine;
   using namespace test;
 
@@ -1000,7 +1000,7 @@ TEST_P(MxGemmTestSuite, TestMxfp8GemmE2E) {
 
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
-    MxGemmTestSuite,
+    MxGemmSwizzleGfx1250TestSuite,
     ::testing::Values(
         MxGemmParams{32, 128, 16},
         MxGemmParams{64, 128, 32},
@@ -1012,7 +1012,7 @@ INSTANTIATE_TEST_SUITE_P(
         MxGemmParams{1024, 2048, 128},
         MxGemmParams{4096, 8192, 64}
     ),
-    [](const testing::TestParamInfo<MxGemmTestSuite::ParamType> &info) {
+    [](const testing::TestParamInfo<MxGemmSwizzleGfx1250TestSuite::ParamType> &info) {
       return "M" + std::to_string(info.param.m) +
              "_K" + std::to_string(info.param.k) +
              "_N" + std::to_string(info.param.n);

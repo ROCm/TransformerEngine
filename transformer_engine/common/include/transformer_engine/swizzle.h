@@ -64,6 +64,7 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
 void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input, NVTETensor output,
                                                          cudaStream_t stream);
 
+#ifdef __HIP_PLATFORM_AMD__
 /*! \brief Swizzle MX (E8M0) scaling factors into gfx1250 Tensile 3D layout for GEMM
  *
  *  Tensile 3D layout: groups M into blocks of 4, then permutes {1, 0, 2}.
@@ -79,6 +80,7 @@ void nvte_swizzle_block_scaling_to_mxfp8_scaling_factors(const NVTETensor input,
  */
 void nvte_swizzle_scaling_factors_mx(const NVTETensor input, NVTETensor output,
                                         cudaStream_t stream);
+#endif  // __HIP_PLATFORM_AMD__
 
 #ifdef __cplusplus
 }  // extern "C"

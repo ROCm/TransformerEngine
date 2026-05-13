@@ -348,6 +348,7 @@ __global__ void multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_
       input, output, M, K, original_M, original_K, bid_x, bid_y, grid_dim_x, grid_dim_y);
 }
 
+#ifdef __HIP_PLATFORM_AMD__
 // ============================================================================
 // MX scale pre-swizzle kernel for gfx1250 — K-tiled 3D layout
 //
@@ -498,14 +499,17 @@ void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
+#endif  // __HIP_PLATFORM_AMD__
 
 void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t stream) {
+#ifdef __HIP_PLATFORM_AMD__
   // On gfx1250, MXFP8 uses the K-tiled pre-swizzle layout
   // (K_scale grouped by 4, matching hipBLASlt BLK32_UE8M0_32_8_EXT).
   if (input->scaling_mode == NVTE_MXFP8_1D_SCALING && cuda::sm_arch() == 125) {
     swizzle_scaling_factors_mx(input, output, stream);
     return;
   }
+#endif  // __HIP_PLATFORM_AMD__
 
   // Check scaling mode
   const auto& scaling_mode = input->scaling_mode;
@@ -824,6 +828,7 @@ void launch_multi_tensor_swizzle_scaling_factors(MultiSwizzleArgs& kernel_args,
 
 void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
                                           std::vector<Tensor*>& output, cudaStream_t stream) {
+#ifdef __HIP_PLATFORM_AMD__
   // On gfx1250, MXFP8 uses the MX pre-swizzle layout.
   // Dispatch each tensor individually through the MX pre-swizzle path.
   if (cuda::sm_arch() == 125) {
@@ -840,6 +845,7 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
       return;
     }
   }
+#endif  // __HIP_PLATFORM_AMD__
 
   auto num_tensors = input.size();
   bool all_has_data = true;
@@ -1034,6 +1040,7 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
   multi_tensor_swizzle_scaling_factors(input_list, output_list, stream);
 }
 
+#ifdef __HIP_PLATFORM_AMD__
 void nvte_swizzle_scaling_factors_mx(const NVTETensor input, NVTETensor output,
                                         cudaStream_t stream) {
   NVTE_API_CALL(nvte_swizzle_scaling_factors_mx);
@@ -1041,3 +1048,4 @@ void nvte_swizzle_scaling_factors_mx(const NVTETensor input, NVTETensor output,
   swizzle_scaling_factors_mx(convertNVTETensorCheck(input), convertNVTETensorCheck(output),
                                 stream);
 }
+#endif  // __HIP_PLATFORM_AMD__
