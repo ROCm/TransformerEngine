@@ -26,7 +26,6 @@
 #include <cstdint>
 
 #include "../common.h"
-#include "../util/cuda_runtime.h"
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
 

@@ -1108,8 +1108,6 @@ std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& s
              " (got shape=", shape, ")");
 #ifdef USE_ROCM
   // gfx1250 MX pre-swizzle (Tensile 3D) layout requires M padded to multiple of 4.
-  // Other ROCm architectures use 128x4 tiles but currently skip padding
-  // (the swizzle kernel handles out-of-bounds reads).
   if (transformer_engine::cuda::sm_arch() == 125) {
     size_t m_dim = numel / last_dim;
     size_t k_scale = last_dim / MXFP8_BLOCK_SIZE;
