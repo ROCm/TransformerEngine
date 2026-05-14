@@ -224,6 +224,12 @@ TEST_P(MxSwizzleTestSuite, TestMxSwizzle) {
   using namespace transformer_engine;
   using namespace test;
 
+  cudaDeviceProp prop;
+  cudaGetDeviceProperties(&prop, 0);
+  if (prop.major < 12) {
+    GTEST_SKIP() << "MXFP8 pre-swizzle is only supported on gfx1250";
+  }
+
   const auto dims = std::get<0>(GetParam());
   const bool rowwise = std::get<1>(GetParam());
 

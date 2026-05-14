@@ -503,13 +503,11 @@ void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_
 
 void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t stream) {
 #ifdef __HIP_PLATFORM_AMD__
-  // On AMD, MXFP8 uses the MX pre-swizzle layout (K-tiled, grouped by 4).
-  // The calling layers (PyTorch/JAX) decide when to invoke this based on architecture.
-  if (input->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+  // On gfx1250, MXFP8 uses the MX pre-swizzle layout (K-tiled, grouped by 4).
+  if (input->scaling_mode == NVTE_MXFP8_1D_SCALING && cuda::sm_arch() >= 125) {
     swizzle_scaling_factors_mx(input, output, stream);
+    return;
   }
-  // No other scale swizzle formats supported on AMD
-  return;
 #endif  // __HIP_PLATFORM_AMD__
 
   // Check scaling mode
@@ -831,20 +829,20 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
                                           std::vector<Tensor*>& output, cudaStream_t stream) {
 #ifdef __HIP_PLATFORM_AMD__
   // On gfx1250, MXFP8 uses the MX pre-swizzle layout.
-  // Dispatch each tensor individually through the MX pre-swizzle path.
-  bool any_mxfp8 = false;
-  for (size_t i = 0; i < input.size(); i++) {
-    if (is_mxfp8_scaling(input[i]->scaling_mode)) {
-      any_mxfp8 = true;
-    }
-  }
-  if (any_mxfp8) {
+  if (cuda::sm_arch() >= 125) {
+    bool any_mxfp8 = false;
     for (size_t i = 0; i < input.size(); i++) {
-      swizzle_scaling_factors_mx(input[i], output[i], stream);
+      if (is_mxfp8_scaling(input[i]->scaling_mode)) {
+        any_mxfp8 = true;
+      }
+    }
+    if (any_mxfp8) {
+      for (size_t i = 0; i < input.size(); i++) {
+        swizzle_scaling_factors_mx(input[i], output[i], stream);
+      }
+      return;
     }
   }
-  // No other scale swizzle formats supported on AMD
-  return;
 #endif  // __HIP_PLATFORM_AMD__
 
   auto num_tensors = input.size();
