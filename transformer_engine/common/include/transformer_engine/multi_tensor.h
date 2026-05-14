@@ -143,6 +143,34 @@ void nvte_multi_tensor_adam_param_remainder_cuda(
     const float weight_decay, cudaStream_t stream);
 
 /*!  \brief Compute and apply gradient update to parameters for Adam optimizer
+ *          where the master parameters only store the remainder bits.
+ *          Uses precomputed chunk metadata instead of TensorListMetadata.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ */
+void nvte_multi_tensor_adam_param_remainder_cuda_custom(
+    int chunk_size, NVTETensor noop_flag, NVTEDType grad_dtype,
+    int64_t *addresses, int64_t *sizes, int *block_to_tensor, int *chunk_offsets,
+    int total_chunks,
+    const float lr, const float beta1, const float beta2,
+    const float epsilon, const int step, const int mode, const int bias_correction,
+    const float weight_decay, cudaStream_t stream);
+
+/*!  \brief Compute and apply gradient update to parameters for Adam optimizer
+ *          (4-list: g, p, m, v).
+ *          Uses precomputed chunk metadata instead of TensorListMetadata.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ */
+void nvte_multi_tensor_adam_cuda_custom(
+    int chunk_size, NVTETensor noop_flag, NVTEDType grad_dtype, NVTEDType param_dtype,
+    int64_t *addresses, int64_t *sizes, int *block_to_tensor, int *chunk_offsets,
+    int total_chunks, int has_master,
+    const float lr, const float beta1, const float beta2,
+    const float epsilon, const int step, const int mode, const int bias_correction,
+    const float weight_decay, cudaStream_t stream);
+
+/*!  \brief Compute and apply gradient update to parameters for Adam optimizer
  *          when model parameters are in Float8 precision.
  *
  * \warning   This API is **experimental** and subject to change.
