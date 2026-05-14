@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -11,6 +13,7 @@ from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.common.recipe import NVFP4BlockScaling
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import pytest
 import torch
@@ -282,6 +285,8 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
                 torch.testing.assert_close(x_sx_t_i, x_sx_t_ref_i, atol=0.0, rtol=0.0)
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION,
+                    reason="NVFP4 grouped quantization is not supported on ROCm platform")
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "M, N",
@@ -359,6 +364,8 @@ def test_grouped_tensor_nvfp4_versus_reference(
     )
 
 
+@pytest.mark.skipif(IS_HIP_EXTENSION,
+                    reason="NVFP4 grouped quantization is not supported on ROCm platform")
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize(
     "M, N",

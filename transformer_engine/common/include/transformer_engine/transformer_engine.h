@@ -482,6 +482,10 @@ enum NVTEGroupedTensorParam {
       9, /*!< Tensor offsets for contiguous layout (device pointer to int64_t array) */
   kNVTEGroupedWithGEMMSwizzledScales =
       10, /*!< Whether scaling factors are in format expected by GEMM */
+#ifdef USE_ROCM
+  kNVTEGroupedMXFP4ShuffleRowwiseData = 11,      /*!< Whether MXFP4 rowwise data is shuffled for AITER GEMM */
+  kNVTEGroupedMXFP4ShuffleColumnwiseData = 12,  /*!< Whether MXFP4 columnwise data is shuffled for AITER GEMM */
+#endif
   kNVTENumGroupedTensorParams
 };
 
@@ -1158,7 +1162,19 @@ class GroupedTensorWrapper {
     nvte_set_grouped_tensor_param(tensor_, kNVTEGroupedWithGEMMSwizzledScales, &val, sizeof(val));
   }
 
-  // Parameter getters
+#ifdef USE_ROCM
+  void set_mxfp4_shuffle_rowwise_data(bool shuffle_rowwise_data) {
+    const auto val = static_cast<uint8_t>(shuffle_rowwise_data);
+    nvte_set_grouped_tensor_param(tensor_, kNVTEGroupedMXFP4ShuffleRowwiseData, &val, sizeof(val));
+  }
+
+  void set_mxfp4_shuffle_columnwise_data(bool shuffle_columnwise_data) {
+    const auto val = static_cast<uint8_t>(shuffle_columnwise_data);
+    nvte_set_grouped_tensor_param(tensor_, kNVTEGroupedMXFP4ShuffleColumnwiseData, &val, sizeof(val));
+  }
+#endif
+
+// Parameter getters
   NVTEBasicTensor get_parameter(const NVTEGroupedTensorParam param) const noexcept {
     NVTEBasicTensor ret;
     nvte_get_grouped_tensor_param(tensor_, param, &ret, sizeof(ret), nullptr);
@@ -1203,6 +1219,20 @@ class GroupedTensorWrapper {
                                   nullptr);
     return static_cast<bool>(val);
   }
+
+#ifdef USE_ROCM
+  bool get_mxfp4_shuffle_rowwise_data() const {
+    uint8_t val = 0;
+    nvte_get_grouped_tensor_param(tensor_, kNVTEGroupedMXFP4ShuffleRowwiseData, &val, sizeof(val), nullptr);
+    return static_cast<bool>(val);
+  }
+
+  bool get_mxfp4_shuffle_columnwise_data() const {
+    uint8_t val = 0;
+    nvte_get_grouped_tensor_param(tensor_, kNVTEGroupedMXFP4ShuffleColumnwiseData, &val, sizeof(val), nullptr);
+    return static_cast<bool>(val);
+  }
+#endif
 
   /*! \brief Get an underlying NVTEGroupedTensor.
    *

@@ -663,7 +663,11 @@ __global__ void nvfp4_compute_per_block_scale_kernel(
   if (idx >= numel) return;
 
   constexpr float fp4_max = 6.0f;
+#if defined (__HIP_PLATFORM_AMD__) && defined(__HIP_DEVICE_COMPILE__)
+  constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;
+#else
   constexpr float fp8_max = 448.0f;
+#endif
   constexpr float flt_max = 3.402823466e+38f;
   constexpr float tiny = 1.17549435e-38f;  // FLT_MIN
 
@@ -690,7 +694,11 @@ __global__ void nvfp4_compute_global_scale_kernel(
   if (idx >= num_params) return;
 
   constexpr float fp4_max = 6.0f;
+#if defined (__HIP_PLATFORM_AMD__) && defined(__HIP_DEVICE_COMPILE__)
+  constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;
+#else
   constexpr float fp8_max = 448.0f;
+#endif
   constexpr float flt_max = 3.402823466e+38f;
   constexpr float tiny = 1.17549435e-38f;  // FLT_MIN
 
@@ -782,7 +790,11 @@ __global__ void nvfp4_fused_scale_kernel(
 
   // Compute the scale value
   constexpr float fp4_max = 6.0f;
+#if defined (__HIP_PLATFORM_AMD__) && defined(__HIP_DEVICE_COMPILE__)
+  constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;
+#else
   constexpr float fp8_max = 448.0f;
+#endif
   constexpr float flt_max = 3.402823466e+38f;
   constexpr float tiny = 1.17549435e-38f;
 

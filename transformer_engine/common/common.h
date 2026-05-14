@@ -182,8 +182,9 @@ struct Tensor {
       sizeof(NVTEBasicTensor),  // kNVTERowwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
-      sizeof(uint8_t),          // kNVTEWithGEMMSwizzledScales
+      sizeof(uint8_t)          // kNVTEWithGEMMSwizzledScales
 #ifdef __HIP_PLATFORM_AMD__
+      ,
       sizeof(uint8_t),          // kNVTEMXFP4ShuffleRowwiseData
       sizeof(uint8_t)           // kNVTEMXFP4ShuffleColumnwiseData
 #endif
@@ -387,6 +388,11 @@ struct GroupedTensor {
    */
   bool with_gemm_swizzled_scales = false;
 
+#ifdef __HIP_PLATFORM_AMD__
+  bool mxfp4_shuffle_rowwise_data = false;
+  bool mxfp4_shuffle_columnwise_data = false;
+#endif
+
   /*! Map from NVTEGroupedTensorParam to parameter sizes */
   static constexpr size_t attr_sizes[] = {
       sizeof(NVTEBasicTensor),  // kNVTEGroupedRowwiseData
@@ -400,6 +406,11 @@ struct GroupedTensor {
       sizeof(NVTEBasicTensor),  // kNVTEGroupedLastDims
       sizeof(NVTEBasicTensor),  // kNVTEGroupedTensorOffsets
       sizeof(uint8_t)           // kNVTEGroupedWithGEMMSwizzledScales
+#ifdef __HIP_PLATFORM_AMD__
+      ,
+      sizeof(uint8_t),          // kNVTEGroupedMXFP4ShuffleRowwiseData
+      sizeof(uint8_t)           // kNVTEGroupedMXFP4ShuffleColumnwiseData
+#endif
   };
 
   GroupedTensor(NVTEScalingMode scaling_mode, size_t num_tensors)
@@ -417,6 +428,10 @@ struct GroupedTensor {
         tensor_offsets(nullptr, std::vector<size_t>{0}, DType::kInt64),
         logical_shape(nvte_make_shape(nullptr, 1)),
         nvte_tensor(0),
+#ifdef __HIP_PLATFORM_AMD__
+        mxfp4_shuffle_rowwise_data(false),
+        mxfp4_shuffle_columnwise_data(false),
+#endif
         with_gemm_swizzled_scales(false) {}
 
   explicit operator NVTEGroupedTensor() const noexcept { return nvte_tensor; }
@@ -470,6 +485,10 @@ struct GroupedTensor {
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     nvte_tensor = 0;
     with_gemm_swizzled_scales = false;
+#ifdef __HIP_PLATFORM_AMD__
+    mxfp4_shuffle_rowwise_data = false;
+    mxfp4_shuffle_columnwise_data = false;
+#endif
   }
 };
 

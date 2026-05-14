@@ -656,7 +656,7 @@ py::object te_general_grouped_gemm_for_grouped_tensor(
   // Ensure that cublasLt handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(workspace_cublas.device());
+  TECUDAGuard device_guard(workspace_cublas.device());
 
   auto grouped_A = GroupedTensorFromPyTorchGroupedTensor(A);
   auto grouped_B = GroupedTensorFromPyTorchGroupedTensor(B);
@@ -709,7 +709,7 @@ py::object te_general_grouped_gemm_for_discrete_in(py::handle A, bool transa, py
   // Ensure that cublasLt handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(workspace_cublas.device());
+  TECUDAGuard device_guard(workspace_cublas.device());
 
   auto grouped_B = GroupedTensorFromPyTorchGroupedTensor(B);
   auto grouped_D = GroupedTensorFromPyTorchGroupedTensor(D);
@@ -776,7 +776,7 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
   // Ensure that cublasLt handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(workspace_cublas.device());
+  TECUDAGuard device_guard(workspace_cublas.device());
 
   NVTE_CHECK(bias.is_none(), "Bias is not supported for discrete output grouped GEMM.");
 

@@ -1122,7 +1122,6 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
     }
   }
 }
-#endif  // #ifndef USE_ROCM
 
 void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
                                       const std::vector<TensorWrapper> &input_list,
@@ -1202,6 +1201,7 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
     nvte_quantize_v2(input_list[i].data(), output_list[i].data(), quant_config_list[i], stream);
   }
 }
+#endif  // #ifndef USE_ROCM
 
 void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                const std::vector<TensorWrapper> &input_list,
@@ -1248,8 +1248,10 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   NVTE_CHECK(input_last_dim % 128 == 0,
              "NVFP4 multi-quantize requires inner dim to be multiple of 128.");
 
+#ifndef USE_ROCM
   // CUDA stream
   auto stream = at::cuda::getCurrentCUDAStream();
+#endif
 
   // Perform multi-tensor quantization
   NVTE_SCOPED_GIL_RELEASE({

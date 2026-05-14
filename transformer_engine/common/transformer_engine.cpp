@@ -1315,6 +1315,14 @@ void nvte_set_grouped_tensor_param(NVTEGroupedTensor tensor, NVTEGroupedTensorPa
     case kNVTEGroupedWithGEMMSwizzledScales:
       t.with_gemm_swizzled_scales = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
       break;
+#ifdef __HIP_PLATFORM_AMD__
+    case kNVTEGroupedMXFP4ShuffleRowwiseData:
+      t.mxfp4_shuffle_rowwise_data = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
+    case kNVTEGroupedMXFP4ShuffleColumnwiseData:
+      t.mxfp4_shuffle_columnwise_data = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
+#endif
     default:
       NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param), ")");
   }
@@ -1410,6 +1418,14 @@ void nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor, NVTEGroupedTe
     case kNVTEGroupedWithGEMMSwizzledScales:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->with_gemm_swizzled_scales);
       break;
+#ifdef __HIP_PLATFORM_AMD__
+    case kNVTEGroupedMXFP4ShuffleRowwiseData:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->mxfp4_shuffle_rowwise_data);
+      break;
+    case kNVTEGroupedMXFP4ShuffleColumnwiseData:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->mxfp4_shuffle_columnwise_data);
+      break;
+#endif
     default:
       NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param), ")");
   }

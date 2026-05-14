@@ -2609,6 +2609,97 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(const std::ve
   return {std::move(out_cpp), std::move(out_py)};
 }
 
+std::pair<GroupedTensorWrapper, py::object> MXFP4Quantizer::create_grouped_tensor(
+    const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
+    py::object quantizer, const std::optional<at::Tensor>& first_dims,
+    const size_t logical_first_dim, const size_t logical_last_dim) const {
+  using namespace pybind11::literals;
+
+  const auto tensor_offsets =
+      build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+  const int64_t total_elements =
+      static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
+  NVTE_CHECK(total_elements % 2 == 0, "MXFP4 data size must be divisible by 2.");
+  const int64_t total_data_elements = total_elements / 2;
+
+  const auto uint8_opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+
+  std::optional<at::Tensor> rowwise_data;
+  std::optional<at::Tensor> columnwise_data;
+  std::optional<at::Tensor> rowwise_scale_inv;
+  std::optional<at::Tensor> columnwise_scale_inv;
+  const std::vector<size_t> logical_shape_vec = {logical_first_dim, logical_last_dim};
+
+  if (rowwise_usage) {
+    rowwise_data = at::empty({total_data_elements}, uint8_opts);
+    const auto scale_shape = get_scale_shape(logical_shape_vec, false);
+    const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
+    rowwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
+  }
+
+  if (columnwise_usage) {
+    columnwise_data = at::empty({total_data_elements}, uint8_opts);
+    const auto scale_shape = get_scale_shape(logical_shape_vec, true);
+    const int64_t total_scale_elements = static_cast<int64_t>(product(scale_shape));
+    columnwise_scale_inv = at::empty({total_scale_elements}, uint8_opts);
+  }
+
+  GroupedTensorWrapper out_cpp(num_tensors, logical_shape, this->get_scaling_mode());
+  if (rowwise_usage) {
+    out_cpp.set_rowwise_data(rowwise_data->data_ptr(), this->dtype, getTensorShape(*rowwise_data));
+    out_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
+                                  getTensorShape(*rowwise_scale_inv));
+  }
+  if (columnwise_usage) {
+    out_cpp.set_columnwise_data(columnwise_data->data_ptr(), this->dtype,
+                                getTensorShape(*columnwise_data));
+    out_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
+                                     getTensorShape(*columnwise_scale_inv));
+  }
+  if (first_dims.has_value()) {
+    out_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
+  }
+  if (tensor_offsets.has_value()) {
+    out_cpp.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
+                               getTensorShape(*tensor_offsets));
+  }
+
+  out_cpp.set_with_gemm_swizzled_scales(this->with_gemm_swizzled_scales);
+  out_cpp.set_mxfp4_shuffle_rowwise_data(this->shuffle_rowwise_data);
+  out_cpp.set_mxfp4_shuffle_columnwise_data(this->shuffle_columnwise_data);
+
+  py::handle GroupedTensorClass = grouped_tensor_python_class(this->internal);
+  py::dict kwargs;
+  py::tuple args(0);
+  const std::vector<int64_t> grouped_shape = {static_cast<int64_t>(logical_first_dim),
+                                              static_cast<int64_t>(logical_last_dim)};
+  const std::vector<int64_t> grouped_stride = stride_from_shape(grouped_shape);
+  kwargs["shape"] = py::cast(grouped_shape);
+  kwargs["stride"] = py::cast(grouped_stride);
+  kwargs["dtype"] = py::cast(GetATenDType(dtype));
+  kwargs["num_tensors"] = py::cast(num_tensors);
+  kwargs["quantizer"] = quantizer;
+  kwargs["data"] = maybe_tensor_to_py(rowwise_data);
+  kwargs["columnwise_data"] = maybe_tensor_to_py(columnwise_data);
+  kwargs["scale_inv"] = maybe_tensor_to_py(rowwise_scale_inv);
+  kwargs["columnwise_scale_inv"] = maybe_tensor_to_py(columnwise_scale_inv);
+  kwargs["amax"] = py::none();
+  kwargs["columnwise_amax"] = py::none();
+  kwargs["scale"] = py::none();
+  kwargs["first_dims"] = first_dims.has_value() ? py::cast(*first_dims) : py::none();
+  kwargs["last_dims"] = py::none();
+  kwargs["tensor_offsets"] = tensor_offsets.has_value() ? py::cast(*tensor_offsets) : py::none();
+  kwargs["with_gemm_swizzled_scales"] = this->with_gemm_swizzled_scales;
+  PyObject* result = PyObject_Call(GroupedTensorClass.ptr(), args.ptr(), kwargs.ptr());
+  if (result == nullptr) {
+    PyErr_Print();
+  }
+  NVTE_CHECK(result != nullptr, "Failed to create GroupedTensor instance");
+  py::object out_py = py::reinterpret_steal<py::object>(result);
+
+  return {std::move(out_cpp), std::move(out_py)};
+}
+
 std::pair<TensorWrapper, py::object> MXFP4Quantizer::convert_and_update_tensor(
     py::object tensor) const {
   NVTE_CHECK(detail::IsMXFP4Tensor(tensor.ptr()), "MXFP4Quantizer must output to MXFP4Tensor.");

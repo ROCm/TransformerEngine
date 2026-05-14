@@ -317,7 +317,12 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
     NVTE_DEVICE_ERROR(
         "FP4 cvt.rs PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
+    uint16_t dummy = 0;
+    return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
+  }
 #else
+  // It is like ptx.cuh::mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding but w/o scaling
+  // TODO: should ptx.cuh method be reused?
 #if ARCH_HAS_STOCHASTIC_ROUNDING
   // opsel=1 always writes to byte 1, result read from fp4x2[1]
   // Matches HIP's own usage, see e.g. https://github.com/ROCm/clr/blob/3dbb5f1c5e0734d21dd2424a38255e61ee0a73e0/hipamd/include/hip/amd_detail/amd_hip_ocp_fp.hpp#L1858-L1890
@@ -373,11 +378,6 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
   }
 #endif // ARCH_HAS_STOCHASTIC_ROUNDING
 #endif // !__HIP_PLATFORM_AMD__
-    uint16_t dummy = 0;
-    return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
-#ifndef __HIP_PLATFORM_AMD__
-  }
-#endif
 }
 
 
@@ -385,6 +385,8 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_rn(const floa
                                                                       const float2 in23,
                                                                       const uint32_t rbits) {
 #ifdef __HIP_PLATFORM_AMD__
+  // It is like ptx.cuh::mul_cvt_fp32_to_fp4_4x_with_rn but w/o scaling
+  // TODO: should ptx.cuh method be reused?
   const __hip_fp4_storage_t q0 = __hip_cvt_float_to_fp4(in01.x, __HIP_E2M1, hipRoundNearest);
   const __hip_fp4_storage_t q1 = __hip_cvt_float_to_fp4(in01.y, __HIP_E2M1, hipRoundNearest);
   const __hip_fp4_storage_t q2 = __hip_cvt_float_to_fp4(in23.x, __HIP_E2M1, hipRoundNearest);

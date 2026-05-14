@@ -1816,17 +1816,53 @@ def test_jax_new_rng():
     runner.test_forward()
 
 
-def _run_deterministic_bwd_case(
-    qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d,
-    dtype=jnp.bfloat16,
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="Deterministic backward bitwise test only applies to ROCm"
+)
+@pytest.mark.skipif(not _deterministic, reason="Test determinism only")
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pytest.param(jnp.bfloat16, id="BF16"),
+        pytest.param(jnp.float16, id="FP16"),
+    ],
+)
+@pytest.mark.parametrize(
+    "qkv_layout",
+    [
+        pytest.param(QKVLayout.BS3HD, id="BS3HD"),
+        pytest.param(QKVLayout.BSHD_BS2HD, id="BSHD_BS2HD"),
+        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id="BSHD_BSHD_BSHD"),
+        pytest.param(QKVLayout.T3HD, id="T3HD"),
+        pytest.param(QKVLayout.THD_T2HD, id="THD_T2HD"),
+        pytest.param(QKVLayout.THD_THD_THD, id="THD_THD_THD"),
+    ],
+)
+@pytest.mark.parametrize(
+    "attn_mask_type",
+    [
+        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
+        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
+        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
+        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+        pytest.param(
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK, id="PADDING_CAUSAL_BOTTOM_RIGHT"
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "b, seq_len, h_q, h_kv, d",
+    [
+        pytest.param(2, 256, 8, 8, 128, id="b2_s256_MHA"),
+        pytest.param(2, 512, 8, 8, 128, id="b2_s512_MHA"),
+        pytest.param(2, 2048, 8, 8, 128, id="b2_s2048_MHA"),
+        pytest.param(2, 2048, 12, 4, 128, id="b2_s2048_GQA"),
+    ],
+)
+def test_backward_bitwise_reproducible(
+    dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d
 ):
-    """
-    Shared helper for deterministic backward tests.
-
-    Verifies that the fused attention backward pass in deterministic mode
-    produces bitwise-reproducible gradients. Determinism mode must be enabled
-    externally via NVTE_ALLOW_NONDETERMINISTIC_ALGO=0.
-    """
+    """Test deterministic backward (CK backend): bitwise reproducibility."""
     runner = FusedAttnRunner(
         batch_size=b,
         max_seqlen_q=seq_len,
@@ -1878,59 +1914,3 @@ def _run_deterministic_bwd_case(
     for name, x, y in zip(("dQ", "dK", "dV"), grads1, grads2):
         # Bitwise reproducibility across consecutive runs
         assert_allclose(x, y, atol=0, rtol=0, err_msg=f"{name} not bitwise reproducible")
-
-
-@pytest.mark.skipif(
-    not is_hip_extension(), reason="Deterministic backward only applies to AMD hardware"
-)
-@pytest.mark.skipif(not _deterministic, reason="Test determinism only")
-@pytest.mark.parametrize(
-    "dtype",
-    [
-        pytest.param(jnp.bfloat16, id="BF16"),
-        pytest.param(jnp.float16, id="FP16"),
-    ],
-)
-@pytest.mark.parametrize(
-    "qkv_layout",
-    [
-        pytest.param(QKVLayout.BS3HD, id="BS3HD"),
-        pytest.param(QKVLayout.BSHD_BS2HD, id="BSHD_BS2HD"),
-        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id="BSHD_BSHD_BSHD"),
-        pytest.param(QKVLayout.T3HD, id="T3HD"),
-        pytest.param(QKVLayout.THD_T2HD, id="THD_T2HD"),
-        pytest.param(QKVLayout.THD_THD_THD, id="THD_THD_THD"),
-    ],
-)
-@pytest.mark.parametrize(
-    "attn_mask_type",
-    [
-        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
-        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
-        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
-        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
-        pytest.param(
-            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK, id="PADDING_CAUSAL_BOTTOM_RIGHT"
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "b, seq_len, h_q, h_kv, d",
-    [
-        pytest.param(2, 256, 8, 8, 128, id="b2_s256_MHA"),
-        pytest.param(2, 512, 8, 8, 128, id="b2_s512_MHA"),
-        pytest.param(2, 2048, 8, 8, 128, id="b2_s2048_MHA"),
-        pytest.param(2, 2048, 12, 4, 128, id="b2_s2048_GQA"),
-    ],
-)
-class TestFusedAttnWithDeterminism:
-    """Fused attention tester (CK backend) with deterministic backward."""
-
-    @staticmethod
-    def test_backward_bitwise_reproducible(
-        dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d
-    ):
-        """Test deterministic backward (CK backend): bitwise reproducibility."""
-        _run_deterministic_bwd_case(
-            qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d, dtype=dtype,
-        )

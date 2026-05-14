@@ -1218,7 +1218,9 @@ def test_nvfp4_partial_cast_matches_full(world_size: int) -> None:
     if not available:
         pytest.skip(reason)
 
-    python_exe = pathlib.Path(sys.executable).resolve()
+    # ROCm: Use executable as-is; do not resolve() or a venv symlink may point to system
+    # Python which does not have torch/site-packages.
+    python_exe = pathlib.Path(sys.executable)
     current_file = pathlib.Path(__file__).resolve()
     command = [
         python_exe,
