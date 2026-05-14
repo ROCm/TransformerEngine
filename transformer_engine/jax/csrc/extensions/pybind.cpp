@@ -12,7 +12,6 @@
 #endif //#ifndef USE_ROCM
 #include "common/util/cuda_runtime.h"
 
-
 namespace transformer_engine {
 namespace jax {
 

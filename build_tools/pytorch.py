@@ -78,15 +78,6 @@ def setup_pytorch_extension(
     else:
         cxx_flags.append("-g0")
 
-    if rocm_build():
-        rocm_archs = os.environ.get("NVTE_ROCM_ARCH", "gfx942;gfx950")
-        hipkittens_header = (
-            Path(__file__).resolve().parent.parent
-            / "3rdparty" / "hipkittens" / "include" / "kittens.cuh"
-        )
-        if "gfx950" in rocm_archs and hipkittens_header.exists():
-            cxx_flags.append("-DUSE_HIPKITTENS_GEMM")
-
     # Version-dependent CUDA options
     if not rocm_build():
         try:

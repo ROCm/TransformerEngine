@@ -8,6 +8,7 @@
 
 
 constexpr int NUM_WARPS = 8;
+constexpr int NUM_THREADS = NUM_WARPS * kittens::WARP_THREADS;
 constexpr int WARPS_ROW = 2;
 constexpr int WARPS_COL = 4;
 constexpr int BLOCK_ROW = 256;
@@ -53,7 +54,7 @@ enum struct OutDtype {
 };
 
 template <GemmEpilogue EPILOGUE, int CBSZ, int BLGP, typename OutGL, typename AuxGLType>
-__global__ __launch_bounds__(512, 2)
+__global__ __launch_bounds__(NUM_THREADS, 2)
 void mxfp8_gemm_tn_kernel(
     const gl_fp8_rt A,
     const gl_fp8_rt B,
@@ -68,7 +69,6 @@ void mxfp8_gemm_tn_kernel(
     int k_iters  = K / BLOCK_K;
     int tiles_M  = M / BLOCK_ROW;
     int tiles_N  = N / BLOCK_COL;
-    constexpr int NUM_THREADS = NUM_WARPS * kittens::WARP_THREADS;
 
     using ST_A = kittens::st_fp8e4m3<HALF_ROW, BLOCK_K, kittens::st_16x128_s>;
     using ST_B = kittens::st_fp8e4m3<HALF_COL, BLOCK_K, kittens::st_16x128_s>;
@@ -470,15 +470,15 @@ static void launch_tn_gemm_typed(
 
     if (out_dtype == OutDtype::BF16) {
         gl_bf16_rt gl_C((kittens::bf16 *)C, nullptr, nullptr, (size_t)N, (size_t)M);
-        mxfp8_gemm_tn_kernel<EPILOGUE, CBSZ, BLGP><<<grid, 512, 0, stream>>>(
+        mxfp8_gemm_tn_kernel<EPILOGUE, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
             gl_A, gl_B, gl_C, aux_gl, packed_sa, packed_sb, bias, bias_dtype, M, N, K);
     } else if (out_dtype == OutDtype::FP16) {
         gl_fp16_rt gl_C((half *)C, nullptr, nullptr, (size_t)N, (size_t)M);
-        mxfp8_gemm_tn_kernel<EPILOGUE, CBSZ, BLGP><<<grid, 512, 0, stream>>>(
+        mxfp8_gemm_tn_kernel<EPILOGUE, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
             gl_A, gl_B, gl_C, aux_gl, packed_sa, packed_sb, bias, bias_dtype, M, N, K);
     } else {
         gl_f32_rt gl_C((float *)C, nullptr, nullptr, (size_t)N, (size_t)M);
-        mxfp8_gemm_tn_kernel<EPILOGUE, CBSZ, BLGP><<<grid, 512, 0, stream>>>(
+        mxfp8_gemm_tn_kernel<EPILOGUE, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
             gl_A, gl_B, gl_C, aux_gl, packed_sa, packed_sb, bias, bias_dtype, M, N, K);
     }
 }
