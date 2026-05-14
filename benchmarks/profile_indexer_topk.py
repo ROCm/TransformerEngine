@@ -14,7 +14,7 @@ import time
 import jax
 import jax.numpy as jnp
 
-from transformer_engine.jax.indexer import indexer
+from transformer_engine.jax.indexer import indexer, indexer_topk
 
 try:
     from transformer_engine.jax.triton_extensions.indexer import score_reduce_triton  # noqa: F401
@@ -66,7 +66,7 @@ def time_fn(fn, args, n_warmup=15, n_iter=50):
 
 CONFIGS = [
     #(B, oH, T,    S,    d,   d_c,  H,  d_i)
-    ( 2, 64, 1024, 1024, 512, 1024, 64, 128),
+    ( 2, 64, 4096, 4096, 512, 1024, 64, 128),
 ]
 
 K_TOPK = 512
@@ -77,6 +77,13 @@ def _build_topk(backend, k):
     def fn(Q, K, W_uq, W_dq, W_k, W_w):
         scores = indexer(Q, K, W_uq, W_dq, W_k, W_w, backend=backend)
         return jax.lax.top_k(scores, k)
+    return fn
+
+
+def _build_fused_topk(k):
+    @jax.jit
+    def fn(Q, K, W_uq, W_dq, W_k, W_w):
+        return indexer_topk(Q, K, W_uq, W_dq, W_k, W_w, k=k)
     return fn
 
 
@@ -101,9 +108,11 @@ def main():
         print(f"--- B={B} oH={oH} T={T} S={S} d={d} d_c={d_c} H={H} d_i={d_i} bfloat16 ---")
         print(f"    theoretical work = {flops/1e9:.2f} GFLOPs/call (top-k = 0 FLOP)")
 
-        impls = [("baseline+topk", _build_topk("reference", K_TOPK))]
+        # impls = [("baseline+topk", _build_topk("reference", K_TOPK))]
+        impls = []
         if _HAVE_HYBRID:
             impls.append(("hybrid+topk", _build_topk("hybrid", K_TOPK)))
+            impls.append(("hybrid_fused_topk", _build_fused_topk(K_TOPK)))
 
         baseline_ms = None
         for name, fn in impls:
@@ -114,20 +123,22 @@ def main():
                 if name == "baseline+topk":
                     baseline_ms = ms
                     speed = ""
-                else:
+                elif baseline_ms is not None:
                     speed = f" ({baseline_ms/ms:.2f}x baseline)"
-                print(f"    {name:<14} {ms:8.3f} ms   {tflops:6.2f} TFLOP/s{speed}")
+                else:
+                    speed = ""
+                print(f"    {name:<18} {ms:8.3f} ms   {tflops:6.2f} TFLOP/s{speed}")
             except Exception as e:  # noqa: BLE001
-                print(f"    {name:<14} FAILED: {type(e).__name__}: {str(e).splitlines()[0]}")
+                print(f"    {name:<18} FAILED: {type(e).__name__}: {str(e).splitlines()[0]}")
 
         # Time top_k alone on a precomputed (reference) score matrix to
         # isolate the top-k cost from the indexer compute.
         try:
             scores_mat = indexer(*args, backend="reference")
             sec = time_fn(_topk_only, (scores_mat,))
-            print(f"    {'(top_k alone)':<14} {sec*1e3:8.3f} ms")
+            print(f"    {'(top_k alone)':<18} {sec*1e3:8.3f} ms")
         except Exception as e:  # noqa: BLE001
-            print(f"    (top_k alone)  FAILED: {type(e).__name__}")
+            print(f"    {'(top_k alone) FAILED':<18} {type(e).__name__}")
         print()
 
 

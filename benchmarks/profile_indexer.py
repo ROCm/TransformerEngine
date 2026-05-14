@@ -70,7 +70,7 @@ def time_fn(fn, args, n_warmup=15, n_iter=50):
 
 CONFIGS = [
     #(B, oH, T,    S,    d,   d_c,  H,  d_i)
-    ( 2, 64, 1024, 1024, 512, 1024, 64, 128),
+    ( 2, 64, 4096, 4096, 512, 1024, 64, 128),
 ]
 
 
@@ -115,7 +115,8 @@ def main():
         print(f"--- B={B} oH={oH} T={T} S={S} d={d} d_c={d_c} H={H} d_i={d_i} bfloat16 ---")
         print(f"    theoretical work = {flops/1e9:.2f} GFLOPs/call")
 
-        impls = [("baseline", _build_impl("reference"))]
+        # impls = [("baseline", _build_impl("reference"))]
+        impls = []
         if _HAVE_HYBRID:
             impls.append(("hybrid", _build_impl("hybrid")))
 
@@ -128,8 +129,10 @@ def main():
                 if name == "baseline":
                     baseline_ms = ms
                     speed = ""
-                else:
+                elif baseline_ms is not None:
                     speed = f" ({baseline_ms/ms:.2f}x baseline)"
+                else:
+                    speed = ""
                 print(f"    {name:<10} {ms:8.3f} ms   {tflops:6.2f} TFLOP/s{speed}")
             except Exception as e:  # noqa: BLE001
                 print(f"    {name:<10} FAILED: {type(e).__name__}: {str(e).splitlines()[0]}")
