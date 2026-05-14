@@ -32,6 +32,7 @@ if not is_hip_extension():
         initialize_cgemm_communicator,
         get_cgemm_num_max_streams,
     )
+
 from .base import BasePrimitive, register_primitive
 from .quantization import grouped_quantize
 
