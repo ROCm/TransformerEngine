@@ -58,12 +58,18 @@ TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
   static_assert(NVTE_INVALID_SCALING < 1024,
                 "This function assumes at most 10 bits used in the scaling mode.");
   static_assert(kNVTENumTypes < 32, "This function assumes at most 5 bits used in the NVTEDType");
-  uint64_t general_key = static_cast<uint64_t>(itype) | (static_cast<uint64_t>(otype) << 5) |
-                         (static_cast<uint64_t>(ctype) << 10) |
-                         (static_cast<uint64_t>(wtype) << 15) | (uint64_t(NormType) << 20) |
-                         (uint64_t(NormStage)) << 22 | (uint64_t(NormBackend) << 24) |
-                         (uint64_t(zero_centered_gamma) << 26) | (uint64_t(mode) << 27) |
-                         (uint64_t(training) << 37) | (uint64_t(gamma_in_weight_dtype) << 38);
+  uint64_t general_key =
+        (static_cast<uint64_t>(itype) << norm_key::kItypeShift) |
+        (static_cast<uint64_t>(otype) << norm_key::kOtypeShift) |
+        (static_cast<uint64_t>(ctype) << norm_key::kCtypeShift) |
+        (static_cast<uint64_t>(wtype) << norm_key::kWtypeShift) |
+        (static_cast<uint64_t>(NormType) << norm_key::kNormTypeShift) |
+        (static_cast<uint64_t>(NormStage) << norm_key::kNormStageShift) |
+        (static_cast<uint64_t>(NormBackend) << norm_key::kNormBackendShift) |
+        (static_cast<uint64_t>(zero_centered_gamma) << norm_key::kZeroCenteredGammaShift) |
+        (static_cast<uint64_t>(mode) << norm_key::kScalingModeShift) |
+        (static_cast<uint64_t>(training) << norm_key::kTrainingShift) |
+        (static_cast<uint64_t>(gamma_in_weight_dtype) << norm_key::kGammaInWeightDtypeShift);
   return std::make_tuple(general_key, batch_size, hidden_size, is_tuned);
 }
 

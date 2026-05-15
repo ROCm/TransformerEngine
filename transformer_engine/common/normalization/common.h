@@ -38,6 +38,27 @@ namespace transformer_engine {
 
 namespace normalization {
 
+// Bit layout for the packed normalization general_key.
+// Keep these constants in sync with get_key() encoding in common.cpp.
+namespace norm_key {
+
+constexpr int kItypeShift = 0;
+constexpr int kOtypeShift = 5;
+constexpr int kCtypeShift = 10;
+constexpr int kWtypeShift = 15;
+constexpr int kNormTypeShift = 20;
+constexpr int kNormStageShift = 22;
+constexpr int kNormBackendShift = 24;
+constexpr int kZeroCenteredGammaShift = 26;
+constexpr int kScalingModeShift = 27;
+constexpr int kTrainingShift = 37;
+constexpr int kGammaInWeightDtypeShift = 38;
+
+constexpr uint64_t kDTypeMask = 0x1F;
+constexpr uint64_t kNormTypeMask = 0x3;
+
+}  // namespace norm_key
+
 #ifndef __HIP_PLATFORM_AMD__
 namespace fe = cudnn_frontend;
 #endif
@@ -203,24 +224,26 @@ TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
                      bool is_tuned, NVTEScalingMode mode = NVTE_DELAYED_TENSOR_SCALING,
                      bool training = true, bool gamma_in_weight_dtype = false);
 
+// Decode helpers assume the same general_key bit layout used by get_key().
 inline DType decode_itype(uint64_t general_key) {
-  return static_cast<DType>(general_key & 0x1F);
+  return static_cast<DType>((general_key >> norm_key::kItypeShift) & norm_key::kDTypeMask);
 }
 
 inline DType decode_otype(uint64_t general_key) {
-  return static_cast<DType>((general_key >> 5) & 0x1F);
+  return static_cast<DType>((general_key >> norm_key::kOtypeShift) & norm_key::kDTypeMask);
 }
 
 inline DType decode_ctype(uint64_t general_key) {
-  return static_cast<DType>((general_key >> 10) & 0x1F);
+  return static_cast<DType>((general_key >> norm_key::kCtypeShift) & norm_key::kDTypeMask);
 }
 
 inline DType decode_wtype(uint64_t general_key) {
-  return static_cast<DType>((general_key >> 15) & 0x1F);
+  return static_cast<DType>((general_key >> norm_key::kWtypeShift) & norm_key::kDTypeMask);
 }
 
 inline NVTE_Norm_Type decode_norm_type(uint64_t general_key) {
-  return static_cast<NVTE_Norm_Type>((general_key >> 20) & 0x3);
+  return static_cast<NVTE_Norm_Type>(
+      (general_key >> norm_key::kNormTypeShift) & norm_key::kNormTypeMask);
 }
 
 inline const char* dtype_to_string(DType dtype) {
