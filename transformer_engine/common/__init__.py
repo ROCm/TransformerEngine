@@ -409,8 +409,16 @@ def is_fp8_fnuz():
 
 @functools.lru_cache(maxsize=None)
 def _load_core_library():
-    """Load shared library with Transformer Engine C extensions"""
-    return ctypes.CDLL(_get_shared_object_file("core"), mode=ctypes.RTLD_GLOBAL)
+    """Load shared library with Transformer Engine C extensions.
+
+    Loaded with RTLD_LOCAL so that transitive dependencies (notably
+    librocroller.so on ROCm) are not promoted into the global symbol
+    namespace, where they would interpose with HIP runtime helpers and
+    cause hipModuleLoad to abort with `free(): invalid size`. Framework
+    extensions therefore link against this library explicitly via ELF
+    NEEDED rather than relying on global symbol visibility.
+    """
+    return ctypes.CDLL(_get_shared_object_file("core"), mode=ctypes.RTLD_LOCAL)
 
 
 if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):

@@ -115,6 +115,7 @@ def get_build_ext(
 
         def run(self) -> None:
             # Build CMake extensions
+            cmake_install_dirs: List[Path] = []
             for ext in self.extensions:
                 package_path = Path(self.get_ext_fullpath(ext.name))
                 install_dir = package_path.resolve().parent
@@ -135,12 +136,21 @@ def get_build_ext(
                         build_dir=build_dir,
                         install_dir=install_dir,
                     )
+                    cmake_install_dirs.append(install_dir)
 
             # Build non-CMake extensions as usual
             all_extensions = self.extensions
             self.extensions = [
                 ext for ext in self.extensions if not isinstance(ext, CMakeExtension)
             ]
+            # Make CMake-installed shared libraries (e.g. libtransformer_engine.so)
+            # discoverable when linking framework extensions that declare them as
+            # NEEDED dependencies.
+            for ext in self.extensions:
+                for cmake_install_dir in cmake_install_dirs:
+                    cmake_install_dir_str = str(cmake_install_dir)
+                    if cmake_install_dir_str not in ext.library_dirs:
+                        ext.library_dirs.append(cmake_install_dir_str)
             super().run()
             self.extensions = all_extensions
 

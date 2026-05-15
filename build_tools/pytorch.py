@@ -115,6 +115,27 @@ def setup_pytorch_extension(
         libraries.append("mpi")
         cxx_flags.extend(["-DNVTE_ENABLE_ROCSHMEM", "-DOMPI_SKIP_MPICXX"])
 
+    # Link against the TE core library so the torch extension resolves core
+    # symbols via the ELF NEEDED graph rather than via RTLD_GLOBAL. This
+    # avoids transitively exposing librocroller.so symbols, which interpose
+    # with HIP's internal helpers and cause hipModuleLoad to abort with
+    # `free(): invalid size`.
+    #
+    # The CMake build of the core library runs before this extension is
+    # linked (see `_CMakeBuildExtension.run` in build_ext.py), and the
+    # CMake install directory is injected into `library_dirs` there so the
+    # linker can find `libtransformer_engine.so` even on a clean build. We
+    # additionally try to resolve a previously-built copy here so that
+    # incremental builds and tooling that links this extension in isolation
+    # still work.
+    libraries.append("transformer_engine")
+    try:
+        from transformer_engine.common import _get_shared_object_file
+        core_lib_path = Path(_get_shared_object_file("core"))
+        library_dirs.append(str(core_lib_path.parent))
+    except (ImportError, FileNotFoundError):
+        pass
+
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]
     include_dirs = [str(path) for path in include_dirs]

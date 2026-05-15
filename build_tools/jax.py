@@ -123,6 +123,29 @@ def setup_jax_extension(
     if rocm_build():
         cxx_flags.extend(["-D__HIP_PLATFORM_AMD__", "-DUSE_ROCM"])
 
+    # Link against the TE core library so the jax extension resolves core
+    # symbols via the ELF NEEDED graph rather than via RTLD_GLOBAL. This
+    # avoids transitively exposing librocroller.so symbols, which interpose
+    # with HIP's internal helpers and cause hipModuleLoad to abort with
+    # `free(): invalid size`.
+    #
+    # The CMake build of the core library runs before this extension is
+    # linked (see `_CMakeBuildExtension.run` in build_ext.py), and the
+    # CMake install directory is injected into `library_dirs` there so the
+    # linker can find `libtransformer_engine.so` even on a clean build. We
+    # additionally try to resolve a previously-built copy here so that
+    # incremental builds and tooling that links this extension in isolation
+    # still work.
+    libraries = ["nccl"] if not rocm_build() else []
+    libraries.append("transformer_engine")
+    library_dirs: List[str] = []
+    try:
+        from transformer_engine.common import _get_shared_object_file
+        core_lib_path = Path(_get_shared_object_file("core"))
+        library_dirs.append(str(core_lib_path.parent))
+    except (ImportError, FileNotFoundError):
+        pass
+
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
 
@@ -131,5 +154,6 @@ def setup_jax_extension(
         sources=[str(path) for path in sources],
         include_dirs=[str(path) for path in include_dirs],
         extra_compile_args=cxx_flags,
-        libraries=["nccl"] if not rocm_build() else [],
+        libraries=libraries,
+        library_dirs=library_dirs,
     )
