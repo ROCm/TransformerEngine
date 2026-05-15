@@ -1077,6 +1077,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_meta["num_gemms"] = num_gemms
             self.init_fp8_meta_tensors(self.fp8_meta["recipe"])
 
+        # Force the transpose cache to be kept whenever the recipe is MXFP8 / MXFP4,
+        # regardless of whether we are currently inside an fp8_autocast region or not.
+        # reset_parameters() would disable columnwise_usage for params constructed inside
+        # `fp8_model_init` / `quantized_model_init`, leaving `_columnwise_data=None`).
+        if self.fp8_meta["recipe"].mxfp8() or self.fp8_meta["recipe"].mxfp4():
+            self.keep_fp8_weight_transpose_cache = True
+
         if fp8_enabled:
             # Set FP8 and other FP8 metadata
             self.fp8_meta["num_gemms"] = num_gemms
@@ -1092,8 +1099,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fp8_initialized = True
 
             self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
-            if self.fp8_meta["recipe"].mxfp8() or self.fp8_meta["recipe"].mxfp4():
-                self.keep_fp8_weight_transpose_cache = True
 
         _current_recipe = self.fp8_meta["recipe"]
         if _original_recipe is not None and not (

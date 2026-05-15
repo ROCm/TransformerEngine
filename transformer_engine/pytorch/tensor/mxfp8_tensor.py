@@ -471,7 +471,10 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
             split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
             # Padding requirements: rowwise dim0 should be divisble by 128, columnwise dim0 should be divisble by 4
-            padding_multiples = [128, 4]
+            # NOTE: ROCm/HIP backend uses an unpadded scale-inv layout (see `MXFP8Quantizer.make_empty`),
+            # so applying the padding here would produce a per-shard scale-inv whose dim-0
+            # does not match the destination scale-inv allocated for the FSDP2 local shard.
+            padding_multiples = [128, 4] if not IS_HIP_EXTENSION else [1, 1]
             for scale_inv, scale_split_size, pad_multiple in zip(
                 scale_invs, split_sizes_for_scale, padding_multiples
             ):
@@ -487,7 +490,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 )
                 scale_inv_out = list(scale_inv_out) if scale_inv_out is not None else None
                 # Pad scale_inv_out to be a multiple of pad_multiple
-                if scale_inv_out is not None:
+                if scale_inv_out is not None and pad_multiple > 1:
                     for idx, split_scale_inv_out in enumerate(scale_inv_out):
                         current_shape = split_scale_inv_out.shape
                         pad_dim0 = (pad_multiple - current_shape[0] % pad_multiple) % pad_multiple
