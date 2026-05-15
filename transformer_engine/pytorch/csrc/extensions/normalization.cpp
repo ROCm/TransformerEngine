@@ -10,6 +10,13 @@
 #include "common/util/system.h"
 #include "pybind.h"
 
+#include <torch/version.h>
+#if USE_ROCM && TORCH_VERSION_MINOR < 11
+using TECUDAGuard = at::hip::HIPGuardMasqueradingAsCUDA;
+#else
+using TECUDAGuard = at::cuda::CUDAGuard;
+#endif
+
 namespace transformer_engine::pytorch {
 
 std::vector<py::object> layernorm_bwd(const at::Tensor &dz, const at::Tensor &x,
@@ -69,7 +76,7 @@ std::vector<py::object> layernorm_fwd(py::handle input, py::handle weight, Maybe
   // Ensure that cuDNN handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(input.cast<at::Tensor>().device());
+  TECUDAGuard device_guard(input.cast<at::Tensor>().device());
 
   // Input and param tensors
   auto none = py::none();
@@ -319,7 +326,7 @@ std::vector<py::object> rmsnorm_fwd(const py::handle &input, const py::handle &w
   // Ensure that cuDNN handle is created on the correct device,
   // overriding torch.cuda.set_device calls from user side.
   // Assumes all tensors passed are on the same device.
-  at::cuda::CUDAGuard device_guard(input.cast<at::Tensor>().device());
+  TECUDAGuard device_guard(input.cast<at::Tensor>().device());
 
   // Input and param tensors
   auto none = py::none();
