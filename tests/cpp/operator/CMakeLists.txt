@@ -35,7 +35,7 @@ add_executable(test_operator
                test_causal_softmax.cu
                $<${GX_CUDA}:test_swizzle.cu>
                test_swap_first_dims.cu
-               test_grouped_gemm.cu
+               $<${GX_CUDA}:test_grouped_gemm.cu>
                ../test_common.cu)
 
 if(USE_ROCM)
