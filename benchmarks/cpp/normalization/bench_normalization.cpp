@@ -90,7 +90,6 @@ static void BM_NormForward(benchmark::State& state) {
                      prop.multiProcessorCount, zero_centered_gamma, stream);
   }
 
-  HIP_CHECK(hipStreamSynchronize(stream));
   warmup_gpu();
 
   hipEvent_t start, stop;
@@ -220,7 +219,6 @@ static void BM_NormBackward(benchmark::State& state) {
                      prop.multiProcessorCount, zero_centered_gamma, stream);
   }
 
-  HIP_CHECK(hipStreamSynchronize(stream));
   warmup_gpu();
 
   hipEvent_t start, stop;
