@@ -17,6 +17,7 @@ from .utils import (
     cuda_version,
     get_cuda_include_dirs,
     debug_build_enabled,
+    installed_te_core_lib_dir,
 )
 from typing import List
 
@@ -120,21 +121,10 @@ def setup_pytorch_extension(
     # avoids transitively exposing librocroller.so symbols, which interpose
     # with HIP's internal helpers and cause hipModuleLoad to abort with
     # `free(): invalid size`.
-    #
-    # The CMake build of the core library runs before this extension is
-    # linked (see `_CMakeBuildExtension.run` in build_ext.py), and the
-    # CMake install directory is injected into `library_dirs` there so the
-    # linker can find `libtransformer_engine.so` even on a clean build. We
-    # additionally try to resolve a previously-built copy here so that
-    # incremental builds and tooling that links this extension in isolation
-    # still work.
     libraries.append("transformer_engine")
-    try:
-        from transformer_engine.common import _get_shared_object_file
-        core_lib_path = Path(_get_shared_object_file("core"))
-        library_dirs.append(str(core_lib_path.parent))
-    except (ImportError, FileNotFoundError):
-        pass
+    core_lib_dir = installed_te_core_lib_dir()
+    if core_lib_dir is not None:
+        library_dirs.append(str(core_lib_dir))
 
     # Construct PyTorch CUDA extension
     sources = [str(path) for path in sources]

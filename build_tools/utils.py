@@ -82,6 +82,33 @@ def remove_dups(_list: List):
     return list(set(_list))
 
 
+def installed_te_core_lib_dir() -> Optional[Path]:
+    """Locate an already-installed libtransformer_engine.so.
+
+    Searches Python's site-packages for the core library so that
+    framework extensions can declare an explicit DT_NEEDED link against
+    it. Used at build time when the core library is being installed
+    separately from the framework extension (e.g. when building the
+    ``transformer_engine_*_torch`` sdist against a pre-installed
+    ``transformer_engine_*`` core package).
+
+    Importing ``transformer_engine.common`` is intentionally avoided
+    here because that module eagerly loads framework extensions, which
+    may not exist yet during this very build.
+    """
+    import sysconfig
+
+    purelib = Path(sysconfig.get_paths()["purelib"])
+    candidate_dirs = (
+        purelib / "transformer_engine",
+        purelib / "transformer_engine" / "wheel_lib",
+    )
+    for candidate in candidate_dirs:
+        if candidate.is_dir() and any(candidate.glob("libtransformer_engine*.so*")):
+            return candidate
+    return None
+
+
 def found_cmake() -> bool:
     """ "Check if valid CMake is available
 

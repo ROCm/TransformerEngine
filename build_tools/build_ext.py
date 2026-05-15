@@ -145,7 +145,7 @@ def get_build_ext(
             ]
             # Make CMake-installed shared libraries (e.g. libtransformer_engine.so)
             # discoverable when linking framework extensions that declare them as
-            # NEEDED dependencies.
+            # NEEDED dependencies on a fresh full-tree build.
             for ext in self.extensions:
                 for cmake_install_dir in cmake_install_dirs:
                     cmake_install_dir_str = str(cmake_install_dir)
