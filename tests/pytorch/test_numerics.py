@@ -3080,9 +3080,7 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
     reason="Only enable CUTLASS/CK grouped gemm on Hopper or ROCm",
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=str)
-# NT is excluded: transB=true means ColMajor B, and CK produces incorrect
-# results with kPadK + ColMajor B (the dispatch falls back to cuBLAS).
-@pytest.mark.parametrize("layout", ["TN", "NN"])
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
 @pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize(
     "pad_dim",
@@ -3143,7 +3141,7 @@ def test_grouped_gemm_unaligned(dtype, layout, accumulate, pad_dim):
         m_splits = m_vals
         grad = False
         single_output = True
-    else:  # NN
+    elif layout == "NN":
         # NN GEMM: M=m_splits[i], N=A.cols, K=A.rows
         if pad_dim == "K":
             gemm_k = unaligned_k
@@ -3170,6 +3168,36 @@ def test_grouped_gemm_unaligned(dtype, layout, accumulate, pad_dim):
         m_splits = m_vals
         grad = True
         single_output = True
+    else:  # NT
+        # NT GEMM: out[i] = A[i]^T @ B[i], A[i]: (m_i, k), B[i]: (m_i, n), out[i]: (n, k)
+        if pad_dim == "K":
+            k_val = unaligned_k
+            m_vals = [m_aligned] * z
+            n_val = n_aligned
+        elif pad_dim == "M":
+            k_val = k_aligned
+            m_vals = unaligned_m
+            n_val = n_aligned
+        elif pad_dim == "MK":
+            k_val = unaligned_k
+            m_vals = unaligned_m
+            n_val = n_aligned
+        else:  # N
+            k_val = k_aligned
+            m_vals = [m_aligned] * z
+            n_val = unaligned_n
+
+        A = list(torch.split(
+            torch.randn(sum(m_vals), k_val, dtype=dtype, device="cuda"), m_vals
+        ))
+        B = list(torch.split(
+            torch.randn(sum(m_vals), n_val, dtype=dtype, device="cuda"), m_vals
+        ))
+        out = [torch.randn(n_val, k_val, dtype=dtype, device="cuda") for _ in range(z)]
+        out_ref = [o.clone() for o in out]
+        m_splits = m_vals
+        grad = True
+        single_output = False
 
     # Reference: individual GEMMs
     for i in range(z):
@@ -3205,6 +3233,7 @@ def test_grouped_gemm_unaligned(dtype, layout, accumulate, pad_dim):
             torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
 
     os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
+
 
 @pytest.mark.parametrize("N", [32])
 @pytest.mark.parametrize("datatype", [torch.float16, torch.bfloat16])

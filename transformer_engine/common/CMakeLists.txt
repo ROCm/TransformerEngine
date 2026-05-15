@@ -259,6 +259,10 @@ else()
         gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
         gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
         gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_nn.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_nt.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tn.cpp
+        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tt.cpp
         amd_detail/system.cpp)
     list(APPEND transformer_engine_cuda_sources
         fused_attn_rocm/fused_attn_aotriton.cpp
