@@ -244,7 +244,7 @@ bool ck_tile_grouped_gemm_fp16_dispatch(DType a_dtype,
     }
   }
 
-  // CK tile kernel produces incorrect results with kPadK + ColMajor B.
+  // FIXME: CK tile kernel produces incorrect results with kPadK + ColMajor B.
   // Fall back to cuBLAS for this combination.
   if (need_k_pad && ctx.transB) {
     return false;

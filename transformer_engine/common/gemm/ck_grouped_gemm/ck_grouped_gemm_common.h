@@ -144,8 +144,7 @@ static inline bool launch_grouped_gemm_kernel(const DescContainer& descs,
               " accumulate=", ctx.accumulate, " groups=", ctx.group_num,
               ". Falling back. "
               "CK_Tile constraints for bf16/fp16: "
-              "contiguous dim of A and B must be dword-aligned (even), "
-              "N must be multiple of 16 (GetVectorSizeC).");
+              "contiguous dim of A and B must be dword-aligned (even).");
     for (size_t i = 0; i < descs.size(); ++i) {
       NVTE_WARN("  group ", i, ": M=", descs[i].M, " N=", descs[i].N, " K=", descs[i].K,
                 " stride_A=", descs[i].stride_A, " stride_B=", descs[i].stride_B,

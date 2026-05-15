@@ -3080,11 +3080,13 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
     reason="Only enable CUTLASS/CK grouped gemm on Hopper or ROCm",
 )
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=str)
+# NT is excluded: transB=true means ColMajor B, and CK produces incorrect
+# results with kPadK + ColMajor B (the dispatch falls back to cuBLAS).
 @pytest.mark.parametrize("layout", ["TN", "NN"])
 @pytest.mark.parametrize("accumulate", [False, True])
 @pytest.mark.parametrize(
     "pad_dim",
-    ["K", "M", "N"],
+    ["K", "M", "N", "MK"],
     ids=lambda d: f"pad{d}",
 )
 def test_grouped_gemm_unaligned(dtype, layout, accumulate, pad_dim):
@@ -3094,8 +3096,7 @@ def test_grouped_gemm_unaligned(dtype, layout, accumulate, pad_dim):
       - Contiguous dim of A/B must be dword-aligned (even for 2-byte types).
         RowMajor: contiguous dim is cols (K for A, N for B).
         ColMajor: contiguous dim is rows (M for A, K for B).
-      - N: must be multiple of 16 (GetVectorSizeC, no dword fallback), tile 128/256
-      - K tile: 64, M tile: 256
+      - K tile: 64, M tile: 256, N tile: 128/256
     """
     torch.manual_seed(0)
     z = 8
@@ -3125,6 +3126,10 @@ def test_grouped_gemm_unaligned(dtype, layout, accumulate, pad_dim):
             k_val = k_aligned
             m_vals = unaligned_m
             n_val = n_aligned
+        elif pad_dim == "MK":
+            k_val = unaligned_k
+            m_vals = unaligned_m
+            n_val = n_aligned
         else:  # N
             k_val = k_aligned
             m_vals = [m_aligned] * z
@@ -3146,6 +3151,10 @@ def test_grouped_gemm_unaligned(dtype, layout, accumulate, pad_dim):
             n_out = n_aligned
         elif pad_dim == "M":
             gemm_k = k_aligned
+            m_vals = unaligned_m
+            n_out = n_aligned
+        elif pad_dim == "MK":
+            gemm_k = unaligned_k
             m_vals = unaligned_m
             n_out = n_aligned
         else:  # N
