@@ -369,7 +369,6 @@ class FusedAttnRunner:
     attn_mask_type: AttnMaskType
     softmax_type: AttnSoftmaxType
     dropout_prob: float
-    use_old_rng: bool
     dtype: DTypeLike
     is_training: bool
     qkv_layout: QKVLayout
@@ -378,6 +377,7 @@ class FusedAttnRunner:
     seq_desc_format: SeqDescFormat
     stripe_size: int | None = None
     num_segments_per_seq: int | None = None
+    use_old_rng: bool = True #ROCm may use new-style RNG
 
     # Specifies sharding resources for distributed tests
     number_of_devices: int = 1
@@ -1370,13 +1370,6 @@ class FusedAttnRunner:
         pytest.param(0.1, id="DROP_0.1"),
     ],
 )
-# Only testing old-style RNGs by default to reduce the # of tests but leaving the hooks in place
-@pytest.mark.parametrize(
-    "use_old_rng",
-    [
-        pytest.param(True, id="Old-style rng"),
-    ],
-)
 @pytest.mark.parametrize(
     "swa",
     [
@@ -1428,7 +1421,6 @@ class TestFusedAttn:
         attn_mask_type,
         softmax_type,
         dropout_prob,
-        use_old_rng,
         dtype,
         is_training,
         qkv_layout,
@@ -1456,7 +1448,6 @@ class TestFusedAttn:
             attn_mask_type,
             softmax_type,
             dropout_prob,
-            use_old_rng,
             dtype,
             is_training,
             qkv_layout,
@@ -1486,7 +1477,6 @@ class TestFusedAttn:
         attn_mask_type,
         softmax_type,
         dropout_prob,
-        use_old_rng,
         dtype,
         qkv_layout,
         bias_shape,
@@ -1511,7 +1501,6 @@ class TestFusedAttn:
             attn_mask_type,
             softmax_type,
             dropout_prob,
-            use_old_rng,
             dtype,
             True,
             qkv_layout,
@@ -1742,7 +1731,6 @@ def test_backward_bias_all_neg_inf(
         attn_mask_type=AttnMaskType.NO_MASK,
         softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
         dropout_prob=0.0,
-        use_old_rng=True,
         dtype=dtype,
         is_training=True,
         qkv_layout=qkv_layout,
