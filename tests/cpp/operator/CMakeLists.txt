@@ -4,7 +4,6 @@
 #
 # See LICENSE for license information.
 
-set(GX_CUDA $<BOOL:${USE_CUDA}>)
 add_executable(test_operator
                test_cast.cu
                test_cast_current_scaling.cu
@@ -16,7 +15,7 @@ add_executable(test_operator
                test_cast_mxfp8.cu
                test_cast_mxfp8_grouped.cu
                test_cast_nvfp4_transpose.cu
-               $<${GX_CUDA}:test_cast_float8blockwise.cu>
+               test_cast_float8blockwise.cu #CUDA-only test
                test_dequantize_mxfp8.cu
                test_transpose.cu
                test_cast_transpose.cu
@@ -33,13 +32,18 @@ add_executable(test_operator
                test_multi_padding.cu
                test_multi_unpadding.cu
                test_causal_softmax.cu
-               $<${GX_CUDA}:test_swizzle.cu>
+               test_swizzle.cu #CUDA-only test
                test_swap_first_dims.cu
-               $<${GX_CUDA}:test_grouped_gemm.cu>
+               test_grouped_gemm.cu #CUDA-only test
                ../test_common.cu)
 
 if(USE_ROCM)
   get_target_property(test_cuda_sources test_operator SOURCES)
+  # Remove CUDA-only tests and add ROCm specific ones
+  list(REMOVE_ITEM test_cuda_sources
+              test_cast_float8blockwise.cu
+              test_swizzle.cu
+              test_grouped_gemm.cu)
   list(APPEND test_cuda_sources
               test_dequantize_nvfp4.cu
               test_cublaslt_gemm.cu
