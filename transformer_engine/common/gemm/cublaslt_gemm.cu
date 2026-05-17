@@ -34,7 +34,7 @@
 #else
 #include "ck_grouped_gemm/ck_grouped_gemm.h"
 #include "ck_mx_grouped_gemm/ck_mx_grouped_gemm.hpp"
-
+#endif
 
 #ifndef __HIP_PLATFORM_AMD__
 namespace {
@@ -1205,7 +1205,8 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype() &&
 #ifdef __HIP_PLATFORM_AMD__
       true)                               {
-    const bool mxfp8_gemm = !use_fp4 && is_mxfp8_scaling(inputA->scaling_mode);
+    auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
+    const bool mxfp8_gemm = transformer_engine::is_mxfp8_scaling(inputA->scaling_mode);
 
     bool handled_by_ck = false;
     if (mxfp8_gemm) {
