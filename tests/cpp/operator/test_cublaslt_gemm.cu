@@ -562,7 +562,6 @@ void performTest(const TestParams& params) {
   }
 
   auto [atol, rtol] = getTestTolerances(dtype, has_fp8, use_mxfp8);
-  size_t mismatch_limit = use_mxfp8 ? std::max((size_t)1, params.m * params.n / 1'000'000) : 0;
   RefD.to_cpu();
   compareResults("D", D, RefD.rowwise_cpu_dptr<D_Type>(), true, atol, rtol);
 

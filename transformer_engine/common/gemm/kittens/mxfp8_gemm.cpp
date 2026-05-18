@@ -733,13 +733,20 @@ static bool mxfp8_gemm_nt(
 }
 
 static int fp8_code(int dt) {
-    return (dt == KITTENS_FP8E5M2) ? 1 : 0;
+    switch (dt) {
+    case KITTENS_FP8E4M3: return 0;
+    case KITTENS_FP8E5M2: return 1;
+    default: assert(0 && "unexpected FP8 dtype"); return 0;
+    }
 }
 
 static int out_code(int dt) {
-    if (dt == KITTENS_BFLOAT16) { return 1; }
-    if (dt == KITTENS_FLOAT16)  { return 2; }
-    return 0;
+    switch (dt) {
+    case KITTENS_FLOAT32:  return 0;
+    case KITTENS_BFLOAT16: return 1;
+    case KITTENS_FLOAT16:  return 2;
+    default: assert(0 && "unexpected output dtype"); return 0;
+    }
 }
 
 bool kittens_mxfp8_gemm(
@@ -775,7 +782,7 @@ bool kittens_mxfp8_gemm(
                              aux_gelu, out_dc, aux_dc,
                              workspace, workspace_size, stream);
     } else {
-        assert(false && "kittens_mxfp8_gemm: TT layout is not supported");
+        assert(0 && "kittens_mxfp8_gemm: TT layout is not supported");
     }
     return false;
 
