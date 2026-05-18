@@ -154,6 +154,12 @@ void launch_ln_bwd_general_(LaunchParams<BackwardKernelParams> &launch_params,
 //  HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, ...
 //                             WARPS_M, WARPS_N, BYTES_PER_LDG, BYTES_PER_LDG_FINAL
 
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 128, fp32, fp32, fp32, fp32, 1, 4, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 128, fp16, fp16, fp16, fp32, 1, 4, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 128, fp16, fp32, fp16, fp32, 1, 4, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 128, bf16, bf16, bf16, fp32, 1, 4, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 128, bf16, fp32, bf16, fp32, 1, 4, 1, 4, 4);
+
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 768, fp32, fp32, fp32, fp32, 1, 4, 1, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 768, fp16, fp16, fp16, fp32, 1, 4, 1, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 768, fp16, fp32, fp16, fp32, 1, 4, 1, 16, 4);
@@ -213,6 +219,12 @@ REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 6144, fp16, fp16, fp16, fp32,
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 6144, fp16, fp32, fp16, fp32, 1, 1, 8, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 6144, bf16, bf16, bf16, fp32, 1, 1, 8, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 6144, bf16, fp32, bf16, fp32, 1, 1, 8, 16, 4);
+
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, fp32, fp32, fp32, fp32, 1, 1, 7, 16, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, fp16, fp16, fp16, fp32, 1, 1, 7, 16, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, fp16, fp32, fp16, fp32, 1, 1, 7, 16, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, bf16, bf16, bf16, fp32, 1, 1, 7, 16, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, bf16, fp32, bf16, fp32, 1, 1, 7, 16, 4);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 8192, fp32, fp32, fp32, fp32, 2, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 8192, fp16, fp16, fp16, fp32, 2, 1, 4, 16, 4);
