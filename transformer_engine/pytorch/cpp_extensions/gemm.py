@@ -330,10 +330,10 @@ def general_gemm(
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
 
-    is_mxfp8 = isinstance(A, MXFP8TensorStorage) or isinstance(B, MXFP8TensorStorage)
+    is_mxfp8 = isinstance(A, MXFP8TensorStorage)
     if is_mxfp8 and _use_hipkittens():
-        a_size = A.size() if hasattr(A, "size") and callable(A.size) else A.shape
-        b_size = B.size() if hasattr(B, "size") and callable(B.size) else B.shape
+        a_size = A.size()
+        b_size = B.size()
         m  = a_size[0] if transa else a_size[-1]
         n  = b_size[-1] if transb else b_size[0]
         k  = a_size[-1] if transa else a_size[0]
