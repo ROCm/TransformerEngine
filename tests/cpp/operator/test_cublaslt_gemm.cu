@@ -357,6 +357,7 @@ void performTest(const TestParams& params) {
 
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
   const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
+  const bool use_hipkittens_mxfp8 = use_mxfp8 && !params.force_hipblaslt
 
   if (use_mxfp8) {
     if (!has_fp8) {
@@ -368,7 +369,7 @@ void performTest(const TestParams& params) {
     if (params.k % 128) {
       GTEST_SKIP() << "MXFP8 requires K to be a multiple of 128";
     }
-    if (!params.force_hipblaslt && (params.m % 256 || params.n % 256 || params.k < 256)) {
+    if (use_hipkittens_mxfp8 && (params.m % 256 || params.n % 256 || params.k < 256)) {
       GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
     }
   }
@@ -402,18 +403,18 @@ void performTest(const TestParams& params) {
 
   if (has_fp8)
   {
-    bool fp8_supported = (prop.major == 9 && prop.minor >= 4) || prop.major >= 12;
+    const bool fp8_supported = (prop.major == 9 && prop.minor >= 4) || prop.major >= 12;
     if (!fp8_supported) {
       GTEST_SKIP() << "FP8 is not supported in current config";
     }
-    bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
+    const bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
     if (use_mxfp8 && !mxfp8_supported) {
       GTEST_SKIP() << "MXFP8 is not supported in current config";
     }
-    if (use_mxfp8 && params.use_bias && params.force_hipblaslt) {
+    if (!use_hipkittens_mxfp8 && params.use_bias) {
       GTEST_SKIP() << "MXFP8 GEMM with bias is not supported by hipBLASLt";
     }
-    if (params.use_gelu && !fp8_gelu_fusion_config && (params.force_hipblaslt || !use_mxfp8)) {
+    if (params.use_gelu && !fp8_gelu_fusion_config && !use_hipkittens_mxfp8) {
       GTEST_SKIP() << "FP8 GEMM with GELU is not supported in current config";
     }
     if (params.use_bias && dtype == DType::kFloat16) {
@@ -426,7 +427,7 @@ void performTest(const TestParams& params) {
     if (isFp8Type(dtype)) {
       GTEST_SKIP() << "GEMM with float8 output is not supported";
     }
-    if (params.use_gelu && dtype == DType::kBFloat16 && (params.force_hipblaslt || !use_mxfp8)) {
+    if (params.use_gelu && dtype == DType::kBFloat16 && !use_hipkittens_mxfp8) {
       GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
     }
     if constexpr ((std::is_same_v<A_Type, bf8> || std::is_same_v<B_Type, bf8>) &&
@@ -502,7 +503,7 @@ void performTest(const TestParams& params) {
   if ((prop.major == 9 && prop.minor == 5) || prop.major >= 12) {
     workspace_size = 67108864;
   }
-  if (use_mxfp8 && !params.force_hipblaslt) {
+  if (use_mxfp8 && !use_hipkittens_mxfp8) {
     workspace_size = compute_mxfp8_workspace_size(params.m, params.k, params.n,
                                                   params.transa, params.transb,
                                                   workspace_size);
@@ -592,14 +593,16 @@ void performDqTest(const TestParams &params) {
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-  bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
+  const bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
+  const bool use_hipkittens_mxfp8 = use_mxfp8 && !params.force_hipblaslt
+
   if (!mxfp8_supported) {
     GTEST_SKIP() << "MXFP8 is not supported in current config";
   }
   if (params.use_bias || params.use_gelu) {
     GTEST_SKIP() << "DqGEMMTestSuite does not yet have reference for bias/gelu epilogues";
   }
-  if (!params.force_hipblaslt && (params.m % 256 || params.n % 256 || params.k % 128 || params.k < 256)) {
+  if (use_hipkittens_mxfp8 && (params.m % 256 || params.n % 256 || params.k % 128 || params.k < 256)) {
     GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
   }
 
