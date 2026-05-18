@@ -228,20 +228,18 @@ const std::unordered_map<NVTE_Mask_Type, std::string> mNVTEMaskTypeStr = {
   {NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK, "PADDING_CAUSAL_BOTTOM_RIGHT_MASK"},
 };
 
-// True for the two *_BOTTOM_RIGHT_MASK variants, false otherwise.
-inline bool implied_bottom_right_diagonal(NVTE_Mask_Type attn_mask_type) {
-  return attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
-         attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK;
-}
-
-// The ROCm/AITER fused-attn backend derives mask anchoring solely from the
-// NVTE_Mask_Type enum and does not consume `bottom_right_diagonal`. Any
-// divergence between the boolean and the alignment implied by the mask type
-// would silently produce numerically incorrect attention, so we reject it
-// here until AITER plumbs an explicit alignment parameter.
+// ROCm/AITER fused-attn derives diagonal alignment from NVTE_Mask_Type alone.
+// Reject mismatches on causal variants to avoid silent corruption; the flag is
+// inert for non-causal masks (no_mask, padding, arbitrary).
 inline void check_bottom_right_diagonal(NVTE_Mask_Type attn_mask_type,
                                         bool bottom_right_diagonal) {
-  if (bottom_right_diagonal != implied_bottom_right_diagonal(attn_mask_type)) {
+  const bool is_top_left =
+      attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK;
+  const bool is_bottom_right =
+      attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
+      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK;
+  if ((is_top_left && bottom_right_diagonal) || (is_bottom_right && !bottom_right_diagonal)) {
     NVTE_ERROR(
         "ROCm fused attention does not support a `bottom_right_diagonal` value "
         "that diverges from the alignment implied by `attn_mask_type`. Use "
