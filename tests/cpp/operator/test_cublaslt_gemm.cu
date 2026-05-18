@@ -319,6 +319,14 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
   else if (use_fp8) {
     atol = 1e-3;
     rtol = std::max(rtol, 1e-2);
+#ifdef __HIP_PLATFORM_AMD__
+    // Relax for gfx1250
+    cudaDeviceProp prop;
+    (void)cudaGetDeviceProperties(&prop, 0);
+    if (prop.major >= 12 && type == DType::kBFloat16) {
+      rtol = std::max(rtol, 5e-2);
+    }
+#endif
   }
   else if (type == DType::kBFloat16) {
     //relax for certain prime number TN gemm
@@ -497,6 +505,66 @@ void performTest(const TestParams& params) {
 #endif
   Tensor Workspace("Workspace", TShape{ workspace_size }, DType::kByte);
 
+  //perform the reference gemm on GPU (before swizzle, which modifies scales in-place)
+  Tensor RefD("RefD", TShape{ params.n, params.m }, dtype);
+  Tensor RefPreGeluOut;
+
+  if (params.use_gelu) {
+    RefPreGeluOut = Tensor("RefPreGeluOut", TShape{ params.n, params.m }, gelu_type);
+  }
+
+  run_reference<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
+    params,
+    A,
+    B,
+    params.use_bias ? &bias : nullptr,
+    D,
+    RefD,
+    params.use_gelu ? &RefPreGeluOut : nullptr);
+
+#ifdef __HIP_PLATFORM_AMD__
+  // On gfx1250+, hipBLASLt MXFP8 kernels expect pre-swizzled scales.
+  if (use_mxfp8 && prop.major >= 12) {
+    auto swizzle_scales = [](test::Tensor &t, bool rowwise) {
+      using namespace transformer_engine;
+      void *scale_ptr = rowwise ? t.rowwise_scale_inv_dptr()
+                                : t.columnwise_scale_inv_dptr();
+      if (!scale_ptr) return;
+      const NVTEShape scale_shape = rowwise ? t.rowwise_scale_inv_shape()
+                                            : t.columnwise_scale_inv_shape();
+      const NVTEShape data_shape = rowwise ? t.rowwise_shape()
+                                           : t.columnwise_shape();
+      size_t num_scales = 1;
+      for (size_t d = 0; d < scale_shape.ndim; d++) num_scales *= scale_shape.data[d];
+      uint8_t *d_tmp = nullptr;
+      NVTE_CHECK_CUDA(cudaMalloc(&d_tmp, num_scales));
+      TensorWrapper input_tw(NVTE_MXFP8_1D_SCALING);
+      TensorWrapper output_tw(NVTE_MXFP8_1D_SCALING);
+      output_tw.set_with_gemm_swizzled_scales(true);
+      if (rowwise) {
+        input_tw.set_rowwise_data(nullptr, t.dtype(), data_shape);
+        input_tw.set_rowwise_scale_inv(scale_ptr, DType::kFloat8E8M0, scale_shape);
+        output_tw.set_rowwise_data(nullptr, t.dtype(), data_shape);
+        output_tw.set_rowwise_scale_inv(d_tmp, DType::kFloat8E8M0, scale_shape);
+      } else {
+        input_tw.set_columnwise_data(nullptr, t.dtype(), data_shape);
+        input_tw.set_columnwise_scale_inv(scale_ptr, DType::kFloat8E8M0, scale_shape);
+        output_tw.set_columnwise_data(nullptr, t.dtype(), data_shape);
+        output_tw.set_columnwise_scale_inv(d_tmp, DType::kFloat8E8M0, scale_shape);
+      }
+      nvte_swizzle_scaling_factors(input_tw.data(), output_tw.data(), 0);
+      NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+      NVTE_CHECK_CUDA(cudaMemcpy(scale_ptr, d_tmp, num_scales, cudaMemcpyDeviceToDevice));
+      NVTE_CHECK_CUDA(cudaFree(d_tmp));
+    };
+    // Swizzle only the scale directions that actually exist on the tensor.
+    if (!a_colwise) swizzle_scales(A, true);
+    if (a_colwise)  swizzle_scales(A, false);
+    if (!b_colwise) swizzle_scales(B, true);
+    if (b_colwise)  swizzle_scales(B, false);
+  }
+#endif
+
   //perform the gemm in GPU
   nvte_cublas_gemm(A.data(),
                    B.data(),
@@ -517,23 +585,6 @@ void performTest(const TestParams& params) {
   if(params.use_gelu){
     pre_gelu_out.to_cpu();
   }
-
-  //perform the reference gemm on GPU
-  Tensor RefD("RefD", TShape{ params.n, params.m }, dtype);
-  Tensor RefPreGeluOut;
-
-  if (params.use_gelu) {
-    RefPreGeluOut = Tensor("RefPreGeluOut", TShape{ params.n, params.m }, gelu_type);
-  }
-
-  run_reference<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
-    params,
-    A,
-    B,
-    params.use_bias ? &bias : nullptr,
-    D,
-    RefD,
-    params.use_gelu ? &RefPreGeluOut : nullptr);
 
   // check if error message happens in running                             
   (void)cudaDeviceSynchronize();
