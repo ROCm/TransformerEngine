@@ -220,11 +220,11 @@ REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 6144, fp16, fp32, fp16, fp32,
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 6144, bf16, bf16, bf16, fp32, 1, 1, 8, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 6144, bf16, fp32, bf16, fp32, 1, 1, 8, 16, 4);
 
-REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, fp32, fp32, fp32, fp32, 1, 1, 7, 8, 4);
-REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, fp16, fp16, fp16, fp32, 1, 1, 7, 8, 4);
-REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, fp16, fp32, fp16, fp32, 1, 1, 7, 8, 4);
-REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, bf16, bf16, bf16, fp32, 1, 1, 7, 8, 4);
-REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, bf16, fp32, bf16, fp32, 1, 1, 7, 8, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, fp32, fp32, fp32, fp32, 1, 1, 7, 16, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, fp16, fp16, fp16, fp32, 1, 1, 7, 16, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, fp16, fp32, fp16, fp32, 1, 1, 7, 16, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, bf16, bf16, bf16, fp32, 1, 1, 7, 16, 4);
+REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 7168, bf16, fp32, bf16, fp32, 1, 1, 7, 16, 4);
 
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 8192, fp32, fp32, fp32, fp32, 2, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(LayerNorm, Backward, tuned, 8192, fp16, fp16, fp16, fp32, 2, 1, 4, 16, 4);
