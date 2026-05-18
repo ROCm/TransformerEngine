@@ -786,7 +786,7 @@ class DqGEMMTestSuite: public GEMMTestSuite {};
 
 MAKE_DQ_GEMM_TEST(Testfp8xfp8xfp16, fp8, fp8, fp16)
 
-INSTANTIATE_TEST_SUITE_P(OperatorTest, DqGEMMTestSuite,
+INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP8, DqGEMMTestSuite,
                          ::testing::Combine(::testing::ValuesIn(test_case_sizes_mxfp8),
                                             ::testing::Values(false),        // use bias
                                             ::testing::Values(false),        // use gelu

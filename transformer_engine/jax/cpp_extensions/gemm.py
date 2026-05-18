@@ -7,6 +7,7 @@
 
 import math
 import operator
+import os
 from collections.abc import Iterable
 from dataclasses import dataclass
 from functools import partial, reduce
@@ -82,6 +83,15 @@ jnp_float8_e4m3_type = get_jnp_float8_e4m3_type()
 jnp_float8_e5m2_type = get_jnp_float8_e5m2_type()
 
 num_cublas_streams = get_num_compute_streams()
+
+
+def _use_hipkittens() -> bool:
+    """Check if HipKittens MXFP8 backend is active."""
+    if not is_hip_extension():
+        return False
+    if get_device_compute_capability(0) != 95:
+        return False
+    return os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "0") != "1"
 
 
 def _hipkittens_workspace_bytes(m: int, n: int, k: int, layout: str) -> int:
@@ -576,7 +586,7 @@ class GemmPrimitive(BasePrimitive):
         if scaling_mode.is_nvfp4_scaling:
             workspace_size += lhs_scale_inv.size + rhs_scale_inv.size
         # HipKittens MXFP8 NN/NT kernels need workspace for transposed data and scales
-        if scaling_mode.is_mxfp8_scaling and is_hip_extension() and get_device_compute_capability(0) == 95:
+        if scaling_mode.is_mxfp8_scaling and _use_hipkittens():
             m = reduce(operator.mul, lhs_non_contracting_shape)
             n = reduce(operator.mul, rhs_non_contracting_shape)
             k = lhs_contracting_size
