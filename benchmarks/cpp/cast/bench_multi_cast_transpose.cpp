@@ -187,8 +187,6 @@ static void BM_MultiCastTranspose(benchmark::State &state) {
   HIP_CHECK(hipEventCreate(&start));
   HIP_CHECK(hipEventCreate(&stop));
 
-  nvte_multi_cast_transpose(num_experts, nvte_in.data(), nvte_out.data(), stream);
-  HIP_CHECK(hipStreamSynchronize(stream));
   warmup_gpu();
 
   for (auto _ : state) {
@@ -232,7 +230,7 @@ static void BM_MultiCastTranspose(benchmark::State &state) {
     ->Unit(benchmark::kMicrosecond)                                           \
     ->UseManualTime();                                                        \
   BENCHMARK_TEMPLATE(BM_MultiCastTranspose, ITYPE)                            \
-    ->Name("BM_MultiCastTranspose/" INAME "_E4M3/moe_skewed")                \
+    ->Name("BM_MultiCastTranspose/" INAME "_E4M3/moe_skewed")                 \
     MOE_SKEWED                                                                \
     ->Unit(benchmark::kMicrosecond)                                           \
     ->UseManualTime();
