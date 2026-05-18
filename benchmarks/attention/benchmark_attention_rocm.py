@@ -84,6 +84,9 @@ columns = [
 output_csv = "times.csv"
 # Output directory name
 output_dir_name = "profiler_outputs"
+# rocprofv3 output prefix and kernel stats filename (see rocprofv3 -o/-d)
+rocprof_output_prefix = "results"
+rocprof_kernel_stats_csv = f"{rocprof_output_prefix}_kernel_stats.csv"
 # Current working directory
 cwd = os.getcwd()
 
@@ -137,7 +140,7 @@ KERNEL_PATTERNS = {
     "aotriton_bwd": "bwd",
 }
 
-# Runs benchmark with warmup iterations and profiles using rocprof
+# Runs benchmark with warmup iterations and profiles using rocprofv3
 def benchmark_dot_product_attention(model, attention, column_name, dirname):
     config = model_configs[model]
 
@@ -153,29 +156,34 @@ def benchmark_dot_product_attention(model, attention, column_name, dirname):
                 is_training,
             )
     os.makedirs(dirname, exist_ok=True)
-    before_files = set(os.listdir(cwd))
-    # Profiling command using rocprof
     benchmark_dir = os.path.dirname(os.path.abspath(__file__))
+    profiler_script = (
+        f"import sys; sys.path.insert(0, {benchmark_dir!r}); "
+        f"import benchmark_attention_rocm; "
+        f"benchmark_attention_rocm.benchmark_dot_product_attention_profiler("
+        f"{model!r}, {attention!r}, {column_name!r})"
+    )
+    # rocprofv3: --kernel-trace + --stats replaces rocprofv2 --hip-trace (kernel stats
+    # are not enabled by default). Full kernel names are kept (v2 --basenames off).
     prof_cmd = [
-            "rocprof",
-            "--hip-trace",
-            "--basenames off",
-            "python",
-            "-c",
-            f""" "import sys; sys.path.insert(0, '{benchmark_dir}'); import benchmark_attention_rocm;""",
-            f"""benchmark_attention_rocm.benchmark_dot_product_attention_profiler("""
-            f"""'{model}', '{attention}', '{column_name}')" """,
-        ]
-    prof_cmd = " ".join(prof_cmd)
-    subprocess.call(prof_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
-    after_files = set(os.listdir(cwd))
-    new_files = after_files - before_files
-
-    for f in new_files:
-        src_path = os.path.join(cwd, f)
-        dst_path = os.path.join(dirname, f)
-        if os.path.isfile(src_path):  # Only move files, not directories
-            shutil.move(src_path, dst_path)
+        "rocprofv3",
+        "--kernel-trace",
+        "--stats",
+        "-f", "csv",
+        "-o", rocprof_output_prefix,
+        "-d", dirname,
+        "--",
+        sys.executable,
+        "-c",
+        profiler_script,
+    ]
+    result = subprocess.run(prof_cmd, capture_output=True, text=True)
+    if result.returncode != 0:
+        print(
+            f"rocprofv3 failed for {model} [{attention}] (exit {result.returncode}):\n"
+            f"{result.stderr}",
+            file=sys.stderr,
+        )
     torch.cuda.empty_cache()
     
 # Runs profiler and records timing information
@@ -216,7 +224,10 @@ def calculate_attention_tflops(batch_size, seq_len, num_heads_q, head_dim_qk, fw
 
 # Helper function to extract timing results from profiler logs
 def parse_helper(model, dirname, fwd_search_pattern, bwd_search_pattern, column_name, df_times):
-    df = pd.read_csv(os.path.join(dirname, "results.stats.csv"))
+    stats_csv = os.path.join(dirname, rocprof_kernel_stats_csv)
+    if not os.path.isfile(stats_csv):
+        return False
+    df = pd.read_csv(stats_csv)
 
     # Extract kernel timing values
     fwd_values = df[df["Name"].str.contains(fwd_search_pattern, regex=False)]["AverageNs"].to_numpy()
@@ -281,7 +292,7 @@ def sanity_checks(
 ):
     """
     • Verifies that every model/backend that *should* have run produced
-        profiler_root/<dir>/results.stats.csv
+        profiler_root/<dir>/results_kernel_stats.csv
     • Non-zero exit code on any failure (CI friendly)
     """
     if profiler_root is None:
@@ -323,12 +334,14 @@ def sanity_checks(
         print(f"{model}:")
         # Rocprof run status
         for be, pat in expected.items():
-            stats = os.path.join(profiler_root, pat.format(model=model), "results.stats.csv")
+            stats = os.path.join(profiler_root, pat.format(model=model), rocprof_kernel_stats_csv)
             if os.path.isfile(stats):
                 print(f"  [{be:<22}] Profiling successful")
             else:
                 ok_overall = False
-                raise FileNotFoundError(f"Error while profiling {model} [{be}], results.stats.csv not found")
+                raise FileNotFoundError(
+                    f"Error while profiling {model} [{be}], {rocprof_kernel_stats_csv} not found"
+                )
 
         print("-" * 60)
     return ok_overall
@@ -347,7 +360,7 @@ def main(args):
     os.makedirs(output_dir)
 
     df_times = pd.DataFrame(index=indices, columns=columns)
-    df_times = df_times.infer_objects(copy=False)
+    df_times = df_times.infer_objects()
     df_times.fillna(0.0, inplace=True)
     df_times.index.name = "Model"
     df_times.to_csv(output_csv_path)

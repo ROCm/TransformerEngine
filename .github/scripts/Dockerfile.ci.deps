@@ -1,49 +1,99 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
+#
+# TE CI deps image: Ubuntu 24.04 + one TheRock ROCm tarball + Python 3.12 venv.
+#
+#   docker build -f .github/scripts/Dockerfile.ci.deps \
+#     --build-arg GPU_ARCH=gfx942 \
+#     -t te-ci-deps:rocm-7.12.0-ubuntu24.04-py312-gfx942 .
+#
+#   docker build -f .github/scripts/Dockerfile.ci.deps \
+#     --build-arg GPU_ARCH=gfx950 \
+#     -t te-ci-deps:rocm-7.12.0-ubuntu24.04-py312-gfx950 .
+#
+# ROCm installer: https://raw.githubusercontent.com/ROCm/TheRock/main/dockerfiles/install_rocm_tarball.sh
 
-## TE CI Dockerfile
-ARG BASE_DOCKER=registry-sc-harbor.amd.com/framework/compute-rocm-rel-7.2:57_ubuntu22.04_py3.11_pytorch_release-2.8_08d38866
-FROM $BASE_DOCKER
-WORKDIR /
+FROM ubuntu:24.04
 
-# Updated git via git-core PPA
-RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common \
-    && add-apt-repository ppa:git-core/ppa -y \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends git vim \
+ARG DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+ARG ROCM_VERSION=7.12.0
+ARG GPU_ARCH=gfx942
+ARG INSTALL_ROCM_TARBALL_SH_URL=https://raw.githubusercontent.com/ROCm/TheRock/main/dockerfiles/install_rocm_tarball.sh
+
+# Map GPU_ARCH → AMD GPU wheel/tarball family (once).
+RUN case "${GPU_ARCH}" in \
+      gfx942) echo -n gfx94X-dcgpu > /etc/amd_gpu_family ;; \
+      gfx950) echo -n gfx950-dcgpu > /etc/amd_gpu_family ;; \
+      *) echo "GPU_ARCH must be gfx942 or gfx950 (got: ${GPU_ARCH})" >&2; exit 1 ;; \
+    esac
+
+# Base OS packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl \
+    git vim \
+    build-essential cmake ninja-build pkg-config liblzma-dev \
+    python3.12 python3.12-venv python3.12-dev python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Build arguments
+# Native ROCm tarball → /opt/rocm
+RUN AMD_GPU_FAMILY=$(cat /etc/amd_gpu_family) \
+    && curl -fsSL -o /tmp/install_rocm_tarball.sh "${INSTALL_ROCM_TARBALL_SH_URL}" \
+    && chmod +x /tmp/install_rocm_tarball.sh \
+    && /tmp/install_rocm_tarball.sh "${ROCM_VERSION}" "${AMD_GPU_FAMILY}" stable \
+    && rm -f /tmp/install_rocm_tarball.sh
+
+RUN python3.12 -m venv /opt/venv \
+    && { echo ""; echo "# ROCm"; \
+         echo 'export ROCM_PATH=/opt/rocm'; \
+         echo 'export PATH="${ROCM_PATH}/bin:${PATH}"'; \
+         echo 'if [ -n "${LD_LIBRARY_PATH:-}" ]; then export LD_LIBRARY_PATH="${ROCM_PATH}/lib:${LD_LIBRARY_PATH}"; else export LD_LIBRARY_PATH="${ROCM_PATH}/lib"; fi'; \
+       } >> /opt/venv/bin/activate
+
+ENV GPU_ARCH=${GPU_ARCH} \
+    ROCM_PATH=/opt/rocm \
+    VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    LD_LIBRARY_PATH=/opt/rocm/lib
+
+RUN python -m pip install --upgrade pip setuptools wheel \
+    && pip install --no-cache-dir ipython pytest fire pydantic pybind11 ninja pandas expecttest
+
+# Python ROCm SDK + torch / jax from https://repo.amd.com/rocm/whl/<AMD_GPU_FAMILY>/
+RUN AMD_GPU_FAMILY=$(cat /etc/amd_gpu_family) \
+    && W="https://repo.amd.com/rocm/whl/${AMD_GPU_FAMILY}" \
+    && LIBS_PKG="rocm-sdk-libraries-$(echo "${AMD_GPU_FAMILY}" | tr '[:upper:]' '[:lower:]')" \
+    && pip install --no-cache-dir \
+        --extra-index-url "${W}" \
+        "rocm-sdk-core==${ROCM_VERSION}" \
+        "rocm-sdk-devel==${ROCM_VERSION}" \
+        "${LIBS_PKG}==${ROCM_VERSION}" \
+        "${W}/rocm-${ROCM_VERSION}.tar.gz" \
+        "${W}/torch-2.10.0%2Brocm7.12.0-cp312-cp312-linux_x86_64.whl" \
+        "${W}/torchvision-0.25.0%2Brocm7.12.0-cp312-cp312-linux_x86_64.whl" \
+        "${W}/torchaudio-2.10.0%2Brocm7.12.0-cp312-cp312-linux_x86_64.whl" \
+        "${W}/triton-3.6.0%2Brocm7.12.0-cp312-cp312-linux_x86_64.whl" \
+        "${W}/jax_rocm7_pjrt-0.8.2%2Brocm7.12.0-py3-none-manylinux_2_28_x86_64.whl" \
+        "${W}/jax_rocm7_plugin-0.8.2%2Brocm7.12.0-cp312-cp312-manylinux_2_28_x86_64.whl" \
+        "${W}/jaxlib-0.8.2%2Brocm7.12.0-cp312-cp312-manylinux_2_27_x86_64.whl" \
+        "jax==0.8.2"
+
 ARG FA_VERSION=v2.8.1
-ARG ROCM_VERSION=7.2
-ARG JAX_VERSION=0.8.0
-ARG PYTHON_VERSION=311
-# AITER - Required for MXFP4 FP4 GEMM kernels.
+RUN git clone --branch "${FA_VERSION}" --depth 1 https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention \
+    && cd /tmp/flash-attention \
+    && GPU_ARCHS="${GPU_ARCH}" FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE FLASH_ATTENTION_SKIP_CK_BUILD=FALSE \
+       python setup.py install \
+    && rm -rf /tmp/flash-attention
+
 ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
-
-RUN pip install setuptools wheel
-RUN pip install ipython pytest fire pydantic pybind11 ninja pandas
-
-# Install flash-attention
-RUN git clone --branch ${FA_VERSION} --depth 1 https://github.com/Dao-AILab/flash-attention.git \
-    && cd flash-attention \
-    && GPU_ARCHS="gfx950;gfx942" FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE FLASH_ATTENTION_SKIP_CK_BUILD=FALSE python setup.py install \
-    && cd ..
-
-# Install AITER
-RUN git clone --no-checkout https://github.com/ROCm/aiter.git \
-    && cd aiter \
-    && git checkout ${AITER_COMMIT} \
+RUN git clone --no-checkout https://github.com/ROCm/aiter.git /tmp/aiter \
+    && cd /tmp/aiter \
+    && git checkout "${AITER_COMMIT}" \
     && git submodule update --init --recursive \
-    && pip install .
-
-# Install JAX
-RUN ROCM_MAJOR=$(echo "${ROCM_VERSION}" | cut -d. -f1) && pip install \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-${ROCM_VERSION}/jax_rocm${ROCM_MAJOR}_pjrt-${JAX_VERSION}%2Brocm${ROCM_VERSION}.0-py3-none-manylinux_2_28_x86_64.whl \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-${ROCM_VERSION}/jax_rocm${ROCM_MAJOR}_plugin-${JAX_VERSION}%2Brocm${ROCM_VERSION}.0-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux_2_28_x86_64.whl \
-    jax==${JAX_VERSION} \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-${ROCM_VERSION}/jaxlib-${JAX_VERSION}%2Brocm${ROCM_VERSION}.0-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux_2_27_x86_64.whl
+    && GPU_ARCHS="${GPU_ARCH}" pip install --no-build-isolation --no-cache-dir . \
+    && rm -rf /tmp/aiter
 
 WORKDIR /workspace/
 CMD ["/bin/bash"]
