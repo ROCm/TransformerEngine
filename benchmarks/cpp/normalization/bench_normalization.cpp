@@ -22,6 +22,8 @@ using namespace transformer_engine;
   ->Args({8192, 1536}) \
   ->Args({8192, 7168})
 
+constexpr float kNormEpsilon = 1e-5f;
+
 enum class BenchNormType {
   LayerNorm,
   RMSNorm,
@@ -42,7 +44,6 @@ template <BenchNormType Norm, typename WType, typename IType, typename OType, ty
 static void BM_NormForward(benchmark::State& state) {
   const size_t N = state.range(0);
   const size_t H = state.range(1);
-  const float epsilon = 1e-5f;
   constexpr bool zero_centered_gamma = false;
 
   const DType wtype = dtype_of<WType>();
@@ -69,11 +70,11 @@ static void BM_NormForward(benchmark::State& state) {
   HIP_CHECK(hipStreamCreate(&stream));
 
   if constexpr (Norm == BenchNormType::LayerNorm) {
-    nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
+    nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), kNormEpsilon,
                        output.data(), mu.data(), rsigma.data(), workspace.data(),
                        prop.multiProcessorCount, zero_centered_gamma, stream);
   } else {
-    nvte_rmsnorm_fwd(input.data(), gamma.data(), epsilon,
+    nvte_rmsnorm_fwd(input.data(), gamma.data(), kNormEpsilon,
                      output.data(), rsigma.data(), workspace.data(),
                      prop.multiProcessorCount, zero_centered_gamma, stream);
   }
@@ -81,11 +82,11 @@ static void BM_NormForward(benchmark::State& state) {
   workspace = test::Tensor("workspace", workspace.rowwise_shape(), workspace.dtype());
 
   if constexpr (Norm == BenchNormType::LayerNorm) {
-    nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
+    nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), kNormEpsilon,
                        output.data(), mu.data(), rsigma.data(), workspace.data(),
                        prop.multiProcessorCount, zero_centered_gamma, stream);
   } else {
-    nvte_rmsnorm_fwd(input.data(), gamma.data(), epsilon,
+    nvte_rmsnorm_fwd(input.data(), gamma.data(), kNormEpsilon,
                      output.data(), rsigma.data(), workspace.data(),
                      prop.multiProcessorCount, zero_centered_gamma, stream);
   }
@@ -100,11 +101,11 @@ static void BM_NormForward(benchmark::State& state) {
     HIP_CHECK(hipEventRecord(start, stream));
 
     if constexpr (Norm == BenchNormType::LayerNorm) {
-      nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
+      nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), kNormEpsilon,
                          output.data(), mu.data(), rsigma.data(), workspace.data(),
                          prop.multiProcessorCount, zero_centered_gamma, stream);
     } else {
-      nvte_rmsnorm_fwd(input.data(), gamma.data(), epsilon,
+      nvte_rmsnorm_fwd(input.data(), gamma.data(), kNormEpsilon,
                        output.data(), rsigma.data(), workspace.data(),
                        prop.multiProcessorCount, zero_centered_gamma, stream);
     }
@@ -121,13 +122,9 @@ static void BM_NormForward(benchmark::State& state) {
   HIP_CHECK(hipEventDestroy(stop));
   HIP_CHECK(hipStreamDestroy(stream));
 
-  size_t bytes_read =
-      N * H * sizeof(IType) +  // x
-      H * sizeof(WType);       // gamma
+  size_t bytes_read = N * H * sizeof(IType) + H * sizeof(WType);       
 
-  size_t bytes_write =
-      N * H * sizeof(OType) +  // z
-      N * sizeof(float);       // rsigma
+  size_t bytes_write = N * H * sizeof(OType) + N * sizeof(float);
 
   if constexpr (Norm == BenchNormType::LayerNorm) {
     bytes_read += H * sizeof(WType);   // beta
@@ -141,7 +138,6 @@ template <BenchNormType Norm, typename WType, typename IType, typename OType, ty
 static void BM_NormBackward(benchmark::State& state) {
   const size_t N = state.range(0);
   const size_t H = state.range(1);
-  const float epsilon = 1e-5f;
   constexpr bool zero_centered_gamma = false;
 
   const DType wtype = dtype_of<WType>();
@@ -174,11 +170,11 @@ static void BM_NormBackward(benchmark::State& state) {
   HIP_CHECK(hipStreamCreate(&stream));
 
   if constexpr (Norm == BenchNormType::LayerNorm) {
-    nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
+    nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), kNormEpsilon,
                        output.data(), mu.data(), rsigma.data(), workspace_fwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, stream);
   } else {
-    nvte_rmsnorm_fwd(input.data(), gamma.data(), epsilon,
+    nvte_rmsnorm_fwd(input.data(), gamma.data(), kNormEpsilon,
                      output.data(), rsigma.data(), workspace_fwd.data(),
                      prop.multiProcessorCount, zero_centered_gamma, stream);
   }
@@ -188,7 +184,7 @@ static void BM_NormBackward(benchmark::State& state) {
                                workspace_fwd.dtype());
 
   if constexpr (Norm == BenchNormType::LayerNorm) {
-    nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), epsilon,
+    nvte_layernorm_fwd(input.data(), gamma.data(), beta.data(), kNormEpsilon,
                        output.data(), mu.data(), rsigma.data(), workspace_fwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, stream);
 
@@ -196,7 +192,7 @@ static void BM_NormBackward(benchmark::State& state) {
                        dx.data(), dgamma.data(), dbeta.data(), workspace_bwd.data(),
                        prop.multiProcessorCount, zero_centered_gamma, stream);
   } else {
-    nvte_rmsnorm_fwd(input.data(), gamma.data(), epsilon,
+    nvte_rmsnorm_fwd(input.data(), gamma.data(), kNormEpsilon,
                      output.data(), rsigma.data(), workspace_fwd.data(),
                      prop.multiProcessorCount, zero_centered_gamma, stream);
 
