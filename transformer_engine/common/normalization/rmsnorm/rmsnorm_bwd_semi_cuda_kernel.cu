@@ -183,9 +183,9 @@ REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 4096, fp32, fp32, fp32, fp32, 1
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 4096, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 4096, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4);
 
-REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 7168, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4);
-REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 7168, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4);
-REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 7168, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 7168, fp32, fp32, fp32, fp32, 1, 1, 7, 16, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 7168, fp16, fp16, fp16, fp32, 1, 1, 7, 16, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 7168, bf16, bf16, bf16, fp32, 1, 1, 7, 16, 4);
 
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 8192, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 8192, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4);
@@ -278,11 +278,11 @@ REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 4096, fp16, fp16, fp16, fp32
 REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 4096, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4,
                        true);
 
-REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 7168, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4,
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 7168, fp32, fp32, fp32, fp32, 1, 1, 7, 16, 4,
                        true);
-REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 7168, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4,
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 7168, fp16, fp16, fp16, fp32, 1, 1, 7, 16, 4,
                        true);
-REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 7168, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4,
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 7168, bf16, bf16, bf16, fp32, 1, 1, 7, 16, 4,
                        true);
 
 REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 8192, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4,
