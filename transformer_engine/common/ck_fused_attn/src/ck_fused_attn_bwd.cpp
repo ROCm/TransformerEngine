@@ -462,17 +462,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.d_sink_ptr = nullptr;
   fmha_args.mask_type = static_cast<int>(static_cast<mask_enum>(args.attn_mask_type));
   // Mirrors AITER's small-seqlen guard at aiter/ops/mha.py:1689.
-  const bool buggy_small_sq = (args.s_q < 16);
-  // Predicate matches exactly bwd_hd128_bf16_causal_br_a32_psskddv_group.co
-  // (broken by AITER PR #2189). Other psskddv_group variants are unaffected.
-  const bool buggy_br_psskddv_group =
-      args.is_group_mode() &&
-      args.attn_mask_type == ck_fused_attn::MaskType::mask_bottom_right &&
-      args.dtype == ck_fused_attn::DType::kBFloat16 &&
-      args.d_qk == 128 && args.d_v == 128 &&
-      args.is_v3_atomic_fp32;
-  fmha_args.use_asm_v3 =
-      (buggy_small_sq || buggy_br_psskddv_group) ? false : args.uses_bwd_v3;
+  fmha_args.use_asm_v3 = (args.s_q < 16) ? false : args.uses_bwd_v3;
   fmha_args.v3_atomic_fp32 = args.is_v3_atomic_fp32;
   fmha_args.v3_bf16_cvt = args.how_v3_bf16_cvt;
   fmha_args.v3_api_check = false;
