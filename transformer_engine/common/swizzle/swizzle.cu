@@ -504,7 +504,7 @@ void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_
 void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t stream) {
 #ifdef __HIP_PLATFORM_AMD__
   // On gfx1250, MXFP8 uses the MX pre-swizzle layout (K-tiled, grouped by 4).
-  if (input->scaling_mode == NVTE_MXFP8_1D_SCALING && cuda::sm_arch() >= 125) {
+  if (input->scaling_mode == NVTE_MXFP8_1D_SCALING && cuda::sm_arch() == 125) {
     swizzle_scaling_factors_mx(input, output, stream);
     return;
   }
@@ -829,7 +829,7 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
                                           std::vector<Tensor*>& output, cudaStream_t stream) {
 #ifdef __HIP_PLATFORM_AMD__
   // On gfx1250, MXFP8 uses the MX pre-swizzle layout.
-  if (cuda::sm_arch() >= 125) {
+  if (cuda::sm_arch() == 125) {
     bool any_mxfp8 = false;
     for (size_t i = 0; i < input.size(); i++) {
       if (is_mxfp8_scaling(input[i]->scaling_mode)) {
