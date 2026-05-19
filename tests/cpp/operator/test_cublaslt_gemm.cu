@@ -357,7 +357,7 @@ void performTest(const TestParams& params) {
 
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
   const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
-  const bool use_hipkittens_mxfp8 = use_mxfp8 && !params.force_hipblaslt
+  const bool use_hipkittens_mxfp8 = use_mxfp8 && !params.force_hipblaslt;
 
   if (use_mxfp8) {
     if (!has_fp8) {
@@ -593,7 +593,7 @@ void performDqTest(const TestParams &params) {
   (void)cudaGetDeviceProperties(&prop, 0);
 
   const bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
-  const bool use_hipkittens_mxfp8 = use_mxfp8 && !params.force_hipblaslt
+  const bool use_hipkittens_mxfp8 = !params.force_hipblaslt;
 
   if (!mxfp8_supported) {
     GTEST_SKIP() << "MXFP8 is not supported in current config";
