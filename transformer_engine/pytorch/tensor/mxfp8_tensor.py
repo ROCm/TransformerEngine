@@ -490,7 +490,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 )
                 scale_inv_out = list(scale_inv_out) if scale_inv_out is not None else None
                 # Pad scale_inv_out to be a multiple of pad_multiple
-                if scale_inv_out is not None and pad_multiple > 1:
+                if scale_inv_out is not None:
                     for idx, split_scale_inv_out in enumerate(scale_inv_out):
                         current_shape = split_scale_inv_out.shape
                         pad_dim0 = (pad_multiple - current_shape[0] % pad_multiple) % pad_multiple
