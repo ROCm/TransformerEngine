@@ -1,6 +1,7 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
+import os
 import torch
 import triton
 import warnings
@@ -23,7 +24,19 @@ from .rmsnorm import (
     _rmsnorm_bwd_triton_impl,
     _rmsnorm_bwd_dg_reduce_triton,
     _rmsnorm_bwd_dg_reduce_triton_impl,
+    _fp8_transpose_2d_triton,
+    _fp8_transpose_2d_impl,
 )
+
+# Use the external LDS-tiled byte transpose instead of the in-kernel strided
+# stores. Default on -- the in-kernel path is uncoalesced and bottlenecks
+# every fp8_t shape. Set NVTE_RMS_EXTERNAL_TRANSPOSE=0 to fall back.
+_USE_EXTERNAL_TRANSPOSE = os.environ.get("NVTE_RMS_EXTERNAL_TRANSPOSE", "1") == "1"
+
+_fp8_transpose_kernels = {
+    True: _fp8_transpose_2d_triton,
+    False: _fp8_transpose_2d_impl,
+}
 from .layernorm import (
     _layernorm_fwd_triton,
     _layernorm_fwd_triton_impl,
@@ -164,6 +177,10 @@ def _te_norm_fwd_triton(
     out_transpose_ptr = None
     out_transpose_stride = None
     FP8_MAX = None
+    # When True, skip in-kernel strided transpose stores and dispatch a
+    # separate LDS-tiled transpose kernel after the main fwd. Only applies
+    # to the rms path for now.
+    use_external_transpose = False
     if IS_FP8:
         MAKE_TRANSPOSE = quantizer.columnwise_usage
         amax = (
@@ -182,8 +199,11 @@ def _te_norm_fwd_triton(
                     dtype=out._data.dtype, device=device
                 )
                 out._transpose_invalid = False
-            out_transpose_ptr = triton.reinterpret(out._transpose, tl_dtype)
-            out_transpose_stride = out._transpose.stride(0)
+            use_external_transpose = _USE_EXTERNAL_TRANSPOSE and kernel == 'rms'
+            if not use_external_transpose:
+                # In-kernel strided transpose path; main kernel does the writes.
+                out_transpose_ptr = triton.reinterpret(out._transpose, tl_dtype)
+                out_transpose_stride = out._transpose.stride(0)
 
     grid_fwd = lambda meta: (NUM_PRGMS,)
     kernel_func = _norm_kernels[kernel][autotune]
@@ -207,7 +227,9 @@ def _te_norm_fwd_triton(
         BLOCK_SIZE=BLOCK_SIZE,
         IS_FP8=IS_FP8,
         FP8_MAX=FP8_MAX,
-        MAKE_TRANSPOSE=MAKE_TRANSPOSE,
+        # Gate the in-kernel strided transpose stores off when we'll do the
+        # transpose externally via the LDS-tiled kernel.
+        MAKE_TRANSPOSE=(MAKE_TRANSPOSE and not use_external_transpose),
     )
     if kernel == 'layer':
         kwargs["APPLY_ATOMIC"]=APPLY_ATOMIC
@@ -227,6 +249,29 @@ def _te_norm_fwd_triton(
         )
 
     kernel_func[grid_fwd](**kwargs)
+
+    if use_external_transpose:
+        # out._data: (N rows, H cols) row-major uint8; out._transpose: (H, N).
+        transpose_kernel = _fp8_transpose_kernels[autotune]
+        if autotune:
+            grid_t = lambda meta: (
+                triton.cdiv(N, meta['BLOCK_M']),
+                triton.cdiv(H, meta['BLOCK_N']),
+            )
+            transpose_kernel[grid_t](
+                out._data, out._transpose,
+                N, H,
+                out._data.stride(0), out._transpose.stride(0),
+            )
+        else:
+            BLOCK_M, BLOCK_N = 64, 64
+            grid_t = (triton.cdiv(N, BLOCK_M), triton.cdiv(H, BLOCK_N))
+            transpose_kernel[grid_t](
+                out._data, out._transpose,
+                N, H,
+                out._data.stride(0), out._transpose.stride(0),
+                BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N,
+            )
 
     # Reduce and find amax if "not APPLY_ATOMIC" is True for layernorm.
     if IS_FP8 and not APPLY_ATOMIC:

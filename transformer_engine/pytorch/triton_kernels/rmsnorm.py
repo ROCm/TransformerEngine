@@ -416,3 +416,67 @@ _rmsnorm_bwd_dg_reduce_triton = triton.autotune(
     use_cuda_graph=True,
 )(_rmsnorm_bwd_dg_reduce_triton_impl)
 
+
+# --------------------------------------------------------------------------- #
+# External LDS-tiled byte transpose
+#
+# Replaces the in-kernel `out_transpose_ptr + cols * stride + row_idx` strided
+# stores that the main fwd kernel emits when MAKE_TRANSPOSE=True. Those writes
+# are uncoalesced (1 byte/thread to a different cache line each), which is why
+# every fp8_t shape in the bench sat at ~1.00x.
+#
+# This kernel reads a (BLOCK_M, BLOCK_N) tile coalesced from the row-major
+# fp8 output, transposes it through LDS via `tl.trans`, and writes the
+# (BLOCK_N, BLOCK_M) tile coalesced to the column-major transpose buffer.
+#
+# Operates on the raw uint8 storage so the fp8 dtype is irrelevant to
+# correctness.
+# --------------------------------------------------------------------------- #
+@triton.jit
+def _fp8_transpose_2d_impl(
+    src_ptr,           # uint8 ptr, (n_rows, n_cols) row-major
+    dst_ptr,           # uint8 ptr, (n_cols, n_rows) row-major
+    n_rows, n_cols,
+    src_stride,        # element stride of src row dim (== n_cols when contig)
+    dst_stride,        # element stride of dst row dim (== n_rows when contig)
+    BLOCK_M: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+
+    rm = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    cn = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+
+    # Coalesced read of (BLOCK_M, BLOCK_N) tile (innermost dim = cols).
+    src_offs = rm[:, None] * src_stride + cn[None, :]
+    src_mask = (rm[:, None] < n_rows) & (cn[None, :] < n_cols)
+    tile = tl.load(src_ptr + src_offs, mask=src_mask, other=0)
+
+    # LDS-staged transpose -> (BLOCK_N, BLOCK_M).
+    tile_t = tl.trans(tile)
+
+    # Coalesced write of (BLOCK_N, BLOCK_M) tile (innermost dim = rows).
+    dst_offs = cn[:, None] * dst_stride + rm[None, :]
+    dst_mask = (cn[:, None] < n_cols) & (rm[None, :] < n_rows)
+    tl.store(dst_ptr + dst_offs, tile_t, mask=dst_mask)
+
+
+def _get_fp8_transpose_configs():
+    # 1 B/elem on AMD CDNA3. Keep tile <= ~16 KB so the LDS staging buffer
+    # fits with room for double-buffering. tl.trans handles bank conflicts.
+    return [
+        triton.Config({'BLOCK_M': 32,  'BLOCK_N': 64},  num_warps=4),
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64},  num_warps=4),
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 128}, num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 64},  num_warps=4),
+        triton.Config({'BLOCK_M': 128, 'BLOCK_N': 128}, num_warps=8),
+        triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64},  num_warps=8),
+    ]
+
+
+_fp8_transpose_2d_triton = triton.autotune(
+    configs=_get_fp8_transpose_configs(),
+    key=['n_rows', 'n_cols'],
+    use_cuda_graph=True,
+)(_fp8_transpose_2d_impl)
