@@ -4,62 +4,12 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
-#include <transformer_engine/transformer_engine.h>
-#include "../../common.h"
-
-#include "ck_tile/core.hpp"
-#include "ck_tile/host/kernel_launch.hpp"
-#include "ck_tile/ops/epilogue.hpp"
-#include "ck_tile/ops/gemm.hpp"
-#include "ck_tile/ops/gemm/kernel/mx_grouped_gemm_kernel.hpp"
-#include "ck_tile/ops/elementwise/unary_element_wise_operation.hpp"
-
-#include <algorithm>
-#include <memory>
-#include <vector>
+#include "ck_grouped_gemm_common.h"
 
 namespace transformer_engine {
-namespace mx_grouped_gemm {
+namespace grouped_gemm {
 
-using RowMajor = ck_tile::tensor_layout::gemm::RowMajor;
-using ColMajor = ck_tile::tensor_layout::gemm::ColumnMajor;
 using mx_grouped_gemm_kargs = ck_tile::MxGroupedGemmHostArgs<>;
-
-template <typename TEScalar> struct TETypeToCKType;
-template <> struct TETypeToCKType<transformer_engine::fp8e4m3> { using type = ck_tile::fp8_t; };
-template <> struct TETypeToCKType<transformer_engine::fp8e5m2> { using type = ck_tile::bf8_t; };
-template <> struct TETypeToCKType<transformer_engine::fp16>    { using type = ck_tile::half_t; };
-template <> struct TETypeToCKType<transformer_engine::bf16>    { using type = ck_tile::bfloat16_t; };
-template <> struct TETypeToCKType<transformer_engine::fp32>    { using type = float; };
-
-struct GroupedGemmRunContext {
-    const NVTETensor* A = nullptr;
-    const NVTETensor* B = nullptr;
-    NVTETensor* D = nullptr;
-
-    int group_num = 0;
-    bool transA = false;
-    bool transB = false;
-
-    void* workspace = nullptr;
-    size_t workspace_bytes = 0;
-    hipStream_t stream = nullptr;
-
-    bool use_a_colwise_data = false;
-    bool use_b_colwise_data = false;
-};
-
-// Treat TE tensors as generalized 2D matrices by flattening:
-// (D1, D2, ..., Dn) -> (D1*...*D(n-1), Dn), consistent with TE Tensor::flat_*_dim.
-static inline bool get_flat_2d_dims(const transformer_engine::Tensor& t,
-                                    int64_t& d0, int64_t& d1) {
-  if (t.shape().size() < 2) {
-    return false;
-  }
-  d0 = static_cast<int64_t>(t.flat_first_dim());
-  d1 = static_cast<int64_t>(t.flat_last_dim());
-  return true;
-}
 
 static constexpr ck_tile::index_t ScaleBlockSize = 32;
 
@@ -86,17 +36,6 @@ struct MxGemmPipelineTypeSelector<MxGemmPipelineType::CompTDMV2, Problem>
     using pipeline      = ck_tile::GemmPipelineAgBgCrCompTDMV2<Problem>;
     static constexpr auto GetName() { return "GemmPipelineAgBgCrCompTDMV2"; }
 };
-
-template <typename Kernel>
-static inline bool has_sufficient_workspace(const GroupedGemmRunContext& ctx) {
-  const size_t needed = Kernel::GetWorkSpaceSize(ctx.group_num);
-  if (!ctx.workspace || ctx.workspace_bytes < needed) {
-    NVTE_WARN("ck_tile_mx_grouped_gemm: insufficient workspace for CK path. Needed bytes=", needed,
-              ", available bytes=", ctx.workspace_bytes, ". Falling back.");
-    return false;
-  }
-  return true;
-}
 
 struct GroupedGemKernelParam_Wmma
 {
@@ -283,7 +222,6 @@ bool invoke_mx_grouped_gemm(const std::vector<mx_grouped_gemm_kargs>& descs, con
                                            1,                /*kNumWaveGroups_*/
                                            false,            /*FixedVectorSize_*/
                                            1,                /*VectorSizeC_*/
-                                           false,            /*TiledMMAPermuteN_*/
                                            1,                /*BlockedXDLN_PerWarp_*/
                                            DoubleSmemBuffer, /*DoubleSmemBuffer*/
                                            AType, /*AType_*/
@@ -395,18 +333,21 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
     ws_bytes = ws_te->data.numel() * typeToSize(ws_te->data.dtype);
   }
 
-  GroupedGemmRunContext ctx = {
-      A_use,
-      B_use,
-      D,
-      group_num,
-      transA_use,
-      transB_use,
-      ws_ptr,
-      ws_bytes,
-      stream,
-      use_a_colwise_data,
-      use_b_colwise_data};
+  GroupedGemmRunContext ctx{
+      .A = A_use,
+      .B = B_use,
+      .D = D,
+      .N = 0,
+      .group_num = group_num,
+      .transA = transA_use,
+      .transB = transB_use,
+      .workspace = ws_ptr,
+      .workspace_bytes = ws_bytes,
+      .stream = stream,
+      .use_a_columnwise_data = use_a_colwise_data,
+      .use_b_columnwise_data = use_b_colwise_data,
+      .accumulate = false,
+  };
 
   const ck_tile::stream_config s{ctx.stream};
 
@@ -426,13 +367,13 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
       transformer_engine::Tensor* D_te =
           transformer_engine::convertNVTETensorCheck(ctx.D[i]);
 
-      const auto& a = ctx.use_a_colwise_data ? A_te->columnwise_data : A_te->data;
-      const auto& b = ctx.use_b_colwise_data ? B_te->columnwise_data : B_te->data;
+      const auto& a = ctx.use_a_columnwise_data ? A_te->columnwise_data : A_te->data;
+      const auto& b = ctx.use_b_columnwise_data ? B_te->columnwise_data : B_te->data;
       const auto& d = D_te->data;
       const auto& a_scales =
-          ctx.use_a_colwise_data ? A_te->columnwise_scale_inv : A_te->scale_inv;
+          ctx.use_a_columnwise_data ? A_te->columnwise_scale_inv : A_te->scale_inv;
       const auto& b_scales =
-          ctx.use_b_colwise_data ? B_te->columnwise_scale_inv : B_te->scale_inv;
+          ctx.use_b_columnwise_data ? B_te->columnwise_scale_inv : B_te->scale_inv;
 
       int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0, Dd0 = 0, Dd1 = 0;
 
@@ -503,7 +444,7 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
       // TE rowwise MXFP8 scale_inv is [rows, KScale] and can be read with
       // KStride=true. TE columnwise_scale_inv is [KScale, rows] and must be
       // read with KStride=false before writing CK's canonical shuffled layout.
-      if (ctx.use_a_colwise_data) {
+      if (ctx.use_a_columnwise_data) {
         preShuffleScaleBuffer_gfx1250<AScaleType, ScaleBlockSize, false>(
             reinterpret_cast<const AScaleType*>(a_scales.dptr),
             reinterpret_cast<AScaleType*>(a_scale_shuffled_ptr),
@@ -521,7 +462,7 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
             stream);
       }
 
-      if (ctx.use_b_colwise_data) {
+      if (ctx.use_b_columnwise_data) {
         preShuffleScaleBuffer_gfx1250<BScaleType, ScaleBlockSize, false>(
             reinterpret_cast<const BScaleType*>(b_scales.dptr),
             reinterpret_cast<BScaleType*>(b_scale_shuffled_ptr),
@@ -571,7 +512,7 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
   return ok;
 }
 
-}  // namespace mx_grouped_gemm
+}  // namespace grouped_gemm
 }  // namespace transformer_engine
 
 bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
@@ -583,6 +524,6 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
                              NVTETensor* workspace,
                              bool accumulate,
                              hipStream_t stream) {
-  return transformer_engine::mx_grouped_gemm::ck_tile_mx_grouped_gemm(
+  return transformer_engine::grouped_gemm::ck_tile_mx_grouped_gemm(
       A, B, D, group_num, transA, transB, workspace, accumulate, stream);
 }

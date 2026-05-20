@@ -33,7 +33,7 @@
 #include "./cutlass_grouped_gemm.cuh"
 #else
 #include "ck_grouped_gemm/ck_grouped_gemm.h"
-#include "ck_mx_grouped_gemm/ck_mx_grouped_gemm.hpp"
+#include "ck_grouped_gemm/ck_mx_grouped_gemm.hpp"
 #endif
 
 #ifndef __HIP_PLATFORM_AMD__

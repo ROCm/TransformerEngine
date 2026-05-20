@@ -8,6 +8,7 @@
 
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <array>
 #include <type_traits>
 #include <vector>
@@ -19,6 +20,9 @@
 #include "ck_tile/core.hpp"
 #include "ck_tile/ops/epilogue.hpp"
 #include "ck_tile/ops/gemm.hpp"
+#include "ck_tile/host/kernel_launch.hpp"
+#include "ck_tile/ops/gemm/kernel/mx_grouped_gemm_kernel.hpp"
+#include "ck_tile/ops/elementwise/unary_element_wise_operation.hpp"
 
 namespace transformer_engine {
 namespace grouped_gemm {
