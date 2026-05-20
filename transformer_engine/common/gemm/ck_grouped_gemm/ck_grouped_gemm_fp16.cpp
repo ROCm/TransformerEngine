@@ -59,13 +59,13 @@ bool ck_tile_grouped_gemm_fp16_dispatch(DType a_dtype,
       return false;
     }
     // Dispatch with B's columnwise buffer as RowMajor (transB=false).
-    GroupedGemmRunContext ctx_nn = ctx;
-    ctx_nn.transB = false;
-    ctx_nn.use_b_columnwise_data = true;
-    if (!ctx_nn.transA) {
-      return ck_tile_grouped_gemm_fp16_dispatch_nn(a_dtype, d_dtype, need_m_pad, need_k_pad, ctx_nn);
+    GroupedGemmRunContext ctx_b_colwise = ctx;
+    ctx_b_colwise.transB = false;
+    ctx_b_colwise.use_b_columnwise_data = true;
+    if (!ctx_b_colwise.transA) {
+      return ck_tile_grouped_gemm_fp16_dispatch_nn(a_dtype, d_dtype, need_m_pad, need_k_pad, ctx_b_colwise);
     } else {
-      return ck_tile_grouped_gemm_fp16_dispatch_tn(a_dtype, d_dtype, need_m_pad, need_k_pad, ctx_nn);
+      return ck_tile_grouped_gemm_fp16_dispatch_tn(a_dtype, d_dtype, need_m_pad, need_k_pad, ctx_b_colwise);
     }
   }
 
