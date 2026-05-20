@@ -260,17 +260,26 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, 
     blk_size = block_size(x_)
     USE_BLOCKED = use_blocked(x_)
     NUM_PRGMS = num_programs(x_, sm_margin)
-    # Both blocked and non-blocked paths now accumulate per-program (NUM_PRGMS rows)
-    # rather than per-input-row (M rows). For typical workloads (NUM_PRGMS ~= 144 on
-    # MI300X vs M up to 32k), this shrinks the partial buffer by ~100x and keeps it
-    # L2-resident, turning the bwd dg RMW into a near-free op vs going to HBM.
+    # dg accumulation strategy:
+    #   * Large M (rows_per_program > 1): per-program partial buffer of shape
+    #     (NUM_PRGMS, N) accumulated via HBM RMW. Buffer is small, L2-resident,
+    #     RMW near-free; reduce kernel then sums NUM_PRGMS rows.
+    #   * Small M (rows_per_program == 1, i.e. NUM_PRGMS == M): RMW would just
+    #     be load+add+store of a slot only written once. Fall back to pure
+    #     per-row writes into (M, N) and skip the zero-init.
+    #   * Non-blocked path always writes via in-register accumulator (no RMW).
+    rows_per_program_gt_1 = NUM_PRGMS < M
+    DG_RMW = USE_BLOCKED and rows_per_program_gt_1
     need_reduction = NUM_PRGMS > 1
-    # Blocked path uses HBM RMW so the buffer must be zero-initialized.
-    # Non-blocked path writes once per program; empty is fine.
     if need_reduction:
-        if USE_BLOCKED:
+        if DG_RMW:
+            # RMW requires zero-init.
             dg_tmp = torch.zeros(NUM_PRGMS, N, device=x.device, dtype=torch.float32, requires_grad=False)
+        elif USE_BLOCKED:
+            # Pure per-row writes; rows are M.
+            dg_tmp = torch.empty(M, N, device=x.device, dtype=torch.float32, requires_grad=False)
         else:
+            # Non-blocked: each program writes its slot unconditionally.
             dg_tmp = torch.empty(NUM_PRGMS, N, device=x.device, dtype=torch.float32, requires_grad=False)
     else:
         dg_tmp = None
@@ -292,6 +301,7 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, 
         GRAD_OUTPUT_ALIGNED_16=grad_output_aligned_16,
         DX_ALIGNED_16=dx_aligned_16,
         DG_ALIGNED_16=dg_aligned_16,
+        DG_RMW=DG_RMW,
     )
     if not autotune:
         bwd_kwargs["num_warps"] = 8
