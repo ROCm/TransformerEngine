@@ -13,6 +13,7 @@
 
 #include "../common.h"
 #include "../utils.cuh"
+#include "rocm_device_utils.cuh"
 
 namespace transformer_engine {
 
@@ -42,22 +43,6 @@ struct MultiPaddingArgs {
   int num_tensors;
 };
 
-// Binary search to find which tensor owns a given block id.
-// block_range is a sorted prefix sum array with (num_tensors + 1) entries.
-__device__ __forceinline__ int find_tensor_for_block(const int* block_range, int num_tensors,
-                                                     int bid) {
-  int lo = 0, hi = num_tensors - 1;
-  while (lo < hi) {
-    int mid = (lo + hi) / 2;
-    if (block_range[mid + 1] <= bid) {
-      lo = mid + 1;
-    } else {
-      hi = mid;
-    }
-  }
-  return lo;
-}
-
 template <int nvec, typename Type>
 __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiPaddingArgs args) {
   using Vec = Vec<Type, nvec>;
@@ -81,7 +66,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
   constexpr int n_iterations = THREADS_PER_WARP / n_warps_per_tile;
 
   // Find tensor corresponding to block
-  const int tensor_id = find_tensor_for_block(args.block_range, args.num_tensors, bid);
+  const int tensor_id = rocm_upper_bound(args.block_range, args.num_tensors, bid);
   const Type* input = reinterpret_cast<const Type*>(args.input_list[tensor_id]);
   Type* output = reinterpret_cast<Type*>(args.output_list[tensor_id]);
   const int num_rows = args.num_rows_list[tensor_id];
@@ -149,7 +134,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
   constexpr int n_iterations = THREADS_PER_WARP / n_warps_per_tile;
 
   // Find tensor corresponding to block
-  const int tensor_id = find_tensor_for_block(args.block_range, args.num_tensors, bid);
+  const int tensor_id = rocm_upper_bound(args.block_range, args.num_tensors, bid);
   const Type* input = reinterpret_cast<const Type*>(args.input_list[tensor_id]);
   Type* output = reinterpret_cast<Type*>(args.output_list[tensor_id]);
   const int num_rows = args.num_rows_list[tensor_id];
