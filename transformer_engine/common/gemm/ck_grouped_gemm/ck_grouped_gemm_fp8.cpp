@@ -45,6 +45,13 @@ struct TileCfg_128x128x128_16x16x128_2x2x1 {
   static constexpr ck_tile::index_t TilePartitionerM01 = 8;
 };
 
+struct TileCfg_256x256x128_16x16x128_2x2x1
+    : TileCfg_128x128x128_16x16x128_2x2x1 {
+  static constexpr ck_tile::index_t M_Tile = 256;
+  static constexpr ck_tile::index_t N_Tile = 256;
+  static constexpr ck_tile::index_t K_Tile = 128;
+};
+
 // gfx950 device compilation cannot instantiate the literal 32x32x16 FP8 tile
 // configuration due to an unsupported warp GEMM dispatcher configuration.
 // See: ck_tile/ops/gemm/warp/warp_gemm_dispatcher.hpp for supported variants.
@@ -290,6 +297,17 @@ struct FP8TileCfg<GPUArch::GFX950> {
   using type = TileCfg_128x128x128_16x16x128_2x2x1;
 };
 
+#define MAKE_FP8_RUNNER(TileCfg_)                                      \
+  using Runner = QuantGroupedGemmRunner<AType,                     \
+                                        BType,                     \
+                                        CType,                     \
+                                        ALayout,                   \
+                                        BLayout,                   \
+                                        CTypeLayout,               \
+                                        TileCfg_,                  \
+                                        ck_tile::memory_operation_enum::set>; \
+  runner = std::make_unique<Runner>()
+
 template <GPUArch Arch>
 static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
                                                    DType b_dtype,
@@ -299,7 +317,6 @@ static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
   std::unique_ptr<RunnerInterface> runner = nullptr;
 
   using CTypeLayout = RowMajor;
-  using TileCfg = typename FP8TileCfg<Arch>::type;
 
   TRANSFORMER_ENGINE_SWITCH_CONDITION(ctx.transA, kTransA, {
     using ALayout = std::conditional_t<kTransA, ColMajor, RowMajor>;
@@ -315,15 +332,17 @@ static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
 
           TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(d_dtype, d_te_type, {
             using CType = typename TETypeToCKType<d_te_type>::type;
-            using Runner = QuantGroupedGemmRunner<AType,
-                                                  BType,
-                                                  CType,
-                                                  ALayout,
-                                                  BLayout,
-                                                  CTypeLayout,
-                                                  TileCfg,
-                                                  ck_tile::memory_operation_enum::set>;
-            runner = std::make_unique<Runner>();
+
+            if constexpr (Arch == GPUArch::GFX950) {
+              if (ctx.K >= 2048 || ctx.N >= 2048) {
+                MAKE_FP8_RUNNER(TileCfg_256x256x128_16x16x128_2x2x1);
+              } else {
+                MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1);
+              }
+            } else {
+              using TileCfg = typename FP8TileCfg<Arch>::type;
+              MAKE_FP8_RUNNER(TileCfg);
+            }
           });
         });
       });
@@ -336,6 +355,8 @@ static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
 
   return runner->run(s, ctx);
 }
+
+#undef MAKE_FP8_RUNNER
 
 bool ck_tile_grouped_gemm_fp8_dispatch(DType a_dtype,
                                        DType b_dtype,

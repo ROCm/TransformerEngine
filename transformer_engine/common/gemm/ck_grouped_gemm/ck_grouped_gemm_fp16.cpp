@@ -196,7 +196,7 @@ class GroupedGemmRunner : public RunnerInterface {
   }
 };
 
-#define MAKE_RUNNER(TileCfg_)                                          \
+#define MAKE_FP16_RUNNER(TileCfg_)                                          \
   TRANSFORMER_ENGINE_SWITCH_CONDITION(ctx.accumulate, accum_option, {  \
     using Runner = GroupedGemmRunner<AType,                            \
                                      BType,                            \
@@ -231,11 +231,11 @@ bool ck_tile_grouped_gemm_fp16_dispatch(DType a_dtype,
           using CType = typename TETypeToCKType<d_te_type>::type;
 
           if (ctx.N % 256 == 0) {
-            MAKE_RUNNER(TileCfg_256x256x64);
+            MAKE_FP16_RUNNER(TileCfg_256x256x64);
           } else if (ctx.N % 128 == 0) {
-            MAKE_RUNNER(TileCfg_256x128x64);
+            MAKE_FP16_RUNNER(TileCfg_256x128x64);
           } else {
-            MAKE_RUNNER(TileCfg_256x128x64_padding);
+            MAKE_FP16_RUNNER(TileCfg_256x128x64_padding);
           }
         });
       });
@@ -249,7 +249,7 @@ bool ck_tile_grouped_gemm_fp16_dispatch(DType a_dtype,
   return runner->run(s, ctx);
 }
 
-#undef MAKE_RUNNER
+#undef MAKE_FP16_RUNNER
 
 }  // namespace grouped_gemm
 }  // namespace transformer_engine
