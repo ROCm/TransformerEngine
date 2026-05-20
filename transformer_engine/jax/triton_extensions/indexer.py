@@ -179,299 +179,170 @@ mlir.register_lowering(_score_reduce_p, _score_reduce_lowering, platform="rocm")
 mlir.register_lowering(_score_reduce_p, _score_reduce_lowering, platform="cuda")
 
 
-# --- Backward: dHq + dW_o kernel ----------------------------------------------
+# --- Chunked score-tile kernel for hybrid bwd --------------------------------
 #
-# FlashAttention-style: residuals saved from forward = (Hq, Hk, W_o). The
-# (T, H, S) score tensor is recomputed inside this kernel from Hq @ Hk^T,
-# so we never store H = relu(scores) -- which is 549 GB at the production
-# 4096^2 shape.
+# Produces dscores_chunk[B, oH, T, H_CHUNK, T_s] and dW_o_chunk[B, oH, T, H_CHUNK]
+# for ONE h-chunk. Caller loops over H/H_CHUNK chunks and feeds dscores_chunk
+# to hipBLASLt einsums for dHq/dHk reductions. Bounds peak materialization to
+# H/H_CHUNK fraction of the full (B, oH, T, H, T_s) score tensor.
 #
-# Math:
-#   scores[t, h, s] = sum_i Hq[t, h, i] * Hk[s, i]
-#   H_relu[t, h, s] = max(scores, 0)
-#   O[t, s]         = sum_h H_relu[t, h, s] * W_o[t, h]
-#
-# Cotangents:
-#   dW_o[t, h]  = sum_s dO[t, s] * H_relu[t, h, s]
-#   dH[t,h,s]   = dO[t, s] * W_o[t, h]
-#   dscores     = dH * (scores > 0)            # ReLU mask
-#   dHq[t,h,i]  = sum_s dscores[t,h,s] * Hk[s, i]
-#   dHk[s,i]    = sum_t sum_h dscores[t,h,s] * Hq[t, h, i]
-#
-# Kernel A (this one): computes dHq and dW_o.
-#   Grid: (cdiv(T_t, BLOCK_T), B * oH). Each CTA owns BLOCK_T rows of dHq
-#   and dW_o exclusively -- no atomics needed since the full S range is
-#   reduced inside one CTA.
-#
-# Kernel B (next section): computes dHk. Grid (cdiv(T_s, BLOCK_S), B * oH);
-# each CTA owns BLOCK_S rows of dHk and reduces over all T inside.
+# Fuses score recompute + relu + mask + dO*W_o broadcast in registers --
+# nothing of size (B, oH, T, H, T_s) ever lands in HBM at full size. dW_o is
+# reduced inline (sum_s of h_relu * dO) so h_relu also never materializes.
+
+
+_HBWD_BLOCK_T = 64
+_HBWD_BLOCK_S = 64
 
 
 @triton.jit
-def _score_reduce_dHq_dWo_kernel(
-    Hq_ptr,    # (B, oH, T_t, H, d_i) bf16
-    Hk_ptr,    # (B, oH, T_s, d_i) bf16
-    W_o_ptr,   # (B, oH, T_t, H) bf16
-    dO_ptr,    # (B, oH, T_t, T_s) fp32   (caller upcasts)
-    dHq_ptr,   # (B, oH, T_t, H, d_i) bf16  OUTPUT
-    dWo_ptr,   # (B, oH, T_t, H)      bf16  OUTPUT
+def _score_dscores_chunk_kernel(
+    Hq_chunk_ptr,        # input  (B, oH, T,   H_CHUNK, d_i) bf16
+    Hk_ptr,              # input  (B, oH, T_s, d_i)         bf16
+    W_o_chunk_ptr,       # input  (B, oH, T,   H_CHUNK)     bf16
+    dO_ptr,              # input  (B, oH, T,   T_s)         fp32
+    dscores_chunk_ptr,   # output (B, oH, T,   H_CHUNK, T_s) bf16
+    dWo_chunk_ptr,       # output (B, oH, T,   H_CHUNK)     bf16
     B: tl.constexpr,
     oH: tl.constexpr,
-    T_t: tl.constexpr,
+    T: tl.constexpr,
     T_s: tl.constexpr,
-    H: tl.constexpr,
+    H_CHUNK: tl.constexpr,
     d_i: tl.constexpr,
     BLOCK_T: tl.constexpr,
     BLOCK_S: tl.constexpr,
 ):
-    """Per-CTA: produces dHq[BLOCK_T, H, d_i] and dW_o[BLOCK_T, H].
+    """One CTA handles (T_tile, h_in) for one (b, h_outer). Loops over s_chunks.
 
-    Outer-h loop / inner-s loop. For each h, we accumulate dHq and dW_o
-    contributions over the full S range, then store and move on.
+    Each CTA writes its T_tile rows of (dscores_chunk[..., h_in, :],
+    dW_o_chunk[..., h_in]). dW_o is reduced in registers (sum over s) so
+    h_relu never lands in HBM -- we compute it on-the-fly and consume it.
     """
     pid_t = tl.program_id(0)
-    pid_bh = tl.program_id(1)
-
-    # int64 indexing — production tensors exceed int32 range
+    pid_h_bh = tl.program_id(1)
+    h_in = pid_h_bh % H_CHUNK
+    pid_bh = pid_h_bh // H_CHUNK
     b = (pid_bh // oH).to(tl.int64)
     h_outer = (pid_bh % oH).to(tl.int64)
+    h_in_64 = h_in.to(tl.int64)
 
     rt = pid_t * BLOCK_T + tl.arange(0, BLOCK_T)
     rdi = tl.arange(0, d_i)
-    rt_mask = rt < T_t
+    rt_mask = rt < T
 
-    hq_base = b * (oH * T_t * H * d_i) + h_outer * (T_t * H * d_i)
+    hq_base = b * (oH * T * H_CHUNK * d_i) + h_outer * (T * H_CHUNK * d_i)
     hk_base = b * (oH * T_s * d_i) + h_outer * (T_s * d_i)
-    wo_base = b * (oH * T_t * H) + h_outer * (T_t * H)
-    do_base = b * (oH * T_t * T_s) + h_outer * (T_t * T_s)
+    wo_base = b * (oH * T * H_CHUNK) + h_outer * (T * H_CHUNK)
+    do_base = b * (oH * T * T_s) + h_outer * (T * T_s)
+    ds_base = b * (oH * T * H_CHUNK * T_s) + h_outer * (T * H_CHUNK * T_s)
 
-    for h in range(H):
-        # Load Hq[..., rt, h, :] -> [BLOCK_T, d_i] bf16
-        hq_ptrs = Hq_ptr + hq_base + rt[:, None] * (H * d_i) + h * d_i + rdi[None, :]
-        Hq_h = tl.load(hq_ptrs, mask=rt_mask[:, None], other=0.0)
+    # Load Hq[..., t_tile, h_in, :] -> [BLOCK_T, d_i] once per CTA
+    hq_ptrs = (Hq_chunk_ptr + hq_base
+               + rt[:, None] * (H_CHUNK * d_i)
+               + h_in_64 * d_i
+               + rdi[None, :])
+    Hq_h = tl.load(hq_ptrs, mask=rt_mask[:, None], other=0.0)
 
-        # Load W_o[..., rt, h] -> [BLOCK_T] fp32
-        wo_ptrs = W_o_ptr + wo_base + rt * H + h
-        w_h = tl.load(wo_ptrs, mask=rt_mask, other=0.0).to(tl.float32)
+    # Load W_o[..., t_tile, h_in] -> [BLOCK_T] once per CTA
+    wo_ptrs = W_o_chunk_ptr + wo_base + rt * H_CHUNK + h_in_64
+    w_h = tl.load(wo_ptrs, mask=rt_mask, other=0.0).to(tl.float32)
 
-        dHq_acc = tl.zeros((BLOCK_T, d_i), dtype=tl.float32)
-        dWo_acc = tl.zeros((BLOCK_T,), dtype=tl.float32)
+    # dW_o accumulator: sum_s (h_relu * dO) -- reduced in regs
+    dWo_acc = tl.zeros((BLOCK_T,), dtype=tl.float32)
 
-        for s_start in range(0, T_s, BLOCK_S):
-            rs = s_start + tl.arange(0, BLOCK_S)
-            rs_mask = rs < T_s
+    for s_start in range(0, T_s, BLOCK_S):
+        rs = s_start + tl.arange(0, BLOCK_S)
+        rs_mask = rs < T_s
 
-            # Load Hk[..., rs, :] -> [BLOCK_S, d_i] bf16
-            hk_ptrs = Hk_ptr + hk_base + rs[:, None] * d_i + rdi[None, :]
-            Hk_chunk = tl.load(hk_ptrs, mask=rs_mask[:, None], other=0.0)
+        # Load Hk[..., s_chunk, :] and dO[..., t_tile, s_chunk]
+        hk_ptrs = Hk_ptr + hk_base + rs[:, None] * d_i + rdi[None, :]
+        Hk_chunk = tl.load(hk_ptrs, mask=rs_mask[:, None], other=0.0)
 
-            # Load dO[..., rt, rs] -> [BLOCK_T, BLOCK_S] (caller upcast to fp32)
-            do_ptrs = dO_ptr + do_base + rt[:, None] * T_s + rs[None, :]
-            dO_chunk = tl.load(
-                do_ptrs,
-                mask=rt_mask[:, None] & rs_mask[None, :],
-                other=0.0,
-            )
-
-            # Recompute scores[BLOCK_T, BLOCK_S] = Hq_h @ Hk_chunk^T, in fp32
-            scores = tl.dot(Hq_h, tl.trans(Hk_chunk))   # [BLOCK_T, BLOCK_S]
-            relu_mask = scores > 0
-            h_relu = tl.where(relu_mask, scores, 0.0)
-
-            # dW_o accumulator: sum_s dO * H_relu
-            dWo_acc += tl.sum(dO_chunk * h_relu, axis=1)
-
-            # dscores = (dO * w_h) * relu_mask
-            dH = dO_chunk * w_h[:, None]
-            dscores = tl.where(relu_mask, dH, 0.0)
-
-            # dHq_acc += dscores @ Hk_chunk  -> [BLOCK_T, d_i]
-            dHq_acc += tl.dot(dscores.to(Hk_chunk.dtype), Hk_chunk)
-
-        # Store dHq[..., rt, h, :]
-        dhq_ptrs = dHq_ptr + hq_base + rt[:, None] * (H * d_i) + h * d_i + rdi[None, :]
-        tl.store(
-            dhq_ptrs,
-            dHq_acc.to(dHq_ptr.dtype.element_ty),
-            mask=rt_mask[:, None],
+        do_ptrs = dO_ptr + do_base + rt[:, None] * T_s + rs[None, :]
+        dO_chunk = tl.load(
+            do_ptrs,
+            mask=rt_mask[:, None] & rs_mask[None, :],
+            other=0.0,
         )
 
-        # Store dW_o[..., rt, h]
-        dwo_ptrs = dWo_ptr + wo_base + rt * H + h
-        tl.store(dwo_ptrs, dWo_acc.to(dWo_ptr.dtype.element_ty), mask=rt_mask)
+        # scores tile in registers (never lands in HBM at full size)
+        scores = tl.dot(Hq_h, tl.trans(Hk_chunk))
+        relu_mask = scores > 0
+        h_relu = tl.where(relu_mask, scores, 0.0)
+
+        # dW_o contribution: sum_s (h_relu * dO)
+        dWo_acc += tl.sum(h_relu * dO_chunk, axis=1)
+
+        # dscores tile = relu_mask * (dO * W_o)
+        dscores = tl.where(relu_mask, dO_chunk * w_h[:, None], 0.0)
+
+        # Store dscores tile to HBM (bf16). Total dscores_chunk size is
+        # H_CHUNK x smaller than the full (B,oH,T,H,T_s) tensor.
+        ds_ptrs = (dscores_chunk_ptr + ds_base
+                   + rt[:, None] * (H_CHUNK * T_s)
+                   + h_in_64 * T_s
+                   + rs[None, :])
+        tl.store(
+            ds_ptrs,
+            dscores.to(dscores_chunk_ptr.dtype.element_ty),
+            mask=rt_mask[:, None] & rs_mask[None, :],
+        )
+
+    # Store dW_o[..., t_tile, h_in]
+    dwo_out_ptrs = dWo_chunk_ptr + wo_base + rt * H_CHUNK + h_in_64
+    tl.store(
+        dwo_out_ptrs,
+        dWo_acc.to(dWo_chunk_ptr.dtype.element_ty),
+        mask=rt_mask,
+    )
 
 
-_score_reduce_dHq_dWo_p = extend_core.Primitive("te_indexer_score_reduce_dHq_dWo")
-_score_reduce_dHq_dWo_p.multiple_results = True
+_score_dscores_chunk_p = extend_core.Primitive("te_indexer_score_dscores_chunk")
+_score_dscores_chunk_p.multiple_results = True
 
 
-@_score_reduce_dHq_dWo_p.def_abstract_eval
-def _score_reduce_dHq_dWo_abstract(Hq, Hk, W_o, dO):
-    del Hk, dO
+@_score_dscores_chunk_p.def_abstract_eval
+def _score_dscores_chunk_abstract(Hq_chunk, Hk, W_o_chunk, dO):
+    del Hk, W_o_chunk
+    B, oH, T, H_CHUNK, _ = Hq_chunk.shape
+    T_s = dO.shape[-1]
     return [
-        core.ShapedArray(Hq.shape, Hq.dtype),   # dHq
-        core.ShapedArray(W_o.shape, W_o.dtype), # dW_o
+        core.ShapedArray((B, oH, T, H_CHUNK, T_s), Hq_chunk.dtype),  # dscores
+        core.ShapedArray((B, oH, T, H_CHUNK), Hq_chunk.dtype),       # dW_o
     ]
 
 
-_score_reduce_dHq_dWo_p.def_impl(
-    functools.partial(xla.apply_primitive, _score_reduce_dHq_dWo_p)
+_score_dscores_chunk_p.def_impl(
+    functools.partial(xla.apply_primitive, _score_dscores_chunk_p)
 )
 
 
-def _score_reduce_dHq_dWo_lowering(ctx, Hq, Hk, W_o, dO):
+def _score_dscores_chunk_lowering(ctx, Hq_chunk, Hk, W_o_chunk, dO):
     Hq_aval = ctx.avals_in[0]
-    Hk_aval = ctx.avals_in[1]
-    B, oH, T_t, H, d_i = Hq_aval.shape
-    T_s = Hk_aval.shape[2]
-    BLOCK_T = 32 if T_t >= 32 else T_t
-    BLOCK_S = 32 if T_s >= 32 else T_s
+    dO_aval = ctx.avals_in[3]
+    B, oH, T, H_CHUNK, d_i = Hq_aval.shape
+    T_s = dO_aval.shape[-1]
+    BLOCK_T = _HBWD_BLOCK_T if T >= _HBWD_BLOCK_T else T
+    BLOCK_S = _HBWD_BLOCK_S if T_s >= _HBWD_BLOCK_S else T_s
+    n_t_tiles = (T + BLOCK_T - 1) // BLOCK_T
 
     return triton_call_lowering(
         ctx,
-        _score_reduce_dHq_dWo_kernel,
-        Hq, Hk, W_o, dO,
-        grid=(triton.cdiv(T_t, BLOCK_T), B * oH),
+        _score_dscores_chunk_kernel,
+        Hq_chunk, Hk, W_o_chunk, dO,
+        grid=(n_t_tiles, B * oH * H_CHUNK),
         num_warps=4,
         num_stages=2,
         constexprs={
-            "B": B, "oH": oH, "T_t": T_t, "T_s": T_s,
-            "H": H, "d_i": d_i,
+            "B": B, "oH": oH, "T": T, "T_s": T_s,
+            "H_CHUNK": H_CHUNK, "d_i": d_i,
             "BLOCK_T": BLOCK_T, "BLOCK_S": BLOCK_S,
         },
     )
 
 
-mlir.register_lowering(_score_reduce_dHq_dWo_p, _score_reduce_dHq_dWo_lowering, platform="rocm")
-mlir.register_lowering(_score_reduce_dHq_dWo_p, _score_reduce_dHq_dWo_lowering, platform="cuda")
-
-
-# --- Backward: dHk kernel -----------------------------------------------------
-
-
-@triton.jit
-def _score_reduce_dHk_kernel(
-    Hq_ptr,    # (B, oH, T_t, H, d_i) bf16
-    Hk_ptr,    # (B, oH, T_s, d_i) bf16
-    W_o_ptr,   # (B, oH, T_t, H) bf16
-    dO_ptr,    # (B, oH, T_t, T_s) fp32
-    dHk_ptr,   # (B, oH, T_s, d_i) bf16  OUTPUT
-    B: tl.constexpr,
-    oH: tl.constexpr,
-    T_t: tl.constexpr,
-    T_s: tl.constexpr,
-    H: tl.constexpr,
-    d_i: tl.constexpr,
-    BLOCK_T: tl.constexpr,
-    BLOCK_S: tl.constexpr,
-):
-    """Per-CTA: produces dHk[BLOCK_S, d_i].
-
-    Outer-h loop / inner-t loop, accumulating dHk over all T and H.
-    """
-    pid_s = tl.program_id(0)
-    pid_bh = tl.program_id(1)
-
-    b = (pid_bh // oH).to(tl.int64)
-    h_outer = (pid_bh % oH).to(tl.int64)
-
-    rs = pid_s * BLOCK_S + tl.arange(0, BLOCK_S)
-    rdi = tl.arange(0, d_i)
-    rs_mask = rs < T_s
-
-    hq_base = b * (oH * T_t * H * d_i) + h_outer * (T_t * H * d_i)
-    hk_base = b * (oH * T_s * d_i) + h_outer * (T_s * d_i)
-    wo_base = b * (oH * T_t * H) + h_outer * (T_t * H)
-    do_base = b * (oH * T_t * T_s) + h_outer * (T_t * T_s)
-
-    # Load Hk[..., rs, :] once -- needed for score recompute every iteration
-    hk_ptrs = Hk_ptr + hk_base + rs[:, None] * d_i + rdi[None, :]
-    Hk_tile = tl.load(hk_ptrs, mask=rs_mask[:, None], other=0.0)
-    Hk_T = tl.trans(Hk_tile)  # [d_i, BLOCK_S]
-
-    dHk_acc = tl.zeros((BLOCK_S, d_i), dtype=tl.float32)
-
-    for h in range(H):
-        for t_start in range(0, T_t, BLOCK_T):
-            rt = t_start + tl.arange(0, BLOCK_T)
-            rt_mask = rt < T_t
-
-            # Load Hq[..., rt, h, :] -> [BLOCK_T, d_i]
-            hq_ptrs = Hq_ptr + hq_base + rt[:, None] * (H * d_i) + h * d_i + rdi[None, :]
-            Hq_h = tl.load(hq_ptrs, mask=rt_mask[:, None], other=0.0)
-
-            # Load W_o[..., rt, h] -> [BLOCK_T]
-            wo_ptrs = W_o_ptr + wo_base + rt * H + h
-            w_h = tl.load(wo_ptrs, mask=rt_mask, other=0.0).to(tl.float32)
-
-            # Load dO[..., rt, rs] -> [BLOCK_T, BLOCK_S]
-            do_ptrs = dO_ptr + do_base + rt[:, None] * T_s + rs[None, :]
-            dO_chunk = tl.load(
-                do_ptrs,
-                mask=rt_mask[:, None] & rs_mask[None, :],
-                other=0.0,
-            )
-
-            # Recompute scores[BLOCK_T, BLOCK_S]
-            scores = tl.dot(Hq_h, Hk_T)
-            relu_mask = scores > 0
-
-            # dscores = (dO * w_h[:, None]) * relu_mask
-            dH = dO_chunk * w_h[:, None]
-            dscores = tl.where(relu_mask, dH, 0.0)
-
-            # dHk[s, i] += sum_t dscores[t, s] * Hq_h[t, i]
-            # = (dscores^T @ Hq_h)[s, i]
-            dHk_acc += tl.dot(tl.trans(dscores).to(Hq_h.dtype), Hq_h)
-
-    dhk_ptrs = dHk_ptr + hk_base + rs[:, None] * d_i + rdi[None, :]
-    tl.store(
-        dhk_ptrs,
-        dHk_acc.to(dHk_ptr.dtype.element_ty),
-        mask=rs_mask[:, None],
-    )
-
-
-_score_reduce_dHk_p = extend_core.Primitive("te_indexer_score_reduce_dHk")
-_score_reduce_dHk_p.multiple_results = True
-
-
-@_score_reduce_dHk_p.def_abstract_eval
-def _score_reduce_dHk_abstract(Hq, Hk, W_o, dO):
-    del Hq, W_o, dO
-    return [core.ShapedArray(Hk.shape, Hk.dtype)]
-
-
-_score_reduce_dHk_p.def_impl(
-    functools.partial(xla.apply_primitive, _score_reduce_dHk_p)
-)
-
-
-def _score_reduce_dHk_lowering(ctx, Hq, Hk, W_o, dO):
-    Hq_aval = ctx.avals_in[0]
-    Hk_aval = ctx.avals_in[1]
-    B, oH, T_t, H, d_i = Hq_aval.shape
-    T_s = Hk_aval.shape[2]
-    BLOCK_T = 32 if T_t >= 32 else T_t
-    BLOCK_S = 32 if T_s >= 32 else T_s
-
-    return triton_call_lowering(
-        ctx,
-        _score_reduce_dHk_kernel,
-        Hq, Hk, W_o, dO,
-        grid=(triton.cdiv(T_s, BLOCK_S), B * oH),
-        num_warps=4,
-        num_stages=2,
-        constexprs={
-            "B": B, "oH": oH, "T_t": T_t, "T_s": T_s,
-            "H": H, "d_i": d_i,
-            "BLOCK_T": BLOCK_T, "BLOCK_S": BLOCK_S,
-        },
-    )
-
-
-mlir.register_lowering(_score_reduce_dHk_p, _score_reduce_dHk_lowering, platform="rocm")
-mlir.register_lowering(_score_reduce_dHk_p, _score_reduce_dHk_lowering, platform="cuda")
+mlir.register_lowering(_score_dscores_chunk_p, _score_dscores_chunk_lowering, platform="rocm")
+mlir.register_lowering(_score_dscores_chunk_p, _score_dscores_chunk_lowering, platform="cuda")
 
 
 # --- Public score_reduce_triton with custom_vjp ------------------------------
@@ -487,14 +358,65 @@ def _score_reduce_fwd(Hq, Hk, W_o, out_dtype):
     return out, (Hq, Hk, W_o)
 
 
+_BWD_H_CHUNK = 8  # peak (B, oH, T, H_CHUNK, T_s) tile -- bounds materialization
+
+
 def _score_reduce_bwd(out_dtype, residuals, dO):
     del out_dtype
     Hq, Hk, W_o = residuals
-    # Backward kernels work in fp32; upcast dO once.
-    dO_f32 = dO.astype(jnp.float32)
-    dHq, dW_o = _score_reduce_dHq_dWo_p.bind(Hq, Hk, W_o, dO_f32)
-    dHk, = _score_reduce_dHk_p.bind(Hq, Hk, W_o, dO_f32)
-    return dHq, dHk, dW_o
+    B, oH, T, H, d_i = Hq.shape
+
+    # Hybrid scheme with bounded materialization:
+    #   For each h-chunk of size H_CHUNK (driven by lax.scan, NOT Python
+    #   unroll, so intermediates are freed between iterations):
+    #     1. Triton kernel fuses (score recompute + relu + mask + dO*W_o
+    #        broadcast) and writes dscores_chunk[B,oH,T,H_CHUNK,T_s] to HBM.
+    #        h_relu is consumed in-register to also produce dWo_chunk
+    #        without ever materializing the (B,oH,T,H,T_s) h_relu tensor.
+    #     2. hipBLASLt einsums on dscores_chunk give dHq_chunk and a partial
+    #        dHk contribution.
+    # Peak HBM intermediate stays at H_CHUNK/H fraction of the full score.
+    #
+    # The fully-fused Triton bwd variants (v2/v3/v4) remain in this file for
+    # reference -- they don't materialize the score tensor either but are
+    # slower than the hipBLASLt-based reductions used here (~2x at 4096^2).
+    if H % _BWD_H_CHUNK == 0:
+        H_CHUNK = _BWD_H_CHUNK
+    else:
+        H_CHUNK = 1
+        for c in (8, 4, 2):
+            if H % c == 0:
+                H_CHUNK = c
+                break
+    n_chunks = H // H_CHUNK
+
+    Hq_r = Hq.reshape(B, oH, T, n_chunks, H_CHUNK, d_i)
+    Wo_r = W_o.reshape(B, oH, T, n_chunks, H_CHUNK)
+    # Move chunk axis to leading for scan over axis 0.
+    Hq_s = jnp.moveaxis(Hq_r, -3, 0)   # (n_chunks, B, oH, T, H_CHUNK, d_i)
+    Wo_s = jnp.moveaxis(Wo_r, -2, 0)   # (n_chunks, B, oH, T, H_CHUNK)
+
+    def step(dHk_acc, chunk):
+        Hq_c, Wo_c = chunk
+        # Triton: dscores_chunk + dWo_chunk; no full (B,oH,T,H,T_s) tensor
+        # ever exists in HBM.
+        dscores_c, dWo_c = _score_dscores_chunk_p.bind(Hq_c, Hk, Wo_c, dO)
+        dHq_c = jnp.einsum("...ths,...si->...thi", dscores_c, Hk)
+        dHk_c = jnp.einsum("...ths,...thi->...si", dscores_c, Hq_c)
+        new_dHk_acc = dHk_acc + dHk_c.astype(jnp.float32)
+        return new_dHk_acc, (dHq_c, dWo_c)
+
+    init = jnp.zeros(Hk.shape, dtype=jnp.float32)
+    dHk_acc, (dHq_chunks, dWo_chunks) = jax.lax.scan(
+        step, init, (Hq_s, Wo_s),
+    )
+    # dHq_chunks: (n_chunks, B, oH, T, H_CHUNK, d_i)
+    # dWo_chunks: (n_chunks, B, oH, T, H_CHUNK)
+    dHq = jnp.moveaxis(dHq_chunks, 0, -3).reshape(B, oH, T, H, d_i)
+    dWo = jnp.moveaxis(dWo_chunks, 0, -2).reshape(B, oH, T, H)
+    dHk = dHk_acc.astype(Hk.dtype)
+
+    return dHq.astype(Hq.dtype), dHk, dWo.astype(W_o.dtype)
 
 
 _score_reduce_with_vjp.defvjp(_score_reduce_fwd, _score_reduce_bwd)
