@@ -23,6 +23,9 @@ name: Claude PR Action
 # the two `github_token:` inputs (and the `GH_TOKEN` env on those steps) with
 # an installation token from `actions/create-github-app-token@v1`. No other
 # changes needed — the marker-based dedup keeps working across the swap.
+#
+# Note: We pin commits for all actions used here to avoid accidental breakage
+# from upstream changes.
 
 on:
   pull_request_target:
@@ -238,7 +241,7 @@ jobs:
       # needed. Caveat: the merge ref only exists when the PR is mergeable;
       # if it's missing/stale, the workflow will fail fast on checkout, which
       # is the right behavior for an unreviewable PR.
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5  # v4.3.1
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: refs/pull/${{ env.PR_NUMBER }}/merge
 
