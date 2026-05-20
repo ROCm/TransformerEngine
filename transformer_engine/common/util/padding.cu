@@ -42,6 +42,22 @@ struct MultiPaddingArgs {
   int num_tensors;
 };
 
+// Binary search to find which tensor owns a given block id.
+// block_range is a sorted prefix sum array with (num_tensors + 1) entries.
+__device__ __forceinline__ int find_tensor_for_block(const int* block_range, int num_tensors,
+                                                     int bid) {
+  int lo = 0, hi = num_tensors - 1;
+  while (lo < hi) {
+    int mid = (lo + hi) / 2;
+    if (block_range[mid + 1] <= bid) {
+      lo = mid + 1;
+    } else {
+      hi = mid;
+    }
+  }
+  return lo;
+}
+
 template <int nvec, typename Type>
 __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiPaddingArgs args) {
   using Vec = Vec<Type, nvec>;
@@ -65,15 +81,13 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
   constexpr int n_iterations = THREADS_PER_WARP / n_warps_per_tile;
 
   // Find tensor corresponding to block
-  int tensor_id = 0;
-  while (args.block_range[tensor_id + 1] <= bid) {
-    ++tensor_id;
-  }
+  const int tensor_id = find_tensor_for_block(args.block_range, args.num_tensors, bid);
   const Type* input = reinterpret_cast<const Type*>(args.input_list[tensor_id]);
   Type* output = reinterpret_cast<Type*>(args.output_list[tensor_id]);
   const int num_rows = args.num_rows_list[tensor_id];
   const int padded_num_rows = args.padded_num_rows_list[tensor_id];
   const int row_length = args.row_length_list[tensor_id];
+  const bool inplace = (input == output);
 
   // Find position of tile within tensor
   const int num_tiles_n = (row_length + tile_dim_n - 1) / tile_dim_n;
@@ -83,10 +97,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
   const int tile_row = tile_id_m * tile_dim_m;
   const int tile_col = tile_id_n * tile_dim_n;
 
-  // Load input and store to registers
-  // Note: Each thread loads n_iterations subtiles, casts to output
-  // type, and transposes in registers.
-  Type local_zero = static_cast<Type>(0.f);
+  // Process subtiles with vectorized loads/stores
 #pragma unroll
   for (int iter = 0; iter < n_iterations; ++iter) {
     const int i1 = tidy + iter * bdimy;
@@ -95,33 +106,21 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
     for (int i2 = 0; i2 < nvec; ++i2) {
       const int row = tile_row + i1 * nvec + i2;
       const int col = tile_col + j1 * nvec;
-      Vec local_input;
-      Vec local_output;
-      local_input.clear();
+      const int remaining = row_length - col;
       if (row < num_rows) {
-        for (int j2 = 0; j2 < nvec; ++j2) {
-          if (col + j2 < row_length) {
-            local_input.data.elt[j2] = input[static_cast<size_t>(row) * row_length + col + j2];
-          }
-        }
-      }
-#pragma unroll
-      for (int j2 = 0; j2 < nvec; ++j2) {
-        local_output.data.elt[j2] = local_input.data.elt[j2];
-      }
-      if (row < num_rows) {
-        for (int j2 = 0; j2 < nvec; ++j2) {
-          if (col + j2 < row_length) {
-            output[static_cast<size_t>(row) * row_length + col + j2] = local_output.data.elt[j2];
-          }
+        // Valid data row: skip copy when in-place
+        if (!inplace) {
+          const size_t offset = static_cast<size_t>(row) * row_length + col;
+          Vec v;
+          v.load_from_elts(input, offset, remaining > 0 ? min(remaining, nvec) : 0);
+          v.store_to_elts(output, offset, remaining > 0 ? min(remaining, nvec) : 0);
         }
       } else if (row < padded_num_rows) {
-        // padding
-        for (int j2 = 0; j2 < nvec; ++j2) {
-          if (col + j2 < row_length) {
-            output[static_cast<size_t>(row) * row_length + col + j2] = local_zero;
-          }
-        }
+        // Padding row: fill with zeros
+        const size_t offset = static_cast<size_t>(row) * row_length + col;
+        Vec v;
+        v.clear();
+        v.store_to_elts(output, offset, remaining > 0 ? min(remaining, nvec) : 0);
       }
     }
   }
@@ -150,14 +149,12 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
   constexpr int n_iterations = THREADS_PER_WARP / n_warps_per_tile;
 
   // Find tensor corresponding to block
-  int tensor_id = 0;
-  while (args.block_range[tensor_id + 1] <= bid) {
-    ++tensor_id;
-  }
+  const int tensor_id = find_tensor_for_block(args.block_range, args.num_tensors, bid);
   const Type* input = reinterpret_cast<const Type*>(args.input_list[tensor_id]);
   Type* output = reinterpret_cast<Type*>(args.output_list[tensor_id]);
   const int num_rows = args.num_rows_list[tensor_id];
   const int row_length = args.row_length_list[tensor_id];
+  const bool inplace = (input == output);
 
   // Find position of tile within tensor
   const int num_tiles_n = (row_length + tile_dim_n - 1) / tile_dim_n;
@@ -167,10 +164,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
   const int tile_row = tile_id_m * tile_dim_m;
   const int tile_col = tile_id_n * tile_dim_n;
 
-  // Load input and store to registers
-  // Note: Each thread loads n_iterations subtiles, casts to output
-  // type, and transposes in registers.
-  Type local_zero = static_cast<Type>(0.f);
+  // Process subtiles with vectorized loads/stores
 #pragma unroll
   for (int iter = 0; iter < n_iterations; ++iter) {
     const int i1 = tidy + iter * bdimy;
@@ -179,26 +173,12 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
     for (int i2 = 0; i2 < nvec; ++i2) {
       const int row = tile_row + i1 * nvec + i2;
       const int col = tile_col + j1 * nvec;
-      Vec local_input;
-      Vec local_output;
-      local_input.clear();
-      if (row < num_rows) {
-        for (int j2 = 0; j2 < nvec; ++j2) {
-          if (col + j2 < row_length) {
-            local_input.data.elt[j2] = input[static_cast<size_t>(row) * row_length + col + j2];
-          }
-        }
-      }
-#pragma unroll
-      for (int j2 = 0; j2 < nvec; ++j2) {
-        local_output.data.elt[j2] = local_input.data.elt[j2];
-      }
-      if (row < num_rows) {
-        for (int j2 = 0; j2 < nvec; ++j2) {
-          if (col + j2 < row_length) {
-            output[static_cast<size_t>(row) * row_length + col + j2] = local_output.data.elt[j2];
-          }
-        }
+      if (row < num_rows && !inplace) {
+        const int remaining = row_length - col;
+        const size_t offset = static_cast<size_t>(row) * row_length + col;
+        Vec v;
+        v.load_from_elts(input, offset, remaining > 0 ? min(remaining, nvec) : 0);
+        v.store_to_elts(output, offset, remaining > 0 ? min(remaining, nvec) : 0);
       }
     }
   }
