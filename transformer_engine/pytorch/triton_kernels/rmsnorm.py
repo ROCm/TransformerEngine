@@ -140,22 +140,24 @@ def _rmsnorm_fwd_triton_impl(
 
     else:
         mask = col_offsets < n_cols
+        # gamma is invariant across rows -- load + ZERO_CENTERED adjustment once per program.
+        g = tl.load(g_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
+        if (ZERO_CENTERED_GAMMA):
+            g += 1
+        inv_n_cols = 1.0 / n_cols
         for row_idx in tl.range(row_start, n_rows, NUM_PRGMS, num_stages=2):
             input_ptrs = input_ptr + row_idx * input_row_stride + col_offsets
             if INPUT_ALIGNED_16:
                 input_ptrs = tl.multiple_of(input_ptrs, (16, ))
             row = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(tl.float32)
-            g = tl.load(g_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
             row_norm = row * row
             row_norm = tl.sum(row_norm, axis=-1)
-            norm_factor = tl.math.rsqrt((row_norm / n_cols) + epsilon)
+            norm_factor = tl.math.rsqrt(row_norm * inv_n_cols + epsilon)
 
             # Store rsigma (norm_factor)
             rsigma_output_ptr = rsigma_ptr + row_idx
             tl.store(rsigma_output_ptr, norm_factor)
 
-            if (ZERO_CENTERED_GAMMA):
-                g += 1
             rms_norm = row * norm_factor * g
 
             output_ptrs = output_ptr + row_idx * output_row_stride + col_offsets
@@ -181,29 +183,33 @@ autotune_dec = triton.autotune(configs=get_autotune_config(), key=['n_rows', 'n_
 _rmsnorm_fwd_triton = autotune_dec(_rmsnorm_fwd_triton_impl)
 
 @triton.jit
-def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr, input_row_stride, output_row_stride,
+def _rmsnorm_bwd_triton_impl(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, dg_ptr, input_row_stride, output_row_stride,
                         n_rows, n_cols, ZERO_CENTERED_GAMMA: tl.constexpr, BLOCK_SIZE: tl.constexpr,
                         USE_BLOCKED: tl.constexpr, NUM_PRGMS: tl.constexpr,
                         INPUT_ALIGNED_16: tl.constexpr, GRAD_OUTPUT_ALIGNED_16: tl.constexpr,
                         DX_ALIGNED_16: tl.constexpr, DG_ALIGNED_16: tl.constexpr):
+    # `dg_ptr` points to a (NUM_PRGMS, n_cols) fp32 partial buffer (pre-zeroed
+    # by the launcher). Each program accumulates its assigned rows into its
+    # own slot and a separate reduce kernel finalizes dgamma.
     row_start = tl.program_id(0)
     col_offsets = tl.arange(0, BLOCK_SIZE)
+    # Precomputed per-row invariant: dx = nf * (dz*g - c*x) where
+    #   c = nf*nf * grad_sum / n_cols
+    inv_n_cols = 1.0 / n_cols
     #   tl.assume(input_row_stride >= 0)
     #   tl.assume(output_row_stride >= 0)
     #   tl.assume(row_start >= 0)
 
     if USE_BLOCKED:
-        for row_idx in tl.range(row_start, n_rows, NUM_PRGMS, num_stages=1):
+        # Per-program partial dg slot in the (NUM_PRGMS, n_cols) scratch.
+        prgm_dg_ptr = dg_ptr + row_start * n_cols
+        for row_idx in tl.range(row_start, n_rows, NUM_PRGMS, num_stages=2):
             row_input_ptr = input_ptr + row_idx * input_row_stride
             row_grad_output_ptr = grad_output_ptr + row_idx * output_row_stride
             row_dx_ptr = dx_ptr + row_idx * input_row_stride
-            row_dg_ptr = dg_ptr + row_idx * input_row_stride
 
             # Compute gradients sum of all colums for each row
             n_cols_blks = tl.cdiv(n_cols, BLOCK_SIZE) - 1
-            # older version of triton doesn't accept below init
-            # comment out for now to make it compatible with triton 3.1
-            # grad_sum: tl.float32 = 0.0
             grad_sum = 0.0
             for blk_idx in tl.range(0, n_cols_blks, num_stages=2):
                 cols = blk_idx * BLOCK_SIZE + col_offsets
@@ -236,8 +242,9 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
                 g += 1.
             grad_sum += tl.sum(grad_output * x * g, axis=0)
 
-            # Load r_sigma
+            # Load r_sigma; hoist per-row invariants used in dx.
             norm_factor = tl.load(rsigma_ptr + row_idx).to(tl.float32)
+            c_scalar = norm_factor * norm_factor * grad_sum * inv_n_cols
 
             for blk_idx in tl.range(0, n_cols_blks, num_stages=2):
                 cols = blk_idx * BLOCK_SIZE + col_offsets
@@ -256,19 +263,20 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
                 g = tl.load(g_ptrs).to(tl.float32)
                 if (ZERO_CENTERED_GAMMA):
                     g += 1.
-                grad_input = grad_output * norm_factor * g - (norm_factor * norm_factor * norm_factor) * x * (grad_sum /
-                                                                                                              n_cols)
+                grad_input = norm_factor * (grad_output * g - c_scalar * x)
 
                 dx_ptrs = row_dx_ptr + cols
                 if DX_ALIGNED_16:
                     dx_ptrs = tl.multiple_of(dx_ptrs, (16, ))
                 tl.store(dx_ptrs, grad_input.to(dx_ptr.type.element_ty))
 
+                # Accumulate this row's dg contribution into per-program slot.
                 dg = grad_output * x * norm_factor
-                dg_ptrs = row_dg_ptr + cols
+                dg_ptrs = prgm_dg_ptr + cols
                 if DG_ALIGNED_16:
                     dg_ptrs = tl.multiple_of(dg_ptrs, (16, ))
-                tl.store(dg_ptrs, dg.to(tl.float32))
+                partial_dg = tl.load(dg_ptrs)
+                tl.store(dg_ptrs, partial_dg + dg)
 
             # Handle remainder
             cols = n_cols_blks * BLOCK_SIZE + col_offsets
@@ -282,8 +290,7 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
             g = tl.load(g_ptrs, mask=mask, other=0.0).to(tl.float32)
             if (ZERO_CENTERED_GAMMA):
                 g += 1.
-            grad_input = grad_output * norm_factor * g - (norm_factor * norm_factor * norm_factor) * x * (grad_sum /
-                                                                                                          n_cols)
+            grad_input = norm_factor * (grad_output * g - c_scalar * x)
 
             dx_ptrs = row_dx_ptr + cols
             if DX_ALIGNED_16:
@@ -291,14 +298,21 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
             tl.store(dx_ptrs, grad_input.to(dx_ptr.type.element_ty), mask=mask)
 
             dg = grad_output * x * norm_factor
-            dg_ptrs = row_dg_ptr + cols
+            dg_ptrs = prgm_dg_ptr + cols
             if DG_ALIGNED_16:
                 dg_ptrs = tl.multiple_of(dg_ptrs, (16, ))
-            tl.store(dg_ptrs, dg.to(tl.float32), mask=mask)
+            partial_dg = tl.load(dg_ptrs, mask=mask, other=0.0)
+            tl.store(dg_ptrs, partial_dg + dg, mask=mask)
 
     else:
         mask = col_offsets < n_cols
         dg_col_redux = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
+
+        # Hoist gamma load + ZERO_CENTERED adjustment outside the row loop
+        # since gamma is invariant across rows.
+        g = tl.load(g_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
+        if (ZERO_CENTERED_GAMMA):
+            g += 1.
 
         for row_idx in tl.range(row_start, n_rows, NUM_PRGMS, num_stages=2):
             input_ptrs = input_ptr + row_idx * input_row_stride + col_offsets
@@ -314,25 +328,31 @@ def _rmsnorm_bwd_triton(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_ptr, d
 
             x = tl.load(input_ptrs, mask=mask, other=0.0).to(tl.float32)
             grad_output = tl.load(grad_output_ptrs, mask=mask, other=0.0).to(tl.float32)
-            g = tl.load(g_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
-            if (ZERO_CENTERED_GAMMA):
-                g += 1.
 
             norm_factor = tl.load(rsigma_ptr + row_idx).to(tl.float32)
             grad_sum = tl.sum(grad_output * x * g, axis=0)
+            c_scalar = norm_factor * norm_factor * grad_sum * inv_n_cols
 
-            grad_input = grad_output * norm_factor * g - (norm_factor * norm_factor * norm_factor) * x * (grad_sum /
-                                                                                                          n_cols)
+            grad_input = norm_factor * (grad_output * g - c_scalar * x)
             tl.store(dx_ptrs, grad_input.to(dx_ptr.type.element_ty), mask=mask)
 
             dg = grad_output * x * norm_factor
             dg_col_redux += dg.to(tl.float32)
 
-        tl.store(dg_ptr + tl.program_id(0) * input_row_stride + col_offsets, dg_col_redux, mask=mask)
+        tl.store(dg_ptr + row_start * n_cols + col_offsets, dg_col_redux, mask=mask)
+
+
+# Autotune wrapper. Mirrors the fwd autotune layout so callers can toggle
+# autotune via the same flag.
+_rmsnorm_bwd_triton = triton.autotune(
+    configs=get_autotune_config(),
+    key=['n_rows', 'n_cols'],
+    use_cuda_graph=True,
+)(_rmsnorm_bwd_triton_impl)
 
 
 @triton.jit
-def _rmsnorm_bwd_dg_reduce_triton(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n_cols, BLOCK_SIZE_M: tl.constexpr,
+def _rmsnorm_bwd_dg_reduce_triton_impl(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n_cols, BLOCK_SIZE_M: tl.constexpr,
                                   BLOCK_SIZE_N: tl.constexpr):
     # we want parallelism in N direction
     # if N is small, we will just use one CU,
@@ -348,4 +368,25 @@ def _rmsnorm_bwd_dg_reduce_triton(dg_in_ptr, dg_out_ptr, dg_in_stride, n_rows, n
 
     sum_dg = tl.sum(acc, axis=0)
     tl.store(dg_out_ptr + cols, sum_dg.to(dg_out_ptr.type.element_ty), mask=cols < n_cols)
+
+
+def _get_dg_reduce_configs():
+    # n_rows is NUM_PRGMS (<=~144 on MI300X) so the M dimension is small.
+    # The reduce kernel is <1% of bwd cost, so a tight 6-config sweep is plenty;
+    # bigger sweeps just pay first-call compile tax for marginal gain.
+    return [
+        triton.Config({'BLOCK_SIZE_M': 64,  'BLOCK_SIZE_N': 64},  num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64},  num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128}, num_warps=4),
+        triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64},  num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 64},  num_warps=8),
+        triton.Config({'BLOCK_SIZE_M': 256, 'BLOCK_SIZE_N': 128}, num_warps=8),
+    ]
+
+
+_rmsnorm_bwd_dg_reduce_triton = triton.autotune(
+    configs=_get_dg_reduce_configs(),
+    key=['n_rows', 'n_cols'],
+    use_cuda_graph=True,
+)(_rmsnorm_bwd_dg_reduce_triton_impl)
 

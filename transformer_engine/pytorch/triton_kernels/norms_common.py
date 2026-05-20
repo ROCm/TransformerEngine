@@ -20,7 +20,9 @@ from .rmsnorm import (
     _rmsnorm_fwd_triton,
     _rmsnorm_fwd_triton_impl,
     _rmsnorm_bwd_triton,
+    _rmsnorm_bwd_triton_impl,
     _rmsnorm_bwd_dg_reduce_triton,
+    _rmsnorm_bwd_dg_reduce_triton_impl,
 )
 from .layernorm import (
     _layernorm_fwd_triton,
@@ -40,6 +42,16 @@ _norm_kernels={
         True: _layernorm_fwd_triton,
         False: _layernorm_fwd_triton_impl,
     }
+}
+
+_rmsnorm_bwd_kernels = {
+    True: _rmsnorm_bwd_triton,
+    False: _rmsnorm_bwd_triton_impl,
+}
+
+_rmsnorm_bwd_dg_reduce_kernels = {
+    True: _rmsnorm_bwd_dg_reduce_triton,
+    False: _rmsnorm_bwd_dg_reduce_triton_impl,
 }
 # triton drop-in replacement for transformer_engine::pytorch::rmsnorm_fwd
 def te_rmsnorm_fwd_triton(
@@ -234,7 +246,7 @@ def _te_norm_fwd_triton(
 
 
 # triton drop-in replacement for transformer_engine::pytorch::rmsnorm_bwd
-def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
+def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, autotune: bool = True):
     # may take non-contiguous inputs
     dz_ = dz.contiguous()
     x_ = x.contiguous()
@@ -248,25 +260,62 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma):
     blk_size = block_size(x_)
     USE_BLOCKED = use_blocked(x_)
     NUM_PRGMS = num_programs(x_, sm_margin)
-    need_reduction = N > 1
-    dg_tmp_rows =  x_.shape[0] if use_blocked(x_) else num_programs(x_, sm_margin)
-    dg_tmp = torch.empty(dg_tmp_rows, N, device=x.device, dtype=torch.float32, requires_grad=False) if need_reduction else None
+    # Both blocked and non-blocked paths now accumulate per-program (NUM_PRGMS rows)
+    # rather than per-input-row (M rows). For typical workloads (NUM_PRGMS ~= 144 on
+    # MI300X vs M up to 32k), this shrinks the partial buffer by ~100x and keeps it
+    # L2-resident, turning the bwd dg RMW into a near-free op vs going to HBM.
+    need_reduction = NUM_PRGMS > 1
+    # Blocked path uses HBM RMW so the buffer must be zero-initialized.
+    # Non-blocked path writes once per program; empty is fine.
+    if need_reduction:
+        if USE_BLOCKED:
+            dg_tmp = torch.zeros(NUM_PRGMS, N, device=x.device, dtype=torch.float32, requires_grad=False)
+        else:
+            dg_tmp = torch.empty(NUM_PRGMS, N, device=x.device, dtype=torch.float32, requires_grad=False)
+    else:
+        dg_tmp = None
 
     input_aligned_16 = (x_.data_ptr() % 16 == 0) and (x_.stride(0) * x_.dtype.itemsize % 16 == 0)
     grad_output_aligned_16 = (dz_.data_ptr() % 16 == 0) and (dz_.stride(0) * dz_.dtype.itemsize % 16 == 0)
     dx_aligned_16 = (dx.data_ptr() % 16 == 0) and (dx.stride(0) * dx.dtype.itemsize % 16 == 0)
     dg_target = dg_tmp if need_reduction else dgamma
     dg_aligned_16 = (dg_target.data_ptr() % 16 == 0) and (dg_target.stride(0) * dg_target.dtype.itemsize % 16 == 0)
+
     grid_bwd = lambda meta: (NUM_PRGMS, )
-    _rmsnorm_bwd_triton[grid_bwd](dz_, x_, gamma_, rsigma_, dx, dg_tmp if need_reduction else dgamma,
-                                  x_.stride(0), dz_.stride(0), M, N, zero_centered_gamma, blk_size,
-                                  USE_BLOCKED, NUM_PRGMS, input_aligned_16, grad_output_aligned_16,
-                                  dx_aligned_16, dg_aligned_16, num_warps=8)
+    bwd_kernel = _rmsnorm_bwd_kernels[autotune]
+    bwd_kwargs = dict(
+        n_rows=M, n_cols=N,
+        ZERO_CENTERED_GAMMA=zero_centered_gamma,
+        BLOCK_SIZE=blk_size,
+        USE_BLOCKED=USE_BLOCKED, NUM_PRGMS=NUM_PRGMS,
+        INPUT_ALIGNED_16=input_aligned_16,
+        GRAD_OUTPUT_ALIGNED_16=grad_output_aligned_16,
+        DX_ALIGNED_16=dx_aligned_16,
+        DG_ALIGNED_16=dg_aligned_16,
+    )
+    if not autotune:
+        bwd_kwargs["num_warps"] = 8
+    bwd_kernel[grid_bwd](
+        dz_, x_, gamma_, rsigma_, dx, dg_tmp if need_reduction else dgamma,
+        x_.stride(0), dz_.stride(0),
+        **bwd_kwargs,
+    )
 
     if need_reduction:
-        grid_reduce = lambda meta: [triton.cdiv(N, meta['BLOCK_SIZE_N'])]
-        _rmsnorm_bwd_dg_reduce_triton[grid_reduce](dg_tmp, dgamma, dg_tmp.stride(0), dg_tmp.shape[0], dg_tmp.shape[1],
-                                                   BLOCK_SIZE_M=128, BLOCK_SIZE_N=64)
+        reduce_kernel = _rmsnorm_bwd_dg_reduce_kernels[autotune]
+        if autotune:
+            grid_reduce = lambda meta: [triton.cdiv(N, meta['BLOCK_SIZE_N'])]
+            reduce_kernel[grid_reduce](
+                dg_tmp, dgamma, dg_tmp.stride(0), dg_tmp.shape[0], dg_tmp.shape[1],
+            )
+        else:
+            # Match the previously-hardcoded tile when autotune is disabled.
+            BLOCK_SIZE_M, BLOCK_SIZE_N = 128, 64
+            grid_reduce = (triton.cdiv(N, BLOCK_SIZE_N),)
+            reduce_kernel[grid_reduce](
+                dg_tmp, dgamma, dg_tmp.stride(0), dg_tmp.shape[0], dg_tmp.shape[1],
+                BLOCK_SIZE_M=BLOCK_SIZE_M, BLOCK_SIZE_N=BLOCK_SIZE_N,
+            )
 
     return dx, dgamma
 
