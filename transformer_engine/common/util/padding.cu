@@ -1,4 +1,6 @@
 /*************************************************************************
+* This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -13,7 +15,9 @@
 
 #include "../common.h"
 #include "../utils.cuh"
-#include "rocm_device_utils.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "rocm_device_utils.cuh"  // for rocm_upper_bound()
+#endif
 
 namespace transformer_engine {
 
@@ -66,13 +70,22 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
   constexpr int n_iterations = THREADS_PER_WARP / n_warps_per_tile;
 
   // Find tensor corresponding to block
+#ifdef __HIP_PLATFORM_AMD__
   const int tensor_id = rocm_upper_bound(args.block_range, args.num_tensors, bid);
+#else
+  int tensor_id = 0;
+  while (args.block_range[tensor_id + 1] <= bid) {
+    ++tensor_id;
+  }
+#endif
   const Type* input = reinterpret_cast<const Type*>(args.input_list[tensor_id]);
   Type* output = reinterpret_cast<Type*>(args.output_list[tensor_id]);
   const int num_rows = args.num_rows_list[tensor_id];
   const int padded_num_rows = args.padded_num_rows_list[tensor_id];
   const int row_length = args.row_length_list[tensor_id];
+#ifdef __HIP_PLATFORM_AMD__
   const bool inplace = (input == output);
+#endif
 
   // Find position of tile within tensor
   const int num_tiles_n = (row_length + tile_dim_n - 1) / tile_dim_n;
@@ -82,6 +95,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
   const int tile_row = tile_id_m * tile_dim_m;
   const int tile_col = tile_id_n * tile_dim_n;
 
+#ifdef __HIP_PLATFORM_AMD__
   // Process subtiles with vectorized loads/stores
 #pragma unroll
   for (int iter = 0; iter < n_iterations; ++iter) {
@@ -109,6 +123,50 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
       }
     }
   }
+#else  // !__HIP_PLATFORM_AMD__
+  // Load input and store to registers
+  // Note: Each thread loads n_iterations subtiles, casts to output
+  // type, and transposes in registers.
+  Type local_zero = static_cast<Type>(0.f);
+#pragma unroll
+  for (int iter = 0; iter < n_iterations; ++iter) {
+    const int i1 = tidy + iter * bdimy;
+    const int j1 = tidx;
+#pragma unroll
+    for (int i2 = 0; i2 < nvec; ++i2) {
+      const int row = tile_row + i1 * nvec + i2;
+      const int col = tile_col + j1 * nvec;
+      Vec local_input;
+      Vec local_output;
+      local_input.clear();
+      if (row < num_rows) {
+        for (int j2 = 0; j2 < nvec; ++j2) {
+          if (col + j2 < row_length) {
+            local_input.data.elt[j2] = input[static_cast<size_t>(row) * row_length + col + j2];
+          }
+        }
+      }
+#pragma unroll
+      for (int j2 = 0; j2 < nvec; ++j2) {
+        local_output.data.elt[j2] = local_input.data.elt[j2];
+      }
+      if (row < num_rows) {
+        for (int j2 = 0; j2 < nvec; ++j2) {
+          if (col + j2 < row_length) {
+            output[static_cast<size_t>(row) * row_length + col + j2] = local_output.data.elt[j2];
+          }
+        }
+      } else if (row < padded_num_rows) {
+        // padding
+        for (int j2 = 0; j2 < nvec; ++j2) {
+          if (col + j2 < row_length) {
+            output[static_cast<size_t>(row) * row_length + col + j2] = local_zero;
+          }
+        }
+      }
+    }
+  }
+#endif  // __HIP_PLATFORM_AMD__
 }
 
 template <int nvec, typename Type>
@@ -134,12 +192,21 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
   constexpr int n_iterations = THREADS_PER_WARP / n_warps_per_tile;
 
   // Find tensor corresponding to block
+#ifdef __HIP_PLATFORM_AMD__
   const int tensor_id = rocm_upper_bound(args.block_range, args.num_tensors, bid);
+#else
+  int tensor_id = 0;
+  while (args.block_range[tensor_id + 1] <= bid) {
+    ++tensor_id;
+  }
+#endif
   const Type* input = reinterpret_cast<const Type*>(args.input_list[tensor_id]);
   Type* output = reinterpret_cast<Type*>(args.output_list[tensor_id]);
   const int num_rows = args.num_rows_list[tensor_id];
   const int row_length = args.row_length_list[tensor_id];
+#ifdef __HIP_PLATFORM_AMD__
   const bool inplace = (input == output);
+#endif
 
   // Find position of tile within tensor
   const int num_tiles_n = (row_length + tile_dim_n - 1) / tile_dim_n;
@@ -149,6 +216,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
   const int tile_row = tile_id_m * tile_dim_m;
   const int tile_col = tile_id_n * tile_dim_n;
 
+#ifdef __HIP_PLATFORM_AMD__
   // Process subtiles with vectorized loads/stores
 #pragma unroll
   for (int iter = 0; iter < n_iterations; ++iter) {
@@ -167,6 +235,43 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
       }
     }
   }
+#else  // !__HIP_PLATFORM_AMD__
+  // Load input and store to registers
+  // Note: Each thread loads n_iterations subtiles, casts to output
+  // type, and transposes in registers.
+  Type local_zero = static_cast<Type>(0.f);
+#pragma unroll
+  for (int iter = 0; iter < n_iterations; ++iter) {
+    const int i1 = tidy + iter * bdimy;
+    const int j1 = tidx;
+#pragma unroll
+    for (int i2 = 0; i2 < nvec; ++i2) {
+      const int row = tile_row + i1 * nvec + i2;
+      const int col = tile_col + j1 * nvec;
+      Vec local_input;
+      Vec local_output;
+      local_input.clear();
+      if (row < num_rows) {
+        for (int j2 = 0; j2 < nvec; ++j2) {
+          if (col + j2 < row_length) {
+            local_input.data.elt[j2] = input[static_cast<size_t>(row) * row_length + col + j2];
+          }
+        }
+      }
+#pragma unroll
+      for (int j2 = 0; j2 < nvec; ++j2) {
+        local_output.data.elt[j2] = local_input.data.elt[j2];
+      }
+      if (row < num_rows) {
+        for (int j2 = 0; j2 < nvec; ++j2) {
+          if (col + j2 < row_length) {
+            output[static_cast<size_t>(row) * row_length + col + j2] = local_output.data.elt[j2];
+          }
+        }
+      }
+    }
+  }
+#endif  // __HIP_PLATFORM_AMD__
 }
 
 }  // namespace
