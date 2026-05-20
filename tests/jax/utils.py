@@ -84,12 +84,13 @@ def _check_mxfp8_layernorm_mlp_support(
     hidden_in,
     hidden_out,
     n_tp_shards=1,
+    n_fsdp_shards=1,
     use_bias=False,
     with_jax_gemm=False,
 ):
     # Check input shape compatibility with MXFP8 GEMMs
     # FWD 1
-    m = batch_size
+    m = batch_size // n_fsdp_shards # Account for FSDP sharding
     k = hidden_in // n_tp_shards # Account for TP sharding
     n = activation_size
     _check_mxfp8_gemm_support(
@@ -113,6 +114,7 @@ def _check_mxfp8_layernorm_mlp_grad_support(
     hidden_in,
     hidden_out,
     n_tp_shards=1,
+    n_fsdp_shards=1,
     use_bias=False,
     with_jax_gemm=False,
 ):
@@ -124,12 +126,13 @@ def _check_mxfp8_layernorm_mlp_grad_support(
         hidden_in,
         hidden_out,
         n_tp_shards,
+        n_fsdp_shards,
         use_bias,
         with_jax_gemm,
     )
     # BWD 1
-    m = batch_size
-    k = hidden_out // n_tp_shards  # Account for TP sharding
+    m = batch_size // n_fsdp_shards # Account for FSDP sharding
+    k = hidden_out // n_tp_shards # Account for TP sharding
     n = intermediate_size
     _check_mxfp8_gemm_support(
         with_jax_gemm,
@@ -138,7 +141,7 @@ def _check_mxfp8_layernorm_mlp_grad_support(
     )
     # BWD 2
     m = intermediate_size
-    k = batch_size // n_tp_shards  # Account for TP sharding
+    k = batch_size // n_tp_shards // n_fsdp_shards # Account for TP and FSDP sharding
     n = hidden_out
     _check_mxfp8_gemm_support(
         with_jax_gemm,

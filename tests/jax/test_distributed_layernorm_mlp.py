@@ -229,6 +229,7 @@ class TestDistributedLayernormMLP:
                 input_shape[2],
                 input_shape[2],
                 mesh_config[1][1],
+                mesh_config[1][0],
                 use_bias,
                 with_jax_gemm
             )
@@ -418,6 +419,7 @@ class TestDistributedLayernormMLP:
                 input_shape[2],
                 input_shape[2],
                 mesh_config[1][1],
+                mesh_config[1][0],
                 use_bias,
                 with_jax_gemm
             )
