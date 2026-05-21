@@ -27,7 +27,6 @@ python bench_gemm.py                        # run one suite directly
 python bench_gemm.py time_forward           # filter to method names containing this string
 python bench_casting.py --no-csv            # stdout only, don't write CSV
 python bench_casting.py --csv out.csv       # custom output path
-python bench_casting.py --append            # append to existing CSV
 ```
 
 ## Output format
@@ -97,8 +96,8 @@ class BenchSomething:
 
 
 if __name__ == "__main__":
-    from driver import run_as_main
-    run_as_main(__file__)
+    from driver import main
+    main(__file__)
 ```
 
 Key rules:

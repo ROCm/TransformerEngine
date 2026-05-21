@@ -85,5 +85,5 @@ class BenchAttention:
 
 
 if __name__ == "__main__":
-    from driver import run_as_main
-    run_as_main(__file__)
+    from driver import main
+    main(__file__)
