@@ -228,6 +228,27 @@ const std::unordered_map<NVTE_Mask_Type, std::string> mNVTEMaskTypeStr = {
   {NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK, "PADDING_CAUSAL_BOTTOM_RIGHT_MASK"},
 };
 
+// ROCm/AITER fused-attn derives diagonal alignment from NVTE_Mask_Type alone.
+// Reject mismatches on causal variants to avoid silent corruption; the flag is
+// inert for non-causal masks (no_mask, padding, arbitrary).
+inline void check_bottom_right_diagonal(NVTE_Mask_Type attn_mask_type,
+                                        bool bottom_right_diagonal) {
+  const bool is_top_left =
+      attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK;
+  const bool is_bottom_right =
+      attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
+      attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK;
+  if ((is_top_left && bottom_right_diagonal) || (is_bottom_right && !bottom_right_diagonal)) {
+    NVTE_ERROR(
+        "ROCm fused attention does not support a `bottom_right_diagonal` value "
+        "that diverges from the alignment implied by `attn_mask_type`. Use "
+        "NVTE_CAUSAL_BOTTOM_RIGHT_MASK or NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK "
+        "for bottom-right alignment, or the corresponding non-bottom-right "
+        "mask types for top-left alignment.");
+  }
+}
+
 void log_fused_attn_config(
     const char* func_name, NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout, 
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, float dropout, size_t batch_size, 
@@ -279,7 +300,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     float dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, 
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, 
-    int64_t window_size_right, bool return_max_logit, bool cuda_graph) {
+    int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic) {
   using namespace transformer_engine;
   
   // TODO: Add return_max_logit support
@@ -345,18 +366,20 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
 
 
 // NVTE fused attention FWD with packed QKV
-void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias, 
-                                   const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O, 
-                                   NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens, 
-                                   const NVTETensor cu_seqlens_padded, const NVTETensor rng_state, 
+void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
+                                   const NVTETensor SoftmaxOffset, NVTETensor S, NVTETensor O,
+                                   NVTETensorPack *Aux_CTX_Tensors, const NVTETensor cu_seqlens,
+                                   const NVTETensor cu_seqlens_padded, const NVTETensor rng_state,
                                    size_t max_seqlen, bool is_training, bool return_max_logit,
-                                   float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
-                                   bool cuda_graph, NVTE_Bias_Type bias_type, 
+                                   bool cuda_graph, float attn_scale, float dropout,
+                                   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                                    NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
                                    int64_t window_size_left, int64_t window_size_right,
+                                   bool bottom_right_diagonal,
                                    NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd_qkvpacked);
   using namespace transformer_engine;
+  check_bottom_right_diagonal(attn_mask_type, bottom_right_diagonal);
 
   const Tensor *input_cu_seqlens = convertNVTETensorCheck(cu_seqlens);
   const Tensor *input_cu_seqlens_padded = convertNVTETensorCheck(cu_seqlens_padded);
@@ -394,7 +417,7 @@ void nvte_fused_attn_fwd_qkvpacked(const NVTETensor QKV, const NVTETensor Bias,
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
       h, h, max_seqlen, max_seqlen, d, d, window_size_left, window_size_right, return_max_logit,
-      cuda_graph);
+      cuda_graph, false);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd_qkvpacked(
@@ -431,10 +454,11 @@ void nvte_fused_attn_bwd_qkvpacked(
     NVTETensor dSoftmaxOffset, const NVTETensor cu_seqlens, const NVTETensor cu_seqlens_padded,
     size_t max_seqlen, float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-    int64_t window_size_left, int64_t window_size_right, bool deterministic, bool cuda_graph,
-    NVTETensor workspace, cudaStream_t stream) {
+    int64_t window_size_left, int64_t window_size_right, bool bottom_right_diagonal,
+    bool deterministic, bool cuda_graph, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd_qkvpacked);
   using namespace transformer_engine;
+  check_bottom_right_diagonal(attn_mask_type, bottom_right_diagonal);
 
   const Tensor *input_cu_seqlens = convertNVTETensorCheck(cu_seqlens);
   const Tensor *input_cu_seqlens_padded = convertNVTETensorCheck(cu_seqlens_padded);
@@ -477,7 +501,8 @@ void nvte_fused_attn_bwd_qkvpacked(
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       true, QKV_type, QKV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout, h, h,
-      max_seqlen, max_seqlen, d, d, window_size_left, window_size_right, false, cuda_graph);
+      max_seqlen, max_seqlen, d, d, window_size_left, window_size_right, false, cuda_graph,
+      deterministic);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)){
@@ -523,10 +548,12 @@ void nvte_fused_attn_fwd_kvpacked(
     size_t max_seqlen_kv, bool is_training, bool return_max_logit, bool cuda_graph,
     float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
-    int64_t window_size_right, NVTETensor workspace, cudaStream_t stream) {
+    int64_t window_size_right, bool bottom_right_diagonal,
+    NVTETensor workspace, cudaStream_t stream) {
  
   NVTE_API_CALL(nvte_flash_attn_fwd_kvpacked);
   using namespace transformer_engine;
+  check_bottom_right_diagonal(attn_mask_type, bottom_right_diagonal);
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
   const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
@@ -570,7 +597,7 @@ void nvte_fused_attn_fwd_kvpacked(
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
       h_q, h_kv, max_seqlen_q, max_seqlen_kv, d, d, window_size_left, window_size_right,
-      return_max_logit, cuda_graph);
+      return_max_logit, cuda_graph, false);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd_kvpacked(
@@ -614,10 +641,11 @@ void nvte_fused_attn_bwd_kvpacked(
     const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q, size_t max_seqlen_kv,
     float attn_scale, float dropout, NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
     NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type, int64_t window_size_left,
-    int64_t window_size_right, bool deterministic, bool cuda_graph, NVTETensor workspace,
-    cudaStream_t stream) {
+    int64_t window_size_right, bool bottom_right_diagonal, bool deterministic, bool cuda_graph,
+    NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd_kvpacked);
   using namespace transformer_engine;
+  check_bottom_right_diagonal(attn_mask_type, bottom_right_diagonal);
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
   const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
@@ -666,7 +694,8 @@ void nvte_fused_attn_bwd_kvpacked(
   NVTE_Fused_Attn_Backend fused_attention_backend =
       nvte_get_fused_attn_backend(true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type,
                                   softmax_type, dropout, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
-                                  d, window_size_left, window_size_right, false, cuda_graph);
+                                  d, window_size_left, window_size_right, false, cuda_graph,
+                                  deterministic);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
@@ -720,10 +749,12 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
                          NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-                         int64_t window_size_left, int64_t window_size_right, NVTETensor workspace,
+                         int64_t window_size_left, int64_t window_size_right,
+                         bool bottom_right_diagonal, NVTETensor workspace,
                          cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd);
   using namespace transformer_engine;
+  check_bottom_right_diagonal(attn_mask_type, bottom_right_diagonal);
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
   const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
@@ -760,7 +791,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
       h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right,
-      return_max_logit, cuda_graph);
+      return_max_logit, cuda_graph, false);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd(
@@ -806,10 +837,12 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          size_t max_seqlen_kv, float attn_scale, float dropout,
                          NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
-                         int64_t window_size_left, int64_t window_size_right, bool deterministic,
+                         int64_t window_size_left, int64_t window_size_right,
+                         bool bottom_right_diagonal, bool deterministic,
                          bool cuda_graph, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
+  check_bottom_right_diagonal(attn_mask_type, bottom_right_diagonal);
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
   const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
@@ -852,7 +885,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout, h_q,
       h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right, false,
-      cuda_graph);
+      cuda_graph, deterministic);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {

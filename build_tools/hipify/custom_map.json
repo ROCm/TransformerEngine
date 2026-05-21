@@ -11,7 +11,6 @@
         "__nv_fp8_e5m2" : "te_hip_fp8_e5m2",
         "__nv_fp8_e4m3" : "te_hip_fp8_e4m3",
         "cuda::getCurrentCUDAStream" : "hip::getCurrentHIPStreamMasqueradingAsCUDA",
-        "at::cuda::CUDAGuard" : "at::hip::HIPGuardMasqueradingAsCUDA",
         "__nv_fp4_e2m1" : "__hip_fp4_e2m1",
         "__nv_fp4x2_e2m1" : "__hip_fp4x2_e2m1",
         "__nv_fp4x4_e2m1" : "__hip_fp4x4_e2m1",
