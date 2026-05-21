@@ -320,6 +320,67 @@ struct FP8TileCfg<GPUArch::GFX950> {
   using type = TileCfg_128x128x128_16x16x128_2x2x1;
 };
 
+struct FP8GroupedShapeAlignment {
+  bool all_n_256_aligned = true;
+  bool all_n_128_aligned = true;
+  bool all_k_128_aligned = true;
+};
+
+static FP8GroupedShapeAlignment get_fp8_grouped_shape_alignment(
+    const GroupedGemmRunContext& ctx) {
+  FP8GroupedShapeAlignment alignment;
+
+  for (int i = 0; i < ctx.group_num; ++i) {
+    const transformer_engine::Tensor* const A_te =
+        transformer_engine::convertNVTETensorCheck(ctx.A[i]);
+    const transformer_engine::Tensor* const B_te =
+        transformer_engine::convertNVTETensorCheck(ctx.B[i]);
+
+    int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0;
+
+    if (ctx.use_a_columnwise_data) {
+      if (!get_columnwise_storage_2d_dims(A_te->columnwise_data, Ad0, Ad1)) {
+        NVTE_ERROR("ck_tile_grouped_gemm: expected 2D columnwise_data for A in group ", i);
+      }
+    } else {
+      if (!get_flat_2d_dims(*A_te, Ad0, Ad1)) {
+        NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for normalized A in group ", i);
+      }
+    }
+
+    if (ctx.use_b_columnwise_data) {
+      if (!get_columnwise_storage_2d_dims(B_te->columnwise_data, Bd0, Bd1)) {
+        NVTE_ERROR("ck_tile_grouped_gemm: expected 2D columnwise_data for B in group ", i);
+      }
+    } else {
+      if (!get_flat_2d_dims(*B_te, Bd0, Bd1)) {
+        NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for normalized B in group ", i);
+      }
+    }
+
+    const int64_t K = ctx.transA ? Ad0 : Ad1;
+    const int64_t N = ctx.transB ? Bd0 : Bd1;
+
+    if (N % 256 != 0) {
+      alignment.all_n_256_aligned = false;
+    }
+    if (N % 128 != 0) {
+      alignment.all_n_128_aligned = false;
+    }
+    if (K % 128 != 0) {
+      alignment.all_k_128_aligned = false;
+    }
+
+    if (!alignment.all_n_256_aligned &&
+        !alignment.all_n_128_aligned &&
+        !alignment.all_k_128_aligned) {
+      break;
+    }
+  }
+
+  return alignment;
+}
+
 #define MAKE_FP8_RUNNER(TileCfg_)                                      \
   using Runner = QuantGroupedGemmRunner<AType,                     \
                                         BType,                     \
@@ -365,20 +426,22 @@ static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
       TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(d_dtype, d_te_type, {
         using CType = typename TETypeToCKType<d_te_type>::type;
 
-        if constexpr (Arch == GPUArch::GFX950) {
-          if (ctx.N % 256 == 0) {
-            if (ctx.K % 128 == 0) {
+      if constexpr (Arch == GPUArch::GFX950) {
+          const auto alignment = get_fp8_grouped_shape_alignment(ctx);
+
+          if (alignment.all_n_256_aligned) {
+            if (alignment.all_k_128_aligned) {
               MAKE_FP8_RUNNER(TileCfg_256x256x128_16x16x128_2x2x1);
             } else {
               MAKE_FP8_RUNNER(TileCfg_256x256x128_16x16x128_2x2x1_kpad);
             }
-          } else if (ctx.N % 128 == 0) {
-            if (ctx.K % 128 == 0) {
+          } else if (alignment.all_n_128_aligned) {
+            if (alignment.all_k_128_aligned) {
               MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1);
             } else {
               MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_kpad);
             }
-          } else if (ctx.K % 128 == 0) {
+          } else if (alignment.all_k_128_aligned) {
             MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_npad);
           } else {
             MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_nkpad);
