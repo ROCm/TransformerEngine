@@ -1123,6 +1123,7 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 #else
   // Currently only support cutlass group gemm on Hopper Arch
   if (!(is_hopper && use_cutlass)) {
+  if (!use_cutlass) {
 #endif
     cublas_path();
     return;
