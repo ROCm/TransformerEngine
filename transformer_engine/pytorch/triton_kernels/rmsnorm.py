@@ -203,8 +203,6 @@ def _rmsnorm_bwd_triton_impl(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_p
     #                    load+add+store on a slot that's only written once.
     row_start = tl.program_id(0)
     col_offsets = tl.arange(0, BLOCK_SIZE)
-    # Precomputed per-row invariant: dx = nf * (dz*g - c*x) where
-    #   c = nf*nf * grad_sum / n_cols
     inv_n_cols = 1.0 / n_cols
     #   tl.assume(input_row_stride >= 0)
     #   tl.assume(output_row_stride >= 0)
@@ -256,8 +254,10 @@ def _rmsnorm_bwd_triton_impl(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_p
                 g += 1.
             grad_sum += tl.sum(grad_output * x * g, axis=0)
 
-            # Load r_sigma; hoist per-row invariants used in dx.
+            # Load r_sigma
             norm_factor = tl.load(rsigma_ptr + row_idx).to(tl.float32)
+            # Precomputed per-row invariant: dx = nf * (dz*g - c*x) where
+            #   c = nf*nf * grad_sum / n_cols
             c_scalar = norm_factor * norm_factor * grad_sum * inv_n_cols
 
             for blk_idx in tl.range(0, n_cols_blks, num_stages=2):
@@ -334,8 +334,6 @@ def _rmsnorm_bwd_triton_impl(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_p
         mask = col_offsets < n_cols
         dg_col_redux = tl.zeros((BLOCK_SIZE, ), dtype=tl.float32)
 
-        # Hoist gamma load + ZERO_CENTERED adjustment outside the row loop
-        # since gamma is invariant across rows.
         g = tl.load(g_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
         if (ZERO_CENTERED_GAMMA):
             g += 1.
@@ -357,6 +355,8 @@ def _rmsnorm_bwd_triton_impl(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_p
 
             norm_factor = tl.load(rsigma_ptr + row_idx).to(tl.float32)
             grad_sum = tl.sum(grad_output * x * g, axis=0)
+            # Precomputed per-row invariant: dx = nf * (dz*g - c*x) where
+            #   c = nf*nf * grad_sum / n_cols
             c_scalar = norm_factor * norm_factor * grad_sum * inv_n_cols
 
             grad_input = norm_factor * (grad_output * g - c_scalar * x)
@@ -397,7 +397,7 @@ def _rmsnorm_bwd_dg_reduce_triton_impl(dg_in_ptr, dg_out_ptr, dg_in_stride, n_ro
 
 
 def _get_dg_reduce_configs():
-    # n_rows is NUM_PRGMS (<=~144 on MI300X) so the M dimension is small.
+    # n_rows is NUM_PRGMS so the M dimension is small.
     # The reduce kernel is <1% of bwd cost, so a tight 6-config sweep is plenty;
     # bigger sweeps just pay first-call compile tax for marginal gain.
     return [
@@ -422,8 +422,7 @@ _rmsnorm_bwd_dg_reduce_triton = triton.autotune(
 #
 # Replaces the in-kernel `out_transpose_ptr + cols * stride + row_idx` strided
 # stores that the main fwd kernel emits when MAKE_TRANSPOSE=True. Those writes
-# are uncoalesced (1 byte/thread to a different cache line each), which is why
-# every fp8_t shape in the bench sat at ~1.00x.
+# are uncoalesced (1 byte/thread to a different cache line each).
 #
 # This kernel reads a (BLOCK_M, BLOCK_N) tile coalesced from the row-major
 # fp8 output, transposes it through LDS via `tl.trans`, and writes the
