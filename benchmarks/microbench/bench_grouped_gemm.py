@@ -6,37 +6,27 @@
 ###############################################################################
 """Grouped GEMM benchmarks via te.GroupedLinear.
 
-MoE model configurations with GateUp and Down projections.
-Configurations are based on:
-https://github.com/AMD-AGI/Primus-Turbo/blob/main/benchmark/ops/config.py
+MoE model configurations with GateUp and Down projections, swept over a
+range of expert-parallel sizes.
 """
 
 import torch
 import transformer_engine.pytorch as te
 
 from driver import time_func
+from shapes import grouped_gemm_configs
 
-# (n_routed_experts, moe_intermediate_size, hidden_size)
-MOE_MODELS = {
-    "DSV2-Lite": (64, 1408, 2048),
-    "DSV2":      (160, 1536, 5120),
-    "DSV3":      (256, 2048, 7168),
-    "Grok-V2":   (8, 16384, 8192),
-}
+# Grouped GEMM scales with B, so we sweep smaller M than dense benchmarks
+# to keep the working set and runtime reasonable.
+M_SIZES = [512, 1024, 2048, 4096]
 
-# Build (config_key -> (num_gemms, N, K)) mapping
-CONFIGS = {}
-for model, (n_experts, inter, hidden) in MOE_MODELS.items():
-    for ep in [32, 16, 8]:
-        if n_experts % ep != 0:
-            continue
-        B = n_experts // ep
-        CONFIGS[f"{model}_EP{ep}-GateUp"] = (B, 2 * inter, hidden)
-        CONFIGS[f"{model}_EP{ep}-Down"] = (B, hidden, inter)
+# Default to the shared MoE configs; mutate to add custom shapes
+# (e.g. CONFIGS["MyMoE_EP4-GateUp"] = (B, N, K)).
+CONFIGS = grouped_gemm_configs()
 
 
 class BenchGroupedGemm:
-    params = [[512, 1024, 2048, 4096], list(CONFIGS)]
+    params = [M_SIZES, list(CONFIGS)]
     param_names = ["M", "config"]
     timeout = 300
 

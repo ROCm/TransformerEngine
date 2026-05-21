@@ -7,35 +7,28 @@
 """
 RMSNorm and LayerNorm benchmarks on activation-sized tensors.
 
-Shapes are derived from training workloads:
-  - Llama 3   8B, 70B, 405B (all use RMSNorm)
-  - Qwen 2.5  7B, 72B       (all use RMSNorm)
+Modern models predominantly use RMSNorm, but we benchmark both since TE
+supports both and they share the same kernel infrastructure.
 
-Modern models predominantly use RMSNorm, but we benchmark both
-LayerNorm and RMSNorm since TE supports both and they share the
-same kernel infrastructure.
-
-The M dimension (batch * seq_len) is swept across typical training sizes.
-
-Sources for model configs:
-  https://huggingface.co/meta-llama/Llama-3.1-8B/blob/main/config.json
-  https://huggingface.co/meta-llama/Llama-3.1-70B/blob/main/config.json
-  https://huggingface.co/meta-llama/Llama-3.1-405B/blob/main/config.json
-  https://huggingface.co/Qwen/Qwen2.5-7B-Instruct/blob/main/config.json
-  https://huggingface.co/Qwen/Qwen2.5-72B-Instruct/blob/main/config.json
+The M dimension (batch * seq_len) is swept across typical training sizes;
+hidden sizes are derived from the shared dense-model configs.
 """
 
 import torch
 import transformer_engine.pytorch as te
 
 from driver import time_func
+from shapes import M_SIZES, hidden_sizes
 
 NORMS = {"RMSNorm": te.RMSNorm, "LayerNorm": te.LayerNorm}
-HIDDEN_SIZES = [3584, 4096, 8192, 16384]
+
+# Sweep unique hidden sizes from the shared dense-model configs; replace or
+# extend (e.g. HIDDEN_SIZES.append(2048)) to add custom shapes.
+HIDDEN_SIZES = sorted(set(hidden_sizes().values()))
 
 
 class BenchNormalization:
-    params = [[1024, 2048, 4096, 8192], HIDDEN_SIZES, list(NORMS)]
+    params = [M_SIZES, HIDDEN_SIZES, list(NORMS)]
     param_names = ["M", "hidden", "norm_type"]
     timeout = 120
 
