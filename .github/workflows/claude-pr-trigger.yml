@@ -1,0 +1,119 @@
+name: Claude PR Trigger
+
+# Forwards PR review/summary requests to the Claude worker workflow.
+#
+# Two trigger surfaces:
+#   1. Labels:  `claude-review`, `claude-summary`
+#   2. Comments on a PR: `/claude review`, `/claude summary`
+#
+# Why the indirection (repository_dispatch -> worker)?
+# claude-code-action exchanges the GitHub OIDC token for a GitHub App
+# installation token. The OIDC subject from `pull_request_target` and
+# `issue_comment` events is rejected by Anthropic's token exchange endpoint;
+# `repository_dispatch` produces a ref-based subject that is accepted.
+# (See ROCm/xla claude_trigger.yml for prior art.)
+
+on:
+  pull_request_target:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: read
+  issues: write
+
+jobs:
+  dispatch:
+    # Lightweight dispatcher — kept on ubuntu-latest (which has `gh`
+    # preinstalled) to avoid tying up a self-hosted GPU runner on every PR
+    # label/comment event. Mirrors the pattern in rocm-ci-dispatch.yml's
+    # determine_level job.
+    runs-on: ubuntu-latest
+    # Skip non-PR issue comments early.
+    if: >
+      github.event_name == 'pull_request_target' ||
+      (github.event_name == 'issue_comment' && github.event.issue.pull_request != null)
+    steps:
+      - name: Resolve action, PR number, and base branch
+        id: resolve
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          LABEL_NAME: ${{ github.event.label.name }}
+          COMMENT_BODY: ${{ github.event.comment.body }}
+          AUTHOR_ASSOC: ${{ github.event.comment.author_association }}
+          PR_FROM_LABEL: ${{ github.event.pull_request.number }}
+          PR_FROM_COMMENT: ${{ github.event.issue.number }}
+          # Available on pull_request_target only; empty on issue_comment.
+          BASE_FROM_LABEL: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          action=""
+          pr=""
+          base=""
+
+          if [[ "$EVENT_NAME" == "pull_request_target" ]]; then
+            case "$LABEL_NAME" in
+              claude-review)  action="review"  ;;
+              claude-summary) action="summary" ;;
+            esac
+            pr="$PR_FROM_LABEL"
+            base="$BASE_FROM_LABEL"
+          else
+            # Comment trigger: only accept from users with write access.
+            case "$AUTHOR_ASSOC" in
+              OWNER|MEMBER|COLLABORATOR) ;;
+              *) echo "Ignoring comment from $AUTHOR_ASSOC"; exit 0 ;;
+            esac
+            # Match `/claude <cmd>` as the first non-whitespace token.
+            cmd=$(printf '%s' "$COMMENT_BODY" | awk 'NR==1 && $1=="/claude" {print $2}')
+            case "$cmd" in
+              review)    action="review"  ;;
+              summary)   action="summary" ;;
+            esac
+            pr="$PR_FROM_COMMENT"
+          fi
+
+          if [[ -z "$action" ]]; then
+            echo "No matching action; nothing to dispatch."
+            exit 0
+          fi
+
+          # For comment triggers (and as a safety net for label triggers), look
+          # up the PR's actual base ref so the worker diffs against the merge
+          # target, not the repo default branch.
+          if [[ -z "$base" ]]; then
+            base=$(gh pr view "$pr" \
+                     --repo "${{ github.repository }}" \
+                     --json baseRefName -q .baseRefName)
+          fi
+
+          echo "action=$action" >> "$GITHUB_OUTPUT"
+          echo "pr=$pr"         >> "$GITHUB_OUTPUT"
+          echo "base=$base"     >> "$GITHUB_OUTPUT"
+
+      - name: React to comment (acknowledge)
+        if: steps.resolve.outputs.action != '' && github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api \
+            -H "Accept: application/vnd.github+json" \
+            --method POST \
+            "/repos/${{ github.repository }}/issues/comments/${{ github.event.comment.id }}/reactions" \
+            -f content=eyes || true
+
+      - name: Dispatch worker
+        if: steps.resolve.outputs.action != ''
+        env:
+          # repository_dispatch requires a PAT (or GitHub App token) — the
+          # default GITHUB_TOKEN returns 403 here by design (recursion guard).
+          GH_TOKEN: ${{ secrets.WORKFLOW_DISPATCH_TOKEN }}
+        run: |
+          gh api repos/${{ github.repository }}/dispatches \
+            -f event_type=claude-pr-action \
+            -f "client_payload[action]=${{ steps.resolve.outputs.action }}" \
+            -f "client_payload[pull_number]=${{ steps.resolve.outputs.pr }}" \
+            -f "client_payload[base]=${{ steps.resolve.outputs.base }}"
