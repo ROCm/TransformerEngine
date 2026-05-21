@@ -312,7 +312,6 @@ void cpu_rowwise_to_columnwise(
   }
 }
 
-#ifdef __HIP_PLATFORM_AMD__
 // Swizzle MXFP8 scale_inv of a test::Tensor in-place for gfx1250.
 static void swizzle_mxfp8_scales(test::Tensor &t, bool rowwise) {
   using namespace transformer_engine;
@@ -346,7 +345,6 @@ static void swizzle_mxfp8_scales(test::Tensor &t, bool rowwise) {
   NVTE_CHECK_CUDA(cudaMemcpy(scale_ptr, d_tmp, num_scales, cudaMemcpyDeviceToDevice));
   NVTE_CHECK_CUDA(cudaFree(d_tmp));
 }
-#endif  // __HIP_PLATFORM_AMD__
 
 std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool use_mxfp8) {
   auto [atol, rtol] = getTolerances(type);
@@ -363,14 +361,12 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
   else if (use_fp8) {
     atol = 1e-3;
     rtol = std::max(rtol, 1e-2);
-#ifdef __HIP_PLATFORM_AMD__
     // Relax for gfx1250
     cudaDeviceProp prop;
     (void)cudaGetDeviceProperties(&prop, 0);
     if (prop.major == 12 && type == DType::kBFloat16) {
       rtol = std::max(rtol, 5e-2);
     }
-#endif
   }
   else if (type == DType::kBFloat16) {
     //relax for certain prime number TN gemm
@@ -566,7 +562,6 @@ void performTest(const TestParams& params) {
     RefD,
     params.use_gelu ? &RefPreGeluOut : nullptr);
 
-#ifdef __HIP_PLATFORM_AMD__
   // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales.
   if (use_mxfp8 && prop.major == 12) {
     if (!a_colwise) swizzle_mxfp8_scales(A, true);
@@ -574,7 +569,6 @@ void performTest(const TestParams& params) {
     if (!b_colwise) swizzle_mxfp8_scales(B, true);
     if (b_colwise)  swizzle_mxfp8_scales(B, false);
   }
-#endif
 
   //perform the gemm in GPU
   nvte_cublas_gemm(A.data(),
