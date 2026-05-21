@@ -31,12 +31,11 @@ list(APPEND test_cuda_sources
             test_multi_unpadding.cu
             test_causal_softmax.cu
             test_swap_first_dims.cu
-            ../test_common.cu)
-
+            test_swizzle.cu
+	          ../test_common.cu)
 if(USE_CUDA)
   list(APPEND test_cuda_sources
-              test_cast_float8blockwise.cu
-              test_swizzle.cu)
+              test_cast_float8blockwise.cu)
 else()
   list(APPEND test_cuda_sources
               test_cublaslt_gemm.cu

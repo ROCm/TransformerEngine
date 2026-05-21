@@ -7,6 +7,7 @@
 #pragma once
 
 #include <hip/hip_runtime.h>
+#include "common/util/cuda_runtime.h"
 
 #include <algorithm>
 #include <array>
@@ -72,6 +73,28 @@ static inline const transformer_engine::SimpleTensor& data_view(const transforme
 
 static inline const transformer_engine::SimpleTensor& scale_inv_view(const transformer_engine::Tensor& t) {
   return t.scale_inv;
+}
+
+enum class GPUArch {
+  GFX942,
+  GFX950,
+  GFX1250,
+  UNKNOWN
+};
+
+static inline GPUArch detect_gpu_arch() {
+  int arch = cuda::sm_arch(0);
+
+  if (arch == 94) {
+    return GPUArch::GFX942;
+  }
+  if (arch == 95) {
+    return GPUArch::GFX950;
+  }
+  if (arch == 1250) {
+    return GPUArch::GFX1250;
+  }
+  return GPUArch::UNKNOWN;
 }
 
 struct GroupedGemmRunContext {
