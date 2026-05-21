@@ -1160,9 +1160,20 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
     auto *OutputD = transformer_engine::convertNVTETensorCheck(D[0]);
 #ifdef __HIP_PLATFORM_AMD__
-    auto A_dt = inputA->data.dtype;
-    auto B_dt = inputB->data.dtype;
+    auto effective_dtype = [](const transformer_engine::Tensor* t) {
+      if (is_fp8_dtype(t->data.dtype)) {
+        return t->data.dtype;
+      }
+      if (t->has_columnwise_data() && is_fp8_dtype(t->columnwise_data.dtype)) {
+        return t->columnwise_data.dtype;
+      }
+      return t->data.dtype;
+    };
+
+    auto A_dt = effective_dtype(inputA);
+    auto B_dt = effective_dtype(inputB);
     auto D_dt = OutputD->data.dtype;
+
     return (
             (is_fp8_dtype(A_dt) && is_fp8_dtype(B_dt))
           ) ||

@@ -94,8 +94,11 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
     }
   }
 
-  const auto a_dtype = convertNVTETensorCheck(A_use[0])->dtype();
-  const auto b_dtype = convertNVTETensorCheck(B_use[0])->dtype();
+  const auto& A0_data = use_a_colwise_data ? A0_te->columnwise_data : A0_te->data;
+  const auto& B0_data = use_b_colwise_data ? B0_te->columnwise_data : B0_te->data;
+
+  const auto a_dtype = A0_data.dtype;
+  const auto b_dtype = B0_data.dtype;
 
   Tensor* D0_te = convertNVTETensorCheck(D[0]);
   const auto d_dtype = D0_te->dtype();

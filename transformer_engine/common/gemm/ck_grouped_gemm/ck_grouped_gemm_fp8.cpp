@@ -268,7 +268,9 @@ class QuantGroupedGemmRunner : public RunnerInterface {
     if (descs.empty()) {
       return false;
     }
-    return launch_grouped_gemm_kernel<Kernel>(descs, ctx, stream_cfg);
+
+    const bool launched = launch_grouped_gemm_kernel<Kernel>(descs, ctx, stream_cfg);
+    return launched;
   }
 };
 
@@ -334,7 +336,7 @@ static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
             using CType = typename TETypeToCKType<d_te_type>::type;
 
             if constexpr (Arch == GPUArch::GFX950) {
-              if (ctx.K >= 2048 || ctx.N >= 2048) {
+              if (ctx.K >= 2048 && ctx.N >= 2048) {
                 MAKE_FP8_RUNNER(TileCfg_256x256x128_16x16x128_2x2x1);
               } else {
                 MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1);
@@ -353,7 +355,8 @@ static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
     return false;
   }
 
-  return runner->run(s, ctx);
+  const bool ok = runner->run(s, ctx);
+  return ok;
 }
 
 #undef MAKE_FP8_RUNNER
@@ -375,3 +378,4 @@ bool ck_tile_grouped_gemm_fp8_dispatch(DType a_dtype,
 
 }  // namespace grouped_gemm
 }  // namespace transformer_engine
+
