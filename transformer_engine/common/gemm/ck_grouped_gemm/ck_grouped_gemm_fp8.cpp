@@ -22,9 +22,9 @@ enum class GPUArch {
   UNKNOWN
 };
 
-struct TileCfg_128x128x128_16x16x128_2x2x1 {
-  static constexpr ck_tile::index_t M_Tile = 128;
-  static constexpr ck_tile::index_t N_Tile = 128;
+struct TileCfg_256x256x128_16x16x128_2x2x1 {
+  static constexpr ck_tile::index_t M_Tile = 256;
+  static constexpr ck_tile::index_t N_Tile = 256;
   static constexpr ck_tile::index_t K_Tile = 128;
 
   static constexpr ck_tile::index_t M_Warp = 2;
@@ -45,11 +45,15 @@ struct TileCfg_128x128x128_16x16x128_2x2x1 {
   static constexpr ck_tile::index_t TilePartitionerM01 = 8;
 };
 
-struct TileCfg_256x256x128_16x16x128_2x2x1
+struct TileCfg_128x128x128_16x16x128_2x2x1
+    : TileCfg_256x256x128_16x16x128_2x2x1 {
+  static constexpr ck_tile::index_t M_Tile = 128;
+  static constexpr ck_tile::index_t N_Tile = 128;
+};
+
+struct TileCfg_128x128x128_16x16x128_2x2x1_padding
     : TileCfg_128x128x128_16x16x128_2x2x1 {
-  static constexpr ck_tile::index_t M_Tile = 256;
-  static constexpr ck_tile::index_t N_Tile = 256;
-  static constexpr ck_tile::index_t K_Tile = 128;
+  static constexpr bool kPadN = true;
 };
 
 // gfx950 device compilation cannot instantiate the literal 32x32x16 FP8 tile
@@ -57,8 +61,9 @@ struct TileCfg_256x256x128_16x16x128_2x2x1
 // See: ck_tile/ops/gemm/warp/warp_gemm_dispatcher.hpp for supported variants.
 //
 // To preserve the existing type name in shared template code, this struct
-// inherits from the gfx950-safe 16x16x128 configuration in the gfx950 device
-// compilation path, effectively reusing those parameters without redefining them.
+// inherits from the gfx950-safe 128x128x128 16x16x128 configuration in the
+// gfx950 device compilation path, effectively reusing those parameters without
+// redefining them.
 //
 // In all other compilation paths, the struct overrides the relevant fields to
 // provide the intended 32x32x16 configuration.
@@ -336,10 +341,14 @@ static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
             using CType = typename TETypeToCKType<d_te_type>::type;
 
             if constexpr (Arch == GPUArch::GFX950) {
-              if (ctx.K >= 2048 && ctx.N >= 2048) {
+              if (ctx.K % 128 != 0) {
+                NVTE_WARN("ck_tile_grouped_gemm: (FP8) K must be a multiple of 128. Falling back.");
+              } else if (ctx.N % 256 == 0) {
                 MAKE_FP8_RUNNER(TileCfg_256x256x128_16x16x128_2x2x1);
-              } else {
+              } else if (ctx.N % 128 == 0) {
                 MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1);
+              } else {
+                MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_padding);
               }
             } else {
               using TileCfg = typename FP8TileCfg<Arch>::type;
