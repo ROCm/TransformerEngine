@@ -233,28 +233,10 @@ class GroupedGemmRunner : public RunnerInterface {
   })
 
 template <GPUArch Arch>
-struct FP16TileCfg;
-
-template <>
-struct FP16TileCfg<GPUArch::GFX942> {
-  using type = TileCfg_256x256x64_MFMA;
-};
-
-template <>
-struct FP16TileCfg<GPUArch::GFX950> {
-  using type = TileCfg_256x256x64_MFMA;
-};
-
-template <>
-struct FP16TileCfg<GPUArch::GFX1250> {
-  using type = TileCfg_256x256x64_WMMA;
-};
-
-template <GPUArch Arch>
 bool ck_tile_grouped_gemm_fp16_dispatch_arch(DType a_dtype,
-                                        DType b_dtype,
-                                        DType d_dtype,
-                                        const GroupedGemmRunContext& ctx) {
+                                             DType b_dtype,
+                                             DType d_dtype,
+                                             const GroupedGemmRunContext& ctx) {
   const ck_tile::stream_config s{ctx.stream};
   std::unique_ptr<RunnerInterface> runner = nullptr;
 
@@ -276,11 +258,11 @@ bool ck_tile_grouped_gemm_fp16_dispatch_arch(DType a_dtype,
             MAKE_RUNNER(TileCfg_256x256x64_WMMA);
           } else {
             if (ctx.N % 256 == 0) {
-                MAKE_RUNNER(TileCfg_256x256x64_MFMA);
+              MAKE_RUNNER(TileCfg_256x256x64_MFMA);
             } else if (ctx.N % 128 == 0) {
-                MAKE_RUNNER(TileCfg_256x128x64_MFMA);
+              MAKE_RUNNER(TileCfg_256x128x64_MFMA);
             } else {
-                MAKE_RUNNER(TileCfg_256x128x64_MFMA_padding);
+              MAKE_RUNNER(TileCfg_256x128x64_MFMA_padding);
             }
           }
         });
@@ -300,12 +282,19 @@ bool ck_tile_grouped_gemm_fp16_dispatch(DType a_dtype,
                                        DType d_dtype,
                                        const GroupedGemmRunContext& ctx) {
   switch (detect_gpu_arch()) {
+#if defined(__gfx942__)
     case GPUArch::GFX942:
       return ck_tile_grouped_gemm_fp16_dispatch_arch<GPUArch::GFX942>(a_dtype, b_dtype, d_dtype, ctx);
+#endif
+#if defined(__gfx950__)
     case GPUArch::GFX950:
       return ck_tile_grouped_gemm_fp16_dispatch_arch<GPUArch::GFX950>(a_dtype, b_dtype, d_dtype, ctx);
+#endif
+#if defined(__gfx1250__)
     case GPUArch::GFX1250:
       return ck_tile_grouped_gemm_fp16_dispatch_arch<GPUArch::GFX1250>(a_dtype, b_dtype, d_dtype, ctx);
+#endif
+
     default:
       NVTE_ERROR("ck_tile_grouped_gemm: available architectures = {gfx942, gfx950, gfx1250}");
       return false;

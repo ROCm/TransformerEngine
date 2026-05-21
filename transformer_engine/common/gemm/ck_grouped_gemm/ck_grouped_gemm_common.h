@@ -87,7 +87,7 @@ static inline GPUArch detect_gpu_arch() {
   if (arch == 95) {
     return GPUArch::GFX950;
   }
-  if (arch == 125 || arch == 1250) {
+  if (arch == 1250) {
     return GPUArch::GFX1250;
   }
   return GPUArch::UNKNOWN;

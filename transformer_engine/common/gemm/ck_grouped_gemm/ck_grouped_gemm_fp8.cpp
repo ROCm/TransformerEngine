@@ -357,12 +357,19 @@ bool ck_tile_grouped_gemm_fp8_dispatch(DType a_dtype,
                                        DType d_dtype,
                                        const GroupedGemmRunContext& ctx) {
   switch (detect_gpu_arch()) {
+#if defined(__gfx942__)
     case GPUArch::GFX942:
       return ck_tile_grouped_gemm_fp8_dispatch_arch<GPUArch::GFX942>(a_dtype, b_dtype, d_dtype, ctx);
+#endif
+#if defined(__gfx950__)
     case GPUArch::GFX950:
       return ck_tile_grouped_gemm_fp8_dispatch_arch<GPUArch::GFX950>(a_dtype, b_dtype, d_dtype, ctx);
+#endif
+#if defined(__gfx1250__)
     case GPUArch::GFX1250:
       return ck_tile_grouped_gemm_fp8_dispatch_arch<GPUArch::GFX1250>(a_dtype, b_dtype, d_dtype, ctx);
+#endif
+
     default:
       NVTE_ERROR("ck_tile_grouped_gemm: available architectures = {gfx942, gfx950, gfx1250}");
       return false;
