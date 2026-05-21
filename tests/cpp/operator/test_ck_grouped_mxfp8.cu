@@ -9,11 +9,7 @@
 // Compares three paths for grouped MXFP8 GEMM across NN/NT/TN transpose layouts:
 //   1. TE nvte_multi_tensor_gemm grouped path (CK backend selected by env)
 //   2. ck_tile::reference_mx_gemm host reference, using exact quantized operands/scales
-//   3. TE HIP reference kernel adapted from test_cublaslt_gemm.cu compute_ref_kernel
-
-#ifndef CK_TILE_USE_OCP_FP8
-#define CK_TILE_USE_OCP_FP8 1
-#endif
+//   3. TE HIP reference kernel simplified from test_cublaslt_gemm.cu compute_ref_kernel
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -99,17 +95,10 @@ static void set_env_defaults() {
   setenv("NVTE_ROCM_ENABLE_MXFP8", "1", 0);
 }
 
-static float to_float(float x) { return x; }
 static float to_float(const bf16_t& x) { return static_cast<float>(x); }
 static float to_float(const ck_tile::bfloat16_t& x) { return static_cast<float>(x); }
 
-__device__ __host__ __forceinline__ float ref_gelu_unused(float x) {
-  float cdf = 0.5f * (1.0f + tanhf((0.7978845608028654f * (x + 0.044715f * x * x * x))));
-  return x * cdf;
-}
-
-template <typename A_Type, typename B_Type, typename Bias_Type,
-          typename Gelu_Type, typename D_Type>
+template <typename A_Type, typename B_Type, typename D_Type>
 __global__ void compute_ref_kernel(
     const A_Type* __restrict__ a_data,
     const B_Type* __restrict__ b_data,
@@ -121,18 +110,10 @@ __global__ void compute_ref_kernel(
     size_t b_scale_ld,
     bool a_scale_is_colwise,
     bool b_scale_is_colwise,
-    const Bias_Type* __restrict__ bias_data,
-    float d_scale,
     size_t m, size_t k, size_t n,
     D_Type* __restrict__ d_data,
-    float* __restrict__ d_amax,
-    Gelu_Type* __restrict__ gelu_data,
     bool transa,
-    bool transb,
-    bool is_fp8_output,
-    bool a_is_colwise,
-    bool b_is_colwise,
-    bool use_mxfp8) {
+    bool transb) {
   const size_t jj = blockIdx.x * blockDim.x + threadIdx.x;
   const size_t ii = blockIdx.y * blockDim.y + threadIdx.y;
   const bool in_range = (ii < m) && (jj < n);
@@ -143,15 +124,8 @@ __global__ void compute_ref_kernel(
       size_t a_idx = 0;
       size_t b_idx = 0;
 
-      if (use_mxfp8) {
-        a_idx = transa ? (ii * k + kk) : (kk * m + ii);
-        b_idx = transb ? (kk * n + jj) : (jj * k + kk);
-      } else {
-        a_idx = a_is_colwise ? (ii * k + kk)
-                             : (transa ? (ii * k + kk) : (kk * m + ii));
-        b_idx = b_is_colwise ? (jj * k + kk)
-                             : (transb ? (kk * n + jj) : (jj * k + kk));
-      }
+      a_idx = transa ? (ii * k + kk) : (kk * m + ii);
+      b_idx = transb ? (kk * n + jj) : (jj * k + kk);
 
       float a_scale_inv_val = a_scale_inv_scalar;
       float b_scale_inv_val = b_scale_inv_scalar;
@@ -171,27 +145,7 @@ __global__ void compute_ref_kernel(
       val += a_scale_inv_val * a_val * b_scale_inv_val * b_val;
     }
 
-    if (bias_data) val += static_cast<float>(bias_data[ii]);
-    if (gelu_data) {
-      gelu_data[ii + jj * m] = static_cast<Gelu_Type>(val);
-      val = ref_gelu_unused(val);
-    }
-
-    const float scaled = val * d_scale;
-    d_data[ii + jj * m] = static_cast<D_Type>(scaled);
-  }
-
-  if (is_fp8_output && d_amax) {
-    const int tid = threadIdx.y * blockDim.x + threadIdx.x;
-    const int nthreads = blockDim.x * blockDim.y;
-    extern __shared__ float s_amax[];
-    s_amax[tid] = in_range ? fabsf(val) : 0.0f;
-    __syncthreads();
-    for (int offset = nthreads / 2; offset > 0; offset /= 2) {
-      if (tid < offset) s_amax[tid] = fmaxf(s_amax[tid], s_amax[tid + offset]);
-      __syncthreads();
-    }
-    if (tid == 0) atomicMax(d_amax, s_amax[0]);
+    d_data[ii + jj * m] = static_cast<D_Type>(val);
   }
 }
 
@@ -326,10 +280,9 @@ static void run_hip_ref_for_group(const Tensor& a_mx,
   dim3 block(16, 16);
   dim3 grid(static_cast<unsigned>((n + block.x - 1) / block.x),
             static_cast<unsigned>((m + block.y - 1) / block.y));
-  const size_t shmem_bytes = size_t(block.x) * size_t(block.y) * sizeof(float);
 
-  compute_ref_kernel<ATypeIn, BTypeIn, bf16_t, bf16_t, DTypeOut>
-      <<<grid, block, shmem_bytes, 0>>>(
+  compute_ref_kernel<ATypeIn, BTypeIn, DTypeOut>
+      <<<grid, block, 0, 0>>>(
           static_cast<const ATypeIn*>(left_use_colwise ? b_mx.columnwise_dptr() : b_mx.rowwise_dptr()),
           static_cast<const BTypeIn*>(right_use_colwise ? a_mx.columnwise_dptr() : a_mx.rowwise_dptr()),
           1.0f,
@@ -342,18 +295,10 @@ static void run_hip_ref_for_group(const Tensor& a_mx,
           right_scale_ld,
           left_use_colwise,
           right_use_colwise,
-          nullptr,
-          1.0f,
           m, k, n,
           static_cast<DTypeOut*>(ref_d_colmajor->rowwise_dptr()),
-          nullptr,
-          nullptr,
           left_transa,
-          right_transb,
-          false,
-          left_use_colwise,
-          right_use_colwise,
-          true);
+          right_transb);
   NVTE_CHECK_CUDA(cudaGetLastError());
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
 }
@@ -474,14 +419,12 @@ static void run_case_typed(const CaseConfig& cfg) {
 
   cudaDeviceProp prop;
   NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, 0));
-#ifdef __HIP_PLATFORM_AMD__
   const bool is_gfx1250 = (prop.major == 12 && prop.minor == 5);
 
   if (!is_gfx1250) {
     GTEST_SKIP() << "This MXFP8 grouped GEMM test currently exercises the gfx1250-compatible CK pipeline only. GPU="
                  << prop.name << " major=" << prop.major << " minor=" << prop.minor;
   }
-#endif
 
   const auto m_splits = split_even(cfg.m_total, cfg.experts);
 
