@@ -23,11 +23,12 @@ main() {
     echo -e "\n[2/3] Running benchmarks..."
 
     BENCHMARKS=(
-        "bench_quantize_mxfp8_fused"
+        "bench_casttranspose"
         "bench_dequantize_mxfp8"
         "bench_gated_mxfp8"
-        "bench_casttranspose"
         "bench_multi_cast_transpose"
+        "bench_group_quantize_mxfp8"
+        "bench_quantize_mxfp8_fused"
     )
 
     FAILED_BENCHMARKS=()

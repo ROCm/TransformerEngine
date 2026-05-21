@@ -47,7 +47,8 @@ if(USE_ROCM)
   list(APPEND test_cuda_sources
               test_dequantize_nvfp4.cu
               test_cublaslt_gemm.cu
-              test_cast_mxfp4_transpose.cu)
+              test_cast_mxfp4_transpose.cu
+              test_multi_quantize_mxfp8.cu)
   TE_GetHipifiedSources("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR} test_hip_sources)
   TE_AddHipifyDeps("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR})
   message("${message_line}")

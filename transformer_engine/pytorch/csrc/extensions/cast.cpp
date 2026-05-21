@@ -291,6 +291,20 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
   }
 
   // Launch TE kernel
+#ifdef USE_ROCM
+  if (num_tensors > 0 && detail::IsMXFP8Quantizers(quantizer_py_list[0].ptr())) {
+    std::vector<NVTETensor> nvte_input_list, nvte_output_list;
+    for (size_t i = 0; i < num_tensors; i++) {
+      nvte_input_list.push_back(input_list[i].data());
+      nvte_output_list.push_back(output_list[i].data());
+    }
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_multi_quantize_mxfp8(nvte_input_list.size(), nvte_input_list.data(),
+                                nvte_output_list.data(), at::cuda::getCurrentCUDAStream());
+    });
+    return;
+  }
+#endif
   if (with_fused_kernel) {
     // Fused kernel for multi-tensor quantize
     std::vector<NVTETensor> nvte_tensor_input_list;
