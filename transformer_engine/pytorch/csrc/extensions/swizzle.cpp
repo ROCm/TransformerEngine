@@ -13,6 +13,7 @@
 
 #include "common.h"
 #include "common/common.h"
+#include "common/util/cuda_runtime.h"
 #include "extensions.h"
 #include "pybind.h"
 #include "util.h"
@@ -54,6 +55,13 @@ std::tuple<std::optional<at::Tensor>, std::optional<at::Tensor>> swizzle_scales_
       // Tensor format does not require scale swizzling for GEMM
       return {std::nullopt, std::nullopt};
   }
+
+#ifdef USE_ROCM
+  // On ROCm, only MXFP8 on gfx1250 needs scale pre-swizzling
+  if (scaling_mode != NVTE_MXFP8_1D_SCALING || transformer_engine::cuda::sm_arch() != 125) {
+    return {std::nullopt, std::nullopt};
+  }
+#endif
 
   // Return early if scales are already swizzled
   if (tensor.get_with_gemm_swizzled_scales()) {
@@ -163,6 +171,13 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
       // Tensor format does not require scale swizzling for GEMM
       return std::nullopt;
   }
+
+#ifdef USE_ROCM
+  // On ROCm, only MXFP8 on gfx1250 needs scale pre-swizzling
+  if (scaling_mode != NVTE_MXFP8_1D_SCALING || transformer_engine::cuda::sm_arch() != 125) {
+    return std::nullopt;
+  }
+#endif
 
   // Filter out tensors that already have swizzled scales
   std::vector<TensorWrapper *> tensors_needing_swizzle;
