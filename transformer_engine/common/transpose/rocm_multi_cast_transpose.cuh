@@ -24,6 +24,130 @@ struct RocmMultiCastTransposeArgs {
   int   num_tensors;
 };
 
+template <bool IS_EDGE, int LOAD_SIZE, int STORE_SIZE, int WARPS_PER_TILE,
+          typename IType, typename OType>
+__device__ __forceinline__ void
+mct_cast_store(
+    const IType *__restrict__ input,
+    OType       *__restrict__ output_c,
+    const int                 row_length,
+    const int                 num_rows,
+    const float               scale,
+    float                    &amax,
+    NTVec<OType, STORE_SIZE / sizeof(OType)> (&local_t)[LOAD_SIZE / sizeof(IType)][ROCM_CT_WARP_SIZE / WARPS_PER_TILE],
+    const int tidx, const int tidy,
+    const int row_base, const int col_base)
+{
+    constexpr int NVEC_IN   = LOAD_SIZE / sizeof(IType);
+    constexpr int NVEC_OUT  = STORE_SIZE / sizeof(OType);
+    constexpr int NUM_ITERS = ROCM_CT_WARP_SIZE / WARPS_PER_TILE;
+
+    using IVec  = NTVec<IType, NVEC_IN>;
+    using OVecC = NTVec<OType, NVEC_IN>;
+
+#pragma unroll
+    for (int iter = 0; iter < NUM_ITERS; iter++) {
+        const int i1 = tidy + iter * WARPS_PER_TILE;
+        const int j1 = tidx;
+#pragma unroll
+        for (int i2 = 0; i2 < NVEC_OUT; i2++) {
+            const int row = row_base + i1 * NVEC_OUT + i2;
+            const int col = col_base + j1 * NVEC_IN;
+
+            IVec  in;
+            OVecC out_c;
+
+            if (IS_EDGE && row >= num_rows) {
+#pragma unroll
+                for (int j2 = 0; j2 < NVEC_IN; j2++) in.val[j2] = IType(0);
+            } else {
+                in.load(&input[row * row_length + col]);
+            }
+
+#ifdef HAS_PACK_4xFLOAT8
+            if constexpr (sizeof(OType) == 1) {
+#pragma unroll
+                for (int j2 = 0; j2 < NVEC_IN; j2 += 4) {
+                    const float v0 = static_cast<float>(in.val[j2]);
+                    const float v1 = (j2+1 < NVEC_IN) ? static_cast<float>(in.val[j2+1]) : 0.0f;
+                    const float v2 = (j2+2 < NVEC_IN) ? static_cast<float>(in.val[j2+2]) : 0.0f;
+                    const float v3 = (j2+3 < NVEC_IN) ? static_cast<float>(in.val[j2+3]) : 0.0f;
+                    if (!IS_EDGE || row < num_rows)
+                        amax = fmaxf(amax, fmaxf(fmaxf(fabsf(v0), fabsf(v1)),
+                                                  fmaxf(fabsf(v2), fabsf(v3))));
+                    uint32_t packed = rocm_pack_4xfloat8<OType>(
+                        v0 * scale, v1 * scale, v2 * scale, v3 * scale);
+                    uint8_t *bytes = reinterpret_cast<uint8_t *>(&packed);
+#pragma unroll
+                    for (int k = 0; k < 4 && j2 + k < NVEC_IN; k++) {
+                        out_c.val[j2 + k] = reinterpret_cast<OType &>(bytes[k]);
+                        local_t[j2 + k][iter].val[i2] = out_c.val[j2 + k];
+                    }
+                }
+            } else
+#endif
+            {
+#pragma unroll
+                for (int j2 = 0; j2 < NVEC_IN; j2++) {
+                    const float v = static_cast<float>(in.val[j2]);
+                    if (!IS_EDGE || row < num_rows)
+                        amax = fmaxf(amax, fabsf(v));
+                    const OType o = static_cast<OType>(v * scale);
+                    out_c.val[j2] = o;
+                    local_t[j2][iter].val[i2] = o;
+                }
+            }
+
+            if (!IS_EDGE || row < num_rows)
+                out_c.nt_store(&output_c[row * row_length + col]);
+        }
+    }
+}
+
+template <bool IS_EDGE, int LOAD_SIZE, int STORE_SIZE, int WARPS_PER_TILE,
+          typename IType, typename OType>
+__device__ __forceinline__ void
+mct_transpose_store(
+    OType *__restrict__ output_t,
+    const int           num_rows,
+    NTVec<OType, STORE_SIZE / sizeof(OType)> (&smem)[ROCM_CT_WARP_SIZE][ROCM_CT_WARP_SIZE + 1],
+    NTVec<OType, STORE_SIZE / sizeof(OType)> (&local_t)[LOAD_SIZE / sizeof(IType)][ROCM_CT_WARP_SIZE / WARPS_PER_TILE],
+    const int tidx, const int tidy,
+    const int row_base, const int col_base)
+{
+    constexpr int NVEC_IN   = LOAD_SIZE / sizeof(IType);
+    constexpr int NVEC_OUT  = STORE_SIZE / sizeof(OType);
+    constexpr int NUM_ITERS = ROCM_CT_WARP_SIZE / WARPS_PER_TILE;
+
+#pragma unroll
+    for (int j2 = 0; j2 < NVEC_IN; j2++) {
+#pragma unroll
+        for (int iter = 0; iter < NUM_ITERS; iter++) {
+            smem[tidx][tidy + iter * WARPS_PER_TILE] = local_t[j2][iter];
+        }
+        __syncthreads();
+#pragma unroll
+        for (int iter = 0; iter < NUM_ITERS; iter++) {
+            const int i1  = tidx;
+            const int j1  = tidy + iter * WARPS_PER_TILE;
+            const int row = row_base + i1 * NVEC_OUT;
+            const int col = col_base + j1 * NVEC_IN + j2;
+
+            if (IS_EDGE && row + NVEC_OUT > num_rows) {
+                if (row < num_rows) {
+                    for (int k = 0; k < NVEC_OUT && row + k < num_rows; k++)
+                        output_t[col * num_rows + row + k] = smem[j1][i1].val[k];
+                }
+            } else {
+                smem[j1][i1].nt_store(&output_t[col * num_rows + row]);
+            }
+        }
+        if (j2 + 1 < NVEC_IN) {
+            __syncthreads();
+        }
+    }
+}
+
 template <int LOAD_SIZE, int STORE_SIZE, int WARPS_PER_TILE,
           typename IType, typename OType>
 __global__ void __launch_bounds__(ROCM_CT_WARP_SIZE * WARPS_PER_TILE)
@@ -34,8 +158,6 @@ rocm_multi_cast_transpose_kernel(RocmMultiCastTransposeArgs args) {
     constexpr int TILE_ROWS = ROCM_CT_WARP_SIZE * NVEC_OUT;
     constexpr int NUM_ITERS = ROCM_CT_WARP_SIZE / WARPS_PER_TILE;
 
-    using IVec  = NTVec<IType, NVEC_IN>;
-    using OVecC = NTVec<OType, NVEC_IN>;
     using OVecT = NTVec<OType, NVEC_OUT>;
 
     const int tid  = threadIdx.x;
@@ -78,157 +200,20 @@ rocm_multi_cast_transpose_kernel(RocmMultiCastTransposeArgs args) {
 
     OVecT local_t[NVEC_IN][NUM_ITERS];
 
-    if (!is_edge) {
-#pragma unroll
-        for (int iter = 0; iter < NUM_ITERS; iter++) {
-            const int i1 = tidy + iter * WARPS_PER_TILE;
-            const int j1 = tidx;
-#pragma unroll
-            for (int i2 = 0; i2 < NVEC_OUT; i2++) {
-                const int row = row_base + i1 * NVEC_OUT + i2;
-                const int col = col_base + j1 * NVEC_IN;
-
-                IVec  in;
-                OVecC out_c;
-                in.load(&input[row * row_length + col]);
-
-#ifdef HAS_PACK_4xFLOAT8
-                if constexpr (sizeof(OType) == 1) {
-#pragma unroll
-                    for (int j2 = 0; j2 < NVEC_IN; j2 += 4) {
-                        const float v0 = static_cast<float>(in.val[j2]);
-                        const float v1 = (j2+1 < NVEC_IN) ? static_cast<float>(in.val[j2+1]) : 0.0f;
-                        const float v2 = (j2+2 < NVEC_IN) ? static_cast<float>(in.val[j2+2]) : 0.0f;
-                        const float v3 = (j2+3 < NVEC_IN) ? static_cast<float>(in.val[j2+3]) : 0.0f;
-                        amax = fmaxf(amax, fmaxf(fmaxf(fabsf(v0), fabsf(v1)),
-                                                  fmaxf(fabsf(v2), fabsf(v3))));
-                        uint32_t packed = rocm_pack_4xfloat8<OType>(
-                            v0 * scale, v1 * scale, v2 * scale, v3 * scale);
-                        uint8_t *bytes = reinterpret_cast<uint8_t *>(&packed);
-#pragma unroll
-                        for (int k = 0; k < 4 && j2 + k < NVEC_IN; k++) {
-                            out_c.val[j2 + k] = reinterpret_cast<OType &>(bytes[k]);
-                            local_t[j2 + k][iter].val[i2] = out_c.val[j2 + k];
-                        }
-                    }
-                } else
-#endif
-                {
-#pragma unroll
-                    for (int j2 = 0; j2 < NVEC_IN; j2++) {
-                        const float v = static_cast<float>(in.val[j2]);
-                        amax = fmaxf(amax, fabsf(v));
-                        const OType o = static_cast<OType>(v * scale);
-                        out_c.val[j2] = o;
-                        local_t[j2][iter].val[i2] = o;
-                    }
-                }
-
-                out_c.nt_store(&output_c[row * row_length + col]);
-            }
-        }
-
-#pragma unroll
-        for (int j2 = 0; j2 < NVEC_IN; j2++) {
-#pragma unroll
-            for (int iter = 0; iter < NUM_ITERS; iter++) {
-                smem[tidx][tidy + iter * WARPS_PER_TILE] = local_t[j2][iter];
-            }
-            __syncthreads();
-#pragma unroll
-            for (int iter = 0; iter < NUM_ITERS; iter++) {
-                const int i1  = tidx;
-                const int j1  = tidy + iter * WARPS_PER_TILE;
-                const int row = row_base + i1 * NVEC_OUT;
-                const int col = col_base + j1 * NVEC_IN + j2;
-                smem[j1][i1].nt_store(&output_t[col * num_rows + row]);
-            }
-            if (j2 + 1 < NVEC_IN) {
-                __syncthreads();
-            }
-        }
+    if (is_edge) {
+        mct_cast_store<true, LOAD_SIZE, STORE_SIZE, WARPS_PER_TILE, IType, OType>(
+            input, output_c, row_length, num_rows, scale, amax, local_t,
+            tidx, tidy, row_base, col_base);
+        mct_transpose_store<true, LOAD_SIZE, STORE_SIZE, WARPS_PER_TILE, IType, OType>(
+            output_t, num_rows, smem, local_t,
+            tidx, tidy, row_base, col_base);
     } else {
-#pragma unroll
-        for (int iter = 0; iter < NUM_ITERS; iter++) {
-            const int i1 = tidy + iter * WARPS_PER_TILE;
-            const int j1 = tidx;
-#pragma unroll
-            for (int i2 = 0; i2 < NVEC_OUT; i2++) {
-                const int row = row_base + i1 * NVEC_OUT + i2;
-                const int col = col_base + j1 * NVEC_IN;
-
-                IVec  in;
-                OVecC out_c;
-
-                if (row < num_rows) {
-                    in.load(&input[row * row_length + col]);
-                } else {
-#pragma unroll
-                    for (int j2 = 0; j2 < NVEC_IN; j2++) in.val[j2] = IType(0);
-                }
-
-#ifdef HAS_PACK_4xFLOAT8
-                if constexpr (sizeof(OType) == 1) {
-#pragma unroll
-                    for (int j2 = 0; j2 < NVEC_IN; j2 += 4) {
-                        const float v0 = static_cast<float>(in.val[j2]);
-                        const float v1 = (j2+1 < NVEC_IN) ? static_cast<float>(in.val[j2+1]) : 0.0f;
-                        const float v2 = (j2+2 < NVEC_IN) ? static_cast<float>(in.val[j2+2]) : 0.0f;
-                        const float v3 = (j2+3 < NVEC_IN) ? static_cast<float>(in.val[j2+3]) : 0.0f;
-                        if (row < num_rows)
-                            amax = fmaxf(amax, fmaxf(fmaxf(fabsf(v0), fabsf(v1)), fmaxf(fabsf(v2), fabsf(v3))));
-                        uint32_t packed = rocm_pack_4xfloat8<OType>(
-                            v0 * scale, v1 * scale, v2 * scale, v3 * scale);
-                        uint8_t *bytes = reinterpret_cast<uint8_t *>(&packed);
-#pragma unroll
-                        for (int k = 0; k < 4 && j2 + k < NVEC_IN; k++) {
-                            out_c.val[j2 + k] = reinterpret_cast<OType &>(bytes[k]);
-                            local_t[j2 + k][iter].val[i2] = out_c.val[j2 + k];
-                        }
-                    }
-                } else
-#endif
-                {
-#pragma unroll
-                    for (int j2 = 0; j2 < NVEC_IN; j2++) {
-                        const float v = static_cast<float>(in.val[j2]);
-                        if (row < num_rows)
-                            amax = fmaxf(amax, fabsf(v));
-                        const OType o = static_cast<OType>(v * scale);
-                        out_c.val[j2] = o;
-                        local_t[j2][iter].val[i2] = o;
-                    }
-                }
-
-                if (row < num_rows)
-                    out_c.nt_store(&output_c[row * row_length + col]);
-            }
-        }
-
-#pragma unroll
-        for (int j2 = 0; j2 < NVEC_IN; j2++) {
-#pragma unroll
-            for (int iter = 0; iter < NUM_ITERS; iter++) {
-                smem[tidx][tidy + iter * WARPS_PER_TILE] = local_t[j2][iter];
-            }
-            __syncthreads();
-#pragma unroll
-            for (int iter = 0; iter < NUM_ITERS; iter++) {
-                const int i1  = tidx;
-                const int j1  = tidy + iter * WARPS_PER_TILE;
-                const int row = row_base + i1 * NVEC_OUT;
-                const int col = col_base + j1 * NVEC_IN + j2;
-                if (row + NVEC_OUT <= num_rows) {
-                    smem[j1][i1].nt_store(&output_t[col * num_rows + row]);
-                } else if (row < num_rows) {
-                    for (int k = 0; k < NVEC_OUT && row + k < num_rows; k++)
-                        output_t[col * num_rows + row + k] = smem[j1][i1].val[k];
-                }
-            }
-            if (j2 + 1 < NVEC_IN) {
-                __syncthreads();
-            }
-        }
+        mct_cast_store<false, LOAD_SIZE, STORE_SIZE, WARPS_PER_TILE, IType, OType>(
+            input, output_c, row_length, num_rows, scale, amax, local_t,
+            tidx, tidy, row_base, col_base);
+        mct_transpose_store<false, LOAD_SIZE, STORE_SIZE, WARPS_PER_TILE, IType, OType>(
+            output_t, num_rows, smem, local_t,
+            tidx, tidy, row_base, col_base);
     }
 
     if (amax_ptr != nullptr) {
