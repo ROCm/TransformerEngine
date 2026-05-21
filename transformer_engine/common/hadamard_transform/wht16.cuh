@@ -23,6 +23,21 @@ static constexpr int kRowsPerBlock    = kRowsPerWarp * kWarpsPerBlock; // 64
 static constexpr int kThreadsPerBlock = kWarpSize   * kWarpsPerBlock;  // 256
 static constexpr float kHadamardScale = 0.25f;
 
+// ds_swizzle: sub-wavefront exchange without LDS.
+__device__ __forceinline__ float ds_swizzle_xor1(float v) {
+    float r;
+    asm volatile("ds_swizzle_b32 %0, %1 offset:0x041F\n\t"
+                 "s_waitcnt lgkmcnt(0)" : "=v"(r) : "v"(v));
+    return r;
+}
+
+__device__ __forceinline__ float ds_swizzle_xor2(float v) {
+    float r;
+    asm volatile("ds_swizzle_b32 %0, %1 offset:0x081F\n\t"
+                 "s_waitcnt lgkmcnt(0)" : "=v"(r) : "v"(v));
+    return r;
+}
+
 // -----------------------------------------------------------------------
 // 16-point WHT via the Kronecker trick  (no shared memory)
 // -----------------------------------------------------------------------
@@ -86,15 +101,15 @@ __device__ __forceinline__ void wht16(
     v0=a0+a2; v2=a0-a2; v1=a1+a3; v3=a1-a3;
 
     // Stage 2: cross-thread XOR-1
-    { float p0=__shfl_xor(v0, 1), p1=__shfl_xor(v1, 1),
-            p2=__shfl_xor(v2, 1), p3=__shfl_xor(v3, 1);
+    { float p0=ds_swizzle_xor1(v0), p1=ds_swizzle_xor1(v1),
+            p2=ds_swizzle_xor1(v2), p3=ds_swizzle_xor1(v3);
       bool up=(thread_in_group&1);
       v0=up?(p0-v0):(p0+v0); v1=up?(p1-v1):(p1+v1);
       v2=up?(p2-v2):(p2+v2); v3=up?(p3-v3):(p3+v3); }
 
     // Stage 3: cross-thread XOR-2
-    { float p0=__shfl_xor(v0, 2), p1=__shfl_xor(v1, 2),
-            p2=__shfl_xor(v2, 2), p3=__shfl_xor(v3, 2);
+    { float p0=ds_swizzle_xor2(v0), p1=ds_swizzle_xor2(v1),
+            p2=ds_swizzle_xor2(v2), p3=ds_swizzle_xor2(v3);
       bool up=(thread_in_group>>1)&1;
       v0=up?(p0-v0):(p0+v0); v1=up?(p1-v1):(p1+v1);
       v2=up?(p2-v2):(p2+v2); v3=up?(p3-v3):(p3+v3); }
