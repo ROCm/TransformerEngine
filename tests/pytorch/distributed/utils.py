@@ -14,12 +14,11 @@ def run_proctree_with_timeout(cmd, timeout, **kwargs):
     if "timeout" in kwargs:
         raise ValueError("Timeout should be passed as a separate argument, not in kwargs")
 
+    stdout, stderr = None, None
     capture_output = kwargs.pop("capture_output", False)
     if capture_output:
         kwargs["stdout"] = subprocess.PIPE
         kwargs["stderr"] = subprocess.PIPE
-    else:
-        stdout, stderr = None, None
 
     check = kwargs.pop("check", False)
 
@@ -34,6 +33,7 @@ def run_proctree_with_timeout(cmd, timeout, **kwargs):
         p.terminate()
         try:
             # Give the process time to terminate gracefully
+            timeout = 60
             if capture_output:
                 stdout, stderr = p.communicate(timeout=timeout)
             else:
@@ -42,12 +42,14 @@ def run_proctree_with_timeout(cmd, timeout, **kwargs):
             os.killpg(p.pid, signal.SIGKILL)
             if capture_output:
                 stdout, stderr = p.communicate()
+        if check:
+            raise
 
     # Handle check=True
     if check and p.returncode != 0:
         raise subprocess.CalledProcessError(
+            p.returncode,
             cmd,
-            kwargs.get("args", None),
             output=stdout,
             stderr=stderr
         )
