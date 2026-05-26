@@ -31,7 +31,7 @@ import time
 import torch.utils.benchmark as benchmark
 
 
-def time_func(fn, min_run_time=1.0):
+def time_func(fn, min_run_time=0.2):
     """Time *fn* with torch.utils.benchmark.Timer (blocked_autorange)."""
     return benchmark.Timer(stmt="fn()", globals={"fn": fn}).blocked_autorange(
         min_run_time=min_run_time)
