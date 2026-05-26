@@ -1,14 +1,18 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
 import os
 import pytest
-import subprocess
 from pathlib import Path
 import transformer_engine.pytorch as te
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+from utils import run_proctree_with_timeout as run_subprocess
 
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -32,7 +36,8 @@ def _run_test(fp_init, sharding_dims, recipe, layer_type):
     test_cmd += ["--recipe", recipe]
     test_cmd += ["--layer-type", layer_type]
 
-    result = subprocess.run(test_cmd, env=os.environ, check=True)
+    result = run_subprocess(test_cmd, 120 if IS_HIP_EXTENSION else None, env=os.environ,
+                            check=True)
 
 
 @pytest.mark.skipif(NUM_PROCS < 4, reason="Requires 4+ GPUs")

@@ -4,7 +4,6 @@
 #
 # See LICENSE for license information.
 import os
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -14,6 +13,8 @@ import transformer_engine.pytorch.cpp_extensions as tex
 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.utils import get_device_compute_capability
+
+from utils import run_proctree_with_timeout as run_subprocess
 
 
 if torch.cuda.device_count() < 2:
@@ -88,7 +89,8 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, aggregate, quantization
         if aggregate:
             test_cmd.append("--aggregate")
 
-    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
+    result = run_subprocess(test_cmd, 120 if IS_HIP_EXTENSION else None,
+                            env=os.environ, capture_output=True, check=False)
     if (
         result.returncode != 0
         or "NUMERICAL CHECK FAILED" in result.stderr.decode()
@@ -143,7 +145,8 @@ def _run_layer_with_overlap(
         # not show up in more recent GPUs.
         os.environ["NVTE_FLASH_ATTN"] = "0"
 
-    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
+    result = run_subprocess(test_cmd, 120 if IS_HIP_EXTENSION else None,
+                            env=os.environ, capture_output=True, check=False)
 
     os.unsetenv("PYTORCH_JIT")
     os.unsetenv("NVTE_TORCH_COMPILE")
