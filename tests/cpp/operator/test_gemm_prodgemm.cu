@@ -37,7 +37,6 @@ using namespace test;
 
 namespace {
 
-using fp32 = float;
 using fp8  = fp8e4m3;
 using bf8  = fp8e5m2;
 
@@ -72,66 +71,66 @@ struct ShapeDef {
     GemmPass pass;
 };
 
-// LLM1 (hidden=7168, MLA, seq=4096)
+// DeepSeek3 (hidden=7168, MLA, seq=4096)
 
-static const ShapeDef llm1_shapes[] = {
+static const ShapeDef deepseek3_shapes[] = {
     // Forward (M=tokens, N, K)
-    {"LLM1_Linear0_fwd",           1536,  7168, GemmPass::FWD},
-    {"LLM1_Linear1_fwd",            576,  7168, GemmPass::FWD},
-    {"LLM1_LNLinear0_fwd",        24576,  1536, GemmPass::FWD},
-    {"LLM1_LNLinear1_fwd",        32768,   512, GemmPass::FWD},
-    {"LLM1_Linear_attn_fwd",       7168, 16384, GemmPass::FWD},
-    {"LLM1_LNMLP_gateup_fwd",     36864,  7168, GemmPass::FWD},
-    {"LLM1_LNMLP_down_fwd",        7168, 18432, GemmPass::FWD},
-    {"LLM1_SharedExp_gu_fwd",      4096,  7168, GemmPass::FWD},
-    {"LLM1_SharedExp_dn_fwd",      7168,  2048, GemmPass::FWD},
-    {"LLM1_TopKRouter_fwd",         256,  7168, GemmPass::FWD},
+    {"DeepSeek3_Linear0_fwd",        1536,  7168, GemmPass::FWD},
+    {"DeepSeek3_Linear1_fwd",         576,  7168, GemmPass::FWD},
+    {"DeepSeek3_LNLinear0_fwd",     24576,  1536, GemmPass::FWD},
+    {"DeepSeek3_LNLinear1_fwd",     32768,   512, GemmPass::FWD},
+    {"DeepSeek3_Linear_attn_fwd",    7168, 16384, GemmPass::FWD},
+    {"DeepSeek3_LNMLP_gateup_fwd",  36864,  7168, GemmPass::FWD},
+    {"DeepSeek3_LNMLP_down_fwd",     7168, 18432, GemmPass::FWD},
+    {"DeepSeek3_SharedExp_gu_fwd",   4096,  7168, GemmPass::FWD},
+    {"DeepSeek3_SharedExp_dn_fwd",   7168,  2048, GemmPass::FWD},
+    {"DeepSeek3_TopKRouter_fwd",      256,  7168, GemmPass::FWD},
     // Dgrad (M=tokens, N, K)
-    {"LLM1_attn_dgrad",           16384,  7168, GemmPass::DGRAD},
-    {"LLM1_LNLinear1_dgrad",        512, 32768, GemmPass::DGRAD},
-    {"LLM1_LNLinear0_dgrad",       1536, 24576, GemmPass::DGRAD},
-    {"LLM1_SharedExp_dn_dgrad",    2048,  7168, GemmPass::DGRAD},
-    {"LLM1_SharedExp_gu_dgrad",    7168,  4096, GemmPass::DGRAD},
-    {"LLM1_TopKRouter_dgrad",      7168,   256, GemmPass::DGRAD},
-    {"LLM1_MLP_post_dgrad",        7168, 14336, GemmPass::DGRAD},
+    {"DeepSeek3_attn_dgrad",        16384,  7168, GemmPass::DGRAD},
+    {"DeepSeek3_LNLinear1_dgrad",     512, 32768, GemmPass::DGRAD},
+    {"DeepSeek3_LNLinear0_dgrad",    1536, 24576, GemmPass::DGRAD},
+    {"DeepSeek3_SharedExp_dn_dgrad", 2048,  7168, GemmPass::DGRAD},
+    {"DeepSeek3_SharedExp_gu_dgrad", 7168,  4096, GemmPass::DGRAD},
+    {"DeepSeek3_TopKRouter_dgrad",   7168,   256, GemmPass::DGRAD},
+    {"DeepSeek3_MLP_post_dgrad",     7168, 14336, GemmPass::DGRAD},
     // Wgrad (M, N, K=tokens)
-    {"LLM1_attn_wgrad",           16384,  7168, GemmPass::WGRAD},
-    {"LLM1_LNLinear1_wgrad",        512, 32768, GemmPass::WGRAD},
-    {"LLM1_LNLinear0_wgrad",       1536, 24576, GemmPass::WGRAD},
-    {"LLM1_SharedExp_dn_wgrad",    2048,  7168, GemmPass::WGRAD},
-    {"LLM1_SharedExp_gu_wgrad",    7168,  4096, GemmPass::WGRAD},
-    {"LLM1_TopKRouter_wgrad",      7168,   256, GemmPass::WGRAD},
+    {"DeepSeek3_attn_wgrad",        16384,  7168, GemmPass::WGRAD},
+    {"DeepSeek3_LNLinear1_wgrad",     512, 32768, GemmPass::WGRAD},
+    {"DeepSeek3_LNLinear0_wgrad",    1536, 24576, GemmPass::WGRAD},
+    {"DeepSeek3_SharedExp_dn_wgrad", 2048,  7168, GemmPass::WGRAD},
+    {"DeepSeek3_SharedExp_gu_wgrad", 7168,  4096, GemmPass::WGRAD},
+    {"DeepSeek3_TopKRouter_wgrad",   7168,   256, GemmPass::WGRAD},
 };
 
-// LLM1 LM Head (large N, memory-intensive)
-static const ShapeDef llm1_lm_head_shapes[] = {
-    {"LLM1_LMHead_fwd",          129280,  7168, GemmPass::FWD},
-    {"LLM1_LMHead_dgrad",          7168,129280, GemmPass::DGRAD},
-    {"LLM1_LMHead_wgrad",          7168,129280, GemmPass::WGRAD},
+// DeepSeek3 LM Head (large N, memory-intensive)
+static const ShapeDef deepseek3_lm_head_shapes[] = {
+    {"DeepSeek3_LMHead_fwd",     129280,   7168, GemmPass::FWD},
+    {"DeepSeek3_LMHead_dgrad",     7168, 129280, GemmPass::DGRAD},
+    {"DeepSeek3_LMHead_wgrad",     7168, 129280, GemmPass::WGRAD},
 };
 
-// LLM2 (hidden=4096, GQA, seq=4096)
+// Qwen3 (hidden=4096, GQA, seq=4096)
 
-static const ShapeDef llm2_shapes[] = {
+static const ShapeDef qwen3_shapes[] = {
     // Forward (M=tokens, N, K)
-    {"LLM2_LNLinear_QKV_fwd",   9216,  4096, GemmPass::FWD},
-    {"LLM2_Linear_attn_fwd",    4096,  8192, GemmPass::FWD},
-    {"LLM2_Router_fwd",          128,  4096, GemmPass::FWD},
+    {"Qwen3_LNLinear_QKV_fwd",  9216,  4096, GemmPass::FWD},
+    {"Qwen3_Linear_attn_fwd",   4096,  8192, GemmPass::FWD},
+    {"Qwen3_Router_fwd",         128,  4096, GemmPass::FWD},
     // Dgrad (M=tokens, N, K)
-    {"LLM2_Router_dgrad",       4096,   128, GemmPass::DGRAD},
-    {"LLM2_Linear_attn_dgrad",  8192,  4096, GemmPass::DGRAD},
-    {"LLM2_LNLinear_dgrad",     4096,  9216, GemmPass::DGRAD},
+    {"Qwen3_Router_dgrad",      4096,   128, GemmPass::DGRAD},
+    {"Qwen3_Linear_attn_dgrad", 8192,  4096, GemmPass::DGRAD},
+    {"Qwen3_LNLinear_dgrad",    4096,  9216, GemmPass::DGRAD},
     // Wgrad (M, N, K=tokens)
-    {"LLM2_Router_wgrad",       4096,   128, GemmPass::WGRAD},
-    {"LLM2_Linear_attn_wgrad",  8192,  4096, GemmPass::WGRAD},
-    {"LLM2_LNLinear_wgrad",     4096,  9216, GemmPass::WGRAD},
+    {"Qwen3_Router_wgrad",      4096,   128, GemmPass::WGRAD},
+    {"Qwen3_Linear_attn_wgrad", 8192,  4096, GemmPass::WGRAD},
+    {"Qwen3_LNLinear_wgrad",    4096,  9216, GemmPass::WGRAD},
 };
 
-// LLM2 LM Head (large N, memory-intensive)
-static const ShapeDef llm2_lm_head_shapes[] = {
-    {"LLM2_LMHead_fwd",        151936,  4096, GemmPass::FWD},
-    {"LLM2_LMHead_dgrad",        4096,151936, GemmPass::DGRAD},
-    {"LLM2_LMHead_wgrad",        4096,151936, GemmPass::WGRAD},
+// Qwen3 LM Head (large N, memory-intensive)
+static const ShapeDef qwen3_lm_head_shapes[] = {
+    {"Qwen3_LMHead_fwd",       151936,   4096, GemmPass::FWD},
+    {"Qwen3_LMHead_dgrad",       4096, 151936, GemmPass::DGRAD},
+    {"Qwen3_LMHead_wgrad",       4096, 151936, GemmPass::WGRAD},
 };
 
 // ============================================================================
@@ -177,16 +176,16 @@ static std::vector<ProdGemmTestCase> expand_shapes(const ShapeDef* defs, size_t 
 }
 
 static std::vector<ProdGemmTestCase> generate_model_test_cases() {
-    auto v1   = expand_shapes(llm1_shapes,   std::size(llm1_shapes));
-    auto v2   = expand_shapes(llm2_shapes,   std::size(llm2_shapes));
+    auto v1   = expand_shapes(deepseek3_shapes,   std::size(deepseek3_shapes));
+    auto v2   = expand_shapes(qwen3_shapes,       std::size(qwen3_shapes));
     v1.insert(v1.end(), std::make_move_iterator(v2.begin()),
                         std::make_move_iterator(v2.end()));
     return v1;
 }
 
 static std::vector<ProdGemmTestCase> generate_lm_head_test_cases() {
-    auto v1   = expand_shapes(llm1_lm_head_shapes,   std::size(llm1_lm_head_shapes));
-    auto v2   = expand_shapes(llm2_lm_head_shapes,   std::size(llm2_lm_head_shapes));
+    auto v1   = expand_shapes(deepseek3_lm_head_shapes, std::size(deepseek3_lm_head_shapes));
+    auto v2   = expand_shapes(qwen3_lm_head_shapes,     std::size(qwen3_lm_head_shapes));
     v1.insert(v1.end(), std::make_move_iterator(v2.begin()),
                         std::make_move_iterator(v2.end()));
     return v1;
