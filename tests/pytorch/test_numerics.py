@@ -3197,6 +3197,9 @@ if IS_HIP_EXTENSION:
             else:
                 torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
 
+        os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
+        os.environ.pop("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", None)
+
         # Check for CK fallback warnings from C++ (NVTE_WARN writes to std::cerr).
         # capfd captures file-descriptor-level output, including C/C++ stderr.
         captured = capfd.readouterr()
@@ -3208,9 +3211,6 @@ if IS_HIP_EXTENSION:
                 )
             else:
                 pytest.fail(f"CK_Tile grouped GEMM fell back to cuBLAS:\n{captured.err}")
-
-        os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
-        os.environ.pop("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", None)
 
 
 @pytest.mark.parametrize("N", [32])
