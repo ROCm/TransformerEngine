@@ -496,6 +496,39 @@ def score_reduce_triton(Hq, Hk, W_o, *, out_dtype=None):
 # Post-ReLU scores are >= 0, so fp32 bit pattern is monotone in value.
 
 
+# Autotune sweep for _score_topk_kernel.
+#
+# BLOCK_T: number of query tokens per CTA. BLOCK_T>1 amortizes the Hk_chunk
+# load across BLOCK_T queries — the single biggest lever at large T_s. At
+# BLOCK_T=1 (original), each CTA reloads all of Hk for its (b, oH) slab,
+# causing L2 thrash. BLOCK_T=2 halves Hk HBM traffic; BLOCK_T=4 quarters it,
+# but grows per-CTA register pressure (Hq_token, top_packed, logits all
+# scale with BLOCK_T).
+#
+# BLOCK_S knobs the inner-chunk size; bigger BLOCK_S = better matmul
+# arithmetic intensity, but bigger per-CTA transient footprint
+# (logits[BLOCK_S, BLOCK_T*H] fp32 + Hk_chunk[BLOCK_S, d_i] bf16).
+#
+# Constraint: BLOCK_S must divide K (so INNER = K // BLOCK_S is an integer
+# >= 1). Configs whose BLOCK_S exceeds K or doesn't divide K are filtered
+# out at lowering time — otherwise jaxlib's autotuner would time them as
+# zero-work (fast) and pick a bogus winner that returns all-zero indices.
+_SCORE_TOPK_CONFIGS = [
+    triton.Config({"BLOCK_S": bs, "BLOCK_T": bt}, num_warps=nw, num_stages=ns)
+    for bt in (1, 2)
+    for bs in (32, 64, 128, 256)
+    for nw in (4, 8)
+    for ns in (1, 2)
+] + [
+    # BLOCK_T=4 only at smaller BLOCK_S — at BLOCK_S=256 the logits
+    # intermediate [256, 4*H=256] fp32 = 256 KB overflows reliably.
+    triton.Config({"BLOCK_S": bs, "BLOCK_T": 4}, num_warps=nw, num_stages=ns)
+    for bs in (32, 64, 128)
+    for nw in (4, 8)
+    for ns in (1, 2)
+]
+
+
 @triton.jit
 def _score_topk_kernel(
     Hq_ptr,        # (B, oH, T_t, H, d_i) bf16
@@ -511,97 +544,166 @@ def _score_topk_kernel(
     K: tl.constexpr,
     S_PAD: tl.constexpr,
     BLOCK_S: tl.constexpr,
+    BLOCK_T: tl.constexpr,
 ):
-    """Per-CTA: one query token's full top-K via streaming bitonic merge.
+    """Per-CTA: BLOCK_T consecutive query tokens, all sharing Hk loads.
 
-    Grid: (T_t, B * oH).
+    Grid: (cdiv(T_t, BLOCK_T), B * oH). Each CTA does:
+      - Pre-load Hq[..., rt, :, :] for BLOCK_T contiguous query tokens
+      - For each S chunk: load Hk_chunk ONCE, do one [BLOCK_S, d_i] @
+        [d_i, BLOCK_T*H] matmul, weighted-H-reduce per T
+      - Maintain a single 1D top buffer of size BLOCK_T*2K, with T encoded
+        in the top 8 bits of each packed entry. After global sort desc,
+        per-T entries stay grouped together so per-T top-K can be sliced
+        from fixed offsets.
+
+    Note on layout (1D vs 2D top buffer):
+      A 2D [BLOCK_T, 2K] top buffer with per-row sort is the natural
+      design, but `tl.gather + tl.sort(dim=1)` on uint64 2D tensors trips
+      `TritonGPUOptimizeThreadLocality` on the AMD backend (gfx950, Triton
+      3.4.0). The 1D-with-encoded-T workaround sidesteps this — it pays a
+      ~1.5x sort-cost penalty (one sort of BLOCK_T*2K vs BLOCK_T sorts of
+      2K) for BLOCK_T=2, but unblocks Hk-load amortization across queries.
     """
     pid_t = tl.program_id(0)
     pid_bh = tl.program_id(1)
-    # int64 indexing — Hq alone has B*oH*T*H*d_i = 4.3 B elements at T=S=4096.
+    # int64 indexing — Hq has B*oH*T*H*d_i = 4.3 B elements at T=S=4096.
     b = (pid_bh // oH).to(tl.int64)
     h_outer = (pid_bh % oH).to(tl.int64)
-    pid_t_64 = pid_t.to(tl.int64)
 
     rh = tl.arange(0, H)
     rdi = tl.arange(0, d_i)
+    rs_chunk = tl.arange(0, BLOCK_S)
+    rk = tl.arange(0, K)
+    rt_local = tl.arange(0, BLOCK_T)
 
-    # Pre-load Hq[b, h_outer, pid_t, :, :] -> [H, d_i] once
-    hq_base = b * (oH * T_t * H * d_i) + h_outer * (T_t * H * d_i) + pid_t_64 * (H * d_i)
-    Hq_token = tl.load(Hq_ptr + hq_base + rh[:, None] * d_i + rdi[None, :])
+    rt = pid_t * BLOCK_T + rt_local
+    rt_64 = rt.to(tl.int64)
+    rt_mask = rt < T_t
 
-    # Pre-load w_o[b, h_outer, pid_t, :] -> [H] once
-    wo_base = b * (oH * T_t * H) + h_outer * (T_t * H) + pid_t_64 * H
-    w_o = tl.load(W_o_ptr + wo_base + rh).to(tl.float32)
+    # Load Hq[b, h_outer, rt, :, :] -> [BLOCK_T, H, d_i].
+    hq_base = b * (oH * T_t * H * d_i) + h_outer * (T_t * H * d_i)
+    Hq_token = tl.load(
+        Hq_ptr + hq_base
+        + rt_64[:, None, None] * (H * d_i)
+        + rh[None, :, None] * d_i
+        + rdi[None, None, :],
+        mask=rt_mask[:, None, None],
+        other=0.0,
+    )
+
+    # Load w_o[b, h_outer, rt, :] -> [BLOCK_T, H]
+    wo_base = b * (oH * T_t * H) + h_outer * (T_t * H)
+    w_o = tl.load(
+        W_o_ptr + wo_base + rt_64[:, None] * H + rh[None, :],
+        mask=rt_mask[:, None],
+        other=0.0,
+    ).to(tl.float32)
+
+    # Flatten Hq for one big matmul per Hk_chunk: [BLOCK_T * H, d_i] -> trans
+    Hq_flat = tl.reshape(Hq_token, (BLOCK_T * H, d_i))
+    Hq_T = tl.trans(Hq_flat)  # [d_i, BLOCK_T * H]
+    w_o_flat = tl.reshape(w_o, (BLOCK_T * H,))
 
     hk_base = b * (oH * T_s * d_i) + h_outer * (T_s * d_i)
 
     TOP_BUF: tl.constexpr = 2 * K
     INNER: tl.constexpr = K // BLOCK_S        # chunks per sort
     N_OUTER: tl.constexpr = S_PAD // K        # number of sorts per CTA
-    top_packed = tl.zeros((TOP_BUF,), dtype=tl.uint64)
+    BIG_BUF: tl.constexpr = BLOCK_T * TOP_BUF
 
-    rs_buf = tl.arange(0, TOP_BUF)
-    rs_chunk = tl.arange(0, BLOCK_S)
-    Hq_T = tl.trans(Hq_token)  # [d_i, H]
+    # Initialize 1D top buffer with t-encoding pre-applied so per-T regions
+    # stay grouped after global sort. Each slot at position rb gets:
+    #   t_pos = rb // TOP_BUF      -> which T this slot belongs to
+    #   t_enc = BLOCK_T - t_pos    -> 1..BLOCK_T (never 0 → never collides with
+    #                                  reserved init pattern)
+    #   packed = (t_enc << 56) | 0  -> score=0 (sortable=0), index=0
+    # Real candidates also get tagged with their t_enc; after global sort
+    # desc, all entries with t_enc=BLOCK_T (i.e. t=0) come first, then
+    # t_enc=BLOCK_T-1, etc. Within each t group, ordered by score then index.
+    rb = tl.arange(0, BIG_BUF)
+    rb_t = rb // TOP_BUF           # [BIG_BUF] in [0, BLOCK_T)
+    rb_pos = rb % TOP_BUF          # [BIG_BUF] in [0, TOP_BUF)
+    t_enc_per_slot = (BLOCK_T - rb_t).to(tl.uint64)
+    top_packed = t_enc_per_slot << 56
 
-    # Two-level loop: fill the bottom K slots over INNER chunks, then sort.
-    # Net: N_OUTER sorts instead of S_PAD/BLOCK_S sorts (4x fewer at production
-    # shape). The previous round's "losers" (bottom-K after each sort) are
-    # naturally overwritten by the next INNER chunks; correctness holds because
-    # those losers are by definition below the running top-K threshold.
+    # Pre-compute the per-slot (t, pos)-to-flat-chunk-index map used in
+    # scatter: for each rb, identify the (t, j) in chunk_packed_flat to pull
+    # from. j depends on `chunk_offset` (varies per inner iter), so the
+    # gather index is recomputed each iter.
+
     for o in tl.static_range(N_OUTER):
         for i in tl.static_range(INNER):
             c = o * INNER + i
             s_start = c * BLOCK_S
-            rs = s_start + rs_chunk
+            rs = s_start + rs_chunk     # [BLOCK_S]
             rs_mask = rs < T_s
 
-            # Load Hk_chunk[BLOCK_S, d_i]
+            # Load Hk_chunk[BLOCK_S, d_i] ONCE — shared across BLOCK_T queries.
             hk_ptrs = Hk_ptr + hk_base + rs[:, None] * d_i + rdi[None, :]
             Hk_chunk = tl.load(hk_ptrs, mask=rs_mask[:, None], other=0.0)
 
-            # Score matmul: [BLOCK_S, d_i] @ [d_i, H] -> [BLOCK_S, H]
+            # One big matmul: [BLOCK_S, d_i] @ [d_i, BLOCK_T*H] -> [BLOCK_S, BLOCK_T*H]
             logits = tl.dot(Hk_chunk, Hq_T)
             logits = tl.maximum(logits, 0.0)
 
-            # Weighted H-reduce: sum(logits * w_o[None, :], axis=1) -> [BLOCK_S]
-            # Note: w_o can be negative, so chunk_scores can be negative even after ReLU.
-            chunk_scores = tl.sum(logits * w_o[None, :], axis=1)
+            # Weighted reduce over H per (s, t):
+            #   chunk_scores[s, t] = sum_h logits[s, t*H + h] * w_o[t, h]
+            weighted = logits * w_o_flat[None, :]
+            weighted_3d = tl.reshape(weighted, (BLOCK_S, BLOCK_T, H))
+            chunk_scores = tl.sum(weighted_3d, axis=2)  # [BLOCK_S, BLOCK_T]
+            chunk_scores_T = tl.trans(chunk_scores)      # [BLOCK_T, BLOCK_S]
 
-            # Convert fp32 to "sortable uint32" so uint comparison matches fp32
-            # comparison across the full sign range:
-            #   positive: flip sign bit
-            #   negative: flip all bits
+            # Radix-flip: fp32 bit pattern -> sortable uint32 across full sign
+            # range (positives: flip sign bit; negatives: flip all bits).
             # See https://stereopsis.com/radix.html
-            bits = chunk_scores.to(tl.uint32, bitcast=True)
+            bits = chunk_scores_T.to(tl.uint32, bitcast=True)
             sign = bits >> 31
             flip_mask = (0 - sign.to(tl.int32)).to(tl.uint32) | 0x80000000
             sortable = bits ^ flip_mask
-            # OOR positions get sortable=0 (smallest possible, sorts to bottom)
-            sortable = tl.where(rs_mask, sortable, 0)
+            sortable = tl.where(rs_mask[None, :], sortable, 0)
 
-            # Pack (sortable_score_bits << 32) | index into uint64
-            chunk_packed = (sortable.to(tl.uint64) << 32) | rs.to(tl.uint64)
+            # Pack: (t_enc<<56) | (sortable<<24) | (index in low 24 bits).
+            # 24-bit index supports T_s up to 16M, far above our regime.
+            t_enc_chunk = (BLOCK_T - rt_local).to(tl.uint64)  # [BLOCK_T]
+            rs_2d = tl.broadcast_to(rs[None, :], (BLOCK_T, BLOCK_S))
+            chunk_packed_2d = (
+                (t_enc_chunk[:, None] << 56)
+                | (sortable.to(tl.uint64) << 24)
+                | rs_2d.to(tl.uint64)
+            )  # [BLOCK_T, BLOCK_S]
+            # Flatten to 1D for the scatter (1D gather + 1D sort sidesteps
+            # the AMD-backend bug with 2D gather+sort combos).
+            chunk_packed_flat = tl.reshape(chunk_packed_2d, (BLOCK_T * BLOCK_S,))
 
-            # Scatter chunk_packed into top_packed[K + i*BLOCK_S : K + (i+1)*BLOCK_S]
+            # Scatter into top_packed[t*TOP_BUF + K+i*BLOCK_S : ...] for each t.
+            # For each rb in [0, BIG_BUF):
+            #   t = rb // TOP_BUF
+            #   pos = rb % TOP_BUF
+            #   in_slot = (pos >= K + i*BLOCK_S) & (pos < K + (i+1)*BLOCK_S)
+            #   flat_idx = t * BLOCK_S + (pos - (K + i*BLOCK_S))
             chunk_offset = K + i * BLOCK_S
-            in_chunk_slot = (rs_buf >= chunk_offset) & (rs_buf < chunk_offset + BLOCK_S)
-            chunk_gather_idx = tl.where(in_chunk_slot, rs_buf - chunk_offset, 0).to(tl.int32)
-            gathered = tl.gather(chunk_packed, chunk_gather_idx, axis=0)
-            top_packed = tl.where(in_chunk_slot, gathered, top_packed)
+            in_slot = (rb_pos >= chunk_offset) & (rb_pos < chunk_offset + BLOCK_S)
+            j = rb_pos - chunk_offset
+            flat_idx = tl.where(in_slot, rb_t * BLOCK_S + j, 0).to(tl.int32)
+            gathered = tl.gather(chunk_packed_flat, flat_idx, axis=0)
+            top_packed = tl.where(in_slot, gathered, top_packed)
 
-        # All INNER chunks placed -> sort once
+        # 1D sort of the entire buffer. Per-T regions stay grouped via t_enc.
         top_packed = tl.sort(top_packed, descending=True)
 
-    # Extract top K indices: gather positions [0, K) from the sorted buffer,
-    # take low 32 bits.
-    rk = tl.arange(0, K)
-    top_k_packed = tl.gather(top_packed, rk, axis=0)
-    top_k_idx = (top_k_packed & 0xFFFFFFFF).to(tl.int32)
+    # Extract per-T top K. After sort desc, t=0's top K is at positions
+    # [0, K), t=1's at [TOP_BUF, TOP_BUF+K), etc. — i.e. base = t*TOP_BUF.
+    out_idx = rt_local[:, None] * TOP_BUF + rk[None, :]  # [BLOCK_T, K]
+    out_idx_flat = tl.reshape(out_idx, (BLOCK_T * K,)).to(tl.int32)
+    top_k_packed_flat = tl.gather(top_packed, out_idx_flat, axis=0)
+    top_k_packed = tl.reshape(top_k_packed_flat, (BLOCK_T, K))
+    # Strip the t_enc and sortable bits, keep low 24 bits (index).
+    top_k_idx = (top_k_packed & 0xFFFFFF).to(tl.int32)
 
-    out_base = b * (oH * T_t * K) + h_outer * (T_t * K) + pid_t_64 * K
-    tl.store(Topk_idx_ptr + out_base + rk, top_k_idx)
+    out_base = b * (oH * T_t * K) + h_outer * (T_t * K)
+    out_ptrs = Topk_idx_ptr + out_base + rt_64[:, None] * K + rk[None, :]
+    tl.store(out_ptrs, top_k_idx, mask=rt_mask[:, None])
 
 
 _score_topk_p = extend_core.Primitive("te_indexer_score_topk_triton")
@@ -631,23 +733,45 @@ def _score_topk_lowering(ctx, Hq, Hk, W_o, *, k):
     B, oH, T_t, H, d_i = Hq_aval.shape
     T_s = Hk_aval.shape[2]
     S_PAD = _next_pow2(T_s)
-    # BLOCK_S must be <= K (so chunk fits in TOP_BUF[K:K+BLOCK_S]) and
-    # divide S_PAD evenly. Cap at 128 so the [BLOCK_S, H] fp32 logits
-    # intermediate stays in registers.
-    BLOCK_S = min(128, k, S_PAD)
+
+    # Build a K-filtered autotuner around the plain JIT kernel. We do this at
+    # lowering time (rather than decorating the kernel at definition) because
+    # configs with BLOCK_S > k or BLOCK_S that doesn't divide k would compile
+    # to a kernel where INNER = k // BLOCK_S = 0 — i.e. a no-op that's fastest
+    # in the autotune timing race. Filtering ensures the runtime picker only
+    # sees configs that actually do the work.
+    #
+    # Also filter BLOCK_T configs that don't evenly divide T_t — we mask the
+    # tail but unnecessary padding hurts L1/L2 efficiency.
+    valid_configs = [
+        c for c in _SCORE_TOPK_CONFIGS
+        if c.kwargs["BLOCK_S"] <= k
+        and k % c.kwargs["BLOCK_S"] == 0
+        and T_t % c.kwargs["BLOCK_T"] == 0
+    ]
+    if not valid_configs:
+        raise ValueError(
+            f"No valid BLOCK_S/BLOCK_T config for k={k}, T_t={T_t}"
+        )
+
+    autotuned_kernel = triton.autotune(
+        configs=valid_configs,
+        key=["H", "d_i", "T_s", "K"],
+    )(_score_topk_kernel)
+
+    def grid_fn(merged_kwargs):
+        bt = merged_kwargs.get("BLOCK_T", 1)
+        return (triton.cdiv(T_t, bt), B * oH)
 
     return triton_call_lowering(
         ctx,
-        _score_topk_kernel,
+        autotuned_kernel,
         Hq, Hk, W_o,
-        grid=(T_t, B * oH),
-        num_warps=4,
-        num_stages=2,
+        grid=grid_fn,
         constexprs={
             "B": B, "oH": oH, "T_t": T_t, "T_s": T_s,
             "H": H, "d_i": d_i,
             "K": k, "S_PAD": S_PAD,
-            "BLOCK_S": BLOCK_S,
         },
     )
 
