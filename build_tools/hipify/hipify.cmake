@@ -6,14 +6,6 @@ set(_HIPIFY_CMAKE_DIR "${CMAKE_CURRENT_LIST_DIR}")
 
 
 function(TE_Hipify SRC_DIR)
-    # Register original source files as configure dependencies so that
-    # editing them triggers re-configuration and re-hipification.
-    file(GLOB_RECURSE _hipify_source_deps
-        "${SRC_DIR}/*.cu"
-        "${SRC_DIR}/*.cuh"
-    )
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_hipify_source_deps})
-
     # Create result file
     set(hipify_result "${CMAKE_BINARY_DIR}/hipify_result.json")
     
