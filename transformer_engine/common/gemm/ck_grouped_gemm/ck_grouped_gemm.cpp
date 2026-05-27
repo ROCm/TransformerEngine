@@ -51,7 +51,7 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
 
   // Currently the accumulate path is only supported on fp16
   if (accumulate && is_8bit_float) {
-    NVTE_ERROR("ck_tile_grouped_gemm: accumulate is currently unsupported on fp8");
+    NVTE_WARN("ck_tile_grouped_gemm: accumulate is currently unsupported on fp8");
   	return false;
   }
 
