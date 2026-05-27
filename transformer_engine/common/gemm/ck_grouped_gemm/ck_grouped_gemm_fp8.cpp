@@ -433,7 +433,7 @@ static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
             if (alignment.all_k_128_aligned) {
               MAKE_FP8_RUNNER(TileCfg_256x256x128_16x16x128_2x2x1);
             } else {
-              MAKE_FP8_RUNNER(TileCfg_256x256x128_16x16x128_2x2x1_kpad);
+              MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_kpad);
             }
           } else if (alignment.all_n_128_aligned) {
             if (alignment.all_k_128_aligned) {
