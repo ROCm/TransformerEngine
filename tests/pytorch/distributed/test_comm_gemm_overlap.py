@@ -5,6 +5,7 @@
 # See LICENSE for license information.
 import os
 from pathlib import Path
+import sys
 
 import pytest
 import torch
@@ -14,6 +15,9 @@ import transformer_engine.pytorch.cpp_extensions as tex
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.utils import get_device_compute_capability
 
+# Import utility functions
+_current_file = Path(__file__).resolve()
+sys.path.append(str(_current_file.parent.parent))
 from utils import run_proctree_with_timeout as run_subprocess
 
 

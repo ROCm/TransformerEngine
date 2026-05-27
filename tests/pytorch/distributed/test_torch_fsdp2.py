@@ -7,11 +7,15 @@
 import os
 import pytest
 from pathlib import Path
+import sys
 import transformer_engine.pytorch as te
 
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
+# Import utility functions
+_current_file = Path(__file__).resolve()
+sys.path.append(str(_current_file.parent.parent))
 from utils import run_proctree_with_timeout as run_subprocess
 
 

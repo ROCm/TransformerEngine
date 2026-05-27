@@ -6,10 +6,15 @@ import os
 from typing import List
 import pytest
 from pathlib import Path
+import sys
 from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 import torch
 from run_fsdp2_fp8_model import SimpleNet
+
+# Import utility functions
+_current_file = Path(__file__).resolve()
+sys.path.append(str(_current_file.parent.parent))
 from utils import run_proctree_with_timeout as run_subprocess
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
