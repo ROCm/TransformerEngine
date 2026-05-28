@@ -221,35 +221,34 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          set -x
           BRANCH="${{ github.head_ref || github.ref_name }}"
           echo "Cleaning up old te-rocm-wheels artifacts for branch: $BRANCH"
-          echo "Repository: ${{ github.repository }}"
-
-          # Debug: check gh availability and auth
-          gh --version || echo "WARNING: gh CLI not found"
-          gh auth status || echo "WARNING: gh auth failed"
-
-          # Debug: show raw API response (first page only, limited fields)
-          echo "=== Raw API response (first 5 artifacts) ==="
-          gh api "repos/${{ github.repository }}/actions/artifacts?name=te-rocm-wheels&per_page=5" \
-            --jq '.artifacts[] | "\(.id)\t\(.name)\t\(.expired)\t\(.workflow_run.head_branch)"' || echo "WARNING: API call failed with exit code $?"
 
           # Collect artifact IDs to delete
-          IDS=$(gh api --paginate "repos/${{ github.repository }}/actions/artifacts?name=te-rocm-wheels" \
-            --jq ".artifacts[] | select(.expired == false and .workflow_run.head_branch == \"$BRANCH\") | .id") || echo "WARNING: artifact listing failed with exit code $?"
+          if ! IDS=$(gh api --paginate "repos/${{ github.repository }}/actions/artifacts?name=te-rocm-wheels" \
+            --jq ".artifacts[] | select(.expired == false and .workflow_run.head_branch == \"$BRANCH\") | .id"); then
+            echo "::warning::Failed to list artifacts (possible permissions issue). Skipping cleanup."
+            exit 0
+          fi
 
           if [ -z "$IDS" ]; then
             echo "No previous artifacts found for this branch."
           else
             echo "Deleting artifacts:"
+            FAILED=0
             for id in $IDS; do
-              # Log artifact details before deleting
               gh api "repos/${{ github.repository }}/actions/artifacts/$id" \
-                --jq '"\(.id)\t\(.size_in_bytes / 1024 / 1024 | round)MB\t\(.created_at)"'
-              gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id" || true
+                --jq '"\(.id)\t\(.size_in_bytes / 1024 / 1024 | round)MB\t\(.created_at)"' || true
+              if ! gh api -X DELETE "repos/${{ github.repository }}/actions/artifacts/$id"; then
+                echo "::warning::Failed to delete artifact $id (possible permissions issue)."
+                FAILED=$((FAILED + 1))
+              fi
             done
-            echo "Cleanup complete."
+            if [ "$FAILED" -gt 0 ]; then
+              echo "::warning::Failed to delete $FAILED artifact(s). Ensure the workflow has 'actions: write' permission."
+            else
+              echo "Cleanup complete."
+            fi
           fi
 
       - name: Upload wheels as GitHub Actions artifacts
