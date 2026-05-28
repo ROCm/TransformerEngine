@@ -45,6 +45,10 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
+permissions:
+  actions: write
+  contents: read
+
 env:
   TEST_LEVEL: ${{ (github.event_name == 'push' && '3') || inputs.test_level || '1' }}
 

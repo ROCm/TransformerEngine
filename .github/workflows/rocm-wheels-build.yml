@@ -70,6 +70,10 @@ env:
   DOCKER_IMAGE_NAME: te-rocm-manylinux-x86
   MANYLINUX_PLATFORM: manylinux_2_28_x86_64
 
+permissions:
+  actions: write
+  contents: read
+
 # ─────────────────────────────────────────────────────────────────────────────
 jobs:
 
