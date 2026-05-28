@@ -28,7 +28,6 @@
 #include <gtest/gtest.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/gemm.h>
-#include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 #include "../test_common.h"
 
@@ -133,104 +132,24 @@ static const ShapeDef qwen3_lm_head_shapes[] = {
     {"Qwen3_LMHead_wgrad",       4096, 151936, GemmPass::WGRAD},
 };
 
-// ============================================================================
-// Test case: a concrete (M, K, N) shape with pass info, ready for execution
-// ============================================================================
+// ====================================================
+// Test case: a concrete (M, K, N) shape with pass info
+// ====================================================
 
-struct ProdGemmTestCase {
-    std::string label;
-    size_t m, k, n;
-    GemmPass pass;
-};
-
-std::ostream& operator<<(std::ostream& os, const ProdGemmTestCase& tc) {
-    return os << tc.label;
+std::ostream& operator<<(std::ostream& os, const ShapeDef& s) {
+    return os << s.label;
 }
 
-static std::vector<ProdGemmTestCase> expand_shapes(const ShapeDef* defs, size_t count) {
-    std::vector<ProdGemmTestCase> cases;
-    for (size_t i = 0; i < count; ++i) {
-        const auto& s = defs[i];
-        for (size_t mbs : {1, 2, 4}) {
-            size_t tokens = mbs * 4096;
-            ProdGemmTestCase tc;
-            tc.label = std::string(s.label) + "_mbs" + std::to_string(mbs);
-            tc.pass = s.pass;
-            switch (s.pass) {
-                case GemmPass::FWD:
-                case GemmPass::DGRAD:
-                    tc.m = tokens;
-                    tc.n = s.dim1;
-                    tc.k = s.dim2;
-                    break;
-                case GemmPass::WGRAD:
-                    tc.m = s.dim1;
-                    tc.n = s.dim2;
-                    tc.k = tokens;
-                    break;
-            }
-            cases.push_back(std::move(tc));
-        }
+static void resolve_mkn(const ShapeDef& s, size_t mbs,
+                         size_t& m, size_t& k, size_t& n) {
+    size_t tokens = mbs * 4096;
+    switch (s.pass) {
+        case GemmPass::FWD:
+        case GemmPass::DGRAD:
+            m = tokens; n = s.dim1; k = s.dim2; break;
+        case GemmPass::WGRAD:
+            m = s.dim1; n = s.dim2; k = tokens; break;
     }
-    return cases;
-}
-
-static std::vector<ProdGemmTestCase> generate_model_test_cases() {
-    auto v1   = expand_shapes(deepseek3_shapes,   std::size(deepseek3_shapes));
-    auto v2   = expand_shapes(qwen3_shapes,       std::size(qwen3_shapes));
-    v1.insert(v1.end(), std::make_move_iterator(v2.begin()),
-                        std::make_move_iterator(v2.end()));
-    return v1;
-}
-
-static std::vector<ProdGemmTestCase> generate_lm_head_test_cases() {
-    auto v1   = expand_shapes(deepseek3_lm_head_shapes, std::size(deepseek3_lm_head_shapes));
-    auto v2   = expand_shapes(qwen3_lm_head_shapes,     std::size(qwen3_lm_head_shapes));
-    v1.insert(v1.end(), std::make_move_iterator(v2.begin()),
-                        std::make_move_iterator(v2.end()));
-    return v1;
-}
-
-// ============================================================================
-// Swizzle helper for gfx1250 MXFP8 scales (same as test_cublaslt_gemm.cu)
-// ============================================================================
-
-static void swizzle_mxfp8_scales(test::Tensor& t, bool rowwise) {
-    void* scale_ptr = rowwise ? t.rowwise_scale_inv_dptr()
-                              : t.columnwise_scale_inv_dptr();
-    if (!scale_ptr) return;
-
-    const NVTEShape scale_shape = rowwise ? t.rowwise_scale_inv_shape()
-                                          : t.columnwise_scale_inv_shape();
-    const NVTEShape data_shape  = rowwise ? t.rowwise_shape()
-                                          : t.columnwise_shape();
-
-    size_t num_scales = 1;
-    for (size_t d = 0; d < scale_shape.ndim; d++) num_scales *= scale_shape.data[d];
-
-    uint8_t* d_tmp = nullptr;
-    NVTE_CHECK_CUDA(cudaMalloc(&d_tmp, num_scales));
-
-    TensorWrapper input_tw(NVTE_MXFP8_1D_SCALING);
-    TensorWrapper output_tw(NVTE_MXFP8_1D_SCALING);
-    output_tw.set_with_gemm_swizzled_scales(true);
-
-    if (rowwise) {
-        input_tw.set_rowwise_data(nullptr, t.dtype(), data_shape);
-        input_tw.set_rowwise_scale_inv(scale_ptr, DType::kFloat8E8M0, scale_shape);
-        output_tw.set_rowwise_data(nullptr, t.dtype(), data_shape);
-        output_tw.set_rowwise_scale_inv(d_tmp, DType::kFloat8E8M0, scale_shape);
-    } else {
-        input_tw.set_columnwise_data(nullptr, t.dtype(), data_shape);
-        input_tw.set_columnwise_scale_inv(scale_ptr, DType::kFloat8E8M0, scale_shape);
-        output_tw.set_columnwise_data(nullptr, t.dtype(), data_shape);
-        output_tw.set_columnwise_scale_inv(d_tmp, DType::kFloat8E8M0, scale_shape);
-    }
-
-    nvte_swizzle_scaling_factors(input_tw.data(), output_tw.data(), 0);
-    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-    NVTE_CHECK_CUDA(cudaMemcpy(scale_ptr, d_tmp, num_scales, cudaMemcpyDeviceToDevice));
-    NVTE_CHECK_CUDA(cudaFree(d_tmp));
 }
 
 // ============================================================================
@@ -342,25 +261,29 @@ void performMxfp8DqTest(size_t m, size_t k, size_t n, bool transa, bool transb) 
 // Test suite
 // ============================================================================
 
-using ProdGemmParam = std::tuple<ProdGemmTestCase, Layout>;
+using ProdGemmParam = std::tuple<ShapeDef, size_t, Layout>;
 
 class ProdGemmTestSuite : public ::testing::TestWithParam<ProdGemmParam> {};
 
 TEST_P(ProdGemmTestSuite, TestMxfp8Dq) {
-    const auto& tc = std::get<0>(GetParam());
-    const auto& layout = std::get<1>(GetParam());
+    const auto& shape = std::get<0>(GetParam());
+    size_t mbs = std::get<1>(GetParam());
+    const auto& layout = std::get<2>(GetParam());
     bool transa = layout.first;
     bool transb = layout.second;
 
-    switch (tc.pass) {
+    size_t m, k, n;
+    resolve_mkn(shape, mbs, m, k, n);
+
+    switch (shape.pass) {
         case GemmPass::FWD:
-            performMxfp8DqTest<fp8, fp8, bf16>(tc.m, tc.k, tc.n, transa, transb);
+            performMxfp8DqTest<fp8, fp8, bf16>(m, k, n, transa, transb);
             break;
         case GemmPass::DGRAD:
-            performMxfp8DqTest<bf8, fp8, bf16>(tc.m, tc.k, tc.n, transa, transb);
+            performMxfp8DqTest<bf8, fp8, bf16>(m, k, n, transa, transb);
             break;
         case GemmPass::WGRAD:
-            performMxfp8DqTest<fp8, bf8, bf16>(tc.m, tc.k, tc.n, transa, transb);
+            performMxfp8DqTest<fp8, bf8, bf16>(m, k, n, transa, transb);
             break;
     }
 }
@@ -370,25 +293,48 @@ static inline std::string TN(const Layout& layout) {
     return map[layout.first][layout.second];
 }
 
-// Regular model shapes (excluding LM Head)
-INSTANTIATE_TEST_SUITE_P(
-    ProdGemmModel, ProdGemmTestSuite,
-    ::testing::Combine(
-        ::testing::ValuesIn(generate_model_test_cases()),
-        ::testing::ValuesIn(kLayouts)),
-    [](const testing::TestParamInfo<ProdGemmParam>& info) {
-        return std::get<0>(info.param).label + "_" + TN(std::get<1>(info.param));
-    });
+static inline auto testName(const testing::TestParamInfo<ProdGemmParam>& info) {
+    const auto& shape = std::get<0>(info.param);
+    size_t mbs = std::get<1>(info.param);
+    const auto& layout = std::get<2>(info.param);
+    return std::string(shape.label) + "_mbs" + std::to_string(mbs) + "_" + TN(layout);
+}
 
-// LM Head shapes (very large N, memory-intensive)
+// DeepSeek3 model shapes
 INSTANTIATE_TEST_SUITE_P(
-    ProdGemmLMHead, ProdGemmTestSuite,
+    ProdGemmDeepSeek3, ProdGemmTestSuite,
     ::testing::Combine(
-        ::testing::ValuesIn(generate_lm_head_test_cases()),
+        ::testing::ValuesIn(deepseek3_shapes),
+        ::testing::Values(size_t{1}, size_t{2}, size_t{4}),
         ::testing::ValuesIn(kLayouts)),
-    [](const testing::TestParamInfo<ProdGemmParam>& info) {
-        return std::get<0>(info.param).label + "_" + TN(std::get<1>(info.param));
-    });
+    testName);
+
+// Qwen3 model shapes
+INSTANTIATE_TEST_SUITE_P(
+    ProdGemmQwen3, ProdGemmTestSuite,
+    ::testing::Combine(
+        ::testing::ValuesIn(qwen3_shapes),
+        ::testing::Values(size_t{1}, size_t{2}, size_t{4}),
+        ::testing::ValuesIn(kLayouts)),
+    testName);
+
+// DeepSeek3 LM Head shapes (very large N, memory-intensive)
+INSTANTIATE_TEST_SUITE_P(
+    ProdGemmDeepSeek3LMHead, ProdGemmTestSuite,
+    ::testing::Combine(
+        ::testing::ValuesIn(deepseek3_lm_head_shapes),
+        ::testing::Values(size_t{1}, size_t{2}, size_t{4}),
+        ::testing::ValuesIn(kLayouts)),
+    testName);
+
+// Qwen3 LM Head shapes (very large N, memory-intensive)
+INSTANTIATE_TEST_SUITE_P(
+    ProdGemmQwen3LMHead, ProdGemmTestSuite,
+    ::testing::Combine(
+        ::testing::ValuesIn(qwen3_lm_head_shapes),
+        ::testing::Values(size_t{1}, size_t{2}, size_t{4}),
+        ::testing::ValuesIn(kLayouts)),
+    testName);
 
 }  // namespace
 
