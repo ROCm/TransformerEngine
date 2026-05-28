@@ -144,11 +144,17 @@ static void resolve_mkn(const ShapeDef& s, size_t mbs,
                          size_t& m, size_t& k, size_t& n) {
     size_t tokens = mbs * 4096;
     switch (s.pass) {
-        case GemmPass::FWD:
+        case GemmPass::FWD: // Fallthrough, same as DGRAD
         case GemmPass::DGRAD:
-            m = tokens; n = s.dim1; k = s.dim2; break;
+            m = tokens;
+            n = s.dim1;
+            k = s.dim2;
+            break;
         case GemmPass::WGRAD:
-            m = s.dim1; n = s.dim2; k = tokens; break;
+            m = s.dim1;
+            n = s.dim2;
+            k = tokens;
+            break;
     }
 }
 
