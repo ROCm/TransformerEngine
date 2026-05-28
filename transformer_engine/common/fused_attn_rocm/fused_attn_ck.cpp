@@ -743,9 +743,6 @@ void fused_attn_ck_bwd_impl(
 
   bool is_mqa_gqa = (h > hg);
 
-  size_t kN0 = (d_qk <= 128)? 128:64;
-  size_t nsplits = deterministic? ceil(1.0*s_kv/kN0):1;
-
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
   bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
   bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD || qkv_format==NVTE_QKV_Format::NVTE_SBHD_2BSHD;
@@ -769,9 +766,6 @@ void fused_attn_ck_bwd_impl(
 
   // First h*max_tokens_q*sizeof(float) is the lse-d buffer (passed as softmax_lsed)
   void* lse_workspace = planner.allocate(h*max_tokens_q*sizeof(float));
-
-  // CK requires dq_acc ptr; size depends on deterministic mode
-  void* dq_acc_ptr = planner.allocate(nsplits*h*max_tokens_q*d_qk*sizeof(float));
 
   void* dk_expanded_ptr = nullptr;
   void* dv_expanded_ptr = nullptr;
@@ -913,8 +907,6 @@ void fused_attn_ck_bwd_impl(
   }
 
   // Initialize workspace buffers.
-  // dq_acc is of shape (nsplits, B, S, H, D_qk); CK requires zeroing
-  NVTE_CHECK_CUDA(cudaMemsetAsync(dq_acc_ptr, 0, sizeof(float)*nsplits*h*max_tokens_q*d_qk, stream));
   if(devPtrAlibiSlope){
     dim3 block, grid;
     block.x = 1024;
@@ -992,7 +984,6 @@ void fused_attn_ck_bwd_impl(
   ck_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
   ck_args.window_size_left = window_size_left;
   ck_args.window_size_right = window_size_right;
-  ck_args.dq_acc_ptr = dq_acc_ptr;
   ck_args.dk_expanded_ptr = dk_expanded_ptr;
   ck_args.dv_expanded_ptr = dv_expanded_ptr;
   ck_args.lse_workspace_ptr = lse_workspace;

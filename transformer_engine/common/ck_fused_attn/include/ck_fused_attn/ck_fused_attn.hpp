@@ -113,7 +113,6 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
   // dQ
   void* dq_ptr = nullptr;
   uint64_t stride_b_dq = 0, stride_h_dq = 0, stride_s_dq = 0;
-  void* dq_acc_ptr = nullptr;
 
   // dK / dV expanded (MQA/GQA reduction inputs; null when h==hg)
   void* dk_expanded_ptr = nullptr;

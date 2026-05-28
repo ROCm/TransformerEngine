@@ -31,7 +31,7 @@ def parse_with_skip_comments(buffer, line, regex, outputs):
 
 
 def extract_fields_from_header(text: str, struct_name: str) -> List[str]:
-    struct_field_re = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:=[^;]*)?;\s*$")
+    struct_field_re = re.compile(r"([A-Za-z_][A-Za-z0-9_]*)\s*(?:=[^;]*|\{[^;]*\})?;\s*$")
     struct_end_re = re.compile(r"^\s*};\s*$")
 
     struct_start_re = re.compile(rf"\bstruct\s+{re.escape(struct_name)}\b")
