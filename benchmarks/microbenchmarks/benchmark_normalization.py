@@ -28,7 +28,7 @@ NORM_TYPES = [
 BENCHMARK_LABEL = "Normalization"
 
 
-def _generate_norm_test_cases():
+def _generate_test_cases():
     test_cases = []
     for model_name, hidden in MODEL_HIDDEN_SIZES:
         for norm_name, norm_cls in NORM_TYPES:
@@ -88,7 +88,7 @@ def bench_norm(Case, M, hidden_size, norm_name, norm_cls, dtype):
 
 if __name__ == "__main__":
     run_benchmarks(
-        test_cases=_generate_norm_test_cases(),
+        test_cases=_generate_test_cases(),
         bench_fn=bench_norm,
         param_columns=["Case", "M", "hidden_size", "dtype"],
     )

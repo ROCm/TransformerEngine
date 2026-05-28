@@ -37,7 +37,7 @@ CAST_CONFIGS = [
 ]
 
 
-def _generate_cast_test_cases():
+def _generate_test_cases():
     test_cases = []
     for model_name, hidden in MODEL_HIDDEN_SIZES:
         for cast_name, direction, fp8_dtype in CAST_CONFIGS:
@@ -80,7 +80,7 @@ def bench_cast(Case, M, hidden_size, direction, fp8_dtype, dtype_str):
 
 if __name__ == "__main__":
     run_benchmarks(
-        test_cases=_generate_cast_test_cases(),
+        test_cases=_generate_test_cases(),
         bench_fn=bench_cast,
         param_columns=["Case", "M", "hidden_size", "dtype_str"],
     )
