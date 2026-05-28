@@ -66,7 +66,11 @@ __global__ void __launch_bounds__(512)
 #else
   float amax = (tensor_amax != nullptr) ? *tensor_amax : 1.0f;
 #endif
+#if defined(__HIP_DEVICE_COMPILE__)
+  constexpr float factor_inv = 1.0f / (detail::TypeExtrema<fp4e2m1>::max * detail::TypeExtrema<fp8e4m3>::max);
+#else
   constexpr float factor_inv = 1.0 / (6.0 * 448.0);
+#endif
   float final_scale = static_cast<float>(scale) * amax * factor_inv;
 #pragma unroll
   for (int i = 0; i < 4; i++) {

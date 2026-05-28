@@ -108,7 +108,12 @@ void compute_ref(const fp4e2m1* input,
                  const size_t rows,
                  const size_t cols,
                  const size_t scale_stride) {
+#ifdef __HIP_PLATFORM_AMD__
+    const float fp8_max = Numeric_Traits<fp8e4m3>::maxNorm;
+    const float factor_inv = 1.0f / (6.0f * fp8_max);
+#else
     constexpr float factor_inv = 1.0f / (6.0f * 448.0f);
+#endif
 
     const size_t blocks_per_row = cols / kFP4BlockSize1D;
 

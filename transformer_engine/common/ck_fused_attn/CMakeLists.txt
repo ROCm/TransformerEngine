@@ -8,10 +8,20 @@ project(ck_fused_attn LANGUAGES HIP CXX)
 
 set(AITER_MHA_INSTALL_PREFIX "transformer_engine" CACHE STRING "aiter mha shared lib install prefix in TE")
 
-# QoLA no longer vendors AITER as a submodule; it clones on demand into
-# build/third_party/aiter (git-ignored) via `qola checkout`. Mirror that
-# default here so the source-build path and the header-include paths
-# resolve to the same tree.
+#Corresponding runtime check is in nvte_get_fused_attn_backend()
+list(FIND CMAKE_HIP_ARCHITECTURES "gfx1250" _gfx1250_idx)
+if(NOT _gfx1250_idx EQUAL -1)
+  message(WARNING
+    "Removing unsupported gfx1250 from CMAKE_HIP_ARCHITECTURES for ck_fused_attn build.")
+  list(REMOVE_ITEM CMAKE_HIP_ARCHITECTURES "gfx1250")
+  list(LENGTH CMAKE_HIP_ARCHITECTURES _hip_arch_count)
+  if(_hip_arch_count EQUAL 0)
+    message(FATAL_ERROR
+            "No supported architectures remain for the ck_fused_attn build. "
+            "Re-run the build with FUSED_ATTN_CK backend disabled.")
+  endif()
+  set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
+endif()
 set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
 set(__AITER_SOURCE_DIR "${__QOLA_DIR}/build/third_party/aiter")
 set(__CK_SOURCE_DIR "${__AITER_SOURCE_DIR}/3rdparty/composable_kernel")
@@ -96,25 +106,6 @@ if(NOT EXISTS "${AITER_INCLUDE_DIR}")
           "Re-run the build to let `qola checkout` clone AITER.")
 endif()
 
-# so far, there are only gfx942 and gfx950 v3 kernels
-SET(V3_ASM_ARCHS_SUPPORTED "gfx942;gfx950")
-
-# filter unsupported gfx archs for v3 kernels in aiter
-SET(V3_ASM_ARCHS "")
-# generate fwd/bwd v3 kernels for each requested rocm arch
-foreach(CK_TARGET_ARCH IN LISTS CMAKE_HIP_ARCHITECTURES)
-  string(TOLOWER "${CK_TARGET_ARCH}" CK_TARGET_ARCH_LOWER)
-  if(${CK_TARGET_ARCH_LOWER} IN_LIST V3_ASM_ARCHS_SUPPORTED)
-    list(APPEND V3_ASM_ARCHS "${CK_TARGET_ARCH_LOWER}")
-  else()
-    message(WARNING "${CK_TARGET_ARCH} not supported with aiter v3 asm kernels")
-  endif()
-endforeach()
-message(STATUS "AITER V3_ASM_ARCHS: ${V3_ASM_ARCHS}")
-
-# pass GPU_TARGET as env into aiter codegen
-list(JOIN V3_ASM_ARCHS ";" V3_ASM_ARCHS_STR)
-
 if(DEFINED AITER_MHA_PATH)
   message(STATUS "[AITER-BUILD] Using AITER_MHA_PATH=${AITER_MHA_PATH}")
   # use pre-built te_libmha_fwd.so te_libmha_bwd.so
@@ -125,21 +116,19 @@ else()
 
   if(__AITER_MHA_PATH STREQUAL "")
     # If not available, fallback: Build from source via QoLA
-    message(STATUS "[AITER-BUILD] Building AITER kernels via QoLA.")
+    list(JOIN CMAKE_HIP_ARCHITECTURES ";" GPU_ARCHS_STR)
+    message(STATUS "[AITER-BUILD] Building AITER kernels for ${GPU_ARCHS_STR} via QoLA.")
     set(__QOLA_BUILD_DIR "${__QOLA_DIR}/build")
     # Same GIT_CONFIG_GLOBAL trick as the earlier `qola.cli checkout` call:
     # `qola.cli build` re-invokes ensure_aiter_commit internally and will hit
     # the same dubious-ownership trap without it.
     execute_process(
-      COMMAND sh -c
-        "tmp=$(mktemp /tmp/gitconfig.XXXXXX) || exit 1; \
-GIT_CONFIG_GLOBAL=$tmp git config --global --add safe.directory '*' >/dev/null 2>&1; \
-GIT_CONFIG_GLOBAL=$tmp PYTHONPATH=\"${__QOLA_DIR}:$PYTHONPATH\" '${Python_EXECUTABLE}' -m qola.cli build \
---manifest '${__QOLA_MANIFEST}' \
---aiter-root '${__AITER_SOURCE_DIR}' \
---output-dir '${__QOLA_BUILD_DIR}' \
---arch '${V3_ASM_ARCHS_STR}'; \
-rc=$?; rm -f \"$tmp\"; exit $rc"
+      COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${__QOLA_DIR}:$ENV{PYTHONPATH}"
+              ${Python_EXECUTABLE} -m qola.cli build
+              --manifest ${__QOLA_MANIFEST}
+              --aiter-root ${__AITER_SOURCE_DIR}
+              --output-dir ${__QOLA_BUILD_DIR}
+              --arch "${GPU_ARCHS_STR}"
       RESULT_VARIABLE QOLA_BUILD_RESULT
     )
     if(NOT QOLA_BUILD_RESULT EQUAL 0)
@@ -176,11 +165,6 @@ set(CK_FUSED_ATTN_COMPILE_OPTIONS)
 list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
     -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
     -DENABLE_CK=1)
-
-foreach(ARCH IN LISTS V3_ASM_ARCHS)
-  list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS --offload-arch=${ARCH})
-endforeach()
-
 
 # Public QoLA headers ship alongside the .so libs in ${__AITER_MHA_PATH}/../include
 # (emitted by qola.cli build, or copied from the QoLA build dir above for the

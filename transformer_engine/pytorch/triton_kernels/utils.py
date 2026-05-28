@@ -6,6 +6,7 @@ import torch
 import triton
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
+from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from .common import te_dtype_to_torch_dtype
 
 def get_ln_sm_margin(sm_margin_type):
@@ -59,7 +60,7 @@ def make_ln_out(ln_out, quantizer=None, input_shape=None, out_dtype=torch.float3
 
     if ln_out is None:
         # TODO(micky774): Remove corresponding FP8Quantizer check when kernels properly support MXFP8/float8_current_scaling as a fused operation
-        if quantizer is None or isinstance(quantizer, MXFP8Quantizer) or isinstance(quantizer, Float8CurrentScalingQuantizer):
+        if quantizer is None or isinstance(quantizer, (MXFP8Quantizer, Float8CurrentScalingQuantizer, NVFP4Quantizer)):
             return torch.empty(input_shape, dtype=out_dtype, device='cuda')
         return quantizer.make_empty(input_shape, dtype=out_dtype)
 

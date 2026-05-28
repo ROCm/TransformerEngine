@@ -54,10 +54,10 @@ def check_fp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 4), (9, 5)):
+        if gpu_arch in ((9, 4), (9, 5), (12, 5)):
             return True, ""
         else:
-            return False, "Device arch gfx94x or gfx95x required for FP8 execution."
+            return False, "Device arch gfx94x or newer is required for FP8 execution."
     if get_device_compute_capability() >= (9, 0):  # hopper and above
         return True, ""
     if get_device_compute_capability() < (8, 9):  # pre-ada
@@ -76,9 +76,9 @@ def check_mxfp8_support() -> Tuple[bool, str]:
         if os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") == "0":
             return False, "MXFP8 support is not enabled."
         gpu_arch = get_device_compute_capability()
-        if gpu_arch == (9, 5):
+        if gpu_arch in ((9, 5), (12, 5)):
             return True, ""
-        return False, "Gfx95x is required for MXFP8 execution."
+        return False, "Device arch gfx95x or newer is required for MXFP8 execution."
     if get_device_compute_capability() >= (12, 0):
         return False, "MXFP8 (for all gemm layouts) is not supported on 12.0+ architectures yet."
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
@@ -89,7 +89,10 @@ def check_mxfp8_support() -> Tuple[bool, str]:
 @functools.lru_cache(maxsize=None)
 def check_nvfp4_support() -> Tuple[bool, str]:
     if IS_HIP_EXTENSION:
-        return False, "ROCm TE currently not supporting NVFP4"
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch in ((9, 4), (9, 5)): #TODO: enabled for gfx1250 when ready
+            return True, ""
+        return False, "Device arch gfx94x or newer is required for NVFP4 execution."
     """Return if nvfp4 support is available"""
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
@@ -114,9 +117,9 @@ def check_mxfp4_support() -> Tuple[bool, str]:
     """Return if mxfp4 support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch == (9, 5):
+        if gpu_arch == (9, 5): #TODO: enabled for gfx1250 when ready
             return True, ""
-        return False, "Gfx95x is required for MXFP4 execution."
+        return False, "Device arch gfx95x or newer is required for MXFP4 execution."
     return False, "Only ROCm gfx950 supports MXFP4"
 
 
@@ -140,8 +143,7 @@ def get_default_fp8_recipe() -> Recipe:
     if IS_HIP_EXTENSION:
         if os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") != "2":
             return DelayedScaling()
-        gpu_arch = get_device_compute_capability()
-        if gpu_arch == (9, 5):
+        if check_mxfp8_support()[0]:
             return MXFP8BlockScaling()
         return DelayedScaling()
     if check_mxfp8_support()[0]:

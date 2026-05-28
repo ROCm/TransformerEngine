@@ -20,6 +20,7 @@ if IS_HIP_EXTENSION:
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
@@ -101,6 +102,46 @@ def get_tensor_device(tensor: torch.Tensor) -> int:
     if hasattr(tensor, "_transpose") and tensor._transpose is not None:
         return tensor._transpose.device.index
     return torch.cuda.current_device()
+
+
+if IS_HIP_EXTENSION:
+    def _should_use_bf16_output_for_nvfp4_tn(
+        A,
+        B,
+        layout: str,
+        out_dtype: Optional[torch.dtype],
+        out,
+        bias,
+        quantization_params,
+        debug_quantizer,
+        grad: bool,
+        accumulate: bool,
+        ub,
+        extra_output,
+        gelu: bool,
+    ) -> bool:
+        """Work around ROCm NVFP4 TN GEMM corruption when requesting FP32 output.
+
+        FIXME: hipBLASLt BF16xBF16->FP32 GEMM algos with ALPHA_DEVICE_VECTOR
+        produce incorrect results intermittently on AMDGPU. Return True for the
+        narrow path where we force BF16 output, which empirically covers the
+        corruption cases.
+        """
+        return (
+            layout == "TN"
+            and out_dtype == torch.float32
+            and out is None
+            and bias is not None
+            and quantization_params is None
+            and debug_quantizer is None
+            and not grad
+            and not accumulate
+            and ub is None
+            and extra_output is None
+            and not gelu
+            and (isinstance(A, NVFP4TensorStorage) or isinstance(B, NVFP4TensorStorage))
+        )
+
 
 def _select_kernel_fp4(layout: str, grad: bool, M: int, N: int, K: int):
     """Select kernel via tuned CSV lookup, falling back to AITER heuristic."""
@@ -288,6 +329,24 @@ def general_gemm(
     beta = validate_gemm_scale(beta, accumulate)
     workspace = get_cublas_workspace(get_tensor_device(A), ub is not None, False)
 
+    # On ROCm, FP4 is dequantized to BF16 in the workspace before GEMM.
+    # Compute the required extra space and extend the workspace if needed.
+    if IS_HIP_EXTENSION and (
+        isinstance(A, NVFP4TensorStorage) or isinstance(B, NVFP4TensorStorage)
+    ):
+        assert ub is None, "User buffers (comm overlap) are not supported with NVFP4"
+        import math
+        bf16_size = torch.bfloat16.itemsize
+        fp4_extra = 0
+        if isinstance(A, NVFP4TensorStorage):
+            fp4_extra += math.prod(A.size()) * bf16_size
+            fp4_extra += A.size(0) * 4  # alpha vector (m floats)
+        if isinstance(B, NVFP4TensorStorage):
+            fp4_extra += math.prod(B.size()) * bf16_size
+        total_needed = fp4_extra + get_cublas_workspace_size_bytes()
+        if workspace.numel() < total_needed:
+            workspace = torch.empty(total_needed, dtype=torch.uint8, device=workspace.device)
+
     if ub_type is not None:
         assert ub is not None, (
             f"{'AG+GEMM' if ub_type == tex.CommOverlapType.AG else 'GEMM+RS'} overlap requires"
@@ -352,6 +411,24 @@ def general_gemm(
         # FP8 block-scaling requires split accumulator
         use_split_accumulator = True
 
+    if IS_HIP_EXTENSION:
+        use_bf16_tn_output_workaround = _should_use_bf16_output_for_nvfp4_tn(
+            A,
+            B,
+            layout,
+            out_dtype,
+            out,
+            bias,
+            quantization_params,
+            debug_quantizer,
+            grad,
+            accumulate,
+            ub,
+            extra_output,
+            gelu,
+        )
+        out_dtype = torch.bfloat16 if use_bf16_tn_output_workaround else out_dtype
+
     args = (
         A,
         transa,  # transa
@@ -380,6 +457,9 @@ def general_gemm(
     }
 
     out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+
+    if IS_HIP_EXTENSION and use_bf16_tn_output_workaround:
+        out = cast_if_needed(out, torch.float32)
 
     if debug_quantizer is not None:
         out = debug_quantizer.process_gemm_output(out)
