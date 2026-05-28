@@ -187,20 +187,7 @@ def _rmsnorm_bwd_triton_impl(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_p
                         n_rows, n_cols, ZERO_CENTERED_GAMMA: tl.constexpr, BLOCK_SIZE: tl.constexpr,
                         USE_BLOCKED: tl.constexpr, NUM_PRGMS: tl.constexpr,
                         INPUT_ALIGNED_16: tl.constexpr, GRAD_OUTPUT_ALIGNED_16: tl.constexpr,
-                        DX_ALIGNED_16: tl.constexpr, DG_ALIGNED_16: tl.constexpr,
-                        DG_RMW: tl.constexpr = True):
-    # `dg_ptr` points to a fp32 partial buffer that will be summed by the
-    # reduce kernel afterwards. Two storage modes (selected by the launcher):
-    #
-    #   DG_RMW=True   -> (NUM_PRGMS, n_cols), pre-zeroed. Each program owns one
-    #                    slot and accumulates its assigned rows via HBM RMW.
-    #                    L2-resident partial buffer makes the RMW near-free
-    #                    when rows_per_program >> 1.
-    #
-    #   DG_RMW=False  -> (n_rows, n_cols), uninitialized. Each program writes
-    #                    one row per `row_idx` it processes (no RMW). Used
-    #                    when n_rows <= NUM_PRGMS so RMW would just be wasted
-    #                    load+add+store on a slot that's only written once.
+                        DX_ALIGNED_16: tl.constexpr, DG_ALIGNED_16: tl.constexpr):
     row_start = tl.program_id(0)
     col_offsets = tl.arange(0, BLOCK_SIZE)
     inv_n_cols = 1.0 / n_cols
@@ -209,16 +196,11 @@ def _rmsnorm_bwd_triton_impl(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_p
     #   tl.assume(row_start >= 0)
 
     if USE_BLOCKED:
-        # Per-program partial dg slot when accumulating with RMW.
-        if DG_RMW:
-            prgm_dg_ptr = dg_ptr + row_start * n_cols
         for row_idx in tl.range(row_start, n_rows, NUM_PRGMS, num_stages=2):
             row_input_ptr = input_ptr + row_idx * input_row_stride
             row_grad_output_ptr = grad_output_ptr + row_idx * output_row_stride
             row_dx_ptr = dx_ptr + row_idx * input_row_stride
-            # Per-row dg slot for pure-write mode.
-            if not DG_RMW:
-                row_dg_ptr = dg_ptr + row_idx * n_cols
+            row_dg_ptr = dg_ptr + row_idx * n_cols
 
             # Compute gradients sum of all colums for each row
             n_cols_blks = tl.cdiv(n_cols, BLOCK_SIZE) - 1
@@ -284,19 +266,11 @@ def _rmsnorm_bwd_triton_impl(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_p
                     dx_ptrs = tl.multiple_of(dx_ptrs, (16, ))
                 tl.store(dx_ptrs, grad_input.to(dx_ptr.type.element_ty))
 
-                # Accumulate (RMW) or write (pure) this row's dg contribution.
                 dg = grad_output * x * norm_factor
-                if DG_RMW:
-                    dg_ptrs = prgm_dg_ptr + cols
-                else:
-                    dg_ptrs = row_dg_ptr + cols
+                dg_ptrs = row_dg_ptr + cols
                 if DG_ALIGNED_16:
                     dg_ptrs = tl.multiple_of(dg_ptrs, (16, ))
-                if DG_RMW:
-                    partial_dg = tl.load(dg_ptrs)
-                    tl.store(dg_ptrs, partial_dg + dg)
-                else:
-                    tl.store(dg_ptrs, dg)
+                tl.store(dg_ptrs, dg)
 
             # Handle remainder
             cols = n_cols_blks * BLOCK_SIZE + col_offsets
@@ -318,17 +292,10 @@ def _rmsnorm_bwd_triton_impl(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_p
             tl.store(dx_ptrs, grad_input.to(dx_ptr.type.element_ty), mask=mask)
 
             dg = grad_output * x * norm_factor
-            if DG_RMW:
-                dg_ptrs = prgm_dg_ptr + cols
-            else:
-                dg_ptrs = row_dg_ptr + cols
+            dg_ptrs = row_dg_ptr + cols
             if DG_ALIGNED_16:
                 dg_ptrs = tl.multiple_of(dg_ptrs, (16, ))
-            if DG_RMW:
-                partial_dg = tl.load(dg_ptrs, mask=mask, other=0.0)
-                tl.store(dg_ptrs, partial_dg + dg, mask=mask)
-            else:
-                tl.store(dg_ptrs, dg, mask=mask)
+            tl.store(dg_ptrs, dg, mask=mask)
 
     else:
         mask = col_offsets < n_cols

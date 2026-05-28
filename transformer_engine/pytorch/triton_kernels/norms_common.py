@@ -240,9 +240,6 @@ def _te_norm_fwd_triton(
     out_transpose_ptr = None
     out_transpose_stride = None
     FP8_MAX = None
-    # When True, skip in-kernel strided transpose stores and dispatch a
-    # separate LDS-tiled transpose kernel after the main fwd. Only applies
-    # to the rms path for now.
     use_external_transpose = False
     if IS_FP8:
         MAKE_TRANSPOSE = quantizer.columnwise_usage
@@ -368,29 +365,9 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, 
     blk_size = block_size(x_)
     USE_BLOCKED = use_blocked(x_)
     NUM_PRGMS = num_programs(x_, sm_margin)
-    # dg accumulation strategy:
-    #   * Large M (rows_per_program > 1): per-program partial buffer of shape
-    #     (NUM_PRGMS, N) accumulated via HBM RMW. Buffer is small, L2-resident,
-    #     RMW near-free; reduce kernel then sums NUM_PRGMS rows.
-    #   * Small M (rows_per_program == 1, i.e. NUM_PRGMS == M): RMW would just
-    #     be load+add+store of a slot only written once. Fall back to pure
-    #     per-row writes into (M, N) and skip the zero-init.
-    #   * Non-blocked path always writes via in-register accumulator (no RMW).
-    rows_per_program_gt_1 = NUM_PRGMS < M
-    DG_RMW = USE_BLOCKED and rows_per_program_gt_1
     need_reduction = NUM_PRGMS > 1
-    if need_reduction:
-        if DG_RMW:
-            # RMW requires zero-init.
-            dg_tmp = torch.zeros(NUM_PRGMS, N, device=x.device, dtype=torch.float32, requires_grad=False)
-        elif USE_BLOCKED:
-            # Pure per-row writes; rows are M.
-            dg_tmp = torch.empty(M, N, device=x.device, dtype=torch.float32, requires_grad=False)
-        else:
-            # Non-blocked: each program writes its slot unconditionally.
-            dg_tmp = torch.empty(NUM_PRGMS, N, device=x.device, dtype=torch.float32, requires_grad=False)
-    else:
-        dg_tmp = None
+    dg_tmp_rows = M if USE_BLOCKED else NUM_PRGMS
+    dg_tmp = torch.empty(dg_tmp_rows, N, device=x.device, dtype=torch.float32, requires_grad=False) if need_reduction else None
 
     input_aligned_16 = (x_.data_ptr() % 16 == 0) and (x_.stride(0) * x_.dtype.itemsize % 16 == 0)
     grad_output_aligned_16 = (dz_.data_ptr() % 16 == 0) and (dz_.stride(0) * dz_.dtype.itemsize % 16 == 0)
@@ -409,7 +386,6 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, 
         GRAD_OUTPUT_ALIGNED_16=grad_output_aligned_16,
         DX_ALIGNED_16=dx_aligned_16,
         DG_ALIGNED_16=dg_aligned_16,
-        DG_RMW=DG_RMW,
     )
     if not autotune:
         bwd_kwargs["num_warps"] = 8
