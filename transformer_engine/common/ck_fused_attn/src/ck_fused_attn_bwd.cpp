@@ -16,7 +16,32 @@
 #include "qola_mha_bwd.h"
 #include "ck_fused_attn_utils.hpp"
 
+// Staged gfx1250 backward dispatch. When this build includes the CK-free V3
+// backward library (te_v3_libmha_bwd.so, built for gfx1250), declare its
+// namespaced entry point so ck_attn_bwd can route to it on gfx1250 devices at
+// runtime. The CK-full path (QOLA_NS(mha_bwd) == qola::te::mha_bwd) is used on
+// all other archs.
+#if defined(NVTE_AITER_V3_BWD_GFX1250)
+namespace qola { namespace te_v3 {
+float mha_bwd(const aiter::mha_bwd_args& args, const ck_tile::stream_config& stream_config);
+}}  // namespace qola::te_v3
+#endif
+
 namespace ck_fused_attn{
+
+#if defined(NVTE_AITER_V3_BWD_GFX1250)
+namespace {
+// True when the active device is gfx1250 (gcnArchName may carry feature
+// suffixes, e.g. "gfx1250:sramecc+", so match on prefix).
+bool is_gfx1250_device(){
+  int dev = 0;
+  if(hipGetDevice(&dev) != hipSuccess){ return false; }
+  hipDeviceProp_t prop{};
+  if(hipGetDeviceProperties(&prop, dev) != hipSuccess){ return false; }
+  return std::string(prop.gcnArchName).rfind("gfx1250", 0) == 0;
+}
+}  // namespace
+#endif
 
 // TODO: unify with binary search in TE/common/fused_attn(rocm)/util
 // no device std::upper_bound
@@ -632,7 +657,21 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   if(log_file){
     log_bwd_config(__FUNCTION__, fmha_args, log_file);
   }
-  float average_runtime = QOLA_NS(mha_bwd)(fmha_args, stream_config);
+  float average_runtime;
+#if defined(NVTE_AITER_V3_BWD_GFX1250)
+  if(is_gfx1250_device()){
+    average_runtime = qola::te_v3::mha_bwd(fmha_args, stream_config);
+  } else
+#endif
+  {
+#if defined(NVTE_AITER_CK_FULL)
+    average_runtime = QOLA_NS(mha_bwd)(fmha_args, stream_config);
+#else
+    throw std::runtime_error(
+      "ck_fused_attn bwd: this build has no CK-full AITER backward library "
+      "(no CDNA archs built); only the staged gfx1250 V3 path is present.");
+#endif
+  }
   for(void* ws_ptr : mha_bwd_workspaces){
     hipFreeAsync(ws_ptr, stream);
   }

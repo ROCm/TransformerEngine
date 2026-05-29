@@ -11,7 +11,6 @@
 #include "fused_attn_aotriton.h"
 #include "fused_attn_ck.h"
 #include "../common.h"
-#include "../util/cuda_runtime.h" //cuda::sm_arch
 #include "utils.h"
 
 // map NVTE_QKV_Layout to NVTE_QKV_Layout_Group
@@ -283,12 +282,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     int64_t window_size_right, bool return_max_logit, bool cuda_graph) {
   using namespace transformer_engine;
 
-  //gfx1250 is disabled in ck_fused_attn/CMakeLists.txt and is not supported by curretnt aotriton
-  const int gpu_arch = cuda::sm_arch(cuda::current_device());
-  if (gpu_arch == 125) {
-    return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-  }
-  
   // TODO: Add return_max_logit support
   if (return_max_logit) return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
 

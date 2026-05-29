@@ -224,7 +224,18 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
   if(log_file){
      log_fwd_config(__FUNCTION__, has_dropout, fmha_args, log_file);
   }
+#if defined(NVTE_AITER_CK_FULL)
   float average_runtime = QOLA_NS(mha_fwd)(fmha_args, stream_config);
+#else
+  // gfx1250-only build: no CK-full forward library exists (gfx1250 has no
+  // forward kernels). The unified backend selector never picks CK on gfx1250,
+  // so this path is unreachable at runtime; the guard only keeps the link
+  // closed when te_libmha_fwd.so is absent.
+  float average_runtime = -1.0f;
+  throw std::runtime_error(
+    "ck_fused_attn fwd: no CK-full AITER forward library in this build "
+    "(gfx1250 has no forward kernels).");
+#endif
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");

@@ -1,0 +1,34 @@
+# gfx1250 (RDNA4) carries AITER V3 *backward* asm kernels only — there are no
+# forward kernels at the pinned commit, and the CK FMHA template headers do not
+# compile for gfx1250. This manifest therefore builds a CK-free (ENABLE_CK=0),
+# asm-v3-only backward library under a distinct namespace (te_v3) so it can
+# coexist with the CK-full te_* libraries in a multi-arch build. TE selects
+# between qola::te::mha_bwd and qola::te_v3::mha_bwd at runtime by device arch.
+#
+# Keep aiter_commit in lockstep with qola_manifest.toml — both consume the same
+# checked-out AITER source tree.
+[qola]
+aiter_commit = "f03a4ec572bb3d9e15da3b346763c8f126feec0d"    # pinned AITER submodule commit
+namespace = "te_v3"
+rocm_versions = ["7.2"]
+
+[build]
+architectures = ["gfx1250"]
+
+# Reuse the torch-free libmha_bwd module (sources = mha_bwd.cu only; the same
+# source the CK-full te_libmha_bwd.so builds from). Do NOT use
+# module_fmha_v3_bwd here — it pulls in mha_common.cu, which includes
+# <ATen/hip/HIPContext.h> and is therefore torch-dependent. To make this build
+# CK-free and asm-only, two independent gates in mha_bwd.cu must both be set:
+#   - ONLY_FAV3=1 selects the asm-only dispatch (`#if ONLY_FAV3` returns the
+#     fmha_v3_bwd result; the `#else` branch instantiates CK fmha_bwd_traits),
+#   - ENABLE_CK=0 strips the CK fmha_bwd.hpp include and uses the ck_tile shim,
+# mirroring AITER's own module_fmha_v3_bwd. drop_directions=["bwd"] removes the
+# CK `generate.py -d bwd` codegen (the HSA codegen has no -d and is kept).
+# flags_extra_cc values are eval'd as Python expressions (optCompilerConfig
+# convention), hence the inner quotes; this replaces libmha_bwd's empty list.
+[[modules]]
+name = "libmha_bwd"
+mode = "cpp_itfs"
+drop_directions = ["bwd"]
+flags_extra_cc = ["'-DONLY_FAV3=1'", "'-DENABLE_CK=0'"]

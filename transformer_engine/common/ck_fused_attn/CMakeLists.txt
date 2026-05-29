@@ -8,20 +8,8 @@ project(ck_fused_attn LANGUAGES HIP CXX)
 
 set(AITER_MHA_INSTALL_PREFIX "transformer_engine" CACHE STRING "aiter mha shared lib install prefix in TE")
 
-#Corresponding runtime check is in nvte_get_fused_attn_backend()
-list(FIND CMAKE_HIP_ARCHITECTURES "gfx1250" _gfx1250_idx)
-if(NOT _gfx1250_idx EQUAL -1)
-  message(WARNING
-    "Removing unsupported gfx1250 from CMAKE_HIP_ARCHITECTURES for ck_fused_attn build.")
-  list(REMOVE_ITEM CMAKE_HIP_ARCHITECTURES "gfx1250")
-  list(LENGTH CMAKE_HIP_ARCHITECTURES _hip_arch_count)
-  if(_hip_arch_count EQUAL 0)
-    message(FATAL_ERROR
-            "No supported architectures remain for the ck_fused_attn build. "
-            "Re-run the build with FUSED_ATTN_CK backend disabled.")
-  endif()
-  set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
-endif()
+# gfx1250 carries AITER V3 bwd kernels only (hd128, bf16, batch mode). The
+# runtime envelope is enforced in nvte_get_fused_attn_backend().
 set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
 set(__AITER_SOURCE_DIR "${__QOLA_DIR}/build/third_party/aiter")
 set(__CK_SOURCE_DIR "${__AITER_SOURCE_DIR}/3rdparty/composable_kernel")
@@ -106,47 +94,105 @@ if(NOT EXISTS "${AITER_INCLUDE_DIR}")
           "Re-run the build to let `qola checkout` clone AITER.")
 endif()
 
-if(DEFINED AITER_MHA_PATH)
-  message(STATUS "[AITER-BUILD] Using AITER_MHA_PATH=${AITER_MHA_PATH}")
-  # use pre-built te_libmha_fwd.so te_libmha_bwd.so
-  set(__AITER_MHA_PATH ${AITER_MHA_PATH})
-else()
-  set(__AITER_MHA_PATH "")
-  get_prebuilt_aiter(__AITER_MHA_PATH)
+# Partition the requested HIP architectures into the CK-full set (CDNA, where
+# the AITER CK FMHA template headers compile) and the V3-asm-only set. gfx1250
+# (RDNA4) has AITER V3 *backward* asm kernels but no CK FMHA support and no
+# forward kernels, so it is built as a separate CK-free library (namespace
+# te_v3, manifest qola_manifest_gfx1250.toml) and dispatched at runtime in
+# ck_attn_bwd. The two tiers coexist via distinct QoLA namespaces.
+set(__CK_FULL_ARCHS ${CMAKE_HIP_ARCHITECTURES})
+set(__HAS_GFX1250 FALSE)
+list(FIND __CK_FULL_ARCHS "gfx1250" __GFX1250_IDX)
+if(NOT __GFX1250_IDX EQUAL -1)
+  set(__HAS_GFX1250 TRUE)
+  list(REMOVE_ITEM __CK_FULL_ARCHS "gfx1250")
+endif()
+list(LENGTH __CK_FULL_ARCHS __CK_FULL_ARCH_COUNT)
+if(__CK_FULL_ARCH_COUNT EQUAL 0 AND NOT __HAS_GFX1250)
+  message(FATAL_ERROR "ck_fused_attn: no target architectures requested.")
+endif()
 
-  if(__AITER_MHA_PATH STREQUAL "")
-    # If not available, fallback: Build from source via QoLA
-    list(JOIN CMAKE_HIP_ARCHITECTURES ";" GPU_ARCHS_STR)
-    message(STATUS "[AITER-BUILD] Building AITER kernels for ${GPU_ARCHS_STR} via QoLA.")
-    set(__QOLA_BUILD_DIR "${__QOLA_DIR}/build")
-    # Same GIT_CONFIG_GLOBAL trick as the earlier `qola.cli checkout` call:
-    # `qola.cli build` re-invokes ensure_aiter_commit internally and will hit
-    # the same dubious-ownership trap without it.
-    execute_process(
-      COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${__QOLA_DIR}:$ENV{PYTHONPATH}"
-              ${Python_EXECUTABLE} -m qola.cli build
-              --manifest ${__QOLA_MANIFEST}
-              --aiter-root ${__AITER_SOURCE_DIR}
-              --output-dir ${__QOLA_BUILD_DIR}
-              --arch "${GPU_ARCHS_STR}"
-      RESULT_VARIABLE QOLA_BUILD_RESULT
-    )
-    if(NOT QOLA_BUILD_RESULT EQUAL 0)
-      message(FATAL_ERROR "[AITER-BUILD] QoLA build failed.")
+set(__AITER_MHA_PATH "")
+set(__HAVE_CK_FULL FALSE)
+
+# --- CK-full libraries (CDNA): te_libmha_fwd.so / te_libmha_bwd.so ---
+if(__CK_FULL_ARCH_COUNT GREATER 0)
+  set(__HAVE_CK_FULL TRUE)
+  if(DEFINED AITER_MHA_PATH)
+    message(STATUS "[AITER-BUILD] Using AITER_MHA_PATH=${AITER_MHA_PATH}")
+    # use pre-built te_libmha_fwd.so te_libmha_bwd.so
+    set(__AITER_MHA_PATH ${AITER_MHA_PATH})
+  else()
+    get_prebuilt_aiter(__AITER_MHA_PATH)
+
+    if(__AITER_MHA_PATH STREQUAL "")
+      # If not available, fallback: Build from source via QoLA
+      list(JOIN __CK_FULL_ARCHS ";" GPU_ARCHS_STR)
+      message(STATUS "[AITER-BUILD] Building CK-full AITER kernels for ${GPU_ARCHS_STR} via QoLA.")
+      set(__QOLA_BUILD_DIR "${__QOLA_DIR}/build")
+      execute_process(
+        COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${__QOLA_DIR}:$ENV{PYTHONPATH}"
+                ${Python_EXECUTABLE} -m qola.cli build
+                --manifest ${__QOLA_MANIFEST}
+                --aiter-root ${__AITER_SOURCE_DIR}
+                --output-dir ${__QOLA_BUILD_DIR}
+                --arch "${GPU_ARCHS_STR}"
+        RESULT_VARIABLE QOLA_BUILD_RESULT
+      )
+      if(NOT QOLA_BUILD_RESULT EQUAL 0)
+        message(FATAL_ERROR "[AITER-BUILD] QoLA build failed.")
+      endif()
+
+      # Copy the final .so libs and exported public headers into the aiter
+      # prebuilt cache so downstream consumers see a self-contained tree.
+      get_default_aiter_cache_dir(__QOLA_CACHE_DIR)
+      set(__QOLA_CACHE_LIB "${__QOLA_CACHE_DIR}/lib")
+      file(MAKE_DIRECTORY ${__QOLA_CACHE_LIB})
+      file(GLOB __QOLA_BUILT_LIBS "${__QOLA_BUILD_DIR}/lib/*.so")
+      file(COPY ${__QOLA_BUILT_LIBS} DESTINATION ${__QOLA_CACHE_LIB})
+      file(COPY "${__QOLA_BUILD_DIR}/include" DESTINATION "${__QOLA_CACHE_DIR}")
+      set(__AITER_MHA_PATH "${__QOLA_CACHE_LIB}")
+    else()
+      message(STATUS "[AITER-BUILD] Using pre-built AITER from ${__AITER_MHA_PATH}")
     endif()
+  endif()
+endif()
 
-    # Copy the final .so libs and exported public headers into the aiter
-    # prebuilt cache so downstream consumers see a self-contained tree.
+# --- V3-asm-only backward library (gfx1250): te_v3_libmha_bwd.so ---
+# There is no prebuilt cache path for gfx1250 (no public prebuilt, and a CK-free
+# asm build is cheap), so always build it from source via QoLA. Both manifests
+# pin the same AITER commit and share the already-checked-out source tree.
+if(__HAS_GFX1250)
+  set(__QOLA_MANIFEST_V3 "${CMAKE_CURRENT_LIST_DIR}/qola_manifest_gfx1250.toml")
+  set(__QOLA_BUILD_DIR_V3 "${__QOLA_DIR}/build_gfx1250")
+  message(STATUS "[AITER-BUILD] Building CK-free V3 backward (gfx1250) via QoLA.")
+  # The asm-only / CK-free flags (ONLY_FAV3=1, ENABLE_CK=0) are carried by the
+  # gfx1250 manifest's libmha_bwd module, so no special env is needed here.
+  execute_process(
+    COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${__QOLA_DIR}:$ENV{PYTHONPATH}"
+            ${Python_EXECUTABLE} -m qola.cli build
+            --manifest ${__QOLA_MANIFEST_V3}
+            --aiter-root ${__AITER_SOURCE_DIR}
+            --output-dir ${__QOLA_BUILD_DIR_V3}
+            --arch "gfx1250"
+    RESULT_VARIABLE QOLA_V3_BUILD_RESULT
+  )
+  if(NOT QOLA_V3_BUILD_RESULT EQUAL 0)
+    message(FATAL_ERROR "[AITER-BUILD] QoLA gfx1250 V3 build failed.")
+  endif()
+
+  # Stage the v3 lib next to the CK-full libs so a single link/-L/install path
+  # covers both. For a gfx1250-only build there are no CK-full libs, so set up
+  # the cache lib dir here and stage the v3 public headers too.
+  if(__AITER_MHA_PATH STREQUAL "")
     get_default_aiter_cache_dir(__QOLA_CACHE_DIR)
     set(__QOLA_CACHE_LIB "${__QOLA_CACHE_DIR}/lib")
     file(MAKE_DIRECTORY ${__QOLA_CACHE_LIB})
-    file(GLOB __QOLA_BUILT_LIBS "${__QOLA_BUILD_DIR}/lib/*.so")
-    file(COPY ${__QOLA_BUILT_LIBS} DESTINATION ${__QOLA_CACHE_LIB})
-    file(COPY "${__QOLA_BUILD_DIR}/include" DESTINATION "${__QOLA_CACHE_DIR}")
+    file(COPY "${__QOLA_BUILD_DIR_V3}/include" DESTINATION "${__QOLA_CACHE_DIR}")
     set(__AITER_MHA_PATH "${__QOLA_CACHE_LIB}")
-  else()
-    message(STATUS "[AITER-BUILD] Using pre-built AITER from ${__AITER_MHA_PATH}")
   endif()
+  file(GLOB __QOLA_V3_LIBS "${__QOLA_BUILD_DIR_V3}/lib/te_v3_*.so")
+  file(COPY ${__QOLA_V3_LIBS} DESTINATION ${__AITER_MHA_PATH})
 endif()
 
 set(ck_fused_attn_SOURCES)
@@ -165,6 +211,16 @@ set(CK_FUSED_ATTN_COMPILE_OPTIONS)
 list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
     -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
     -DENABLE_CK=1)
+# Tier guards consumed by src/ck_fused_attn_{fwd,bwd}.cpp:
+#   NVTE_AITER_CK_FULL        -> qola::te::{mha_fwd,mha_bwd} (CDNA) are linked
+#   NVTE_AITER_V3_BWD_GFX1250 -> qola::te_v3::mha_bwd (gfx1250) is linked +
+#                                runtime-dispatched in ck_attn_bwd
+if(__HAVE_CK_FULL)
+  list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -DNVTE_AITER_CK_FULL)
+endif()
+if(__HAS_GFX1250)
+  list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -DNVTE_AITER_V3_BWD_GFX1250)
+endif()
 
 # Public QoLA headers ship alongside the .so libs in ${__AITER_MHA_PATH}/../include
 # (emitted by qola.cli build, or copied from the QoLA build dir above for the
@@ -181,10 +237,22 @@ target_include_directories(ck_fused_attn PRIVATE ${__QOLA_INCLUDE_DIR})
 
 find_package(hip)
 target_link_directories(ck_fused_attn PUBLIC ${__AITER_MHA_PATH})
-list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64 -l:te_libmha_fwd.so -l:te_libmha_bwd.so)
+list(APPEND ck_fused_attn_LINKER_LIBS hip::host hip::device roctx64)
+set(__INSTALL_AITER_LIBS)
+if(__HAVE_CK_FULL)
+  list(APPEND ck_fused_attn_LINKER_LIBS -l:te_libmha_fwd.so -l:te_libmha_bwd.so)
+  list(APPEND __INSTALL_AITER_LIBS
+       ${__AITER_MHA_PATH}/te_libmha_fwd.so
+       ${__AITER_MHA_PATH}/te_libmha_bwd.so)
+endif()
+if(__HAS_GFX1250)
+  list(APPEND ck_fused_attn_LINKER_LIBS -l:te_v3_libmha_bwd.so)
+  list(APPEND __INSTALL_AITER_LIBS
+       ${__AITER_MHA_PATH}/te_v3_libmha_bwd.so)
+endif()
 target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
 set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
 
-install(FILES ${__AITER_MHA_PATH}/te_libmha_fwd.so ${__AITER_MHA_PATH}/te_libmha_bwd.so DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
+install(FILES ${__INSTALL_AITER_LIBS} DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
 install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)

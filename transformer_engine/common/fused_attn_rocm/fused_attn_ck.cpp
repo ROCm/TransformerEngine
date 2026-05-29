@@ -30,9 +30,9 @@ bool is_ck_backend_supported(
   float dropout,
   size_t num_attn_heads, size_t num_gqa_groups,
   size_t max_seqlen_q, size_t max_seqlen_kv,
-  size_t head_dim_qk, 
-  size_t head_dim_v, 
-  int64_t window_size_left, 
+  size_t head_dim_qk,
+  size_t head_dim_v,
+  int64_t window_size_left,
   int64_t window_size_right) {
 
 #ifdef USE_FUSED_ATTN_CK
@@ -154,6 +154,22 @@ bool is_ck_backend_supported(
     }
     return false;
   }
+
+  // gfx1250 (RDNA4) ships AITER V3 *backward* asm kernels only — there are no
+  // forward kernels at the pinned commit. TE selects one fused-attn backend per
+  // op and uses it for both directions (backward inherits the forward's choice),
+  // so selecting CK here would route the forward into a kernel-less path.
+  // Until the forward is handled (direction-aware backend selection, or gfx1250
+  // forward kernels), do not select CK on gfx1250 through this unified path.
+  // The CK-free V3 backward library (te_v3_module_fmha_v3_bwd.so) and the
+  // runtime dispatch in ck_attn_bwd are built and staged for that activation.
+  if(cuda::sm_arch(cuda::current_device()) == 125){
+    if(nvte_log_ck_config){
+      std::cout<<"gfx1250 CK fused attn is staged (backward-only); not selected via the unified backend yet"<<std::endl;
+    }
+    return false;
+  }
+
   return true;
 #else
   return false;
