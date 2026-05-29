@@ -248,8 +248,13 @@ def _default_csv_name(bench_fn):
 # Benchmark runner
 # ---------------------------------------------------------------------------
 
-def add_csv_arg(parser):
-    """Add ``--csv`` and ``--csv-samples`` flags to an argparse parser."""
+def make_parser(**kwargs):
+    """Return an :class:`~argparse.ArgumentParser` with ``--csv`` and ``--csv-samples`` flags.
+
+    Any *kwargs* are forwarded to the ``ArgumentParser`` constructor, so
+    callers can set ``description``, ``parents``, etc.
+    """
+    parser = argparse.ArgumentParser(**kwargs)
     parser.add_argument(
         "--csv", nargs="?", const=True, default=None, metavar="FILE",
         help="Write results to CSV. Optional filename; default derived from script name.",
@@ -261,9 +266,11 @@ def add_csv_arg(parser):
             "Optional filename; default derived from script name."
         ),
     )
+    return parser
 
 
-def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None):
+def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
+                   args=None):
     """Iterate *test_cases*, call *bench_fn*, and optionally write a CSV.
 
     Parameters
@@ -283,10 +290,16 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None):
         filename. If omitted, the CSV name is derived from the caller's
         file name. CSV output is only written when the caller passes
         ``--csv`` on the command line.
+    args : argparse.Namespace or None
+        Pre-parsed arguments.  When a benchmark script needs its own CLI
+        flags it can call ``parser = make_parser()``, add custom
+        arguments, run ``args = parser.parse_args()``, and then pass
+        *args* here.  If *None*, a default parser with only
+        ``--csv`` / ``--csv-samples`` is created and ``parse_args()``
+        is called automatically.
     """
-    parser = argparse.ArgumentParser(add_help=False)
-    add_csv_arg(parser)
-    args, _ = parser.parse_known_args()
+    if args is None:
+        args = make_parser().parse_args()
 
     rows = []
     all_case_metrics = []
