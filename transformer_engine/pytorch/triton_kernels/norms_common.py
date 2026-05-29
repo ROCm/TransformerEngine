@@ -1,7 +1,6 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-import os
 import torch
 import triton
 import triton.language as tl
@@ -27,18 +26,14 @@ from .rmsnorm import (
     _rmsnorm_bwd_dg_reduce_triton_impl,
 )
 
-# Use the external LDS-tiled byte transpose instead of the in-kernel strided
-# stores. Default on -- the in-kernel path is uncoalesced and bottlenecks
-# every fp8_t shape. Set NVTE_RMS_EXTERNAL_TRANSPOSE=0 to fall back.
-_USE_EXTERNAL_TRANSPOSE = os.environ.get("NVTE_RMS_EXTERNAL_TRANSPOSE", "1") == "1"
-
-
 # --------------------------------------------------------------------------- #
 # External LDS-tiled byte transpose
 #
-# Replaces the in-kernel `out_transpose_ptr + cols * stride + row_idx` strided
-# stores that the main fwd kernel emits when MAKE_TRANSPOSE=True. Those writes
-# are uncoalesced (1 byte/thread to a different cache line each).
+# Produces the column-major fp8 transpose for the RMSNorm fwd path. The
+# alternative -- having the main kernel emit `out_transpose_ptr + cols * stride
+# + row_idx` strided stores -- is uncoalesced (1 byte/thread to a different
+# cache line each) and bottlenecks every fp8_t shape, so RMSNorm always uses
+# this kernel instead.
 #
 # This kernel reads a (BLOCK_M, BLOCK_N) tile coalesced from the row-major
 # fp8 output, transposes it through LDS via `tl.trans`, and writes the
@@ -78,8 +73,6 @@ def _fp8_transpose_2d_impl(
 
 
 def _get_fp8_transpose_configs():
-    # 1 B/elem on AMD CDNA3. Keep tile <= ~16 KB so the LDS staging buffer
-    # fits with room for double-buffering. tl.trans handles bank conflicts.
     return [
         triton.Config({'BLOCK_M': 32,  'BLOCK_N': 64},  num_warps=4),
         triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64},  num_warps=4),
@@ -259,9 +252,11 @@ def _te_norm_fwd_triton(
                     dtype=out._data.dtype, device=device
                 )
                 out._transpose_invalid = False
-            use_external_transpose = _USE_EXTERNAL_TRANSPOSE and kernel == 'rms'
-            if not use_external_transpose:
-                # In-kernel strided transpose path; main kernel does the writes.
+            if kernel == 'rms':
+                # RMSNorm always uses the external LDS-tiled transpose kernel.
+                use_external_transpose = True
+            else:
+                # LayerNorm emits the transpose via in-kernel strided stores.
                 out_transpose_ptr = triton.reinterpret(out._transpose, tl_dtype)
                 out_transpose_stride = out._transpose.stride(0)
 
@@ -281,21 +276,20 @@ def _te_norm_fwd_triton(
         q_amax_ptr=amax,
         q_scale_ptr=q_scale,
         scale_inv_ptr=scale_inv_ptr,
-        out_transpose_ptr=out_transpose_ptr,
-        out_transpose_stride=out_transpose_stride,
         ZERO_CENTERED_GAMMA=zero_centered_gamma,
         BLOCK_SIZE=BLOCK_SIZE,
         IS_FP8=IS_FP8,
         FP8_MAX=FP8_MAX,
-        # Gate the in-kernel strided transpose stores off when we'll do the
-        # transpose externally via the LDS-tiled kernel.
-        MAKE_TRANSPOSE=(MAKE_TRANSPOSE and not use_external_transpose),
     )
     if kernel == 'layer':
         kwargs["APPLY_ATOMIC"]=APPLY_ATOMIC
         kwargs["PERSISTENT"]=False # TODO: Improve persistent algo performance
         kwargs["b_ptr"]=bias
         kwargs["mean_ptr"]=mu
+        # LayerNorm emits the column-major fp8 copy via in-kernel strided stores.
+        kwargs["out_transpose_ptr"]=out_transpose_ptr
+        kwargs["out_transpose_stride"]=out_transpose_stride
+        kwargs["MAKE_TRANSPOSE"]=MAKE_TRANSPOSE
     elif kernel == "rms":
         kwargs["USE_BLOCKED"]=USE_BLOCKED
         kwargs["NUM_PRGMS"]=NUM_PRGMS
@@ -403,7 +397,6 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, 
                 dg_tmp, dgamma, dg_tmp.stride(0), dg_tmp.shape[0], dg_tmp.shape[1],
             )
         else:
-            # Match the previously-hardcoded tile when autotune is disabled.
             BLOCK_SIZE_M, BLOCK_SIZE_N = 128, 64
             grid_reduce = (triton.cdiv(N, BLOCK_SIZE_N),)
             reduce_kernel[grid_reduce](

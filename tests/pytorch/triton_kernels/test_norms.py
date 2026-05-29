@@ -298,17 +298,12 @@ class TestNorms:
             zero_centered_gamma=zero_centered_gamma,
 
         )
-        # te_rmsnorm_bwd_triton accepts an `autotune` kwarg; te_layernorm_bwd_triton does not.
-        # Honor the same NVTE_TEST_TRITON_AUTOTUNE env toggle as the fwd path so
-        # default test runs avoid the autotune compile/sweep cost.
-        if norm == "rms":
-            triton_bwd_outs = triton_bwd_func(*args["triton"], autotune=autotune)
-        else:
-            triton_bwd_outs = triton_bwd_func(*args["triton"])
 
         if norm == "layer":
+            triton_bwd_outs = triton_bwd_func(*args["triton"])
             dx_triton, dgamma_triton, dbeta_triton = triton_bwd_outs
         elif norm == "rms":
+            triton_bwd_outs = triton_bwd_func(*args["triton"], autotune=autotune)
             dx_triton, dgamma_triton = triton_bwd_outs
             dbeta_triton = None
 

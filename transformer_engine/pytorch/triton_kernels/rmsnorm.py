@@ -24,21 +24,15 @@ def _rmsnorm_fwd_triton_impl(
     q_amax_ptr,
     q_scale_ptr,
     scale_inv_ptr,
-    out_transpose_ptr,
-    out_transpose_stride,
     ZERO_CENTERED_GAMMA: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
     USE_BLOCKED: tl.constexpr,
     NUM_PRGMS: tl.constexpr,
     IS_FP8: tl.constexpr,
     FP8_MAX: tl.constexpr,
-    MAKE_TRANSPOSE: tl.constexpr,
     INPUT_ALIGNED_16: tl.constexpr,
     OUTPUT_ALIGNED_16: tl.constexpr,
 ):
-
-    # Enable the transpose cache only in FP8 mode.
-    tl.static_assert(not MAKE_TRANSPOSE or IS_FP8, "Transpose cache requires fp8 data type.")
 
     row_start = tl.program_id(0)
     col_offsets = tl.arange(0, BLOCK_SIZE)
@@ -108,9 +102,6 @@ def _rmsnorm_fwd_triton_impl(
                     amax = tl.maximum(amax, amax_temp)
                     rms_norm = rms_norm * scale
                     rms_norm = tl.clamp(rms_norm, -FP8_MAX, FP8_MAX)
-                    if MAKE_TRANSPOSE:
-                        output_t_ptrs = out_transpose_ptr + cols * out_transpose_stride + row_idx
-                        tl.store(output_t_ptrs, rms_norm.to(output_type))
                 tl.store(output_ptrs, rms_norm.to(output_type))
 
             # Handle remainder
@@ -133,9 +124,6 @@ def _rmsnorm_fwd_triton_impl(
                 amax = tl.maximum(amax, amax_temp)
                 rms_norm = rms_norm * scale
                 rms_norm = tl.clamp(rms_norm, -FP8_MAX, FP8_MAX)
-                if MAKE_TRANSPOSE:
-                    output_t_ptrs = out_transpose_ptr + cols * out_transpose_stride  + row_idx
-                    tl.store(output_t_ptrs, rms_norm.to(output_type), mask=mask)
             tl.store(output_ptrs, rms_norm.to(output_type), mask=mask)
 
     else:
@@ -168,9 +156,6 @@ def _rmsnorm_fwd_triton_impl(
                 amax = tl.maximum(amax, amax_temp)
                 rms_norm = rms_norm * scale
                 rms_norm = tl.clamp(rms_norm, -FP8_MAX, FP8_MAX)
-                if MAKE_TRANSPOSE:
-                    output_t_ptrs = out_transpose_ptr + col_offsets * out_transpose_stride + row_idx
-                    tl.store(output_t_ptrs, rms_norm.to(output_type), mask=mask)
             tl.store(output_ptrs, rms_norm.to(output_type), mask=mask)
     if IS_FP8:
         tl.atomic_max(q_amax_ptr, amax, sem="relaxed")
