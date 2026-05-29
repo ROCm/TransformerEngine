@@ -5,17 +5,12 @@
 import os
 from typing import List
 import pytest
+import subprocess
 from pathlib import Path
-import sys
 from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 import torch
 from run_fsdp2_fp8_model import SimpleNet
-
-# Import utility functions
-_current_file = Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
-from utils import run_proctree_with_timeout as run_subprocess
 
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
@@ -48,17 +43,17 @@ def _run_test(fp_init, recipe):
     test_dir = Path(__file__).parent.resolve()
     fsdp_script = test_dir / "run_fsdp2_fp8_model.py"
     
-    test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", "--master-port=29501", str(fsdp_script)]
+    test_cmd = ["timeout", "-k60", "-v", "180", "torchrun", f"--nproc_per_node={NUM_PROCS}",
+                "--master-port=29501", str(fsdp_script)]
 
     if fp_init:
         test_cmd += ["--fp8-init"]
     test_cmd += ["--recipe", recipe]
     
-    timeout = 120
-    run_subprocess(test_cmd + ['--use-fsdp2','--gradients-save-file', 'all_iters_fsdp2.pt'],
-                   timeout, env=os.environ, check=True)
-    run_subprocess(test_cmd + ['--gradients-save-file', 'all_iters_dp.pt'], timeout,
+    subprocess.run(test_cmd + ['--use-fsdp2','--gradients-save-file', 'all_iters_fsdp2.pt'],
                    env=os.environ, check=True)
+    subprocess.run(test_cmd + ['--gradients-save-file', 'all_iters_dp.pt'], env=os.environ,
+                   check=True)
         
     # Load outputs
     output_fsdp = torch.load("all_iters_fsdp2.pt", map_location="cpu")

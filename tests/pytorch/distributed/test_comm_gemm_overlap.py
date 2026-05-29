@@ -4,8 +4,8 @@
 #
 # See LICENSE for license information.
 import os
+import subprocess
 from pathlib import Path
-import sys
 
 import pytest
 import torch
@@ -14,11 +14,6 @@ import transformer_engine.pytorch.cpp_extensions as tex
 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.utils import get_device_compute_capability
-
-# Import utility functions
-_current_file = Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
-from utils import run_proctree_with_timeout as run_subprocess
 
 
 if torch.cuda.device_count() < 2:
@@ -49,6 +44,8 @@ NUM_PROCS: int = min(torch.cuda.device_count(), MAX_GPUS_TO_USE)
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 if tex.ubuf_built_with_mpi():
     LAUNCH_CMD = ["mpirun", "-np", str(NUM_PROCS), "--oversubscribe", "--quiet", "python3"]
+if IS_HIP_EXTENSION:
+    LAUNCH_CMD = ["timeout", "-k60", "-v", "180"] + LAUNCH_CMD
 
 # Fall back on CUDA IPC if the platform does not support CUDA multicast
 if not tex.device_supports_multicast():
@@ -93,13 +90,14 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, aggregate, quantization
         if aggregate:
             test_cmd.append("--aggregate")
 
-    result = run_subprocess(test_cmd, 120 if IS_HIP_EXTENSION else None,
-                            env=os.environ, capture_output=True, check=False)
+    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
     if (
         result.returncode != 0
         or "NUMERICAL CHECK FAILED" in result.stderr.decode()
         or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
     ):
+        if result.returncode == 124:
+            pytest.fail("Test timed out", pytrace=False)
         raise AssertionError(result.stderr.decode())
 
 
@@ -149,8 +147,7 @@ def _run_layer_with_overlap(
         # not show up in more recent GPUs.
         os.environ["NVTE_FLASH_ATTN"] = "0"
 
-    result = run_subprocess(test_cmd, 120 if IS_HIP_EXTENSION else None,
-                            env=os.environ, capture_output=True, check=False)
+    result = subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
 
     os.unsetenv("PYTORCH_JIT")
     os.unsetenv("NVTE_TORCH_COMPILE")
@@ -162,6 +159,8 @@ def _run_layer_with_overlap(
         or "NUMERICAL CHECK FAILED" in result.stderr.decode()
         or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
     ):
+        if result.returncode == 124:
+            pytest.fail("Test timed out", pytrace=False)
         raise AssertionError(result.stderr.decode())
 
 

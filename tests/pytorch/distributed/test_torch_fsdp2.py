@@ -6,17 +6,12 @@
 
 import os
 import pytest
+import subprocess
 from pathlib import Path
-import sys
 import transformer_engine.pytorch as te
 
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-
-# Import utility functions
-_current_file = Path(__file__).resolve()
-sys.path.append(str(_current_file.parent.parent))
-from utils import run_proctree_with_timeout as run_subprocess
 
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -27,6 +22,8 @@ NUM_PROCS: int = torch.cuda.device_count()
 def _run_test(fp_init, sharding_dims, recipe, layer_type):
     test_path = Path(__file__).parent.resolve() / "run_fsdp2_model.py"
     test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", str(test_path)]
+    if IS_HIP_EXTENSION:
+        test_cmd = ["timeout", "-k60", "-v", "180"] + test_cmd
 
     if fp_init:
         test_cmd += ["--fp8-init"]
@@ -40,8 +37,7 @@ def _run_test(fp_init, sharding_dims, recipe, layer_type):
     test_cmd += ["--recipe", recipe]
     test_cmd += ["--layer-type", layer_type]
 
-    result = run_subprocess(test_cmd, 120 if IS_HIP_EXTENSION else None, env=os.environ,
-                            check=True)
+    result = subprocess.run(test_cmd, env=os.environ, check=True)
 
 
 @pytest.mark.skipif(NUM_PROCS < 4, reason="Requires 4+ GPUs")
