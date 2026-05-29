@@ -503,7 +503,7 @@ void performTest(const TestParams& params) {
   if ((prop.major == 9 && prop.minor == 5) || prop.major >= 12) {
     workspace_size = 67108864;
   }
-  if (use_mxfp8 && !use_hipkittens_mxfp8) {
+  if (use_hipkittens_mxfp8) {
     workspace_size = compute_mxfp8_workspace_size(params.m, params.k, params.n,
                                                   params.transa, params.transb,
                                                   workspace_size);
