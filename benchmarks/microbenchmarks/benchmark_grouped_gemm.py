@@ -38,12 +38,16 @@ def _generate_moe_test_cases(
     n_routed_experts: int,
     moe_intermediate_size: int,
     hidden_size: int,
+    skip_shapes=None,
 ):
     test_cases = []
     shapes_dict = {
         f"{name_prefix}-GateUP": (2 * moe_intermediate_size, hidden_size),
         f"{name_prefix}-Down": (hidden_size, moe_intermediate_size),
     }
+    if skip_shapes:
+        for s in skip_shapes:
+            shapes_dict.pop(f"{name_prefix}-{s}", None)
 
     for ep in EP_SIZE_LIST:
         if n_routed_experts % ep != 0:
@@ -68,8 +72,10 @@ def _generate_moe_test_cases(
 
 
 def generate_deepseekv3_test_cases():
+    # DSV3-GateUP hangs on some hardware; only benchmark DSV3-Down.
     return _generate_moe_test_cases(
-        "DSV3", n_routed_experts=256, moe_intermediate_size=2048, hidden_size=7168
+        "DSV3", n_routed_experts=256, moe_intermediate_size=2048, hidden_size=7168,
+        skip_shapes=["GateUP"],
     )
 
 
