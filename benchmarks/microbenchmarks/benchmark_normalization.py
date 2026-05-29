@@ -68,8 +68,8 @@ def bench_norm(Case, M, hidden_size, norm_name, norm_cls, dtype):
     fwd_bytes = 2 * M * hidden_size * elem_bytes   # read x, write y
     bwd_bytes = 4 * M * hidden_size * elem_bytes   # read grad+x+y, write grad_x
 
-    fwd_ms = time_func(fwd_func)
-    fwd_bwd_ms = time_func(fwd_bwd_func)
+    fwd_ms, fwd_measurement = time_func(fwd_func)
+    fwd_bwd_ms, fwd_bwd_measurement = time_func(fwd_bwd_func)
     bwd_ms = fwd_bwd_ms - fwd_ms
 
     fwd_gbps = compute_gbps(fwd_bytes, fwd_ms)
@@ -82,7 +82,9 @@ def bench_norm(Case, M, hidden_size, norm_name, norm_cls, dtype):
         fwd_gbps,
         bwd_ms,
         bwd_gbps,
-        backward_derived=True
+        backward_derived=True,
+        fwd_measurement=fwd_measurement,
+        fwd_bwd_measurement=fwd_bwd_measurement,
     )
 
 

@@ -72,10 +72,10 @@ def bench_cast(Case, M, hidden_size, direction, fp8_dtype, dtype_str):
         cast_func = lambda: fp8_tensor.dequantize()
         total_bytes = numel * (1 + 2)  # FP8 read + BF16 write
 
-    ms = time_func(cast_func, method="blocked")
+    ms, measurement = time_func(cast_func, method="blocked")
     gbps = compute_gbps(total_bytes, ms)
 
-    return [make_metric_record(CAST_LABEL, ms, "GB/s", gbps)]
+    return [make_metric_record(CAST_LABEL, ms, "GB/s", gbps, measurement=measurement)]
 
 
 if __name__ == "__main__":

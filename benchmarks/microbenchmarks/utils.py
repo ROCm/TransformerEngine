@@ -89,15 +89,21 @@ def generate_gemm_test_cases(configs=None, m_sizes=None, dtypes=None):
 # ---------------------------------------------------------------------------
 
 def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
-    """Time *fn* and return elapsed milliseconds.
+    """Time *fn* and return ``(mean_ms, measurement)``.
+
+    The ``Measurement`` object carries per-sample times accessible via
+    ``measurement.times`` (total wall time per run) and
+    ``measurement.number_per_run``.
 
     method: "adaptive" uses adaptive_autorange (good for compute-bound),
             "blocked"  uses blocked_autorange  (good for memory-bound).
     """
     timer = benchmark.Timer(stmt="fn()", globals={"fn": fn})
     if method == "blocked":
-        return timer.blocked_autorange(min_run_time=min_run_time).mean * 1e3
-    return timer.adaptive_autorange(min_run_time=min_run_time).mean * 1e3
+        m = timer.blocked_autorange(min_run_time=min_run_time)
+    else:
+        m = timer.adaptive_autorange(min_run_time=min_run_time)
+    return m.mean * 1e3, m
 
 
 # ---------------------------------------------------------------------------
@@ -115,12 +121,18 @@ def compute_gbps(nbytes, ms):
 
 
 def make_metric_record(label, ms, unit, throughput, derived=False,
-                       ms_precision=3, throughput_precision=2):
+                       ms_precision=3, throughput_precision=2,
+                       measurement=None, samples_only=False):
     """Create a structured metric record for stdout and CSV generation.
 
     Each record describes one benchmark line item such as "GEMM Forward".
     ``run_benchmarks`` formats these records for stdout and expands them into
     ``<label> Time (ms)`` and ``<label> <unit>`` CSV columns.
+
+    If *measurement* is provided (a ``torch.utils.benchmark.Measurement``),
+    the per-sample times are available for the ``--csv-samples`` output.
+    Records with *samples_only=True* are excluded from stdout and the main
+    CSV but their samples are still written to the samples CSV.
     """
     return {
         "label": label,
@@ -130,6 +142,8 @@ def make_metric_record(label, ms, unit, throughput, derived=False,
         "derived": derived,
         "ms_precision": ms_precision,
         "throughput_precision": throughput_precision,
+        "measurement": measurement,
+        "samples_only": samples_only,
     }
 
 
@@ -138,9 +152,17 @@ def make_forward_backward_metric_records(label_prefix, unit,
                                          backward_ms, backward_throughput,
                                          backward_derived=False,
                                          ms_precision=3,
-                                         throughput_precision=2):
-    """Create standard forward/backward metric records for a benchmark."""
-    return [
+                                         throughput_precision=2,
+                                         fwd_measurement=None,
+                                         bwd_measurement=None,
+                                         fwd_bwd_measurement=None):
+    """Create standard forward/backward metric records for a benchmark.
+
+    When *backward_derived* is True and *fwd_bwd_measurement* is provided,
+    an extra samples-only record for "Forward+Backward" is emitted so that
+    the raw timing samples are preserved in the ``--csv-samples`` output.
+    """
+    records = [
         make_metric_record(
             f"{label_prefix} Forward",
             forward_ms,
@@ -148,6 +170,7 @@ def make_forward_backward_metric_records(label_prefix, unit,
             forward_throughput,
             ms_precision=ms_precision,
             throughput_precision=throughput_precision,
+            measurement=fwd_measurement,
         ),
         make_metric_record(
             f"{label_prefix} Backward",
@@ -157,8 +180,19 @@ def make_forward_backward_metric_records(label_prefix, unit,
             derived=backward_derived,
             ms_precision=ms_precision,
             throughput_precision=throughput_precision,
+            measurement=bwd_measurement,
         ),
     ]
+    if fwd_bwd_measurement is not None:
+        records.append(make_metric_record(
+            f"{label_prefix} Forward+Backward",
+            forward_ms + backward_ms,
+            unit,
+            0,
+            samples_only=True,
+            measurement=fwd_bwd_measurement,
+        ))
+    return records
 
 
 def _metric_time_key(metric):
@@ -176,6 +210,8 @@ def _format_metric_number(value, precision):
 def _metric_row_from_records(metric_records):
     row = {}
     for metric in metric_records:
+        if metric.get("samples_only"):
+            continue
         row[_metric_time_key(metric)] = _format_metric_number(
             metric["ms"], metric.get("ms_precision", 3)
         )
@@ -186,8 +222,11 @@ def _metric_row_from_records(metric_records):
 
 
 def _print_metric_records(metric_records):
-    label_width = max(24, *(len(metric["label"]) for metric in metric_records))
-    for metric in metric_records:
+    printable = [m for m in metric_records if not m.get("samples_only")]
+    if not printable:
+        return
+    label_width = max(24, *(len(metric["label"]) for metric in printable))
+    for metric in printable:
         ms_str = _format_metric_number(metric["ms"], metric.get("ms_precision", 3))
         throughput_str = _format_metric_number(
             metric["throughput"], metric.get("throughput_precision", 2)
@@ -210,10 +249,17 @@ def _default_csv_name(bench_fn):
 # ---------------------------------------------------------------------------
 
 def add_csv_arg(parser):
-    """Add a ``--csv`` flag to an argparse parser."""
+    """Add ``--csv`` and ``--csv-samples`` flags to an argparse parser."""
     parser.add_argument(
         "--csv", nargs="?", const=True, default=None, metavar="FILE",
         help="Write results to CSV. Optional filename; default derived from script name.",
+    )
+    parser.add_argument(
+        "--csv-samples", nargs="?", const=True, default=None, metavar="FILE",
+        help=(
+            "Write per-sample timing data to a CSV for downstream analysis. "
+            "Optional filename; default derived from script name."
+        ),
     )
 
 
@@ -243,6 +289,7 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None):
     args, _ = parser.parse_known_args()
 
     rows = []
+    all_case_metrics = []
     resolved_metric_columns = None
 
     for case in test_cases:
@@ -264,10 +311,12 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None):
                 f"expected {resolved_metric_columns}, got {current_metric_columns}"
             )
 
-        row = {k: (str(case[k]) if isinstance(case[k], torch.dtype) else case[k])
-               for k in param_columns}
+        case_params = {k: (str(case[k]) if isinstance(case[k], torch.dtype) else case[k])
+                       for k in param_columns}
+        row = dict(case_params)
         row.update(metric_row)
         rows.append(row)
+        all_case_metrics.append((case_params, metric_records))
 
     if args.csv is not None:
         import pandas as pd
@@ -278,3 +327,31 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None):
         results = pd.DataFrame(rows, columns=columns)
         results.to_csv(out_csv, index=False)
         print(f"\nResults saved to {out_csv}")
+
+    if args.csv_samples is not None:
+        import pandas as pd
+        from pathlib import Path
+        base = default_csv or _default_csv_name(bench_fn)
+        samples_csv = args.csv_samples if isinstance(args.csv_samples, str) else (
+            Path(base).stem + "_samples.csv"
+        )
+        sample_rows = []
+        for case_params, records in all_case_metrics:
+            for metric in records:
+                measurement = metric.get("measurement")
+                if measurement is None:
+                    continue
+                lbl = metric["label"]
+                for i, t in enumerate(measurement.times):
+                    sr = dict(case_params)
+                    sr["label"] = lbl
+                    sr["sample_idx"] = i
+                    sr["time_ms"] = t / measurement.number_per_run * 1e3
+                    sample_rows.append(sr)
+        if sample_rows:
+            df = pd.DataFrame(
+                sample_rows,
+                columns=param_columns + ["label", "sample_idx", "time_ms"],
+            )
+            df.to_csv(samples_csv, index=False)
+            print(f"Samples saved to {samples_csv}")

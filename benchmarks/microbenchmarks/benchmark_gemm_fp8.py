@@ -53,8 +53,8 @@ def bench_fp8_gemm(Case, M, N, K, dtype):
     fwd_flops = 2 * M * N * K
     bwd_flops = 2 * fwd_flops
 
-    fwd_ms = time_func(fwd_func)
-    fwd_bwd_ms = time_func(fwd_bwd_func)
+    fwd_ms, fwd_measurement = time_func(fwd_func)
+    fwd_bwd_ms, fwd_bwd_measurement = time_func(fwd_bwd_func)
     bwd_ms = fwd_bwd_ms - fwd_ms
 
     fwd_tflops = compute_tflops(fwd_flops, fwd_ms)
@@ -68,6 +68,8 @@ def bench_fp8_gemm(Case, M, N, K, dtype):
         bwd_ms,
         bwd_tflops,
         backward_derived=True,
+        fwd_measurement=fwd_measurement,
+        fwd_bwd_measurement=fwd_bwd_measurement,
     )
 
 

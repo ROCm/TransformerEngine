@@ -20,6 +20,17 @@ python benchmark_gemm.py --csv
 python benchmark_grouped_gemm.py --csv grouped_results.csv
 ```
 
+To also save per-sample timing data for downstream analysis (e.g. histograms,
+confidence intervals), pass `--csv-samples`:
+
+```bash
+python benchmark_gemm.py --csv --csv-samples
+python benchmark_gemm.py --csv --csv-samples gemm_samples.csv
+```
+
+The samples CSV contains one row per timing sample with columns for all
+benchmark parameters plus `label`, `sample_idx`, and `time_ms`.
+
 ## Shared configuration
 
 Common benchmark settings live in `utils.py`.

@@ -188,8 +188,8 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype):
     fwd_total_flops = 2 * B * M * N * K
     bwd_total_flops = 2 * fwd_total_flops
 
-    fwd_te_ms = time_func(fwd_func_te)
-    bwd_te_ms = time_func(bwd_func_te)
+    fwd_te_ms, fwd_measurement = time_func(fwd_func_te)
+    bwd_te_ms, bwd_measurement = time_func(bwd_func_te)
 
     fwd_te_tflops = compute_tflops(fwd_total_flops, fwd_te_ms)
     bwd_te_tflops = compute_tflops(bwd_total_flops, bwd_te_ms)
@@ -201,6 +201,8 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype):
         fwd_te_tflops,
         bwd_te_ms,
         bwd_te_tflops,
+        fwd_measurement=fwd_measurement,
+        bwd_measurement=bwd_measurement,
     )
 
 
