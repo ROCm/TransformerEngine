@@ -48,7 +48,7 @@ from flax import linen as nn
 
 from transformer_engine.jax.flax.module import DenseGeneral
 from transformer_engine.jax.flax.transformer import DotProductAttention
-from transformer_engine.jax.indexer import indexer as _indexer_fn
+from transformer_engine.jax.indexer import indexer as _indexer_fn, _indexer_projections
 
 
 # Backends supported by deep_sparse_attention_core.
@@ -189,10 +189,10 @@ def deep_sparse_attention_core(
         )
         # Project the indexer side so the fused primitive sees Hq/Hk/W_o tensors.
         # (Scaffold lowering raises; the projections are computed for shape only.)
-        C_q = jnp.einsum("...td,dc->...tc", indexer_inputs_q, indexer_W_dq)
-        Hq = jnp.einsum("...tc,hci->...thi", C_q, indexer_W_uq)
-        Hk = jnp.einsum("...sd,di->...si", indexer_inputs_kv, indexer_W_k)
-        W_o = jnp.einsum("...td,dh->...th", indexer_inputs_q, indexer_W_w)
+        Hq, Hk, W_o = _indexer_projections(
+            indexer_inputs_q, indexer_inputs_kv,
+            indexer_W_uq, indexer_W_dq, indexer_W_k, indexer_W_w,
+        )
         return fused_sparse_attention_triton(
             query, key, value, Hq, Hk, W_o, k=k,
         )
@@ -414,129 +414,3 @@ class DeepSparseAttention(nn.Module):  # pylint: disable=too-few-public-methods
             backend=self.backend,
             indexer_backend=self.indexer_backend,
         )                                                   # [B, oH, T_t, head_dim]
-
-
-# -----------------------------------------------------------------------------
-# Reference / smoke test
-# -----------------------------------------------------------------------------
-
-
-def _ref_dense_softmax_per_head(
-    query, key, value, mask_out, scale,
-):
-    """Reference: per-head dense softmax attention with arbitrary mask (no DPA).
-
-    Args:
-        query, key, value: ``[B, oH, T, head_dim]``
-        mask_out: ``[B, oH, T_t, T_s]`` uint8 (1 = mask out)
-        scale: scalar
-    Returns: ``[B, oH, T_t, head_dim]``
-    """
-    logits = jnp.einsum("bhtd,bhsd->bhts", query, key) * scale       # [B, oH, T_t, T_s]
-    logits = logits.astype(jnp.float32)
-    logits = jnp.where(
-        mask_out.astype(jnp.bool_),
-        jnp.asarray(-jnp.inf, jnp.float32),
-        logits,
-    )
-    weights = jax.nn.softmax(logits, axis=-1)
-    out = jnp.einsum("bhts,bhsd->bhtd", weights.astype(value.dtype), value)
-    return out
-
-
-def _ref_dsa_jax(
-    inputs_q, inputs_kv,
-    W_q_kernel, W_k_kernel, W_v_kernel,
-    W_uq, W_dq, W_k_idx, W_w,
-    *,
-    head_dim, k, causal,
-):
-    """Pure-JAX reference matching ``deep_sparse_attention_core``."""
-    # inputs_q: [B, oH, T_t, hidden]; inputs_kv: [B, oH, T_s, hidden]
-    B, oH, T_t, hidden = inputs_q.shape
-    T_s = inputs_kv.shape[2]
-
-    # Per-head Q/K/V projections (kernel shape [hidden, head_dim], shared across oH).
-    q = jnp.einsum("bhtd,dk->bhtk", inputs_q, W_q_kernel)              # [B, oH, T_t, D]
-    kk = jnp.einsum("bhsd,dk->bhsk", inputs_kv, W_k_kernel)
-    v = jnp.einsum("bhsd,dk->bhsk", inputs_kv, W_v_kernel)
-
-    scores = _indexer_fn(
-        inputs_q, inputs_kv, W_uq, W_dq, W_k_idx, W_w,
-        backend="reference", out_dtype=jnp.float32,
-    )                                                                  # [B, oH, T_t, T_s]
-    if causal:
-        ckeep = _causal_keep_mask(T_t, T_s)[None, None, :, :]
-        scores = jnp.where(ckeep, scores, jnp.asarray(-jnp.inf, jnp.float32))
-    _, topk_idx = jax.lax.top_k(scores, min(k, T_s))
-    mask_out = _topk_indices_to_attn_mask(topk_idx, T_s, causal=causal)
-    out = _ref_dense_softmax_per_head(
-        q, kk, v, mask_out, scale=1.0 / jnp.sqrt(head_dim).astype(q.dtype),
-    )
-    return out
-
-
-def _smoke_test(seed=0):
-    """Self-attention smoke test: DSA composition vs hand-rolled JAX reference."""
-    B, oH, T, hidden = 1, 4, 16, 32
-    head_dim = 8
-    iH, idc, idi = 2, 16, 16
-    k = 4
-    keys = jax.random.split(jax.random.PRNGKey(seed), 2)
-    inputs = jax.random.normal(keys[0], (B, oH, T, hidden), dtype=jnp.bfloat16)
-
-    module = DeepSparseAttention(
-        head_dim=head_dim,
-        num_attention_heads=oH,
-        indexer_num_heads=iH,
-        indexer_d_c=idc,
-        indexer_d_i=idi,
-        topk=k,
-        dtype=jnp.bfloat16,
-    )
-    params = module.init(keys[1], inputs, inputs, deterministic=True)
-    out = module.apply(params, inputs, inputs, deterministic=True)
-    print(f"  DSA composition out.shape = {out.shape} dtype = {out.dtype}  [OK]")
-    assert out.shape == (B, oH, T, head_dim), f"Unexpected shape {out.shape}"
-
-    params_unboxed = nn.meta.unbox(params)
-    p = params_unboxed["params"]
-    out_ref = _ref_dsa_jax(
-        inputs, inputs,
-        p["query"]["kernel"], p["key"]["kernel"], p["value"]["kernel"],
-        p["indexer_W_uq"], p["indexer_W_dq"], p["indexer_W_k"], p["indexer_W_w"],
-        head_dim=head_dim, k=k, causal=True,
-    )
-
-    diff = (out.astype(jnp.float32) - out_ref.astype(jnp.float32))
-    rel = float(jnp.linalg.norm(diff) /
-                (jnp.linalg.norm(out_ref.astype(jnp.float32)) + 1e-30))
-    tag = "OK" if rel < 5e-2 else "FAIL"
-    print(f"  DSA vs hand-rolled JAX reference: rel.err = {rel:.2e}  [{tag}]")
-
-
-def _scaffold_test():
-    """Confirm backend='fused' raises NotImplementedError (scaffold contract)."""
-    B, oH, T, hidden = 1, 2, 8, 16
-    head_dim = 8
-    iH, idc, idi = 2, 8, 8
-    keys = jax.random.split(jax.random.PRNGKey(42), 2)
-    inputs = jax.random.normal(keys[0], (B, oH, T, hidden), dtype=jnp.bfloat16)
-    module = DeepSparseAttention(
-        head_dim=head_dim, num_attention_heads=oH,
-        indexer_num_heads=iH, indexer_d_c=idc, indexer_d_i=idi,
-        topk=4, backend="fused",
-    )
-    try:
-        module.init(keys[1], inputs, inputs, deterministic=True)
-        print("  FAIL: fused backend should have raised NotImplementedError")
-    except NotImplementedError as e:
-        msg = str(e).splitlines()[0]
-        print(f"  OK: fused backend raises NotImplementedError ({msg!r})")
-
-
-if __name__ == "__main__":
-    print("=== DSA composition smoke test (hybrid indexer) ===")
-    _smoke_test(seed=0)
-    print("\n=== DSA fused-backend scaffold contract ===")
-    _scaffold_test()

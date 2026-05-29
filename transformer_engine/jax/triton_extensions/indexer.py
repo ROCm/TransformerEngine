@@ -1,5 +1,4 @@
 # Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 """Triton score-relu-reduce kernel for the lightning-indexer hybrid backend.
@@ -384,7 +383,7 @@ def _score_reduce_bwd(out_dtype, residuals, dO):
         H_CHUNK = _BWD_H_CHUNK
     else:
         H_CHUNK = 1
-        for c in (8, 4, 2):
+        for c in (4, 2):
             if H % c == 0:
                 H_CHUNK = c
                 break

@@ -545,8 +545,7 @@ def triton_call_lowering(
         kernel_calls = []
         actual_kernel_fn = kernel_fn.fn
 
-        for idx, config in enumerate(kernel_fn.configs):
-            print(f"DEBUG *** Running config {idx+1}/{len(kernel_fn.configs)}")
+        for config in kernel_fn.configs:
             # Extract parameters from config
             config_num_warps = config.num_warps if config.num_warps is not None else num_warps
             config_num_stages = config.num_stages if config.num_stages is not None else num_stages

@@ -13,12 +13,12 @@ from transformer_engine.jax.sparse_attention import (
     deep_sparse_attention_core,
     _causal_keep_mask,
     _topk_indices_to_attn_mask,
-    _ref_dsa_jax,
 )
 from transformer_engine.jax.compressed_attention import (
     HeavilyCompressedAttention,
     heavily_compressed_attention,
 )
+from transformer_engine.jax.indexer import indexer
 from transformer_engine.jax.triton_extensions import fused_sparse_attention_triton
 
 
@@ -59,6 +59,52 @@ def _make_dsa_module(*, oH=4, D=8, iH=2, idc=16, idi=16, k=4,
 def _make_inputs(B=1, oH=4, T=16, hidden=32, dtype=jnp.bfloat16, seed=0):
     """Rank-4 inputs [B, oH, T, hidden]."""
     return jax.random.normal(jax.random.PRNGKey(seed), (B, oH, T, hidden), dtype=dtype)
+
+
+def _ref_dense_softmax_per_head(query, key, value, mask_out, scale):
+    """Per-head dense softmax attention with an arbitrary mask (no DPA).
+
+    query/key/value: [B, oH, T, head_dim]; mask_out: [B, oH, T_t, T_s] uint8
+    (1 = mask out). Returns [B, oH, T_t, head_dim].
+    """
+    logits = jnp.einsum("bhtd,bhsd->bhts", query, key) * scale
+    logits = logits.astype(jnp.float32)
+    logits = jnp.where(
+        mask_out.astype(jnp.bool_),
+        jnp.asarray(-jnp.inf, jnp.float32),
+        logits,
+    )
+    weights = jax.nn.softmax(logits, axis=-1)
+    return jnp.einsum("bhts,bhsd->bhtd", weights.astype(value.dtype), value)
+
+
+def _ref_dsa_jax(
+    inputs_q, inputs_kv,
+    W_q_kernel, W_k_kernel, W_v_kernel,
+    W_uq, W_dq, W_k_idx, W_w,
+    *,
+    head_dim, k, causal,
+):
+    """Pure-JAX reference matching ``deep_sparse_attention_core``."""
+    T_t = inputs_q.shape[2]
+    T_s = inputs_kv.shape[2]
+
+    q = jnp.einsum("bhtd,dk->bhtk", inputs_q, W_q_kernel)
+    kk = jnp.einsum("bhsd,dk->bhsk", inputs_kv, W_k_kernel)
+    v = jnp.einsum("bhsd,dk->bhsk", inputs_kv, W_v_kernel)
+
+    scores = indexer(
+        inputs_q, inputs_kv, W_uq, W_dq, W_k_idx, W_w,
+        backend="reference", out_dtype=jnp.float32,
+    )
+    if causal:
+        ckeep = _causal_keep_mask(T_t, T_s)[None, None, :, :]
+        scores = jnp.where(ckeep, scores, jnp.asarray(-jnp.inf, jnp.float32))
+    _, topk_idx = jax.lax.top_k(scores, min(k, T_s))
+    mask_out = _topk_indices_to_attn_mask(topk_idx, T_s, causal=causal)
+    return _ref_dense_softmax_per_head(
+        q, kk, v, mask_out, scale=1.0 / jnp.sqrt(head_dim).astype(q.dtype),
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -183,9 +229,8 @@ def test_dsa_topk_count_equals_kept_count_under_causal(T_t, T_s, k):
     module = _make_dsa_module(oH=oH, D=8, iH=1, idc=8, idi=8, k=k)
     params = module.init(keys[0], inputs, inputs, deterministic=True)
 
-    from transformer_engine.jax.indexer import indexer as _idx
     p = nn.meta.unbox(params)["params"]
-    scores = _idx(
+    scores = indexer(
         inputs, inputs,
         p["indexer_W_uq"], p["indexer_W_dq"], p["indexer_W_k"], p["indexer_W_w"],
         backend="reference", out_dtype=jnp.float32,
