@@ -76,7 +76,14 @@ def general_grouped_gemm_triton(
         # A=inputs (list of (m_i, in_features)), B=grad_outputs (list of (m_i, out_features))
         A_tensor = A[0] if len(A) == 1 else torch.cat(A, dim=0)  # (M, in_features)
         B_tensor = B[0] if len(B) == 1 else torch.cat(B, dim=0)  # (M, out_features)
-        out_tensor_3d = out  # (G, out_features, in_features)
+        # out is a list of per-expert grad tensors; stack to 3D for ptgmm
+        if isinstance(out, list):
+            if len(out) == 1 and out[0].ndim == 3:
+                out_tensor_3d = out[0]
+            else:
+                out_tensor_3d = torch.stack(out, dim=0)  # (G, out_features, in_features)
+        else:
+            out_tensor_3d = out
         
         # Allocate bias_grad OUTPUT buffer if needed (kernel writes to this)
         bias_grad_tensor = None

@@ -158,6 +158,15 @@ def load_framework_extension(framework: str) -> None:
     # Supported frameworks.
     assert framework in ("jax", "torch"), f"Unsupported framework {framework}"
 
+    # Lite mode: use pure-Python replacement instead of compiled C++ extension.
+    if framework == "torch" and os.environ.get("NVTE_LITE", "0") == "1":
+        from transformer_engine.pytorch._lite import \
+            __name__ as _lite_name  # noqa: F401 -- trigger init
+        import transformer_engine.pytorch._lite as _lite_module
+        module_name = f"transformer_engine_{framework}"
+        sys.modules[module_name] = _lite_module
+        return
+
     # Name of the framework extension library.
     module_name = f"transformer_engine_{framework}"
 
@@ -402,6 +411,9 @@ te_rocm_build = None
 
 @functools.cache
 def is_fp8_fnuz():
+    if _TE_LIB_CTYPES is None:
+        # Lite mode: assume FNUZ based on ROCm convention
+        return True
     if te_rocm_build:
         _TE_LIB_CTYPES.nvte_uses_fp8_fnuz.restype = ctypes.c_bool
         return _TE_LIB_CTYPES.nvte_uses_fp8_fnuz()
@@ -413,7 +425,17 @@ def _load_core_library():
     return ctypes.CDLL(_get_shared_object_file("core"), mode=ctypes.RTLD_GLOBAL)
 
 
-if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
+# Detect lite mode: explicit env var or LITE_BUILD marker file (lite-only wheel)
+_lite_marker = Path(__file__).parent.parent / "LITE_BUILD"
+_nvte_lite_mode = os.environ.get("NVTE_LITE", "0") == "1" or _lite_marker.exists()
+if _nvte_lite_mode:
+    os.environ["NVTE_LITE"] = "1"
+
+if _nvte_lite_mode:
+    # In lite mode, skip loading compiled C++ libraries entirely.
+    _TE_LIB_CTYPES = None
+    te_rocm_build = True  # Lite mode targets ROCm
+elif "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
     sanity_checks_for_pypi_installation()
     if not te_rocm_build:
         try:

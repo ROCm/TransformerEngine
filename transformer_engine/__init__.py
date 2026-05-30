@@ -86,6 +86,19 @@ except FileNotFoundError as e:
 try:
     __version__ = str(metadata.version("transformer_engine"))
 except metadata.PackageNotFoundError:
-    _te_core_installed, _, __version__ = transformer_engine.common.get_te_core_package_info(True)
-    if not _te_core_installed:
-        raise
+    if transformer_engine.common._nvte_lite_mode:
+        # Lite-only wheels are installed under the `tealite` distribution name,
+        # so `metadata.version("transformer_engine")` raises. Prefer that, then
+        # fall back to reading VERSION.txt via build_tools, then a sentinel.
+        try:
+            __version__ = str(metadata.version("tealite"))
+        except metadata.PackageNotFoundError:
+            try:
+                from transformer_engine.build_tools.te_version import te_version
+                __version__ = te_version() + "+lite"
+            except Exception:
+                __version__ = "0.0.0+lite"
+    else:
+        _te_core_installed, _, __version__ = transformer_engine.common.get_te_core_package_info(True)
+        if not _te_core_installed:
+            raise

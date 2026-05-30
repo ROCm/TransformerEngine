@@ -415,13 +415,14 @@ def get_frameworks() -> List[str]:
         if framework not in supported_frameworks:
             raise ValueError(f"Transformer Engine does not support framework={framework}")
 
-    if rocm_build():
+    if rocm_build() and not bool(int(os.getenv("NVTE_LITE_ONLY", "0"))):
         _unsupported_frameworks = []
         if "pytorch" in _frameworks:
             try:
-                from torch.utils.cpp_extension import IS_HIP_EXTENSION
+                import torch.utils.cpp_extension
+                IS_HIP_EXTENSION = getattr(torch.utils.cpp_extension, "IS_HIP_EXTENSION", False)
             except ImportError:
-                IS_HIP_EXTENSION=False
+                IS_HIP_EXTENSION = False
             if not IS_HIP_EXTENSION:
                 if "pytorch" in _requested_frameworks:
                     _unsupported_frameworks.append("pytorch")
