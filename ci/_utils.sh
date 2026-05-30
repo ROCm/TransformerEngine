@@ -234,7 +234,7 @@ start_message() {
     fi
     _rocm_path=`$REALPATH "$_rocm_path"`
     test -d "$_rocm_path" && echo "ROCm: $_rocm_path" || echo "ROCm path not found"
-    python --version
+    python3 --version
 }
 
 configure_omp_threads() {
