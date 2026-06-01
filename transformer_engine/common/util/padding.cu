@@ -24,7 +24,11 @@ namespace transformer_engine {
 namespace {
 
 // Parameters to tune
+#ifdef __HIP_PLATFORM_AMD__
+constexpr int n_warps_per_tile = 16;
+#else
 constexpr int n_warps_per_tile = 4;
+#endif
 constexpr int threads_per_block = THREADS_PER_WARP * n_warps_per_tile;
 constexpr int desired_load_store_size = 8;
 constexpr int kMaxTensorsPerKernel = 64;  // Args must be <4 KB
