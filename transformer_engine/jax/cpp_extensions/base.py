@@ -223,7 +223,7 @@ def register_primitive(cls, outer_only=False):
 
 
 for _name, _value in transformer_engine_jax.registrations().items():
-    ffi.register_ffi_target(_name, _value, platform="ROCM" if is_hip_extension else "CUDA")
+    ffi.register_ffi_target(_name, _value, platform="ROCM" if is_hip_extension() else "CUDA")
 
 
 def manage_primitives(enable_names=None, disable_names=None, disable_all_first=False):
