@@ -71,6 +71,8 @@ run_test_config_mgpu() {
 
     # Mitigate distributed tests hang by adding 5min timeout
     _timeout_args="--timeout 300 --timeout-method thread"
+    # Workaround for some distributed tests hang/abortion
+    export XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false"
 
     if [ $_fus_attn = $_DEFAULT_FUSED_ATTN ]; then
         _dfa_level=2
