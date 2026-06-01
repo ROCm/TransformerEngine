@@ -223,8 +223,8 @@ def _rmsnorm_bwd_triton_impl(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_p
 
             # Load r_sigma
             norm_factor = tl.load(rsigma_ptr + row_idx).to(tl.float32)
-            # Precomputed per-row invariant: dx = nf * (dz*g - c*x) where
-            #   c = nf*nf * grad_sum / n_cols
+            # Precomputed per-row invariant: c = nf*nf * grad_sum / n_cols
+            # used in calculating dx = nf * (dz*g - c*x)
             c_scalar = norm_factor * norm_factor * grad_sum * inv_n_cols
 
             for blk_idx in tl.range(0, n_cols_blks, num_stages=2):
@@ -307,8 +307,6 @@ def _rmsnorm_bwd_triton_impl(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_p
 
             norm_factor = tl.load(rsigma_ptr + row_idx).to(tl.float32)
             grad_sum = tl.sum(grad_output * x * g, axis=0)
-            # Precomputed per-row invariant: dx = nf * (dz*g - c*x) where
-            #   c = nf*nf * grad_sum / n_cols
             c_scalar = norm_factor * norm_factor * grad_sum * inv_n_cols
 
             grad_input = norm_factor * (grad_output * g - c_scalar * x)
