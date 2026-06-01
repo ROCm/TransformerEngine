@@ -44,6 +44,8 @@ NUM_PROCS: int = min(torch.cuda.device_count(), MAX_GPUS_TO_USE)
 LAUNCH_CMD = ["torchrun", f"--nproc_per_node={NUM_PROCS}"]
 if tex.ubuf_built_with_mpi():
     LAUNCH_CMD = ["mpirun", "-np", str(NUM_PROCS), "--oversubscribe", "--quiet", "python3"]
+if IS_HIP_EXTENSION:
+    LAUNCH_CMD = ["timeout", "-k60", "-v", "180"] + LAUNCH_CMD
 
 # Fall back on CUDA IPC if the platform does not support CUDA multicast
 if not tex.device_supports_multicast():
@@ -94,6 +96,8 @@ def _run_gemm_with_overlap(comm_type, bulk, p2p, atomic, aggregate, quantization
         or "NUMERICAL CHECK FAILED" in result.stderr.decode()
         or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
     ):
+        if result.returncode == 124:
+            pytest.fail("Test timed out", pytrace=False)
         raise AssertionError(result.stderr.decode())
 
 
@@ -155,6 +159,8 @@ def _run_layer_with_overlap(
         or "NUMERICAL CHECK FAILED" in result.stderr.decode()
         or "NUMERICAL CHECK PASSED" not in result.stdout.decode()
     ):
+        if result.returncode == 124:
+            pytest.fail("Test timed out", pytrace=False)
         raise AssertionError(result.stderr.decode())
 
 
