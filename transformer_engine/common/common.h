@@ -636,8 +636,8 @@ struct TypeExtrema<fp8e4m3> {
   static constexpr float max = te_fp8_fnuz() ? 240.0f : 448.0f;
   static constexpr float max_inverse = 1.0 / max;
 #else
-  static float max;
-  static float max_inverse;
+  static constexpr float max = 448.0f;
+  static constexpr float max_inverse = 1.0 / max;
 #endif
 };
 

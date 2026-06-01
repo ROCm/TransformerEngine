@@ -5,30 +5,50 @@
  ************************************************************************/
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
 #include <cfloat>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cuda/barrier>
+#endif
 
 #include "common/common.h"
 #include "common/recipe/recipe_common.cuh"
 #include "common/util/cuda_runtime.h"
+#ifndef __HIP_PLATFORM_AMD__
 #include "common/util/ptx.cuh"
+#endif
 #include "common/utils.cuh"
 
+#ifndef __HIP_PLATFORM_AMD__
 #if (!defined(__CUDA_MINIMUM_ARCH__) && __CUDA_ARCH__ >= 900) || \
     (defined(__CUDA_MINIMUM_ARCH__) && __CUDA_MINIMUM_ARCH__ >= 900)
 #define TMA_HW_SUPPORTED
+#endif
 #endif
 
 namespace transformer_engine {
 namespace {
 
+#ifdef __HIP_PLATFORM_AMD__
+using WarpSyncMask = uint64_t;
+constexpr WarpSyncMask kFullWarpMask = 0xFFFFFFFFFFFFFFFFULL;
+#else
+using WarpSyncMask = unsigned;
+constexpr WarpSyncMask kFullWarpMask = 0xFFFFFFFFu;
+#endif
+
 // const values configuration
 
+#ifdef __HIP_PLATFORM_AMD__
+constexpr size_t kThreadsPerWarp = 64;
+#else
 constexpr size_t kThreadsPerWarp = 32;
+#endif
 #ifdef TMA_HW_SUPPORTED
 constexpr size_t BLOCK_TILE_DIM = 128;
 constexpr size_t WARP_TILE_DIM_X = 32;
@@ -62,6 +82,7 @@ constexpr size_t NUM_THREADS_Y_IN_WARP = kThreadsPerWarp / NUM_THREADS_X_IN_WARP
 
 #define MIN(a, b) (a < b ? a : b)
 
+#ifdef TMA_HW_SUPPORTED
 template <bool kReturnTranspose, typename CType, typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_BLOCK)
     block_scaled_cast_transpose_kernel(const IType* const input, OType* const output_c,
@@ -133,7 +154,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
   warp_tile_amax = warp_reduce_max<kThreadsPerWarp>(amax);
   // broadcast the amax to all threads in a warp from the lane 0
   constexpr int lane_zero = 0;
-  warp_tile_amax = __shfl_sync(0xFFFFFFFF, warp_tile_amax, lane_zero);
+  warp_tile_amax = __shfl_sync(kFullWarpMask, warp_tile_amax, lane_zero);
 
   // reduce warp_tile_amax across multiple warps in a thread block using shared mem
   if (tid_in_warp == 0) {
@@ -247,6 +268,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
 #endif
   }
 }
+#endif  // TMA_HW_SUPPORTED
 
 template <bool kReturnTranspose, typename CType, typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose_kernel_notaligned(
@@ -360,7 +382,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
   warp_tile_amax = warp_reduce_max<kThreadsPerWarp>(amax);
   // broadcast the amax to all threads in a warp from the lane 0
   constexpr int lane_zero = 0;
-  warp_tile_amax = __shfl_sync(0xFFFFFFFF, warp_tile_amax, lane_zero);
+  warp_tile_amax = __shfl_sync(kFullWarpMask, warp_tile_amax, lane_zero);
 
   // reduce warp_tile_amax across multiple warps in a thread block using shared mem
   if (tid_in_warp == 0) {
@@ -456,6 +478,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
   }
 }
 
+#ifdef TMA_HW_SUPPORTED
 template <typename OutputType>
 CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size_t global_dim_y) {
   CUtensorMapDataType dataType;
@@ -473,6 +496,7 @@ CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size
                        /*stride_elems=*/global_dim_x, /*offset_elems=*/0, sizeof(OutputType) * 8);
   return tensor_map_output_trans;
 }
+#endif  // TMA_HW_SUPPORTED
 
 }  // namespace
 }  // namespace transformer_engine
@@ -546,6 +570,7 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
               const bool full_tile =
                   row_length % BLOCK_TILE_DIM == 0 && num_rows % BLOCK_TILE_DIM == 0;
 
+#ifdef TMA_HW_SUPPORTED
               if (full_tile) {
                 CUtensorMap tensor_map_output_trans;
                 if (return_transpose) {
@@ -561,7 +586,11 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                         reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
                         scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
                         tensor_map_output_trans, pow_2_scale, noop_ptr);
-              } else {
+              } else
+#else
+              (void)full_tile;
+#endif
+              {
                 block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, float, InputType,
                                                               OutputType>
                     <<<grid, THREADS_PER_BLOCK, 0, stream>>>(

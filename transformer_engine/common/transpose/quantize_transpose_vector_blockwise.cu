@@ -5,13 +5,17 @@
  ************************************************************************/
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
+#endif
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
 #include <cfloat>
+#ifndef __HIP_PLATFORM_AMD__
 #include <cuda/barrier>
+#endif
 #include <utility>
 
 #include "common/common.h"
@@ -25,6 +29,14 @@ namespace {
 
 using transformer_engine::detail::FP8BlockwiseColumnwiseOption;
 using transformer_engine::detail::FP8BlockwiseRowwiseOption;
+
+#ifdef __HIP_PLATFORM_AMD__
+using WarpSyncMask = uint64_t;
+constexpr WarpSyncMask kFullWarpMask = 0xFFFFFFFFFFFFFFFFULL;
+#else
+using WarpSyncMask = unsigned;
+constexpr WarpSyncMask kFullWarpMask = 0xFFFFFFFFu;
+#endif
 
 // clang-format off
 /*
@@ -145,14 +157,23 @@ Step 3 (if columnwise transpose is False, COMPACT format): Skip Transpose, cast 
 */
 // clang-format on
 
+#ifdef __HIP_PLATFORM_AMD__
+constexpr size_t kThreadsPerWarp = 64;
+#else
 constexpr size_t kThreadsPerWarp = 32;
+#endif
 
 // Hyperparameters for performance tuning
 constexpr int kTileDim = 128;  // Fixed to 128 beacause we are using 1x128 and 128x1 quantization
 constexpr int kNVecIn = 8;     // The number of elements each LDG touches
 constexpr int kNVecOut = 16;   // The number of elements each STG touches
 constexpr int kNVecSMem = 2;   // The number of elements each LDS/STS touches
+
+#ifdef __HIP_PLATFORM_AMD__
+constexpr int kThreadsPerBlock = 512;  // Thread block size, 8 warps (wave64) in total
+#else
 constexpr int kThreadsPerBlock = 256;  // Thread block size, 8 warps in total
+#endif
 
 // Auto-calculated constants, do not modify directly)
 static_assert(kNVecIn % kNVecSMem == 0, "kNVecIn must be divisible by kNVecSMem");
@@ -259,7 +280,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     // the first thread to do the reduction.
     const unsigned src_lane = (threadIdx.x % kThreadsPerWarp) / kNumThreadsStore * kNumThreadsStore;
     // This mask represents which threads should do the reduction together.
-    const unsigned mask = ((1 << kNumThreadsStore) - 1) << src_lane;
+    const WarpSyncMask mask = ((WarpSyncMask{1} << kNumThreadsStore) - 1) << src_lane;
     const bool is_src_lane = (threadIdx.x % kNumThreadsStore) == 0;
 #pragma unroll
     for (int iter = 0; iter < num_iterations; ++iter) {
@@ -350,7 +371,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     // the first thread to do the reduction.
     const unsigned src_lane = (threadIdx.x % kThreadsPerWarp) / kNumThreadsStore * kNumThreadsStore;
     // This mask represents which threads should do the reduction together.
-    const unsigned mask = ((1 << kNumThreadsStore) - 1) << src_lane;
+    const WarpSyncMask mask = ((WarpSyncMask{1} << kNumThreadsStore) - 1) << src_lane;
     const bool is_src_lane = (threadIdx.x % kNumThreadsStore) == 0;
 #pragma unroll
     for (int iter = 0; iter < num_iterations; ++iter) {
@@ -474,7 +495,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         const bool is_src_lane = thr_idx_in_warp == 0;
         amax = warp_reduce_max<kThreadsPerWarp>(amax);
         constexpr int lane_zero = 0;
-        amax = __shfl_sync(0xFFFFFFFF, amax, lane_zero);
+        amax = __shfl_sync(kFullWarpMask, amax, lane_zero);
         // Step 3.4: Compute scale
         CType scale;
         scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scaling);
