@@ -71,8 +71,6 @@ run_test_config_mgpu() {
 
     # Mitigate distributed tests hang by adding 5min timeout
     _timeout_args="--timeout 300 --timeout-method thread"
-    # Workaround for some distributed tests hang/abortion
-    export XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false"
 
     if [ $_fus_attn = $_DEFAULT_FUSED_ATTN ]; then
         _dfa_level=2
@@ -83,8 +81,7 @@ run_test_config_mgpu() {
     fi
 
     run_default_fa 2 test_distributed_dense.py
-    # RCCL_MSCCL_ENABLE=0 is to avoid hangs in some distributed tests (ROCM-1719)
-    RCCL_MSCCL_ENABLE=0 run $_dfa_level test_distributed_fused_attn.py $_timeout_args
+    run $_dfa_level test_distributed_fused_attn.py $_timeout_args
     run_default_fa 3 test_distributed_layernorm.py
     run_default_fa 2 test_distributed_layernorm_mlp.py $_timeout_args
     run_default_fa 3 test_distributed_softmax.py
