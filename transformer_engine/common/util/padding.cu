@@ -101,25 +101,26 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
   for (int iter = 0; iter < n_iterations; ++iter) {
     const int i1 = tidy + iter * bdimy;
     const int j1 = tidx;
+    const int col = tile_col + j1 * nvec;
+    const int remaining = row_length - col;
+    const int valid_cols = remaining > 0 ? min(remaining, nvec) : 0;
 #pragma unroll
     for (int i2 = 0; i2 < nvec; ++i2) {
       const int row = tile_row + i1 * nvec + i2;
-      const int col = tile_col + j1 * nvec;
-      const int remaining = row_length - col;
       if (row < num_rows) {
         // Valid data row: skip copy when in-place
         if (!inplace) {
           const size_t offset = static_cast<size_t>(row) * row_length + col;
           Vec v;
-          v.load_from_elts(input, offset, remaining > 0 ? min(remaining, nvec) : 0);
-          v.store_to_elts(output, offset, remaining > 0 ? min(remaining, nvec) : 0);
+          v.load_from_elts(input, offset, valid_cols);
+          v.store_to_elts(output, offset, valid_cols);
         }
       } else if (row < padded_num_rows) {
         // Padding row: fill with zeros
         const size_t offset = static_cast<size_t>(row) * row_length + col;
         Vec v;
         v.clear();
-        v.store_to_elts(output, offset, remaining > 0 ? min(remaining, nvec) : 0);
+        v.store_to_elts(output, offset, valid_cols);
       }
     }
   }
@@ -222,16 +223,17 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
   for (int iter = 0; iter < n_iterations; ++iter) {
     const int i1 = tidy + iter * bdimy;
     const int j1 = tidx;
+    const int col = tile_col + j1 * nvec;
+    const int remaining = row_length - col;
+    const int valid_cols = remaining > 0 ? min(remaining, nvec) : 0;
 #pragma unroll
     for (int i2 = 0; i2 < nvec; ++i2) {
       const int row = tile_row + i1 * nvec + i2;
-      const int col = tile_col + j1 * nvec;
       if (row < num_rows && !inplace) {
-        const int remaining = row_length - col;
         const size_t offset = static_cast<size_t>(row) * row_length + col;
         Vec v;
-        v.load_from_elts(input, offset, remaining > 0 ? min(remaining, nvec) : 0);
-        v.store_to_elts(output, offset, remaining > 0 ? min(remaining, nvec) : 0);
+        v.load_from_elts(input, offset, valid_cols);
+        v.store_to_elts(output, offset, valid_cols);
       }
     }
   }
