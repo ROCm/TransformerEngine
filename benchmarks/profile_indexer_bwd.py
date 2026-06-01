@@ -6,8 +6,13 @@ so value_and_grad total work = 3x forward FLOPs.
 
 Run inside the container:
   docker exec zain-w2 sh -c 'cd /workspace && python benchmarks/profile_indexer_bwd.py'
+
+Select backends and passes via flags:
+  --backends reference hybrid
+  --passes fwd bwd vag
 """
 
+import argparse
 import time
 
 import jax
@@ -21,6 +26,10 @@ try:
 except Exception as _e:  # noqa: BLE001
     _HAVE_HYBRID = False
     _HYBRID_IMPORT_ERROR = _e
+
+
+ALL_BACKENDS = ["reference", "hybrid"]
+ALL_PASSES = ["fwd", "bwd", "vag"]
 
 
 def make_inputs(B, oH, T, S, d, d_c, H, d_i, dtype, seed=0):
@@ -82,52 +91,90 @@ def _build_value_and_grad(backend):
     return jax.jit(jax.value_and_grad(fwd, argnums=(0, 1, 2, 3, 4, 5)))
 
 
+PASS_SPECS = {
+    "fwd": ("forward",        _build_fwd,            1),
+    "bwd": ("backward",       _build_bwd,            2),
+    "vag": ("value_and_grad", _build_value_and_grad, 3),
+}
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description=__doc__)
+    p.add_argument(
+        "--backends",
+        nargs="+",
+        choices=ALL_BACKENDS,
+        default=None,
+        help=(
+            "Backends to benchmark. Default: 'reference' plus 'hybrid' if importable."
+        ),
+    )
+    p.add_argument(
+        "--passes",
+        nargs="+",
+        choices=ALL_PASSES,
+        default=ALL_PASSES,
+        help="Which passes to run: fwd, bwd, vag. Default: all three.",
+    )
+    return p.parse_args()
+
+
+def resolve_backends(requested):
+    if requested is None:
+        backends = ["reference"]
+        if _HAVE_HYBRID:
+            backends.append("hybrid")
+        return backends
+    if "hybrid" in requested and not _HAVE_HYBRID:
+        print(
+            f"WARNING: 'hybrid' backend requested but unavailable "
+            f"({type(_HYBRID_IMPORT_ERROR).__name__}: {_HYBRID_IMPORT_ERROR}). "
+            "Running it anyway — expect failure."
+        )
+    return requested
+
+
 def main():
-    print(f"jax devices: {jax.devices()}\n")
+    args = parse_args()
+    backends = resolve_backends(args.backends)
+    passes = args.passes
+
+    print(f"jax devices: {jax.devices()}")
+    print(f"backends: {backends}")
+    print(f"passes:   {passes}\n")
+
     for B, oH, T, S, d, d_c, H, d_i in CONFIGS:
         Q, K, W_uq, W_dq, W_k, W_w = make_inputs(
             B, oH, T, S, d, d_c, H, d_i, jnp.bfloat16
         )
-        args = (Q, K, W_uq, W_dq, W_k, W_w)
+        fn_args = (Q, K, W_uq, W_dq, W_k, W_w)
         fwd_flops = theoretical_fwd_flops(B, oH, T, S, d, d_c, H, d_i)
 
         print(f"--- B={B} oH={oH} T={T} S={S} d={d} d_c={d_c} H={H} d_i={d_i} bfloat16 ---")
         print(f"    forward GFLOPs/call:   {fwd_flops/1e9:.2f}")
-        print(f"    bwd GFLOPs/call (~2x): {2*fwd_flops/1e9:.2f}")
-        print(f"    f+b GFLOPs/call (~3x): {3*fwd_flops/1e9:.2f}")
+        if "bwd" in passes:
+            print(f"    bwd GFLOPs/call (~2x): {2*fwd_flops/1e9:.2f}")
+        if "vag" in passes:
+            print(f"    f+b GFLOPs/call (~3x): {3*fwd_flops/1e9:.2f}")
         print()
 
-        backends = ["reference"]
-        if _HAVE_HYBRID:
-            backends.append("hybrid")
-
-        # Headers
         print(f"    {'backend':<10s} {'pass':<14s}   {'ms':>8s}   {'TFLOP/s':>8s}")
 
         for backend in backends:
-            try:
-                # Forward (loss only)
-                fwd = _build_fwd(backend)
-                sec = time_fn(fwd, args)
-                ms = sec * 1e3
-                tflops = fwd_flops / sec / 1e12
-                print(f"    {backend:<10s} {'forward':<14s}   {ms:8.3f}   {tflops:8.2f}")
-
-                # Backward only (jax.grad — XLA may re-trace forward inside)
-                bwd = _build_bwd(backend)
-                sec = time_fn(bwd, args)
-                ms = sec * 1e3
-                tflops = 2 * fwd_flops / sec / 1e12   # bwd ~= 2x fwd
-                print(f"    {backend:<10s} {'backward':<14s}   {ms:8.3f}   {tflops:8.2f}")
-
-                # value_and_grad (forward + backward, single pass)
-                vag = _build_value_and_grad(backend)
-                sec = time_fn(vag, args)
-                ms = sec * 1e3
-                tflops = 3 * fwd_flops / sec / 1e12   # f+b ~= 3x fwd
-                print(f"    {backend:<10s} {'value_and_grad':<14s}   {ms:8.3f}   {tflops:8.2f}")
-            except Exception as e:  # noqa: BLE001
-                print(f"    {backend:<10s} FAILED: {type(e).__name__}: {str(e).splitlines()[0]}")
+            for pass_key in passes:
+                label, builder, flop_mult = PASS_SPECS[pass_key]
+                try:
+                    fn = builder(backend)
+                    sec = time_fn(fn, fn_args)
+                    ms = sec * 1e3
+                    tflops = flop_mult * fwd_flops / sec / 1e12
+                    print(f"    {backend:<10s} {label:<14s}   {ms:8.3f}   {tflops:8.2f}")
+                except Exception as e:  # noqa: BLE001
+                    msg = str(e).splitlines()[0] if str(e) else ""
+                    print(
+                        f"    {backend:<10s} {label:<14s}   FAILED: "
+                        f"{type(e).__name__}: {msg}"
+                    )
             print()
 
 
