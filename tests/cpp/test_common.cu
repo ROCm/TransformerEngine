@@ -22,9 +22,6 @@
 #endif
 #include <omp.h>
 
-#ifdef __HIP_PLATFORM_AMD__
-#include <transformer_engine/swizzle.h>
-#endif
 #include <transformer_engine/transformer_engine.h>
 #include "util/logging.h"
 
@@ -1316,45 +1313,5 @@ std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
     const size_t blocks_X = round_up_to_nearest_multiple(unpadded_blocks_X, alignment_X);
     return {unpadded_blocks_Y, unpadded_blocks_X, blocks_Y, blocks_X};
 }
-
-#ifdef __HIP_PLATFORM_AMD__
-void swizzle_mxfp8_scales(Tensor& t, bool rowwise) {
-    void* scale_ptr = rowwise ? t.rowwise_scale_inv_dptr()
-                              : t.columnwise_scale_inv_dptr();
-    if (!scale_ptr) return;
-
-    const NVTEShape scale_shape = rowwise ? t.rowwise_scale_inv_shape()
-                                          : t.columnwise_scale_inv_shape();
-    const NVTEShape data_shape  = rowwise ? t.rowwise_shape()
-                                          : t.columnwise_shape();
-
-    size_t num_scales = 1;
-    for (size_t d = 0; d < scale_shape.ndim; d++) num_scales *= scale_shape.data[d];
-
-    uint8_t* d_tmp = nullptr;
-    NVTE_CHECK_CUDA(cudaMalloc(&d_tmp, num_scales));
-
-    TensorWrapper input_tw(NVTE_MXFP8_1D_SCALING);
-    TensorWrapper output_tw(NVTE_MXFP8_1D_SCALING);
-    output_tw.set_with_gemm_swizzled_scales(true);
-
-    if (rowwise) {
-        input_tw.set_rowwise_data(nullptr, t.dtype(), data_shape);
-        input_tw.set_rowwise_scale_inv(scale_ptr, DType::kFloat8E8M0, scale_shape);
-        output_tw.set_rowwise_data(nullptr, t.dtype(), data_shape);
-        output_tw.set_rowwise_scale_inv(d_tmp, DType::kFloat8E8M0, scale_shape);
-    } else {
-        input_tw.set_columnwise_data(nullptr, t.dtype(), data_shape);
-        input_tw.set_columnwise_scale_inv(scale_ptr, DType::kFloat8E8M0, scale_shape);
-        output_tw.set_columnwise_data(nullptr, t.dtype(), data_shape);
-        output_tw.set_columnwise_scale_inv(d_tmp, DType::kFloat8E8M0, scale_shape);
-    }
-
-    nvte_swizzle_scaling_factors(input_tw.data(), output_tw.data(), 0);
-    NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-    NVTE_CHECK_CUDA(cudaMemcpy(scale_ptr, d_tmp, num_scales, cudaMemcpyDeviceToDevice));
-    NVTE_CHECK_CUDA(cudaFree(d_tmp));
-}
-#endif // #ifdef __HIP_PLATFORM_AMD__
 
 }  // namespace test

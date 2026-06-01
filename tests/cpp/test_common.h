@@ -581,10 +581,6 @@ int32_t getDeviceComputeCapability();
 constexpr int32_t hopperComputeCapability = 90;
 constexpr int32_t blackwellComputeCapability = 100;
 
-#ifdef USE_ROCM
-void swizzle_mxfp8_scales(Tensor& t, bool rowwise);
-#endif
-
 }  // namespace test
 
 #if FP4_TYPE_SUPPORTED
