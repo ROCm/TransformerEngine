@@ -16,12 +16,34 @@
 #include "../common.h"
 #include "../utils.cuh"
 #ifdef __HIP_PLATFORM_AMD__
-#include "rocm_device_utils.cuh"  // for rocm_upper_bound()
+#include "rocm_device_utils.cuh"  // for rocm_upper_bound(), NTVec
 #endif
 
 namespace transformer_engine {
 
 namespace {
+
+#ifdef __HIP_PLATFORM_AMD__
+// Non-temporal store helper: uses NT store for full aligned vectors,
+// falls back to element-wise for partial/unaligned cases.
+// Note: NT loads were also benchmarked but hurt performance.
+template <uint32_t nvec, typename Type>
+__device__ __forceinline__ void nt_store_to_elts(const Vec<Type, nvec>& v,
+                                                 Type* ptr, int count) {
+  constexpr size_t BYTES = nvec * sizeof(Type);
+  if (count == nvec && reinterpret_cast<uint64_t>(ptr) % BYTES == 0) {
+    NTVec<Type, nvec> nt;
+#pragma unroll
+    for (int i = 0; i < nvec; i++) nt.val[i] = v.data.elt[i];
+    nt.nt_store(ptr);
+  } else {
+#pragma unroll
+    for (int i = 0; i < nvec; i++) {
+      if (i < count) ptr[i] = v.data.elt[i];
+    }
+  }
+}
+#endif
 
 // Parameters to tune
 #ifdef __HIP_PLATFORM_AMD__
@@ -117,14 +139,14 @@ __global__ void __launch_bounds__(threads_per_block) multi_padding_kernel(MultiP
           const size_t offset = static_cast<size_t>(row) * row_length + col;
           Vec v;
           v.load_from_elts(input, offset, valid_cols);
-          v.store_to_elts(output, offset, valid_cols);
+          nt_store_to_elts(v, output + offset, valid_cols);
         }
       } else if (row < padded_num_rows) {
         // Padding row: fill with zeros
         const size_t offset = static_cast<size_t>(row) * row_length + col;
         Vec v;
         v.clear();
-        v.store_to_elts(output, offset, valid_cols);
+        nt_store_to_elts(v, output + offset, valid_cols);
       }
     }
   }
@@ -237,7 +259,7 @@ __global__ void __launch_bounds__(threads_per_block) multi_unpadding_kernel(Mult
         const size_t offset = static_cast<size_t>(row) * row_length + col;
         Vec v;
         v.load_from_elts(input, offset, valid_cols);
-        v.store_to_elts(output, offset, valid_cols);
+        nt_store_to_elts(v, output + offset, valid_cols);
       }
     }
   }
