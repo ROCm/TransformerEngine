@@ -95,6 +95,12 @@ const std::string &include_directory(bool required = false);
 int cudart_version();
 #endif
 
+/* \brief cuBLAS version number at run-time
+ *
+ * Versions may differ between compile-time and run-time.
+ */
+size_t cublas_version();
+
 }  // namespace cuda
 
 }  // namespace transformer_engine

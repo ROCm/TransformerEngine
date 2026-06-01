@@ -198,6 +198,7 @@ list(APPEND transformer_engine_cuda_sources
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
      gemm/cublaslt_gemm.cu
+     gemm/cublaslt_grouped_gemm.cu
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
      normalization/layernorm/ln_fwd_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
@@ -214,17 +215,37 @@ list(APPEND transformer_engine_cuda_sources
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      recipe/fp8_block_scaling.cu
+<<<<<<< origin/dev
      recipe/nvfp4.cu
      swizzle/swizzle.cu)
+=======
+     comm_gemm_overlap/userbuffers/userbuffers.cu)
+>>>>>>> 708d7c160ad6b2bf44c9c597083d4cbb4860f068
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/gelu.cu
+     activation/glu.cu
      activation/relu.cu
      activation/swiglu.cu
      cast/cast.cu
+<<<<<<< origin/dev
      hadamard_transform/hadamard_transform.cu
      multi_tensor/compute_scale.cu
      recipe/mxfp8_scaling.cu
+=======
+     gemm/cutlass_grouped_gemm.cu
+     hadamard_transform/group_hadamard_transform.cu
+     hadamard_transform/graph_safe_group_hadamard_transform.cu
+     hadamard_transform/hadamard_transform.cu
+     hadamard_transform/hadamard_transform_cast_fusion.cu
+     hadamard_transform/group_hadamard_transform_cast_fusion.cu
+     hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
+     hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu
+     multi_tensor/compute_scale.cu
+     recipe/mxfp8_scaling.cu
+     recipe/nvfp4.cu
+     transpose/quantize_transpose_square_blockwise.cu
+>>>>>>> 708d7c160ad6b2bf44c9c597083d4cbb4860f068
      transpose/quantize_transpose_vector_blockwise_fp4.cu)
 
 if(USE_CUDA)
@@ -399,21 +420,35 @@ endif()
 option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
 if (NVTE_WITH_CUBLASMP)
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
-    target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include ${NVSHMEM_DIR}/include)
+    target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include)
     find_library(CUBLASMP_LIB
                  NAMES cublasmp libcublasmp
                  PATHS ${CUBLASMP_DIR}
                  PATH_SUFFIXES lib
                  REQUIRED)
-    find_library(NVSHMEM_HOST_LIB
-                 NAMES nvshmem_host libnvshmem_host.so.3
-                 PATHS ${NVSHMEM_DIR}
+    find_library(NCCL_LIB
+                 NAMES nccl libnccl
                  PATH_SUFFIXES lib
                  REQUIRED)
-  target_link_libraries(transformer_engine PUBLIC ${CUBLASMP_LIB} ${NVSHMEM_HOST_LIB})
+  target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB} ${CUBLASMP_LIB})
   message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
-  message(STATUS "Using nvshmem at: ${NVSHMEM_DIR}")
 endif()
+
+# Number of philox4x32 rounds for stochastic rounding (build-time constant).
+set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR $ENV{NVTE_BUILD_NUM_PHILOX_ROUNDS})
+if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR)
+  set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR "10")
+endif()
+if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR MATCHES "^[1-9][0-9]*$")
+  message(FATAL_ERROR
+          "Environment variable NVTE_BUILD_NUM_PHILOX_ROUNDS must be a positive integer, "
+          "but got '${NVTE_BUILD_NUM_PHILOX_ROUNDS_STR}'.")
+endif()
+set(NVTE_BUILD_NUM_PHILOX_ROUNDS ${NVTE_BUILD_NUM_PHILOX_ROUNDS_STR})
+
+target_compile_definitions(transformer_engine
+                           PUBLIC NVTE_BUILD_NUM_PHILOX_ROUNDS=${NVTE_BUILD_NUM_PHILOX_ROUNDS})
+message(STATUS "Philox rounds for stochastic rounding: ${NVTE_BUILD_NUM_PHILOX_ROUNDS}")
 
 # Hack to enable dynamic loading in cuDNN frontend
 target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
@@ -535,6 +570,7 @@ list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
+                                          activation/glu.cu
                                           activation/relu.cu
                                           activation/swiglu.cu)
 endif()

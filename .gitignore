@@ -54,8 +54,13 @@ compile_commands.json
 .nfs
 tensor_dumps/
 artifacts/
+<<<<<<< origin/dev
 **/profiler_outputs/
 **/times.csv
 transformer_engine/build_info.txt
 transformer_engine/common/util/hip_nvml.*
 *.DS_Store
+=======
+.DS_Store
+.claude/
+>>>>>>> 708d7c160ad6b2bf44c9c597083d4cbb4860f068

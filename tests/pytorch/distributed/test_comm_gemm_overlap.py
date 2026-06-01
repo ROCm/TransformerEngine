@@ -234,7 +234,6 @@ def test_bulk_overlaps(comm_type, quantization, connections):
         (te.Linear.__name__, "row", False),
         (te.Linear.__name__, "column", False),
         (te.Linear.__name__, "column", True),
-        (te.LayerNormLinear.__name__, "row", False),
         (te.LayerNormLinear.__name__, "column", False),
         (te.LayerNormLinear.__name__, "column", True),
     ]
@@ -248,8 +247,12 @@ def test_bulk_overlaps(comm_type, quantization, connections):
     ids=[
         f" {te.Linear.__name__} - ROW-PARALLEL ",
         f" {te.Linear.__name__} - COL-PARALLEL - BULK DGRAD/WGRAD ",
+<<<<<<< origin/dev
         f" {te.Linear.__name__} - COL-PARALLEL - DGRAD+RS ",
         f" {te.LayerNormLinear.__name__} - ROW-PARALLEL ",
+=======
+        f" {te.Linear.__name__} - COL-PARLALEL - DGRAD+RS ",
+>>>>>>> 708d7c160ad6b2bf44c9c597083d4cbb4860f068
         f" {te.LayerNormLinear.__name__} - COL-PARALLEL - BULK DGRAD/WGRAD ",
         f" {te.LayerNormLinear.__name__} - COL-PARALLEL - DGRAD+RS ",
     ]
@@ -278,7 +281,6 @@ def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_d
         (te.Linear.__name__, "row", False),
         (te.Linear.__name__, "column", False),
         (te.Linear.__name__, "column", True),
-        (te.LayerNormLinear.__name__, "row", False),
         (te.LayerNormLinear.__name__, "column", False),
         (te.LayerNormLinear.__name__, "column", True),
     ]
@@ -293,7 +295,6 @@ def test_layers_with_overlap_bf16(layer_type, linear_parallel_mode, overlap_rs_d
         f"{te.Linear.__name__}-row_tensor_parallel",
         f"{te.Linear.__name__}-col_tensor_parallel-BULK DGRAD/WGRAD",
         f"{te.Linear.__name__}-col_tensor_parallel-DGRAD+RS",
-        f"{te.LayerNormLinear.__name__}-row_tensor_parallel",
         f"{te.LayerNormLinear.__name__}-col_tensor_parallel-BULK DGRAD/WGRAD",
         f"{te.LayerNormLinear.__name__}-col_tensor_parallel-DGRAD+RS",
     ]
