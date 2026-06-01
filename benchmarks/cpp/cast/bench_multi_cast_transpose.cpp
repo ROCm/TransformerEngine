@@ -91,10 +91,14 @@ static std::vector<size_t> simulate_topk_balanced(
   std::vector<size_t> experts(num_experts);
   std::iota(experts.begin(), experts.end(), 0);
 
+  std::vector<std::uniform_int_distribution<size_t>> dists;
+  for (size_t k = 0; k < top_k; k++) {
+    dists.push_back(std::uniform_int_distribution<size_t>(k, num_experts - 1));
+  }
+
   for (size_t t = 0; t < total_tokens; t++) {
     for (size_t k = 0; k < top_k; k++) {
-      std::uniform_int_distribution<size_t> dist(k, num_experts - 1);
-      std::swap(experts[k], experts[dist(gen)]);
+      std::swap(experts[k], experts[dists[k](gen)]);
       counts[experts[k]]++;
     }
   }
