@@ -49,6 +49,7 @@ if(USE_ROCM)
               test_cublaslt_gemm.cu
               test_cast_mxfp4_transpose.cu)
   TE_GetHipifiedSources("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR} test_hip_sources)
+  TE_AddHipifyDeps("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR})
   message("${message_line}")
   message(STATUS "test_operator hipified sources: ${test_hip_sources}")
   set_target_properties(test_operator PROPERTIES SOURCES "${test_hip_sources}")
