@@ -3133,7 +3133,8 @@ def _make_grouped_tensor_uniform(
     )
 
 
-@pytest.mark.skipif(IS_HIP_EXTENSION, reason="Grouped GEMM is not yet supported in ROCm TE")
+@pytest.mark.skipif(IS_HIP_EXTENSION,
+                    reason="Grouped tensors GEMM is not yet supported in ROCm TE")
 @pytest.mark.parametrize(
     "z, m, n, k",
     [
