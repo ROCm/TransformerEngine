@@ -8,8 +8,6 @@
 #ifndef USE_ROCM
 #include <cuda_runtime.h>
 
-#include <iostream>
-
 #include "../extensions.h"
 #include "transformer_engine/cast.h"
 #include "transformer_engine/hadamard_transform.h"
