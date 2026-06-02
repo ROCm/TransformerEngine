@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,6 +11,7 @@ from pathlib import Path
 import transformer_engine.pytorch as te
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 
 fp8_available, reason_for_no_fp8 = te.is_fp8_available(return_reason=True)
@@ -19,6 +22,8 @@ NUM_PROCS: int = torch.cuda.device_count()
 def _run_test(fp_init, sharding_dims, recipe, layer_type):
     test_path = Path(__file__).parent.resolve() / "run_fsdp2_model.py"
     test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", str(test_path)]
+    if IS_HIP_EXTENSION:
+        test_cmd = ["timeout", "-k60", "-v", "180"] + test_cmd
 
     if fp_init:
         test_cmd += ["--fp8-init"]
