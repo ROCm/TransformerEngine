@@ -23,6 +23,9 @@ name: Claude PR Action
 # the two `github_token:` inputs (and the `GH_TOKEN` env on those steps) with
 # an installation token from `actions/create-github-app-token@v1`. No other
 # changes needed — the marker-based dedup keeps working across the swap.
+#
+# Note: We pin commits for all actions used here to avoid accidental breakage
+# from upstream changes.
 
 on:
   pull_request_target:
@@ -200,13 +203,45 @@ jobs:
       PR_NUMBER: ${{ needs.resolve.outputs.pr }}
       BASE_REF:  ${{ needs.resolve.outputs.base }}
     steps:
+      # SECURITY GATE — must run before any step that materializes PR code.
+      # pull_request_target grants this job write-scoped GITHUB_TOKEN and the
+      # CLAUDE_CODE_OAUTH_TOKEN secret. If we then check out the fork's tree
+      # and let Claude run `git diff` etc. on it, a malicious PR can hijack
+      # those credentials (e.g. via a `.gitattributes` textconv driver).
+      # Restrict fork PRs to authors with write/maintain/admin on the base
+      # repo; same-repo PRs and workflow_dispatch already require write perms
+      # to reach this point.
+      - name: Block fork PRs from non-collaborators
+        if: github.event_name == 'pull_request_target'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+        run: |
+          set -euo pipefail
+          if [[ "$HEAD_REPO" == "${{ github.repository }}" ]]; then
+            echo "Same-repo PR; collaborator check not required."
+            exit 0
+          fi
+          perm=$(gh api "repos/${{ github.repository }}/collaborators/$PR_AUTHOR/permission" \
+                   --jq .permission 2>/dev/null || echo none)
+          case "$perm" in
+            admin|maintain|write)
+              echo "Fork PR author $PR_AUTHOR has $perm; allowing."
+              ;;
+            *)
+              echo "::error::Fork PR from $PR_AUTHOR ($HEAD_REPO) lacks write access (perm=$perm); refusing to run on untrusted code."
+              exit 1
+              ;;
+          esac
+
       # refs/pull/<n>/merge is GitHub's synthetic merge commit (base tip
       # merged with PR head). Checking it out gives us both parents in one
       # shot: HEAD^1 = base tip, HEAD^2 = PR head — no separate base fetch
       # needed. Caveat: the merge ref only exists when the PR is mergeable;
       # if it's missing/stale, the workflow will fail fast on checkout, which
       # is the right behavior for an unreviewable PR.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
           ref: refs/pull/${{ env.PR_NUMBER }}/merge
 
@@ -242,7 +277,14 @@ jobs:
           curl -fsSL https://claude.ai/install.sh | bash
           export PATH="$HOME/.local/bin:$PATH"
           claude --version
-          timeout 60 claude --print -p "Say OK" || echo "Warmup complete"
+          # Run the warmup in a clean directory so Claude Code does not
+          # auto-discover CLAUDE.md / .claude/ from the (untrusted) PR tree
+          # at $GITHUB_WORKSPACE. The OAUTH token is in env at this step,
+          # and a malicious workspace CLAUDE.md could otherwise prompt-inject
+          # the warmup invocation into echoing it.
+          warmup_dir=$(mktemp -d)
+          ( cd "$warmup_dir" && timeout 60 claude --print -p "Say OK" ) || echo "Warmup complete"
+          rm -rf "$warmup_dir"
 
       # claude-code-action only auto-configures the inline-comment MCP server
       # for pull_request* events. Wire it up manually so it works regardless
@@ -276,7 +318,7 @@ jobs:
         id: review
         if: env.ACTION == 'review'
         timeout-minutes: 30
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@dde2242db6af13460b916652159b6ba19a598f30  # v1.0.120
         env:
           # Same token is exposed to the model's `gh` subprocess so it can
           # comment on the PR. Mirrors the `github_token:` input below.
@@ -293,8 +335,18 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           allowed_bots: "github-actions[bot]"
           show_full_output: true
+          # Strict allowlist for Bash(...) and MCP tools (no disallowedTools).
+          # The matcher splits chained commands on `;`/`&&`/`|` and checks
+          # each segment, so `Bash(git diff *)` covers `BASE=…; git diff …`
+          # but `Bash(echo *)` is still needed for the `echo "---"` segment.
+          # Built-in tools (Read, Grep, Glob, Skill, TodoWrite, ToolSearch,
+          # Write, Edit) bypass --allowedTools enforcement, but Read/Grep/
+          # Glob/Skill are listed for documentation. Patterns are verified
+          # against past run transcripts; widen only when a transcript shows
+          # a needed command being denied — never to `Bash(gh *)`/`Bash(git
+          # *)`/`Bash(*)`.
           claude_args: |
-            --model claude-opus-4-7 --effort xhigh --allowedTools "Skill,mcp__github_inline_comment__create_inline_comment,Bash(gh *),Bash(git *),Bash(jq *),Bash(head *),Bash(grep *),Read,Grep,Glob" --disallowedTools "Bash(gh pr close *),Bash(gh pr merge *),Bash(gh pr edit *),Bash(gh pr lock *),Bash(gh pr ready *),Bash(gh pr reopen *),Bash(gh pr review *),Bash(gh repo *),Bash(gh release *),Bash(gh workflow *),Bash(gh run *),Bash(gh secret *),Bash(gh ssh-key *),Bash(gh auth *),Bash(git push *),Bash(git reset *),Bash(git rebase *),Bash(git checkout *),Bash(git clean *)" --mcp-config ${{ steps.mcp.outputs.file }}
+            --model claude-opus-4-7 --effort xhigh --allowedTools "Skill,mcp__github_inline_comment__create_inline_comment,Bash(gh pr view *),Bash(gh pr comment *),Bash(gh pr diff *),Bash(gh api repos/*),Bash(gh api /repos/*),Bash(gh api --paginate repos/*),Bash(gh api --paginate /repos/*),Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git cat-file *),Bash(git ls-files *),Bash(git rev-parse *),Bash(git rev-list *),Bash(git ls-remote *),Bash(git merge-base *),Bash(git fetch *),Bash(git status),Bash(git status *),Bash(jq *),Bash(head *),Bash(grep *),Bash(echo *),Bash(ls),Bash(ls *),Read,Grep,Glob" --mcp-config ${{ steps.mcp.outputs.file }}
           settings: |
             { "hasCompletedOnboarding": true }
           prompt: |
@@ -376,7 +428,7 @@ jobs:
         id: summary
         if: env.ACTION == 'summary'
         timeout-minutes: 20
-        uses: anthropics/claude-code-action@v1
+        uses: anthropics/claude-code-action@dde2242db6af13460b916652159b6ba19a598f30  # v1.0.120
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -385,8 +437,19 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           allowed_bots: "github-actions[bot]"
           show_full_output: true
+          # Strict allowlist for Bash(...) and MCP (see review step for the
+          # full rationale). Summary additionally needs:
+          #   - `gh api -X{POST,PATCH} repos/*/issues/*/comments` to create
+          #     or update the walkthrough top-level comment (past runs use
+          #     either `gh api -F body=@-` or `gh pr comment --body-file`);
+          #   - `cat *` for `cat > /tmp/walkthrough.md <<EOF` heredocs the
+          #     model uses to stage the body before posting;
+          #   - `git fetch *` / `git merge-base *` for shallow-clone deepening
+          #     when the synthetic merge commit's parents aren't reachable.
+          # Review intentionally does NOT allow POST/PATCH against the issues
+          # comments endpoint; it posts inline via the MCP tool instead.
           claude_args: |
-            --model claude-opus-4-7 --effort xhigh --allowedTools "Skill,Bash(gh *),Bash(git *),Bash(jq *),Read,Grep,Glob" --disallowedTools "Bash(gh pr close *),Bash(gh pr merge *),Bash(gh pr edit *),Bash(gh pr lock *),Bash(gh pr ready *),Bash(gh pr reopen *),Bash(gh pr review *),Bash(gh repo *),Bash(gh release *),Bash(gh workflow *),Bash(gh run *),Bash(gh secret *),Bash(gh ssh-key *),Bash(gh auth *),Bash(git push *),Bash(git reset *),Bash(git rebase *),Bash(git checkout *),Bash(git clean *)"
+            --model claude-opus-4-7 --effort xhigh --allowedTools "Skill,Bash(gh pr view *),Bash(gh pr comment *),Bash(gh pr diff *),Bash(gh api repos/*),Bash(gh api /repos/*),Bash(gh api --paginate repos/*),Bash(gh api --paginate /repos/*),Bash(gh api --method POST repos/*),Bash(gh api --method POST /repos/*),Bash(gh api -X POST repos/*),Bash(gh api -X POST /repos/*),Bash(gh api --method PATCH repos/*),Bash(gh api --method PATCH /repos/*),Bash(gh api -X PATCH repos/*),Bash(gh api -X PATCH /repos/*),Bash(git diff *),Bash(git log *),Bash(git show *),Bash(git cat-file *),Bash(git ls-files *),Bash(git rev-parse *),Bash(git rev-list *),Bash(git merge-base *),Bash(git fetch *),Bash(git status),Bash(git status *),Bash(jq *),Bash(echo *),Bash(cat *),Bash(ls),Bash(ls *),Read,Grep,Glob"
           settings: |
             { "hasCompletedOnboarding": true }
           prompt: |
@@ -454,7 +517,7 @@ jobs:
 
       - name: Upload Claude execution log
         if: always() && (steps.review.outputs.execution_file != '' || steps.summary.outputs.execution_file != '')
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02  # v4.6.2
         with:
           name: claude-${{ env.ACTION }}-pr${{ env.PR_NUMBER }}-log
           path: ${{ steps.review.outputs.execution_file || steps.summary.outputs.execution_file }}

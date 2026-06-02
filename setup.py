@@ -16,7 +16,10 @@ from typing import List, Tuple
 
 import setuptools
 from setuptools.command.egg_info import egg_info
-from wheel.bdist_wheel import bdist_wheel
+try:
+    from setuptools.command.bdist_wheel import bdist_wheel
+except ImportError:
+    from wheel.bdist_wheel import bdist_wheel
 
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
@@ -122,11 +125,6 @@ def setup_common_extension() -> CMakeExtension:
             f"nvidia-cublasmp-cu{cuda_version()[0]}"
         ).locate_file(f"nvidia/cublasmp/cu{cuda_version()[0]}")
         cmake_flags.append(f"-DCUBLASMP_DIR={cublasmp_dir}")
-        nvshmem_dir = os.getenv("NVSHMEM_HOME") or metadata.distribution(
-            f"nvidia-nvshmem-cu{cuda_version()[0]}"
-        ).locate_file("nvidia/nvshmem")
-        cmake_flags.append(f"-DNVSHMEM_DIR={nvshmem_dir}")
-        print("CMAKE_FLAGS:", cmake_flags[-2:])
 
     # Add custom CMake arguments from environment variable
     nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")
