@@ -422,7 +422,7 @@ class FusedAttnRunner:
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
 
-        if get_device_compute_capability(0) >= 100 and self.is_training:
+        if not is_hip_extension() and get_device_compute_capability(0) >= 100 and self.is_training:
             if FusedAttnHelper.is_non_deterministic_allowed() and (
                 (self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS)
                 or get_cudnn_version() < 90700
@@ -1078,7 +1078,7 @@ class FusedAttnRunner:
 
             # Assume all batch has the same actual_seqlen, probably needs to extend the tests
             bias_mask = self.mask[0, 0]
-            
+
             # Assert all masked dbias are 0s
             assert_allclose(
                 jnp.where(bias_mask, primitive_dbias, 0),
@@ -1488,40 +1488,6 @@ class TestFusedAttn:
         )
         runner.test_backward()
 
-# Single test with new-style RNG
-@pytest.mark.skipif(
-    not is_hip_extension(), reason="New-style RNGs only enabled on AMD hardware"
-)
-def test_jax_new_rng():
-    """
-    Non-regression test evaluating whether
-    `_FusedAttnRNGStateChecker.check_seed` can correctly handle a new-style
-    JAX PRNG seed.
-    """
-    # Arbitrary args, except `dropout_prob` which needs to be >0
-    kwargs = dict(
-        batch_size = 2,
-        max_seqlen_q = 2048,
-        max_seqlen_kv = 2048,
-        num_heads_q = 12,
-        num_heads_kv = 12,
-        head_dim_qk = 64,
-        head_dim_v = 64,
-        attn_bias_type = AttnBiasType.NO_BIAS,
-        attn_mask_type = AttnMaskType.NO_MASK,
-        softmax_type = AttnSoftmaxType.VANILLA_SOFTMAX,
-        dropout_prob = 0.1,
-        use_old_rng = False,
-        dtype = jnp.bfloat16,
-        is_training = True,
-        qkv_layout = QKVLayout.BS3HD,
-        bias_shape = BiasShape._1HSS,
-        seq_desc_format = SeqDescFormat.Mask,
-        window_size = None,
-    )
-    runner = FusedAttnRunner(**kwargs)
-    runner.test_forward()
-
 
 @pytest.mark.parametrize(
     "attn_mask_type",
@@ -1700,3 +1666,37 @@ class TestFusedAttnWithDeterminism:
             swa,
             seq_desc_format,
         )
+
+# Single test with new-style RNG
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="New-style RNGs only enabled on AMD hardware"
+)
+def test_jax_new_rng():
+    """
+    Non-regression test evaluating whether
+    `_FusedAttnRNGStateChecker.check_seed` can correctly handle a new-style
+    JAX PRNG seed.
+    """
+    # Arbitrary args, except `dropout_prob` which needs to be >0
+    kwargs = dict(
+        batch_size = 2,
+        max_seqlen_q = 2048,
+        max_seqlen_kv = 2048,
+        num_heads_q = 12,
+        num_heads_kv = 12,
+        head_dim_qk = 64,
+        head_dim_v = 64,
+        attn_bias_type = AttnBiasType.NO_BIAS,
+        attn_mask_type = AttnMaskType.NO_MASK,
+        softmax_type = AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_prob = 0.1,
+        use_old_rng = False,
+        dtype = jnp.bfloat16,
+        is_training = True,
+        qkv_layout = QKVLayout.BS3HD,
+        bias_shape = BiasShape._1HSS,
+        seq_desc_format = SeqDescFormat.Mask,
+        window_size = None,
+    )
+    runner = FusedAttnRunner(**kwargs)
+    runner.test_forward()

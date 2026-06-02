@@ -1,5 +1,6 @@
 #!/usr/bin/python3
-
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -19,6 +20,7 @@ import torch.nn.functional as F
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import DeviceMesh
 from torch.distributed.tensor import DTensor
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import QuantizedTensor
@@ -181,6 +183,9 @@ def test_fused_adam_fp8_master_weights(recipe=None):
         with te.autocast(enabled=True, recipe=recipe):
             output = model(x)
         loss = F.mse_loss(output, target)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
 
@@ -239,6 +244,9 @@ def test_fused_adam_fp8_master_weights_no_meta(recipe=None):
         with te.autocast(enabled=True, recipe=recipe):
             output = model(x)
         loss = F.mse_loss(output, target)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
 
@@ -311,6 +319,9 @@ def test_fused_adam_fp8_no_master(recipe=None):
         with te.autocast(enabled=True, recipe=recipe):
             output = model(x)
         loss = F.mse_loss(output, target)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
 
@@ -474,6 +485,9 @@ def test_safetensors_fp32_export(recipe=None):
         with te.autocast(enabled=True, recipe=recipe):
             output = model(x)
         loss = F.mse_loss(output, target)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
 
@@ -548,6 +562,9 @@ def test_dcp_output_parity(recipe=None, async_save=False):
         with te.autocast(enabled=True, recipe=recipe):
             output = model(x)
         loss = F.mse_loss(output, target)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
 
@@ -593,6 +610,9 @@ def test_dcp_output_parity(recipe=None, async_save=False):
     optimizer2.zero_grad(set_to_none=True)
     with te.autocast(enabled=True, recipe=recipe):
         out_tmp = model2(x)
+    # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+    if IS_HIP_EXTENSION:
+        torch.cuda.current_stream().synchronize()
     F.mse_loss(out_tmp, target).backward()
     optimizer2.step()
 
@@ -645,6 +665,9 @@ def test_dcp_output_parity(recipe=None, async_save=False):
     with te.autocast(enabled=True, recipe=recipe):
         out1 = model(x)
     loss1 = F.mse_loss(out1, target)
+    # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+    if IS_HIP_EXTENSION:
+        torch.cuda.current_stream().synchronize()
     loss1.backward()
     optimizer.step()
 
@@ -652,6 +675,9 @@ def test_dcp_output_parity(recipe=None, async_save=False):
     with te.autocast(enabled=True, recipe=recipe):
         out2 = model2(x)
     loss2 = F.mse_loss(out2, target)
+    # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+    if IS_HIP_EXTENSION:
+        torch.cuda.current_stream().synchronize()
     loss2.backward()
     optimizer2.step()
 

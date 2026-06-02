@@ -406,7 +406,17 @@ class FusedAdam(torch.optim.Optimizer):
         param_for_empty = (
             local_param.dequantize() if isinstance(local_param, QuantizedTensor) else local_param
         )
-        if store_param_remainders:
+        #ROCm: create plain `torch.Tensor` instead of `FSDPAGTensor` subclasses
+        if IS_HIP_EXTENSION:
+            if store_param_remainders:
+                data = torch.zeros(
+                    param_for_empty.shape, dtype=torch.int16, device=param_for_empty.device
+                )
+            else:
+                data = torch.empty(
+                    param_for_empty.shape, dtype=dtype, device=param_for_empty.device
+                )
+        elif store_param_remainders:
             data = torch.zeros_like(param_for_empty, dtype=torch.int16)
         else:
             data = torch.empty_like(param_for_empty, dtype=dtype)
@@ -612,6 +622,19 @@ class FusedAdam(torch.optim.Optimizer):
                             unscaled_lists[name].append(unscaled)
                             scaled_lists[name].append(state[name])
                             state_scales[name].append(self._scales[p][name])
+                # ROCm: extract local tensor data from DTensor (FSDP2) to ensure
+                # consistent shapes with optimizer states (which are local tensors).
+                local_p = p._local_tensor if IS_HIP_EXTENSION and isinstance(p, DTensor) else p
+                local_g = ( p_grad._local_tensor if IS_HIP_EXTENSION and
+                           isinstance(p_grad, DTensor) else p_grad )
+
+                local_p_data = p._local_tensor.data if isinstance(p, DTensor) else p.data
+                local_g_data = (
+                    p_grad._local_tensor.data
+                    if isinstance(p_grad, DTensor)
+                    else p_grad.data
+                )
+
                 if isinstance(p, Float8Tensor) or (
                     isinstance(p, DTensor) and isinstance(p._local_tensor, Float8Tensor)
                 ):
@@ -624,7 +647,7 @@ class FusedAdam(torch.optim.Optimizer):
                     scale_invs.append(scale_inv)
                     if self.master_weights:
                         p_main_of_fp8_model.append(unscaled_state["master_param"].data)
-                    g_of_fp8_model.append(p_grad.data)
+                    g_of_fp8_model.append(local_g.data)
                     m_of_fp8_model.append(unscaled_state["exp_avg"])
                     v_of_fp8_model.append(unscaled_state["exp_avg_sq"])
                 elif isinstance(p, QuantizedTensor) or (
@@ -646,22 +669,22 @@ class FusedAdam(torch.optim.Optimizer):
                     # Gradients may be BF16/FP16 from the backward pass — cast to FP32
                     # to match the FP32 Adam kernel expectations.
                     p_f32_model.append(unscaled_state["master_param"].data)
-                    g_of_f32_model.append(p_grad.data.float())
+                    g_of_f32_model.append(local_g.data.float())
                     m_of_f32_model.append(unscaled_state["exp_avg"])
                     v_of_f32_model.append(unscaled_state["exp_avg_sq"])
                     quantized_params_to_update.append((p, unscaled_state["master_param"]))
                 elif p.dtype in [torch.float16, torch.bfloat16]:
                     has_fp16 = has_fp16 or p.dtype == torch.float16
                     has_bf16 = has_bf16 or p.dtype == torch.bfloat16
-                    p_f16_model.append(p.data)
+                    p_f16_model.append(local_p.data)
                     if self.master_weights:
                         p_main_of_f16_model.append(unscaled_state["master_param"].data)
-                    g_of_f16_model.append(p_grad.data)
+                    g_of_f16_model.append(local_g.data)
                     m_of_f16_model.append(unscaled_state["exp_avg"])
                     v_of_f16_model.append(unscaled_state["exp_avg_sq"])
                 elif p.dtype == torch.float32:
-                    p_f32_model.append(p.data)
-                    g_of_f32_model.append(p_grad.data)
+                    p_f32_model.append(local_p.data)
+                    g_of_f32_model.append(local_g.data)
                     m_of_f32_model.append(unscaled_state["exp_avg"])
                     v_of_f32_model.append(unscaled_state["exp_avg_sq"])
                 else:

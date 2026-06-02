@@ -730,7 +730,7 @@ def get_attention_backend(
             )
             use_unfused_attention = False
         if qkv_format == "thd":
-            if cudnn_version < (9, 18, 0):
+            if not IS_HIP_EXTENSION and cudnn_version < (9, 18, 0):
                 logger.debug(
                     "Disabling FusedAttention for softmax_type = %s, qkv_format = thd and cuDNN"
                     " version < 9.18",
@@ -884,7 +884,7 @@ def get_attention_backend(
                 "Disabling FusedAttention as it does not support sliding window attention for FP8"
             )
             use_fused_attention = False
-        elif attention_dropout != 0.0:
+        elif not IS_HIP_EXTENSION and attention_dropout != 0.0:
             logger.debug(
                 "Disabling FusedAttention as it only supports sliding window attention "
                 "without dropout"
@@ -968,9 +968,12 @@ def get_attention_backend(
         ):
             fu_core_attention_bias_shape = "bhss"
 
-    # rocm ck backend support all 4 bias shapes (11ss, 1hss, b1ss, and bhss)
-    if (
-        not IS_HIP_EXTENSION and
+    # rocm ck backend support 4 bias shapes (11ss, 1hss, b1ss, and bhss)
+    if IS_HIP_EXTENSION:
+        if use_fused_attention and fu_core_attention_bias_shape == "111s":
+            logger.debug("Disabling FusedAttention as ROCm backends do not support 111s")
+            use_fused_attention = False
+    elif (
         use_fused_attention
         and fu_core_attention_bias_type == "post_scale_bias"
         and fu_core_attention_bias_shape != "1hss"

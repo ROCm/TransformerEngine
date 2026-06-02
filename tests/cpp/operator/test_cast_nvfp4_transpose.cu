@@ -393,7 +393,21 @@ void compare_nvfp4_tensors(const std::string& name,
                 const double t = (k == 0 ? test_data_pair.x : test_data_pair.y);
                 const double r = (k == 0 ? ref_data_pair.x : ref_data_pair.y);
 
+#ifndef __HIP_PLATFORM_AMD__
                 const bool mismatch = fabs(t - r) > (atol + fabs(r) * rtol);
+#else
+                bool mismatch = fabs(t - r) > (atol + fabs(r) * rtol);
+                if (mismatch) {
+                    /* Check if it is just a failure of round to nearest choosing different
+                        side of the real value */
+                    const double mean = (t + r) / 2;
+                    const double mean_p = mean >= 0 ? mean * (1 + 1e-6) : mean * (1 - 1e-6);
+                    const double mean_m = mean >= 0 ? mean * (1 - 1e-6) : mean * (1 + 1e-6);
+                    const double cast_mean_p = static_cast<double>(static_cast<fp4e2m1>(mean_p));
+                    const double cast_mean_m = static_cast<double>(static_cast<fp4e2m1>(mean_m));
+                    mismatch = !(cast_mean_m == std::min(t,r) && cast_mean_p == std::max(t,r));
+                }
+#endif
                 if (mismatch) {
                     total_mismatches++;
                     // Optional: limit number of detailed messages to avoid overwhelming output
@@ -620,10 +634,10 @@ void performTest(float (*OP)(const float),
     rng_state.from_cpu();
 
     QuantizationConfigWrapper quant_config;
+    quant_config.set_use_fast_math(use_fast_math);
 #ifdef __HIP_PLATFORM_AMD__
     quant_config.set_stochastic_rounding(use_stochastic_rounding);
 #else
-    quant_config.set_use_fast_math(use_fast_math);
     quant_config.set_stochastic_rounding(false);
 #endif
     quant_config.set_rng_state(rng_state.data());

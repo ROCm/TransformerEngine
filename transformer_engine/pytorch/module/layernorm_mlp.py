@@ -229,8 +229,8 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_overlap_ag,
             ub_overlap_rs,
             ub_overlap_rs_dgrad,
-            ub_bulk_wgrad,
-            ub_bulk_dgrad,
+            ub_bulk_wgrad, #ROCm: there is a but in upstream - order of dgrad and wgrad here bug here
+            ub_bulk_dgrad, #does not match order in LayerNormMLP::forward. Fix it there
             gemm_gelu_fusion,
             fsdp_group,
             module,
@@ -557,7 +557,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 gemm_gelu_fusion = False
         if debug:
             gemm_gelu_fusion = False
-        
+
         if IS_HIP_EXTENSION and fp8 and not keep_fp8_weight_transpose_cache:
             assert fc1_weight_final._transpose is None or fc1_weight_final._transpose.numel() == 0, "Expected _transpose to be None or an empty tensor when transpose cache is disabled."
 
@@ -1402,7 +1402,6 @@ class _LayerNormMLP(torch.autograd.Function):
                     # Overlap FC1 DGRAD reduce-scatter with WGRAD compute
                     ub_obj_fc1_wgrad = get_ub("fc1_wgrad", ctx.fp8)
                     ub_type_fc1_wgrad = tex.CommOverlapType.RS
-            
 
             # --------------------------------------------------
             # FC1 DGRAD
@@ -1678,7 +1677,7 @@ class _LayerNormMLP(torch.autograd.Function):
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
             if ctx.autocast_fp8_reduction_skipped:
-                FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True)                    
+                FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=True)
 
         # FIX THIS
         # Scatter Fp8 tranposed-weight buffers
@@ -2216,8 +2215,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                 self.ub_overlap_ag,
                 self.ub_overlap_rs,
                 self.ub_overlap_rs_dgrad,
-                self.ub_bulk_wgrad,
-                self.ub_bulk_dgrad,
+                self.ub_bulk_wgrad, #ROCm: there is a bug in upstream with dgrad and wgrad
+                self.ub_bulk_dgrad, #order not matching _LayerNormMLP::_forward
                 self.gemm_gelu_fusion and not debug,
                 self.fsdp_group,
                 self,

@@ -37,9 +37,6 @@ if not is_hip_extension():
 
 from .base import BasePrimitive, register_primitive
 from .quantization import grouped_quantize
-
-from ..util import is_hip_extension, get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
-
 from ..quantize import (
     AbstractBaseTensor,
     NoScaleTensor,
@@ -62,6 +59,8 @@ from ..sharding import (
     tpsp_axis_size,
     dp_or_fsdp_axis_size,
 )
+
+from ..util import get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 
 
 __all__ = [
@@ -86,8 +85,11 @@ num_cublas_streams = get_num_compute_streams()
 # Calling get_grouped_gemm_setup_workspace_size raises a RuntimeError mentioning "cublas" when
 # compiled against cuBLAS < 13.2, in which case the cuda-graphable path is unavailable.
 try:
-    get_grouped_gemm_setup_workspace_size(1)
-    _v2_grouped_gemm_available = True
+    if is_hip_extension():
+        _v2_grouped_gemm_available = False
+    else:
+        get_grouped_gemm_setup_workspace_size(1)
+        _v2_grouped_gemm_available = True
 except RuntimeError as e:
     if "cublas" in str(e).lower():
         _v2_grouped_gemm_available = False
@@ -311,7 +313,8 @@ def collective_gemm_bootstrap(
         this function with its own unique process_id.
     """
     if is_hip_extension():
-        assert 0, "collective_gemm_bootstrap is not supported for ROCm yet."
+        raise NotImplementedError("Collective GEMM is not supported for ROCm yet.")
+
     if not (num_devices_per_process == 1 and jax.local_device_count() == 1):
         raise RuntimeError("Only single device per process is supported at the moment!")
     if num_total_devices % num_devices_per_process != 0:

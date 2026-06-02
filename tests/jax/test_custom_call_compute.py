@@ -1826,8 +1826,6 @@ class TestGroupedDense:
             dtype, input_shape, layout
         )
         if use_async_d2h_group_size:
-            if is_hip_extension():
-                pytest.skip("ROCm does not support use_async_d2h_group_sizes yet.")
             num_gemms = input_shape[0]
             _ = jax.jit(tex.grouped_gemm_copy_group_sizes, static_argnames=("num_gemms",))(
                 group_sizes,
@@ -1990,7 +1988,7 @@ class TestDebugInspectFFI:
             # Note: fp4 currently doesn't work
             # jnp.float4_e2m1fn
         ]
-        + ([jnp.float8_e4m3fn, jnp.float8_e5m2] if is_fp8_supported else []),
+        + ([jnp_float8_e4m3_type, jnp_float8_e5m2_type] if is_fp8_supported else []),
     )
     def test_debug_inspect_ffi(self, shape, dtype):
         from transformer_engine.jax.debug.experimental import inspect_array, load_array_dump

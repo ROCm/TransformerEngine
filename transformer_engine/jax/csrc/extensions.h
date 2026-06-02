@@ -150,8 +150,10 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 // GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmV2Handler);
+#ifndef USE_ROCM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CollectiveGemmInitHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GemmInitV2Handler);
+#endif
 
 // Grouped GEMM
 XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmD2HGroupSizesHandler);
@@ -162,10 +164,12 @@ XLA_FFI_DECLARE_HANDLER_SYMBOL(GroupedGemmV2Handler);
 // Amax
 XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationInitializeHandler);
 XLA_FFI_DECLARE_HANDLER_SYMBOL(RHTAmaxCalculationHandler);
+#endif
 
 // Inspect
 XLA_FFI_DECLARE_HANDLER_SYMBOL(InspectHandler);
 
+#ifndef USE_ROCM
 // Cudnn helpers
 XLA_FFI_DECLARE_HANDLER_SYMBOL(CudnnHandleInitHandler);
 

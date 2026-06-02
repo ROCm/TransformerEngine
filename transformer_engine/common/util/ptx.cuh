@@ -126,17 +126,6 @@ constexpr bool is_supported_arch() {
 #define ARCH_HAS_STOCHASTIC_ROUNDING \
   NVTE_CUDA_ARCH_MATCHES(ptx::ArchSpecific<100>, ptx::ArchSpecific<103>)
 
-#else
-
-// Native FP4 stochastic rounding is available on gfx950 and later.
-#if defined(__gfx950__)
-#define ARCH_HAS_STOCHASTIC_ROUNDING (true)
-#else
-#define ARCH_HAS_STOCHASTIC_ROUNDING (false)
-#endif
-
-#endif //#ifndef __HIP_PLATFORM_AMD__
-
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -338,6 +327,17 @@ __device__ __forceinline__ void get_cancelled_cta_id_2D(__uint128_t *response_da
   }
 }
 
+#else
+
+// Native FP4 stochastic rounding is available on gfx950 and later.
+#if defined(__gfx950__)
+#define ARCH_HAS_STOCHASTIC_ROUNDING (true)
+#else
+#define ARCH_HAS_STOCHASTIC_ROUNDING (false)
+#endif
+
+#endif //#ifndef __HIP_PLATFORM_AMD__
+
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 
@@ -393,6 +393,7 @@ __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
 #endif //#ifndef __HIP_PLATFORM_AMD__
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor
 // shared::cta -> global
 __device__ __forceinline__ void cp_async_bulk_tensor_1d_shared_to_global(uint64_t *dst_global_ptr,
@@ -501,6 +502,8 @@ __device__ __forceinline__ void fence_proxy_async_shared_cta() {
   NVTE_DEVICE_ERROR("fence_proxy_async_shared_cta is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
+
+#endif //!__HIP_PLATFORM_AMD__
 
 template <typename T>
 struct alignas(2 * sizeof(T)) FPx2 {
@@ -785,6 +788,8 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x(const float2 in01, c
   }
 }
 
+#ifndef __HIP_PLATFORM_AMD__
+
 template <typename SCALING_COEFFICIENT_TYPE>
 __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_round_to_nearest(
     const uint64_t in03, const uint64_t in47, const SCALING_COEFFICIENT_TYPE scaling_coefficient) {
@@ -957,7 +962,10 @@ __device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
   return out_8x;
 }
 
+#endif //!__HIP_PLATFORM_AMD__
 #endif  // FP4_TYPE_SUPPORTED
+
+#ifndef __HIP_PLATFORM_AMD__
 
 // SIMD like "Fused" cast + multiplication (x2)
 __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const floatx2 &in,
@@ -1126,7 +1134,6 @@ __device__ __forceinline__ void abs_max_2x(fp16x2 &dst, const fp16x2 &p1, const 
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
 
-#ifndef __HIP_PLATFORM_AMD__
 __device__ __forceinline__ int32_t elect_one_sync(uint32_t mask = 0xFFFFFFFFu) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   int32_t pred = 0;
@@ -1808,7 +1815,6 @@ __device__ __forceinline__ floatx4 up_cast(const bf16x4 &in) {
       : "r"(in2[0]), "r"(in2[1]));
   return out;
 }
-#endif //#ifndef __HIP_PLATFORM_AMD__
 
 // Loads single BF16/FP16 element from shared memory state space
 __device__ __forceinline__ bf16 ld_shared_b16(const bf16 *__restrict__ src_smem) {
@@ -1862,6 +1868,7 @@ __device__ __forceinline__ void st_shared_b64(fp4e2m1x2 *__restrict__ dst_smem,
   asm volatile("st.shared.b64 [%0], %1;" : : "r"(dst_smem_ptr), "l"(fp4_pack_x16));
 }
 #endif
+#endif //!__HIP_PLATFORM_AMD__
 }  // namespace ptx
 
 namespace {

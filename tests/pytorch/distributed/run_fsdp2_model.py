@@ -21,6 +21,7 @@ from torch import nn, optim
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch import QuantizedTensor
 from contextlib import nullcontext
 
@@ -339,6 +340,9 @@ def _train(args):
                 output = model(input_data)
                 loss = F.mse_loss(output, target)
 
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
         dist_print(f"Iteration {iteration} completed with loss {loss.item()}")

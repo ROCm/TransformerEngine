@@ -12,7 +12,6 @@
 #include <cuda_runtime_api.h>
 
 #include <string>
-
 namespace transformer_engine {
 
 namespace cuda {
@@ -85,13 +84,13 @@ const std::string &include_directory(bool required = false);
  * Versions may differ between compile-time and run-time.
  */
 int cudart_version();
-#endif
 
 /* \brief cuBLAS version number at run-time
  *
  * Versions may differ between compile-time and run-time.
  */
 size_t cublas_version();
+#endif
 
 }  // namespace cuda
 

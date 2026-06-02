@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -60,6 +62,9 @@ void compute_ref(const ProcessingMethod processing_method,
                  const size_t scales_stride_rowwise,
                  const size_t scales_stride_colwise)
 {
+#ifdef __HIP_PLATFORM_AMD__
+    using std::isnan, std::isinf;
+#endif
     const size_t tile_size_Y = 32;
     const size_t tile_size_X = 32;
     const size_t tiles_num_Y = (rows + tile_size_Y - 1) / tile_size_Y;
@@ -559,10 +564,25 @@ void performTest(const ProcessingMethod processing_method,
         cudaMemcpy(out_scales_rowwise_h.data(), out_scales_rowwise_d, rowwise_scales_size, cudaMemcpyDeviceToHost);
 
         size_t mismatches_scales = 0;
+#ifdef USE_ROCM
+        std::vector<size_t> mismatches_scales_indices;
+#endif
         compare_scaling_factors("rowwise_scales", out_scales_rowwise_h.data(), out_scales_rowwise_ref.data(),
-                                1, rowwise_sfs_num, rowwise_sfs_num, mismatches_scales, scale_diff_abs_tolerance,
+                                1, rowwise_sfs_num, rowwise_sfs_num,
+#ifdef USE_ROCM
+                                mismatches_scales_indices,
+#endif
+                                mismatches_scales, scale_diff_abs_tolerance,
                                 abs_tolerable_mismatches_limit, rel_tolerable_mismatches_limit);
 
+#ifdef USE_ROCM
+        if (::testing::Test::HasFatalFailure()) return;
+        adjust_ref_for_e8m0_scale_error("rowwise_scales", mismatches_scales_indices,
+                                        out_scales_rowwise_h.data(), out_scales_rowwise_ref.data(),
+                                        rowwise_sfs_num, rows, cols, true,
+                                        out_data_rowwise_ref.data(), otype);
+        mismatches_scales = 0;
+#endif
         const size_t mismatches_elts = 32 * mismatches_scales;
 
         compare_scaled_elts<OutputType>("rowwise_output", out_data_rowwise_ref.data(),
@@ -574,10 +594,25 @@ void performTest(const ProcessingMethod processing_method,
         cudaMemcpy(out_scales_colwise_h.data(), out_scales_colwise_d, colwise_scales_size, cudaMemcpyDeviceToHost);
 
         size_t mismatches_scales = 0;
+#ifdef USE_ROCM
+        std::vector<size_t> mismatches_scales_indices;
+#endif
         compare_scaling_factors("colwise_scales", out_scales_colwise_h.data(), out_scales_colwise_ref.data(),
-                                1, colwise_sfs_num, colwise_sfs_num, mismatches_scales, scale_diff_abs_tolerance,
+                                1, colwise_sfs_num, colwise_sfs_num,
+#ifdef USE_ROCM
+                                mismatches_scales_indices,
+#endif
+                                mismatches_scales, scale_diff_abs_tolerance,
                                 abs_tolerable_mismatches_limit, rel_tolerable_mismatches_limit);
 
+#ifdef USE_ROCM
+        if (::testing::Test::HasFatalFailure()) return;
+        adjust_ref_for_e8m0_scale_error("colwise_scales", mismatches_scales_indices,
+                                        out_scales_colwise_h.data(), out_scales_colwise_ref.data(),
+                                        colwise_sfs_num, rows, cols, false,
+                                        out_data_colwise_ref.data(), otype);
+        mismatches_scales = 0;
+#endif
         const size_t mismatches_elts = 32 * mismatches_scales;
 
         compare_scaled_elts<OutputType>("colwise_output", out_data_colwise_ref.data(),
@@ -763,6 +798,7 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
             case ActivationKind::ReLU: OP = &relu; break;
             case ActivationKind::QGeLU: OP = &qgelu; break;
             case ActivationKind::SReLU: OP = &srelu; break;
+            case ActivationKind::Identity: /*ROCm: comiler warining*/ break;
         }
     } else if (processing_method == ProcessingMethod::CAST_DACT
                || processing_method == ProcessingMethod::CAST_DBIAS_DACT) {
@@ -772,6 +808,7 @@ TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
             case ActivationKind::ReLU: OP = &drelu; break;
             case ActivationKind::QGeLU: OP = &dqgelu; break;
             case ActivationKind::SReLU: OP = &dsrelu; break;
+            case ActivationKind::Identity: /*ROCm: comiler warining*/ break;
         }
     }
 

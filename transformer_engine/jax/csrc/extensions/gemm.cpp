@@ -370,7 +370,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GemmV2Handler, GemmV2FFI,
                                   .Ret<Buffer_Type>()      // output
                                   .Ret<Buffer_Type>()      // workspace
                                   .Attr<GemmConfig>("config"),
-                              FFI_CudaGraph_Traits);
+                              GemmFFI_CudaGraph_Traits);
 
 Error_Type GemmFFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale_inv, Buffer_Type rhs,
                    Buffer_Type rhs_scale_inv, Buffer_Type bias, Buffer_Type gelu_input,
@@ -872,7 +872,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
                                   .Attr<bool>("rhs_is_trans")
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<bool>("is_grouped_dense_wgrad"),
-                              FFI_CudaGraph_Traits);
+                              GemmFFI_CudaGraph_Traits);
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
@@ -1245,7 +1245,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   }
 #endif
 
-// Launch zero-out kernels before the GEMM calls to use the sync in the multi-stream GEMM
+  // Launch zero-out kernels before the GEMM calls to use the sync in the multi-stream GEMM
   size_t num_zero_outs = zero_out_dptr_list.size();
   for (int i = 0; i < num_zero_outs; i++) {
     int stream_id = i % num_streams;

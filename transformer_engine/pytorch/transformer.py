@@ -11,6 +11,7 @@ from contextlib import nullcontext
 from typing import Any, Callable, List, Optional, Tuple, Union
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.module import LayerNormMLP, LayerNorm, RMSNorm
@@ -37,8 +38,6 @@ from transformer_engine.pytorch.distributed import get_distributed_world_size
 from transformer_engine.pytorch.export import is_in_onnx_export_mode
 from transformer_engine.pytorch.module.base import TransformerEngineBaseModule
 import transformer_engine.pytorch.attention.dot_product_attention.utils as dpa_utils
-
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 warnings.filterwarnings("module", category=DeprecationWarning, module="transformer")
 

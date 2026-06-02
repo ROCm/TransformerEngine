@@ -83,6 +83,7 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   return output_py;
 }
 
+#ifndef USE_ROCM
 namespace {
 
 // helper functions for NVFP4 grouped quantization (cuda graph safe with shapes stored in device without D2H copy)
@@ -158,6 +159,7 @@ void group_quantize_nvfp4_impl(const GroupedTensorWrapper &grouped_input_tensor,
 }
 
 }  // namespace
+#endif // USE_ROCM
 
 // NOTE: Only supports varying first dim.
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
@@ -212,10 +214,14 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
 
   switch (grouped_quantization_mode) {
     case GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE: {
+#ifdef USE_ROCM
+      NVTE_ERROR("NVFP4 grouped quantization is not supported on ROCm platform.");
+#else
       // NVFP4 grouped quantization
       NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
       group_quantize_nvfp4_impl(grouped_input_tensor, grouped_output_tensor_cpp,
                                 nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream());
+#endif  // USE_ROCM
       break;
     }
     case GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE: {

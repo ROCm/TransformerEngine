@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -102,7 +104,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
 
   for (int delta = kThreadsPerWarp / 2; delta > 0; delta /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+    float other_amax = __shfl_down(amax, delta, kThreadsPerWarp);
+#else
     float other_amax = __shfl_down_sync(0xFFFFFFFF, amax, delta);
+#endif
     __builtin_assume(amax >= 0);
     __builtin_assume(other_amax >= 0);
     amax = fmaxf(amax, other_amax);
@@ -178,10 +184,18 @@ __global__ void __launch_bounds__(kThreadsPerBlock)
   }
 
   for (int delta = kThreadsPerWarp / 2; delta > 0; delta /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+    bool other = __shfl_down(skip_store, delta, kThreadsPerWarp);
+#else
     bool other = __shfl_down_sync(0xFFFFFFFF, skip_store, delta);
+#endif
     skip_store = skip_store && other;
   }
+#ifdef __HIP_PLATFORM_AMD__
+  skip_store = __shfl(skip_store, 0, kThreadsPerWarp);
+#else
   skip_store = __shfl_sync(0xFFFFFFFF, skip_store, 0);
+#endif
   if (skip_store) {
     return;
   }
