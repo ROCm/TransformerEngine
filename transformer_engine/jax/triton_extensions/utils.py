@@ -421,13 +421,6 @@ def _compile_triton_hip(
         f.write(compiled.asm["hsaco"])
     _HSACO_TEMP_FILES.append(hsaco_path)
 
-    # The HIP TritonKernel constructor on this jax/jaxlib (0.8.0) takes
-    # `shared_mem_bytes` in slot 2 — not slot 5 as the public sample code
-    # suggests. The sample only works for kernels whose `shared` is 0
-    # (e.g. simple element-wise kernels), because there the misplaced 0 in
-    # slot 2 coincidentally matches the expected layout. Kernels using
-    # tl.dot need real LDS allocation and silently produce garbage when
-    # `shared` lands in the wrong constructor slot.
     return gpu_triton.TritonKernel(
         compiled.name,
         num_warps,
