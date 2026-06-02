@@ -275,8 +275,6 @@ __global__ void HadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap tensor
                           is_master_thread);
       }
 
-      ptx::fence_proxy_async_shared_cta();
-
       // Wait for the data to have arrived
       ptx::mbarrier_wait_parity(&mbar[stage], 0);
 
@@ -308,6 +306,9 @@ __global__ void HadamardAmaxTmaKernel(const __grid_constant__ CUtensorMap tensor
         // memory.
         __syncthreads();
       }
+
+      // Ensure generic shared-memory accesses are visible before the next TMA write.
+      ptx::fence_proxy_async_shared_cta();
     }
   }
 

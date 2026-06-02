@@ -135,7 +135,8 @@ def check_recipe_support(recipe: Recipe) -> None:
         recipe_supported, unsupported_reason = check_mxfp8_support()
     elif isinstance(recipe, MXFP4BlockScaling):
         recipe_supported, unsupported_reason = check_mxfp4_support()
-    assert recipe_supported, unsupported_reason
+    if not recipe_supported:
+        raise RuntimeError(unsupported_reason)
 
 
 def get_default_fp8_recipe() -> Recipe:

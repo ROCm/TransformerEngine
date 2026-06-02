@@ -89,7 +89,6 @@ class TestDistributedLayernorm:
     @pytest_parametrize_wrapper("zero_centered_gamma", [False, True])
     @pytest_parametrize_wrapper("shard_weights", [False, True])
     @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
-    @pytest_parametrize_wrapper("use_shardy", [False, True] if version.parse(jax.__version__) >= version.parse("0.5.0") else [False])
     def test_layernorm(
         self,
         device_count,
@@ -101,9 +100,7 @@ class TestDistributedLayernorm:
         zero_centered_gamma,
         shard_weights,
         fp8_recipe,
-        use_shardy,
     ):
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         epsilon = 1e-6
         ln_type = "layernorm"
         q_dtype = get_jnp_float8_e4m3_type()
@@ -180,7 +177,6 @@ class TestDistributedLayernorm:
     @pytest_parametrize_wrapper("dtype", DTYPES)
     @pytest_parametrize_wrapper("shard_weights", [False, True])
     @pytest_parametrize_wrapper("fp8_recipe", SUPPORTED_RECIPES)
-    @pytest_parametrize_wrapper("use_shardy", [False, True] if version.parse(jax.__version__) >= version.parse("0.5.0") else [False])
     def test_rmsnorm(
         self,
         device_count,
@@ -191,9 +187,7 @@ class TestDistributedLayernorm:
         dtype,
         shard_weights,
         fp8_recipe,
-        use_shardy,
     ):
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         epsilon = 1e-6
         ln_type = "rmsnorm"
         q_dtype = get_jnp_float8_e4m3_type()

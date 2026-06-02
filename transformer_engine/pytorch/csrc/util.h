@@ -1,6 +1,4 @@
 /*************************************************************************
- * This file was modified for portability to AMDGPU
- * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -8,8 +6,6 @@
 
 #ifndef TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_
 #define TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_
-
-#ifndef USE_ROCM
 
 #include <torch/extension.h>
 
@@ -37,6 +33,16 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(std::vector<Tenso
                                                                bool rowwise_usage,
                                                                bool columnwise_usage);
 
+using SwizzledGroupedScales = std::pair<std::optional<at::Tensor>, std::optional<at::Tensor>>;
+
+/*! \brief Swizzle grouped tensor scales for GEMM if needed.
+ * Currently only works for MXFP8 1D scaling with uniform shapes.
+ *
+ * The returned swizzled scales should be kept alive during the GEMM.
+ */
+std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
+    GroupedTensorWrapper& input);
+
 /*! \brief Convert a block scaling tensor to an mxfp8 tensor in-place.
  *
  *  If rowwise==false, the columnwise data will be reinterpreted as
@@ -53,7 +59,5 @@ at::Tensor convert_block_scaling_to_mxfp8_tensor(TensorWrapper& input, bool roww
 
 }  // namespace pytorch
 }  // namespace transformer_engine
-
-#endif  //!USE_ROCM
 
 #endif  // TRANSFORMER_ENGINE_PYTORCH_CSRC_UTIL_H_
