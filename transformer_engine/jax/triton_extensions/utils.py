@@ -40,6 +40,7 @@ import zlib
 from jax import core
 import jax
 import jax.numpy as jnp
+from transformer_engine.jax.util import is_hip_extension
 
 
 # Placeholder package version on PyPI that should never be used
@@ -152,6 +153,7 @@ _TRITON_VERSION, _IS_PYTORCH_TRITON = _check_triton_compatibility()
 try:
     from jax._src.lib import gpu_triton
     from triton.compiler import compiler as tc
+    from triton.backends.nvidia import compiler as cb
     from triton.runtime import autotuner
 except ImportError as e:
     raise ImportError(
@@ -161,22 +163,10 @@ except ImportError as e:
     ) from e
 
 
-# Detect target platform once at import time. AMD/HIP returns an arch string
-# like "gfx950:sramecc+:xnack-"; NVIDIA returns something else (or this call
-# falls through to the CUDA path).
-try:
-    _ARCH_DETAILS = gpu_triton.get_arch_details(0)
-except Exception:  # noqa: BLE001
-    _ARCH_DETAILS = ""
-_IS_HIP = _ARCH_DETAILS.startswith("gfx")
-
-# Lazy backend imports — only pull in what the active platform needs so that
-# AMD-only or NVIDIA-only environments don't fail at module load.
-if _IS_HIP:
+# AMD/HIP backend imports are additive: the NVIDIA path above is left untouched.
+if is_hip_extension():
     from triton.backends.amd import compiler as cb_hip  # noqa: E402
     from triton.backends.compiler import GPUTarget as _TritonGPUTarget  # noqa: E402
-else:
-    from triton.backends.nvidia import compiler as cb  # noqa: E402
 
 
 __all__ = ["triton_call_lowering", "get_triton_info"]
@@ -230,7 +220,7 @@ def get_triton_dtype(aval):
         jnp.dtype("float16"): "fp16",
         jnp.dtype("float8_e4m3fn"): "fp8e4nv",
         jnp.dtype("float8_e5m2"): "fp8e5",
-        # AMD MI300 (gfx942) "FNUZ" variants — Triton calls these fp8e4b8/fp8e5b16.
+        # AMD gfx942 "FNUZ" variants — Triton calls these fp8e4b8/fp8e5b16.
         jnp.dtype("float8_e4m3fnuz"): "fp8e4b8",
         jnp.dtype("float8_e5m2fnuz"): "fp8e5b16",
         jnp.dtype("int64"): "i64",
@@ -294,18 +284,12 @@ def compile_triton(
     if cache_key in _TRITON_KERNEL_CACHE:
         return _TRITON_KERNEL_CACHE[cache_key]
 
-    # Mark constants as constexpr in signature (defensive — tensor signatures
-    # built by triton_call_lowering won't contain constexpr names, but other
-    # callers might).
-    signature_with_constexpr = dict(signature)
-    for const_name in constants.keys():
-        if const_name in signature_with_constexpr:
-            signature_with_constexpr[const_name] = "constexpr"
-
-    if _IS_HIP:
+    # AMD/HIP uses a separate compilation path; the NVIDIA path below is the
+    # unchanged upstream implementation.
+    if is_hip_extension():
         kernel = _compile_triton_hip(
             kernel_fn,
-            signature_with_constexpr,
+            signature,
             constants,
             num_warps,
             num_stages,
@@ -313,32 +297,10 @@ def compile_triton(
             compute_capability,
             enable_fp_fusion,
         )
-    else:
-        kernel = _compile_triton_cuda(
-            kernel_fn,
-            signature_with_constexpr,
-            constants,
-            num_warps,
-            num_stages,
-            num_ctas,
-            compute_capability,
-            enable_fp_fusion,
-        )
+        _TRITON_KERNEL_CACHE[cache_key] = kernel
+        return kernel
 
-    _TRITON_KERNEL_CACHE[cache_key] = kernel
-    return kernel
-
-
-def _compile_triton_cuda(
-    kernel_fn,
-    signature,
-    constants,
-    num_warps,
-    num_stages,
-    num_ctas,
-    compute_capability,
-    enable_fp_fusion,
-):
+    # Compile kernel
     options = cb.CUDAOptions(
         num_warps=num_warps,
         num_stages=num_stages,
@@ -347,36 +309,54 @@ def _compile_triton_cuda(
         debug=False,
         enable_fp_fusion=enable_fp_fusion,
     )
-    src = tc.ASTSource(fn=kernel_fn, constexprs=constants, signature=signature)
+
+    # Mark constants as constexpr in signature
+    signature_with_constexpr = dict(signature)
+    for const_name in constants.keys():
+        if const_name in signature_with_constexpr:
+            signature_with_constexpr[const_name] = "constexpr"
+
+    src = tc.ASTSource(
+        fn=kernel_fn,
+        constexprs=constants,
+        signature=signature_with_constexpr,
+    )
+
     compiled = tc.compile(
         src,
         target=tc.GPUTarget("cuda", compute_capability, 32),
         options=options.__dict__,
     )
 
+    # Create kernel object for JAX
+    # From jax/jaxlib/gpu/triton_kernels.cc:
     from packaging import version
 
     if version.parse(jax.__version__) >= version.parse("0.8.2"):
-        return gpu_triton.TritonKernel(
+        kernel = gpu_triton.TritonKernel(
+            compiled.name,  # arg0: kernel_name (str)
+            num_warps,  # arg1: num_warps (int)
+            num_ctas,  # arg2: num_ctas (int)
+            compiled.metadata.shared,  # arg3: shared_mem_bytes (int)
+            compiled.asm["ptx"],  # arg4: ptx (str)
+            "",  # arg5: ttir (str) - empty
+            compute_capability,  # arg6: compute_capability (int)
+        )
+    else:
+        kernel = gpu_triton.TritonKernel(
             compiled.name,
             num_warps,
-            num_ctas,
             compiled.metadata.shared,
             compiled.asm["ptx"],
-            "",
+            "",  # ttir
             compute_capability,
+            1,
+            1,
+            1,
         )
-    return gpu_triton.TritonKernel(
-        compiled.name,
-        num_warps,
-        compiled.metadata.shared,
-        compiled.asm["ptx"],
-        "",
-        compute_capability,
-        1,
-        1,
-        1,
-    )
+
+    _TRITON_KERNEL_CACHE[cache_key] = kernel
+    return kernel
 
 
 # Track HSACO temp files for the lifetime of the process so the kernel paths
@@ -394,8 +374,9 @@ def _compile_triton_hip(
     compute_capability,
     enable_fp_fusion,
 ):
-    # Strip target-feature suffix: "gfx950:sramecc+:xnack-" -> "gfx950".
-    arch = _ARCH_DETAILS.split(":", 1)[0]
+    # AMD/HIP returns an arch string like "gfx950:sramecc+:xnack-"; strip the
+    # target-feature suffix -> "gfx950".
+    arch = gpu_triton.get_arch_details(0).split(":", 1)[0]
     # Mirror what triton's parse_options would do per-arch: the default
     # HIPOptions.supported_fp8_dtypes is just ("fp8e5",), and constructing
     # HIPOptions directly bypasses the per-arch augmentation. Set it
@@ -416,7 +397,18 @@ def _compile_triton_hip(
         arch=arch,
         supported_fp8_dtypes=fp8_dtypes,
     )
-    src = tc.ASTSource(fn=kernel_fn, constexprs=constants, signature=signature)
+
+    # Mark constants as constexpr in signature (mirrors the NVIDIA path).
+    signature_with_constexpr = dict(signature)
+    for const_name in constants.keys():
+        if const_name in signature_with_constexpr:
+            signature_with_constexpr[const_name] = "constexpr"
+
+    src = tc.ASTSource(
+        fn=kernel_fn,
+        constexprs=constants,
+        signature=signature_with_constexpr,
+    )
     compiled = tc.compile(
         src,
         target=_TritonGPUTarget("hip", arch, warp_size=64),
