@@ -166,23 +166,28 @@ set(transformer_engine_cuda_sources)
 set(transformer_engine_cuda_arch_specific_sources)
 
 # Source files in both cuda and rocm
-set(GX_CUDA $<BOOL:${USE_CUDA}>)
 list(APPEND transformer_engine_cpp_sources
-     $<${GX_CUDA}:cudnn_utils.cpp>
+     cudnn_utils.cpp #CUDA-only
      transformer_engine.cpp
-     $<${GX_CUDA}:fused_attn/fused_attn.cpp>
+     fused_attn/fused_attn.cpp #CUDA-only
      gemm/config.cpp
      normalization/common.cpp
      normalization/layernorm/ln_api.cpp
      normalization/rmsnorm/rmsnorm_api.cpp
      util/cuda_driver.cpp
-     $<${GX_CUDA}:util/cuda_nvml.cpp>
+     util/cuda_nvml.cpp #CUDA-only
      util/cuda_runtime.cpp
      util/multi_stream.cpp
      util/rtc.cpp
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
      comm_gemm_overlap/comm_gemm_overlap.cpp)
+
+# Sources that only apply to CUDA builds (removed when building for ROCm)
+set(cuda_only_cpp_sources
+     cudnn_utils.cpp
+     fused_attn/fused_attn.cpp
+     util/cuda_nvml.cpp)
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
@@ -195,16 +200,16 @@ list(APPEND transformer_engine_cuda_sources
      transpose/cast_transpose_fusion.cu
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
-     $<${GX_CUDA}:transpose/quantize_transpose_vector_blockwise.cu>
+     transpose/quantize_transpose_vector_blockwise.cu #CUDA-only
      transpose/swap_first_dims.cu
      dropout/dropout.cu
      fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
-     $<${GX_CUDA}:fused_attn/fused_attn_f16_max512_seqlen.cu>
-     $<${GX_CUDA}:fused_attn/fused_attn_f16_arbitrary_seqlen.cu>
-     $<${GX_CUDA}:fused_attn/fused_attn_fp8.cu>
-     $<${GX_CUDA}:fused_attn/utils.cu>
+     fused_attn/fused_attn_f16_max512_seqlen.cu #CUDA-only
+     fused_attn/fused_attn_f16_arbitrary_seqlen.cu #CUDA-only
+     fused_attn/fused_attn_fp8.cu #CUDA-only
+     fused_attn/utils.cu #CUDA-only
      gemm/cublaslt_gemm.cu
      gemm/cublaslt_grouped_gemm.cu
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
@@ -214,7 +219,7 @@ list(APPEND transformer_engine_cuda_sources
      permutation/permutation.cu
      util/padding.cu
      swizzle/swizzle.cu
-     $<${GX_CUDA}:swizzle/swizzle_block_scaling.cu>
+     swizzle/swizzle_block_scaling.cu #CUDA-only
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
@@ -227,25 +232,43 @@ list(APPEND transformer_engine_cuda_sources
      recipe/fp8_block_scaling.cu
      comm_gemm_overlap/userbuffers/userbuffers.cu)
 
+set(cuda_only_cuda_sources
+     transpose/quantize_transpose_vector_blockwise.cu
+     fused_attn/fused_attn_f16_max512_seqlen.cu
+     fused_attn/fused_attn_f16_arbitrary_seqlen.cu
+     fused_attn/fused_attn_fp8.cu
+     fused_attn/utils.cu
+     swizzle/swizzle_block_scaling.cu)
+
 list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/gelu.cu
      activation/glu.cu
      activation/relu.cu
      activation/swiglu.cu
      cast/cast.cu
-     $<${GX_CUDA}:gemm/cutlass_grouped_gemm.cu>
-     $<${GX_CUDA}:hadamard_transform/group_hadamard_transform.cu>
-     $<${GX_CUDA}:hadamard_transform/graph_safe_group_hadamard_transform.cu>
+     gemm/cutlass_grouped_gemm.cu #CUDA-only
+     hadamard_transform/group_hadamard_transform.cu #CUDA-only
+     hadamard_transform/graph_safe_group_hadamard_transform.cu #CUDA-only
      hadamard_transform/hadamard_transform.cu
-     $<${GX_CUDA}:hadamard_transform/hadamard_transform_cast_fusion.cu>
-     $<${GX_CUDA}:hadamard_transform/group_hadamard_transform_cast_fusion.cu>
-     $<${GX_CUDA}:hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu>
-     $<${GX_CUDA}:hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu>
+     hadamard_transform/hadamard_transform_cast_fusion.cu #CUDA-only
+     hadamard_transform/group_hadamard_transform_cast_fusion.cu #CUDA-only
+     hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu #CUDA-only
+     hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu #CUDA-only
      multi_tensor/compute_scale.cu
      recipe/mxfp8_scaling.cu
      recipe/nvfp4.cu
-     $<${GX_CUDA}:transpose/quantize_transpose_square_blockwise.cu>
+     transpose/quantize_transpose_square_blockwise.cu #CUDA-only
      transpose/quantize_transpose_vector_blockwise_fp4.cu)
+
+set(cuda_only_cuda_arch_specific_sources
+     gemm/cutlass_grouped_gemm.cu
+     hadamard_transform/group_hadamard_transform.cu
+     hadamard_transform/graph_safe_group_hadamard_transform.cu
+     hadamard_transform/hadamard_transform_cast_fusion.cu
+     hadamard_transform/group_hadamard_transform_cast_fusion.cu
+     hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
+     hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu
+     transpose/quantize_transpose_square_blockwise.cu)
 
 # Compiling the files with the worst compilation time first to hopefully overlap
 # better with the faster-compiling cpp files
@@ -254,6 +277,12 @@ list(APPEND transformer_engine_SOURCES ${transformer_engine_cuda_arch_specific_s
                                        ${transformer_engine_cpp_sources})
 
 if(USE_ROCM)
+# Remove CUDA-only sources when not building for CUDA
+  list(REMOVE_ITEM transformer_engine_SOURCES
+    ${cuda_only_cpp_sources}
+    ${cuda_only_cuda_sources}
+    ${cuda_only_cuda_arch_specific_sources})
+
   #ROCm specific source codes
   list(INSERT transformer_engine_SOURCES 0
       amd_detail/system.cpp

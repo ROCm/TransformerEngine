@@ -173,6 +173,15 @@ class MXFP4TensorStorage(QuantizedTensorStorage):
             shape[-1] = shape[-1] * 2  # Unpacked size
         return torch.Size(shape) if not args and not kwargs else shape
 
+    @property
+    def device(self):
+        """Return the device of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.device
+        if self._columnwise_data is not None:
+            return self._columnwise_data.device
+        raise RuntimeError("MXFP4TensorStorage has no data!")
+
     def __repr__(self):
         return (
             "MXFP4TensorStorage("

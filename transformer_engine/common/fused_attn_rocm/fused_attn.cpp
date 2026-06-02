@@ -320,8 +320,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
 
   // first check whether ck can be used, then check aotriton
-  // TODO: deterministic support on CK
-  if(nvte_fused_attn_ck && !deterministic && fused_attn_rocm::is_ck_backend_supported(
+  if(nvte_fused_attn_ck && fused_attn_rocm::is_ck_backend_supported(
         q_dtype,
         kv_dtype,
         qkv_layout,
