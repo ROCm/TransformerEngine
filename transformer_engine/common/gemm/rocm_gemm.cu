@@ -1706,6 +1706,9 @@ void release_service_stream(hipStream_t stream, struct ServiceStreamCtl &ctl)
 } // namespace
 
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic error "-Wmissing-declarations"
+
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
                  cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
@@ -1813,5 +1816,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     release_service_stream(stream, ss_ctl);
   }
 }
+
+#pragma GCC diagnostic pop
 
 } //namespace transformer_engine

@@ -91,6 +91,8 @@ class _NoopCatFunc(torch.autograd.Function):
         # Check first tensor
         if not tensors:
             raise ValueError("Attempted to concatenate 0 tensors")
+
+        # Check concat dim
         num_dims = tensors[0].dim()
         if not -num_dims <= dim < num_dims:
             raise ValueError(
@@ -123,11 +125,24 @@ class _NoopCatFunc(torch.autograd.Function):
         ctx.dim = dim
         ctx.split_ranges = split_ranges
 
-        # Out-of-place concatenation if needed
+        # Tensor properties from first tensor
         dtype = tensors[0].dtype
         device = tensors[0].device
         strides = tensors[0].stride()
         data_ptr_stride = strides[dim] * tensors[0].element_size()
+
+        # Out-of-place concatenation when view tensors have different storage
+        # Note: This works around an edge case with the split_quantize
+        # function, which might allocate a buffer and construct
+        # subviews. However, in order to reduce CPU overheads, these
+        # views are configured manually outside of PyTorch. PyTorch
+        # doesn't know these views share the same memory, and it
+        # blocks us from reconstructing the full tensor because it
+        # thinks we are accessing out-of-bounds memory.
+        if tensors[0].untyped_storage().nbytes() < out_shape[dim] * data_ptr_stride:
+            return torch.cat(tensors, dim=dim)
+
+        # Out-of-place concatenation if tensor properties do not match
         data_ptr = tensors[0].data_ptr() + tensors[0].size(dim) * data_ptr_stride
         numel = tensors[0].numel()
         for tensor in tensors[1:]:
@@ -149,13 +164,7 @@ class _NoopCatFunc(torch.autograd.Function):
             return out
 
         # No-op concatenation
-        out = tensors[0].new()
-        out.set_(
-            tensors[0].untyped_storage(),
-            tensors[0].storage_offset(),
-            out_shape,
-            strides,
-        )
+        out = tensors[0].as_strided(out_shape, strides)
         out.requires_grad = any(tensor.requires_grad for tensor in tensors)
         return out
 

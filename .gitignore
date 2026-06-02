@@ -58,4 +58,8 @@ artifacts/
 **/times.csv
 transformer_engine/build_info.txt
 transformer_engine/common/util/hip_nvml.*
-*.DS_Store
+.DS_Store
+.rsync-filter
+.codex/
+.cline_storage/
+.claude/

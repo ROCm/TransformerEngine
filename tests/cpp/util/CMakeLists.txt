@@ -12,6 +12,7 @@ if(USE_CUDA)
     add_executable(test_util ${test_cuda_sources})
 else()  
     TE_GetHipifiedSources("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR} test_hip_sources)
+    TE_AddHipifyDeps("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR})
     message("${message_line}")
     message(STATUS "test_util hipified sources: ${test_hip_sources}")
 
