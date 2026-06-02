@@ -23,6 +23,17 @@ TEST_START_TS=`date +%s`
 #To disable some logs trimming
 export CI=1
 
+# Crash/hang visibility and bounding:
+# - PYTHONFAULTHANDLER dumps a Python traceback on fatal signals (segfaults).
+# - PYTEST_TIMEOUT bounds every individual test item so a single hang cannot
+#   stall the whole CI job; the offending test is recorded as a failure with a
+#   traceback instead of the run silently timing out hours later.
+# All are overridable from the environment.
+export PYTHONFAULTHANDLER=1
+: ${PYTEST_TIMEOUT:=1200}          # per-test (per-parametrization) timeout, seconds
+: ${PYTEST_TIMEOUT_METHOD:=thread} # 'thread' reliably unsticks GPU/collective hangs
+: ${CTEST_TIMEOUT:=1200}           # per-cpp-test timeout, seconds
+
 _script_error_count=0
 _run_error_count=0
 _ignored_error_count=0
@@ -213,6 +224,12 @@ get_pytest_junitxml() {
     fi
 }
 
+get_ctest_junitxml() {
+    if [ -n "$JUNITXML_PREFIX$JUNITXML_SUFFIX" ]; then
+        echo "--output-junit ${JUNITXML_PREFIX}$1${JUNITXML_SUFFIX}"
+    fi
+}
+
 check_test_filter() {
     test -z "$TEST_FILTER" && return 0
     for _tf in $TEST_FILTER; do
@@ -266,7 +283,12 @@ pytest_run() {
     check_test_filter $_test_name_tag || return
     _start_ts=`date +%s`
     echo "Run [$_test_variant_tag] $@ at `time_elapsed $TEST_START_TS`"
-    python3 -m pytest -v -rfEs `get_pytest_junitxml $_test_name_tag` $TEST_PYTEST_ARGS "$TEST_DIR/$@"
+    # A per-test timeout is applied to every item. Callers may still append their
+    # own --timeout/--timeout-method (e.g. distributed tests); since argparse
+    # takes the last value, a caller-supplied override wins over these defaults.
+    python3 -m pytest -v -rfEs \
+        --timeout=$PYTEST_TIMEOUT --timeout-method=$PYTEST_TIMEOUT_METHOD \
+        `get_pytest_junitxml $_test_name_tag` $TEST_PYTEST_ARGS "$TEST_DIR/$@"
     test $? -eq 0 || test_run_error "[$_test_variant_tag] $1"
     echo "Done [$_test_variant_tag] $1 in `time_elapsed $_start_ts`"
 }

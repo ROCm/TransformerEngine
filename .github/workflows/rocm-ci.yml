@@ -183,10 +183,13 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           rm -f FAIL_*
+          rm -rf test-results && mkdir -p test-results
 
           docker exec \
             -e TEST_SGPU=1 \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
+            -e JUNITXML_PREFIX=/workspace/test-results/ \
+            -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
             te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
@@ -270,6 +273,13 @@ jobs:
           EOF
           )"
 
+      - name: Generate test report
+        if: always()
+        run: |
+          command -v python3 >/dev/null 2>&1 || { echo "python3 not available; skipping report"; exit 0; }
+          python3 ci/junit_report.py test-results \
+            --title "sGPU Tests (${{ matrix.arch_label }})"
+
       - name: Check suite failure status
         if: always()
         run: |
@@ -299,6 +309,7 @@ jobs:
           name: logs-sgpu-${{ matrix.arch_label }}
           path: |
             *.log
+            test-results/*.xml
           if-no-files-found: ignore
           retention-days: 5
 
@@ -387,6 +398,8 @@ jobs:
             *)       echo "::error::Unknown framework: ${{ matrix.framework }}"; exit 1 ;;
           esac
 
+          rm -rf test-results && mkdir -p test-results
+
           docker exec \
             -e TEST_MGPU=1 \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
@@ -394,6 +407,8 @@ jobs:
             -e LOG_FILE=$LOG_FILE \
             -e SUITE_NAME=$SUITE_NAME \
             -e NVTE_FRAMEWORK=${{ matrix.framework }} \
+            -e JUNITXML_PREFIX=/workspace/test-results/ \
+            -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
             te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
@@ -414,6 +429,13 @@ jobs:
           EOF
           )"
 
+      - name: Generate test report
+        if: always()
+        run: |
+          command -v python3 >/dev/null 2>&1 || { echo "python3 not available; skipping report"; exit 0; }
+          python3 ci/junit_report.py test-results \
+            --title "mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})"
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -421,6 +443,7 @@ jobs:
           name: logs-mgpu-${{ matrix.arch_label }}-${{ matrix.framework }}
           path: |
             *.log
+            test-results/*.xml
           if-no-files-found: ignore
           retention-days: 5
 

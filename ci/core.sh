@@ -31,14 +31,16 @@ fi
 check_test_filter "nongemm"
 if [ $? -eq 0 ]; then
     echo ===== Run non GEMM tests =====
-    ctest --test-dir build -j"$n_parallel_jobs" -V --output-on-failure -E "GEMMTestSuite"
+    ctest --test-dir build -j"$n_parallel_jobs" -V --output-on-failure \
+        --timeout $CTEST_TIMEOUT $(get_ctest_junitxml core.nongemm) -E "GEMMTestSuite"
     test $? -eq 0 || test_run_error "non-GEMM"
 fi
 
 check_test_filter "gemm"
 if [ $? -eq 0 ]; then
     echo  ===== Run GEMM tests =====
-    ctest --test-dir build -j"$n_parallel_jobs" -V --output-on-failure -R "GEMMTestSuite"
+    ctest --test-dir build -j"$n_parallel_jobs" -V --output-on-failure \
+        --timeout $CTEST_TIMEOUT $(get_ctest_junitxml core.gemm) -R "GEMMTestSuite"
     test $? -eq 0 || test_run_error "GEMM"
 fi
 
