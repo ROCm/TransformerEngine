@@ -112,8 +112,9 @@ def get_hipified_sources(hipify_result: Union[str, dict], sources: Union[list[Un
 
     # Because hipify output_directory == project_directory
     # Original sources list may contain previous hipifying results that ends up with duplicated entries
-    # Keep unique entries only
-    hipified_sources = set()
+    # Keep unique entries only but preserve the order by using list + set
+    hipified_sources = list()
+    hipified_sources_set = set()
     for fname in sources:
         if not os.path.isabs(fname):
             fname = os.path.join(src_base_path, fname)
@@ -122,7 +123,9 @@ def get_hipified_sources(hipify_result: Union[str, dict], sources: Union[list[Un
             file_result = hipify_result[fname]
             if file_result['hipified_path'] is not None:
                 fname = hipify_result[fname]['hipified_path']
-        hipified_sources.add(os.path.relpath(fname, str(src_base_path)))
+        if fname not in hipified_sources_set:
+            hipified_sources_set.add(fname)
+            hipified_sources.append(os.path.relpath(fname, str(src_base_path)))
 
     if sources_fname is not None:
         with open(sources_fname, "w") as f:
@@ -130,7 +133,7 @@ def get_hipified_sources(hipify_result: Union[str, dict], sources: Union[list[Un
                 f.write(fname + "\n")
         return sources_fname
 
-    return list(hipified_sources)
+    return hipified_sources
     
 
 def hipify_sources(te_root: Union[Path, str], src_dir: Union[Path, str],
