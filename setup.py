@@ -16,7 +16,10 @@ from typing import List, Tuple
 
 import setuptools
 from setuptools.command.egg_info import egg_info
-from wheel.bdist_wheel import bdist_wheel
+try:
+    from setuptools.command.bdist_wheel import bdist_wheel
+except ImportError:
+    from wheel.bdist_wheel import bdist_wheel
 
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version

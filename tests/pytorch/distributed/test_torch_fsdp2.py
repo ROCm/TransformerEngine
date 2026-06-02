@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,6 +10,7 @@ from pathlib import Path
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch import fp8
@@ -64,6 +67,8 @@ def fp_recipe(request):
 def _run_test(fp_init, sharding_dims, recipe, layer_type):
     test_path = Path(__file__).parent.resolve() / "run_fsdp2_model.py"
     test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", str(test_path)]
+    if IS_HIP_EXTENSION:
+        test_cmd = ["timeout", "-k60", "-v", "180"] + test_cmd
 
     if fp_init:
         test_cmd += ["--fp8-init"]
