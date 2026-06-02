@@ -441,9 +441,9 @@ def triton_call_lowering(
     grid,
     input_output_aliases: Mapping[int, int] = None,
     constexprs: Mapping[str, Any] = None,
-    num_warps: int = 32,
-    num_stages: int = 1,
-    num_ctas: int = 1,
+    num_warps: int = None,
+    num_stages: int = None,
+    num_ctas: int = None,
 ):
     """Helper for MLIR lowering that calls a Triton kernel.
 
@@ -518,9 +518,16 @@ def triton_call_lowering(
         # For non-autotune fallback, evaluate with just the user constexprs.
         grid_tuple = _normalize_grid(grid_fn(constexprs or {}))
 
-    # Caller-supplied num_warps/num_stages/num_ctas (defaults match the
-    # historical hardcoded values: 32/1/1).
+    # Default values for the kernel
     actual_kernel_fn = kernel_fn
+    if num_warps is None:
+        num_warps = 32
+    if num_stages is None:
+        num_stages = (
+            1  # TODO(Phuong): consider if it is beneficial to expose num_warps, num_stages, num_ctas
+        )
+    if num_ctas is None:
+        num_ctas = 1
     kernel_constexprs = constexprs if constexprs is not None else {}
 
     # Handle autotuned kernels - compile all configs
@@ -541,11 +548,9 @@ def triton_call_lowering(
 
             # Per-config grid: re-evaluate grid_fn with this config's merged
             # kwargs so configs that vary BLOCK_T/BLOCK_S launch at the right
-            # cdiv(T_t, BLOCK_T) etc.
+            # cdiv(T_t, BLOCK_T) etc. (grid_tuple is otherwise the fixed grid.)
             if grid_fn is not None:
-                config_grid = _normalize_grid(grid_fn(config_constexprs))
-            else:
-                config_grid = grid_tuple
+                grid_tuple = _normalize_grid(grid_fn(config_constexprs))
 
             # Compile this config
             config_kernel = compile_triton(
@@ -566,9 +571,9 @@ def triton_call_lowering(
 
             config_call = gpu_triton.TritonKernelCall(
                 config_kernel,
-                config_grid[0],
-                config_grid[1],
-                config_grid[2],
+                grid_tuple[0],
+                grid_tuple[1],
+                grid_tuple[2],
                 config_params,
             )
 
