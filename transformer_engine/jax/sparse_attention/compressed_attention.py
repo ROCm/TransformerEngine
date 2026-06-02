@@ -19,7 +19,7 @@ The intended math (for context, not yet implemented)::
     apply RoPE to (Q_rope, K_rope)
     O = softmax(Q @ K^T / sqrt(d)) @ V
 
-See ``transformer_engine.jax.sparse_attention`` for the sibling DSA module
+See ``transformer_engine.jax.sparse_attention.dsa`` for the sibling DSA module
 that is implemented today.
 """
 
@@ -42,7 +42,7 @@ _HCA_DEFER_MESSAGE = (
     "  5. Interaction with TE's existing fused-attn backends — does any of "
     "CK/AITER/cuDNN support split (RoPE/no-RoPE) head dims natively?\n"
     "Pin these before filling in. See "
-    "transformer_engine.jax.sparse_attention for the working DSA module."
+    "transformer_engine.jax.sparse_attention.dsa for the working DSA module."
 )
 
 

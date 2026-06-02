@@ -14,11 +14,11 @@ from transformer_engine.jax.sparse_attention import (
     _causal_keep_mask,
     _topk_indices_to_attn_mask,
 )
-from transformer_engine.jax.compressed_attention import (
+from transformer_engine.jax.sparse_attention.compressed_attention import (
     HeavilyCompressedAttention,
     heavily_compressed_attention,
 )
-from transformer_engine.jax.indexer import indexer
+from transformer_engine.jax.sparse_attention.indexer import indexer
 from transformer_engine.jax.triton_extensions import fused_sparse_attention_triton
 
 

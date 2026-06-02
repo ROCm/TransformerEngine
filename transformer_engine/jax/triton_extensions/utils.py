@@ -518,7 +518,7 @@ def triton_call_lowering(
         # For non-autotune fallback, evaluate with just the user constexprs.
         grid_tuple = _normalize_grid(grid_fn(constexprs or {}))
 
-    # Default values for the kernel
+    # Default values for the kernel (used unless the caller overrides them).
     actual_kernel_fn = kernel_fn
     if num_warps is None:
         num_warps = 32

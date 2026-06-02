@@ -48,7 +48,7 @@ from flax import linen as nn
 
 from transformer_engine.jax.flax.module import DenseGeneral
 from transformer_engine.jax.flax.transformer import DotProductAttention
-from transformer_engine.jax.indexer import indexer as _indexer_fn, _indexer_projections
+from .indexer import indexer as _indexer_fn, _indexer_projections
 
 
 # Backends supported by deep_sparse_attention_core.
@@ -376,7 +376,7 @@ class DeepSparseAttention(nn.Module):  # pylint: disable=too-few-public-methods
         )(inputs_kv)                                        # [B, oH, T_s, head_dim]
 
         # ---- indexer projections (shared across oH) ----
-        # Shapes mirror transformer_engine.jax.indexer:31-48.
+        # Shapes mirror transformer_engine.jax.sparse_attention.indexer:31-48.
         W_dq = self.param(
             "indexer_W_dq",
             nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal"),

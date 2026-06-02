@@ -4,7 +4,7 @@
 """Correctness tests for the lightning-indexer JAX ops.
 
 Ported from the in-module ``__main__`` smoke tests of
-``transformer_engine.jax.indexer``. The hybrid and top-k backends require
+``transformer_engine.jax.sparse_attention.indexer``. The hybrid and top-k backends require
 rank-4 ``(B, oH, T, d)`` inputs, so every leading shape here is length-2.
 """
 
@@ -12,7 +12,7 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from transformer_engine.jax.indexer import indexer, indexer_topk
+from transformer_engine.jax.sparse_attention.indexer import indexer, indexer_topk
 
 
 def _indexer_inputs(B, oH, T_t, T_s, d, d_c, H, d_i, seed):
