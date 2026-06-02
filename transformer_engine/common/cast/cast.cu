@@ -30,20 +30,6 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
   dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
 }
 
-#ifdef __HIP_PLATFORM_AMD__
-void nvte_multi_quantize_mxfp8(size_t num_tensors, const NVTETensor *input_list,
-                               NVTETensor *output_list, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_multi_quantize_mxfp8);
-  using namespace transformer_engine;
-  std::vector<Tensor *> input_list_, output_list_;
-  for (size_t i = 0; i < num_tensors; i++) {
-    input_list_.push_back(convertNVTETensorCheck(input_list[i]));
-    output_list_.push_back(convertNVTETensorCheck(output_list[i]));
-  }
-  dispatch::multi_quantize_mxfp8(input_list_, output_list_, stream);
-}
-#endif
-
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                          cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_quantize);
@@ -112,6 +98,19 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
                                 const size_t num_tensors, cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_quantize);
   using namespace transformer_engine;
+
+#ifdef __HIP_PLATFORM_AMD__
+  if (num_tensors > 0 &&
+      convertNVTETensorCheck(outputs[0])->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    std::vector<Tensor *> input_list, output_list;
+    for (size_t i = 0; i < num_tensors; i++) {
+      input_list.push_back(convertNVTETensorCheck(inputs[i]));
+      output_list.push_back(convertNVTETensorCheck(outputs[i]));
+    }
+    dispatch::multi_quantize_mxfp8(input_list, output_list, stream);
+    return;
+  }
+#endif
 
   constexpr bool IS_ACT = false;
 

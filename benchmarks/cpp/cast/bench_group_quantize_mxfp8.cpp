@@ -303,7 +303,7 @@ static void BM_MultiQuantizeMXFP8(benchmark::State &state) {
 
   for (auto _ : state) {
     HIP_CHECK(hipEventRecord(start, stream));
-    nvte_multi_quantize_mxfp8(num_experts, nvte_inputs.data(), nvte_outputs.data(), stream);
+    nvte_multi_tensor_quantize(nvte_inputs.data(), nvte_outputs.data(), nullptr, num_experts, stream);
     HIP_CHECK(hipEventRecord(stop, stream));
     HIP_CHECK(hipEventSynchronize(stop));
     float ms = 0;

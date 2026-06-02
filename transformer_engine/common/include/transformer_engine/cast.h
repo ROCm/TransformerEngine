@@ -101,19 +101,6 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                          cudaStream_t stream);
 
-#ifdef __HIP_PLATFORM_AMD__
-/*! \brief Fused multi-tensor MXFP8 quantize. Quantizes multiple tensors in a single kernel launch.
- *         Each tensor can have different shapes. Output tensors are written to per-tensor pointers.
- *
- *  \param[in]     num_tensors      Number of tensors to quantize.
- *  \param[in]     input_list       Array of input tensors.
- *  \param[in,out] output_list      Array of output MXFP8 tensors.
- *  \param[in]     stream           CUDA stream used for the operation.
- */
-void nvte_multi_quantize_mxfp8(size_t num_tensors, const NVTETensor *input_list,
-                               NVTETensor *output_list, cudaStream_t stream);
-#endif
-
 /*! \brief Casts input tensor to FP8/MXFP8/BlockwiseFP8, providing the option to immediately exit the kernel
  *         based on the value of the 'noop' tensor.
  *         The type of quantized tensor in the output depends on the scaling mode of the output

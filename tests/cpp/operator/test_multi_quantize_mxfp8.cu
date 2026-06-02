@@ -47,8 +47,8 @@ void performTest(const std::vector<std::pair<size_t, size_t>> &tensor_dims,
     nvte_outputs_multi.push_back(t.data());
   }
 
-  nvte_multi_quantize_mxfp8(num_tensors, nvte_inputs.data(),
-                            nvte_outputs_multi.data(), 0);
+  nvte_multi_tensor_quantize(nvte_inputs.data(), nvte_outputs_multi.data(),
+                             nullptr, num_tensors, 0);
 
   for (size_t i = 0; i < num_tensors; i++) {
     if (tensor_dims[i].first > 0 && tensor_dims[i].second > 0)
