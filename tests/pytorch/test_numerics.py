@@ -3084,7 +3084,7 @@ if IS_HIP_EXTENSION:
         ["K", "M", "N", "MK", "MKN"],
         ids=lambda d: f"pad{d}",
     )
-    def test_grouped_gemm_unaligned(dtype, layout, accumulate, pad_dim, capfd):
+    def test_grouped_gemm_unaligned(dtype, layout, accumulate, pad_dim, capfd, monkeypatch):
         """Test CK grouped GEMM with M, N, or K not aligned to CK tile size.
 
         CK constraints for bf16/fp16:
@@ -3094,7 +3094,6 @@ if IS_HIP_EXTENSION:
         - K tile: 64, M tile: 256, N tile: 128/256
         """
         torch.manual_seed(0)
-        z = 8
 
         # Unaligned values per dimension (all satisfy CK vector-load constraints).
         # K: even but not multiple of tile (64). Same for all groups.
@@ -3103,6 +3102,7 @@ if IS_HIP_EXTENSION:
         unaligned_k = 2016
         unaligned_m = [100, 300, 150, 200, 50, 350, 250, 180]
         unaligned_n = 2032
+        z = len(unaligned_m)
 
         # Aligned defaults.
         k_aligned = 2048
@@ -3115,8 +3115,8 @@ if IS_HIP_EXTENSION:
         n_val = unaligned_n if "N" in pad_dim else n_aligned
 
         total_m = sum(m_vals)
-        os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
-        os.environ["NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK"] = "1"
+        monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
+        monkeypatch.setenv("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", "1")
 
         if layout == "TN":
             A = [torch.randn(n_val, k_val, dtype=dtype, device="cuda") for _ in range(z)]
@@ -3192,13 +3192,10 @@ if IS_HIP_EXTENSION:
         )
 
         for o, o_ref in zip(out, out_ref):
-            if IS_HIP_EXTENSION and accumulate and dtype == torch.bfloat16 and get_device_compute_capability() == (9, 4):
+            if accumulate and dtype == torch.bfloat16 and get_device_compute_capability() == (9, 4):
                 torch.testing.assert_close(o, o_ref, rtol=4e-2, atol=4e-2)
             else:
                 torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
-
-        os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
-        os.environ.pop("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", None)
 
         # Check for CK fallback warnings from C++ (NVTE_WARN writes to std::cerr).
         # capfd captures file-descriptor-level output, including C/C++ stderr.
