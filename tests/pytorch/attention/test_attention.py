@@ -89,6 +89,14 @@ _deterministic = (
 seed = 1234
 reset_rng_states()
 
+# Determinism mode is selected by the NVTE_ALLOW_NONDETERMINISTIC_ALGO env var
+# (or by torch's global deterministic flag). When enabled, deterministic-only
+# tests run and non-determinism-only tests are skipped.
+_deterministic = (
+    not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
+    or torch.are_deterministic_algorithms_enabled()
+)
+
 
 # Reset FP8 global state manager
 @pytest.fixture(autouse=True)
@@ -3036,3 +3044,87 @@ class Custom_MHA_FP8(TransformerEngineBaseModule):
                 self.quantizers,
             )
         return out
+
+
+# ---------------------- Deterministic Backward Tests ----------------------
+
+
+_DETERMINISTIC_LAYOUT_MASK_COMBOS = [
+    pytest.param(layout, mask, id=f"{layout.upper()}-{mask.upper()}")
+    for layout in ("bshd_bshd_bshd", "bs3hd", "bshd_bs2hd", "thd_thd_thd")
+    for mask in (
+        "no_mask",
+        "causal",
+        "padding",
+        "padding_causal",
+        "padding_causal_bottom_right",
+    )
+    if not (layout.startswith("thd") and "padding" not in mask)
+]
+
+
+@pytest.mark.skipif(
+    not IS_HIP_EXTENSION, reason="CK split-accumulator deterministic backward is ROCm-only"
+)
+@pytest.mark.skipif(not _deterministic, reason="Test determinism only")
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pytest.param(torch.bfloat16, id="BF16"),
+        pytest.param(torch.float16, id="FP16"),
+    ],
+)
+@pytest.mark.parametrize("qkv_layout, attn_mask_type", _DETERMINISTIC_LAYOUT_MASK_COMBOS)
+@pytest.mark.parametrize(
+    "b, seq_len, h_q, h_kv, d",
+    [
+        pytest.param(2, 256, 8, 8, 128, id="b2_s256_MHA"),
+        pytest.param(2, 512, 8, 8, 128, id="b2_s512_MHA"),
+        pytest.param(2, 2048, 8, 8, 128, id="b2_s2048_MHA"),
+        pytest.param(2, 2048, 12, 4, 128, id="b2_s2048_GQA"),
+    ],
+)
+def test_deterministic_bwd_ck(
+    dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d
+):
+    """Test deterministic backward (CK backend): bitwise reproducibility.
+
+    Determinism mode must be enabled externally via NVTE_ALLOW_NONDETERMINISTIC_ALGO=0.
+    """
+    config = ModelConfig(
+        batch_size=b,
+        max_seqlen_q=seq_len,
+        num_heads=h_q,
+        head_dim_qk=d,
+        num_gqa_groups=h_kv,
+        attn_mask_type=attn_mask_type,
+    )
+
+    _, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=dtype,
+        qkv_layout=qkv_layout,
+        deterministic=True,
+        is_training=True,
+    )
+    if FusedAttnBackend["CK"] not in fused_attn_backends:
+        pytest.skip("This test requires the CK fused attention backend.")
+
+    kwargs = dict(
+        dtype=dtype,
+        config=config,
+        backend="FusedAttention",
+        ckpt_attn=False,
+        qkv_layout=qkv_layout,
+        workspace_opt=False,
+        pad_between_seqs=False,
+        is_training=True,
+    )
+
+    out1, _, grads1 = _run_dot_product_attention(**kwargs)
+    out2, _, grads2 = _run_dot_product_attention(**kwargs)
+
+    # Bitwise reproducibility across consecutive runs (output + gradients)
+    torch.testing.assert_close(out1, out2, atol=0, rtol=0, msg="output not bitwise reproducible")
+    for name, x, y in zip(("dQ", "dK", "dV"), grads1[:3], grads2[:3]):
+        torch.testing.assert_close(x, y, atol=0, rtol=0, msg=f"{name} not bitwise reproducible")

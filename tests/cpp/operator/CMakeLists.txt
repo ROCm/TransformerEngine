@@ -35,14 +35,15 @@ add_executable(test_operator
                test_causal_softmax.cu
                $<${GX_CUDA}:test_swizzle.cu>
                test_swap_first_dims.cu
-               $<${GX_CUDA}:test_grouped_gemm.cu>
+               test_grouped_gemm.cu
                ../test_common.cu)
 
 if(USE_ROCM)
   get_target_property(test_cuda_sources test_operator SOURCES)
   list(APPEND test_cuda_sources
               test_dequantize_nvfp4.cu
-              test_cublaslt_gemm.cu)
+              test_cublaslt_gemm.cu
+              test_cast_mxfp4_transpose.cu)
   TE_GetHipifiedSources("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR} test_hip_sources)
   message("${message_line}")
   message(STATUS "test_operator hipified sources: ${test_hip_sources}")

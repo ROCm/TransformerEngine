@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -10,7 +12,10 @@ from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
+if IS_HIP_EXTENSION:
+    from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
@@ -108,8 +113,13 @@ def check_nvfp4_gemm_versus_reference(
 
     # Native scales are stored as uint8 but need to be interpreted as float8_e4m3fn
     # for the reference GEMM to work correctly
-    sx_trimmed = sx_trimmed.view(torch.float8_e4m3fn)
-    sw_trimmed = sw_trimmed.view(torch.float8_e4m3fn)
+    if IS_HIP_EXTENSION:
+        fp8_dtype = get_torch_float8_e4m3_type()
+        sx_trimmed = sx_trimmed.view(fp8_dtype)
+        sw_trimmed = sw_trimmed.view(fp8_dtype)
+    else:
+        sx_trimmed = sx_trimmed.view(torch.float8_e4m3fn)
+        sw_trimmed = sw_trimmed.view(torch.float8_e4m3fn)
 
     # Create reference quantizer for reference GEMM
     ref_quantizer = NVFP4QuantizerRef(
@@ -150,7 +160,14 @@ def check_nvfp4_gemm_versus_reference(
 
     # Native TE GEMM using tex.generic_gemm (cuBLAS GEMM)
     # Allocate cuBLAS workspace
-    workspace = torch.empty(4, dtype=torch.uint8, device=device)
+    if IS_HIP_EXTENSION:
+        # On ROCm, FP4 is dequantized to BF16 in workspace before GEMM, so allocate enough space.
+        from transformer_engine.pytorch.cpp_extensions.gemm import get_cublas_workspace_size_bytes
+        bf16_size = torch.bfloat16.itemsize
+        ws_bytes = M * K * bf16_size + K * N * bf16_size + get_cublas_workspace_size_bytes()
+        workspace = torch.empty(ws_bytes, dtype=torch.uint8, device=device)
+    else:
+        workspace = torch.empty(4, dtype=torch.uint8, device=device)
 
     transa = True if not w_columnwise else False
     transb = False if not x_columnwise else True

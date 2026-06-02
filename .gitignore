@@ -18,7 +18,9 @@ __pycache__
 .vimrc
 .vs
 .vscode
+.cline_storage
 .cache
+.rsync-filter
 .hypothesis
 .devcontainer.json
 tests/cpp/build/

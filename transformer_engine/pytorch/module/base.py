@@ -30,6 +30,7 @@ from ..quantization import (
     DelayedScalingRecipeState,
     Float8CurrentScalingRecipeState,
     Float8BlockScalingRecipeState,
+    MXFP4BlockScalingRecipeState,
     NVFP4BlockScalingRecipeState,
     FP8GlobalStateManager,
     RecipeState,
@@ -802,6 +803,8 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 recipe_state, Float8BlockScalingRecipeState
             ):
                 return
+            if recipe.mxfp4() and isinstance(recipe_state, MXFP4BlockScalingRecipeState):
+                return
             if recipe.nvfp4() and isinstance(recipe_state, NVFP4BlockScalingRecipeState):
                 return
 
@@ -1100,7 +1103,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.fast_setattr("fp8_initialized", True)
 
             meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
-            if meta["recipe"].mxfp8():
+            if meta["recipe"].mxfp8() or meta["recipe"].mxfp4():
                 self.keep_fp8_weight_transpose_cache = True
 
         _current_recipe = meta["recipe"]
