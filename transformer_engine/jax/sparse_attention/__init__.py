@@ -21,6 +21,7 @@ from . import indexer
 from . import dsa
 from . import compressed_attention
 
+from .indexer import LightningIndexer
 from .dsa import (
     DeepSparseAttention,
     deep_sparse_attention_core,
@@ -36,6 +37,7 @@ __all__ = [
     "indexer",
     "dsa",
     "compressed_attention",
+    "LightningIndexer",
     "DeepSparseAttention",
     "deep_sparse_attention_core",
     "HeavilyCompressedAttention",

@@ -12,7 +12,7 @@ import time
 import jax
 import jax.numpy as jnp
 
-from transformer_engine.jax.indexer import indexer
+from transformer_engine.jax.sparse_attention.indexer import indexer
 
 try:
     from transformer_engine.jax.triton_extensions.indexer import score_reduce_triton  # noqa: F401

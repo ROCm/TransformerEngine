@@ -12,7 +12,11 @@ import jax
 import jax.numpy as jnp
 import pytest
 
-from transformer_engine.jax.sparse_attention.indexer import indexer, indexer_topk
+from transformer_engine.jax.sparse_attention.indexer import (
+    LightningIndexer,
+    indexer,
+    indexer_topk,
+)
 
 
 def _indexer_inputs(B, oH, T_t, T_s, d, d_c, H, d_i, seed):
@@ -85,3 +89,35 @@ def test_hybrid_backward_matches_reference_grad(B, oH):
     grads_hyb = jax.grad(_loss("hybrid"), argnums=argnums)(*args)
     for gr, gh in zip(grads_ref, grads_hyb):
         assert _rel_err(gh, gr) < 5e-2
+
+
+def test_lightning_indexer_module_matches_functional():
+    """``LightningIndexer`` (Flax module) reproduces the functional ``indexer``
+    when fed the module's own initialized weights."""
+    B, oH, T_t, T_s, d, d_c, H, d_i = 2, 3, 64, 64, 32, 32, 8, 32
+    keys = jax.random.split(jax.random.PRNGKey(7), 3)
+    Q = jax.random.normal(keys[0], (B, oH, T_t, d), dtype=jnp.bfloat16)
+    K = jax.random.normal(keys[1], (B, oH, T_s, d), dtype=jnp.bfloat16)
+
+    mod = LightningIndexer(num_heads=H, d_c=d_c, d_i=d_i, backend="reference")
+    variables = mod.init(keys[2], Q, K)
+    o_mod = mod.apply(variables, Q, K)
+    assert o_mod.shape == (B, oH, T_t, T_s)
+
+    p = variables["params"]
+    o_fn = indexer(Q, K, p["W_uq"], p["W_dq"], p["W_k"], p["W_w"], backend="reference")
+    assert _rel_err(o_mod, o_fn) < 1e-5
+
+
+def test_lightning_indexer_topk_mode():
+    """``LightningIndexer(topk=k)`` returns fused top-k indices of shape (..., T, k)."""
+    B, oH, T_t, T_s, d, d_c, H, d_i, k = 2, 3, 64, 128, 32, 32, 16, 32, 32
+    keys = jax.random.split(jax.random.PRNGKey(9), 2)
+    Q = jax.random.normal(keys[0], (B, oH, T_t, d), dtype=jnp.bfloat16)
+    K = jax.random.normal(keys[1], (B, oH, T_s, d), dtype=jnp.bfloat16)
+
+    mod = LightningIndexer(num_heads=H, d_c=d_c, d_i=d_i, topk=k)
+    variables = mod.init(jax.random.PRNGKey(0), Q, K)
+    idx = mod.apply(variables, Q, K)
+    assert idx.shape == (B, oH, T_t, k)
+    assert idx.dtype == jnp.int32

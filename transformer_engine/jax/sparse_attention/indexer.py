@@ -11,7 +11,9 @@ Two canonical backends:
     registers. Avoids the score-tensor HBM round-trip that dominates the
     reference path.
 
-Top-level entry point: ``indexer(Q, K, W_uq, W_dq, W_k, W_w, *, backend=...)``.
+Functional entry point: ``indexer(Q, K, W_uq, W_dq, W_k, W_w, *, backend=...)``.
+User-facing Flax module: :class:`LightningIndexer`, which owns the projection
+weights and delegates to ``indexer`` / ``indexer_topk``.
 
 Math (low-rank form: Q is hidden state; query heads are produced by a
 down-projection (d -> d_c) followed by an up-projection (d_c -> H * d_i);
@@ -26,9 +28,11 @@ output weights are produced from Q via a learnable d -> H projection):
 """
 
 import functools
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
+from flax import linen as nn
 
 
 def _indexer_projections(Q, K, W_uq, W_dq, W_k, W_w):
@@ -126,3 +130,71 @@ def indexer(Q, K, W_uq, W_dq, W_k, weights, *, out_dtype=None, backend="referenc
     raise ValueError(
         f"unknown backend {backend!r}; expected 'reference' or 'hybrid'"
     )
+
+
+class LightningIndexer(nn.Module):  # pylint: disable=too-few-public-methods
+    """Lightning-indexer Flax module — the user-facing indexer API.
+
+    Owns the low-rank indexer projection weights (``W_dq``, ``W_uq``, ``W_k``,
+    ``W_w``) and delegates to the functional :func:`indexer` / :func:`indexer_topk`
+    ops. Weight shapes mirror :func:`indexer`'s ``Args`` and are inferred from the
+    trailing hidden dimension ``d`` of ``Q`` at call time.
+
+    Parameters
+    ----------
+    num_heads : int
+        Number of indexer-internal heads (``H``).
+    d_c : int
+        Down-projection rank (``d -> d_c``).
+    d_i : int
+        Inner head dimension (``d_i``).
+    topk : Optional[int], default ``None``
+        If set, :meth:`__call__` returns the fused top-``k`` indices
+        (``(..., T, k)`` int32) via :func:`indexer_topk`, and ``backend`` /
+        ``out_dtype`` are ignored (top-k always uses the fused Triton kernel).
+        If ``None``, :meth:`__call__` returns the full score tensor
+        ``(..., T, S)``.
+    backend : str, default ``"reference"``
+        ``"reference"`` (pure einsum) or ``"hybrid"`` (Triton score-relu-reduce).
+        Only used when ``topk is None``.
+    out_dtype : Optional[jnp.dtype]
+        Output dtype override; defaults to ``Q.dtype``. Unused when ``topk`` is set.
+    dtype : Optional[jnp.dtype]
+        Parameter dtype. Defaults to the input dtype.
+    """
+
+    num_heads: int
+    d_c: int
+    d_i: int
+    topk: Optional[int] = None
+    backend: str = "reference"
+    out_dtype: Optional[jnp.dtype] = None
+    dtype: Optional[jnp.dtype] = None
+
+    @nn.compact
+    def __call__(self, Q: jax.Array, K: jax.Array) -> jax.Array:
+        """Run the indexer on ``Q`` / ``K``.
+
+        Args:
+            Q: ``(..., T, d)`` query-side hidden state.
+            K: ``(..., S, d)`` key-side hidden state.
+
+        Returns:
+            ``(..., T, S)`` scores if ``topk is None``, else ``(..., T, k)``
+            int32 top-k indices (in descending score order).
+        """
+        d = Q.shape[-1]
+        param_dtype = self.dtype if self.dtype is not None else Q.dtype
+        init = nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal")
+
+        W_dq = self.param("W_dq", init, (d, self.d_c), param_dtype)
+        W_uq = self.param("W_uq", init, (self.num_heads, self.d_c, self.d_i), param_dtype)
+        W_k = self.param("W_k", init, (d, self.d_i), param_dtype)
+        W_w = self.param("W_w", init, (d, self.num_heads), param_dtype)
+
+        if self.topk is not None:
+            return indexer_topk(Q, K, W_uq, W_dq, W_k, W_w, k=self.topk)
+        return indexer(
+            Q, K, W_uq, W_dq, W_k, W_w,
+            out_dtype=self.out_dtype, backend=self.backend,
+        )
