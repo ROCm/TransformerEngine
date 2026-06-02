@@ -16,6 +16,10 @@
 
 namespace transformer_engine {
 
+#ifdef __HIP_PLATFORM_AMD__
+#include "rocm_multi_cast_transpose.cuh"
+#endif  // #ifdef __HIP_PLATFORM_AMD__
+
 namespace {
 
 // Parameters to tune
@@ -235,6 +239,42 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
                input.data.shape);
   }
 
+#ifdef __HIP_PLATFORM_AMD__
+  {
+    const size_t n = input_list.size();
+    TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(
+        itype, InputType,
+        TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(
+            otype, OutputType,
+
+            std::vector<const InputType *> in_ptrs(n);
+            std::vector<OutputType *> out_c_ptrs(n);
+            std::vector<OutputType *> out_t_ptrs(n);
+            std::vector<const float *> scale_ptrs(n);
+            std::vector<float *> amax_ptrs(n);
+            std::vector<float *> sinv_ptrs(n);
+            std::vector<size_t> rows(n);
+            std::vector<size_t> cols(n);
+
+            for (size_t i = 0; i < n; i++) {
+              in_ptrs[i]    = reinterpret_cast<const InputType *>(input_list[i]->data.dptr);
+              out_c_ptrs[i] = reinterpret_cast<OutputType *>(output_list[i]->data.dptr);
+              out_t_ptrs[i] = reinterpret_cast<OutputType *>(output_list[i]->columnwise_data.dptr);
+              scale_ptrs[i] = reinterpret_cast<const float *>(output_list[i]->scale.dptr);
+              amax_ptrs[i]  = reinterpret_cast<float *>(output_list[i]->amax.dptr);
+              sinv_ptrs[i]  = reinterpret_cast<float *>(output_list[i]->scale_inv.dptr);
+              rows[i]       = input_list[i]->data.shape[0];
+              cols[i]       = input_list[i]->data.shape[1];
+            }
+
+            rocm_multi_cast_transpose_dispatch<InputType, OutputType>(n, in_ptrs.data(), out_c_ptrs.data(),
+                      out_t_ptrs.data(), scale_ptrs.data(), amax_ptrs.data(), sinv_ptrs.data(), rows.data(),
+                      cols.data(), stream);
+        ); // NOLINT(*)
+    );     // NOLINT(*)
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  }
+#else
   // Input matrices are divided into tiles
   // Note: Each tile is a warp_size x warp_size grid of nvec_out x nvec_in subtiles
   const int tile_dim_m = THREADS_PER_WARP * desired_store_size * 8 / typeToNumBits(otype);
@@ -328,6 +368,7 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
     );                                                                              // NOLINT(*)
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
+#endif  // #ifdef __HIP_PLATFORM_AMD__
 }
 
 }  // namespace transformer_engine

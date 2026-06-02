@@ -59,12 +59,7 @@ def xla_path() -> str:
     Throws FileNotFoundError if XLA source is not found."""
 
     try:
-        import jax
-        from packaging import version
-        if version.parse(jax.__version__) >= version.parse("0.5.0"):
-            from jax import ffi
-        else:
-            from jax.extend import ffi
+        from jax import ffi
     except ImportError:
         if os.getenv("XLA_HOME"):
             xla_home = Path(os.getenv("XLA_HOME"))

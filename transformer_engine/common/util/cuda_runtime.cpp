@@ -8,6 +8,8 @@
 
 #include "../util/cuda_runtime.h"
 
+#include <cublasLt.h>
+
 #include <filesystem>
 #include <mutex>
 
@@ -278,6 +280,12 @@ int cudart_version() {
     return version;
   };
   static int version = get_version();
+  return version;
+}
+
+size_t cublas_version() {
+  // Cache version to avoid cuBLAS logging overhead
+  static size_t version = cublasLtGetVersion();
   return version;
 }
 #endif // __HIP_PLATFORM_AMD__
