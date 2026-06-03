@@ -242,9 +242,9 @@ Error_Type GemmV2FFI(cudaStream_t stream, Buffer_Type lhs, Buffer_Type lhs_scale
   auto workspace_ptr = reinterpret_cast<uint8_t *>(workspace->untyped_data());
   workspace_ptr = move_ptr_to_next_256B_aligned(workspace_ptr);
   size_t workspace_size = static_cast<size_t>(workspace->element_count()) - 256;
-  if (is_nvfp4_scaling(scaling_mode)
+  if (is_nvfp4_scaling(config.scaling_mode)
 #ifdef USE_ROCM
-      || (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING
+      || (config.scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING
           && transformer_engine::cuda::sm_arch() == 125)
 #endif
   ) {
