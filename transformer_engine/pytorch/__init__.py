@@ -64,10 +64,12 @@ from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
 from transformer_engine.pytorch.export import onnx_export
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
-from transformer_engine.pytorch.newton_schulz import (
-    CusolverMpCtx,
-    newton_schulz,
-)
+from torch.utils.cpp_extension import IS_HIP_EXTENSION as _IS_HIP_EXTENSION
+if not _IS_HIP_EXTENSION:
+    from transformer_engine.pytorch.newton_schulz import (
+        CusolverMpCtx,
+        newton_schulz,
+    )
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from transformer_engine.pytorch.quantized_tensor import Quantizer

@@ -223,14 +223,15 @@ list(APPEND transformer_engine_cpp_sources
      comm_gemm_overlap/userbuffers/ipcsocket.cc
      comm_gemm_overlap/userbuffers/userbuffers-host.cpp
      comm_gemm_overlap/comm_gemm_overlap.cpp
-     newton_schulz/newton_schulz.cpp
+     newton_schulz/newton_schulz.cpp #CUDA-only
      )
 
 # Sources that only apply to CUDA builds (removed when building for ROCm)
 set(cuda_only_cpp_sources
      cudnn_utils.cpp
      fused_attn/fused_attn.cpp
-     util/cuda_nvml.cpp)
+     util/cuda_nvml.cpp
+     newton_schulz/newton_schulz.cpp)
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
