@@ -294,6 +294,10 @@ if(USE_ROCM)
       gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp
+      gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_nn.cpp
+      gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_nt.cpp
+      gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tn.cpp
+      gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tt.cpp
       gemm/rocm_gemm.cu)
 endif()
 
