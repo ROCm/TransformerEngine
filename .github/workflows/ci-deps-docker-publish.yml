@@ -68,6 +68,10 @@ jobs:
             echo "Set repository variables ARTIFACTORY_DOCKER_REGISTRY and ARTIFACTORY_CI_DEPS_REPOSITORY." >&2
             exit 1
           fi
+          case "${GPU_ARCH}" in
+            gfx942|gfx950) ;;
+            *) echo "gpu_arch must be gfx942 or gfx950" >&2; exit 1 ;;
+          esac
           ROCM_VER="${ROCM_VERSION:-7.12.0}"
           if [ -n "${IMAGE_TAG_INPUT}" ]; then
             echo "IMAGE_TAG=${IMAGE_TAG_INPUT}" >> "${GITHUB_ENV}"
