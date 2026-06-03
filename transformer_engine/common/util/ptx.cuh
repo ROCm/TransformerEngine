@@ -330,8 +330,6 @@ __device__ __forceinline__ void get_cancelled_cta_id_2D(__uint128_t *response_da
   }
 }
 
-constexpr uint32_t BF16_MANTISSA_BITS = 7;
-
 #else
 
 // Native FP4 stochastic rounding is available on gfx950 and later.
@@ -343,12 +341,20 @@ constexpr uint32_t BF16_MANTISSA_BITS = 7;
 
 #endif  // __HIP_PLATFORM_AMD__
 
-
+constexpr uint32_t BF16_MANTISSA_BITS = 7;
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 
 template <typename T>
 __device__ __forceinline__ T exp2f_rcp(e8m0_t biased_exp);
+
+template <>
+__device__ __forceinline__ float exp2f_rcp<float>(e8m0_t biased_exp);
+
+#ifdef __HIP_PLATFORM_AMD__
+// Non-template overload for ROCm — ROCm-specific files call ptx::exp2f_rcp(e8m0) without <float>
+__device__ __forceinline__ float exp2f_rcp(e8m0_t biased_exp);
+#endif
 
 template <>
 __device__ __forceinline__ float exp2f_rcp<float>(e8m0_t biased_exp) {
@@ -376,6 +382,13 @@ __device__ __forceinline__ bf16 exp2f_rcp<bf16>(e8m0_t biased_exp) {
   return static_cast<bf16>(0.0f);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
+
+#ifdef __HIP_PLATFORM_AMD__
+// Non-template definition — delegates to the float specialization
+__device__ __forceinline__ float exp2f_rcp(e8m0_t biased_exp) {
+  return exp2f_rcp<float>(biased_exp);
+}
+#endif
 
 __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
   return __int_as_float(biased_exp << FP32_MANTISSA_BITS);

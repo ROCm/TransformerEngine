@@ -29,6 +29,8 @@ namespace common {
 
 constexpr int MAX_SUPPORTED_TENSOR_DESCRIPTORS = 64;
 
+#ifndef __HIP_PLATFORM_AMD__
+
 struct alignas(128) TensorMapStorage {
   alignas(128) CUtensorMap input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
   alignas(128) CUtensorMap act_input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
@@ -36,10 +38,8 @@ struct alignas(128) TensorMapStorage {
   alignas(128) CUtensorMap output_colwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 };
 
-#ifndef __HIP_PLATFORM_AMD__
 // Internal linkage avoids device-link ODR issues when this header is included by multiple .cu TUs.
 static __device__ TensorMapStorage g_tensor_maps;
-#endif  // __HIP_PLATFORM_AMD__
 
 inline bool full_tile_1D_tensor(const Tensor *const t, const size_t elems_per_block) {
   const size_t N = product(t->data.shape);
@@ -60,7 +60,7 @@ __device__ __forceinline__ unsigned char *align_smem_ptr_per_TMA_requirements(un
   return reinterpret_cast<unsigned char *>(addr);
 }
 
-#endif  //!__HIP_PLATFORM_AMD__   
+#endif  //!__HIP_PLATFORM_AMD__
 
 namespace kernel {
 
@@ -428,6 +428,7 @@ decode_block(const JobDescriptor &job, const int64_t *const __restrict__ offsets
                          block_offset_Y, block_offset_X);
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 // Copies the base tensor map to shmem, modifies the copy, stores the modified tensor map at index
 __device__ __forceinline__ void modify_base_tensor_map(const CUtensorMap base_tensor_map,
                                                        CUtensorMap *global_tensor_map,
@@ -581,6 +582,8 @@ __device__ __forceinline__ void store_output_stage(
     ptx::cp_async_bulk_commit_group();
   }
 }
+
+#endif  // __HIP_PLATFORM_AMD__
 
 }  // namespace common
 }  // namespace dispatch

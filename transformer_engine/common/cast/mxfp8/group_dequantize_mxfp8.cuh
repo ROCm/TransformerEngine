@@ -11,6 +11,8 @@
 #ifndef TRANSFORMER_ENGINE_GROUP_DEQUANTIZE_MXFP8_CUH_
 #define TRANSFORMER_ENGINE_GROUP_DEQUANTIZE_MXFP8_CUH_
 
+#ifndef __HIP_PLATFORM_AMD__
+
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_runtime.h>
@@ -491,5 +493,7 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
 }  // namespace mxfp8
 }  // namespace dispatch
 }  // namespace transformer_engine
+
+#endif  // __HIP_PLATFORM_AMD__
 
 #endif  // TRANSFORMER_ENGINE_GROUP_DEQUANTIZE_MXFP8_CUH_

@@ -230,6 +230,7 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
   bool is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, rsigma.data.dptr, dx->data.dptr,
                                    dz.data.dptr, dgamma->data.dptr, add.data.dptr);
   bool gamma_in_weight_dtype = false;
+#ifndef __HIP_PLATFORM_AMD__
   if (use_cudnn_norm_bwd()) {
     norm_backend = NVTE_Norm_Backend::Cudnn;
     gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
@@ -242,6 +243,7 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
     is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, rsigma.data.dptr, dx->data.dptr,
                                 dz.data.dptr, dgamma->data.dptr, add.data.dptr);
   }
+#endif
 
   auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
       norm_backend, NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::BackwardAdd,

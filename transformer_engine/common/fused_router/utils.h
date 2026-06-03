@@ -412,9 +412,10 @@ __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int 
     bool is_greater = valid && (u > desired);
 
     // Warp ballot to count how many lanes have a qualifying element
-    unsigned int ballot = __ballot_sync(0xffffffff, is_greater);
-    int lane_prefix = __popc(ballot & ((1u << lane_id) - 1));  // exclusive prefix
-    int total_qualifying = __popc(ballot);
+    // Use 64-bit mask for ROCm compatibility (HIP requires uint64_t mask)
+    uint64_t ballot = __ballot_sync(0xFFFFFFFFFFFFFFFFull, is_greater);
+    int lane_prefix = __popcll(ballot & ((1ull << lane_id) - 1));  // exclusive prefix
+    int total_qualifying = __popcll(ballot);
 
     if (is_greater) {
       int out_idx = write_pos + lane_prefix;
@@ -436,9 +437,9 @@ __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int 
     unsigned int u = valid ? float_to_ordered_uint(scores[i]) : 0;
     bool is_equal = valid && (u == desired);
 
-    unsigned int ballot = __ballot_sync(0xffffffff, is_equal);
-    int lane_prefix = __popc(ballot & ((1u << lane_id) - 1));
-    int total_equal = __popc(ballot);
+    uint64_t ballot = __ballot_sync(0xFFFFFFFFFFFFFFFFull, is_equal);
+    int lane_prefix = __popcll(ballot & ((1ull << lane_id) - 1));
+    int total_equal = __popcll(ballot);
 
     if (is_equal && lane_prefix < tie_remaining) {
       int out_idx = write_pos + lane_prefix;

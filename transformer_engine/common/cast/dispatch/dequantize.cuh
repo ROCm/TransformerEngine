@@ -64,11 +64,15 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
 
   switch (input.scaling_mode) {
     case NVTE_MXFP8_1D_SCALING: {
+#ifndef __HIP_PLATFORM_AMD__
       if (is_supported_by_CC_100()) {
         mxfp8::group_dequantize(&input, output, stream);
       } else {
         NVTE_ERROR("MXFP8 Grouped Dequantization is NOT supported by architectures < 10.0");
       }
+#else
+      NVTE_ERROR("MXFP8 Grouped Dequantization is not supported on ROCm.");
+#endif
       break;
     }
     default:
