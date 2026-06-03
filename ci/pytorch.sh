@@ -148,7 +148,7 @@ start_message
 install_prerequisites
 pip list | egrep "flash|ml_dtypes|numpy|torch|transformer_e|typing_ext"
 #check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
-ck_jit_prebuild build
+ck_jit_prebuild build || exit $?
 
 for _fus_attn in auto flash ck aotriton unfused; do
     configure_fused_attn_env $_fus_attn || continue

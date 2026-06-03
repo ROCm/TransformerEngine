@@ -278,24 +278,24 @@ PYTHON_TE_IMPORT="import sys; sys.path[:] = [p for p in sys.path if p not in [''
 ck_jit_prebuild() {
     _prebuild_list="${TE_PATH}ci/ck_jit_prebuild.txt"
     if [ ! -f "$_prebuild_list" ]; then
-        echo "ck_jit_prebuild: blob list not found: $_prebuild_list" >&2
+        script_error "ck_jit_prebuild: blob list not found: $_prebuild_list"
         return 1
     fi
     _gpu_arch=$(rocminfo | grep -E "^ *Name: *gfx" | head -1 | sed "s/.*gfx/gfx/;s/ .*//" 2>/dev/null)
     if [ -n "$_gpu_arch" ]; then
         _arch_arg="--arch $_gpu_arch"
     else
-        echo "ck_jit_prebuild: GPU architecture not detected, omitting --arch" >&2
+        script_error "ck_jit_prebuild: GPU architecture not detected, omitting --arch"
         _arch_arg=""
     fi
     _te_install_dir=$(python -c "${PYTHON_TE_IMPORT}; import os; print(os.path.dirname(transformer_engine.__file__))" 2>/dev/null)
     if [ -z "$_te_install_dir" ]; then
-        echo "ck_jit_prebuild: failed to determine transformer_engine installation directory" >&2
+        script_error "ck_jit_prebuild: failed to determine transformer_engine installation directory"
         return 1
     fi
     _prebuild_py="$_te_install_dir/lib/ck_jit/ck_jit_prebuild.py"
     if [ ! -f "$_prebuild_py" ]; then
-        echo "ck_jit_prebuild: prebuild script not found: $_prebuild_py" >&2
+        script_error "ck_jit_prebuild: prebuild script not found: $_prebuild_py"
         return 1
     fi
     _cpu_count=$(get_cpu_count)

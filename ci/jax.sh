@@ -106,7 +106,7 @@ install_prerequisites
 pip list | egrep "flax|fidle|jax|ml_dtypes|numpy|transformer_e|typing_ext"
 #check_test_jobs_requested
 #test $? -eq 0 && init_test_jobs `python -c "import jax; print(len([d for d in jax.devices() if 'rocm' in d.client.platform_version]))"`
-ck_jit_prebuild build
+ck_jit_prebuild build || exit $?
 
 for _fus_attn in auto ck aotriton; do
     configure_fused_attn_env $_fus_attn || continue
