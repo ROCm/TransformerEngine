@@ -36,12 +36,10 @@ struct alignas(128) TensorMapStorage {
   alignas(128) CUtensorMap output_colwise[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
 };
 
-<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
-=======
 // Internal linkage avoids device-link ODR issues when this header is included by multiple .cu TUs.
 static __device__ TensorMapStorage g_tensor_maps;
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
+#endif  // __HIP_PLATFORM_AMD__
 
 inline bool full_tile_1D_tensor(const Tensor *const t, const size_t elems_per_block) {
   const size_t N = product(t->data.shape);

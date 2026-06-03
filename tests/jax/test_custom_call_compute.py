@@ -1080,10 +1080,8 @@ class TestRandomizedHadamardTransform:
 
 @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
-<<<<<<< HEAD
 @pytest_parametrize_wrapper("input_shape", [(8, 16, 32)])
 @pytest_parametrize_wrapper("q_dtype", [jnp_float8_e4m3_type])
-=======
 @pytest_parametrize_wrapper(
     "input_shape",
     [
@@ -1103,7 +1101,6 @@ class TestRandomizedHadamardTransform:
     ],
 )
 @pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 @pytest_parametrize_wrapper("scaling_mode", non_fp4_supported_scaling_modes)
 @pytest_parametrize_wrapper("flatten_axis", [-1])
 @pytest_parametrize_wrapper("with_group_sizes", [True, False])
@@ -1909,18 +1906,10 @@ class TestGroupedDense:
         prim_out = jax.jit(
             tex.grouped_gemm, static_argnames=("contracting_dims", "use_async_d2h_group_sizes")
         )(
-<<<<<<< HEAD
-            lhs,
-            rhs,
-            group_sizes,
-            contracting_dims,
-            use_async_d2h_group_sizes=use_async_d2h_group_size,
-=======
             lhs_tensor,
             rhs_tensor,
             contracting_dims=contracting_dims,
             use_async_d2h_group_sizes=True,
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
         )
 
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)

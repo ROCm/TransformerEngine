@@ -92,7 +92,6 @@ _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
 
-<<<<<<< HEAD
 if IS_HIP_EXTENSION and os.getenv("NVTE_FLASH_ATTN_AITER", "0") == "1":
     try:
         import aiter
@@ -117,15 +116,12 @@ if IS_HIP_EXTENSION and os.getenv("NVTE_FLASH_ATTN_AITER", "0") == "1":
         fa_utils.version = PkgVersion("2.7.1")  #masqurade as FA 2.7.1
         fa_utils.set_flash_attention_version()
         attn_log.fa_logger.info("Using AITER Triton for FlashAttn.")
+
+# Try to import Flash Attention v2
 try:
     if fa_utils.use_aiter_triton:
         raise PackageNotFoundError  # skip version check for aiter triton
-    fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
-=======
-# Try to import Flash Attention v2
-try:
     fa_utils.version = PkgVersion(PkgVersion(get_pkg_version("flash-attn")).public)
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
 else:
@@ -168,48 +164,28 @@ else:
             ),
             fa_utils.version,
         )
-<<<<<<< HEAD
+
+# Try to import Flash Attention v3
 if not IS_HIP_EXTENSION:
     try:
-        fa_utils.fa3_version = PkgVersion(get_pkg_version("flash-attn-3"))
+        fa_utils.fa3_version = PkgVersion(PkgVersion(get_pkg_version("flash-attn-3")).public)
     except PackageNotFoundError:
         flash_attn_func_v3 = None
         flash_attn_varlen_func_v3 = None
         flash_attn_with_kvcache_v3 = None
+        _flash_attn_fwd_v3 = None
+        _flash_attn_bwd_v3 = None
         # pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
     else:
-        from flash_attn_3.flash_attn_interface import flash_attn_func as flash_attn_func_v3
-        from flash_attn_3.flash_attn_interface import (
+        from flash_attn_interface import flash_attn_func as flash_attn_func_v3
+        from flash_attn_interface import (
             flash_attn_varlen_func as flash_attn_varlen_func_v3,
         )
-        from flash_attn_3.flash_attn_interface import (
+        from flash_attn_interface import (
             flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
         )
-        from flash_attn_3.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
-        from flash_attn_3.flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
-=======
-
-# Try to import Flash Attention v3
-try:
-    fa_utils.fa3_version = PkgVersion(PkgVersion(get_pkg_version("flash-attn-3")).public)
-except PackageNotFoundError:
-    flash_attn_func_v3 = None
-    flash_attn_varlen_func_v3 = None
-    flash_attn_with_kvcache_v3 = None
-    _flash_attn_fwd_v3 = None
-    _flash_attn_bwd_v3 = None
-    # pass  # only print warning if use_flash_attention_3 = True in get_attention_backend
-else:
-    from flash_attn_interface import flash_attn_func as flash_attn_func_v3
-    from flash_attn_interface import (
-        flash_attn_varlen_func as flash_attn_varlen_func_v3,
-    )
-    from flash_attn_interface import (
-        flash_attn_with_kvcache as flash_attn_with_kvcache_v3,
-    )
-    from flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
-    from flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
+        from flash_attn_interface import _flash_attn_forward as _flash_attn_fwd_v3
+        from flash_attn_interface import _flash_attn_backward as _flash_attn_bwd_v3
 
         fa_utils.set_flash_attention_3_params()
 

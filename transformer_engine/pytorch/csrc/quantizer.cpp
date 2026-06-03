@@ -2314,7 +2314,6 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
     }
   }
 
-<<<<<<< HEAD
   // Restriction for the RHT cast fusion kernel because we are using MMA hardware for computing RHT
   bool eligible_for_rht_cast_fusion =
       input.dtype() == DType::kBFloat16 && rows % 64 == 0 && cols % 128 == 0;
@@ -2323,8 +2322,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
   eligible_for_rht_cast_fusion = false;
 #endif
 
-=======
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
+
   // Compute amax.
 #ifdef USE_ROCM
   // Allocate rht_output_t early so that the amax kernel can also write the
@@ -2459,7 +2457,6 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // are separate kernel launches
       auto& columnwise_quant_config_to_use =
           need_separate_columnwise_rng ? quant_config_columnwise : quant_config;
-<<<<<<< HEAD
 
       if (!eligible_for_rht_cast_fusion) {
 #ifndef USE_ROCM
@@ -2506,20 +2503,6 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
         });
 #endif
       }
-=======
-      // unfused path also needs memory allocation for intermediate buffer for RHT output
-      at::Tensor rht_output_t;  // The RHT(x_t) output, in columnwise layout
-      // This wrapper is going to be passed as input to the quantization kernel.
-      TensorWrapper rht_output_t_cpp;  // Wrapper to contain the RHT(x) and RHT(x_t) outputs
-      rht_output_t =
-          allocateTorchTensor(static_cast<int>(cols), static_cast<int>(rows), input.dtype());
-      // NOTE (frsun): This is non-intuitive, we are writing the
-      // result of transposed RHT to the output of rowwise.
-      rht_output_t_cpp.set_rowwise_data(rht_output_t.data_ptr(), input.dtype(),
-                                        std::vector<size_t>{cols, rows});
-      this->quantize_with_rht_unfused_helper(input, out, rht_output_t_cpp, quant_config,
-                                             columnwise_quant_config_to_use, stream);
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
     }
   } else {
     NVTE_SCOPED_GIL_RELEASE({ nvte_quantize_v2(input.data(), out.data(), quant_config, stream); });

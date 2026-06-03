@@ -129,9 +129,8 @@
 
 #endif  // NVTE_WITH_CUBLASMP
 
-<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
-=======
+
 #ifdef NVTE_WITH_CUSOLVERMP
 
 #define NVTE_CHECK_CUSOLVERMP(expr)                                                   \
@@ -144,7 +143,6 @@
 
 #endif  // NVTE_WITH_CUSOLVERMP
 
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 #define NVTE_CHECK_NCCL(expr)                                                 \
   do {                                                                        \
     const ncclResult_t status_NVTE_CHECK_NCCL = (expr);                       \
@@ -152,5 +150,5 @@
       NVTE_ERROR("NCCL Error: ", ncclGetErrorString(status_NVTE_CHECK_NCCL)); \
     }                                                                         \
   } while (false)
-#endif //#ifndef __HIP_PLATFORM_AMD__
+#endif  // __HIP_PLATFORM_AMD__
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_

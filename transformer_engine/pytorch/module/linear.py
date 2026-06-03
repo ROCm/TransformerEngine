@@ -1089,7 +1089,6 @@ class _Linear(torch.autograd.Function):
         inp: torch.Tensor,
         bias: Optional[torch.Tensor],
         non_tensor_args: Tuple,
-<<<<<<< HEAD
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
 
@@ -1449,35 +1448,6 @@ class _Linear(torch.autograd.Function):
             tensors_to_save, tensor_objects = prepare_for_saving(
                 saved_inputmat,
                 weightmat,
-=======
-        input_quantizer: Optional[Quantizer],
-        weight_quantizer: Optional[Quantizer],
-        output_quantizer: Optional[Quantizer],
-        grad_input_quantizer: Optional[Quantizer],
-        grad_weight_quantizer: Optional[Quantizer],
-        grad_output_quantizer: Optional[Quantizer],
-    ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """Forward pass: compute linear output and set up autograd context."""
-        out, new_weight_workspace, tensors_to_save, tensor_objects, ctx_attrs = (
-            _linear_forward_impl(
-                weight,
-                weight_workspace,
-                inp,
-                bias,
-                non_tensor_args,
-                input_quantizer,
-                weight_quantizer,
-                output_quantizer,
-            )
-        )
-        if ctx is not None:
-            _linear_setup_ctx(
-                ctx,
-                tensors_to_save,
-                tensor_objects,
-                ctx_attrs,
-                inp,
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
                 weight,
                 bias,
                 non_tensor_args,
@@ -1494,7 +1464,6 @@ class _Linear(torch.autograd.Function):
             if ctx.backward_override is not None:
                 ctx.reduce_and_update_bwd_fp8_tensors = False
 
-<<<<<<< HEAD
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
@@ -1550,9 +1519,6 @@ class _Linear(torch.autograd.Function):
         # ------------------------------------------------------
 
         return out
-=======
-        return out, new_weight_workspace
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 
     @staticmethod
     def backward(
@@ -1562,7 +1528,6 @@ class _Linear(torch.autograd.Function):
         nvtx_label = "transformer_engine._Linear.backward"
         if ctx.ub_name is not None:
             nvtx_label = f"{nvtx_label}.{ctx.ub_name}"
-<<<<<<< HEAD
 
         with get_nvtx_range_context("_Linear_backward"):
             saved_tensors = ctx.saved_tensors
@@ -2033,17 +1998,6 @@ class _Linear(torch.autograd.Function):
             wgrad = None
 
         # Update FP8 scaling factors if needed
-=======
-        result = _linear_backward(
-            ctx,
-            grad_output,
-            input_quantizer=ctx.input_quantizer,
-            weight_quantizer=ctx.weight_quantizer,
-            grad_input_quantizer=ctx.grad_input_quantizer,
-            grad_weight_quantizer=ctx.grad_weight_quantizer,
-            grad_output_quantizer=ctx.grad_output_quantizer,
-        )
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
         if ctx.reduce_and_update_bwd_fp8_tensors and not is_graph_capturing():
             nvtx_range_push(f"{nvtx_label}.reduce_and_update_fp8_tensors")
             FP8GlobalStateManager.reduce_and_update_fp8_tensors(forward=False)
@@ -2573,14 +2527,8 @@ class Linear(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 self.save_original_input,
                 debug,
-<<<<<<< HEAD
                 self.keep_fp8_weight_transpose_cache,
-                self.use_fsdp2
-=======
-                backward_override,
-                custom,
-                backward_input_needs_gather,
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
+                self.use_fsdp2,
             )
             out, new_weight_workspace = linear_fn(
                 *autograd_ctx,

@@ -994,7 +994,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
                                   .Ret<Buffer_Type>()      // cublas_workspace
                                   .Ret<Buffer_Type>()      // setup_workspace
                                   .Ret<Buffer_Type>()      // int64_workspace
-<<<<<<< HEAD
                                   .Attr<int64_t>("M")
                                   .Attr<int64_t>("N")
                                   .Attr<int64_t>("K")
@@ -1003,10 +1002,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
                                   .Attr<JAXX_Scaling_Mode>("scaling_mode")
                                   .Attr<bool>("is_grouped_dense_wgrad"),
                               GemmFFI_CudaGraph_Traits);
-=======
-                                  .Attrs<GroupedGemmV2Config>(),
-                              FFI_CudaGraph_Traits);
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
                           Buffer_Type rhs_data, Buffer_Type rhs_sinv, Buffer_Type bias,
@@ -1383,7 +1378,6 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
 
   size_t num_non_empty_gemms = lhs_list.size();
 
-<<<<<<< HEAD
 #ifndef USE_ROCM
   if (is_mxfp8_scaling) {
     for (int i = 0; i < num_non_empty_gemms; i++) {
@@ -1398,8 +1392,7 @@ Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type
   }
 #endif
 
-=======
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
+
   // Launch zero-out kernels before the GEMM calls to use the sync in the multi-stream GEMM
   size_t num_zero_outs = zero_out_dptr_list.size();
   for (int i = 0; i < num_zero_outs; i++) {

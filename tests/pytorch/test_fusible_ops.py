@@ -42,12 +42,9 @@ from transformer_engine.pytorch import (
     NVFP4Quantizer,
     is_bf16_available,
 )
-<<<<<<< HEAD
 from transformer_engine.pytorch.utils import get_device_compute_capability
-=======
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.pytorch.cpp_extensions.gemm import general_grouped_gemm_for_grouped_tensor
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 import transformer_engine_torch as tex
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 

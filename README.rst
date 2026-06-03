@@ -325,13 +325,10 @@ Transformer Engine
 Latest News
 ===========
 
-<<<<<<< HEAD
-=======
 * [12/2025] `NVIDIA Nemotron 3: Efficient and Open Intelligence <https://arxiv.org/abs/2512.20856>`_ - trained with NVFP4 on Transformer Engine
 * [11/2025] `NVIDIA Blackwell Architecture Sweeps MLPerf Training v5.1 Benchmarks <https://developer.nvidia.com/blog/nvidia-blackwell-architecture-sweeps-mlperf-training-v5-1-benchmarks/>`_
 * [11/2025] `Scale Biology Transformer Models with PyTorch and NVIDIA BioNeMo Recipes <https://developer.nvidia.com/blog/scale-biology-transformer-models-with-pytorch-and-nvidia-bionemo-recipes/>`_
 * [11/2025] `FP8 Training of Large-Scale RL Models <https://lmsys.org/blog/2025-11-25-fp8-rl/>`_
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 * [09/2025] `Pretraining Large Language Models with NVFP4 <https://www.arxiv.org/pdf/2509.25149>`_
 * [09/2025] `Native FP8 Mixed Precision Training for Ling 2.0, Open Sourced! <https://huggingface.co/blog/im0qianqian/ling-mini-2-fp8-mixed-precision-training-solution>`_
 * [09/2025] `Faster Training Throughput in FP8 Precision with NVIDIA NeMo <https://developer.nvidia.com/blog/faster-training-throughput-in-fp8-precision-with-nvidia-nemo/>`_

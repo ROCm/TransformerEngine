@@ -323,19 +323,12 @@ class _LayerNormLinear(torch.autograd.Function):
             if is_weight_param_quantized and not debug:
                 weight_quantizer = weight._quantizer
             elif weight_quantizer is not None:
-<<<<<<< HEAD
                 weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and keep_fp8_weight_transpose_cache)
                 # NVFP4 must produce columnwise data at quantization time
                 # (no lazy transpose like Float8Tensor)
                 from ..tensor.nvfp4_tensor import NVFP4Quantizer
                 if isinstance(weight_quantizer, NVFP4Quantizer) and is_grad_enabled:
                     weight_quantizer.set_usage(columnwise=True)
-=======
-                weight_quantizer.set_usage(
-                    rowwise=True,
-                    columnwise=is_grad_enabled and backward_override is None,
-                )
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 
             # Get quantized weight
             update_ws = is_first_microbatch is None or is_first_microbatch
@@ -573,17 +566,12 @@ class _LayerNormLinear(torch.autograd.Function):
                 _first_fp8_module = qstate.is_first_fp8_module
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase():
-<<<<<<< HEAD
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
                 ctx.autocast_fp8_reduction_skipped = FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2
             ctx.wgrad_store = wgrad_store
             ctx.debug = debug
             ctx.keep_fp8_weight_transpose_cache = keep_fp8_weight_transpose_cache
             ctx.use_fsdp2 = use_fsdp2
-=======
-                    qstate.is_first_fp8_module = _first_fp8_module
-            ctx.wgrad_store = wgrad_store
-            ctx.debug = debug
 
             # backward overrides
             if backward_override is not None:
@@ -598,7 +586,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 ctx.grad_output_quantizer = None
                 ctx.reduce_and_update_bwd_fp8_tensors = False
 
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
+
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
         # ------------------------------------------------------

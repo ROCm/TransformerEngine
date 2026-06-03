@@ -2420,7 +2420,6 @@ def grouped_gemm(
     # would cause the C++ kernel to skip scale_inv setup, triggering a cuBLAS assertion.
     _, scaling_mode = _get_out_dtype_and_scaling_mode(lhs)
 
-<<<<<<< HEAD
     if (
         not isinstance(lhs, ScaledTensor)
         and not isinstance(rhs, ScaledTensor)
@@ -2463,9 +2462,6 @@ def grouped_gemm(
         rhs_shape = rhs_q.original_shape
 
     if lhs_data.dtype == jnp_float8_e5m2_type and rhs_data.dtype == jnp_float8_e5m2_type:
-=======
-    if lhs.data.dtype == jnp.float8_e5m2 and rhs.data.dtype == jnp.float8_e5m2:
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
         raise ValueError("FP8 GEMM does not support E5M2 * E5M2")
 
     if scaling_mode.is_tensor_scaling() and not is_fp8_gemm_with_all_layouts_supported():

@@ -686,15 +686,6 @@ def get_attention_backend(
                 )
             use_fused_attention = False
 
-<<<<<<< HEAD
-    if use_flash_attention_2 and (
-        head_dim_qk > 256
-        or head_dim_qk % 8 != 0
-        or (
-            not IS_HIP_EXTENSION
-            and head_dim_qk > 192
-            and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
-=======
     if (  # pylint: disable=too-many-boolean-expressions
         use_flash_attention_2
         and FlashAttentionUtils.is_installed
@@ -702,10 +693,10 @@ def get_attention_backend(
             head_dim_qk > 256
             or head_dim_qk % 8 != 0
             or (
-                head_dim_qk > 192
+                not IS_HIP_EXTENSION
+                and head_dim_qk > 192
                 and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
             )
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
         )
     ):
         logger.debug(
@@ -815,16 +806,7 @@ def get_attention_backend(
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
             use_flash_attention = False
-<<<<<<< HEAD
         if device_compute_capability == (12, 0) and not IS_HIP_EXTENSION:
-            if use_fused_attention:
-                logger.debug(
-                    "Disabling FusedAttention as qkv_format = thd is"
-                    " not supported for compute capability = sm120"
-                )
-            use_fused_attention = False
-=======
-        if device_compute_capability == (12, 0):
             if cudnn_version < (9, 18, 1):
                 if use_fused_attention:
                     logger.debug(
@@ -840,7 +822,6 @@ def get_attention_backend(
                         qkv_layout,
                     )
                 use_fused_attention = False
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 
     # Filter: Dropout
     if attention_dropout != 0.0:
@@ -1227,17 +1208,13 @@ def get_attention_backend(
                 "please install flash-attn >= 2.4.1."
             )
             use_flash_attention_2 = False
-<<<<<<< HEAD
-    if use_fused_attention and deterministic and (not IS_HIP_EXTENSION):
-=======
     if use_flash_attention_3 and deterministic and FlashAttentionUtils.v3_is_installed:
         if head_dim_qk >= 256:
             logger.debug(
                 "Disabling FlashAttention 3 for deterministic execution with head_dim_qk >= 256."
             )
             use_flash_attention_3 = False
-    if use_fused_attention and deterministic:
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
+    if use_fused_attention and deterministic and (not IS_HIP_EXTENSION):
         if softmax_type != "vanilla":
             logger.debug(
                 "Disabling FusedAttention for determinism reasons with softmax_type = %s. "

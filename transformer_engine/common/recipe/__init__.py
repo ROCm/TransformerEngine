@@ -612,8 +612,11 @@ class CustomRecipe(Recipe):
         ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
     def __repr__(self) -> str:
-<<<<<<< HEAD
-        return f"recipe_type={self.__class__.__name__}, qfactory={self.qfactory}"
+        return (
+            f"recipe_type={self.__class__.__name__}, "
+            f"qfactory={self.qfactory}, "
+            f"backward_override={self.backward_override}"
+        )
 
 @dataclass()
 class MXFP4BlockScaling(Recipe):
@@ -662,10 +665,4 @@ class MXFP4BlockScaling(Recipe):
             f"recipe_type={self.__class__.__name__}, "
             f"margin={self.margin}, "
             f"fp4_format={str(self.fp4_format).split('.')[1]}"
-=======
-        return (
-            f"recipe_type={self.__class__.__name__}, "
-            f"qfactory={self.qfactory}, "
-            f"backward_override={self.backward_override}"
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
         )

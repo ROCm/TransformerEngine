@@ -5,9 +5,7 @@
 #
 # See LICENSE for license information.
 
-<<<<<<< HEAD:tests/pytorch/distributed/run_fsdp2_model.py
 
-=======
 """FSDP2 model sharding tests.
 
 Run all tests (via torchrun + pytest):
@@ -31,7 +29,6 @@ Other options:
 """
 
 import gc
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723:tests/pytorch/distributed/fsdp2_tests/run_fsdp2_model.py
 import os
 import sys
 import argparse
@@ -52,12 +49,9 @@ from torch import nn, optim
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
-<<<<<<< HEAD:tests/pytorch/distributed/run_fsdp2_model.py
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch import QuantizedTensor
 from contextlib import nullcontext
-=======
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723:tests/pytorch/distributed/fsdp2_tests/run_fsdp2_model.py
 
 from fsdp2_utils import get_recipe_from_string, save_custom_attrs, restore_custom_attrs
 
@@ -372,7 +366,6 @@ def _train(args):
         torch.cuda.empty_cache()
         gc.collect()
 
-<<<<<<< HEAD:tests/pytorch/distributed/run_fsdp2_model.py
     # NOTE: In PyTorch < 2.6 there’s a teardown race where one rank may call
     # destroy_process_group() while other ranks still have in-flight NCCL ops,
     # which can trigger a NCCL/RCCL comm error. Newer releases (>= 2.6) fixed
@@ -380,8 +373,6 @@ def _train(args):
     if te.torch_version() < (2, 6, 0):
         dist.barrier(device_ids=[torch.cuda.current_device()])
     dist.destroy_process_group()
-=======
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723:tests/pytorch/distributed/fsdp2_tests/run_fsdp2_model.py
     return 0
 
 

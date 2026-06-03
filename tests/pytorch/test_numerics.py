@@ -3579,19 +3579,14 @@ def _make_grouped_tensor_quantized_mxfp8(
 def test_grouped_gemm_grouped_tensor_mxfp8(
     shape, accumulate, layout: str, case: str, dtype: torch.dtype
 ) -> None:
-<<<<<<< HEAD
-    if not IS_HIP_EXTENSION and tex.get_cublasLt_version() < 130200:
-        pytest.skip("Grouped GEMM requires cuBLAS 13.2+.")
     if IS_HIP_EXTENSION:
         if not is_mxfp8_available():
             pytest.skip("MXFP8 is not supported on this config")
-    elif torch.cuda.get_device_capability() < (10, 0):
-=======
-    if tex.get_cublasLt_version() < 130300:
-        pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
-    if torch.cuda.get_device_capability() < (10, 0):
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
-        pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
+    else:
+        if tex.get_cublasLt_version() < 130300:
+            pytest.skip("Grouped GEMM requires cuBLAS 13.3+.")
+        if torch.cuda.get_device_capability() < (10, 0):
+            pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
     if dtype == torch.bfloat16 and not is_bf16_available():
         pytest.skip("bfloat16 is required for grouped GEMM test.")
 

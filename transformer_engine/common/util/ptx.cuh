@@ -330,7 +330,8 @@ __device__ __forceinline__ void get_cancelled_cta_id_2D(__uint128_t *response_da
   }
 }
 
-<<<<<<< HEAD
+constexpr uint32_t BF16_MANTISSA_BITS = 7;
+
 #else
 
 // Native FP4 stochastic rounding is available on gfx950 and later.
@@ -340,11 +341,9 @@ __device__ __forceinline__ void get_cancelled_cta_id_2D(__uint128_t *response_da
 #define ARCH_HAS_STOCHASTIC_ROUNDING (false)
 #endif
 
-#endif //#ifndef __HIP_PLATFORM_AMD__
+#endif  // __HIP_PLATFORM_AMD__
 
-=======
-constexpr uint32_t BF16_MANTISSA_BITS = 7;
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
+
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 

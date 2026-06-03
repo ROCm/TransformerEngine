@@ -899,12 +899,7 @@ class _LayerNormMLP(torch.autograd.Function):
                 _first_fp8_module = qstate.is_first_fp8_module
                 ctx.reduce_and_update_bwd_fp8_tensors = FP8GlobalStateManager.is_first_fp8_module()
                 if in_fp8_activation_recompute_phase() or is_recomputation:
-<<<<<<< HEAD
-                    FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
-                ctx.autocast_fp8_reduction_skipped = FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2
-=======
                     qstate.is_first_fp8_module = _first_fp8_module
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 
             ctx.wgrad_store = wgrad_store
             if is_recomputation:  # return the recomputed tensors
@@ -1466,11 +1461,7 @@ class _LayerNormMLP(torch.autograd.Function):
 
             # Make sure required data is available
             if ctx.fc1_weight_quantizer is not None and isinstance(
-<<<<<<< HEAD
-                fc1_weight, QuantizedTensorStorage # this fixes a bug with upstream usage of fc1_weight_quantizer
-=======
                 fc1_weight, QuantizedTensorStorage
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
             ):
                 fc1_weight.update_usage(columnwise_usage=True)
 

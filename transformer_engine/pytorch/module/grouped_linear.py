@@ -368,19 +368,11 @@ class _GroupedLinear(torch.autograd.Function):
         with get_nvtx_range_context("_GroupedLinear_backward"):
             saved_tensors = restore_from_func_ctx(ctx)
             N = ctx.num_gemms
-<<<<<<< HEAD
             num_inputs = ctx.num_input_tensors
             inputmats = saved_tensors[:num_inputs]
             weights = saved_tensors[num_inputs: num_inputs + N]
-            origin_weights = saved_tensors[num_inputs + N : num_inputs + 2 * N]
+            saved_weights = saved_tensors[num_inputs + N : num_inputs + 2 * N]
             biases = saved_tensors[num_inputs + 2 * N : num_inputs + 3 * N]
-            main_grads = [main_grad_func() for main_grad_func in ctx.main_grad_funcs]
-=======
-            inputmats = saved_tensors[:N]
-            weights = saved_tensors[N : 2 * N]
-            saved_weights = saved_tensors[2 * N : 3 * N]
-            biases = saved_tensors[3 * N : 4 * N]
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 
             # Restore from weakrefs to get original weight python objects
             # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
@@ -471,23 +463,7 @@ class _GroupedLinear(torch.autograd.Function):
                     dtype=ctx.activation_dtype,
                     device=ctx.device,
                 )
-<<<<<<< HEAD
 
-                for weight, quantizer in zip(weights, ctx.weight_quantizers):
-                    if quantizer is not None and isinstance(weight, QuantizedTensorStorage):
-                        weight.update_usage(
-                            rowwise_usage=quantizer.rowwise_usage,
-                            columnwise_usage=quantizer.columnwise_usage,
-                        )
-                if ctx.use_grouped_gemm_triton:
-                    general_grouped_gemm_func = general_grouped_gemm_triton
-                    kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
-                else:
-                    general_grouped_gemm_func = general_grouped_gemm
-                    kwargs = {}
-                general_grouped_gemm_func(
-                    weights,
-=======
                 weights_for_dgrad = weights
                 if ctx.backward_override == "dequantized":
                     weights_for_dgrad = [
@@ -509,12 +485,20 @@ class _GroupedLinear(torch.autograd.Function):
                     ]
                 # Make sure weights are available in column-wise format
                 # for dgrad computation.
-                for weight in weights_for_dgrad:
-                    if isinstance(weight, QuantizedTensorStorage):
-                        weight.update_usage(columnwise_usage=True)
-                general_grouped_gemm(
+                for weight, quantizer in zip(weights_for_dgrad, ctx.weight_quantizers):
+                    if quantizer is not None and isinstance(weight, QuantizedTensorStorage):
+                        weight.update_usage(
+                            rowwise_usage=quantizer.rowwise_usage,
+                            columnwise_usage=quantizer.columnwise_usage,
+                        )
+                if ctx.use_grouped_gemm_triton:
+                    general_grouped_gemm_func = general_grouped_gemm_triton
+                    kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
+                else:
+                    general_grouped_gemm_func = general_grouped_gemm
+                    kwargs = {}
+                general_grouped_gemm_func(
                     weights_for_dgrad,
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
                     grad_output,
                     [dgrad],
                     ctx.grad_input_quantizers,
@@ -574,24 +558,12 @@ class _GroupedLinear(torch.autograd.Function):
                             ctx.activation_dtype,
                         )
                     else:
-<<<<<<< HEAD
                         if not ctx.use_grouped_gemm_triton:
                             inputmats = torch.split(
                                 cast_if_needed(inp_view, ctx.activation_dtype), ctx.m_splits
                             )
                         else:
                             inputmats = [cast_if_needed(inp_view, ctx.activation_dtype)]
-
-                if ctx.use_grouped_gemm_triton:
-                    general_grouped_gemm_func = general_grouped_gemm_triton
-                    kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
-                else:
-                    general_grouped_gemm_func = general_grouped_gemm
-                    kwargs = {}
-=======
-                        inputmats = torch.split(
-                            cast_if_needed(inp_view, ctx.activation_dtype), ctx.m_splits
-                        )
                 elif ctx.backward_override == "dequantized":
                     inputmats_dequant = []
                     for m_split, inputmat in zip(ctx.m_splits, inputmats):
@@ -616,7 +588,13 @@ class _GroupedLinear(torch.autograd.Function):
                         else:
                             inputmats_dequant.append(cast_if_needed(inputmat, ctx.activation_dtype))
                     inputmats = inputmats_dequant
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
+
+                if ctx.use_grouped_gemm_triton:
+                    general_grouped_gemm_func = general_grouped_gemm_triton
+                    kwargs = {"m_splits_tensor": ctx.m_splits_tensor}
+                else:
+                    general_grouped_gemm_func = general_grouped_gemm
+                    kwargs = {}
                 grouped_gemm_wgrad = functools.partial(
                     general_grouped_gemm_func,
                     quantization_params=ctx.grad_weight_quantizers,
@@ -673,13 +651,8 @@ class _GroupedLinear(torch.autograd.Function):
                     return wgrad
 
                 wgrad_list = [
-<<<<<<< HEAD
-                    handle_custom_ddp_from_mcore(weight, wgrad_list[i])
-                    for i, weight in enumerate(origin_weights)
-=======
                     handle_custom_ddp_from_mcore(weight, main_grad, wgrad)
                     for weight, main_grad, wgrad in zip(origin_weights, main_grads, wgrad_list)
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
                 ]
             else:
                 wgrad_list = [None] * ctx.num_gemms

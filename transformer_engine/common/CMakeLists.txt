@@ -321,7 +321,6 @@ list(APPEND transformer_engine_SOURCES ${transformer_engine_cuda_arch_specific_s
                                        ${transformer_engine_cuda_sources}
                                        ${transformer_engine_cpp_sources})
 
-<<<<<<< HEAD
 if(USE_ROCM)
 # Remove CUDA-only sources when not building for CUDA
   list(REMOVE_ITEM transformer_engine_SOURCES
@@ -348,11 +347,8 @@ if(USE_ROCM)
 endif()
 
 if(USE_CUDA)
-# Set compile options for CUDA sources with generic architectures
-=======
 # Set compile options for CUDA sources with generic architectures.
 # These get standard archs (pre-Blackwell) + generic Blackwell family heads.
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 foreach(cuda_source IN LISTS transformer_engine_cuda_sources)
   set(arch_compile_options)
   foreach(arch IN LISTS NVTE_STANDARD_ARCHS)
@@ -400,7 +396,10 @@ list(APPEND transformer_engine_SOURCES
 endif()
 
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
-<<<<<<< HEAD
+# Disable CMake's automatic architecture flag injection.
+# All architectures are handled explicitly via per-source COMPILE_OPTIONS
+# using NVTE_STANDARD_ARCHS, NVTE_GENERIC_ARCHS, and NVTE_SPECIFIC_ARCHS above.
+set_target_properties(transformer_engine PROPERTIES CUDA_ARCHITECTURES OFF)
 
 else() #USE_ROCM
 
@@ -418,13 +417,6 @@ else() #USE_ROCM
   # to rocm_sysdeps but missing it in the default include path.
   target_include_directories(transformer_engine SYSTEM PRIVATE "${ROCM_PATH}/lib/rocm_sysdeps/include")
 endif()
-
-=======
-# Disable CMake's automatic architecture flag injection.
-# All architectures are handled explicitly via per-source COMPILE_OPTIONS
-# using NVTE_STANDARD_ARCHS, NVTE_GENERIC_ARCHS, and NVTE_SPECIFIC_ARCHS above.
-set_target_properties(transformer_engine PROPERTIES CUDA_ARCHITECTURES OFF)
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 target_include_directories(transformer_engine PUBLIC
                            "${CMAKE_CURRENT_SOURCE_DIR}/include")
 

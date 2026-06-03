@@ -26,7 +26,6 @@ _FSDP2_DIR = Path(__file__).parent.resolve() / "fsdp2_tests"
 sys.path.insert(0, str(_FSDP2_DIR))
 from conftest import _parametrize_recipes
 
-<<<<<<< HEAD
 def check_nvfp4_support():
     supported, reason = fp8.check_nvfp4_support()
     if supported and torch.cuda.get_device_capability()[0] == 12:
@@ -92,9 +91,7 @@ def _run_test(fp_init, sharding_dims, recipe, layer_type):
     test_cmd += ["--layer-type", layer_type]
 
     subprocess.run(test_cmd, env=os.environ, check=True)
-=======
 sys.path.pop(0)
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 
 
 @pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")

@@ -12,19 +12,13 @@ from pathlib import Path
 import setuptools
 
 from .utils import (
-<<<<<<< HEAD
     rocm_build,
     rocm_path,
-=======
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
     all_files_in_dir,
     cuda_version,
     get_cuda_include_dirs,
     debug_build_enabled,
-<<<<<<< HEAD
-=======
     setup_mpi_flags,
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 )
 from typing import List
 

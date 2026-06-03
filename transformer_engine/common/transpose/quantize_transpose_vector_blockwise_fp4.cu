@@ -540,12 +540,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 #else
   const float global_encode_scale =
       kIsE8Scaling ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0]);
-<<<<<<< HEAD
 #endif
-=======
   constexpr float fp4_max_inv = 1.0f / TypeExtrema<fp4e2m1>::max;
   const float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
   const float global_decode_scale = 1.0 / global_encode_scale;
 
   // Step 2: Cast and store to output_c

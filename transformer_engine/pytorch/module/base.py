@@ -1582,7 +1582,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
     def forward(self):
         """Needs override."""
 
-<<<<<<< HEAD
     def get_weight_workspace(
         self,
         *,
@@ -1718,8 +1717,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         return out
 
-=======
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
     ):

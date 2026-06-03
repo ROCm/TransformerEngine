@@ -218,7 +218,6 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
     CheckOutputTensor(*dgamma, "dgamma");
   }
 
-<<<<<<< HEAD
   // cuDNN does not currently support fused backward+add
   NVTE_Norm_Backend norm_backend = NVTE_Norm_Backend::Te;
 
@@ -230,10 +229,6 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
 
   bool is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, rsigma.data.dptr, dx->data.dptr,
                                    dz.data.dptr, dgamma->data.dptr, add.data.dptr);
-=======
-  NVTE_Norm_Backend norm_backend;
-  bool is_aligned = true;
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
   bool gamma_in_weight_dtype = false;
   if (use_cudnn_norm_bwd()) {
     norm_backend = NVTE_Norm_Backend::Cudnn;

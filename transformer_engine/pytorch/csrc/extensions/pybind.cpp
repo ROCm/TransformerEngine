@@ -489,9 +489,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Get cublasLt version", py::call_guard<py::gil_scoped_release>());
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
-<<<<<<< HEAD
 #endif
-=======
   m.def("convert_host_pointers_to_tensor",
         &transformer_engine::pytorch::convert_host_pointers_to_tensor,
         "Copy host-side device pointers into device tensors", py::arg("tensor_lists"),
@@ -501,7 +499,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Swizzle scales and collect data/scale device pointers into device tensors",
         py::arg("data_tensors"), py::arg("scale_tensors"), py::arg("swizzle") = false,
         py::arg("rowwise"), py::arg("data_dtype"), py::call_guard<py::gil_scoped_release>());
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
   m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,
         "Compute grouped tensor offsets from split sizes", py::arg("first_dims"),
         py::arg("logical_last_dim"), py::call_guard<py::gil_scoped_release>());
@@ -614,9 +611,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         &transformer_engine::pytorch::multi_tensor_compute_scale_inv_e8m0_cuda,
         "Fused compute E8M0 scale_inv from amax", py::call_guard<py::gil_scoped_release>());
 
-<<<<<<< HEAD
 #ifndef USE_ROCM
-=======
   // Newton-Schulz (cuSolverMp)
   m.def("cusolvermp_ctx_create", &transformer_engine::pytorch::cusolvermp_ctx_create,
         "Create cuSolverMp context for Newton-Schulz", py::arg("nccl_comm_ptr"), py::arg("nranks"),
@@ -628,7 +623,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("x"), py::arg("num_iterations"), py::arg("coefficients"),
         py::call_guard<py::gil_scoped_release>());
 
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
+
   // Comm+GEMM Overlap
   m.def("bulk_overlap_ag_with_external_gemm",
         &transformer_engine::pytorch::bulk_overlap_ag_with_external_gemm,

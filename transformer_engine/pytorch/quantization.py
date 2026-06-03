@@ -90,18 +90,13 @@ def _compute_mxfp8_support() -> Tuple[bool, str]:
     return False, "Device compute capability 10.0 or higher required for MXFP8 execution."
 
 
-<<<<<<< HEAD
-@functools.lru_cache(maxsize=None)
-def check_nvfp4_support() -> Tuple[bool, str]:
+def _compute_nvfp4_support() -> Tuple[bool, str]:
+    """Return if nvfp4 support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 4), (9, 5)): #TODO: enabled for gfx1250 when ready
+        if gpu_arch in ((9, 4), (9, 5)):  # TODO: enabled for gfx1250 when ready
             return True, ""
         return False, "Device arch gfx94x or newer is required for NVFP4 execution."
-=======
-def _compute_nvfp4_support() -> Tuple[bool, str]:
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
-    """Return if nvfp4 support is available"""
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
     return False, "Device compute capability 10.0 or higher required for NVFP4 execution."
@@ -119,17 +114,6 @@ def _compute_fp8_block_scaling_support() -> Tuple[bool, str]:
     )
 
 
-<<<<<<< HEAD
-@functools.lru_cache(maxsize=None)
-def check_mxfp4_support() -> Tuple[bool, str]:
-    """Return if mxfp4 support is available"""
-    if IS_HIP_EXTENSION:
-        gpu_arch = get_device_compute_capability()
-        if gpu_arch == (9, 5): #TODO: enabled for gfx1250 when ready
-            return True, ""
-        return False, "Device arch gfx95x or newer is required for MXFP4 execution."
-    return False, "Only ROCm gfx950 supports MXFP4"
-=======
 @torch.compiler.assume_constant_result
 def check_fp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available."""
@@ -164,7 +148,17 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     if _FP8_BLOCK_SCALING_SUPPORT is None:
         _FP8_BLOCK_SCALING_SUPPORT = _compute_fp8_block_scaling_support()
     return _FP8_BLOCK_SCALING_SUPPORT
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
+
+
+@functools.lru_cache(maxsize=None)
+def check_mxfp4_support() -> Tuple[bool, str]:
+    """Return if mxfp4 support is available"""
+    if IS_HIP_EXTENSION:
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch == (9, 5): #TODO: enabled for gfx1250 when ready
+            return True, ""
+        return False, "Device arch gfx95x or newer is required for MXFP4 execution."
+    return False, "Only ROCm gfx950 supports MXFP4"
 
 
 def check_recipe_support(recipe: Recipe) -> None:
@@ -189,20 +183,17 @@ def check_recipe_support(recipe: Recipe) -> None:
 
 def get_default_fp8_recipe() -> Recipe:
     """FP8 recipe with default args."""
-<<<<<<< HEAD
+    assert not torch.compiler.is_compiling(), (
+        "Creating Recipe objects inside compiled regions is not supported because "
+        "their construction is not traceable. "
+        "Pass an explicit recipe to te.autocast() instead."
+    )
     if IS_HIP_EXTENSION:
         if os.getenv("NVTE_ROCM_ENABLE_MXFP8", "0") != "2":
             return DelayedScaling()
         if check_mxfp8_support()[0]:
             return MXFP8BlockScaling()
         return DelayedScaling()
-=======
-    assert not torch.compiler.is_compiling(), (
-        "Creating Recipe objects inside compiled regions is not supported because "
-        "their construction is not traceable. "
-        "Pass an explicit recipe to te.autocast() instead."
-    )
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
     if check_mxfp8_support()[0]:
         return MXFP8BlockScaling()
     if get_device_compute_capability() >= (12, 0):
@@ -381,7 +372,6 @@ class FP8GlobalStateManager:
     FP8 state at different stages of execution.
     """
 
-<<<<<<< HEAD
     FP8_ENABLED = False
     FP8_CALIBRATION = False
     FP8_RECIPE = None
@@ -406,9 +396,7 @@ class FP8GlobalStateManager:
     reason_for_no_fp8_block_scaling = None
     nvfp4_available = None
     reason_for_no_nvfp4 = ""
-=======
     quantization_state = FP8GlobalState()
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 
     @classmethod
     def reset(cls) -> None:
@@ -745,11 +733,7 @@ class FP8GlobalStateManager:
         # Reduce only the non-FP8 weight modules here.
         # FP8 weight modules are reduced at the end of the optimizer
         # step after the weight amax is populated.
-<<<<<<< HEAD
         if not cls.SKIP_FP8_REDUCTION_FOR_FSDP2 and enabled and cls.AUTOCAST_DEPTH == 0 and not _graph and torch.is_grad_enabled():
-=======
-        if enabled and qstate.autocast_depth == 0 and not _graph and torch.is_grad_enabled():
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
             # delayed scaling only function, for other recipes (current scaling with any granularity),
             # this is noop for other recipes because cls.global_amax_buffer is empty list
             cls.reduce_and_update_fp8_tensors(forward=True)

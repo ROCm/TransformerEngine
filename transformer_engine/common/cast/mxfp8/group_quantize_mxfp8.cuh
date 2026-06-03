@@ -756,15 +756,11 @@ template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
           float (*OP)(float, const ParamOP &)>
 void group_quantize(const GroupedTensor *input, const GroupedTensor *activations,
                     const Tensor *noop, GroupedTensor *output, GroupedTensor *dbias,
-<<<<<<< HEAD
-                    Tensor *workspace, cudaStream_t stream) {
+                    Tensor *workspace, const QuantizationConfig *quant_config,
+                    cudaStream_t stream) {
 #ifdef __HIP_PLATFORM_AMD__
   NVTE_ERROR("group_quantize is not supported on ROCm yet.");
 #else
-=======
-                    Tensor *workspace, const QuantizationConfig *quant_config,
-                    cudaStream_t stream) {
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
   using namespace group_quantize_kernel;
 
   checkCuDriverContext(stream);
@@ -995,7 +991,6 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                               CHUNK_DIM_Y, stream);
                         }
 
-<<<<<<< HEAD
               if constexpr (IS_DBIAS) {
                 common::grouped_reduce_dbias<IType>(
                     shape_rep, num_tensors, first_logical_dim, last_logical_dim, offsets_ptr,
@@ -1006,14 +1001,6 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
       );                                              // NOLINT(*)
   );                                                  // NOLINT(*)
 #endif  //__HIP_PLATFORM_AMD__
-=======
-                        NVTE_CHECK_CUDA(cudaGetLastError());
-                      });  // NOLINT(*)
-              );           // NOLINT(*)
-          );               // NOLINT(*)
-      );                   // NOLINT(*)
-  );                       // NOLINT(*)
->>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 }
 
 }  // namespace mxfp8
