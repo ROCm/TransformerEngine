@@ -5,18 +5,26 @@
 # See LICENSE for license information.
 
 """PyTorch related extensions."""
+
 import os
 from pathlib import Path
 
 import setuptools
 
 from .utils import (
+<<<<<<< HEAD
     rocm_build,
     rocm_path,
+=======
+>>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
     all_files_in_dir,
     cuda_version,
     get_cuda_include_dirs,
     debug_build_enabled,
+<<<<<<< HEAD
+=======
+    setup_mpi_flags,
+>>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 )
 from typing import List
 
@@ -88,13 +96,7 @@ def setup_pytorch_extension(
             if version < (12, 0):
                 raise RuntimeError("Transformer Engine requires CUDA 12.0 or newer")
 
-    if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
-        assert (
-            os.getenv("MPI_HOME") is not None
-        ), "MPI_HOME=/path/to/mpi must be set when compiling with NVTE_UB_WITH_MPI=1!"
-        mpi_path = Path(os.getenv("MPI_HOME"))
-        include_dirs.append(mpi_path / "include")
-        cxx_flags.append("-DNVTE_UB_WITH_MPI")
+    setup_mpi_flags(include_dirs, cxx_flags)
 
     library_dirs = []
     libraries = []

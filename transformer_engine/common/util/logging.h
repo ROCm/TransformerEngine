@@ -26,6 +26,10 @@
 #include <cublasmp.h>
 #endif  // NVTE_WITH_CUBLASMP
 
+#ifdef NVTE_WITH_CUSOLVERMP
+#include <cusolverMp.h>
+#endif  // NVTE_WITH_CUSOLVERMP
+
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -125,7 +129,22 @@
 
 #endif  // NVTE_WITH_CUBLASMP
 
+<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
+=======
+#ifdef NVTE_WITH_CUSOLVERMP
+
+#define NVTE_CHECK_CUSOLVERMP(expr)                                                   \
+  do {                                                                                \
+    const cusolverStatus_t status_NVTE_CHECK_CUSOLVERMP = (expr);                     \
+    if (status_NVTE_CHECK_CUSOLVERMP != CUSOLVER_STATUS_SUCCESS) {                    \
+      NVTE_ERROR("cuSolverMp Error: ", std::to_string(status_NVTE_CHECK_CUSOLVERMP)); \
+    }                                                                                 \
+  } while (false)
+
+#endif  // NVTE_WITH_CUSOLVERMP
+
+>>>>>>> 549f5ba4cf8a4d1184e3a8136bfcfa1434c16723
 #define NVTE_CHECK_NCCL(expr)                                                 \
   do {                                                                        \
     const ncclResult_t status_NVTE_CHECK_NCCL = (expr);                       \
