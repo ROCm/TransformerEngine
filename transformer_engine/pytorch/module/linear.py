@@ -1463,9 +1463,6 @@ class _Linear(torch.autograd.Function):
                 ctx.reduce_and_update_bwd_fp8_tensors = _check_fp8_reduce_and_update()
             else:
                 ctx.reduce_and_update_bwd_fp8_tensors = False
-            if ctx.backward_override is not None:
-                ctx.reduce_and_update_bwd_fp8_tensors = False
-
             ctx.activation_dtype = activation_dtype
             ctx.fp8 = fp8
             ctx.fp8_recipe = FP8GlobalStateManager.get_fp8_recipe() if fp8 else None
@@ -1515,6 +1512,19 @@ class _Linear(torch.autograd.Function):
                     FP8GlobalStateManager.IS_FIRST_FP8_MODULE = _first_fp8_module
                 ctx.autocast_fp8_reduction_skipped = FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2
             ctx.wgrad_store = wgrad_store
+
+            # Apply backward_override AFTER all ctx fields are set
+            if ctx.backward_override is not None:
+                ctx.reduce_and_update_bwd_fp8_tensors = False
+                ctx.fp8 = False
+                ctx.debug = False
+                ctx.ub_overlap_ag = False
+                ctx.ub_overlap_rs_dgrad = False
+                ctx.ub_bulk_dgrad = False
+                ctx.ub_bulk_wgrad = False
+                ctx.grad_input_quantizer = None
+                ctx.grad_weight_quantizer = None
+                ctx.grad_output_quantizer = None
 
         # ------------------------------------------------------
         # Cached state for backward pass is ready...
@@ -2527,7 +2537,7 @@ class Linear(TransformerEngineBaseModule):
                 self.ub_name,
                 fp8_output,
                 self.fsdp_group,
-                cache_name is not None,
+                self,
                 skip_fp8_weight_update,
                 self.symmetric_ar_type,
                 self.save_original_input,
