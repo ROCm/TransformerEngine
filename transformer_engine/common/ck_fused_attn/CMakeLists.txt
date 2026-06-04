@@ -83,16 +83,18 @@ elseif(NOT __USE_CK_JIT) #disable for CK_JIT for now
   # use pre-built cache
   include("${CMAKE_CURRENT_LIST_DIR}/aiter_prebuilt.cmake")
   get_prebuilt_aiter(__AITER_CACHE_DIR)
+elseif(DEFINED ENV(NVTE_AITER_PREBUILT_BASE_URL))
+  message(WARNING "[AITER-BUILD] NVTE_AITER_PREBUILT_BASE_URL is set but will be ignored because CK_JIT is enabled.")
 endif()
 
 if(__AITER_CACHE_DIR STREQUAL "")
-  # If not available, fallback: Build from source via QoLA
+  # If not available or not requested, build from source via QoLA
   list(JOIN CMAKE_HIP_ARCHITECTURES ";" GPU_ARCHS_STR)
   message(STATUS "[AITER-BUILD] Building AITER kernels for ${GPU_ARCHS_STR} via QoLA.")
   set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
   set(__QOLA_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/qola_manifest.toml")
   if(__USE_CK_JIT)
-    message(STATUS "[AITER-BUILD] CK_JIT is enabled; will build AITER kernels via CK_JIT.")
+    message(STATUS "[AITER-BUILD] CK_JIT is enabled; will build CK kernels via CK_JIT.")
     set(__CK_JIT_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/ck_jit")
     set(__QOLA_BUILD_DIR "${__CK_JIT_BUILD_DIR}/qola") #Need it under ck_jit to clean on full build
     if(DEFINED ENV{NVTE_CK_JIT_DIR})
