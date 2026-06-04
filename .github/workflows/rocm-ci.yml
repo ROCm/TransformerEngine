@@ -144,15 +144,28 @@ jobs:
 
       - name: Run Container
         run: |
+          # All GPUs are visible to the runner; per-suite visibility is set later
+          # via HIP_VISIBLE_DEVICES in the test step. Add render group for the
+          # container. Under kubernetes, GPU isolation comes from DEVICE_FLAG:
+          # the runner writes this pod's allocated render devices into
+          # /etc/podinfo/gha-render-devices; fall back to all GPUs on bare metal.
+          render_gid=$(cat /etc/group | grep render | cut -d: -f3)
+          if [ -f "/etc/podinfo/gha-render-devices" ]; then
+            DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)
+          else
+            DEVICE_FLAG="--device /dev/dri"
+          fi
+          # --group-add daemon/bin cover the video-group GID -> subgid 1 mapping
+          # across Ubuntu 24.04 / AlmaLinux base images. /dev/kfd is the single
+          # system-wide compute node and is always required.
+          GPU_FLAG="--device=/dev/mem --device=/dev/kfd $DEVICE_FLAG --group-add video --group-add $render_gid --group-add daemon --group-add bin --cap-add=SYS_PTRACE --security-opt seccomp=unconfined"
           docker run -dt \
             --rm \
             --name te-runner \
             --network=host \
-            --device=/dev/dri --device=/dev/kfd \
+            $GPU_FLAG \
             --shm-size=16G \
             --pid=host \
-            --group-add $(getent group render | cut -d: -f3) \
-            --group-add $(getent group video | cut -d: -f3) \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
             ${{ needs.select_image.outputs.image-tag }}
@@ -352,15 +365,28 @@ jobs:
 
       - name: Run Container
         run: |
+          # All GPUs are visible to the runner; per-suite visibility is set later
+          # via HIP_VISIBLE_DEVICES in the test step. Add render group for the
+          # container. Under kubernetes, GPU isolation comes from DEVICE_FLAG:
+          # the runner writes this pod's allocated render devices into
+          # /etc/podinfo/gha-render-devices; fall back to all GPUs on bare metal.
+          render_gid=$(cat /etc/group | grep render | cut -d: -f3)
+          if [ -f "/etc/podinfo/gha-render-devices" ]; then
+            DEVICE_FLAG=$(cat /etc/podinfo/gha-render-devices)
+          else
+            DEVICE_FLAG="--device /dev/dri"
+          fi
+          # --group-add daemon/bin cover the video-group GID -> subgid 1 mapping
+          # across Ubuntu 24.04 / AlmaLinux base images. /dev/kfd is the single
+          # system-wide compute node and is always required.
+          GPU_FLAG="--device=/dev/mem --device=/dev/kfd $DEVICE_FLAG --group-add video --group-add $render_gid --group-add daemon --group-add bin --cap-add=SYS_PTRACE --security-opt seccomp=unconfined"
           docker run -dt \
             --rm \
             --name te-runner \
             --network=host \
-            --device=/dev/dri --device=/dev/kfd \
+            $GPU_FLAG \
             --shm-size=16G \
             --pid=host \
-            --group-add $(getent group render | cut -d: -f3) \
-            --group-add $(getent group video | cut -d: -f3) \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
             ${{ needs.select_image.outputs.image-tag }}
