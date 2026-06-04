@@ -1,21 +1,19 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include <cuda.h>
-#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
-#endif
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
 #include <algorithm>
 #include <cfloat>
-#ifndef __HIP_PLATFORM_AMD__
 #include <cuda/barrier>
-#endif
 #include <utility>
 
 #include "common/common.h"

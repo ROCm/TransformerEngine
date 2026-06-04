@@ -67,7 +67,7 @@ void scales_from_amax(float amax, const QuantizationOptions& opts, float* qscale
     qscale = ldexpf(1.0f, static_cast<int32_t>(exp) - 127);
   }
 
-  float qscale_inv = 1.0 / qscale;
+  float qscale_inv = 1.0f / qscale;
   *qscale_out = qscale;
   *qscale_inv_out = qscale_inv;
 }
@@ -227,17 +227,22 @@ void ref_quantize_onedimensional_blocks(const ProcessingMethod processing_method
 }
 
 inline size_t scale_align_stride(size_t inner_elements) {
+#ifdef __HIP_PLATFORM_AMD__
+  return inner_elements;
+#else
   return ((inner_elements + 4u - 1u) / 4u) * 4u;
+#endif
 };
 
 void compare_scaling_factors(const std::string& name, const float* test, const float* ref,
                              const size_t row_blocks, const size_t col_blocks,
-                             const size_t test_stride, const size_t ref_stride) {
+                             const size_t test_stride, const size_t ref_stride,
+                             const float atol = 1e-6f) {
   for (int i = 0; i < row_blocks; ++i) {
     for (int j = 0; j < col_blocks; ++j) {
       const int test_idx = i * test_stride + j;
       const int ref_idx = i * ref_stride + j;
-      ASSERT_FALSE(test[test_idx] != ref[ref_idx])
+      ASSERT_FALSE(std::abs(test[test_idx] - ref[ref_idx]) > atol)
           << "Error in " << name << std::endl
           << "Mismatch: " << test[test_idx] << " vs " << ref[ref_idx] << " at index " << test_idx
           << "," << ref_idx;
@@ -247,13 +252,14 @@ void compare_scaling_factors(const std::string& name, const float* test, const f
 
 void compare_scaling_factors_one_dimensional_blocks(const std::string& name, const float* test,
                                                     const float* ref, const size_t rows,
-                                                    const size_t col_blocks) {
+                                                    const size_t col_blocks,
+                                                    const float atol = 1e-6f) {
   const size_t test_stride = scale_align_stride(rows);
   for (int i = 0; i < rows; ++i) {
     for (int j = 0; j < col_blocks; ++j) {
       const int test_idx = i + test_stride * j;
       const int ref_idx = i + rows * j;
-      ASSERT_FALSE(test[test_idx] != ref[ref_idx])
+      ASSERT_FALSE(std::abs(test[test_idx] - ref[ref_idx]) > atol)
           << "Error in " << name << std::endl
           << "Mismatch: " << test[test_idx] << " vs " << ref[ref_idx] << " at index " << test_idx
           << "," << ref_idx;

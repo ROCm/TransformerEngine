@@ -1,27 +1,23 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include <cuda.h>
-#ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
-#endif
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
 #include <cfloat>
-#ifndef __HIP_PLATFORM_AMD__
 #include <cuda/barrier>
-#endif
 
 #include "common/common.h"
 #include "common/recipe/recipe_common.cuh"
 #include "common/util/cuda_runtime.h"
-#ifndef __HIP_PLATFORM_AMD__
 #include "common/util/ptx.cuh"
-#endif
 #include "common/utils.cuh"
 
 #ifndef __HIP_PLATFORM_AMD__
@@ -60,7 +56,11 @@ constexpr size_t BLOCK_TILE_DIM = 128;
 constexpr size_t WARP_TILE_DIM_X = 64;
 constexpr size_t WARP_TILE_DIM_Y = 32;
 constexpr size_t THREAD_TILE_DIM_X = 8;
+#ifdef __HIP_PLATFORM_AMD__
+constexpr size_t THREAD_TILE_DIM_Y = 4;
+#else
 constexpr size_t THREAD_TILE_DIM_Y = 8;
+#endif
 #endif
 
 #ifdef TMA_HW_SUPPORTED
@@ -81,6 +81,15 @@ constexpr size_t NUM_THREADS_X_IN_WARP = WARP_TILE_DIM_X / THREAD_TILE_DIM_X;
 constexpr size_t NUM_THREADS_Y_IN_WARP = kThreadsPerWarp / NUM_THREADS_X_IN_WARP;
 
 #define MIN(a, b) (a < b ? a : b)
+
+#ifdef __HIP_PLATFORM_AMD__
+__device__ __forceinline__ float blockwise_warp_reduce_max(float val) {
+#pragma unroll
+  for (int delta = kThreadsPerWarp / 2; delta > 0; delta /= 2)
+    val = fmaxf(val, __shfl_down(val, delta, kThreadsPerWarp));
+  return val;
+}
+#endif
 
 #ifdef TMA_HW_SUPPORTED
 template <bool kReturnTranspose, typename CType, typename IType, typename OType>
@@ -151,7 +160,11 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
     }
   }
   // Reduce amax in the warp (32x32 tile)
+#ifdef __HIP_PLATFORM_AMD__
+  warp_tile_amax = blockwise_warp_reduce_max(amax);
+#else
   warp_tile_amax = warp_reduce_max<kThreadsPerWarp>(amax);
+#endif
   // broadcast the amax to all threads in a warp from the lane 0
   constexpr int lane_zero = 0;
   warp_tile_amax = __shfl_sync(kFullWarpMask, warp_tile_amax, lane_zero);
@@ -379,7 +392,11 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
     }
   }
   // Reduce amax in the warp (32x32 tile)
+#ifdef __HIP_PLATFORM_AMD__
+  warp_tile_amax = blockwise_warp_reduce_max(amax);
+#else
   warp_tile_amax = warp_reduce_max<kThreadsPerWarp>(amax);
+#endif
   // broadcast the amax to all threads in a warp from the lane 0
   constexpr int lane_zero = 0;
   warp_tile_amax = __shfl_sync(kFullWarpMask, warp_tile_amax, lane_zero);
