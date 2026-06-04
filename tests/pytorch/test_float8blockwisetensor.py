@@ -46,7 +46,7 @@ DimsType = Union[Iterable[int], int]
 
 # TODO replace with call to fp8.py when recipe added.
 if IS_HIP_EXTENSION:
-    recipe_available = get_device_compute_capability() >= (9, 5)
+    recipe_available = get_device_compute_capability() >= (9, 0)
 else:
     recipe_available = get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.8
 reason_for_no_recipe = "Quantize kernels require TMA and are only relevant with GEMMS."

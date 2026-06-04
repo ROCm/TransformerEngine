@@ -67,7 +67,7 @@ void scales_from_amax(float amax, const QuantizationOptions& opts, float* qscale
     qscale = ldexpf(1.0f, static_cast<int32_t>(exp) - 127);
   }
 
-  float qscale_inv = 1.0f / qscale;
+  float qscale_inv = 1.0 / qscale;
   *qscale_out = qscale;
   *qscale_inv_out = qscale_inv;
 }
@@ -236,13 +236,19 @@ inline size_t scale_align_stride(size_t inner_elements) {
 
 void compare_scaling_factors(const std::string& name, const float* test, const float* ref,
                              const size_t row_blocks, const size_t col_blocks,
-                             const size_t test_stride, const size_t ref_stride,
-                             const float atol = 1e-6f) {
+                             const size_t test_stride, const size_t ref_stride) {
+#ifdef __HIP_PLATFORM_AMD__
+  const float atol = 1e-6f;
+#endif
   for (int i = 0; i < row_blocks; ++i) {
     for (int j = 0; j < col_blocks; ++j) {
       const int test_idx = i * test_stride + j;
       const int ref_idx = i * ref_stride + j;
+#ifdef __HIP_PLATFORM_AMD__
       ASSERT_FALSE(std::abs(test[test_idx] - ref[ref_idx]) > atol)
+#else
+      ASSERT_FALSE(test[test_idx] != ref[ref_idx])
+#endif
           << "Error in " << name << std::endl
           << "Mismatch: " << test[test_idx] << " vs " << ref[ref_idx] << " at index " << test_idx
           << "," << ref_idx;
@@ -252,14 +258,20 @@ void compare_scaling_factors(const std::string& name, const float* test, const f
 
 void compare_scaling_factors_one_dimensional_blocks(const std::string& name, const float* test,
                                                     const float* ref, const size_t rows,
-                                                    const size_t col_blocks,
-                                                    const float atol = 1e-6f) {
+                                                    const size_t col_blocks) {
+#ifdef __HIP_PLATFORM_AMD__
+  const float atol = 1e-6f;
+#endif
   const size_t test_stride = scale_align_stride(rows);
   for (int i = 0; i < rows; ++i) {
     for (int j = 0; j < col_blocks; ++j) {
       const int test_idx = i + test_stride * j;
       const int ref_idx = i + rows * j;
+#ifdef __HIP_PLATFORM_AMD__
       ASSERT_FALSE(std::abs(test[test_idx] - ref[ref_idx]) > atol)
+#else
+      ASSERT_FALSE(test[test_idx] != ref[ref_idx])
+#endif
           << "Error in " << name << std::endl
           << "Mismatch: " << test[test_idx] << " vs " << ref[ref_idx] << " at index " << test_idx
           << "," << ref_idx;

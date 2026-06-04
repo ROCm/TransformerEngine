@@ -91,7 +91,7 @@ __device__ __forceinline__ float blockwise_warp_reduce_max(float val) {
 }
 #endif
 
-#ifdef TMA_HW_SUPPORTED
+#ifndef __HIP_PLATFORM_AMD__
 template <bool kReturnTranspose, typename CType, typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_BLOCK)
     block_scaled_cast_transpose_kernel(const IType* const input, OType* const output_c,
@@ -281,7 +281,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
 #endif
   }
 }
-#endif  // TMA_HW_SUPPORTED
+#endif  // __HIP_PLATFORM_AMD__
 
 template <bool kReturnTranspose, typename CType, typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose_kernel_notaligned(
@@ -495,7 +495,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
   }
 }
 
-#ifdef TMA_HW_SUPPORTED
+#ifndef __HIP_PLATFORM_AMD__
 template <typename OutputType>
 CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size_t global_dim_y) {
   CUtensorMapDataType dataType;
@@ -513,7 +513,7 @@ CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size
                        /*stride_elems=*/global_dim_x, /*offset_elems=*/0, sizeof(OutputType) * 8);
   return tensor_map_output_trans;
 }
-#endif  // TMA_HW_SUPPORTED
+#endif  // __HIP_PLATFORM_AMD__
 
 }  // namespace
 }  // namespace transformer_engine
@@ -584,10 +584,10 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
               return_transpose, kReturnTranspose,
 
               dim3 grid(num_blocks_x, num_blocks_y, 1);
+
+#ifndef __HIP_PLATFORM_AMD__
               const bool full_tile =
                   row_length % BLOCK_TILE_DIM == 0 && num_rows % BLOCK_TILE_DIM == 0;
-
-#ifdef TMA_HW_SUPPORTED
               if (full_tile) {
                 CUtensorMap tensor_map_output_trans;
                 if (return_transpose) {
@@ -603,11 +603,7 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                         reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
                         scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
                         tensor_map_output_trans, pow_2_scale, noop_ptr);
-              } else
-#else
-              (void)full_tile;
-#endif
-              {
+              } else {
                 block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, float, InputType,
                                                               OutputType>
                     <<<grid, THREADS_PER_BLOCK, 0, stream>>>(
@@ -619,6 +615,18 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                         scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
                         pow_2_scale, noop_ptr);
               }  // full-tile
+#else
+              block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, float, InputType,
+                                                            OutputType>
+                  <<<grid, THREADS_PER_BLOCK, 0, stream>>>(
+                      reinterpret_cast<const InputType*>(input.dptr),
+                      reinterpret_cast<OutputType*>(output.dptr),
+                      reinterpret_cast<OutputType*>(output_t.dptr),
+                      reinterpret_cast<float*>(scale_inv.dptr),
+                      reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
+                      scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
+                      pow_2_scale, noop_ptr);
+#endif  // __HIP_PLATFORM_AMD__
               )  // return_transpose
           )      // OutputType
       )          // InputType
