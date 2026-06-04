@@ -75,7 +75,6 @@ struct GroupedGemmRunContext {
     const NVTETensor* B = nullptr;
     NVTETensor* D = nullptr;
     int64_t N = 0;
-    int64_t K = 0;
 
     int group_num = 0;
     bool transA = false;

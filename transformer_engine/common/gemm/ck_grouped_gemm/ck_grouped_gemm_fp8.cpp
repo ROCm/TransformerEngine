@@ -290,8 +290,7 @@ class QuantGroupedGemmRunner : public RunnerInterface {
       return false;
     }
 
-    const bool launched = launch_grouped_gemm_kernel<Kernel>(descs, ctx, stream_cfg);
-    return launched;
+    return launch_grouped_gemm_kernel<Kernel>(descs, ctx, stream_cfg);
   }
 };
 
