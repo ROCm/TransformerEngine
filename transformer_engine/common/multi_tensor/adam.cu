@@ -13,6 +13,7 @@
 
 #include "../utils.cuh"
 #include "multi_tensor_apply.cuh"
+#include "../util/rocm_device_utils.cuh"
 
 namespace transformer_engine {
 namespace multi_tensor_adam {
@@ -983,18 +984,6 @@ void multi_tensor_adam_capturable_master_cuda(int chunk_size, Tensor noop_flag,
 // metadata struct on each launch.
 // ---------------------------------------------------------------------------
 
-template <int N, typename T>
-__device__ __forceinline__ bool is_aligned_n(const T *p) {
-  return ((uint64_t)p) % (N * sizeof(T)) == 0;
-}
-
-template <int N, typename T>
-__device__ __forceinline__ void load_store_n(T *dst, const T *src,
-                                             int dst_offset, int src_offset) {
-  typedef typename std::aligned_storage<N * sizeof(T), N * alignof(T)>::type LT;
-  ((LT *)dst)[dst_offset] = ((const LT *)src)[src_offset];  // NOLINT(*)
-}
-
 static constexpr int CILP = 8;
 
 template <typename GRAD_T, adamMode_t MODE>
@@ -1106,13 +1095,13 @@ void custom_adam_param_remainder_kernel(
 #pragma unroll
     for (int ii = 0; ii < CILP; ii++) {
       if (MODE == ADAM_MODE_0) {  // L2
-        r_g[ii] = r_g[ii] + (decay * r_p[ii]);
+        r_g[ii] += decay * r_p[ii];
       }
       r_m[ii] = beta1 * r_m[ii] + (1 - beta1) * r_g[ii];
       r_v[ii] = beta2 * r_v[ii] + (1 - beta2) * r_g[ii] * r_g[ii];
       MATH_T denom = sqrtf(r_v[ii] * beta2_corr_inv) + epsilon;
       if (MODE == ADAM_MODE_0) {  // L2
-        r_p[ii] = r_p[ii] - step_size * (r_m[ii] / denom);
+        r_p[ii] -= step_size * (r_m[ii] / denom);
       } else {  // weight decay
         r_p[ii] = r_p[ii] - step_size * (r_m[ii] / denom) - lr * decay * r_p[ii];
       }
@@ -1167,21 +1156,15 @@ void multi_tensor_adam_param_remainder_cuda_custom(
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       grad_dtype, grad_type,
-      if (mode == ADAM_MODE_0) {
-        custom_adam_param_remainder_kernel<grad_type, ADAM_MODE_0>
-            <<<total_chunks, BLOCK_SIZE, 0, stream>>>(
-                chunk_size, reinterpret_cast<int *>(noop_flag.data.dptr),
-                addresses, sizes, block_to_tensor, chunk_offsets, total_chunks,
-                beta1, beta2, step_size, beta2_corr_inv, epsilon, lr,
-                weight_decay);
-      } else {
-        custom_adam_param_remainder_kernel<grad_type, ADAM_MODE_1>
-            <<<total_chunks, BLOCK_SIZE, 0, stream>>>(
-                chunk_size, reinterpret_cast<int *>(noop_flag.data.dptr),
-                addresses, sizes, block_to_tensor, chunk_offsets, total_chunks,
-                beta1, beta2, step_size, beta2_corr_inv, epsilon, lr,
-                weight_decay);
-      };);
+      TRANSFORMER_ENGINE_SWITCH_CONDITION(mode == ADAM_MODE_0, IS_MODE_0,
+          constexpr adamMode_t ADAM_MODE = IS_MODE_0 ? ADAM_MODE_0 : ADAM_MODE_1;
+          custom_adam_param_remainder_kernel<grad_type, ADAM_MODE>
+              <<<total_chunks, BLOCK_SIZE, 0, stream>>>(
+                  chunk_size, reinterpret_cast<int *>(noop_flag.data.dptr),
+                  addresses, sizes, block_to_tensor, chunk_offsets, total_chunks,
+                  beta1, beta2, step_size, beta2_corr_inv, epsilon, lr,
+                  weight_decay);
+      ););  // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -1302,13 +1285,13 @@ void custom_adam_kernel(
 #pragma unroll
     for (int ii = 0; ii < CILP; ii++) {
       if (MODE == ADAM_MODE_0) {  // L2
-        r_g[ii] = r_g[ii] + (decay * r_p[ii]);
+        r_g[ii] += decay * r_p[ii];
       }
       r_m[ii] = beta1 * r_m[ii] + (1 - beta1) * r_g[ii];
       r_v[ii] = beta2 * r_v[ii] + (1 - beta2) * r_g[ii] * r_g[ii];
       MATH_T denom = sqrtf(r_v[ii] * beta2_corr_inv) + epsilon;
       if (MODE == ADAM_MODE_0) {  // L2
-        r_p[ii] = r_p[ii] - step_size * (r_m[ii] / denom);
+        r_p[ii] -= step_size * (r_m[ii] / denom);
       } else {  // weight decay
         r_p[ii] = r_p[ii] - step_size * (r_m[ii] / denom) - lr * decay * r_p[ii];
       }
@@ -1382,21 +1365,19 @@ void multi_tensor_adam_cuda_custom(
         param_dtype, p_type,
         TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
             grad_dtype, g_type,
-            if (mode == ADAM_MODE_0) {
-              LAUNCH_CUSTOM_ADAM(g_type, p_type, ADAM_MODE_0, true);
-            } else {
-              LAUNCH_CUSTOM_ADAM(g_type, p_type, ADAM_MODE_1, true);
-            };););
+            TRANSFORMER_ENGINE_SWITCH_CONDITION(mode == ADAM_MODE_0, IS_MODE_0,
+                constexpr adamMode_t ADAM_MODE = IS_MODE_0 ? ADAM_MODE_0 : ADAM_MODE_1;
+                LAUNCH_CUSTOM_ADAM(g_type, p_type, ADAM_MODE, true);
+            );););  // NOLINT(*)
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
         param_dtype, p_type,
         TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
             grad_dtype, g_type,
-            if (mode == ADAM_MODE_0) {
-              LAUNCH_CUSTOM_ADAM(g_type, p_type, ADAM_MODE_0, false);
-            } else {
-              LAUNCH_CUSTOM_ADAM(g_type, p_type, ADAM_MODE_1, false);
-            };););
+            TRANSFORMER_ENGINE_SWITCH_CONDITION(mode == ADAM_MODE_0, IS_MODE_0,
+                constexpr adamMode_t ADAM_MODE = IS_MODE_0 ? ADAM_MODE_0 : ADAM_MODE_1;
+                LAUNCH_CUSTOM_ADAM(g_type, p_type, ADAM_MODE, false);
+            );););  // NOLINT(*)
   }
 
 #undef LAUNCH_CUSTOM_ADAM

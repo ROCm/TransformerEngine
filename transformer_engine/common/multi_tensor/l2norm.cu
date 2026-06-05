@@ -13,6 +13,7 @@
 
 #include "../utils.cuh"
 #include "multi_tensor_apply.cuh"
+#include "../util/rocm_device_utils.cuh"
 
 namespace transformer_engine {
 namespace multi_tensor_l2norm {
@@ -28,17 +29,6 @@ __device__ __forceinline__ bool is_aligned(T *p) {
 template <typename T>
 __device__ __forceinline__ void load_store(T *dst, T *src, int dst_offset, int src_offset) {
   typedef typename std::aligned_storage<ILP * sizeof(T), ILP * alignof(T)>::type LT;
-  ((LT *)dst)[dst_offset] = ((LT *)src)[src_offset];  // NOLINT(*)
-}
-
-template <int N, typename T>
-__device__ __forceinline__ bool is_aligned_n(T *p) {
-  return ((uint64_t)p) % (N * sizeof(T)) == 0;
-}
-
-template <int N, typename T>
-__device__ __forceinline__ void load_store_n(T *dst, T *src, int dst_offset, int src_offset) {
-  typedef typename std::aligned_storage<N * sizeof(T), N * alignof(T)>::type LT;
   ((LT *)dst)[dst_offset] = ((LT *)src)[src_offset];  // NOLINT(*)
 }
 
@@ -338,13 +328,13 @@ __global__ void custom_multi_tensor_l2norm_kernel(
   float val = 0.f;
   for (int i = 0; i < CILP; i++) val += vals[i];
 
-  float final = reduce_block_into_lanes(s_vals, val);
+  float result = reduce_block_into_lanes(s_vals, val);
 
   if (threadIdx.x == 0) {
-    if (!isfinite(final)) {
+    if (!isfinite(result)) {
       *noop_gmem = 1;
     }
-    output[global_chunk] = final;
+    output[global_chunk] = result;
   }
 }
 
@@ -357,10 +347,10 @@ __global__ void custom_multi_tensor_l2norm_reduce(
     val += output[i];
   }
 
-  float final = reduce_block_into_lanes(s_vals, val);
+  float result = reduce_block_into_lanes(s_vals, val);
 
   if (threadIdx.x == 0) {
-    *ret = sqrtf(final);
+    *ret = sqrtf(result);
   }
 }
 
@@ -616,9 +606,9 @@ void multi_tensor_unscale_l2norm_cuda(int chunk_size, Tensor noop_flag,
 }  // namespace transformer_engine
 
 void nvte_multi_tensor_l2norm_cuda_custom(int chunk_size, NVTETensor noop_flag,
-                      const NVTEDType input_dtype, const int64_t *addresses,
-                      const int *sizes, const int *block_to_tensor,
-                      const int *chunk_offsets, int total_chunks,
+                      const NVTEDType input_dtype, const int64_t * const addresses,
+                      const int * const sizes, const int * const block_to_tensor,
+                      const int * const chunk_offsets, int total_chunks,
                       NVTETensor output,
                       NVTETensor ret, cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_l2norm_cuda_custom);
@@ -631,8 +621,8 @@ void nvte_multi_tensor_l2norm_cuda_custom(int chunk_size, NVTETensor noop_flag,
 
 void nvte_multi_tensor_unscale_l2norm_cuda_custom(
   int chunk_size, NVTETensor noop_flag, const NVTEDType input_dtype,
-  const int64_t *addresses, const int *sizes, const int *block_to_tensor,
-  const int *chunk_offsets, int total_chunks,
+  const int64_t * const addresses, const int * const sizes, const int * const block_to_tensor,
+  const int * const chunk_offsets, int total_chunks,
   NVTETensor output, NVTETensor ret, NVTETensor inv_scale, cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_unscale_l2norm_cuda_custom);
   using namespace transformer_engine;
