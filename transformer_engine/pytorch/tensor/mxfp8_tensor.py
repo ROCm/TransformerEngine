@@ -146,9 +146,10 @@ class MXFP8Quantizer(Quantizer):
             if IS_HIP_EXTENSION:
                 m_dim = math.prod(shape[:-1])
                 k_scale = math.ceil(shape[-1] / MXFP8_BLOCK_SCALING_SIZE)
-                # gfx1250 MX pre-swizzle layout requires M padded to multiple of 4
+                # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
                 if get_device_compute_capability() == (12, 5):
                     m_dim = round_up_to_nearest_multiple(m_dim, 4)
+                    k_scale = round_up_to_nearest_multiple(k_scale, 4)
                 scale_inv = torch.zeros(
                     m_dim,
                     k_scale,
@@ -176,8 +177,9 @@ class MXFP8Quantizer(Quantizer):
             if IS_HIP_EXTENSION:
                 k_scale = math.ceil(math.prod(shape[:-1]) / MXFP8_BLOCK_SCALING_SIZE)
                 m_dim = shape[-1]
-                # gfx1250 MX pre-swizzle layout requires M padded to multiple of 4
+                # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
                 if get_device_compute_capability() == (12, 5):
+                    k_scale = round_up_to_nearest_multiple(k_scale, 4)
                     m_dim = round_up_to_nearest_multiple(m_dim, 4)
                 columnwise_scale_inv = torch.zeros(
                     k_scale,
@@ -524,8 +526,8 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
             split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
             if IS_HIP_EXTENSION and get_device_compute_capability() == (12, 5):
-                # gfx1250 MX pre-swizzle layout requires M padded to multiple of 4
-                padding_multiples = [4, 1]
+                # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
+                padding_multiples = [4, 4]
             else:
                 # Padding requirements: rowwise dim0 should be divisble by 128, columnwise dim0 should be divisble by 4
                 padding_multiples = [128, 4]
