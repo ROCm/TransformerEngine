@@ -40,22 +40,50 @@ def iter_testsuites(root):
         yield from root.iter("testsuite")
 
 
+def _system_out(testcase):
+    el = testcase.find("system-out")
+    return (el.text or "").strip() if el is not None else ""
+
+
 def classify(testcase):
     """Return (status, first-line-message) for a <testcase>.
 
     status is one of: passed, failed, error, skipped.
+
+    Handles both pytest XML (results marked with child <failure>/<error>/
+    <skipped> tags) and ctest's ``--output-junit`` XML, which instead carries a
+    ``status`` attribute (e.g. "fail"/"notrun") and may omit the child tag.
     """
     for tag, status in (("failure", "failed"), ("error", "error"), ("skipped", "skipped")):
         el = testcase.find(tag)
         if el is not None:
             msg = (el.get("message") or el.text or "").strip()
             return status, msg
+
+    # No child marker: fall back to the ctest `status` attribute.
+    status_attr = (testcase.get("status") or "").strip().lower()
+    if status_attr in ("fail", "failed", "error"):
+        return "failed", _system_out(testcase)
+    if status_attr in ("notrun", "disabled", "skipped"):
+        return "skipped", ""
     return "passed", ""
 
 
-def is_timeout(message):
-    m = message.lower()
-    return "timeout" in m or "timed out" in m
+def is_timeout(testcase, message):
+    """True if a failed/errored <testcase> failed due to a timeout.
+
+    Scans the failure message plus the failure `type`, the testcase `status`
+    attribute, and captured stdout. pytest-timeout puts "Timeout" in the
+    message, but ctest records a timed-out test via those other places instead.
+    """
+    parts = [message, testcase.get("status", "")]
+    for tag in ("failure", "error"):
+        el = testcase.find(tag)
+        if el is not None:
+            parts.append(el.get("type", ""))
+    parts.append(_system_out(testcase))
+    blob = " ".join(p for p in parts if p).lower()
+    return "timeout" in blob or "timed out" in blob
 
 
 def emit(lines):
@@ -125,7 +153,7 @@ def main():
                 totals[status] += 1
                 if status in ("failed", "error"):
                     label = status
-                    if is_timeout(msg):
+                    if is_timeout(tc, msg):
                         label = "timeout"
                         totals["timeout"] += 1
                     cls = tc.get("classname", "")

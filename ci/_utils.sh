@@ -28,11 +28,15 @@ export CI=1
 # - PYTEST_TIMEOUT bounds every individual test item so a single hang cannot
 #   stall the whole CI job; the offending test is recorded as a failure with a
 #   traceback instead of the run silently timing out hours later.
+# Note: the 'thread' method bounds only the pytest process itself. Tests that
+# launch torchrun/mpirun children (tests/pytorch/distributed) are reaped
+# separately by tests/pytorch/distributed/conftest.py, which reads PYTEST_TIMEOUT
+# to bound each child below this outer limit -- hence the exports below.
 # All are overridable from the environment.
 export PYTHONFAULTHANDLER=1
-: ${PYTEST_TIMEOUT:=1200}          # per-test (per-parametrization) timeout, seconds
-: ${PYTEST_TIMEOUT_METHOD:=thread} # 'thread' reliably unsticks GPU/collective hangs
-: ${CTEST_TIMEOUT:=1200}           # per-cpp-test timeout, seconds
+export PYTEST_TIMEOUT=${PYTEST_TIMEOUT:-1200}               # per-test (per-parametrization) timeout, seconds
+export PYTEST_TIMEOUT_METHOD=${PYTEST_TIMEOUT_METHOD:-thread} # unstick a hung main thread; see note above
+export CTEST_TIMEOUT=${CTEST_TIMEOUT:-1200}                 # per-cpp-test timeout, seconds
 
 _script_error_count=0
 _run_error_count=0
