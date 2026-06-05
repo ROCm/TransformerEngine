@@ -329,7 +329,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         head_dim_qk,
         head_dim_v,
         window_size_left,
-        window_size_right)){
+        window_size_right,
+        is_training, cuda_graph)){
     return NVTE_Fused_Attn_Backend::NVTE_CK;
   }else if(nvte_fused_attn_aotriton && fused_attn_rocm::is_aotriton_backend_supported(
               q_dtype,

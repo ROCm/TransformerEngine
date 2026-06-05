@@ -632,6 +632,37 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   if(log_file){
     log_bwd_config(__FUNCTION__, fmha_args, log_file);
   }
+
+  // Graph-capture safety net. The CK v2 launcher (fmha_bwd / prepare_workspace_async)
+  // schedules self-deleting hipLaunchHostFunc nodes that re-run and double-free on
+  // every graph replay, so it must never be captured. Only the v3 asm path is
+  // graph-replay-safe. Backend selection already steers graph-captured training off
+  // these configs, but context-parallel and direct callers bypass that path, so we
+  // refuse a v2-bound dispatch under active capture rather than corrupt memory on
+  // replay. Conditions mirror AITER's fmha_v3_bwd gate (csrc/cpp_itfs/mha_bwd.cu).
+  hipStreamCaptureStatus capture_status = hipStreamCaptureStatusNone;
+  if(hipStreamIsCapturing(stream, &capture_status) == hipSuccess &&
+     capture_status != hipStreamCaptureStatusNone){
+    int dev = 0;
+    hipDeviceProp_t prop{};
+    bool is_v3_arch = false;
+    if(hipGetDevice(&dev) == hipSuccess && hipGetDeviceProperties(&prop, dev) == hipSuccess){
+      std::string arch_name(prop.gcnArchName);
+      is_v3_arch = arch_name.find("gfx942") != std::string::npos ||
+                   arch_name.find("gfx950") != std::string::npos;
+    }
+    bool resolves_to_v3 = fmha_args.use_asm_v3 && !fmha_args.is_deterministic &&
+                          !fmha_args.has_dbias && fmha_args.bias_type == 0 &&
+                          !fmha_args.has_dropout && is_v3_arch;
+    if(!resolves_to_v3){
+      throw std::runtime_error(
+        "ck_fused_attn bwd: this configuration dispatches to the CK v2 launcher, which "
+        "is not HIP-graph-replay-safe (self-deleting host nodes in prepare_workspace_async). "
+        "Disable determinism/dropout/bias and run on gfx942/gfx950 with NVTE_CK_USES_BWD_V3=1 "
+        "to use the v3 asm path, or set NVTE_FUSED_ATTN_CK=0 under CUDA graphs.");
+    }
+  }
+
   float average_runtime = QOLA_NS(mha_bwd)(fmha_args, stream_config);
   for(void* ws_ptr : mha_bwd_workspaces){
     hipFreeAsync(ws_ptr, stream);
