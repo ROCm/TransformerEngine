@@ -234,7 +234,7 @@ start_message() {
     fi
     _rocm_path=`$REALPATH "$_rocm_path"`
     test -d "$_rocm_path" && echo "ROCm: $_rocm_path" || echo "ROCm path not found"
-    python --version
+    python3 --version
 }
 
 configure_omp_threads() {
@@ -266,6 +266,7 @@ pytest_run() {
     check_test_filter $_test_name_tag || return
     _start_ts=`date +%s`
     echo "Run [$_test_variant_tag] $@ at `time_elapsed $TEST_START_TS`"
-    pytest -v -rfEs `get_pytest_junitxml $_test_name_tag` $TEST_PYTEST_ARGS "$TEST_DIR/$@" || test_run_error "[$_test_variant_tag] $1"
+    python3 -m pytest -v -rfEs `get_pytest_junitxml $_test_name_tag` $TEST_PYTEST_ARGS "$TEST_DIR/$@"
+    test $? -eq 0 || test_run_error "[$_test_variant_tag] $1"
     echo "Done [$_test_variant_tag] $1 in `time_elapsed $_start_ts`"
 }
