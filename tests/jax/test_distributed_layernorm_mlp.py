@@ -210,7 +210,6 @@ class TestDistributedLayernormMLP:
         input_shape,
         dtype,
         quantization_recipe,
-        use_shardy,
         with_jax_gemm,
     ):
         if (
@@ -221,6 +220,7 @@ class TestDistributedLayernormMLP:
             and (dtype == jnp.bfloat16)
         ):
             pytest.xfail("Skip known failure case.")
+        #ROCm: skip unsupported MXFP8 layernorm MLP grad test cases
         if isinstance(quantization_recipe, recipe.MXFP8BlockScaling):
             _check_mxfp8_layernorm_mlp_grad_support(
                 input_shape[0]*input_shape[1],
@@ -232,7 +232,6 @@ class TestDistributedLayernormMLP:
                 use_bias,
                 with_jax_gemm
             )
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
         layernorm_type = "rmsnorm"
 
@@ -363,38 +362,7 @@ class TestDistributedLayernormMLP:
             use_bias,
             input_shape,
             dtype,
-            quantization_recipe,
-            use_shardy=False,
-            with_jax_gemm=with_jax_gemm,
-        )
-
-    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tpsp_configs())
-    @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
-    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
-    @pytest_parametrize_wrapper("dtype", DTYPES)
-    @pytest_parametrize_wrapper("use_bias", [True, False])
-    @pytest_parametrize_wrapper("quantization_recipe", [None] + SUPPORTED_RECIPES)
-    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
-    def test_layernorm_mlp_grad_shardy(
-        self,
-        mesh_config,
-        activation_type,
-        use_bias,
-        input_shape,
-        dtype,
-        quantization_recipe,
-        with_jax_gemm,
-    ):
-        if dtype == jnp.float16 and quantization_recipe is not None and quantization_recipe.nvfp4():
-            pytest.skip("NVFP4 GEMM + Float16 output is unsupported!")
-        self._test_layernorm_mlp_grad(
-            mesh_config,
-            activation_type,
-            use_bias,
-            input_shape,
-            dtype,
             quantization_recipe=quantization_recipe,
-            use_shardy=True,
             with_jax_gemm=with_jax_gemm,
         )
 
@@ -407,9 +375,9 @@ class TestDistributedLayernormMLP:
         dtype,
         use_fp8,
         quantization_recipe,
-        use_shardy,
         with_jax_gemm,
     ):
+        #ROCm: skip unsupported MXFP8 layernorm MLP test cases
         if isinstance(quantization_recipe, recipe.MXFP8BlockScaling):
             _check_mxfp8_layernorm_mlp_support(
                 input_shape[0]*input_shape[1],
@@ -421,7 +389,6 @@ class TestDistributedLayernormMLP:
                 use_bias,
                 with_jax_gemm
             )
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         batch, seqlen, hidden_in = input_shape
         layernorm_type = "rmsnorm"
 
@@ -533,7 +500,6 @@ class TestDistributedLayernormMLP:
             dtype,
             use_fp8=False,
             quantization_recipe=None,
-            use_shardy=False,
             with_jax_gemm=with_jax_gemm,
         )
 
@@ -564,58 +530,5 @@ class TestDistributedLayernormMLP:
             dtype,
             use_fp8=True,
             quantization_recipe=quantization_recipe,
-            use_shardy=False,
-            with_jax_gemm=with_jax_gemm,
-        )
-
-    @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
-    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tpsp_configs())
-    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("silu", "linear")])
-    @pytest_parametrize_wrapper("dtype", DTYPES)
-    @pytest_parametrize_wrapper("use_bias", [True, False])
-    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
-    def test_layernorm_mlp_layer_shardy(
-        self, mesh_config, activation_type, use_bias, input_shape, dtype, with_jax_gemm
-    ):
-        self._test_layernorm_mlp(
-            mesh_config,
-            activation_type,
-            use_bias,
-            input_shape,
-            dtype,
-            use_fp8=False,
-            quantization_recipe=None,
-            use_shardy=True,
-            with_jax_gemm=with_jax_gemm,
-        )
-
-    @pytest_parametrize_wrapper("mesh_config", generate_fsdp_and_tpsp_configs())
-    @pytest_parametrize_wrapper("activation_type", [("gelu",), ("gelu", "linear")])
-    @pytest_parametrize_wrapper("use_bias", [True, False])
-    @pytest_parametrize_wrapper("input_shape", INPUT_SHAPE)
-    @pytest_parametrize_wrapper("dtype", DTYPES)
-    @pytest_parametrize_wrapper("quantization_recipe", SUPPORTED_RECIPES)
-    @pytest_parametrize_wrapper("with_jax_gemm", [False, True])
-    def test_layernorm_mlp_layer_fp8_shardy(
-        self,
-        mesh_config,
-        activation_type,
-        use_bias,
-        input_shape,
-        dtype,
-        quantization_recipe,
-        with_jax_gemm,
-    ):
-        if dtype == jnp.float16 and quantization_recipe is not None and quantization_recipe.nvfp4():
-            pytest.skip("NVFP4 GEMM + Float16 output is unsupported!")
-        self._test_layernorm_mlp(
-            mesh_config,
-            activation_type,
-            use_bias,
-            input_shape,
-            dtype,
-            use_fp8=True,
-            quantization_recipe=quantization_recipe,
-            use_shardy=True,
             with_jax_gemm=with_jax_gemm,
         )

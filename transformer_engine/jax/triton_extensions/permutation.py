@@ -65,8 +65,6 @@ class RowIdMapPass1Primitive(BasePrimitive):
     @staticmethod
     def abstract(routing_map_aval, *, num_tokens, num_experts, block_size):
         """Shape/dtype inference for pass 1."""
-        del block_size  # Only affects grid, not output shape
-
         assert routing_map_aval.shape == (
             num_tokens,
             num_experts,
@@ -75,7 +73,7 @@ class RowIdMapPass1Primitive(BasePrimitive):
         row_id_map_shape = (num_tokens, num_experts * 2 + 1)
         workspace_shape = (
             num_experts,
-            triton.cdiv(num_tokens, DEFAULT_BLOCK_SIZE),
+            triton.cdiv(num_tokens, block_size),
         )
 
         return (
@@ -134,9 +132,10 @@ class RowIdMapPass1Primitive(BasePrimitive):
             desc="RowIdMapPass1.row_id_map_sharding",
         )
         # Workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
+        # Second dim depends on num_tokens, so it must be sharded on the same axis as tokens
         workspace_sharding = NamedSharding(
             mesh,
-            PartitionSpec(None, None),
+            PartitionSpec(None, routing_map_spec[0]),
             desc="RowIdMapPass1.workspace_sharding",
         )
         return [row_id_map_sharding, workspace_sharding]
@@ -156,9 +155,11 @@ class RowIdMapPass1Primitive(BasePrimitive):
             PartitionSpec(routing_map_spec[0], None),
             desc="RowIdMapPass1.row_id_map_sharding",
         )
+        # Workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
+        # Second dim depends on num_tokens, so it must be sharded on the same axis as tokens
         workspace_sharding = NamedSharding(
             mesh,
-            PartitionSpec(None, None),
+            PartitionSpec(None, routing_map_spec[0]),
             desc="RowIdMapPass1.workspace_sharding",
         )
         out_shardings = [row_id_map_sharding, workspace_sharding]
@@ -186,7 +187,8 @@ class RowIdMapPass1Primitive(BasePrimitive):
         # Note: row_id_cols != experts since it's num_experts * 2 + 1
         row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_row_id_cols")
         # workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
-        workspace_spec = (f"{prefix}_experts", f"{prefix}_ws_blocks")
+        # Second dim depends on num_tokens, so use same factor to ensure same sharding
+        workspace_spec = (f"{prefix}_experts", f"{prefix}_tokens")
         return SdyShardingRule((input_spec,), (row_id_map_spec, workspace_spec))
 
 
@@ -208,10 +210,9 @@ class RowIdMapPass2Primitive(BasePrimitive):
     def abstract(row_id_map_aval, workspace_aval, *, num_tokens, num_experts, block_size):
         """Shape/dtype inference for pass 2 (in-place operation)."""
         del row_id_map_aval, workspace_aval
-        del block_size
 
         row_id_map_shape = (num_tokens, num_experts * 2 + 1)
-        workspace_shape = (num_experts, triton.cdiv(num_tokens, DEFAULT_BLOCK_SIZE))
+        workspace_shape = (num_experts, triton.cdiv(num_tokens, block_size))
 
         return (
             jax.core.ShapedArray(row_id_map_shape, jnp.int32),
@@ -270,9 +271,11 @@ class RowIdMapPass2Primitive(BasePrimitive):
             PartitionSpec(*row_id_map_spec),
             desc="RowIdMapPass2.row_id_map_sharding",
         )
+        # Workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
+        # Second dim depends on num_tokens, so it must be sharded on the same axis as tokens
         workspace_sharding = NamedSharding(
             mesh,
-            PartitionSpec(None, None),
+            PartitionSpec(None, row_id_map_spec[0]),
             desc="RowIdMapPass2.workspace_sharding",
         )
         return [row_id_map_sharding, workspace_sharding]
@@ -292,9 +295,11 @@ class RowIdMapPass2Primitive(BasePrimitive):
             PartitionSpec(*row_id_map_spec),
             desc="RowIdMapPass2.row_id_map_sharding",
         )
+        # Workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
+        # Second dim depends on num_tokens, so it must be sharded on the same axis as tokens
         workspace_sharding = NamedSharding(
             mesh,
-            PartitionSpec(None, None),
+            PartitionSpec(None, row_id_map_spec[0]),
             desc="RowIdMapPass2.workspace_sharding",
         )
         out_shardings = [row_id_map_sharding, workspace_sharding]
@@ -317,7 +322,9 @@ class RowIdMapPass2Primitive(BasePrimitive):
         del num_tokens, num_experts, block_size, mesh, value_types, result_types
         prefix = "RowIdMapPass2"
         row_id_map_spec = (f"{prefix}_tokens", f"{prefix}_cols")
-        workspace_spec = (f"{prefix}_ws_experts", f"{prefix}_ws_blocks")
+        # workspace shape: (num_experts, cdiv(num_tokens, BLOCK_SIZE))
+        # Second dim depends on num_tokens, so use same factor to ensure same sharding
+        workspace_spec = (f"{prefix}_ws_experts", f"{prefix}_tokens")
         return SdyShardingRule((row_id_map_spec, workspace_spec), (row_id_map_spec, workspace_spec))
 
 
@@ -1659,10 +1666,19 @@ class SortChunksByMapPrimitive(BasePrimitive):
 
     @staticmethod
     def abstract(
-        inp_aval, row_id_map_aval, probs_aval, *, num_tokens, hidden_size, is_forward, with_probs
+        inp_aval,
+        row_id_map_aval,
+        probs_aval,
+        output_buf_aval=None,  # Pre-allocated output buffer (inner primitive only)
+        *,
+        num_tokens,
+        hidden_size,
+        is_forward,
+        with_probs,
     ):
         """Shape/dtype inference."""
         del row_id_map_aval, is_forward
+        del output_buf_aval  # Used for input_output_aliases only
 
         output_aval = jax.core.ShapedArray((num_tokens, hidden_size), inp_aval.dtype)
 
@@ -1677,10 +1693,14 @@ class SortChunksByMapPrimitive(BasePrimitive):
     def impl(inp, row_id_map, probs, num_tokens, hidden_size, is_forward, with_probs):
         """Forward to inner primitive."""
         assert SortChunksByMapPrimitive.inner_primitive is not None
+
+        output_buf = jnp.empty((num_tokens, hidden_size), dtype=inp.dtype)
+
         return SortChunksByMapPrimitive.inner_primitive.bind(
             inp,
             row_id_map,
             probs,
+            output_buf,
             num_tokens=num_tokens,
             hidden_size=hidden_size,
             is_forward=is_forward,
@@ -1688,7 +1708,9 @@ class SortChunksByMapPrimitive(BasePrimitive):
         )
 
     @staticmethod
-    def lowering(ctx, inp, row_id_map, probs, *, num_tokens, hidden_size, is_forward, with_probs):
+    def lowering(
+        ctx, inp, row_id_map, probs, output_buf, *, num_tokens, hidden_size, is_forward, with_probs
+    ):
         """MLIR lowering using triton_call_lowering."""
         # Compute strides
         inp_stride_token = hidden_size
@@ -1702,13 +1724,22 @@ class SortChunksByMapPrimitive(BasePrimitive):
         block_size = _get_min_block_size(_sort_chunks_by_map_kernel)
         grid = (num_tokens, triton.cdiv(hidden_size, block_size))
 
+        # Declare input_output_aliases so XLA knows output slot 0 is claimed by
+        # input 3 (output_buf). This prevents XLA from implicitly aliasing any
+        # other input (like output_grad in backward) to the output buffer.
+        # Input indices: 0=inp, 1=row_id_map, 2=probs, 3=output_buf
+        # Output indices: 0=output, 1=permuted_probs
+        input_output_aliases = {3: 0}
+
         return triton_call_lowering(
             ctx,
             _sort_chunks_by_map_kernel,
             inp,
             row_id_map,
             probs,
+            output_buf,
             grid=grid,
+            input_output_aliases=input_output_aliases,
             constexprs={
                 "stride_input_token": inp_stride_token,
                 "stride_input_hidden": inp_stride_hidden,
