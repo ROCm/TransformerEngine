@@ -457,8 +457,7 @@ static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
     return false;
   }
 
-  const bool ok = runner->run(s, ctx);
-  return ok;
+  return runner->run(s, ctx);
 }
 
 #undef MAKE_FP8_RUNNER
