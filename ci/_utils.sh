@@ -34,9 +34,9 @@ export CI=1
 # to bound each child below this outer limit -- hence the exports below.
 # All are overridable from the environment.
 export PYTHONFAULTHANDLER=1
-export PYTEST_TIMEOUT=${PYTEST_TIMEOUT:-1200}               # per-test (per-parametrization) timeout, seconds
+export PYTEST_TIMEOUT=${PYTEST_TIMEOUT:-300}               # per-test (per-parametrization) timeout, seconds
 export PYTEST_TIMEOUT_METHOD=${PYTEST_TIMEOUT_METHOD:-thread} # unstick a hung main thread; see note above
-export CTEST_TIMEOUT=${CTEST_TIMEOUT:-1200}                 # per-cpp-test timeout, seconds
+export CTEST_TIMEOUT=${CTEST_TIMEOUT:-300}                 # per-cpp-test timeout, seconds
 
 _script_error_count=0
 _run_error_count=0
