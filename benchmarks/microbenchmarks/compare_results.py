@@ -62,8 +62,12 @@ def print_key_table(title, rows_df, key_cols):
 def run_stats(args):
     """Compare two samples CSVs with a statistical test via benchstats.
 
+    Timing (``time_ms``) is the main metric and drives the exit code; throughput
+    / bandwidth (``TFLOPS`` / ``GB/s``) is reported as a secondary metric when
+    present in the CSV.
+
     Returns a process exit code: 1 if a significant difference is found in the
-    main metric (timing), else 0.
+    main (timing) metric, else 0.
     """
     import os
 
@@ -73,7 +77,7 @@ def run_stats(args):
     from benchstats.render import renderComparisonResults
     from benchstats.common import LoggingConsole, detectExportFormat
 
-    metrics = ["time_ms"]
+    main_metrics = ["time_s"]
 
     export_fmt = detectExportFormat(args.export_to, None) if args.export_to else None
     if export_fmt is not None and os.path.isfile(args.export_to):
@@ -84,20 +88,27 @@ def run_stats(args):
         log_level=LoggingConsole.LogLevel.Warning,
     )
 
-    s1 = parser_TEsamples(args.baseline_csv, None, metrics, debug_log=console).getStats()
-    s2 = parser_TEsamples(args.candidate_csv, None, metrics, debug_log=console).getStats()
+    # metrics=None exposes every metric the CSV carries (time + throughput).
+    s1 = parser_TEsamples(args.baseline_csv, None, None, debug_log=console).getStats()
+    s2 = parser_TEsamples(args.candidate_csv, None, None, debug_log=console).getStats()
 
     cr = compareStats(
         s1, s2,
         method=args.method,
         alpha=args.alpha,
-        main_metrics=metrics,
+        main_metrics=main_metrics,
         debug_log=console,
     )
 
+    # Throughput metrics (e.g. TFLOPS / GB/s) are not times; blank benchstats'
+    # default per-value "s" suffix for them (the column header names the unit).
+    secondary = [m for m in cr.getMetrics() if m not in main_metrics]
+    style_overrides = {f"metric_{m}_unit": "" for m in secondary}
+
     renderComparisonResults(
         cr, console,
-        main_metrics=metrics,
+        main_metrics=main_metrics,
+        style_overrides=style_overrides or None,
         always_show_pvalues=args.always_show_pvalues,
     )
 

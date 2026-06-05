@@ -21,11 +21,11 @@ DTYPE_LIST = [torch.bfloat16]
 
 DEFAULT_MIN_RUN_TIME_SECONDS = 0.2
 
-# Number of repetitions used by ``time_func`` when a caller passes
-# ``repetitions=None``. ``run_benchmarks`` sets this from the ``--repetitions``
-# CLI flag so every benchmark script inherits the knob without per-script edits.
-# ``None`` (the default) preserves the original single-measurement behavior.
-_ACTIVE_REPETITIONS = None
+# Minimum number of raw timing samples (blocks) ``time_func`` ensures when a
+# caller passes ``min_samples=None``. ``run_benchmarks`` sets this from the
+# ``--min-samples`` CLI flag so every benchmark script inherits the knob without
+# per-script edits. ``None`` leaves torch's autorange result untouched.
+_ACTIVE_MIN_SAMPLES = None
 
 # ---------------------------------------------------------------------------
 # Model configurations
@@ -94,54 +94,60 @@ def generate_gemm_test_cases(configs=None, m_sizes=None, dtypes=None):
 # Timing helpers
 # ---------------------------------------------------------------------------
 
-class _RepeatedMeasurement:
-    """Minimal ``torch...benchmark.Measurement`` stand-in for repeated runs.
+class _RawSamples:
+    """Minimal ``torch...benchmark.Measurement`` stand-in holding raw block times.
 
-    Exposes the ``times`` / ``number_per_run`` / ``mean`` attributes the
-    samples-CSV writer relies on. ``times`` holds one per-run mean (in seconds)
-    for each repetition, so ``--csv-samples`` emits one row per repetition.
+    Exposes the ``times`` (per-run seconds, one entry per recorded timing block),
+    ``number_per_run`` and ``mean`` attributes that ``time_func`` callers and the
+    samples-CSV writer rely on.
     """
 
-    def __init__(self, times, mean):
+    def __init__(self, times, number_per_run, mean):
         self.times = times
-        self.number_per_run = 1
+        self.number_per_run = number_per_run
         self.mean = mean
 
 
 def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS,
-              repetitions=None):
+              min_samples=None):
     """Time *fn* and return ``(mean_ms, measurement)``.
 
-    The returned measurement carries per-sample times accessible via
-    ``measurement.times`` and ``measurement.number_per_run``.
+    The returned measurement exposes per-run sample times via
+    ``measurement.times`` -- one entry per recorded timing block (each block is
+    an average over ``measurement.number_per_run`` executions, as chosen by
+    torch to amortize timer overhead).
 
     method: "adaptive" uses adaptive_autorange (good for compute-bound),
             "blocked"  uses blocked_autorange  (good for memory-bound).
 
-    repetitions: number of independent autorange measurements to collect. Each
-        repetition contributes one per-run mean to ``measurement.times`` (the
-        form expected by statistical comparison via ``compare_results.py
-        --stats``). ``None`` falls back to the module-level ``_ACTIVE_REPETITIONS``
-        (set from ``--repetitions``); a value <= 1 reproduces the original
-        single-measurement behavior and returns the native ``Measurement``.
+    min_samples: ensure at least this many raw timing blocks are recorded, so the
+        per-sample data is large enough for statistical comparison
+        (compare_results.py --stats). torch's autorange usually records only a
+        few blocks; any shortfall is topped up with additional equal-sized blocks
+        rather than re-running and re-averaging the whole measurement. ``None``
+        falls back to the module-level ``_ACTIVE_MIN_SAMPLES`` (set from
+        ``--min-samples``); ``None`` there too leaves the autorange result as-is.
     """
-    if repetitions is None:
-        repetitions = _ACTIVE_REPETITIONS
+    if min_samples is None:
+        min_samples = _ACTIVE_MIN_SAMPLES
 
     timer = benchmark.Timer(stmt="fn()", globals={"fn": fn})
+    if method == "blocked":
+        m = timer.blocked_autorange(min_run_time=min_run_time)
+    else:
+        m = timer.adaptive_autorange(min_run_time=min_run_time)
 
-    def _measure():
-        if method == "blocked":
-            return timer.blocked_autorange(min_run_time=min_run_time)
-        return timer.adaptive_autorange(min_run_time=min_run_time)
-
-    if repetitions is None or repetitions <= 1:
-        m = _measure()
+    if min_samples is None or len(m.times) >= min_samples:
         return m.mean * 1e3, m
 
-    means = [_measure().mean for _ in range(repetitions)]  # per-run seconds
-    mean_s = sum(means) / len(means)
-    return mean_s * 1e3, _RepeatedMeasurement(times=means, mean=mean_s)
+    # Top up with additional equal-sized blocks (each timeit() records one block
+    # averaged over number_per_run runs) until enough raw samples are collected.
+    times = list(m.times)  # per-run seconds
+    number = m.number_per_run
+    while len(times) < min_samples:
+        times.append(timer.timeit(number).mean)
+    mean_s = sum(times) / len(times)
+    return mean_s * 1e3, _RawSamples(times=times, number_per_run=number, mean=mean_s)
 
 
 # ---------------------------------------------------------------------------
@@ -305,12 +311,13 @@ def make_parser(**kwargs):
         ),
     )
     parser.add_argument(
-        "--repetitions", type=int, default=15, metavar="N",
+        "--min-samples", type=int, default=12, metavar="N",
         help=(
-            "Number of independent timing repetitions per metric. Each "
-            "repetition yields one sample for statistical comparison "
-            "(compare_results.py --stats). Use 1 for the original "
-            "single-measurement behavior. Default: 15."
+            "Ensure at least N raw timing samples (blocks) are recorded per "
+            "metric for statistical comparison (compare_results.py --stats). "
+            "torch's autorange records only a few; any shortfall is topped up "
+            "with additional equal-sized blocks. Use a small value (e.g. 2) to "
+            "effectively disable top-up. Default: 12."
         ),
     )
     return parser
@@ -348,10 +355,10 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
     if args is None:
         args = make_parser().parse_args()
 
-    # Let time_func (called by bench_fns without an explicit repetitions arg)
+    # Let time_func (called by bench_fns without an explicit min_samples arg)
     # inherit the CLI value without editing every benchmark script.
-    global _ACTIVE_REPETITIONS
-    _ACTIVE_REPETITIONS = getattr(args, "repetitions", None)
+    global _ACTIVE_MIN_SAMPLES
+    _ACTIVE_MIN_SAMPLES = getattr(args, "min_samples", None)
 
     rows = []
     all_case_metrics = []
@@ -407,16 +414,36 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
                 if measurement is None:
                     continue
                 lbl = metric["label"]
+                unit = metric.get("unit")
+                thr_mean = metric.get("throughput") or 0.0
+                ms_mean = metric.get("ms") or 0.0
+                # Throughput is a deterministic function of time for a given
+                # config (throughput = C / time), so a per-sample throughput is
+                # recovered from the aggregate as thr_mean * ms_mean / sample_ms.
+                # samples_only records (e.g. Forward+Backward) carry no
+                # throughput and are left blank.
+                has_thr = (
+                    not metric.get("samples_only") and thr_mean > 0 and ms_mean > 0
+                )
                 for i, t in enumerate(measurement.times):
+                    # measurement.times entries are already per-run (seconds).
+                    sample_ms = t * 1e3
                     sr = dict(case_params)
                     sr["label"] = lbl
                     sr["sample_idx"] = i
-                    sr["time_ms"] = t / measurement.number_per_run * 1e3
+                    sr["time_ms"] = sample_ms
+                    sr["throughput"] = (
+                        thr_mean * ms_mean / sample_ms
+                        if has_thr and sample_ms > 0
+                        else ""
+                    )
+                    sr["unit"] = unit if has_thr else ""
                     sample_rows.append(sr)
         if sample_rows:
             df = pd.DataFrame(
                 sample_rows,
-                columns=param_columns + ["label", "sample_idx", "time_ms"],
+                columns=param_columns
+                + ["label", "sample_idx", "time_ms", "throughput", "unit"],
             )
             df.to_csv(samples_csv, index=False)
             print(f"Samples saved to {samples_csv}")
