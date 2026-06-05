@@ -31,6 +31,12 @@ python benchmark_gemm.py --csv --csv-samples gemm_samples.csv
 The samples CSV contains one row per timing sample with columns for all
 benchmark parameters plus `label`, `sample_idx`, and `time_ms`.
 
+By default each metric is measured over 15 repetitions (one sample per
+repetition). Use `--repetitions N` to change this; `--repetitions 1` reproduces
+the original single-measurement behavior. Statistical comparison (see below)
+needs at least ~10 samples, so keep the default (or higher) when producing
+samples CSVs for `--stats`.
+
 ## Shared configuration
 
 Common benchmark settings live in `utils.py`.
@@ -75,3 +81,30 @@ python compare_results.py baseline.csv candidate.csv --bench-name GEMM
 
 The script auto-detects metric columns, computes speedups for overlapping rows,
 and reports rows that exist only in the baseline or only in the candidate.
+
+### Statistical comparison (`--stats`)
+
+The ratio comparison above uses point estimates and cannot tell a real
+regression from measurement noise. To test whether timing differences are
+statistically significant, run the benchmark with `--csv-samples` on both
+sides and compare the samples CSVs with `--stats`:
+
+```bash
+pip install -r requirements.txt   # benchstats (pulls rich, scipy, numpy)
+
+# baseline checkout
+python benchmark_gemm.py --csv-samples baseline_samples.csv --repetitions 15
+# candidate checkout
+python benchmark_gemm.py --csv-samples candidate_samples.csv --repetitions 15
+
+python compare_results.py baseline_samples.csv candidate_samples.csv --stats
+```
+
+`--stats` uses the [benchstats](https://github.com/Arech/benchstats) package to
+apply a Brunner-Munzel test (override with `--method`) at significance level
+`--alpha` (default `0.001`) to each `(config, label)` pair. It prints a table
+marking each benchmark as faster (`<`), slower (`>`), or not significantly
+different (`~`), and exits `1` when a significant difference in the timing
+metric is found, so it can gate CI. Use `--export-to report.svg` (or `.html`,
+`.txt`) to save the report, and `--always-show-pvalues` to show p-values for
+non-significant rows.

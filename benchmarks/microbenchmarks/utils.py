@@ -21,6 +21,12 @@ DTYPE_LIST = [torch.bfloat16]
 
 DEFAULT_MIN_RUN_TIME_SECONDS = 0.2
 
+# Number of repetitions used by ``time_func`` when a caller passes
+# ``repetitions=None``. ``run_benchmarks`` sets this from the ``--repetitions``
+# CLI flag so every benchmark script inherits the knob without per-script edits.
+# ``None`` (the default) preserves the original single-measurement behavior.
+_ACTIVE_REPETITIONS = None
+
 # ---------------------------------------------------------------------------
 # Model configurations
 # ---------------------------------------------------------------------------
@@ -88,22 +94,54 @@ def generate_gemm_test_cases(configs=None, m_sizes=None, dtypes=None):
 # Timing helpers
 # ---------------------------------------------------------------------------
 
-def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
+class _RepeatedMeasurement:
+    """Minimal ``torch...benchmark.Measurement`` stand-in for repeated runs.
+
+    Exposes the ``times`` / ``number_per_run`` / ``mean`` attributes the
+    samples-CSV writer relies on. ``times`` holds one per-run mean (in seconds)
+    for each repetition, so ``--csv-samples`` emits one row per repetition.
+    """
+
+    def __init__(self, times, mean):
+        self.times = times
+        self.number_per_run = 1
+        self.mean = mean
+
+
+def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS,
+              repetitions=None):
     """Time *fn* and return ``(mean_ms, measurement)``.
 
-    The ``Measurement`` object carries per-sample times accessible via
-    ``measurement.times`` (total wall time per run) and
-    ``measurement.number_per_run``.
+    The returned measurement carries per-sample times accessible via
+    ``measurement.times`` and ``measurement.number_per_run``.
 
     method: "adaptive" uses adaptive_autorange (good for compute-bound),
             "blocked"  uses blocked_autorange  (good for memory-bound).
+
+    repetitions: number of independent autorange measurements to collect. Each
+        repetition contributes one per-run mean to ``measurement.times`` (the
+        form expected by statistical comparison via ``compare_results.py
+        --stats``). ``None`` falls back to the module-level ``_ACTIVE_REPETITIONS``
+        (set from ``--repetitions``); a value <= 1 reproduces the original
+        single-measurement behavior and returns the native ``Measurement``.
     """
+    if repetitions is None:
+        repetitions = _ACTIVE_REPETITIONS
+
     timer = benchmark.Timer(stmt="fn()", globals={"fn": fn})
-    if method == "blocked":
-        m = timer.blocked_autorange(min_run_time=min_run_time)
-    else:
-        m = timer.adaptive_autorange(min_run_time=min_run_time)
-    return m.mean * 1e3, m
+
+    def _measure():
+        if method == "blocked":
+            return timer.blocked_autorange(min_run_time=min_run_time)
+        return timer.adaptive_autorange(min_run_time=min_run_time)
+
+    if repetitions is None or repetitions <= 1:
+        m = _measure()
+        return m.mean * 1e3, m
+
+    means = [_measure().mean for _ in range(repetitions)]  # per-run seconds
+    mean_s = sum(means) / len(means)
+    return mean_s * 1e3, _RepeatedMeasurement(times=means, mean=mean_s)
 
 
 # ---------------------------------------------------------------------------
@@ -266,6 +304,15 @@ def make_parser(**kwargs):
             "Optional filename; default derived from script name."
         ),
     )
+    parser.add_argument(
+        "--repetitions", type=int, default=15, metavar="N",
+        help=(
+            "Number of independent timing repetitions per metric. Each "
+            "repetition yields one sample for statistical comparison "
+            "(compare_results.py --stats). Use 1 for the original "
+            "single-measurement behavior. Default: 15."
+        ),
+    )
     return parser
 
 
@@ -300,6 +347,11 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
     """
     if args is None:
         args = make_parser().parse_args()
+
+    # Let time_func (called by bench_fns without an explicit repetitions arg)
+    # inherit the CLI value without editing every benchmark script.
+    global _ACTIVE_REPETITIONS
+    _ACTIVE_REPETITIONS = getattr(args, "repetitions", None)
 
     rows = []
     all_case_metrics = []
