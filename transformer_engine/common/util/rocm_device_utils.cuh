@@ -118,6 +118,23 @@ __device__ __forceinline__ void rocm_atomicMaxFloat(float *addr, float val) {
     atomicMax(reinterpret_cast<int*>(addr), __float_as_int(val));
 }
 
+// Binary search on a sorted array.
+// Returns the largest index i in [0, n) such that arr[i] <= val.
+// Precondition: arr is sorted in non-decreasing order and arr[0] <= val.
+template <typename T>
+__device__ __forceinline__ int rocm_upper_bound(const T* arr, int n, T val) {
+  int lo = 0, hi = n - 1;
+  while (lo < hi) {
+    int mid = (lo + hi + 1) / 2;
+    if (arr[mid] <= val) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return lo;
+}
+
 template <int WARPS>
 __device__ __forceinline__ float rocm_block_reduce_max(float val, int warp_id) {
     __shared__ float staging[WARPS];
