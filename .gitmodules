@@ -29,4 +29,3 @@
 [submodule "rocm_libraries"]
 	path = 3rdparty/rocm_libraries
 	url = https://github.com/ROCm/rocm-libraries.git
-	branch = users/jia/ck/fix_grouped_gemm_quant_mxtype
