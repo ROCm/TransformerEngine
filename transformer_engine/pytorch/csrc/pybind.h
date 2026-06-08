@@ -48,6 +48,8 @@ extern PyTypeObject *MXFP4QuantizerClass;
 extern PyTypeObject *NVFP4TensorPythonClass;
 extern PyTypeObject *NVFP4TensorStoragePythonClass;
 extern PyTypeObject *NVFP4QuantizerClass;
+extern PyTypeObject *GroupedTensorPythonClass;
+extern PyTypeObject *GroupedTensorStoragePythonClass;
 
 void init_extension();
 
@@ -111,6 +113,8 @@ TensorWrapper NVTETensorFromMXFP4Tensor(py::handle tensor, Quantizer *quantizer)
 #endif //#ifdef USE_ROCM
 
 TensorWrapper NVTETensorFromNVFP4Tensor(py::handle tensor, Quantizer *quantizer);
+
+GroupedTensorWrapper GroupedTensorFromPyTorchGroupedTensor(py::handle tensor);
 
 inline bool IsFloatingPointType(at::ScalarType type) {
   return type == at::kFloat || type == at::kHalf || type == at::kBFloat16;

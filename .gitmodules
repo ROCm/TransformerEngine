@@ -25,7 +25,8 @@
 	url = https://github.com/NVIDIA/cutlass.git
 [submodule "3rdparty/QoLA"]
 	path = 3rdparty/QoLA
-	url = https://github.com/Micky774/QoLA.git
+	url = https://github.com/ROCm/QoLA.git
 [submodule "3rdparty/rocm_libraries"]
 	path = 3rdparty/rocm_libraries
 	url = https://github.com/ROCm/rocm-libraries.git
+
