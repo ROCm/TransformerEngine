@@ -266,6 +266,12 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
                           NVTETensor* workspace,
                           bool accumulate,//ignored for now
                           hipStream_t stream) {
+
+  if (detect_gpu_arch() != GPUArch::GFX1250) {
+    NVTE_WARN("ck_tile_mx_grouped_gemm: only supported on gfx1250. Falling back.");
+    return false;
+  }
+
   if (group_num <= 0) {
     return true;
   }
