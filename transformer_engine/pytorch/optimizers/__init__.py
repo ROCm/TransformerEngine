@@ -5,14 +5,13 @@
 # See LICENSE for license information.
 
 """Fused optimizers and multi-tensor kernels."""
-import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine_torch import (
-    multi_tensor_scale as _multi_tensor_scale,
+    multi_tensor_scale,
     multi_tensor_scale_tensor,
-    multi_tensor_l2norm as _multi_tensor_l2norm,
-    multi_tensor_unscale_l2norm as _multi_tensor_unscale_l2norm,
+    multi_tensor_l2norm,
+    multi_tensor_unscale_l2norm,
     multi_tensor_adam,
     multi_tensor_adam_fp8,
     multi_tensor_adam_capturable,
@@ -25,6 +24,13 @@ from .multi_tensor_apply import MultiTensorApply, multi_tensor_applier
 
 
 if IS_HIP_EXTENSION:
+    import torch
+    from transformer_engine_torch import (
+        multi_tensor_scale as _multi_tensor_scale,
+        multi_tensor_l2norm as _multi_tensor_l2norm,
+        multi_tensor_unscale_l2norm as _multi_tensor_unscale_l2norm,
+    )
+
     def _is_single_tensor_list(tensor_lists: list[list[torch.Tensor]], expected_lists: int) -> bool:
         return len(tensor_lists) == expected_lists and all(len(tensor_list) == 1 for tensor_list in tensor_lists)
 
@@ -73,7 +79,3 @@ if IS_HIP_EXTENSION:
             )
             return scaled_norm, per_tensor_norm
         return _multi_tensor_unscale_l2norm(chunk_size, noop_flag_buffer, tensor_lists, inv_scale, per_tensor)
-else:
-    multi_tensor_scale = _multi_tensor_scale
-    multi_tensor_l2norm = _multi_tensor_l2norm
-    multi_tensor_unscale_l2norm = _multi_tensor_unscale_l2norm
