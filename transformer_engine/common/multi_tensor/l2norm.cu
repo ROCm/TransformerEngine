@@ -568,6 +568,9 @@ void multi_tensor_l2norm_cuda(int chunk_size, Tensor noop_flag,
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 
+  // This involves one more small kernel launches, but will be negligible end to end.
+  // I could get rid of these by hacking the functor + multi tensor harness with persistence
+  // logic, but keeping it simple for now
   cleanup<<<per_tensor ? tensor_lists[0].size() : 1, 512, 0, stream>>>(
       reinterpret_cast<float *>(output.data.dptr),
       per_tensor ? reinterpret_cast<float *>(output_per_tensor.data.dptr) : nullptr,
@@ -593,6 +596,9 @@ void multi_tensor_unscale_l2norm_cuda(int chunk_size, Tensor noop_flag,
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 
+  // This involves one more small kernel launches, but will be negligible end to end.
+  // I could get rid of these by hacking the functor + multi tensor harness with persistence
+  // logic, but keeping it simple for now
   cleanup<<<per_tensor ? tensor_lists[0].size() : 1, 512, 0, stream>>>(
       reinterpret_cast<float *>(output.data.dptr),
       per_tensor ? reinterpret_cast<float *>(output_per_tensor.data.dptr) : nullptr,
