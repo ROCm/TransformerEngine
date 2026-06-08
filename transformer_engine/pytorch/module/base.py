@@ -1109,7 +1109,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             self.init_fp8_meta_tensors(meta["recipe"])
             self.fast_setattr("fp8_initialized", True)
 
-            self.fp8_meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
+            meta["recipe"] = FP8GlobalStateManager.get_fp8_recipe()
 
         _current_recipe = meta["recipe"]
         if _original_recipe is not None and not (
