@@ -155,6 +155,10 @@ void launch_rmsnorm_bwd_general_(LaunchParams<BackwardKernelParams> &launch_para
 //  HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, ...
 //                             WARPS_M, WARPS_N, BYTES_PER_LDG, BYTES_PER_LDG_FINAL
 
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 128, fp32, fp32, fp32, fp32, 1, 4, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 128, fp16, fp16, fp16, fp32, 1, 4, 1, 4, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 128, bf16, bf16, bf16, fp32, 1, 4, 1, 4, 4);
+
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 512, fp32, fp32, fp32, fp32, 1, 4, 1, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 512, fp16, fp16, fp16, fp32, 1, 4, 1, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 512, bf16, bf16, bf16, fp32, 1, 4, 1, 16, 4);
@@ -167,6 +171,10 @@ REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 1024, fp32, fp32, fp32, fp32, 1
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 1024, fp16, fp16, fp16, fp32, 1, 4, 1, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 1024, bf16, bf16, bf16, fp32, 1, 4, 1, 16, 4);
 
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 1536, fp32, fp32, fp32, fp32, 1, 4, 1, 16, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 1536, fp16, fp16, fp16, fp32, 1, 4, 1, 16, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 1536, bf16, bf16, bf16, fp32, 1, 4, 1, 16, 4);
+
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 2048, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 2048, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 2048, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4);
@@ -174,6 +182,10 @@ REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 2048, bf16, bf16, bf16, fp32, 1
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 4096, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 4096, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 4096, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4);
+
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 7168, fp32, fp32, fp32, fp32, 1, 1, 7, 16, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 7168, fp16, fp16, fp16, fp32, 1, 1, 7, 16, 4);
+REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 7168, bf16, bf16, bf16, fp32, 1, 1, 7, 16, 4);
 
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 8192, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4);
 REGISTER_NORM_LAUNCHER(RMSNorm, Backward, tuned, 8192, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4);
@@ -217,6 +229,13 @@ REGISTER_NORM_LAUNCHER(RMSNorm, Backward, general, 4096, bf16, fp32, bf16, fp32,
 //  HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW, ...
 //                             WARPS_M, WARPS_N, BYTES_PER_LDG, BYTES_PER_LDG_FINAL
 
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 128, fp32, fp32, fp32, fp32, 1, 4, 1, 4, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 128, fp16, fp16, fp16, fp32, 1, 4, 1, 4, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 128, bf16, bf16, bf16, fp32, 1, 4, 1, 4, 4,
+                       true);
+
 REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 512, fp32, fp32, fp32, fp32, 1, 4, 1, 16, 4,
                        true);
 REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 512, fp16, fp16, fp16, fp32, 1, 4, 1, 16, 4,
@@ -238,6 +257,13 @@ REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 1024, fp16, fp16, fp16, fp32
 REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 1024, bf16, bf16, bf16, fp32, 1, 4, 1, 16, 4,
                        true);
 
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 1536, fp32, fp32, fp32, fp32, 1, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 1536, fp16, fp16, fp16, fp32, 1, 4, 1, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 1536, bf16, bf16, bf16, fp32, 1, 4, 1, 16, 4,
+                       true);
+
 REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 2048, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4,
                        true);
 REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 2048, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4,
@@ -250,6 +276,13 @@ REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 4096, fp32, fp32, fp32, fp32
 REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 4096, fp16, fp16, fp16, fp32, 1, 1, 4, 16, 4,
                        true);
 REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 4096, bf16, bf16, bf16, fp32, 1, 1, 4, 16, 4,
+                       true);
+
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 7168, fp32, fp32, fp32, fp32, 1, 1, 7, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 7168, fp16, fp16, fp16, fp32, 1, 1, 7, 16, 4,
+                       true);
+REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 7168, bf16, bf16, bf16, fp32, 1, 1, 7, 16, 4,
                        true);
 
 REGISTER_NORM_LAUNCHER(RMSNorm, BackwardAdd, tuned, 8192, fp32, fp32, fp32, fp32, 1, 1, 4, 16, 4,

@@ -1,4 +1,6 @@
 #!/usr/bin/python3
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # See LICENSE for license information.
 
@@ -17,6 +19,7 @@ from torch import nn, optim
 from torch.distributed import DeviceMesh
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import init_device_mesh
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.quantization import quantized_model_init
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -257,6 +260,9 @@ def _train(args):
             output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
         loss = F.mse_loss(output, target)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
         if LOCAL_RANK == 0:

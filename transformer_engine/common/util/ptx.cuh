@@ -126,17 +126,6 @@ constexpr bool is_supported_arch() {
 #define ARCH_HAS_STOCHASTIC_ROUNDING \
   NVTE_CUDA_ARCH_MATCHES(ptx::ArchSpecific<100>, ptx::ArchSpecific<103>)
 
-#else
-
-// Native FP4 stochastic rounding is available on gfx950 and later.
-#if defined(__gfx950__)
-#define ARCH_HAS_STOCHASTIC_ROUNDING (true)
-#else
-#define ARCH_HAS_STOCHASTIC_ROUNDING (false)
-#endif
-
-#endif //#ifndef __HIP_PLATFORM_AMD__
-
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#parallel-synchronization-and-communication-instructions-mbarrier-init
 __device__ __forceinline__ void mbarrier_init(uint64_t *mbar, const uint32_t count) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
@@ -175,6 +164,18 @@ __device__ __forceinline__ void mbarrier_arrive_expect_tx(uint64_t *mbar, const 
                : "memory");
 #else
   NVTE_DEVICE_ERROR("mbarrier_arrive_expect_tx is only supported on SM 10.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ void mbarrier_arrive_expect_tx_cta_relaxed_shared_cta(
+    uint64_t *mbar, const uint32_t tx_count) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
+  asm volatile("mbarrier.arrive.expect_tx.relaxed.cta.shared::cta.b64 _, [%0], %1;" ::"r"(mbar_ptr),
+               "r"(tx_count));
+#else
+  NVTE_DEVICE_ERROR(
+      "mbarrier_arrive_expect_tx_cta_relaxed_shared_cta is only supported on SM 10.0+.");
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
@@ -257,13 +258,97 @@ __device__ __forceinline__ void mbarrier_wait_parity(uint64_t *mbar, const uint3
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
 
+__device__ __forceinline__ void mbarrier_wait_parity_acquire_cta_shared_cta(uint64_t *mbar,
+                                                                            uint32_t phase_parity) {
+#if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+  uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
+  asm volatile(
+      "{\n\t"
+      ".reg .b64 r1; \n\t"
+      ".reg .pred waitComplete; \n\t"  // predicate representing if barrier condition is met
+      "WAIT: \n\t"                     // loop around barrier wait
+      "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64  waitComplete, [%0], %1; \n\t"
+      "@waitComplete bra DONE; \n\t"  // mbarrier conditions are met
+      "bra WAIT; \n\t"                // just a time-out, try again
+      "DONE: \n\t"
+      "}\n\t"
+      :
+      : "r"(mbar_ptr), "r"(phase_parity)
+      : "memory");
+#else
+  NVTE_DEVICE_ERROR("mbarrier_wait_parity_acquire_cta_shared_cta is only supported on SM 10.0+.");
+#endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+}
+
+__device__ __forceinline__ void try_cancel_cta(uint64_t *mbar, __uint128_t *response_data_ptr) {
+  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+  if constexpr (is_blackwell) {
+    uint32_t mbar_ptr = __cvta_generic_to_shared(mbar);
+    uint32_t workID_response = __cvta_generic_to_shared(response_data_ptr);
+    asm volatile(
+        "clusterlaunchcontrol.try_cancel.async.mbarrier::complete_tx::bytes.multicast::cluster::"
+        "all.b128 "
+        "[%0], [%1];" ::"r"(workID_response),
+        "r"(mbar_ptr));
+  } else {
+    NVTE_DEVICE_ERROR(
+        "Cluster Launch Control PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
+  }
+}
+
+__device__ __forceinline__ void get_cancelled_cta_id_2D(__uint128_t *response_data_ptr,
+                                                        int32_t &ctaid_X, int32_t &ctaid_Y) {
+  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+  if constexpr (is_blackwell) {
+    uint32_t workID_response = __cvta_generic_to_shared(response_data_ptr);
+    asm volatile(
+        "{\n\t"
+        ".reg .s32 x_ctaid; \n\t"
+        ".reg .s32 y_ctaid; \n\t"
+        "mov .s32 x_ctaid, -1; \n\t"
+        "mov .s32 y_ctaid, -1; \n\t"
+        ".reg.b128 try_cancel_response; \n\t"
+        "ld.shared.b128 try_cancel_response, [%2]; \n\t"
+        ".reg .pred P1; \n\t"
+        "clusterlaunchcontrol.query_cancel.is_canceled.pred.b128 P1, try_cancel_response; \n\t"
+        "@P1 clusterlaunchcontrol.query_cancel.get_first_ctaid.v4.b32.b128 {x_ctaid, y_ctaid, _, "
+        "_}, try_cancel_response; \n\t"
+        "mov .s32 %0, x_ctaid; \n\t"
+        "mov .s32 %1, y_ctaid; \n\t"
+        "}\n\t"
+        : "=r"(ctaid_X), "=r"(ctaid_Y)
+        : "r"(workID_response)
+        : "memory");
+  } else {
+    NVTE_DEVICE_ERROR(
+        "Cluster Launch Control PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
+  }
+}
+
+#else
+
+// Native FP4 stochastic rounding is available on gfx950 and later.
+#if defined(__gfx950__)
+#define ARCH_HAS_STOCHASTIC_ROUNDING (true)
+#else
+#define ARCH_HAS_STOCHASTIC_ROUNDING (false)
+#endif
+
+#endif //#ifndef __HIP_PLATFORM_AMD__
+
 constexpr uint32_t FP32_MANTISSA_BITS = 23;
 constexpr uint32_t FP32_EXPONENT_BIAS = 127;
 
 __device__ __forceinline__ float exp2f_rcp(e8m0_t biased_exp) {
-  return (biased_exp == 0) ? 1
-                           : __int_as_float((254 - biased_exp)
-                                            << FP32_MANTISSA_BITS);  // 127 - (biased_exp - 127)
+  // Handle the special case of NaN.
+  if (biased_exp == 255) return __int_as_float(0x7fffffff);
+  // Handle the special case where the unbiased exponent is 127, so the reciprocal is 2^-127 which needs the first bit of
+  // the mantissa to be 1, which can't be obtained by shifting `FP32_MANTISSA_BITS` bits to the left.
+  if (biased_exp == 254) return __int_as_float(0x00400000);
+  // Fast calculation when the unbiased exp is in [-126, 126], and only the exponent part is used to express the reciprocal.
+  return __int_as_float((254 - biased_exp) << FP32_MANTISSA_BITS);
 }
 
 __device__ __forceinline__ float exp2f(e8m0_t biased_exp) {
@@ -308,6 +393,7 @@ __device__ __forceinline__ e8m0_t float_to_e8m0(float val) {
 #endif //#ifndef __HIP_PLATFORM_AMD__
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#data-movement-and-conversion-instructions-cp-async-bulk-tensor
 // shared::cta -> global
 __device__ __forceinline__ void cp_async_bulk_tensor_1d_shared_to_global(uint64_t *dst_global_ptr,
@@ -416,6 +502,8 @@ __device__ __forceinline__ void fence_proxy_async_shared_cta() {
   NVTE_DEVICE_ERROR("fence_proxy_async_shared_cta is only supported on SM 9.0+.");
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 900)
 }
+
+#endif //!__HIP_PLATFORM_AMD__
 
 template <typename T>
 struct alignas(2 * sizeof(T)) FPx2 {
@@ -603,7 +691,66 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_bf16_to_fp4_4x(const uint64_t in_4x
 __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding(
     const float2 in01, const float2 in23, const float2 scale, const uint32_t rbits) {
   uint16_t out_4x = 0;
-#ifndef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
+  const float scaled[4] = {
+      in01.x * scale.x, in01.y * scale.x,
+      in23.x * scale.y, in23.y * scale.y
+  };
+#if ARCH_HAS_STOCHASTIC_ROUNDING
+  // opsel=1 always writes to byte 1, result read from fp4x2[1]
+  // Matches HIP's own usage, see e.g.
+  // https://github.com/ROCm/clr/blob/3dbb5f1c5e0734d21dd2424a38255e61ee0a73e0/hipamd/include/hip/amd_detail/amd_hip_ocp_fp.hpp#L1858-L1890
+  union { uint32_t ui32; __hip_fp4x2_storage_t fp4x2[4]; } u{0};
+  __amd_floatx2_storage_t packed01{scaled[0], scaled[1]};
+  __amd_floatx2_storage_t packed23{scaled[2], scaled[3]};
+  u.ui32 = __builtin_amdgcn_cvt_scalef32_sr_pk_fp4_f32(u.ui32, packed01, rbits, 1.0f, 1);
+  const __hip_fp4x2_storage_t lo = u.fp4x2[1];
+  u.ui32 = __builtin_amdgcn_cvt_scalef32_sr_pk_fp4_f32(u.ui32, packed23, rbits, 1.0f, 1);
+  const __hip_fp4x2_storage_t hi = u.fp4x2[1];
+  __hip_fp4x4_e2m1 result;
+  result.__x = static_cast<__hip_fp4x4_storage_t>(lo | (static_cast<__hip_fp4x4_storage_t>(hi) << 8));
+  return result;
+#else
+  // Stochastic rounding fallback for AMD GPUs without native
+  // FP4 SR instructions (e.g. gfx942).
+  //
+  // FP4 E2M1 has 8 non-negative magnitudes whose 3-bit codes happen to
+  // be sorted: {0->0.0, 1->0.5, 2->1.0, 3->1.5, 4->2.0, 5->3.0,
+  //             6->4.0, 7->6.0}.
+  //
+  // For each value we:
+  //  1. Clamp |x| into [0, 6] (the FP4 representable range).
+  //  2. Find the floor index fi in the FP4 grid via branchless
+  //     comparisons (sum of (|x| >= threshold) for each level).
+  //  3. Compute the fractional position within [kV[fi], kV[ci]]
+  //     where ci = min(fi+1, 7) is the ceiling index.
+  //  4. Draw a uniform random value r in [0,1) from 8 bits of rbits.
+  //  5. Round up to ci if r < frac, otherwise keep fi.
+  //     This gives E[round(x)] = x (unbiased).
+  //  6. Set the sign bit (bit 3) if the original value was negative.
+  {
+    constexpr float kV[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+    __hip_fp4_storage_t q[4];
+#pragma unroll
+    for (int i = 0; i < 4; ++i) {
+      const float av = fminf(fabsf(scaled[i]), 6.0f);
+      const int fi = int(av >= 0.5f) + int(av >= 1.0f) + int(av >= 1.5f) +
+                     int(av >= 2.0f) + int(av >= 3.0f) + int(av >= 4.0f) + int(av >= 6.0f);
+      const int ci = min(fi + 1, 7);
+      const float gap = kV[ci] - kV[fi];
+      const float frac = (gap > 0.0f) ? (av - kV[fi]) / gap : 0.0f;
+      const float r = static_cast<float>((rbits >> (8 * i)) & 0xFFu) * (1.0f / 256.0f);
+      const int ri = (r < frac) ? ci : fi;
+      q[i] = static_cast<__hip_fp4_storage_t>((scaled[i] < 0.0f) ? (ri | 0x8) : ri);
+    }
+    __nv_fp4x4_e2m1 result;
+    result.__x = static_cast<__hip_fp4x4_storage_t>(
+        (q[0] & 0xFu) | ((q[1] & 0xFu) << 4) |
+        ((q[2] & 0xFu) << 8) | ((q[3] & 0xFu) << 12));
+    return result;
+  }
+#endif // ARCH_HAS_STOCHASTIC_ROUNDING
+#else
   constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
   if constexpr (has_rs) {
     asm volatile(
@@ -633,22 +780,31 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_stochastic_roun
         "FP4 cvt PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
   }
-#else
-  NVTE_DEVICE_ERROR(
-      "mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding is not supported on AMDGPU.");
-#endif
   return *reinterpret_cast<fp4e2m1x4 *>(&out_4x);
+#endif
 }
 
 __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_rn(const float2 in01,
                                                                     const float2 in23,
                                                                     const float2 scale,
                                                                     const uint32_t rbits) {
-#ifndef __HIP_PLATFORM_AMD__
+#ifdef __HIP_PLATFORM_AMD__
+  const float scaled[4] = {
+      in01.x * scale.x, in01.y * scale.x,
+      in23.x * scale.y, in23.y * scale.y
+  };
+  const __hip_fp4_storage_t q0 = __hip_cvt_float_to_fp4(scaled[0], __HIP_E2M1, hipRoundNearest);
+  const __hip_fp4_storage_t q1 = __hip_cvt_float_to_fp4(scaled[1], __HIP_E2M1, hipRoundNearest);
+  const __hip_fp4_storage_t q2 = __hip_cvt_float_to_fp4(scaled[2], __HIP_E2M1, hipRoundNearest);
+  const __hip_fp4_storage_t q3 = __hip_cvt_float_to_fp4(scaled[3], __HIP_E2M1, hipRoundNearest);
+
+  __hip_fp4x4_e2m1 result;
+  result.__x = static_cast<__hip_fp4x4_storage_t>(
+        (q0 & 0xFu) | ((q1 & 0xFu) << 4) | ((q2 & 0xFu) << 8) | ((q3 & 0xFu) << 12));
+  return result;
+#else
   constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
-#endif
   uint32_t out_4x = 0;  // Only need 16 bit. Using 32 bit container for packing.
-#ifndef __HIP_PLATFORM_AMD__
   if constexpr (is_blackwell) {
     // NOTE: rbits unused for rn.
     asm volatile(
@@ -682,11 +838,8 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x_with_rn(const float2
         "FP4 cvt PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
   }
-#else
-  NVTE_DEVICE_ERROR(
-      "mul_cvt_fp32_to_fp4_4x_with_rn is not supported on AMDGPU.");
-#endif
   return reinterpret_cast<fp4e2m1x4 *>(&out_4x)[0];
+#endif
 }
 
 template <bool USE_STOCHASTIC_ROUNDING>
@@ -699,7 +852,185 @@ __device__ __forceinline__ fp4e2m1x4 mul_cvt_fp32_to_fp4_4x(const float2 in01, c
     return mul_cvt_fp32_to_fp4_4x_with_rn(in01, in23, scale, rbits);
   }
 }
+
+#ifndef __HIP_PLATFORM_AMD__
+
+template <typename SCALING_COEFFICIENT_TYPE>
+__device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_round_to_nearest(
+    const uint64_t in03, const uint64_t in47, const SCALING_COEFFICIENT_TYPE scaling_coefficient) {
+  uint32_t out_8x = 0;
+  constexpr bool is_blackwell = ARCH_BLACKWELL_FAMILY;
+  if constexpr (is_blackwell) {
+    if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, bf16>::value) {
+      asm volatile(
+          "{\n"
+          ".reg.f32 zero; \n\t"
+          "mov.b32 zero, 0; \n\t"
+          ".reg.b16 scaling_coeff; \n\t"
+          "mov.b16 scaling_coeff, %3; \n\t"
+          ".reg.b16 v0_h, v1_h, v2_h, v3_h, v4_h, v5_h, v6_h, v7_h; \n\t"
+          "mov.b64 {v0_h, v1_h, v2_h, v3_h}, %1; \n\t"
+          "mov.b64 {v4_h, v5_h, v6_h, v7_h}, %2; \n\t"
+
+          ".reg.f32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
+          "fma.rn.f32.bf16 v0, v0_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v1, v1_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v2, v2_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v3, v3_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v4, v4_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v5, v5_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v6, v6_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v7, v7_h, scaling_coeff, zero; \n\t"
+
+          ".reg.b8 f0, f1, f2, f3; \n\t"
+          // Elements reordered to match e2m1x4 packing order (v1,v0)
+          "cvt.rn.satfinite.e2m1x2.f32 f0, v1, v0;\n\t"
+          "cvt.rn.satfinite.e2m1x2.f32 f1, v3, v2;\n\t"
+          "cvt.rn.satfinite.e2m1x2.f32 f2, v5, v4;\n\t"
+          "cvt.rn.satfinite.e2m1x2.f32 f3, v7, v6;\n\t"
+          "mov.b32 %0, {f0, f1, f2, f3};\n"
+          "}"
+          : "=r"(out_8x)
+          : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)));
+    } else if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, float>::value) {
+      asm volatile(
+          "{\n"
+          ".reg.b64 scaling_coeff_2x; \n\t"
+          "mov.b64 scaling_coeff_2x, {%3, %3}; \n\t"
+          ".reg.b16 v0_bf16, v1_bf16, v2_bf16, v3_bf16, v4_bf16, v5_bf16, v6_bf16, v7_bf16; \n\t"
+          "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16}, %1; \n\t"
+          "mov.b64 {v4_bf16, v5_bf16, v6_bf16, v7_bf16}, %2; \n\t"
+
+          ".reg.b32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
+          "cvt.f32.bf16 v0, v0_bf16; \n\t"
+          "cvt.f32.bf16 v1, v1_bf16; \n\t"
+          "cvt.f32.bf16 v2, v2_bf16; \n\t"
+          "cvt.f32.bf16 v3, v3_bf16; \n\t"
+          "cvt.f32.bf16 v4, v4_bf16; \n\t"
+          "cvt.f32.bf16 v5, v5_bf16; \n\t"
+          "cvt.f32.bf16 v6, v6_bf16; \n\t"
+          "cvt.f32.bf16 v7, v7_bf16; \n\t"
+
+          ".reg.b64 v01, v23, v45, v67; \n\t"
+          "mov.b64 v01, {v0, v1}; \n\t"
+          "mov.b64 v23, {v2, v3}; \n\t"
+          "mov.b64 v45, {v4, v5}; \n\t"
+          "mov.b64 v67, {v6, v7}; \n\t"
+          "mul.f32x2 v01, v01, scaling_coeff_2x; \n\t"
+          "mul.f32x2 v23, v23, scaling_coeff_2x; \n\t"
+          "mul.f32x2 v45, v45, scaling_coeff_2x; \n\t"
+          "mul.f32x2 v67, v67, scaling_coeff_2x; \n\t"
+          // Elements reordered to match the packing order (v1,v0)
+          "mov.b64 {v1, v0}, v01; \n\t"
+          "mov.b64 {v3, v2}, v23; \n\t"
+          "mov.b64 {v5, v4}, v45; \n\t"
+          "mov.b64 {v7, v6}, v67; \n\t"
+
+          ".reg.b8 f0, f1, f2, f3; \n\t"
+          "cvt.rn.satfinite.e2m1x2.f32 f0, v0, v1;\n\t"
+          "cvt.rn.satfinite.e2m1x2.f32 f1, v2, v3;\n\t"
+          "cvt.rn.satfinite.e2m1x2.f32 f2, v4, v5;\n\t"
+          "cvt.rn.satfinite.e2m1x2.f32 f3, v6, v7;\n\t"
+          "mov.b32 %0, {f0, f1, f2, f3};\n\t"
+          "}"
+          : "=r"(out_8x)
+          : "l"(in03), "l"(in47), "f"(scaling_coefficient));
+    } else {
+      NVTE_DEVICE_ERROR("Not supported scaling coefficient type.");
+    }
+  } else {
+    NVTE_DEVICE_ERROR(
+        "FP4 cvt PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
+  }
+  return out_8x;
+}
+
+template <typename SCALING_COEFFICIENT_TYPE>
+__device__ __forceinline__ uint32_t mul_cvt_bf16_to_fp4_8x_stochastic_rounding(
+    const uint64_t in03, const uint64_t in47, const SCALING_COEFFICIENT_TYPE scaling_coefficient,
+    const uint32_t rbits03, const uint32_t rbits47) {
+  uint32_t out_8x = 0;
+  constexpr bool has_rs = ARCH_HAS_STOCHASTIC_ROUNDING;
+  if constexpr (has_rs) {
+    if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, bf16>::value) {
+      asm volatile(
+          "{\n"
+          ".reg.f32 zero; \n\t"
+          "mov.b32 zero, 0; \n\t"
+          ".reg.b16 scaling_coeff; \n\t"
+          "mov.b16 scaling_coeff, %3; \n\t"
+          ".reg.b16 v0_h, v1_h, v2_h, v3_h, v4_h, v5_h, v6_h, v7_h; \n\t"
+          "mov.b64 {v0_h, v1_h, v2_h, v3_h}, %1; \n\t"
+          "mov.b64 {v4_h, v5_h, v6_h, v7_h}, %2; \n\t"
+
+          ".reg.f32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
+          "fma.rn.f32.bf16 v0, v0_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v1, v1_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v2, v2_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v3, v3_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v4, v4_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v5, v5_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v6, v6_h, scaling_coeff, zero; \n\t"
+          "fma.rn.f32.bf16 v7, v7_h, scaling_coeff, zero; \n\t"
+
+          ".reg.b16 b03, b47; \n\t"
+          // Elements reordered to match e2m1x4 packing order (v3,v2,v1,v0)
+          "cvt.rs.satfinite.e2m1x4.f32 b03, {v3, v2, v1, v0}, %4; \n\t"
+          "cvt.rs.satfinite.e2m1x4.f32 b47, {v7, v6, v5, v4}, %5; \n\t"
+          "mov.b32 %0, {b03, b47};\n"
+          "}"
+          : "=r"(out_8x)
+          : "l"(in03), "l"(in47), "h"(reinterpret_cast<const uint16_t &>(scaling_coefficient)),
+            "r"(rbits03), "r"(rbits47));
+    } else if constexpr (std::is_same<SCALING_COEFFICIENT_TYPE, float>::value) {
+      asm volatile(
+          "{\n"
+          ".reg.b16 v0_bf16, v1_bf16, v2_bf16, v3_bf16, v4_bf16, v5_bf16, v6_bf16, v7_bf16; \n\t"
+          "mov.b64 {v0_bf16, v1_bf16, v2_bf16, v3_bf16}, %1; \n\t"
+          "mov.b64 {v4_bf16, v5_bf16, v6_bf16, v7_bf16}, %2; \n\t"
+
+          ".reg.b32 v0, v1, v2, v3, v4, v5, v6, v7; \n\t"
+          "cvt.f32.bf16 v0, v0_bf16; \n\t"
+          "cvt.f32.bf16 v1, v1_bf16; \n\t"
+          "cvt.f32.bf16 v2, v2_bf16; \n\t"
+          "cvt.f32.bf16 v3, v3_bf16; \n\t"
+          "cvt.f32.bf16 v4, v4_bf16; \n\t"
+          "cvt.f32.bf16 v5, v5_bf16; \n\t"
+          "cvt.f32.bf16 v6, v6_bf16; \n\t"
+          "cvt.f32.bf16 v7, v7_bf16; \n\t"
+
+          "mul.f32 v0, v0, %3; \n\t"
+          "mul.f32 v1, v1, %3; \n\t"
+          "mul.f32 v2, v2, %3; \n\t"
+          "mul.f32 v3, v3, %3; \n\t"
+          "mul.f32 v4, v4, %3; \n\t"
+          "mul.f32 v5, v5, %3; \n\t"
+          "mul.f32 v6, v6, %3; \n\t"
+          "mul.f32 v7, v7, %3; \n\t"
+          ".reg.b16 b03, b47; \n\t"
+          // Elements reordered to match e2m1x4 packing order (v3,v2,v1,v0)
+          "cvt.rs.satfinite.e2m1x4.f32 b03, {v3, v2, v1, v0}, %4; \n\t"
+          "cvt.rs.satfinite.e2m1x4.f32 b47, {v7, v6, v5, v4}, %5; \n\t"
+          "mov.b32 %0, {b03, b47};\n"
+          "}"
+          : "=r"(out_8x)
+          : "l"(in03), "l"(in47), "f"(scaling_coefficient), "r"(rbits03), "r"(rbits47));
+    } else {
+      NVTE_DEVICE_ERROR("Not supported scaling coefficient type.");
+    }
+  } else {
+    NVTE_DEVICE_ERROR(
+        "FP4 cvt PTX instructions are architecture-specific. "
+        "Try recompiling with sm_XXXa instead of sm_XXX.");
+  }
+  return out_8x;
+}
+
+#endif //!__HIP_PLATFORM_AMD__
 #endif  // FP4_TYPE_SUPPORTED
+
+#ifndef __HIP_PLATFORM_AMD__
 
 // SIMD like "Fused" cast + multiplication (x2)
 __device__ __forceinline__ void mul_cvt_2x(fp8e4m3x2 &out, const floatx2 &in,
@@ -868,7 +1199,6 @@ __device__ __forceinline__ void abs_max_2x(fp16x2 &dst, const fp16x2 &p1, const 
 #endif  // (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 890)
 }
 
-#ifndef __HIP_PLATFORM_AMD__
 __device__ __forceinline__ int32_t elect_one_sync(uint32_t mask = 0xFFFFFFFFu) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   int32_t pred = 0;
@@ -1550,8 +1880,60 @@ __device__ __forceinline__ floatx4 up_cast(const bf16x4 &in) {
       : "r"(in2[0]), "r"(in2[1]));
   return out;
 }
-#endif //#ifndef __HIP_PLATFORM_AMD__
 
+// Loads single BF16/FP16 element from shared memory state space
+__device__ __forceinline__ bf16 ld_shared_b16(const bf16 *__restrict__ src_smem) {
+  const uint32_t src_smem_ptr = __cvta_generic_to_shared(src_smem);
+  bf16 dst;
+  asm volatile("ld.shared.b16 %0, [%1];"
+               : "=h"(reinterpret_cast<uint16_t &>(dst))
+               : "r"(src_smem_ptr));
+  return dst;
+}
+
+// Loads pair of BF16/FP16 values from shared memory state space
+__device__ __forceinline__ bf16x2 ld_shared_b32(const bf16x2 *__restrict__ src_smem) {
+  const uint32_t src_smem_ptr = __cvta_generic_to_shared(src_smem);
+  bf16x2 dst;
+  asm volatile("ld.shared.b32 %0, [%1];"
+               : "=r"(reinterpret_cast<uint32_t &>(dst))
+               : "r"(src_smem_ptr));
+  return dst;
+}
+
+// Loads 8x BF16 values from shared memory state space
+__device__ __forceinline__ __uint128_t ld_shared_b128(const bf16 *__restrict__ src_smem) {
+  uint64_t elts03, elts47;
+  const uint32_t src_smem_ptr = __cvta_generic_to_shared(src_smem);
+  asm volatile(
+      "{\n\t"
+      ".reg.b128 xy; \n\t"
+      "ld.shared.b128 xy, [%2]; \n\t"
+      "mov.b128 {%0, %1}, xy; \n"
+      "}\n"
+      : "=l"(elts03), "=l"(elts47)
+      : "r"(src_smem_ptr));
+  return (static_cast<__uint128_t>(elts47) << 64) | static_cast<__uint128_t>(elts03);
+}
+
+#if FP4_TYPE_SUPPORTED
+// Vectorized store of x8 FP4 elements into shared memory state space
+__device__ __forceinline__ void st_shared_b32(fp4e2m1x2 *__restrict__ dst_smem,
+                                              uint32_t fp4_pack_x8) {
+  const uint32_t dst_smem_ptr = __cvta_generic_to_shared(dst_smem);
+  asm volatile("st.shared.b32 [%0], %1;" : : "r"(dst_smem_ptr), "r"(fp4_pack_x8));
+}
+#endif
+
+// Vectorized store of x16 FP4 elements into shared memory state space
+#if FP4_TYPE_SUPPORTED
+__device__ __forceinline__ void st_shared_b64(fp4e2m1x2 *__restrict__ dst_smem,
+                                              uint64_t fp4_pack_x16) {
+  const uint32_t dst_smem_ptr = __cvta_generic_to_shared(dst_smem);
+  asm volatile("st.shared.b64 [%0], %1;" : : "r"(dst_smem_ptr), "l"(fp4_pack_x16));
+}
+#endif
+#endif //!__HIP_PLATFORM_AMD__
 }  // namespace ptx
 
 namespace {
