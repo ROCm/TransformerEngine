@@ -26,6 +26,6 @@
 [submodule "3rdparty/QoLA"]
 	path = 3rdparty/QoLA
 	url = https://github.com/Micky774/QoLA.git
-[submodule "rocm_libraries"]
+[submodule "3rdparty/rocm_libraries"]
 	path = 3rdparty/rocm_libraries
 	url = https://github.com/ROCm/rocm-libraries.git
