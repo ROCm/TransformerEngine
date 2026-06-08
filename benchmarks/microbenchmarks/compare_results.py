@@ -7,12 +7,22 @@
 """
 Compare two CSVs from the same benchmark suite.
 
-Auto-detects metric columns (containing "TFLOPS" or "GB/s") and key columns.
-Outputs a markdown <details> block to stdout with per-config results,
-and optionally appends a summary table row to --summary-file.
+Two modes:
+
+1. Default (ratio) mode: compares two *aggregate* CSVs. Auto-detects metric
+   columns (containing "TFLOPS" or "GB/s") and key columns, computes throughput
+   speedups, and emits a markdown <details> block (optionally appending a
+   summary row to --summary-file).
+
+2. --stats mode: compares two *samples* CSVs (written with --csv-samples) using
+   a statistical test (Brunner-Munzel by default) via the benchstats package.
+   Reports whether per-config timing differences are significant and exits 1
+   when a significant regression is found (for CI gating). Requires
+   ``pip install -r requirements.txt``.
 
 Usage:
     python compare_results.py baseline.csv candidate.csv --bench-name NAME --summary-file FILE
+    python compare_results.py base_samples.csv cand_samples.csv --stats
 """
 
 import argparse
@@ -49,6 +59,75 @@ def print_key_table(title, rows_df, key_cols):
     print()
 
 
+def run_stats(args):
+    """Compare two samples CSVs with a statistical test via benchstats.
+
+    Timing (``time_ms``) is the main metric and drives the exit code; throughput
+    / bandwidth (``TFLOPS`` / ``GB/s``) is reported as a secondary metric when
+    present in the CSV.
+
+    Returns a process exit code: 1 if a significant difference is found in the
+    main (timing) metric, else 0.
+    """
+    import os
+
+    import rich.table  # noqa: F401  benchstats 3.4.0 render uses rich.table.Table without importing it
+    from parser_TEsamples import parser_TEsamples
+    from benchstats.compare import compareStats
+    from benchstats.render import renderComparisonResults
+    from benchstats.common import LoggingConsole, detectExportFormat
+
+    main_metrics = ["time_s"]
+
+    export_fmt = detectExportFormat(args.export_to, None) if args.export_to else None
+    if export_fmt is not None and os.path.isfile(args.export_to):
+        os.remove(args.export_to)
+
+    console = LoggingConsole(
+        record=export_fmt is not None,
+        log_level=LoggingConsole.LogLevel.Warning,
+    )
+
+    # metrics=None exposes every metric the CSV carries (time + throughput).
+    s1 = parser_TEsamples(args.baseline_csv, None, None, debug_log=console).getStats()
+    s2 = parser_TEsamples(args.candidate_csv, None, None, debug_log=console).getStats()
+
+    cr = compareStats(
+        s1, s2,
+        method=args.method,
+        alpha=args.alpha,
+        main_metrics=main_metrics,
+        debug_log=console,
+    )
+
+    # Throughput metrics (e.g. TFLOPS / GB/s) are not times; blank benchstats'
+    # default per-value "s" suffix for them (the column header names the unit).
+    secondary = [m for m in cr.getMetrics() if m not in main_metrics]
+    style_overrides = {f"metric_{m}_unit": "" for m in secondary}
+
+    renderComparisonResults(
+        cr, console,
+        main_metrics=main_metrics,
+        style_overrides=style_overrides or None,
+        always_show_pvalues=args.always_show_pvalues,
+    )
+
+    if export_fmt is not None:
+        if export_fmt == "txt":
+            console.save_text(args.export_to)
+        elif export_fmt == "svg":
+            console.save_svg(args.export_to, title="")
+        elif export_fmt == "html":
+            console.save_html(args.export_to)
+
+    if cr.at_least_one_differs:
+        console.warning(
+            "At least one significant timing difference was detected (exit 1)."
+        )
+        return 1
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="Compare benchmark CSVs")
     parser.add_argument("baseline_csv", help="Baseline CSV")
@@ -67,7 +146,34 @@ def main():
             "Set to 0 to disable the filter."
         ),
     )
+
+    stats_group = parser.add_argument_group(
+        "statistical comparison (--stats mode; operates on --csv-samples CSVs)"
+    )
+    stats_group.add_argument(
+        "--stats", action="store_true",
+        help="Compare per-sample CSVs with a statistical test via benchstats.",
+    )
+    stats_group.add_argument(
+        "--alpha", type=float, default=0.001,
+        help="Significance level for the test (default: 0.001).",
+    )
+    stats_group.add_argument(
+        "--method", default="brunnermunzel",
+        help="Statistical test to use (default: brunnermunzel).",
+    )
+    stats_group.add_argument(
+        "--always-show-pvalues", action="store_true",
+        help="Always show p-values, including for non-significant results.",
+    )
+    stats_group.add_argument(
+        "--export-to", default=None, metavar="FILE",
+        help="Export the report to a .txt/.svg/.html file (format from extension).",
+    )
     args = parser.parse_args()
+
+    if args.stats:
+        return run_stats(args)
 
     baseline_df = pd.read_csv(args.baseline_csv)
     candidate_df = pd.read_csv(args.candidate_csv)

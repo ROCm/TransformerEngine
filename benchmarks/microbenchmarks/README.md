@@ -29,7 +29,16 @@ python benchmark_gemm.py --csv --csv-samples gemm_samples.csv
 ```
 
 The samples CSV contains one row per timing sample with columns for all
-benchmark parameters plus `label`, `sample_idx`, and `time_ms`.
+benchmark parameters plus `label`, `sample_idx`, `time_ms`, `throughput`, and
+`unit`. The per-sample `throughput` is derived from the sample time (it is blank
+for samples-only records such as `Forward+Backward`, which carry no throughput).
+
+torch's autorange records only a few raw timing blocks per metric. To get
+enough samples for statistical comparison, `--min-samples N` (default 12)
+ensures at least `N` raw blocks are recorded, topping up any shortfall with
+additional equal-sized blocks rather than re-averaging the whole measurement.
+Statistical comparison (see below) needs at least ~10 samples, so keep the
+default (or higher) when producing samples CSVs for `--stats`.
 
 ## Shared configuration
 
@@ -75,3 +84,36 @@ python compare_results.py baseline.csv candidate.csv --bench-name GEMM
 
 The script auto-detects metric columns, computes speedups for overlapping rows,
 and reports rows that exist only in the baseline or only in the candidate.
+
+### Statistical comparison (`--stats`)
+
+The ratio comparison above uses point estimates and cannot tell a real
+regression from measurement noise. To test whether timing differences are
+statistically significant, run the benchmark with `--csv-samples` on both
+sides and compare the samples CSVs with `--stats`:
+
+```bash
+pip install -r requirements.txt   # benchstats (pulls rich, scipy, numpy)
+
+# baseline checkout
+python benchmark_gemm.py --csv-samples baseline_samples.csv --min-samples 12
+# candidate checkout
+python benchmark_gemm.py --csv-samples candidate_samples.csv --min-samples 12
+
+python compare_results.py baseline_samples.csv candidate_samples.csv --stats
+```
+
+`--stats` uses the [benchstats](https://github.com/Arech/benchstats) package to
+apply a Brunner-Munzel test (override with `--method`) at significance level
+`--alpha` (default `0.001`) to each `(config, label)` pair. It prints a table
+marking each benchmark as faster (`<`), slower (`>`), or not significantly
+different (`~`), and exits `1` when a significant difference in the timing
+metric is found, so it can gate CI. Use `--export-to report.svg` (or `.html`,
+`.txt`) to save the report, and `--always-show-pvalues` to show p-values for
+non-significant rows.
+
+Time (the main metric, which drives the exit code) is shown alongside the
+calculated throughput/bandwidth (`TFLOPS` or `GB/s`), reported as a secondary
+metric. Because the table requires a uniform metric set, samples-only composite
+rows that carry no throughput (e.g. `Forward+Backward`) are omitted from the
+comparison; their raw samples remain in the CSV.
