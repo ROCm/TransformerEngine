@@ -56,7 +56,6 @@ std::optional<SwizzledGroupedScales> maybe_swizzle_grouped_tensor_for_gemm(
  *  during the GEMM.
  */
 at::Tensor convert_block_scaling_to_mxfp8_tensor(TensorWrapper& input, bool rowwise);
-#endif  //!USE_ROCM
 
 }  // namespace pytorch
 }  // namespace transformer_engine
