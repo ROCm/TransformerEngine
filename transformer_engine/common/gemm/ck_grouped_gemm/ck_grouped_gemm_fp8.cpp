@@ -16,12 +16,6 @@
 namespace transformer_engine {
 namespace grouped_gemm {
 
-enum class GPUArch {
-  GFX942,
-  GFX950,
-  UNKNOWN
-};
-
 struct TileCfg_128x128x128_16x16x128_2x2x1 {
   static constexpr ck_tile::index_t M_Tile = 128;
   static constexpr ck_tile::index_t N_Tile = 128;
@@ -264,18 +258,6 @@ class QuantGroupedGemmRunner : public RunnerInterface {
     return launch_grouped_gemm_kernel<Kernel>(descs, ctx, stream_cfg);
   }
 };
-
-static inline GPUArch detect_gpu_arch() {
-  int arch = cuda::sm_arch(0);
-
-  if (arch == 94) {
-    return GPUArch::GFX942;
-  }
-  if (arch == 95) {
-    return GPUArch::GFX950;
-  }
-  return GPUArch::UNKNOWN;
-}
 
 template <GPUArch Arch>
 struct FP8TileCfg;
