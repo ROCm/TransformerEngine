@@ -33,13 +33,21 @@ def get_inf_ln_sm_margin():
     return get_ln_sm_margin("INF")
 
 
+# Per-device SM count cache. get_num_sms is called on every RMSNorm dispatch
+# (forward and backward), and get_device_properties is a driver round-trip;
+# the active device's SM count is constant, so cache it.
+_NUM_SMS_CACHE: "dict[int, int]" = {}
+
+
 def get_num_sms(sm_margin=None):
-    num_sms = torch.cuda.get_device_properties(
-        torch.cuda.current_device()
-    ).multi_processor_count
+    dev = torch.cuda.current_device()
+    n = _NUM_SMS_CACHE.get(dev)
+    if n is None:
+        n = torch.cuda.get_device_properties(dev).multi_processor_count
+        _NUM_SMS_CACHE[dev] = n
     if sm_margin is not None and sm_margin > 0:
-        num_sms = max(num_sms - int(sm_margin), 1)
-    return num_sms
+        n = max(n - int(sm_margin), 1)
+    return n
 
 
 def num_programs(x, sm_margin=None):

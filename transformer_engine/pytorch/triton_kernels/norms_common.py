@@ -15,7 +15,7 @@ from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_triton_dtype,
 )
 from ..quantized_tensor import Quantizer
-from .utils import num_programs, block_size, use_blocked, make_ln_out
+from .utils import num_programs, block_size, use_blocked, make_ln_out, get_num_sms
 from .common import get_fp8_max
 from .rmsnorm import (
     _rmsnorm_fwd_triton,
@@ -122,6 +122,42 @@ _rmsnorm_bwd_dg_reduce_kernels = {
     True: _rmsnorm_bwd_dg_reduce_triton,
     False: _rmsnorm_bwd_dg_reduce_triton_impl,
 }
+
+
+_TARGET_PRGMS_PER_CU = 8 
+_MAX_PRGMS_PER_CU = 16 
+_I32_OFFSET_LIMIT = 1 << 31 
+
+_FWD_CAP_LADDER = ((128, 16), (256, 4), (512, 2))
+_BWD_CAP_LADDER = ((128, 4), (512, 2))
+
+
+def _rows_per_pid(rows, hidden, num_sms, cap_ladder):
+    """Largest power-of-two rows-per-program for a narrow-H RMSNorm launch.
+
+    Picks the biggest ``rpp`` that (a) does not exceed the hidden-size cap,
+    (b) evenly divides ``rows`` -- so the kernel needs no row-tail mask -- and
+    (c) still leaves at least ``_TARGET_PRGMS_PER_CU * num_sms`` programs. If
+    the program-count target cannot be met we still pack a little (4 or 2) to
+    amortise the gamma load, provided divisibility holds.
+    """
+    target = _TARGET_PRGMS_PER_CU * num_sms
+    cap = 1
+    for threshold, c in cap_ladder:
+        if hidden <= threshold:
+            cap = c
+            break
+    rpp = 1
+    while rpp * 2 <= cap and rows % (rpp * 2) == 0 and rows // (rpp * 2) >= target:
+        rpp *= 2
+    if rpp == 1:
+        if hidden <= 128 and rows % 4 == 0:
+            rpp = 4
+        elif hidden <= 512 and rows % 2 == 0:
+            rpp = 2
+    return rpp
+
+
 # triton drop-in replacement for transformer_engine::pytorch::rmsnorm_fwd
 def te_rmsnorm_fwd_triton(
     input: torch.Tensor,
@@ -208,7 +244,22 @@ def _te_norm_fwd_triton(
     IS_FP8_CURRENT_SCALING = isinstance(quantizer, Float8CurrentScalingQuantizer)
     BLOCK_SIZE = block_size(input_tensor, norm=kernel)
     USE_BLOCKED = use_blocked(input_tensor)
-    NUM_PRGMS = N if kernel=='layer' else num_programs(input_tensor, sm_margin)
+
+    # Row-packing (RMSNorm, non-blocked, non-FP8 only)
+    ROWS_PER_PID_FWD = 1
+    if kernel == 'rms' and not USE_BLOCKED and not IS_FP8:
+        ROWS_PER_PID_FWD = _rows_per_pid(N, H, get_num_sms(sm_margin), _FWD_CAP_LADDER)
+
+    if kernel == 'layer':
+        # LayerNorm requires one program per row on both paths.
+        NUM_PRGMS = N
+    elif kernel == 'rms' and not USE_BLOCKED:
+        if IS_FP8:
+            NUM_PRGMS = num_programs(input_tensor, sm_margin)
+        else:
+            NUM_PRGMS = N // ROWS_PER_PID_FWD
+    else:
+        NUM_PRGMS = num_programs(input_tensor, sm_margin)
     MAKE_TRANSPOSE = False
     APPLY_ATOMIC = N < 512 or kernel == 'rms'
     ATOMIC_REDUCTION_BLOCK_SIZE=256
@@ -301,6 +352,9 @@ def _te_norm_fwd_triton(
             out_ptr.data_ptr() % 16 == 0 and
             output_row_stride * getattr(out_ptr.dtype, 'itemsize', 1) % 16 == 0
         )
+        kwargs["ROWS_PER_PID"] = ROWS_PER_PID_FWD
+        max_off = max(input_row_stride, output_row_stride) * N + H
+        kwargs["NEEDS_I64_OFFSETS"] = max_off >= _I32_OFFSET_LIMIT
 
     kernel_func[grid_fwd](**kwargs)
 
@@ -358,9 +412,23 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, 
     M, N = x_.shape
     blk_size = block_size(x_)
     USE_BLOCKED = use_blocked(x_)
-    NUM_PRGMS = num_programs(x_, sm_margin)
+
+    # Multi-row-per-program for narrow N
+    ROWS_PER_PID_BWD = 1
+    if not USE_BLOCKED:
+        ROWS_PER_PID_BWD = _rows_per_pid(M, N, get_num_sms(sm_margin), _BWD_CAP_LADDER)
+
+    base_prgms = num_programs(x_, sm_margin)
+    if USE_BLOCKED:
+        NUM_PRGMS = base_prgms
+        dg_tmp_rows = M
+    elif ROWS_PER_PID_BWD > 1:
+        NUM_PRGMS = min(M // ROWS_PER_PID_BWD, _MAX_PRGMS_PER_CU * base_prgms)
+        dg_tmp_rows = NUM_PRGMS
+    else:
+        NUM_PRGMS = base_prgms
+        dg_tmp_rows = NUM_PRGMS
     need_reduction = NUM_PRGMS > 1
-    dg_tmp_rows = M if USE_BLOCKED else NUM_PRGMS
     dg_tmp = torch.empty(dg_tmp_rows, N, device=x.device, dtype=torch.float32, requires_grad=False) if need_reduction else None
 
     input_aligned_16 = (x_.data_ptr() % 16 == 0) and (x_.stride(0) * x_.dtype.itemsize % 16 == 0)
@@ -370,6 +438,8 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, 
     dg_aligned_16 = (dg_target.data_ptr() % 16 == 0) and (dg_target.stride(0) * dg_target.dtype.itemsize % 16 == 0)
 
     grid_bwd = lambda meta: (NUM_PRGMS, )
+    # See forward: gate i64 offsets on actual overflow to stay on the fast i32 path.
+    needs_i64_offsets_bwd = max(x_.stride(0), dz_.stride(0), dx.stride(0)) * M + N >= _I32_OFFSET_LIMIT
     bwd_kernel = _rmsnorm_bwd_kernels[autotune]
     bwd_kwargs = dict(
         n_rows=M, n_cols=N,
@@ -380,6 +450,8 @@ def te_rmsnorm_bwd_triton(dz, x, rsigma, gamma, sm_margin, zero_centered_gamma, 
         GRAD_OUTPUT_ALIGNED_16=grad_output_aligned_16,
         DX_ALIGNED_16=dx_aligned_16,
         DG_ALIGNED_16=dg_aligned_16,
+        ROWS_PER_PID=ROWS_PER_PID_BWD,
+        NEEDS_I64_OFFSETS=needs_i64_offsets_bwd,
     )
     if not autotune:
         bwd_kwargs["num_warps"] = 8
