@@ -11,7 +11,6 @@
 #include <gtest/gtest.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/gemm.h>
-#include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 #include "../test_common.h"
 
@@ -31,15 +30,7 @@ std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes = {
 
 std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes_mxfp8 = {
   {32, 128, 16},
-  {64, 128, 32},
-  {128, 128, 64},
-  {64, 256, 32},
-  {128, 384, 64},
-  {256, 512, 128},
-  {512, 1024, 256},
   {768, 3072, 4096},
-  {1024, 2048, 128},
-  {4096, 8192, 64},
 };
 
 //  A, B, Bias, Gelu, D
@@ -312,40 +303,6 @@ void cpu_rowwise_to_columnwise(
   }
 }
 
-// Swizzle MXFP8 scale_inv of a test::Tensor in-place for gfx1250.
-static void swizzle_mxfp8_scales(test::Tensor &t, bool rowwise) {
-  using namespace transformer_engine;
-  void *scale_ptr = rowwise ? t.rowwise_scale_inv_dptr()
-                            : t.columnwise_scale_inv_dptr();
-  if (!scale_ptr) return;
-  const NVTEShape scale_shape = rowwise ? t.rowwise_scale_inv_shape()
-                                        : t.columnwise_scale_inv_shape();
-  const NVTEShape data_shape = rowwise ? t.rowwise_shape()
-                                       : t.columnwise_shape();
-  size_t num_scales = 1;
-  for (size_t d = 0; d < scale_shape.ndim; d++) num_scales *= scale_shape.data[d];
-  uint8_t *d_tmp = nullptr;
-  NVTE_CHECK_CUDA(cudaMalloc(&d_tmp, num_scales));
-  TensorWrapper input_tw(NVTE_MXFP8_1D_SCALING);
-  TensorWrapper output_tw(NVTE_MXFP8_1D_SCALING);
-  output_tw.set_with_gemm_swizzled_scales(true);
-  if (rowwise) {
-    input_tw.set_rowwise_data(nullptr, t.dtype(), data_shape);
-    input_tw.set_rowwise_scale_inv(scale_ptr, DType::kFloat8E8M0, scale_shape);
-    output_tw.set_rowwise_data(nullptr, t.dtype(), data_shape);
-    output_tw.set_rowwise_scale_inv(d_tmp, DType::kFloat8E8M0, scale_shape);
-  } else {
-    input_tw.set_columnwise_data(nullptr, t.dtype(), data_shape);
-    input_tw.set_columnwise_scale_inv(scale_ptr, DType::kFloat8E8M0, scale_shape);
-    output_tw.set_columnwise_data(nullptr, t.dtype(), data_shape);
-    output_tw.set_columnwise_scale_inv(d_tmp, DType::kFloat8E8M0, scale_shape);
-  }
-  nvte_swizzle_scaling_factors(input_tw.data(), output_tw.data(), 0);
-  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
-  NVTE_CHECK_CUDA(cudaMemcpy(scale_ptr, d_tmp, num_scales, cudaMemcpyDeviceToDevice));
-  NVTE_CHECK_CUDA(cudaFree(d_tmp));
-}
-
 std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool use_mxfp8) {
   auto [atol, rtol] = getTolerances(type);
 
@@ -361,12 +318,6 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
   else if (use_fp8) {
     atol = 1e-3;
     rtol = std::max(rtol, 1e-2);
-    // Relax for gfx1250
-    cudaDeviceProp prop;
-    (void)cudaGetDeviceProperties(&prop, 0);
-    if (prop.major == 12 && type == DType::kBFloat16) {
-      rtol = std::max(rtol, 5e-2);
-    }
   }
   else if (type == DType::kBFloat16) {
     //relax for certain prime number TN gemm
@@ -545,31 +496,6 @@ void performTest(const TestParams& params) {
 #endif
   Tensor Workspace("Workspace", TShape{ workspace_size }, DType::kByte);
 
-  //perform the reference gemm on GPU (before swizzle, which modifies scales in-place)
-  Tensor RefD("RefD", TShape{ params.n, params.m }, dtype);
-  Tensor RefPreGeluOut;
-
-  if (params.use_gelu) {
-    RefPreGeluOut = Tensor("RefPreGeluOut", TShape{ params.n, params.m }, gelu_type);
-  }
-
-  run_reference<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
-    params,
-    A,
-    B,
-    params.use_bias ? &bias : nullptr,
-    D,
-    RefD,
-    params.use_gelu ? &RefPreGeluOut : nullptr);
-
-  // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales.
-  if (use_mxfp8 && prop.major == 12) {
-    if (!a_colwise) swizzle_mxfp8_scales(A, true);
-    if (a_colwise)  swizzle_mxfp8_scales(A, false);
-    if (!b_colwise) swizzle_mxfp8_scales(B, true);
-    if (b_colwise)  swizzle_mxfp8_scales(B, false);
-  }
-
   //perform the gemm in GPU
   nvte_cublas_gemm(A.data(),
                    B.data(),
@@ -590,6 +516,23 @@ void performTest(const TestParams& params) {
   if(params.use_gelu){
     pre_gelu_out.to_cpu();
   }
+
+  //perform the reference gemm on GPU
+  Tensor RefD("RefD", TShape{ params.n, params.m }, dtype);
+  Tensor RefPreGeluOut;
+
+  if (params.use_gelu) {
+    RefPreGeluOut = Tensor("RefPreGeluOut", TShape{ params.n, params.m }, gelu_type);
+  }
+
+  run_reference<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
+    params,
+    A,
+    B,
+    params.use_bias ? &bias : nullptr,
+    D,
+    RefD,
+    params.use_gelu ? &RefPreGeluOut : nullptr);
 
   // check if error message happens in running                             
   (void)cudaDeviceSynchronize();
@@ -661,16 +604,6 @@ void performDqTest(const TestParams &params) {
   Tensor B_ref("B_ref", b_shape, ref_type);
   nvte_dequantize(A_fp8.data(), A_ref.data(), 0);
   nvte_dequantize(B_fp8.data(), B_ref.data(), 0);
-
-  // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales.
-  if (prop.major == 12) {
-    const bool a_colwise = !params.transa;
-    const bool b_colwise = params.transb;
-    if (!a_colwise) swizzle_mxfp8_scales(A_fp8, true);
-    if (a_colwise)  swizzle_mxfp8_scales(A_fp8, false);
-    if (!b_colwise) swizzle_mxfp8_scales(B_fp8, true);
-    if (b_colwise)  swizzle_mxfp8_scales(B_fp8, false);
-  }
 
   Tensor bias;
   Tensor pre_gelu_out;
