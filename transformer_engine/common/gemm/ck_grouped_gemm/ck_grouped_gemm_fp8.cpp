@@ -72,13 +72,6 @@ struct TileCfg_128x128x128_16x16x128_2x2x1_nkpad
   static constexpr bool kPadK = true;
 };
 
-struct TileCfg_128x128x128_16x16x128_2x2x1_mnkpad
-    : TileCfg_128x128x128_16x16x128_2x2x1 {
-  static constexpr bool kPadM = true;
-  static constexpr bool kPadN = true;
-  static constexpr bool kPadK = true;
-};
-
 // gfx950 device compilation cannot instantiate the literal 32x32x16 FP8 tile
 // configuration due to an unsupported warp GEMM dispatcher configuration.
 // See: ck_tile/ops/gemm/warp/warp_gemm_dispatcher.hpp for supported variants.
@@ -327,7 +320,6 @@ struct FP8TileCfg<GPUArch::GFX950> {
 };
 
 struct FP8GroupedShapeAlignment {
-  bool need_m_pad = false;
   bool all_n_256_aligned = true;
   bool all_n_128_aligned = true;
   bool all_k_128_aligned = true;
@@ -365,13 +357,9 @@ static FP8GroupedShapeAlignment get_fp8_grouped_shape_alignment(
       }
     }
 
-    const int64_t M = ctx.transA ? Ad1 : Ad0;
     const int64_t K = ctx.transA ? Ad0 : Ad1;
     const int64_t N = ctx.transB ? Bd0 : Bd1;
 
-    if (M % TileCfg_128x128x128_16x16x128_2x2x1::M_Tile != 0) {
-      alignment.need_m_pad = true;
-    }
     if (N % 256 != 0) {
       alignment.all_n_256_aligned = false;
     }
@@ -382,10 +370,9 @@ static FP8GroupedShapeAlignment get_fp8_grouped_shape_alignment(
       alignment.all_k_128_aligned = false;
     }
 
-    if (alignment.need_m_pad ||
-        (!alignment.all_n_256_aligned &&
-         !alignment.all_n_128_aligned &&
-         !alignment.all_k_128_aligned)) {
+    if (!alignment.all_n_256_aligned &&
+        !alignment.all_n_128_aligned &&
+        !alignment.all_k_128_aligned) {
       break;
     }
   }
@@ -440,26 +427,23 @@ static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
 
       if constexpr (Arch == GPUArch::GFX950) {
           const auto alignment = get_fp8_grouped_shape_alignment(ctx);
-          if (alignment.need_m_pad) {
-            MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_mnkpad);
-          } else {
-            if (alignment.all_n_256_aligned) {
-              if (alignment.all_k_128_aligned) {
-                MAKE_FP8_RUNNER(TileCfg_256x256x128_16x16x128_2x2x1);
-              } else {
-                MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_kpad);
-              }
-            } else if (alignment.all_n_128_aligned) {
-              if (alignment.all_k_128_aligned) {
-                MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1);
-              } else {
-                MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_kpad);
-              }
-            } else if (alignment.all_k_128_aligned) {
-              MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_npad);
+
+          if (alignment.all_n_256_aligned) {
+            if (alignment.all_k_128_aligned) {
+              MAKE_FP8_RUNNER(TileCfg_256x256x128_16x16x128_2x2x1);
             } else {
-              MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_nkpad);
+              MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_kpad);
             }
+          } else if (alignment.all_n_128_aligned) {
+            if (alignment.all_k_128_aligned) {
+              MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1);
+            } else {
+              MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_kpad);
+            }
+          } else if (alignment.all_k_128_aligned) {
+            MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_npad);
+          } else {
+            MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_nkpad);
           }
         } else {
           using TileCfg = typename FP8TileCfg<Arch>::type;
