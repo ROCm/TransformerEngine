@@ -83,18 +83,16 @@ enum class GPUArch {
 };
 
 static inline GPUArch detect_gpu_arch() {
-  int arch = cuda::sm_arch(0);
-
-  if (arch == 94) {
-    return GPUArch::GFX942;
+  switch (cuda::sm_arch(0)) {
+    case 94:
+      return GPUArch::GFX942;
+    case 95:
+      return GPUArch::GFX950;
+    case 125:
+      return GPUArch::GFX1250;
+    default:
+      return GPUArch::UNKNOWN;
   }
-  if (arch == 95) {
-    return GPUArch::GFX950;
-  }
-  if (arch == 1250) {
-    return GPUArch::GFX1250;
-  }
-  return GPUArch::UNKNOWN;
 }
 
 struct GroupedGemmRunContext {
