@@ -53,8 +53,7 @@ from transformer_engine_jax import (
 from distributed_test_base import assert_equal_collectives
 from utils import assert_allclose, print_debug_tensor_stats
 
-# Determinism mode is selected by the NVTE_ALLOW_NONDETERMINISTIC_ALGO env var.
-# When set to "0", deterministic-only tests run and non-determinism-only tests are skipped.
+# Get determinism
 _deterministic = not bool(int(os.getenv("NVTE_ALLOW_NONDETERMINISTIC_ALGO", "1")))
 
 
@@ -370,7 +369,6 @@ class FusedAttnRunner:
     attn_mask_type: AttnMaskType
     softmax_type: AttnSoftmaxType
     dropout_prob: float
-    use_old_rng: bool
     dtype: DTypeLike
     is_training: bool
     qkv_layout: QKVLayout
@@ -379,6 +377,7 @@ class FusedAttnRunner:
     seq_desc_format: SeqDescFormat
     stripe_size: int | None = None
     num_segments_per_seq: int | None = None
+    use_old_rng: bool = True #ROCm may use new-style RNG
 
     # Specifies sharding resources for distributed tests
     number_of_devices: int = 1
@@ -438,16 +437,25 @@ class FusedAttnRunner:
             pytest.skip(
                 "seqlen_q > seqlen_kv is not supported with sliding window attention in cuDNN"
             )
-        # TODO(KshitijLakhani): Set the upper limit for skipping this test when cuDNN adds support
-        if (
-            get_device_compute_capability(0) >= 100
-            and self.dropout_prob == 0.1
-            and self.attn_bias_type is not AttnBiasType.NO_BIAS
-            and not is_hip_extension()
-        ):
-            pytest.skip(
-                "For sm100+, bprop kernel support for dropout + determinism (bias) is not supported"
-            )
+
+        if not is_hip_extension() and get_device_compute_capability(0) >= 100 and self.is_training:
+            if FusedAttnHelper.is_non_deterministic_allowed() and (
+                (self.dropout_prob != 0.0 and self.attn_bias_type != AttnBiasType.NO_BIAS)
+                or get_cudnn_version() < 90700
+            ):
+                pytest.skip(
+                    "For sm100+, non-deterministic bprop (cuDNN 9.7+) does not support bias with"
+                    " dropout"
+                )
+            if not FusedAttnHelper.is_non_deterministic_allowed() and (
+                self.dropout_prob != 0.0
+                or self.attn_bias_type != AttnBiasType.NO_BIAS
+                or get_cudnn_version() < 91801
+            ):
+                pytest.skip(
+                    "For sm100+, deterministic bprop (cuDNN 9.18.1+) does not support bias or"
+                    " dropout"
+                )
         # Test the MLA case where head dims for qk differ from head dims for v, only if the tensors
         # are provided in BSHD_BSHD_BSHD or THD_THD_THD formats
         if self.head_dim_qk != self.head_dim_v and not self.qkv_layout.is_separate():
@@ -1103,7 +1111,7 @@ class FusedAttnRunner:
 
             # Assume all batch has the same actual_seqlen, probably needs to extend the tests
             bias_mask = self.mask[0, 0]
-            
+
             # Assert all masked dbias are 0s
             assert_allclose(
                 jnp.where(bias_mask, primitive_dbias, 0),
@@ -1362,13 +1370,6 @@ class FusedAttnRunner:
         pytest.param(0.1, id="DROP_0.1"),
     ],
 )
-# Only testing old-style RNGs by default to reduce the # of tests but leaving the hooks in place
-@pytest.mark.parametrize(
-    "use_old_rng",
-    [
-        pytest.param(True, id="Old-style rng"),
-    ],
-)
 @pytest.mark.parametrize(
     "swa",
     [
@@ -1384,6 +1385,7 @@ class FusedAttnRunner:
         pytest.param(SeqDescFormat.SegmentIDs, id="SegmentIDs"),
     ],
 )
+@pytest.mark.skipif(_deterministic, reason="Test non-determinism only")
 class TestFusedAttn:
     """
     Fused attention tester
@@ -1419,7 +1421,6 @@ class TestFusedAttn:
         attn_mask_type,
         softmax_type,
         dropout_prob,
-        use_old_rng,
         dtype,
         is_training,
         qkv_layout,
@@ -1447,7 +1448,6 @@ class TestFusedAttn:
             attn_mask_type,
             softmax_type,
             dropout_prob,
-            use_old_rng,
             dtype,
             is_training,
             qkv_layout,
@@ -1477,7 +1477,6 @@ class TestFusedAttn:
         attn_mask_type,
         softmax_type,
         dropout_prob,
-        use_old_rng,
         dtype,
         qkv_layout,
         bias_shape,
@@ -1502,7 +1501,6 @@ class TestFusedAttn:
             attn_mask_type,
             softmax_type,
             dropout_prob,
-            use_old_rng,
             dtype,
             True,
             qkv_layout,
@@ -1511,6 +1509,185 @@ class TestFusedAttn:
             seq_desc_format,
         )
         runner.test_backward()
+
+
+@pytest.mark.parametrize(
+    "attn_mask_type",
+    [
+        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
+        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
+        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
+        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+        pytest.param(
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK, id="PADDING_CAUSAL_BOTTOM_RIGHT"
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "softmax_type",
+    [
+        pytest.param(AttnSoftmaxType.VANILLA_SOFTMAX, id="VANILLA_SOFTMAX"),
+    ],
+)
+@pytest.mark.parametrize(
+    "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, dtype, qkv_layout",
+    [
+        # large data size + fp16 + cross attn + gqa + diff hidden v dim + qkv separate
+        pytest.param(
+            2,
+            1024,
+            2048,
+            12,
+            6,
+            128,
+            64,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-1024-2048-12-6-128-64-BF16-CROSS-GQA-SEPARATE",
+        ),
+        pytest.param(
+            2,
+            1024,
+            2048,
+            12,
+            6,
+            128,
+            64,
+            jnp.bfloat16,
+            QKVLayout.THD_THD_THD,
+            id="2-1024-2048-12-6-128-64-BF16-CROSS-GQA-RAGGED_SEPARATE",
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "dropout_prob",
+    [
+        pytest.param(0.0, id="DROP_0.0"),
+    ],
+)
+@pytest.mark.parametrize(
+    "swa",
+    [
+        pytest.param(False, id="NO_SWA"),
+    ],
+)
+@pytest.mark.parametrize(
+    "seq_desc_format",
+    [
+        pytest.param(SeqDescFormat.Seqlens, id="Seqlens"),
+    ],
+)
+@pytest.mark.skipif(not _deterministic, reason="Test determinism only")
+class TestFusedAttnWithDeterminism:
+    """
+    Fused attention tester with determinism
+    """
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "is_training",
+        [
+            pytest.param(True, id="TRAINING"),
+        ],
+    )
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [
+            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
+            pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._1HSS, id="POST_SCALE_BIAS-1HSS"),
+        ],
+    )
+    def _test_forward(
+        b,
+        s_q,
+        s_kv,
+        h_q,
+        h_kv,
+        d_qk,
+        d_v,
+        attn_bias_type,
+        attn_mask_type,
+        softmax_type,
+        dropout_prob,
+        dtype,
+        is_training,
+        qkv_layout,
+        bias_shape,
+        swa,
+        seq_desc_format,
+    ):
+        """
+        Test forward with parameterized configs
+        This test is not intended to run automatically during CI as it is time-consuming
+        It is kept for development and debugging
+        """
+        TestFusedAttn._test_forward(
+            b,
+            s_q,
+            s_kv,
+            h_q,
+            h_kv,
+            d_qk,
+            d_v,
+            attn_bias_type,
+            attn_mask_type,
+            softmax_type,
+            dropout_prob,
+            dtype,
+            is_training,
+            qkv_layout,
+            bias_shape,
+            swa,
+            seq_desc_format,
+        )
+
+    @staticmethod
+    @pytest.mark.parametrize(
+        "attn_bias_type, bias_shape",
+        [
+            pytest.param(AttnBiasType.NO_BIAS, None, id="NO_BIAS"),
+            pytest.param(AttnBiasType.POST_SCALE_BIAS, BiasShape._1HSS, id="POST_SCALE_BIAS-1HSS"),
+        ],
+    )
+    def test_backward(
+        b,
+        s_q,
+        s_kv,
+        h_q,
+        h_kv,
+        d_qk,
+        d_v,
+        attn_bias_type,
+        attn_mask_type,
+        softmax_type,
+        dropout_prob,
+        dtype,
+        qkv_layout,
+        bias_shape,
+        swa,
+        seq_desc_format,
+    ):
+        """
+        Test backward with parameterized configs
+        """
+        TestFusedAttn.test_backward(
+            b,
+            s_q,
+            s_kv,
+            h_q,
+            h_kv,
+            d_qk,
+            d_v,
+            attn_bias_type,
+            attn_mask_type,
+            softmax_type,
+            dropout_prob,
+            dtype,
+            qkv_layout,
+            bias_shape,
+            swa,
+            seq_desc_format,
+        )
 
 @pytest.mark.skipif(
     not is_hip_extension(), reason="Bias all-neg-inf NaN fix is ROCm-specific (SWDEV-561757)"
@@ -1554,7 +1731,6 @@ def test_backward_bias_all_neg_inf(
         attn_mask_type=AttnMaskType.NO_MASK,
         softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
         dropout_prob=0.0,
-        use_old_rng=True,
         dtype=dtype,
         is_training=True,
         qkv_layout=qkv_layout,
@@ -1628,17 +1804,53 @@ def test_jax_new_rng():
     runner.test_forward()
 
 
-def _run_deterministic_bwd_case(
-    qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d,
-    dtype=jnp.bfloat16,
+@pytest.mark.skipif(
+    not is_hip_extension(), reason="Deterministic backward bitwise test only applies to ROCm"
+)
+@pytest.mark.skipif(not _deterministic, reason="Test determinism only")
+@pytest.mark.parametrize(
+    "dtype",
+    [
+        pytest.param(jnp.bfloat16, id="BF16"),
+        pytest.param(jnp.float16, id="FP16"),
+    ],
+)
+@pytest.mark.parametrize(
+    "qkv_layout",
+    [
+        pytest.param(QKVLayout.BS3HD, id="BS3HD"),
+        pytest.param(QKVLayout.BSHD_BS2HD, id="BSHD_BS2HD"),
+        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id="BSHD_BSHD_BSHD"),
+        pytest.param(QKVLayout.T3HD, id="T3HD"),
+        pytest.param(QKVLayout.THD_T2HD, id="THD_T2HD"),
+        pytest.param(QKVLayout.THD_THD_THD, id="THD_THD_THD"),
+    ],
+)
+@pytest.mark.parametrize(
+    "attn_mask_type",
+    [
+        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
+        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
+        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
+        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
+        pytest.param(
+            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK, id="PADDING_CAUSAL_BOTTOM_RIGHT"
+        ),
+    ],
+)
+@pytest.mark.parametrize(
+    "b, seq_len, h_q, h_kv, d",
+    [
+        pytest.param(2, 256, 8, 8, 128, id="b2_s256_MHA"),
+        pytest.param(2, 512, 8, 8, 128, id="b2_s512_MHA"),
+        pytest.param(2, 2048, 8, 8, 128, id="b2_s2048_MHA"),
+        pytest.param(2, 2048, 12, 4, 128, id="b2_s2048_GQA"),
+    ],
+)
+def test_backward_bitwise_reproducible(
+    dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d
 ):
-    """
-    Shared helper for deterministic backward tests.
-
-    Verifies that the fused attention backward pass in deterministic mode
-    produces bitwise-reproducible gradients. Determinism mode must be enabled
-    externally via NVTE_ALLOW_NONDETERMINISTIC_ALGO=0.
-    """
+    """Test deterministic backward (CK backend): bitwise reproducibility."""
     runner = FusedAttnRunner(
         batch_size=b,
         max_seqlen_q=seq_len,
@@ -1690,59 +1902,3 @@ def _run_deterministic_bwd_case(
     for name, x, y in zip(("dQ", "dK", "dV"), grads1, grads2):
         # Bitwise reproducibility across consecutive runs
         assert_allclose(x, y, atol=0, rtol=0, err_msg=f"{name} not bitwise reproducible")
-
-
-@pytest.mark.skipif(
-    not is_hip_extension(), reason="Deterministic backward only applies to AMD hardware"
-)
-@pytest.mark.skipif(not _deterministic, reason="Test determinism only")
-@pytest.mark.parametrize(
-    "dtype",
-    [
-        pytest.param(jnp.bfloat16, id="BF16"),
-        pytest.param(jnp.float16, id="FP16"),
-    ],
-)
-@pytest.mark.parametrize(
-    "qkv_layout",
-    [
-        pytest.param(QKVLayout.BS3HD, id="BS3HD"),
-        pytest.param(QKVLayout.BSHD_BS2HD, id="BSHD_BS2HD"),
-        pytest.param(QKVLayout.BSHD_BSHD_BSHD, id="BSHD_BSHD_BSHD"),
-        pytest.param(QKVLayout.T3HD, id="T3HD"),
-        pytest.param(QKVLayout.THD_T2HD, id="THD_T2HD"),
-        pytest.param(QKVLayout.THD_THD_THD, id="THD_THD_THD"),
-    ],
-)
-@pytest.mark.parametrize(
-    "attn_mask_type",
-    [
-        pytest.param(AttnMaskType.NO_MASK, id="NO_MASK"),
-        pytest.param(AttnMaskType.CAUSAL_MASK, id="CAUSAL"),
-        pytest.param(AttnMaskType.PADDING_MASK, id="PADDING"),
-        pytest.param(AttnMaskType.PADDING_CAUSAL_MASK, id="PADDING_CAUSAL"),
-        pytest.param(
-            AttnMaskType.PADDING_CAUSAL_BOTTOM_RIGHT_MASK, id="PADDING_CAUSAL_BOTTOM_RIGHT"
-        ),
-    ],
-)
-@pytest.mark.parametrize(
-    "b, seq_len, h_q, h_kv, d",
-    [
-        pytest.param(2, 256, 8, 8, 128, id="b2_s256_MHA"),
-        pytest.param(2, 512, 8, 8, 128, id="b2_s512_MHA"),
-        pytest.param(2, 2048, 8, 8, 128, id="b2_s2048_MHA"),
-        pytest.param(2, 2048, 12, 4, 128, id="b2_s2048_GQA"),
-    ],
-)
-class TestFusedAttnWithDeterminism:
-    """Fused attention tester (CK backend) with deterministic backward."""
-
-    @staticmethod
-    def test_backward_bitwise_reproducible(
-        dtype, qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d
-    ):
-        """Test deterministic backward (CK backend): bitwise reproducibility."""
-        _run_deterministic_bwd_case(
-            qkv_layout, attn_mask_type, b, seq_len, h_q, h_kv, d, dtype=dtype,
-        )

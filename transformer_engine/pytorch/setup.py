@@ -15,7 +15,10 @@ from pathlib import Path
 import platform
 import urllib
 import setuptools
-from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
+try:
+    from setuptools.command.bdist_wheel import bdist_wheel as _bdist_wheel
+except ImportError:
+    from wheel.bdist_wheel import bdist_wheel as _bdist_wheel
 from packaging.version import parse
 
 try:

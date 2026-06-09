@@ -43,14 +43,17 @@ def _run_test(fp_init, recipe):
     test_dir = Path(__file__).parent.resolve()
     fsdp_script = test_dir / "run_fsdp2_fp8_model.py"
     
-    test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", "--master-port=29501", str(fsdp_script)]
+    test_cmd = ["timeout", "-k60", "-v", "180", "torchrun", f"--nproc_per_node={NUM_PROCS}",
+                "--master-port=29501", str(fsdp_script)]
 
     if fp_init:
         test_cmd += ["--fp8-init"]
     test_cmd += ["--recipe", recipe]
     
-    subprocess.run(test_cmd + ['--use-fsdp2','--gradients-save-file', 'all_iters_fsdp2.pt'], env=os.environ, check=True)
-    subprocess.run(test_cmd + ['--gradients-save-file', 'all_iters_dp.pt'], env=os.environ, check=True)
+    subprocess.run(test_cmd + ['--use-fsdp2','--gradients-save-file', 'all_iters_fsdp2.pt'],
+                   env=os.environ, check=True)
+    subprocess.run(test_cmd + ['--gradients-save-file', 'all_iters_dp.pt'], env=os.environ,
+                   check=True)
         
     # Load outputs
     output_fsdp = torch.load("all_iters_fsdp2.pt", map_location="cpu")

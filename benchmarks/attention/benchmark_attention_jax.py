@@ -13,12 +13,10 @@ import csv
 from transformer_engine.jax.attention import (
     AttnBiasType,
     AttnMaskType,
+    AttnSoftmaxType,
     QKVLayout,
 )
 from transformer_engine.jax import fp8_autocast
-
-# Needed in order to dump timings properly
-os.environ["XLA_FLAGS"]="--xla_gpu_graph_level=0"
 
 # Add test_fused_attn to the sys path 
 tests_path = os.path.abspath(
@@ -108,12 +106,14 @@ class FusedAttnBenchRunner(FusedAttnRunner):
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
             jax.device_put(self.bias, self.bias_sharding),
+            jax.device_put(self.softmax_offset, self.softmax_offset_sharding),
             jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
             jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
         ]
         kwargs = {
             "attn_bias_type": self.attn_bias_type,
             "attn_mask_type": self.attn_mask_type,
+            "softmax_type": self.softmax_type,
             "scaling_factor": self.scaling_factor,
             "dropout_probability": self.dropout_prob,
             "is_training": self.is_training,
@@ -122,6 +122,7 @@ class FusedAttnBenchRunner(FusedAttnRunner):
             "window_size": self.window_size,
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
+            "stripe_size": self.stripe_size,
         }
 
         customcall_fused_dpa_jit = jax.jit(
@@ -132,6 +133,7 @@ class FusedAttnBenchRunner(FusedAttnRunner):
                 self.qkvo_sharding,
                 self.qkvo_sharding,
                 self.bias_sharding,
+                self.softmax_offset_sharding,
                 self.seq_desc_sharding,
                 self.dropout_rng_sharding,
             ],
@@ -180,12 +182,14 @@ class FusedAttnBenchRunner(FusedAttnRunner):
             jax.device_put(self.cp_reorder_fn(self.k), self.qkvo_sharding),
             jax.device_put(self.cp_reorder_fn(self.v), self.qkvo_sharding),
             jax.device_put(self.bias, self.bias_sharding),
+            jax.device_put(self.softmax_offset, self.softmax_offset_sharding),
             jax.device_put(self.sequence_desciptor, self.seq_desc_sharding),
             jax.device_put(self.dropout_rng, self.dropout_rng_sharding),
         ]
         kwargs = {
             "attn_bias_type": self.attn_bias_type,
             "attn_mask_type": self.attn_mask_type,
+            "softmax_type": self.softmax_type,
             "scaling_factor": self.scaling_factor,
             "dropout_probability": self.dropout_prob,
             "is_training": self.is_training,
@@ -194,6 +198,7 @@ class FusedAttnBenchRunner(FusedAttnRunner):
             "window_size": self.window_size,
             "context_parallel_strategy": self.cp_strategy,
             "context_parallel_causal_load_balanced": self.cp_load_balanced,
+            "stripe_size": self.stripe_size,
         }
 
         # We can compute dBias only for the [1, h, s, s] layout
@@ -212,8 +217,8 @@ class FusedAttnBenchRunner(FusedAttnRunner):
         # Use FP16/BF16 to sum the results may cause overflow, use FP32 for the summation
         jitted_primitive = jax.jit(
             jax.value_and_grad(
-                lambda q, k, v, bias, *args: grad_func(
-                    customcall_fused_dpa, q, k, v, bias, *args, cp_reverse_out=True, **kwargs
+                lambda q, k, v, bias, softmax_offset, *args: grad_func(
+                    customcall_fused_dpa, q, k, v, bias, softmax_offset, *args, cp_reverse_out=True, **kwargs
                 ),
                 arg_nums,
             ),
@@ -222,6 +227,7 @@ class FusedAttnBenchRunner(FusedAttnRunner):
                 self.qkvo_sharding,
                 self.qkvo_sharding,
                 self.bias_sharding,
+                self.softmax_offset_sharding,
                 self.seq_desc_sharding,
                 self.dropout_rng_sharding,
             ),
@@ -270,11 +276,13 @@ def _filter_configs(configs):
             continue
 
         backend = FusedAttnHelper(
+            is_training,
             dtype,
             dtype,
             qkv_layout,
             attn_bias_type,
             attn_mask_type,
+            AttnSoftmaxType.VANILLA_SOFTMAX,
             dropout_prob,
             h_q, h_kv,
             s_q, s_kv,
@@ -348,8 +356,8 @@ def benchmark_dot_product_attention_profiler(args):
             d_qk, d_v,
             attn_bias_type,
             attn_mask_type,
+            AttnSoftmaxType.VANILLA_SOFTMAX,
             dropout_prob,
-            True,
             dtype,
             is_training,
             qkv_layout,

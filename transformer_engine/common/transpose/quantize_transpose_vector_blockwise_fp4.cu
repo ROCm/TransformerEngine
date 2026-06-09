@@ -244,10 +244,10 @@ __device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_
   return global_encode_scale;
 }
 
-__device__ __forceinline__ uint32_t
-get_rbits(transformer_engine::curanddx::detail::philox4x32_native_state<10>&
-              rng,  // philox4x32_native_state<10>: 10 rounds of philox4_32
-          uint4& random_uint4, int& rnd_idx) {
+__device__ __forceinline__ uint32_t get_rbits(
+    transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS>&
+        rng,  // NVTE_BUILD_NUM_PHILOX_ROUNDS rounds of philox4x32
+    uint4& random_uint4, int& rnd_idx) {
   if (rnd_idx == 4) {
     rnd_idx = 0;
     random_uint4 = rng.generate4();
@@ -317,7 +317,12 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
     NVTE_DEVICE_ERROR(
         "FP4 cvt.rs PTX instructions are architecture-specific. "
         "Try recompiling with sm_XXXa instead of sm_XXX.");
+    uint16_t dummy = 0;
+    return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
+  }
 #else
+  // It is like ptx.cuh::mul_cvt_fp32_to_fp4_4x_with_stochastic_rounding but w/o scaling
+  // TODO: should ptx.cuh method be reused?
 #if ARCH_HAS_STOCHASTIC_ROUNDING
   // opsel=1 always writes to byte 1, result read from fp4x2[1]
   // Matches HIP's own usage, see e.g. https://github.com/ROCm/clr/blob/3dbb5f1c5e0734d21dd2424a38255e61ee0a73e0/hipamd/include/hip/amd_detail/amd_hip_ocp_fp.hpp#L1858-L1890
@@ -373,11 +378,6 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_stochastic_ro
   }
 #endif // ARCH_HAS_STOCHASTIC_ROUNDING
 #endif // !__HIP_PLATFORM_AMD__
-    uint16_t dummy = 0;
-    return *reinterpret_cast<__nv_fp4x4_e2m1*>(&dummy);
-#ifndef __HIP_PLATFORM_AMD__
-  }
-#endif
 }
 
 
@@ -385,6 +385,8 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x_with_rn(const floa
                                                                       const float2 in23,
                                                                       const uint32_t rbits) {
 #ifdef __HIP_PLATFORM_AMD__
+  // It is like ptx.cuh::mul_cvt_fp32_to_fp4_4x_with_rn but w/o scaling
+  // TODO: should ptx.cuh method be reused?
   const __hip_fp4_storage_t q0 = __hip_cvt_float_to_fp4(in01.x, __HIP_E2M1, hipRoundNearest);
   const __hip_fp4_storage_t q1 = __hip_cvt_float_to_fp4(in01.y, __HIP_E2M1, hipRoundNearest);
   const __hip_fp4_storage_t q2 = __hip_cvt_float_to_fp4(in23.x, __HIP_E2M1, hipRoundNearest);
@@ -459,7 +461,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   const size_t rng_seed = rng_state != nullptr ? rng_state[0] : 0;
   const size_t rng_offset = rng_state != nullptr ? rng_state[1] : 0;
 
-  transformer_engine::curanddx::detail::philox4x32_native_state<10> rng;
+  transformer_engine::curanddx::detail::philox4x32_native_state<NVTE_BUILD_NUM_PHILOX_ROUNDS> rng;
   rng.init(rng_seed, rng_sequence, rng_offset);
   uint4 random_uint4 = kApplyStochasticRounding ? rng.generate4() : uint4{0, 0, 0, 0};
 
