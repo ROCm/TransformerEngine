@@ -49,9 +49,14 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   Tensor* A0_te = convertNVTETensorCheck(A_use[0]);
   Tensor* B0_te = convertNVTETensorCheck(B_use[0]);
 
+  const bool warn_fallback =
+      getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
+
   // Currently the accumulate path is only supported on fp16
   if (accumulate && is_8bit_float) {
-    NVTE_WARN("ck_tile_grouped_gemm: accumulate is currently unsupported on fp8");
+    if (warn_fallback) {
+      NVTE_WARN("ck_tile_grouped_gemm: accumulate is currently unsupported on fp8");
+    }
   	return false;
   }
 
@@ -175,7 +180,8 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   } else if (is_8bit_float) {
     return ck_tile_grouped_gemm_fp8_dispatch(a_dtype, b_dtype, d_dtype, ctx);
   }
-
-  NVTE_WARN("ck_tile_grouped_gemm: input dtype is neither fp16 nor fp8.");
+  if (warn_fallback) {
+    NVTE_WARN("ck_tile_grouped_gemm: input dtype is neither fp16 nor fp8.");
+  }
   return false;
 }
