@@ -9,6 +9,7 @@ cmake_minimum_required(VERSION 3.21)
 option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
+option(USE_CK_GEMM "Use CK grouped GEMM backend" ON)
 set(USE_CUDA OFF)
 
 if (USE_ROCM)
@@ -256,10 +257,16 @@ else()
         comm_gemm_overlap/rocm_comm_gemm_overlap.cpp
         fused_attn_rocm/fused_attn.cpp
         gemm/rocm_gemm.cu
-        gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
-        gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
-        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp
         amd_detail/system.cpp)
+    if(USE_CK_GEMM)
+        list(APPEND transformer_engine_cpp_sources
+            gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
+            gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
+            gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp)
+    else()
+        list(APPEND transformer_engine_cpp_sources
+            gemm/ck_grouped_gemm/ck_grouped_gemm_stub.cpp)
+    endif()
     list(APPEND transformer_engine_cuda_sources
         fused_attn_rocm/fused_attn_aotriton.cpp
         fused_attn_rocm/fused_attn_ck.cpp

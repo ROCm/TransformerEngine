@@ -598,7 +598,16 @@ def get_attention_backend(
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
-        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+        # NOTE: AITER Triton flash_attn_func DOES support MLA (NOPE+PE: pe=qk-v, with v and pe
+        # unpadded powers of 2 — DSv3 has v=128, pe=64). The d=192 MLA Triton kernel was
+        # validated to compile and run correctly on gfx1250 (numerics match SDPA; ~8.7x faster
+        # than the unfused softmax path). Opt-in carve-out: when the aiter Triton backend is
+        # loaded and NVTE_AITER_MLA_FLASH_ATTN=1, keep FlashAttention enabled for MLA dims.
+        _allow_aiter_mla = (
+            FlashAttentionUtils.use_aiter_triton
+            and os.getenv("NVTE_AITER_MLA_FLASH_ATTN", "0") == "1"
+        )
+        if use_flash_attention_2 and FlashAttentionUtils.is_installed and not _allow_aiter_mla:
             logger.debug("Disabling FlashAttention 2 as it does not support MLA.")
             use_flash_attention_2 = False
 
