@@ -11,20 +11,6 @@
 //   2. ck_tile::reference_mx_gemm host reference, using exact quantized operands/scales
 //   3. TE HIP reference kernel simplified from test_cublaslt_gemm.cu compute_ref_kernel
 
-#include <cuda_bf16.h>
-#include <cuda_runtime.h>
-#include <gtest/gtest.h>
-
-#include <transformer_engine/cast.h>
-#include <transformer_engine/gemm.h>
-#include <transformer_engine/transformer_engine.h>
-
-#include "../test_common.h"
-
-#include "ck_tile/core.hpp"
-#include "ck_tile/host.hpp"
-#include "ck_tile/ops/gemm.hpp"
-
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -38,6 +24,20 @@
 #include <string>
 #include <tuple>
 #include <vector>
+
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+#include <gtest/gtest.h>
+
+#include <transformer_engine/cast.h>
+#include <transformer_engine/gemm.h>
+#include <transformer_engine/transformer_engine.h>
+
+#include "../test_common.h"
+
+#include "ck_tile/core.hpp"
+#include "ck_tile/host.hpp"
+#include "ck_tile/ops/gemm.hpp"
 
 using namespace transformer_engine;
 using namespace test;
@@ -92,7 +92,6 @@ static std::string case_name(const testing::TestParamInfo<CaseConfig>& info) {
 static void set_env_defaults() {
   setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1", 1);
   setenv("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", "1", 0);
-  setenv("NVTE_ROCM_ENABLE_MXFP8", "1", 0);
 }
 
 static float to_float(const bf16_t& x) { return static_cast<float>(x); }
