@@ -181,7 +181,7 @@ jobs:
         id: run-tests
         # Below the job's timeout-minutes so an overrun kills only this step;
         # the `if: always()` report + upload steps still run (artifacts survive).
-        timeout-minutes: 330
+        timeout-minutes: 180
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -202,13 +202,14 @@ jobs:
           set -x -o pipefail
           ulimit -c 0 # Disable core dumps
 
-          # Per-suite JUNITXML_PREFIX overrides the docker-exec default so each
-          # suite writes into its own subdir (inline VAR=val applies only to that
-          # backgrounded subprocess; the sourced _utils.sh reads it from the env).
-          HIP_VISIBLE_DEVICES=0 JUNITXML_PREFIX=/workspace/test-results/torch/ ci/pytorch.sh > /workspace/torch.log 2>&1 &
+          # Each suite appends its own subdir to the inherited base prefix so the
+          # base path is defined once in the docker-exec env above (inline VAR=val
+          # applies only to that backgrounded subprocess; the sourced _utils.sh
+          # reads it from the env).
+          HIP_VISIBLE_DEVICES=0 JUNITXML_PREFIX=${JUNITXML_PREFIX}torch/ ci/pytorch.sh > /workspace/torch.log 2>&1 &
           TORCH_PID=$!
 
-          HIP_VISIBLE_DEVICES=1 JUNITXML_PREFIX=/workspace/test-results/jax/ ci/jax.sh > /workspace/jax.log 2>&1 &
+          HIP_VISIBLE_DEVICES=1 JUNITXML_PREFIX=${JUNITXML_PREFIX}jax/ ci/jax.sh > /workspace/jax.log 2>&1 &
           JAX_PID=$!
 
           (
@@ -238,7 +239,7 @@ jobs:
           ) > /workspace/examples.log 2>&1 &
           EXAMPLES_PID=$!
 
-          HIP_VISIBLE_DEVICES=3 JUNITXML_PREFIX=/workspace/test-results/core/ ci/core.sh > /workspace/core.log 2>&1 &
+          HIP_VISIBLE_DEVICES=3 JUNITXML_PREFIX=${JUNITXML_PREFIX}core/ ci/core.sh > /workspace/core.log 2>&1 &
           CORE_PID=$!
 
           wait $TORCH_PID;    torch_rc=$?
@@ -407,7 +408,7 @@ jobs:
         id: mgpu-tests
         # Below the job's timeout-minutes so an overrun kills only this step;
         # the `if: always()` report + upload steps still run (artifacts survive).
-        timeout-minutes: 330
+        timeout-minutes: 180
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
