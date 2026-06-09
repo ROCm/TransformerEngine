@@ -65,6 +65,13 @@ on:
       docker_image_tag_override:
         type: string
         default: ''
+    outputs:
+      wheel_artifact_id:
+        description: 'GitHub Actions artifact ID for te-rocm-wheels.'
+        value: ${{ jobs.build-rocm-wheels.outputs.wheel_artifact_id }}
+      wheel_artifact_digest:
+        description: 'SHA-256 digest for te-rocm-wheels.'
+        value: ${{ jobs.build-rocm-wheels.outputs.wheel_artifact_digest }}
 
 env:
   DOCKER_IMAGE_NAME: te-rocm-manylinux-x86
@@ -76,6 +83,9 @@ jobs:
   build-rocm-wheels:
     name: Build ROCm Docker image and TransformerEngine wheels
     runs-on: build-only-te
+    outputs:
+      wheel_artifact_id: ${{ steps.upload-wheels.outputs['artifact-id'] }}
+      wheel_artifact_digest: ${{ steps.upload-wheels.outputs['artifact-digest'] }}
 
     steps:
       - name: Checkout repository
@@ -213,6 +223,7 @@ jobs:
           fi
 
       - name: Upload wheels as GitHub Actions artifacts
+        id: upload-wheels
         if: success()
         uses: actions/upload-artifact@v4
         with:
