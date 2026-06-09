@@ -155,7 +155,7 @@ Step 3 (if columnwise transpose is False, COMPACT format): Skip Transpose, cast 
 */
 // clang-format on
 
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx1250__)
 constexpr size_t kThreadsPerWarp = 64;
 #else
 constexpr size_t kThreadsPerWarp = 32;

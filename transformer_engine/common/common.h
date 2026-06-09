@@ -635,12 +635,9 @@ struct TypeExtrema<fp8e4m3> {
 #elif defined(__HIP_DEVICE_COMPILE__)
   static constexpr float max = te_fp8_fnuz() ? 240.0f : 448.0f;
   static constexpr float max_inverse = 1.0 / max;
-#elif defined(HIP_FP8_TYPE_FNUZ)
-  static constexpr float max = 240.0f;
-  static constexpr float max_inverse = 1.0 / max;
 #else
-  static constexpr float max = 448.0f;
-  static constexpr float max_inverse = 1.0 / max;
+  static float max;
+  static float max_inverse;
 #endif
 };
 
