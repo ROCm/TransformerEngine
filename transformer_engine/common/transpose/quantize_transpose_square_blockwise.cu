@@ -20,11 +20,9 @@
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
 
-#ifndef __HIP_PLATFORM_AMD__
 #if (!defined(__CUDA_MINIMUM_ARCH__) && __CUDA_ARCH__ >= 900) || \
     (defined(__CUDA_MINIMUM_ARCH__) && __CUDA_MINIMUM_ARCH__ >= 900)
 #define TMA_HW_SUPPORTED
-#endif
 #endif
 
 namespace transformer_engine {
