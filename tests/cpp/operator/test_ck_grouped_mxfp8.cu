@@ -19,7 +19,6 @@
 #include <iostream>
 #include <memory>
 #include <numeric>
-#include <random>
 #include <sstream>
 #include <string>
 #include <tuple>
@@ -75,8 +74,6 @@ struct CaseConfig {
   size_t n;
   size_t k;
   int experts;
-  float scale;
-  int seed;
   LayoutConfig layout;
   DTypeConfig dtype;
 };
@@ -146,16 +143,6 @@ __global__ void compute_ref_kernel(
 
     d_data[ii + jj * m] = static_cast<D_Type>(val);
   }
-}
-
-template <typename T>
-static void fill_randn_cpu(Tensor* t, float scale, int seed) {
-  std::mt19937 gen(seed);
-  std::normal_distribution<float> dist(0.0f, scale);
-  const size_t n = product(t->rowwise_shape());
-  T* ptr = t->rowwise_cpu_dptr<T>();
-  for (size_t i = 0; i < n; ++i) ptr[i] = static_cast<T>(dist(gen));
-  t->from_cpu();
 }
 
 static std::vector<size_t> split_even(size_t m_total, int experts) {
@@ -445,11 +432,11 @@ static void run_case_typed(const CaseConfig& cfg) {
     const auto a_shape = a_shape_for_te(cfg.n, cfg.k, cfg.layout.transa);
     const auto b_shape = b_shape_for_te(m, cfg.k, cfg.layout.transb);
 
-    a_src.emplace_back("a_src", a_shape, DType::kBFloat16);
-    b_src.emplace_back("b_src", b_shape, DType::kBFloat16);
+    a_src.emplace_back("a_src" + std::to_string(g), a_shape, DType::kBFloat16);
+    b_src.emplace_back("b_src" + std::to_string(g), b_shape, DType::kBFloat16);
 
-    fill_randn_cpu<bf16_t>(&a_src.back(), cfg.scale, cfg.seed + 1009 * g + 17);
-    fill_randn_cpu<bf16_t>(&b_src.back(), cfg.scale, cfg.seed + 1009 * g + 29);
+    fillUniform(&a_src.back());
+    fillUniform(&b_src.back());
 
     // Allocate both rowwise and columnwise MX views so the backend can canonicalize NN/NT/TN.
     a_mx.emplace_back("a_mx", a_shape, te_dtype(cfg.dtype.a),
@@ -533,17 +520,17 @@ static std::vector<CaseConfig> make_cases() {
   const std::vector<DTypeConfig> dtypes = {kFP8FP8, kFP8BF8, kBF8FP8, kBF8BF8};
   const std::vector<CaseConfig> base_cases = {
       // Small sanity across NN/NT/TN.
-      CaseConfig{1024, 1024, 1024, 2, 0.25f, 1234, kNN, kFP8FP8},
-      CaseConfig{1024, 1024, 1024, 2, 0.25f, 1234, kNT, kFP8FP8},
-      CaseConfig{1024, 1024, 1024, 2, 0.25f, 1234, kTN, kFP8FP8},
+      CaseConfig{1024, 1024, 1024, 2, kNN, kFP8FP8},
+      CaseConfig{1024, 1024, 1024, 2, kNT, kFP8FP8},
+      CaseConfig{1024, 1024, 1024, 2, kTN, kFP8FP8},
       // Earlier failure regime across NN/NT/TN.
-      CaseConfig{1536, 4096, 4096, 3, 0.25f, 1234, kNN, kFP8FP8},
-      CaseConfig{1536, 4096, 4096, 3, 0.25f, 1234, kNT, kFP8FP8},
-      CaseConfig{1536, 4096, 4096, 3, 0.25f, 1234, kTN, kFP8FP8},
+      CaseConfig{1536, 4096, 4096, 3, kNN, kFP8FP8},
+      CaseConfig{1536, 4096, 4096, 3, kNT, kFP8FP8},
+      CaseConfig{1536, 4096, 4096, 3, kTN, kFP8FP8},
       // Llama-ish suspicious path across NN/NT/TN.
-      CaseConfig{4096, 12288, 4096, 4, 0.25f, 1234, kNN, kFP8FP8},
-      CaseConfig{4096, 12288, 4096, 4, 0.25f, 1234, kNT, kFP8FP8},
-      CaseConfig{4096, 12288, 4096, 4, 0.25f, 1234, kTN, kFP8FP8},
+      CaseConfig{4096, 12288, 4096, 4, kNN, kFP8FP8},
+      CaseConfig{4096, 12288, 4096, 4, kNT, kFP8FP8},
+      CaseConfig{4096, 12288, 4096, 4, kTN, kFP8FP8},
   };
 
   std::vector<CaseConfig> cases;
