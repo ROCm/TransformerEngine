@@ -183,6 +183,78 @@ static_assert(kNumThreadsLoad <= kThreadsPerWarp, "kNumThreadsLoad must be <= kT
 static_assert(kNumThreadsStore <= kThreadsPerWarp, "kNumThreadsStore must be <= kThreadsPerWarp");
 constexpr int kNumWarps = kThreadsPerBlock / kThreadsPerWarp;
 
+// gfx942 (MI300) has 64KB LDS; the full 128x128 fp32 staging tile overflows it. 
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx950__)
+constexpr int kChunkCol = 64;
+constexpr int kNumChunks = kTileDim / kChunkCol;
+static_assert(kTileDim % kChunkCol == 0, "kTileDim must be divisible by kChunkCol");
+constexpr int kSMemColChunk = (kChunkCol / kNVecSMem) + 1;
+constexpr int kSMemSizeChunk = kSMemRow * kSMemColChunk * kNVecSMem;
+constexpr int kNumThreadsLoadChunk = kChunkCol / kNVecIn;
+constexpr size_t kLdsLimitBytes = 64 * 1024;
+
+template <typename IType>
+constexpr bool use_chunked_lds() {
+  return sizeof(IType) * static_cast<size_t>(kSMemSize) > kLdsLimitBytes;
+}
+
+template <typename IType>
+size_t host_smem_bytes() {
+  if (transformer_engine::cuda::sm_arch() < 95 &&
+      sizeof(IType) * static_cast<size_t>(kSMemSize) > kLdsLimitBytes) {
+    return static_cast<size_t>(kSMemSizeChunk) * sizeof(IType);
+  }
+  return static_cast<size_t>(kSMemSize) * sizeof(IType);
+}
+
+template <bool kAligned, typename IType>
+__device__ __forceinline__ void load_chunk_to_smem(Vec<IType, kNVecSMem>* smem,
+                                                   const IType* const input,
+                                                   const size_t row_length, const size_t num_rows,
+                                                   const int chunk) {
+  using SMemVec = Vec<IType, kNVecSMem>;
+  union IVec {
+    Vec<IType, kNVecIn> input_type;
+    Vec<SMemVec, kNVecIn / kNVecSMem> smem_type;
+  };
+  constexpr int r_stride = kThreadsPerBlock / kNumThreadsLoadChunk;
+  constexpr int num_iterations = kTileDim / r_stride;
+  const int c_s = (threadIdx.x % kNumThreadsLoadChunk) * (kNVecIn / kNVecSMem);
+  int r_s = threadIdx.x / kNumThreadsLoadChunk;
+  const size_t c_g = static_cast<size_t>(blockIdx.x) * kTileDim +
+                     static_cast<size_t>(chunk) * kChunkCol + c_s * kNVecSMem;
+  size_t r_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;
+  const size_t stride_g = static_cast<size_t>(r_stride) * row_length;
+  const size_t num_ele =
+      c_g < row_length ? min(static_cast<size_t>(kNVecIn), row_length - c_g) : 0;
+  const IType* input_g = &input[r_g * row_length + c_g];
+#pragma unroll
+  for (int iter = 0; iter < num_iterations; ++iter) {
+    IVec input_vec;
+    if constexpr (kAligned) {
+      input_vec.input_type.load_from(input_g);
+    } else {
+      if (r_g < num_rows) {
+        input_vec.input_type.load_from_elts(input_g, 0, num_ele);
+      } else {
+        input_vec.input_type.clear();
+      }
+    }
+#pragma unroll
+    for (int i = 0; i < kNVecIn / kNVecSMem; ++i) {
+      int c = c_s + i;
+      int r = r_s;
+      smem[r * kSMemColChunk + c] = input_vec.smem_type.data.elt[i];
+    }
+    input_g += stride_g;
+    r_s += r_stride;
+    if constexpr (!kAligned) {
+      r_g += r_stride;
+    }
+  }
+}
+#endif  // gfx942 helpers
+
 template <bool kAligned, typename CType, typename IType, typename OType>
 __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpose_kernel(
     const IType* const input, OType* const output_c, OType* const output_t,
@@ -213,6 +285,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   SMemVec* smem = reinterpret_cast<SMemVec*>(&smem_base[0]);
 
   // Step 1: Load input to shared memory
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx950__)
+  if constexpr (!use_chunked_lds<IType>())
+#endif
   {
     constexpr int r_stride = kThreadsPerBlock / kNumThreadsLoad;  // stride in rows of shared memory
     constexpr int num_iterations = kTileDim / r_stride;
@@ -258,6 +333,89 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   __syncthreads();
 
   // Step 2: Cast and store to output_c
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx950__)
+  if (return_rowwise && use_chunked_lds<IType>()) {
+    constexpr int r_stride = kThreadsPerBlock / kNumThreadsStore;
+    constexpr int num_iterations = kTileDim / r_stride;
+
+    int r_s = threadIdx.x / kNumThreadsStore;
+    const size_t c_g = static_cast<size_t>(blockIdx.x) * kTileDim +
+                       static_cast<size_t>(threadIdx.x % kNumThreadsStore) * kNVecOut;
+    size_t r_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;
+    const size_t stride_g = static_cast<size_t>(r_stride) * row_length;
+    const size_t num_ele =
+        c_g < row_length ? min(static_cast<size_t>(kNVecOut), row_length - c_g) : 0;
+    const IType* input_g = &input[r_g * row_length + c_g];
+    OType* output_g = &output_c[r_g * row_length + c_g];
+    const unsigned src_lane = (threadIdx.x % kThreadsPerWarp) / kNumThreadsStore * kNumThreadsStore;
+    const WarpSyncMask mask = ((WarpSyncMask{1} << kNumThreadsStore) - 1) << src_lane;
+    const bool is_src_lane = (threadIdx.x % kNumThreadsStore) == 0;
+#pragma unroll
+    for (int iter = 0; iter < num_iterations; ++iter) {
+      // Step 2.1: Load kNVecOut contiguous elements directly from global input
+      Vec<IType, kNVecOut> in_vec;
+      if constexpr (kAligned) {
+        in_vec.load_from(input_g);
+      } else {
+        if (r_g < num_rows) {
+          in_vec.load_from_elts(input_g, 0, num_ele);
+        } else {
+          in_vec.clear();
+        }
+      }
+      // Step 2.2: Compute local amax
+      CType amax = 0;
+#pragma unroll
+      for (int j = 0; j < kNVecOut; ++j) {
+        __builtin_assume(amax >= 0);
+        amax = fmaxf(amax, fabsf(in_vec.data.elt[j]));
+      }
+      // Step 2.3: Reduce amax
+#pragma unroll
+      for (int delta = kNumThreadsStore / 2; delta > 0; delta /= 2) {
+        const float other_amax = __shfl_down_sync(mask, amax, delta);
+        __builtin_assume(amax >= 0);
+        __builtin_assume(other_amax >= 0);
+        amax = fmaxf(amax, other_amax);
+      }
+      amax = __shfl_sync(mask, amax, src_lane);
+      // Step 2.4: Compute scale
+      CType scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scaling);
+      // Step 2.5: Write scale_inv
+      bool write_scale_inv = is_src_lane;
+      if constexpr (!kAligned) {
+        write_scale_inv &= (r_g < num_rows);
+      }
+      if (write_scale_inv) {
+        CType scale_inv = 1.0 / scale;
+        size_t row_idx = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;
+        size_t col_idx = static_cast<size_t>(blockIdx.x);
+        tile_scales_inv_c[row_idx * scale_stride_y + col_idx * scale_stride_x] = scale_inv;
+      }
+      // Step 2.6: Quantize
+      OVec output_vec;
+#pragma unroll
+      for (int j = 0; j < kNVecOut; ++j) {
+        output_vec.data.elt[j] = static_cast<OType>(static_cast<CType>(in_vec.data.elt[j]) * scale);
+      }
+      // Step 2.7: Store output_c
+      if constexpr (kAligned) {
+        output_vec.store_to(output_g);
+      } else {
+        if (r_g < num_rows) {
+          output_vec.store_to_elts(output_g, 0, num_ele);
+        }
+      }
+      // Step 2.8: Advance
+      input_g += stride_g;
+      output_g += stride_g;
+      r_s += r_stride;
+      if constexpr (!kAligned) {
+        r_g += r_stride;
+      }
+    }
+  } else
+#endif
   if (return_rowwise) {
     constexpr int r_stride =
         kThreadsPerBlock / kNumThreadsStore;  // stride in rows of shared memory
@@ -349,6 +507,75 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   }
 
   // Step 3 (return_columnwise_gemm_ready): Transpose, cast and store to output_t
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx950__)
+  if (return_columnwise_gemm_ready && use_chunked_lds<IType>()) {
+    const int r_s = (threadIdx.x % kNumThreadsStore) * kNVecOut;
+    const int c_s = threadIdx.x / kNumThreadsStore;
+    const size_t c_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;
+    const size_t num_ele =
+        c_g < num_rows ? min(static_cast<size_t>(kNVecOut), num_rows - c_g) : 0;
+    const unsigned src_lane = (threadIdx.x % kThreadsPerWarp) / kNumThreadsStore * kNumThreadsStore;
+    const WarpSyncMask mask = ((WarpSyncMask{1} << kNumThreadsStore) - 1) << src_lane;
+    const bool is_src_lane = (threadIdx.x % kNumThreadsStore) == 0;
+    const bool col_active = c_s < (kChunkCol / kNVecSMem);
+    for (int chunk = 0; chunk < kNumChunks; ++chunk) {
+      __syncthreads();
+      load_chunk_to_smem<kAligned, IType>(smem, input, row_length, num_rows, chunk);
+      __syncthreads();
+
+      const size_t r_g = static_cast<size_t>(blockIdx.x) * kTileDim +
+                         static_cast<size_t>(chunk) * kChunkCol + c_s * kNVecSMem;
+      OType* output_g = &output_t[r_g * num_rows + c_g];
+      if (col_active) {
+        SMemVec smem_vec[kNVecOut];
+#pragma unroll
+        for (int i = 0; i < kNVecOut; ++i) {
+          smem_vec[i] = smem[(r_s + i) * kSMemColChunk + c_s];
+        }
+#pragma unroll
+        for (int smem_idx = 0; smem_idx < kNVecSMem; ++smem_idx) {
+          CType amax = 0;
+#pragma unroll
+          for (int i = 0; i < kNVecOut; ++i) {
+            amax = fmaxf(amax, fabsf(smem_vec[i].data.elt[smem_idx]));
+          }
+#pragma unroll
+          for (int delta = kNumThreadsStore / 2; delta > 0; delta /= 2) {
+            const float other_amax = __shfl_down_sync(mask, amax, delta);
+            __builtin_assume(amax >= 0);
+            __builtin_assume(other_amax >= 0);
+            amax = fmaxf(amax, other_amax);
+          }
+          amax = __shfl_sync(mask, amax, src_lane);
+          CType scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scaling);
+          bool write_scale_inv = is_src_lane;
+          if constexpr (!kAligned) {
+            write_scale_inv &= (r_g + smem_idx < row_length);
+          }
+          if (write_scale_inv) {
+            CType scale_inv = 1.0 / scale;
+            size_t row_idx = r_g + smem_idx;
+            size_t col_idx = static_cast<size_t>(blockIdx.y);
+            tile_scales_inv_t[row_idx * scale_t_stride_y + col_idx * scale_t_stride_x] = scale_inv;
+          }
+          OVec output_vec;
+#pragma unroll
+          for (int i = 0; i < kNVecOut; ++i) {
+            output_vec.data.elt[i] =
+                static_cast<OType>(static_cast<CType>(smem_vec[i].data.elt[smem_idx]) * scale);
+          }
+          if constexpr (kAligned) {
+            output_vec.store_to(output_g + smem_idx * num_rows);
+          } else {
+            if (r_g + smem_idx < row_length) {
+              output_vec.store_to_elts(output_g + smem_idx * num_rows, 0, num_ele);
+            }
+          }
+        }
+      }
+    }
+  } else
+#endif
   if (return_columnwise_gemm_ready) {
     constexpr int c_stride =
         kThreadsPerBlock / kNumThreadsStore;  // Stride in columns of shared memory
@@ -436,6 +663,90 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   }
 
   // Step 4 (return_columnwise_compact): cast in 128x1 style and store to output, skip transpose
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx950__)
+  if (return_columnwise_compact && use_chunked_lds<IType>()) {
+    constexpr int kThreadTileRow = kTileDim / kThreadsPerWarp;
+    constexpr int kThreadTileCol = kNVecOut;
+    using RegVec = Vec<IType, kThreadTileCol>;
+    using RegScaleVec = Vec<CType, kThreadTileCol>;
+    constexpr int num_smem_reads = kNVecOut / kNVecSMem;
+    constexpr int warps_per_chunk = kNumWarps / kNumChunks;
+    const int thr_idx_in_warp = threadIdx.x % kThreadsPerWarp;
+    const int warp_idx = threadIdx.x / kThreadsPerWarp;
+    const int warp_in_chunk = warp_idx % warps_per_chunk;
+    const int r_s = thr_idx_in_warp * kThreadTileRow;
+    const int c_s = warp_in_chunk * num_smem_reads;
+    size_t r_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;
+    for (int chunk = 0; chunk < kNumChunks; ++chunk) {
+      __syncthreads();
+      load_chunk_to_smem<kAligned, IType>(smem, input, row_length, num_rows, chunk);
+      __syncthreads();
+      const bool warp_active = (warp_idx / warps_per_chunk) == chunk;
+      const size_t c_g = static_cast<size_t>(blockIdx.x) * kTileDim +
+                         static_cast<size_t>(chunk) * kChunkCol + c_s * kNVecSMem;
+      const size_t num_ele = c_g < row_length
+                                 ? min(static_cast<size_t>(kThreadTileCol), row_length - c_g)
+                                 : 0;
+      if (warp_active) {
+        RegVec reg_vec[kThreadTileRow];
+        RegScaleVec thr_scale;
+#pragma unroll
+        for (int i = 0; i < kThreadTileRow; ++i) {
+          int r = r_s + i;
+#pragma unroll
+          for (int j = 0; j < num_smem_reads; ++j) {
+            int c = c_s + j;
+            SMemVec smem_vec = smem[r * kSMemColChunk + c];
+#pragma unroll
+            for (int k = 0; k < kNVecSMem; ++k) {
+              reg_vec[i].data.elt[j * kNVecSMem + k] = smem_vec.data.elt[k];
+            }
+          }
+        }
+#pragma unroll
+        for (int reg_idx = 0; reg_idx < kThreadTileCol; ++reg_idx) {
+          CType amax = 0;
+#pragma unroll
+          for (int i = 0; i < kThreadTileRow; ++i) {
+            amax = fmaxf(amax, fabsf(reg_vec[i].data.elt[reg_idx]));
+          }
+          const bool is_src_lane = thr_idx_in_warp == 0;
+          amax = warp_reduce_max<kThreadsPerWarp>(amax);
+          constexpr int lane_zero = 0;
+          amax = __shfl(amax, lane_zero, kThreadsPerWarp);
+          CType scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scaling);
+          thr_scale.data.elt[reg_idx] = scale;
+          bool write_scale_inv = is_src_lane;
+          if constexpr (!kAligned) {
+            write_scale_inv &= (c_g + reg_idx < row_length);
+          }
+          if (write_scale_inv) {
+            CType scale_inv = 1.0 / scale;
+            size_t row_idx = static_cast<size_t>(blockIdx.y);
+            size_t col_idx = c_g + reg_idx;
+            tile_scales_inv_t[row_idx * scale_t_stride_y + col_idx * scale_t_stride_x] = scale_inv;
+          }
+        }
+        for (int row_idx = 0; row_idx < kThreadTileRow; ++row_idx) {
+          OType* output_g = &output_t[(r_g + row_idx) * row_length + c_g];
+          OVec output_vec;
+#pragma unroll
+          for (int i = 0; i < kThreadTileCol; ++i) {
+            output_vec.data.elt[i] = static_cast<OType>(
+                static_cast<CType>(reg_vec[row_idx].data.elt[i]) * thr_scale.data.elt[i]);
+          }
+          if constexpr (kAligned) {
+            output_vec.store_to(output_g);
+          } else {
+            if (r_g + row_idx < num_rows) {
+              output_vec.store_to_elts(output_g, 0, num_ele);
+            }
+          }
+        }
+      }
+    }
+  } else
+#endif
   if (return_columnwise_compact) {
     // thread tile should be 4x16, 16 means 8 smem reads
     constexpr int kThreadTileRow = kTileDim / kThreadsPerWarp;
@@ -638,7 +949,11 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               full_tile, kAligned,
 
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx950__)
+              size_t smem_bytes = host_smem_bytes<InputType>();
+#else
               size_t smem_bytes = kSMemSize * sizeof(InputType);
+#endif
               // shared memory must be requested up
               if (smem_bytes >= 48 * 1024) {
                 cudaError_t err = cudaFuncSetAttribute(
