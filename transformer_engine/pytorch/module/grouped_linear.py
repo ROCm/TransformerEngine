@@ -180,20 +180,22 @@ class _GroupedLinear(torch.autograd.Function):
         # Initialize weights
         weights_fp8: list
         if fp8 or debug:
-            # FP8 cast to workspace buffer
-            weights_fp8 = []
+            # FP8 cast to workspace buffer. For delayed-scaling FP8 the whole group is
+            # cast and transposed with a single fused multi_cast_transpose kernel; other
+            # cases fall back to a per-weight quantize inside get_multi_weight_workspace.
             update_workspace = is_first_microbatch is None or is_first_microbatch
-            for i in range(num_gemms):
-                weight_fp8 = module.get_weight_workspace(
-                    tensor=weights[i],
-                    quantizer=weight_quantizers[i],
-                    cache_name=(None if is_first_microbatch is None else f"weight{i}"),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_fp8_weight_update,
-                    workspace_dtype=activation_dtype,
-                )
-                weights_fp8.append(weight_fp8)
-
+            weights_fp8 = module.get_multi_weight_workspace(
+                tensors=weights,
+                quantizers=weight_quantizers,
+                cache_names=(
+                    None
+                    if is_first_microbatch is None
+                    else [f"weight{i}" for i in range(num_gemms)]
+                ),
+                update_workspace=update_workspace,
+                skip_update_flag=skip_fp8_weight_update,
+                workspace_dtype=activation_dtype,
+            )
         else:
             weights_fp8 = [cast_if_needed(weight, activation_dtype) for weight in weights]
 

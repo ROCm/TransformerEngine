@@ -1593,6 +1593,90 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         return out
 
+    def get_multi_weight_workspace(
+        self,
+        *,
+        tensors: List[torch.Tensor],
+        quantizers: List[Quantizer],
+        cache_names: Optional[List[str]] = None,
+        update_workspace: bool = True,
+        skip_update_flag: Optional[torch.Tensor] = None,
+        workspace_dtype: Optional[torch.dtype] = None,
+    ) -> List[QuantizedTensor]:
+        """Get workspace buffers for a group of weights and maybe update their values.
+
+        Analogous to `get_weight_workspace`, but operates on a whole group of
+        weights. For delayed-scaling FP8 the group is cast and transposed with a
+        single fused multi_cast_transpose kernel instead of one quantize call per
+        tensor. When fusion is not applicable (other recipes, rowwise-only usage,
+        already-quantized weights, or CUDA-graph weight caching) the call falls
+        back to `get_weight_workspace` for each tensor, matching the per-tensor path.
+
+        Parameters
+        ----------
+        tensors : list of torch.Tensor
+            Values to copy into the workspaces.
+        quantizers : list of Quantizer
+            Quantizers used to cast the weights.
+        cache_names : list of str, optional
+            Keys for caching. If None, the workspaces are not cached.
+        update_workspace : bool, default = True
+            Update workspaces with values from `tensors`.
+        skip_update_flag : torch.Tensor, optional
+            GPU flag to skip updating the workspaces.
+        workspace_dtype : torch.dtype, optional
+            High-precision workspace dtype (used for debug quantization).
+        """
+        num_tensors = len(tensors)
+
+        # Fused path: delayed-scaling FP8 with transpose, high-precision (not
+        # already quantized) weights, and no CUDA-graph skip flag (the fused kernel
+        # has no device-side noop and would not preserve cached buffer pointers).
+        can_fuse = (
+            num_tensors > 0
+            and skip_update_flag is None
+            and all(
+                isinstance(quantizer, Float8Quantizer) and quantizer.columnwise_usage
+                for quantizer in quantizers
+            )
+            and not any(isinstance(tensor, QuantizedTensorStorage) for tensor in tensors)
+        )
+
+        if can_fuse:
+            caching = cache_names is not None
+            cache_valid = caching and all(
+                self._fp8_workspaces.get(name) is not None for name in cache_names
+            )
+            if update_workspace or not cache_valid:
+                # Force internal=False so cached workspaces survive prepare_for_saving.
+                saved_internal = [quantizer.internal for quantizer in quantizers]
+                if caching:
+                    for quantizer in quantizers:
+                        quantizer.internal = False
+                workspaces = tex.multi_tensor_quantize(list(tensors), quantizers)
+                if caching:
+                    for quantizer, internal in zip(quantizers, saved_internal):
+                        quantizer.internal = internal
+                    for name, workspace in zip(cache_names, workspaces):
+                        self._fp8_workspaces[name] = workspace
+                return workspaces
+            return [self._fp8_workspaces[name] for name in cache_names]
+
+        # Fallback: quantize each weight individually.
+        workspaces = []
+        for i in range(num_tensors):
+            workspaces.append(
+                self.get_weight_workspace(
+                    tensor=tensors[i],
+                    quantizer=quantizers[i],
+                    cache_name=(None if cache_names is None else cache_names[i]),
+                    update_workspace=update_workspace,
+                    skip_update_flag=skip_update_flag,
+                    workspace_dtype=workspace_dtype,
+                )
+            )
+        return workspaces
+
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
     ):
