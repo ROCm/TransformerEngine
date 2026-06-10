@@ -50,9 +50,11 @@ void performTest(const size_t N, const size_t H, const bool zero_centered_gamma,
   }
 #endif
 
+#ifndef __HIP_PLATFORM_AMD__
   if (fused_bwd_add && use_cudnn && (cudnnGetVersion() < 92100)) {
     GTEST_SKIP() << "cuDNN < 9.21 does not support fused RMSNorm backward+add";
   }
+#endif
 
   using WeightType = InputType;
   DType itype = TypeInfo<InputType>::dtype;

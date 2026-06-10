@@ -994,13 +994,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(GroupedGemmV2Handler, GroupedGemmV2FFI,
                                   .Ret<Buffer_Type>()      // cublas_workspace
                                   .Ret<Buffer_Type>()      // setup_workspace
                                   .Ret<Buffer_Type>()      // int64_workspace
-                                  .Attr<int64_t>("M")
-                                  .Attr<int64_t>("N")
-                                  .Attr<int64_t>("K")
-                                  .Attr<bool>("lhs_is_trans")
-                                  .Attr<bool>("rhs_is_trans")
-                                  .Attr<JAXX_Scaling_Mode>("scaling_mode")
-                                  .Attr<bool>("is_grouped_dense_wgrad"),
+                                  .Attrs<GroupedGemmV2Config>(),
                               GemmFFI_CudaGraph_Traits);
 
 Error_Type GroupedGemmFFI(cudaStream_t stream, Buffer_Type lhs_data, Buffer_Type lhs_sinv,
