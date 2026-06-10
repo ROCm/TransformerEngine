@@ -24,6 +24,7 @@
 #include <cstdlib>
 #include <string>
 #include <cstdint>
+#include <cstring>
 
 #include "../common.h"
 #include "../util/vectorized_pointwise.h"
@@ -700,16 +701,21 @@ public:
         int m_, int n_, int k_, int lda_, int ldb_, int ldd_,
         hipblasOperation_t transa_, hipblasOperation_t transb_,
         int scaling_mode_, hipblasLtEpilogue_t epilogue_,
-        bool fp4_alpha_device_vector_):
-        deviceCap(deviceCap_),
-        a_type(a_type_), b_type(b_type_),
-        d_type(d_type_), bias_type(bias_type_), aux_type(aux_type_),
-        m(m_), n(n_), k(k_), lda(lda_), ldb(ldb_), ldd(ldd_),
-        transa(transa_), transb(transb_),
-        scaling_mode(scaling_mode_), epilogue(epilogue_),
-        fp4_alpha_device_vector(fp4_alpha_device_vector_) {}
+        bool fp4_alpha_device_vector_)
+    {
+      // Zero the whole object (including padding bytes) BEFORE assigning the
+      // members, so the byte-wise Comp below never compares stack garbage.
+      std::memset(this, 0, sizeof(*this));
+      deviceCap = deviceCap_;
+      a_type = a_type_; b_type = b_type_;
+      d_type = d_type_; bias_type = bias_type_; aux_type = aux_type_;
+      m = m_; n = n_; k = k_; lda = lda_; ldb = ldb_; ldd = ldd_;
+      transa = transa_; transb = transb_;
+      scaling_mode = scaling_mode_; epilogue = epilogue_;
+      fp4_alpha_device_vector = fp4_alpha_device_vector_;
+    }
 
-    Key() {}
+    Key() { std::memset(this, 0, sizeof(*this)); }
 
     bool operator==(const Key &val) const
     {
@@ -728,6 +734,8 @@ public:
     {
       bool operator()(const Key& lhs, const Key& rhs) const
       {
+        // Safe because Key zero-inits all padding in its constructors, so the
+        // byte representation is fully determined by the logical fields.
         return ::std::string_view((const char*)&lhs, sizeof(lhs)) < ::std::string_view((const char*)&rhs, sizeof(rhs));
       }
     };
@@ -1701,6 +1709,9 @@ void release_service_stream(hipStream_t stream, struct ServiceStreamCtl &ctl)
 } // namespace
 
 
+#pragma GCC diagnostic push
+#pragma GCC diagnostic error "-Wmissing-declarations"
+
 void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const Tensor *inputBias, Tensor *outputPreGelu, cublasOperation_t transa,
                  cublasOperation_t transb, bool grad, void *workspace, size_t workspaceSize,
@@ -1766,5 +1777,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     release_service_stream(stream, ss_ctl);
   }
 }
+
+#pragma GCC diagnostic pop
 
 } //namespace transformer_engine

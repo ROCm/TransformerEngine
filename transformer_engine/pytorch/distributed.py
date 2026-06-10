@@ -154,7 +154,11 @@ def set_tensor_model_parallel_attributes(
 ) -> None:
     """set attributes needed for TP"""
     for attribute in _MODEL_PARALLEL_ATTRIBUTE_DEFAULTS:
-        assert not hasattr(tensor, attribute)
+        if hasattr(tensor, attribute):
+            raise RuntimeError(
+                f"Tensor already has attribute '{attribute}' set. Cannot set "
+                "tensor model parallel attributes on a tensor that already has them."
+            )
     # Set the attributes.
     setattr(tensor, "tensor_model_parallel", is_parallel)
     setattr(tensor, "partition_dim", dim)
@@ -172,7 +176,11 @@ def get_distributed_world_size(group: Optional[dist_group_type] = None) -> int:
 @lru_cache
 def get_distributed_rank(group: Optional[dist_group_type] = None) -> int:
     """Return my rank for the distributed group."""
-    assert torch.distributed.is_initialized(), "torch.distributed is not initialized."
+    if not torch.distributed.is_initialized():
+        raise RuntimeError(
+            "torch.distributed is not initialized. Call torch.distributed.init_process_group() "
+            "before calling get_distributed_rank()."
+        )
     return torch.distributed.get_rank(group=group)
 
 
@@ -731,8 +739,8 @@ def checkpoint(
     if isinstance(function, TransformerEngineBaseModule):
         # If this TE module is FSDP-wrapped, clear its FSDP group information because there's no need
         # to scatter/gather activations that we will recompute anyway.
-        setattr(function, "fsdp_wrapped", False)
-        setattr(function, "fsdp_group", None)
+        function.fast_setattr("fsdp_wrapped", False)
+        function.fast_setattr("fsdp_group", None)
 
     # Otherwise discard unused te.utils.checkpoint.checkpoint() arguments
     # and execute TE's own checkpointing
@@ -745,7 +753,12 @@ def checkpoint(
         # If saved activations need to be distributed but there is no process group,
         # default to the world group.
         if distribute_saved_activations:
-            assert torch.distributed.is_initialized(), "torch.distributed is not initialized."
+            if not torch.distributed.is_initialized():
+                raise RuntimeError(
+                    "torch.distributed is not initialized. Call "
+                    "torch.distributed.init_process_group() before using "
+                    "distribute_saved_activations=True."
+                )
             tp_group = torch.distributed.GroupMember.WORLD if tp_group is None else tp_group
 
         return _CheckpointFunction.apply(
@@ -921,9 +934,12 @@ def reduce_scatter_along_first_dim(
         return inp, None
 
     dim_size = list(inp.size())
-    assert (
-        dim_size[0] % world_size == 0
-    ), "First dimension of the tensor should be divisible by tensor parallel size"
+    if dim_size[0] % world_size != 0:
+        raise ValueError(
+            "First dimension of the tensor should be divisible by tensor parallel size, "
+            f"but got dim_size[0]={dim_size[0]} and world_size={world_size} "
+            f"(remainder={dim_size[0] % world_size})."
+        )
 
     dim_size[0] = dim_size[0] // world_size
 
@@ -988,7 +1004,11 @@ def _all_gather_fp8(
     # Note: We cannot directly all-gather the transposed FP8 tensor,
     # so temporarily modify quantizer to avoid creating FP8 transpose.
     if not isinstance(inp, Float8TensorStorage):
-        assert isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer))
+        if not isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
+            raise TypeError(
+                "Expected quantizer to be Float8Quantizer or Float8CurrentScalingQuantizer "
+                f"when input is not Float8TensorStorage, but got {type(quantizer).__name__}."
+            )
         # we cannot directly gather the transposed fp8 tensor
         # so we need to disable columnwise usage for the quantizer
         # and then set it back to the original value after quantizing
@@ -1083,7 +1103,7 @@ def _start_all_gather_fp8_blockwise(
             device = inp._columnwise_data.device
         else:
             raise ValueError("Got Float8BlockwiseQTensorStorage input tensor without any data")
-        dtype = torch.bfloat16  # Only has fp8 dtype. Guess BF16 for dequant.
+        dtype = inp._dtype
     else:
         raise ValueError(
             "Invalid type for input tensor (expected torch.Tensor or"
@@ -1104,6 +1124,9 @@ def _start_all_gather_fp8_blockwise(
 
     # Fall back to high-precision all-gather if FP8 is not supported
     if not quantizer.is_quantizable(inp) or quantizer.block_scaling_dim != 1:
+        warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
+        if isinstance(inp, QuantizedTensorStorage):
+            inp = inp.dequantize(dtype=dtype)  # Dequantize if needed
         out = torch.empty(out_shape, dtype=dtype, device=device)
         torch.distributed.all_gather_into_tensor(out, inp, group=process_group, async_op=False)
         out = quantizer(out)
@@ -1119,7 +1142,7 @@ def _start_all_gather_fp8_blockwise(
             "Input and quantizer do not have matching usages. "
             "Dequantizing and requantizing to Float8BlockwiseQTensor."
         )
-        inp = quantizer(inp.dequantize())
+        inp = quantizer(inp.dequantize(dtype=dtype))
 
     # Construct Float8BlockwiseQTensor output tensor
     out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
@@ -1235,10 +1258,18 @@ def _swap_first_dims(tensor: torch.Tensor, world_size: int):
     """
 
     shape = tensor.shape
-    assert len(shape) >= 2, "Wrong number of dimensions for fixing interleave."
+    if len(shape) < 2:
+        raise ValueError(
+            f"Wrong number of dimensions for fixing interleave: got {len(shape)}, "
+            f"expected at least 2 (shape={shape})."
+        )
     first_dim = shape[0]
     flattened_trailing = math.prod(shape[1:])
-    assert first_dim % world_size == 0, "Wrong dimensions for fixing interleave."
+    if first_dim % world_size != 0:
+        raise ValueError(
+            f"Wrong dimensions for fixing interleave: first_dim={first_dim} is not divisible "
+            f"by world_size={world_size} (remainder={first_dim % world_size})."
+        )
     tensor = tensor.reshape(world_size, first_dim // world_size, flattened_trailing)
     tensor = tex.swap_first_dims(tensor, out=None)
     return tensor.reshape(first_dim // world_size, flattened_trailing * world_size)
@@ -1321,14 +1352,18 @@ def _all_gather_nvfp4(
         if inp._columnwise_data is not None:
             in_shape_t = inp._columnwise_data.size()
             device = inp._columnwise_data.device
-        dtype = torch.bfloat16
+        dtype = inp._dtype
     else:
         raise ValueError(
             "Invalid type for input tensor (expected torch.Tensor or NVFP4TensorStorage, "
             f"found {inp.__class__.__name__})"
         )
 
-    assert in_shape is not None or in_shape_t is not None, "No data found."
+    if in_shape is None and in_shape_t is None:
+        raise ValueError(
+            "No data found: both in_shape and in_shape_t are None. "
+            "Input tensor must have rowwise or columnwise data."
+        )
 
     world_size = get_distributed_world_size(process_group)
 
@@ -1342,6 +1377,9 @@ def _all_gather_nvfp4(
         and quantizer is not None
         and not quantizer.is_quantizable(inp)
     ):
+        warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
+        if isinstance(inp, QuantizedTensorStorage):
+            inp = inp.dequantize(dtype=dtype)  # Dequantize if needed
         out = torch.empty(
             out_shape,
             dtype=dtype,
@@ -1362,7 +1400,7 @@ def _all_gather_nvfp4(
             "Input and quantizer do not have matching usages. "
             "Dequantizing and requantizing to NVFP4."
         )
-        inp = quantizer(inp.dequantize())
+        inp = quantizer(inp.dequantize(dtype=dtype))
 
     # Construct NVFP4 output tensor
     out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
@@ -1378,7 +1416,11 @@ def _all_gather_nvfp4(
         if quantizer.rowwise_usage:
 
             # Remove padding from NVFP4 scale-inverses
-            assert in_shape is not None, "Shape not found."
+            if in_shape is None:
+                raise RuntimeError(
+                    "Shape not found: in_shape is None but rowwise_usage is True. "
+                    "Input tensor must have rowwise data for NVFP4 rowwise gathering."
+                )
             in_scale_inv = inp._rowwise_scale_inv
             out_scale_inv = out._rowwise_scale_inv
             flattened_in_shape0 = math.prod(in_shape[:-1])
@@ -1490,7 +1532,7 @@ def _all_gather_mxfp8(
             device = inp._columnwise_data.device
         else:
             raise ValueError("Got MXFP8 input tensor without any data")
-        dtype = torch.bfloat16  # Guess high-precision dtype.
+        dtype = inp._dtype
     else:
         raise ValueError(
             "Invalid type for input tensor (expected torch.Tensor or MXFP8TensorStorage, "
@@ -1509,6 +1551,9 @@ def _all_gather_mxfp8(
         and quantizer is not None
         and not quantizer.is_quantizable(inp)
     ):
+        warnings.warn("Cannot quantize input tensor. Performing all-gather in high precision.")
+        if isinstance(inp, QuantizedTensorStorage):
+            inp = inp.dequantize(dtype=dtype)  # Dequantize if needed
         out = torch.empty(
             out_shape,
             dtype=dtype,
@@ -1529,7 +1574,7 @@ def _all_gather_mxfp8(
             "Input and quantizer do not have matching usages. "
             "Dequantizing and requantizing to MXFP8."
         )
-        inp = quantizer(inp.dequantize())
+        inp = quantizer(inp.dequantize(dtype=dtype))
 
     # Construct MXFP8 output tensor
     out = quantizer.make_empty(out_shape, dtype=dtype, device=device)
@@ -1676,7 +1721,10 @@ def gather_along_first_dim(
 
     # MXFP8 case
     if isinstance(inp, MXFP8TensorStorage) or isinstance(quantizer, MXFP8Quantizer):
-        assert isinstance(quantizer, MXFP8Quantizer)
+        if not isinstance(quantizer, MXFP8Quantizer):
+            raise TypeError(
+                f"Expected MXFP8Quantizer for MXFP8 all-gather, but got {type(quantizer).__name__}."
+            )
         return _all_gather_mxfp8(
             inp,
             process_group,
@@ -1687,7 +1735,10 @@ def gather_along_first_dim(
 
     # NVFP4 case
     if isinstance(inp, NVFP4TensorStorage) or isinstance(quantizer, NVFP4Quantizer):
-        assert isinstance(quantizer, NVFP4Quantizer)
+        if not isinstance(quantizer, NVFP4Quantizer):
+            raise TypeError(
+                f"Expected NVFP4Quantizer for NVFP4 all-gather, but got {type(quantizer).__name__}."
+            )
         return _all_gather_nvfp4(
             inp,
             process_group,
@@ -1830,8 +1881,15 @@ def symmetric_all_reduce(
         - The second element is the async work handle if async_op=True,
           otherwise None.
     """
-    assert async_op is False, "Async symmetric ops no supported yet"
-    assert HAS_TORCH_SYMMETRIC, "Could not import symetric memory from torch"
+    if async_op:
+        raise RuntimeError(
+            f"Async symmetric ops are not supported yet, but async_op={async_op!r} was passed."
+        )
+    if not HAS_TORCH_SYMMETRIC:
+        raise RuntimeError(
+            "Could not import symmetric memory from torch. "
+            "Please ensure torch.distributed._symmetric_memory is available."
+        )
 
     if get_distributed_world_size(tp_group) == 1:
         return inp, None
@@ -1964,10 +2022,19 @@ def _fsdp_gather_tensors(
     *tensors: torch.Tensor,
 ):
     if fsdp_group is not None:
-        assert len(shapes) == len(tensors), "Number of tensors and tensor shapes must be equal."
+        if len(shapes) != len(tensors):
+            raise ValueError(
+                "Number of tensors and tensor shapes must be equal, "
+                f"but got {len(shapes)} shapes and {len(tensors)} tensors."
+            )
         for s, t in zip(shapes, tensors):
             if isinstance(t, torch.Tensor):
-                assert s is not None, "Internal TE error."
+                if s is None:
+                    raise RuntimeError(
+                        "Internal TE error: shape is None for a non-None tensor in "
+                        "post_optimizer_step_fwd_amax_reduction. "
+                        f"Tensor type: {type(t).__name__}, tensor shape: {t.shape}."
+                    )
                 targets = t.get_data_tensors() if isinstance(t, QuantizedTensor) else [t]
                 for target in targets:
                     safely_set_viewless_tensor_data(
@@ -2015,29 +2082,37 @@ def prepare_te_modules_for_fsdp(fsdp_root: torch.nn.Module) -> None:
     fsdp_root : torch.nn.Module
                FSDP-wrapped root module that may contain FSDP-wrapped TE modules.
     """
-    assert isinstance(fsdp_root, FSDP), "Root module must be FSDP-wrapped."
+    if not isinstance(fsdp_root, FSDP):
+        raise TypeError(f"Root module must be FSDP-wrapped, but got {type(fsdp_root).__name__}.")
 
     # If the root module is a TE module, inject FSDP information into it
     if _is_te_module(fsdp_root.module):
         if hasattr(fsdp_root, "primary_weights_in_fp8"):
-            assert not fsdp_root.primary_weights_in_fp8, (
-                "TE modules with primary weights in FP8 cannot be FSDP-wrapped. "
-                "Please initialize your model without the te.quantized_model_init(...) context."
-            )
+            if fsdp_root.primary_weights_in_fp8:
+                raise RuntimeError(
+                    "TE modules with primary weights in FP8 cannot be FSDP-wrapped. "
+                    "Please initialize your model without the te.quantized_model_init(...) context."
+                )
         root_state = _get_module_fsdp_state(fsdp_root)
-        assert root_state is not None, "Root module does not have a valid _FSDPState."
-        setattr(fsdp_root.module, "fsdp_group", root_state.process_group)
+        if root_state is None:
+            raise RuntimeError(
+                f"Root module ({type(fsdp_root.module).__name__}) does not have a valid "
+                "_FSDPState. Ensure the module is properly wrapped with FSDP."
+            )
+        fsdp_root.module.fast_setattr("fsdp_group", root_state.process_group)
 
     # Iterate through all FSDP-wrapped submodules and inject FSDP information into TE modules
     fsdp_states, fsdp_modules = _get_fsdp_states_with_modules(fsdp_root)
     for state, fsdp_module in zip(fsdp_states, fsdp_modules):
         if _is_te_module(fsdp_module.module):
             if hasattr(fsdp_module.module, "primary_weights_in_fp8"):
-                assert not fsdp_module.module.primary_weights_in_fp8, (
-                    "TE modules with primary weights in FP8 cannot be FSDP-wrapped. "
-                    "Please initialize your model without the te.quantized_model_init(...) context."
-                )
-            setattr(fsdp_module.module, "fsdp_group", state.process_group)
+                if fsdp_module.module.primary_weights_in_fp8:
+                    raise RuntimeError(
+                        f"TE module '{type(fsdp_module.module).__name__}' with primary weights "
+                        "in FP8 cannot be FSDP-wrapped. Please initialize your model without "
+                        "the te.quantized_model_init(...) context."
+                    )
+            fsdp_module.module.fast_setattr("fsdp_group", state.process_group)
 
 
 class FullyShardedDataParallel(FSDP):
