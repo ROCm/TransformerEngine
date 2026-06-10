@@ -149,7 +149,8 @@ template <typename MXFP8GemmConfig,
           MxGemmPipelineType PipelineType = MxGemmPipelineType::CompTDMV1>
 bool invoke_mx_grouped_gemm(const std::vector<mx_grouped_gemm_kargs> &descs,
                             const GroupedGemmRunContext &ctx,
-                            const ck_tile::stream_config &stream_cfg) {
+                            const ck_tile::stream_config &stream_cfg,
+                            bool warn_fallback) {
   // Check hardware WMMA support for the warp tile.
   static constexpr bool has_wmma_support =
       ck_tile::has_wmma_traits_v<ck_tile::gfx125_t,
@@ -256,8 +257,10 @@ bool invoke_mx_grouped_gemm(const std::vector<mx_grouped_gemm_kargs> &descs,
 
       auto kargs = Kernel::MakeKargs(descs);
       if (!Kernel::IsSupportedArgument(kargs)) {
-        NVTE_WARN("ck_tile_mx_grouped_gemm: CK_Tile kernel arguments not supported for this config. "
-                  "Falling back.");
+        if (warn_fallback) {
+          NVTE_WARN("ck_tile_mx_grouped_gemm: CK_Tile kernel arguments not supported for this config. "
+                    "Falling back.");
+        }
         return false;
       }
       const dim3 blocks = Kernel::BlockSize();
@@ -288,8 +291,13 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor *A,
                              bool accumulate,  // ignored for now
                              hipStream_t stream) {
 
+  const bool warn_fallback =
+    getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
+
   if (detect_gpu_arch() != GPUArch::GFX1250) {
-    NVTE_WARN("ck_tile_mx_grouped_gemm: only supported on gfx1250. Falling back.");
+    if (warn_fallback) {
+      NVTE_WARN("ck_tile_mx_grouped_gemm: only supported on gfx1250. Falling back.");
+    }
     return false;
   }
 
@@ -527,7 +535,7 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor *A,
         using CType = typename TETypeToCKType<d_te_type>::type;
         ok = invoke_mx_grouped_gemm<GroupedGemKernelParam_Wmma,
                                     AType, BType, CType,
-                                    AScaleType, BScaleType>(descs, ctx, s);
+                                    AScaleType, BScaleType>(descs, ctx, s, warn_fallback);
       });  // NOLINT(*)
     });  // NOLINT(*)
   });  // NOLINT(*)
