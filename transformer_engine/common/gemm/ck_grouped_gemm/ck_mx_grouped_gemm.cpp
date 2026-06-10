@@ -13,45 +13,42 @@ using mx_grouped_gemm_kargs = ck_tile::MxGroupedGemmHostArgs<>;
 
 static constexpr ck_tile::index_t ScaleBlockSize = 32;
 
-enum struct MxGemmPipelineType
-{
-    CompTDMV1,
-    CompTDMV2
+enum struct MxGemmPipelineType {
+  CompTDMV1,
+  CompTDMV2
 };
 
 template <MxGemmPipelineType PT, typename Problem>
 struct MxGemmPipelineTypeSelector;
+
 template <typename Problem>
-struct MxGemmPipelineTypeSelector<MxGemmPipelineType::CompTDMV1, Problem>
-{
-    using base_pipeline = ck_tile::BaseGemmPipelineAgBgCrCompTDM<Problem>;
-    using pipeline      = ck_tile::GemmPipelineAgBgCrCompTDMV1<Problem>;
-    static constexpr auto GetName() { return "GemmPipelineAgBgCrCompTDMV1"; }
+struct MxGemmPipelineTypeSelector<MxGemmPipelineType::CompTDMV1, Problem> {
+  using base_pipeline = ck_tile::BaseGemmPipelineAgBgCrCompTDM<Problem>;
+  using pipeline = ck_tile::GemmPipelineAgBgCrCompTDMV1<Problem>;
+  static constexpr auto GetName() { return "GemmPipelineAgBgCrCompTDMV1"; }
 };
 
 template <typename Problem>
-struct MxGemmPipelineTypeSelector<MxGemmPipelineType::CompTDMV2, Problem>
-{
-    using base_pipeline = ck_tile::BaseGemmPipelineAgBgCrCompTDM<Problem>;
-    using pipeline      = ck_tile::GemmPipelineAgBgCrCompTDMV2<Problem>;
-    static constexpr auto GetName() { return "GemmPipelineAgBgCrCompTDMV2"; }
+struct MxGemmPipelineTypeSelector<MxGemmPipelineType::CompTDMV2, Problem> {
+  using base_pipeline = ck_tile::BaseGemmPipelineAgBgCrCompTDM<Problem>;
+  using pipeline = ck_tile::GemmPipelineAgBgCrCompTDMV2<Problem>;
+  static constexpr auto GetName() { return "GemmPipelineAgBgCrCompTDMV2"; }
 };
 
-struct GroupedGemKernelParam_Wmma
-{
-    static const bool kPadM = false;
-    static const bool kPadN = false;
-    static const bool kPadK = false;
-    static const int kBlockPerCu         = 1;
-    static const ck_tile::index_t M_Tile = 64;
-    static const ck_tile::index_t N_Tile = 64;
-    static const ck_tile::index_t K_Tile = 128;
-    static const ck_tile::index_t M_Warp = 2;
-    static const ck_tile::index_t N_Warp = 2;
-    static const ck_tile::index_t K_Warp = 1;
-    static const ck_tile::index_t M_Warp_Tile     = 32;
-    static const ck_tile::index_t N_Warp_Tile     = 32;
-    static constexpr ck_tile::index_t K_Warp_Tile = 128;
+struct GroupedGemKernelParam_Wmma {
+  static const bool kPadM = false;
+  static const bool kPadN = false;
+  static const bool kPadK = false;
+  static const int kBlockPerCu         = 1;
+  static const ck_tile::index_t M_Tile = 64;
+  static const ck_tile::index_t N_Tile = 64;
+  static const ck_tile::index_t K_Tile = 128;
+  static const ck_tile::index_t M_Warp = 2;
+  static const ck_tile::index_t N_Warp = 2;
+  static const ck_tile::index_t K_Warp = 1;
+  static const ck_tile::index_t M_Warp_Tile     = 32;
+  static const ck_tile::index_t N_Warp_Tile     = 32;
+  static constexpr ck_tile::index_t K_Warp_Tile = 128;
 };
 
 // gfx1250 scale preshuffle.
@@ -67,97 +64,103 @@ struct GroupedGemKernelParam_Wmma
 // For A scales, rows=M and output_rows is M padded to M_Warp_Tile.
 // For B scales, rows=N and output_rows is currently N.
 template <typename ScaleType, ck_tile::index_t ScaleBlockSize, bool KStride>
-__global__ void preshuffle_scale_gfx1250_kernel(const ScaleType* __restrict__ src,
-                                                ScaleType* __restrict__ dst,
+__global__ void preshuffle_scale_gfx1250_kernel(const ScaleType *__restrict__ src,
+                                                ScaleType *__restrict__ dst,
                                                 int actual_rows,
                                                 int output_rows,
-                                                int KScale)
-{
-    static_assert(ScaleBlockSize == 32 && sizeof(ScaleType) == 1,
-                  "gfx1250 scale preshuffle only supports 8-bit scale with ScaleBlockSize=32");
-    constexpr int MPerXdlops = 16;
-    constexpr int KPerXdlops = 128;
-    constexpr int MNPack = 2;
-    constexpr int KPack  = 1;
-    constexpr int MNStep = MPerXdlops;                  // 16
-    constexpr int KStep  = KPerXdlops / ScaleBlockSize; // 4
-    const int K0 = KScale / (KPack * KStep);
-    const int linear = blockIdx.x * blockDim.x + threadIdx.x;
-    const int total  = output_rows * KScale;
-    if(linear >= total)
-        return;
-    const int mn = linear / KScale;
-    const int k  = linear % KScale;
-    const int iMNRepeat = mn / (MNStep * MNPack);
-    const int tempmn    = mn % (MNStep * MNPack);
-    const int iKRepeat = k / (KStep * KPack);
-    const int tempk    = k % (KStep * KPack);
-    const int outputIndex =
-        (iMNRepeat * MNPack * MNStep) * (KStep * KPack * K0) +
-        (iKRepeat * KStep * KPack) * (MNStep * MNPack) +
-        tempmn * (KStep * KPack) +
-        tempk;
-    ScaleType value{};
-    if(mn < actual_rows)
-    {
-        if constexpr(KStride)
-            value = src[mn * KScale + k];
-        else
-            value = src[k * actual_rows + mn];
+                                                int KScale) {
+  static_assert(ScaleBlockSize == 32 && sizeof(ScaleType) == 1,
+                "gfx1250 scale preshuffle only supports 8-bit scale with ScaleBlockSize=32");
+  constexpr int MPerXdlops = 16;
+  constexpr int KPerXdlops = 128;
+  constexpr int MNPack = 2;
+  constexpr int KPack  = 1;
+  constexpr int MNStep = MPerXdlops;                  // 16
+  constexpr int KStep  = KPerXdlops / ScaleBlockSize; // 4
+  const int K0 = KScale / (KPack * KStep);
+  const int linear = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total  = output_rows * KScale;
+  if (linear >= total) {
+    return;
+  }
+  const int mn = linear / KScale;
+  const int k  = linear % KScale;
+  const int iMNRepeat = mn / (MNStep * MNPack);
+  const int tempmn    = mn % (MNStep * MNPack);
+  const int iKRepeat = k / (KStep * KPack);
+  const int tempk    = k % (KStep * KPack);
+  const int outputIndex =
+      (iMNRepeat * MNPack * MNStep) * (KStep * KPack * K0) +
+      (iKRepeat * KStep * KPack) * (MNStep * MNPack) +
+      tempmn * (KStep * KPack) +
+      tempk;
+  ScaleType value{};
+  if (mn < actual_rows) {
+    if constexpr (KStride) {
+      value = src[mn * KScale + k];
+    } else {
+      value = src[k * actual_rows + mn];
     }
-    dst[outputIndex] = value;
+  }
+  dst[outputIndex] = value;
 }
 
 template <typename ScaleType, ck_tile::index_t ScaleBlockSize, bool KStride>
-void preShuffleScaleBuffer_gfx1250(const ScaleType* src,
-                                   ScaleType* dst,
+void preShuffleScaleBuffer_gfx1250(const ScaleType *src,
+                                   ScaleType *dst,
                                    int actual_rows,
                                    int output_rows,
                                    int KScale,
-                                   hipStream_t stream)
-{
-    constexpr int KPerXdlops = 128;
-    constexpr int KStep      = KPerXdlops / ScaleBlockSize; // 4
-    if(KScale % KStep != 0)
-    {
-        NVTE_ERROR("preshuffle_scale_gfx1250: KScale must be a multiple of 4, "
-                   "i.e. original K must be a multiple of 128 for ScaleBlockSize=32.");
-    }
-    const int total = output_rows * KScale;
-    constexpr int block_size = 256;
-    const int grid_size      = (total + block_size - 1) / block_size;
-    hipLaunchKernelGGL((preshuffle_scale_gfx1250_kernel<ScaleType, ScaleBlockSize, KStride>),
-                       dim3(grid_size),
-                       dim3(block_size),
-                       0,
-                       stream,
-                       src,
-                       dst,
-                       actual_rows,
-                       output_rows,
-                       KScale);
-    NVTE_CHECK_CUDA(hipGetLastError());
+                                   hipStream_t stream) {
+  constexpr int KPerXdlops = 128;
+  constexpr int KStep      = KPerXdlops / ScaleBlockSize; // 4
+  if (KScale % KStep != 0) {
+    NVTE_ERROR("preshuffle_scale_gfx1250: KScale must be a multiple of 4, "
+               "i.e. original K must be a multiple of 128 for ScaleBlockSize=32.");
+  }
+  const int total = output_rows * KScale;
+  constexpr int block_size = 256;
+  const int grid_size      = (total + block_size - 1) / block_size;
+  hipLaunchKernelGGL((preshuffle_scale_gfx1250_kernel<ScaleType, ScaleBlockSize, KStride>),
+                     dim3(grid_size),
+                     dim3(block_size),
+                     0,
+                     stream,
+                     src,
+                     dst,
+                     actual_rows,
+                     output_rows,
+                     KScale);
+  NVTE_CHECK_CUDA(hipGetLastError());
 }
 
-template <typename MXFP8GemmConfig, typename AType, typename BType, typename CType, typename AScaleType, typename BScaleType, typename AccType = float,  MxGemmPipelineType PipelineType = MxGemmPipelineType::CompTDMV1>
-bool invoke_mx_grouped_gemm(const std::vector<mx_grouped_gemm_kargs>& descs, const GroupedGemmRunContext& ctx, const ck_tile::stream_config& stream_cfg)
-{
-  // check hardware WMMA support for the warp tile
+template <typename MXFP8GemmConfig,
+          typename AType,
+          typename BType,
+          typename CType,
+          typename AScaleType,
+          typename BScaleType,
+          typename AccType = float,
+          MxGemmPipelineType PipelineType = MxGemmPipelineType::CompTDMV1>
+bool invoke_mx_grouped_gemm(const std::vector<mx_grouped_gemm_kargs> &descs,
+                            const GroupedGemmRunContext &ctx,
+                            const ck_tile::stream_config &stream_cfg) {
+  // Check hardware WMMA support for the warp tile.
   static constexpr bool has_wmma_support =
       ck_tile::has_wmma_traits_v<ck_tile::gfx125_t,
-                               AType,
-                               BType,
-                               AccType,
-                               MXFP8GemmConfig::M_Warp_Tile,
-                               MXFP8GemmConfig::N_Warp_Tile,
-                               MXFP8GemmConfig::K_Warp_Tile>;
+                                 AType,
+                                 BType,
+                                 AccType,
+                                 MXFP8GemmConfig::M_Warp_Tile,
+                                 MXFP8GemmConfig::N_Warp_Tile,
+                                 MXFP8GemmConfig::K_Warp_Tile>;
 
   NVTE_CHECK(has_wmma_support,
-           "ck_tile_mx_grouped_gemm: unsupported gfx125 WMMA traits for "
-           "AType/BType/AccType with warp tile shape ",
-           MXFP8GemmConfig::M_Warp_Tile, "x",
-           MXFP8GemmConfig::N_Warp_Tile, "x",
-           MXFP8GemmConfig::K_Warp_Tile);
+             "ck_tile_mx_grouped_gemm: unsupported gfx125 WMMA traits for "
+             "AType/BType/AccType with warp tile shape ",
+             MXFP8GemmConfig::M_Warp_Tile, "x",
+             MXFP8GemmConfig::N_Warp_Tile, "x",
+             MXFP8GemmConfig::K_Warp_Tile);
 
   using CLayout = RowMajor;
   constexpr bool preshuffle       = false;
@@ -194,50 +197,52 @@ bool invoke_mx_grouped_gemm(const std::vector<mx_grouped_gemm_kargs>& descs, con
                                                                    CLayout,
                                                                    TransposeC,
                                                                    StructuredSparsity,
-                                                                   false,//Persistent
+                                                                   false,  // Persistent
                                                                    NumWaveGroup,
                                                                    preshuffle>;
       using UniversalGemmProblem =
-          ck_tile::MxGemmPipelineProblem<AType,
-                                         BType,
-                                         float,
-                                         GemmShape,
-                                         GemmUniversalTraits,
-                                         ck_tile::GemmPipelineScheduler::Intrawave,
-                                         ck_tile::element_wise::PassThrough,
-                                         ck_tile::element_wise::PassThrough,
-                                         AType,
-                                         BType,
-                                         AScaleType,
-                                         BScaleType>;
-        /* make pipeline selective */
+        ck_tile::MxGemmPipelineProblem<AType,
+                                       BType,
+                                       float,
+                                       GemmShape,
+                                       GemmUniversalTraits,
+                                       ck_tile::GemmPipelineScheduler::Intrawave,
+                                       ck_tile::element_wise::PassThrough,
+                                       ck_tile::element_wise::PassThrough,
+                                       AType,
+                                       BType,
+                                       AScaleType,
+                                       BScaleType>;
+      /* Make pipeline selective. */
       using GemmPipeline =
-          typename MxGemmPipelineTypeSelector<PipelineType,
-                                                UniversalGemmProblem>::pipeline;
+        typename MxGemmPipelineTypeSelector<
+          PipelineType,
+          UniversalGemmProblem>::pipeline;
+
       using GemmEpilogue = ck_tile::TdmEpilogue<
-          ck_tile::CShuffleEpilogueProblem<AType,
-                                           BType,
-                                           ck_tile::tuple<>,//DsDataType
-                                           float,
-                                           CType,
-                                           ck_tile::tuple<>,//DsLayout
-                                           CLayout,
-                                           ck_tile::element_wise::PassThrough,
-                                           TilePartitioner::MPerBlock,
-                                           TilePartitioner::NPerBlock,
-                                           MXFP8GemmConfig::M_Warp,
-                                           MXFP8GemmConfig::N_Warp,
-                                           MXFP8GemmConfig::M_Warp_Tile,
-                                           MXFP8GemmConfig::N_Warp_Tile,
-                                           MXFP8GemmConfig::K_Warp_Tile,
-                                           UniversalGemmProblem::TransposeC,
-                                           1,                /*kNumWaveGroups_*/
-                                           false,            /*FixedVectorSize_*/
-                                           1,                /*VectorSizeC_*/
-                                           1,                /*BlockedXDLN_PerWarp_*/
-                                           DoubleSmemBuffer, /*DoubleSmemBuffer*/
-                                           AType, /*AType_*/
-                                           BType /*BType_*/>>;
+        ck_tile::CShuffleEpilogueProblem<AType,
+                                         BType,
+                                         ck_tile::tuple<>,  // DsDataType
+                                         float,
+                                         CType,
+                                         ck_tile::tuple<>,  // DsLayout
+                                         CLayout,
+                                         ck_tile::element_wise::PassThrough,
+                                         TilePartitioner::MPerBlock,
+                                         TilePartitioner::NPerBlock,
+                                         MXFP8GemmConfig::M_Warp,
+                                         MXFP8GemmConfig::N_Warp,
+                                         MXFP8GemmConfig::M_Warp_Tile,
+                                         MXFP8GemmConfig::N_Warp_Tile,
+                                         MXFP8GemmConfig::K_Warp_Tile,
+                                         UniversalGemmProblem::TransposeC,
+                                         1,                /* kNumWaveGroups_ */
+                                         false,            /* FixedVectorSize_ */
+                                         1,                /* VectorSizeC_ */
+                                         1,                /* BlockedXDLN_PerWarp_ */
+                                         DoubleSmemBuffer, /* DoubleSmemBuffer */
+                                         AType,            /* AType_ */
+                                         BType             /* BType_ */>>;
       using Kernel = ck_tile::MxGroupedGemmKernel<TilePartitioner, GemmPipeline, GemmEpilogue>;
 
       if (!has_sufficient_workspace<Kernel>(ctx)) {
@@ -245,10 +250,9 @@ bool invoke_mx_grouped_gemm(const std::vector<mx_grouped_gemm_kargs>& descs, con
       }
 
       auto kargs = Kernel::MakeKargs(descs);
-      if(!Kernel::IsSupportedArgument(kargs))
-      {
+      if (!Kernel::IsSupportedArgument(kargs)) {
         NVTE_WARN("ck_tile_mx_grouped_gemm: CK_Tile kernel arguments not supported for this config. "
-                "Falling back.");
+                  "Falling back.");
         return false;
       }
       const dim3 blocks = Kernel::BlockSize();
@@ -259,25 +263,25 @@ bool invoke_mx_grouped_gemm(const std::vector<mx_grouped_gemm_kargs>& descs, con
                                      hipMemcpyHostToDevice,
                                      ctx.stream));
       ck_tile::ignore = ck_tile::launch_kernel(
-          stream_cfg, ck_tile::make_kernel<MXFP8GemmConfig::kBlockPerCu>(
-                         Kernel{}, grids, blocks, 0,
-                         ck_tile::cast_pointer_to_constant_address_space(ctx.workspace),
-                         kargs.size()));
+        stream_cfg, ck_tile::make_kernel<MXFP8GemmConfig::kBlockPerCu>(
+                      Kernel{}, grids, blocks, 0,
+                      ck_tile::cast_pointer_to_constant_address_space(ctx.workspace),
+                      kargs.size()));
       return true;
     });
   });
   return false;
 }
 
-bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
-                          const NVTETensor* B,
-                          NVTETensor* D,
-                          int group_num,
-                          bool transA,
-                          bool transB,
-                          NVTETensor* workspace,
-                          bool accumulate,//ignored for now
-                          hipStream_t stream) {
+bool ck_tile_mx_grouped_gemm(const NVTETensor *A,
+                             const NVTETensor *B,
+                             NVTETensor *D,
+                             int group_num,
+                             bool transA,
+                             bool transB,
+                             NVTETensor *workspace,
+                             bool accumulate,  // ignored for now
+                             hipStream_t stream) {
 
   if (detect_gpu_arch() != GPUArch::GFX1250) {
     NVTE_WARN("ck_tile_mx_grouped_gemm: only supported on gfx1250. Falling back.");
@@ -290,8 +294,8 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
 
   // Normalize input mats
   // I.e., swap A and B, as well as transa and transb.
-  const NVTETensor* A_use = B;
-  const NVTETensor* B_use = A;
+  const NVTETensor *A_use = B;
+  const NVTETensor *B_use = A;
   bool transA_use = transB;
   bool transB_use = transA;
 
@@ -302,18 +306,18 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
   const bool use_a_colwise_data = transA_use;
   const bool use_b_colwise_data = !transB_use;
 
-  Tensor* A0_te = convertNVTETensorCheck(A_use[0]);
-  Tensor* B0_te = convertNVTETensorCheck(B_use[0]);
+  Tensor *A0_te = convertNVTETensorCheck(A_use[0]);
+  Tensor *B0_te = convertNVTETensorCheck(B_use[0]);
 
   // Validate scale type / data type combination.
   // Expected input data format: fp8/bf8 (e4m3/e5m2)
   // Expected scale data format: e8m0
-  const auto* D0 = convertNVTETensorCheck(D[0]);
+  const auto *D0 = convertNVTETensorCheck(D[0]);
 
-  const auto& A0_data = use_a_colwise_data ? A0_te->columnwise_data : A0_te->data;
-  const auto& B0_data = use_b_colwise_data ? B0_te->columnwise_data : B0_te->data;
-  const auto& A0_scale = use_a_colwise_data ? A0_te->columnwise_scale_inv : A0_te->scale_inv;
-  const auto& B0_scale = use_b_colwise_data ? B0_te->columnwise_scale_inv : B0_te->scale_inv;
+  const auto &A0_data = use_a_colwise_data ? A0_te->columnwise_data : A0_te->data;
+  const auto &B0_data = use_b_colwise_data ? B0_te->columnwise_data : B0_te->data;
+  const auto &A0_scale = use_a_colwise_data ? A0_te->columnwise_scale_inv : A0_te->scale_inv;
+  const auto &B0_scale = use_b_colwise_data ? B0_te->columnwise_scale_inv : B0_te->scale_inv;
 
   NVTE_CHECK(A0_data.dptr != nullptr,
              "ck_tile_mx_grouped_gemm: A[0] data is not initialized");
@@ -327,12 +331,12 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
   const auto a_scale_dtype = A0_scale.dtype;
   const auto b_scale_dtype = B0_scale.dtype;
   NVTE_CHECK(a_scale_dtype == DType::kFloat8E8M0,
-        "ck_tile_mx_grouped_gemm: A scale_inv dtype must be Float8E8M0, got ",
-        static_cast<int>(a_scale_dtype));
+             "ck_tile_mx_grouped_gemm: A scale_inv dtype must be Float8E8M0, got ",
+             static_cast<int>(a_scale_dtype));
 
   NVTE_CHECK(b_scale_dtype == DType::kFloat8E8M0,
-        "ck_tile_mx_grouped_gemm: B scale_inv dtype must be Float8E8M0, got ",
-        static_cast<int>(b_scale_dtype));
+             "ck_tile_mx_grouped_gemm: B scale_inv dtype must be Float8E8M0, got ",
+             static_cast<int>(b_scale_dtype));
 
   const auto a_dtype = A0_data.dtype;
   const auto b_dtype = B0_data.dtype;
@@ -343,28 +347,28 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
   using AScaleType = ck_tile::e8m0_t;
   using BScaleType = ck_tile::e8m0_t;
 
-  void* ws_ptr = nullptr;
+  void *ws_ptr = nullptr;
   size_t ws_bytes = 0;
   if (workspace) {
-    auto* ws_te = convertNVTETensorCheck(*workspace);
+    auto *ws_te = convertNVTETensorCheck(*workspace);
     ws_ptr = ws_te->data.dptr;
     ws_bytes = ws_te->data.numel() * typeToSize(ws_te->data.dtype);
   }
 
   GroupedGemmRunContext ctx{
-      .A = A_use,
-      .B = B_use,
-      .D = D,
-      .N = 0,
-      .group_num = group_num,
-      .transA = transA_use,
-      .transB = transB_use,
-      .workspace = ws_ptr,
-      .workspace_bytes = ws_bytes,
-      .stream = stream,
-      .use_a_columnwise_data = use_a_colwise_data,
-      .use_b_columnwise_data = use_b_colwise_data,
-      .accumulate = false,
+    .A = A_use,
+    .B = B_use,
+    .D = D,
+    .N = 0,
+    .group_num = group_num,
+    .transA = transA_use,
+    .transB = transB_use,
+    .workspace = ws_ptr,
+    .workspace_bytes = ws_bytes,
+    .stream = stream,
+    .use_a_columnwise_data = use_a_colwise_data,
+    .use_b_columnwise_data = use_b_colwise_data,
+    .accumulate = false,
   };
 
   const ck_tile::stream_config s{ctx.stream};
@@ -378,161 +382,160 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
   // Carve regions from the end of the workspace for mxfp8 scales.
   // Layout: [CK kargs workspace ... | a_scales (i) | b_scales (i) | ... | a_scales (group_num-1) | b_scales (group_num-1)]
   constexpr size_t kScaleWorkspaceAlign = 256;
-  uint8_t* scale_workspace_base = reinterpret_cast<uint8_t*>(ctx.workspace);
+  uint8_t *scale_workspace_base = reinterpret_cast<uint8_t *>(ctx.workspace);
   size_t scale_workspace_end =
     (ctx.workspace_bytes / kScaleWorkspaceAlign) * kScaleWorkspaceAlign;
 
   for (int i = 0; i < group_num; i++) {
-      const transformer_engine::Tensor* const A_te =
-          transformer_engine::convertNVTETensorCheck(ctx.A[i]);
-      const transformer_engine::Tensor* const B_te =
-          transformer_engine::convertNVTETensorCheck(ctx.B[i]);
-      transformer_engine::Tensor* D_te =
-          transformer_engine::convertNVTETensorCheck(ctx.D[i]);
+    const transformer_engine::Tensor *const A_te =
+      transformer_engine::convertNVTETensorCheck(ctx.A[i]);
+    const transformer_engine::Tensor *const B_te =
+      transformer_engine::convertNVTETensorCheck(ctx.B[i]);
+    transformer_engine::Tensor *D_te =
+      transformer_engine::convertNVTETensorCheck(ctx.D[i]);
 
-      const auto& a = ctx.use_a_columnwise_data ? A_te->columnwise_data : A_te->data;
-      const auto& b = ctx.use_b_columnwise_data ? B_te->columnwise_data : B_te->data;
-      const auto& d = D_te->data;
-      const auto& a_scales =
-          ctx.use_a_columnwise_data ? A_te->columnwise_scale_inv : A_te->scale_inv;
-      const auto& b_scales =
-          ctx.use_b_columnwise_data ? B_te->columnwise_scale_inv : B_te->scale_inv;
+    const auto &a = ctx.use_a_columnwise_data ? A_te->columnwise_data : A_te->data;
+    const auto &b = ctx.use_b_columnwise_data ? B_te->columnwise_data : B_te->data;
+    const auto &d = D_te->data;
+    const auto &a_scales =
+        ctx.use_a_columnwise_data ? A_te->columnwise_scale_inv : A_te->scale_inv;
+    const auto &b_scales =
+        ctx.use_b_columnwise_data ? B_te->columnwise_scale_inv : B_te->scale_inv;
 
-      int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0, Dd0 = 0, Dd1 = 0;
+    int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0, Dd0 = 0, Dd1 = 0;
 
-      if (!get_flat_2d_dims(*A_te, Ad0, Ad1)) {
-        NVTE_ERROR("ck_tile_mx_grouped_gemm: expected rank>=2 for normalized A in group ", i);
-      }
+    if (!get_flat_2d_dims(*A_te, Ad0, Ad1)) {
+      NVTE_ERROR("ck_tile_mx_grouped_gemm: expected rank>=2 for normalized A in group ", i);
+    }
 
-      if (!get_flat_2d_dims(*B_te, Bd0, Bd1)) {
-        NVTE_ERROR("ck_tile_mx_grouped_gemm: expected rank>=2 for normalized B in group ", i);
-      }
+    if (!get_flat_2d_dims(*B_te, Bd0, Bd1)) {
+      NVTE_ERROR("ck_tile_mx_grouped_gemm: expected rank>=2 for normalized B in group ", i);
+    }
 
-      if (!get_flat_2d_dims(*D_te, Dd0, Dd1)) {
-        NVTE_ERROR("ck_tile_mx_grouped_gemm: expected rank>=2 for normalized D in group ", i);
-      }
-      if (a.dptr == nullptr || b.dptr == nullptr || a_scales.dptr == nullptr ||
-          b_scales.dptr == nullptr) {
-        NVTE_ERROR("ck_tile_mx_grouped_gemm: effective A/B data or scale_inv is missing.");
-      }
-      if (a_scales.shape.size() != 2 || b_scales.shape.size() != 2) {
-        NVTE_ERROR("ck_tile_mx_grouped_gemm: expected effective A/B scale_inv tensors to be rank-2.");
-      }
+    if (!get_flat_2d_dims(*D_te, Dd0, Dd1)) {
+      NVTE_ERROR("ck_tile_mx_grouped_gemm: expected rank>=2 for normalized D in group ", i);
+    }
+    if (a.dptr == nullptr || b.dptr == nullptr || a_scales.dptr == nullptr ||
+        b_scales.dptr == nullptr) {
+      NVTE_ERROR("ck_tile_mx_grouped_gemm: effective A/B data or scale_inv is missing.");
+    }
+    if (a_scales.shape.size() != 2 || b_scales.shape.size() != 2) {
+      NVTE_ERROR("ck_tile_mx_grouped_gemm: expected effective A/B scale_inv tensors to be rank-2.");
+    }
 
-      const int64_t M = ctx.transA ? Ad1 : Ad0;
-      const int64_t K = ctx.transA ? Ad0 : Ad1;
-      const int64_t N = ctx.transB ? Bd0 : Bd1;
-      const int64_t Kb = ctx.transB ? Bd1 : Bd0;
-      if (K % ScaleBlockSize != 0) {
-        NVTE_ERROR("ck_tile_mx_grouped_gemm: K must be a multiple of ScaleBlockSize for MX GEMM", i);
-      }
-      const int KScale = static_cast<int>(K / ScaleBlockSize);
-      if (Kb != K) {
-        NVTE_ERROR("ck_tile_mx_grouped_gemm: K mismatch between A and B in group ", i,
-                   ". op(A)=", M, "x", K, ", op(B)=", Kb, "x", N);
-      }
-      if (Dd0 != M || Dd1 != N) {
-        NVTE_ERROR("ck_tile_mx_grouped_gemm: D shape mismatch in group ", i,
-                   ". D=", Dd0, "x", Dd1, ", expected=", M, "x", N);
-      }
+    const int64_t M = ctx.transA ? Ad1 : Ad0;
+    const int64_t K = ctx.transA ? Ad0 : Ad1;
+    const int64_t N = ctx.transB ? Bd0 : Bd1;
+    const int64_t Kb = ctx.transB ? Bd1 : Bd0;
+    if (K % ScaleBlockSize != 0) {
+      NVTE_ERROR("ck_tile_mx_grouped_gemm: K must be a multiple of ScaleBlockSize for MX GEMM", i);
+    }
+    const int KScale = static_cast<int>(K / ScaleBlockSize);
+    if (Kb != K) {
+      NVTE_ERROR("ck_tile_mx_grouped_gemm: K mismatch between A and B in group ", i,
+                  ". op(A)=", M, "x", K, ", op(B)=", Kb, "x", N);
+    }
+    if (Dd0 != M || Dd1 != N) {
+      NVTE_ERROR("ck_tile_mx_grouped_gemm: D shape mismatch in group ", i,
+                  ". D=", Dd0, "x", Dd1, ", expected=", M, "x", N);
+    }
 
-      const ck_tile::index_t stride_A = static_cast<ck_tile::index_t>(Ad1);
-      const ck_tile::index_t stride_B = static_cast<ck_tile::index_t>(Bd1);
-      const ck_tile::index_t stride_E = static_cast<ck_tile::index_t>(Dd1);
+    const ck_tile::index_t stride_A = static_cast<ck_tile::index_t>(Ad1);
+    const ck_tile::index_t stride_B = static_cast<ck_tile::index_t>(Bd1);
+    const ck_tile::index_t stride_E = static_cast<ck_tile::index_t>(Dd1);
 
-      // Pre-shuffle scale buffers for the hardware.
-      const int a_scale_actual_rows = static_cast<int>(M);
-      const int a_scale_output_rows =
+    // Pre-shuffle scale buffers for the hardware.
+    const int a_scale_actual_rows = static_cast<int>(M);
+    const int a_scale_output_rows =
       ck_tile::integer_least_multiple(
-          static_cast<ck_tile::index_t>(M),
-          static_cast<ck_tile::index_t>(GroupedGemKernelParam_Wmma::M_Warp_Tile));
-      const int b_scale_actual_rows = static_cast<int>(N);
-      const int b_scale_output_rows = static_cast<int>(N);
-      const size_t a_scale_shuffled_bytes =
-          static_cast<size_t>(a_scale_output_rows) *
-          static_cast<size_t>(KScale) *
-          sizeof(AScaleType);
-      const size_t b_scale_shuffled_bytes =
-          static_cast<size_t>(b_scale_output_rows) *
-          static_cast<size_t>(KScale) *
-          sizeof(BScaleType);
-      const size_t scale_pair_bytes =
-          a_scale_shuffled_bytes + b_scale_shuffled_bytes;
-      
-      scale_workspace_end =
-          (scale_workspace_end / kScaleWorkspaceAlign) * kScaleWorkspaceAlign;
+        static_cast<ck_tile::index_t>(M),
+        static_cast<ck_tile::index_t>(GroupedGemKernelParam_Wmma::M_Warp_Tile));
+    const int b_scale_actual_rows = static_cast<int>(N);
+    const int b_scale_output_rows = static_cast<int>(N);
+    const size_t a_scale_shuffled_bytes =
+      static_cast<size_t>(a_scale_output_rows) *
+      static_cast<size_t>(KScale) *
+      sizeof(AScaleType);
+    const size_t b_scale_shuffled_bytes =
+      static_cast<size_t>(b_scale_output_rows) *
+      static_cast<size_t>(KScale) *
+      sizeof(BScaleType);
+    const size_t scale_pair_bytes =
+      a_scale_shuffled_bytes + b_scale_shuffled_bytes;
+    scale_workspace_end =
+      (scale_workspace_end / kScaleWorkspaceAlign) * kScaleWorkspaceAlign;
 
-      NVTE_CHECK(scale_workspace_end >= scale_pair_bytes,
-                 "ck_tile_mx_grouped_gemm: insufficient workspace for shuffled MXFP8 scales. "
-                 "Need current group scale bytes=", scale_pair_bytes,
-                 ", available workspace bytes=", scale_workspace_end,
-                 ". Increase the grouped GEMM workspace size.");
+    NVTE_CHECK(scale_workspace_end >= scale_pair_bytes,
+               "ck_tile_mx_grouped_gemm: insufficient workspace for shuffled MXFP8 scales. "
+               "Need current group scale bytes=", scale_pair_bytes,
+               ", available workspace bytes=", scale_workspace_end,
+               ". Increase the grouped GEMM workspace size.");
 
-      scale_workspace_end -= scale_pair_bytes;
-      uint8_t* scale_pair_ptr = scale_workspace_base + scale_workspace_end;
+    scale_workspace_end -= scale_pair_bytes;
+    uint8_t *scale_pair_ptr = scale_workspace_base + scale_workspace_end;
 
-      void* a_scale_shuffled_ptr = scale_pair_ptr;
-      void* b_scale_shuffled_ptr = scale_pair_ptr + a_scale_shuffled_bytes;
+    void *a_scale_shuffled_ptr = scale_pair_ptr;
+    void *b_scale_shuffled_ptr = scale_pair_ptr + a_scale_shuffled_bytes;
 
-      // CK expects canonical pre-shuffled scale buffers laid out as
-      // A: [M, KScale] and B: [N, KScale], independent of A/B data layouts.
-      // TE rowwise MXFP8 scale_inv is [rows, KScale] and can be read with
-      // KStride=true. TE columnwise_scale_inv is [KScale, rows] and must be
-      // read with KStride=false before writing CK's canonical shuffled layout.
-      if (ctx.use_a_columnwise_data) {
-        preShuffleScaleBuffer_gfx1250<AScaleType, ScaleBlockSize, false>(
-            reinterpret_cast<const AScaleType*>(a_scales.dptr),
-            reinterpret_cast<AScaleType*>(a_scale_shuffled_ptr),
-            a_scale_actual_rows,
-            a_scale_output_rows,
-            KScale,
-            stream);
-      } else {
-        preShuffleScaleBuffer_gfx1250<AScaleType, ScaleBlockSize, true>(
-            reinterpret_cast<const AScaleType*>(a_scales.dptr),
-            reinterpret_cast<AScaleType*>(a_scale_shuffled_ptr),
-            a_scale_actual_rows,
-            a_scale_output_rows,
-            KScale,
-            stream);
-      }
+    // CK expects canonical pre-shuffled scale buffers laid out as
+    // A: [M, KScale] and B: [N, KScale], independent of A/B data layouts.
+    // TE rowwise MXFP8 scale_inv is [rows, KScale] and can be read with
+    // KStride=true. TE columnwise_scale_inv is [KScale, rows] and must be
+    // read with KStride=false before writing CK's canonical shuffled layout.
+    if (ctx.use_a_columnwise_data) {
+      preShuffleScaleBuffer_gfx1250<AScaleType, ScaleBlockSize, false>(
+        reinterpret_cast<const AScaleType *>(a_scales.dptr),
+        reinterpret_cast<AScaleType *>(a_scale_shuffled_ptr),
+        a_scale_actual_rows,
+        a_scale_output_rows,
+        KScale,
+        stream);
+    } else {
+      preShuffleScaleBuffer_gfx1250<AScaleType, ScaleBlockSize, true>(
+        reinterpret_cast<const AScaleType *>(a_scales.dptr),
+        reinterpret_cast<AScaleType *>(a_scale_shuffled_ptr),
+        a_scale_actual_rows,
+        a_scale_output_rows,
+        KScale,
+        stream);
+    }
 
-      if (ctx.use_b_columnwise_data) {
-        preShuffleScaleBuffer_gfx1250<BScaleType, ScaleBlockSize, false>(
-            reinterpret_cast<const BScaleType*>(b_scales.dptr),
-            reinterpret_cast<BScaleType*>(b_scale_shuffled_ptr),
-            b_scale_actual_rows,
-            b_scale_output_rows,
-            KScale,
-            stream);
-      } else {
-        preShuffleScaleBuffer_gfx1250<BScaleType, ScaleBlockSize, true>(
-            reinterpret_cast<const BScaleType*>(b_scales.dptr),
-            reinterpret_cast<BScaleType*>(b_scale_shuffled_ptr),
-            b_scale_actual_rows,
-            b_scale_output_rows,
-            KScale,
-            stream);
-      }
-      descs.emplace_back(mx_grouped_gemm_kargs(
-                         a.dptr,
-                         a_scale_shuffled_ptr,
-                         b.dptr,
-                         b_scale_shuffled_ptr,
-                         {/*ds_ptr*/},
-                         d.dptr,
-                         1,//kbatch
-                         M,
-                         N,
-                         K,
-                         stride_A,
-                         stride_B,
-                         {/*stride_Ds*/},
-                         stride_E));
+    if (ctx.use_b_columnwise_data) {
+      preShuffleScaleBuffer_gfx1250<BScaleType, ScaleBlockSize, false>(
+        reinterpret_cast<const BScaleType *>(b_scales.dptr),
+        reinterpret_cast<BScaleType *>(b_scale_shuffled_ptr),
+        b_scale_actual_rows,
+        b_scale_output_rows,
+        KScale,
+        stream);
+    } else {
+      preShuffleScaleBuffer_gfx1250<BScaleType, ScaleBlockSize, true>(
+        reinterpret_cast<const BScaleType *>(b_scales.dptr),
+        reinterpret_cast<BScaleType *>(b_scale_shuffled_ptr),
+        b_scale_actual_rows,
+        b_scale_output_rows,
+        KScale,
+        stream);
+    }
+    descs.emplace_back(mx_grouped_gemm_kargs(
+        a.dptr,
+        a_scale_shuffled_ptr,
+        b.dptr,
+        b_scale_shuffled_ptr,
+        {/*ds_ptr*/},
+        d.dptr,
+        1,  // kbatch
+        M,
+        N,
+        K,
+        stride_A,
+        stride_B,
+        {/*stride_Ds*/},
+        stride_E));
   }
   ctx.workspace_bytes = scale_workspace_end;
 
-  // invoke gemm
+  // Invoke the GEMM.
   bool ok = false;
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(a_dtype, a_te_type, {
     using AType = typename TETypeToCKType<a_te_type>::type;
@@ -542,7 +545,7 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
         using CType = typename TETypeToCKType<d_te_type>::type;
         ok = invoke_mx_grouped_gemm<GroupedGemKernelParam_Wmma,
                                     AType, BType, CType,
-                                    AScaleType, BScaleType>(descs,ctx,s);
+                                    AScaleType, BScaleType>(descs, ctx, s);
       });
     });
   });
@@ -552,15 +555,15 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
 }  // namespace grouped_gemm
 }  // namespace transformer_engine
 
-bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
-                             const NVTETensor* B,
-                             NVTETensor* D,
+bool ck_tile_mx_grouped_gemm(const NVTETensor *A,
+                             const NVTETensor *B,
+                             NVTETensor *D,
                              int group_num,
                              bool transA,
                              bool transB,
-                             NVTETensor* workspace,
+                             NVTETensor *workspace,
                              bool accumulate,
                              hipStream_t stream) {
   return transformer_engine::grouped_gemm::ck_tile_mx_grouped_gemm(
-      A, B, D, group_num, transA, transB, workspace, accumulate, stream);
+    A, B, D, group_num, transA, transB, workspace, accumulate, stream);
 }
