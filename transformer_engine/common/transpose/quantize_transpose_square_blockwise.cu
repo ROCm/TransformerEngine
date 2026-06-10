@@ -28,14 +28,6 @@
 namespace transformer_engine {
 namespace {
 
-#ifdef __HIP_PLATFORM_AMD__
-using WarpSyncMask = uint64_t;
-constexpr WarpSyncMask kFullWarpMask = 0xFFFFFFFFFFFFFFFFULL;
-#else
-using WarpSyncMask = unsigned;
-constexpr WarpSyncMask kFullWarpMask = 0xFFFFFFFFu;
-#endif
-
 // const values configuration
 
 #if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx1250__)
@@ -161,7 +153,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
   warp_tile_amax = warp_reduce_max<kThreadsPerWarp>(amax);
   // broadcast the amax to all threads in a warp from the lane 0
   constexpr int lane_zero = 0;
-  warp_tile_amax = __shfl_sync(kFullWarpMask, warp_tile_amax, lane_zero);
+  warp_tile_amax = __shfl_sync(0xFFFFFFFF, warp_tile_amax, lane_zero);
 
   // reduce warp_tile_amax across multiple warps in a thread block using shared mem
   if (tid_in_warp == 0) {
@@ -393,7 +385,11 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
 #endif
   // broadcast the amax to all threads in a warp from the lane 0
   constexpr int lane_zero = 0;
-  warp_tile_amax = __shfl_sync(kFullWarpMask, warp_tile_amax, lane_zero);
+#ifdef __HIP_PLATFORM_AMD__
+  warp_tile_amax = __shfl(warp_tile_amax, lane_zero, kThreadsPerWarp);
+#else
+  warp_tile_amax = __shfl_sync(0xFFFFFFFF, warp_tile_amax, lane_zero);
+#endif  
 
   // reduce warp_tile_amax across multiple warps in a thread block using shared mem
   if (tid_in_warp == 0) {

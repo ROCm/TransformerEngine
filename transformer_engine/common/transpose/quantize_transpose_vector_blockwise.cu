@@ -30,10 +30,8 @@ using transformer_engine::detail::FP8BlockwiseRowwiseOption;
 
 #ifdef __HIP_PLATFORM_AMD__
 using WarpSyncMask = uint64_t;
-constexpr WarpSyncMask kFullWarpMask = 0xFFFFFFFFFFFFFFFFULL;
 #else
 using WarpSyncMask = unsigned;
-constexpr WarpSyncMask kFullWarpMask = 0xFFFFFFFFu;
 #endif
 
 // clang-format off
@@ -493,7 +491,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         const bool is_src_lane = thr_idx_in_warp == 0;
         amax = warp_reduce_max<kThreadsPerWarp>(amax);
         constexpr int lane_zero = 0;
-        amax = __shfl_sync(kFullWarpMask, amax, lane_zero);
+#ifdef __HIP_PLATFORM_AMD__
+        amax = __shfl(amax, lane_zero, kThreadsPerWarp);
+#else
+        amax = __shfl_sync(0xFFFFFFFF, amax, lane_zero);
+#endif
         // Step 3.4: Compute scale
         CType scale;
         scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scaling);
