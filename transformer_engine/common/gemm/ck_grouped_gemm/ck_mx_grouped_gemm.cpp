@@ -428,10 +428,10 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor *A,
       NVTE_ERROR("ck_tile_mx_grouped_gemm: expected effective A/B scale_inv tensors to be rank-2.");
     }
 
-    const int64_t M = ctx.transA ? Ad1 : Ad0;
-    const int64_t K = ctx.transA ? Ad0 : Ad1;
-    const int64_t N = ctx.transB ? Bd0 : Bd1;
-    const int64_t Kb = ctx.transB ? Bd1 : Bd0;
+    const size_t M = ctx.transA ? Ad1 : Ad0;
+    const size_t K = ctx.transA ? Ad0 : Ad1;
+    const size_t N = ctx.transB ? Bd0 : Bd1;
+    const size_t Kb = ctx.transB ? Bd1 : Bd0;
     if (K % ScaleBlockSize != 0) {
       NVTE_ERROR("ck_tile_mx_grouped_gemm: K must be a multiple of ScaleBlockSize for MX GEMM", i);
     }
@@ -491,52 +491,29 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor *A,
       preShuffleScaleBuffer_gfx1250<AScaleType, ScaleBlockSize, false>(
         reinterpret_cast<const AScaleType *>(a_scales.dptr),
         reinterpret_cast<AScaleType *>(a_scale_shuffled_ptr),
-        a_scale_actual_rows,
-        a_scale_output_rows,
-        KScale,
-        stream);
+        a_scale_actual_rows, a_scale_output_rows, KScale, stream);
     } else {
       preShuffleScaleBuffer_gfx1250<AScaleType, ScaleBlockSize, true>(
         reinterpret_cast<const AScaleType *>(a_scales.dptr),
         reinterpret_cast<AScaleType *>(a_scale_shuffled_ptr),
-        a_scale_actual_rows,
-        a_scale_output_rows,
-        KScale,
-        stream);
+        a_scale_actual_rows, a_scale_output_rows, KScale, stream);
     }
 
     if (ctx.use_b_columnwise_data) {
       preShuffleScaleBuffer_gfx1250<BScaleType, ScaleBlockSize, false>(
         reinterpret_cast<const BScaleType *>(b_scales.dptr),
         reinterpret_cast<BScaleType *>(b_scale_shuffled_ptr),
-        b_scale_actual_rows,
-        b_scale_output_rows,
-        KScale,
-        stream);
+        b_scale_actual_rows, b_scale_output_rows, KScale, stream);
     } else {
       preShuffleScaleBuffer_gfx1250<BScaleType, ScaleBlockSize, true>(
         reinterpret_cast<const BScaleType *>(b_scales.dptr),
         reinterpret_cast<BScaleType *>(b_scale_shuffled_ptr),
-        b_scale_actual_rows,
-        b_scale_output_rows,
-        KScale,
-        stream);
+        b_scale_actual_rows, b_scale_output_rows, KScale, stream);
     }
     descs.emplace_back(mx_grouped_gemm_kargs(
-        a.dptr,
-        a_scale_shuffled_ptr,
-        b.dptr,
-        b_scale_shuffled_ptr,
-        {/*ds_ptr*/},
-        d.dptr,
-        1,  // kbatch
-        M,
-        N,
-        K,
-        stride_A,
-        stride_B,
-        {/*stride_Ds*/},
-        stride_E));
+      a.dptr, a_scale_shuffled_ptr, b.dptr, b_scale_shuffled_ptr,
+      {/*ds_ptr*/}, d.dptr, 1,  // kbatch
+      M, N, K, stride_A, stride_B, {/*stride_Ds*/}, stride_E));
   }
   ctx.workspace_bytes = scale_workspace_end;
 
@@ -551,9 +528,9 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor *A,
         ok = invoke_mx_grouped_gemm<GroupedGemKernelParam_Wmma,
                                     AType, BType, CType,
                                     AScaleType, BScaleType>(descs, ctx, s);
-      });
-    });
-  });
+      });  // NOLINT(*)
+    });  // NOLINT(*)
+  });  // NOLINT(*)
   return ok;
 }
 
