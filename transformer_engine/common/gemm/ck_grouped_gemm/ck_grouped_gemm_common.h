@@ -18,6 +18,7 @@
 
 #include "common/util/cuda_runtime.h"
 #include "../../common.h"
+#include "../../common/util/system.h"
 
 #include "ck_tile/core.hpp"
 #include "ck_tile/host/kernel_launch.hpp"

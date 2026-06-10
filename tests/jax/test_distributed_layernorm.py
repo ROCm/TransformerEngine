@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -132,7 +134,7 @@ class TestDistributedLayernorm:
         )
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, autocast(enabled=True, recipe=fp8_recipe, mesh_resource=mesh_resource):
+        with jax.set_mesh(mesh), autocast(enabled=True, recipe=fp8_recipe, mesh_resource=mesh_resource):
             x_named_sharding = NamedSharding(mesh, x_pspec)
             g_named_sharding = NamedSharding(mesh, g_pspec)
             b_named_sharding = NamedSharding(mesh, b_pspec)
@@ -211,7 +213,7 @@ class TestDistributedLayernorm:
         )
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, autocast(enabled=True, recipe=fp8_recipe, mesh_resource=mesh_resource):
+        with jax.set_mesh(mesh), autocast(enabled=True, recipe=fp8_recipe, mesh_resource=mesh_resource):
             x_named_sharding = NamedSharding(mesh, x_pspec)
             g_named_sharding = NamedSharding(mesh, g_pspec)
             x_ = jax.device_put(x, x_named_sharding)
