@@ -1204,10 +1204,9 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 #ifdef __HIP_PLATFORM_AMD__
       true)                               {
     auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
-    const bool mxfp8_gemm = transformer_engine::is_mxfp8_scaling(inputA->scaling_mode);
 
     bool handled_by_ck = false;
-    if (mxfp8_gemm) {
+    if (transformer_engine::is_mxfp8_scaling(inputA->scaling_mode)) {
       handled_by_ck = ck_tile_mx_grouped_gemm(
           A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
     } else {
