@@ -29,6 +29,7 @@
 #include "../common.h"
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
+#include "../util/cuda_runtime.h"
 
 namespace transformer_engine {
 
@@ -310,14 +311,26 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     // dimensions (with matrix interpreted in row-major order).
     if (is_A_transposed) {
       NVTE_CHECK(A.has_data(), "Input A is missing row-wise usage");
+      ret.A = A.data.dptr;
+      ret.transA = CUBLAS_OP_T;
+      ret.Atype = A.data.dtype;
+      ret.A_scale_inv = A.scale_inv.dptr;
+      ret.lda = k;
     } else {
       NVTE_CHECK(A.has_columnwise_data(), "Input A is missing column-wise usage");
+      ret.A = A.columnwise_data.dptr;
+      ret.Atype = A.columnwise_data.dtype;
+      ret.A_scale_inv = A.columnwise_scale_inv.dptr;
+      // On gfx1250, hipBLASLt only supports TN layout for MXFP8.
+      // Convert A from N to T using columnwise data (same as tensor scaling).
+      if (cuda::sm_arch() == 125) {
+        ret.transA = CUBLAS_OP_T;
+        ret.lda = k;
+      } else {
+        ret.transA = transA;
+        ret.lda = m;
+      }
     }
-    ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
-    ret.transA = transA;
-    ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
-    ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
-    ret.lda = is_A_transposed ? k : m;
   } else if (is_nvfp_scaling(A.scaling_mode)) {
     // NVFP4: dequant path always produces TN layout for the BF16 GEMM,
     // but the source data may come from either rowwise or columnwise buffers.
@@ -355,14 +368,26 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     // dimensions (with matrix interpreted in row-major order).
     if (is_B_transposed) {
       NVTE_CHECK(B.has_columnwise_data(), "Input B is missing column-wise usage");
+      ret.B = B.columnwise_data.dptr;
+      ret.Btype = B.columnwise_data.dtype;
+      ret.B_scale_inv = B.columnwise_scale_inv.dptr;
+      // On gfx1250, hipBLASLt only supports TN layout for MXFP8.
+      // Convert B from T to N using columnwise data (same as tensor scaling).
+      if (cuda::sm_arch() == 125) {
+        ret.transB = CUBLAS_OP_N;
+        ret.ldb = k;
+      } else {
+        ret.transB = transB;
+        ret.ldb = n;
+      }
     } else {
       NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
+      ret.B = B.data.dptr;
+      ret.transB = CUBLAS_OP_N;
+      ret.Btype = B.data.dtype;
+      ret.B_scale_inv = B.scale_inv.dptr;
+      ret.ldb = k;
     }
-    ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
-    ret.transB = transB;
-    ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
-    ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
-    ret.ldb = is_B_transposed ? n : k;
   } else if (is_nvfp_scaling(B.scaling_mode)) {
     // NVFP4: dequant path always produces TN layout for the BF16 GEMM,
     // but the source data may come from either rowwise or columnwise buffers.
