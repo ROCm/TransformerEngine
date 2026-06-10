@@ -53,13 +53,18 @@ struct GroupedGemKernelParam_Wmma {
 
 // gfx1250 scale preshuffle.
 //
+// Unlike the existing MXFP8 GEMM scale swizzle defined in:
+//   transformer_engine/common/swizzle/swizzle.cu
+//
+// CK gfx1250 WMMA kernels expect scales in the layout below:
+//
 // Input scales are logically [MN, KScale]
 //
 // The output layout groups KScale into tiles of 4 (= 128 / ScaleBlockSize)
 // and additionally blocks M into chunks of 32 rows:
 //
-//   [MN, KScale]
-//     -> [MN/32, KScale/4, 32, 4]
+//  [MN, KScale]
+//    -> [MN/32, KScale/4, 32, 4]
 //
 // For A scales, rows=M and output_rows is M padded to M_Warp_Tile.
 // For B scales, rows=N and output_rows is currently N.
