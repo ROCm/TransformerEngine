@@ -360,10 +360,15 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
   std::vector<mx_grouped_gemm_kargs> descs;
   descs.reserve(group_num);
 
-  std::vector<std::unique_ptr<ck_tile::DeviceMem>> a_scale_shuffled_bufs;
-  std::vector<std::unique_ptr<ck_tile::DeviceMem>> b_scale_shuffled_bufs;
-  a_scale_shuffled_bufs.reserve(group_num);
-  b_scale_shuffled_bufs.reserve(group_num);
+  NVTE_CHECK(ctx.workspace != nullptr,
+             "ck_tile_mx_grouped_gemm: workspace is required for shuffled MXFP8 scales.");
+
+  // Carve regions from the end of the workspace for mxfp8 scales.
+  // Layout: [CK kargs workspace ... | a_scales (i) | b_scales (i) | ... | a_scales (group_num-1) | b_scales (group_num-1)]
+  constexpr size_t kScaleWorkspaceAlign = 256;
+  uint8_t* scale_workspace_base = reinterpret_cast<uint8_t*>(ctx.workspace);
+  size_t scale_workspace_end =
+    (ctx.workspace_bytes / kScaleWorkspaceAlign) * kScaleWorkspaceAlign;
 
   for (int i = 0; i < group_num; i++) {
       const transformer_engine::Tensor* const A_te =
@@ -439,12 +444,24 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
           static_cast<size_t>(b_scale_output_rows) *
           static_cast<size_t>(KScale) *
           sizeof(BScaleType);
-      a_scale_shuffled_bufs.push_back(
-          std::make_unique<ck_tile::DeviceMem>(a_scale_shuffled_bytes));
-      b_scale_shuffled_bufs.push_back(
-          std::make_unique<ck_tile::DeviceMem>(b_scale_shuffled_bytes));
-      void* a_scale_shuffled_ptr = a_scale_shuffled_bufs.back()->GetDeviceBuffer();
-      void* b_scale_shuffled_ptr = b_scale_shuffled_bufs.back()->GetDeviceBuffer();
+      const size_t scale_pair_bytes =
+          a_scale_shuffled_bytes + b_scale_shuffled_bytes;
+      
+      scale_workspace_end =
+          (scale_workspace_end / kScaleWorkspaceAlign) * kScaleWorkspaceAlign;
+
+      NVTE_CHECK(scale_workspace_end >= scale_pair_bytes,
+                 "ck_tile_mx_grouped_gemm: insufficient workspace for shuffled MXFP8 scales. "
+                 "Need current group scale bytes=", scale_pair_bytes,
+                 ", available workspace bytes=", scale_workspace_end,
+                 ". Increase the grouped GEMM workspace size.");
+
+      scale_workspace_end -= scale_pair_bytes;
+      uint8_t* scale_pair_ptr = scale_workspace_base + scale_workspace_end;
+
+      void* a_scale_shuffled_ptr = scale_pair_ptr;
+      void* b_scale_shuffled_ptr = scale_pair_ptr + a_scale_shuffled_bytes;
+
       // CK expects canonical pre-shuffled scale buffers laid out as
       // A: [M, KScale] and B: [N, KScale], independent of A/B data layouts.
       // TE rowwise MXFP8 scale_inv is [rows, KScale] and can be read with
@@ -501,6 +518,8 @@ bool ck_tile_mx_grouped_gemm(const NVTETensor* A,
                          {/*stride_Ds*/},
                          stride_E));
   }
+  ctx.workspace_bytes = scale_workspace_end;
+
   // invoke gemm
   bool ok = false;
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(a_dtype, a_te_type, {
