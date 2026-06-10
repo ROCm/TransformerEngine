@@ -151,7 +151,7 @@ void nvte_multi_tensor_adam_param_remainder_cuda(
  * \warning   This API is **experimental** and subject to change.
  */
 void nvte_multi_tensor_adam_param_remainder_cuda_custom(
-    int chunk_size, NVTETensor noop_flag, NVTEDType grad_dtype,
+    int chunk_size, NVTETensor noop_flag, NVTEDType grad_dtype, NVTEDType moment_dtype,
     int64_t *addresses, int64_t *sizes, int *block_to_tensor, int *chunk_offsets,
     int total_chunks,
     const float lr, const float beta1, const float beta2,
@@ -166,6 +166,7 @@ void nvte_multi_tensor_adam_param_remainder_cuda_custom(
  */
 void nvte_multi_tensor_adam_cuda_custom(
     int chunk_size, NVTETensor noop_flag, NVTEDType grad_dtype, NVTEDType param_dtype,
+    NVTEDType moment_dtype,
     int64_t *addresses, int64_t *sizes, int *block_to_tensor, int *chunk_offsets,
     int total_chunks, int has_master,
     const float lr, const float beta1, const float beta2,

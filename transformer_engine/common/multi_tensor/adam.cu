@@ -986,7 +986,7 @@ void multi_tensor_adam_capturable_master_cuda(int chunk_size, Tensor noop_flag,
 
 static constexpr int CILP = 8;
 
-template <typename GRAD_T, adamMode_t MODE>
+template <typename GRAD_T, typename MOMENT_T, adamMode_t MODE>
 __global__ __launch_bounds__(BLOCK_SIZE)
 void custom_adam_param_remainder_kernel(
     const int chunk_size,
@@ -1012,10 +1012,10 @@ void custom_adam_param_remainder_kernel(
       reinterpret_cast<GRAD_T *>(addresses[tensor_loc * 5 + 0]);
   int16_t * __restrict__ p =
       reinterpret_cast<int16_t *>(addresses[tensor_loc * 5 + 1]);
-  float * __restrict__ m =
-      reinterpret_cast<float *>(addresses[tensor_loc * 5 + 2]);
-  float * __restrict__ v =
-      reinterpret_cast<float *>(addresses[tensor_loc * 5 + 3]);
+  MOMENT_T * __restrict__ m =
+      reinterpret_cast<MOMENT_T *>(addresses[tensor_loc * 5 + 2]);
+  MOMENT_T * __restrict__ v =
+      reinterpret_cast<MOMENT_T *>(addresses[tensor_loc * 5 + 3]);
   int16_t * __restrict__ p_remainder =
       reinterpret_cast<int16_t *>(addresses[tensor_loc * 5 + 4]);
 
@@ -1049,11 +1049,6 @@ void custom_adam_param_remainder_kernel(
       load_store_n<CILP>(g_raw, g, 0, i_start / CILP);
       load_store_n<CILP>(local_p, p, 0, i_start / CILP);
       load_store_n<CILP>(local_p_rem, p_remainder, 0, i_start / CILP);
-      // 2x 128-bit for float types
-      load_store_n<4>(r_m, m, 0, i_start / 4);
-      load_store_n<4>(r_m, m, 1, i_start / 4 + 1);
-      load_store_n<4>(r_v, v, 0, i_start / 4);
-      load_store_n<4>(r_v, v, 1, i_start / 4 + 1);
     } else {
 #pragma unroll
       for (int ii = 0; ii < CILP; ii++) {
@@ -1062,15 +1057,23 @@ void custom_adam_param_remainder_kernel(
           g_raw[ii] = g[i];
           local_p[ii] = p[i];
           local_p_rem[ii] = p_remainder[i];
-          r_m[ii] = m[i];
-          r_v[ii] = v[i];
         } else {
           g_raw[ii] = GRAD_T(0);
           local_p[ii] = int16_t(0);
           local_p_rem[ii] = int16_t(0);
-          r_m[ii] = MATH_T(0);
-          r_v[ii] = MATH_T(0);
         }
+      }
+    }
+
+#pragma unroll
+    for (int ii = 0; ii < CILP; ii++) {
+      int i = i_start + ii;
+      if (i < n_this) {
+        r_m[ii] = static_cast<MATH_T>(m[i]);
+        r_v[ii] = static_cast<MATH_T>(v[i]);
+      } else {
+        r_m[ii] = MATH_T(0);
+        r_v[ii] = MATH_T(0);
       }
     }
 
@@ -1119,27 +1122,24 @@ void custom_adam_param_remainder_kernel(
     if (i_start + CILP <= n_this && is_aligned_n<CILP>(p + i_start)) {
       load_store_n<CILP>(p, local_p, i_start / CILP, 0);
       load_store_n<CILP>(p_remainder, local_p_rem, i_start / CILP, 0);
-      load_store_n<4>(m, r_m, i_start / 4, 0);
-      load_store_n<4>(m, r_m, i_start / 4 + 1, 1);
-      load_store_n<4>(v, r_v, i_start / 4, 0);
-      load_store_n<4>(v, r_v, i_start / 4 + 1, 1);
-    } else {
+    }
 #pragma unroll
-      for (int ii = 0; ii < CILP; ii++) {
-        int i = i_start + ii;
-        if (i < n_this) {
+    for (int ii = 0; ii < CILP; ii++) {
+      int i = i_start + ii;
+      if (i < n_this) {
+        if (!(i_start + CILP <= n_this && is_aligned_n<CILP>(p + i_start))) {
           p[i] = local_p[ii];
           p_remainder[i] = local_p_rem[ii];
-          m[i] = r_m[ii];
-          v[i] = r_v[ii];
         }
+        m[i] = static_cast<MOMENT_T>(r_m[ii]);
+        v[i] = static_cast<MOMENT_T>(r_v[ii]);
       }
     }
   }
 }
 
 void multi_tensor_adam_param_remainder_cuda_custom(
-    int chunk_size, Tensor noop_flag, DType grad_dtype,
+    int chunk_size, Tensor noop_flag, DType grad_dtype, DType moment_dtype,
     int64_t *addresses, int64_t *sizes, int *block_to_tensor, int *chunk_offsets,
     int total_chunks,
     const float lr, const float beta1, const float beta2, const float epsilon,
@@ -1156,15 +1156,16 @@ void multi_tensor_adam_param_remainder_cuda_custom(
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
       grad_dtype, grad_type,
-      TRANSFORMER_ENGINE_SWITCH_CONDITION(mode == ADAM_MODE_0, IS_MODE_0,
-          constexpr adamMode_t ADAM_MODE = IS_MODE_0 ? ADAM_MODE_0 : ADAM_MODE_1;
-          custom_adam_param_remainder_kernel<grad_type, ADAM_MODE>
-              <<<total_chunks, BLOCK_SIZE, 0, stream>>>(
-                  chunk_size, reinterpret_cast<int *>(noop_flag.data.dptr),
-                  addresses, sizes, block_to_tensor, chunk_offsets, total_chunks,
-                  beta1, beta2, step_size, beta2_corr_inv, epsilon, lr,
-                  weight_decay);
-      ););  // NOLINT(*)
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
+          moment_dtype, moment_type,
+          TRANSFORMER_ENGINE_SWITCH_CONDITION(mode == ADAM_MODE_0, IS_MODE_0,
+              constexpr adamMode_t ADAM_MODE = IS_MODE_0 ? ADAM_MODE_0 : ADAM_MODE_1;
+              custom_adam_param_remainder_kernel<grad_type, moment_type, ADAM_MODE>
+                  <<<total_chunks, BLOCK_SIZE, 0, stream>>>(
+                      chunk_size, reinterpret_cast<int *>(noop_flag.data.dptr), addresses, sizes,
+                      block_to_tensor, chunk_offsets, total_chunks, beta1, beta2, step_size,
+                      beta2_corr_inv, epsilon, lr, weight_decay);
+          );););  // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
@@ -1172,7 +1173,8 @@ void multi_tensor_adam_param_remainder_cuda_custom(
 // Custom adam kernel (4-list: g, p, m, v) or (5-list: g, p, m, v, p_master)
 // using device-side arrays.
 // ---------------------------------------------------------------------------
-template <typename GRAD_T, typename PARAM_T, adamMode_t MODE, bool HAS_MASTER = false>
+template <typename GRAD_T, typename PARAM_T, typename MOMENT_T, adamMode_t MODE,
+          bool HAS_MASTER = false>
 __global__ __launch_bounds__(BLOCK_SIZE)
 void custom_adam_kernel(
     const int chunk_size,
@@ -1197,10 +1199,10 @@ void custom_adam_kernel(
       reinterpret_cast<GRAD_T *>(addresses[tensor_loc * kDepth + 0]);
   PARAM_T * __restrict__ p =
       reinterpret_cast<PARAM_T *>(addresses[tensor_loc * kDepth + 1]);
-  float * __restrict__ m =
-      reinterpret_cast<float *>(addresses[tensor_loc * kDepth + 2]);
-  float * __restrict__ v =
-      reinterpret_cast<float *>(addresses[tensor_loc * kDepth + 3]);
+  MOMENT_T * __restrict__ m =
+      reinterpret_cast<MOMENT_T *>(addresses[tensor_loc * kDepth + 2]);
+  MOMENT_T * __restrict__ v =
+      reinterpret_cast<MOMENT_T *>(addresses[tensor_loc * kDepth + 3]);
   float * __restrict__ p_master = nullptr;
   if constexpr (HAS_MASTER) {
     p_master = reinterpret_cast<float *>(addresses[tensor_loc * kDepth + 4]);
@@ -1250,10 +1252,6 @@ void custom_adam_kernel(
           r_p[ii] = static_cast<MATH_T>(p_raw[ii]);
         }
       }
-      load_store_n<4>(r_m, m, 0, i_start / 4);
-      load_store_n<4>(r_m, m, 1, i_start / 4 + 1);
-      load_store_n<4>(r_v, v, 0, i_start / 4);
-      load_store_n<4>(r_v, v, 1, i_start / 4 + 1);
     } else {
 #pragma unroll
       for (int ii = 0; ii < CILP; ii++) {
@@ -1265,14 +1263,22 @@ void custom_adam_kernel(
           } else {
             r_p[ii] = static_cast<MATH_T>(p[i]);
           }
-          r_m[ii] = m[i];
-          r_v[ii] = v[i];
         } else {
           g_raw[ii] = GRAD_T(0);
           r_p[ii] = MATH_T(0);
-          r_m[ii] = MATH_T(0);
-          r_v[ii] = MATH_T(0);
         }
+      }
+    }
+
+#pragma unroll
+    for (int ii = 0; ii < CILP; ii++) {
+      int i = i_start + ii;
+      if (i < n_this) {
+        r_m[ii] = static_cast<MATH_T>(m[i]);
+        r_v[ii] = static_cast<MATH_T>(v[i]);
+      } else {
+        r_m[ii] = MATH_T(0);
+        r_v[ii] = MATH_T(0);
       }
     }
 
@@ -1315,22 +1321,19 @@ void custom_adam_kernel(
         load_store_n<4>(p_master, r_p, i_start / 4, 0);
         load_store_n<4>(p_master, r_p, i_start / 4 + 1, 1);
       }
-      load_store_n<4>(m, r_m, i_start / 4, 0);
-      load_store_n<4>(m, r_m, i_start / 4 + 1, 1);
-      load_store_n<4>(v, r_v, i_start / 4, 0);
-      load_store_n<4>(v, r_v, i_start / 4 + 1, 1);
-    } else {
+    }
 #pragma unroll
-      for (int ii = 0; ii < CILP; ii++) {
-        int i = i_start + ii;
-        if (i < n_this) {
+    for (int ii = 0; ii < CILP; ii++) {
+      int i = i_start + ii;
+      if (i < n_this) {
+        if (!(i_start + CILP <= n_this && is_aligned_n<CILP>(p + i_start))) {
           p[i] = static_cast<PARAM_T>(r_p[ii]);
           if constexpr (HAS_MASTER) {
             p_master[i] = r_p[ii];
           }
-          m[i] = r_m[ii];
-          v[i] = r_v[ii];
         }
+        m[i] = static_cast<MOMENT_T>(r_m[ii]);
+        v[i] = static_cast<MOMENT_T>(r_v[ii]);
       }
     }
   }
@@ -1338,8 +1341,8 @@ void custom_adam_kernel(
 
 void multi_tensor_adam_cuda_custom(
     int chunk_size, Tensor noop_flag, DType grad_dtype, DType param_dtype,
-    int64_t *addresses, int64_t *sizes, int *block_to_tensor, int *chunk_offsets,
-    int total_chunks, bool has_master,
+    DType moment_dtype, int64_t *addresses, int64_t *sizes, int *block_to_tensor,
+    int *chunk_offsets, int total_chunks, bool has_master,
     const float lr, const float beta1, const float beta2, const float epsilon,
     const int step, const int mode, const int bias_correction,
     const float weight_decay, cudaStream_t stream) {
@@ -1352,8 +1355,8 @@ void multi_tensor_adam_cuda_custom(
   const float step_size = lr / bias_correction1;
   const float beta2_corr_inv = 1.0f / bias_correction2;
 
-#define LAUNCH_CUSTOM_ADAM(g_type, p_type, adam_mode, master_flag) \
-  custom_adam_kernel<g_type, p_type, adam_mode, master_flag> \
+#define LAUNCH_CUSTOM_ADAM(g_type, p_type, m_type, adam_mode, master_flag) \
+  custom_adam_kernel<g_type, p_type, m_type, adam_mode, master_flag> \
       <<<total_chunks, BLOCK_SIZE, 0, stream>>>( \
           chunk_size, reinterpret_cast<int *>(noop_flag.data.dptr), \
           addresses, sizes, block_to_tensor, chunk_offsets, total_chunks, \
@@ -1365,19 +1368,23 @@ void multi_tensor_adam_cuda_custom(
         param_dtype, p_type,
         TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
             grad_dtype, g_type,
-            TRANSFORMER_ENGINE_SWITCH_CONDITION(mode == ADAM_MODE_0, IS_MODE_0,
-                constexpr adamMode_t ADAM_MODE = IS_MODE_0 ? ADAM_MODE_0 : ADAM_MODE_1;
-                LAUNCH_CUSTOM_ADAM(g_type, p_type, ADAM_MODE, true);
-            );););  // NOLINT(*)
+            TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
+                moment_dtype, m_type,
+                TRANSFORMER_ENGINE_SWITCH_CONDITION(mode == ADAM_MODE_0, IS_MODE_0,
+                    constexpr adamMode_t ADAM_MODE = IS_MODE_0 ? ADAM_MODE_0 : ADAM_MODE_1;
+                    LAUNCH_CUSTOM_ADAM(g_type, p_type, m_type, ADAM_MODE, true);
+                ););););  // NOLINT(*)
   } else {
     TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
         param_dtype, p_type,
         TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
             grad_dtype, g_type,
-            TRANSFORMER_ENGINE_SWITCH_CONDITION(mode == ADAM_MODE_0, IS_MODE_0,
-                constexpr adamMode_t ADAM_MODE = IS_MODE_0 ? ADAM_MODE_0 : ADAM_MODE_1;
-                LAUNCH_CUSTOM_ADAM(g_type, p_type, ADAM_MODE, false);
-            );););  // NOLINT(*)
+            TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(
+                moment_dtype, m_type,
+                TRANSFORMER_ENGINE_SWITCH_CONDITION(mode == ADAM_MODE_0, IS_MODE_0,
+                    constexpr adamMode_t ADAM_MODE = IS_MODE_0 ? ADAM_MODE_0 : ADAM_MODE_1;
+                    LAUNCH_CUSTOM_ADAM(g_type, p_type, m_type, ADAM_MODE, false);
+                ););););  // NOLINT(*)
   }
 
 #undef LAUNCH_CUSTOM_ADAM
@@ -1463,7 +1470,7 @@ void nvte_multi_tensor_adam_capturable_master_cuda(
 }
 
 void nvte_multi_tensor_adam_param_remainder_cuda_custom(
-    int chunk_size, NVTETensor noop_flag, NVTEDType grad_dtype,
+    int chunk_size, NVTETensor noop_flag, NVTEDType grad_dtype, NVTEDType moment_dtype,
     int64_t *addresses, int64_t *sizes, int *block_to_tensor, int *chunk_offsets,
     int total_chunks,
     const float lr, const float beta1, const float beta2,
@@ -1474,14 +1481,15 @@ void nvte_multi_tensor_adam_param_remainder_cuda_custom(
 
   multi_tensor_adam::multi_tensor_adam_param_remainder_cuda_custom(
       chunk_size, *convertNVTETensorCheck(noop_flag), static_cast<DType>(grad_dtype),
+      static_cast<DType>(moment_dtype),
       addresses, sizes, block_to_tensor, chunk_offsets, total_chunks,
       lr, beta1, beta2, epsilon, step, mode, bias_correction, weight_decay, stream);
 }
 
 void nvte_multi_tensor_adam_cuda_custom(
     int chunk_size, NVTETensor noop_flag, NVTEDType grad_dtype, NVTEDType param_dtype,
-    int64_t *addresses, int64_t *sizes, int *block_to_tensor, int *chunk_offsets,
-    int total_chunks, int has_master,
+  NVTEDType moment_dtype, int64_t *addresses, int64_t *sizes,
+  int *block_to_tensor, int *chunk_offsets, int total_chunks, int has_master,
     const float lr, const float beta1, const float beta2,
     const float epsilon, const int step, const int mode, const int bias_correction,
     const float weight_decay, cudaStream_t stream) {
@@ -1491,6 +1499,7 @@ void nvte_multi_tensor_adam_cuda_custom(
   multi_tensor_adam::multi_tensor_adam_cuda_custom(
       chunk_size, *convertNVTETensorCheck(noop_flag),
       static_cast<DType>(grad_dtype), static_cast<DType>(param_dtype),
+      static_cast<DType>(moment_dtype),
       addresses, sizes, block_to_tensor, chunk_offsets, total_chunks,
       has_master != 0,
       lr, beta1, beta2, epsilon, step, mode, bias_correction, weight_decay, stream);
