@@ -138,7 +138,7 @@ class FusedAttnBenchRunner(FusedAttnRunner):
                 self.dropout_rng_sharding,
             ],
         )
-        with self.mesh, fp8_autocast(mesh_resource=self.mesh_resource):
+        with jax.set_mesh(self.mesh), fp8_autocast(mesh_resource=self.mesh_resource):
             for _ in range(warmup):
                 customcall_fused_dpa_jit(*customcall_args)
 
@@ -233,7 +233,7 @@ class FusedAttnBenchRunner(FusedAttnRunner):
             ),
             out_shardings=(None, grad_shardings),
         )
-        with self.mesh, fp8_autocast(mesh_resource=self.mesh_resource):
+        with jax.set_mesh(self.mesh), fp8_autocast(mesh_resource=self.mesh_resource):
             for _ in range(warmup):
                 jitted_primitive(*customcall_args)
 
