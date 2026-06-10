@@ -124,9 +124,9 @@ _rmsnorm_bwd_dg_reduce_kernels = {
 }
 
 
-_TARGET_PRGMS_PER_CU = 8 
-_MAX_PRGMS_PER_CU = 16 
-_I32_OFFSET_LIMIT = 1 << 31 
+_TARGET_PRGMS_PER_CU = 8
+_MAX_PRGMS_PER_CU = 16
+_I32_OFFSET_LIMIT = 1 << 31
 
 _FWD_FLAT_GRID_MAX_H = 2048
 
