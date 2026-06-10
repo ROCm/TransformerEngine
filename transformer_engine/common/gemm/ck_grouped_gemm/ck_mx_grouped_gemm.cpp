@@ -54,6 +54,18 @@ struct GroupedGemKernelParam_Wmma
     static constexpr ck_tile::index_t K_Warp_Tile = 128;
 };
 
+// gfx1250 scale preshuffle.
+//
+// Input scales are logically [MN, KScale]
+//
+// The output layout groups KScale into tiles of 4 (= 128 / ScaleBlockSize)
+// and additionally blocks M into chunks of 32 rows:
+//
+//   [MN, KScale]
+//     -> [MN/32, KScale/4, 32, 4]
+//
+// For A scales, rows=M and output_rows is M padded to M_Warp_Tile.
+// For B scales, rows=N and output_rows is currently N.
 template <typename ScaleType, ck_tile::index_t ScaleBlockSize, bool KStride>
 __global__ void preshuffle_scale_gfx1250_kernel(const ScaleType* __restrict__ src,
                                                 ScaleType* __restrict__ dst,
