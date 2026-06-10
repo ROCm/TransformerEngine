@@ -7,6 +7,7 @@ import triton
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+from transformer_engine.pytorch.utils import get_sm_count
 from .common import te_dtype_to_torch_dtype
 
 def get_ln_sm_margin(sm_margin_type):
@@ -33,18 +34,8 @@ def get_inf_ln_sm_margin():
     return get_ln_sm_margin("INF")
 
 
-# Per-device SM count cache. get_num_sms is called on every RMSNorm dispatch
-# (forward and backward), and get_device_properties is a driver round-trip;
-# the active device's SM count is constant, so cache it.
-_NUM_SMS_CACHE: "dict[int, int]" = {}
-
-
 def get_num_sms(sm_margin=None):
-    dev = torch.cuda.current_device()
-    n = _NUM_SMS_CACHE.get(dev)
-    if n is None:
-        n = torch.cuda.get_device_properties(dev).multi_processor_count
-        _NUM_SMS_CACHE[dev] = n
+    n = get_sm_count()
     if sm_margin is not None and sm_margin > 0:
         n = max(n - int(sm_margin), 1)
     return n

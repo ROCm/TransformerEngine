@@ -4,11 +4,9 @@
 import torch
 import triton
 import triton.language as tl
-from itertools import product
 
 def get_autotune_config():
-    return [triton.Config({'waves_per_eu': we}, num_warps=nw)
-            for (we, nw) in product([0, 1, 2, 4], [1, 2, 4, 8, 16])]
+    return [triton.Config({'waves_per_eu': 0}, num_warps=nw) for nw in (1, 4, 8, 16)]
 
 
 def _prune_rms_configs(configs, named_args, **kwargs):
@@ -58,6 +56,7 @@ def _rmsnorm_fwd_triton_impl(
     OUTPUT_ALIGNED_16: tl.constexpr,
     ROWS_PER_PID: tl.constexpr = 1,
     NEEDS_I64_OFFSETS: tl.constexpr = False,
+    HOIST_GAMMA: tl.constexpr = True,
 ):
 
     row_start = tl.program_id(0)
@@ -155,7 +154,7 @@ def _rmsnorm_fwd_triton_impl(
     else:
         mask = col_offsets < n_cols
         inv_n_cols = 1.0 / n_cols
-        if BLOCK_SIZE <= 512:
+        if HOIST_GAMMA:
             g = tl.load(g_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
             if (ZERO_CENTERED_GAMMA):
                 g += 1
@@ -171,14 +170,17 @@ def _rmsnorm_fwd_triton_impl(
                 input_ptrs = input_ptr + row_off * input_row_stride + col_offsets
                 if INPUT_ALIGNED_16:
                     input_ptrs = tl.multiple_of(input_ptrs, (16, ))
-                row = tl.load(input_ptrs, mask=mask, other=0.0).to(tl.float32)
+                if HOIST_GAMMA and ROWS_PER_PID == 1:
+                    row = tl.load(input_ptrs, mask=mask, other=0.0, cache_modifier=".cg").to(tl.float32)
+                else:
+                    row = tl.load(input_ptrs, mask=mask, other=0.0).to(tl.float32)
                 row_norm = tl.sum(row * row, axis=-1)
                 norm_factor = tl.math.rsqrt(row_norm * inv_n_cols + epsilon)
 
                 # Store rsigma (norm_factor)
                 tl.store(rsigma_ptr + row_idx, norm_factor)
 
-                if BLOCK_SIZE > 512:
+                if not HOIST_GAMMA:
                     g = tl.load(g_ptr + col_offsets, mask=mask, other=0.0).to(tl.float32)
                     if (ZERO_CENTERED_GAMMA):
                         g += 1

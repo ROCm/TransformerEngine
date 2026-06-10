@@ -128,6 +128,8 @@ _TARGET_PRGMS_PER_CU = 8
 _MAX_PRGMS_PER_CU = 16 
 _I32_OFFSET_LIMIT = 1 << 31 
 
+_FWD_FLAT_GRID_MAX_H = 2048
+
 _FWD_CAP_LADDER = ((128, 16), (256, 4), (512, 2))
 _BWD_CAP_LADDER = ((128, 4), (512, 2))
 
@@ -250,14 +252,19 @@ def _te_norm_fwd_triton(
     if kernel == 'rms' and not USE_BLOCKED and not IS_FP8:
         ROWS_PER_PID_FWD = _rows_per_pid(N, H, get_num_sms(sm_margin), _FWD_CAP_LADDER)
 
+    # HOIST_GAMMA: load gamma once per program when the program processes more than one row
+    HOIST_GAMMA_FWD = True
     if kernel == 'layer':
         # LayerNorm requires one program per row on both paths.
         NUM_PRGMS = N
     elif kernel == 'rms' and not USE_BLOCKED:
-        if IS_FP8:
-            NUM_PRGMS = num_programs(input_tensor, sm_margin)
-        else:
+        use_flat = (not IS_FP8) and (H <= _FWD_FLAT_GRID_MAX_H)
+        if use_flat:
             NUM_PRGMS = N // ROWS_PER_PID_FWD
+            HOIST_GAMMA_FWD = ROWS_PER_PID_FWD > 1
+        else:
+            NUM_PRGMS = num_programs(input_tensor, sm_margin)
+            HOIST_GAMMA_FWD = True  # persistent loop reuses gamma across rows
     else:
         NUM_PRGMS = num_programs(input_tensor, sm_margin)
     MAKE_TRANSPOSE = False
@@ -353,6 +360,7 @@ def _te_norm_fwd_triton(
             output_row_stride * getattr(out_ptr.dtype, 'itemsize', 1) % 16 == 0
         )
         kwargs["ROWS_PER_PID"] = ROWS_PER_PID_FWD
+        kwargs["HOIST_GAMMA"] = HOIST_GAMMA_FWD
         max_off = max(input_row_stride, output_row_stride) * N + H
         kwargs["NEEDS_I64_OFFSETS"] = max_off >= _I32_OFFSET_LIMIT
 
