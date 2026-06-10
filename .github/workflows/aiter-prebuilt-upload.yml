@@ -6,14 +6,40 @@ name: AITER Prebuilt Upload
 on:
   workflow_dispatch:
     inputs:
-      docker_image:
-        description: "Docker image"
+      docker_image_override:
+        description: "Manual Docker Image (Leave empty to use config file value)"
         required: false
-        default: ""
+        type: string
+  workflow_call:
+    inputs:
+      docker_image_override:
+        description: "Manual Docker Image (Leave empty to use config file value)"
+        required: true
+        type: string
+      aiter_upload_cache_key:
+        description: "If non-empty, save Actions cache after success (same key as rocm-ci-dispatch restore)."
+        required: false
+        default: ''
+        type: string
+
+permissions:
+  actions: write
+  contents: read
 
 jobs:
+  # Same resolver as rocm-ci / dispatch; override comes from inputs for both workflow_dispatch and workflow_call.
+  select_docker_image:
+    uses: ./.github/workflows/select-docker-image.yml
+    with:
+      docker_image_override: ${{ inputs.docker_image_override }}
+      test_config_from_source: true
+
   upload:
+    needs: [select_docker_image]
     runs-on: build-only-te
+    env:
+      NVTE_AITER_PREBUILT_BASE_URL: ${{ vars.NVTE_AITER_PREBUILT_BASE_URL }}
+      NVTE_AITER_PREBUILT_UPLOAD_TOKEN: ${{ secrets.AITER_ARTIFACTORY_TOKEN }}
     steps:
       - name: Checkout source
         uses: actions/checkout@v6
@@ -22,21 +48,19 @@ jobs:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Resolve docker image
-        id: cfg
+      # Verify this runner can reach Artifactory for uploads
+      - name: "Preflight: Artifactory upload reachability"
         run: |
-          IMAGE="${{ inputs.docker_image }}"
-          if [ -z "$IMAGE" ]; then
-            IMAGE="${{ vars.DEV_DOCKER_IMAGE }}"
+          set -euo pipefail
+          if bash .github/scripts/aiter_prebuild_upload.sh --preflight --upload; then
+            echo "::notice::Preflight upload reachability succeeded"
+            exit 0
           fi
-          if [ -z "$IMAGE" ]; then
-            echo "No docker image provided and vars.DEV_DOCKER_IMAGE is empty." >&2
-            exit 1
-          fi
-          echo "image=${IMAGE}" >> $GITHUB_OUTPUT
+          echo "::error::Preflight upload reachability failed"
+          exit 1
 
       - name: Pull docker image
-        run: docker pull ${{ steps.cfg.outputs.image }}
+        run: docker pull ${{ needs.select_docker_image.outputs.image_tag }}
 
       - name: Run container
         run: |
@@ -47,27 +71,31 @@ jobs:
             --pid=host \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            ${{ steps.cfg.outputs.image }}
+            ${{ needs.select_docker_image.outputs.image_tag }}
 
       - name: Build and upload aiter prebuilt
-        env:
-          NVTE_AITER_PREBUILT_BASE_URL: https://compute-artifactory.amd.com:5000/artifactory/rocm-generic-local/te-ci/aiter-prebuilts
-          NVTE_AITER_PREBUILT_UPLOAD_TOKEN: ${{ secrets.AITER_ARTIFACTORY_TOKEN }}
         run: |
           docker exec \
             -e NVTE_AITER_PREBUILT_BASE_URL=${NVTE_AITER_PREBUILT_BASE_URL} \
             -e NVTE_AITER_PREBUILT_UPLOAD_TOKEN=${NVTE_AITER_PREBUILT_UPLOAD_TOKEN} \
             te-aiter-upload bash -c "$(cat <<'EOF'
           set -ex
-          if [ -z "${NVTE_AITER_PREBUILT_UPLOAD_TOKEN}" ]; then
-            echo "Missing secrets.AITER_ARTIFACTORY_TOKEN" >&2
-            exit 1
-          fi
           export HIP_PATH=""
           git config --global --add safe.directory '*'
           bash .github/scripts/aiter_prebuild_upload.sh --build
           EOF
           )"
+
+      - name: Record successful AITER prebuilt upload (cache marker)
+        if: success() && inputs.aiter_upload_cache_key != ''
+        run: echo ok > .aiter-upload-success
+
+      - name: Save AITER upload success cache
+        if: success() && inputs.aiter_upload_cache_key != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .aiter-upload-success
+          key: ${{ inputs.aiter_upload_cache_key }}
 
       - name: Cleanup container
         if: always()

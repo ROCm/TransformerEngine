@@ -10,8 +10,70 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
+  actions: write
 
 jobs:
+  # Resolve Docker image tag
+  select_ci_image:
+    uses: ./.github/workflows/select-docker-image.yml
+    with:
+      docker_image_override: ''
+      test_config_from_source: true
+
+  # Whether the PR touches 3rdparty/aiter
+  aiter_gate:
+    runs-on: ubuntu-latest
+    outputs:
+      aiter_paths: ${{ steps.paths.outputs.aiter }}
+    steps:
+      - name: Detect PR changes under 3rdparty/aiter
+        uses: dorny/paths-filter@v4
+        id: paths
+        if: github.event.action == 'synchronize'
+        with:
+          filters: |
+            aiter:
+              - '3rdparty/aiter/**'
+
+  # Whether to upload AITER prebuilt to Artifactory
+  aiter_prebuilt_upload_trigger:
+    needs: [aiter_gate, select_ci_image]
+    runs-on: ubuntu-latest
+    outputs:
+      # true only on synchronize + aiter paths + cache miss (default false via expression)
+      trigger_aiter_upload: ${{ github.event.action == 'synchronize' && needs.aiter_gate.outputs.aiter_paths == 'true' && steps.aiter_upload_cache.outputs.cache-hit != 'true' }}
+      aiter_upload_cache_key: ${{ steps.aiter_key.outputs.cache_key }}
+    steps:
+      - name: Checkout PR head
+        if: ${{ github.event.action == 'synchronize' && needs.aiter_gate.outputs.aiter_paths == 'true' }}
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+
+      - name: Compute AITER upload cache key
+        id: aiter_key
+        if: ${{ github.event.action == 'synchronize' && needs.aiter_gate.outputs.aiter_paths == 'true' }}
+        env:
+          IMAGE_TO_USE: ${{ needs.select_ci_image.outputs.image_tag }}
+        run: |
+          set -euo pipefail
+          AITER_SHA=$(git rev-parse HEAD:3rdparty/aiter)
+          IMAGE_SLUG=$(printf '%s' "$IMAGE_TO_USE" | sha256sum | awk '{print $1}')
+          echo "aiter_sha=$AITER_SHA" >> "$GITHUB_OUTPUT"
+          echo "image_slug=$IMAGE_SLUG" >> "$GITHUB_OUTPUT"
+          echo "cache_key=aiter-prebuilt-upload-ok-${IMAGE_SLUG}-${AITER_SHA}" >> "$GITHUB_OUTPUT"
+          echo "Resolved Docker image for cache key (select-docker-image.yml): $IMAGE_TO_USE"
+
+      - name: AITER upload cache validation
+        id: aiter_upload_cache
+        if: ${{ github.event.action == 'synchronize' && needs.aiter_gate.outputs.aiter_paths == 'true' }}
+        uses: actions/cache/restore@v4
+        with:
+          path: .aiter-upload-success
+          key: ${{ steps.aiter_key.outputs.cache_key }}
+
   determine_level:
     runs-on: ubuntu-latest
     outputs:
@@ -52,10 +114,14 @@ jobs:
     # - A ci-level label higher than any existing ci-level label(s) was added
     # - A commit was pushed with existing ci-level label(s)
     # - The PR was reopened or opened with existing ci-level label(s)
-    if: ${{ needs.determine_level.outputs.test_level != '' }}
-    needs: determine_level
+    if: ${{ always() && needs.select_ci_image.result == 'success' && needs.determine_level.outputs.test_level != '' }}
+    needs: [determine_level, aiter_prebuilt_upload_trigger, select_ci_image]
     name: CI Level ${{ needs.determine_level.outputs.test_level }}
     uses: ./.github/workflows/rocm-ci.yml
     secrets: inherit
     with:
       test_level: ${{ needs.determine_level.outputs.test_level }}
+      trigger_aiter_upload: ${{ needs.aiter_prebuilt_upload_trigger.outputs.trigger_aiter_upload == 'true' }}
+      aiter_upload_cache_key: ${{ needs.aiter_prebuilt_upload_trigger.outputs.aiter_upload_cache_key }}
+      docker_image_override: ${{ needs.select_ci_image.outputs.image_tag }}
+      test_config_from_source: true
