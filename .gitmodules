@@ -28,4 +28,4 @@
 	url = https://github.com/Micky774/QoLA.git
 [submodule "3rdparty/ck_jit"]
 	path = 3rdparty/ck_jit
-	url = https://github.com/ipanfilo/ck_jit.git
+	url = https://github.com/ROCm/ck-jit.git
