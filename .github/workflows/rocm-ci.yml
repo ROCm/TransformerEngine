@@ -142,13 +142,16 @@ jobs:
         run: |
           docker pull ${{ needs.select_image.outputs.image-tag }}
 
-      - name: Run Container
+      - &run_container
+        name: Run Container
         run: |
+          DEVICE_FLAG="$(cat /etc/podinfo/gha-render-devices 2>/dev/null || echo --device=/dev/dri)"
+          test -n "$DEVICE_FLAG"
           docker run -dt \
             --rm \
             --name te-runner \
             --network=host \
-            --device=/dev/dri --device=/dev/kfd \
+            --device=/dev/kfd $DEVICE_FLAG \
             --shm-size=16G \
             --pid=host \
             --group-add $(getent group render | cut -d: -f3) \
@@ -338,20 +341,7 @@ jobs:
         run: |
           docker pull ${{ needs.select_image.outputs.image-tag }}
 
-      - name: Run Container
-        run: |
-          docker run -dt \
-            --rm \
-            --name te-runner \
-            --network=host \
-            --device=/dev/dri --device=/dev/kfd \
-            --shm-size=16G \
-            --pid=host \
-            --group-add $(getent group render | cut -d: -f3) \
-            --group-add $(getent group video | cut -d: -f3) \
-            -v "${{ github.workspace }}:/workspace" \
-            -w /workspace \
-            ${{ needs.select_image.outputs.image-tag }}
+      - *run_container
 
       - name: Install packages
         env:
