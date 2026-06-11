@@ -8,12 +8,37 @@
 # Keep aiter_commit in lockstep with qola_manifest.toml — both consume the same
 # checked-out AITER source tree.
 [qola]
-aiter_commit = "f03a4ec572bb3d9e15da3b346763c8f126feec0d"    # pinned AITER submodule commit
+aiter_commit = "c4c4faa4789cb3bf6d972192d96c5461b71728be"    # pinned AITER submodule commit
 namespace = "te_v3"
 rocm_versions = ["7.2"]
 
 [build]
 architectures = ["gfx1250"]
+
+[[modules]]
+name = "libmha_fwd"
+mode = "cpp_itfs"
+drop_directions = ["fwd", "fwd_splitkv", "batch_prefill"]
+flags_extra_cc = ["'-DFAV3_ON=1'", "'-DENABLE_CK=0'", "'-DFAV1250_ON=1'"]
+hsa_subdirs = ["fmha_fwd_bf16"]
+# Override the source list from optCompilerConfig.json to add the two
+# gfx1250 ASM sink TUs.  mha_fwd.cu (FAV1250_ON=1) declares
+# fmha_fwd_with_sink_asm() via extern "C" and calls it;
+srcs = [
+    "f'{AITER_CSRC_DIR}/cpp_itfs/mha_fwd.cu'",
+    "f'{AITER_CSRC_DIR}/cpp_itfs/mha_fwd_split.cu'",
+    "f'{AITER_CSRC_DIR}/cpp_itfs/mha_fwd_batch_prefill.cu'",
+    "f'{AITER_CSRC_DIR}/py_itfs_cu/asm_fmha_fwd_with_sink.cu'",
+]
+# Override blob_gen_cmd to drop the CK generate.py -d {fwd,fwd_splitkv,batch_prefill}
+# commands (not needed / would fail for gfx1250) and add the codegen run that
+# produce the config headers consumed by the sink TUs:
+#   asm_fmha_fwd_bf16_configs.hpp        <- -m fmha_fwd_bf16
+# The registry's add_blob_gen_cmd (-m fmha_v3_fwd) is still appended by
+# _apply_cpp_itfs on top of this list.
+blob_gen_cmd = [
+    "f'{AITER_META_DIR}/hsa/codegen.py -m fmha_fwd_bf16 --output_dir {{}}'",
+]
 
 # Reuse the torch-free libmha_bwd module (sources = mha_bwd.cu only; the same
 # source the CK-full te_libmha_bwd.so builds from). Do NOT use

@@ -12,7 +12,32 @@
 #include "qola_mha_fwd.h"
 #include "ck_fused_attn_utils.hpp"
 
+// Staged gfx1250 forward dispatch. When this build includes the CK-free V3
+// forward library (te_v3_libmha_fwd.so, built for gfx1250), declare its
+// namespaced entry point so ck_attn_fwd can route to it on gfx1250 devices at
+// runtime. The CK-full path (QOLA_NS(mha_fwd) == qola::te::mha_fwd) is used on
+// all other archs.
+#if defined(NVTE_AITER_V3_FWD_GFX1250)
+namespace qola { namespace te_v3 {
+float mha_fwd(const aiter::mha_fwd_args& args, const ck_tile::stream_config& stream_config);
+}}  // namespace qola::te_v3
+#endif
+
 namespace ck_fused_attn{
+
+#if defined(NVTE_AITER_V3_FWD_GFX1250)
+namespace {
+// True when the active device is gfx1250 (gcnArchName may carry feature
+// suffixes, e.g. "gfx1250:sramecc+", so match on prefix).
+bool is_gfx1250_device(){
+  int dev = 0;
+  if(hipGetDevice(&dev) != hipSuccess){ return false; }
+  hipDeviceProp_t prop{};
+  if(hipGetDeviceProperties(&prop, dev) != hipSuccess){ return false; }
+  return prop.major == 12 && prop.minor == 5;
+}
+}  // namespace
+#endif
 
 // print the fmha traits and fmha_args when calling ck apis
 void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fwd_args& fmha_args, std::ostream* log_file){
@@ -230,18 +255,26 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
   if(log_file){
      log_fwd_config(__FUNCTION__, has_dropout, fmha_args, log_file);
   }
-#if defined(NVTE_AITER_CK_FULL)
-  float average_runtime = QOLA_NS(mha_fwd)(fmha_args, stream_config);
-#else
-  // gfx1250-only build: no CK-full forward library exists (gfx1250 has no
-  // forward kernels). The unified backend selector never picks CK on gfx1250,
-  // so this path is unreachable at runtime; the guard only keeps the link
-  // closed when te_libmha_fwd.so is absent.
-  float average_runtime = -1.0f;
-  throw std::runtime_error(
-    "ck_fused_attn fwd: no CK-full AITER forward library in this build "
-    "(gfx1250 has no forward kernels).");
+
+  float average_runtime;
+#if defined(NVTE_AITER_V3_FWD_GFX1250)
+  if(is_gfx1250_device()){
+    average_runtime = qola::te_v3::mha_fwd(fmha_args, stream_config);
+  } else
 #endif
+  {
+#if defined(NVTE_AITER_CK_FULL)
+    average_runtime = QOLA_NS(mha_fwd)(fmha_args, stream_config);
+#else
+    // gfx1250-only build: no CK-full forward library exists (gfx1250 has no
+    // forward kernels). The unified backend selector never picks CK on gfx1250,
+    // so this path is unreachable at runtime; the guard only keeps the link
+    // closed when te_libmha_fwd.so is absent.
+    throw std::runtime_error(
+      "ck_fused_attn fwd: no CK-full AITER forward library in this build "
+      "(gfx1250 has no forward kernels).");
+#endif
+  }
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");

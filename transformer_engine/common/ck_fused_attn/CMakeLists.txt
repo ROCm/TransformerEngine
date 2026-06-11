@@ -137,6 +137,7 @@ if(__CK_FULL_ARCH_COUNT GREATER 0)
                 --aiter-root ${__AITER_SOURCE_DIR}
                 --output-dir ${__QOLA_BUILD_DIR}
                 --arch "${GPU_ARCHS_STR}"
+                --skip-checkout
         RESULT_VARIABLE QOLA_BUILD_RESULT
       )
       if(NOT QOLA_BUILD_RESULT EQUAL 0)
@@ -158,14 +159,14 @@ if(__CK_FULL_ARCH_COUNT GREATER 0)
   endif()
 endif()
 
-# --- V3-asm-only backward library (gfx1250): te_v3_libmha_bwd.so ---
+# --- V3-asm-only libraries for gfx1250: te_v3_libmha_fwd.so and te_v3_libmha_bwd.so ---
 # There is no prebuilt cache path for gfx1250 (no public prebuilt, and a CK-free
 # asm build is cheap), so always build it from source via QoLA. Both manifests
 # pin the same AITER commit and share the already-checked-out source tree.
 if(__HAS_GFX1250)
   set(__QOLA_MANIFEST_V3 "${CMAKE_CURRENT_LIST_DIR}/qola_manifest_gfx1250.toml")
   set(__QOLA_BUILD_DIR_V3 "${__QOLA_DIR}/build_gfx1250")
-  message(STATUS "[AITER-BUILD] Building CK-free V3 backward (gfx1250) via QoLA.")
+  message(STATUS "[AITER-BUILD] Building CK-free V3 (gfx1250) via QoLA.")
   # The asm-only / CK-free flags (ONLY_FAV3=1, ENABLE_CK=0) are carried by the
   # gfx1250 manifest's libmha_bwd module, so no special env is needed here.
   execute_process(
@@ -224,11 +225,13 @@ list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
 #   NVTE_AITER_CK_FULL        -> qola::te::{mha_fwd,mha_bwd} (CDNA) are linked
 #   NVTE_AITER_V3_BWD_GFX1250 -> qola::te_v3::mha_bwd (gfx1250) is linked +
 #                                runtime-dispatched in ck_attn_bwd
+#   NVTE_AITER_V3_FWD_GFX1250 -> qola::te_v3::mha_fwd (gfx1250) is linked +
+#                                runtime-dispatched in ck_attn_fwd
 if(__HAVE_CK_FULL)
   list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -DNVTE_AITER_CK_FULL)
 endif()
 if(__HAS_GFX1250)
-  list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -DNVTE_AITER_V3_BWD_GFX1250)
+  list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS -DNVTE_AITER_V3_BWD_GFX1250 -DNVTE_AITER_V3_FWD_GFX1250)
 endif()
 
 # Public QoLA headers ship alongside the .so libs in ${__AITER_MHA_PATH}/../include
@@ -255,8 +258,9 @@ if(__HAVE_CK_FULL)
        ${__AITER_MHA_PATH}/te_libmha_bwd.so)
 endif()
 if(__HAS_GFX1250)
-  list(APPEND ck_fused_attn_LINKER_LIBS -l:te_v3_libmha_bwd.so)
+  list(APPEND ck_fused_attn_LINKER_LIBS -l:te_v3_libmha_fwd.so -l:te_v3_libmha_bwd.so)
   list(APPEND __INSTALL_AITER_LIBS
+       ${__AITER_MHA_PATH}/te_v3_libmha_fwd.so
        ${__AITER_MHA_PATH}/te_v3_libmha_bwd.so)
 endif()
 target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
