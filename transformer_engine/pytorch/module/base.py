@@ -1643,24 +1643,37 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         )
 
         if can_fuse:
-            caching = cache_names is not None
-            cache_valid = caching and all(
-                self._fp8_workspaces.get(name) is not None for name in cache_names
-            )
-            if update_workspace or not cache_valid:
+            # No caching: allocate fresh and cast + transpose the whole group at once.
+            if cache_names is None:
+                return tex.multi_tensor_quantize(list(tensors), quantizers)
+
+            workspaces = [self._fp8_workspaces.get(name) for name in cache_names]
+            if any(workspace is None for workspace in workspaces):
+                # Cache miss: allocate the workspaces once with a single fused kernel.
                 # Force internal=False so cached workspaces survive prepare_for_saving.
                 saved_internal = [quantizer.internal for quantizer in quantizers]
-                if caching:
-                    for quantizer in quantizers:
-                        quantizer.internal = False
+                for quantizer in quantizers:
+                    quantizer.internal = False
                 workspaces = tex.multi_tensor_quantize(list(tensors), quantizers)
-                if caching:
-                    for quantizer, internal in zip(quantizers, saved_internal):
-                        quantizer.internal = internal
-                    for name, workspace in zip(cache_names, workspaces):
-                        self._fp8_workspaces[name] = workspace
-                return workspaces
-            return [self._fp8_workspaces[name] for name in cache_names]
+                for quantizer, internal in zip(quantizers, saved_internal):
+                    quantizer.internal = internal
+                for name, workspace in zip(cache_names, workspaces):
+                    self._fp8_workspaces[name] = workspace
+            elif update_workspace:
+                # Cache hit: quantize in-place into the existing buffers to avoid
+                # reallocating FP8 storage (and rebuilding tensor objects) every step.
+                for tensor, quantizer, workspace in zip(tensors, quantizers, workspaces):
+                    if hasattr(workspace, "quantize_"):
+                        workspace.quantize_(tensor, noop_flag=None)
+                    elif IS_HIP_EXTENSION:
+                        use_cast_transpose_triton = bool(
+                            int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0"))
+                        )
+                        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
+                        quantize_func(tensor, quantizer, workspace, None)
+                    else:
+                        tex.quantize(tensor, quantizer, workspace, None)
+            return workspaces
 
         # Fallback: quantize each weight individually.
         workspaces = []
