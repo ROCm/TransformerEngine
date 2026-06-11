@@ -83,7 +83,7 @@ elseif(NOT __USE_CK_JIT) #disable for CK_JIT for now
   # use pre-built cache
   include("${CMAKE_CURRENT_LIST_DIR}/aiter_prebuilt.cmake")
   get_prebuilt_aiter(__AITER_CACHE_DIR)
-elseif(DEFINED ENV(NVTE_AITER_PREBUILT_BASE_URL))
+elseif(DEFINED ENV{NVTE_AITER_PREBUILT_BASE_URL})
   message(WARNING "[AITER-BUILD] NVTE_AITER_PREBUILT_BASE_URL is set but will be ignored because CK_JIT is enabled.")
 endif()
 
