@@ -2420,48 +2420,7 @@ def grouped_gemm(
     # would cause the C++ kernel to skip scale_inv setup, triggering a cuBLAS assertion.
     _, scaling_mode = _get_out_dtype_and_scaling_mode(lhs)
 
-    if (
-        not isinstance(lhs, ScaledTensor)
-        and not isinstance(rhs, ScaledTensor)
-        and quantizer_set != noop_quantizer_set
-    ):
-        if not isinstance(quantizer_set.x, GroupedQuantizer):
-            raise TypeError(
-                "Expected quantizer_set.x to be GroupedQuantizer, but got"
-                f" type={type(quantizer_set.x)}"
-            )
-        if type(quantizer_set.x) is not type(quantizer_set.kernel):
-            raise TypeError(
-                "Expected quantizer_set.x and quantizer_set.kernel to have the same type, but got"
-                f" {type(quantizer_set.x)} and {type(quantizer_set.kernel)}"
-            )
-        scaling_mode = quantizer_set.x.scaling_mode
-        if (
-            quantizer_set.x.scaling_mode.is_tensor_scaling()
-            and is_fp8_gemm_with_all_layouts_supported()
-        ):
-            lhs_is_rowwise = rhs_is_rowwise = True
-        else:
-            lhs_is_rowwise = not lhs_is_trans
-            rhs_is_rowwise = rhs_is_trans
-        quantizer_set.x.q_layout = (
-            QuantizeLayout.ROWWISE if lhs_is_rowwise else QuantizeLayout.COLWISE
-        )
-        quantizer_set.kernel.q_layout = (
-            QuantizeLayout.ROWWISE if rhs_is_rowwise else QuantizeLayout.COLWISE
-        )
-        lhs_q = grouped_quantize(lhs, quantizer_set.x, group_sizes, lhs_flatten_axis)
-        rhs_q = grouped_quantize(
-            rhs, quantizer_set.kernel, group_sizes=None, flatten_axis=rhs_flatten_axis
-        )
-        lhs_data = lhs_q.data
-        rhs_data = rhs_q.data
-        lhs_scale_inv = lhs_q.scale_inv
-        rhs_scale_inv = rhs_q.scale_inv
-        lhs_shape = lhs_q.original_shape
-        rhs_shape = rhs_q.original_shape
-
-    if lhs_data.dtype == jnp_float8_e5m2_type and rhs_data.dtype == jnp_float8_e5m2_type:
+    if lhs.data.dtype == jnp_float8_e5m2_type and rhs.data.dtype == jnp_float8_e5m2_type:
         raise ValueError("FP8 GEMM does not support E5M2 * E5M2")
 
     if scaling_mode.is_tensor_scaling() and not is_fp8_gemm_with_all_layouts_supported():

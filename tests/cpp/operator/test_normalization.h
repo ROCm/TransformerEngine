@@ -17,8 +17,9 @@
 
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
+#ifndef USE_ROCM
 #include <cudnn.h>
-
+#endif
 #include <transformer_engine/normalization.h>
 #include <transformer_engine/transformer_engine.h>
 #include "../test_common.h"

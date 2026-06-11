@@ -49,6 +49,7 @@ from ..quantize import (
     get_rht_matrix,
     QuantizeLayout,
 )
+from ..util import is_hip_extension
 
 
 __all__ = ["quantize", "quantize_dbias", "grouped_quantize", "grouped_dbias"]
@@ -1035,6 +1036,9 @@ class GroupedQuantizePrimitive(BasePrimitive):
         Falls back to V1 when constraints are not met. V1 supports arbitrary shapes
         but performs a D2H copy of group_sizes (not CUDA-graph safe).
         """
+        if is_hip_extension():
+            return False
+
         if ScalingMode(scaling_mode) != ScalingMode.MXFP8_1D_SCALING:
             return False
         # Require SM100+ so V2 quantize (fused swizzle) is only used alongside V2 GEMM.

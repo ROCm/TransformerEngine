@@ -1080,8 +1080,6 @@ class TestRandomizedHadamardTransform:
 
 @pytest.mark.skipif(not is_fp8_supported, reason=fp8_unsupported_reason)
 @pytest_parametrize_wrapper("in_dtype", QUANTIZATION_INPUT_DTYPE)
-@pytest_parametrize_wrapper("input_shape", [(8, 16, 32)])
-@pytest_parametrize_wrapper("q_dtype", [jnp_float8_e4m3_type])
 @pytest_parametrize_wrapper(
     "input_shape",
     [
@@ -1100,7 +1098,7 @@ class TestRandomizedHadamardTransform:
         128,  # V2 MXFP8 eligible: group size must be multiple of 128. Alignment is required due to V2 grouped quantize and grouped GEMM kernel requirements.
     ],
 )
-@pytest_parametrize_wrapper("q_dtype", [jnp.float8_e4m3fn])
+@pytest_parametrize_wrapper("q_dtype", [jnp_float8_e4m3_type])
 @pytest_parametrize_wrapper("scaling_mode", non_fp4_supported_scaling_modes)
 @pytest_parametrize_wrapper("flatten_axis", [-1])
 @pytest_parametrize_wrapper("with_group_sizes", [True, False])
@@ -1909,7 +1907,7 @@ class TestGroupedDense:
             lhs_tensor,
             rhs_tensor,
             contracting_dims=contracting_dims,
-            use_async_d2h_group_sizes=True,
+            use_async_d2h_group_sizes=use_async_d2h_group_size,
         )
 
         self._assert_grouped_gemm_output(prim_out, group_sizes, ref_out, dtype)

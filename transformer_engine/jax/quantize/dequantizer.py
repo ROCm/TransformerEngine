@@ -1,4 +1,5 @@
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 """
@@ -16,6 +17,7 @@ import jax.numpy as jnp
 
 from .scaling_modes import ScalingMode
 from .hadamard import apply_rht
+from ..util import is_hip_extension
 
 
 __all__ = ["ScalingModeToDequantizerMap"]
@@ -378,7 +380,12 @@ def _grouped_dequantize(grouped_scaled_tensor):
             unpadded_2d = scaling_mode.get_scale_shape(
                 flat_data_2d, is_colwise=is_colwise, is_padded=False, flatten_axis=1
             )
-            scale_inv_i = _unswizzle_mxfp8_grouped_scale(scale_inv_i, padded_2d, is_colwise)
+            if not is_hip_extension():
+                scale_inv_i = _unswizzle_mxfp8_grouped_scale(
+                    scale_inv_i, padded_2d, is_colwise
+                )
+            else:
+                scale_inv_i = scale_inv_i.reshape(padded_2d)
             scale_inv_i = jax.lax.slice(scale_inv_i, [0, 0], list(unpadded_2d))
         else:
             scale_inv_i = scale_inv_i.reshape(padded_scale_shape_i)

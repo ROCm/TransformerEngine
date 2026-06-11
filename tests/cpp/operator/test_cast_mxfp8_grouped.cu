@@ -586,7 +586,7 @@ void performTest(const ProcessingMethod processing_method,
         if (::testing::Test::HasFatalFailure()) return;
         adjust_ref_for_e8m0_scale_error("rowwise_scales", mismatches_scales_indices,
                                         out_scales_rowwise_h.data(), out_scales_rowwise_ref.data(),
-                                        rowwise_sfs_num, rows, cols, true,
+                                        rowwise_sfs_num, compare_rows, compare_cols, true,
                                         out_data_rowwise_ref.data(), otype);
         mismatches_scales = 0;
 #endif
@@ -617,7 +617,7 @@ void performTest(const ProcessingMethod processing_method,
         if (::testing::Test::HasFatalFailure()) return;
         adjust_ref_for_e8m0_scale_error("colwise_scales", mismatches_scales_indices,
                                         out_scales_colwise_h.data(), out_scales_colwise_ref.data(),
-                                        colwise_sfs_num, rows, cols, false,
+                                        colwise_sfs_num, compare_rows, compare_cols, false,
                                         out_data_colwise_ref.data(), otype);
         mismatches_scales = 0;
 #endif
