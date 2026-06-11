@@ -207,10 +207,19 @@ foreach(file ${ck_fused_attn_SOURCES})
 endforeach()
 
 add_library(ck_fused_attn SHARED ${ck_fused_attn_SOURCES})
+# ENABLE_CK gates the wrapper's CK-tile dependency: with a CK-full arch present
+# (CDNA) the headers pull real ck_tile; for a gfx1250-only build the real CK
+# template headers do not compile, so build CK-free (ENABLE_CK=0) and let the
+# wrapper fall back to the ck_tile shim + HIP-native 16-bit numerics.
+if(__HAVE_CK_FULL)
+  set(__ENABLE_CK 1)
+else()
+  set(__ENABLE_CK 0)
+endif()
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
 list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
     -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
-    -DENABLE_CK=1)
+    -DENABLE_CK=${__ENABLE_CK})
 # Tier guards consumed by src/ck_fused_attn_{fwd,bwd}.cpp:
 #   NVTE_AITER_CK_FULL        -> qola::te::{mha_fwd,mha_bwd} (CDNA) are linked
 #   NVTE_AITER_V3_BWD_GFX1250 -> qola::te_v3::mha_bwd (gfx1250) is linked +

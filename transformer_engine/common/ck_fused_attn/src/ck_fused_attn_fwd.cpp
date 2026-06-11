@@ -201,7 +201,13 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
   fmha_args.is_group_mode   = args.is_group_mode();
   fmha_args.bias_type       = static_cast<int>(bias_type);
   fmha_args.has_lse         = args.lse_ptr!=nullptr;
+#if ENABLE_CK
   fmha_args.qscale_type     = static_cast<int>(quant_scale_enum::no_scale);
+#else
+  // quant_scale_enum lives in the CK example headers (quant.hpp), absent in the
+  // CK-free build. no_scale == 0; this fwd path is unused on gfx1250 anyway.
+  fmha_args.qscale_type     = 0;
+#endif
   fmha_args.has_sink        = false;
   fmha_args.q_descale_ptr    = nullptr;
   fmha_args.k_descale_ptr    = nullptr;

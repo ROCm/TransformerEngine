@@ -10,7 +10,25 @@
 #include<fstream>
 #include<utility>
 #include<hip/hip_runtime.h>
+#if ENABLE_CK
 #include "ck_tile/host.hpp"
+#else
+// CK-free (gfx1250) build: the real ck_tile template headers do not compile for
+// this arch. Pull the lightweight shim (ck_tile::index_t / stream_config, plus
+// mask_enum / bias_enum) via aiter_hip_common.h, and provide the few ck_tile
+// numeric symbols the reduction kernels use. half_t is the _Float16 scalar
+// (unambiguous float arithmetic, unlike __half which is ambiguous in the
+// kernels' implicit-conversion else-branch); bf16_t is __hip_bfloat16. Both are
+// bit-compatible with fp16/bf16 so the kernel sources stay unchanged.
+#include "aiter_hip_common.h"
+#include <hip/hip_bf16.h>
+namespace ck_tile {
+using half_t = _Float16;
+using bf16_t = __hip_bfloat16;
+__host__ __device__ inline float bf16_to_float(bf16_t x) { return __bfloat162float(x); }
+__host__ __device__ inline bf16_t float_to_bf16(float x) { return __float2bfloat16(x); }
+}  // namespace ck_tile
+#endif
 #include "ck_fused_attn/ck_fused_attn.hpp"
 
 //forward declaration for ck_tile enum
