@@ -305,7 +305,7 @@ if(USE_ROCM)
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tt.cpp
     )
   else()
-    list(APPEND transformer_engine_cpp_SOURCES
+    list(APPEND transformer_engine_SOURCES
       gemm/ck_grouped_gemm/ck_grouped_gemm_stub.cpp)
   endif()
   
