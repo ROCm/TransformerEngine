@@ -312,7 +312,8 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
                           std::optional<at::Tensor> first_dims);
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
-                                              std::vector<py::handle> quantizer_list);
+                                              std::vector<py::handle> quantizer_list,
+                                              const py::object &outputs = py::none());
 
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                        const std::vector<size_t> &split_sections,

@@ -1608,7 +1608,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         Analogous to `get_weight_workspace`, but operates on a whole group of
         weights. For delayed-scaling FP8 the group is cast and transposed with a
         single fused multi_cast_transpose kernel instead of one quantize call per
-        tensor. When fusion is not applicable (other recipes, rowwise-only usage,
+        tensor. With caching, both the initial allocation and later updates use that
+        fused `multi_tensor_quantize` path when `update_workspace` is True; cached
+        workspaces are passed as `outputs` so the fused kernel writes in place without
+        reallocating buffers. When
+        fusion is not applicable (other recipes, rowwise-only usage,
         already-quantized weights, or CUDA-graph weight caching) the call falls
         back to `get_weight_workspace` for each tensor, matching the per-tensor path.
 
@@ -1647,34 +1651,42 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
             if cache_names is None:
                 return tex.multi_tensor_quantize(list(tensors), quantizers)
 
-            workspaces = [self._fp8_workspaces.get(name) for name in cache_names]
-            if any(workspace is None for workspace in workspaces):
-                # Cache miss: allocate the workspaces once with a single fused kernel.
+            workspaces = []
+            cache_miss = False
+            for name, quantizer in zip(cache_names, quantizers):
+                out = self._fp8_workspaces.get(name)
+                if out is not None and quantizer is not None:
+                    reset_cache = False
+                    if isinstance(out, Float8TensorStorage):
+                        if (
+                            not is_non_tn_fp8_gemm_supported()
+                            and quantizer.columnwise_usage
+                            and out._transpose is None
+                        ):
+                            reset_cache = True
+                    if reset_cache:
+                        del self._fp8_workspaces[name]
+                        out = None
+                if out is None:
+                    cache_miss = True
+                workspaces.append(out)
+            if cache_miss or update_workspace:
+                # Single fused kernel for initial allocation and for refreshes.
                 # Force internal=False so cached workspaces survive prepare_for_saving.
                 saved_internal = [quantizer.internal for quantizer in quantizers]
                 for quantizer in quantizers:
                     quantizer.internal = False
-                workspaces = tex.multi_tensor_quantize(list(tensors), quantizers)
+                if cache_miss:
+                    workspaces = tex.multi_tensor_quantize(list(tensors), quantizers)
+                else:
+                    workspaces = tex.multi_tensor_quantize(
+                        list(tensors), quantizers, outputs=workspaces
+                    )
                 for quantizer, internal in zip(quantizers, saved_internal):
                     quantizer.internal = internal
                 for name, workspace in zip(cache_names, workspaces):
                     self._fp8_workspaces[name] = workspace
-            elif update_workspace:
-                # Cache hit: quantize in-place into the existing buffers to avoid
-                # reallocating FP8 storage (and rebuilding tensor objects) every step.
-                for tensor, quantizer, workspace in zip(tensors, quantizers, workspaces):
-                    if hasattr(workspace, "quantize_"):
-                        workspace.quantize_(tensor, noop_flag=None)
-                    elif IS_HIP_EXTENSION:
-                        use_cast_transpose_triton = bool(
-                            int(os.environ.get("NVTE_USE_CAST_TRANSPOSE_TRITON", "0"))
-                        )
-                        quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
-                        quantize_func(tensor, quantizer, workspace, None)
-                    else:
-                        tex.quantize(tensor, quantizer, workspace, None)
             return workspaces
-
         # Fallback: quantize each weight individually.
         workspaces = []
         for i in range(num_tensors):
