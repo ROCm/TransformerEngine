@@ -31,7 +31,7 @@
 #include "./config.h"
 #ifndef __HIP_PLATFORM_AMD__
 #include "./cutlass_grouped_gemm.cuh"
-#else
+#elif defined(NVTE_CK_GROUPED_GEMM)
 #include "ck_grouped_gemm/ck_grouped_gemm.h"
 #endif
 
@@ -1194,12 +1194,18 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype() &&
 #ifdef __HIP_PLATFORM_AMD__
       true)                               {
+#ifdef NVTE_CK_GROUPED_GEMM
     if (!ck_tile_grouped_gemm(A, B, D, num_gemms, transa, transb, workspace, accumulate, stream)) {
         if (warn_fallback) {
           NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
         }
         cublas_path();
     }
+#else
+    // CK grouped GEMM is not built for this arch (e.g. gfx1250, where CK-tile
+    // does not compile); use the hipBLASLt grouped-GEMM path directly.
+    cublas_path();
+#endif
 #else
       all_groups_uniform_k128(B, transb)) {
     cutlass_grouped_gemm(A, B, D, num_gemms, transa, transb, grad, workspace, accumulate,
