@@ -892,6 +892,19 @@ class _LayerNormLinear(torch.autograd.Function):
                         dgrad_shape, dtype=ctx.activation_dtype, device=grad_outputs[0].device
                     )
 
+                # ROCm hipBLASLt has no algorithm for a bf16 -> fp32-accumulate wgrad
+                # GEMM that also fuses the bias-gradient (BGRADB) epilogue, so the
+                # heuristic returns no algorithms and the GEMM raises. When wgrad is
+                # accumulated into an fp32 main_grad on ROCm, skip the fusion and
+                # reduce grad_bias separately below.
+                rocm_unfuse_dbias = (
+                    IS_HIP_EXTENSION
+                    and accumulate_wgrad_into_param_main_grad
+                    and grad_bias is None
+                    and not ctx.fp8
+                    and bias is not None
+                )
+
                 # Arguments to include in wgrad GEMM closure
                 wgrad_gemm_kwargs = {
                     "out_dtype": (
@@ -905,7 +918,11 @@ class _LayerNormLinear(torch.autograd.Function):
                     ),
                     "layout": "NT",
                     "out": main_grad if ctx.fuse_wgrad_accumulation else None,
-                    "bias": (bias if (grad_bias is None and not ctx.fp8) else None),
+                    "bias": (
+                        bias
+                        if (grad_bias is None and not ctx.fp8 and not rocm_unfuse_dbias)
+                        else None
+                    ),
                     "use_split_accumulator": use_split_accumulator,
                     "grad": True,
                     "ub": ub_obj_wgrad,
@@ -951,7 +968,16 @@ class _LayerNormLinear(torch.autograd.Function):
 
                     # Update grad bias if needed
                     if grad_bias is None:
-                        grad_bias = grad_bias_
+                        if rocm_unfuse_dbias:
+                            # Fused dbias was suppressed for the ROCm fp32-accumulate
+                            # path; reduce it here (fp32 accumulate, cast to bias dtype).
+                            grad_bias = (
+                                grad_output.reshape(-1, grad_output.shape[-1])
+                                .sum(dim=0, dtype=torch.float32)
+                                .to(bias.dtype)
+                            )
+                        else:
+                            grad_bias = grad_bias_
                     del grad_bias_
 
                     # Deallocate input tensors if permitted
