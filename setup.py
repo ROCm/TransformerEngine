@@ -100,6 +100,9 @@ def setup_common_extension() -> CMakeExtension:
         elif os.getenv("NVTE_FUSED_ATTN_CK") or os.getenv("NVTE_FUSED_ATTN"):
             cmake_flags.append("-DUSE_FUSED_ATTN_CK=ON")
 
+        if int(os.getenv("NVTE_USE_CK_GEMM", "1"))==0:
+            cmake_flags.append("-DUSE_CK_GEMM=OFF")
+
         if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))) and os.getenv("NVTE_ENABLE_ROCSHMEM") is None:
             os.environ["NVTE_ENABLE_ROCSHMEM"] = '1'
             os.environ["NVTE_ENABLE_NVSHMEM"] = '0'
