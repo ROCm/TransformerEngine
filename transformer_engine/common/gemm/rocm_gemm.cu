@@ -29,7 +29,6 @@
 #include "../common.h"
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
-#include "../util/cuda_runtime.h"
 
 namespace transformer_engine {
 
@@ -321,15 +320,8 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       ret.A = A.columnwise_data.dptr;
       ret.Atype = A.columnwise_data.dtype;
       ret.A_scale_inv = A.columnwise_scale_inv.dptr;
-      // On gfx1250, hipBLASLt only supports TN layout for MXFP8.
-      // Convert A from N to T using columnwise data (same as tensor scaling).
-      if (cuda::sm_arch() == 125) {
-        ret.transA = CUBLAS_OP_T;
-        ret.lda = k;
-      } else {
-        ret.transA = transA;
-        ret.lda = m;
-      }
+      ret.transA = transA;
+      ret.lda = m;
     }
   } else if (is_nvfp_scaling(A.scaling_mode)) {
     // NVFP4: dequant path always produces TN layout for the BF16 GEMM,
@@ -371,15 +363,8 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       ret.B = B.columnwise_data.dptr;
       ret.Btype = B.columnwise_data.dtype;
       ret.B_scale_inv = B.columnwise_scale_inv.dptr;
-      // On gfx1250, hipBLASLt only supports TN layout for MXFP8.
-      // Convert B from T to N using columnwise data (same as tensor scaling).
-      if (cuda::sm_arch() == 125) {
-        ret.transB = CUBLAS_OP_N;
-        ret.ldb = k;
-      } else {
-        ret.transB = transB;
-        ret.ldb = n;
-      }
+      ret.transB = transB;
+      ret.ldb = n;
     } else {
       NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
       ret.B = B.data.dptr;
