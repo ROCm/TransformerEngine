@@ -1157,31 +1157,15 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   };
 #endif
 
-  #ifdef __HIP_PLATFORM_AMD__
-    auto effective_dtype = [](const transformer_engine::Tensor *t) {
-      if (t->has_data()) {
-        return t->data.dtype;
-      }
-      if (t->has_columnwise_data()) {
-        return t->columnwise_data.dtype;
-      }
-      return t->data.dtype;
-    };
-  #endif
-
   auto is_supported_dtype = [&]() -> bool {
     auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
     auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
     auto *OutputD = transformer_engine::convertNVTETensorCheck(D[0]);
 #ifdef __HIP_PLATFORM_AMD__
-    auto effective_dtype = [](const transformer_engine::Tensor* t) {
-      if (is_fp8_dtype(t->data.dtype)) {
-        return t->data.dtype;
-      }
-      if (t->has_columnwise_data() && is_fp8_dtype(t->columnwise_data.dtype)) {
-        return t->columnwise_data.dtype;
-      }
-      return t->data.dtype;
+    auto effective_dtype = [](const transformer_engine::Tensor *t) {
+      NVTE_CHECK(t->has_data() || t->has_columnwise_data(),
+                "Input tensor has neither row-wise nor column-wise data.");
+      return t->has_data() ? t->data.dtype : t->columnwise_data.dtype;
     };
 
     auto A_dt = effective_dtype(inputA);

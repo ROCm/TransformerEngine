@@ -85,7 +85,7 @@ enum class GPUArch {
 };
 
 static inline GPUArch detect_gpu_arch() {
-  switch (cuda::sm_arch(0)) {
+  switch (cuda::sm_arch()) {
     case 94:
       return GPUArch::GFX942;
     case 95:
