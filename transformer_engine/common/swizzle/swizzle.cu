@@ -414,6 +414,7 @@ __global__ void __launch_bounds__(256)
     swizzle_scaling_mx_kernel(const uint8_t* __restrict__ input,
                               uint8_t* __restrict__ output,
                               const int padded_M,
+                              const int input_stride,
                               const int orig_M, const int orig_K) {
   const int idx = blockIdx.x * blockDim.x + threadIdx.x;
   const int total = orig_M * orig_K;
@@ -424,9 +425,9 @@ __global__ void __launch_bounds__(256)
 
   uint8_t val;
   if constexpr (kRowwise) {
-    val = input[idx];  // == input[m * orig_K + k]
+    val = input[m * input_stride + k];
   } else {
-    val = input[k * orig_M + m];
+    val = input[k * input_stride + m];
   }
 
   const int group = k / MX_PRESWIZZLE_GROUP_SIZE;
@@ -507,6 +508,7 @@ void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_
   if (has_rowwise_scale_inv) {
     const int original_M = input->flat_first_dim();
     const int original_K = input->flat_last_dim() / MXFP8_BLOCK_SIZE;
+    const int input_stride = k;
     // Pre-fill output with E8M0 identity (127 = 2^0) to handle padding
     NVTE_CHECK_CUDA(cudaMemsetAsync(output->scale_inv.dptr, 127, total, stream));
     const int orig_total = original_M * original_K;
@@ -514,7 +516,7 @@ void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_
     swizzle_scaling_mx_kernel<true><<<grid, block, 0, stream>>>(
         reinterpret_cast<const uint8_t*>(input->scale_inv.dptr),
         reinterpret_cast<uint8_t*>(output->scale_inv.dptr),
-        m, original_M, original_K);
+        m, input_stride, original_M, original_K);
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 
@@ -522,6 +524,7 @@ void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_
   if (has_columnwise_scale_inv) {
     const int original_M = input->flat_last_dim();
     const int original_K = input->flat_first_dim() / MXFP8_BLOCK_SIZE;
+    const int input_stride = m;
     // Pre-fill output with E8M0 identity (127 = 2^0) to handle padding
     NVTE_CHECK_CUDA(cudaMemsetAsync(output->columnwise_scale_inv.dptr, 127, total, stream));
     const int orig_total = original_M * original_K;
@@ -529,7 +532,7 @@ void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_
     swizzle_scaling_mx_kernel<false><<<grid, block, 0, stream>>>(
         reinterpret_cast<const uint8_t*>(input->columnwise_scale_inv.dptr),
         reinterpret_cast<uint8_t*>(output->columnwise_scale_inv.dptr),
-        m, original_M, original_K);
+        m, input_stride, original_M, original_K);
     NVTE_CHECK_CUDA(cudaGetLastError());
   }
 }
@@ -872,7 +875,7 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
     }
     if (any_mxfp8) {
       for (size_t i = 0; i < input.size(); i++) {
-        swizzle_scaling_factors_mx(input[i], output[i], stream);
+        swizzle_scaling_factors(input[i], output[i], stream);
       }
       return;
     }
