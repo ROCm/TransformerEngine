@@ -38,6 +38,7 @@ import pytest
 
 import torch
 import torch.distributed as dist
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import torch.nn.functional as F
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import DeviceMesh
@@ -190,8 +191,13 @@ def test_fused_adam_fp8_master_weights(recipe_name):
         with te.autocast(enabled=True, recipe=recipe):
             output = model(x)
         loss = F.mse_loss(output, target)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
+        # if IS_HIP_EXTENSION:
+        #     torch.cuda.current_stream().synchronize()
 
     # Verify optimizer states
     for param in model.parameters():
@@ -255,6 +261,9 @@ def test_fused_adam_fp8_master_weights_no_meta(recipe_name):
         with te.autocast(enabled=True, recipe=recipe):
             output = model(x)
         loss = F.mse_loss(output, target)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
 
@@ -358,6 +367,9 @@ def test_fused_adam_fp8_high_precision_init(recipe_name):
         with te.autocast(enabled=True, recipe=recipe):
             output = model(x)
         loss = F.mse_loss(output, target)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
 
@@ -391,6 +403,16 @@ def test_fused_adam_bf16(recipe_name):
     """
     recipe = get_recipe_from_string(recipe_name)
 
+    if recipe_name == "NVFP4BlockScaling" and IS_HIP_EXTENSION:
+        pytest.xfail(
+            "NVFP4BlockScaling + bf16 params on ROCm: NaN loss after the first "
+            "optimizer step. Root cause: RCCL allreduce_coalesced on NVFP4 amax "
+            "tensors (triggered by with_amax_reduction=True in multi-rank training) "
+            "produces incorrect amax values on ROCm. This causes scale_inv = "
+            "fp8e4m3_max / 0 = inf, which makes subsequent NVFP4 dequantize produce "
+            "NaN. Confirmed by: disable_rht=True (no amax all-reduce needed) "
+        )
+
     world_size, device = _get_dist_info()
 
     model = _build_model(fp8_init=False)
@@ -413,6 +435,9 @@ def test_fused_adam_bf16(recipe_name):
             output = model(x)
         loss = F.mse_loss(output, target)
         losses.append(loss.item())
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
 
@@ -458,6 +483,9 @@ def test_fused_adam_fp8_no_master(recipe_name):
         with te.autocast(enabled=True, recipe=recipe):
             output = model(x)
         loss = F.mse_loss(output, target)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
 
@@ -481,6 +509,15 @@ def test_fused_adam_bf16_store_param_remainders(recipe_name):
     - Loss decreases (basic sanity)
     """
     recipe = get_recipe_from_string(recipe_name)
+
+    if recipe_name == "NVFP4BlockScaling" and IS_HIP_EXTENSION:
+        pytest.xfail(
+            "NVFP4BlockScaling + bf16 params on ROCm: same root cause as "
+            "test_fused_adam_bf16 — RCCL allreduce_coalesced on NVFP4 amax "
+            "tensors produces incorrect values on ROCm, leading to NaN loss. "
+            "Passes with disable_rht=True. Passes on CUDA."
+        )
+
     world_size, device = _get_dist_info()
 
     model = _build_model(fp8_init=False)
@@ -504,6 +541,9 @@ def test_fused_adam_bf16_store_param_remainders(recipe_name):
             output = model(x)
         loss = F.mse_loss(output, target)
         losses.append(loss.item())
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
 
@@ -584,6 +624,9 @@ def test_fuse_wgrad_accumulation(recipe_name):
     with te.autocast(enabled=True, recipe=recipe):
         output = model(x)
 
+    # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+    if IS_HIP_EXTENSION:
+        torch.cuda.current_stream().synchronize()
     loss = F.mse_loss(output, target)
     loss.backward()  # Expected to raise AttributeError
 
@@ -633,6 +676,9 @@ def test_safetensors_fp32_export(recipe_name):
         with te.autocast(enabled=True, recipe=recipe):
             output = model(x)
         loss = F.mse_loss(output, target)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
 
@@ -753,6 +799,9 @@ def test_dcp_output_parity(recipe_name, async_save):
             with te.autocast(enabled=True, recipe=recipe):
                 output = model(x)
             loss = F.mse_loss(output, target)
+            # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+            if IS_HIP_EXTENSION:
+                torch.cuda.current_stream().synchronize()
             loss.backward()
             optimizer.step()
 
@@ -797,6 +846,9 @@ def test_dcp_output_parity(recipe_name, async_save):
         optimizer2.zero_grad(set_to_none=True)
         with te.autocast(enabled=True, recipe=recipe):
             out_tmp = model2(x)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         F.mse_loss(out_tmp, target).backward()
         optimizer2.step()
 
@@ -851,6 +903,9 @@ def test_dcp_output_parity(recipe_name, async_save):
         with te.autocast(enabled=True, recipe=recipe):
             out1 = model(x)
         loss1 = F.mse_loss(out1, target)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss1.backward()
         optimizer.step()
 
@@ -858,6 +913,9 @@ def test_dcp_output_parity(recipe_name, async_save):
         with te.autocast(enabled=True, recipe=recipe):
             out2 = model2(x)
         loss2 = F.mse_loss(out2, target)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss2.backward()
         optimizer2.step()
 
@@ -929,6 +987,9 @@ def test_dcp_resharding_save(recipe_name):
         with te.autocast(enabled=True, recipe=recipe):
             output = model(x)
         loss = F.mse_loss(output, target)
+        # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+        if IS_HIP_EXTENSION:
+            torch.cuda.current_stream().synchronize()
         loss.backward()
         optimizer.step()
 
@@ -1088,5 +1149,11 @@ if __name__ == "__main__":
     try:
         TESTS[args.test](args.recipe)
     finally:
+        # NOTE: In PyTorch < 2.6 there’s a teardown race where one rank may call
+        # destroy_process_group() while other ranks still have in-flight NCCL ops,
+        # which can trigger a NCCL/RCCL comm error. Newer releases (>= 2.6) fixed
+        # this, but we kept a version-guarded barrier on older Torch for stability.
+        if dist.is_initialized() and te.torch_version() < (2, 6, 0):
+            dist.barrier(device_ids=[torch.cuda.current_device()])
         if dist.is_initialized():
             dist.destroy_process_group()

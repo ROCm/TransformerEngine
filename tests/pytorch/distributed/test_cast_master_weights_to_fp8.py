@@ -845,6 +845,13 @@ def _test_cast_master_weights_to_nvfp4(dp_group, manual_post_all_gather_processi
     available, reason = is_nvfp4_available(return_reason=True)
     if not available:
         pytest.skip(reason)
+    if IS_HIP_EXTENSION:
+        pytest.skip(
+            "NVFP4 cast_master_weights test produces NaN on ROCm: "
+            "RCCL allreduce_coalesced on NVFP4 amax tensors (with_amax_reduction=True) "
+            "returns incorrect values, causing scale_inv = fp8e4m3_max / 0 = inf and "
+            "subsequent NaN outputs."
+        )
 
     rank = dist.get_rank(dp_group)
     world_size = dist.get_world_size(dp_group)

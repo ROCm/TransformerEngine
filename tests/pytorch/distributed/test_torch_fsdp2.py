@@ -15,8 +15,6 @@ from utils import run_distributed
 
 import pytest
 import torch
-from torch.utils.cpp_extension import IS_HIP_EXTENSION
-
 import transformer_engine.pytorch as te
 
 NUM_PROCS: int = torch.cuda.device_count()
@@ -25,74 +23,6 @@ _FSDP2_DIR = Path(__file__).parent.resolve() / "fsdp2_tests"
 # Import some utilities from PyTest-owned conftest.py.
 sys.path.insert(0, str(_FSDP2_DIR))
 from conftest import _parametrize_recipes
-
-def check_nvfp4_support():
-    supported, reason = fp8.check_nvfp4_support()
-    if supported and torch.cuda.get_device_capability()[0] == 12:
-        return (
-            False,
-            (
-                "NVFP4BlockScaling is failing on SM120 with "
-                "hadamard_transform/hadamard_transform_cast_fusion.cu:672 in function "
-                "rht_gemm_ntt_w_sfc: CUDA Error: invalid argument"
-            ),
-        )
-
-    return supported, reason
-
-
-# Each entry: (recipe_class_name, check_fn)
-_FP8_RECIPE_CONFIGS = [
-    ("DelayedScaling", fp8.check_fp8_support),
-    ("Float8CurrentScaling", fp8.check_fp8_support),
-    ("Float8BlockScaling", fp8.check_fp8_block_scaling_support),
-    ("MXFP8BlockScaling", fp8.check_mxfp8_support),
-    ("NVFP4BlockScaling", check_nvfp4_support),
-]
-
-
-def _parametrize_fp8_recipes():
-    """Generate pytest.param objects with skip marks for unsupported FP8 recipes."""
-    params = []
-    for name, check_fn in _FP8_RECIPE_CONFIGS:
-        supported, reason = check_fn()
-        params.append(
-            pytest.param(
-                name,
-                id=name,
-                marks=pytest.mark.skipif(not supported, reason=reason),
-            )
-        )
-    return params
-
-
-@pytest.fixture(params=_parametrize_fp8_recipes())
-def fp_recipe(request):
-    """Parametrized fixture providing FP8 recipe Hydra overrides for each supported TE recipe."""
-    return request.param
-
-
-def _run_test(fp_init, sharding_dims, recipe, layer_type):
-    test_path = Path(__file__).parent.resolve() / "run_fsdp2_model.py"
-    test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", str(test_path)]
-    if IS_HIP_EXTENSION:
-        test_cmd = ["timeout", "-k60", "-v", "180"] + test_cmd
-
-    if fp_init:
-        test_cmd += ["--fp8-init"]
-
-    if len(sharding_dims) == 1:
-        test_cmd += ["--sharding-dims", str(sharding_dims[0])]
-    elif len(sharding_dims) == 2:
-        test_cmd += ["--sharding-dims", str(sharding_dims[0]), str(sharding_dims[1])]
-    else:
-        assert False
-    test_cmd += ["--recipe", recipe]
-    test_cmd += ["--layer-type", layer_type]
-
-    subprocess.run(test_cmd, env=os.environ, check=True)
-sys.path.pop(0)
-
 
 @pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
 @pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
