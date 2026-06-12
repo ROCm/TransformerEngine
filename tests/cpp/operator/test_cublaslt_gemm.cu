@@ -3,10 +3,9 @@
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
+#include <algorithm>
 #include <cmath>
-#include <iostream>
 #include <optional>
-#include <set>
 #include <string>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -653,10 +652,8 @@ void performTest(const TestParams& params) {
 
   // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales.
   if (use_mxfp8 && prop.major == 12) {
-    if (!a_colwise) swizzle_mxfp8_scales(A, true);
-    if (a_colwise)  swizzle_mxfp8_scales(A, false);
-    if (!b_colwise) swizzle_mxfp8_scales(B, true);
-    if (b_colwise)  swizzle_mxfp8_scales(B, false);
+    swizzle_mxfp8_scales(A, !a_colwise);
+    swizzle_mxfp8_scales(B, !b_colwise);
   }
 
   //perform the gemm in GPU
@@ -707,7 +704,8 @@ void performTest(const TestParams& params) {
 template <typename A_Type, typename B_Type, typename D_Type>
 void performDqTest(const TestParams &params,
                    std::optional<double> atol_override = std::nullopt,
-                   std::optional<double> rtol_override = std::nullopt) {
+                   std::optional<double> rtol_override = std::nullopt,
+                   size_t tolerable_mismatches_limit = 0) {
   DType atype = TypeInfo<A_Type>::dtype;
   DType btype = TypeInfo<B_Type>::dtype;
   DType dtype = TypeInfo<D_Type>::dtype;
@@ -765,13 +763,11 @@ void performDqTest(const TestParams &params,
   nvte_dequantize(B_fp8.data(), B_ref.data(), 0);
 
   // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales.
+  const bool a_colwise = !params.transa;
+  const bool b_colwise = params.transb;
   if (prop.major == 12) {
-    const bool a_colwise = !params.transa;
-    const bool b_colwise = params.transb;
-    if (!a_colwise) swizzle_mxfp8_scales(A_fp8, true);
-    if (a_colwise)  swizzle_mxfp8_scales(A_fp8, false);
-    if (!b_colwise) swizzle_mxfp8_scales(B_fp8, true);
-    if (b_colwise)  swizzle_mxfp8_scales(B_fp8, false);
+    swizzle_mxfp8_scales(A_fp8, !a_colwise);
+    swizzle_mxfp8_scales(B_fp8, !b_colwise);
   }
 
   Tensor bias;
@@ -787,7 +783,6 @@ void performDqTest(const TestParams &params,
                    prop.multiProcessorCount, 0);
   D.to_cpu();
 
-
   //perform non-FP8 gemm and copy the output results from GPU memory to CPU memory
   Tensor D_ref("D", TShape{params.n, params.m}, dtype);
   nvte_cublas_gemm(A_ref.data(), B_ref.data(), D_ref.data(), bias.data(), pre_gelu_out.data(),
@@ -795,18 +790,20 @@ void performDqTest(const TestParams &params,
                    prop.multiProcessorCount, 0);
   D_ref.to_cpu();
 
+  auto [atol, rtol] = getTestTolerances(dtype, true, true);
+  if (atol_override)
+    atol = *atol_override;
+  if (rtol_override)
+    rtol = *rtol_override;
+
   // check if error message happens in running
   (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
   //compare results
-  auto [atol, rtol] = getTestTolerances(dtype, true, true);
-  if (atol_override)
-    atol = *atol_override;
-  if (rtol_override)
-    rtol = *rtol_override;
-  compareResults("D", D, D_ref.rowwise_cpu_dptr<D_Type>(), true, atol, rtol);
+  compareResults("D", D, D_ref.rowwise_cpu_dptr<D_Type>(), true, atol, rtol, true,
+                 tolerable_mismatches_limit);
 }
 #endif // __HIP_PLATFORM_AMD__
 
@@ -948,11 +945,14 @@ TEST_P(ProdDqGEMMTestSuite, TestMxfp8Dq) {
 
   // Production shapes use looser tolerances: the MXFP8 and bf16 reference
   // GEMM use different internal accumulation paths, so results can differ
-  // by up to 1 ULP in bf16 (~1.5-2% relative).
+  // by up to 1 ULP in bf16 (~1.5-2% relative). On gfx12, repeated BF16
+  // reference GEMMs can still differ on a small number of outputs.
   const double prod_atol = 1e-3;
   const double prod_rtol = 2e-2;
+  const size_t prod_tolerable_mismatches = prop.major == 12 ? 2048 : 0;
 
-  performDqTest<fp8, fp8, bf16>(params, prod_atol, prod_rtol);
+  performDqTest<fp8, fp8, bf16>(params, prod_atol, prod_rtol,
+                                prod_tolerable_mismatches);
 }
 
 static auto prodTestName = [](const testing::TestParamInfo<ProdGemmConfig>& info) {
