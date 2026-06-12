@@ -157,6 +157,8 @@ def _rows_per_pid(rows, hidden, num_sms, cap_ladder):
             rpp = 4
         elif hidden <= 512 and rows % 2 == 0:
             rpp = 2
+    # The kernel packs rpp rows per program with no row-tail mask, so rpp must divide rows
+    assert rows % rpp == 0, f"rows_per_pid={rpp} does not divide rows={rows}"
     return rpp
 
 
