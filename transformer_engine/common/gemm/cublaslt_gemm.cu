@@ -1180,8 +1180,8 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
             (is_fp8_dtype(A_dt) && is_fp8_dtype(B_dt))
           ) ||
           (
-            (A_dt == B_dt) && (A_dt == D_dt) &&
-            (is_fp16_dtype(A_dt))
+            (A_dt == B_dt) && is_fp16_dtype(A_dt) &&
+            (is_fp16_dtype(D_dt) || D_dt == transformer_engine::DType::kFloat32)
           );
 #else
     auto A_type = get_cuda_dtype(inputA->data.dtype);
