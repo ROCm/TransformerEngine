@@ -72,6 +72,7 @@ bash benchmarks/asv/run_benchmarks.sh <command> [options]
 | `run [suite] [method]` | Run benchmarks in-process (saves ASV-compatible results) |
 | `view` | Build the ASV HTML dashboard from saved results and serve it on `localhost:8080` |
 | `list` | List available benchmark suites |
+| `compare BASE CAND` | Statistically compare two result JSONs (exits 1 on a significant regression) |
 
 ## How results are stored
 
@@ -87,7 +88,9 @@ benchmarks/.asv/results/
 ```
 
 Each commit JSON contains the wall-clock timings for every benchmark + parameter combination
-run on that machine. The `benchmarks/.asv/` directory is in `.gitignore`.
+run on that machine, including the raw per-call samples (the ASV `samples`
+column) used by `compare_results.py`. The `benchmarks/.asv/` directory is in
+`.gitignore`.
 
 ## Viewing results
 
@@ -102,6 +105,63 @@ asv preview --config benchmarks/asv/asv.conf.json
 
 `asv.conf.json` exists only to support `publish` / `preview`; benchmarks
 themselves are not invoked through `asv`.
+
+## Comparing two checkouts statistically
+
+The dashboard plots point estimates (medians), which cannot tell a real
+regression from measurement noise. To test whether timing differences between
+two checkouts are statistically significant, the driver records the raw per-call
+samples in each result file (the ASV `samples` column), and `compare_results.py`
+compares them with a Brunner-Munzel test via the
+[benchstats](https://github.com/Arech/benchstats) package:
+
+```bash
+pip install -r requirements.txt   # benchstats (pulls rich, scipy, numpy)
+
+cd benchmarks/asv
+
+# baseline checkout — saves <baseline-hash>-<env>.json
+python driver.py --all -n 20
+# candidate checkout — saves <candidate-hash>-<env>.json
+python driver.py --all -n 20
+
+python compare_results.py \
+    ../.asv/results/<machine>/<baseline-hash>-<env>.json \
+    ../.asv/results/<machine>/<candidate-hash>-<env>.json
+```
+
+It prints a table marking each `(benchmark, parameter combination)` as faster
+(`<`), slower (`>`), or not significantly different (`~`), and exits `1` when a
+significant difference is found, so it can gate CI.
+
+By default the result filename is derived from the commit hash, so two runs on
+the **same** commit (e.g. prototyping against a dirty working tree, where `HEAD`
+is unchanged) would overwrite each other. Pass `--label` to fold a tag into the
+filename and keep them distinct:
+
+```bash
+python driver.py --all -n 20 --label base   # -> <hash>-base-<env>.json
+# ... edit code (HEAD stays the same) ...
+python driver.py --all -n 20 --label cand   # -> <hash>-cand-<env>.json
+
+python compare_results.py \
+    ../.asv/results/<machine>/<hash>-base-<env>.json \
+    ../.asv/results/<machine>/<hash>-cand-<env>.json
+```
+
+| Flag | Effect |
+|---|---|
+| `--alpha A` | Significance level for the test (default `0.001`). |
+| `--method M` | Statistical test to use (default `brunnermunzel`). |
+| `--filter REGEX` | Only compare benchmarks whose name matches `REGEX`. |
+| `--always-show-pvalues` | Show p-values for non-significant rows too. |
+| `--export-to FILE` | Save the report to a `.txt`/`.svg`/`.html` file. |
+
+The test is rank-based and needs a reasonable number of samples per benchmark
+(≥ ~10 recommended); the default `-n 20` timed iterations satisfies this. Only
+timing is tested — throughput (`TFLOPS`/`GB/s`) is a constant-work transform of
+time, so a rank test on it is identical; the driver already prints throughput
+columns during a run.
 
 ## Writing new benchmarks
 

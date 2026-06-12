@@ -21,6 +21,7 @@ import itertools
 import json
 import os
 import platform
+import re
 import subprocess
 import sys
 import textwrap
@@ -119,8 +120,14 @@ def _get_results_dir():
     return os.path.normpath(os.path.join(conf_dir, conf["results_dir"]))
 
 
-def save_asv_results(all_results, bench_meta):
-    """Write results and benchmark index to ASV's results directory."""
+def save_asv_results(all_results, bench_meta, label=None):
+    """Write results and benchmark index to ASV's results directory.
+
+    *label*, when given, is folded into the result filename so multiple runs on
+    the same commit (e.g. prototyping with a dirty working tree, where the HEAD
+    hash is unchanged) land in distinct files that ``compare_results.py`` can
+    compare instead of overwriting each other.
+    """
     commit_hash = _get_commit_hash()
     machine_name, machine_info = _get_machine_info()
     env_name = "existing-" + sys.executable.replace("/", "_").strip("_")
@@ -134,8 +141,13 @@ def save_asv_results(all_results, bench_meta):
         with open(machine_json, "w") as f:
             json.dump({**machine_info, "version": 1}, f, indent=4)
 
-    # Load existing result file or start fresh
-    filename = f"{commit_hash[:8]}-{env_name}.json"
+    # Load existing result file or start fresh. A label is sanitized to keep the
+    # filename safe (no path separators / whitespace) and inserted after the hash.
+    if label:
+        safe_label = re.sub(r"[^A-Za-z0-9._-]+", "_", label).strip("_")
+        filename = f"{commit_hash[:8]}-{safe_label}-{env_name}.json"
+    else:
+        filename = f"{commit_hash[:8]}-{env_name}.json"
     result_path = os.path.join(machine_dir, filename)
     if os.path.exists(result_path):
         with open(result_path) as f:
@@ -296,6 +308,7 @@ def run_class(
 
         medians, ci_los, ci_his, q25s, q75s = [], [], [], [], []
         numbers, repeats = [], []
+        sample_lists = []  # raw per-call samples per combo (the ASV "samples" column)
         started_at = int(time.time() * 1000)
         t_start = time.perf_counter()
 
@@ -308,6 +321,7 @@ def run_class(
                 print(f"  SKIP  {label}  setup failed: {e}")
                 for lst in (medians, ci_los, ci_his, q25s, q75s, numbers, repeats):
                     lst.append(None)
+                sample_lists.append(None)
                 continue
 
             # Inner-loop and cache configuration. Cold-cache mode forces
@@ -344,6 +358,10 @@ def run_class(
             q75s.append(q75)
             numbers.append(instance._inner)
             repeats.append(iters)
+            # Keep the raw samples (seconds) for statistical comparison
+            # (compare_results.py). Rounded to 1 ns to keep the JSON compact
+            # without losing meaningful timing resolution.
+            sample_lists.append([round(x, 9) for x in samples])
 
             # Derive throughput from work_* companion
             work = {}
@@ -369,7 +387,7 @@ def run_class(
         duration = time.perf_counter() - t_start
         all_results[bench_key] = [
             medians, asv_params, version, started_at, round(duration, 2),
-            ci_los, ci_his, q25s, q75s, numbers, repeats,
+            ci_los, ci_his, q25s, q75s, numbers, repeats, sample_lists,
         ]
 
     return all_results, all_meta
@@ -419,6 +437,11 @@ def run_as_main(caller_file=None):
                              "Infinity Cache).")
     parser.add_argument("--no-save", action="store_true",
                         help="Skip saving results to ASV format")
+    parser.add_argument("--label", default=None,
+                        help="Tag folded into the result filename "
+                             "(<hash>-<label>-<env>.json). Use it to keep "
+                             "multiple runs on the same commit (e.g. a dirty "
+                             "working tree) in distinct files for comparison.")
     args = parser.parse_args()
     if args.inner != "auto":
         try:
@@ -464,7 +487,7 @@ def run_as_main(caller_file=None):
                 all_meta.update(meta)
 
     if all_results and not args.no_save:
-        save_asv_results(all_results, all_meta)
+        save_asv_results(all_results, all_meta, label=args.label)
 
 
 if __name__ == "__main__":

@@ -16,6 +16,9 @@ Commands:
                         Run benchmarks in-process (saves ASV-compatible results)
   view                  Build the ASV HTML dashboard from saved results and serve it
   list                  List available benchmark suites
+  compare BASE CAND [OPTS]
+                        Statistically compare two ASV result JSONs (benchstats);
+                        exits 1 on a significant timing regression (CI gating)
 
 EOF
 }
@@ -37,6 +40,10 @@ case "${1:-}" in
     list)
         echo "Available benchmark suites:"
         ls "$BENCH_DIR"/bench_*.py 2>/dev/null | sed 's|.*/bench_|  bench_|;s|\.py$||'
+        ;;
+    compare)
+        shift
+        python "$BENCH_DIR/compare_results.py" "$@"
         ;;
     *)
         usage
