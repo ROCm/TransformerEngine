@@ -362,15 +362,15 @@ def _rmsnorm_bwd_triton_impl(grad_output_ptr, input_ptr, g_ptr, rsigma_ptr, dx_p
                 if DX_ALIGNED_16:
                     dx_ptrs = tl.multiple_of(dx_ptrs, (16, ))
 
-                x = tl.load(input_ptrs, mask=mask, other=0.0).to(tl.float32)
-                grad_output = tl.load(grad_output_ptrs, mask=mask, other=0.0).to(tl.float32)
+                x = tl.load(input_ptrs, mask=row_mask, other=0.0).to(tl.float32)
+                grad_output = tl.load(grad_output_ptrs, mask=row_mask, other=0.0).to(tl.float32)
 
-                norm_factor = tl.load(rsigma_ptr + row_idx).to(tl.float32)
+                norm_factor = tl.load(rsigma_ptr + row_idx, mask=row_valid, other=1.0).to(tl.float32)
                 grad_sum = tl.sum(grad_output * x * g, axis=0)
                 c_scalar = norm_factor * norm_factor * grad_sum * inv_n_cols
 
                 grad_input = norm_factor * (grad_output * g - c_scalar * x)
-                tl.store(dx_ptrs, grad_input.to(dx_ptr.type.element_ty), mask=mask)
+                tl.store(dx_ptrs, grad_input.to(dx_ptr.type.element_ty), mask=row_mask)
 
                 dg = grad_output * x * norm_factor
                 dg_col_redux += dg.to(tl.float32)
