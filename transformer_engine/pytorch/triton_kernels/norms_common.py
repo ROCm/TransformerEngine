@@ -422,6 +422,13 @@ def te_layernorm_bwd_triton(
             '"sm_margin" is not supported in the Triton based backward layer-norm kernel. '
             + f"sm_margin={sm_margin} will be ignored."
         )
+
+    dz = dz.contiguous()
+    x = x.contiguous()
+    mu = mu.contiguous()
+    rsigma = rsigma.contiguous()
+    gamma = gamma.contiguous()
+
     M, N = x.shape
     # calculate dw and db separately when M is small
     IGNORE_DW_DB_IN_FUSED = M <= 512
