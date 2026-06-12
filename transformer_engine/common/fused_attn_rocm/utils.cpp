@@ -13,6 +13,35 @@ namespace fused_attn_rocm {
 
 using namespace transformer_engine;
 
+bool is_padding_mask(NVTE_Mask_Type mask_type){
+  return mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+         mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+         mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK;
+}
+
+bool is_causal_mask(NVTE_Mask_Type mask_type){
+  return mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
+         mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+         mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK ||
+         mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK;
+}
+
+void set_workspace_size(Tensor *workspace, size_t workspace_size){
+  // workspace_size is unsigned, so the only cases are >0 and ==0.
+  if(workspace_size > 0){
+    if(workspace->data.dptr == nullptr){
+      // sizing pass: request allocation
+      workspace->data.shape = {workspace_size};
+      workspace->data.dtype = DType::kByte;
+    }
+    // execution pass (dptr != nullptr): kernel already ran, nothing to do
+    return;
+  }
+  // workspace_size == 0: report a 1-byte placeholder
+  workspace->data.shape = {1};
+  workspace->data.dtype = DType::kByte;
+}
+
 size_t nvte_dtype_size(DType t_dtype){
   switch(t_dtype){
     case DType::kByte: 
