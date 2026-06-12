@@ -3,9 +3,8 @@
  *
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
-#include <algorithm>
 #include <cmath>
-#include <optional>
+#include <iostream>
 #include <string>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
@@ -449,12 +448,6 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
   else if (use_fp8) {
     atol = 1e-3;
     rtol = std::max(rtol, 1e-2);
-    // Relax for gfx1250
-    cudaDeviceProp prop;
-    (void)cudaGetDeviceProperties(&prop, 0);
-    if (prop.major == 12 && type == DType::kBFloat16) {
-      rtol = std::max(rtol, 5e-2);
-    }
   }
   else if (type == DType::kBFloat16) {
     //relax for certain prime number TN gemm
@@ -702,10 +695,7 @@ void performTest(const TestParams& params) {
 
 #ifdef __HIP_PLATFORM_AMD__
 template <typename A_Type, typename B_Type, typename D_Type>
-void performDqTest(const TestParams &params,
-                   std::optional<double> atol_override = std::nullopt,
-                   std::optional<double> rtol_override = std::nullopt,
-                   size_t tolerable_mismatches_limit = 0) {
+void performDqTest(const TestParams &params) {
   DType atype = TypeInfo<A_Type>::dtype;
   DType btype = TypeInfo<B_Type>::dtype;
   DType dtype = TypeInfo<D_Type>::dtype;
@@ -783,6 +773,7 @@ void performDqTest(const TestParams &params,
                    prop.multiProcessorCount, 0);
   D.to_cpu();
 
+
   //perform non-FP8 gemm and copy the output results from GPU memory to CPU memory
   Tensor D_ref("D", TShape{params.n, params.m}, dtype);
   nvte_cublas_gemm(A_ref.data(), B_ref.data(), D_ref.data(), bias.data(), pre_gelu_out.data(),
@@ -790,20 +781,14 @@ void performDqTest(const TestParams &params,
                    prop.multiProcessorCount, 0);
   D_ref.to_cpu();
 
-  auto [atol, rtol] = getTestTolerances(dtype, true, true);
-  if (atol_override)
-    atol = *atol_override;
-  if (rtol_override)
-    rtol = *rtol_override;
-
   // check if error message happens in running
   (void)cudaDeviceSynchronize();
   auto err = cudaGetLastError();
   ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
 
   //compare results
-  compareResults("D", D, D_ref.rowwise_cpu_dptr<D_Type>(), true, atol, rtol, true,
-                 tolerable_mismatches_limit);
+  auto [atol, rtol] = getTestTolerances(dtype, true, true);
+  compareResults("D", D, D_ref.rowwise_cpu_dptr<D_Type>(), true, atol, rtol);
 }
 #endif // __HIP_PLATFORM_AMD__
 
@@ -934,7 +919,7 @@ TEST_P(ProdDqGEMMTestSuite, TestMxfp8Dq) {
   (void)cudaGetDeviceProperties(&prop, 0);
   const bool is_tn = config.transa && !config.transb;
   if (prop.major == 12 && !is_tn) {
-    GTEST_SKIP() << "hipBLASLt MXFP8 prod GEMM non-TN layout is not supported on gfx1250: "
+    GTEST_SKIP() << "hipBLASLt MXFP8 GEMM non-TN layout is not supported on gfx1250: "
                  << config.label;
   }
 
@@ -943,16 +928,7 @@ TEST_P(ProdDqGEMMTestSuite, TestMxfp8Dq) {
                        .transa = config.transa, .transb = config.transb,
                        .scaling_mode = NVTEScalingMode::NVTE_MXFP8_1D_SCALING};
 
-  // Production shapes use looser tolerances: the MXFP8 and bf16 reference
-  // GEMM use different internal accumulation paths, so results can differ
-  // by up to 1 ULP in bf16 (~1.5-2% relative). On gfx12, repeated BF16
-  // reference GEMMs can still differ on a small number of outputs.
-  const double prod_atol = 1e-3;
-  const double prod_rtol = 2e-2;
-  const size_t prod_tolerable_mismatches = prop.major == 12 ? 2048 : 0;
-
-  performDqTest<fp8, fp8, bf16>(params, prod_atol, prod_rtol,
-                                prod_tolerable_mismatches);
+  performDqTest<fp8, fp8, bf16>(params);
 }
 
 static auto prodTestName = [](const testing::TestParamInfo<ProdGemmConfig>& info) {
