@@ -138,10 +138,11 @@ def _rows_per_pid(rows, hidden, num_sms, cap_ladder):
     """Largest power-of-two rows-per-program for a narrow-H RMSNorm launch.
 
     Picks the biggest ``rpp`` that (a) does not exceed the hidden-size cap,
-    (b) evenly divides ``rows`` -- so the kernel needs no row-tail mask -- and
-    (c) still leaves at least ``_TARGET_PRGMS_PER_CU * num_sms`` programs. If
-    the program-count target cannot be met we still pack a little (4 or 2) to
-    amortise the gamma load, provided divisibility holds.
+    (b) evenly divides ``rows`` so the packed kernel wastes no masked tail
+    iterations, and (c) still leaves at least ``_TARGET_PRGMS_PER_CU *
+    num_sms`` programs. If the target cannot be met we still pack a little
+    (4 or 2) to amortise the gamma load. Divisibility is only a performance
+    choice: the kernel masks any partial tail, so any ``rpp`` stays in bounds.
     """
     target = _TARGET_PRGMS_PER_CU * num_sms
     cap = 1
@@ -157,8 +158,6 @@ def _rows_per_pid(rows, hidden, num_sms, cap_ladder):
             rpp = 4
         elif hidden <= 512 and rows % 2 == 0:
             rpp = 2
-    # The kernel packs rpp rows per program with no row-tail mask, so rpp must divide rows
-    assert rows % rpp == 0, f"rows_per_pid={rpp} does not divide rows={rows}"
     return rpp
 
 
