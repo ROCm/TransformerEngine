@@ -102,6 +102,42 @@ def main() -> int:
         else:
             print("\nNo unknown fields referenced in source.")
 
+    # Split-KV forward uses a distinct struct (fmha_fwd_splitkv_args), defined in
+    # the CK example header rather than csrc/include/mha_fwd.h, and populated under
+    # the variable name fmha_splitkv_args in ck_fused_attn_fwd.cpp. Validate it the
+    # same way. The header path is more fragile than csrc/include, so a missing
+    # header warns instead of failing the build.
+    if "fwd" in modes:
+        splitkv_struct = "fmha_fwd_splitkv_args"
+        splitkv_var = "fmha_splitkv_args"
+        splitkv_header = aiter_root / "3rdparty/composable_kernel/example/ck_tile/01_fmha/fmha_fwd.hpp"
+        splitkv_source = args.te_dir / "transformer_engine/common/ck_fused_attn/src/ck_fused_attn_fwd.cpp"
+        print(f"\nAnalyzing {splitkv_struct}\n")
+        if not splitkv_header.exists():
+            print(f"WARNING: split-KV header not found at {splitkv_header}; skipping validation.")
+        else:
+            header_set = set(extract_fields_from_header(
+                splitkv_header.read_text(encoding="utf-8"), splitkv_struct))
+            used_fields = extract_usage_from_source(
+                splitkv_source.read_text(encoding="utf-8"), splitkv_var)
+            missing_in_usage = sorted(header_set - used_fields)
+            unknown_in_header = sorted(used_fields - header_set)
+            mismatch += len(missing_in_usage) + len(unknown_in_header)
+            print(f"{splitkv_struct} fields in header:", len(header_set))
+            print(f"{splitkv_struct} fields referenced in source:", len(used_fields))
+            if missing_in_usage:
+                print("\nFields present in header but not referenced in source:")
+                for name in missing_in_usage:
+                    print(f"  - {name}")
+            else:
+                print("\nAll header fields are referenced in source.")
+            if unknown_in_header:
+                print("\nFields referenced in source but not in header:")
+                for name in unknown_in_header:
+                    print(f"  - {name}")
+            else:
+                print("\nNo unknown fields referenced in source.")
+
     if mismatch:
         print(f"\nTotal mismatched fields: {mismatch}")
         return 1

@@ -98,6 +98,13 @@ struct CKAttnFwdArgs : CKAttnCommonArgs {
 
   // V3 ASM kernel selection
   bool uses_fwd_v3 = false;
+
+  // Split-KV (Flash-Decoding). num_splits > 1 selects the ck_attn_fwd_splitkv
+  // path; lse_acc/o_acc are fp32 partial-result scratch buffers, each laid out
+  // contiguously as [nhead, num_splits, max_tokens_q(, d_v)] (group mode only).
+  int num_splits = 1;
+  void* lse_acc_ptr = nullptr;
+  void* o_acc_ptr = nullptr;
 };
 
 // Backward attention request.
@@ -140,6 +147,7 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
 };
 
 hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream);
+hipError_t ck_attn_fwd_splitkv(const CKAttnFwdArgs& args, hipStream_t stream);
 hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream);
 
 }//namespace ck_fused_attn

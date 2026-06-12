@@ -7,6 +7,9 @@
 #include <iostream>
 #include <string>
 #include <numeric> // Required for std::accumulate
+#include <vector>
+#include <algorithm>
+#include <cmath>
 #ifdef USE_FUSED_ATTN_CK
 #include <ck_fused_attn/ck_fused_attn.hpp>
 #endif // USE_FUSED_ATTN_CK
@@ -507,6 +510,60 @@ void pad_remap_lse(
   }
 }
 
+// Flash-Decoding split-count heuristic, ported from AITER's CK example
+// (3rdparty/composable_kernel/example/ck_tile/01_fmha/fmha_fwd_runner.hpp::
+// num_splits_heuristic). Ported rather than included because that header is a
+// host example unit and mha_common.h's variant pulls in torch types. Note the
+// mha_common.h variant derives num_n_blocks from hdim_v and degenerates to 1;
+// this occupancy-based version is the one that actually yields splits > 1.
+// Returns 1 when the launch already fills the GPU.
+static int ck_num_splits_heuristic(int batch_nhead_mblocks, int num_SMs, int max_splits) {
+  if (batch_nhead_mblocks >= 0.8f * num_SMs) {
+    return 1;
+  }
+  max_splits = std::min(max_splits, num_SMs);
+  float max_efficiency = 0.f;
+  std::vector<float> efficiency;
+  efficiency.reserve(max_splits);
+  for (int num_splits = 1; num_splits <= max_splits; num_splits++) {
+    float n_waves = float(batch_nhead_mblocks * num_splits) / num_SMs;
+    float eff = n_waves / std::ceil(n_waves);
+    if (eff > max_efficiency) {
+      max_efficiency = eff;
+    }
+    efficiency.push_back(eff);
+  }
+  for (int num_splits = 1; num_splits <= max_splits; num_splits++) {
+    if (efficiency[num_splits - 1] >= 0.85 * max_efficiency) {
+      return num_splits;
+    }
+  }
+  return 1;
+}
+
+// Auto-select the split-KV count for a forward call. Deterministic in
+// (shape, device), so the workspace sizing pass and the execution pass agree.
+// Returns 1 (no split) on any failure or when dropout is active.
+static int ck_compute_num_splits(uint64_t b, uint64_t h, uint64_t max_seqlen_q,
+                                 float dropout_probability) {
+  if (dropout_probability != 0.f) {
+    return 1;
+  }
+  int device = 0;
+  if (hipGetDevice(&device) != hipSuccess) {
+    return 1;
+  }
+  hipDeviceProp_t props{};
+  if (hipGetDeviceProperties(&props, device) != hipSuccess) {
+    return 1;
+  }
+  // kM0 tile must match AITER's splitkv kernel generation (generate.py).
+  const int kM0 = 64;
+  const int num_m_blocks = (static_cast<int>(max_seqlen_q) + kM0 - 1) / kM0;
+  return ck_num_splits_heuristic(static_cast<int>(b * h) * num_m_blocks,
+                                 props.multiProcessorCount * 2, /*max_splits=*/128);
+}
+
 // actual fwd implementation, calling ck api directly
 void fused_attn_ck_fwd_impl(
   uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
@@ -534,6 +591,7 @@ void fused_attn_ck_fwd_impl(
   bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
   bool nvte_ck_zero_out_pad = getenv<int>("NVTE_CK_ZERO_OUT_PAD", 1);
+  bool nvte_ck_uses_splitkv = getenv<int>("NVTE_CK_USES_SPLITKV", 1);
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
   bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
   bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD || qkv_format==NVTE_QKV_Format::NVTE_SBHD_2BSHD;
@@ -543,6 +601,19 @@ void fused_attn_ck_fwd_impl(
                      mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                      mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
   bool bshd_to_thd = is_BSHD && is_padding;
+
+  // Split-KV (Flash-Decoding) is wired into the group-mode paths only (those
+  // setting cu_seqlens: SBHD+padding, BSHD->THD, ragged THD), because the
+  // accumulator-buffer layout below follows AITER's varlen splitkv reference.
+  // It is restricted to inference (is_training==false) so the standard
+  // training fwd/bwd LSE contract is untouched, and only engages when the
+  // occupancy heuristic asks for more than one split.
+  bool is_group_path = (is_SBHD && is_padding) || bshd_to_thd || is_ragged;
+  int num_splits = 1;
+  if(nvte_ck_uses_splitkv && !is_training && is_group_path){
+    num_splits = ck_compute_num_splits(b, h, s_q, dropout_probability);
+  }
+  bool use_splitkv = num_splits > 1;
 
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
@@ -564,6 +635,16 @@ void fused_attn_ck_fwd_impl(
   void* devPtrSoftmaxLSEWithoutPadding = nullptr;
   if((is_SBHD && is_padding) || bshd_to_thd || is_ragged){
     devPtrSoftmaxLSEWithoutPadding = planner.allocate(h*max_tokens_q*sizeof(float));
+  }
+
+  // Split-KV fp32 accumulators: lse_acc [h, num_splits, max_tokens_q] and
+  // o_acc [h, num_splits, max_tokens_q, d_v]. Sized only when splitkv engages;
+  // num_splits is deterministic so this matches in the sizing and execution passes.
+  void* devPtrLseAcc = nullptr;
+  void* devPtrOAcc = nullptr;
+  if(use_splitkv){
+    devPtrLseAcc = planner.allocate(static_cast<size_t>(h)*num_splits*max_tokens_q*sizeof(float));
+    devPtrOAcc   = planner.allocate(static_cast<size_t>(h)*num_splits*max_tokens_q*d_v*sizeof(float));
   }
 
   void* devPtrQWithoutPadding = nullptr;
@@ -673,7 +754,8 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"(bias_b, bias_h): ("<<bias_b<<", "<<bias_h<<"), ";
     std::cout<<"mask_type: "<<mask_type<<", ";
     std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<", ";
-    std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<std::endl;
+    std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<", ";
+    std::cout<<"use_splitkv: "<<use_splitkv<<", num_splits: "<<num_splits<<std::endl;
   }
   // Common fields filled here; mode-specific fields are overwritten below.
   ck_fused_attn::CKAttnFwdArgs ck_args;
@@ -710,7 +792,14 @@ void fused_attn_ck_fwd_impl(
     ck_args.o_ptr = devPtrOWithoutPadding;
     ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[0];
     ck_args.lse_ptr = devPtrSoftmaxLSEWithoutPadding;
-    NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_fwd(ck_args, stream));
+    if(use_splitkv){
+      ck_args.num_splits = num_splits;
+      ck_args.lse_acc_ptr = devPtrLseAcc;
+      ck_args.o_acc_ptr = devPtrOAcc;
+      NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_fwd_splitkv(ck_args, stream));
+    }else{
+      NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_fwd(ck_args, stream));
+    }
     // add padding for o and softmax_lse
     pad_remap<PadDirection::Add>(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrO, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrOWithoutPadding, stream);
     pad_remap_lse<PadDirection::Add>(b, h, s_q, max_tokens_q, false, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxLSEWithoutPadding, stream);
@@ -729,7 +818,14 @@ void fused_attn_ck_fwd_impl(
     ck_args.o_ptr = devPtrO;
     ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[2];
     ck_args.lse_ptr = devPtrSoftmaxLSEWithoutPadding;
-    NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_fwd(ck_args, stream));
+    if(use_splitkv){
+      ck_args.num_splits = num_splits;
+      ck_args.lse_acc_ptr = devPtrLseAcc;
+      ck_args.o_acc_ptr = devPtrOAcc;
+      NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_fwd_splitkv(ck_args, stream));
+    }else{
+      NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_fwd(ck_args, stream));
+    }
     // aiter asm output softmax_lse with padding
     pad_remap_lse<PadDirection::Add>(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxLSEWithoutPadding, stream);
   }else{

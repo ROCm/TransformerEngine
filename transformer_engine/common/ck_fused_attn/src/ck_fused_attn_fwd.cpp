@@ -235,5 +235,140 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
   return hipSuccess;
 }
 
+// print the splitkv fmha_args when calling ck apis
+void log_fwd_splitkv_config(const char* func_name, const aiter::mha_fwd_splitkv_args& fmha_args, std::ostream* log_file){
+  (*log_file) << "\n" << func_name << "\n";
+  (*log_file) << "\nfmha_splitkv_args: \n";
+  log_value(log_file, "q_ptr", fmha_args.q_ptr);
+  log_value(log_file, "k_ptr", fmha_args.k_ptr);
+  log_value(log_file, "v_ptr", fmha_args.v_ptr);
+  log_value(log_file, "lse_acc_ptr", fmha_args.lse_acc_ptr);
+  log_value(log_file, "o_acc_ptr", fmha_args.o_acc_ptr);
+  log_value(log_file, "lse_ptr", fmha_args.lse_ptr);
+  log_value(log_file, "o_ptr", fmha_args.o_ptr);
+  log_value(log_file, "seqstart_q_ptr", fmha_args.seqstart_q_ptr);
+  log_value(log_file, "seqstart_k_ptr", fmha_args.seqstart_k_ptr);
+  log_value(log_file, "batch", fmha_args.batch);
+  log_value(log_file, "max_seqlen_q", fmha_args.max_seqlen_q);
+  log_value(log_file, "hdim_q", fmha_args.hdim_q);
+  log_value(log_file, "hdim_v", fmha_args.hdim_v);
+  log_value(log_file, "nhead_q", fmha_args.nhead_q);
+  log_value(log_file, "nhead_k", fmha_args.nhead_k);
+  log_value(log_file, "num_splits", fmha_args.num_splits);
+  log_value(log_file, "scale_s", fmha_args.scale_s);
+  log_value(log_file, "nhead_stride_lse_acc", fmha_args.nhead_stride_lse_acc);
+  log_value(log_file, "split_stride_lse_acc", fmha_args.split_stride_lse_acc);
+  log_value(log_file, "nhead_stride_o_acc", fmha_args.nhead_stride_o_acc);
+  log_value(log_file, "split_stride_o_acc", fmha_args.split_stride_o_acc);
+  log_value(log_file, "stride_o_acc", fmha_args.stride_o_acc);
+  log_value(log_file, "window_size_left", fmha_args.window_size_left);
+  log_value(log_file, "window_size_right", fmha_args.window_size_right);
+  log_value(log_file, "mask_type", fmha_args.mask_type);
+}
+
+// Split-KV (Flash-Decoding) forward. Group mode only: the accumulator layout and
+// stride math below mirror AITER's varlen reference
+// (csrc/py_itfs_ck/mha_varlen_fwd_kernels.cu::get_ck_fmha_varlen_fwd_splitkv_args),
+// where lse_acc is [nhead, num_splits, max_tokens_q] and o_acc is
+// [nhead, num_splits, max_tokens_q, d_v], both fp32 and batch-stride 0.
+hipError_t ck_attn_fwd_splitkv(const CKAttnFwdArgs& args, hipStream_t stream){
+
+  auto* log_file = get_ck_log_stream();
+  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
+
+  const uint64_t max_tokens_q = args.max_tokens_q;
+  const uint64_t d_v          = args.d_v;
+  const uint64_t num_splits   = static_cast<uint64_t>(args.num_splits);
+
+  aiter::mha_fwd_splitkv_args fmha_splitkv_args{};
+  fmha_splitkv_args.q_ptr = args.q_ptr;
+  fmha_splitkv_args.k_ptr = args.k_ptr;
+  fmha_splitkv_args.v_ptr = args.v_ptr;
+  fmha_splitkv_args.bias_ptr = nullptr;
+  fmha_splitkv_args.lse_acc_ptr = args.lse_acc_ptr;
+  fmha_splitkv_args.o_acc_ptr   = args.o_acc_ptr;
+  fmha_splitkv_args.lse_ptr     = args.lse_ptr;
+  fmha_splitkv_args.o_ptr       = args.o_ptr;
+
+  // No paged-KV cache: block table / paging fields stay disabled.
+  fmha_splitkv_args.block_table_ptr = nullptr;
+  fmha_splitkv_args.batch_stride_block_table = 0;
+  fmha_splitkv_args.page_block_size = 0;
+  fmha_splitkv_args.is_gappy = false;
+  fmha_splitkv_args.cache_batch_idx = nullptr;
+
+  // Group mode: seqstart drives the per-sequence lengths (prefer padded offsets).
+  fmha_splitkv_args.seqstart_q_ptr = args.cu_seqlen_q_padded_ptr==nullptr? args.cu_seqlen_q_ptr : args.cu_seqlen_q_padded_ptr;
+  fmha_splitkv_args.seqstart_k_ptr = args.cu_seqlen_kv_padded_ptr==nullptr? args.cu_seqlen_kv_ptr : args.cu_seqlen_kv_padded_ptr;
+  fmha_splitkv_args.seqlen_k_ptr = nullptr;
+  fmha_splitkv_args.sink_ptr = nullptr;
+
+  fmha_splitkv_args.seqlen_q     = args.s_q; // unused in group mode
+  fmha_splitkv_args.seqlen_k     = args.s_kv; // unused in group mode
+  fmha_splitkv_args.batch        = args.b;
+  fmha_splitkv_args.max_seqlen_q = args.s_q;
+  fmha_splitkv_args.hdim_q       = args.d_qk;
+  fmha_splitkv_args.hdim_v       = args.d_v;
+  fmha_splitkv_args.nhead_q      = args.h;
+  fmha_splitkv_args.nhead_k      = args.hg;
+  fmha_splitkv_args.num_splits   = args.num_splits;
+
+  fmha_splitkv_args.scale_s = args.scaling_factor;
+  fmha_splitkv_args.scale_p = 1.f;
+  fmha_splitkv_args.scale_o = 1.f;
+  fmha_splitkv_args.logits_soft_cap = 0.f;
+
+  fmha_splitkv_args.stride_q       = args.stride_s_q;
+  fmha_splitkv_args.stride_k       = args.stride_s_k;
+  fmha_splitkv_args.stride_v       = args.stride_s_v;
+  fmha_splitkv_args.stride_bias    = 0;
+  fmha_splitkv_args.stride_o_acc   = d_v;
+  fmha_splitkv_args.stride_o       = args.stride_s_o;
+  fmha_splitkv_args.nhead_stride_q = args.stride_h_q;
+  fmha_splitkv_args.nhead_stride_k = args.stride_h_k;
+  fmha_splitkv_args.nhead_stride_v = args.stride_h_v;
+  fmha_splitkv_args.nhead_stride_bias = 0;
+  // softmax_lse is [nhead, max_tokens_q] in group mode (matches non-split path).
+  fmha_splitkv_args.nhead_stride_lse     = max_tokens_q;
+  fmha_splitkv_args.nhead_stride_lse_acc = num_splits * max_tokens_q;
+  fmha_splitkv_args.nhead_stride_o_acc   = num_splits * max_tokens_q * d_v;
+  fmha_splitkv_args.nhead_stride_o       = args.stride_h_o;
+  fmha_splitkv_args.batch_stride_q   = 0;
+  fmha_splitkv_args.batch_stride_k   = 0;
+  fmha_splitkv_args.batch_stride_v   = 0;
+  fmha_splitkv_args.batch_stride_bias = 0;
+  fmha_splitkv_args.batch_stride_lse     = 0;
+  fmha_splitkv_args.batch_stride_lse_acc = 0;
+  fmha_splitkv_args.batch_stride_o_acc   = 0;
+  fmha_splitkv_args.batch_stride_o   = 0;
+  fmha_splitkv_args.split_stride_lse_acc = max_tokens_q;
+  fmha_splitkv_args.split_stride_o_acc   = max_tokens_q * d_v;
+
+  fmha_splitkv_args.window_size_left  = args.window_size_left;
+  fmha_splitkv_args.window_size_right = args.window_size_right;
+  fmha_splitkv_args.sink_size = 0;
+  mask_enum mask_type = static_cast<mask_enum>(args.attn_mask_type);
+  fmha_splitkv_args.mask_type = static_cast<ck_tile::index_t>(mask_type);
+
+  bias_enum bias_type = bias_enum::no_bias;
+  bool has_lse = args.lse_ptr != nullptr;
+
+  if(log_file){
+    log_fwd_splitkv_config(__FUNCTION__, fmha_splitkv_args, log_file);
+  }
+  float average_runtime = QOLA_NS(mha_fwd_splitkv)(
+    fmha_splitkv_args, stream_config, get_data_type_str(args.dtype),
+    args.is_group_mode(), mask_type, bias_type, has_lse, /*has_sink=*/false);
+  if(average_runtime < 0){
+    //TODO: better error out system
+    throw std::runtime_error("fused attn configs not supported in ck_fused_attn splitkv fwd pass.");
+  }
+  if(dump_path){
+    dump_fwd_timings(dump_path, average_runtime);
+  }
+  return hipSuccess;
+}
+
 }//namespace ck_fused_attn
 
