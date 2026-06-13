@@ -119,6 +119,14 @@ TEST_P(SwizzleTestSuite, TestSwizzle) {
     using namespace transformer_engine;
     using namespace test;
 
+#ifdef __HIP_PLATFORM_AMD__
+  cudaDeviceProp prop;
+  cudaGetDeviceProperties(&prop, 0);
+  if (prop.major == 12 && prop.minor == 5) {
+    GTEST_SKIP() << "Legacy MXFP8 swizzle reference does not match gfx1250 GEMM pre-swizzle layout";
+  }
+#endif
+
   const auto num_tiles = std::get<0>(GetParam());
   const auto scaling_mode = std::get<1>(GetParam());
   const auto transa = std::get<2>(GetParam());
@@ -218,7 +226,7 @@ class MxSwizzleTestSuite
     : public ::testing::TestWithParam<
           std::tuple<std::pair<int, int>, bool>> {};
 
-TEST_P(MxSwizzleTestSuite, TestMxSwizzle) {
+TEST_P(MxSwizzleTestSuite, TestMxSwizzleGfx1250) {
   using namespace transformer_engine;
   using namespace test;
 
