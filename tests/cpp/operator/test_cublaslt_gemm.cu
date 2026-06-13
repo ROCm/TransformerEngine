@@ -718,14 +718,12 @@ void performDqTest(const TestParams &params) {
     GTEST_SKIP() << "MXFP8 is not supported in current config";
   }
 
-  // hipBLASLt on gfx950 produces incorrect results for certain small MXFP8
+  // hipBLASLt on gfx950 produces incorrect results for certain MXFP8
   // GEMMs with non-TN layouts.
   if (prop.major == 9 && prop.minor == 5) {
-    const bool is_NN = !params.transa && !params.transb;
     const bool is_NT = !params.transa && params.transb;
-    if ((is_NN && params.m == 64) ||
-        (is_NT && params.m > 32 && params.m <= 128 && params.n <= 64)) {
-      GTEST_SKIP() << "hipBLASLt MXFP8 non-TN GEMM with small M/N is not supported on gfx950";
+    if (is_NT && params.m == 7168 && params.n == 576) {
+      GTEST_SKIP() << "hipBLASLt MXFP8 non-TN GEMM with certain M/N is not supported on gfx950";
     }
   }
 
