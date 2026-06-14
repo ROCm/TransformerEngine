@@ -232,7 +232,7 @@ TEST_P(MxSwizzleTestSuite, TestMxSwizzleGfx1250) {
 
   cudaDeviceProp prop;
   cudaGetDeviceProperties(&prop, 0);
-  if (prop.major < 12) {
+  if (!(prop.major == 12 && prop.minor == 5)) {
     GTEST_SKIP() << "MXFP8 pre-swizzle is only supported on gfx1250";
   }
 

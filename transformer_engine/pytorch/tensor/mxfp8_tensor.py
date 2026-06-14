@@ -525,15 +525,18 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
             scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
             split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
-            if IS_HIP_EXTENSION and get_device_compute_capability() == (12, 5):
-                # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
-                padding_multiples = [4, 4]
+            if IS_HIP_EXTENSION:
+                if get_device_compute_capability() == (12, 5):
+                    # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
+                    padding_multiples = [4, 4]
+                else:
+                    # ROCm/HIP backend uses an unpadded scale-inv layout (see `MXFP8Quantizer.make_empty`),
+                    # so applying the padding here would produce a per-shard scale-inv whose dim-0
+                    # does not match the destination scale-inv allocated for the FSDP2 local shard.
+                    padding_multiples = [1, 1]
             else:
-                # Padding requirements: rowwise dim0 should be divisble by 128, columnwise dim0 should be divisble by 4
-                # NOTE: ROCm/HIP backend uses an unpadded scale-inv layout (see `MXFP8Quantizer.make_empty`),
-                # so applying the padding here would produce a per-shard scale-inv whose dim-0
-                # does not match the destination scale-inv allocated for the FSDP2 local shard.
-                padding_multiples = [128, 4] if not IS_HIP_EXTENSION else [1, 1]
+                # Padding requirements: rowwise dim0 should be divisible by 128, columnwise dim0 should be divisible by 4
+                padding_multiples = [128, 4]
             for scale_inv, scale_split_size, pad_multiple in zip(
                 scale_invs, split_sizes_for_scale, padding_multiples
             ):

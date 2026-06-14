@@ -644,7 +644,7 @@ void performTest(const TestParams& params) {
     params.use_gelu ? &RefPreGeluOut : nullptr);
 
   // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales.
-  if (use_mxfp8 && prop.major == 12) {
+  if (use_mxfp8 && prop.major == 12 && prop.minor == 5) {
     swizzle_mxfp8_scales(A, !a_colwise);
     swizzle_mxfp8_scales(B, !b_colwise);
   }
@@ -753,7 +753,7 @@ void performDqTest(const TestParams &params) {
   // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales.
   const bool a_colwise = !params.transa;
   const bool b_colwise = params.transb;
-  if (prop.major == 12) {
+  if (prop.major == 12 && prop.minor == 5) {
     swizzle_mxfp8_scales(A_fp8, !a_colwise);
     swizzle_mxfp8_scales(B_fp8, !b_colwise);
   }
@@ -908,15 +908,15 @@ INSTANTIATE_TEST_SUITE_P(OperatorTest, DqGEMMTestSuite,
 // Production GEMM shape instantiations (run with --gtest_filter='ProdGemm*')
 // ============================================================================
 
-class ProdDqGEMMTestSuite : public ::testing::TestWithParam<ProdGemmConfig> {};
+class ProdGEMMTestSuite : public ::testing::TestWithParam<ProdGemmConfig> {};
 
-TEST_P(ProdDqGEMMTestSuite, TestMxfp8Dq) {
+TEST_P(ProdGEMMTestSuite, TestMxfp8Dq) {
   const auto& config = GetParam();
 
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
   const bool is_tn = config.transa && !config.transb;
-  if (prop.major == 12 && !is_tn) {
+  if (prop.major == 12 && prop.minor == 5 && !is_tn) {
     GTEST_SKIP() << "hipBLASLt MXFP8 GEMM non-TN layout is not supported on gfx1250: "
                  << config.label;
   }
@@ -933,7 +933,7 @@ static auto prodTestName = [](const testing::TestParamInfo<ProdGemmConfig>& info
   return std::string(info.param.label);
 };
 
-INSTANTIATE_TEST_SUITE_P(ProdGemmSweep, ProdDqGEMMTestSuite,
+INSTANTIATE_TEST_SUITE_P(ProdGemmSweep, ProdGEMMTestSuite,
     ::testing::ValuesIn(prod_gemm_sweep),
     prodTestName);
 

@@ -311,7 +311,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     if (is_A_transposed) {
       NVTE_CHECK(A.has_data(), "Input A is missing row-wise usage");
       ret.A = A.data.dptr;
-      ret.transA = CUBLAS_OP_T;
+      ret.transA = transA;
       ret.Atype = A.data.dtype;
       ret.A_scale_inv = A.scale_inv.dptr;
       ret.lda = k;
@@ -368,7 +368,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     } else {
       NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
       ret.B = B.data.dptr;
-      ret.transB = CUBLAS_OP_N;
+      ret.transB = transB;
       ret.Btype = B.data.dtype;
       ret.B_scale_inv = B.scale_inv.dptr;
       ret.ldb = k;
