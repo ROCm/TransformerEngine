@@ -1,14 +1,15 @@
-# gfx1250 (RDNA4) carries AITER V3 *backward* asm kernels only — there are no
-# forward kernels at the pinned commit, and the CK FMHA template headers do not
-# compile for gfx1250. This manifest therefore builds a CK-free (ENABLE_CK=0),
-# asm-v3-only backward library under a distinct namespace (te_v3) so it can
-# coexist with the CK-full te_* libraries in a multi-arch build. TE selects
-# between qola::te::mha_bwd and qola::te_v3::mha_bwd at runtime by device arch.
+# gfx1250 (RDNA4) AITER V3 ASM kernels: forward (fmha_fwd_with_sink_asm,
+# D64/D128) and backward. CK FMHA template headers do not compile for gfx1250,
+# so this manifest builds CK-free (ENABLE_CK=0) asm-v3-only libraries under a
+# distinct namespace (te_v3) so they can coexist with the CK-full te_* libraries
+# in a multi-arch build. TE selects between qola::te::mha_{fwd,bwd} and
+# qola::te_v3::mha_{fwd,bwd} at runtime by device arch.
+# Issue #16948
 #
 # Keep aiter_commit in lockstep with qola_manifest.toml — both consume the same
 # checked-out AITER source tree.
 [qola]
-aiter_commit = "c4c4faa4789cb3bf6d972192d96c5461b71728be"    # pinned AITER submodule commit
+aiter_commit = "0403bcdfd0b507e0459012b82e00785a818f774a"    # pinned AITER submodule commit
 namespace = "te_v3"
 rocm_versions = ["7.2"]
 

@@ -8,16 +8,28 @@ project(ck_fused_attn LANGUAGES HIP CXX)
 
 set(AITER_MHA_INSTALL_PREFIX "transformer_engine" CACHE STRING "aiter mha shared lib install prefix in TE")
 
+# Issue #16948
 # gfx1250 carries AITER V3 bwd kernels only (hd128, bf16, batch mode). The
 # runtime envelope is enforced in nvte_get_fused_attn_backend().
 set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
 set(__AITER_SOURCE_DIR "${__QOLA_DIR}/build/third_party/aiter")
+if (DEFINED ENV{NVTE_AITER_SOURCE_DIR} AND NOT $ENV{NVTE_AITER_SOURCE_DIR} STREQUAL "")
+  set(__AITER_SOURCE_DIR $ENV{NVTE_AITER_SOURCE_DIR})
+  message(STATUS "Using AITER source from NVTE_AITER_SOURCE_DIR=${__AITER_SOURCE_DIR}. Disable AITER checkout.")
+  set(__SKIP_AITER_CHECKOUT TRUE)
+else()
+  set(__SKIP_AITER_CHECKOUT FALSE)
+endif()
 set(__CK_SOURCE_DIR "${__AITER_SOURCE_DIR}/3rdparty/composable_kernel")
 set(CK_INCLUDE_DIR "${__CK_SOURCE_DIR}/include")
 set(AITER_INCLUDE_DIR "${__AITER_SOURCE_DIR}/csrc/include")
 
 if(NOT Python_EXECUTABLE)
   find_package(Python COMPONENTS Interpreter QUIET)
+  if (NOT Python_EXECUTABLE)
+    #Don't fail the entire build if Python isn't found since it may pass if pre-built AITER is used
+    message(ERROR "Python interpreter not found. Some build steps will be skipped or fail. Please install Python and ensure it is on the PATH.")
+  endif()
 endif()
 
 # Resolve the manifest-pinned AITER commit (defines AITER_SHA) and bring the
@@ -33,27 +45,26 @@ if(Python_EXECUTABLE)
   # submodules) work in containerized builds where the bind-mounted .git is
   # owned by a different UID than the build process. Mirrors the pattern in
   # transformer_engine/common/CMakeLists.txt:get_git_commit().
-  execute_process(
-    COMMAND sh -c
-      "tmp=$(mktemp /tmp/gitconfig.XXXXXX) || exit 1; \
-GIT_CONFIG_GLOBAL=$tmp git config --global --add safe.directory '*' >/dev/null 2>&1; \
-GIT_CONFIG_GLOBAL=$tmp PYTHONPATH=\"${__QOLA_DIR}:$PYTHONPATH\" '${Python_EXECUTABLE}' -m qola.cli checkout \
---manifest '${__QOLA_MANIFEST}' \
---aiter-root '${__AITER_SOURCE_DIR}'; \
-rc=$?; rm -f \"$tmp\"; exit $rc"
-    RESULT_VARIABLE AITER_CHECKOUT_RESULT
-    OUTPUT_VARIABLE AITER_CHECKOUT_OUTPUT
-    ERROR_VARIABLE AITER_CHECKOUT_ERROR
-    OUTPUT_STRIP_TRAILING_WHITESPACE
-    ERROR_STRIP_TRAILING_WHITESPACE
-  )
-  if(NOT AITER_CHECKOUT_RESULT EQUAL 0)
-    message(FATAL_ERROR
-            "Failed to sync AITER source tree at ${__AITER_SOURCE_DIR} to "
-            "manifest-pinned commit ${AITER_SHA}.\n"
-            "${AITER_CHECKOUT_OUTPUT}\n${AITER_CHECKOUT_ERROR}")
+  if (NOT __SKIP_AITER_CHECKOUT)
+    execute_process(
+      COMMAND sh -c
+        "PYTHONPATH=\"${__QOLA_DIR}:$PYTHONPATH\" '${Python_EXECUTABLE}' -m qola.cli checkout \
+        --manifest '${__QOLA_MANIFEST}' \
+        --aiter-root '${__AITER_SOURCE_DIR}'"
+      RESULT_VARIABLE AITER_CHECKOUT_RESULT
+      OUTPUT_VARIABLE AITER_CHECKOUT_OUTPUT
+      ERROR_VARIABLE AITER_CHECKOUT_ERROR
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_STRIP_TRAILING_WHITESPACE
+    )
+    if(NOT AITER_CHECKOUT_RESULT EQUAL 0)
+      message(FATAL_ERROR
+              "Failed to sync AITER source tree at ${__AITER_SOURCE_DIR} to "
+              "manifest-pinned commit ${AITER_SHA}.\n"
+              "${AITER_CHECKOUT_OUTPUT}\n${AITER_CHECKOUT_ERROR}")
+    endif()
+    message(STATUS "[AITER] Synced ${__AITER_SOURCE_DIR} to ${AITER_SHA}")
   endif()
-  message(STATUS "[AITER] Synced ${__AITER_SOURCE_DIR} to ${AITER_SHA}")
 
   execute_process(
     COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/check_aiter_mha_args.py
@@ -73,8 +84,6 @@ rc=$?; rm -f \"$tmp\"; exit $rc"
             "${AITER_ARG_CHECK_OUTPUT}\n${AITER_ARG_CHECK_ERROR}")
   endif()
   message(STATUS "AITER API validation passed via check_aiter_mha_args.py")
-else()
-  message(WARNING "Python interpreter not found; skipping AITER source-tree sync and API validation.")
 endif()
 
 # Sanity-check the resolved include directories now that `qola checkout` has
@@ -166,6 +175,11 @@ endif()
 if(__HAS_GFX1250)
   set(__QOLA_MANIFEST_V3 "${CMAKE_CURRENT_LIST_DIR}/qola_manifest_gfx1250.toml")
   set(__QOLA_BUILD_DIR_V3 "${__QOLA_DIR}/build_gfx1250")
+  if (__SKIP_AITER_CHECKOUT)
+    set(__SKIP_CHECKOUT_ARGS "--skip-checkout")
+  else()
+    set(__SKIP_CHECKOUT_ARGS "")
+  endif()
   message(STATUS "[AITER-BUILD] Building CK-free V3 (gfx1250) via QoLA.")
   # The asm-only / CK-free flags (ONLY_FAV3=1, ENABLE_CK=0) are carried by the
   # gfx1250 manifest's libmha_bwd module, so no special env is needed here.
@@ -176,6 +190,7 @@ if(__HAS_GFX1250)
             --aiter-root ${__AITER_SOURCE_DIR}
             --output-dir ${__QOLA_BUILD_DIR_V3}
             --arch "gfx1250"
+            ${__SKIP_CHECKOUT_ARGS}
     RESULT_VARIABLE QOLA_V3_BUILD_RESULT
   )
   if(NOT QOLA_V3_BUILD_RESULT EQUAL 0)

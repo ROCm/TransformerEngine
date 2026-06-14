@@ -6,8 +6,10 @@
 
 #include <iostream>
 #include <cstdlib>
+#include <mutex>
 #include <stdexcept>
 #include <type_traits>
+#include <vector>
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "qola_mha_fwd.h"
 #include "ck_fused_attn_utils.hpp"
@@ -35,6 +37,31 @@ bool is_gfx1250_device(){
   hipDeviceProp_t prop{};
   if(hipGetDeviceProperties(&prop, dev) != hipSuccess){ return false; }
   return prop.major == 12 && prop.minor == 5;
+}
+
+// D64 gfx1250 fmha_fwd_with_sink_asm (ENABLE_SINK=1): requires non-null sink_ptr
+// of shape [nhead] fp32 in "AITER post-scale domain".  The kernel adds
+// exp(sink_val[h]) to every row's softmax denominator.  We initialize to
+// -1e30f so expf(-1e30f)=0.0f in fp32 — zero contribution, matching the
+// UnfusedDotProductAttention reference which has no sink term.
+// D128 (ENABLE_SINK=0): dispatch guard rejects sink_ptr!=nullptr; leave null.
+//
+// Single static buffer, allocated once, kept for the process lifetime.
+constexpr int kSinkBufMaxHeads = 256;
+static float*          s_sink_buf  = nullptr;
+static std::once_flag  s_sink_once;
+
+const void* get_gfx1250_sink_buf(){
+  std::call_once(s_sink_once, [](){
+    if(hipMalloc(&s_sink_buf, kSinkBufMaxHeads * sizeof(float)) != hipSuccess){
+      s_sink_buf = nullptr;
+      return;
+    }
+    std::vector<float> fill(kSinkBufMaxHeads, -1e30f);
+    hipMemcpy(s_sink_buf, fill.data(),
+              kSinkBufMaxHeads * sizeof(float), hipMemcpyHostToDevice);
+  });
+  return s_sink_buf;
 }
 }  // namespace
 #endif
@@ -181,6 +208,16 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
   fmha_args.block_scale_seqstart_q_ptr = nullptr;
   fmha_args.block_scale_seqstart_k_ptr = nullptr;
   fmha_args.sink_ptr = nullptr;
+#if defined(NVTE_AITER_V3_FWD_GFX1250)
+  // D64 (ENABLE_SINK=1): fmha_fwd_gfx1250_batched requires non-null sink_ptr and
+  // reads each element as a per-head logit added to the softmax denominator.
+  // We pass -1e30f so exp(-1e30f)=0.0f in fp32 — zero contribution, matching
+  // the UnfusedDotProductAttention reference.
+  // D128 (ENABLE_SINK=0): dispatch guard rejects sink_ptr!=nullptr, so leave null.
+  if(is_gfx1250_device() && args.d_qk == 64 && args.h <= kSinkBufMaxHeads) {
+    fmha_args.sink_ptr = get_gfx1250_sink_buf();
+  }
+#endif
   fmha_args.seqlen_k     = args.s_kv; // unused in group mode (or kvcache enabled)
   fmha_args.max_seqlen_q = args.s_q;
 
@@ -258,7 +295,18 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
 
   float average_runtime;
 #if defined(NVTE_AITER_V3_FWD_GFX1250)
+  // Pre-fill O and LSE before calling the gfx1250 ASM forward kernel.
+  // The kernel ABI requires a valid (allocated) LSE buffer regardless of
+  // return_lse; the kernel may touch lse_ptr even when return_lse=0.
+  // O/LSE pre-initialization is handled inside fmha_fwd_gfx1250_batched
+  // (in aiter/csrc/cpp_itfs/mha_fwd.cu) as part of the kernel calling convention.
   if(is_gfx1250_device()){
+    if(fmha_args.lse_ptr == nullptr)
+      throw std::runtime_error(
+        "ck_fused_attn fwd: lse_ptr is null on gfx1250 — caller must allocate softmax LSE.");
+    if(fmha_args.o_ptr == nullptr)
+      throw std::runtime_error(
+        "ck_fused_attn fwd: o_ptr is null on gfx1250 — caller must allocate output.");
     average_runtime = qola::te_v3::mha_fwd(fmha_args, stream_config);
   } else
 #endif
