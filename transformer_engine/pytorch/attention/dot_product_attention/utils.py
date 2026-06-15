@@ -144,6 +144,7 @@ class FlashAttentionUtils:
 (5) cp flash_attn_interface.py $python_path/flash_attn_3/flash_attn_interface.py"""
     v3_warning_printed = False
     use_aiter_triton = False #ROCm
+    use_aiter_splitkv = False #ROCm: AITER native split-K forward (aiter.ops.mha) available
 
     @staticmethod
     def set_flash_attention_version():
@@ -530,7 +531,13 @@ def get_attention_backend(
 
     # Filter: num_splits
     if num_splits != 1:
-        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
+        # ROCm: the AITER backend masquerades as FlashAttention 2 and routes num_splits
+        # through to its native split-K forward (aiter.ops.mha), so keep it enabled here.
+        if (
+            use_flash_attention_2
+            and FlashAttentionUtils.is_installed
+            and not FlashAttentionUtils.use_aiter_splitkv
+        ):
             logger.debug("Disabling FlashAttention 2 for num_splits")
             use_flash_attention_2 = False
         if use_fused_attention:

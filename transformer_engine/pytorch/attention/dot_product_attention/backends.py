@@ -91,6 +91,7 @@ _flash_attn_fwd = None
 _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
+aiter_flash_attn_func_splitkv = None  # ROCm: AITER native split-K forward (aiter.ops.mha)
 
 if IS_HIP_EXTENSION and os.getenv("NVTE_FLASH_ATTN_AITER", "0") == "1":
     try:
@@ -116,6 +117,19 @@ if IS_HIP_EXTENSION and os.getenv("NVTE_FLASH_ATTN_AITER", "0") == "1":
         fa_utils.version = PkgVersion("2.7.1")  #masqurade as FA 2.7.1
         fa_utils.set_flash_attention_version()
         attn_log.fa_logger.info("Using AITER Triton for FlashAttn.")
+        # Optionally pull in AITER's native split-K forward (aiter.ops.mha). Kept
+        # separate from the Triton imports above so its absence never disables the
+        # Triton path; engaged only when num_splits != 1 (see FlashAttention.forward).
+        try:
+            from aiter.ops.mha import flash_attn_func as aiter_flash_attn_func_splitkv
+        except ImportError:
+            attn_log.fa_logger.warning(
+                "AITER native split-K forward (aiter.ops.mha) is unavailable;"
+                " num_splits will be ignored for the AITER path."
+            )
+        else:
+            fa_utils.use_aiter_splitkv = True
+            attn_log.fa_logger.info("AITER native split-K forward is available.")
 try:
     if fa_utils.use_aiter_triton:
         raise PackageNotFoundError  # skip version check for aiter triton
@@ -1040,6 +1054,20 @@ class FlashAttention(torch.nn.Module):
                                 1
                             )[:batch_size]
                         )
+                    if (
+                        fa_utils.use_aiter_splitkv
+                        and num_splits != 1
+                        and inference_params is None
+                        and not fp8
+                        and func is flash_attn_func
+                    ):
+                        # ROCm: route the dense forward to AITER's native split-K kernel.
+                        # aiter.ops.mha.flash_attn_func self-gates (gfx942/D64/bf16) and
+                        # otherwise falls back to the standard CK/ASM dispatch, so this is
+                        # safe for any dense bf16 shape. Forward-only; backward unchanged.
+                        # num_splits: 0 = AITER heuristic, >=2 = forced split count.
+                        func = aiter_flash_attn_func_splitkv
+                        fa_optional_forward_kwargs["num_splits"] = num_splits
                     output = func(
                         query_layer,
                         key_layer,
