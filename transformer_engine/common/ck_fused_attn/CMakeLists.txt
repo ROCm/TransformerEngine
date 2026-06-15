@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD 17)
 project(ck_fused_attn LANGUAGES HIP CXX)
 
 
-set(AITER_MHA_INSTALL_PREFIX "transformer_engine" CACHE STRING "aiter mha shared lib install prefix in TE")
+set(AITER_MHA_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/transformer_engine/lib")
 
 # Issue #16948
 # gfx1250 carries AITER V3 bwd kernels only (hd128, bf16, batch mode). The
@@ -121,23 +121,66 @@ if(__CK_FULL_ARCH_COUNT EQUAL 0 AND NOT __HAS_GFX1250)
   message(FATAL_ERROR "ck_fused_attn: no target architectures requested.")
 endif()
 
+# CK_JIT (NVTE_CK_JIT != 0) builds the CK-full tier's CK kernels just-in-time
+# instead of ahead-of-time via QoLA. It is only meaningful for the CK-full
+# (CDNA) tier; the CK-free gfx1250 V3 tier never pulls CK and is unaffected.
+if(NOT "$ENV{NVTE_CK_JIT}" STREQUAL "0")
+  set(__USE_CK_JIT TRUE)
+else()
+  set(__USE_CK_JIT FALSE)
+endif()
+
 set(__AITER_MHA_PATH "")
+set(__QOLA_INCLUDE_DIR "")
 set(__HAVE_CK_FULL FALSE)
 
 # --- CK-full libraries (CDNA): te_libmha_fwd.so / te_libmha_bwd.so ---
 if(__CK_FULL_ARCH_COUNT GREATER 0)
   set(__HAVE_CK_FULL TRUE)
-  if(DEFINED AITER_MHA_PATH)
-    message(STATUS "[AITER-BUILD] Using AITER_MHA_PATH=${AITER_MHA_PATH}")
-    # use pre-built te_libmha_fwd.so te_libmha_bwd.so
-    set(__AITER_MHA_PATH ${AITER_MHA_PATH})
-  else()
-    get_prebuilt_aiter(__AITER_MHA_PATH)
+  set(__AITER_CACHE_DIR "")
+  if(DEFINED ENV{AITER_MHA_PATH})
+    message(STATUS "[AITER-BUILD] Using AITER_MHA_PATH=$ENV{AITER_MHA_PATH}")
+    # use pre-built libraries and includes from a location specified by the user
+    set(__AITER_CACHE_DIR $ENV{AITER_MHA_PATH})
+  elseif(NOT __USE_CK_JIT) # CK_JIT always builds from source; skip the prebuilt cache
+    get_prebuilt_aiter(__AITER_CACHE_DIR)
+  elseif(DEFINED ENV{NVTE_AITER_PREBUILT_BASE_URL})
+    message(WARNING "[AITER-BUILD] NVTE_AITER_PREBUILT_BASE_URL is set but will be ignored because CK_JIT is enabled.")
+  endif()
 
-    if(__AITER_MHA_PATH STREQUAL "")
-      # If not available, fallback: Build from source via QoLA
-      list(JOIN __CK_FULL_ARCHS ";" GPU_ARCHS_STR)
-      message(STATUS "[AITER-BUILD] Building CK-full AITER kernels for ${GPU_ARCHS_STR} via QoLA.")
+  if(__AITER_CACHE_DIR STREQUAL "")
+    # If not available or not requested, build from source via QoLA
+    list(JOIN __CK_FULL_ARCHS ";" GPU_ARCHS_STR)
+    message(STATUS "[AITER-BUILD] Building CK-full AITER kernels for ${GPU_ARCHS_STR} via QoLA.")
+    if(__USE_CK_JIT)
+      message(STATUS "[AITER-BUILD] CK_JIT is enabled; will build CK kernels via CK_JIT.")
+      set(__CK_JIT_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/ck_jit")
+      set(__QOLA_BUILD_DIR "${__CK_JIT_BUILD_DIR}/qola") #Need it under ck_jit to clean on full build
+      if(DEFINED ENV{NVTE_CK_JIT_DIR})
+        set(__CK_JIT_SOURCE_DIR $ENV{NVTE_CK_JIT_DIR})
+      else()
+        set(__CK_JIT_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/ck_jit")
+      endif()
+      execute_process(
+        COMMAND ${Python_EXECUTABLE} "${__CK_JIT_SOURCE_DIR}/ck_jit_build.py" full
+            --with-qola
+            --qola-dir ${__QOLA_DIR}
+            --qola-manifest ${__QOLA_MANIFEST}
+            --qola-output "${__QOLA_BUILD_DIR}"
+            --gpu-archs "${GPU_ARCHS_STR}"
+            --aiter-dir ${__AITER_SOURCE_DIR}
+            --tmp-dir "${__CK_JIT_BUILD_DIR}"
+            --install-dir ${AITER_MHA_INSTALL_DIR}
+            --jit-name "te_ck_jit"
+        RESULT_VARIABLE QOLA_BUILD_RESULT
+      )
+      if(NOT QOLA_BUILD_RESULT EQUAL 0)
+        message(FATAL_ERROR "[AITER-BUILD] QoLA build failed.")
+      endif()
+      # CK_JIT emits the libs straight into the install dir; nothing to cache.
+      set(__AITER_MHA_PATH ${AITER_MHA_INSTALL_DIR})
+      set(__QOLA_INCLUDE_DIR "${__QOLA_BUILD_DIR}/include")
+    else()
       set(__QOLA_BUILD_DIR "${__QOLA_DIR}/build")
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${__QOLA_DIR}:$ENV{PYTHONPATH}"
@@ -155,23 +198,27 @@ if(__CK_FULL_ARCH_COUNT GREATER 0)
 
       # Copy the final .so libs and exported public headers into the aiter
       # prebuilt cache so downstream consumers see a self-contained tree.
-      get_default_aiter_cache_dir(__QOLA_CACHE_DIR)
-      set(__QOLA_CACHE_LIB "${__QOLA_CACHE_DIR}/lib")
+      get_default_aiter_cache_dir(__AITER_CACHE_DIR)
+      set(__QOLA_CACHE_LIB "${__AITER_CACHE_DIR}/lib")
       file(MAKE_DIRECTORY ${__QOLA_CACHE_LIB})
       file(GLOB __QOLA_BUILT_LIBS "${__QOLA_BUILD_DIR}/lib/*.so")
       file(COPY ${__QOLA_BUILT_LIBS} DESTINATION ${__QOLA_CACHE_LIB})
-      file(COPY "${__QOLA_BUILD_DIR}/include" DESTINATION "${__QOLA_CACHE_DIR}")
+      file(COPY "${__QOLA_BUILD_DIR}/include" DESTINATION "${__AITER_CACHE_DIR}")
       set(__AITER_MHA_PATH "${__QOLA_CACHE_LIB}")
-    else()
-      message(STATUS "[AITER-BUILD] Using pre-built AITER from ${__AITER_MHA_PATH}")
+      set(__QOLA_INCLUDE_DIR "${__AITER_CACHE_DIR}/include")
     endif()
+  else()
+    message(STATUS "[AITER-BUILD] Using pre-built AITER from ${__AITER_CACHE_DIR}")
+    set(__AITER_MHA_PATH "${__AITER_CACHE_DIR}/lib")
+    set(__QOLA_INCLUDE_DIR "${__AITER_CACHE_DIR}/include")
   endif()
 endif()
 
 # --- V3-asm-only libraries for gfx1250: te_v3_libmha_fwd.so and te_v3_libmha_bwd.so ---
 # There is no prebuilt cache path for gfx1250 (no public prebuilt, and a CK-free
 # asm build is cheap), so always build it from source via QoLA. Both manifests
-# pin the same AITER commit and share the already-checked-out source tree.
+# pin the same AITER commit and share the already-checked-out source tree. CK_JIT
+# does not apply here -- this tier is CK-free.
 if(__HAS_GFX1250)
   set(__QOLA_MANIFEST_V3 "${CMAKE_CURRENT_LIST_DIR}/qola_manifest_gfx1250.toml")
   set(__QOLA_BUILD_DIR_V3 "${__QOLA_DIR}/build_gfx1250")
@@ -206,6 +253,7 @@ if(__HAS_GFX1250)
     file(MAKE_DIRECTORY ${__QOLA_CACHE_LIB})
     file(COPY "${__QOLA_BUILD_DIR_V3}/include" DESTINATION "${__QOLA_CACHE_DIR}")
     set(__AITER_MHA_PATH "${__QOLA_CACHE_LIB}")
+    set(__QOLA_INCLUDE_DIR "${__QOLA_CACHE_DIR}/include")
   endif()
   file(GLOB __QOLA_V3_LIBS "${__QOLA_BUILD_DIR_V3}/lib/te_v3_*.so")
   file(COPY ${__QOLA_V3_LIBS} DESTINATION ${__AITER_MHA_PATH})
@@ -252,7 +300,6 @@ endif()
 # Public QoLA headers ship alongside the .so libs in ${__AITER_MHA_PATH}/../include
 # (emitted by qola.cli build, or copied from the QoLA build dir above for the
 # source-build path).
-set(__QOLA_INCLUDE_DIR "${__AITER_MHA_PATH}/../include")
 if(NOT EXISTS "${__QOLA_INCLUDE_DIR}/qola_config.h")
   message(FATAL_ERROR "Could not find QoLA public headers at ${__QOLA_INCLUDE_DIR}.")
 endif()
@@ -282,5 +329,10 @@ target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
 set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
 
-install(FILES ${__INSTALL_AITER_LIBS} DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
-install(TARGETS ck_fused_attn DESTINATION ${CMAKE_INSTALL_PREFIX}/${AITER_MHA_INSTALL_PREFIX}/lib)
+# In CK_JIT mode the AITER libs are emitted directly into AITER_MHA_INSTALL_DIR
+# (and the v3 libs are staged there too), so skip the redundant, self-overwriting
+# copy. In every other path the libs live in the QoLA cache and must be installed.
+if(NOT "${__AITER_MHA_PATH}" STREQUAL "${AITER_MHA_INSTALL_DIR}")
+  install(FILES ${__INSTALL_AITER_LIBS} DESTINATION ${AITER_MHA_INSTALL_DIR})
+endif()
+install(TARGETS ck_fused_attn DESTINATION ${AITER_MHA_INSTALL_DIR})

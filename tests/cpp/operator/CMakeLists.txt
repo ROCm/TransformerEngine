@@ -32,7 +32,7 @@ add_executable(test_operator
                test_multi_padding.cu
                test_multi_unpadding.cu
                test_causal_softmax.cu
-               test_swizzle.cu #CUDA-only test
+               test_swizzle.cu
                test_swap_first_dims.cu
                test_grouped_gemm.cu #CUDA-only test
                ../test_common.cu)
@@ -42,7 +42,6 @@ if(USE_ROCM)
   # Remove CUDA-only tests and add ROCm specific ones
   list(REMOVE_ITEM test_cuda_sources
               test_cast_float8blockwise.cu
-              test_swizzle.cu
               test_grouped_gemm.cu)
   list(APPEND test_cuda_sources
               test_dequantize_nvfp4.cu

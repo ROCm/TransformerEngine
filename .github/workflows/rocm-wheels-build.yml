@@ -87,6 +87,7 @@ jobs:
             3rdparty/aotriton \
             3rdparty/aiter \
             3rdparty/QoLA \
+            3rdparty/ck_jit \
             3rdparty/hipify_torch
 
       - name: Derive Docker image tag

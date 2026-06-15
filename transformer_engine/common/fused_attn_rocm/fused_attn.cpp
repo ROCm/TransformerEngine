@@ -11,6 +11,8 @@
 #include "fused_attn_aotriton.h"
 #include "fused_attn_ck.h"
 #include "../common.h"
+#include "../util/cuda_runtime.h" //cuda::sm_arch
+#include "../util/system.h" //getenv
 #include "utils.h"
 
 // map NVTE_QKV_Layout to NVTE_QKV_Layout_Group
@@ -140,12 +142,9 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout) {
 //    causal_bottom_right, padding_causal_bottom_right | (-1,  0) or (>=0, 0)
 std::pair<int64_t, int64_t> check_set_window_size(NVTE_Mask_Type attn_mask_type, std::pair<int64_t, int64_t> window_size){
   //mask_type contain causal
-  bool nvte_log_fused_attn_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_FUSED_ATTN_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_fused_attn_config = true;
-  }
-  if(attn_mask_type==NVTE_CAUSAL_MASK || attn_mask_type==NVTE_PADDING_CAUSAL_MASK || attn_mask_type==NVTE_CAUSAL_BOTTOM_RIGHT_MASK || attn_mask_type==NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK){
+  const bool nvte_log_fused_attn_config =
+      transformer_engine::getenv<bool>("NVTE_LOG_FUSED_ATTN_CONFIG");
+  if(transformer_engine::fused_attn_rocm::is_causal_mask(attn_mask_type)){
     if(window_size==std::make_pair<int64_t, int64_t>(-1, -1) || (window_size.first >=0 && window_size.second!=0)){
       //TODO: better INFO logging
       if(nvte_log_fused_attn_config){
@@ -235,11 +234,8 @@ void log_fused_attn_config(
     size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, int64_t window_size_right) {
 
   //log the fused attn config at NVTE common level
-  bool nvte_log_fused_attn_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_FUSED_ATTN_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_fused_attn_config = true;
-  }
+  const bool nvte_log_fused_attn_config =
+      transformer_engine::getenv<bool>("NVTE_LOG_FUSED_ATTN_CONFIG");
   if(!nvte_log_fused_attn_config){
     return;
   }
@@ -290,24 +286,12 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   if (return_max_logit) return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
 
   // by default, fused attn is enabled
-  bool nvte_fused_attn = true;
-  if (const char* env_p = std::getenv("NVTE_FUSED_ATTN") ) {
-    if (env_p != nullptr && std::string(env_p) == "0")
-      nvte_fused_attn = false;
-  }
+  const bool nvte_fused_attn = getenv<bool>("NVTE_FUSED_ATTN", true);
 
-  // by default, both ck and aotriton backends are enabled by nvte_fused_attn
-  bool nvte_fused_attn_ck = nvte_fused_attn;
-  bool nvte_fused_attn_aotriton = nvte_fused_attn;
-
-  if (const char* env_p = std::getenv("NVTE_FUSED_ATTN_CK") ) {
-    if (env_p != nullptr && std::string(env_p) == "0")
-      nvte_fused_attn_ck = false;
-  }
-  if (const char* env_p = std::getenv("NVTE_FUSED_ATTN_AOTRITON") ) {
-    if (env_p != nullptr && std::string(env_p) == "0")
-      nvte_fused_attn_aotriton = false;
-  }
+  // by default, both ck and aotriton backends inherit the master toggle
+  const bool nvte_fused_attn_ck = nvte_fused_attn && getenv<bool>("NVTE_FUSED_ATTN_CK", true);
+  const bool nvte_fused_attn_aotriton =
+      nvte_fused_attn && getenv<bool>("NVTE_FUSED_ATTN_AOTRITON", true);
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));

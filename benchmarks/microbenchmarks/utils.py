@@ -359,7 +359,9 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
                     sr = dict(case_params)
                     sr["label"] = lbl
                     sr["sample_idx"] = i
-                    sr["time_ms"] = t / measurement.number_per_run * 1e3
+                    # measurement.times is already per-iteration (raw block time
+                    # divided by number_per_run); convert seconds -> ms only.
+                    sr["time_ms"] = t * 1e3
                     sample_rows.append(sr)
         if sample_rows:
             df = pd.DataFrame(

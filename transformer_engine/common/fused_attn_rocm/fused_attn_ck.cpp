@@ -66,12 +66,8 @@ bool is_ck_backend_supported(
 #ifdef USE_FUSED_ATTN_CK
 
   // debug info setting
-  bool nvte_log_ck_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_ck_config = true;
-  }
-  
+  const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
+
   // single filters
   
   // filter based on num_heads and num_gqa_groups
@@ -118,10 +114,7 @@ bool is_ck_backend_supported(
   }
 
   // joint filter based on sliding window and attn_mask
-  bool is_causal = (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-                    attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK||
-                    attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK||
-                    attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  bool is_causal = is_causal_mask(attn_mask_type);
   if(is_causal){
     // causal mask window must be with causal top left or causal bottom right mask type
     if (!((window_size_left ==-1 || window_size_left >=0) && window_size_right ==0 )){
@@ -165,9 +158,7 @@ bool is_ck_backend_supported(
   // in NVTE, padding can happen in both THD format or BSHD/SBHD format
   // For THD format, padding is natural
   // For BSHD/SBHD, padding can be inferred by a cu_seqlen which shows the actual seqlen for each batch, while the dim(S) is the max_seqlen
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  bool is_padding = is_padding_mask(attn_mask_type);
   if(is_ragged && !is_padding){
     if(nvte_log_ck_config){
       std::cout<<"Ragged QKV input requires padding mask"<<std::endl;
@@ -525,11 +516,7 @@ void fused_attn_ck_fwd_impl(
   size_t *workspace_size,
   cudaStream_t stream){
 
-  bool nvte_log_ck_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_ck_config = true;
-  }
+  const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
 
   bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
@@ -539,9 +526,7 @@ void fused_attn_ck_fwd_impl(
   bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD || qkv_format==NVTE_QKV_Format::NVTE_SBHD_2BSHD;
   bool is_BSHD = qkv_format==NVTE_QKV_Format::NVTE_BSHD;
 
-  bool is_padding = (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-                     mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  bool is_padding = is_padding_mask(mask_type);
   bool bshd_to_thd = is_BSHD && is_padding;
 
   // extract the qkv and o storage bytes to allocate buffer for padding removing
@@ -772,11 +757,7 @@ void fused_attn_ck_bwd_impl(
   size_t *workspace_size,
   cudaStream_t stream) {
   
-  bool nvte_log_ck_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_ck_config = true;
-  } 
+  const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
   // bwd v3 is optional by enabling the following envs
   // default values follows the ck example setting
   bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 1);
@@ -789,9 +770,7 @@ void fused_attn_ck_bwd_impl(
   bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
   bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD || qkv_format==NVTE_QKV_Format::NVTE_SBHD_2BSHD;
   bool is_BSHD = qkv_format==NVTE_QKV_Format::NVTE_BSHD;
-  bool is_padding = (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-                     mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  bool is_padding = is_padding_mask(mask_type);
   bool bshd_to_thd = is_BSHD && is_padding;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
 
@@ -1235,10 +1214,6 @@ void fused_attn_ck_fwd(
   }
   size_t workspace_size = 0;
 
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, bias_b, bias_h,
     max_tokens_q, max_tokens_kv,
@@ -1257,19 +1232,8 @@ void fused_attn_ck_fwd(
     &workspace_size,
     stream);
 
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
+  set_workspace_size(workspace, workspace_size);
+  return;
 #else
   NVTE_ERROR("CK fused attn backend not compiled.");
 #endif // USE_FUSED_ATTN_CK
@@ -1323,11 +1287,6 @@ void fused_attn_ck_bwd(
 
   size_t workspace_size = 0;
 
-  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  
   // extract the max_tokens for padding/unpadding and softmax_lse buffer
   // b from cu_seqlen and max_seqlen are not the actual storage batch and seqlen for pad_between_seqs case
   size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d_qk;
@@ -1354,19 +1313,8 @@ void fused_attn_ck_bwd(
     &workspace_size,
     stream);
 
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
+  set_workspace_size(workspace, workspace_size);
+  return;
 #else
   NVTE_ERROR("CK fused attn backend not compiled.");
 #endif // USE_FUSED_ATTN_CK

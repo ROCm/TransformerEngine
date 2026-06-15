@@ -129,8 +129,10 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
       // Need (4, 128) alignment even for e8 scaling factor
       auto block_alignment = std::vector<size_t>{128ul, 4ul};
 #else
-      // HIP does not use scale padding
-      auto block_alignment = std::vector<size_t>{1ul, 1ul};
+      // HIP does not use scale padding (except gfx1250 which pads both dims to mult of 4)
+      auto block_alignment = (cuda::sm_arch() == 125)
+          ? std::vector<size_t>{4ul, 4ul}
+          : std::vector<size_t>{1ul, 1ul};
 #endif
       size_t expected_x, expected_y, alignment;
       const size_t block_size_rowwise = 32;
