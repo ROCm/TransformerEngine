@@ -28,12 +28,6 @@ namespace {
 using transformer_engine::detail::FP8BlockwiseColumnwiseOption;
 using transformer_engine::detail::FP8BlockwiseRowwiseOption;
 
-#ifdef __HIP_PLATFORM_AMD__
-using WarpSyncMask = uint64_t;
-#else
-using WarpSyncMask = unsigned;
-#endif
-
 // clang-format off
 /*
 
@@ -165,7 +159,7 @@ constexpr int kNVecIn = 8;     // The number of elements each LDG touches
 constexpr int kNVecOut = 16;   // The number of elements each STG touches
 constexpr int kNVecSMem = 2;   // The number of elements each LDS/STS touches
 
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx1250__)
 constexpr int kThreadsPerBlock = 512;  // Thread block size, 8 warps (wave64) in total
 #else
 constexpr int kThreadsPerBlock = 256;  // Thread block size, 8 warps in total
@@ -348,7 +342,6 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     const IType* input_g = &input[r_g * row_length + c_g];
     OType* output_g = &output_c[r_g * row_length + c_g];
     const unsigned src_lane = (threadIdx.x % kThreadsPerWarp) / kNumThreadsStore * kNumThreadsStore;
-    const WarpSyncMask mask = ((WarpSyncMask{1} << kNumThreadsStore) - 1) << src_lane;
     const bool is_src_lane = (threadIdx.x % kNumThreadsStore) == 0;
 #pragma unroll
     for (int iter = 0; iter < num_iterations; ++iter) {
@@ -373,12 +366,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       // Step 2.3: Reduce amax
 #pragma unroll
       for (int delta = kNumThreadsStore / 2; delta > 0; delta /= 2) {
-        const float other_amax = __shfl_down_sync(mask, amax, delta);
+        const float other_amax = __shfl_down(amax, delta, kNumThreadsStore);
         __builtin_assume(amax >= 0);
         __builtin_assume(other_amax >= 0);
         amax = fmaxf(amax, other_amax);
       }
-      amax = __shfl_sync(mask, amax, src_lane);
+      amax = __shfl(amax, src_lane, kNumThreadsStore);
       // Step 2.4: Compute scale
       CType scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scaling);
       // Step 2.5: Write scale_inv
@@ -433,8 +426,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     // Each kNumThreadsStore threads form a warp process one row, we need to find the lane id of
     // the first thread to do the reduction.
     const unsigned src_lane = (threadIdx.x % kThreadsPerWarp) / kNumThreadsStore * kNumThreadsStore;
+#ifndef __HIP_PLATFORM_AMD__
     // This mask represents which threads should do the reduction together.
-    const WarpSyncMask mask = ((WarpSyncMask{1} << kNumThreadsStore) - 1) << src_lane;
+    const unsigned mask = ((1 << kNumThreadsStore) - 1) << src_lane;
+#endif
     const bool is_src_lane = (threadIdx.x % kNumThreadsStore) == 0;
 #pragma unroll
     for (int iter = 0; iter < num_iterations; ++iter) {
@@ -459,12 +454,20 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       // Step 2.3: Reduce amax
 #pragma unroll
       for (int delta = kNumThreadsStore / 2; delta > 0; delta /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+        const float other_amax = __shfl_down(amax, delta, kNumThreadsStore);
+#else
         const float other_amax = __shfl_down_sync(mask, amax, delta);
+#endif
         __builtin_assume(amax >= 0);
         __builtin_assume(other_amax >= 0);
         amax = fmaxf(amax, other_amax);
       }
+#ifdef __HIP_PLATFORM_AMD__
+      amax = __shfl(amax, src_lane, kNumThreadsStore);
+#else
       amax = __shfl_sync(mask, amax, src_lane);
+#endif
       CType scale;
       // Step 2.4: Compute scale
       scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scaling);
@@ -515,11 +518,13 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     const size_t num_ele =
         c_g < num_rows ? min(static_cast<size_t>(kNVecOut), num_rows - c_g) : 0;
     const unsigned src_lane = (threadIdx.x % kThreadsPerWarp) / kNumThreadsStore * kNumThreadsStore;
-    const WarpSyncMask mask = ((WarpSyncMask{1} << kNumThreadsStore) - 1) << src_lane;
     const bool is_src_lane = (threadIdx.x % kNumThreadsStore) == 0;
     const bool col_active = c_s < (kChunkCol / kNVecSMem);
+#pragma unroll
     for (int chunk = 0; chunk < kNumChunks; ++chunk) {
-      __syncthreads();
+      if (chunk != 0) {
+        __syncthreads();
+      }
       load_chunk_to_smem<kAligned, IType>(smem, input, row_length, num_rows, chunk);
       __syncthreads();
 
@@ -541,12 +546,12 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
           }
 #pragma unroll
           for (int delta = kNumThreadsStore / 2; delta > 0; delta /= 2) {
-            const float other_amax = __shfl_down_sync(mask, amax, delta);
+            const float other_amax = __shfl_down(amax, delta, kNumThreadsStore);
             __builtin_assume(amax >= 0);
             __builtin_assume(other_amax >= 0);
             amax = fmaxf(amax, other_amax);
           }
-          amax = __shfl_sync(mask, amax, src_lane);
+          amax = __shfl(amax, src_lane, kNumThreadsStore);
           CType scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scaling);
           bool write_scale_inv = is_src_lane;
           if constexpr (!kAligned) {
@@ -593,8 +598,10 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     // Each kNumThreadsStore threads form a warp process one row, we need to find the lane id of
     // the first thread to do the reduction.
     const unsigned src_lane = (threadIdx.x % kThreadsPerWarp) / kNumThreadsStore * kNumThreadsStore;
+#ifndef __HIP_PLATFORM_AMD__
     // This mask represents which threads should do the reduction together.
-    const WarpSyncMask mask = ((WarpSyncMask{1} << kNumThreadsStore) - 1) << src_lane;
+    const unsigned mask = ((1 << kNumThreadsStore) - 1) << src_lane;
+#endif
     const bool is_src_lane = (threadIdx.x % kNumThreadsStore) == 0;
 #pragma unroll
     for (int iter = 0; iter < num_iterations; ++iter) {
@@ -617,12 +624,20 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         // Step 3.3: Reduce amax
 #pragma unroll
         for (int delta = kNumThreadsStore / 2; delta > 0; delta /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+          const float other_amax = __shfl_down(amax, delta, kNumThreadsStore);
+#else
           const float other_amax = __shfl_down_sync(mask, amax, delta);
+#endif
           __builtin_assume(amax >= 0);
           __builtin_assume(other_amax >= 0);
           amax = fmaxf(amax, other_amax);
         }
+#ifdef __HIP_PLATFORM_AMD__
+        amax = __shfl(amax, src_lane, kNumThreadsStore);
+#else
         amax = __shfl_sync(mask, amax, src_lane);
+#endif
         // Step 3.4: Compute scale
         CType scale;
         scale = compute_scale_from_types<IType, OType>(amax, epsilon, pow_2_scaling);
@@ -677,8 +692,11 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     const int r_s = thr_idx_in_warp * kThreadTileRow;
     const int c_s = warp_in_chunk * num_smem_reads;
     size_t r_g = static_cast<size_t>(blockIdx.y) * kTileDim + r_s;
+#pragma unroll
     for (int chunk = 0; chunk < kNumChunks; ++chunk) {
-      __syncthreads();
+      if (chunk != 0) {
+        __syncthreads();
+      }
       load_chunk_to_smem<kAligned, IType>(smem, input, row_length, num_rows, chunk);
       __syncthreads();
       const bool warp_active = (warp_idx / warps_per_chunk) == chunk;

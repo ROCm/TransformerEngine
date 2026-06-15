@@ -46,7 +46,7 @@ constexpr size_t BLOCK_TILE_DIM = 128;
 constexpr size_t WARP_TILE_DIM_X = 64;
 constexpr size_t WARP_TILE_DIM_Y = 32;
 constexpr size_t THREAD_TILE_DIM_X = 8;
-#ifdef __HIP_PLATFORM_AMD__
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx1250__)
 constexpr size_t THREAD_TILE_DIM_Y = 4;
 #else
 constexpr size_t THREAD_TILE_DIM_Y = 8;
@@ -71,15 +71,6 @@ constexpr size_t NUM_THREADS_X_IN_WARP = WARP_TILE_DIM_X / THREAD_TILE_DIM_X;
 constexpr size_t NUM_THREADS_Y_IN_WARP = kThreadsPerWarp / NUM_THREADS_X_IN_WARP;
 
 #define MIN(a, b) (a < b ? a : b)
-
-#ifdef __HIP_PLATFORM_AMD__
-__device__ __forceinline__ float warp_reduce_max_64(float val) {
-#pragma unroll
-  for (int delta = kThreadsPerWarp / 2; delta > 0; delta /= 2)
-    val = fmaxf(val, __shfl_down(val, delta, kThreadsPerWarp));
-  return val;
-}
-#endif
 
 #ifndef __HIP_PLATFORM_AMD__
 template <bool kReturnTranspose, typename CType, typename IType, typename OType>
@@ -379,17 +370,17 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
   }
   // Reduce amax in the warp (32x32 tile)
 #ifdef __HIP_PLATFORM_AMD__
-  warp_tile_amax = warp_reduce_max_64(amax);
+#pragma unroll
+  for (int delta = kThreadsPerWarp / 2; delta > 0; delta /= 2) {
+    warp_tile_amax = fmaxf(amax, __shfl_xor(amax, delta, kThreadsPerWarp));
+    amax = warp_tile_amax;
+  }
 #else
   warp_tile_amax = warp_reduce_max<kThreadsPerWarp>(amax);
-#endif
   // broadcast the amax to all threads in a warp from the lane 0
   constexpr int lane_zero = 0;
-#ifdef __HIP_PLATFORM_AMD__
-  warp_tile_amax = __shfl(warp_tile_amax, lane_zero, kThreadsPerWarp);
-#else
   warp_tile_amax = __shfl_sync(0xFFFFFFFF, warp_tile_amax, lane_zero);
-#endif  
+#endif
 
   // reduce warp_tile_amax across multiple warps in a thread block using shared mem
   if (tid_in_warp == 0) {
@@ -574,10 +565,10 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
               return_transpose, kReturnTranspose,
 
               dim3 grid(num_blocks_x, num_blocks_y, 1);
-
 #ifndef __HIP_PLATFORM_AMD__
               const bool full_tile =
                   row_length % BLOCK_TILE_DIM == 0 && num_rows % BLOCK_TILE_DIM == 0;
+
               if (full_tile) {
                 CUtensorMap tensor_map_output_trans;
                 if (return_transpose) {

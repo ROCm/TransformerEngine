@@ -104,9 +104,9 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch >= (9, 0):
+        if gpu_arch >= (9, 4):
             return True, ""
-        return False, "Device arch gfx9+ or newer is required for FP8 block scaling execution."
+        return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
     if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
         return True, ""
     return (
