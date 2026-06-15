@@ -21,6 +21,7 @@ import itertools
 import json
 import os
 import platform
+import random
 import re
 import subprocess
 import sys
@@ -241,13 +242,49 @@ def _autotune_inner(instance, method_name, combo, target_s, max_inner=10000):
     return max(1, min(max_inner, int(target_s / t_per) + 1))
 
 
+def _free_gpu_cache():
+    """Release cached GPU memory between interleave chunks.
+
+    No-op when torch was never imported (e.g. CPU-only test harnesses), so the
+    driver stays importable and runnable without torch present.
+    """
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        try:
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+
 def run_class(
     suite_name, cls, class_name, method_filter=None,
     warmup=3, iters=7,
     inner="auto", target_window_ms=1.0,
     cold_cache=False, cache_flush_mb=256,
+    interleave_group=8, rng=None, shuffle=True,
 ):
-    """Run all benchmarks in a class, returning (results, metadata) dicts."""
+    """Run all benchmarks in a class, returning (results, metadata) dicts.
+
+    Samples are collected in round-robin chunks of ``interleave_group``
+    ``(method, combo)`` benchmarks: one sample is taken from each benchmark in
+    the chunk per round, for ``iters`` rounds. This spreads every benchmark's
+    samples across the same wall-clock window so time-correlated GPU noise
+    (thermal ramp, DVFS throttle) becomes shared variance rather than a bias on
+    whichever benchmark happened to own a contiguous block of time. See
+    ``repro/transient_noise_sim.py``. ``interleave_group=1`` reproduces the
+    original contiguous (sequential) behavior; larger groups interleave more
+    benchmarks but keep that many GPU instances live at once.
+
+    When ``shuffle`` is true the per-round visit order is randomly permuted
+    (seeded by *rng*, a ``random.Random``; one is created with seed 0 if not
+    given). Fixed round-robin still pins each benchmark to a constant phase
+    within the round, so a monotonic ramp leaves a small constant per-benchmark
+    offset and each benchmark always sees the same predecessor's cache/clock
+    state. Permuting each round makes both uniform in expectation, turning that
+    residual bias into variance. The per-round structure is kept (each benchmark
+    still gets exactly ``iters`` evenly-spread samples) -- a balanced randomized
+    design, not a global shuffle that could re-cluster a benchmark's samples.
+    """
     methods = sorted(m for m in dir(cls) if m.startswith("time_"))
     if method_filter:
         methods = [m for m in methods if method_filter in m]
@@ -277,13 +314,20 @@ def run_class(
 
     # Print table header
     target_window_s = target_window_ms / 1000.0
+    group = max(1, int(interleave_group))
+    if rng is None:
+        rng = random.Random(0)
     inner_desc = (
         "cold-cache (inner=1)" if cold_cache
         else f"inner={inner}" if inner != "auto"
         else f"inner=auto (>={target_window_ms:g}ms window)"
     )
+    if group == 1:
+        sched_desc = "sequential"
+    else:
+        sched_desc = f"interleaved group={group}, " + ("shuffled" if shuffle else "fixed-order")
     print(f"\n{class_name}  ({len(combos)} combos x {len(methods)} methods, "
-          f"{warmup} warmup, {iters} timed, {inner_desc})")
+          f"{warmup} warmup, {iters} timed, {inner_desc}, {sched_desc})")
     extra_hdr = "".join(f"  {label:>10}" for _, label, _ in throughput_cols)
     HDR = (f"  {'median':>10}  {'mean':>10}  {'stdev':>10}"
            f"  {'q25':>10}  {'q75':>10}  {'min':>10}  {'max':>10}"
@@ -295,10 +339,20 @@ def run_class(
     all_results = {}
     all_meta = {}
 
+    # Per-method result columns, indexed by combo position. Filling by index
+    # decouples the wire format from the order samples are actually collected in,
+    # so interleaved scheduling leaves the saved JSON identical to sequential.
+    n_combos = len(combos)
+    cols = {
+        m: {k: [None] * n_combos for k in
+            ("median", "ci_lo", "ci_hi", "q25", "q75", "number", "repeat", "samples")}
+        for m in methods
+    }
+    versions = {}
     for method_name in methods:
         bench_key = f"{suite_name}.{class_name}.{method_name}"
         code, version = _get_benchmark_code_and_version(cls, method_name)
-
+        versions[method_name] = version
         all_meta[bench_key] = {
             **_ASV_META_DEFAULTS,
             "code": code, "name": bench_key, "version": version,
@@ -306,23 +360,30 @@ def run_class(
             "timeout": getattr(cls, "timeout", 300),
         }
 
-        medians, ci_los, ci_his, q25s, q75s = [], [], [], [], []
-        numbers, repeats = [], []
-        sample_lists = []  # raw per-call samples per combo (the ASV "samples" column)
-        started_at = int(time.time() * 1000)
-        t_start = time.perf_counter()
+    def _label(combo):
+        return ", ".join(f"{nm}={v}" for nm, v in zip(param_names, combo))
 
-        for combo in combos:
-            label = ", ".join(f"{n}={v}" for n, v in zip(param_names, combo))
+    # Flatten to (method, combo) tasks, method-major so printed rows keep the
+    # same grouping as before, then sample them in round-robin chunks.
+    tasks = [(mi, ci) for mi in range(len(methods)) for ci in range(n_combos)]
+    started_at = int(time.time() * 1000)
+    t_start = time.perf_counter()
+
+    for chunk_start in range(0, len(tasks), group):
+        chunk = tasks[chunk_start:chunk_start + group]
+
+        # Setup phase: prepare every benchmark in the chunk (allocate tensors,
+        # pick _inner, warm up) and keep its instance live for round-robin timing.
+        live = []  # (instance, method_obj, method_name, combo, combo_idx)
+        for mi, ci in chunk:
+            method_name = methods[mi]
+            combo = combos[ci]
             instance = cls()
             try:
                 instance.setup(*combo)
             except Exception as e:
-                print(f"  SKIP  {label}  setup failed: {e}")
-                for lst in (medians, ci_los, ci_his, q25s, q75s, numbers, repeats):
-                    lst.append(None)
-                sample_lists.append(None)
-                continue
+                print(f"  SKIP  {_label(combo)}  setup failed: {e}")
+                continue  # leaves None in this (method, combo) slot
 
             # Inner-loop and cache configuration. Cold-cache mode forces
             # inner=1 so only the first invocation in the window sees a
@@ -340,28 +401,43 @@ def run_class(
             method = getattr(instance, method_name)
             for _ in range(warmup):
                 method(*combo)
+            live.append((instance, method, method_name, combo, ci))
 
-            samples = []
-            for _ in range(iters):
+        # Timed phase: one sample from each live benchmark per round, so a
+        # transient spike lands on one sample of each rather than corrupting a
+        # whole benchmark's contiguous block. The visit order is re-permuted
+        # each round (when shuffle is on) so no benchmark is pinned to a fixed
+        # phase / predecessor; chunk_samples stays keyed by the stable index i.
+        chunk_samples = [[] for _ in live]
+        order = list(range(len(live)))
+        for _ in range(iters):
+            if shuffle and len(order) > 1:
+                rng.shuffle(order)
+            for i in order:
+                instance, method, method_name, combo, ci = live[i]
                 t0 = time.perf_counter()
                 result = method(*combo)
                 wall = time.perf_counter() - t0
-                samples.append(wall if result is None else result)
+                chunk_samples[i].append(wall if result is None else result)
 
+        # Finalize phase: stats, throughput, print, store into the combo slot.
+        for i, (instance, method, method_name, combo, ci) in enumerate(live):
+            samples = chunk_samples[i]
             median, mean, stdev, ci_lo, ci_hi, q25, q75 = _compute_stats(samples)
             s_min, s_max = min(samples), max(samples)
 
-            medians.append(median)
-            ci_los.append(ci_lo)
-            ci_his.append(ci_hi)
-            q25s.append(q25)
-            q75s.append(q75)
-            numbers.append(instance._inner)
-            repeats.append(iters)
+            c = cols[method_name]
+            c["median"][ci] = median
+            c["ci_lo"][ci] = ci_lo
+            c["ci_hi"][ci] = ci_hi
+            c["q25"][ci] = q25
+            c["q75"][ci] = q75
+            c["number"][ci] = instance._inner
+            c["repeat"][ci] = iters
             # Keep the raw samples (seconds) for statistical comparison
             # (compare_results.py). Rounded to 1 ns to keep the JSON compact
             # without losing meaningful timing resolution.
-            sample_lists.append([round(x, 9) for x in samples])
+            c["samples"][ci] = [round(x, 9) for x in samples]
 
             # Derive throughput from work_* companion
             work = {}
@@ -382,12 +458,21 @@ def run_class(
                   f"{stdev*1000:>8.3f}ms  {q25*1000:>8.3f}ms  {q75*1000:>8.3f}ms  "
                   f"{s_min*1000:>8.3f}ms  {s_max*1000:>8.3f}ms"
                   f"{extra_cols}  "
-                  f"{instance._inner:>5}  {method_name:<30}  {label}")
+                  f"{instance._inner:>5}  {method_name:<30}  {_label(combo)}")
 
-        duration = time.perf_counter() - t_start
+        # Release this chunk's GPU instances before setting up the next chunk.
+        live.clear()
+        _free_gpu_cache()
+
+    duration = time.perf_counter() - t_start
+    for method_name in methods:
+        bench_key = f"{suite_name}.{class_name}.{method_name}"
+        c = cols[method_name]
         all_results[bench_key] = [
-            medians, asv_params, version, started_at, round(duration, 2),
-            ci_los, ci_his, q25s, q75s, numbers, repeats, sample_lists,
+            c["median"], asv_params, versions[method_name], started_at,
+            round(duration, 2),
+            c["ci_lo"], c["ci_hi"], c["q25"], c["q75"], c["number"], c["repeat"],
+            c["samples"],
         ]
 
     return all_results, all_meta
@@ -435,6 +520,28 @@ def run_as_main(caller_file=None):
                         help="Size in MB of the cache-flush buffer for "
                              "--cold-cache (default: 256, sized for the MI300 "
                              "Infinity Cache).")
+    parser.add_argument("--interleave-group", type=int, default=8,
+                        help="Number of (method, combo) benchmarks sampled "
+                             "round-robin together so time-correlated GPU noise "
+                             "(thermal ramp / DVFS throttle) is shared across "
+                             "them instead of biasing whichever benchmark owns a "
+                             "contiguous block of wall-clock time (default: 8). "
+                             "Each benchmark in a group keeps a live GPU "
+                             "instance, so lower this on out-of-memory. 1 = "
+                             "sequential. See repro/transient_noise_sim.py.")
+    parser.add_argument("--sequential", action="store_true",
+                        help="Collect each benchmark's samples in one contiguous "
+                             "block (equivalent to --interleave-group 1). Lowest "
+                             "memory, but biased under thermal drift.")
+    parser.add_argument("--seed", type=int, default=0,
+                        help="Seed for the per-round shuffle of the interleave "
+                             "order (default: 0), kept fixed so runs are "
+                             "reproducible.")
+    parser.add_argument("--no-shuffle", action="store_true",
+                        help="Disable the per-round random permutation and use a "
+                             "fixed round-robin order. Each benchmark then keeps "
+                             "a constant within-round phase and predecessor, "
+                             "leaving a small residual ordering bias.")
     parser.add_argument("--no-save", action="store_true",
                         help="Skip saving results to ASV format")
     parser.add_argument("--label", default=None,
@@ -448,6 +555,9 @@ def run_as_main(caller_file=None):
             args.inner = max(1, int(args.inner))
         except ValueError:
             parser.error("--inner must be 'auto' or a positive integer")
+    if args.sequential:
+        args.interleave_group = 1
+    args.interleave_group = max(1, args.interleave_group)
 
     if caller_file is not None:
         script_dir = os.path.dirname(os.path.abspath(caller_file))
@@ -469,6 +579,13 @@ def run_as_main(caller_file=None):
     if script_dir not in sys.path:
         sys.path.insert(0, script_dir)
 
+    # One RNG for the whole run so the interleave order is reproducible given
+    # --seed. Shared across classes so the stream is deterministic end-to-end.
+    rng = random.Random(args.seed)
+    shuffle = not args.no_shuffle
+    if args.interleave_group > 1 and shuffle:
+        print(f"Interleave: group={args.interleave_group}, shuffled (seed={args.seed})")
+
     all_results = {}
     all_meta = {}
     for suite_name in suite_names:
@@ -482,6 +599,8 @@ def run_as_main(caller_file=None):
                     inner=args.inner, target_window_ms=args.target_window_ms,
                     cold_cache=args.cold_cache,
                     cache_flush_mb=args.cache_flush_mb,
+                    interleave_group=args.interleave_group,
+                    rng=rng, shuffle=shuffle,
                 )
                 all_results.update(results)
                 all_meta.update(meta)

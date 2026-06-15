@@ -59,6 +59,43 @@ Caveat: the inner loop runs in Python, so each iteration carries
 not removable without CUDA graph capture; pick `--inner` deliberately
 in that regime or use the cold-cache mode.
 
+### Sample scheduling: interleaving
+
+By default the driver does **not** collect a benchmark's samples in one
+contiguous block. It samples in round-robin chunks: it sets up a group of
+`(method, combo)` benchmarks, then takes one sample from each per round, for
+`-n` rounds. This is on by default because *sequential* scheduling (all of A,
+then all of B) makes wall-clock time a proxy for benchmark identity — so any
+time-correlated GPU noise (thermal warm-up ramp, DVFS throttle, a neighbor
+container on a shared GPU) becomes a systematic **bias** between benchmarks
+rather than noise. The Monte-Carlo study in `repro/transient_noise_sim.py`
+quantifies it: under a 5% thermal ramp a sequential Brunner-Munzel comparison
+fires a false positive 86% of the time (α=0.05), and a 20% ramp can flip a real
+5% speedup into a reported regression. Round-robin sampling spreads every
+benchmark across the same window, so a transient lands on one sample of each
+instead of corrupting one benchmark's whole block.
+
+The per-round visit order is also **randomly permuted** each round (a balanced
+randomized design, not a global shuffle). Fixed round-robin would still pin each
+benchmark to a constant phase within the round — so a monotonic ramp leaves a
+small constant per-benchmark offset, and each benchmark always sees the same
+predecessor's cache/clock state. Re-permuting each round makes both uniform in
+expectation, turning that residual bias into variance. The shuffle is seeded
+(`--seed`, default `0`) so runs stay reproducible.
+
+| Flag | Effect |
+|---|---|
+| `--interleave-group N` (default `8`) | Number of benchmarks sampled round-robin together. Each keeps a live GPU instance for the duration of the chunk, so **lower this if a group runs out of memory**; raise it to share the time window across more benchmarks. |
+| `--sequential` | Collect each benchmark's samples contiguously (≡ `--interleave-group 1`). Lowest memory, but biased under thermal drift — use only for quick local runs. |
+| `--seed S` (default `0`) | Seed for the per-round shuffle, fixed so runs are reproducible. |
+| `--no-shuffle` | Use a fixed round-robin order instead of permuting each round. Leaves a small residual ordering/predecessor bias; mainly for debugging. |
+
+Caveat: interleaving removes *within-run* time-position bias. It does **not**
+remove a whole-run thermal offset between two **separately produced** result
+files (e.g. a cold baseline run vs. a warm candidate run). For the statistical
+comparison below, produce the baseline and candidate result files back-to-back
+under similar conditions.
+
 ### Helper script
 
 `run_benchmarks.sh` wraps common tasks and can be run from anywhere.

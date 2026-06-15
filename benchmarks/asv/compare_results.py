@@ -12,7 +12,8 @@ two result files (one per checkout) using a statistical test (Brunner-Munzel by
 default) via the benchstats package. It marks each (benchmark, parameter
 combination) as faster (``<``), slower (``>``), or not significantly different
 (``~``) and exits ``1`` when a significant timing difference is found, so it can
-gate CI. Requires ``pip install -r requirements.txt``.
+gate CI. A summary line reports how many benchmarks were significantly faster,
+significantly slower, or unchanged. Requires ``pip install -r requirements.txt``.
 
 Usage:
     # run the suite on the baseline checkout, then on the candidate checkout,
@@ -66,6 +67,26 @@ def run_stats(args):
         main_metrics=main_metrics,
         always_show_pvalues=args.always_show_pvalues,
     )
+
+    # Tally significant results per direction for the timing metric. benchstats
+    # encodes the outcome of each comparison as set0-vs-set1: "<" means baseline
+    # < candidate (candidate's time is higher -> slower / a regression), ">"
+    # means baseline > candidate (candidate faster / a speedup), "~" means not
+    # significant at alpha. Printed via the console so it is captured by export.
+    for metric in main_metrics:
+        counts = {"<": 0, ">": 0, "~": 0}
+        for bm_res in cr.results.values():
+            res = bm_res.get(metric)
+            if res is not None:
+                counts[res.result] = counts.get(res.result, 0) + 1
+        total = counts["<"] + counts[">"] + counts["~"]
+        console.print(
+            f"\nSummary for '{metric}' ({cr.method}, alpha={cr.alpha:g}, "
+            f"{total} benchmarks):"
+        )
+        console.print(f"  candidate faster (significant, '>'): {counts['>']}")
+        console.print(f"  candidate slower (significant, '<'): {counts['<']}")
+        console.print(f"  no significant difference ('~'):     {counts['~']}")
 
     if export_fmt is not None:
         if export_fmt == "txt":
