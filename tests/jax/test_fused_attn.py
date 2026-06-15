@@ -1902,3 +1902,43 @@ def test_backward_bitwise_reproducible(
     for name, x, y in zip(("dQ", "dK", "dV"), grads1, grads2):
         # Bitwise reproducibility across consecutive runs
         assert_allclose(x, y, atol=0, rtol=0, err_msg=f"{name} not bitwise reproducible")
+
+
+def _on_gfx942():
+    """True when running on AMD MI300-class (gfx942) JAX devices."""
+    if not is_hip_extension():
+        return False
+    try:
+        devs = jax.devices()
+        if not devs:
+            return False
+        return "gfx942" in str(devs[0]).lower()
+    except Exception:
+        return False
+
+
+@pytest.mark.skipif(not _on_gfx942(), reason="CK small-seq is implemented for gfx942 (MI300X) only")
+def test_fused_attn_ck_smallseq_thd_gfx942(monkeypatch):
+    """THD forward with NVTE_FUSED_ATTN_CK_SMALLSEQ=1 (HIP small-seq vs reference)."""
+    monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1")
+    runner = FusedAttnRunner(
+        batch_size=2,
+        max_seqlen_q=8,
+        max_seqlen_kv=8,
+        num_heads_q=16,
+        num_heads_kv=16,
+        head_dim_qk=128,
+        head_dim_v=128,
+        attn_bias_type=AttnBiasType.NO_BIAS,
+        attn_mask_type=AttnMaskType.PADDING_MASK,
+        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+        dropout_prob=0.0,
+        dtype=jnp.bfloat16,
+        is_training=False,
+        qkv_layout=QKVLayout.THD_THD_THD,
+        bias_shape=BiasShape._1HSS,
+        window_size=None,
+        seq_desc_format=SeqDescFormat.SegmentIDs,
+        num_segments_per_seq=2,
+    )
+    runner.test_forward()

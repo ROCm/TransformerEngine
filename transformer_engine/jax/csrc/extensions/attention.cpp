@@ -9,6 +9,9 @@
 #include "../extensions.h"
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
+#ifdef USE_ROCM
+#include "common/fused_attn_rocm/fused_attn_smallseq.h"
+#endif
 
 namespace transformer_engine {
 namespace jax {
@@ -214,6 +217,19 @@ pybind11::tuple GetFusedAttnForwardWorkspaceSizes(
   nvte_tensor_pack_destroy(&aux_output_tensors);
 
   auto workspace_shape = MakeShapeVector(query_workspace_tensor.shape());
+#ifdef USE_ROCM
+  if (is_ragged && ::transformer_engine::fused_attn_rocm::is_nvte_ck_small_seq_enabled()) {
+    if (::transformer_engine::fused_attn_rocm::small_seq_static_config_ok(
+            static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), bias_type,
+            dropout_probability, qk_head_dim, v_head_dim, attn_heads, num_gqa_groups, mask_type)) {
+      const size_t max_tokens_q_upper = input_batch * q_max_seqlen;
+      size_t total_ws_bytes = workspace_shape.empty() ? static_cast<size_t>(1) : workspace_shape[0];
+      total_ws_bytes +=
+          ::transformer_engine::fused_attn_rocm::small_seq_extra_workspace_bytes(max_tokens_q_upper);
+      workspace_shape = std::vector<size_t>{std::max<size_t>(total_ws_bytes, static_cast<size_t>(1))};
+    }
+  }
+#endif
   return pybind11::make_tuple(workspace_shape, query_workspace_tensor.dtype());
 }
 
@@ -504,6 +520,19 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
   nvte_tensor_pack_destroy(&aux_input_tensors);
 
   auto work_shape = MakeShapeVector(query_workspace_tensor.shape());
+#ifdef USE_ROCM
+  if (is_ragged && ::transformer_engine::fused_attn_rocm::is_nvte_ck_small_seq_enabled()) {
+    if (::transformer_engine::fused_attn_rocm::small_seq_static_config_ok(
+            static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), bias_type,
+            dropout_probability, qk_head_dim, v_head_dim, attn_heads, num_gqa_groups, mask_type)) {
+      const size_t max_tokens_q_upper = input_batch * q_max_seqlen;
+      size_t total_ws_bytes = work_shape.empty() ? static_cast<size_t>(1) : work_shape[0];
+      total_ws_bytes +=
+          ::transformer_engine::fused_attn_rocm::small_seq_extra_workspace_bytes(max_tokens_q_upper);
+      work_shape = std::vector<size_t>{std::max<size_t>(total_ws_bytes, static_cast<size_t>(1))};
+    }
+  }
+#endif
   return pybind11::make_tuple(work_shape, query_workspace_tensor.dtype());
 }
 

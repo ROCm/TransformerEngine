@@ -13,6 +13,7 @@
 #include "../util/cuda_runtime.h"
 #include "../util/system.h"
 #include "fused_attn_ck.h"
+#include "fused_attn_smallseq.h"
 #include "utils.h"
 
 namespace transformer_engine {
@@ -273,6 +274,22 @@ void generate_alibi_slope(uint64_t h, float* alibi_slope_ptr){
   }
 }
 
+// Legacy CK small-seq layout (cross-attn varlen): one thread per batch index fills
+// padded_q_to_batch[i] = b for i in [cu_seqlens_q_padded[b], cu_seqlens_q_padded[b+1]).
+__global__ void build_padded_q_to_batch_kernel(const int* cu_seqlens_q_padded,
+                                               int bs,
+                                               int* padded_q_to_batch) {
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+  if(b >= bs) {
+    return;
+  }
+  int start = cu_seqlens_q_padded[b];
+  int end = cu_seqlens_q_padded[b + 1];
+  for(int i = start; i < end; ++i) {
+    padded_q_to_batch[i] = b;
+  }
+}
+
 // no device std::upper_bound
 // in an increasing array with given size len, search for the index that:
 // array[index] <= target < array[index+1]
@@ -498,6 +515,18 @@ void fused_attn_ck_fwd_impl(
   // (planner returns nullptr, accumulates total) and execution mode.
   WorkspacePlanner planner(workspace);
 
+  // Prefix layout matches legacy CK small-seq: [max_seqlen_q probe][max_seqlen_kv probe][padded_q_to_batch]
+  void* ck_smallseq_workspace_prefix = nullptr;
+  const bool ck_small_seq_enabled =
+      is_nvte_ck_small_seq_enabled() &&
+      small_seq_static_config_ok(static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype),
+                                 bias_type, dropout_probability, d_qk, d_v, h, hg, mask_type) &&
+      is_ragged;
+  if(ck_small_seq_enabled) {
+    ck_smallseq_workspace_prefix =
+        planner.allocate(small_seq_extra_workspace_bytes(max_tokens_q));
+  }
+
   void* devPtrAlibiSlope = nullptr;
   if(bias_type == NVTE_Bias_Type::NVTE_ALIBI){
     // ck requires an alibi slope array even if in standard (vanilla) mode
@@ -658,21 +687,72 @@ void fused_attn_ck_fwd_impl(
     pad_remap<PadDirection::Add>(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrO, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrOWithoutPadding, stream);
     pad_remap_lse<PadDirection::Add>(b, h, s_q, max_tokens_q, false, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxLSEWithoutPadding, stream);
   }else if(bshd_to_thd || is_ragged){
-    ck_args.max_tokens_q = max_tokens_q;
-    ck_args.q_ptr = devPtrQ;
-    ck_args.stride_h_q = q_stride[1]; ck_args.stride_s_q = q_stride[2];
-    ck_args.k_ptr = devPtrK;
-    ck_args.stride_h_k = k_stride[1]; ck_args.stride_s_k = k_stride[2];
-    ck_args.v_ptr = devPtrV;
-    ck_args.stride_h_v = v_stride[1]; ck_args.stride_s_v = v_stride[2];
-    ck_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
-    ck_args.cu_seqlen_kv_ptr = devPtrCuSeqlensKV;
-    ck_args.cu_seqlen_q_padded_ptr = devPtrCuSeqlenPaddedQ;
-    ck_args.cu_seqlen_kv_padded_ptr = devPtrCuSeqlenPaddedKV;
-    ck_args.o_ptr = devPtrO;
-    ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[2];
-    ck_args.lse_ptr = devPtrSoftmaxLSEWithoutPadding;
-    NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_fwd(ck_args, stream));
+    bool ran_smallseq = false;
+    if(ck_smallseq_workspace_prefix != nullptr && is_ragged && ck_small_seq_enabled) {
+      void* workspace_next = ck_smallseq_workspace_prefix;
+      void* max_seqlen_workspace_q = workspace_next;
+      void* max_seqlen_workspace_kv =
+          static_cast<void*>(static_cast<int8_t*>(workspace_next) + sizeof(uint64_t));
+      hipStream_t hip_stream = reinterpret_cast<hipStream_t>(stream);
+      const size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+          b, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, max_seqlen_workspace_q, hip_stream));
+      const size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+          b, devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV, max_seqlen_workspace_kv, hip_stream));
+      workspace_next =
+          static_cast<void*>(static_cast<int8_t*>(workspace_next) + 2 * sizeof(uint64_t));
+      if(nvte_log_ck_config) {
+        std::cout << std::endl << "attn_fwd(ck small-seq): ";
+        std::cout << "b: " << b << ", ";
+        std::cout << "runtime_max_seqlen_q: " << runtime_max_seqlen_q << ", ";
+        std::cout << "runtime_max_seqlen_kv: " << runtime_max_seqlen_kv << ", ";
+        std::cout << "flow: "
+                  << (is_runtime_small_seq_eligible(runtime_max_seqlen_q, runtime_max_seqlen_kv)
+                          ? "ck-smallseq"
+                          : "regular ck/aiter")
+                  << std::endl;
+      }
+      if(is_runtime_small_seq_eligible(runtime_max_seqlen_q, runtime_max_seqlen_kv)) {
+        const int total_padded_q = static_cast<int>(max_tokens_q);
+        int* devPtrPaddedQToBatch = static_cast<int*>(workspace_next);
+        workspace_next = static_cast<void*>(static_cast<int8_t*>(workspace_next) +
+                                             static_cast<size_t>(total_padded_q) * sizeof(int));
+        (void)workspace_next;  // Legacy layout: remainder reserved for small-seq scratch (unused here).
+        constexpr int k_build_padded_threads = 256;
+        const int bs = static_cast<int>(b);
+        if(bs > 0) {
+          const unsigned grid_x = static_cast<unsigned>(
+              (static_cast<int64_t>(bs) + k_build_padded_threads - 1) / k_build_padded_threads);
+          dim3 grid(grid_x);
+          dim3 block(k_build_padded_threads);
+          build_padded_q_to_batch_kernel<<<grid, block, 0, stream>>>(
+              static_cast<const int*>(devPtrCuSeqlenPaddedQ), bs, devPtrPaddedQToBatch);
+          NVTE_CHECK_CUDA(hipGetLastError());
+        }
+        NVTE_CHECK_CUDA(hipStreamSynchronize(hip_stream));
+        ran_smallseq = fused_attn_smallseq_fwd(
+            b, h, d_qk, max_tokens_q, max_tokens_kv, scaling_factor, devPtrQ, devPtrK, devPtrV,
+            devPtrO, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ,
+            devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV, devPtrPaddedQToBatch,
+            static_cast<NVTEDType>(dtype), stream);
+      }
+    }
+    if(!ran_smallseq) {
+      ck_args.max_tokens_q = max_tokens_q;
+      ck_args.q_ptr = devPtrQ;
+      ck_args.stride_h_q = q_stride[1]; ck_args.stride_s_q = q_stride[2];
+      ck_args.k_ptr = devPtrK;
+      ck_args.stride_h_k = k_stride[1]; ck_args.stride_s_k = k_stride[2];
+      ck_args.v_ptr = devPtrV;
+      ck_args.stride_h_v = v_stride[1]; ck_args.stride_s_v = v_stride[2];
+      ck_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
+      ck_args.cu_seqlen_kv_ptr = devPtrCuSeqlensKV;
+      ck_args.cu_seqlen_q_padded_ptr = devPtrCuSeqlenPaddedQ;
+      ck_args.cu_seqlen_kv_padded_ptr = devPtrCuSeqlenPaddedKV;
+      ck_args.o_ptr = devPtrO;
+      ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[2];
+      ck_args.lse_ptr = devPtrSoftmaxLSEWithoutPadding;
+      NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_fwd(ck_args, stream));
+    }
     // aiter asm output softmax_lse with padding
     pad_remap_lse<PadDirection::Add>(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxLSEWithoutPadding, stream);
   }else{
@@ -745,6 +825,18 @@ void fused_attn_ck_bwd_impl(
   // Reserve workspace chunks. Same allocation sequence runs in sizing mode
   // (planner returns nullptr, accumulates total) and execution mode.
   WorkspacePlanner planner(workspace);
+
+  // Prefix layout matches legacy CK small-seq: [max_seqlen_q probe][max_seqlen_kv probe][padded_q_to_batch]
+  void* ck_smallseq_workspace_prefix = nullptr;
+  const bool ck_small_seq_enabled =
+      is_nvte_ck_small_seq_enabled() &&
+      small_seq_static_config_ok(static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype),
+                                 bias_type, dropout_probability, d_qk, d_v, h, hg, mask_type) &&
+      is_ragged;
+  if(ck_small_seq_enabled) {
+    ck_smallseq_workspace_prefix =
+        planner.allocate(small_seq_extra_workspace_bytes(max_tokens_q));
+  }
 
   // First h*max_tokens_q*sizeof(float) is the lse-d buffer (passed as softmax_lsed)
   void* lse_workspace = planner.allocate(h*max_tokens_q*sizeof(float));
@@ -1024,32 +1116,70 @@ void fused_attn_ck_bwd_impl(
     pad_remap<PadDirection::Add>(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrdV, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdVWithoutPadding, stream);
   }else if(bshd_to_thd || is_ragged){
     pad_remap_lse<PadDirection::Remove>(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxLSEWithoutPadding, stream);
-    ck_args.max_tokens_q = max_tokens_q; ck_args.max_tokens_kv = max_tokens_kv;
-    ck_args.q_ptr = devPtrQ;
-    ck_args.stride_h_q = q_stride[1]; ck_args.stride_s_q = q_stride[2];
-    ck_args.k_ptr = devPtrK;
-    ck_args.stride_h_k = k_stride[1]; ck_args.stride_s_k = k_stride[2];
-    ck_args.v_ptr = devPtrV;
-    ck_args.stride_h_v = v_stride[1]; ck_args.stride_s_v = v_stride[2];
-    ck_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
-    ck_args.cu_seqlen_kv_ptr = devPtrCuSeqlensKV;
-    ck_args.cu_seqlen_q_padded_ptr = devPtrCuSeqlenPaddedQ;
-    ck_args.cu_seqlen_kv_padded_ptr = devPtrCuSeqlenPaddedKV;
-    ck_args.o_ptr = devPtrO;
-    ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[2];
-    ck_args.lse_ptr = devPtrSoftmaxLSEWithoutPadding;
-    // dO and O share the same stride
-    ck_args.do_ptr = devPtrdO;
-    ck_args.stride_h_do = o_stride[1]; ck_args.stride_s_do = o_stride[2];
-    ck_args.dq_ptr = devPtrdQ;
-    ck_args.stride_h_dq = q_stride[1]; ck_args.stride_s_dq = q_stride[2];
-    ck_args.stride_h_dk_expanded = dk_expanded_stride[1]; ck_args.stride_s_dk_expanded = dk_expanded_stride[2];
-    ck_args.stride_h_dv_expanded = dv_expanded_stride[1]; ck_args.stride_s_dv_expanded = dv_expanded_stride[2];
-    ck_args.dk_ptr = devPtrdK;
-    ck_args.stride_h_dk = k_stride[1]; ck_args.stride_s_dk = k_stride[2];
-    ck_args.dv_ptr = devPtrdV;
-    ck_args.stride_h_dv = v_stride[1]; ck_args.stride_s_dv = v_stride[2];
-    NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_bwd(ck_args, stream));
+    bool ran_smallseq_bwd = false;
+    if(ck_smallseq_workspace_prefix != nullptr && is_ragged && ck_small_seq_enabled) {
+      void* workspace_next = ck_smallseq_workspace_prefix;
+      void* max_seqlen_workspace_q = workspace_next;
+      void* max_seqlen_workspace_kv =
+          static_cast<void*>(static_cast<int8_t*>(workspace_next) + sizeof(uint64_t));
+      hipStream_t hip_stream = reinterpret_cast<hipStream_t>(stream);
+      const size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+          b, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, max_seqlen_workspace_q, hip_stream));
+      const size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+          b, devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV, max_seqlen_workspace_kv, hip_stream));
+      workspace_next =
+          static_cast<void*>(static_cast<int8_t*>(workspace_next) + 2 * sizeof(uint64_t));
+      if(nvte_log_ck_config) {
+        std::cout << std::endl << "attn_bwd(ck small-seq): ";
+        std::cout << "b: " << b << ", ";
+        std::cout << "runtime_max_seqlen_q: " << runtime_max_seqlen_q << ", ";
+        std::cout << "runtime_max_seqlen_kv: " << runtime_max_seqlen_kv << ", ";
+        std::cout << "flow: "
+                  << (is_runtime_small_seq_eligible(runtime_max_seqlen_q, runtime_max_seqlen_kv)
+                          ? "ck-smallseq"
+                          : "regular ck/aiter")
+                  << std::endl;
+      }
+      if(is_runtime_small_seq_eligible(runtime_max_seqlen_q, runtime_max_seqlen_kv)) {
+        const int total_padded_q = static_cast<int>(max_tokens_q);
+        workspace_next = static_cast<void*>(static_cast<int8_t*>(workspace_next) +
+                                             static_cast<size_t>(total_padded_q) * sizeof(int));
+        (void)workspace_next;  // Same prefix carve as fwd; small-seq bwd path does not consume padded map.
+        ran_smallseq_bwd = fused_attn_smallseq_bwd(
+            b, h, d_qk, max_tokens_q, max_tokens_kv, scaling_factor, devPtrQ, devPtrK, devPtrV,
+            devPtrdO, devPtrSoftmaxLSEWithoutPadding, devPtrdQ, devPtrdK, devPtrdV,
+            devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV,
+            static_cast<NVTEDType>(dtype), stream);
+      }
+    }
+    if(!ran_smallseq_bwd) {
+      ck_args.max_tokens_q = max_tokens_q; ck_args.max_tokens_kv = max_tokens_kv;
+      ck_args.q_ptr = devPtrQ;
+      ck_args.stride_h_q = q_stride[1]; ck_args.stride_s_q = q_stride[2];
+      ck_args.k_ptr = devPtrK;
+      ck_args.stride_h_k = k_stride[1]; ck_args.stride_s_k = k_stride[2];
+      ck_args.v_ptr = devPtrV;
+      ck_args.stride_h_v = v_stride[1]; ck_args.stride_s_v = v_stride[2];
+      ck_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
+      ck_args.cu_seqlen_kv_ptr = devPtrCuSeqlensKV;
+      ck_args.cu_seqlen_q_padded_ptr = devPtrCuSeqlenPaddedQ;
+      ck_args.cu_seqlen_kv_padded_ptr = devPtrCuSeqlenPaddedKV;
+      ck_args.o_ptr = devPtrO;
+      ck_args.stride_h_o = o_stride[1]; ck_args.stride_s_o = o_stride[2];
+      ck_args.lse_ptr = devPtrSoftmaxLSEWithoutPadding;
+      // dO and O share the same stride
+      ck_args.do_ptr = devPtrdO;
+      ck_args.stride_h_do = o_stride[1]; ck_args.stride_s_do = o_stride[2];
+      ck_args.dq_ptr = devPtrdQ;
+      ck_args.stride_h_dq = q_stride[1]; ck_args.stride_s_dq = q_stride[2];
+      ck_args.stride_h_dk_expanded = dk_expanded_stride[1]; ck_args.stride_s_dk_expanded = dk_expanded_stride[2];
+      ck_args.stride_h_dv_expanded = dv_expanded_stride[1]; ck_args.stride_s_dv_expanded = dv_expanded_stride[2];
+      ck_args.dk_ptr = devPtrdK;
+      ck_args.stride_h_dk = k_stride[1]; ck_args.stride_s_dk = k_stride[2];
+      ck_args.dv_ptr = devPtrdV;
+      ck_args.stride_h_dv = v_stride[1]; ck_args.stride_s_dv = v_stride[2];
+      NVTE_CHECK_CUDA(ck_fused_attn::ck_attn_bwd(ck_args, stream));
+    }
   }else{
     ck_args.bias_b = bias_b; ck_args.bias_h = bias_h;
     ck_args.q_ptr = devPtrQ;

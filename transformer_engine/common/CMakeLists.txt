@@ -290,6 +290,7 @@ if(USE_ROCM)
       fused_attn_rocm/fused_attn.cpp
       fused_attn_rocm/fused_attn_aotriton.cpp
       fused_attn_rocm/fused_attn_ck.cpp
+      fused_attn_rocm/fused_attn_smallseq.cpp
       fused_attn_rocm/utils.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
@@ -354,6 +355,11 @@ else() #USE_ROCM
   message(STATUS "nvte hipified sources: ${te_hip_sources}")
 
   add_library(transformer_engine SHARED ${te_hip_sources})
+
+  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/crossattn_hip_kernel/include")
+    target_include_directories(transformer_engine PRIVATE
+      "${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/crossattn_hip_kernel/include")
+  endif()
 
   # Workaround for TheRock installation that moved some headers from system-wide location
   # to rocm_sysdeps but missing it in the default include path.
