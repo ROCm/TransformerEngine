@@ -237,11 +237,15 @@ start_message() {
     python3 --version
 }
 
-configure_omp_threads() {
+get_cpu_count() {
     n_vcpus=$(lscpu | grep "^CPU(s):" | awk '{print $2}')
     cpus_per_core=$(lscpu | grep "Thread(s) per core:" | awk '{print $NF}')
 
-    n_physical_cores=$((n_vcpus / cpus_per_core))
+    echo $((n_vcpus / cpus_per_core))
+}
+
+configure_omp_threads() {
+    n_physical_cores=`get_cpu_count`
     n_parallel_jobs=$1
 
     if [ -z ${OMP_NUM_THREADS} ]; then
@@ -269,4 +273,39 @@ pytest_run() {
     python3 -m pytest -v -rfEs `get_pytest_junitxml $_test_name_tag` $TEST_PYTEST_ARGS "$TEST_DIR/$@"
     test $? -eq 0 || test_run_error "[$_test_variant_tag] $1"
     echo "Done [$_test_variant_tag] $1 in `time_elapsed $_start_ts`"
+}
+
+PYTHON_TE_IMPORT="import sys; sys.path[:] = [p for p in sys.path if p not in ['', '.']]; import transformer_engine"
+ck_jit_prebuild() {
+    _prebuild_list="${TE_PATH}ci/ck_jit_prebuild.txt"
+    if [ ! -f "$_prebuild_list" ]; then
+        script_error "ck_jit_prebuild: blob list not found: $_prebuild_list"
+        return 1
+    fi
+    _gpu_arch=$(rocminfo | grep -E "^ *Name: *gfx" | head -1 | sed "s/.*gfx/gfx/;s/ .*//" 2>/dev/null)
+    if [ -n "$_gpu_arch" ]; then
+        _arch_arg="--arch $_gpu_arch"
+    else
+        script_error "ck_jit_prebuild: GPU architecture not detected, omitting --arch"
+        _arch_arg=""
+    fi
+    _te_install_dir=$(python -c "${PYTHON_TE_IMPORT}; import os; print(os.path.dirname(transformer_engine.__file__))" 2>/dev/null)
+    if [ -z "$_te_install_dir" ]; then
+        script_error "ck_jit_prebuild: failed to determine transformer_engine installation directory"
+        return 1
+    fi
+    _prebuild_py="$_te_install_dir/lib/ck_jit/ck_jit_prebuild.py"
+    if [ ! -f "$_prebuild_py" ]; then
+        script_error "ck_jit_prebuild: prebuild script not found: $_prebuild_py"
+        return 1
+    fi
+    _cpu_count=$(get_cpu_count)
+    if [ -n "$_cpu_count" -a "$_cpu_count" != "0" ]; then
+        _jobs_arg="--jobs $((_cpu_count/2))"
+    fi
+    if [ "$1" = "build" ]; then
+        echo "Building CK JIT cache for arch=${_gpu_arch:-<not detected>}..."
+        python "$_prebuild_py" build --blob-list "$_prebuild_list" $_arch_arg $_jobs_arg > /dev/null
+    fi
+    python "$_prebuild_py" cache | grep Cache
 }

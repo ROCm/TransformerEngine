@@ -9,6 +9,9 @@
 #include <pybind.h>
 
 #include "common.h"
+#ifdef USE_ROCM
+#include "common/util/cuda_runtime.h"
+#endif
 #include "pybind.h"
 #include "torch/torch.h"
 
@@ -1695,6 +1698,18 @@ std::vector<size_t> MXFP8Quantizer::get_scale_shape(const std::vector<size_t>& s
              "MXFP8 requires tensor dims that are divisible by ", MXFP8_BLOCK_SIZE,
              " (got shape=", shape, ")");
 #ifdef USE_ROCM
+  // gfx1250 MX pre-swizzle (Tensile 3D) layout requires both M and K_scale
+  // padded to multiples of 4.
+  if (transformer_engine::cuda::sm_arch() == 125) {
+    size_t m_dim = numel / last_dim;
+    size_t k_scale = last_dim / MXFP8_BLOCK_SIZE;
+    if (!columnwise) {
+      return {roundup(m_dim, 4), roundup(k_scale, 4)};
+    } else {
+      return {roundup(m_dim / MXFP8_BLOCK_SIZE, 4), roundup(last_dim, 4)};
+    }
+  }
+
   return !columnwise 
          ? std::vector<size_t>{numel / last_dim, last_dim / MXFP8_BLOCK_SIZE} 
          : std::vector<size_t>{numel / last_dim / MXFP8_BLOCK_SIZE, last_dim};
