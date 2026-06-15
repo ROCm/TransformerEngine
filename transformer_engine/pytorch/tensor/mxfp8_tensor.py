@@ -19,7 +19,7 @@ from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
-from ..utils import devices_match, round_up_to_nearest_multiple
+from ..utils import devices_match, get_device_compute_capability, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
@@ -144,9 +144,15 @@ class MXFP8Quantizer(Quantizer):
             data = torch.empty(shape, dtype=torch.uint8, device=device)
             # ROCm TE does not implement fuse padding zeros so use zero tensor here
             if IS_HIP_EXTENSION:
+                m_dim = math.prod(shape[:-1])
+                k_scale = math.ceil(shape[-1] / MXFP8_BLOCK_SCALING_SIZE)
+                # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
+                if get_device_compute_capability() == (12, 5):
+                    m_dim = round_up_to_nearest_multiple(m_dim, 4)
+                    k_scale = round_up_to_nearest_multiple(k_scale, 4)
                 scale_inv = torch.zeros(
-                    math.prod(shape[:-1]), 
-                    math.ceil(shape[-1] / MXFP8_BLOCK_SCALING_SIZE),
+                    m_dim,
+                    k_scale,
                     dtype=torch.uint8,
                     device=device,
                     pin_memory=pin_memory,
@@ -169,9 +175,15 @@ class MXFP8Quantizer(Quantizer):
             )
             # ROCm TE does not implement fuse padding zeros so use zero tensor here
             if IS_HIP_EXTENSION:
+                k_scale = math.ceil(math.prod(shape[:-1]) / MXFP8_BLOCK_SCALING_SIZE)
+                m_dim = shape[-1]
+                # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
+                if get_device_compute_capability() == (12, 5):
+                    k_scale = round_up_to_nearest_multiple(k_scale, 4)
+                    m_dim = round_up_to_nearest_multiple(m_dim, 4)
                 columnwise_scale_inv = torch.zeros(
-                    math.ceil(math.prod(shape[:-1]) / MXFP8_BLOCK_SCALING_SIZE),
-                    shape[-1],
+                    k_scale,
+                    m_dim,
                     dtype=torch.uint8,
                     device=device,
                     pin_memory=pin_memory,
@@ -513,11 +525,18 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
             scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
             split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
-            # Padding requirements: rowwise dim0 should be divisble by 128, columnwise dim0 should be divisble by 4
-            # NOTE: ROCm/HIP backend uses an unpadded scale-inv layout (see `MXFP8Quantizer.make_empty`),
-            # so applying the padding here would produce a per-shard scale-inv whose dim-0
-            # does not match the destination scale-inv allocated for the FSDP2 local shard.
-            padding_multiples = [128, 4] if not IS_HIP_EXTENSION else [1, 1]
+            if IS_HIP_EXTENSION:
+                if get_device_compute_capability() == (12, 5):
+                    # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
+                    padding_multiples = [4, 4]
+                else:
+                    # ROCm/HIP backend uses an unpadded scale-inv layout (see `MXFP8Quantizer.make_empty`),
+                    # so applying the padding here would produce a per-shard scale-inv whose dim-0
+                    # does not match the destination scale-inv allocated for the FSDP2 local shard.
+                    padding_multiples = [1, 1]
+            else:
+                # Padding requirements: rowwise dim0 should be divisible by 128, columnwise dim0 should be divisible by 4
+                padding_multiples = [128, 4]
             for scale_inv, scale_split_size, pad_multiple in zip(
                 scale_invs, split_sizes_for_scale, padding_multiples
             ):
