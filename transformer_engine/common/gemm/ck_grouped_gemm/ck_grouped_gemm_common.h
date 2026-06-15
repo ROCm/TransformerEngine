@@ -15,6 +15,7 @@
 
 #include <transformer_engine/transformer_engine.h>
 #include "../../common.h"
+#include "../../common/util/system.h"
 
 #include "ck_tile/core.hpp"
 #include "ck_tile/ops/epilogue.hpp"
