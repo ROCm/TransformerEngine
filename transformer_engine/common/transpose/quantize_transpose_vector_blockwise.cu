@@ -178,7 +178,7 @@ static_assert(kNumThreadsStore <= kThreadsPerWarp, "kNumThreadsStore must be <= 
 constexpr int kNumWarps = kThreadsPerBlock / kThreadsPerWarp;
 
 // gfx942 (MI300) has 64KB LDS; the full 128x128 fp32 staging tile overflows it. 
-#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx950__)
+#if defined(__HIP_PLATFORM_AMD__) && (!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx942__))
 constexpr int kChunkCol = 64;
 constexpr int kNumChunks = kTileDim / kChunkCol;
 static_assert(kTileDim % kChunkCol == 0, "kTileDim must be divisible by kChunkCol");
@@ -279,7 +279,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   SMemVec* smem = reinterpret_cast<SMemVec*>(&smem_base[0]);
 
   // Step 1: Load input to shared memory
-#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx950__)
+#if defined(__HIP_PLATFORM_AMD__) && (!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx942__))
   if constexpr (!use_chunked_lds<IType>())
 #endif
   {
@@ -327,7 +327,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   __syncthreads();
 
   // Step 2: Cast and store to output_c
-#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx950__)
+#if defined(__HIP_PLATFORM_AMD__) && (!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx942__))
   if (return_rowwise && use_chunked_lds<IType>()) {
     constexpr int r_stride = kThreadsPerBlock / kNumThreadsStore;
     constexpr int num_iterations = kTileDim / r_stride;
@@ -510,7 +510,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   }
 
   // Step 3 (return_columnwise_gemm_ready): Transpose, cast and store to output_t
-#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx950__)
+#if defined(__HIP_PLATFORM_AMD__) && (!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx942__))
   if (return_columnwise_gemm_ready && use_chunked_lds<IType>()) {
     const int r_s = (threadIdx.x % kNumThreadsStore) * kNVecOut;
     const int c_s = threadIdx.x / kNumThreadsStore;
@@ -678,7 +678,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   }
 
   // Step 4 (return_columnwise_compact): cast in 128x1 style and store to output, skip transpose
-#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx950__)
+#if defined(__HIP_PLATFORM_AMD__) && (!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx942__))
   if (return_columnwise_compact && use_chunked_lds<IType>()) {
     constexpr int kThreadTileRow = kTileDim / kThreadsPerWarp;
     constexpr int kThreadTileCol = kNVecOut;
@@ -967,7 +967,7 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               full_tile, kAligned,
 
-#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx950__)
+#if defined(__HIP_PLATFORM_AMD__) && (!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx942__))
               size_t smem_bytes = host_smem_bytes<InputType>();
 #else
               size_t smem_bytes = kSMemSize * sizeof(InputType);
