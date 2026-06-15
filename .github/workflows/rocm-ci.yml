@@ -182,24 +182,37 @@ jobs:
 
       - name: Run sGPU tests in parallel (pytorch, jax, examples, core)
         id: run-tests
+        # Below the job's timeout-minutes so an overrun kills only this step;
+        # the `if: always()` report + upload steps still run (artifacts survive).
+        timeout-minutes: 180
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
           rm -f FAIL_*
+          # One subdir per suite so PyTorch/JAX/Core get independent reports and
+          # never collide on identically-named XML (e.g. test_sanity_import.auto.xml
+          # exists in both the torch and jax suites and runs in parallel).
+          rm -rf test-results && mkdir -p test-results/torch test-results/jax test-results/core
 
           docker exec \
             -e TEST_SGPU=1 \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
+            -e JUNITXML_PREFIX=/workspace/test-results/ \
+            -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
             te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
           set -x -o pipefail
           ulimit -c 0 # Disable core dumps
 
-          HIP_VISIBLE_DEVICES=0 ci/pytorch.sh > /workspace/torch.log 2>&1 &
+          # Each suite appends its own subdir to the inherited base prefix so the
+          # base path is defined once in the docker-exec env above (inline VAR=val
+          # applies only to that backgrounded subprocess; the sourced _utils.sh
+          # reads it from the env).
+          HIP_VISIBLE_DEVICES=0 JUNITXML_PREFIX=${JUNITXML_PREFIX}torch/ ci/pytorch.sh > /workspace/torch.log 2>&1 &
           TORCH_PID=$!
 
-          HIP_VISIBLE_DEVICES=1 ci/jax.sh > /workspace/jax.log 2>&1 &
+          HIP_VISIBLE_DEVICES=1 JUNITXML_PREFIX=${JUNITXML_PREFIX}jax/ ci/jax.sh > /workspace/jax.log 2>&1 &
           JAX_PID=$!
 
           (
@@ -229,7 +242,7 @@ jobs:
           ) > /workspace/examples.log 2>&1 &
           EXAMPLES_PID=$!
 
-          HIP_VISIBLE_DEVICES=3 ci/core.sh > /workspace/core.log 2>&1 &
+          HIP_VISIBLE_DEVICES=3 JUNITXML_PREFIX=${JUNITXML_PREFIX}core/ ci/core.sh > /workspace/core.log 2>&1 &
           CORE_PID=$!
 
           wait $TORCH_PID;    torch_rc=$?
@@ -273,6 +286,20 @@ jobs:
           EOF
           )"
 
+      - name: Generate test report
+        if: always()
+        run: |
+          command -v python3 >/dev/null 2>&1 || { echo "python3 not available; skipping report"; exit 0; }
+          # One report per suite; each appends its own section to the job summary.
+          # An empty subdir (suite crashed before writing XML) yields an explicit
+          # "no results" warning attributable to that suite.
+          python3 ci/junit_report.py test-results/torch \
+            --title "sGPU PyTorch (${{ matrix.arch_label }})"
+          python3 ci/junit_report.py test-results/jax \
+            --title "sGPU JAX (${{ matrix.arch_label }})"
+          python3 ci/junit_report.py test-results/core \
+            --title "sGPU Core (${{ matrix.arch_label }})"
+
       - name: Check suite failure status
         if: always()
         run: |
@@ -302,6 +329,7 @@ jobs:
           name: logs-sgpu-${{ matrix.arch_label }}
           path: |
             *.log
+            test-results/**/*.xml
           if-no-files-found: ignore
           retention-days: 5
 
@@ -368,6 +396,9 @@ jobs:
 
       - name: Run mGPU tests
         id: mgpu-tests
+        # Below the job's timeout-minutes so an overrun kills only this step;
+        # the `if: always()` report + upload steps still run (artifacts survive).
+        timeout-minutes: 180
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -377,6 +408,8 @@ jobs:
             *)       echo "::error::Unknown framework: ${{ matrix.framework }}"; exit 1 ;;
           esac
 
+          rm -rf test-results && mkdir -p test-results
+
           docker exec \
             -e TEST_MGPU=1 \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
@@ -384,6 +417,8 @@ jobs:
             -e LOG_FILE=$LOG_FILE \
             -e SUITE_NAME=$SUITE_NAME \
             -e NVTE_FRAMEWORK=${{ matrix.framework }} \
+            -e JUNITXML_PREFIX=/workspace/test-results/ \
+            -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
             te-runner bash -c "$(cat <<'EOF'
           #!/usr/bin/bash
@@ -404,6 +439,13 @@ jobs:
           EOF
           )"
 
+      - name: Generate test report
+        if: always()
+        run: |
+          command -v python3 >/dev/null 2>&1 || { echo "python3 not available; skipping report"; exit 0; }
+          python3 ci/junit_report.py test-results \
+            --title "mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})"
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -411,6 +453,7 @@ jobs:
           name: logs-mgpu-${{ matrix.arch_label }}-${{ matrix.framework }}
           path: |
             *.log
+            test-results/*.xml
           if-no-files-found: ignore
           retention-days: 5
 
