@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <tuple>
 #include <utility>
@@ -80,6 +81,163 @@ py::object quantize(const at::Tensor &tensor, py::handle quantizer, const py::ob
   }
 
   return output_py;
+}
+
+#ifndef USE_ROCM
+namespace {
+
+// helper functions for NVFP4 grouped quantization (cuda graph safe with shapes stored in device without D2H copy)
+void group_quantize_nvfp4_impl(const GroupedTensorWrapper &grouped_input_tensor,
+                               GroupedTensorWrapper &grouped_output_tensor,
+                               NVFP4Quantizer *nvfp4_quantizer_cpp, cudaStream_t stream) {
+  size_t num_tensors = grouped_input_tensor.num_tensors();
+
+  // assert the 2D scaling case, since 2D scaling grouped quant kernel is not ready yet
+  NVTE_CHECK(!nvfp4_quantizer_cpp->with_2d_quantization,
+             "2D scaling grouped quant kernel is not ready yet");
+
+  auto quant_config_cpp = QuantizationConfigWrapper();
+
+  // stochastic rounding
+  bool need_stochastic_rounding = nvfp4_quantizer_cpp->stochastic_rounding;
+  auto opts = at::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+  at::Tensor rng_states_tensor;  // Declare tensor outside, do not allocate yet
+  TensorWrapper te_rng_state;
+
+  if (need_stochastic_rounding) {
+    // in fused kernel, one rng state will be used by the grouped kernel to generate random
+    // number for different tensors in the group, so we only need to allocate one rng state
+    const size_t rng_elts_per_thread = 1024 * num_tensors;
+    rng_states_tensor = torch::empty({2}, opts);
+    auto gen = at::get_generator_or_default<at::CUDAGeneratorImpl>(
+        std::nullopt, at::cuda::detail::getDefaultCUDAGenerator());
+    at::PhiloxCudaState philox_args = init_philox_state(gen, rng_elts_per_thread);
+    philox_unpack(philox_args, static_cast<int64_t *>(rng_states_tensor.data_ptr()));
+
+    te_rng_state = makeTransformerEngineTensor(rng_states_tensor);
+    quant_config_cpp.set_rng_state(te_rng_state.data());
+    quant_config_cpp.set_stochastic_rounding(true);
+  }
+
+  // fast math
+  const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
+  if (use_fast_math) {
+    quant_config_cpp.set_use_fast_math(true);
+  }
+
+  // so far, only the RHT path has grouped kernel support
+  // grouped kernels for non-RHT path will be added later
+
+  if (nvfp4_quantizer_cpp->with_rht) {
+    // post-RHT amax or not
+    if (nvfp4_quantizer_cpp->with_post_rht_amax) {
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_group_hadamard_transform_amax_graph_safe(
+            grouped_input_tensor.data(), grouped_output_tensor.data(), 0,
+            nvfp4_quantizer_cpp->rht_matrix_random_sign_mask_t, stream);
+      });
+    } else {
+      NVTE_ERROR("graph safe grouped quant kernel for non-RHT path is not ready yet");
+    }
+
+    // RHT cast fusion
+    auto tile_scheduler_workspace_torch =
+        at::empty({1}, at::device(at::kCUDA).dtype(torch::kInt32));
+    auto nvte_tile_scheduler_workspace =
+        makeTransformerEngineTensor(tile_scheduler_workspace_torch);
+
+    auto rht_matrix_nvte = makeTransformerEngineTensor(nvfp4_quantizer_cpp->rht_matrix);
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_group_hadamard_transform_cast_fusion_graph_safe(
+          grouped_input_tensor.data(), grouped_output_tensor.data(), rht_matrix_nvte.data(),
+          quant_config_cpp, nvte_tile_scheduler_workspace.data(), stream);
+    });
+
+  } else {
+    NVTE_ERROR("graph safe grouped quant kernel for non-RHT path is not ready yet");
+  }
+}
+
+}  // namespace
+#endif // USE_ROCM
+
+// NOTE: Only supports varying first dim.
+py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
+                          std::optional<at::Tensor> first_dims) {
+  using namespace transformer_engine::pytorch::detail;
+  init_extension();
+
+  NVTE_CHECK(tensor.dim() == 2, "Tensor must be 2D");
+
+  std::vector<size_t> logical_shape;
+  for (const auto &d : tensor.sizes()) {
+    logical_shape.push_back(d);
+  }
+  const auto logical_first_dim = logical_shape[0];
+  const auto logical_last_dim = logical_shape[1];
+
+  bool empty_input_buffer = logical_first_dim == 0 || logical_last_dim == 0;
+
+  auto quantizer_cpp = convert_quantizer(quantizer);
+
+  // Create input GroupedTensor.
+  auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
+  grouped_input_tensor.set_rowwise_data(
+      tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()), getTensorShape(tensor));
+
+  // Create output GroupedTensor.
+  auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
+      num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, logical_first_dim,
+      logical_last_dim);
+
+  // dispatch to scaling methods
+  enum class GroupedQuantizationMode {
+    MXFP8_GROUPED_QUANTIZE,
+    NVFP4_GROUPED_QUANTIZE,
+    INVALID_FOR_GROUPED_QUANTIZE
+  };
+  GroupedQuantizationMode grouped_quantization_mode =
+      GroupedQuantizationMode::INVALID_FOR_GROUPED_QUANTIZE;
+  if (detail::IsMXFP8Quantizers(quantizer.ptr())) {
+    grouped_quantization_mode = GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE;
+  } else if (detail::IsNVFP4Quantizers(quantizer.ptr())) {
+    grouped_quantization_mode = GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE;
+  }
+
+  if (empty_input_buffer) {
+    // early return for empty input buffer
+    // just return the output tensor as is
+    // no need to quantize
+    return py::reinterpret_borrow<py::object>(grouped_output_py);
+  }
+
+  switch (grouped_quantization_mode) {
+    case GroupedQuantizationMode::NVFP4_GROUPED_QUANTIZE: {
+#ifdef USE_ROCM
+      NVTE_ERROR("NVFP4 grouped quantization is not supported on ROCm platform.");
+#else
+      // NVFP4 grouped quantization
+      NVFP4Quantizer *nvfp4_quantizer_cpp = static_cast<NVFP4Quantizer *>(quantizer_cpp.get());
+      group_quantize_nvfp4_impl(grouped_input_tensor, grouped_output_tensor_cpp,
+                                nvfp4_quantizer_cpp, at::cuda::getCurrentCUDAStream());
+#endif  // USE_ROCM
+      break;
+    }
+    case GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE: {
+      NVTE_SCOPED_GIL_RELEASE({
+        nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                            at::cuda::getCurrentCUDAStream());
+      });
+      break;
+    }
+    case GroupedQuantizationMode::INVALID_FOR_GROUPED_QUANTIZE:
+    default:
+      NVTE_ERROR("group_quantize: only support NVFP4 or MXFP8 quantizer.");
+      break;
+  }
+
+  return py::reinterpret_borrow<py::object>(grouped_output_py);
 }
 
 py::object dequantize(const py::handle &input, transformer_engine::DType otype) {
@@ -498,7 +656,6 @@ std::tuple<std::vector<py::object>, std::vector<TensorWrapper>> bulk_allocate_mx
   return retval;
 }
 
-#ifndef USE_ROCM
 // allocate fp4 data, fp8 scalings, and amax values
 // layout: [fp4_data0, ..., fp4_dataN, fp8_scaling0, ..., fp8_scalingN, amax0, ..., amaxN]
 // amax buffer will be zeroed out by later amax kernels, so we can use empty to allocate
@@ -802,6 +959,7 @@ static StochasticRngStateResources setup_stochastic_rounding_rng_states_helper(
   return res;
 }
 
+#ifndef USE_ROCM
 // Implements split-quantize NVFP4 with Row/Column-wise Hadamard Transform (RHT)
 void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
                                                const std::vector<TensorWrapper> &input_list,
@@ -1020,8 +1178,16 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
     NVTE_CHECK(amax_ptr != nullptr, "Could not find amax pointer");
     output_list[i].set_amax(amax_ptr, DType::kFloat32, std::vector<size_t>{1});
   }
+#ifndef USE_ROCM
   nvte_group_amax(input.data(), reinterpret_cast<NVTETensor *>(nvte_tensor_output_list.data()),
                   split_sections.data(), num_tensors, stream);
+#else
+  // nvte_group_amax is not available on ROCm; compute amax individually
+  for (size_t i = 0; i < num_tensors; i++) {
+    if (input_list[i].numel() == 0) continue;
+    nvte_compute_amax(input_list[i].data(), output_list[i].data(), stream);
+  }
+#endif
   for (size_t i = 0; i < num_tensors; i++) {
     output_list[i].set_amax(orig_amax_ptr_list[i], DType::kFloat32, std::vector<size_t>{1});
   }
@@ -1035,6 +1201,7 @@ void split_quantize_nvfp4_impl_helper(const TensorWrapper &input,
     nvte_quantize_v2(input_list[i].data(), output_list[i].data(), quant_config_list[i], stream);
   }
 }
+#endif  // #ifndef USE_ROCM
 
 void split_quantize_nvfp4_impl(const TensorWrapper &input,
                                const std::vector<TensorWrapper> &input_list,
@@ -1081,11 +1248,14 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
   NVTE_CHECK(input_last_dim % 128 == 0,
              "NVFP4 multi-quantize requires inner dim to be multiple of 128.");
 
+#ifndef USE_ROCM
   // CUDA stream
   auto stream = at::cuda::getCurrentCUDAStream();
+#endif
 
   // Perform multi-tensor quantization
   NVTE_SCOPED_GIL_RELEASE({
+#ifndef USE_ROCM
     if (quantizer.with_rht) {  // Quantize row-wise data, RHT+quantize column-wise data
       // Check that config is supported
       NVTE_CHECK(input.dtype() == DType::kBFloat16, "RHT is only supported for bfloat16 input");
@@ -1097,9 +1267,16 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
       split_quantize_nvfp4_impl_helper(input, input_list, output_list, split_sections, quantizers,
                                        stream);
     }
+#else
+    // ROCm: group hadamard kernels are not available, fall back to per-tensor quantize
+    // which handles both RHT and non-RHT paths via NVFP4Quantizer::quantize_impl.
+    for (size_t i = 0; i < num_tensors; i++) {
+      if (input_list[i].numel() == 0) continue;
+      quantizers[i]->quantize(input_list[i], output_list[i]);
+    }
+#endif
   });
 }
-#endif  // #ifndef USE_ROCM
 
 }  // namespace
 
@@ -1169,14 +1346,12 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                              return detail::IsMXFP8Quantizers(quantizer.ptr());
                            })) {
       allocation_method = AllocationMethod::BULK_MXFP8;
-#ifndef USE_ROCM
     } else if (std::all_of(quantizer_list.begin(), quantizer_list.end(),
                            [](const py::handle &quantizer) -> bool {
                              return detail::IsNVFP4Quantizers(quantizer.ptr());
                            })) {
       allocation_method = AllocationMethod::BULK_NVFP4;
       quantization_method = QuantizationMethod::FUSED_NVFP4;
-#endif
     }
   }
 
@@ -1204,23 +1379,31 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
           bulk_allocate_mxfp8_tensors(split_shapes, quantizer_list, mxfp8_quantizers);
       break;
     }
-#ifndef USE_ROCM
     case AllocationMethod::BULK_NVFP4: {
       // Bulk allocation for NVFP4 tensors
       std::vector<NVFP4Quantizer *> nvfp4_quantizers;
       for (auto &quantizer : quantizer_cpp_list) {
         nvfp4_quantizers.push_back(static_cast<NVFP4Quantizer *>(quantizer.get()));
       }
-      bool contiguous_data_and_scale;
+      bool contiguous_data_and_scale = false;
       std::tie(output_py_list, output_cpp_list, contiguous_data_and_scale) =
           bulk_allocate_nvfp4_tensors(split_shapes, quantizer_list, nvfp4_quantizers);
+      if (!input_shape.empty() && input_shape.back() % 128 != 0) {
+        static std::once_flag once_unfused_nvfp4_fallback_warning;
+        std::call_once(once_unfused_nvfp4_fallback_warning, []() {
+          NVTE_WARN(
+              "Unfused NVFP4 quantization fallback is triggered because the input tensor inner "
+              "dimension is not a multiple of 128, disabling NVFP4 grouped kernel fusion. "
+              "NVFP4 might bring performance regressions for this input tensor shape.");
+        });
+        quantization_method = QuantizationMethod::UNFUSED;
+      }
       if (!contiguous_data_and_scale) {
         // Avoid fused quantize kernel if data is not contiguous
         quantization_method = QuantizationMethod::UNFUSED;
       }
       break;
     }
-#endif
     default: {
       // Allocate output tensors individually
       for (size_t i = 0; i < num_splits; ++i) {
@@ -1234,7 +1417,6 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
 
   // Quantize into output tensors
   switch (quantization_method) {
-#ifndef USE_ROCM
     case QuantizationMethod::FUSED_NVFP4: {
       // Fused NVFP4 quantize kernel
       auto input_nvte = makeTransformerEngineTensor(input_dptr, input_shape, input_dtype);
@@ -1246,7 +1428,6 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                 nvfp4_quantizers);
       break;
     }
-#endif
     default:
       // General multi-tensor quantization
       multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);

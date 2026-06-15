@@ -91,7 +91,34 @@ _flash_attn_fwd = None
 _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
+
+if IS_HIP_EXTENSION and os.getenv("NVTE_FLASH_ATTN_AITER", "0") == "1":
+    try:
+        import aiter
+        import triton
+        from aiter.ops.triton.mha import flash_attn_func, flash_attn_varlen_func
+        from aiter.ops.triton.mha import _flash_attn_forward as _flash_attn_fwd
+        from aiter.ops.triton.mha import flash_attn_onekernel_backward as _flash_attn_bwd
+        from aiter.ops.triton.mha import (
+            _flash_attn_forward as _flash_attn_varlen_fwd,
+        )
+        from aiter.ops.triton.mha import (
+            flash_attn_onekernel_backward as _flash_attn_varlen_bwd,
+        )
+    except ImportError as e:
+        attn_log.fa_logger.warning(
+            "NVTE_FLASH_ATTN_AITER is set but AITER Triton is not available."
+            " Falling back to standalone FlashAttn if available"
+            )
+    else:
+        fa_utils.use_aiter_triton = True
+        # Setup Flash attention utils
+        fa_utils.version = PkgVersion("2.7.1")  #masqurade as FA 2.7.1
+        fa_utils.set_flash_attention_version()
+        attn_log.fa_logger.info("Using AITER Triton for FlashAttn.")
 try:
+    if fa_utils.use_aiter_triton:
+        raise PackageNotFoundError  # skip version check for aiter triton
     fa_utils.version = PkgVersion(get_pkg_version("flash-attn"))
 except PackageNotFoundError:
     pass  # only print warning if use_flash_attention_2 = True in get_attention_backend
@@ -170,6 +197,11 @@ class FP8EmulationFunc(torch.autograd.Function):
     @staticmethod
     def forward(ctx, tensor1, tensor2, tensor3, quantizer, quantizer_name, qkv_layout):
         # pylint: disable=missing-function-docstring
+        if is_in_onnx_export_mode():
+            return FP8EmulationFunc.onnx_forward(
+                tensor1, tensor2, tensor3, quantizer, quantizer_name, qkv_layout
+            )
+
         if quantizer_name == "QKV_quantizer":
             query_layer, key_layer, value_layer = [
                 x.contiguous() for x in [tensor1, tensor2, tensor3]
@@ -207,6 +239,47 @@ class FP8EmulationFunc(torch.autograd.Function):
         else:
             tensors = grad1, grad2, grad3
         return tensors[0], tensors[1], tensors[2], None, None, None
+
+    @staticmethod
+    def onnx_forward(tensor1, tensor2, tensor3, quantizer, quantizer_name, qkv_layout=None):
+        """
+        ONNX-compatible forward for FP8 emulation using operations with defined ONNX translations.
+        """
+        # pylint: disable=unused-argument
+        is_qkv_quantizer = quantizer_name == "QKV_quantizer"
+        assert isinstance(
+            quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)
+        ), "ONNX FP8 emulation path supports only Float8 quantizers."
+
+        if is_qkv_quantizer:
+            # Flatten + concatenate + quantize + split. Equivalent to combine_and_quantize Case 3.
+            orig_dtype = tensor1.dtype
+            shapes = [tensor1.shape, tensor2.shape, tensor3.shape]
+            numels = [tensor1.numel(), tensor2.numel(), tensor3.numel()]
+
+            # Flatten and concatenate
+            combined = torch.cat(
+                [tensor1.reshape(-1), tensor2.reshape(-1), tensor3.reshape(-1)], dim=0
+            )
+
+            # Quantize + dequantize combined tensor using quantizer's ONNX methods
+            combined_fp8 = quantizer.onnx_quantize(combined)
+            out = quantizer.onnx_dequantize(combined_fp8).to(orig_dtype)
+
+            # Split back
+            out1 = out[: numels[0]].reshape(shapes[0])
+            out2 = out[numels[0] : numels[0] + numels[1]].reshape(shapes[1])
+            out3 = out[numels[0] + numels[1] :].reshape(shapes[2])
+
+            return out1, out2, out3
+        if quantizer_name in ["S_quantizer", "O_quantizer"]:
+            # Emulate FP8 on single tensor using quantizer's ONNX methods
+            orig_dtype = tensor1.dtype
+            t_fp8 = quantizer.onnx_quantize(tensor1)
+            out = quantizer.onnx_dequantize(t_fp8).to(orig_dtype)
+            return out, tensor2, tensor3
+        # Pass-through
+        return tensor1, tensor2, tensor3
 
 
 class UnfusedDotProductAttention(torch.nn.Module):
@@ -255,6 +328,10 @@ class UnfusedDotProductAttention(torch.nn.Module):
             bool(int(os.getenv("NVTE_APPLY_QK_LAYER_SCALING", "0"))) and layer_number is not None
         )
 
+    def fast_setattr(self, name: str, value: Any) -> None:
+        """Fast attribute set for non-parameter fields."""
+        self.__dict__[name] = value
+
     def forward(
         self,
         _alibi_cache: Dict[str, Any],
@@ -269,6 +346,7 @@ class UnfusedDotProductAttention(torch.nn.Module):
         attn_mask_type: str = "causal",
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
         alibi_slopes: Optional[torch.Tensor] = None,
@@ -354,6 +432,11 @@ class UnfusedDotProductAttention(torch.nn.Module):
                 attention_mask=attention_mask,
                 window_size=window_size,
                 attention_type=self.attention_type,
+                bottom_right_alignment=(
+                    attn_mask_type not in ["causal", "padding_causal"]
+                    if bottom_right_diagonal is None
+                    else bottom_right_diagonal
+                ),
             )
         )
 
@@ -457,7 +540,11 @@ class UnfusedDotProductAttention(torch.nn.Module):
                     actual_seqlens_q=actual_seqlens_q if "padding" in attn_mask_type else None,
                     actual_seqlens_kv=actual_seqlens_kv if "padding" in attn_mask_type else None,
                     alibi_slopes=alibi_slopes,
-                    bottom_right_alignment=attn_mask_type not in ["causal", "padding_causal"],
+                    bottom_right_alignment=(
+                        attn_mask_type not in ["causal", "padding_causal"]
+                        if bottom_right_diagonal is None
+                        else bottom_right_diagonal
+                    ),
                 )
             matmul_result = torch.baddbmm(
                 matmul_result,
@@ -1118,6 +1205,7 @@ class FusedAttnFunc(torch.autograd.Function):
         attn_mask_type,
         softmax_type,
         window_size,
+        bottom_right_diagonal,
         rng_gen,
         fused_attention_backend,
         use_FAv2_bwd,
@@ -1221,6 +1309,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 attn_mask_type,
                 softmax_type,
                 window_size,
+                bottom_right_diagonal,
                 rng_gen,
                 softmax_offset,
                 cuda_graph=is_graph_capturing(),
@@ -1298,6 +1387,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 attn_mask_type,
                 softmax_type,
                 window_size,
+                bottom_right_diagonal,
                 rng_gen,
                 softmax_offset,
                 return_max_logit,
@@ -1385,6 +1475,7 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.attn_mask_type = attn_mask_type
         ctx.softmax_type = softmax_type
         ctx.window_size = window_size
+        ctx.bottom_right_diagonal = bottom_right_diagonal
         ctx.fused_attention_backend = (
             fused_attention_backend if (IS_HIP_EXTENSION or ctx.fp8) else FusedAttnBackend["F16_arbitrary_seqlen"]
         )
@@ -1535,6 +1626,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.attn_mask_type,
                         ctx.softmax_type,
                         ctx.window_size,
+                        ctx.bottom_right_diagonal,
                         ctx.deterministic,
                         is_graph_capturing(),
                     )
@@ -1600,6 +1692,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         ctx.attn_mask_type,
                         ctx.softmax_type,
                         ctx.window_size,
+                        ctx.bottom_right_diagonal,
                         ctx.deterministic,
                         is_graph_capturing(),
                     )
@@ -1624,6 +1717,7 @@ class FusedAttnFunc(torch.autograd.Function):
             dk,
             dv,
             d_bias,
+            None,
             None,
             None,
             None,
@@ -1738,6 +1832,7 @@ class FusedAttention(torch.nn.Module):
         attn_mask_type: str = "causal",
         attention_mask: Optional[Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]] = None,
         window_size: Optional[Tuple[int, int]] = None,
+        bottom_right_diagonal: Optional[bool] = None,
         fused_attention_backend: tex.NVTE_Fused_Attn_Backend = tex.NVTE_Fused_Attn_Backend.NVTE_No_Backend,
         core_attention_bias_type: str = "no_bias",
         core_attention_bias: Optional[torch.Tensor] = None,
@@ -1945,6 +2040,7 @@ class FusedAttention(torch.nn.Module):
                     attn_mask_type,
                     self.softmax_type,
                     window_size,
+                    bottom_right_diagonal,
                     None,  # rng_gen
                     fused_attention_backend,
                     use_FAv2_bwd,

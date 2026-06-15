@@ -28,9 +28,13 @@ from transformer_engine.jax.attention import (
     canonicalize_attn_mask_type,
     make_swa_mask,
 )
-from transformer_engine.jax.quantize.helper import DType as TEDType
-from transformer_engine.jax.util import get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 from transformer_engine.jax.cpp_extensions.misc import is_hip_extension
+from transformer_engine.jax.quantize.helper import DType as TEDType
+from transformer_engine.jax.version_utils import (
+    TRITON_EXTENSION_MIN_JAX_VERSION,
+    is_triton_extension_supported,
+)
+from transformer_engine.jax.util import get_jnp_float8_e4m3_type, get_jnp_float8_e5m2_type
 
 PRNGKey = Any
 Shape = Tuple[int, ...]
@@ -43,6 +47,17 @@ Initializer = Callable[[PRNGKey, Shape, DType], Array]
 
 # Enables verbose printing of tensor numerics for debug.
 NVTE_DEBUG_NUMERICS = bool(int(os.getenv("NVTE_DEBUG_NUMERICS", 0)))
+
+
+def require_triton_or_skip_test_file():
+    """Skip the current test file if JAX is too old for Triton kernel support (calls pytest.skip)."""
+    if not is_triton_extension_supported():
+        pytest.skip(
+            f"JAX >= {TRITON_EXTENSION_MIN_JAX_VERSION} required for Triton kernel support. "
+            "Triton kernel dispatch segfaults with older jaxlib. "
+            "Upgrade with: pip install --upgrade jax jaxlib",
+            allow_module_level=True,
+        )
 
 
 def is_devices_enough(required):

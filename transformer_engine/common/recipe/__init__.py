@@ -111,33 +111,45 @@ class Recipe:
     Base recipe class.
     """
 
-    def nvfp4(self):
+    @classmethod
+    def nvfp4(cls):
         """Whether the given recipe is NVFP4 1D block scaling."""
-        return isinstance(self, NVFP4BlockScaling)
+        return issubclass(cls, NVFP4BlockScaling)
 
-    def mxfp8(self):
+    @classmethod
+    def mxfp8(cls):
         """Whether the given recipe is MXFP8 block scaling."""
-        return isinstance(self, MXFP8BlockScaling)
+        return issubclass(cls, MXFP8BlockScaling)
 
-    def delayed(self):
+    @classmethod
+    def mxfp4(cls):
+        """Whether the given recipe is MXFP4 block scaling."""
+        return issubclass(cls, MXFP4BlockScaling)
+
+    @classmethod
+    def delayed(cls):
         """Whether the given recipe is delayed scaling."""
-        return isinstance(self, DelayedScaling)
+        return issubclass(cls, DelayedScaling)
 
-    def float8_current_scaling(self):
+    @classmethod
+    def float8_current_scaling(cls):
         """Whether the given recipe is (per-tensor) current scaling."""
-        return isinstance(self, Float8CurrentScaling)
+        return issubclass(cls, Float8CurrentScaling)
 
-    def float8_per_tensor_scaling(self):
+    @classmethod
+    def float8_per_tensor_scaling(cls):
         """Whether the given recipe is per-tensor scaling."""
-        return isinstance(self, (DelayedScaling, Float8CurrentScaling))
+        return issubclass(cls, (DelayedScaling, Float8CurrentScaling))
 
-    def float8_block_scaling(self):
+    @classmethod
+    def float8_block_scaling(cls):
         """Whether the given recipe is float8 blockwise scaling."""
-        return isinstance(self, Float8BlockScaling)
+        return issubclass(cls, Float8BlockScaling)
 
-    def custom(self):
+    @classmethod
+    def custom(cls):
         """Whether the given recipe is custom."""
-        return isinstance(self, CustomRecipe)
+        return issubclass(cls, CustomRecipe)
 
 
 @dataclass()
@@ -570,13 +582,12 @@ class MXFP4BlockScaling(Recipe):
 
     margin: int = 0
     fp4_format: Format = Format.E2M1
+    # Must remain set: Recipe paths expect a valid `fp8_format` even
+    # though the MXFP4 code path is FP4-only. Changing it can break compatibility.
+    fp8_format: Format = Format.E4M3
     fp8_dpa: bool = False
     fp8_mha: bool = False
-
-    @property
-    def fp8_format(self) -> Format:
-        """Alias for fp4_format for compatibility with code that expects recipe.fp8_format."""
-        return self.fp4_format
+    use_hadamard: bool = os.getenv("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
 
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for MXFP4 scaling."

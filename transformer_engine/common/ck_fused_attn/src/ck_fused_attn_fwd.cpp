@@ -9,7 +9,7 @@
 #include <stdexcept>
 #include <type_traits>
 #include "ck_fused_attn/ck_fused_attn.hpp"
-#include "mha_fwd.h"
+#include "qola_mha_fwd.h"
 #include "ck_fused_attn_utils.hpp"
 
 namespace ck_fused_attn{
@@ -99,57 +99,10 @@ void dump_fwd_timings(const char* dump_path, float average_runtime){
   file << average_runtime << "\n";
 }
 
-hipError_t _ck_attn_fwd_impl(
-  DType dtype,
-  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
-  uint64_t max_tokens_q,
-  const void* q_ptr,
-  uint64_t stride_b_q, uint64_t stride_h_q, uint64_t stride_s_q,
-  const void* k_ptr,
-  uint64_t stride_b_k, uint64_t stride_h_k, uint64_t stride_s_k,
-  const void* v_ptr,
-  uint64_t stride_b_v, uint64_t stride_h_v, uint64_t stride_s_v,
-  const void* bias_ptr,
-  const void* alibi_slope_ptr,
-  const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
-  const void* cu_seqlen_q_padded_ptr, const void* cu_seqlen_kv_padded_ptr,
-  bool is_training,
-  float scaling_factor,
-  float dropout_probability,
-  void* philox_seed_ptr, void* philox_offset_ptr,
-  BiasType attn_bias_type,
-  MaskType attn_mask_type,
-  int64_t window_size_left, int64_t window_size_right,
-  void* o_ptr,
-  uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
-  void* lse_ptr,
-  bool uses_fwd_v3,
-  int how_v3_bf16_cvt,
-  bool is_group_mode,
-  const char* func_name,
-  hipStream_t stream){
+hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
 
-  bool has_dropout = (is_training && dropout_probability > 0.f);
-  bool has_lse = (lse_ptr != nullptr);
+  bool has_dropout = (args.is_training && args.dropout_probability > 0.f);
 
-  /* CK input parameters */
-  ck_tile::index_t batch = b;
-  ck_tile::index_t nhead = h;
-  ck_tile::index_t hdim_q = d_qk;
-  ck_tile::index_t nhead_k = hg;
-  ck_tile::index_t hdim_v = d_v;
-  ck_tile::index_t max_seqlen_q = s_q;
-  ck_tile::index_t max_seqlen_k = s_kv;
-
-  float scale_s = scaling_factor;
-  float logits_soft_cap = 0.f;
-  float p_drop = dropout_probability;
-
-  ck_tile::index_t left, right;
-  left = window_size_left;
-  right = window_size_right;
-  mask_enum mask_type = static_cast<mask_enum>(attn_mask_type);
-  
   bool ck_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
@@ -161,80 +114,80 @@ hipError_t _ck_attn_fwd_impl(
 
   bias_enum bias_type = bias_enum::no_bias;
   BiasShape bias_shape = BiasShape::k11SS;
+  if (!args.is_group_mode()) {
+    std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(&args);
+  }
 
   aiter::mha_fwd_args fmha_args{};
-  fmha_args.q_ptr = q_ptr;
-  fmha_args.k_ptr = k_ptr;
-  fmha_args.v_ptr = v_ptr;
+  fmha_args.q_ptr = args.q_ptr;
+  fmha_args.k_ptr = args.k_ptr;
+  fmha_args.v_ptr = args.v_ptr;
 
-  fmha_args.batch    = batch;
-  fmha_args.seqlen_q = max_seqlen_q; // unused in group mode
-  fmha_args.hdim_q   = hdim_q;
-  fmha_args.hdim_v   = hdim_v;
-  fmha_args.nhead_q  = nhead;
-  fmha_args.nhead_k  = nhead_k;
+  fmha_args.batch    = args.b;
+  fmha_args.seqlen_q = args.s_q; // unused in group mode
+  fmha_args.hdim_q   = args.d_qk;
+  fmha_args.hdim_v   = args.d_v;
+  fmha_args.nhead_q  = args.h;
+  fmha_args.nhead_k  = args.hg;
 
-  fmha_args.stride_q       = stride_s_q;
-  fmha_args.stride_k       = stride_s_k;
-  fmha_args.stride_v       = stride_s_v;
-  fmha_args.nhead_stride_q = stride_h_q;
-  fmha_args.nhead_stride_k = stride_h_k;
-  fmha_args.nhead_stride_v = stride_h_v;
-  fmha_args.batch_stride_q = stride_b_q;
-  fmha_args.batch_stride_k = stride_b_k;
-  fmha_args.batch_stride_v = stride_b_v;
+  fmha_args.stride_q       = args.stride_s_q;
+  fmha_args.stride_k       = args.stride_s_k;
+  fmha_args.stride_v       = args.stride_s_v;
+  fmha_args.nhead_stride_q = args.stride_h_q;
+  fmha_args.nhead_stride_k = args.stride_h_k;
+  fmha_args.nhead_stride_v = args.stride_h_v;
+  fmha_args.batch_stride_q = args.stride_b_q;
+  fmha_args.batch_stride_k = args.stride_b_k;
+  fmha_args.batch_stride_v = args.stride_b_v;
 
-  if (is_group_mode) {
-    fmha_args.seqstart_q_ptr = cu_seqlen_q_padded_ptr==nullptr? cu_seqlen_q_ptr: cu_seqlen_q_padded_ptr;
-    fmha_args.seqstart_k_ptr = cu_seqlen_kv_padded_ptr==nullptr? cu_seqlen_kv_ptr: cu_seqlen_kv_padded_ptr;
-    fmha_args.seqlen_q_ptr = nullptr;
-    fmha_args.seqlen_k_ptr = nullptr;
-    fmha_args.cu_seqlen_q_ptr = cu_seqlen_q_ptr;
-    fmha_args.cu_seqlen_k_ptr = cu_seqlen_kv_ptr;
+  if (args.is_group_mode()) {
+    fmha_args.seqstart_q_ptr = args.cu_seqlen_q_padded_ptr==nullptr? args.cu_seqlen_q_ptr : args.cu_seqlen_q_padded_ptr;
+    fmha_args.seqstart_k_ptr = args.cu_seqlen_kv_padded_ptr==nullptr? args.cu_seqlen_kv_ptr : args.cu_seqlen_kv_padded_ptr;
+    fmha_args.cu_seqlen_q_ptr = args.cu_seqlen_q_ptr;
+    fmha_args.cu_seqlen_k_ptr = args.cu_seqlen_kv_ptr;
   } else {
     fmha_args.seqstart_q_ptr = nullptr;
     fmha_args.seqstart_k_ptr = nullptr;
-    fmha_args.seqlen_q_ptr = nullptr;
-    fmha_args.seqlen_k_ptr = nullptr;
     fmha_args.cu_seqlen_q_ptr = nullptr;
     fmha_args.cu_seqlen_k_ptr = nullptr;
-    std::tie(bias_type, bias_shape) = get_ck_bias_type_shape(attn_bias_type, b, h, bias_b, bias_h);
   }
+  fmha_args.seqlen_q_ptr = nullptr;
+  fmha_args.seqlen_k_ptr = nullptr;
 
-  fmha_args.bias_ptr = bias_type==bias_enum::alibi? alibi_slope_ptr :bias_ptr;
-  fmha_args.lse_ptr  = lse_ptr;
-  fmha_args.o_ptr    = o_ptr;
+  fmha_args.bias_ptr = bias_type==bias_enum::alibi? args.alibi_slope_ptr : args.bias_ptr;
+  fmha_args.lse_ptr  = args.lse_ptr;
+  fmha_args.o_ptr    = args.o_ptr;
 
   fmha_args.block_scale_seqstart_q_ptr = nullptr;
   fmha_args.block_scale_seqstart_k_ptr = nullptr;
   fmha_args.sink_ptr = nullptr;
-  fmha_args.seqlen_k     = max_seqlen_k; // unused in group mode (or kvcache enabled)
-  fmha_args.max_seqlen_q = max_seqlen_q;
+  fmha_args.seqlen_k     = args.s_kv; // unused in group mode (or kvcache enabled)
+  fmha_args.max_seqlen_q = args.s_q;
 
-  fmha_args.scale_s = scale_s;
+  fmha_args.scale_s = args.scaling_factor;
 
-  fmha_args.logits_soft_cap = logits_soft_cap;
+  fmha_args.logits_soft_cap = 0.f;
 
   // bias is of shape [b, h , s_q, s_kv]
-  fmha_args.stride_bias = is_group_mode? 0 : (bias_type==bias_enum::alibi? 0: max_seqlen_k);
-  fmha_args.stride_o          = stride_s_o;
-  fmha_args.nhead_stride_bias = get_nhead_stride_bias(bias_shape, max_seqlen_q, max_seqlen_k, is_group_mode);
-  fmha_args.batch_stride_bias = get_batch_stride_bias(bias_h, bias_shape, max_seqlen_q, max_seqlen_k, is_group_mode, true);
+  fmha_args.stride_bias = args.is_group_mode()? 0 : (bias_type==bias_enum::alibi? 0: args.s_kv);
+  fmha_args.stride_o          = args.stride_s_o;
+  fmha_args.nhead_stride_bias = get_nhead_stride_bias(bias_shape, args.s_q, args.s_kv, args.is_group_mode());
+  fmha_args.batch_stride_bias = get_batch_stride_bias(args.bias_h, bias_shape, args.s_q, args.s_kv, args.is_group_mode(), true);
   // softmax_lse is of shape [b, h, s_q]
-  fmha_args.nhead_stride_lse  = is_group_mode? max_tokens_q : max_seqlen_q;
-  fmha_args.batch_stride_lse  = is_group_mode? 0 : nhead * max_seqlen_q;
-  fmha_args.nhead_stride_o    = stride_h_o;
-  fmha_args.batch_stride_o    = stride_b_o;
+  fmha_args.nhead_stride_lse  = args.is_group_mode()? args.max_tokens_q : args.s_q;
+  fmha_args.batch_stride_lse  = args.is_group_mode()? 0 : args.h * args.s_q;
+  fmha_args.nhead_stride_o    = args.stride_h_o;
+  fmha_args.batch_stride_o    = args.stride_b_o;
 
-  fmha_args.window_size_left  = left;
-  fmha_args.window_size_right = right;
-  fmha_args.mask_type         = static_cast<ck_tile::index_t>(mask_type);
+  fmha_args.window_size_left  = args.window_size_left;
+  fmha_args.window_size_right = args.window_size_right;
+  fmha_args.mask_type         = static_cast<ck_tile::index_t>(static_cast<mask_enum>(args.attn_mask_type));
 
   fmha_args.rand_val_ptr = nullptr;
 
-  fmha_args.stride_randval       = max_seqlen_k;
+  fmha_args.stride_randval       = args.s_kv;
   // Unused
-  fmha_args.nhead_stride_randval = 0; 
+  fmha_args.nhead_stride_randval = 0;
   fmha_args.batch_stride_randval = 0;
   fmha_args.nhead_stride_q_descale = 0;
   fmha_args.nhead_stride_k_descale = 0;
@@ -243,16 +196,16 @@ hipError_t _ck_attn_fwd_impl(
   fmha_args.batch_stride_k_descale = 0;
   fmha_args.batch_stride_v_descale = 0;
 
-  fmha_args.p_drop    = p_drop;
+  fmha_args.p_drop    = args.dropout_probability;
   fmha_args.s_randval = 0;
-  fmha_args.drop_seed_offset = std::pair<const void*, const void*>{philox_seed_ptr, philox_offset_ptr};
-  fmha_args.use_asm_v3      = uses_fwd_v3;
-  fmha_args.how_v3_bf16_cvt = how_v3_bf16_cvt;
+  fmha_args.drop_seed_offset = std::pair<const void*, const void*>{args.philox_seed_ptr, args.philox_offset_ptr};
+  fmha_args.use_asm_v3      = args.uses_fwd_v3;
+  fmha_args.how_v3_bf16_cvt = args.how_v3_bf16_cvt;
   fmha_args.v3_api_check    = false;
-  fmha_args.data_type       = get_data_type_str(dtype);
-  fmha_args.is_group_mode   = is_group_mode;
+  fmha_args.data_type       = get_data_type_str(args.dtype);
+  fmha_args.is_group_mode   = args.is_group_mode();
   fmha_args.bias_type       = static_cast<int>(bias_type);
-  fmha_args.has_lse         = lse_ptr!=nullptr;
+  fmha_args.has_lse         = args.lse_ptr!=nullptr;
   fmha_args.qscale_type     = static_cast<int>(quant_scale_enum::no_scale);
   fmha_args.has_sink        = false;
   fmha_args.q_descale_ptr    = nullptr;
@@ -264,19 +217,19 @@ hipError_t _ck_attn_fwd_impl(
   fmha_args.block_scale_size_kv = 0;
 
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")){
-    if(is_group_mode && std::string(env_p) == "1"){
+    if(args.is_group_mode() && std::string(env_p) == "1"){
       if(ck_log_config){
         std::cout << "attn_fwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
       }
-      fmha_args.max_seqlen_q = get_runtime_max_seqlen(b, cu_seqlen_q_ptr, cu_seqlen_q_padded_ptr, lse_ptr, stream);
+      fmha_args.max_seqlen_q = get_runtime_max_seqlen(args.b, args.cu_seqlen_q_ptr, args.cu_seqlen_q_padded_ptr, args.lse_ptr, stream);
     }
   }
 
   // print ck traits and fmha_args when needed
   if(ck_log_config){
-     log_fwd_config(func_name, has_dropout, fmha_args);
+     log_fwd_config(__FUNCTION__, has_dropout, fmha_args);
   }
-  float average_runtime = aiter::mha_fwd(fmha_args, stream_config);
+  float average_runtime = QOLA_NS(mha_fwd)(fmha_args, stream_config);
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn fwd pass.");
@@ -285,114 +238,6 @@ hipError_t _ck_attn_fwd_impl(
     dump_fwd_timings(dump_path, average_runtime);
   }
   return hipSuccess;
-}
-
-hipError_t ck_attn_fwd(
-  DType dtype,
-  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v, uint64_t bias_b, uint64_t bias_h,
-  const void* q_ptr,
-  uint64_t stride_b_q, uint64_t stride_h_q, uint64_t stride_s_q,
-  const void* k_ptr,
-  uint64_t stride_b_k, uint64_t stride_h_k, uint64_t stride_s_k,
-  const void* v_ptr,
-  uint64_t stride_b_v, uint64_t stride_h_v, uint64_t stride_s_v,
-  const void* bias_ptr,
-  const void* alibi_slope_ptr,
-  bool is_training,
-  float scaling_factor,
-  float dropout_probability,
-  void* philox_seed_ptr, void* philox_offset_ptr,
-  BiasType attn_bias_type,
-  MaskType attn_mask_type,
-  int64_t window_size_left, int64_t window_size_right,
-  void* o_ptr,
-  uint64_t stride_b_o, uint64_t stride_h_o, uint64_t stride_s_o,
-  void* lse_ptr,
-  bool uses_fwd_v3,
-  int how_v3_bf16_cvt,
-  hipStream_t stream){
-
-  return _ck_attn_fwd_impl(
-    dtype,
-    b, h, hg, s_q, s_kv, d_qk, d_v, bias_b, bias_h,
-    0,
-    q_ptr, stride_b_q, stride_h_q, stride_s_q,
-    k_ptr, stride_b_k, stride_h_k, stride_s_k,
-    v_ptr, stride_b_v, stride_h_v, stride_s_v,
-    bias_ptr,
-    alibi_slope_ptr,
-    nullptr, nullptr, // cu_seqlen_q_ptr, cu_seqlen_kv_ptr,
-    nullptr, nullptr, // cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr
-    is_training,
-    scaling_factor,
-    dropout_probability,
-    philox_seed_ptr, philox_offset_ptr,
-    attn_bias_type,
-    attn_mask_type,
-    window_size_left, window_size_right,
-    o_ptr,
-    stride_b_o, stride_h_o, stride_s_o,
-    lse_ptr,
-    uses_fwd_v3,
-    how_v3_bf16_cvt,
-    false,
-    __FUNCTION__, // func_name
-    stream
-  );
-}
-
-hipError_t ck_attn_varlen_fwd(
-  DType dtype,
-  uint64_t b, uint64_t h, uint64_t hg, uint64_t s_q, uint64_t s_kv, uint64_t d_qk, uint64_t d_v,
-  uint64_t max_tokens_q,
-  const void* q_ptr,
-  uint64_t stride_h_q, uint64_t stride_s_q,
-  const void* k_ptr,
-  uint64_t stride_h_k, uint64_t stride_s_k,
-  const void* v_ptr,
-  uint64_t stride_h_v, uint64_t stride_s_v,
-  const void* cu_seqlen_q_ptr, const void* cu_seqlen_kv_ptr,
-  const void* cu_seqlen_q_padded_ptr, const void* cu_seqlen_kv_padded_ptr,
-  bool is_training,
-  float scaling_factor,
-  float dropout_probability,
-  void* philox_seed_ptr, void* philox_offset_ptr,
-  MaskType attn_mask_type,
-  int64_t window_size_left, int64_t window_size_right,
-  void* o_ptr,
-  uint64_t stride_h_o, uint64_t stride_s_o,
-  void* lse_thd_ptr,
-  bool uses_fwd_v3,
-  int how_v3_bf16_cvt,
-  hipStream_t stream){
-
-  return _ck_attn_fwd_impl(
-    dtype,
-    b, h, hg, s_q, s_kv, d_qk, d_v, 0, 0,
-    max_tokens_q,
-    q_ptr, 0, stride_h_q, stride_s_q,
-    k_ptr, 0, stride_h_k, stride_s_k,
-    v_ptr, 0, stride_h_v, stride_s_v,
-    nullptr, // bias_ptr,
-    nullptr, // alibi_slope_ptr
-    cu_seqlen_q_ptr, cu_seqlen_kv_ptr,
-    cu_seqlen_q_padded_ptr, cu_seqlen_kv_padded_ptr,
-    is_training,
-    scaling_factor,
-    dropout_probability,
-    philox_seed_ptr, philox_offset_ptr,
-    BiasType::no_bias,
-    attn_mask_type,
-    window_size_left, window_size_right,
-    o_ptr,
-    0, stride_h_o, stride_s_o,
-    lse_thd_ptr,
-    uses_fwd_v3,
-    how_v3_bf16_cvt,
-    true,
-    __FUNCTION__, // func_name
-    stream
-  );
 }
 
 }//namespace ck_fused_attn

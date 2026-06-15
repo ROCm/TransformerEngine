@@ -19,7 +19,7 @@ from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
 from ..constants import MXFP8_BLOCK_SCALING_SIZE
-from ..utils import devices_match, round_up_to_nearest_multiple
+from ..utils import devices_match, get_device_compute_capability, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
@@ -144,9 +144,15 @@ class MXFP8Quantizer(Quantizer):
             data = torch.empty(shape, dtype=torch.uint8, device=device)
             # ROCm TE does not implement fuse padding zeros so use zero tensor here
             if IS_HIP_EXTENSION:
+                m_dim = math.prod(shape[:-1])
+                k_scale = math.ceil(shape[-1] / MXFP8_BLOCK_SCALING_SIZE)
+                # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
+                if get_device_compute_capability() == (12, 5):
+                    m_dim = round_up_to_nearest_multiple(m_dim, 4)
+                    k_scale = round_up_to_nearest_multiple(k_scale, 4)
                 scale_inv = torch.zeros(
-                    math.prod(shape[:-1]), 
-                    math.ceil(shape[-1] / MXFP8_BLOCK_SCALING_SIZE),
+                    m_dim,
+                    k_scale,
                     dtype=torch.uint8,
                     device=device,
                     pin_memory=pin_memory,
@@ -169,9 +175,15 @@ class MXFP8Quantizer(Quantizer):
             )
             # ROCm TE does not implement fuse padding zeros so use zero tensor here
             if IS_HIP_EXTENSION:
+                k_scale = math.ceil(math.prod(shape[:-1]) / MXFP8_BLOCK_SCALING_SIZE)
+                m_dim = shape[-1]
+                # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
+                if get_device_compute_capability() == (12, 5):
+                    k_scale = round_up_to_nearest_multiple(k_scale, 4)
+                    m_dim = round_up_to_nearest_multiple(m_dim, 4)
                 columnwise_scale_inv = torch.zeros(
-                    math.ceil(math.prod(shape[:-1]) / MXFP8_BLOCK_SCALING_SIZE),
-                    shape[-1],
+                    k_scale,
+                    m_dim,
                     dtype=torch.uint8,
                     device=device,
                     pin_memory=pin_memory,
@@ -202,6 +214,49 @@ class MXFP8Quantizer(Quantizer):
     def calibrate(self, tensor: torch.Tensor) -> None:
         # TODO(ksivamani): No calibration needed for mxfp8?
         pass
+
+    def get_scale_shape(
+        self,
+        shape: Iterable[int],
+        columnwise: bool,
+    ) -> Tuple[int, int]:
+        """Calculate the shape of the scaling tensor for MXFP8 1D blockwise quantization.
+
+        This method determines the shape of the scaling tensor needed for blockwise quantization,
+        taking into account the input tensor shape and whether columnwise scaling is used.
+
+        Parameters
+        ----------
+        shape : Iterable[int]
+            Shape of the input tensor to be quantized
+        columnwise : bool
+            Whether to use columnwise scaling (True) or rowwise scaling (False)
+
+        Returns
+        -------
+        Tuple[int, int]
+            Shape of the scaling tensor as (outer_dim, inner_dim)
+            For MXFP8 1D blockwise quantization, blocksize is 32
+        Swizzle kernel will be performed before GEMM to suit the need of CuBLAS.
+        CuBLAS doc: https://docs.nvidia.com/cuda/cublas/index.html#d-block-scaling-factors-layout
+        """
+        if columnwise:
+            # Columnwise: scale_inv shape is [prod(shape[:-1]) // BLOCK_SIZE, shape[-1]]
+            # with padding to multiples of [4, 128]
+            return (
+                round_up_to_nearest_multiple(math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE, 4),
+                round_up_to_nearest_multiple(shape[-1], 128),
+            )
+        # Rowwise: scale_inv shape is [prod(shape[:-1]), shape[-1] // BLOCK_SIZE]
+        # with padding to multiples of [128, 4]
+        return (
+            round_up_to_nearest_multiple(math.prod(shape[:-1]), 128),
+            round_up_to_nearest_multiple(shape[-1] // MXFP8_BLOCK_SCALING_SIZE, 4),
+        )
+
+    def get_columnwise_shape(self, rowwise_data_shape: Tuple[int, ...]) -> Tuple[int, ...]:
+        """Calculate the shape of the columnwise data for MXFP8 1D blockwise quantization."""
+        return rowwise_data_shape
 
     def create_tensor_from_data(
         self,
@@ -292,7 +347,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         )
 
     def __repr__(self, *, tensor_contents=None):
-        return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize(dtype=self.dtype)})"
+        return f"MXFP8Tensor(fp8_dtype={self._fp8_dtype}, data={self.dequantize()})"
 
     def dequantize(self, *, dtype: Optional[torch.dtype] = None) -> torch.Tensor:
         """
@@ -470,8 +525,18 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
             scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
             split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
-            # Padding requirements: rowwise dim0 should be divisble by 128, columnwise dim0 should be divisble by 4
-            padding_multiples = [128, 4]
+            if IS_HIP_EXTENSION:
+                if get_device_compute_capability() == (12, 5):
+                    # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
+                    padding_multiples = [4, 4]
+                else:
+                    # ROCm/HIP backend uses an unpadded scale-inv layout (see `MXFP8Quantizer.make_empty`),
+                    # so applying the padding here would produce a per-shard scale-inv whose dim-0
+                    # does not match the destination scale-inv allocated for the FSDP2 local shard.
+                    padding_multiples = [1, 1]
+            else:
+                # Padding requirements: rowwise dim0 should be divisible by 128, columnwise dim0 should be divisible by 4
+                padding_multiples = [128, 4]
             for scale_inv, scale_split_size, pad_multiple in zip(
                 scale_invs, split_sizes_for_scale, padding_multiples
             ):
@@ -743,7 +808,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 columnwise_scale_inv=columnwise_scale_inv,
                 fp8_dtype=fp8_dtype,
                 dtype=param_dtype,
-                shape=rowwise_data.shape if rowwise_data is not None else columnwise_data.shape,
+                shape=(rowwise_data.shape if rowwise_data is not None else columnwise_data.shape),
                 quantizer=self._quantizer,
                 with_gemm_swizzled_scales=False,
             )
@@ -838,6 +903,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 )
                 # pylint: disable=unnecessary-dunder-call
                 super(MXFP8Tensor, type(self)).data.__set__(self, dummy_tensor)
+
             self._rowwise_data = tensor._rowwise_data
             self._columnwise_data = tensor._columnwise_data
             self._quantizer = tensor._quantizer.copy()
@@ -856,6 +922,33 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
     # Cast to FP8 when setting MXFP8Tensor.data
     data = property(_get_data, _set_data)
+
+    @property
+    def device(self):
+        """Return the device of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.device
+        if self._columnwise_data is not None:
+            return self._columnwise_data.device
+        raise RuntimeError("MXFP8Tensor has no data!")
+
+    @property
+    def shape(self):
+        """Return the shape of the tensor. Define this to avoid expensive PyObject lookups."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.shape
+        if self._columnwise_data is not None:
+            return self._columnwise_data.shape
+        raise RuntimeError("MXFP8Tensor has no data!")
+
+    @property
+    def is_cuda(self):
+        """Return whether the tensor is on a CUDA device."""
+        if self._rowwise_data is not None:
+            return self._rowwise_data.is_cuda
+        if self._columnwise_data is not None:
+            return self._columnwise_data.is_cuda
+        raise RuntimeError("MXFP8Tensor has no data!")
 
 
 class _ViewFunc(torch.autograd.Function):

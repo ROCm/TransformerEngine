@@ -4,50 +4,54 @@
 #
 # See LICENSE for license information.
 
-list(APPEND test_cuda_sources
-            test_cast.cu
-            test_cast_current_scaling.cu
-            test_cast_dbias.cu
-            test_cast_dbias_dgelu.cu
-            test_cast_gated_swiglu.cu
-            test_cast_mxfp8_gated_swiglu.cu
-            test_qdq.cu
-            test_cast_mxfp8.cu
-            test_dequantize_mxfp8.cu
-            test_cast_nvfp4_transpose.cu
-            test_transpose.cu
-            test_cast_transpose.cu
-            test_cast_transpose_current_scaling.cu
-            test_cast_transpose_dbias.cu
-            test_cast_transpose_dbias_dgelu.cu
-            test_cast_transpose_dgeglu.cu
-            test_act.cu
-            test_normalization.cu
-            test_normalization_mxfp8.cu
-            test_memset.cu
-            test_multi_cast_transpose.cu
-            test_multi_padding.cu
-            test_multi_unpadding.cu
-            test_causal_softmax.cu
-            test_swap_first_dims.cu
-	          ../test_common.cu)
-if(USE_CUDA)
-  list(APPEND test_cuda_sources
-              test_cast_float8blockwise.cu
-              test_swizzle.cu)
-else()
-  list(APPEND test_cuda_sources
-              test_cublaslt_gemm.cu)
-endif()
+add_executable(test_operator
+               test_cast.cu
+               test_cast_current_scaling.cu
+               test_cast_dbias.cu
+               test_cast_dbias_dgelu.cu
+               test_cast_gated_swiglu.cu
+               test_cast_mxfp8_gated_swiglu.cu
+               test_qdq.cu
+               test_cast_mxfp8.cu
+               test_cast_mxfp8_grouped.cu
+               test_cast_nvfp4_transpose.cu
+               test_cast_float8blockwise.cu #CUDA-only test
+               test_dequantize_mxfp8.cu
+               test_transpose.cu
+               test_cast_transpose.cu
+               test_cast_transpose_current_scaling.cu
+               test_cast_transpose_dbias.cu
+               test_cast_transpose_dbias_dgelu.cu
+               test_cast_transpose_dgeglu.cu
+               test_act.cu
+               test_normalization.cu
+               test_normalization_mxfp8.cu
+               test_memset.cu
+               test_splits_to_offsets.cu
+               test_multi_cast_transpose.cu
+               test_multi_padding.cu
+               test_multi_unpadding.cu
+               test_causal_softmax.cu
+               test_swizzle.cu
+               test_swap_first_dims.cu
+               test_grouped_gemm.cu #CUDA-only test
+               ../test_common.cu)
 
-if(USE_CUDA)
-  add_executable(test_operator ${test_cuda_sources})
-else()
+if(USE_ROCM)
+  get_target_property(test_cuda_sources test_operator SOURCES)
+  # Remove CUDA-only tests and add ROCm specific ones
+  list(REMOVE_ITEM test_cuda_sources
+              test_cast_float8blockwise.cu
+              test_grouped_gemm.cu)
+  list(APPEND test_cuda_sources
+              test_dequantize_nvfp4.cu
+              test_cublaslt_gemm.cu
+              test_cast_mxfp4_transpose.cu)
   TE_GetHipifiedSources("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR} test_hip_sources)
+  TE_AddHipifyDeps("${test_cuda_sources}" ${CMAKE_CURRENT_SOURCE_DIR})
   message("${message_line}")
   message(STATUS "test_operator hipified sources: ${test_hip_sources}")
-
-  add_executable(test_operator ${test_hip_sources})
+  set_target_properties(test_operator PROPERTIES SOURCES "${test_hip_sources}")
 endif()
 
 # Find required packages

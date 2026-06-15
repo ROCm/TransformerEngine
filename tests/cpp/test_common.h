@@ -353,11 +353,23 @@ constexpr size_t nvfp4_scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t nvfp4_scale_tensor_alignment_X_rowwise = 4;
 constexpr size_t nvfp4_scale_tensor_alignment_Y_colwise = 4;
 constexpr size_t nvfp4_scale_tensor_alignment_X_colwise = 128;
+
+constexpr size_t mxfp4_scale_tensor_alignment_Y_rowwise = 256;
+constexpr size_t mxfp4_scale_tensor_alignment_X_rowwise = 8;
+constexpr size_t mxfp4_scale_tensor_alignment_Y_colwise = 8;
+constexpr size_t mxfp4_scale_tensor_alignment_X_colwise = 256;
 #else
 constexpr size_t scale_tensor_alignment_Y_rowwise = 128;
 constexpr size_t scale_tensor_alignment_X_rowwise = 4;
 constexpr size_t scale_tensor_alignment_Y_colwise = 4;
 constexpr size_t scale_tensor_alignment_X_colwise = 128;
+#endif
+
+#ifdef __HIP_PLATFORM_AMD__
+static constexpr float E2M1_LUT[16] = {
+     0.0f,  0.5f,  1.0f,  1.5f,  2.0f,  3.0f,  4.0f,  6.0f,
+    -0.0f, -0.5f, -1.0f, -1.5f, -2.0f, -3.0f, -4.0f, -6.0f,
+};
 #endif
 
 inline size_t divide_round_up(const size_t N, const size_t M) {
@@ -476,10 +488,14 @@ inline fp8e8m0 float_to_e8m0(float val) {
 }
 
 inline float exp2f_rcp(fp8e8m0 biased_exp) {
-  if (biased_exp == 0) {
-    return 1.0f;
+  int32_t int_val = 0;
+  if (biased_exp == 255) {
+    int_val = 0x7fffffff;
+  } else if (biased_exp == 254) {
+    int_val = 0x00400000;
+  } else {
+    int_val = (254 - biased_exp) << FP32_MANTISSA_BITS;   // 127 - (biased_exp - 127)
   }
-  int32_t int_val = (254 - biased_exp) << FP32_MANTISSA_BITS;   // 127 - (biased_exp - 127)
   float fp32_val = *reinterpret_cast<float*>(&int_val);
   return fp32_val;
 }
@@ -523,7 +539,7 @@ template <typename T>
 void compare_scaling_factors(const std::string &name, const T *test, const T *ref,
                              const size_t row_blocks, const size_t col_blocks, const size_t stride,
 #ifdef USE_ROCM
-                             std::vector<size_t>& mismatch_indices, 
+                             std::vector<size_t>& mismatch_indices,
 #endif  //#ifdef USE_ROCM
                              size_t& mismatches_num,
                              const size_t scale_diff_abs_tolerance = 0,
@@ -539,7 +555,11 @@ void adjust_ref_for_e8m0_scale_error(const std::string &name,
 #endif
 
 std::array<size_t, 4> get_scale_tensor_dims(const size_t rows, const size_t cols,
-                                            const size_t block_size_rows, const size_t block_size_cols);
+                                            const size_t block_size_rows, const size_t block_size_cols
+#ifdef USE_ROCM
+                                            , const NVTEScalingMode scaling_mode = NVTE_MXFP8_1D_SCALING
+#endif
+                                          );
 
 std::pair<double, double> getTolerances(const DType type);
 
@@ -564,6 +584,61 @@ bool isFp4Type(DType type);
 int32_t getDeviceComputeCapability();
 constexpr int32_t hopperComputeCapability = 90;
 constexpr int32_t blackwellComputeCapability = 100;
+
+// Custom deleters for RAII
+struct CudaDeleter {
+  void operator()(void* p) const { if (p) cudaFree(p); }
+};
+struct GroupedTensorDeleter {
+  void operator()(NVTEGroupedTensor h) const { if (h) nvte_destroy_grouped_tensor(h); }
+};
+
+template <typename T = void>
+using CudaPtr = std::unique_ptr<T, CudaDeleter>;
+using GroupedTensorHandle = std::unique_ptr<std::remove_pointer_t<NVTEGroupedTensor>, GroupedTensorDeleter>;
+
+// Helper to allocate CUDA memory into a CudaPtr
+template <typename T = void>
+CudaPtr<T> cuda_alloc(size_t bytes) {
+  void* ptr = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&ptr, bytes));
+  return CudaPtr<T>(static_cast<T*>(ptr));
+}
+
+// Helper owning GPU buffers that back NVTEGroupedTensor.
+// NVTEGroupedTensor does not own memory; data/offsets/scales
+// must be allocated and freed by the test.
+struct GroupedBuffers {
+  GroupedTensorHandle handle;
+  CudaPtr<> data;
+  CudaPtr<> scale_inv;
+  CudaPtr<> columnwise_scale_inv;
+  CudaPtr<int64_t> first_dims_dev;
+  CudaPtr<int64_t> last_dims_dev;
+  CudaPtr<int64_t> offsets_dev;
+  CudaPtr<> columnwise_data;
+  NVTEShape logical_shape{};
+  std::vector<int64_t> offsets_host;
+  std::vector<size_t> tensor_bytes;
+  size_t num_tensors{0};
+  size_t elem_size{0};
+  DType dtype{DType::kFloat32};
+  NVTEScalingMode scaling_mode{NVTE_DELAYED_TENSOR_SCALING};
+
+  GroupedBuffers() = default;
+  GroupedBuffers(const GroupedBuffers&) = delete;
+  GroupedBuffers& operator=(const GroupedBuffers&) = delete;
+  GroupedBuffers(GroupedBuffers&&) = default;
+  GroupedBuffers& operator=(GroupedBuffers&&) = default;
+  ~GroupedBuffers() = default;
+
+  // Convenience accessors for raw pointers
+  NVTEGroupedTensor get_handle() const { return handle.get(); }
+  void* get_data() const { return data.get(); }
+};
+
+GroupedBuffers build_grouped_tensor(const std::vector<Tensor*>& tensors,
+                                    const NVTEScalingMode scaling_mode);
 
 }  // namespace test
 

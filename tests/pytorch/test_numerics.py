@@ -54,12 +54,15 @@ from transformer_engine.pytorch import (
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils as fa_utils
 from transformer_engine.pytorch import checkpoint as te_checkpoint
-from transformer_engine.pytorch.cpp_extensions import general_gemm, general_grouped_gemm
+from transformer_engine.pytorch.cpp_extensions import (
+    general_gemm,
+    general_grouped_gemm,
+    general_grouped_gemm_for_grouped_tensor,
+)
+from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.common import recipe
 import transformer_engine_torch as tex
 from utils import ModelConfig, reset_rng_states
-if IS_HIP_EXTENSION:
-    from utils import EnvVarCleaner
 
 # Only run FP8 tests on supported devices.
 fp8_available, reason_for_no_fp8 = is_fp8_available(return_reason=True)
@@ -109,6 +112,7 @@ all_boolean = [True, False]
 all_activations = [
     "gelu",
     "geglu",
+    "glu",
     "qgelu",
     "qgeglu",
     "relu",
@@ -512,6 +516,7 @@ class TorchGroupedLinearWithPadding(nn.Module):
 _supported_act = {
     "gelu": nn.GELU(approximate="tanh"),
     "geglu": nn.GELU(approximate="tanh"),
+    "glu": nn.Sigmoid(),
     "qgelu": TorchQuickGELU(),
     "qgeglu": TorchQuickGELU(),
     "relu": nn.ReLU(),
@@ -770,17 +775,14 @@ def _test_e2e_full_recompute(
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("use_reentrant", all_boolean)
 def test_gpt_full_activation_recompute(
-    dtype, bs, model, fp8, recipe, fp8_model_params, use_reentrant
+    dtype, bs, model, fp8, recipe, fp8_model_params, use_reentrant, monkeypatch
 ):
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
-    if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
-        if (dtype == torch.bfloat16
-            and not fp8
-            and not use_reentrant
-            and recipe.float8_per_tensor_scaling()
-            ):
-            pytest.skip("hipBLASLt does not provide suitable algorithms on GFX950 for this config.")
+    if (IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 5), (12, 5))
+        and dtype == torch.bfloat16 and not fp8 and not use_reentrant
+        ):
+        pytest.skip("hipBLASLt does not provide suitable algorithms for this config on this GPU.")
     if fp8 and recipe.nvfp4():
         if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
             pytest.skip(
@@ -791,10 +793,9 @@ def test_gpt_full_activation_recompute(
     torch.compiler.reset() # avoid cache size limit overflow
 
     if not use_reentrant:
-        if IS_HIP_EXTENSION:
-            env = EnvVarCleaner(["NVTE_BIAS_GELU_NVFUSION"])
         # Non-reentrant checkpoint becomes non-deterministic with bias+GELU fusion
-        os.environ["NVTE_BIAS_GELU_NVFUSION"] = "0"
+        # ROCm: we want to make sure it is cleaned of exception happens in the test
+        monkeypatch.setenv("NVTE_BIAS_GELU_NVFUSION", "0")
 
     outputs, names = _test_e2e_full_recompute(
         bs,
@@ -2970,7 +2971,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             max_seqlen_kv=config.max_seqlen_kv,
         )
 
-        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
+        if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 5), (12, 5)):
             tols_thd = dtype_tols(dtype)
             # On gfx950 the results for THD are different
             # that results in lower final result precision
@@ -3068,7 +3069,9 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
         if not use_cutlass:
             # cublas implementation should be bit-wise match
             torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
-        elif IS_HIP_EXTENSION and accumulate and dtype == torch.bfloat16 and get_device_compute_capability() == (9, 4):
+        elif (IS_HIP_EXTENSION and accumulate and dtype == torch.bfloat16
+              and get_device_compute_capability() == (9, 4)
+              ):
             # ck_tile's MultiD Add epilogue fuses accumulation into the tile store, producing
             # a different FP rounding order than sequential GEMMs.
             torch.testing.assert_close(o, o_ref, rtol=4e-2, atol=4e-2)
@@ -3077,6 +3080,479 @@ def test_grouped_gemm(shape, dtype, layout, accumulate, use_cutlass):
 
     if use_cutlass:
         os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
+
+
+if IS_HIP_EXTENSION:
+    @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16], ids=str)
+    @pytest.mark.parametrize("layout", ["TN", "NN", "NT", "TT"])
+    @pytest.mark.parametrize("accumulate", [False, True])
+    @pytest.mark.parametrize(
+        "pad_dim",
+        ["K", "M", "N", "MK", "MKN"],
+        ids=lambda d: f"pad{d}",
+    )
+    def test_grouped_gemm_unaligned(dtype, layout, accumulate, pad_dim, capfd, monkeypatch):
+        """Test CK grouped GEMM with M, N, or K not aligned to CK tile size.
+
+        CK constraints for bf16/fp16:
+        - Contiguous dim of A/B must be dword-aligned (even for 2-byte types).
+            RowMajor: contiguous dim is cols (K for A, N for B).
+            ColMajor: contiguous dim is rows (M for A, K for B).
+        - K tile: 64, M tile: 256, N tile: 128/256
+        """
+        torch.manual_seed(0)
+
+        # Unaligned values per dimension (all satisfy CK vector-load constraints).
+        # K: even but not multiple of tile (64). Same for all groups.
+        # M: not multiples of tile (256), varies per group.
+        # N: multiple of 16 but not multiple of tile (128).
+        unaligned_k = 2016
+        unaligned_m = [100, 300, 150, 200, 50, 350, 250, 180]
+        unaligned_n = 2032
+        z = len(unaligned_m)
+
+        # Aligned defaults.
+        k_aligned = 2048
+        m_aligned = 256
+        n_aligned = 2048
+
+        # Select (un)aligned values based on pad_dim.
+        k_val = unaligned_k if "K" in pad_dim else k_aligned
+        m_vals = unaligned_m if "M" in pad_dim else [m_aligned] * z
+        n_val = unaligned_n if "N" in pad_dim else n_aligned
+
+        total_m = sum(m_vals)
+        monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
+        monkeypatch.setenv("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", "1")
+
+        if layout == "TN":
+            A = [torch.randn(n_val, k_val, dtype=dtype, device="cuda") for _ in range(z)]
+            B = [torch.randn(m, k_val, dtype=dtype, device="cuda") for m in m_vals]
+            out = [torch.randn(total_m, n_val, dtype=dtype, device="cuda")]
+            out_ref = [o.clone() for o in torch.split(out[0], m_vals)]
+            m_splits = m_vals
+            grad = False
+            single_output = True
+        elif layout == "NN":
+            A = [torch.randn(k_val, n_val, dtype=dtype, device="cuda") for _ in range(z)]
+            B = [torch.randn(m, k_val, dtype=dtype, device="cuda") for m in m_vals]
+            out = [torch.randn(total_m, n_val, dtype=dtype, device="cuda")]
+            out_ref = [o.clone() for o in torch.split(out[0], m_vals)]
+            m_splits = m_vals
+            grad = True
+            single_output = True
+        elif layout == "NT":
+            A = list(torch.split(
+                torch.randn(total_m, k_val, dtype=dtype, device="cuda"), m_vals
+            ))
+            B = list(torch.split(
+                torch.randn(total_m, n_val, dtype=dtype, device="cuda"), m_vals
+            ))
+            out = [torch.randn(n_val, k_val, dtype=dtype, device="cuda") for _ in range(z)]
+            out_ref = [o.clone() for o in out]
+            m_splits = m_vals
+            grad = True
+            single_output = False
+        else:  # TT
+            A = [torch.randn(n_val, k_val, dtype=dtype, device="cuda") for _ in range(z)]
+            B = [torch.randn(k_val, m, dtype=dtype, device="cuda") for m in m_vals]
+            out = [torch.randn(total_m, n_val, dtype=dtype, device="cuda")]
+            out_ref = [o.clone() for o in torch.split(out[0], m_vals)]
+            m_splits = m_vals
+            grad = False
+            single_output = True
+
+        # Reference: individual GEMMs
+        for i in range(z):
+            if layout == "TT":
+                # general_gemm doesn't support TT; compute reference manually.
+                ref = B[i].T.to(torch.float32) @ A[i].T.to(torch.float32)
+                if accumulate:
+                    out_ref[i] = (out_ref[i].to(torch.float32) + ref).to(dtype)
+                else:
+                    out_ref[i] = ref.to(dtype)
+            else:
+                general_gemm(
+                    A[i],
+                    B[i],
+                    dtype,
+                    grad=grad,
+                    accumulate=accumulate,
+                    layout=layout,
+                    out=out_ref[i],
+                )
+
+        if single_output:
+            out_ref = [torch.cat(out_ref)]
+
+        general_grouped_gemm(
+            A,
+            B,
+            out,
+            [None] * z,
+            dtype,
+            m_splits=m_splits,
+            grad=grad,
+            accumulate=accumulate,
+            layout=layout,
+            single_output=single_output,
+        )
+
+        for o, o_ref in zip(out, out_ref):
+            if accumulate and dtype == torch.bfloat16 and get_device_compute_capability() == (9, 4):
+                torch.testing.assert_close(o, o_ref, rtol=4e-2, atol=4e-2)
+            else:
+                torch.testing.assert_close(o, o_ref, rtol=1.5e-2, atol=1.5e-2)
+
+        # Check for CK fallback warnings from C++ (NVTE_WARN writes to std::cerr).
+        # capfd captures file-descriptor-level output, including C/C++ stderr.
+        captured = capfd.readouterr()
+        if "Falling back" in captured.err or "Fallback" in captured.err:
+            if "K" in pad_dim and layout != "NN":
+                pytest.xfail(
+                    "Known CK_Tile limitation: K-padding with non-NN layouts may fall back to cuBLAS "
+                    "(kPadK + ColMajor B bug, or CK_Tile stride alignment requirements)"
+                )
+            else:
+                pytest.fail(f"CK_Tile grouped GEMM fell back to cuBLAS:\n{captured.err}")
+
+
+def _pack_grouped_tensor(grouped_tensor: GroupedTensor, tensors: List[torch.Tensor]) -> None:
+    data = grouped_tensor.rowwise_data
+    if data is None:
+        data = grouped_tensor.columnwise_data
+    if data is None:
+        raise ValueError("GroupedTensor has no data buffers to pack.")
+    offset = 0
+    for tensor in tensors:
+        numel = tensor.numel()
+        data[offset : offset + numel].copy_(tensor.reshape(-1))
+        offset += numel
+
+
+def _make_grouped_tensor_from_splits(
+    m_sizes: List[int],
+    last_dim: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> GroupedTensor:
+    first_dims = torch.tensor(m_sizes, device=device, dtype=torch.int64)
+    return GroupedTensor.make_grouped_tensor(
+        num_tensors=len(m_sizes),
+        first_dims=first_dims,
+        last_dims=None,
+        logical_first_dim=sum(m_sizes),
+        logical_last_dim=last_dim,
+        quantizer=None,
+        device=device,
+        dtype=dtype,
+    )
+
+
+def _make_grouped_tensor_uniform(
+    num_tensors: int,
+    first_dim: int,
+    last_dim: int,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> GroupedTensor:
+    return GroupedTensor.make_grouped_tensor(
+        num_tensors=num_tensors,
+        first_dims=None,
+        last_dims=None,
+        logical_first_dim=num_tensors * first_dim,
+        logical_last_dim=last_dim,
+        quantizer=None,
+        device=device,
+        dtype=dtype,
+    )
+
+
+@pytest.mark.skipif(IS_HIP_EXTENSION,
+                    reason="Grouped tensors GEMM is not yet supported in ROCm TE")
+@pytest.mark.parametrize(
+    "z, m, n, k",
+    [
+        (4, 256, 256, 256),
+        (4, 512, 256, 512),
+        (4, 512, 512, 256),
+        (8, 512, 256, 512),
+    ],
+)
+@pytest.mark.parametrize("case", ["no_discrete", "discrete_in", "discrete_out"])
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+@pytest.mark.parametrize("accumulate", [False, True])
+def test_grouped_gemm_grouped_tensor(z, m, n, k, case, layout, accumulate) -> None:
+    if tex.get_cublasLt_version() < 130200:
+        pytest.skip("Grouped GEMM requires cuBLAS 13.2+.")
+    if torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
+    if not is_bf16_available():
+        pytest.skip("bfloat16 is required for grouped GEMM test.")
+
+    torch.manual_seed(0)
+
+    dtype = torch.bfloat16
+
+    split_points = torch.randperm(m - 1)[: z - 1] + 1
+    split_points = torch.sort(split_points).values.tolist()
+    m_sizes = [split_points[0]]
+    m_sizes += [b - a for a, b in zip(split_points[:-1], split_points[1:])]
+    m_sizes.append(m - split_points[-1])
+    assert sum(m_sizes) == m and len(m_sizes) == z
+
+    if layout == "NT":
+        A = [torch.randn(ms, k, dtype=dtype, device="cuda") for ms in m_sizes]  # input
+        B = [torch.randn(ms, n, dtype=dtype, device="cuda") for ms in m_sizes]  # grad_output
+        out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
+        out_ref = [torch.matmul(B[i].transpose(0, 1).float(), A[i].float()) for i in range(z)]
+    else:
+        A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
+        B = [
+            torch.randn(ms, k if layout == "TN" else n, dtype=dtype, device="cuda")
+            for ms in m_sizes
+        ]  # TN --> input, NN --> grad_output
+        out = [
+            torch.randn(ms, n if layout == "TN" else k, dtype=dtype, device="cuda")
+            for ms in m_sizes
+        ]  # TN --> output, NN --> dgrad
+        if layout == "NN":
+            out_ref = [torch.matmul(B[i].float(), A[i].float()) for i in range(z)]
+        else:  # layout == "TN"
+            out_ref = [torch.matmul(B[i].float(), A[i].transpose(0, 1).float()) for i in range(z)]
+
+    if accumulate:
+        out_ref = [out[i].float() + o for i, o in enumerate(out_ref)]
+
+    # Bias is applied after GEMM (broadcasted along rows)
+    # Match kernel behavior: GEMM output is already in output dtype when bias is added.
+    out_ref_no_bias = [o.to(dtype) for o in out_ref]
+    if layout == "TN":
+        bias_last_dim = n
+    else:  # layout == "NT" or "NN"
+        bias_last_dim = k
+    bias = (
+        [torch.randn(1, bias_last_dim, dtype=dtype, device="cuda") for _ in range(z)]
+        if case != "discrete_out"
+        else None
+    )
+    # Bias add in grouped kernel accumulates in FP32 for BF16/FP16.
+    out_ref = (
+        [(o.float() + b.float()).to(dtype) for o, b in zip(out_ref_no_bias, bias)]
+        if bias is not None
+        else out_ref_no_bias
+    )
+    # Create grouped tensors based on case
+    device = A[0].device
+    grouped_A = A
+    grouped_out = out
+    grouped_out_bias = [o.clone() for o in out]
+    grouped_out_no_bias = [o.clone() for o in out]
+    grouped_bias = None
+    if layout == "TN":
+        grouped_A = (
+            _make_grouped_tensor_uniform(z, n, k, device, dtype) if case != "discrete_in" else A
+        )  # weight
+        grouped_B = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)  # input
+        if case != "discrete_out":
+            grouped_out = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)  # output
+            grouped_out_bias = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
+            grouped_out_no_bias = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
+    elif layout == "NN":
+        grouped_A = (
+            _make_grouped_tensor_uniform(z, n, k, device, dtype) if case != "discrete_in" else A
+        )  # weight
+        grouped_B = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)  # grad_output
+        if case != "discrete_out":
+            grouped_out = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
+            grouped_out_bias = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
+            grouped_out_no_bias = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
+    else:  # layout == "NT"
+        grouped_A = (
+            _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
+            if case != "discrete_in"
+            else A
+        )  # input
+        grouped_B = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)  # grad_output
+        if case != "discrete_out":
+            grouped_out = _make_grouped_tensor_uniform(z, n, k, device, dtype)  # wgrad
+            grouped_out_bias = _make_grouped_tensor_uniform(z, n, k, device, dtype)
+            grouped_out_no_bias = _make_grouped_tensor_uniform(z, n, k, device, dtype)
+    _pack_grouped_tensor(grouped_B, B)
+    if case != "discrete_out":
+        _pack_grouped_tensor(grouped_out, out)
+        _pack_grouped_tensor(grouped_out_bias, out)
+        _pack_grouped_tensor(grouped_out_no_bias, out)
+    if case != "discrete_in":
+        _pack_grouped_tensor(grouped_A, A)
+
+    if bias is not None:
+        grouped_bias = _make_grouped_tensor_uniform(z, 1, bias_last_dim, device, dtype)
+        _pack_grouped_tensor(grouped_bias, bias)
+
+    general_grouped_gemm_for_grouped_tensor(
+        grouped_A,
+        grouped_B,
+        grouped_out_no_bias,
+        layout=layout,
+        accumulate=accumulate,
+        bias=None,
+    )
+    general_grouped_gemm_for_grouped_tensor(
+        grouped_A,
+        grouped_B,
+        grouped_out_bias,
+        layout=layout,
+        accumulate=accumulate,
+        bias=grouped_bias,
+    )
+    out_grouped_no_bias = (
+        grouped_out_no_bias
+        if isinstance(grouped_out_no_bias, list)
+        else grouped_out_no_bias.split_into_quantized_tensors()
+    )
+    out_grouped_bias = (
+        grouped_out_bias
+        if isinstance(grouped_out_bias, list)
+        else grouped_out_bias.split_into_quantized_tensors()
+    )
+
+    out_grouped_manual_bias = (
+        [(o.float() + b.float()).to(dtype) for o, b in zip(out_grouped_no_bias, bias)]
+        if bias is not None
+        else out_grouped_no_bias
+    )
+    tols = dtype_tols(dtype)
+    for o, o_ref in zip(out_grouped_no_bias, out_ref_no_bias):
+        torch.testing.assert_close(o, o_ref, **tols)
+    if bias is not None:
+        for o, o_ref in zip(out_grouped_bias, out_grouped_manual_bias):
+            torch.testing.assert_close(o, o_ref, **tols)
+
+
+def _make_grouped_tensor_quantized_mxfp8(
+    tensors: List[torch.Tensor],
+    *,
+    is_a: bool,
+    transposed: bool,
+    device: torch.device,
+    optimize_for_gemm: bool = True,
+) -> GroupedTensor:
+    if not tensors:
+        raise ValueError("Expected non-empty tensor list for grouped quantization.")
+    if is_a:
+        rowwise = transposed
+        columnwise = not transposed
+    else:
+        rowwise = not transposed
+        columnwise = transposed
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=rowwise,
+        columnwise=columnwise,
+    )
+    quantizer.optimize_for_gemm = optimize_for_gemm
+    grouped_input = torch.cat(tensors, dim=0)
+    first_dims = torch.tensor([t.shape[0] for t in tensors], dtype=torch.int64, device=device)
+    return tex.group_quantize(grouped_input, quantizer, len(tensors), first_dims)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        (1, 128, 128, 512),
+        (8, 1024, 128, 512),
+        (16, 4096, 128, 512),
+    ],
+)
+@pytest.mark.parametrize("accumulate", [False, True])
+@pytest.mark.parametrize("layout", ["TN", "NN", "NT"])
+@pytest.mark.parametrize("case", ["no_discrete", "discrete_in", "discrete_out"])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_grouped_gemm_grouped_tensor_mxfp8(
+    shape, accumulate, layout: str, case: str, dtype: torch.dtype
+) -> None:
+    if not IS_HIP_EXTENSION and tex.get_cublasLt_version() < 130200:
+        pytest.skip("Grouped GEMM requires cuBLAS 13.2+.")
+    if IS_HIP_EXTENSION:
+        if not is_mxfp8_available():
+            pytest.skip("MXFP8 is not supported on this config")
+    elif torch.cuda.get_device_capability() < (10, 0):
+        pytest.skip("Grouped GEMM requires Blackwell (SM100) or newer.")
+    if dtype == torch.bfloat16 and not is_bf16_available():
+        pytest.skip("bfloat16 is required for grouped GEMM test.")
+
+    torch.manual_seed(0)
+    z, m, k, n = shape
+    m_sizes = [m // z] * z
+
+    if layout == "TN":
+        A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
+        B = [torch.randn(ms, k, dtype=dtype, device="cuda") for ms in m_sizes]  # input
+        out = [torch.randn(ms, n, dtype=dtype, device="cuda") for ms in m_sizes]  # output
+        grad = False
+    elif layout == "NN":
+        A = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # weight
+        B = [torch.randn(ms, n, dtype=dtype, device="cuda") for ms in m_sizes]  # grad_output
+        out = [torch.randn(ms, k, dtype=dtype, device="cuda") for ms in m_sizes]  # dgrad
+        grad = True
+    else:  # layout == "NT"
+        A = [torch.randn(ms, k, dtype=dtype, device="cuda") for ms in m_sizes]  # input
+        B = [torch.randn(ms, n, dtype=dtype, device="cuda") for ms in m_sizes]  # grad_output
+        out = [torch.randn(n, k, dtype=dtype, device="cuda") for _ in range(z)]  # wgrad
+        grad = True
+
+    out_ref = [o.clone() for o in out]
+
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+    grouped_A = _make_grouped_tensor_quantized_mxfp8(A, is_a=True, transposed=transa, device="cuda")
+    grouped_B = _make_grouped_tensor_quantized_mxfp8(
+        B, is_a=False, transposed=transb, device="cuda"
+    )
+    A_fp8 = grouped_A.split_into_quantized_tensors()
+    B_fp8 = grouped_B.split_into_quantized_tensors()
+
+    general_grouped_gemm(
+        A_fp8,
+        B_fp8,
+        out_ref,
+        [None] * z,
+        dtype,
+        m_splits=m_sizes,
+        grad=grad,
+        accumulate=accumulate,
+        layout=layout,
+        single_output=False,
+    )
+
+    device = A[0].device
+
+    grouped_out = None
+    if case != "discrete_out":
+        if layout == "TN":
+            grouped_out = _make_grouped_tensor_from_splits(m_sizes, n, device, dtype)
+        elif layout == "NN":
+            grouped_out = _make_grouped_tensor_from_splits(m_sizes, k, device, dtype)
+        else:  # layout == "NT"
+            grouped_out = _make_grouped_tensor_uniform(z, n, k, device, dtype)
+        _pack_grouped_tensor(grouped_out, out)
+
+    grouped_out_input = out if case == "discrete_out" else grouped_out
+    grouped_A_input = A_fp8 if case == "discrete_in" else grouped_A
+    general_grouped_gemm_for_grouped_tensor(
+        grouped_A_input,
+        grouped_B,
+        grouped_out_input,
+        layout=layout,
+        accumulate=accumulate,
+    )
+
+    out_grouped = out if case == "discrete_out" else grouped_out.split_into_quantized_tensors()
+    tols = dict(rtol=0.125, atol=0.0675)  # mxfp8 tolerance
+
+    for o, o_ref in zip(out_grouped, out_ref):
+        torch.testing.assert_close(o, o_ref, **tols)
 
 
 @pytest.mark.parametrize("N", [32])
@@ -3109,11 +3585,13 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
         pytest.skip(reason_for_no_fp8)
     if is_mxfp8_needed and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5):
+    if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 5), (12, 5)):
         if isinstance(input_quantizer, MXFP8Quantizer):
             N = math.ceil(N / 128) * 128 #hipBlasLt supports K which is multiple of 128 for MXFP8
         if not is_mxfp8_needed and isinstance(out_quantizer, Float8Quantizer):
-            pytest.skip("hipBLASLt does not provide suitable algorithms on GFX950 for this config.")
+            pytest.skip(
+                "hipBLASLt does not provide suitable algorithms for this config on this GPU."
+                )
     inp_fp8 = input_quantizer(torch.randn(N, N, device="cuda", dtype=datatype))
     weight_fp8 = input_quantizer(torch.randn(N, N, device="cuda", dtype=datatype))
     outp_type = torch.float32

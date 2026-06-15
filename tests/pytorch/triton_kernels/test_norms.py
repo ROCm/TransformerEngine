@@ -298,11 +298,12 @@ class TestNorms:
             zero_centered_gamma=zero_centered_gamma,
 
         )
-        triton_bwd_outs = triton_bwd_func(*args["triton"])
 
         if norm == "layer":
+            triton_bwd_outs = triton_bwd_func(*args["triton"])
             dx_triton, dgamma_triton, dbeta_triton = triton_bwd_outs
         elif norm == "rms":
+            triton_bwd_outs = triton_bwd_func(*args["triton"], autotune=autotune)
             dx_triton, dgamma_triton = triton_bwd_outs
             dbeta_triton = None
 

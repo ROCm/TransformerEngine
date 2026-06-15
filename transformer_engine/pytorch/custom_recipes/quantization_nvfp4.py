@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -12,6 +14,10 @@ import torch
 from transformer_engine.pytorch.custom_recipes import quantization
 from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, Quantizer
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
+if IS_HIP_EXTENSION:
+    from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, is_fp8_fnuz
 
 
 def nvfp4_ref_rht_2d_quantizer_factory(role):
@@ -137,9 +143,15 @@ def cast_to_e4m3(decode_scale, global_amax):
     TODO(etsykunov): Make less unintuitive.
     """
     decode_scale = decode_scale * global_amax
-    FLOAT8_E4M3_MAX = torch.tensor(448.0, device=decode_scale.device, dtype=torch.float32)
+    if IS_HIP_EXTENSION:
+        FLOAT8_E4M3_MAX = torch.tensor(240.0 if is_fp8_fnuz() else 448.0, device=decode_scale.device, dtype=torch.float32)
+    else:
+        FLOAT8_E4M3_MAX = torch.tensor(448.0, device=decode_scale.device, dtype=torch.float32)
     decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
-    return decode_scale.to(torch.float8_e4m3fn)
+    if IS_HIP_EXTENSION:
+        return decode_scale.to(get_torch_float8_e4m3_type())
+    else:
+        return decode_scale.to(torch.float8_e4m3fn)
 
 
 def high_precision_gemm_ref(
@@ -169,7 +181,8 @@ def high_precision_gemm_ref(
     y_shape = (mat1.size(0), mat2.size(1))
 
     if bias is not None:
-        assert not accumulate, "Bias is not supported with accumulation"
+        if accumulate:
+            raise ValueError("Bias is not supported with accumulation")
         bias = bias.to(out_dtype)
         # With bias case
         if out_dtype == torch.float32:
@@ -325,7 +338,8 @@ class NVFP4TensorRef(QuantizedTensorStorage):
         the second dimension by half. This method returns the logical shape that
         users expect, not the internal packed storage shape.
         """
-        assert self.original_shape is not None
+        if self.original_shape is None:
+            raise RuntimeError("NVFP4TensorRef.size() called but original_shape has not been set")
         return torch.Size(self.original_shape)
 
 
@@ -374,7 +388,8 @@ class NVFP4QuantizerRef(Quantizer):
 
         Uses Sylvester construction to avoid SciPy dependency.
         """
-        assert (size & (size - 1)) == 0, "Hadamard size must be a power of two"
+        if (size & (size - 1)) != 0:
+            raise ValueError(f"Hadamard size must be a power of two, got {size}")
         h = torch.ones((1, 1), device=device, dtype=torch.float32)
         while h.shape[0] < size:
             h = torch.cat(
@@ -402,9 +417,10 @@ class NVFP4QuantizerRef(Quantizer):
 
         # RHT dimension equals the quantization tile length (NVFP4 uses 16)
         rht_dim = self.quant_tile_shape[1]
-        assert (
-            x.shape[-1] % rht_dim == 0
-        ), f"Inner dimension {x.shape[-1]} must be divisible by hadamard dimension {rht_dim}"
+        if x.shape[-1] % rht_dim != 0:
+            raise ValueError(
+                f"Inner dimension {x.shape[-1]} must be divisible by hadamard dimension {rht_dim}"
+            )
 
         # Build H and scale
         H = self._build_hadamard_matrix(rht_dim, x.device, x.dtype, self.with_random_sign_mask)
@@ -446,7 +462,11 @@ class NVFP4QuantizerRef(Quantizer):
         eps: float,  # pylint: disable=unused-argument
     ) -> Tuple[torch.Tensor, torch.Tensor]:
 
-        assert x.ndim == 2
+        if x.ndim != 2:
+            raise ValueError(
+                f"_quantize_blockwise_reference expects a 2D tensor, got {x.ndim}D with shape"
+                f" {x.shape}"
+            )
         using_2d_quantization = tile_len_x == 16 and tile_len_y == 16
         m, n = x.shape
         # Compute vec_max based on the original x (before reshape)
@@ -470,7 +490,10 @@ class NVFP4QuantizerRef(Quantizer):
             )  # (128, 8, 1)
         x = x.view(m, n // tile_len_x, tile_len_x)
         FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)
-        FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
+        if IS_HIP_EXTENSION:
+            FLOAT8_E4M3_MAX = torch.tensor(240.0 if is_fp8_fnuz() else 448.0, device=x. device, dtype=torch.float32)
+        else:
+            FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
         decode_scale = torch.div(vec_max, FLOAT4_E2M1_MAX)
 
         if pow_2_scales:
@@ -503,7 +526,10 @@ class NVFP4QuantizerRef(Quantizer):
                 ),
             )
             decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
-            decode_scale = decode_scale.to(torch.float8_e4m3fn)
+            if IS_HIP_EXTENSION:
+                decode_scale = decode_scale.to(get_torch_float8_e4m3_type())
+            else:
+                decode_scale = decode_scale.to(torch.float8_e4m3fn)
 
             encode_scale = torch.min(
                 torch.div(1.0, decode_scale.to(torch.float32) * global_decode_scale),
@@ -525,7 +551,11 @@ class NVFP4QuantizerRef(Quantizer):
         tensor: torch.Tensor, row_divisor: Optional[int], col_divisor: Optional[int]
     ) -> torch.Tensor:
 
-        assert tensor.dim() == 2, "only supports 2D tensors"
+        if tensor.dim() != 2:
+            raise ValueError(
+                f"_pad_tensor only supports 2D tensors, got {tensor.dim()}D tensor with shape"
+                f" {tensor.shape}"
+            )
         M, N = tensor.shape
         padding_needed_rows = 0
         padding_needed_cols = 0
@@ -553,7 +583,11 @@ class NVFP4QuantizerRef(Quantizer):
     @staticmethod
     def _rm_pad_tensor(tensor: torch.Tensor, original_size: tuple[int, ...]) -> torch.Tensor:
 
-        assert tensor.dim() == 2, "only supports 2D tensors"
+        if tensor.dim() != 2:
+            raise ValueError(
+                f"_rm_pad_tensor only supports 2D tensors, got {tensor.dim()}D tensor with shape"
+                f" {tensor.shape}"
+            )
         M, N = original_size
         out = tensor[:M, :N].contiguous()
         return out
@@ -584,19 +618,20 @@ class NVFP4QuantizerRef(Quantizer):
             - sx_t: scale tensor for qx_t (if columnwise_usage), None otherwise
             - global_amax_row, global_amax_col: global amax tensors
         """
+        global_amax_col = None
         if self.pow_2_scales:
-            assert self.quant_tile_shape == (
-                1,
-                32,
-            ), "MXFP4 only supports 1x32 tile shape."
+            if self.quant_tile_shape != (1, 32):
+                raise ValueError(
+                    f"MXFP4 only supports 1x32 tile shape, got {self.quant_tile_shape}"
+                )
             # TODO(etsykunov): Fix bug where global_amax_row and
             # global_amax_col are not defined
             # global_amax = torch.empty(0, device=tensor.device, dtype=torch.float32)
         else:
-            assert self.quant_tile_shape in (
-                (1, 16),
-                (16, 16),
-            ), "NVFP4 only supports 1x16 or 16x16 tile shape."
+            if self.quant_tile_shape not in ((1, 16), (16, 16)):
+                raise ValueError(
+                    f"NVFP4 only supports 1x16 or 16x16 tile shape, got {self.quant_tile_shape}"
+                )
             # Prepare inputs once so we can reuse for both amax and quantization
             # Row-input will always be the original input.
             row_input = tensor
@@ -670,7 +705,11 @@ class NVFP4QuantizerRef(Quantizer):
         **kwargs,  # pylint: disable=unused-argument
     ) -> NVFP4TensorRef:
         # sanity checks
-        assert tensor.dtype in utils.HIGH_PRECISION_FLOAT_DTYPES, "Unsupported input dtype."
+        if tensor.dtype not in utils.HIGH_PRECISION_FLOAT_DTYPES:
+            raise TypeError(
+                f"Unsupported input dtype {tensor.dtype}, expected one of"
+                f" {utils.HIGH_PRECISION_FLOAT_DTYPES}"
+            )
 
         # Make it work with 3D tensors
         original_shape = tensor.shape
@@ -766,7 +805,10 @@ class NVFP4QuantizerRef(Quantizer):
 
         TODO(etsykunov): Confirm docstring is correct.
         """
-        raise NotImplementedError("Not implemented yet")
+        raise NotImplementedError(
+            "NVFP4QuantizerRef.is_data_t_transposed_in_memory is not implemented for FP4"
+            " quantization"
+        )
 
     def qgemm(
         self,
@@ -784,7 +826,8 @@ class NVFP4QuantizerRef(Quantizer):
         qresult_w: QuantizedTensorStorage | None = None,
     ) -> torch.Tensor:
         """Python implementation of microblock FP4 GEMM."""
-        assert bias is None, "Bias is implemented for FP4 GEMM."
+        if bias is not None:
+            raise ValueError("Bias is not supported in NVFP4QuantizerRef.qgemm")
 
         high_precision_x = cast_from_fp4x2(qx, out_dtype)
         high_precision_w = cast_from_fp4x2(qw, out_dtype)
@@ -814,16 +857,30 @@ class NVFP4QuantizerRef(Quantizer):
 
         else:
 
-            assert qresult_x is not None
-            assert qresult_w is not None
-
-            assert qresult_x.global_amax_row is not None
-            assert qresult_w.global_amax_col is not None
+            if qresult_x is None:
+                raise ValueError(
+                    "qresult_x is required for non-pow_2_scales NVFP4 GEMM (needed for global_amax)"
+                )
+            if qresult_w is None:
+                raise ValueError(
+                    "qresult_w is required for non-pow_2_scales NVFP4 GEMM (needed for global_amax)"
+                )
+            if qresult_x.global_amax_row is None:
+                raise ValueError(
+                    "qresult_x.global_amax_row must be set for non-pow_2_scales NVFP4 GEMM"
+                )
+            if qresult_w.global_amax_col is None:
+                raise ValueError(
+                    "qresult_w.global_amax_col must be set for non-pow_2_scales NVFP4 GEMM"
+                )
 
             sx = sx.to(torch.float32)
             sw = sw.to(torch.float32)
 
-            factor = 6.0 * 6.0 * 448.0 * 448.0
+            if IS_HIP_EXTENSION:
+                factor = 6.0 * 6.0 * 240.0 * 240.0 if is_fp8_fnuz() else 6.0 * 6.0 * 448.0 * 448.0
+            else:
+                factor = 6.0 * 6.0 * 448.0 * 448.0
 
             if gemm_type == quantization.GEMMType.WGRAD:
                 partial_alpha = qresult_x.global_amax_col * qresult_w.global_amax_col
@@ -833,23 +890,27 @@ class NVFP4QuantizerRef(Quantizer):
 
         M, K = high_precision_x.shape
         N, K_w = high_precision_w.shape
-        assert K == K_w, "K dimension mismatch between qx and qw"
-
-        assert K % 32 == 0, "K dimension must be divisible by 32"
-        assert N % 8 == 0, "N dimension must be divisible by 8"
+        if K != K_w:
+            raise ValueError(
+                f"K dimension mismatch between qx and qw: qx has K={K}, qw has K={K_w}"
+            )
+        if K % 32 != 0:
+            raise ValueError(f"K dimension must be divisible by 32, got K={K}")
+        if N % 8 != 0:
+            raise ValueError(f"N dimension must be divisible by 8, got N={N}")
 
         block_length = 32 if self.pow_2_scales else 16
 
         grid_k = K // block_length
 
-        assert sx.shape == (
-            M,
-            K // block_length,
-        ), f"sx shape mismatch: expected ({M}, {K//block_length}), got {sx.shape}"
-        assert sw.shape == (
-            N,
-            K // block_length,
-        ), f"sw shape mismatch: expected ({N}, {K//block_length}), got {sw.shape}"
+        if sx.shape != (M, K // block_length):
+            raise ValueError(
+                f"sx shape mismatch: expected ({M}, {K // block_length}), got {sx.shape}"
+            )
+        if sw.shape != (N, K // block_length):
+            raise ValueError(
+                f"sw shape mismatch: expected ({N}, {K // block_length}), got {sw.shape}"
+            )
 
         y = torch.zeros(M, N, dtype=torch.float32, device=qx.device)
 
@@ -878,10 +939,12 @@ class NVFP4QuantizerRef(Quantizer):
 
         # accumulation happens at epilogue in float32
         if accumulate:
-            assert out is not None, "Output tensor must be provided for accumulation."
+            if out is None:
+                raise ValueError("Output tensor must be provided for accumulation.")
             y += out.to(torch.float32)
         else:
-            assert out is None, "Output tensor should be None when accumulate is False."
+            if out is not None:
+                raise ValueError("Output tensor should be None when accumulate is False.")
 
         y = y.to(out_dtype)
         return y

@@ -20,6 +20,12 @@
 #endif
 #endif //#ifndef __HIP_PLATFORM_AMD__
 
+#ifndef NVTE_BUILD_NUM_PHILOX_ROUNDS
+#define NVTE_BUILD_NUM_PHILOX_ROUNDS 10
+#endif
+static_assert(NVTE_BUILD_NUM_PHILOX_ROUNDS > 0,
+              "NVTE_BUILD_NUM_PHILOX_ROUNDS must be a positive integer.");
+
 #include <cuda_bf16.h>
 #include <cuda_fp16.h>
 #include <cuda_fp8.h>
@@ -48,6 +54,8 @@ namespace transformer_engine {
 std::string to_string(const DType type);
 std::string to_string(const NVTEScalingMode &mode);
 
+inline std::string to_string_like(const DType &val) { return to_string(val); }
+
 inline bool is_tensor_scaling(const NVTEScalingMode &mode) {
   return mode == NVTE_DELAYED_TENSOR_SCALING;
 }
@@ -62,8 +70,19 @@ inline bool is_nvfp4_scaling(const NVTEScalingMode &mode) { return mode == NVTE_
 
 inline bool is_mxfp8_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
 
-inline bool is_mxfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP8_1D_SCALING; }
+#ifdef __HIP_PLATFORM_AMD__
+inline bool is_mxfp4_scaling(const NVTEScalingMode &mode) { return mode == NVTE_MXFP4_1D_SCALING; }
+#endif //#ifdef __HIP_PLATFORM_AMD__
 
+#ifdef __HIP_PLATFORM_AMD__
+inline bool is_mxfp_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_MXFP8_1D_SCALING || mode == NVTE_MXFP4_1D_SCALING;
+}
+#else
+inline bool is_mxfp_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_MXFP8_1D_SCALING;
+}
+#endif //#ifdef __HIP_PLATFORM_AMD__
 inline bool is_nvfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_NVFP4_1D_SCALING; }
 
 inline size_t product(const std::vector<size_t> &shape, const size_t begin, const size_t end) {
@@ -149,6 +168,11 @@ struct Tensor {
    */
   bool with_gemm_swizzled_scales = false;
 
+#ifdef __HIP_PLATFORM_AMD__
+  bool mxfp4_shuffle_rowwise_data = false;
+  bool mxfp4_shuffle_columnwise_data = false;
+#endif
+
   /*! Map from NVTETensorParam to parameter sizes */
   static constexpr size_t attr_sizes[] = {
       sizeof(NVTEBasicTensor),  // kNVTERowwiseData
@@ -158,7 +182,12 @@ struct Tensor {
       sizeof(NVTEBasicTensor),  // kNVTERowwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseScaleInv
       sizeof(NVTEBasicTensor),  // kNVTEColumnwiseAmax
-      sizeof(uint8_t)           // kNVTEWithGEMMSwizzledScales
+      sizeof(uint8_t)          // kNVTEWithGEMMSwizzledScales
+#ifdef __HIP_PLATFORM_AMD__
+      ,
+      sizeof(uint8_t),          // kNVTEMXFP4ShuffleRowwiseData
+      sizeof(uint8_t)           // kNVTEMXFP4ShuffleColumnwiseData
+#endif
   };
 
   Tensor() : scaling_mode{NVTE_DELAYED_TENSOR_SCALING}, nvte_tensor{0} {}
@@ -174,6 +203,10 @@ struct Tensor {
     columnwise_scale_inv.clear();
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     with_gemm_swizzled_scales = false;
+#ifdef __HIP_PLATFORM_AMD__
+    mxfp4_shuffle_rowwise_data = false;
+    mxfp4_shuffle_columnwise_data = false;
+#endif
   }
 
   explicit operator NVTETensor() const noexcept { return nvte_tensor; }
@@ -230,7 +263,11 @@ struct Tensor {
       case NVTE_DELAYED_TENSOR_SCALING:
       case NVTE_BLOCK_SCALING_1D:
       case NVTE_BLOCK_SCALING_2D:
-      case NVTE_NVFP4_1D_SCALING: {
+      case NVTE_NVFP4_1D_SCALING:
+#ifdef __HIP_PLATFORM_AMD__
+      case NVTE_MXFP4_1D_SCALING:
+#endif
+      {
         // Row-wise data shape matches tensor logical shape,
         // column-wise data shape is transpose of logical shape
         if (!has_data() && has_columnwise_data()) {
@@ -323,6 +360,9 @@ struct GroupedTensor {
   SimpleTensor columnwise_amax;
   SimpleTensor scale;  // for FP8-DS only
 
+  NVTEScalingMode scaling_mode;
+  size_t num_tensors;
+
   // Shape information (OPTIONAL - empty if dimension is uniform across all tensors)
   // first_dims[i] = first dimension of tensor i (empty if all tensors have same first dim)
   // last_dims[i] = last dimension of tensor i (empty if all tensors have same last dim)
@@ -340,9 +380,38 @@ struct GroupedTensor {
   // Always 2D with positive dimensions
   NVTEShape logical_shape;
 
-  NVTEScalingMode scaling_mode;
-  size_t num_tensors;
   NVTEGroupedTensor nvte_tensor;
+
+  /*! \brief Whether scaling factors are in format expected by GEMM
+   *
+   *  Only meaningful for MXFP8 and NVFP4.
+   */
+  bool with_gemm_swizzled_scales = false;
+
+#ifdef __HIP_PLATFORM_AMD__
+  bool mxfp4_shuffle_rowwise_data = false;
+  bool mxfp4_shuffle_columnwise_data = false;
+#endif
+
+  /*! Map from NVTEGroupedTensorParam to parameter sizes */
+  static constexpr size_t attr_sizes[] = {
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedRowwiseData
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedColumnwiseData
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedScale
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedAmax
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedRowwiseScaleInv
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedColumnwiseScaleInv
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedColumnwiseAmax
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedFirstDims
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedLastDims
+      sizeof(NVTEBasicTensor),  // kNVTEGroupedTensorOffsets
+      sizeof(uint8_t)           // kNVTEGroupedWithGEMMSwizzledScales
+#ifdef __HIP_PLATFORM_AMD__
+      ,
+      sizeof(uint8_t),          // kNVTEGroupedMXFP4ShuffleRowwiseData
+      sizeof(uint8_t)           // kNVTEGroupedMXFP4ShuffleColumnwiseData
+#endif
+  };
 
   GroupedTensor(NVTEScalingMode scaling_mode, size_t num_tensors)
       : data(),
@@ -352,13 +421,18 @@ struct GroupedTensor {
         amax(),
         columnwise_amax(),
         scale(),
+        scaling_mode(scaling_mode),
         num_tensors(num_tensors),
         first_dims(nullptr, std::vector<size_t>{0}, DType::kInt64),
         last_dims(nullptr, std::vector<size_t>{0}, DType::kInt64),
         tensor_offsets(nullptr, std::vector<size_t>{0}, DType::kInt64),
         logical_shape(nvte_make_shape(nullptr, 1)),
-        scaling_mode(scaling_mode),
-        nvte_tensor(0) {}
+        nvte_tensor(0),
+#ifdef __HIP_PLATFORM_AMD__
+        mxfp4_shuffle_rowwise_data(false),
+        mxfp4_shuffle_columnwise_data(false),
+#endif
+        with_gemm_swizzled_scales(false) {}
 
   explicit operator NVTEGroupedTensor() const noexcept { return nvte_tensor; }
 
@@ -410,6 +484,11 @@ struct GroupedTensor {
     num_tensors = 0;
     scaling_mode = NVTE_DELAYED_TENSOR_SCALING;
     nvte_tensor = 0;
+    with_gemm_swizzled_scales = false;
+#ifdef __HIP_PLATFORM_AMD__
+    mxfp4_shuffle_rowwise_data = false;
+    mxfp4_shuffle_columnwise_data = false;
+#endif
   }
 };
 
@@ -421,6 +500,9 @@ struct QuantizationConfig {
   bool nvfp4_2d_quantization = false;
   bool stochastic_rounding = false;
   bool use_fast_math = false;
+#ifdef __HIP_PLATFORM_AMD__
+  bool mxfp4_use_hadamard = false;
+#endif
 
   static constexpr size_t attr_sizes[] = {
       sizeof(uint8_t),                       // force_pow_2_scales
@@ -430,7 +512,10 @@ struct QuantizationConfig {
       sizeof(NVTETensor),                    // rng_seed and offset
       sizeof(uint8_t),                       // nvfp4_2d_quantization
       sizeof(uint8_t),                       // stochastic_rounding
-      sizeof(uint8_t)                        // use_fast_math
+      sizeof(uint8_t),                       // use_fast_math
+#ifdef __HIP_PLATFORM_AMD__
+      sizeof(uint8_t)                        // mxfp4_use_hadamard
+#endif
   };
 };
 
@@ -652,125 +737,149 @@ struct TypeInfo {
 #define SWITCH_FP4_TYPE_HANDLE(type, ...)  // do nothing
 #endif
 
-#define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...) \
-  switch (dtype) {                                           \
-    using namespace transformer_engine;                      \
-    case DType::kByte: {                                     \
-      using type = unsigned char;                            \
-      { __VA_ARGS__ }                                        \
-    } break;                                                 \
-    case DType::kInt16: {                                    \
-      using type = int16_t;                                  \
-      { __VA_ARGS__ }                                        \
-    } break;                                                 \
-    case DType::kInt32: {                                    \
-      using type = int32_t;                                  \
-      { __VA_ARGS__ }                                        \
-    } break;                                                 \
-    case DType::kInt64: {                                    \
-      using type = int64_t;                                  \
-      { __VA_ARGS__ }                                        \
-    } break;                                                 \
-    case DType::kFloat32: {                                  \
-      using type = float;                                    \
-      { __VA_ARGS__ }                                        \
-    } break;                                                 \
-    case DType::kFloat16: {                                  \
-      using type = fp16;                                     \
-      { __VA_ARGS__ }                                        \
-    } break;                                                 \
-    case DType::kBFloat16: {                                 \
-      using type = bf16;                                     \
-      { __VA_ARGS__ }                                        \
-    } break;                                                 \
-    case DType::kFloat8E4M3: {                               \
-      using type = fp8e4m3;                                  \
-      { __VA_ARGS__ }                                        \
-    } break;                                                 \
-    case DType::kFloat8E5M2: {                               \
-      using type = fp8e5m2;                                  \
-      { __VA_ARGS__ }                                        \
-    } break;                                                 \
-    case DType::kFloat8E8M0: {                               \
-      using type = byte;                                     \
-      { __VA_ARGS__ }                                        \
-    } break;                                                 \
-      SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__)              \
-    default:                                                 \
-      NVTE_ERROR("Invalid type.");                           \
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_ALL(dtype, type, ...)                 \
+  switch (dtype) {                                                           \
+    using namespace transformer_engine;                                      \
+    case DType::kByte: {                                                     \
+      using type = unsigned char;                                            \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kInt16: {                                                    \
+      using type = int16_t;                                                  \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kInt32: {                                                    \
+      using type = int32_t;                                                  \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kInt64: {                                                    \
+      using type = int64_t;                                                  \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kFloat32: {                                                  \
+      using type = float;                                                    \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kFloat16: {                                                  \
+      using type = fp16;                                                     \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kBFloat16: {                                                 \
+      using type = bf16;                                                     \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kFloat8E4M3: {                                               \
+      using type = fp8e4m3;                                                  \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kFloat8E5M2: {                                               \
+      using type = fp8e5m2;                                                  \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kFloat8E8M0: {                                               \
+      using type = byte;                                                     \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+      SWITCH_FP4_TYPE_HANDLE(type, __VA_ARGS__)                              \
+    default:                                                                 \
+      NVTE_ERROR("Unsupported dtype ", to_string(static_cast<DType>(dtype)), \
+                 ". Expected one of: Byte, Int16, Int32, Int64, Float32, "   \
+                 "Float16, BFloat16, Float8E4M3, Float8E5M2, "               \
+                 "Float8E8M0, Float4E2M1.");                                 \
   }
 
-#define TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(dtype, type, ...) \
-  switch (dtype) {                                             \
-    using namespace transformer_engine;                        \
-    case DType::kFloat32: {                                    \
-      using type = float;                                      \
-      { __VA_ARGS__ }                                          \
-    } break;                                                   \
-    case DType::kFloat16: {                                    \
-      using type = fp16;                                       \
-      { __VA_ARGS__ }                                          \
-    } break;                                                   \
-    case DType::kBFloat16: {                                   \
-      using type = bf16;                                       \
-      { __VA_ARGS__ }                                          \
-    } break;                                                   \
-    case DType::kFloat8E4M3: {                                 \
-      using type = fp8e4m3;                                    \
-      { __VA_ARGS__ }                                          \
-    } break;                                                   \
-    case DType::kFloat8E5M2: {                                 \
-      using type = fp8e5m2;                                    \
-      { __VA_ARGS__ }                                          \
-    } break;                                                   \
-    default:                                                   \
-      NVTE_ERROR("Invalid type.");                             \
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_FLOAT(dtype, type, ...)               \
+  switch (dtype) {                                                           \
+    using namespace transformer_engine;                                      \
+    case DType::kFloat32: {                                                  \
+      using type = float;                                                    \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kFloat16: {                                                  \
+      using type = fp16;                                                     \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kBFloat16: {                                                 \
+      using type = bf16;                                                     \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kFloat8E4M3: {                                               \
+      using type = fp8e4m3;                                                  \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kFloat8E5M2: {                                               \
+      using type = fp8e5m2;                                                  \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    default:                                                                 \
+      NVTE_ERROR("Unsupported dtype ", to_string(static_cast<DType>(dtype)), \
+                 ". Expected one of: Float32, Float16, BFloat16, "           \
+                 "Float8E4M3, Float8E5M2.");                                 \
   }
 
-#define TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, type, ...) \
-  switch (dtype) {                                              \
-    using namespace transformer_engine;                         \
-    case DType::kFloat32: {                                     \
-      using type = float;                                       \
-      { __VA_ARGS__ }                                           \
-    } break;                                                    \
-    case DType::kFloat16: {                                     \
-      using type = fp16;                                        \
-      { __VA_ARGS__ }                                           \
-    } break;                                                    \
-    case DType::kBFloat16: {                                    \
-      using type = bf16;                                        \
-      { __VA_ARGS__ }                                           \
-    } break;                                                    \
-    case DType::kFloat8E5M2: {                                  \
-      using type = fp8e5m2;                                     \
-      { __VA_ARGS__ }                                           \
-    } break;                                                    \
-    case DType::kFloat8E4M3: {                                  \
-      using type = fp8e4m3;                                     \
-      { __VA_ARGS__ }                                           \
-    } break;                                                    \
-    default:                                                    \
-      NVTE_ERROR("Invalid type.");                              \
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_OUTPUT(dtype, type, ...)                     \
+  switch (dtype) {                                                                  \
+    using namespace transformer_engine;                                             \
+    case DType::kFloat32: {                                                         \
+      using type = float;                                                           \
+      { __VA_ARGS__ }                                                               \
+    } break;                                                                        \
+    case DType::kFloat16: {                                                         \
+      using type = fp16;                                                            \
+      { __VA_ARGS__ }                                                               \
+    } break;                                                                        \
+    case DType::kBFloat16: {                                                        \
+      using type = bf16;                                                            \
+      { __VA_ARGS__ }                                                               \
+    } break;                                                                        \
+    case DType::kFloat8E5M2: {                                                      \
+      using type = fp8e5m2;                                                         \
+      { __VA_ARGS__ }                                                               \
+    } break;                                                                        \
+    case DType::kFloat8E4M3: {                                                      \
+      using type = fp8e4m3;                                                         \
+      { __VA_ARGS__ }                                                               \
+    } break;                                                                        \
+    default:                                                                        \
+      NVTE_ERROR("Unsupported output dtype ", to_string(static_cast<DType>(dtype)), \
+                 ". Expected one of: Float32, Float16, BFloat16, "                  \
+                 "Float8E5M2, Float8E4M3.");                                        \
   }
 
-#define TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, type, ...) \
-  switch (dtype) {                                                   \
-    using namespace transformer_engine;                              \
-    case DType::kFloat32: {                                          \
-      using type = float;                                            \
-      { __VA_ARGS__ }                                                \
-    } break;                                                         \
-    case DType::kFloat16: {                                          \
-      using type = fp16;                                             \
-      { __VA_ARGS__ }                                                \
-    } break;                                                         \
-    case DType::kBFloat16: {                                         \
-      using type = bf16;                                             \
-      { __VA_ARGS__ }                                                \
-    } break;                                                         \
-    default:                                                         \
-      NVTE_ERROR("Invalid type.");                                   \
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(dtype, type, ...)         \
+  switch (dtype) {                                                           \
+    using namespace transformer_engine;                                      \
+    case DType::kFloat32: {                                                  \
+      using type = float;                                                    \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kFloat16: {                                                  \
+      using type = fp16;                                                     \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kBFloat16: {                                                 \
+      using type = bf16;                                                     \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    default:                                                                 \
+      NVTE_ERROR("Unsupported dtype ", to_string(static_cast<DType>(dtype)), \
+                 ". Expected one of: Float32, Float16, BFloat16.");          \
+  }
+
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_FP32_BF16(dtype, type, ...)           \
+  switch (dtype) {                                                           \
+    using namespace transformer_engine;                                      \
+    case DType::kFloat32: {                                                  \
+      using type = float;                                                    \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kBFloat16: {                                                 \
+      using type = bf16;                                                     \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    default:                                                                 \
+      NVTE_ERROR("Unsupported dtype ", to_string(static_cast<DType>(dtype)), \
+                 ". Expected one of: Float32, BFloat16.");                   \
   }
 
 // Add a pack_size argument to select the packed type for FP4
@@ -782,80 +891,90 @@ struct TypeInfo {
       { __VA_ARGS__ }                                                          \
     } break;                                                                   \
     default:                                                                   \
-      NVTE_ERROR("Invalid type.");                                             \
+      NVTE_ERROR("Unsupported dtype ", to_string(static_cast<DType>(dtype)),   \
+                 ". Expected: Float4E2M1.");                                   \
   }
 
-#define TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(dtype, type, ...) \
-  switch (dtype) {                                               \
-    using namespace transformer_engine;                          \
-    case DType::kFloat8E5M2: {                                   \
-      using type = fp8e5m2;                                      \
-      { __VA_ARGS__ }                                            \
-    } break;                                                     \
-    case DType::kFloat8E4M3: {                                   \
-      using type = fp8e4m3;                                      \
-      { __VA_ARGS__ }                                            \
-    } break;                                                     \
-    default:                                                     \
-      NVTE_ERROR("Invalid type.");                               \
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(dtype, type, ...)             \
+  switch (dtype) {                                                           \
+    using namespace transformer_engine;                                      \
+    case DType::kFloat8E5M2: {                                               \
+      using type = fp8e5m2;                                                  \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    case DType::kFloat8E4M3: {                                               \
+      using type = fp8e4m3;                                                  \
+      { __VA_ARGS__ }                                                        \
+    } break;                                                                 \
+    default:                                                                 \
+      NVTE_ERROR("Unsupported dtype ", to_string(static_cast<DType>(dtype)), \
+                 ". Expected one of: Float8E5M2, Float8E4M3.");              \
   }
 
-#define TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, type, ...) \
-  switch (dtype) {                                             \
-    using namespace transformer_engine;                        \
-    case DType::kFloat32: {                                    \
-      using type = float;                                      \
-      { __VA_ARGS__ }                                          \
-    } break;                                                   \
-    case DType::kFloat16: {                                    \
-      using type = fp16;                                       \
-      { __VA_ARGS__ }                                          \
-    } break;                                                   \
-    case DType::kBFloat16: {                                   \
-      using type = bf16;                                       \
-      { __VA_ARGS__ }                                          \
-    } break;                                                   \
-    case DType::kFloat8E5M2:                                   \
-    case DType::kFloat8E4M3: {                                 \
-      NVTE_ERROR("FP8 type not instantiated for input.");      \
-    } break;                                                   \
-    case DType::kFloat4E2M1: {                                 \
-      NVTE_ERROR("FP4 type not instantiated for input.");      \
-    } break;                                                   \
-    default:                                                   \
-      NVTE_ERROR("Invalid type.");                             \
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_INPUT(dtype, type, ...)                     \
+  switch (dtype) {                                                                 \
+    using namespace transformer_engine;                                            \
+    case DType::kFloat32: {                                                        \
+      using type = float;                                                          \
+      { __VA_ARGS__ }                                                              \
+    } break;                                                                       \
+    case DType::kFloat16: {                                                        \
+      using type = fp16;                                                           \
+      { __VA_ARGS__ }                                                              \
+    } break;                                                                       \
+    case DType::kBFloat16: {                                                       \
+      using type = bf16;                                                           \
+      { __VA_ARGS__ }                                                              \
+    } break;                                                                       \
+    case DType::kFloat8E5M2:                                                       \
+    case DType::kFloat8E4M3: {                                                     \
+      NVTE_ERROR("FP8 dtype ", to_string(static_cast<DType>(dtype)),               \
+                 " is not instantiated for input. "                                \
+                 "Expected one of: Float32, Float16, BFloat16.");                  \
+    } break;                                                                       \
+    case DType::kFloat4E2M1: {                                                     \
+      NVTE_ERROR(                                                                  \
+          "FP4 dtype Float4E2M1 is not instantiated "                              \
+          "for input. Expected one of: Float32, Float16, "                         \
+          "BFloat16.");                                                            \
+    } break;                                                                       \
+    default:                                                                       \
+      NVTE_ERROR("Unsupported input dtype ", to_string(static_cast<DType>(dtype)), \
+                 ". Expected one of: Float32, Float16, BFloat16.");                \
   }
 
-#define TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, type, ...) \
-  switch (dtype) {                                             \
-    using namespace transformer_engine;                        \
-    case DType::kFloat16: {                                    \
-      using type = fp16;                                       \
-      __VA_ARGS__;                                             \
-      break;                                                   \
-    }                                                          \
-    case DType::kBFloat16: {                                   \
-      using type = bf16;                                       \
-      __VA_ARGS__;                                             \
-      break;                                                   \
-    }                                                          \
-    default:                                                   \
-      NVTE_ERROR("Invalid type for 16 bit.");                  \
+#define TRANSFORMER_ENGINE_TYPE_SWITCH_16BIT(dtype, type, ...)                      \
+  switch (dtype) {                                                                  \
+    using namespace transformer_engine;                                             \
+    case DType::kFloat16: {                                                         \
+      using type = fp16;                                                            \
+      __VA_ARGS__;                                                                  \
+      break;                                                                        \
+    }                                                                               \
+    case DType::kBFloat16: {                                                        \
+      using type = bf16;                                                            \
+      __VA_ARGS__;                                                                  \
+      break;                                                                        \
+    }                                                                               \
+    default:                                                                        \
+      NVTE_ERROR("Unsupported 16-bit dtype ", to_string(static_cast<DType>(dtype)), \
+                 ". Expected one of: Float16, BFloat16.");                          \
   }
 
-#define TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(SCALE_DIM, DIM, ...) \
-  switch (SCALE_DIM) {                                              \
-    case 1: {                                                       \
-      constexpr size_t DIM = 1;                                     \
-      { __VA_ARGS__ }                                               \
-    } break;                                                        \
-    case 32: {                                                      \
-      constexpr size_t DIM = 32;                                    \
-      { __VA_ARGS__ }                                               \
-    } break;                                                        \
-    default: {                                                      \
-      NVTE_ERROR("Invalid size of the MX scaling factor.");         \
-    }                                                               \
+#define TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(SCALE_DIM, DIM, ...)     \
+  switch (SCALE_DIM) {                                                  \
+    case 1: {                                                           \
+      constexpr size_t DIM = 1;                                         \
+      { __VA_ARGS__ }                                                   \
+    } break;                                                            \
+    case 32: {                                                          \
+      constexpr size_t DIM = 32;                                        \
+      { __VA_ARGS__ }                                                   \
+    } break;                                                            \
+    default: {                                                          \
+      NVTE_ERROR("Unsupported MX scaling factor dimension ", SCALE_DIM, \
+                 ". Expected one of: 1, 32.");                          \
+    }                                                                   \
   }
 
 #define TRANSFORMER_ENGINE_SWITCH_CONDITION(CONDITION, FLAG, ...) \

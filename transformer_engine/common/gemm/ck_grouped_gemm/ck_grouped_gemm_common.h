@@ -15,6 +15,7 @@
 
 #include <transformer_engine/transformer_engine.h>
 #include "../../common.h"
+#include "../../common/util/system.h"
 
 #include "ck_tile/core.hpp"
 #include "ck_tile/ops/epilogue.hpp"
@@ -84,6 +85,7 @@ struct GroupedGemmRunContext {
     size_t workspace_bytes = 0;
     hipStream_t stream = nullptr;
 
+    bool use_a_columnwise_data = false;
     bool use_b_columnwise_data = false;
     bool accumulate = false;
 };
@@ -139,7 +141,16 @@ static inline bool launch_grouped_gemm_kernel(const DescContainer& descs,
 
   if (!Kernel::IsSupportedArgument(kargs)) {
     NVTE_WARN("ck_tile_grouped_gemm: CK_Tile kernel arguments not supported for this config. "
-              "Falling back.");
+              "transA=", ctx.transA, " transB=", ctx.transB,
+              " accumulate=", ctx.accumulate, " groups=", ctx.group_num,
+              ". Falling back. "
+              "CK_Tile constraints for bf16/fp16: "
+              "contiguous dim of A and B must be dword-aligned (even).");
+    for (size_t i = 0; i < descs.size(); ++i) {
+      NVTE_WARN("  group ", i, ": M=", descs[i].M, " N=", descs[i].N, " K=", descs[i].K,
+                " stride_A=", descs[i].stride_A, " stride_B=", descs[i].stride_B,
+                " stride_E=", descs[i].stride_E);
+    }
     return false;
   }
 

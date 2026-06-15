@@ -16,7 +16,10 @@ from typing import List, Tuple
 
 import setuptools
 from setuptools.command.egg_info import egg_info
-from wheel.bdist_wheel import bdist_wheel
+try:
+    from setuptools.command.bdist_wheel import bdist_wheel
+except ImportError:
+    from wheel.bdist_wheel import bdist_wheel
 
 from build_tools.build_ext import CMakeExtension, get_build_ext
 from build_tools.te_version import te_version
@@ -76,16 +79,12 @@ def setup_common_extension() -> CMakeExtension:
                 os.getenv("MPI_HOME") is not None
             ), "MPI_HOME must be set when compiling with NVTE_UB_WITH_MPI=1"
             cmake_flags.append("-DNVTE_UB_WITH_MPI=ON")
-    
+
     if rocm_build():
         cmake_flags.append("-DUSE_ROCM=ON")
-        if os.getenv("NVTE_AOTRITON_PATH"):
-            aotriton_path = Path(os.getenv("NVTE_AOTRITON_PATH"))
-            cmake_flags.append(f"-DAOTRITON_PATH={aotriton_path}")
-        cmake_flags.append(f"-DCK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT={os.getenv('NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT', 3)}")
-        if os.getenv("NVTE_CK_FUSED_ATTN_PATH"):
-            ck_path = Path(os.getenv("NVTE_CK_FUSED_ATTN_PATH"))
-            cmake_flags.append(f"-DAITER_MHA_PATH={ck_path}")
+        cmake_flags.append(
+            f"-DCK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT={os.getenv('NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT', '3')}"
+        )
 
         if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=OFF")
@@ -122,11 +121,6 @@ def setup_common_extension() -> CMakeExtension:
             f"nvidia-cublasmp-cu{cuda_version()[0]}"
         ).locate_file(f"nvidia/cublasmp/cu{cuda_version()[0]}")
         cmake_flags.append(f"-DCUBLASMP_DIR={cublasmp_dir}")
-        nvshmem_dir = os.getenv("NVSHMEM_HOME") or metadata.distribution(
-            f"nvidia-nvshmem-cu{cuda_version()[0]}"
-        ).locate_file("nvidia/nvshmem")
-        cmake_flags.append(f"-DNVSHMEM_DIR={nvshmem_dir}")
-        print("CMAKE_FLAGS:", cmake_flags[-2:])
 
     # Add custom CMake arguments from environment variable
     nvte_cmake_extra_args = os.getenv("NVTE_CMAKE_EXTRA_ARGS")

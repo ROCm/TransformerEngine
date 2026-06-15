@@ -76,6 +76,10 @@ std::string to_string(const NVTEScalingMode &mode) {
       return "NVTE_BLOCK_SCALING_2D";
     case NVTE_NVFP4_1D_SCALING:
       return "NVTE_NVFP4_1D_SCALING";
+#ifdef __HIP_PLATFORM_AMD__
+    case NVTE_MXFP4_1D_SCALING:
+      return "NVTE_MXFP4_1D_SCALING";
+#endif
     case NVTE_INVALID_SCALING:
       return "NVTE_INVALID_SCALING";
   }
@@ -125,8 +129,10 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
       // Need (4, 128) alignment even for e8 scaling factor
       auto block_alignment = std::vector<size_t>{128ul, 4ul};
 #else
-      // HIP does not use scale padding
-      auto block_alignment = std::vector<size_t>{1ul, 1ul};
+      // HIP does not use scale padding (except gfx1250 which pads both dims to mult of 4)
+      auto block_alignment = (cuda::sm_arch() == 125)
+          ? std::vector<size_t>{4ul, 4ul}
+          : std::vector<size_t>{1ul, 1ul};
 #endif
       size_t expected_x, expected_y, alignment;
       const size_t block_size_rowwise = 32;
@@ -177,6 +183,33 @@ void CheckScaleTensorShape(const Tensor &t, const std::string &name) {
                    t.columnwise_scale_inv.shape, ")");
       }
     }
+#ifdef __HIP_PLATFORM_AMD__
+    else if (t.scaling_mode == NVTE_MXFP4_1D_SCALING) {
+      const size_t row_alignment = 256;
+      const size_t col_alignment = 8;
+
+      const size_t block_size = 32;
+
+      if (t.has_data()) {
+        const size_t expected_y = DIVUP_TO_MULTIPLE(t.flat_first_dim(), row_alignment);
+        const size_t expected_x =
+            DIVUP_TO_MULTIPLE(DIVUP(t.flat_last_dim(), block_size), col_alignment);
+        const auto &expected = std::vector<size_t>{expected_y, expected_x};
+        NVTE_CHECK(t.scale_inv.shape == expected, "Tensor \"", name,
+                   "\" has invalid scale_inv shape (expected ", expected, ", got ",
+                   t.scale_inv.shape, ")");
+      }
+      if (t.has_columnwise_data()) {
+        const size_t expected_y = DIVUP_TO_MULTIPLE(t.flat_last_dim(), row_alignment);
+        const size_t expected_x =
+            DIVUP_TO_MULTIPLE(DIVUP(t.flat_first_dim(), block_size), col_alignment);
+        const auto &expected = std::vector<size_t>{expected_y, expected_x};
+        NVTE_CHECK(t.columnwise_scale_inv.shape == expected, "Tensor \"", name,
+                   "\"  has invalid columnwise_scale_inv shape (expected ", expected, ", got ",
+                   t.columnwise_scale_inv.shape, ")");
+      }
+    }
+#endif
   }
 }
 
@@ -206,21 +239,27 @@ void CheckInputTensor(const Tensor &t, const std::string &name) {
   } else if (is_fp4_dtype(type)) {
     // TODO(ksivaman): Fix this to check for amaxes and other details.
     // For now only needed for swizzle.
+#ifdef __HIP_PLATFORM_AMD__
+    const DType expected_scale_dtype =
+        is_mxfp4_scaling(t.scaling_mode) ? DType::kFloat8E8M0 : DType::kFloat8E4M3;
+#else
+    const DType expected_scale_dtype = DType::kFloat8E4M3;
+#endif
     if (t.has_data()) {
       NVTE_CHECK(t.scale_inv.has_data(), "FP4 scaling factor input ", name,
                  "_scale_inverse must be allocated");
-      NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor input ", name,
+      NVTE_CHECK(t.scale_inv.dtype == expected_scale_dtype, "FP4 scaling factor input ", name,
                  "_scale_inverse has invalid dtype "
-                 "(expected DType::kFloat8E4M3, got ",
+                 "(expected ", to_string(expected_scale_dtype), ", got ",
                  to_string(t.scale_inv.dtype), ")");
     }
     if (t.has_columnwise_data()) {
       NVTE_CHECK(t.columnwise_scale_inv.has_data(), "FP4 scaling factor input ", name,
                  "_columnwise_scale_inverse must be allocated");
-      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3, "FP8 scaling factor input ",
-                 name,
+      NVTE_CHECK(t.columnwise_scale_inv.dtype == expected_scale_dtype,
+                 "FP4 scaling factor input ", name,
                  "_columnwise_scale_inverse has invalid dtype "
-                 "(expected DType::kFloat8E4M3, got ",
+                 "(expected ", to_string(expected_scale_dtype), ", got ",
                  to_string(t.columnwise_scale_inv.dtype), ")");
     }
   } else {
@@ -265,21 +304,27 @@ void CheckOutputTensor(const Tensor &t, const std::string &name, bool allow_empt
     }
   } else if (is_fp4_dtype(type)) {
     // FP4 output needs to have the scale_inv
+#ifdef __HIP_PLATFORM_AMD__
+    const DType expected_scale_dtype =
+        is_mxfp4_scaling(t.scaling_mode) ? DType::kFloat8E8M0 : DType::kFloat8E4M3;
+#else
+    const DType expected_scale_dtype = DType::kFloat8E4M3;
+#endif
     if (t.has_data()) {
       NVTE_CHECK(t.scale_inv.has_data(), "FP4 scaling factor output ", name,
                  "_scale_inverse must be allocated");
-      NVTE_CHECK(t.scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor output ", name,
+      NVTE_CHECK(t.scale_inv.dtype == expected_scale_dtype, "FP4 scaling factor output ", name,
                  "_scale_inverse has invalid dtype "
-                 "(expected Float8E4M3, got ",
+                 "(expected ", to_string(expected_scale_dtype), ", got ",
                  to_string(t.scale_inv.dtype), ")");
     }
     if (t.has_columnwise_data()) {
       NVTE_CHECK(t.columnwise_scale_inv.has_data(), "FP4 scaling factor output ", name,
                  "_columnwise_scale_inverse must be allocated");
-      NVTE_CHECK(t.columnwise_scale_inv.dtype == DType::kFloat8E4M3, "FP4 scaling factor output ",
-                 name,
+      NVTE_CHECK(t.columnwise_scale_inv.dtype == expected_scale_dtype,
+                 "FP4 scaling factor output ", name,
                  "_columnwise_scale_inverse has invalid dtype "
-                 "(expected Float8E4M3, got ",
+                 "(expected ", to_string(expected_scale_dtype), ", got ",
                  to_string(t.columnwise_scale_inv.dtype), ")");
     }
   } else {
@@ -379,7 +424,11 @@ static void CheckGroupedScaleInv(const GroupedTensor &t, const std::string &name
   // Determine expected dtype based on data type and scaling mode
   if (is_fp8_dtype(t.dtype()) && is_tensor_scaling(t.scaling_mode)) {
     check_scales(DType::kFloat32);
-  } else if (is_mxfp8_scaling(t.scaling_mode)) {
+  } else if (is_mxfp8_scaling(t.scaling_mode)
+#ifdef __HIP_PLATFORM_AMD__
+            || is_mxfp4_scaling(t.scaling_mode)
+#endif
+            ) {
     check_scales(DType::kFloat8E8M0);
   } else if (is_nvfp4_scaling(t.scaling_mode)) {
     check_scales(DType::kFloat8E4M3);
@@ -461,9 +510,9 @@ class TensorAllocator {
   }
 
   void Free(NVTETensor t) {
-    std::lock_guard<std::mutex> lock(mutex);
     uintptr_t index = reinterpret_cast<uintptr_t>(t);
     if (index == 0) return;
+    std::lock_guard<std::mutex> lock(mutex);
     NVTE_CHECK(index <= memory.size(), "Invalid tensor.");
     free_list.push_back(index);
     // Clean up
@@ -571,9 +620,9 @@ class GroupedTensorAllocator {
   }
 
   void Free(NVTEGroupedTensor t) {
-    std::lock_guard<std::mutex> lock(mutex);
     uintptr_t index = reinterpret_cast<uintptr_t>(t);
     if (index == 0) return;
+    std::lock_guard<std::mutex> lock(mutex);
     NVTE_CHECK(index <= memory.size(), "Invalid grouped tensor.");
     free_list.push_back(index);
     // Clean up
@@ -657,7 +706,7 @@ NVTEShape nvte_make_shape(const size_t *data, size_t ndim) {
 NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) {
-    NVTE_ERROR("Invalid tensor");
+    NVTE_ERROR("Invalid tensor: received null pointer in nvte_tensor_shape");
   }
 
   // Determine tensor shape depending on tensor format
@@ -669,7 +718,7 @@ NVTEShape nvte_tensor_shape(const NVTETensor tensor) {
 NVTEShape nvte_tensor_columnwise_shape(const NVTETensor tensor) {
   auto *t = transformer_engine::convertNVTETensor(tensor);
   if (t == nullptr) {
-    NVTE_ERROR("Invalid tensor");
+    NVTE_ERROR("Invalid tensor: received null pointer in nvte_tensor_columnwise_shape");
   }
   const std::vector<size_t> &shape = t->columnwise_data.shape;
   return nvte_make_shape(shape.data(), shape.size());
@@ -875,6 +924,14 @@ void nvte_set_tensor_param_v2(NVTETensor tensor, NVTETensorParam param, const vo
     case kNVTEWithGEMMSwizzledScales:
       t.with_gemm_swizzled_scales = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
       break;
+#ifdef __HIP_PLATFORM_AMD__
+    case kNVTEMXFP4ShuffleRowwiseData:
+      t.mxfp4_shuffle_rowwise_data = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
+    case kNVTEMXFP4ShuffleColumnwiseData:
+      t.mxfp4_shuffle_columnwise_data = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
+#endif
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
   }
@@ -955,6 +1012,14 @@ void nvte_get_tensor_param_v2(const NVTETensor tensor, NVTETensorParam param, vo
     case kNVTEWithGEMMSwizzledScales:
       *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->with_gemm_swizzled_scales);
       break;
+#ifdef __HIP_PLATFORM_AMD__
+    case kNVTEMXFP4ShuffleRowwiseData:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->mxfp4_shuffle_rowwise_data);
+      break;
+    case kNVTEMXFP4ShuffleColumnwiseData:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->mxfp4_shuffle_columnwise_data);
+      break;
+#endif
     default:
       NVTE_ERROR("Unsupported tensor parameter (", static_cast<int>(param), ")");
   }
@@ -1066,6 +1131,11 @@ void nvte_get_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigUseFastMath:
       bool_to_uint8(config_.use_fast_math, buf);
       break;
+#ifdef __HIP_PLATFORM_AMD__
+    case kNVTEQuantizationConfigMXFP4UseHadamard:
+      bool_to_uint8(config_.mxfp4_use_hadamard, buf);
+      break;
+#endif
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -1121,6 +1191,11 @@ void nvte_set_quantization_config_attribute(NVTEQuantizationConfig config,
     case kNVTEQuantizationConfigUseFastMath:
       uint8_to_bool(buf, config_.use_fast_math);
       break;
+#ifdef __HIP_PLATFORM_AMD__
+    case kNVTEQuantizationConfigMXFP4UseHadamard:
+      uint8_to_bool(buf, config_.mxfp4_use_hadamard);
+      break;
+#endif
     default:
       NVTE_ERROR("Unsupported NVTEQuantizationConfigAttribute (got ", static_cast<int>(attr), ")");
   }
@@ -1133,6 +1208,9 @@ void nvte_destroy_quantization_config(NVTEQuantizationConfig config) {
 }
 
 int nvte_is_non_tn_fp8_gemm_supported() {
+#ifdef __HIP_PLATFORM_AMD__
+  return 0;
+#else
   int num_devices = transformer_engine::cuda::num_devices();
   static std::vector<int> cache(num_devices, -1);
   static std::vector<std::once_flag> flags(num_devices);
@@ -1145,6 +1223,7 @@ int nvte_is_non_tn_fp8_gemm_supported() {
                        deviceComputeCapability >= 130;
   });
   return cache[device_id];
+#endif
 }
 
 // Grouped Tensor C API implementations
@@ -1152,8 +1231,8 @@ NVTEGroupedTensor nvte_create_grouped_tensor(NVTEScalingMode scaling_mode, size_
                                              NVTEShape logical_shape) {
   NVTE_CHECK(num_tensors > 0, "Number of tensors must be greater than 0");
   NVTE_CHECK(logical_shape.ndim == 2, "Logical shape must be 2D");
-  NVTE_CHECK(logical_shape.data[0] > 0 && logical_shape.data[1] > 0,
-             "Logical shape must have positive dimensions");
+  // NVTE_CHECK(logical_shape.data[0] > 0 && logical_shape.data[1] > 0,
+  //            "Logical shape must have positive dimensions");
   NVTEGroupedTensor ret = transformer_engine::GroupedTensorAllocator::instance().Allocate(
       scaling_mode, num_tensors, logical_shape);
   return ret;
@@ -1163,88 +1242,194 @@ void nvte_destroy_grouped_tensor(NVTEGroupedTensor tensor) {
   transformer_engine::GroupedTensorAllocator::instance().Free(tensor);
 }
 
-void nvte_set_grouped_tensor_param(NVTEGroupedTensor *tensor, NVTEGroupedTensorParam param_name,
-                                   const NVTEBasicTensor *param) {
-  NVTE_CHECK(tensor != nullptr, "Grouped tensor pointer can't be NULL.");
-  auto *t = transformer_engine::convertNVTEGroupedTensor(*tensor);
-  NVTE_CHECK(t != nullptr, "Grouped tensor is not allocated.");
-  NVTE_CHECK(param != nullptr, "Grouped tensor param can't be NULL.");
+void nvte_set_grouped_tensor_param(NVTEGroupedTensor tensor, NVTEGroupedTensorParam param,
+                                   const void *buf, size_t size_in_bytes) {
+  using namespace transformer_engine;
 
-  switch (param_name) {
-    case kNVTEGroupedRowwiseData:
-      t->data = *param;
+  // Check attribute and buffer
+  NVTE_CHECK(param < kNVTENumGroupedTensorParams, "Invalid NVTEGroupedTensorParam (got ",
+             static_cast<int>(param), ")");
+  NVTE_CHECK(tensor != nullptr, "Grouped tensor pointer can't be NULL.");
+  auto &t = *convertNVTEGroupedTensorCheck(tensor);
+  const auto &attr_size = GroupedTensor::attr_sizes[param];
+  NVTE_CHECK(size_in_bytes >= attr_size,
+             "Buffer is too small for grouped tensor parameter "
+             "(parameter ",
+             static_cast<int>(param), " needs ", attr_size, " bytes, but buffer has ",
+             size_in_bytes, " bytes)");
+  NVTE_CHECK(buf != nullptr, "Invalid buffer (got NULL)");
+
+  // Read from buffer
+  switch (param) {
+    case kNVTEGroupedRowwiseData: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.data = *basic_tensor;
       break;
-    case kNVTEGroupedColumnwiseData:
-      t->columnwise_data = *param;
+    }
+    case kNVTEGroupedColumnwiseData: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.columnwise_data = *basic_tensor;
       break;
-    case kNVTEGroupedScale:
-      t->scale = *param;
+    }
+    case kNVTEGroupedScale: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.scale = *basic_tensor;
       break;
-    case kNVTEGroupedAmax:
-      t->amax = *param;
+    }
+    case kNVTEGroupedAmax: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.amax = *basic_tensor;
       break;
-    case kNVTEGroupedRowwiseScaleInv:
-      t->scale_inv = *param;
+    }
+    case kNVTEGroupedRowwiseScaleInv: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.scale_inv = *basic_tensor;
       break;
-    case kNVTEGroupedColumnwiseScaleInv:
-      t->columnwise_scale_inv = *param;
+    }
+    case kNVTEGroupedColumnwiseScaleInv: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.columnwise_scale_inv = *basic_tensor;
       break;
-    case kNVTEGroupedColumnwiseAmax:
-      t->columnwise_amax = *param;
+    }
+    case kNVTEGroupedColumnwiseAmax: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.columnwise_amax = *basic_tensor;
       break;
-    case kNVTEGroupedFirstDims:
-      t->first_dims = *param;
-      // Validate it's Int64
-      NVTE_CHECK(t->first_dims.dtype == transformer_engine::DType::kInt64,
-                 "first_dims must have dtype Int64");
+    }
+    case kNVTEGroupedFirstDims: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.first_dims = *basic_tensor;
+      NVTE_CHECK(t.first_dims.dtype == DType::kInt64, "first_dims must have dtype Int64");
       break;
-    case kNVTEGroupedLastDims:
-      t->last_dims = *param;
-      // Validate it's Int64
-      NVTE_CHECK(t->last_dims.dtype == transformer_engine::DType::kInt64,
-                 "last_dims must have dtype Int64");
+    }
+    case kNVTEGroupedLastDims: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.last_dims = *basic_tensor;
+      NVTE_CHECK(t.last_dims.dtype == DType::kInt64, "last_dims must have dtype Int64");
       break;
-    case kNVTEGroupedTensorOffsets:
-      t->tensor_offsets = *param;
-      // Validate it's Int64
-      NVTE_CHECK(t->tensor_offsets.dtype == transformer_engine::DType::kInt64,
-                 "tensor_offsets must have dtype Int64");
+    }
+    case kNVTEGroupedTensorOffsets: {
+      const NVTEBasicTensor *basic_tensor = reinterpret_cast<const NVTEBasicTensor *>(buf);
+      t.tensor_offsets = *basic_tensor;
+      NVTE_CHECK(t.tensor_offsets.dtype == DType::kInt64, "tensor_offsets must have dtype Int64");
       break;
+    }
+    case kNVTEGroupedWithGEMMSwizzledScales:
+      t.with_gemm_swizzled_scales = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
+#ifdef __HIP_PLATFORM_AMD__
+    case kNVTEGroupedMXFP4ShuffleRowwiseData:
+      t.mxfp4_shuffle_rowwise_data = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
+    case kNVTEGroupedMXFP4ShuffleColumnwiseData:
+      t.mxfp4_shuffle_columnwise_data = static_cast<bool>(*reinterpret_cast<const uint8_t *>(buf));
+      break;
+#endif
     default:
-      NVTE_ERROR("Unknown grouped tensor parameter!");
+      NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param), ")");
   }
 }
 
-NVTEBasicTensor nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor,
-                                              NVTEGroupedTensorParam param_name) {
-  if (tensor == nullptr) {
-    return {nullptr, kNVTEFloat32, nvte_make_shape(nullptr, 1)};
-  }
-  const auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
+void nvte_get_grouped_tensor_param(const NVTEGroupedTensor tensor, NVTEGroupedTensorParam param,
+                                   void *buf, size_t size_in_bytes, size_t *size_written) {
+  using namespace transformer_engine;
 
-  switch (param_name) {
-    case kNVTEGroupedRowwiseData:
-      return t.data;
-    case kNVTEGroupedColumnwiseData:
-      return t.columnwise_data;
-    case kNVTEGroupedScale:
-      return t.scale;
-    case kNVTEGroupedAmax:
-      return t.amax;
-    case kNVTEGroupedRowwiseScaleInv:
-      return t.scale_inv;
-    case kNVTEGroupedColumnwiseScaleInv:
-      return t.columnwise_scale_inv;
-    case kNVTEGroupedColumnwiseAmax:
-      return t.columnwise_amax;
-    case kNVTEGroupedFirstDims:
-      return t.first_dims;
-    case kNVTEGroupedLastDims:
-      return t.last_dims;
-    case kNVTEGroupedTensorOffsets:
-      return t.tensor_offsets;
+  // Check param
+  NVTE_CHECK(param < kNVTENumGroupedTensorParams, "Invalid NVTEGroupedTensorParam (got ",
+             static_cast<int>(param), ")");
+
+  // Write attribute size if provided
+  const auto &attr_size = GroupedTensor::attr_sizes[param];
+  if (size_written != nullptr) {
+    *size_written = attr_size;
+  }
+
+  // Return immediately if buffer is not provided
+  if (buf == nullptr) {
+    return;
+  }
+
+  // Check buffer size
+  NVTE_CHECK(size_in_bytes >= attr_size,
+             "Buffer is too small for grouped tensor parameter "
+             "(parameter ",
+             static_cast<int>(param), " needs ", attr_size, " bytes, but buffer has ",
+             size_in_bytes, " bytes)");
+
+  // Get C++ grouped tensor
+  const GroupedTensor *t = convertNVTEGroupedTensor(tensor);
+  std::optional<GroupedTensor> dummy;
+  if (t == nullptr) {
+    // Make dummy grouped tensor if provided tensor is invalid
+    dummy.emplace(NVTE_DELAYED_TENSOR_SCALING, 1);
+    t = &(*dummy);
+  }
+
+  // Write to buffer
+  switch (param) {
+    case kNVTEGroupedRowwiseData: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->data);
+      break;
+    }
+    case kNVTEGroupedColumnwiseData: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->columnwise_data);
+      break;
+    }
+    case kNVTEGroupedScale: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->scale);
+      break;
+    }
+    case kNVTEGroupedAmax: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->amax);
+      break;
+    }
+    case kNVTEGroupedRowwiseScaleInv: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->scale_inv);
+      break;
+    }
+    case kNVTEGroupedColumnwiseScaleInv: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->columnwise_scale_inv);
+      break;
+    }
+    case kNVTEGroupedColumnwiseAmax: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->columnwise_amax);
+      break;
+    }
+    case kNVTEGroupedFirstDims: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->first_dims);
+      break;
+    }
+    case kNVTEGroupedLastDims: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->last_dims);
+      break;
+    }
+    case kNVTEGroupedTensorOffsets: {
+      NVTEBasicTensor *basic_tensor = reinterpret_cast<NVTEBasicTensor *>(buf);
+      *basic_tensor = static_cast<NVTEBasicTensor>(t->tensor_offsets);
+      break;
+    }
+    case kNVTEGroupedWithGEMMSwizzledScales:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->with_gemm_swizzled_scales);
+      break;
+#ifdef __HIP_PLATFORM_AMD__
+    case kNVTEGroupedMXFP4ShuffleRowwiseData:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->mxfp4_shuffle_rowwise_data);
+      break;
+    case kNVTEGroupedMXFP4ShuffleColumnwiseData:
+      *reinterpret_cast<uint8_t *>(buf) = static_cast<uint8_t>(t->mxfp4_shuffle_columnwise_data);
+      break;
+#endif
     default:
-      NVTE_ERROR("Unknown grouped tensor parameter!");
+      NVTE_ERROR("Unsupported grouped tensor parameter (", static_cast<int>(param), ")");
   }
 }
 

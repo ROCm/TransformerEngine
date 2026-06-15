@@ -19,7 +19,7 @@ string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER_CONTENT}")
 string(REGEX MATCH "^[0-9]+" ROCM_VER_MAJOR "${ROCM_VER}")
 
 # AITER commit
-get_git_commit("${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/aiter" AITER_SHA)
+get_git_commit("${__AITER_SOURCE_DIR}" AITER_SHA)
 
 # Cache key & local paths
 set(AITER_CACHE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../build/aiter-prebuilts")
@@ -33,7 +33,7 @@ endfunction()
 # Validate existing cache path
 function(is_aiter_cache_valid ROCM_VER_PARAM CACHE_VALID)
   get_aiter_cache_key("${ROCM_VER_PARAM}" KEY EXTRACT_DIR)
-  if(EXISTS "${EXTRACT_DIR}/libmha_fwd.so" AND EXISTS "${EXTRACT_DIR}/libmha_bwd.so")
+  if(EXISTS "${EXTRACT_DIR}/lib/te_libmha_fwd.so" AND EXISTS "${EXTRACT_DIR}/lib/te_libmha_bwd.so")
     set(${CACHE_VALID} TRUE PARENT_SCOPE)
     message(STATUS "[AITER-PREBUILT] Found Cached build files at ${EXTRACT_DIR}")
   endif()
@@ -52,7 +52,7 @@ function(get_prebuilt_aiter PREBUILT_DIR_VAR)
       return()
     endif()
   endforeach()
-  
+
   # Cache is invalid/outdated - clean it and some build files that depend on AITER libs path
   file(REMOVE_RECURSE "${AITER_CACHE_ROOT}")
   file(REMOVE_RECURSE "${CMAKE_BINARY_DIR}/_deps")

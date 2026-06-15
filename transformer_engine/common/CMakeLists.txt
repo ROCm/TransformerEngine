@@ -28,7 +28,7 @@ else()
   else()
     message(FATAL_ERROR "Could not find NVCC at '$ENV{CUDA_HOME}/bin/nvcc'")
   endif()
-  
+
 endif()
 
 # Language options
@@ -126,14 +126,14 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 
 else()
   set(CMAKE_CXX_STANDARD 17)
+  #define GPU ARCH before enabling HIP to avoid potential failures with arch detection
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
   project(transformer_engine LANGUAGES HIP CXX)
 
   # If using ROCm, ninja must be installed to build TE.
   if (NOT CMAKE_GENERATOR STREQUAL "Ninja")
     message(FATAL_ERROR "This project requires the Ninja build system. Install it using 'pip install ninja'.")
   endif()
-
-  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
 
   # Disable Asserts In Code (Can't use asserts on HIP stack.)
   add_definitions(-DNDEBUG)
@@ -167,22 +167,30 @@ set(transformer_engine_cuda_arch_specific_sources)
 
 # Source files in both cuda and rocm
 list(APPEND transformer_engine_cpp_sources
+     cudnn_utils.cpp #CUDA-only
      transformer_engine.cpp
-     comm_gemm_overlap/userbuffers/ipcsocket.cc
-     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
-     comm_gemm_overlap/comm_gemm_overlap.cpp
+     fused_attn/fused_attn.cpp #CUDA-only
      gemm/config.cpp
      normalization/common.cpp
      normalization/layernorm/ln_api.cpp
      normalization/rmsnorm/rmsnorm_api.cpp
      util/cuda_driver.cpp
+     util/cuda_nvml.cpp #CUDA-only
      util/cuda_runtime.cpp
      util/multi_stream.cpp
-     util/rtc.cpp)
+     util/rtc.cpp
+     comm_gemm_overlap/userbuffers/ipcsocket.cc
+     comm_gemm_overlap/userbuffers/userbuffers-host.cpp
+     comm_gemm_overlap/comm_gemm_overlap.cpp)
+
+# Sources that only apply to CUDA builds (removed when building for ROCm)
+set(cuda_only_cpp_sources
+     cudnn_utils.cpp
+     fused_attn/fused_attn.cpp
+     util/cuda_nvml.cpp)
 
 list(APPEND transformer_engine_cuda_sources
      common.cu
-     comm_gemm_overlap/userbuffers/userbuffers.cu
      multi_tensor/adam.cu
      multi_tensor/l2norm.cu
      multi_tensor/scale.cu
@@ -192,18 +200,26 @@ list(APPEND transformer_engine_cuda_sources
      transpose/cast_transpose_fusion.cu
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
+     transpose/quantize_transpose_vector_blockwise.cu #CUDA-only
      transpose/swap_first_dims.cu
      dropout/dropout.cu
      fused_attn/flash_attn.cu
      fused_attn/context_parallel.cu
      fused_attn/kv_cache.cu
+     fused_attn/fused_attn_f16_max512_seqlen.cu #CUDA-only
+     fused_attn/fused_attn_f16_arbitrary_seqlen.cu #CUDA-only
+     fused_attn/fused_attn_fp8.cu #CUDA-only
+     fused_attn/utils.cu #CUDA-only
      gemm/cublaslt_gemm.cu
+     gemm/cublaslt_grouped_gemm.cu
      normalization/layernorm/ln_bwd_semi_cuda_kernel.cu
      normalization/layernorm/ln_fwd_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_bwd_semi_cuda_kernel.cu
      normalization/rmsnorm/rmsnorm_fwd_cuda_kernel.cu
      permutation/permutation.cu
      util/padding.cu
+     swizzle/swizzle.cu
+     swizzle/swizzle_block_scaling.cu #CUDA-only
      fused_softmax/scaled_masked_softmax.cu
      fused_softmax/scaled_upper_triang_masked_softmax.cu
      fused_softmax/scaled_aligned_causal_masked_softmax.cu
@@ -214,62 +230,76 @@ list(APPEND transformer_engine_cuda_sources
      recipe/current_scaling.cu
      recipe/delayed_scaling.cu
      recipe/fp8_block_scaling.cu
-     swizzle/swizzle.cu)
+     comm_gemm_overlap/userbuffers/userbuffers.cu)
+
+set(cuda_only_cuda_sources
+     transpose/quantize_transpose_vector_blockwise.cu
+     fused_attn/fused_attn_f16_max512_seqlen.cu
+     fused_attn/fused_attn_f16_arbitrary_seqlen.cu
+     fused_attn/fused_attn_fp8.cu
+     fused_attn/utils.cu
+     swizzle/swizzle_block_scaling.cu)
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
      activation/gelu.cu
+     activation/glu.cu
      activation/relu.cu
      activation/swiglu.cu
      cast/cast.cu
+     gemm/cutlass_grouped_gemm.cu #CUDA-only
+     hadamard_transform/group_hadamard_transform.cu #CUDA-only
+     hadamard_transform/graph_safe_group_hadamard_transform.cu #CUDA-only
+     hadamard_transform/hadamard_transform.cu
+     hadamard_transform/hadamard_transform_cast_fusion.cu #CUDA-only
+     hadamard_transform/group_hadamard_transform_cast_fusion.cu #CUDA-only
+     hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu #CUDA-only
+     hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu #CUDA-only
      multi_tensor/compute_scale.cu
      recipe/mxfp8_scaling.cu
+     recipe/nvfp4.cu
+     transpose/quantize_transpose_square_blockwise.cu #CUDA-only
      transpose/quantize_transpose_vector_blockwise_fp4.cu)
 
-if(USE_CUDA)
-#NV specific source codes
-    list(APPEND transformer_engine_cpp_sources
-        cudnn_utils.cpp
-        fused_attn/fused_attn.cpp
-        util/cuda_nvml.cpp)
-    list(APPEND transformer_engine_cuda_sources
-        transpose/quantize_transpose_vector_blockwise.cu
-        fused_attn/fused_attn_f16_max512_seqlen.cu
-        fused_attn/fused_attn_f16_arbitrary_seqlen.cu
-        fused_attn/fused_attn_fp8.cu
-        fused_attn/utils.cu
-        swizzle/swizzle_block_scaling.cu
-        recipe/nvfp4.cu)
-    list(APPEND transformer_engine_cuda_arch_specific_sources
-        gemm/cutlass_grouped_gemm.cu
-        hadamard_transform/group_hadamard_transform.cu
-        transpose/quantize_transpose_square_blockwise.cu
-        hadamard_transform/hadamard_transform.cu
-        hadamard_transform/hadamard_transform_cast_fusion.cu
-        hadamard_transform/group_hadamard_transform_cast_fusion.cu
-        hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
-        transpose/quantize_transpose_square_blockwise.cu
-        transpose/quantize_transpose_vector_blockwise_fp4.cu)
-else()
-#ROCm specific source codes
-    list(APPEND transformer_engine_cpp_sources
-        comm_gemm_overlap/rocm_comm_gemm_overlap.cpp
-        fused_attn_rocm/fused_attn.cpp
-        gemm/rocm_gemm.cu
-        gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
-        gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
-        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp
-        amd_detail/system.cpp)
-    list(APPEND transformer_engine_cuda_sources
-        fused_attn_rocm/fused_attn_aotriton.cpp
-        fused_attn_rocm/fused_attn_ck.cpp
-        fused_attn_rocm/utils.cpp)
-endif()
+set(cuda_only_cuda_arch_specific_sources
+     gemm/cutlass_grouped_gemm.cu
+     hadamard_transform/group_hadamard_transform.cu
+     hadamard_transform/graph_safe_group_hadamard_transform.cu
+     hadamard_transform/hadamard_transform_cast_fusion.cu
+     hadamard_transform/group_hadamard_transform_cast_fusion.cu
+     hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
+     hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu
+     transpose/quantize_transpose_square_blockwise.cu)
 
 # Compiling the files with the worst compilation time first to hopefully overlap
 # better with the faster-compiling cpp files
 list(APPEND transformer_engine_SOURCES ${transformer_engine_cuda_arch_specific_sources}
                                        ${transformer_engine_cuda_sources}
                                        ${transformer_engine_cpp_sources})
+
+if(USE_ROCM)
+# Remove CUDA-only sources when not building for CUDA
+  list(REMOVE_ITEM transformer_engine_SOURCES
+    ${cuda_only_cpp_sources}
+    ${cuda_only_cuda_sources}
+    ${cuda_only_cuda_arch_specific_sources})
+
+  #ROCm specific source codes
+  list(INSERT transformer_engine_SOURCES 0
+      amd_detail/system.cpp
+      comm_gemm_overlap/rocm_comm_gemm_overlap.cpp
+      fused_attn_rocm/fused_attn.cpp
+      fused_attn_rocm/fused_attn_aotriton.cpp
+      fused_attn_rocm/fused_attn_ck.cpp
+      fused_attn_rocm/utils.cpp
+      gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
+      gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
+      gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp
+      gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_nn.cpp
+      gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_nt.cpp
+      gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tn.cpp
+      gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tt.cpp
+      gemm/rocm_gemm.cu)
+endif()
 
 if(USE_CUDA)
 # Set compile options for CUDA sources with generic architectures
@@ -313,7 +343,7 @@ endif()
 
 add_library(transformer_engine SHARED ${transformer_engine_SOURCES})
 
-else()
+else() #USE_ROCM
 
   # process source code files
   include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/hipify/hipify.cmake")
@@ -398,26 +428,40 @@ endif()
 option(NVTE_WITH_CUBLASMP "Use cuBLASMp for tensor parallel GEMMs" OFF)
 if (NVTE_WITH_CUBLASMP)
     target_compile_definitions(transformer_engine PRIVATE NVTE_WITH_CUBLASMP)
-    target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include ${NVSHMEM_DIR}/include)
+    target_include_directories(transformer_engine PRIVATE ${CUBLASMP_DIR}/include)
     find_library(CUBLASMP_LIB
                  NAMES cublasmp libcublasmp
                  PATHS ${CUBLASMP_DIR}
                  PATH_SUFFIXES lib
                  REQUIRED)
-    find_library(NVSHMEM_HOST_LIB
-                 NAMES nvshmem_host libnvshmem_host.so.3
-                 PATHS ${NVSHMEM_DIR}
+    find_library(NCCL_LIB
+                 NAMES nccl libnccl
                  PATH_SUFFIXES lib
                  REQUIRED)
-  target_link_libraries(transformer_engine PUBLIC ${CUBLASMP_LIB} ${NVSHMEM_HOST_LIB})
+  target_link_libraries(transformer_engine PUBLIC ${NCCL_LIB} ${CUBLASMP_LIB})
   message(STATUS "Using cuBLASMp at: ${CUBLASMP_DIR}")
-  message(STATUS "Using nvshmem at: ${NVSHMEM_DIR}")
 endif()
+
+# Number of philox4x32 rounds for stochastic rounding (build-time constant).
+set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR $ENV{NVTE_BUILD_NUM_PHILOX_ROUNDS})
+if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR)
+  set(NVTE_BUILD_NUM_PHILOX_ROUNDS_STR "10")
+endif()
+if (NOT NVTE_BUILD_NUM_PHILOX_ROUNDS_STR MATCHES "^[1-9][0-9]*$")
+  message(FATAL_ERROR
+          "Environment variable NVTE_BUILD_NUM_PHILOX_ROUNDS must be a positive integer, "
+          "but got '${NVTE_BUILD_NUM_PHILOX_ROUNDS_STR}'.")
+endif()
+set(NVTE_BUILD_NUM_PHILOX_ROUNDS ${NVTE_BUILD_NUM_PHILOX_ROUNDS_STR})
+
+target_compile_definitions(transformer_engine
+                           PUBLIC NVTE_BUILD_NUM_PHILOX_ROUNDS=${NVTE_BUILD_NUM_PHILOX_ROUNDS})
+message(STATUS "Philox rounds for stochastic rounding: ${NVTE_BUILD_NUM_PHILOX_ROUNDS}")
 
 # Hack to enable dynamic loading in cuDNN frontend
 target_compile_definitions(transformer_engine PUBLIC NV_CUDNN_FRONTEND_USE_DYNAMIC_LOADING)
 
-else()
+else() # USE_ROCM
   option(NVTE_ENABLE_ROCSHMEM "Compile with ROCSHMEM library" OFF)
   if (NVTE_ENABLE_ROCSHMEM)
     add_subdirectory(rocshmem_api)
@@ -499,7 +543,7 @@ make_string_header_from_file(utils.cuh
                              string_code_utils_cuh)
 else()
   make_string_header_from_file(utils_hip.cuh
-                               string_code_utils_cuh)
+                              string_code_utils_cuh)
   make_string_header_from_file(transpose/rtc/cast_transpose_fusion.hip
                               string_code_transpose_rtc_cast_transpose_fusion_cu)
   make_string_header_from_file(transpose/rtc/cast_transpose.hip
@@ -509,7 +553,7 @@ else()
   make_string_header_from_file(transpose/rtc/swap_first_dims.hip
                               string_code_transpose_rtc_swap_first_dims_cu)
   make_string_header_from_file(amd_detail/hip_float8.h
-                               string_code_amd_detail_hip_float8_h)
+                              string_code_amd_detail_hip_float8_h)
 endif()
 make_string_header_from_file(util/math.h
                              string_code_util_math_h)
@@ -534,6 +578,7 @@ list(APPEND nvte_sources_with_fast_math fused_softmax/scaled_masked_softmax.cu
 option(NVTE_BUILD_ACTIVATION_WITH_FAST_MATH "Compile activation kernels with --use_fast_math option" OFF)
 if (NVTE_BUILD_ACTIVATION_WITH_FAST_MATH)
   list(APPEND nvte_sources_with_fast_math activation/gelu.cu
+                                          activation/glu.cu
                                           activation/relu.cu
                                           activation/swiglu.cu)
 endif()

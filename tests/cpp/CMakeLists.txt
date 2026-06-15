@@ -95,6 +95,25 @@ endif()
 if(USE_ROCM)
   include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/hipify/hipify.cmake")
   TE_Hipify(${CMAKE_CURRENT_SOURCE_DIR})
+
+  # Register original source files as configure dependencies so that
+  # editing them triggers re-configuration and re-hipification.
+  # SOURCES covers explicitly listed .cu/.cpp files; headers (.h, .cuh,
+  # .hpp) are globbed from BASE_DIR since they are not enumerated in SOURCES.
+  function(TE_AddHipifyDeps SOURCES BASE_DIR)
+      set(_deps)
+      foreach(_src ${SOURCES})
+          get_filename_component(_abs "${BASE_DIR}/${_src}" ABSOLUTE)
+          list(APPEND _deps "${_abs}")
+      endforeach()
+      file(GLOB _hdrs
+          "${BASE_DIR}/*.h"
+          "${BASE_DIR}/*.cuh"
+          "${BASE_DIR}/*.hpp"
+      )
+      list(APPEND _deps ${_hdrs})
+      set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_deps})
+  endfunction()
 endif()
 
 add_subdirectory(operator)

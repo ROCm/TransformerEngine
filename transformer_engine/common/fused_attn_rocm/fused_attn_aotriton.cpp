@@ -206,11 +206,7 @@ void fused_attn_aotriton_fwd_impl(
     std::array<uint64_t, 4>{1, 1, 1, 1}, 
     dtype);
   
-  bool nvte_log_aotriton_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_aotriton_config = true;
-  }
+  const bool nvte_log_aotriton_config = getenv<bool>("NVTE_LOG_AOTRITON_CONFIG");
   aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
   auto seed = mk_aoscalartensor(devPtrDropoutSeed);
   auto offset1 = mk_aoscalartensor(devPtrDropoutOffset);
@@ -401,11 +397,7 @@ void fused_attn_aotriton_bwd_impl(
   auto cu_seqlens_q = aotriton::TensorView<1>(reinterpret_cast<intptr_t>(devPtrCuSeqlensQ), cu_seqlens_shape, cu_seqlens_stride, aotriton::DType::kInt32);
   auto cu_seqlens_k = aotriton::TensorView<1>(reinterpret_cast<intptr_t>(devPtrCuSeqlensKV), cu_seqlens_shape, cu_seqlens_stride, aotriton::DType::kInt32);
 
-  bool nvte_log_aotriton_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_aotriton_config = true;
-  }
+  const bool nvte_log_aotriton_config = getenv<bool>("NVTE_LOG_AOTRITON_CONFIG");
   aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
   auto seed = mk_aoscalartensor(devPtrDropoutSeed);
   auto offset = mk_aoscalartensor(devPtrDropoutOffset);
@@ -495,328 +487,6 @@ void fused_attn_aotriton_bwd_impl(
 }  // namespace fused_attn_rocm
 
 using namespace transformer_engine::fused_attn_rocm;
-void fused_attn_aotriton_fwd_qkvpacked(
-  size_t b, size_t h, size_t max_seqlen, size_t d,
-  bool is_training, float attn_scale, float dropout, 
-  int32_t window_left, int32_t window_right,
-  NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-  const Tensor* input_QKV,
-  Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
-  const Tensor* input_cu_seqlens,
-  const Tensor* rng_state,
-  Tensor *workspace,
-  cudaStream_t stream){
-
-#ifdef USE_FUSED_ATTN_AOTRITON
-  const DType QKV_type = input_QKV->data.dtype;
-  void *devPtrQKV = input_QKV->data.dptr;
-  // determine the stride based on qkv layout
-  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  size_t stride = 0;
-  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride = nvte_dtype_size(QKV_type) * h * d;
-  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride = nvte_dtype_size(QKV_type) * d;
-  }
-  void *devPtrQ = static_cast<void *>(devPtrQKV);
-  void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
-  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2 * stride);
-
-  //save the input rng state to Aux_CTX_Tensors
-  void *devPtrO = output_O->data.dptr;
-  void *devPtrS = nullptr;
-
-  if (Aux_CTX_Tensors->size == 0) {
-    Aux_CTX_Tensors->size = 2;
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    output_S->data.dptr = nullptr;
-    output_S->data.shape = {b, h, max_seqlen, 1};
-    output_S->data.dtype = DType::kFloat32;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    output_rng_state->data.dptr = nullptr;
-    output_rng_state->data.shape = {2};
-    output_rng_state->data.dtype = DType::kInt64;
-  } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    output_rng_state->data.dptr = rng_state->data.dptr;
-  } else {
-    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
-  }
-
-  size_t workspace_size = 0;
-
-  fused_attn_aotriton_fwd_impl(
-    b, h, h, max_seqlen, max_seqlen, d,
-    is_training, attn_scale, dropout, 
-    window_left, window_right,
-    qkv_layout,
-    bias_type, attn_mask_type,
-    devPtrQ, devPtrK, devPtrV, 
-    devPtrS, devPtrO,
-    reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
-    reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
-    input_cu_seqlens->data.dptr, input_cu_seqlens->data.dptr,
-    nvte_to_aotriton_dtype(QKV_type),
-    workspace->data.dptr,
-    &workspace_size,
-    stream);
-
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
-#else
-  NVTE_ERROR("AOTriton backend not compiled.");
-#endif // USE_FUSED_ATTN_AOTRITON
-}
-
-void fused_attn_aotriton_bwd_qkvpacked(
-  size_t b, size_t h, size_t max_seqlen, size_t d,
-  float attn_scale, float dropout, 
-  int32_t window_size_left, int32_t window_size_right,
-  NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-  const Tensor* input_QKV, const Tensor* input_O, const Tensor* input_dO, 
-  const Tensor* output_S,
-  Tensor* output_dQKV,
-  const Tensor* input_cu_seqlens,
-  const Tensor* rng_state,
-  Tensor* workspace,
-  cudaStream_t stream){
-
-#ifdef USE_FUSED_ATTN_AOTRITON
-  const DType QKV_type = input_QKV->data.dtype;
-  //input tensor
-  void *devPtrQKV = input_QKV->data.dptr;
-  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  size_t stride = 0;
-  if (layout_group == NVTE_QKV_Layout_Group::NVTE_3HD) {
-    stride = nvte_dtype_size(QKV_type) * h * d;
-  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_H3D) {
-    stride = nvte_dtype_size(QKV_type) * d;
-  }
-  void *devPtrQ = static_cast<void *>(devPtrQKV);
-  void *devPtrK = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + stride);
-  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrQKV) + 2 * stride);
-  void *devPtrSoftmaxStats = output_S->data.dptr;
-  void *devPtrO = input_O->data.dptr;
-  void *devPtrdO = input_dO->data.dptr;
-
-  // output tensor
-  void *devPtrdQKV = output_dQKV->data.dptr;
-  void *devPtrdQ = static_cast<void *>(devPtrdQKV);
-  void *devPtrdK = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + stride);
-  void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdQKV) + 2 * stride);
-  
-  size_t workspace_size = 0;
-  fused_attn_aotriton_bwd_impl(
-    b, h, h, max_seqlen, max_seqlen, d,
-    attn_scale, dropout, 
-    window_size_left, window_size_right,
-    qkv_layout,
-    bias_type, attn_mask_type,
-    devPtrQ, devPtrK, devPtrV, 
-    devPtrO, devPtrSoftmaxStats,
-    devPtrdQ, devPtrdK, devPtrdV, 
-    devPtrdO, 
-    input_cu_seqlens->data.dptr, input_cu_seqlens->data.dptr,
-    reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
-    reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
-    nvte_to_aotriton_dtype(QKV_type),
-    workspace->data.dptr,
-    &workspace_size,
-    stream);
-
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
-#else
-  NVTE_ERROR("AOTriton backend not compiled.");
-#endif // USE_FUSED_ATTN_AOTRITON
-}
-
-void fused_attn_aotriton_fwd_kvpacked(
-  size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
-  bool is_training, float attn_scale, float dropout, 
-  int32_t window_left, int32_t window_right,
-  NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-  const Tensor* input_Q, const Tensor* input_KV,
-  Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
-  const Tensor* input_cu_seqlens_q,
-  const Tensor* input_cu_seqlens_kv,
-  const Tensor* rng_state,
-  Tensor *workspace,
-  cudaStream_t stream){
-
-#ifdef USE_FUSED_ATTN_AOTRITON
-  const DType QKV_type = input_Q->data.dtype;
-  //input tensor
-  void *devPtrQ = input_Q->data.dptr;
-  void *devPtrKV = input_KV->data.dptr;
-  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  size_t stride = 0;
-  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = nvte_dtype_size(QKV_type)*h_kv*d;
-  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = nvte_dtype_size(QKV_type) * d;
-  }
-  void *devPtrK = devPtrKV;
-  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
-
-  void *devPtrO = output_O->data.dptr;
-  void *devPtrS = nullptr;
-
-  if (Aux_CTX_Tensors->size == 0) {
-    Aux_CTX_Tensors->size = 2;
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    output_S->data.dptr = nullptr;
-    output_S->data.shape = {b, h_q, max_seqlen_q, 1};
-    output_S->data.dtype = DType::kFloat32;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    output_rng_state->data.dptr = nullptr;
-    output_rng_state->data.shape = {2};
-    output_rng_state->data.dtype = DType::kInt64;
-  } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    output_rng_state->data.dptr = rng_state->data.dptr;
-  } else {
-    NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
-  }
-
-  size_t workspace_size = 0;
-
-  fused_attn_aotriton_fwd_impl(
-    b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
-    is_training, attn_scale, dropout, 
-    window_left, window_right,
-    qkv_layout,
-    bias_type, attn_mask_type,
-    devPtrQ, devPtrK, devPtrV,
-    devPtrS, devPtrO,
-    reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
-    reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
-    input_cu_seqlens_q->data.dptr, input_cu_seqlens_kv->data.dptr,
-    nvte_to_aotriton_dtype(QKV_type),
-    workspace->data.dptr,
-    &workspace_size,
-    stream);
-
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
-#else
-  NVTE_ERROR("AOTriton backend not compiled.");
-#endif // USE_FUSED_ATTN_AOTRITON
-}
-
-void fused_attn_aotriton_bwd_kvpacked(
-  size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
-  float attn_scale, float dropout, 
-  int32_t window_size_left, int32_t window_size_right,
-  NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
-  const Tensor* input_Q, const Tensor* input_KV, const Tensor* input_O, const Tensor* input_dO,
-  const Tensor* output_S,
-  Tensor* output_dQ, Tensor* output_dKV,
-  const Tensor* input_cu_seqlens_q,
-  const Tensor* input_cu_seqlens_kv,
-  const Tensor* rng_state,
-  Tensor* workspace,
-  cudaStream_t stream){
-
-#ifdef USE_FUSED_ATTN_AOTRITON
-  const DType QKV_type = input_Q->data.dtype;
-  //input tensor
-  void *devPtrQ = input_Q->data.dptr;
-  void *devPtrKV = input_KV->data.dptr;
-  NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(qkv_layout);
-  size_t stride = 0;
-  if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_2HD) {
-    stride = nvte_dtype_size(QKV_type) * h_kv * d;
-  } else if (layout_group == NVTE_QKV_Layout_Group::NVTE_HD_H2D) {
-    stride = nvte_dtype_size(QKV_type) * d;
-  }
-  void *devPtrK = devPtrKV;
-  void *devPtrV = static_cast<void *>(static_cast<int8_t *>(devPtrKV) + stride);
-
-  // output tensor
-  void *devPtrdQ = output_dQ->data.dptr;
-  void *devPtrdKV = output_dKV->data.dptr;
-  void *devPtrdK = devPtrdKV;
-  void *devPtrdV = static_cast<void *>(static_cast<int8_t *>(devPtrdKV) + stride);
-
-  void *devPtrO = input_O->data.dptr;
-  void *devPtrdO = input_dO->data.dptr;
-
-  void *devPtrSoftmaxStats = output_S->data.dptr;
-
-  size_t workspace_size = 0;
-  fused_attn_aotriton_bwd_impl(
-    b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d,
-    attn_scale, dropout, 
-    window_size_left, window_size_right,
-    qkv_layout,
-    bias_type, attn_mask_type,
-    devPtrQ, devPtrK, devPtrV, 
-    devPtrO, devPtrSoftmaxStats,
-    devPtrdQ, devPtrdK, devPtrdV, 
-    devPtrdO,
-    input_cu_seqlens_q->data.dptr, input_cu_seqlens_kv->data.dptr,
-    reinterpret_cast<const uint64_t *>(rng_state->data.dptr), 
-    reinterpret_cast<const uint64_t *>(rng_state->data.dptr) + 1,
-    nvte_to_aotriton_dtype(QKV_type),
-    workspace->data.dptr,
-    &workspace_size,
-    stream);
-
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
-#else
-  NVTE_ERROR("AOTriton backend not compiled.");
-#endif // USE_FUSED_ATTN_AOTRITON
-}
 
 void fused_attn_aotriton_fwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d,
@@ -877,19 +547,8 @@ void fused_attn_aotriton_fwd(
     &workspace_size,
     stream);
 
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
+  set_workspace_size(workspace, workspace_size);
+  return;
 #else
   NVTE_ERROR("AOTriton backend not compiled.");
 #endif // USE_FUSED_ATTN_AOTRITON
@@ -942,19 +601,8 @@ void fused_attn_aotriton_bwd(
     &workspace_size,
     stream);
 
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
+  set_workspace_size(workspace, workspace_size);
+  return;
 #else
   NVTE_ERROR("AOTriton backend not compiled.");
 #endif // USE_FUSED_ATTN_AOTRITON

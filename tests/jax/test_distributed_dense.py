@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -127,7 +129,7 @@ class TestDistributedDense:
 
         contracting_dims = ((2,), (0,))  # Contract on hidden_in dimension
 
-        with mesh, autocast(enabled=False, mesh_resource=mesh_resource):
+        with jax.set_mesh(mesh), autocast(enabled=False, mesh_resource=mesh_resource):
             # TE GEMM result
             te_result = _jitted_gemm(
                 x_sharded,
@@ -161,16 +163,21 @@ class TestDistributedDense:
             # Compare results
             assert_allclose(gathered_te, gathered_jax, dtype=dtype)
 
-    def _te_sum_dense(self, x, weight, bias, contracting_dims):
+    def _te_sum_dense(self, x, weight, bias, contracting_dims, output_sharding):
         """TE GEMM function for gradient testing"""
-        return jnp.sum(dense(x, weight, bias=bias, contracting_dims=contracting_dims))
+        output = dense(x, weight, bias=bias, contracting_dims=contracting_dims)
+        if output_sharding is not None:
+            output = jax.lax.with_sharding_constraint(output, output_sharding)
+        return jnp.sum(output)
 
-    def _jax_sum_dense(self, x, weight, bias, contracting_dims):
+    def _jax_sum_dense(self, x, weight, bias, contracting_dims, output_sharding):
         """JAX dot function for gradient testing"""
-        result = (
+        output = (
             jax.lax.dot_general(x, weight, dimension_numbers=(contracting_dims, ((), ()))) + bias
         )
-        return jnp.sum(result)
+        if output_sharding is not None:
+            output = jax.lax.with_sharding_constraint(output, output_sharding)
+        return jnp.sum(output)
 
     @pytest_parametrize_wrapper(
         "device_count,mesh_shape,mesh_axes,mesh_resource",
@@ -209,22 +216,22 @@ class TestDistributedDense:
 
         contracting_dims = ((2,), (0,))
 
-        with mesh, autocast(enabled=False, mesh_resource=mesh_resource):
+        with jax.set_mesh(mesh), autocast(enabled=False, mesh_resource=mesh_resource):
             # Test gradients w.r.t. all inputs
             te_grad_func = jax.jit(
                 jax.value_and_grad(self._te_sum_dense, argnums=(0, 1, 2)),
-                static_argnames=("contracting_dims",),
+                static_argnames=("contracting_dims", "output_sharding"),
             )
             jax_grad_func = jax.jit(
                 jax.value_and_grad(self._jax_sum_dense, argnums=(0, 1, 2)),
-                static_argnames=("contracting_dims",),
+                static_argnames=("contracting_dims", "output_sharding"),
             )
 
             te_val, te_grads = te_grad_func(
-                x_sharded, weight_sharded, bias_sharded, contracting_dims
+                x_sharded, weight_sharded, bias_sharded, contracting_dims, output_sharding
             )
             jax_val, jax_grads = jax_grad_func(
-                x_sharded, weight_sharded, bias_sharded, contracting_dims
+                x_sharded, weight_sharded, bias_sharded, contracting_dims, output_sharding
             )
 
             # Compare forward pass
