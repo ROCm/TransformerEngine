@@ -8,6 +8,8 @@
 
 #include "../util/cuda_runtime.h"
 
+#include <cublasLt.h>
+
 #include <filesystem>
 #include <mutex>
 
@@ -81,6 +83,22 @@ const std::string &sm_arch_name(int device_id) {
     cudaDeviceProp prop;
     NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, device_id));
     cache[device_id] = prop.gcnArchName;
+  };
+  std::call_once(flags[device_id], init);
+  return cache[device_id];
+}
+
+int warp_size(int device_id) {
+  static std::vector<int> cache(num_devices(), -1);
+  static std::vector<std::once_flag> flags(num_devices());
+  if (device_id < 0) {
+    device_id = current_device();
+  }
+  NVTE_CHECK(0 <= device_id && device_id < num_devices(), "invalid CUDA device ID");
+  auto init = [&]() {
+    cudaDeviceProp prop;
+    NVTE_CHECK_CUDA(cudaGetDeviceProperties(&prop, device_id));
+    cache[device_id] = prop.warpSize;
   };
   std::call_once(flags[device_id], init);
   return cache[device_id];
@@ -262,6 +280,12 @@ int cudart_version() {
     return version;
   };
   static int version = get_version();
+  return version;
+}
+
+size_t cublas_version() {
+  // Cache version to avoid cuBLAS logging overhead
+  static size_t version = cublasLtGetVersion();
   return version;
 }
 #endif // __HIP_PLATFORM_AMD__

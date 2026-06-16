@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -11,6 +13,7 @@ and collective operations.
 """
 from contextlib import contextmanager
 from dataclasses import dataclass
+from packaging import version
 from typing import Callable, Optional
 import warnings
 
@@ -20,7 +23,8 @@ from jax.interpreters import pxla
 from jax.sharding import PartitionSpec, get_abstract_mesh
 import numpy as np
 
-_PXLA_THREAD_RESOURCES = pxla.thread_resources
+if version.parse(jax.__version__) < version.parse("0.9.0"):
+    _PXLA_THREAD_RESOURCES = pxla.thread_resources
 
 # Axis Names
 BATCH_AXES = "nvte_batch"
@@ -39,9 +43,11 @@ W_JOINED_AXES = "nvte_w_joined"
 
 def _get_mesh():
     # Handle Mesh's set via `with mesh:`
-    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
-    if mesh is not None and not mesh.empty:
-        return mesh
+    # ROCm: add JAX version guard for all backends
+    if version.parse(jax.__version__) < version.parse("0.9.0"):
+        mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+        if mesh is not None and not mesh.empty:
+            return mesh
     # Handle Mesh's set via `jax.set_mesh(mesh)`
     return jax.sharding.get_abstract_mesh()
 
@@ -164,6 +170,31 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
         return x
 
     cleaned_pspec = PartitionSpec(*cleaned_axis_names)
+
+    # ROCm: JAX 0.9 compat (all backends) — when an AbstractMesh is active,
+    # jax.lax.with_sharding_constraint requires the input to already carry a
+    # NamedSharding. This affects both concrete arrays in eager mode and traced
+    # values inside jax.jit whose abstract sharding is not a NamedSharding (e.g.
+    # Module.init() traces over a single-device input and JAX propagates the
+    # SingleDeviceSharding through the Tracer). In both cases the constraint must
+    # be skipped because JAX raises unconditionally.
+    # A UserWarning is emitted only for concrete (non-Tracer) arrays so the user
+    # gets a visible signal in eager mode; the jit-traced skip is unavoidable and
+    # kept silent to avoid spurious warnings from traced code.
+    if hasattr(x, "sharding") and not isinstance(x.sharding, jax.sharding.NamedSharding):
+        if not isinstance(x, jax.core.Tracer):
+            warnings.warn(
+                f"with_sharding_constraint: the sharding constraint {cleaned_pspec!r} was not"
+                f" applied because the input array carries a {type(x.sharding).__name__} rather"
+                " than a NamedSharding. This typically happens in eager mode when arrays have not"
+                " yet been placed on a mesh (e.g. during model initialisation). Wrap the call in"
+                " jax.jit or ensure the array is on a named mesh before applying sharding"
+                " constraints.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return x
+
     return jax.lax.with_sharding_constraint(x, cleaned_pspec)
 
 
@@ -359,6 +390,14 @@ def global_shard_guard(resource: MeshResource):
     old_resources = _GLOBAL_MESH_RESOURCE
     try:
         _GLOBAL_MESH_RESOURCE = resource
+        # ROCm: JAX 0.9 compat (all backends)
+        # Validate once at context-setup time, where get_abstract_mesh() correctly
+        # reflects the physical mesh.  Calling _validate_mesh_resource_configuration
+        # from global_mesh_resource() (i.e. on every access) breaks in JAX 0.9
+        # because get_abstract_mesh() returns an empty AbstractMesh when called
+        # from inside a custom_partitioning sharded_impl during jit(...).lower().
+        if resource is not None:
+            _validate_mesh_resource_configuration(resource)
         yield
     finally:
         _GLOBAL_MESH_RESOURCE = old_resources
@@ -375,7 +414,13 @@ def global_mesh_resource() -> MeshResource:
         " context. If you are not using multiple GPUs, you can use an empty MeshResource by"
         " wrapping your program in 'with global_shard_guard(MeshResource()):'"
     )
-    _validate_mesh_resource_configuration(_GLOBAL_MESH_RESOURCE)
+    # ROCm: JAX 0.9 compat (all backends)
+    # _validate_mesh_resource_configuration is intentionally NOT called here.
+    # Validation is done once in global_shard_guard() at context-setup time, where
+    # get_abstract_mesh() correctly reflects the physical mesh. Calling it here
+    # would break in JAX 0.9 when global_mesh_resource() is invoked from inside a
+    # custom_partitioning sharded_impl during jit(...).lower(), at which point
+    # get_abstract_mesh() returns an empty AbstractMesh.
     return _GLOBAL_MESH_RESOURCE
 
 
@@ -418,8 +463,11 @@ def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mes
     Returns:
         Reduced tensor
     """
-    all_axes = get_all_mesh_axes()
-    for axis in all_axes:
+    # ROCm: JAX 0.9 compat (all backends)
+    # Use mesh.axis_names from the concrete mesh argument rather than calling
+    # get_all_mesh_axes() → _get_mesh() → get_abstract_mesh(), which returns
+    # empty in JAX 0.9 when called from inside a custom_partitioning sharded_impl.
+    for axis in mesh.axis_names:
         if axis != global_mesh_resource().pp_resource:
             x = lax_paral_op(x, jax.lax.pmax, axis, mesh)
     return x

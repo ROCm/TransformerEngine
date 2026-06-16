@@ -7,6 +7,7 @@ import triton
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+from transformer_engine.pytorch.utils import get_sm_count
 from .common import te_dtype_to_torch_dtype
 
 def get_ln_sm_margin(sm_margin_type):
@@ -34,12 +35,10 @@ def get_inf_ln_sm_margin():
 
 
 def get_num_sms(sm_margin=None):
-    num_sms = torch.cuda.get_device_properties(
-        torch.cuda.current_device()
-    ).multi_processor_count
+    n = get_sm_count()
     if sm_margin is not None and sm_margin > 0:
-        num_sms = max(num_sms - int(sm_margin), 1)
-    return num_sms
+        n = max(n - int(sm_margin), 1)
+    return n
 
 
 def num_programs(x, sm_margin=None):

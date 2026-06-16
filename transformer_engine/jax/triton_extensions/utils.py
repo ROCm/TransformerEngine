@@ -37,10 +37,17 @@ import warnings
 from typing import Any, Callable, Mapping
 import zlib
 
+from packaging import version
+
 from jax import core
 import jax
 import jax.numpy as jnp
 from transformer_engine.jax.util import is_hip_extension
+
+from ..version_utils import (
+    TRITON_EXTENSION_MIN_JAX_VERSION,
+    is_triton_extension_supported,
+)
 
 
 # Placeholder package version on PyPI that should never be used
@@ -149,6 +156,21 @@ def _check_triton_compatibility():
 
 # Perform compatibility check and get triton info
 _TRITON_VERSION, _IS_PYTORCH_TRITON = _check_triton_compatibility()
+
+# Enforce minimum JAX version before importing gpu_triton.  The segfault on old
+# jaxlib occurs at Triton kernel dispatch time, not at import time, so gpu_triton
+# itself is safe to import on older jaxlib.  The guard is placed here (before the
+# import) as a belt-and-suspenders measure so that if the import behaviour ever
+# changes, we still fail fast with a clear error rather than a cryptic crash.
+if not is_triton_extension_supported():
+    raise RuntimeError(
+        f"JAX >= {TRITON_EXTENSION_MIN_JAX_VERSION} required for "
+        "transformer_engine.jax.triton_extensions. "
+        "Triton kernel dispatch segfaults with older jaxlib. "
+        f"Current jax version: {jax.__version__}. "
+        "Please upgrade: pip install --upgrade jax jaxlib. "
+        "If you don't need Triton, use transformer_engine.jax.cpp_extensions instead."
+    )
 
 try:
     from jax._src.lib import gpu_triton
@@ -301,13 +323,16 @@ def compile_triton(
         return kernel
 
     # Compile kernel
+    cuda_option_kwargs = {}
+    if version.parse(_TRITON_VERSION) < version.parse("3.6.0"):
+        cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
     options = cb.CUDAOptions(
         num_warps=num_warps,
         num_stages=num_stages,
         num_ctas=num_ctas,
-        cluster_dims=(1, 1, 1),
         debug=False,
         enable_fp_fusion=enable_fp_fusion,
+        **cuda_option_kwargs,
     )
 
     # Mark constants as constexpr in signature
@@ -330,8 +355,6 @@ def compile_triton(
 
     # Create kernel object for JAX
     # From jax/jaxlib/gpu/triton_kernels.cc:
-    from packaging import version
-
     if version.parse(jax.__version__) >= version.parse("0.8.2"):
         kernel = gpu_triton.TritonKernel(
             compiled.name,  # arg0: kernel_name (str)

@@ -54,7 +54,7 @@ def cross_entropy_forward(
     n_non_ignore = torch.zeros(1, dtype=torch.int64, device=_input.device)
 
     # ensure _input and target are contiguous in the last dimension
-    if _input.stride(-1) != 1:
+    if _input.stride(-1) != 1 or _input.stride(-2) != _input.shape[-1]:
         _input = _input.contiguous()
     if target.stride(-1) != 1:
         target = target.contiguous()
@@ -131,6 +131,11 @@ def cross_entropy_backward(
         B, SQ, V = _input.shape
         n_rows = B * SQ
         BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
+
+        # element_mul_kernel indexes grad_output per row with unit stride, so a broadcasted
+        # gradient (single element, stride 0) would read out of bounds. Make it contiguous.
+        if grad_output.numel() > 1:
+            grad_output = grad_output.contiguous()
 
         element_mul_kernel[(n_rows,)](
             _input,

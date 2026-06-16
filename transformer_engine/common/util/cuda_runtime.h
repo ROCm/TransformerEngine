@@ -12,7 +12,6 @@
 #include <cuda_runtime_api.h>
 
 #include <string>
-
 namespace transformer_engine {
 
 namespace cuda {
@@ -40,6 +39,14 @@ int sm_arch(int device_id = -1);
  * \return GPU arch name and compute capabilities string.
  */
 const std::string &sm_arch_name(int device_id = -1);
+
+/* \brief Warp/wavefront size on a device
+ *
+ * \param[in] device_id CUDA/HIP device (default is current device)
+ *
+ * \return Number of threads per warp (NVIDIA) or wavefront (AMD)
+ */
+int warp_size(int device_id = -1);
 #endif
 
 /* \brief Number of multiprocessors on a device
@@ -85,6 +92,12 @@ const std::string &include_directory(bool required = false);
  * Versions may differ between compile-time and run-time.
  */
 int cudart_version();
+
+/* \brief cuBLAS version number at run-time
+ *
+ * Versions may differ between compile-time and run-time.
+ */
+size_t cublas_version();
 #endif
 
 }  // namespace cuda

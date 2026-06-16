@@ -50,6 +50,7 @@ cudnn_frontend::NormFwdPhase_t get_cudnn_forward_phase(const bool training) {
 }
 #endif //#ifndef __HIP_PLATFORM_AMD__
 
+// Keep this bit layout in sync with the decode helpers in common.h.
 TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
                      NVTE_Norm_Stage NormStage, DType wtype, DType itype, DType otype, DType ctype,
                      uint64_t batch_size, uint64_t hidden_size, bool zero_centered_gamma,
@@ -66,6 +67,25 @@ TupleKeyType get_key(NVTE_Norm_Backend NormBackend, NVTE_Norm_Type NormType,
                          (uint64_t(training) << 37) | (uint64_t(gamma_in_weight_dtype) << 38);
   return std::make_tuple(general_key, batch_size, hidden_size, is_tuned);
 }
+
+namespace {
+
+[[maybe_unused]] const bool kNormKeyLayoutCheck = [] {
+  const uint64_t key = std::get<0>(get_key(
+      NVTE_Norm_Backend::Te, NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::Forward,
+      DType::kFloat16, DType::kBFloat16, DType::kFloat8E4M3, DType::kFloat32,
+      1, 1, false, false));
+
+  NVTE_CHECK(decode_itype(key) == DType::kBFloat16);
+  NVTE_CHECK(decode_otype(key) == DType::kFloat8E4M3);
+  NVTE_CHECK(decode_ctype(key) == DType::kFloat32);
+  NVTE_CHECK(decode_wtype(key) == DType::kFloat16);
+  NVTE_CHECK(decode_norm_type(key) == NVTE_Norm_Type::RMSNorm);
+
+  return true;
+}();
+
+}  // namespace
 
 template <typename KernelParamsType>
 TeNormalizationPlan<KernelParamsType>::TeNormalizationPlan(
@@ -144,7 +164,9 @@ void TeNormalizationPlan<BackwardKernelParams>::execute(Tensor* z, void* x_dptr,
                                                         void* beta_dptr, void* mean_dptr,
                                                         void* eps_dptr, void* rsigma_dptr,
                                                         void* workspace_dptr, cudaStream_t stream) {
-  NVTE_ERROR("Backward normalization should not call the forward execute function!");
+  NVTE_ERROR(
+      "Backward normalization should not call the forward execute function. "
+      "Use the backward-specific execute overload instead.");
 }
 
 template <typename KernelParamsType>
@@ -201,7 +223,9 @@ void TeNormalizationPlan<ForwardKernelParams>::execute(void* x_dptr, void* gamma
                                                        void* dx_dptr, void* dz_dptr, void* add_dptr,
                                                        void* dbeta_dptr, void* dgamma_dptr,
                                                        void* workspace_dptr, cudaStream_t stream) {
-  NVTE_ERROR("Forward normalization should not call the backward execute function!");
+  NVTE_ERROR(
+      "Forward normalization should not call the backward execute function. "
+      "Use the forward-specific execute overload instead.");
 }
 
 template <>
@@ -609,4 +633,3 @@ void nvte_enable_zero_centered_gamma_in_weight_dtype(bool enable) {
   transformer_engine::normalization::_zero_centered_gamma_in_weight_dtype() = enable;
 }
 #endif
-

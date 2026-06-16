@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -87,12 +89,9 @@ class TestDistributedSoftmax:
         dtype,
         bad_sharding,
         broadcast_batch_mask,
-        use_shardy,
     ):
         if broadcast_batch_mask and softmax_fusion_type != SoftmaxFusionType.SCALED_MASKED:
             pytest.skip("Softmax type has no mask.")
-
-        jax.config.update("jax_use_shardy_partitioner", use_shardy)
         target_func = partial(
             self.target_func, scale_factor=scale_factor, softmax_fusion_type=softmax_fusion_type
         )
@@ -109,7 +108,7 @@ class TestDistributedSoftmax:
         collective_count_ref = self.generate_collectives_count_ref()
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, autocast(mesh_resource=mesh_resource):
+        with jax.set_mesh(mesh), autocast(mesh_resource=mesh_resource):
             x_named_sharding = NamedSharding(mesh, x_pspec)
             mask_named_sharding = NamedSharding(mesh, mask_pspec)
             x_ = jax.device_put(x, x_named_sharding)
@@ -181,35 +180,4 @@ class TestDistributedSoftmax:
             dtype,
             bad_sharding,
             broadcast_batch_mask,
-            use_shardy=True,
-        )
-
-    @pytest.mark.parametrize("device_count,mesh_shape,mesh_axes,mesh_resource", generate_configs())
-    @pytest.mark.parametrize(
-        "softmax_fusion_type", [SoftmaxFusionType.SCALED, SoftmaxFusionType.SCALED_MASKED]
-    )
-    @pytest.mark.parametrize("bad_sharding", [False, True])
-    @pytest.mark.parametrize("broadcast_batch_mask", [False, True])
-    def test_softmax_gspmd(
-        self,
-        device_count,
-        mesh_shape,
-        mesh_axes,
-        mesh_resource,
-        softmax_fusion_type,
-        bad_sharding,
-        broadcast_batch_mask,
-    ):
-        self.impl_test_softmax(
-            device_count,
-            mesh_shape,
-            mesh_axes,
-            mesh_resource,
-            data_shape=[32, 12, 128, 128],
-            softmax_fusion_type=softmax_fusion_type,
-            scale_factor=1.0,
-            dtype=DTYPES[0],
-            bad_sharding=bad_sharding,
-            broadcast_batch_mask=broadcast_batch_mask,
-            use_shardy=False,
         )

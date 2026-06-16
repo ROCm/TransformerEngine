@@ -49,8 +49,14 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   Tensor* A0_te = convertNVTETensorCheck(A_use[0]);
   Tensor* B0_te = convertNVTETensorCheck(B_use[0]);
 
+  const bool warn_fallback =
+      getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
+
   // Currently the accumulate path is only supported on fp16
   if (accumulate && is_8bit_float) {
+    if (warn_fallback) {
+      NVTE_WARN("ck_tile_grouped_gemm: accumulate is currently unsupported on fp8");
+    }
   	return false;
   }
 
@@ -94,8 +100,11 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
     }
   }
 
-  const auto a_dtype = convertNVTETensorCheck(A_use[0])->dtype();
-  const auto b_dtype = convertNVTETensorCheck(B_use[0])->dtype();
+  const auto& A0_data = use_a_colwise_data ? A0_te->columnwise_data : A0_te->data;
+  const auto& B0_data = use_b_colwise_data ? B0_te->columnwise_data : B0_te->data;
+
+  const auto a_dtype = A0_data.dtype;
+  const auto b_dtype = B0_data.dtype;
 
   Tensor* D0_te = convertNVTETensorCheck(D[0]);
   const auto d_dtype = D0_te->dtype();
@@ -171,7 +180,8 @@ bool ck_tile_grouped_gemm(const NVTETensor* A,
   } else if (is_8bit_float) {
     return ck_tile_grouped_gemm_fp8_dispatch(a_dtype, b_dtype, d_dtype, ctx);
   }
-
-  NVTE_WARN("ck_tile_grouped_gemm: input dtype is neither fp16 nor fp8.");
+  if (warn_fallback) {
+    NVTE_WARN("ck_tile_grouped_gemm: input dtype is neither fp16 nor fp8.");
+  }
   return false;
 }

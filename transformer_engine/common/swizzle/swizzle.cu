@@ -14,6 +14,7 @@
 #include <type_traits>
 
 #include "../common.h"
+#include "../util/cuda_runtime.h"
 #include "../util/logging.h"
 #include "transformer_engine/transformer_engine.h"
 
@@ -286,6 +287,40 @@ struct MultiSwizzleArgs {
   int num_tensors;
 };
 
+constexpr size_t round_up_to_multiple(size_t value, size_t multiple) {
+  return DIVUP(value, multiple) * multiple;
+}
+
+template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
+__global__ void __launch_bounds__(TB_DIM* TB_DIM)
+    grouped_swizzle_row_scaling_uniform_shape_kernel(const void* input, void* output, const int M,
+                                                     const int K, const int original_M,
+                                                     const int original_K,
+                                                     const size_t scale_stride_bytes) {
+  const int tensor_id = blockIdx.z;
+  const uint8_t* input_base =
+      reinterpret_cast<const uint8_t*>(input) + tensor_id * scale_stride_bytes;
+  uint8_t* output_base = reinterpret_cast<uint8_t*>(output) + tensor_id * scale_stride_bytes;
+  swizzle_row_scaling_kernel_impl<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+      input_base, output_base, M, K, original_M, original_K, blockIdx.x, blockIdx.y, gridDim.x,
+      gridDim.y);
+}
+
+template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
+__global__ void __launch_bounds__(TB_DIM* TB_DIM)
+    grouped_swizzle_col_scaling_uniform_shape_kernel(const void* input, void* output, const int M,
+                                                     const int K, const int original_M,
+                                                     const int original_K,
+                                                     const size_t scale_stride_bytes) {
+  const int tensor_id = blockIdx.z;
+  const uint8_t* input_base =
+      reinterpret_cast<const uint8_t*>(input) + tensor_id * scale_stride_bytes;
+  uint8_t* output_base = reinterpret_cast<uint8_t*>(output) + tensor_id * scale_stride_bytes;
+  swizzle_col_scaling_kernel_impl<LType, SF_TILE_DIM_M, SF_TILE_DIM_K>(
+      input_base, output_base, M, K, original_M, original_K, blockIdx.x, blockIdx.y, gridDim.x,
+      gridDim.y);
+}
+
 template <typename LType, int SF_TILE_DIM_M, int SF_TILE_DIM_K>
 __global__ void multi_tensor_swizzle_row_scaling_kernel(MultiSwizzleArgs kernel_args) {
   // Find tensor corresponding to block
@@ -347,9 +382,171 @@ __global__ void multi_tensor_swizzle_col_scaling_kernel(MultiSwizzleArgs kernel_
       input, output, M, K, original_M, original_K, bid_x, bid_y, grid_dim_x, grid_dim_y);
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+// ============================================================================
+// MX scale pre-swizzle kernel for gfx1250 — K-tiled 3D layout
+//
+// hipBLASlt Tensile kernels expect scales in a permuted 3D layout that
+// groups K_scale into tiles of 4 (= 128 / MXBlock32):
+//   Tensor({M, K_scale}).pad(K_scale to mult of 4).reshape({M, K_scale/4, 4}).permute({1, 0, 2})
+//
+// For source position (m, k) in the [M, K_scale] scale matrix:
+//   group  = k / 4
+//   within = k % 4
+//   dst    = group * (M * 4) + m * 4 + within
+//
+// Padding: K_scale to multiple of 4.  No M padding required.
+// Identity padding value: E8M0 127 = 2^0 = 1.0
+//
+// Reference: swizzle_mx_scale() in hipblaslt/clients/common/include/testing_matmul.hpp
+// ============================================================================
+
+constexpr int MX_PRESWIZZLE_GROUP_SIZE = 4;
+
+// Unified MX scale pre-swizzle kernel for both row-wise and column-wise.
+// Iterates only over valid (non-padded) elements; the caller must pre-fill
+// the output buffer with identity (127) to handle padding.
+//
+// kRowwise=true:  input is [orig_M, orig_K] row-major
+// kRowwise=false: input is [orig_K, orig_M] row-major (column-wise scales)
+template <bool kRowwise>
+__global__ void __launch_bounds__(256)
+    swizzle_scaling_mx_kernel(const uint8_t* __restrict__ input,
+                              uint8_t* __restrict__ output,
+                              const int padded_M,
+                              const int input_stride,
+                              const int orig_M, const int orig_K) {
+  const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+  const int total = orig_M * orig_K;
+  if (idx >= total) return;
+
+  const int m = idx / orig_K;
+  const int k = idx % orig_K;
+
+  uint8_t val;
+  if constexpr (kRowwise) {
+    val = input[m * input_stride + k];
+  } else {
+    val = input[k * input_stride + m];
+  }
+
+  const int group = k / MX_PRESWIZZLE_GROUP_SIZE;
+  const int within = k % MX_PRESWIZZLE_GROUP_SIZE;
+  const int dst = group * (padded_M * MX_PRESWIZZLE_GROUP_SIZE)
+                + m * MX_PRESWIZZLE_GROUP_SIZE + within;
+
+  output[dst] = val;
+}
+
 }  // namespace
 
+void swizzle_scaling_factors_mx(const Tensor* input, Tensor* output, cudaStream_t stream) {
+  // Check scaling mode
+  const auto& scaling_mode = input->scaling_mode;
+  NVTE_CHECK(scaling_mode == NVTE_MXFP8_1D_SCALING,
+             "MX pre-swizzle only supports MXFP8 scaling mode (got ",
+             to_string(input->scaling_mode), ").");
+
+  // Check tensors
+  CheckInputTensor(*input, "scaling_factor_input");
+  CheckInputTensor(*output, "scaling_factor_output");
+  NVTE_CHECK(!input->with_gemm_swizzled_scales,
+             "Expected input tensor with scales in compact format.");
+  NVTE_CHECK(output->with_gemm_swizzled_scales,
+             "Expected output tensor with scales in GEMM swizzled format.");
+  NVTE_CHECK(is_fp8_dtype(input->dtype()), "Input tensor has invalid dtype (expected FP8, got ",
+             to_string(input->dtype()), ").");
+
+  // Check if scaling factors are non-trivial
+  const bool has_rowwise_scale_inv = input->scale_inv.has_data();
+  const bool has_columnwise_scale_inv = input->columnwise_scale_inv.has_data();
+  NVTE_CHECK(!has_rowwise_scale_inv || !has_columnwise_scale_inv,
+             "Input tensor has both row-wise and column-wise scaling factors");
+  if (!has_rowwise_scale_inv && !has_columnwise_scale_inv) {
+    return;
+  }
+
+  // Deduce tensor dims
+  int m{0}, k{0};
+  if (has_rowwise_scale_inv) {
+    NVTE_CHECK(input->scale_inv.shape.size() == 2,
+               "Expected 2D scaling factors, got shape=", input->scale_inv.shape, ".");
+    m = input->scale_inv.shape[0];
+    k = input->scale_inv.shape[1];
+  } else if (has_columnwise_scale_inv) {
+    NVTE_CHECK(input->columnwise_scale_inv.shape.size() == 2,
+               "Expected 2D scaling factors, got shape=", input->columnwise_scale_inv.shape, ".");
+    m = input->columnwise_scale_inv.shape[1];
+    k = input->columnwise_scale_inv.shape[0];
+  }
+
+  // Check dims -- K-tiled layout requires K_scale padded to multiple of 4
+  NVTE_CHECK(k % MX_PRESWIZZLE_GROUP_SIZE == 0,
+             "Scale K dimension must be padded to multiple of ", MX_PRESWIZZLE_GROUP_SIZE,
+             ", got ", k, ".");
+
+  // Validate output dimensions match
+  if (has_rowwise_scale_inv) {
+    NVTE_CHECK(output->scale_inv.has_data(),
+               "Output tensor does not have row-wise scaling factors.");
+    NVTE_CHECK(m * k == output->scale_inv.numel(), "Expected output tensor to have ", m * k,
+               " row-wise scaling factors, but got shape=", output->scale_inv.shape, ".");
+  }
+  if (has_columnwise_scale_inv) {
+    NVTE_CHECK(output->columnwise_scale_inv.has_data(),
+               "Output tensor does not have column-wise scaling factors.");
+    NVTE_CHECK(m * k == output->columnwise_scale_inv.numel(),
+               "Expected output tensor to have ", m * k,
+               " column-wise scaling factors, but got shape=",
+               output->columnwise_scale_inv.shape, ".");
+  }
+
+  const int total = m * k;
+  constexpr int block = 256;
+
+  // Row-wise swizzle
+  if (has_rowwise_scale_inv) {
+    const int original_M = input->flat_first_dim();
+    const int original_K = input->flat_last_dim() / MXFP8_BLOCK_SIZE;
+    const int input_stride = k;
+    // Pre-fill output with E8M0 identity (127 = 2^0) to handle padding
+    NVTE_CHECK_CUDA(cudaMemsetAsync(output->scale_inv.dptr, 127, total, stream));
+    const int orig_total = original_M * original_K;
+    const int grid = (orig_total + block - 1) / block;
+    swizzle_scaling_mx_kernel<true><<<grid, block, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(input->scale_inv.dptr),
+        reinterpret_cast<uint8_t*>(output->scale_inv.dptr),
+        m, input_stride, original_M, original_K);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  }
+
+  // Column-wise swizzle
+  if (has_columnwise_scale_inv) {
+    const int original_M = input->flat_last_dim();
+    const int original_K = input->flat_first_dim() / MXFP8_BLOCK_SIZE;
+    const int input_stride = m;
+    // Pre-fill output with E8M0 identity (127 = 2^0) to handle padding
+    NVTE_CHECK_CUDA(cudaMemsetAsync(output->columnwise_scale_inv.dptr, 127, total, stream));
+    const int orig_total = original_M * original_K;
+    const int grid = (orig_total + block - 1) / block;
+    swizzle_scaling_mx_kernel<false><<<grid, block, 0, stream>>>(
+        reinterpret_cast<const uint8_t*>(input->columnwise_scale_inv.dptr),
+        reinterpret_cast<uint8_t*>(output->columnwise_scale_inv.dptr),
+        m, input_stride, original_M, original_K);
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  }
+}
+#endif  // __HIP_PLATFORM_AMD__
+
 void swizzle_scaling_factors(const Tensor* input, Tensor* output, cudaStream_t stream) {
+#ifdef __HIP_PLATFORM_AMD__
+  // On gfx1250, MXFP8 uses the MX pre-swizzle layout (K-tiled, grouped by 4).
+  if (input->scaling_mode == NVTE_MXFP8_1D_SCALING && cuda::sm_arch() == 125) {
+    swizzle_scaling_factors_mx(input, output, stream);
+    return;
+  }
+#endif  // __HIP_PLATFORM_AMD__
+
   // Check scaling mode
   const auto& scaling_mode = input->scaling_mode;
   NVTE_CHECK(scaling_mode == NVTE_MXFP8_1D_SCALING || scaling_mode == NVTE_NVFP4_1D_SCALING,
@@ -587,9 +784,9 @@ void launch_multi_tensor_swizzle_scaling_factors(MultiSwizzleArgs& kernel_args,
   int n_tiles_in_tb = TB_DIM * vec_load_size;
   int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
   /* Calculate number of CUDA blocks needed for each tensor.
-    * We have to do it here because we have to iterate over all tensors in this batch to
-    * get the minimum vec_load_size.
-    */
+  * We have to do it here because we have to iterate over all tensors in this batch to
+  * get the minimum vec_load_size.
+  */
   for (size_t j = 0; j < kernel_args.num_tensors; j++) {
     const int m = kernel_args.m_list[j];
     const int k = kernel_args.k_list[j];
@@ -667,6 +864,24 @@ void launch_multi_tensor_swizzle_scaling_factors(MultiSwizzleArgs& kernel_args,
 
 void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
                                           std::vector<Tensor*>& output, cudaStream_t stream) {
+#ifdef __HIP_PLATFORM_AMD__
+  // On gfx1250, MXFP8 uses the MX pre-swizzle layout.
+  if (cuda::sm_arch() == 125) {
+    bool any_mxfp8 = false;
+    for (size_t i = 0; i < input.size(); i++) {
+      if (is_mxfp8_scaling(input[i]->scaling_mode)) {
+        any_mxfp8 = true;
+      }
+    }
+    if (any_mxfp8) {
+      for (size_t i = 0; i < input.size(); i++) {
+        swizzle_scaling_factors(input[i], output[i], stream);
+      }
+      return;
+    }
+  }
+#endif  // __HIP_PLATFORM_AMD__
+
   auto num_tensors = input.size();
   bool all_has_data = true;
   bool all_has_columnwise_data = true;
@@ -837,10 +1052,10 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
 }  // namespace transformer_engine
 
 /*
- * WIP (Phuong):
- *   - Opt for bank conflicts
- *   - Adding swizzle for 2d-block scaling.
- */
+* WIP (Phuong):
+*   - Opt for bank conflicts
+*   - Adding swizzle for 2d-block scaling.
+*/
 void nvte_swizzle_scaling_factors(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_swizzle_scaling_factors);
   using namespace transformer_engine;
@@ -858,4 +1073,172 @@ void nvte_multi_tensor_swizzle_scaling_factors(const NVTETensor* inputs, NVTETen
     output_list.push_back(convertNVTETensorCheck(outputs[i]));
   }
   multi_tensor_swizzle_scaling_factors(input_list, output_list, stream);
+}
+
+namespace transformer_engine {
+
+void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* output,
+                                     cudaStream_t stream) {
+  // Check scaling mode
+  NVTE_CHECK(input->scaling_mode == NVTE_MXFP8_1D_SCALING,
+             "Grouped swizzle supports only MXFP8 scaling.");
+
+  // Check tensors
+  CheckInputGroupedTensor(*input, "input");
+  CheckOutputGroupedTensor(*output, "output", false);
+  NVTE_CHECK(!input->with_gemm_swizzled_scales,
+             "Expected input grouped tensor with scales in compact format.");
+  NVTE_CHECK(output->with_gemm_swizzled_scales,
+             "Expected output grouped tensor with scales in GEMM swizzled format.");
+
+  // Check scaling factors availability
+  const bool has_rowwise_scale_inv = input->scale_inv.has_data();
+  const bool has_columnwise_scale_inv = input->columnwise_scale_inv.has_data();
+  if (!has_rowwise_scale_inv && !has_columnwise_scale_inv) {
+    return;
+  }
+
+  // Only support uniform shapes for graph-safe grouped swizzle
+  NVTE_CHECK(input->all_same_shape(), "Grouped swizzle requires uniform tensor shapes.");
+  NVTE_CHECK(input->all_same_last_dim() && input->all_same_first_dim(),
+             "Grouped swizzle requires uniform tensor shapes.");
+
+  // Assumption is that all the tensors share the same shapes and are contgiuous.
+  // And so we dont need to pass array of input/output pointers(due to conttiguity)
+  // as well as array of shapes(due to uniform shapes).
+  const size_t first_dim = input->get_common_first_dim();
+  const size_t last_dim = input->get_common_last_dim();
+
+  constexpr int SF_TILE_DIM_M = 128;
+  constexpr int SF_TILE_DIM_K = 4;
+  const dim3 block_size(TB_DIM, TB_DIM);
+
+  auto launch_grouped_swizzle = [&](bool rowwise) {
+    const size_t m = rowwise ? first_dim : last_dim;
+    const size_t k = rowwise ? last_dim : first_dim;
+    const size_t padded_m = round_up_to_multiple(m, 128);
+    const size_t padded_k =
+        round_up_to_multiple(DIVUP(k, static_cast<size_t>(MXFP8_BLOCK_SIZE)), 4);
+    const size_t scale_elems = padded_m * padded_k;
+
+    const size_t scale_elem_size = rowwise ? typeToSize(input->scale_inv.dtype)
+                                           : typeToSize(input->columnwise_scale_inv.dtype);
+    const size_t scale_stride_bytes = scale_elems * scale_elem_size;
+
+    if (rowwise) {
+      NVTE_CHECK(input->scale_inv.numel() == input->num_tensors * scale_elems,
+                 "Grouped input scale_inv size does not match expected packed size.");
+      NVTE_CHECK(output->scale_inv.numel() == output->num_tensors * scale_elems,
+                 "Grouped output scale_inv size does not match expected packed size.");
+    } else {
+      NVTE_CHECK(input->columnwise_scale_inv.numel() == input->num_tensors * scale_elems,
+                 "Grouped input columnwise_scale_inv size does not match expected packed size.");
+      NVTE_CHECK(output->columnwise_scale_inv.numel() == output->num_tensors * scale_elems,
+                 "Grouped output columnwise_scale_inv size does not match expected packed size.");
+    }
+
+    const int num_tiles_m = padded_m / SF_TILE_DIM_M;
+    const int num_tiles_k = padded_k / SF_TILE_DIM_K;
+    int vec_load_size = (rowwise ? ((num_tiles_k - 1) % 4 + 1) : ((num_tiles_m - 1) % 4 + 1));
+    if (vec_load_size == 3) vec_load_size = 1;
+    const int n_tiles_in_tb = TB_DIM * vec_load_size;
+
+    dim3 num_blocks;
+    if (rowwise) {
+      num_blocks = dim3(DIVUP(num_tiles_k, n_tiles_in_tb), num_tiles_m, input->num_tensors);
+    } else {
+      num_blocks =
+          dim3(DIVUP(num_tiles_k, TB_DIM), DIVUP(num_tiles_m, vec_load_size), input->num_tensors);
+    }
+    const int slm_size = n_tiles_in_tb * SF_TILE_DIM_M * SF_TILE_DIM_K * sizeof(int8_t);
+
+    const int original_M = static_cast<int>(rowwise ? first_dim : last_dim);
+    const int original_K = static_cast<int>(DIVUP(k, static_cast<size_t>(MXFP8_BLOCK_SIZE)));
+    const void* input_ptr = rowwise ? input->scale_inv.dptr : input->columnwise_scale_inv.dptr;
+    void* output_ptr = rowwise ? output->scale_inv.dptr : output->columnwise_scale_inv.dptr;
+
+    if (rowwise) {
+      switch (vec_load_size) {
+        case 4:
+          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+              grouped_swizzle_row_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+          grouped_swizzle_row_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
+              <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
+                                                             padded_k, original_M, original_K,
+                                                             scale_stride_bytes);
+          break;
+        case 2:
+          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+              grouped_swizzle_row_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+          grouped_swizzle_row_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
+              <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
+                                                             padded_k, original_M, original_K,
+                                                             scale_stride_bytes);
+          break;
+        case 1:
+          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+              grouped_swizzle_row_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+          grouped_swizzle_row_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
+              <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
+                                                             padded_k, original_M, original_K,
+                                                             scale_stride_bytes);
+          break;
+        default:
+          NVTE_ERROR("Not valid vec_load_size.");
+      }
+    } else {
+      switch (vec_load_size) {
+        case 4:
+          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+              grouped_swizzle_col_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+          grouped_swizzle_col_scaling_uniform_shape_kernel<int4, SF_TILE_DIM_M, SF_TILE_DIM_K>
+              <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
+                                                             padded_k, original_M, original_K,
+                                                             scale_stride_bytes);
+          break;
+        case 2:
+          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+              grouped_swizzle_col_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+          grouped_swizzle_col_scaling_uniform_shape_kernel<int2, SF_TILE_DIM_M, SF_TILE_DIM_K>
+              <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
+                                                             padded_k, original_M, original_K,
+                                                             scale_stride_bytes);
+          break;
+        case 1:
+          NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+              grouped_swizzle_col_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>,
+              cudaFuncAttributeMaxDynamicSharedMemorySize, slm_size));
+          grouped_swizzle_col_scaling_uniform_shape_kernel<int, SF_TILE_DIM_M, SF_TILE_DIM_K>
+              <<<num_blocks, block_size, slm_size, stream>>>(input_ptr, output_ptr, padded_m,
+                                                             padded_k, original_M, original_K,
+                                                             scale_stride_bytes);
+          break;
+        default:
+          NVTE_ERROR("Not valid vec_load_size.");
+      }
+    }
+    NVTE_CHECK_CUDA(cudaGetLastError());
+  };
+
+  if (has_rowwise_scale_inv) {
+    launch_grouped_swizzle(true);
+  }
+  if (has_columnwise_scale_inv) {
+    launch_grouped_swizzle(false);
+  }
+}
+
+}  // namespace transformer_engine
+
+void nvte_swizzle_grouped_scaling_factors(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                                          cudaStream_t stream) {
+  NVTE_API_CALL(nvte_swizzle_grouped_scaling_factors);
+  using namespace transformer_engine;
+  swizzle_grouped_scaling_factors(convertNVTEGroupedTensorCheck(input),
+                                  convertNVTEGroupedTensorCheck(output), stream);
 }

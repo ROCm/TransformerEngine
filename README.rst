@@ -29,34 +29,25 @@ Installation
 See docs/installation.rst for detailed installation instructions on ROCm and AMDGPU.
 For addtional build configuration parameters see `Fused Attention Backends on ROCm` section below.
 
-AITER rebuilding
-^^^^^^^^^^^^^^^^
-
-TE uses AITER submodule as fused attention backend on ROCm. Rebuilding of this library takes a long time so build scripts cache the built library in `build/aiter-prebuilts`. If you want rebuild AITER, delete the cache and rebuild TE.
-
-Known Issue with ROCm 6.4 PyTorch Release
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Using the docker image ``rocm/pytorch:rocm6.4_ubuntu22.04_py3.10_pytorch_release_2.5.1`` triggers a failure in the unit-test ``tests/pytorch/test_permutation.py`` (tracked in Jira ticket SWDEV-534311).
-
-Rebuilding PyTorch at commit ``f929e0d602a71aa393ca2e6097674b210bdf321c`` resolves the issue.
+CK JIT
+^^^^^^
+TE uses AITER submodule as fused attention backend on ROCm which includes Composable Kernels (CK) MHA kernels library.
+By default CK kernels are not compiled during the build of TE. Instead, they are installed to TE as sourcre files and compiled runtime with HIP compiler.
+This allows TE to support a wide range of configurations without the need to pre-compile kernels for all configurations, which would lead to a very long build time and large binary size.
+Installed TE has `lib/ck_jit/ck_jit_prebuild.py` script that allows manipulating JIT cache.
 
 .. code-block:: bash
+  
+  #In TE installation directory
+  python3 lib/ck_jit/ck_jit_prebuild.py --help
 
-  # Remove the pre-installed pytorch
-  pip uninstall -y torch
+Like with any JIT it is important to perform warmup runs before benchmarking or using TE in production to ensure the JIT cache is populated and the kernels are compiled.
+After that list of built kernels can be obtained with `ck_jit_prebuilt.py` or by direct read of cache directory, and then `ck_jit_prebuilt.py` can be used on the same on another system
+for quick kernels rebuild if needed fully utilizing parallel multi-CPU compilation 
 
-  # Clone PyTorch and check out the working commit
-  export PYTORCH_COMMIT=f929e0d602a71aa393ca2e6097674b210bdf321c
-  git clone https://github.com/pytorch/pytorch
-  cd pytorch
-  git fetch origin ${PYTORCH_COMMIT}
-  git checkout -q ${PYTORCH_COMMIT}
-  git submodule update --recursive --init
-
-  # Build and install
-  ./tools/amd_build/build_amd.py
-  BUILD_TEST=0 python3 setup.py install
+AITER rebuilding
+^^^^^^^^^^^^^^^^
+If CK JIT is disabled, rebuilding of AITER library takes a long time so build scripts caches the built library in `build/aiter-prebuilts`. If you want rebuild AITER, delete the cache and rebuild TE.
 
 Test
 ====
@@ -223,7 +214,7 @@ Currently ROCm TE supports two backends, AOTriton and CK, for fused attention.
 To enable specific backends in compilation and/or in runtime, the following environment variables can be used:
 
 * NVTE_FUSED_ATTN - enable the fused attention, default = 1;
-* NVTE_FUSED_ATTN_CK - enable the CK backend, default = 1;
+* NVTE_FUSED_ATTN_CK - enable the AITER and CK backends, default = 1;
 * NVTE_FUSED_ATTN_AOTRITON - enable the AOTriton backend, default = 1.
 
 Setting env NVTE_FUSED_ATTN_<BACKEND>=0 in compilation will skip the build of the specific backend, which saves the overall building time.
@@ -458,7 +449,7 @@ Flax
       for _ in range(10):
         loss, (param_grads, other_grads) = fwd_bwd_fn(params, other_variables, inp)
 
-For a more comprehensive tutorial, check out our `Quickstart Notebook <https://github.com/NVIDIA/TransformerEngine/blob/main/docs/examples/quickstart.ipynb>`_.
+For a more comprehensive tutorial, check out our `Getting Started Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/getting_started.html>`_.
 
 .. overview-end-marker-do-not-remove
 
@@ -496,15 +487,22 @@ For example to use the NGC PyTorch container interactively,
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:25.08-py3
+    docker run --gpus all -it --rm nvcr.io/nvidia/pytorch:26.01-py3
 
 For example to use the NGC JAX container interactively,
 
 .. code-block:: bash
 
-    docker run --gpus all -it --rm nvcr.io/nvidia/jax:25.08-py3
+    docker run --gpus all -it --rm nvcr.io/nvidia/jax:26.01-py3
 
-Where 25.08 (corresponding to August 2025 release) is the container version.
+Where 26.01 (corresponding to January 2026 release) is the container version.
+
+We recommend updating to the latest NGC container available here:
+
+* https://catalog.ngc.nvidia.com/orgs/nvidia/containers/pytorch
+* https://catalog.ngc.nvidia.com/orgs/nvidia/containers/jax
+
+If you run any examples, please ensure you are using a matching version of TransformerEngine. TransformerEngine is pre-built and packaged inside the containers with examples available at ``/opt/transformerengine`` or ``/opt/transformer-engine``. If you would like to use examples from TE main branch and are running into import errors, please try the latest pip package or building from source, although NGC containers are recommended for ease-of-use for most users.
 
 **Benefits of using NGC containers:**
 
@@ -627,6 +625,37 @@ Troubleshooting
 
          cd transformer_engine
          pip install -v -v -v --no-build-isolation .
+
+**Problems using UV or Virtual Environments:**
+
+1. **Import Error:**
+
+   * **Symptoms:** Cannot import ``transformer_engine``
+   * **Solution:** Ensure your UV environment is active and that you have used ``uv pip install --no-build-isolation <te_pypi_package_or_wheel_or_source_dir>`` instead of a regular pip install to your system environment.
+
+2. **cuDNN Sublibrary Loading Failed:**
+
+   * **Symptoms:** Errors at runtime with ``CUDNN_STATUS_SUBLIBRARY_LOADING_FAILED``
+   * **Solution:** This can occur when TE is built against the container's system installation of cuDNN, but pip packages inside the virtual environment pull in pip packages for ``nvidia-cudnn-cu12/cu13``. To resolve this, when building TE from source please specify the following environment variables to point to the cuDNN in your virtual environment.
+   
+   
+     .. code-block:: bash
+
+        export CUDNN_PATH=$(pwd)/.venv/lib/python3.12/site-packages/nvidia/cudnn
+        export CUDNN_HOME=$CUDNN_PATH
+        export LD_LIBRARY_PATH=$CUDNN_PATH/lib:$LD_LIBRARY_PATH
+
+3. **Building Wheels:**
+
+   * **Symptoms:** Regular TE installs work correctly but UV wheel builds fail at runtime.
+   * **Solution:** Ensure that ``uv build --wheel --no-build-isolation -v`` is used during the wheel build as well as the pip installation of the wheel. Use ``-v`` for verbose output to verify that TE is not pulling in a mismatching version of PyTorch or JAX that differs from the UV environment's version.
+
+**JAX-specific Common Issues and Solutions:**
+
+1. **FFI Issues:**
+
+   * **Symptoms:** ``No registered implementation for custom call to <some_te_ffi> for platform CUDA``
+   * **Solution:** Ensure ``--no-build-isolation`` is used during installation. If pre-building wheels, ensure that the wheel is both built and installed with ``--no-build-isolation``. See "Problems using UV or Virtual Environments" above if using UV.
 
 .. troubleshooting-end-marker-do-not-remove
 
