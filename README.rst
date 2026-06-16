@@ -259,6 +259,34 @@ ROCm TE provides the compile-time env NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAU
 * 3 - standard asm, default;
 * 4 - rta_asm.
 
+AITER Native Split-K Forward (gfx942 only)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+On gfx942, the CK fused attention path can optionally dispatch the *forward* pass to AITER's
+hand-written native split-K (Flash-Decoding) kernel, which splits the work along the key/value
+sequence dimension to keep the GPU busy when a single attention problem does not. This is
+controlled by a runtime environment variable:
+
+* NVTE_FUSED_ATTN_SPLITKV - by default 0 (disabled). When set to 1, eligible CK FusedAttention
+  forward calls are routed to AITER's native split-K kernel, which picks the number of splits with
+  its built-in occupancy heuristic.
+
+When to use it:
+
+* The benefit comes from *under-subscribed, long-KV* shapes - small ``batch x num_heads`` with a
+  large ``seqlen_kv`` (e.g. long-context prefill or decode) - where the standard kernel leaves
+  compute units idle. Splitting the KV dimension across more workgroups fills the machine.
+* For already-saturated shapes (large ``batch x num_heads``) there is little to gain; AITER's
+  heuristic typically declines to split, so leaving the flag on is low-risk but offers no benefit
+  there.
+* It is forward-only and affects only the ``FusedAttention`` / ``DotProductAttention`` module path.
+  Training backward and the unfused path are unchanged.
+
+The divert engages only when a call is eligible for the native kernel: gfx942, dense ``bshd`` /
+``sbhd`` layout (no ``thd``/varlen), bf16, head dim 64, no bias/ALiBi/sliding-window/dropout/
+attention-sink/FP8/context-parallel/KV-cache, and, for causal masking, ``seqlen_kv >= seqlen_q``.
+Non-eligible calls fall back to the standard CK kernel unchanged. This requires an AITER build that
+includes the native split-K kernel; if it is unavailable the flag is ignored with a warning.
+
 Experimental Triton Kernels on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Most CUDA kernels in Transformer Engine are hipified to run on ROCm. While the hipifiled CUDA kernels are functional, they are not necessarily optimal on ROCm.
