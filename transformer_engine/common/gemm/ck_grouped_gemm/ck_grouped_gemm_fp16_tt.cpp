@@ -9,10 +9,11 @@
 namespace transformer_engine {
 namespace grouped_gemm {
 
+template <GPUArch Arch>
 bool ck_tile_grouped_gemm_fp16_dispatch_tt(DType a_dtype, DType d_dtype,
                                            bool need_m_pad, bool need_k_pad,
                                            const GroupedGemmRunContext& ctx) {
-  return ck_tile_grouped_gemm_fp16_dispatch_layout<ColMajor, ColMajor>(
+  return ck_tile_grouped_gemm_fp16_dispatch_layout<Arch, ColMajor, ColMajor>(
       a_dtype, d_dtype, need_m_pad, need_k_pad, ctx);
 }
 
