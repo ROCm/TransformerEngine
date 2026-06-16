@@ -16,15 +16,10 @@
 namespace transformer_engine {
 namespace grouped_gemm {
 
-enum class GPUArch {
-  GFX942,
-  GFX950,
-  UNKNOWN
-};
 
-struct TileCfg_128x128x128_16x16x128_2x2x1 {
-  static constexpr ck_tile::index_t M_Tile = 128;
-  static constexpr ck_tile::index_t N_Tile = 128;
+struct TileCfg_256x256x128_16x16x128_2x2x1 {
+  static constexpr ck_tile::index_t M_Tile = 256;
+  static constexpr ck_tile::index_t N_Tile = 256;
   static constexpr ck_tile::index_t K_Tile = 128;
 
   static constexpr ck_tile::index_t M_Warp = 2;
@@ -45,13 +40,41 @@ struct TileCfg_128x128x128_16x16x128_2x2x1 {
   static constexpr ck_tile::index_t TilePartitionerM01 = 8;
 };
 
+struct TileCfg_128x128x128_16x16x128_2x2x1
+    : TileCfg_256x256x128_16x16x128_2x2x1 {
+  static constexpr ck_tile::index_t M_Tile = 128;
+  static constexpr ck_tile::index_t N_Tile = 128;
+};
+
+struct TileCfg_256x256x128_16x16x128_2x2x1_kpad
+    : TileCfg_256x256x128_16x16x128_2x2x1 {
+  static constexpr bool kPadK = true;
+};
+
+struct TileCfg_128x128x128_16x16x128_2x2x1_kpad
+    : TileCfg_128x128x128_16x16x128_2x2x1 {
+  static constexpr bool kPadK = true;
+};
+
+struct TileCfg_128x128x128_16x16x128_2x2x1_npad
+    : TileCfg_128x128x128_16x16x128_2x2x1 {
+  static constexpr bool kPadN = true;
+};
+
+struct TileCfg_128x128x128_16x16x128_2x2x1_nkpad
+    : TileCfg_128x128x128_16x16x128_2x2x1 {
+  static constexpr bool kPadN = true;
+  static constexpr bool kPadK = true;
+};
+
 // gfx950 device compilation cannot instantiate the literal 32x32x16 FP8 tile
 // configuration due to an unsupported warp GEMM dispatcher configuration.
 // See: ck_tile/ops/gemm/warp/warp_gemm_dispatcher.hpp for supported variants.
 //
 // To preserve the existing type name in shared template code, this struct
-// inherits from the gfx950-safe 16x16x128 configuration in the gfx950 device
-// compilation path, effectively reusing those parameters without redefining them.
+// inherits from the gfx950-safe 128x128x128 16x16x128 configuration in the
+// gfx950 device compilation path, effectively reusing those parameters without
+// redefining them.
 //
 // In all other compilation paths, the struct overrides the relevant fields to
 // provide the intended 32x32x16 configuration.
@@ -261,21 +284,10 @@ class QuantGroupedGemmRunner : public RunnerInterface {
     if (descs.empty()) {
       return false;
     }
+
     return launch_grouped_gemm_kernel<Kernel>(descs, ctx, stream_cfg);
   }
 };
-
-static inline GPUArch detect_gpu_arch() {
-  int arch = cuda::sm_arch(0);
-
-  if (arch == 94) {
-    return GPUArch::GFX942;
-  }
-  if (arch == 95) {
-    return GPUArch::GFX950;
-  }
-  return GPUArch::UNKNOWN;
-}
 
 template <GPUArch Arch>
 struct FP8TileCfg;
@@ -290,6 +302,78 @@ struct FP8TileCfg<GPUArch::GFX950> {
   using type = TileCfg_128x128x128_16x16x128_2x2x1;
 };
 
+struct FP8GroupedShapeAlignment {
+  bool all_n_256_aligned = true;
+  bool all_n_128_aligned = true;
+  bool all_k_128_aligned = true;
+};
+
+static FP8GroupedShapeAlignment get_fp8_grouped_shape_alignment(
+    const GroupedGemmRunContext& ctx) {
+  FP8GroupedShapeAlignment alignment;
+
+  for (int i = 0; i < ctx.group_num; ++i) {
+    const transformer_engine::Tensor* const A_te =
+        transformer_engine::convertNVTETensorCheck(ctx.A[i]);
+    const transformer_engine::Tensor* const B_te =
+        transformer_engine::convertNVTETensorCheck(ctx.B[i]);
+
+    int64_t Ad0 = 0, Ad1 = 0, Bd0 = 0, Bd1 = 0;
+
+    if (ctx.use_a_columnwise_data) {
+      if (!get_columnwise_storage_2d_dims(A_te->columnwise_data, Ad0, Ad1)) {
+        NVTE_ERROR("ck_tile_grouped_gemm: expected 2D columnwise_data for A in group ", i);
+      }
+    } else {
+      if (!get_flat_2d_dims(*A_te, Ad0, Ad1)) {
+        NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for normalized A in group ", i);
+      }
+    }
+
+    if (ctx.use_b_columnwise_data) {
+      if (!get_columnwise_storage_2d_dims(B_te->columnwise_data, Bd0, Bd1)) {
+        NVTE_ERROR("ck_tile_grouped_gemm: expected 2D columnwise_data for B in group ", i);
+      }
+    } else {
+      if (!get_flat_2d_dims(*B_te, Bd0, Bd1)) {
+        NVTE_ERROR("ck_tile_grouped_gemm: expected rank>=2 for normalized B in group ", i);
+      }
+    }
+
+    const int64_t K = ctx.transA ? Ad0 : Ad1;
+    const int64_t N = ctx.transB ? Bd0 : Bd1;
+
+    if (N % 256 != 0) {
+      alignment.all_n_256_aligned = false;
+    }
+    if (N % 128 != 0) {
+      alignment.all_n_128_aligned = false;
+    }
+    if (K % 128 != 0) {
+      alignment.all_k_128_aligned = false;
+    }
+
+    if (!alignment.all_n_256_aligned &&
+        !alignment.all_n_128_aligned &&
+        !alignment.all_k_128_aligned) {
+      break;
+    }
+  }
+
+  return alignment;
+}
+
+#define MAKE_FP8_RUNNER(TileCfg_)                                      \
+  using Runner = QuantGroupedGemmRunner<AType,                     \
+                                        BType,                     \
+                                        CType,                     \
+                                        ALayout,                   \
+                                        BLayout,                   \
+                                        CTypeLayout,               \
+                                        TileCfg_,                  \
+                                        ck_tile::memory_operation_enum::set>; \
+  runner = std::make_unique<Runner>()
+
 template <GPUArch Arch>
 static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
                                                    DType b_dtype,
@@ -299,33 +383,55 @@ static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
   std::unique_ptr<RunnerInterface> runner = nullptr;
 
   using CTypeLayout = RowMajor;
-  using TileCfg = typename FP8TileCfg<Arch>::type;
 
-  TRANSFORMER_ENGINE_SWITCH_CONDITION(ctx.transA, kTransA, {
-    using ALayout = std::conditional_t<kTransA, ColMajor, RowMajor>;
+  // FP8 grouped GEMM is only compiled for CK's preferred NT presentation:
+  //   transA=false, transB=true
+  // which maps to:
+  //   ALayout=RowMajor, BLayout=ColMajor.
+  //
+  // The caller is responsible for rewriting other FP8 layouts into this form
+  // using columnwise_data when needed. Reject anything that did not normalize
+  // successfully so we do not instantiate unreachable/unsupported layout variants.
+  if (ctx.transA || !ctx.transB) {
+    return false;
+  }
 
-    TRANSFORMER_ENGINE_SWITCH_CONDITION(ctx.transB, kTransB, {
-      using BLayout = std::conditional_t<kTransB, ColMajor, RowMajor>;
+  using ALayout = RowMajor;
+  using BLayout = ColMajor;
 
-      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(a_dtype, a_te_type, {
-        using AType = typename TETypeToCKType<a_te_type>::type;
+  TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(a_dtype, a_te_type, {
+    using AType = typename TETypeToCKType<a_te_type>::type;
 
-        TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(b_dtype, b_te_type, {
-          using BType = typename TETypeToCKType<b_te_type>::type;
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(b_dtype, b_te_type, {
+      using BType = typename TETypeToCKType<b_te_type>::type;
 
-          TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(d_dtype, d_te_type, {
-            using CType = typename TETypeToCKType<d_te_type>::type;
-            using Runner = QuantGroupedGemmRunner<AType,
-                                                  BType,
-                                                  CType,
-                                                  ALayout,
-                                                  BLayout,
-                                                  CTypeLayout,
-                                                  TileCfg,
-                                                  ck_tile::memory_operation_enum::set>;
-            runner = std::make_unique<Runner>();
-          });
-        });
+      TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(d_dtype, d_te_type, {
+        using CType = typename TETypeToCKType<d_te_type>::type;
+
+      if constexpr (Arch == GPUArch::GFX950) {
+          const auto alignment = get_fp8_grouped_shape_alignment(ctx);
+
+          if (alignment.all_n_256_aligned) {
+            if (alignment.all_k_128_aligned) {
+              MAKE_FP8_RUNNER(TileCfg_256x256x128_16x16x128_2x2x1);
+            } else {
+              MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_kpad);
+            }
+          } else if (alignment.all_n_128_aligned) {
+            if (alignment.all_k_128_aligned) {
+              MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1);
+            } else {
+              MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_kpad);
+            }
+          } else if (alignment.all_k_128_aligned) {
+            MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_npad);
+          } else {
+            MAKE_FP8_RUNNER(TileCfg_128x128x128_16x16x128_2x2x1_nkpad);
+          }
+        } else {
+          using TileCfg = typename FP8TileCfg<Arch>::type;
+          MAKE_FP8_RUNNER(TileCfg);
+        }
       });
     });
   });
@@ -336,6 +442,8 @@ static bool ck_tile_grouped_gemm_fp8_dispatch_arch(DType a_dtype,
 
   return runner->run(s, ctx);
 }
+
+#undef MAKE_FP8_RUNNER
 
 bool ck_tile_grouped_gemm_fp8_dispatch(DType a_dtype,
                                        DType b_dtype,
