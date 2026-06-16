@@ -788,6 +788,34 @@ void fused_attn_ck_bwd_impl(
   // First h*max_tokens_q*sizeof(float) is the lse-d buffer (passed as softmax_lsed)
   void* lse_workspace = planner.allocate(h*max_tokens_q*sizeof(float));
 
+  // Reserve AOT scratch for AITER's internal bwd workspace (launcher metadata +
+  // dq_acc accumulator), carved by ck_attn_bwd's workspace_alloc callback instead
+  // of allocated per call. The size is a pure host-side query; the full ck_args
+  // built below (execution pass only) carries the pointer into the dispatch, so
+  // assemble just the trait-bearing fields here.
+  ck_fused_attn::CkAttnBwdArgs ws_size_args;
+  ws_size_args.dtype = nvte_to_ck_dtype(dtype);
+  ws_size_args.b = b; ws_size_args.h = h; ws_size_args.hg = hg;
+  ws_size_args.s_q = s_q; ws_size_args.s_kv = s_kv; ws_size_args.d_qk = d_qk; ws_size_args.d_v = d_v;
+  ws_size_args.max_tokens_q = max_tokens_q; ws_size_args.max_tokens_kv = max_tokens_kv;
+  ws_size_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
+  ws_size_args.dropout_probability = dropout_probability;
+  ws_size_args.deterministic = deterministic;
+  ws_size_args.uses_bwd_v3 = nvte_ck_uses_bwd_v3;
+  ws_size_args.is_v3_atomic_fp32 = nvte_ck_is_v3_atomic_fp32;
+  ws_size_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
+  ws_size_args.dbias_ptr = devPtrdBias;
+  if((is_SBHD && is_padding) || bshd_to_thd || is_ragged){
+    // group mode: a non-null cu_seqlen flips is_group_mode(); bias is forced off
+    ws_size_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
+  }else{
+    // batch mode: bias shape feeds the trait/workspace sizing
+    ws_size_args.attn_bias_type = nvte_to_ck_bias_type(bias_type);
+    ws_size_args.bias_b = bias_b; ws_size_args.bias_h = bias_h;
+  }
+  const size_t aiter_workspace_bytes = ck_fused_attn::ck_attn_bwd_workspace_size(ws_size_args);
+  void* aiter_workspace = planner.allocate(aiter_workspace_bytes);
+
   void* dk_expanded_ptr = nullptr;
   void* dv_expanded_ptr = nullptr;
   std::array<uint64_t, 4> dk_expanded_stride;
@@ -1008,6 +1036,8 @@ void fused_attn_ck_bwd_impl(
   ck_args.dk_expanded_ptr = dk_expanded_ptr;
   ck_args.dv_expanded_ptr = dv_expanded_ptr;
   ck_args.lse_workspace_ptr = lse_workspace;
+  ck_args.aiter_workspace_ptr = aiter_workspace;
+  ck_args.aiter_workspace_bytes = aiter_workspace_bytes;
   ck_args.deterministic = deterministic;
   ck_args.uses_bwd_v3 = nvte_ck_uses_bwd_v3;
   ck_args.is_v3_atomic_fp32 = nvte_ck_is_v3_atomic_fp32;

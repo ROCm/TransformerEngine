@@ -133,6 +133,13 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
   // Workspace shared with forward LSE
   void* lse_workspace_ptr = nullptr;
 
+  // AOT scratch for AITER's internal bwd allocations (launcher metadata + dq_acc
+  // accumulator). Carved from the caller's workspace and handed to aiter through
+  // the workspace_alloc callback; ck_attn_bwd_workspace_size() reports the bytes
+  // to reserve. aiter_workspace_bytes bounds the bump allocator.
+  void* aiter_workspace_ptr = nullptr;
+  size_t aiter_workspace_bytes = 0;
+
   // V3 ASM kernel selection
   bool deterministic = false;
   bool uses_bwd_v3 = false;
@@ -141,6 +148,11 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
 
 hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream);
 hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream);
+
+// Bytes of AOT device scratch ck_attn_bwd needs for AITER's internal bwd
+// workspace (launcher metadata + dq_acc), covering both the v2 (CK launcher) and
+// v3 (asm) dispatch paths. Pure host-side computation; no kernel launch.
+size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args);
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_H
