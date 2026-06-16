@@ -15,13 +15,10 @@ namespace grouped_gemm {
 // Tile configs: FP16/BF16
 // -------------------------
 
-static constexpr ck_tile::index_t Fp16GroupedGemmMTile = 256;
-static constexpr ck_tile::index_t Fp16GroupedGemmKTile = 64;
-
-struct TileCfg_256x256x64_MFMA {
-  static constexpr ck_tile::index_t M_Tile = Fp16GroupedGemmMTile;
+struct TileCfg_256x256x64 {
+  static constexpr ck_tile::index_t M_Tile = 256;
   static constexpr ck_tile::index_t N_Tile = 256;
-  static constexpr ck_tile::index_t K_Tile = Fp16GroupedGemmKTile;
+  static constexpr ck_tile::index_t K_Tile = 64;
 
   static constexpr ck_tile::index_t M_Warp = 2;
   static constexpr ck_tile::index_t N_Warp = 2;
@@ -41,14 +38,10 @@ struct TileCfg_256x256x64_MFMA {
   static constexpr ck_tile::index_t TilePartitionerM01 = 4;
 };
 
-struct TileCfg_256x128x64_MFMA : TileCfg_256x256x64_MFMA {
-  static constexpr ck_tile::index_t N_Tile = 128;
-};
-
 struct TileCfg_256x256x64_WMMA {
-  static constexpr ck_tile::index_t M_Tile = Fp16GroupedGemmMTile;
+  static constexpr ck_tile::index_t M_Tile = 256;
   static constexpr ck_tile::index_t N_Tile = 256;
-  static constexpr ck_tile::index_t K_Tile = Fp16GroupedGemmKTile;
+  static constexpr ck_tile::index_t K_Tile = 64;
 
   static constexpr ck_tile::index_t M_Warp = 2;
   static constexpr ck_tile::index_t N_Warp = 2;
@@ -66,6 +59,10 @@ struct TileCfg_256x256x64_WMMA {
 
   static constexpr ck_tile::index_t TilePartitionerGroupNum = 8;
   static constexpr ck_tile::index_t TilePartitionerM01 = 4;
+};
+
+struct TileCfg_256x128x64 : TileCfg_256x256x64 {
+  static constexpr ck_tile::index_t N_Tile = 128;
 };
 
 template <typename Base, bool PadM_, bool PadN_, bool PadK_>
@@ -258,7 +255,7 @@ class GroupedGemmRunner : public RunnerInterface {
   })
 
 // Templated dispatch on A/B layouts, shared by all layout-specific .cpp files.
-template <GPUArch Arch, typename ALayout, typename BLayout>
+template <typename ALayout, typename BLayout>
 bool ck_tile_grouped_gemm_fp16_dispatch_layout(DType a_dtype, DType d_dtype,
                                                bool need_m_pad, bool need_k_pad,
                                                const GroupedGemmRunContext& ctx) {
@@ -275,16 +272,14 @@ bool ck_tile_grouped_gemm_fp16_dispatch_layout(DType a_dtype, DType d_dtype,
 
       TRANSFORMER_ENGINE_SWITCH_CONDITION(need_m_pad, kPadM, {
         TRANSFORMER_ENGINE_SWITCH_CONDITION(need_k_pad, kPadK, {
-          if constexpr (Arch == GPUArch::GFX1250) {
+          if (ctx.arch == GPUArch::GFX1250) {
             MAKE_RUNNER(TileCfg_256x256x64_WMMA, true, true, true);
+          } else if (ctx.N % 256 == 0) {
+            MAKE_RUNNER(TileCfg_256x256x64, kPadM, false, kPadK);
+          } else if (ctx.N % 128 == 0) {
+            MAKE_RUNNER(TileCfg_256x128x64, kPadM, false, kPadK);
           } else {
-            if (ctx.N % 256 == 0) {
-              MAKE_RUNNER(TileCfg_256x256x64_MFMA, kPadM, false, kPadK);
-            } else if (ctx.N % 128 == 0) {
-              MAKE_RUNNER(TileCfg_256x128x64_MFMA, kPadM, false, kPadK);
-            } else {
-              MAKE_RUNNER(TileCfg_256x128x64_MFMA, kPadM, true, kPadK);
-            }
+            MAKE_RUNNER(TileCfg_256x128x64, kPadM, true, kPadK);
           }
         });
       });
@@ -299,19 +294,15 @@ bool ck_tile_grouped_gemm_fp16_dispatch_layout(DType a_dtype, DType d_dtype,
 
 // Per-layout dispatch function signature.
 // Each layout file (NN, NT, TN, TT) implements one of these.
-template <GPUArch Arch>
 bool ck_tile_grouped_gemm_fp16_dispatch_nn(DType a_dtype, DType d_dtype,
                                            bool need_m_pad, bool need_k_pad,
                                            const GroupedGemmRunContext& ctx);
-template <GPUArch Arch>
 bool ck_tile_grouped_gemm_fp16_dispatch_nt(DType a_dtype, DType d_dtype,
                                            bool need_m_pad, bool need_k_pad,
                                            const GroupedGemmRunContext& ctx);
-template <GPUArch Arch>
 bool ck_tile_grouped_gemm_fp16_dispatch_tn(DType a_dtype, DType d_dtype,
                                            bool need_m_pad, bool need_k_pad,
                                            const GroupedGemmRunContext& ctx);
-template <GPUArch Arch>
 bool ck_tile_grouped_gemm_fp16_dispatch_tt(DType a_dtype, DType d_dtype,
                                            bool need_m_pad, bool need_k_pad,
                                            const GroupedGemmRunContext& ctx);
