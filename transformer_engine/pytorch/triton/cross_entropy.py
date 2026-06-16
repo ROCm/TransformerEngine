@@ -123,6 +123,11 @@ def cross_entropy_backward(
         n_rows = B * SQ
         BLOCK_SIZE = min(MAX_FUSED_SIZE, triton.next_power_of_2(V))
 
+        # element_mul_kernel indexes grad_output per row with unit stride, so a broadcasted
+        # gradient (single element, stride 0) would read out of bounds. Make it contiguous.
+        if grad_output.numel() > 1:
+            grad_output = grad_output.contiguous()
+
         element_mul_kernel[(n_rows,)](
             _input,
             _input.stride(-2),
