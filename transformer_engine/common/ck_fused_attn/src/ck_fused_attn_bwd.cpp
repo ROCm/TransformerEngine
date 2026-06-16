@@ -5,11 +5,11 @@
  ************************************************************************/
 
 #include <iostream>
+#include <cstddef>
 #include <cstdlib>
 #include <memory>
 #include <stdexcept>
 #include <type_traits>
-#include <vector>
 #include <hip/hip_runtime.h>
 #include "ck_fused_attn/ck_fused_attn.hpp"
 #include "ck_tile/host/pinned_host_releaser.hpp"
@@ -440,6 +440,69 @@ void dump_bwd_timings(const char* dump_path, float average_runtime){
   file << average_runtime << "\n";
 }
 
+namespace {
+
+// Trait subset that determines AITER's internal bwd workspace footprint. Mirrors
+// the fields ck_attn_bwd sets on mha_bwd_args so the size query and the dispatch
+// stay in lockstep.
+::fmha_bwd_traits make_bwd_traits(const CkAttnBwdArgs& args){
+  bool has_dropout = (args.dropout_probability > 0.f);
+  bool has_dbias = args.dbias_ptr != nullptr;
+  bias_enum bias_type = bias_enum::no_bias;
+  if(!args.is_group_mode()){
+    bias_type = get_ck_bias_type_shape(&args).first;
+  }
+  return ::fmha_bwd_traits{
+    /* seqlen_q         */ static_cast<int>(args.is_group_mode() ? args.max_tokens_q : args.s_q),
+    /* seqlen_k         */ static_cast<int>(args.is_group_mode() ? args.max_tokens_kv : args.s_kv),
+    /* batch            */ static_cast<int>(args.b),
+    /* max_seqlen_q     */ static_cast<int>(args.s_q),
+    /* max_seqlen_k     */ static_cast<int>(args.s_kv),
+    /* hdim_q           */ static_cast<int>(args.d_qk),
+    /* hdim_v           */ static_cast<int>(args.d_v),
+    /* nhead_q          */ static_cast<int>(args.h),
+    /* nhead_k          */ static_cast<int>(args.hg),
+    /* data_type        */ get_data_type_str(args.dtype),
+    /* is_group_mode    */ args.is_group_mode(),
+    /* mask_type        */ static_cast<mask_enum>(args.attn_mask_type),
+    /* bias_type        */ bias_type,
+    /* has_dbias        */ (!args.is_group_mode()) && has_dbias,
+    /* has_dropout      */ has_dropout,
+    /* is_store_randval */ false,
+    /* is_deterministic */ args.deterministic,
+  };
+}
+
+// dq_acc bytes the v3 asm path allocates via workspace_alloc. Mirrors aiter's
+// fmha_v3_bwd sizing (csrc/cpp_itfs/mha_bwd.cu); returns 0 when v3 can't run so
+// the CK launcher size dominates. Gating mirrors ck_attn_bwd's use_asm_v3.
+size_t v3_dq_acc_bytes(const CkAttnBwdArgs& args){
+  const bool use_asm_v3 = (args.s_q < 16) ? false : args.uses_bwd_v3;
+  if(!use_asm_v3){
+    return 0;
+  }
+  const size_t seqlen_q = args.is_group_mode() ? args.max_tokens_q : args.s_q;
+  const size_t elem = args.is_v3_atomic_fp32 ? 4 : 2;
+  const size_t a16_seq = (args.s_q + 15) / 16 * 16;
+  const size_t a16_hdim = (args.d_qk == 192) ? 192 : 128;
+  const size_t dq_acc_seq = args.is_v3_atomic_fp32 ? seqlen_q : a16_seq;
+  const size_t dq_acc_hdim = args.is_v3_atomic_fp32 ? args.d_qk : a16_hdim;
+  const size_t eff_batch = (args.is_group_mode() && args.is_v3_atomic_fp32) ? 1 : args.b;
+  return eff_batch * args.h * dq_acc_seq * dq_acc_hdim * elem;
+}
+
+}  // namespace
+
+size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args){
+  // v2 (CK launcher) reports its full device workspace (host metadata + dq_acc)
+  // host-side; v3 (asm) allocates only dq_acc. v3 is tried first but may fall
+  // back to v2, so reserve the larger of the two. The launcher symbol is forced
+  // local by QoLA's export script, so the v2 size is queried through QoLA.
+  const size_t v2_bytes = QOLA_NS(mha_bwd_workspace_size)(make_bwd_traits(args));
+  const size_t v3_bytes = v3_dq_acc_bytes(args);
+  return v2_bytes > v3_bytes ? v2_bytes : v3_bytes;
+}
+
 hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
 
   bool has_dropout = (args.dropout_probability > 0.f);
@@ -587,34 +650,40 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
     }
   }
 
-  // Device-side workspace allocations made inside mha_bwd (launcher metadata
-  // and the dq_acc accumulator). aiter only contracts that the pointer remain
-  // valid for the duration of the kernels it enqueues; hipFreeAsync on the
-  // same stream defers the free until that work completes.
-  std::vector<void*> mha_bwd_workspaces;
-  fmha_args.workspace_alloc = [&mha_bwd_workspaces, stream](size_t bytes, bool zero_init) -> void* {
+  // Device-side workspace for mha_bwd's internal allocations (launcher metadata
+  // and the dq_acc accumulator) is reserved ahead of time by the caller (see
+  // ck_attn_bwd_workspace_size) and carved here, matching the AOTriton bwd path.
+  // workspace_alloc bump-allocates from that buffer instead of allocating per
+  // call; only one allocation happens per dispatch, but the bump allocator stays
+  // correct if aiter splits the request.
+  void* ws_base = args.aiter_workspace_ptr;
+  const size_t ws_capacity = args.aiter_workspace_bytes;
+  size_t ws_offset = 0;
+  fmha_args.workspace_alloc = [ws_base, ws_capacity, &ws_offset, stream](size_t bytes, bool zero_init) -> void* {
     if(bytes == 0){
       return nullptr;
     }
-    void* ptr = nullptr;
-    if(hipMallocAsync(&ptr, bytes, stream) != hipSuccess){
-      throw std::runtime_error("ck_fused_attn bwd: hipMallocAsync failed for AITER workspace.");
+    constexpr size_t kAlign = 256;
+    const size_t base = (ws_offset + kAlign - 1) & ~(kAlign - 1);
+    if(ws_base == nullptr || base + bytes > ws_capacity){
+      throw std::runtime_error("ck_fused_attn bwd: AITER workspace request exceeds reserved AOT buffer.");
     }
+    void* ptr = static_cast<int8_t*>(ws_base) + base;
+    ws_offset = base + bytes;
     if(zero_init){
       if(hipMemsetAsync(ptr, 0, bytes, stream) != hipSuccess){
-        hipFreeAsync(ptr, stream);
         throw std::runtime_error("ck_fused_attn bwd: hipMemsetAsync failed for AITER workspace.");
       }
     }
-    mha_bwd_workspaces.push_back(ptr);
     return ptr;
   };
-  // Group mode requires a pinned host buffer for the async D2H seqstart
-  // pipeline; aiter keeps the shared_ptr alive past kernel completion via a
-  // stream-tail hipLaunchHostFunc keepalive. The deleter fires from that HIP
-  // callback thread, which holds runtime locks — calling any HIP API from it
-  // (including hipHostFree) deadlocks against concurrent main-thread HIP
-  // calls. Defer the free to ck_tile::pinned_host_releaser's worker thread.
+  // Group mode needs a pinned host buffer for the async D2H seqstart pipeline.
+  // aiter keeps the shared_ptr alive past kernel completion via a stream-tail
+  // release; that release (and thus the deleter) fires from a HIP callback thread
+  // holding runtime locks, so calling any HIP API from it (including hipHostFree)
+  // would deadlock against concurrent main-thread HIP calls. Defer the free to
+  // ck_tile::pinned_host_releaser's worker thread, which frees each buffer once
+  // it is no longer in flight — small and group-mode-v2 only, but never leaked.
   fmha_args.pinned_host_alloc = [](size_t bytes) -> std::shared_ptr<void> {
     if(bytes == 0){
       return {};
@@ -664,9 +733,6 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   }
 
   float average_runtime = QOLA_NS(mha_bwd)(fmha_args, stream_config);
-  for(void* ws_ptr : mha_bwd_workspaces){
-    hipFreeAsync(ws_ptr, stream);
-  }
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
