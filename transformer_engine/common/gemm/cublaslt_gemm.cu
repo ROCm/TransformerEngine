@@ -1162,27 +1162,19 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
     auto *OutputD = transformer_engine::convertNVTETensorCheck(D[0]);
 #ifdef __HIP_PLATFORM_AMD__
-    auto effective_dtype = [](const transformer_engine::Tensor* t) {
-      if (is_fp8_dtype(t->data.dtype)) {
-        return t->data.dtype;
-      }
-      if (t->has_columnwise_data() && is_fp8_dtype(t->columnwise_data.dtype)) {
-        return t->columnwise_data.dtype;
-      }
-      return t->data.dtype;
+    auto effective_dtype = [](const transformer_engine::Tensor *t) {
+      NVTE_CHECK(t->has_data() || t->has_columnwise_data(),
+                "Input tensor has neither row-wise nor column-wise data.");
+      return t->has_data() ? t->data.dtype : t->columnwise_data.dtype;
     };
 
     auto A_dt = effective_dtype(inputA);
     auto B_dt = effective_dtype(inputB);
     auto D_dt = OutputD->data.dtype;
 
-    return (
-            (is_fp8_dtype(A_dt) && is_fp8_dtype(B_dt))
-          ) ||
-          (
-            (A_dt == B_dt) && (A_dt == D_dt) &&
-            (is_fp16_dtype(A_dt))
-          );
+    return ((is_fp8_dtype(A_dt) && is_fp8_dtype(B_dt)) ||
+            ((A_dt == B_dt) && (A_dt == D_dt) && is_fp16_dtype(A_dt)));
+
 #else
     auto A_type = get_cuda_dtype(inputA->data.dtype);
     auto B_type = get_cuda_dtype(inputB->data.dtype);
@@ -1205,11 +1197,22 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype() &&
 #ifdef __HIP_PLATFORM_AMD__
       true)                               {
-    if (!ck_tile_grouped_gemm(A, B, D, num_gemms, transa, transb, workspace, accumulate, stream)) {
-        if (warn_fallback) {
-          NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
-        }
-        cublas_path();
+    auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
+
+    bool handled_by_ck = false;
+    if (transformer_engine::is_mxfp8_scaling(inputA->scaling_mode)) {
+      handled_by_ck = ck_tile_mx_grouped_gemm(
+          A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
+    } else {
+      handled_by_ck = ck_tile_grouped_gemm(
+          A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
+    }
+
+    if (!handled_by_ck) {
+      if (warn_fallback) {
+        NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
+      }
+      cublas_path();
     }
 #else
       all_groups_uniform_k128(B, transb)) {

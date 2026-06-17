@@ -87,7 +87,9 @@ jobs:
             3rdparty/aotriton \
             3rdparty/aiter \
             3rdparty/QoLA \
-            3rdparty/hipify_torch
+            3rdparty/ck_jit \
+            3rdparty/hipify_torch \
+            3rdparty/composable_kernel
 
       - name: Derive Docker image tag
         id: set-tag
