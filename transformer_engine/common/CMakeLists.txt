@@ -303,12 +303,13 @@ if(USE_ROCM)
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_nt.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tn.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tt.cpp
-    )
+      gemm/ck_grouped_gemm/ck_mx_grouped_gemm.cpp
+      gemm/rocm_gemm.cu)
   else()
+    # Provide stub implementations so cublaslt_gemm falls back to cuBLAS.
     list(APPEND transformer_engine_SOURCES
       gemm/ck_grouped_gemm/ck_grouped_gemm_stub.cpp)
   endif()
-  
 endif()
 
 if(USE_CUDA)
@@ -393,7 +394,7 @@ set_property(
   PROPERTY
   COMPILE_OPTIONS "-g0;-dopt=on")
 else()
-  set(CK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/aiter/3rdparty/composable_kernel)
+  set(CK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/composable_kernel)
   target_include_directories(transformer_engine PRIVATE ${CK_ROOT}/include)
 endif() #USE_CUDA
 
