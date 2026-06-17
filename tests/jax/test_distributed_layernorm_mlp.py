@@ -261,7 +261,7 @@ class TestDistributedLayernormMLP:
             # Multi GPUs
             devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
             mesh = Mesh(devices, mesh_axes)
-            with mesh, autocast(
+            with jax.set_mesh(mesh), autocast(
                 enabled=quantization_recipe is not None,
                 recipe=quantization_recipe,
                 mesh_resource=mesh_resource,
@@ -421,7 +421,7 @@ class TestDistributedLayernormMLP:
             device_count, mesh_shape, mesh_axes, mesh_resource = mesh_config
             devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
             mesh = Mesh(devices, mesh_axes)
-            with mesh, autocast(
+            with jax.set_mesh(mesh), autocast(
                 enabled=use_fp8, recipe=quantization_recipe, mesh_resource=mesh_resource
             ):
                 ln_mlp_sharded = LayerNormMLP(

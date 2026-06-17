@@ -11,6 +11,7 @@
 #include <gtest/gtest.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/gemm.h>
+#include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 #include "../test_common.h"
 
@@ -33,6 +34,93 @@ std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes_mxfp8 = {
   {256, 256, 256},
   {768, 3072, 4096},
   {4096, 16384, 4096},
+};
+
+// ============================================================================
+// Production LLM MXFP8 GEMM shapes.
+// ============================================================================
+
+struct ProdGemmConfig {
+  const char* label;
+  size_t m;
+  size_t n;
+  size_t k;
+  bool transa;
+  bool transb;
+};
+
+static const ProdGemmConfig prod_gemm_sweep[] = {
+    // Format: label, M, N, K, transa, transb
+    // DeepSeek3
+    {"DeepSeek3_Linear0_fwd_mbs1_TN", 4096, 1536, 7168, true, false},
+    {"DeepSeek3_Linear0_fwd_mbs2_TN", 8192, 1536, 7168, true, false},
+    {"DeepSeek3_Linear0_fwd_mbs4_TN", 16384, 1536, 7168, true, false},
+    {"DeepSeek3_Linear1_fwd_mbs1_TN", 4096, 576, 7168, true, false},
+    {"DeepSeek3_Linear1_fwd_mbs2_TN", 8192, 576, 7168, true, false},
+    {"DeepSeek3_Linear1_fwd_mbs4_TN", 16384, 576, 7168, true, false},
+    {"DeepSeek3_LNLinear0_fwd_mbs1_TN", 4096, 24576, 1536, true, false},
+    {"DeepSeek3_LNLinear0_fwd_mbs2_TN", 8192, 24576, 1536, true, false},
+    {"DeepSeek3_LNLinear0_fwd_mbs4_TN", 16384, 24576, 1536, true, false},
+    {"DeepSeek3_LNLinear1_fwd_mbs1_TN", 4096, 32768, 512, true, false},
+    {"DeepSeek3_LNLinear1_fwd_mbs2_TN", 8192, 32768, 512, true, false},
+    {"DeepSeek3_LNLinear1_fwd_mbs4_TN", 16384, 32768, 512, true, false},
+    {"DeepSeek3_Linear_attn_fwd_mbs1_TN", 4096, 7168, 16384, true, false},
+    {"DeepSeek3_Linear_attn_fwd_mbs2_TN", 8192, 7168, 16384, true, false},
+    {"DeepSeek3_Linear_attn_fwd_mbs4_TN", 16384, 7168, 16384, true, false},
+    {"DeepSeek3_LNMLP_gateup_fwd_mbs1_TN", 4096, 36864, 7168, true, false},
+    {"DeepSeek3_LNMLP_gateup_fwd_mbs2_TN", 8192, 36864, 7168, true, false},
+    {"DeepSeek3_LNMLP_gateup_fwd_mbs4_TN", 16384, 36864, 7168, true, false},
+    {"DeepSeek3_LNMLP_down_fwd_mbs1_TN", 4096, 7168, 18432, true, false},
+    {"DeepSeek3_LNMLP_down_fwd_mbs2_TN", 8192, 7168, 18432, true, false},
+    {"DeepSeek3_LNMLP_down_fwd_mbs4_TN", 16384, 7168, 18432, true, false},
+    {"DeepSeek3_ExpertMLP_gu_fwd_mbs1_TN", 4096, 4096, 7168, true, false},
+    {"DeepSeek3_ExpertMLP_gu_fwd_mbs2_TN", 8192, 4096, 7168, true, false},
+    {"DeepSeek3_ExpertMLP_gu_fwd_mbs4_TN", 16384, 4096, 7168, true, false},
+    {"DeepSeek3_ExpertMLP_dn_fwd_mbs1_TN", 4096, 7168, 2048, true, false},
+    {"DeepSeek3_ExpertMLP_dn_fwd_mbs2_TN", 8192, 7168, 2048, true, false},
+    {"DeepSeek3_ExpertMLP_dn_fwd_mbs4_TN", 16384, 7168, 2048, true, false},
+    {"DeepSeek3_LNMLP_down_wgrad_mbs1_NT", 18432, 7168, 4096, false, true},
+    {"DeepSeek3_LNMLP_down_wgrad_mbs2_NT", 18432, 7168, 8192, false, true},
+    {"DeepSeek3_LNMLP_down_wgrad_mbs4_NT", 18432, 7168, 16384, false, true},
+    {"DeepSeek3_LNMLP_gateup_wgrad_mbs1_NT", 7168, 36864, 4096, false, true},
+    {"DeepSeek3_LNMLP_gateup_wgrad_mbs2_NT", 7168, 36864, 8192, false, true},
+    {"DeepSeek3_LNMLP_gateup_wgrad_mbs4_NT", 7168, 36864, 16384, false, true},
+    {"DeepSeek3_Linear_attn_wgrad_mbs1_NT", 16384, 7168, 4096, false, true},
+    {"DeepSeek3_Linear_attn_wgrad_mbs2_NT", 16384, 7168, 8192, false, true},
+    {"DeepSeek3_LNLinear1_wgrad_mbs1_NT", 512, 32768, 4096, false, true},
+    {"DeepSeek3_LNLinear1_wgrad_mbs2_NT", 512, 32768, 8192, false, true},
+    {"DeepSeek3_LNLinear1_wgrad_mbs4_NT", 512, 32768, 16384, false, true},
+    {"DeepSeek3_LNLinear0_wgrad_mbs1_NT", 1536, 24576, 4096, false, true},
+    {"DeepSeek3_LNLinear0_wgrad_mbs2_NT", 1536, 24576, 8192, false, true},
+    {"DeepSeek3_LNLinear0_wgrad_mbs4_NT", 1536, 24576, 16384, false, true},
+    {"DeepSeek3_Linear1_wgrad_mbs1_NT", 7168, 576, 4096, false, true},
+    {"DeepSeek3_Linear1_wgrad_mbs2_NT", 7168, 576, 8192, false, true},
+    {"DeepSeek3_Linear1_wgrad_mbs4_NT", 7168, 576, 16384, false, true},
+    {"DeepSeek3_Linear0_wgrad_mbs1_NT", 7168, 1536, 4096, false, true},
+    {"DeepSeek3_Linear0_wgrad_mbs2_NT", 7168, 1536, 8192, false, true},
+    {"DeepSeek3_Linear0_wgrad_mbs4_NT", 7168, 1536, 16384, false, true},
+    {"DeepSeek3_ExpertMLP_gu_dgrad_mbs1_NN", 4096, 7168, 4096, false, false},
+    {"DeepSeek3_ExpertMLP_gu_dgrad_mbs2_NN", 8192, 7168, 4096, false, false},
+    {"DeepSeek3_ExpertMLP_gu_wgrad_mbs1_NT", 7168, 4096, 4096, false, true},
+    {"DeepSeek3_ExpertMLP_gu_wgrad_mbs2_NT", 7168, 4096, 8192, false, true},
+    {"DeepSeek3_ExpertMLP_gu_wgrad_mbs4_NT", 7168, 4096, 16384, false, true},
+    {"DeepSeek3_ExpertMLP_dn_dgrad_mbs1_NN", 4096, 2048, 7168, false, false},
+    {"DeepSeek3_ExpertMLP_dn_dgrad_mbs2_NN", 8192, 2048, 7168, false, false},
+    {"DeepSeek3_ExpertMLP_dn_dgrad_mbs4_NN", 16384, 2048, 7168, false, false},
+    {"DeepSeek3_ExpertMLP_dn_wgrad_mbs1_NT", 2048, 7168, 4096, false, true},
+    {"DeepSeek3_ExpertMLP_dn_wgrad_mbs2_NT", 2048, 7168, 8192, false, true},
+    {"DeepSeek3_ExpertMLP_dn_wgrad_mbs4_NT", 2048, 7168, 16384, false, true},
+    // Qwen3
+    {"Qwen3_LNLinear_QKV_fwd_mbs1_TN", 4096, 9216, 4096, true, false},
+    {"Qwen3_LNLinear_QKV_fwd_mbs2_TN", 8192, 9216, 4096, true, false},
+    {"Qwen3_LNLinear_QKV_fwd_mbs4_TN", 16384, 9216, 4096, true, false},
+    {"Qwen3_Linear_attn_fwd_mbs1_TN", 4096, 4096, 8192, true, false},
+    {"Qwen3_Linear_attn_fwd_mbs2_TN", 8192, 4096, 8192, true, false},
+    {"Qwen3_Linear_attn_fwd_mbs4_TN", 16384, 4096, 8192, true, false},
+    {"Qwen3_Linear_attn_wgrad_mbs1_NT", 8192, 4096, 4096, false, true},
+    {"Qwen3_Linear_attn_wgrad_mbs4_NT", 8192, 4096, 16384, false, true},
+    {"Qwen3_LNLinear_QKV_wgrad_mbs2_NT", 4096, 9216, 8192, false, true},
+    {"Qwen3_LNLinear_QKV_wgrad_mbs4_NT", 4096, 9216, 16384, false, true},
 };
 
 //  A, B, Bias, Gelu, D
@@ -320,6 +408,40 @@ void cpu_rowwise_to_columnwise(
   }
 }
 
+// Swizzle MXFP8 scale_inv of a test::Tensor in-place for gfx1250.
+static void swizzle_mxfp8_scales(test::Tensor &t, bool rowwise) {
+  using namespace transformer_engine;
+  void *scale_ptr = rowwise ? t.rowwise_scale_inv_dptr()
+                            : t.columnwise_scale_inv_dptr();
+  if (!scale_ptr) return;
+  const NVTEShape scale_shape = rowwise ? t.rowwise_scale_inv_shape()
+                                        : t.columnwise_scale_inv_shape();
+  const NVTEShape data_shape = rowwise ? t.rowwise_shape()
+                                       : t.columnwise_shape();
+  size_t num_scales = 1;
+  for (size_t d = 0; d < scale_shape.ndim; d++) num_scales *= scale_shape.data[d];
+  uint8_t *d_tmp = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&d_tmp, num_scales));
+  TensorWrapper input_tw(NVTE_MXFP8_1D_SCALING);
+  TensorWrapper output_tw(NVTE_MXFP8_1D_SCALING);
+  output_tw.set_with_gemm_swizzled_scales(true);
+  if (rowwise) {
+    input_tw.set_rowwise_data(nullptr, t.dtype(), data_shape);
+    input_tw.set_rowwise_scale_inv(scale_ptr, DType::kFloat8E8M0, scale_shape);
+    output_tw.set_rowwise_data(nullptr, t.dtype(), data_shape);
+    output_tw.set_rowwise_scale_inv(d_tmp, DType::kFloat8E8M0, scale_shape);
+  } else {
+    input_tw.set_columnwise_data(nullptr, t.dtype(), data_shape);
+    input_tw.set_columnwise_scale_inv(scale_ptr, DType::kFloat8E8M0, scale_shape);
+    output_tw.set_columnwise_data(nullptr, t.dtype(), data_shape);
+    output_tw.set_columnwise_scale_inv(d_tmp, DType::kFloat8E8M0, scale_shape);
+  }
+  nvte_swizzle_scaling_factors(input_tw.data(), output_tw.data(), 0);
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+  NVTE_CHECK_CUDA(cudaMemcpy(scale_ptr, d_tmp, num_scales, cudaMemcpyDeviceToDevice));
+  NVTE_CHECK_CUDA(cudaFree(d_tmp));
+}
+
 std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool use_mxfp8) {
   auto [atol, rtol] = getTolerances(type);
 
@@ -511,6 +633,29 @@ void performTest(const TestParams& params) {
 #endif
   Tensor Workspace("Workspace", TShape{ workspace_size }, DType::kByte);
 
+  //perform the reference gemm on GPU (before swizzle, which modifies scales in-place)
+  Tensor RefD("RefD", TShape{ params.n, params.m }, dtype);
+  Tensor RefPreGeluOut;
+
+  if (params.use_gelu) {
+    RefPreGeluOut = Tensor("RefPreGeluOut", TShape{ params.n, params.m }, gelu_type);
+  }
+
+  run_reference<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
+    params,
+    A,
+    B,
+    params.use_bias ? &bias : nullptr,
+    D,
+    RefD,
+    params.use_gelu ? &RefPreGeluOut : nullptr);
+
+  // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales.
+  if (use_mxfp8 && prop.major == 12 && prop.minor == 5) {
+    swizzle_mxfp8_scales(A, !a_colwise);
+    swizzle_mxfp8_scales(B, !b_colwise);
+  }
+
   //perform the gemm in GPU
   nvte_cublas_gemm(A.data(),
                    B.data(),
@@ -531,23 +676,6 @@ void performTest(const TestParams& params) {
   if(params.use_gelu){
     pre_gelu_out.to_cpu();
   }
-
-  //perform the reference gemm on GPU
-  Tensor RefD("RefD", TShape{ params.n, params.m }, dtype);
-  Tensor RefPreGeluOut;
-
-  if (params.use_gelu) {
-    RefPreGeluOut = Tensor("RefPreGeluOut", TShape{ params.n, params.m }, gelu_type);
-  }
-
-  run_reference<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(
-    params,
-    A,
-    B,
-    params.use_bias ? &bias : nullptr,
-    D,
-    RefD,
-    params.use_gelu ? &RefPreGeluOut : nullptr);
 
   // check if error message happens in running                             
   (void)cudaDeviceSynchronize();
@@ -605,6 +733,15 @@ void performDqTest(const TestParams &params) {
     GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
   }
 
+  // hipBLASLt on gfx950 produces incorrect results for certain MXFP8
+  // GEMMs with non-TN layouts.
+  if (prop.major == 9 && prop.minor == 5) {
+    const bool is_NT = !params.transa && params.transb;
+    if (is_NT && params.m == 7168 && params.n == 576) {
+      GTEST_SKIP() << "hipBLASLt MXFP8 non-TN GEMM with certain M/N is not supported on gfx950";
+    }
+  }
+
   DType ref_type = dtype;
   TShape a_shape = params.transa ? TShape{params.m, params.k} : TShape{params.k, params.m};
   TShape b_shape = params.transb ? TShape{params.k, params.n} : TShape{params.n, params.k};
@@ -627,6 +764,14 @@ void performDqTest(const TestParams &params) {
   Tensor B_ref("B_ref", b_shape, ref_type);
   nvte_dequantize(A_fp8.data(), A_ref.data(), 0);
   nvte_dequantize(B_fp8.data(), B_ref.data(), 0);
+
+  // On gfx1250, hipBLASLt MXFP8 kernels expect pre-swizzled scales.
+  const bool a_colwise = !params.transa;
+  const bool b_colwise = params.transb;
+  if (prop.major == 12 && prop.minor == 5) {
+    swizzle_mxfp8_scales(A_fp8, !a_colwise);
+    swizzle_mxfp8_scales(B_fp8, !b_colwise);
+  }
 
   Tensor bias;
   Tensor pre_gelu_out;
@@ -798,6 +943,39 @@ INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP8, DqGEMMTestSuite,
                                   TN(std::get<3>(info.param)) + "x" +
                                   (std::get<5>(info.param) ? "HB" : "HK");
                          });
+
+// ============================================================================
+// Production GEMM shape instantiations (run with --gtest_filter='ProdGemm*')
+// ============================================================================
+
+class ProdGEMMTestSuite : public ::testing::TestWithParam<ProdGemmConfig> {};
+
+TEST_P(ProdGEMMTestSuite, TestMxfp8Dq) {
+  const auto& config = GetParam();
+
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+  const bool is_tn = config.transa && !config.transb;
+  if (prop.major == 12 && prop.minor == 5 && !is_tn) {
+    GTEST_SKIP() << "hipBLASLt MXFP8 GEMM non-TN layout is not supported on gfx1250: "
+                 << config.label;
+  }
+
+  TestParams params = {.m = config.m, .k = config.k, .n = config.n,
+                       .use_bias = false, .use_gelu = false,
+                       .transa = config.transa, .transb = config.transb,
+                       .scaling_mode = NVTEScalingMode::NVTE_MXFP8_1D_SCALING};
+
+  performDqTest<fp8, fp8, bf16>(params);
+}
+
+static auto prodTestName = [](const testing::TestParamInfo<ProdGemmConfig>& info) {
+  return std::string(info.param.label);
+};
+
+INSTANTIATE_TEST_SUITE_P(ProdGemmSweep, ProdGEMMTestSuite,
+    ::testing::ValuesIn(prod_gemm_sweep),
+    prodTestName);
 
 TEST(InputGenTest, FillUniform_DoesNotGetOverwrittenByFromCpu) {
   const size_t rows = 128;

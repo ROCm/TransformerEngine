@@ -249,7 +249,7 @@ def _default_csv_name(bench_fn):
 # ---------------------------------------------------------------------------
 
 def make_parser(**kwargs):
-    """Return an :class:`~argparse.ArgumentParser` with ``--csv`` and ``--csv-samples`` flags.
+    """Return an :class:`~argparse.ArgumentParser` with ``--csv``, ``--csv-samples``, and ``--kernel-profile`` flags.
 
     Any *kwargs* are forwarded to the ``ArgumentParser`` constructor, so
     callers can set ``description``, ``parents``, etc.
@@ -266,7 +266,40 @@ def make_parser(**kwargs):
             "Optional filename; default derived from script name."
         ),
     )
+    parser.add_argument(
+        "--kernel-profile", action="store_true", default=False,
+        help=(
+            "Profile GPU kernels using torch.profiler in addition to normal "
+            "timing. Prints per-kernel CUDA times output. "
+            "Use with --csv to write kernel-level data to CSV. "
+            "--csv-samples is ignored in this mode."
+        ),
+    )
     return parser
+
+
+_KERNEL_NAME_MAX_WIDTH = 80
+
+
+def _shorten_kernel_name(name):
+    """Shorten verbose C++/HIP kernel names for readable terminal output.
+
+    Strips ``void `` prefix and template arguments (``<...>``) from
+    fully-qualified kernel names while preserving the function name and
+    any top-level namespace.
+    """
+    import re
+    s = name
+    # Strip leading "void "
+    if s.startswith("void "):
+        s = s[5:]
+    # Remove balanced template args (handles one level of nesting)
+    s = re.sub(r"<[^<>]*(?:<[^<>]*>[^<>]*)*>", "", s)
+    # Collapse whitespace
+    s = " ".join(s.split())
+    if len(s) > _KERNEL_NAME_MAX_WIDTH:
+        s = s[: _KERNEL_NAME_MAX_WIDTH - 3] + "..."
+    return s
 
 
 def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
@@ -301,8 +334,12 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
     if args is None:
         args = make_parser().parse_args()
 
+    if args.kernel_profile:
+        from torch.profiler import profile, ProfilerActivity
+
     rows = []
     all_case_metrics = []
+    all_kernel_rows = []
     resolved_metric_columns = None
 
     for case in test_cases:
@@ -331,6 +368,57 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
         rows.append(row)
         all_case_metrics.append((case_params, metric_records))
 
+        if args.kernel_profile:
+            with profile(
+                activities=[ProfilerActivity.CUDA],
+            ) as prof:
+                bench_fn(**case)
+                torch.cuda.synchronize()
+
+            averages = prof.key_averages()
+            gpu_events = [e for e in averages if e.self_device_time_total > 0]
+            gpu_events.sort(key=lambda e: e.self_device_time_total, reverse=True)
+
+            if gpu_events:
+                total_cuda_us = sum(e.self_device_time_total for e in gpu_events)
+                w = _KERNEL_NAME_MAX_WIDTH
+                print(
+                    f"\n  | {'Kernel':<{w}} | "
+                    f"{'Total (us)':>11} | {'Calls':>6} | "
+                    f"{'Avg (us)':>10} | {'%':>6} |"
+                )
+                print(
+                    f"  | {'-'*w} | "
+                    f"{'-'*11} | {'-'*6} | "
+                    f"{'-'*10} | {'-'*6} |"
+                )
+                for e in gpu_events:
+                    avg_us = e.self_device_time_total / e.count if e.count > 0 else 0
+                    pct = (
+                        100.0 * e.self_device_time_total / total_cuda_us
+                        if total_cuda_us > 0
+                        else 0
+                    )
+                    short = _shorten_kernel_name(e.key)
+                    print(
+                        f"  | {short:<{w}} | {e.self_device_time_total:>11.1f} | "
+                        f"{e.count:>6} | {avg_us:>10.2f} | {pct:>5.1f}% |"
+                    )
+                print(
+                    f"  | {'TOTAL':<{w}} | {total_cuda_us:>11.1f} | "
+                    f"{'---':>6} | {'---':>10} | {'---':>6} |"
+                )
+
+            for e in gpu_events:
+                kr = dict(case_params)
+                kr["kernel_name"] = e.key
+                kr["cuda_time_total_us"] = round(e.self_device_time_total, 1)
+                kr["num_calls"] = e.count
+                kr["cuda_time_avg_us"] = (
+                    round(e.self_device_time_total / e.count, 2) if e.count > 0 else 0
+                )
+                all_kernel_rows.append(kr)
+
     if args.csv is not None:
         import pandas as pd
         out_csv = args.csv if isinstance(args.csv, str) else (
@@ -340,6 +428,23 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
         results = pd.DataFrame(rows, columns=columns)
         results.to_csv(out_csv, index=False)
         print(f"\nResults saved to {out_csv}")
+
+    if args.kernel_profile and args.csv is not None and all_kernel_rows:
+        import pandas as pd
+        from pathlib import Path
+        base = default_csv or _default_csv_name(bench_fn)
+        out_csv_name = args.csv if isinstance(args.csv, str) else (
+            Path(base).stem + "_kernel_profile.csv"
+        )
+        # Don't overwrite the main CSV if --csv was given a filename
+        if isinstance(args.csv, str):
+            out_csv_name = Path(args.csv).stem + "_kernel_profile.csv"
+        kernel_columns = param_columns + [
+            "kernel_name", "cuda_time_total_us", "num_calls", "cuda_time_avg_us",
+        ]
+        df = pd.DataFrame(all_kernel_rows, columns=kernel_columns)
+        df.to_csv(out_csv_name, index=False)
+        print(f"Kernel profile saved to {out_csv_name}")
 
     if args.csv_samples is not None:
         import pandas as pd
@@ -359,7 +464,9 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
                     sr = dict(case_params)
                     sr["label"] = lbl
                     sr["sample_idx"] = i
-                    sr["time_ms"] = t / measurement.number_per_run * 1e3
+                    # measurement.times is already per-iteration (raw block time
+                    # divided by number_per_run); convert seconds -> ms only.
+                    sr["time_ms"] = t * 1e3
                     sample_rows.append(sr)
         if sample_rows:
             df = pd.DataFrame(

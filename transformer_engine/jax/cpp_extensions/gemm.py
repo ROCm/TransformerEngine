@@ -649,7 +649,12 @@ class GemmPrimitive(BasePrimitive):
         # Declare cuBLAS workspace
         workspace_size = get_cublas_workspace_size_bytes()
         # NVFP4 swizzling happen in via nvte kernel instead of JAX transposes
-        if scaling_mode.is_nvfp4_scaling:
+        # On gfx1250, MXFP8 scale pre-swizzling also needs workspace space
+        if scaling_mode.is_nvfp4_scaling or (
+            scaling_mode.is_mxfp8_scaling
+            and is_hip_extension()
+            and get_device_compute_capability(0) == 125
+        ):
             workspace_size += lhs_scale_inv.size + rhs_scale_inv.size
         # HipKittens MXFP8 NN/NT kernels need workspace for transposed data and scales
         if scaling_mode.is_mxfp8_scaling and _use_hipkittens():
