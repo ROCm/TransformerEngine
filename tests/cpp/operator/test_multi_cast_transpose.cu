@@ -105,12 +105,18 @@ void performTest() {
   }
 
   // Transformer Engine implementation
-  std::vector<NVTETensor> nvte_inputs(num_tensors), nvte_outputs(num_tensors);
-  for (size_t i = 0; i < num_tensors; i++) {
-    nvte_inputs[i]  = input_list[i].data();
-    nvte_outputs[i] = output_list[i].data();
-  }
-  nvte_multi_cast_transpose(num_tensors, nvte_inputs.data(), nvte_outputs.data(), 0);
+  auto make_nvte_vector = [](std::vector<Tensor>& tensor_list)
+    -> std::vector<NVTETensor> {
+    std::vector<NVTETensor> nvte_tensor_list;
+    for (auto& tensor : tensor_list) {
+      nvte_tensor_list.emplace_back(tensor.data());
+    }
+    return nvte_tensor_list;
+  };
+  nvte_multi_cast_transpose(num_tensors,
+                            make_nvte_vector(input_list).data(),
+                            make_nvte_vector(output_list).data(),
+                            0);
 
   // Reference implementation
   compute_ref<InputType, OutputType>(ref_input_list,
@@ -216,12 +222,12 @@ void performTestWithPadding() {
   std::vector<int> valid_num_rows(num_tensors);
 
   for (size_t tensor_id = 0; tensor_id < num_tensors; tensor_id++) {
-    const size_t in_h  = std::get<0>(tensor_dims[tensor_id]);
+    const size_t valid_h  = std::get<0>(tensor_dims[tensor_id]);
     const size_t padded_h = std::get<1>(tensor_dims[tensor_id]);
     const size_t width    = std::get<2>(tensor_dims[tensor_id]);
 
-    input_list.emplace_back("input_" + std::to_string(tensor_id), std::vector<size_t>{in_h, width}, itype);
-    output_list.emplace_back("output_" + std::to_string(tensor_id), std::vector<size_t>{padded_h, width}, 
+    input_list.emplace_back("input_" + std::to_string(tensor_id), std::vector<size_t>{valid_h, width}, itype);
+    output_list.emplace_back("output_" + std::to_string(tensor_id), std::vector<size_t>{padded_h, width},
                              otype, true, true);
 
     auto &input = input_list.back();
@@ -229,11 +235,11 @@ void performTestWithPadding() {
     fillUniform(&input);
     setRandomScale(&output);
 
-    ref_input_list.emplace_back(in_h * width);
+    ref_input_list.emplace_back(valid_h * width);
     ref_output_c_list.emplace_back(padded_h * width);
     ref_output_t_list.emplace_back(width * padded_h);
 
-    std::copy(input.rowwise_cpu_dptr<InputType>(), input.rowwise_cpu_dptr<InputType>() + in_h * width,
+    std::copy(input.rowwise_cpu_dptr<InputType>(), input.rowwise_cpu_dptr<InputType>() + valid_h * width,
               ref_input_list.back().begin());
 
     ref_scale_list[tensor_id]    = output.scale();
@@ -243,12 +249,16 @@ void performTestWithPadding() {
     valid_num_rows[tensor_id]    = static_cast<int>(valid_h);
   }
 
-  std::vector<NVTETensor> nvte_inputs(num_tensors), nvte_outputs(num_tensors);
-  for (size_t i = 0; i < num_tensors; i++) {
-    nvte_inputs[i]  = input_list[i].data();
-    nvte_outputs[i] = output_list[i].data();
-  }
-  nvte_multi_cast_transpose_with_padding(num_tensors, nvte_inputs.data(), nvte_outputs.data(),
+  auto make_nvte_vector = [](std::vector<Tensor> &tensor_list) -> std::vector<NVTETensor> {
+    std::vector<NVTETensor> nvte_tensor_list;
+    for (auto &tensor : tensor_list) {
+      nvte_tensor_list.emplace_back(tensor.data());
+    }
+    return nvte_tensor_list;
+  };
+  nvte_multi_cast_transpose_with_padding(num_tensors,
+                                         make_nvte_vector(input_list).data(),
+                                         make_nvte_vector(output_list).data(),
                                          valid_num_rows.data(), 0);
 
   compute_ref_with_padding<InputType, OutputType>(ref_input_list, ref_output_c_list, ref_output_t_list, ref_scale_list,

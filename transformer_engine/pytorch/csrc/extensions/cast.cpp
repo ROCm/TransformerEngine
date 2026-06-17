@@ -1480,6 +1480,8 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
       }
       multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list,
                                  output_cpp_list, valid_num_rows_ptr);
+      break;
+    }
 #else
     default:
       // General multi-tensor quantization

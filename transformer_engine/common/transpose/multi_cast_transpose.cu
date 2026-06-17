@@ -249,9 +249,15 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
     NVTE_CHECK(output.columnwise_data.shape[0] == input.data.shape[1], "T output tensor shape ",
                output.columnwise_data.shape, "does not match input tensor shape ",
                input.data.shape);
+#ifdef __HIP_PLATFORM_AMD__
     NVTE_CHECK(output.columnwise_data.shape[1] == output.data.shape[0], "T output tensor shape ",
+               output.columnwise_data.shape, "does not match output rows ",
+               output.data.shape[0]);
+#else
+    NVTE_CHECK(output.columnwise_data.shape[1] == input.data.shape[0], "T output tensor shape ",
                output.columnwise_data.shape, "does not match input tensor shape ",
                input.data.shape);
+#endif
   }
 
 #ifdef __HIP_PLATFORM_AMD__

@@ -160,7 +160,7 @@ class _GroupedLinear(torch.autograd.Function):
         if fp8 and not debug:
             # Disable bulk allocation when CPU offloading is active: offloading skips small
             # tensors (like scales), but bulk allocation shares storage across all tensors,
-            # so if scales can't be offloaded, nothing in the group can be offloaded.\
+            # so if scales can't be offloaded, nothing in the group can be offloaded.
             fused_padding_kwargs = {}
             if actual_m_splits is not None and IS_HIP_EXTENSION \
                     and inp_view.shape[0] == sum(actual_m_splits):
@@ -380,6 +380,7 @@ class _GroupedLinear(torch.autograd.Function):
             bwd_fused_kwargs = {}
             if ctx.output_unpadded and ctx.actual_m_splits is not None:
                 bwd_fused_kwargs["valid_split_sections"] = ctx.actual_m_splits
+                # Fused pad+MCT produces both rowwise (dgrad) and columnwise (wgrad).
                 for q in ctx.grad_output_quantizers:
                     if q is not None:
                         q.set_usage(rowwise=True, columnwise=True)
@@ -971,6 +972,14 @@ class GroupedLinear(TransformerEngineBaseModule):
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)
+        actual_m_splits : Optional[List[int]], default = None
+                         Unpadded per-group row counts when inp is unpadded and
+                         m_splits contains the padded sizes. Used by the ROCm
+                         fused-pad-cast-transpose path; ignored on CUDA.
+        unpad_output : bool, default = False
+                      When True, unpad the GEMM output from sum(m_splits) to
+                      sum(actual_m_splits) rows before returning. Used by the
+                      ROCm fused-pad-cast-transpose path; ignored on CUDA.
         """
         debug = self.is_debug_iter()
 
