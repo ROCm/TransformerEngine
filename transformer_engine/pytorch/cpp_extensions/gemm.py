@@ -431,16 +431,9 @@ def general_gemm(
         )
         out_dtype = torch.bfloat16 if use_bf16_tn_output_workaround else out_dtype
 
-    # ROCm: hipBLASLt has no algorithm for a bf16 -> fp32-accumulate wgrad GEMM
-    # that also fuses the bias-gradient (BGRADB) epilogue; the heuristic returns
-    # no algorithms and the GEMM raises "Unable to find any suitable algorithms".
-    # Run the GEMM with the default epilogue (no fused bias grad) and reduce the
-    # bias gradient separately afterwards. Every wgrad path (Linear,
-    # LayerNormLinear, LayerNormMLP, and the delayed-wgrad store) reads the bias
-    # gradient from this function's return value, so handling it here covers them
-    # all. Gated on ROCm + bias-grad (grad + bias) + fp32 main_grad accumulate +
-    # non-quantized, so CUDA, the forward bias-add path (grad=False) and fp8/fp4
-    # are untouched.
+    # hipBLASLt has no algorithm for the fused bias-grad (BGRADB) epilogue on a
+    # bf16 -> fp32-accumulate wgrad GEMM, so split it: run the GEMM without the
+    # fused dbias and reduce the bias gradient separately below.
     rocm_split_dbias = (
         IS_HIP_EXTENSION
         and grad
@@ -482,9 +475,7 @@ def general_gemm(
     out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
 
     if rocm_split_dbias:
-        # dbias = column-sum of grad_output (operand B) over tokens, accumulated
-        # in fp32 and cast to the bias dtype to match the fused BGRADB epilogue
-        # this replaces.
+        # dbias = column-sum of grad_output over tokens, in fp32, cast to bias dtype.
         bias_grad = B.reshape(-1, B.shape[-1]).sum(dim=0, dtype=torch.float32).to(bias.dtype)
 
     if IS_HIP_EXTENSION and use_bf16_tn_output_workaround:
