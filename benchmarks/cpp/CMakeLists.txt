@@ -1,3 +1,9 @@
+#########################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# License for AMD contributions = MIT. See LICENSE for more information
+#########################################################################
+
 cmake_minimum_required(VERSION 3.18)
 
 if(NOT DEFINED CMAKE_CXX_COMPILER)

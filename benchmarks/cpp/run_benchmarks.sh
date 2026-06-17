@@ -1,4 +1,10 @@
 #!/bin/bash
+#########################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# License for AMD contributions = MIT. See LICENSE for more information
+#########################################################################
+
 # Builds benchmarks, runs them, and consolidates results into a single CSV
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

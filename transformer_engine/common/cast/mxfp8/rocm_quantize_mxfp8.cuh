@@ -13,7 +13,7 @@ constexpr size_t MXFP8_CHUNK_DIM_Y = 64;
 constexpr size_t MXFP8_CHUNK_DIM_X = 64;
 constexpr size_t MXFP8_THREADS_PER_CHUNK = 64;
 
-constexpr int kMultiQuantizeMXFP8MaxTensors = 256;
+constexpr int kMultiQuantizeMXFP8MaxTensors = 1024;
 
 struct MultiQuantizeMXFP8Args {
   const void *input_list[kMultiQuantizeMXFP8MaxTensors];

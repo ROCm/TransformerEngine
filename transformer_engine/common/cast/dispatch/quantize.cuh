@@ -515,6 +515,9 @@ inline void multi_quantize_mxfp8(const std::vector<Tensor *> &input_list,
                           std::vector<Tensor *> &output_list, cudaStream_t stream) {
   const size_t num_tensors = input_list.size();
   if (num_tensors == 0) return;
+  NVTE_CHECK(num_tensors <= mxfp8::quantize_kernel::kMultiQuantizeMXFP8MaxTensors,
+             "multi_quantize_mxfp8: num_tensors (", num_tensors, ") exceeds maximum (",
+             mxfp8::quantize_kernel::kMultiQuantizeMXFP8MaxTensors, ").");
 
   DType itype = input_list[0]->data.dtype;
   DType otype = output_list[0]->dtype();
@@ -531,8 +534,8 @@ inline void multi_quantize_mxfp8(const std::vector<Tensor *> &input_list,
   int tiles_x = 0;
 
   for (size_t i = 0; i < num_tensors; i++) {
-    const int rows = input_list[i]->data.shape[0];
-    const int cols = input_list[i]->data.shape[1];
+    const int rows = input_list[i]->flat_first_dim();
+    const int cols = input_list[i]->flat_last_dim();
     const int row_tiles = DIVUP(static_cast<size_t>(rows), CDY);
     const int col_tiles = DIVUP(static_cast<size_t>(cols), CDX);
     if (col_tiles > tiles_x) {
