@@ -29,7 +29,3 @@
 [submodule "3rdparty/ck_jit"]
 	path = 3rdparty/ck_jit
 	url = https://github.com/ROCm/ck-jit.git
-[submodule "3rdparty/crossattn_hip_kernel"]
-	path = 3rdparty/crossattn_hip_kernel
-	url = https://github.com/ROCm/crossattn_hip_kernel.git
-	branch = prototype/lse-aux

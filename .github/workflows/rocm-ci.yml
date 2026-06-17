@@ -121,8 +121,7 @@ jobs:
         run: |
           git submodule update --init --recursive --depth 1 \
             3rdparty/googletest \
-            3rdparty/hipify_torch \
-            3rdparty/crossattn_hip_kernel
+            3rdparty/hipify_torch
 
       - name: Download build artifacts
         uses: actions/download-artifact@v4
