@@ -188,7 +188,6 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          rm -f FAIL_*
           # One subdir per suite so PyTorch/JAX/Core get independent reports and
           # never collide on identically-named XML (e.g. test_sanity_import.auto.xml
           # exists in both the torch and jax suites and runs in parallel).
@@ -200,91 +199,10 @@ jobs:
             -e JUNITXML_PREFIX=/workspace/test-results/ \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
-            te-runner bash -c "$(cat <<'EOF'
-          #!/usr/bin/bash
-          set -x -o pipefail
-          ulimit -c 0 # Disable core dumps
-
-          # Each suite appends its own subdir to the inherited base prefix so the
-          # base path is defined once in the docker-exec env above (inline VAR=val
-          # applies only to that backgrounded subprocess; the sourced _utils.sh
-          # reads it from the env).
-          HIP_VISIBLE_DEVICES=0 JUNITXML_PREFIX=${JUNITXML_PREFIX}torch/ ci/pytorch.sh > /workspace/torch.log 2>&1 &
-          TORCH_PID=$!
-
-          HIP_VISIBLE_DEVICES=1 JUNITXML_PREFIX=${JUNITXML_PREFIX}jax/ ci/jax.sh > /workspace/jax.log 2>&1 &
-          JAX_PID=$!
-
-          (
-            set -e
-            python -c "import os; print('HF_TOKEN set:', bool(os.environ.get('HF_TOKEN')))"
-
-            JAX_CONSTRAINTS=/tmp/jax-constraints.txt
-            pip freeze | grep -iE '^(jax|jaxlib|jax[_-]rocm|jax[_-]plugins)[=@]' > "$JAX_CONSTRAINTS" || true
-
-            export HIP_VISIBLE_DEVICES=2
-
-            cd /workspace/examples/pytorch/mnist
-            python main.py
-            python main.py --use-te
-            python main.py --use-fp8
-
-            cd /workspace/examples/jax/mnist
-            pip3 install -c "$JAX_CONSTRAINTS" -r requirements.txt
-            python test_single_gpu_mnist.py
-            python test_single_gpu_mnist.py --use-te
-            python test_single_gpu_mnist.py --use-fp8
-
-            cd /workspace/examples/jax/encoder
-            pip3 install -c "$JAX_CONSTRAINTS" -r requirements.txt
-            python test_single_gpu_encoder.py
-            python test_single_gpu_encoder.py --use-fp8
-          ) > /workspace/examples.log 2>&1 &
-          EXAMPLES_PID=$!
-
-          HIP_VISIBLE_DEVICES=3 JUNITXML_PREFIX=${JUNITXML_PREFIX}core/ ci/core.sh > /workspace/core.log 2>&1 &
-          CORE_PID=$!
-
-          wait $TORCH_PID;    torch_rc=$?
-          wait $JAX_PID;      jax_rc=$?
-          wait $EXAMPLES_PID; examples_rc=$?
-          wait $CORE_PID;     core_rc=$?
-
-          if [ $torch_rc -ne 0 ]; then
-            echo "::group::[FAILED] PyTorch Log"
-            cat /workspace/torch.log
-            echo "::endgroup::"
-            echo "::error::PyTorch tests FAILED."
-            touch /workspace/FAIL_TORCH
-          fi
-
-          if [ $jax_rc -ne 0 ]; then
-            echo "::group::[FAILED] JAX Log"
-            cat /workspace/jax.log
-            echo "::endgroup::"
-            echo "::error::JAX tests FAILED."
-            touch /workspace/FAIL_JAX
-          fi
-
-          if [ $examples_rc -ne 0 ]; then
-            echo "::group::[FAILED] Examples Log"
-            cat /workspace/examples.log
-            echo "::endgroup::"
-            echo "::error::Examples FAILED."
-            touch /workspace/FAIL_EXAMPLES
-          fi
-
-          if [ $core_rc -ne 0 ]; then
-            echo "::group::[FAILED] Core Log"
-            cat /workspace/core.log
-            echo "::endgroup::"
-            echo "::error::Core tests FAILED."
-            touch /workspace/FAIL_CORE
-          fi
-
-          test $torch_rc -eq 0 -a $jax_rc -eq 0 -a $examples_rc -eq 0 -a $core_rc -eq 0
-          EOF
-          )"
+            te-runner bash /workspace/.github/scripts/run_parallel_sgpu.sh \
+              --first-gpu 0 \
+              --log-dir /workspace/ \
+              /workspace/.github/scripts/ci_sgpu_jobs.conf
 
       - name: Generate test report
         if: always()

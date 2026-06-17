@@ -157,8 +157,10 @@ for config in "${resolved_configs[@]}"; do
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${line//[[:space:]]/}" ]]  && continue
         read -r label logfile rest <<< "$line"
+        # Each suite appends its own subdir to the inherited base prefix so the base path is defined once.
+        mkdir -p ${JUNITXML_PREFIX}${label}/
         # shellcheck disable=SC2086  # $rest is intentionally word-split
-        HIP_VISIBLE_DEVICES=$gpu launch_job "$label" "${LOG_DIR}/$logfile" $rest
+        HIP_VISIBLE_DEVICES=$gpu JUNITXML_PREFIX=${JUNITXML_PREFIX}${label}/ launch_job "$label" "${LOG_DIR}/$logfile" $rest
         (( gpu++ ))
     done < "$config"
 done
