@@ -69,16 +69,11 @@ size_t small_seq_extra_workspace_bytes(size_t max_tokens_q) {
 }
 
 bool is_nvte_ck_small_seq_enabled() {
-#ifdef __HIP_PLATFORM_AMD__
-  const std::string& arch = cuda::sm_arch_name();
-  if(arch.rfind("gfx942", 0) != 0) {
+  if (transformer_engine::cuda::sm_arch() != 94) {
     return false;
   }
   const char* env_p = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
   return env_p != nullptr && std::strcmp(env_p, "1") == 0;
-#else
-  return false;
-#endif
 }
 
 #ifndef USE_FUSED_ATTN_CK

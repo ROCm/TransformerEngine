@@ -406,11 +406,11 @@ class FusedAttnRunner:
         if self.qkv_layout.is_thd():
             if 90400 <= get_cudnn_version() < 90500:
                 return self.num_segments_per_seq
-            else:
-                # +1 for testing runtime_segments < max_segments
-                return self.num_segments_per_seq + 1
-        else:
-            return 1
+            if is_hip_extension() and os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") == "1":
+                return self.num_segments_per_seq
+            # +1 for testing runtime_segments < max_segments
+            return self.num_segments_per_seq + 1
+        return 1
 
     def _check_configs(self):
         # TODO(rewang): probably adds this in is_fused_attn_available
@@ -525,6 +525,49 @@ class FusedAttnRunner:
                     "B1SS, BHSS and 11SS bias shapes are only supported for "
                     "the F16_arbitrary_seqlen backend."
                 )
+
+    def _setup_segments_ck_smallseq(self, generate_random_segment_ids):
+        """
+        Segment ids / seqlens for NVTE_FUSED_ATTN_CK_SMALLSEQ + padded ragged layouts.
+
+        num_segments_per_seq follows max_seqlen_q; max_seqlen_q==1 uses a fixed Q row and
+        corrected seqlens_q. KV always uses generate_random_segment_ids.
+        """
+        num_segments_per_seq = self.max_seqlen_q
+        if self.max_seqlen_q == 1:
+            segment_ids_q = jnp.ones((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
+            segment_pos_q = jnp.zeros((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
+            pad_q = jnp.zeros((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
+            seqlens_q, offsets_q = get_seqlens_and_offsets(segment_ids_q)
+            seqlens_q = jnp.ones((self.batch_size, 1), dtype=jnp.int32)
+        else:
+            segment_ids_q, segment_pos_q, pad_q = generate_random_segment_ids(
+                self.batch_size, self.max_seqlen_q, num_segments_per_seq, seed=42
+            )
+            seqlens_q, offsets_q = get_seqlens_and_offsets(segment_ids_q)
+
+        min_segment_len = None if self.window_size is None else seqlens_q
+        segment_ids_kv, segment_pos_kv, pad_kv = generate_random_segment_ids(
+            self.batch_size,
+            self.max_seqlen_kv,
+            num_segments_per_seq,
+            seed=2024,
+            min_segment_len=min_segment_len,
+        )
+        seqlens_kv, offsets_kv = get_seqlens_and_offsets(segment_ids_kv)
+        return (
+            num_segments_per_seq,
+            segment_ids_q,
+            segment_pos_q,
+            pad_q,
+            seqlens_q,
+            offsets_q,
+            segment_ids_kv,
+            segment_pos_kv,
+            pad_kv,
+            seqlens_kv,
+            offsets_kv,
+        )
 
     def _setup_inputs(self):
         self._check_configs()
@@ -654,30 +697,47 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
-                self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
-            )
-            self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
-            # TODO(rewang): record only self attention and find the reason of cross attention
-            if self.qkv_layout == QKVLayout.T3HD or self.max_seqlen_q == self.max_seqlen_kv:
-                self.segment_ids_kv = self.segment_ids_q
-                self.segment_pos_kv = self.segment_pos_q
-                self.pad_kv = self.pad_q
-            else:
-                # Force kv_len >= q_len for swa, otherwise, cuDNN kernels don't support
-                min_segment_len = None
-                if (
-                    self.window_size is not None or self.attn_mask_type.is_bottom_right()
-                ):  # SWA or BRCM requires kv_len >= q_len
-                    min_segment_len = self.seqlens_q
-                self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = generate_random_segment_ids(
-                    self.batch_size,
-                    self.max_seqlen_kv,
+            if is_hip_extension() and os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") == "1":
+                (
                     self.num_segments_per_seq,
-                    seed=2024,
-                    min_segment_len=min_segment_len,
+                    self.segment_ids_q,
+                    self.segment_pos_q,
+                    self.pad_q,
+                    self.seqlens_q,
+                    self.offsets_q,
+                    self.segment_ids_kv,
+                    self.segment_pos_kv,
+                    self.pad_kv,
+                    self.seqlens_kv,
+                    self.offsets_kv,
+                ) = self._setup_segments_ck_smallseq(generate_random_segment_ids)
+            else:
+                self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
+                    self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
                 )
-            self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
+                self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
+                # TODO(rewang): record only self attention and find the reason of cross attention
+                if self.qkv_layout == QKVLayout.T3HD or self.max_seqlen_q == self.max_seqlen_kv:
+                    self.segment_ids_kv = self.segment_ids_q
+                    self.segment_pos_kv = self.segment_pos_q
+                    self.pad_kv = self.pad_q
+                else:
+                    # Force kv_len >= q_len for swa, otherwise, cuDNN kernels don't support
+                    min_segment_len = None
+                    if (
+                        self.window_size is not None or self.attn_mask_type.is_bottom_right()
+                    ):  # SWA or BRCM requires kv_len >= q_len
+                        min_segment_len = self.seqlens_q
+                    self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = (
+                        generate_random_segment_ids(
+                            self.batch_size,
+                            self.max_seqlen_kv,
+                            self.num_segments_per_seq,
+                            seed=2024,
+                            min_segment_len=min_segment_len,
+                        )
+                    )
+                self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
         else:
             self.segment_ids_q, self.pad_q = gen_valid(
                 self.batch_size, self.max_seqlen_q, pad_ratio
@@ -1904,41 +1964,98 @@ def test_backward_bitwise_reproducible(
         assert_allclose(x, y, atol=0, rtol=0, err_msg=f"{name} not bitwise reproducible")
 
 
-def _on_gfx942():
-    """True when running on AMD MI300-class (gfx942) JAX devices."""
-    if not is_hip_extension():
-        return False
-    try:
-        devs = jax.devices()
-        if not devs:
-            return False
-        return "gfx942" in str(devs[0]).lower()
-    except Exception:
-        return False
+_SKIP_ROCM_CK_SMALLSEQ = pytest.mark.skipif(
+    not is_hip_extension(),
+    reason="CK unfused small-seq tests only on ROCm",
+)
 
+# ROCm CK small-seq tests.
+@pytest.fixture
+def ck_smallseq_env(monkeypatch):
+    """Enable CK small-seq path and disable XLA GPU graphs for these tests."""
+    # gfx942 uses the dedicated unfused small-seq path (NVTE_FUSED_ATTN_CK_SMALLSEQ), 
+    # which requires XLA GPU graphs disabled. 
+    if get_device_compute_capability(0) == 94:
+        if "xla_gpu_graph_level=0" not in os.environ.get("XLA_FLAGS", ""):
+            pytest.skip("Test must be run with XLA_FLAGS='--xla_gpu_graph_level=0'")
+        monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1")
+    yield
 
-@pytest.mark.skipif(not _on_gfx942(), reason="CK small-seq is implemented for gfx942 (MI300X) only")
-def test_fused_attn_ck_smallseq_thd_gfx942(monkeypatch):
-    """THD forward with NVTE_FUSED_ATTN_CK_SMALLSEQ=1 (HIP small-seq vs reference)."""
-    monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1")
-    runner = FusedAttnRunner(
-        batch_size=2,
-        max_seqlen_q=8,
-        max_seqlen_kv=8,
-        num_heads_q=16,
-        num_heads_kv=16,
-        head_dim_qk=128,
-        head_dim_v=128,
-        attn_bias_type=AttnBiasType.NO_BIAS,
-        attn_mask_type=AttnMaskType.PADDING_MASK,
-        softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
-        dropout_prob=0.0,
-        dtype=jnp.bfloat16,
-        is_training=False,
-        qkv_layout=QKVLayout.THD_THD_THD,
-        bias_shape=BiasShape._1HSS,
-        window_size=None,
-        seq_desc_format=SeqDescFormat.SegmentIDs,
-        num_segments_per_seq=2,
+@_SKIP_ROCM_CK_SMALLSEQ
+@pytest.mark.usefixtures("ck_smallseq_env")
+class TestFusedAttnCkSmallseq:
+    """
+    ROCm CK small-seq (NVTE_FUSED_ATTN_CK_SMALLSEQ).
+    Covers 1<=s_q<=16, 2<=s_kv<=16 THD self/cross attention and BSHD.
+    """
+
+    @staticmethod
+    @pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float16], ids=["BF16", "FP16"])
+    @pytest.mark.parametrize(
+        "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, qkv_layout",
+        [
+            # cross-attention (q=1 attends over kv), THD + no bias
+            pytest.param(4000, 1, 2, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-2-16-16-128-128"),
+            pytest.param(4000, 1, 4, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-4-16-16-128-128"),
+            pytest.param(4000, 1, 6, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-6-16-16-128-128"),
+            pytest.param(4000, 1, 8, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-8-16-16-128-128"),
+            pytest.param(4000, 1, 12, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-12-16-16-128-128"),
+            pytest.param(4000, 1, 16, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-16-16-16-128-128"),
+            pytest.param(4000, 1, 4, 32, 32, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-256-1-4-32-32-128-128"),
+            pytest.param(4000, 1, 6, 16, 16, 256, 256, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-128-1-6-16-16-256-256"),
+            # self-attention (s_q == s_kv), THD + padding
+            pytest.param(4000, 8, 8, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-2-8-8-16-16-128-128"),
+            pytest.param(4000, 8, 8, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-32-8-8-16-16-128-128"),
+            pytest.param(4000, 16, 16, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-48-16-16-16-16-128-128"),
+            pytest.param(4000, 16, 16, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-16-16-16-16-16-128-128"),
+            pytest.param(4000, 17, 17, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-8-17-17-16-16-128-128"),
+            # cross-attention (s_q != s_kv), THD + padding
+            pytest.param(4000, 4, 8, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-64-4-8-16-16-128-128"),
+            pytest.param(4000, 8, 12, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-64-8-12-16-16-128-128"),
+            pytest.param(4000, 12, 16, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-32-12-16-16-16-128-128"),
+            # self-attention, BSHD + no mask + no bias
+            pytest.param(4000, 16, 16, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4-16-16-16-16-128-128"),
+            pytest.param(4000, 17, 17, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-17-17-16-16-128-128"),
+        ],
     )
-    runner.test_forward()
+    def test_smallseq(
+        dtype,
+        b,
+        s_q,
+        s_kv,
+        h_q,
+        h_kv,
+        d_qk,
+        d_v,
+        qkv_layout,
+    ):
+        """CK small-seq THD/BSHD: no bias; padding mask for THD, no mask for BSHD.
+
+        """
+        attn_mask_type = (
+            AttnMaskType.NO_MASK
+            if qkv_layout == QKVLayout.BSHD_BSHD_BSHD
+            else AttnMaskType.PADDING_MASK
+        )
+        runner = FusedAttnRunner(
+            batch_size=b,
+            max_seqlen_q=s_q,
+            max_seqlen_kv=s_kv,
+            num_heads_q=h_q,
+            num_heads_kv=h_kv,
+            head_dim_qk=d_qk,
+            head_dim_v=d_v,
+            attn_bias_type=AttnBiasType.NO_BIAS,
+            attn_mask_type=attn_mask_type,
+            softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
+            dropout_prob=0.0,
+            use_old_rng=True,
+            dtype=dtype,
+            is_training=True,
+            qkv_layout=qkv_layout,
+            bias_shape=None,
+            window_size=None,
+            seq_desc_format=SeqDescFormat.Seqlens,
+        )
+        runner.test_forward()
+        runner.test_backward()
