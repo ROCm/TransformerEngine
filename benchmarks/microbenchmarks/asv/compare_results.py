@@ -67,7 +67,6 @@ def _load_samples(path, name_filter=None):
 
 def run_stats(args):
     """Compare two result JSONs; return 1 if a significant difference is found."""
-    import rich.table  # noqa: F401  benchstats render uses rich.table without importing it
     from benchstats.compare import compareStats
     from benchstats.render import renderComparisonResults
     from benchstats.common import LoggingConsole, detectExportFormat

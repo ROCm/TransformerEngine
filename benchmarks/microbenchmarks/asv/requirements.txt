@@ -1,4 +1,4 @@
 # Extra dependencies for statistical benchmark comparison (compare_results.py).
 # benchstats pulls in rich, scipy and numpy.
 numpy
-benchstats>=3.4
+benchstats>=3.4.1
