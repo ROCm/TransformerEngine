@@ -111,7 +111,8 @@ if IS_HIP_EXTENSION:
     def reset_attn_backend():
         env = EnvVarCleaner(["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN",
                             "NVTE_FUSED_ATTN_CK", "NVTE_FUSED_ATTN_AOTRITON",
-                            "NVTE_CK_USES_FWD_V3", "NVTE_CK_USES_BWD_V3", "NVTE_FP8_DPA_BWD"])
+                            "NVTE_CK_USES_FWD_V3", "NVTE_CK_USES_BWD_V3", "NVTE_FP8_DPA_BWD",
+                            "NVTE_FUSED_ATTN_SPLITKV"])
         yield
 
 # Define F16 data types to test
@@ -478,6 +479,62 @@ def test_dpa_num_splits(dtype, model_configs, model):
         False,
         False,
     )
+
+
+# ROCm: configs matching the exact gate that AITER's native split-K (Flash-Decoding)
+# forward was wired in for -- dense bf16, head_dim 64, no_bias, no sliding window, no
+# dropout, no_mask/causal. See _aiter_splitkv_eligible in backends.py.
+model_configs_splitkv = {
+    # test:         ModelConfig(b, sq, hq, dqk)
+    "splitkv_1_0": ModelConfig(2, 2048, 16, 64, max_seqlen_kv=4096),  # no_mask, bshd
+    "splitkv_1_1": ModelConfig(2, 2048, 16, 64, attn_mask_type="causal"),  # causal, sbhd
+}
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="AITER split-K is a ROCm-only path.")
+@pytest.mark.parametrize("dtype", param_types_lean)  # split-K forward is bf16 only
+@pytest.mark.parametrize("model_configs", [model_configs_splitkv])
+@pytest.mark.parametrize("model", model_configs_splitkv.keys())
+def test_dpa_splitkv(dtype, model_configs, model):
+    """Test DotProductAttention routed through AITER's native split-K forward.
+
+    Enables NVTE_FUSED_ATTN_SPLITKV and exercises the dense bf16 head-dim-64
+    no_mask/causal config the kernel was added for; the split-K result (fwd+bwd)
+    is validated against the unfused and CK backends. Interception only fires on
+    gfx942 -- elsewhere FusedAttention falls back to CK and the config still runs.
+    """
+    import inspect
+    from transformer_engine.pytorch.attention.dot_product_attention import backends
+
+    try:
+        from aiter.ops.mha import flash_attn_func as splitkv_func
+    except ImportError:
+        pytest.skip("aiter.ops.mha split-K forward is unavailable.")
+    if "num_splits" not in inspect.signature(splitkv_func).parameters:
+        pytest.skip("aiter split-K forward predates num_splits (AITER PR #3581).")
+
+    # NVTE_FUSED_ATTN_SPLITKV is consumed at import time, so enable the interception
+    # directly for the duration of this test and restore the module state afterwards.
+    saved_func = backends._aiter_splitkv_flash_attn_func
+    saved_use = backends._use_aiter_splitkv
+    os.environ["NVTE_FUSED_ATTN_SPLITKV"] = "1"
+    backends._aiter_splitkv_flash_attn_func = splitkv_func
+    backends._use_aiter_splitkv = True
+    try:
+        test_dot_product_attention(
+            dtype,
+            model_configs,
+            model,
+            False,
+            False,
+            None,
+            False,
+            False,
+        )
+    finally:
+        backends._aiter_splitkv_flash_attn_func = saved_func
+        backends._use_aiter_splitkv = saved_use
+        os.environ.pop("NVTE_FUSED_ATTN_SPLITKV", None)
 
 
 model_configs_softmax = {
