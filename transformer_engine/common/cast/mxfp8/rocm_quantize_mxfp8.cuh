@@ -7,8 +7,6 @@
 // drop-in replacement for rocm quantize_mxfp8 kernels
 //#include "hip/hip_runtime.h" //dummy include to prevent hipification adding this header
 
-#include "../../util/rocm_device_utils.cuh"
-
 constexpr size_t MXFP8_CHUNK_DIM_Y = 64;
 constexpr size_t MXFP8_CHUNK_DIM_X = 64;
 constexpr size_t MXFP8_THREADS_PER_CHUNK = 64;
@@ -163,7 +161,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       __builtin_assume(thread_amax >= 0);
       block_amax = fmaxf(block_amax, thread_amax);
 
-      const float subwarp_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(thread_amax);
+      const float subwarp_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(thread_amax, rocm_max_op{});
       const e8m0_t biased_exponent =
           ptx::float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
 
@@ -309,7 +307,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           __builtin_assume(thread_amax >= 0);
           block_amax = fmaxf(block_amax, thread_amax);
 
-          const float subwarp_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(thread_amax);
+          const float subwarp_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(thread_amax, rocm_max_op{});
           const e8m0_t biased_exponent =
               ptx::float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
 
