@@ -2047,6 +2047,11 @@ class FusedAttention(torch.nn.Module):
             q, k, v = query_layer, key_layer, value_layer
             if qkv_format == "sbhd":
                 q, k, v = (x.transpose(0, 1).contiguous() for x in (q, k, v))
+            # AITER's autograd Function asserts return_lse=True whenever it will build a
+            # backward graph -- it saves the LSE for the backward pass -- and in that case
+            # flash_attn_func returns an (out, softmax_lse) tuple. Mirror its own is_grad
+            # gate so the LSE is requested (and unpacked) exactly when grad is needed.
+            return_lse = torch.is_grad_enabled() and any(t.requires_grad for t in (q, k, v))
             out = _aiter_splitkv_flash_attn_func(
                 q,
                 k,
@@ -2054,8 +2059,11 @@ class FusedAttention(torch.nn.Module):
                 dropout_p=0.0,
                 softmax_scale=self.softmax_scale,
                 causal="causal" in attn_mask_type,
+                return_lse=return_lse,
                 num_splits=0,
             )
+            if return_lse:
+                out = out[0]
             if qkv_format == "sbhd":
                 out = out.transpose(0, 1)
             # ...hd -> ...(hd), matching the FusedAttnFunc return convention below.
