@@ -24,7 +24,9 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # Warn if a log file has not been updated in this many seconds
 : "${STALL_WARN_SECS:=180}"
 # Number of tail lines to show for stalled logs
-: "${STALL_TAIL_LINES:=15}"
+: "${STALL_TAIL_LINES:=3}"
+# Number of new lines to show for resumed logs
+: "${STALL_RESUME_CONTEXT_LINES:=2}"
 
 # Associative arrays:  _JOB_PIDS[name]=pid   _JOB_LOGS[pid]=logfile
 declare -A _JOB_PIDS
@@ -52,6 +54,8 @@ launch_job() {
 wait_for_jobs() {
     local -A remaining
     local -A stall_mtime
+    local -A stall_walltime
+    local -A stall_lineno
     for name in "${!_JOB_PIDS[@]}"; do
         remaining["$name"]="${_JOB_PIDS[$name]}"
     done
@@ -82,16 +86,26 @@ wait_for_jobs() {
                     age=$(( now - mtime ))
                     if [ -n "${stall_mtime[$pid]+set}" ]; then
                         if [ "$mtime" -gt "${stall_mtime[$pid]}" ]; then
-                            echo "[$(date '+%Y-%m-%d %H:%M:%S')] INFO: '${name}' (pid ${pid}) log '${logfile}' resumed updating (was frozen)"
+                            local frozen_secs=$(( now - stall_walltime[$pid] ))
+                            local freeze_line="${stall_lineno[$pid]}"
+                            echo "[$(date '+%Y-%m-%d %H:%M:%S')] INFO: '${name}' (pid ${pid}) log '${logfile}' resumed updating after ${frozen_secs}s"
+                            echo "--- first ${STALL_RESUME_CONTEXT_LINES} lines of ${logfile} starting ${freeze_line} ---"                            
+                            tail -n "+${freeze_line}" "$logfile" | head -n ${STALL_RESUME_CONTEXT_LINES}
+                            echo "---"
                             unset "stall_mtime[$pid]"
+                            unset "stall_walltime[$pid]"
+                            unset "stall_lineno[$pid]"
                         fi
                         # else: still stalled but already warned — do nothing
                     elif [ "$age" -ge "$STALL_WARN_SECS" ]; then
-                        echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: '${name}' (pid ${pid}) log '${logfile}' has not been updated for ${age}s"
-                        echo "--- last ${STALL_TAIL_LINES} lines of ${logfile} ---"
-                        tail -n "$STALL_TAIL_LINES" "$logfile"
-                        echo "--- end of ${logfile} ---"
+                        local freeze_line=$(wc -l < "$logfile")
                         stall_mtime[$pid]=$mtime
+                        stall_walltime[$pid]=$now
+                        stall_lineno[$pid]=$freeze_line
+                        echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: '${name}' (pid ${pid}) log '${logfile}' has not been updated for ${age}s"
+                        echo "--- last ${STALL_TAIL_LINES} lines of ${logfile} up to ${freeze_line} ---"
+                        head -n "${freeze_line}" "$logfile" | tail -n "$STALL_TAIL_LINES"
+                        echo "--- end of ${logfile} ---"
                     fi
                 fi
             fi
@@ -158,9 +172,14 @@ for config in "${resolved_configs[@]}"; do
         [[ -z "${line//[[:space:]]/}" ]]  && continue
         read -r label logfile rest <<< "$line"
         # Each suite appends its own subdir to the inherited base prefix so the base path is defined once.
-        mkdir -p ${JUNITXML_PREFIX}${label}/
+        if [ -n "${JUNITXML_PREFIX}${JUNITXML_SUFFIX}" ]; then
+            junitxml_dir="${JUNITXML_PREFIX}${label}/"
+            mkdir -p "${junitxml_dir}"
+        else
+            junitxml_dir=""
+        fi
         # shellcheck disable=SC2086  # $rest is intentionally word-split
-        HIP_VISIBLE_DEVICES=$gpu JUNITXML_PREFIX=${JUNITXML_PREFIX}${label}/ launch_job "$label" "${LOG_DIR}/$logfile" $rest
+        HIP_VISIBLE_DEVICES=$gpu JUNITXML_PREFIX="${junitxml_dir}" launch_job "$label" "${LOG_DIR}/$logfile" $rest
         (( gpu++ ))
     done < "$config"
 done

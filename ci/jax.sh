@@ -69,8 +69,6 @@ run_test_config_mgpu() {
     echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
     configure_omp_threads 8
 
-    # Mitigate distributed tests hang by adding 5min timeout
-    _timeout_args="--timeout 300 --timeout-method thread"
     # Workaround for some distributed tests hang/abortion
     export XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false --xla_cpu_enable_fast_math=false"
     export JAX_COMPILATION_CACHE_DIR="/tmp/jax_cache"
@@ -84,12 +82,12 @@ run_test_config_mgpu() {
         export NVTE_JAX_UNITTEST_LEVEL=L2
     fi
 
-    run_default_fa 2 test_distributed_dense.py -p no:rerunfailures
+    run_default_fa 2 test_distributed_dense.py
     # RCCL_MSCCL_ENABLE=0 is to avoid hangs in some distributed tests (ROCM-1719)
-    RCCL_MSCCL_ENABLE=0 run $_dfa_level test_distributed_fused_attn.py $_timeout_args -p no:rerunfailures
-    run_default_fa 3 test_distributed_layernorm.py -p no:rerunfailures
-    run_default_fa 2 test_distributed_layernorm_mlp.py $_timeout_args -p no:rerunfailures
-    run_default_fa 3 test_distributed_softmax.py -p no:rerunfailures
+    RCCL_MSCCL_ENABLE=0 run $_dfa_level test_distributed_fused_attn.py
+    run_default_fa 3 test_distributed_layernorm.py
+    run_default_fa 2 test_distributed_layernorm_mlp.py
+    run_default_fa 3 test_distributed_softmax.py
 
     run_default_fa 3 test_sanity_import.py
 }

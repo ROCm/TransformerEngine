@@ -107,7 +107,7 @@ jobs:
   sgpu_tests:
     name: sGPU Tests (${{ matrix.arch_label }})
     needs: [select_image, build]
-    timeout-minutes: 360
+    timeout-minutes: 270
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || 'linux-te-mi35x-4' }}
     strategy:
       fail-fast: false
@@ -184,7 +184,7 @@ jobs:
         id: run-tests
         # Below the job's timeout-minutes so an overrun kills only this step;
         # the `if: always()` report + upload steps still run (artifacts survive).
-        timeout-minutes: 180
+        timeout-minutes: 240
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -257,7 +257,7 @@ jobs:
   mgpu_tests:
     name: mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})
     needs: [select_image, build]
-    timeout-minutes: 360
+    timeout-minutes: 210
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || 'linux-te-mi35x-8' }}
     strategy:
       fail-fast: false
