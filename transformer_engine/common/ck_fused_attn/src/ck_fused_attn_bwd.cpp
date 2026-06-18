@@ -467,9 +467,11 @@ void dump_bwd_timings(const char* dump_path, float average_runtime){
 
 namespace {
 
+#if ENABLE_CK
 // Trait subset that determines AITER's internal bwd workspace footprint. Mirrors
 // the fields ck_attn_bwd sets on mha_bwd_args so the size query and the dispatch
-// stay in lockstep.
+// stay in lockstep. fmha_bwd_traits lives in the CK example headers, absent in the
+// CK-free build (gfx1250 v3-only tier), which has no v2 launcher to size.
 ::fmha_bwd_traits make_bwd_traits(const CkAttnBwdArgs& args){
   bool has_dropout = (args.dropout_probability > 0.f);
   bool has_dbias = args.dbias_ptr != nullptr;
@@ -497,6 +499,7 @@ namespace {
     /* is_deterministic */ args.deterministic,
   };
 }
+#endif
 
 // dq_acc bytes the v3 asm path allocates via workspace_alloc. Mirrors aiter's
 // fmha_v3_bwd sizing (csrc/cpp_itfs/mha_bwd.cu); returns 0 when v3 can't run so
@@ -519,6 +522,7 @@ size_t v3_dq_acc_bytes(const CkAttnBwdArgs& args){
 }  // namespace
 
 size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args){
+#if ENABLE_CK
   // v2 (CK launcher) reports its full device workspace (host metadata + dq_acc)
   // host-side; v3 (asm) allocates only dq_acc. v3 is tried first but may fall
   // back to v2, so reserve the larger of the two. The launcher symbol is forced
@@ -526,6 +530,11 @@ size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args){
   const size_t v2_bytes = QOLA_NS(mha_bwd_workspace_size)(make_bwd_traits(args));
   const size_t v3_bytes = v3_dq_acc_bytes(args);
   return v2_bytes > v3_bytes ? v2_bytes : v3_bytes;
+#else
+  // CK-free build (gfx1250 v3-only tier): there is no v2 launcher to query, so
+  // only the v3 asm dq_acc accumulator is reserved.
+  return v3_dq_acc_bytes(args);
+#endif
 }
 
 hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
