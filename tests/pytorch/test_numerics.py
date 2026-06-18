@@ -1410,10 +1410,6 @@ def test_linear_accuracy_delay_wgrad_compute(dtype, bs, model, bias, fuse_wgrad_
 
     config = model_configs[model]
 
-    if IS_HIP_EXTENSION:
-        if dtype not in (torch.float32,) and fuse_wgrad_accumulation and bias:
-            pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
-
     te_linear_ref = Linear(
         config.hidden_size,
         4 * config.hidden_size,

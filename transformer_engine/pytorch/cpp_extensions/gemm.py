@@ -431,14 +431,12 @@ def general_gemm(
         )
         out_dtype = torch.bfloat16 if use_bf16_tn_output_workaround else out_dtype
 
-    # hipBLASLt has no algorithm for the fused bias-grad (BGRADB) epilogue on a
-    # bf16 -> fp32-accumulate wgrad GEMM, so split it: run the GEMM without the
-    # fused dbias and reduce the bias gradient separately below.
+    # hipBLASLt has no fused bias-grad (BGRADB) algorithm for an fp32-output wgrad GEMM, so skip the fused dbias and reduce grad_output below.
     rocm_split_dbias = (
         IS_HIP_EXTENSION
         and grad
         and bias is not None
-        and accumulate
+        and not gelu
         and out is not None
         and out.dtype == torch.float32
         and quantization_params is None
@@ -475,7 +473,6 @@ def general_gemm(
     out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
 
     if rocm_split_dbias:
-        # dbias = column-sum of grad_output over tokens, in fp32, cast to bias dtype.
         bias_grad = B.reshape(-1, B.shape[-1]).sum(dim=0, dtype=torch.float32).to(bias.dtype)
 
     if IS_HIP_EXTENSION and use_bf16_tn_output_workaround:
