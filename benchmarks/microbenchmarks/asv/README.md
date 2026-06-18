@@ -23,6 +23,7 @@ python bench_gemm.py -w 5 -n 20           # custom warmup / timed iterations
 python bench_casting.py --no-save         # don't write a result file
 python bench_casting.py --cold-cache      # flush GPU cache before each sample
 python bench_gemm.py --inner 50           # fix the inner-loop count to 50
+python bench_gemm.py --kernel-profile     # per-kernel CUDA-time breakdown
 ```
 
 Results are written to `benchmarks/microbenchmarks/asv/results/<commit-hash>.json`
@@ -45,6 +46,24 @@ so each window lasts at least `--target-window-ms` (default `1.0 ms`).
 
 - **Warm cache, large `_inner`** (default): steady-state throughput, lowest variance.
 - **Cold cache, `_inner=1`**: isolated cold-memory cost — higher variance; bandwidth-bound benches (cast, norm) run ~1.5–3× slower than warm.
+
+## Kernel profiling
+
+`--kernel-profile` runs each benchmark once under `torch.profiler` instead of
+collecting timing distributions, and prints the GPU kernels it launched, sorted
+by total device time:
+
+```bash
+python driver.py bench_gemm --kernel-profile
+python bench_attention.py time_forward --kernel-profile   # one method
+```
+
+For each `(method, parameter combo)` it reports per-kernel total/avg CUDA time,
+launch count, and share of total — useful for spotting which kernel dominates or
+whether an op is launch-bound. This bypasses the timing machinery (`--inner`,
+`--cold-cache`, interleaving); `--profile-inner N` sets how many invocations are
+profiled per run (default `1`). Output is saved to
+`results/<commit-hash>-kernelprofile.json` unless `--no-save`.
 
 ## Sample scheduling: interleaving
 

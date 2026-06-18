@@ -346,6 +346,111 @@ def run_class(
     }
 
 
+# ---------------------------------------------------------------------------
+# Kernel profiling
+# ---------------------------------------------------------------------------
+
+_KERNEL_NAME_MAX_WIDTH = 80
+
+
+def _shorten_kernel_name(name):
+    """Shorten verbose C++/HIP kernel names for readable output.
+
+    Strips a leading 'void ', removes template arguments (one level of nesting),
+    collapses whitespace, and truncates to ``_KERNEL_NAME_MAX_WIDTH``.
+    """
+    s = name[5:] if name.startswith("void ") else name
+    s = re.sub(r"<[^<>]*(?:<[^<>]*>[^<>]*)*>", "", s)
+    s = " ".join(s.split())
+    if len(s) > _KERNEL_NAME_MAX_WIDTH:
+        s = s[:_KERNEL_NAME_MAX_WIDTH - 3] + "..."
+    return s
+
+
+def profile_class(suite_name, cls, class_name, method_filter=None, warmup=3, inner=1):
+    """Per-kernel CUDA-time breakdown for each time_* method x parameter combo.
+
+    Unlike :func:`run_class` (timing distributions), this runs each benchmark
+    once under ``torch.profiler`` and reports the GPU kernels it launched, sorted
+    by total device time. Returns ``{bench_key: {combo_label: [kernel_row, ...]}}``.
+    """
+    import torch
+    from torch.profiler import profile, ProfilerActivity
+
+    methods = sorted(m for m in dir(cls) if m.startswith("time_"))
+    if method_filter:
+        methods = [m for m in methods if method_filter in m]
+    if not methods:
+        return {}
+
+    params = getattr(cls, "params", [[]])
+    param_names = list(getattr(cls, "param_names", []))
+    combos = list(itertools.product(*params))
+
+    def _label(combo):
+        return ", ".join(f"{nm}={v}" for nm, v in zip(param_names, combo))
+
+    out = {}
+    for method_name in methods:
+        bench_key = f"{suite_name}.{class_name}.{method_name}"
+        out[bench_key] = {}
+        for combo in combos:
+            instance = cls()
+            try:
+                instance.setup(*combo)
+            except Exception as e:
+                print(f"  SKIP  {_label(combo)}  setup failed: {e}")
+                continue
+            instance._inner = max(1, int(inner))
+            method = getattr(instance, method_name)
+            for _ in range(warmup):
+                method(*combo)
+            with profile(activities=[ProfilerActivity.CUDA]) as prof:
+                method(*combo)
+                torch.cuda.synchronize()
+
+            events = [e for e in prof.key_averages() if e.self_device_time_total > 0]
+            events.sort(key=lambda e: e.self_device_time_total, reverse=True)
+            total = sum(e.self_device_time_total for e in events)
+
+            w = _KERNEL_NAME_MAX_WIDTH
+            hdr = (f"  {'kernel':<{w}}  {'total us':>11}  {'calls':>6}"
+                   f"  {'avg us':>10}  {'%':>6}")
+            print(f"\n{bench_key}  ({_label(combo)})")
+            print(hdr)
+            print("  " + "-" * (len(hdr) - 2))
+            rows = []
+            for e in events:
+                avg = e.self_device_time_total / e.count if e.count else 0.0
+                pct = 100.0 * e.self_device_time_total / total if total else 0.0
+                print(f"  {_shorten_kernel_name(e.key):<{w}}  {e.self_device_time_total:>11.1f}"
+                      f"  {e.count:>6}  {avg:>10.2f}  {pct:>5.1f}%")
+                rows.append({
+                    "kernel": e.key, "total_us": round(e.self_device_time_total, 1),
+                    "calls": e.count, "avg_us": round(avg, 2), "pct": round(pct, 1),
+                })
+            print(f"  {'TOTAL':<{w}}  {total:>11.1f}")
+            out[bench_key][_label(combo)] = rows
+    return out
+
+
+def save_kernel_profile(all_profiles, label=None, results_dir=None):
+    """Write per-kernel profiles to ``<results_dir>/<hash>[-<label>]-kernelprofile.json``."""
+    commit = _get_commit_hash()
+    results_dir = results_dir or _results_dir()
+    os.makedirs(results_dir, exist_ok=True)
+    suffix = ""
+    if label:
+        suffix = "-" + re.sub(r"[^A-Za-z0-9._-]+", "_", label).strip("_")
+    path = os.path.join(results_dir, f"{commit[:8]}{suffix}-kernelprofile.json")
+    with open(path, "w") as f:
+        json.dump(
+            {"commit_hash": commit, "date": int(time.time() * 1000),
+             "kernel_profile": all_profiles}, f, indent=2,
+        )
+    print(f"\nKernel profile saved to {path}")
+
+
 def run_as_main(caller_file=None):
     """Run benchmarks from a bench file's ``__main__`` block or the command line.
 
@@ -402,6 +507,14 @@ def run_as_main(caller_file=None):
                         help="Disable the per-round random permutation and use a "
                              "fixed round-robin order, leaving a small residual "
                              "ordering bias.")
+    parser.add_argument("--kernel-profile", action="store_true",
+                        help="Profile per-kernel CUDA time via torch.profiler "
+                             "instead of measuring timing distributions. Runs each "
+                             "benchmark once and prints a per-kernel breakdown "
+                             "(saved to <hash>-kernelprofile.json unless --no-save).")
+    parser.add_argument("--profile-inner", type=int, default=1,
+                        help="Kernel invocations per profiled run in "
+                             "--kernel-profile mode (default: 1).")
     parser.add_argument("--no-save", action="store_true",
                         help="Skip saving results to JSON.")
     parser.add_argument("--label", default=None,
@@ -441,18 +554,26 @@ def run_as_main(caller_file=None):
     # --seed; shared across classes so the stream is deterministic end-to-end.
     rng = random.Random(args.seed)
     shuffle = not args.no_shuffle
-    if args.interleave_group > 1 and shuffle:
+    if not args.kernel_profile and args.interleave_group > 1 and shuffle:
         print(f"Interleave: group={args.interleave_group}, shuffled (seed={args.seed})")
 
     all_results = {}
+    all_profiles = {}
     for suite_name in suite_names:
         mod = importlib.import_module(suite_name)
         for name in sorted(dir(mod)):
             obj = getattr(mod, name)
             # Any Bench* class that defines a time_* method (excludes BenchBase,
             # and is robust to the bench-file/driver __main__ double-import).
-            if (isinstance(obj, type) and name.startswith("Bench")
+            if not (isinstance(obj, type) and name.startswith("Bench")
                     and any(m.startswith("time_") for m in dir(obj))):
+                continue
+            if args.kernel_profile:
+                all_profiles.update(profile_class(
+                    suite_name, obj, name, args.method_filter,
+                    warmup=args.warmup, inner=args.profile_inner,
+                ))
+            else:
                 all_results.update(run_class(
                     suite_name, obj, name, args.method_filter,
                     warmup=args.warmup, iters=args.iters,
@@ -461,7 +582,10 @@ def run_as_main(caller_file=None):
                     interleave_group=args.interleave_group, rng=rng, shuffle=shuffle,
                 ))
 
-    if all_results and not args.no_save:
+    if args.kernel_profile:
+        if all_profiles and not args.no_save:
+            save_kernel_profile(all_profiles, label=args.label)
+    elif all_results and not args.no_save:
         save_results(all_results, label=args.label)
 
 
