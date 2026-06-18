@@ -781,9 +781,6 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
       "(no CDNA archs built); only the staged gfx1250 V3 path is present.");
 #endif
   }
-  for(void* ws_ptr : mha_bwd_workspaces){
-    hipFreeAsync(ws_ptr, stream);
-  }
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
