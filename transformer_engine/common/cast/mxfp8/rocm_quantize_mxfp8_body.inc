@@ -4,6 +4,20 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 
+// Shared MXFP8 quantize body, included by three kernel wrappers in rocm_quantize_mxfp8.cuh
+// (single, grouped, multi-tensor). Using a .inc rather than __forceinline__ avoids VGPR spills.
+//
+// Required in scope before #include:
+//   Template params : SCALE_DIM_X, SCALE_DIM_Y, CHUNK_DIM_X, CHUNK_DIM_Y, THREADS_PER_CHUNK,
+//                     IS_DBIAS, IS_DACT, IS_ACT, IS_ALIGNED, IType, OType, ParamOP, OP
+//   Defines         : HAS_CVT_4xFLOAT8, DIVUP
+//   Local variables : block_id_Y, block_id_X, dbias_y_offset
+//   Kernel params   : input_ptr, act_input_ptr, output_rowwise, output_colwise, scales_rowwise, scales_colwise,
+//                     rows, cols, scale_stride_rowwise, scale_stride_colwise, dbias_workspace, amax_ptr
+
+  constexpr size_t ELEMS_PER_THREAD   = 16;
+  constexpr size_t MXFP8_BUFFER_DIM_Y = 32;
+
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
   constexpr bool USE_COLWISE_SCALING = SCALE_DIM_Y > 1;
 

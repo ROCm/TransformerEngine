@@ -23,9 +23,8 @@
 #ifdef __HIP_PLATFORM_AMD__
 #include "../fp8/rocm_cast.cuh"
 #endif
-// ROCm: group_quantize_mxfp8.cuh depends on quantize_mxfp8.cuh
-#include "../mxfp8/quantize_mxfp8.cuh"
 #include "../mxfp8/group_quantize_mxfp8.cuh"
+#include "../mxfp8/quantize_mxfp8.cuh"
 #ifdef __HIP_PLATFORM_AMD__
 #include "../mxfp4/quantize_mxfp4.cuh"
 #endif //#ifdef __HIP_PLATFORM_AMD__

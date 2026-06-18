@@ -25,6 +25,11 @@
 #include "../core/common.cuh"
 #include "swizzle.cuh"
 
+#ifdef __HIP_PLATFORM_AMD__
+// ROCm group_quantize dispatch uses quantize_kernel namespace
+#include "quantize_mxfp8.cuh"
+#endif
+
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
