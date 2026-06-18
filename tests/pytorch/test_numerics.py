@@ -1704,9 +1704,6 @@ def test_layernorm_linear_accuracy(
 def test_layernorm_linear_accuracy_delay_wgrad_compute(
     dtype, bs, model, normalization, zero_centered_gamma, bias, fuse_wgrad_accumulation
 ):
-    if IS_HIP_EXTENSION:
-        if dtype not in (torch.float32,) and fuse_wgrad_accumulation and bias:
-            pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
     if NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("Delayed wgrad compute is not supported in debug mode.")
 
@@ -1927,10 +1924,6 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
         pytest.skip("Delayed wgrad compute is not supported in debug mode.")
 
     config = model_configs[model]
-
-    if IS_HIP_EXTENSION:
-        if dtype not in (torch.float32,) and fuse_wgrad_accumulation and bias:
-            pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
 
     ln_mlp = LayerNormMLP(
         hidden_size=config.hidden_size,
