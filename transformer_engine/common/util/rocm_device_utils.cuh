@@ -136,16 +136,18 @@ __device__ __forceinline__ int rocm_upper_bound(const T* arr, int n, T val) {
 }
 
 // Binary reduction ops for rocm_subwarp_allreduce
-struct rocm_max_op {
-    __device__ __forceinline__ float operator()(float a, float b) const { return fmaxf(a, b); }
-};
+struct rocm_op {
+    struct max {
+        __device__ __forceinline__ float operator()(float a, float b) const { return fmaxf(a, b); }
+    };
 
-struct rocm_min_op {
-    __device__ __forceinline__ float operator()(float a, float b) const { return fminf(a, b); }
-};
+    struct min {
+        __device__ __forceinline__ float operator()(float a, float b) const { return fminf(a, b); }
+    };
 
-struct rocm_sum_op {
-    __device__ __forceinline__ float operator()(float a, float b) const { return a + b; }
+    struct sum {
+        __device__ __forceinline__ float operator()(float a, float b) const { return a + b; }
+    };
 };
 
 // Butterfly all-reduce within a subwarp. All lanes get the result.

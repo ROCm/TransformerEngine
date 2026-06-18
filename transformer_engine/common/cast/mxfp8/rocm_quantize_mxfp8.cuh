@@ -161,7 +161,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       __builtin_assume(thread_amax >= 0);
       block_amax = fmaxf(block_amax, thread_amax);
 
-      const float subwarp_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(thread_amax, rocm_max_op{});
+      const float subwarp_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(thread_amax, rocm_op::max{});
       const e8m0_t biased_exponent =
           ptx::float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
 
@@ -307,7 +307,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           __builtin_assume(thread_amax >= 0);
           block_amax = fmaxf(block_amax, thread_amax);
 
-          const float subwarp_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(thread_amax, rocm_max_op{});
+          const float subwarp_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(thread_amax, rocm_op::max{});
           const e8m0_t biased_exponent =
               ptx::float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
 
