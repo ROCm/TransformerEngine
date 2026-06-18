@@ -54,7 +54,6 @@ launch_job() {
 wait_for_jobs() {
     local -A remaining
     local -A stall_mtime
-    local -A stall_walltime
     local -A stall_lineno
     for name in "${!_JOB_PIDS[@]}"; do
         remaining["$name"]="${_JOB_PIDS[$name]}"
@@ -86,21 +85,20 @@ wait_for_jobs() {
                     age=$(( now - mtime ))
                     if [ -n "${stall_mtime[$pid]+set}" ]; then
                         if [ "$mtime" -gt "${stall_mtime[$pid]}" ]; then
-                            local frozen_secs=$(( now - stall_walltime[$pid] ))
+                            local frozen_secs=$(( mtime - stall_mtime[$pid] ))
                             local freeze_line="${stall_lineno[$pid]}"
                             echo "[$(date '+%Y-%m-%d %H:%M:%S')] INFO: '${name}' (pid ${pid}) log '${logfile}' resumed updating after ${frozen_secs}s"
                             echo "--- first ${STALL_RESUME_CONTEXT_LINES} lines of ${logfile} starting ${freeze_line} ---"                            
                             tail -n "+${freeze_line}" "$logfile" | head -n ${STALL_RESUME_CONTEXT_LINES}
                             echo "---"
                             unset "stall_mtime[$pid]"
-                            unset "stall_walltime[$pid]"
                             unset "stall_lineno[$pid]"
                         fi
                         # else: still stalled but already warned — do nothing
                     elif [ "$age" -ge "$STALL_WARN_SECS" ]; then
-                        local freeze_line=$(wc -l < "$logfile")
+                        # don't use wc here because it doces not count the last line if it doesn't end with a newline
+                        local freeze_line=$(grep -c '' < "$logfile")
                         stall_mtime[$pid]=$mtime
-                        stall_walltime[$pid]=$now
                         stall_lineno[$pid]=$freeze_line
                         echo "[$(date '+%Y-%m-%d %H:%M:%S')] WARNING: '${name}' (pid ${pid}) log '${logfile}' has not been updated for ${age}s"
                         echo "--- last ${STALL_TAIL_LINES} lines of ${logfile} up to ${freeze_line} ---"
