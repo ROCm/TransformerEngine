@@ -545,7 +545,6 @@ static void launch_tn_gemm(
     }
 }
 
-// FP8 format codes: 0 = e4m3 (cbsz/blgp=0), 1 = e5m2 (cbsz/blgp=1)
 template<GemmEpilogue EPILOGUE>
 static void dispatch_fp8_types(
     int a_fp8, int b_fp8,
@@ -554,6 +553,7 @@ static void dispatch_fp8_types(
     const void *bias, int bias_dtype, void *aux_gelu,
     int M, int N, int K, OutDtype out_dtype, OutDtype aux_dtype, hipStream_t stream) {
 
+    // CBSZ/BLGP: 0 = e4m3, 1 = e5m2 (MFMA hardware format codes)
     if (a_fp8 == 0 && b_fp8 == 0) {
         launch_tn_gemm<EPILOGUE, 0, 0>(
             A, B, C, packed_sa, packed_sb, bias, bias_dtype,
@@ -776,6 +776,8 @@ static bool mxfp8_gemm_nt(
     return true;
 }
 
+// Convert KittensDType to MFMA cbsz/blgp format code.
+// 0 = e4m3, 1 = e5m2 — hardware-defined by v_mfma_scale_f32_16x16x128_f8f6f4.
 static int fp8_code(int dt) {
     switch (dt) {
     case KITTENS_FP8E4M3: return 0;

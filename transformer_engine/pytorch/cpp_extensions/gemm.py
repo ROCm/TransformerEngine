@@ -86,6 +86,7 @@ def _get_or_grow_workspace(device: int, needed: int) -> torch.Tensor:
     return ws
 
 
+@functools.lru_cache(maxsize=None)
 def _use_hipkittens() -> bool:
     """Check if HipKittens MXFP8 backend is active."""
     if not IS_HIP_EXTENSION:

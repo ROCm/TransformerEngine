@@ -97,6 +97,7 @@ except RuntimeError as e:
         raise
 
 
+@cache
 def _use_hipkittens() -> bool:
     """Check if HipKittens MXFP8 backend is active."""
     if not is_hip_extension():
