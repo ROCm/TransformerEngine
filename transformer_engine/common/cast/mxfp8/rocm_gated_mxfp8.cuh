@@ -176,7 +176,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // --- Act rowwise quantization ---
       {
         __builtin_assume(act_amax >= 0);
-        const float scale_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(act_amax);
+        const float scale_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(act_amax, rocm_op::max{});
         const e8m0_t biased_exp =
             ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
         const float scale_inv = ptx::exp2f_rcp(biased_exp);
@@ -211,7 +211,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // --- Gate rowwise quantization (BWD only) ---
       if constexpr (IS_DGATED) {
         __builtin_assume(gate_amax >= 0);
-        const float scale_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(gate_amax);
+        const float scale_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(gate_amax, rocm_op::max{});
         const e8m0_t biased_exp =
             ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
         const float scale_inv = ptx::exp2f_rcp(biased_exp);
@@ -335,7 +335,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // --- Act rowwise quantization ---
       {
         __builtin_assume(act_amax >= 0);
-        const float scale_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(act_amax);
+        const float scale_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(act_amax, rocm_op::max{});
         const e8m0_t biased_exp =
             ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
         const float scale_inv = ptx::exp2f_rcp(biased_exp);
@@ -370,7 +370,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // --- Gate rowwise quantization (BWD only) ---
       if constexpr (IS_DGATED) {
         __builtin_assume(gate_amax >= 0);
-        const float scale_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(gate_amax);
+        const float scale_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(gate_amax, rocm_op::max{});
         const e8m0_t biased_exp =
             ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
         const float scale_inv = ptx::exp2f_rcp(biased_exp);

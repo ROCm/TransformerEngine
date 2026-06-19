@@ -140,7 +140,7 @@
       __builtin_assume(thread_amax >= 0);
       block_amax = fmaxf(block_amax, thread_amax);
 
-      const float subwarp_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(thread_amax);
+      const float subwarp_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(thread_amax, rocm_op::max{});
       const e8m0_t biased_exponent =
           ptx::float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
 
@@ -287,7 +287,7 @@
           __builtin_assume(thread_amax >= 0);
           block_amax = fmaxf(block_amax, thread_amax);
 
-          const float subwarp_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(thread_amax);
+          const float subwarp_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(thread_amax, rocm_op::max{});
           const e8m0_t biased_exponent =
               ptx::float_to_e8m0(subwarp_amax * Quantized_Limits<OType>::max_norm_rcp);
 
