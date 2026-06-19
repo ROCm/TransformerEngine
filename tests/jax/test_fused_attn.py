@@ -915,7 +915,7 @@ class FusedAttnRunner:
             ],
         )
 
-        with self.mesh, autocast(mesh_resource=self.mesh_resource):
+        with jax.set_mesh(self.mesh), autocast(mesh_resource=self.mesh_resource):
             primitive_out = customcall_fused_dpa_jit(*customcall_args)
             primitive_out = self.cp_inverse_reorder_fn(primitive_out)
 
@@ -932,7 +932,7 @@ class FusedAttnRunner:
         assert_allclose(primitive_valid, reference_valid, dtype=self.dtype)
 
         if self.coll_count_ref is not None:
-            with self.mesh, autocast(mesh_resource=self.mesh_resource):
+            with jax.set_mesh(self.mesh), autocast(mesh_resource=self.mesh_resource):
                 target_hlo = (
                     customcall_fused_dpa_jit.lower(*customcall_args, **kwargs).compile().as_text()
                 )
@@ -1046,7 +1046,7 @@ class FusedAttnRunner:
             )
         )
 
-        with self.mesh, autocast(mesh_resource=self.mesh_resource):
+        with jax.set_mesh(self.mesh), autocast(mesh_resource=self.mesh_resource):
             primitive_out, primitive_dgrad = jitted_primitive(*customcall_args)
 
         reference_out, reference_dgrad = jitted_reference(*args)
@@ -1134,7 +1134,7 @@ class FusedAttnRunner:
             )
 
         if self.coll_count_ref is not None:
-            with self.mesh, autocast(mesh_resource=self.mesh_resource):
+            with jax.set_mesh(self.mesh), autocast(mesh_resource=self.mesh_resource):
                 target_hlo = jitted_primitive.lower(*customcall_args).compile().as_text()
             assert_equal_collectives(target_hlo, self.coll_count_ref)
 
