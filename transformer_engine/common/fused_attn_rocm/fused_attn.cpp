@@ -282,12 +282,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic) {
   using namespace transformer_engine;
 
-  //gfx1250 is disabled in ck_fused_attn/CMakeLists.txt and is not supported by curretnt aotriton
-  const int gpu_arch = cuda::sm_arch(cuda::current_device());
-  if (gpu_arch == 125) {
-    return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-  }
-  
   // TODO: Add return_max_logit support
   if (return_max_logit) return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
 
@@ -316,7 +310,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         head_dim_qk,
         head_dim_v,
         window_size_left,
-        window_size_right)){
+        window_size_right,
+        is_training, cuda_graph)){
     return NVTE_Fused_Attn_Backend::NVTE_CK;
   }else if(nvte_fused_attn_aotriton && fused_attn_rocm::is_aotriton_backend_supported(
               q_dtype,

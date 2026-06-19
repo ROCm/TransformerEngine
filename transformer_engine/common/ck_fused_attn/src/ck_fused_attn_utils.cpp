@@ -15,8 +15,14 @@
 #include <unistd.h>
 #include "ck_fused_attn_utils.hpp"
 #include "ck_fused_attn/ck_fused_attn.hpp"
+#if ENABLE_CK
 #include "mask.hpp"
 #include "bias.hpp"
+#else
+// CK-free (gfx1250) build: mask.hpp/bias.hpp are CK example headers that do not
+// compile for this arch. mask_enum / bias_enum come from the ck_tile shim
+// (pulled via ck_fused_attn_utils.hpp -> aiter_hip_common.h) instead.
+#endif
 
 
 namespace ck_fused_attn{

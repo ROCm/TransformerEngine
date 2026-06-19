@@ -26,10 +26,11 @@ bool is_ck_backend_supported(
   float dropout,
   size_t num_attn_heads, size_t num_gqa_groups,
   size_t max_seqlen_q, size_t max_seqlen_kv,
-  size_t head_dim_qk, 
-  size_t head_dim_v, 
-  int64_t window_size_left, 
-  int64_t window_size_right);
+  size_t head_dim_qk,
+  size_t head_dim_v,
+  int64_t window_size_left,
+  int64_t window_size_right,
+  bool is_training, bool cuda_graph);
 }  // namespace fused_attn_rocm
 
 void fused_attn_ck_fwd(

@@ -6,13 +6,42 @@
 
 #include <iostream>
 #include <cstdlib>
+#include <memory>
 #include <stdexcept>
 #include <type_traits>
+#include <vector>
+#include <hip/hip_runtime.h>
 #include "ck_fused_attn/ck_fused_attn.hpp"
+#include "ck_tile/host/pinned_host_releaser.hpp"
 #include "qola_mha_bwd.h"
 #include "ck_fused_attn_utils.hpp"
 
+// Staged gfx1250 backward dispatch. When this build includes the CK-free V3
+// backward library (te_v3_libmha_bwd.so, built for gfx1250), declare its
+// namespaced entry point so ck_attn_bwd can route to it on gfx1250 devices at
+// runtime. The CK-full path (QOLA_NS(mha_bwd) == qola::te::mha_bwd) is used on
+// all other archs.
+#if defined(NVTE_AITER_V3_BWD_GFX1250)
+namespace qola { namespace te_v3 {
+float mha_bwd(const aiter::mha_bwd_args& args, const ck_tile::stream_config& stream_config);
+}}  // namespace qola::te_v3
+#endif
+
 namespace ck_fused_attn{
+
+#if defined(NVTE_AITER_V3_BWD_GFX1250)
+namespace {
+// True when the active device is gfx1250 (gcnArchName may carry feature
+// suffixes, e.g. "gfx1250:sramecc+", so match on prefix).
+bool is_gfx1250_device(){
+  int dev = 0;
+  if(hipGetDevice(&dev) != hipSuccess){ return false; }
+  hipDeviceProp_t prop{};
+  if(hipGetDeviceProperties(&prop, dev) != hipSuccess){ return false; }
+  return std::string(prop.gcnArchName).rfind("gfx1250", 0) == 0;
+}
+}  // namespace
+#endif
 
 // TODO: unify with binary search in TE/common/fused_attn(rocm)/util
 // no device std::upper_bound
@@ -331,9 +360,8 @@ __global__ void dbias_reduce_b1ss(
 }
 
 // print the fmha_traits and args passed into ck apis
-void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args){
+void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args, std::ostream* log_file){
 
-  std::ostream* log_file = get_ck_log_stream();
   (*log_file) << "\n" << func_name << "\n";
 
   // fmha_traits debug
@@ -365,7 +393,6 @@ void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args)
   log_value(log_file, "dk_ptr", fmha_args.dk_ptr);
   log_value(log_file, "dv_ptr", fmha_args.dv_ptr);
   log_value(log_file, "dbias_ptr", fmha_args.dbias_ptr);
-  log_value(log_file, "dq_acc_ptr", fmha_args.dq_acc_ptr);
 
   log_value(log_file, "seqstart_q_ptr", fmha_args.seqstart_q_ptr);
   log_value(log_file, "seqstart_k_ptr", fmha_args.seqstart_k_ptr);
@@ -390,7 +417,6 @@ void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args)
   log_value(log_file, "stride_o", fmha_args.stride_o);
   log_value(log_file, "stride_randval", fmha_args.stride_randval);
   log_value(log_file, "stride_do", fmha_args.stride_do);
-  log_value(log_file, "stride_dq_acc", fmha_args.stride_dq_acc);
   log_value(log_file, "stride_dq", fmha_args.stride_dq);
   log_value(log_file, "stride_dk", fmha_args.stride_dk);
   log_value(log_file, "stride_dv", fmha_args.stride_dv);
@@ -403,7 +429,6 @@ void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args)
   log_value(log_file, "nhead_stride_randval", fmha_args.nhead_stride_randval);
   log_value(log_file, "nhead_stride_do", fmha_args.nhead_stride_do);
   log_value(log_file, "nhead_stride_lsed", fmha_args.nhead_stride_lsed);
-  log_value(log_file, "nhead_stride_dq_acc", fmha_args.nhead_stride_dq_acc);
   log_value(log_file, "nhead_stride_dq", fmha_args.nhead_stride_dq);
   log_value(log_file, "nhead_stride_dk", fmha_args.nhead_stride_dk);
   log_value(log_file, "nhead_stride_dv", fmha_args.nhead_stride_dv);
@@ -416,7 +441,6 @@ void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args)
   log_value(log_file, "batch_stride_randval", fmha_args.batch_stride_randval);
   log_value(log_file, "batch_stride_do", fmha_args.batch_stride_do);
   log_value(log_file, "batch_stride_lsed", fmha_args.batch_stride_lsed);
-  log_value(log_file, "batch_stride_dq_acc", fmha_args.batch_stride_dq_acc);
   log_value(log_file, "batch_stride_dq", fmha_args.batch_stride_dq);
   log_value(log_file, "batch_stride_dk", fmha_args.batch_stride_dk);
   log_value(log_file, "batch_stride_dv", fmha_args.batch_stride_dv);
@@ -447,14 +471,10 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   bool has_dbias = args.dbias_ptr != nullptr;
   bool is_mqa_gqa = (args.h > args.hg);
 
-  bool ck_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      ck_log_config = true;
-  }
+  auto* log_file = get_ck_log_stream();
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, log_file != nullptr};
 
   bias_enum bias_type = bias_enum::no_bias;
   BiasShape bias_shape = BiasShape::k11SS;
@@ -463,8 +483,11 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   }
 
   aiter::mha_bwd_args fmha_args{};
+  fmha_args.sink_ptr = nullptr;
+  fmha_args.d_sink_ptr = nullptr;
   fmha_args.mask_type = static_cast<int>(static_cast<mask_enum>(args.attn_mask_type));
-  fmha_args.use_asm_v3 = args.uses_bwd_v3;
+  // Mirrors AITER's small-seqlen guard at aiter/ops/mha.py:1689.
+  fmha_args.use_asm_v3 = (args.s_q < 16) ? false : args.uses_bwd_v3;
   fmha_args.v3_atomic_fp32 = args.is_v3_atomic_fp32;
   fmha_args.v3_bf16_cvt = args.how_v3_bf16_cvt;
   fmha_args.v3_api_check = false;
@@ -495,7 +518,6 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.dbias_ptr = ((!args.is_group_mode()) && has_dbias)
                           ? (bias_shape==BiasShape::kBHSS ? args.dbias_ptr : args.dbias_expanded_ptr)
                           : nullptr;
-  fmha_args.dq_acc_ptr = args.dq_acc_ptr;
 
   if (args.is_group_mode()) {
     fmha_args.seqstart_q_ptr = args.cu_seqlen_q_padded_ptr==nullptr? args.cu_seqlen_q_ptr : args.cu_seqlen_q_padded_ptr;
@@ -511,8 +533,13 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.seqlen_q_ptr = nullptr;
   fmha_args.seqlen_k_ptr = nullptr;
 
-  fmha_args.seqlen_q = args.s_q;
-  fmha_args.seqlen_k = args.s_kv;
+  // Group mode contract (matches aiter asm_mha_varlen_bwd.cu): seqlen_q/k
+  // carry the total token counts, max_seqlen_q/k the per-sequence maximum.
+  // aiter sizes dq_acc and related workspaces from seqlen_q; passing the
+  // per-sequence length in group mode under-sizes them and the kernel writes
+  // past the end.
+  fmha_args.seqlen_q = args.is_group_mode() ? args.max_tokens_q : args.s_q;
+  fmha_args.seqlen_k = args.is_group_mode() ? args.max_tokens_kv : args.s_kv;
   fmha_args.batch = args.b;
   fmha_args.max_seqlen_q = args.s_q;
   fmha_args.max_seqlen_k = args.s_kv;
@@ -529,8 +556,6 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.stride_o = args.stride_s_o;
   fmha_args.stride_randval = args.s_kv;
   fmha_args.stride_do = args.stride_s_do;
-  //dq_acc of shape (nsplits, B, H, S, D)
-  fmha_args.stride_dq_acc = args.d_qk;
   fmha_args.stride_dq = args.stride_s_dq;
   fmha_args.stride_dk = is_mqa_gqa? args.stride_s_dk_expanded : args.stride_s_dk;
   fmha_args.stride_dv = is_mqa_gqa? args.stride_s_dv_expanded : args.stride_s_dv;
@@ -548,7 +573,6 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.nhead_stride_randval = args.is_group_mode() ? 0 : args.s_q * args.s_kv;
   fmha_args.nhead_stride_do = args.stride_h_do;
   fmha_args.nhead_stride_lsed = args.is_group_mode() ? args.max_tokens_q : args.s_q;
-  fmha_args.nhead_stride_dq_acc = static_cast<int64_t>((args.is_group_mode() ? args.max_tokens_q : args.s_q) * args.d_qk);
   fmha_args.nhead_stride_dq = args.stride_h_dq;
   fmha_args.nhead_stride_dk = is_mqa_gqa? args.stride_h_dk_expanded : args.stride_h_dk;
   fmha_args.nhead_stride_dv = is_mqa_gqa? args.stride_h_dv_expanded : args.stride_h_dv;
@@ -564,13 +588,11 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.batch_stride_randval = args.is_group_mode() ? 0 : args.h * args.s_q * args.s_kv;
   fmha_args.batch_stride_do = args.is_group_mode() ? 0 : args.stride_b_do;
   fmha_args.batch_stride_lsed = args.is_group_mode() ? 0 : args.h * args.s_q;
-  fmha_args.batch_stride_dq_acc = args.is_group_mode() ? 0 : static_cast<int64_t>(args.h * args.s_q * args.d_qk);
   fmha_args.batch_stride_dq = args.is_group_mode() ? 0 : args.stride_b_dq;
   fmha_args.batch_stride_dk = args.is_group_mode() ? 0 : (is_mqa_gqa? args.stride_b_dk_expanded : args.stride_b_dk);
   fmha_args.batch_stride_dv = args.is_group_mode() ? 0 : (is_mqa_gqa? args.stride_b_dv_expanded : args.stride_b_dv);
   // for dbias, use h since h can be different from bias_h
   fmha_args.batch_stride_dbias = args.is_group_mode() ? 0 : args.h * args.s_q * args.s_kv;
-  fmha_args.split_stride_dq_acc = static_cast<int>(args.is_group_mode() ? (args.max_tokens_q * args.h * args.d_qk) : (args.b * args.h * args.s_q * args.d_qk));
 
   fmha_args.window_size_left = args.window_size_left;
   fmha_args.window_size_right = args.window_size_right;
@@ -582,19 +604,108 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   // lse_workspace_ptr used as buffer
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")) {
     if(args.is_group_mode() && std::string(env_p) == "1"){
-      if(ck_log_config){
-        std::cout << "attn_bwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
+      if(log_file){
+        *log_file << "attn_bwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
       }
       fmha_args.max_seqlen_q = get_runtime_max_seqlen(args.b, args.cu_seqlen_q_ptr, nullptr, args.lse_workspace_ptr, stream);
       fmha_args.max_seqlen_k = get_runtime_max_seqlen(args.b, args.cu_seqlen_kv_ptr, nullptr, args.lse_workspace_ptr, stream);
     }
   }
 
+  // Device-side workspace allocations made inside mha_bwd (launcher metadata
+  // and the dq_acc accumulator). aiter only contracts that the pointer remain
+  // valid for the duration of the kernels it enqueues; hipFreeAsync on the
+  // same stream defers the free until that work completes.
+  std::vector<void*> mha_bwd_workspaces;
+  fmha_args.workspace_alloc = [&mha_bwd_workspaces, stream](size_t bytes, bool zero_init) -> void* {
+    if(bytes == 0){
+      return nullptr;
+    }
+    void* ptr = nullptr;
+    if(hipMallocAsync(&ptr, bytes, stream) != hipSuccess){
+      throw std::runtime_error("ck_fused_attn bwd: hipMallocAsync failed for AITER workspace.");
+    }
+    if(zero_init){
+      if(hipMemsetAsync(ptr, 0, bytes, stream) != hipSuccess){
+        hipFreeAsync(ptr, stream);
+        throw std::runtime_error("ck_fused_attn bwd: hipMemsetAsync failed for AITER workspace.");
+      }
+    }
+    mha_bwd_workspaces.push_back(ptr);
+    return ptr;
+  };
+  // Group mode requires a pinned host buffer for the async D2H seqstart
+  // pipeline; aiter keeps the shared_ptr alive past kernel completion via a
+  // stream-tail hipLaunchHostFunc keepalive. The deleter fires from that HIP
+  // callback thread, which holds runtime locks — calling any HIP API from it
+  // (including hipHostFree) deadlocks against concurrent main-thread HIP
+  // calls. Defer the free to ck_tile::pinned_host_releaser's worker thread.
+  fmha_args.pinned_host_alloc = [](size_t bytes) -> std::shared_ptr<void> {
+    if(bytes == 0){
+      return {};
+    }
+    void* ptr = nullptr;
+    if(hipHostMalloc(&ptr, bytes, hipHostMallocDefault) != hipSuccess){
+      throw std::runtime_error("ck_fused_attn bwd: hipHostMalloc failed for AITER pinned host buffer.");
+    }
+    return std::shared_ptr<void>(ptr, [](void* p){
+      ck_tile::pinned_host_releaser::instance().enqueue(p);
+    });
+  };
+
   // print ck traits and args when needed
-  if(ck_log_config){
-    log_bwd_config(__FUNCTION__, fmha_args);
+  if(log_file){
+    log_bwd_config(__FUNCTION__, fmha_args, log_file);
   }
-  float average_runtime = QOLA_NS(mha_bwd)(fmha_args, stream_config);
+
+  // Graph-capture safety net. The CK v2 launcher (fmha_bwd / prepare_workspace_async)
+  // schedules self-deleting hipLaunchHostFunc nodes that re-run and double-free on
+  // every graph replay, so it must never be captured. Only the v3 asm path is
+  // graph-replay-safe. Backend selection already steers graph-captured training off
+  // these configs, but context-parallel and direct callers bypass that path, so we
+  // refuse a v2-bound dispatch under active capture rather than corrupt memory on
+  // replay. Conditions mirror AITER's fmha_v3_bwd gate (csrc/cpp_itfs/mha_bwd.cu).
+  hipStreamCaptureStatus capture_status = hipStreamCaptureStatusNone;
+  if(hipStreamIsCapturing(stream, &capture_status) == hipSuccess &&
+     capture_status != hipStreamCaptureStatusNone){
+    int dev = 0;
+    hipDeviceProp_t prop{};
+    bool is_v3_arch = false;
+    if(hipGetDevice(&dev) == hipSuccess && hipGetDeviceProperties(&prop, dev) == hipSuccess){
+      std::string arch_name(prop.gcnArchName);
+      is_v3_arch = arch_name.find("gfx942") != std::string::npos ||
+                   arch_name.find("gfx950") != std::string::npos;
+    }
+    bool resolves_to_v3 = fmha_args.use_asm_v3 && !fmha_args.is_deterministic &&
+                          !fmha_args.has_dbias && fmha_args.bias_type == 0 &&
+                          !fmha_args.has_dropout && is_v3_arch;
+    if(!resolves_to_v3){
+      throw std::runtime_error(
+        "ck_fused_attn bwd: this configuration dispatches to the CK v2 launcher, which "
+        "is not HIP-graph-replay-safe (self-deleting host nodes in prepare_workspace_async). "
+        "Disable determinism/dropout/bias and run on gfx942/gfx950 with NVTE_CK_USES_BWD_V3=1 "
+        "to use the v3 asm path, or set NVTE_FUSED_ATTN_CK=0 under CUDA graphs.");
+    }
+  }
+
+  float average_runtime;
+#if defined(NVTE_AITER_V3_BWD_GFX1250)
+  if(is_gfx1250_device()){
+    average_runtime = qola::te_v3::mha_bwd(fmha_args, stream_config);
+  } else
+#endif
+  {
+#if defined(NVTE_AITER_CK_FULL)
+    average_runtime = QOLA_NS(mha_bwd)(fmha_args, stream_config);
+#else
+    throw std::runtime_error(
+      "ck_fused_attn bwd: this build has no CK-full AITER backward library "
+      "(no CDNA archs built); only the staged gfx1250 V3 path is present.");
+#endif
+  }
+  for(void* ws_ptr : mha_bwd_workspaces){
+    hipFreeAsync(ws_ptr, stream);
+  }
   if(average_runtime < 0){
     //TODO: better error out system
     throw std::runtime_error("fused attn configs not supported in ck_fused_attn bwd pass.");
@@ -610,7 +721,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
       dim3 grid(args.max_tokens_kv, args.hg);
       if(args.d_qk == args.d_v){
         dim3 block(args.d_qk);
-        if (auto* log_file = get_ck_log_stream()) {
+        if (log_file) {
           *log_file << "\n" << "run dk_dv_reduce_thd: " << "\n";
           *log_file << "cu_seqlen_kv_ptr: " << args.cu_seqlen_kv_ptr << "\n";
           *log_file << "cu_seqlen_kv_padded_ptr: " << args.cu_seqlen_kv_padded_ptr << "\n";
@@ -637,7 +748,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
             args.stride_h_dk, args.stride_s_dk););
       } else {
         dim3 block_dk(args.d_qk);
-        if (auto* log_file = get_ck_log_stream()) {
+        if (log_file) {
           *log_file << "\n" << "run dk_or_dv_reduce_thd on dk: " << "\n";
           *log_file << "cu_seqlen_kv_ptr: " << args.cu_seqlen_kv_ptr << "\n";
           *log_file << "cu_seqlen_kv_padded_ptr: " << args.cu_seqlen_kv_padded_ptr << "\n";
@@ -660,7 +771,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
             args.stride_h_dk, args.stride_s_dk););
 
         dim3 block_dv(args.d_v);
-        if (auto* log_file = get_ck_log_stream()) {
+        if (log_file) {
           *log_file << "\n" << "run dk_or_dv_reduce_thd on dv: " << "\n";
           *log_file << "cu_seqlen_kv_ptr: " << args.cu_seqlen_kv_ptr << "\n";
           *log_file << "cu_seqlen_kv_padded_ptr: " << args.cu_seqlen_kv_padded_ptr << "\n";
@@ -686,7 +797,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
       dim3 grid(args.b, args.s_kv, args.hg);
       if(args.d_qk == args.d_v){
         dim3 block(args.d_qk);
-        if (auto* log_file = get_ck_log_stream()) {
+        if (log_file) {
           *log_file << "\n" << "run dk_dv_reduce: " << "\n";
           *log_file << "dk_expanded_ptr: " << args.dk_expanded_ptr << "\n";
           *log_file << "dv_expanded_ptr: " << args.dv_expanded_ptr << "\n";
@@ -711,7 +822,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
             args.stride_b_dk, args.stride_h_dk, args.stride_s_dk););
       } else {
         dim3 block_dk(args.d_qk);
-        if (auto* log_file = get_ck_log_stream()) {
+        if (log_file) {
           *log_file << "\n" << "run dk_or_dv_reduce on dk: " << "\n";
           *log_file << "dk_expanded_ptr: " << args.dk_expanded_ptr << "\n";
           *log_file << "stride_b_dk_expanded: " << args.stride_b_dk_expanded << "\n";
@@ -732,7 +843,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
             args.stride_b_dk, args.stride_h_dk, args.stride_s_dk););
 
         dim3 block_dv(args.d_v);
-        if (auto* log_file = get_ck_log_stream()) {
+        if (log_file) {
           *log_file << "\n" << "run dk_or_dv_reduce on dv: " << "\n";
           *log_file << "dv_expanded_ptr: " << args.dv_expanded_ptr << "\n";
           *log_file << "stride_b_dv_expanded: " << args.stride_b_dv_expanded << "\n";
@@ -762,7 +873,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
     dim3 block(THREADS_PER_BLOCK);
     dim3 grid(ceil(1.0 * args.s_q * args.s_kv / THREADS_PER_BLOCK));
     if(bias_shape==BiasShape::k11SS){
-      if (auto* log_file = get_ck_log_stream()) {
+      if (log_file) {
         *log_file << "\n" << "run dbias_reduce_11SS: " << "\n";
         *log_file << "dbias_ptr: " << args.dbias_ptr << "\n";
         *log_file << "dbias_expanded_ptr: " << args.dbias_expanded_ptr << "\n";
@@ -774,7 +885,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
           static_cast<CK_TILE_TYPE*>(args.dbias_expanded_ptr),
           static_cast<CK_TILE_TYPE*>(args.dbias_ptr)););
     }else if(bias_shape==BiasShape::k1HSS){
-      if (auto* log_file = get_ck_log_stream()) {
+      if (log_file) {
         *log_file << "\n" << "run dbias_reduce_1HSS: " << "\n";
         *log_file << "dbias_ptr: " << args.dbias_ptr << "\n";
         *log_file << "dbias_expanded_ptr: " << args.dbias_expanded_ptr << "\n";
@@ -786,7 +897,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
           static_cast<CK_TILE_TYPE*>(args.dbias_expanded_ptr),
           static_cast<CK_TILE_TYPE*>(args.dbias_ptr)););
     }else if(bias_shape==BiasShape::kB1SS){
-      if (auto* log_file = get_ck_log_stream()) {
+      if (log_file) {
         *log_file << "\n" << "run dbias_reduce_B1SS: " << "\n";
         *log_file << "dbias_ptr: " << args.dbias_ptr << "\n";
         *log_file << "dbias_expanded_ptr: " << args.dbias_expanded_ptr << "\n";

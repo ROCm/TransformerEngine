@@ -1,0 +1,60 @@
+# gfx1250 (RDNA4) AITER V3 ASM kernels: forward (fmha_fwd_with_sink_asm,
+# D64/D128) and backward. CK FMHA template headers do not compile for gfx1250,
+# so this manifest builds CK-free (ENABLE_CK=0) asm-v3-only libraries under a
+# distinct namespace (te_v3) so they can coexist with the CK-full te_* libraries
+# in a multi-arch build. TE selects between qola::te::mha_{fwd,bwd} and
+# qola::te_v3::mha_{fwd,bwd} at runtime by device arch.
+# Issue #16948
+#
+# Keep aiter_commit in lockstep with qola_manifest.toml — both consume the same
+# checked-out AITER source tree.
+[qola]
+aiter_commit = "0403bcdfd0b507e0459012b82e00785a818f774a"    # pinned AITER submodule commit
+namespace = "te_v3"
+rocm_versions = ["7.2"]
+
+[build]
+architectures = ["gfx1250"]
+
+[[modules]]
+name = "libmha_fwd"
+mode = "cpp_itfs"
+drop_directions = ["fwd", "fwd_splitkv", "batch_prefill"]
+flags_extra_cc = ["'-DFAV3_ON=1'", "'-DENABLE_CK=0'", "'-DFAV1250_ON=1'"]
+hsa_subdirs = ["fmha_fwd_bf16"]
+# Override the source list from optCompilerConfig.json to add the two
+# gfx1250 ASM sink TUs.  mha_fwd.cu (FAV1250_ON=1) declares
+# fmha_fwd_with_sink_asm() via extern "C" and calls it;
+srcs = [
+    "f'{AITER_CSRC_DIR}/cpp_itfs/mha_fwd.cu'",
+    "f'{AITER_CSRC_DIR}/cpp_itfs/mha_fwd_split.cu'",
+    "f'{AITER_CSRC_DIR}/cpp_itfs/mha_fwd_batch_prefill.cu'",
+    "f'{AITER_CSRC_DIR}/py_itfs_cu/asm_fmha_fwd_with_sink.cu'",
+]
+# Override blob_gen_cmd to drop the CK generate.py -d {fwd,fwd_splitkv,batch_prefill}
+# commands (not needed / would fail for gfx1250) and add the codegen run that
+# produce the config headers consumed by the sink TUs:
+#   asm_fmha_fwd_bf16_configs.hpp        <- -m fmha_fwd_bf16
+# The registry's add_blob_gen_cmd (-m fmha_v3_fwd) is still appended by
+# _apply_cpp_itfs on top of this list.
+blob_gen_cmd = [
+    "f'{AITER_META_DIR}/hsa/codegen.py -m fmha_fwd_bf16 --output_dir {{}}'",
+]
+
+# Reuse the torch-free libmha_bwd module (sources = mha_bwd.cu only; the same
+# source the CK-full te_libmha_bwd.so builds from). Do NOT use
+# module_fmha_v3_bwd here — it pulls in mha_common.cu, which includes
+# <ATen/hip/HIPContext.h> and is therefore torch-dependent. To make this build
+# CK-free and asm-only, two independent gates in mha_bwd.cu must both be set:
+#   - ONLY_FAV3=1 selects the asm-only dispatch (`#if ONLY_FAV3` returns the
+#     fmha_v3_bwd result; the `#else` branch instantiates CK fmha_bwd_traits),
+#   - ENABLE_CK=0 strips the CK fmha_bwd.hpp include and uses the ck_tile shim,
+# mirroring AITER's own module_fmha_v3_bwd. drop_directions=["bwd"] removes the
+# CK `generate.py -d bwd` codegen (the HSA codegen has no -d and is kept).
+# flags_extra_cc values are eval'd as Python expressions (optCompilerConfig
+# convention), hence the inner quotes; this replaces libmha_bwd's empty list.
+[[modules]]
+name = "libmha_bwd"
+mode = "cpp_itfs"
+drop_directions = ["bwd"]
+flags_extra_cc = ["'-DONLY_FAV3=1'", "'-DENABLE_CK=0'"]

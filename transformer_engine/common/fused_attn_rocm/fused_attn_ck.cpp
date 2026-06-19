@@ -18,6 +18,33 @@
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
+#ifdef USE_FUSED_ATTN_CK
+// Returns false when a CK backward for this config would dispatch to the CK v2
+// launcher (fmha_bwd / prepare_workspace_async), which schedules self-deleting
+// hipLaunchHostFunc nodes that double-free on graph replay. Only the v3 asm bwd
+// path is HIP-graph-replay-safe. Mirrors AITER's fmha_v3_bwd gate (mha_bwd.cu)
+// for the conditions visible at backend-selection time; determinism is applied
+// separately on the framework side.
+static bool is_ck_bwd_graph_capture_safe(
+  NVTE_Bias_Type bias_type,
+  float dropout,
+  size_t max_seqlen_q) {
+  // The CK v2 launcher is reached whenever the v3 asm bwd path is not taken.
+  // v3 requires gfx942/gfx950, no dropout, no bias, and (per TE's use_asm_v3 rule
+  // in ck_fused_attn_bwd.cpp) max_seqlen_q >= 16. NVTE_CK_USES_BWD_V3 can force the
+  // v2 path off entirely.
+  bool uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 1);
+  const std::string& arch = cuda::sm_arch_name();
+  bool is_v3_arch = arch.find("gfx942") != std::string::npos ||
+                    arch.find("gfx950") != std::string::npos;
+  return uses_bwd_v3 &&
+         is_v3_arch &&
+         dropout == 0.f &&
+         bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
+         max_seqlen_q >= 16;
+}
+#endif // USE_FUSED_ATTN_CK
+
 // check the fused attn config to see whether it's ck backend supported
 // single filtering followed by joint filtering
 bool is_ck_backend_supported(
@@ -30,10 +57,11 @@ bool is_ck_backend_supported(
   float dropout,
   size_t num_attn_heads, size_t num_gqa_groups,
   size_t max_seqlen_q, size_t max_seqlen_kv,
-  size_t head_dim_qk, 
-  size_t head_dim_v, 
-  int64_t window_size_left, 
-  int64_t window_size_right) {
+  size_t head_dim_qk,
+  size_t head_dim_v,
+  int64_t window_size_left,
+  int64_t window_size_right,
+  bool is_training, bool cuda_graph) {
 
 #ifdef USE_FUSED_ATTN_CK
 
@@ -142,6 +170,20 @@ bool is_ck_backend_supported(
   if(is_padding && (bias_type==NVTE_Bias_Type::NVTE_POST_SCALE_BIAS || bias_type==NVTE_Bias_Type::NVTE_ALIBI)){
     if(nvte_log_ck_config){
       std::cout<<"padding mask cannot work with post_scale_bias or alibi"<<std::endl;
+    }
+    return false;
+  }
+
+  // Under HIP-graph capture, CK backward must take the graph-replay-safe v3 asm
+  // path; a config that would fall back to the CK v2 launcher is not graph-safe.
+  // Reject such graph-captured training configs so selection falls through to a
+  // graph-safe backend (the v2 host-pack hazard is backward-only, so inference is
+  // unaffected). Determinism also forces v2 but is invisible here, so it is handled
+  // on the framework side.
+  if(is_training && cuda_graph &&
+     !is_ck_bwd_graph_capture_safe(bias_type, dropout, max_seqlen_q)){
+    if(nvte_log_ck_config){
+      std::cout<<"CK backward would use the v2 launcher, which is not HIP-graph-replay-safe"<<std::endl;
     }
     return false;
   }
@@ -724,9 +766,6 @@ void fused_attn_ck_bwd_impl(
 
   bool is_mqa_gqa = (h > hg);
 
-  size_t kN0 = (d_qk <= 128)? 128:64;
-  size_t nsplits = deterministic? ceil(1.0*s_kv/kN0):1;
-
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
   bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
   bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD || qkv_format==NVTE_QKV_Format::NVTE_SBHD_2BSHD;
@@ -748,9 +787,6 @@ void fused_attn_ck_bwd_impl(
 
   // First h*max_tokens_q*sizeof(float) is the lse-d buffer (passed as softmax_lsed)
   void* lse_workspace = planner.allocate(h*max_tokens_q*sizeof(float));
-
-  // CK requires dq_acc ptr; size depends on deterministic mode
-  void* dq_acc_ptr = planner.allocate(nsplits*h*max_tokens_q*d_qk*sizeof(float));
 
   void* dk_expanded_ptr = nullptr;
   void* dv_expanded_ptr = nullptr;
@@ -892,8 +928,6 @@ void fused_attn_ck_bwd_impl(
   }
 
   // Initialize workspace buffers.
-  // dq_acc is of shape (nsplits, B, S, H, D_qk); CK requires zeroing
-  NVTE_CHECK_CUDA(cudaMemsetAsync(dq_acc_ptr, 0, sizeof(float)*nsplits*h*max_tokens_q*d_qk, stream));
   if(devPtrAlibiSlope){
     dim3 block, grid;
     block.x = 1024;
@@ -971,7 +1005,6 @@ void fused_attn_ck_bwd_impl(
   ck_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
   ck_args.window_size_left = window_size_left;
   ck_args.window_size_right = window_size_right;
-  ck_args.dq_acc_ptr = dq_acc_ptr;
   ck_args.dk_expanded_ptr = dk_expanded_ptr;
   ck_args.dv_expanded_ptr = dv_expanded_ptr;
   ck_args.lse_workspace_ptr = lse_workspace;

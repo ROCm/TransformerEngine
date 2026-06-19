@@ -297,7 +297,9 @@ def test_dot_product_attention(
 
     # Skip if only unfused backend is supported
     # Double-count the CK backend since we want to compare V2/V3 kernels
-    has_ck_backend = IS_HIP_EXTENSION and FusedAttnBackend["CK"] in fused_attn_backends
+    # Issue #16948 CK V2 is disabled for gfx1250
+    has_ck_backend = ( IS_HIP_EXTENSION and FusedAttnBackend["CK"] in fused_attn_backends and
+                      get_device_compute_capability() != (12, 5) )
     if not has_ck_backend and (
         len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported
     ) < 2:
@@ -1494,7 +1496,9 @@ def test_transformer_layer(
 
     # Skip if only unfused backend is supported
     # Double-count the CK backend since we want to compare V2/V3 kernels
-    has_ck_backend = IS_HIP_EXTENSION and FusedAttnBackend["CK"] in fused_attn_backends
+    # Issue #16948 CK V2 is disabled for gfx1250
+    has_ck_backend = ( IS_HIP_EXTENSION and FusedAttnBackend["CK"] in fused_attn_backends and
+                      get_device_compute_capability() != (12, 5) )
     if not has_ck_backend and (
         len(fused_attn_backends) + flash_attn_supported + unfused_attn_supported
     ) < 2:
