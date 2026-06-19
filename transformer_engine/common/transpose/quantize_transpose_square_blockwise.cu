@@ -597,9 +597,11 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                         pow_2_scale, noop_ptr);
               }  // full-tile
 #else
+              const size_t threads_per_block =
+                  (transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device()) == 125) ? 256 : 512;
               block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, float, InputType,
                                                             OutputType>
-                  <<<grid, THREADS_PER_BLOCK, 0, stream>>>(
+                  <<<grid, threads_per_block, 0, stream>>>(
                       reinterpret_cast<const InputType*>(input.dptr),
                       reinterpret_cast<OutputType*>(output.dptr),
                       reinterpret_cast<OutputType*>(output_t.dptr),

@@ -177,8 +177,8 @@ static_assert(kNumThreadsLoad <= kThreadsPerWarp, "kNumThreadsLoad must be <= kT
 static_assert(kNumThreadsStore <= kThreadsPerWarp, "kNumThreadsStore must be <= kThreadsPerWarp");
 constexpr int kNumWarps = kThreadsPerBlock / kThreadsPerWarp;
 
-// gfx942 (MI300) has 64KB LDS; the full 128x128 fp32 staging tile overflows it. 
-#if defined(__HIP_PLATFORM_AMD__) && (!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx942__))
+// gfx942 (MI300) has 64KB LDS; the full 128x128 fp32 staging tile overflows it. (chunked-LDS helpers)
+#if defined(__HIP_PLATFORM_AMD__)
 constexpr int kChunkCol = 64;
 constexpr int kNumChunks = kTileDim / kChunkCol;
 static_assert(kTileDim % kChunkCol == 0, "kTileDim must be divisible by kChunkCol");
@@ -194,7 +194,7 @@ constexpr bool use_chunked_lds() {
 
 template <typename IType>
 size_t host_smem_bytes() {
-  if (transformer_engine::cuda::sm_arch() < 95 &&
+  if (transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device()) == 94 &&
       sizeof(IType) * static_cast<size_t>(kSMemSize) > kLdsLimitBytes) {
     return static_cast<size_t>(kSMemSizeChunk) * sizeof(IType);
   }
@@ -247,7 +247,7 @@ __device__ __forceinline__ void load_chunk_to_smem(Vec<IType, kNVecSMem>* smem,
     }
   }
 }
-#endif  // gfx942 helpers
+#endif  // __HIP_PLATFORM_AMD__ (chunked-LDS helpers)
 
 template <bool kAligned, typename CType, typename IType, typename OType>
 __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpose_kernel(
@@ -279,7 +279,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   SMemVec* smem = reinterpret_cast<SMemVec*>(&smem_base[0]);
 
   // Step 1: Load input to shared memory
-#if defined(__HIP_PLATFORM_AMD__) && (!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx942__))
+#if defined(__gfx942__)
   if constexpr (!use_chunked_lds<IType>())
 #endif
   {
@@ -327,7 +327,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   __syncthreads();
 
   // Step 2: Cast and store to output_c
-#if defined(__HIP_PLATFORM_AMD__) && (!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx942__))
+#if defined(__gfx942__)
   if (return_rowwise && use_chunked_lds<IType>()) {
     constexpr int r_stride = kThreadsPerBlock / kNumThreadsStore;
     constexpr int num_iterations = kTileDim / r_stride;
@@ -510,7 +510,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   }
 
   // Step 3 (return_columnwise_gemm_ready): Transpose, cast and store to output_t
-#if defined(__HIP_PLATFORM_AMD__) && (!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx942__))
+#if defined(__gfx942__)
   if (return_columnwise_gemm_ready && use_chunked_lds<IType>()) {
     const int r_s = (threadIdx.x % kNumThreadsStore) * kNVecOut;
     const int c_s = threadIdx.x / kNumThreadsStore;
@@ -678,7 +678,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   }
 
   // Step 4 (return_columnwise_compact): cast in 128x1 style and store to output, skip transpose
-#if defined(__HIP_PLATFORM_AMD__) && (!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx942__))
+#if defined(__gfx942__)
   if (return_columnwise_compact && use_chunked_lds<IType>()) {
     constexpr int kThreadTileRow = kTileDim / kThreadsPerWarp;
     constexpr int kThreadTileCol = kNVecOut;
@@ -967,10 +967,13 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
           TRANSFORMER_ENGINE_SWITCH_CONDITION(
               full_tile, kAligned,
 
-#if defined(__HIP_PLATFORM_AMD__) && (!defined(__HIP_DEVICE_COMPILE__) || defined(__gfx942__))
+#if defined(__HIP_PLATFORM_AMD__)
               size_t smem_bytes = host_smem_bytes<InputType>();
+              const int threads_per_block =
+                  (transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device()) == 125) ? 256 : 512;
 #else
               size_t smem_bytes = kSMemSize * sizeof(InputType);
+              const int threads_per_block = kThreadsPerBlock;
 #endif
               // shared memory must be requested up
               if (smem_bytes >= 48 * 1024) {
@@ -979,7 +982,7 @@ void quantize_transpose_vector_blockwise(const SimpleTensor& input, SimpleTensor
                     cudaFuncAttributeMaxDynamicSharedMemorySize, smem_bytes);
                 NVTE_CHECK(err == cudaSuccess, "Failed to set dynamic shared memory size.");
               } block_scaled_1d_cast_transpose_kernel<kAligned, float, InputType, OutputType>
-              <<<grid, kThreadsPerBlock, smem_bytes, stream>>>(
+              <<<grid, threads_per_block, smem_bytes, stream>>>(
                   reinterpret_cast<const InputType*>(input.dptr),
                   reinterpret_cast<OutputType*>(output.dptr),
                   reinterpret_cast<OutputType*>(output_t.dptr),
