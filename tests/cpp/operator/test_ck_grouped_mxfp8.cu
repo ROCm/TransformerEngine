@@ -14,14 +14,11 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
-#include <cstring>
-#include <iomanip>
-#include <iostream>
-#include <memory>
-#include <numeric>
+#include <cstdint>
+#include <limits>
 #include <sstream>
 #include <string>
-#include <tuple>
+#include <type_traits>
 #include <vector>
 
 #include <cuda_bf16.h>
@@ -33,6 +30,12 @@
 #include <transformer_engine/transformer_engine.h>
 
 #include "../test_common.h"
+
+// CK defaults host-side reference code to non-OCP FP8, while TE and CK device kernels
+// use OCP FP8/E8M0 on gfx950/gfx12. Force the host reference onto the same encoding.
+#ifndef CK_TILE_USE_OCP_FP8
+#define CK_TILE_USE_OCP_FP8 1
+#endif
 
 #include "ck_tile/core.hpp"
 #include "ck_tile/host.hpp"
@@ -117,11 +120,8 @@ __global__ void compute_ref_kernel(
   float val = 0.0f;
   if (in_range) {
     for (size_t kk = 0; kk < k; ++kk) {
-      size_t a_idx = 0;
-      size_t b_idx = 0;
-
-      a_idx = transa ? (ii * k + kk) : (kk * m + ii);
-      b_idx = transb ? (kk * n + jj) : (jj * k + kk);
+      const size_t a_idx = transa ? (ii * k + kk) : (kk * m + ii);
+      const size_t b_idx = transb ? (kk * n + jj) : (jj * k + kk);
 
       float a_scale_inv_val = a_scale_inv_scalar;
       float b_scale_inv_val = b_scale_inv_scalar;
@@ -153,7 +153,7 @@ static std::vector<size_t> split_even(size_t m_total, int experts) {
 }
 
 static std::vector<size_t> a_shape_for_te(size_t n, size_t k, bool transa) {
-  // TE grouped GEMM computes output shape [M,N].  A contributes the N dimension.
+  // TE grouped GEMM computes output shape [M,N]. A contributes the N dimension.
   // transa=true means physical A is [N,K]; transa=false means physical A is [K,N].
   return transa ? std::vector<size_t>{n, k} : std::vector<size_t>{k, n};
 }
@@ -166,36 +166,101 @@ static std::vector<size_t> b_shape_for_te(size_t m, size_t k, bool transb) {
 
 struct ErrorStats {
   size_t count = 0;
-  double sum_abs = 0.0;
-  double sum_rel = 0.0;
-  double sum_ref_abs = 0.0;
-  double sum_got_abs = 0.0;
+  size_t nonfinite_count = 0;
+  size_t first_nonfinite_i = 0;
+  size_t first_nonfinite_j = 0;
+  float first_nonfinite_got = 0.0f;
+  float first_nonfinite_ref = 0.0f;
+
+  size_t tolerance_violation_count = 0;
+  size_t first_tolerance_violation_i = 0;
+  size_t first_tolerance_violation_j = 0;
+  float first_tolerance_violation_abs = 0.0f;
+  float first_tolerance_violation_bound = 0.0f;
   float max_abs = 0.0f;
-  float max_rel = 0.0f;
-  std::vector<float> abs_errs;
+  float max_ref_abs = 0.0f;
 };
 
-static void add_err(ErrorStats& s, float got, float ref) {
-  const float abs_err = std::abs(got - ref);
-  const float rel_err = abs_err / std::max(std::abs(ref), 1.0e-12f);
+static void add_err(ErrorStats& s,
+                    float got,
+                    float ref,
+                    size_t i,
+                    size_t j,
+                    float rtol,
+                    float atol) {
   s.count++;
-  s.sum_abs += abs_err;
-  s.sum_rel += rel_err;
-  s.sum_ref_abs += std::abs(ref);
-  s.sum_got_abs += std::abs(got);
+  if (!std::isfinite(got) || !std::isfinite(ref)) {
+    if (s.nonfinite_count == 0) {
+      s.first_nonfinite_i = i;
+      s.first_nonfinite_j = j;
+      s.first_nonfinite_got = got;
+      s.first_nonfinite_ref = ref;
+    }
+    s.nonfinite_count++;
+    return;
+  }
+
+  const float abs_ref = std::abs(ref);
+  const float abs_err = std::abs(got - ref);
+  const float bound = atol + rtol * abs_ref;
   s.max_abs = std::max(s.max_abs, abs_err);
-  s.max_rel = std::max(s.max_rel, rel_err);
-  s.abs_errs.push_back(abs_err);
+  s.max_ref_abs = std::max(s.max_ref_abs, abs_ref);
+
+  if (abs_err > bound) {
+    if (s.tolerance_violation_count == 0) {
+      s.first_tolerance_violation_i = i;
+      s.first_tolerance_violation_j = j;
+      s.first_tolerance_violation_abs = abs_err;
+      s.first_tolerance_violation_bound = bound;
+    }
+    s.tolerance_violation_count++;
+  }
 }
 
+template <typename ADataType, typename BDataType, typename CDataType, typename AccDataType>
+static auto calculate_ck_internal_rtol_atol(const size_t K,
+                                            const int kbatch,
+                                            const float max_accumulated_value) {
+  using ComputeType =
+      std::conditional_t<sizeof(ADataType) < sizeof(BDataType), ADataType, BDataType>;
 
-static void expect_reference_match(const std::string& label,
-                                   const ErrorStats& stats,
-                                   float max_abs_limit,
-                                   float mean_abs_limit) {
-  EXPECT_LE(stats.max_abs, max_abs_limit) << label;
-  EXPECT_LE(stats.sum_abs / static_cast<double>(std::max<size_t>(stats.count, 1)),
-            static_cast<double>(mean_abs_limit)) << label;
+  const auto rtol = ck_tile::get_relative_threshold<ComputeType, CDataType, AccDataType>(
+      ck_tile::integer_divide_ceil(static_cast<ck_tile::index_t>(K),
+                                   static_cast<ck_tile::index_t>(kbatch)));
+  auto atol = ck_tile::get_absolute_threshold<ComputeType, CDataType, AccDataType>(
+      max_accumulated_value / static_cast<float>(kbatch),
+      ck_tile::integer_divide_ceil(static_cast<ck_tile::index_t>(K),
+                                   static_cast<ck_tile::index_t>(kbatch)));
+
+  const auto rtol_split_k =
+      ck_tile::get_relative_threshold<CDataType, CDataType, CDataType>(kbatch);
+  auto atol_split_k = ck_tile::get_absolute_threshold<CDataType, CDataType, CDataType>(
+      max_accumulated_value, kbatch);
+
+  // Match CK internal mx grouped GEMM test: BF16 gets extra tolerance for HW vs SW conversion.
+  if constexpr (std::is_same_v<CDataType, ck_tile::bf16_t> ||
+                std::is_same_v<CDataType, ck_tile::bfloat16_t>) {
+    atol += 0.6f;
+    atol_split_k += 0.6f;
+  }
+
+  return ck_tile::make_tuple(std::max(rtol, rtol_split_k),
+                             std::max(atol, atol_split_k));
+}
+
+static void expect_reference_match_ck_style(const std::string& label,
+                                            const ErrorStats& stats) {
+  EXPECT_EQ(stats.nonfinite_count, 0UL) << label
+      << " first_nonfinite_coord=(" << stats.first_nonfinite_i << ","
+      << stats.first_nonfinite_j << ") got=" << stats.first_nonfinite_got
+      << " ref=" << stats.first_nonfinite_ref;
+
+  EXPECT_EQ(stats.tolerance_violation_count, 0UL) << label
+      << " first_tolerance_violation_coord=(" << stats.first_tolerance_violation_i << ","
+      << stats.first_tolerance_violation_j << ") abs=" << stats.first_tolerance_violation_abs
+      << " bound=" << stats.first_tolerance_violation_bound
+      << " max_abs=" << stats.max_abs
+      << " max_ref_abs=" << stats.max_ref_abs;
 }
 
 static void run_te_grouped_mxfp8(const std::vector<Tensor>& a_mx,
@@ -252,8 +317,8 @@ static void run_hip_ref_for_group(const Tensor& a_mx,
   const bool left_transa = !transb;
   const bool right_transb = !transa;
 
-  const bool left_use_colwise = !left_transa;   // Same rule as test_cublaslt_gemm run_reference.
-  const bool right_use_colwise = right_transb;  // Same rule as test_cublaslt_gemm run_reference.
+  const bool left_use_colwise = !left_transa;
+  const bool right_use_colwise = right_transb;
 
   const auto left_s = left_use_colwise ? b_mx.columnwise_scale_inv_shape()
                                        : b_mx.rowwise_scale_inv_shape();
@@ -306,6 +371,8 @@ static ck_tile::HostTensor<ck_tile::bfloat16_t> run_ck_tile_reference_for_group(
 
   const size_t kscale = k / 32;
 
+  // TE grouped GEMM computes op(B) [M,K] * op(A) [K,N].
+  // CK host reference wants logical left=[M,K], right=[K,N].
   const bool left_transa = !transb;
   const bool right_transb = !transa;
   const bool left_use_colwise = !left_transa;
@@ -320,12 +387,13 @@ static ck_tile::HostTensor<ck_tile::bfloat16_t> run_ck_tile_reference_for_group(
   ck_tile::HostTensor<CType> c_ref(
       ck_tile::HostTensorDescriptor({m, n}, {n, 1_uz}));
 
+  // Match CK internal reference scale descriptors:
+  //   A scale: logical [M, K/32], RowMajor
+  //   B scale: logical [K/32, N], ColumnMajor
   ck_tile::HostTensor<ScaleType> a_scale_ref(
-      left_use_colwise ? ck_tile::HostTensorDescriptor({m, kscale}, {1_uz, m})
-                       : ck_tile::HostTensorDescriptor({m, kscale}, {kscale, 1_uz}));
+      ck_tile::HostTensorDescriptor({m, kscale}, {kscale, 1_uz}));
   ck_tile::HostTensor<ScaleType> b_scale_ref(
-      right_use_colwise ? ck_tile::HostTensorDescriptor({kscale, n}, {n, 1_uz})
-                        : ck_tile::HostTensorDescriptor({kscale, n}, {1_uz, kscale}));
+      ck_tile::HostTensorDescriptor({kscale, n}, {1_uz, kscale}));
 
   c_ref.SetZero();
 
@@ -337,32 +405,84 @@ static ck_tile::HostTensor<ck_tile::bfloat16_t> run_ck_tile_reference_for_group(
                              right_use_colwise ? a_mx.columnwise_dptr() : a_mx.rowwise_dptr(),
                              b_right.get_element_space_size_in_bytes(),
                              cudaMemcpyDeviceToHost));
-  NVTE_CHECK_CUDA(cudaMemcpy(a_scale_ref.data(),
-                             left_use_colwise ? b_mx.columnwise_scale_inv_dptr()
-                                              : b_mx.rowwise_scale_inv_dptr(),
-                             a_scale_ref.get_element_space_size_in_bytes(),
-                             cudaMemcpyDeviceToHost));
-  NVTE_CHECK_CUDA(cudaMemcpy(b_scale_ref.data(),
-                             right_use_colwise ? a_mx.columnwise_scale_inv_dptr()
-                                               : a_mx.rowwise_scale_inv_dptr(),
-                             b_scale_ref.get_element_space_size_in_bytes(),
-                             cudaMemcpyDeviceToHost));
+
+  auto copy_device_scale_to_host = [](const void* dev_ptr, size_t count) {
+    std::vector<ScaleType> host(count);
+    NVTE_CHECK_CUDA(cudaMemcpy(host.data(),
+                               dev_ptr,
+                               count * sizeof(ScaleType),
+                               cudaMemcpyDeviceToHost));
+    return host;
+  };
+
+  if (!left_use_colwise) {
+    const auto src = copy_device_scale_to_host(b_mx.rowwise_scale_inv_dptr(), m * kscale);
+    for (size_t mi = 0; mi < m; ++mi) {
+      for (size_t kc = 0; kc < kscale; ++kc) {
+        a_scale_ref(mi, kc) = src[mi * kscale + kc];
+      }
+    }
+  } else {
+    const auto src = copy_device_scale_to_host(b_mx.columnwise_scale_inv_dptr(), kscale * m);
+    for (size_t mi = 0; mi < m; ++mi) {
+      for (size_t kc = 0; kc < kscale; ++kc) {
+        a_scale_ref(mi, kc) = src[kc * m + mi];
+      }
+    }
+  }
+
+  if (!right_use_colwise) {
+    const auto src = copy_device_scale_to_host(a_mx.rowwise_scale_inv_dptr(), n * kscale);
+    for (size_t nj = 0; nj < n; ++nj) {
+      for (size_t kc = 0; kc < kscale; ++kc) {
+        b_scale_ref(kc, nj) = src[nj * kscale + kc];
+      }
+    }
+  } else {
+    const auto src = copy_device_scale_to_host(a_mx.columnwise_scale_inv_dptr(), kscale * n);
+    for (size_t kc = 0; kc < kscale; ++kc) {
+      for (size_t nj = 0; nj < n; ++nj) {
+        b_scale_ref(kc, nj) = src[kc * n + nj];
+      }
+    }
+  }
 
   ck_tile::reference_mx_gemm<AType, BType, ScaleType, ScaleType, float, CType>(
       a_left, b_right, c_ref, a_scale_ref, b_scale_ref);
   return c_ref;
 }
 
+static float max_abs_bf16_tensor(const Tensor& t, size_t rows, size_t cols) {
+  const bf16_t* p = t.rowwise_cpu_dptr<bf16_t>();
+  float m = 0.0f;
+  for (size_t i = 0; i < rows * cols; ++i) {
+    const float v = static_cast<float>(p[i]);
+    if (std::isfinite(v)) m = std::max(m, std::abs(v));
+  }
+  return m;
+}
+
+static float max_abs_ck_ref(const ck_tile::HostTensor<ck_tile::bfloat16_t>& t) {
+  float m = 0.0f;
+  for (const auto& x : t.mData) {
+    const float v = static_cast<float>(x);
+    if (std::isfinite(v)) m = std::max(m, std::abs(v));
+  }
+  return m;
+}
+
 static ErrorStats compare_te_vs_hip(const Tensor& te_out_rowmajor,
                                     const Tensor& hip_ref_colmajor,
                                     size_t m,
-                                    size_t n) {
+                                    size_t n,
+                                    float rtol,
+                                    float atol) {
   ErrorStats stats;
   const bf16_t* te = te_out_rowmajor.rowwise_cpu_dptr<bf16_t>();
   const bf16_t* hip = hip_ref_colmajor.rowwise_cpu_dptr<bf16_t>();
   for (size_t i = 0; i < m; ++i) {
     for (size_t j = 0; j < n; ++j) {
-      add_err(stats, to_float(te[i * n + j]), to_float(hip[j * m + i]));
+      add_err(stats, to_float(te[i * n + j]), to_float(hip[j * m + i]), i, j, rtol, atol);
     }
   }
   return stats;
@@ -371,12 +491,14 @@ static ErrorStats compare_te_vs_hip(const Tensor& te_out_rowmajor,
 static ErrorStats compare_te_vs_ck(const Tensor& te_out_rowmajor,
                                    const ck_tile::HostTensor<ck_tile::bfloat16_t>& ck_ref,
                                    size_t m,
-                                   size_t n) {
+                                   size_t n,
+                                   float rtol,
+                                   float atol) {
   ErrorStats stats;
   const bf16_t* te = te_out_rowmajor.rowwise_cpu_dptr<bf16_t>();
   for (size_t i = 0; i < m; ++i) {
     for (size_t j = 0; j < n; ++j) {
-      add_err(stats, to_float(te[i * n + j]), to_float(ck_ref(i, j)));
+      add_err(stats, to_float(te[i * n + j]), to_float(ck_ref(i, j)), i, j, rtol, atol);
     }
   }
   return stats;
@@ -385,12 +507,14 @@ static ErrorStats compare_te_vs_ck(const Tensor& te_out_rowmajor,
 static ErrorStats compare_ck_vs_hip(const ck_tile::HostTensor<ck_tile::bfloat16_t>& ck_ref,
                                     const Tensor& hip_ref_colmajor,
                                     size_t m,
-                                    size_t n) {
+                                    size_t n,
+                                    float rtol,
+                                    float atol) {
   ErrorStats stats;
   const bf16_t* hip = hip_ref_colmajor.rowwise_cpu_dptr<bf16_t>();
   for (size_t i = 0; i < m; ++i) {
     for (size_t j = 0; j < n; ++j) {
-      add_err(stats, to_float(ck_ref(i, j)), to_float(hip[j * m + i]));
+      add_err(stats, to_float(ck_ref(i, j)), to_float(hip[j * m + i]), i, j, rtol, atol);
     }
   }
   return stats;
@@ -464,26 +588,37 @@ static void run_case_typed(const CaseConfig& cfg) {
                                   m_splits[g], cfg.k, cfg.n,
                                   cfg.layout.transa, cfg.layout.transb);
     output_hip_colmajor[g].to_cpu();
-    expect_reference_match("group " + std::to_string(g) + " TE_vs_HIP_REF",
-                           compare_te_vs_hip(output_te[g], output_hip_colmajor[g],
-                                             m_splits[g], cfg.n),
-                           0.25f,
-                           0.03f);
+
+    const float max_accumulated_value =
+        max_abs_bf16_tensor(output_hip_colmajor[g], cfg.n, m_splits[g]);
+    const auto rtol_atol =
+        calculate_ck_internal_rtol_atol<CkBType, CkAType, ck_tile::bfloat16_t, float>(
+            cfg.k, 1, max_accumulated_value);
+    const float rtol = rtol_atol.at(ck_tile::number<0>{});
+    const float atol = rtol_atol.at(ck_tile::number<1>{});
+
+    expect_reference_match_ck_style("group " + std::to_string(g) + " TE_vs_HIP_REF",
+                                    compare_te_vs_hip(output_te[g], output_hip_colmajor[g],
+                                                      m_splits[g], cfg.n, rtol, atol));
   }
 
   for (int g = 0; g < cfg.experts; ++g) {
     auto ck_ref = run_ck_tile_reference_for_group<CkBType, CkAType>(a_mx[g], b_mx[g],
                                                   m_splits[g], cfg.k, cfg.n,
                                                   cfg.layout.transa, cfg.layout.transb);
-    expect_reference_match("group " + std::to_string(g) + " TE_vs_CK_REF ",
-                           compare_te_vs_ck(output_te[g], ck_ref, m_splits[g], cfg.n),
-                           0.25f,
-                           0.03f);
-    expect_reference_match("group " + std::to_string(g) + " CK_vs_HIP_REF",
-                           compare_ck_vs_hip(ck_ref, output_hip_colmajor[g],
-                                             m_splits[g], cfg.n),
-                           0.25f,
-                           0.03f);
+    const float max_accumulated_value = max_abs_ck_ref(ck_ref);
+    const auto rtol_atol =
+        calculate_ck_internal_rtol_atol<CkBType, CkAType, ck_tile::bfloat16_t, float>(
+            cfg.k, 1, max_accumulated_value);
+    const float rtol = rtol_atol.at(ck_tile::number<0>{});
+    const float atol = rtol_atol.at(ck_tile::number<1>{});
+
+    expect_reference_match_ck_style("group " + std::to_string(g) + " TE_vs_CK_REF",
+                                    compare_te_vs_ck(output_te[g], ck_ref, m_splits[g], cfg.n,
+                                                     rtol, atol));
+    expect_reference_match_ck_style("group " + std::to_string(g) + " CK_vs_HIP_REF",
+                                    compare_ck_vs_hip(ck_ref, output_hip_colmajor[g],
+                                                      m_splits[g], cfg.n, rtol, atol));
   }
 }
 
