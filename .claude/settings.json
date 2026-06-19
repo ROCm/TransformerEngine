@@ -1,0 +1,10 @@
+{
+  "extraKnownMarketplaces": {
+    "amd-claude-marketplace": {
+      "source": {
+        "source": "github",
+        "repo": "ROCm/amd-claude-marketplace"
+      }
+    }
+  }
+}

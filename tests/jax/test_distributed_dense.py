@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -127,7 +129,7 @@ class TestDistributedDense:
 
         contracting_dims = ((2,), (0,))  # Contract on hidden_in dimension
 
-        with mesh, autocast(enabled=False, mesh_resource=mesh_resource):
+        with jax.set_mesh(mesh), autocast(enabled=False, mesh_resource=mesh_resource):
             # TE GEMM result
             te_result = _jitted_gemm(
                 x_sharded,
@@ -214,7 +216,7 @@ class TestDistributedDense:
 
         contracting_dims = ((2,), (0,))
 
-        with mesh, autocast(enabled=False, mesh_resource=mesh_resource):
+        with jax.set_mesh(mesh), autocast(enabled=False, mesh_resource=mesh_resource):
             # Test gradients w.r.t. all inputs
             te_grad_func = jax.jit(
                 jax.value_and_grad(self._te_sum_dense, argnums=(0, 1, 2)),

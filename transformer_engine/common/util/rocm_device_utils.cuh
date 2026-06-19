@@ -118,6 +118,48 @@ __device__ __forceinline__ void rocm_atomicMaxFloat(float *addr, float val) {
     atomicMax(reinterpret_cast<int*>(addr), __float_as_int(val));
 }
 
+// Binary search on a sorted array.
+// Returns the largest index i in [0, n) such that arr[i] <= val.
+// Precondition: arr is sorted in non-decreasing order and arr[0] <= val.
+template <typename T>
+__device__ __forceinline__ int rocm_upper_bound(const T* arr, int n, T val) {
+  int lo = 0, hi = n - 1;
+  while (lo < hi) {
+    int mid = (lo + hi + 1) / 2;
+    if (arr[mid] <= val) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return lo;
+}
+
+// Binary reduction ops for rocm_subwarp_allreduce
+struct rocm_op {
+    struct max {
+        __device__ __forceinline__ float operator()(float a, float b) const { return fmaxf(a, b); }
+    };
+
+    struct min {
+        __device__ __forceinline__ float operator()(float a, float b) const { return fminf(a, b); }
+    };
+
+    struct sum {
+        __device__ __forceinline__ float operator()(float a, float b) const { return a + b; }
+    };
+};
+
+// Butterfly all-reduce within a subwarp. All lanes get the result.
+template <int WIDTH, typename T, typename OP>
+__device__ __forceinline__ T rocm_subwarp_allreduce(T val, const OP &op) {
+#pragma unroll
+    for (int offset = WIDTH / 2; offset > 0; offset >>= 1) {
+        val = op(val, __shfl_xor(val, offset, WIDTH));
+    }
+    return val;
+}
+
 template <int WARPS>
 __device__ __forceinline__ float rocm_block_reduce_max(float val, int warp_id) {
     __shared__ float staging[WARPS];
