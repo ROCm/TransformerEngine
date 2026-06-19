@@ -165,20 +165,11 @@ static std::vector<size_t> b_shape_for_te(size_t m, size_t k, bool transb) {
 }
 
 struct ErrorStats {
-  size_t count = 0;
-  size_t nonfinite_count = 0;
-  size_t first_nonfinite_i = 0;
-  size_t first_nonfinite_j = 0;
-  float first_nonfinite_got = 0.0f;
-  float first_nonfinite_ref = 0.0f;
-
-  size_t tolerance_violation_count = 0;
-  size_t first_tolerance_violation_i = 0;
-  size_t first_tolerance_violation_j = 0;
-  float first_tolerance_violation_abs = 0.0f;
-  float first_tolerance_violation_bound = 0.0f;
-  float max_abs = 0.0f;
-  float max_ref_abs = 0.0f;
+  size_t failures = 0;
+  size_t first_i = 0;
+  size_t first_j = 0;
+  float first_got = 0.0f;
+  float first_ref = 0.0f;
 };
 
 static void add_err(ErrorStats& s,
@@ -188,32 +179,18 @@ static void add_err(ErrorStats& s,
                     size_t j,
                     float rtol,
                     float atol) {
-  s.count++;
-  if (!std::isfinite(got) || !std::isfinite(ref)) {
-    if (s.nonfinite_count == 0) {
-      s.first_nonfinite_i = i;
-      s.first_nonfinite_j = j;
-      s.first_nonfinite_got = got;
-      s.first_nonfinite_ref = ref;
-    }
-    s.nonfinite_count++;
-    return;
-  }
+  const bool failed =
+      !std::isfinite(got) || !std::isfinite(ref) ||
+      std::abs(got - ref) > atol + rtol * std::abs(ref);
 
-  const float abs_ref = std::abs(ref);
-  const float abs_err = std::abs(got - ref);
-  const float bound = atol + rtol * abs_ref;
-  s.max_abs = std::max(s.max_abs, abs_err);
-  s.max_ref_abs = std::max(s.max_ref_abs, abs_ref);
-
-  if (abs_err > bound) {
-    if (s.tolerance_violation_count == 0) {
-      s.first_tolerance_violation_i = i;
-      s.first_tolerance_violation_j = j;
-      s.first_tolerance_violation_abs = abs_err;
-      s.first_tolerance_violation_bound = bound;
+  if (failed) {
+    if (s.failures == 0) {
+      s.first_i = i;
+      s.first_j = j;
+      s.first_got = got;
+      s.first_ref = ref;
     }
-    s.tolerance_violation_count++;
+    ++s.failures;
   }
 }
 
@@ -250,17 +227,12 @@ static auto calculate_ck_internal_rtol_atol(const size_t K,
 
 static void expect_reference_match_ck_style(const std::string& label,
                                             const ErrorStats& stats) {
-  EXPECT_EQ(stats.nonfinite_count, 0UL) << label
-      << " first_nonfinite_coord=(" << stats.first_nonfinite_i << ","
-      << stats.first_nonfinite_j << ") got=" << stats.first_nonfinite_got
-      << " ref=" << stats.first_nonfinite_ref;
-
-  EXPECT_EQ(stats.tolerance_violation_count, 0UL) << label
-      << " first_tolerance_violation_coord=(" << stats.first_tolerance_violation_i << ","
-      << stats.first_tolerance_violation_j << ") abs=" << stats.first_tolerance_violation_abs
-      << " bound=" << stats.first_tolerance_violation_bound
-      << " max_abs=" << stats.max_abs
-      << " max_ref_abs=" << stats.max_ref_abs;
+  EXPECT_EQ(stats.failures, 0UL)
+      << label
+      << " failures=" << stats.failures
+      << " first_failure_coord=(" << stats.first_i << "," << stats.first_j << ")"
+      << " got=" << stats.first_got
+      << " ref=" << stats.first_ref;
 }
 
 static void run_te_grouped_mxfp8(const std::vector<Tensor>& a_mx,
