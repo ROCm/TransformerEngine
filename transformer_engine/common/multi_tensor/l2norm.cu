@@ -13,7 +13,9 @@
 
 #include "../utils.cuh"
 #include "multi_tensor_apply.cuh"
+#ifdef __HIP_PLATFORM_AMD__
 #include "../util/rocm_device_utils.cuh"
+#endif
 
 namespace transformer_engine {
 namespace multi_tensor_l2norm {
@@ -262,6 +264,8 @@ struct UnscaleL2NormFunctor {
   }
 };
 
+#ifdef __HIP_PLATFORM_AMD__
+
 template <typename x_t, bool UNSCALE>
 __global__ void custom_multi_tensor_l2norm_kernel(
     int chunk_size, volatile int * __restrict__ noop_gmem,
@@ -413,6 +417,8 @@ void multi_tensor_unscale_l2norm_cuda_custom(int chunk_size, NVTETensor noop_fla
       reinterpret_cast<float *>(ret->data.dptr), total_chunks);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
+
+#endif  // __HIP_PLATFORM_AMD__
 
 // Probably better to template, but since we are not likely to support other norm
 template <typename x_t>
@@ -611,6 +617,7 @@ void multi_tensor_unscale_l2norm_cuda(int chunk_size, Tensor noop_flag,
 }  // namespace multi_tensor_l2norm
 }  // namespace transformer_engine
 
+#ifdef __HIP_PLATFORM_AMD__
 void nvte_multi_tensor_l2norm_cuda_custom(int chunk_size, NVTETensor noop_flag,
                       const NVTEDType input_dtype, const int64_t * const addresses,
                       const int * const sizes, const int * const block_to_tensor,
@@ -637,6 +644,7 @@ void nvte_multi_tensor_unscale_l2norm_cuda_custom(
     chunk_size, noop_flag, static_cast<DType>(input_dtype), addresses, sizes, block_to_tensor,
     chunk_offsets, total_chunks, output, ret, inv_scale, stream);
 }
+#endif  // __HIP_PLATFORM_AMD__
 
 void nvte_multi_tensor_l2norm_cuda(int chunk_size, NVTETensor noop_flag, NVTETensor **tensor_lists,
                                    const size_t num_tensor_lists, const size_t num_tensors_per_list,

@@ -70,6 +70,7 @@ void nvte_multi_tensor_unscale_l2norm_cuda(int chunk_size, NVTETensor noop_flag,
                                            int per_tensor, int max_chunks_per_tensor,
                                            cudaStream_t stream);
 
+#ifdef __HIP_PLATFORM_AMD__
 /*!  \brief Computes cumulative L2 norm for a list of tensors from precomputed chunk metadata.
  *
  * \warning   This API is **experimental** and subject to change.
@@ -91,6 +92,7 @@ void nvte_multi_tensor_unscale_l2norm_cuda_custom(
     const int64_t *addresses, const int *sizes, const int *block_to_tensor,
     const int *chunk_offsets, int total_chunks,
     NVTETensor output, NVTETensor ret, NVTETensor inv_scale, cudaStream_t stream);
+#endif  // __HIP_PLATFORM_AMD__
 
 /*!  \brief Compute and apply gradient update to parameters for Adam optimizer.
  *
@@ -144,6 +146,7 @@ void nvte_multi_tensor_adam_param_remainder_cuda(
     const float epsilon, const int step, const int mode, const int bias_correction,
     const float weight_decay, cudaStream_t stream);
 
+#ifdef __HIP_PLATFORM_AMD__
 /*!  \brief Compute and apply gradient update to parameters for Adam optimizer
  *          where the master parameters only store the remainder bits.
  *          Uses precomputed chunk metadata instead of TensorListMetadata.
@@ -172,6 +175,7 @@ void nvte_multi_tensor_adam_cuda_custom(
     const float lr, const float beta1, const float beta2,
     const float epsilon, const int step, const int mode, const int bias_correction,
     const float weight_decay, cudaStream_t stream);
+#endif  // __HIP_PLATFORM_AMD__
 
 /*!  \brief Compute and apply gradient update to parameters for Adam optimizer
  *          when model parameters are in Float8 precision.

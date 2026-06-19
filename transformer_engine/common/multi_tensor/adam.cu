@@ -13,7 +13,9 @@
 
 #include "../utils.cuh"
 #include "multi_tensor_apply.cuh"
+#ifdef __HIP_PLATFORM_AMD__
 #include "../util/rocm_device_utils.cuh"
+#endif
 
 namespace transformer_engine {
 namespace multi_tensor_adam {
@@ -983,6 +985,7 @@ void multi_tensor_adam_capturable_master_cuda(int chunk_size, Tensor noop_flag,
 // TensorListMetadata.  Removes the 320-block limit and avoids packing the
 // metadata struct on each launch.
 // ---------------------------------------------------------------------------
+#ifdef __HIP_PLATFORM_AMD__
 
 static constexpr int CILP = 8;
 
@@ -1391,6 +1394,8 @@ void multi_tensor_adam_cuda_custom(
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+#endif  // __HIP_PLATFORM_AMD__
+
 }  // namespace multi_tensor_adam
 }  // namespace transformer_engine
 
@@ -1469,6 +1474,7 @@ void nvte_multi_tensor_adam_capturable_master_cuda(
       bias_correction, weight_decay, *convertNVTETensorCheck(inv_scale), stream);
 }
 
+#ifdef __HIP_PLATFORM_AMD__
 void nvte_multi_tensor_adam_param_remainder_cuda_custom(
     int chunk_size, NVTETensor noop_flag, NVTEDType grad_dtype, NVTEDType moment_dtype,
     int64_t *addresses, int64_t *sizes, int *block_to_tensor, int *chunk_offsets,
@@ -1488,8 +1494,8 @@ void nvte_multi_tensor_adam_param_remainder_cuda_custom(
 
 void nvte_multi_tensor_adam_cuda_custom(
     int chunk_size, NVTETensor noop_flag, NVTEDType grad_dtype, NVTEDType param_dtype,
-  NVTEDType moment_dtype, int64_t *addresses, int64_t *sizes,
-  int *block_to_tensor, int *chunk_offsets, int total_chunks, int has_master,
+    NVTEDType moment_dtype, int64_t *addresses, int64_t *sizes,
+    int *block_to_tensor, int *chunk_offsets, int total_chunks, int has_master,
     const float lr, const float beta1, const float beta2,
     const float epsilon, const int step, const int mode, const int bias_correction,
     const float weight_decay, cudaStream_t stream) {
@@ -1504,3 +1510,4 @@ void nvte_multi_tensor_adam_cuda_custom(
       has_master != 0,
       lr, beta1, beta2, epsilon, step, mode, bias_correction, weight_decay, stream);
 }
+#endif  // __HIP_PLATFORM_AMD__
