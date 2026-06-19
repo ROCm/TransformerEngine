@@ -282,10 +282,17 @@ void performTest(const ProcessingMethod processing_method,
         const size_t unpadded_colwise_blocks_Y = divide_round_up(M, 32);
         const size_t unpadded_colwise_blocks_X = K;
 
+#ifdef __HIP_PLATFORM_AMD__
+        rowwise_scales_first_dim[t] = unpadded_rowwise_blocks_Y;
+        rowwise_scales_last_dim[t]  = unpadded_rowwise_blocks_X;
+        colwise_scales_first_dim[t] = unpadded_colwise_blocks_Y;
+        colwise_scales_last_dim[t]  = unpadded_colwise_blocks_X;
+#else
         rowwise_scales_first_dim[t] = round_up_to_nearest_multiple(unpadded_rowwise_blocks_Y, 128);
         rowwise_scales_last_dim[t] = round_up_to_nearest_multiple(unpadded_rowwise_blocks_X, 4);
         colwise_scales_first_dim[t] = round_up_to_nearest_multiple(unpadded_colwise_blocks_Y, 4);
         colwise_scales_last_dim[t] = round_up_to_nearest_multiple(unpadded_colwise_blocks_X, 128);
+#endif
 
         const size_t rowwise_sfs = rowwise_scales_first_dim[t] * rowwise_scales_last_dim[t];
         const size_t colwise_sfs = colwise_scales_first_dim[t] * colwise_scales_last_dim[t];
@@ -566,22 +573,27 @@ void performTest(const ProcessingMethod processing_method,
         size_t mismatches_scales = 0;
 #ifdef USE_ROCM
         std::vector<size_t> mismatches_scales_indices;
-#endif
-        compare_scaling_factors("rowwise_scales", out_scales_rowwise_h.data(), out_scales_rowwise_ref.data(),
-                                1, rowwise_sfs_num, rowwise_sfs_num,
-#ifdef USE_ROCM
-                                mismatches_scales_indices,
-#endif
-                                mismatches_scales, scale_diff_abs_tolerance,
-                                abs_tolerable_mismatches_limit, rel_tolerable_mismatches_limit);
-
-#ifdef USE_ROCM
+        for (size_t t = 0; t < num_tensors; t++) {
+            compare_scaling_factors("rowwise_scales",
+                                    out_scales_rowwise_h.data() + rowwise_scales_offset[t],
+                                    out_scales_rowwise_ref.data() + rowwise_scales_offset[t],
+                                    rowwise_scales_first_dim[t], rowwise_scales_last_dim[t],
+                                    rowwise_scales_last_dim[t],
+                                    mismatches_scales_indices,
+                                    mismatches_scales, scale_diff_abs_tolerance,
+                                    abs_tolerable_mismatches_limit, rel_tolerable_mismatches_limit);
+        }
         if (::testing::Test::HasFatalFailure()) return;
         adjust_ref_for_e8m0_scale_error("rowwise_scales", mismatches_scales_indices,
                                         out_scales_rowwise_h.data(), out_scales_rowwise_ref.data(),
                                         rowwise_sfs_num, rows, cols, true,
                                         out_data_rowwise_ref.data(), otype);
         mismatches_scales = 0;
+#else
+        compare_scaling_factors("rowwise_scales", out_scales_rowwise_h.data(), out_scales_rowwise_ref.data(),
+                                1, rowwise_sfs_num, rowwise_sfs_num,
+                                mismatches_scales, scale_diff_abs_tolerance,
+                                abs_tolerable_mismatches_limit, rel_tolerable_mismatches_limit);
 #endif
         const size_t mismatches_elts = 32 * mismatches_scales;
 
@@ -596,22 +608,27 @@ void performTest(const ProcessingMethod processing_method,
         size_t mismatches_scales = 0;
 #ifdef USE_ROCM
         std::vector<size_t> mismatches_scales_indices;
-#endif
-        compare_scaling_factors("colwise_scales", out_scales_colwise_h.data(), out_scales_colwise_ref.data(),
-                                1, colwise_sfs_num, colwise_sfs_num,
-#ifdef USE_ROCM
-                                mismatches_scales_indices,
-#endif
-                                mismatches_scales, scale_diff_abs_tolerance,
-                                abs_tolerable_mismatches_limit, rel_tolerable_mismatches_limit);
-
-#ifdef USE_ROCM
+        for (size_t t = 0; t < num_tensors; t++) {
+            compare_scaling_factors("colwise_scales",
+                                    out_scales_colwise_h.data() + colwise_scales_offset[t],
+                                    out_scales_colwise_ref.data() + colwise_scales_offset[t],
+                                    colwise_scales_first_dim[t], colwise_scales_last_dim[t],
+                                    colwise_scales_last_dim[t],
+                                    mismatches_scales_indices,
+                                    mismatches_scales, scale_diff_abs_tolerance,
+                                    abs_tolerable_mismatches_limit, rel_tolerable_mismatches_limit);
+        }
         if (::testing::Test::HasFatalFailure()) return;
         adjust_ref_for_e8m0_scale_error("colwise_scales", mismatches_scales_indices,
                                         out_scales_colwise_h.data(), out_scales_colwise_ref.data(),
                                         colwise_sfs_num, rows, cols, false,
                                         out_data_colwise_ref.data(), otype);
         mismatches_scales = 0;
+#else
+        compare_scaling_factors("colwise_scales", out_scales_colwise_h.data(), out_scales_colwise_ref.data(),
+                                1, colwise_sfs_num, colwise_sfs_num,
+                                mismatches_scales, scale_diff_abs_tolerance,
+                                abs_tolerable_mismatches_limit, rel_tolerable_mismatches_limit);
 #endif
         const size_t mismatches_elts = 32 * mismatches_scales;
 
@@ -703,10 +720,12 @@ class GroupedFusedCastMXFP8TestSuite : public ::testing::TestWithParam
                 >> {};
 
 TEST_P(GroupedFusedCastMXFP8TestSuite, Test) {
+#ifndef __HIP_PLATFORM_AMD__
     // Skip tests for pre-Blackwell architectures
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
     }
+#endif
 
     using namespace transformer_engine;
     using namespace test;

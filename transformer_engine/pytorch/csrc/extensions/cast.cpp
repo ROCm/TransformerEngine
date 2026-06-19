@@ -303,6 +303,19 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
       nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
                                 nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
     });
+#ifdef USE_ROCM
+  } else if (num_tensors > 0 && detail::IsMXFP8Quantizers(quantizer_py_list[0].ptr())) {
+    std::vector<NVTETensor> nvte_tensor_input_list;
+    std::vector<NVTETensor> nvte_tensor_output_list;
+    for (size_t i = 0; i < num_tensors; ++i) {
+      nvte_tensor_input_list.push_back(input_list[i].data());
+      nvte_tensor_output_list.push_back(output_list[i].data());
+    }
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_multi_tensor_quantize(nvte_tensor_input_list.data(), nvte_tensor_output_list.data(),
+                                 nullptr, num_tensors, at::cuda::getCurrentCUDAStream());
+    });
+#endif
   } else {
     // Quantize kernels individually
     for (size_t i = 0; i < num_tensors; ++i) {
