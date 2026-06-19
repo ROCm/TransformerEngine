@@ -1979,6 +1979,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   // Check that K is compatible with the MXFP8 scale layout, and M/N are multiples of 16
   if (inputA->scaling_mode == NVTE_MXFP8_1D_SCALING || inputB->scaling_mode == NVTE_MXFP8_1D_SCALING) {
     const bool is_gfx1250 = cuda::sm_arch() == 125;
+    // TODO: Also use 32 for gfx950 once hipBLASLt (and TE) support MXFP8 GEMM with 
+    // swizzled scales on that architecture.
     const int required_k_multiple = is_gfx1250 ? 32 : 128;
     NVTE_CHECK(inputBias->data.dptr == nullptr, "MXFP8 GEMM does not yet support bias.");
     NVTE_CHECK((k % required_k_multiple) == 0,

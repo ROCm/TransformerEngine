@@ -475,7 +475,10 @@ void performTest(const TestParams& params) {
     if (params.m % 16 || params.n % 16) {
       GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
     }
-    const size_t required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
+    size_t required_k_multiple = 128;
+  #ifdef __HIP_PLATFORM_AMD__
+    required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
+  #endif
     if (params.k % required_k_multiple) {
       GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
     }
@@ -703,7 +706,10 @@ void performDqTest(const TestParams &params) {
   if (params.m % 16 || params.n % 16) {
     GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
   }
-  const size_t required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
+  size_t required_k_multiple = 128;
+#ifdef __HIP_PLATFORM_AMD__
+  required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
+#endif
   if (params.k % required_k_multiple) {
     GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
   }
