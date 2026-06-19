@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -109,7 +111,7 @@ class TestDistributedSoftmax:
         collective_count_ref = self.generate_collectives_count_ref()
         devices = np.asarray(jax.devices()[:device_count]).reshape(*mesh_shape)
         mesh = Mesh(devices, mesh_axes)
-        with mesh, autocast(mesh_resource=mesh_resource):
+        with jax.set_mesh(mesh), autocast(mesh_resource=mesh_resource):
             x_named_sharding = NamedSharding(mesh, x_pspec)
             mask_named_sharding = NamedSharding(mesh, mask_pspec)
             x_ = jax.device_put(x, x_named_sharding)
