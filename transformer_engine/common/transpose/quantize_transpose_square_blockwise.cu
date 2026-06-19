@@ -19,6 +19,9 @@
 #include "common/util/cuda_runtime.h"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "common/util/rocm_device_utils.cuh"
+#endif
 
 #if (!defined(__CUDA_MINIMUM_ARCH__) && __CUDA_ARCH__ >= 900) || \
     (defined(__CUDA_MINIMUM_ARCH__) && __CUDA_MINIMUM_ARCH__ >= 900)
@@ -370,11 +373,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
   }
   // Reduce amax in the warp (32x32 tile)
 #ifdef __HIP_PLATFORM_AMD__
-#pragma unroll
-  for (int delta = kThreadsPerWarp / 2; delta > 0; delta /= 2) {
-    warp_tile_amax = fmaxf(amax, __shfl_xor(amax, delta, kThreadsPerWarp));
-    amax = warp_tile_amax;
-  }
+  warp_tile_amax = rocm_subwarp_allreduce<kThreadsPerWarp>(amax, rocm_op::max{});
 #else
   warp_tile_amax = warp_reduce_max<kThreadsPerWarp>(amax);
   // broadcast the amax to all threads in a warp from the lane 0
