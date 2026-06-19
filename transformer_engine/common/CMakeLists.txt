@@ -300,26 +300,6 @@ if(USE_ROCM)
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tt.cpp
       gemm/ck_grouped_gemm/ck_mx_grouped_gemm.cpp
       gemm/rocm_gemm.cu)
-
-  # CK grouped GEMM instantiates CK-tile GEMM kernels, which do not compile for
-  # gfx1250 (RDNA4 - CK-tile has no arch definition for it). Build it only when
-  # no gfx1250 target is requested; otherwise the runtime falls back to the
-  # hipBLASLt grouped-GEMM path. NVTE_CK_GROUPED_GEMM gates the matching call
-  # site in gemm/cublaslt_gemm.cu.
-  if(NOT CMAKE_HIP_ARCHITECTURES MATCHES "gfx1250")
-    set(NVTE_CK_GROUPED_GEMM ON)
-    list(INSERT transformer_engine_SOURCES 0
-        gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
-        gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
-        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp
-        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_nn.cpp
-        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_nt.cpp
-        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tn.cpp
-        gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tt.cpp)
-  else()
-    message(STATUS "ck_grouped_gemm disabled (gfx1250 target; CK-tile unsupported) - "
-                   "using hipBLASLt grouped GEMM fallback")
-  endif()
 endif()
 
 if(USE_CUDA)
@@ -406,9 +386,6 @@ set_property(
 else()
   set(CK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/composable_kernel)
   target_include_directories(transformer_engine PRIVATE ${CK_ROOT}/include)
-  if(NVTE_CK_GROUPED_GEMM)
-    target_compile_definitions(transformer_engine PRIVATE NVTE_CK_GROUPED_GEMM)
-  endif()
 endif() #USE_CUDA
 
 # Configure dependencies
