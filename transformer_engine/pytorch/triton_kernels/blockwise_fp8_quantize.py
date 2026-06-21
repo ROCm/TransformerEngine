@@ -2,11 +2,9 @@
 #
 # See LICENSE for license information.
 #
-# DeepSeek-style blockwise FP8 quantization (1x128 row / 128x1 col / 128x128 weight).
-# Triton kernels ported from AMD Primus-Turbo
-# (primus_turbo/triton/quantization/quant_blockwise.py); pure-Triton, no CK / no C++.
-# Host launchers adapted from Primus-Turbo
-# (primus_turbo/pytorch/kernels/quantization/quantization_impl.py).
+# Blockwise FP8 quantization Triton kernels (1x128 activation, 128x128 weight),
+# adapted from AMD Primus-Turbo (primus_turbo/triton/quantization/quant_blockwise.py
+# and primus_turbo/pytorch/kernels/quantization/quantization_impl.py).
 
 import torch
 import triton
@@ -213,10 +211,9 @@ def quant_fp8_blockwise_segment_m_kernel(
 # -----------------------------------------------------------------------------
 # Host launchers
 #
-# NOTE: Primus-Turbo registers these as ``torch.library.custom_op`` to work
-# around an inductor ``identify_mutated_tensors`` bug on gfx942 + Triton 3.7.
-# For the TE port we keep them as plain functions for now; if torch.compile
-# integration surfaces the same issue we will add the custom_op wrapper.
+# Plain functions, not ``torch.library.custom_op``. A custom_op wrapper may be
+# needed if torch.compile hits the inductor ``identify_mutated_tensors`` bug
+# seen on gfx942 + Triton 3.7.
 # -----------------------------------------------------------------------------
 
 

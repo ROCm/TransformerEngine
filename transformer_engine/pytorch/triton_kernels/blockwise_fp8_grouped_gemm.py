@@ -2,19 +2,15 @@
 #
 # See LICENSE for license information.
 #
-# DeepSeek-style blockwise FP8 grouped GEMM (MoE) — forward / dgrad (M-grouped).
-# Ported from AMD Primus-Turbo
-# (primus_turbo/triton/grouped_gemm/grouped_gemm_fp8_kernel.py, blockwise fwd
-# section); pure-Triton, no CK / no C++. Only the blockwise path is taken
-# (origami / tensorwise / rowwise helpers are intentionally not ported).
-# The variable-K wgrad kernel is added in a later step (Stage 4).
+# Blockwise FP8 grouped GEMM Triton kernels (MoE), adapted from AMD Primus-Turbo
+# (primus_turbo/triton/grouped_gemm/grouped_gemm_fp8_kernel.py).
 
 import torch
 import triton
 import triton.language as tl
 
 
-# --- arch detection (self-contained; TODO: switch to TE common.get_arch) -----
+# Local gfx950 check (TODO: use TE's common.get_arch).
 def is_gfx950() -> bool:
     props = torch.cuda.get_device_properties(torch.cuda.current_device())
     return "gfx950" in props.gcnArchName
@@ -24,7 +20,7 @@ def get_num_cus() -> int:
     return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
 
 
-# --- AMD compiler knobs (ported from Primus triton_knobs_helper.py) ----------
+# AMD gfx950 compiler knobs (from Primus triton_knobs_helper.py).
 _KNOBS_SET = False
 
 
@@ -51,9 +47,8 @@ def _set_amd_knobs(enable: bool = True):
         triton.knobs.amd.scalarize_packed_fops = enable
 
 
-# --- XCD/chiplet PID remap (ported from Primus grouped_gemm_kernel.py) --------
-# TODO(integration): TE has an equivalent in gmm/pid_preprocessing.remap_xcd_chunked;
-# port faithfully here for now so the kernel is byte-equivalent + standalone-testable.
+# XCD/chiplet PID remap (from Primus grouped_gemm_kernel.py).
+# TODO: TE has an equivalent in gmm/pid_preprocessing.remap_xcd_chunked.
 NUM_XCDS = 8
 
 
@@ -73,12 +68,8 @@ def _chiplet_transform_chunked(
     return chunk_idx * NUM_XCDS * CHUNK_SIZE + xcd * CHUNK_SIZE + pos_in_chunk
 
 
-# ===========================================================================
-# Below: blockwise grouped FP8 forward kernel + public entrypoint, copied
-# verbatim from Primus-Turbo grouped_gemm_fp8_kernel.py
-# (_grouped_blockwise_fp8_persistent_gemm_kernel and
-# grouped_gemm_fp8_blockwise_triton_kernel).
-# ===========================================================================
+# Blockwise grouped FP8 kernel and public entrypoint
+# (from Primus grouped_gemm_fp8_kernel.py).
 
 @triton.jit()
 def _grouped_blockwise_fp8_persistent_gemm_kernel(

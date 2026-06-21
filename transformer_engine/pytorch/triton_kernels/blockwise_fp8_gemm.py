@@ -2,11 +2,9 @@
 #
 # See LICENSE for license information.
 #
-# DeepSeek-style blockwise FP8 GEMM (1x128 act / 128x128 weight) — unified
-# NT(fwd) / NN(dgrad) / TN(wgrad) Triton kernel. Ported from AMD Primus-Turbo
-# (primus_turbo/triton/gemm/gemm_fp8_kernel.py, blockwise section); pure-Triton,
-# no CK / no C++. Only the blockwise path is taken (origami / split-K helpers,
-# used by the tensorwise/rowwise paths, are intentionally not ported).
+# Blockwise FP8 GEMM Triton kernel: a unified NT/NN/TN kernel covering the
+# forward, dgrad and wgrad layouts. Adapted from AMD Primus-Turbo
+# (primus_turbo/triton/gemm/gemm_fp8_kernel.py, blockwise section).
 
 import itertools
 import os
@@ -16,16 +14,13 @@ import triton
 import triton.language as tl
 
 
-# --- arch detection ---------------------------------------------------------
-# Self-contained for standalone testing. TODO(integration): replace with TE's
-# ``from ..common import get_arch`` -> ``get_arch() == "gfx950"`` once this
-# module is imported through the transformer_engine.pytorch package.
+# Local gfx950 check (TODO: use TE's common.get_arch).
 def is_gfx950() -> bool:
     props = torch.cuda.get_device_properties(torch.cuda.current_device())
     return "gfx950" in props.gcnArchName
 
 
-# --- AMD compiler knobs (ported from Primus triton_knobs_helper.py) ----------
+# AMD gfx950 compiler knobs (from Primus triton_knobs_helper.py).
 _KNOBS_SET = False
 
 
@@ -45,12 +40,8 @@ def set_triton_knobs_gfx950() -> None:
         os.environ.setdefault("TRITON_HIP_USE_BLOCK_PINGPONG", "1")
 
 
-# ===========================================================================
-# Below: blockwise FP8 GEMM, copied verbatim from Primus-Turbo
-# gemm_fp8_kernel.py lines 742-1172 (_get_blockwise_autotune_configs,
-# _blockwise_fp8_unified_kernel, the three autotune wrappers, and the public
-# gemm_fp8_blockwise_triton_kernel entrypoint).
-# ===========================================================================
+# Blockwise FP8 GEMM kernel, autotune configs and public entrypoint
+# (from Primus gemm_fp8_kernel.py).
 def _get_blockwise_autotune_configs(
     allow_num_stages_3: bool = True,
     extra_matrix_instr_nonkdim: list | None = None,
@@ -141,13 +132,12 @@ def _get_blockwise_autotune_configs(
 #     TN     │ False          │ False          │ False      │ False    │ True
 #
 # Kept invariants (do not break without re-benchmarking):
-#   * `EVEN_K` fast path skips the K-tail mask on NT/NN (R26: removes two
+#   * `EVEN_K` fast path skips the K-tail mask on NT/NN (removes two
 #     `v_cmp_*` + one `v_cndmask_*` per K iteration). TN keeps the mask path
 #     because its `b_ptrs += BLOCK_K * stride_bk_val` arithmetic combined with
 #     `num_stages=3` triggered the historic Triton 3.7 LLVM-backend
 #     `Begin <= End` assertion; the TN autotune wrapper below already drops
-#     `ns=3`, but EVEN_K=False on TN is the matched safety net documented in
-#     `pr_report_blockwise_gemm_triton.md` §3.2.
+#     `ns=3`, but EVEN_K=False on TN is the matched safety net.
 #   * `TRANS_C_STORE=True` takes the `tl.trans(acc)` epilogue so the BF16
 #     write coalesces into `(buffer|global)_store_dwordx4` under
 #     `trans_c=True` (stride_cm=1, stride_cn=N). NT/NN (`trans_c=False`) keep
@@ -160,7 +150,7 @@ def _get_blockwise_autotune_configs(
 #   * NN  : 144 configs (96 + matrix_instr_nonkdim=16 stack on BM=256),
 #           key=("M","N","K","EVEN_K"), keeps `num_stages=3` (the nonkdim=16
 #           candidate is what avoids the 16-AGPR overflow on
-#           BM=256/nw=8/ns=3 documented in §3.3).
+#           BM=256/nw=8/ns=3).
 #   * TN  : 64 configs (no `num_stages=3` — dual strided-K + ns=3 hits the
 #           Triton 3.7 AMD-backend assertion mentioned above),
 #           key=("M","N","K").
@@ -330,6 +320,28 @@ _blockwise_fp8_tn_kernel = triton.autotune(
 )(_blockwise_fp8_unified_kernel)
 
 
+_TRITON_AUTOTUNE = bool(int(os.environ.get("NVTE_FP8_BLOCK_SCALING_TRITON_AUTOTUNE", "0")))
+
+
+def get_blockwise_gemm_config(layout, tokens):
+    """Baked gfx950 tile config; ``tokens`` is M for NT/NN, K for TN.
+
+    Winners captured offline over the model dense GEMM shapes, replacing per-shape
+    autotune. Returns None off gfx950 so the caller falls back to autotune.
+    """
+    if not is_gfx950():
+        return None
+    if layout == "NT":
+        return dict(BLOCK_M=256, BLOCK_N=64, BLOCK_K=128, GROUP_M=4, CHUNK=32, NUM_XCDS=8, num_warps=8, num_stages=3)
+    if layout == "NN":
+        if tokens <= 1024:
+            return dict(BLOCK_M=256, BLOCK_N=64, BLOCK_K=128, GROUP_M=4, CHUNK=64, NUM_XCDS=8, num_warps=8, num_stages=3)
+        return dict(BLOCK_M=128, BLOCK_N=128, BLOCK_K=128, GROUP_M=8, CHUNK=64, NUM_XCDS=8, num_warps=4, num_stages=2)
+    if tokens <= 2048:
+        return dict(BLOCK_M=128, BLOCK_N=128, BLOCK_K=128, GROUP_M=4, CHUNK=64, NUM_XCDS=8, num_warps=4, num_stages=2)
+    return dict(BLOCK_M=256, BLOCK_N=128, BLOCK_K=128, GROUP_M=4, CHUNK=32, NUM_XCDS=8, num_warps=8, num_stages=2)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Unified Public API — Block-wise FP8 GEMM
 # Interface consistent with CK blockwise backend.
@@ -402,7 +414,7 @@ def gemm_fp8_blockwise_triton_kernel(
     # for the kernel, which autotune wrapper owns the search space/cache, and
     # the three constexpr flags (SCALE_2D_B / EVEN_K / TRANS_C_STORE).
     #
-    # TN safety notes (Round-6 P2-#7.6):
+    # TN safety notes:
     #   * `TRANS_C_STORE=True` lets the BF16 epilogue coalesce into dwordx4
     #     under the `(N, M)` output buffer; without it the wgrad path emits
     #     64×buffer_store_short per tile.
@@ -454,7 +466,7 @@ def gemm_fp8_blockwise_triton_kernel(
     num_k = (K + 127) // 128
     NUM_SMS = ((M + 127) // 128) * ((N + 127) // 128)
 
-    autotune_kernel[(NUM_SMS,)](
+    args = (
         A_view,
         B_view,
         out,
@@ -475,10 +487,53 @@ def gemm_fp8_blockwise_triton_kernel(
         stride_bs_1,
         NUM_SMS,
         num_k,
+    )
+    flags = dict(
         A_K_CONTIGUOUS=not trans_a,
         B_K_CONTIGUOUS=trans_b,
         SCALE_2D_B=SCALE_2D_B,
         EVEN_K=EVEN_K,
         TRANS_C_STORE=TRANS_C_STORE,
     )
+    # Default: baked gfx950 config. Opt in to autotune via NVTE_FP8_BLOCK_SCALING_TRITON_AUTOTUNE.
+    layout = "NT" if (not trans_a and trans_b) else ("NN" if not trans_a else "TN")
+    cfg = None if _TRITON_AUTOTUNE else get_blockwise_gemm_config(layout, M if layout != "TN" else K)
+    if cfg is None:
+        autotune_kernel[(NUM_SMS,)](*args, **flags)
+    else:
+        _blockwise_fp8_unified_kernel[(NUM_SMS,)](
+            *args,
+            BLOCK_M=cfg["BLOCK_M"],
+            BLOCK_N=cfg["BLOCK_N"],
+            BLOCK_K=cfg["BLOCK_K"],
+            GROUP_M=cfg["GROUP_M"],
+            NUM_XCDS=cfg["NUM_XCDS"],
+            CHUNK=cfg["CHUNK"],
+            num_warps=cfg["num_warps"],
+            num_stages=cfg["num_stages"],
+            **flags,
+        )
     return out
+
+
+def gemm_blockwise(A, B, transa, transb, out_dtype, bias=None, out=None):
+    """Blockwise FP8 GEMM for Float8Blockwise operands via the Triton kernel.
+
+    ``general_gemm`` computes ``out = op_b(B) @ op_a(A)``; the Triton kernel
+    computes ``op(a) @ op(b)``, so a=B, b=A with the transpose flags swapped.
+    """
+    from .common import te_dtype_to_torch_dtype
+
+    dt = te_dtype_to_torch_dtype(A._fp8_dtype)
+    a_data, a_scale = B.get_gemm_operand(is_left=True, trans=transb)
+    b_data, b_scale = A.get_gemm_operand(is_left=False, trans=transa)
+    res = gemm_fp8_blockwise_triton_kernel(
+        a_data.view(dt), a_scale, b_data.view(dt), b_scale,
+        trans_a=transb, trans_b=transa, out_dtype=out_dtype,
+    )
+    if bias is not None:
+        res = res + bias.to(res.dtype)
+    if out is not None:
+        out.copy_(res)
+        return out
+    return res
