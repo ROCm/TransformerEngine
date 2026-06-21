@@ -154,8 +154,15 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         # 1D-scaled activation: 1x128 blocks must align with the contraction axis.
         want_rowwise = (not trans) if is_left else trans
         if want_rowwise:
-            return self._rowwise_data, self._rowwise_scale_inv
-        return self._columnwise_data, self._columnwise_scale_inv
+            # _rowwise_scale_inv is stored transposed [H/128, *leading] (TE get_scale_shape contract,
+            # required by the SP all-gather scale de-interleave); the kernel wants it token-first.
+            rs = self._rowwise_scale_inv
+            return self._rowwise_data, rs.reshape(rs.shape[0], -1).t().contiguous()
+        # _columnwise_data is stored transposed [H, *leading] (TE get_columnwise_shape contract,
+        # required by the SP all-gather de-interleave); the Triton GEMM wants it token-first
+        # [tokens, H], so transpose back here.
+        cw = self._columnwise_data
+        return cw.reshape(cw.shape[0], -1).t().contiguous(), self._columnwise_scale_inv
 
     def _transpose_dq_columnwise_output(self, columnwise_dq: torch.Tensor) -> torch.Tensor:
         """Takes dequantized columnwise data and permutes to a rowwise shape"""

@@ -1526,7 +1526,9 @@ class Linear(TransformerEngineBaseModule):
                 non_tensor_args,
             )
             if rocm_blockwise_flatten:
-                out = out.reshape(*inp_lead, out.shape[-1])
+                # SP can change the seq dim across the Linear (e.g. row-parallel reduce-scatter),
+                # so infer it from out; keep the batch dims.
+                out = out.reshape(-1, *inp_lead[1:], out.shape[-1])
         finally:
             self.end_forward()
         if self.gemm_bias_unfused_add:

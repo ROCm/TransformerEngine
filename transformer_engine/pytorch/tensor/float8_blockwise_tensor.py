@@ -159,16 +159,20 @@ class Float8BlockQuantizer(Quantizer):
             if self.rowwise_usage and self.columnwise_usage:
                 row, srow, col, scol = quantize_fp8_blockwise_dual(x, dt, block)
                 dst._rowwise_data = row.view(torch.uint8).reshape(orig_shape)
-                dst._rowwise_scale_inv = srow
-                dst._columnwise_data = col.view(torch.uint8).reshape(orig_shape)
+                dst._rowwise_scale_inv = srow.t().contiguous()
+                dst._columnwise_data = (
+                    col.view(torch.uint8).t().contiguous().reshape((orig_shape[-1],) + orig_shape[:-1])
+                )
                 dst._columnwise_scale_inv = scol
             elif self.rowwise_usage:
                 row, srow = quantize_fp8_blockwise(x, dt, axis=1, block_size=block)
                 dst._rowwise_data = row.view(torch.uint8).reshape(orig_shape)
-                dst._rowwise_scale_inv = srow
+                dst._rowwise_scale_inv = srow.t().contiguous()
             else:
                 col, scol = quantize_fp8_blockwise(x, dt, axis=0, block_size=block)
-                dst._columnwise_data = col.view(torch.uint8).reshape(orig_shape)
+                dst._columnwise_data = (
+                    col.view(torch.uint8).t().contiguous().reshape((orig_shape[-1],) + orig_shape[:-1])
+                )
                 dst._columnwise_scale_inv = scol
 
         dst._fp8_dtype = self.dtype
