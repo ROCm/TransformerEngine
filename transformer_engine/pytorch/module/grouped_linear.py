@@ -1021,6 +1021,17 @@ class GroupedLinear(TransformerEngineBaseModule):
                 linear_fn = _GroupedLinear.forward
                 autograd_ctx = [None]
 
+            if IS_HIP_EXTENSION and self.fp8:
+                _recipe = FP8GlobalStateManager.get_fp8_recipe()
+                if _recipe is not None and _recipe.float8_block_scaling():
+                    from .grouped_linear_blockwise import _GroupedLinearBlockwiseFP8
+
+                    linear_fn = (
+                        _GroupedLinearBlockwiseFP8.apply
+                        if is_grad_enabled
+                        else _GroupedLinearBlockwiseFP8.forward
+                    )
+
             non_tensor_args = (
                 m_splits,
                 self.apply_bias,
