@@ -114,14 +114,64 @@ class Float8BlockQuantizer(Quantizer):
             src = src.contiguous()
 
         # Launch cast kernel
-        tex.quantize(src, self, dst, noop_flag)
+        if IS_HIP_EXTENSION:
+            self._quantize_triton(src, dst)
+        else:
+            tex.quantize(src, self, dst, noop_flag)
 
         dst._fp8_dtype = self.dtype
         return dst
 
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
+        if IS_HIP_EXTENSION:
+            # ROCm Triton path: quantize out-of-place via update_quantized.
+            out = self.make_empty(tensor.shape, dtype=tensor.dtype, device=tensor.device)
+            return self.update_quantized(tensor, out)
         return tex.quantize(tensor, self)
+
+    def _quantize_triton(self, src: torch.Tensor, dst) -> None:
+        """Blockwise-quantize ``src`` into ``dst`` using the ROCm Triton kernels."""
+        from ..triton_kernels.blockwise_fp8_quantize import (
+            quantize_fp8_blockwise,
+            quantize_fp8_blockwise_dual,
+            quantize_fp8_blockwise_weight,
+        )
+        from ..triton_kernels.common import te_dtype_to_torch_dtype
+
+        block = 128
+        dt = te_dtype_to_torch_dtype(self.dtype)
+        orig_shape = tuple(src.shape)
+        x = src.reshape(-1, orig_shape[-1]).contiguous()
+
+        if self.block_scaling_dim == 2:
+            # 128x128 weight blocks.
+            if self.rowwise_usage:
+                fp8, scale = quantize_fp8_blockwise_weight(x, dt, block)
+                dst._rowwise_data = fp8.view(torch.uint8).reshape(orig_shape)
+                dst._rowwise_scale_inv = scale
+            if self.columnwise_usage:
+                fp8c, scalec = quantize_fp8_blockwise_weight(x.t().contiguous(), dt, block)
+                dst._columnwise_data = fp8c.view(torch.uint8)
+                dst._columnwise_scale_inv = scalec
+        else:
+            # 1x128 activation blocks; both directions come from the original src.
+            if self.rowwise_usage and self.columnwise_usage:
+                row, srow, col, scol = quantize_fp8_blockwise_dual(x, dt, block)
+                dst._rowwise_data = row.view(torch.uint8).reshape(orig_shape)
+                dst._rowwise_scale_inv = srow
+                dst._columnwise_data = col.view(torch.uint8).reshape(orig_shape)
+                dst._columnwise_scale_inv = scol
+            elif self.rowwise_usage:
+                row, srow = quantize_fp8_blockwise(x, dt, axis=1, block_size=block)
+                dst._rowwise_data = row.view(torch.uint8).reshape(orig_shape)
+                dst._rowwise_scale_inv = srow
+            else:
+                col, scol = quantize_fp8_blockwise(x, dt, axis=0, block_size=block)
+                dst._columnwise_data = col.view(torch.uint8).reshape(orig_shape)
+                dst._columnwise_scale_inv = scol
+
+        dst._fp8_dtype = self.dtype
 
     def get_scale_shape(self, shape: Iterable[int], columnwise: bool) -> Tuple[int, int]:
         """Scaling tensor shape.

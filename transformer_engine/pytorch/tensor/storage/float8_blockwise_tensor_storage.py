@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -143,6 +145,17 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         if columnwise_data:
             return self._columnwise_data
         raise ValueError("No data to get, both rowwise_data and columnwise_data are False")
+
+    def get_gemm_operand(self, is_left: bool, trans: bool):
+        """Select (data, scale_inv) for this tensor's role in a GEMM."""
+        # 2D-scaled weight: one rowwise [N,K] copy serves both transposes.
+        if self._is_2D_scaled:
+            return self._rowwise_data, self._rowwise_scale_inv
+        # 1D-scaled activation: 1x128 blocks must align with the contraction axis.
+        want_rowwise = (not trans) if is_left else trans
+        if want_rowwise:
+            return self._rowwise_data, self._rowwise_scale_inv
+        return self._columnwise_data, self._columnwise_scale_inv
 
     def _transpose_dq_columnwise_output(self, columnwise_dq: torch.Tensor) -> torch.Tensor:
         """Takes dequantized columnwise data and permutes to a rowwise shape"""
