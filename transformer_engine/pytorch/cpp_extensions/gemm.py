@@ -411,6 +411,8 @@ def general_gemm(
 
     if isinstance(A, Float8BlockwiseQTensorStorage) or isinstance(B, Float8BlockwiseQTensorStorage):
         if IS_HIP_EXTENSION:
+            # Single blockwise GEMM backend (Triton). Add a NVTE_ROCM_FP8_BLOCK_GEMM_BACKEND
+            # selector here once a 2nd backend (CK/hipBLASLt/AITER) is validated on gfx950.
             from ..triton_kernels.blockwise_fp8_gemm import gemm_blockwise
 
             out = gemm_blockwise(A, B, transa, transb, out_dtype, bias=bias, out=out)

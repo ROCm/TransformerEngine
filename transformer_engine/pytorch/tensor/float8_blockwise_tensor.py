@@ -115,6 +115,8 @@ class Float8BlockQuantizer(Quantizer):
 
         # Launch cast kernel
         if IS_HIP_EXTENSION:
+            # Single blockwise quantize backend (Triton). Add a NVTE_ROCM_FP8_BLOCK_QUANT_BACKEND
+            # selector when a 2nd is validated.
             self._quantize_triton(src, dst)
         else:
             tex.quantize(src, self, dst, noop_flag)
