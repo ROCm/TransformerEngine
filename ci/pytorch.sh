@@ -12,7 +12,7 @@ TEST_DIR=${TE_PATH}tests/pytorch
 #: ${TEST_WORKERS:=4}
 
 install_prerequisites() {
-    pip install 'numpy>=1.22.4' pandas safetensors
+    pip install 'numpy>=1.22.4' pandas safetensors pytest-timeout
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to install test prerequisites"
@@ -136,11 +136,22 @@ if [ -n "$SINGLE_CONFIG" ]; then
     exit $?
 fi
 
+check_flash_attn_installed() {
+    _result=$(python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils; print(FlashAttentionUtils.is_installed)" 2>/dev/null)
+    if [ "$_result" = "True" ]; then
+        return 0
+    else
+        echo "Flash attention is not installed" >&2
+        return 1
+    fi
+}
+
 #Master script mode: prepare testing prerequisites first
 start_message
 install_prerequisites
 pip list | egrep "flash|ml_dtypes|numpy|torch|transformer_e|typing_ext"
 #check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
+ck_jit_prebuild build || exit $?
 
 for _fus_attn in auto flash ck aotriton unfused; do
     configure_fused_attn_env $_fus_attn || continue
@@ -161,6 +172,10 @@ for _fus_attn in auto flash ck aotriton unfused; do
     else
         test $_fus_attn != auto && continue
         _DEFAULT_FUSED_ATTN="auto"
+    fi
+
+    if [ $_fus_attn = flash ]; then
+        check_flash_attn_installed || continue
     fi
 
     if [ -n "$TEST_JOBS_MODE" ]; then
@@ -185,4 +200,5 @@ if [ $TEST_LEVEL -ge 3 ]; then
     fi
 fi
 
+ck_jit_prebuild list
 return_run_results

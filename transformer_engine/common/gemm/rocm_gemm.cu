@@ -24,8 +24,10 @@
 #include <cstdlib>
 #include <string>
 #include <cstdint>
+#include <cstring>
 
 #include "../common.h"
+#include "../util/cuda_runtime.h"
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
 
@@ -700,16 +702,21 @@ public:
         int m_, int n_, int k_, int lda_, int ldb_, int ldd_,
         hipblasOperation_t transa_, hipblasOperation_t transb_,
         int scaling_mode_, hipblasLtEpilogue_t epilogue_,
-        bool fp4_alpha_device_vector_):
-        deviceCap(deviceCap_),
-        a_type(a_type_), b_type(b_type_),
-        d_type(d_type_), bias_type(bias_type_), aux_type(aux_type_),
-        m(m_), n(n_), k(k_), lda(lda_), ldb(ldb_), ldd(ldd_),
-        transa(transa_), transb(transb_),
-        scaling_mode(scaling_mode_), epilogue(epilogue_),
-        fp4_alpha_device_vector(fp4_alpha_device_vector_) {}
+        bool fp4_alpha_device_vector_)
+    {
+      // Zero the whole object (including padding bytes) BEFORE assigning the
+      // members, so the byte-wise Comp below never compares stack garbage.
+      std::memset(this, 0, sizeof(*this));
+      deviceCap = deviceCap_;
+      a_type = a_type_; b_type = b_type_;
+      d_type = d_type_; bias_type = bias_type_; aux_type = aux_type_;
+      m = m_; n = n_; k = k_; lda = lda_; ldb = ldb_; ldd = ldd_;
+      transa = transa_; transb = transb_;
+      scaling_mode = scaling_mode_; epilogue = epilogue_;
+      fp4_alpha_device_vector = fp4_alpha_device_vector_;
+    }
 
-    Key() {}
+    Key() { std::memset(this, 0, sizeof(*this)); }
 
     bool operator==(const Key &val) const
     {
@@ -728,6 +735,8 @@ public:
     {
       bool operator()(const Key& lhs, const Key& rhs) const
       {
+        // Safe because Key zero-inits all padding in its constructors, so the
+        // byte representation is fully determined by the logical fields.
         return ::std::string_view((const char*)&lhs, sizeof(lhs)) < ::std::string_view((const char*)&rhs, sizeof(rhs));
       }
     };
@@ -1728,10 +1737,16 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   NVTE_CHECK((is_transb ? B0 : B1) == k,
              "GEMM inputs have incompatible dimensions (A is ", A0, "x", A1, ", B is ", B0, "x", B1,
              ")");
-  // Check that K is a multiple of 128, and M/N are multiples of 16 for MXFP8 GEMM
+  // Check that K is compatible with the MXFP8 scale layout, and M/N are multiples of 16
   if (inputA->scaling_mode == NVTE_MXFP8_1D_SCALING || inputB->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    const bool is_gfx1250 = cuda::sm_arch() == 125;
+    // TODO: Also use 32 for gfx950 once hipBLASLt (and TE) support MXFP8 GEMM with 
+    // swizzled scales on that architecture.
+    const int required_k_multiple = is_gfx1250 ? 32 : 128;
     NVTE_CHECK(inputBias->data.dptr == nullptr, "MXFP8 GEMM does not yet support bias.");
-    NVTE_CHECK((k % 128) == 0, "GEMM K dimension must be multiple of 128 for MXFP8 scaling (got K=", k, ")");
+    NVTE_CHECK((k % required_k_multiple) == 0,
+               "GEMM K dimension must be multiple of ", required_k_multiple,
+               " for MXFP8 scaling (got K=", k, ")");
     NVTE_CHECK((m % 16) == 0, "GEMM M dimension must be multiple of 16 for MXFP8 scaling (got M=", m, ")");
     NVTE_CHECK((n % 16) == 0, "GEMM N dimension must be multiple of 16 for MXFP8 scaling (got N=", n, ")");
   }
