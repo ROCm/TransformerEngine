@@ -12,23 +12,17 @@ from .common import te_dtype_to_torch_dtype
 
 
 def use_cuda_graph_autotune():
-    """Whether Triton autotuning should benchmark configs via CUDA/HIP graphs.
+    """Return whether Triton autotuning should benchmark configs with CUDA/HIP graphs.
 
-    Triton's ``do_bench_cudagraph`` path (``use_cuda_graph=True``) captures each
-    candidate launch into a graph. On ROCm/HIP this is fragile: if any single
-    candidate errors mid-capture it poisons the whole capture and every later op
-    fails with "HIP error: operation failed due to a previous error during
-    capture" (Code 901), aborting the first training step. The plain ``do_bench``
-    path (``use_cuda_graph=False``) times each config independently, so a bad
-    config is simply pruned. Default to graphs on CUDA only; allow an explicit
-    override via ``NVTE_TRITON_AUTOTUNE_WITH_CUDA_GRAPH`` (set to 1 or 0).
+    Graph-based benchmarking is enabled by default on CUDA and disabled on ROCm/HIP.
+    Set ``NVTE_TRITON_AUTOTUNE_WITH_CUDA_GRAPH`` to ``1`` or ``0`` to override the default.
     """
     override = os.getenv("NVTE_TRITON_AUTOTUNE_WITH_CUDA_GRAPH")
     if override is not None:
         return override == "1"
     return torch.version.hip is None
 
-    
+
 def get_ln_sm_margin(sm_margin_type):
     assert sm_margin_type in {"FWD", "BWD", "INF"}
     try:
