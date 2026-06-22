@@ -19,6 +19,7 @@ struct RocmMultiCastTransposeArgs {
   void       *amax_list[kMCTMaxTensors];
   void       *scale_inv_list[kMCTMaxTensors];
   int   num_rows_list[kMCTMaxTensors];
+  int   valid_num_rows_list[kMCTMaxTensors];
   int   row_length_list[kMCTMaxTensors];
   int   block_range[kMCTMaxTensors + 1];
   int   num_tensors;
@@ -32,6 +33,7 @@ mct_cast_store(
     OType       *__restrict__ output_c,
     const int                 row_length,
     const int                 num_rows,
+    const int                 valid_num_rows,
     const float               scale,
     float                    &amax,
     NTVec<OType, STORE_SIZE / sizeof(OType)> (&local_t)[LOAD_SIZE / sizeof(IType)][ROCM_CT_WARP_SIZE / WARPS_PER_TILE],
@@ -57,9 +59,11 @@ mct_cast_store(
             IVec  in;
             OVecC out_c;
 
-            if (IS_EDGE && row >= num_rows) {
+            if (IS_EDGE && row >= valid_num_rows) {
 #pragma unroll
-                for (int j2 = 0; j2 < NVEC_IN; j2++) in.val[j2] = IType(0);
+                for (int j2 = 0; j2 < NVEC_IN; j2++) {
+                    in.val[j2] = IType(0);
+                }
             } else {
                 in.load(&input[row * row_length + col]);
             }
@@ -72,9 +76,10 @@ mct_cast_store(
                     const float v1 = (j2+1 < NVEC_IN) ? static_cast<float>(in.val[j2+1]) : 0.0f;
                     const float v2 = (j2+2 < NVEC_IN) ? static_cast<float>(in.val[j2+2]) : 0.0f;
                     const float v3 = (j2+3 < NVEC_IN) ? static_cast<float>(in.val[j2+3]) : 0.0f;
-                    if (!IS_EDGE || row < num_rows)
+                    if (!IS_EDGE || row < valid_num_rows) {
                         amax = fmaxf(amax, fmaxf(fmaxf(fabsf(v0), fabsf(v1)),
                                                   fmaxf(fabsf(v2), fabsf(v3))));
+                    }
                     uint32_t packed = rocm_pack_4xfloat8<OType>(
                         v0 * scale, v1 * scale, v2 * scale, v3 * scale);
                     uint8_t *bytes = reinterpret_cast<uint8_t *>(&packed);
@@ -90,31 +95,28 @@ mct_cast_store(
 #pragma unroll
                 for (int j2 = 0; j2 < NVEC_IN; j2++) {
                     const float v = static_cast<float>(in.val[j2]);
-                    if (!IS_EDGE || row < num_rows)
+                    if (!IS_EDGE || row < valid_num_rows) {
                         amax = fmaxf(amax, fabsf(v));
+                    }
                     const OType o = static_cast<OType>(v * scale);
                     out_c.val[j2] = o;
                     local_t[j2][iter].val[i2] = o;
                 }
             }
 
-            if (!IS_EDGE || row < num_rows)
+            if (!IS_EDGE || row < num_rows) {
                 out_c.nt_store(&output_c[row * row_length + col]);
+            }
         }
     }
 }
 
 template <bool IS_EDGE, int LOAD_SIZE, int STORE_SIZE, int WARPS_PER_TILE,
           typename IType, typename OType>
-__device__ __forceinline__ void
-mct_transpose_store(
-    OType *__restrict__ output_t,
-    const int           num_rows,
+__device__ __forceinline__ void mct_transpose_store(OType *__restrict__ output_t, const int num_rows,
     NTVec<OType, STORE_SIZE / sizeof(OType)> (&smem)[ROCM_CT_WARP_SIZE][ROCM_CT_WARP_SIZE + 1],
     NTVec<OType, STORE_SIZE / sizeof(OType)> (&local_t)[LOAD_SIZE / sizeof(IType)][ROCM_CT_WARP_SIZE / WARPS_PER_TILE],
-    const int tidx, const int tidy,
-    const int row_base, const int col_base)
-{
+    const int tidx, const int tidy, const int row_base, const int col_base) {
     constexpr int NVEC_IN   = LOAD_SIZE / sizeof(IType);
     constexpr int NVEC_OUT  = STORE_SIZE / sizeof(OType);
     constexpr int NUM_ITERS = ROCM_CT_WARP_SIZE / WARPS_PER_TILE;
@@ -177,6 +179,8 @@ rocm_multi_cast_transpose_kernel(RocmMultiCastTransposeArgs args) {
     const int num_rows   = args.num_rows_list[tensor_id];
     const int row_length = args.row_length_list[tensor_id];
 
+    const int valid_num_rows = args.valid_num_rows_list[tensor_id];
+
     const IType *__restrict__ input = reinterpret_cast<const IType *>(args.input_list[tensor_id]);
     OType *__restrict__ output_c    = reinterpret_cast<OType *>(args.output_c_list[tensor_id]);
     OType *__restrict__ output_t    = reinterpret_cast<OType *>(args.output_t_list[tensor_id]);
@@ -191,7 +195,7 @@ rocm_multi_cast_transpose_kernel(RocmMultiCastTransposeArgs args) {
     const int row_base = tile_m * TILE_ROWS;
     const int col_base = tile_n * TILE_COLS;
 
-    const bool is_edge = (row_base + TILE_ROWS > num_rows);
+    const bool is_edge = (row_base + TILE_ROWS > valid_num_rows);
 
     const float scale = (scale_ptr != nullptr) ? *scale_ptr : 1.0f;
     float amax = 0.0f;
@@ -202,14 +206,14 @@ rocm_multi_cast_transpose_kernel(RocmMultiCastTransposeArgs args) {
 
     if (is_edge) {
         mct_cast_store<true, LOAD_SIZE, STORE_SIZE, WARPS_PER_TILE, IType, OType>(
-            input, output_c, row_length, num_rows, scale, amax, local_t,
+            input, output_c, row_length, num_rows, valid_num_rows, scale, amax, local_t,
             tidx, tidy, row_base, col_base);
         mct_transpose_store<true, LOAD_SIZE, STORE_SIZE, WARPS_PER_TILE, IType, OType>(
             output_t, num_rows, smem, local_t,
             tidx, tidy, row_base, col_base);
     } else {
         mct_cast_store<false, LOAD_SIZE, STORE_SIZE, WARPS_PER_TILE, IType, OType>(
-            input, output_c, row_length, num_rows, scale, amax, local_t,
+            input, output_c, row_length, num_rows, valid_num_rows, scale, amax, local_t,
             tidx, tidy, row_base, col_base);
         mct_transpose_store<false, LOAD_SIZE, STORE_SIZE, WARPS_PER_TILE, IType, OType>(
             output_t, num_rows, smem, local_t,
@@ -229,10 +233,12 @@ rocm_multi_cast_transpose_kernel(RocmMultiCastTransposeArgs args) {
 }
 
 template <typename IType, typename OType>
-void rocm_multi_cast_transpose_dispatch(size_t num_tensors, const IType *const *input_list, OType *const *output_c_list,
-                                        OType *const *output_t_list, const float *const *scale_list, float *const *amax_list,
-                                        float *const *scale_inv_list, const size_t *num_rows_list, 
-                                        const size_t *row_length_list, hipStream_t stream) {
+void rocm_multi_cast_transpose_dispatch(size_t num_tensors, const IType *const *input_list,
+                                        OType *const *output_c_list, OType *const *output_t_list,
+                                        const float *const *scale_list, float *const *amax_list,
+                                        float *const *scale_inv_list, const size_t *num_rows_list,
+                                        const size_t *row_length_list, const size_t *valid_num_rows_list,
+                                        hipStream_t stream) {
     constexpr int WPT       = 16;
     constexpr int BLK       = ROCM_CT_WARP_SIZE * WPT;
     constexpr int ISZ       = sizeof(IType);
@@ -280,14 +286,17 @@ void rocm_multi_cast_transpose_dispatch(size_t num_tensors, const IType *const *
             int tiles_n = cols / TILE_COLS;
             int tiles   = tiles_m * tiles_n;
 
-            args.input_list[packed]      = reinterpret_cast<const void *>(input_list[i]);
-            args.output_c_list[packed]   = reinterpret_cast<void *>(output_c_list[i]);
-            args.output_t_list[packed]   = reinterpret_cast<void *>(output_t_list[i]);
-            args.scale_list[packed]      = reinterpret_cast<const void *>(scale_list[i]);
-            args.amax_list[packed]       = amax_list[i];
-            args.scale_inv_list[packed]  = scale_inv_list[i];
-            args.num_rows_list[packed]   = rows;
-            args.row_length_list[packed] = cols;
+            int valid_rows = valid_num_rows_list ? valid_num_rows_list[i] : rows;
+
+            args.input_list[packed]          = reinterpret_cast<const void *>(input_list[i]);
+            args.output_c_list[packed]       = reinterpret_cast<void *>(output_c_list[i]);
+            args.output_t_list[packed]       = reinterpret_cast<void *>(output_t_list[i]);
+            args.scale_list[packed]          = reinterpret_cast<const void *>(scale_list[i]);
+            args.amax_list[packed]           = amax_list[i];
+            args.scale_inv_list[packed]      = scale_inv_list[i];
+            args.num_rows_list[packed]       = rows;
+            args.valid_num_rows_list[packed] = valid_rows;
+            args.row_length_list[packed]     = cols;
             total_blocks += tiles;
             args.block_range[packed + 1] = total_blocks;
             packed++;
