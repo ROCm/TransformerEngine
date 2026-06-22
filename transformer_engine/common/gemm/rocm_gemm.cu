@@ -6,6 +6,7 @@
 #include <type_traits>
 #include <transformer_engine/gemm.h>
 #include <transformer_engine/multi_stream.h>
+#include <transformer_engine/transpose.h>
 #include <transformer_engine/transformer_engine.h>
 #include <map>
 #include <unistd.h>
@@ -202,29 +203,15 @@ struct GemmParam {
 constexpr int kMXFP8BlockSize = 32;
 constexpr int kMXFP8ScaleGroupSize = 4;
 
-__global__ void transpose_u8_kernel(const uint8_t* __restrict__ input,
-                                    uint8_t* __restrict__ output,
-                                    const size_t rows, const size_t cols) {
-  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const size_t total = rows * cols;
-  if (idx >= total) return;
-
-  const size_t row = idx / cols;
-  const size_t col = idx % cols;
-  output[col * rows + row] = input[idx];
-}
-
-template <typename T>
-__global__ void transpose_kernel(const T* __restrict__ input,
-                                 T* __restrict__ output,
-                                 const size_t rows, const size_t cols) {
-  const size_t idx = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
-  const size_t total = rows * cols;
-  if (idx >= total) return;
-
-  const size_t row = idx / cols;
-  const size_t col = idx % cols;
-  output[col * rows + row] = input[idx];
+// Transpose a 2D matrix using the optimized tiled nvte_transpose kernel.
+static void launch_transpose(const void* input, void* output,
+                             const size_t rows, const size_t cols,
+                             const DType dtype, hipStream_t stream) {
+  if (rows == 0 || cols == 0)
+    return;
+  TensorWrapper input_tw(const_cast<void*>(input), std::vector<size_t>{rows, cols}, dtype);
+  TensorWrapper output_tw(output, std::vector<size_t>{cols, rows}, dtype);
+  nvte_transpose(input_tw.data(), output_tw.data(), stream);
 }
 
 __global__ void mxfp8_colwise_scale_to_rowwise_kernel(const uint8_t* __restrict__ input,
@@ -250,43 +237,7 @@ __global__ void mxfp8_colwise_scale_to_rowwise_kernel(const uint8_t* __restrict_
   output[out_idx] = (k < valid_k_scale && m < valid_m) ? input[in_idx] : 127;
 }
 
-void launch_transpose_u8(const void* input, void* output, const size_t rows, const size_t cols,
-                         hipStream_t stream) {
-  constexpr int kBlockSize = 256;
-  const size_t total = rows * cols;
-  if (total == 0) return;
-  const int grid = static_cast<int>((total + kBlockSize - 1) / kBlockSize);
-  transpose_u8_kernel<<<grid, kBlockSize, 0, stream>>>(
-      reinterpret_cast<const uint8_t*>(input), reinterpret_cast<uint8_t*>(output), rows, cols);
-  NVTE_CHECK_CUDA(hipGetLastError());
-}
 
-template <typename T>
-void launch_transpose_typed(const void* input, void* output, const size_t rows, const size_t cols,
-                            hipStream_t stream) {
-  constexpr int kBlockSize = 256;
-  const size_t total = rows * cols;
-  if (total == 0) return;
-  const int grid = static_cast<int>((total + kBlockSize - 1) / kBlockSize);
-  transpose_kernel<T><<<grid, kBlockSize, 0, stream>>>(
-      reinterpret_cast<const T*>(input), reinterpret_cast<T*>(output), rows, cols);
-  NVTE_CHECK_CUDA(hipGetLastError());
-}
-
-void launch_transpose_output(const DType dtype, const void* input, void* output,
-                             const size_t rows, const size_t cols, hipStream_t stream) {
-  switch (dtype) {
-    case DType::kFloat32:
-      launch_transpose_typed<uint32_t>(input, output, rows, cols, stream);
-      break;
-    case DType::kFloat16:
-    case DType::kBFloat16:
-      launch_transpose_typed<uint16_t>(input, output, rows, cols, stream);
-      break;
-    default:
-      NVTE_ERROR("Unsupported MXFP8 NT transpose output dtype: ", to_string(dtype));
-  }
-}
 
 void launch_mxfp8_colwise_scale_to_rowwise(const void* input, void* output,
                                            const size_t k_scale, const size_t padded_m,
@@ -332,7 +283,8 @@ Tensor make_mxfp8_rowwise_from_columnwise(const Tensor& input, std::vector<void*
   const size_t rows = product(data_shape) / cols;
   const size_t data_bytes = rows * cols * typeToSize(input.columnwise_data.dtype);
   void* rowwise_data = allocate_async_temp(buffers, data_bytes, stream);
-  launch_transpose_u8(input.columnwise_data.dptr, rowwise_data, rows, cols, stream);
+  launch_transpose(input.columnwise_data.dptr, rowwise_data, rows, cols,
+                   input.columnwise_data.dtype, stream);
 
   const auto& scale_shape = input.columnwise_scale_inv.shape;
   NVTE_CHECK(scale_shape.size() == 2, "MXFP8 transpose-to-TN expects 2D column-wise scales.");
@@ -1940,7 +1892,9 @@ bool try_mxfp8_non_tn_transpose_to_tn(const Tensor *inputA, const Tensor *inputB
                    0.0f, use_split_accumulator, math_sm_count, stream, handle);
 
     if (transb == CUBLAS_OP_T) {
-      launch_transpose_output(outputD->data.dtype, D_tn.data.dptr, outputD->data.dptr, m, n, stream);
+      launch_transpose(D_tn.data.dptr, outputD->data.dptr,
+                       static_cast<size_t>(m), static_cast<size_t>(n),
+                       outputD->data.dtype, stream);
     }
     launched = true;
   } catch (...) {
