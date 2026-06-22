@@ -1798,10 +1798,10 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                   && m % 256 == 0 && n % 256 == 0 && k % 128 == 0 && k >= 256;
   }
 
+  hipStream_t s = use_service_stream ? ss_ctl.stream : stream;
+
   if (use_hipkittens) {
     auto param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
-    
-    hipStream_t s = use_service_stream ? ss_ctl.stream : stream;
 
     kittens_mxfp8_gemm(param.A, param.B, outputD->data.dptr,
                        param.A_scale_inv, param.B_scale_inv,
@@ -1822,7 +1822,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
     hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, m, n, k, lda, ldb, ldd, transa,
                    transb, grad, workspace, workspaceSize, alpha, beta, use_split_accumulator,
-                   math_sm_count, use_service_stream ? ss_ctl.stream : stream, handle);
+                   math_sm_count, s, handle);
 #ifdef USE_HIPKITTENS_GEMM
   }
 #endif

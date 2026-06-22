@@ -820,7 +820,7 @@ void performDqTest(const TestParams &params) {
   if (force_hipblaslt_) {                                                       \
     setenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "1", 1);                            \
   } else {                                                                      \
-    unsetenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8");                                  \
+    setenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "0", 1);                            \
   }                                  \
   TestParams P_ = {.m = std::get<0>(std::get<0>(GetParam())),                   \
                    .k = std::get<1>(std::get<0>(GetParam())),                   \
@@ -839,8 +839,8 @@ class GEMMTestSuite
     : public ::testing::TestWithParam<
           std::tuple<std::tuple<size_t, size_t, size_t>, bool, bool, Layout, NVTEScalingMode, bool>> {};
 
-#define MAKE_GEMM_TEST(NAME_, A_, B_, BIAS_, GELU_, D_)                     \
-  TEST_P(GEMMTestSuite, NAME_) {                                            \
+#define MAKE_GEMM_TEST(SUITE_, NAME_, A_, B_, BIAS_, GELU_, D_)              \
+  TEST_P(SUITE_, NAME_) {                                                   \
     MAKE_TEST_PARAMS(test_params);                                          \
     using A_Type = A_;                                                      \
     using B_Type = B_;                                                      \
@@ -850,43 +850,32 @@ class GEMMTestSuite
     performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(test_params); \
   }
 
-MAKE_GEMM_TEST(Testfp32xfp32xfp32xfp32xfp32, fp32, fp32, fp32, fp32, fp32);
+// Non-FP8 types
+MAKE_GEMM_TEST(GEMMTestSuite, Testfp32xfp32xfp32xfp32xfp32, fp32, fp32, fp32, fp32, fp32);
+MAKE_GEMM_TEST(GEMMTestSuite, Testfp16xfp16xfp16xfp16xfp16, fp16, fp16, fp16, fp16, fp16);
+MAKE_GEMM_TEST(GEMMTestSuite, Testbf16xbf16xbf16xbf16xbf16, bf16, bf16, bf16, bf16, bf16);
 
-MAKE_GEMM_TEST(Testfp16xfp16xfp16xfp16xfp16, fp16, fp16, fp16, fp16, fp16);
+// FP8 types — used by both OperatorTest and OperatorTestMXFP8 suites
+class FP8GEMMTestSuite
+    : public ::testing::TestWithParam<
+          std::tuple<std::tuple<size_t, size_t, size_t>, bool, bool, Layout, NVTEScalingMode, bool>> {};
 
-MAKE_GEMM_TEST(Testbf16xbf16xbf16xbf16xbf16, bf16, bf16, bf16, bf16, bf16);
-
-MAKE_GEMM_TEST(Testfp8xfp8xbf16xbf16xfp32, fp8, fp8, bf16, bf16, fp32);
-
-MAKE_GEMM_TEST(Testfp8xfp8xbf16xbf16xfp16, fp8, fp8, bf16, bf16, fp16);
-
-MAKE_GEMM_TEST(Testfp8xfp8xbf16xbf16xbf16, fp8, fp8, bf16, bf16, bf16);
-
-MAKE_GEMM_TEST(Testfp8xfp8xbf16xbf16xfp8, fp8, fp8, bf16, bf16, fp8);
-
-MAKE_GEMM_TEST(Testfp8xfp8xbf16xbf16xbf8, fp8, fp8, bf16, bf16, bf8);
-
-MAKE_GEMM_TEST(Testfp8xbf8xbf16xbf16xfp32, fp8, bf8, bf16, bf16, fp32);
-
-MAKE_GEMM_TEST(Testfp8xbf8xbf16xbf16xfp16, fp8, bf8, bf16, bf16, fp16);
-
-MAKE_GEMM_TEST(Testfp8xbf8xbf16xbf16xbf16, fp8, bf8, bf16, bf16, bf16);
-
-MAKE_GEMM_TEST(Testfp8xbf8xbf16xbf16xfp8, fp8, bf8, bf16, bf16, fp8);
-
-MAKE_GEMM_TEST(Testfp8xbf8xbf16xbf16xbf8, fp8, bf8, bf16, bf16, bf8);
-
-MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xfp32, bf8, fp8, bf16, bf16, fp32);
-
-MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xfp16, bf8, fp8, bf16, bf16, fp16);
-
-MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xbf16, bf8, fp8, bf16, bf16, bf16);
-
-MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xfp8, bf8, fp8, bf16, bf16, fp8);
-
-MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xbf8, bf8, fp8, bf16, bf16, bf8);
-
-MAKE_GEMM_TEST(Testfp8xfp8xfp16xfp16xfp8, fp8, fp8, fp16, fp16, fp8);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp32, fp8, fp8, bf16, bf16, fp32);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp16, fp8, fp8, bf16, bf16, fp16);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xfp8xbf16xbf16xbf16, fp8, fp8, bf16, bf16, bf16);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp8, fp8, fp8, bf16, bf16, fp8);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xfp8xbf16xbf16xbf8, fp8, fp8, bf16, bf16, bf8);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp32, fp8, bf8, bf16, bf16, fp32);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp16, fp8, bf8, bf16, bf16, fp16);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xbf8xbf16xbf16xbf16, fp8, bf8, bf16, bf16, bf16);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp8, fp8, bf8, bf16, bf16, fp8);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xbf8xbf16xbf16xbf8, fp8, bf8, bf16, bf16, bf8);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp32, bf8, fp8, bf16, bf16, fp32);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp16, bf8, fp8, bf16, bf16, fp16);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testbf8xfp8xbf16xbf16xbf16, bf8, fp8, bf16, bf16, bf16);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp8, bf8, fp8, bf16, bf16, fp8);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testbf8xfp8xbf16xbf16xbf8, bf8, fp8, bf16, bf16, bf8);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xfp8xfp16xfp16xfp8, fp8, fp8, fp16, fp16, fp8);
 
 static inline auto TN(const Layout& layout) {
   static const char* map[2][2] = {{"NN", "NT"}, {"TN", "TT"}};
@@ -916,7 +905,16 @@ INSTANTIATE_TEST_SUITE_P(OperatorTest, GEMMTestSuite,
                                             ::testing::Values(false)),        //force hipblaslt
                          GEMMTestName);
 
-INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP8, GEMMTestSuite,
+INSTANTIATE_TEST_SUITE_P(OperatorTestFP8, FP8GEMMTestSuite,
+                         ::testing::Combine(::testing::ValuesIn(test_case_sizes),
+                                            ::testing::Values(false, true),   //use bias
+                                            ::testing::Values(false, true),   //use_gelu
+                                            ::testing::ValuesIn(kLayouts),    //transa,transb
+                                            ::testing::Values(false),         //use mxfp8
+                                            ::testing::Values(false)),        //force hipblaslt
+                         GEMMTestName);
+
+INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP8, FP8GEMMTestSuite,
                          ::testing::Combine(::testing::ValuesIn(test_case_sizes),
                                             ::testing::Values(false, true),   //use bias
                                             ::testing::Values(false, true),   //use_gelu
@@ -926,7 +924,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP8, GEMMTestSuite,
                          GEMMTestName);
 
 #ifdef __HIP_PLATFORM_AMD__
-class DqGEMMTestSuite: public GEMMTestSuite {};
+class DqGEMMTestSuite: public FP8GEMMTestSuite {};
 
 #define MAKE_DQ_GEMM_TEST(NAME_, A_, B_, D_)            \
   TEST_P(DqGEMMTestSuite, NAME_) {                      \
