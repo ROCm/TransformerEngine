@@ -7,6 +7,7 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <vector>
 #include <ATen/ATen.h>
 #include <c10/cuda/CUDAStream.h>
@@ -31,6 +32,7 @@ struct CustomMultiTensorCache {
   at::Tensor chunk_offsets_dev;
   int total_chunks = 0;
   int chunk_size = 0;
+  std::mutex mtx;
 
   bool shapes_valid(int ntensors, int cs,
                     const std::vector<std::vector<at::Tensor>> &tensor_lists) const {
@@ -133,6 +135,7 @@ struct CustomMultiTensorCache {
   int ensure(int ntensors, int cs, int tc,
              const std::vector<std::vector<at::Tensor>> &tensor_lists,
              cudaStream_t stream) {
+    std::lock_guard<std::mutex> lock(mtx);
     if (!shapes_valid(ntensors, cs, tensor_lists)) {
       rebuild(ntensors, cs, tc, tensor_lists, stream);
     } else if (!addresses_valid(ntensors, tensor_lists)) {
@@ -154,6 +157,7 @@ struct CustomL2NormCache {
   at::Tensor ret_dev;
   int total_chunks = 0;
   int chunk_size = 0;
+  std::mutex mtx;
 
   bool shapes_valid(int ntensors, int cs,
                     const std::vector<std::vector<at::Tensor>> &tensor_lists) const {
@@ -251,6 +255,7 @@ struct CustomL2NormCache {
   int ensure(int ntensors, int cs, int tc,
              const std::vector<std::vector<at::Tensor>> &tensor_lists,
              cudaStream_t stream) {
+    std::lock_guard<std::mutex> lock(mtx);
     if (!shapes_valid(ntensors, cs, tensor_lists)) {
       rebuild(ntensors, cs, tc, tensor_lists, stream);
     } else if (!addresses_valid(ntensors, tensor_lists)) {
