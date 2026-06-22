@@ -1052,6 +1052,22 @@ void custom_adam_param_remainder_kernel(
       load_store_n<CILP>(g_raw, g, 0, i_start / CILP);
       load_store_n<CILP>(local_p, p, 0, i_start / CILP);
       load_store_n<CILP>(local_p_rem, p_remainder, 0, i_start / CILP);
+      // Vectorized m/v loads
+      if constexpr (sizeof(MOMENT_T) == sizeof(MATH_T)) {
+        load_store_n<4>(r_m, reinterpret_cast<MATH_T *>(m), 0, i_start / 4);
+        load_store_n<4>(r_m, reinterpret_cast<MATH_T *>(m), 1, i_start / 4 + 1);
+        load_store_n<4>(r_v, reinterpret_cast<MATH_T *>(v), 0, i_start / 4);
+        load_store_n<4>(r_v, reinterpret_cast<MATH_T *>(v), 1, i_start / 4 + 1);
+      } else {
+        MOMENT_T m_raw[CILP], v_raw[CILP];
+        load_store_n<CILP>(m_raw, m, 0, i_start / CILP);
+        load_store_n<CILP>(v_raw, v, 0, i_start / CILP);
+#pragma unroll
+        for (int ii = 0; ii < CILP; ii++) {
+          r_m[ii] = static_cast<MATH_T>(m_raw[ii]);
+          r_v[ii] = static_cast<MATH_T>(v_raw[ii]);
+        }
+      }
     } else {
 #pragma unroll
       for (int ii = 0; ii < CILP; ii++) {
@@ -1060,23 +1076,15 @@ void custom_adam_param_remainder_kernel(
           g_raw[ii] = g[i];
           local_p[ii] = p[i];
           local_p_rem[ii] = p_remainder[i];
+          r_m[ii] = static_cast<MATH_T>(m[i]);
+          r_v[ii] = static_cast<MATH_T>(v[i]);
         } else {
           g_raw[ii] = GRAD_T(0);
           local_p[ii] = int16_t(0);
           local_p_rem[ii] = int16_t(0);
+          r_m[ii] = MATH_T(0);
+          r_v[ii] = MATH_T(0);
         }
-      }
-    }
-
-#pragma unroll
-    for (int ii = 0; ii < CILP; ii++) {
-      int i = i_start + ii;
-      if (i < n_this) {
-        r_m[ii] = static_cast<MATH_T>(m[i]);
-        r_v[ii] = static_cast<MATH_T>(v[i]);
-      } else {
-        r_m[ii] = MATH_T(0);
-        r_v[ii] = MATH_T(0);
       }
     }
 
@@ -1125,17 +1133,32 @@ void custom_adam_param_remainder_kernel(
     if (i_start + CILP <= n_this && is_aligned_n<CILP>(p + i_start)) {
       load_store_n<CILP>(p, local_p, i_start / CILP, 0);
       load_store_n<CILP>(p_remainder, local_p_rem, i_start / CILP, 0);
-    }
+      // Vectorized m/v stores
+      if constexpr (sizeof(MOMENT_T) == sizeof(MATH_T)) {
+        load_store_n<4>(reinterpret_cast<MATH_T *>(m), r_m, i_start / 4, 0);
+        load_store_n<4>(reinterpret_cast<MATH_T *>(m), r_m, i_start / 4 + 1, 1);
+        load_store_n<4>(reinterpret_cast<MATH_T *>(v), r_v, i_start / 4, 0);
+        load_store_n<4>(reinterpret_cast<MATH_T *>(v), r_v, i_start / 4 + 1, 1);
+      } else {
+        MOMENT_T m_out[CILP], v_out[CILP];
 #pragma unroll
-    for (int ii = 0; ii < CILP; ii++) {
-      int i = i_start + ii;
-      if (i < n_this) {
-        if (!(i_start + CILP <= n_this && is_aligned_n<CILP>(p + i_start))) {
+        for (int ii = 0; ii < CILP; ii++) {
+          m_out[ii] = static_cast<MOMENT_T>(r_m[ii]);
+          v_out[ii] = static_cast<MOMENT_T>(r_v[ii]);
+        }
+        load_store_n<CILP>(m, m_out, i_start / CILP, 0);
+        load_store_n<CILP>(v, v_out, i_start / CILP, 0);
+      }
+    } else {
+#pragma unroll
+      for (int ii = 0; ii < CILP; ii++) {
+        int i = i_start + ii;
+        if (i < n_this) {
           p[i] = local_p[ii];
           p_remainder[i] = local_p_rem[ii];
+          m[i] = static_cast<MOMENT_T>(r_m[ii]);
+          v[i] = static_cast<MOMENT_T>(r_v[ii]);
         }
-        m[i] = static_cast<MOMENT_T>(r_m[ii]);
-        v[i] = static_cast<MOMENT_T>(r_v[ii]);
       }
     }
   }
@@ -1255,6 +1278,22 @@ void custom_adam_kernel(
           r_p[ii] = static_cast<MATH_T>(p_raw[ii]);
         }
       }
+      // Vectorized m/v loads
+      if constexpr (sizeof(MOMENT_T) == sizeof(MATH_T)) {
+        load_store_n<4>(r_m, reinterpret_cast<MATH_T *>(m), 0, i_start / 4);
+        load_store_n<4>(r_m, reinterpret_cast<MATH_T *>(m), 1, i_start / 4 + 1);
+        load_store_n<4>(r_v, reinterpret_cast<MATH_T *>(v), 0, i_start / 4);
+        load_store_n<4>(r_v, reinterpret_cast<MATH_T *>(v), 1, i_start / 4 + 1);
+      } else {
+        MOMENT_T m_raw[CILP], v_raw[CILP];
+        load_store_n<CILP>(m_raw, m, 0, i_start / CILP);
+        load_store_n<CILP>(v_raw, v, 0, i_start / CILP);
+#pragma unroll
+        for (int ii = 0; ii < CILP; ii++) {
+          r_m[ii] = static_cast<MATH_T>(m_raw[ii]);
+          r_v[ii] = static_cast<MATH_T>(v_raw[ii]);
+        }
+      }
     } else {
 #pragma unroll
       for (int ii = 0; ii < CILP; ii++) {
@@ -1266,22 +1305,14 @@ void custom_adam_kernel(
           } else {
             r_p[ii] = static_cast<MATH_T>(p[i]);
           }
+          r_m[ii] = static_cast<MATH_T>(m[i]);
+          r_v[ii] = static_cast<MATH_T>(v[i]);
         } else {
           g_raw[ii] = GRAD_T(0);
           r_p[ii] = MATH_T(0);
+          r_m[ii] = MATH_T(0);
+          r_v[ii] = MATH_T(0);
         }
-      }
-    }
-
-#pragma unroll
-    for (int ii = 0; ii < CILP; ii++) {
-      int i = i_start + ii;
-      if (i < n_this) {
-        r_m[ii] = static_cast<MATH_T>(m[i]);
-        r_v[ii] = static_cast<MATH_T>(v[i]);
-      } else {
-        r_m[ii] = MATH_T(0);
-        r_v[ii] = MATH_T(0);
       }
     }
 
@@ -1324,19 +1355,34 @@ void custom_adam_kernel(
         load_store_n<4>(p_master, r_p, i_start / 4, 0);
         load_store_n<4>(p_master, r_p, i_start / 4 + 1, 1);
       }
-    }
+      // Vectorized m/v stores
+      if constexpr (sizeof(MOMENT_T) == sizeof(MATH_T)) {
+        load_store_n<4>(reinterpret_cast<MATH_T *>(m), r_m, i_start / 4, 0);
+        load_store_n<4>(reinterpret_cast<MATH_T *>(m), r_m, i_start / 4 + 1, 1);
+        load_store_n<4>(reinterpret_cast<MATH_T *>(v), r_v, i_start / 4, 0);
+        load_store_n<4>(reinterpret_cast<MATH_T *>(v), r_v, i_start / 4 + 1, 1);
+      } else {
+        MOMENT_T m_out[CILP], v_out[CILP];
 #pragma unroll
-    for (int ii = 0; ii < CILP; ii++) {
-      int i = i_start + ii;
-      if (i < n_this) {
-        if (!(i_start + CILP <= n_this && is_aligned_n<CILP>(p + i_start))) {
+        for (int ii = 0; ii < CILP; ii++) {
+          m_out[ii] = static_cast<MOMENT_T>(r_m[ii]);
+          v_out[ii] = static_cast<MOMENT_T>(r_v[ii]);
+        }
+        load_store_n<CILP>(m, m_out, i_start / CILP, 0);
+        load_store_n<CILP>(v, v_out, i_start / CILP, 0);
+      }
+    } else {
+#pragma unroll
+      for (int ii = 0; ii < CILP; ii++) {
+        int i = i_start + ii;
+        if (i < n_this) {
           p[i] = static_cast<PARAM_T>(r_p[ii]);
           if constexpr (HAS_MASTER) {
             p_master[i] = r_p[ii];
           }
+          m[i] = static_cast<MOMENT_T>(r_m[ii]);
+          v[i] = static_cast<MOMENT_T>(r_v[ii]);
         }
-        m[i] = static_cast<MOMENT_T>(r_m[ii]);
-        v[i] = static_cast<MOMENT_T>(r_v[ii]);
       }
     }
   }
