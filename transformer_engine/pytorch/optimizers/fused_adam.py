@@ -14,6 +14,7 @@ import warnings
 
 import torch
 from torch.distributed._tensor import DTensor
+from transformer_engine.pytorch.tensor.fsdp2_allgather_tensor import FSDPAGTensor
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
@@ -402,20 +403,12 @@ class FusedAdam(torch.optim.Optimizer):
         # QuantizedTensor.__torch_dispatch__ ignoring the dtype kwarg in
         # torch.empty_like, and to ensure optimizer states are plain tensors.
         local_param = param._local_tensor if isinstance(param, DTensor) else param
+        # ROCm fix: FSDPAGTensor is a wrapper around a plain tensor, so we need to extract the underlying tensor.
+        local_param = local_param._data if isinstance(local_param, FSDPAGTensor) else local_param
         # Handle QuantizedTensor by dequantizing first
         param_for_empty = (
             local_param.dequantize() if isinstance(local_param, QuantizedTensor) else local_param
         )
-        #ROCm: create plain `torch.Tensor` instead of `FSDPAGTensor` subclasses
-        if IS_HIP_EXTENSION:
-            if store_param_remainders:
-                data = torch.zeros(
-                    param_for_empty.shape, dtype=torch.int16, device=param_for_empty.device
-                )
-            else:
-                data = torch.empty(
-                    param_for_empty.shape, dtype=dtype, device=param_for_empty.device
-                )
         elif store_param_remainders:
             data = torch.zeros_like(param_for_empty, dtype=torch.int16)
         else:
@@ -463,6 +456,8 @@ class FusedAdam(torch.optim.Optimizer):
                 # Extract local tensor from DTensor and dequantize QuantizedTensor
                 # to get a plain float32 copy for the master weight.
                 local_param = param._local_tensor if isinstance(param, DTensor) else param
+                # ROCm fix: FSDPAGTensor is a wrapper around a plain tensor, so we need to extract the underlying tensor.
+                local_param = local_param._data if isinstance(local_param, FSDPAGTensor) else local_param
                 if isinstance(local_param, QuantizedTensor):
                     master = local_param.dequantize(dtype=torch.float32).clone().detach()
                 else:

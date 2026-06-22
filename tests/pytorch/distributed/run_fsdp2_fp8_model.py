@@ -26,43 +26,48 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from pathlib import Path
 
 class SimpleNet(nn.Module):  
-    def __init__(self, input_size, hidden_size, output_size, use_fsdp2=False):
+    def __init__(self, input_size, hidden_size, output_size, use_fsdp2=False, linear_only=False):
         super(SimpleNet, self).__init__()  
-          
-        # LayerNormLinear: fuses LayerNorm + Linear  
-        self.ln_linear = te.LayerNormLinear(  
-            in_features=input_size,  
-            out_features=hidden_size,  
-            eps=1e-5,
-            use_fsdp2=use_fsdp2,
-            keep_fp8_weight_transpose_cache=False
-        )  
-          
-        # LayerNormMLP: fuses LayerNorm + FC1 + Activation + FC2  
-        self.ln_mlp = te.LayerNormMLP(  
-            hidden_size=hidden_size,  
-            ffn_hidden_size=hidden_size * 4,  # Typical 4x expansion
-            use_fsdp2=use_fsdp2,
-            keep_fp8_weight_transpose_cache=False
-        )  
-          
+        self.linear_only = linear_only
+        if not linear_only:
+            # LayerNormLinear: fuses LayerNorm + Linear  
+            self.ln_linear = te.LayerNormLinear(  
+                in_features=input_size,  
+                out_features=hidden_size,  
+                eps=1e-5,
+                use_fsdp2=use_fsdp2,
+                keep_fp8_weight_transpose_cache=False
+            )  
+            
+            # LayerNormMLP: fuses LayerNorm + FC1 + Activation + FC2  
+            self.ln_mlp = te.LayerNormMLP(  
+                hidden_size=hidden_size,  
+                ffn_hidden_size=hidden_size * 4,  # Typical 4x expansion
+                use_fsdp2=use_fsdp2,
+                keep_fp8_weight_transpose_cache=False
+            )  
+            
         # Regular Linear for final projection  
         self.fc_out = te.Linear(  
             hidden_size,   
             output_size,  
             use_fsdp2=use_fsdp2,
-            keep_fp8_weight_transpose_cache=False
+            keep_fp8_weight_transpose_cache=False,
+            bias=False
         )  
   
     def forward(self, x):  
-        # LayerNormLinear: applies LayerNorm then Linear  
-        x = self.ln_linear(x)  
-          
-        # LayerNormMLP: applies LayerNorm + FC1 + GELU + FC2  
-        x = self.ln_mlp(x)  
-          
-        # Final Linear projection  
-        x = self.fc_out(x)  
+        if self.linear_only:
+            return self.fc_out(x)
+        else:
+            # LayerNormLinear: applies LayerNorm then Linear  
+            x = self.ln_linear(x)  
+            
+            # LayerNormMLP: applies LayerNorm + FC1 + GELU + FC2  
+            x = self.ln_mlp(x)  
+            
+            # Final Linear projection  
+            x = self.fc_out(x)  
           
         return x
 
@@ -89,8 +94,12 @@ def _parse_args(argv=None, namespace=None):
     parser.add_argument("--hidden-size", type=int, default=2048, help="Hidden layer size")
     parser.add_argument("--output-size", type=int, default=2048, help="Output size for the model")
     parser.add_argument("--batch-size", type=int, default=2048, help="Output size for the model")
+    parser.add_argument("--linear-only", action="store_true", default=False, help="Only use Linear layer")
     parser.add_argument(
-        "--fp8-init", action="store_true", default=False, help="Initialize primary weights in FP8."
+        "--quantized-init", action="store_true", default=False, help="Initialize primary weights in FP8 via quantized_model_init."
+    )
+    parser.add_argument(
+        "--autocast", action="store_true", default=False, help="Enable te.autocast for FP8 compute."
     )
     parser.add_argument(
         "--iter", type=int, default=10, help="Number of iterations for forward pass"
@@ -172,15 +181,30 @@ def _train(args):
 
     if args.memory_profile:
         torch.cuda.memory._record_memory_history(enabled='all', context='all', stacks='all')
-    if args.fp8_init:
-        # Build the model with the specified context
-        with quantized_model_init(enabled=True):
-            model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)
-    else:
-        model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2)
-    # Move the model to the correct device
-    if not args.memory_profile:
-        model.load_state_dict(torch.load('fsdp_model.pth'))
+    
+    prof = None
+    if (
+        args.profile
+        and torch.distributed.get_rank() in args.profile_ranks
+    ):
+        prof = torch.profiler.profile(
+            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
+            schedule=torch.profiler.schedule(
+                wait=max(args.profile_step_start - 1, 0),
+                warmup=1 if args.profile_step_start > 0 else 0,
+                active=args.profile_step_end - args.profile_step_start,
+                repeat=1,
+            ),
+            on_trace_ready=torch.profiler.tensorboard_trace_handler(args.tensorboard_dir),
+            record_shapes=True,
+            profile_memory=True,
+            with_stack=True,
+        )
+        prof.start()
+        
+    # Build the model with the specified context
+    with quantized_model_init(enabled=args.quantized_init, recipe=fp8_recipe):
+        model = SimpleNet(args.input_size, args.hidden_size, args.output_size, use_fsdp2=args.use_fsdp2, linear_only=args.linear_only)
     model.to(device)
 
     # Creating a DeviceMesh for fully_shard
@@ -218,7 +242,10 @@ def _train(args):
     else:
         model = DDP(model, device_ids=[LOCAL_RANK])
 
-    optimizer =  te.optimizers.FusedAdam(model.parameters(), lr=1e-3)
+    if args.quantized_init:
+        optimizer =  te.optimizers.FusedAdam(model.parameters(), lr=1e-3, master_weights=True)
+    else:
+        optimizer =  te.optimizers.FusedAdam(model.parameters(), lr=1e-3)
 
     input_path = Path("shared_input.pt")
     if input_path.exists():
@@ -229,25 +256,6 @@ def _train(args):
         print("Generated and saved shared input tensor.")
     
     out_tensors = []
-    prof = None
-    if (
-        args.profile
-        and torch.distributed.get_rank() in args.profile_ranks
-    ):
-        prof = torch.profiler.profile(
-            activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA],
-            schedule=torch.profiler.schedule(
-                wait=max(args.profile_step_start - 1, 0),
-                warmup=1 if args.profile_step_start > 0 else 0,
-                active=args.profile_step_end - args.profile_step_start,
-                repeat=1,
-            ),
-            on_trace_ready=torch.profiler.tensorboard_trace_handler(args.tensorboard_dir),
-            record_shapes=True,
-            profile_memory=True,
-            with_stack=True,
-        )
-        prof.start()
     for iteration in range(args.iter):
         if LOCAL_RANK == 0:
             print(f"Starting iteration...{iteration}")
@@ -256,7 +264,7 @@ def _train(args):
 
         # Zero the parameter gradients
         optimizer.zero_grad()
-        with te.fp8_autocast(enabled=True, fp8_recipe=fp8_recipe):
+        with te.autocast(enabled=args.autocast, recipe=fp8_recipe):
             output = model(input_data)
         target = torch.randn(args.batch_size, args.output_size).to(device)
         loss = F.mse_loss(output, target)
@@ -292,6 +300,9 @@ def _train(args):
         torch.save(out_tensors, args.gradients_save_file)
 
     if args.memory_profile:
+        with open('memory_summary.txt', 'w') as f:
+            f.write(torch.cuda.memory_summary(device=None, abbreviated=False))
+        
         snapshot = torch.cuda.memory._snapshot()
         import pickle
         with open('memory_snapshot.pickle', 'wb') as f:

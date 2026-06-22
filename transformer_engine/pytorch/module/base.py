@@ -21,6 +21,7 @@ import torch
 import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
+from torch.distributed.tensor import DTensor
 
 import transformer_engine_torch as tex
 
@@ -1070,7 +1071,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         _original_recipe = None
 
-        if IS_HIP_EXTENSION and not FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 and hasattr(self, 'use_fsdp2') and self.use_fsdp2:
+        if IS_HIP_EXTENSION and not self.primary_weights_in_fp8 and not FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 and hasattr(self, 'use_fsdp2') and self.use_fsdp2:
             FP8GlobalStateManager.SKIP_FP8_REDUCTION_FOR_FSDP2 = True
 
         if fp8_parameters or fp8_enabled:
@@ -1399,9 +1400,7 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 self.keep_fp8_weight_transpose_cache = False
                 param = FSDPAGTensor(
                     param, 
-                    module=self, 
-                    fp8_meta_index=fp8_meta_index, 
-                    keep_fp8_weight_transpose_cache=self.keep_fp8_weight_transpose_cache
+                    fp8_meta_index=fp8_meta_index,
                 )
 
             # Redo parameter wrap in case we broke it above

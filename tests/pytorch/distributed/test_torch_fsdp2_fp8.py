@@ -10,44 +10,60 @@ from pathlib import Path
 from transformer_engine.pytorch import torch_version
 from transformer_engine.pytorch.quantization import FP8GlobalStateManager
 import torch
-from run_fsdp2_fp8_model import SimpleNet
-
 fp8_available, reason_for_no_fp8 = FP8GlobalStateManager.is_fp8_available()
 mxfp8_available, reason_for_no_mxfp8 = FP8GlobalStateManager.is_mxfp8_available()
 
 NUM_PROCS: int = torch.cuda.device_count()
 
-def assertEqual(
-    l1: List[torch.Tensor], l2: List[torch.Tensor]) -> bool:
-    """Ensures two lists are exactly equal."""
+def assert_allclose(
+    l1: List[torch.Tensor], l2: List[torch.Tensor], atol: float, rtol: float = None
+) -> bool:
+    """Ensures two lists are equal."""
     assert len(l1) == len(l2), "Unequal number of outputs."
+    tols = dict(atol=atol)
+    tols["rtol"] = rtol if rtol is not None else 0
     for i, (t1, t2) in enumerate(zip(l1, l2)):
-        result = torch.allclose(t1, t2, atol=0, rtol=0)
+        tol = tols["atol"] + (tols["rtol"] * torch.abs(t2))
+        result = torch.allclose(t1, t2, **tols)
         if not result:
             diff = torch.abs(t1 - t2)
-            exceed_mask = diff > 0
-            if exceed_mask.any():
-                indices = torch.nonzero(exceed_mask, as_tuple=True)
-                max_diff = diff[exceed_mask].max()
-                max_idx = (diff[exceed_mask] == max_diff).nonzero(as_tuple=True)[0][0]
-                max_location = [idx[max_idx].item() for idx in indices]
+            if diff.dim() == 0:
+                max_diff = diff
+                max_location = []
                 msg = (
-                    f"Outputs not close enough in tensor at idx={i}. "
-                    f"Maximum difference at location {max_location} "
-                    f"with {t1[exceed_mask][max_idx].item()} vs {t2[exceed_mask][max_idx].item()} "
-                    f"(diff {max_diff.item()})."
+                    f"Outputs not close enough in scalar tensor at idx={i}. "
+                    f"Difference: {max_diff.item()}."
                 )
+            else:
+                exceed_mask = diff > tol
+                
+                if exceed_mask.any():
+                    indices = torch.nonzero(exceed_mask, as_tuple=True)
+                    max_diff = diff[exceed_mask].max()
+                    max_idx = (diff[exceed_mask] == max_diff).nonzero(as_tuple=True)[0][0]
+                    max_location = [idx[max_idx].item() for idx in indices]
+                    msg = (
+                        f"Outputs not close enough in tensor at idx={i}. "
+                        f"Maximum difference at location {max_location} "
+                        f"with {t1[exceed_mask][max_idx].item()} vs {t2[exceed_mask][max_idx].item()} "
+                        f"(diff {max_diff.item()})."
+                    )
             raise AssertionError(msg)
 
-def _run_test(fp_init, recipe):
+def _run_test(quantized_init, autocast, recipe):
     test_dir = Path(__file__).parent.resolve()
     fsdp_script = test_dir / "run_fsdp2_fp8_model.py"
     
     test_cmd = ["torchrun", f"--nproc_per_node={NUM_PROCS}", "--master-port=29501", str(fsdp_script)]
 
-    if fp_init:
-        test_cmd += ["--fp8-init"]
-    test_cmd += ["--recipe", recipe]
+    if quantized_init:
+        test_cmd += ["--quantized-init"]
+    if autocast:
+        test_cmd += ["--autocast"]
+    if autocast or quantized_init:
+        test_cmd += ["--recipe", recipe]
+    if quantized_init:
+        test_cmd += ["--linear-only"]
     
     subprocess.run(test_cmd + ['--use-fsdp2','--gradients-save-file', 'all_iters_fsdp2.pt'], env=os.environ, check=True)
     subprocess.run(test_cmd + ['--gradients-save-file', 'all_iters_dp.pt'], env=os.environ, check=True)
@@ -55,28 +71,65 @@ def _run_test(fp_init, recipe):
     # Load outputs
     output_fsdp = torch.load("all_iters_fsdp2.pt", map_location="cpu")
     output_dp = torch.load("all_iters_dp.pt", map_location="cpu")
+    atol = 0
+    rtol = 0
+    # Use relaxed tolerance when FSDP2 and DDP are not guaranteed to be bit-identical:
+    #
+    # - No FP8 (quantized_init=False, autocast=False): gradient reduction order differs
+    #   (all-reduce vs reduce-scatter), so float non-associativity produces last-bit
+    #   differences in the reduced gradients and updated weights.
+    #
+    # quantized_init=True + autocast=True uses a Linear-only model (--linear-only)
+    # with bias=False to ensure all parameters are Float8Tensors. This avoids a
+    # known issue where PyTorch DDP's _broadcast_coalesced concatenates FP8 and
+    # FP32 parameters via aten::cat, triggering Float8Tensor dequantization (since
+    # Float8Tensor doesn't natively handle aten::cat). The subsequent aten::copy_
+    # back into the Float8Tensor re-quantizes from the dequantized values, which
+    # recomputes amax/scale with FP8 round-trip error, causing divergence from
+    # FSDP2. With bias=False and all params in FP8, aten::cat operates on
+    # homogeneous Float8Tensors and no dequantization occurs.
+    #
+    # autocast=True alone (quantized_init=False) works without any modifications
+    # because weights are initialized as regular FP32 tensors. DDP broadcasts
+    # FP32 parameters natively without any FP8 dequantize/re-quantize path, and
+    # quantization to FP8 only happens dynamically during the forward pass inside
+    # te.autocast, which is identical for both DDP and FSDP2.
+    if (not quantized_init and not autocast):
+        atol = 1e-6
+        rtol = 5e-5
     
     for idx, (te_output_no_cache, te_output_cache) in enumerate(zip(output_fsdp, output_dp)):
     
         print(f"Comparing FSDP {te_output_no_cache[0]}, DDP {te_output_cache[0]} at index {idx}...")
-        assertEqual(te_output_no_cache[1], te_output_cache[1]) # expects exact match
+        assert_allclose(te_output_no_cache[1], te_output_cache[1], atol=atol, rtol=rtol)
         print(f"Tensor at index {idx} passed comparison.")
 
 
 @pytest.fixture
 def cleanup_artifacts():
     yield  # run the test first
-    for fname in ["all_iters_fsdp2.pt", "all_iters_dp.pt", "fsdp_model.pth", "shared_input.pt"]:
+    for fname in ["all_iters_fsdp2.pt", "all_iters_dp.pt", "shared_input.pt"]:
         if os.path.exists(fname):
             os.remove(fname)
+
+# Define test cases explicitly
+test_cases = []
+for quantized_init in [True, False]:
+    for autocast in [True, False]:
+        if quantized_init and not autocast:
+            continue
+        if quantized_init or autocast:
+            for recipe in ["delayed", "current", "mxfp8"]:
+                test_cases.append((quantized_init, autocast, recipe))
+test_cases.append((False, False, "delayed"))
+
 
 @pytest.mark.skipif(NUM_PROCS < 4, reason="Requires 4+ GPUs")
 @pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
 @pytest.mark.skipif(not torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
-@pytest.mark.parametrize("fp8_init", ([False]))
-@pytest.mark.parametrize("recipe", (["delayed", "current", "mxfp8"]))
+@pytest.mark.parametrize("quantized_init, autocast, recipe", test_cases)
 @pytest.mark.usefixtures("cleanup_artifacts")
-def test_distributed(fp8_init, recipe):
+def test_distributed(quantized_init, autocast, recipe):
 
     batch_size = 2048
     input_size = 2048
@@ -90,18 +143,15 @@ def test_distributed(fp8_init, recipe):
         torch.save(input_data.cpu(), input_path)
         print("Generated and saved shared input tensor.")
 
-    model = SimpleNet(input_size, 2048, 2048)
-    torch.save(model.state_dict(), 'fsdp_model.pth')
-
     if torch.cuda.device_count() < 4:
         pytest.skip("FSDP2 test requires at least 4 GPUs")
 
-    if fp8_init and not fp8_available:
+    if quantized_init and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if recipe == "mxfp8" and not mxfp8_available:  
         pytest.skip(reason_for_no_mxfp8)
 
-    _run_test(fp8_init, recipe)
+    _run_test(quantized_init, autocast, recipe)
 
 
 def test_dummy() -> None:
