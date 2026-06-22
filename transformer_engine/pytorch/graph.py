@@ -374,7 +374,8 @@ def _make_graphed_callables(
     need_bwd_dw_graph = {}
 
     # Run warmup and do the above filtering.
-    with torch.cuda.stream(torch.cuda.Stream()):
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
         for func_idx, func in zip(warmup_func_idx, warmup_func):
             args = sample_args[func_idx]
             kwargs = sample_kwargs[func_idx]
@@ -492,7 +493,7 @@ def _make_graphed_callables(
                     args = sample_args[per_callable_fwd_idx]
                     kwargs = sample_kwargs[per_callable_fwd_idx]
                     fwd_graph = fwd_graphs[per_callable_fwd_idx]
-                    with _graph_context_wrapper(fwd_graph, pool=mempool):
+                    with _graph_context_wrapper(fwd_graph, stream=stream, pool=mempool):
                         outputs = func(*args, **kwargs)
                     flatten_outputs, spec = _tree_flatten(outputs)
                     per_callable_static_outputs[per_callable_fwd_idx] = tuple(flatten_outputs)
@@ -530,7 +531,7 @@ def _make_graphed_callables(
                             torch.empty_like(o) if o.requires_grad else None for o in static_outputs
                         )
                     if is_training:
-                        with _graph_context_wrapper(bwd_graph, pool=mempool):
+                        with _graph_context_wrapper(bwd_graph, stream=stream, pool=mempool):
                             grad_inputs = torch.autograd.grad(
                                 outputs=tuple(o for o in static_outputs if o.requires_grad),
                                 inputs=tuple(i for i in static_input_surface if i.requires_grad),
@@ -543,7 +544,7 @@ def _make_graphed_callables(
                         # So skip capturing it.
                         if need_bwd_dw_graph[per_callable_bwd_idx]:
                             bwd_dw_graph = bwd_dw_graphs[per_callable_bwd_idx]
-                            with _graph_context_wrapper(bwd_dw_graph, pool=mempool):
+                            with _graph_context_wrapper(bwd_dw_graph, stream=stream, pool=mempool):
                                 for module in visited_te_modules[per_callable_bwd_idx]:
                                     if (
                                         hasattr(module, "need_backward_dw")
@@ -606,7 +607,7 @@ def _make_graphed_callables(
         per_callable_output_unflatten_spec = []
         graph_id = 0
         for func, args, kwargs, fwd_graph in zip(callables, sample_args, sample_kwargs, fwd_graphs):
-            with _graph_context_wrapper(fwd_graph, pool=mempool):
+            with _graph_context_wrapper(fwd_graph, stream=stream, pool=mempool):
                 outputs = func(*args, **kwargs)
             graph_callables[graph_id] = func
             graph_id += 1
@@ -630,7 +631,7 @@ def _make_graphed_callables(
                 torch.empty_like(o) if o.requires_grad else None for o in static_outputs
             )
             if is_training:
-                with _graph_context_wrapper(bwd_graph, pool=mempool):
+                with _graph_context_wrapper(bwd_graph, stream=stream, pool=mempool):
                     grad_inputs = torch.autograd.grad(
                         outputs=tuple(o for o in static_outputs if o.requires_grad),
                         inputs=tuple(i for i in static_input_surface if i.requires_grad),
@@ -640,7 +641,7 @@ def _make_graphed_callables(
                         retain_graph=retain_graph_in_backward,
                     )
                 if need_bwd_dw_graph[bwd_idx]:
-                    with _graph_context_wrapper(bwd_dw_graph, pool=mempool):
+                    with _graph_context_wrapper(bwd_dw_graph, stream=stream, pool=mempool):
                         for module in visited_te_modules[bwd_idx]:
                             if hasattr(module, "need_backward_dw") and module.need_backward_dw():
                                 module.backward_dw()
