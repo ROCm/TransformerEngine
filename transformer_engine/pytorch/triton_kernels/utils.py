@@ -2,6 +2,7 @@
 # License for AMD contributions = MIT. See LICENSE for more information
 
 import os
+from functools import cache
 import torch
 import triton
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8CurrentScalingQuantizer
@@ -10,7 +11,7 @@ from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.utils import get_sm_count
 from .common import te_dtype_to_torch_dtype
 
-
+@cache
 def use_cuda_graph_autotune():
     """Return whether Triton autotuning should benchmark configs with CUDA/HIP graphs.
 
