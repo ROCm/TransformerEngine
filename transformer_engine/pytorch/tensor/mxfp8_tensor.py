@@ -240,6 +240,16 @@ class MXFP8Quantizer(Quantizer):
         Swizzle kernel will be performed before GEMM to suit the need of CuBLAS.
         CuBLAS doc: https://docs.nvidia.com/cuda/cublas/index.html#d-block-scaling-factors-layout
         """
+        if IS_HIP_EXTENSION:
+            if columnwise:
+                return (
+                    math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE,
+                    shape[-1],
+                )
+            return (
+                math.prod(shape[:-1]),
+                shape[-1] // MXFP8_BLOCK_SCALING_SIZE,
+            )
         if columnwise:
             # Columnwise: scale_inv shape is [prod(shape[:-1]) // BLOCK_SIZE, shape[-1]]
             # with padding to multiples of [4, 128]

@@ -481,23 +481,28 @@ void performTest(const TestParams& params) {
   const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
   const bool use_hipkittens_mxfp8 = use_mxfp8 && !params.force_hipblaslt;
 
-  if (use_mxfp8) {
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+
+  if (use_mxfp8)
+  {
     if (!has_fp8) {
       GTEST_SKIP() << "MXFP8 scaling mode requires Float8 types";
     }
     if (params.m % 16 || params.n % 16) {
       GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
     }
-    if (params.k % 128) {
-      GTEST_SKIP() << "MXFP8 requires K to be a multiple of 128";
+    size_t required_k_multiple = 128;
+  #ifdef __HIP_PLATFORM_AMD__
+    required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
+  #endif
+    if (params.k % required_k_multiple) {
+      GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
     }
     if (use_hipkittens_mxfp8 && (params.m % 256 || params.n % 256 || params.k < 256)) {
       GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
     }
   }
-
-  cudaDeviceProp prop;
-  (void)cudaGetDeviceProperties(&prop, 0);
 
 #ifdef __HIP_PLATFORM_AMD__
 
@@ -710,19 +715,22 @@ void performDqTest(const TestParams &params) {
   GTEST_ASSERT_TRUE(isFp8Type(atype) && isFp8Type(btype)) << "FP8/BF8 input datatype is expected";
   GTEST_ASSERT_FALSE(isFp8Type(dtype)) << "Non FP8/BF8 output datatype is expected";
 
-  if (params.m % 16 || params.n % 16) {
-    GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
-  }
-  if (params.k % 128) {
-    GTEST_SKIP() << "MXFP8 requires K to be a multiple of 128";
-  }
-
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-  const bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
-  const bool use_hipkittens_mxfp8 = !params.force_hipblaslt;
+  if (params.m % 16 || params.n % 16) {
+    GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
+  }
+  size_t required_k_multiple = 128;
+#ifdef __HIP_PLATFORM_AMD__
+  required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
+#endif
+  if (params.k % required_k_multiple) {
+    GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
+  }
 
+  bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
+  const bool use_hipkittens_mxfp8 = !params.force_hipblaslt;
   if (!mxfp8_supported) {
     GTEST_SKIP() << "MXFP8 is not supported in current config";
   }

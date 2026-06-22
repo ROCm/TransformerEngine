@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -92,6 +94,23 @@ void nvte_fp8_transpose_dbias(const NVTETensor input, NVTETensor transposed_outp
  */
 void nvte_multi_cast_transpose(size_t num_tensors, const NVTETensor* input_list,
                                NVTETensor* output_list, cudaStream_t stream);
+
+#ifdef __HIP_PLATFORM_AMD__
+/*! \brief Cast and transpose multiple tensors with fused padding.
+ *
+ *  Input tensors may have fewer rows than output tensors. Rows beyond
+ *  valid_num_rows are zero-filled in the output and excluded from amax.
+ *
+ *  \param[in]     num_tensors             Number of tensors.
+ *  \param[in]     input_list              List of 2D input tensors (unpadded).
+ *  \param[in,out] output_list             List of casted tensors (padded).
+ *  \param[in]     valid_num_rows_list     Per-tensor valid row count, or NULL
+ *                                         for no padding (all rows valid).
+ *  \param[in]     stream                  CUDA stream used for the operation.
+ */
+void nvte_multi_cast_transpose_with_padding(size_t num_tensors, const NVTETensor *input_list, NVTETensor *output_list,
+                                            const int *valid_num_rows_list, cudaStream_t stream);
+#endif
 
 /*! \brief Compute backward of GeLU operation on the input, then cast and transpose.
  *         Additionally, reduce the result of the GeLU backward along the first dimension.
