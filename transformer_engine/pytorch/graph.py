@@ -374,6 +374,7 @@ def _make_graphed_callables(
     need_bwd_dw_graph = {}
 
     # Run warmup and do the above filtering.
+    # ROCm: reuse warmup stream for graph capture (ROCM-25129)
     stream = torch.cuda.Stream()
     with torch.cuda.stream(stream):
         for func_idx, func in zip(warmup_func_idx, warmup_func):
