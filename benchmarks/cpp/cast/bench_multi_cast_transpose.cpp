@@ -11,6 +11,7 @@
 
 #include "benchmark_utils.h"
 
+#include "transformer_engine/padding_hip.h"
 #include "transformer_engine/transpose_hip.h"
 #include "transformer_engine/transformer_engine_hip.h"
 
@@ -225,6 +226,182 @@ static void BM_MultiCastTranspose(benchmark::State &state) {
   HIP_CHECK(hipStreamDestroy(stream));
 }
 
+// Unfused baseline: separate padding kernel + cast_transpose
+template <typename IType>
+static void BM_PaddingThenMCT(benchmark::State &state) {
+  const size_t total_tokens = state.range(0);
+  const size_t cols         = state.range(1);
+  const size_t num_experts  = state.range(2);
+  const size_t top_k        = state.range(3);
+  const size_t routing_mode = state.range(4);
+
+  uint64_t seed = derive_seed(total_tokens, cols, num_experts, top_k, routing_mode);
+
+  auto counts = (routing_mode == 0)
+      ? simulate_topk_balanced(total_tokens, num_experts, top_k, seed)
+      : simulate_topk_skewed(total_tokens, num_experts, top_k, seed);
+
+  size_t sum_tok = std::accumulate(counts.begin(), counts.end(), size_t(0));
+
+  DType itype = std::is_same_v<IType, float>        ? DType::kFloat32  :
+                std::is_same_v<IType, hip_bfloat16> ? DType::kBFloat16 :
+                                                      DType::kFloat16;
+
+  std::string pfx = "pad_mct_" + std::to_string(total_tokens) + "_" + std::to_string(cols) + "_" 
+                  + std::to_string(num_experts) + "_" + std::to_string(routing_mode);
+
+  std::vector<NVTETensor> nvte_in(num_experts), nvte_pad_out(num_experts), 
+      nvte_mct_in(num_experts), nvte_mct_out(num_experts);
+
+  std::vector<int> padded_rows_list(num_experts);
+
+  for (size_t e = 0; e < num_experts; e++) {
+    size_t actual = std::max(counts[e], size_t(1));
+    size_t padded = ((actual + kPadMultiple - 1) / kPadMultiple) * kPadMultiple;
+    padded_rows_list[e] = static_cast<int>(padded);
+
+    auto &input = TensorCache::get_or_create(pfx + "_in_" + std::to_string(e), {actual, cols}, itype, 
+                                             true, false, NVTE_DELAYED_TENSOR_SCALING, true);
+
+    auto &pad_out = TensorCache::get_or_create(pfx + "_pad_" + std::to_string(e), {padded, cols}, itype,
+                                               true, false, NVTE_DELAYED_TENSOR_SCALING, false);
+
+    auto &mct_out = TensorCache::get_or_create(pfx + "_out_" + std::to_string(e), {padded, cols}, DType::kFloat8E4M3,
+                                               true, true, NVTE_DELAYED_TENSOR_SCALING, false);
+
+    mct_out.set_scale(1.0f);
+
+    nvte_in[e]      = input.data();
+    nvte_pad_out[e] = pad_out.data();
+    nvte_mct_in[e]  = pad_out.data();
+    nvte_mct_out[e] = mct_out.data();
+  }
+
+  hipStream_t stream;
+  HIP_CHECK(hipStreamCreate(&stream));
+
+  hipEvent_t start, stop;
+  HIP_CHECK(hipEventCreate(&start));
+  HIP_CHECK(hipEventCreate(&stop));
+
+  warmup_gpu();
+
+  for (auto _ : state) {
+    HIP_CHECK(hipEventRecord(start, stream));
+    nvte_multi_padding(num_experts, nvte_in.data(), nvte_pad_out.data(), padded_rows_list.data(), stream);
+    nvte_multi_cast_transpose(num_experts, nvte_mct_in.data(), nvte_mct_out.data(), stream);
+    HIP_CHECK(hipEventRecord(stop, stream));
+    HIP_CHECK(hipEventSynchronize(stop));
+
+    float ms = 0;
+    HIP_CHECK(hipEventElapsedTime(&ms, start, stop));
+    state.SetIterationTime(ms / 1000.0);
+  }
+
+  HIP_CHECK(hipEventDestroy(start));
+  HIP_CHECK(hipEventDestroy(stop));
+
+  size_t total_bytes = 0;
+  for (size_t e = 0; e < num_experts; e++) {
+    size_t actual = std::max(counts[e], size_t(1));
+    size_t padded = padded_rows_list[e];
+    total_bytes += actual * cols * sizeof(IType);
+    total_bytes += padded * cols * sizeof(IType);
+    total_bytes += padded * cols * sizeof(IType);
+    total_bytes += padded * cols * sizeof(fp8_e4m3) * 2;
+  }
+  set_bytes_processed(state, total_bytes);
+
+  state.counters["experts"] = num_experts;
+  state.counters["cols"]    = cols;
+  state.counters["avg_tok"] = static_cast<double>(sum_tok) / num_experts;
+
+  HIP_CHECK(hipStreamDestroy(stream));
+}
+
+// Fused: single cast_transpose kernel with built-in padding
+template <typename IType>
+static void BM_FusedPaddingMCT(benchmark::State &state) {
+  const size_t total_tokens = state.range(0);
+  const size_t cols         = state.range(1);
+  const size_t num_experts  = state.range(2);
+  const size_t top_k        = state.range(3);
+  const size_t routing_mode = state.range(4);
+
+  uint64_t seed = derive_seed(total_tokens, cols, num_experts, top_k, routing_mode);
+
+  auto counts = (routing_mode == 0)
+      ? simulate_topk_balanced(total_tokens, num_experts, top_k, seed)
+      : simulate_topk_skewed(total_tokens, num_experts, top_k, seed);
+
+  size_t sum_tok = std::accumulate(counts.begin(), counts.end(), size_t(0));
+
+  DType itype = std::is_same_v<IType, float>        ? DType::kFloat32  :
+                std::is_same_v<IType, hip_bfloat16> ? DType::kBFloat16 :
+                                                      DType::kFloat16;
+
+  std::string pfx = "fused_mct_" + std::to_string(total_tokens) + "_" + std::to_string(cols) + "_" 
+                  + std::to_string(num_experts) + "_" + std::to_string(routing_mode);
+
+  std::vector<NVTETensor> nvte_in(num_experts), nvte_out(num_experts);
+  std::vector<int> valid_rows_list(num_experts);
+
+  for (size_t e = 0; e < num_experts; e++) {
+    size_t actual = std::max(counts[e], size_t(1));
+    size_t padded = ((actual + kPadMultiple - 1) / kPadMultiple) * kPadMultiple;
+    valid_rows_list[e] = static_cast<int>(actual);
+
+    auto &input = TensorCache::get_or_create(pfx + "_in_" + std::to_string(e), {actual, cols}, itype,
+                                             true, false, NVTE_DELAYED_TENSOR_SCALING, true);
+
+    auto &output = TensorCache::get_or_create(pfx + "_out_" + std::to_string(e), {padded, cols}, DType::kFloat8E4M3,
+                                              true, true, NVTE_DELAYED_TENSOR_SCALING, false);
+
+    output.set_scale(1.0f);
+
+    nvte_in[e]  = input.data();
+    nvte_out[e] = output.data();
+  }
+
+  hipStream_t stream;
+  HIP_CHECK(hipStreamCreate(&stream));
+
+  hipEvent_t start, stop;
+  HIP_CHECK(hipEventCreate(&start));
+  HIP_CHECK(hipEventCreate(&stop));
+
+  warmup_gpu();
+
+  for (auto _ : state) {
+    HIP_CHECK(hipEventRecord(start, stream));
+    nvte_multi_cast_transpose_with_padding(num_experts, nvte_in.data(), nvte_out.data(), valid_rows_list.data(), stream);
+    HIP_CHECK(hipEventRecord(stop, stream));
+    HIP_CHECK(hipEventSynchronize(stop));
+
+    float ms = 0;
+    HIP_CHECK(hipEventElapsedTime(&ms, start, stop));
+    state.SetIterationTime(ms / 1000.0);
+  }
+
+  HIP_CHECK(hipEventDestroy(start));
+  HIP_CHECK(hipEventDestroy(stop));
+
+  size_t total_bytes = 0;
+  for (size_t e = 0; e < num_experts; e++) {
+    size_t actual = std::max(counts[e], size_t(1));
+    size_t padded = ((actual + kPadMultiple - 1) / kPadMultiple) * kPadMultiple;
+    total_bytes += actual * cols * sizeof(IType);
+    total_bytes += padded * cols * sizeof(fp8_e4m3) * 2;
+  }
+  set_bytes_processed(state, total_bytes);
+
+  state.counters["experts"]  = num_experts;
+  state.counters["cols"]     = cols;
+  state.counters["avg_tok"]  = static_cast<double>(sum_tok) / num_experts;
+
+  HIP_CHECK(hipStreamDestroy(stream));
+}
+
 }  // namespace
 
 #define REGISTER_MCT(ITYPE, INAME)                                            \
@@ -239,6 +416,29 @@ static void BM_MultiCastTranspose(benchmark::State &state) {
     ->Unit(benchmark::kMicrosecond)                                           \
     ->UseManualTime();
 
+#define REGISTER_PAD_MCT(ITYPE, INAME)                                        \
+  BENCHMARK_TEMPLATE(BM_PaddingThenMCT, ITYPE)                                \
+    ->Name("BM_PaddingThenMCT/" INAME "_E4M3/moe")                            \
+    MOE_BALANCED                                                              \
+    ->Unit(benchmark::kMicrosecond)                                           \
+    ->UseManualTime();                                                        \
+  BENCHMARK_TEMPLATE(BM_PaddingThenMCT, ITYPE)                                \
+    ->Name("BM_PaddingThenMCT/" INAME "_E4M3/moe_skewed")                     \
+    MOE_SKEWED                                                                \
+    ->Unit(benchmark::kMicrosecond)                                           \
+    ->UseManualTime();                                                        \
+  BENCHMARK_TEMPLATE(BM_FusedPaddingMCT, ITYPE)                               \
+    ->Name("BM_FusedPaddingMCT/" INAME "_E4M3/moe")                           \
+    MOE_BALANCED                                                              \
+    ->Unit(benchmark::kMicrosecond)                                           \
+    ->UseManualTime();                                                        \
+  BENCHMARK_TEMPLATE(BM_FusedPaddingMCT, ITYPE)                               \
+    ->Name("BM_FusedPaddingMCT/" INAME "_E4M3/moe_skewed")                    \
+    MOE_SKEWED                                                                \
+    ->Unit(benchmark::kMicrosecond)                                           \
+    ->UseManualTime();
+
 REGISTER_MCT(hip_bfloat16, "BF16")
+REGISTER_PAD_MCT(hip_bfloat16, "BF16")
 
 BENCHMARK_MAIN();
