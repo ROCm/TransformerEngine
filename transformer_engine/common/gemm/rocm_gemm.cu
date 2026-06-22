@@ -321,7 +321,7 @@ void free_async_temps(const std::vector<void*>& buffers, hipStream_t stream) {
 }
 
 Tensor make_mxfp8_rowwise_from_columnwise(const Tensor& input, std::vector<void*>& buffers,
-                                          const bool output_swizzled, hipStream_t stream) {
+                                          hipStream_t stream) {
   NVTE_CHECK(input.has_columnwise_data(), "MXFP8 transpose-to-TN requires column-wise data.");
   NVTE_CHECK(input.columnwise_scale_inv.has_data(),
              "MXFP8 transpose-to-TN requires column-wise scales.");
@@ -340,8 +340,10 @@ Tensor make_mxfp8_rowwise_from_columnwise(const Tensor& input, std::vector<void*
   const size_t padded_m = scale_shape[1];
   const size_t valid_k_scale = (rows + kMXFP8BlockSize - 1) / kMXFP8BlockSize;
   const size_t valid_m = cols;
+  // On gfx1250 (the only arch that calls this function), hipBLASLt always requires
+  // swizzled scales. If the input scales are already swizzled, reuse them directly.
   void* rowwise_scale = nullptr;
-  if (input.with_gemm_swizzled_scales && output_swizzled) {
+  if (input.with_gemm_swizzled_scales) {
     rowwise_scale = input.columnwise_scale_inv.dptr;
   } else {
     const size_t scale_bytes = k_scale * padded_m * typeToSize(input.columnwise_scale_inv.dtype);
@@ -349,7 +351,7 @@ Tensor make_mxfp8_rowwise_from_columnwise(const Tensor& input, std::vector<void*
     launch_mxfp8_colwise_scale_to_rowwise(input.columnwise_scale_inv.dptr, rowwise_scale, k_scale,
                                           padded_m, valid_k_scale, valid_m,
                                           input.with_gemm_swizzled_scales,
-                                          output_swizzled, stream);
+                                          /*output_swizzled=*/true, stream);
   }
 
   Tensor output;
@@ -358,7 +360,7 @@ Tensor make_mxfp8_rowwise_from_columnwise(const Tensor& input, std::vector<void*
   output.data = SimpleTensor(rowwise_data, std::vector<size_t>{cols, rows}, input.columnwise_data.dtype);
   output.scale_inv = SimpleTensor(rowwise_scale, std::vector<size_t>{padded_m, k_scale},
                                   input.columnwise_scale_inv.dtype);
-  output.with_gemm_swizzled_scales = output_swizzled;
+  output.with_gemm_swizzled_scales = true;
   return output;
 }
 
@@ -1870,6 +1872,11 @@ void release_service_stream(hipStream_t stream, struct ServiceStreamCtl &ctl)
     NVTE_CHECK_CUDA(hipEventDestroy(ctl.start_event));
 }
 
+// On gfx1250, hipBLASLt MXFP8 kernels only support TN layout. This function handles
+// NN (DGRAD) and NT (WGRAD) by physically transposing the MXFP8 data+scales into a
+// rowwise layout suitable for a TN call. We always need columnwise data for the
+// non-transposed operands; having rowwise data as well doesn't help because MXFP8
+// rowwise/columnwise scales cover different dimensions and are not interchangeable.
 bool try_mxfp8_non_tn_transpose_to_tn(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                       const Tensor *inputBias, Tensor *outputPreGelu,
                                       cublasOperation_t transa, cublasOperation_t transb,
@@ -1894,12 +1901,10 @@ bool try_mxfp8_non_tn_transpose_to_tn(const Tensor *inputA, const Tensor *inputB
     return false;
   }
 
-  const bool output_swizzled = cuda::sm_arch() == 125;
   std::vector<void*> temp_buffers;
   bool launched = false;
   try {
-    const Tensor A_tn = make_mxfp8_rowwise_from_columnwise(*inputA, temp_buffers, output_swizzled,
-                                                           stream);
+    const Tensor A_tn = make_mxfp8_rowwise_from_columnwise(*inputA, temp_buffers, stream);
     Tensor B_tn;
     const Tensor *A_for_gemm = &A_tn;
     const Tensor *B_for_gemm = nullptr;
@@ -1910,7 +1915,7 @@ bool try_mxfp8_non_tn_transpose_to_tn(const Tensor *inputA, const Tensor *inputB
     int tn_ldd = m;
 
     if (transb == CUBLAS_OP_T) {
-      B_tn = make_mxfp8_rowwise_from_columnwise(*inputB, temp_buffers, output_swizzled, stream);
+      B_tn = make_mxfp8_rowwise_from_columnwise(*inputB, temp_buffers, stream);
       A_for_gemm = &B_tn;
       B_for_gemm = &A_tn;
 
@@ -2015,6 +2020,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     handle = hipblaslt_handles[compute_stream_offset];
   }
 
+  // FIXME(https://amd-hub.atlassian.net/browse/ROCM-26110): Remove this workaround once hipBLASLt supports NN/NT
+  // layouts for MXFP8 on gfx1250.
   bool handled = try_mxfp8_non_tn_transpose_to_tn(inputA, inputB, outputD, inputBias,
                                                   outputPreGelu, transa, transb, grad,
                                                   workspace, workspaceSize, alpha, beta,
