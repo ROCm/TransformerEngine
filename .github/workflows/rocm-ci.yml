@@ -147,6 +147,7 @@ jobs:
         run: |
           DEVICE_FLAG="$(cat /etc/podinfo/gha-render-devices 2>/dev/null || echo --device=/dev/dri)"
           test -n "$DEVICE_FLAG"
+          echo "Using device flag: $DEVICE_FLAG"
           docker run -dt \
             --rm \
             --name te-runner \
