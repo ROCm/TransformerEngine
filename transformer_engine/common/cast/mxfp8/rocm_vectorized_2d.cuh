@@ -26,7 +26,7 @@ __device__ inline void copy_2d_to_shared(T *sh_ptr_base, const T *g_ptr, size_t 
         size_t g_row = g_start_row + l_y;
         size_t g_col_primitive_start = g_start_col + l_x_vec * N_VEC;
 
-        if (g_row < total_rows) {
+        if (g_row < total_rows && g_col_primitive_start < total_cols) {
             const T* current_g_row_base_ptr = g_ptr + g_row * g_stride;
             VectorizedLoader<T, N_VEC, ALIGNED_ACCESS>global_loader(current_g_row_base_ptr, total_cols);
 
@@ -65,7 +65,7 @@ __device__ inline void bulk_tensor_2d_shared_to_global(const T *sh_ptr_base, T *
     size_t g_row = g_start_row + l_y;
     size_t g_col_primitive_start = g_start_col + l_x_vec * N_VEC;
 
-    if (g_row < total_rows) {
+    if (g_row < total_rows && g_col_primitive_start < total_cols) {
       const T *sh_row = sh_ptr_base + l_y * chunk_dim_x;
       T *g_row_ptr = g_ptr + g_row * g_stride;
 
