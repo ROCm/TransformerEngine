@@ -184,8 +184,10 @@ class _GroupedLinear(torch.autograd.Function):
         weights_fp8: list
         if fp8 or debug:
             # FP8 cast to workspace buffer. For delayed-scaling FP8 the whole group is
-            # cast and transposed with a single fused multi_cast_transpose kernel; other
-            # cases fall back to a per-weight quantize inside get_multi_weight_workspace.
+            # cast and transposed with a single fused multi_cast_transpose kernel, and on
+            # ROCm an MXFP8 group is quantized with a single fused multi-quantize kernel;
+            # other cases fall back to a per-weight quantize inside
+            # get_multi_weight_workspace.
             update_workspace = is_first_microbatch is None or is_first_microbatch
             weights_fp8 = module.get_multi_weight_workspace(
                 tensors=weights,

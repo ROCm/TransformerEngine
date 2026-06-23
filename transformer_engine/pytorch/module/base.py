@@ -1607,12 +1607,13 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
 
         Analogous to `get_weight_workspace`, but operates on a whole group of
         weights. For delayed-scaling FP8 the group is cast and transposed with a
-        single fused multi_cast_transpose kernel instead of one quantize call per
-        tensor. With caching, both the initial allocation and later updates use that
-        fused `multi_tensor_quantize` path when `update_workspace` is True; cached
-        workspaces are passed as `outputs` so the fused kernel writes in place without
-        reallocating buffers. When
-        fusion is not applicable (other recipes, rowwise-only usage,
+        single fused multi_cast_transpose kernel, and on ROCm an MXFP8 group is
+        quantized with a single fused multi-quantize kernel, instead of one
+        quantize call per tensor. With caching, both the initial allocation and
+        later updates use that fused `multi_tensor_quantize` path when
+        `update_workspace` is True; cached workspaces are passed as `outputs` so
+        the fused kernel writes in place without reallocating buffers. When
+        fusion is not applicable (other recipes, FP8 rowwise-only usage,
         already-quantized weights, or CUDA-graph weight caching) the call falls
         back to `get_weight_workspace` for each tensor, matching the per-tensor path.
 
@@ -1633,16 +1634,26 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         """
         num_tensors = len(tensors)
 
-        # Fused path: delayed-scaling FP8 with transpose, high-precision (not
-        # already quantized) weights, and no CUDA-graph skip flag (the fused kernel
-        # has no device-side noop and would not preserve cached buffer pointers).
+        # Fused path eligibility. Two recipes have a fused multi-tensor quantize
+        # kernel:
+        #   * delayed-scaling FP8 (Float8Quantizer): cast + transpose, so it
+        #     requires columnwise usage.
+        #   * MXFP8 (ROCm only): fused multi-quantize kernel that handles whichever
+        #     rowwise/columnwise buffers are allocated.
+        # Both require high-precision (not already quantized) weights and no
+        # CUDA-graph skip flag (the fused kernels have no device-side noop and would
+        # not preserve cached buffer pointers).
+        fused_fp8 = all(
+            isinstance(quantizer, Float8Quantizer) and quantizer.columnwise_usage
+            for quantizer in quantizers
+        )
+        fused_mxfp8 = IS_HIP_EXTENSION and all(
+            isinstance(quantizer, MXFP8Quantizer) for quantizer in quantizers
+        )
         can_fuse = (
             num_tensors > 0
             and skip_update_flag is None
-            and all(
-                isinstance(quantizer, Float8Quantizer) and quantizer.columnwise_usage
-                for quantizer in quantizers
-            )
+            and (fused_fp8 or fused_mxfp8)
             and not any(isinstance(tensor, QuantizedTensorStorage) for tensor in tensors)
         )
 
@@ -1663,6 +1674,11 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                             and quantizer.columnwise_usage
                             and out._transpose is None
                         ):
+                            reset_cache = True
+                    elif isinstance(out, MXFP8TensorStorage):
+                        if quantizer.rowwise_usage and out._rowwise_data is None:
+                            reset_cache = True
+                        elif quantizer.columnwise_usage and out._columnwise_data is None:
                             reset_cache = True
                     if reset_cache:
                         del self._fp8_workspaces[name]
