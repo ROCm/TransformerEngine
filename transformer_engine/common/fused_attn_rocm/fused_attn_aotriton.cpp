@@ -206,11 +206,7 @@ void fused_attn_aotriton_fwd_impl(
     std::array<uint64_t, 4>{1, 1, 1, 1}, 
     dtype);
   
-  bool nvte_log_aotriton_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_aotriton_config = true;
-  }
+  const bool nvte_log_aotriton_config = getenv<bool>("NVTE_LOG_AOTRITON_CONFIG");
   aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
   auto seed = mk_aoscalartensor(devPtrDropoutSeed);
   auto offset1 = mk_aoscalartensor(devPtrDropoutOffset);
@@ -401,11 +397,7 @@ void fused_attn_aotriton_bwd_impl(
   auto cu_seqlens_q = aotriton::TensorView<1>(reinterpret_cast<intptr_t>(devPtrCuSeqlensQ), cu_seqlens_shape, cu_seqlens_stride, aotriton::DType::kInt32);
   auto cu_seqlens_k = aotriton::TensorView<1>(reinterpret_cast<intptr_t>(devPtrCuSeqlensKV), cu_seqlens_shape, cu_seqlens_stride, aotriton::DType::kInt32);
 
-  bool nvte_log_aotriton_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_AOTRITON_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_aotriton_config = true;
-  }
+  const bool nvte_log_aotriton_config = getenv<bool>("NVTE_LOG_AOTRITON_CONFIG");
   aotriton::TensorView<4> empty_bias(0, {0,0,0,0}, {0,0,0,0}, dtype);
   auto seed = mk_aoscalartensor(devPtrDropoutSeed);
   auto offset = mk_aoscalartensor(devPtrDropoutOffset);
@@ -555,19 +547,8 @@ void fused_attn_aotriton_fwd(
     &workspace_size,
     stream);
 
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
+  set_workspace_size(workspace, workspace_size);
+  return;
 #else
   NVTE_ERROR("AOTriton backend not compiled.");
 #endif // USE_FUSED_ATTN_AOTRITON
@@ -620,19 +601,8 @@ void fused_attn_aotriton_bwd(
     &workspace_size,
     stream);
 
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
+  set_workspace_size(workspace, workspace_size);
+  return;
 #else
   NVTE_ERROR("AOTriton backend not compiled.");
 #endif // USE_FUSED_ATTN_AOTRITON

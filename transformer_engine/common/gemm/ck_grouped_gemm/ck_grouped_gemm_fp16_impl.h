@@ -38,6 +38,29 @@ struct TileCfg_256x256x64 {
   static constexpr ck_tile::index_t TilePartitionerM01 = 4;
 };
 
+struct TileCfg_256x256x64_WMMA {
+  static constexpr ck_tile::index_t M_Tile = 256;
+  static constexpr ck_tile::index_t N_Tile = 256;
+  static constexpr ck_tile::index_t K_Tile = 64;
+
+  static constexpr ck_tile::index_t M_Warp = 2;
+  static constexpr ck_tile::index_t N_Warp = 2;
+  static constexpr ck_tile::index_t K_Warp = 1;
+
+  static constexpr ck_tile::index_t M_Warp_Tile = 16;
+  static constexpr ck_tile::index_t N_Warp_Tile = 16;
+  static constexpr ck_tile::index_t K_Warp_Tile = 32;
+
+  static constexpr bool kPadM = true;
+  static constexpr bool kPadN = true;
+  static constexpr bool kPadK = true;
+
+  static constexpr bool DoubleSmemBuffer = false;
+
+  static constexpr ck_tile::index_t TilePartitionerGroupNum = 8;
+  static constexpr ck_tile::index_t TilePartitionerM01 = 4;
+};
+
 struct TileCfg_256x128x64 : TileCfg_256x256x64 {
   static constexpr ck_tile::index_t N_Tile = 128;
 };
@@ -249,7 +272,9 @@ bool ck_tile_grouped_gemm_fp16_dispatch_layout(DType a_dtype, DType d_dtype,
 
       TRANSFORMER_ENGINE_SWITCH_CONDITION(need_m_pad, kPadM, {
         TRANSFORMER_ENGINE_SWITCH_CONDITION(need_k_pad, kPadK, {
-          if (ctx.N % 256 == 0) {
+          if (ctx.arch == GPUArch::GFX1250) {
+            MAKE_RUNNER(TileCfg_256x256x64_WMMA, true, true, true);
+          } else if (ctx.N % 256 == 0) {
             MAKE_RUNNER(TileCfg_256x256x64, kPadM, false, kPadK);
           } else if (ctx.N % 128 == 0) {
             MAKE_RUNNER(TileCfg_256x128x64, kPadM, false, kPadK);

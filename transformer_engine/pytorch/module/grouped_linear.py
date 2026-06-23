@@ -104,6 +104,8 @@ class _GroupedLinear(torch.autograd.Function):
             save_original_input,
             debug,
             m_splits_tensor,
+            actual_m_splits,
+            unpad_output,
         ) = non_tensor_args
 
         # Check if Triton kernel should be used
@@ -159,12 +161,13 @@ class _GroupedLinear(torch.autograd.Function):
             # Disable bulk allocation when CPU offloading is active: offloading skips small
             # tensors (like scales), but bulk allocation shares storage across all tensors,
             # so if scales can't be offloaded, nothing in the group can be offloaded.
+            fused_padding_kwargs = {}
+            if actual_m_splits is not None and IS_HIP_EXTENSION \
+                    and inp_view.shape[0] == sum(actual_m_splits):
+                fused_padding_kwargs["valid_split_sections"] = actual_m_splits
             inputmats = tex.split_quantize(
-                inp_view,
-                m_splits,
-                input_quantizers,
-                disable_bulk_allocation=cpu_offloading,
-            )
+                inp_view, m_splits, input_quantizers,
+                disable_bulk_allocation=cpu_offloading, **fused_padding_kwargs)
         elif debug:
             inputmats = DebugQuantizer.multi_tensor_quantize(
                 inp_view, input_quantizers, m_splits, activation_dtype
@@ -239,6 +242,17 @@ class _GroupedLinear(torch.autograd.Function):
             **kwargs,
         )
 
+
+        output_unpadded = False
+        if unpad_output and actual_m_splits is not None and IS_HIP_EXTENSION and actual_m_splits != m_splits:
+            out_unpadded = torch.empty(
+                [sum(actual_m_splits), out.shape[-1]],
+                dtype=out.dtype, device=out.device,
+            )
+            tex.fused_multi_row_unpadding(out, out_unpadded, m_splits, actual_m_splits)
+            out = out_unpadded
+            output_unpadded = True
+
         if fp8_calibration:
             for i in range(num_gemms):
                 # amax of input
@@ -309,6 +323,8 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.device = device
             ctx.output_quantizers = output_quantizers
             ctx.m_splits = m_splits
+            ctx.actual_m_splits = actual_m_splits if IS_HIP_EXTENSION else None
+            ctx.output_unpadded = output_unpadded
             ctx.m_splits_tensor = m_splits_tensor
             ctx.num_gemms = num_gemms
             ctx.activation_dtype = activation_dtype
@@ -362,11 +378,22 @@ class _GroupedLinear(torch.autograd.Function):
 
             # Preprocess grad output
             grad_output_view = grad_output.contiguous().view(-1, grad_output.shape[-1])
+
+            bwd_fused_kwargs = {}
+            if ctx.output_unpadded and ctx.actual_m_splits is not None:
+                bwd_fused_kwargs["valid_split_sections"] = ctx.actual_m_splits
+                # Fused pad+MCT produces both rowwise (dgrad) and columnwise (wgrad).
+                for q in ctx.grad_output_quantizers:
+                    if q is not None:
+                        q.set_usage(rowwise=True, columnwise=True)
             grad_output = [None] * ctx.num_gemms
             grad_biases = [None] * ctx.num_gemms
             if ctx.fp8 and not ctx.debug:
                 if ctx.use_bias:
-                    grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
+                    grad_output_mats = torch.split(
+                        grad_output_view,
+                        ctx.actual_m_splits if ctx.output_unpadded else ctx.m_splits,
+                    )
                     recipe = ctx.fp8_recipe
                     if recipe.delayed() or recipe.float8_current_scaling() or recipe.mxfp8():
                         # Fused bias grad + quantize kernel
@@ -380,17 +407,13 @@ class _GroupedLinear(torch.autograd.Function):
                         for i in range(ctx.num_gemms):
                             grad_biases[i] = grad_output_mats[i].sum(dim=0)
                         grad_output = tex.split_quantize(
-                            grad_output_view,
-                            ctx.m_splits,
-                            ctx.grad_output_quantizers,
-                        )
+                            grad_output_view, ctx.m_splits,
+                            ctx.grad_output_quantizers, **bwd_fused_kwargs)
                 else:
                     # Multi-tensor quantize
                     grad_output = tex.split_quantize(
-                        grad_output_view,
-                        ctx.m_splits,
-                        ctx.grad_output_quantizers,
-                    )
+                        grad_output_view, ctx.m_splits,
+                        ctx.grad_output_quantizers, **bwd_fused_kwargs)
             elif ctx.debug:
                 grad_output_mats = torch.split(grad_output_view, ctx.m_splits)
                 for i in range(ctx.num_gemms):
@@ -459,6 +482,17 @@ class _GroupedLinear(torch.autograd.Function):
                     **kwargs,
                 )
 
+                if ctx.actual_m_splits is not None and ctx.actual_m_splits != ctx.m_splits \
+                        and not ctx.output_unpadded:
+                    dgrad_unpadded = torch.empty(
+                        (sum(ctx.actual_m_splits), dgrad.shape[-1]),
+                        dtype=dgrad.dtype, device=dgrad.device,
+                    )
+                    tex.fused_multi_row_unpadding(
+                        dgrad, dgrad_unpadded, ctx.m_splits, ctx.actual_m_splits,
+                    )
+                    dgrad = dgrad_unpadded
+
             if ctx.weights_requires_grad:
                 wgrad_gemm_use_split_accumulator = _2X_ACC_WGRAD
                 if ctx.fp8:
@@ -497,7 +531,13 @@ class _GroupedLinear(torch.autograd.Function):
                                 input_quantizer.set_usage(rowwise=False, columnwise=True)
                     inputmats: list
                     if ctx.fp8 and not ctx.debug:
-                        inputmats = tex.split_quantize(inp_view, ctx.m_splits, ctx.input_quantizers)
+                        save_fused_kwargs = {}
+                        if ctx.actual_m_splits is not None and IS_HIP_EXTENSION \
+                                and inp_view.shape[0] == sum(ctx.actual_m_splits):
+                            save_fused_kwargs["valid_split_sections"] = ctx.actual_m_splits
+                        inputmats = tex.split_quantize(
+                            inp_view, ctx.m_splits, ctx.input_quantizers,
+                            **save_fused_kwargs)
                     elif ctx.debug:
                         inputmats = DebugQuantizer.multi_tensor_quantize(
                             inp_view,
@@ -909,6 +949,8 @@ class GroupedLinear(TransformerEngineBaseModule):
         m_splits: List[int],
         is_first_microbatch: Optional[bool] = None,
         m_splits_tensor: Optional[torch.Tensor] = None,
+        actual_m_splits: Optional[List[int]] = None,
+        unpad_output: bool = False,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -932,6 +974,14 @@ class GroupedLinear(TransformerEngineBaseModule):
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)
+        actual_m_splits : Optional[List[int]], default = None
+                         Unpadded per-group row counts when inp is unpadded and
+                         m_splits contains the padded sizes. Used by the ROCm
+                         fused-pad-cast-transpose path; ignored on CUDA.
+        unpad_output : bool, default = False
+                      When True, unpad the GEMM output from sum(m_splits) to
+                      sum(actual_m_splits) rows before returning. Used by the
+                      ROCm fused-pad-cast-transpose path; ignored on CUDA.
         """
         debug = self.is_debug_iter()
 
@@ -996,6 +1046,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                 self.save_original_input,
                 debug,
                 m_splits_tensor,
+                actual_m_splits,
+                unpad_output,
             )
             out = linear_fn(*autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors)
 
