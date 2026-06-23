@@ -154,6 +154,13 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream);
 // v3 (asm) dispatch paths. Pure host-side computation; no kernel launch.
 size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args);
 
+// Reserve, outside any HIP graph capture, the pinned host staging buffer the v2 backward
+// launcher requests via ck_attn_bwd's pinned_host_alloc callback. Must be called only from
+// the workspace-size (sizing) pass, which runs at lowering time before stream capture;
+// allocating there keeps the captured dispatch allocation-free. Idempotent per config and
+// harmless for configs that end up on the v3 asm path (the buffer simply goes unused).
+void ck_attn_bwd_reserve_host_staging(const CkAttnBwdArgs& args);
+
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_H
 
