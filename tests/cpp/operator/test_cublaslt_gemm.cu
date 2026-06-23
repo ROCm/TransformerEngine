@@ -465,6 +465,7 @@ static void swizzle_mxfp8_scales(test::Tensor &t, bool rowwise) {
   nvte_swizzle_scaling_factors(input_tw.data(), output_tw.data(), 0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   NVTE_CHECK_CUDA(cudaMemcpy(scale_ptr, d_tmp, num_scales, cudaMemcpyDeviceToDevice));
+  t.set_with_gemm_swizzled_scales(true);
   NVTE_CHECK_CUDA(cudaFree(d_tmp));
 }
 
@@ -506,6 +507,9 @@ void performTest(const TestParams& params) {
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
   const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
 
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+
   if (use_mxfp8)
   {
     if (!has_fp8) {
@@ -514,13 +518,14 @@ void performTest(const TestParams& params) {
     if (params.m % 16 || params.n % 16) {
       GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
     }
-    if (params.k % 128) {
-      GTEST_SKIP() << "MXFP8 requires K to be a multiple of 128";
+    size_t required_k_multiple = 128;
+  #ifdef __HIP_PLATFORM_AMD__
+    required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
+  #endif
+    if (params.k % required_k_multiple) {
+      GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
     }
   }
-
-  cudaDeviceProp prop;
-  (void)cudaGetDeviceProperties(&prop, 0);
 
 #ifdef __HIP_PLATFORM_AMD__
 
@@ -738,15 +743,19 @@ void performDqTest(const TestParams &params) {
   GTEST_ASSERT_TRUE(isFp8Type(atype) && isFp8Type(btype)) << "FP8/BF8 input datatype is expected";
   GTEST_ASSERT_FALSE(isFp8Type(dtype)) << "Non FP8/BF8 output datatype is expected";
 
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+
   if (params.m % 16 || params.n % 16) {
     GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
   }
-  if (params.k % 128) {
-    GTEST_SKIP() << "MXFP8 requires K to be a multiple of 128";
+  size_t required_k_multiple = 128;
+#ifdef __HIP_PLATFORM_AMD__
+  required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
+#endif
+  if (params.k % required_k_multiple) {
+    GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
   }
-
-  cudaDeviceProp prop;
-  (void)cudaGetDeviceProperties(&prop, 0);
 
   bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
   if (!mxfp8_supported) {
@@ -947,14 +956,6 @@ class ProdGEMMTestSuite : public ::testing::TestWithParam<ProdGemmConfig> {};
 
 TEST_P(ProdGEMMTestSuite, TestMxfp8Dq) {
   const auto& config = GetParam();
-
-  cudaDeviceProp prop;
-  (void)cudaGetDeviceProperties(&prop, 0);
-  const bool is_tn = config.transa && !config.transb;
-  if (prop.major == 12 && prop.minor == 5 && !is_tn) {
-    GTEST_SKIP() << "hipBLASLt MXFP8 GEMM non-TN layout is not supported on gfx1250: "
-                 << config.label;
-  }
 
   TestParams params = {.m = config.m, .k = config.k, .n = config.n,
                        .use_bias = false, .use_gelu = false,

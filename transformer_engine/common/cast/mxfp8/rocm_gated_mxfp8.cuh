@@ -176,7 +176,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // --- Act rowwise quantization ---
       {
         __builtin_assume(act_amax >= 0);
-        const float scale_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(act_amax);
+        const float scale_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(act_amax, rocm_op::max{});
         const e8m0_t biased_exp =
             ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
         const float scale_inv = ptx::exp2f_rcp(biased_exp);
@@ -189,7 +189,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
         if (row_valid && col_valid) {
           if (IS_ALIGNED || col_start + ELEMS_PER_THREAD <= cols) {
-            out_vec.store_to(&output_act_rowwise[row * output_cols + col_start]);
+            reinterpret_cast<const NTVec<OType, ELEMS_PER_THREAD>*>(&out_vec)->nt_store(
+                &output_act_rowwise[row * output_cols + col_start]);
           } else {
 #pragma unroll
             for (int j = 0; j < ELEMS_PER_THREAD; j++) {
@@ -210,7 +211,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // --- Gate rowwise quantization (BWD only) ---
       if constexpr (IS_DGATED) {
         __builtin_assume(gate_amax >= 0);
-        const float scale_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(gate_amax);
+        const float scale_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(gate_amax, rocm_op::max{});
         const e8m0_t biased_exp =
             ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
         const float scale_inv = ptx::exp2f_rcp(biased_exp);
@@ -223,7 +224,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
         if (row_valid && col_valid) {
           if (IS_ALIGNED || col_start + ELEMS_PER_THREAD <= cols) {
-            out_vec.store_to(&output_gate_rowwise[row * output_cols + col_start]);
+            reinterpret_cast<const NTVec<OType, ELEMS_PER_THREAD>*>(&out_vec)->nt_store(
+                &output_gate_rowwise[row * output_cols + col_start]);
           } else {
 #pragma unroll
             for (int j = 0; j < ELEMS_PER_THREAD; j++) {
@@ -333,7 +335,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // --- Act rowwise quantization ---
       {
         __builtin_assume(act_amax >= 0);
-        const float scale_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(act_amax);
+        const float scale_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(act_amax, rocm_op::max{});
         const e8m0_t biased_exp =
             ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
         const float scale_inv = ptx::exp2f_rcp(biased_exp);
@@ -346,7 +348,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
         if (row_valid && col_valid) {
           if (IS_ALIGNED || col_start + ELEMS_PER_THREAD <= cols) {
-            out_vec.store_to(&output_act_rowwise[row * output_cols + col_start]);
+            reinterpret_cast<const NTVec<OType, ELEMS_PER_THREAD>*>(&out_vec)->nt_store(
+                &output_act_rowwise[row * output_cols + col_start]);
           } else {
 #pragma unroll
             for (int j = 0; j < ELEMS_PER_THREAD; j++) {
@@ -367,7 +370,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       // --- Gate rowwise quantization (BWD only) ---
       if constexpr (IS_DGATED) {
         __builtin_assume(gate_amax >= 0);
-        const float scale_amax = subwarp_reduce_max_broadcast<SUBWARP_WIDTH>(gate_amax);
+        const float scale_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(gate_amax, rocm_op::max{});
         const e8m0_t biased_exp =
             ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
         const float scale_inv = ptx::exp2f_rcp(biased_exp);
@@ -380,7 +383,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
         if (row_valid && col_valid) {
           if (IS_ALIGNED || col_start + ELEMS_PER_THREAD <= cols) {
-            out_vec.store_to(&output_gate_rowwise[row * output_cols + col_start]);
+            reinterpret_cast<const NTVec<OType, ELEMS_PER_THREAD>*>(&out_vec)->nt_store(
+                &output_gate_rowwise[row * output_cols + col_start]);
           } else {
 #pragma unroll
             for (int j = 0; j < ELEMS_PER_THREAD; j++) {
@@ -398,9 +402,29 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
           scales_rowwise[scale_idx] = biased_exp;
         }
       }
+
+      {
+        Vec<IType, ELEMS_PER_THREAD> cached_act, cached_gate;
+#pragma unroll
+        for (int j = 0; j < ELEMS_PER_THREAD; j++) {
+          cached_act.data.elt[j] = static_cast<IType>(computed_act[j]);
+        }
+        cached_act.store_to(&in_act_sh[shmem_base]);
+        if constexpr (IS_DGATED) {
+#pragma unroll
+          for (int j = 0; j < ELEMS_PER_THREAD; j++) {
+            cached_gate.data.elt[j] = static_cast<IType>(computed_gate[j]);
+          }
+          cached_gate.store_to(&in_gate_sh[shmem_base]);
+        }
+      }
     }
 
     if constexpr (USE_COLWISE_SCALING) {
+      if constexpr (USE_ROWWISE_SCALING) {
+        __syncthreads();
+      }
+
       const bool col_out_of_bounds = (chunk_offset_X + tid_colwise_X >= cols);
       const size_t row_base = chunk_it_offset_y;
       const int iteration_scale_colwise_offset_Y = scales_colwise_chunk_offset_Y + it;
@@ -411,21 +435,26 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       float thread_Y_mx_block_amax      = 0.0f;
       float thread_Y_mx_block_amax_gate = 0.0f;
 
-      // Compute activation and accumulate column amax
       for (int stage = 0; stage < BUFFER_STAGES_NUM_COLWISE; ++stage) {
         const int stage_offset_Y = stage * THREADS_PER_CHUNK_Y_COLWISE;
         const int shmem_offset_y = tid_colwise_Y + stage_offset_Y;
         const int shmem_idx      = shmem_offset_y * SHMEM_DIM_X + tid_colwise_X;
 
-        float act_elt  = static_cast<float>(in_act_sh[shmem_idx]);
-        float gate_elt = static_cast<float>(in_gate_sh[shmem_idx]);
-        float grad_elt = 0.0f;
-        if constexpr (IS_DGATED) {
-          grad_elt = static_cast<float>(in_grad_sh[shmem_idx]);
+        if constexpr (USE_ROWWISE_SCALING) {
+          after_dact_reg[stage] = static_cast<float>(in_act_sh[shmem_idx]);
+          if constexpr (IS_DGATED) {
+            after_dgate_reg[stage] = static_cast<float>(in_gate_sh[shmem_idx]);
+          }
+        } else {
+          float act_elt  = static_cast<float>(in_act_sh[shmem_idx]);
+          float gate_elt = static_cast<float>(in_gate_sh[shmem_idx]);
+          float grad_elt = 0.0f;
+          if constexpr (IS_DGATED) {
+            grad_elt = static_cast<float>(in_grad_sh[shmem_idx]);
+          }
+          compute_gated_activation<IS_DGATED, ParamOP, ActOP, DActOP, IType>(
+              act_elt, gate_elt, grad_elt, p, after_dact_reg[stage], after_dgate_reg[stage]);
         }
-
-        compute_gated_activation<IS_DGATED, ParamOP, ActOP, DActOP, IType>(
-            act_elt, gate_elt, grad_elt, p, after_dact_reg[stage], after_dgate_reg[stage]);
 
         __builtin_assume(thread_Y_mx_block_amax >= 0);
         thread_Y_mx_block_amax = fmaxf(thread_Y_mx_block_amax, fabsf(after_dact_reg[stage]));

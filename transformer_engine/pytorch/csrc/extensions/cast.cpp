@@ -7,6 +7,7 @@
  ************************************************************************/
 
 #include "transformer_engine/cast.h"
+#include "transformer_engine/transpose.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -265,7 +266,11 @@ namespace {
 void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
                                 std::vector<py::handle> &quantizer_py_list,
                                 std::vector<std::unique_ptr<Quantizer>> &quantizer_cpp_list,
-                                std::vector<TensorWrapper> &output_list) {
+                                std::vector<TensorWrapper> &output_list
+#ifdef __HIP_PLATFORM_AMD__
+                                , const int *valid_num_rows = nullptr
+#endif
+                                ) {
   // Check number of tensors
   const size_t num_tensors = input_list.size();
   NVTE_CHECK(quantizer_py_list.size() == num_tensors, "Expected ", num_tensors,
@@ -300,9 +305,36 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
       nvte_tensor_output_list.push_back(output_list[i].data());
     }
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
-                                nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
+#ifdef __HIP_PLATFORM_AMD__
+      if (valid_num_rows != nullptr) {
+        nvte_multi_cast_transpose_with_padding(nvte_tensor_input_list.size(),
+                                               nvte_tensor_input_list.data(),
+                                               nvte_tensor_output_list.data(),
+                                               valid_num_rows,
+                                               at::cuda::getCurrentCUDAStream());
+      } else {
+#endif
+      nvte_multi_cast_transpose(nvte_tensor_input_list.size(),
+                                nvte_tensor_input_list.data(),
+                                nvte_tensor_output_list.data(),
+                                at::cuda::getCurrentCUDAStream());
+#ifdef __HIP_PLATFORM_AMD__
+      }
+#endif
     });
+#ifdef USE_ROCM
+  } else if (num_tensors > 0 && detail::IsMXFP8Quantizers(quantizer_py_list[0].ptr())) {
+    std::vector<NVTETensor> nvte_tensor_input_list;
+    std::vector<NVTETensor> nvte_tensor_output_list;
+    for (size_t i = 0; i < num_tensors; ++i) {
+      nvte_tensor_input_list.push_back(input_list[i].data());
+      nvte_tensor_output_list.push_back(output_list[i].data());
+    }
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_multi_tensor_quantize(nvte_tensor_input_list.data(), nvte_tensor_output_list.data(),
+                                 nullptr, num_tensors, at::cuda::getCurrentCUDAStream());
+    });
+#endif
   } else {
     // Quantize kernels individually
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -1283,7 +1315,11 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                        const std::vector<size_t> &split_sections,
                                        std::vector<py::handle> quantizer_list,
-                                       bool disable_bulk_allocation) {
+                                       bool disable_bulk_allocation
+#ifdef __HIP_PLATFORM_AMD__
+                                       , std::optional<std::vector<size_t>> valid_split_sections
+#endif
+                                       ) {
   init_extension();
 
   // Check number of tensors
@@ -1312,6 +1348,22 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   size_t dim0_offset = 0;
   const size_t dim0_stride =
       input_shape[0] == 0 ? 0 : input_py.element_size() * input_size / input_shape[0];
+#ifdef __HIP_PLATFORM_AMD__
+  const auto &input_sections = valid_split_sections.has_value()
+                               ? *valid_split_sections : split_sections;
+  for (size_t i = 0; i < num_splits; i++) {
+    NVTE_CHECK(dim0_offset + input_sections[i] <= input_shape[0],
+               "Attempted to split tensor with shape=", input_shape,
+               " along dim 0 with split_sections=", split_sections);
+    void *split_dptr = static_cast<void *>(input_dptr + dim0_offset * dim0_stride);
+    std::vector<size_t> in_shape = input_shape;
+    in_shape[0] = input_sections[i];
+    input_list.emplace_back(makeTransformerEngineTensor(split_dptr, in_shape, input_dtype));
+    split_shapes.push_back(input_shape);
+    split_shapes.back()[0] = split_sections[i];
+    dim0_offset += input_sections[i];
+  }
+#else
   for (size_t i = 0; i < num_splits; ++i) {
     NVTE_CHECK(dim0_offset + split_sections[i] <= input_shape[0],
                "Attempted to split tensor with shape=", input_shape,
@@ -1323,6 +1375,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
     input_list.emplace_back(makeTransformerEngineTensor(split_dptr, split_shape, input_dtype));
     dim0_offset += split_sections[i];
   }
+#endif
 
   // Convert quantizers to C++ objects
   std::vector<std::unique_ptr<Quantizer>> quantizer_cpp_list;
@@ -1428,9 +1481,25 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                 nvfp4_quantizers);
       break;
     }
+#ifdef __HIP_PLATFORM_AMD__
+    default: {
+      std::vector<int> valid_num_rows_vec;
+      const int *valid_num_rows_ptr = nullptr;
+      if (valid_split_sections.has_value()) {
+        for (size_t s : *valid_split_sections) {
+          valid_num_rows_vec.push_back(static_cast<int>(s));
+        }
+        valid_num_rows_ptr = valid_num_rows_vec.data();
+      }
+      multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list,
+                                 output_cpp_list, valid_num_rows_ptr);
+      break;
+    }
+#else
     default:
       // General multi-tensor quantization
       multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
+#endif
   }
 
   return output_py_list;

@@ -1,4 +1,10 @@
 #!/bin/bash
+#########################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# License for AMD contributions = MIT. See LICENSE for more information
+#########################################################################
+
 # Builds benchmarks, runs them, and consolidates results into a single CSV
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,11 +29,12 @@ main() {
     echo -e "\n[2/3] Running benchmarks..."
 
     BENCHMARKS=(
-        "bench_quantize_mxfp8_fused"
+        "bench_casttranspose"
         "bench_dequantize_mxfp8"
         "bench_gated_mxfp8"
-        "bench_casttranspose"
         "bench_multi_cast_transpose"
+        "bench_group_quantize_mxfp8"
+        "bench_quantize_mxfp8_fused"
     )
 
     FAILED_BENCHMARKS=()
