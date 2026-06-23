@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -200,7 +202,7 @@ __global__ void __launch_bounds__(threads_per_block)
 }  // namespace
 
 void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Tensor*> output_list,
-                          cudaStream_t stream) {
+                          cudaStream_t stream, const int *valid_num_rows_list = nullptr) {
   // Check that number of tensors is valid
   NVTE_CHECK(output_list.size() == input_list.size(),
              "Number of input and output tensors must match");
@@ -226,17 +228,36 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
 
     NVTE_CHECK(input.data.shape.size() == 2, "Input tensor must have 2 dimensions, but shape is ",
                input.data.shape);
-    NVTE_CHECK(output.data.shape == input.data.shape, "C output tensor shape ", output.data.shape,
-               "does not match input tensor shape ", input.data.shape);
+#ifdef __HIP_PLATFORM_AMD__
+    if (valid_num_rows_list != nullptr) {
+      NVTE_CHECK(input.data.shape[0] == static_cast<size_t>(valid_num_rows_list[tensor_id]),
+                 "Input rows ", input.data.shape[0], " != valid_num_rows ",
+                 valid_num_rows_list[tensor_id]);
+      NVTE_CHECK(output.data.shape[0] >= input.data.shape[0],
+                 "Output rows ", output.data.shape[0], " < input rows ", input.data.shape[0]);
+      NVTE_CHECK(output.data.shape[1] == input.data.shape[1],
+                 "Output cols ", output.data.shape[1], " != input cols ", input.data.shape[1]);
+    } else
+#endif
+    {
+      NVTE_CHECK(output.data.shape == input.data.shape, "C output tensor shape ", output.data.shape,
+                 "does not match input tensor shape ", input.data.shape);
+    }
     NVTE_CHECK(output.columnwise_data.shape.size() == 2, "T output tensor shape ",
                output.columnwise_data.shape, "does not match input tensor shape ",
                input.data.shape);
     NVTE_CHECK(output.columnwise_data.shape[0] == input.data.shape[1], "T output tensor shape ",
                output.columnwise_data.shape, "does not match input tensor shape ",
                input.data.shape);
+#ifdef __HIP_PLATFORM_AMD__
+    NVTE_CHECK(output.columnwise_data.shape[1] == output.data.shape[0], "T output tensor shape ",
+               output.columnwise_data.shape, "does not match output rows ",
+               output.data.shape[0]);
+#else
     NVTE_CHECK(output.columnwise_data.shape[1] == input.data.shape[0], "T output tensor shape ",
                output.columnwise_data.shape, "does not match input tensor shape ",
                input.data.shape);
+#endif
   }
 
 #ifdef __HIP_PLATFORM_AMD__
@@ -255,6 +276,7 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
             std::vector<float *> sinv_ptrs(n);
             std::vector<size_t> rows(n);
             std::vector<size_t> cols(n);
+            std::vector<size_t> valid_rows(n);
 
             for (size_t i = 0; i < n; i++) {
               in_ptrs[i]    = reinterpret_cast<const InputType *>(input_list[i]->data.dptr);
@@ -263,13 +285,17 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
               scale_ptrs[i] = reinterpret_cast<const float *>(output_list[i]->scale.dptr);
               amax_ptrs[i]  = reinterpret_cast<float *>(output_list[i]->amax.dptr);
               sinv_ptrs[i]  = reinterpret_cast<float *>(output_list[i]->scale_inv.dptr);
-              rows[i]       = input_list[i]->data.shape[0];
+              rows[i]       = output_list[i]->data.shape[0];
               cols[i]       = input_list[i]->data.shape[1];
+              valid_rows[i] = valid_num_rows_list
+                              ? static_cast<size_t>(valid_num_rows_list[i])
+                              : input_list[i]->data.shape[0];
             }
 
-            rocm_multi_cast_transpose_dispatch<InputType, OutputType>(n, in_ptrs.data(), out_c_ptrs.data(),
-                      out_t_ptrs.data(), scale_ptrs.data(), amax_ptrs.data(), sinv_ptrs.data(), rows.data(),
-                      cols.data(), stream);
+            rocm_multi_cast_transpose_dispatch<InputType, OutputType>(
+                      n, in_ptrs.data(), out_c_ptrs.data(), out_t_ptrs.data(),
+                      scale_ptrs.data(), amax_ptrs.data(), sinv_ptrs.data(),
+                      rows.data(), cols.data(), valid_rows.data(), stream);
         ); // NOLINT(*)
     );     // NOLINT(*)
     NVTE_CHECK_CUDA(cudaGetLastError());
@@ -330,7 +356,7 @@ void multi_cast_transpose(const std::vector<Tensor*> input_list, std::vector<Ten
 
     // Add tensor to kernel argument struct
     const int pos = kernel_args.num_tensors;
-    kernel_args.input_list[pos] = const_cast<void*>(input_list[tensor_id]->data.dptr);
+    kernel_args.input_list[pos] = const_cast<void *>(input_list[tensor_id]->data.dptr);
     kernel_args.output_c_list[pos] = output_list[tensor_id]->data.dptr;
     kernel_args.output_t_list[pos] = output_list[tensor_id]->columnwise_data.dptr;
     kernel_args.scale_list[pos] = output_list[tensor_id]->scale.dptr;
@@ -384,3 +410,19 @@ void nvte_multi_cast_transpose(size_t num_tensors, const NVTETensor* input_list,
   }
   multi_cast_transpose(input_list_, output_list_, stream);
 }
+
+#ifdef __HIP_PLATFORM_AMD__
+void nvte_multi_cast_transpose_with_padding(size_t num_tensors, const NVTETensor *input_list,
+                                            NVTETensor *output_list,
+                                            const int *valid_num_rows_list,
+                                            cudaStream_t stream) {
+  NVTE_API_CALL(nvte_multi_cast_transpose_with_padding);
+  using namespace transformer_engine;
+  std::vector<Tensor *> input_list_, output_list_;
+  for (size_t i = 0; i < num_tensors; i++) {
+    input_list_.push_back(convertNVTETensorCheck(input_list[i]));
+    output_list_.push_back(convertNVTETensorCheck(output_list[i]));
+  }
+  multi_cast_transpose(input_list_, output_list_, stream, valid_num_rows_list);
+}
+#endif

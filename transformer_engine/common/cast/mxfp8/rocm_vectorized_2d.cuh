@@ -7,6 +7,7 @@
 #pragma once
 
 #include "../../util/vectorized_pointwise.h"
+#include "../../util/rocm_device_utils.cuh"
 
 namespace transformer_engine {
 // These 2d copy functions replace TMA tensormap async copies for AMD GPUs.
@@ -64,17 +65,21 @@ __device__ inline void bulk_tensor_2d_shared_to_global(const T *sh_ptr_base, T *
     size_t g_row = g_start_row + l_y;
     size_t g_col_primitive_start = g_start_col + l_x_vec * N_VEC;
 
-    const T* current_sh_row_base_ptr = sh_ptr_base + l_y * chunk_dim_x;
-    VectorizedLoader<T, N_VEC, ALIGNED_ACCESS> shared_loader(current_sh_row_base_ptr, chunk_dim_x);
-
-    T* current_g_row_base_ptr = g_ptr + g_row * g_stride;
-    VectorizedStorer<T, N_VEC, ALIGNED_ACCESS> global_storer(current_g_row_base_ptr, total_cols);
-
-    shared_loader.load(l_x_vec, chunk_dim_x);
-
     if (g_row < total_rows) {
-      global_storer.storage_.scratch_ = shared_loader.storage_.scratch_;
-      global_storer.store(g_col_primitive_start / N_VEC, total_cols);
+      const T *sh_row = sh_ptr_base + l_y * chunk_dim_x;
+      T *g_row_ptr = g_ptr + g_row * g_stride;
+
+      if (ALIGNED_ACCESS || g_col_primitive_start + N_VEC <= total_cols) {
+        NTVec<T, N_VEC> v;
+        v.load(sh_row + l_x_vec * N_VEC);
+        v.nt_store(g_row_ptr + g_col_primitive_start);
+      } else {
+        for (int i = 0; i < N_VEC; i++) {
+          if (g_col_primitive_start + i < total_cols) {
+            g_row_ptr[g_col_primitive_start + i] = sh_row[l_x_vec * N_VEC + i];
+          }
+        }
+      }
     }
   }
 }

@@ -82,9 +82,10 @@ run_test_config_mgpu() {
         export NVTE_JAX_UNITTEST_LEVEL=L2
     fi
 
-    run_default_fa 2 test_distributed_dense.py
+    run_default_fa 1 test_distributed_dense.py
     # RCCL_MSCCL_ENABLE=0 is to avoid hangs in some distributed tests (ROCM-1719)
     RCCL_MSCCL_ENABLE=0 run $_dfa_level test_distributed_fused_attn.py
+    run_default_fa 1 test_distributed_helper.py
     run_default_fa 3 test_distributed_layernorm.py
     run_default_fa 2 test_distributed_layernorm_mlp.py
     run_default_fa 3 test_distributed_softmax.py
