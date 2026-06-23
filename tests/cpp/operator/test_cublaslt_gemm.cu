@@ -439,6 +439,7 @@ static void swizzle_mxfp8_scales(test::Tensor &t, bool rowwise) {
   nvte_swizzle_scaling_factors(input_tw.data(), output_tw.data(), 0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   NVTE_CHECK_CUDA(cudaMemcpy(scale_ptr, d_tmp, num_scales, cudaMemcpyDeviceToDevice));
+  t.set_with_gemm_swizzled_scales(true);
   NVTE_CHECK_CUDA(cudaFree(d_tmp));
 }
 
@@ -958,14 +959,6 @@ class ProdGEMMTestSuite : public ::testing::TestWithParam<ProdGemmConfig> {};
 
 TEST_P(ProdGEMMTestSuite, TestMxfp8Dq) {
   const auto& config = GetParam();
-
-  cudaDeviceProp prop;
-  (void)cudaGetDeviceProperties(&prop, 0);
-  const bool is_tn = config.transa && !config.transb;
-  if (prop.major == 12 && prop.minor == 5 && !is_tn) {
-    GTEST_SKIP() << "hipBLASLt MXFP8 GEMM non-TN layout is not supported on gfx1250: "
-                 << config.label;
-  }
 
   TestParams params = {.m = config.m, .k = config.k, .n = config.n,
                        .use_bias = false, .use_gelu = false,
