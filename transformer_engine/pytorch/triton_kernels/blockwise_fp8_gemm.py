@@ -1,10 +1,12 @@
-# Copyright (c) 2025, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 #
 # Blockwise FP8 GEMM Triton kernel: a unified NT/NN/TN kernel covering the
 # forward, dgrad and wgrad layouts. Adapted from AMD Primus-Turbo
-# (primus_turbo/triton/gemm/gemm_fp8_kernel.py, blockwise section).
+# (primus_turbo/triton/gemm/gemm_fp8_kernel.py, blockwise section). Those
+# persistent FP8 GEMM kernels are in turn adapted from tritonBLAS
+# (https://github.com/ROCm/tritonBLAS).
 
 import itertools
 import os
