@@ -9,10 +9,8 @@ import torch
 import triton
 import triton.language as tl
 
-
-def is_gfx950() -> bool:
-    props = torch.cuda.get_device_properties(torch.cuda.current_device())
-    return "gfx950" in props.gcnArchName
+from .common import is_cdna4
+from .gmm.pid_preprocessing import remap_xcd_chunked
 
 
 def get_num_cus() -> int:
@@ -46,24 +44,7 @@ def _set_amd_knobs(enable: bool = True):
         triton.knobs.amd.scalarize_packed_fops = enable
 
 
-# XCD/chiplet PID remap.
 NUM_XCDS = 8
-
-
-@triton.jit
-def _chiplet_transform_chunked(
-    pid,
-    NUM_SMS: tl.constexpr,
-    NUM_XCDS: tl.constexpr,
-    CHUNK_SIZE: tl.constexpr,
-):
-    if pid > (NUM_SMS // (NUM_XCDS * CHUNK_SIZE)) * (NUM_XCDS * CHUNK_SIZE):
-        return pid
-    local_pid = pid // NUM_XCDS
-    chunk_idx = local_pid // CHUNK_SIZE
-    pos_in_chunk = local_pid % CHUNK_SIZE
-    xcd = pid % NUM_XCDS
-    return chunk_idx * NUM_XCDS * CHUNK_SIZE + xcd * CHUNK_SIZE + pos_in_chunk
 
 
 # Blockwise grouped FP8 kernel and public entrypoint
@@ -111,7 +92,7 @@ def _grouped_blockwise_fp8_persistent_gemm_kernel(
     """Persistent grouped block-wise FP8 GEMM kernel (CPU-sync-free)."""
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
-        pid = _chiplet_transform_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
+        pid = remap_xcd_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
 
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
 
@@ -268,7 +249,7 @@ def grouped_gemm_fp8_blockwise_triton_kernel(
     Returns:
         [M_total, N] output in out_dtype.
     """
-    if is_gfx950():
+    if is_cdna4():
         set_triton_knobs_gfx950()
     else:
         _set_amd_knobs(enable=True)
@@ -403,7 +384,7 @@ def _grouped_blockwise_fp8_variable_k_gemm_kernel(
     """
     pid = tl.program_id(0)
     if NUM_XCDS != 1:
-        pid = _chiplet_transform_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
+        pid = remap_xcd_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK_SIZE)
 
     tiles_m = tl.cdiv(OUT_M, BLOCK_SIZE_M)
     tiles_n = tl.cdiv(OUT_N, BLOCK_SIZE_N)
@@ -529,7 +510,7 @@ def grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
     Returns:
         [G, OUT_M, OUT_N] output.
     """
-    if is_gfx950():
+    if is_cdna4():
         set_triton_knobs_gfx950()
     else:
         _set_amd_knobs(enable=False)

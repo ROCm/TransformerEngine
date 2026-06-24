@@ -15,10 +15,8 @@ import torch
 import triton
 import triton.language as tl
 
-
-def is_gfx950() -> bool:
-    props = torch.cuda.get_device_properties(torch.cuda.current_device())
-    return "gfx950" in props.gcnArchName
+from .common import is_cdna4
+from .gmm.pid_preprocessing import remap_xcd_chunked
 
 
 # AMD gfx950 compiler knobs.
@@ -62,7 +60,7 @@ def _get_blockwise_autotune_configs(
             ``None`` keeps the original search space.
     """
     configs = []
-    if is_gfx950():
+    if is_cdna4():
         num_stage_values = [1, 2, 3] if allow_num_stages_3 else [1, 2]
         block_n_values = [64, 128]
     else:
@@ -194,13 +192,7 @@ def _blockwise_fp8_unified_kernel(
     # XCD-aware PID transform (inlined from _chiplet_transform_chunked
     # because NUM_SMS is not constexpr in this kernel).
     if NUM_XCDS != 1:
-        full_chunk_pids = (NUM_SMS // (NUM_XCDS * CHUNK)) * (NUM_XCDS * CHUNK)
-        if pid <= full_chunk_pids:
-            local_pid = pid // NUM_XCDS
-            chunk_idx = local_pid // CHUNK
-            pos_in_chunk = local_pid % CHUNK
-            xcd = pid % NUM_XCDS
-            pid = chunk_idx * NUM_XCDS * CHUNK + xcd * CHUNK + pos_in_chunk
+        pid = remap_xcd_chunked(pid, NUM_SMS, NUM_XCDS, CHUNK)
 
     num_m = tl.cdiv(M, BLOCK_M)
     num_n = tl.cdiv(N, BLOCK_N)
@@ -329,7 +321,7 @@ def get_blockwise_gemm_config(layout, tokens):
     Winners captured offline over the model dense GEMM shapes, replacing per-shape
     autotune. Returns None off gfx950 so the caller falls back to autotune.
     """
-    if not is_gfx950():
+    if not is_cdna4():
         return None
     if layout == "NT":
         return dict(BLOCK_M=256, BLOCK_N=64, BLOCK_K=128, GROUP_M=4, CHUNK=32, NUM_XCDS=8, num_warps=8, num_stages=3)
@@ -404,7 +396,7 @@ def gemm_fp8_blockwise_triton_kernel(
     # AMD knobs: gfx950 always sets the gfx950 knobs; on gfx942 NT/NN benefit
     # from use_async_copy/scalarize_packed_fops while TN/wgrad regresses 5-8%.
     is_tn = trans_a and not trans_b
-    if is_gfx950():
+    if is_cdna4():
         set_triton_knobs_gfx950()
     else:
         _set_amd_knobs(enable=not is_tn)

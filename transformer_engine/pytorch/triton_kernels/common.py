@@ -14,6 +14,9 @@ def get_arch():
 def is_cdna3():
     return get_arch() == "gfx942"
 
+def is_cdna4():
+    return get_arch() == "gfx950"
+
 get_torch_e4m3_type = lambda: torch.float8_e4m3fn if not is_cdna3() else torch.float8_e4m3fnuz
 get_torch_e5m2_type = lambda: torch.float8_e5m2 if not is_cdna3() else torch.float8_e5m2fnuz
 
