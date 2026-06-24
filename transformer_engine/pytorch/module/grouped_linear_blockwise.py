@@ -77,8 +77,8 @@ class _GroupedLinearBlockwiseFP8(torch.autograd.Function):
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
 
-        # First-cut: unsupported orchestration features -> loud error, not silent wrong.
-        # fp8 is an internal invariant (assert); the rest are user-reachable -> raise.
+        # Unsupported orchestration features raise instead of being silently ignored.
+        # fp8 is an internal invariant (assert); the rest are user-reachable (raise).
         assert fp8, "blockwise grouped FP8 path requires fp8=True"
         if use_bias:
             raise NotImplementedError("bias is not supported in the blockwise grouped FP8 path yet")
@@ -95,7 +95,6 @@ class _GroupedLinearBlockwiseFP8(torch.autograd.Function):
             raise NotImplementedError("save_original_input is not supported in the blockwise grouped FP8 path yet")
         if wgrad_store is not None and wgrad_store.delay_wgrad_compute():
             raise NotImplementedError("delayed wgrad is not supported in the blockwise grouped FP8 path yet")
-        # dev-only GroupedLinear features absent from the v2.8 bring-up path.
         if debug:
             raise NotImplementedError("debug quantization is not supported in the blockwise grouped FP8 path yet")
         if unpad_output or (actual_m_splits is not None and list(actual_m_splits) != list(m_splits)):
@@ -109,10 +108,9 @@ class _GroupedLinearBlockwiseFP8(torch.autograd.Function):
         device = inp.device
 
         inp_shape = inp.shape
-        a = inp.reshape(-1, in_features).to(activation_dtype).contiguous()  # [M_total, K] bf16
+        a = inp.reshape(-1, in_features).to(activation_dtype).contiguous()
         group_lens, group_offs = _group_offsets(m_splits, device)
 
-        # Stack per-expert weights [G, N, K] (bf16).
         w = torch.stack([wt.to(activation_dtype).contiguous() for wt in weights], 0).contiguous()
 
         # Quantize: activation rowwise (1x128 along K), weights 128x128.
@@ -125,7 +123,7 @@ class _GroupedLinearBlockwiseFP8(torch.autograd.Function):
         )
 
         if is_grad_enabled:
-            # Segment-padded columnwise activation (from bf16) for the variable-K wgrad.
+            # Segment-padded columnwise activation for the variable-K wgrad.
             a_col, a_scol, _vk_lens, vk_offs = quantize_fp8_blockwise_segment_m(
                 a, dt, 128, group_lens, group_offs
             )
@@ -154,7 +152,7 @@ class _GroupedLinearBlockwiseFP8(torch.autograd.Function):
 
         a_col, a_scol, b_fp8, b_scale, group_lens, group_offs, vk_offs = ctx.saved_tensors
         dt = ctx.dt
-        g_out = grad_output.reshape(-1, ctx.out_features).contiguous()  # [M_total, N]
+        g_out = grad_output.reshape(-1, ctx.out_features).contiguous()
 
         # dgrad: dX[seg] = dY[seg] @ W[g]  (trans_b=False) -> [M_total, K].
         dgrad = None
@@ -173,7 +171,7 @@ class _GroupedLinearBlockwiseFP8(torch.autograd.Function):
             )
             dW = grouped_gemm_fp8_blockwise_variable_k_triton_kernel(
                 go_col, a_col, go_scol, a_scol, vk_offs, out_dtype=ctx.activation_dtype
-            )  # [G, N, K]
+            )
             wgrad_list = [dW[g].contiguous() for g in range(ctx.num_gemms)]
 
         grad_biases = [None] * ctx.num_gemms  # bias rejected in forward
@@ -181,7 +179,7 @@ class _GroupedLinearBlockwiseFP8(torch.autograd.Function):
         # Grads match forward inputs: (inp, non_tensor_args, *weights, *biases).
         return (
             dgrad.view(ctx.inp_shape) if dgrad is not None else None,
-            None,  # non_tensor_args
+            None,
             *wgrad_list,
             *grad_biases,
         )

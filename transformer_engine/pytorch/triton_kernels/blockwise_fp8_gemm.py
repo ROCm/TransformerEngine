@@ -16,13 +16,12 @@ import triton
 import triton.language as tl
 
 
-# Local gfx950 check (TODO: use TE's common.get_arch).
 def is_gfx950() -> bool:
     props = torch.cuda.get_device_properties(torch.cuda.current_device())
     return "gfx950" in props.gcnArchName
 
 
-# AMD gfx950 compiler knobs (from Primus triton_knobs_helper.py).
+# AMD gfx950 compiler knobs.
 _KNOBS_SET = False
 
 
@@ -42,8 +41,7 @@ def set_triton_knobs_gfx950() -> None:
         os.environ.setdefault("TRITON_HIP_USE_BLOCK_PINGPONG", "1")
 
 
-# Blockwise FP8 GEMM kernel, autotune configs and public entrypoint
-# (from Primus gemm_fp8_kernel.py).
+# Blockwise FP8 GEMM kernel, autotune configs and public entrypoint.
 def _get_blockwise_autotune_configs(
     allow_num_stages_3: bool = True,
     extra_matrix_instr_nonkdim: list | None = None,

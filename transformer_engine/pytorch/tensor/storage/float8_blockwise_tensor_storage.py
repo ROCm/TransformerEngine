@@ -154,13 +154,10 @@ class Float8BlockwiseQTensorStorage(QuantizedTensorStorage):
         # 1D-scaled activation: 1x128 blocks must align with the contraction axis.
         want_rowwise = (not trans) if is_left else trans
         if want_rowwise:
-            # _rowwise_scale_inv is stored transposed [H/128, *leading] (TE get_scale_shape contract,
-            # required by the SP all-gather scale de-interleave); the kernel wants it token-first.
+            # _rowwise_scale_inv is stored transposed per TE get_scale_shape; transpose to token-first for the kernel.
             rs = self._rowwise_scale_inv
             return self._rowwise_data, rs.reshape(rs.shape[0], -1).t().contiguous()
-        # _columnwise_data is stored transposed [H, *leading] (TE get_columnwise_shape contract,
-        # required by the SP all-gather de-interleave); the Triton GEMM wants it token-first
-        # [tokens, H], so transpose back here.
+        # _columnwise_data is stored transposed per TE get_columnwise_shape; transpose back to token-first [tokens, H] for the Triton GEMM.
         cw = self._columnwise_data
         return cw.reshape(cw.shape[0], -1).t().contiguous(), self._columnwise_scale_inv
 

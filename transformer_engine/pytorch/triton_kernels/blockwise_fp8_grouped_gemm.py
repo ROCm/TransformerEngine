@@ -10,7 +10,6 @@ import triton
 import triton.language as tl
 
 
-# Local gfx950 check (TODO: use TE's common.get_arch).
 def is_gfx950() -> bool:
     props = torch.cuda.get_device_properties(torch.cuda.current_device())
     return "gfx950" in props.gcnArchName
@@ -20,7 +19,7 @@ def get_num_cus() -> int:
     return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
 
 
-# AMD gfx950 compiler knobs (from Primus triton_knobs_helper.py).
+# AMD gfx950 compiler knobs.
 _KNOBS_SET = False
 
 
@@ -47,8 +46,7 @@ def _set_amd_knobs(enable: bool = True):
         triton.knobs.amd.scalarize_packed_fops = enable
 
 
-# XCD/chiplet PID remap (from Primus grouped_gemm_kernel.py).
-# TODO: TE has an equivalent in gmm/pid_preprocessing.remap_xcd_chunked.
+# XCD/chiplet PID remap.
 NUM_XCDS = 8
 
 
@@ -69,7 +67,6 @@ def _chiplet_transform_chunked(
 
 
 # Blockwise grouped FP8 kernel and public entrypoint
-# (from Primus grouped_gemm_fp8_kernel.py).
 
 @triton.jit()
 def _grouped_blockwise_fp8_persistent_gemm_kernel(
@@ -358,7 +355,6 @@ def grouped_gemm_fp8_blockwise_triton_kernel(
 
 
 
-# ===== Variable-K wgrad (backward) =====
 @triton.jit()
 def _grouped_blockwise_fp8_variable_k_gemm_kernel(
     # C[g] = LHS_g^T @ RHS_g * block_scales

@@ -1508,8 +1508,7 @@ class Linear(TransformerEngineBaseModule):
                 self.keep_fp8_weight_transpose_cache,
                 self.use_fsdp2
             )
-            # ROCm blockwise Triton GEMM is 2D-only; flatten leading dims (Primus
-            # LinearFP8 style) so quantize + fwd/dgrad/wgrad run in 2D, restored below.
+            # ROCm blockwise Triton GEMM is 2D-only; flatten leading dims and restore below.
             rocm_blockwise_flatten = (
                 IS_HIP_EXTENSION
                 and isinstance(input_quantizer, Float8BlockQuantizer)
@@ -1526,8 +1525,7 @@ class Linear(TransformerEngineBaseModule):
                 non_tensor_args,
             )
             if rocm_blockwise_flatten:
-                # SP can change the seq dim across the Linear (e.g. row-parallel reduce-scatter),
-                # so infer it from out; keep the batch dims.
+                # SP can change the seq dim, so infer it from out; keep the batch dims.
                 out = out.reshape(-1, *inp_lead[1:], out.shape[-1])
         finally:
             self.end_forward()

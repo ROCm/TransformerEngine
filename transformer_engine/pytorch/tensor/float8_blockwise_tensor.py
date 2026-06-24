@@ -115,8 +115,6 @@ class Float8BlockQuantizer(Quantizer):
 
         # Launch cast kernel
         if IS_HIP_EXTENSION:
-            # Single blockwise quantize backend (Triton). Add a NVTE_ROCM_FP8_BLOCK_QUANT_BACKEND
-            # selector when a 2nd is validated.
             self._quantize_triton(src, dst)
         else:
             tex.quantize(src, self, dst, noop_flag)
@@ -127,7 +125,6 @@ class Float8BlockQuantizer(Quantizer):
     def quantize_impl(self, tensor: torch.Tensor) -> QuantizedTensor:
         """Quantize tensor implementation"""
         if IS_HIP_EXTENSION:
-            # ROCm Triton path: quantize out-of-place via update_quantized.
             out = self.make_empty(tensor.shape, dtype=tensor.dtype, device=tensor.device)
             return self.update_quantized(tensor, out)
         return tex.quantize(tensor, self)
@@ -147,7 +144,6 @@ class Float8BlockQuantizer(Quantizer):
         x = src.reshape(-1, orig_shape[-1]).contiguous()
 
         if self.block_scaling_dim == 2:
-            # 128x128 weight blocks.
             if self.rowwise_usage:
                 fp8, scale = quantize_fp8_blockwise_weight(x, dt, block)
                 dst._rowwise_data = fp8.view(torch.uint8).reshape(orig_shape)

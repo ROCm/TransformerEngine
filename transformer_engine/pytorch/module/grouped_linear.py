@@ -1022,8 +1022,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 autograd_ctx = [None]
 
             if IS_HIP_EXTENSION and self.fp8:
-                # Single blockwise grouped-GEMM backend (Triton). Add a
-                # NVTE_ROCM_FP8_BLOCK_GROUPED_GEMM_BACKEND selector when a 2nd is validated.
                 _recipe = FP8GlobalStateManager.get_fp8_recipe()
                 if _recipe is not None and _recipe.float8_block_scaling():
                     from .grouped_linear_blockwise import _GroupedLinearBlockwiseFP8
