@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -32,8 +34,9 @@ Environment Variables:
 
 import hashlib
 import os
+import tempfile
 import warnings
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Optional
 import zlib
 
 from packaging import version
@@ -46,6 +49,7 @@ from ..version_utils import (
     TRITON_EXTENSION_MIN_JAX_VERSION,
     is_triton_extension_supported,
 )
+from ..util import is_hip_extension
 
 
 # Placeholder package version on PyPI that should never be used
@@ -171,6 +175,7 @@ if not is_triton_extension_supported():
     )
 
 try:
+    import triton
     from jax._src.lib import gpu_triton
     from triton.compiler import compiler as tc
     from triton.backends.nvidia import compiler as cb
@@ -259,23 +264,29 @@ def compile_triton(
     compute_capability: int,
     enable_fp_fusion: bool = False,
 ):
-    """Compile a Triton kernel to PTX.
+    """Compile a Triton or Gluon kernel to a GPU binary (PTX on CUDA, HSACO on ROCm).
 
     Kernels are cached to avoid recompilation.
 
     Args:
-        kernel_fn: Triton kernel function (decorated with @triton.jit)
+        kernel_fn: Triton (@triton.jit) or Gluon (@gluon.jit) kernel function
         signature: Dict mapping arg names to types (e.g., {"x_ptr": "*fp32", "n": "i32"})
         constants: Dict of compile-time constants
         num_warps: Number of warps per block
         num_stages: Number of pipeline stages
         num_ctas: Number of CTAs (cooperative thread arrays)
-        compute_capability: CUDA compute capability
+        compute_capability: CUDA compute capability (CUDA only; ignored on ROCm, whose
+            target is auto-detected from the active GPU)
         enable_fp_fusion: Enable FP fusion optimizations (default False for accuracy)
 
     Returns:
         TritonKernel object for JAX
     """
+    # Backend (CUDA/ROCm) and kernel flavor (Triton/Gluon); only the source and
+    # compile options differ, the resulting binary is handled the same way.
+    is_hip = is_hip_extension()
+    is_gluon = hasattr(kernel_fn, "is_gluon") and kernel_fn.is_gluon()
+
     # Create cache key
     cache_key = hashlib.md5(
         str(
@@ -288,6 +299,8 @@ def compile_triton(
                 num_ctas,
                 enable_fp_fusion,
                 compute_capability,
+                is_hip,
+                is_gluon,
             )
         ).encode()
     ).hexdigest()
@@ -295,55 +308,102 @@ def compile_triton(
     if cache_key in _TRITON_KERNEL_CACHE:
         return _TRITON_KERNEL_CACHE[cache_key]
 
-    # Compile kernel
-    cuda_option_kwargs = {}
-    if version.parse(_TRITON_VERSION) < version.parse("3.6.0"):
-        cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
-    options = cb.CUDAOptions(
-        num_warps=num_warps,
-        num_stages=num_stages,
-        num_ctas=num_ctas,
-        debug=False,
-        enable_fp_fusion=enable_fp_fusion,
-        **cuda_option_kwargs,
-    )
-
     # Mark constants as constexpr in signature
     signature_with_constexpr = dict(signature)
     for const_name in constants.keys():
         if const_name in signature_with_constexpr:
             signature_with_constexpr[const_name] = "constexpr"
 
-    src = tc.ASTSource(
-        fn=kernel_fn,
-        constexprs=constants,
-        signature=signature_with_constexpr,
-    )
+    if is_hip:
+        # ROCm: active GPU target (gfx arch + 64-lane warp); binary is HSACO.
+        from triton.compiler import make_backend
 
-    compiled = tc.compile(
-        src,
-        target=tc.GPUTarget("cuda", compute_capability, 32),
-        options=options.__dict__,
-    )
+        target = triton.runtime.driver.active.get_current_target()
+        backend = make_backend(target)
+        options = backend.parse_options(
+            {
+                "num_warps": num_warps,
+                "num_ctas": num_ctas,
+                "num_stages": num_stages,
+                "warp_size": target.warp_size,
+                "enable_fp_fusion": enable_fp_fusion,
+            }
+        )
+        binary_key = backend.binary_ext
+    else:
+        # CUDA path (unchanged).
+        cuda_option_kwargs = {}
+        if version.parse(_TRITON_VERSION) < version.parse("3.6.0"):
+            cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
+        options = cb.CUDAOptions(
+            num_warps=num_warps,
+            num_stages=num_stages,
+            num_ctas=num_ctas,
+            debug=False,
+            enable_fp_fusion=enable_fp_fusion,
+            **cuda_option_kwargs,
+        )
+        target = tc.GPUTarget("cuda", compute_capability, 32)
+        binary_key = "ptx"
 
-    # Create kernel object for JAX
-    # From jax/jaxlib/gpu/triton_kernels.cc:
+    # Gluon uses GluonASTSource, which (unlike ASTSource) requires every constexpr
+    # parameter to be listed in the signature.
+    if is_gluon:
+        try:
+            from triton.experimental.gluon._runtime import GluonASTSource
+        except ImportError as exc:
+            raise ImportError(
+                "A Gluon kernel was passed but GluonASTSource is unavailable in this "
+                "Triton build (triton.experimental.gluon._runtime). Upgrade to a Triton "
+                "version that ships Gluon, or pass a @triton.jit kernel instead."
+            ) from exc
+
+        gluon_signature = dict(signature_with_constexpr)
+        for name in kernel_fn.arg_names:
+            if name not in gluon_signature and name in constants:
+                gluon_signature[name] = "constexpr"
+
+        src = GluonASTSource(
+            fn=kernel_fn,
+            constexprs=constants,
+            signature=gluon_signature,
+        )
+    else:
+        src = tc.ASTSource(
+            fn=kernel_fn,
+            constexprs=constants,
+            signature=signature_with_constexpr,
+        )
+
+    compiled = tc.compile(src, target=target, options=options.__dict__)
+
+    # TritonKernel's binary arg is a std::string: PTX is text, but HSACO is bytes
+    # (nanobind won't coerce), so pass HSACO as a temp-file path. The file is left
+    # in place because the plugin loads it at launch.
+    binary = compiled.asm[binary_key]
+    if is_hip:
+        fd, hsaco_path = tempfile.mkstemp(suffix=".hsaco")
+        with os.fdopen(fd, "wb") as f:
+            f.write(binary)
+        binary = hsaco_path
+
+    # TritonKernel signature per jax/jaxlib/gpu/triton_kernels.cc (changed in 0.8.2).
     if version.parse(jax.__version__) >= version.parse("0.8.2"):
         kernel = gpu_triton.TritonKernel(
-            compiled.name,  # arg0: kernel_name (str)
-            num_warps,  # arg1: num_warps (int)
-            num_ctas,  # arg2: num_ctas (int)
-            compiled.metadata.shared,  # arg3: shared_mem_bytes (int)
-            compiled.asm["ptx"],  # arg4: ptx (str)
-            "",  # arg5: ttir (str) - empty
-            compute_capability,  # arg6: compute_capability (int)
+            compiled.name,
+            num_warps,
+            num_ctas,
+            compiled.metadata.shared,
+            binary,
+            "",  # ttir
+            compute_capability,
         )
     else:
         kernel = gpu_triton.TritonKernel(
             compiled.name,
             num_warps,
             compiled.metadata.shared,
-            compiled.asm["ptx"],
+            binary,
             "",  # ttir
             compute_capability,
             1,
@@ -362,6 +422,8 @@ def triton_call_lowering(
     grid,
     input_output_aliases: Mapping[int, int] = None,
     constexprs: Mapping[str, Any] = None,
+    num_warps: Optional[int] = None,
+    num_stages: Optional[int] = None,
 ):
     """Helper for MLIR lowering that calls a Triton kernel.
 
@@ -376,6 +438,10 @@ def triton_call_lowering(
         constexprs: Compile-time constants for the kernel. This includes both
                     tl.constexpr arguments AND scalar runtime arguments (like
                     num_tokens, strides) that are known at JAX trace time.
+        num_warps: Warps per block for non-autotuned kernels (required for Gluon
+                    layouts; default 4 on ROCm, 32 on CUDA). Ignored when autotuned.
+        num_stages: Pipeline stages for non-autotuned kernels (default 1). Ignored
+                    when autotuned.
 
     Returns:
         MLIR lowering result
@@ -422,12 +488,13 @@ def triton_call_lowering(
     else:
         grid_tuple = grid[:3]
 
-    # Default values for the kernel
+    # Resolve launch defaults (Gluon layouts need a matching num_warps).
     actual_kernel_fn = kernel_fn
-    num_warps = 32
-    num_stages = (
-        1  # TODO(Phuong): consider if it is beneficial to expose num_warps, num_stages, num_ctas
-    )
+    if num_warps is None:
+        # 32 warps would exceed the 1024-thread block limit on AMD's 64-lane warp.
+        num_warps = 4 if is_hip_extension() else 32
+    if num_stages is None:
+        num_stages = 1
     num_ctas = 1
     kernel_constexprs = constexprs if constexprs is not None else {}
 
