@@ -323,11 +323,12 @@ class _LayerNormLinear(torch.autograd.Function):
             if is_weight_param_quantized and not debug:
                 weight_quantizer = weight._quantizer
             elif weight_quantizer is not None:
-                weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and keep_fp8_weight_transpose_cache)
+                weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and  backward_override is None and keep_fp8_weight_transpose_cache)
                 # NVFP4 must produce columnwise data at quantization time
-                # (no lazy transpose like Float8Tensor)
+                # (no lazy transpose like Float8Tensor), but not in backward override modes
+                # where the weight is dequantized before use.
                 from ..tensor.nvfp4_tensor import NVFP4Quantizer
-                if isinstance(weight_quantizer, NVFP4Quantizer) and is_grad_enabled:
+                if isinstance(weight_quantizer, NVFP4Quantizer) and is_grad_enabled and backward_override is None:
                     weight_quantizer.set_usage(columnwise=True)
 
             # Get quantized weight
@@ -467,7 +468,8 @@ class _LayerNormLinear(torch.autograd.Function):
                         ln_out.update_usage(rowwise_usage=False)
 
             # Weight with column-wise usage is needed for dgrad GEMM while keeping fp8 weight transpose cache.
-            if inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
+            # Not needed in backward override modes since the weight is used in high-precision there.
+            if backward_override is None and inp.requires_grad and keep_fp8_weight_transpose_cache and not use_fsdp2:
                 if isinstance(weightmat, QuantizedTensorStorage):
                     weightmat.update_usage(columnwise_usage=True)
 
@@ -1947,9 +1949,16 @@ class LayerNormLinear(TransformerEngineBaseModule):
         weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
         weight_quantizer.internal = True
         if IS_HIP_EXTENSION:
-            # NVFP4 must always produce columnwise data at quantization time
-            # (no lazy transpose like Float8Tensor), so force columnwise=True.
+            # NVFP4 must produce columnwise data at quantization time (no lazy transpose like
+            # Float8Tensor), but only when the backward will actually use it in FP4 form.
+            # In dequantized/high_precision backward_override modes the weight is dequantized
+            # before the dgrad GEMM, so columnwise data is not required.
             from ..tensor.nvfp4_tensor import NVFP4Quantizer
             is_nvfp4 = isinstance(weight_quantizer, NVFP4Quantizer)
-            weight_quantizer.set_usage(columnwise=True if is_nvfp4 else self.keep_fp8_weight_transpose_cache)
+            fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
+            backward_override = fp8_recipe.backward_override if fp8_recipe is not None else None
+            if is_nvfp4 and backward_override is not None:
+                weight_quantizer.set_usage(columnwise=False)
+            else:
+                weight_quantizer.set_usage(columnwise=True if is_nvfp4 else self.keep_fp8_weight_transpose_cache)
         return [weight_quantizer]

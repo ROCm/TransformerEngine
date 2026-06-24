@@ -66,6 +66,9 @@ run_test_config(){
     run 1 test_sanity.py
     run_default_fa 3 test_sanity_hipified_cast_transpose.py
     run_default_fa 1 test_sanity_import.py
+    run_default_fa 1 test_backward_override.py
+    run_default_fa 1 test_nvfp4_fsdp2_hooks.py
+    run_default_fa 1 test_torch_compile.py
     run_default_fa 1 attention/test_attention.py # Backend selection is controlled by the test
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 attention/test_attention.py -k "test_deterministic_bwd_ck"
     run_default_fa 1 attention/test_cp_utils.py
@@ -178,7 +181,7 @@ if [ -n "$TEST_JOBS_MODE" -a -n "$TEST_MGPU" ]; then
     done
 fi
 
-#run benchmark script
+run benchmark script
 if [ $TEST_LEVEL -ge 3 ]; then
     if [ -n "$TEST_SGPU" ]; then
         run_benchmark   
