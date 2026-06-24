@@ -108,6 +108,7 @@ else:
     FusedAttnBackend = {
         "AOTriton": NVTE_Fused_Attn_Backend.NVTE_AOTriton,
         "CK": NVTE_Fused_Attn_Backend.NVTE_CK,
+        "FlyDSL": 2,  # Pure Python backend — no C++ enum needed
         "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
     }
 
@@ -300,6 +301,24 @@ def fused_attn_fwd(
             f" qkv_layout={qkv_layout!r}, attn_bias_type={attn_bias_type!r},"
             f" attn_mask_type={attn_mask_type!r}, q.shape={list(q.shape)},"
             f" q.dtype={q.dtype}, backend={fused_attention_backend}."
+        )
+
+    # FlyDSL: pure Python path — bypass C++ entirely
+    if IS_HIP_EXTENSION and fused_attention_backend == FusedAttnBackend["FlyDSL"]:
+        from ..attention.flydsl_fused_attn import flydsl_fused_attn_fwd
+
+        return flydsl_fused_attn_fwd(
+            is_training=is_training,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            q=q,
+            k=k,
+            v=v,
+            qkv_layout=qkv_layout,
+            attn_mask_type=attn_mask_type,
+            attn_scale=attn_scale,
         )
 
     if IS_HIP_EXTENSION:
@@ -524,6 +543,29 @@ def fused_attn_bwd(
             f" attn_mask_type={attn_mask_type!r}, q.shape={list(q.shape)},"
             f" q.dtype={q.dtype}, backend={fused_attention_backend}."
         )
+
+    # FlyDSL: backward via PyTorch SDPA recompute — bypass C++ entirely
+    if IS_HIP_EXTENSION and fused_attention_backend == FusedAttnBackend["FlyDSL"]:
+        from ..attention.flydsl_fused_attn import flydsl_fused_attn_bwd
+
+        dq, dk, dv = flydsl_fused_attn_bwd(
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_kv=max_seqlen_kv,
+            cu_seqlens_q=cu_seqlens_q,
+            cu_seqlens_kv=cu_seqlens_kv,
+            q=q,
+            k=k,
+            v=v,
+            o=o,
+            d_o=d_o,
+            qkv_layout=qkv_layout,
+            attn_mask_type=attn_mask_type,
+            attn_bias_type=attn_bias_type,
+            attn_scale=attn_scale,
+            dropout=dropout,
+            window_size=window_size,
+        )
+        return dq, dk, dv
 
     if not IS_HIP_EXTENSION and fused_attention_backend != FusedAttnBackend["F16_max512_seqlen"]:
         if len(aux_ctx_tensors) < 1:

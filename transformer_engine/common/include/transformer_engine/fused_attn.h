@@ -166,6 +166,8 @@ enum NVTE_Fused_Attn_Backend {
     NVTE_AOTriton = 0,
     /*! CK fused attn */
     NVTE_CK = 1,
+    /*! FlyDSL fused attn */
+    NVTE_FlyDSL = 2,
 };
 #endif
 

@@ -991,7 +991,25 @@ def get_attention_backend(
 
     # Filter: cuDNN support
     fused_attention_backend = None
-    if use_fused_attention:
+
+    # FlyDSL override: when NVTE_FUSED_ATTN_FLYDSL=1, use FlyDSL for everything
+    if IS_HIP_EXTENSION and int(os.getenv("NVTE_FUSED_ATTN_FLYDSL", "0")):
+        from ...attention.flydsl_fused_attn import is_flydsl_available
+
+        _flydsl_ok = is_flydsl_available()
+        print(f"[FlyDSL] Backend selection: NVTE_FUSED_ATTN_FLYDSL=1, available={_flydsl_ok}")
+        if _flydsl_ok:
+            fused_attention_backend = FusedAttnBackend["FlyDSL"]
+            use_fused_attention = True
+            use_flash_attention = False
+            use_flash_attention_2 = False
+            use_flash_attention_3 = False
+            use_unfused_attention = False
+            print("[FlyDSL] Forced FlyDSL as sole attention backend")
+        else:
+            print("[FlyDSL] FlyDSL not available, falling back to default backends")
+
+    if use_fused_attention and fused_attention_backend is None:
         q_type = TE_DType[qkv_dtype]
         kv_type = q_type
         if fp8 and fp8_meta["recipe"].fp8_dpa:
