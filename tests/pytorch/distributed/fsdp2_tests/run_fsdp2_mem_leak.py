@@ -1,5 +1,6 @@
 #!/usr/bin/python3
-
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -42,6 +43,7 @@ import torch.distributed as dist
 import torch.nn.functional as F
 from torch.distributed._composable.fsdp import fully_shard
 from torch.distributed.device_mesh import DeviceMesh
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
 
@@ -122,6 +124,9 @@ def _run_training_step(model, optimizer, recipe, x, target):
     with te.autocast(enabled=(recipe is not None), recipe=recipe):
         output = model(x)
     loss = F.mse_loss(output, target)
+    # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+    if IS_HIP_EXTENSION:
+        torch.cuda.current_stream().synchronize()
     loss.backward()
     optimizer.step()
     return loss.item()
@@ -141,6 +146,9 @@ def _measure_backward_memory_delta(model, optimizer, recipe, x, target):
     mem_post_fwd = torch.cuda.memory_allocated()
 
     loss = F.mse_loss(output, target)
+    # AIPYTORCH-427 Forward and backward pass overlap with FSDP2 can cause RCCL deadlock.
+    if IS_HIP_EXTENSION:
+        torch.cuda.current_stream().synchronize()
     loss.backward()
     torch.cuda.synchronize()
     mem_post_bwd = torch.cuda.memory_allocated()
