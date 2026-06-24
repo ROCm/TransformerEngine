@@ -31,7 +31,7 @@ For addtional build configuration parameters see `Fused Attention Backends on RO
 
 CK JIT
 ^^^^^^
-TE uses AITER submodule as fused attention backend on ROCm which includes Composable Kernels (CK) MHA kernels library.
+TE uses the AITER library as fused attention backend on ROCm which includes Composable Kernels (CK) MHA kernels library.
 By default CK kernels are not compiled during the build of TE. Instead, they are installed to TE as sourcre files and compiled runtime with HIP compiler.
 This allows TE to support a wide range of configurations without the need to pre-compile kernels for all configurations, which would lead to a very long build time and large binary size.
 Installed TE has `lib/ck_jit/ck_jit_prebuild.py` script that allows manipulating JIT cache.
