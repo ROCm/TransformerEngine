@@ -103,6 +103,8 @@ struct GroupedGemmRunContext {
     NVTETensor* D = nullptr;
     int64_t N = 0;
 
+    GPUArch arch = GPUArch::UNKNOWN;
+
     int group_num = 0;
     bool transA = false;
     bool transB = false;
