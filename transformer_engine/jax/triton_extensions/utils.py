@@ -193,6 +193,17 @@ __all__ = ["triton_call_lowering", "get_triton_info"]
 # Triton kernel cache (module-level, shared across all kernels)
 _TRITON_KERNEL_CACHE = {}
 
+# Process-scoped temp dir for ROCm HSACO blobs (removed at interpreter exit).
+_HSACO_TMPDIR = None
+
+
+def _hsaco_dir():
+    """Return a process-scoped temp directory for HSACO blobs (created lazily)."""
+    global _HSACO_TMPDIR
+    if _HSACO_TMPDIR is None:
+        _HSACO_TMPDIR = tempfile.TemporaryDirectory(prefix="te_jax_hsaco_")
+    return _HSACO_TMPDIR.name
+
 
 def get_triton_info():
     """Get information about the installed Triton package.
@@ -378,11 +389,11 @@ def compile_triton(
     compiled = tc.compile(src, target=target, options=options.__dict__)
 
     # TritonKernel's binary arg is a std::string: PTX is text, but HSACO is bytes
-    # (nanobind won't coerce), so pass HSACO as a temp-file path. The file is left
-    # in place because the plugin loads it at launch.
+    # (nanobind won't coerce), so write HSACO to a process-scoped temp dir and
+    # pass the path. The plugin loads it at launch; the dir is removed at exit.
     binary = compiled.asm[binary_key]
     if is_hip:
-        fd, hsaco_path = tempfile.mkstemp(suffix=".hsaco")
+        fd, hsaco_path = tempfile.mkstemp(suffix=".hsaco", dir=_hsaco_dir())
         with os.fdopen(fd, "wb") as f:
             f.write(binary)
         binary = hsaco_path
@@ -431,7 +442,8 @@ def triton_call_lowering(
 
     Args:
         ctx: MLIR lowering context
-        kernel_fn: Triton kernel function
+        kernel_fn: Triton (@triton.jit) or Gluon (@gluon.jit) kernel, optionally
+                    wrapped with @triton.autotune
         *array_args: Input arrays (from ctx)
         grid: Grid dimensions (int or tuple)
         input_output_aliases: Mapping of input to output aliases

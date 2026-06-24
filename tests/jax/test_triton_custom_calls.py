@@ -147,43 +147,43 @@ class TestTritonBinding:
         assert_allclose(result, expected, dtype=jnp.float32)
 
 
-# Gluon binding test. Drives a @gluon.jit kernel through
-# the same triton_call_lowering bridge as the Triton test above.
+# Gluon binding tests. Drive a @gluon.jit kernel through the same
+# triton_call_lowering bridge as the Triton test above.
 if HAS_GLUON:
     # BLOCK_SIZE must divide NUM_WARPS * WARP_SIZE so the 1-D layout tiles exactly.
     BLOCK_SIZE = 1024
     NUM_WARPS = 4
 
+    # Elementwise out = x * 2, shared by the jit and autotuned tests. Gluon is
+    # layout-explicit: `arange` needs a BlockedLayout whose warps_per_cta matches
+    # the launch num_warps.
+    @gluon.jit
+    def _double_kernel(
+        x_ptr,
+        out_ptr,
+        n_elements: gl.constexpr,
+        BLOCK_SIZE: gl.constexpr,
+        NUM_WARPS: gl.constexpr,
+        WARP_SIZE: gl.constexpr,
+    ):
+        """Multiply each element by 2 using Gluon."""
+        SIZE_PER_THREAD: gl.constexpr = BLOCK_SIZE // (NUM_WARPS * WARP_SIZE)
+        layout: gl.constexpr = gl.BlockedLayout(
+            size_per_thread=[SIZE_PER_THREAD],
+            threads_per_warp=[WARP_SIZE],
+            warps_per_cta=[NUM_WARPS],
+            order=[0],
+        )
+
+        pid = gl.program_id(0)
+        offsets = pid * BLOCK_SIZE + gl.arange(0, BLOCK_SIZE, layout=layout)
+        mask = offsets < n_elements
+        x = gl.load(x_ptr + offsets, mask)
+        gl.store(out_ptr + offsets, x * 2.0, mask)
+
     @pytest.mark.triton
     class TestGluonBinding:
         """Test Gluon binding primitive through the Triton custom-call bridge."""
-
-        # Elementwise out = x * 2. Gluon is layout-explicit: `arange` needs a
-        # BlockedLayout whose warps_per_cta matches the launch num_warps.
-        @staticmethod
-        @gluon.jit
-        def double_kernel(
-            x_ptr,
-            out_ptr,
-            n_elements: gl.constexpr,
-            BLOCK_SIZE: gl.constexpr,
-            NUM_WARPS: gl.constexpr,
-            WARP_SIZE: gl.constexpr,
-        ):
-            """Multiply each element by 2 using Gluon."""
-            SIZE_PER_THREAD: gl.constexpr = BLOCK_SIZE // (NUM_WARPS * WARP_SIZE)
-            layout: gl.constexpr = gl.BlockedLayout(
-                size_per_thread=[SIZE_PER_THREAD],
-                threads_per_warp=[WARP_SIZE],
-                warps_per_cta=[NUM_WARPS],
-                order=[0],
-            )
-
-            pid = gl.program_id(0)
-            offsets = pid * BLOCK_SIZE + gl.arange(0, BLOCK_SIZE, layout=layout)
-            mask = offsets < n_elements
-            x = gl.load(x_ptr + offsets, mask)
-            gl.store(out_ptr + offsets, x * 2.0, mask)
 
         # Define test primitive
         class DoubleGluonPrimitive(BasePrimitive):
@@ -213,7 +213,7 @@ if HAS_GLUON:
 
                 return triton_call_lowering(
                     ctx,
-                    TestGluonBinding.double_kernel,
+                    _double_kernel,
                     x,
                     grid=grid,
                     constexprs={
@@ -232,7 +232,7 @@ if HAS_GLUON:
             """Double each element using the Gluon kernel."""
             return TestGluonBinding.DoubleGluonPrimitive.outer_primitive.bind(x)
 
-        @pytest_parametrize_wrapper("shape", [(1024, 1024)])
+        @pytest_parametrize_wrapper("shape", [(1024, 1024), (1000, 1000)])
         @pytest_parametrize_wrapper("dtype", [jnp.float32])
         def test_gluon_double(self, shape, dtype):
             """Test the Gluon double kernel with JIT."""
@@ -242,5 +242,79 @@ if HAS_GLUON:
             expected = (x * 2.0).astype(dtype)
             jitted_double = jax.jit(self._gluon_double)
             result = jitted_double(x)
+
+            assert_allclose(result, expected, dtype=dtype)
+
+
+    @pytest.mark.triton
+    class TestGluonAutotunedBinding:
+        """Autotuned Gluon binding; exercises the TritonAutotunedKernelCall path."""
+
+        # Reuse the shared kernel; each config carries BLOCK_SIZE and NUM_WARPS as
+        # constexprs (the layout needs them) with a matching launch num_warps.
+        double_kernel_autotuned = triton.autotune(
+            configs=[
+                triton.Config({"BLOCK_SIZE": 256, "NUM_WARPS": 4}, num_warps=4),
+                triton.Config({"BLOCK_SIZE": 1024, "NUM_WARPS": 8}, num_warps=8),
+            ],
+            key=["n_elements"],
+        )(_double_kernel)
+
+        class DoubleGluonAutotunedPrimitive(BasePrimitive):
+            """Test primitive using an autotuned Gluon kernel."""
+
+            name = "te_double_gluon_autotuned_test"
+            multiple_results = False
+            impl_static_args = ()
+
+            @staticmethod
+            def abstract(x_aval):
+                return jax.core.ShapedArray(x_aval.shape, x_aval.dtype)
+
+            @staticmethod
+            def impl(x):
+                prim = TestGluonAutotunedBinding.DoubleGluonAutotunedPrimitive
+                assert prim.inner_primitive is not None
+                return prim.inner_primitive.bind(x)
+
+            @staticmethod
+            def lowering(ctx, x):
+                """MLIR lowering using the autotuned Gluon kernel."""
+                n_elements = 1
+                for dim in ctx.avals_in[0].shape:
+                    n_elements *= dim
+
+                kernel = TestGluonAutotunedBinding.double_kernel_autotuned
+                # Smallest BLOCK_SIZE so every config's grid covers all elements.
+                block_size = min(c.kwargs.get("BLOCK_SIZE") for c in kernel.configs)
+                grid = (triton.cdiv(n_elements, block_size),)
+
+                return triton_call_lowering(
+                    ctx,
+                    kernel,
+                    x,
+                    grid=grid,
+                    # BLOCK_SIZE/NUM_WARPS come from each autotune config; only
+                    # n_elements and WARP_SIZE are passed here.
+                    constexprs={"n_elements": n_elements, "WARP_SIZE": WARP_SIZE},
+                )
+
+        register_primitive(DoubleGluonAutotunedPrimitive)
+
+        @staticmethod
+        def _gluon_double_autotuned(x: jnp.ndarray) -> jnp.ndarray:
+            """Double each element using the autotuned Gluon kernel."""
+            prim = TestGluonAutotunedBinding.DoubleGluonAutotunedPrimitive
+            return prim.outer_primitive.bind(x)
+
+        @pytest_parametrize_wrapper("shape", [(1024, 1024), (1000, 1000)])
+        @pytest_parametrize_wrapper("dtype", [jnp.float32])
+        def test_gluon_double_autotuned(self, shape, dtype):
+            """Test the autotuned Gluon double kernel with JIT."""
+            key = jax.random.PRNGKey(0)
+            x = jax.random.uniform(key, shape, dtype)
+
+            expected = (x * 2.0).astype(dtype)
+            result = jax.jit(self._gluon_double_autotuned)(x)
 
             assert_allclose(result, expected, dtype=dtype)
