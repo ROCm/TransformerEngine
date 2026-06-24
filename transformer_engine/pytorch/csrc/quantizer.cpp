@@ -2232,14 +2232,15 @@ void NVFP4Quantizer::quantize_with_rht_unfused_helper(
         nvte_hadamard_transform(input.data(), rht_output_t_cpp.data(), 0,
                                 this->rht_matrix_random_sign_mask_t, stream);
       });
-
-      // Quantize kernel will treat everything as rowwise input/output, which is
-      // intended.
-      NVTE_SCOPED_GIL_RELEASE({
-        nvte_quantize_v2(rht_output_t_cpp.data(), out_transpose.data(), quant_config_columnwise,
-                        stream);
-      });
     }
+
+    // Quantize kernel will treat everything as rowwise input/output, which is
+    // intended. Must always run — even when the hadamard transform was already
+    // performed by the fused amax kernel, the RHT output still needs FP4 quantization.
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_quantize_v2(rht_output_t_cpp.data(), out_transpose.data(), quant_config_columnwise,
+                      stream);
+    });
   }
 }
 

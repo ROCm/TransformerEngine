@@ -262,7 +262,20 @@ void fused_topk_with_score_function_forward_kernel_launcher(
   }
   check_shared_memory_capacity_num_experts(shared_memory_size, num_experts);
   // Radix selection is O(E), independent of K, but it needs 4 passes for 32-bit float;
-  // switch at K=16 where naive O(K^2*E) starts to dominate
+  // switch at K=16 where naive O(K^2*E) starts to dominate.
+  // On ROCm, always use Naive: the Radix path uses wave32 ballot/prefix-sum
+  // intrinsics (__ballot_sync, __popcll) that are incompatible with wave64.
+#ifdef USE_ROCM
+  {
+    NVTE_CHECK_CUDA(cudaFuncSetAttribute(
+        fused_topk_with_score_function_forward_kernel<DataType, BiasType, TopkFuncType::Naive>,
+        cudaFuncAttributeMaxDynamicSharedMemorySize, shared_memory_size));
+    fused_topk_with_score_function_forward_kernel<DataType, BiasType, TopkFuncType::Naive>
+        <<<grid_size, kThreadsPerBlock, shared_memory_size, stream>>>(
+            logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
+            scaling_factor, score_function, expert_bias, probs, routing_map, intermediate_output);
+  }
+#else
   if (topk < 16) {
     NVTE_CHECK_CUDA(cudaFuncSetAttribute(
         fused_topk_with_score_function_forward_kernel<DataType, BiasType, TopkFuncType::Naive>,
@@ -280,6 +293,7 @@ void fused_topk_with_score_function_forward_kernel_launcher(
             logits, num_tokens, num_experts, topk, use_pre_softmax, num_groups, group_topk,
             scaling_factor, score_function, expert_bias, probs, routing_map, intermediate_output);
   }
+#endif
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
