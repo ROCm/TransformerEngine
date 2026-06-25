@@ -56,11 +56,11 @@ static std::vector<int> generate_routed_tokens(int total_tokens, int num_experts
   return tokens;
 }
 
-template <typename IType, typename OType, int SCALE_DIM_Y, int SCALE_DIM_X>
+template <typename IType, typename OType, int SCALE_DIM_Y, int SCALE_DIM_X, int EP = 1>
 static void BM_GroupQuantizeMXFP8(benchmark::State &state) {
-  const int num_experts  = state.range(0);
+  const int num_experts  = state.range(0) / EP;
   const int cols         = state.range(1);
-  const int total_tokens = state.range(2);
+  const int total_tokens = state.range(2) / EP;
   const int skewed       = state.range(3);
 
   constexpr bool USE_ROWWISE = SCALE_DIM_X > 1;
@@ -210,11 +210,11 @@ static void BM_GroupQuantizeMXFP8(benchmark::State &state) {
   HIP_CHECK(hipStreamDestroy(stream));
 }
 
-template <typename IType, typename OType, int SCALE_DIM_Y, int SCALE_DIM_X>
+template <typename IType, typename OType, int SCALE_DIM_Y, int SCALE_DIM_X, int EP = 1>
 static void BM_MultiQuantizeMXFP8(benchmark::State &state) {
-  const int num_experts  = state.range(0);
+  const int num_experts  = state.range(0) / EP;
   const int cols         = state.range(1);
-  const int total_tokens = state.range(2);
+  const int total_tokens = state.range(2) / EP;
   const int skewed       = state.range(3);
 
   constexpr bool USE_ROWWISE = SCALE_DIM_X > 1;
@@ -346,14 +346,18 @@ static void BM_MultiQuantizeMXFP8(benchmark::State &state) {
 #define MOE_BALANCED                                              \
   ->Args({128,  4096, 65536,  0}) /* Qwen3 H=4096  */             \
   ->Args({128,  1536, 65536,  0}) /* Qwen3 I=1536  */             \
-  ->Args({256,  7168, 131072, 0}) /* DeepSeek H=7168 */           \
-  ->Args({256,  2048, 131072, 0}) /* DeepSeek I=2048 */
+  ->Args({256,  7168, 131072, 0}) /* DSv3 H=7168   */             \
+  ->Args({256,  2048, 131072, 0}) /* DSv3 I=2048   */             \
+  ->Args({384,  7168, 131072, 0}) /* DSv4 H=7168   */             \
+  ->Args({384,  3072, 131072, 0}) /* DSv4 I=3072   */
 
 #define MOE_SKEWED                                                \
   ->Args({128,  4096, 65536,  1}) /* Qwen3 H=4096  */             \
   ->Args({128,  1536, 65536,  1}) /* Qwen3 I=1536  */             \
-  ->Args({256,  7168, 131072, 1}) /* DeepSeek H=7168 */           \
-  ->Args({256,  2048, 131072, 1}) /* DeepSeek I=2048 */
+  ->Args({256,  7168, 131072, 1}) /* DSv3 H=7168   */             \
+  ->Args({256,  2048, 131072, 1}) /* DSv3 I=2048   */             \
+  ->Args({384,  7168, 131072, 1}) /* DSv4 H=7168   */             \
+  ->Args({384,  3072, 131072, 1}) /* DSv4 I=3072   */
 
 #define REGISTER_GROUP_QUANTIZE(ITYPE, OTYPE, INAME, ONAME)                                \
   BENCHMARK_TEMPLATE(BM_GroupQuantizeMXFP8, ITYPE, OTYPE, 1, 32)                           \
@@ -386,5 +390,38 @@ REGISTER_GROUP_QUANTIZE(hip_bfloat16, fp8_e4m3, "BF16", "E4M3")
     ->Unit(benchmark::kMicrosecond) ->UseManualTime();
 
 REGISTER_MULTI_QUANTIZE(hip_bfloat16, fp8_e4m3, "BF16", "E4M3")
+
+#ifdef NVTE_ROCM_EP8_BENCHMARKS
+#define REGISTER_GROUP_QUANTIZE_EP8(ITYPE, OTYPE, INAME, ONAME)                            \
+  BENCHMARK_TEMPLATE(BM_GroupQuantizeMXFP8, ITYPE, OTYPE, 1, 32, 8)                        \
+    ->Name("BM_GroupQuantizeMXFP8/rowwise_ep8/" INAME "_" ONAME)                           \
+    MOE_BALANCED MOE_SKEWED                                                                \
+    ->Unit(benchmark::kMicrosecond) ->UseManualTime();                                     \
+  BENCHMARK_TEMPLATE(BM_GroupQuantizeMXFP8, ITYPE, OTYPE, 32, 1, 8)                        \
+    ->Name("BM_GroupQuantizeMXFP8/colwise_ep8/" INAME "_" ONAME)                           \
+    MOE_BALANCED MOE_SKEWED                                                                \
+    ->Unit(benchmark::kMicrosecond) ->UseManualTime();                                     \
+  BENCHMARK_TEMPLATE(BM_GroupQuantizeMXFP8, ITYPE, OTYPE, 32, 32, 8)                       \
+    ->Name("BM_GroupQuantizeMXFP8/both_ep8/" INAME "_" ONAME)                              \
+    MOE_BALANCED MOE_SKEWED                                                                \
+    ->Unit(benchmark::kMicrosecond) ->UseManualTime();
+
+#define REGISTER_MULTI_QUANTIZE_EP8(ITYPE, OTYPE, INAME, ONAME)                            \
+  BENCHMARK_TEMPLATE(BM_MultiQuantizeMXFP8, ITYPE, OTYPE, 1, 32, 8)                        \
+    ->Name("BM_MultiQuantizeMXFP8/rowwise_ep8/" INAME "_" ONAME)                           \
+    MOE_BALANCED MOE_SKEWED                                                                \
+    ->Unit(benchmark::kMicrosecond) ->UseManualTime();                                     \
+  BENCHMARK_TEMPLATE(BM_MultiQuantizeMXFP8, ITYPE, OTYPE, 32, 1, 8)                        \
+    ->Name("BM_MultiQuantizeMXFP8/colwise_ep8/" INAME "_" ONAME)                           \
+    MOE_BALANCED MOE_SKEWED                                                                \
+    ->Unit(benchmark::kMicrosecond) ->UseManualTime();                                     \
+  BENCHMARK_TEMPLATE(BM_MultiQuantizeMXFP8, ITYPE, OTYPE, 32, 32, 8)                       \
+    ->Name("BM_MultiQuantizeMXFP8/both_ep8/" INAME "_" ONAME)                              \
+    MOE_BALANCED MOE_SKEWED                                                                \
+    ->Unit(benchmark::kMicrosecond) ->UseManualTime();
+
+REGISTER_GROUP_QUANTIZE_EP8(hip_bfloat16, fp8_e4m3, "BF16", "E4M3")
+REGISTER_MULTI_QUANTIZE_EP8(hip_bfloat16, fp8_e4m3, "BF16", "E4M3")
+#endif
 
 BENCHMARK_MAIN();
