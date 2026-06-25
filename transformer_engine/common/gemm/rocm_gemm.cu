@@ -32,6 +32,10 @@
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
 
+#ifdef USE_HIPKITTENS_GEMM
+#include "kittens/mxfp8_gemm.h"
+#endif
+
 namespace transformer_engine {
 
 namespace {
@@ -1938,15 +1942,17 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   // Check that K is compatible with the MXFP8 scale layout, and M/N are multiples of 16
   if (inputA->scaling_mode == NVTE_MXFP8_1D_SCALING || inputB->scaling_mode == NVTE_MXFP8_1D_SCALING) {
     const bool is_gfx1250 = cuda::sm_arch() == 125;
-    // TODO: Also use 32 for gfx950 once hipBLASLt (and TE) support MXFP8 GEMM with 
+    // TODO: Also use 32 for gfx950 once hipBLASLt (and TE) support MXFP8 GEMM with
     // swizzled scales on that architecture.
     const int required_k_multiple = is_gfx1250 ? 32 : 128;
-    NVTE_CHECK(inputBias->data.dptr == nullptr, "MXFP8 GEMM does not yet support bias.");
     NVTE_CHECK((k % required_k_multiple) == 0,
                "GEMM K dimension must be multiple of ", required_k_multiple,
                " for MXFP8 scaling (got K=", k, ")");
     NVTE_CHECK((m % 16) == 0, "GEMM M dimension must be multiple of 16 for MXFP8 scaling (got M=", m, ")");
     NVTE_CHECK((n % 16) == 0, "GEMM N dimension must be multiple of 16 for MXFP8 scaling (got N=", n, ")");
+#ifndef USE_HIPKITTENS_GEMM
+    NVTE_CHECK(inputBias->data.dptr == nullptr, "hipBLASlt MXFP8 GEMM does not support bias.");
+#endif
   }
 
   const int lda = is_transa ? k : m;
@@ -1974,21 +1980,57 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     handle = hipblaslt_handles[compute_stream_offset];
   }
 
-  // FIXME(https://amd-hub.atlassian.net/browse/ROCM-26110): Remove this workaround once hipBLASLt supports NN/NT
-  // layouts for MXFP8 on gfx1250.
-  bool handled = try_mxfp8_non_tn_transpose_to_tn(inputA, inputB, outputD, inputBias,
-                                                  outputPreGelu, transa, transb, grad,
-                                                  workspace, workspaceSize, alpha, beta,
-                                                  use_split_accumulator, math_sm_count,
-                                                  gemm_stream, handle, m, n, k);
-  if (!handled) {
-    hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, m, n, k, lda, ldb, ldd, transa,
-                   transb, grad, workspace, workspaceSize, alpha, beta, use_split_accumulator,
-                   math_sm_count, gemm_stream, handle);
+  bool is_mxfp8 = inputA->scaling_mode == NVTE_MXFP8_1D_SCALING
+               || inputB->scaling_mode == NVTE_MXFP8_1D_SCALING;
+
+#ifdef USE_HIPKITTENS_GEMM
+
+  bool use_hipkittens = false;
+  if (is_mxfp8) {
+    bool is_gfx950 = (cuda::sm_arch() == 95);
+    bool force_hipblaslt = false;
+    if (const char *env_p = std::getenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8")) {
+      force_hipblaslt = (strcmp(env_p, "1") == 0);
+    }
+    use_hipkittens = is_gfx950 && !force_hipblaslt
+                  && m % 256 == 0 && n % 256 == 0 && k % 128 == 0 && k >= 256;
   }
 
-  if (use_service_stream)
-  {
+  hipStream_t s = use_service_stream ? ss_ctl.stream : stream;
+
+  if (use_hipkittens) {
+    auto param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
+
+    kittens_mxfp8_gemm(param.A, param.B, outputD->data.dptr,
+                       param.A_scale_inv, param.B_scale_inv,
+                       m, n, k, is_transa, is_transb,
+                       static_cast<int>(param.Atype),
+                       static_cast<int>(param.Btype),
+                       inputBias->data.dptr,
+                       static_cast<int>(inputBias->data.dtype),
+                       outputPreGelu->data.dptr,
+                       static_cast<int>(outputD->data.dtype),
+                       static_cast<int>(outputPreGelu->data.dtype),
+                       workspace, workspaceSize, s);
+  } else {
+#endif
+    // FIXME(https://amd-hub.atlassian.net/browse/ROCM-26110): Remove this workaround once hipBLASLt supports NN/NT
+    // layouts for MXFP8 on gfx1250.
+    bool handled = try_mxfp8_non_tn_transpose_to_tn(inputA, inputB, outputD, inputBias,
+                                                    outputPreGelu, transa, transb, grad,
+                                                    workspace, workspaceSize, alpha, beta,
+                                                    use_split_accumulator, math_sm_count,
+                                                    s, handle, m, n, k);
+    if (!handled) {
+      hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, m, n, k, lda, ldb, ldd, transa,
+                     transb, grad, workspace, workspaceSize, alpha, beta, use_split_accumulator,
+                     math_sm_count, s, handle);
+    }
+#ifdef USE_HIPKITTENS_GEMM
+  }
+#endif
+
+  if (use_service_stream) {
     release_service_stream(stream, ss_ctl);
   }
 }

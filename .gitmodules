@@ -23,6 +23,9 @@
 [submodule "3rdparty/QoLA"]
 	path = 3rdparty/QoLA
 	url = https://github.com/ROCm/QoLA.git
+[submodule "3rdparty/hipkittens"]
+	path = 3rdparty/hipkittens
+	url = https://github.com/HazyResearch/HipKittens.git
 [submodule "3rdparty/composable_kernel"]
 	path = 3rdparty/composable_kernel
 	url = https://github.com/ROCm/composable_kernel.git
