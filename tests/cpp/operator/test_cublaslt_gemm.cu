@@ -496,9 +496,6 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
   // relax for certain FP8 gemm with hipblaslt
   if (use_mxfp8) {
     atol = 5e-4;
-<<<<<<< HEAD
-    rtol = std::max(rtol, 5e-3);
-=======
     rtol = std::max(rtol, 1e-3);
     // gfx950 MXFP8 GEMMs can show larger numerical variance
     // Relax tolerances to avoid flaky failures.
@@ -507,7 +504,6 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
     if (prop.major == 9 && prop.minor == 5) {
       rtol = std::max(rtol, 6e-2);
     }
->>>>>>> origin/dev
   }
   else if (use_fp8) {
     atol = 1e-3;
