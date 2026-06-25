@@ -25,11 +25,11 @@ class BenchGroupedGemm(BenchBase):
         self.module = te.GroupedLinear(
             num_gemms=B, in_features=K, out_features=N, bias=False,
         ).to(device="cuda", dtype=dtype)
-        self.xs = [
-            torch.randn(M, K, dtype=dtype, device="cuda", requires_grad=True)
-            for _ in range(B)
-        ]
-        self.grad_outs = [torch.randn_like(o) for o in self.module(self.xs)]
+        # GroupedLinear takes one concatenated (sum_M, K) input plus the per-group
+        # row counts; M tokens per group -> m_splits = [M] * B.
+        self.m_splits = [M] * B
+        self.x = torch.randn(B * M, K, dtype=dtype, device="cuda", requires_grad=True)
+        self.grad_out = torch.randn_like(self.module(self.x, self.m_splits))
 
     def work_forward(self, M, config):
         B, N, K = CONFIGS[config]
@@ -40,12 +40,12 @@ class BenchGroupedGemm(BenchBase):
         return {"flops": B * 3 * 2 * M * N * K}
 
     def time_forward(self, M, config):
-        return self._time(lambda: self.module(self.xs))
+        return self._time(lambda: self.module(self.x, self.m_splits))
 
     def time_forward_backward(self, M, config):
-        t = self._time(lambda: torch.autograd.backward(self.module(self.xs), self.grad_outs))
-        for x in self.xs:
-            x.grad = None
+        t = self._time(lambda: torch.autograd.backward(
+            self.module(self.x, self.m_splits), self.grad_out))
+        self.x.grad = None
         for p in self.module.parameters():
             p.grad = None
         return t

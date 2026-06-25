@@ -64,13 +64,16 @@ def grouped_gemm_configs(models=MOE_MODELS, eps=(32, 16, 8)):
 
     One entry per (model, expert-parallel size) where the experts divide evenly.
     """
+    # DSV3-GateUp hangs on some hardware; only benchmark DSV3-Down.
+    _SKIP_GATEUP = {"DSV3"}
     configs = {}
     for model, (n_experts, inter, hidden) in models.items():
         for ep in eps:
             if n_experts % ep != 0:
                 continue
             num_gemms = n_experts // ep
-            configs[f"{model}_EP{ep}-GateUp"] = (num_gemms, 2 * inter, hidden)
+            if model not in _SKIP_GATEUP:
+                configs[f"{model}_EP{ep}-GateUp"] = (num_gemms, 2 * inter, hidden)
             configs[f"{model}_EP{ep}-Down"] = (num_gemms, hidden, inter)
     return configs
 

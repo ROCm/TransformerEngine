@@ -39,34 +39,49 @@ import numpy as np
 class BenchBase:
     """Base for benchmark classes: driver-controlled knobs + the timing helper.
 
-    The driver sets ``_inner`` (kernel invocations per CUDA-event window, to
-    amortize launch + event overhead) and ``_scratch`` (a buffer written before
-    each sample to evict the GPU cache in ``--cold-cache`` mode) per
-    (combo, method). Subclasses time their kernels through :meth:`_time`.
+    The driver sets timing knobs per (combo, method) before the timed phase:
+      _min_run_time_s  -- blocked_autorange target window (auto mode, default 1ms)
+      _use_autorange   -- True: blocked_autorange; False: timeit(_inner)
+      _inner           -- fixed iteration count when _use_autorange is False
+      _scratch         -- cache-flush buffer for --cold-cache mode
+
+    Subclasses time their kernels through :meth:`_time`.
     """
 
     _inner = 1
     _scratch = None
+    _min_run_time_s = 0.001  # 1 ms default, overridden by driver per instance
+    _use_autorange = True
 
     def _time(self, fn):
-        """Run *fn* ``_inner`` times in one CUDA-event window; return seconds/call.
+        """Time *fn* via torch.utils.benchmark; return seconds/call.
 
-        Honors ``--cold-cache`` (flush scratch before the window) and ``--inner``
-        (loop count). The per-call value is what the driver and throughput
-        columns consume regardless of inner-loop count.
+        Uses a C++ measurement loop to avoid Python per-iteration overhead.
+
+        * Normal mode (``_use_autorange=True``): ``blocked_autorange`` selects
+          the inner iteration count automatically so each sample window lasts
+          >= ``_min_run_time_s``.  Mirrors stats suite behaviour.
+        * Fixed mode (``_use_autorange=False``): ``timeit(_inner)`` runs
+          exactly ``_inner`` iterations.  Used with ``--inner N`` or
+          ``--cold-cache`` (which forces ``_inner=1`` and flushes scratch).
         """
-        import torch  # deferred: driver stays importable without torch
-        evt = getattr(self, "_evt", None)
-        if evt is None:
-            evt = self._evt = [torch.cuda.Event(enable_timing=True) for _ in range(2)]
+        import torch.utils.benchmark as benchmark  # deferred
         if self._scratch is not None:
             self._scratch.fill_(1.0)
-        evt[0].record()
-        for _ in range(self._inner):
-            fn()
-        evt[1].record()
-        torch.cuda.synchronize()
-        return evt[0].elapsed_time(evt[1]) / 1000 / self._inner
+        timer = getattr(self, "_timer", None)
+        if timer is None:
+            timer = self._timer = benchmark.Timer(stmt="fn()", globals={"fn": fn})
+        if self._use_autorange:
+            if self._inner == 1:
+                # First call: use blocked_autorange to calibrate number_per_run
+                # and collect the first sample in one shot.
+                m = timer.blocked_autorange(min_run_time=self._min_run_time_s)
+                self._inner = m.number_per_run  # cache for subsequent calls
+            else:
+                # Subsequent calls: skip re-calibration, reuse cached count.
+                m = timer.timeit(self._inner)
+            return m.mean
+        return timer.timeit(self._inner).mean
 
 
 # ---------------------------------------------------------------------------
@@ -227,7 +242,7 @@ def run_class(
     inner_desc = (
         "cold-cache (inner=1)" if cold_cache
         else f"inner={inner}" if inner != "auto"
-        else f"inner=auto (>={target_window_ms:g}ms window)"
+        else f"blocked_autorange (>={target_window_ms:g}ms)"
     )
     sched_desc = ("sequential" if group == 1
                   else f"interleaved group={group}, " + ("shuffled" if shuffle else "fixed-order"))
@@ -274,11 +289,13 @@ def run_class(
             if cold_cache:
                 instance._scratch = _make_scratch(cache_flush_mb)
                 instance._inner = 1
+                instance._use_autorange = False
             elif inner == "auto":
-                instance._inner = _autotune_inner(
-                    instance, method_name, combo, target_window_s)
+                instance._min_run_time_s = target_window_s
+                instance._use_autorange = True
             else:
                 instance._inner = max(1, int(inner))
+                instance._use_autorange = False
 
             method = getattr(instance, method_name)
             for _ in range(warmup):
