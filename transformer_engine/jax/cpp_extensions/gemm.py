@@ -108,22 +108,15 @@ def _use_hipkittens() -> bool:
 
 
 def _hipkittens_workspace_bytes(m: int, n: int, k: int, layout: str) -> int:
-    """Compute workspace bytes needed for HipKittens MXFP8 GEMM."""
+    """Compute workspace bytes needed for HipKittens MXFP8 GEMM.
+
+    Native TN/NN/NT kernels only need packed scale workspace (no data transpose).
+    """
     def _align(x: int) -> int:
         return (x + 255) & ~255
 
-    transa = layout[0] == "T"
-    transb = layout[1] == "T"
     k_iters = k // 128
-    scale_k = k // 32
-    sa_pk = _align(k_iters * m * 4)
-    sb_pk = k_iters * n * 4
-    needed = _align(sa_pk) + sb_pk
-    if not transa:
-        needed += _align(m * k) + _align(m * scale_k)
-    if transb:
-        needed += _align(n * k) + _align(n * scale_k) + _align(sb_pk)
-    return needed
+    return _align(k_iters * m * 4) + k_iters * n * 4
 
 
 def get_cublas_workspace_size_bytes() -> None:

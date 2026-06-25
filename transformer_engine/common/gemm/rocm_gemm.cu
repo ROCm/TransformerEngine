@@ -1945,7 +1945,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     // TODO: Also use 32 for gfx950 once hipBLASLt (and TE) support MXFP8 GEMM with
     // swizzled scales on that architecture.
     const int required_k_multiple = is_gfx1250 ? 32 : 128;
-    NVTE_CHECK(inputBias->data.dptr == nullptr, "MXFP8 GEMM does not yet support bias.");
     NVTE_CHECK((k % required_k_multiple) == 0,
                "GEMM K dimension must be multiple of ", required_k_multiple,
                " for MXFP8 scaling (got K=", k, ")");
