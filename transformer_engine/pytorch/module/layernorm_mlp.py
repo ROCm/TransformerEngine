@@ -409,7 +409,7 @@ class _LayerNormMLP(torch.autograd.Function):
             and not custom
         )
 
-        # ROCm does not currently support quantized norm for Float8CurrentScalingQuantizer
+        # ROCm does not currently support quantized norm for Float8CurrentScalingQuantizer or Float8BlockQuantizer
         if IS_HIP_EXTENSION and isinstance(
             fc1_input_quantizer, (Float8CurrentScalingQuantizer, Float8BlockQuantizer)
         ):

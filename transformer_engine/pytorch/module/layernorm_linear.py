@@ -226,7 +226,7 @@ class _LayerNormLinear(torch.autograd.Function):
             and not custom  # TODO(negvet): and not FP8GlobalStateManager.get_fp8_recipe().custom()
         )
 
-        # ROCm does not currently support quantized norm for Float8CurrentScalingQuantizer
+        # ROCm does not currently support quantized norm for Float8CurrentScalingQuantizer or Float8BlockQuantizer
         if IS_HIP_EXTENSION and isinstance(
             input_quantizer, (Float8CurrentScalingQuantizer, Float8BlockQuantizer)
         ):

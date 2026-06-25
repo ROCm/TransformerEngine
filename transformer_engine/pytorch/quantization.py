@@ -103,8 +103,6 @@ def check_nvfp4_support() -> Tuple[bool, str]:
 def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
     if IS_HIP_EXTENSION:
-        if os.getenv("NVTE_ROCM_ENABLE_FP8_BLOCK_SCALING", "0") == "0":
-            return False, "FP8 block scaling support is not enabled."
         gpu_arch = get_device_compute_capability()
         if gpu_arch == (9, 5):
             return True, ""

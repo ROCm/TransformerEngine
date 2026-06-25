@@ -5,6 +5,8 @@
 # Blockwise FP8 grouped GEMM Triton kernels (MoE), adapted from AMD Primus-Turbo
 # (primus_turbo/triton/grouped_gemm/grouped_gemm_fp8_kernel.py).
 
+import os
+
 import torch
 import triton
 import triton.language as tl
@@ -22,6 +24,7 @@ _KNOBS_SET = False
 
 
 def set_triton_knobs_gfx950() -> None:
+    """Enable AMD compiler knobs for gfx950 (async_copy, block_pingpong, scalarize)."""
     global _KNOBS_SET
     if _KNOBS_SET:
         return
@@ -31,14 +34,16 @@ def set_triton_knobs_gfx950() -> None:
         triton.knobs.amd.scalarize_packed_fops = True
         triton.knobs.amd.use_block_pingpong = True
     else:
-        import os
         os.environ.setdefault("TRITON_HIP_USE_ASYNC_COPY", "1")
         os.environ.setdefault("AMDGCN_SCALARIZE_PACKED_FOPS", "1")
         os.environ.setdefault("TRITON_HIP_USE_BLOCK_PINGPONG", "1")
 
 
 def _set_amd_knobs(enable: bool = True):
-    """Set AMD-specific Triton knobs (non-gfx950 fallback)."""
+    """Set AMD-specific Triton knobs (non-gfx950 fallback).
+    NOTE: use_async_copy and scalarize_packed_fops help NT/NN but regress
+    TN/wgrad ~5-8% on gfx942, so callers gate ``enable`` per layout.
+    """
     if hasattr(triton, "knobs") and hasattr(triton.knobs, "amd"):
         triton.knobs.amd.use_async_copy = enable
         triton.knobs.amd.scalarize_packed_fops = enable

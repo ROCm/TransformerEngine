@@ -39,6 +39,16 @@ def set_triton_knobs_gfx950() -> None:
         os.environ.setdefault("TRITON_HIP_USE_BLOCK_PINGPONG", "1")
 
 
+def _set_amd_knobs(enable: bool = True):
+    """Set AMD-specific Triton knobs (non-gfx950 fallback).
+    NOTE: use_async_copy and scalarize_packed_fops help NT/NN but regress
+    TN/wgrad ~5-8% on gfx942, so callers gate ``enable`` per layout.
+    """
+    if hasattr(triton, "knobs") and hasattr(triton.knobs, "amd"):
+        triton.knobs.amd.use_async_copy = enable
+        triton.knobs.amd.scalarize_packed_fops = enable
+
+
 # Blockwise FP8 GEMM kernel, autotune configs and public entrypoint.
 def _get_blockwise_autotune_configs(
     allow_num_stages_3: bool = True,
