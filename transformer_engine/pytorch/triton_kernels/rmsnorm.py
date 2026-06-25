@@ -4,6 +4,8 @@
 import torch
 import triton
 import triton.language as tl
+from .utils import use_cuda_graph_autotune
+
 
 def get_autotune_config():
     return [triton.Config({'waves_per_eu': 0}, num_warps=nw) for nw in (1, 4, 8, 16)]
@@ -208,7 +210,7 @@ autotune_dec = triton.autotune(
     configs=get_autotune_config(),
     key=['n_rows', 'n_cols'],
     prune_configs_by={'early_config_prune': _prune_rms_configs},
-    use_cuda_graph=True,
+    use_cuda_graph=use_cuda_graph_autotune(),
 )
 _rmsnorm_fwd_triton = autotune_dec(_rmsnorm_fwd_triton_impl)
 
@@ -383,7 +385,7 @@ _rmsnorm_bwd_triton = triton.autotune(
     configs=get_autotune_config(),
     key=['n_rows', 'n_cols'],
     prune_configs_by={'early_config_prune': _prune_rms_configs},
-    use_cuda_graph=True,
+    use_cuda_graph=use_cuda_graph_autotune(),
 )(_rmsnorm_bwd_triton_impl)
 
 
@@ -423,5 +425,5 @@ def _get_dg_reduce_configs():
 _rmsnorm_bwd_dg_reduce_triton = triton.autotune(
     configs=_get_dg_reduce_configs(),
     key=['n_rows', 'n_cols'],
-    use_cuda_graph=True,
+    use_cuda_graph=use_cuda_graph_autotune(),
 )(_rmsnorm_bwd_dg_reduce_triton_impl)
