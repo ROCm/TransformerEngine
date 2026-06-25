@@ -1935,12 +1935,16 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   NVTE_CHECK((is_transb ? B0 : B1) == k,
              "GEMM inputs have incompatible dimensions (A is ", A0, "x", A1, ", B is ", B0, "x", B1,
              ")");
-  // Check that K is compatible with the MXFP8 scale layout, and M/N are multiples of 16
+  // Check that K is compatible with the MXFP8 scale layout, and M/N are multiples of 16.
+  // On non-gfx1250 archs K only needs to be a multiple of 64: hipBLASLt has MXFP8
+  // solutions for every K % 64 == 0 (verified on gfx950 via hipblaslt-bench, scaleA/B=3
+  // VEC32_UE8M0: K=64/128/192/256/384 succeed; K=32/96/160/224/288 have no solution).
+  // The prior 128 bound was over-strict and rejected supported shapes (e.g. K=192).
   if (inputA->scaling_mode == NVTE_MXFP8_1D_SCALING || inputB->scaling_mode == NVTE_MXFP8_1D_SCALING) {
     const bool is_gfx1250 = cuda::sm_arch() == 125;
-    // TODO: Also use 32 for gfx950 once hipBLASLt (and TE) support MXFP8 GEMM with 
+    // TODO: Also use 32 for gfx950 once hipBLASLt (and TE) support MXFP8 GEMM with
     // swizzled scales on that architecture.
-    const int required_k_multiple = is_gfx1250 ? 32 : 128;
+    const int required_k_multiple = is_gfx1250 ? 32 : 64;
     NVTE_CHECK(inputBias->data.dptr == nullptr, "MXFP8 GEMM does not yet support bias.");
     NVTE_CHECK((k % required_k_multiple) == 0,
                "GEMM K dimension must be multiple of ", required_k_multiple,
