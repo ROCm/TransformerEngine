@@ -25,6 +25,8 @@ from references.blockwise_quantizer_reference import (
     BlockwiseQuantizerReference,
     QuantizeResult,
 )
+fp8_e4m3_type = get_torch_float8_e4m3_type()
+fp8_e5m2_type = get_torch_float8_e5m2_type()
 from test_float8_current_scaling_exact import (
     TestFP8RecipeLinearBase,
     TestFP8RecipeLayerNormLinearBase,

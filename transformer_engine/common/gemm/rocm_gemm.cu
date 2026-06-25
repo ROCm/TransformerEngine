@@ -30,6 +30,10 @@
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
 
+#ifdef USE_HIPKITTENS_GEMM
+#include "kittens/blockwise_fp8_gemm.h"
+#endif
+
 namespace transformer_engine {
 
 namespace {
@@ -1767,6 +1771,69 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
     handle = hipblaslt_handles[compute_stream_offset];
   }
+
+#ifdef USE_HIPKITTENS_GEMM
+  {
+    const bool inputA_blockwise = inputA->scaling_mode == NVTE_BLOCK_SCALING_1D ||
+                                  inputA->scaling_mode == NVTE_BLOCK_SCALING_2D;
+    const bool inputB_blockwise = inputB->scaling_mode == NVTE_BLOCK_SCALING_1D ||
+                                  inputB->scaling_mode == NVTE_BLOCK_SCALING_2D;
+    if (inputA_blockwise && inputB_blockwise) {
+      NVTE_CHECK(outputD->data.dtype == DType::kBFloat16 ||
+                 outputD->data.dtype == DType::kFloat32  ||
+                 outputD->data.dtype == DType::kFloat16,
+                 "Blockwise FP8 GEMM: unsupported output dtype.");
+      NVTE_CHECK(!outputPreGelu->data.dptr || grad,
+                 "Blockwise FP8 GEMM: forward GELU fusion is not supported; "
+                 "only the backward dGELU path (grad=true) is implemented.");
+      NVTE_CHECK(!(is_transa && is_transb),
+                 "Blockwise FP8 GEMM: TT layout (transa=T, transb=T) is not supported.");
+
+      const bool inputA_col    = !is_transa;
+      const void *inputA_data  = inputA_col ? inputA->columnwise_data.dptr      : inputA->data.dptr;
+      const void *inputA_scale = inputA_col ? inputA->columnwise_scale_inv.dptr : inputA->scale_inv.dptr;
+      const int   inputA_dtype = static_cast<int>(inputA_col ? inputA->columnwise_data.dtype
+                                                             : inputA->data.dtype);
+      const bool inputB_col    = is_transb;
+      const void *inputB_data  = inputB_col ? inputB->columnwise_data.dptr      : inputB->data.dptr;
+      const void *inputB_scale = inputB_col ? inputB->columnwise_scale_inv.dptr : inputB->scale_inv.dptr;
+      const int   inputB_dtype = static_cast<int>(inputB_col ? inputB->columnwise_data.dtype
+                                                             : inputB->data.dtype);
+      NVTE_CHECK(inputA_data != nullptr && inputA_scale != nullptr &&
+                 inputB_data != nullptr && inputB_scale != nullptr,
+                 "Blockwise FP8 GEMM: missing rowwise or columnwise data/scale pointer.");
+      NVTE_CHECK((k % 16) == 0,
+                 "Blockwise FP8 GEMM: K must be a multiple of 16 (got K=", k, ").");
+
+      const bool has_bias        = (inputBias->data.dptr != nullptr);
+      const bool has_gelu        = (outputPreGelu->data.dptr != nullptr);
+      const bool has_accum       = (beta != 0.0f);
+      const void *bias           = has_bias  ? inputBias->data.dptr     : nullptr;
+      const int   bias_dtype     = static_cast<int>(inputBias->data.dtype);
+      const void *gelu_aux       = has_gelu  ? outputPreGelu->data.dptr : nullptr;
+      const int   gelu_aux_dtype = static_cast<int>(outputPreGelu->data.dtype);
+      const void *c_in           = has_accum ? outputD->data.dptr       : nullptr;
+
+      hipStream_t s = use_service_stream ? ss_ctl.stream : stream;
+      kittens_blockwise_fp8_gemm(
+          inputB_data, inputA_data, outputD->data.dptr,
+          inputB_scale, inputA_scale,
+          n, m, k, false, true,
+          inputB_dtype, inputA_dtype,
+          static_cast<int>(inputB->scaling_mode),
+          static_cast<int>(inputA->scaling_mode),
+          static_cast<int>(outputD->data.dtype),
+          bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta,
+          s);
+      
+      if (use_service_stream)
+      {
+        release_service_stream(stream, ss_ctl);
+      } 
+      return;
+    }
+  }
+#endif
 
   hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, m, n, k, lda, ldb, ldd, transa,
                  transb, grad, workspace, workspaceSize, alpha, beta, use_split_accumulator,

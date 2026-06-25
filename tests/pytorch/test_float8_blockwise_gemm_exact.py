@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -6,20 +8,63 @@ import pytest
 import torch
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.pytorch import (
     Float8BlockQuantizer,
     get_device_compute_capability,
 )
+from transformer_engine.pytorch.utils import (
+    get_torch_float8_e4m3_type,
+    get_torch_float8_e5m2_type,
+)
 from references.blockwise_quantizer_reference import CuBLASScaleMunger
 from references.blockwise_fp8_gemm_reference import CuBLASRefBlockwiseGemm
 
+fp8_e4m3_type = get_torch_float8_e4m3_type()
+fp8_e5m2_type = get_torch_float8_e5m2_type()
 
 def fp8_blockwise_gemm_supported() -> bool:
     supported = te.is_fp8_block_scaling_available()
     emulated = get_device_compute_capability() >= (10, 0)
     return supported and not emulated
+
+def rocm_blockwise_unsupported_reason(
+    x_dtype,
+    w_dtype,
+    out_dtype,
+    K,
+    is_x_1d_scaled,
+    is_w_1d_scaled,
+    *,
+    x_columnwise: bool = False,
+    w_columnwise: bool = False,
+    use_gelu: bool = False,
+    use_grad: bool = False,
+):
+    if out_dtype not in (torch.bfloat16, torch.float32, torch.float16):
+        return "blockwise FP8 GEMM only supports bfloat16/float32/float16 output"
+
+    is_1d2d = is_x_1d_scaled and not is_w_1d_scaled
+    is_1d1d = is_x_1d_scaled and is_w_1d_scaled
+    if not (is_1d2d or is_1d1d):
+        return "blockwise FP8 GEMM only supports 1Dx2D / 1Dx1D scaling"
+
+    if x_columnwise and not w_columnwise:
+        return "blockwise FP8 GEMM does not support TT layout"
+
+    fp8_types = (fp8_e4m3_type, fp8_e5m2_type)
+    if x_dtype not in fp8_types or w_dtype not in fp8_types:
+        return "blockwise FP8 GEMM only supports e4m3/e5m2 inputs"
+
+    if use_gelu and not use_grad:
+        return "blockwise FP8 GEMM only supports dgelu (grad) epilogue"
+
+    if K % 16 != 0:
+        return "blockwise FP8 GEMM requires K%16==0"
+
+    return None
 
 
 def cublas_gemm_fp8_blockwise_case(
@@ -45,12 +90,20 @@ def cublas_gemm_fp8_blockwise_case(
     atol: float = 0.0,
     rtol: float = 0.0
 ):
-    if x_dtype == torch.float8_e5m2 and w_dtype == torch.float8_e5m2:
+    if x_dtype == fp8_e5m2_type and w_dtype == fp8_e5m2_type:
         pytest.skip("FP8 GEMM doesn't support both a and b types being torch.float8_e5m2")
     if not (is_x_1d_scaled or is_w_1d_scaled):
         pytest.skip("FP8 GEMM doesn't support 2dimensional qtile by 2dimensional qtile")
     if not fp8_blockwise_gemm_supported():
         pytest.skip("CUDA version does not support blockwise FP8 gemm.")
+    if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 4):
+        unsupported_reason = rocm_blockwise_unsupported_reason(
+            x_dtype, w_dtype, out_dtype, K, is_x_1d_scaled, is_w_1d_scaled,
+            x_columnwise=x_columnwise, w_columnwise=w_columnwise,
+            use_gelu=use_gelu, use_grad=use_grad,
+        )
+        if unsupported_reason is not None:
+            pytest.skip(unsupported_reason)
     # Setup device and random seed
     device = "cuda"
     seed = 0
@@ -228,6 +281,10 @@ def cublas_gemm_test_constraint_enforced(
 ):
     if not fp8_blockwise_gemm_supported():
         pytest.skip("CUDA version does not support blockwise FP8 gemm.")
+    if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 4):
+        pytest.skip(
+            "blockwise FP8 GEMM does not yet wire unsupported-config error paths"
+        )
     # Setup device and random seed
     device = "cuda"
     seed = 0
@@ -331,8 +388,8 @@ def cublas_gemm_test_constraint_enforced(
         (1024, 4096, 1024),
     ],
 )
-@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
-@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
+@pytest.mark.parametrize("x_dtype", [fp8_e4m3_type, fp8_e5m2_type], ids=str)
+@pytest.mark.parametrize("w_dtype", [fp8_e4m3_type, fp8_e5m2_type], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("noise_type", ["normal"], ids=str)
 @pytest.mark.parametrize("x_magnitude", [1], ids=str)
@@ -387,8 +444,8 @@ def test_cublas_gemm_fp8_blockwise_shape_varying(
         (320, 256, 336),
     ],
 )
-@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
-@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
+@pytest.mark.parametrize("x_dtype", [fp8_e4m3_type, fp8_e5m2_type], ids=str)
+@pytest.mark.parametrize("w_dtype", [fp8_e4m3_type, fp8_e5m2_type], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("noise_type", ["normal", "uniform"], ids=str)
 @pytest.mark.parametrize("x_magnitude", [1e-28, 1, 1e3], ids=str)
@@ -447,8 +504,8 @@ def test_cublas_gemm_fp8_blockwise_accumulate_magnitude_varying(
         (256, 256, 256),
     ],
 )
-@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
-@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
+@pytest.mark.parametrize("x_dtype", [fp8_e4m3_type, fp8_e5m2_type], ids=str)
+@pytest.mark.parametrize("w_dtype", [fp8_e4m3_type, fp8_e5m2_type], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("noise_type", ["normal"], ids=str)
 @pytest.mark.parametrize("x_magnitude", [1e-3], ids=str)
@@ -509,8 +566,8 @@ def test_cublas_gemm_fp8_blockwise_bias(
         (4096, 128, 4096),
     ],
 )
-@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
-@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
+@pytest.mark.parametrize("x_dtype", [fp8_e4m3_type, fp8_e5m2_type], ids=str)
+@pytest.mark.parametrize("w_dtype", [fp8_e4m3_type, fp8_e5m2_type], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("noise_type", ["normal"], ids=str)
 @pytest.mark.parametrize("x_magnitude", [1], ids=str)
@@ -582,8 +639,8 @@ def test_cublas_gemm_fp8_blockwise_columnwise(
         (256, 256, 256),
     ],
 )
-@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn], ids=str)
-@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn], ids=str)
+@pytest.mark.parametrize("x_dtype", [fp8_e4m3_type], ids=str)
+@pytest.mark.parametrize("w_dtype", [fp8_e4m3_type], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("noise_type", ["normal"], ids=str)
 @pytest.mark.parametrize("x_magnitude", [1], ids=str)
@@ -654,8 +711,8 @@ def test_cublas_gemm_fp8_gelu(
         (256, 128, 256),
     ],
 )
-@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn], ids=str)
-@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn], ids=str)
+@pytest.mark.parametrize("x_dtype", [fp8_e4m3_type], ids=str)
+@pytest.mark.parametrize("w_dtype", [fp8_e4m3_type], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
 @pytest.mark.parametrize("use_split_accumulator", [False], ids=["split_acc"])
@@ -701,8 +758,8 @@ def test_split_accumulator_enforced(
         (256, 128, 256),
     ],
 )
-@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn], ids=str)
-@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn], ids=str)
+@pytest.mark.parametrize("x_dtype", [fp8_e4m3_type], ids=str)
+@pytest.mark.parametrize("w_dtype", [fp8_e4m3_type], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
 @pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
@@ -752,8 +809,8 @@ def test_bgrad_not_supported(
         (256, 128, 256),
     ],
 )
-@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn], ids=str)
-@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn], ids=str)
+@pytest.mark.parametrize("x_dtype", [fp8_e4m3_type], ids=str)
+@pytest.mark.parametrize("w_dtype", [fp8_e4m3_type], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
 @pytest.mark.parametrize("use_bias", [True, False], ids=["bias", "no_bias"])
@@ -812,8 +869,8 @@ def test_gelu_unsupported_cases_error(
         (256, 128, 256),
     ],
 )
-@pytest.mark.parametrize("x_dtype", [torch.float8_e5m2], ids=str)
-@pytest.mark.parametrize("w_dtype", [torch.float8_e5m2], ids=str)
+@pytest.mark.parametrize("x_dtype", [fp8_e5m2_type], ids=str)
+@pytest.mark.parametrize("w_dtype", [fp8_e5m2_type], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
 @pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
@@ -859,8 +916,8 @@ def test_illegal_dtype_enforced(
         (256, 128, 256),
     ],
 )
-@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn], ids=str)
-@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn], ids=str)
+@pytest.mark.parametrize("x_dtype", [fp8_e4m3_type], ids=str)
+@pytest.mark.parametrize("w_dtype", [fp8_e4m3_type], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16, torch.float32], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
 @pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])
@@ -911,8 +968,8 @@ def test_illegal_2D_by_2D_enforced(
         (256, 128, 252, False, False),
     ],
 )
-@pytest.mark.parametrize("x_dtype", [torch.float8_e4m3fn], ids=str)
-@pytest.mark.parametrize("w_dtype", [torch.float8_e4m3fn], ids=str)
+@pytest.mark.parametrize("x_dtype", [fp8_e4m3_type], ids=str)
+@pytest.mark.parametrize("w_dtype", [fp8_e4m3_type], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("accumulate", [False], ids=["no_accumulate"])
 @pytest.mark.parametrize("use_split_accumulator", [True], ids=["split_acc"])

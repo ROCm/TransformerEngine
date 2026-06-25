@@ -1,0 +1,39 @@
+/*************************************************************************
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+ * License for AMD contributions = MIT. See LICENSE for more information
+*************************************************************************/
+
+#pragma once
+
+#include <hip/hip_runtime.h>
+#include <cstddef>
+
+enum KittensDType {
+    KITTENS_FLOAT32  = 4,
+    KITTENS_FLOAT16  = 5,
+    KITTENS_BFLOAT16 = 6,
+    KITTENS_FP8E4M3  = 7,
+    KITTENS_FP8E5M2  = 8,
+};
+
+enum KittensScalingMode {
+    KITTENS_BLOCK_SCALING_1D = 2,
+    KITTENS_BLOCK_SCALING_2D = 3,
+};
+
+
+// activation 1D scale [K/128, M]; weight scale selected by b_scaling_mode:
+// KITTENS_BLOCK_SCALING_2D -> 2D scale [N/128, K/128]  (1d2d)
+// KITTENS_BLOCK_SCALING_1D -> 1D scale [K/128, N]      (1d1d)
+void kittens_blockwise_fp8_gemm(
+    const void *A, const void *B, void *C,
+    const void *scale_A, const void *scale_B,
+    int M, int N, int K,
+    bool transa, bool transb,
+    int a_dtype, int b_dtype,
+    int a_scaling_mode, int b_scaling_mode,
+    int out_dtype,
+    const void *bias, int bias_dtype,
+    const void *gelu_aux, int gelu_aux_dtype,
+    const void *c_in, float beta,
+    hipStream_t stream);
