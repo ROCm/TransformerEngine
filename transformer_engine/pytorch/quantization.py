@@ -43,6 +43,7 @@ __all__ = [
     "is_fp8_available",
     "is_mxfp8_available",
     "is_fp8_block_scaling_available",
+    "is_fp8_block_scaling_quantization_available",
     "is_nvfp4_available",
     "get_default_recipe",
     "get_align_size_for_quantization",
@@ -103,10 +104,7 @@ def check_nvfp4_support() -> Tuple[bool, str]:
 def check_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
     if IS_HIP_EXTENSION:
-        gpu_arch = get_device_compute_capability()
-        if gpu_arch >= (9, 4):
-            return True, ""
-        return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
+        return False, "FP8 block scaled gemm not yet supported for ROCm"
     if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
         return True, ""
     return (
@@ -114,6 +112,14 @@ def check_fp8_block_scaling_support() -> Tuple[bool, str]:
         "FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9.",
     )
 
+@functools.lru_cache(maxsize=None)
+def check_fp8_block_scaling_quantization_support() -> Tuple[bool, str]:
+    """Return if fp8 block scaling quantization (cast only, no GEMM) is available"""
+    if IS_HIP_EXTENSION:
+        if get_device_compute_capability() >= (9, 4):
+            return True, ""
+        return False, "Device arch gfx94x or newer is required for FP8 block scaling quantization."
+    return check_fp8_block_scaling_support()
 
 @functools.lru_cache(maxsize=None)
 def check_mxfp4_support() -> Tuple[bool, str]:
@@ -262,6 +268,22 @@ def is_fp8_block_scaling_available(return_reason: bool = False) -> Union[bool, T
         return check_fp8_block_scaling_support()
     return check_fp8_block_scaling_support()[0]
 
+def is_fp8_block_scaling_quantization_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
+    """
+    Determine if support is available for FP8 block scaling quantization (cast only, no GEMM).
+
+    Parameters
+    ----------
+    return_reason : bool, optional
+        If ``False`` (default), return only a boolean indicating availability.
+        If ``True``, return a tuple ``(is_available, reason)`` where ``reason`` provides
+        a human-readable explanation when required support is not available. The reason
+        will be an empty string if support for FP8 block scaling quantization is available.
+
+    """
+    if return_reason:
+        return check_fp8_block_scaling_quantization_support()
+    return check_fp8_block_scaling_quantization_support()[0]
 
 def is_nvfp4_available(return_reason: bool = False) -> Union[bool, Tuple[bool, str]]:
     """
