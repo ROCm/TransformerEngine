@@ -30,7 +30,7 @@ bool is_ck_backend_supported(
   size_t head_dim_v,
   int64_t window_size_left,
   int64_t window_size_right,
-  bool is_training, bool cuda_graph, bool deterministic);
+  bool is_training, bool deterministic);
 }  // namespace fused_attn_rocm
 
 void fused_attn_ck_fwd(

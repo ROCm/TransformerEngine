@@ -18,38 +18,6 @@
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
-#ifdef USE_FUSED_ATTN_CK
-// Returns false when a CK backward for this config would dispatch to the CK v2
-// launcher (fmha_bwd / prepare_workspace_async), which schedules self-deleting
-// hipLaunchHostFunc nodes that double-free on graph replay. Only the v3 asm bwd
-// path is HIP-graph-replay-safe. Mirrors AITER's fmha_v3_bwd gate (mha_bwd.cu).
-static bool is_ck_bwd_graph_capture_safe(
-  NVTE_Bias_Type bias_type,
-  float dropout,
-  size_t max_seqlen_q,
-  bool deterministic) {
-  // The CK v2 launcher is reached whenever the v3 asm bwd path is not taken.
-  // v3 requires gfx942/gfx950, no dropout, no bias, non-deterministic, and (per
-  // TE's use_asm_v3 rule in ck_fused_attn_bwd.cpp) max_seqlen_q >= 16.
-  // NVTE_CK_USES_BWD_V3 can force the v2 path off entirely.
-  bool uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 1);
-  const std::string& arch = cuda::sm_arch_name();
-  bool is_v3_arch = arch.find("gfx942") != std::string::npos ||
-                    arch.find("gfx950") != std::string::npos;
-  if (
-    uses_bwd_v3 &&
-    is_v3_arch &&
-    !deterministic &&
-    dropout == 0.f &&
-    bias_type == NVTE_Bias_Type::NVTE_NO_BIAS &&
-    max_seqlen_q >= 16
-  ) {
-    std::cout << "attn_bwd(ck): v3 asm bwd path is HIP-graph-replay-safe." << std::endl;
-  }
-  return true;
-}
-#endif // USE_FUSED_ATTN_CK
-
 // check the fused attn config to see whether it's ck backend supported
 // single filtering followed by joint filtering
 bool is_ck_backend_supported(
@@ -66,7 +34,7 @@ bool is_ck_backend_supported(
   size_t head_dim_v,
   int64_t window_size_left,
   int64_t window_size_right,
-  bool is_training, bool cuda_graph, bool deterministic) {
+  bool is_training, bool deterministic) {
 
 #ifdef USE_FUSED_ATTN_CK
 
@@ -179,18 +147,6 @@ bool is_ck_backend_supported(
     return false;
   }
 
-  // Under HIP-graph capture, CK backward must take the graph-replay-safe v3 asm
-  // path; a config that would fall back to the CK v2 launcher is not graph-safe.
-  // Reject such graph-captured training configs so selection falls through to a
-  // graph-safe backend (the v2 host-pack hazard is backward-only, so inference is
-  // unaffected). Determinism also forces the v2 path, so it is part of the gate.
-  if(is_training && cuda_graph &&
-     !is_ck_bwd_graph_capture_safe(bias_type, dropout, max_seqlen_q, deterministic)){
-    if(nvte_log_ck_config){
-      std::cout<<"CK backward would use the v2 launcher, which is not HIP-graph-replay-safe"<<std::endl;
-    }
-    return false;
-  }
   return true;
 #else
   return false;
