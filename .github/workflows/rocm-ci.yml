@@ -118,7 +118,7 @@ jobs:
     name: sGPU Tests (${{ matrix.arch_label }})
     needs: [select_image, build]
     timeout-minutes: 270
-    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || 'linux-te-mi35x-4' }}
+    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-4' }}
     strategy:
       fail-fast: false
       matrix:
@@ -150,7 +150,7 @@ jobs:
 
       - name: Pull Docker Image
         run: |
-          docker pull ${{ matrix.arch_label == 'mi30x' && needs.select_image.outputs.image-tag-mi30x || needs.select_image.outputs.image-tag-mi35x }}
+          docker pull ${{ matrix.arch_label == 'mi30x' && needs.select_image.outputs.image-tag-mi30x || matrix.arch_label == 'mi35x' && needs.select_image.outputs.image-tag-mi35x }}
 
       - &run_container
         name: Run Container
@@ -169,7 +169,7 @@ jobs:
             --group-add $(getent group video | cut -d: -f3) \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            ${{ matrix.arch_label == 'mi30x' && needs.select_image.outputs.image-tag-mi30x || needs.select_image.outputs.image-tag-mi35x }}
+            ${{ matrix.arch_label == 'mi30x' && needs.select_image.outputs.image-tag-mi30x || matrix.arch_label == 'mi35x' && needs.select_image.outputs.image-tag-mi35x }}
 
       - name: Install packages
         run: |
@@ -269,7 +269,7 @@ jobs:
     name: mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})
     needs: [select_image, build]
     timeout-minutes: 210
-    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || 'linux-te-mi35x-8' }}
+    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
     strategy:
       fail-fast: false
       matrix:
@@ -296,7 +296,7 @@ jobs:
 
       - name: Pull Docker Image
         run: |
-          docker pull ${{ matrix.arch_label == 'mi30x' && needs.select_image.outputs.image-tag-mi30x || needs.select_image.outputs.image-tag-mi35x }}
+          docker pull ${{ matrix.arch_label == 'mi30x' && needs.select_image.outputs.image-tag-mi30x || matrix.arch_label == 'mi35x' && needs.select_image.outputs.image-tag-mi35x }}
 
       - *run_container
 

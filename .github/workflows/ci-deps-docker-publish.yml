@@ -2,16 +2,7 @@
 #
 # See LICENSE for license information.
 #
-# Build .github/scripts/Dockerfile.ci.deps and push to Harbor.
-#
-# Tag convention (when image_tag is left empty):
-#   rocm-<rocm_version>-ubuntu24.04-py312-<gpu_arch>
-# e.g. rocm-7.12.0-ubuntu24.04-py312-gfx942
-#
-# Local builds:
-#   docker build -f .github/scripts/Dockerfile.ci.deps \
-#     --build-arg GPU_ARCH=gfx942 \
-#     -t registry-sc-harbor.amd.com/framework/te-ci:rocm-7.12.0-ubuntu24.04-py312-gfx942 .
+# Build .github/scripts/Dockerfile.ci.deps and push to the container registry.
 #
 # Required repository secrets:
 #   ARTIFACTORY_DOCKER_USERNAME / ARTIFACTORY_DOCKER_PASSWORD — registry basic auth
@@ -26,22 +17,16 @@ on:
   workflow_dispatch:
     inputs:
       gpu_arch:
-        description: "GPU architecture for the CI deps image (Dockerfile GPU_ARCH build-arg)"
+        description: "GPU architecture"
         required: true
         type: choice
         options:
           - gfx942
           - gfx950
-      rocm_version:
-        description: "ROCm version string (must match Dockerfile wheel pins when changed)"
-        required: false
-        type: string
-        default: "7.12.0"
       image_tag:
-        description: "Tag to push; leave empty for rocm-<ver>-ubuntu24.04-py312-<gpu_arch>"
-        required: false
+        description: "Tag to push to the registry"
+        required: true
         type: string
-        default: ""
 
 jobs:
   build-and-push:
@@ -59,9 +44,8 @@ jobs:
         env:
           REGISTRY: ${{ vars.ARTIFACTORY_DOCKER_REGISTRY }}
           REPOSITORY: ${{ vars.ARTIFACTORY_CI_DEPS_REPOSITORY }}
-          IMAGE_TAG_INPUT: ${{ inputs.image_tag }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
           GPU_ARCH: ${{ inputs.gpu_arch }}
-          ROCM_VERSION: ${{ inputs.rocm_version }}
         run: |
           set -euo pipefail
           if [ -z "${REGISTRY}" ] || [ -z "${REPOSITORY}" ]; then
@@ -72,12 +56,7 @@ jobs:
             gfx942|gfx950) ;;
             *) echo "gpu_arch must be gfx942 or gfx950" >&2; exit 1 ;;
           esac
-          ROCM_VER="${ROCM_VERSION:-7.12.0}"
-          if [ -n "${IMAGE_TAG_INPUT}" ]; then
-            echo "IMAGE_TAG=${IMAGE_TAG_INPUT}" >> "${GITHUB_ENV}"
-          else
-            echo "IMAGE_TAG=rocm-${ROCM_VER}-ubuntu24.04-py312-${GPU_ARCH}" >> "${GITHUB_ENV}"
-          fi
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "${GITHUB_ENV}"
 
       - name: Log in to container registry
         uses: docker/login-action@v3
@@ -91,15 +70,12 @@ jobs:
           REGISTRY: ${{ vars.ARTIFACTORY_DOCKER_REGISTRY }}
           REPOSITORY: ${{ vars.ARTIFACTORY_CI_DEPS_REPOSITORY }}
           GPU_ARCH: ${{ inputs.gpu_arch }}
-          ROCM_VERSION_INPUT: ${{ inputs.rocm_version }}
         run: |
           set -euo pipefail
           FULL_IMAGE="${REGISTRY}/${REPOSITORY}"
           : "${IMAGE_TAG:?IMAGE_TAG must be set by the validate step}"
-          ROCM_VER="${ROCM_VERSION_INPUT:-7.12.0}"
           docker build \
             -f .github/scripts/Dockerfile.ci.deps \
-            --build-arg "ROCM_VERSION=${ROCM_VER}" \
             --build-arg "GPU_ARCH=${GPU_ARCH}" \
             -t "${FULL_IMAGE}:${IMAGE_TAG}" \
             .

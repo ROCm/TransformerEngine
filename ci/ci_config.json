@@ -1,8 +1,8 @@
 {
   "docker_images": {
     "default": {
-      "mi30x": "registry-sc-harbor.amd.com/framework/te-ci:rocm-7.12.0-ubuntu24.04-py312-gfx942_test",
-      "mi35x": "registry-sc-harbor.amd.com/framework/te-ci:rocm-7.12.0-ubuntu24.04-py312-gfx950_test"
+      "mi30x": "registry-sc-harbor.amd.com/framework/te-ci:therock_7.12.0_ubuntu24.04_py3.12_pytorch_2.10.0_triton_3.6.0_jax_0.8.2_fa_2.8.1_gfx942",
+      "mi35x": "registry-sc-harbor.amd.com/framework/te-ci:therock_7.12.0_ubuntu24.04_py3.12_pytorch_2.10.0_triton_3.6.0_jax_0.8.2_fa_2.8.1_gfx950"
     },
     "release_v1.13": "compute-artifactory.amd.com:5000/rocm-plus-docker/framework/private/te-ci:rocm-6.4_0_ubuntu22_py310_torch25_jax0435qa_fa273",
     "release_v1.14": "compute-artifactory.amd.com:5000/rocm-plus-docker/framework/private/te-ci:rocm-6.4_0_ubuntu22_py310_torch25_jax0435qa_fa273"

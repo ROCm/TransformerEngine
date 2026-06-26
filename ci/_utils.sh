@@ -10,6 +10,18 @@ test $? -ne 0 && REALPATH=echo
 export TE_PATH
 TEST_DIR=${TE_PATH}tests/
 
+# TheRock ROCm: amdsmi lives under $ROCM_PATH/share/amd_smi (not pip-installed).
+# PyTorch needs it on PYTHONPATH before import for lazy GPU probing;
+with_amd_smi_pythonpath() {
+    _rocm_path="${ROCM_PATH:-${ROCM_HOME:-/opt/rocm}}"
+    _amd_smi="$_rocm_path/share/amd_smi"
+    if [ -d "$_amd_smi" ]; then
+        PYTHONPATH="$_amd_smi${PYTHONPATH:+:$PYTHONPATH}" "$@"
+    else
+        "$@"
+    fi
+}
+
 : ${TEST_LEVEL:=99} #Run all tests by default
 TEST_JOBS_MODE=""
 

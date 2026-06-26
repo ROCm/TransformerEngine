@@ -2,11 +2,7 @@
 #
 # See LICENSE for license information.
 #
-# TE CI deps image: Ubuntu 24.04 + TheRock ROCm tarball
-#
-#   docker build -f .github/scripts/Dockerfile.ci.deps \
-#     --build-arg GPU_ARCH=gfx942 \
-#     -t te-ci-deps:rocm-7.12.0-ubuntu24.04-py312-gfx942 .
+# TE CI deps image
 #
 # ROCm installer: https://raw.githubusercontent.com/ROCm/TheRock/main/dockerfiles/install_rocm_tarball.sh
 
@@ -15,7 +11,7 @@ FROM ubuntu:24.04
 ARG DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
 
-ARG ROCM_VERSION=7.12.0
+ARG ROCK_RELEASE_VERSION=7.12.0
 ARG GPU_ARCH=gfx942
 ARG PYTHON_VERSION=3.12
 ARG PYTHON_ABI=cp312
@@ -47,7 +43,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN AMD_GPU_FAMILY=$(cat /etc/amd_gpu_family) \
     && curl -fsSL -o /tmp/install_rocm_tarball.sh "${INSTALL_ROCM_TARBALL_SH_URL}" \
     && chmod +x /tmp/install_rocm_tarball.sh \
-    && /tmp/install_rocm_tarball.sh "${ROCM_VERSION}" "${AMD_GPU_FAMILY}" stable \
+    && /tmp/install_rocm_tarball.sh "${ROCK_RELEASE_VERSION}" "${AMD_GPU_FAMILY}" stable \
     && rm -f /tmp/install_rocm_tarball.sh
 
 # Isolated Python env for pip packages
@@ -67,13 +63,13 @@ RUN python -m pip install --upgrade pip setuptools wheel \
 RUN AMD_GPU_FAMILY=$(cat /etc/amd_gpu_family) \
     && W="https://repo.amd.com/rocm/whl/${AMD_GPU_FAMILY}" \
     && LIBS_PKG="rocm-sdk-libraries-$(echo "${AMD_GPU_FAMILY}" | tr '[:upper:]' '[:lower:]')" \
-    && ROCM_WHEEL_TAG="rocm${ROCM_VERSION}" \
+    && ROCM_WHEEL_TAG="rocm${ROCK_RELEASE_VERSION}" \
     && pip install --no-cache-dir \
         --extra-index-url "${W}" \
-        "rocm-sdk-core==${ROCM_VERSION}" \
-        "rocm-sdk-devel==${ROCM_VERSION}" \
-        "${LIBS_PKG}==${ROCM_VERSION}" \
-        "${W}/rocm-${ROCM_VERSION}.tar.gz" \
+        "rocm-sdk-core==${ROCK_RELEASE_VERSION}" \
+        "rocm-sdk-devel==${ROCK_RELEASE_VERSION}" \
+        "${LIBS_PKG}==${ROCK_RELEASE_VERSION}" \
+        "${W}/rocm-${ROCK_RELEASE_VERSION}.tar.gz" \
         "${W}/torch-${TORCH_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
         "${W}/torchvision-${TORCHVISION_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
         "${W}/torchaudio-${TORCHAUDIO_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \

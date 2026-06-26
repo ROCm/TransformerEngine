@@ -873,7 +873,7 @@ class TestBasicOps:
             pytest.skip(
                 "hipBLASLt does not provide suitable algorithms for this config"
             )
-        
+
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         quantization_needed = any(

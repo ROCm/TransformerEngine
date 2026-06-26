@@ -83,9 +83,6 @@ columns = [
 output_csv = "times.csv"
 # Output directory name
 output_dir_name = "profiler_outputs"
-# rocprofv3 output prefix and kernel stats filename (see rocprofv3 -o/-d)
-rocprof_output_prefix = "results"
-rocprof_kernel_stats_csv = f"{rocprof_output_prefix}_kernel_stats.csv"
 # Current working directory
 cwd = os.getcwd()
 

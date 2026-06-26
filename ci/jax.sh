@@ -61,7 +61,7 @@ run_test_config() {
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 test_fused_attn.py -k "TestFusedAttnWithDeterminism"
     NVTE_CK_USES_FWD_V3=0 NVTE_CK_USES_BWD_V3=0 run_default_fa_lbl "v2" 3 test_fused_attn.py # Using FAv2 for forward and backward pass
     run_default_fa 1 test_layer.py # it effectively always uses unfused attention
-    run_default_fa 1 test_sanity_import.py
+    with_amd_smi_pythonpath run_default_fa 1 test_sanity_import.py
     run_default_fa 1 test_softmax.py
 }
 
@@ -90,7 +90,7 @@ run_test_config_mgpu() {
     run_default_fa 2 test_distributed_layernorm_mlp.py
     run_default_fa 3 test_distributed_softmax.py
 
-    run_default_fa 3 test_sanity_import.py
+    with_amd_smi_pythonpath run_default_fa 3 test_sanity_import.py
 }
 
 # Single config mode, run it synchronously and return result

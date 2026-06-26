@@ -25,7 +25,9 @@ For `dev` and other branches using the `default` entry, images are selected per 
 
 | Runner label | GPU arch | Image tag |
 |--------------|----------|-----------|
-| `linux-te-mi30x-*` | gfx942 (MI300X) | `rocm-7.12.0-ubuntu24.04-py312-gfx942_test` |
-| `linux-te-mi35x-*` | gfx950 (MI350X) | `rocm-7.12.0-ubuntu24.04-py312-gfx950_test` |
+| `linux-te-mi30x-*` | gfx942 (MI300X) | `therock_7.12.0_ubuntu24.04_py3.12_pytorch_2.10.0_triton_3.6.0_jax_0.8.2_fa_2.8.1_gfx942` |
+| `linux-te-mi35x-*` | gfx950 (MI350X) | `therock_7.12.0_ubuntu24.04_py3.12_pytorch_2.10.0_triton_3.6.0_jax_0.8.2_fa_2.8.1_gfx950` |
+
+Full image references: `registry-sc-harbor.amd.com/framework/te-ci:<tag>` (see [`ci_config.json`](ci_config.json)).
 
 The default image is built from [`.github/scripts/Dockerfile.ci.deps`](../.github/scripts/Dockerfile.ci.deps). It pins [ROCm/aiter](https://github.com/ROCm/aiter) at commit [`77455e3ecf4f0d28756afc452e914940c45b944b`](https://github.com/ROCm/aiter/commit/77455e3ecf4f0d28756afc452e914940c45b944b). That revision was validated in CI for **MXFP4 FP4 GEMM** kernel coverage.

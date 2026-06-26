@@ -828,6 +828,15 @@ def test_dcp_output_parity(recipe_name, async_save):
 
         if not async_save:
             dcp.save(save_state, checkpoint_id=checkpoint_dir)
+        elif te.torch_version() >= (2, 9, 0):
+            from torch.distributed.checkpoint.staging import BlockingAsyncStager
+
+            future = dcp.async_save(
+                save_state,
+                checkpoint_id=checkpoint_dir,
+                async_stager=BlockingAsyncStager(), 
+            )
+            future.result()  # Block on async save completion
         else:
             future = dcp.async_save(save_state, checkpoint_id=checkpoint_dir)
             future.result()
