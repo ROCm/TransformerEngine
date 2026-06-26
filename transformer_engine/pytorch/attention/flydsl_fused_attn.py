@@ -10,10 +10,8 @@ Backward pass uses PyTorch SDPA recompute (FlyDSL backward kernels are not yet a
 Usage: set NVTE_FUSED_ATTN_FLYDSL=1 to enable this backend.
 """
 
-import importlib.util
 import math
 import os
-import sys
 import logging
 
 import torch
@@ -34,38 +32,19 @@ _flydsl_flash_attn_func = None
 
 
 def _try_import_flydsl():
-    """Lazy-import FlyDSL flydsl_flash_attn_func."""
+    """Lazy-import FlyDSL flash attention from TE-bundled kernels."""
     global _flydsl_available, _flydsl_flash_attn_func
 
     if _flydsl_available is not None:
         return _flydsl_available
 
-    flydsl_repo = os.environ.get(
-        "FLYDSL_PATH",
-        os.path.abspath(os.path.join(os.path.dirname(__file__), "../../../../FlyDSL")),
-    )
-    interface_file = os.path.join(flydsl_repo, "kernels", "flash_attn_interface.py")
-    print(f"[FlyDSL] Looking for interface at: {interface_file} (exists={os.path.isfile(interface_file)})")
-
-    if not os.path.isfile(interface_file):
-        _flydsl_available = False
-        print("[FlyDSL] Interface file not found")
-        return _flydsl_available
-
-    # Add FlyDSL repo to sys.path so internal imports (kernels.*) work
-    if flydsl_repo not in sys.path:
-        sys.path.insert(0, flydsl_repo)
-
     try:
-        spec = importlib.util.spec_from_file_location(
-            "flydsl_flash_attn_interface", interface_file,
-            submodule_search_locations=[os.path.join(flydsl_repo, "kernels")],
+        from transformer_engine.pytorch.attention.flydsl_kernels.flash_attn_interface import (
+            flydsl_flash_attn_func,
         )
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
-        _flydsl_flash_attn_func = mod.flydsl_flash_attn_func
+        _flydsl_flash_attn_func = flydsl_flash_attn_func
         _flydsl_available = True
-        print(f"[FlyDSL] Successfully loaded from {interface_file}")
+        print("[FlyDSL] Successfully loaded from TE-bundled flydsl_kernels")
     except Exception as e:
         _flydsl_available = False
         print(f"[FlyDSL] Failed to load: {e}")
