@@ -6,6 +6,8 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#ifndef USE_ROCM
+
 #include "transformer_engine/newton_schulz.h"
 
 #include "../extensions.h"
@@ -40,3 +42,5 @@ void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x, int64_t 
 }
 
 }  // namespace transformer_engine::pytorch
+
+#endif  // USE_ROCM
