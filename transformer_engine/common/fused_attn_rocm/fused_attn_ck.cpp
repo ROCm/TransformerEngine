@@ -33,8 +33,7 @@ bool is_ck_backend_supported(
   size_t head_dim_qk,
   size_t head_dim_v,
   int64_t window_size_left,
-  int64_t window_size_right,
-  bool is_training, bool deterministic) {
+  int64_t window_size_right) {
 
 #ifdef USE_FUSED_ATTN_CK
 
@@ -146,7 +145,6 @@ bool is_ck_backend_supported(
     }
     return false;
   }
-
   return true;
 #else
   return false;
