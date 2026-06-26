@@ -1985,7 +1985,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
 #ifdef USE_HIPKITTENS_GEMM
 
-  bool use_hipkittens = false;
+  bool use_hipkittens = false, hipkittens_gemm_complete = false;
   if (is_mxfp8) {
     bool is_gfx950 = (cuda::sm_arch() == 95);
     bool force_hipblaslt = false;
@@ -2001,18 +2001,19 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
   if (use_hipkittens) {
     auto param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
 
-    kittens_mxfp8_gemm(param.A, param.B, outputD->data.dptr,
-                       param.A_scale_inv, param.B_scale_inv,
-                       m, n, k, is_transa, is_transb,
-                       static_cast<int>(param.Atype),
-                       static_cast<int>(param.Btype),
-                       inputBias->data.dptr,
-                       static_cast<int>(inputBias->data.dtype),
-                       outputPreGelu->data.dptr,
-                       static_cast<int>(outputD->data.dtype),
-                       static_cast<int>(outputPreGelu->data.dtype),
-                       workspace, workspaceSize, s);
-  } else {
+    hipkittens_gemm_complete = kittens_mxfp8_gemm(param.A, param.B, outputD->data.dptr,
+                                                  param.A_scale_inv, param.B_scale_inv,
+                                                  m, n, k, is_transa, is_transb,
+                                                  static_cast<int>(param.Atype),
+                                                  static_cast<int>(param.Btype),
+                                                  inputBias->data.dptr,
+                                                  static_cast<int>(inputBias->data.dtype),
+                                                  outputPreGelu->data.dptr,
+                                                  static_cast<int>(outputD->data.dtype),
+                                                  static_cast<int>(outputPreGelu->data.dtype),
+                                                  workspace, workspaceSize, s);
+  }
+  if (!use_hipkittens || !hipkittens_gemm_complete) {
 #endif
     // FIXME(https://amd-hub.atlassian.net/browse/ROCM-26110): Remove this workaround once hipBLASLt supports NN/NT
     // layouts for MXFP8 on gfx1250.
