@@ -1,10 +1,10 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
-
-#ifndef USE_ROCM
 
 #include "transformer_engine/newton_schulz.h"
 
@@ -40,5 +40,3 @@ void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x, int64_t 
 }
 
 }  // namespace transformer_engine::pytorch
-
-#endif  // USE_ROCM
