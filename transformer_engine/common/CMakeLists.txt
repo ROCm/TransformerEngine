@@ -9,6 +9,7 @@ cmake_minimum_required(VERSION 3.21)
 option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
+option(USE_HIPKITTENS_GEMM "Use HipKittens MXFP8 GEMM kernels" ON)
 set(USE_CUDA OFF)
 
 if (USE_ROCM)
@@ -344,6 +345,7 @@ if(USE_ROCM)
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_nt.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tn.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp16_tt.cpp
+      gemm/ck_grouped_gemm/ck_mx_grouped_gemm.cpp
       gemm/rocm_gemm.cu)
 endif()
 
@@ -441,7 +443,7 @@ set_property(
   PROPERTY
   COMPILE_OPTIONS "-g0;-dopt=on")
 else()
-  set(CK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/aiter/3rdparty/composable_kernel)
+  set(CK_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../3rdparty/composable_kernel)
   target_include_directories(transformer_engine PRIVATE ${CK_ROOT}/include)
 endif() #USE_CUDA
 
@@ -578,6 +580,10 @@ else() # USE_ROCM
     add_subdirectory(ck_fused_attn ${CMAKE_CURRENT_BINARY_DIR}/ck_fused_attn)
   endif()
 
+  if(USE_HIPKITTENS_GEMM)
+    add_subdirectory(gemm/kittens ${CMAKE_CURRENT_BINARY_DIR}/kittens)
+  endif()
+
   find_package(hip)
   list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64)
   find_package(hiprtc)
@@ -591,6 +597,10 @@ else() # USE_ROCM
   if(USE_FUSED_ATTN_CK)
     target_compile_definitions(transformer_engine PUBLIC USE_FUSED_ATTN_CK)
     list(APPEND transformer_engine_LINKER_LIBS ck_fused_attn)
+  endif()
+  if(USE_HIPKITTENS_GEMM)
+    target_compile_definitions(transformer_engine PUBLIC USE_HIPKITTENS_GEMM)
+    list(APPEND transformer_engine_LINKER_LIBS kittens_gemm)
   endif()
   target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
 endif()

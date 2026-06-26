@@ -103,13 +103,32 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
 #pragma unroll
       for (int j = 0; j < ELEMS_PER_THREAD; j++) {
+#if defined(__gfx1250__)
+        // FIXME: Force E4M3 OCP interpretation because HIP headers do not declare
+        // which type gfx1250 supports. This can be removed once HIP headers are updated.
+        const float elt = std::is_same_v<IType, fp8e4m3>
+                              ? static_cast<float>(*reinterpret_cast<__hip_fp8_e4m3 *>(
+                                    &in.data.elt[j]))
+                              : static_cast<float>(in.data.elt[j]);
+        out.data.elt[j] = static_cast<OType>(block_scale * elt);
+#else
         out.data.elt[j] = static_cast<OType>(block_scale * static_cast<float>(in.data.elt[j]));
+#endif
       }
       out.store_to(&out_sh[shmem_offset_y][shmem_offset_x]);
     } else {
 #pragma unroll
       for (int i = 0; i < BUFFER_DIM_Y; i++) {
+#if defined(__gfx1250__)
+        // FIXME: Force E4M3 OCP interpretation because HIP headers do not declare
+        // which type gfx1250 supports. This can be removed once HIP headers are updated.
+        const float elt = std::is_same_v<IType, fp8e4m3>
+          ? static_cast<float>(*reinterpret_cast<__hip_fp8_e4m3 *>(
+            &in_sh[i][tid_colwise_X]))
+          : static_cast<float>(in_sh[i][tid_colwise_X]);
+#else
         const float elt = static_cast<float>(in_sh[i][tid_colwise_X]);
+#endif
         out_sh[i][tid_colwise_X] = static_cast<OType>(block_scale * elt);
       }
     }

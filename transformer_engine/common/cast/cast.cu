@@ -107,6 +107,19 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
   NVTE_API_CALL(nvte_multi_tensor_quantize);
   using namespace transformer_engine;
 
+#ifdef __HIP_PLATFORM_AMD__
+  if (num_tensors > 0 &&
+      convertNVTETensorCheck(outputs[0])->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    std::vector<Tensor *> input_list, output_list;
+    for (size_t i = 0; i < num_tensors; i++) {
+      input_list.push_back(convertNVTETensorCheck(inputs[i]));
+      output_list.push_back(convertNVTETensorCheck(outputs[i]));
+    }
+    dispatch::multi_quantize_mxfp8(input_list, output_list, stream);
+    return;
+  }
+#endif
+
   constexpr bool IS_ACT = false;
 
   const size_t num_streams = nvte_get_num_compute_streams();

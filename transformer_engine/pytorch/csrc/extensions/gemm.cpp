@@ -282,13 +282,10 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
   config.set_use_split_accumulator(use_split_accumulator);
   config.set_sm_count(num_math_sms);
 
-#ifndef USE_ROCM
   // Keep the swizzled scaling factor tensors alive during the GEMM.
   std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
-#endif
   auto main_stream = at::cuda::getCurrentCUDAStream();
   if (A_tensor.numel() != 0 && B_tensor.numel() != 0) {
-#ifndef USE_ROCM
     // Optionally swizzle the scaling factors
     auto [A_row_scales, A_col_scales] = swizzle_scales_for_gemm(A_tensor, transa, !transa);
     auto [B_row_scales, B_col_scales] = swizzle_scales_for_gemm(B_tensor, !transb, transb);
@@ -297,6 +294,7 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
     swizzled_scale_inverses_list.emplace_back(std::move(B_row_scales));
     swizzled_scale_inverses_list.emplace_back(std::move(B_col_scales));
 
+#ifndef USE_ROCM
     // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer
     // as it is not natively supported by cublasLt
     if (fp8_block_scaling && transformer_engine::cuda::sm_arch() >= 100) {
@@ -570,7 +568,6 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
     te_pre_gelu_out_wrappers.emplace_back(std::move(te_pre_gelu_out));
   }
 
-#ifndef USE_ROCM
   // Keep the swizzled scaling factor tensors alive during the GEMM.
   std::vector<std::optional<at::Tensor>> swizzled_scale_inverses_list;
 
@@ -580,6 +577,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   swizzled_scale_inverses_list.emplace_back(
       multi_tensor_swizzle_scales_for_gemm(te_B_wrappers, !transb, transb));
 
+#ifndef USE_ROCM
   // Emulate the FP8 block scaling recipe with MXFP8 on Blackwell and newer
   // as it is not natively supported by cublasLt
   if (transformer_engine::cuda::sm_arch() >= 100) {

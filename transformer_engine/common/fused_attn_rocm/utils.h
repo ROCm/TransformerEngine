@@ -14,6 +14,7 @@
 
 #include "transformer_engine/fused_attn.h"
 #include "transformer_engine/transformer_engine.h"
+#include "../common.h"
 
 
 namespace transformer_engine {
@@ -27,6 +28,17 @@ enum NVTE_QKV_Matrix {
   NVTE_V_Matrix            = 2,  // values
   NVTE_O_Matrix            = 3,  // final output
 };
+
+// mask-class predicates shared across backend support checks and dispatch glue.
+// Kept here so a new padding/causal mask variant only needs updating in one place.
+bool is_padding_mask(NVTE_Mask_Type mask_type);
+bool is_causal_mask(NVTE_Mask_Type mask_type);
+
+// Finalize a fused-attn workspace tensor from a computed size. In the sizing pass
+// (workspace->data.dptr == nullptr) the shape/dtype are set so the framework can
+// allocate; a size of 0 is reported as a 1-byte placeholder. Mirrors the boilerplate
+// previously duplicated across every backend fwd/bwd entry point.
+void set_workspace_size(Tensor *workspace, size_t workspace_size);
 
 void generateMatrixStrides(
             uint64_t b, uint64_t h,

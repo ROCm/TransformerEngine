@@ -101,6 +101,35 @@ except RuntimeError as e:
         raise
 
 
+@cache
+def _use_hipkittens() -> bool:
+    """Check if HipKittens MXFP8 backend is active."""
+    if not is_hip_extension():
+        return False
+    if get_device_compute_capability(0) != 95:
+        return False
+    return os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "0") != "1"
+
+
+def _hipkittens_workspace_bytes(m: int, n: int, k: int, layout: str) -> int:
+    """Compute workspace bytes needed for HipKittens MXFP8 GEMM."""
+    def _align(x: int) -> int:
+        return (x + 255) & ~255
+
+    transa = layout[0] == "T"
+    transb = layout[1] == "T"
+    k_iters = k // 128
+    scale_k = k // 32
+    sa_pk = _align(k_iters * m * 4)
+    sb_pk = k_iters * n * 4
+    needed = _align(sa_pk) + sb_pk
+    if not transa:
+        needed += _align(m * k) + _align(m * scale_k)
+    if transb:
+        needed += _align(n * k) + _align(n * scale_k) + _align(sb_pk)
+    return needed
+
+
 def get_cublas_workspace_size_bytes() -> None:
     """Return workspace size needed for current architecture"""
     if is_hip_extension():
@@ -622,11 +651,24 @@ class GemmPrimitive(BasePrimitive):
                 f" beta.dtype={beta.dtype}"
             )
 
-        # Declare cuBLAS workspace
-        workspace_size = get_cublas_workspace_size_bytes()
-        # NVFP4 swizzling happen in via nvte kernel instead of JAX transposes
-        if scaling_mode.is_nvfp4_scaling:
-            workspace_size += lhs_scale_inv.size + rhs_scale_inv.size
+        # HipKittens MXFP8 NN/NT kernels need workspace for transposed data and scales
+        if scaling_mode.is_mxfp8_scaling and _use_hipkittens():
+            m = reduce(operator.mul, lhs_non_contracting_shape)
+            n = reduce(operator.mul, rhs_non_contracting_shape)
+            k = lhs_contracting_size
+            layout = ("T" if lhs_is_transposed else "N") + ("T" if rhs_is_transposed else "N")
+            workspace_size = _hipkittens_workspace_bytes(m, n, k, layout)
+        else:
+            # Declare cuBLAS workspace
+            workspace_size = get_cublas_workspace_size_bytes()
+            # NVFP4 swizzling happen in via nvte kernel instead of JAX transposes
+            # On gfx1250, MXFP8 scale pre-swizzling also needs workspace space
+            if scaling_mode.is_nvfp4_scaling or (
+                scaling_mode.is_mxfp8_scaling
+                and is_hip_extension()
+                and get_device_compute_capability(0) == 125
+            ):
+                workspace_size += lhs_scale_inv.size + rhs_scale_inv.size
         if not collective_op.is_none:
             workspace_size *= get_cgemm_num_max_streams()
         # cuBLAS workspace ptr must be 256 bytes aligned but JAX buffers are not
