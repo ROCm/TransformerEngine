@@ -1,3 +1,5 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -30,6 +32,7 @@ Environment Variables:
         Default is "0".
 """
 
+import dataclasses
 import hashlib
 import os
 import tempfile
@@ -410,26 +413,41 @@ def _compile_triton_hip(
         fp8_dtypes = ("fp8e4nv", "fp8e5")
     else:
         fp8_dtypes = ("fp8e5",)
-    options = cb_hip.HIPOptions(
+    hip_option_kwargs = dict(
         num_warps=num_warps,
         num_stages=num_stages,
         num_ctas=num_ctas,
-        cluster_dims=(1, 1, 1),
         debug=False,
         enable_fp_fusion=enable_fp_fusion,
         arch=arch,
         supported_fp8_dtypes=fp8_dtypes,
     )
 
+    # Autotune configs may carry AMD compile hints (matrix_instr_nonkdim,
+    # waves_per_eu, kpack, ...) mixed in with real kernel constexprs. Route any
+    # constant that names a HIPOptions field into the compile options; the rest
+    # stay as kernel constexprs. (cluster_dims is gated the same way — it was
+    # dropped from HIPOptions in Triton 3.7.1.)
+    hip_option_fields = {f.name for f in dataclasses.fields(cb_hip.HIPOptions)}
+    kernel_constants = {}
+    for name, value in constants.items():
+        if name in hip_option_fields:
+            hip_option_kwargs[name] = value
+        else:
+            kernel_constants[name] = value
+    if "cluster_dims" in hip_option_fields:
+        hip_option_kwargs.setdefault("cluster_dims", (1, 1, 1))
+    options = cb_hip.HIPOptions(**hip_option_kwargs)
+
     # Mark constants as constexpr in signature (mirrors the NVIDIA path).
     signature_with_constexpr = dict(signature)
-    for const_name in constants.keys():
+    for const_name in kernel_constants:
         if const_name in signature_with_constexpr:
             signature_with_constexpr[const_name] = "constexpr"
 
     src = tc.ASTSource(
         fn=kernel_fn,
-        constexprs=constants,
+        constexprs=kernel_constants,
         signature=signature_with_constexpr,
     )
     compiled = tc.compile(

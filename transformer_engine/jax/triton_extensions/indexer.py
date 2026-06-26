@@ -909,17 +909,32 @@ def _score_topk_lowering(ctx, Hq, Hk, W_o, *, k):
         bt = merged_kwargs.get("BLOCK_T", 1)
         return (triton.cdiv(T_t, bt), B * oH)
 
-    return triton_call_lowering(
-        ctx,
-        autotuned_kernel,
-        Hq, Hk, W_o,
-        grid=grid_fn,
-        constexprs={
-            "B": B, "oH": oH, "T_t": T_t, "T_s": T_s,
-            "H": H, "d_i": d_i,
-            "K": k, "S_PAD": S_PAD,
-        },
-    )
+    constexprs = {
+        "B": B, "oH": oH, "T_t": T_t, "T_s": T_s,
+        "H": H, "d_i": d_i,
+        "K": k, "S_PAD": S_PAD,
+    }
+
+    # Apply the kernel's early_config_prune ourselves. triton_call_lowering hands
+    # every config to jaxlib's runtime autotuner, which picks the fastest by
+    # timing -- not correctness -- and does not run the prune hook. An invalid
+    # config (e.g. a BLOCK_S that doesn't divide S_PAD, leaving the static chunk
+    # loop with zero iterations) does no work, "wins" on speed, and returns the
+    # kernel's uninitialized buffer. Prune here, before lowering, so only configs
+    # valid for this S_PAD/K/T_t reach the autotuner.
+    valid_configs = autotuned_kernel.early_config_prune(autotuned_kernel.configs, constexprs)
+    saved_configs = autotuned_kernel.configs
+    autotuned_kernel.configs = valid_configs
+    try:
+        return triton_call_lowering(
+            ctx,
+            autotuned_kernel,
+            Hq, Hk, W_o,
+            grid=grid_fn,
+            constexprs=constexprs,
+        )
+    finally:
+        autotuned_kernel.configs = saved_configs
 
 
 mlir.register_lowering(_score_topk_p, _score_topk_lowering, platform="rocm")
