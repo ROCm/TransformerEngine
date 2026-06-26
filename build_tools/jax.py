@@ -12,7 +12,6 @@ from pathlib import Path
 import setuptools
 
 from .utils import rocm_build, rocm_path
-from .utils import all_files_in_dir, get_cuda_include_dirs, debug_build_enabled
 from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled, setup_mpi_flags
 from typing import List
 

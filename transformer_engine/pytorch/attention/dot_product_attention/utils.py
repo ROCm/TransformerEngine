@@ -458,12 +458,12 @@ def get_attention_backend(
         if use_fused_attention:
             logger.debug("Disabling FusedAttention for compute capability < sm80")
             use_fused_attention = False
-    if device_compute_capability != (9, 0):
+    if not IS_HIP_EXTENSION and device_compute_capability != (9, 0):
         if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
             logger.debug("Disabling FlashAttention 3 for compute capability != sm90")
         use_flash_attention_3 = False
     # FA4 supports SM80, SM90, SM100, SM120
-    if device_compute_capability < (8, 0):
+    if not IS_HIP_EXTENSION and device_compute_capability < (8, 0):
         if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
             logger.debug("Disabling FlashAttention 4 for compute capability < sm80")
         use_flash_attention_4 = False
