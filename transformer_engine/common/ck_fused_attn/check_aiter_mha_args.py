@@ -71,7 +71,7 @@ def main() -> int:
     modes = ["fwd", "bwd"] if args.mode == "both" else [args.mode]
     mismatch = 0
     for mode in modes:
-        header_path = args.te_dir / f"3rdparty/QoLA/build/third_party/aiter/csrc/include/mha_{mode}.h"
+        header_path = aiter_root / f"csrc/include/mha_{mode}.h"
         source_path = args.te_dir / f"transformer_engine/common/ck_fused_attn/src/ck_fused_attn_{mode}.cpp"
         header_text = header_path.read_text(encoding="utf-8")
         source_text = source_path.read_text(encoding="utf-8")
