@@ -46,6 +46,11 @@ class BenchBase:
       _scratch         -- cache-flush buffer for --cold-cache mode
 
     Subclasses time their kernels through :meth:`_time`.
+
+    After each call to :meth:`_time`, the instance exposes:
+      _last_mean   -- mean seconds/call across _inner inner iterations
+      _last_min    -- minimum seconds/call across _inner inner iterations
+      _last_median -- median seconds/call across _inner inner iterations
     """
 
     _inner = 1
@@ -54,34 +59,54 @@ class BenchBase:
     _use_autorange = True
 
     def _time(self, fn):
-        """Time *fn* via torch.utils.benchmark; return seconds/call.
+        """Time *fn* using per-iteration CUDA events; return mean seconds/call.
 
-        Uses a C++ measurement loop to avoid Python per-iteration overhead.
+        ``blocked_autorange`` is still used on the first autorange call to
+        calibrate ``_inner``; all timed measurements (including that first
+        sample) then use a CUDA-event loop so per-iteration min and median
+        are available alongside the mean.
 
-        * Normal mode (``_use_autorange=True``): ``blocked_autorange`` selects
-          the inner iteration count automatically so each sample window lasts
-          >= ``_min_run_time_s``.  Mirrors stats suite behaviour.
-        * Fixed mode (``_use_autorange=False``): ``timeit(_inner)`` runs
-          exactly ``_inner`` iterations.  Used with ``--inner N`` or
-          ``--cold-cache`` (which forces ``_inner=1`` and flushes scratch).
+        After each call, ``_last_min``, ``_last_median``, and ``_last_mean``
+        hold the corresponding statistics across the ``_inner`` inner
+        iterations of that sample window.
         """
-        import torch.utils.benchmark as benchmark  # deferred
+        import torch
+        import torch.utils.benchmark as benchmark  # for blocked_autorange calibration
+
         if self._scratch is not None:
             self._scratch.fill_(1.0)
-        timer = getattr(self, "_timer", None)
-        if timer is None:
-            timer = self._timer = benchmark.Timer(stmt="fn()", globals={"fn": fn})
-        if self._use_autorange:
-            if self._inner == 1:
-                # First call: use blocked_autorange to calibrate number_per_run
-                # and collect the first sample in one shot.
-                m = timer.blocked_autorange(min_run_time=self._min_run_time_s)
-                self._inner = m.number_per_run  # cache for subsequent calls
-            else:
-                # Subsequent calls: skip re-calibration, reuse cached count.
-                m = timer.timeit(self._inner)
-            return m.mean
-        return timer.timeit(self._inner).mean
+
+        if self._use_autorange and self._inner == 1:
+            # Calibrate: find inner count so one window lasts >= _min_run_time_s.
+            timer = getattr(self, "_timer", None)
+            if timer is None:
+                timer = self._timer = benchmark.Timer(stmt="fn()", globals={"fn": fn})
+            m = timer.blocked_autorange(min_run_time=self._min_run_time_s)
+            self._inner = m.number_per_run
+
+        n = self._inner
+        # Pre-allocate CUDA events once per _inner value; re-allocate if it changes.
+        evts = getattr(self, "_evts", None)
+        if evts is None or len(evts[0]) != n:
+            self._evts = (
+                [torch.cuda.Event(enable_timing=True) for _ in range(n)],
+                [torch.cuda.Event(enable_timing=True) for _ in range(n)],
+            )
+        starts, ends = self._evts
+
+        for i in range(n):
+            starts[i].record()
+            fn()
+            ends[i].record()
+        torch.cuda.synchronize()
+
+        times_s = np.asarray(
+            [s.elapsed_time(e) for s, e in zip(starts, ends)], dtype=np.float64
+        ) / 1000.0
+        self._last_min = float(times_s.min())
+        self._last_median = float(np.median(times_s))
+        self._last_mean = float(times_s.mean())
+        return self._last_mean
 
 
 # ---------------------------------------------------------------------------
@@ -262,7 +287,11 @@ def run_class(
     # Samples per method, indexed by combo position. Filling by index decouples
     # the wire format from the order samples are actually collected in, so
     # interleaved scheduling leaves the saved JSON identical to sequential.
-    samples_by_method = {m: [None] * n_combos for m in methods}
+    # Three parallel structures capture mean, min, and median of the inner
+    # CUDA-event iterations for each outer sample window.
+    samples_by_method        = {m: [None] * n_combos for m in methods}
+    samples_min_by_method    = {m: [None] * n_combos for m in methods}
+    samples_median_by_method = {m: [None] * n_combos for m in methods}
 
     # Flatten to (method, combo) tasks, method-major so printed rows keep their
     # grouping, then sample them in round-robin chunks.
@@ -306,7 +335,9 @@ def run_class(
         # transient spike lands on one sample of each rather than corrupting a
         # whole benchmark's contiguous block. Visit order is re-permuted each
         # round (when shuffle is on); chunk_samples stays keyed by index i.
-        chunk_samples = [[] for _ in live]
+        chunk_samples        = [[] for _ in live]
+        chunk_samples_min    = [[] for _ in live]
+        chunk_samples_median = [[] for _ in live]
         order = list(range(len(live)))
         for _ in range(iters):
             if shuffle and len(order) > 1:
@@ -317,7 +348,10 @@ def run_class(
                 t0 = time.perf_counter()
                 result = method(*combo)
                 wall = time.perf_counter() - t0
-                chunk_samples[i].append(wall if result is None else result)
+                t = wall if result is None else result
+                chunk_samples[i].append(t)
+                chunk_samples_min[i].append(getattr(instance, "_last_min", t))
+                chunk_samples_median[i].append(getattr(instance, "_last_median", t))
 
         # Finalize: stats, throughput, print, store into the combo slot.
         for i, (instance, method_name, combo, ci) in enumerate(live):
@@ -327,7 +361,9 @@ def run_class(
 
             # Raw samples (seconds) for statistical comparison; rounded to 1 ns
             # to keep the JSON compact without losing timing resolution.
-            samples_by_method[method_name][ci] = [round(x, 9) for x in samples]
+            samples_by_method[method_name][ci]        = [round(x, 9) for x in samples]
+            samples_min_by_method[method_name][ci]    = [round(x, 9) for x in chunk_samples_min[i]]
+            samples_median_by_method[method_name][ci] = [round(x, 9) for x in chunk_samples_median[i]]
 
             work = {}
             wfn = getattr(instance, "work_" + method_name[5:], None)
@@ -357,7 +393,9 @@ def run_class(
         f"{suite_name}.{class_name}.{m}": {
             "param_names": param_names,
             "combos": combos_json,
-            "samples": samples_by_method[m],
+            "samples":        samples_by_method[m],
+            "samples_min":    samples_min_by_method[m],
+            "samples_median": samples_median_by_method[m],
         }
         for m in methods
     }
