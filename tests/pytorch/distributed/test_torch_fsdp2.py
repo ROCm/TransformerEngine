@@ -1,9 +1,11 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
 
+import importlib.util
 import os
-import sys
 import subprocess
 import sys
 from pathlib import Path
@@ -13,14 +15,21 @@ from utils import run_distributed
 
 import pytest
 import torch
+
 import transformer_engine.pytorch as te
 
 NUM_PROCS: int = torch.cuda.device_count()
 _FSDP2_DIR = Path(__file__).parent.resolve() / "fsdp2_tests"
 
-# Import some utilities from PyTest-owned conftest.py.
-sys.path.insert(0, str(_FSDP2_DIR))
-from conftest import _parametrize_recipes
+# Import _parametrize_recipes from the fsdp2_tests conftest by file path,
+# bypassing sys.path/sys.modules to avoid collision with the ROCm conftest
+# in this directory.
+_spec = importlib.util.spec_from_file_location(
+    "fsdp2_conftest", _FSDP2_DIR / "conftest.py"
+)
+_fsdp2_conftest = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_fsdp2_conftest)
+_parametrize_recipes = _fsdp2_conftest._parametrize_recipes
 
 @pytest.mark.skipif(NUM_PROCS % 2 != 0, reason="Requires even number of GPUs")
 @pytest.mark.skipif(not te.torch_version() >= (2, 4, 0), reason="Requires PyTorch 2.4.0+")
