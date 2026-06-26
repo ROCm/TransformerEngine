@@ -313,6 +313,11 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
 
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list,
+                                              // ROCm adds a fused multi-quantize
+                                              // path for GroupedLinear expert weights. The cached
+                                              // workspace can be passed directly as `outputs`, so the
+                                              // kernel writes in place instead of allocating separate
+                                              // storage.
                                               const py::object &outputs = py::none());
 
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
