@@ -798,10 +798,18 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
     // stream-tail release contract: the deleter fires from a HIP callback thread holding
     // runtime locks, so it must not call any HIP API directly.
     void* ptr = nullptr;
-    if(hipHostMalloc(&ptr, bytes, hipHostMallocDefault) != hipSuccess){
-      throw std::runtime_error("ck_fused_attn bwd: pinned host staging was not reserved and "
-                               "hipHostMalloc failed (allocation is illegal under HIP graph "
-                               "capture); ensure ck_attn_bwd_workspace_size runs before capture.");
+    hipError_t err = hipHostMalloc(&ptr, bytes, hipHostMallocDefault);
+    if(err != hipSuccess){
+      const char* detail =
+        (err == hipErrorStreamCaptureUnsupported)
+          ? "hipHostMalloc is illegal under HIP graph capture; ensure "
+            "ck_attn_bwd_workspace_size runs before capture so the buffer "
+            "is pre-reserved."
+        : (err == hipErrorOutOfMemory)
+          ? "system is out of pinned host memory."
+          : hipGetErrorString(err);
+      throw std::runtime_error(std::string("ck_fused_attn bwd: pinned host staging was not "
+                               "reserved and hipHostMalloc failed: ") + detail);
     }
     return std::shared_ptr<void>(ptr, [](void* p){
       ck_tile::pinned_host_releaser::instance().enqueue(p);
