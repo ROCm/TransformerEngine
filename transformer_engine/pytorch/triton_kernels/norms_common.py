@@ -15,7 +15,7 @@ from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_triton_dtype,
 )
 from ..quantized_tensor import Quantizer
-from .utils import num_programs, block_size, use_blocked, make_ln_out, get_num_sms
+from .utils import num_programs, block_size, use_blocked, make_ln_out, get_num_sms, use_cuda_graph_autotune
 from .common import get_fp8_max
 from .rmsnorm import (
     _rmsnorm_fwd_triton,
@@ -86,7 +86,7 @@ def _get_fp8_transpose_configs():
 _fp8_transpose_2d_triton = triton.autotune(
     configs=_get_fp8_transpose_configs(),
     key=['n_rows', 'n_cols'],
-    use_cuda_graph=True,
+    use_cuda_graph=use_cuda_graph_autotune(),
 )(_fp8_transpose_2d_impl)
 
 _fp8_transpose_kernels = {

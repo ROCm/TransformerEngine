@@ -46,7 +46,8 @@ if(USE_ROCM)
   list(APPEND test_cuda_sources
               test_dequantize_nvfp4.cu
               test_cublaslt_gemm.cu
-              test_cast_mxfp4_transpose.cu)
+              test_cast_mxfp4_transpose.cu
+              test_multi_quantize_mxfp8.cu)
 
   list(FIND CMAKE_HIP_ARCHITECTURES "gfx1250" _gfx1250_idx)
   if(NOT _gfx1250_idx EQUAL -1)
