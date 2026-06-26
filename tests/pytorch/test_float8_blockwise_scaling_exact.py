@@ -25,8 +25,6 @@ from references.blockwise_quantizer_reference import (
     BlockwiseQuantizerReference,
     QuantizeResult,
 )
-fp8_e4m3_type = get_torch_float8_e4m3_type()
-fp8_e5m2_type = get_torch_float8_e5m2_type()
 from test_float8_current_scaling_exact import (
     TestFP8RecipeLinearBase,
     TestFP8RecipeLayerNormLinearBase,
@@ -40,10 +38,7 @@ TENSOR_DUMP_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "tenso
 tensor_dump_dir_env = os.getenv("NVTE_TEST_BLOCK_CURRENT_SCALING_EXACT_TENSOR_DUMP_DIR")
 if tensor_dump_dir_env is not None:
     TENSOR_DUMP_DIR = pathlib.Path(tensor_dump_dir_env)
-recipe_available, reason_for_no_recipe = te.is_fp8_block_scaling_quantization_available(
-    return_reason=True
-)
-gemm_available, reason_for_no_gemm = te.is_fp8_block_scaling_available(return_reason=True)
+recipe_available, reason_for_no_recipe = te.is_fp8_block_scaling_available(return_reason=True)
 recipe_emulated = get_device_compute_capability() >= (10, 0)
 
 
@@ -392,7 +387,7 @@ def test_quantization_block_tiling_extrema_versus_reference(
 
 
 # FP8 per tesnor current scaling
-@pytest.mark.skipif(not gemm_available, reason=reason_for_no_gemm)
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 class TestFP8BlockScalingRecipeLinear(TestFP8RecipeLinearBase):
 
     @staticmethod
@@ -452,7 +447,7 @@ class TestFP8BlockScalingRecipeLinear(TestFP8RecipeLinearBase):
         )
 
 
-@pytest.mark.skipif(not gemm_available, reason=reason_for_no_gemm)
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 class TestFP8BlockScalingRecipeLayerNormLinear(TestFP8RecipeLayerNormLinearBase):
 
     @staticmethod
