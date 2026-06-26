@@ -3,19 +3,13 @@
 # See LICENSE for license information.
 """Deep Sparse Attention (DSA) — composes the lightning indexer with dense attention.
 
-Phase 1 (this file, working) composes the existing pieces:
+The pipeline composes existing pieces:
 
     1. Per-attention-head Q/K/V projection (DenseGeneral)
     2. Lightning-indexer scoring via the hybrid Triton backend
     3. Causal mask + jax.lax.top_k on each per-head score row
     4. Scatter top-k indices into a per-head sparse attention mask
     5. Call transformer_engine.jax.flax.DotProductAttention with that mask
-
-Phase 2 will dispatch the entire stack to a single fused Triton kernel
-``transformer_engine.jax.triton_extensions.fused_sparse_attention_triton``;
-the dispatch site lives in :func:`deep_sparse_attention_core` under
-``backend="fused"`` and currently raises NotImplementedError (the scaffold
-holds the signature stable so the kernel can land without API churn).
 
 **Shape contract — all DSA tensors are rank-4 with the outer-head dim
 explicit:**
@@ -40,7 +34,7 @@ Zero modifications are made to upstream-tracked TE files; DSA composes
 argument.
 """
 
-from typing import Literal, Optional
+from typing import Optional
 
 import jax
 import jax.numpy as jnp
@@ -48,11 +42,7 @@ from flax import linen as nn
 
 from transformer_engine.jax.flax.module import DenseGeneral
 from transformer_engine.jax.flax.transformer import DotProductAttention
-from .indexer import indexer as _indexer_fn, _indexer_projections
-
-
-# Backends supported by deep_sparse_attention_core.
-_BACKENDS = ("composition", "fused")
+from .indexer import indexer as _indexer_fn
 
 
 # -----------------------------------------------------------------------------
@@ -131,7 +121,6 @@ def deep_sparse_attention_core(
     scale_factor: Optional[float] = None,
     attention_dropout: float = 0.0,
     deterministic: bool = True,
-    backend: Literal["composition", "fused"] = "composition",
     dropout_rng_name: str = "dropout",
     indexer_backend: str = "hybrid",
 ) -> jax.Array:
@@ -153,17 +142,12 @@ def deep_sparse_attention_core(
         attn_mask_type: ``"causal"`` or ``"no_mask"`` (phase 1 only).
         scale_factor: passed through to DPA. ``None`` → ``1/sqrt(head_dim)``.
         attention_dropout, deterministic, dropout_rng_name: passed through to DPA.
-        backend: ``"composition"`` (working) or ``"fused"`` (phase-2 scaffold).
-        indexer_backend: which indexer implementation to use when
-            ``backend == "composition"``. ``"hybrid"`` (default, fast Triton) or
-            ``"reference"`` (pure einsum).
+        indexer_backend: which indexer implementation to use. ``"hybrid"``
+            (default, fast Triton) or ``"reference"`` (pure einsum).
 
     Returns:
         Attention output of the same shape as ``query``: ``[B, oH, T_t, head_dim]``.
     """
-    if backend not in _BACKENDS:
-        raise ValueError(f"unknown backend {backend!r}; expected one of {_BACKENDS}")
-
     if attn_mask_type not in ("causal", "no_mask"):
         raise NotImplementedError(
             f"deep_sparse_attention_core: attn_mask_type={attn_mask_type!r} "
@@ -183,21 +167,6 @@ def deep_sparse_attention_core(
             f"indexer_inputs_kv={indexer_inputs_kv.shape}"
         )
 
-    if backend == "fused":
-        from transformer_engine.jax.triton_extensions import (
-            fused_sparse_attention_triton,
-        )
-        # Project the indexer side so the fused primitive sees Hq/Hk/W_o tensors.
-        # (Scaffold lowering raises; the projections are computed for shape only.)
-        Hq, Hk, W_o = _indexer_projections(
-            indexer_inputs_q, indexer_inputs_kv,
-            indexer_W_uq, indexer_W_dq, indexer_W_k, indexer_W_w,
-        )
-        return fused_sparse_attention_triton(
-            query, key, value, Hq, Hk, W_o, k=k,
-        )
-
-    # ---- composition backend ----
     B, oH, T_t, head_dim = query.shape
     T_s = key.shape[2]
     if key.shape != (B, oH, T_s, head_dim) or value.shape != (B, oH, T_s, head_dim):
@@ -292,11 +261,8 @@ class DeepSparseAttention(nn.Module):  # pylint: disable=too-few-public-methods
     attention_dropout : float, default ``0.0``
     scale_factor : Optional[float]
         Defaults to ``1/sqrt(head_dim)`` inside DPA.
-    backend : str, default ``"composition"``
-        ``"composition"`` (working) or ``"fused"`` (phase-2 scaffold).
     indexer_backend : str, default ``"hybrid"``
-        ``"hybrid"`` (fast Triton) or ``"reference"`` (pure einsum). Only used
-        when ``backend == "composition"``.
+        ``"hybrid"`` (fast Triton) or ``"reference"`` (pure einsum).
     dtype : Optional[jnp.dtype]
         Parameter dtype. Defaults to the input dtype.
     """
@@ -310,7 +276,6 @@ class DeepSparseAttention(nn.Module):  # pylint: disable=too-few-public-methods
     attn_mask_type: str = "causal"
     attention_dropout: float = 0.0
     scale_factor: Optional[float] = None
-    backend: str = "composition"
     indexer_backend: str = "hybrid"
     dtype: Optional[jnp.dtype] = None
 
@@ -376,31 +341,15 @@ class DeepSparseAttention(nn.Module):  # pylint: disable=too-few-public-methods
         )(inputs_kv)                                        # [B, oH, T_s, head_dim]
 
         # ---- indexer projections (shared across oH) ----
-        # Shapes mirror transformer_engine.jax.sparse_attention.indexer:31-48.
-        W_dq = self.param(
-            "indexer_W_dq",
-            nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal"),
-            (hidden, self.indexer_d_c),
-            param_dtype,
-        )
+        # Shapes mirror transformer_engine.jax.sparse_attention.indexer.
+        init = nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal")
+        W_dq = self.param("indexer_W_dq", init, (hidden, self.indexer_d_c), param_dtype)
         W_uq = self.param(
-            "indexer_W_uq",
-            nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal"),
-            (self.indexer_num_heads, self.indexer_d_c, self.indexer_d_i),
-            param_dtype,
+            "indexer_W_uq", init,
+            (self.indexer_num_heads, self.indexer_d_c, self.indexer_d_i), param_dtype,
         )
-        W_k_idx = self.param(
-            "indexer_W_k",
-            nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal"),
-            (hidden, self.indexer_d_i),
-            param_dtype,
-        )
-        W_w = self.param(
-            "indexer_W_w",
-            nn.initializers.variance_scaling(1.0, "fan_in", "truncated_normal"),
-            (hidden, self.indexer_num_heads),
-            param_dtype,
-        )
+        W_k_idx = self.param("indexer_W_k", init, (hidden, self.indexer_d_i), param_dtype)
+        W_w = self.param("indexer_W_w", init, (hidden, self.indexer_num_heads), param_dtype)
 
         return deep_sparse_attention_core(
             query, key, value,
@@ -411,6 +360,5 @@ class DeepSparseAttention(nn.Module):  # pylint: disable=too-few-public-methods
             scale_factor=self.scale_factor,
             attention_dropout=self.attention_dropout,
             deterministic=deterministic,
-            backend=self.backend,
             indexer_backend=self.indexer_backend,
         )                                                   # [B, oH, T_t, head_dim]

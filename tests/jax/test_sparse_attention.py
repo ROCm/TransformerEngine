@@ -1,7 +1,7 @@
 # Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
-"""Tests for Deep Sparse Attention (DSA) composition + HCA / fused scaffold contracts."""
+"""Tests for Deep Sparse Attention (DSA) composition."""
 
 import jax
 import jax.numpy as jnp
@@ -11,15 +11,12 @@ from flax import linen as nn
 from transformer_engine.jax.sparse_attention import (
     DeepSparseAttention,
     deep_sparse_attention_core,
+)
+from transformer_engine.jax.sparse_attention.dsa import (
     _causal_keep_mask,
     _topk_indices_to_attn_mask,
 )
-from transformer_engine.jax.sparse_attention.compressed_attention import (
-    HeavilyCompressedAttention,
-    heavily_compressed_attention,
-)
 from transformer_engine.jax.sparse_attention.indexer import indexer
-from transformer_engine.jax.triton_extensions import fused_sparse_attention_triton
 
 
 @pytest.fixture(autouse=True)
@@ -42,7 +39,7 @@ def _force_unfused_attn(monkeypatch):
 
 
 def _make_dsa_module(*, oH=4, D=8, iH=2, idc=16, idi=16, k=4,
-                     backend="composition", indexer_backend="hybrid"):
+                     indexer_backend="hybrid"):
     return DeepSparseAttention(
         head_dim=D,
         num_attention_heads=oH,
@@ -50,7 +47,6 @@ def _make_dsa_module(*, oH=4, D=8, iH=2, idc=16, idi=16, k=4,
         indexer_d_c=idc,
         indexer_d_i=idi,
         topk=k,
-        backend=backend,
         indexer_backend=indexer_backend,
         dtype=jnp.bfloat16,
     )
@@ -209,15 +205,25 @@ def test_dsa_composition_vs_pure_jax_reference(B, oH, T, hidden, D, iH, idc, idi
 
 
 def test_dsa_composition_reference_indexer_matches_hybrid():
-    """Same correctness check using indexer_backend='reference' (pure einsum)."""
+    """DSA output is the same whether the indexer runs reference or hybrid.
+
+    Both backends share params and the same top-k / DPA path; only the indexer
+    implementation differs. Exercises indexer_backend='reference' through the
+    real DPA module path (the pure-JAX reference test uses manual softmax).
+    """
     B, oH, T, hidden, D, iH, idc, idi, k = 1, 2, 8, 16, 8, 1, 8, 8, 2
     inputs = _make_inputs(B=B, oH=oH, T=T, hidden=hidden)
-    keys = jax.random.split(jax.random.PRNGKey(7), 2)
-    module = _make_dsa_module(oH=oH, D=D, iH=iH, idc=idc, idi=idi, k=k,
-                              indexer_backend="reference")
-    params = module.init(keys[0], inputs, inputs, deterministic=True)
-    out = module.apply(params, inputs, inputs, deterministic=True)
-    assert out.shape == (B, oH, T, D)
+    ref_mod = _make_dsa_module(oH=oH, D=D, iH=iH, idc=idc, idi=idi, k=k,
+                               indexer_backend="reference")
+    hyb_mod = _make_dsa_module(oH=oH, D=D, iH=iH, idc=idc, idi=idi, k=k,
+                               indexer_backend="hybrid")
+    params = ref_mod.init(jax.random.PRNGKey(7), inputs, inputs, deterministic=True)
+    out_ref = ref_mod.apply(params, inputs, inputs, deterministic=True)
+    out_hyb = hyb_mod.apply(params, inputs, inputs, deterministic=True)
+    assert out_ref.shape == (B, oH, T, D)
+    diff = out_hyb.astype(jnp.float32) - out_ref.astype(jnp.float32)
+    rel = float(jnp.linalg.norm(diff) / (jnp.linalg.norm(out_ref.astype(jnp.float32)) + 1e-30))
+    assert rel < 5e-2, f"reference vs hybrid indexer diverge: rel.err={rel:.3e}"
 
 
 @pytest.mark.parametrize("T_t,T_s,k", [(8, 8, 4), (8, 8, 2), (16, 16, 8)])
@@ -254,7 +260,7 @@ def test_dsa_topk_count_equals_kept_count_under_causal(T_t, T_s, k):
 # -----------------------------------------------------------------------------
 
 
-def test_dsa_backward_runs_without_shape_errors():
+def test_dsa_backward_produces_finite_grads():
     inputs = _make_inputs(B=1, oH=2, T=8, hidden=16)
     keys = jax.random.split(jax.random.PRNGKey(5), 2)
     module = _make_dsa_module(oH=2, D=8, iH=1, idc=8, idi=8, k=2)
@@ -271,71 +277,8 @@ def test_dsa_backward_runs_without_shape_errors():
 
 
 # -----------------------------------------------------------------------------
-# Scaffold contracts
-# -----------------------------------------------------------------------------
-
-
-def test_dsa_fused_backend_raises_not_implemented():
-    inputs = _make_inputs(B=1, oH=2, T=8, hidden=16)
-    keys = jax.random.split(jax.random.PRNGKey(0), 2)
-    module = _make_dsa_module(oH=2, D=8, iH=1, idc=8, idi=8, k=2, backend="fused")
-    # Flax materializes the call during init, so NotImplementedError fires there.
-    with pytest.raises(NotImplementedError, match="phase-2 scaffold"):
-        module.init(keys[0], inputs, inputs, deterministic=True)
-
-
-def test_fused_sparse_attention_triton_direct_raises():
-    """Calling the primitive directly also raises (locked contract)."""
-    q = jnp.zeros((1, 2, 4, 8), dtype=jnp.bfloat16)         # [B, T, H, D]
-    kk = jnp.zeros((1, 2, 4, 8), dtype=jnp.bfloat16)
-    v = jnp.zeros((1, 2, 4, 8), dtype=jnp.bfloat16)
-    iq = jnp.zeros((1, 2, 4, 8), dtype=jnp.bfloat16)
-    ik = jnp.zeros((1, 2, 8), dtype=jnp.bfloat16)
-    iw = jnp.zeros((1, 2, 2), dtype=jnp.bfloat16)
-    with pytest.raises(NotImplementedError, match="phase-2 scaffold"):
-        jax.jit(
-            lambda *args: fused_sparse_attention_triton(*args, k=2)
-        )(q, kk, v, iq, ik, iw)
-
-
-def test_hca_module_raises_not_implemented():
-    module = HeavilyCompressedAttention(
-        head_dim=8, num_attention_heads=4,
-        q_lora_rank=16, kv_lora_rank=16,
-        qk_nope_head_dim=4, qk_rope_head_dim=4, v_head_dim=8,
-    )
-    inputs = jax.random.normal(jax.random.PRNGKey(0), (1, 4, 32), dtype=jnp.bfloat16)
-    keys = jax.random.split(jax.random.PRNGKey(0), 2)
-    with pytest.raises(NotImplementedError, match="design.*deferred|DESIGN DEFERRED|scaffold"):
-        module.init(keys[0], inputs, inputs, deterministic=True)
-
-
-def test_hca_functional_raises_not_implemented():
-    inputs = jax.random.normal(jax.random.PRNGKey(0), (1, 4, 32), dtype=jnp.bfloat16)
-    with pytest.raises(NotImplementedError):
-        heavily_compressed_attention(
-            inputs, inputs,
-            head_dim=8, num_attention_heads=4,
-            q_lora_rank=16, kv_lora_rank=16,
-            qk_nope_head_dim=4, qk_rope_head_dim=4, v_head_dim=8,
-        )
-
-
-# -----------------------------------------------------------------------------
 # Functional API surface
 # -----------------------------------------------------------------------------
-
-
-def test_deep_sparse_attention_core_invalid_backend_raises():
-    q = jnp.zeros((1, 2, 4, 8))                              # rank-4
-    iq = jnp.zeros((1, 2, 4, 16))
-    W = jnp.zeros((16, 8))
-    Wuq = jnp.zeros((1, 8, 8))
-    with pytest.raises(ValueError, match="unknown backend"):
-        deep_sparse_attention_core(
-            q, q, q, iq, iq, Wuq, W, W[:, :8], W[:, :1],
-            k=2, backend="bogus",
-        )
 
 
 def test_deep_sparse_attention_core_unsupported_mask_type_raises():

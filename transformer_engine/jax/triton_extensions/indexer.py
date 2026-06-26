@@ -38,18 +38,7 @@ def _score_reduce_autotune_configs():
     # BLOCK_T=512 was tried and consistently failed to launch on MI355X
     # (resource exhaustion — VGPR/LDS budget for 64-iter H-loop with that
     # large an accumulator). Capped at 256.
-    cfgs = []
-    # cfgs = [
-    #     triton.Config({"BLOCK_T": bt, "BLOCK_S": bs, "matrix_instr_nonkdim": nk_dim, "waves_per_eu": wpe}, num_warps=nw, num_stages=ns)
-    #     for bt in (64, 128, 256)
-    #     for bs in (32, 64, 128)
-    #     for nk_dim in (16, 32)
-    #     for wpe in (0, 1, 2)
-    #     for nw in (4, 8)
-    #     for ns in (1, 2, 3)
-    # ]
-    # A few skinny / fat shapes the regular grid above won't hit.
-    cfgs += [
+    cfgs = [
         triton.Config({"BLOCK_T": 32,  "BLOCK_S": 128}, num_warps=4, num_stages=2),
         triton.Config({"BLOCK_T": 32,  "BLOCK_S": 256}, num_warps=4, num_stages=2),
         triton.Config({"BLOCK_T": 256, "BLOCK_S": 32},  num_warps=8, num_stages=2),
@@ -201,7 +190,6 @@ mlir.register_lowering(_score_reduce_p, _score_reduce_lowering, platform="cuda")
 
 
 _HBWD_BLOCK_T = 64
-_HBWD_BLOCK_S = 256
 
 
 def _score_dscores_chunk_autotune_configs():
@@ -355,11 +343,8 @@ def _score_dscores_chunk_lowering(ctx, Hq_chunk, Hk, W_o_chunk, dO):
     B, oH, T, H_CHUNK, d_i = Hq_aval.shape
     T_s = dO_aval.shape[-1]
 
-    # Grid is (T-tiles, B*oH) -- one CTA per (T_tile, b, h_outer) covering ALL
-    # H_CHUNK heads (so dO/Hk are shared across heads), NOT one CTA per head.
-    # BLOCK_T/BLOCK_S/num_warps/num_stages come from the autotuner; all configs
-    # pin num_stages=1 (pipelining the s-loop crashes LLVM codegen on Triton
-    # 3.7.0 / gfx950). The grid depends on the autotuned BLOCK_T.
+    # Grid: (T-tiles, B*oH) -- one CTA per (T_tile, b, h_outer) covers all
+    # H_CHUNK heads (dO/Hk shared across heads). Depends on autotuned BLOCK_T.
     def grid_fn(merged_kwargs):
         bt = merged_kwargs.get("BLOCK_T", _HBWD_BLOCK_T)
         return ((T + bt - 1) // bt, B * oH)
@@ -411,10 +396,6 @@ def _score_reduce_bwd(out_dtype, residuals, dO):
     #     2. hipBLASLt einsums on dscores_chunk give dHq_chunk and a partial
     #        dHk contribution.
     # Peak HBM intermediate stays at H_CHUNK/H fraction of the full score.
-    #
-    # The fully-fused Triton bwd variants (v2/v3/v4) remain in this file for
-    # reference -- they don't materialize the score tensor either but are
-    # slower than the hipBLASLt-based reductions used here (~2x at 4096^2).
     if H % _BWD_H_CHUNK == 0:
         H_CHUNK = _BWD_H_CHUNK
     else:

@@ -52,10 +52,8 @@ def test_topk_matches_reference(k):
 
     Index set-equality is too strict (backends break ties differently), so the
     check is on the *scores* at the fused-selected indices. ``k`` is kept in the
-    top quartile of ``T_s``: a cutoff in the dense middle of the distribution
-    makes boundary scores closely spaced, so the kernel's fp32 ranking and the
-    bf16-rounded reference grid resolve near-ties differently (a test-grid
-    sensitivity, not a kernel error).
+    top quartile of ``T_s`` so the cutoff lands above the dense band of near-tied
+    scores where fp32 and bf16-rounded rankings would disagree.
     """
     args = _indexer_inputs(2, 3, T_t=64, T_s=128, d=32, d_c=32, H=16, d_i=32, seed=200)
     o_ref = indexer(*args, backend="reference").astype(jnp.float32)
@@ -63,6 +61,7 @@ def test_topk_matches_reference(k):
     assert topk_idx.shape == (2, 3, 64, k)
 
     ref_vals = jax.lax.top_k(o_ref, k=k)[0]
+    assert float(ref_vals.max()) > 0, "degenerate test: all top-k scores are zero"
     picked = jnp.take_along_axis(o_ref, topk_idx, axis=-1)
     picked_sorted = jnp.sort(picked, axis=-1)[..., ::-1]
     max_rel = float((jnp.abs(ref_vals - picked_sorted) / (jnp.abs(ref_vals) + 1e-6)).max())

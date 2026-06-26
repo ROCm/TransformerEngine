@@ -3,14 +3,12 @@
 # See LICENSE for license information.
 """Deep Sparse Attention (DSA) family.
 
-Bundles the lightning indexer and the attention modules built on top of it:
+Bundles the lightning indexer and the attention module built on top of it:
 
   * :mod:`~transformer_engine.jax.sparse_attention.indexer` — the lightning
     indexer op (``indexer`` / ``indexer_topk``).
   * :mod:`~transformer_engine.jax.sparse_attention.dsa` — Deep Sparse
     Attention, which composes the indexer with dense attention.
-  * :mod:`~transformer_engine.jax.sparse_attention.compressed_attention` —
-    Heavily Compressed Attention (MLA-style scaffold, design deferred).
 
 The Triton kernel backends live in
 :mod:`transformer_engine.jax.triton_extensions` alongside the other Triton
@@ -19,27 +17,14 @@ kernels.
 
 from . import indexer
 from . import dsa
-from . import compressed_attention
 
 from .indexer import LightningIndexer
-from .dsa import (
-    DeepSparseAttention,
-    deep_sparse_attention_core,
-    _causal_keep_mask,
-    _topk_indices_to_attn_mask,
-)
-from .compressed_attention import (
-    HeavilyCompressedAttention,
-    heavily_compressed_attention,
-)
+from .dsa import DeepSparseAttention, deep_sparse_attention_core
 
 __all__ = [
     "indexer",
     "dsa",
-    "compressed_attention",
     "LightningIndexer",
     "DeepSparseAttention",
     "deep_sparse_attention_core",
-    "HeavilyCompressedAttention",
-    "heavily_compressed_attention",
 ]
