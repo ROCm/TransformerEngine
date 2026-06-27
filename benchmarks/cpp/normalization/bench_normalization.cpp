@@ -17,10 +17,22 @@
 using namespace te_bench;
 using namespace transformer_engine;
 
-#define NORM_SHAPES    \
-  ->Args({8192, 128})  \
-  ->Args({8192, 1536}) \
-  ->Args({8192, 7168})
+#define NORM_SHAPES     \
+  ->Args({4096, 128})   \
+  ->Args({4096, 1024})  \
+  ->Args({4096, 1536})  \
+  ->Args({4096, 4096})  \
+  ->Args({4096, 7168})  \
+  ->Args({8192, 128})   \
+  ->Args({8192, 1024})  \
+  ->Args({8192, 1536})  \
+  ->Args({8192, 4096})  \
+  ->Args({8192, 7168})  \
+  ->Args({16384, 128})  \
+  ->Args({16384, 1024}) \
+  ->Args({16384, 1536}) \
+  ->Args({16384, 4096}) \
+  ->Args({16384, 7168})
 
 constexpr float kNormEpsilon = 1e-5f;
 

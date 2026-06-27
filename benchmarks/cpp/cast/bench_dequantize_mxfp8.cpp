@@ -19,7 +19,7 @@ using namespace te_bench;
 using namespace transformer_engine;
 using fp8_e4m3 = test::fp8e4m3;
 
-// Tensor shapes from LLaMA (8B, 70B, 405B) and Qwen (7B, 72B)
+// Tensor shapes from LLaMA (8B, 70B, 405B), Qwen (7B, 72B), and DeepSeek-V3/V4
 #define COMMON_SHAPES   \
   ->Args({1024, 3584})  \
   ->Args({1024, 4096})  \
@@ -39,7 +39,22 @@ using fp8_e4m3 = test::fp8e4m3;
   ->Args({8192, 53248}) \
   ->Args({16384, 8192}) \
   ->Args({16384, 16384})\
-  ->Args({32768, 8192})
+  ->Args({32768, 8192}) \
+  ->Args({4096, 512})   \
+  ->Args({8192, 512})   \
+  ->Args({16384, 512})  \
+  ->Args({4096, 1536})  \
+  ->Args({8192, 1536})  \
+  ->Args({16384, 1536}) \
+  ->Args({4096, 3072})  \
+  ->Args({8192, 3072})  \
+  ->Args({16384, 3072}) \
+  ->Args({4096, 7168})  \
+  ->Args({8192, 7168})  \
+  ->Args({16384, 7168}) \
+  ->Args({4096, 65536}) \
+  ->Args({8192, 65536}) \
+  ->Args({16384, 65536})
 
 template <typename IType, typename OType, int SCALE_DIM_Y, int SCALE_DIM_X>
 static void BM_DequantizeMXFP8(benchmark::State &state) {
