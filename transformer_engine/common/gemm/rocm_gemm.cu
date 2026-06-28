@@ -1823,7 +1823,7 @@ void release_service_stream(hipStream_t stream, struct ServiceStreamCtl &ctl)
 {
     NVTE_CHECK_CUDA(hipEventRecord(ctl.end_event, ctl.stream));
     NVTE_CHECK_CUDA(hipStreamWaitEvent(stream, ctl.end_event, 0));
-    //TODO: when event are really destroyed (documentation says on devide synchronize) and how much overhead is to create them
+    //TODO: when event are really destroyed (documentation says on device synchronize) and how much overhead is to create them
     //May need to store event in eventPool and reuse them after thy are recorded
     NVTE_CHECK_CUDA(hipEventDestroy(ctl.start_event));
 }
@@ -1996,8 +1996,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                   && m % 256 == 0 && n % 256 == 0 && k % 128 == 0 && k >= 256;
   }
 
-  hipStream_t s = use_service_stream ? ss_ctl.stream : stream;
-
   if (use_hipkittens) {
     auto param = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
 
@@ -2011,7 +2009,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                        outputPreGelu->data.dptr,
                        static_cast<int>(outputD->data.dtype),
                        static_cast<int>(outputPreGelu->data.dtype),
-                       workspace, workspaceSize, s);
+                       workspace, workspaceSize, gemm_stream);
   } else {
 #endif
     // FIXME(https://amd-hub.atlassian.net/browse/ROCM-26110): Remove this workaround once hipBLASLt supports NN/NT
@@ -2020,11 +2018,11 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                                     outputPreGelu, transa, transb, grad,
                                                     workspace, workspaceSize, alpha, beta,
                                                     use_split_accumulator, math_sm_count,
-                                                    s, handle, m, n, k);
+                                                    gemm_stream, handle, m, n, k);
     if (!handled) {
       hipblaslt_gemm(inputA, inputB, outputD, inputBias, outputPreGelu, m, n, k, lda, ldb, ldd, transa,
                      transb, grad, workspace, workspaceSize, alpha, beta, use_split_accumulator,
-                     math_sm_count, s, handle);
+                     math_sm_count, gemm_stream, handle);
     }
 #ifdef USE_HIPKITTENS_GEMM
   }
