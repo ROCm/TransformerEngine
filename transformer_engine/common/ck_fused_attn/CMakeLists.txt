@@ -65,64 +65,45 @@ if("${AITER_SHA}" STREQUAL "")
   message(FATAL_ERROR
           "Failed to parse 'aiter_commit = \"...\"' line in ${__QOLA_MANIFEST}.")
 endif()
-
-# Resolve the manifest-pinned AITER commit (defines AITER_SHA) and bring the
-# QoLA-managed AITER source tree to that commit before any consumer reads it
-# (header validation below, header includes for the .cpp build later, and
-# QoLA's own kernel build if the prebuilt cache misses).
-include("${CMAKE_CURRENT_LIST_DIR}/aiter_prebuilt.cmake")
-
-if(Python_EXECUTABLE)
-  if (NOT __SKIP_AITER_CHECKOUT)
-    # Redirect GIT_CONFIG_GLOBAL to a tempfile carrying `safe.directory = *` so
-    # git operations inside the QoLA-managed AITER tree (and its recursive
-    # submodules) work in containerized builds where the bind-mounted .git is
-    # owned by a different UID than the build process. Mirrors the pattern in
-    # transformer_engine/common/CMakeLists.txt:get_git_commit().
-    execute_process(
-      COMMAND sh -c
-        "tmp=$(mktemp /tmp/gitconfig.XXXXXX) || exit 1; \
-GIT_CONFIG_GLOBAL=$tmp git config --global --add safe.directory '*' >/dev/null 2>&1; \
-GIT_CONFIG_GLOBAL=$tmp PYTHONPATH=\"${__QOLA_DIR}:$PYTHONPATH\" '${Python_EXECUTABLE}' -m qola.cli checkout \
---manifest '${__QOLA_MANIFEST}' \
---aiter-root '${__AITER_SOURCE_DIR}'; \
-rc=$?; rm -f \"$tmp\"; exit $rc"
-      RESULT_VARIABLE AITER_CHECKOUT_RESULT
-      OUTPUT_VARIABLE AITER_CHECKOUT_OUTPUT
-      ERROR_VARIABLE AITER_CHECKOUT_ERROR
-      OUTPUT_STRIP_TRAILING_WHITESPACE
-      ERROR_STRIP_TRAILING_WHITESPACE
-    )
-    if(NOT AITER_CHECKOUT_RESULT EQUAL 0)
-      message(FATAL_ERROR
-              "Failed to sync AITER source tree at ${__AITER_SOURCE_DIR} to "
-              "manifest-pinned commit ${AITER_SHA}.\n"
-              "${AITER_CHECKOUT_OUTPUT}\n${AITER_CHECKOUT_ERROR}")
-    endif()
-    message(STATUS "[AITER] Synced ${__AITER_SOURCE_DIR} to ${AITER_SHA}")
-  endif()
-
+if (NOT __SKIP_AITER_CHECKOUT)
   execute_process(
-    COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/check_aiter_mha_args.py
-            --mode both
-            --te-dir "${CMAKE_CURRENT_LIST_DIR}/../../.."
-            --aiter-root "${__AITER_SOURCE_DIR}"
-    RESULT_VARIABLE AITER_ARG_CHECK_RESULT
-    OUTPUT_VARIABLE AITER_ARG_CHECK_OUTPUT
-    ERROR_VARIABLE AITER_ARG_CHECK_ERROR
+    COMMAND sh -c
+      "PYTHONPATH=\"${__QOLA_DIR}:$PYTHONPATH\" '${Python_EXECUTABLE}' -m qola.cli checkout \
+--manifest '${__QOLA_MANIFEST}' \
+--aiter-root '${__AITER_SOURCE_DIR}'"
+    RESULT_VARIABLE AITER_CHECKOUT_RESULT
+    OUTPUT_VARIABLE AITER_CHECKOUT_OUTPUT
+    ERROR_VARIABLE AITER_CHECKOUT_ERROR
     OUTPUT_STRIP_TRAILING_WHITESPACE
     ERROR_STRIP_TRAILING_WHITESPACE
   )
-
-  if(NOT AITER_ARG_CHECK_RESULT EQUAL 0)
+  if(NOT AITER_CHECKOUT_RESULT EQUAL 0)
     message(FATAL_ERROR
-            "AITER API validation failed in check_aiter_mha_args.py.\n"
-            "${AITER_ARG_CHECK_OUTPUT}\n${AITER_ARG_CHECK_ERROR}")
+            "Failed to sync AITER source tree at ${__AITER_SOURCE_DIR} to "
+            "manifest-pinned commit ${AITER_SHA}.\n"
+            "${AITER_CHECKOUT_OUTPUT}\n${AITER_CHECKOUT_ERROR}")
   endif()
-  message(STATUS "AITER API validation passed via check_aiter_mha_args.py")
-else()
-  message(WARNING "Python interpreter not found; skipping AITER source-tree sync and API validation.")
+  message(STATUS "[AITER] Synced ${__AITER_SOURCE_DIR} to ${AITER_SHA}")
 endif()
+
+execute_process(
+  COMMAND ${Python_EXECUTABLE} ${CMAKE_CURRENT_LIST_DIR}/check_aiter_mha_args.py
+          --mode both
+          --te-dir "${CMAKE_CURRENT_LIST_DIR}/../../.."
+          --aiter-root "${__AITER_SOURCE_DIR}"
+  RESULT_VARIABLE AITER_ARG_CHECK_RESULT
+  OUTPUT_VARIABLE AITER_ARG_CHECK_OUTPUT
+  ERROR_VARIABLE AITER_ARG_CHECK_ERROR
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_STRIP_TRAILING_WHITESPACE
+)
+
+if(NOT AITER_ARG_CHECK_RESULT EQUAL 0)
+  message(FATAL_ERROR
+          "AITER API validation failed in check_aiter_mha_args.py.\n"
+          "${AITER_ARG_CHECK_OUTPUT}\n${AITER_ARG_CHECK_ERROR}")
+endif()
+message(STATUS "AITER API validation passed via check_aiter_mha_args.py")
 
 # Sanity-check the resolved include directories now that `qola checkout` has
 # materialized the AITER tree.
