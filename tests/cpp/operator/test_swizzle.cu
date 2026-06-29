@@ -340,6 +340,10 @@ TEST_P(UnswizzleTestSuite, TestUnswizzle) {
     using namespace transformer_engine;
     using namespace test;
 
+#ifdef __HIP_PLATFORM_AMD__
+  GTEST_SKIP() << "Legacy MXFP8 swizzle layout is not used on AMD GPUs";
+#endif
+
   const auto data_shape = std::get<0>(GetParam());
   const auto scaling_mode = std::get<1>(GetParam());
   const auto transa = std::get<2>(GetParam());
@@ -520,6 +524,10 @@ class SwizzleGroupedTestSuite
     : public ::testing::TestWithParam<std::tuple<int, size_t, size_t>> {};
 
 TEST_P(SwizzleGroupedTestSuite, TestGroupedSwizzleMXFP8) {
+#ifdef __HIP_PLATFORM_AMD__
+  GTEST_SKIP() << "Legacy MXFP8 swizzle layout is not used on AMD GPUs";
+#endif
+
   const auto num_tensors = std::get<0>(GetParam());
   const auto M = std::get<1>(GetParam());
   const auto K = std::get<2>(GetParam());
@@ -555,6 +563,10 @@ class UnswizzleGroupedTestSuite
     : public ::testing::TestWithParam<std::tuple<int, size_t, size_t>> {};
 
 TEST_P(UnswizzleGroupedTestSuite, TestGroupedUnswizzleMXFP8) {
+#ifdef __HIP_PLATFORM_AMD__
+  GTEST_SKIP() << "Legacy MXFP8 swizzle layout is not used on AMD GPUs";
+#endif
+
   const auto num_tensors = std::get<0>(GetParam());
   const auto M = std::get<1>(GetParam());
   const auto K = std::get<2>(GetParam());
@@ -586,6 +598,10 @@ class SwizzleUnswizzleGroupedRoundtripTestSuite
     : public ::testing::TestWithParam<std::tuple<int, size_t, size_t>> {};
 
 TEST_P(SwizzleUnswizzleGroupedRoundtripTestSuite, TestGroupedSwizzleUnswizzleRoundtrip) {
+#ifdef __HIP_PLATFORM_AMD__
+  GTEST_SKIP() << "Legacy MXFP8 swizzle layout is not used on AMD GPUs";
+#endif
+
   const auto num_tensors = std::get<0>(GetParam());
   const auto M = std::get<1>(GetParam());
   const auto K = std::get<2>(GetParam());
@@ -769,6 +785,10 @@ class SwizzleUnswizzleRoundtripTestSuite : public ::testing::TestWithParam<std::
 TEST_P(SwizzleUnswizzleRoundtripTestSuite, TestSwizzleUnswizzleRoundtrip) {
   using namespace transformer_engine;
   using namespace test;
+
+#ifdef __HIP_PLATFORM_AMD__
+  GTEST_SKIP() << "Legacy MXFP8 swizzle layout is not used on AMD GPUs";
+#endif
 
   const auto data_shape = std::get<0>(GetParam());
   const auto scaling_mode = std::get<1>(GetParam());
