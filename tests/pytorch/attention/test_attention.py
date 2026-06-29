@@ -134,6 +134,13 @@ model_configs_base = {
     "base_5_1": ModelConfig(8, 128, 16, 512, max_seqlen_kv=2048),
     "base_6_0": ModelConfig(8, 1, 16, 1024, max_seqlen_kv=2048),
     "base_6_1": ModelConfig(8, 128, 16, 1024, max_seqlen_kv=2048),
+    # gfx942 split-KV testing
+    "base_7_0": ModelConfig(1, 1, 8, 64, max_seqlen_kv=2048, num_gqa_groups=1),
+    "base_7_1": ModelConfig(1, 1, 8, 64, max_seqlen_kv=2048, num_gqa_groups=1,
+                            attn_mask_type="causal_bottom_right"),
+    #test fallthrough to bactch kernels with causal mask
+    "base_7_2": ModelConfig(1, 1, 8, 64, max_seqlen_kv=2048, num_gqa_groups=1,
+                            attn_mask_type="causal"),
 }
 
 
@@ -907,6 +914,9 @@ model_configs_layout = {
         max_seqlen_kv=256,
         attn_mask_type="padding_causal",
         attn_bias_type="post_scale_bias",
+    ),
+    "layout_0_4": ModelConfig(
+        2, 128, 16, 64, max_seqlen_kv=512, num_gqa_groups=1, attn_mask_type="causal"
     ),
     "layout_1_0": ModelConfig(2, 2048, 24, 128),
     "layout_1_1": ModelConfig(
