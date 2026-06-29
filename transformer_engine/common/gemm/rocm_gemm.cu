@@ -2012,6 +2012,10 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                         workspace, workspaceSize, gemm_stream);
   }
   if (!use_hipkittens) {
+    if (is_mxfp8) {
+      NVTE_CHECK(inputBias->data.dptr == nullptr,
+                 "hipBLASLt MXFP8 GEMM does not support bias");
+    }
 #endif
     // FIXME(https://amd-hub.atlassian.net/browse/ROCM-26110): Remove this workaround once hipBLASLt supports NN/NT
     // layouts for MXFP8 on gfx1250.
