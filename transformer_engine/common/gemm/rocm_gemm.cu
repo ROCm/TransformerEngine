@@ -2040,4 +2040,70 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
 #pragma GCC diagnostic pop
 
+#ifdef USE_HIPKITTENS_GEMM
+bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+    int num_gemms, bool transa, bool transb, NVTETensor *workspace,
+    bool accumulate, cudaStream_t stream) {
+    if (accumulate || num_gemms <= 1) return false;
+    if (cuda::sm_arch() != 95) return false;
+
+    std::vector<const void *> a_ptrs(num_gemms), b_ptrs(num_gemms), c_ptrs(num_gemms), sa_ptrs(num_gemms), sb_ptrs(num_gemms);
+    std::vector<int> m_arr(num_gemms);
+
+    int ref_N = -1, ref_K = -1;
+    int out_dtype = -1;
+
+    for (int i = 0; i < num_gemms; i++) {
+        const auto *tA = convertNVTETensorCheck(A[i]);
+        const auto *tB = convertNVTETensorCheck(B[i]);
+        auto *tD = convertNVTETensorCheck(D[i]);
+
+        if (!tA->has_data() || !tB->has_data()) return false;
+
+        int M_i, N_i, K_i;
+        if (transa) {
+            M_i = tA->data.shape[0];
+            K_i = tA->data.shape[1];
+        } else {
+            K_i = tA->data.shape[0];
+            M_i = tA->data.shape[1];
+        }
+        if (transb) {
+            N_i = tB->data.shape[1];
+        } else {
+            N_i = tB->data.shape[0];
+        }
+
+        if (i == 0) {
+            ref_N = N_i;
+            ref_K = K_i;
+            out_dtype = static_cast<int>(tD->data.dtype);
+        } else {
+            if (N_i != ref_N || K_i != ref_K) return false;
+        }
+
+        a_ptrs[i]  = tA->data.dptr;
+        b_ptrs[i]  = tB->data.dptr;
+        c_ptrs[i]  = tD->data.dptr;
+        sa_ptrs[i] = tA->scale_inv.dptr;
+        sb_ptrs[i] = tB->scale_inv.dptr;
+        m_arr[i]   = M_i;
+    }
+
+    auto *ws = convertNVTETensorCheck(workspace[0]);
+    void *ws_ptr = ws->data.dptr;
+    size_t ws_size = ws->data.shape[0];
+
+    return kittens_grouped_mxfp8_gemm(
+        a_ptrs.data(), b_ptrs.data(), (void *const *)c_ptrs.data(),
+        sa_ptrs.data(), sb_ptrs.data(),
+        m_arr.data(), ref_N, ref_K,
+        num_gemms, transa, transb,
+        static_cast<int>(convertNVTETensorCheck(A[0])->data.dtype),
+        static_cast<int>(convertNVTETensorCheck(B[0])->data.dtype),
+        out_dtype,
+        ws_ptr, ws_size, stream);
+}
+#endif
+
 } //namespace transformer_engine

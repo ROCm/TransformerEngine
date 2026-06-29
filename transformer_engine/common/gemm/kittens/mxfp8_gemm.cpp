@@ -54,6 +54,22 @@ enum struct OutDtype {
     FP16,
 };
 
+constexpr int MAX_EXPERTS = 512;
+
+struct TileOffsets {
+    int data[MAX_EXPERTS + 1];
+};
+
+template <typename T>
+__device__ __forceinline__ int rocm_upper_bound(const T *arr, int n, T val) {
+    int lo = 0, hi = n - 1;
+    while (lo < hi) {
+        int mid = (lo + hi + 1) / 2;
+        if (arr[mid] <= val) { lo = mid; } else { hi = mid - 1; }
+    }
+    return lo;
+}
+
 template<GemmEpilogue EPILOGUE, typename RT_C, typename RT_C_T, typename OutGL, typename AuxGLType>
 __device__ __forceinline__ void gemm_epilogue(
     RT_C &cA, RT_C &cB, RT_C &cC, RT_C &cD,
@@ -113,22 +129,16 @@ __device__ __forceinline__ void gemm_epilogue(
     kittens::store(C, oC, out_coord_C); kittens::store(C, oD, out_coord_D);
 }
 
-template <GemmEpilogue EPILOGUE, int CBSZ, int BLGP, typename OutGL, typename AuxGLType>
+template <bool GROUPED, GemmEpilogue EPILOGUE, int CBSZ, int BLGP, typename OutGL, typename AuxGLType>
 __global__ __launch_bounds__(NUM_THREADS, 2)
-void mxfp8_gemm_tn_kernel(
-    const gl_fp8_rt A,
-    const gl_fp8_rt B,
-    const OutGL C,
-    const AuxGLType AuxGL,
-    const gl_scale_rt scale_A_gl,
-    const gl_scale_rt scale_B_gl,
-    const void *__restrict__ bias,
-    int bias_dtype,
-    int M, int N, int K) {
+void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, const AuxGLType AuxGL,
+    const gl_scale_rt scale_A_gl, const gl_scale_rt scale_B_gl,
+    [[maybe_unused]] const void *__restrict__ bias, [[maybe_unused]] int bias_dtype,
+    [[maybe_unused]] TileOffsets tile_offsets, [[maybe_unused]] int num_experts,
+    int N, int K, int total_m_tiles, int tiles_N) {
 
     int k_iters = K / BLOCK_K;
-    int tiles_M = M / BLOCK_ROW;
-    int tiles_N = N / BLOCK_COL;
+    int total_n_tiles = GROUPED ? num_experts * tiles_N : tiles_N;
 
     using ST_A     = kittens::st_fp8e4m3<HALF_ROW, BLOCK_K, kittens::st_16x128_s>;
     using ST_B     = kittens::st_fp8e4m3<HALF_COL, BLOCK_K, kittens::st_16x128_s>;
@@ -153,11 +163,23 @@ void mxfp8_gemm_tn_kernel(
     int num_wgid_in_group = WGM * tiles_N;
     int group_id     = wgid / num_wgid_in_group;
     int first_pid_m  = group_id * WGM;
-    int group_size_m = min(tiles_M - first_pid_m, WGM);
-    int block_row    = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
-    int block_col    = (wgid % num_wgid_in_group) / group_size_m;
-    int block_m      = block_row * BLOCK_ROW;
-    int block_n      = block_col * BLOCK_COL;
+    int group_size_m = min(total_m_tiles - first_pid_m, WGM);
+    int m_tile       = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
+    int n_tile       = (wgid % num_wgid_in_group) / group_size_m;
+
+    int expert_id = 0;
+    if constexpr (GROUPED) {
+        expert_id = rocm_upper_bound(tile_offsets.data, num_experts, m_tile);
+    }
+
+    int a_half0 = m_tile * 2;
+    int a_half1 = a_half0 + 1;
+    int b_half0 = GROUPED ? expert_id * tiles_N * 2 + n_tile * 2 : n_tile * 2;
+    int b_half1 = b_half0 + 1;
+
+    int block_m      = m_tile * BLOCK_ROW;
+    int block_row    = m_tile;
+    int block_col    = GROUPED ? expert_id * tiles_N + n_tile : n_tile;
 
     int warp_m = kittens::warpid() / WARPS_COL;
     int warp_n = kittens::warpid() % WARPS_COL;
@@ -183,8 +205,8 @@ void mxfp8_gemm_tn_kernel(
     const T *b_base = (const T *)&B[{0, 0, 0, 0}];
     const int a_row_stride = A.template stride<2>() * sizeof(T);
     const int b_row_stride = B.template stride<2>() * sizeof(T);
-    kittens::i32x4 a_srd = kittens::make_srsrc(a_base, M * a_row_stride, a_row_stride);
-    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, N * b_row_stride, b_row_stride);
+    kittens::i32x4 a_srd = kittens::make_srsrc(a_base, A.rows() * a_row_stride, a_row_stride);
+    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, B.rows() * b_row_stride, b_row_stride);
 
     const int wid = kittens::warpid() % NUM_WARPS;
     constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
@@ -196,23 +218,23 @@ void mxfp8_gemm_tn_kernel(
             reinterpret_cast<uintptr_t>(&Bs[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
     }
 
-    G::load(Bs[tic][0], B, {0, 0, block_col * 2, 0}, sw_B, b_srd, b_base, b_lds[tic][0]);
-    G::load(As[tic][0], A, {0, 0, block_row * 2, 0}, sw_A, a_srd, a_base, a_lds[tic][0]);
-    G::load(Bs[tic][1], B, {0, 0, block_col * 2 + 1, 0}, sw_B, b_srd, b_base, b_lds[tic][1]);
-    G::load(As[tic][1], A, {0, 0, block_row * 2 + 1, 0}, sw_A, a_srd, a_base, a_lds[tic][1]);
+    G::load(Bs[tic][0], B, {0, 0, b_half0, 0}, sw_B, b_srd, b_base, b_lds[tic][0]);
+    G::load(As[tic][0], A, {0, 0, a_half0, 0}, sw_A, a_srd, a_base, a_lds[tic][0]);
+    G::load(Bs[tic][1], B, {0, 0, b_half1, 0}, sw_B, b_srd, b_base, b_lds[tic][1]);
+    G::load(As[tic][1], A, {0, 0, a_half1, 0}, sw_A, a_srd, a_base, a_lds[tic][1]);
 
     if (warp_m == 1) __builtin_amdgcn_s_barrier();
     asm volatile("s_waitcnt vmcnt(4)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(As[toc][0], A, {0, 0, block_row * 2, 1}, sw_A, a_srd, a_base, a_lds[toc][0]);
-    G::load(Bs[toc][0], B, {0, 0, block_col * 2, 1}, sw_B, b_srd, b_base, b_lds[toc][0]);
-    G::load(Bs[toc][1], B, {0, 0, block_col * 2 + 1, 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
+    G::load(As[toc][0], A, {0, 0, a_half0, 1}, sw_A, a_srd, a_base, a_lds[toc][0]);
+    G::load(Bs[toc][0], B, {0, 0, b_half0, 1}, sw_B, b_srd, b_base, b_lds[toc][0]);
+    G::load(Bs[toc][1], B, {0, 0, b_half1, 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
     asm volatile("s_waitcnt vmcnt(6)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(scale_A_smem[0], scale_A_gl, {0 * tiles_M + block_row, 0, 0, 0});
-    G::load(scale_B_smem[0], scale_B_gl, {0 * tiles_N + block_col, 0, 0, 0});
+    G::load(scale_A_smem[0], scale_A_gl, {0 * total_m_tiles + m_tile, 0, 0, 0});
+    G::load(scale_B_smem[0], scale_B_gl, {0 * total_n_tiles + block_col, 0, 0, 0});
     asm volatile("s_waitcnt vmcnt(0)");
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
@@ -220,14 +242,14 @@ void mxfp8_gemm_tn_kernel(
 #pragma unroll 2
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1, tic_scales ^= 1, toc_scales ^= 1) {
         if (k + 1 < k_iters) {
-            G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * tiles_M + block_row, 0, 0, 0});
-            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * tiles_N + block_col, 0, 0, 0});
+            G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * total_m_tiles + m_tile, 0, 0, 0});
+            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * total_n_tiles + block_col, 0, 0, 0});
         }
         auto bs0 = kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][0], {warp_n, 0});
         kittens::load(b0, bs0);
         auto as0 = kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][0], {warp_m, 0});
         kittens::load(a, as0);
-        G::load(As[toc][1], A, {0, 0, block_row * 2 + 1, k + 1}, sw_A, a_srd, a_base, a_lds[toc][1]);
+        G::load(As[toc][1], A, {0, 0, a_half1, k + 1}, sw_A, a_srd, a_base, a_lds[toc][1]);
         asm volatile("s_waitcnt lgkmcnt(8)");
         __builtin_amdgcn_s_barrier();
 
@@ -243,7 +265,7 @@ void mxfp8_gemm_tn_kernel(
 
         auto bs1 = kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][1], {warp_n, 0});
         kittens::load(b1, bs1);
-        G::load(As[tic][0], A, {0, 0, block_row * 2, k + 2}, sw_A, a_srd, a_base, a_lds[tic][0]);
+        G::load(As[tic][0], A, {0, 0, a_half0, k + 2}, sw_A, a_srd, a_base, a_lds[tic][0]);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
@@ -254,7 +276,7 @@ void mxfp8_gemm_tn_kernel(
 
         auto as1 = kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][1], {warp_m, 0});
         kittens::load(a, as1);
-        G::load(Bs[tic][0], B, {0, 0, block_col * 2, k + 2}, sw_B, b_srd, b_base, b_lds[tic][0]);
+        G::load(Bs[tic][0], B, {0, 0, b_half0, k + 2}, sw_B, b_srd, b_base, b_lds[tic][0]);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
@@ -264,7 +286,7 @@ void mxfp8_gemm_tn_kernel(
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
-        G::load(Bs[tic][1], B, {0, 0, block_col * 2 + 1, k + 2}, sw_B, b_srd, b_base, b_lds[tic][1]);
+        G::load(Bs[tic][1], B, {0, 0, b_half1, k + 2}, sw_B, b_srd, b_base, b_lds[tic][1]);
         asm volatile("s_waitcnt vmcnt(6)");
         __builtin_amdgcn_s_barrier();
 
@@ -277,8 +299,8 @@ void mxfp8_gemm_tn_kernel(
     { // Epilogue k = k_iters - 2
         int k = k_iters - 2;
         if (k + 1 < k_iters) {
-            G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * tiles_M + block_row, 0, 0, 0});
-            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * tiles_N + block_col, 0, 0, 0});
+            G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * total_m_tiles + m_tile, 0, 0, 0});
+            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * total_n_tiles + block_col, 0, 0, 0});
         }
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -292,7 +314,7 @@ void mxfp8_gemm_tn_kernel(
         kittens::load(b0, bs0);
         auto as0 = kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][0], {warp_m, 0});
         kittens::load(a, as0);
-        G::load(As[toc][1], A, {0, 0, block_row * 2 + 1, k + 1}, sw_A, a_srd, a_base, a_lds[toc][1]);
+        G::load(As[toc][1], A, {0, 0, a_half1, k + 1}, sw_A, a_srd, a_base, a_lds[toc][1]);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -407,14 +429,15 @@ __global__ void pack_scales_kernel(const uint8_t *__restrict__ scales, uint32_t 
 }
 
 
-template <GemmEpilogue EPILOGUE, int CBSZ, int BLGP, typename OutGL, typename AuxGLType>
-__global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, 
-    const AuxGLType AuxGL, const gl_scale_rt scale_A_gl, const gl_scale_rt scale_B_gl, const void *__restrict__ bias, 
-    int bias_dtype, int M, int N, int K) {
+template <bool GROUPED, GemmEpilogue EPILOGUE, int CBSZ, int BLGP, typename OutGL, typename AuxGLType>
+__global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C,
+    const AuxGLType AuxGL, const gl_scale_rt scale_A_gl, const gl_scale_rt scale_B_gl,
+    [[maybe_unused]] const void *__restrict__ bias, [[maybe_unused]] int bias_dtype,
+    [[maybe_unused]] TileOffsets tile_offsets, [[maybe_unused]] int num_experts,
+    int N, int K, int total_m_tiles, int tiles_N) {
 
     int k_iters = K / BLOCK_K;
-    int tiles_M = M / BLOCK_ROW;
-    int tiles_N = N / BLOCK_COL;
+    int total_n_tiles = GROUPED ? num_experts * tiles_N : tiles_N;
 
     using ST_A     = kittens::st_fp8e4m3<BLOCK_K, HALF_ROW, kittens::st_16x128_s>;
     using ST_B     = kittens::st_fp8e4m3<HALF_COL, BLOCK_K, kittens::st_16x128_s>;
@@ -439,11 +462,18 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
     int num_wgid_in_group = WGM * tiles_N;
     int group_id     = wgid / num_wgid_in_group;
     int first_pid_m  = group_id * WGM;
-    int group_size_m = min(tiles_M - first_pid_m, WGM);
-    int block_row    = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
-    int block_col    = (wgid % num_wgid_in_group) / group_size_m;
-    int block_m      = block_row * BLOCK_ROW;
-    int block_n      = block_col * BLOCK_COL;
+    int group_size_m = min(total_m_tiles - first_pid_m, WGM);
+    int m_tile       = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
+    int n_tile       = (wgid % num_wgid_in_group) / group_size_m;
+
+    int expert_id = 0;
+    if constexpr (GROUPED) {
+        expert_id = rocm_upper_bound(tile_offsets.data, num_experts, m_tile);
+    }
+
+    int block_row    = m_tile;
+    int block_col    = GROUPED ? expert_id * tiles_N + n_tile : n_tile;
+    int block_m      = m_tile * BLOCK_ROW;
 
     int warp_m = kittens::warpid() / WARPS_COL;
     int warp_n = kittens::warpid() % WARPS_COL;
@@ -480,8 +510,8 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(scale_A_smem[0], scale_A_gl, {0 * tiles_M + block_row, 0, 0, 0});
-    G::load(scale_B_smem[0], scale_B_gl, {0 * tiles_N + block_col, 0, 0, 0});
+    G::load(scale_A_smem[0], scale_A_gl, {0 * total_m_tiles + m_tile, 0, 0, 0});
+    G::load(scale_B_smem[0], scale_B_gl, {0 * total_n_tiles + block_col, 0, 0, 0});
     asm volatile("s_waitcnt vmcnt(0)");
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
@@ -491,8 +521,8 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
 #pragma unroll 2
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1, tic_scales ^= 1, toc_scales ^= 1) {
         if (k + 1 < k_iters) {
-            G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * tiles_M + block_row, 0, 0, 0});
-            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * tiles_N + block_col, 0, 0, 0});
+            G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * total_m_tiles + m_tile, 0, 0, 0});
+            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * total_n_tiles + block_col, 0, 0, 0});
         }
 
         auto bs0 = kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][0], {warp_n, 0});
@@ -547,8 +577,8 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
     { // Epilogue k = k_iters - 2
         int k = k_iters - 2;
         if (k + 1 < k_iters) {
-            G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * tiles_M + block_row, 0, 0, 0});
-            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * tiles_N + block_col, 0, 0, 0});
+            G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * total_m_tiles + m_tile, 0, 0, 0});
+            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * total_n_tiles + block_col, 0, 0, 0});
         }
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -651,14 +681,15 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
         block_m, block_row, block_col, warp_m, warp_n);
 }
 
-template <GemmEpilogue EPILOGUE, int CBSZ, int BLGP, typename OutGL, typename AuxGLType>
-__global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_fp8_rt A, const gl_fp8_rt B, 
-    const OutGL C, const AuxGLType AuxGL, const gl_scale_rt scale_A_gl, const gl_scale_rt scale_B_gl, 
-    const void *__restrict__ bias, int bias_dtype, int M, int N, int K) {
+template <bool GROUPED, GemmEpilogue EPILOGUE, int CBSZ, int BLGP, typename OutGL, typename AuxGLType>
+__global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_fp8_rt A, const gl_fp8_rt B,
+    const OutGL C, const AuxGLType AuxGL, const gl_scale_rt scale_A_gl, const gl_scale_rt scale_B_gl,
+    [[maybe_unused]] const void *__restrict__ bias, [[maybe_unused]] int bias_dtype,
+    [[maybe_unused]] TileOffsets tile_offsets, [[maybe_unused]] int num_experts,
+    int N, int K, int total_m_tiles, int tiles_N) {
 
     int k_iters = K / BLOCK_K;
-    int tiles_M = M / BLOCK_ROW;
-    int tiles_N = N / BLOCK_COL;
+    int total_n_tiles = GROUPED ? num_experts * tiles_N : tiles_N;
 
     using ST_A     = kittens::st_fp8e4m3<BLOCK_K, HALF_ROW, kittens::st_16x128_s>;
     using ST_B     = kittens::st_fp8e4m3<BLOCK_K, HALF_COL, kittens::st_16x128_s>;
@@ -683,11 +714,18 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
     int num_wgid_in_group = WGM * tiles_N;
     int group_id     = wgid / num_wgid_in_group;
     int first_pid_m  = group_id * WGM;
-    int group_size_m = min(tiles_M - first_pid_m, WGM);
-    int block_row    = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
-    int block_col    = (wgid % num_wgid_in_group) / group_size_m;
-    int block_m      = block_row * BLOCK_ROW;
-    int block_n      = block_col * BLOCK_COL;
+    int group_size_m = min(total_m_tiles - first_pid_m, WGM);
+    int m_tile       = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
+    int n_tile       = (wgid % num_wgid_in_group) / group_size_m;
+
+    int expert_id = 0;
+    if constexpr (GROUPED) {
+        expert_id = rocm_upper_bound(tile_offsets.data, num_experts, m_tile);
+    }
+
+    int block_row    = m_tile;
+    int block_col    = GROUPED ? expert_id * tiles_N + n_tile : n_tile;
+    int block_m      = m_tile * BLOCK_ROW;
 
     int warp_m = kittens::warpid() / WARPS_COL;
     int warp_n = kittens::warpid() % WARPS_COL;
@@ -725,8 +763,8 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(scale_A_smem[0], scale_A_gl, {0 * tiles_M + block_row, 0, 0, 0});
-    G::load(scale_B_smem[0], scale_B_gl, {0 * tiles_N + block_col, 0, 0, 0});
+    G::load(scale_A_smem[0], scale_A_gl, {0 * total_m_tiles + m_tile, 0, 0, 0});
+    G::load(scale_B_smem[0], scale_B_gl, {0 * total_n_tiles + block_col, 0, 0, 0});
     asm volatile("s_waitcnt vmcnt(0)");
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
@@ -736,8 +774,8 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
 #pragma unroll 2
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1, tic_scales ^= 1, toc_scales ^= 1) {
         if (k + 1 < k_iters) {
-            G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * tiles_M + block_row, 0, 0, 0});
-            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * tiles_N + block_col, 0, 0, 0});
+            G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * total_m_tiles + m_tile, 0, 0, 0});
+            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * total_n_tiles + block_col, 0, 0, 0});
         }
 
         kittens::load(b0, Bs[tic][0], b_col_off);
@@ -790,8 +828,8 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
     { // Epilogue k = k_iters - 2
         int k = k_iters - 2;
         if (k + 1 < k_iters) {
-            G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * tiles_M + block_row, 0, 0, 0});
-            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * tiles_N + block_col, 0, 0, 0});
+            G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * total_m_tiles + m_tile, 0, 0, 0});
+            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * total_n_tiles + block_col, 0, 0, 0});
         }
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -901,9 +939,9 @@ static void launch_gemm_typed(
     const void *bias, int bias_dtype, AuxGLType aux_gl,
     int M, int N, int K, OutDtype out_dtype, hipStream_t stream) {
 
-    int grid    = (M / BLOCK_ROW) * (N / BLOCK_COL);
     int tiles_M = M / BLOCK_ROW;
     int tiles_N = N / BLOCK_COL;
+    int grid    = tiles_M * tiles_N;
     int k_iters = K / BLOCK_K;
 
     gl_fp8_rt gl_A((kittens::fp8e4m3 *)A, nullptr, nullptr,
@@ -915,16 +953,20 @@ static void launch_gemm_typed(
     gl_scale_rt gl_SB(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sb)),
                       k_iters * tiles_N, nullptr, nullptr, nullptr);
 
+    TileOffsets dummy = {};
     auto launch = [&](auto gl_C) {
         if constexpr (TRANSA && !TRANSB) {
-            mxfp8_gemm_tn_kernel<EPILOGUE, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
-                gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, bias, bias_dtype, M, N, K);
+            mxfp8_gemm_tn_kernel<false, EPILOGUE, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
+                gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, bias, bias_dtype,
+                dummy, 0, N, K, tiles_M, tiles_N);
         } else if constexpr (!TRANSA && !TRANSB) {
-            mxfp8_gemm_nn_kernel<EPILOGUE, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
-                gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, bias, bias_dtype, M, N, K);
+            mxfp8_gemm_nn_kernel<false, EPILOGUE, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
+                gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, bias, bias_dtype,
+                dummy, 0, N, K, tiles_M, tiles_N);
         } else {
-            mxfp8_gemm_nt_kernel<EPILOGUE, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
-                gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, bias, bias_dtype, M, N, K);
+            mxfp8_gemm_nt_kernel<false, EPILOGUE, CBSZ, BLGP><<<grid, NUM_THREADS, 0, stream>>>(
+                gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, bias, bias_dtype,
+                dummy, 0, N, K, tiles_M, tiles_N);
         }
     };
     if (out_dtype == OutDtype::BF16) {
@@ -993,8 +1035,7 @@ static void dispatch_gemm(
 }
 
 template<bool COLWISE>
-static void launch_pack_scales(const uint8_t *scales, uint32_t *packed, int dim,
-                               int scale_K, int k_iters, hipStream_t stream) {
+static void launch_pack_scales(const uint8_t *scales, uint32_t *packed, int dim, int scale_K, int k_iters, hipStream_t stream) {
     int total  = k_iters * dim;
     int blocks = (total + 255) / 256;
     pack_scales_kernel<COLWISE><<<blocks, 256, 0, stream>>>(scales, packed, dim, scale_K, k_iters);
@@ -1099,6 +1140,89 @@ bool kittens_mxfp8_gemm(
         )
     )
     return result;
+}
+
+static size_t align256(size_t x) {
+    return (x + 255) & ~(size_t)255;
+}
+
+bool kittens_grouped_mxfp8_gemm(
+    const void *const *A_array, const void *const *B_array, void *const *C_array,
+    const void *const *scale_A_array, const void *const *scale_B_array,
+    const int *M_array, int N, int K, int num_experts,
+    bool transa, bool transb, int a_dtype, int b_dtype, int out_dtype,
+    void *workspace, size_t workspace_size, hipStream_t stream) {
+
+    if (transa && transb) return false;
+    if (N % BLOCK_COL != 0 || K % BLOCK_K != 0 || K < 256) return false;
+    if (num_experts <= 0 || num_experts > MAX_EXPERTS) return false;
+
+    int tiles_N = N / BLOCK_COL;
+    int k_iters = K / BLOCK_K;
+    int scale_K = K / 32;
+
+    TileOffsets tile_offsets;
+    int total_M = 0;
+    int total_m_tiles = 0;
+    for (int g = 0; g < num_experts; g++) {
+        if (M_array[g] % BLOCK_ROW != 0) return false;
+        tile_offsets.data[g] = total_m_tiles;
+        total_M += M_array[g];
+        total_m_tiles += M_array[g] / BLOCK_ROW;
+    }
+    tile_offsets.data[num_experts] = total_m_tiles;
+
+    int total_n_tiles = num_experts * tiles_N;
+    int grid = total_m_tiles * tiles_N;
+    if (grid == 0) return true;
+
+    size_t sa_pk_bytes = align256((size_t)k_iters * total_M * sizeof(uint32_t));
+    size_t sb_pk_bytes = align256((size_t)k_iters * num_experts * N * sizeof(uint32_t));
+    if (workspace_size < sa_pk_bytes + sb_pk_bytes) return false;
+
+    uint8_t *ws = (uint8_t *)workspace;
+    auto *sa_pk = (uint32_t *)ws;
+    auto *sb_pk = (uint32_t *)(ws + sa_pk_bytes);
+
+    launch_pack_scales<false>((const uint8_t *)scale_A_array[0], sa_pk, total_M, scale_K, k_iters, stream);
+    launch_pack_scales<false>((const uint8_t *)scale_B_array[0], sb_pk, num_experts * N, scale_K, k_iters, stream);
+
+    size_t a1 = transa ? (size_t)total_M : (size_t)K;
+    size_t a2 = transa ? (size_t)K : (size_t)total_M;
+    size_t b1 = transb ? (size_t)K : (size_t)(num_experts * N);
+    size_t b2 = transb ? (size_t)(num_experts * N) : (size_t)K;
+
+    gl_fp8_rt gl_A((kittens::fp8e4m3 *)A_array[0], nullptr, nullptr, a1, a2);
+    gl_fp8_rt gl_B((kittens::fp8e4m3 *)B_array[0], nullptr, nullptr, b1, b2);
+    gl_scale_rt gl_SA(reinterpret_cast<kittens::fp8e8m0 *>(sa_pk),
+                      k_iters * total_m_tiles, nullptr, nullptr, nullptr);
+    gl_scale_rt gl_SB(reinterpret_cast<kittens::fp8e8m0 *>(sb_pk),
+                      k_iters * total_n_tiles, nullptr, nullptr, nullptr);
+
+    static float dummy_aux = 0.f;
+    gl_f32_rt aux_gl(&dummy_aux, nullptr, nullptr, 1, 1);
+
+    #define LAUNCH_GROUPED(KERNEL) \
+        KERNEL<true, GemmEpilogue::DEFAULT, 0, 0><<<grid, NUM_THREADS, 0, stream>>>( \
+            gl_A, gl_B, gl_C, aux_gl, gl_SA, gl_SB, nullptr, 0, \
+            tile_offsets, num_experts, N, K, total_m_tiles, tiles_N)
+
+    auto launch = [&](auto gl_C) {
+        if (transa && !transb)       { LAUNCH_GROUPED(mxfp8_gemm_tn_kernel); }
+        else if (!transa && !transb) { LAUNCH_GROUPED(mxfp8_gemm_nn_kernel); }
+        else                         { LAUNCH_GROUPED(mxfp8_gemm_nt_kernel); }
+    };
+    #undef LAUNCH_GROUPED
+    if (out_dtype == KITTENS_BFLOAT16) {
+        launch(gl_bf16_rt((kittens::bf16 *)C_array[0], nullptr, nullptr, (size_t)N, (size_t)total_M));
+    } else if (out_dtype == KITTENS_FLOAT16) {
+        launch(gl_fp16_rt((half *)C_array[0], nullptr, nullptr, (size_t)N, (size_t)total_M));
+    } else if (out_dtype == KITTENS_FLOAT32) {
+        launch(gl_f32_rt((float *)C_array[0], nullptr, nullptr, (size_t)N, (size_t)total_M));
+    } else {
+        return false;
+    }
+    return true;
 }
 
 #undef BOOL_SWITCH

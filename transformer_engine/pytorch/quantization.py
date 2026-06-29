@@ -220,6 +220,8 @@ def get_default_recipe() -> Recipe:
 def get_align_size_for_quantization(recipe: Recipe) -> int:
     """Get the alignment size for quantization."""
     if recipe.mxfp8():
+        if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5) and os.environ.get("NVTE_USE_CUTLASS_GROUPED_GEMM", "0") == "1":
+            return 256
         return 32
     if recipe.nvfp4():
         return 128

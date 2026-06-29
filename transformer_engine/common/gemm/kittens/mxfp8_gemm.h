@@ -27,3 +27,10 @@ bool kittens_mxfp8_gemm(
     void *aux_gelu, int out_dtype, int aux_dtype,
     void *workspace, size_t workspace_size,
     hipStream_t stream);
+
+bool kittens_grouped_mxfp8_gemm(
+    const void *const *A_array, const void *const *B_array, void *const *C_array,
+    const void *const *scale_A_array, const void *const *scale_B_array,
+    const int *M_array, int N, int K, int num_experts,
+    bool transa, bool transb, int a_dtype, int b_dtype, int out_dtype,
+    void *workspace, size_t workspace_size, hipStream_t stream);
