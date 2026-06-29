@@ -4,7 +4,7 @@
 #
 # TE CI deps image
 #
-# ROCm installer: https://raw.githubusercontent.com/ROCm/TheRock/main/dockerfiles/install_rocm_tarball.sh
+# ROCm installer: https://raw.githubusercontent.com/ROCm/TheRock/release/therock-7.12/dockerfiles/install_rocm_tarball.sh
 
 FROM ubuntu:24.04
 
@@ -22,7 +22,7 @@ ARG TRITON_VERSION=3.6.0
 ARG JAX_VERSION=0.8.2
 ARG FA_VERSION=v2.8.1
 ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
-ARG INSTALL_ROCM_TARBALL_SH_URL=https://raw.githubusercontent.com/ROCm/TheRock/main/dockerfiles/install_rocm_tarball.sh
+ARG INSTALL_ROCM_TARBALL_SH_URL=https://raw.githubusercontent.com/ROCm/TheRock/release/therock-7.12/dockerfiles/install_rocm_tarball.sh
 
 # Map GPU_ARCH → AMD GPU wheel/tarball family (once).
 RUN case "${GPU_ARCH}" in \

@@ -96,7 +96,7 @@ jobs:
             echo "::notice::Manual override detected: $MANUAL_OVERRIDE"
             IMAGE_MI30X="$MANUAL_OVERRIDE"
             IMAGE_MI35X="$MANUAL_OVERRIDE"
-          elif jq -e '.mi30x and .mi35x' <<< "$CONFIG_ENTRY" > /dev/null; then
+          elif jq -e 'type=="object" and has("mi30x") and has("mi35x")' <<< "$CONFIG_ENTRY" > /dev/null; then
             IMAGE_MI30X=$(jq -r '.mi30x' <<< "$CONFIG_ENTRY")
             IMAGE_MI35X=$(jq -r '.mi35x' <<< "$CONFIG_ENTRY")
           else
