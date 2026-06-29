@@ -655,10 +655,14 @@ class MXFP4BlockScaling(Recipe):
     fp8_format: Format = Format.E4M3
     fp8_dpa: bool = False
     fp8_mha: bool = False
+    backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
     use_hadamard: bool = os.getenv("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
 
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for MXFP4 scaling."
+        assert (
+            self.backward_override in _BACKWARD_OVERRIDES
+        ), "NVTE_BACKWARD_OVERRIDE must be unset or one of: 'high_precision', 'dequantized'."
 
     def __repr__(self) -> str:
         return (
