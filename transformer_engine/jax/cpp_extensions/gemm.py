@@ -618,6 +618,7 @@ class GemmPrimitive(BasePrimitive):
                 f" beta.dtype={beta.dtype}"
             )
 
+        # Declare cuBLAS workspace
         workspace_size = get_cublas_workspace_size_bytes()
         # NVFP4 swizzling happen in via nvte kernel instead of JAX transposes
         # On gfx1250, MXFP8 scale pre-swizzling also needs workspace space
