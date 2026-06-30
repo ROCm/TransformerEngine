@@ -382,6 +382,20 @@ ck_jit_prebuild() {
     if [ "$1" = "build" ]; then
         echo "Building CK JIT cache for arch=${_gpu_arch:-<not detected>}..."
         python "$_prebuild_py" build --blob-list "$_prebuild_list" $_arch_arg $_jobs_arg > /dev/null
+        _CK_JIT_CACHE_SNAPSHOT=$(python "$_prebuild_py" cache)
+        echo "$_CK_JIT_CACHE_SNAPSHOT" | grep Cache
+    else
+        if [ -z "${_CK_JIT_CACHE_SNAPSHOT+set}" ]; then
+            python "$_prebuild_py" cache | grep Cache
+        else
+            _cache_now=$(python "$_prebuild_py" cache)
+            if [ "$_CK_JIT_CACHE_SNAPSHOT" != "$_cache_now" ]; then
+                echo "Cache diff (build -> now):"
+                _diff_tmp=$(mktemp)
+                echo "$_CK_JIT_CACHE_SNAPSHOT" > "$_diff_tmp"
+                echo "$_cache_now" | diff -u "$_diff_tmp" -
+                rm -f "$_diff_tmp"
+            fi
+        fi
     fi
-    python "$_prebuild_py" cache | grep Cache
 }

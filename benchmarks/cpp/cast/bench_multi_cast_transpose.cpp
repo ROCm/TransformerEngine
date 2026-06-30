@@ -26,7 +26,7 @@ using namespace te_bench;
 using namespace transformer_engine;
 using fp8_e4m3 = test::fp8e4m3;
 
-// MoE shapes from Qwen3-235B and DeepSeek-V3
+// MoE shapes from Qwen3-235B, DeepSeek-V3, and DeepSeek-V4
 // Args: {total_tokens, cols, num_experts, top_k, routing_mode}
 #define MOE_BALANCED                     \
   ->Args({4096,  4096, 128, 8, 0})       \
@@ -46,7 +46,13 @@ using fp8_e4m3 = test::fp8e4m3;
   ->Args({16384, 2048, 256, 8, 0})       \
   ->Args({4096,  4096, 256, 8, 0})       \
   ->Args({8192,  4096, 256, 8, 0})       \
-  ->Args({16384, 4096, 256, 8, 0})
+  ->Args({16384, 4096, 256, 8, 0})       \
+  ->Args({4096,  7168, 384, 6, 0})       \
+  ->Args({8192,  7168, 384, 6, 0})       \
+  ->Args({16384, 7168, 384, 6, 0})       \
+  ->Args({4096,  3072, 384, 6, 0})       \
+  ->Args({8192,  3072, 384, 6, 0})       \
+  ->Args({16384, 3072, 384, 6, 0})
 
 #define MOE_SKEWED                       \
   ->Args({4096,  4096, 128, 8, 1})       \
@@ -66,7 +72,13 @@ using fp8_e4m3 = test::fp8e4m3;
   ->Args({16384, 2048, 256, 8, 1})       \
   ->Args({4096,  4096, 256, 8, 1})       \
   ->Args({8192,  4096, 256, 8, 1})       \
-  ->Args({16384, 4096, 256, 8, 1})
+  ->Args({16384, 4096, 256, 8, 1})       \
+  ->Args({4096,  7168, 384, 6, 1})       \
+  ->Args({8192,  7168, 384, 6, 1})       \
+  ->Args({16384, 7168, 384, 6, 1})       \
+  ->Args({4096,  3072, 384, 6, 1})       \
+  ->Args({8192,  3072, 384, 6, 1})       \
+  ->Args({16384, 3072, 384, 6, 1})
 
 namespace {
 
@@ -137,11 +149,11 @@ static std::vector<size_t> simulate_topk_skewed(
   return counts;
 }
 
-template <typename IType>
+template <typename IType, int EP = 1>
 static void BM_MultiCastTranspose(benchmark::State &state) {
-  const size_t total_tokens = state.range(0);
+  const size_t total_tokens = state.range(0) / EP;
   const size_t cols         = state.range(1);
-  const size_t num_experts  = state.range(2);
+  const size_t num_experts  = state.range(2) / EP;
   const size_t top_k        = state.range(3);
   const size_t routing_mode = state.range(4);
 
@@ -227,11 +239,11 @@ static void BM_MultiCastTranspose(benchmark::State &state) {
 }
 
 // Unfused baseline: separate padding kernel + cast_transpose
-template <typename IType>
+template <typename IType, int EP = 1>
 static void BM_PaddingThenMCT(benchmark::State &state) {
-  const size_t total_tokens = state.range(0);
+  const size_t total_tokens = state.range(0) / EP;
   const size_t cols         = state.range(1);
-  const size_t num_experts  = state.range(2);
+  const size_t num_experts  = state.range(2) / EP;
   const size_t top_k        = state.range(3);
   const size_t routing_mode = state.range(4);
 
@@ -320,11 +332,11 @@ static void BM_PaddingThenMCT(benchmark::State &state) {
 }
 
 // Fused: single cast_transpose kernel with built-in padding
-template <typename IType>
+template <typename IType, int EP = 1>
 static void BM_FusedPaddingMCT(benchmark::State &state) {
-  const size_t total_tokens = state.range(0);
+  const size_t total_tokens = state.range(0) / EP;
   const size_t cols         = state.range(1);
-  const size_t num_experts  = state.range(2);
+  const size_t num_experts  = state.range(2) / EP;
   const size_t top_k        = state.range(3);
   const size_t routing_mode = state.range(4);
 
@@ -440,5 +452,44 @@ static void BM_FusedPaddingMCT(benchmark::State &state) {
 
 REGISTER_MCT(hip_bfloat16, "BF16")
 REGISTER_PAD_MCT(hip_bfloat16, "BF16")
+
+#ifdef NVTE_ROCM_EP8_BENCHMARKS
+#define REGISTER_MCT_EP8(ITYPE, INAME)                                        \
+  BENCHMARK_TEMPLATE(BM_MultiCastTranspose, ITYPE, 8)                         \
+    ->Name("BM_MultiCastTranspose/" INAME "_E4M3/moe_ep8")                    \
+    MOE_BALANCED                                                              \
+    ->Unit(benchmark::kMicrosecond)                                           \
+    ->UseManualTime();                                                        \
+  BENCHMARK_TEMPLATE(BM_MultiCastTranspose, ITYPE, 8)                         \
+    ->Name("BM_MultiCastTranspose/" INAME "_E4M3/moe_ep8_skewed")             \
+    MOE_SKEWED                                                                \
+    ->Unit(benchmark::kMicrosecond)                                           \
+    ->UseManualTime();
+
+#define REGISTER_PAD_MCT_EP8(ITYPE, INAME)                                    \
+  BENCHMARK_TEMPLATE(BM_PaddingThenMCT, ITYPE, 8)                             \
+    ->Name("BM_PaddingThenMCT/" INAME "_E4M3/moe_ep8")                        \
+    MOE_BALANCED                                                              \
+    ->Unit(benchmark::kMicrosecond)                                           \
+    ->UseManualTime();                                                        \
+  BENCHMARK_TEMPLATE(BM_PaddingThenMCT, ITYPE, 8)                             \
+    ->Name("BM_PaddingThenMCT/" INAME "_E4M3/moe_ep8_skewed")                 \
+    MOE_SKEWED                                                                \
+    ->Unit(benchmark::kMicrosecond)                                           \
+    ->UseManualTime();                                                        \
+  BENCHMARK_TEMPLATE(BM_FusedPaddingMCT, ITYPE, 8)                            \
+    ->Name("BM_FusedPaddingMCT/" INAME "_E4M3/moe_ep8")                       \
+    MOE_BALANCED                                                              \
+    ->Unit(benchmark::kMicrosecond)                                           \
+    ->UseManualTime();                                                        \
+  BENCHMARK_TEMPLATE(BM_FusedPaddingMCT, ITYPE, 8)                            \
+    ->Name("BM_FusedPaddingMCT/" INAME "_E4M3/moe_ep8_skewed")                \
+    MOE_SKEWED                                                                \
+    ->Unit(benchmark::kMicrosecond)                                           \
+    ->UseManualTime();
+
+REGISTER_MCT_EP8(hip_bfloat16, "BF16")
+REGISTER_PAD_MCT_EP8(hip_bfloat16, "BF16")
+#endif
 
 BENCHMARK_MAIN();

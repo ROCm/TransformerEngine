@@ -385,7 +385,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         scales_colwise[scale_idx] = biased_exponent_act;
       }
 
-      float block_scale_inverse_act = ptx::exp2f_rcp(biased_exponent_act);
+      float block_scale_inverse_act = ptx::exp2f_rcp<float>(biased_exponent_act);
       float block_scale_inverse_gate;
 
       if constexpr (IS_BWD) {
@@ -403,7 +403,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         if (tid_Y_colwise == 0 && (!out_of_bounds_colwise)) {
           scales_colwise[scale_idx_gate] = biased_exponent_gate;
         }
-        block_scale_inverse_gate = ptx::exp2f_rcp(biased_exponent_gate);
+        block_scale_inverse_gate = ptx::exp2f_rcp<float>(biased_exponent_gate);
       }
 
 // 3. Scale elements
@@ -595,7 +595,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         scales_rowwise[scale_idx] = biased_exponent_act;
       }
 
-      const float block_scale_inverse_act = ptx::exp2f_rcp(biased_exponent_act);
+      const float block_scale_inverse_act = ptx::exp2f_rcp<float>(biased_exponent_act);
       const ptx::floatx2 block_scale_inverse_2x_act = {block_scale_inverse_act,
                                                        block_scale_inverse_act};
 
@@ -617,7 +617,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         if (!out_of_bounds_rowwise) {
           scales_rowwise[scale_idx_gate] = biased_exponent_gate;
         }
-        block_scale_inverse_gate = ptx::exp2f_rcp(biased_exponent_gate);
+        block_scale_inverse_gate = ptx::exp2f_rcp<float>(biased_exponent_gate);
         block_scale_inverse_2x_gate = {block_scale_inverse_gate, block_scale_inverse_gate};
       }
 
