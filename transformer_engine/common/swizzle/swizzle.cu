@@ -28,9 +28,7 @@ namespace {
 constexpr int MXFP8_BLOCK_SIZE = 32;
 constexpr int NVFP4_BLOCK_SIZE = 16;
 
-<<<<<<< HEAD
 #ifndef __HIP_PLATFORM_AMD__
-=======
 int get_max_dynamic_smem() {
   static int max_smem = -1;
   if (max_smem < 0) {
@@ -42,7 +40,6 @@ int get_max_dynamic_smem() {
   return max_smem;
 }
 
->>>>>>> upstream/release_v2.15
 constexpr __device__ __host__ int TB_DIM = 32;
 constexpr __device__ __host__ int NEW_SF_TILE_DIM_K = 16;
 constexpr __device__ __host__ int N_SF_PER_TD_PER_TILE = 4;
@@ -1617,8 +1614,8 @@ void launch_multi_tensor_unswizzle_scaling_factors(MultiSwizzleArgs& kernel_args
 }
 
 void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
-<<<<<<< HEAD
-                                          std::vector<Tensor*>& output, cudaStream_t stream) {
+                                          std::vector<Tensor*>& output, cudaStream_t stream,
+                                          bool check_scale_inv_shapes) {
 #ifdef __HIP_PLATFORM_AMD__
   // On gfx1250, MXFP8 uses the MX pre-swizzle layout.
   if (cuda::sm_arch() == 125) {
@@ -1637,10 +1634,6 @@ void multi_tensor_swizzle_scaling_factors(const std::vector<Tensor*>& input,
   }
 #endif  // __HIP_PLATFORM_AMD__
 
-=======
-                                          std::vector<Tensor*>& output, cudaStream_t stream,
-                                          bool check_scale_inv_shapes) {
->>>>>>> upstream/release_v2.15
   auto num_tensors = input.size();
   bool all_has_data = true;
   bool all_has_columnwise_data = true;

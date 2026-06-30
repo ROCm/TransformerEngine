@@ -565,13 +565,7 @@ def get_attention_backend(
             if not allow_emulation:
                 logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
                 use_unfused_attention = False
-<<<<<<< HEAD
-        fp8_recipe = fp8_meta["recipe"]
-        if fp8_meta.get("local_recipes", None) is not None:
-            fp8_recipe = fp8_meta["local_recipes"][0]
-        if use_fused_attention and fp8_recipe.float8_current_scaling() and not IS_HIP_EXTENSION:
-=======
-        if use_fused_attention and fp8_recipe.delayed():
+        if use_fused_attention and fp8_recipe.delayed() and not IS_HIP_EXTENSION:
             if (
                 device_compute_capability >= (10, 0)
                 and deterministic
@@ -582,8 +576,7 @@ def get_attention_backend(
                     " determinism for cuDNN < 9.18.0"
                 )
                 use_fused_attention = False
-        if use_fused_attention and fp8_recipe.float8_current_scaling():
->>>>>>> upstream/release_v2.15
+        if use_fused_attention and fp8_recipe.float8_current_scaling() and not IS_HIP_EXTENSION:
             if device_compute_capability < (10, 0):
                 logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
                 use_fused_attention = False
@@ -922,32 +915,12 @@ def get_attention_backend(
                     softmax_type,
                 )
                 use_unfused_attention = False
-        if qkv_format == "thd" and cudnn_version < (9, 18, 0):
+        if qkv_format == "thd" and not IS_HIP_EXTENSION and cudnn_version < (9, 18, 0):
             logger.debug(
                 "Disabling FusedAttention for softmax_type = %s, qkv_format = thd and cuDNN"
                 " version < 9.18",
                 softmax_type,
             )
-<<<<<<< HEAD
-            use_unfused_attention = False
-        if qkv_format == "thd":
-            if not IS_HIP_EXTENSION and cudnn_version < (9, 18, 0):
-                logger.debug(
-                    "Disabling FusedAttention for softmax_type = %s, qkv_format = thd and cuDNN"
-                    " version < 9.18",
-                    softmax_type,
-                )
-                use_fused_attention = False
-        if context_parallel:
-            if cp_comm_type != "a2a":
-                logger.debug(
-                    "Disabling FusedAttention for context parallelism with softmax_type = %s and"
-                    " cp_comm_type = %s",
-                    softmax_type,
-                    cp_comm_type,
-                )
-                use_fused_attention = False
-=======
             use_fused_attention = False
         if context_parallel and cp_comm_type != "a2a":
             logger.debug(
@@ -957,7 +930,6 @@ def get_attention_backend(
                 cp_comm_type,
             )
             use_fused_attention = False
->>>>>>> upstream/release_v2.15
 
     # Filter: Context parallelism
     # qkv_format | attn_mask_type              | attn_bias_type           | supported backends

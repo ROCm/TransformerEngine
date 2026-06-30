@@ -590,32 +590,6 @@ def fused_attn_bwd(
                 f" for backend={fused_attention_backend}."
             )
 
-<<<<<<< HEAD
-    if not IS_HIP_EXTENSION and fused_attention_backend == FusedAttnBackend["FP8"]:
-        if s_quantizer is None:
-            raise ValueError(
-                "s_quantizer is required for FP8 fused attention backward"
-                f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
-            )
-        if dp_quantizer is None:
-            raise ValueError(
-                "dp_quantizer is required for FP8 fused attention backward"
-                f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
-            )
-        if dqkv_dtype is None:
-            raise ValueError(
-                "dqkv_dtype is required for FP8 fused attention backward"
-                f" (backend={fused_attention_backend}, qkv_layout={qkv_layout!r})."
-            )
-        if len(aux_ctx_tensors) != 3:
-            raise ValueError(
-                "aux_ctx_tensors must be [M, ZInv, rng_state] for FP8 fused attention,"
-                f" but got len(aux_ctx_tensors)={len(aux_ctx_tensors)}"
-                f" (backend={fused_attention_backend})."
-            )
-
-=======
->>>>>>> upstream/release_v2.15
     output_tensors = tex.fused_attn_bwd(
         max_seqlen_q,
         max_seqlen_kv,

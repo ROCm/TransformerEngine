@@ -2394,12 +2394,9 @@ class AttnFuncWithCPAndKVP2P(torch.autograd.Function):
             ]
             p2p_comm_buffers[0][0].copy_(kv)
             if ctx.use_fused_attention:
-<<<<<<< HEAD
-                bwd_output_te_dtype = TE_DType[bwd_nominal_dtype]
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"]
-=======
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
->>>>>>> upstream/release_v2.15
+                fused_attn_backend = FusedAttnBackend[
+                    "F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"
+                ]
 
         # communicate for the 'a2a' part of 'a2a+p2p'
         dout = dout.view(*ctx.orig_o_shape)
@@ -3099,7 +3096,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
             fp8_meta_kwargs["s_quantizer"] = S_quantizer
             fp8_meta_kwargs["o_quantizer"] = O_quantizer
         elif use_fused_attention:
-            fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+            fused_attn_backend = (
+                tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                if not IS_HIP_EXTENSION
+                else tex.NVTE_Fused_Attn_Backend.NVTE_CK
+            )
         orig_q_shape, _, orig_v_shape = q.shape, k.shape, v.shape
         orig_o_shape = orig_q_shape[:-1] + orig_v_shape[-1:]
 
@@ -3210,19 +3211,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             max_seqlen_kv_,
                             cu_seqlens_q,
                             cu_seqlens_kv_per_step[i],
-<<<<<<< HEAD
-                            q_,
-                            k_,
-                            v_,
-                            qkv_dtype,
-                            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen if not IS_HIP_EXTENSION else tex.NVTE_Fused_Attn_Backend.NVTE_CK,
-=======
                             q_part,
                             k_part,
                             v_part,
                             fwd_nominal_dtype,
                             fused_attn_backend,
->>>>>>> upstream/release_v2.15
                             attn_scale=softmax_scale,
                             dropout=dropout_p,
                             qkv_layout=new_qkv_layout,
@@ -3615,7 +3608,11 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                                 softmax_lse_per_step[i],
                                 rng_states[i],
                             ]
-                        fused_attn_backend = tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                        fused_attn_backend = (
+                            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen
+                            if not IS_HIP_EXTENSION
+                            else tex.NVTE_Fused_Attn_Backend.NVTE_CK
+                        )
                         fp8_meta_kwargs = {}
                         new_qkv_layout = ctx.qkv_layout
                         do_format = ctx.o_format
@@ -3673,11 +3670,7 @@ class AttnFuncWithCPAndKVAllGather(torch.autograd.Function):
                             dout_part,
                             ctx.fwd_nominal_dtype,
                             aux_ctx_tensors,
-<<<<<<< HEAD
-                            tex.NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen if not IS_HIP_EXTENSION else tex.NVTE_Fused_Attn_Backend.NVTE_CK,
-=======
                             fused_attn_backend,
->>>>>>> upstream/release_v2.15
                             cu_seqlens_q_padded=cu_seqlens_q_padded,
                             cu_seqlens_kv_padded=cu_seqlens_kv_per_step[i],
                             attn_scale=ctx.softmax_scale,
@@ -3983,12 +3976,9 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             fp8_meta_kwargs["o_quantizer"] = O_quantizer
         else:
             if use_fused_attention:
-<<<<<<< HEAD
-                fp8_meta_kwargs = {}
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"]
-=======
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
->>>>>>> upstream/release_v2.15
+                fused_attn_backend = FusedAttnBackend[
+                    "F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"
+                ]
 
         # q, k, v:
         # FP8DS/FP8CS: torch.uint8
@@ -4314,14 +4304,10 @@ class AttnFuncWithCPAndQKVOA2A(torch.autograd.Function):
             if isinstance(dout, QuantizedTensorStorage):
                 dout = dout.dequantize(dtype=bwd_nominal_dtype)
             if ctx.use_fused_attention:
-<<<<<<< HEAD
-                fp8_meta_kwargs = {}
-                dqkv_te_dtype = TE_DType[dout.dtype]
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"]
-=======
-                fused_attn_backend = FusedAttnBackend["F16_arbitrary_seqlen"]
+                fused_attn_backend = FusedAttnBackend[
+                    "F16_arbitrary_seqlen" if not IS_HIP_EXTENSION else "CK"
+                ]
         dout = dout.view(*ctx.orig_o_shape)
->>>>>>> upstream/release_v2.15
 
         # dout:
         # FP8DS/CS: torch.uint8

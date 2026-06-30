@@ -3401,23 +3401,14 @@ class TestSequentialModules:
 
         # Check values
         tols = {"rtol": 0.25, "atol": 0.5}  # Loose tols for sanity checking
-<<<<<<< HEAD
         if IS_HIP_EXTENSION:
             tols["atol"] = 0.54
-        torch.testing.assert_close(to_cpu(y_test), y_ref, **tols)
-        torch.testing.assert_close(to_cpu(x_test.grad), x_ref.grad, **tols)
-        torch.testing.assert_close(to_cpu(norm.weight.grad), norm_w_ref.grad, **tols)
-        torch.testing.assert_close(to_cpu(norm.bias.grad), norm_b_ref.grad, **tols)
-        torch.testing.assert_close(to_cpu(ffn2.weight.grad), w2_ref.grad, **tols)
-        torch.testing.assert_close(to_cpu(ffn1.weight.grad), w1_ref.grad, **tols)
-=======
         assert_close(y_test, y_ref, **tols)
         assert_close(x_test.grad, x_ref.grad, **tols)
         assert_close_grads(norm.weight, norm_w_ref, **tols)
         assert_close_grads(norm.bias, norm_b_ref, **tols)
         assert_close_grads(ffn2.weight, w2_ref, **tols)
         assert_close_grads(ffn1.weight, w1_ref, **tols)
->>>>>>> upstream/release_v2.15
         if bias:
             assert_close_grads(ffn1.bias, b1_ref, **tols)
             assert_close_grads(ffn2.bias, b2_ref, **tols)

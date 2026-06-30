@@ -284,26 +284,6 @@ if test_essential:
 def test_cp_with_fused_attention(
     dtype, model, qkv_format, cp_comm_type, fp8_bwd, fp8_mha, fp8_dpa, scaling_mode, f16_O
 ):
-<<<<<<< HEAD
-    num_gpus = 4 if cp_comm_type == "a2a+p2p" else 2
-    if num_gpus > torch.cuda.device_count():
-        pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()}")
-
-    if (not IS_HIP_EXTENSION) and qkv_format == "thd" and get_device_compute_capability() < (9, 0):
-        pytest.skip("THD format is only supported on sm90+!")
-    if cp_comm_type == "all_gather" and get_cudnn_version() < (9, 3, 0):
-        pytest.skip("CP implementation with KV all-gather is only supported with cuDNN >= 9.3.0!")
-    if (not IS_HIP_EXTENSION) and dtype == "fp8" and get_device_compute_capability() < (9, 0):
-        pytest.skip("FP8 attention is only supported on sm90+!")
-    if IS_HIP_EXTENSION and dtype == "fp8":
-        pytest.skip("FP8 attention is not supported on ROCm yet!")
-    if dtype == "fp8" and not fp8_dpa and fp8_mha:
-        pytest.skip("Duplicate tests to fp8_dpa=True and fp8_mha=True!")
-    if dtype != "fp8" and fp8_bwd:
-        pytest.skip("Only fp8 works with fp8_bwd=True!")
-
-=======
->>>>>>> upstream/release_v2.15
     config = model_configs_fused_attn[model]
     config.context_parallel = True
     config.cp_comm_type = cp_comm_type
@@ -312,10 +292,12 @@ def test_cp_with_fused_attention(
     if num_gpus > torch.cuda.device_count():
         pytest.skip(f"Test requires {num_gpus} GPUs, but found {torch.cuda.device_count()} GPUs.")
 
-    if get_device_compute_capability() < (9, 0) and qkv_format == "thd":
+    if not IS_HIP_EXTENSION and get_device_compute_capability() < (9, 0) and qkv_format == "thd":
         pytest.skip("Only sm90+ architectures support THD format!")
-    if get_device_compute_capability() < (9, 0) and dtype == "fp8":
+    if not IS_HIP_EXTENSION and get_device_compute_capability() < (9, 0) and dtype == "fp8":
         pytest.skip("Only sm90+ architectures support FP8 attention!")
+    if IS_HIP_EXTENSION and dtype == "fp8":
+        pytest.skip("FP8 attention is not supported on ROCm yet!")
 
     if dtype == "fp8" and not (fp8_mha or fp8_dpa):
         pytest.skip("dtype=fp8 requires fp8_dpa=True or fp8_mha=True!")

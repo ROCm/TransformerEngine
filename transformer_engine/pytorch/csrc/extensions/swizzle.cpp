@@ -294,9 +294,6 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_impl(
   return std::move(output_scales_pyt);
 }
 
-<<<<<<< HEAD
-#ifndef USE_ROCM
-=======
 }  // anonymous namespace
 
 std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm(
@@ -313,7 +310,7 @@ std::optional<at::Tensor> multi_tensor_swizzle_scales_for_gemm_unchecked(
                                                    /*check_scale_inv_shapes=*/false);
 }
 
->>>>>>> upstream/release_v2.15
+#ifndef USE_ROCM
 at::Tensor convert_block_scaling_to_mxfp8_tensor(transformer_engine::TensorWrapper &input,
                                                  bool rowwise) {
   // Check input tensor
