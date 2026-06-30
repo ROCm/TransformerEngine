@@ -34,7 +34,7 @@
 
 #ifdef USE_HIPKITTENS_GEMM
 #include "kittens/blockwise_fp8_gemm.h"
-#include "kittens/mxfp8_gemm.h"
+#include "kittens/cdna4/mxfp8_gemm.h"
 #endif
 
 namespace transformer_engine {

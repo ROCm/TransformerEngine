@@ -3,11 +3,13 @@
 
 cmake_minimum_required(VERSION 3.21)
 
-# HipKittens GEMM kernels coexist for two architectures:
-#   gfx942 (CDNA3): blockwise FP8 GEMM  -> blockwise_fp8_gemm.cpp, 3rdparty/hipkittens_cdna3
-#   gfx950 (CDNA4): MXFP8 GEMM          -> mxfp8_gemm.cpp,         3rdparty/hipkittens
-# Each source is only added when its target arch is present in CMAKE_HIP_ARCHITECTURES,
-# and is compiled with its own include dir + KITTENS_CDNA{3,4} define.
+# HipKittens GEMM kernels are split by target architecture into per-device
+# folders (a TEMPORARY layout until the hipkittens cdna3/cdna4 submodule
+# branches are merged upstream):
+#   cdna3/  gfx942: blockwise FP8 GEMM   (3rdparty/hipkittens_cdna3, -DKITTENS_CDNA3)
+#   cdna4/  gfx950: blockwise + MXFP8    (3rdparty/hipkittens,       -DKITTENS_CDNA4)
+# Each source is added only when its arch is in CMAKE_HIP_ARCHITECTURES, and
+# compiled with its own HipKittens include dir + define.
 function(try_enable_hipkittens_gemm)
     list(FIND CMAKE_HIP_ARCHITECTURES "gfx942" _gfx942_index)
     list(FIND CMAKE_HIP_ARCHITECTURES "gfx950" _gfx950_index)
@@ -27,25 +29,26 @@ function(try_enable_hipkittens_gemm)
 
     set(HIPKITTENS_CDNA3_INCLUDE_DIR
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../../3rdparty/hipkittens_cdna3/include")
-    set(HIPKITTENS_INCLUDE_DIR
+    set(HIPKITTENS_CDNA4_INCLUDE_DIR
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../../3rdparty/hipkittens/include")
 
-    set(kittens_gemm_SOURCES "")
+    # Unified host launcher (pure host, no HipKittens headers) — always built.
+    set(kittens_gemm_SOURCES blockwise_fp8_gemm.cpp)
     if(NOT _gfx942_index EQUAL -1)
         if(NOT EXISTS "${HIPKITTENS_CDNA3_INCLUDE_DIR}/kittens.cuh")
             message(FATAL_ERROR
                 "Could not find HipKittens (CDNA3) headers at ${HIPKITTENS_CDNA3_INCLUDE_DIR}. "
                 "Try running 'git submodule update --init --recursive'.")
         endif()
-        list(APPEND kittens_gemm_SOURCES blockwise_fp8_gemm.cpp)
+        list(APPEND kittens_gemm_SOURCES cdna3/blockwise_fp8_gemm.cpp)
     endif()
     if(NOT _gfx950_index EQUAL -1)
-        if(NOT EXISTS "${HIPKITTENS_INCLUDE_DIR}/kittens.cuh")
+        if(NOT EXISTS "${HIPKITTENS_CDNA4_INCLUDE_DIR}/kittens.cuh")
             message(FATAL_ERROR
-                "Could not find HipKittens (CDNA4) headers at ${HIPKITTENS_INCLUDE_DIR}. "
+                "Could not find HipKittens (CDNA4) headers at ${HIPKITTENS_CDNA4_INCLUDE_DIR}. "
                 "Try running 'git submodule update --init --recursive'.")
         endif()
-        list(APPEND kittens_gemm_SOURCES mxfp8_gemm.cpp)
+        list(APPEND kittens_gemm_SOURCES cdna4/blockwise_fp8_gemm.cpp cdna4/mxfp8_gemm.cpp)
     endif()
 
     set(CMAKE_CXX_STANDARD 20)
@@ -58,22 +61,32 @@ function(try_enable_hipkittens_gemm)
     target_include_directories(kittens_gemm PRIVATE ${HIP_INCLUDE_DIRS})
     target_link_libraries(kittens_gemm PUBLIC hip::host hip::device)
 
+    # Dev-only fast build: NVTE_HK_FAST_BUILD=1 instantiates only one dtype
+    # combo (e4m3xe4m3, bf16 out) to cut kittens compile time ~9x.
+    set(_kittens_fast_def "")
+    if(NOT "$ENV{NVTE_HK_FAST_BUILD}" STREQUAL "" AND NOT "$ENV{NVTE_HK_FAST_BUILD}" STREQUAL "0")
+        set(_kittens_fast_def -DNVTE_HK_FAST_BUILD)
+        message(STATUS "HipKittens GEMM: FAST dev build (single dtype instance)")
+    endif()
+
     # Per-source include dir + define so each kernel sees its own HipKittens.
     if(NOT _gfx942_index EQUAL -1)
-        set_property(SOURCE blockwise_fp8_gemm.cpp APPEND PROPERTY
+        set_property(SOURCE cdna3/blockwise_fp8_gemm.cpp APPEND PROPERTY
             INCLUDE_DIRECTORIES "${HIPKITTENS_CDNA3_INCLUDE_DIR}")
-        set_property(SOURCE blockwise_fp8_gemm.cpp APPEND PROPERTY
-            COMPILE_OPTIONS -DKITTENS_CDNA3 -fno-gpu-rdc -O3)
-        set_source_files_properties(blockwise_fp8_gemm.cpp PROPERTIES
+        set_property(SOURCE cdna3/blockwise_fp8_gemm.cpp APPEND PROPERTY
+            COMPILE_OPTIONS -DKITTENS_CDNA3 ${_kittens_fast_def} -fno-gpu-rdc -O3)
+        set_source_files_properties(cdna3/blockwise_fp8_gemm.cpp PROPERTIES
             HIP_ARCHITECTURES "gfx942")
     endif()
     if(NOT _gfx950_index EQUAL -1)
-        set_property(SOURCE mxfp8_gemm.cpp APPEND PROPERTY
-            INCLUDE_DIRECTORIES "${HIPKITTENS_INCLUDE_DIR}")
-        set_property(SOURCE mxfp8_gemm.cpp APPEND PROPERTY
-            COMPILE_OPTIONS -DKITTENS_CDNA4 -fno-gpu-rdc -O3)
-        set_source_files_properties(mxfp8_gemm.cpp PROPERTIES
-            HIP_ARCHITECTURES "gfx950")
+        foreach(_cdna4_src cdna4/blockwise_fp8_gemm.cpp cdna4/mxfp8_gemm.cpp)
+            set_property(SOURCE ${_cdna4_src} APPEND PROPERTY
+                INCLUDE_DIRECTORIES "${HIPKITTENS_CDNA4_INCLUDE_DIR}")
+            set_property(SOURCE ${_cdna4_src} APPEND PROPERTY
+                COMPILE_OPTIONS -DKITTENS_CDNA4 -fno-gpu-rdc -O3)
+            set_source_files_properties(${_cdna4_src} PROPERTIES
+                HIP_ARCHITECTURES "gfx950")
+        endforeach()
     endif()
 
     install(TARGETS kittens_gemm

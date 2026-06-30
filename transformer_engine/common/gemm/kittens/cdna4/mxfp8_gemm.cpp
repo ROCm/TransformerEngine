@@ -66,6 +66,7 @@ void mxfp8_gemm_tn_kernel(
     const void *__restrict__ bias,
     int bias_dtype,
     int M, int N, int K) {
+#if defined(__gfx950__)
 
     int k_iters  = K / BLOCK_K;
     int tiles_M  = M / BLOCK_ROW;
@@ -390,6 +391,7 @@ void mxfp8_gemm_tn_kernel(
     kittens::store(C, oB, out_coord_B);
     kittens::store(C, oC, out_coord_C);
     kittens::store(C, oD, out_coord_D);
+#endif  // __gfx950__
 }
 
 // Scale format conversion: TE uint8 [dim, K/32] row-major →
