@@ -653,7 +653,7 @@ class GemmPrimitive(BasePrimitive):
             n = reduce(operator.mul, rhs_non_contracting_shape)
             k = lhs_contracting_size
             layout = ("T" if lhs_is_transposed else "N") + ("T" if rhs_is_transposed else "N")
-            workspace_size = _hipkittens_workspace_bytes(m, n, k, layout)
+            workspace_size = max(_hipkittens_workspace_bytes(m, n, k, layout), get_cublas_workspace_size_bytes())
         else:
             # Declare cuBLAS workspace
             workspace_size = get_cublas_workspace_size_bytes()
