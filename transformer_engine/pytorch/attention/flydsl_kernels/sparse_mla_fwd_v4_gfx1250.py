@@ -46,7 +46,7 @@ NUM_WAVES = 4
 BLOCK_SIZE = NUM_WAVES * WAVE_SIZE  # 128 threads — parallelizes the cooperative
                                     # load + transposed-K scatter 4x vs 1 wave.
 BLOCK_H = 16  # heads per workgroup = WMMA_M
-TILE_K = 32   # gathered tokens per inner loop step = WMMA_K
+TILE_K = 64   # gathered tokens per inner loop step (ACC_K_STEPS = TILE_K/WMMA_K)
 
 _LOG2E = host_math.log2(host_math.e)
 
@@ -86,21 +86,21 @@ def build_sparse_mla_fwd_v4_gfx1250(
 
     assert D_V % WMMA_N == 0, f"D_V={D_V} must be multiple of WMMA_N={WMMA_N}"
     assert D_ROPE % WMMA_K == 0 or D_ROPE % WMMA_N == 0, f"D_ROPE={D_ROPE} must align"
-    assert TOPK % TILE_K == 0, f"TOPK={TOPK} must be multiple of TILE_K={TILE_K}"
+    assert TILE_K % WMMA_K == 0, f"TILE_K={TILE_K} must be multiple of WMMA_K={WMMA_K}"
 
     elem_bytes = 2  # bf16
     is_bf16 = True
     wmma_op = rocdl.wmma_f32_16x16x32_bf16
 
     # WMMA tile counts
-    # Score GEMM: S[BH=16, TK=32] = Q[16, D] × K^T[D, 32]
-    SCORE_N_TILES = TILE_K // WMMA_N   # 32/16 = 2
+    # Score GEMM: S[BH=16, TILE_K] = Q[16, D] × K^T[D, TILE_K]
+    SCORE_N_TILES = TILE_K // WMMA_N   # 64/16 = 4
     SCORE_K_STEPS_LORA = D_V // WMMA_K  # 512/32 = 16
     SCORE_K_STEPS_ROPE = D_ROPE // WMMA_K  # 64/32 = 2
 
-    # Acc GEMM: O[BH=16, D_V] += P[16, 32] × V[32, D_V]
+    # Acc GEMM: O[BH=16, D_V] += P[16, TILE_K] × V[TILE_K, D_V]
     ACC_N_TILES = D_V // WMMA_N  # 512/16 = 32
-    ACC_K_STEPS = TILE_K // WMMA_K  # 32/32 = 1
+    ACC_K_STEPS = TILE_K // WMMA_K  # 64/32 = 2 (ktok contraction split into K-steps)
     # Split the acc N-tiles across the waves: wave w computes tiles
     # [w*ACC_TILES_PER_WAVE : (w+1)*ACC_TILES_PER_WAVE]. Score+softmax stay
     # per-wave (each wave needs the full P), only the P@V acc is partitioned.
@@ -110,8 +110,8 @@ def build_sparse_mla_fwd_v4_gfx1250(
     )
     ACC_TILES_PER_WAVE = ACC_N_TILES // NUM_WAVES
 
-    # Number of TOPK tiles
-    NUM_TOPK_TILES = TOPK // TILE_K
+    # Number of TOPK tiles (ceil — last tile may be partial; extra ktok masked)
+    NUM_TOPK_TILES = (TOPK + TILE_K - 1) // TILE_K
 
     # LDS layout: [Q | V (=KV natural [ktok,d]) | K (transposed [d,ktok]) | P | Valid]
     # Q tile [BLOCK_H, D_QK] — loaded once at start, persistent
@@ -158,8 +158,8 @@ def build_sparse_mla_fwd_v4_gfx1250(
     @flyc.kernel
     def sparse_mla_fwd_v4_kernel(
         Q: fx.Tensor,        # [T, H, D_QK] bf16
-        GKV: fx.Tensor,      # [T, TOPK, D_QK] bf16 (pre-gathered)
-        VMask: fx.Tensor,    # [T, TOPK] int32 (0=valid, 1=invalid)
+        KV: fx.Tensor,       # [T, D_QK] bf16 (original MQA latent KV — gathered in-kernel)
+        TopK: fx.Tensor,     # [T, TOPK] int32 (KV token indices; <0 or >=T = invalid)
         Sink: fx.Tensor,     # [H] fp32
         O: fx.Tensor,        # [T, H, D_V] bf16
         LSE: fx.Tensor,      # [T, H] fp32
@@ -197,8 +197,8 @@ def build_sparse_mla_fwd_v4_gfx1250(
         # ---- Buffer resources ----
         from flydsl.expr.typing import T
         q_rsrc = buffer_ops.create_buffer_resource(Q, max_size=True)
-        gkv_rsrc = buffer_ops.create_buffer_resource(GKV, max_size=True)
-        vmask_rsrc = buffer_ops.create_buffer_resource(VMask, max_size=True)
+        kv_rsrc = buffer_ops.create_buffer_resource(KV, max_size=True)
+        topk_rsrc = buffer_ops.create_buffer_resource(TopK, max_size=True)
         o_rsrc = buffer_ops.create_buffer_resource(O, max_size=True)
 
         # ---- Q base offset (for WMMA on wave 0) ----
@@ -245,11 +245,14 @@ def build_sparse_mla_fwd_v4_gfx1250(
             tile_base = arith.index(tile_iter * TILE_K)
             zero_i32 = arith.constant(0, type=T.i32)
 
-            # ---- Phase 1: Load gathered KV tile to LDS (ALL 128 threads) ----
-            # GKV is [T, TOPK, D_QK] bf16 pre-gathered. Load tile [TILE_K, D_QK].
-            # GKV base for this token + tile: token_idx * TOPK * D_QK + tile_base * D_QK
-            STRIDE_GKV_TOKEN = TOPK * D_QK
-            gkv_base = token_idx * arith.index(STRIDE_GKV_TOKEN) + tile_base * arith.index(D_QK)
+            # ---- Phase 1: Gather KV tile to LDS in-kernel (ALL 128 threads) ----
+            # KV is the original [T, D_QK] latent (MQA). Each of the TILE_K rows in this
+            # tile is gathered from KV[TopK[token_idx, tile_base + row]]. Invalid indices
+            # (<0 or >=T) load row 0 and are masked out later in the score.
+            STRIDE_KV_TOKEN = D_QK
+            topk_tile_base = token_idx * arith.index(TOPK) + tile_base
+            ttok_i32 = arith.index_cast(T.i32, total_tokens)
+            one_i32 = arith.constant(1, type=T.i32)
             ELEMS_PER_LOAD = 8  # dwordx4
             TOTAL_KV_ELEMS = TILE_K * D_QK
             KV_LOADS_PER_THREAD = (TOTAL_KV_ELEMS + BLOCK_SIZE * ELEMS_PER_LOAD - 1) // (BLOCK_SIZE * ELEMS_PER_LOAD)
@@ -258,11 +261,18 @@ def build_sparse_mla_fwd_v4_gfx1250(
                 flat_idx = (tx + arith.index(li * BLOCK_SIZE)) * arith.index(ELEMS_PER_LOAD)
                 in_bounds = arith.cmpi(arith.CmpIPredicate.slt, flat_idx, arith.index(TOTAL_KV_ELEMS))
                 if in_bounds:
-                    row = flat_idx // arith.index(D_QK)   # ktok
+                    row = flat_idx // arith.index(D_QK)   # ktok within tile
                     col = flat_idx % arith.index(D_QK)    # d (start of 8-elem chunk)
-                    g_offset = gkv_base + row * arith.index(D_QK) + col
+                    # Gather: read this row's KV-token index, bounds-check, clamp to 0.
+                    raw_idx = buffer_ops.buffer_load(
+                        topk_rsrc, fx.Int32(topk_tile_base + row), vec_width=1, dtype=T.i32)
+                    ge0 = arith.cmpi(arith.CmpIPredicate.sge, raw_idx, zero_i32)
+                    ltT = arith.cmpi(arith.CmpIPredicate.slt, raw_idx, ttok_i32)
+                    safe_idx = arith.select(ge0, arith.select(ltT, raw_idx, zero_i32), zero_i32)
+                    src_tok = arith.index_cast(T.index, safe_idx)
+                    g_offset = src_tok * arith.index(STRIDE_KV_TOKEN) + col
                     g_i32_off = fx.Int32(g_offset * arith.index(elem_bytes) // arith.index(4))
-                    data = buffer_ops.buffer_load(gkv_rsrc, g_i32_off, vec_width=ELEMS_PER_LOAD // 2, dtype=T.i32)
+                    data = buffer_ops.buffer_load(kv_rsrc, g_i32_off, vec_width=ELEMS_PER_LOAD // 2, dtype=T.i32)
                     from flydsl._mlir.dialects import llvm as llvm_d
                     # Store natural [ktok, d] for V (acc gemm).
                     lds_offset = row * arith.index(LDS_KV_STRIDE * elem_bytes) + col * arith.index(elem_bytes)
@@ -279,18 +289,24 @@ def build_sparse_mla_fwd_v4_gfx1250(
                             _raw(arith.index_cast(T.i32, kt_lds_base + kt_offset)), address_space=3)
                         llvm_d.store(elem, kt_ptr)
 
-            # Also load validity mask for this tile to LDS
-            # VMask is [T, TOPK] int32. Load TILE_K entries.
-            vmask_base = token_idx * arith.index(TOPK) + tile_base
-            # Only first TILE_K threads need to load (1 i32 each)
+            # Compute per-row validity from TopK indices (0=valid, 1=invalid) → LDS.
+            # Only the first TILE_K threads load one index each. For a partial last
+            # tile (TOPK not a multiple of TILE_K), ktok positions >= TOPK are invalid.
             is_vmask_loader = arith.cmpi(arith.CmpIPredicate.slt, tx, arith.index(TILE_K))
             if is_vmask_loader:
-                v_off = vmask_base + tx
-                v_flag = buffer_ops.buffer_load(vmask_rsrc, fx.Int32(v_off), vec_width=1, dtype=T.i32)
+                raw_idx_v = buffer_ops.buffer_load(
+                    topk_rsrc, fx.Int32(topk_tile_base + tx), vec_width=1, dtype=T.i32)
+                ge0_v = arith.cmpi(arith.CmpIPredicate.sge, raw_idx_v, zero_i32)
+                ltT_v = arith.cmpi(arith.CmpIPredicate.slt, raw_idx_v, ttok_i32)
+                inv_flag = arith.select(ge0_v, arith.select(ltT_v, zero_i32, one_i32), one_i32)
+                tile_remaining = TOPK - tile_iter * TILE_K  # compile-time
+                if tile_remaining < TILE_K:
+                    pos_ok = arith.cmpi(arith.CmpIPredicate.slt, tx, arith.index(tile_remaining))
+                    inv_flag = arith.select(pos_ok, inv_flag, one_i32)
                 from flydsl._mlir.dialects import llvm as llvm_d
                 vptr = buffer_ops.create_llvm_ptr(
                     _raw(arith.index_cast(T.i32, valid_lds_base + tx * arith.index(4))), address_space=3)
-                llvm_d.store(v_flag, vptr)
+                llvm_d.store(inv_flag, vptr)
 
             rocdl.s_wait_dscnt(0)
             gpu.barrier()
@@ -311,51 +327,48 @@ def build_sparse_mla_fwd_v4_gfx1250(
             # wave needs the full P for its acc slice).
             s_accs = [arith.constant_vector(0.0, T.vec(8, T.f32)) for _ in range_constexpr(SCORE_N_TILES)]
 
-            # Score GEMM: Q_lora[16, D_V] × K_lora^T[D_V, 32]
-            for ks in range_constexpr(SCORE_K_STEPS_LORA):
-                q_k_byte_off = arith.index(ks * WMMA_K * elem_bytes)
-                q_off0 = q_lane_base + q_k_byte_off
-                q_off1 = q_off0 + arith.index(32)
-                q_lo_v = fx.Vector(lds_load_b128_raw(q_lds_base, q_off0)).bitcast(elem_dtype)
-                q_hi_v = fx.Vector(lds_load_b128_raw(q_lds_base, q_off1)).bitcast(elem_dtype)
-                q_frag = q_lo_v.shuffle(q_hi_v, list(range(16)))
-                for wn in range_constexpr(SCORE_N_TILES):
-                    vec8_ty = ir.VectorType.get([8], elem_ty)
-                    n_col = arith.index(wn * WMMA_N * elem_bytes) + kt_n_lane
-                    b_base = kt_k_lane + n_col
-                    results = []
-                    for k_half in range_constexpr(2):
-                        k_row_off = (ks * WMMA_K + k_half * 16) * LDS_KT_STRIDE * elem_bytes
-                        elem_off = b_base + arith.index(k_row_off)
-                        v = lds_transpose_load_raw(vec8_ty, kt_lds_base, elem_off)
-                        results.append(fx.Vector(v))
-                    k_frag = results[0].shuffle(results[1], list(range(16)))
-                    rocdl.s_wait_dscnt(0)
-                    s_accs[wn] = wmma_op(
-                        T.vec(8, T.f32), k_frag, q_frag, s_accs[wn],
-                        signA=False, signB=False, modC=0, reuseA=False, reuseB=False,
-                    ).result
+            # Software-pipelined score GEMM: S = Q_lora·K_lora^T + Q_rope·K_rope^T.
+            # The lora (D_V) and rope (D_ROPE) contraction steps are flattened into a
+            # single k-step sequence so the NEXT step's LDS fragment loads are issued
+            # before the CURRENT step's WMMAs run — overlapping LDS-load latency with
+            # WMMA execution (1-deep prefetch) instead of stalling per WMMA.
+            vec8_ty = ir.VectorType.get([8], elem_ty)
+            TOTAL_KSTEPS = SCORE_K_STEPS_LORA + SCORE_K_STEPS_ROPE
+            SCORE_LOADS_PER_STEP = 2 + SCORE_N_TILES * 2  # 2 Q loads + 2 K loads per n-tile
 
-            # Score GEMM: Q_rope[16, D_ROPE] × K_rope^T[D_ROPE, 32]
-            for ks in range_constexpr(SCORE_K_STEPS_ROPE):
-                q_k_byte_off = arith.index((D_V + ks * WMMA_K) * elem_bytes)
-                q_off0 = q_lane_base + q_k_byte_off
-                q_off1 = q_off0 + arith.index(32)
-                q_lo_v = fx.Vector(lds_load_b128_raw(q_lds_base, q_off0)).bitcast(elem_dtype)
-                q_hi_v = fx.Vector(lds_load_b128_raw(q_lds_base, q_off1)).bitcast(elem_dtype)
-                q_frag = q_lo_v.shuffle(q_hi_v, list(range(16)))
+            def _score_d_base(g):
+                # d-position (Q LDS column / K^T LDS row) of flattened k-step g.
+                if g < SCORE_K_STEPS_LORA:
+                    return g * WMMA_K
+                return D_V + (g - SCORE_K_STEPS_LORA) * WMMA_K
+
+            def _issue_score_loads(g):
+                d_base = _score_d_base(g)
+                q0 = lds_load_b128_raw(q_lds_base, q_lane_base + arith.index(d_base * elem_bytes))
+                q1 = lds_load_b128_raw(q_lds_base, q_lane_base + arith.index(d_base * elem_bytes + 32))
+                kraws = []
                 for wn in range_constexpr(SCORE_N_TILES):
-                    vec8_ty = ir.VectorType.get([8], elem_ty)
-                    n_col = arith.index(wn * WMMA_N * elem_bytes) + kt_n_lane
-                    b_base = kt_k_lane + n_col
-                    results = []
+                    b_base = kt_k_lane + arith.index(wn * WMMA_N * elem_bytes) + kt_n_lane
+                    halves = []
                     for k_half in range_constexpr(2):
-                        k_row_off = (D_V + ks * WMMA_K + k_half * 16) * LDS_KT_STRIDE * elem_bytes
-                        elem_off = b_base + arith.index(k_row_off)
-                        v = lds_transpose_load_raw(vec8_ty, kt_lds_base, elem_off)
-                        results.append(fx.Vector(v))
-                    k_frag = results[0].shuffle(results[1], list(range(16)))
+                        k_row_off = (d_base + k_half * 16) * LDS_KT_STRIDE * elem_bytes
+                        halves.append(
+                            lds_transpose_load_raw(vec8_ty, kt_lds_base, b_base + arith.index(k_row_off)))
+                    kraws.append(halves)
+                return (q0, q1), kraws
+
+            qraw_n, kraw_n = _issue_score_loads(0)
+            for g in range_constexpr(TOTAL_KSTEPS):
+                qraw_c, kraw_c = qraw_n, kraw_n
+                if g + 1 < TOTAL_KSTEPS:
+                    qraw_n, kraw_n = _issue_score_loads(g + 1)
+                    rocdl.s_wait_dscnt(SCORE_LOADS_PER_STEP)
+                else:
                     rocdl.s_wait_dscnt(0)
+                q_frag = fx.Vector(qraw_c[0]).bitcast(elem_dtype).shuffle(
+                    fx.Vector(qraw_c[1]).bitcast(elem_dtype), list(range(16)))
+                for wn in range_constexpr(SCORE_N_TILES):
+                    k_frag = fx.Vector(kraw_c[wn][0]).shuffle(fx.Vector(kraw_c[wn][1]), list(range(16)))
                     s_accs[wn] = wmma_op(
                         T.vec(8, T.f32), k_frag, q_frag, s_accs[wn],
                         signA=False, signB=False, modC=0, reuseA=False, reuseB=False,
@@ -450,37 +463,55 @@ def build_sparse_mla_fwd_v4_gfx1250(
             rocdl.s_wait_dscnt(0)
             gpu.barrier()
 
-            # ---- O accumulation: O[16, D_V] += P[16, 32] × V[32, D_V] ----
-            # P is in LDS as [16, 32+pad], load as WMMA A-operand
-            # V = K_lora in LDS as [32, D_QK+pad], first D_V cols, load as B-operand (transpose)
+            # ---- O accumulation: O[16, D_V] += P[16, TILE_K] × V[TILE_K, D_V] ----
+            # P in LDS [16, TILE_K+pad] (A-operand); V = K_lora in LDS [TILE_K, D_QK+pad]
+            # first D_V cols (B-operand, transpose-loaded). The ktok contraction is
+            # split into ACC_K_STEPS WMMA K-steps (one P A-fragment each). Software-
+            # pipelined over the flattened (d-tile, k-step) space: prefetch the next
+            # V loads before the current WMMA so LDS-load latency overlaps execution.
             p_a_lane_base = p_row_off + lane_kgrp * arith.index(8 * elem_bytes)
-
-            # Load P A-fragment (TILE_K=32=WMMA_K, single K-step)
-            p_off0 = p_a_lane_base
-            p_off1 = p_a_lane_base + arith.index(32)  # +32 bytes = +16 bf16
-            p_v0 = fx.Vector(lds_load_b128_raw(p_lds_base, p_off0)).bitcast(elem_dtype)
-            p_v1 = fx.Vector(lds_load_b128_raw(p_lds_base, p_off1)).bitcast(elem_dtype)
-            p_frag = p_v0.shuffle(p_v1, list(range(16)))
-
-            # Accumulate P × V — this wave owns D_V tiles [wave*ATPW : +ATPW].
+            vec8_ty = ir.VectorType.get([8], elem_ty)
             wave_acc_base = wave_id * arith.index(ACC_TILES_PER_WAVE)
-            for wn_local in range_constexpr(ACC_TILES_PER_WAVE):
-                wn_glob = wave_acc_base + arith.index(wn_local)  # runtime tile index
-                # Load V B-fragment (transpose from KV LDS, first D_V cols)
-                vec8_ty = ir.VectorType.get([8], elem_ty)
-                n_col = wn_glob * arith.index(WMMA_N * elem_bytes) + kv_n_lane
-                b_base = kv_k_lane + n_col  # V = first D_V cols of KV
-                results = []
-                for k_half in range_constexpr(2):
-                    k_row_off = k_half * 16 * LDS_KV_STRIDE * elem_bytes
-                    elem_off = b_base + arith.index(k_row_off)
-                    v = lds_transpose_load_raw(vec8_ty, kv_lds_base, elem_off)
-                    results.append(fx.Vector(v))
-                v_frag = results[0].shuffle(results[1], list(range(16)))
+            ACC_V_LOADS = 2  # transpose loads per (V tile, k-step)
 
-                rocdl.s_wait_dscnt(0)
-                new_o[wn_local] = wmma_op(
-                    T.vec(8, T.f32), v_frag, p_frag, new_o[wn_local],
+            def _issue_v_loads(wn_local, ks):
+                wn_glob = wave_acc_base + arith.index(wn_local)
+                b_base = kv_k_lane + wn_glob * arith.index(WMMA_N * elem_bytes) + kv_n_lane
+                halves = []
+                for k_half in range_constexpr(2):
+                    k_row_off = (ks * WMMA_K + k_half * 16) * LDS_KV_STRIDE * elem_bytes
+                    halves.append(
+                        lds_transpose_load_raw(vec8_ty, kv_lds_base, b_base + arith.index(k_row_off)))
+                return halves
+
+            # Issue all P A-fragments (one per K-step), then prefetch the first V tile.
+            p_raws = []
+            for ks in range_constexpr(ACC_K_STEPS):
+                k_byte = arith.index(ks * WMMA_K * elem_bytes)
+                p_raws.append((
+                    lds_load_b128_raw(p_lds_base, p_a_lane_base + k_byte),
+                    lds_load_b128_raw(p_lds_base, p_a_lane_base + k_byte + arith.index(32)),
+                ))
+            acc_steps = [(wl, ks) for wl in range_constexpr(ACC_TILES_PER_WAVE)
+                         for ks in range_constexpr(ACC_K_STEPS)]
+            n_acc_steps = len(acc_steps)
+            vraw_n = _issue_v_loads(acc_steps[0][0], acc_steps[0][1])
+            rocdl.s_wait_dscnt(ACC_V_LOADS)  # leaves first V's loads → all P loads done
+            p_frags = [fx.Vector(r0).bitcast(elem_dtype).shuffle(
+                           fx.Vector(r1).bitcast(elem_dtype), list(range(16)))
+                       for (r0, r1) in p_raws]
+
+            for i in range_constexpr(n_acc_steps):
+                wl, ks = acc_steps[i]
+                vraw_c = vraw_n
+                if i + 1 < n_acc_steps:
+                    vraw_n = _issue_v_loads(acc_steps[i + 1][0], acc_steps[i + 1][1])
+                    rocdl.s_wait_dscnt(ACC_V_LOADS)
+                else:
+                    rocdl.s_wait_dscnt(0)
+                v_frag = fx.Vector(vraw_c[0]).shuffle(fx.Vector(vraw_c[1]), list(range(16)))
+                new_o[wl] = wmma_op(
+                    T.vec(8, T.f32), v_frag, p_frags[ks], new_o[wl],
                     signA=False, signB=False, modC=0, reuseA=False, reuseB=False,
                 ).result
 
@@ -557,8 +588,8 @@ def build_sparse_mla_fwd_v4_gfx1250(
     @flyc.jit
     def _launch_sparse_mla_fwd_v4(
         Q: fx.Tensor,
-        GKV: fx.Tensor,
-        VMask: fx.Tensor,
+        KV: fx.Tensor,
+        TopK: fx.Tensor,
         Sink: fx.Tensor,
         O: fx.Tensor,
         LSE: fx.Tensor,
@@ -572,7 +603,7 @@ def build_sparse_mla_fwd_v4_gfx1250(
             arena.finalize()
 
         num_head_groups = (num_heads + BLOCK_H - 1) // BLOCK_H
-        launcher = sparse_mla_fwd_v4_kernel(Q, GKV, VMask, Sink, O, LSE, total_tokens)
+        launcher = sparse_mla_fwd_v4_kernel(Q, KV, TopK, Sink, O, LSE, total_tokens)
         launcher.launch(
             grid=(total_tokens, num_head_groups, 1),
             block=(BLOCK_SIZE, 1, 1),
@@ -640,21 +671,17 @@ def sparse_mla_fwd_v4(
     # reused across calls (rebuilding per call cost a fixed ~55 ms).
     exe = _build_sparse_mla_fwd_v4_cached(H, D_V, D_ROPE, TOPK, has_sink, scale)
 
-    # Pre-gather KV in PyTorch to avoid indirect loads in kernel
-    invalid = (topk_indices < 0) | (topk_indices >= T_tok)
-    safe_idx = topk_indices.clamp(0, T_tok - 1).long()
-    gathered_kv = kv.squeeze(1)[safe_idx]  # [T, TOPK, D_QK] bf16
-    # Validity mask: 0=valid, 1=invalid (int32 per TOPK entry)
-    valid_mask = invalid.int()  # [T, TOPK] int32
-
+    # In-kernel gather: pass the original KV latent + topk indices directly. The
+    # kernel gathers each tile from KV[topk] and derives validity from the indices,
+    # so there is no PyTorch pre-gather pass or separate validity mask.
     q_flat = q.contiguous().reshape(-1)
-    gkv_flat = gathered_kv.contiguous().reshape(-1)
-    vmask_flat = valid_mask.contiguous().reshape(-1)
+    kv_flat = kv.squeeze(1).contiguous().reshape(-1)                   # [T, D_QK] bf16
+    topk_flat = topk_indices.to(torch.int32).contiguous().reshape(-1)  # [T, TOPK] int32
     o_flat = o.reshape(-1)
     lse_flat = lse.reshape(-1)
 
     stream = torch.cuda.current_stream(q.device)
-    exe(q_flat, gkv_flat, vmask_flat, attn_sink, o_flat, lse_flat, T_tok, stream=stream)
+    exe(q_flat, kv_flat, topk_flat, attn_sink, o_flat, lse_flat, T_tok, stream=stream)
 
     return o, lse
 
