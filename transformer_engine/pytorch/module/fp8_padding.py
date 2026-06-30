@@ -99,6 +99,15 @@ class Fp8Padding(torch.nn.Module):
         self.num_gemms = num_gemms
         self.align_size = align_size
 
+    def compute_padded_splits(self, m_splits: List[int]) -> List[int]:
+        """Compute padded split sizes without allocating or copying data."""
+        if self.align_size is None:
+            recipe = FP8GlobalStateManager.get_fp8_recipe()
+            self.align_size = get_align_size_for_quantization(recipe)
+        return [
+            (m + self.align_size - 1) // self.align_size * self.align_size for m in m_splits
+        ]
+
     @no_torch_dynamo()
     def forward(
         self,
