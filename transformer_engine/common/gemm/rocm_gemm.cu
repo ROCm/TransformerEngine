@@ -1985,7 +1985,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
 #ifdef USE_HIPKITTENS_GEMM
 
-  bool use_hipkittens = false, hipkittens_gemm_complete = false;
+  bool use_hipkittens = false;
   if (is_mxfp8) {
     bool is_gfx950 = (cuda::sm_arch() == 95);
     bool force_hipblaslt = false;
