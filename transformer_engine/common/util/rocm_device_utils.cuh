@@ -186,3 +186,17 @@ __device__ __forceinline__ float rocm_block_reduce_max(float val, int warp_id) {
     }
     return val;
 }
+
+// N-wide alignment check and vectorized load/store using NTVec.
+template <int N, typename T>
+__device__ __forceinline__ bool is_aligned_n(const T *p) {
+  return (reinterpret_cast<uintptr_t>(p)) % (N * sizeof(T)) == 0;
+}
+
+template <int N, typename T>
+__device__ __forceinline__ void load_store_n(T *dst, const T *src,
+                                             int dst_offset, int src_offset) {
+  NTVec<T, N> v;
+  v.load(src + src_offset * N);
+  v.store(dst + dst_offset * N);
+}

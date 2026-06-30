@@ -26,6 +26,10 @@
 #include <cublasmp.h>
 #endif  // NVTE_WITH_CUBLASMP
 
+#ifdef NVTE_WITH_CUSOLVERMP
+#include <cusolverMp.h>
+#endif  // NVTE_WITH_CUSOLVERMP
+
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -126,6 +130,19 @@
 #endif  // NVTE_WITH_CUBLASMP
 
 #ifndef __HIP_PLATFORM_AMD__
+
+#ifdef NVTE_WITH_CUSOLVERMP
+
+#define NVTE_CHECK_CUSOLVERMP(expr)                                                   \
+  do {                                                                                \
+    const cusolverStatus_t status_NVTE_CHECK_CUSOLVERMP = (expr);                     \
+    if (status_NVTE_CHECK_CUSOLVERMP != CUSOLVER_STATUS_SUCCESS) {                    \
+      NVTE_ERROR("cuSolverMp Error: ", std::to_string(status_NVTE_CHECK_CUSOLVERMP)); \
+    }                                                                                 \
+  } while (false)
+
+#endif  // NVTE_WITH_CUSOLVERMP
+
 #define NVTE_CHECK_NCCL(expr)                                                 \
   do {                                                                        \
     const ncclResult_t status_NVTE_CHECK_NCCL = (expr);                       \
@@ -133,5 +150,5 @@
       NVTE_ERROR("NCCL Error: ", ncclGetErrorString(status_NVTE_CHECK_NCCL)); \
     }                                                                         \
   } while (false)
-#endif //#ifndef __HIP_PLATFORM_AMD__
+#endif  // __HIP_PLATFORM_AMD__
 #endif  // TRANSFORMER_ENGINE_COMMON_UTIL_LOGGING_H_

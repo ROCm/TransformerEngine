@@ -3,10 +3,16 @@
 
 cmake_minimum_required(VERSION 3.21)
 
+# HipKittens GEMM kernels coexist for two architectures:
+#   gfx942 (CDNA3): blockwise FP8 GEMM  -> blockwise_fp8_gemm.cpp, 3rdparty/hipkittens_cdna3
+#   gfx950 (CDNA4): MXFP8 GEMM          -> mxfp8_gemm.cpp,         3rdparty/hipkittens
+# Each source is only added when its target arch is present in CMAKE_HIP_ARCHITECTURES,
+# and is compiled with its own include dir + KITTENS_CDNA{3,4} define.
 function(try_enable_hipkittens_gemm)
     list(FIND CMAKE_HIP_ARCHITECTURES "gfx942" _gfx942_index)
-    if(_gfx942_index EQUAL -1)
-        message(STATUS "HipKittens GEMM disabled (gfx942 not in CMAKE_HIP_ARCHITECTURES)")
+    list(FIND CMAKE_HIP_ARCHITECTURES "gfx950" _gfx950_index)
+    if(_gfx942_index EQUAL -1 AND _gfx950_index EQUAL -1)
+        message(STATUS "HipKittens GEMM disabled (neither gfx942 nor gfx950 in CMAKE_HIP_ARCHITECTURES)")
         set(USE_HIPKITTENS_GEMM OFF PARENT_SCOPE)
         return()
     endif()
@@ -19,35 +25,56 @@ function(try_enable_hipkittens_gemm)
         return()
     endif()
 
-    set(HIPKITTENS_INCLUDE_DIR
+    set(HIPKITTENS_CDNA3_INCLUDE_DIR
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../../3rdparty/hipkittens_cdna3/include")
-    if(NOT EXISTS "${HIPKITTENS_INCLUDE_DIR}/kittens.cuh")
-        message(FATAL_ERROR
-            "Could not find HipKittens headers at ${HIPKITTENS_INCLUDE_DIR}. "
-            "Try running 'git submodule update --init --recursive' "
-            "within the Transformer Engine source.")
+    set(HIPKITTENS_INCLUDE_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../3rdparty/hipkittens/include")
+
+    set(kittens_gemm_SOURCES "")
+    if(NOT _gfx942_index EQUAL -1)
+        if(NOT EXISTS "${HIPKITTENS_CDNA3_INCLUDE_DIR}/kittens.cuh")
+            message(FATAL_ERROR
+                "Could not find HipKittens (CDNA3) headers at ${HIPKITTENS_CDNA3_INCLUDE_DIR}. "
+                "Try running 'git submodule update --init --recursive'.")
+        endif()
+        list(APPEND kittens_gemm_SOURCES blockwise_fp8_gemm.cpp)
+    endif()
+    if(NOT _gfx950_index EQUAL -1)
+        if(NOT EXISTS "${HIPKITTENS_INCLUDE_DIR}/kittens.cuh")
+            message(FATAL_ERROR
+                "Could not find HipKittens (CDNA4) headers at ${HIPKITTENS_INCLUDE_DIR}. "
+                "Try running 'git submodule update --init --recursive'.")
+        endif()
+        list(APPEND kittens_gemm_SOURCES mxfp8_gemm.cpp)
     endif()
 
     set(CMAKE_CXX_STANDARD 20)
     project(kittens_gemm LANGUAGES HIP CXX)
 
-    set(kittens_gemm_SOURCES
-        blockwise_fp8_gemm.cpp)
-
     add_library(kittens_gemm SHARED ${kittens_gemm_SOURCES})
     set_source_files_properties(${kittens_gemm_SOURCES} PROPERTIES LANGUAGE HIP)
-    set_target_properties(kittens_gemm PROPERTIES HIP_ARCHITECTURES "gfx942")
-
-    set(KITTENS_GEMM_COMPILE_OPTIONS
-        -DKITTENS_CDNA3
-        -fno-gpu-rdc
-        -O3)
 
     find_package(hip)
-    target_include_directories(kittens_gemm PRIVATE ${HIPKITTENS_INCLUDE_DIR})
     target_include_directories(kittens_gemm PRIVATE ${HIP_INCLUDE_DIRS})
     target_link_libraries(kittens_gemm PUBLIC hip::host hip::device)
-    target_compile_options(kittens_gemm PRIVATE ${KITTENS_GEMM_COMPILE_OPTIONS})
+
+    # Per-source include dir + define so each kernel sees its own HipKittens.
+    if(NOT _gfx942_index EQUAL -1)
+        set_property(SOURCE blockwise_fp8_gemm.cpp APPEND PROPERTY
+            INCLUDE_DIRECTORIES "${HIPKITTENS_CDNA3_INCLUDE_DIR}")
+        set_property(SOURCE blockwise_fp8_gemm.cpp APPEND PROPERTY
+            COMPILE_OPTIONS -DKITTENS_CDNA3 -fno-gpu-rdc -O3)
+        set_source_files_properties(blockwise_fp8_gemm.cpp PROPERTIES
+            HIP_ARCHITECTURES "gfx942")
+    endif()
+    if(NOT _gfx950_index EQUAL -1)
+        set_property(SOURCE mxfp8_gemm.cpp APPEND PROPERTY
+            INCLUDE_DIRECTORIES "${HIPKITTENS_INCLUDE_DIR}")
+        set_property(SOURCE mxfp8_gemm.cpp APPEND PROPERTY
+            COMPILE_OPTIONS -DKITTENS_CDNA4 -fno-gpu-rdc -O3)
+        set_source_files_properties(mxfp8_gemm.cpp PROPERTIES
+            HIP_ARCHITECTURES "gfx950")
+    endif()
 
     install(TARGETS kittens_gemm
         DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine/lib)

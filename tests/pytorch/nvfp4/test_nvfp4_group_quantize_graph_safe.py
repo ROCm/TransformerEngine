@@ -49,7 +49,7 @@ def check_grouped_tensor_nvfp4_versus_reference(
     x_dtype: torch.dtype,
     M: int,
     N: int,
-    return_identity: bool,
+    return_rowwise: bool,
     return_transpose: bool,
     split_sections: list[int],
     with_rht: bool = True,
@@ -78,7 +78,7 @@ def check_grouped_tensor_nvfp4_versus_reference(
     quantizers = [
         NVFP4Quantizer(
             fp4_dtype=te_dtype,
-            rowwise=return_identity,
+            rowwise=return_rowwise,
             columnwise=return_transpose,
             with_amax_reduction=False,
             amax_reduction_group=None,
@@ -95,14 +95,14 @@ def check_grouped_tensor_nvfp4_versus_reference(
     grouped_quantizer.optimize_for_gemm = optimize_for_gemm
 
     x_qx_ref, x_sx_ref, x_amax_rowwise_ref, x_qx_t_ref, x_sx_t_ref, x_amax_colwise_ref = (
-        reference_group_quantize(x, quantizers, split_sections, return_identity, return_transpose)
+        reference_group_quantize(x, quantizers, split_sections, return_rowwise, return_transpose)
     )
 
     group_quantized_output = fused_grouped_quantize(x, split_section_tensor, grouped_quantizer)
     # get a list of nvfp4 quantized tensors for testing
     split_quantize_outputs = group_quantized_output.split_into_quantized_tensors()
 
-    if return_identity:
+    if return_rowwise:
         x_qx = [output._rowwise_data.view(dtype=torch.uint8) for output in split_quantize_outputs]
         x_sx = [output._rowwise_scale_inv for output in split_quantize_outputs]
         x_amax_rowwise = [output._amax_rowwise for output in split_quantize_outputs]
@@ -165,7 +165,7 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
     x_dtype: torch.dtype,
     M: int,
     N: int,
-    return_identity: bool,
+    return_rowwise: bool,
     return_transpose: bool,
     split_sections: list[int],
     with_rht: bool = True,
@@ -199,7 +199,7 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
     quantizers = [
         NVFP4Quantizer(
             fp4_dtype=te_dtype,
-            rowwise=return_identity,
+            rowwise=return_rowwise,
             columnwise=return_transpose,
             with_amax_reduction=False,
             amax_reduction_group=None,
@@ -217,7 +217,7 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
 
     x_qx_ref, x_sx_ref, x_amax_rowwise_ref, x_qx_t_ref, x_sx_t_ref, x_amax_colwise_ref = (
         reference_group_quantize(
-            valid_x, quantizers, split_sections, return_identity, return_transpose
+            valid_x, quantizers, split_sections, return_rowwise, return_transpose
         )
     )
 
@@ -229,7 +229,7 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
     # get a list of nvfp4 quantized tensors for testing
     split_quantize_outputs = group_quantized_output.split_into_quantized_tensors()
 
-    if return_identity:
+    if return_rowwise:
         x_qx = [output._rowwise_data.view(dtype=torch.uint8) for output in split_quantize_outputs]
         x_sx = [output._rowwise_scale_inv for output in split_quantize_outputs]
         x_amax_rowwise = [output._amax_rowwise for output in split_quantize_outputs]
@@ -312,9 +312,7 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
         "random_uneven_split",
     ],
 )
-@pytest.mark.parametrize(
-    "quantize_mode", ["quantize", "quantize_transpose", "quantize_colwise_only"]
-)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
 @pytest.mark.parametrize(
     "with_random_sign_mask", [True, False], ids=["with_random_sign_mask", "no_random_sign_mask"]
 )
@@ -338,14 +336,14 @@ def test_grouped_tensor_nvfp4_versus_reference(
     # currently disable pre-RHT amax
     with_post_rht_amax = with_rht
 
-    if quantize_mode == "quantize":
-        return_identity = True
+    if quantize_mode == "rowwise_only":
+        return_rowwise = True
         return_transpose = False
-    elif quantize_mode == "quantize_transpose":
-        return_identity = True
+    elif quantize_mode == "both_directions":
+        return_rowwise = True
         return_transpose = True
-    elif quantize_mode == "quantize_colwise_only":
-        return_identity = False
+    elif quantize_mode == "columnwise_only":
+        return_rowwise = False
         return_transpose = True
     else:
         raise ValueError(f"Invalid quantize mode: {quantize_mode}")
@@ -354,7 +352,7 @@ def test_grouped_tensor_nvfp4_versus_reference(
         x_dtype=x_dtype,
         M=M,
         N=N,
-        return_identity=return_identity,
+        return_rowwise=return_rowwise,
         return_transpose=return_transpose,
         split_sections=split_sections,
         with_rht=with_rht,
@@ -393,9 +391,7 @@ def test_grouped_tensor_nvfp4_versus_reference(
         "random_uneven_split",
     ],
 )
-@pytest.mark.parametrize(
-    "quantize_mode", ["quantize", "quantize_transpose", "quantize_colwise_only"]
-)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
 @pytest.mark.parametrize(
     "with_random_sign_mask", [True, False], ids=["with_random_sign_mask", "no_random_sign_mask"]
 )
@@ -431,14 +427,14 @@ def test_grouped_tensor_nvfp4_with_paged_stashing(
     # currently disable pre-RHT amax
     with_post_rht_amax = with_rht
 
-    if quantize_mode == "quantize":
-        return_identity = True
+    if quantize_mode == "rowwise_only":
+        return_rowwise = True
         return_transpose = False
-    elif quantize_mode == "quantize_transpose":
-        return_identity = True
+    elif quantize_mode == "both_directions":
+        return_rowwise = True
         return_transpose = True
-    elif quantize_mode == "quantize_colwise_only":
-        return_identity = False
+    elif quantize_mode == "columnwise_only":
+        return_rowwise = False
         return_transpose = True
     else:
         raise ValueError(f"Invalid quantize mode: {quantize_mode}")
@@ -447,7 +443,7 @@ def test_grouped_tensor_nvfp4_with_paged_stashing(
         x_dtype=x_dtype,
         M=M,
         N=N,
-        return_identity=return_identity,
+        return_rowwise=return_rowwise,
         return_transpose=return_transpose,
         split_sections=split_sections,
         with_rht=with_rht,
