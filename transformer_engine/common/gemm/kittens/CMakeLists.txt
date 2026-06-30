@@ -20,7 +20,7 @@ function(try_enable_hipkittens_gemm)
     endif()
 
     set(HIPKITTENS_INCLUDE_DIR
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../3rdparty/hipkittens/include")
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../3rdparty/hipkittens_cdna3/include")
     if(NOT EXISTS "${HIPKITTENS_INCLUDE_DIR}/kittens.cuh")
         message(FATAL_ERROR
             "Could not find HipKittens headers at ${HIPKITTENS_INCLUDE_DIR}. "

@@ -33,7 +33,7 @@
 [submodule "3rdparty/ck_jit"]
 	path = 3rdparty/ck_jit
 	url = https://github.com/ROCm/ck-jit.git
-[submodule "3rdparty/hipkittens"]
-	path = 3rdparty/hipkittens
+[submodule "3rdparty/hipkittens_cdna3"]
+	path = 3rdparty/hipkittens_cdna3
 	url = https://github.com/asdfvg123/HipKittens.git
 	branch = yeonsoo/cdna3_fp8
