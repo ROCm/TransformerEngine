@@ -173,9 +173,11 @@ struct PermuteParams {
   PermuteSlot slots[kMaxPermuteTensors];
 };
 
+#ifndef __HIP_PLATFORM_AMD__
 struct TmaMapParams {
   CUtensorMap maps[kMaxPermuteTensors];
 };
+#endif  // !__HIP_PLATFORM_AMD__
 
 // ---------- path 3: fallback_not_vec_aligned ----------
 
@@ -363,6 +365,10 @@ __launch_bounds__(fallback_permute_threads) __global__
 }
 
 // ---------- path 1: TMA ----------
+// TMA (Tensor Memory Accelerator) is a CUDA sm100+ feature relying on the CUDA driver
+// CUtensorMap API and PTX bulk-copy/mbarrier intrinsics that have no HIP equivalent. The
+// ROCm build uses only the vectorized / shared-memory fallback paths below.
+#ifndef __HIP_PLATFORM_AMD__
 
 constexpr int tma_permute_threads = 128;
 constexpr int tma_permute_s_tile_default = 32;
@@ -583,6 +589,7 @@ static void create_strided_tensor_map(CUtensorMap &map, void *ptr, DType dtype, 
                          static_cast<uint32_t>(d), 1, 1, static_cast<uint32_t>(s_tile));
   }
 }
+#endif  // !__HIP_PLATFORM_AMD__
 
 void multi_tensor_transpose_to_bhsd(Tensor *inputs, Tensor *outputs, size_t num_tensors,
                                     NVTE_QKV_Format original_format, cudaStream_t stream) {
@@ -642,6 +649,7 @@ void multi_tensor_transpose_to_bhsd(Tensor *inputs, Tensor *outputs, size_t num_
   //     and s_tile*D_in*elem is uint4-aligned.
   //  2. Fallback path (vec-aligned): vectorized loads/stores when D_in*elem % 4 == 0.
   //  3. Fallback path (not-vec-aligned): shared-memory transpose when D_in*elem % 4 != 0.
+#ifndef __HIP_PLATFORM_AMD__
   if (all_tma_ok) {
     const size_t s_tile = std::min(static_cast<size_t>(tma_permute_s_tile_default), s_min);
     bool tma_aligned = true;
@@ -681,6 +689,7 @@ void multi_tensor_transpose_to_bhsd(Tensor *inputs, Tensor *outputs, size_t num_
       return;
     }
   }
+#endif  // !__HIP_PLATFORM_AMD__
 
   if (!any_not_vec_aligned) {
     const unsigned int permute_s_splits = std::max(

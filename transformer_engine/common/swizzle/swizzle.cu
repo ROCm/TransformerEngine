@@ -28,7 +28,6 @@ namespace {
 constexpr int MXFP8_BLOCK_SIZE = 32;
 constexpr int NVFP4_BLOCK_SIZE = 16;
 
-#ifndef __HIP_PLATFORM_AMD__
 int get_max_dynamic_smem() {
   static int max_smem = -1;
   if (max_smem < 0) {
@@ -40,6 +39,7 @@ int get_max_dynamic_smem() {
   return max_smem;
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 constexpr __device__ __host__ int TB_DIM = 32;
 constexpr __device__ __host__ int NEW_SF_TILE_DIM_K = 16;
 constexpr __device__ __host__ int N_SF_PER_TD_PER_TILE = 4;
