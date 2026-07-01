@@ -14,6 +14,9 @@
 
 #include <hip/hip_runtime.h>
 #include <cstring>
+#include <cstdio>
+#include <stdexcept>
+#include <string>
 #include "blockwise_fp8_gemm.h"
 #include "cdna3/blockwise_fp8_gemm.h"
 #include "cdna4/blockwise_fp8_gemm.h"
@@ -40,13 +43,31 @@ void kittens_blockwise_fp8_gemm(
     const void *gelu_aux, int gelu_aux_dtype,
     const void *c_in, float beta,
     hipStream_t stream) {
+    const bool has_bias = (bias != nullptr);
+    const bool has_gelu = (gelu_aux != nullptr);
+    const bool has_beta = (c_in != nullptr);
+
     if (current_device_is_gfx950()) {
-        // CDNA4 impl supports a limited path (e4m3 x e4m3, bf16 out, TN, no
-        // bias/gelu/beta, fixed square shapes). Returns false when unsupported;
-        // fall through to the CDNA3 impl as a last resort.
+        // CDNA4 impl currently supports TE 1Dx2D, e4m3 x e4m3, bf16 out, TN,
+        // 256-aligned M/N/K, no epilogue. It returns false for anything else.
+        // We must NOT fall back to the cdna3 kernel here: cdna3 is compiled
+        // #if __gfx942__ only, so on gfx950 its body is empty (would silently
+        // produce wrong results). Unsupported gfx950 cases raise instead.
         bool handled = kittens_blockwise_fp8_gemm_impl_cdna4(
-            A, B, C, scale_A, scale_B, M, N, K, stream);
-        if (handled) return;
+            A, B, C, scale_A, scale_B, M, N, K,
+            a_dtype, b_dtype, a_scaling_mode, b_scaling_mode, out_dtype,
+            has_bias, has_gelu, has_beta, stream);
+        if (!handled) {
+            throw std::runtime_error(
+                "kittens_blockwise_fp8_gemm: unsupported case on gfx950 "
+                "(only 1Dx2D, e4m3xe4m3, bf16 out, TN, 256-aligned M/N/K, "
+                "no bias/gelu/accumulate is implemented on CDNA4). Got M=" +
+                std::to_string(M) + " N=" + std::to_string(N) + " K=" + std::to_string(K) +
+                " a_dtype=" + std::to_string(a_dtype) + " b_dtype=" + std::to_string(b_dtype) +
+                " a_mode=" + std::to_string(a_scaling_mode) + " b_mode=" + std::to_string(b_scaling_mode) +
+                " out=" + std::to_string(out_dtype));
+        }
+        return;
     }
 
     kittens_blockwise_fp8_gemm_impl_cdna3(

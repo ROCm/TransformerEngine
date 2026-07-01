@@ -112,6 +112,12 @@ inline bool is_mxfp_scaling(const NVTEScalingMode &mode) {
 #endif //#ifdef __HIP_PLATFORM_AMD__
 inline bool is_nvfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_NVFP4_1D_SCALING; }
 
+// Blockwise FP8 (1x128 / 128x128). Note: is_block_scaling above is the broad
+// "not tensor scaling" predicate; this one matches only blockwise FP8 modes.
+inline bool is_blockwise_fp8_scaling(const NVTEScalingMode &mode) {
+  return mode == NVTE_BLOCK_SCALING_1D || mode == NVTE_BLOCK_SCALING_2D;
+}
+
 inline size_t product(const std::vector<size_t> &shape, const size_t begin, const size_t end) {
   NVTE_CHECK(begin <= end && end <= shape.size(), "Attempted to access entries ", begin, " to ",
              end, " in a vector with ", shape.size(), " entries");

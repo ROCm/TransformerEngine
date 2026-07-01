@@ -203,6 +203,10 @@ struct GemmParam {
   void *B_scale_inv = nullptr;
   int lda = 0;  // A column strides
   int ldb = 0;  // B column strides
+  // Blockwise FP8 only: per-operand scaling mode (NVTE_BLOCK_SCALING_1D/2D).
+  // Other scaling paths leave these at -1.
+  int A_scaling_mode = -1;
+  int B_scaling_mode = -1;
 };
 
 constexpr int kMXFP8BlockSize = 32;
@@ -398,7 +402,11 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
                                 const int m, const int n, const int k) {
   using namespace transformer_engine;
-  NVTE_CHECK(A.scaling_mode == B.scaling_mode,
+  // Blockwise FP8 legitimately mixes 1D (activation) and 2D (weight) scaling
+  // between A and B, so only require matching modes for non-blockwise inputs.
+  const bool a_blockwise = is_blockwise_fp8_scaling(A.scaling_mode);
+  const bool b_blockwise = is_blockwise_fp8_scaling(B.scaling_mode);
+  NVTE_CHECK((a_blockwise && b_blockwise) || A.scaling_mode == B.scaling_mode,
              "Inputs A and B to GEMM need to have the same scaling mode!");
   NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
   NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
@@ -449,6 +457,15 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
     ret.lda = k;
+  } else if (is_blockwise_fp8_scaling(A.scaling_mode)) {
+    // Blockwise FP8: transposed uses row-wise data/scale, non-transposed uses
+    // column-wise (matches the previous manual dispatch: inputA_col = !is_transa).
+    ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
+    ret.transA = transA;
+    ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
+    ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
+    ret.A_scaling_mode = static_cast<int>(A.scaling_mode);
+    ret.lda = is_A_transposed ? k : m;
   } else {
     NVTE_ERROR("A has unsupported scaling mode");
   }
@@ -494,6 +511,15 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
     ret.ldb = k;
+  } else if (is_blockwise_fp8_scaling(B.scaling_mode)) {
+    // Blockwise FP8: transposed uses column-wise data/scale, non-transposed uses
+    // row-wise (matches the previous manual dispatch: inputB_col = is_transb).
+    ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
+    ret.transB = transB;
+    ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
+    ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
+    ret.B_scaling_mode = static_cast<int>(B.scaling_mode);
+    ret.ldb = is_B_transposed ? n : k;
   } else {
     NVTE_ERROR("B has unsupported scaling mode");
   }
@@ -1983,10 +2009,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
 #ifdef USE_HIPKITTENS_GEMM
   {
-    const bool inputA_blockwise = inputA->scaling_mode == NVTE_BLOCK_SCALING_1D ||
-                                  inputA->scaling_mode == NVTE_BLOCK_SCALING_2D;
-    const bool inputB_blockwise = inputB->scaling_mode == NVTE_BLOCK_SCALING_1D ||
-                                  inputB->scaling_mode == NVTE_BLOCK_SCALING_2D;
+    const bool inputA_blockwise = is_blockwise_fp8_scaling(inputA->scaling_mode);
+    const bool inputB_blockwise = is_blockwise_fp8_scaling(inputB->scaling_mode);
     if (inputA_blockwise && inputB_blockwise) {
       NVTE_CHECK(outputD->data.dtype == DType::kBFloat16 ||
                  outputD->data.dtype == DType::kFloat32  ||
@@ -1997,20 +2021,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  "only the backward dGELU path (grad=true) is implemented.");
       NVTE_CHECK(!(is_transa && is_transb),
                  "Blockwise FP8 GEMM: TT layout (transa=T, transb=T) is not supported.");
-
-      const bool inputA_col    = !is_transa;
-      const void *inputA_data  = inputA_col ? inputA->columnwise_data.dptr      : inputA->data.dptr;
-      const void *inputA_scale = inputA_col ? inputA->columnwise_scale_inv.dptr : inputA->scale_inv.dptr;
-      const int   inputA_dtype = static_cast<int>(inputA_col ? inputA->columnwise_data.dtype
-                                                             : inputA->data.dtype);
-      const bool inputB_col    = is_transb;
-      const void *inputB_data  = inputB_col ? inputB->columnwise_data.dptr      : inputB->data.dptr;
-      const void *inputB_scale = inputB_col ? inputB->columnwise_scale_inv.dptr : inputB->scale_inv.dptr;
-      const int   inputB_dtype = static_cast<int>(inputB_col ? inputB->columnwise_data.dtype
-                                                             : inputB->data.dtype);
-      NVTE_CHECK(inputA_data != nullptr && inputA_scale != nullptr &&
-                 inputB_data != nullptr && inputB_scale != nullptr,
-                 "Blockwise FP8 GEMM: missing rowwise or columnwise data/scale pointer.");
       NVTE_CHECK((k % 16) == 0,
                  "Blockwise FP8 GEMM: K must be a multiple of 16 (got K=", k, ").");
 
@@ -2022,23 +2032,55 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       const void *gelu_aux       = has_gelu  ? outputPreGelu->data.dptr : nullptr;
       const int   gelu_aux_dtype = static_cast<int>(outputPreGelu->data.dtype);
       const void *c_in           = has_accum ? outputD->data.dptr       : nullptr;
-
       hipStream_t s = use_service_stream ? ss_ctl.stream : stream;
-      kittens_blockwise_fp8_gemm(
-          inputB_data, inputA_data, outputD->data.dptr,
-          inputB_scale, inputA_scale,
-          n, m, k, false, true,
-          inputB_dtype, inputA_dtype,
-          static_cast<int>(inputB->scaling_mode),
-          static_cast<int>(inputA->scaling_mode),
-          static_cast<int>(outputD->data.dtype),
-          bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta,
-          s);
-      
+
+      if (cuda::sm_arch() == 95) {
+        // gfx950 (CDNA4): use the shared CanonicalizeGemmInput and pass the
+        // canonical A/B/M/N straight through (no swap) — mxfp8-style convention.
+        GemmParam p = CanonicalizeGemmInput(*inputA, transa, *inputB, transb, m, n, k);
+        NVTE_CHECK(p.A != nullptr && p.A_scale_inv != nullptr &&
+                   p.B != nullptr && p.B_scale_inv != nullptr,
+                   "Blockwise FP8 GEMM: missing rowwise or columnwise data/scale pointer.");
+        kittens_blockwise_fp8_gemm(
+            p.A, p.B, outputD->data.dptr,
+            p.A_scale_inv, p.B_scale_inv,
+            m, n, k, is_transa, is_transb,
+            static_cast<int>(p.Atype), static_cast<int>(p.Btype),
+            p.A_scaling_mode, p.B_scaling_mode,
+            static_cast<int>(outputD->data.dtype),
+            bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta,
+            s);
+      } else {
+        // gfx942 (CDNA3): unchanged manual dispatch.
+        const bool inputA_col    = !is_transa;
+        const void *inputA_data  = inputA_col ? inputA->columnwise_data.dptr      : inputA->data.dptr;
+        const void *inputA_scale = inputA_col ? inputA->columnwise_scale_inv.dptr : inputA->scale_inv.dptr;
+        const int   inputA_dtype = static_cast<int>(inputA_col ? inputA->columnwise_data.dtype
+                                                               : inputA->data.dtype);
+        const bool inputB_col    = is_transb;
+        const void *inputB_data  = inputB_col ? inputB->columnwise_data.dptr      : inputB->data.dptr;
+        const void *inputB_scale = inputB_col ? inputB->columnwise_scale_inv.dptr : inputB->scale_inv.dptr;
+        const int   inputB_dtype = static_cast<int>(inputB_col ? inputB->columnwise_data.dtype
+                                                               : inputB->data.dtype);
+        NVTE_CHECK(inputA_data != nullptr && inputA_scale != nullptr &&
+                   inputB_data != nullptr && inputB_scale != nullptr,
+                   "Blockwise FP8 GEMM: missing rowwise or columnwise data/scale pointer.");
+        kittens_blockwise_fp8_gemm(
+            inputB_data, inputA_data, outputD->data.dptr,
+            inputB_scale, inputA_scale,
+            n, m, k, false, true,
+            inputB_dtype, inputA_dtype,
+            static_cast<int>(inputB->scaling_mode),
+            static_cast<int>(inputA->scaling_mode),
+            static_cast<int>(outputD->data.dtype),
+            bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta,
+            s);
+      }
+
       if (use_service_stream)
       {
         release_service_stream(stream, ss_ctl);
-      } 
+      }
       return;
     }
   }
