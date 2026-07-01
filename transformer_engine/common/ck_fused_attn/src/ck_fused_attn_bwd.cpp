@@ -828,18 +828,6 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
     log_bwd_config(__FUNCTION__, fmha_args, log_file);
   }
 
-  // Deterministic dq_acc must start zeroed. The CK group deterministic kernel gates
-  // its dq_acc zero-init on kHasMask (NeedsZeroDqAcc()), but padding is carried via
-  // seqlens rather than a mask (the kernel is "nmask"), so the split accumulator is
-  // left uninitialized. Zero the reserved workspace up front (stream-ordered before
-  // the launcher's H2D metadata write, and capture-safe) so any unwritten split
-  // reads as zero.
-  if(args.deterministic && ws_base != nullptr && ws_capacity > 0){
-    if(hipMemsetAsync(ws_base, 0, ws_capacity, stream) != hipSuccess){
-      throw std::runtime_error("ck_fused_attn bwd: hipMemsetAsync failed zeroing deterministic workspace.");
-    }
-  }
-
   float average_runtime = QOLA_NS(mha_bwd)(fmha_args, stream_config);
   if(average_runtime < 0){
     //TODO: better error out system
