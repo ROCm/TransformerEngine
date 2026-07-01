@@ -241,11 +241,17 @@ class Float8TensorWrapper:
                     # Simple 2D case: just transpose
                     rowwise_data = self._columnwise_data.transpose(0, 1).contiguous()
                 else:
-                    # Batch dimensions exist (at the end of columnwise)
-                    # Move batch dims to front and swap matrix dims: [K,M,b1,b2,...] -> [b1,b2,...,M,K]
-                    # Create permutation: (2, 3, ..., ndim-1, 1, 0)
-                    batch_dims = list(range(2, ndim))  # [2, 3, ..., ndim-1]
-                    perm = batch_dims + [1, 0]  # [2,3,...,ndim-1, 1, 0]
+                    # fp8_transpose (see transpose_hip.cpp) treats an n-D rowwise
+                    # tensor with shape (D0, ..., D_{n-2}, K) as 2-D (M, K) with
+                    # M = prod(D0..D_{n-2}), transposes to (K, M), and re-shapes
+                    # the result to [K, D0, ..., D_{n-2}]. To recover the original
+                    # rowwise layout we must rotate the leading K dim back to the
+                    # tail: [K, D0, ..., D_{n-2}] -> [D0, ..., D_{n-2}, K].
+                    # The previous formula (batch_dims + [1, 0]) assumed columnwise
+                    # was [K, M, b1, b2, ...] with M kept as a separate dim, which
+                    # does not match fp8_transpose's output and silently scrambled
+                    # the batch dimensions for ndim >= 3.
+                    perm = list(range(1, ndim)) + [0]
                     rowwise_data = self._columnwise_data.permute(*perm).contiguous()
 
                 # Store the rowwise data for use in get_data_for_gemm()
@@ -860,7 +866,8 @@ def te_generic_gemm_triton(A,
     else:
         # Call regular FP8 or standard matmul kernel
         matmul(a_row_major, b_row_major, d_row_major, a_scale_triton, b_scale_triton,
-               D_scale, bias_tensor, D_amax, epilogue, input_fp8, output_fp8)
+               D_scale, bias_tensor, D_amax, epilogue, input_fp8, output_fp8,
+               accumulate=accumulate, alpha=alpha, beta=beta)
 
     return D, bias_grad, None, None
         
@@ -968,7 +975,9 @@ def te_gemm_triton(A,
 
     input_fp8 = is_fp8_dtype(A_type) and is_fp8_dtype(B_type)
     output_fp8 = is_fp8_dtype(D_type)
-    matmul(a_row_major, b_row_major, D, a_scale_triton, b_scale_triton, D_scale, bias, D_amax, epilogue, input_fp8, output_fp8)
+    matmul(a_row_major, b_row_major, D, a_scale_triton, b_scale_triton, D_scale, bias, D_amax, epilogue, input_fp8, output_fp8, accumulate=accumulate)
+    # (te_gemm_triton low-level path has no alpha/beta in its signature; callers
+    # wanting fused α/β should use te_generic_gemm_triton via general_gemm().)
 
 
 # MXFP8 (Microscaling FP8) Matmul Kernel and Wrapper
@@ -1208,7 +1217,11 @@ def mxfp8_matmul(a, a_scale, b, b_scale, c, M, N, K, a_fp8_dtype, b_fp8_dtype):
     key=['M', 'N', 'K'],
     # Ran into stream capture error when using cuda_graph, thus disabled.
     #use_cuda_graph=True,
-
+    # With ACCUMULATE=True each benchmark iteration would add computed_c to
+    # the output again, multi-copying the result. Snapshot and restore c_ptr
+    # around every benchmark run. Harmless when ACCUMULATE=False (kernel
+    # overwrites regardless); cost is paid once per shape during warmup.
+    restore_value=['c_ptr'],
 )
 @triton.heuristics({
     'EVEN_K': lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0,
@@ -1223,6 +1236,8 @@ def matmul_kernel(
         bias_ptr,
         # Pointer to amax
         c_amax_ptr,
+        # GEMM output scale (α) and accumulate scale (β): D = α·(A·B) + bias + β·C
+        alpha, beta,
         # Matrix dimensions
         M, N, K,
         # The stride variables represent how much to increase the ptr by when moving by 1
@@ -1239,7 +1254,11 @@ def matmul_kernel(
         # Whether multiplied by scale_a * scale_b
         INPUT_FP8: tl.constexpr,
         # Whether to output fp8 or not, if so, also calculate amax.
-        OUTPUT_FP8: tl.constexpr
+        OUTPUT_FP8: tl.constexpr,
+        # β=1 accumulation: C := existing_C + α*A*B (used for fused wgrad accumulate)
+        ACCUMULATE: tl.constexpr,
+        # Fast-path toggle: skip `accumulator *= alpha` when α is known to be 1.0
+        ALPHA_IS_ONE: tl.constexpr,
 ):
     """Kernel for computing the matmul C = A x B.
     A has shape (M, K), B has shape (K, N) and C has shape (M, N)
@@ -1327,14 +1346,29 @@ def matmul_kernel(
 
     if INPUT_FP8:
         accumulator *= scale
+    # Apply α (GEMM output scale). Skipped via constexpr fast-path when α=1.
+    if not ALPHA_IS_ONE:
+        accumulator = accumulator * alpha
     # You can fuse arbitrary activation functions here
     # while the accumulator is still in FP32!
     if EPILOGUE == 'BIAS':
-        offs_bias = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N) 
+        offs_bias = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
         bias_ptrs = bias_ptr + offs_bias
         bias = tl.load(bias_ptrs, mask=(offs_bias < N), other=0.0).to(tl.float32)
         accumulator = accumulator + bias[None, :]
 
+
+    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
+    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+
+    # β accumulation: D = α·(A·B) + bias + β·C. Fold existing C in *before*
+    # any FP8 output scaling so amax reflects the final value. Matches
+    # hipBLASLt's epilogue ordering.
+    if ACCUMULATE:
+        existing_c = tl.load(c_ptrs, mask=c_mask, other=0.0).to(acc_dtype)
+        accumulator = accumulator + beta * existing_c
 
     # Get amax first and then scale c before conversion to fp8
     if OUTPUT_FP8:
@@ -1346,17 +1380,13 @@ def matmul_kernel(
 
     # -----------------------------------------------------------
     # Write back the block of the output matrix C with masks.
-    offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
-    c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
     tl.store(c_ptrs, c, mask=c_mask)
 
 
 # %%
 # We can now create a convenience wrapper function that only takes two input tensors,
 # and (1) checks any shape constraint; (2) allocates the output; (3) launches the above kernel.
-def matmul(a, b, c, a_scale, b_scale, c_scale, bias, c_amax, epilogue='DEFAULT', input_fp8=False, output_fp8=False):
+def matmul(a, b, c, a_scale, b_scale, c_scale, bias, c_amax, epilogue='DEFAULT', input_fp8=False, output_fp8=False, accumulate=False, alpha=1.0, beta=0.0):
     # Check constraints.
     assert a.shape[1] == b.shape[0], "Incompatible dimensions"
     M, K = a.shape
@@ -1372,13 +1402,16 @@ def matmul(a, b, c, a_scale, b_scale, c_scale, bias, c_amax, epilogue='DEFAULT',
         a_scale, b_scale, c_scale,
         bias,
         c_amax,
+        float(alpha), float(beta),
         M, N, K,
         a.stride(0), a.stride(1),
         b.stride(0), b.stride(1),
         c.stride(0), c.stride(1),
         EPILOGUE=epilogue,
         INPUT_FP8=input_fp8,
-        OUTPUT_FP8=output_fp8
+        OUTPUT_FP8=output_fp8,
+        ACCUMULATE=accumulate,
+        ALPHA_IS_ONE=(float(alpha) == 1.0),
     )
 
 

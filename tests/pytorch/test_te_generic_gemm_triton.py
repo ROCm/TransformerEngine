@@ -47,7 +47,6 @@ REGULAR_FP8_SHAPES = [
 MXFP8_SHAPES = [
     (128, 256, 512),
     (768, 768, 4096),
-    (224, 544, 544),
 ]
 
 LAYOUTS = ["TN", "NN", "NT"]

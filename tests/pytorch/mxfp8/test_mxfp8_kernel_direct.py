@@ -19,6 +19,20 @@ if torch_version() < (2, 10):
     )
 
 
+def _get_e4m3_dtype():
+    """Return the E4M3 dtype native to the current architecture.
+
+    gfx950 (compute cap >= 9.5) uses OCP torch.float8_e4m3fn where the bit
+    patterns 0x7F/0xFF are NaN; gfx942 and earlier use NANOO
+    torch.float8_e4m3fnuz where only 0x80 is NaN. Quantizing through the
+    right dtype keeps the uint8 payload free of NaN encodings.
+    """
+    major, minor = torch.cuda.get_device_capability()
+    if major == 9 and minor >= 5:
+        return torch.float8_e4m3fn
+    return torch.float8_e4m3fnuz
+
+
 def test_mxfp8_kernel_with_simulated_data():
     """Test MXFP8 kernel with simulated FP8 data and E8M0 scales"""
     try:
@@ -42,10 +56,13 @@ def test_mxfp8_kernel_with_simulated_data():
         A_fp32 = torch.randn(M, K, device='cuda', dtype=torch.float32) * 0.1
         B_fp32 = torch.randn(K, N, device='cuda', dtype=torch.float32) * 0.1
 
-        # Simulate FP8 by converting to uint8 (not real FP8, just for kernel test)
-        # In production, this would be actual FP8 data from MXFP8Tensor
-        A_fp8 = (A_fp32 * 127).clamp(-127, 127).to(torch.int8).view(torch.uint8)
-        B_fp8 = (B_fp32 * 127).clamp(-127, 127).to(torch.int8).view(torch.uint8)
+        # Quantize through the architecture-native E4M3 dtype, then view as
+        # uint8. An int8→uint8 reinterpret cast can produce 0x7F/0xFF bytes
+        # which are NaN encodings under OCP e4m3fn (gfx950), poisoning the
+        # whole accumulator; routing through the FP8 dtype avoids that.
+        e4m3 = _get_e4m3_dtype()
+        A_fp8 = A_fp32.to(e4m3).view(torch.uint8)
+        B_fp8 = B_fp32.to(e4m3).view(torch.uint8)
 
         # Create E8M0 scales (uint8 biased exponents)
         # For testing, use constant scales: exponent = 127 means scale = 2^0 = 1.0
