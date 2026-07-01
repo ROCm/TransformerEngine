@@ -749,8 +749,20 @@ void fused_attn_ck_bwd_impl(
   // First h*max_tokens_q*sizeof(float) is the lse-d buffer (passed as softmax_lsed)
   void* lse_workspace = planner.allocate(h*max_tokens_q*sizeof(float));
 
-  // CK requires dq_acc ptr; size depends on deterministic mode
-  void* dq_acc_ptr = planner.allocate(nsplits*h*max_tokens_q*d_qk*sizeof(float));
+  // CK requires dq_acc ptr; size/dtype/layout depend on the dq post-processing path (mirrors aiter's
+  // asm_mha_varlen_bwd wiring):
+  //  - fp32 dq_convert (is_v3_atomic_fp32=1): fp32-packed (nsplits, H, total_q, d_qk).
+  //  - bf16 dq_shuffle (is_v3_atomic_fp32=0) in ragged/group mode: per-segment padded bf16
+  //    (nsplits, B, H, pad16(s_q), 128) so each ragged segment has a fixed-stride slot (batch_stride!=0).
+  //    TE previously always used the fp32-packed layout with batch_stride_dq_acc=0, which the dq_shuffle
+  //    kernel mis-indexes for segments past cu_seqlens offset 0 -> corrupt dQ. See ck_fused_attn_bwd.cpp.
+  const bool dq_acc_bf16_ragged = is_ragged && !nvte_ck_is_v3_atomic_fp32;
+  const size_t dq_acc_padded_sq = ((s_q + 15) / 16) * 16;
+  const size_t dq_acc_elems = dq_acc_bf16_ragged
+      ? (nsplits * b * h * dq_acc_padded_sq * 128)
+      : (nsplits * h * max_tokens_q * d_qk);
+  const size_t dq_acc_elem_size = dq_acc_bf16_ragged ? nvte_dtype_size(dtype) : sizeof(float);
+  void* dq_acc_ptr = planner.allocate(dq_acc_elems * dq_acc_elem_size);
 
   void* dk_expanded_ptr = nullptr;
   void* dv_expanded_ptr = nullptr;
@@ -892,8 +904,9 @@ void fused_attn_ck_bwd_impl(
   }
 
   // Initialize workspace buffers.
-  // dq_acc is of shape (nsplits, B, S, H, D_qk); CK requires zeroing
-  NVTE_CHECK_CUDA(cudaMemsetAsync(dq_acc_ptr, 0, sizeof(float)*nsplits*h*max_tokens_q*d_qk, stream));
+  // dq_acc layout/dtype set at allocation (fp32-packed, or bf16 per-segment padded for ragged dq_shuffle);
+  // CK requires zeroing the whole buffer.
+  NVTE_CHECK_CUDA(cudaMemsetAsync(dq_acc_ptr, 0, dq_acc_elems * dq_acc_elem_size, stream));
   if(devPtrAlibiSlope){
     dim3 block, grid;
     block.x = 1024;

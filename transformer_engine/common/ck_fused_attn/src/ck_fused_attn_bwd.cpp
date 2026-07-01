@@ -529,8 +529,15 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.stride_o = args.stride_s_o;
   fmha_args.stride_randval = args.s_kv;
   fmha_args.stride_do = args.stride_s_do;
+  // dq_acc layout mirrors aiter's asm_mha_varlen_bwd:
+  //  - fp32 dq_convert path: fp32-packed (nsplits, H, total_q, d_qk), batch_stride_dq_acc = 0 in group mode.
+  //  - bf16 dq_shuffle path in ragged/group mode: per-segment padded (nsplits, B, H, pad16(s_q), 128) with
+  //    a fixed nonzero batch stride, so each ragged segment lands in its own slot (the old batch_stride=0
+  //    packed layout mis-indexed every segment past cu_seqlens offset 0 -> corrupt dQ).
+  const bool dq_acc_bf16_ragged = args.is_group_mode() && !args.is_v3_atomic_fp32;
+  const int64_t dq_acc_padded_sq = static_cast<int64_t>(((args.s_q + 15) / 16) * 16);
   //dq_acc of shape (nsplits, B, H, S, D)
-  fmha_args.stride_dq_acc = args.d_qk;
+  fmha_args.stride_dq_acc = dq_acc_bf16_ragged ? 128 : args.d_qk;
   fmha_args.stride_dq = args.stride_s_dq;
   fmha_args.stride_dk = is_mqa_gqa? args.stride_s_dk_expanded : args.stride_s_dk;
   fmha_args.stride_dv = is_mqa_gqa? args.stride_s_dv_expanded : args.stride_s_dv;
@@ -548,7 +555,9 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.nhead_stride_randval = args.is_group_mode() ? 0 : args.s_q * args.s_kv;
   fmha_args.nhead_stride_do = args.stride_h_do;
   fmha_args.nhead_stride_lsed = args.is_group_mode() ? args.max_tokens_q : args.s_q;
-  fmha_args.nhead_stride_dq_acc = static_cast<int64_t>((args.is_group_mode() ? args.max_tokens_q : args.s_q) * args.d_qk);
+  fmha_args.nhead_stride_dq_acc = dq_acc_bf16_ragged
+      ? static_cast<int64_t>(dq_acc_padded_sq * 128)
+      : static_cast<int64_t>((args.is_group_mode() ? args.max_tokens_q : args.s_q) * args.d_qk);
   fmha_args.nhead_stride_dq = args.stride_h_dq;
   fmha_args.nhead_stride_dk = is_mqa_gqa? args.stride_h_dk_expanded : args.stride_h_dk;
   fmha_args.nhead_stride_dv = is_mqa_gqa? args.stride_h_dv_expanded : args.stride_h_dv;
@@ -564,13 +573,17 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.batch_stride_randval = args.is_group_mode() ? 0 : args.h * args.s_q * args.s_kv;
   fmha_args.batch_stride_do = args.is_group_mode() ? 0 : args.stride_b_do;
   fmha_args.batch_stride_lsed = args.is_group_mode() ? 0 : args.h * args.s_q;
-  fmha_args.batch_stride_dq_acc = args.is_group_mode() ? 0 : static_cast<int64_t>(args.h * args.s_q * args.d_qk);
+  fmha_args.batch_stride_dq_acc = dq_acc_bf16_ragged
+      ? static_cast<int64_t>(args.h * dq_acc_padded_sq * 128)
+      : (args.is_group_mode() ? 0 : static_cast<int64_t>(args.h * args.s_q * args.d_qk));
   fmha_args.batch_stride_dq = args.is_group_mode() ? 0 : args.stride_b_dq;
   fmha_args.batch_stride_dk = args.is_group_mode() ? 0 : (is_mqa_gqa? args.stride_b_dk_expanded : args.stride_b_dk);
   fmha_args.batch_stride_dv = args.is_group_mode() ? 0 : (is_mqa_gqa? args.stride_b_dv_expanded : args.stride_b_dv);
   // for dbias, use h since h can be different from bias_h
   fmha_args.batch_stride_dbias = args.is_group_mode() ? 0 : args.h * args.s_q * args.s_kv;
-  fmha_args.split_stride_dq_acc = static_cast<int>(args.is_group_mode() ? (args.max_tokens_q * args.h * args.d_qk) : (args.b * args.h * args.s_q * args.d_qk));
+  fmha_args.split_stride_dq_acc = dq_acc_bf16_ragged
+      ? static_cast<int>(args.b * args.h * dq_acc_padded_sq * 128)
+      : static_cast<int>(args.is_group_mode() ? (args.max_tokens_q * args.h * args.d_qk) : (args.b * args.h * args.s_q * args.d_qk));
 
   fmha_args.window_size_left = args.window_size_left;
   fmha_args.window_size_right = args.window_size_right;
