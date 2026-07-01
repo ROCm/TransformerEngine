@@ -54,48 +54,6 @@ def get_cublas_workspace_size_bytes() -> None:
     return 4_194_304
 
 
-def _hipkittens_workspace_bytes(m: int, n: int, k: int, layout: str) -> int:
-    """Compute workspace bytes needed for HipKittens MXFP8 GEMM."""
-    def _align(x: int) -> int:
-        return (x + 255) & ~255
-
-    transa = layout[0] == "T"
-    transb = layout[1] == "T"
-    k_iters = k // 128
-    scale_k = k // 32
-    sa_pk = _align(k_iters * m * 4)
-    sb_pk = k_iters * n * 4
-    needed = _align(sa_pk) + sb_pk
-    if not transa:
-        needed += _align(m * k) + _align(m * scale_k)
-    if transb:
-        needed += _align(n * k) + _align(n * scale_k) + _align(sb_pk)
-    return needed
-
-
-_workspace_cache: dict[int, torch.Tensor] = {}
-
-
-def _get_or_grow_workspace(device: int, needed: int) -> torch.Tensor:
-    """Return a cached workspace tensor, growing it if needed."""
-    needed = max(needed, get_cublas_workspace_size_bytes())
-    ws = _workspace_cache.get(device)
-    if ws is None or ws.shape[0] < needed:
-        ws = torch.empty(needed, dtype=torch.uint8, device=device)
-        _workspace_cache[device] = ws
-    return ws
-
-
-@functools.lru_cache(maxsize=None)
-def _use_hipkittens() -> bool:
-    """Check if HipKittens MXFP8 backend is active."""
-    if not IS_HIP_EXTENSION:
-        return False
-    if get_device_compute_capability() != (9, 5):
-        return False
-    return os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "0") != "1"
-
-
 @functools.lru_cache(maxsize=None)
 def get_cublas_workspace(device: int, ub: bool, grouped_gemm: bool) -> torch.Tensor:
     """Returns workspace for cublas GEMM."""
@@ -373,17 +331,7 @@ def general_gemm(
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
 
-    is_mxfp8 = isinstance(A, MXFP8TensorStorage)
-    if is_mxfp8 and _use_hipkittens():
-        a_size = A.size()
-        b_size = B.size()
-        m  = a_size[0] if transa else a_size[-1]
-        n  = b_size[-1] if transb else b_size[0]
-        k  = a_size[-1] if transa else a_size[0]
-        needed = _hipkittens_workspace_bytes(m, n, k, layout)
-        workspace = _get_or_grow_workspace(A.device.index, needed)
-    else:
-        workspace = get_cublas_workspace(A.device.index, ub is not None, False)
+    workspace = get_cublas_workspace(A.device.index, ub is not None, False)
 
     # On ROCm, FP4 is dequantized to BF16 in the workspace before GEMM.
     # Compute the required extra space and extend the workspace if needed.
