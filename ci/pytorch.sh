@@ -58,6 +58,10 @@ run_test_config(){
     run_default_fa 1 test_fused_router.py
     run_default_fa 1 test_fusible_ops.py
     run_default_fa 1 test_gemm_autotune.py
+    NVTE_USE_GEMM_TRITON=1 run_default_fa_lbl "triton" 1 test_gemm_triton.py
+    NVTE_USE_GEMM_TRITON=1 run_default_fa_lbl "triton" 1 test_gemm_triton_generic_fp8.py
+    NVTE_USE_GEMM_TRITON=1 run_default_fa_lbl "triton" 1 test_te_generic_gemm_triton.py
+    NVTE_USE_GEMM_TRITON=1 NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "triton" 1 mxfp8/
     run 1 test_gqa.py
     run 1 test_jit.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
@@ -85,6 +89,9 @@ run_test_config(){
     NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 3 test_numerics.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "triton" 1 test_float8_current_scaling_exact.py
+    NVTE_USE_GEMM_TRITON=1 run_default_fa_lbl "gemm-triton" 3 test_numerics.py
+    NVTE_USE_GEMM_TRITON=1 run_default_fa_lbl "gemm-triton" 1 test_fusible_ops.py
+    NVTE_USE_GEMM_TRITON=1 run_default_fa_lbl "gemm-triton" 1 test_float8_current_scaling_exact.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 test_numerics.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 test_fusible_ops.py
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_numerics.py

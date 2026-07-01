@@ -80,6 +80,18 @@ def is_fp8(type_name):
     a_type, b_type = get_in_dtypes(type_name)
     return ( a_type in ('fp8e4', 'fp8e5') ) and ( b_type in ('fp8e4', 'fp8e5') )
 
+def is_mixed_fp8(type_name):
+    a_type, b_type = get_in_dtypes(type_name)
+    return is_fp8(type_name) and a_type != b_type
+
+# Mixed FP8 (e4m3 + e5m2) on gfx950 hits a Triton compiler bug in mixed-type
+# MFMA instruction selection. Fixed in triton-lang/triton PR #9567
+# (commit eaaa75cf5, 2026-02-27). The fix landed in Triton release/3.7.x
+# and ships starting with PyTorch 2.12 (pytorch-triton-rocm 3.7.x);
+# pytorch-triton-rocm 3.6.x (PyTorch 2.10 / 2.11) does not carry it.
+from transformer_engine.pytorch import torch_version
+_MIXED_FP8_MFMA_FIXED = torch_version() >= (2, 12)
+
 @pytest.mark.parametrize("M, K, N, in_dtype, out_dtype, col_a, col_b, use_bias, bias_dtype, grad",
 [ (*shape, in_dtype, out_dtype, col_a, col_b, use_bias, bias_dtype, grad)
     for shape in [(2304, 768, 4096),
@@ -114,6 +126,13 @@ def test_correctness(M, N, K, col_a, col_b, in_dtype, out_dtype, use_bias, bias_
     a_in_dtype, b_in_dtype = get_in_dtypes(in_dtype)
     if is_fp8(in_dtype) and use_bias and grad:
         pytest.skip('Skip tests for fp8 GEMM with BGRADB.')
+
+    if is_mixed_fp8(in_dtype) and not _MIXED_FP8_MFMA_FIXED:
+        pytest.skip(
+            'Mixed FP8 formats (e4m3 + e5m2) require Triton with '
+            'triton-lang/triton#9567 (pytorch-triton-rocm >= 3.7.x, '
+            'shipped with PyTorch 2.12+).'
+        )
 
     if col_a and col_b:
         pytest.skip('Skip tests for TT layout')
