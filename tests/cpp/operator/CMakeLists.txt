@@ -15,7 +15,7 @@ add_executable(test_operator
                test_cast_mxfp8.cu
                test_cast_mxfp8_grouped.cu
                test_cast_nvfp4_transpose.cu
-               test_cast_float8blockwise.cu #CUDA-only test
+               test_cast_float8blockwise.cu
                test_dequantize_mxfp8.cu
                test_dequantize_mxfp8_grouped.cu
                test_transpose.cu
@@ -42,7 +42,6 @@ if(USE_ROCM)
   get_target_property(test_cuda_sources test_operator SOURCES)
   # Remove CUDA-only tests and add ROCm specific ones
   list(REMOVE_ITEM test_cuda_sources
-              test_cast_float8blockwise.cu
               test_grouped_gemm.cu)
   list(APPEND test_cuda_sources
               test_dequantize_nvfp4.cu
