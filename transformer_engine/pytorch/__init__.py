@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -64,11 +66,18 @@ from transformer_engine.pytorch import ops
 from transformer_engine.pytorch import optimizers
 from transformer_engine.pytorch.export import onnx_export
 from transformer_engine.pytorch.cross_entropy import parallel_cross_entropy
+from torch.utils.cpp_extension import IS_HIP_EXTENSION as _IS_HIP_EXTENSION
+if not _IS_HIP_EXTENSION:
+    from transformer_engine.pytorch.newton_schulz import (
+        CusolverMpCtx,
+        newton_schulz,
+    )
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
 from transformer_engine.pytorch.quantized_tensor import Quantizer
 from transformer_engine.pytorch.quantized_tensor import prepare_for_saving
 from transformer_engine.pytorch.quantized_tensor import restore_from_saved
+from transformer_engine.pytorch.quantized_tensor import restore_from_func_ctx
 from transformer_engine.pytorch.tensor import Float8Quantizer
 from transformer_engine.pytorch.tensor import Float8CurrentScalingQuantizer
 from transformer_engine.pytorch.tensor import MXFP8Quantizer

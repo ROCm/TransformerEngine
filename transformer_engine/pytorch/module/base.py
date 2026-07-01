@@ -88,19 +88,19 @@ class UserBufferQuantizationMode(Enum):
 
 def get_dummy_wgrad(shape: list, dtype: torch.dtype, zero=False) -> torch.Tensor:
     """Returns a dummy tensor of given shape."""
-    if len(shape) != 2:
-        raise ValueError(f"Expected 2D shape, got {len(shape)}D: {shape}")
+
+    key = (*shape, dtype)
     global _dummy_wgrads
-    if (shape[0], shape[1], dtype) not in _dummy_wgrads:
-        _dummy_wgrads[(shape[0], shape[1], dtype)] = torch.empty(
+    if key not in _dummy_wgrads:
+        _dummy_wgrads[key] = torch.empty(
             shape,
             dtype=dtype,
             device="cuda",
             requires_grad=False,
         )
     if zero:
-        _dummy_wgrads[(shape[0], shape[1], dtype)].fill_(0)
-    return _dummy_wgrads[(shape[0], shape[1], dtype)].detach()
+        _dummy_wgrads[key].fill_(0)
+    return _dummy_wgrads[key].detach()
 
 
 def initialize_ub(
@@ -676,6 +676,252 @@ def fill_userbuffers_buffer_for_all_gather(
     raise ValueError(f"Unsupported quantizer for Userbuffers ({quantizer})")
 
 
+def _is_weight_workspace_valid(
+    workspace: QuantizedTensorStorage,
+    quantizer: Quantizer,
+) -> bool:
+    """Check if a cached weight workspace is compatible with the quantizer's current usage."""
+    if isinstance(workspace, Float8TensorStorage):
+        if (
+            not is_non_tn_fp8_gemm_supported()
+            and quantizer.columnwise_usage
+            and workspace._transpose is None
+        ):
+            return False
+    elif isinstance(workspace, MXFP8TensorStorage):
+        if quantizer.rowwise_usage and workspace._rowwise_data is None:
+            return False
+        if quantizer.columnwise_usage and workspace._columnwise_data is None:
+            return False
+    elif isinstance(workspace, NVFP4TensorStorage):
+        if quantizer.rowwise_usage and workspace._rowwise_data is None:
+            return False
+        if quantizer.columnwise_usage and workspace._columnwise_data is None:
+            return False
+    if isinstance(workspace, DebugQuantizedTensor) != isinstance(quantizer, DebugQuantizer):
+        return False
+    return True
+
+
+def quantize_weight(
+    *,
+    tensor: Optional[torch.Tensor] = None,
+    quantizer: Optional[Quantizer] = None,
+    workspace: Optional[QuantizedTensorStorage] = None,
+    update_workspace: bool = True,
+    skip_update_flag: Optional[torch.Tensor] = None,
+    fsdp_group: Optional["dist_group_type"] = None,
+    workspace_dtype: Optional[torch.dtype] = None,
+    cache: bool = False,
+) -> Tuple[QuantizedTensorStorage, Optional[QuantizedTensorStorage]]:
+    """Quantize a weight tensor, optionally reusing a cached workspace.
+
+    Parameters
+    ----------
+    tensor: torch.Tensor, optional
+        Weight tensor to quantize.
+    quantizer: Quantizer, optional
+        Quantizer for casting the weight.
+    workspace: QuantizedTensorStorage, optional
+        Previously cached workspace (from the module's ``_fp8_workspaces``).
+        ``None`` indicates a cache miss.
+    update_workspace: bool, default = True
+        Whether to update an existing workspace with fresh values.
+    skip_update_flag: torch.Tensor, optional
+        GPU flag to conditionally skip the update.
+    fsdp_group: dist_group_type, optional
+        FSDP process group the weights are distributed over.
+    workspace_dtype: torch.dtype, optional
+        High-precision dtype for debug quantization workspaces.
+    cache: bool, default = False
+        If ``True`` and a new workspace is created, it will be returned
+        as the second element so the caller can store it.
+
+    Returns
+    -------
+    (weightmat, new_workspace)
+        *weightmat*: quantized weight ready for GEMM.
+        *new_workspace*: non-``None`` only when a brand-new workspace was
+        created **and** ``cache=True``.  The caller should store it in
+        ``_fp8_workspaces``.
+    """
+
+    # Already-quantized weight (primary FP8 parameters)
+    if isinstance(tensor, QuantizedTensor):
+        update_rowwise = True if quantizer.rowwise_usage else None
+        update_columnwise = True if quantizer.columnwise_usage else None
+        tensor.update_usage(
+            rowwise_usage=update_rowwise,
+            columnwise_usage=update_columnwise,
+        )
+        if isinstance(quantizer, DebugQuantizer):
+            tensor = quantizer.wrap_quantized_tensor(tensor)
+        return tensor, None
+
+    # Validate workspace
+    if workspace is not None and quantizer is not None:
+        if not _is_weight_workspace_valid(workspace, quantizer):
+            workspace = None
+
+    # FSDP gather on cached workspace
+    if (
+        workspace is not None
+        and tensor is not None
+        and fsdp_group is not None
+        and workspace.data.shape != tensor.data.shape
+    ):
+        _fsdp_gather_tensors(fsdp_group, [tensor.data.shape], workspace)
+
+    # Cache hit — update in-place and return
+    if workspace is not None:
+        if skip_update_flag is not None:
+            update_workspace = True
+        if update_workspace:
+            if tensor is None:
+                raise ValueError("tensor kwarg must be provided to update FP8 workspace")
+            if hasattr(workspace, "quantize_"):
+                workspace.quantize_(tensor, noop_flag=skip_update_flag)
+            else:
+                tex.quantize(tensor, quantizer, workspace, skip_update_flag)
+        return workspace, None
+
+    # Cache miss — create new workspace
+    if tensor is None or quantizer is None:
+        raise ValueError("tensor and quantizer kwargs must be provided to construct FP8 workspace")
+    if cache:
+        # Ensure the tensor in the cache is an instance of torch.Tensor,
+        # as it persists beyond a single forward pass.
+        # Setting internal=True would cause the data to be removed in prepare_for_saving(...).
+        saved_internal = quantizer.internal
+        quantizer.internal = False
+    out = quantizer.quantize(tensor, dtype=workspace_dtype)
+    if cache:
+        quantizer.internal = saved_internal
+        return out, out
+    return out, None
+
+
+def quantize_multi_weight(
+    *,
+    tensors: List[torch.Tensor],
+    quantizers: List[Quantizer],
+    workspaces: Optional[List[Optional[QuantizedTensorStorage]]] = None,
+    update_workspace: bool = True,
+    skip_update_flag: Optional[torch.Tensor] = None,
+    workspace_dtype: Optional[torch.dtype] = None,
+    cache: bool = False,
+) -> Tuple[List[QuantizedTensorStorage], List[Optional[QuantizedTensorStorage]]]:
+    """Quantize a group of weights, optionally reusing cached workspaces.
+
+    Group analogue of :func:`quantize_weight`. For delayed-scaling FP8 the whole
+    group is cast and transposed with a single fused ``multi_cast_transpose``
+    kernel, and on ROCm an MXFP8 group is quantized with a single fused
+    multi-quantize kernel, instead of one quantize call per tensor. When fusion
+    is not applicable (other recipes, FP8 rowwise-only usage, already-quantized
+    weights, or a CUDA-graph skip flag) the call falls back to
+    :func:`quantize_weight` for each tensor.
+
+    Parameters
+    ----------
+    tensors: list of torch.Tensor
+        Weight tensors to quantize.
+    quantizers: list of Quantizer
+        Quantizers for casting the weights.
+    workspaces: list of QuantizedTensorStorage, optional
+        Previously cached workspaces (from the module's ``_fp8_workspaces``).
+        ``None`` entries indicate a cache miss.
+    update_workspace: bool, default = True
+        Whether to update existing workspaces with fresh values.
+    skip_update_flag: torch.Tensor, optional
+        GPU flag to conditionally skip the update.
+    workspace_dtype: torch.dtype, optional
+        High-precision dtype for debug quantization workspaces.
+    cache: bool, default = False
+        If ``True``, brand-new workspaces are returned so the caller can store
+        them.
+
+    Returns
+    -------
+    (weights, new_workspaces)
+        *weights*: quantized weights ready for GEMM.
+        *new_workspaces*: per-tensor entries that are non-``None`` only when a
+        workspace should be (re)stored in ``_fp8_workspaces`` (i.e. ``cache`` is
+        ``True`` and the fused/per-tensor path produced a workspace to cache).
+    """
+    num_tensors = len(tensors)
+    if workspaces is None:
+        workspaces = [None] * num_tensors
+
+    # Fused path eligibility. Two recipes have a fused multi-tensor quantize kernel:
+    #   * delayed-scaling FP8 (Float8Quantizer): cast + transpose, so it requires
+    #     columnwise usage.
+    #   * MXFP8 (ROCm only): fused multi-quantize kernel that handles whichever
+    #     rowwise/columnwise buffers are allocated.
+    # Both require high-precision (not already quantized) weights and no CUDA-graph
+    # skip flag (the fused kernels have no device-side noop and would not preserve
+    # cached buffer pointers).
+    fused_fp8 = all(
+        isinstance(quantizer, Float8Quantizer) and quantizer.columnwise_usage
+        for quantizer in quantizers
+    )
+    fused_mxfp8 = IS_HIP_EXTENSION and all(
+        isinstance(quantizer, MXFP8Quantizer) for quantizer in quantizers
+    )
+    can_fuse = (
+        num_tensors > 0
+        and skip_update_flag is None
+        and (fused_fp8 or fused_mxfp8)
+        and not any(isinstance(tensor, QuantizedTensorStorage) for tensor in tensors)
+    )
+
+    if can_fuse:
+        # Validate cached workspaces; treat any invalid/missing entry as a cache miss.
+        cache_miss = False
+        for i, (workspace, quantizer) in enumerate(zip(workspaces, quantizers)):
+            if workspace is not None and not _is_weight_workspace_valid(workspace, quantizer):
+                workspaces[i] = None
+            if workspaces[i] is None:
+                cache_miss = True
+
+        new_workspaces: List[Optional[QuantizedTensorStorage]] = [None] * num_tensors
+        if not cache_miss and not update_workspace:
+            # All workspaces valid and no refresh requested.
+            return list(workspaces), new_workspaces
+
+        # Force internal=False so cached workspaces survive prepare_for_saving.
+        if cache:
+            saved_internal = [quantizer.internal for quantizer in quantizers]
+            for quantizer in quantizers:
+                quantizer.internal = False
+        if cache_miss:
+            # Single fused kernel allocates all outputs.
+            weights = tex.multi_tensor_quantize(list(tensors), quantizers)
+        else:
+            # In-place refresh of cached workspaces.
+            weights = tex.multi_tensor_quantize(list(tensors), quantizers, outputs=list(workspaces))
+        if cache:
+            for quantizer, internal in zip(quantizers, saved_internal):
+                quantizer.internal = internal
+            new_workspaces = list(weights)
+        return list(weights), new_workspaces
+
+    # Fallback: quantize each weight individually.
+    weights = []
+    new_workspaces = [None] * num_tensors
+    for i in range(num_tensors):
+        weight, new_workspaces[i] = quantize_weight(
+            tensor=tensors[i],
+            quantizer=quantizers[i],
+            workspace=workspaces[i],
+            update_workspace=update_workspace,
+            skip_update_flag=skip_update_flag,
+            workspace_dtype=workspace_dtype,
+            cache=cache,
+        )
+        weights.append(weight)
+    return weights, new_workspaces
+
+
 class TransformerEngineBaseModule(torch.nn.Module, ABC):
     """Base TE module."""
 
@@ -768,20 +1014,21 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                 fwd_pos, fwd_key, bwd_pos, bwd_key = self.fp8_meta[
                     FP8GlobalStateManager.get_buffer_info()
                 ]
+                qstate = FP8GlobalStateManager.quantization_state
                 for pos, buffer_key in zip((fwd_pos, bwd_pos), (fwd_key, bwd_key)):
-                    if buffer_key in FP8GlobalStateManager.global_amax_buffer:
-                        if buffer_key not in FP8GlobalStateManager.global_amax_history_buffer:
+                    if buffer_key in qstate.global_amax_buffer:
+                        if buffer_key not in qstate.global_amax_history_buffer:
                             raise RuntimeError(
                                 "TE internal error during amax history change: "
                                 f"buffer_key '{buffer_key}' found in global_amax_buffer "
                                 "but missing from global_amax_history_buffer"
                             )
-                        FP8GlobalStateManager.global_amax_buffer[buffer_key][pos] = self.fp8_meta[
+                        qstate.global_amax_history_buffer[buffer_key][pos] = self.fp8_meta[
+                            meta_key
+                        ].amax_history
+                        qstate.global_amax_buffer[buffer_key][pos] = self.fp8_meta[
                             meta_key
                         ].amax_history[0]
-                        FP8GlobalStateManager.global_amax_history_buffer[buffer_key][pos] = (
-                            self.fp8_meta[meta_key].amax_history
-                        )
 
     def set_meta_tensor(self, fwd: bool, recipe: Recipe) -> None:
         """Init scales and amaxes for fwd | bwd."""
@@ -1239,9 +1486,10 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
         grad_output = grad_output.reshape((-1, grad_output.shape[-1]))
         grad_output = grad_output.contiguous()
         gather_grad_output = row_parallel_mode and ctx.sequence_parallel
+        use_fp8_bwd = ctx.fp8 and ctx.backward_override is None
 
         # Non-FP8 case: bgrad is fused with wgrad for this case.
-        if not ctx.fp8 and not ctx.debug:
+        if not use_fp8_bwd and not ctx.debug:
             if gather_grad_output:
                 if not ctx.ub_overlap_ag:  # Perform NCCL all-gather
                     grad_output, _ = gather_along_first_dim(grad_output, ctx.tp_group)
@@ -1444,10 +1692,12 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     if hasattr(self, "_high_precision_init_val"):
                         del self._high_precision_init_val
 
-                param._high_precision_init_val = high_precision_init_val
-                param.get_high_precision_init_val = MethodType(get, param)
-                param.clear_high_precision_init_val = MethodType(clear, param)
-                # Update the parameter based on its type
+                # DTensor.from_local() does not preserve object identity,
+                # so attach to the DTensor's local tensor when applicable.
+                target = dtensor_param._local_tensor if is_dtensor else param
+                target._high_precision_init_val = high_precision_init_val
+                target.get_high_precision_init_val = MethodType(get, target)
+                target.clear_high_precision_init_val = MethodType(clear, target)
 
             if not is_dtensor:
                 self.module_setattr(name, param)
@@ -1592,131 +1842,6 @@ class TransformerEngineBaseModule(torch.nn.Module, ABC):
                     tex.quantize(tensor, quantizer, out, skip_update_flag)
 
         return out
-
-    def get_multi_weight_workspace(
-        self,
-        *,
-        tensors: List[torch.Tensor],
-        quantizers: List[Quantizer],
-        cache_names: Optional[List[str]] = None,
-        update_workspace: bool = True,
-        skip_update_flag: Optional[torch.Tensor] = None,
-        workspace_dtype: Optional[torch.dtype] = None,
-    ) -> List[QuantizedTensor]:
-        """Get workspace buffers for a group of weights and maybe update their values.
-
-        Analogous to `get_weight_workspace`, but operates on a whole group of
-        weights. For delayed-scaling FP8 the group is cast and transposed with a
-        single fused multi_cast_transpose kernel, and on ROCm an MXFP8 group is
-        quantized with a single fused multi-quantize kernel, instead of one
-        quantize call per tensor. With caching, both the initial allocation and
-        later updates use that fused `multi_tensor_quantize` path when
-        `update_workspace` is True; cached workspaces are passed as `outputs` so
-        the fused kernel writes in place without reallocating buffers. When
-        fusion is not applicable (other recipes, FP8 rowwise-only usage,
-        already-quantized weights, or CUDA-graph weight caching) the call falls
-        back to `get_weight_workspace` for each tensor, matching the per-tensor path.
-
-        Parameters
-        ----------
-        tensors : list of torch.Tensor
-            Values to copy into the workspaces.
-        quantizers : list of Quantizer
-            Quantizers used to cast the weights.
-        cache_names : list of str, optional
-            Keys for caching. If None, the workspaces are not cached.
-        update_workspace : bool, default = True
-            Update workspaces with values from `tensors`.
-        skip_update_flag : torch.Tensor, optional
-            GPU flag to skip updating the workspaces.
-        workspace_dtype : torch.dtype, optional
-            High-precision workspace dtype (used for debug quantization).
-        """
-        num_tensors = len(tensors)
-
-        # Fused path eligibility. Two recipes have a fused multi-tensor quantize
-        # kernel:
-        #   * delayed-scaling FP8 (Float8Quantizer): cast + transpose, so it
-        #     requires columnwise usage.
-        #   * MXFP8 (ROCm only): fused multi-quantize kernel that handles whichever
-        #     rowwise/columnwise buffers are allocated.
-        # Both require high-precision (not already quantized) weights and no
-        # CUDA-graph skip flag (the fused kernels have no device-side noop and would
-        # not preserve cached buffer pointers).
-        fused_fp8 = all(
-            isinstance(quantizer, Float8Quantizer) and quantizer.columnwise_usage
-            for quantizer in quantizers
-        )
-        fused_mxfp8 = IS_HIP_EXTENSION and all(
-            isinstance(quantizer, MXFP8Quantizer) for quantizer in quantizers
-        )
-        can_fuse = (
-            num_tensors > 0
-            and skip_update_flag is None
-            and (fused_fp8 or fused_mxfp8)
-            and not any(isinstance(tensor, QuantizedTensorStorage) for tensor in tensors)
-        )
-
-        if can_fuse:
-            # No caching: allocate fresh and cast + transpose the whole group at once.
-            if cache_names is None:
-                return tex.multi_tensor_quantize(list(tensors), quantizers)
-
-            workspaces = []
-            cache_miss = False
-            for name, quantizer in zip(cache_names, quantizers):
-                out = self._fp8_workspaces.get(name)
-                if out is not None and quantizer is not None:
-                    reset_cache = False
-                    if isinstance(out, Float8TensorStorage):
-                        if (
-                            not is_non_tn_fp8_gemm_supported()
-                            and quantizer.columnwise_usage
-                            and out._transpose is None
-                        ):
-                            reset_cache = True
-                    elif isinstance(out, MXFP8TensorStorage):
-                        if quantizer.rowwise_usage and out._rowwise_data is None:
-                            reset_cache = True
-                        elif quantizer.columnwise_usage and out._columnwise_data is None:
-                            reset_cache = True
-                    if reset_cache:
-                        del self._fp8_workspaces[name]
-                        out = None
-                if out is None:
-                    cache_miss = True
-                workspaces.append(out)
-            if cache_miss or update_workspace:
-                # Single fused kernel for initial allocation and for refreshes.
-                # Force internal=False so cached workspaces survive prepare_for_saving.
-                saved_internal = [quantizer.internal for quantizer in quantizers]
-                for quantizer in quantizers:
-                    quantizer.internal = False
-                if cache_miss:
-                    workspaces = tex.multi_tensor_quantize(list(tensors), quantizers)
-                else:
-                    workspaces = tex.multi_tensor_quantize(
-                        list(tensors), quantizers, outputs=workspaces
-                    )
-                for quantizer, internal in zip(quantizers, saved_internal):
-                    quantizer.internal = internal
-                for name, workspace in zip(cache_names, workspaces):
-                    self._fp8_workspaces[name] = workspace
-            return workspaces
-        # Fallback: quantize each weight individually.
-        workspaces = []
-        for i in range(num_tensors):
-            workspaces.append(
-                self.get_weight_workspace(
-                    tensor=tensors[i],
-                    quantizer=quantizers[i],
-                    cache_name=(None if cache_names is None else cache_names[i]),
-                    update_workspace=update_workspace,
-                    skip_update_flag=skip_update_flag,
-                    workspace_dtype=workspace_dtype,
-                )
-            )
-        return workspaces
 
     def _load_from_state_dict(
         self, state_dict, prefix, local_metadata, strict, missing_keys, unexpected_keys, error_msgs
