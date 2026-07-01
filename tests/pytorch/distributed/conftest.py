@@ -31,7 +31,7 @@ except Exception:  # torch missing/broken -> let the tests themselves report it
 _LAUNCHERS = ("torchrun", "mpirun")
 
 @cache
-def __terminate_timeout_seconds():
+def _terminate_timeout_seconds():
     """Grace between SIGTERM and the SIGKILL backstop."""
     try:
         return str(max(1, int(os.environ.get("TE_DIST_LAUNCH_KILL_AFTER", "60"))))
@@ -50,7 +50,7 @@ def _launch_timeout_seconds():
         outer = int(os.environ.get("PYTEST_TIMEOUT", "1200"))
     except ValueError:
         return "1200"
-    return str(max(60, outer - 60 - int(__terminate_timeout_seconds())))
+    return str(max(60, outer - 60 - int(_terminate_timeout_seconds())))
 
 
 def _is_launcher(cmd):
@@ -63,7 +63,7 @@ def _is_launcher(cmd):
 
 
 def _wrap(cmd):
-    return ["timeout", "-k", __terminate_timeout_seconds(), "-v", _launch_timeout_seconds(), *cmd]
+    return ["timeout", "-k", _terminate_timeout_seconds(), "-v", _launch_timeout_seconds(), *cmd]
 
 
 # Patch at import (collection) time so it is active for every test in this dir.
