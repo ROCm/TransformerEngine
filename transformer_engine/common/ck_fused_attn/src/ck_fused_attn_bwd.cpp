@@ -585,11 +585,9 @@ size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args){
   // local by QoLA's export script, so the v2 size is queried through QoLA.
   const size_t v2_bytes = QOLA_NS(mha_bwd_workspace_size)(make_bwd_traits(args));
   const size_t v3_bytes = v3_dq_acc_bytes(args);
-  // Safety floor: when the CK-JIT cannot find workspace-query symbols for a
-  // kernel variant (e.g. deterministic kernels absent for some d_v configs),
-  // mha_bwd_workspace_size() may under-report. Guard with the explicit dq_acc
-  // size required by the deterministic accumulation algorithm — the same formula
-  // the pre-AITER code used — so we always allocate enough device workspace.
+  // Safety floor: CK reports too little memory for kN0=192. Guard with the explicit
+  // dq_acc size required by the deterministic accumulation algorithm — the same
+  // formula the pre-AITER code used — so we always allocate enough device workspace.
   const size_t kN0 = (args.d_qk <= 128) ? 128u : 64u;
   const size_t nsplits = args.deterministic ? ((args.s_kv + kN0 - 1) / kN0) : 1u;
   const size_t tokens_q = args.is_group_mode() ? args.max_tokens_q : (args.b * args.s_q);
