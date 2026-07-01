@@ -32,9 +32,9 @@ def _indexer_reference(Q, K, W_uq, W_dq, W_k, W_w, out_dtype=None):
     Triton op under test. Shapes: Q [..., T, d], K [..., S, d], W_dq [d, d_c],
     W_uq [H, d_c, d_i], W_k [d, d_i], W_w [d, H]. Returns O [..., T, S].
 
-    JIT-compiled so its HLO (reduction order / bf16 rounding) matches the
-    standalone-compiled reference op it replaces — the DSA composition test's
-    top-k tie-breaking is sensitive to sub-ULP score perturbations.
+    JIT-compiled so its HLO (reduction order / bf16 rounding) is stable — the
+    top-k test feeds these reference scores to ``jax.lax.top_k``, whose
+    tie-breaking is sensitive to sub-ULP score perturbations.
     """
     C_q = jnp.einsum("...td,dc->...tc", Q, W_dq)
     H_q = jnp.einsum("...tc,hci->...thi", C_q, W_uq)
