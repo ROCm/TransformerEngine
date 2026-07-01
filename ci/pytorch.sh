@@ -61,7 +61,7 @@ run_test_config(){
     NVTE_USE_GEMM_TRITON=1 run_default_fa_lbl "triton" 1 test_gemm_triton.py
     NVTE_USE_GEMM_TRITON=1 run_default_fa_lbl "triton" 1 test_gemm_triton_generic_fp8.py
     NVTE_USE_GEMM_TRITON=1 run_default_fa_lbl "triton" 1 test_te_generic_gemm_triton.py
-    NVTE_USE_GEMM_TRITON=1 NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "triton" 1 mxfp8/
+    NVTE_USE_GEMM_TRITON=1 NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "triton" 1 mxfp8/test_mxfp8_gemm_basic.py mxfp8/test_mxfp8_kernel_direct.py
     run 1 test_gqa.py
     run 1 test_jit.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
