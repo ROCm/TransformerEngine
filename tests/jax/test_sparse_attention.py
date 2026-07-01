@@ -30,6 +30,8 @@ def _force_unfused_attn(monkeypatch):
     asserting the composition math, not the fused-path's mask handling.
     """
     monkeypatch.setenv("NVTE_FUSED_ATTN", "0")
+    # Pin indexer Triton kernels to a single config — skip the autotune sweep.
+    monkeypatch.setenv("NVTE_INDEXER_DISABLE_AUTOTUNE", "1")
     yield
 
 

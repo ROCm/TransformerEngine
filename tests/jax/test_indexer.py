@@ -1,11 +1,7 @@
-# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
 """Correctness tests for the lightning-indexer JAX ops.
-
-Ported from the in-module ``__main__`` smoke tests of
-``transformer_engine.jax.sparse_attention.indexer``. The hybrid and top-k backends require
-rank-4 ``(B, oH, T, d)`` inputs, so every leading shape here is length-2.
 """
 
 import functools
@@ -19,6 +15,13 @@ from transformer_engine.jax.sparse_attention.indexer import (
     indexer,
     indexer_topk,
 )
+
+
+@pytest.fixture(autouse=True)
+def _disable_indexer_autotune(monkeypatch):
+    """Pin each indexer Triton kernel to a single (prune-valid) config so the
+    suite skips the multi-minute autotune sweep."""
+    monkeypatch.setenv("NVTE_INDEXER_DISABLE_AUTOTUNE", "1")
 
 
 @functools.partial(jax.jit, static_argnames=("out_dtype",))
@@ -71,26 +74,38 @@ def test_hybrid_matches_reference(B, oH):
     assert _rel_err(o_hyb, o_ref) < 5e-3
 
 
-@pytest.mark.parametrize("k", [32])
+@pytest.mark.parametrize("k", [32, 64, 128, 256, 512, 1024])
 def test_topk_matches_reference(k):
     """Fused top-k selects the same scores as reference + ``jax.lax.top_k``.
 
     Index set-equality is too strict (backends break ties differently), so the
-    check is on the *scores* at the fused-selected indices. ``k`` is kept in the
-    top quartile of ``T_s`` so the cutoff lands above the dense band of near-tied
-    scores where fp32 and bf16-rounded rankings would disagree.
+    check is on the *scores* at the fused-selected indices, compared rank-by-rank
+    against the reference top-k. ``T_s`` is ``4 * max(k)`` so the largest ``k``
+    (1024) sits at the top quartile — deep enough to exercise the streaming
+    top-k path (2K candidate buffer) that small ``k`` / ``T_s`` never reaches.
+
+    The gap is normalized by the overall score *scale* (max reference score), not
+    per element: as ``k`` grows into the near-zero ReLU tail, per-element relative
+    error is dominated by ties the fp32/bf16 paths break differently (denominators
+    ~0 blow it up), while the absolute gap stays ~0.1% of the max score.
+
+    Leading dims (B, oH, T_t) are kept small so the reference — which materializes
+    the (B, oH, T_t, H, T_s) pre-relu score tensor — stays a few MB even at
+    T_s=4096; a larger footprint tips shared-GPU GEMMs into resource errors.
     """
-    args = _indexer_inputs(2, 3, T_t=64, T_s=128, d=32, d_c=32, H=16, d_i=32, seed=200)
+    B, oH, T_t = 1, 2, 32
+    args = _indexer_inputs(B, oH, T_t, T_s=4096, d=32, d_c=32, H=16, d_i=32, seed=200)
     o_ref = _indexer_reference(*args).astype(jnp.float32)
     topk_idx = indexer_topk(*args, k=k)
-    assert topk_idx.shape == (2, 3, 64, k)
+    assert topk_idx.shape == (B, oH, T_t, k)
 
     ref_vals = jax.lax.top_k(o_ref, k=k)[0]
-    assert float(ref_vals.max()) > 0, "degenerate test: all top-k scores are zero"
+    scale = float(ref_vals.max())
+    assert scale > 0, "degenerate test: all top-k scores are zero"
     picked = jnp.take_along_axis(o_ref, topk_idx, axis=-1)
     picked_sorted = jnp.sort(picked, axis=-1)[..., ::-1]
-    max_rel = float((jnp.abs(ref_vals - picked_sorted) / (jnp.abs(ref_vals) + 1e-6)).max())
-    assert max_rel < 1e-2
+    max_gap = float(jnp.abs(ref_vals - picked_sorted).max()) / scale
+    assert max_gap < 1e-2, f"fused top-k scores diverge: max_gap={max_gap:.3e} (k={k})"
 
 
 @pytest.mark.parametrize("B,oH", [(2, 3), (1, 2)])

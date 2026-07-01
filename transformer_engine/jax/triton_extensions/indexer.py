@@ -17,6 +17,7 @@ on the pre-relu score tensor.
 """
 
 import functools
+import os
 
 import jax
 import jax.numpy as jnp
@@ -28,6 +29,17 @@ from jax.extend import core as extend_core
 from jax.interpreters import mlir, xla
 
 from .utils import triton_call_lowering
+
+
+def _autotune_disabled():
+    """True when ``NVTE_INDEXER_DISABLE_AUTOTUNE=1``.
+
+    When set, each kernel's lowering collapses its autotune sweep to the first
+    (still prune-valid) config, so no time is spent compiling and benchmarking
+    every candidate. Intended for the test suite — a full sweep at large k/T_s
+    costs many minutes and only picks the fastest config, not a more correct
+    one. Read at lowering time so a test fixture can toggle it per process."""
+    return os.environ.get("NVTE_INDEXER_DISABLE_AUTOTUNE", "0") == "1"
 
 
 def _score_reduce_autotune_configs():
@@ -155,22 +167,28 @@ def _score_reduce_lowering(ctx, Hq, Hk, W_o, *, out_dtype):
         # cluster in time and hit L2 on the shared Hq slab.
         return (triton.cdiv(T_s, bs), triton.cdiv(T_t, bt), B * oH)
 
-    return triton_call_lowering(
-        ctx,
-        _score_reduce_kernel,
-        Hq, Hk, W_o,
-        grid=grid_fn,
-        num_warps=4,
-        num_stages=2,
-        constexprs={
-            "B": B,
-            "oH": oH,
-            "T_t": T_t,
-            "T_s": T_s,
-            "H": H,
-            "d_i": d_i,
-        },
-    )
+    saved_configs = _score_reduce_kernel.configs
+    if _autotune_disabled():
+        _score_reduce_kernel.configs = saved_configs[:1]
+    try:
+        return triton_call_lowering(
+            ctx,
+            _score_reduce_kernel,
+            Hq, Hk, W_o,
+            grid=grid_fn,
+            num_warps=4,
+            num_stages=2,
+            constexprs={
+                "B": B,
+                "oH": oH,
+                "T_t": T_t,
+                "T_s": T_s,
+                "H": H,
+                "d_i": d_i,
+            },
+        )
+    finally:
+        _score_reduce_kernel.configs = saved_configs
 
 
 mlir.register_lowering(_score_reduce_p, _score_reduce_lowering, platform="rocm")
@@ -349,16 +367,22 @@ def _score_dscores_chunk_lowering(ctx, Hq_chunk, Hk, W_o_chunk, dO):
         bt = merged_kwargs.get("BLOCK_T", _HBWD_BLOCK_T)
         return ((T + bt - 1) // bt, B * oH)
 
-    return triton_call_lowering(
-        ctx,
-        _score_dscores_chunk_kernel,
-        Hq_chunk, Hk, W_o_chunk, dO,
-        grid=grid_fn,
-        constexprs={
-            "B": B, "oH": oH, "T": T, "T_s": T_s,
-            "H_CHUNK": H_CHUNK, "d_i": d_i,
-        },
-    )
+    saved_configs = _score_dscores_chunk_kernel.configs
+    if _autotune_disabled():
+        _score_dscores_chunk_kernel.configs = saved_configs[:1]
+    try:
+        return triton_call_lowering(
+            ctx,
+            _score_dscores_chunk_kernel,
+            Hq_chunk, Hk, W_o_chunk, dO,
+            grid=grid_fn,
+            constexprs={
+                "B": B, "oH": oH, "T": T, "T_s": T_s,
+                "H_CHUNK": H_CHUNK, "d_i": d_i,
+            },
+        )
+    finally:
+        _score_dscores_chunk_kernel.configs = saved_configs
 
 
 mlir.register_lowering(_score_dscores_chunk_p, _score_dscores_chunk_lowering, platform="rocm")
@@ -923,6 +947,8 @@ def _score_topk_lowering(ctx, Hq, Hk, W_o, *, k):
     # kernel's uninitialized buffer. Prune here, before lowering, so only configs
     # valid for this S_PAD/K/T_t reach the autotuner.
     valid_configs = autotuned_kernel.early_config_prune(autotuned_kernel.configs, constexprs)
+    if _autotune_disabled():
+        valid_configs = valid_configs[:1]
     saved_configs = autotuned_kernel.configs
     autotuned_kernel.configs = valid_configs
     try:
