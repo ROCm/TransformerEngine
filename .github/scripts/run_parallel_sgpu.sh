@@ -96,7 +96,7 @@ wait_for_jobs() {
                         fi
                         # else: still stalled but already warned — do nothing
                     elif [ "$age" -ge "$STALL_WARN_SECS" ]; then
-                        # don't use wc here because it doces not count the last line if it doesn't end with a newline
+                        # don't use wc here because it does not count the last line if it doesn't end with a newline
                         local freeze_line=$(grep -c '' < "$logfile")
                         stall_mtime[$pid]=$mtime
                         stall_lineno[$pid]=$freeze_line
