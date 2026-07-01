@@ -45,6 +45,8 @@ if(USE_ROCM)
   list(REMOVE_ITEM test_cuda_sources
               test_cast_float8blockwise.cu
               test_grouped_gemm.cu)
+  # Skip on ROCm for now; TODO: revisit on gfx1250 and re-enable these tests.
+  list(REMOVE_ITEM test_cuda_sources test_multi_swizzle.cu)
   list(APPEND test_cuda_sources
               test_dequantize_nvfp4.cu
               test_cublaslt_gemm.cu

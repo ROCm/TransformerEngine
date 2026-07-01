@@ -593,7 +593,7 @@ def get_attention_backend(
                             " for cuDNN < 9.18.0"
                         )
                         use_fused_attention = False
-        if use_fused_attention and fp8_recipe.mxfp8():
+        if use_fused_attention and fp8_recipe.mxfp8() and not IS_HIP_EXTENSION:
             if device_compute_capability < (10, 0):
                 logger.debug("Disabling FusedAttention for MXFP8 on arch < sm100")
                 use_fused_attention = False
@@ -900,8 +900,10 @@ def get_attention_backend(
         logger.debug("Disabling FlashAttention for softmax_type = %s", softmax_type)
         use_flash_attention = False
         if fp8 and fp8_meta["recipe"].fp8_dpa:
-            if use_fused_attention and (
-                device_compute_capability < (10, 0) or cudnn_version < (9, 21, 0)
+            if (
+                use_fused_attention
+                and not IS_HIP_EXTENSION
+                and (device_compute_capability < (10, 0) or cudnn_version < (9, 21, 0))
             ):
                 logger.debug(
                     "Disabling FusedAttention for softmax_type = %s in FP8 on sm < 100 with cuDNN"
@@ -1116,6 +1118,7 @@ def get_attention_backend(
     if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
         if (
             fp8
+            and not IS_HIP_EXTENSION
             and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha)
             and (device_compute_capability < (10, 0) or cudnn_version < (9, 21, 0))
         ):
