@@ -190,7 +190,7 @@
       }
 #else
       {
-        const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+        const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
 #pragma unroll
         for (int j = 0; j < ELEMS_PER_THREAD; j++) {
           out_c.data.elt[j] = static_cast<OType>(in_compute[j] * block_scale_inverse);
@@ -336,7 +336,7 @@
           }
 #else
           {
-            const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+            const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
 #pragma unroll
             for (int j = 0; j < ELEMS_PER_THREAD; j++) {
               out_c.data.elt[j] = static_cast<OType>(in_compute[j] * block_scale_inverse);
@@ -439,7 +439,7 @@
         }
 #else
         {
-          const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+          const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
 #pragma unroll
           for (int i = 0; i < SCALE_DIM_Y; i++) {
             out_colwise_sh[i][tid_colwise_X] =
