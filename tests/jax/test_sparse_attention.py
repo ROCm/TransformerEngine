@@ -16,7 +16,7 @@ from transformer_engine.jax.sparse_attention.dsa import (
     _causal_keep_mask,
     _topk_indices_to_attn_mask,
 )
-from transformer_engine.jax.sparse_attention.indexer import indexer
+from test_indexer import _indexer_reference
 
 
 @pytest.fixture(autouse=True)
@@ -38,8 +38,7 @@ def _force_unfused_attn(monkeypatch):
 # -----------------------------------------------------------------------------
 
 
-def _make_dsa_module(*, oH=4, D=8, iH=2, idc=16, idi=16, k=4,
-                     indexer_backend="hybrid"):
+def _make_dsa_module(*, oH=4, D=8, iH=2, idc=16, idi=16, k=4):
     return DeepSparseAttention(
         head_dim=D,
         num_attention_heads=oH,
@@ -47,7 +46,6 @@ def _make_dsa_module(*, oH=4, D=8, iH=2, idc=16, idi=16, k=4,
         indexer_d_c=idc,
         indexer_d_i=idi,
         topk=k,
-        indexer_backend=indexer_backend,
         dtype=jnp.bfloat16,
     )
 
@@ -89,9 +87,9 @@ def _ref_dsa_jax(
     kk = jnp.einsum("bhsd,dk->bhsk", inputs_kv, W_k_kernel)
     v = jnp.einsum("bhsd,dk->bhsk", inputs_kv, W_v_kernel)
 
-    scores = indexer(
+    scores = _indexer_reference(
         inputs_q, inputs_kv, W_uq, W_dq, W_k_idx, W_w,
-        backend="reference", out_dtype=jnp.float32,
+        out_dtype=jnp.float32,
     )
     if causal:
         ckeep = _causal_keep_mask(T_t, T_s)[None, None, :, :]
@@ -204,28 +202,6 @@ def test_dsa_composition_vs_pure_jax_reference(B, oH, T, hidden, D, iH, idc, idi
     assert rel < 5e-2, f"DSA output diverges from reference: rel.err={rel:.3e}"
 
 
-def test_dsa_composition_reference_indexer_matches_hybrid():
-    """DSA output is the same whether the indexer runs reference or hybrid.
-
-    Both backends share params and the same top-k / DPA path; only the indexer
-    implementation differs. Exercises indexer_backend='reference' through the
-    real DPA module path (the pure-JAX reference test uses manual softmax).
-    """
-    B, oH, T, hidden, D, iH, idc, idi, k = 1, 2, 8, 16, 8, 1, 8, 8, 2
-    inputs = _make_inputs(B=B, oH=oH, T=T, hidden=hidden)
-    ref_mod = _make_dsa_module(oH=oH, D=D, iH=iH, idc=idc, idi=idi, k=k,
-                               indexer_backend="reference")
-    hyb_mod = _make_dsa_module(oH=oH, D=D, iH=iH, idc=idc, idi=idi, k=k,
-                               indexer_backend="hybrid")
-    params = ref_mod.init(jax.random.PRNGKey(7), inputs, inputs, deterministic=True)
-    out_ref = ref_mod.apply(params, inputs, inputs, deterministic=True)
-    out_hyb = hyb_mod.apply(params, inputs, inputs, deterministic=True)
-    assert out_ref.shape == (B, oH, T, D)
-    diff = out_hyb.astype(jnp.float32) - out_ref.astype(jnp.float32)
-    rel = float(jnp.linalg.norm(diff) / (jnp.linalg.norm(out_ref.astype(jnp.float32)) + 1e-30))
-    assert rel < 5e-2, f"reference vs hybrid indexer diverge: rel.err={rel:.3e}"
-
-
 @pytest.mark.parametrize("T_t,T_s,k", [(8, 8, 4), (8, 8, 2), (16, 16, 8)])
 def test_dsa_topk_count_equals_kept_count_under_causal(T_t, T_s, k):
     """For each query t, the number of unmasked key positions equals min(k, t+1)."""
@@ -236,10 +212,10 @@ def test_dsa_topk_count_equals_kept_count_under_causal(T_t, T_s, k):
     params = module.init(keys[0], inputs, inputs, deterministic=True)
 
     p = nn.meta.unbox(params)["params"]
-    scores = indexer(
+    scores = _indexer_reference(
         inputs, inputs,
         p["indexer_W_uq"], p["indexer_W_dq"], p["indexer_W_k"], p["indexer_W_w"],
-        backend="reference", out_dtype=jnp.float32,
+        out_dtype=jnp.float32,
     )                                                       # [B, oH, T_t, T_s]
     ckeep = _causal_keep_mask(T_t, T_s)[None, None, :, :]
     scores_masked = jnp.where(ckeep, scores, -jnp.inf)

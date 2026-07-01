@@ -8,6 +8,8 @@ Ported from the in-module ``__main__`` smoke tests of
 rank-4 ``(B, oH, T, d)`` inputs, so every leading shape here is length-2.
 """
 
+import functools
+
 import jax
 import jax.numpy as jnp
 import pytest
@@ -17,6 +19,29 @@ from transformer_engine.jax.sparse_attention.indexer import (
     indexer,
     indexer_topk,
 )
+
+
+@functools.partial(jax.jit, static_argnames=("out_dtype",))
+def _indexer_reference(Q, K, W_uq, W_dq, W_k, W_w, out_dtype=None):
+    """Pure-einsum lightning-indexer reference (test oracle).
+
+    Materializes the (..., T, H, S) pre-relu score tensor, unlike the hybrid
+    Triton op under test. Shapes: Q [..., T, d], K [..., S, d], W_dq [d, d_c],
+    W_uq [H, d_c, d_i], W_k [d, d_i], W_w [d, H]. Returns O [..., T, S].
+
+    JIT-compiled so its HLO (reduction order / bf16 rounding) matches the
+    standalone-compiled reference op it replaces — the DSA composition test's
+    top-k tie-breaking is sensitive to sub-ULP score perturbations.
+    """
+    C_q = jnp.einsum("...td,dc->...tc", Q, W_dq)
+    H_q = jnp.einsum("...tc,hci->...thi", C_q, W_uq)
+    H_k = jnp.einsum("...sd,di->...si", K, W_k)
+    W_o = jnp.einsum("...td,dh->...th", Q, W_w)
+    H = jax.nn.relu(jnp.einsum("...thi,...si->...ths", H_q, H_k))  # (..., T, H, S)
+    O = jnp.einsum("...ths,...th->...ts", H, W_o)                  # (..., T, S)
+    if out_dtype is not None:
+        O = O.astype(out_dtype)
+    return O
 
 
 def _indexer_inputs(B, oH, T_t, T_s, d, d_c, H, d_i, seed):
@@ -40,8 +65,8 @@ def _rel_err(actual, ref):
 def test_hybrid_matches_reference(B, oH):
     """Hybrid Triton score-reduce matches the pure-einsum reference forward."""
     args = _indexer_inputs(B, oH, T_t=64, T_s=64, d=32, d_c=32, H=8, d_i=32, seed=100)
-    o_ref = indexer(*args, backend="reference")
-    o_hyb = indexer(*args, backend="hybrid")
+    o_ref = _indexer_reference(*args)
+    o_hyb = indexer(*args)
     assert o_hyb.shape == o_ref.shape
     assert _rel_err(o_hyb, o_ref) < 5e-3
 
@@ -56,7 +81,7 @@ def test_topk_matches_reference(k):
     scores where fp32 and bf16-rounded rankings would disagree.
     """
     args = _indexer_inputs(2, 3, T_t=64, T_s=128, d=32, d_c=32, H=16, d_i=32, seed=200)
-    o_ref = indexer(*args, backend="reference").astype(jnp.float32)
+    o_ref = _indexer_reference(*args).astype(jnp.float32)
     topk_idx = indexer_topk(*args, k=k)
     assert topk_idx.shape == (2, 3, 64, k)
 
@@ -78,14 +103,14 @@ def test_hybrid_backward_matches_reference_grad(B, oH):
     """
     args = _indexer_inputs(B, oH, T_t=32, T_s=32, d=32, d_c=32, H=8, d_i=32, seed=300)
 
-    def _loss(backend):
+    def _loss(fn):
         def inner(*a):
-            return jnp.sum(indexer(*a, backend=backend).astype(jnp.float32))
+            return jnp.sum(fn(*a).astype(jnp.float32))
         return inner
 
     argnums = (0, 1, 2, 3, 4, 5)
-    grads_ref = jax.grad(_loss("reference"), argnums=argnums)(*args)
-    grads_hyb = jax.grad(_loss("hybrid"), argnums=argnums)(*args)
+    grads_ref = jax.grad(_loss(_indexer_reference), argnums=argnums)(*args)
+    grads_hyb = jax.grad(_loss(indexer), argnums=argnums)(*args)
     for gr, gh in zip(grads_ref, grads_hyb):
         assert _rel_err(gh, gr) < 5e-2
 
@@ -98,13 +123,13 @@ def test_lightning_indexer_module_matches_functional():
     Q = jax.random.normal(keys[0], (B, oH, T_t, d), dtype=jnp.bfloat16)
     K = jax.random.normal(keys[1], (B, oH, T_s, d), dtype=jnp.bfloat16)
 
-    mod = LightningIndexer(num_heads=H, d_c=d_c, d_i=d_i, backend="reference")
+    mod = LightningIndexer(num_heads=H, d_c=d_c, d_i=d_i)
     variables = mod.init(keys[2], Q, K)
     o_mod = mod.apply(variables, Q, K)
     assert o_mod.shape == (B, oH, T_t, T_s)
 
     p = variables["params"]
-    o_fn = indexer(Q, K, p["W_uq"], p["W_dq"], p["W_k"], p["W_w"], backend="reference")
+    o_fn = indexer(Q, K, p["W_uq"], p["W_dq"], p["W_k"], p["W_w"])
     assert _rel_err(o_mod, o_fn) < 1e-5
 
 

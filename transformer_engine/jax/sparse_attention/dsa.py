@@ -122,7 +122,6 @@ def deep_sparse_attention_core(
     attention_dropout: float = 0.0,
     deterministic: bool = True,
     dropout_rng_name: str = "dropout",
-    indexer_backend: str = "hybrid",
 ) -> jax.Array:
     """Functional DSA: indexer-top-k + per-head sparse attention.
 
@@ -142,8 +141,6 @@ def deep_sparse_attention_core(
         attn_mask_type: ``"causal"`` or ``"no_mask"`` (phase 1 only).
         scale_factor: passed through to DPA. ``None`` → ``1/sqrt(head_dim)``.
         attention_dropout, deterministic, dropout_rng_name: passed through to DPA.
-        indexer_backend: which indexer implementation to use. ``"hybrid"``
-            (default, fast Triton) or ``"reference"`` (pure einsum).
 
     Returns:
         Attention output of the same shape as ``query``: ``[B, oH, T_t, head_dim]``.
@@ -182,7 +179,6 @@ def deep_sparse_attention_core(
         indexer_W_dq,
         indexer_W_k,
         indexer_W_w,
-        backend=indexer_backend,
         out_dtype=jnp.float32,
     )                                                       # [B, oH, T_t, T_s] fp32
 
@@ -261,8 +257,6 @@ class DeepSparseAttention(nn.Module):  # pylint: disable=too-few-public-methods
     attention_dropout : float, default ``0.0``
     scale_factor : Optional[float]
         Defaults to ``1/sqrt(head_dim)`` inside DPA.
-    indexer_backend : str, default ``"hybrid"``
-        ``"hybrid"`` (fast Triton) or ``"reference"`` (pure einsum).
     dtype : Optional[jnp.dtype]
         Parameter dtype. Defaults to the input dtype.
     """
@@ -276,7 +270,6 @@ class DeepSparseAttention(nn.Module):  # pylint: disable=too-few-public-methods
     attn_mask_type: str = "causal"
     attention_dropout: float = 0.0
     scale_factor: Optional[float] = None
-    indexer_backend: str = "hybrid"
     dtype: Optional[jnp.dtype] = None
 
     @nn.compact
@@ -360,5 +353,4 @@ class DeepSparseAttention(nn.Module):  # pylint: disable=too-few-public-methods
             scale_factor=self.scale_factor,
             attention_dropout=self.attention_dropout,
             deterministic=deterministic,
-            indexer_backend=self.indexer_backend,
         )                                                   # [B, oH, T_t, head_dim]

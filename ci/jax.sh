@@ -63,6 +63,8 @@ run_test_config() {
     run_default_fa 1 test_layer.py # it effectively always uses unfused attention
     run_default_fa 1 test_sanity_import.py
     run_default_fa 1 test_softmax.py
+    run_default_fa 1 test_indexer.py # lightning indexer ops (fused-attn agnostic)
+    run_default_fa 1 test_sparse_attention.py # DSA composition (forces unfused attn)
 }
 
 run_test_config_mgpu() {

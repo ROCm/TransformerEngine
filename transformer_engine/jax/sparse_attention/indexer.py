@@ -3,15 +3,12 @@
 # See LICENSE for license information.
 """Indexer op (forward only), bf16 inputs.
 
-Two canonical backends:
-  * ``"reference"`` — pure ``jnp.einsum``. Materializes the
-    (B, oH, T, H, S) pre-relu score tensor in HBM via hipBLASLt.
-  * ``"hybrid"`` — same einsum projections (C_q, H_q, H_k, W_o) followed
-    by a fused Triton kernel that does score+relu+H-reduction in
-    registers. Avoids the score-tensor HBM round-trip that dominates the
-    reference path.
+The op runs a hybrid backend: einsum projections (C_q, H_q, H_k, W_o) —
+which lower to hipBLASLt bf16 GEMMs — followed by a fused Triton kernel that
+does score+relu+H-reduction in registers. This avoids materializing the
+(B, oH, T, H, S) pre-relu score tensor in HBM.
 
-Functional entry point: ``indexer(Q, K, W_uq, W_dq, W_k, W_w, *, backend=...)``.
+Functional entry point: ``indexer(Q, K, W_uq, W_dq, W_k, W_w)``.
 User-facing Flax module: :class:`LightningIndexer`, which owns the projection
 weights and delegates to ``indexer`` / ``indexer_topk``.
 
@@ -36,7 +33,7 @@ from flax import linen as nn
 
 
 def _indexer_projections(Q, K, W_uq, W_dq, W_k, W_w):
-    """Low-rank indexer projections shared by every backend.
+    """Low-rank indexer projections shared by the score and top-k paths.
 
     Returns (H_q, H_k, W_o) with shapes
     (..., T, H, d_i), (..., S, d_i), (..., T, H).
@@ -48,31 +45,13 @@ def _indexer_projections(Q, K, W_uq, W_dq, W_k, W_w):
     return H_q, H_k, W_o
 
 
-def _indexer_impl_reference(Q, K, W_uq, W_dq, W_k, W_w, out_dtype=None):
-    """
-    Q       [..., T, d]
-    K       [..., S, d]
-    W_dq    [d, d_c]
-    W_uq    [H, d_c, d_i]
-    W_k     [d, d_i]
-    W_w     [..., d, H]    # leading dims must match Q's
-    """
-    H_q, H_k, W_o = _indexer_projections(Q, K, W_uq, W_dq, W_k, W_w)
-    H = jax.nn.relu(jnp.einsum("...thi,...si->...ths", H_q, H_k))  # (..., T, H, S)
-    O = jnp.einsum("...ths,...th->...ts", H, W_o)                  # (..., T, S)
-    if out_dtype is not None:
-        O = O.astype(out_dtype)
-    return O
-
-
 def _indexer_impl_hybrid(Q, K, W_uq, W_dq, W_k, W_w, out_dtype=None):
     """Einsum projections + Triton score-relu-reduce.
 
-    Mirrors ``_indexer_impl_reference`` for the four projections (which
-    lower to hipBLASLt bf16 GEMMs), then hands Hq / Hk / W_o to a fused
-    Triton kernel that does score+relu+H-reduction in registers —
-    eliminating the (B, oH, T, H, S) pre-relu-score HBM round-trip the
-    pure-einsum path pays.
+    Runs the four projections (which lower to hipBLASLt bf16 GEMMs), then
+    hands Hq / Hk / W_o to a fused Triton kernel that does
+    score+relu+H-reduction in registers — eliminating the
+    (B, oH, T, H, S) pre-relu-score HBM round-trip a pure-einsum path pays.
     """
     from transformer_engine.jax.triton_extensions.indexer import score_reduce_triton
 
@@ -104,9 +83,9 @@ def indexer_topk(Q, K, W_uq, W_dq, W_k, weights, *, k):
     return score_topk_triton(H_q, H_k, W_o, k=k)
 
 
-@functools.partial(jax.jit, static_argnames=("backend", "out_dtype"))
-def indexer(Q, K, W_uq, W_dq, W_k, weights, *, out_dtype=None, backend="reference"):
-    """Low-rank lightning-indexer (bf16).
+@functools.partial(jax.jit, static_argnames=("out_dtype",))
+def indexer(Q, K, W_uq, W_dq, W_k, weights, *, out_dtype=None):
+    """Low-rank lightning-indexer (bf16), hybrid Triton backend.
 
     Args:
         Q:       (..., T, d)            hidden state (per token)
@@ -117,19 +96,11 @@ def indexer(Q, K, W_uq, W_dq, W_k, weights, *, out_dtype=None, backend="referenc
         weights: (d, H)                 learnable output-weight projection
                                         (W_o = Q @ weights inside the impl)
         out_dtype: output dtype override (defaults to Q.dtype).
-        backend: "reference" (pure einsum) or "hybrid" (einsum projections
-                 + Triton score-relu-reduce kernel).
 
     Returns:
         O of shape (..., T, S).
     """
-    if backend == "reference":
-        return _indexer_impl_reference(Q, K, W_uq, W_dq, W_k, weights, out_dtype=out_dtype)
-    if backend == "hybrid":
-        return _indexer_impl_hybrid(Q, K, W_uq, W_dq, W_k, weights, out_dtype=out_dtype)
-    raise ValueError(
-        f"unknown backend {backend!r}; expected 'reference' or 'hybrid'"
-    )
+    return _indexer_impl_hybrid(Q, K, W_uq, W_dq, W_k, weights, out_dtype=out_dtype)
 
 
 class LightningIndexer(nn.Module):  # pylint: disable=too-few-public-methods
@@ -150,13 +121,10 @@ class LightningIndexer(nn.Module):  # pylint: disable=too-few-public-methods
         Inner head dimension (``d_i``).
     topk : Optional[int], default ``None``
         If set, :meth:`__call__` returns the fused top-``k`` indices
-        (``(..., T, k)`` int32) via :func:`indexer_topk`, and ``backend`` /
-        ``out_dtype`` are ignored (top-k always uses the fused Triton kernel).
+        (``(..., T, k)`` int32) via :func:`indexer_topk`, and ``out_dtype`` is
+        ignored (top-k always uses the fused Triton kernel).
         If ``None``, :meth:`__call__` returns the full score tensor
-        ``(..., T, S)``.
-    backend : str, default ``"reference"``
-        ``"reference"`` (pure einsum) or ``"hybrid"`` (Triton score-relu-reduce).
-        Only used when ``topk is None``.
+        ``(..., T, S)`` (hybrid Triton backend).
     out_dtype : Optional[jnp.dtype]
         Output dtype override; defaults to ``Q.dtype``. Unused when ``topk`` is set.
     dtype : Optional[jnp.dtype]
@@ -167,7 +135,6 @@ class LightningIndexer(nn.Module):  # pylint: disable=too-few-public-methods
     d_c: int
     d_i: int
     topk: Optional[int] = None
-    backend: str = "reference"
     out_dtype: Optional[jnp.dtype] = None
     dtype: Optional[jnp.dtype] = None
 
@@ -194,7 +161,4 @@ class LightningIndexer(nn.Module):  # pylint: disable=too-few-public-methods
 
         if self.topk is not None:
             return indexer_topk(Q, K, W_uq, W_dq, W_k, W_w, k=self.topk)
-        return indexer(
-            Q, K, W_uq, W_dq, W_k, W_w,
-            out_dtype=self.out_dtype, backend=self.backend,
-        )
+        return indexer(Q, K, W_uq, W_dq, W_k, W_w, out_dtype=self.out_dtype)
