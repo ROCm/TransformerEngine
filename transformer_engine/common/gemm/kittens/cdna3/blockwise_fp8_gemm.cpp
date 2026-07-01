@@ -50,6 +50,53 @@ struct micro_globals {
     size_t dynamic_shared_memory() { return 49152; }
 };
 
+// --- SGPR/reg scale helpers ---
+typedef int int32x4_lds_t __attribute__((ext_vector_type(4)));
+struct __attribute__((packed)) buf_res { const void *ptr; uint32_t range; uint32_t config; };
+__device__ inline int32x4_lds_t make_buf_res(const void *ptr, uint32_t size) {
+    buf_res r{ptr, size, 0x00020000u};
+    return __builtin_bit_cast(int32x4_lds_t, r);
+}
+extern "C" __device__ __uint128_t
+llvm_amdgcn_raw_buffer_load_b128(int32x4_lds_t rsrc, int voffset, int soffset,
+                                 int aux) __asm("llvm.amdgcn.raw.buffer.load.v4f32");
+extern "C" __device__ float
+llvm_amdgcn_s_buffer_load_f32(int32x4_lds_t rsrc, int offset,
+                              int cachepolicy) __asm("llvm.amdgcn.s.buffer.load.f32");
+extern "C" __device__ float
+llvm_amdgcn_raw_buffer_load_f32(int32x4_lds_t rsrc, int voffset, int soffset,
+                                int aux) __asm("llvm.amdgcn.raw.buffer.load.f32");
+
+// SRD range_bytes bounds OOB rows to 0 (partial-M safe).
+template <int HEIGHT>
+__device__ inline void load_scale_global_reg(float (&sa_reg)[HEIGHT * 4], const float *sa_base,
+                                             int local_m_base, uint32_t range_bytes) {
+    const int lane = kittens::laneid();
+    const int row_g = 4 * (lane / 16);
+    int32x4_lds_t srsrc = make_buf_res((const void*)sa_base, range_bytes);
+    #pragma unroll
+    for (int i = 0; i < HEIGHT; i++) {
+        const int m0 = local_m_base + i * 16 + row_g;
+        __uint128_t raw = llvm_amdgcn_raw_buffer_load_b128(srsrc, m0 * 4, 0, 0);
+        *reinterpret_cast<float4*>(&sa_reg[i * 4]) = *reinterpret_cast<float4*>(&raw);
+    }
+}
+
+// 1D1D scale_B: per-N vector (lane-dependent col), so VGPR not SGPR.
+// SRD range bounds OOB cols to 0 (partial-N safe).
+template <int WIDTH>
+__device__ inline void load_scaleB_global_reg(float (&sb_reg)[WIDTH], const float *sb_base,
+                                              int local_n_base, uint32_t range_bytes) {
+    const int lane = kittens::laneid();
+    const int col_l = lane % 16;
+    int32x4_lds_t srsrc = make_buf_res((const void*)sb_base, range_bytes);
+    #pragma unroll
+    for (int j = 0; j < WIDTH; j++) {
+        const int n0 = local_n_base + j * 16 + col_l;
+        sb_reg[j] = llvm_amdgcn_raw_buffer_load_f32(srsrc, n0 * 4, 0, 0);
+    }
+}
+
 __device__ inline float rtne_bias(float v) {
     uint32_t bits = __builtin_bit_cast(uint32_t, v);
     if ((bits & 0x7f800000u) == 0x7f800000u) return v;
@@ -208,6 +255,25 @@ __device__ inline void apply_block_scale_1d2d(
 }
 
 template <typename AccType>
+__device__ inline void apply_block_scale_1d2d_reg(
+    AccType &Cacc, const AccType &partial, const float (&sa_reg)[AccType::height * 4], float sb) {
+    #pragma unroll
+    for (int i = 0; i < AccType::height; i++) {
+        const float s0 = sa_reg[i * 4 + 0] * sb;
+        const float s1 = sa_reg[i * 4 + 1] * sb;
+        const float s2 = sa_reg[i * 4 + 2] * sb;
+        const float s3 = sa_reg[i * 4 + 3] * sb;
+        #pragma unroll
+        for (int j = 0; j < AccType::width; j++) {
+            Cacc.tiles[i][j].data[0].x += partial.tiles[i][j].data[0].x * s0;
+            Cacc.tiles[i][j].data[0].y += partial.tiles[i][j].data[0].y * s1;
+            Cacc.tiles[i][j].data[1].x += partial.tiles[i][j].data[1].x * s2;
+            Cacc.tiles[i][j].data[1].y += partial.tiles[i][j].data[1].y * s3;
+        }
+    }
+}
+
+template <typename AccType>
 __device__ inline void apply_block_scale_1d1d(
     AccType &Cacc, const AccType &partial, const float *sa_lds, const float *sb_lds,
         int local_m_base, int local_n_base) {
@@ -224,6 +290,27 @@ __device__ inline void apply_block_scale_1d1d(
         #pragma unroll
         for (int j = 0; j < AccType::width; j++) {
             const float sb = sb_lds[local_n_base + j * 16 + col_l];
+            Cacc.tiles[i][j].data[0].x += partial.tiles[i][j].data[0].x * (a0 * sb);
+            Cacc.tiles[i][j].data[0].y += partial.tiles[i][j].data[0].y * (a1 * sb);
+            Cacc.tiles[i][j].data[1].x += partial.tiles[i][j].data[1].x * (a2 * sb);
+            Cacc.tiles[i][j].data[1].y += partial.tiles[i][j].data[1].y * (a3 * sb);
+        }
+    }
+}
+
+template <typename AccType>
+__device__ inline void apply_block_scale_1d1d_reg(
+    AccType &Cacc, const AccType &partial, const float (&sa_reg)[AccType::height * 4],
+    const float (&sb_reg)[AccType::width]) {
+    #pragma unroll
+    for (int i = 0; i < AccType::height; i++) {
+        const float a0 = sa_reg[i * 4 + 0];
+        const float a1 = sa_reg[i * 4 + 1];
+        const float a2 = sa_reg[i * 4 + 2];
+        const float a3 = sa_reg[i * 4 + 3];
+        #pragma unroll
+        for (int j = 0; j < AccType::width; j++) {
+            const float sb = sb_reg[j];
             Cacc.tiles[i][j].data[0].x += partial.tiles[i][j].data[0].x * (a0 * sb);
             Cacc.tiles[i][j].data[0].y += partial.tiles[i][j].data[0].y * (a1 * sb);
             Cacc.tiles[i][j].data[1].x += partial.tiles[i][j].data[1].x * (a2 * sb);
@@ -286,9 +373,12 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
     const int sb_block0 = col * (BLOCK_N / SCALE_BLOCK) + warp_col / 2;
     const bool sb_valid = (!is_last_n) || (sb_block0 < n_scale_blocks);
     const float *sb_base = g.scale_b.raw_ptr + (sb_valid ? sb_block0 : 0) * num_k_steps;
+    int32x4_lds_t sb_srsrc = make_buf_res((const void*)sb_base, (uint32_t)num_k_steps * 4);
     const int local_m0 = warp_row * REG_M;
     const int local_m1 = (warp_row + 2) * REG_M;
     const int tid = threadIdx.x;
+    // scale_A SRD: bounds OOB rows (partial-M) to 0 automatically.
+    const uint32_t sa_range = (uint32_t)((M - row * BLOCK_M) * 4);
 
     const bool is_first_k_partial = is_k_partial && (num_k_steps == 1);
     if (is_first_k_partial || is_last_m) load_tile_masked(As, g.a, row, 0, M, K);
@@ -297,9 +387,8 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
     else                         G::load(Bs, g.b, {0, 0, col, 0});
 
     // Prologue
-    const bool m_in_range = (tid < BLOCK_M) && (!is_last_m || row * BLOCK_M + tid < M);
-    if (tid < BLOCK_M) smem_sa[0][tid] = m_in_range ? sa_block[tid] : 0.f;
-    float sb_cur = sb_base[0];
+    float sb_cur = llvm_amdgcn_s_buffer_load_f32(sb_srsrc, 0, 0);
+    asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
     if (warp_row == 1) {
@@ -317,12 +406,13 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
         zero(partial[0]); zero(partial[1]);
 
         const bool is_next_k_partial = is_k_partial && (k_step + 1 == num_k_steps - 1);
+        float sa_reg0[REG_M / 16 * 4];
+        float sa_reg1[REG_M / 16 * 4];
 
         // Cluster 0
-        if (!is_last_m && !is_next_k_partial)
-            load_global_to_register_buffer<2, false, NUM_THREADS>(a_buffer_next, A_ELEMS_PER_THREAD, g.a, {0, 0, row, k_step + 1}, As);
-        float sa_next = m_in_range ? sa_block[(k_step + 1) * M + tid] : 0.f;
-        float sb_next = sb_base[k_step + 1];
+        if (!is_last_n && !is_next_k_partial)
+            load_global_to_register_buffer<2, false, NUM_THREADS>(b_buffer_next, B_ELEMS_PER_THREAD, g.b, {0, 0, col, k_step + 1}, Bs);
+        float sb_next;
         load(at[0], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 0}));
         load(at[1], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 0}));
         load(bt[0], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 0}));
@@ -357,8 +447,8 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 4
-        if (!is_last_n && !is_next_k_partial)
-            load_global_to_register_buffer<2, false, NUM_THREADS>(b_buffer_next, B_ELEMS_PER_THREAD, g.b, {0, 0, col, k_step + 1}, Bs);
+        if (!is_last_m && !is_next_k_partial)
+            load_global_to_register_buffer<2, false, NUM_THREADS>(a_buffer_next, A_ELEMS_PER_THREAD, g.a, {0, 0, row, k_step + 1}, As);
         load(at[1], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 2}));
         load(bt[2], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 3}));
         load(at[4], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 3}));
@@ -379,8 +469,9 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
         if (is_next_k_partial || is_last_m) load_tile_masked(As, g.a, row, k_step + 1, M, K);
         else                         store_register_buffer_to_shared<NUM_THREADS>(As, a_buffer_next);
         if (is_next_k_partial || is_last_n) load_tile_masked(Bs, g.b, col, k_step + 1, N, K);
-        else                         store_register_buffer_to_shared<NUM_THREADS>(Bs, b_buffer_next);
-        if (tid < BLOCK_M) smem_sa[(k_step + 1) & 1][tid] = sa_next;
+        load_scale_global_reg<REG_M / 16>(sa_reg0, sa_block + k_step * M, local_m0, sa_range);
+        load_scale_global_reg<REG_M / 16>(sa_reg1, sa_block + k_step * M, local_m1, sa_range);
+        sb_next = llvm_amdgcn_s_buffer_load_f32(sb_srsrc, (k_step + 1) * 4, 0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
@@ -393,9 +484,14 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 8
-        const float *sa_cur = smem_sa[k_step & 1];
-        apply_block_scale_1d2d(C_accum[0], partial[0], sa_cur, sb_cur, local_m0);
-        apply_block_scale_1d2d(C_accum[1], partial[1], sa_cur, sb_cur, local_m1);
+        if (!(is_next_k_partial || is_last_n))
+            store_register_buffer_to_shared<NUM_THREADS>(Bs, b_buffer_next);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        // Cluster 9
+        apply_block_scale_1d2d_reg(C_accum[0], partial[0], sa_reg0, sb_cur);
+        apply_block_scale_1d2d_reg(C_accum[1], partial[1], sa_reg1, sb_cur);
         sb_cur = sb_next;
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -459,9 +555,12 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
 
     {
         const int last = num_k_steps - 1;
-        const float *sa_cur = smem_sa[last & 1];
-        apply_block_scale_1d2d(C_accum[0], partial[0], sa_cur, sb_cur, local_m0);
-        apply_block_scale_1d2d(C_accum[1], partial[1], sa_cur, sb_cur, local_m1);
+        float sa_reg0[REG_M / 16 * 4];
+        float sa_reg1[REG_M / 16 * 4];
+        load_scale_global_reg<REG_M / 16>(sa_reg0, sa_block + last * M, local_m0, sa_range);
+        load_scale_global_reg<REG_M / 16>(sa_reg1, sa_block + last * M, local_m1, sa_range);
+        apply_block_scale_1d2d_reg(C_accum[0], partial[0], sa_reg0, sb_cur);
+        apply_block_scale_1d2d_reg(C_accum[1], partial[1], sa_reg1, sb_cur);
     }
 
     if (warp_row == 0) {
@@ -501,8 +600,6 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
     shared_allocator al((int*)&__shm[0]);
     st<AType, BLOCK_M, BLOCK_K> (&As) = al.allocate<st<AType, BLOCK_M, BLOCK_K>>();
     st<BType, BLOCK_N, BLOCK_K> (&Bs) = al.allocate<st<BType, BLOCK_N, BLOCK_K>>();
-    __shared__ float smem_sa[2][BLOCK_M];
-    __shared__ float smem_sb[2][BLOCK_N];
 
     rt<AType, REG_M, MFMA_K> at[5];
     rt<BType, REG_N, MFMA_K> bt[3];
@@ -544,10 +641,14 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
     const float *sa_block = g.scale_a.raw_ptr + row * BLOCK_M;
 
     const int sb_col0 = col * BLOCK_N;
+    const float *sb_block = g.scale_b.raw_ptr + sb_col0;
     const int local_m0 = warp_row * REG_M;
     const int local_m1 = (warp_row + 2) * REG_M;
     const int local_n  = warp_col * REG_N;
     const int tid = threadIdx.x;
+    // scale SRD ranges: bound OOB rows/cols (partial-M/N) to 0 automatically.
+    const uint32_t sa_range = (uint32_t)((M - row * BLOCK_M) * 4);
+    const uint32_t sb_range = (uint32_t)((N - sb_col0) * 4);
 
     // Prologue
     const bool is_first_k_partial = is_k_partial && (num_k_steps == 1);
@@ -555,11 +656,6 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
     else                         G::load(As, g.a, {0, 0, row, 0});
     if (is_first_k_partial || is_last_n) load_tile_masked(Bs, g.b, col, 0, N, K);
     else                         G::load(Bs, g.b, {0, 0, col, 0});
-    const bool m_in_range = (tid < BLOCK_M) && (!is_last_m || row * BLOCK_M + tid < M);
-    if (tid < BLOCK_M) smem_sa[0][tid] = m_in_range ? sa_block[tid] : 0.f;
-
-    const bool n_in_range0 = (tid < BLOCK_N) && (!is_last_n || sb_col0 + tid < N);
-    if (tid < BLOCK_N) smem_sb[0][tid] = n_in_range0 ? g.scale_b.raw_ptr[sb_col0 + tid] : 0.f;
     __builtin_amdgcn_s_barrier();
 
     if (warp_row == 1) {
@@ -579,12 +675,11 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
         const bool is_next_k_partial = is_k_partial && (k_step + 1 == num_k_steps - 1);
 
         // Cluster 0
-        if (!is_last_m && !is_next_k_partial)
-            load_global_to_register_buffer<2, false, NUM_THREADS>(a_buffer_next, A_ELEMS_PER_THREAD, g.a, {0, 0, row, k_step + 1}, As);
-        float sa_next = m_in_range ? sa_block[(k_step + 1) * M + tid] : 0.f;
-        const bool n_in_range = (tid < BLOCK_N) && (!is_last_n || sb_col0 + tid < N);
-        float sb_next = (tid < BLOCK_N && n_in_range)
-                            ? g.scale_b.raw_ptr[(k_step + 1) * N + sb_col0 + tid] : 0.f;
+        if (!is_last_n && !is_next_k_partial)
+            load_global_to_register_buffer<2, false, NUM_THREADS>(b_buffer_next, B_ELEMS_PER_THREAD, g.b, {0, 0, col, k_step + 1}, Bs);
+        float sa_reg0[REG_M / 16 * 4];
+        float sa_reg1[REG_M / 16 * 4];
+        float sb_reg[REG_N / 16];
         load(at[0], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 0}));
         load(at[1], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 0}));
         load(bt[0], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 0}));
@@ -619,8 +714,8 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 4
-        if (!is_last_n && !is_next_k_partial)
-            load_global_to_register_buffer<2, false, NUM_THREADS>(b_buffer_next, B_ELEMS_PER_THREAD, g.b, {0, 0, col, k_step + 1}, Bs);
+        if (!is_last_m && !is_next_k_partial)
+            load_global_to_register_buffer<2, false, NUM_THREADS>(a_buffer_next, A_ELEMS_PER_THREAD, g.a, {0, 0, row, k_step + 1}, As);
         load(at[1], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 2}));
         load(bt[2], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 3}));
         load(at[4], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 3}));
@@ -641,9 +736,9 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
         if (is_next_k_partial || is_last_m) load_tile_masked(As, g.a, row, k_step + 1, M, K);
         else                         store_register_buffer_to_shared<NUM_THREADS>(As, a_buffer_next);
         if (is_next_k_partial || is_last_n) load_tile_masked(Bs, g.b, col, k_step + 1, N, K);
-        else                         store_register_buffer_to_shared<NUM_THREADS>(Bs, b_buffer_next);
-        if (tid < BLOCK_M) smem_sa[(k_step + 1) & 1][tid] = sa_next;
-        if (tid < BLOCK_N) smem_sb[(k_step + 1) & 1][tid] = sb_next;
+        load_scale_global_reg<REG_M / 16>(sa_reg0, sa_block + k_step * M, local_m0, sa_range);
+        load_scale_global_reg<REG_M / 16>(sa_reg1, sa_block + k_step * M, local_m1, sa_range);
+        load_scaleB_global_reg<REG_N / 16>(sb_reg, sb_block + k_step * N, local_n, sb_range);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
@@ -656,10 +751,14 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 8
-        const float *sa_cur = smem_sa[k_step & 1];
-        const float *sb_cur = smem_sb[k_step & 1];
-        apply_block_scale_1d1d(C_accum[0], partial[0], sa_cur, sb_cur, local_m0, local_n);
-        apply_block_scale_1d1d(C_accum[1], partial[1], sa_cur, sb_cur, local_m1, local_n);
+        if (!(is_next_k_partial || is_last_n))
+            store_register_buffer_to_shared<NUM_THREADS>(Bs, b_buffer_next);
+        __builtin_amdgcn_s_barrier();
+        __builtin_amdgcn_sched_barrier(0);
+
+        // Cluster 9
+        apply_block_scale_1d1d_reg(C_accum[0], partial[0], sa_reg0, sb_reg);
+        apply_block_scale_1d1d_reg(C_accum[1], partial[1], sa_reg1, sb_reg);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
@@ -722,10 +821,14 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
 
     {
         const int last = num_k_steps - 1;
-        const float *sa_cur = smem_sa[last & 1];
-        const float *sb_cur = smem_sb[last & 1];
-        apply_block_scale_1d1d(C_accum[0], partial[0], sa_cur, sb_cur, local_m0, local_n);
-        apply_block_scale_1d1d(C_accum[1], partial[1], sa_cur, sb_cur, local_m1, local_n);
+        float sa_reg0[REG_M / 16 * 4];
+        float sa_reg1[REG_M / 16 * 4];
+        float sb_reg[REG_N / 16];
+        load_scale_global_reg<REG_M / 16>(sa_reg0, sa_block + last * M, local_m0, sa_range);
+        load_scale_global_reg<REG_M / 16>(sa_reg1, sa_block + last * M, local_m1, sa_range);
+        load_scaleB_global_reg<REG_N / 16>(sb_reg, sb_block + last * N, local_n, sb_range);
+        apply_block_scale_1d1d_reg(C_accum[0], partial[0], sa_reg0, sb_reg);
+        apply_block_scale_1d1d_reg(C_accum[1], partial[1], sa_reg1, sb_reg);
     }
 
     if (warp_row == 0) {
@@ -812,7 +915,17 @@ void kittens_blockwise_fp8_gemm_impl_cdna3(
     const void *c_in, float beta,
     hipStream_t stream) {
 
-    const bool is_1d2d   = (b_scaling_mode == KITTENS_BLOCK_SCALING_2D);
+    // Kernel body uses the swapped convention (kernel-A=activation/1D, kM=user N);
+    // dispatch passes canonical (A=weight/2D, M=user M). Swap back here (as impl_cdna4).
+    const void *kA = B,          *kB = A;
+    const void *ksa = scale_B,   *ksb = scale_A;
+    void       *kC = C;
+    const int   kM = N,          kN = M;
+    const int   ka_mode = b_scaling_mode, kb_mode = a_scaling_mode;
+    const int   ka_dtype = b_dtype,       kb_dtype = a_dtype;
+    (void)transa; (void)transb;
+
+    const bool is_1d2d   = (kb_mode == KITTENS_BLOCK_SCALING_2D);
     const bool has_bias  = (bias != nullptr);
     const bool has_gelu  = (gelu_aux != nullptr);
     const bool has_beta  = (c_in != nullptr);
@@ -821,13 +934,13 @@ void kittens_blockwise_fp8_gemm_impl_cdna3(
 
     auto run = [&]<typename AType, typename BType, typename OType>() {
         micro_globals<AType, BType, OType> g = {
-            _gl_A_t<AType>(reinterpret_cast<AType*>(const_cast<void*>(A)), 1, 1, M, K),
-            _gl_B_t<BType>(reinterpret_cast<BType*>(const_cast<void*>(B)), 1, 1, N, K),
-            _gl_C_t<OType>(reinterpret_cast<OType*>(C), 1, 1, M, N),
-            _gl_SA(reinterpret_cast<float*>(const_cast<void*>(scale_A)), 1, 1, k_blocks, M),
+            _gl_A_t<AType>(reinterpret_cast<AType*>(const_cast<void*>(kA)), 1, 1, kM, K),
+            _gl_B_t<BType>(reinterpret_cast<BType*>(const_cast<void*>(kB)), 1, 1, kN, K),
+            _gl_C_t<OType>(reinterpret_cast<OType*>(kC), 1, 1, kM, kN),
+            _gl_SA(reinterpret_cast<float*>(const_cast<void*>(ksa)), 1, 1, k_blocks, kM),
             is_1d2d
-                ? _gl_SB(reinterpret_cast<float*>(const_cast<void*>(scale_B)), 1, 1, ceil_div(N, SCALE_BLOCK), k_blocks)
-                : _gl_SB(reinterpret_cast<float*>(const_cast<void*>(scale_B)), 1, 1, k_blocks, N),
+                ? _gl_SB(reinterpret_cast<float*>(const_cast<void*>(ksb)), 1, 1, ceil_div(kN, SCALE_BLOCK), k_blocks)
+                : _gl_SB(reinterpret_cast<float*>(const_cast<void*>(ksb)), 1, 1, k_blocks, kN),
             stream,
             bias, bias_dtype, gelu_aux, gelu_aux_dtype,
             reinterpret_cast<const OType*>(c_in), beta,
@@ -836,8 +949,8 @@ void kittens_blockwise_fp8_gemm_impl_cdna3(
         else         dispatch_micro<false, AType, BType, OType>(g, has_bias, has_gelu, has_beta, has_partial_k);
     };
 
-    const bool a_e5m2 = (a_dtype == KITTENS_FP8E5M2);
-    const bool b_e5m2 = (b_dtype == KITTENS_FP8E5M2);
+    const bool a_e5m2 = (ka_dtype == KITTENS_FP8E5M2);
+    const bool b_e5m2 = (kb_dtype == KITTENS_FP8E5M2);
 #ifdef NVTE_HK_FAST_BUILD
     // Fast dev build: instantiate only e4m3xe4m3 + bf16 out (1/9 of the
     // template instances). Other dtype combos fall back to this instance.
