@@ -585,10 +585,13 @@ size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args){
   // local by QoLA's export script, so the v2 size is queried through QoLA.
   const size_t v2_bytes = QOLA_NS(mha_bwd_workspace_size)(make_bwd_traits(args));
   const size_t v3_bytes = v3_dq_acc_bytes(args);
-  // Safety floor: CK reports too little memory for kN0=192. Guard with the explicit
-  // dq_acc size required by the deterministic accumulation algorithm — the same
-  // formula the pre-AITER code used — so we always allocate enough device workspace.
-  const size_t kN0 = (args.d_qk <= 128) ? 128u : 64u;
+  // Safety floor: CK's device_ws_size is computed from a representative tile and can
+  // under-report the dq_acc the actually-dispatched kernel uses. The deterministic
+  // dq_acc holds nsplits = ceil(s_kv / kN0) copies, so a smaller kN0 means MORE splits
+  // and a LARGER buffer. To stay an upper bound we must use the smallest kN0 the CK-tile
+  // bwd dispatcher can pick for any supported arch. Per the CK codegen bwd tile tables,
+  // the smallest non-tail kN0 is 64.
+  const size_t kN0 = 64u;
   const size_t nsplits = args.deterministic ? ((args.s_kv + kN0 - 1) / kN0) : 1u;
   const size_t tokens_q = args.is_group_mode() ? args.max_tokens_q : (args.b * args.s_q);
   const size_t dq_acc_floor = nsplits * args.h * tokens_q * args.d_qk * sizeof(float);
