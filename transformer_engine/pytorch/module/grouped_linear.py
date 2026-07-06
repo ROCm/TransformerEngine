@@ -5,7 +5,10 @@
 # See LICENSE for license information.
 
 """GroupedLinear API"""
-from typing import Union, Optional, Callable, Tuple, List
+from typing import Union, Optional, Callable, Tuple, List, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from transformer_engine.pytorch.moe_routing import MoERoutingMetadata
 from itertools import chain
 import warnings
 import weakref
@@ -61,6 +64,12 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 if IS_HIP_EXTENSION:
     from transformer_engine.pytorch.triton_kernels.grouped_gemm import general_grouped_gemm_triton
+    from transformer_engine.pytorch.triton_kernels.permute_free_grouped_gemm import (
+        is_permute_free_grouped_gemm_enabled,
+        permute_free_grouped_gemm_bf16,
+        permute_free_grouped_gemm_bf16_dgrad,
+        permute_free_wgrad_sorted_inputs,
+    )
     import os
 
 __all__ = ["GroupedLinear"]
@@ -109,6 +118,7 @@ class _GroupedLinear(torch.autograd.Function):
             m_splits_tensor,
             actual_m_splits,
             unpad_output,
+            routing_metadata,
         ) = non_tensor_args
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -119,6 +129,22 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Check if Triton kernel should be used
         use_grouped_gemm_triton = IS_HIP_EXTENSION and os.getenv("NVTE_USE_GROUPED_GEMM_TRITON", "0") == "1" and not fp8 and not fuse_wgrad_accumulation
+
+        # Permute-free gather GEMM (fwd + dgrad gather, wgrad on default path).
+        # Training is supported: only fp8 / bias / wgrad-accumulation fusion are excluded.
+        use_perm_free_grouped_gemm = (
+            IS_HIP_EXTENSION
+            and is_permute_free_grouped_gemm_enabled()
+            and routing_metadata is not None
+            and not fp8
+            and not fuse_wgrad_accumulation
+            and activation_dtype == torch.bfloat16
+            and not use_bias
+        )
+        if use_perm_free_grouped_gemm and use_grouped_gemm_triton:
+            raise RuntimeError(
+                "NVTE_PERMUTE_FREE_GROUPED_GEMM and NVTE_USE_GROUPED_GEMM_TRITON cannot both be enabled."
+            )
 
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
@@ -188,6 +214,8 @@ class _GroupedLinear(torch.autograd.Function):
             )
         elif use_grouped_gemm_triton:
             inputmats = [cast_if_needed(inp_view, activation_dtype)]
+        elif use_perm_free_grouped_gemm:
+            inputmats = [cast_if_needed(inp_view, activation_dtype)]
         else:
             inputmats = torch.split(cast_if_needed(inp_view, activation_dtype), m_splits)
 
@@ -221,11 +249,19 @@ class _GroupedLinear(torch.autograd.Function):
             bias_dtype = torch.bfloat16  # FP8 GEMM only supports BF16/FP16 bias
         biases = [cast_if_needed(bias, bias_dtype) for bias in biases] if use_bias else biases
         # Initialize output tensor
-        out = torch.empty(
-            [sum(m_splits), weights_fp8[0].size(0)],
-            dtype=activation_dtype,
-            device=device,
-        )
+        if use_perm_free_grouped_gemm:
+            top_k = routing_metadata.topk_ids.size(1)
+            out = torch.empty(
+                [inp_view.size(0), top_k, weights_fp8[0].size(0)],
+                dtype=activation_dtype,
+                device=device,
+            )
+        else:
+            out = torch.empty(
+                [sum(m_splits), weights_fp8[0].size(0)],
+                dtype=activation_dtype,
+                device=device,
+            )
 
         # Choose whether to use split accumulator
         use_split_accumulator = _2X_ACC_FPROP
@@ -235,25 +271,32 @@ class _GroupedLinear(torch.autograd.Function):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
         # Perform GEMM
-        if use_grouped_gemm_triton:
+        if use_perm_free_grouped_gemm:
+            out = permute_free_grouped_gemm_bf16(
+                inputmats[0],
+                weights_fp8,
+                routing_metadata,
+            )
+        elif use_grouped_gemm_triton:
             general_grouped_gemm_func = general_grouped_gemm_triton
             kwargs = {"m_splits_tensor": m_splits_tensor}
         else:
             general_grouped_gemm_func = general_grouped_gemm
             kwargs = {}
-        general_grouped_gemm_func(
-            weights_fp8,
-            inputmats,
-            [out],
-            output_quantizers,
-            activation_dtype,
-            single_output=True,
-            m_splits=m_splits,
-            bias=biases,
-            use_bias=use_bias,
-            use_split_accumulator=use_split_accumulator,
-            **kwargs,
-        )
+        if not use_perm_free_grouped_gemm:
+            general_grouped_gemm_func(
+                weights_fp8,
+                inputmats,
+                [out],
+                output_quantizers,
+                activation_dtype,
+                single_output=True,
+                m_splits=m_splits,
+                bias=biases,
+                use_bias=use_bias,
+                use_split_accumulator=use_split_accumulator,
+                **kwargs,
+            )
 
 
         output_unpadded = False
@@ -359,6 +402,8 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.input_quantizers = input_quantizers
             ctx.use_grouped_gemm_triton = use_grouped_gemm_triton
             ctx.num_input_tensors = len(inputmats)
+            ctx.use_perm_free_grouped_gemm = use_perm_free_grouped_gemm
+            ctx.routing_metadata = routing_metadata if use_perm_free_grouped_gemm else None
 
             # backward overrides
             if backward_override is not None:
@@ -373,7 +418,9 @@ class _GroupedLinear(torch.autograd.Function):
                 ctx.grad_output_quantizers = [None] * num_gemms
                 ctx.reduce_and_update_bwd_fp8_tensors = False
 
-        # [*, in_features] -> [*, out_features] except first dimension changes for SP
+        # [*, in_features] -> [*, out_features] or [*, topk, out_features] (permute-free)
+        if use_perm_free_grouped_gemm:
+            return out, new_workspaces
         return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
 
     @staticmethod
@@ -389,6 +436,50 @@ class _GroupedLinear(torch.autograd.Function):
             weights = saved_tensors[num_inputs: num_inputs + N]
             saved_weights = saved_tensors[num_inputs + N : num_inputs + 2 * N]
             biases = saved_tensors[num_inputs + 2 * N : num_inputs + 3 * N]
+
+            # Permute-free gather GEMM: dgrad reuses the forward gather kernel
+            # (no permute), wgrad reorders activations/grads by expert and runs
+            # the default grouped GEMM. Returns early to bypass the fp8/debug logic.
+            if getattr(ctx, "use_perm_free_grouped_gemm", False):
+                routing = ctx.routing_metadata
+                grad_output_pf = grad_output.contiguous()  # [num_tokens, topk, out_features]
+
+                dgrad = None
+                if ctx.requires_dgrad:
+                    weights_stacked = torch.stack(list(weights), dim=0)  # [E, N, H]
+                    dgrad = permute_free_grouped_gemm_bf16_dgrad(
+                        grad_output_pf, weights_stacked, routing
+                    )
+
+                wgrad_list = [None] * ctx.num_gemms
+                if ctx.weights_requires_grad:
+                    x_chunks, dy_chunks, counts = permute_free_wgrad_sorted_inputs(
+                        inputmats[0], grad_output_pf, routing
+                    )
+                    wgrad_list = [
+                        torch.empty(w.size(), dtype=ctx.activation_dtype, device=ctx.device)
+                        for w in weights
+                    ]
+                    general_grouped_gemm(
+                        x_chunks,
+                        dy_chunks,
+                        wgrad_list,
+                        [None] * ctx.num_gemms,
+                        ctx.activation_dtype,
+                        layout="NT",
+                        grad=True,
+                        m_splits=counts,
+                        use_bias=False,
+                        bias=None,
+                        use_split_accumulator=_2X_ACC_WGRAD,
+                    )
+
+                return (
+                    dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+                    None,
+                    *wgrad_list,
+                    *([None] * ctx.num_gemms),
+                )
 
             # Restore from weakrefs to get original weight python objects
             # (preserves attributes like main_grad, grad_added_to_main_grad, etc.)
@@ -775,11 +866,15 @@ class GroupedLinear(TransformerEngineBaseModule):
                        instead of one bias per GEMM.
                        EXPERIMENTAL and subject to change.
 
-    Notes
-    -----
-    GroupedLinear doesn't really handle the TP communications inside. The ``tp_size`` and
-    ``parallel_mode`` are used to determine the shapes of weights and biases.
-    The TP communication should be handled in the dispatch and combine stages of MoE models.
+    Permute-free MoE (ROCm, bf16, inference)
+    ----------------------------------------
+    When ``NVTE_PERMUTE_FREE_GROUPED_GEMM=1``, pass ``routing_metadata`` (a
+    :class:`~transformer_engine.pytorch.moe_routing.MoERoutingMetadata`) instead
+    of permuting activations before this module. The caller must skip
+    ``moe_permute``; input shape is ``[num_tokens, in_features]`` and output
+    shape is ``[num_tokens, topk, out_features]``. Requires ``bias=False``,
+    bf16, and ``torch.no_grad()`` / eval mode. For FC2 reduction use
+    ``moe_unpermute`` or AITER ``moe_sum``.
     """
 
     def __init__(
@@ -1171,6 +1266,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         m_splits_tensor: Optional[torch.Tensor] = None,
         actual_m_splits: Optional[List[int]] = None,
         unpad_output: bool = False,
+        routing_metadata: Optional["MoERoutingMetadata"] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -1202,6 +1298,10 @@ class GroupedLinear(TransformerEngineBaseModule):
                       When True, unpad the GEMM output from sum(m_splits) to
                       sum(actual_m_splits) rows before returning. Used by the
                       ROCm fused-pad-cast-transpose path; ignored on CUDA.
+        routing_metadata : MoERoutingMetadata, optional
+                      When set with ``NVTE_PERMUTE_FREE_GROUPED_GEMM=1``, run
+                      gather-in-GEMM on unpermuted bf16 activations. Output
+                      shape is ``[num_tokens, topk, out_features]``.
         """
         debug = self.is_debug_iter()
 
@@ -1277,6 +1377,7 @@ class GroupedLinear(TransformerEngineBaseModule):
                 m_splits_tensor,
                 actual_m_splits,
                 unpad_output,
+                routing_metadata,
             )
             out, new_workspaces = linear_fn(
                 *autograd_ctx, inp, non_tensor_args, *weight_tensors, *bias_tensors

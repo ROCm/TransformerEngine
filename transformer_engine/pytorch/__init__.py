@@ -41,6 +41,11 @@ from transformer_engine.pytorch.permutation import (
     moe_sort_chunks_by_index,
     moe_sort_chunks_by_index_with_probs,
 )
+from transformer_engine.pytorch.moe_routing import (
+    MoERoutingMetadata,
+    routing_map_to_topk,
+    index_map_to_topk_weights,
+)
 from transformer_engine.pytorch.quantization import fp8_autocast
 from transformer_engine.pytorch.quantization import fp8_model_init
 from transformer_engine.pytorch.quantization import autocast
