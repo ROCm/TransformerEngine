@@ -345,7 +345,7 @@ def compile_triton(
             signature_with_constexpr[const_name] = "constexpr"
 
     if is_hip:
-        # ROCm: active GPU target (gfx arch + 64-lane warp); binary is HSACO.
+        # ROCm: active GPU target (gfx arch + its native warp size); HSACO binary.
         from triton.compiler import make_backend
 
         target = triton.runtime.driver.active.get_current_target()
@@ -417,16 +417,17 @@ def compile_triton(
             f.write(binary)
         binary = hsaco_path
 
-    # TritonKernel signature per jax/jaxlib/gpu/triton_kernels.cc (changed in 0.8.2).
+    # Create kernel object for JAX
+    # From jax/jaxlib/gpu/triton_kernels.cc:
     if version.parse(jax.__version__) >= version.parse("0.8.2"):
         kernel = gpu_triton.TritonKernel(
-            compiled.name,
-            num_warps,
-            num_ctas,
-            compiled.metadata.shared,
-            binary,
-            "",  # ttir
-            compute_capability,
+            compiled.name,  # arg0: kernel_name (str)
+            num_warps,  # arg1: num_warps (int)
+            num_ctas,  # arg2: num_ctas (int)
+            compiled.metadata.shared,  # arg3: shared_mem_bytes (int)
+            binary,  # arg4: ptx (str)
+            "",  # arg5: ttir (str) - empty
+            compute_capability,  # arg6: compute_capability (int)
         )
     else:
         kernel = gpu_triton.TritonKernel(
@@ -522,7 +523,10 @@ def triton_call_lowering(
     # Resolve launch defaults (Gluon layouts need a matching num_warps).
     actual_kernel_fn = kernel_fn
     if num_warps is None:
-        # 32 warps would exceed the 1024-thread block limit on AMD's 64-lane warp.
+        # The upstream default of 32 assumes 32-lane warps (32*32 = 1024, the max
+        # threads per block). AMD wavefronts are 32 or 64 lanes, so use a smaller
+        # default that stays within 1024 threads either way; callers needing a
+        # specific count (e.g. Gluon layouts) pass num_warps explicitly.
         num_warps = 4 if is_hip_extension() else 32
     if num_stages is None:
         num_stages = 1
