@@ -147,11 +147,19 @@ jobs:
         run: |
           DEVICE_FLAG="$(cat /etc/podinfo/gha-render-devices 2>/dev/null || echo --device=/dev/dri)"
           test -n "$DEVICE_FLAG"
+          mapfile -t RENDER_DEVICES < <(grep -oE '/dev/dri/renderD[0-9]+' <<< "$DEVICE_FLAG" || true)
+          GPU_COUNT="${#RENDER_DEVICES[@]}"
+          GPU_ENV=()
+          if [ "$GPU_COUNT" -gt 0 ]; then
+            GPU_IDS="$(seq -s, 0 $((GPU_COUNT - 1)))"
+            GPU_ENV=(-e "ROCR_VISIBLE_DEVICES=$GPU_IDS" -e "HIP_VISIBLE_DEVICES=$GPU_IDS")
+          fi
           docker run -dt \
             --rm \
             --name te-runner \
             --network=host \
             --device=/dev/kfd $DEVICE_FLAG \
+            "${GPU_ENV[@]}" \
             --shm-size=16G \
             --pid=host \
             --group-add $(getent group render | cut -d: -f3) \
@@ -182,9 +190,6 @@ jobs:
 
       - name: Run sGPU tests in parallel (pytorch, jax, examples, core)
         id: run-tests
-        # Below the job's timeout-minutes so an overrun kills only this step;
-        # the `if: always()` report + upload steps still run (artifacts survive).
-        timeout-minutes: 180
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
@@ -194,97 +199,132 @@ jobs:
           # exists in both the torch and jax suites and runs in parallel).
           rm -rf test-results && mkdir -p test-results/torch test-results/jax test-results/core
 
-          docker exec \
-            -e TEST_SGPU=1 \
-            -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
-            -e JUNITXML_PREFIX=/workspace/test-results/ \
-            -e JUNITXML_SUFFIX=.xml \
-            -e HF_TOKEN="$HF_TOKEN" \
-            te-runner bash -c "$(cat <<'EOF'
-          #!/usr/bin/bash
+          INSTALLED_IMAGE="te-runner-installed:${{ github.run_id }}-${{ matrix.arch_label }}"
+          docker commit te-runner "$INSTALLED_IMAGE" >/dev/null
+
+          mapfile -t RENDER_DEVICES < <(grep -oE '/dev/dri/renderD[0-9]+' /etc/podinfo/gha-render-devices 2>/dev/null || true)
+          if [ "${#RENDER_DEVICES[@]}" -eq 0 ]; then
+            mapfile -t RENDER_DEVICES < <(find /dev/dri -maxdepth 1 -name 'renderD*' | sort | head -4)
+          fi
+          if [ "${#RENDER_DEVICES[@]}" -lt 4 ]; then
+            echo "::error::Expected at least 4 render devices, found ${#RENDER_DEVICES[@]}."
+            exit 1
+          fi
+
+          cat > .te-ci-torch.sh <<'EOF'
           set -x -o pipefail
-          ulimit -c 0 # Disable core dumps
+          ulimit -c 0
+          JUNITXML_PREFIX=${JUNITXML_PREFIX}torch/ ci/pytorch.sh
+          EOF
 
-          # Each suite appends its own subdir to the inherited base prefix so the
-          # base path is defined once in the docker-exec env above (inline VAR=val
-          # applies only to that backgrounded subprocess; the sourced _utils.sh
-          # reads it from the env).
-          HIP_VISIBLE_DEVICES=0 JUNITXML_PREFIX=${JUNITXML_PREFIX}torch/ ci/pytorch.sh > /workspace/torch.log 2>&1 &
-          TORCH_PID=$!
+          cat > .te-ci-jax.sh <<'EOF'
+          set -x -o pipefail
+          ulimit -c 0
+          JUNITXML_PREFIX=${JUNITXML_PREFIX}jax/ ci/jax.sh
+          EOF
 
-          HIP_VISIBLE_DEVICES=1 JUNITXML_PREFIX=${JUNITXML_PREFIX}jax/ ci/jax.sh > /workspace/jax.log 2>&1 &
-          JAX_PID=$!
+          cat > .te-ci-examples.sh <<'EOF'
+          set -ex -o pipefail
+          ulimit -c 0
+          python -c "import os; print('HF_TOKEN set:', bool(os.environ.get('HF_TOKEN')))"
 
-          (
-            set -e
-            python -c "import os; print('HF_TOKEN set:', bool(os.environ.get('HF_TOKEN')))"
+          JAX_CONSTRAINTS=/tmp/jax-constraints.txt
+          pip freeze | grep -iE '^(jax|jaxlib|jax[_-]rocm|jax[_-]plugins)[=@]' > "$JAX_CONSTRAINTS" || true
 
-            JAX_CONSTRAINTS=/tmp/jax-constraints.txt
-            pip freeze | grep -iE '^(jax|jaxlib|jax[_-]rocm|jax[_-]plugins)[=@]' > "$JAX_CONSTRAINTS" || true
+          cd /workspace/examples/pytorch/mnist
+          python main.py
+          python main.py --use-te
+          python main.py --use-fp8
 
-            export HIP_VISIBLE_DEVICES=2
+          cd /workspace/examples/jax/mnist
+          pip3 install -c "$JAX_CONSTRAINTS" -r requirements.txt
+          python test_single_gpu_mnist.py
+          python test_single_gpu_mnist.py --use-te
+          python test_single_gpu_mnist.py --use-fp8
 
-            cd /workspace/examples/pytorch/mnist
-            python main.py
-            python main.py --use-te
-            python main.py --use-fp8
+          cd /workspace/examples/jax/encoder
+          pip3 install -c "$JAX_CONSTRAINTS" -r requirements.txt
+          python test_single_gpu_encoder.py
+          python test_single_gpu_encoder.py --use-fp8
+          EOF
 
-            cd /workspace/examples/jax/mnist
-            pip3 install -c "$JAX_CONSTRAINTS" -r requirements.txt
-            python test_single_gpu_mnist.py
-            python test_single_gpu_mnist.py --use-te
-            python test_single_gpu_mnist.py --use-fp8
+          cat > .te-ci-core.sh <<'EOF'
+          set -x -o pipefail
+          ulimit -c 0
+          JUNITXML_PREFIX=${JUNITXML_PREFIX}core/ ci/core.sh
+          EOF
 
-            cd /workspace/examples/jax/encoder
-            pip3 install -c "$JAX_CONSTRAINTS" -r requirements.txt
-            python test_single_gpu_encoder.py
-            python test_single_gpu_encoder.py --use-fp8
-          ) > /workspace/examples.log 2>&1 &
-          EXAMPLES_PID=$!
+          run_gpu_suite() {
+            local name="$1"
+            local gpu_index="$2"
+            local log_file="$3"
+            local script_path="$4"
+            docker rm -f "te-runner-$name" >/dev/null 2>&1 || true
+            docker run -d \
+              --name "te-runner-$name" \
+              --network=host \
+              --device=/dev/kfd \
+              --device="${RENDER_DEVICES[$gpu_index]}" \
+              --shm-size=16G \
+              --pid=host \
+              --group-add "$(getent group render | cut -d: -f3)" \
+              --group-add "$(getent group video | cut -d: -f3)" \
+              -e TEST_SGPU=1 \
+              -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
+              -e JUNITXML_PREFIX=/workspace/test-results/ \
+              -e JUNITXML_SUFFIX=.xml \
+              -e HF_TOKEN="$HF_TOKEN" \
+              -e ROCR_VISIBLE_DEVICES=0 \
+              -e HIP_VISIBLE_DEVICES=0 \
+              -v "${{ github.workspace }}:/workspace" \
+              -w /workspace \
+              "$INSTALLED_IMAGE" \
+              bash -lc "bash $script_path > $log_file 2>&1"
+          }
 
-          HIP_VISIBLE_DEVICES=3 JUNITXML_PREFIX=${JUNITXML_PREFIX}core/ ci/core.sh > /workspace/core.log 2>&1 &
-          CORE_PID=$!
+          TORCH_CID="$(run_gpu_suite torch 0 /workspace/torch.log /workspace/.te-ci-torch.sh)"
+          JAX_CID="$(run_gpu_suite jax 1 /workspace/jax.log /workspace/.te-ci-jax.sh)"
+          EXAMPLES_CID="$(run_gpu_suite examples 2 /workspace/examples.log /workspace/.te-ci-examples.sh)"
+          CORE_CID="$(run_gpu_suite core 3 /workspace/core.log /workspace/.te-ci-core.sh)"
 
-          wait $TORCH_PID;    torch_rc=$?
-          wait $JAX_PID;      jax_rc=$?
-          wait $EXAMPLES_PID; examples_rc=$?
-          wait $CORE_PID;     core_rc=$?
+          torch_rc="$(docker wait "$TORCH_CID")"
+          jax_rc="$(docker wait "$JAX_CID")"
+          examples_rc="$(docker wait "$EXAMPLES_CID")"
+          core_rc="$(docker wait "$CORE_CID")"
 
-          if [ $torch_rc -ne 0 ]; then
+          if [ "$torch_rc" -ne 0 ]; then
             echo "::group::[FAILED] PyTorch Log"
-            cat /workspace/torch.log
+            cat torch.log || true
             echo "::endgroup::"
             echo "::error::PyTorch tests FAILED."
-            touch /workspace/FAIL_TORCH
+            touch FAIL_TORCH
           fi
 
-          if [ $jax_rc -ne 0 ]; then
+          if [ "$jax_rc" -ne 0 ]; then
             echo "::group::[FAILED] JAX Log"
-            cat /workspace/jax.log
+            cat jax.log || true
             echo "::endgroup::"
             echo "::error::JAX tests FAILED."
-            touch /workspace/FAIL_JAX
+            touch FAIL_JAX
           fi
 
-          if [ $examples_rc -ne 0 ]; then
+          if [ "$examples_rc" -ne 0 ]; then
             echo "::group::[FAILED] Examples Log"
-            cat /workspace/examples.log
+            cat examples.log || true
             echo "::endgroup::"
             echo "::error::Examples FAILED."
-            touch /workspace/FAIL_EXAMPLES
+            touch FAIL_EXAMPLES
           fi
 
-          if [ $core_rc -ne 0 ]; then
+          if [ "$core_rc" -ne 0 ]; then
             echo "::group::[FAILED] Core Log"
-            cat /workspace/core.log
+            cat core.log || true
             echo "::endgroup::"
             echo "::error::Core tests FAILED."
-            touch /workspace/FAIL_CORE
+            touch FAIL_CORE
           fi
 
-          test $torch_rc -eq 0 -a $jax_rc -eq 0 -a $examples_rc -eq 0 -a $core_rc -eq 0
-          EOF
-          )"
+          test "$torch_rc" -eq 0 -a "$jax_rc" -eq 0 -a "$examples_rc" -eq 0 -a "$core_rc" -eq 0
 
       - name: Generate test report
         if: always()
@@ -335,7 +375,9 @@ jobs:
 
       - name: Cleanup container
         if: always()
-        run: docker rm -f te-runner || true
+        run: |
+          docker rm -f te-runner te-runner-torch te-runner-jax te-runner-examples te-runner-core || true
+          docker image rm "te-runner-installed:${{ github.run_id }}-${{ matrix.arch_label }}" || true
 
   mgpu_tests:
     name: mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})
