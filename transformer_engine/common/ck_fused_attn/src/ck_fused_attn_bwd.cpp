@@ -828,6 +828,18 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
     log_bwd_config(__FUNCTION__, fmha_args, log_file);
   }
 
+  // Deterministic dq_acc must start zeroed across the *entire* reserved buffer, not just
+  // the extent CK's launcher reports. mha_bwd_workspace_size under-reports the dq_acc need
+  // (see the floor in ck_attn_bwd_workspace_size), and by how much depends on the kernel's
+  // kN0/tile shape, which varies by GPU arch. CK's own dq_acc zeroing only covers its
+  // reported extent, so convert_dq reduces the unzeroed [reported, floor) tail and dQ is
+  // not bitwise reproducible.
+  if(args.deterministic && ws_base != nullptr && ws_capacity > 0){
+    if(hipMemsetAsync(ws_base, 0, ws_capacity, stream) != hipSuccess){
+      throw std::runtime_error("ck_fused_attn bwd: hipMemsetAsync failed zeroing deterministic workspace.");
+    }
+  }
+
   float average_runtime = QOLA_NS(mha_bwd)(fmha_args, stream_config);
   if(average_runtime < 0){
     //TODO: better error out system
