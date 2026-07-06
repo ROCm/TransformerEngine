@@ -846,45 +846,24 @@ class SequenceDescriptor:
             # Generate the default pos for THD and BSHD non-reordered segment_ids
             def generate_default_pos(seg_ids):
                 if is_thd:
-                    batch_size, seq_size = seg_ids.shape
-                    # Assume that the first token belongs to a segment and is not a padded token
-                    first_is_segment = jnp.full((batch_size, 1), True, dtype=bool)
-                    # Get segment start positions
-                    segment_start = jnp.concatenate(
+                    # Per-segment position reset for packed (THD) sequences via a single
+                    # parallel cummax instead of per-row vmapped scans. The old
+                    # jax.vmap(jnp.maximum.accumulate) lowered to a sequential scan whose
+                    # cost grew with seqlen (hundreds of ms at 64k), dominating the kernel.
+                    seq_size = seg_ids.shape[-1]
+                    idx = jnp.arange(seq_size, dtype=seg_ids.dtype)
+                    is_start = jnp.concatenate(
                         [
-                            first_is_segment,
+                            jnp.ones((seg_ids.shape[0], 1), dtype=bool),
                             (seg_ids[..., 1:] != seg_ids[..., :-1]) & (seg_ids[..., 1:] != 0),
                         ],
                         axis=-1,
                     )
-                    # Get offset for location where new segment starts
-                    segment_start_idx = jax.vmap(lambda row: jnp.arange(row.size) * row)(
-                        segment_start
+                    seg_start = jax.lax.cummax(
+                        jnp.where(is_start, idx, 0), axis=seg_ids.ndim - 1
                     )
-                    segment_start_offsets = jax.vmap(jnp.maximum.accumulate)(segment_start_idx)
-
-                    # Get the last non-zero index - after this everything is padding
-                    # (B,)
-                    last_nonzero_idx = jax.vmap(
-                        lambda segids_row: jnp.max(
-                            jnp.where(segids_row != 0, jnp.arange(seq_size), -1)
-                        )
-                    )(seg_ids)
-                    seg_pos_no_thd = jnp.arange(seq_size)
-                    # Get a mask which can be used to zero out all the padding at the end (after the non-zero index)
-                    mask = seg_pos_no_thd <= last_nonzero_idx[:, None]
-
-                    # Get the unmasked seg_pos for the THD sequence
-                    seg_pos = (
-                        jnp.broadcast_to(jnp.arange(seq_size), seg_ids.shape)
-                        - segment_start_offsets
-                    )
-
-                    # Use the mask to zero out the padding at the end (after the non-zero index)
-                    segment_pos = jax.vmap(
-                        lambda pos_row, mask_row: jnp.where(mask_row, pos_row, 0)
-                    )(seg_pos, mask)
-                    return segment_pos
+                    pos = idx - seg_start
+                    return jnp.where(seg_ids != 0, pos, 0)
 
                 seqlen = seg_ids.shape[-1]
                 return jnp.broadcast_to(jnp.arange(seqlen), seg_ids.shape)
