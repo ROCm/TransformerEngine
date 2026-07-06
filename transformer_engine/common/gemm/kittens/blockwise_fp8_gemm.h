@@ -27,8 +27,6 @@ enum KittensScalingMode {
 };
 #endif  // KITTENS_SCALING_MODE_DEFINED
 
-// Single public entry point for HipKittens blockwise FP8 GEMM. Internally
-// dispatches by runtime GPU arch to the gfx942 (CDNA3) or gfx950 (CDNA4) impl.
 // activation 1D scale [K/128, M]; weight scale selected by b_scaling_mode:
 //   KITTENS_BLOCK_SCALING_2D -> 2D scale [N/128, K/128]  (1d2d)
 //   KITTENS_BLOCK_SCALING_1D -> 1D scale [K/128, N]      (1d1d)

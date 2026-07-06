@@ -3,15 +3,6 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 
-// Unified host launcher for HipKittens blockwise FP8 GEMM. Pure host code
-// (no HipKittens headers) so it can see both the cdna3 (gfx942) and cdna4
-// (gfx950) implementations, which are built against different HipKittens
-// submodule branches. Dispatch is by runtime GPU arch.
-//
-// When the cdna3/cdna4 HipKittens branches are eventually merged upstream,
-// the two impls can collapse into one and this launcher becomes a thin
-// pass-through (or disappears) without touching the rocm_gemm.cu call site.
-
 #include <hip/hip_runtime.h>
 #include <cstring>
 #include <cstdio>
@@ -48,11 +39,7 @@ void kittens_blockwise_fp8_gemm(
     const bool has_beta = (c_in != nullptr);
 
     if (current_device_is_gfx950()) {
-        // CDNA4 impl currently supports TE 1Dx2D, e4m3 x e4m3, bf16 out, TN,
-        // 256-aligned M/N/K, no epilogue. It returns false for anything else.
-        // We must NOT fall back to the cdna3 kernel here: cdna3 is compiled
-        // #if __gfx942__ only, so on gfx950 its body is empty (would silently
-        // produce wrong results). Unsupported gfx950 cases raise instead.
+        // No cdna3 fallback on gfx950: cdna3 is #if __gfx942__ only (empty body -> wrong results); raise instead.
         bool handled = kittens_blockwise_fp8_gemm_impl_cdna4(
             A, B, C, scale_A, scale_B, M, N, K,
             a_dtype, b_dtype, a_scaling_mode, b_scaling_mode, out_dtype,
@@ -70,7 +57,7 @@ void kittens_blockwise_fp8_gemm(
         return;
     }
 
-    kittens_blockwise_fp8_gemm_impl_cdna3(
+    blockwise_gfx942::kittens_blockwise_fp8_gemm_impl_cdna3(
         A, B, C, scale_A, scale_B, M, N, K, transa, transb,
         a_dtype, b_dtype, a_scaling_mode, b_scaling_mode, out_dtype,
         bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta, stream);

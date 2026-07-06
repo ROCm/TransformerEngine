@@ -3,15 +3,12 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 
-// Device-side helpers for the cdna3 (gfx942) blockwise FP8 GEMM kernel.
-// Include AFTER "kittens.cuh", "../../../util/math.h", `using namespace kittens;`
-// and the BLOCK_*/REG_*/SCALE_BLOCK/NUM_THREADS constants — this header relies
-// on those already being in scope. Include only from the cdna3 kernel .cpp,
-// never from host code (it depends on HipKittens device types).
-
 #pragma once
 
-// --- SGPR/reg scale helpers ---
+#include <type_traits>
+#include "kittens.cuh"
+#include "../../../util/math.h"
+
 typedef int int32x4_lds_t __attribute__((ext_vector_type(4)));
 struct __attribute__((packed)) buf_res { const void *ptr; uint32_t range; uint32_t config; };
 __device__ inline int32x4_lds_t make_buf_res(const void *ptr, uint32_t size) {
@@ -28,7 +25,7 @@ extern "C" __device__ float
 llvm_amdgcn_raw_buffer_load_f32(int32x4_lds_t rsrc, int voffset, int soffset,
                                 int aux) __asm("llvm.amdgcn.raw.buffer.load.f32");
 
-// SRD range_bytes bounds OOB rows to 0 (partial-M safe).
+
 template <int HEIGHT>
 __device__ inline void load_scale_global_reg(float (&sa_reg)[HEIGHT * 4], const float *sa_base,
                                              int local_m_base, uint32_t range_bytes) {
@@ -43,8 +40,6 @@ __device__ inline void load_scale_global_reg(float (&sa_reg)[HEIGHT * 4], const 
     }
 }
 
-// 1D1D scale_B: per-N vector (lane-dependent col), so VGPR not SGPR.
-// SRD range bounds OOB cols to 0 (partial-N safe).
 template <int WIDTH>
 __device__ inline void load_scaleB_global_reg(float (&sb_reg)[WIDTH], const float *sb_base,
                                               int local_n_base, uint32_t range_bytes) {
@@ -76,7 +71,7 @@ __device__ inline float rtne_cast_roundtrip(float v) {
     if constexpr (std::is_same_v<OType, float>) {
         return v;
     } else {
-        return static_cast<float>(base_types::convertor<OType, float>::convert(rtne_bias(v)));
+        return static_cast<float>(kittens::base_types::convertor<OType, float>::convert(rtne_bias(v)));
     }
 }
 
@@ -111,10 +106,10 @@ __device__ inline void store_masked(OType *c_ptr, const AccType &Cacc,
             const float v1 = Cacc.tiles[i][j].data[0].y;
             const float v2 = Cacc.tiles[i][j].data[1].x;
             const float v3 = Cacc.tiles[i][j].data[1].y;
-            if (m0 + 0 < M) c_ptr[(m0 + 0) * N + col] = base_types::convertor<OType, float>::convert(v0);
-            if (m0 + 1 < M) c_ptr[(m0 + 1) * N + col] = base_types::convertor<OType, float>::convert(v1);
-            if (m0 + 2 < M) c_ptr[(m0 + 2) * N + col] = base_types::convertor<OType, float>::convert(v2);
-            if (m0 + 3 < M) c_ptr[(m0 + 3) * N + col] = base_types::convertor<OType, float>::convert(v3);
+            if (m0 + 0 < M) c_ptr[(m0 + 0) * N + col] = kittens::base_types::convertor<OType, float>::convert(v0);
+            if (m0 + 1 < M) c_ptr[(m0 + 1) * N + col] = kittens::base_types::convertor<OType, float>::convert(v1);
+            if (m0 + 2 < M) c_ptr[(m0 + 2) * N + col] = kittens::base_types::convertor<OType, float>::convert(v2);
+            if (m0 + 3 < M) c_ptr[(m0 + 3) * N + col] = kittens::base_types::convertor<OType, float>::convert(v3);
         }
     }
 }
@@ -165,7 +160,7 @@ __device__ inline void apply_epilogue(
     }
 }
 
-template <typename ST, typename GL>
+template <int NUM_THREADS, typename ST, typename GL>
 __device__ inline void load_tile_masked(ST &dst, const GL &src, int row_blk,
                                         int k_blk, int row_dim, int K) {
     using T = typename ST::dtype;
@@ -186,37 +181,15 @@ __device__ inline void load_tile_masked(ST &dst, const GL &src, int row_blk,
         const int col = (idx % memcpy_per_row) * elem_per_memcpy;
         float4 v = {0.f, 0.f, 0.f, 0.f};
         if (row_base + row < row_dim && k_base + col < K)
-            v = load_global_vec4((float4 *)(src_ptr + (row * row_stride + col)));
-        store_shared_vec(dst.idx(dst_ptr, {row, col}), {v.x, v.y});
-        store_shared_vec(dst.idx(dst_ptr, {row, col + elem_per_half_memcpy}), {v.z, v.w});
+            v = kittens::load_global_vec4((float4 *)(src_ptr + (row * row_stride + col)));
+        kittens::store_shared_vec(dst.idx(dst_ptr, {row, col}), {v.x, v.y});
+        kittens::store_shared_vec(dst.idx(dst_ptr, {row, col + elem_per_half_memcpy}), {v.z, v.w});
     }
     asm volatile("s_waitcnt lgkmcnt(0)");
 }
 
 template <typename AccType>
 __device__ inline void apply_block_scale_1d2d(
-    AccType &Cacc, const AccType &partial, const float *sa_lds, float sb, int local_m_base) {
-    const int lane = kittens::laneid();
-    const int row_g = 4 * (lane / 16);
-    #pragma unroll
-    for (int i = 0; i < AccType::height; i++) {
-        const int m0 = local_m_base + i * 16 + row_g;
-        const float s0 = sa_lds[m0 + 0] * sb;
-        const float s1 = sa_lds[m0 + 1] * sb;
-        const float s2 = sa_lds[m0 + 2] * sb;
-        const float s3 = sa_lds[m0 + 3] * sb;
-        #pragma unroll
-        for (int j = 0; j < AccType::width; j++) {
-            Cacc.tiles[i][j].data[0].x += partial.tiles[i][j].data[0].x * s0;
-            Cacc.tiles[i][j].data[0].y += partial.tiles[i][j].data[0].y * s1;
-            Cacc.tiles[i][j].data[1].x += partial.tiles[i][j].data[1].x * s2;
-            Cacc.tiles[i][j].data[1].y += partial.tiles[i][j].data[1].y * s3;
-        }
-    }
-}
-
-template <typename AccType>
-__device__ inline void apply_block_scale_1d2d_reg(
     AccType &Cacc, const AccType &partial, const float (&sa_reg)[AccType::height * 4], float sb) {
     #pragma unroll
     for (int i = 0; i < AccType::height; i++) {
@@ -236,31 +209,6 @@ __device__ inline void apply_block_scale_1d2d_reg(
 
 template <typename AccType>
 __device__ inline void apply_block_scale_1d1d(
-    AccType &Cacc, const AccType &partial, const float *sa_lds, const float *sb_lds,
-        int local_m_base, int local_n_base) {
-    const int lane = kittens::laneid();
-    const int row_g = 4 * (lane / 16);
-    const int col_l = lane % 16;
-    #pragma unroll
-    for (int i = 0; i < AccType::height; i++) {
-        const int m0 = local_m_base + i * 16 + row_g;
-        const float a0 = sa_lds[m0 + 0];
-        const float a1 = sa_lds[m0 + 1];
-        const float a2 = sa_lds[m0 + 2];
-        const float a3 = sa_lds[m0 + 3];
-        #pragma unroll
-        for (int j = 0; j < AccType::width; j++) {
-            const float sb = sb_lds[local_n_base + j * 16 + col_l];
-            Cacc.tiles[i][j].data[0].x += partial.tiles[i][j].data[0].x * (a0 * sb);
-            Cacc.tiles[i][j].data[0].y += partial.tiles[i][j].data[0].y * (a1 * sb);
-            Cacc.tiles[i][j].data[1].x += partial.tiles[i][j].data[1].x * (a2 * sb);
-            Cacc.tiles[i][j].data[1].y += partial.tiles[i][j].data[1].y * (a3 * sb);
-        }
-    }
-}
-
-template <typename AccType>
-__device__ inline void apply_block_scale_1d1d_reg(
     AccType &Cacc, const AccType &partial, const float (&sa_reg)[AccType::height * 4],
     const float (&sb_reg)[AccType::width]) {
     #pragma unroll

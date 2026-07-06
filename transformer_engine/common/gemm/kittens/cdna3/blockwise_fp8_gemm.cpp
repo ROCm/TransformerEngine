@@ -7,24 +7,26 @@
 #include "kittens.cuh"
 #include "blockwise_fp8_gemm.h"
 #include "../../../util/math.h"
-using namespace kittens;
 
+namespace blockwise_gfx942 {
+
+#include "blockwise_fp8_gemm_device.cuh"
+
+constexpr int NUM_WARPS   = 8;
 constexpr int BLOCK_M     = 128;
 constexpr int BLOCK_N     = 256;
-constexpr int BLOCK_K     = 128; // GEMM K dimension block size
+constexpr int BLOCK_K     = 128;
 constexpr int REG_M       = BLOCK_M / 4;
 constexpr int REG_N       = BLOCK_N / 4;
 constexpr int MFMA_K      = 32;
 constexpr int SCALE_BLOCK = 128; // blockwise scale granularity
+constexpr int NUM_THREADS = NUM_WARPS * kittens::WARP_THREADS;
 
-#define NUM_WARPS 8
-#define NUM_THREADS (kittens::WARP_THREADS * NUM_WARPS)
-
-template <typename T> using _gl_A_t = gl<T, -1, -1, -1, -1>;
-template <typename T> using _gl_B_t = gl<T, -1, -1, -1, -1>;
-template <typename OType> using _gl_C_t = gl<OType, -1, -1, -1, -1>;
-using _gl_SA = gl<float,   -1, -1, -1, -1>;
-using _gl_SB = gl<float,   -1, -1, -1, -1>;
+template <typename T> using _gl_A_t = kittens::gl<T, -1, -1, -1, -1>;
+template <typename T> using _gl_B_t = kittens::gl<T, -1, -1, -1, -1>;
+template <typename OType> using _gl_C_t = kittens::gl<OType, -1, -1, -1, -1>;
+using _gl_SA = kittens::gl<float,   -1, -1, -1, -1>;
+using _gl_SB = kittens::gl<float,   -1, -1, -1, -1>;
 
 using G = kittens::group<NUM_WARPS>;
 
@@ -50,24 +52,22 @@ struct micro_globals {
     size_t dynamic_shared_memory() { return 49152; }
 };
 
-#include "blockwise_fp8_gemm_device.cuh"
 template <typename AType, typename BType, typename OType, bool IS_PARTIAL_M, bool IS_PARTIAL_N,
           bool HAS_BIAS = false, bool HAS_GELU = false, bool HAS_BETA = false,
           bool IS_PARTIAL_K = false>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
-#if defined(__gfx942__)
-    extern __shared__ alignment_dummy __shm[];
-    shared_allocator al((int*)&__shm[0]);
-    st<AType, BLOCK_M, BLOCK_K> (&As) = al.allocate<st<AType, BLOCK_M, BLOCK_K>>();
-    st<BType, BLOCK_N, BLOCK_K> (&Bs) = al.allocate<st<BType, BLOCK_N, BLOCK_K>>();
+    extern __shared__ kittens::alignment_dummy __shm[];
+    kittens::shared_allocator al((int*)&__shm[0]);
+    kittens::st<AType, BLOCK_M, BLOCK_K> (&As) = al.allocate<kittens::st<AType, BLOCK_M, BLOCK_K>>();
+    kittens::st<BType, BLOCK_N, BLOCK_K> (&Bs) = al.allocate<kittens::st<BType, BLOCK_N, BLOCK_K>>();
     __shared__ float smem_sa[2][BLOCK_M];
 
-    rt<AType, REG_M, MFMA_K> at[5];
-    rt<BType, REG_N, MFMA_K> bt[3];
-    rt_fl<REG_M, REG_N, ducks::rt_layout::col> C_accum[2];
-    rt_fl<REG_M, REG_N, ducks::rt_layout::col> partial[2];
-    for (int i = 0; i < 2; i++) { zero(C_accum[i]); }
+    kittens::rt<AType, REG_M, MFMA_K> at[5];
+    kittens::rt<BType, REG_N, MFMA_K> bt[3];
+    kittens::rt_fl<REG_M, REG_N, kittens::ducks::rt_layout::col> C_accum[2];
+    kittens::rt_fl<REG_M, REG_N, kittens::ducks::rt_layout::col> partial[2];
+    for (int i = 0; i < 2; i++) { kittens::zero(C_accum[i]); }
 
     const int M = (int)g.c.rows();
     const int N = (int)g.c.cols();
@@ -76,10 +76,10 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
     int wgid = (blockIdx.y * gridDim.x) + blockIdx.x;
     const int NUM_WGS = gridDim.x * gridDim.y;
     constexpr int WGM = 4;
-    wgid = chiplet_transform_chunked(wgid, NUM_WGS, NUM_XCDS, WGM*WGM);
+    wgid = kittens::chiplet_transform_chunked(wgid, NUM_WGS, kittens::NUM_XCDS, WGM*WGM);
     
-    const int num_pid_m = ceil_div(M, BLOCK_M);
-    const int num_pid_n = ceil_div(N, BLOCK_N);
+    const int num_pid_m = kittens::ceil_div(M, BLOCK_M);
+    const int num_pid_n = kittens::ceil_div(N, BLOCK_N);
     int num_wgid_in_group = WGM * num_pid_n;
     int group_id = wgid / num_wgid_in_group;
     int first_pid_m = group_id * WGM;
@@ -96,12 +96,12 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
     const int warp_row = warp_id / 4;
     const int warp_col = warp_id % 4;
 
-    const int num_k_steps = ceil_div(K, BLOCK_K);
+    const int num_k_steps = kittens::ceil_div(K, BLOCK_K);
     const bool is_k_partial = IS_PARTIAL_K && (K % BLOCK_K != 0);
 
     const float *sa_block = g.scale_a.raw_ptr + row * BLOCK_M;
 
-    const int n_scale_blocks = ceil_div(N, SCALE_BLOCK);
+    const int n_scale_blocks = kittens::ceil_div(N, SCALE_BLOCK);
     const int sb_block0 = col * (BLOCK_N / SCALE_BLOCK) + warp_col / 2;
     const bool sb_valid = (!is_last_n) || (sb_block0 < n_scale_blocks);
     const float *sb_base = g.scale_b.raw_ptr + (sb_valid ? sb_block0 : 0) * num_k_steps;
@@ -109,13 +109,13 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
     const int local_m0 = warp_row * REG_M;
     const int local_m1 = (warp_row + 2) * REG_M;
     const int tid = threadIdx.x;
-    // scale_A SRD: bounds OOB rows (partial-M) to 0 automatically.
+
     const uint32_t sa_range = (uint32_t)((M - row * BLOCK_M) * 4);
 
     const bool is_first_k_partial = is_k_partial && (num_k_steps == 1);
-    if (is_first_k_partial || is_last_m) load_tile_masked(As, g.a, row, 0, M, K);
+    if (is_first_k_partial || is_last_m) load_tile_masked<NUM_THREADS>(As, g.a, row, 0, M, K);
     else                         G::load(As, g.a, {0, 0, row, 0});
-    if (is_first_k_partial || is_last_n) load_tile_masked(Bs, g.b, col, 0, N, K);
+    if (is_first_k_partial || is_last_n) load_tile_masked<NUM_THREADS>(Bs, g.b, col, 0, N, K);
     else                         G::load(Bs, g.b, {0, 0, col, 0});
 
     // Prologue
@@ -135,7 +135,7 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
         float4 a_buffer_next[A_ELEMS_PER_THREAD * sizeof(AType) / sizeof(float4)];
         float4 b_buffer_next[B_ELEMS_PER_THREAD * sizeof(BType) / sizeof(float4)];
 
-        zero(partial[0]); zero(partial[1]);
+        kittens::zero(partial[0]); kittens::zero(partial[1]);
 
         const bool is_next_k_partial = is_k_partial && (k_step + 1 == num_k_steps - 1);
         float sa_reg0[REG_M / 16 * 4];
@@ -143,64 +143,64 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
 
         // Cluster 0
         if (!is_last_n && !is_next_k_partial)
-            load_global_to_register_buffer<2, false, NUM_THREADS>(b_buffer_next, B_ELEMS_PER_THREAD, g.b, {0, 0, col, k_step + 1}, Bs);
+            kittens::load_global_to_register_buffer<2, false, NUM_THREADS>(b_buffer_next, B_ELEMS_PER_THREAD, g.b, {0, 0, col, k_step + 1}, Bs);
         float sb_next;
-        load(at[0], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 0}));
-        load(at[1], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 0}));
-        load(bt[0], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 0}));
+        kittens::load(at[0], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 0}));
+        kittens::load(at[1], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 0}));
+        kittens::load(bt[0], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 0}));
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 1
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt(partial[0], at[0], bt[0], partial[0]);
-        mma_ABt(partial[1], at[1], bt[0], partial[1]);
+        kittens::mma_ABt(partial[0], at[0], bt[0], partial[0]);
+        kittens::mma_ABt(partial[1], at[1], bt[0], partial[1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 2
-        load(bt[1], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 1}));
-        load(at[2], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 1}));
-        load(at[3], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 1}));
-        load(bt[0], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 2}));
-        load(at[0], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 2}));
+        kittens::load(bt[1], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 1}));
+        kittens::load(at[2], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 1}));
+        kittens::load(at[3], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 1}));
+        kittens::load(bt[0], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 2}));
+        kittens::load(at[0], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 2}));
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 3
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt(partial[0], at[2], bt[1], partial[0]);
-        mma_ABt(partial[1], at[3], bt[1], partial[1]);
+        kittens::mma_ABt(partial[0], at[2], bt[1], partial[0]);
+        kittens::mma_ABt(partial[1], at[3], bt[1], partial[1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 4
         if (!is_last_m && !is_next_k_partial)
-            load_global_to_register_buffer<2, false, NUM_THREADS>(a_buffer_next, A_ELEMS_PER_THREAD, g.a, {0, 0, row, k_step + 1}, As);
-        load(at[1], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 2}));
-        load(bt[2], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 3}));
-        load(at[4], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 3}));
-        load(at[3], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 3}));
+            kittens::load_global_to_register_buffer<2, false, NUM_THREADS>(a_buffer_next, A_ELEMS_PER_THREAD, g.a, {0, 0, row, k_step + 1}, As);
+        kittens::load(at[1], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 2}));
+        kittens::load(bt[2], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 3}));
+        kittens::load(at[4], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 3}));
+        kittens::load(at[3], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 3}));
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 5
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt(partial[0], at[0], bt[0], partial[0]);
-        mma_ABt(partial[1], at[1], bt[0], partial[1]);
+        kittens::mma_ABt(partial[0], at[0], bt[0], partial[0]);
+        kittens::mma_ABt(partial[1], at[1], bt[0], partial[1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 6
         asm volatile("s_waitcnt lgkmcnt(0)");
-        if (is_next_k_partial || is_last_m) load_tile_masked(As, g.a, row, k_step + 1, M, K);
-        else                         store_register_buffer_to_shared<NUM_THREADS>(As, a_buffer_next);
-        if (is_next_k_partial || is_last_n) load_tile_masked(Bs, g.b, col, k_step + 1, N, K);
+        if (is_next_k_partial || is_last_m) load_tile_masked<NUM_THREADS>(As, g.a, row, k_step + 1, M, K);
+        else                         kittens::store_register_buffer_to_shared<NUM_THREADS>(As, a_buffer_next);
+        if (is_next_k_partial || is_last_n) load_tile_masked<NUM_THREADS>(Bs, g.b, col, k_step + 1, N, K);
         load_scale_global_reg<REG_M / 16>(sa_reg0, sa_block + k_step * M, local_m0, sa_range);
         load_scale_global_reg<REG_M / 16>(sa_reg1, sa_block + k_step * M, local_m1, sa_range);
         sb_next = llvm_amdgcn_s_buffer_load_f32(sb_srsrc, (k_step + 1) * 4, 0);
@@ -209,21 +209,21 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
 
         // Cluster 7
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt(partial[0], at[4], bt[2], partial[0]);
-        mma_ABt(partial[1], at[3], bt[2], partial[1]);
+        kittens::mma_ABt(partial[0], at[4], bt[2], partial[0]);
+        kittens::mma_ABt(partial[1], at[3], bt[2], partial[1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 8
         if (!(is_next_k_partial || is_last_n))
-            store_register_buffer_to_shared<NUM_THREADS>(Bs, b_buffer_next);
+            kittens::store_register_buffer_to_shared<NUM_THREADS>(Bs, b_buffer_next);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 9
-        apply_block_scale_1d2d_reg(C_accum[0], partial[0], sa_reg0, sb_cur);
-        apply_block_scale_1d2d_reg(C_accum[1], partial[1], sa_reg1, sb_cur);
+        apply_block_scale_1d2d(C_accum[0], partial[0], sa_reg0, sb_cur);
+        apply_block_scale_1d2d(C_accum[1], partial[1], sa_reg1, sb_cur);
         sb_cur = sb_next;
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -231,56 +231,56 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
     }
 
     // Epilogue
-    zero(partial[0]); zero(partial[1]);
+    kittens::zero(partial[0]); kittens::zero(partial[1]);
     __builtin_amdgcn_sched_barrier(0);
-    load(bt[0], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 0}));
-    load(at[0], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 0}));
-    load(at[1], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 0}));
+    kittens::load(bt[0], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 0}));
+    kittens::load(at[0], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 0}));
+    kittens::load(at[1], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 0}));
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
     __builtin_amdgcn_s_setprio(1);
-    mma_ABt(partial[0], at[0], bt[0], partial[0]);
-    mma_ABt(partial[1], at[1], bt[0], partial[1]);
+    kittens::mma_ABt(partial[0], at[0], bt[0], partial[0]);
+    kittens::mma_ABt(partial[1], at[1], bt[0], partial[1]);
     __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
-    load(bt[1], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 1}));
-    load(at[2], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 1}));
-    load(at[3], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 1}));
+    kittens::load(bt[1], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 1}));
+    kittens::load(at[2], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 1}));
+    kittens::load(at[3], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 1}));
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
     __builtin_amdgcn_s_setprio(1);
-    mma_ABt(partial[0], at[2], bt[1], partial[0]);
-    mma_ABt(partial[1], at[3], bt[1], partial[1]);
+    kittens::mma_ABt(partial[0], at[2], bt[1], partial[0]);
+    kittens::mma_ABt(partial[1], at[3], bt[1], partial[1]);
     __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
-    load(bt[0], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 2}));
-    load(at[0], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 2}));
-    load(at[1], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 2}));
-    load(bt[1], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 3}));
-    load(at[2], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 3}));
-    load(at[3], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 3}));
+    kittens::load(bt[0], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 2}));
+    kittens::load(at[0], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 2}));
+    kittens::load(at[1], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 2}));
+    kittens::load(bt[1], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 3}));
+    kittens::load(at[2], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 3}));
+    kittens::load(at[3], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 3}));
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
     __builtin_amdgcn_s_setprio(1);
-    mma_ABt(partial[0], at[0], bt[0], partial[0]);
-    mma_ABt(partial[1], at[1], bt[0], partial[1]);
+    kittens::mma_ABt(partial[0], at[0], bt[0], partial[0]);
+    kittens::mma_ABt(partial[1], at[1], bt[0], partial[1]);
     __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
     __builtin_amdgcn_s_setprio(1);
-    mma_ABt(partial[0], at[2], bt[1], partial[0]);
-    mma_ABt(partial[1], at[3], bt[1], partial[1]);
+    kittens::mma_ABt(partial[0], at[2], bt[1], partial[0]);
+    kittens::mma_ABt(partial[1], at[3], bt[1], partial[1]);
     __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -291,8 +291,8 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
         float sa_reg1[REG_M / 16 * 4];
         load_scale_global_reg<REG_M / 16>(sa_reg0, sa_block + last * M, local_m0, sa_range);
         load_scale_global_reg<REG_M / 16>(sa_reg1, sa_block + last * M, local_m1, sa_range);
-        apply_block_scale_1d2d_reg(C_accum[0], partial[0], sa_reg0, sb_cur);
-        apply_block_scale_1d2d_reg(C_accum[1], partial[1], sa_reg1, sb_cur);
+        apply_block_scale_1d2d(C_accum[0], partial[0], sa_reg0, sb_cur);
+        apply_block_scale_1d2d(C_accum[1], partial[1], sa_reg1, sb_cur);
     }
 
     if (warp_row == 0) {
@@ -308,7 +308,7 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
             g.bias, g.bias_dtype, g.gelu_aux, g.gelu_aux_dtype, g.c_in, g.beta);
     }
 
-    if constexpr (std::is_same_v<OType, bf16>) {
+    if constexpr (std::is_same_v<OType, kittens::bf16>) {
         apply_rtne_bias(C_accum[0]);
         apply_rtne_bias(C_accum[1]);
     }
@@ -316,10 +316,9 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
         store_masked(g.c.raw_ptr, C_accum[0], row * 4 + warp_row,     col * 4 + warp_col, M, N);
         store_masked(g.c.raw_ptr, C_accum[1], row * 4 + warp_row + 2, col * 4 + warp_col, M, N);
     } else {
-        store(g.c, C_accum[0], {0, 0, row * 4 + warp_row,     col * 4 + warp_col});
-        store(g.c, C_accum[1], {0, 0, row * 4 + warp_row + 2, col * 4 + warp_col});
+        kittens::store(g.c, C_accum[0], {0, 0, row * 4 + warp_row,     col * 4 + warp_col});
+        kittens::store(g.c, C_accum[1], {0, 0, row * 4 + warp_row + 2, col * 4 + warp_col});
     }
-#endif  // __gfx942__
 }
 
 template <typename AType, typename BType, typename OType, bool IS_PARTIAL_M, bool IS_PARTIAL_N,
@@ -327,17 +326,16 @@ template <typename AType, typename BType, typename OType, bool IS_PARTIAL_M, boo
           bool IS_PARTIAL_K = false>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
-#if defined(__gfx942__)
-    extern __shared__ alignment_dummy __shm[];
-    shared_allocator al((int*)&__shm[0]);
-    st<AType, BLOCK_M, BLOCK_K> (&As) = al.allocate<st<AType, BLOCK_M, BLOCK_K>>();
-    st<BType, BLOCK_N, BLOCK_K> (&Bs) = al.allocate<st<BType, BLOCK_N, BLOCK_K>>();
+    extern __shared__ kittens::alignment_dummy __shm[];
+    kittens::shared_allocator al((int*)&__shm[0]);
+    kittens::st<AType, BLOCK_M, BLOCK_K> (&As) = al.allocate<kittens::st<AType, BLOCK_M, BLOCK_K>>();
+    kittens::st<BType, BLOCK_N, BLOCK_K> (&Bs) = al.allocate<kittens::st<BType, BLOCK_N, BLOCK_K>>();
 
-    rt<AType, REG_M, MFMA_K> at[5];
-    rt<BType, REG_N, MFMA_K> bt[3];
-    rt_fl<REG_M, REG_N, ducks::rt_layout::col> C_accum[2];
-    rt_fl<REG_M, REG_N, ducks::rt_layout::col> partial[2];
-    for (int i = 0; i < 2; i++) { zero(C_accum[i]); }
+    kittens::rt<AType, REG_M, MFMA_K> at[5];
+    kittens::rt<BType, REG_N, MFMA_K> bt[3];
+    kittens::rt_fl<REG_M, REG_N, kittens::ducks::rt_layout::col> C_accum[2];
+    kittens::rt_fl<REG_M, REG_N, kittens::ducks::rt_layout::col> partial[2];
+    for (int i = 0; i < 2; i++) { kittens::zero(C_accum[i]); }
 
     const int M = (int)g.c.rows();
     const int N = (int)g.c.cols();
@@ -346,10 +344,10 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
     int wgid = (blockIdx.y * gridDim.x) + blockIdx.x;
     const int NUM_WGS = gridDim.x * gridDim.y;
     constexpr int WGM = 4;
-    wgid = chiplet_transform_chunked(wgid, NUM_WGS, NUM_XCDS, WGM*WGM);
+    wgid = kittens::chiplet_transform_chunked(wgid, NUM_WGS, kittens::NUM_XCDS, WGM*WGM);
 
-    const int num_pid_m = ceil_div(M, BLOCK_M);
-    const int num_pid_n = ceil_div(N, BLOCK_N);
+    const int num_pid_m = kittens::ceil_div(M, BLOCK_M);
+    const int num_pid_n = kittens::ceil_div(N, BLOCK_N);
     int num_wgid_in_group = WGM * num_pid_n;
     int group_id = wgid / num_wgid_in_group;
     int first_pid_m = group_id * WGM;
@@ -367,7 +365,7 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
     const int warp_row = warp_id / 4;
     const int warp_col = warp_id % 4;
 
-    const int num_k_steps = ceil_div(K, BLOCK_K);
+    const int num_k_steps = kittens::ceil_div(K, BLOCK_K);
     const bool is_k_partial = IS_PARTIAL_K && (K % BLOCK_K != 0);
 
     const float *sa_block = g.scale_a.raw_ptr + row * BLOCK_M;
@@ -378,15 +376,14 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
     const int local_m1 = (warp_row + 2) * REG_M;
     const int local_n  = warp_col * REG_N;
     const int tid = threadIdx.x;
-    // scale SRD ranges: bound OOB rows/cols (partial-M/N) to 0 automatically.
     const uint32_t sa_range = (uint32_t)((M - row * BLOCK_M) * 4);
     const uint32_t sb_range = (uint32_t)((N - sb_col0) * 4);
 
     // Prologue
     const bool is_first_k_partial = is_k_partial && (num_k_steps == 1);
-    if (is_first_k_partial || is_last_m) load_tile_masked(As, g.a, row, 0, M, K);
+    if (is_first_k_partial || is_last_m) load_tile_masked<NUM_THREADS>(As, g.a, row, 0, M, K);
     else                         G::load(As, g.a, {0, 0, row, 0});
-    if (is_first_k_partial || is_last_n) load_tile_masked(Bs, g.b, col, 0, N, K);
+    if (is_first_k_partial || is_last_n) load_tile_masked<NUM_THREADS>(Bs, g.b, col, 0, N, K);
     else                         G::load(Bs, g.b, {0, 0, col, 0});
     __builtin_amdgcn_s_barrier();
 
@@ -402,72 +399,72 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
         float4 a_buffer_next[A_ELEMS_PER_THREAD * sizeof(AType) / sizeof(float4)];
         float4 b_buffer_next[B_ELEMS_PER_THREAD * sizeof(BType) / sizeof(float4)];
 
-        zero(partial[0]); zero(partial[1]);
+        kittens::zero(partial[0]); kittens::zero(partial[1]);
 
         const bool is_next_k_partial = is_k_partial && (k_step + 1 == num_k_steps - 1);
 
         // Cluster 0
         if (!is_last_n && !is_next_k_partial)
-            load_global_to_register_buffer<2, false, NUM_THREADS>(b_buffer_next, B_ELEMS_PER_THREAD, g.b, {0, 0, col, k_step + 1}, Bs);
+            kittens::load_global_to_register_buffer<2, false, NUM_THREADS>(b_buffer_next, B_ELEMS_PER_THREAD, g.b, {0, 0, col, k_step + 1}, Bs);
         float sa_reg0[REG_M / 16 * 4];
         float sa_reg1[REG_M / 16 * 4];
         float sb_reg[REG_N / 16];
-        load(at[0], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 0}));
-        load(at[1], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 0}));
-        load(bt[0], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 0}));
+        kittens::load(at[0], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 0}));
+        kittens::load(at[1], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 0}));
+        kittens::load(bt[0], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 0}));
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 1
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt(partial[0], at[0], bt[0], partial[0]);
-        mma_ABt(partial[1], at[1], bt[0], partial[1]);
+        kittens::mma_ABt(partial[0], at[0], bt[0], partial[0]);
+        kittens::mma_ABt(partial[1], at[1], bt[0], partial[1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 2
-        load(bt[1], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 1}));
-        load(at[2], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 1}));
-        load(at[3], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 1}));
-        load(bt[0], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 2}));
-        load(at[0], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 2}));
+        kittens::load(bt[1], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 1}));
+        kittens::load(at[2], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 1}));
+        kittens::load(at[3], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 1}));
+        kittens::load(bt[0], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 2}));
+        kittens::load(at[0], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 2}));
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 3
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt(partial[0], at[2], bt[1], partial[0]);
-        mma_ABt(partial[1], at[3], bt[1], partial[1]);
+        kittens::mma_ABt(partial[0], at[2], bt[1], partial[0]);
+        kittens::mma_ABt(partial[1], at[3], bt[1], partial[1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 4
         if (!is_last_m && !is_next_k_partial)
-            load_global_to_register_buffer<2, false, NUM_THREADS>(a_buffer_next, A_ELEMS_PER_THREAD, g.a, {0, 0, row, k_step + 1}, As);
-        load(at[1], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 2}));
-        load(bt[2], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 3}));
-        load(at[4], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 3}));
-        load(at[3], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 3}));
+            kittens::load_global_to_register_buffer<2, false, NUM_THREADS>(a_buffer_next, A_ELEMS_PER_THREAD, g.a, {0, 0, row, k_step + 1}, As);
+        kittens::load(at[1], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 2}));
+        kittens::load(bt[2], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 3}));
+        kittens::load(at[4], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 3}));
+        kittens::load(at[3], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 3}));
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 5
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt(partial[0], at[0], bt[0], partial[0]);
-        mma_ABt(partial[1], at[1], bt[0], partial[1]);
+        kittens::mma_ABt(partial[0], at[0], bt[0], partial[0]);
+        kittens::mma_ABt(partial[1], at[1], bt[0], partial[1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 6
         asm volatile("s_waitcnt lgkmcnt(0)");
-        if (is_next_k_partial || is_last_m) load_tile_masked(As, g.a, row, k_step + 1, M, K);
-        else                         store_register_buffer_to_shared<NUM_THREADS>(As, a_buffer_next);
-        if (is_next_k_partial || is_last_n) load_tile_masked(Bs, g.b, col, k_step + 1, N, K);
+        if (is_next_k_partial || is_last_m) load_tile_masked<NUM_THREADS>(As, g.a, row, k_step + 1, M, K);
+        else                         kittens::store_register_buffer_to_shared<NUM_THREADS>(As, a_buffer_next);
+        if (is_next_k_partial || is_last_n) load_tile_masked<NUM_THREADS>(Bs, g.b, col, k_step + 1, N, K);
         load_scale_global_reg<REG_M / 16>(sa_reg0, sa_block + k_step * M, local_m0, sa_range);
         load_scale_global_reg<REG_M / 16>(sa_reg1, sa_block + k_step * M, local_m1, sa_range);
         load_scaleB_global_reg<REG_N / 16>(sb_reg, sb_block + k_step * N, local_n, sb_range);
@@ -476,77 +473,77 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
 
         // Cluster 7
         __builtin_amdgcn_s_setprio(1);
-        mma_ABt(partial[0], at[4], bt[2], partial[0]);
-        mma_ABt(partial[1], at[3], bt[2], partial[1]);
+        kittens::mma_ABt(partial[0], at[4], bt[2], partial[0]);
+        kittens::mma_ABt(partial[1], at[3], bt[2], partial[1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 8
         if (!(is_next_k_partial || is_last_n))
-            store_register_buffer_to_shared<NUM_THREADS>(Bs, b_buffer_next);
+            kittens::store_register_buffer_to_shared<NUM_THREADS>(Bs, b_buffer_next);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 9
-        apply_block_scale_1d1d_reg(C_accum[0], partial[0], sa_reg0, sb_reg);
-        apply_block_scale_1d1d_reg(C_accum[1], partial[1], sa_reg1, sb_reg);
+        apply_block_scale_1d1d(C_accum[0], partial[0], sa_reg0, sb_reg);
+        apply_block_scale_1d1d(C_accum[1], partial[1], sa_reg1, sb_reg);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
     }
 
     // Epilogue
-    zero(partial[0]); zero(partial[1]);
+    kittens::zero(partial[0]); kittens::zero(partial[1]);
     __builtin_amdgcn_sched_barrier(0);
-    load(bt[0], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 0}));
-    load(at[0], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 0}));
-    load(at[1], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 0}));
+    kittens::load(bt[0], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 0}));
+    kittens::load(at[0], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 0}));
+    kittens::load(at[1], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 0}));
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
     __builtin_amdgcn_s_setprio(1);
-    mma_ABt(partial[0], at[0], bt[0], partial[0]);
-    mma_ABt(partial[1], at[1], bt[0], partial[1]);
+    kittens::mma_ABt(partial[0], at[0], bt[0], partial[0]);
+    kittens::mma_ABt(partial[1], at[1], bt[0], partial[1]);
     __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
-    load(bt[1], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 1}));
-    load(at[2], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 1}));
-    load(at[3], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 1}));
+    kittens::load(bt[1], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 1}));
+    kittens::load(at[2], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 1}));
+    kittens::load(at[3], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 1}));
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
     __builtin_amdgcn_s_setprio(1);
-    mma_ABt(partial[0], at[2], bt[1], partial[0]);
-    mma_ABt(partial[1], at[3], bt[1], partial[1]);
+    kittens::mma_ABt(partial[0], at[2], bt[1], partial[0]);
+    kittens::mma_ABt(partial[1], at[3], bt[1], partial[1]);
     __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
-    load(bt[0], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 2}));
-    load(at[0], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 2}));
-    load(at[1], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 2}));
-    load(bt[1], subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 3}));
-    load(at[2], subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 3}));
-    load(at[3], subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 3}));
+    kittens::load(bt[0], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 2}));
+    kittens::load(at[0], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 2}));
+    kittens::load(at[1], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 2}));
+    kittens::load(bt[1], kittens::subtile_inplace<REG_N, MFMA_K>(Bs, {warp_col, 3}));
+    kittens::load(at[2], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row, 3}));
+    kittens::load(at[3], kittens::subtile_inplace<REG_M, MFMA_K>(As, {warp_row + 2, 3}));
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
     __builtin_amdgcn_s_setprio(1);
-    mma_ABt(partial[0], at[0], bt[0], partial[0]);
-    mma_ABt(partial[1], at[1], bt[0], partial[1]);
+    kittens::mma_ABt(partial[0], at[0], bt[0], partial[0]);
+    kittens::mma_ABt(partial[1], at[1], bt[0], partial[1]);
     __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
     __builtin_amdgcn_s_setprio(1);
-    mma_ABt(partial[0], at[2], bt[1], partial[0]);
-    mma_ABt(partial[1], at[3], bt[1], partial[1]);
+    kittens::mma_ABt(partial[0], at[2], bt[1], partial[0]);
+    kittens::mma_ABt(partial[1], at[3], bt[1], partial[1]);
     __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -559,8 +556,8 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
         load_scale_global_reg<REG_M / 16>(sa_reg0, sa_block + last * M, local_m0, sa_range);
         load_scale_global_reg<REG_M / 16>(sa_reg1, sa_block + last * M, local_m1, sa_range);
         load_scaleB_global_reg<REG_N / 16>(sb_reg, sb_block + last * N, local_n, sb_range);
-        apply_block_scale_1d1d_reg(C_accum[0], partial[0], sa_reg0, sb_reg);
-        apply_block_scale_1d1d_reg(C_accum[1], partial[1], sa_reg1, sb_reg);
+        apply_block_scale_1d1d(C_accum[0], partial[0], sa_reg0, sb_reg);
+        apply_block_scale_1d1d(C_accum[1], partial[1], sa_reg1, sb_reg);
     }
 
     if (warp_row == 0) {
@@ -576,7 +573,7 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
             g.bias, g.bias_dtype, g.gelu_aux, g.gelu_aux_dtype, g.c_in, g.beta);
     }
 
-    if constexpr (std::is_same_v<OType, bf16>) {
+    if constexpr (std::is_same_v<OType, kittens::bf16>) {
         apply_rtne_bias(C_accum[0]);
         apply_rtne_bias(C_accum[1]);
     }
@@ -584,10 +581,9 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
         store_masked(g.c.raw_ptr, C_accum[0], row * 4 + warp_row,     col * 4 + warp_col, M, N);
         store_masked(g.c.raw_ptr, C_accum[1], row * 4 + warp_row + 2, col * 4 + warp_col, M, N);
     } else {
-        store(g.c, C_accum[0], {0, 0, row * 4 + warp_row,     col * 4 + warp_col});
-        store(g.c, C_accum[1], {0, 0, row * 4 + warp_row + 2, col * 4 + warp_col});
+        kittens::store(g.c, C_accum[0], {0, 0, row * 4 + warp_row,     col * 4 + warp_col});
+        kittens::store(g.c, C_accum[1], {0, 0, row * 4 + warp_row + 2, col * 4 + warp_col});
     }
-#endif  // __gfx942__
 }
 
 template <bool IS_1D2D, typename AType, typename BType, typename OType,
@@ -647,8 +643,8 @@ void kittens_blockwise_fp8_gemm_impl_cdna3(
     const void *c_in, float beta,
     hipStream_t stream) {
 
-    // Kernel body uses the swapped convention (kernel-A=activation/1D, kM=user N);
-    // dispatch passes canonical (A=weight/2D, M=user M). Swap back here (as impl_cdna4).
+    // Dispatch passes canonical (A=weight/2D, B=activation/1D, M/N=user)
+    // The kernel uses swapped layout
     const void *kA = B,          *kB = A;
     const void *ksa = scale_B,   *ksb = scale_A;
     void       *kC = C;
@@ -671,40 +667,26 @@ void kittens_blockwise_fp8_gemm_impl_cdna3(
             _gl_C_t<OType>(reinterpret_cast<OType*>(kC), 1, 1, kM, kN),
             _gl_SA(reinterpret_cast<float*>(const_cast<void*>(ksa)), 1, 1, k_blocks, kM),
             is_1d2d
-                ? _gl_SB(reinterpret_cast<float*>(const_cast<void*>(ksb)), 1, 1, ceil_div(kN, SCALE_BLOCK), k_blocks)
+                ? _gl_SB(reinterpret_cast<float*>(const_cast<void*>(ksb)), 1, 1, kittens::ceil_div(kN, SCALE_BLOCK), k_blocks)
                 : _gl_SB(reinterpret_cast<float*>(const_cast<void*>(ksb)), 1, 1, k_blocks, kN),
             stream,
             bias, bias_dtype, gelu_aux, gelu_aux_dtype,
             reinterpret_cast<const OType*>(c_in), beta,
         };
-#ifdef NVTE_HK_FAST_BUILD
-        // Fast dev build: skip epilogue (bias/gelu/beta) and partial-K instances
-        // (~12x fewer kernels). PM/PN kept for partial-M/N correctness tests.
-        (void)has_bias; (void)has_gelu; (void)has_beta;
-        if (is_1d2d) dispatch_micro_epilogue<true,  AType, BType, OType, false, false, false, false>(g);
-        else         dispatch_micro_epilogue<false, AType, BType, OType, false, false, false, false>(g);
-#else
         if (is_1d2d) dispatch_micro<true,  AType, BType, OType>(g, has_bias, has_gelu, has_beta, has_partial_k);
         else         dispatch_micro<false, AType, BType, OType>(g, has_bias, has_gelu, has_beta, has_partial_k);
-#endif
     };
 
     const bool a_e5m2 = (ka_dtype == KITTENS_FP8E5M2);
     const bool b_e5m2 = (kb_dtype == KITTENS_FP8E5M2);
-#ifdef NVTE_HK_FAST_BUILD
-    // Fast dev build: instantiate only e4m3xe4m3 + bf16 out (1/9 of the
-    // template instances). Other dtype combos fall back to this instance.
-    // For correctness/perf testing build WITHOUT NVTE_HK_FAST_BUILD.
-    (void)a_e5m2; (void)b_e5m2; (void)out_dtype;
-    run.template operator()<fp8e4m3, fp8e4m3, bf16>();
-#else
     auto run_ab = [&]<typename OType>() {
-        if      (!a_e5m2 && !b_e5m2) run.template operator()<fp8e4m3, fp8e4m3, OType>();
-        else if ( a_e5m2 && !b_e5m2) run.template operator()<fp8e5m2, fp8e4m3, OType>();
-        else                         run.template operator()<fp8e4m3, fp8e5m2, OType>();
+        if      (!a_e5m2 && !b_e5m2) run.template operator()<kittens::fp8e4m3, kittens::fp8e4m3, OType>();
+        else if ( a_e5m2 && !b_e5m2) run.template operator()<kittens::fp8e5m2, kittens::fp8e4m3, OType>();
+        else                         run.template operator()<kittens::fp8e4m3, kittens::fp8e5m2, OType>();
     };
     if      (out_dtype == KITTENS_FLOAT32) run_ab.template operator()<float>();
-    else if (out_dtype == KITTENS_FLOAT16) run_ab.template operator()<half>();
-    else                                   run_ab.template operator()<bf16>();
-#endif
+    else if (out_dtype == KITTENS_FLOAT16) run_ab.template operator()<kittens::half>();
+    else                                   run_ab.template operator()<kittens::bf16>();
 }
+
+}  // namespace blockwise_gfx942

@@ -36,14 +36,6 @@ function(try_enable_hipkittens_gemm)
     project(kittens_gemm LANGUAGES HIP CXX)
     find_package(hip)
 
-    # Dev-only fast build: NVTE_HK_FAST_BUILD=1 instantiates only one dtype
-    # combo (e4m3xe4m3, bf16 out) to cut kittens compile time ~9x.
-    set(_kittens_fast_def "")
-    if(NOT "$ENV{NVTE_HK_FAST_BUILD}" STREQUAL "" AND NOT "$ENV{NVTE_HK_FAST_BUILD}" STREQUAL "0")
-        set(_kittens_fast_def -DNVTE_HK_FAST_BUILD)
-        message(STATUS "HipKittens GEMM: FAST dev build (single dtype instance)")
-    endif()
-
     # Arch-specific kernels are compiled as separate OBJECT libraries, each
     # pinned to its own GPU arch via the per-TARGET HIP_ARCHITECTURES property
     # (per-SOURCE HIP_ARCHITECTURES is ignored by CMake's HIP language, which is
@@ -64,7 +56,7 @@ function(try_enable_hipkittens_gemm)
         target_include_directories(kittens_gemm_cdna3 PRIVATE
             ${HIP_INCLUDE_DIRS} "${HIPKITTENS_CDNA3_INCLUDE_DIR}")
         target_compile_options(kittens_gemm_cdna3 PRIVATE
-            -DKITTENS_CDNA3 ${_kittens_fast_def} -fno-gpu-rdc -O3)
+            -DKITTENS_CDNA3 -fno-gpu-rdc -O3)
         target_link_libraries(kittens_gemm_cdna3 PRIVATE hip::host hip::device)
         list(APPEND _kittens_arch_objs $<TARGET_OBJECTS:kittens_gemm_cdna3>)
     endif()

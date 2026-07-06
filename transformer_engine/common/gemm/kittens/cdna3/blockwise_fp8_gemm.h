@@ -31,6 +31,7 @@ enum KittensScalingMode {
 // activation 1D scale [K/128, M]; weight scale selected by b_scaling_mode:
 // KITTENS_BLOCK_SCALING_2D -> 2D scale [N/128, K/128]  (1d2d)
 // KITTENS_BLOCK_SCALING_1D -> 1D scale [K/128, N]      (1d1d)
+namespace blockwise_gfx942 {
 void kittens_blockwise_fp8_gemm_impl_cdna3(
     const void *A, const void *B, void *C,
     const void *scale_A, const void *scale_B,
@@ -43,3 +44,4 @@ void kittens_blockwise_fp8_gemm_impl_cdna3(
     const void *gelu_aux, int gelu_aux_dtype,
     const void *c_in, float beta,
     hipStream_t stream);
+}  // namespace blockwise_gfx942
