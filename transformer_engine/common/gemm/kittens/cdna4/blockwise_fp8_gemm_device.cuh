@@ -108,3 +108,40 @@ __device__ inline void scale_accumulate(
         }
     }
 }
+
+// Per-column (N-direction) scale_B for one K-block, mirroring the col_l store
+// layout: each lane owns columns n_off + j*16 + (lane%16) for j in [0,WIDTH).
+template <int WIDTH>
+struct ColScale { float v[WIDTH]; };
+
+template <typename AccType>
+__device__ inline ColScale<AccType::width> load_col_scale(
+    const float *sb_col_k, int local_n_base, int n_valid) {
+    ColScale<AccType::width> cs;
+    const int col_g = kittens::laneid() % 16;
+    #pragma unroll
+    for (int j = 0; j < AccType::width; j++) {
+        const int n0 = local_n_base + j * 16 + col_g;
+        cs.v[j] = n0 < n_valid ? sb_col_k[n0] : 0.f;
+    }
+    return cs;
+}
+
+// acc += partial * (scale_A_row[i] * scale_B_col[j]). Both per-row (over M) and
+// per-column (over N) 1D scales (wgrad / 1Dx1D).
+template <typename AccType>
+__device__ inline void scale_accumulate_1d1d(
+    AccType &acc, const AccType &partial, const RowScale<AccType::height> &rs,
+    const ColScale<AccType::width> &cs) {
+    #pragma unroll
+    for (int i = 0; i < AccType::height; i++) {
+        #pragma unroll
+        for (int j = 0; j < AccType::width; j++) {
+            const float sc = cs.v[j];
+            acc.tiles[i][j].data[0].x += partial.tiles[i][j].data[0].x * (rs.v[i][0] * sc);
+            acc.tiles[i][j].data[0].y += partial.tiles[i][j].data[0].y * (rs.v[i][1] * sc);
+            acc.tiles[i][j].data[1].x += partial.tiles[i][j].data[1].x * (rs.v[i][2] * sc);
+            acc.tiles[i][j].data[1].y += partial.tiles[i][j].data[1].y * (rs.v[i][3] * sc);
+        }
+    }
+}

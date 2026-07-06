@@ -3,6 +3,7 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 
+#include <type_traits>
 #include "kittens.cuh"
 #include "blockwise_fp8_gemm.h"
 
@@ -26,14 +27,18 @@ constexpr int MFMA_K      = 128;
 constexpr int NUM_THREADS = NUM_WARPS * kittens::WARP_THREADS;
 
 using gl_fp8  = kittens::gl<kittens::fp8e4m3, 1, 1, -1, -1>;
-using gl_bf16 = kittens::gl<kittens::bf16,    1, 1, -1, -1>;
+template <typename OType> using gl_out = kittens::gl<OType, 1, 1, -1, -1>;
 
 using G = kittens::group<NUM_WARPS>;
 
 
+// A/B tiles are always typed fp8e4m3 (mxfp8-style): the actual e4m3/e5m2 flavor
+// is selected purely by the MFMA cbsz/blgp bits (fp8 is 1 byte, bits identical).
+// CBSZ: kernel-A flavor (0=e4m3, 1=e5m2). BLGP: kernel-B flavor.
+template <typename OType, int CBSZ, int BLGP, bool IS_1D2D>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void fp8_blockwise_gemm_kernel(
-    const gl_fp8 A, const gl_fp8 B, const gl_bf16 C,
+    const gl_fp8 A, const gl_fp8 B, const gl_out<OType> C,
     const float *__restrict__ scale_A, const float *__restrict__ scale_B,
     int M, int N, int K) {
     const int k_iters = K / BLOCK_K;
@@ -105,6 +110,11 @@ void fp8_blockwise_gemm_kernel(
     const int local_m0 = warp_m * REG_M;
     const int local_m1 = HALF_ROW + warp_m * REG_M;
     const int m_valid = M - block_row * BLOCK_ROW;
+    // 1Dx1D only: scale_B is per-column over N, laid out [k_blocks, N]. Each
+    // K-block k's column base is scale_B + k*N; cA/cC own columns at local_n0,
+    // cB/cD at local_n1 (matching the col_l store column mapping).
+    const int local_n0 = block_col * BLOCK_COL + warp_n * REG_N;
+    const int local_n1 = block_col * BLOCK_COL + HALF_COL + warp_n * REG_N;
 
     kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
 
@@ -137,8 +147,16 @@ void fp8_blockwise_gemm_kernel(
 
     #pragma unroll 2
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1) {
-        const float sb0_k = __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, sb0[k])));
-        const float sb1_k = __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, sb1[k])));
+        float sb0_k, sb1_k;
+        ColScale<RT_C::width> cs0, cs1;
+        if constexpr (IS_1D2D) {
+            sb0_k = __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, sb0[k])));
+            sb1_k = __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, sb1[k])));
+        } else {
+            const float *sb_col = scale_B + k * N;
+            cs0 = load_col_scale<RT_C>(sb_col, local_n0, N);
+            cs1 = load_col_scale<RT_C>(sb_col, local_n1, N);
+        }
 
         const int sa_tid = tid % BLOCK_ROW;
         const float sa_next = sa_tid < m_valid ? sa_row[(k + 1) * M + sa_tid] : 0.f;
@@ -158,8 +176,9 @@ void fp8_blockwise_gemm_kernel(
         if (tid < BLOCK_ROW) smem_sa[toc][tid] = sa_next;
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        kittens::zero(p); mma_ABt(p, a, b0, p);
-        scale_accumulate(cA, p, rs0, sb0_k);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b0, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cA, p, rs0, sb0_k);
+        else                   scale_accumulate_1d1d(cA, p, rs0, cs0);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -171,8 +190,9 @@ void fp8_blockwise_gemm_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        kittens::zero(p); mma_ABt(p, a, b1, p);
-        scale_accumulate(cB, p, rs0, sb1_k);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b1, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cB, p, rs0, sb1_k);
+        else                   scale_accumulate_1d1d(cB, p, rs0, cs1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
@@ -183,8 +203,9 @@ void fp8_blockwise_gemm_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        kittens::zero(p); mma_ABt(p, a, b0, p);
-        scale_accumulate(cC, p, rs1, sb0_k);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b0, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cC, p, rs1, sb0_k);
+        else                   scale_accumulate_1d1d(cC, p, rs1, cs0);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -194,16 +215,25 @@ void fp8_blockwise_gemm_kernel(
         __builtin_amdgcn_s_barrier();
 
         __builtin_amdgcn_s_setprio(1);
-        kittens::zero(p); mma_ABt(p, a, b1, p);
-        scale_accumulate(cD, p, rs1, sb1_k);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b1, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cD, p, rs1, sb1_k);
+        else                   scale_accumulate_1d1d(cD, p, rs1, cs1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
     }
 
     {
         const int k = k_iters - 2;
-        const float sb0_k = __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, sb0[k])));
-        const float sb1_k = __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, sb1[k])));
+        float sb0_k, sb1_k;
+        ColScale<RT_C::width> cs0, cs1;
+        if constexpr (IS_1D2D) {
+            sb0_k = __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, sb0[k])));
+            sb1_k = __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, sb1[k])));
+        } else {
+            const float *sb_col = scale_B + k * N;
+            cs0 = load_col_scale<RT_C>(sb_col, local_n0, N);
+            cs1 = load_col_scale<RT_C>(sb_col, local_n1, N);
+        }
         const float *sa_k = sa_row + k * M;
         const auto rs0 = load_row_scale<RT_C>(sa_k, local_m0, m_valid);
         const auto rs1 = load_row_scale<RT_C>(sa_k, local_m1, m_valid);
@@ -217,8 +247,9 @@ void fp8_blockwise_gemm_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        kittens::zero(p); mma_ABt(p, a, b0, p);
-        scale_accumulate(cA, p, rs0, sb0_k);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b0, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cA, p, rs0, sb0_k);
+        else                   scale_accumulate_1d1d(cA, p, rs0, cs0);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -229,8 +260,9 @@ void fp8_blockwise_gemm_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        kittens::zero(p); mma_ABt(p, a, b1, p);
-        scale_accumulate(cB, p, rs0, sb1_k);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b1, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cB, p, rs0, sb1_k);
+        else                   scale_accumulate_1d1d(cB, p, rs0, cs1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
@@ -241,8 +273,9 @@ void fp8_blockwise_gemm_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        kittens::zero(p); mma_ABt(p, a, b0, p);
-        scale_accumulate(cC, p, rs1, sb0_k);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b0, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cC, p, rs1, sb0_k);
+        else                   scale_accumulate_1d1d(cC, p, rs1, cs0);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
@@ -252,8 +285,9 @@ void fp8_blockwise_gemm_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        kittens::zero(p); mma_ABt(p, a, b1, p);
-        scale_accumulate(cD, p, rs1, sb1_k);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b1, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cD, p, rs1, sb1_k);
+        else                   scale_accumulate_1d1d(cD, p, rs1, cs1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -263,8 +297,16 @@ void fp8_blockwise_gemm_kernel(
 
     {
         const int k = k_iters - 1;
-        const float sb0_k = __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, sb0[k])));
-        const float sb1_k = __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, sb1[k])));
+        float sb0_k, sb1_k;
+        ColScale<RT_C::width> cs0, cs1;
+        if constexpr (IS_1D2D) {
+            sb0_k = __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, sb0[k])));
+            sb1_k = __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, sb1[k])));
+        } else {
+            const float *sb_col = scale_B + k * N;
+            cs0 = load_col_scale<RT_C>(sb_col, local_n0, N);
+            cs1 = load_col_scale<RT_C>(sb_col, local_n1, N);
+        }
         const float *sa_k = sa_row + k * M;
         const auto rs0 = load_row_scale<RT_C>(sa_k, local_m0, m_valid);
         const auto rs1 = load_row_scale<RT_C>(sa_k, local_m1, m_valid);
@@ -276,8 +318,9 @@ void fp8_blockwise_gemm_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        kittens::zero(p); mma_ABt(p, a, b0, p);
-        scale_accumulate(cA, p, rs0, sb0_k);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b0, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cA, p, rs0, sb0_k);
+        else                   scale_accumulate_1d1d(cA, p, rs0, cs0);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
@@ -288,8 +331,9 @@ void fp8_blockwise_gemm_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        kittens::zero(p); mma_ABt(p, a, b1, p);
-        scale_accumulate(cB, p, rs0, sb1_k);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b1, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cB, p, rs0, sb1_k);
+        else                   scale_accumulate_1d1d(cB, p, rs0, cs1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
@@ -299,10 +343,12 @@ void fp8_blockwise_gemm_kernel(
 
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        kittens::zero(p); mma_ABt(p, a, b0, p);
-        scale_accumulate(cC, p, rs1, sb0_k);
-        kittens::zero(p); mma_ABt(p, a, b1, p);
-        scale_accumulate(cD, p, rs1, sb1_k);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b0, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cC, p, rs1, sb0_k);
+        else                   scale_accumulate_1d1d(cC, p, rs1, cs0);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b1, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cD, p, rs1, sb1_k);
+        else                   scale_accumulate_1d1d(cD, p, rs1, cs1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
     }
@@ -311,13 +357,16 @@ void fp8_blockwise_gemm_kernel(
         __builtin_amdgcn_s_barrier();
     }
 
-    apply_rtne_bias(cA); apply_rtne_bias(cB); apply_rtne_bias(cC); apply_rtne_bias(cD);
+    // rtne rounding bias is a bf16-specific pre-round; skip for fp16/fp32 output.
+    if constexpr (std::is_same_v<OType, kittens::bf16>) {
+        apply_rtne_bias(cA); apply_rtne_bias(cB); apply_rtne_bias(cC); apply_rtne_bias(cD);
+    }
 
     const int m_off0 = block_row * BLOCK_ROW + warp_m * REG_M;
     const int m_off1 = block_row * BLOCK_ROW + HALF_ROW + warp_m * REG_M;
     const int n_off0 = block_col * BLOCK_COL + warp_n * REG_N;
     const int n_off1 = block_col * BLOCK_COL + HALF_COL + warp_n * REG_N;
-    kittens::bf16 *c_ptr = C.raw_ptr;
+    OType *c_ptr = C.raw_ptr;
     const int ca = block_row * WARPS_ROW * 2 + warp_m;
     const int cc = block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m;
     const int cn0 = block_col * WARPS_COL * 2 + warp_n;
@@ -335,6 +384,43 @@ void fp8_blockwise_gemm_kernel(
         store_masked(c_ptr, cC, m_off1, n_off0, M, N);
         store_masked(c_ptr, cD, m_off1, n_off1, M, N);
     }
+}
+
+// Launch the kernel with OType/CBSZ/BLGP/IS_1D2D resolved at compile time.
+template <typename OType, int CBSZ, int BLGP, bool IS_1D2D>
+static void launch_blockwise(const void *kA, const void *kB, void *C,
+                             const float *sa, const float *sb,
+                             int kM, int kN, int K, hipStream_t stream) {
+    gl_fp8 A_gl((kittens::fp8e4m3 *)const_cast<void *>(kA), nullptr, nullptr, kM, K);
+    gl_fp8 B_gl((kittens::fp8e4m3 *)const_cast<void *>(kB), nullptr, nullptr, kN, K);
+    gl_out<OType> C_gl((OType *)C, nullptr, nullptr, kM, kN);
+    const int grid = ((kM + BLOCK_ROW - 1) / BLOCK_ROW) * ((kN + BLOCK_COL - 1) / BLOCK_COL);
+    fp8_blockwise_gemm_kernel<OType, CBSZ, BLGP, IS_1D2D><<<grid, NUM_THREADS, 0, stream>>>(
+        A_gl, B_gl, C_gl, sa, sb, kM, kN, K);
+}
+
+template <typename OType, bool IS_1D2D>
+static void launch_blockwise_fp8(int cbsz, int blgp, const void *kA, const void *kB, void *C,
+                                 const float *sa, const float *sb,
+                                 int kM, int kN, int K, hipStream_t stream) {
+#ifdef NVTE_HK_FAST_BUILD
+    // Dev-only: instantiate a single e4m3xe4m3 kernel to cut compile time.
+    (void)cbsz; (void)blgp;
+    launch_blockwise<OType, 0, 0, IS_1D2D>(kA, kB, C, sa, sb, kM, kN, K, stream);
+#else
+    if      (cbsz == 0 && blgp == 0) launch_blockwise<OType, 0, 0, IS_1D2D>(kA, kB, C, sa, sb, kM, kN, K, stream);
+    else if (cbsz == 0 && blgp == 1) launch_blockwise<OType, 0, 1, IS_1D2D>(kA, kB, C, sa, sb, kM, kN, K, stream);
+    else if (cbsz == 1 && blgp == 0) launch_blockwise<OType, 1, 0, IS_1D2D>(kA, kB, C, sa, sb, kM, kN, K, stream);
+    else                             launch_blockwise<OType, 1, 1, IS_1D2D>(kA, kB, C, sa, sb, kM, kN, K, stream);
+#endif
+}
+
+template <typename OType>
+static void launch_blockwise_mode(bool is_1d2d, int cbsz, int blgp, const void *kA, const void *kB, void *C,
+                                  const float *sa, const float *sb,
+                                  int kM, int kN, int K, hipStream_t stream) {
+    if (is_1d2d) launch_blockwise_fp8<OType, true>(cbsz, blgp, kA, kB, C, sa, sb, kM, kN, K, stream);
+    else         launch_blockwise_fp8<OType, false>(cbsz, blgp, kA, kB, C, sa, sb, kM, kN, K, stream);
 }
 
 }  // namespace blockwise_gfx950
@@ -355,11 +441,17 @@ bool kittens_blockwise_fp8_gemm_impl_cdna4(
     const int   ka_mode = b_scaling_mode, kb_mode = a_scaling_mode;
     const int   ka_dtype = b_dtype,       kb_dtype = a_dtype;
 
+    // Supported: user 1Dx2D (ka=1D,kb=2D) and user 1Dx1D (ka=1D,kb=1D).
+    // user 2Dx1D (kb=2D,ka=... i.e. kb_mode==2D && ka_mode==1D is 1Dx2D; the
+    // 2Dx1D case maps to ka_mode==1D,kb_mode==2D? no) -> reject anything else.
     const bool is_1d2d = (ka_mode == KITTENS_BLOCK_SCALING_1D) &&
                          (kb_mode == KITTENS_BLOCK_SCALING_2D);
-    if (!is_1d2d) return false;
-    if (ka_dtype != KITTENS_FP8E4M3 || kb_dtype != KITTENS_FP8E4M3) return false;
-    if (out_dtype != KITTENS_BFLOAT16) return false;
+    const bool is_1d1d = (ka_mode == KITTENS_BLOCK_SCALING_1D) &&
+                         (kb_mode == KITTENS_BLOCK_SCALING_1D);
+    if (!is_1d2d && !is_1d1d) return false;  // 2Dx1D unsupported (as on cdna3)
+    // e4m3/e5m2 both allowed (flavor -> MFMA cbsz/blgp). Mixed permitted.
+    if (ka_dtype != KITTENS_FP8E4M3 && ka_dtype != KITTENS_FP8E5M2) return false;
+    if (kb_dtype != KITTENS_FP8E4M3 && kb_dtype != KITTENS_FP8E5M2) return false;
     if (has_bias || has_gelu || has_beta) return false;
     using blockwise_gfx950::BLOCK_ROW;
     using blockwise_gfx950::BLOCK_COL;
@@ -369,14 +461,22 @@ bool kittens_blockwise_fp8_gemm_impl_cdna4(
     // M/N may be arbitrary (partial edge tiles handled via SRD-zeroed loads +
     // masked kittens::store).
 
+    // cbsz = kernel-A(=kA) flavor, blgp = kernel-B(=kB) flavor. (0=e4m3, 1=e5m2)
+    const int cbsz = (ka_dtype == KITTENS_FP8E5M2) ? 1 : 0;
+    const int blgp = (kb_dtype == KITTENS_FP8E5M2) ? 1 : 0;
     const float *sa = reinterpret_cast<const float *>(ksa);
     const float *sb = reinterpret_cast<const float *>(ksb);
-    blockwise_gfx950::gl_fp8 A_gl((kittens::fp8e4m3 *)const_cast<void *>(kA), nullptr, nullptr, kM, K);
-    blockwise_gfx950::gl_fp8 B_gl((kittens::fp8e4m3 *)const_cast<void *>(kB), nullptr, nullptr, kN, K);
-    blockwise_gfx950::gl_bf16 C_gl((kittens::bf16 *)C, nullptr, nullptr, kM, kN);
 
-    const int grid = ((kM + BLOCK_ROW - 1) / BLOCK_ROW) * ((kN + BLOCK_COL - 1) / BLOCK_COL);
-    blockwise_gfx950::fp8_blockwise_gemm_kernel<<<grid, blockwise_gfx950::NUM_THREADS, 0, stream>>>(
-        A_gl, B_gl, C_gl, sa, sb, kM, kN, K);
+    using namespace blockwise_gfx950;
+#ifdef NVTE_HK_FAST_BUILD
+    // Dev-only: only bf16 output instantiated to cut compile time.
+    if (out_dtype != KITTENS_BFLOAT16) return false;
+    launch_blockwise_mode<kittens::bf16>(is_1d2d, cbsz, blgp, kA, kB, C, sa, sb, kM, kN, K, stream);
+#else
+    if      (out_dtype == KITTENS_BFLOAT16) launch_blockwise_mode<kittens::bf16>(is_1d2d, cbsz, blgp, kA, kB, C, sa, sb, kM, kN, K, stream);
+    else if (out_dtype == KITTENS_FLOAT16)  launch_blockwise_mode<kittens::half>(is_1d2d, cbsz, blgp, kA, kB, C, sa, sb, kM, kN, K, stream);
+    else if (out_dtype == KITTENS_FLOAT32)  launch_blockwise_mode<float>(is_1d2d, cbsz, blgp, kA, kB, C, sa, sb, kM, kN, K, stream);
+    else return false;
+#endif
     return true;
 }
