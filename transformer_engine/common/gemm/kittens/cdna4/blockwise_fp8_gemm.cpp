@@ -4,6 +4,8 @@
 *************************************************************************/
 
 #include <type_traits>
+#include <stdexcept>
+#include <string>
 #include "kittens.cuh"
 #include "blockwise_fp8_gemm.h"
 
@@ -12,18 +14,18 @@ namespace blockwise_gfx950 {
 
 #include "blockwise_fp8_gemm_device.cuh"
 
-constexpr int NUM_WARPS  = 8;
-constexpr int WARPS_COL  = 4;
-constexpr int WARPS_ROW  = 2;
-constexpr int BLOCK_ROW  = 128;
-constexpr int BLOCK_COL  = 256;
-constexpr int BLOCK_K    = 128;
-constexpr int HALF_ROW   = BLOCK_ROW / 2;
-constexpr int HALF_COL   = BLOCK_COL / 2;
-constexpr int REG_M      = BLOCK_ROW / WARPS_ROW / 2;   // 64
-constexpr int REG_N      = BLOCK_COL / WARPS_COL / 2;   // 32
-constexpr int SCALE_BLOCK = 128;
+constexpr int NUM_WARPS   = 8;
+constexpr int WARPS_ROW    = 2;
+constexpr int WARPS_COL    = 4;
+constexpr int BLOCK_M     = 128;
+constexpr int BLOCK_N     = 256;
+constexpr int BLOCK_K     = 128;
+constexpr int HALF_ROW    = BLOCK_M / 2;
+constexpr int HALF_COL    = BLOCK_N / 2;
+constexpr int REG_M       = BLOCK_M / WARPS_ROW / 2;
+constexpr int REG_N       = BLOCK_N / WARPS_COL / 2;
 constexpr int MFMA_K      = 128;
+constexpr int SCALE_BLOCK = 128;
 constexpr int NUM_THREADS = NUM_WARPS * kittens::WARP_THREADS;
 
 using gl_fp8  = kittens::gl<kittens::fp8e4m3, 1, 1, -1, -1>;
@@ -31,19 +33,26 @@ template <typename OType> using gl_out = kittens::gl<OType, 1, 1, -1, -1>;
 
 using G = kittens::group<NUM_WARPS>;
 
+template <typename OType>
+struct EpilogueArgs {
+    const void *bias;
+    int bias_dtype;
+    const void *gelu_aux;
+    int gelu_aux_dtype;
+    const OType *c_in;
+    float beta;
+};
 
-// A/B tiles are always typed fp8e4m3 (mxfp8-style): the actual e4m3/e5m2 flavor
-// is selected purely by the MFMA cbsz/blgp bits (fp8 is 1 byte, bits identical).
-// CBSZ: kernel-A flavor (0=e4m3, 1=e5m2). BLGP: kernel-B flavor.
-template <typename OType, int CBSZ, int BLGP, bool IS_1D2D>
+template <typename OType, int CBSZ, int BLGP, bool IS_1D2D,
+          bool HAS_BIAS, bool HAS_GELU, bool HAS_BETA>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void fp8_blockwise_gemm_kernel(
     const gl_fp8 A, const gl_fp8 B, const gl_out<OType> C,
     const float *__restrict__ scale_A, const float *__restrict__ scale_B,
-    int M, int N, int K) {
+    int M, int N, int K, EpilogueArgs<OType> ep) {
     const int k_iters = K / BLOCK_K;
     const int scale_K = K / SCALE_BLOCK;
-    const int blocks_per_col = (N + BLOCK_COL - 1) / BLOCK_COL;
+    const int blocks_per_col = (N + BLOCK_N - 1) / BLOCK_N;
 
     using ST_A = kittens::st_fp8e4m3<HALF_ROW, BLOCK_K, kittens::st_16x128_s>;
     using ST_B = kittens::st_fp8e4m3<HALF_COL, BLOCK_K, kittens::st_16x128_s>;
@@ -51,7 +60,7 @@ void fp8_blockwise_gemm_kernel(
     using RT_B = kittens::rt_fp8e4m3<REG_N, MFMA_K>;
     using RT_C = kittens::rt_fl<REG_M, REG_N, kittens::col_l, kittens::rt_16x16_s>;
 
-    __shared__ float smem_sa[2][BLOCK_ROW];
+    __shared__ float smem_sa[2][BLOCK_M];
     __shared__ ST_A As[2][2];
     __shared__ ST_B Bs[2][2];
 
@@ -104,21 +113,19 @@ void fp8_blockwise_gemm_kernel(
     const int n_scale_blocks = (N + SCALE_BLOCK - 1) / SCALE_BLOCK;
     const int nb0 = min(block_col * 2 + 0, n_scale_blocks - 1);
     const int nb1 = min(block_col * 2 + 1, n_scale_blocks - 1);
-    const float *sa_row = scale_A + block_row * BLOCK_ROW;
+    const float *sa_row = scale_A + block_row * BLOCK_M;
     const float *sb0 = scale_B + nb0 * scale_K;
     const float *sb1 = scale_B + nb1 * scale_K;
     const int local_m0 = warp_m * REG_M;
     const int local_m1 = HALF_ROW + warp_m * REG_M;
-    const int m_valid = M - block_row * BLOCK_ROW;
-    // 1Dx1D only: scale_B is per-column over N, laid out [k_blocks, N]. Each
-    // K-block k's column base is scale_B + k*N; cA/cC own columns at local_n0,
-    // cB/cD at local_n1 (matching the col_l store column mapping).
-    const int local_n0 = block_col * BLOCK_COL + warp_n * REG_N;
-    const int local_n1 = block_col * BLOCK_COL + HALF_COL + warp_n * REG_N;
+    const int m_valid = M - block_row * BLOCK_M;
+
+    const int local_n0 = block_col * BLOCK_N + warp_n * REG_N;
+    const int local_n1 = block_col * BLOCK_N + HALF_COL + warp_n * REG_N;
 
     kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
 
-    const int sa_tid_p = tid % BLOCK_ROW;
+    const int sa_tid_p = tid % BLOCK_M;
 
     G::load(Bs[tic][0], B, {0, 0, block_col * 2, 0}, sw_B, b_srd, b_base, b_lds[tic][0]);
     G::load(As[tic][0], A, {0, 0, block_row * 2, 0}, sw_A, a_srd, a_base, a_lds[tic][0]);
@@ -139,7 +146,7 @@ void fp8_blockwise_gemm_kernel(
     const float sa1_reg = (k_iters > 1 && sa_tid_p < m_valid) ? sa_row[1 * M + sa_tid_p] : 0.f;
 
     asm volatile("s_waitcnt vmcnt(6)");
-    if (tid < BLOCK_ROW) {
+    if (tid < BLOCK_M) {
         smem_sa[tic][tid] = sa0_reg;
         if (k_iters > 1) smem_sa[toc][tid] = sa1_reg;
     }
@@ -158,7 +165,7 @@ void fp8_blockwise_gemm_kernel(
             cs1 = load_col_scale<RT_C>(sb_col, local_n1, N);
         }
 
-        const int sa_tid = tid % BLOCK_ROW;
+        const int sa_tid = tid % BLOCK_M;
         const float sa_next = sa_tid < m_valid ? sa_row[(k + 1) * M + sa_tid] : 0.f;
 
         auto bs0 = kittens::subtile_inplace<REG_N, MFMA_K>(Bs[tic][0], {warp_n, 0});
@@ -173,7 +180,7 @@ void fp8_blockwise_gemm_kernel(
         const auto rs0 = load_row_scale_lds<RT_C>(smem_sa[tic], local_m0);
         const auto rs1 = load_row_scale_lds<RT_C>(smem_sa[tic], local_m1);
 
-        if (tid < BLOCK_ROW) smem_sa[toc][tid] = sa_next;
+        if (tid < BLOCK_M) smem_sa[toc][tid] = sa_next;
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
         kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b0, p, &unit, &unit);
@@ -357,22 +364,29 @@ void fp8_blockwise_gemm_kernel(
         __builtin_amdgcn_s_barrier();
     }
 
-    // rtne rounding bias is a bf16-specific pre-round; skip for fp16/fp32 output.
+    const int m_off0 = block_row * BLOCK_M + warp_m * REG_M;
+    const int m_off1 = block_row * BLOCK_M + HALF_ROW + warp_m * REG_M;
+    const int n_off0 = block_col * BLOCK_N + warp_n * REG_N;
+    const int n_off1 = block_col * BLOCK_N + HALF_COL + warp_n * REG_N;
+
+    if constexpr (HAS_BIAS || HAS_GELU || HAS_BETA) {
+        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cA, m_off0, n_off0, M, N, ep.bias, ep.bias_dtype, ep.gelu_aux, ep.gelu_aux_dtype, ep.c_in, ep.beta);
+        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cB, m_off0, n_off1, M, N, ep.bias, ep.bias_dtype, ep.gelu_aux, ep.gelu_aux_dtype, ep.c_in, ep.beta);
+        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cC, m_off1, n_off0, M, N, ep.bias, ep.bias_dtype, ep.gelu_aux, ep.gelu_aux_dtype, ep.c_in, ep.beta);
+        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cD, m_off1, n_off1, M, N, ep.bias, ep.bias_dtype, ep.gelu_aux, ep.gelu_aux_dtype, ep.c_in, ep.beta);
+    }
+
     if constexpr (std::is_same_v<OType, kittens::bf16>) {
         apply_rtne_bias(cA); apply_rtne_bias(cB); apply_rtne_bias(cC); apply_rtne_bias(cD);
     }
 
-    const int m_off0 = block_row * BLOCK_ROW + warp_m * REG_M;
-    const int m_off1 = block_row * BLOCK_ROW + HALF_ROW + warp_m * REG_M;
-    const int n_off0 = block_col * BLOCK_COL + warp_n * REG_N;
-    const int n_off1 = block_col * BLOCK_COL + HALF_COL + warp_n * REG_N;
     OType *c_ptr = C.raw_ptr;
     const int ca = block_row * WARPS_ROW * 2 + warp_m;
     const int cc = block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m;
     const int cn0 = block_col * WARPS_COL * 2 + warp_n;
     const int cn1 = block_col * WARPS_COL * 2 + WARPS_COL + warp_n;
-    
-    const bool full = (block_row + 1) * BLOCK_ROW <= M && (block_col + 1) * BLOCK_COL <= N;
+
+    const bool full = (block_row + 1) * BLOCK_M <= M && (block_col + 1) * BLOCK_N <= N;
     if (full) {
         kittens::store(C, cA, {0, 0, ca, cn0});
         kittens::store(C, cB, {0, 0, ca, cn1});
@@ -386,54 +400,231 @@ void fp8_blockwise_gemm_kernel(
     }
 }
 
-// Launch the kernel with OType/CBSZ/BLGP/IS_1D2D resolved at compile time.
-template <typename OType, int CBSZ, int BLGP, bool IS_1D2D>
+template <typename OType, int CBSZ, int BLGP, bool IS_1D2D,
+          bool HAS_BIAS, bool HAS_GELU, bool HAS_BETA>
+__global__ __launch_bounds__(NUM_THREADS, 2)
+void fp8_blockwise_gemm_kernel_smallk(
+    const gl_fp8 A, const gl_fp8 B, const gl_out<OType> C,
+    const float *__restrict__ scale_A, const float *__restrict__ scale_B,
+    int M, int N, int K, EpilogueArgs<OType> ep) {
+    const int k_blocks = (K + BLOCK_K - 1) / BLOCK_K;
+    const int scale_K = k_blocks;
+    const int blocks_per_col = (N + BLOCK_N - 1) / BLOCK_N;
+
+    using ST_A = kittens::st_fp8e4m3<HALF_ROW, BLOCK_K, kittens::st_16x128_s>;
+    using ST_B = kittens::st_fp8e4m3<HALF_COL, BLOCK_K, kittens::st_16x128_s>;
+    using RT_A = kittens::rt_fp8e4m3<REG_M, MFMA_K>;
+    using RT_B = kittens::rt_fp8e4m3<REG_N, MFMA_K>;
+    using RT_C = kittens::rt_fl<REG_M, REG_N, kittens::col_l, kittens::rt_16x16_s>;
+
+    __shared__ ST_A As[2];
+    __shared__ ST_B Bs[2];
+
+    RT_A a;
+    RT_B b0, b1;
+    RT_C cA, cB, cC, cD;
+    RT_C p;
+
+    const int global_block_id = blockIdx.x;
+    const int block_row = global_block_id / blocks_per_col;
+    const int block_col = global_block_id % blocks_per_col;
+
+    const int warp_m = kittens::warpid() / WARPS_COL;
+    const int warp_n = kittens::warpid() % WARPS_COL;
+    const int tid = threadIdx.x;
+
+    using T = kittens::fp8e4m3;
+    const kittens::fp8e8m0_4 unit = 0x7F7F7F7Fu;
+
+    const T *a_base = (const T *)&A[{0, 0, 0, 0}];
+    const T *b_base = (const T *)&B[{0, 0, 0, 0}];
+    const int a_row_stride = A.template stride<2>();
+    const int b_row_stride = B.template stride<2>();
+
+    const int n_scale_blocks = (N + SCALE_BLOCK - 1) / SCALE_BLOCK;
+    const int nb0 = min(block_col * 2 + 0, n_scale_blocks - 1);
+    const int nb1 = min(block_col * 2 + 1, n_scale_blocks - 1);
+    const float *sa_row = scale_A + block_row * BLOCK_M;
+    const float *sb0 = scale_B + nb0 * scale_K;
+    const float *sb1 = scale_B + nb1 * scale_K;
+    const int local_m0 = warp_m * REG_M;
+    const int local_m1 = HALF_ROW + warp_m * REG_M;
+    const int m_valid = M - block_row * BLOCK_M;
+    const int local_n0 = block_col * BLOCK_N + warp_n * REG_N;
+    const int local_n1 = block_col * BLOCK_N + HALF_COL + warp_n * REG_N;
+
+    kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
+
+    for (int k = 0; k < k_blocks; k++) {
+        __builtin_amdgcn_s_barrier();
+        load_tile_masked<NUM_THREADS>(As[0], a_base, a_row_stride, block_row * 2 + 0, k, M, K);
+        load_tile_masked<NUM_THREADS>(As[1], a_base, a_row_stride, block_row * 2 + 1, k, M, K);
+        load_tile_masked<NUM_THREADS>(Bs[0], b_base, b_row_stride, block_col * 2 + 0, k, N, K);
+        load_tile_masked<NUM_THREADS>(Bs[1], b_base, b_row_stride, block_col * 2 + 1, k, N, K);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_s_barrier();
+
+        const auto rs0 = load_row_scale<RT_C>(sa_row + k * M, local_m0, m_valid);
+        const auto rs1 = load_row_scale<RT_C>(sa_row + k * M, local_m1, m_valid);
+        float sb0_k, sb1_k;
+        ColScale<RT_C::width> cs0, cs1;
+        if constexpr (IS_1D2D) {
+            sb0_k = sb0[k];
+            sb1_k = sb1[k];
+        } else {
+            const float *sb_col = scale_B + k * N;
+            cs0 = load_col_scale<RT_C>(sb_col, local_n0, N);
+            cs1 = load_col_scale<RT_C>(sb_col, local_n1, N);
+        }
+
+        auto as0 = kittens::subtile_inplace<REG_M, MFMA_K>(As[0], {warp_m, 0});
+        kittens::load(a, as0);
+        auto bs0 = kittens::subtile_inplace<REG_N, MFMA_K>(Bs[0], {warp_n, 0});
+        kittens::load(b0, bs0);
+        auto bs1 = kittens::subtile_inplace<REG_N, MFMA_K>(Bs[1], {warp_n, 0});
+        kittens::load(b1, bs1);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_sched_barrier(0);
+
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b0, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cA, p, rs0, sb0_k);
+        else                   scale_accumulate_1d1d(cA, p, rs0, cs0);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b1, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cB, p, rs0, sb1_k);
+        else                   scale_accumulate_1d1d(cB, p, rs0, cs1);
+        __builtin_amdgcn_sched_barrier(0);
+
+        auto as1 = kittens::subtile_inplace<REG_M, MFMA_K>(As[1], {warp_m, 0});
+        kittens::load(a, as1);
+        asm volatile("s_waitcnt lgkmcnt(0)");
+        __builtin_amdgcn_sched_barrier(0);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b0, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cC, p, rs1, sb0_k);
+        else                   scale_accumulate_1d1d(cC, p, rs1, cs0);
+        kittens::zero(p); mma_ABt_scaled<CBSZ, BLGP>(p, a, b1, p, &unit, &unit);
+        if constexpr (IS_1D2D) scale_accumulate(cD, p, rs1, sb1_k);
+        else                   scale_accumulate_1d1d(cD, p, rs1, cs1);
+        __builtin_amdgcn_sched_barrier(0);
+        __builtin_amdgcn_s_barrier();
+    }
+
+    const int m_off0 = block_row * BLOCK_M + warp_m * REG_M;
+    const int m_off1 = block_row * BLOCK_M + HALF_ROW + warp_m * REG_M;
+    const int n_off0 = block_col * BLOCK_N + warp_n * REG_N;
+    const int n_off1 = block_col * BLOCK_N + HALF_COL + warp_n * REG_N;
+
+    if constexpr (HAS_BIAS || HAS_GELU || HAS_BETA) {
+        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cA, m_off0, n_off0, M, N, ep.bias, ep.bias_dtype, ep.gelu_aux, ep.gelu_aux_dtype, ep.c_in, ep.beta);
+        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cB, m_off0, n_off1, M, N, ep.bias, ep.bias_dtype, ep.gelu_aux, ep.gelu_aux_dtype, ep.c_in, ep.beta);
+        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cC, m_off1, n_off0, M, N, ep.bias, ep.bias_dtype, ep.gelu_aux, ep.gelu_aux_dtype, ep.c_in, ep.beta);
+        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cD, m_off1, n_off1, M, N, ep.bias, ep.bias_dtype, ep.gelu_aux, ep.gelu_aux_dtype, ep.c_in, ep.beta);
+    }
+
+    if constexpr (std::is_same_v<OType, kittens::bf16>) {
+        apply_rtne_bias(cA); apply_rtne_bias(cB); apply_rtne_bias(cC); apply_rtne_bias(cD);
+    }
+
+    OType *c_ptr = C.raw_ptr;
+    const int ca = block_row * WARPS_ROW * 2 + warp_m;
+    const int cc = block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m;
+    const int cn0 = block_col * WARPS_COL * 2 + warp_n;
+    const int cn1 = block_col * WARPS_COL * 2 + WARPS_COL + warp_n;
+
+    const bool full = (block_row + 1) * BLOCK_M <= M && (block_col + 1) * BLOCK_N <= N;
+    if (full) {
+        kittens::store(C, cA, {0, 0, ca, cn0});
+        kittens::store(C, cB, {0, 0, ca, cn1});
+        kittens::store(C, cC, {0, 0, cc, cn0});
+        kittens::store(C, cD, {0, 0, cc, cn1});
+    } else {
+        store_masked(c_ptr, cA, m_off0, n_off0, M, N);
+        store_masked(c_ptr, cB, m_off0, n_off1, M, N);
+        store_masked(c_ptr, cC, m_off1, n_off0, M, N);
+        store_masked(c_ptr, cD, m_off1, n_off1, M, N);
+    }
+}
+
+template <typename OType, int CBSZ, int BLGP, bool IS_1D2D,
+          bool HAS_BIAS, bool HAS_GELU, bool HAS_BETA>
 static void launch_blockwise(const void *kA, const void *kB, void *C,
                              const float *sa, const float *sb,
-                             int kM, int kN, int K, hipStream_t stream) {
+                             int kM, int kN, int K, EpilogueArgs<OType> ep, hipStream_t stream) {
     gl_fp8 A_gl((kittens::fp8e4m3 *)const_cast<void *>(kA), nullptr, nullptr, kM, K);
     gl_fp8 B_gl((kittens::fp8e4m3 *)const_cast<void *>(kB), nullptr, nullptr, kN, K);
     gl_out<OType> C_gl((OType *)C, nullptr, nullptr, kM, kN);
-    const int grid = ((kM + BLOCK_ROW - 1) / BLOCK_ROW) * ((kN + BLOCK_COL - 1) / BLOCK_COL);
-    fp8_blockwise_gemm_kernel<OType, CBSZ, BLGP, IS_1D2D><<<grid, NUM_THREADS, 0, stream>>>(
-        A_gl, B_gl, C_gl, sa, sb, kM, kN, K);
+    const int grid = ((kM + BLOCK_M - 1) / BLOCK_M) * ((kN + BLOCK_N - 1) / BLOCK_N);
+    if (K < 2 * BLOCK_K || K % BLOCK_K != 0) {
+        fp8_blockwise_gemm_kernel_smallk<OType, CBSZ, BLGP, IS_1D2D, HAS_BIAS, HAS_GELU, HAS_BETA><<<grid, NUM_THREADS, 0, stream>>>(
+            A_gl, B_gl, C_gl, sa, sb, kM, kN, K, ep);
+    } else {
+        fp8_blockwise_gemm_kernel<OType, CBSZ, BLGP, IS_1D2D, HAS_BIAS, HAS_GELU, HAS_BETA><<<grid, NUM_THREADS, 0, stream>>>(
+            A_gl, B_gl, C_gl, sa, sb, kM, kN, K, ep);
+    }
+}
+
+template <typename OType, int CBSZ, int BLGP, bool IS_1D2D>
+static void launch_blockwise_epi(bool has_bias, bool has_gelu, bool has_beta,
+                                 const void *kA, const void *kB, void *C,
+                                 const float *sa, const float *sb,
+                                 int kM, int kN, int K, EpilogueArgs<OType> ep, hipStream_t stream) {
+    if (has_gelu) {
+        if (has_beta) launch_blockwise<OType, CBSZ, BLGP, IS_1D2D, false, true, true >(kA, kB, C, sa, sb, kM, kN, K, ep, stream);
+        else          launch_blockwise<OType, CBSZ, BLGP, IS_1D2D, false, true, false>(kA, kB, C, sa, sb, kM, kN, K, ep, stream);
+    } else if (has_bias) {
+        if (has_beta) launch_blockwise<OType, CBSZ, BLGP, IS_1D2D, true, false, true >(kA, kB, C, sa, sb, kM, kN, K, ep, stream);
+        else          launch_blockwise<OType, CBSZ, BLGP, IS_1D2D, true, false, false>(kA, kB, C, sa, sb, kM, kN, K, ep, stream);
+    } else {
+        if (has_beta) launch_blockwise<OType, CBSZ, BLGP, IS_1D2D, false, false, true >(kA, kB, C, sa, sb, kM, kN, K, ep, stream);
+        else          launch_blockwise<OType, CBSZ, BLGP, IS_1D2D, false, false, false>(kA, kB, C, sa, sb, kM, kN, K, ep, stream);
+    }
 }
 
 template <typename OType, bool IS_1D2D>
-static void launch_blockwise_fp8(int cbsz, int blgp, const void *kA, const void *kB, void *C,
+static void launch_blockwise_fp8(int cbsz, int blgp, bool has_bias, bool has_gelu, bool has_beta,
+                                 const void *kA, const void *kB, void *C,
                                  const float *sa, const float *sb,
-                                 int kM, int kN, int K, hipStream_t stream) {
-#ifdef NVTE_HK_FAST_BUILD
-    // Dev-only: instantiate a single e4m3xe4m3 kernel to cut compile time.
-    (void)cbsz; (void)blgp;
-    launch_blockwise<OType, 0, 0, IS_1D2D>(kA, kB, C, sa, sb, kM, kN, K, stream);
-#else
-    if      (cbsz == 0 && blgp == 0) launch_blockwise<OType, 0, 0, IS_1D2D>(kA, kB, C, sa, sb, kM, kN, K, stream);
-    else if (cbsz == 0 && blgp == 1) launch_blockwise<OType, 0, 1, IS_1D2D>(kA, kB, C, sa, sb, kM, kN, K, stream);
-    else if (cbsz == 1 && blgp == 0) launch_blockwise<OType, 1, 0, IS_1D2D>(kA, kB, C, sa, sb, kM, kN, K, stream);
-    else                             launch_blockwise<OType, 1, 1, IS_1D2D>(kA, kB, C, sa, sb, kM, kN, K, stream);
-#endif
+                                 int kM, int kN, int K, EpilogueArgs<OType> ep, hipStream_t stream) {
+    if      (cbsz == 0 && blgp == 0) launch_blockwise_epi<OType, 0, 0, IS_1D2D>(has_bias, has_gelu, has_beta, kA, kB, C, sa, sb, kM, kN, K, ep, stream);
+    else if (cbsz == 0 && blgp == 1) launch_blockwise_epi<OType, 0, 1, IS_1D2D>(has_bias, has_gelu, has_beta, kA, kB, C, sa, sb, kM, kN, K, ep, stream);
+    else if (cbsz == 1 && blgp == 0) launch_blockwise_epi<OType, 1, 0, IS_1D2D>(has_bias, has_gelu, has_beta, kA, kB, C, sa, sb, kM, kN, K, ep, stream);
+    else                             launch_blockwise_epi<OType, 1, 1, IS_1D2D>(has_bias, has_gelu, has_beta, kA, kB, C, sa, sb, kM, kN, K, ep, stream);
 }
 
 template <typename OType>
-static void launch_blockwise_mode(bool is_1d2d, int cbsz, int blgp, const void *kA, const void *kB, void *C,
+static void launch_blockwise_mode(bool is_1d2d, int cbsz, int blgp, bool has_bias, bool has_gelu, bool has_beta,
+                                  const void *kA, const void *kB, void *C,
                                   const float *sa, const float *sb,
-                                  int kM, int kN, int K, hipStream_t stream) {
-    if (is_1d2d) launch_blockwise_fp8<OType, true>(cbsz, blgp, kA, kB, C, sa, sb, kM, kN, K, stream);
-    else         launch_blockwise_fp8<OType, false>(cbsz, blgp, kA, kB, C, sa, sb, kM, kN, K, stream);
+                                  int kM, int kN, int K, EpilogueArgs<OType> ep, hipStream_t stream) {
+    if (is_1d2d) launch_blockwise_fp8<OType, true>(cbsz, blgp, has_bias, has_gelu, has_beta, kA, kB, C, sa, sb, kM, kN, K, ep, stream);
+    else         launch_blockwise_fp8<OType, false>(cbsz, blgp, has_bias, has_gelu, has_beta, kA, kB, C, sa, sb, kM, kN, K, ep, stream);
 }
 
-}  // namespace blockwise_gfx950
+[[noreturn]] static void unsupported(int M, int N, int K, int a_dtype, int b_dtype,
+                                     int a_scaling_mode, int b_scaling_mode, int out_dtype) {
+    throw std::runtime_error(
+        "kittens_blockwise_fp8_gemm: unsupported case on gfx950 "
+        "(1Dx2D/1Dx1D, e4m3/e5m2, bf16/fp16/fp32 out, TN only; "
+        "2Dx1D and TT layout unsupported). Got M=" +
+        std::to_string(M) + " N=" + std::to_string(N) + " K=" + std::to_string(K) +
+        " a_dtype=" + std::to_string(a_dtype) + " b_dtype=" + std::to_string(b_dtype) +
+        " a_mode=" + std::to_string(a_scaling_mode) + " b_mode=" + std::to_string(b_scaling_mode) +
+        " out=" + std::to_string(out_dtype));
+}
 
-bool kittens_blockwise_fp8_gemm_impl_cdna4(
+void kittens_blockwise_fp8_gemm_impl_cdna4(
     const void *A, const void *B, void *C,
     const void *scale_A, const void *scale_B,
     int M, int N, int K,
     int a_dtype, int b_dtype,
     int a_scaling_mode, int b_scaling_mode,
     int out_dtype,
-    bool has_bias, bool has_gelu, bool has_beta,
+    const void *bias, int bias_dtype,
+    const void *gelu_aux, int gelu_aux_dtype,
+    const void *c_in, float beta,
     hipStream_t stream) {
+    const bool has_bias = (bias != nullptr);
+    const bool has_gelu = (gelu_aux != nullptr);
+    const bool has_beta = (c_in != nullptr);
 
     const void *kA = B,        *kB = A;
     const void *ksa = scale_B,  *ksb = scale_A;
@@ -441,42 +632,32 @@ bool kittens_blockwise_fp8_gemm_impl_cdna4(
     const int   ka_mode = b_scaling_mode, kb_mode = a_scaling_mode;
     const int   ka_dtype = b_dtype,       kb_dtype = a_dtype;
 
-    // Supported: user 1Dx2D (ka=1D,kb=2D) and user 1Dx1D (ka=1D,kb=1D).
-    // user 2Dx1D (kb=2D,ka=... i.e. kb_mode==2D && ka_mode==1D is 1Dx2D; the
-    // 2Dx1D case maps to ka_mode==1D,kb_mode==2D? no) -> reject anything else.
     const bool is_1d2d = (ka_mode == KITTENS_BLOCK_SCALING_1D) &&
                          (kb_mode == KITTENS_BLOCK_SCALING_2D);
     const bool is_1d1d = (ka_mode == KITTENS_BLOCK_SCALING_1D) &&
                          (kb_mode == KITTENS_BLOCK_SCALING_1D);
-    if (!is_1d2d && !is_1d1d) return false;  // 2Dx1D unsupported (as on cdna3)
-    // e4m3/e5m2 both allowed (flavor -> MFMA cbsz/blgp). Mixed permitted.
-    if (ka_dtype != KITTENS_FP8E4M3 && ka_dtype != KITTENS_FP8E5M2) return false;
-    if (kb_dtype != KITTENS_FP8E4M3 && kb_dtype != KITTENS_FP8E5M2) return false;
-    if (has_bias || has_gelu || has_beta) return false;
-    using blockwise_gfx950::BLOCK_ROW;
-    using blockwise_gfx950::BLOCK_COL;
-    using blockwise_gfx950::BLOCK_K;
-    if (K % BLOCK_K != 0) return false;  // partial-K not yet supported
-    if (K < 2 * BLOCK_K) return false;
-    // M/N may be arbitrary (partial edge tiles handled via SRD-zeroed loads +
-    // masked kittens::store).
+    const bool a_fp8 = (ka_dtype == KITTENS_FP8E4M3 || ka_dtype == KITTENS_FP8E5M2);
+    const bool b_fp8 = (kb_dtype == KITTENS_FP8E4M3 || kb_dtype == KITTENS_FP8E5M2);
+    if ((!is_1d2d && !is_1d1d) || !a_fp8 || !b_fp8)
+        unsupported(M, N, K, a_dtype, b_dtype, a_scaling_mode, b_scaling_mode, out_dtype);
 
-    // cbsz = kernel-A(=kA) flavor, blgp = kernel-B(=kB) flavor. (0=e4m3, 1=e5m2)
     const int cbsz = (ka_dtype == KITTENS_FP8E5M2) ? 1 : 0;
     const int blgp = (kb_dtype == KITTENS_FP8E5M2) ? 1 : 0;
     const float *sa = reinterpret_cast<const float *>(ksa);
     const float *sb = reinterpret_cast<const float *>(ksb);
 
-    using namespace blockwise_gfx950;
-#ifdef NVTE_HK_FAST_BUILD
-    // Dev-only: only bf16 output instantiated to cut compile time.
-    if (out_dtype != KITTENS_BFLOAT16) return false;
-    launch_blockwise_mode<kittens::bf16>(is_1d2d, cbsz, blgp, kA, kB, C, sa, sb, kM, kN, K, stream);
-#else
-    if      (out_dtype == KITTENS_BFLOAT16) launch_blockwise_mode<kittens::bf16>(is_1d2d, cbsz, blgp, kA, kB, C, sa, sb, kM, kN, K, stream);
-    else if (out_dtype == KITTENS_FLOAT16)  launch_blockwise_mode<kittens::half>(is_1d2d, cbsz, blgp, kA, kB, C, sa, sb, kM, kN, K, stream);
-    else if (out_dtype == KITTENS_FLOAT32)  launch_blockwise_mode<float>(is_1d2d, cbsz, blgp, kA, kB, C, sa, sb, kM, kN, K, stream);
-    else return false;
-#endif
-    return true;
+#define LAUNCH_OUT(OT)                                                                  \
+    do {                                                                               \
+        EpilogueArgs<OT> ep{bias, bias_dtype, gelu_aux, gelu_aux_dtype,                 \
+                            reinterpret_cast<const OT *>(c_in), beta};                  \
+        launch_blockwise_mode<OT>(is_1d2d, cbsz, blgp, has_bias, has_gelu, has_beta,    \
+                                  kA, kB, C, sa, sb, kM, kN, K, ep, stream);            \
+    } while (0)
+    if      (out_dtype == KITTENS_BFLOAT16) LAUNCH_OUT(kittens::bf16);
+    else if (out_dtype == KITTENS_FLOAT16)  LAUNCH_OUT(kittens::half);
+    else if (out_dtype == KITTENS_FLOAT32)  LAUNCH_OUT(float);
+    else unsupported(M, N, K, a_dtype, b_dtype, a_scaling_mode, b_scaling_mode, out_dtype);
+#undef LAUNCH_OUT
 }
+
+}  // namespace blockwise_gfx950

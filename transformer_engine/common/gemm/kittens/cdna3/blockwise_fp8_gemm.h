@@ -28,7 +28,6 @@ enum KittensScalingMode {
 #endif  // KITTENS_SCALING_MODE_DEFINED
 
 
-// activation 1D scale [K/128, M]; weight scale selected by b_scaling_mode:
 // KITTENS_BLOCK_SCALING_2D -> 2D scale [N/128, K/128]  (1d2d)
 // KITTENS_BLOCK_SCALING_1D -> 1D scale [K/128, N]      (1d1d)
 namespace blockwise_gfx942 {

@@ -4,23 +4,12 @@
 *************************************************************************/
 
 #include <hip/hip_runtime.h>
-#include <cstring>
-#include <cstdio>
 #include <stdexcept>
 #include <string>
 #include "blockwise_fp8_gemm.h"
 #include "cdna3/blockwise_fp8_gemm.h"
 #include "cdna4/blockwise_fp8_gemm.h"
-
-namespace {
-bool current_device_is_gfx950() {
-    int dev = 0;
-    if (hipGetDevice(&dev) != hipSuccess) return false;
-    hipDeviceProp_t prop;
-    if (hipGetDeviceProperties(&prop, dev) != hipSuccess) return false;
-    return std::strstr(prop.gcnArchName, "gfx950") != nullptr;
-}
-}  // namespace
+#include "../../util/hip_runtime.h"
 
 void kittens_blockwise_fp8_gemm(
     const void *A, const void *B, void *C,
@@ -34,31 +23,22 @@ void kittens_blockwise_fp8_gemm(
     const void *gelu_aux, int gelu_aux_dtype,
     const void *c_in, float beta,
     hipStream_t stream) {
-    const bool has_bias = (bias != nullptr);
-    const bool has_gelu = (gelu_aux != nullptr);
-    const bool has_beta = (c_in != nullptr);
-
-    if (current_device_is_gfx950()) {
-        // No cdna3 fallback on gfx950: cdna3 is #if __gfx942__ only (empty body -> wrong results); raise instead.
-        bool handled = kittens_blockwise_fp8_gemm_impl_cdna4(
+    const int arch = transformer_engine::cuda::sm_arch();
+    if (arch == 95) {
+        blockwise_gfx950::kittens_blockwise_fp8_gemm_impl_cdna4(
             A, B, C, scale_A, scale_B, M, N, K,
             a_dtype, b_dtype, a_scaling_mode, b_scaling_mode, out_dtype,
-            has_bias, has_gelu, has_beta, stream);
-        if (!handled) {
-            throw std::runtime_error(
-                "kittens_blockwise_fp8_gemm: unsupported case on gfx950 "
-                "(only 1Dx2D, e4m3xe4m3, bf16 out, TN, 256-aligned M/N/K, "
-                "no bias/gelu/accumulate is implemented on CDNA4). Got M=" +
-                std::to_string(M) + " N=" + std::to_string(N) + " K=" + std::to_string(K) +
-                " a_dtype=" + std::to_string(a_dtype) + " b_dtype=" + std::to_string(b_dtype) +
-                " a_mode=" + std::to_string(a_scaling_mode) + " b_mode=" + std::to_string(b_scaling_mode) +
-                " out=" + std::to_string(out_dtype));
-        }
+            bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta, stream);
         return;
     }
-
-    blockwise_gfx942::kittens_blockwise_fp8_gemm_impl_cdna3(
-        A, B, C, scale_A, scale_B, M, N, K, transa, transb,
-        a_dtype, b_dtype, a_scaling_mode, b_scaling_mode, out_dtype,
-        bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta, stream);
+    if (arch == 94) {
+        blockwise_gfx942::kittens_blockwise_fp8_gemm_impl_cdna3(
+            A, B, C, scale_A, scale_B, M, N, K, transa, transb,
+            a_dtype, b_dtype, a_scaling_mode, b_scaling_mode, out_dtype,
+            bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta, stream);
+        return;
+    }
+    throw std::runtime_error(
+        "kittens_blockwise_fp8_gemm: not implemented for this GPU arch (sm_arch=" +
+        std::to_string(arch) + "); only gfx942 and gfx950 are supported.");
 }

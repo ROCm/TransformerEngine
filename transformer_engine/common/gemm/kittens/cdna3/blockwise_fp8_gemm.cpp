@@ -6,7 +6,6 @@
 #include <type_traits>
 #include "kittens.cuh"
 #include "blockwise_fp8_gemm.h"
-#include "../../../util/math.h"
 
 namespace blockwise_gfx942 {
 

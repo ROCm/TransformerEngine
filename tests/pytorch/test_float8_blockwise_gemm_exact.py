@@ -96,7 +96,7 @@ def cublas_gemm_fp8_blockwise_case(
         pytest.skip("FP8 GEMM doesn't support 2dimensional qtile by 2dimensional qtile")
     if not fp8_blockwise_gemm_supported():
         pytest.skip("CUDA version does not support blockwise FP8 gemm.")
-    if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 4):
+    if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 4), (9, 5)):
         unsupported_reason = rocm_blockwise_unsupported_reason(
             x_dtype, w_dtype, out_dtype, K, is_x_1d_scaled, is_w_1d_scaled,
             x_columnwise=x_columnwise, w_columnwise=w_columnwise,
@@ -281,7 +281,7 @@ def cublas_gemm_test_constraint_enforced(
 ):
     if not fp8_blockwise_gemm_supported():
         pytest.skip("CUDA version does not support blockwise FP8 gemm.")
-    if IS_HIP_EXTENSION and get_device_compute_capability() == (9, 4):
+    if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 4), (9, 5)):
         pytest.skip(
             "blockwise FP8 GEMM does not yet wire unsupported-config error paths"
         )

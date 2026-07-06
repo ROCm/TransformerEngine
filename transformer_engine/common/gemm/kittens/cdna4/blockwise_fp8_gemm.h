@@ -27,15 +27,18 @@ enum KittensScalingMode {
 };
 #endif  // KITTENS_SCALING_MODE_DEFINED
 
-// gfx950 (CDNA4) blockwise FP8 GEMM (TN). C[M,N] = A[M,K] x B[N,K]^T.
-// 1Dx2D scaling only: scale_A = per-row 1D [K/128, M], scale_B = per-tile 2D
-// [N/128, K/128]; e4m3 x e4m3; bf16 output; M/N/K multiples of 128; no epilogue.
-bool kittens_blockwise_fp8_gemm_impl_cdna4(
+// KITTENS_BLOCK_SCALING_2D -> 2D scale [N/128, K/128]  (1d2d)
+// KITTENS_BLOCK_SCALING_1D -> 1D scale [K/128, N]      (1d1d)
+namespace blockwise_gfx950 {
+void kittens_blockwise_fp8_gemm_impl_cdna4(
     const void *A, const void *B, void *C,
     const void *scale_A, const void *scale_B,
     int M, int N, int K,
     int a_dtype, int b_dtype,
     int a_scaling_mode, int b_scaling_mode,
     int out_dtype,
-    bool has_bias, bool has_gelu, bool has_beta,
+    const void *bias, int bias_dtype,
+    const void *gelu_aux, int gelu_aux_dtype,
+    const void *c_in, float beta,
     hipStream_t stream);
+}  // namespace blockwise_gfx950

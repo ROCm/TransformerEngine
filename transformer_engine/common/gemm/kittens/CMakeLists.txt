@@ -76,11 +76,6 @@ function(try_enable_hipkittens_gemm)
             ${HIP_INCLUDE_DIRS} "${HIPKITTENS_CDNA4_INCLUDE_DIR}")
         target_compile_options(kittens_gemm_cdna4 PRIVATE
             -DKITTENS_CDNA4 -fno-gpu-rdc -O3)
-        # Dev-only: NVTE_HK_FAST_BUILD=1 shrinks blockwise instantiations
-        # (bf16 + e4m3xe4m3 only) to cut cdna4 compile time. Not for release.
-        if(DEFINED ENV{NVTE_HK_FAST_BUILD} AND NOT "$ENV{NVTE_HK_FAST_BUILD}" STREQUAL "0")
-            target_compile_options(kittens_gemm_cdna4 PRIVATE -DNVTE_HK_FAST_BUILD)
-        endif()
         target_link_libraries(kittens_gemm_cdna4 PRIVATE hip::host hip::device)
         list(APPEND _kittens_arch_objs $<TARGET_OBJECTS:kittens_gemm_cdna4>)
     endif()
