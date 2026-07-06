@@ -31,38 +31,19 @@ def fp8_blockwise_gemm_supported() -> bool:
     return supported and not emulated
 
 def rocm_blockwise_unsupported_reason(
-    x_dtype,
-    w_dtype,
-    out_dtype,
-    K,
     is_x_1d_scaled,
     is_w_1d_scaled,
     *,
     x_columnwise: bool = False,
     w_columnwise: bool = False,
-    use_gelu: bool = False,
-    use_grad: bool = False,
 ):
-    if out_dtype not in (torch.bfloat16, torch.float32, torch.float16):
-        return "blockwise FP8 GEMM only supports bfloat16/float32/float16 output"
-
     is_1d2d = is_x_1d_scaled and not is_w_1d_scaled
     is_1d1d = is_x_1d_scaled and is_w_1d_scaled
     if not (is_1d2d or is_1d1d):
-        return "blockwise FP8 GEMM only supports 1Dx2D / 1Dx1D scaling"
+        return "only supports 1Dx2D / 1Dx1D scaling"
 
     if x_columnwise and not w_columnwise:
-        return "blockwise FP8 GEMM does not support TT layout"
-
-    fp8_types = (fp8_e4m3_type, fp8_e5m2_type)
-    if x_dtype not in fp8_types or w_dtype not in fp8_types:
-        return "blockwise FP8 GEMM only supports e4m3/e5m2 inputs"
-
-    if use_gelu and not use_grad:
-        return "blockwise FP8 GEMM only supports dgelu (grad) epilogue"
-
-    if K % 16 != 0:
-        return "blockwise FP8 GEMM requires K%16==0"
+        return "does not support TT layout"
 
     return None
 
@@ -98,9 +79,8 @@ def cublas_gemm_fp8_blockwise_case(
         pytest.skip("CUDA version does not support blockwise FP8 gemm.")
     if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 4), (9, 5)):
         unsupported_reason = rocm_blockwise_unsupported_reason(
-            x_dtype, w_dtype, out_dtype, K, is_x_1d_scaled, is_w_1d_scaled,
+            is_x_1d_scaled, is_w_1d_scaled,
             x_columnwise=x_columnwise, w_columnwise=w_columnwise,
-            use_gelu=use_gelu, use_grad=use_grad,
         )
         if unsupported_reason is not None:
             pytest.skip(unsupported_reason)
@@ -282,9 +262,8 @@ def cublas_gemm_test_constraint_enforced(
     if not fp8_blockwise_gemm_supported():
         pytest.skip("CUDA version does not support blockwise FP8 gemm.")
     if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 4), (9, 5)):
-        pytest.skip(
-            "blockwise FP8 GEMM does not yet wire unsupported-config error paths"
-        )
+        expected_err_msg = None
+        expected_err_cls = RuntimeError
     # Setup device and random seed
     device = "cuda"
     seed = 0

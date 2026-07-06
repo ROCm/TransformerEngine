@@ -27,8 +27,6 @@ enum KittensScalingMode {
 };
 #endif  // KITTENS_SCALING_MODE_DEFINED
 
-// KITTENS_BLOCK_SCALING_2D -> 2D scale [N/128, K/128]  (1d2d)
-// KITTENS_BLOCK_SCALING_1D -> 1D scale [K/128, N]      (1d1d)
 namespace blockwise_gfx950 {
 void kittens_blockwise_fp8_gemm_impl_cdna4(
     const void *A, const void *B, void *C,
