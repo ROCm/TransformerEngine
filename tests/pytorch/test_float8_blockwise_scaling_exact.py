@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -15,6 +17,10 @@ from transformer_engine.pytorch import (
     Float8BlockQuantizer,
     get_device_compute_capability,
 )
+from transformer_engine.pytorch.utils import (
+    get_torch_float8_e4m3_type,
+    get_torch_float8_e5m2_type,
+)
 from references.blockwise_quantizer_reference import (
     BlockwiseQuantizerReference,
     QuantizeResult,
@@ -24,12 +30,18 @@ from test_float8_current_scaling_exact import (
     TestFP8RecipeLayerNormLinearBase,
 )
 
+fp8_e4m3_type = get_torch_float8_e4m3_type()
+fp8_e5m2_type = get_torch_float8_e5m2_type()
+
 # read env variable NVTE_TEST_FLOAT8_BLOCK_SCALING_EXACT_TENSOR_DUMP_DIR to override the default tensor dump directory
 TENSOR_DUMP_DIR = pathlib.Path(__file__).resolve().parent.parent.parent / "tensor_dumps"
 tensor_dump_dir_env = os.getenv("NVTE_TEST_BLOCK_CURRENT_SCALING_EXACT_TENSOR_DUMP_DIR")
 if tensor_dump_dir_env is not None:
     TENSOR_DUMP_DIR = pathlib.Path(tensor_dump_dir_env)
-recipe_available, reason_for_no_recipe = te.is_fp8_block_scaling_available(return_reason=True)
+recipe_available, reason_for_no_recipe = te.is_fp8_block_scaling_quantization_available(
+    return_reason=True
+)
+gemm_available, reason_for_no_gemm = te.is_fp8_block_scaling_available(return_reason=True)
 recipe_emulated = get_device_compute_capability() >= (10, 0)
 
 
@@ -213,7 +225,7 @@ def check_quantization_block_tiling_versus_reference(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-@pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
+@pytest.mark.parametrize("quant_dtype", [fp8_e4m3_type, fp8_e5m2_type], ids=str)
 @pytest.mark.parametrize("eps", [0], ids=["eps_0"])
 @pytest.mark.parametrize(
     "return_transpose", [True, False], ids=["quantize_transpose", "quantize_only"]
@@ -248,7 +260,7 @@ def test_quantization_block_tiling_versus_reference(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-@pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
+@pytest.mark.parametrize("quant_dtype", [fp8_e4m3_type, fp8_e5m2_type], ids=str)
 @pytest.mark.parametrize("eps", [0], ids=["eps_0"])
 @pytest.mark.parametrize(
     "return_transpose", [True, False], ids=["quantize_transpose", "quantize_only"]
@@ -279,7 +291,7 @@ def test_quantization_block_tiling_versus_reference_fp32_scales(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.float32, torch.bfloat16], ids=str)
-@pytest.mark.parametrize("quant_dtype", [torch.float8_e4m3fn, torch.float8_e5m2], ids=str)
+@pytest.mark.parametrize("quant_dtype", [fp8_e4m3_type, fp8_e5m2_type], ids=str)
 @pytest.mark.parametrize("eps", [0], ids=["eps_0"])
 @pytest.mark.parametrize("pow_2_scales", [True, False], ids=["pow2scales", "fp32scales"])
 @pytest.mark.parametrize("tile_size", [(128, 128)])
@@ -378,7 +390,7 @@ def test_quantization_block_tiling_extrema_versus_reference(
 
 
 # FP8 per tesnor current scaling
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(not gemm_available, reason=reason_for_no_gemm)
 class TestFP8BlockScalingRecipeLinear(TestFP8RecipeLinearBase):
 
     @staticmethod
@@ -438,7 +450,7 @@ class TestFP8BlockScalingRecipeLinear(TestFP8RecipeLinearBase):
         )
 
 
-@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(not gemm_available, reason=reason_for_no_gemm)
 class TestFP8BlockScalingRecipeLayerNormLinear(TestFP8RecipeLayerNormLinearBase):
 
     @staticmethod

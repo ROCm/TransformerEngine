@@ -245,7 +245,7 @@ list(APPEND transformer_engine_cuda_sources
      transpose/cast_transpose_fusion.cu
      transpose/transpose_fusion.cu
      transpose/multi_cast_transpose.cu
-     transpose/quantize_transpose_vector_blockwise.cu #CUDA-only
+     transpose/quantize_transpose_vector_blockwise.cu
      transpose/swap_first_dims.cu
      dropout/dropout.cu
      fused_attn/flash_attn.cu
@@ -279,7 +279,6 @@ list(APPEND transformer_engine_cuda_sources
      comm_gemm_overlap/userbuffers/userbuffers.cu)
 
 set(cuda_only_cuda_sources
-     transpose/quantize_transpose_vector_blockwise.cu
      fused_attn/fused_attn_f16_max512_seqlen.cu
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
      fused_attn/fused_attn_fp8.cu
@@ -303,7 +302,7 @@ list(APPEND transformer_engine_cuda_arch_specific_sources
      multi_tensor/compute_scale.cu
      recipe/mxfp8_scaling.cu
      recipe/nvfp4.cu
-     transpose/quantize_transpose_square_blockwise.cu #CUDA-only
+     transpose/quantize_transpose_square_blockwise.cu
      transpose/quantize_transpose_vector_blockwise_fp4.cu)
 
 set(cuda_only_cuda_arch_specific_sources
@@ -314,8 +313,7 @@ set(cuda_only_cuda_arch_specific_sources
      hadamard_transform/row_cast_col_hadamard_transform_cast_fusion.cu
      hadamard_transform/group_hadamard_transform_cast_fusion.cu
      hadamard_transform/group_row_cast_col_hadamard_transform_cast_fusion.cu
-     hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu
-     transpose/quantize_transpose_square_blockwise.cu)
+     hadamard_transform/graph_safe_group_row_cast_col_hadamard_transform_cast_fusion.cu)
 
 # Compiling the files with the worst compilation time first to hopefully overlap
 # better with the faster-compiling cpp files
