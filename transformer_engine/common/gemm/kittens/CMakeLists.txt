@@ -3,13 +3,6 @@
 
 cmake_minimum_required(VERSION 3.21)
 
-# HipKittens GEMM kernels are split by target architecture into per-device
-# folders (a TEMPORARY layout until the hipkittens cdna3/cdna4 submodule
-# branches are merged upstream):
-#   cdna3/  gfx942: blockwise FP8 GEMM   (3rdparty/hipkittens_cdna3, -DKITTENS_CDNA3)
-#   cdna4/  gfx950: blockwise + MXFP8    (3rdparty/hipkittens,       -DKITTENS_CDNA4)
-# Each source is added only when its arch is in CMAKE_HIP_ARCHITECTURES, and
-# compiled with its own HipKittens include dir + define.
 function(try_enable_hipkittens_gemm)
     list(FIND CMAKE_HIP_ARCHITECTURES "gfx942" _gfx942_index)
     list(FIND CMAKE_HIP_ARCHITECTURES "gfx950" _gfx950_index)
@@ -36,11 +29,6 @@ function(try_enable_hipkittens_gemm)
     project(kittens_gemm LANGUAGES HIP CXX)
     find_package(hip)
 
-    # Arch-specific kernels are compiled as separate OBJECT libraries, each
-    # pinned to its own GPU arch via the per-TARGET HIP_ARCHITECTURES property
-    # (per-SOURCE HIP_ARCHITECTURES is ignored by CMake's HIP language, which is
-    # why cdna3 was previously getting gfx950 code objects too). The final
-    # shared library links the host launcher + whichever arch objects apply.
     set(_kittens_arch_objs "")
 
     if(NOT _gfx942_index EQUAL -1)
@@ -80,7 +68,6 @@ function(try_enable_hipkittens_gemm)
         list(APPEND _kittens_arch_objs $<TARGET_OBJECTS:kittens_gemm_cdna4>)
     endif()
 
-    # Unified host launcher (pure host, no HipKittens headers) + arch objects.
     add_library(kittens_gemm SHARED blockwise_fp8_gemm.cpp ${_kittens_arch_objs})
     set_source_files_properties(blockwise_fp8_gemm.cpp PROPERTIES LANGUAGE HIP)
     target_include_directories(kittens_gemm PRIVATE ${HIP_INCLUDE_DIRS})
