@@ -71,6 +71,17 @@ enum ReduceFuncType {
   MAX,
 };
 
+// Reduction helpers for masked_warp_reduce_on_shmem.
+template <typename T>
+__device__ inline T max(T a, T b) {
+  return a > b ? a : b;
+}
+
+template <typename T>
+__device__ inline T sum(T a, T b) {
+  return a + b;
+}
+
 // Warp-level reduction over shared memory data.  Templated on the reduction
 // type to enable compile-time dispatch (no function pointer overhead).
 template <typename T, ReduceFuncType type>
@@ -539,16 +550,26 @@ __device__ inline void naive_topk_and_mask_smallk(CompType *scores, int data_siz
       }
     }
     for (int s = kThreadsPerWarp / 2; s > 0; s /= 2) {
+#ifdef __HIP_PLATFORM_AMD__
+      auto shuffled_val = __shfl_xor(val, s, kThreadsPerWarp);
+      auto shuffled_index = __shfl_xor(index, s, kThreadsPerWarp);
+#else
       auto shuffled_val = __shfl_xor_sync(0xffffffff, val, s);
       auto shuffled_index = __shfl_xor_sync(0xffffffff, index, s);
+#endif
       if (shuffled_val > val) {
         val = shuffled_val;
         index = shuffled_index;
       }
     }
 
+#ifdef __HIP_PLATFORM_AMD__
+    CompType chosen_val = __shfl(val, 0, kThreadsPerWarp);
+    int chosen_index = __shfl(index, 0, kThreadsPerWarp);
+#else
     CompType chosen_val = __shfl_sync(0xffffffff, val, 0);
     int chosen_index = __shfl_sync(0xffffffff, index, 0);
+#endif
     if (lane_id == 0) {
       topk_indices[k] = chosen_index;
       topk_scores[k] = chosen_val;

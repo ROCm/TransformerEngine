@@ -2212,6 +2212,7 @@ void nvte_multi_tensor_unswizzle_scaling_factors(const NVTETensor* inputs, NVTET
 
 namespace transformer_engine {
 
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
 template <int SF_TILE_DIM_M, int SF_TILE_DIM_K>
 __global__ void __launch_bounds__(TB_DIM* TB_DIM)
     grouped_swizzle_scaling_variable_shape_kernel(const void* input, void* output,
@@ -2359,6 +2360,7 @@ int grouped_swizzle_variable_max_active_blocks_per_sm(int device_id) {
   std::call_once(flags[device_id], init);
   return cache[device_id];
 }
+#endif
 
 void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* output,
                                      cudaStream_t stream) {
@@ -2387,8 +2389,8 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
 
   if (!is_variable_shape) {
     // Fallback to uniform shape implementation
-    // Assumption is that all the tensors share the same shapes and are contgiuous.
-    // And so we dont need to pass array of input/output pointers(due to conttiguity)
+    // Assumption is that all the tensors share the same shapes and are contiguous.
+    // And so we don't need to pass array of input/output pointers (due to contiguity)
     // as well as array of shapes(due to uniform shapes).
     const size_t first_dim = input->get_common_first_dim();
     const size_t last_dim = input->get_common_last_dim();
@@ -2505,6 +2507,7 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
       launch_grouped_swizzle(false);
     }
   } else {
+#ifndef __HIP_PLATFORM_AMD__
     // Variable shape implementation using Device-Side Block Scheduler
     size_t num_tensors = input->num_tensors;
 
@@ -2550,6 +2553,9 @@ void swizzle_grouped_scaling_factors(const GroupedTensor* input, GroupedTensor* 
     if (has_columnwise_scale_inv) {
       launch_grouped_swizzle_variable(false);
     }
+#else
+    NVTE_ERROR("Variable-shape grouped scale swizzling is not supported on ROCm.");
+#endif
   }
 }
 

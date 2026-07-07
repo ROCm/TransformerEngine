@@ -117,7 +117,7 @@ if IS_HIP_EXTENSION and os.getenv("NVTE_FLASH_ATTN_AITER", "0") == "1":
     else:
         fa_utils.use_aiter_triton = True
         # Setup Flash attention utils
-        fa_utils.version = PkgVersion("2.7.1")  #masqurade as FA 2.7.1
+        fa_utils.version = PkgVersion("2.7.1")  # masquerade as FA 2.7.1
         fa_utils.set_flash_attention_version()
         attn_log.fa_logger.info("Using AITER Triton for FlashAttn.")
 
@@ -137,7 +137,7 @@ else:
 
     if fa_utils.is_installed:
         if not IS_HIP_EXTENSION:
-            #Should not be used on AMD GPUs
+            # Should not be used on AMD GPUs
             from flash_attn_2_cuda import varlen_bwd as flash_attn_cuda_bwd
         from flash_attn.flash_attn_interface import flash_attn_func, flash_attn_varlen_func
         from flash_attn.flash_attn_interface import _flash_attn_forward as _flash_attn_fwd

@@ -192,7 +192,7 @@ def _compute_nvfp4_support() -> Tuple[bool, str]:
     """Return if nvfp4 support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 4), (9, 5)):  # TODO: enabled for gfx1250 when ready
+        if gpu_arch in ((9, 4), (9, 5)):  # TODO: enable for gfx1250 when ready
             return True, ""
         return False, "Device arch gfx94x or newer is required for NVFP4 execution."
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
@@ -261,7 +261,7 @@ def check_mxfp4_support() -> Tuple[bool, str]:
     """Return if mxfp4 support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch == (9, 5): #TODO: enabled for gfx1250 when ready
+        if gpu_arch == (9, 5):  # TODO: enable for gfx1250 when ready
             return True, ""
         return False, "Device arch gfx95x or newer is required for MXFP4 execution."
     return False, "Only ROCm gfx950 supports MXFP4"

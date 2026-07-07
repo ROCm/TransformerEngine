@@ -1748,7 +1748,7 @@ def test_layernorm_linear_accuracy_delay_wgrad_compute(
         ln_linear_ref, bs, dtype, config, delay_wgrad_compute=False
     )
 
-    # Shoule be bit-wise match
+    # Should be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
@@ -1966,7 +1966,7 @@ def test_layernorm_mlp_accuracy_delay_wgrad_compute(
         ln_mlp_ref, bs, dtype, config, delay_wgrad_compute=False
     )
 
-    # Shoule be bit-wise match
+    # Should be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
@@ -2018,7 +2018,7 @@ def test_layernorm_mlp_accuracy_checkpoint(
         ln_mlp_ref, bs, dtype, config, delay_wgrad_compute=False
     )
 
-    # Shoule be bit-wise match
+    # Should be bit-wise match
     for i, (o, o_ref) in enumerate(zip(te_outputs, te_outputs_ref)):
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 

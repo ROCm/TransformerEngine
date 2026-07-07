@@ -12,9 +12,7 @@
 namespace transformer_engine {
 namespace jax {
 
-// nvte_topk (common/util/topk.cu) is CUDA-only: standalone_topk.cuh relies on
-// cub internals and cooperative_groups::reduce, which have no HIP equivalent, so
-// topk.cu is excluded from the ROCm build. Guard the FFI/handlers accordingly.
+// Disabled on ROCm
 #ifndef USE_ROCM
 
 // ---------------------------------------------------------------------------
@@ -105,7 +103,7 @@ pybind11::tuple GetTopkWorkspaceSizes(int batch_size, int seq_len, int k) {
   return pybind11::make_tuple(std::make_pair(work_shape, workspace_tensor.dtype()));
 }
 
-#endif  // #ifndef USE_ROCM
+#endif
 
 }  // namespace jax
 }  // namespace transformer_engine

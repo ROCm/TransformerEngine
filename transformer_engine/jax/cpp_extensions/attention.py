@@ -363,7 +363,6 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         ).get_fused_attn_backend()
 
         if not is_hip_extension():
-            # upstream v2.17 dropped the NVTE_F16_max512_seqlen branch; CUDA path now only supports arbitrary_seqlen
             if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
                 # cuDNN 9.6 reduces the required softmax shape
                 if get_cudnn_version() >= (9, 6, 0):

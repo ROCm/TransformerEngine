@@ -6,7 +6,9 @@
  * See LICENSE for license information.
  ************************************************************************/
 
+#ifndef USE_ROCM  // Disabled on ROCm
 #include <cudnn_frontend.h>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -73,7 +75,7 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
 #endif
     // ROCm fused attn has two backends: aotriton and ck
     // They both have the same shape and stride for softmax and rng aux tensors
-    // CK now support bias features
+    // CK now supports bias features
     tensor_pack->size = 2;
     NVTETensor &rng_state_aux = tensor_pack->tensors[1];
     NVTEBasicTensor rng_state_aux_data;
@@ -718,6 +720,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnBackwardHandler, FusedAttnBackwardFFI,
                                   .Attrs(),
                               FFI_CudaGraph_Traits);
 
+#ifndef USE_ROCM  // Disabled on ROCm: cuDNN score_mod graph
 namespace {
 
 struct ScoreModScalarStorage {
@@ -955,6 +958,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(FusedAttnScoreModBackwardHandler, FusedAttnScoreMo
                                   .Ret<Buffer_Type>()      // dv
                                   .Ret<Buffer_Type>()      // workspace
                                   .Attrs());
+#endif  // USE_ROCM
 
 }  // namespace jax
 }  // namespace transformer_engine

@@ -415,7 +415,7 @@ class FusedAdam(torch.optim.Optimizer):
         param_for_empty = (
             local_param.dequantize() if isinstance(local_param, QuantizedTensor) else local_param
         )
-        #ROCm: create plain `torch.Tensor` instead of `FSDPAGTensor` subclasses
+        # ROCm: create plain `torch.Tensor` instead of `FSDPAGTensor` subclasses
         if IS_HIP_EXTENSION:
             if store_param_remainders:
                 data = torch.zeros(

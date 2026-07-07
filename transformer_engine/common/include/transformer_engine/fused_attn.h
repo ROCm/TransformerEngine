@@ -159,10 +159,7 @@ enum NVTE_Softmax_Type {
 enum NVTE_Fused_Attn_Backend {
   /*! No supported backend */
   NVTE_No_Backend = -1,
-  /*! cuDNN-based FP16/BF16 fused attention for max 512 sequence length.
-   *  Note: upstream v2.17 removed the max512 backend implementation/dispatch;
-   *  the ROCm fork retains the enumerator so its CUDA-path bindings/consumers
-   *  (pybind_helper.h, cpp_extensions/fused_attn.py) still compile. */
+  /*! cuDNN-based FP16/BF16 fused attention for <= 512 sequence length */
   NVTE_F16_max512_seqlen = 0,
   /*! cuDNN-based FP16/BF16 fused attention for any sequence length */
   NVTE_F16_arbitrary_seqlen = 1,

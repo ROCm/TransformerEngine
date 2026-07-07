@@ -81,6 +81,7 @@ std::tuple<TensorWrapper, std::vector<size_t>> xla_buffer_to_nvte_gemm_operand(
                  "Inverse scale factors need to have an 8-bit data type.");
     }
     if (scaling_mode == JAXX_Scaling_Mode::MXFP8_1D_SCALING) {
+      // Assume MXFP8 scales are already swizzled
       if (rowwise) {
         input.set_rowwise_scale_inv(scale_inv.untyped_data(), scale_dtype, scale_shape);
       } else {

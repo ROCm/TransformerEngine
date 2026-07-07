@@ -144,7 +144,7 @@ def setup_jax_extension(
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
         cxx_flags.append("-DNVTE_WITH_CUBLASMP")
 
-    # NCCL EP is a CUDA/NCCL-only feature; never enabled on ROCm.
+    # Disabled on ROCm
     if not rocm_build() and nccl_ep_enabled():
         cxx_flags.append("-DNVTE_WITH_NCCL_EP")
 
