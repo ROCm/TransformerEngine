@@ -10,6 +10,7 @@ option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
 option(USE_HIPKITTENS_GEMM "Use HipKittens MXFP8 GEMM kernels" ON)
+option(USE_AITER_GEMM "Use AITER a4w4 (FP4) GEMM backend" ON)
 set(USE_CUDA OFF)
 
 if (USE_ROCM)
@@ -336,6 +337,7 @@ if(USE_ROCM)
       fused_attn_rocm/fused_attn_aotriton.cpp
       fused_attn_rocm/fused_attn_ck.cpp
       fused_attn_rocm/utils.cpp
+      gemm/aiter_a4w4_gemm.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp8.cpp
       gemm/ck_grouped_gemm/ck_grouped_gemm_fp16.cpp
@@ -582,6 +584,20 @@ else() # USE_ROCM
     add_subdirectory(gemm/kittens ${CMAKE_CURRENT_BINARY_DIR}/kittens)
   endif()
 
+  # AITER a4w4 (FP4) GEMM is gfx950-only; skip cleanly on other arches so a
+  # default-on USE_AITER_GEMM does not break gfx942/gfx1250 builds.  The NVTE
+  # C API in gemm/aiter_a4w4_gemm.cpp keeps stub symbols when disabled.
+  list(FIND CMAKE_HIP_ARCHITECTURES "gfx950" _aiter_gemm_gfx950_idx)
+  if(USE_AITER_GEMM AND NOT _aiter_gemm_gfx950_idx EQUAL -1)
+    set(__BUILD_AITER_GEMM TRUE)
+    add_subdirectory(aiter_gemm ${CMAKE_CURRENT_BINARY_DIR}/aiter_gemm)
+  else()
+    set(__BUILD_AITER_GEMM FALSE)
+    if(USE_AITER_GEMM)
+      message(STATUS "USE_AITER_GEMM requested but no gfx950 target present; a4w4 GEMM backend disabled.")
+    endif()
+  endif()
+
   find_package(hip)
   list(APPEND transformer_engine_LINKER_LIBS hip::host hip::device roctx64)
   find_package(hiprtc)
@@ -599,6 +615,10 @@ else() # USE_ROCM
   if(USE_HIPKITTENS_GEMM)
     target_compile_definitions(transformer_engine PUBLIC USE_HIPKITTENS_GEMM)
     list(APPEND transformer_engine_LINKER_LIBS kittens_gemm)
+  endif()
+  if(__BUILD_AITER_GEMM)
+    target_compile_definitions(transformer_engine PUBLIC USE_AITER_GEMM)
+    list(APPEND transformer_engine_LINKER_LIBS aiter_gemm)
   endif()
   target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
 endif()

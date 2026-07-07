@@ -16,6 +16,9 @@
 #include "common/util/system.h"
 #include "pybind.h"
 #include "transformer_engine/transformer_engine.h"
+#ifdef USE_ROCM
+#include "transformer_engine/aiter_gemm.h"
+#endif
 #include "util.h"
 
 #include <torch/version.h>
@@ -821,5 +824,80 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
 
   return py::reinterpret_borrow<py::object>(D);
 }
+
+#ifdef USE_ROCM
+
+namespace {
+
+NVTEAiterGemmTensor make_aiter_gemm_tensor(const at::Tensor &t, int dtype) {
+  NVTEAiterGemmTensor d{};
+  d.ptr = t.data_ptr();
+  d.ndim = static_cast<int>(t.dim());
+  for (int i = 0; i < d.ndim && i < 8; ++i) {
+    d.shape[i] = t.size(i);
+    d.strides[i] = t.stride(i);
+  }
+  d.dtype = dtype;
+  d.device_id = static_cast<int>(t.device().index());
+  return d;
+}
+
+int aiter_gemm_out_dtype(const at::Tensor &t) {
+  switch (t.scalar_type()) {
+    case at::kBFloat16:
+      return kNVTEAiterGemmBF16;
+    case at::kHalf:
+      return kNVTEAiterGemmFP16;
+    default:
+      NVTE_CHECK(false, "AITER a4w4 GEMM output must be bf16 or fp16");
+      return kNVTEAiterGemmBF16;
+  }
+}
+
+}  // namespace
+
+// CK blockscale a4w4 GEMM. Inputs are already FP4-packed / pre-shuffled and the
+// kernel is already selected in Python (kernel_name may be empty -> heuristic).
+void gemm_a4w4_blockscale(at::Tensor XQ, at::Tensor WQ, at::Tensor x_scale, at::Tensor w_scale,
+                          at::Tensor Y, int64_t split_k, std::string kernel_name) {
+  NVTEAiterGemmTensor xq = make_aiter_gemm_tensor(XQ, kNVTEAiterGemmFP4x2);
+  NVTEAiterGemmTensor wq = make_aiter_gemm_tensor(WQ, kNVTEAiterGemmFP4x2);
+  NVTEAiterGemmTensor xs = make_aiter_gemm_tensor(x_scale, kNVTEAiterGemmE8M0);
+  NVTEAiterGemmTensor ws = make_aiter_gemm_tensor(w_scale, kNVTEAiterGemmE8M0);
+  NVTEAiterGemmTensor y = make_aiter_gemm_tensor(Y, aiter_gemm_out_dtype(Y));
+  int rc;
+  NVTE_SCOPED_GIL_RELEASE({
+    rc = nvte_aiter_gemm_a4w4_blockscale(&xq, &wq, &xs, &ws, &y, static_cast<int>(split_k),
+                                         kernel_name.c_str(), at::cuda::getCurrentCUDAStream());
+  });
+  NVTE_CHECK(rc == 0, "nvte_aiter_gemm_a4w4_blockscale failed (rc=", rc, ")");
+}
+
+// ASM (f4gemm) a4w4 GEMM. `bias` optional; kernel_name empty -> ASM heuristic.
+void gemm_a4w4_asm(at::Tensor A, at::Tensor B, at::Tensor a_scale, at::Tensor b_scale,
+                   at::Tensor out, std::optional<at::Tensor> bias, std::string kernel_name,
+                   double alpha, double beta, bool bpreshuffle, int64_t log2_k_split) {
+  NVTEAiterGemmTensor a = make_aiter_gemm_tensor(A, kNVTEAiterGemmFP4x2);
+  NVTEAiterGemmTensor b = make_aiter_gemm_tensor(B, kNVTEAiterGemmFP4x2);
+  NVTEAiterGemmTensor as = make_aiter_gemm_tensor(a_scale, kNVTEAiterGemmE8M0);
+  NVTEAiterGemmTensor bs = make_aiter_gemm_tensor(b_scale, kNVTEAiterGemmE8M0);
+  NVTEAiterGemmTensor o = make_aiter_gemm_tensor(out, aiter_gemm_out_dtype(out));
+  NVTEAiterGemmTensor bias_t{};
+  NVTEAiterGemmTensor *bias_ptr = nullptr;
+  if (bias.has_value() && bias->defined()) {
+    bias_t = make_aiter_gemm_tensor(*bias, kNVTEAiterGemmFP32);
+    bias_ptr = &bias_t;
+  }
+  int rc;
+  NVTE_SCOPED_GIL_RELEASE({
+    rc = nvte_aiter_gemm_a4w4_asm(&a, &b, &as, &bs, &o, bias_ptr, kernel_name.c_str(),
+                                  static_cast<float>(alpha), static_cast<float>(beta),
+                                  bpreshuffle ? 1 : 0, static_cast<int>(log2_k_split),
+                                  at::cuda::getCurrentCUDAStream());
+  });
+  NVTE_CHECK(rc == 0, "nvte_aiter_gemm_a4w4_asm failed (rc=", rc, ")");
+}
+
+#endif  // USE_ROCM
 
 }  // namespace transformer_engine::pytorch

@@ -174,10 +174,11 @@ def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16,
     Routes to the ASM backend when ``kernel_name`` is an ASM-mangled symbol
     (starts with ``_ZN``) or empty (heuristic). Otherwise routes to the CK
     blockscale backend, matching AITER's own ``gemm_a4w4`` dispatcher.
+
+    The GEMM itself runs through TE's torch-free AITER libs (``tex``); only the
+    weight/scale shuffle helper is still sourced from the ``aiter`` package.
     """
-    import aiter
     from aiter.ops.shuffle import shuffle_weight
-    from aiter.ops.gemm_op_a4w4 import gemm_a4w4_blockscale
 
     _fp4_dtype = torch.float4_e2m1fn_x2
     A_fp4 = A_fp4.view(_fp4_dtype) if A_fp4.dtype != _fp4_dtype else A_fp4
@@ -198,17 +199,18 @@ def _fp4_gemm_core(A_fp4, A_scales, B_fp4, B_scales, out_dtype=torch.bfloat16,
 
     use_ck = bool(kernel_name) and kernel_name.find("_ZN") == -1
     if use_ck:
-        result = gemm_a4w4_blockscale(
+        tex.gemm_a4w4_blockscale(
             A_fp4, B_shuffled, A_scales_uint8, B_scales_uint8, out_hp,
-            splitK=log2_k_split,
+            split_k=log2_k_split, kernel_name=kernel_name,
         )
     else:
-        result = aiter.gemm_a4w4_asm(
-            A_fp4, B_shuffled, A_scales_uint8, B_scales_uint8,
-            out_hp, kernel_name, None,
-            bpreshuffle=True, log2_k_split=log2_k_split,
+        tex.gemm_a4w4_asm(
+            A_fp4, B_shuffled, A_scales_uint8, B_scales_uint8, out_hp,
+            bias=None, kernel_name=kernel_name,
+            alpha=1.0, beta=0.0, bpreshuffle=True, log2_k_split=log2_k_split,
         )
 
+    result = out_hp
     return result[:M, :] if result.shape[0] > M else result
 
 

@@ -1,0 +1,25 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# QoLA consumer manifest for TE's AITER a4w4 (FP4) GEMM integration.
+# Builds the torch-free CK-blockscale and ASM kernels as standalone
+# te_libgemm_a4w4_*.so shared libraries (cpp_itfs mode).
+
+[qola]
+# NB: with NVTE_AITER_SOURCE_DIR set the build skips `qola checkout` and uses
+# that tree directly; this pin documents the intended AITER commit for the
+# reproducible (checkout) path.
+aiter_commit = "773c8f67b9bfd99be95700a527d887afb4d8ba6a"
+namespace = "te"
+rocm_versions = ["7.2"]
+
+[build]
+architectures = ["gfx950"]
+
+[[modules]]
+name = "libgemm_a4w4_blockscale"
+mode = "cpp_itfs"
+
+[[modules]]
+name = "libgemm_a4w4_asm"
+mode = "cpp_itfs"

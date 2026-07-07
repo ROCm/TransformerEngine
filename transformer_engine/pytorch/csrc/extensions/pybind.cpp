@@ -182,6 +182,15 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("comm_overlap") = nullptr, py::arg("comm_type") = std::nullopt,
         py::arg("extra_output") = std::nullopt, py::arg("bulk_overlap") = false,
         py::arg("alpha") = 1.0f, py::arg("beta") = std::nullopt);
+#ifdef USE_ROCM
+  m.def("gemm_a4w4_blockscale", &transformer_engine::pytorch::gemm_a4w4_blockscale,
+        "AITER a4w4 CK blockscale GEMM", py::arg("XQ"), py::arg("WQ"), py::arg("x_scale"),
+        py::arg("w_scale"), py::arg("Y"), py::arg("split_k") = 0, py::arg("kernel_name") = "");
+  m.def("gemm_a4w4_asm", &transformer_engine::pytorch::gemm_a4w4_asm, "AITER a4w4 ASM (f4gemm) GEMM",
+        py::arg("A"), py::arg("B"), py::arg("a_scale"), py::arg("b_scale"), py::arg("out"),
+        py::arg("bias") = std::nullopt, py::arg("kernel_name") = "", py::arg("alpha") = 1.0,
+        py::arg("beta") = 0.0, py::arg("bpreshuffle") = true, py::arg("log2_k_split") = 0);
+#endif  // USE_ROCM
   /* GLU (sigmoid gate) */
   m.def("glu", transformer_engine::pytorch::glu, "GLU activation", py::arg("input"),
         py::arg("quantizer"));
