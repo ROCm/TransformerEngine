@@ -445,6 +445,33 @@ void dump_bwd_timings(const char* dump_path, float average_runtime){
 
 namespace {
 
+// Effective max_seqlen_k for dq_acc workspace sizing.
+//
+// In group/ragged mode the caller passes an externally-built cu_seqlen_kv_padded whose
+// per-sequence padded lengths can exceed s_kv by the inter-sequence padding (batch mode
+// pads every segment to exactly s_kv, so it is unaffected). The deterministic bwd kernel
+// splits each sequence into ceil(padded_seqlen_k / kN0) dq_acc copies taken from that
+// padded array, while both CK's own workspace upper bound and our floor derive the split
+// count from max_seqlen_k. Passing s_kv there under-counts the splits, so the kernel writes
+// past the granted dq_acc region -> NaN.
+//
+// The tight value would be the true max padded segment
+// max_i(cu_seqlen_kv_padded[i+1]-cu_seqlen_kv_padded[i]), but that is only knowable at
+// runtime from the device array: it cannot be computed in the lowering-time sizing pass
+// (seqstarts unpopulated) and a runtime reduction to fetch it syncs the stream, which is
+// illegal under HIP-graph capture. So reserve a capture-safe upper bound instead.
+//
+// The dq_acc split count is ceil(seqlen_k / kN0) where kN0 is the dispatched bwd KV tile
+// (bn0). The largest bn0 across supported archs is kCkBwdMaxKvTile (per the CK codegen bwd
+// tile tables, codegen/ops/fmha_bwd.py). Adding one full max-tile of headroom guarantees at
+// least one extra split for any actually-dispatched kN0 (all <= kCkBwdMaxKvTile), which
+// covers inter-sequence padding of up to a whole tile per sequence -- far above the
+// few-token THD alignment padding used in practice.
+constexpr uint64_t kCkBwdMaxKvTile = 256;
+uint64_t bwd_dq_acc_seqlen_k(const CkAttnBwdArgs& args){
+  return args.is_group_mode() ? args.s_kv + kCkBwdMaxKvTile : args.s_kv;
+}
+
 // Trait subset that determines AITER's internal bwd workspace footprint. Mirrors
 // the fields ck_attn_bwd sets on mha_bwd_args so the size query and the dispatch
 // stay in lockstep.
@@ -460,7 +487,7 @@ namespace {
     /* seqlen_k         */ static_cast<int>(args.is_group_mode() ? args.max_tokens_kv : args.s_kv),
     /* batch            */ static_cast<int>(args.b),
     /* max_seqlen_q     */ static_cast<int>(args.s_q),
-    /* max_seqlen_k     */ static_cast<int>(args.s_kv),
+    /* max_seqlen_k     */ static_cast<int>(bwd_dq_acc_seqlen_k(args)),
     /* hdim_q           */ static_cast<int>(args.d_qk),
     /* hdim_v           */ static_cast<int>(args.d_v),
     /* nhead_q          */ static_cast<int>(args.h),
@@ -585,14 +612,15 @@ size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args){
   // local by QoLA's export script, so the v2 size is queried through QoLA.
   const size_t v2_bytes = QOLA_NS(mha_bwd_workspace_size)(make_bwd_traits(args));
   const size_t v3_bytes = v3_dq_acc_bytes(args);
-  // Safety floor: CK's device_ws_size is computed from a representative tile and can
-  // under-report the dq_acc the actually-dispatched kernel uses. The deterministic
-  // dq_acc holds nsplits = ceil(s_kv / kN0) copies, so a smaller kN0 means MORE splits
-  // and a LARGER buffer. To stay an upper bound we must use the smallest kN0 the CK-tile
-  // bwd dispatcher can pick for any supported arch. Per the CK codegen bwd tile tables,
-  // the smallest non-tail kN0 is 64.
-  const size_t kN0 = 64u;
-  const size_t nsplits = args.deterministic ? ((args.s_kv + kN0 - 1) / kN0) : 1u;
+  // Safety floor: CK's launcher derives the dq_acc device size from max_seqlen_k, but the
+  // deterministic kernel splits each sequence by its padded length from cu_seqlen_kv_padded,
+  // which can exceed s_kv in group mode (see bwd_dq_acc_seqlen_k). Size the floor from the
+  // same padded extent and the smallest kN0 the dispatched tile can use for this head dim
+  // (128 for d_qk<=128, else 64; per the CK bwd tile tables) so a smaller kN0 -> more splits
+  // stays an upper bound on what the kernel writes.
+  const size_t kN0 = (args.d_qk <= 128) ? 128u : 64u;
+  const size_t nsplits =
+    args.deterministic ? ((bwd_dq_acc_seqlen_k(args) + kN0 - 1) / kN0) : 1u;
   const size_t tokens_q = args.is_group_mode() ? args.max_tokens_q : (args.b * args.s_q);
   const size_t dq_acc_floor = nsplits * args.h * tokens_q * args.d_qk * sizeof(float);
   return std::max({v2_bytes, v3_bytes, dq_acc_floor});
@@ -691,7 +719,9 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.seqlen_k = args.is_group_mode() ? args.max_tokens_kv : args.s_kv;
   fmha_args.batch = args.b;
   fmha_args.max_seqlen_q = args.s_q;
-  fmha_args.max_seqlen_k = args.s_kv;
+  // Padded extent (group mode) so CK's dq_acc grant covers per-sequence padding; see
+  // bwd_dq_acc_seqlen_k.
+  fmha_args.max_seqlen_k = bwd_dq_acc_seqlen_k(args);
   fmha_args.nhead_q = args.h;
   fmha_args.nhead_k = args.hg;
   fmha_args.scale = args.scaling_factor;
@@ -774,13 +804,11 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
     if(bytes == 0){
       return nullptr;
     }
-    constexpr size_t kAlign = 256;
-    const size_t base = (ws_offset + kAlign - 1) & ~(kAlign - 1);
-    if(ws_base == nullptr || base + bytes > ws_capacity){
+    if(ws_base == nullptr || ws_offset + bytes > ws_capacity){
       throw std::runtime_error("ck_fused_attn bwd: AITER workspace request exceeds reserved AOT buffer.");
     }
-    void* ptr = static_cast<int8_t*>(ws_base) + base;
-    ws_offset = base + bytes;
+    void* ptr = static_cast<int8_t*>(ws_base) + ws_offset;
+    ws_offset += bytes;
     if(zero_init){
       if(hipMemsetAsync(ptr, 0, bytes, stream) != hipSuccess){
         throw std::runtime_error("ck_fused_attn bwd: hipMemsetAsync failed for AITER workspace.");
@@ -829,18 +857,6 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   // print ck traits and args when needed
   if(log_file){
     log_bwd_config(__FUNCTION__, fmha_args, log_file);
-  }
-
-  // Deterministic dq_acc must start zeroed across the *entire* reserved buffer, not just
-  // the extent CK's launcher reports. mha_bwd_workspace_size under-reports the dq_acc need
-  // (see the floor in ck_attn_bwd_workspace_size), and by how much depends on the kernel's
-  // kN0/tile shape, which varies by GPU arch. CK's own dq_acc zeroing only covers its
-  // reported extent, so convert_dq reduces the unzeroed [reported, floor) tail and dQ is
-  // not bitwise reproducible.
-  if(args.deterministic && ws_base != nullptr && ws_capacity > 0){
-    if(hipMemsetAsync(ws_base, 0, ws_capacity, stream) != hipSuccess){
-      throw std::runtime_error("ck_fused_attn bwd: hipMemsetAsync failed zeroing deterministic workspace.");
-    }
   }
 
   float average_runtime = QOLA_NS(mha_bwd)(fmha_args, stream_config);
