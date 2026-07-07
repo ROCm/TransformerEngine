@@ -143,6 +143,12 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
 hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream);
 hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream);
 
+// Probe whether AITER's v3 (asm) path will run for the given config, without
+// launching a kernel (backed by AITER's v3_api_check dry-run). Returns true iff
+// the v3 path is selected; false means the CK v2 path (or no support) would run.
+bool ck_attn_fwd_uses_v3(const CKAttnFwdArgs& args);
+bool ck_attn_bwd_uses_v3(const CkAttnBwdArgs& args);
+
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_H
 
