@@ -8,9 +8,8 @@
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
-from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
+from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils
-from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.common.recipe import NVFP4BlockScaling
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
@@ -58,7 +57,7 @@ def check_grouped_tensor_nvfp4_versus_reference(
     optimize_for_gemm: bool = False,
 ) -> None:
 
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = te.DType.kFloat4E2M1
 
     split_section_tensor = torch.tensor(split_sections, dtype=torch.int64, device="cuda")
 
@@ -175,7 +174,7 @@ def check_grouped_tensor_nvfp4_with_paged_stashing(
     optimize_for_gemm: bool = False,
 ) -> None:
 
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = te.DType.kFloat4E2M1
 
     assert valid_M is not None, "valid_M must be provided when with_paged_stashing is True"
     assert valid_M < M, "valid_M must be less than M when with_paged_stashing is True"

@@ -23,6 +23,7 @@ namespace jax {
 int GetCudaRuntimeVersion();
 #ifndef USE_ROCM
 size_t GetCudnnRuntimeVersion();
+size_t GetCudnnFrontendVersion();
 #else
 // use a very high number for cudnn in rocm to enable all filtering
 //(99, 0, 0)

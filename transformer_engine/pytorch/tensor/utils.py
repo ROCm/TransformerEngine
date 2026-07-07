@@ -23,7 +23,7 @@ from .mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from .float8_blockwise_tensor import Float8BlockwiseQTensor, Float8BlockQuantizer
 from ..optimizers.multi_tensor_apply import multi_tensor_applier
 from ..utils import is_non_tn_fp8_gemm_supported, is_fp8_fnuz
-from ..constants import NVFP4_BLOCK_SCALING_SIZE
+from ..constants import NVFP4_BLOCK_SCALING_SIZE, DType
 
 
 def replace_raw_data(tensor: QuantizedTensor, new_raw_data: torch.Tensor):
@@ -354,7 +354,7 @@ def _cast_master_weights_to_fp8_current_scaling(
                 f"expected {amax_epsilon} but got {quantizer.amax_epsilon}"
             )
 
-        scales.append(quantizer.scale.view(1))
+        scales.append(torch.empty(1, dtype=torch.float32, device=device))
         scale_invs.append(model_weight._scale_inv.view(1))
 
         # Compute amax of the master weight and store it in packed_amaxes.
@@ -369,9 +369,9 @@ def _cast_master_weights_to_fp8_current_scaling(
     # ---------------------------------------------------------------------------------------------
     # Step 3: Update scales and scale_invs.
     # ---------------------------------------------------------------------------------------------
-    if fp8_dtype == tex.DType.kFloat8E4M3:
+    if fp8_dtype == DType.kFloat8E4M3:
         max_fp8 = 240.0 if is_fp8_fnuz() else 448.0
-    elif fp8_dtype == tex.DType.kFloat8E5M2:
+    elif fp8_dtype == DType.kFloat8E5M2:
         max_fp8 = 57344.0
     else:
         raise ValueError(f"Unsupported FP8 dtype: {fp8_dtype}")
@@ -532,9 +532,9 @@ def _cast_master_weights_to_fp8_blockwise_scaling(
     # ---------------------------------------------------------------------------------------------
     # Step 3: Update scales and scale_invs.
     # ---------------------------------------------------------------------------------------------
-    if fp8_dtype == tex.DType.kFloat8E4M3:
+    if fp8_dtype == DType.kFloat8E4M3:
         max_fp8 = 240.0 if is_fp8_fnuz() else 448.0
-    elif fp8_dtype == tex.DType.kFloat8E5M2:
+    elif fp8_dtype == DType.kFloat8E5M2:
         max_fp8 = 57344.0
     else:
         raise ValueError(f"Unsupported FP8 dtype: {fp8_dtype}")
@@ -1044,6 +1044,21 @@ def _nvfp4_2d_multi_tensor_transpose(nvfp4_tensors: List[NVFP4Tensor]):
         M_list,
         K_list,
     )
+
+
+def clear_columnwise_cache(tensor: QuantizedTensorStorage) -> None:
+    """Clear the columnwise cache of a quantized tensor.
+    Use-case: FSDP2, where TE allocates allgathered
+    columnwise data(by deriving it out of allgathered rowwise data)
+    in fsdp2 hooks. And so FSDP2 cant deallocate it when it's done with it"""
+    if hasattr(tensor, "_columnwise_data"):
+        tensor._columnwise_data = None
+    if hasattr(tensor, "_columnwise_scale_inv"):
+        tensor._columnwise_scale_inv = None
+    if hasattr(tensor, "_transpose"):
+        tensor._transpose = None
+    if hasattr(tensor, "_transpose_invalid"):
+        tensor._transpose_invalid = True
 
 
 def is_custom(x: Optional[Union[Quantizer, QuantizedTensorStorage]] = None) -> bool:
