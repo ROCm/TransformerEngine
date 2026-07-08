@@ -197,6 +197,28 @@ class Float8TensorWrapper:
         except ImportError:
             is_fp8_tensor = False
 
+        # Refuse quantized formats we don't implement (NVFP4, MXFP8 via this
+        # wrapper path, block-scaling variants, ...). Without this gate, they
+        # fall through to the "regular tensor" branch below and crash on
+        # `tensor.dtype` because QuantizedTensorStorage exposes `_dtype`, not
+        # `dtype`. A clean refusal beats an AttributeError from the fallback.
+        # The MXFP8 path is handled separately via MXFP8TensorWrapper, so
+        # callers routing MXFP8 tensors through Float8TensorWrapper are also
+        # bugs and should surface here.
+        if not is_fp8_tensor:
+            try:
+                from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
+                if isinstance(tensor, QuantizedTensorStorage):
+                    raise ValueError(
+                        f"The Triton GEMM backend (NVTE_USE_GEMM_TRITON=1) does not "
+                        f"support {type(tensor).__name__}. Only Float8Tensor / "
+                        f"Float8TensorStorage (regular FP8) and MXFP8TensorStorage "
+                        f"(via MXFP8TensorWrapper) are implemented. Disable the "
+                        f"Triton backend for this recipe (unset NVTE_USE_GEMM_TRITON)."
+                    )
+            except ImportError:
+                pass
+
         if is_fp8_tensor:
             # Extract FP8 components (similar to NVTETensorFromFloat8Tensor in C++)
             self._is_fp8 = True
