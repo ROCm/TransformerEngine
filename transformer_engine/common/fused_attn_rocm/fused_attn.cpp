@@ -390,7 +390,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
       h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right,
-      return_max_logit, false, false);
+      return_max_logit, false /*Ignored*/, false);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd(
@@ -482,7 +482,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout, h_q,
-      h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right, false,
+      h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right, false /*Ignored*/,
       false, deterministic);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
