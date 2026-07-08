@@ -263,7 +263,6 @@ jobs:
             docker rm -f "te-runner-$name" >/dev/null 2>&1 || true
             docker run -d \
               --name "te-runner-$name" \
-              --network=host \
               --device=/dev/kfd \
               --device="${RENDER_DEVICES[$gpu_index]}" \
               --shm-size=16G \
