@@ -34,7 +34,6 @@ load_framework_extension("jax")
 from . import flax
 from . import quantize
 
-# AMD lightning-indexer / sparse-attention staging module.
 from . import sparse_attention
 
 from .quantize import autocast, fp8_autocast, update_collections
