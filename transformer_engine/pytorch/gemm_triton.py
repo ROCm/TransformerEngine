@@ -1048,9 +1048,10 @@ def mxfp8_matmul_kernel(
     offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
-    # Data pointers
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    # Data pointers. Promote M/N offsets to int64 before multiplying by
+    # potentially large strides — see matmul_kernel for the overflow rationale.
+    a_ptrs = a_ptr + (offs_am[:, None].to(tl.int64) * stride_am + offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :].to(tl.int64) * stride_bn)
 
     # K-loop
     num_k_blocks = tl.cdiv(K, BLOCK_SIZE_K)
@@ -1095,7 +1096,7 @@ def mxfp8_matmul_kernel(
         k_block_start = k * (BLOCK_SIZE_K // VEC_SIZE)
         offs_a_scale_k = k_block_start + tl.arange(0, BLOCK_SIZE_K // VEC_SIZE)
 
-        a_scale_ptrs = a_scale_ptr + (offs_am[:, None] * stride_a_scale_m +
+        a_scale_ptrs = a_scale_ptr + (offs_am[:, None].to(tl.int64) * stride_a_scale_m +
                                        offs_a_scale_k[None, :] * stride_a_scale_k)
 
         # Check bounds for scale loading
@@ -1108,7 +1109,7 @@ def mxfp8_matmul_kernel(
         # B scale layout: [N, K//32] (new dot_scaled API -- "Do NOT transpose rhs_scale")
         # For tl.dot_scaled we need [BLOCK_SIZE_N, BLOCK_SIZE_K//32]
         offs_b_scale_k = k_block_start + tl.arange(0, BLOCK_SIZE_K // VEC_SIZE)
-        b_scale_ptrs = b_scale_ptr + (offs_bn[:, None] * stride_b_scale_n +
+        b_scale_ptrs = b_scale_ptr + (offs_bn[:, None].to(tl.int64) * stride_b_scale_n +
                                        offs_b_scale_k[None, :] * stride_b_scale_k)
 
         mask_b_scale_n = offs_bn < N
@@ -1140,7 +1141,8 @@ def mxfp8_matmul_kernel(
     # Store output (convert to target dtype)
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    # int64 promotion (see matmul_kernel).
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None].to(tl.int64) + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
 
     c = accumulator.to(c_ptr.type.element_ty)
@@ -1292,8 +1294,13 @@ def matmul_kernel(
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     offs_am = (pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)) % M
     offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)) % N
-    a_ptrs = a_ptr + (offs_am[:, None] * stride_am + offs_k[None, :] * stride_ak)
-    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
+    # Promote the M/N offsets to int64 before multiplying by a stride that may
+    # be as large as K or N: offs_am*stride_am overflows int32 whenever
+    # (M-1)*K > 2^31 (e.g. M=143616, K=15360 → 2.2G). The mask arithmetic
+    # (offs_* < M/N) stays int32 for speed; only the address computation
+    # widens.
+    a_ptrs = a_ptr + (offs_am[:, None].to(tl.int64) * stride_am + offs_k[None, :] * stride_ak)
+    b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :].to(tl.int64) * stride_bn)
 
     # -----------------------------------------------------------
     # Iterate to compute a block of the C matrix.
@@ -1360,7 +1367,8 @@ def matmul_kernel(
 
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_ptrs = c_ptr + stride_cm * offs_cm[:, None] + stride_cn * offs_cn[None, :]
+    # Same int64 promotion as the A/B pointers above: M*N can exceed 2^31.
+    c_ptrs = c_ptr + stride_cm * offs_cm[:, None].to(tl.int64) + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
 
     # β accumulation: D = α·(A·B) + bias + β·C. Fold existing C in *before*
