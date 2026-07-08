@@ -86,11 +86,14 @@ def is_mixed_fp8(type_name):
 
 # Mixed FP8 (e4m3 + e5m2) on gfx950 hits a Triton compiler bug in mixed-type
 # MFMA instruction selection. Fixed in triton-lang/triton PR #9567
-# (commit eaaa75cf5, 2026-02-27). The fix landed in Triton release/3.7.x
-# and ships starting with PyTorch 2.12 (pytorch-triton-rocm 3.7.x);
-# pytorch-triton-rocm 3.6.x (PyTorch 2.10 / 2.11) does not carry it.
+# (commit eaaa75cf5, 2026-02-27). The fix lives only on Triton main — it is
+# NOT on release/3.6.x, release/3.7.x, or release/3.8.x, so no released
+# PyTorch through 2.13 carries it. First lands in pytorch/pytorch main via
+# the Triton pin bump to 43422b04 ("Triton 3.8") on 2026-06-26, which ships
+# in PyTorch 2.14.0.dev nightlies from that date onward.
+# See https://github.com/triton-lang/triton/pull/9567.
 from transformer_engine.pytorch import torch_version
-_MIXED_FP8_MFMA_FIXED = torch_version() >= (2, 12)
+_MIXED_FP8_MFMA_FIXED = torch_version() >= (2, 14)
 
 @pytest.mark.parametrize("M, K, N, in_dtype, out_dtype, col_a, col_b, use_bias, bias_dtype, grad",
 [ (*shape, in_dtype, out_dtype, col_a, col_b, use_bias, bias_dtype, grad)
@@ -130,8 +133,8 @@ def test_correctness(M, N, K, col_a, col_b, in_dtype, out_dtype, use_bias, bias_
     if is_mixed_fp8(in_dtype) and not _MIXED_FP8_MFMA_FIXED:
         pytest.skip(
             'Mixed FP8 formats (e4m3 + e5m2) require Triton with '
-            'triton-lang/triton#9567 (pytorch-triton-rocm >= 3.7.x, '
-            'shipped with PyTorch 2.12+).'
+            'triton-lang/triton#9567 (only on Triton main; first ships in '
+            'PyTorch 2.14.0.dev nightlies from 2026-06-26+).'
         )
 
     if col_a and col_b:
