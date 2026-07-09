@@ -197,14 +197,9 @@ class Float8TensorWrapper:
         except ImportError:
             is_fp8_tensor = False
 
-        # Refuse quantized formats we don't implement (NVFP4, MXFP8 via this
-        # wrapper path, block-scaling variants, ...). Without this gate, they
-        # fall through to the "regular tensor" branch below and crash on
-        # `tensor.dtype` because QuantizedTensorStorage exposes `_dtype`, not
-        # `dtype`. A clean refusal beats an AttributeError from the fallback.
-        # The MXFP8 path is handled separately via MXFP8TensorWrapper, so
-        # callers routing MXFP8 tensors through Float8TensorWrapper are also
-        # bugs and should surface here.
+        # Refuse other QuantizedTensorStorage subclasses (NVFP4, ...) rather
+        # than falling through to the "regular tensor" branch, which crashes
+        # on `tensor.dtype` (QuantizedTensorStorage exposes `_dtype`).
         if not is_fp8_tensor:
             try:
                 from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
@@ -1081,8 +1076,7 @@ def mxfp8_matmul_kernel(
     offs_bn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     offs_k = tl.arange(0, BLOCK_SIZE_K)
 
-    # Data pointers. Promote M/N offsets to int64 before multiplying by
-    # potentially large strides — see matmul_kernel for the overflow rationale.
+    # int64 promotion (see matmul_kernel A/B).
     a_ptrs = a_ptr + (offs_am[:, None].to(tl.int64) * stride_am + offs_k[None, :] * stride_ak)
     b_ptrs = b_ptr + (offs_k[:, None] * stride_bk + offs_bn[None, :].to(tl.int64) * stride_bn)
 
@@ -1174,7 +1168,7 @@ def mxfp8_matmul_kernel(
     # Store output (convert to target dtype)
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    # int64 promotion (see matmul_kernel).
+    # int64 promotion (see matmul_kernel A/B).
     c_ptrs = c_ptr + stride_cm * offs_cm[:, None].to(tl.int64) + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
 
@@ -1400,7 +1394,7 @@ def matmul_kernel(
 
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    # Same int64 promotion as the A/B pointers above: M*N can exceed 2^31.
+    # int64 promotion (see matmul_kernel A/B).
     c_ptrs = c_ptr + stride_cm * offs_cm[:, None].to(tl.int64) + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
 
