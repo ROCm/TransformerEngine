@@ -9,13 +9,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <memory>
-#include <mutex>
 #include <stdexcept>
 #include <type_traits>
-#include <unordered_map>
 #include <hip/hip_runtime.h>
 #include "ck_fused_attn/ck_fused_attn.hpp"
-#include "ck_tile/host/pinned_host_releaser.hpp"
 #include "qola_mha_bwd.h"
 #include "ck_fused_attn_utils.hpp"
 
@@ -521,88 +518,6 @@ size_t v3_dq_acc_bytes(const CkAttnBwdArgs& args){
   return eff_batch * args.h * dq_acc_seq * dq_acc_hdim * elem;
 }
 
-// Persistent pinned-host staging for the CK v2 backward launcher
-// (fmha_bwd_launcher::prepare_workspace_async). That launcher requests a pinned host
-// buffer through the pinned_host_alloc callback on every dispatch. A hipHostMalloc issued
-// inside an active HIP graph capture returns hipErrorStreamCaptureUnsupported and
-// invalidates the capture (surfacing as hipErrorStreamCaptureInvalidated at
-// hipStreamEndCapture). We therefore reserve the buffer once from
-// ck_attn_bwd_workspace_size (the host-side size pass, which runs outside capture) and
-// hand the captured dispatch a pre-reserved slice, so prepare_workspace_async issues only
-// capturable ops.
-//
-// A captured graph embeds its host-pack closure into this buffer and dereferences it on
-// every replay, so the buffer must outlive the graph: slabs are never freed (process
-// lifetime, bounded by the number of distinct backward configs). Distinct configs get
-// distinct slabs; configs that collide share one, which is correct for the serial,
-// single-stream replay used by JAX/XLA.
-class PinnedHostStagingArena {
- public:
-  static PinnedHostStagingArena& instance() {
-    static PinnedHostStagingArena arena;
-    return arena;
-  }
-
-  // Idempotent. Must be called from a non-capturing context (the size pass): a failed
-  // hipHostMalloc (e.g. invoked under capture) leaves the key unreserved and the callback
-  // falls back to a direct allocation.
-  void reserve(uint64_t key, size_t bytes) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = slabs_.find(key);
-    if (it != slabs_.end() && it->second.capacity >= bytes) {
-      return;
-    }
-    void* ptr = nullptr;
-    if (hipHostMalloc(&ptr, bytes, hipHostMallocDefault) != hipSuccess) {
-      return;
-    }
-    // A smaller previous slab is intentionally leaked: a live captured graph may still
-    // reference it.
-    slabs_[key] = Slab{ptr, bytes};
-  }
-
-  // Returns a buffer of at least `bytes` for `key`, or nullptr if none is reserved.
-  void* get(uint64_t key, size_t bytes) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = slabs_.find(key);
-    if (it != slabs_.end() && it->second.capacity >= bytes) {
-      return it->second.ptr;
-    }
-    return nullptr;
-  }
-
- private:
-  struct Slab {
-    void* ptr = nullptr;
-    size_t capacity = 0;
-  };
-  std::mutex mutex_;
-  std::unordered_map<uint64_t, Slab> slabs_;
-};
-
-// Identifies a backward config for pinned-staging reuse. Uses only fields set identically
-// by both ck_attn_bwd_workspace_size (size pass) and ck_attn_bwd (run pass) so the reserve
-// and the lookup agree; the launcher's host_ws_size_ is a function of these traits.
-uint64_t host_staging_key(const CkAttnBwdArgs& args) {
-  uint64_t h = 1469598103934665603ull;  // FNV-1a hash
-  auto mix = [&h](uint64_t v) {
-    h ^= v;
-    h *= 1099511628211ull;
-  };
-  mix(static_cast<uint64_t>(args.dtype));
-  mix(args.b); mix(args.h); mix(args.hg);
-  mix(args.s_q); mix(args.s_kv); mix(args.d_qk); mix(args.d_v);
-  // NOTE: is_group_mode() is intentionally NOT part of the key. It is derived from
-  // cu_seqlen_q_ptr, which is null during the sizing pass (reserve) but set at run time
-  // (lookup) for the same config, so including it would mismatch the two keys. attn_mask_type
-  // already distinguishes group from batch (group mode requires a padding mask).
-  mix(args.deterministic ? 1u : 0u);
-  mix(static_cast<uint64_t>(args.attn_mask_type));
-  mix(args.uses_bwd_v3 ? 1u : 0u);
-  mix(args.is_v3_atomic_fp32 ? 1u : 0u);
-  return h;
-}
-
 }  // namespace
 
 size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args){
@@ -624,22 +539,6 @@ size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args){
   const size_t tokens_q = args.is_group_mode() ? args.max_tokens_q : (args.b * args.s_q);
   const size_t dq_acc_floor = nsplits * args.h * tokens_q * args.d_qk * sizeof(float);
   return std::max({v2_bytes, v3_bytes, dq_acc_floor});
-}
-
-void ck_attn_bwd_reserve_host_staging(const CkAttnBwdArgs& args){
-  // Called from the sizing pass only (see header) — outside any HIP graph capture. Doing
-  // the hipHostMalloc here keeps prepare_workspace_async allocation-free during the captured
-  // run. It must NOT be invoked from the captured run pass: a hipHostMalloc under capture
-  // returns hipErrorStreamCaptureUnsupported and invalidates the graph even for configs that
-  // never touch the pinned buffer (e.g. the v3 asm path).
-  const size_t v2_bytes = QOLA_NS(mha_bwd_workspace_size)(make_bwd_traits(args));
-  // v2_bytes upper-bounds the host metadata (host_ws_size_ is the front of the v2 device
-  // workspace). Always add room for the two D2H seqstart copies (group mode) and the embedded
-  // graph closure; computed pointer-independently since is_group_mode() is unreliable in the
-  // sizing pass (cu_seqlen_q_ptr is null there).
-  const size_t seqstart_bytes = sizeof(int) * (args.b + 1);
-  PinnedHostStagingArena::instance().reserve(host_staging_key(args),
-                                             v2_bytes + 2 * seqstart_bytes + 8192);
 }
 
 hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
@@ -715,8 +614,8 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   // aiter sizes dq_acc and related workspaces from seqlen_q; passing the
   // per-sequence length in group mode under-sizes them and the kernel writes
   // past the end.
-  fmha_args.seqlen_q = args.is_group_mode() ? args.max_tokens_q : args.s_q;
-  fmha_args.seqlen_k = args.is_group_mode() ? args.max_tokens_kv : args.s_kv;
+  fmha_args.seqlen_q = args.s_q;
+  fmha_args.seqlen_k = args.s_kv;
   fmha_args.batch = args.b;
   fmha_args.max_seqlen_q = args.s_q;
   // Padded extent (group mode) so CK's dq_acc grant covers per-sequence padding; see
@@ -816,44 +715,6 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
     }
     return ptr;
   };
-  // The v2 launcher's prepare_workspace_async requests a pinned host buffer here on every
-  // dispatch. Hand back the buffer reserved out-of-capture by ck_attn_bwd_workspace_size
-  // (keyed by config) so no allocation happens inside a HIP graph capture, which would
-  // invalidate the graph. The arena owns the memory for the process lifetime, so a no-op
-  // deleter is correct: a captured graph dereferences the embedded closure on every
-  // replay and the buffer must outlive the graph.
-  const uint64_t pin_staging_key = host_staging_key(args);
-  fmha_args.pinned_host_alloc = [pin_staging_key](size_t bytes) -> std::shared_ptr<void> {
-    if(bytes == 0){
-      return {};
-    }
-    if(void* ptr = PinnedHostStagingArena::instance().get(pin_staging_key, bytes)){
-      return std::shared_ptr<void>(ptr, [](void*){});
-    }
-    // Fallback: no reservation exists (the size pass did not run before this dispatch).
-    // Under capture this hipHostMalloc returns hipErrorStreamCaptureUnsupported; surface a
-    // clear error rather than corrupting the capture. The deferred free mirrors aiter's
-    // stream-tail release contract: the deleter fires from a HIP callback thread holding
-    // runtime locks, so it must not call any HIP API directly.
-    void* ptr = nullptr;
-    hipError_t err = hipHostMalloc(&ptr, bytes, hipHostMallocDefault);
-    if(err != hipSuccess){
-      const char* detail =
-        (err == hipErrorStreamCaptureUnsupported)
-          ? "hipHostMalloc is illegal under HIP graph capture; ensure "
-            "ck_attn_bwd_workspace_size runs before capture so the buffer "
-            "is pre-reserved."
-        : (err == hipErrorOutOfMemory)
-          ? "system is out of pinned host memory."
-          : hipGetErrorString(err);
-      throw std::runtime_error(std::string("ck_fused_attn bwd: pinned host staging was not "
-                               "reserved and hipHostMalloc failed: ") + detail);
-    }
-    return std::shared_ptr<void>(ptr, [](void* p){
-      ck_tile::pinned_host_releaser::instance().enqueue(p);
-    });
-  };
-
   // print ck traits and args when needed
   if(log_file){
     log_bwd_config(__FUNCTION__, fmha_args, log_file);

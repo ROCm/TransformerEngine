@@ -871,11 +871,6 @@ void fused_attn_ck_bwd_impl(
   // Sizing-only path: report and exit before any kernel/memset.
   if(planner.is_sizing()){
     *workspace_size = planner.total();
-    // The sizing pass is a host-side query run at lowering time, always outside any HIP graph
-    // capture. Reserve the v2 launcher's pinned host staging now so the later captured
-    // backward dispatch reuses it and prepare_workspace_async never calls hipHostMalloc under
-    // capture (which would invalidate the graph -> hipErrorStreamCaptureInvalidated).
-    ck_fused_attn::ck_attn_bwd_reserve_host_staging(ws_size_args);
     if(nvte_log_ck_config){
       if(is_SBHD && is_padding){
         std::cout<<std::endl<<"attn_bwd(ck) need padding/unpadding workaround"<<std::endl;
