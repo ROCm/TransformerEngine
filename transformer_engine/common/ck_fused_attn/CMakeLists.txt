@@ -186,7 +186,7 @@ if(__AITER_CACHE_DIR STREQUAL "")
       set(__CK_JIT_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/ck_jit")
     endif()
     # Rebuild when any JIT orchestrator script/patch/runtime changes.
-    file(GLOB __CK_JIT_SCRIPTS
+    file(GLOB __CK_JIT_SCRIPTS CONFIGURE_DEPENDS
          "${__CK_JIT_SOURCE_DIR}/*.py"
          "${__CK_JIT_SOURCE_DIR}/*.sh"
          "${__CK_JIT_SOURCE_DIR}/*.cpp"
