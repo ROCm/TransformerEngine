@@ -45,33 +45,6 @@ class GetRecipes:
         return Float8CurrentScaling()
 
 
-_USE_GEMM_TRITON = bool(int(os.environ.get("NVTE_USE_GEMM_TRITON", "0")))
-
-
-def _skip_if_hybrid_under_gemm_triton(*recipes):
-    """Skip when NVTE_USE_GEMM_TRITON=1 and any recipe uses Format.HYBRID.
-
-    Mirrors the runtime gate in transformer_engine/pytorch/quantization.py:184.
-    HYBRID makes the backward pass produce mixed FP8 (e5m2 x e4m3) GEMMs,
-    which trigger a Triton compiler bug (triton-lang/triton#9567). The fix
-    lives only on Triton main; no released PyTorch through 2.13 carries it,
-    and 2.14.0.dev nightlies from 2026-06-26 are the first wheels that do.
-    Relax this skip only when the runtime gate is also relaxed.
-    """
-    if not _USE_GEMM_TRITON:
-        return
-    for r in recipes:
-        if r is None:
-            continue
-        fmt = getattr(r, "fp8_format", None)
-        if fmt is not None and fmt == Format.HYBRID:
-            pytest.skip(
-                "Triton GEMM backend (NVTE_USE_GEMM_TRITON=1) does not "
-                "support Format.HYBRID due to triton-lang/triton#9567. "
-                "See _skip_if_hybrid_under_gemm_triton for details."
-            )
-
-
 # base class for validating current_scaling x linear layer
 class TestFP8RecipeLinearBase:
     @staticmethod
@@ -758,7 +731,6 @@ class TestFP8CurrentScalingRecipeLinear(TestFP8RecipeLinearBase):
         dtype,
         use_bias=True,
     ):
-        _skip_if_hybrid_under_gemm_triton(recipe1(), recipe2())
         fp8_zero_tolerance_tensor_dumps_recipe2 = None
         # check tensor dumps dir, if the dir exists, then read files to get y, dgrad, wgrad, bgrad
         # if we cannot get all four tensors, then still set the tensor dump to None
@@ -945,7 +917,6 @@ class TestFP8CurrentScalingRecipeLayerNormLinear(TestFP8RecipeLayerNormLinearBas
         dtype,
         use_bias=True,
     ):
-        _skip_if_hybrid_under_gemm_triton(recipe1(), recipe2())
         fp8_zero_tolerance_tensor_dumps_recipe2 = None
         # check tensor dumps dir, if the dir exists, then read files to get y, dgrad, wgrad, bgrad
         # if we cannot get all four tensors, then still set the tensor dump to None
