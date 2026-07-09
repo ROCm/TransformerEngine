@@ -2020,26 +2020,24 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  outputD->data.dtype == DType::kFloat16,
                  "Blockwise FP8 GEMM only supports bfloat16/float32/float16 output");
       NVTE_CHECK(inputB->scaling_mode == NVTE_BLOCK_SCALING_1D,
-                 "Blockwise FP8 GEMM only supports 1Dx2D / 1Dx1D scaling");
+                 "Only 1D by 1D and 1D by 2D block scaling GEMM is supported");
       NVTE_CHECK(!(is_transa && is_transb),
                  "Blockwise FP8 GEMM does not support TT layout");
       NVTE_CHECK(!(inputA->dtype() == DType::kFloat8E5M2 &&
                    inputB->dtype() == DType::kFloat8E5M2),
-                 "Blockwise FP8 GEMM does not support e5m2 x e5m2 inputs");
+                 "Blockwise FP8 GEMM does not support e5m2 by e5m2 inputs");
       NVTE_CHECK(!has_gelu || grad,
-                 "Blockwise FP8 GEMM only supports dgelu grad epilogue");
-      NVTE_CHECK(!has_gelu || outputD->data.dtype == DType::kBFloat16,
-                 "Blockwise FP8 GEMM dgelu epilogue only supports bfloat16 output");
+                 "Blockwise FP8 GEMM only supports DGELU grad epilogue");
       NVTE_CHECK(!(has_bias && grad),
                  "Blockwise FP8 GEMM does not support bias with grad");
+      NVTE_CHECK(!has_gelu || outputD->data.dtype == DType::kBFloat16,
+                 "Blockwise FP8 GEMM DGELU epilogue only supports bfloat16 output");
       NVTE_CHECK(use_split_accumulator,
                  "Blockwise FP8 GEMM requires split accumulator");
       NVTE_CHECK((k % 16) == 0,
-                 "Blockwise FP8 GEMM requires K divisible by 16");
-      NVTE_CHECK((m % 8) == 0,
-                 "Blockwise FP8 GEMM requires N divisible by 8");
-      NVTE_CHECK(inputB->scaling_mode != NVTE_BLOCK_SCALING_1D || (n % 16) == 0,
-                 "Blockwise FP8 GEMM requires M divisible by 16 for 1D scaling");
+                 "GEMM K dimension must be multiple of 16 for blockwise FP8 scaling (got K=", k, ")");
+      NVTE_CHECK((m % 16) == 0,
+                 "GEMM M dimension must be multiple of 16 for blockwise FP8 scaling (got M=", m, ")");
 
       const bool has_accum       = (beta != 0.0f);
       const void *bias           = has_bias  ? inputBias->data.dptr     : nullptr;

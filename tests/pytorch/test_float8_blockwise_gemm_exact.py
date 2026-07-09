@@ -40,7 +40,7 @@ def rocm_blockwise_unsupported_reason(
     is_1d2d = is_x_1d_scaled and not is_w_1d_scaled
     is_1d1d = is_x_1d_scaled and is_w_1d_scaled
     if not (is_1d2d or is_1d1d):
-        return "only supports 1Dx2D / 1Dx1D scaling"
+        return "Only 1D by 1D and 1D by 2D block scaling GEMM is supported"
 
     if x_columnwise and not w_columnwise:
         return "does not support TT layout"
@@ -77,7 +77,7 @@ def cublas_gemm_fp8_blockwise_case(
         pytest.skip("FP8 GEMM doesn't support 2dimensional qtile by 2dimensional qtile")
     if not fp8_blockwise_gemm_supported():
         pytest.skip("CUDA version does not support blockwise FP8 gemm.")
-    if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 4), (9, 5)):
+    if IS_HIP_EXTENSION:
         unsupported_reason = rocm_blockwise_unsupported_reason(
             is_x_1d_scaled, is_w_1d_scaled,
             x_columnwise=x_columnwise, w_columnwise=w_columnwise,
@@ -261,9 +261,11 @@ def cublas_gemm_test_constraint_enforced(
 ):
     if not fp8_blockwise_gemm_supported():
         pytest.skip("CUDA version does not support blockwise FP8 gemm.")
-    if IS_HIP_EXTENSION and get_device_compute_capability() in ((9, 4), (9, 5)):
-        expected_err_msg = None
-        expected_err_cls = RuntimeError
+    if IS_HIP_EXTENSION:
+        is_1d1d = is_x_1d_scaled and is_w_1d_scaled
+        is_1d2d = is_x_1d_scaled and not is_w_1d_scaled
+        if not (is_1d1d or is_1d2d):
+            expected_err_msg = "Only 1D by 1D and 1D by 2D block scaling GEMM is supported"
     # Setup device and random seed
     device = "cuda"
     seed = 0
@@ -716,6 +718,10 @@ def test_split_accumulator_enforced(
     is_x_1d_scaled,
     is_w_1d_scaled,
 ) -> None:
+    if IS_HIP_EXTENSION:
+        expected_err_msg = "requires split accumulator"
+    else:
+        expected_err_msg = "CUBLAS_STATUS_NOT_SUPPORTED"
     cublas_gemm_test_constraint_enforced(
         x_dtype,
         w_dtype,
@@ -727,6 +733,7 @@ def test_split_accumulator_enforced(
         use_split_accumulator,
         is_x_1d_scaled,
         is_w_1d_scaled,
+        expected_err_msg=expected_err_msg,
     )
 
 
@@ -764,6 +771,10 @@ def test_bgrad_not_supported(
     is_w_1d_scaled,
 ) -> None:
     # NOTE: BGRAD epilogue is not supported for fp8.
+    if IS_HIP_EXTENSION:
+        expected_err_msg = "does not support bias with grad"
+    else:
+        expected_err_msg = "Epilogue requested outside of the available"
     cublas_gemm_test_constraint_enforced(
         x_dtype,
         w_dtype,
@@ -777,7 +788,7 @@ def test_bgrad_not_supported(
         is_w_1d_scaled,
         use_grad=True,
         use_bias=True,
-        expected_err_msg="Epilogue requested outside of the available",
+        expected_err_msg=expected_err_msg,
     )
 
 
@@ -824,6 +835,13 @@ def test_gelu_unsupported_cases_error(
         expected_err = "an unsupported value or parameter was passed"
     else:
         expected_err = "Epilogue requested outside of the available"
+    if IS_HIP_EXTENSION:
+        if use_grad and not use_bias:
+            expected_err = "DGELU epilogue only supports bfloat16 output"
+        elif not use_grad:
+            expected_err = "only supports DGELU grad epilogue"
+        else:
+            expected_err = "does not support bias with grad"
     cublas_gemm_test_constraint_enforced(
         x_dtype,
         w_dtype,
@@ -875,6 +893,10 @@ def test_illegal_dtype_enforced(
     is_w_1d_scaled,
 ) -> None:
     # e5m2 by e5m2 not supported.
+    if IS_HIP_EXTENSION:
+        expected_err_msg = "does not support e5m2 by e5m2 inputs"
+    else:
+        expected_err_msg = "CUBLAS_STATUS_NOT_SUPPORTED"
     cublas_gemm_test_constraint_enforced(
         x_dtype,
         w_dtype,
@@ -886,6 +908,7 @@ def test_illegal_dtype_enforced(
         use_split_accumulator,
         is_x_1d_scaled,
         is_w_1d_scaled,
+        expected_err_msg=expected_err_msg,
     )
 
 
@@ -920,7 +943,10 @@ def test_illegal_2D_by_2D_enforced(
     is_w_1d_scaled,
 ) -> None:
     # 2D block quantization by 2D block quantization is not supported.
-    expected_err_msg = "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling GEMM is supported"
+    if IS_HIP_EXTENSION:
+        expected_err_msg = "Only 1D by 1D and 1D by 2D block scaling GEMM is supported"
+    else:
+        expected_err_msg = "Only 1D by 1D, 1D by 2D, and 2D by 1D block scaling GEMM is supported"
     cublas_gemm_test_constraint_enforced(
         x_dtype,
         w_dtype,
@@ -976,7 +1002,13 @@ def test_unaligned_shapes(
     is_w_1d_scaled,
 ) -> None:
     legal = legalX1d if is_x_1d_scaled else legalX2d
+    if IS_HIP_EXTENSION:
+        legal = (K % 16 == 0) and (N % 16 == 0) # M is unconstrained for rocm
     if not legal:
+        if IS_HIP_EXTENSION:
+            expected_err_msg = "must be multiple of 16"
+        else:
+            expected_err_msg = "dimension requirement"
         cublas_gemm_test_constraint_enforced(
             x_dtype,
             w_dtype,
@@ -988,7 +1020,7 @@ def test_unaligned_shapes(
             use_split_accumulator,
             is_x_1d_scaled,
             is_w_1d_scaled,
-            expected_err_msg="dimension requirement",
+            expected_err_msg=expected_err_msg,
         )
     else:
         cublas_gemm_fp8_blockwise_case(
