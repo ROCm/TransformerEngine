@@ -914,6 +914,13 @@ void fused_attn_ck_bwd_impl(
   }
 
   // Initialize workspace buffers.
+  // dk_expanded/dv_expanded scratch is written only for valid KV rows by the GQA
+  // main kernel, but the post-dispatch reduction reads every row; pre-zero so
+  // masked/padded rows don't feed uninitialized workspace into dk/dv (-> NaN).
+  if(dk_expanded_ptr){
+    NVTE_CHECK_CUDA(cudaMemsetAsync(dk_expanded_ptr, 0,
+        max_tokens_kv*h*(d_qk+d_v)*nvte_dtype_size(dtype), stream));
+  }
   if(devPtrAlibiSlope){
     dim3 block, grid;
     block.x = 1024;
