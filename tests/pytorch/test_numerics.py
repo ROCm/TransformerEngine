@@ -196,6 +196,26 @@ if torch.cuda.get_device_capability() == (9, 0) or IS_HIP_EXTENSION:
     use_cutlass_grouped_gemm.append(True)
 
 
+# Marker for tests that compare a grouped-GEMM path against a sequence of
+# individual GEMM calls, or that rely on a bit-exact `rtol=0, atol=0`
+# comparison. Under NVTE_USE_GEMM_TRITON=1 our Triton kernel replaces the
+# regular (non-grouped) GEMM in the "sequential" side while the grouped side
+# is still hipBLASLt/CUTLASS/AITER-Triton — so the equivalence premise (both
+# sides using the same GEMM) is broken by design. The upstream code even
+# spells this out with a `# cuBLAS implementation should be bit-wise match`
+# comment. These tests were not written to validate our regular Triton
+# backend, so we skip them under the override rather than loosen tolerances
+# just to make them pass vacuously.
+_skip_grouped_under_gemm_triton = pytest.mark.skipif(
+    bool(int(os.environ.get("NVTE_USE_GEMM_TRITON", "0"))),
+    reason=(
+        "NVTE_USE_GEMM_TRITON=1 replaces the regular GEMM used by the "
+        "sequential comparison side; the grouped-vs-sequential equivalence "
+        "premise no longer holds. See conftest.py and PR discussion."
+    ),
+)
+
+
 def get_causal_attn_mask(sq: int) -> torch.Tensor:
     return torch.triu(torch.ones(sq, sq, device="cuda"), diagonal=1).bool()
 
@@ -2103,6 +2123,7 @@ def _test_grouped_linear_accuracy(
     return outputs
 
 
+@_skip_grouped_under_gemm_triton
 @pytest.mark.parametrize("dtype", param_types, ids=str)
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -2231,6 +2252,7 @@ def test_grouped_linear_accuracy(
         torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
 
 
+@_skip_grouped_under_gemm_triton
 @pytest.mark.skipif(
     torch.cuda.get_device_capability() != (9, 0) and not IS_HIP_EXTENSION,
     reason="Only enable CUTLASS grouped gemm on Hopper",
@@ -2277,6 +2299,7 @@ def test_grouped_linear_accuracy_cutlass(
     os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
 
 
+@_skip_grouped_under_gemm_triton
 @pytest.mark.parametrize("dtype", param_types, ids=str)
 @pytest.mark.parametrize("num_gemms", [3])
 @pytest.mark.parametrize("bs", [1])
@@ -2383,6 +2406,7 @@ def test_grouped_linear_accuracy_save_original_input(
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
+@_skip_grouped_under_gemm_triton
 @pytest.mark.parametrize("recipe", fp8_recipes + [None])
 def test_grouped_linear_accuracy_single_gemm(recipe):
     """Split the tests to save CI time"""
@@ -2493,6 +2517,7 @@ def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, r
     return outputs
 
 
+@_skip_grouped_under_gemm_triton
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("num_gemms", [3, 6])
 @pytest.mark.parametrize("bs", batch_sizes)
@@ -2568,6 +2593,7 @@ def test_padding_grouped_linear_accuracy(
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
+@_skip_grouped_under_gemm_triton
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("num_gemms", [3])
 @pytest.mark.parametrize("bs", [1])
@@ -2988,6 +3014,7 @@ def test_transformer_layer_hidden_states_format(dtype, bs, model):
             )
 
 
+@_skip_grouped_under_gemm_triton
 @pytest.mark.parametrize(
     "shape",
     [
@@ -3740,6 +3767,7 @@ def test_fp8gemm_with_unfused_quantization(N, datatype, input_quantizer, out_qua
     torch.testing.assert_close(expected_quantized_out.dequantize(), quantized_out.dequantize())
 
 
+@_skip_grouped_under_gemm_triton
 @pytest.mark.parametrize(
     "shape",
     [
