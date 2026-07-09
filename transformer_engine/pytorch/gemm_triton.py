@@ -891,6 +891,17 @@ def te_generic_gemm_triton(A,
                D_scale, bias_tensor, D_amax, epilogue, input_fp8, output_fp8,
                accumulate=accumulate, alpha=alpha, beta=beta)
 
+    # Fused FP8 output quantization is not wired through this wrapper (see the
+    # `output_fp8 = False` above): the kernel produces D in `output_dtype`
+    # (typically fp32/bf16) rather than writing FP8 with scale + amax directly.
+    # When the caller passed a quantizer, apply it here so the returned tensor
+    # is the Float8Tensor / MXFP8Tensor the caller expects. This matches what
+    # the hipBLASLt fused path produces bit-for-bit: same fp32 accumulator ->
+    # same quantizer -> same FP8 payload. Skip DebugQuantizer because
+    # general_gemm strips it out before dispatching to us.
+    if quantizer is not None:
+        D = quantizer(D)
+
     return D, bias_grad, None, None
         
     
