@@ -81,14 +81,6 @@ bool is_ck_backend_supported(
     return false;
   }
 
-  // filter based on softmax type
-  if(softmax_type!=NVTE_VANILLA_SOFTMAX){
-    if(nvte_log_ck_config){
-      std::cout<<"AITER/CK fused attn does not support learnable sink yet"<<std::endl;
-    }
-    return false;
-  }
-
   // joint filter based on sliding window and attn_mask
   bool is_causal = (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK||
@@ -472,8 +464,10 @@ void fused_attn_ck_fwd_impl(
   bool is_training, float scaling_factor, float dropout_probability,
   NVTE_QKV_Layout layout,
   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+  NVTE_Softmax_Type softmax_type,
   int64_t window_size_left, int64_t window_size_right,
   void *devPtrQ, void *devPtrK, void *devPtrV, void* devPtrBias,
+  void *devPtrSoftmaxOffset,
   void *devPtrSoftmaxAux, void *devPtrO,
   void* devPtrDropoutSeed, void* devPtrDropoutOffset,
   void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
@@ -599,6 +593,8 @@ void fused_attn_ck_fwd_impl(
   }
 
   if (nvte_log_ck_config) {
+    const bool log_has_sink =
+        (softmax_type != NVTE_VANILLA_SOFTMAX && devPtrSoftmaxOffset != nullptr);
     std::cout<<std::endl<<"attn_fwd(ck): ";
     std::cout<<"layout: "<<layout<<", ";
     std::cout<<"max_tokens_q: "<<max_tokens_q<<", ";
@@ -631,7 +627,9 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"(bias_b, bias_h): ("<<bias_b<<", "<<bias_h<<"), ";
     std::cout<<"mask_type: "<<mask_type<<", ";
     std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<", ";
-    std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<std::endl;
+    std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<", ";
+    std::cout<<"has_sink: "<<log_has_sink<<", ";
+    std::cout<<"sink_ptr: "<<(log_has_sink ? devPtrSoftmaxOffset : nullptr)<<std::endl;
   }
   // Common fields filled here; mode-specific fields are overwritten below.
   ck_fused_attn::CKAttnFwdArgs ck_args;
@@ -648,6 +646,10 @@ void fused_attn_ck_fwd_impl(
   ck_args.window_size_right = window_size_right;
   ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3;
   ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
+  const bool has_sink = (softmax_type != NVTE_VANILLA_SOFTMAX && devPtrSoftmaxOffset != nullptr);
+  ck_args.has_sink = has_sink;
+  ck_args.sink_ptr = has_sink ? devPtrSoftmaxOffset : nullptr;
+  ck_args.sink_size = has_sink ? 1 : 0;
 
   if(is_SBHD && is_padding){
     // remove padding for q, k, v
@@ -1114,8 +1116,10 @@ void fused_attn_ck_fwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d_qk, size_t d_v,
   bool is_training, float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+  NVTE_Softmax_Type softmax_type,
   int64_t window_size_left, int64_t window_size_right,
-  const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_Bias, 
+  const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_Bias,
+  const Tensor* input_SoftmaxOffset,
   Tensor* output_O, NVTETensorPack *Aux_CTX_Tensors,
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
@@ -1142,6 +1146,11 @@ void fused_attn_ck_fwd(
     bias_h = input_Bias->data.shape[1];
   }
 
+  void *devPtrSoftmaxOffset = nullptr;
+  if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+    devPtrSoftmaxOffset = input_SoftmaxOffset->data.dptr;
+  }
+
   void *devPtrCuSeqlensQ = input_cu_seqlens_q->data.dptr;
   void *devPtrCuSeqlensKV = input_cu_seqlens_kv->data.dptr;
   void *devPtrSeqOffsetsQ = input_cu_seqlens_q_padded->data.dptr;
@@ -1150,53 +1159,51 @@ void fused_attn_ck_fwd(
   size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d_qk;
   size_t max_tokens_kv = std::accumulate((input_K->data).shape.begin(), (input_K->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_kv/d_qk;
 
-  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
+  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD;
+  size_t i = 0;
   if (Aux_CTX_Tensors->size == 0) {
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    output_S->data.dptr = nullptr;
+    if(is_ragged){
+      output_S->data.shape = {max_tokens_q, h_q, 1};
+    }else{
+      output_S->data.shape = {b, h_q, max_seqlen_q, 1};
+    }
+    output_S->data.dtype = DType::kFloat32;
+
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+    output_rng_state->data.dptr = nullptr;
+    output_rng_state->data.shape = {2};
+    output_rng_state->data.dtype = DType::kInt64;
+
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
-      Aux_CTX_Tensors->size = 3;
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-      output_S->data.dptr = nullptr;
-      if(is_ragged){
-        output_S->data.shape = {max_tokens_q, h_q, 1};
-      }else{
-        output_S->data.shape = {b, h_q, max_seqlen_q, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
-      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
+      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
       output_bias->data.dptr = nullptr;
       output_bias->data.shape = {bias_b, bias_h, max_seqlen_q, max_seqlen_kv};
       output_bias->data.dtype = QKV_type;
-    } else {
-      Aux_CTX_Tensors->size = 2;
-      Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-      output_S->data.dptr = nullptr;
-      if(is_ragged){
-        output_S->data.shape = {max_tokens_q, h_q, 1};
-      }else{
-        output_S->data.shape = {b, h_q, max_seqlen_q, 1};
-      }
-      output_S->data.dtype = DType::kFloat32;
-      Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-      output_rng_state->data.dptr = nullptr;
-      output_rng_state->data.shape = {2};
-      output_rng_state->data.dtype = DType::kInt64;
     }
-  } else if (Aux_CTX_Tensors->size == 2) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
+
+    if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+      Tensor *output_softmax_offset = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+      output_softmax_offset->data.dptr = nullptr;
+      output_softmax_offset->data.shape = {1, h_q, 1, 1};
+      output_softmax_offset->data.dtype = DType::kFloat32;
+    }
+
+    Aux_CTX_Tensors->size = i;
+  } else if (Aux_CTX_Tensors->size >= 2) {
+    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
+    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
     output_rng_state->data.dptr = rng_state->data.dptr;
-  } else if (Aux_CTX_Tensors->size == 3) {
-    Tensor *output_S = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[0]);
-    devPtrS = output_S->data.dptr;
-    Tensor *output_rng_state = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[1]);
-    output_rng_state->data.dptr = rng_state->data.dptr;
-    Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[2]);
-    output_bias->data.dptr = devPtrBias;
+    if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
+      Tensor *output_bias = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+      output_bias->data.dptr = devPtrBias;
+    }
+    if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+      Tensor *output_softmax_offset = convertNVTETensorCheck(Aux_CTX_Tensors->tensors[i++]);
+      output_softmax_offset->data.dptr = devPtrSoftmaxOffset;
+    }
   } else {
     NVTE_ERROR("Unexpected Aux_CTX_Tensors->size.");
   }
@@ -1211,9 +1218,10 @@ void fused_attn_ck_fwd(
     max_tokens_q, max_tokens_kv,
     is_training, attn_scale, dropout, 
     qkv_layout,
-    bias_type, attn_mask_type,
+    bias_type, attn_mask_type, softmax_type,
     window_size_left, window_size_right,
-    devPtrQ, devPtrK, devPtrV, devPtrBias, 
+    devPtrQ, devPtrK, devPtrV, devPtrBias,
+    devPtrSoftmaxOffset,
     devPtrS, devPtrO,
     rng_state->data.dptr, 
     reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1),

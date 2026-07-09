@@ -91,6 +91,9 @@ void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fw
 
   log_value(log_file, "dropout_seed_ptr", std::get<0>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset)));
   log_value(log_file, "dropout_offset_ptr", std::get<1>(std::get<std::pair<const void*, const void*>>(fmha_args.drop_seed_offset)));
+  log_value(log_file, "has_sink", fmha_args.has_sink);
+  log_value(log_file, "sink_ptr", fmha_args.sink_ptr);
+  log_value(log_file, "sink_size", fmha_args.sink_size);
 }
 
 void dump_fwd_timings(const char* dump_path, float average_runtime){
@@ -160,7 +163,7 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
 
   fmha_args.block_scale_seqstart_q_ptr = nullptr;
   fmha_args.block_scale_seqstart_k_ptr = nullptr;
-  fmha_args.sink_ptr = nullptr;
+  fmha_args.sink_ptr = args.sink_ptr;
   fmha_args.seqlen_k     = args.s_kv; // unused in group mode (or kvcache enabled)
   fmha_args.max_seqlen_q = args.s_q;
 
@@ -207,11 +210,11 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
   fmha_args.bias_type       = static_cast<int>(bias_type);
   fmha_args.has_lse         = args.lse_ptr!=nullptr;
   fmha_args.qscale_type     = static_cast<int>(quant_scale_enum::no_scale);
-  fmha_args.has_sink        = false;
+  fmha_args.has_sink        = args.has_sink;
   fmha_args.q_descale_ptr    = nullptr;
   fmha_args.k_descale_ptr    = nullptr;
   fmha_args.v_descale_ptr    = nullptr;
-  fmha_args.sink_size        = 0;
+  fmha_args.sink_size        = args.sink_size;
   fmha_args.min_seqlen_q     = 0;
   fmha_args.block_scale_size_q  = 0;
   fmha_args.block_scale_size_kv = 0;

@@ -382,6 +382,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   const Tensor *input_K = convertNVTETensorCheck(K);
   const Tensor *input_V = convertNVTETensorCheck(V);
   const Tensor *input_Bias = convertNVTETensorCheck(Bias);
+  const Tensor *input_SoftmaxOffset = convertNVTETensorCheck(SoftmaxOffset);
   Tensor *output_O = convertNVTETensorCheck(O);
   Tensor *wkspace = convertNVTETensorCheck(workspace);
 
@@ -413,9 +414,9 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
     fused_attn_ck_fwd(
       b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v,
       is_training, attn_scale, dropout, 
-      qkv_layout, bias_type, attn_mask_type,
+      qkv_layout, bias_type, attn_mask_type, softmax_type,
       window_size_left, window_size_right,
-      input_Q, input_K, input_V, input_Bias, 
+      input_Q, input_K, input_V, input_Bias, input_SoftmaxOffset,
       output_O, Aux_CTX_Tensors,
       input_cu_seqlens_q,
       input_cu_seqlens_kv,
