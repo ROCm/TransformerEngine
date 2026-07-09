@@ -35,6 +35,7 @@ main() {
         "bench_multi_cast_transpose"
         "bench_group_quantize_mxfp8"
         "bench_quantize_mxfp8_fused"
+        "bench_normalization"
     )
 
     FAILED_BENCHMARKS=()

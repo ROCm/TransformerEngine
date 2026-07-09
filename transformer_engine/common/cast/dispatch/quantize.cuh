@@ -164,7 +164,6 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
 #endif
       break;
     }
-#ifndef __HIP_PLATFORM_AMD__
     case NVTE_BLOCK_SCALING_2D: {
       // TODO(kwyss): IS_ACT, ParamOP, OP parameters support.
       NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for FWD NVTE_BLOCK_SCALING_2D");
@@ -196,7 +195,6 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
           columnwise_option, force_pow_2_scales, noop_tensor->data, stream);
       break;
     }
-#endif//#ifndef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
   }
@@ -317,7 +315,6 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
 #endif
       break;
     }
-#ifndef __HIP_PLATFORM_AMD__
     case NVTE_BLOCK_SCALING_2D: {
       // TODO(kwyss): IS_BIAS, IS_DACT, ParamOP, OP parameters support.
       NVTE_CHECK((!IS_DBIAS && !IS_DACT),
@@ -351,7 +348,6 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
           columnwise_option, force_pow_2_scales, noop_tensor->data, stream);
       break;
     }
-#endif //#ifndef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
   }
@@ -460,7 +456,7 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8::group_quantize</*IS_DBIAS=*/false, /*IS_DACT=*/false, IS_ACT, ParamOP, OP>(
           input_tensor, activations_tensor, noop_tensor, output_tensor, dbias_tensor,
-          workspace_tensor, stream);
+          workspace_tensor, &quant_config_cpp, stream);
       break;
     }
     default:
@@ -501,7 +497,7 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
     case NVTE_MXFP8_1D_SCALING: {
       mxfp8::group_quantize<IS_DBIAS, IS_DACT, /*IS_ACT=*/false, ParamOP, OP>(
           grad_tensor, input_tensor, noop_tensor, output_tensor, dbias_tensor, workspace_tensor,
-          stream);
+          &quant_config_cpp, stream);
       break;
     }
     default:

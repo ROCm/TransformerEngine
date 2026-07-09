@@ -301,19 +301,6 @@ __global__ void compute_ref_kernel(
 }
 
 
-constexpr size_t kMXFP8GroupSize = 32;
-constexpr size_t kKTileSize      = 128;
-
-static size_t compute_mxfp8_workspace_size(size_t m, size_t k, size_t n, bool transa, bool transb, size_t base_size) {
-  size_t k_iters = k / kKTileSize;
-  size_t scale_k = k / kMXFP8GroupSize;
-  size_t sa_pk   = round_up_to_nearest_multiple(k_iters * m * 4, 256);
-  size_t sb_pk   = k_iters * n * 4;
-  size_t needed  = round_up_to_nearest_multiple(sa_pk, 256) + sb_pk;
-  if (!transa) needed += round_up_to_nearest_multiple(m * k, 256) + round_up_to_nearest_multiple(m * scale_k, 256) + round_up_to_nearest_multiple(sa_pk, 256);
-  if (transb)  needed += round_up_to_nearest_multiple(n * k, 256) + round_up_to_nearest_multiple(n * scale_k, 256) + round_up_to_nearest_multiple(sb_pk, 256);
-  return std::max(base_size, needed);
-}
 
 struct TestParams {
   size_t m;
@@ -676,15 +663,10 @@ void performTest(const TestParams& params) {
   bool grad = false;
   bool accumulate = false;
 
-  size_t workspace_size = 33554432;
+  size_t workspace_size = 33'554'432;
 #ifdef __HIP_PLATFORM_AMD__
   if ((prop.major == 9 && prop.minor == 5) || prop.major >= 12) {
-    workspace_size = 67108864;
-  }
-  if (use_hipkittens_mxfp8) {
-    workspace_size = compute_mxfp8_workspace_size(params.m, params.k, params.n,
-                                                  params.transa, params.transb,
-                                                  workspace_size);
+    workspace_size = 67'108'864;
   }
 #endif
   Tensor Workspace("Workspace", TShape{ workspace_size }, DType::kByte);
@@ -835,10 +817,7 @@ void performDqTest(const TestParams &params) {
   Tensor bias;
   Tensor pre_gelu_out;
 
-  size_t workspace_size = compute_mxfp8_workspace_size(params.m, params.k, params.n,
-                                                  params.transa, params.transb,
-                                                  67108864); // 64 MiB required for hipBLASlt
-  Tensor Workspace("Workspace", TShape{workspace_size}, DType::kByte);
+  Tensor Workspace("Workspace", TShape{67'108'864}, DType::kByte);
 
   //perform FP8 gemm and copy the output results from GPU memory to CPU memory
   Tensor D("D", TShape{params.n, params.m}, dtype);
