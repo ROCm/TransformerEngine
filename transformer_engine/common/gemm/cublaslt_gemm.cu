@@ -33,7 +33,9 @@
 #include "./cutlass_grouped_gemm.cuh"
 #else
 #include "ck_grouped_gemm/ck_grouped_gemm.h"
+#ifdef USE_HIPKITTENS_GEMM
 #include "kittens/mxfp8_gemm.h"
+#endif
 #endif
 
 #ifndef __HIP_PLATFORM_AMD__
@@ -1098,7 +1100,7 @@ void nvte_cublas_handle_init() { auto _ = cublasHandleManager::Instance().GetHan
 }  //  namespace transformer_engine
 #endif // __HIP_PLATFORM_AMD__
 
-#ifdef __HIP_PLATFORM_AMD__
+#ifdef USE_HIPKITTENS_GEMM
 namespace transformer_engine {
 bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
     int num_gemms, bool transa, bool transb, NVTETensor *workspace,
@@ -1210,10 +1212,12 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 
     bool handled_by_ck = false;
     if (transformer_engine::is_mxfp8_scaling(inputA->scaling_mode)) {
+#ifdef USE_HIPKITTENS_GEMM
       if (transformer_engine::try_kittens_grouped_mxfp8_gemm(A, B, D, num_gemms, transa, transb,
                                          workspace, accumulate, stream)) {
         return;
       }
+#endif
       handled_by_ck = ck_tile_mx_grouped_gemm(
           A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
     } else {

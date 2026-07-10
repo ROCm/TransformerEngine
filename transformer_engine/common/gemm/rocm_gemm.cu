@@ -2046,6 +2046,8 @@ bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NV
     bool accumulate, cudaStream_t stream) {
     if (accumulate || num_gemms <= 1) return false;
     if (cuda::sm_arch() != 95) return false;
+    if (!transformer_engine::getenv<bool>("NVTE_USE_HIPKITTENS_GROUPED_GEMM", false) &&
+        !transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false)) return false;
 
     std::vector<const void *> a_ptrs(num_gemms), b_ptrs(num_gemms), c_ptrs(num_gemms);
     std::vector<const void *> sa_ptrs(num_gemms), sb_ptrs(num_gemms);

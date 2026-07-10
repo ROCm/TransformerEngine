@@ -137,6 +137,8 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
     [[maybe_unused]] const void *const *a_expert_ptrs, [[maybe_unused]] TileOffsets tile_offsets, 
     [[maybe_unused]] int num_experts, int N, int K, int total_m_tiles, int tiles_N) {
 
+    static_assert(!GROUPED || EPILOGUE == GemmEpilogue::DEFAULT, "Grouped GEMM only supports DEFAULT epilogue");
+
     int k_iters = K / BLOCK_K;
     int sa_stride = total_m_tiles;
     int sb_stride = tiles_N;
@@ -440,6 +442,8 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
     [[maybe_unused]] const void *const *a_expert_ptrs, [[maybe_unused]] TileOffsets tile_offsets,
     [[maybe_unused]] int num_experts, int N, int K, int total_m_tiles, int tiles_N) {
 
+    static_assert(!GROUPED || EPILOGUE == GemmEpilogue::DEFAULT, "Grouped GEMM only supports DEFAULT epilogue");
+
     int k_iters = K / BLOCK_K;
     int sa_stride = total_m_tiles;
     int sb_stride = tiles_N;
@@ -701,6 +705,8 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
     [[maybe_unused]] const void *__restrict__ bias, [[maybe_unused]] int bias_dtype,
     [[maybe_unused]] const void *const *a_expert_ptrs, [[maybe_unused]] TileOffsets tile_offsets, 
     [[maybe_unused]] int num_experts, int N, int K, int total_m_tiles, int tiles_N) {
+
+    static_assert(!GROUPED || EPILOGUE == GemmEpilogue::DEFAULT, "Grouped GEMM only supports DEFAULT epilogue");
 
     int k_iters = K / BLOCK_K;
     int sa_stride = total_m_tiles;
@@ -1218,6 +1224,8 @@ bool kittens_grouped_mxfp8_gemm(
                                   sa_pk + (size_t)g * k_iters * M,
                                   M, scale_K, k_iters, stream);
     }
+
+    // Activation scales are validated contiguous [total_N, scale_K] from scale_B_array[0].
     launch_pack_scales<false>((const uint8_t *)scale_B_array[0], sb_pk,
                               total_N, scale_K, k_iters, stream);
 
