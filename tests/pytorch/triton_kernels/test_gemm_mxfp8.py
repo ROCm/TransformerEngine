@@ -1,22 +1,76 @@
-#!/usr/bin/env python3
-"""Direct test of MXFP8 kernel (without full quantization)"""
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# License for AMD contributions = MIT. See LICENSE for more information
 
-import torch
+"""Triton MXFP8 GEMM kernel and wrapper tests."""
+
 import sys
-import pytest
 
-print("Testing MXFP8 kernel directly...")
+import pytest
+import torch
 
 if not torch.cuda.is_available():
     pytest.skip("CUDA not available", allow_module_level=True)
 
 from transformer_engine.pytorch import torch_version
+
 if torch_version() < (2, 10):
     pytest.skip(
         f"MXFP8 Triton kernel requires PyTorch >= 2.10 (found {torch_version()}); "
         "earlier versions hit a tl.dot_scaled() RHS-scale compiler bug producing NaNs.",
         allow_module_level=True,
     )
+
+
+def test_mxfp8_imports():
+    """Test that MXFP8 classes can be imported"""
+    try:
+        from transformer_engine.pytorch.triton_kernels.gemm import te_generic_gemm_triton
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
+        from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+        print("✓ Successfully imported MXFP8 classes")
+    except ImportError as e:
+        pytest.fail(f"Import failed: {e}")
+
+
+def test_mxfp8_wrapper_regular_tensor():
+    """Test MXFP8TensorWrapper with regular tensors"""
+    try:
+        from transformer_engine.pytorch.triton_kernels.gemm import MXFP8TensorWrapper
+
+        # Create simple test tensor
+        A_fp32 = torch.randn(128, 512, device='cuda', dtype=torch.float32)
+
+        # Test wrapping a regular tensor
+        wrapper = MXFP8TensorWrapper(A_fp32)
+        print(f"✓ MXFP8TensorWrapper created for regular tensor")
+        print(f"  - is_mxfp8: {wrapper.is_mxfp8}")
+        print(f"  - size: {wrapper.size()}")
+
+        assert wrapper.is_mxfp8 == False, "Regular tensor should not be detected as MXFP8"
+        assert wrapper.size() == A_fp32.size(), "Size should match original tensor"
+
+    except Exception as e:
+        pytest.fail(f"MXFP8TensorWrapper test failed: {e}")
+
+
+def test_basic_fp32_gemm():
+    """Test basic FP32 GEMM for reference"""
+    try:
+        M, N, K = 128, 256, 512
+
+        A_fp32 = torch.randn(M, K, device='cuda', dtype=torch.float32)
+        B_fp32 = torch.randn(K, N, device='cuda', dtype=torch.float32)
+
+        print(f"✓ Created test tensors: A={A_fp32.shape}, B={B_fp32.shape}")
+
+        # Compute reference
+        C_ref = torch.matmul(A_fp32, B_fp32)
+        print(f"✓ Computed FP32 reference: C={C_ref.shape}")
+
+        assert C_ref.shape == (M, N), f"Expected shape ({M}, {N}), got {C_ref.shape}"
+
+    except Exception as e:
+        pytest.fail(f"Tensor creation failed: {e}")
 
 
 def _get_e4m3_dtype():
@@ -102,17 +156,3 @@ def test_mxfp8_kernel_with_simulated_data():
 
     except Exception as e:
         pytest.fail(f"Kernel execution failed: {e}")
-
-
-if __name__ == "__main__":
-    print("\n" + "="*60)
-    print("Running MXFP8 Kernel Direct Test")
-    print("="*60)
-
-    test_mxfp8_kernel_with_simulated_data()
-
-    print("\n" + "="*60)
-    print("MXFP8 KERNEL TEST PASSED!")
-    print("="*60)
-    print("\nNote: This test uses simulated FP8 data (not real quantization).")
-    print("For full testing, use actual MXFP8Tensor with proper quantization.")
