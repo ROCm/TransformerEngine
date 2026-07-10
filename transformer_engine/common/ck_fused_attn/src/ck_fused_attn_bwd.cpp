@@ -700,7 +700,7 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   void* ws_base = args.aiter_workspace_ptr;
   const size_t ws_capacity = args.aiter_workspace_bytes;
   size_t ws_offset = 0;
-  fmha_args.workspace_alloc = [ws_base, ws_capacity, &ws_offset, stream, det = args.deterministic](size_t bytes, bool zero_init) -> void* {
+  fmha_args.workspace_alloc = [ws_base, ws_capacity, &ws_offset, stream](size_t bytes, bool zero_init) -> void* {
     if(bytes == 0){
       return nullptr;
     }
@@ -709,10 +709,10 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
     }
     void* ptr = static_cast<int8_t*>(ws_base) + ws_offset;
     ws_offset += bytes;
-    // The deterministic bwd splits dq_acc into ceil(seqlen_k/kN0) copies and reduces
-    // across them; slots for splits the kernel never writes (padded/masked KV) are
-    // read during the reduction, so an unzeroed dq_acc yields NaN in dq.
-    if(zero_init || det){
+    // Honor aiter's zero_init hint; aiter zeroes the dq_acc region itself in
+    // prepare_workspace_async when the kernel requires it (deterministic splits,
+    // atomic-add accumulation), given a correctly sized workspace.
+    if(zero_init){
       if(hipMemsetAsync(ptr, 0, bytes, stream) != hipSuccess){
         throw std::runtime_error("ck_fused_attn bwd: hipMemsetAsync failed for AITER workspace.");
       }
