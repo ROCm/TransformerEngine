@@ -104,7 +104,7 @@ void dump_fwd_timings(const char* dump_path, float average_runtime){
 // never disagree with the launch. v3_api_check is left false here; callers flip it.
 // The stream-dependent max_seqlen override (NVTE_CK_RUNTIME_MAX_SEQLEN) is applied
 // by ck_attn_fwd after this returns; it does not affect v3 kernel selection.
-static aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
+aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
 
   bias_enum bias_type = bias_enum::no_bias;
   BiasShape bias_shape = BiasShape::k11SS;

@@ -441,12 +441,19 @@ void dump_bwd_timings(const char* dump_path, float average_runtime){
   file << average_runtime << "\n";
 }
 
+struct BwdFmhaArgs {
+  aiter::mha_bwd_args fmha_args;
+  bool is_mqa_gqa;
+  bool has_dbias;
+  BiasShape bias_shape;
+};
+
 // Populate the AITER mha_bwd_args from TE's CkAttnBwdArgs. Shared by ck_attn_bwd
 // (real launch) and ck_attn_bwd_uses_v3 (v3 availability probe) so the probe can
 // never disagree with the launch. v3_api_check is left false here; callers flip it.
 // The stream-dependent max_seqlen override (NVTE_CK_RUNTIME_MAX_SEQLEN) is applied
 // by ck_attn_bwd after this returns; it does not affect v3 kernel selection.
-static aiter::mha_bwd_args build_bwd_fmha_args(const CkAttnBwdArgs& args){
+BwdFmhaArgs build_bwd_fmha_args(const CkAttnBwdArgs& args){
 
   bool has_dropout = (args.dropout_probability > 0.f);
   bool has_dbias = args.dbias_ptr != nullptr;
@@ -574,14 +581,14 @@ static aiter::mha_bwd_args build_bwd_fmha_args(const CkAttnBwdArgs& args){
   fmha_args.p_undrop = 1.0 - args.dropout_probability;
   fmha_args.drop_seed_offset = std::pair<const void*, const void*>{args.philox_seed_ptr, args.philox_offset_ptr};
 
-  return fmha_args;
+  return {fmha_args, is_mqa_gqa, has_dbias, bias_shape};
 }
 
 // Probe whether AITER's v3 (asm) backward path will run for this config, without
 // launching any kernel. Builds the same args as ck_attn_bwd and relies on AITER's
 // v3_api_check dry-run (returns 1 when v3 is available, -1 otherwise).
 bool ck_attn_bwd_uses_v3(const CkAttnBwdArgs& args){
-  aiter::mha_bwd_args fmha_args = build_bwd_fmha_args(args);
+  aiter::mha_bwd_args fmha_args = build_bwd_fmha_args(args).fmha_args;
   fmha_args.v3_api_check = true;
   // No kernel is launched in check mode, so the stream/log flags are irrelevant.
   ck_tile::stream_config stream_config{nullptr, false, false};
@@ -590,14 +597,13 @@ bool ck_attn_bwd_uses_v3(const CkAttnBwdArgs& args){
 
 hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
 
-  // Recomputed here (also computed inside build_bwd_fmha_args) for the post-dispatch
-  // MQA/GQA reduction and dbias handling below.
-  bool is_mqa_gqa = (args.h > args.hg);
-  bool has_dbias = args.dbias_ptr != nullptr;
-  BiasShape bias_shape = BiasShape::k11SS;
-  if (!args.is_group_mode()) {
-    std::tie(std::ignore, bias_shape) = get_ck_bias_type_shape(&args);
-  }
+  // build_bwd_fmha_args also derives the flags the post-dispatch MQA/GQA and dbias
+  // reductions below need, so we unpack them here rather than recomputing.
+  BwdFmhaArgs built = build_bwd_fmha_args(args);
+  aiter::mha_bwd_args& fmha_args = built.fmha_args;
+  const bool is_mqa_gqa = built.is_mqa_gqa;
+  const bool has_dbias = built.has_dbias;
+  const BiasShape bias_shape = built.bias_shape;
 
   bool ck_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
@@ -607,8 +613,6 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
   // print kernel name on verbose mode
   ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
-
-  aiter::mha_bwd_args fmha_args = build_bwd_fmha_args(args);
 
   // modify the max_seqlen_q for better performance in 0-length cases
   // lse_workspace_ptr used as buffer
