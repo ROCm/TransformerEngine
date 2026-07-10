@@ -208,6 +208,22 @@ If you want to check that only previously tuned algorithms are used by your appl
   diff algo_tune.csv algo_tune_check.csv
 
 
+Grouped GEMM Backends on ROCm
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+For Mixture of Experts workloads, ROCm TE supports single-launch grouped GEMMs. Two backends are available:
+
+* **HipKittens** -- MXFP8 grouped GEMM only, requires expert dimensions to be 256-aligned. Default when the grouped GEMM path is enabled on gfx950.
+* **CK** (Composable Kernel) -- Grouped GEMM used as a fallback when HipKittens constraints are not met, or when explicitly selected.
+
+The following environment variables control backend selection:
+
+* ``NVTE_USE_CUTLASS_GROUPED_GEMM=1`` -- Enable the grouped GEMM path. On gfx950, defaults to HipKittens with CK fallback.
+* ``NVTE_USE_HIPKITTENS_GROUPED_GEMM=1`` -- Explicitly enable HipKittens grouped GEMM. Takes priority over CK.
+* ``NVTE_USE_CK_GROUPED_GEMM=1`` -- Explicitly select CK, bypassing HipKittens.
+
+When none are set, TE falls back to multi-stream dispatch.
+
+
 Fused Attention Backends on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Currently ROCm TE supports two backends, AOTriton and CK, for fused attention.

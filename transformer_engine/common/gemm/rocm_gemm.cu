@@ -2045,9 +2045,25 @@ bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NV
     int num_gemms, bool transa, bool transb, NVTETensor *workspace,
     bool accumulate, cudaStream_t stream) {
     if (accumulate || num_gemms <= 1) return false;
-    if (cuda::sm_arch() != 95) return false;
-    if (!transformer_engine::getenv<bool>("NVTE_USE_HIPKITTENS_GROUPED_GEMM", false) &&
-        !transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false)) return false;
+
+    auto env_set = [](const char *name) {
+        const char *v = std::getenv(name);
+        return v && v[0] == '1';
+    };
+    static bool enabled = [&] {
+        if (cuda::sm_arch() != 95) return false;
+        bool use    = env_set("NVTE_USE_CUTLASS_GROUPED_GEMM");
+        bool use_hk = env_set("NVTE_USE_HIPKITTENS_GROUPED_GEMM");
+        bool use_ck = env_set("NVTE_USE_CK_GROUPED_GEMM");
+        if (use_hk && use_ck) {
+            fprintf(stderr, "[HK-grouped] both NVTE_USE_HIPKITTENS_GROUPED_GEMM and "
+                    "NVTE_USE_CK_GROUPED_GEMM set; defaulting to HipKittens\n");
+        }
+        return use_hk || (use && !use_ck);
+    }();
+    if (!enabled) return false;
+
+    static bool warn_fallback = env_set("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK");
 
     std::vector<const void *> a_ptrs(num_gemms), b_ptrs(num_gemms), c_ptrs(num_gemms);
     std::vector<const void *> sa_ptrs(num_gemms), sb_ptrs(num_gemms);
@@ -2066,7 +2082,12 @@ bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NV
         const void *b_data  = transb ? tB->columnwise_data.dptr : tB->data.dptr;
         const void *b_scale = transb ? tB->columnwise_scale_inv.dptr : tB->scale_inv.dptr;
 
-        if (!a_data || !b_data) return false;
+        if (!a_data || !b_data) {
+            if (warn_fallback) {
+                fprintf(stderr, "[HK-grouped] null data pointer at expert %d\n", i);
+            }
+            return false;
+        }
 
         int A0 = tA->data.shape[0], A1 = tA->data.shape[1];
         int B0 = tB->data.shape[0], B1 = tB->data.shape[1];
@@ -2081,7 +2102,12 @@ bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NV
             a_dtype = static_cast<int>(transa ? tA->data.dtype : tA->columnwise_data.dtype);
             b_dtype = static_cast<int>(transb ? tB->columnwise_data.dtype : tB->data.dtype);
         } else {
-            if (m_i != ref_m || k_i != ref_k) return false;
+            if (m_i != ref_m || k_i != ref_k) {
+                if (warn_fallback) {
+                    fprintf(stderr, "[HK-grouped] M or K varies across experts\n");
+                }
+                return false;
+            }
         }
 
         a_ptrs[i]  = a_data;
@@ -2092,6 +2118,8 @@ bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NV
         n_arr[i]   = n_i;
     }
 
+    // Activation data (B), activation scales (SB), and output (D) must be contiguous.
+    // Weight data and scales are passed per-expert via pointer arrays.
     int scale_K = ref_k / 32;
     size_t n_offset = 0;
     for (int i = 0; i < num_gemms; i++) {
@@ -2103,6 +2131,13 @@ bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NV
         size_t c_actual  = (const uint8_t *)c_ptrs[i]  - (const uint8_t *)c_ptrs[0];
         size_t sb_actual = (const uint8_t *)sb_ptrs[i] - (const uint8_t *)sb_ptrs[0];
 
+        if (b_actual != b_expect || c_actual != c_expect || sb_actual != sb_expect) {
+            if (warn_fallback) {
+                fprintf(stderr, "[HK-grouped] non-contiguous activation/output at expert %d, "
+                        "falling back\n", i);
+            }
+            return false;
+        }
         n_offset += n_arr[i];
     }
 

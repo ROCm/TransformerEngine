@@ -1122,7 +1122,9 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   const int current_device = transformer_engine::cuda::current_device();
   const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
 #endif
-  const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
+  const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false)
+                        || transformer_engine::getenv<bool>("NVTE_USE_HIPKITTENS_GROUPED_GEMM", false)
+                        || transformer_engine::getenv<bool>("NVTE_USE_CK_GROUPED_GEMM", false);
   const bool warn_fallback =
       transformer_engine::getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
 

@@ -2249,6 +2249,7 @@ def test_grouped_linear_accuracy(
 )
 @pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
 @pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
+@pytest.mark.parametrize("grouped_gemm_backend", ["hipkittens", "ck"] if IS_HIP_EXTENSION else ["cutlass"], ids=str)
 def test_grouped_linear_accuracy_cutlass(
     dtype,
     num_gemms,
@@ -2258,8 +2259,16 @@ def test_grouped_linear_accuracy_cutlass(
     fp8_model_params,
     fuse_wgrad_accumulation,
     delay_wgrad_compute,
+    grouped_gemm_backend,
 ):
     os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
+    if IS_HIP_EXTENSION:
+        os.environ.pop("NVTE_USE_HIPKITTENS_GROUPED_GEMM", None)
+        os.environ.pop("NVTE_USE_CK_GROUPED_GEMM", None)
+        if grouped_gemm_backend == "hipkittens":
+            os.environ["NVTE_USE_HIPKITTENS_GROUPED_GEMM"] = "1"
+        elif grouped_gemm_backend == "ck":
+            os.environ["NVTE_USE_CK_GROUPED_GEMM"] = "1"
     test_grouped_linear_accuracy(
         dtype,
         num_gemms,
@@ -2275,6 +2284,9 @@ def test_grouped_linear_accuracy_cutlass(
         use_cutlass=True,
     )
     os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
+    if IS_HIP_EXTENSION:
+        os.environ.pop("NVTE_USE_HIPKITTENS_GROUPED_GEMM", None)
+        os.environ.pop("NVTE_USE_CK_GROUPED_GEMM", None)
 
 
 @pytest.mark.parametrize("dtype", param_types, ids=str)
