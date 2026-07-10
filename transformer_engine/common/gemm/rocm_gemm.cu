@@ -2047,62 +2047,72 @@ bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NV
     if (accumulate || num_gemms <= 1) return false;
     if (cuda::sm_arch() != 95) return false;
 
-    std::vector<const void *> a_ptrs(num_gemms), b_ptrs(num_gemms), c_ptrs(num_gemms), sa_ptrs(num_gemms), sb_ptrs(num_gemms);
-    std::vector<int> m_arr(num_gemms);
+    std::vector<const void *> a_ptrs(num_gemms), b_ptrs(num_gemms), c_ptrs(num_gemms);
+    std::vector<const void *> sa_ptrs(num_gemms), sb_ptrs(num_gemms);
+    std::vector<int> n_arr(num_gemms);
 
-    int ref_N = -1, ref_K = -1;
-    int out_dtype = -1;
+    int ref_m = -1, ref_k = -1;
+    int out_dtype = -1, a_dtype = -1, b_dtype = -1;
 
     for (int i = 0; i < num_gemms; i++) {
         const auto *tA = convertNVTETensorCheck(A[i]);
         const auto *tB = convertNVTETensorCheck(B[i]);
         auto *tD = convertNVTETensorCheck(D[i]);
 
-        if (!tA->has_data() || !tB->has_data()) return false;
+        const void *a_data  = transa ? tA->data.dptr : tA->columnwise_data.dptr;
+        const void *a_scale = transa ? tA->scale_inv.dptr : tA->columnwise_scale_inv.dptr;
+        const void *b_data  = transb ? tB->columnwise_data.dptr : tB->data.dptr;
+        const void *b_scale = transb ? tB->columnwise_scale_inv.dptr : tB->scale_inv.dptr;
 
-        int M_i, N_i, K_i;
-        if (transa) {
-            M_i = tA->data.shape[0];
-            K_i = tA->data.shape[1];
-        } else {
-            K_i = tA->data.shape[0];
-            M_i = tA->data.shape[1];
-        }
-        if (transb) {
-            N_i = tB->data.shape[1];
-        } else {
-            N_i = tB->data.shape[0];
-        }
+        if (!a_data || !b_data) return false;
+
+        int A0 = tA->data.shape[0], A1 = tA->data.shape[1];
+        int B0 = tB->data.shape[0], B1 = tB->data.shape[1];
+        int m_i = transa ? A0 : A1;
+        int n_i = transb ? B1 : B0;
+        int k_i = transa ? A1 : A0;
 
         if (i == 0) {
-            ref_N = N_i;
-            ref_K = K_i;
+            ref_m = m_i;
+            ref_k = k_i;
             out_dtype = static_cast<int>(tD->data.dtype);
+            a_dtype = static_cast<int>(transa ? tA->data.dtype : tA->columnwise_data.dtype);
+            b_dtype = static_cast<int>(transb ? tB->columnwise_data.dtype : tB->data.dtype);
         } else {
-            if (N_i != ref_N || K_i != ref_K) return false;
+            if (m_i != ref_m || k_i != ref_k) return false;
         }
 
-        a_ptrs[i]  = tA->data.dptr;
-        b_ptrs[i]  = tB->data.dptr;
+        a_ptrs[i]  = a_data;
+        b_ptrs[i]  = b_data;
         c_ptrs[i]  = tD->data.dptr;
-        sa_ptrs[i] = tA->scale_inv.dptr;
-        sb_ptrs[i] = tB->scale_inv.dptr;
-        m_arr[i]   = M_i;
+        sa_ptrs[i] = a_scale;
+        sb_ptrs[i] = b_scale;
+        n_arr[i]   = n_i;
+    }
+
+    int scale_K = ref_k / 32;
+    size_t n_offset = 0;
+    for (int i = 0; i < num_gemms; i++) {
+        size_t b_expect  = n_offset * ref_k;
+        size_t c_expect  = n_offset * ref_m * sizeof(uint16_t);
+        size_t sb_expect = n_offset * scale_K;
+
+        size_t b_actual  = (const uint8_t *)b_ptrs[i]  - (const uint8_t *)b_ptrs[0];
+        size_t c_actual  = (const uint8_t *)c_ptrs[i]  - (const uint8_t *)c_ptrs[0];
+        size_t sb_actual = (const uint8_t *)sb_ptrs[i] - (const uint8_t *)sb_ptrs[0];
+
+        n_offset += n_arr[i];
     }
 
     auto *ws = convertNVTETensorCheck(workspace[0]);
-    void *ws_ptr = ws->data.dptr;
-    size_t ws_size = ws->data.shape[0];
 
     return kittens_grouped_mxfp8_gemm(
         a_ptrs.data(), b_ptrs.data(), (void *const *)c_ptrs.data(),
         sa_ptrs.data(), sb_ptrs.data(),
-        m_arr.data(), ref_N, ref_K,
+        ref_m, n_arr.data(), ref_k,
         num_gemms, transa, transb,
-        static_cast<int>(convertNVTETensorCheck(A[0])->data.dtype),
-        static_cast<int>(convertNVTETensorCheck(B[0])->data.dtype),
-        out_dtype,
-        ws_ptr, ws_size, stream);
+        a_dtype, b_dtype, out_dtype,
+        ws->data.dptr, ws->data.shape[0], stream);
 }
 #endif
 
