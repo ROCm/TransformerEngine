@@ -10,7 +10,6 @@
 
 import os
 from importlib import metadata
-import os
 import transformer_engine.common
 
 _use_pytorch = True

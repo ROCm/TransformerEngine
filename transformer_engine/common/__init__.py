@@ -402,6 +402,16 @@ def _load_cuda_library(lib_name: str):
 
 te_rocm_build = None
 
+
+def _preload_torch_for_rocm_te_core() -> None:
+    """On ROCm 7.13+, torch/rocm_sdk must initialize COMGR before TE's core lib."""
+    if platform.system() != "Linux" or te_rocm_build is False:
+        return
+    try:
+        import torch  # noqa: F401
+    except ImportError:
+        pass
+
 @functools.cache
 def is_fp8_fnuz():
     if te_rocm_build:
@@ -437,6 +447,7 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
         except (OSError, RuntimeError, subprocess.CalledProcessError):
             pass
 
+    _preload_torch_for_rocm_te_core()
     _TE_LIB_CTYPES = _load_core_library()
     try:
         _te_rocm_build = _TE_LIB_CTYPES.nvte_is_rocm_build()
