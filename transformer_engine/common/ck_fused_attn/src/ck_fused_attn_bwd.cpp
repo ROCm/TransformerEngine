@@ -609,13 +609,14 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.seqlen_q_ptr = nullptr;
   fmha_args.seqlen_k_ptr = nullptr;
 
-  // Group mode contract (matches aiter asm_mha_varlen_bwd.cu): seqlen_q/k
-  // carry the total token counts, max_seqlen_q/k the per-sequence maximum.
-  // aiter sizes dq_acc and related workspaces from seqlen_q; passing the
-  // per-sequence length in group mode under-sizes them and the kernel writes
-  // past the end.
-  fmha_args.seqlen_q = args.s_q;
-  fmha_args.seqlen_k = args.s_kv;
+  // Group mode contract (matches aiter asm_mha_varlen_bwd.cu and the v2 launcher's
+  // total_seqlen_q_padded == seqstart_q[batch] assumption in fmha_bwd.hpp): seqlen_q/k
+  // carry the padded total token counts, max_seqlen_q/k the per-sequence maximum.
+  // aiter sizes dq_acc and the device workspace upper bound from seqlen_q; passing the
+  // per-sequence length in group mode under-sizes them so the dq_acc overflow region is
+  // left unzeroed (and can be written past the end) -> corrupt/NaN dq.
+  fmha_args.seqlen_q = args.is_group_mode() ? args.max_tokens_q : args.s_q;
+  fmha_args.seqlen_k = args.is_group_mode() ? args.max_tokens_kv : args.s_kv;
   fmha_args.batch = args.b;
   fmha_args.max_seqlen_q = args.s_q;
   // Padded extent (group mode) so CK's dq_acc grant covers per-sequence padding; see
