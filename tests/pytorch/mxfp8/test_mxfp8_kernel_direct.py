@@ -37,7 +37,7 @@ def test_mxfp8_kernel_with_simulated_data():
     """Test MXFP8 kernel with simulated FP8 data and E8M0 scales"""
     try:
         # Import our kernel
-        from transformer_engine.pytorch.gemm_triton import mxfp8_matmul
+        from transformer_engine.pytorch.triton_kernels.gemm import mxfp8_matmul
         import transformer_engine_torch as tex
         from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 

@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from transformer_engine.pytorch.gemm_triton import te_gemm_triton, torch_to_te_dtype, _get_fp8_dtypes
+from transformer_engine.pytorch.triton_kernels.gemm import te_gemm_triton, torch_to_te_dtype, _get_fp8_dtypes
 
 
 fp8_e4m3_dtype, fp8_e5m2_dtype = _get_fp8_dtypes()

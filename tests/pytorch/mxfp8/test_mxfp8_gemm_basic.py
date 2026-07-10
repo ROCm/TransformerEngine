@@ -16,7 +16,7 @@ if not torch.cuda.is_available():
 def test_mxfp8_imports():
     """Test that MXFP8 classes can be imported"""
     try:
-        from transformer_engine.pytorch.gemm_triton import te_generic_gemm_triton
+        from transformer_engine.pytorch.triton_kernels.gemm import te_generic_gemm_triton
         from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
         from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
         print("✓ Successfully imported MXFP8 classes")
@@ -27,7 +27,7 @@ def test_mxfp8_imports():
 def test_mxfp8_wrapper_regular_tensor():
     """Test MXFP8TensorWrapper with regular tensors"""
     try:
-        from transformer_engine.pytorch.gemm_triton import MXFP8TensorWrapper
+        from transformer_engine.pytorch.triton_kernels.gemm import MXFP8TensorWrapper
 
         # Create simple test tensor
         A_fp32 = torch.randn(128, 512, device='cuda', dtype=torch.float32)

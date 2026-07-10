@@ -6,8 +6,9 @@
 into pytest.skip so the CI sweep under NVTE_USE_GEMM_TRITON=1 does not
 flag intentionally-unsupported combinations as failures.
 
-The gates raise ValueError from quantization.py and gemm_triton.py; when
-they are relaxed the marker text disappears and this hook stops firing.
+The gates raise ValueError from quantization.py and
+triton_kernels/gemm/gemm_wrapper.py; when they are relaxed the marker
+text disappears and this hook stops firing.
 """
 
 import pytest

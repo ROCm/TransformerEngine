@@ -26,8 +26,8 @@ from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
 from ...debug.pytorch.debug_quantization import DebugQuantizer
-from ..gemm_triton import te_generic_gemm_triton
-#from ..gemm_triton import te_gemm_triton
+from ..triton_kernels.gemm import te_generic_gemm_triton
+#from ..triton_kernels.gemm import te_gemm_triton
 
 _FP4_USE_TUNED_GEMM = int(os.environ.get("NVTE_FP4_USE_TUNED_GEMM", "1"))
 _FP4_LOG_SHAPES = int(os.environ.get("NVTE_FP4_LOG_GEMM_SHAPES", "0"))
