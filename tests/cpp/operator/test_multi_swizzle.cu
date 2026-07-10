@@ -308,9 +308,21 @@ TEST_P(MultiTensorSwizzleTestSuite, TestMultiTensorSwizzle) {
   const auto M = std::get<1>(GetParam());
   const auto K = std::get<2>(GetParam());
   const auto rowwise = std::get<3>(GetParam());
+#ifdef __HIP_PLATFORM_AMD__
+  // Mirror SwizzleTestSuite on ROCm: skip gfx1250 (pre-swizzle layout mismatch) and
+  // unaligned shapes (compact MXFP8 scales require 128-aligned M,K).
+  cudaDeviceProp prop;
+  cudaGetDeviceProperties(&prop, 0);
+  if (prop.major == 12 && prop.minor == 5)
+    GTEST_SKIP() << "Legacy MXFP8 swizzle reference does not match gfx1250 GEMM pre-swizzle layout";
+  if (M % 128 != 0 || K % 128 != 0)
+    GTEST_SKIP() << "ROCm uses compact MXFP8 scales; swizzle needs 128-aligned M,K";
+#endif
   performTestMultiTensorSwizzle(num_tensors, M, K, rowwise);
 }
 
+// Unswizzle and Roundtrip mirror UnswizzleTestSuite: compiled out on ROCm.
+#ifndef __HIP_PLATFORM_AMD__
 class MultiTensorUnswizzleTestSuite
     : public ::testing::TestWithParam<std::tuple<int, size_t, size_t, bool>> {};
 
@@ -332,6 +344,7 @@ TEST_P(MultiTensorRoundtripTestSuite, TestMultiTensorRoundtrip) {
   const auto rowwise = std::get<3>(GetParam());
   performTestMultiTensorRoundtrip(num_tensors, M, K, rowwise);
 }
+#endif  // !__HIP_PLATFORM_AMD__ (Unswizzle + Roundtrip suites)
 
 namespace {
 
@@ -392,6 +405,7 @@ INSTANTIATE_TEST_SUITE_P(
              (std::get<3>(info.param) ? "_row" : "_col");
     });
 
+#ifndef __HIP_PLATFORM_AMD__
 INSTANTIATE_TEST_SUITE_P(
     OperatorTest,
     MultiTensorUnswizzleTestSuite,
@@ -413,3 +427,4 @@ INSTANTIATE_TEST_SUITE_P(
              "_K" + std::to_string(std::get<2>(info.param)) +
              (std::get<3>(info.param) ? "_row" : "_col");
     });
+#endif  // !__HIP_PLATFORM_AMD__ (Unswizzle + Roundtrip instantiations)
