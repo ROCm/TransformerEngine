@@ -97,6 +97,13 @@ def generate_grok_v2_test_cases():
     )
 
 
+def generate_qwen3_235b_test_cases():
+    # Qwen3-235B-A22B: 128 routed experts (top-8), hidden 4096, MoE intermediate 1536.
+    return _generate_moe_test_cases(
+        "Qwen3-235B", n_routed_experts=128, moe_intermediate_size=1536, hidden_size=4096
+    )
+
+
 def make_fwd_bwd_funcs_te(x, w, group_lens, activation_dtype):
     from transformer_engine.pytorch.cpp_extensions import general_grouped_gemm
 

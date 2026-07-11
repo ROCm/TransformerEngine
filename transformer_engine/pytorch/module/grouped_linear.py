@@ -5,10 +5,8 @@
 # See LICENSE for license information.
 
 """GroupedLinear API"""
-from typing import Union, Optional, Callable, Tuple, List, TYPE_CHECKING
+from typing import Union, Optional, Callable, Tuple, List
 
-if TYPE_CHECKING:
-    from transformer_engine.pytorch.moe_routing import MoERoutingMetadata
 from itertools import chain
 import warnings
 import weakref
@@ -68,7 +66,10 @@ if IS_HIP_EXTENSION:
         is_permute_free_grouped_gemm_enabled,
         permute_free_grouped_gemm_bf16,
         permute_free_grouped_gemm_bf16_dgrad,
-        permute_free_wgrad_sorted_inputs,
+        permute_free_grouped_gemm_bf16_wgrad,
+        permute_free_grouped_gemm_bf16_fc2,
+        permute_free_grouped_gemm_bf16_fc2_dgrad,
+        permute_free_grouped_gemm_bf16_fc2_wgrad,
     )
     import os
 
@@ -248,15 +249,10 @@ class _GroupedLinear(torch.autograd.Function):
         if fp8 and activation_dtype == torch.float32:
             bias_dtype = torch.bfloat16  # FP8 GEMM only supports BF16/FP16 bias
         biases = [cast_if_needed(bias, bias_dtype) for bias in biases] if use_bias else biases
-        # Initialize output tensor
-        if use_perm_free_grouped_gemm:
-            top_k = routing_metadata.topk_ids.size(1)
-            out = torch.empty(
-                [inp_view.size(0), top_k, weights_fp8[0].size(0)],
-                dtype=activation_dtype,
-                device=device,
-            )
-        else:
+        # Initialize output tensor. The permute-free path allocates its own worst-case padded
+        # [em_max, out_features] output inside permute_free_grouped_gemm_bf16 (valid rows are
+        # the compact route range [0, num_routes); the tail is inert zero padding).
+        if not use_perm_free_grouped_gemm:
             out = torch.empty(
                 [sum(m_splits), weights_fp8[0].size(0)],
                 dtype=activation_dtype,
@@ -272,11 +268,20 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Perform GEMM
         if use_perm_free_grouped_gemm:
-            out = permute_free_grouped_gemm_bf16(
-                inputmats[0],
-                weights_fp8,
-                routing_metadata,
-            )
+            if getattr(routing_metadata, "route_space", False):
+                # FC2: route-ordered input, fused scatter-to-token -> [num_recv, out].
+                out = permute_free_grouped_gemm_bf16_fc2(
+                    inputmats[0],
+                    weights_fp8,
+                    routing_metadata,
+                )
+            else:
+                # FC1: gather-in-GEMM -> padded [em_max, out] route buffer.
+                out = permute_free_grouped_gemm_bf16(
+                    inputmats[0],
+                    weights_fp8,
+                    routing_metadata,
+                )
         elif use_grouped_gemm_triton:
             general_grouped_gemm_func = general_grouped_gemm_triton
             kwargs = {"m_splits_tensor": m_splits_tensor}
@@ -418,7 +423,8 @@ class _GroupedLinear(torch.autograd.Function):
                 ctx.grad_output_quantizers = [None] * num_gemms
                 ctx.reduce_and_update_bwd_fp8_tensors = False
 
-        # [*, in_features] -> [*, out_features] or [*, topk, out_features] (permute-free)
+        # [*, in_features] -> [*, out_features], or worst-case padded [em_max, out_features]
+        # (permute-free route-list path; valid rows are the compact range [0, num_routes)).
         if use_perm_free_grouped_gemm:
             return out, new_workspaces
         return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
@@ -437,42 +443,45 @@ class _GroupedLinear(torch.autograd.Function):
             saved_weights = saved_tensors[num_inputs + N : num_inputs + 2 * N]
             biases = saved_tensors[num_inputs + 2 * N : num_inputs + 3 * N]
 
-            # Permute-free gather GEMM: dgrad reuses the forward gather kernel
-            # (no permute), wgrad reorders activations/grads by expert and runs
-            # the default grouped GEMM. Returns early to bypass the fp8/debug logic.
+            # Permute-free gather GEMM: both dgrad and wgrad gather along the
+            # contraction axis inside a single Triton kernel (no permute/argsort,
+            # no device-to-host sync), reusing the forward align buffers. Returns
+            # early to bypass the fp8/debug logic.
             if getattr(ctx, "use_perm_free_grouped_gemm", False):
                 routing = ctx.routing_metadata
-                grad_output_pf = grad_output.contiguous()  # [num_tokens, topk, out_features]
+                route_space = getattr(routing, "route_space", False)
+                grad_output_pf = grad_output.contiguous()
 
                 dgrad = None
-                if ctx.requires_dgrad:
-                    weights_stacked = torch.stack(list(weights), dim=0)  # [E, N, H]
-                    dgrad = permute_free_grouped_gemm_bf16_dgrad(
-                        grad_output_pf, weights_stacked, routing
-                    )
-
                 wgrad_list = [None] * ctx.num_gemms
-                if ctx.weights_requires_grad:
-                    x_chunks, dy_chunks, counts = permute_free_wgrad_sorted_inputs(
-                        inputmats[0], grad_output_pf, routing
-                    )
-                    wgrad_list = [
-                        torch.empty(w.size(), dtype=ctx.activation_dtype, device=ctx.device)
-                        for w in weights
-                    ]
-                    general_grouped_gemm(
-                        x_chunks,
-                        dy_chunks,
-                        wgrad_list,
-                        [None] * ctx.num_gemms,
-                        ctx.activation_dtype,
-                        layout="NT",
-                        grad=True,
-                        m_splits=counts,
-                        use_bias=False,
-                        bias=None,
-                        use_split_accumulator=_2X_ACC_WGRAD,
-                    )
+                if route_space:
+                    # FC2: grad is token-space [num_recv, out]. dgrad gathers back to the
+                    # compact route buffer [em_max, in]; wgrad swaps operands + transposes.
+                    if ctx.requires_dgrad:
+                        weights_stacked = torch.stack(list(weights), dim=0)  # [E, H, F]
+                        dgrad = permute_free_grouped_gemm_bf16_fc2_dgrad(
+                            grad_output_pf, weights_stacked, routing
+                        )
+                    if ctx.weights_requires_grad:
+                        weights_shape = (ctx.num_gemms, weights[0].size(0), weights[0].size(1))
+                        dW = permute_free_grouped_gemm_bf16_fc2_wgrad(
+                            inputmats[0], grad_output_pf, weights_shape, routing
+                        )  # [E, H, F]
+                        wgrad_list = [dW[i] for i in range(ctx.num_gemms)]
+                else:
+                    # FC1: grad is the padded [em_max, out] route buffer; dgrad scatters the
+                    # input grad back to received-token rows.
+                    if ctx.requires_dgrad:
+                        weights_stacked = torch.stack(list(weights), dim=0)  # [E, N, H]
+                        dgrad = permute_free_grouped_gemm_bf16_dgrad(
+                            grad_output_pf, weights_stacked, routing
+                        )
+                    if ctx.weights_requires_grad:
+                        weights_shape = (ctx.num_gemms, weights[0].size(0), weights[0].size(1))
+                        dW = permute_free_grouped_gemm_bf16_wgrad(
+                            inputmats[0], grad_output_pf, weights_shape, routing
+                        )  # [E, N, H]
+                        wgrad_list = [dW[i] for i in range(ctx.num_gemms)]
 
                 return (
                     dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
@@ -866,15 +875,18 @@ class GroupedLinear(TransformerEngineBaseModule):
                        instead of one bias per GEMM.
                        EXPERIMENTAL and subject to change.
 
-    Permute-free MoE (ROCm, bf16, inference)
-    ----------------------------------------
-    When ``NVTE_PERMUTE_FREE_GROUPED_GEMM=1``, pass ``routing_metadata`` (a
-    :class:`~transformer_engine.pytorch.moe_routing.MoERoutingMetadata`) instead
-    of permuting activations before this module. The caller must skip
-    ``moe_permute``; input shape is ``[num_tokens, in_features]`` and output
-    shape is ``[num_tokens, topk, out_features]``. Requires ``bias=False``,
-    bf16, and ``torch.no_grad()`` / eval mode. For FC2 reduction use
-    ``moe_unpermute`` or AITER ``moe_sum``.
+    Permute-free MoE (ROCm, bf16)
+    -----------------------------
+    When ``NVTE_PERMUTE_FREE_GROUPED_GEMM=1``, pass a ``permute_free_metadata``
+    (:class:`PermuteFreeMetadata`, carrying the boolean ``routing_map``
+    ``[num_recv_tokens, num_local_experts]`` + a ``route_space`` direction) instead of
+    permuting activations before this module. The caller must skip ``moe_permute``. FC1
+    (``route_space=False``) takes ``[num_recv_tokens, in_features]`` and produces the
+    worst-case padded ``[em_max, out_features]`` route buffer (valid rows are the compact
+    route range ``[0, num_routes)``; the tail is inert zero padding); FC2
+    (``route_space=True``) takes the route-ordered ``[em_max, in_features]`` and fuses the
+    scatter back to token order, returning ``[num_recv_tokens, out_features]``. Requires
+    ``bias=False`` and bf16. The router-weight combine happens upstream (at the activation).
     """
 
     def __init__(
@@ -1266,7 +1278,7 @@ class GroupedLinear(TransformerEngineBaseModule):
         m_splits_tensor: Optional[torch.Tensor] = None,
         actual_m_splits: Optional[List[int]] = None,
         unpad_output: bool = False,
-        routing_metadata: Optional["MoERoutingMetadata"] = None,
+        permute_free_metadata: Optional["PermuteFreeMetadata"] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -1298,10 +1310,18 @@ class GroupedLinear(TransformerEngineBaseModule):
                       When True, unpad the GEMM output from sum(m_splits) to
                       sum(actual_m_splits) rows before returning. Used by the
                       ROCm fused-pad-cast-transpose path; ignored on CUDA.
-        routing_metadata : MoERoutingMetadata, optional
-                      When set with ``NVTE_PERMUTE_FREE_GROUPED_GEMM=1``, run
-                      gather-in-GEMM on unpermuted bf16 activations. Output
-                      shape is ``[num_tokens, topk, out_features]``.
+        permute_free_metadata : PermuteFreeMetadata, optional
+                      Route-list routing metadata (carrying the boolean ``routing_map``
+                      ``[num_recv_tokens, num_local_experts]`` plus a ``route_space``
+                      direction). When set with ``NVTE_PERMUTE_FREE_GROUPED_GEMM=1``, run
+                      the route-list GEMM on unpermuted bf16 activations. ``route_space=
+                      False`` (FC1) gathers per expert into the worst-case padded
+                      ``[em_max, out_features]`` route buffer (valid rows are the compact
+                      range ``[0, num_routes)``; the tail is inert zero padding);
+                      ``route_space=True`` (FC2) reads route-ordered input and fuses the
+                      scatter back to token order, returning ``[num_recv_tokens,
+                      out_features]``. TE builds/caches the expert-sorted alignment buffers
+                      on the metadata.
         """
         debug = self.is_debug_iter()
 
@@ -1314,6 +1334,12 @@ class GroupedLinear(TransformerEngineBaseModule):
             )
 
         is_grad_enabled = torch.is_grad_enabled()
+
+        # The permute-free path is driven entirely by the PermuteFreeMetadata (which carries
+        # the boolean routing_map + the route_space direction). It is built once by the
+        # caller and shared across FC1/FC2 to avoid a duplicate align build; TE builds/caches
+        # the align buffers on the object.
+        routing_metadata = permute_free_metadata
 
         inp = self.prepare_forward(inp, num_gemms=self.num_gemms)
         try:
