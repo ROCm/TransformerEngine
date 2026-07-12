@@ -12,6 +12,7 @@ import math
 from typing import Any, Optional
 
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine_torch as tex
 from ...constants import DType
@@ -777,6 +778,9 @@ class GroupedLinear(BasicOperation):
         * Input/weight/grad_output quantizers are assumed to be of the same type, otherwise it
           would trigger a fatal error in the cuBLASLt grouped GEMM check.
         """
+        if IS_HIP_EXTENSION:
+            # CUDA-only path; ROCm uses general_grouped_gemm.
+            return False
         if not (9, 0) <= get_device_compute_capability() <= (11, 0):
             return False
         if with_quantized_compute:

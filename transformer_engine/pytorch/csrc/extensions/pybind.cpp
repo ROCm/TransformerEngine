@@ -379,10 +379,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         , py::arg("valid_split_sections") = py::none()
 #endif
         );
+#ifndef USE_ROCM  // CUDA-only grouped-tensor GEMM entry points
   m.def("get_grouped_gemm_setup_workspace_size", &nvte_get_grouped_gemm_setup_workspace_size,
         "Required workspace size for grouped GEMM setup");
+#endif
   m.def("te_general_grouped_gemm", &transformer_engine::pytorch::te_general_grouped_gemm,
         "Grouped GEMM");
+#ifndef USE_ROCM  // CUDA-only grouped-tensor GEMM entry points
   m.def("te_general_grouped_gemm_for_grouped_tensor",
         &transformer_engine::pytorch::te_general_grouped_gemm_for_grouped_tensor,
         "Grouped GEMM for GroupedTensor");
@@ -392,6 +395,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("te_general_grouped_gemm_for_discrete_out",
         &transformer_engine::pytorch::te_general_grouped_gemm_for_discrete_out,
         "Grouped GEMM for discrete output list");
+#endif
   m.def("fp8_transpose", &transformer_engine::pytorch::fp8_transpose, "Transpose with FP8 I/O",
         py::arg("input"), py::arg("dtype"), py::kw_only(), py::arg("out"),
         py::call_guard<py::gil_scoped_release>());
