@@ -192,7 +192,9 @@ class NVFP4Quantizer(Quantizer):
         noop_flag: Optional[torch.Tensor] = None,
     ) -> QuantizedTensor:
 
-        assert isinstance(dst, NVFP4Tensor), f"Cannot store quantized NVFP4 in {type(dst)} type."
+        assert isinstance(
+            dst, NVFP4TensorStorage
+        ), f"Cannot store quantized NVFP4 in {type(dst)} type."
 
         # Make sure input is in expected format
         if not devices_match(src.device, dst.device):
