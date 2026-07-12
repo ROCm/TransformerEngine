@@ -616,6 +616,13 @@ void inplace_swizzle_scale_for_gemm(py::handle &tensor) {
       return;
   }
 
+#ifdef USE_ROCM
+  // On ROCm, only MXFP8 on gfx1250 needs scale pre-swizzling
+  if (scaling_mode != NVTE_MXFP8_1D_SCALING || transformer_engine::cuda::sm_arch() != 125) {
+    return;
+  }
+#endif
+
   // Return early if scales are already swizzled
   if (tensor_nvte.get_with_gemm_swizzled_scales()) {
     return;
