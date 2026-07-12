@@ -64,7 +64,7 @@ run_test_config(){
     run 1 test_jit.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
-    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "mxfp8" 1 test_numerics.py -k "recipe0 and 126m and not grouped"
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "mxfp8" 1 test_numerics.py -k "MXFP8BlockScaling and 126m and not grouped"
     run_default_fa 1 test_nvfp4_fsdp2_hooks.py
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py
