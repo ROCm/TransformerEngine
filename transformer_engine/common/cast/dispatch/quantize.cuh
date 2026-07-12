@@ -28,11 +28,15 @@
 #ifdef __HIP_PLATFORM_AMD__
 #include "../mxfp4/quantize_mxfp4.cuh"
 #endif //#ifdef __HIP_PLATFORM_AMD__
-//TODO: ROCm TE does not support nvfp4 yet
+// The optimized NVFP4 kernels are Blackwell-only (CUtensorMap/tcgen05); ROCm uses
+// the generic quantize_transpose_vector_blockwise_fp4 path plus this portable
+// row-wise amax for row-scaled NVFP4.
 #ifndef __HIP_PLATFORM_AMD__
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "../nvfp4/quantize_4over6_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
+#else
+#include "../nvfp4/rowwise_amax_nvfp4.cuh"
 #endif //#ifndef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine {
@@ -140,11 +144,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
         NVTE_CHECK(!output_tensor->has_columnwise_data(),
                    "Row-scaled NVFP4 quantization does not produce columnwise output.");
-#ifndef __HIP_PLATFORM_AMD__
         nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
-#else
-        NVTE_ERROR("Row-scaled NVFP4 quantization is not supported on ROCm.");
-#endif
       }
       // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
       // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
