@@ -1747,10 +1747,13 @@ class MXFP4BlockScalingRecipeState(RecipeState):
         mode: str,
         num_quantizers: int = 1,
         device: Optional[torch.device] = None,
+        roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
         self.num_quantizers = num_quantizers
+        self.roles = roles
         self.dtype = get_fp4_te_dtype(recipe)
 
         if device is None:
