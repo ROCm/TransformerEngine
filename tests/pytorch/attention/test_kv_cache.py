@@ -430,6 +430,8 @@ def test_kv_cache(dtype, model, qkv_format, is_paged, backend, module, is_cuda_g
             pytest.skip("Paged KV cache is not supported for FusedAttention on ROCm")
         if qkv_format == "thd" and backend == "FusedAttention":
             pytest.skip("THD KV cache is not supported for FusedAttention on ROCm")
+        if qkv_format == "bshd" and backend == "FusedAttention":
+            pytest.skip("BSHD KV cache is not supported for FusedAttention on ROCm")
     reset_rng_states()
     logger = logging.getLogger("test_kv_cache")
     fp8_recipe = recipe.DelayedScaling(

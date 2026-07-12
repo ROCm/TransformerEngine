@@ -39,6 +39,8 @@ def check_nvfp4_gemm_versus_reference(
 ):
     if nvfp4_e4m3_max != 448 and not use_4over6:
         pytest.skip("E4M3 max 256 is only meaningful for 4over6")
+    if IS_HIP_EXTENSION and use_4over6:
+        pytest.skip("NVFP4 4over6 is not supported on ROCm")
     te_dtype = te.DType.kFloat4E2M1
 
     # Setup device and random seed
@@ -269,6 +271,8 @@ def check_nvfp4_row_scaled_grouped_gemm_matches_per_gemm(
     use_4over6: bool = False,
     nvfp4_4over6_err_mode: str = "MAE",
 ):
+    if IS_HIP_EXTENSION:
+        pytest.skip("Grouped NVFP4 quantization is not supported on ROCm")
     te_dtype = te.DType.kFloat4E2M1
     device = "cuda"
     torch.manual_seed(23)
