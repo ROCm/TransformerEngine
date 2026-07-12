@@ -20,11 +20,6 @@ from torch.utils._pytree import tree_map
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-from transformer_engine.pytorch.tensor._quantization_helpers import (
-    _QuantizeFunc,
-    _IdentityFunc,
-    _stride_from_shape,
-)
 
 
 # Custom ops that should pass through __torch_dispatch__ without unwrapping
@@ -291,6 +286,7 @@ class Quantizer(abc.ABC):
         """Quantize tensor"""
         if out is not None:
             return self.update_quantized(tensor, out)
+        from transformer_engine.pytorch.tensor._quantization_helpers import _QuantizeFunc
         if (not self.internal) and torch.is_grad_enabled():
             return _QuantizeFunc.apply(tensor, self.quantize_impl)
         return _QuantizeFunc.forward(None, tensor, self.quantize_impl)
@@ -431,7 +427,10 @@ class QuantizedTensor(torch.Tensor):
         # Calculate stride from shape if not provided. When creating this object from
         # C++ code, we provide the stride computed from shape in C++ to avoid the
         # PyobjectVectorCall overhead of calling _stride_from_shape from C++ to Python.
-        stride = _stride_from_shape(shape) if stride is None else stride
+        if stride is None:
+            from transformer_engine.pytorch.tensor._quantization_helpers import _stride_from_shape
+
+            stride = _stride_from_shape(shape)
         if IS_HIP_EXTENSION and device == torch.device("cuda"):
             # Without passing explicit device index to _make_wrapper_subclass tests fail with
             # RuntimeError at autograd: 0 <= device.index() &&
@@ -588,6 +587,8 @@ class QuantizedTensor(torch.Tensor):
             # and access the backward graph (see
             # https://github.com/pytorch/pytorch/blob/238fb660851268f44ff88127887041fea352fe48/torch/nn/parallel/distributed.py#L1026).
             # We hackily add a dummy function to handle this case.
+            from transformer_engine.pytorch.tensor._quantization_helpers import _IdentityFunc
+
             return _IdentityFunc.apply(self)
         return super().expand_as(other)
 
