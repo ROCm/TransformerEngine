@@ -272,6 +272,21 @@ def test_fp8_temp_accumulation_across_layers(recipe_name, quantized_model_init):
     """
     _maybe_skip(recipe_name, quantized_model_init)
 
+    if (
+        IS_HIP_EXTENSION
+        and quantized_model_init
+        and recipe_name in ("DelayedScaling", "Float8CurrentScaling")
+    ):
+        pytest.xfail(
+            "ROCm + primary-FP8 weights (quantized_model_init) + FSDP2: the all-gathered "
+            "Float8Tensor reconstructed in fsdp_post_all_gather is retained by FSDP2's FSDPParam "
+            "after forward instead of being freed on reshard, so per-layer forward memory "
+            "accumulates (~0.68 MiB/layer). Root cause is FSDP2's unsharded-param free path for "
+            "custom tensor subclasses, not the TE weight workspace (verified: skipping the "
+            "workspace save has no effect). no_quant_init, sync/async DCP, and CUDA are "
+            "unaffected. (Issue #2681)"
+        )
+
     recipe = get_recipe_from_string(recipe_name)
     world_size, device = _get_dist_info()
 
