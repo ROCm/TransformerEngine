@@ -9,6 +9,50 @@
 #include "kittens.cuh"
 #include "../../../util/math.h"
 
+// 128-bit buffer_load (SRD-based) for reading scale directly global->reg, matching cdna3.
+// buffer_load uses vmcnt (not lgkmcnt) and offloads addressing to the SRD, which is much
+// cheaper than a flat global_load of float4.
+extern "C" __device__ __uint128_t
+llvm_amdgcn_raw_buffer_load_b128(kittens::i32x4 rsrc, int voffset, int soffset, int aux)
+    __asm("llvm.amdgcn.raw.buffer.load.v4i32");
+
+// Broadcast a uniform per-tile scale from vmem to an SGPR (all lanes read the same element).
+__device__ inline float read_scale_broadcast(const float *p, int i) {
+    return __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, p[i])));
+}
+
+// readfirstlane broadcast only (value already in a VGPR). Split from the vmem load so the
+// load can be issued early (cluster 0) and broadcast deferred until it has drained.
+__device__ inline float broadcast_lane(float v) {
+    return __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, v)));
+}
+
+// Scalar load directly into an SGPR (s_load_dword, tracked by lgkmcnt). Uniform address only.
+// Skips the vmem->readfirstlane two-step; must be drained (s_waitcnt lgkmcnt) before use.
+__device__ inline float scalar_load_scale(const float *p, int i) {
+    float v;
+    asm volatile("s_load_dword %0, %1, %2\n"
+                 : "=s"(v)
+                 : "s"(p), "s"(i * 4)
+                 : "memory");
+    return v;
+}
+
+using as3_u32_ptr_ = uint32_t __attribute__((address_space(3)))*;
+using i32x4_v_ = int32_t __attribute__((ext_vector_type(4)));
+extern "C" __device__ void
+raw_buffer_load_lds_(i32x4_v_ rsrc, as3_u32_ptr_ lds, int size, int voff, int soff, int off, int aux)
+    __asm("llvm.amdgcn.raw.buffer.load.lds");
+
+// Direct global->LDS DMA of one 4-byte scale element per lane (no register round-trip). Tracked by
+// vmcnt, so no forced early vmcnt(0) at a register->LDS store; drains naturally before the LDS read.
+// lds_base_warp = wave-uniform destination byte offset (SGPR) for this warp's first lane; the DMA
+// scatters lane L to lds_base_warp + L*4. voffset = per-lane source byte offset in SRD (VGPR).
+__device__ inline void load_scale_to_lds(kittens::i32x4 srd, uint32_t lds_base_warp, int voffset) {
+    asm volatile("s_mov_b32 m0, %0" :: "s"(lds_base_warp));
+    raw_buffer_load_lds_(__builtin_bit_cast(i32x4_v_, srd), (as3_u32_ptr_)0, 4, voffset, 0, 0, 0);
+}
+
 __device__ inline float rtne_bias(float v) {
     uint32_t bits = __builtin_bit_cast(uint32_t, v);
     if ((bits & 0x7f800000u) == 0x7f800000u) return v;
@@ -111,9 +155,11 @@ __device__ inline void apply_epilogue(
     }
 }
 
+// Scale stored as float2 pairs {v[i][0]={s0,s1}, v[i][1]={s2,s3}} so compute/apply map to
+// v_pk_mul_f32 / v_pk_fma_f32 (2-way packed) matching the tile's float2 data[0]/data[1].
 template <int HEIGHT>
 struct RowScale {
-    float v[HEIGHT][4];
+    float2 v[HEIGHT][2];
 };
 
 template <typename AccType>
@@ -124,10 +170,30 @@ __device__ inline RowScale<AccType::height> load_row_scale_lds(
     #pragma unroll
     for (int i = 0; i < AccType::height; i++) {
         const int m0 = local_m_base + i * 16 + row_g;
-        rs.v[i][0] = sa_lds[m0 + 0];
-        rs.v[i][1] = sa_lds[m0 + 1];
-        rs.v[i][2] = sa_lds[m0 + 2];
-        rs.v[i][3] = sa_lds[m0 + 3];
+        // single 128-bit LDS read (4 contiguous scales) instead of two b128 reads.
+        const float4 v = *reinterpret_cast<const float4 *>(&sa_lds[m0]);
+        rs.v[i][0] = make_float2(v.x, v.y);
+        rs.v[i][1] = make_float2(v.z, v.w);
+    }
+    return rs;
+}
+
+// Read the row-scale fragment directly from GLOBAL (sa for this k), one float4 per (lane,i).
+// Each lane owns 4 contiguous output rows [m0..m0+3] -> a single global_load_dwordx4 (vmem,
+// tracked by vmcnt, NOT lgkmcnt) so compute_scaled never stalls behind fragment LDS reads.
+// Assumes M is 128-aligned (rows in range); unaligned handled by a separate kernel.
+template <typename AccType>
+__device__ inline RowScale<AccType::height> load_row_scale_global(
+    kittens::i32x4 sa_srd, int voffset_base) {
+    RowScale<AccType::height> rs;
+    const int row_g = 4 * (kittens::laneid() / 16);
+    #pragma unroll
+    for (int i = 0; i < AccType::height; i++) {
+        const int off = (voffset_base + i * 16 + row_g) * 4;   // byte offset
+        __uint128_t raw = llvm_amdgcn_raw_buffer_load_b128(sa_srd, off, 0, 0);
+        const float4 v = *reinterpret_cast<float4 *>(&raw);
+        rs.v[i][0] = make_float2(v.x, v.y);
+        rs.v[i][1] = make_float2(v.z, v.w);
     }
     return rs;
 }
@@ -144,31 +210,72 @@ __device__ inline RowScale<AccType::height> load_row_scale(
         const int c1 = m0 + 1 < m_valid ? m0 + 1 : m_valid - 1;
         const int c2 = m0 + 2 < m_valid ? m0 + 2 : m_valid - 1;
         const int c3 = m0 + 3 < m_valid ? m0 + 3 : m_valid - 1;
-        rs.v[i][0] = sa_row_k[c0];
-        rs.v[i][1] = sa_row_k[c1];
-        rs.v[i][2] = sa_row_k[c2];
-        rs.v[i][3] = sa_row_k[c3];
+        rs.v[i][0] = make_float2(sa_row_k[c0], sa_row_k[c1]);
+        rs.v[i][1] = make_float2(sa_row_k[c2], sa_row_k[c3]);
     }
     return rs;
+}
+
+// packed float2 helpers: force v_pk_mul_f32 / v_pk_fma_f32 via inline asm (the compiler
+// otherwise leaves ~14 of these as scalar v_fma_f32 pairs).
+// packed float2 helpers -> v_pk_mul_f32 / v_pk_fma_f32 (compiler packs most; a few stay scalar)
+__device__ inline float2 pk_mul(float2 a, float2 b) { return make_float2(a.x * b.x, a.y * b.y); }
+__device__ inline float2 pk_fma(float2 a, float2 b, float2 c) {
+    return make_float2(a.x * b.x + c.x, a.y * b.y + c.y);
 }
 
 template <typename AccType>
 __device__ inline void scale_accumulate(
     AccType &acc, const AccType &partial, const RowScale<AccType::height> &rs, float sb_tile) {
+    const float2 sbv = make_float2(sb_tile, sb_tile);
     #pragma unroll
     for (int i = 0; i < AccType::height; i++) {
-        const float s0 = rs.v[i][0] * sb_tile;
-        const float s1 = rs.v[i][1] * sb_tile;
-        const float s2 = rs.v[i][2] * sb_tile;
-        const float s3 = rs.v[i][3] * sb_tile;
+        const float2 s0 = pk_mul(rs.v[i][0], sbv);
+        const float2 s1 = pk_mul(rs.v[i][1], sbv);
         #pragma unroll
         for (int j = 0; j < AccType::width; j++) {
-            acc.tiles[i][j].data[0].x += partial.tiles[i][j].data[0].x * s0;
-            acc.tiles[i][j].data[0].y += partial.tiles[i][j].data[0].y * s1;
-            acc.tiles[i][j].data[1].x += partial.tiles[i][j].data[1].x * s2;
-            acc.tiles[i][j].data[1].y += partial.tiles[i][j].data[1].y * s3;
+            acc.tiles[i][j].data[0] = pk_fma(partial.tiles[i][j].data[0], s0, acc.tiles[i][j].data[0]);
+            acc.tiles[i][j].data[1] = pk_fma(partial.tiles[i][j].data[1], s1, acc.tiles[i][j].data[1]);
         }
     }
+}
+
+// Fine pipeline: precompute s = rs * sb_tile (independent of MFMA) so it issues
+// BEFORE/overlapping the MFMA; apply_scaled then only does acc += p*s after the
+// MFMA result is ready, hiding MFMA latency behind the scale-mul.
+template <int HEIGHT>
+__device__ inline RowScale<HEIGHT> compute_scaled(const RowScale<HEIGHT> &rs, float sb_tile) {
+#ifdef NVTE_NOSCALE_EXP
+    return rs;   // skip the scale multiply (upper-bound experiment)
+#else
+    const float2 sbv = make_float2(sb_tile, sb_tile);
+    RowScale<HEIGHT> s;
+    #pragma unroll
+    for (int i = 0; i < HEIGHT; i++) {
+        s.v[i][0] = pk_mul(rs.v[i][0], sbv);
+        s.v[i][1] = pk_mul(rs.v[i][1], sbv);
+    }
+    return s;
+#endif
+}
+
+template <typename AccType>
+__device__ inline void apply_scaled(
+    AccType &acc, const AccType &partial, const RowScale<AccType::height> &s) {
+    #pragma unroll
+    for (int i = 0; i < AccType::height; i++)
+        #pragma unroll
+        for (int j = 0; j < AccType::width; j++) {
+#ifdef NVTE_NOSCALE_EXP
+            acc.tiles[i][j].data[0] = make_float2(acc.tiles[i][j].data[0].x + partial.tiles[i][j].data[0].x,
+                                                  acc.tiles[i][j].data[0].y + partial.tiles[i][j].data[0].y);
+            acc.tiles[i][j].data[1] = make_float2(acc.tiles[i][j].data[1].x + partial.tiles[i][j].data[1].x,
+                                                  acc.tiles[i][j].data[1].y + partial.tiles[i][j].data[1].y);
+#else
+            acc.tiles[i][j].data[0] = pk_fma(partial.tiles[i][j].data[0], s.v[i][0], acc.tiles[i][j].data[0]);
+            acc.tiles[i][j].data[1] = pk_fma(partial.tiles[i][j].data[1], s.v[i][1], acc.tiles[i][j].data[1]);
+#endif
+        }
 }
 
 template <int WIDTH>
@@ -196,10 +303,11 @@ __device__ inline void scale_accumulate_1d1d(
         #pragma unroll
         for (int j = 0; j < AccType::width; j++) {
             const float sc = cs.v[j];
-            acc.tiles[i][j].data[0].x += partial.tiles[i][j].data[0].x * (rs.v[i][0] * sc);
-            acc.tiles[i][j].data[0].y += partial.tiles[i][j].data[0].y * (rs.v[i][1] * sc);
-            acc.tiles[i][j].data[1].x += partial.tiles[i][j].data[1].x * (rs.v[i][2] * sc);
-            acc.tiles[i][j].data[1].y += partial.tiles[i][j].data[1].y * (rs.v[i][3] * sc);
+            // RowScale stores float2 pairs: v[i][0]={s0,s1}, v[i][1]={s2,s3}.
+            acc.tiles[i][j].data[0].x += partial.tiles[i][j].data[0].x * (rs.v[i][0].x * sc);
+            acc.tiles[i][j].data[0].y += partial.tiles[i][j].data[0].y * (rs.v[i][0].y * sc);
+            acc.tiles[i][j].data[1].x += partial.tiles[i][j].data[1].x * (rs.v[i][1].x * sc);
+            acc.tiles[i][j].data[1].y += partial.tiles[i][j].data[1].y * (rs.v[i][1].y * sc);
         }
     }
 }
