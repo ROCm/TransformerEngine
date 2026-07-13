@@ -51,10 +51,18 @@ class _FromNVFP4Func(torch.autograd.Function):
         if tensor._rowwise_data is None and tensor._columnwise_data is not None:
             raise NotImplementedError("Dequantizing column-wise NVFP4 data is not implemented yet!")
 
-        # ``tex.dequantize`` requires CUDA-resident buffers. If the tensor has
+        # ``tex.dequantize`` requires CUDA-resident buffers. Move the raw buffers
+        # to CUDA via the metadata dict rather than the NVFP4 subclass's ``.to()``:
+        # the latter re-enters __torch_dispatch__ -> dequantize -> ``.to()`` and
+        # recurses infinitely when the tensor is CPU-resident (FSDP2 DCP staging).
         src_device = tensor.device
         if src_device.type != "cuda":
-            cuda_tensor = tensor.to(device=torch.device("cuda"))
+            cuda = torch.device("cuda")
+            metadata = {
+                key: (value.to(device=cuda) if isinstance(value, torch.Tensor) else value)
+                for key, value in tensor.get_metadata().items()
+            }
+            cuda_tensor = NVFP4TensorStorage(**metadata)
             result = tex.dequantize(cuda_tensor, torch_to_transformer_engine_dtype[dtype])
             return result.to(device=src_device)
         return tex.dequantize(tensor, torch_to_transformer_engine_dtype[dtype])
