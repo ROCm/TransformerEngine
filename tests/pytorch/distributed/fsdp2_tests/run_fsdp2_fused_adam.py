@@ -735,6 +735,19 @@ def test_dcp_output_parity(recipe_name, async_save):
             "requires using power of two scaling factors."
         )
 
+    if recipe_name == "NVFP4BlockScaling" and async_save and IS_HIP_EXTENSION:
+        pytest.xfail(
+            "NVFP4BlockScaling + async DCP is not bitwise-identical on torch 2.8. The default "
+            "async stager (BlockingAsyncStager) copies each parameter into a plain "
+            "torch.empty(logical_shape, dtype) buffer, dequantizing the NVFP4Tensor; the "
+            "checkpoint then stores bf16 values instead of the fp4 data + scales. On load the "
+            "values are re-quantized, and NVFP4's E4M3 block scales / amax do not survive the "
+            "bf16 round-trip (MXFP8 does, since its scales are E8M0 powers of two). The upstream "
+            "fix (NVIDIA/TransformerEngine#2721) intercepts aten.new_empty to preserve the "
+            "subclass, but torch 2.8's stager uses torch.empty (not new_empty), so the hook "
+            "never fires; #2721 also covers Float8Tensor only. Sync DCP is bitwise-correct."
+        )
+
     import torch.distributed.checkpoint as dcp
 
     world_size, device = _get_dist_info()
