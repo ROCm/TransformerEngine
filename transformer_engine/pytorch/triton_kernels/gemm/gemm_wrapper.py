@@ -19,7 +19,7 @@ from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 
 import triton
 
-from ..common import torch_dtype_to_te_dtype, te_dtype_to_torch_dtype
+from ..common import te_dtype_to_torch_dtype
 from .gemm_kernels import matmul_kernel, mxfp8_matmul_kernel
 from .gemm_common import (
     is_fp8_dtype,
@@ -470,8 +470,9 @@ def te_generic_gemm_triton(A,
     if b_fp8_dtype is not None:
         B_data = reinterpret_as_fp8_tensor(B_data, b_fp8_dtype)
 
-    # Compute dimensions using wrapper sizes
-    # Wrapper handles Float8TensorStorage which doesn't have .shape attribute
+    # Compute dimensions from the logical (rowwise) size established above.
+    # A_size / B_size are picked in the FP8 / MXFP8 / regular branches --
+    # they always exist even for a Float8TensorStorage without .shape.
     #
     # BLAS column-major interpretation:
     # PyTorch tensors are row-major in memory, but BLAS interprets them as column-major.

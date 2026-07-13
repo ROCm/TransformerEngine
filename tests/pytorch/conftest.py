@@ -20,7 +20,8 @@ _TRITON_GEMM_GATE_MARKERS = (
     # Mixed FP8 (e4m3 x e5m2) refused at the low-level matmul entry.
     "Mixed FP8 types",
     # Covers both quantization.py::check_recipe_support (HYBRID) and
-    # Float8TensorWrapper's refusal of NVFP4 / other QuantizedTensorStorage.
+    # gemm_wrapper._classify_input's refusal of NVFP4 / other
+    # QuantizedTensorStorage subclasses.
     "The Triton GEMM backend (NVTE_USE_GEMM_TRITON=1) does not support",
 )
 

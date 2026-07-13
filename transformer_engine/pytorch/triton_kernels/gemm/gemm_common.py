@@ -14,15 +14,9 @@ import torch
 
 import transformer_engine_torch as tex
 
-# Reuse the shared dtype-conversion utilities that already live in the
-# triton_kernels package. Keeping the GEMM backend on the same helpers as
-# the norms / cast kernels avoids drift when new dtypes land.
-from ..common import (
-    get_torch_e4m3_type,
-    get_torch_e5m2_type,
-    torch_dtype_to_te_dtype,
-    te_dtype_to_torch_dtype,
-)
+# Reuse the shared architecture-native FP8 dtype helpers from the
+# triton_kernels package to stay in sync with the norms / cast kernels.
+from ..common import get_torch_e4m3_type, get_torch_e5m2_type
 
 
 def is_fp8_dtype(dtype: tex.DType) -> bool:
