@@ -10,12 +10,11 @@ across a broad matrix of ``(M, K, N) x layout x in_dtype x out_dtype x bias
 x grad`` parametrizations (~1000 collected). Isolates kernel-level bugs from
 wrapper-layer issues.
 
-Complementary files:
+Complementary file:
 
 - ``test_gemm.py`` -- user-facing ``general_gemm()`` tests with real
   ``Float8Tensor`` / ``MXFP8Tensor`` and equivalence vs. both PyTorch and
-  the C++ backend.
-- ``test_gemm_mxfp8.py`` -- MXFP8 wrapper-layer sanity.
+  the C++ backend (covers MXFP8 and mxfp8 wrapper paths there too).
 """
 
 import pytest

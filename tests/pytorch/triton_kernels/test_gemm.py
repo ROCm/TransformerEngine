@@ -16,14 +16,14 @@ Each test compares the Triton path against two independent references:
   2. The C++ ``tex.generic_gemm`` backend under the same TE ``general_gemm``
      surface -- catches divergence from the production path.
 
-Complementary files:
+Complementary file:
 
 - ``test_gemm_kernel.py`` -- low-level ``te_gemm_triton()`` kernel-direct
   correctness (bypasses ``general_gemm`` and the wrappers; ~1000
   parametrizations of a single ``test_correctness`` function).
-- ``test_gemm_mxfp8.py`` -- narrow wrapper-layer sanity checks for MXFP8
-  (imports + ``MXFP8TensorWrapper`` with a non-MXFP8 tensor). MXFP8
-  end-to-end numerical correctness lives here in ``test_triton_vs_*_mxfp8``.
+
+MXFP8 end-to-end numerical correctness lives here, in
+``test_triton_vs_pytorch_mxfp8`` / ``test_triton_vs_cpp_mxfp8``.
 """
 
 import os
