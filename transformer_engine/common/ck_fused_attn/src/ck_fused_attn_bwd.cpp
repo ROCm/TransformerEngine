@@ -530,10 +530,10 @@ size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args){
   // Safety floor: CK's launcher derives the dq_acc device size from max_seqlen_k, but the
   // deterministic kernel splits each sequence by its padded length from cu_seqlen_kv_padded,
   // which can exceed s_kv in group mode (see bwd_dq_acc_seqlen_k). Size the floor from the
-  // same padded extent and the smallest kN0 the dispatched tile can use for this head dim
-  // (128 for d_qk<=128, else 64; per the CK bwd tile tables) so a smaller kN0 -> more splits
-  // stays an upper bound on what the kernel writes.
-  const size_t kN0 = (args.d_qk <= 128) ? 128u : 64u;
+  // same padded extent and the smallest kN0 any dispatched bwd tile can use (64; per the CK
+  // bwd tile tables) so a smaller kN0 -> more splits stays an upper bound on what the kernel
+  // writes. Always use the minimum tile.
+  const size_t kN0 = 64u;
   const size_t nsplits =
     args.deterministic ? ((bwd_dq_acc_seqlen_k(args) + kN0 - 1) / kN0) : 1u;
   const size_t tokens_q = args.is_group_mode() ? args.max_tokens_q : (args.b * args.s_q);
