@@ -196,34 +196,23 @@ if torch.cuda.get_device_capability() == (9, 0) or IS_HIP_EXTENSION:
     use_cutlass_grouped_gemm.append(True)
 
 
-# Marker for tests that compare a grouped-GEMM path against a sequence of
-# individual GEMM calls (or that rely on a bit-exact `rtol=0, atol=0`
-# comparison). The comparison is only meaningful when *both* sides use the
-# same GEMM backend; the upstream code spells this out with a
+# Marker for tests that compare a sequence of individual `Linear` layers
+# against a multi-stream / grouped GEMM (or that otherwise assume a
+# bit-exact `rtol=0, atol=0` match). The original invariant these tests
+# check is that the same GEMM kernel, used both sequentially and inside
+# the multi-stream GEMM, reproduces the same result -- see the upstream
 # `# cuBLAS implementation should be bit-wise match` comment.
 #
-# NVTE_USE_GEMM_TRITON=1 breaks that premise. It routes the *regular*
-# `general_gemm` path (used by each individual Linear on the sequential
-# side) onto our Triton kernel -- but it does NOT affect the grouped side.
-# `GroupedLinear` uses `general_grouped_gemm`, which is controlled by a
-# separate `NVTE_USE_GROUPED_GEMM_TRITON=1` env var (and by the test's
-# `use_triton` parametrize flag, which sets it locally). With just
-# `NVTE_USE_GEMM_TRITON=1` set globally:
-#   - sequential side  -> our Triton `general_gemm`
-#   - grouped side     -> hipBLASLt grouped (unchanged), CUTLASS grouped,
-#                         or AITER Triton grouped -- but never our kernel
-# Two different backends -> different fp32 rounding -> `atol=0` fails.
-# This is not Triton non-determinism; it's a backend mismatch on the two
-# sides of the comparison. Skip rather than loosen tolerances so the
-# original grouped-vs-sequential invariant remains exact where it holds.
+# Under NVTE_USE_GEMM_TRITON=1 the Triton GEMM kernel is NOT used inside
+# the multi-stream GEMM path, so the invariant no longer applies to these
+# tests. Skip them under the override rather than loosen tolerances just
+# to make them pass vacuously.
 _skip_grouped_under_gemm_triton = pytest.mark.skipif(
     bool(int(os.environ.get("NVTE_USE_GEMM_TRITON", "0"))),
     reason=(
-        "NVTE_USE_GEMM_TRITON=1 routes the sequential side of this "
-        "grouped-vs-sequential comparison onto Triton while the grouped "
-        "side stays on hipBLASLt/CUTLASS/AITER-Triton (controlled by a "
-        "separate NVTE_USE_GROUPED_GEMM_TRITON env var). Different "
-        "backends on each side break the bit-exact equivalence premise."
+        "The Triton GEMM kernel is not used inside the multi-stream GEMM "
+        "path, so the sequential-vs-multi-stream equivalence these tests "
+        "check does not apply under NVTE_USE_GEMM_TRITON=1."
     ),
 )
 
