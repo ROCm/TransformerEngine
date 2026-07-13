@@ -23,29 +23,15 @@ import triton
 import triton.language as tl
 
 from transformer_engine.pytorch.triton_kernels.common import (
-    get_torch_e4m3_type,
-    get_torch_e5m2_type,
     torch_dtype_to_te_dtype as torch_to_te_dtype,
 )
 from transformer_engine.pytorch.triton_kernels.gemm import te_gemm_triton
+from test_common import str_to_torch_dtype
 
 
-def _get_fp8_dtypes():
-    """Architecture-native (E4M3, E5M2) torch dtypes."""
-    return get_torch_e4m3_type(), get_torch_e5m2_type()
-
-
-fp8_e4m3_dtype, fp8_e5m2_dtype = _get_fp8_dtypes()
-tl_to_torch_types = {
-    tl.float16: torch.float16,
-    tl.bfloat16: torch.bfloat16,
-    tl.float32: torch.float32,
-    tl.int8: torch.int8,
-    tl.int32: torch.int32,
-    tl.float8e4b8: fp8_e4m3_dtype,
-    tl.float8e5b16: fp8_e5m2_dtype,
-}
-
+# String -> Triton kernel dtype. Kept local because `gen_input` needs the
+# Triton dtype for the reference `copy_kernel` and to decide the fp8
+# codepath. String -> torch.dtype comes from `str_to_torch_dtype` (shared).
 name_to_tl_types = {
     'int8': tl.int8,
     'int32': tl.int32,
@@ -79,8 +65,8 @@ def gen_input(M, N, ty_name, needTrans, seed, device='cuda'):
     if d_type == tl.float8e4b8:
         raw_data += torch.sign(raw_data)
 
-    if d_type in tl_to_torch_types:
-        input = raw_data.to(tl_to_torch_types[d_type])
+    if ty_name in ('fp16', 'bf16', 'fp32', 'fp8e4', 'fp8e5'):
+        input = raw_data.to(str_to_torch_dtype(ty_name))
         input_f16 = input.to(torch.float16)
     else:
         f8_tensor = raw_data.to(torch.int8)
@@ -171,10 +157,8 @@ def test_correctness(M, N, K, col_a, col_b, in_dtype, out_dtype, use_bias, bias_
     a_fp32 = a.to(torch.float32)
     b_fp32 = b.to(torch.float32)
     # Allocates output.
-    tl_out_dtype = name_to_tl_types[out_dtype]
-    torch_out_dtype = tl_to_torch_types[tl_out_dtype]
-    tl_bias_dtype = name_to_tl_types[bias_dtype]
-    torch_bias_dtype = tl_to_torch_types[tl_bias_dtype]
+    torch_out_dtype = str_to_torch_dtype(out_dtype)
+    torch_bias_dtype = str_to_torch_dtype(bias_dtype)
     c = torch.empty((N, M), device=a.device, dtype=torch_out_dtype)
     if is_fp8(in_dtype):
         A_scale_inverse = torch.randn((3,), dtype=torch.float32, device='cuda')
@@ -187,9 +171,9 @@ def test_correctness(M, N, K, col_a, col_b, in_dtype, out_dtype, use_bias, bias_
     transa = col_a
     transb = col_b
 
-    A_type = torch_to_te_dtype( tl_to_torch_types[ name_to_tl_types[a_in_dtype] ] )
-    B_type = torch_to_te_dtype( tl_to_torch_types[ name_to_tl_types[b_in_dtype] ] )
-    D_type = torch_to_te_dtype( tl_to_torch_types[ name_to_tl_types[out_dtype] ] )
+    A_type = torch_to_te_dtype(str_to_torch_dtype(a_in_dtype))
+    B_type = torch_to_te_dtype(str_to_torch_dtype(b_in_dtype))
+    D_type = torch_to_te_dtype(str_to_torch_dtype(out_dtype))
     if out_dtype in ('fp8e4', 'fp8e5'):
         D_amax = torch.empty((), dtype=torch.float32, device='cuda')
     else:
