@@ -22,13 +22,113 @@ import triton
 from ..common import torch_dtype_to_te_dtype, te_dtype_to_torch_dtype
 from .gemm_kernels import matmul_kernel, mxfp8_matmul_kernel
 from .gemm_common import (
-    Float8TensorWrapper,
-    MXFP8TensorWrapper,
     is_fp8_dtype,
     reinterpret_as_fp8_tensor,
     getGemmOutputShape,
     product,
+    materialize_rowwise_from_columnwise,
+    data_and_scale_for_transpose,
 )
+
+
+def _classify_input(t):
+    """Classify a GEMM operand for the Triton backend.
+
+    Returns:
+        ``("regular", None)`` for a plain ``torch.Tensor``,
+        ``("fp8", storage)`` for ``Float8Tensor`` / ``Float8TensorStorage``,
+        ``("mxfp8", storage)`` for ``MXFP8Tensor`` / ``MXFP8TensorStorage``.
+
+    Raises ``ValueError`` for any other ``QuantizedTensorStorage`` subclass
+    (e.g. NVFP4) so the caller gets a clear "unsupported recipe" message
+    instead of a downstream attribute error.
+
+    Imports are guarded with try/except so this stays importable even when
+    the optional tensor modules aren't available.
+    """
+    try:
+        from transformer_engine.pytorch.float8_tensor import Float8Tensor
+        from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import (
+            Float8TensorStorage,
+        )
+        if isinstance(t, (Float8Tensor, Float8TensorStorage)):
+            return "fp8", t
+    except ImportError:
+        pass
+
+    try:
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
+        from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import (
+            MXFP8TensorStorage,
+        )
+        if isinstance(t, (MXFP8Tensor, MXFP8TensorStorage)):
+            return "mxfp8", t
+    except ImportError:
+        pass
+
+    try:
+        from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
+        if isinstance(t, QuantizedTensorStorage):
+            raise ValueError(
+                f"The Triton GEMM backend (NVTE_USE_GEMM_TRITON=1) does not "
+                f"support {type(t).__name__}. Only Float8Tensor / "
+                f"Float8TensorStorage (regular FP8) and MXFP8TensorStorage "
+                f"are implemented. Disable the Triton backend for this recipe "
+                f"(unset NVTE_USE_GEMM_TRITON)."
+            )
+    except ImportError:
+        pass
+
+    return "regular", None
+
+
+def _extract_fp8_operand(t, kind):
+    """Extract Triton-kernel inputs from a GEMM operand.
+
+    Called once per operand (A and B) at the top of ``te_generic_gemm_triton``
+    in the regular / FP8 path.
+
+    Args:
+        t: The operand as passed to ``te_generic_gemm_triton``. When
+            ``kind == "fp8"`` this is a ``Float8Tensor`` /
+            ``Float8TensorStorage``; when ``kind == "regular"`` it's a plain
+            ``torch.Tensor``.
+        kind: ``"fp8"`` or ``"regular"`` (from ``_classify_input``).
+
+    Returns:
+        ``(data, scale_inv, fp8_dtype, size)``:
+          - ``data``: the rowwise data buffer the kernel will consume. For a
+            columnwise-only ``Float8TensorStorage`` this is materialized once
+            via ``materialize_rowwise_from_columnwise`` and cached in a
+            local for downstream reuse.
+          - ``scale_inv``: the inverse scale (empty ``torch.Tensor`` for
+            regular inputs).
+          - ``fp8_dtype``: the ``tex.DType`` FP8 variant, or ``None`` for
+            regular inputs.
+          - ``size``: the logical rowwise size.
+
+    Raises:
+        RuntimeError: on an FP8 tensor that has neither valid rowwise
+            ``_data`` nor a valid columnwise ``_transpose``.
+    """
+    if kind == "fp8":
+        if t._data is not None:
+            data = t._data
+        else:
+            transpose_valid = (
+                hasattr(t, '_transpose')
+                and t._transpose is not None
+                and not getattr(t, '_transpose_invalid', False)
+            )
+            if not transpose_valid:
+                raise RuntimeError(
+                    "Float8Tensor has neither valid rowwise (_data) "
+                    "nor columnwise (_transpose) data."
+                )
+            data = materialize_rowwise_from_columnwise(t)
+        return data, t._scale_inv, t._fp8_dtype, data.size()
+    # Regular tensor
+    return t, torch.Tensor(), None, t.size()
 
 
 # %%
@@ -251,18 +351,13 @@ def te_generic_gemm_triton(A,
                             alpha=1.0,
                             beta=0.0):
 
-    # Wrap inputs to handle Float8Tensor and MXFP8Tensor uniformly
-    # Try MXFP8 first, then Float8, then regular
-    try:
-        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
-        from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
-        is_mxfp8_a = isinstance(A, (MXFP8Tensor, MXFP8TensorStorage))
-        is_mxfp8_b = isinstance(B, (MXFP8Tensor, MXFP8TensorStorage))
-    except ImportError:
-        is_mxfp8_a = False
-        is_mxfp8_b = False
+    # Classify operands once; downstream branches read the storage attributes
+    # directly. _classify_input raises on unsupported QuantizedTensorStorage
+    # subclasses (NVFP4, ...) with a clear "disable the Triton backend" error.
+    a_kind, _ = _classify_input(A)
+    b_kind, _ = _classify_input(B)
 
-    if is_mxfp8_a or is_mxfp8_b:
+    if a_kind == "mxfp8" or b_kind == "mxfp8":
         # MXFP8 Triton GEMM requires PyTorch >= 2.10 which ships a Triton version
         # with the tl.dot_scaled() RHS scale layout bug fix.
         # Earlier versions silently produce wrong results for non-uniform B scales.
@@ -275,13 +370,21 @@ def te_generic_gemm_triton(A,
                 "Set NVTE_USE_GEMM_TRITON=0 to use the C++ GEMM backend instead."
             )
 
-        # Use MXFP8TensorWrapper
-        A_wrapper = MXFP8TensorWrapper(A)
-        B_wrapper = MXFP8TensorWrapper(B)
-
         # Validate both are MXFP8
-        if A_wrapper.is_mxfp8 != B_wrapper.is_mxfp8:
+        if a_kind != b_kind:
             raise ValueError("Mixed MXFP8 and non-MXFP8 inputs not supported")
+
+        # Sanity: both operands must have at least one pre-quantized copy.
+        if getattr(A, '_rowwise_data', None) is None and getattr(A, '_columnwise_data', None) is None:
+            raise RuntimeError("MXFP8Tensor has neither rowwise nor columnwise data")
+        if getattr(B, '_rowwise_data', None) is None and getattr(B, '_columnwise_data', None) is None:
+            raise RuntimeError("MXFP8Tensor has neither rowwise nor columnwise data")
+
+        # Logical (rowwise-oriented) size for shape computation downstream.
+        # MXFP8 rowwise and columnwise share the same shape, so we pick whichever
+        # copy is populated.
+        A_size = (A._rowwise_data if A._rowwise_data is not None else A._columnwise_data).size()
+        B_size = (B._rowwise_data if B._rowwise_data is not None else B._columnwise_data).size()
 
         # IMPORTANT: Match the C++ CanonicalizeGemmInput logic for MXFP8
         # The C++ code selects data/scales based on the BLAS transpose flags:
@@ -292,58 +395,33 @@ def te_generic_gemm_triton(A,
         # For B:
         #   - transb=True:  Use columnwise data and scales
         #   - transb=False: Use rowwise data and scales
-        #
-        # The wrapper's get_data_and_scale_for_gemm takes will_transpose parameter:
-        #   - will_transpose=True → returns columnwise
-        #   - will_transpose=False → returns rowwise
-
-        # Extract data and scales for Triton (row-major) requirements
-        # Triton needs different selection than C++ because it works in row-major
-        # For A (first operand): needs [M, K] with scales [M, K//32] (rowwise pattern)
-        # For B (second operand): needs [K, N] with scales [K//32, N] (columnwise pattern)
 
         # Debug: print available data
         import os
         if os.getenv("DEBUG_MXFP8_SELECT"):
             print(f"[DEBUG] MXFP8 data selection:")
-            print(f"  A shape: {A_wrapper.size()}, transA={transa}")
-            if hasattr(A_wrapper, '_rowwise_data') and A_wrapper._rowwise_data is not None:
-                print(f"    A rowwise: data {A_wrapper._rowwise_data.shape}, scale {A_wrapper._rowwise_scale_inv.shape}")
-            if hasattr(A_wrapper, '_columnwise_data') and A_wrapper._columnwise_data is not None:
-                print(f"    A columnwise: data {A_wrapper._columnwise_data.shape}, scale {A_wrapper._columnwise_scale_inv.shape}")
-            print(f"  B shape: {B_wrapper.size()}, transB={transb}")
-            if hasattr(B_wrapper, '_rowwise_data') and B_wrapper._rowwise_data is not None:
-                print(f"    B rowwise: data {B_wrapper._rowwise_data.shape}, scale {B_wrapper._rowwise_scale_inv.shape}")
-            if hasattr(B_wrapper, '_columnwise_data') and B_wrapper._columnwise_data is not None:
-                print(f"    B columnwise: data {B_wrapper._columnwise_data.shape}, scale {B_wrapper._columnwise_scale_inv.shape}")
+            print(f"  A shape: {A_size}, transA={transa}")
+            if getattr(A, '_rowwise_data', None) is not None:
+                print(f"    A rowwise: data {A._rowwise_data.shape}, scale {A._rowwise_scale_inv.shape}")
+            if getattr(A, '_columnwise_data', None) is not None:
+                print(f"    A columnwise: data {A._columnwise_data.shape}, scale {A._columnwise_scale_inv.shape}")
+            print(f"  B shape: {B_size}, transB={transb}")
+            if getattr(B, '_rowwise_data', None) is not None:
+                print(f"    B rowwise: data {B._rowwise_data.shape}, scale {B._rowwise_scale_inv.shape}")
+            if getattr(B, '_columnwise_data', None) is not None:
+                print(f"    B columnwise: data {B._columnwise_data.shape}, scale {B._columnwise_scale_inv.shape}")
 
         # MXFP8 Selection for BLAS API compatibility
         #
         # The API uses BLAS convention with column-major interpretation
         # We need to select the right MXFP8 format based on BLAS transpose flags
         # Following the C++ logic from CanonicalizeGemmInput:
-        #   - When transA=True: use rowwise
-        #   - When transA=False: use columnwise
-        #   - When transB=True: use columnwise
-        #   - When transB=False: use rowwise
-
-        if transa:
-            # BLAS transA=True → use rowwise
-            A_data = A_wrapper._rowwise_data
-            a_scale_inv = A_wrapper._rowwise_scale_inv
-        else:
-            # BLAS transA=False → use columnwise
-            A_data = A_wrapper._columnwise_data
-            a_scale_inv = A_wrapper._columnwise_scale_inv
-
-        if transb:
-            # BLAS transB=True → use columnwise
-            B_data = B_wrapper._columnwise_data
-            b_scale_inv = B_wrapper._columnwise_scale_inv
-        else:
-            # BLAS transB=False → use rowwise
-            B_data = B_wrapper._rowwise_data
-            b_scale_inv = B_wrapper._rowwise_scale_inv
+        #   - When transA=True: use rowwise (will_transpose=False in the helper)
+        #   - When transA=False: use columnwise (will_transpose=True)
+        #   - When transB=True: use columnwise (will_transpose=True)
+        #   - When transB=False: use rowwise (will_transpose=False)
+        A_data, a_scale_inv = data_and_scale_for_transpose(A, will_transpose=not transa)
+        B_data, b_scale_inv = data_and_scale_for_transpose(B, will_transpose=transb)
 
         # Debug output
         if os.getenv("DEBUG_MXFP8_SELECT"):
@@ -352,23 +430,20 @@ def te_generic_gemm_triton(A,
             print(f"  A selected: data {A_data.shape}, scale {a_scale_inv.shape}")
             print(f"  B selected: data {B_data.shape}, scale {b_scale_inv.shape}")
 
-        a_fp8_dtype = A_wrapper.fp8_dtype
-        b_fp8_dtype = B_wrapper.fp8_dtype
+        a_fp8_dtype = A._fp8_dtype
+        b_fp8_dtype = B._fp8_dtype
+        a_nominal_dtype = getattr(A, 'dtype', torch.float32)
 
         input_mxfp8 = True
     else:
-        # Use Float8TensorWrapper (existing code)
-        A_wrapper = Float8TensorWrapper(A)
-        B_wrapper = Float8TensorWrapper(B)
-
-        A_data = A_wrapper.get_data_for_gemm(will_transpose=transa)
-        B_data = B_wrapper.get_data_for_gemm(will_transpose=transb)
-
-        a_fp8_dtype = A_wrapper.fp8_dtype
-        b_fp8_dtype = B_wrapper.fp8_dtype
-        a_scale_inv = A_wrapper.scale_inv
-        b_scale_inv = B_wrapper.scale_inv
-
+        # FP8 / regular path. _extract_fp8_operand pulls (data, scale, fp8 dtype,
+        # size) from a Float8 storage or a plain tensor; the columnwise-only
+        # Float8 case materializes the rowwise buffer once for reuse.
+        A_data, a_scale_inv, a_fp8_dtype, A_size = _extract_fp8_operand(A, a_kind)
+        B_data, b_scale_inv, b_fp8_dtype, B_size = _extract_fp8_operand(B, b_kind)
+        # A's nominal dtype is used downstream as an output-dtype fallback;
+        # B's isn't consumed.
+        a_nominal_dtype = getattr(A, 'dtype', None) if a_kind == "fp8" else A.dtype
         input_mxfp8 = False
 
     # Mixed FP8 types (e.g. A=e4m3, B=e5m2) are not supported due to a Triton
@@ -423,10 +498,10 @@ def te_generic_gemm_triton(A,
     #   - If transa=True: transpose in column-major gives (A_shape[0], A_shape[1]), so m=A_shape[0], k=A_shape[1]
     #
     # Using product notation where A0 = product(A_shape[:-1]), A1 = A_shape[-1]:
-    A0 = product(A_wrapper.size()[:-1])  # First dim(s)
-    A1 = product(A_wrapper.size()[-1:])  # Last dim
-    B0 = product(B_wrapper.size()[:-1])
-    B1 = product(B_wrapper.size()[-1:])
+    A0 = product(A_size[:-1])  # First dim(s)
+    A1 = product(A_size[-1:])  # Last dim
+    B0 = product(B_size[:-1])
+    B1 = product(B_size[-1:])
 
     m = A0 if transa else A1  # Original code
     k = A1 if transa else A0  # Original code
@@ -498,32 +573,26 @@ def te_generic_gemm_triton(A,
         epilogue = 'DEFAULT'
         bias_grad = None
 
-    # Compute output shape
-    if input_mxfp8:
-        # For MXFP8, we swapped operands, so use BLAS logic for output shape
-        # BLAS computes in column-major, and we want the row-major result
-        D_shape = getGemmOutputShape(A_wrapper.size(), transa, B_wrapper.size(), transb)
-    else:
-        # For regular path, use BLAS column-major logic
-        D_shape = getGemmOutputShape(A_wrapper.size(), transa, B_wrapper.size(), transb)
+    # Compute output shape (BLAS column-major convention; both branches identical)
+    D_shape = getGemmOutputShape(A_size, transa, B_size, transb)
 
     if D is None:
         # Determine output dtype
         if output_dtype is not None:
             # Use explicitly provided output dtype (from TE_DType)
             out_dtype = te_dtype_to_torch_dtype(output_dtype)
-        elif hasattr(A_wrapper, 'is_mxfp8') and A_wrapper.is_mxfp8:
+        elif a_kind == "mxfp8":
             # MXFP8 input: use nominal dtype
-            out_dtype = A_wrapper.nominal_dtype
-        elif hasattr(A_wrapper, 'is_fp8') and A_wrapper.is_fp8:
+            out_dtype = a_nominal_dtype
+        elif a_kind == "fp8":
             # Regular FP8 input: use nominal dtype if available
-            if A_wrapper.nominal_dtype is None:
+            if a_nominal_dtype is None:
                 raise RuntimeError(
                     "FP8 input detected (Float8TensorStorage without nominal dtype) but output_dtype "
                     "parameter is not provided. Please explicitly provide the output_dtype parameter "
                     "to general_gemm()."
                 )
-            out_dtype = A_wrapper.nominal_dtype
+            out_dtype = a_nominal_dtype
         else:
             # Regular input: use A's dtype
             out_dtype = A_data.dtype
@@ -533,9 +602,9 @@ def te_generic_gemm_triton(A,
     d_row_major = D.view(-1, D.shape[-1])
 
     # Set FP8 flags
-    is_fp8_wrapper = hasattr(A_wrapper, 'is_fp8') and A_wrapper.is_fp8 and B_wrapper.is_fp8
-    is_mxfp8_wrapper = hasattr(A_wrapper, 'is_mxfp8') and A_wrapper.is_mxfp8 and B_wrapper.is_mxfp8
-    input_fp8 = is_fp8_wrapper or is_mxfp8_wrapper
+    is_fp8_input = (a_kind == "fp8" and b_kind == "fp8")
+    is_mxfp8_input = (a_kind == "mxfp8" and b_kind == "mxfp8")
+    input_fp8 = is_fp8_input or is_mxfp8_input
     output_fp8 = False  # Not supporting FP8 output yet
 
     # Empty tensors for unused parameters (matching C++ empty tensor pattern)
@@ -592,7 +661,7 @@ def te_generic_gemm_triton(A,
             print(f"  a_row_major: {a_row_major.shape}")
             print(f"  b_row_major: {b_row_major.shape}")
             print(f"  Cannot multiply: {a_row_major.shape} @ {b_row_major.shape}")
-            print(f"  Original: A{A_wrapper.size()}, B{B_wrapper.size()}, trans={'T' if transa else 'N'}{'T' if transb else 'N'}")
+            print(f"  Original: A{A_size}, B{B_size}, trans={'T' if transa else 'N'}{'T' if transb else 'N'}")
             assert False, f"Dimension mismatch: {a_row_major.shape} @ {b_row_major.shape}"
         actual_k = a_row_major.shape[1]
 
@@ -600,7 +669,7 @@ def te_generic_gemm_triton(A,
         import os
         if os.getenv("DEBUG_MXFP8_GEMM"):
             print(f"\n[DEBUG] MXFP8 GEMM call:")
-            print(f"  BLAS API: A{A_wrapper.size()}, B{B_wrapper.size()}, trans={'T' if transa else 'N'}{'T' if transb else 'N'}")
+            print(f"  BLAS API: A{A_size}, B{B_size}, trans={'T' if transa else 'N'}{'T' if transb else 'N'}")
 
             # Identify the operation type based on shapes and transpose flags
             op_type = "unknown"
@@ -614,9 +683,9 @@ def te_generic_gemm_triton(A,
             # For wgrad, provide more details about the tensor interpretation
             if op_type == "wgrad (NT)":
                 print(f"  Interpreting wgrad tensors:")
-                print(f"    A (grad_output): original shape {A_wrapper.size()}")
+                print(f"    A (grad_output): original shape {A_size}")
                 print(f"      After flatten: {A_flat.shape}")
-                print(f"    B (input): original shape {B_wrapper.size()}")
+                print(f"    B (input): original shape {B_size}")
                 print(f"      After flatten: {B_flat.shape}")
                 print(f"    Expected: dY^T @ X where dY=[batch*seq, out_feat], X=[batch*seq, in_feat]")
 

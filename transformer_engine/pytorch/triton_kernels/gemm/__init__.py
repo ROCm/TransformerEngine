@@ -6,8 +6,6 @@
 
 from .gemm_wrapper import te_gemm_triton, te_generic_gemm_triton, matmul, mxfp8_matmul
 from .gemm_common import (
-    Float8TensorWrapper,
-    MXFP8TensorWrapper,
     is_fp8_dtype,
     reinterpret_as_fp8_tensor,
     getGemmOutputShape,
@@ -24,8 +22,6 @@ __all__ = [
     "te_generic_gemm_triton",
     "matmul",
     "mxfp8_matmul",
-    "Float8TensorWrapper",
-    "MXFP8TensorWrapper",
     "is_fp8_dtype",
     "reinterpret_as_fp8_tensor",
     "getGemmOutputShape",
