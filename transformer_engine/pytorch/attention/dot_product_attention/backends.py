@@ -1624,6 +1624,7 @@ class FusedAttnFunc(torch.autograd.Function):
         ctx.dropout_p = dropout_p
         ctx.fast_zero_fill = fast_zero_fill
 
+        offload_reloaded = False
         if NVTE_CPU_OFFLOAD_V1:
             # If interleaved tensor is offloaded, reloaded tensor will be
             # non-interleaved, so we need to modify the QKV layout
@@ -1642,6 +1643,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     for _ in range(rep_count):
                         reload_layout = reload_layout + temp_layout + "_"
                 ctx.qkv_layout = reload_layout[:-1]
+                offload_reloaded = True
             else:
                 ctx.qkv_layout = qkv_layout
                 if fp8 and not ctx.fp8:
@@ -1653,8 +1655,14 @@ class FusedAttnFunc(torch.autograd.Function):
 
         ctx.o_format = o_format
         ctx.qkv_scale_inv_format = qkv_scale_inv_format
-        # dqkv should have the same layout as the original qkv
-        ctx.dqkv_layout = original_qkv_layout
+        # dqkv should have the same layout as the original qkv. On ROCm the fused-attn
+        # kernel uses a single qkv_layout for both inputs and gradients, so when CPU
+        # offload reload de-interleaves the inputs (ctx.qkv_layout != original), the
+        # gradients must follow the same de-interleaved layout. (Issue: cpu_offloading_v1)
+        if IS_HIP_EXTENSION and offload_reloaded:
+            ctx.dqkv_layout = ctx.qkv_layout
+        else:
+            ctx.dqkv_layout = original_qkv_layout
         ctx.attn_bias_type = attn_bias_type
         ctx.attn_mask_type = attn_mask_type
         ctx.softmax_type = softmax_type
