@@ -2,12 +2,38 @@
 #
 # License for AMD contributions = MIT. See LICENSE for more information
 
+"""Low-level ``te_gemm_triton()`` kernel-direct correctness tests.
+
+Bypasses ``general_gemm`` and the tensor wrappers. Drives
+``te_gemm_triton()`` with raw tensors and a Triton reference implementation
+across a broad matrix of ``(M, K, N) x layout x in_dtype x out_dtype x bias
+x grad`` parametrizations (~1000 collected). Isolates kernel-level bugs from
+wrapper-layer issues.
+
+Complementary files:
+
+- ``test_gemm.py`` -- user-facing ``general_gemm()`` tests with real
+  ``Float8Tensor`` / ``MXFP8Tensor`` and equivalence vs. both PyTorch and
+  the C++ backend.
+- ``test_gemm_mxfp8.py`` -- MXFP8 wrapper-layer sanity.
+"""
+
 import pytest
 import torch
 import triton
 import triton.language as tl
 
-from transformer_engine.pytorch.triton_kernels.gemm import te_gemm_triton, torch_to_te_dtype, _get_fp8_dtypes
+from transformer_engine.pytorch.triton_kernels.common import (
+    get_torch_e4m3_type,
+    get_torch_e5m2_type,
+    torch_dtype_to_te_dtype as torch_to_te_dtype,
+)
+from transformer_engine.pytorch.triton_kernels.gemm import te_gemm_triton
+
+
+def _get_fp8_dtypes():
+    """Architecture-native (E4M3, E5M2) torch dtypes."""
+    return get_torch_e4m3_type(), get_torch_e5m2_type()
 
 
 fp8_e4m3_dtype, fp8_e5m2_dtype = _get_fp8_dtypes()

@@ -9,83 +9,37 @@ Contains dtype conversion utilities, output-shape computation, and the
 quantized tensors for use in the Python-side Triton GEMM path.
 """
 
-import functools
 import torch
 
 import transformer_engine_torch as tex
 
+# Reuse the shared dtype-conversion utilities that already live in the
+# triton_kernels package. Keeping the GEMM backend on the same helpers as
+# the norms / cast kernels avoids drift when new dtypes land.
+from ..common import (
+    get_torch_e4m3_type,
+    get_torch_e5m2_type,
+    torch_dtype_to_te_dtype,
+    te_dtype_to_torch_dtype,
+)
 
-@functools.lru_cache(maxsize=1)
-def _get_fp8_dtypes():
-    """
-    Get the appropriate FP8 dtypes based on GPU architecture.
 
-    AMD GPU FP8 format support:
-    - gfx942 (MI300/MI325): Uses NANOO FP8 formats
-        - torch.float8_e4m3fnuz (e4m3)
-        - torch.float8_e5m2fnuz (e5m2)
-    - gfx950 (MI350): Uses OCP standard FP8 formats (same as NVIDIA)
-        - torch.float8_e4m3fn (e4m3)
-        - torch.float8_e5m2 (e5m2)
-
-    Returns:
-        tuple: (e4m3_dtype, e5m2_dtype) - PyTorch FP8 dtypes for current architecture
-    """
-    major, minor = torch.cuda.get_device_capability()
-
-    # gfx950 (compute capability 9.5) uses OCP standard FP8 formats
-    if major == 9 and minor >= 5:
-        return (torch.float8_e4m3fn, torch.float8_e5m2)
-
-    # gfx942 (compute capability 9.4) and earlier use NANOO FP8 formats
-    # This includes MI300/MI325 (gfx942) and MI200 (gfx90a)
-    return (torch.float8_e4m3fnuz, torch.float8_e5m2fnuz)
-
-def torch_to_te_dtype(dtype):
-    torch_to_TE_dtypes = {
-        torch.int8: tex.DType.kByte,
-        torch.int32: tex.DType.kInt32,
-        torch.float32: tex.DType.kFloat32,
-        torch.float16: tex.DType.kFloat16,
-        torch.bfloat16: tex.DType.kBFloat16,
-        # Both NANOO and OCP FP8 formats map to the same TE dtypes
-        torch.float8_e4m3fnuz: tex.DType.kFloat8E4M3,  # NANOO format (gfx942)
-        torch.float8_e5m2fnuz: tex.DType.kFloat8E5M2,  # NANOO format (gfx942)
-        torch.float8_e4m3fn: tex.DType.kFloat8E4M3,    # OCP format (gfx950)
-        torch.float8_e5m2: tex.DType.kFloat8E5M2,      # OCP format (gfx950)
-    }
-    return torch_to_TE_dtypes[dtype]
-
-def te_to_torch_dtype(dtype):
-    e4m3_dtype, e5m2_dtype = _get_fp8_dtypes()
-    te_dtype_to_torch_dtype = {
-            tex.DType.kByte : torch.int8,
-            tex.DType.kInt32 : torch.int32,
-            tex.DType.kFloat32 : torch.float32,
-            tex.DType.kFloat16 : torch.float16,
-            tex.DType.kBFloat16 : torch.bfloat16,
-            tex.DType.kFloat8E4M3: e4m3_dtype,
-            tex.DType.kFloat8E5M2: e5m2_dtype,
-            }
-    return te_dtype_to_torch_dtype[dtype]
-
-def is_fp8_dtype(dtype):
+def is_fp8_dtype(dtype: tex.DType) -> bool:
+    """Whether a TE ``DType`` is one of the FP8 variants."""
     return dtype in (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2)
 
-def reinterpret_as_fp8_tensor(a: torch.Tensor, dtype: tex.DType):
-    """
-    Reinterpret a uint8 tensor as an FP8 tensor using the appropriate format for the GPU architecture.
 
-    Uses architecture-specific FP8 formats:
-    - gfx942 (MI300/MI325): NANOO FP8 (fnuz variants)
-    - gfx950 (MI350): OCP FP8 (fn/standard variants)
-    """
-    fp8_e4m3_dtype, fp8_e5m2_dtype = _get_fp8_dtypes()
+def reinterpret_as_fp8_tensor(a: torch.Tensor, dtype: tex.DType) -> torch.Tensor:
+    """View a uint8 tensor as the architecture-native FP8 torch dtype.
 
+    gfx942 (MI300/MI325) uses NANOO (``fnuz``) FP8 variants; gfx950 (MI350)
+    uses OCP-standard variants. Delegates dtype selection to
+    ``triton_kernels.common.get_torch_e4m3_type`` / ``_e5m2_type``.
+    """
     if dtype == tex.DType.kFloat8E4M3:
-        return a.view(dtype=fp8_e4m3_dtype)
+        return a.view(dtype=get_torch_e4m3_type())
     if dtype == tex.DType.kFloat8E5M2:
-        return a.view(dtype=fp8_e5m2_dtype)
+        return a.view(dtype=get_torch_e5m2_type())
 
 def getGemmOutputShape(A, transa, B, transb):
     """

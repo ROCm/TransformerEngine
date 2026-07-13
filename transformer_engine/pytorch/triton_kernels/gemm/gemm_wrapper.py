@@ -19,14 +19,12 @@ from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
 
 import triton
 
+from ..common import torch_dtype_to_te_dtype, te_dtype_to_torch_dtype
 from .gemm_kernels import matmul_kernel, mxfp8_matmul_kernel
 from .gemm_common import (
     Float8TensorWrapper,
     MXFP8TensorWrapper,
-    torch_to_te_dtype,
-    te_to_torch_dtype,
     is_fp8_dtype,
-    _get_fp8_dtypes,
     reinterpret_as_fp8_tensor,
     getGemmOutputShape,
     product,
@@ -174,10 +172,10 @@ def te_gemm_triton(A,
     For epilogue BIAS, bias vector length is blas_m
     for epilogue BGRADB, bias gradient vector length is blas_n
     '''
-    assert te_to_torch_dtype(A_type) == A.dtype, 'A dtype does not match.'
-    assert te_to_torch_dtype(B_type) == B.dtype, 'B dtype does not match.'
-    assert te_to_torch_dtype(D_type) == D.dtype, 'D dtype does not match.'
-    assert (bias.data_ptr() == 0) or (te_to_torch_dtype(bias_type) == bias.dtype), 'bias dtype does not match.'
+    assert te_dtype_to_torch_dtype(A_type) == A.dtype, 'A dtype does not match.'
+    assert te_dtype_to_torch_dtype(B_type) == B.dtype, 'B dtype does not match.'
+    assert te_dtype_to_torch_dtype(D_type) == D.dtype, 'D dtype does not match.'
+    assert (bias.data_ptr() == 0) or (te_dtype_to_torch_dtype(bias_type) == bias.dtype), 'bias dtype does not match.'
 
 
     assert not is_fp8_dtype(A_type) or A_scale_inverse.data_ptr() != 0, 'fp8 input to GEMM requires inverse of scale!'
@@ -513,7 +511,7 @@ def te_generic_gemm_triton(A,
         # Determine output dtype
         if output_dtype is not None:
             # Use explicitly provided output dtype (from TE_DType)
-            out_dtype = te_to_torch_dtype(output_dtype)
+            out_dtype = te_dtype_to_torch_dtype(output_dtype)
         elif hasattr(A_wrapper, 'is_mxfp8') and A_wrapper.is_mxfp8:
             # MXFP8 input: use nominal dtype
             out_dtype = A_wrapper.nominal_dtype

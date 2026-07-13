@@ -8,14 +8,16 @@ from .gemm_wrapper import te_gemm_triton, te_generic_gemm_triton, matmul, mxfp8_
 from .gemm_common import (
     Float8TensorWrapper,
     MXFP8TensorWrapper,
-    torch_to_te_dtype,
-    te_to_torch_dtype,
     is_fp8_dtype,
-    _get_fp8_dtypes,
     reinterpret_as_fp8_tensor,
     getGemmOutputShape,
     product,
 )
+
+# Dtype conversions (torch <-> tex.DType, architecture-native FP8 dtypes) are
+# NOT re-exported here -- import them directly from
+# ``transformer_engine.pytorch.triton_kernels.common``, which is the
+# authoritative source shared across all Triton kernel backends.
 
 __all__ = [
     "te_gemm_triton",
@@ -24,10 +26,7 @@ __all__ = [
     "mxfp8_matmul",
     "Float8TensorWrapper",
     "MXFP8TensorWrapper",
-    "torch_to_te_dtype",
-    "te_to_torch_dtype",
     "is_fp8_dtype",
-    "_get_fp8_dtypes",
     "reinterpret_as_fp8_tensor",
     "getGemmOutputShape",
     "product",

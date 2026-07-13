@@ -1,7 +1,17 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-"""Triton MXFP8 GEMM kernel and wrapper tests."""
+"""MXFP8 wrapper sanity checks for the Triton GEMM backend.
+
+Numerical correctness for the MXFP8 kernel is covered end-to-end by
+``triton_kernels/test_gemm.py::test_triton_vs_pytorch_mxfp8`` and
+``::test_triton_vs_cpp_mxfp8`` (they exercise ``general_gemm`` under
+``NVTE_USE_GEMM_TRITON=1`` with a real ``MXFP8Tensor`` and both PyTorch
+and C++-backend references).
+
+This file only holds narrow wrapper-layer sanity: imports resolve, and
+``MXFP8TensorWrapper`` handles a non-MXFP8 tensor correctly.
+"""
 
 import pytest
 import torch
@@ -35,56 +45,3 @@ def test_mxfp8_wrapper_regular_tensor():
 
     assert wrapper.is_mxfp8 is False
     assert wrapper.size() == A_fp32.size()
-
-
-def _get_e4m3_dtype():
-    """Return the E4M3 dtype native to the current architecture.
-
-    gfx950 (compute cap >= 9.5) uses OCP torch.float8_e4m3fn where the bit
-    patterns 0x7F/0xFF are NaN; gfx942 and earlier use NANOO
-    torch.float8_e4m3fnuz where only 0x80 is NaN. Quantizing through the
-    right dtype keeps the uint8 payload free of NaN encodings.
-    """
-    major, minor = torch.cuda.get_device_capability()
-    if major == 9 and minor >= 5:
-        return torch.float8_e4m3fn
-    return torch.float8_e4m3fnuz
-
-
-def test_mxfp8_kernel_with_simulated_data():
-    """mxfp8_matmul() runs end-to-end on simulated FP8 data + E8M0 scales."""
-    from transformer_engine.pytorch.triton_kernels.gemm import mxfp8_matmul
-    import transformer_engine_torch as tex
-    from transformer_engine.pytorch.constants import MXFP8_BLOCK_SCALING_SIZE
-
-    M, N, K = 128, 256, 512
-    VEC_SIZE = MXFP8_BLOCK_SCALING_SIZE  # 32
-
-    torch.manual_seed(42)
-    A_fp32 = torch.randn(M, K, device='cuda', dtype=torch.float32) * 0.1
-    B_fp32 = torch.randn(K, N, device='cuda', dtype=torch.float32) * 0.1
-
-    # Quantize through the architecture-native E4M3 dtype, then view as uint8.
-    # An int8->uint8 reinterpret cast can produce 0x7F/0xFF bytes which are
-    # NaN encodings under OCP e4m3fn (gfx950), poisoning the whole
-    # accumulator; routing through the FP8 dtype avoids that.
-    e4m3 = _get_e4m3_dtype()
-    A_fp8 = A_fp32.to(e4m3).view(torch.uint8)
-    B_fp8 = B_fp32.to(e4m3).view(torch.uint8)
-
-    # E8M0 scales (uint8 biased exponents). Constant 127 -> scale = 2^0 = 1.0.
-    A_scale = torch.full((M, K // VEC_SIZE), 127, dtype=torch.uint8, device='cuda')
-    B_scale = torch.full((K // VEC_SIZE, N), 127, dtype=torch.uint8, device='cuda')
-
-    C = torch.zeros(M, N, device='cuda', dtype=torch.float32)
-
-    mxfp8_matmul(
-        A_fp8, A_scale,
-        B_fp8, B_scale,
-        C, M, N, K,
-        tex.DType.kFloat8E4M3,
-        tex.DType.kFloat8E4M3,
-    )
-
-    assert C.shape == (M, N)
-    assert C.abs().max() > 0, "kernel produced an all-zero output"

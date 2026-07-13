@@ -2,12 +2,28 @@
 #
 # License for AMD contributions = MIT. See LICENSE for more information
 
-"""
-Consolidated test for te_generic_gemm_triton() via general_gemm().
+"""User-facing Triton GEMM tests -- ``general_gemm()`` under ``NVTE_USE_GEMM_TRITON=1``.
 
-Tests regular, FP8, and MXFP8 tensor types with two reference approaches:
-  1. Triton vs PyTorch torch.matmul reference
-  2. Triton vs C++ tex.generic_gemm reference
+Exercises the same public entry point that TE ``Linear`` / ``LayerNormLinear``
+use. Covers the full precision surface (fp32 / fp16 / bf16 / same-format FP8 /
+mixed FP8 / MXFP8) and all three layouts (TN / NN / NT), plus bias / bias-grad
+epilogues and a batched-fp8 multidim case.
+
+Each test compares the Triton path against two independent references:
+
+  1. ``torch.matmul`` on dequantized inputs -- catches functional bugs
+     independent of any hipBLASLt behavior.
+  2. The C++ ``tex.generic_gemm`` backend under the same TE ``general_gemm``
+     surface -- catches divergence from the production path.
+
+Complementary files:
+
+- ``test_gemm_kernel.py`` -- low-level ``te_gemm_triton()`` kernel-direct
+  correctness (bypasses ``general_gemm`` and the wrappers; ~1000
+  parametrizations of a single ``test_correctness`` function).
+- ``test_gemm_mxfp8.py`` -- narrow wrapper-layer sanity checks for MXFP8
+  (imports + ``MXFP8TensorWrapper`` with a non-MXFP8 tensor). MXFP8
+  end-to-end numerical correctness lives here in ``test_triton_vs_*_mxfp8``.
 """
 
 import os
