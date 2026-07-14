@@ -538,6 +538,16 @@ size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args){
     args.deterministic ? ((bwd_dq_acc_seqlen_k(args) + kN0 - 1) / kN0) : 1u;
   const size_t tokens_q = args.is_group_mode() ? args.max_tokens_q : (args.b * args.s_q);
   const size_t dq_acc_floor = nsplits * args.h * tokens_q * args.d_qk * sizeof(float);
+  // Debug/repro knob: NVTE_CK_DROP_BWD_FLOOR=1 removes the safety floor so the
+  // pre-floor sizing (which lets XLA fold the forward output O into the zeroed dq_acc
+  // region) can be reproduced. See scripts/repro_ck_bwd_o_clobber.py.
+  static const bool drop_floor = [](){
+    const char* e = getenv("NVTE_CK_DROP_BWD_FLOOR");
+    return e && e[0] == '1';
+  }();
+  if(drop_floor){
+    return std::max({v2_bytes, v3_bytes});
+  }
   return std::max({v2_bytes, v3_bytes, dq_acc_floor});
 }
 
