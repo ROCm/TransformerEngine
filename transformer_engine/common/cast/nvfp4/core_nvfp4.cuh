@@ -82,7 +82,12 @@ template <int E4M3_MAX = 448>
 __device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const float global_amax) {
   using namespace detail;
   static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
+#if defined(__HIP_DEVICE_COMPILE__)
+  // ROCm fp8e4m3 max is arch-specific (240 fnuz / 448 OCP); match the encode scale.
+  constexpr float fp8_max = static_cast<float>(TypeExtrema<fp8e4m3>::max);
+#else
   constexpr float fp8_max = static_cast<float>(E4M3_MAX);
+#endif
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
   // If scale is infinity, return max value of float32
