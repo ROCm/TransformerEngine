@@ -172,6 +172,39 @@ def _route_list_moe_wgrad_kernel(
     tl.store(dw_ptrs, acc.to(dw_ptr.dtype.element_ty), mask=mask)
 
 
+def _wgrad_autotune_configs() -> list:
+    """Tile/pipeline configs for the wgrad autotuner.
+
+    The best point is shape-dependent (memory-bound projections favour fewer warps for
+    occupancy; deeper/narrower ones favour more pipeline stages), so the set brackets both
+    regimes observed in the Qwen/DSV sweeps. ``BLOCK_SIZE_N/K`` come from the config; the
+    contraction step ``CONTRACT_M`` (tied to the align block size) and the unused
+    ``GROUP_SIZE_M`` are passed at call time.
+    """
+    return [
+        triton.Config({"BLOCK_SIZE_N": bn, "BLOCK_SIZE_K": bk}, num_warps=w, num_stages=s)
+        for bn, bk, w, s in (
+            (128, 128, 4, 2),
+            (128, 128, 8, 2),
+            (128, 128, 8, 3),
+            (128, 128, 8, 4),
+            (128, 128, 4, 4),
+            (128, 64, 4, 3),
+            (64, 128, 4, 3),
+            (128, 64, 4, 4),
+        )
+    ]
+
+
+# Autotuned view of the kernel (shares the same body). Keyed by the GEMM dims + expert count,
+# which fully determine the tiling trade-off. The explicit-config launch below bypasses this
+# (used for reproducible profiling / manual sweeps).
+_route_list_moe_wgrad_kernel_autotuned = triton.autotune(
+    configs=_wgrad_autotune_configs(),
+    key=["N", "K", "num_experts"],
+)(_route_list_moe_wgrad_kernel)
+
+
 def get_default_route_list_wgrad_config(contract_m: int) -> Dict[str, Any]:
     """Tile config for the route-list Triton wgrad kernel."""
     return {
@@ -201,19 +234,21 @@ def fused_route_list_moe_wgrad(
 
     ``x`` is ``[num_recv_tokens, K]`` (gathered by received-token row); ``grad`` is the
     compact ``[num_routes, N]`` per-route gradient (read via ``route_start``/``block_start``).
+
+    When ``config`` is ``None`` the kernel is autotuned over ``BLOCK_SIZE_N/K`` /
+    ``num_warps`` / ``num_stages`` (keyed by ``N``/``K``/``num_experts`` -- cached after the
+    first launch per shape). Passing an explicit ``config`` bypasses the autotuner (for
+    reproducible profiling / manual sweeps).
     """
     num_experts = dw.shape[0]
     n, k = dw.shape[1], dw.shape[2]
-    wgrad_config = config or get_default_route_list_wgrad_config(contract_m)
-    if "CONTRACT_M" not in wgrad_config:
-        wgrad_config = {**wgrad_config, "CONTRACT_M": contract_m}
 
     grid = lambda meta: (  # noqa: E731
         num_experts
         * triton.cdiv(n, meta["BLOCK_SIZE_N"])
         * triton.cdiv(k, meta["BLOCK_SIZE_K"]),
     )
-    _route_list_moe_wgrad_kernel[grid](
+    common_args = (
         x,
         grad,
         dw,
@@ -232,5 +267,18 @@ def fused_route_list_moe_wgrad(
         dw.stride(1),
         dw.stride(2),
         num_experts,
-        **wgrad_config,
     )
+    if config is None:
+        # Autotuned path: tiling + pipeline come from the autotuner; only the contraction step
+        # and the (unused) group size are fixed at call time.
+        _route_list_moe_wgrad_kernel_autotuned[grid](
+            *common_args,
+            CONTRACT_M=contract_m,
+            GROUP_SIZE_M=8,
+        )
+        return
+
+    wgrad_config = dict(config)
+    if "CONTRACT_M" not in wgrad_config:
+        wgrad_config["CONTRACT_M"] = contract_m
+    _route_list_moe_wgrad_kernel[grid](*common_args, **wgrad_config)

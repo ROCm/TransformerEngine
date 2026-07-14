@@ -132,9 +132,23 @@ class PermuteFreeMetadata(MoERoutingMetadata):
     The align buffers are identical for both directions, so a single built metadata can be
     reused for FC1 and FC2 (e.g. via ``dataclasses.replace(meta, route_space=True)``),
     avoiding a duplicate align build.
+
+    Fusion hints (optional; carried on the same channel that already reaches the FC1 branch):
+
+    activation:
+        Elementwise activation to fuse into the GEMM epilogue -- ``"silu"`` or ``"gelu"``.
+        ``None`` leaves the activation to the caller (no fusion).
+    dispatched_probs:
+        Per-(received-token, local-expert) gating probabilities ``[num_recv_tokens,
+        num_experts]``. When provided, the kernel folds each route's prob
+        ``dispatched_probs[token(r), expert(r)]`` into the activation (reusing the align
+        buffers), fusing the prob multiply instead of running it as a separate op. ``None``
+        disables the fused prob scaling.
     """
 
     route_space: bool = False
+    activation: Optional[str] = None
+    dispatched_probs: Optional[torch.Tensor] = None
 
 
 def routing_map_to_topk(

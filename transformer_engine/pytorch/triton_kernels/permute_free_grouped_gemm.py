@@ -23,13 +23,11 @@ import torch
 import triton.language as tl
 
 from ..moe_routing import MoERoutingMetadata, PermuteFreeMetadata
-from .route_list_align import build_route_inverse_map, route_list_align, route_list_scan
+from .route_list_align import route_list_align, route_list_scan
 from .route_combine import route_gather_combine
-from .route_list_moe_gemm import fused_route_list_moe
-from .route_list_moe_wgrad import (
-    fused_route_list_moe_wgrad,
-    get_default_route_list_wgrad_config,
-)
+from .route_list_moe_gemm import fused_route_list_moe, fused_gated_act_prob_bwd
+from .route_list_moe_wgrad import fused_route_list_moe_wgrad
+from .route_prob import _expert_per_route
 
 __all__ = [
     "MoERoutingMetadata",
@@ -37,6 +35,7 @@ __all__ = [
     "permute_free_grouped_gemm_bf16",
     "permute_free_grouped_gemm_bf16_dgrad",
     "permute_free_grouped_gemm_bf16_wgrad",
+    "permute_free_gated_act_bwd",
     "permute_free_grouped_gemm_bf16_fc2",
     "permute_free_grouped_gemm_bf16_fc2_dgrad",
     "permute_free_grouped_gemm_bf16_fc2_wgrad",
@@ -99,6 +98,7 @@ def moe_align_route_list(
     block_size: int,
     scan=None,
     max_routes_per_token: Optional[int] = None,
+    build_inverse_map: bool = False,
 ) -> Tuple[
     torch.Tensor,
     torch.Tensor,
@@ -107,6 +107,8 @@ def moe_align_route_list(
     torch.Tensor,
     torch.Tensor,
     torch.Tensor,
+    Optional[torch.Tensor],
+    Optional[torch.Tensor],
 ]:
     """Build the expert-sorted route-list buffers from a boolean routing map.
 
@@ -136,8 +138,9 @@ def moe_align_route_list(
     Returns
     -------
     ``(sorted_slot_ids, expert_ids, num_tokens_post_padded, block_start, blocks_per_expert,
-       route_start, route_to_token)``. Index tensors are ``int32``; ``num_tokens_post_padded``
-    (``[1]``) is a device scalar.
+       route_start, route_to_token, token_routes, token_route_count)``. Index tensors are
+    ``int32``; ``num_tokens_post_padded`` (``[1]``) is a device scalar. The last two are the
+    token->routes inverse map, ``None`` unless ``build_inverse_map``.
     """
     return route_list_align(
         routing_map,
@@ -145,6 +148,7 @@ def moe_align_route_list(
         block_size=block_size,
         scan=scan,
         max_routes_per_token=max_routes_per_token,
+        build_inverse_map=build_inverse_map,
     )
 
 
@@ -167,6 +171,9 @@ def prepare_moe_align(metadata: MoERoutingMetadata, block_m: int) -> MoERoutingM
         return metadata
 
     counts, within = _ensure_route_scan(metadata)
+    # The token->routes inverse map (used by the contention-free gather-combine in FC2 fwd /
+    # FC1 dgrad) is emitted by the same place kernel (``build_inverse_map=True``), so it costs
+    # no extra launch. Block-independent, so it is built once here on the fwd align.
     (
         sorted_slot_ids,
         expert_ids,
@@ -175,12 +182,15 @@ def prepare_moe_align(metadata: MoERoutingMetadata, block_m: int) -> MoERoutingM
         _blocks_per_expert,
         route_start,
         route_to_token,
+        token_routes,
+        token_route_count,
     ) = moe_align_route_list(
         metadata.routing_map,
         num_experts=metadata.num_experts,
         block_size=block_m,
         scan=(counts, within),
         max_routes_per_token=metadata.topk,
+        build_inverse_map=True,
     )
     metadata.sorted_slot_ids = sorted_slot_ids
     metadata.expert_ids = expert_ids
@@ -189,16 +199,6 @@ def prepare_moe_align(metadata: MoERoutingMetadata, block_m: int) -> MoERoutingM
     metadata.route_start = route_start
     metadata.route_to_token = route_to_token
     metadata.block_size_m = block_m
-    # Inverse map (token -> its compact route positions) for the contention-free
-    # gather-combine used by FC2 fwd and FC1 dgrad. Block-independent (reuses the ``within``
-    # scan + ``route_start``), so it is built once and cached alongside the align buffers.
-    token_routes, token_route_count = build_route_inverse_map(
-        metadata.routing_map,
-        within,
-        route_start,
-        num_experts=metadata.num_experts,
-        max_routes_per_token=metadata.topk,
-    )
     metadata.token_routes = token_routes
     metadata.token_route_count = token_route_count
     return metadata
@@ -222,6 +222,8 @@ def _prepare_wgrad_align(
         blocks_per_expert,
         route_start,
         _route_to_token,
+        _token_routes,
+        _token_route_count,
     ) = moe_align_route_list(
         metadata.routing_map,
         num_experts=metadata.num_experts,
@@ -257,6 +259,9 @@ def permute_free_grouped_gemm_bf16(
     routing: MoERoutingMetadata,
     *,
     config: Optional[Dict[str, Any]] = None,
+    activation: Optional[str] = None,
+    dispatched_probs: Optional[torch.Tensor] = None,
+    return_preact: bool = False,
 ) -> torch.Tensor:
     """Route-list gather-in-GEMM (FC1 forward) for bf16 MoE.
 
@@ -271,16 +276,32 @@ def permute_free_grouped_gemm_bf16(
         Expert weights ``[num_experts, out_features, in_features]`` or list of ``[out, in]``.
     routing:
         ``MoERoutingMetadata`` carrying (or able to build) the route-list align buffers.
+    activation:
+        When set (``"silu"`` / ``"gelu"``), fuses the **gated** activation into the GEMM
+        epilogue: ``out_features`` is the gate+up width (``2F``), the output is the ``F``-wide
+        activated buffer ``act(gate) * up``, and the separate activation kernel is skipped. The
+        weight output dim must be laid out as ``[gate | up]``.
+    dispatched_probs:
+        Optional ``[num_recv_tokens, num_experts]`` gating probabilities. When given (with a
+        fused ``activation``), each route's ``prob[token, expert]`` is multiplied into the
+        activation in-kernel, skipping the separate route-prob-apply pass.
+    return_preact:
+        When set (only valid with a fused ``activation``), also allocate and fill a
+        ``[em_max, 2F]`` buffer with the raw ``[gate | up]`` pre-activation and return it
+        alongside the activated output. The backward needs it to reconstruct the 2F GEMM-output
+        gradient; keep ``False`` for inference to skip the extra store.
 
     Returns
     -------
     torch.Tensor
-        Worst-case padded ``[em_max, out_features]``, bf16 (expert-contiguous). The valid
-        rows are the compact route range ``[0, num_routes)``; the tail ``[num_routes, em_max)``
-        is inert, *uninitialized* padding (the buffer is ``torch.empty``, never zeroed).
-        Consumers MUST read only the compact range via the routing metadata
-        (``num_tokens_post_padded`` / ``route_start``); the tail holds garbage and must never
-        be read. No host sync is needed here.
+        Worst-case padded ``[em_max, out_features]`` (or ``[em_max, F]`` with a fused
+        ``activation``), bf16 (expert-contiguous). The valid rows are the compact route range
+        ``[0, num_routes)``; the tail ``[num_routes, em_max)`` is inert, *uninitialized*
+        padding (the buffer is ``torch.empty``, never zeroed). Consumers MUST read only the
+        compact range via the routing metadata (``num_tokens_post_padded`` / ``route_start``);
+        the tail holds garbage and must never be read. No host sync is needed here.
+        When ``return_preact`` is set, returns ``(output, preact)`` where ``preact`` is the
+        ``[em_max, 2F]`` raw ``[gate | up]`` buffer (same compact-range validity contract).
     """
     if hidden_states.dtype != torch.bfloat16:
         raise TypeError(
@@ -304,6 +325,14 @@ def permute_free_grouped_gemm_bf16(
             f"num_experts mismatch: weights have {num_experts}, routing has {routing.num_experts}."
         )
 
+    gated_act = activation is not None
+    if gated_act and out_features % 2 != 0:
+        raise ValueError(
+            f"Gated activation requires an even (gate+up) out_features, got {out_features}."
+        )
+    # Fused gated activation halves the stored width (2F -> F).
+    stored_features = out_features // 2 if gated_act else out_features
+
     kernel_config = config or get_default_moe_kernel_config(num_recv_tokens)
     block_size_m = int(kernel_config["BLOCK_SIZE_M"])
 
@@ -320,9 +349,17 @@ def permute_free_grouped_gemm_bf16(
     # which dominates the padding cost, at no correctness change.
     em_max = routing.sorted_slot_ids.shape[0]
     output = torch.empty(
-        (em_max, out_features),
+        (em_max, stored_features),
         dtype=torch.bfloat16,
         device=hidden_states.device,
+    )
+
+    if return_preact and not gated_act:
+        raise ValueError("return_preact requires a fused activation.")
+    preact = (
+        torch.empty((em_max, out_features), dtype=torch.bfloat16, device=hidden_states.device)
+        if return_preact
+        else None
     )
 
     fused_route_list_moe(
@@ -338,8 +375,57 @@ def permute_free_grouped_gemm_bf16(
         compute_type=tl.bfloat16,
         config=kernel_config,
         index_a_by_route_pos=False,
+        activation=activation,
+        dispatched_probs=dispatched_probs,
+        preact_out=preact,
     )
+    if return_preact:
+        return output, preact
     return output
+
+
+def permute_free_gated_act_bwd(
+    grad_output: torch.Tensor,
+    preact: torch.Tensor,
+    routing: MoERoutingMetadata,
+    *,
+    activation: str,
+    dispatched_probs: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """Activation (+ route-prob) backward for the fused permute-free FC1 epilogue.
+
+    Reconstructs the raw ``2F`` GEMM-output gradient ``dpre = [d_gate | d_up]`` (and, when the
+    forward fused the route prob, the prob gradient) from the saved ``[em_max, 2F]``
+    pre-activation. The returned ``dpre`` feeds the *unchanged* route-list dgrad / wgrad, so the
+    FC1 backward stays symmetric with the non-activation path; the caller owns the autograd
+    boundary and routes ``dprob`` back to ``dispatched_probs``.
+
+    Parameters
+    ----------
+    grad_output:
+        ``[em_max, F]`` grad wrt the fused FC1 output (route/padded layout).
+    preact:
+        ``[em_max, 2F]`` raw ``[gate | up]`` pre-activation saved by the forward.
+    dispatched_probs:
+        ``[num_recv_tokens, E]`` gating probs (or ``None`` for a silu/gelu-only fusion).
+
+    Returns
+    -------
+    ``(dpre, dprob)`` -- ``dpre`` is ``[em_max, 2F]`` bf16; ``dprob`` matches
+    ``dispatched_probs`` (or ``None`` when no probs were fused).
+    """
+    routes_max = int(routing.route_to_token.shape[0])
+    token = routing.route_to_token.to(torch.int32)
+    expert = _expert_per_route(routing, routes_max)
+    return fused_gated_act_prob_bwd(
+        grad_output.contiguous(),
+        preact,
+        token,
+        expert,
+        num_recv_tokens=routing.num_recv_tokens,
+        activation=activation,
+        dispatched_probs=dispatched_probs,
+    )
 
 
 def permute_free_grouped_gemm_bf16_dgrad(
@@ -503,7 +589,7 @@ def permute_free_grouped_gemm_bf16_wgrad(
         routing.wgrad_blocks_per_expert,
         routing.route_start,
         num_recv_tokens=routing.num_recv_tokens,
-        config=get_default_route_list_wgrad_config(_WGRAD_CONTRACT_M),
+        config=None,  # autotune BLOCK_SIZE_N/K / num_warps / num_stages per shape
         contract_m=_WGRAD_CONTRACT_M,
     )
     return dW

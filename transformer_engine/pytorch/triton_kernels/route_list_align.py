@@ -104,115 +104,39 @@ def _route_list_place_kernel(
     route_start_ptr,  # [E] int32: first compact route index of each expert
     sorted_slot_ids_ptr,  # [em_max] int32, sentinel-init (T)
     route_to_token_ptr,  # [routes_max] int32, sentinel-init (T)
+    token_routes_ptr,  # [T, MAXK] int32 out: token->route positions (only if BUILD_INVERSE)
+    token_count_ptr,  # [T] int32 out: routes per token (only if BUILD_INVERSE)
     T,
     E,
     stride_t,
     stride_e,
     BLOCK_SIZE_M: tl.constexpr,
+    BUILD_INVERSE: tl.constexpr,
+    MAXK: tl.constexpr,
 ):
+    # One row of the map per program; place the (few) routed cells deterministically. Because
+    # the same per-token expert scan already computes each routed cell's compact route position
+    # ``pos = route_start[e] + within[e, t]``, the token->routes inverse map (used by the
+    # contention-free gather-combine) is emitted here too when ``BUILD_INVERSE`` -- folding what
+    # was a second per-token kernel launch into this one (expert-ascending, no atomics).
     t = tl.program_id(axis=0)
     if t >= T:
         return
-    # One row of the map per program; place the (few) routed cells deterministically.
+    j = tl.zeros((), dtype=tl.int32)
     for e in range(0, E):
         is_routed = tl.load(routing_map_ptr + t * stride_t + e * stride_e)
         if is_routed != 0:
             w = tl.load(within_ptr + e * T + t)
             bs = tl.load(block_start_ptr + e)
             rs = tl.load(route_start_ptr + e)
+            pos = rs + w
             tl.store(sorted_slot_ids_ptr + bs * BLOCK_SIZE_M + w, t)
-            tl.store(route_to_token_ptr + rs + w, t)
-
-
-@triton.jit
-def _inverse_map_kernel(
-    routing_map_ptr,  # [T, E] (bool/int8), True where token t feeds local expert e
-    within_ptr,  # [E, T] int32, exclusive within-expert rank of each routed cell
-    route_start_ptr,  # [E] int32, first compact route index of each expert
-    token_routes_ptr,  # [T, MAXK] int32 out: compact route positions of each token
-    token_count_ptr,  # [T] int32 out: number of routes for each token
-    T,
-    E,
-    stride_t,
-    stride_e,
-    MAXK: tl.constexpr,
-):
-    # Inverse of ``route_to_token``: for each token, list the compact route positions it owns
-    # (expert-ascending). One program per token -> deterministic fill, no atomics. The compact
-    # route index of cell (t, e) is ``route_start[e] + within[e, t]``.
-    t = tl.program_id(axis=0)
-    if t >= T:
-        return
-    j = tl.zeros((), dtype=tl.int32)
-    for e in range(0, E):
-        is_routed = tl.load(routing_map_ptr + t * stride_t + e * stride_e).to(tl.int32)
-        w = tl.load(within_ptr + e * T + t)
-        rs = tl.load(route_start_ptr + e)
-        # Masked store: write the route position only for routed cells; ``j`` advances by the
-        # 0/1 routed flag so the per-token slots stay compact ([0, count)).
-        tl.store(token_routes_ptr + t * MAXK + j, rs + w, mask=is_routed != 0)
-        j += is_routed
-    tl.store(token_count_ptr + t, j)
-
-
-def build_route_inverse_map(
-    routing_map: torch.Tensor,
-    within: torch.Tensor,
-    route_start: torch.Tensor,
-    *,
-    num_experts: int,
-    max_routes_per_token: int | None = None,
-):
-    """Build the token->routes inverse map (sync-free) for the gather-combine.
-
-    Reuses the block-independent ``within`` scan and the compact ``route_start`` (both already
-    built for the align), so it needs no extra scan and no host sync. The result lets the
-    token combine (FC2 fwd / FC1 dgrad) be done as a contention-free gather instead of an
-    atomic scatter.
-
-    Parameters
-    ----------
-    routing_map:
-        Boolean ``[T, E]`` routing map (same one passed to :func:`route_list_align`).
-    within:
-        ``[E, T]`` exclusive within-expert ranks from :func:`route_list_scan`.
-    route_start:
-        ``[E]`` per-expert first compact route index.
-    max_routes_per_token:
-        Host-known upper bound (router top-k) on routes per token; sets the padded width of
-        ``token_routes``. Defaults to ``num_experts`` when ``None``.
-
-    Returns
-    -------
-    ``(token_routes [T, maxk] int32, token_route_count [T] int32)``. For token ``t`` the first
-    ``token_route_count[t]`` entries of ``token_routes[t]`` hold its compact route positions
-    (expert-ascending); the remaining columns are unused padding.
-    """
-    if routing_map.dtype != torch.bool:
-        routing_map = routing_map.bool()
-    routing_map = routing_map.contiguous()
-    device = routing_map.device
-    T = int(routing_map.size(0))
-    E = int(num_experts)
-    maxk = E if max_routes_per_token is None else min(int(max_routes_per_token), E)
-    maxk = max(maxk, 1)
-    # Index buffer: zero-init so any unused tail column is a safe (in-range) index; the gather
-    # masks columns >= count anyway, so the value is never used -- this is purely defensive.
-    token_routes = torch.zeros((T, maxk), dtype=torch.int32, device=device)
-    token_route_count = torch.empty((T,), dtype=torch.int32, device=device)
-    _inverse_map_kernel[(T,)](
-        routing_map,
-        within,
-        route_start,
-        token_routes,
-        token_route_count,
-        T,
-        E,
-        routing_map.stride(0),
-        routing_map.stride(1),
-        MAXK=maxk,
-    )
-    return token_routes, token_route_count
+            tl.store(route_to_token_ptr + pos, t)
+            if BUILD_INVERSE:
+                tl.store(token_routes_ptr + t * MAXK + j, pos)
+                j += 1
+    if BUILD_INVERSE:
+        tl.store(token_count_ptr + t, j)
 
 
 def route_list_scan(
@@ -250,6 +174,7 @@ def route_list_align(
     block_size: int,
     scan=None,
     max_routes_per_token: int | None = None,
+    build_inverse_map: bool = False,
 ):
     """Sync-free fused build of the route-list align buffers.
 
@@ -264,12 +189,19 @@ def route_list_align(
         top-k). When provided, the static over-allocation bound is tightened from the dense
         ``T * num_experts`` to ``T * min(max_routes_per_token, num_experts)`` -- still
         sync-free, but shrinking the padded buffers by ``num_experts / max_routes_per_token``.
+    build_inverse_map:
+        When True, the place kernel also emits the token->routes inverse map (used by the
+        contention-free gather-combine in FC2 fwd / FC1 dgrad) in the same launch, so no
+        separate inverse-map kernel is needed. Block-independent, so build it on the fwd align
+        only.
 
     Returns
     -------
     ``(sorted_slot_ids, expert_ids, num_tokens_post_padded, block_start, blocks_per_expert,
-       route_start, route_to_token)`` -- index tensors ``int32``; ``num_tokens_post_padded``
-    (``[1]``) is a device scalar.
+       route_start, route_to_token, token_routes, token_route_count)`` -- index tensors
+    ``int32``; ``num_tokens_post_padded`` (``[1]``) is a device scalar. ``token_routes``
+    (``[T, min(topk, E)]``) and ``token_route_count`` (``[T]``) are ``None`` unless
+    ``build_inverse_map``.
     """
     if routing_map.dtype != torch.bool:
         routing_map = routing_map.bool()
@@ -313,6 +245,18 @@ def route_list_align(
         BLOCK_B=block_b,
     )
 
+    # Optional token->routes inverse map, emitted by the same place kernel. Width is the
+    # tightened per-token bound; zero-init so any unused tail column is a safe (in-range)
+    # index (the gather masks columns >= count anyway).
+    if build_inverse_map:
+        maxk = max(max_per_token, 1)
+        token_routes = torch.zeros((T, maxk), dtype=torch.int32, device=device)
+        token_route_count = torch.empty((T,), dtype=torch.int32, device=device)
+    else:
+        maxk = 1
+        token_routes = torch.empty((1,), dtype=torch.int32, device=device)  # unused stub
+        token_route_count = token_routes
+
     # Scatter each routed cell into its deterministic (block-padded / compact) slot. Both
     # sentinel buffers are carved from a single fill (one launch); the place kernel then
     # overwrites the routed slots in each contiguous view.
@@ -326,11 +270,15 @@ def route_list_align(
         route_start,
         sorted_slot_ids,
         route_to_token,
+        token_routes,
+        token_route_count,
         T,
         E,
         routing_map.stride(0),
         routing_map.stride(1),
         BLOCK_SIZE_M=block_size,
+        BUILD_INVERSE=build_inverse_map,
+        MAXK=maxk,
     )
 
     return (
@@ -341,4 +289,6 @@ def route_list_align(
         blocks_per_expert,
         route_start,
         route_to_token,
+        token_routes if build_inverse_map else None,
+        token_route_count if build_inverse_map else None,
     )

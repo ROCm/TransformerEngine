@@ -13,8 +13,9 @@ of the fused FC2-forward / FC1-dgrad scatter.
 
 This kernel flips the reduction into a contention-free **gather**: one program owns an output
 token row and pulls its (<= topk) route rows from the compact buffer, summing them locally in
-fp32 with zero atomics. It relies on the token->routes inverse map
-(``build_route_inverse_map``), which is built sync-free during the align.
+fp32 with zero atomics. It relies on the token->routes inverse map (``token_routes`` /
+``token_route_count``), which is emitted sync-free by the align place kernel
+(``route_list_align(..., build_inverse_map=True)``).
 """
 
 from __future__ import annotations
@@ -71,8 +72,8 @@ def route_gather_combine(
     src:
         Compact per-route buffer ``[em_max, N]`` (route order; only ``[0, num_routes)`` valid).
     token_routes / token_route_count:
-        Inverse map from :func:`build_route_inverse_map` (``[T, MAXK]`` route positions and the
-        per-token route count).
+        Token->routes inverse map from the align place kernel (``[T, MAXK]`` route positions
+        and the per-token route count).
     num_recv_tokens:
         Number of output token rows ``T``.
 
