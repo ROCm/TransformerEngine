@@ -112,11 +112,11 @@ def test_route_list_fwd():
 
     route_to_token, route_expert = _compact_route_order(routing_map)
     num_routes = route_to_token.numel()
-    # Output is worst-case padded to a static upper bound; valid rows are the compact route
-    # range [0, num_routes) and the tail must be inert zero padding.
+    # Output is worst-case padded to a static upper bound; only the compact route range
+    # [0, num_routes) is valid. The tail [num_routes, em_max) is inert, uninitialized padding
+    # (the buffer is torch.empty and the kernel never writes it), so it is not checked here.
     assert out_full.shape[0] >= num_routes
     assert out_full.shape[1] == out_features
-    assert torch.count_nonzero(out_full[num_routes:]) == 0
     out = out_full[:num_routes]
     ref = torch.einsum(
         "rk,rnk->rn",
@@ -210,3 +210,53 @@ def test_route_list_fwd_dgrad_wgrad_consistency():
 
     assert _rel_l2(dA, ref_hidden.grad) < 2e-2
     assert _rel_l2(dW, ref_w.grad) < 2e-2
+
+
+def test_apply_route_probs_fwd_bwd():
+    """Fused per-route prob apply (gather+multiply) vs an autograd advanced-index reference."""
+    from transformer_engine.pytorch.triton_kernels.permute_free_grouped_gemm import (
+        get_default_moe_kernel_config,
+        prepare_moe_align,
+    )
+    from transformer_engine.pytorch.triton_kernels.route_prob import (
+        _expert_per_route,
+        apply_route_probs,
+    )
+
+    torch.manual_seed(31)
+    num_recv_tokens, hidden_dim = 128, 192
+    num_experts, max_hits = 8, 3
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=9)
+    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
+    cfg = get_default_moe_kernel_config(num_recv_tokens)
+    prepare_moe_align(routing, int(cfg["BLOCK_SIZE_M"]))
+
+    em_max = int(routing.sorted_slot_ids.shape[0])
+    num_routes = int(routing_map.sum().item())
+    act = torch.randn(em_max, hidden_dim, device="cuda", dtype=torch.bfloat16)
+    probs = torch.rand(num_recv_tokens, num_experts, device="cuda", dtype=torch.float32)
+
+    a1 = act.clone().requires_grad_(True)
+    p1 = probs.clone().requires_grad_(True)
+    out = apply_route_probs(a1, p1, routing)
+
+    # Reference: differentiable advanced index over the compact route order.
+    routes_max = int(routing.route_to_token.shape[0])
+    tok = routing.route_to_token.to(torch.int64).clamp(0, num_recv_tokens - 1)
+    exp = _expert_per_route(routing, routes_max).to(torch.int64)
+    valid = torch.arange(routes_max, device="cuda") < num_routes
+    a2 = act.clone().requires_grad_(True)
+    p2 = probs.clone().requires_grad_(True)
+    pr = torch.where(valid, p2[tok, exp], torch.zeros_like(p2[tok, exp]))
+    pr = torch.nn.functional.pad(pr, (0, em_max - routes_max))
+    ref = a2 * pr[:, None]
+
+    assert _rel_l2(out[:num_routes], ref[:num_routes]) < 2e-2
+
+    g = torch.randn(em_max, hidden_dim, device="cuda", dtype=torch.bfloat16)
+    g[num_routes:] = 0
+    out.backward(g)
+    ref.backward(g)
+    assert _rel_l2(a1.grad[:num_routes], a2.grad[:num_routes]) < 2e-2
+    assert _rel_l2(p1.grad, p2.grad) < 2e-2

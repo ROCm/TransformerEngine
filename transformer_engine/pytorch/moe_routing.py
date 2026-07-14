@@ -33,17 +33,12 @@ class MoERoutingMetadata:
     num_experts:
         Local expert count on this rank. Optional -- defaults to ``routing_map.size(1)``.
     topk:
-        Host-known routing top-k (max experts a token can be routed to). Optional but
-        strongly recommended: it tightens the sync-free align over-allocation from
-        ``num_recv_tokens * num_experts`` to ``num_recv_tokens * min(topk, num_experts)``,
-        which for ``topk << num_experts`` shrinks the padded ``[em_max, out]`` route buffer
-        by orders of magnitude (and avoids the corresponding activation-memory blow-up).
-    topk:
-        Max experts any token routes to (host-known, e.g. the router top-k). Optional. When
-        provided, the sync-free align buffers are sized to the tighter static upper bound
-        ``num_routes <= num_recv_tokens * min(topk, num_experts)`` instead of the dense
-        ``num_recv_tokens * num_experts``, shrinking the padded FC1 output / activation
-        buffers by ``num_experts / topk`` with no host sync.
+        Upstream router top-k -- the host-known maximum number of local experts any received
+        token can feed. Optional. When provided, ``prepare_moe_align`` tightens the (still
+        sync-free) static over-allocation of the block-padded route buffers from the dense
+        ``num_recv_tokens * num_experts`` bound down to
+        ``num_recv_tokens * min(topk, num_experts)``, shrinking ``em_max`` (and the zero-init
+        it costs) by up to ``num_experts / topk``. Leave ``None`` to keep the dense bound.
 
     The remaining fields are lazily populated by ``prepare_moe_align`` and cached for
     FC1 fwd/dgrad reuse (all in the expert-sorted, block-padded route-list layout):
@@ -68,6 +63,13 @@ class MoERoutingMetadata:
     route_to_token:
         ``[routes_max]`` received-token row for each compact route (first ``num_routes``
         entries valid); used by the dgrad scatter-add back to ``[num_recv_tokens, K]``.
+    token_routes / token_route_count:
+        Inverse of ``route_to_token`` (token -> its compact route positions), built sync-free
+        for the contention-free gather-combine that replaces the atomic scatter in the token
+        combine (FC2 fwd) and the FC1 input-grad reduction (FC1 dgrad). ``token_routes`` is
+        ``[num_recv_tokens, min(topk, num_experts)]`` (int32); for token ``t`` the first
+        ``token_route_count[t]`` entries are its route positions (expert-ascending), the rest
+        are unused padding.
     block_size_m:
         ``BLOCK_SIZE_M`` used to build the fwd/dgrad align buffers.
     wgrad_*:
@@ -86,6 +88,8 @@ class MoERoutingMetadata:
     block_start: Optional[torch.Tensor] = None
     route_start: Optional[torch.Tensor] = None
     route_to_token: Optional[torch.Tensor] = None
+    token_routes: Optional[torch.Tensor] = None
+    token_route_count: Optional[torch.Tensor] = None
     block_size_m: Optional[int] = None
     wgrad_sorted_slot_ids: Optional[torch.Tensor] = None
     wgrad_block_start: Optional[torch.Tensor] = None

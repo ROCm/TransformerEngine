@@ -124,6 +124,97 @@ def _route_list_place_kernel(
             tl.store(route_to_token_ptr + rs + w, t)
 
 
+@triton.jit
+def _inverse_map_kernel(
+    routing_map_ptr,  # [T, E] (bool/int8), True where token t feeds local expert e
+    within_ptr,  # [E, T] int32, exclusive within-expert rank of each routed cell
+    route_start_ptr,  # [E] int32, first compact route index of each expert
+    token_routes_ptr,  # [T, MAXK] int32 out: compact route positions of each token
+    token_count_ptr,  # [T] int32 out: number of routes for each token
+    T,
+    E,
+    stride_t,
+    stride_e,
+    MAXK: tl.constexpr,
+):
+    # Inverse of ``route_to_token``: for each token, list the compact route positions it owns
+    # (expert-ascending). One program per token -> deterministic fill, no atomics. The compact
+    # route index of cell (t, e) is ``route_start[e] + within[e, t]``.
+    t = tl.program_id(axis=0)
+    if t >= T:
+        return
+    j = tl.zeros((), dtype=tl.int32)
+    for e in range(0, E):
+        is_routed = tl.load(routing_map_ptr + t * stride_t + e * stride_e).to(tl.int32)
+        w = tl.load(within_ptr + e * T + t)
+        rs = tl.load(route_start_ptr + e)
+        # Masked store: write the route position only for routed cells; ``j`` advances by the
+        # 0/1 routed flag so the per-token slots stay compact ([0, count)).
+        tl.store(token_routes_ptr + t * MAXK + j, rs + w, mask=is_routed != 0)
+        j += is_routed
+    tl.store(token_count_ptr + t, j)
+
+
+def build_route_inverse_map(
+    routing_map: torch.Tensor,
+    within: torch.Tensor,
+    route_start: torch.Tensor,
+    *,
+    num_experts: int,
+    max_routes_per_token: int | None = None,
+):
+    """Build the token->routes inverse map (sync-free) for the gather-combine.
+
+    Reuses the block-independent ``within`` scan and the compact ``route_start`` (both already
+    built for the align), so it needs no extra scan and no host sync. The result lets the
+    token combine (FC2 fwd / FC1 dgrad) be done as a contention-free gather instead of an
+    atomic scatter.
+
+    Parameters
+    ----------
+    routing_map:
+        Boolean ``[T, E]`` routing map (same one passed to :func:`route_list_align`).
+    within:
+        ``[E, T]`` exclusive within-expert ranks from :func:`route_list_scan`.
+    route_start:
+        ``[E]`` per-expert first compact route index.
+    max_routes_per_token:
+        Host-known upper bound (router top-k) on routes per token; sets the padded width of
+        ``token_routes``. Defaults to ``num_experts`` when ``None``.
+
+    Returns
+    -------
+    ``(token_routes [T, maxk] int32, token_route_count [T] int32)``. For token ``t`` the first
+    ``token_route_count[t]`` entries of ``token_routes[t]`` hold its compact route positions
+    (expert-ascending); the remaining columns are unused padding.
+    """
+    if routing_map.dtype != torch.bool:
+        routing_map = routing_map.bool()
+    routing_map = routing_map.contiguous()
+    device = routing_map.device
+    T = int(routing_map.size(0))
+    E = int(num_experts)
+    maxk = E if max_routes_per_token is None else min(int(max_routes_per_token), E)
+    maxk = max(maxk, 1)
+    # Index buffer: zero-init so any unused tail column is a safe (in-range) index; the gather
+    # masks columns >= count anyway, so the value is never used -- this is purely defensive.
+    token_routes = torch.zeros((T, maxk), dtype=torch.int32, device=device)
+    token_route_count = torch.empty((T,), dtype=torch.int32, device=device)
+    _inverse_map_kernel[(T,)](
+        routing_map,
+        within,
+        route_start,
+        token_routes,
+        token_route_count,
+        T,
+        E,
+        routing_map.stride(0),
+        routing_map.stride(1),
+        MAXK=maxk,
+    )
+    return token_routes, token_route_count
+
+
 def route_list_scan(
     routing_map: torch.Tensor,
     *,
