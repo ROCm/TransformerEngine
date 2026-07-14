@@ -712,7 +712,9 @@ class NVFP4QuantizerRef(Quantizer):
             FLOAT8_E4M3_MAX = torch.tensor(240.0 if is_fp8_fnuz() else 448.0, device=x.device, dtype=torch.float32)
         else:
             FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
-        global_scale_e4m3_max = float(nvfp4_e4m3_max if nvfp4_use_4over6 else 448)
+        # On fnuz archs the block scale is stored in fnuz e4m3 (max 240), so the global
+        # scale must use the same arch-aware max to match the kernel (see FLOAT8_E4M3_MAX).
+        global_scale_e4m3_max = float(nvfp4_e4m3_max) if nvfp4_use_4over6 else float(FLOAT8_E4M3_MAX)
         GLOBAL_SCALE_E4M3_MAX = torch.tensor(
             global_scale_e4m3_max, device=x.device, dtype=torch.float32
         )
