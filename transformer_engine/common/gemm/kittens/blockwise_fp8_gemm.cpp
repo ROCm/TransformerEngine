@@ -22,6 +22,7 @@ void kittens_blockwise_fp8_gemm(
     const void *bias, int bias_dtype,
     const void *gelu_aux, int gelu_aux_dtype,
     const void *c_in, float beta,
+    void *workspace, size_t workspace_size,
     hipStream_t stream) {
     const int arch = transformer_engine::cuda::sm_arch();
     if (arch != 94 && arch != 95) {
@@ -34,7 +35,8 @@ void kittens_blockwise_fp8_gemm(
         blockwise_gfx950::kittens_blockwise_fp8_gemm_impl_cdna4(
             A, B, C, scale_A, scale_B, M, N, K,
             a_dtype, b_dtype, a_scaling_mode, b_scaling_mode, out_dtype,
-            bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta, stream);
+            bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta,
+            workspace, workspace_size, stream);
     } else {
         blockwise_gfx942::kittens_blockwise_fp8_gemm_impl_cdna3(
             A, B, C, scale_A, scale_B, M, N, K, transa, transb,

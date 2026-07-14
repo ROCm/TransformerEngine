@@ -2060,7 +2060,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
           p.A_scaling_mode, p.B_scaling_mode,
           static_cast<int>(outputD->data.dtype),
           bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta,
-          s);
+          workspace, workspaceSize, s);
 
       if (use_service_stream)
       {

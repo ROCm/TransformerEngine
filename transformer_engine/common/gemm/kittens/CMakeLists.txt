@@ -3,6 +3,11 @@
 
 cmake_minimum_required(VERSION 3.21)
 
+# Apply power-of-2 blockwise FP8 scales directly in the MFMA (HW E8M0) instead of software
+# running-rescale. Only meaningful for the CDNA4 (gfx950) blockwise kernel.
+option(NVTE_KITTENS_USE_POWER_OF_2_SCALE
+    "Use HW E8M0 MFMA scaling for power-of-2 blockwise FP8 scales (gfx950)" ON)
+
 function(try_enable_hipkittens_gemm)
     list(FIND CMAKE_HIP_ARCHITECTURES "gfx942" _gfx942_index)
     list(FIND CMAKE_HIP_ARCHITECTURES "gfx950" _gfx950_index)
@@ -68,6 +73,9 @@ function(try_enable_hipkittens_gemm)
             ${HIP_INCLUDE_DIRS} "${HIPKITTENS_CDNA4_INCLUDE_DIR}")
         target_compile_options(kittens_gemm_cdna4 PRIVATE
             -DKITTENS_CDNA4 -fno-gpu-rdc -O3)
+        if(NVTE_KITTENS_USE_POWER_OF_2_SCALE)
+            target_compile_definitions(kittens_gemm_cdna4 PRIVATE NVTE_KITTENS_USE_POWER_OF_2_SCALE)
+        endif()
         target_link_libraries(kittens_gemm_cdna4 PRIVATE hip::host hip::device)
         list(APPEND _kittens_arch_objs $<TARGET_OBJECTS:kittens_gemm_cdna4>)
     endif()

@@ -3,7 +3,7 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 
-#define NVTE_POW2_DEBUG  // TEMP: fast-iteration build (bf16 e4m3 no-epilogue pow2 only). REMOVE before merge.
+#include <cstdlib>
 #include <type_traits>
 #include <utility>
 #include "kittens.cuh"
@@ -33,28 +33,17 @@ template <typename T> using _gl_B_t = kittens::gl<T, -1, -1, -1, -1>;
 template <typename OType> using _gl_C_t = kittens::gl<OType, -1, -1, -1, -1>;
 using _gl_SA = kittens::gl<float, -1, -1, -1, -1>;
 using _gl_SB = kittens::gl<float, -1, -1, -1, -1>;
-// pow2 HW-E8M0 packed scale gl (identical mechanism to mxfp8_gemm.cpp's gl_scale_rt):
-// array of 16x64 fp8e8m0 tiles, first dim = k_iters * tiles, holding one BLOCK-worth of
-// per-row E8M0 exponents per k-iteration.
 using gl_scale_rt_pow2 = kittens::gl<kittens::fp8e8m0, -1, 1, 16, 64>;
-// mxfp8-matching compile-time gl shapes for the pow2 kernel (batch/depth fixed at 1), so the
-// scaled-MMA codegen/scheduling matches the deterministic production mxfp8 kernel exactly.
+// Compile-time gl shapes fixed at 1 to match mxfp8's scaled-MMA codegen/scheduling exactly.
 using gl_A_pow2 = kittens::gl<kittens::fp8e4m3, 1, 1, -1, -1>;
 template <typename OType> using gl_C_pow2 = kittens::gl<OType, 1, 1, -1, -1>;
 
 using G = kittens::group<NUM_WARPS>;
 
-// Host-side pack: TE fp32 pow2 scales -> uint32 [k_iters, padded_dim] packed E8M0, laid out
-// identically to mxfp8_gemm.cpp's pack_scales_kernel output (linear-by-row within each
-// (ki, block) 16x64 tile), so the device G::load + pack_scales + mma_ABt_scaled path is
-// byte-identical to the proven mxfp8 kernel. Differences vs mxfp8: (1) input is fp32 (E8M0
-// byte = bits 30..23), not uint8; (2) SCALE_BLOCK==BLOCK_K==128 so there is ONE scale per
-// 128 K -> the 4 sub-K bytes of each uint32 are the SAME byte replicated (mxfp8 packs 4
-// distinct 32-K bytes). Layouts (must reproduce running-rescale's consumed values):
-//   WEIGHT=false (activation): source k-major [scale_K, real_dim], element (ki,row)=ki*real_dim+row.
-//   WEIGHT=true  (weight): source [real_dim/SCALE_BLOCK, scale_K], per-128-block broadcast:
-//                          element (ki,row) = (row/SCALE_BLOCK)*scale_K + ki.
-// Rows >= real_dim (tile padding when dim is not a multiple of BLOCK) are zero-filled.
+// Pack TE fp32 pow2 scales -> E8M0 uint32 [k_iters, padded_dim], mxfp8 pack_scales_kernel layout.
+// SCALE_BLOCK==BLOCK_K==128 => one scale per 128 K, replicated across the 4 sub-K bytes.
+//   WEIGHT=false (activation): src k-major [scale_K, real_dim], (ki,row) = ki*real_dim + row.
+//   WEIGHT=true  (1Dx2D weight): src [real_dim/128, scale_K] broadcast, (ki,row) = (row/128)*scale_K + ki.
 template <bool WEIGHT>
 __global__ void pack_scales_pow2_kernel(const float *__restrict__ scales, uint32_t *__restrict__ packed,
                                         int padded_dim, int real_dim, int scale_K, int k_iters) {
@@ -80,171 +69,9 @@ static void launch_pack_scales_pow2(const float *scales, uint32_t *packed, int p
     pack_scales_pow2_kernel<WEIGHT><<<blocks, 256, 0, stream>>>(scales, packed, padded_dim, real_dim, scale_K, k_iters);
 }
 
-// Per-row scale (running-rescale ratio) held in registers between the LDS read and the multiply,
-// so the read can be hoisted to an earlier cluster and reused across accumulators sharing a row.
-template <int HEIGHT>
-struct RowRatio { float s[HEIGHT][4]; };
-
-// (1) Read the per-row ratios for one m-half from LDS into registers (vectorizes to ds_read_b128).
-template <typename RT_C>
-__device__ __forceinline__ RowRatio<RT_C::height>
-load_row_ratio(const float *smem_ratios, int warp_m_offset) {
-    int lane = kittens::laneid();
-    int row_off = RT_C::base_tile_stride * (lane / RT_C::base_tile_cols);
-    RowRatio<RT_C::height> rr;
-    #pragma unroll
-    for (int i = 0; i < RT_C::height; i++) {
-        int base_m = warp_m_offset + i * 16 + row_off;
-        #pragma unroll
-        for (int r = 0; r < 4; r++) rr.s[i][r] = smem_ratios[base_m + r];
-    }
-    return rr;
-}
-
-// (2) Multiply the accumulator by pre-loaded per-row ratios (pure VALU, no LDS access).
-template <typename RT_C>
-__device__ __forceinline__ void apply_row_ratio(RT_C &acc, const RowRatio<RT_C::height> &rr) {
-    #pragma unroll
-    for (int i = 0; i < acc.height; i++)
-        #pragma unroll
-        for (int j = 0; j < acc.width; j++)
-            #pragma unroll
-            for (int kk = 0; kk < acc.base_tile_num_strides; kk++)
-                #pragma unroll
-                for (int l = 0; l < acc.base_tile_stride / 2; l++) {
-                    int idx = l + kk * acc.base_tile_stride / 2;
-                    acc.tiles[i][j].data[idx].x *= rr.s[i][l * 2];
-                    acc.tiles[i][j].data[idx].y *= rr.s[i][l * 2 + 1];
-                }
-}
-
-// (2b) Fused row-ratio * col-scale(sb): fold sb into the per-row ratio (height*4 scalar muls),
-// then sweep the accumulator ONCE. Replaces apply_row_ratio + a full-tile kittens::mul(sb) pass.
-template <typename RT_C>
-__device__ __forceinline__ void apply_row_ratio_sb(RT_C &acc, const RowRatio<RT_C::height> &rr, float sb) {
-    float s[RT_C::height][4];
-    #pragma unroll
-    for (int i = 0; i < RT_C::height; i++)
-        #pragma unroll
-        for (int r = 0; r < 4; r++) s[i][r] = rr.s[i][r] * sb;
-    #pragma unroll
-    for (int i = 0; i < acc.height; i++)
-        #pragma unroll
-        for (int j = 0; j < acc.width; j++)
-            #pragma unroll
-            for (int kk = 0; kk < acc.base_tile_num_strides; kk++)
-                #pragma unroll
-                for (int l = 0; l < acc.base_tile_stride / 2; l++) {
-                    int idx = l + kk * acc.base_tile_stride / 2;
-                    acc.tiles[i][j].data[idx].x *= s[i][l * 2];
-                    acc.tiles[i][j].data[idx].y *= s[i][l * 2 + 1];
-                }
-}
-
-// (2c) Running-rescale for 1Dx1D: weight scale is a per-N vector (ColScale, one scalar per output
-// col-tile j), so the rescale is a 2D outer product acc[i][j] *= row_ratio[i] * col_ratio[j].
-// Unlike apply_row_ratio_sb (scalar sb pre-folded into rr), row and col vary independently, so the
-// col factor cr.v[j] multiplies per (i,j). rr and cr are prev/curr ratios (running-rescale).
-template <typename RT_C>
-__device__ __forceinline__ void apply_row_col_ratio(RT_C &acc, const RowRatio<RT_C::height> &rr,
-                                                    const ColScale<RT_C::width> &cr) {
-    #pragma unroll
-    for (int i = 0; i < acc.height; i++)
-        #pragma unroll
-        for (int j = 0; j < acc.width; j++) {
-            const float cj = cr.v[j];
-            #pragma unroll
-            for (int kk = 0; kk < acc.base_tile_num_strides; kk++)
-                #pragma unroll
-                for (int l = 0; l < acc.base_tile_stride / 2; l++) {
-                    int idx = l + kk * acc.base_tile_stride / 2;
-                    acc.tiles[i][j].data[idx].x *= rr.s[i][l * 2]     * cj;
-                    acc.tiles[i][j].data[idx].y *= rr.s[i][l * 2 + 1] * cj;
-                }
-        }
-}
-
-// Convenience: original fused form (read + multiply) for call sites that don't hoist the read.
-template <typename RT_C>
-__device__ __forceinline__ void mul_row_prescaled(RT_C &acc, const float *smem_ratios, int warp_m_offset) {
-    apply_row_ratio(acc, load_row_ratio<RT_C>(smem_ratios, warp_m_offset));
-}
-
-// One output base-tile MMA-accumulate (acc += a*b^T), selecting the input format via CBSZ/BLGP.
-// CBSZ/BLGP==0 (e4m3 both) uses the plain fast path; any e5m2 operand uses the scaled MFMA with a
-// unit E8M0 scale (0x7F..=2^0 per byte) so the hardware decodes the e5m2 bits without scaling
-// (running-rescale scales separately). unit is a function-local so &unit is a real VGPR address.
-template <int CBSZ, int BLGP, typename DT, typename AT, typename BT>
-__device__ __forceinline__ void mma_accum_base(DT &d, const AT &a, const BT &b) {
-    if constexpr (CBSZ == 0 && BLGP == 0) {
-        kittens::mma_ABt_base(d, a, b, d);
-    } else {
-        const kittens::fp8e8m0_4 unit = 0x7F7F7F7Fu;
-        kittens::mma_ABt_base_scaled<0, 0, CBSZ, BLGP>(d, a, b, d, &unit, &unit);
-    }
-}
-
-// Whole-accumulator MMA-accumulate (acc += a*b^T) with the same CBSZ/BLGP format select. Used by
-// the batched (non-fused) MMA sites; e4m3 takes the plain fast path, e5m2 the unit-scaled MFMA.
-// One base-tile MMA-accumulate carrying the fp8 input format via cbsz/blgp. Uses the CDNA4
-// mfma_scale builtin with an IMMEDIATE 0 scale exponent (== unit, no block scaling -- running-
-// rescale scales separately). Passing the scale as an immediate is essential: kittens'
-// mma_ABt_scaled dereferences a *scale pointer, which the builtin mis-handles here and yields
-// nondeterministic nan (the scale operand wants an immediate/constant, not a loaded value).
-template <int CBSZ, int BLGP>
-__device__ __forceinline__ void mfma_fmt(float2 (&D)[2], const kittens::fp8e4m3_4 (&A)[8],
-                                         const kittens::fp8e4m3_4 (&B)[8], const float2 (&C)[2]) {
-    typedef __attribute__((__vector_size__(8 * sizeof(int)))) int intx8_t;
-    typedef __attribute__((__vector_size__(4 * sizeof(float)))) float floatx4_t;
-    *(floatx4_t*)D = {__builtin_amdgcn_mfma_scale_f32_16x16x128_f8f6f4(
-        *(intx8_t*)A, *(intx8_t*)B, *(floatx4_t*)C, CBSZ, BLGP, 0, 0, 0, 0)};
-}
-
-template <int CBSZ, int BLGP, typename RT_C, typename RT_A, typename RT_B>
-__device__ __forceinline__ void mma_accum(RT_C &acc, const RT_A &a, const RT_B &b) {
-    if constexpr (CBSZ == 0 && BLGP == 0) {
-        kittens::mma_ABt(acc, a, b, acc);   // e4m3: plain fast path
-    } else {
-        #pragma unroll
-        for (int n = 0; n < acc.height; n++)
-            #pragma unroll
-            for (int m = 0; m < acc.width; m++)
-                mfma_fmt<CBSZ, BLGP>(acc.tiles[n][m].data, a.tiles[n][0].data,
-                                     b.tiles[m][0].data, acc.tiles[n][m].data);
-    }
-}
-
-// Fine-grained per-tile fusion of running-rescale (apply_row_ratio_sb) with the MMA. For each
-// output base tile [n][m]: rescale that tile (VALU), then immediately accumulate a*b^T into it
-// (MFMA). Because tiles are independent, tile[n][m]'s MFMA can overlap tile[n'][m']'s VALU
-// rescale on separate units -- unlike the batched form (rescale ALL tiles, then MMA ALL tiles)
-// where the VALU block finishes before any MFMA starts. Same accumulator/a/b liveness as before
-// (no extra VGPR); same math (acc = acc*ratio + a*b per tile).
-template <int CBSZ, int BLGP, typename RT_C, typename RT_A, typename RT_B>
-__device__ __forceinline__ void mma_ABt_rescaled(
-        RT_C &acc, const RowRatio<RT_C::height> &rr, float sb, const RT_A &a, const RT_B &b) {
-    // No hoisted s[height][4] temporary: fold sb into the row-ratio on the fly so only 4 scalars
-    // (the current row n) are live at once, not all height*4 -- keeps register pressure down so
-    // the interleaved MFMA doesn't spill.
-    #pragma unroll
-    for (int n = 0; n < acc.height; n++) {
-        float sr[4];
-        #pragma unroll
-        for (int r = 0; r < 4; r++) sr[r] = rr.s[n][r] * sb;
-        #pragma unroll
-        for (int m = 0; m < acc.width; m++) {
-            #pragma unroll
-            for (int kk = 0; kk < acc.base_tile_num_strides; kk++)
-                #pragma unroll
-                for (int l = 0; l < acc.base_tile_stride / 2; l++) {
-                    int idx = l + kk * acc.base_tile_stride / 2;
-                    acc.tiles[n][m].data[idx].x *= sr[l * 2];
-                    acc.tiles[n][m].data[idx].y *= sr[l * 2 + 1];
-                }
-            mma_accum_base<CBSZ, BLGP>(acc.tiles[n][m], a.tiles[n][0], b.tiles[m][0]);
-        }
-    }
-}
+// 256-byte align the activation pack so the weight pack (placed after it in the same workspace)
+// starts aligned, matching mxfp8's workspace layout.
+static inline size_t align_up_pow2ws(size_t x) { return (x + 255) & ~size_t(255); }
 
 template <typename AType, typename BType, typename OType>
 struct micro_globals {
@@ -290,9 +117,7 @@ void micro_tk_1d2d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     using RT_B = kittens::rt_fp8e4m3<REG_N, MFMA_K>;
     using RT_C = kittens::rt_fl<REG_M, REG_N, kittens::col_l, kittens::rt_16x16_s>;
 
-    // Double-buffer LDS + running-rescale (ported from blockwise_fp8_gemm_ref.cpp, 256-tile).
-    // Register pressure pushed to LDS: single RT_A `a` reused, row-scale read from LDS (not regs),
-    // accum in-place (no partial tile). scale_A read k-major [scale_K, M] (our layout).
+    // 1Dx2D running-rescale (SW scale). scale_A k-major [scale_K, M]; scale_B uniform per 128-block.
     __shared__ ST_A As[2][2];
     __shared__ ST_B Bs[2][2];
     __shared__ alignas(16) float smem_sa_prev[BLOCK_M];
@@ -304,7 +129,7 @@ void micro_tk_1d2d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     RT_C cA, cB, cC, cD;
     kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
 
-    // XCD-aware block swizzle + WGM group ordering (ref 256-tile: WGM=8, tiles over 256 blocks).
+    // XCD-aware block swizzle + WGM group ordering.
     const int tiles_M = (M + BLOCK_M - 1) / BLOCK_M;
     const int tiles_N = (N + BLOCK_N - 1) / BLOCK_N;
     constexpr int WGM = 8;
@@ -354,28 +179,20 @@ void micro_tk_1d2d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
                 reinterpret_cast<uintptr_t>(&Bs[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
         }
 
-    // scale_A is k-major [scale_K, M] (our layout): element (k, m) at k*M + m.
-    // scale_B moved out of this lambda: it is uniform per block, so read via scalar_load (SGPR)
-    // instead of a vmem load broadcast through LDS -- keeps scale_B off the vmcnt(6) drain that
-    // gated it every iteration (it was bunched with scale_A's 256 vmem loads).
+    // scale_B uniform per block -> scalar_load (SGPR), keeping it off scale_A's vmcnt(6) drain.
     const float *sb0_p = scale_B + sb_h0_idx * scale_K;
     const float *sb1_p = scale_B + sb_h1_idx * scale_K;
-    // scale_A direct global->LDS DMA (no register round-trip => no forced early vmcnt(0) at the
-    // register->LDS store). SRD spans the whole scale_A [scale_K, M] buffer; per-lane 4-byte load,
-    // m0 base is wave-uniform per warp and the DMA scatters lane L to base + L*4.
+    // scale_A direct global->LDS DMA (vmcnt-tracked, no register round-trip / forced early vmcnt(0)).
     kittens::i32x4 sa_srd = kittens::make_srsrc((const void *)scale_A, (uint32_t)(scale_K * M * (int)sizeof(float)));
-    const int sa_warp = tid / kittens::WARP_THREADS;          // 0..7
-    const int sa_lane = tid % kittens::WARP_THREADS;          // 0..63
+    const int sa_warp = tid / kittens::WARP_THREADS;
+    const int sa_lane = tid % kittens::WARP_THREADS;
     const uint32_t sa_curr_lds_warp = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
         reinterpret_cast<uintptr_t>(&smem_sa_curr[sa_warp * kittens::WARP_THREADS])));
     auto load_scales_to_curr = [&](int k) {
         if (tid < BLOCK_M)
             load_scale_to_lds(sa_srd, sa_curr_lds_warp, (k * M + block_m + sa_warp * kittens::WARP_THREADS + sa_lane) * 4);
     };
-    // Split the BLOCK_M ratios across BOTH warp_m groups (tid>>8 == warp_m): group 0 owns m=0..127,
-    // group 1 owns m=128..255, each via float2 on its first 64 lanes (ds_read/write_b64). Both halves
-    // of the ping-pong pair do equal division work instead of piling it all on warp_m=0, which is the
-    // fastest of the variants tried (per-element-on-warp0 and wave-0-only-float4 both unbalanced it).
+    // Ratio division split across both warp_m groups (float2 on first 64 lanes each) to balance work.
     auto compute_a_ratios_and_promote = [&](int dst) {
         int g = tid >> 8;             // warp_m group (0 or 1)
         int lt = tid & 255;           // lane within group
@@ -421,27 +238,24 @@ void micro_tk_1d2d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
 
     float prev_sb_h0 = 1.0f, prev_sb_h1 = 1.0f;
 
-    // ---- Main loop (8-phase, unroll 2, A reused, running-rescale) ----
     #pragma unroll 2
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1, rtic ^= 1, rtoc ^= 1) {
-        float sb_ratio_h0 = prev_sb_h0 / curr_sb_h0;   // used cluster 1 (cA); h1 division deferred to c2
+        float sb_ratio_h0 = prev_sb_h0 / curr_sb_h0;
 
-        // rr_h0 read FIRST (ratio was written by prev-iter cluster 6, already visible): its
-        // ds_read latency then overlaps the cluster-0 a/b LDS reads below before cluster-1 uses it.
+        // rr_h0 read first so its ds_read latency overlaps the cluster-0 a/b LDS reads.
         auto rr_h0 = load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h0);
         load_scales_to_curr(k + 1);
-        // next-k scale_B via SGPR (drained by Phase 3/5 lgkmcnt(0) before promotion at Phase 8)
         float nxt_sb_h0 = scalar_load_scale(sb0_p, k + 1);
         float nxt_sb_h1 = scalar_load_scale(sb1_p, k + 1);
 
-        // cluster 0: load b0, a(h0), issue G::load(A[toc][h1], k+1)
+        // cluster 0
         kittens::load(b0, kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][0], {warp_n, 0}));
         kittens::load(a,  kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][0], {warp_m, 0}));
         G::load(As[toc][1], A, {0, 0, block_row * 2 + 1, k + 1}, sw_A, a_srd, a_base, a_lds[toc][1]);
         asm volatile("s_waitcnt lgkmcnt(8)");
         __builtin_amdgcn_s_barrier();
 
-        // cluster 1: rescale + MMA cA
+        // cluster 1
         apply_row_ratio_sb(cA, rr_h0, sb_ratio_h0);
         __builtin_amdgcn_s_setprio(2);
         mma_accum<CBSZ, BLGP>(cA, a, b0);
@@ -449,27 +263,27 @@ void micro_tk_1d2d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
-        // cluster 2: load b1, issue G::load(A[tic][h0], k+2); h1 col-ratio division (deferred from c0)
+        // cluster 2
         float sb_ratio_h1 = prev_sb_h1 / curr_sb_h1;
         kittens::load(b1, kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][1], {warp_n, 0}));
         G::load(As[tic][0], A, {0, 0, block_row * 2, k + 2}, sw_A, a_srd, a_base, a_lds[tic][0]);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-        // cluster 3: rescale + MMA cB (reuses h0 ratio)
+        // cluster 3
         apply_row_ratio_sb(cB, rr_h0, sb_ratio_h1);
         __builtin_amdgcn_s_setprio(2);
         mma_accum<CBSZ, BLGP>(cB, a, b1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
-        // cluster 4: load a(h1), issue G::load(B[tic][h0], k+2); load h1 row-ratio once (reused cC/cD)
+        // cluster 4
         kittens::load(a, kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][1], {warp_m, 0}));
         G::load(Bs[tic][0], B, {0, 0, block_col * 2, k + 2}, sw_B, b_srd, b_base, b_lds[tic][0]);
         auto rr_h1 = load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h1);
         __builtin_amdgcn_s_barrier();
         
-        // cluster 5: rescale + MMA cC
+        // cluster 5
         asm volatile("s_waitcnt lgkmcnt(0)");
         apply_row_ratio_sb(cC, rr_h1, sb_ratio_h0);
         __builtin_amdgcn_s_setprio(2);
@@ -478,15 +292,13 @@ void micro_tk_1d2d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
-        // cluster 6: issue G::load(B[tic][h1], k+2), wait; compute next-iter row ratios here
-        // (smem_sa_curr's scale_A DMA has drained by this point; ratio write is made visible to
-        //  next iter's cluster 0 by this cluster's barrier).
+        // cluster 6
         G::load(Bs[tic][1], B, {0, 0, block_col * 2 + 1, k + 2}, sw_B, b_srd, b_base, b_lds[tic][1]);
         asm volatile("s_waitcnt vmcnt(6)");
         compute_a_ratios_and_promote(rtoc);
         __builtin_amdgcn_s_barrier();
 
-        // cluster 7: rescale + MMA cD (reuses h1 ratio)
+        // cluster 7
         apply_row_ratio_sb(cD, rr_h1, sb_ratio_h1);
         __builtin_amdgcn_s_setprio(2);
         mma_accum<CBSZ, BLGP>(cD, a, b1);
@@ -605,8 +417,8 @@ void micro_tk_1d2d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
         __builtin_amdgcn_s_barrier();
     }
 
-    // Apply final absolute scale + store per-accumulator (sequential) so only one cX is live at a
-    // time through scale/bias/store. Cuts the 4-accumulator peak that caused the epilogue VGPR spill.
+    // Store per-accumulator (sequential) so only one cX is live through scale/bias/store (cuts the
+    // 4-accumulator epilogue VGPR peak that otherwise spilled).
     const int m_off0 = block_row * BLOCK_M + warp_m * REG_M;
     const int m_off1 = block_row * BLOCK_M + HALF_ROW + warp_m * REG_M;
     const int n_off0 = block_col * BLOCK_N + warp_n * REG_N;
@@ -634,11 +446,9 @@ void micro_tk_1d2d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
 }
 
 
-// pow2 HW-E8M0-scale blockwise 1Dx2D GEMM. The prologue + main loop + both drain epilogues are a
-// byte-for-byte clone of the proven, deterministic production mxfp8_gemm_tn_kernel COMPUTE +
-// SCALE-STAGING (mxfp8 uses the identical G::load srd-style A/B loads, ST_Scale 16x64 LDS
-// ping-pong, pack_scales, and mma_ABt_scaled). The ONLY deviation is the store: we keep
-// blockwise's own NON-TRANSPOSED store instead of mxfp8's transposed gemm_epilogue.
+// pow2 HW-E8M0-scale blockwise GEMM (used for both 1Dx2D and 1Dx1D; scale layout differs only in
+// the host pack). Compute + scale-staging cloned from the deterministic mxfp8 kernel; the sole
+// deviation is keeping blockwise's NON-TRANSPOSED store.
 template <typename OType, int CBSZ, int BLGP,
           bool HAS_BIAS, bool HAS_GELU, bool HAS_BETA>
 __global__ __launch_bounds__(NUM_THREADS, 2)
@@ -679,13 +489,13 @@ void micro_tk_1d2d_pow2(
     int group_id     = wgid / num_wgid_in_group;
     int first_pid_m  = group_id * WGM;
     int group_size_m = min(tiles_M - first_pid_m, WGM);
-    int block_row    = first_pid_m + ((wgid % num_wgid_in_group) % group_size_m);
-    int block_col    = (wgid % num_wgid_in_group) / group_size_m;
+    // readfirstlane forces these workgroup-uniform values into SGPRs (else carried in VGPRs to the
+    // store epilogue, raising pressure enough to spill).
+    int block_row    = __builtin_amdgcn_readfirstlane(first_pid_m + ((wgid % num_wgid_in_group) % group_size_m));
+    int block_col    = __builtin_amdgcn_readfirstlane((wgid % num_wgid_in_group) / group_size_m);
     int block_m      = block_row * BLOCK_M;
     int block_n      = block_col * BLOCK_N;
 
-    // warp_m/warp_n are wave-uniform; force them into SGPRs via readfirstlane so they are not held
-    // in a VGPR across the whole kernel (which the compiler otherwise spills to scratch at the store).
     int warp_m = __builtin_amdgcn_readfirstlane(kittens::warpid() / WARPS_COL);
     int warp_n = __builtin_amdgcn_readfirstlane(kittens::warpid() % WARPS_COL);
 
@@ -908,13 +718,9 @@ void micro_tk_1d2d_pow2(
         __builtin_amdgcn_s_barrier();
     }
 
-    // ---- Store (blockwise NON-TRANSPOSED path). HW already applied the E8M0 scale, so there is
-    //      no scale multiply here. The batched form (epilogue -> rtne -> store, applied to all 4
-    //      accumulators back-to-back) is REQUIRED for determinism on ROCm 7.2.1: the per-accumulator
-    //      sequential `finish` form interleaves each store with epilogue/mask bookkeeping, which on
-    //      7.2.1 blows register allocation to 126 spills (incl. MMA-output accumulators) that race
-    //      against the async scaled MMA -- verified det=[T,F,F,F] + ~10^4 sparse mismatches. Storing
-    //      the four accumulators uniformly keeps MMA outputs unspilled -> deterministic + correct. ----
+    // Store (NON-TRANSPOSED; HW already applied the E8M0 scale). Batched form (all 4 accumulators
+    // back-to-back) is REQUIRED for 7.2.1 determinism: the sequential per-accumulator form spills
+    // MMA outputs (126 spills) that race the async scaled MMA -> nondeterministic.
     const int m_off0 = block_row * BLOCK_M + warp_m * REG_M;
     const int m_off1 = block_row * BLOCK_M + HALF_ROW + warp_m * REG_M;
     const int n_off0 = block_col * BLOCK_N + warp_n * REG_N;
@@ -927,17 +733,26 @@ void micro_tk_1d2d_pow2(
     const int cn1 = block_col * WARPS_COL * 2 + WARPS_COL + warp_n;
     const bool full = (block_row + 1) * BLOCK_M <= M && (block_col + 1) * BLOCK_N <= N;
 
-    auto finish = [&](RT_C &c, int m_off, int n_off, int crow, int ccol) {
-        if constexpr (HAS_BIAS || HAS_GELU || HAS_BETA)
-            apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(c, m_off, n_off, M, N, bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta);
-        if constexpr (std::is_same_v<OType, kittens::bf16>) apply_rtne_bias(c);
-        if (full) kittens::store(C, c, {0, 0, crow, ccol});
-        else      store_masked(c_ptr, c, m_off, n_off, M, N);
-    };
-    finish(cA, m_off0, n_off0, ca, cn0);
-    finish(cB, m_off0, n_off1, ca, cn1);
-    finish(cC, m_off1, n_off0, cc, cn0);
-    finish(cD, m_off1, n_off1, cc, cn1);
+    if constexpr (HAS_BIAS || HAS_GELU || HAS_BETA) {
+        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cA, m_off0, n_off0, M, N, bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta);
+        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cB, m_off0, n_off1, M, N, bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta);
+        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cC, m_off1, n_off0, M, N, bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta);
+        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cD, m_off1, n_off1, M, N, bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta);
+    }
+    if constexpr (std::is_same_v<OType, kittens::bf16>) {
+        apply_rtne_bias(cA); apply_rtne_bias(cB); apply_rtne_bias(cC); apply_rtne_bias(cD);
+    }
+    if (full) {
+        kittens::store(C, cA, {0, 0, ca, cn0});
+        kittens::store(C, cB, {0, 0, ca, cn1});
+        kittens::store(C, cC, {0, 0, cc, cn0});
+        kittens::store(C, cD, {0, 0, cc, cn1});
+    } else {
+        store_masked(c_ptr, cA, m_off0, n_off0, M, N);
+        store_masked(c_ptr, cB, m_off0, n_off1, M, N);
+        store_masked(c_ptr, cC, m_off1, n_off0, M, N);
+        store_masked(c_ptr, cD, m_off1, n_off1, M, N);
+    }
 }
 
 #ifndef NVTE_SQ_ONLY
@@ -961,9 +776,8 @@ void micro_tk_1d1d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     using RT_B = kittens::rt_fp8e4m3<REG_N, MFMA_K>;
     using RT_C = kittens::rt_fl<REG_M, REG_N, kittens::col_l, kittens::rt_16x16_s>;
 
-    // Double-buffer LDS + running-rescale (cloned from micro_tk_1d2d, 256-tile). Only difference:
-    // the WEIGHT scale is a per-N vector (ColScale, one scalar per output col-tile) instead of a
-    // scalar per column-half, so the rescale is a 2D outer product (apply_row_col_ratio).
+    // 1Dx1D running-rescale: cloned from micro_tk_1d2d, but weight scale is per-N (ColScale) so the
+    // rescale is a 2D outer product (apply_row_col_ratio) instead of a scalar-per-column-half.
     __shared__ ST_A As[2][2];
     __shared__ ST_B Bs[2][2];
     __shared__ alignas(16) float smem_sa_prev[BLOCK_M];
@@ -975,7 +789,7 @@ void micro_tk_1d1d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     RT_C cA, cB, cC, cD;
     kittens::zero(cA); kittens::zero(cB); kittens::zero(cC); kittens::zero(cD);
 
-    // XCD-aware block swizzle + WGM group ordering (ref 256-tile: WGM=8, tiles over 256 blocks).
+    // XCD-aware block swizzle + WGM group ordering.
     const int tiles_M = (M + BLOCK_M - 1) / BLOCK_M;
     const int tiles_N = (N + BLOCK_N - 1) / BLOCK_N;
     constexpr int WGM = 8;
@@ -993,7 +807,6 @@ void micro_tk_1d1d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     const int warp_n = kittens::warpid() % WARPS_COL;
     const int tid = threadIdx.x;
 
-    // Weight per-N col-scale bases for the two N-halves (mirrors 1d2d's sb_h0/h1 scalar indices).
     const int local_n0 = block_n + warp_n * REG_N;
     const int local_n1 = block_n + HALF_COL + warp_n * REG_N;
     const int a_row_h0 = warp_m * REG_M;
@@ -1026,11 +839,8 @@ void micro_tk_1d1d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
                 reinterpret_cast<uintptr_t>(&Bs[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
         }
 
-    // scale_A is k-major [scale_K, M] (our layout): element (k, m) at k*M + m.
-    // scale_B (1d1d weight) is [scale_K, N]: element (k, n) at k*N + n; loaded as a per-N ColScale.
-    // scale_A direct global->LDS DMA (no register round-trip => no forced early vmcnt(0) at the
-    // register->LDS store). SRD spans the whole scale_A [scale_K, M] buffer; per-lane 4-byte load,
-    // m0 base is wave-uniform per warp and the DMA scatters lane L to base + L*4.
+    // scale_A k-major [scale_K, M]; scale_B (1d1d weight) per-column [scale_K, N] -> per-N ColScale.
+    // scale_A direct global->LDS DMA (vmcnt-tracked, no register round-trip / forced early vmcnt(0)).
     kittens::i32x4 sa_srd = kittens::make_srsrc((const void *)scale_A, (uint32_t)(scale_K * M * (int)sizeof(float)));
     const int sa_warp = tid / kittens::WARP_THREADS;          // 0..7
     const int sa_lane = tid % kittens::WARP_THREADS;          // 0..63
@@ -1040,10 +850,7 @@ void micro_tk_1d1d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
         if (tid < BLOCK_M)
             load_scale_to_lds(sa_srd, sa_curr_lds_warp, (k * M + block_m + sa_warp * kittens::WARP_THREADS + sa_lane) * 4);
     };
-    // Split the BLOCK_M ratios across BOTH warp_m groups (tid>>8 == warp_m): group 0 owns m=0..127,
-    // group 1 owns m=128..255, each via float2 on its first 64 lanes (ds_read/write_b64). Both halves
-    // of the ping-pong pair do equal division work instead of piling it all on warp_m=0, which is the
-    // fastest of the variants tried (per-element-on-warp0 and wave-0-only-float4 both unbalanced it).
+    // Ratio division split across both warp_m groups (float2 on first 64 lanes each) to balance work.
     auto compute_a_ratios_and_promote = [&](int dst) {
         int g = tid >> 8;             // warp_m group (0 or 1)
         int lt = tid & 255;           // lane within group
@@ -1057,7 +864,6 @@ void micro_tk_1d1d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
         }
     };
 
-    // Elementwise weight col-ratio prev/curr (per output col-tile j) for one N-half.
     auto col_ratio = [](const ColScale<RT_C::width> &p, const ColScale<RT_C::width> &c) {
         ColScale<RT_C::width> r;
         #pragma unroll
@@ -1102,24 +908,22 @@ void micro_tk_1d1d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     // ---- Main loop (8-phase, unroll 2, A reused, running-rescale) ----
     #pragma unroll 2
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1, rtic ^= 1, rtoc ^= 1) {
-        ColScale<RT_C::width> cr0 = col_ratio(prev_cs0, curr_cs0);   // used cluster 1 (cA); h1 ratio deferred to c2
+        ColScale<RT_C::width> cr0 = col_ratio(prev_cs0, curr_cs0);
 
-        // rr_h0 read FIRST (ratio was written by prev-iter cluster 6, already visible): its
-        // ds_read latency then overlaps the cluster-0 a/b LDS reads below before cluster-1 uses it.
+        // rr_h0 read first so its ds_read latency overlaps the cluster-0 a/b LDS reads.
         auto rr_h0 = load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h0);
         load_scales_to_curr(k + 1);
-        // next-k weight col-scale (per-N vector); advanced into prev/curr at cluster 7.
         ColScale<RT_C::width> nxt_cs0 = load_col_scale<RT_C>(scale_B + (k + 1) * N, local_n0, N);
         ColScale<RT_C::width> nxt_cs1 = load_col_scale<RT_C>(scale_B + (k + 1) * N, local_n1, N);
 
-        // cluster 0: load b0, a(h0), issue G::load(A[toc][h1], k+1)
+        // cluster 0
         kittens::load(b0, kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][0], {warp_n, 0}));
         kittens::load(a,  kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][0], {warp_m, 0}));
         G::load(As[toc][1], A, {0, 0, block_row * 2 + 1, k + 1}, sw_A, a_srd, a_base, a_lds[toc][1]);
         asm volatile("s_waitcnt lgkmcnt(8)");
         __builtin_amdgcn_s_barrier();
 
-        // cluster 1: rescale + MMA cA
+        // cluster 1
         apply_row_col_ratio(cA, rr_h0, cr0);
         __builtin_amdgcn_s_setprio(2);
         mma_accum<CBSZ, BLGP>(cA, a, b0);
@@ -1127,27 +931,27 @@ void micro_tk_1d1d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
-        // cluster 2: load b1, issue G::load(A[tic][h0], k+2); h1 col-ratio (deferred from c0)
+        // cluster 2
         ColScale<RT_C::width> cr1 = col_ratio(prev_cs1, curr_cs1);
         kittens::load(b1, kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][1], {warp_n, 0}));
         G::load(As[tic][0], A, {0, 0, block_row * 2, k + 2}, sw_A, a_srd, a_base, a_lds[tic][0]);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-        // cluster 3: rescale + MMA cB (reuses h0 row ratio)
+        // cluster 3
         apply_row_col_ratio(cB, rr_h0, cr1);
         __builtin_amdgcn_s_setprio(2);
         mma_accum<CBSZ, BLGP>(cB, a, b1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
-        // cluster 4: load a(h1), issue G::load(B[tic][h0], k+2); load h1 row-ratio once (reused cC/cD)
+        // cluster 4
         kittens::load(a, kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][1], {warp_m, 0}));
         G::load(Bs[tic][0], B, {0, 0, block_col * 2, k + 2}, sw_B, b_srd, b_base, b_lds[tic][0]);
         auto rr_h1 = load_row_ratio<RT_C>(smem_a_ratio[rtic], a_row_h1);
         __builtin_amdgcn_s_barrier();
 
-        // cluster 5: rescale + MMA cC
+        // cluster 5
         asm volatile("s_waitcnt lgkmcnt(0)");
         apply_row_col_ratio(cC, rr_h1, cr0);
         __builtin_amdgcn_s_setprio(2);
@@ -1156,15 +960,13 @@ void micro_tk_1d1d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
-        // cluster 6: issue G::load(B[tic][h1], k+2), wait; compute next-iter row ratios here
-        // (smem_sa_curr's scale_A DMA has drained by this point; ratio write is made visible to
-        //  next iter's cluster 0 by this cluster's barrier).
+        // cluster 6
         G::load(Bs[tic][1], B, {0, 0, block_col * 2 + 1, k + 2}, sw_B, b_srd, b_base, b_lds[tic][1]);
         asm volatile("s_waitcnt vmcnt(6)");
         compute_a_ratios_and_promote(rtoc);
         __builtin_amdgcn_s_barrier();
 
-        // cluster 7: rescale + MMA cD (reuses h1 row ratio)
+        // cluster 7
         apply_row_col_ratio(cD, rr_h1, cr1);
         __builtin_amdgcn_s_setprio(2);
         mma_accum<CBSZ, BLGP>(cD, a, b1);
@@ -1283,8 +1085,7 @@ void micro_tk_1d1d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
         __builtin_amdgcn_s_barrier();
     }
 
-    // Apply final absolute scale + store per-accumulator (sequential) so only one cX is live at a
-    // time through scale/bias/store. Cuts the 4-accumulator peak that caused the epilogue VGPR spill.
+    // Store per-accumulator (sequential) so only one cX is live through scale/bias/store.
     const int m_off0 = block_row * BLOCK_M + warp_m * REG_M;
     const int m_off1 = block_row * BLOCK_M + HALF_ROW + warp_m * REG_M;
     const int n_off0 = block_col * BLOCK_N + warp_n * REG_N;
@@ -1508,13 +1309,12 @@ static void dispatch_micro(bool is_1d2d, int cbsz, int blgp, bool has_bias, bool
     else         dispatch_micro_k<OType, false>(cbsz, blgp, has_bias, has_gelu, has_beta, has_partial_k, g);
 }
 
-// ---- pow2 HW-E8M0 1Dx2D launch (self-contained; internal E8M0 workspace) ----
 template <typename OType>
 struct pow2_kernel_args {
     gl_A_pow2 A;
     gl_A_pow2 B;
     gl_C_pow2<OType> C;
-    gl_scale_rt_pow2 scale_A_gl;   // packed E8M0 activation scale (mxfp8-style staging)
+    gl_scale_rt_pow2 scale_A_gl;   // packed E8M0 activation scale
     gl_scale_rt_pow2 scale_B_gl;   // packed E8M0 weight scale
     const void *bias; int bias_dtype;
     const void *gelu_aux; int gelu_aux_dtype;
@@ -1532,24 +1332,15 @@ static void launch_pow2_kernel(const pow2_kernel_args<OType> &a) {
 
 template <typename OType, bool HB, bool HG, bool HBeta>
 static void launch_pow2_cbsz(int cbsz, int blgp, const pow2_kernel_args<OType> &a) {
-#ifdef NVTE_POW2_DEBUG
-    // Debug: only the e4m3 (cbsz=0,blgp=0) instance -- drops the other 3 cbsz/blgp variants.
-    launch_pow2_kernel<OType, 0, 0, HB, HG, HBeta>(a);
-#else
     if      (cbsz == 0 && blgp == 0) launch_pow2_kernel<OType, 0, 0, HB, HG, HBeta>(a);
     else if (cbsz == 0 && blgp == 1) launch_pow2_kernel<OType, 0, 1, HB, HG, HBeta>(a);
     else if (cbsz == 1 && blgp == 0) launch_pow2_kernel<OType, 1, 0, HB, HG, HBeta>(a);
     else                             launch_pow2_kernel<OType, 1, 1, HB, HG, HBeta>(a);
-#endif
 }
 
 template <typename OType>
 static void launch_pow2_epi(int cbsz, int blgp, bool has_bias, bool has_gelu, bool has_beta,
                             const pow2_kernel_args<OType> &a) {
-#ifdef NVTE_POW2_DEBUG
-    // Debug: only the no-epilogue instance -- drops bias/gelu/beta variants.
-    launch_pow2_cbsz<OType, false, false, false>(cbsz, blgp, a);
-#else
     if (has_gelu) {
         if (has_beta) launch_pow2_cbsz<OType, false, true, true >(cbsz, blgp, a);
         else          launch_pow2_cbsz<OType, false, true, false>(cbsz, blgp, a);
@@ -1560,14 +1351,11 @@ static void launch_pow2_epi(int cbsz, int blgp, bool has_bias, bool has_gelu, bo
         if (has_beta) launch_pow2_cbsz<OType, false, false, true >(cbsz, blgp, a);
         else          launch_pow2_cbsz<OType, false, false, false>(cbsz, blgp, a);
     }
-#endif
 }
 
-// Pre-pack the raw fp32 pow2 scales into uint32 [k_iters, tiles*256] E8M0 workspaces (exactly
-// mxfp8's staging layout: each (ki, block) 16x64 ST_Scale tile = 256 contiguous uint32 rows;
-// rows >= real dim are zero-padded), then run the mxfp8-identical scale-staging kernel and free.
-// scaleA_src: activation per-row fp32, k-major [scale_K, kM]  (== impl ksa).
-// scaleB_src: weight per-128-block fp32 [kN/128, scale_K]     (== impl ksb).
+// 1Dx2D pow2 launch. scaleA_src=activation [scale_K, kM]; scaleB_src=weight per-128-block [kN/128, scale_K].
+// The E8M0 scales are packed into the caller-provided workspace (per-stream, so multi-stream grouped
+// GEMM has no shared-buffer race). Caller guarantees workspace >= the size computed in impl_cdna4.
 template <typename OType>
 static void launch_1d2d_pow2(int cbsz, int blgp, bool has_bias, bool has_gelu, bool has_beta,
                              const void *kA, const void *kB, void *Cptr,
@@ -1575,31 +1363,57 @@ static void launch_1d2d_pow2(int cbsz, int blgp, bool has_bias, bool has_gelu, b
                              const void *bias, int bias_dtype,
                              const void *gelu_aux, int gelu_aux_dtype,
                              const OType *c_in, float beta,
-                             int kM, int kN, int K, hipStream_t stream) {
+                             int kM, int kN, int K, void *workspace, hipStream_t stream) {
     const int k_iters = K / BLOCK_K;
     const int scale_K = K / SCALE_BLOCK;
     const int tiles_M = (kM + BLOCK_M - 1) / BLOCK_M;
     const int tiles_N = (kN + BLOCK_N - 1) / BLOCK_N;
-    const int padM = tiles_M * BLOCK_M;      // rows per k-iter in the activation workspace
-    const int padN = tiles_N * BLOCK_N;      // rows per k-iter in the weight workspace
+    const int padM = tiles_M * BLOCK_M;
+    const int padN = tiles_N * BLOCK_N;
 
-    const size_t sa_elems = (size_t)k_iters * padM;   // uint32 count
-    const size_t sb_elems = (size_t)k_iters * padN;
+    const size_t sa_bytes = align_up_pow2ws((size_t)k_iters * padM * sizeof(uint32_t));
+    uint32_t *packed_sa = reinterpret_cast<uint32_t *>(workspace);
+    uint32_t *packed_sb = reinterpret_cast<uint32_t *>((uint8_t *)workspace + sa_bytes);
 
-    // Persistent scale workspace: growing-only cache instead of per-call hipMalloc/Free + a
-    // stream sync. The per-call form serialized every GEMM (malloc/free are synchronous and the
-    // sync drained the pipeline), which was the dominant throughput regression vs running-rescale.
-    // The buffers are stream-ordered (pack -> gemm consume on the same stream), so no sync/free is
-    // needed here; they are reused (grown when a larger problem arrives) for the process lifetime.
-    static uint32_t *packed_sa = nullptr, *packed_sb = nullptr;
-    static size_t cap_sa = 0, cap_sb = 0;
-    if (sa_elems > cap_sa) { if (packed_sa) hipFree(packed_sa); hipMalloc(&packed_sa, sa_elems * sizeof(uint32_t)); cap_sa = sa_elems; }
-    if (sb_elems > cap_sb) { if (packed_sb) hipFree(packed_sb); hipMalloc(&packed_sb, sb_elems * sizeof(uint32_t)); cap_sb = sb_elems; }
-    hipMemsetAsync(packed_sa, 0, sa_elems * sizeof(uint32_t), stream);
-    hipMemsetAsync(packed_sb, 0, sb_elems * sizeof(uint32_t), stream);
-
+    // pack_scales_pow2_kernel zero-fills padding rows (row >= real dim), so no memset needed.
     launch_pack_scales_pow2<false>(scaleA_src, packed_sa, padM, kM, scale_K, k_iters, stream);
     launch_pack_scales_pow2<true >(scaleB_src, packed_sb, padN, kN, scale_K, k_iters, stream);
+
+    pow2_kernel_args<OType> a{
+        gl_A_pow2((kittens::fp8e4m3 *)const_cast<void *>(kA), nullptr, nullptr, (size_t)kM, (size_t)K),
+        gl_A_pow2((kittens::fp8e4m3 *)const_cast<void *>(kB), nullptr, nullptr, (size_t)kN, (size_t)K),
+        gl_C_pow2<OType>((OType *)Cptr, nullptr, nullptr, (size_t)kM, (size_t)kN),
+        gl_scale_rt_pow2(reinterpret_cast<kittens::fp8e8m0 *>(packed_sa), k_iters * tiles_M, nullptr, nullptr, nullptr),
+        gl_scale_rt_pow2(reinterpret_cast<kittens::fp8e8m0 *>(packed_sb), k_iters * tiles_N, nullptr, nullptr, nullptr),
+        bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta, kM, kN, K, stream};
+
+    launch_pow2_epi<OType>(cbsz, blgp, has_bias, has_gelu, has_beta, a);
+}
+
+// 1Dx1D pow2: same device kernel as 1Dx2D, but weight scale is per-column [scale_K, N] so it packs
+// with the k-major <false> path instead of the per-128-block <true> broadcast.
+template <typename OType>
+static void launch_1d1d_pow2(int cbsz, int blgp, bool has_bias, bool has_gelu, bool has_beta,
+                             const void *kA, const void *kB, void *Cptr,
+                             const float *scaleA_src, const float *scaleB_src,
+                             const void *bias, int bias_dtype,
+                             const void *gelu_aux, int gelu_aux_dtype,
+                             const OType *c_in, float beta,
+                             int kM, int kN, int K, void *workspace, hipStream_t stream) {
+    const int k_iters = K / BLOCK_K;
+    const int scale_K = K / SCALE_BLOCK;
+    const int tiles_M = (kM + BLOCK_M - 1) / BLOCK_M;
+    const int tiles_N = (kN + BLOCK_N - 1) / BLOCK_N;
+    const int padM = tiles_M * BLOCK_M;
+    const int padN = tiles_N * BLOCK_N;
+
+    const size_t sa_bytes = align_up_pow2ws((size_t)k_iters * padM * sizeof(uint32_t));
+    uint32_t *packed_sa = reinterpret_cast<uint32_t *>(workspace);
+    uint32_t *packed_sb = reinterpret_cast<uint32_t *>((uint8_t *)workspace + sa_bytes);
+
+    // pack_scales_pow2_kernel zero-fills padding rows (row >= real dim), so no memset needed.
+    launch_pack_scales_pow2<false>(scaleA_src, packed_sa, padM, kM, scale_K, k_iters, stream);
+    launch_pack_scales_pow2<false>(scaleB_src, packed_sb, padN, kN, scale_K, k_iters, stream);
 
     pow2_kernel_args<OType> a{
         gl_A_pow2((kittens::fp8e4m3 *)const_cast<void *>(kA), nullptr, nullptr, (size_t)kM, (size_t)K),
@@ -1622,6 +1436,7 @@ void kittens_blockwise_fp8_gemm_impl_cdna4(
     const void *bias, int bias_dtype,
     const void *gelu_aux, int gelu_aux_dtype,
     const void *c_in, float beta,
+    void *workspace, size_t workspace_size,
     hipStream_t stream) {
     const bool has_bias = (bias != nullptr);
     const bool has_gelu = (gelu_aux != nullptr);
@@ -1640,17 +1455,42 @@ void kittens_blockwise_fp8_gemm_impl_cdna4(
     float *sa = reinterpret_cast<float *>(const_cast<void *>(ksa));
     float *sb = reinterpret_cast<float *>(const_cast<void *>(ksb));
 
-    static const bool no_pow2 = (getenv("NVTE_KITTENS_NO_POW2") != nullptr);
+    // pow2 build default = NVTE_KITTENS_USE_POWER_OF_2_SCALE (ON); NVTE_KITTENS_NO_POW2=1 forces the
+    // running-rescale path at runtime without a rebuild (debug).
+#ifdef NVTE_KITTENS_USE_POWER_OF_2_SCALE
+    constexpr bool pow2_build_default = true;
+#else
+    constexpr bool pow2_build_default = false;
+#endif
+    static const bool use_pow2 = pow2_build_default && (std::getenv("NVTE_KITTENS_NO_POW2") == nullptr);
+
+    // pow2 packs the E8M0 scales into the caller-provided workspace (per-stream, so grouped/
+    // multi-stream GEMM has no shared-buffer race). If the workspace can't hold both packed
+    // scale buffers, fall back to running-rescale (which reads raw scales directly, no workspace).
+    const int k_iters = K / BLOCK_K;
+    const int padM = ((kM + BLOCK_M - 1) / BLOCK_M) * BLOCK_M;
+    const int padN = ((kN + BLOCK_N - 1) / BLOCK_N) * BLOCK_N;
+    const size_t pow2_ws_bytes = align_up_pow2ws((size_t)k_iters * padM * sizeof(uint32_t)) +
+                                 (size_t)k_iters * padN * sizeof(uint32_t);
+    const bool pow2_ws_ok = (workspace != nullptr && workspace_size >= pow2_ws_bytes);
+
     auto run = [&]<typename OType>() {
-        if (is_1d2d && !has_partial_k && !no_pow2) {
-            launch_1d2d_pow2<OType>(cbsz, blgp, has_bias, has_gelu, has_beta,
-                                    kA, kB, C, sa, sb, bias, bias_dtype,
-                                    gelu_aux, gelu_aux_dtype,
-                                    reinterpret_cast<const OType *>(c_in), beta,
-                                    kM, kN, K, stream);
+        // pow2 fast path is full-K only; partial-K or insufficient workspace -> running-rescale.
+        if (!has_partial_k && use_pow2 && pow2_ws_ok) {
+            if (is_1d2d)
+                launch_1d2d_pow2<OType>(cbsz, blgp, has_bias, has_gelu, has_beta,
+                                        kA, kB, C, sa, sb, bias, bias_dtype,
+                                        gelu_aux, gelu_aux_dtype,
+                                        reinterpret_cast<const OType *>(c_in), beta,
+                                        kM, kN, K, workspace, stream);
+            else
+                launch_1d1d_pow2<OType>(cbsz, blgp, has_bias, has_gelu, has_beta,
+                                        kA, kB, C, sa, sb, bias, bias_dtype,
+                                        gelu_aux, gelu_aux_dtype,
+                                        reinterpret_cast<const OType *>(c_in), beta,
+                                        kM, kN, K, workspace, stream);
             return;
         }
-#ifndef NVTE_POW2_DEBUG
         micro_globals_fp8<OType> g{
             _gl_A_t<kittens::fp8e4m3>((kittens::fp8e4m3 *)const_cast<void *>(kA), 1, 1, kM, K),
             _gl_B_t<kittens::fp8e4m3>((kittens::fp8e4m3 *)const_cast<void *>(kB), 1, 1, kN, K),
@@ -1660,19 +1500,11 @@ void kittens_blockwise_fp8_gemm_impl_cdna4(
             bias, bias_dtype, gelu_aux, gelu_aux_dtype,
             reinterpret_cast<const OType *>(c_in), beta, stream};
         dispatch_micro<OType>(is_1d2d, cbsz, blgp, has_bias, has_gelu, has_beta, has_partial_k, g);
-#endif
     };
 
-    // NVTE_POW2_DEBUG: compile ONLY the bf16 pow2 path (drop float/half + all running-rescale/
-    // smallk/1d1d instances + all pow2 cbsz/blgp/epilogue variants) so the huge TU compiles in
-    // seconds while iterating on the 7.2.1 pow2 codegen bug. NOT for production.
-#ifdef NVTE_POW2_DEBUG
-    run.template operator()<kittens::bf16>();
-#else
     if      (out_dtype == KITTENS_FLOAT32) run.template operator()<float>();
     else if (out_dtype == KITTENS_FLOAT16) run.template operator()<kittens::half>();
     else                                   run.template operator()<kittens::bf16>();
-#endif
 }
 
 #endif  // NVTE_SQ_ONLY

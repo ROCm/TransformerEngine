@@ -38,5 +38,6 @@ void kittens_blockwise_fp8_gemm_impl_cdna4(
     const void *bias, int bias_dtype,
     const void *gelu_aux, int gelu_aux_dtype,
     const void *c_in, float beta,
+    void *workspace, size_t workspace_size,
     hipStream_t stream);
 }  // namespace blockwise_gfx950
