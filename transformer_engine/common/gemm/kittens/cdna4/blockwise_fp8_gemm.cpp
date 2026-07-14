@@ -684,8 +684,10 @@ void micro_tk_1d2d_pow2(
     int block_m      = block_row * BLOCK_M;
     int block_n      = block_col * BLOCK_N;
 
-    int warp_m = kittens::warpid() / WARPS_COL;
-    int warp_n = kittens::warpid() % WARPS_COL;
+    // warp_m/warp_n are wave-uniform; force them into SGPRs via readfirstlane so they are not held
+    // in a VGPR across the whole kernel (which the compiler otherwise spills to scratch at the store).
+    int warp_m = __builtin_amdgcn_readfirstlane(kittens::warpid() / WARPS_COL);
+    int warp_n = __builtin_amdgcn_readfirstlane(kittens::warpid() % WARPS_COL);
 
     using T = kittens::fp8e4m3;
     constexpr int bpt = ST_A::underlying_subtile_bytes_per_thread;
@@ -908,10 +910,11 @@ void micro_tk_1d2d_pow2(
 
     // ---- Store (blockwise NON-TRANSPOSED path). HW already applied the E8M0 scale, so there is
     //      no scale multiply here. The batched form (epilogue -> rtne -> store, applied to all 4
-    //      accumulators back-to-back) is REQUIRED for determinism on ROCm 7.2.1: the earlier
-    //      per-accumulator `finish` lambda interleaved the store with epilogue/mask bookkeeping and
-    //      produced a register schedule that raced against the scaled MMA (~10^4 sparse pow2-sized
-    //      mismatches). Storing the four accumulators uniformly is deterministic AND correct. ----
+    //      accumulators back-to-back) is REQUIRED for determinism on ROCm 7.2.1: the per-accumulator
+    //      sequential `finish` form interleaves each store with epilogue/mask bookkeeping, which on
+    //      7.2.1 blows register allocation to 126 spills (incl. MMA-output accumulators) that race
+    //      against the async scaled MMA -- verified det=[T,F,F,F] + ~10^4 sparse mismatches. Storing
+    //      the four accumulators uniformly keeps MMA outputs unspilled -> deterministic + correct. ----
     const int m_off0 = block_row * BLOCK_M + warp_m * REG_M;
     const int m_off1 = block_row * BLOCK_M + HALF_ROW + warp_m * REG_M;
     const int n_off0 = block_col * BLOCK_N + warp_n * REG_N;
@@ -924,26 +927,17 @@ void micro_tk_1d2d_pow2(
     const int cn1 = block_col * WARPS_COL * 2 + WARPS_COL + warp_n;
     const bool full = (block_row + 1) * BLOCK_M <= M && (block_col + 1) * BLOCK_N <= N;
 
-    if constexpr (HAS_BIAS || HAS_GELU || HAS_BETA) {
-        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cA, m_off0, n_off0, M, N, bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta);
-        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cB, m_off0, n_off1, M, N, bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta);
-        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cC, m_off1, n_off0, M, N, bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta);
-        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(cD, m_off1, n_off1, M, N, bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta);
-    }
-    if constexpr (std::is_same_v<OType, kittens::bf16>) {
-        apply_rtne_bias(cA); apply_rtne_bias(cB); apply_rtne_bias(cC); apply_rtne_bias(cD);
-    }
-    if (full) {
-        kittens::store(C, cA, {0, 0, ca, cn0});
-        kittens::store(C, cB, {0, 0, ca, cn1});
-        kittens::store(C, cC, {0, 0, cc, cn0});
-        kittens::store(C, cD, {0, 0, cc, cn1});
-    } else {
-        store_masked(c_ptr, cA, m_off0, n_off0, M, N);
-        store_masked(c_ptr, cB, m_off0, n_off1, M, N);
-        store_masked(c_ptr, cC, m_off1, n_off0, M, N);
-        store_masked(c_ptr, cD, m_off1, n_off1, M, N);
-    }
+    auto finish = [&](RT_C &c, int m_off, int n_off, int crow, int ccol) {
+        if constexpr (HAS_BIAS || HAS_GELU || HAS_BETA)
+            apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(c, m_off, n_off, M, N, bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta);
+        if constexpr (std::is_same_v<OType, kittens::bf16>) apply_rtne_bias(c);
+        if (full) kittens::store(C, c, {0, 0, crow, ccol});
+        else      store_masked(c_ptr, c, m_off, n_off, M, N);
+    };
+    finish(cA, m_off0, n_off0, ca, cn0);
+    finish(cB, m_off0, n_off1, ca, cn1);
+    finish(cC, m_off1, n_off0, cc, cn0);
+    finish(cD, m_off1, n_off1, cc, cn1);
 }
 
 #ifndef NVTE_SQ_ONLY
@@ -1592,9 +1586,15 @@ static void launch_1d2d_pow2(int cbsz, int blgp, bool has_bias, bool has_gelu, b
     const size_t sa_elems = (size_t)k_iters * padM;   // uint32 count
     const size_t sb_elems = (size_t)k_iters * padN;
 
-    uint32_t *packed_sa = nullptr, *packed_sb = nullptr;
-    hipMalloc(&packed_sa, sa_elems * sizeof(uint32_t));
-    hipMalloc(&packed_sb, sb_elems * sizeof(uint32_t));
+    // Persistent scale workspace: growing-only cache instead of per-call hipMalloc/Free + a
+    // stream sync. The per-call form serialized every GEMM (malloc/free are synchronous and the
+    // sync drained the pipeline), which was the dominant throughput regression vs running-rescale.
+    // The buffers are stream-ordered (pack -> gemm consume on the same stream), so no sync/free is
+    // needed here; they are reused (grown when a larger problem arrives) for the process lifetime.
+    static uint32_t *packed_sa = nullptr, *packed_sb = nullptr;
+    static size_t cap_sa = 0, cap_sb = 0;
+    if (sa_elems > cap_sa) { if (packed_sa) hipFree(packed_sa); hipMalloc(&packed_sa, sa_elems * sizeof(uint32_t)); cap_sa = sa_elems; }
+    if (sb_elems > cap_sb) { if (packed_sb) hipFree(packed_sb); hipMalloc(&packed_sb, sb_elems * sizeof(uint32_t)); cap_sb = sb_elems; }
     hipMemsetAsync(packed_sa, 0, sa_elems * sizeof(uint32_t), stream);
     hipMemsetAsync(packed_sb, 0, sb_elems * sizeof(uint32_t), stream);
 
@@ -1610,10 +1610,6 @@ static void launch_1d2d_pow2(int cbsz, int blgp, bool has_bias, bool has_gelu, b
         bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta, kM, kN, K, stream};
 
     launch_pow2_epi<OType>(cbsz, blgp, has_bias, has_gelu, has_beta, a);
-
-    hipStreamSynchronize(stream);
-    hipFree(packed_sa);
-    hipFree(packed_sb);
 }
 
 void kittens_blockwise_fp8_gemm_impl_cdna4(
