@@ -18,7 +18,7 @@ const CFG = {
   noiseK: 2.0,           // a drop must exceed K * (run-to-run relative std) to count as real
   minSamples: 3,         // prior main runs needed to size a noise band (else: low confidence)
   sparkFloorPct: 6,      // sparkline min half-window (% of baseline) so trivial noise stays flat
-  archOrder: ["gfx950"], // TE runs; add arches here (also update index.html trend header)
+  archOrder: ["gfx950", "gfx942"], // TE runs; add arches here (also update index.html legend + trend header)
 };
 
 const S = {
