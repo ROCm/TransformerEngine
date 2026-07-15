@@ -18,6 +18,14 @@ import os
 #### cast_transpose
 ##########################################
 
+@triton.jit
+def _init_neg_inf_triton(amax_ptr):
+    # Reset a single-element amax buffer to -inf via a pointer store. Used instead of
+    # amax_out.fill_(-inf) because amax_out may be a preserved inference tensor that
+    # cannot be updated in-place through ATen outside torch.inference_mode.
+    tl.store(amax_ptr, -float('inf'))
+
+
 @triton.autotune(
     configs=[
         triton.Config({'BLOCK_M': 64,  'BLOCK_N': 64,  'GROUP_M': 1}, num_warps=4),
@@ -765,12 +773,19 @@ def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans
         # 2) compute current scale
         # 3) cast+transpose with that current scale (otherwise same as delayed)
 
-        amax_out.fill_(-float("inf"))
         fp8_max = get_fp8_max(otype)
 
         nvte_use_atomic_amax =  bool( int(os.environ.get('NVTE_USE_ATOMIC_AMAX', '0')) )
 
         if nvte_use_atomic_amax:
+            # tl.atomic_max accumulates into amax_out, so it must start at -inf.
+            # Initialize via a Triton store rather than amax_out.fill_(-inf): amax_out is the
+            # quantizer's persistent amax buffer, which since upstream #2929 (fusible ops
+            # preserve quantized-weight usages) may be a PyTorch "inference tensor" allocated
+            # under torch.inference_mode. An ATen in-place op on such a tensor outside
+            # inference mode raises; a Triton pointer store bypasses that guard (same as the
+            # tl.store used by the 2-stage path below).
+            _init_neg_inf_triton[(1,)](amax_out)
             # Compute global amax
             _amax_reduce_triton[grid](
                 input_2d_view,
@@ -786,7 +801,8 @@ def te_cast_transpose_noop_triton(input, noop_flag, input_scale, cast_out, trans
                 FORCE_POW_2_SCALES=force_pow_2_scales,
             )
         else:
-            # 2-stage amax
+            # 2-stage amax. Stage 2 (_amax_reduce_and_compute_scale_triton) overwrites
+            # amax_out via tl.store, so no -inf prefill of amax_out is needed here.
             max_num_amax_stage1_programs = max(
                 triton.cdiv(num_rows, cfg.kwargs['BLOCK_M']) *
                 triton.cdiv(row_length, cfg.kwargs['BLOCK_N'])
