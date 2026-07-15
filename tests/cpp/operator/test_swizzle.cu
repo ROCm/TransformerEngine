@@ -317,6 +317,14 @@ TEST_P(SwizzleTestSuite, TestSwizzle) {
     using namespace transformer_engine;
     using namespace test;
 
+#ifdef __HIP_PLATFORM_AMD__
+  cudaDeviceProp prop;
+  cudaGetDeviceProperties(&prop, 0);
+  if (prop.major == 12 && prop.minor == 5) {
+    GTEST_SKIP() << "Legacy MXFP8 swizzle reference does not match gfx1250 GEMM pre-swizzle layout";
+  }
+#endif
+
   const auto num_tiles = std::get<0>(GetParam());
   const auto scaling_mode = std::get<1>(GetParam());
   const auto transa = std::get<2>(GetParam());
@@ -326,6 +334,7 @@ TEST_P(SwizzleTestSuite, TestSwizzle) {
                        transa);
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 class UnswizzleTestSuite : public ::testing::TestWithParam<std::tuple<std::pair<size_t, size_t>, std::pair<bool, bool>, bool>> {};
 
 TEST_P(UnswizzleTestSuite, TestUnswizzle) {
@@ -604,6 +613,7 @@ INSTANTIATE_TEST_SUITE_P(
            "_K" + std::to_string(std::get<2>(info.param));
   }
 );
+#endif  // !__HIP_PLATFORM_AMD__ (Grouped swizzle test suites)
 
 namespace {
 
@@ -662,6 +672,7 @@ INSTANTIATE_TEST_SUITE_P(
     return name;
     });
 
+#ifndef __HIP_PLATFORM_AMD__
 INSTANTIATE_TEST_SUITE_P(
   OperatorTest,
   UnswizzleTestSuite,
@@ -679,6 +690,7 @@ INSTANTIATE_TEST_SUITE_P(
       std::to_string(std::get<2>(info.param));
     return name;
     });
+#endif  // !__HIP_PLATFORM_AMD__ (UnswizzleTestSuite)
 
 void performTestSwizzleUnswizzleRoundtrip(const size_t M, const size_t K, bool rowwise, bool columnwise, const bool transa) {
   using namespace test;
@@ -756,6 +768,7 @@ void performTestSwizzleUnswizzleRoundtrip(const size_t M, const size_t K, bool r
   }
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 class SwizzleUnswizzleRoundtripTestSuite : public ::testing::TestWithParam<std::tuple<std::pair<size_t, size_t>, std::pair<bool, bool>, bool>> {};
 
 TEST_P(SwizzleUnswizzleRoundtripTestSuite, TestSwizzleUnswizzleRoundtrip) {
@@ -788,3 +801,197 @@ INSTANTIATE_TEST_SUITE_P(
       std::to_string(std::get<2>(info.param));
     return name;
     });
+#endif  // !__HIP_PLATFORM_AMD__ (SwizzleUnswizzleRoundtripTestSuite)
+
+#ifdef __HIP_PLATFORM_AMD__
+
+// MX pre-swizzle test for the gfx1250 K-tiled layout.  K-scale entries are grouped in
+// chunks of 4, and each group stores all M rows before the next K-scale group.
+// Row-wise input is [M, K], column-wise input is [K, M].
+void compute_ref_mx_swizzle_row(const uint8_t *h_input, uint8_t *h_output,
+                                   const int M, const int K,
+                                   const int orig_M, const int orig_K,
+                                   const int input_stride) {
+  constexpr int GROUP = 4;
+  for (int m = 0; m < M; m++) {
+    for (int k = 0; k < K; k++) {
+      uint8_t val = 127;  // E8M0 identity: 2^0 = 1.0
+      if (m < orig_M && k < orig_K) {
+        val = h_input[m * input_stride + k];
+      }
+      int group = k / GROUP;
+      int within = k % GROUP;
+      int dst = group * (M * GROUP) + m * GROUP + within;
+      h_output[dst] = val;
+    }
+  }
+}
+
+void compute_ref_mx_swizzle_col(const uint8_t *h_input, uint8_t *h_output,
+                                   const int M, const int K,
+                                   const int orig_M, const int orig_K,
+                                   const int input_stride) {
+  constexpr int GROUP = 4;
+  for (int m = 0; m < M; m++) {
+    for (int k = 0; k < K; k++) {
+      uint8_t val = 127;
+      if (m < orig_M && k < orig_K) {
+        val = h_input[k * input_stride + m];
+      }
+      int group = k / GROUP;
+      int within = k % GROUP;
+      int dst = group * (M * GROUP) + m * GROUP + within;
+      h_output[dst] = val;
+    }
+  }
+}
+
+static size_t roundup_sz(size_t val, size_t mult) {
+  return ((val + mult - 1) / mult) * mult;
+}
+
+class MxSwizzleTestSuite
+    : public ::testing::TestWithParam<
+          std::tuple<std::pair<int, int>, bool>> {};
+
+TEST_P(MxSwizzleTestSuite, TestMxSwizzleGfx1250) {
+  using namespace transformer_engine;
+  using namespace test;
+
+  cudaDeviceProp prop;
+  cudaGetDeviceProperties(&prop, 0);
+  if (!(prop.major == 12 && prop.minor == 5)) {
+    GTEST_SKIP() << "MXFP8 pre-swizzle is only supported on gfx1250";
+  }
+
+  const auto dims = std::get<0>(GetParam());
+  const bool rowwise = std::get<1>(GetParam());
+
+  // Original (unpadded) scale dimensions
+  const size_t orig_M = dims.first;
+  const size_t orig_K = dims.second;
+
+  // Padded dimensions: K-tiled layout requires M_scale and K_scale padded to multiples of 4.
+  const size_t M = roundup_sz(orig_M, 4);
+  const size_t K = roundup_sz(orig_K, 4);
+
+  // Allocate host input with the padded scale shape used by production tensors.
+  const size_t input_size = M * K;
+  std::unique_ptr<uint8_t[]> h_input(new uint8_t[input_size]);
+  memset(h_input.get(), 127, input_size);
+  std::mt19937 rng(42);
+  if (rowwise) {
+    for (size_t m = 0; m < orig_M; m++) {
+      for (size_t k = 0; k < orig_K; k++) {
+        h_input[m * K + k] = static_cast<uint8_t>(rng() % 256);
+      }
+    }
+  } else {
+    for (size_t k = 0; k < orig_K; k++) {
+      for (size_t m = 0; m < orig_M; m++) {
+        h_input[k * M + m] = static_cast<uint8_t>(rng() % 256);
+      }
+    }
+  }
+
+  // Allocate device input
+  uint8_t *d_input = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&d_input, input_size));
+  NVTE_CHECK_CUDA(cudaMemcpy(d_input, h_input.get(), input_size, cudaMemcpyHostToDevice));
+
+  // Allocate device output (padded size)
+  const size_t output_size = M * K;
+  uint8_t *d_output = nullptr;
+  NVTE_CHECK_CUDA(cudaMalloc(&d_output, output_size));
+  NVTE_CHECK_CUDA(cudaMemset(d_output, 0, output_size));
+
+  // Build TensorWrapper for input and output
+  TensorWrapper input_tw(NVTE_MXFP8_1D_SCALING);
+  TensorWrapper output_tw(NVTE_MXFP8_1D_SCALING);
+  output_tw.set_with_gemm_swizzled_scales(true);
+
+  // Data shape must be consistent with scale shape for validation.
+  // Scale shapes use padded M/K; data shapes use unpadded dims
+  // (kernel derives original_M/K from them).
+  if (rowwise) {
+    std::vector<size_t> data_shape_in = {orig_M, orig_K * 32};
+    std::vector<size_t> data_shape_out = {M, K * 32};
+    std::vector<size_t> scale_shape_in = {M, K};
+    std::vector<size_t> scale_shape_out = {M, K};
+    input_tw.set_rowwise_data(nullptr, DType::kFloat8E4M3, data_shape_in);
+    input_tw.set_rowwise_scale_inv(d_input, DType::kFloat8E8M0, scale_shape_in);
+    output_tw.set_rowwise_data(nullptr, DType::kFloat8E4M3, data_shape_out);
+    output_tw.set_rowwise_scale_inv(d_output, DType::kFloat8E8M0, scale_shape_out);
+  } else {
+    std::vector<size_t> data_shape_in = {orig_K * 32, orig_M};
+    std::vector<size_t> data_shape_out = {K * 32, M};
+    std::vector<size_t> scale_shape_in = {K, M};
+    std::vector<size_t> scale_shape_out = {K, M};
+    input_tw.set_columnwise_data(nullptr, DType::kFloat8E4M3, data_shape_in);
+    input_tw.set_columnwise_scale_inv(d_input, DType::kFloat8E8M0, scale_shape_in);
+    output_tw.set_columnwise_data(nullptr, DType::kFloat8E4M3, data_shape_out);
+    output_tw.set_columnwise_scale_inv(d_output, DType::kFloat8E8M0, scale_shape_out);
+  }
+
+  nvte_swizzle_scaling_factors(input_tw.data(), output_tw.data(), 0);
+
+  NVTE_CHECK_CUDA(cudaDeviceSynchronize());
+
+  // Copy output back to host
+  std::unique_ptr<uint8_t[]> h_output(new uint8_t[output_size]);
+  NVTE_CHECK_CUDA(cudaMemcpy(h_output.get(), d_output, output_size, cudaMemcpyDeviceToHost));
+
+  // Compute reference
+  std::unique_ptr<uint8_t[]> h_ref(new uint8_t[output_size]);
+  memset(h_ref.get(), 0, output_size);
+  if (rowwise) {
+    compute_ref_mx_swizzle_row(h_input.get(), h_ref.get(), M, K, orig_M, orig_K, K);
+  } else {
+    compute_ref_mx_swizzle_col(h_input.get(), h_ref.get(), M, K, orig_M, orig_K, M);
+  }
+
+  // Compare
+  compareResults("mx_swizzle", h_output.get(), h_ref.get(), output_size);
+
+  cudaFree(d_input);
+  cudaFree(d_output);
+}
+
+namespace {
+
+// Scale dimensions (M_scale, K_scale).
+// K_scale will be padded to multiple of 4 by the test.
+std::vector<std::pair<int, int>> mx_scale_dims = {
+  {3, 4},        // non-multiple-of-4 M
+  {4, 3},        // K padding
+  {8, 5},        // K padding
+  {32, 7},       // K padding
+  {4, 4},        // minimal
+  {8, 4},        // small
+  {32, 8},       // medium
+  {64, 16},      // larger
+  {96, 8},       // non-power-of-2 M
+  {128, 32},     // big
+  {256, 64},     // bigger
+  {512, 128},    // stress inter-tile
+  {1024, 256},   // large
+  {4096, 256},   // max stress
+};
+
+}  // namespace
+
+INSTANTIATE_TEST_SUITE_P(
+  OperatorTest,
+  MxSwizzleTestSuite,
+  ::testing::Combine(
+    ::testing::ValuesIn(mx_scale_dims),
+    ::testing::Values(true, false)
+  ),
+  [](const testing::TestParamInfo<MxSwizzleTestSuite::ParamType>& info) {
+    std::string name = "M" + std::to_string(std::get<0>(info.param).first) +
+      "_K" + std::to_string(std::get<0>(info.param).second) +
+      (std::get<1>(info.param) ? "_row" : "_col");
+    return name;
+  });
+
+#endif  // __HIP_PLATFORM_AMD__

@@ -283,6 +283,30 @@ enum class TopkFuncType {
   Radix = 1,
 };
 
+#ifdef __HIP_PLATFORM_AMD__
+/*******************************************************************************
+ * warp_prefix_count — Shuffle-based exclusive prefix sum for a boolean predicate
+ *
+ * Replaces __ballot_sync + __popcll which are broken on wave64: HIP's ballot
+ * returns 64 bits covering the full wavefront, but the kernel assumes 32-lane
+ * warps. Uses __shfl_up with width=kThreadsPerWarp instead — HIP partitions
+ * the 64-lane wavefront into independent 32-lane sub-groups when width=32.
+ ******************************************************************************/
+__device__ inline void warp_prefix_count(bool pred, int lane_id,
+                                         int &exclusive_prefix, int &total) {
+  int val = pred ? 1 : 0;
+#pragma unroll
+  for (int offset = 1; offset < static_cast<int>(kThreadsPerWarp); offset *= 2) {
+    int up = __shfl_up(val, offset, kThreadsPerWarp);
+    if (lane_id >= offset) {
+      val += up;
+    }
+  }
+  exclusive_prefix = val - (pred ? 1 : 0);
+  total = __shfl(val, kThreadsPerWarp - 1, kThreadsPerWarp);
+}
+#endif
+
 /*******************************************************************************
  * radix_topk_and_mask — Warp-level radix-selection based top-K
  *
@@ -411,11 +435,15 @@ __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int 
     unsigned int u = valid ? float_to_ordered_uint(scores[i]) : 0;
     bool is_greater = valid && (u > desired);
 
+    int lane_prefix, total_qualifying;
+#ifdef __HIP_PLATFORM_AMD__
+    warp_prefix_count(is_greater, lane_id, lane_prefix, total_qualifying);
+#else
     // Warp ballot to count how many lanes have a qualifying element
-    // Use 64-bit mask for ROCm compatibility (HIP requires uint64_t mask)
-    uint64_t ballot = __ballot_sync(0xFFFFFFFFFFFFFFFFull, is_greater);
-    int lane_prefix = __popcll(ballot & ((1ull << lane_id) - 1));  // exclusive prefix
-    int total_qualifying = __popcll(ballot);
+    unsigned int ballot = __ballot_sync(0xffffffff, is_greater);
+    lane_prefix = __popcll(ballot & ((1ull << lane_id) - 1)); // exclusive prefix
+    total_qualifying = __popcll(ballot);
+#endif
 
     if (is_greater) {
       int out_idx = write_pos + lane_prefix;
@@ -437,9 +465,14 @@ __device__ inline void radix_topk_and_mask(CompType *scores, int data_size, int 
     unsigned int u = valid ? float_to_ordered_uint(scores[i]) : 0;
     bool is_equal = valid && (u == desired);
 
-    uint64_t ballot = __ballot_sync(0xFFFFFFFFFFFFFFFFull, is_equal);
-    int lane_prefix = __popcll(ballot & ((1ull << lane_id) - 1));
-    int total_equal = __popcll(ballot);
+    int lane_prefix, total_equal;
+#ifdef __HIP_PLATFORM_AMD__
+    warp_prefix_count(is_equal, lane_id, lane_prefix, total_equal);
+#else
+    unsigned int ballot = __ballot_sync(0xffffffff, is_equal);
+    lane_prefix = __popcll(ballot & ((1ull << lane_id) - 1));
+    total_equal = __popcll(ballot);
+#endif
 
     if (is_equal && lane_prefix < tie_remaining) {
       int out_idx = write_pos + lane_prefix;

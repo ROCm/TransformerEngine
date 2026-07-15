@@ -23,6 +23,21 @@ TEST_START_TS=`date +%s`
 #To disable some logs trimming
 export CI=1
 
+# Crash/hang visibility and bounding:
+# - PYTHONFAULTHANDLER dumps a Python traceback on fatal signals (segfaults).
+# - PYTEST_TIMEOUT bounds every individual test item so a single hang cannot
+#   stall the whole CI job; the offending test is recorded as a failure with a
+#   traceback instead of the run silently timing out hours later.
+# Note: the 'thread' method bounds only the pytest process itself. Tests that
+# launch torchrun/mpirun children (tests/pytorch/distributed) are reaped
+# separately by tests/pytorch/distributed/conftest.py, which reads PYTEST_TIMEOUT
+# to bound each child below this outer limit -- hence the exports below.
+# All are overridable from the environment.
+export PYTHONFAULTHANDLER=1
+export PYTEST_TIMEOUT=${PYTEST_TIMEOUT:-600}               # per-test (per-parametrization) timeout, seconds
+export PYTEST_TIMEOUT_METHOD=${PYTEST_TIMEOUT_METHOD:-thread} # unstick a hung main thread; see note above
+export CTEST_TIMEOUT=${CTEST_TIMEOUT:-300}                 # per-cpp-test timeout, seconds
+
 _script_error_count=0
 _run_error_count=0
 _ignored_error_count=0
@@ -213,6 +228,41 @@ get_pytest_junitxml() {
     fi
 }
 
+# Pytest can exit *before* it writes its --junitxml report: a usage error
+# (exit 4), a conftest import failure, a hard per-test timeout that os._exit()s
+# the process, or a segfault/OOM-kill during collection. The file then silently
+# never appears, junit_report.py only sees the other (passing) files' XML, and
+# the job summary shows green even though pytest_run already recorded the failure
+# via test_run_error. Synthesize a minimal JUnit XML for the missing file so the
+# report surfaces it as an error instead of dropping it (keeps the summary
+# consistent with the suite exit-code gate).
+# args: test_name_tag exit_code
+write_missing_junitxml() {
+    test -n "$JUNITXML_PREFIX$JUNITXML_SUFFIX" || return 0   # XML not requested (local run)
+    _missing_xml="$JUNITXML_PREFIX$1$JUNITXML_SUFFIX"
+    test -s "$_missing_xml" && return 0   # pytest already wrote a (non-empty) report
+    # A non-empty sidecar means te_ci_result_sink captured per-test progress;
+    # junit_report.py reconstructs the run from it, so don't shadow that richer
+    # record with a coarse whole-file stub.
+    test -s "$_missing_xml.partial" && return 0
+    mkdir -p "$(dirname "$_missing_xml")" 2>/dev/null
+    # Keep the words 'timeout'/'timed out' out of this message: junit_report.py's
+    # is_timeout() substring-matches the message and would mislabel the entry.
+    _missing_msg="pytest exited $2 without writing JUnit XML (crash, usage/conftest error, or process hard-exit before reporting); see the suite .log artifact"
+    cat > "$_missing_xml" <<EOF
+<?xml version="1.0" encoding="utf-8"?>
+<testsuites><testsuite name="pytest" errors="1" failures="0" skipped="0" tests="1">
+<testcase classname="$1" name="(no JUnit XML written)"><error message="$_missing_msg"></error></testcase>
+</testsuite></testsuites>
+EOF
+}
+
+get_ctest_junitxml() {
+    if [ -n "$JUNITXML_PREFIX$JUNITXML_SUFFIX" ]; then
+        echo "--output-junit ${JUNITXML_PREFIX}$1${JUNITXML_SUFFIX}"
+    fi
+}
+
 check_test_filter() {
     test -z "$TEST_FILTER" && return 0
     for _tf in $TEST_FILTER; do
@@ -237,11 +287,15 @@ start_message() {
     python3 --version
 }
 
-configure_omp_threads() {
+get_cpu_count() {
     n_vcpus=$(lscpu | grep "^CPU(s):" | awk '{print $2}')
     cpus_per_core=$(lscpu | grep "Thread(s) per core:" | awk '{print $NF}')
 
-    n_physical_cores=$((n_vcpus / cpus_per_core))
+    echo $((n_vcpus / cpus_per_core))
+}
+
+configure_omp_threads() {
+    n_physical_cores=`get_cpu_count`
     n_parallel_jobs=$1
 
     if [ -z ${OMP_NUM_THREADS} ]; then
@@ -266,7 +320,82 @@ pytest_run() {
     check_test_filter $_test_name_tag || return
     _start_ts=`date +%s`
     echo "Run [$_test_variant_tag] $@ at `time_elapsed $TEST_START_TS`"
-    python3 -m pytest -v -rfEs `get_pytest_junitxml $_test_name_tag` $TEST_PYTEST_ARGS "$TEST_DIR/$@"
-    test $? -eq 0 || test_run_error "[$_test_variant_tag] $1"
+    # A per-test timeout is applied to every item. Callers may still append their
+    # own --timeout/--timeout-method (e.g. distributed tests); since argparse
+    # takes the last value, a caller-supplied override wins over these defaults.
+    #
+    # te_ci_result_sink streams per-test progress to a <junitxml>.partial sidecar
+    # so a hard --timeout-method=thread exit (or segfault/OOM) that skips pytest's
+    # end-of-session JUnit XML write stays reconstructable by junit_report.py
+    # instead of vanishing from the summary. Enabled only when JUnit XML is
+    # requested (CI); a plain local run is unaffected.
+    _junitxml_arg=`get_pytest_junitxml $_test_name_tag`
+    _sink_plugin=""
+    _result_sink=""
+    _pytest_pythonpath="$PYTHONPATH"
+    if [ -n "$_junitxml_arg" ]; then
+        _result_sink="${JUNITXML_PREFIX}${_test_name_tag}${JUNITXML_SUFFIX}.partial"
+        rm -f "$_result_sink" 2>/dev/null
+        _sink_plugin="-p te_ci_result_sink"
+        _pytest_pythonpath="${TE_PATH}ci${PYTHONPATH:+:$PYTHONPATH}"
+    fi
+    TE_RESULT_SINK="$_result_sink" PYTHONPATH="$_pytest_pythonpath" \
+        python3 -m pytest -v -rfEs \
+        --timeout=$PYTEST_TIMEOUT --timeout-method=$PYTEST_TIMEOUT_METHOD \
+        $_sink_plugin $_junitxml_arg $TEST_PYTEST_ARGS "$TEST_DIR/$@"
+    _pytest_rc=$?
+    if [ $_pytest_rc -ne 0 ]; then
+        test_run_error "[$_test_variant_tag] $1"
+        write_missing_junitxml "$_test_name_tag" "$_pytest_rc"
+    fi
     echo "Done [$_test_variant_tag] $1 in `time_elapsed $_start_ts`"
+}
+
+PYTHON_TE_IMPORT="import sys; sys.path[:] = [p for p in sys.path if p not in ['', '.']]; import transformer_engine"
+ck_jit_prebuild() {
+    _prebuild_list="${TE_PATH}ci/ck_jit_prebuild.txt"
+    if [ ! -f "$_prebuild_list" ]; then
+        script_error "ck_jit_prebuild: blob list not found: $_prebuild_list"
+        return 1
+    fi
+    _gpu_arch=$(rocminfo | grep -E "^ *Name: *gfx" | head -1 | sed "s/.*gfx/gfx/;s/ .*//" 2>/dev/null)
+    if [ -n "$_gpu_arch" ]; then
+        _arch_arg="--arch $_gpu_arch"
+    else
+        script_error "ck_jit_prebuild: GPU architecture not detected, omitting --arch"
+        _arch_arg=""
+    fi
+    _te_install_dir=$(python -c "${PYTHON_TE_IMPORT}; import os; print(os.path.dirname(transformer_engine.__file__))" 2>/dev/null)
+    if [ -z "$_te_install_dir" ]; then
+        script_error "ck_jit_prebuild: failed to determine transformer_engine installation directory"
+        return 1
+    fi
+    _prebuild_py="$_te_install_dir/lib/ck_jit/ck_jit_prebuild.py"
+    if [ ! -f "$_prebuild_py" ]; then
+        script_error "ck_jit_prebuild: prebuild script not found: $_prebuild_py"
+        return 1
+    fi
+    _cpu_count=$(get_cpu_count)
+    if [ -n "$_cpu_count" -a "$_cpu_count" != "0" ]; then
+        _jobs_arg="--jobs $((_cpu_count/2))"
+    fi
+    if [ "$1" = "build" ]; then
+        echo "Building CK JIT cache for arch=${_gpu_arch:-<not detected>}..."
+        python "$_prebuild_py" build --blob-list "$_prebuild_list" $_arch_arg $_jobs_arg > /dev/null
+        _CK_JIT_CACHE_SNAPSHOT=$(python "$_prebuild_py" cache)
+        echo "$_CK_JIT_CACHE_SNAPSHOT" | grep Cache
+    else
+        if [ -z "${_CK_JIT_CACHE_SNAPSHOT+set}" ]; then
+            python "$_prebuild_py" cache | grep Cache
+        else
+            _cache_now=$(python "$_prebuild_py" cache)
+            if [ "$_CK_JIT_CACHE_SNAPSHOT" != "$_cache_now" ]; then
+                echo "Cache diff (build -> now):"
+                _diff_tmp=$(mktemp)
+                echo "$_CK_JIT_CACHE_SNAPSHOT" > "$_diff_tmp"
+                echo "$_cache_now" | diff -u "$_diff_tmp" -
+                rm -f "$_diff_tmp"
+            fi
+        fi
+    fi
 }

@@ -26,6 +26,11 @@
 #include "../core/common.cuh"
 #include "swizzle.cuh"
 
+#ifdef __HIP_PLATFORM_AMD__
+// ROCm group_quantize dispatch uses quantize_kernel namespace
+#include "quantize_mxfp8.cuh"
+#endif
+
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
@@ -759,7 +764,113 @@ void group_quantize(const GroupedTensor *input, const GroupedTensor *activations
                     Tensor *workspace, const QuantizationConfig *quant_config,
                     cudaStream_t stream) {
 #ifdef __HIP_PLATFORM_AMD__
-  NVTE_ERROR("group_quantize is not supported on ROCm yet.");
+  using namespace quantize_kernel;
+  CheckNoopTensor(*noop, "cast_noop");
+
+  const bool use_rowwise_scaling = output->has_data();
+  const bool use_colwise_scaling = output->has_columnwise_data();
+  NVTE_CHECK(use_rowwise_scaling || use_colwise_scaling,
+             "Either rowwise or columnwise output data need to be allocated.");
+  NVTE_CHECK(input->num_tensors == output->num_tensors,
+             "Number of input and output tensors must be same.");
+  NVTE_CHECK(input->has_data(), "Cannot quantize tensor without rowwise data.");
+  NVTE_CHECK(is_fp8_dtype(output->dtype()), "Output must have FP8 type.");
+
+  const bool is_single_tensor = output->all_same_shape() || output->all_same_last_dim();
+
+  const size_t first_logical_dim = input->logical_shape.data[0];
+  const size_t last_logical_dim  = input->logical_shape.data[1];
+  const size_t num_tensors       = input->num_tensors;
+  const size_t elts_total        = first_logical_dim * last_logical_dim;
+
+  const bool use_large_chunks = (elts_total > 32 * 1024 * 1024);
+  const size_t CHUNK_DIM_Y = use_large_chunks ? 128 : 64;
+  const size_t CHUNK_DIM_X = use_large_chunks ? 128 : 64;
+  const size_t THREADS_PER_CHUNK = use_large_chunks ? 256 : 128;
+
+  size_t blocks_X, blocks_Y;
+  if (is_single_tensor) {
+    blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
+    blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
+  } else {
+    blocks_Y = 1;
+    blocks_X = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
+  }
+  const dim3 grid(blocks_X, blocks_Y);
+
+  const int64_t *const offsets_ptr    = reinterpret_cast<const int64_t *>(output->tensor_offsets.dptr);
+  const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(output->first_dims.dptr);
+  const int64_t *const last_dims_ptr  = reinterpret_cast<const int64_t *>(output->last_dims.dptr);
+
+  e8m0_t *const scales_rowwise_ptr = reinterpret_cast<e8m0_t *>(output->scale_inv.dptr);
+  e8m0_t *const scales_colwise_ptr = reinterpret_cast<e8m0_t *>(output->columnwise_scale_inv.dptr);
+  float *const amax_ptr  = reinterpret_cast<float *>(output->amax.dptr);
+  const float *noop_ptr  = reinterpret_cast<const float *>(noop->data.dptr);
+
+  const size_t scale_stride_rowwise = use_rowwise_scaling
+      ? DIVUP(last_logical_dim, size_t{32}) : 1;
+  const size_t scale_stride_colwise = use_colwise_scaling ? last_logical_dim : 1;
+
+  float *const workspace_ptr = IS_DBIAS ? reinterpret_cast<float *>(workspace->data.dptr) : nullptr;
+
+  if constexpr (IS_DBIAS) {
+    NVTE_CHECK(dbias->data.dtype == input->dtype(), "DBias must have the same type as input.");
+    NVTE_CHECK(workspace != nullptr, "Workspace must be a tensor.");
+    const size_t dbias_workspace_rows = blocks_Y;
+    const size_t dbias_workspace_cols = last_logical_dim;
+    if (workspace->data.dptr == nullptr) {
+      workspace->data.shape = {dbias_workspace_rows, dbias_workspace_cols};
+      workspace->data.dtype = DType::kFloat32;
+      return;
+    }
+  }
+
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+    use_large_chunks, USE_LARGE_CHUNKS,
+
+    constexpr size_t CDY = USE_LARGE_CHUNKS ? 128 : 64;
+    constexpr size_t CDX = USE_LARGE_CHUNKS ? 128 : 64;
+    constexpr size_t TPC = USE_LARGE_CHUNKS ? 256 : 128;
+
+    TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+      input->dtype(), IType,
+      TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+          output->dtype(), OType,
+          TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+            (use_colwise_scaling ? 32 : 1), SCALE_DIM_Y,
+            TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+              (use_rowwise_scaling ? 32 : 1), SCALE_DIM_X,
+                TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                  !(last_logical_dim % (32 * sizeof(IType))), IS_ALIGNED,
+                  grouped_quantize_mxfp8_kernel<IS_DBIAS, IS_DACT, IS_ACT, ParamOP, OP, IType, OType,
+                                      SCALE_DIM_Y, SCALE_DIM_X, IS_ALIGNED,
+                                      CDY, CDX, TPC>
+                    <<<grid, TPC, 0, stream>>>(
+                      reinterpret_cast<const IType *>(input->data.dptr),
+                      (IS_DACT) ? reinterpret_cast<const IType *>(activations->data.dptr) : nullptr,
+                      use_rowwise_scaling ? reinterpret_cast<OType *>(output->data.dptr) : nullptr,
+                      use_colwise_scaling ? reinterpret_cast<OType *>(output->columnwise_data.dptr) : nullptr,
+                      scales_rowwise_ptr, scales_colwise_ptr,
+                      noop_ptr, workspace_ptr, amax_ptr,
+                      first_logical_dim, last_logical_dim,
+                      scale_stride_rowwise, scale_stride_colwise,
+                      num_tensors, offsets_ptr, first_dims_ptr, last_dims_ptr,
+                      first_logical_dim);
+                  NVTE_CHECK_CUDA(cudaGetLastError());
+          )))));
+
+  if constexpr (IS_DBIAS) {
+    TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+        input->dtype(), IType,
+        ShapeRepresentation shape_rep = output->all_same_shape()
+            ? ShapeRepresentation::SAME_BOTH_DIMS : ShapeRepresentation::VARYING_FIRST_DIM;
+        common::grouped_reduce_dbias<IType>(
+            shape_rep, num_tensors, first_logical_dim, last_logical_dim,
+            offsets_ptr, first_dims_ptr, last_dims_ptr, dbias, workspace_ptr,
+            CDY, stream);
+    );
+  }
+  ); // NOLINT(*)
 #else
   using namespace group_quantize_kernel;
 

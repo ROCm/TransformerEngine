@@ -21,7 +21,7 @@ install_prerequisites() {
         script_error "Failed to install Flax and dependencies"
         return $rc
     fi
-    pip install pytest-timeout
+    pip install pytest-timeout etils
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to install test prerequisites"
@@ -69,10 +69,10 @@ run_test_config_mgpu() {
     echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
     configure_omp_threads 8
 
-    # Mitigate distributed tests hang by adding 5min timeout
-    _timeout_args="--timeout 300 --timeout-method thread"
     # Workaround for some distributed tests hang/abortion
     export XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false"
+    export JAX_COMPILATION_CACHE_DIR="/tmp/jax_cache"
+    export JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS="0"
 
     if [ $_fus_attn = $_DEFAULT_FUSED_ATTN ]; then
         _dfa_level=2
@@ -82,11 +82,12 @@ run_test_config_mgpu() {
         export NVTE_JAX_UNITTEST_LEVEL=L2
     fi
 
-    run_default_fa 2 test_distributed_dense.py
+    run_default_fa 1 test_distributed_dense.py
     # RCCL_MSCCL_ENABLE=0 is to avoid hangs in some distributed tests (ROCM-1719)
-    RCCL_MSCCL_ENABLE=0 run $_dfa_level test_distributed_fused_attn.py $_timeout_args
+    RCCL_MSCCL_ENABLE=0 run $_dfa_level test_distributed_fused_attn.py
+    run_default_fa 1 test_distributed_helper.py
     run_default_fa 3 test_distributed_layernorm.py
-    run_default_fa 2 test_distributed_layernorm_mlp.py $_timeout_args
+    run_default_fa 2 test_distributed_layernorm_mlp.py
     run_default_fa 3 test_distributed_softmax.py
 
     run_default_fa 3 test_sanity_import.py
@@ -106,6 +107,7 @@ install_prerequisites
 pip list | egrep "flax|fidle|jax|ml_dtypes|numpy|transformer_e|typing_ext"
 #check_test_jobs_requested
 #test $? -eq 0 && init_test_jobs `python -c "import jax; print(len([d for d in jax.devices() if 'rocm' in d.client.platform_version]))"`
+ck_jit_prebuild build || exit $?
 
 for _fus_attn in auto ck aotriton; do
     configure_fused_attn_env $_fus_attn || continue
@@ -139,4 +141,6 @@ if [ -n "$TEST_JOBS_MODE" -a -n "$TEST_MGPU" ]; then
         configure_fused_attn_env $_fus_attn && run_test_config_mgpu
     done
 fi
+
+ck_jit_prebuild list
 return_run_results

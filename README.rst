@@ -29,34 +29,25 @@ Installation
 See docs/installation.rst for detailed installation instructions on ROCm and AMDGPU.
 For addtional build configuration parameters see `Fused Attention Backends on ROCm` section below.
 
-AITER rebuilding
-^^^^^^^^^^^^^^^^
-
-TE uses AITER submodule as fused attention backend on ROCm. Rebuilding of this library takes a long time so build scripts cache the built library in `build/aiter-prebuilts`. If you want rebuild AITER, delete the cache and rebuild TE.
-
-Known Issue with ROCm 6.4 PyTorch Release
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Using the docker image ``rocm/pytorch:rocm6.4_ubuntu22.04_py3.10_pytorch_release_2.5.1`` triggers a failure in the unit-test ``tests/pytorch/test_permutation.py`` (tracked in Jira ticket SWDEV-534311).
-
-Rebuilding PyTorch at commit ``f929e0d602a71aa393ca2e6097674b210bdf321c`` resolves the issue.
+CK JIT
+^^^^^^
+TE uses the AITER library as fused attention backend on ROCm which includes Composable Kernels (CK) MHA kernels library.
+By default CK kernels are not compiled during the build of TE. Instead, they are installed to TE as sourcre files and compiled runtime with HIP compiler.
+This allows TE to support a wide range of configurations without the need to pre-compile kernels for all configurations, which would lead to a very long build time and large binary size.
+Installed TE has `lib/ck_jit/ck_jit_prebuild.py` script that allows manipulating JIT cache.
 
 .. code-block:: bash
+  
+  #In TE installation directory
+  python3 lib/ck_jit/ck_jit_prebuild.py --help
 
-  # Remove the pre-installed pytorch
-  pip uninstall -y torch
+Like with any JIT it is important to perform warmup runs before benchmarking or using TE in production to ensure the JIT cache is populated and the kernels are compiled.
+After that list of built kernels can be obtained with `ck_jit_prebuilt.py` or by direct read of cache directory, and then `ck_jit_prebuilt.py` can be used on the same on another system
+for quick kernels rebuild if needed fully utilizing parallel multi-CPU compilation 
 
-  # Clone PyTorch and check out the working commit
-  export PYTORCH_COMMIT=f929e0d602a71aa393ca2e6097674b210bdf321c
-  git clone https://github.com/pytorch/pytorch
-  cd pytorch
-  git fetch origin ${PYTORCH_COMMIT}
-  git checkout -q ${PYTORCH_COMMIT}
-  git submodule update --recursive --init
-
-  # Build and install
-  ./tools/amd_build/build_amd.py
-  BUILD_TEST=0 python3 setup.py install
+AITER rebuilding
+^^^^^^^^^^^^^^^^
+If CK JIT is disabled, rebuilding of AITER library takes a long time so build scripts caches the built library in `build/aiter-prebuilts`. If you want rebuild AITER, delete the cache and rebuild TE.
 
 Test
 ====
@@ -223,7 +214,7 @@ Currently ROCm TE supports two backends, AOTriton and CK, for fused attention.
 To enable specific backends in compilation and/or in runtime, the following environment variables can be used:
 
 * NVTE_FUSED_ATTN - enable the fused attention, default = 1;
-* NVTE_FUSED_ATTN_CK - enable the CK backend, default = 1;
+* NVTE_FUSED_ATTN_CK - enable the AITER and CK backends, default = 1;
 * NVTE_FUSED_ATTN_AOTRITON - enable the AOTriton backend, default = 1.
 
 Setting env NVTE_FUSED_ATTN_<BACKEND>=0 in compilation will skip the build of the specific backend, which saves the overall building time.

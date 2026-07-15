@@ -32,6 +32,7 @@
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "./rocm_vectorized_2d.cuh"
+#include "../../util/rocm_device_utils.cuh"
 #endif
 
 namespace transformer_engine {

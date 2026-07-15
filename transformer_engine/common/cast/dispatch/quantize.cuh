@@ -164,7 +164,6 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
 #endif
       break;
     }
-#ifndef __HIP_PLATFORM_AMD__
     case NVTE_BLOCK_SCALING_2D: {
       // TODO(kwyss): IS_ACT, ParamOP, OP parameters support.
       NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for FWD NVTE_BLOCK_SCALING_2D");
@@ -196,7 +195,6 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
           columnwise_option, force_pow_2_scales, noop_tensor->data, stream);
       break;
     }
-#endif//#ifndef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
   }
@@ -317,7 +315,6 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
 #endif
       break;
     }
-#ifndef __HIP_PLATFORM_AMD__
     case NVTE_BLOCK_SCALING_2D: {
       // TODO(kwyss): IS_BIAS, IS_DACT, ParamOP, OP parameters support.
       NVTE_CHECK((!IS_DBIAS && !IS_DACT),
@@ -351,7 +348,6 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
           columnwise_option, force_pow_2_scales, noop_tensor->data, stream);
       break;
     }
-#endif //#ifndef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
   }
@@ -508,6 +504,79 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
       NVTE_ERROR("Not implemented scaling mode: " + to_string(scaling_mode) + ".");
   }
 }
+
+#ifdef __HIP_PLATFORM_AMD__
+inline void multi_quantize_mxfp8(const std::vector<Tensor *> &input_list,
+                          std::vector<Tensor *> &output_list, cudaStream_t stream) {
+  const size_t num_tensors = input_list.size();
+  if (num_tensors == 0) return;
+  NVTE_CHECK(num_tensors <= mxfp8::quantize_kernel::kMultiQuantizeMXFP8MaxTensors,
+             "multi_quantize_mxfp8: num_tensors (", num_tensors, ") exceeds maximum (",
+             mxfp8::quantize_kernel::kMultiQuantizeMXFP8MaxTensors, ").");
+
+  DType itype = input_list[0]->data.dtype;
+  DType otype = output_list[0]->dtype();
+  const bool use_rowwise = output_list[0]->has_data();
+  const bool use_colwise = output_list[0]->has_columnwise_data();
+
+  constexpr size_t CDY = 64;   // tile height (rows)
+  constexpr size_t CDX = 64;   // tile width (cols)
+  constexpr size_t TPC = 128;  // threads per block
+
+  mxfp8::quantize_kernel::MultiQuantizeMXFP8Args args;
+  args.num_tensors = 0;
+  args.block_range[0] = 0;
+  int tiles_x = 0;
+
+  for (size_t i = 0; i < num_tensors; i++) {
+    const int rows = input_list[i]->flat_first_dim();
+    const int cols = input_list[i]->flat_last_dim();
+    const int row_tiles = DIVUP(static_cast<size_t>(rows), CDY);
+    const int col_tiles = DIVUP(static_cast<size_t>(cols), CDX);
+    if (col_tiles > tiles_x) {
+      tiles_x = col_tiles;
+    }
+    const int pos = args.num_tensors;
+
+    args.input_list[pos] = input_list[i]->data.dptr;
+    args.output_rowwise_list[pos] = use_rowwise ? output_list[i]->data.dptr : nullptr;
+    args.output_colwise_list[pos] = use_colwise ? output_list[i]->columnwise_data.dptr : nullptr;
+    args.scales_rowwise_list[pos] = use_rowwise ? output_list[i]->scale_inv.dptr : nullptr;
+    args.scales_colwise_list[pos] = use_colwise ? output_list[i]->columnwise_scale_inv.dptr : nullptr;
+    args.amax_list[pos] = reinterpret_cast<float *>(output_list[i]->amax.dptr);
+    args.rows_list[pos] = rows;
+    args.cols_list[pos] = cols;
+    args.block_range[pos + 1] = args.block_range[pos] + row_tiles;
+    args.num_tensors++;
+  }
+
+  if (args.num_tensors == 0) return;
+
+  bool is_aligned = true;
+  for (int i = 0; i < args.num_tensors; i++) {
+    if (args.cols_list[i] % (32 * typeToSize(itype)) != 0) {
+      is_aligned = false;
+      break;
+    }
+  }
+
+  const dim3 grid(tiles_x, args.block_range[args.num_tensors]);
+  TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(itype, IType,
+    TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(otype, OType,
+      TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH((use_colwise ? 32 : 1), SCALE_DIM_Y,
+        TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH((use_rowwise ? 32 : 1), SCALE_DIM_X,
+          if (is_aligned) {
+            mxfp8::quantize_kernel::multi_quantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, true, CDY, CDX, TPC>
+                <<<grid, TPC, 0, stream>>>(args);
+          } else {
+            mxfp8::quantize_kernel::multi_quantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X, false, CDY, CDX, TPC>
+                <<<grid, TPC, 0, stream>>>(args);
+          }
+        ));
+      ));
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
+#endif  // __HIP_PLATFORM_AMD__
 
 }  // namespace dispatch
 }  // namespace transformer_engine

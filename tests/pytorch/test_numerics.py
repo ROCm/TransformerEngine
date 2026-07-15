@@ -3213,6 +3213,11 @@ if IS_HIP_EXTENSION:
                     "Known CK_Tile limitation: K-padding with non-NN layouts may fall back to cuBLAS "
                     "(kPadK + ColMajor B bug, or CK_Tile stride alignment requirements)"
                 )
+            if "M" in pad_dim and layout == "TT":
+                pytest.xfail(
+                    "Known CK_Tile limitation: M-padding with TT layout may fall back to cuBLAS "
+                    "(newer CK requires M to satisfy A vector-load alignment requirements)"
+                )
             else:
                 pytest.fail(f"CK_Tile grouped GEMM fell back to cuBLAS:\n{captured.err}")
 
