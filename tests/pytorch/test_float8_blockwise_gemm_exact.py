@@ -68,9 +68,11 @@ def cublas_gemm_fp8_blockwise_case(
     use_bias: bool = False,
     use_gelu: bool = False,
     use_grad: bool = False,
-    atol: float = 8e-3,
-    rtol: float = 8e-3
+    atol: float = 0.0,
+    rtol: float = 0.0
 ):
+    if IS_HIP_EXTENSION:
+        atol = rtol = 8e-3
     if x_dtype == fp8_e5m2_type and w_dtype == fp8_e5m2_type:
         pytest.skip("FP8 GEMM doesn't support both a and b types being torch.float8_e5m2")
     if not (is_x_1d_scaled or is_w_1d_scaled):

@@ -125,6 +125,7 @@ void mxfp8_gemm_tn_kernel(
     const void *__restrict__ bias,
     int bias_dtype,
     int M, int N, int K) {
+
     int k_iters = K / BLOCK_K;
     int tiles_M = M / BLOCK_ROW;
     int tiles_N = N / BLOCK_COL;

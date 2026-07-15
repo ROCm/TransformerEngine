@@ -203,8 +203,7 @@ struct GemmParam {
   void *B_scale_inv = nullptr;
   int lda = 0;  // A column strides
   int ldb = 0;  // B column strides
-  // Blockwise FP8 only: per-operand scaling mode (NVTE_BLOCK_SCALING_1D/2D).
-  // Other scaling paths leave these at -1.
+  // Blockwise FP8 only
   int A_scaling_mode = -1;
   int B_scaling_mode = -1;
 };
@@ -402,8 +401,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
                                 const int m, const int n, const int k) {
   using namespace transformer_engine;
-  // Blockwise FP8 legitimately mixes 1D (activation) and 2D (weight) scaling
-  // between A and B, so only require matching modes for non-blockwise inputs.
   const bool a_blockwise = is_blockwise_fp8_scaling(A.scaling_mode);
   const bool b_blockwise = is_blockwise_fp8_scaling(B.scaling_mode);
   NVTE_CHECK((a_blockwise && b_blockwise) || A.scaling_mode == B.scaling_mode,
@@ -458,8 +455,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
     ret.lda = k;
   } else if (is_blockwise_fp8_scaling(A.scaling_mode)) {
-    // Blockwise FP8: transposed uses row-wise data/scale, non-transposed uses
-    // column-wise (matches the previous manual dispatch: inputA_col = !is_transa).
     ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
     ret.transA = transA;
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
@@ -512,8 +507,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
     ret.ldb = k;
   } else if (is_blockwise_fp8_scaling(B.scaling_mode)) {
-    // Blockwise FP8: transposed uses column-wise data/scale, non-transposed uses
-    // row-wise (matches the previous manual dispatch: inputB_col = is_transb).
     ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
     ret.transB = transB;
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
