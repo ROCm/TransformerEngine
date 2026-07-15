@@ -4,37 +4,42 @@
 #
 # See LICENSE for license information.
 ###############################################################################
-"""Ingest microbenchmark CSVs into the CI dashboard's history schema.
+"""Append microbenchmark results into the dashboard's per-family CSV shards.
 
 The benchmarks in this directory (``benchmark_gemm.py``, ``benchmark_casting.py``,
 ...) write a results CSV via ``--csv``: one row per config, with paired
 ``<label> Time (ms)`` and ``<label> <unit>`` columns (unit = ``TFLOPS`` or
-``GB/s``), already computed. This script turns one commit's CSV(s) into records
-in ``dashboard/data/history.json`` -- the schema the ported FlyDSL dashboard
-(``dashboard/app.js``) consumes.
+``GB/s``), already computed. This script reshapes each into long ("tidy") rows
+and **appends** them to a per-family, per-ref shard the dashboard reads directly:
 
-Each invocation is ONE run, with a unique ``run_id``. Pass ``--append`` to
-accumulate runs so the dashboard's per-kernel 2-sigma noise band can form (it
-needs the latest run plus >= 3 prior runs -- i.e. >= 4 runs -- per kernel). Runs
-may be different commits OR repeated runs of the same commit: repeated same-code
-runs are exactly the run-to-run noise the band measures. Pin ``--run-id`` (or
-``--ts``) to make re-ingesting a specific run idempotent instead of adding one.
+    dashboard/data/perf-<family>-<ref>.csv     # e.g. perf-gemm-dev.csv, perf-gemm-pr1234.csv
+    dashboard/data/index.csv                   # catalog: file,family,ref,pr
+
+There is no derived ``history.json`` -- the CSV shards are the single source of
+truth. ``<family>`` comes from the input file name (``benchmark_gemm.csv`` ->
+``gemm``); ``<ref>`` is the baseline branch (default ``dev``) or ``pr<N>`` when
+``--pr N`` is given. The shard rows are append-only (git-friendly); each ingest
+invocation is one run with a unique ``run_id`` (repeated runs of the same commit
+accumulate -- that is exactly the run-to-run noise the dashboard's band measures).
+
+``index.csv`` lets the front-end discover shards without a hardcoded list; it is
+updated only when a *new* shard first appears (new family, or a new PR).
 
 Stdlib only (no torch / no pandas); safe to run anywhere the CSVs are visible.
 
-Usage (after producing CSVs -- e.g. in the container where TE is installed):
-  python benchmark_gemm.py --csv                 # -> benchmark_gemm.csv
-  python benchmark_casting.py --csv              # -> benchmark_casting.csv
-  # fold this commit's CSVs into the history (one run):
-  python dashboard_ingest.py benchmark_gemm.csv benchmark_casting.csv \\
-      --commit "$(git rev-parse HEAD)" --append
+Usage:
+  python benchmark_gemm.py --csv                 # -> benchmark_gemm.csv (needs TE + GPU)
+  python benchmark_casting.py --csv
+  # append this run to the dev shards:
+  python dashboard_ingest.py benchmark_*.csv --commit "$(git rev-parse HEAD)"
+  # a PR run instead (isolated from the dev baseline):
+  python dashboard_ingest.py benchmark_*.csv --pr 1234 --commit "$PR_HEAD_SHA"
   # serve the static dashboard (any Python, no GPU needed):
   (cd dashboard && python -m http.server 8000)   # http://localhost:8000
 """
 
 import argparse
 import csv
-import json
 import math
 import subprocess
 import sys
@@ -43,14 +48,15 @@ from pathlib import Path
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 
-# Throughput units the dev suite emits; a "<label> <unit>" column pairs with a
+# Throughput units the suite emits; a "<label> <unit>" column pairs with a
 # "<label> Time (ms)" column. "higher is better" holds for both, so a drop past
 # the noise band is a regression.
 METRIC_UNITS = ("TFLOPS", "GB/s")
 
-# The dashboard sizes a kernel's 2-sigma band from prior runs, so it needs the
-# latest run plus >= 3 prior runs before a band appears.
-MIN_RUNS_FOR_BAND = 4
+# Long-format shard columns (one row per measurement) and the shard catalog.
+SHARD_HEADER = ["ts", "commit", "run_id", "arch", "runner",
+                "op", "shape", "dtype", "metric", "value", "time_ms", "pr"]
+INDEX_HEADER = ["file", "family", "ref", "pr"]
 
 
 def _unit_of(col):
@@ -83,26 +89,43 @@ def _run_id_from_ts(ts):
     return int(dt.timestamp() * 1000)
 
 
+def _family_of(path):
+    """Benchmark family from the CSV file name (``benchmark_gemm.csv`` -> ``gemm``)."""
+    stem = Path(path).stem
+    return stem[len("benchmark_"):] if stem.startswith("benchmark_") else stem
+
+
 def _shape_dtype(row, key_cols):
-    """Derive a compact (shape, dtype) label from a CSV row's parameter columns."""
+    """Derive a compact (shape, dtype) label from a CSV row's parameter columns.
+
+    The label must be *unique* per distinct parameter combination -- otherwise
+    several kernels collapse onto one series (e.g. grouped GEMM sweeps an extra
+    expert-count column ``B``, so DSV2-Down/M512/B{5,10,20} are three kernels,
+    not one). ``Case`` implies ``N``/``K`` for these suites so those stay
+    summarized by the readable base; every *other* swept column is appended so
+    nothing is silently merged.
+    """
     dtype = "bf16"
     params = {}
     for col in key_cols:
-        if col.lower() == "dtype":
+        if "dtype" in col.lower():                   # "dtype" or "dtype_str"
             dtype = str(row[col]).replace("torch.", "")
         else:
             params[col] = row[col]
-    if "Case" in params and "M" in params:          # dense GEMM: readable + unique
+    # Columns already represented by the readable base (Case summarizes N/K here).
+    summarized = {"Case", "M", "N", "K"}
+    extras = "".join(f" {k}={v}" for k, v in params.items() if k not in summarized)
+    if "Case" in params and "M" in params:          # dense/grouped GEMM: readable
         shape = f"{params['Case']} M{params['M']}"
     elif {"M", "N", "K"} <= set(params):
         shape = f"{params['M']}x{params['N']}x{params['K']}"
     else:
-        shape = ", ".join(f"{k}={v}" for k, v in params.items()) or "-"
-    return shape, dtype
+        return (", ".join(f"{k}={v}" for k, v in params.items()) or "-"), dtype
+    return shape + extras, dtype
 
 
-def records_from_csv(path, arch, runner, commit, ts, run_id):
-    """Yield history records for one dev-suite results CSV."""
+def long_rows_from_csv(path, meta):
+    """Yield long-format shard rows (dicts keyed by SHARD_HEADER) for one CSV."""
     with open(path, newline="") as f:
         reader = csv.DictReader(f)
         cols = reader.fieldnames or []
@@ -118,42 +141,70 @@ def records_from_csv(path, arch, runner, commit, ts, run_id):
                 label = mcol[: -(len(unit) + 1)].rstrip()  # "GEMM Forward TFLOPS" -> "GEMM Forward"
                 ms = _num(row.get(f"{label} Time (ms)"))
                 yield {
-                    "op": label,
-                    "shape": shape,
-                    "dtype": dtype,
-                    "metric": unit,
-                    "value": round(value, 4),
-                    "status": "ok",
-                    "vs_main": None,
-                    "vs_tag": None,
-                    "regression": False,
-                    "extra": ({"median_ms": round(ms, 4)} if ms else {}),
-                    "ts": ts,
-                    "commit": commit,
-                    "pr": None,
-                    "run_id": run_id,
-                    "source": "ci",
-                    "runner": runner,
-                    "arch": arch,
+                    "ts": meta["ts"], "commit": meta["commit"], "run_id": meta["run_id"],
+                    "arch": meta["arch"], "runner": meta["runner"],
+                    "op": label, "shape": shape, "dtype": dtype,
+                    "metric": unit, "value": round(value, 4),
+                    "time_ms": "" if ms is None else round(ms, 4),
+                    "pr": meta["pr"],
                 }
+
+
+def append_shard(path, rows):
+    """Append *rows* to shard *path*, writing a header if it's new. Returns (was_new, n)."""
+    was_new = not path.exists()
+    n = 0
+    with open(path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=SHARD_HEADER)
+        if was_new:
+            writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+            n += 1
+    return was_new, n
+
+
+def update_index(out_dir, entries):
+    """Merge *entries* into ``index.csv`` (add new shards only). Returns count added."""
+    idx = out_dir / "index.csv"
+    rows, have = [], set()
+    if idx.exists():
+        with open(idx, newline="") as f:
+            for row in csv.DictReader(f):
+                rows.append(row)
+                have.add(row.get("file"))
+    added = 0
+    for entry in entries:
+        if entry["file"] not in have:
+            rows.append(entry)
+            have.add(entry["file"])
+            added += 1
+    if added or not idx.exists():
+        rows.sort(key=lambda r: (r.get("family", ""), r.get("ref", "")))
+        with open(idx, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=INDEX_HEADER)
+            writer.writeheader()
+            for row in rows:
+                writer.writerow({k: row.get(k, "") for k in INDEX_HEADER})
+    return added
 
 
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("csv", nargs="+", help="Results CSV(s) for ONE commit")
+    parser.add_argument("csv", nargs="+", help="benchmark_<family>.csv file(s) for ONE run")
     parser.add_argument("--out-dir", default=str(SCRIPT_DIR / "dashboard" / "data"),
-                        help="Where to write history.json / runs.json")
-    parser.add_argument("--arch", default="gfx950", help="GPU arch tag")
-    parser.add_argument("--runner", default="local", help="Runner label")
-    parser.add_argument("--repo", default="ROCm/TransformerEngine")
+                        help="Dashboard data dir (default: dashboard/data)")
+    parser.add_argument("--ref", default="dev",
+                        help="Baseline branch ref for the shard name (default: dev)")
+    parser.add_argument("--pr", type=int, default=None,
+                        help="PR number -> writes to perf-<family>-pr<N>.csv instead of -<ref>")
     parser.add_argument("--commit", default=None, help="Commit sha (default: git HEAD)")
     parser.add_argument("--ts", default=None, help="ISO-8601 UTC timestamp (default: now)")
     parser.add_argument("--run-id", type=int, default=None,
-                        help="Explicit run id (default: unique per invocation). Pin it "
-                             "to make re-ingesting the same run idempotent.")
-    parser.add_argument("--append", action="store_true",
-                        help="Merge into existing history.json (accumulate runs)")
+                        help="Explicit run id (default: unique per invocation)")
+    parser.add_argument("--arch", default="gfx950", help="GPU arch tag")
+    parser.add_argument("--runner", default="local", help="Runner label")
     args = parser.parse_args()
 
     now = datetime.now(timezone.utc)
@@ -166,52 +217,43 @@ def main():
         default_run_id = int(now.timestamp() * 1000)  # ms -> unique per invocation
     run_id = args.run_id if args.run_id is not None else default_run_id
 
-    new = []
-    for path in args.csv:
-        try:
-            new.extend(records_from_csv(path, args.arch, args.runner, commit, ts, run_id))
-        except (OSError, csv.Error) as exc:
-            print(f"  skip {path}: {exc}")
-    if not new:
-        sys.exit("no throughput (TFLOPS / GB/s) records found in the given CSV(s)")
+    if args.pr is not None:
+        ref, pr_field = f"pr{args.pr}", str(args.pr)
+    else:
+        ref, pr_field = args.ref, ""
+    meta = {"ts": ts, "commit": commit, "run_id": run_id,
+            "arch": args.arch, "runner": args.runner, "pr": pr_field}
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    hist_path = out_dir / "history.json"
 
-    records = []
-    if args.append and hist_path.exists():
+    entries, per_shard, total = [], [], 0
+    for path in args.csv:
+        family = _family_of(path)
         try:
-            records = json.loads(hist_path.read_text()).get("records", [])
-        except (OSError, json.JSONDecodeError):
-            records = []
-        # Replace this run's matching kernel points in place; keep everything else.
-        newkeys = {(r["run_id"], r["op"], r["shape"], r["dtype"], r["metric"]) for r in new}
-        records = [r for r in records
-                   if (r.get("run_id"), r.get("op"), r.get("shape"),
-                       r.get("dtype"), r.get("metric")) not in newkeys]
-    records.extend(new)
+            rows = list(long_rows_from_csv(path, meta))
+        except (OSError, csv.Error) as exc:
+            print(f"  skip {Path(path).name}: {exc}")
+            continue
+        if not rows:
+            print(f"  skip {Path(path).name}: no TFLOPS/GB/s columns")
+            continue
+        shard = out_dir / f"perf-{family}-{ref}.csv"
+        _, n = append_shard(shard, rows)
+        total += n
+        per_shard.append((shard.name, n))
+        entries.append({"file": shard.name, "family": family, "ref": ref, "pr": pr_field})
 
-    updated = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    hist_path.write_text(json.dumps(
-        {"schema": 1, "updated": updated, "repo": args.repo, "records": records}, indent=1))
-    runs_path = out_dir / "runs.json"
-    if not runs_path.exists():
-        runs_path.write_text(json.dumps(
-            {"schema": 1, "updated": updated, "repo": args.repo, "runs": []}, indent=1))
+    if total == 0:
+        sys.exit("no throughput (TFLOPS / GB/s) rows found in the given CSV(s)")
+    added = update_index(out_dir, entries)
 
-    kernels = {(r["op"], r["shape"], r["dtype"], r["arch"]) for r in records}
-    runs = {r["run_id"] for r in records}
-    commits = {r["commit"] for r in records}
-    print(f"run {commit[:8]} @ {ts} (run_id {run_id}): +{len(new)} records from "
-          f"{len(args.csv)} CSV(s)")
-    print(f"history now: {len(records)} records, {len(kernels)} kernel series, "
-          f"{len(runs)} run(s) across {len(commits)} commit(s)")
-    print(f"  wrote {hist_path}")
-    if len(runs) < MIN_RUNS_FOR_BAND:
-        print(f"  note: {len(runs)}/{MIN_RUNS_FOR_BAND} runs so far -- the 2-sigma band needs "
-              "the latest run plus >= 3 prior runs per kernel. Re-run the benchmarks "
-              "(even on the same commit) and append again to add more runs.")
+    print(f"run {commit[:8]} @ {ts} (run_id {run_id}) ref={ref}: +{total} rows")
+    for name, n in per_shard:
+        print(f"  {name}: +{n}")
+    if added:
+        print(f"  index.csv: +{added} new shard(s)")
+    print(f"  data dir: {out_dir}")
 
 
 if __name__ == "__main__":

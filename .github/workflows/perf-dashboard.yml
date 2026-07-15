@@ -1,0 +1,97 @@
+name: Perf dashboard
+
+# Runs the microbenchmarks on a self-hosted AMD GPU runner, appends the results
+# to the per-family CSV shards, and publishes the static dashboard to gh-pages.
+# Prerequisite: the `gh-pages` branch must already exist (seed it once with the
+# dashboard files + an empty data/ dir).
+#
+# TODO(perf-dashboard): prune PR shards on close. PR runs write
+# perf-<family>-pr<N>.csv and currently accumulate indefinitely. Add a companion
+# job triggered on `pull_request: closed` that deletes perf-*-pr<N>.csv and
+# removes its rows from index.csv (e.g. a `dashboard_prune.py --pr <N>`), then
+# commits gh-pages -- so merged/closed PRs don't leave dead data behind.
+
+on:
+  push:
+    branches: [dev]
+    paths:
+      - 'transformer_engine/**'
+      - 'benchmarks/microbenchmarks/**'
+  pull_request:
+    paths:
+      - 'transformer_engine/**'
+      - 'benchmarks/microbenchmarks/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write            # push commits to gh-pages
+
+# Serialize every run globally: they all push to the single mutable gh-pages
+# branch, so we must not push concurrently.
+concurrency:
+  group: perf-dashboard
+  cancel-in-progress: false
+
+jobs:
+  bench:
+    runs-on: [self-hosted, linux, gfx950]      # your AMD GPU runner label(s)
+    # GitHub's hosted runners have no AMD GPU; a self-hosted runner is required.
+    # If TE isn't in the runner's base env, run the job inside your TE container:
+    # container:
+    #   image: <your-rocm-te-image>
+    #   options: --device=/dev/kfd --device=/dev/dri --group-add video --shm-size 16g
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Checkout published site (gh-pages)
+        uses: actions/checkout@v4
+        with:
+          ref: gh-pages
+          path: site
+
+      - name: Run microbenchmarks
+        working-directory: benchmarks/microbenchmarks
+        run: |
+          # Keep going if one benchmark fails; publish whatever produced a CSV.
+          for b in gemm gemm_fp8 casting normalization grouped_gemm; do
+            python "benchmark_${b}.py" --csv || echo "::warning::benchmark_${b} failed"
+          done
+
+      - name: Ingest into per-family CSV shards
+        working-directory: benchmarks/microbenchmarks
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            python dashboard_ingest.py benchmark_*.csv \
+              --out-dir "$GITHUB_WORKSPACE/site/data" \
+              --pr "${{ github.event.number }}" \
+              --commit "${{ github.event.pull_request.head.sha }}" \
+              --arch gfx950 --runner "${{ runner.name }}"
+          else
+            python dashboard_ingest.py benchmark_*.csv \
+              --out-dir "$GITHUB_WORKSPACE/site/data" \
+              --ref dev \
+              --commit "$GITHUB_SHA" \
+              --arch gfx950 --runner "${{ runner.name }}"
+          fi
+
+      - name: Refresh the static front-end (keep data/ as-is)
+        run: |
+          rsync -a --exclude=data \
+            benchmarks/microbenchmarks/dashboard/ "$GITHUB_WORKSPACE/site/"
+
+      - name: Commit & push to gh-pages
+        working-directory: site
+        run: |
+          set -euo pipefail
+          git config user.name  "perf-bot"
+          git config user.email "perf-bot@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "no changes to publish"; exit 0
+          fi
+          git commit -m "perf: ${GITHUB_SHA::8} (${{ github.event_name }}) $(date -u +%FT%TZ)"
+          # Serialized by `concurrency`, but rebase-then-push is cheap insurance.
+          git pull --rebase origin gh-pages || true
+          git push origin gh-pages

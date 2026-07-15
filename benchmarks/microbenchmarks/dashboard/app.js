@@ -2,13 +2,14 @@
  *
  * Adapted from the ROCm/FlyDSL CI dashboard (Apache-2.0): the run-to-run
  * noise-band regression logic and Chart.js views are reused, retargeted to TE's
- * microbenchmark data. Landing = "is main regressing?"; PR Check = "does this PR
- * regress vs main?"; Trends = per-kernel series with a run-to-run noise band.
+ * microbenchmark data. Landing = "is dev regressing?"; PR Check = "does this PR
+ * regress vs dev?"; Trends = per-kernel series with a run-to-run noise band.
  */
 "use strict";
 
 const CFG = {
   repo: "ROCm/TransformerEngine",
+  data: "./data/",               // per-family CSV shards + index.csv live here
   dataBranch: "./data/",         // local-only: no external data branch
   bundled: "./data/",
   api: "",                        // empty -> no live GitHub Actions board
@@ -16,6 +17,7 @@ const CFG = {
   warnPct: -1.0,         // surfaced as "watch"
   noiseK: 2.0,           // a drop must exceed K * (run-to-run relative std) to count as real
   minSamples: 3,         // prior main runs needed to size a noise band (else: low confidence)
+  sparkFloorPct: 6,      // sparkline min half-window (% of baseline) so trivial noise stays flat
   archOrder: ["gfx950"], // TE runs; add arches here (also update index.html trend header)
 };
 
@@ -24,6 +26,7 @@ const S = {
   view: "health", noiseAware: true, boardFilter: "all",
   pr: { sel: null },
   trend: { key: null, arch: "all", metric: null, q: "", range: "all", xmode: "commits" },
+  byType: { q: "" },
   theme: "dark",
 };
 
@@ -31,7 +34,7 @@ const $ = (s, r = document) => r.querySelector(s);
 const $$ = (s, r = document) => [...r.querySelectorAll(s)];
 const kkey = r => `${r.op} ${r.shape} ${r.dtype}`;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
-const VIEWS = ["health", "prcheck", "board"];
+const VIEWS = ["health", "bytype", "prcheck", "board"];
 
 // theme-aware colors: read the live CSS variables so canvas/SVG match the active theme
 const ARCHVAR = { gfx950: "--gfx950", gfx942: "--gfx942", gfx1201: "--gfx1201" };
@@ -62,6 +65,13 @@ function toast(msg) {
   t.textContent = msg; t.classList.add("show"); clearTimeout(toast._t);
   toast._t = setTimeout(() => t.classList.remove("show"), 2400);
 }
+// Persistent, high-visibility banner for load failures (missing/undeployed data files).
+function showBanner(msg) {
+  const b = $("#banner"); if (!b) return;
+  const m = $("#bannerMsg"); if (m) m.textContent = msg;
+  b.hidden = false;
+}
+function hideBanner() { const b = $("#banner"); if (b) b.hidden = true; }
 
 /* ----------------------------------------------------------------- loading -- */
 async function getJSON(url, timeout = 8000) {
@@ -69,20 +79,86 @@ async function getJSON(url, timeout = 8000) {
   try { const r = await fetch(url, { signal: c.signal, cache: "no-store" }); if (!r.ok) throw 0; return await r.json(); }
   catch { return null; } finally { clearTimeout(id); }
 }
+async function getText(url, timeout = 8000) {
+  const c = new AbortController(); const id = setTimeout(() => c.abort(), timeout);
+  try { const r = await fetch(url, { signal: c.signal, cache: "no-store" }); if (!r.ok) throw 0; return await r.text(); }
+  catch { return null; } finally { clearTimeout(id); }
+}
+// Minimal RFC-4180-ish CSV parser: handles quoted fields with embedded commas,
+// escaped quotes ("") and CRLF. Returns an array of field arrays.
+function parseCSV(text) {
+  const rows = []; let row = [], field = "", i = 0, q = false;
+  while (i < text.length) {
+    const c = text[i];
+    if (q) {
+      if (c === '"') { if (text[i + 1] === '"') { field += '"'; i += 2; } else { q = false; i++; } }
+      else { field += c; i++; }
+    } else if (c === '"') { q = true; i++; }
+    else if (c === ',') { row.push(field); field = ""; i++; }
+    else if (c === '\n') { row.push(field); rows.push(row); row = []; field = ""; i++; }
+    else if (c === '\r') { i++; }
+    else { field += c; i++; }
+  }
+  if (field.length || row.length) { row.push(field); rows.push(row); }
+  return rows;
+}
+function csvToObjects(text) {
+  const rows = parseCSV(text).filter(r => !(r.length === 1 && r[0] === ""));
+  if (rows.length < 2) return [];
+  const hdr = rows[0];
+  return rows.slice(1).map(r => Object.fromEntries(hdr.map((h, i) => [h, r[i] ?? ""])));
+}
+// family from a shard file name: perf-<family>-<ref>.csv -> <family>
+function _familyFromFile(file) {
+  const stem = String(file).replace(/^perf-/, "").replace(/\.csv$/, "");
+  const i = stem.lastIndexOf("-");
+  return i > 0 ? stem.slice(0, i) : stem;
+}
+// one long-CSV row -> the record shape the rest of the app consumes
+function toRecord(o) {
+  const num = v => (v === "" || v == null) ? null : +v;
+  return {
+    op: o.op, shape: o.shape, dtype: o.dtype, metric: o.metric,
+    value: num(o.value), ts: o.ts, commit: o.commit, run_id: num(o.run_id),
+    arch: o.arch, runner: o.runner, pr: num(o.pr), source: "ci",
+    status: "ok", regression: false, vs_main: null, vs_tag: null,
+    extra: o.time_ms ? { median_ms: +o.time_ms } : {},
+  };
+}
 async function loadAll() {
-  const [hb, hs] = await Promise.all([getJSON(CFG.dataBranch + "history.json"), getJSON(CFG.bundled + "history.json")]);
-  const [rb, rs] = await Promise.all([getJSON(CFG.dataBranch + "runs.json"), getJSON(CFG.bundled + "runs.json")]);
-  const newer = (a, b) => (a && (!b || (a.updated || "") >= (b.updated || ""))) ? a : b;
-  const hist = newer(hb, hs) || { records: [] };
-  const runs = newer(rb, rs) || { runs: [] };
-  S.records = hist.records || [];
-  S.runs = runs.runs || [];
-  S.runMeta = new Map(S.runs.map(r => [r.run_id, r]));
-  S.updated = hist.updated || runs.updated || null;
+  // Discover shards from the catalog (no hardcoded benchmark list), then load
+  // each CSV shard. dev shards feed Health/Trends; pr shards feed PR Check.
+  const idx = await getText(CFG.data + "index.csv");
+  const failed = [];
+  if (idx == null) failed.push("index.csv");
+  const shards = idx ? csvToObjects(idx) : [];
+  const texts = await Promise.all(shards.map(s => getText(CFG.data + s.file)));
+  const records = []; let latest = "";
+  texts.forEach((t, i) => {
+    if (t == null) { failed.push(shards[i].file); return; }
+    const family = shards[i].family || _familyFromFile(shards[i].file);
+    for (const o of csvToObjects(t)) {
+      const r = toRecord(o);
+      if (r.value == null) continue;
+      r.family = family;
+      records.push(r);
+      if ((r.ts || "") > latest) latest = r.ts;
+    }
+  });
+  S.records = records;
+  S.runs = [];
+  S.runMeta = new Map();
+  S.updated = latest || null;
   const up = $("#updated"); up.classList.remove("syncing");
   up.textContent = S.updated ? `snapshot ${relTime(S.updated)}` : "no data";
+  if (failed.length) {
+    const noun = failed.length > 1 ? "data files" : "data file";
+    showBanner(`Couldn't load ${failed.length} ${noun} (${failed.join(", ")}). Charts may be incomplete \u2014 verify ${CFG.data} is deployed alongside index.csv.`);
+    console.warn("[dashboard] failed to fetch:", failed);
+  } else {
+    hideBanner();
+  }
   renderAll();
-  enhanceLiveBoard();
 }
 async function enhanceLiveBoard() {
   if (!CFG.api) return;   // live CI board disabled for the local TE dashboard
@@ -119,7 +195,7 @@ async function enhanceLiveBoard() {
 function archOf(n) { return /mi355/.test(n) ? "gfx950" : /mi325/.test(n) ? "gfx942" : /navi/.test(n) ? "gfx1201" : "?"; }
 
 /* ----------------------------------------------------------- noise model --- */
-function isMainRec(r) { const m = S.runMeta.get(r.run_id); return m ? m.branch === "main" : r.pr == null; }
+function isMainRec(r) { const m = S.runMeta.get(r.run_id); return m ? m.branch === "dev" : r.pr == null; }
 
 // chronological main-branch series for one kernel/arch/metric
 function mainSeries(op, shape, dtype, arch, metric) {
@@ -177,11 +253,24 @@ function regOf(r, base) {
 
 let _sparkN = 0;
 function sparkline(values, noise, lastReal) {
-  const W = 128, H = 34, pad = 4;
+  const W = 128, H = 34, pad = 4, GUT = 28;   // GUT: right gutter for the % axis
   if (values.length < 2) return `<svg class="spark" width="${W}" height="${H}"></svg>`;
-  const lo = Math.min(...values, noise.lo ?? Infinity), hi = Math.max(...values, noise.hi ?? -Infinity);
+  const XR = W - GUT;                          // plot right edge (x)
+  // Consistent vertical scale: center on the baseline mean and use a *symmetric*
+  // window with a floor (sparkFloorPct). Without the floor the range collapses to
+  // the values' own min/max, so trivial run-to-run noise gets stretched to fill
+  // the box ("jitter"). The window still expands to include the noise band and any
+  // real excursion, so genuine drops stay visible — matching the big trend chart.
+  const center = (noise && noise.mean != null)
+    ? noise.mean : values.reduce((a, b) => a + b, 0) / values.length;
+  const floorHalf = Math.abs(center) * (CFG.sparkFloorPct / 100);
+  const bandHalf = (noise && noise.lo != null && noise.hi != null)
+    ? Math.max(noise.hi - center, center - noise.lo) : 0;
+  const dataHalf = Math.max(0, ...values.map(v => Math.abs(v - center)));
+  const half = Math.max(floorHalf, bandHalf, dataHalf) || 1;
+  const lo = center - half, hi = center + half;
   const span = hi - lo || 1;
-  const x = i => pad + (i / (values.length - 1)) * (W - 2 * pad);
+  const x = i => pad + (i / (values.length - 1)) * (XR - pad);
   const y = v => H - pad - ((v - lo) / span) * (H - 2 * pad);
   const pts = values.map((v, i) => [x(i), y(v)]);
   const col = lastReal ? cssVal("--bad") : cssVal("--ink-2");
@@ -193,14 +282,26 @@ function sparkline(values, noise, lastReal) {
   let band = "";
   if (noise.lo != null && noise.relStd != null && noise.n >= CFG.minSamples) {
     const yh = y(noise.hi), yl = y(noise.lo);
-    band = `<rect x="0" y="${yh.toFixed(1)}" width="${W}" height="${Math.max(1, yl - yh).toFixed(1)}" fill="${cssVal("--band")}"/>`;
+    band = `<rect x="0" y="${yh.toFixed(1)}" width="${XR}" height="${Math.max(1, yl - yh).toFixed(1)}" fill="${cssVal("--band")}"/>`;
   }
+  // y-axis: 0 = baseline mean; the top/bottom labels state the window extent in %
+  // of that mean (auto-scaled, so labels never crowd and always say what the box
+  // height represents). A point at "-H%" means H% below the prior-dev mean.
+  const axis = cssVal("--ink-3");
+  const midY = y(center);
+  const pct = Math.abs(center) ? half / Math.abs(center) * 100 : 0;
+  const pctLab = pct >= 10 ? String(Math.round(pct)) : pct.toFixed(1);
+  const zeroLine = `<line x1="${pad}" y1="${midY.toFixed(1)}" x2="${XR}" y2="${midY.toFixed(1)}" stroke="${axis}" stroke-width="0.6" stroke-dasharray="2 2" opacity="0.55"/>`;
+  const lx0 = XR + 4;
+  const axisTxt =
+    `<text x="${lx0}" y="${pad}" font-size="8" fill="${axis}" dominant-baseline="hanging">+${pctLab}%</text>` +
+    `<text x="${lx0}" y="${(H - pad).toFixed(1)}" font-size="8" fill="${axis}">-${pctLab}%</text>`;
   const [lx, ly] = pts[pts.length - 1];
   return `<svg class="spark" width="${W}" height="${H}" viewBox="0 0 ${W} ${H}">` +
     `<defs><linearGradient id="${gid}" x1="0" y1="0" x2="0" y2="1">` +
     `<stop offset="0" stop-color="${col}" stop-opacity="0.20"/><stop offset="1" stop-color="${col}" stop-opacity="0"/></linearGradient></defs>` +
-    `${band}<path d="${area}" fill="url(#${gid})"/><path d="${line}" fill="none" stroke="${col}" stroke-width="1.5" stroke-linejoin="round"/>` +
-    `<circle cx="${lx.toFixed(1)}" cy="${ly.toFixed(1)}" r="2.8" fill="${col}"/></svg>`;
+    `${band}${zeroLine}<path d="${area}" fill="url(#${gid})"/><path d="${line}" fill="none" stroke="${col}" stroke-width="1.5" stroke-linejoin="round"/>` +
+    `<circle cx="${lx.toFixed(1)}" cy="${ly.toFixed(1)}" r="2.8" fill="${col}"/>${axisTxt}</svg>`;
 }
 
 /* latest main-run record per (kernel,arch) */
@@ -240,24 +341,24 @@ function renderHealth() {
   const glyph = n
     ? `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M8 2l6 11H2z"/><path d="M8 6.4v3.2M8 11.5v.01"/></svg>`
     : `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3.2L13 5"/></svg>`;
-  $("#heroLabel").innerHTML = glyph + (n ? `confirmed regression${n > 1 ? "s" : ""} on main` : watch.length ? "no confirmed regressions" : "main is clean");
+  $("#heroLabel").innerHTML = glyph + (n ? `confirmed regression${n > 1 ? "s" : ""} on dev` : watch.length ? "no confirmed regressions" : "dev is clean");
   const lastRun = rows.reduce((a, x) => (x.r.ts || "") > a ? x.r.ts : a, "");
   $("#heroNote").innerHTML =
-    `latest main vs <b>prior main history</b> · confirmed = below the ${CFG.noiseK}σ noise band ` +
-    `(needs ≥${CFG.minSamples} prior main runs)`;
+    `latest dev vs <b>prior dev history</b> · confirmed = below the ${CFG.noiseK}σ noise band ` +
+    `(needs ≥${CFG.minSamples} prior dev runs)`;
   $("#heroStats").innerHTML =
     `<div class="stat"><span class="v">${rows.length}</span><span class="l">kernel × arch</span></div>` +
     `<div class="stat warn"><span class="v">${watch.length}</span><span class="l">to check</span></div>` +
     `<div class="stat"><span class="v">${new Set(rows.map(x => x.r.arch)).size}</span><span class="l">arches</span></div>` +
     `<div class="stat"><span class="v" style="font-size:15px">${relTime(lastRun)}</span><span class="l">last run</span></div>`;
   const badge = $("#healthBadge"); badge.hidden = false; badge.textContent = n; badge.classList.toggle("zero", n === 0);
-  $("#regHeadTitle").textContent = list.length ? `${reals.length} confirmed · ${watch.length} to check` : "Regressions on main";
+  $("#regHeadTitle").textContent = list.length ? `${reals.length} confirmed · ${watch.length} to check` : "Regressions on dev";
 
   // list
   if (!list.length) {
     $("#regList").innerHTML = `<div class="reg-list-empty"><div class="big">` +
       `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M3 8.5l3.2 3.2L13 5"/></svg>` +
-      `all kernels within budget</div>no kernel on main is slower than the gate or its noise band.</div>`;
+      `all kernels within budget</div>no kernel on dev is slower than the gate or its noise band.</div>`;
     return;
   }
   const maxAbs = Math.max(6, ...list.map(x => Math.abs(x.d)));
@@ -273,12 +374,73 @@ function renderHealth() {
       <span class="reg-arch" style="color:${archVar(r.arch)}">${esc(r.arch)}</span>
       ${sparkline(vals, noise, real)}
       <span class="reg-delta ${sev}"><span class="dbar" style="width:${w}px;background:${bc}"></span>${fmtPct(d)}</span>
-      <span class="commit"><a href="${href}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${run?.branch === "main" ? "main" : "#" + (r.pr ?? "?")}·${sha}</a></span>
+      <span class="commit"><a href="${href}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${r.pr ? "#" + r.pr : "dev"}·${sha}</a></span>
     </div>`;
   }).join("");
 }
 
-/* ---------------------------------------------------------- 2 · PR CHECK --- */
+/* ---------------------------------------------------------- 2 · BY TYPE --- */
+// Pretty labels for known families; unknown families (e.g. future e2e suites)
+// fall back to a title-cased version of the raw family name -- so newly ingested
+// benchmark types appear here automatically without code changes.
+const FAMILY_LABELS = {
+  gemm: "GEMM", gemm_fp8: "FP8 GEMM", grouped_gemm: "Grouped GEMM",
+  casting: "Casting", normalization: "Normalization",
+};
+// Display order: known microbenchmark families first, then anything else
+// (e.g. e2e suites) alphabetically.
+const FAMILY_ORDER = ["gemm", "gemm_fp8", "grouped_gemm", "casting", "normalization"];
+const familyLabel = f => FAMILY_LABELS[f] ||
+  (f ? f.replace(/[_-]+/g, " ").replace(/\b\w/g, c => c.toUpperCase()) : "Other");
+const familyRank = f => { const i = FAMILY_ORDER.indexOf(f); return i < 0 ? FAMILY_ORDER.length : i; };
+
+// Every latest dev kernel/arch, grouped by benchmark family -- the full picture,
+// not just regressions. Same latest-value + noise-band trend as Health.
+function renderByType() {
+  const q = (S.byType.q || "").toLowerCase();
+  const rows = healthRows().filter(x => {
+    if (!q) return true;
+    const r = x.r;
+    return `${r.op} ${r.shape} ${r.dtype} ${r.family || ""}`.toLowerCase().includes(q);
+  });
+  const groups = new Map();
+  for (const x of rows) {
+    const f = x.r.family || "other";
+    (groups.get(f) || groups.set(f, []).get(f)).push(x);
+  }
+  const fams = [...groups.keys()].sort((a, b) => familyRank(a) - familyRank(b) || a.localeCompare(b));
+  const openAttr = q ? " open" : "";   // folded by default; auto-open sections while filtering
+  $("#typeSummary").innerHTML = rows.length
+    ? `${rows.length} kernel × arch across <b>${fams.length}</b> type${fams.length === 1 ? "" : "s"} · latest dev value + Δ vs prior-dev history`
+    : "no results in snapshot";
+  $("#typeSections").innerHTML = fams.map(f => {
+    const list = groups.get(f).slice().sort((a, b) =>
+      a.r.op.localeCompare(b.r.op) || a.r.shape.localeCompare(b.r.shape) || (a.r.arch || "").localeCompare(b.r.arch || ""));
+    const units = [...new Set(list.map(x => x.r.metric))].join(", ");
+    const body = list.map(({ r, vals, noise, d, real, sev }) => {
+      const dcell = d == null ? `<td class="num k-dim">—</td>` : `<td class="num delta ${sev}">${fmtPct(d)}</td>`;
+      return `<tr data-k="${esc(kkey(r))}" data-arch="${r.arch}">
+        <td>${esc(r.op)} <span class="metric-tag">${r.metric}</span></td>
+        <td class="k-dim">${esc(r.shape)}</td>
+        <td>${esc(r.dtype)}</td>
+        <td style="color:${archVar(r.arch)}">${esc(r.arch)}</td>
+        <td class="spark-cell">${sparkline(vals, noise, real)}</td>
+        <td class="num">${fmtVal(r.value, r.metric)}</td>
+        ${dcell}
+      </tr>`;
+    }).join("");
+    return `<details class="panel type-panel"${openAttr}>
+      <summary class="panel-head"><span class="type-caret" aria-hidden="true">▸</span><span class="t">${esc(familyLabel(f))}</span>
+        <span class="type-count">${list.length} kernel${list.length === 1 ? "" : "s"}</span>
+        <span class="spacer"></span><span class="type-unit">${esc(units)}</span></summary>
+      <div class="table-wrap"><table class="data"><thead><tr>
+        <th>kernel</th><th>shape</th><th>dtype</th><th>arch</th><th>recent trend</th><th class="num">latest</th><th class="num">Δ vs dev</th>
+      </tr></thead><tbody>${body}</tbody></table></div>
+    </details>`;
+  }).join("") || `<div class="empty">no results in snapshot</div>`;
+}
+
+/* ---------------------------------------------------------- 3 · PR CHECK --- */
 function prsWithData() {
   const m = new Map();
   for (const r of S.records) {
@@ -313,16 +475,16 @@ function renderPRCheck() {
   $("#prSummary").innerHTML = `${rows.length} kernels · <b style="color:${nbad ? "var(--bad)" : "var(--good)"}">${nbad} real regression${nbad === 1 ? "" : "s"}</b> · ${nwatch} watch`;
   const runUrl = S.runMeta.get(latestRun)?.url || `https://github.com/${CFG.repo}/actions/runs/${latestRun}`;
   pane.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr>
-    <th>kernel</th><th>shape</th><th>dtype</th><th>arch</th><th class="num">PR</th><th class="num">main</th><th class="num">Δ vs main</th><th>baseline</th>
+    <th>kernel</th><th>shape</th><th>dtype</th><th>arch</th><th class="num">PR</th><th class="num">dev</th><th class="num">Δ vs dev</th><th>baseline</th>
     </tr></thead><tbody>${rows.map(({ r, d, sev }) => `<tr class="${sev === "bad" ? "row-bad" : ""}">
       <td>${esc(r.op)} <span class="metric-tag">${r.metric}</span></td><td class="k-dim">${esc(r.shape)}</td><td>${esc(r.dtype)}</td>
       <td style="color:${archVar(r.arch)}">${esc(r.arch)}</td>
       <td class="num">${fmtVal(r.value, r.metric)}</td>
       <td class="num k-dim">${fmtVal(r.vs_main.baseline, r.metric)}</td>
       <td class="num delta ${sev}">${fmtPct(d)}</td>
-      <td class="k-dim">${esc(r.vs_main.label || "main")}</td></tr>`).join("")
-    || `<tr><td colspan="8" class="empty">no vs-main rows for this PR run</td></tr>`}</tbody></table>
-    <div class="noise-note" style="padding:10px 12px">latest run of #${pr} · <a href="${esc(runUrl)}" target="_blank" rel="noopener">view on GitHub</a> · “real” = beyond the kernel’s run-to-run noise on main</div></div>`;
+      <td class="k-dim">${esc(r.vs_main.label || "dev")}</td></tr>`).join("")
+    || `<tr><td colspan="8" class="empty">no vs-dev rows for this PR run</td></tr>`}</tbody></table>
+    <div class="noise-note" style="padding:10px 12px">latest run of #${pr} · <a href="${esc(runUrl)}" target="_blank" rel="noopener">view on GitHub</a> · “real” = beyond the kernel’s run-to-run noise on dev</div></div>`;
 }
 
 /* ------------------------------------------------------------ 3 · TRENDS --- */
@@ -364,7 +526,7 @@ function selectKernel(k, rerail = true) {
   $("#metricSel").innerHTML = metrics.map(m => `<button data-m="${m}" class="${m === S.trend.metric ? "is-active" : ""}">${m}</button>`).join("");
   $("#trendArch").innerHTML = ["all", ...CFG.archOrder].map(a =>
     `<button data-a="${a}" class="${a === S.trend.arch ? "is-active" : ""}">${a}</button>`).join("");
-  $("#trendRange").innerHTML = [["3d", "3 days"], ["7d", "7 days"], ["all", "all (14d)"]].map(([v, t]) =>
+  $("#trendRange").innerHTML = [["7d", "7 days"], ["30d", "30 days"], ["all", "all"]].map(([v, t]) =>
     `<button data-r="${v}" class="${v === S.trend.range ? "is-active" : ""}">${t}</button>`).join("");
   $("#trendXMode").innerHTML = [["commits", "by commit"], ["daily", "by day"]].map(([v, t]) =>
     `<button data-x="${v}" class="${v === S.trend.xmode ? "is-active" : ""}">${t}</button>`).join("");
@@ -379,8 +541,8 @@ function drawTrend(e) {
     const any = recs.find(r => r.run_id === id);
     return { id, ts: any.ts, commit: any.commit, pr: any.pr, main: isMainRec(any) };
   }).sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
-  // time-range filter (default 10 days). range is "<N>d" or "all".
-  const days = S.trend.range === "all" ? Infinity : parseInt((S.trend.range.match(/\d+/) || ["10"])[0], 10);
+  // time-range filter. range is "<N>d" (last N days) or "all" (no filter).
+  const days = S.trend.range === "all" ? Infinity : parseInt((S.trend.range.match(/\d+/) || ["30"])[0], 10);
   if (Number.isFinite(days)) {
     const cutoff = Date.now() - days * 86400000;
     runIds = runIds.filter(ri => !ri.ts || new Date(ri.ts).getTime() >= cutoff);
@@ -418,14 +580,14 @@ function drawTrend(e) {
     if (noise.lo != null && noise.relStd != null && noise.n >= CFG.minSamples) {
       datasets.push({ label: "+2σ", data: points.map(() => noise.hi), borderColor: "transparent", pointRadius: 0, fill: "+1", backgroundColor: cssVal("--band"), order: 20 });
       datasets.push({ label: "-2σ", data: points.map(() => noise.lo), borderColor: "transparent", pointRadius: 0, fill: false, order: 20 });
-      datasets.push({ label: "main mean", data: points.map(() => noise.mean), borderColor: cssVal("--ink-4"), borderDash: [4, 4], borderWidth: 1, pointRadius: 0, order: 19 });
-      note = `${span} · band = prior-main mean ${fmtVal(noise.mean, metric)} ± ${CFG.noiseK}σ (σ≈<b>${noise.relStd.toFixed(1)}%</b>, n=${noise.n}).` +
+      datasets.push({ label: "dev mean", data: points.map(() => noise.mean), borderColor: cssVal("--ink-4"), borderDash: [4, 4], borderWidth: 1, pointRadius: 0, order: 19 });
+      note = `${span} · band = prior-dev mean ${fmtVal(noise.mean, metric)} ± ${CFG.noiseK}σ (σ≈<b>${noise.relStd.toFixed(1)}%</b>, n=${noise.n}).` +
         (daily ? " Daily mean smooths run-to-run jitter." : " A point below the band is a real regression.");
     } else {
-      note = `${span} · n=${noise.n} prior main runs — too few for a noise band; fixed <b>${CFG.regressionPct}%</b> gate.`;
+      note = `${span} · n=${noise.n} prior dev runs — too few for a noise band; fixed <b>${CFG.regressionPct}%</b> gate.`;
     }
   } else {
-    note = `${span} · one line per arch.` + (daily ? " Daily mean per arch — smooths CI jitter to expose real drift." : " Red = main below its prior-main band, or a PR slower than main.");
+    note = `${span} · one line per arch.` + (daily ? " Daily mean per arch — smooths CI jitter to expose real drift." : " Red = dev below its prior-dev band, or a PR slower than dev.");
   }
   for (const arch of archs) {
     const noise = mainBaseline(op, shape, dtype, arch, metric);
@@ -462,7 +624,7 @@ function drawTrend(e) {
           titleFont: { family: "IBM Plex Mono" }, bodyFont: { family: "IBM Plex Mono" },
           filter: i => !/σ|mean/.test(i.dataset.label),
           callbacks: {
-            title: items => { const p = points[items[0].dataIndex]; return daily ? `${p.date} · ${p.runs.length} run${p.runs.length === 1 ? "" : "s"}` : `${p.sha} · ${p.main ? "main" : "#" + p.pr} · click to open`; },
+            title: items => { const p = points[items[0].dataIndex]; return daily ? `${p.date} · ${p.runs.length} run${p.runs.length === 1 ? "" : "s"}` : `${p.sha} · ${p.main ? "dev" : "#" + p.pr} · click to open`; },
             label: i => ` ${i.dataset.label}: ${fmtVal(i.parsed.y, metric)} ${metric}`,
           },
         },
@@ -488,7 +650,7 @@ function drawTrend(e) {
     const sha = (ri.commit || "").slice(0, 7);
     return `<tr><td><a class="commit-link" href="${commitUrl(ri.commit)}" target="_blank" rel="noopener">${sha || "—"}</a></td>` +
       `<td class="k-dim">${(ri.ts || "").slice(0, 10)}</td>` +
-      `<td class="k-dim">${ri.main ? "main" : ri.pr ? `<a href="https://github.com/${CFG.repo}/pull/${ri.pr}" target="_blank" rel="noopener">#${ri.pr}</a>` : "branch"}</td>` +
+      `<td class="k-dim">${ri.main ? "dev" : ri.pr ? `<a href="https://github.com/${CFG.repo}/pull/${ri.pr}" target="_blank" rel="noopener">#${ri.pr}</a>` : "branch"}</td>` +
       `${CFG.archOrder.map(cell).join("")}</tr>`;
   }).join("");
 }
@@ -538,7 +700,7 @@ function renderBoard() {
     // vs_main is only a real diff for PR runs (a main run rebuilds its own commit as baseline).
     const wd = r.pr ? worstDeltaForRun(r.run_id) : null;
     const wsev = wd == null ? "none" : wd.worst <= CFG.regressionPct ? "bad" : wd.worst <= CFG.warnPct ? "warn" : "ok";
-    const perf = `<div class="pr-perf"><span class="lab">${r.pr ? "worst Δ vs main" : "branch"}</span>` +
+    const perf = `<div class="pr-perf"><span class="lab">${r.pr ? "worst Δ vs dev" : "branch"}</span>` +
       (!r.pr ? `<span class="worst none">${esc(r.branch || "—")} commit</span>`
         : wd == null ? `<span class="worst none">no perf data</span>`
           : `<span class="worst ${wsev}">${fmtPct(wd.worst)}</span><span class="lab">${esc(wd.kernel)}</span>`) + `</div>`;
@@ -553,7 +715,7 @@ function renderBoard() {
 }
 
 /* ------------------------------------------------------------------ shell -- */
-function renderAll() { renderHealth(); renderKernelRail(); renderPRCheck(); renderBoard(); }
+function renderAll() { renderHealth(); renderByType(); renderKernelRail(); renderPRCheck(); renderBoard(); }
 function showView(v) {
   if (v === "trends") v = "health";
   if (!VIEWS.includes(v)) v = "health";
@@ -575,13 +737,16 @@ function wire() {
   $("#tabs").addEventListener("click", e => { const t = e.target.closest(".tab"); if (t) showView(t.dataset.view); });
   document.addEventListener("keydown", e => {
     if (e.target.matches("input,select")) return;
-    const map = { 1: "health", 2: "prcheck", 3: "board" };
+    const map = { 1: "health", 2: "bytype", 3: "prcheck", 4: "board" };
     if (map[e.key]) showView(map[e.key]);
     if (e.key.toLowerCase() === "r") doRefresh();
   });
   $("#refresh").addEventListener("click", doRefresh);
+  $("#bannerClose").addEventListener("click", hideBanner);
   $("#noiseAware").addEventListener("change", e => { S.noiseAware = e.target.checked; renderHealth(); if (S.trend.key) drawTrend(kernelIndex().get(S.trend.key)); });
   $("#regList").addEventListener("click", e => { const row = e.target.closest(".reg-row"); if (row) goTrend(row.dataset.k, row.dataset.arch); });
+  $("#typeSearch").addEventListener("input", e => { S.byType.q = e.target.value; renderByType(); });
+  $("#typeSections").addEventListener("click", e => { const tr = e.target.closest("tr[data-k]"); if (tr) goTrend(tr.dataset.k, tr.dataset.arch); });
   $("#prSelect").addEventListener("change", e => { S.pr.sel = +e.target.value; renderPRCheck(); });
   $("#boardFilter").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.boardFilter = b.dataset.f; $$("#boardFilter button").forEach(x => x.classList.toggle("is-active", x === b)); renderBoard(); });
   $("#kernelSearch").addEventListener("input", e => { S.trend.q = e.target.value; renderKernelRail(); });

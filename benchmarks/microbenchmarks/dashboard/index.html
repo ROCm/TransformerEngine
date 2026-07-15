@@ -23,7 +23,7 @@
   </div>
 
   <div class="arch-legend" aria-label="GPU architectures">
-    <span class="arch-chip" data-arch="gfx950"><i></i>gfx950<small>MI3xx</small></span>
+    <span class="arch-chip" data-arch="gfx950"><i></i>gfx950</span>
   </div>
 
   <div class="status-cluster">
@@ -33,9 +33,17 @@
   </div>
 </header>
 
+<div class="banner" id="banner" role="alert" hidden>
+  <span class="banner-icon" aria-hidden="true">⚠</span>
+  <span class="banner-msg" id="bannerMsg"></span>
+  <button class="banner-x" id="bannerClose" type="button" aria-label="Dismiss">×</button>
+</div>
+
 <nav class="tabs" id="tabs" role="tablist">
   <button class="tab is-active" id="tab-health"  data-view="health"  role="tab" aria-selected="true"  aria-controls="panel-health">
     Health<b class="badge zero" id="healthBadge" hidden>0</b></button>
+  <button class="tab"           id="tab-bytype"  data-view="bytype"  role="tab" aria-selected="false" aria-controls="panel-bytype">
+    All Benchmarks</button>
   <button class="tab"           id="tab-prcheck" data-view="prcheck" role="tab" aria-selected="false" aria-controls="panel-prcheck">
     PR Check</button>
   <button class="tab"           id="tab-board"   data-view="board"   role="tab" aria-selected="false" aria-controls="panel-board">
@@ -49,7 +57,7 @@
       <div class="hero-main">
         <div class="hero-num" id="heroNum">—</div>
         <div class="hero-headline">
-          <span class="hero-label" id="heroLabel">checking main…</span>
+          <span class="hero-label" id="heroLabel">checking dev…</span>
           <span class="hero-note" id="heroNote"></span>
         </div>
       </div>
@@ -58,12 +66,12 @@
 
     <div class="panel">
       <div class="panel-head">
-        <span class="t"><span id="regHeadTitle">Regressions on main</span></span>
+        <span class="t"><span id="regHeadTitle">Regressions on dev</span></span>
         <span class="spacer"></span>
         <label class="check"><input type="checkbox" id="noiseAware" checked> noise-aware gate</label>
       </div>
       <div class="col-head">
-        <span>kernel</span><span>shape · dtype</span><span>arch</span><span>recent trend</span><span class="r">Δ vs main</span><span class="r c-commit">run</span>
+        <span>kernel</span><span>shape · dtype</span><span>arch</span><span>recent trend</span><span class="r">Δ vs dev</span><span class="r c-commit">run</span>
       </div>
       <div id="regList"></div>
     </div>
@@ -95,10 +103,21 @@
     </div>
   </section>
 
-  <!-- 2 · PR CHECK -->
+  <!-- 2 · ALL BENCHMARKS -->
+  <section class="view" data-view="bytype" id="panel-bytype" role="tabpanel" aria-labelledby="tab-bytype" tabindex="0">
+    <div class="view-head">
+      <h2 class="section-title">All benchmark results</h2>
+      <span class="spacer"></span>
+      <input class="search" id="typeSearch" type="search" placeholder="filter kernels…" spellcheck="false">
+    </div>
+    <div class="view-head" style="margin-top:-6px"><span class="hint" id="typeSummary"></span></div>
+    <div id="typeSections"></div>
+  </section>
+
+  <!-- 3 · PR CHECK -->
   <section class="view" data-view="prcheck" id="panel-prcheck" role="tabpanel" aria-labelledby="tab-prcheck" tabindex="0">
     <div class="view-head">
-      <h2 class="section-title">Does this PR slow any kernel vs main?</h2>
+      <h2 class="section-title">Does this PR slow any kernel vs dev?</h2>
       <span class="spacer"></span>
       <select class="sel" id="prSelect" aria-label="Select PR"></select>
     </div>
@@ -106,7 +125,7 @@
     <div id="prPane"></div>
   </section>
 
-  <!-- 3 · CI BOARD -->
+  <!-- 4 · CI BOARD -->
   <section class="view" data-view="board" id="panel-board" role="tabpanel" aria-labelledby="tab-board" tabindex="0">
     <div class="view-head">
       <div class="counts" id="boardCounts"></div>
@@ -114,7 +133,7 @@
       <div class="seg" id="boardFilter" role="group" aria-label="Filter">
         <button data-f="all" class="is-active">All</button>
         <button data-f="pr">PRs</button>
-        <button data-f="main">main</button>
+        <button data-f="main">dev</button>
         <button data-f="active">Active</button>
       </div>
     </div>

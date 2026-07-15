@@ -1,1 +1,4 @@
-*.json
+# Generated benchmark data (per-family CSV shards + index.csv). Committed only
+# on the gh-pages deploy branch, not on dev.
+*
+!.gitignore
