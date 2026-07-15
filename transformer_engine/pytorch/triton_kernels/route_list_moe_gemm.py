@@ -87,6 +87,35 @@ def _apply_activation_grad(x, ACTIVATION: tl.constexpr):
         return _gelu_tanh_grad(x)
 
 
+# --- Fused activation + derivative (for the gated-activation backward) ---
+# The backward needs *both* act(x) and act'(x) on the same input. Computing them via
+# the separate helpers above evaluates the transcendental twice (sigmoid for silu,
+# tanh for gelu). These return the pair from a single transcendental -- the backward
+# kernel is VALU-bound on exp2, so sharing it is the dominant win.
+@triton.jit
+def _silu_and_grad(x):
+    # s = sigmoid(x); silu = x*s; d/dx silu = s + x*s*(1-s).
+    s = 1.0 / (1.0 + tl.exp2(-(x * 1.44269504089)))
+    act = x * s
+    return act, s + act * (1.0 - s)
+
+
+@triton.jit
+def _gelu_tanh_and_grad(x):
+    inner = 0.7978845608028654 * (x + 0.044715 * x * x * x)
+    t = _tanh(inner)
+    dinner = 0.7978845608028654 * (1.0 + 3.0 * 0.044715 * x * x)
+    return 0.5 * x * (1.0 + t), 0.5 * (1.0 + t) + 0.5 * x * (1.0 - t * t) * dinner
+
+
+@triton.jit
+def _apply_activation_and_grad(x, ACTIVATION: tl.constexpr):
+    if ACTIVATION == 0:
+        return _silu_and_grad(x)
+    else:
+        return _gelu_tanh_and_grad(x)
+
+
 @triton.heuristics(
     {
         "EVEN_K": lambda args: args["K"] % args["BLOCK_SIZE_K"] == 0,
@@ -484,6 +513,40 @@ def fused_route_list_moe(
         )
 
 
+def _gated_act_bwd_autotune_configs() -> list:
+    """Tile/warp configs for the gated-act-bwd autotuner.
+
+    Each program owns a ``BLOCK_M`` x ``BLOCK_H`` route/feature tile. The kernel is
+    latency-bound (the per-route work is tiny and the memory unit is never stalled), so
+    the sweep brackets the route-tile height ``BLOCK_M`` (more routes/block = more loads
+    in flight to hide latency) against the feature width ``BLOCK_H`` and the warp count,
+    trading memory-level parallelism against VGPR/occupancy.
+    """
+    return [
+        triton.Config({"BLOCK_M": bm, "BLOCK_H": bh}, num_warps=w)
+        for bm, bh, w in (
+            # ``num_warps`` such that BLOCK_H/(warps*64) >= 8 gives 128-bit (dwordx4)
+            # global loads/stores; the (1,1024,2) / (2,1024,2) points below hit that,
+            # while the wider-warp points keep dwordx2 -- the tuner picks per shape.
+            (1, 1024, 4),
+            (1, 1024, 2),
+            (2, 1024, 2),
+            (2, 1024, 4),
+            (2, 512, 4),
+            (4, 1024, 8),
+            (8, 512, 4),
+            (16, 256, 4),
+            (16, 512, 8),
+            (32, 256, 8),
+            (32, 128, 4),
+            (8, 256, 4),
+            (4, 512, 4),
+            (64, 128, 8),
+        )
+    ]
+
+
+@triton.autotune(configs=_gated_act_bwd_autotune_configs(), key=["F", "HAS_PROBS"])
 @triton.jit
 def _gated_act_prob_bwd_kernel(
     grad_out_ptr,  # [em_max, F]  grad wrt the fused FC1 output (= act(g)*u*prob)
@@ -492,8 +555,8 @@ def _gated_act_prob_bwd_kernel(
     token_ptr,  # [routes_max] route -> received-token row
     expert_ptr,  # [routes_max] route -> local expert
     dpre_ptr,  # [em_max, 2F] out: grad wrt the raw 2F GEMM output
-    grad_probs_ptr,  # [num_recv_tokens, E] out (fp32, atomic)
-    num_routes_bound,
+    grad_probs_ptr,  # [num_recv_tokens, E] out (fp32)
+    nbound_ptr,  # [1] int32 device scalar: dynamic upper bound on compact routes
     num_recv_tokens,
     F,
     stride_gom,
@@ -508,68 +571,87 @@ def _gated_act_prob_bwd_kernel(
     stride_gpe,
     ACTIVATION: tl.constexpr,
     HAS_PROBS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
     """Backward of the fused gated-activation (+ optional route-prob) FC1 epilogue.
 
-    One program per compact route ``r`` (matches the route-parallel layout of the route-prob
-    apply kernels). Given ``grad_out`` (F), the saved pre-activation ``[gate | up]`` (2F) and
-    the per-route prob ``p``, emits the 2F grad wrt the raw GEMM output
-    (``dpre = [d_gate | d_up]``) and accumulates ``dp = sum_f grad_out * act(gate) * up`` into
-    ``grad_dispatched_probs[token, expert]`` with a single masked atomic add. Padded / over-
-    allocated routes carry the ``token == num_recv_tokens`` sentinel and are skipped.
+    Each program owns a ``BLOCK_M`` x ``BLOCK_H`` tile of routes x gate features. Given
+    ``grad_out`` (F), the saved pre-activation ``[gate | up]`` (2F) and the per-route prob
+    ``p``, it emits the 2F grad wrt the raw GEMM output (``dpre = [d_gate | d_up]``) and,
+    when probs are fused, reduces ``dp = sum_f grad_out * act(gate) * up`` per route and
+    scatters it to ``grad_dispatched_probs[token, expert]``.
+
+    ``act(gate)`` and ``act'(gate)`` are produced together from a single transcendental
+    (the kernel is VALU-heavy on ``exp2``). Each ``(token, expert)`` cell is written by
+    exactly one route, so the prob-grad scatter is a plain store (no atomics). Padded /
+    over-allocated routes carry the ``token == num_recv_tokens`` sentinel and are masked
+    out of the prob load/store; their ``dpre`` rows are inert (ignored downstream).
+
+    The compact route buffers are statically over-allocated to the worst-case
+    ``routes_max = T * topk`` (sync-free shape bound), but the real routes occupy only the
+    dense head ``[0, num_routes)`` -- under expert parallelism this can be ~topk*E_local/E
+    times smaller. ``nbound_ptr`` carries the actual (block-padded) route extent as a device
+    scalar so tail programs beyond it exit before touching HBM, instead of grinding through
+    the padding at full memory bandwidth.
     """
-    r = tl.program_id(axis=0)
-    if r >= num_routes_bound:
+    pid = tl.program_id(axis=0)
+    num_routes_bound = tl.load(nbound_ptr)
+    if pid * BLOCK_M >= num_routes_bound:
         return
-    token = tl.load(token_ptr + r).to(tl.int64)
+    r_offs = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    r_mask = r_offs < num_routes_bound
+    token = tl.load(token_ptr + r_offs, mask=r_mask, other=num_recv_tokens).to(tl.int64)
     valid = token < num_recv_tokens
-    expert = tl.load(expert_ptr + r).to(tl.int64)
+    expert = tl.load(expert_ptr + r_offs, mask=r_mask, other=0).to(tl.int64)
     if HAS_PROBS:
         prob = tl.load(
             probs_ptr + token * stride_pm + expert * stride_pe, mask=valid, other=0.0
         ).to(tl.float32)
-    else:
-        prob = 1.0
 
-    dp_acc = tl.zeros((), dtype=tl.float32)
+    dp_acc = tl.zeros((BLOCK_M,), dtype=tl.float32)
     for h0 in range(0, F, BLOCK_H):
         offs = h0 + tl.arange(0, BLOCK_H)
         hmask = offs < F
+        m = r_mask[:, None] & hmask[None, :]
+        prow = r_offs[:, None] * stride_prem
         g = tl.load(
-            preact_ptr + r * stride_prem + offs * stride_preh, mask=hmask, other=0.0
+            preact_ptr + prow + offs[None, :] * stride_preh, mask=m, other=0.0
         ).to(tl.float32)
         u = tl.load(
-            preact_ptr + r * stride_prem + (offs + F) * stride_preh, mask=hmask, other=0.0
+            preact_ptr + prow + (offs[None, :] + F) * stride_preh, mask=m, other=0.0
         ).to(tl.float32)
         go = tl.load(
-            grad_out_ptr + r * stride_gom + offs * stride_goh, mask=hmask, other=0.0
+            grad_out_ptr + r_offs[:, None] * stride_gom + offs[None, :] * stride_goh,
+            mask=m,
+            other=0.0,
         ).to(tl.float32)
 
-        act_g = _apply_activation(g, ACTIVATION)
+        act_g, dact_g = _apply_activation_and_grad(g, ACTIVATION)
         if HAS_PROBS:
-            dp_acc += tl.sum(go * act_g * u)
-        da = go * prob
+            dp_acc += tl.sum(go * act_g * u, axis=1)
+            da = go * prob[:, None]
+        else:
+            da = go
         d_up = da * act_g
-        d_gate = da * u * _apply_activation_grad(g, ACTIVATION)
+        d_gate = da * u * dact_g
+        drow = r_offs[:, None] * stride_dprem
         tl.store(
-            dpre_ptr + r * stride_dprem + offs * stride_dpreh,
+            dpre_ptr + drow + offs[None, :] * stride_dpreh,
             d_gate.to(dpre_ptr.dtype.element_ty),
-            mask=hmask,
+            mask=m,
         )
         tl.store(
-            dpre_ptr + r * stride_dprem + (offs + F) * stride_dpreh,
+            dpre_ptr + drow + (offs[None, :] + F) * stride_dpreh,
             d_up.to(dpre_ptr.dtype.element_ty),
-            mask=hmask,
+            mask=m,
         )
 
     if HAS_PROBS:
-        tl.atomic_add(
+        tl.store(
             grad_probs_ptr + token * stride_gpm + expert * stride_gpe,
             dp_acc,
             mask=valid,
-            sem="relaxed",
-            scope="gpu",
         )
 
 
@@ -583,6 +665,7 @@ def fused_gated_act_prob_bwd(
     activation: str,
     dispatched_probs: Optional[torch.Tensor] = None,
     grad_probs_shape: Optional[torch.Size] = None,
+    num_routes_bound: Optional[torch.Tensor] = None,
 ):
     """Backward of the fused gated-activation (+ route-prob) FC1 epilogue.
 
@@ -597,6 +680,13 @@ def fused_gated_act_prob_bwd(
     dispatched_probs:
         ``[num_recv_tokens, E]`` gating probs, or ``None`` if the forward did not fuse the
         route-prob multiply. When given, its gradient is returned.
+    num_routes_bound:
+        Optional ``[1]`` int32 device scalar giving a (block-padded) upper bound on the number
+        of *real* compact routes. The route buffers are statically sized to the worst case
+        ``routes_max = T * topk``, but under expert parallelism only a small dense head is
+        populated; passing the actual extent (e.g. ``num_tokens_post_padded`` from the routing
+        metadata) lets tail programs exit early instead of streaming the padding through HBM.
+        When ``None`` the full static ``routes_max`` is used (no early exit).
 
     Returns
     -------
@@ -624,8 +714,11 @@ def fused_gated_act_prob_bwd(
         stride_pm = stride_pe = stride_gpm = stride_gpe = 0
 
     act_id = _ACT_IDS[activation]
-    BLOCK_H = min(1024, triton.next_power_of_2(F))
-    grid = (routes_max,)
+    if num_routes_bound is None:
+        nbound = torch.tensor([routes_max], dtype=torch.int32, device=grad_out.device)
+    else:
+        nbound = num_routes_bound
+    grid = lambda meta: (triton.cdiv(routes_max, meta["BLOCK_M"]),)  # noqa: E731
     _gated_act_prob_bwd_kernel[grid](
         grad_out,
         preact,
@@ -634,7 +727,7 @@ def fused_gated_act_prob_bwd(
         expert,
         dpre,
         grad_probs if has_probs else grad_out,
-        routes_max,
+        nbound,
         num_recv_tokens,
         F,
         grad_out.stride(0),
@@ -649,7 +742,6 @@ def fused_gated_act_prob_bwd(
         stride_gpe,
         ACTIVATION=act_id,
         HAS_PROBS=has_probs,
-        BLOCK_H=BLOCK_H,
     )
     if has_probs:
         grad_probs = grad_probs.to(dispatched_probs.dtype)

@@ -417,6 +417,10 @@ def permute_free_gated_act_bwd(
     routes_max = int(routing.route_to_token.shape[0])
     token = routing.route_to_token.to(torch.int32)
     expert = _expert_per_route(routing, routes_max)
+    # The route buffers are statically sized to the worst case ``routes_max = T * topk``, but
+    # only the dense head ``[0, num_routes)`` is real (under EP this can be ~topk*E_local/E
+    # smaller). ``num_tokens_post_padded`` is a device scalar >= num_routes (block-padded), so
+    # it bounds the kernel to the real routes -- sync-free -- and lets the tail exit early.
     return fused_gated_act_prob_bwd(
         grad_output.contiguous(),
         preact,
@@ -425,6 +429,7 @@ def permute_free_gated_act_bwd(
         num_recv_tokens=routing.num_recv_tokens,
         activation=activation,
         dispatched_probs=dispatched_probs,
+        num_routes_bound=routing.num_tokens_post_padded,
     )
 
 
