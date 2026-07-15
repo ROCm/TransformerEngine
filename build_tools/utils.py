@@ -216,15 +216,28 @@ def rocm_build() -> bool:
         raise FileNotFoundError("Could not detect ROCm or CUDA platform")
 
 
+def _rocm_sdk_path_root() -> Optional[Path]:
+    """Return rocm-sdk devel root if the pip package is installed."""
+    try:
+        from rocm_sdk._devel import get_devel_root
+
+        return get_devel_root()
+    except (ImportError, ModuleNotFoundError, OSError):
+        return None
+
 @functools.lru_cache(maxsize=None)
 def rocm_path() -> Tuple[str, str]:
     """
     ROCm root path and HIPCC binary path as a tuple
     If ROCm installation is not specified, use default ROCm path
     """
-    hipcc_bin = None
+    rocm_home = None
     if os.getenv("ROCM_PATH"):
         rocm_home = Path(os.getenv("ROCM_PATH"))
+    if rocm_home is None:
+        rocm_home = _rocm_sdk_path_root()
+    hipcc_bin = None
+    if rocm_home is not None:
         hipcc_bin = rocm_home / "bin" / "hipcc"
     if hipcc_bin is None:
         hipcc_bin = shutil.which("hipcc")
