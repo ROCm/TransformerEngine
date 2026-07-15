@@ -41,6 +41,7 @@ Usage:
 import argparse
 import csv
 import math
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -57,6 +58,9 @@ METRIC_UNITS = ("TFLOPS", "GB/s")
 SHARD_HEADER = ["ts", "commit", "run_id", "arch", "runner",
                 "op", "shape", "dtype", "metric", "value", "time_ms", "pr"]
 INDEX_HEADER = ["file", "family", "ref", "pr"]
+
+# GPU arch tags the dashboard understands (one GPU type per machine).
+ALLOWED_ARCHES = ("gfx942", "gfx950", "gfx1250")
 
 
 def _unit_of(col):
@@ -81,6 +85,32 @@ def _git_head():
             stderr=subprocess.DEVNULL).decode().strip()
     except Exception:
         return "unknown"
+
+
+def _detect_arch():
+    """Best-effort GPU arch for this machine (one GPU type per box).
+
+    Tries ``rocminfo`` first (present on any ROCm install, no torch needed), then
+    falls back to torch's ``gcnArchName``. Returns a bare ``gfxNNNN`` string, or
+    None if nothing could be determined.
+    """
+    try:
+        out = subprocess.run(["rocminfo"], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, timeout=20).stdout.decode(errors="ignore")
+        # rocminfo lists a gfx name only for GPU agents; prefer a known arch.
+        for tok in re.findall(r"gfx[0-9a-fA-F]+", out):
+            if tok in ALLOWED_ARCHES:
+                return tok
+        first = re.search(r"gfx[0-9a-fA-F]+", out)
+        if first:
+            return first.group(0)          # unknown gfx -> surfaced by the caller's check
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        import torch
+        return torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
+    except Exception:
+        return None
 
 
 def _run_id_from_ts(ts):
@@ -203,7 +233,9 @@ def main():
     parser.add_argument("--ts", default=None, help="ISO-8601 UTC timestamp (default: now)")
     parser.add_argument("--run-id", type=int, default=None,
                         help="Explicit run id (default: unique per invocation)")
-    parser.add_argument("--arch", default="gfx950", help="GPU arch tag")
+    parser.add_argument("--arch", default=None,
+                        help="GPU arch (" + "|".join(ALLOWED_ARCHES) + "); "
+                             "auto-detected via rocminfo if omitted")
     parser.add_argument("--runner", default="local", help="Runner label")
     args = parser.parse_args()
 
@@ -221,8 +253,12 @@ def main():
         ref, pr_field = f"pr{args.pr}", str(args.pr)
     else:
         ref, pr_field = args.ref, ""
+    arch = args.arch or _detect_arch()
+    if arch not in ALLOWED_ARCHES:
+        sys.exit(f"could not determine a supported GPU arch (got {arch!r}); "
+                 f"pass --arch with one of: {', '.join(ALLOWED_ARCHES)}")
     meta = {"ts": ts, "commit": commit, "run_id": run_id,
-            "arch": args.arch, "runner": args.runner, "pr": pr_field}
+            "arch": arch, "runner": args.runner, "pr": pr_field}
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -248,7 +284,8 @@ def main():
         sys.exit("no throughput (TFLOPS / GB/s) rows found in the given CSV(s)")
     added = update_index(out_dir, entries)
 
-    print(f"run {commit[:8]} @ {ts} (run_id {run_id}) ref={ref}: +{total} rows")
+    print(f"run {commit[:8]} @ {ts} (run_id {run_id}) ref={ref} arch={arch}"
+          f"{'' if args.arch else ' (auto)'}: +{total} rows")
     for name, n in per_shard:
         print(f"  {name}: +{n}")
     if added:
