@@ -3,8 +3,6 @@
 
 cmake_minimum_required(VERSION 3.21)
 
-# Apply power-of-2 blockwise FP8 scales directly in the MFMA (HW E8M0) instead of software
-# running-rescale. Only meaningful for the CDNA4 (gfx950) blockwise kernel.
 option(NVTE_KITTENS_USE_POWER_OF_2_SCALE
     "Use HW E8M0 MFMA scaling for power-of-2 blockwise FP8 scales (gfx950)" ON)
 
@@ -63,8 +61,6 @@ function(try_enable_hipkittens_gemm)
         add_library(kittens_gemm_cdna4 OBJECT cdna4/blockwise_fp8_gemm.cpp cdna4/mxfp8_gemm.cpp)
         set_source_files_properties(cdna4/mxfp8_gemm.cpp
             PROPERTIES LANGUAGE HIP COMPILE_FLAGS "-gline-tables-only")
-        # blockwise gets -ffast-math (device rcp/fma folding, ~+6-9%); running-rescale stays within
-        # mxfp4/nvfp4 tolerance (verified). mxfp8 excluded to keep its correctness bit-stable.
         set_source_files_properties(cdna4/blockwise_fp8_gemm.cpp
             PROPERTIES LANGUAGE HIP COMPILE_FLAGS "-gline-tables-only -ffast-math")
         set_target_properties(kittens_gemm_cdna4 PROPERTIES

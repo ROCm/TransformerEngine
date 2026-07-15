@@ -9,22 +9,15 @@
 #include "kittens.cuh"
 #include "../../../util/math.h"
 
-// 128-bit SRD buffer_load (vmcnt-tracked, addressing offloaded to SRD) for global->reg scale reads.
-extern "C" __device__ __uint128_t
-llvm_amdgcn_raw_buffer_load_b128(kittens::i32x4 rsrc, int voffset, int soffset, int aux)
-    __asm("llvm.amdgcn.raw.buffer.load.v4i32");
+template <int HEIGHT>
+struct RowScale { float2 v[HEIGHT][2]; };
 
-// Broadcast a uniform per-tile scale from vmem to an SGPR (all lanes read the same element).
-__device__ inline float read_scale_broadcast(const float *p, int i) {
-    return __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, p[i])));
-}
+template <int WIDTH>
+struct ColScale { float v[WIDTH]; };
 
-// readfirstlane broadcast only (value already in a VGPR), so the vmem load can be issued early.
-__device__ inline float broadcast_lane(float v) {
-    return __builtin_bit_cast(float, __builtin_amdgcn_readfirstlane(__builtin_bit_cast(int, v)));
-}
+template <int HEIGHT>
+struct RowRatio { float v[HEIGHT][4]; };
 
-// Scalar load into an SGPR (s_load_dword, lgkmcnt-tracked, uniform address); drain before use.
 __device__ inline float scalar_load_scale(const float *p, int i) {
     float v;
     asm volatile("s_load_dword %0, %1, %2\n"
@@ -40,8 +33,6 @@ extern "C" __device__ void
 raw_buffer_load_lds_(i32x4_v_ rsrc, as3_u32_ptr_ lds, int size, int voff, int soff, int off, int aux)
     __asm("llvm.amdgcn.raw.buffer.load.lds");
 
-// Direct global->LDS DMA of one 4-byte scale per lane (vmcnt-tracked, no register round-trip).
-// lds_base_warp = warp's first-lane dest byte offset (SGPR); DMA scatters lane L to +L*4.
 __device__ inline void load_scale_to_lds(kittens::i32x4 srd, uint32_t lds_base_warp, int voffset) {
     asm volatile("s_mov_b32 m0, %0" :: "s"(lds_base_warp));
     raw_buffer_load_lds_(__builtin_bit_cast(i32x4_v_, srd), (as3_u32_ptr_)0, 4, voffset, 0, 0, 0);
@@ -73,8 +64,6 @@ __device__ inline void store_masked(OType *c_ptr, const AccType &acc,
     const int lane = kittens::laneid();
     const int row_g = 4 * (lane / 16);
     const int col_g = lane % 16;
-    // Row-pointer stepping (base + i*16*N) instead of per-element (m0+k)*N+col: fewer live address
-    // VGPRs, avoids the spill the per-element form caused.
     #pragma unroll
     for (int i = 0; i < AccType::height; i++) {
         const int m0 = m_off + i * 16 + row_g;
@@ -153,44 +142,6 @@ __device__ inline void apply_epilogue(
     }
 }
 
-// float2 pairs {v[i][0]={s0,s1}, v[i][1]={s2,s3}} so compute/apply map to v_pk_mul/fma_f32.
-template <int HEIGHT>
-struct RowScale {
-    float2 v[HEIGHT][2];
-};
-
-template <typename AccType>
-__device__ inline RowScale<AccType::height> load_row_scale_lds(
-    const float *sa_lds, int local_m_base) {
-    RowScale<AccType::height> rs;
-    const int row_g = 4 * (kittens::laneid() / 16);
-    #pragma unroll
-    for (int i = 0; i < AccType::height; i++) {
-        const int m0 = local_m_base + i * 16 + row_g;
-        const float4 v = *reinterpret_cast<const float4 *>(&sa_lds[m0]);
-        rs.v[i][0] = make_float2(v.x, v.y);
-        rs.v[i][1] = make_float2(v.z, v.w);
-    }
-    return rs;
-}
-
-// Row-scale fragment read directly from GLOBAL (vmcnt-tracked b128 per lane). Assumes M 128-aligned.
-template <typename AccType>
-__device__ inline RowScale<AccType::height> load_row_scale_global(
-    kittens::i32x4 sa_srd, int voffset_base) {
-    RowScale<AccType::height> rs;
-    const int row_g = 4 * (kittens::laneid() / 16);
-    #pragma unroll
-    for (int i = 0; i < AccType::height; i++) {
-        const int off = (voffset_base + i * 16 + row_g) * 4;   // byte offset
-        __uint128_t raw = llvm_amdgcn_raw_buffer_load_b128(sa_srd, off, 0, 0);
-        const float4 v = *reinterpret_cast<float4 *>(&raw);
-        rs.v[i][0] = make_float2(v.x, v.y);
-        rs.v[i][1] = make_float2(v.z, v.w);
-    }
-    return rs;
-}
-
 template <typename AccType>
 __device__ inline RowScale<AccType::height> load_row_scale(
     const float *sa_row_k, int local_m_base, int m_valid) {
@@ -209,8 +160,10 @@ __device__ inline RowScale<AccType::height> load_row_scale(
     return rs;
 }
 
-// packed float2 helpers -> v_pk_mul_f32 / v_pk_fma_f32.
-__device__ inline float2 pk_mul(float2 a, float2 b) { return make_float2(a.x * b.x, a.y * b.y); }
+__device__ inline float2 pk_mul(float2 a, float2 b) { 
+    return make_float2(a.x * b.x, a.y * b.y); 
+}
+
 __device__ inline float2 pk_fma(float2 a, float2 b, float2 c) {
     return make_float2(a.x * b.x + c.x, a.y * b.y + c.y);
 }
@@ -230,46 +183,6 @@ __device__ inline void scale_accumulate(
         }
     }
 }
-
-// Precompute s = rs * sb_tile (independent of MFMA) so it overlaps the MFMA; apply_scaled then only
-// does acc += p*s, hiding MFMA latency behind the scale-mul.
-template <int HEIGHT>
-__device__ inline RowScale<HEIGHT> compute_scaled(const RowScale<HEIGHT> &rs, float sb_tile) {
-#ifdef NVTE_NOSCALE_EXP
-    return rs;   // skip the scale multiply (upper-bound experiment)
-#else
-    const float2 sbv = make_float2(sb_tile, sb_tile);
-    RowScale<HEIGHT> s;
-    #pragma unroll
-    for (int i = 0; i < HEIGHT; i++) {
-        s.v[i][0] = pk_mul(rs.v[i][0], sbv);
-        s.v[i][1] = pk_mul(rs.v[i][1], sbv);
-    }
-    return s;
-#endif
-}
-
-template <typename AccType>
-__device__ inline void apply_scaled(
-    AccType &acc, const AccType &partial, const RowScale<AccType::height> &s) {
-    #pragma unroll
-    for (int i = 0; i < AccType::height; i++)
-        #pragma unroll
-        for (int j = 0; j < AccType::width; j++) {
-#ifdef NVTE_NOSCALE_EXP
-            acc.tiles[i][j].data[0] = make_float2(acc.tiles[i][j].data[0].x + partial.tiles[i][j].data[0].x,
-                                                  acc.tiles[i][j].data[0].y + partial.tiles[i][j].data[0].y);
-            acc.tiles[i][j].data[1] = make_float2(acc.tiles[i][j].data[1].x + partial.tiles[i][j].data[1].x,
-                                                  acc.tiles[i][j].data[1].y + partial.tiles[i][j].data[1].y);
-#else
-            acc.tiles[i][j].data[0] = pk_fma(partial.tiles[i][j].data[0], s.v[i][0], acc.tiles[i][j].data[0]);
-            acc.tiles[i][j].data[1] = pk_fma(partial.tiles[i][j].data[1], s.v[i][1], acc.tiles[i][j].data[1]);
-#endif
-        }
-}
-
-template <int WIDTH>
-struct ColScale { float v[WIDTH]; };
 
 template <typename AccType>
 __device__ inline ColScale<AccType::width> load_col_scale(
@@ -335,10 +248,6 @@ __device__ inline void load_tile_masked(ST &dst, const T *src_base, int row_stri
     __builtin_amdgcn_sched_barrier(0);
 }
 
-// Per-row running-rescale ratio held in registers between the LDS read and the multiply.
-template <int HEIGHT>
-struct RowRatio { float s[HEIGHT][4]; };
-
 template <typename RT_C>
 __device__ __forceinline__ RowRatio<RT_C::height>
 load_row_ratio(const float *smem_ratios, int warp_m_offset) {
@@ -349,35 +258,18 @@ load_row_ratio(const float *smem_ratios, int warp_m_offset) {
     for (int i = 0; i < RT_C::height; i++) {
         int base_m = warp_m_offset + i * 16 + row_off;
         #pragma unroll
-        for (int r = 0; r < 4; r++) rr.s[i][r] = smem_ratios[base_m + r];
+        for (int r = 0; r < 4; r++) rr.v[i][r] = smem_ratios[base_m + r];
     }
     return rr;
 }
 
-template <typename RT_C>
-__device__ __forceinline__ void apply_row_ratio(RT_C &acc, const RowRatio<RT_C::height> &rr) {
-    #pragma unroll
-    for (int i = 0; i < acc.height; i++)
-        #pragma unroll
-        for (int j = 0; j < acc.width; j++)
-            #pragma unroll
-            for (int kk = 0; kk < acc.base_tile_num_strides; kk++)
-                #pragma unroll
-                for (int l = 0; l < acc.base_tile_stride / 2; l++) {
-                    int idx = l + kk * acc.base_tile_stride / 2;
-                    acc.tiles[i][j].data[idx].x *= rr.s[i][l * 2];
-                    acc.tiles[i][j].data[idx].y *= rr.s[i][l * 2 + 1];
-                }
-}
-
-// Fold col scalar sb into the per-row ratio, then sweep the accumulator once (1Dx2D rescale).
 template <typename RT_C>
 __device__ __forceinline__ void apply_row_ratio_sb(RT_C &acc, const RowRatio<RT_C::height> &rr, float sb) {
     float s[RT_C::height][4];
     #pragma unroll
     for (int i = 0; i < RT_C::height; i++)
         #pragma unroll
-        for (int r = 0; r < 4; r++) s[i][r] = rr.s[i][r] * sb;
+        for (int r = 0; r < 4; r++) s[i][r] = rr.v[i][r] * sb;
     #pragma unroll
     for (int i = 0; i < acc.height; i++)
         #pragma unroll
@@ -392,7 +284,6 @@ __device__ __forceinline__ void apply_row_ratio_sb(RT_C &acc, const RowRatio<RT_
                 }
 }
 
-// 1Dx1D rescale: weight scale is per-N (ColScale), so acc[i][j] *= row_ratio[i] * col_ratio[j].
 template <typename RT_C>
 __device__ __forceinline__ void apply_row_col_ratio(RT_C &acc, const RowRatio<RT_C::height> &rr,
                                                     const ColScale<RT_C::width> &cr) {
@@ -406,32 +297,12 @@ __device__ __forceinline__ void apply_row_col_ratio(RT_C &acc, const RowRatio<RT
                 #pragma unroll
                 for (int l = 0; l < acc.base_tile_stride / 2; l++) {
                     int idx = l + kk * acc.base_tile_stride / 2;
-                    acc.tiles[i][j].data[idx].x *= rr.s[i][l * 2]     * cj;
-                    acc.tiles[i][j].data[idx].y *= rr.s[i][l * 2 + 1] * cj;
+                    acc.tiles[i][j].data[idx].x *= rr.v[i][l * 2]     * cj;
+                    acc.tiles[i][j].data[idx].y *= rr.v[i][l * 2 + 1] * cj;
                 }
         }
 }
 
-template <typename RT_C>
-__device__ __forceinline__ void mul_row_prescaled(RT_C &acc, const float *smem_ratios, int warp_m_offset) {
-    apply_row_ratio(acc, load_row_ratio<RT_C>(smem_ratios, warp_m_offset));
-}
-
-// e4m3 uses the plain MFMA fast path; any e5m2 operand uses the scaled MFMA with a unit E8M0 scale
-// (0x7F..) so the hardware decodes e5m2 without scaling. unit is function-local so &unit is a real
-// VGPR address (running-rescale applies the real scale separately).
-template <int CBSZ, int BLGP, typename DT, typename AT, typename BT>
-__device__ __forceinline__ void mma_accum_base(DT &d, const AT &a, const BT &b) {
-    if constexpr (CBSZ == 0 && BLGP == 0) {
-        kittens::mma_ABt_base(d, a, b, d);
-    } else {
-        const kittens::fp8e8m0_4 unit = 0x7F7F7F7Fu;
-        kittens::mma_ABt_base_scaled<0, 0, CBSZ, BLGP>(d, a, b, d, &unit, &unit);
-    }
-}
-
-// The scale MUST be an IMMEDIATE 0 exponent: kittens' mma_ABt_scaled dereferences a *scale pointer,
-// which the builtin mis-handles here and yields nondeterministic nan.
 template <int CBSZ, int BLGP>
 __device__ __forceinline__ void mfma_fmt(float2 (&D)[2], const kittens::fp8e4m3_4 (&A)[8],
                                          const kittens::fp8e4m3_4 (&B)[8], const float2 (&C)[2]) {
@@ -455,28 +326,26 @@ __device__ __forceinline__ void mma_accum(RT_C &acc, const RT_A &a, const RT_B &
     }
 }
 
-// Per-tile fusion of rescale (VALU) with the MMA so tile[n][m]'s MFMA overlaps tile[n'][m']'s
-// rescale on separate units. sb is folded into the row ratio on the fly (only 4 scalars live at
-// once) to keep register pressure down.
-template <int CBSZ, int BLGP, typename RT_C, typename RT_A, typename RT_B>
-__device__ __forceinline__ void mma_ABt_rescaled(
-        RT_C &acc, const RowRatio<RT_C::height> &rr, float sb, const RT_A &a, const RT_B &b) {
-    #pragma unroll
-    for (int n = 0; n < acc.height; n++) {
-        float sr[4];
-        #pragma unroll
-        for (int r = 0; r < 4; r++) sr[r] = rr.s[n][r] * sb;
-        #pragma unroll
-        for (int m = 0; m < acc.width; m++) {
-            #pragma unroll
-            for (int kk = 0; kk < acc.base_tile_num_strides; kk++)
-                #pragma unroll
-                for (int l = 0; l < acc.base_tile_stride / 2; l++) {
-                    int idx = l + kk * acc.base_tile_stride / 2;
-                    acc.tiles[n][m].data[idx].x *= sr[l * 2];
-                    acc.tiles[n][m].data[idx].y *= sr[l * 2 + 1];
-                }
-            mma_accum_base<CBSZ, BLGP>(acc.tiles[n][m], a.tiles[n][0], b.tiles[m][0]);
-        }
+template <int BLOCK_M>
+__device__ __forceinline__ void load_scales_to_curr(
+        kittens::i32x4 sa_srd, uint32_t sa_curr_lds_warp, int tid, int k, int M, int block_m,
+        int sa_warp, int sa_lane) {
+    if (tid < BLOCK_M)
+        load_scale_to_lds(sa_srd, sa_curr_lds_warp,
+                          (k * M + block_m + sa_warp * kittens::WARP_THREADS + sa_lane) * 4);
+}
+
+template <int BLOCK_M>
+__device__ __forceinline__ void compute_a_ratios_and_promote(
+        int tid, float *smem_sa_prev, float *smem_sa_curr, float *smem_a_ratio_dst) {
+    int g = tid >> 8;
+    int lt = tid & 255;
+    if (lt < BLOCK_M / 4) {
+        int e = g * (BLOCK_M / 4) + lt;
+        float2 p = reinterpret_cast<const float2 *>(smem_sa_prev)[e];
+        float2 c = reinterpret_cast<const float2 *>(smem_sa_curr)[e];
+        float2 r = {p.x / c.x, p.y / c.y};
+        reinterpret_cast<float2 *>(smem_a_ratio_dst)[e] = r;
+        reinterpret_cast<float2 *>(smem_sa_prev)[e] = c;
     }
 }
