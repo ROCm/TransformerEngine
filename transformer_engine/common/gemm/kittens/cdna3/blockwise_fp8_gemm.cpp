@@ -9,7 +9,7 @@
 
 namespace blockwise_gfx942 {
 
-#include "blockwise_fp8_gemm_device.cuh"
+#include "blockwise_fp8_gemm_helper.cuh"
 
 constexpr int NUM_WARPS   = 8;
 constexpr int WARPS_ROW    = 2;

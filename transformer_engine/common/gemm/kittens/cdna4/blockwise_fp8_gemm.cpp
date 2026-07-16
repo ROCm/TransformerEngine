@@ -12,7 +12,7 @@
 
 namespace blockwise_gfx950 {
 
-#include "blockwise_fp8_gemm_device.cuh"
+#include "blockwise_fp8_gemm_helper.cuh"
 
 constexpr int NUM_WARPS   = 8;
 constexpr int WARPS_ROW   = 2;
@@ -36,33 +36,6 @@ using _gl_SB = kittens::gl<float, -1, -1, -1, -1>;
 using _gl_scale_e8m0 = kittens::gl<kittens::fp8e8m0, -1, -1, -1, -1>;
 
 using G = kittens::group<NUM_WARPS>;
-
-template <bool WEIGHT>
-__global__ void pack_scales_pow2_kernel(const float *__restrict__ scales, uint32_t *__restrict__ packed,
-                                        int padded_dim, int real_dim, int scale_K, int k_iters) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = k_iters * padded_dim;
-    if (idx >= total) return;
-    int ki  = idx / padded_dim;
-    int row = idx % padded_dim;
-    uint32_t pk = 0;
-    if (row < real_dim) {
-        int src = WEIGHT ? (row / SCALE_BLOCK) * scale_K + ki : ki * real_dim + row;
-        uint8_t e = (uint8_t)((__builtin_bit_cast(uint32_t, scales[src]) >> 23) & 0xFFu);
-        pk = (uint32_t)e | ((uint32_t)e << 8) | ((uint32_t)e << 16) | ((uint32_t)e << 24);
-    }
-    packed[ki * padded_dim + row] = pk;
-}
-
-template <bool WEIGHT>
-static void launch_pack_scales_pow2(const float *scales, uint32_t *packed, int padded_dim,
-                                    int real_dim, int scale_K, int k_iters, hipStream_t stream) {
-    int total  = k_iters * padded_dim;
-    int blocks = (total + 255) / 256;
-    pack_scales_pow2_kernel<WEIGHT><<<blocks, 256, 0, stream>>>(scales, packed, padded_dim, real_dim, scale_K, k_iters);
-}
-
-static inline size_t align_up_pow2ws(size_t x) { return (x + 255) & ~size_t(255); }
 
 template <typename AType, typename BType, typename OType>
 struct micro_globals {
@@ -416,7 +389,7 @@ void micro_tk_1d2d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
 }
 
 template <typename OType, int CBSZ, int BLGP,
-          bool HAS_BIAS, bool HAS_GELU, bool HAS_BETA>
+          bool HAS_BIAS, bool HAS_GELU, bool HAS_BETA, bool B_BROADCAST = true>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void micro_tk_1d2d_pow2(
     const _gl_A_t<kittens::fp8e4m3> A,
@@ -442,7 +415,8 @@ void micro_tk_1d2d_pow2(
 
     __shared__ ST_A As[2][2];
     __shared__ ST_B Bs[2][2];
-    __shared__ ST_Scale scale_A_smem[2], scale_B_smem[2];
+    __shared__ ST_Scale scale_A_smem[2];
+    __shared__ ST_Scale scale_B_smem[2];
 
     RT_A a;
     RT_B b0, b1;
@@ -478,6 +452,10 @@ void micro_tk_1d2d_pow2(
     int a_row_h1 = HALF_ROW + warp_m * REG_M;
     int b_row_h0 = warp_n * REG_N;
     int b_row_h1 = HALF_COL + warp_n * REG_N;
+
+    const kittens::fp8e8m0_4 *g_scale_b = (const kittens::fp8e8m0_4 *)scale_B_gl.raw_ptr;
+    const int n_blocks = tiles_N * (BLOCK_N / SCALE_BLOCK);
+    const int b_block0 = block_col * (BLOCK_N / SCALE_BLOCK);
 
     int tic = 0, toc = 1;
     int tic_scales = 0, toc_scales = 1;
@@ -515,16 +493,28 @@ void micro_tk_1d2d_pow2(
     __builtin_amdgcn_s_barrier();
 
     G::load(scale_A_smem[0], scale_A_gl, {0 * tiles_M + block_row, 0, 0, 0});
-    G::load(scale_B_smem[0], scale_B_gl, {0 * tiles_N + block_col, 0, 0, 0});
+    kittens::fp8e8m0_4 curr_sb_h0 = 0, curr_sb_h1 = 0;
+    if constexpr (B_BROADCAST) {
+        curr_sb_h0 = scalar_load_scale_u32(g_scale_b, 0 * n_blocks + b_block0 + 0);
+        curr_sb_h1 = scalar_load_scale_u32(g_scale_b, 0 * n_blocks + b_block0 + 1);
+    } else {
+        G::load(scale_B_smem[0], scale_B_gl, {0 * tiles_N + block_col, 0, 0, 0});
+    }
     asm volatile("s_waitcnt vmcnt(0)");
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
 #pragma unroll 2
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1, tic_scales ^= 1, toc_scales ^= 1) {
+        kittens::fp8e8m0_4 nxt_sb_h0 = curr_sb_h0, nxt_sb_h1 = curr_sb_h1;
         if (k + 1 < k_iters) {
             G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * tiles_M + block_row, 0, 0, 0});
-            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * tiles_N + block_col, 0, 0, 0});
+            if constexpr (B_BROADCAST) {
+                nxt_sb_h0 = scalar_load_scale_u32(g_scale_b, (k + 1) * n_blocks + b_block0 + 0);
+                nxt_sb_h1 = scalar_load_scale_u32(g_scale_b, (k + 1) * n_blocks + b_block0 + 1);
+            } else {
+                G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * tiles_N + block_col, 0, 0, 0});
+            }
         }
         auto bs0 = kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][0], {warp_n, 0});
         kittens::load(b0, bs0);
@@ -534,10 +524,16 @@ void micro_tk_1d2d_pow2(
         asm volatile("s_waitcnt lgkmcnt(8)");
         __builtin_amdgcn_s_barrier();
 
-        kittens::fp8e8m0_4 sa_h0 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h0);
-        kittens::fp8e8m0_4 sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
-        kittens::fp8e8m0_4 sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
-        kittens::fp8e8m0_4 sa_h1 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h1);
+        kittens::fp8e8m0_4 sa_h0 = pack_scales_vec(scale_A_smem[tic_scales].data, a_row_h0);
+        kittens::fp8e8m0_4 sb_h0, sb_h1;
+        if constexpr (B_BROADCAST) {
+            sb_h0 = curr_sb_h0;
+            sb_h1 = curr_sb_h1;
+        } else {
+            sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
+            sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
+        }
+        kittens::fp8e8m0_4 sa_h1 = pack_scales_vec(scale_A_smem[tic_scales].data, a_row_h1);
         __builtin_amdgcn_s_setprio(2);
         kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
         __builtin_amdgcn_s_setprio(0);
@@ -575,21 +571,35 @@ void micro_tk_1d2d_pow2(
         kittens::mma_ABt_scaled<CBSZ, BLGP>(cD, a, b1, cD, &sa_h1, &sb_h1);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
+        curr_sb_h0 = nxt_sb_h0; curr_sb_h1 = nxt_sb_h1;
     }
 
     { // Epilogue k = k_iters - 2
         int k = k_iters - 2;
+        kittens::fp8e8m0_4 nxt_sb_h0 = curr_sb_h0, nxt_sb_h1 = curr_sb_h1;
         if (k + 1 < k_iters) {
             G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * tiles_M + block_row, 0, 0, 0});
-            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * tiles_N + block_col, 0, 0, 0});
+            if constexpr (B_BROADCAST) {
+                nxt_sb_h0 = scalar_load_scale_u32(g_scale_b, (k + 1) * n_blocks + b_block0 + 0);
+                nxt_sb_h1 = scalar_load_scale_u32(g_scale_b, (k + 1) * n_blocks + b_block0 + 1);
+            } else {
+                G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * tiles_N + block_col, 0, 0, 0});
+            }
         }
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
-        kittens::fp8e8m0_4 sa_h0 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h0);
-        kittens::fp8e8m0_4 sa_h1 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h1);
-        kittens::fp8e8m0_4 sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
-        kittens::fp8e8m0_4 sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
+        kittens::fp8e8m0_4 sa_h0 = pack_scales_vec(scale_A_smem[tic_scales].data, a_row_h0);
+        kittens::fp8e8m0_4 sa_h1 = pack_scales_vec(scale_A_smem[tic_scales].data, a_row_h1);
+        kittens::fp8e8m0_4 sb_h0, sb_h1;
+        if constexpr (B_BROADCAST) {
+            sb_h0 = curr_sb_h0;
+            sb_h1 = curr_sb_h1;
+            curr_sb_h0 = nxt_sb_h0; curr_sb_h1 = nxt_sb_h1;
+        } else {
+            sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
+            sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
+        }
 
         auto bs0 = kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][0], {warp_n, 0});
         kittens::load(b0, bs0);
@@ -645,10 +655,16 @@ void micro_tk_1d2d_pow2(
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
-        kittens::fp8e8m0_4 sa_h0 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h0);
-        kittens::fp8e8m0_4 sa_h1 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h1);
-        kittens::fp8e8m0_4 sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
-        kittens::fp8e8m0_4 sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
+        kittens::fp8e8m0_4 sa_h0 = pack_scales_vec(scale_A_smem[tic_scales].data, a_row_h0);
+        kittens::fp8e8m0_4 sa_h1 = pack_scales_vec(scale_A_smem[tic_scales].data, a_row_h1);
+        kittens::fp8e8m0_4 sb_h0, sb_h1;
+        if constexpr (B_BROADCAST) {
+            sb_h0 = curr_sb_h0;
+            sb_h1 = curr_sb_h1;
+        } else {
+            sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
+            sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
+        }
 
         auto as0 = kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][0], {warp_m, 0});
         kittens::load(a, as0);
@@ -718,7 +734,6 @@ void micro_tk_1d2d_pow2(
     }
 }
 
-#ifndef NVTE_SQ_ONLY
 template <typename OType, int CBSZ, int BLGP,
           bool HAS_BIAS, bool HAS_GELU, bool HAS_BETA>
 __global__ __launch_bounds__(NUM_THREADS, 2)
@@ -1260,34 +1275,34 @@ struct pow2_kernel_args {
     int kM; int kN; int K; hipStream_t stream;
 };
 
-template <typename OType, int CBSZ, int BLGP, bool HB, bool HG, bool HBeta>
+template <typename OType, int CBSZ, int BLGP, bool HB, bool HG, bool HBeta, bool B_BROADCAST>
 static void launch_pow2_kernel(const pow2_kernel_args<OType> &a) {
     dim3 grid(((a.kM + BLOCK_M - 1) / BLOCK_M) * ((a.kN + BLOCK_N - 1) / BLOCK_N));
-    micro_tk_1d2d_pow2<OType, CBSZ, BLGP, HB, HG, HBeta><<<grid, NUM_THREADS, 0, a.stream>>>(
+    micro_tk_1d2d_pow2<OType, CBSZ, BLGP, HB, HG, HBeta, B_BROADCAST><<<grid, NUM_THREADS, 0, a.stream>>>(
         a.A, a.B, a.C, a.scale_A_gl, a.scale_B_gl, a.bias, a.bias_dtype, a.gelu_aux, a.gelu_aux_dtype,
         a.c_in, a.beta, a.kM, a.kN, a.K);
 }
 
-template <typename OType, bool HB, bool HG, bool HBeta>
+template <typename OType, bool B_BROADCAST, bool HB, bool HG, bool HBeta>
 static void launch_pow2_cbsz(int cbsz, int blgp, const pow2_kernel_args<OType> &a) {
-    if      (cbsz == 0 && blgp == 0) launch_pow2_kernel<OType, 0, 0, HB, HG, HBeta>(a);
-    else if (cbsz == 0 && blgp == 1) launch_pow2_kernel<OType, 0, 1, HB, HG, HBeta>(a);
-    else if (cbsz == 1 && blgp == 0) launch_pow2_kernel<OType, 1, 0, HB, HG, HBeta>(a);
-    else                             launch_pow2_kernel<OType, 1, 1, HB, HG, HBeta>(a);
+    if      (cbsz == 0 && blgp == 0) launch_pow2_kernel<OType, 0, 0, HB, HG, HBeta, B_BROADCAST>(a);
+    else if (cbsz == 0 && blgp == 1) launch_pow2_kernel<OType, 0, 1, HB, HG, HBeta, B_BROADCAST>(a);
+    else if (cbsz == 1 && blgp == 0) launch_pow2_kernel<OType, 1, 0, HB, HG, HBeta, B_BROADCAST>(a);
+    else                             launch_pow2_kernel<OType, 1, 1, HB, HG, HBeta, B_BROADCAST>(a);
 }
 
-template <typename OType>
+template <typename OType, bool B_BROADCAST>
 static void launch_pow2_epi(int cbsz, int blgp, bool has_bias, bool has_gelu, bool has_beta,
                             const pow2_kernel_args<OType> &a) {
     if (has_gelu) {
-        if (has_beta) launch_pow2_cbsz<OType, false, true, true >(cbsz, blgp, a);
-        else          launch_pow2_cbsz<OType, false, true, false>(cbsz, blgp, a);
+        if (has_beta) launch_pow2_cbsz<OType, B_BROADCAST, false, true, true >(cbsz, blgp, a);
+        else          launch_pow2_cbsz<OType, B_BROADCAST, false, true, false>(cbsz, blgp, a);
     } else if (has_bias) {
-        if (has_beta) launch_pow2_cbsz<OType, true, false, true >(cbsz, blgp, a);
-        else          launch_pow2_cbsz<OType, true, false, false>(cbsz, blgp, a);
+        if (has_beta) launch_pow2_cbsz<OType, B_BROADCAST, true, false, true >(cbsz, blgp, a);
+        else          launch_pow2_cbsz<OType, B_BROADCAST, true, false, false>(cbsz, blgp, a);
     } else {
-        if (has_beta) launch_pow2_cbsz<OType, false, false, true >(cbsz, blgp, a);
-        else          launch_pow2_cbsz<OType, false, false, false>(cbsz, blgp, a);
+        if (has_beta) launch_pow2_cbsz<OType, B_BROADCAST, false, false, true >(cbsz, blgp, a);
+        else          launch_pow2_cbsz<OType, B_BROADCAST, false, false, false>(cbsz, blgp, a);
     }
 }
 
@@ -1306,22 +1321,24 @@ static void launch_1d2d_pow2(int cbsz, int blgp, bool has_bias, bool has_gelu, b
     const int padM = tiles_M * BLOCK_M;
     const int padN = tiles_N * BLOCK_N;
 
+    const int n_blocks = padN / SCALE_BLOCK;
+    const int real_blocks = (kN + SCALE_BLOCK - 1) / SCALE_BLOCK;
     const size_t sa_bytes = align_up_pow2ws((size_t)k_iters * padM * sizeof(uint32_t));
     uint32_t *packed_sa = reinterpret_cast<uint32_t *>(workspace);
     uint32_t *packed_sb = reinterpret_cast<uint32_t *>((uint8_t *)workspace + sa_bytes);
 
-    launch_pack_scales_pow2<false>(scaleA_src, packed_sa, padM, kM, scale_K, k_iters, stream);
-    launch_pack_scales_pow2<true >(scaleB_src, packed_sb, padN, kN, scale_K, k_iters, stream);
+    launch_pack_scales_pow2<false>(scaleA_src, packed_sa, padM, kM, scale_K, k_iters, SCALE_BLOCK, stream);
+    launch_pack_scales_pow2_weight_compact(scaleB_src, packed_sb, n_blocks, real_blocks, scale_K, k_iters, stream);
 
     pow2_kernel_args<OType> a{
         _gl_A_t<kittens::fp8e4m3>((kittens::fp8e4m3 *)const_cast<void *>(kA), 1, 1, (size_t)kM, (size_t)K),
         _gl_A_t<kittens::fp8e4m3>((kittens::fp8e4m3 *)const_cast<void *>(kB), 1, 1, (size_t)kN, (size_t)K),
         _gl_C_t<OType>((OType *)Cptr, 1, 1, (size_t)kM, (size_t)kN),
         _gl_scale_e8m0(reinterpret_cast<kittens::fp8e8m0 *>(packed_sa), k_iters * tiles_M, 1, 16, 64),
-        _gl_scale_e8m0(reinterpret_cast<kittens::fp8e8m0 *>(packed_sb), k_iters * tiles_N, 1, 16, 64),
+        _gl_scale_e8m0(reinterpret_cast<kittens::fp8e8m0 *>(packed_sb), 1, 1, k_iters, n_blocks),
         bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta, kM, kN, K, stream};
 
-    launch_pow2_epi<OType>(cbsz, blgp, has_bias, has_gelu, has_beta, a);
+    launch_pow2_epi<OType, true>(cbsz, blgp, has_bias, has_gelu, has_beta, a);
 }
 
 template <typename OType>
@@ -1343,8 +1360,8 @@ static void launch_1d1d_pow2(int cbsz, int blgp, bool has_bias, bool has_gelu, b
     uint32_t *packed_sa = reinterpret_cast<uint32_t *>(workspace);
     uint32_t *packed_sb = reinterpret_cast<uint32_t *>((uint8_t *)workspace + sa_bytes);
 
-    launch_pack_scales_pow2<false>(scaleA_src, packed_sa, padM, kM, scale_K, k_iters, stream);
-    launch_pack_scales_pow2<false>(scaleB_src, packed_sb, padN, kN, scale_K, k_iters, stream);
+    launch_pack_scales_pow2<false>(scaleA_src, packed_sa, padM, kM, scale_K, k_iters, SCALE_BLOCK, stream);
+    launch_pack_scales_pow2<false, false>(scaleB_src, packed_sb, padN, kN, scale_K, k_iters, SCALE_BLOCK, stream);
 
     pow2_kernel_args<OType> a{
         _gl_A_t<kittens::fp8e4m3>((kittens::fp8e4m3 *)const_cast<void *>(kA), 1, 1, (size_t)kM, (size_t)K),
@@ -1354,7 +1371,7 @@ static void launch_1d1d_pow2(int cbsz, int blgp, bool has_bias, bool has_gelu, b
         _gl_scale_e8m0(reinterpret_cast<kittens::fp8e8m0 *>(packed_sb), k_iters * tiles_N, 1, 16, 64),
         bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta, kM, kN, K, stream};
 
-    launch_pow2_epi<OType>(cbsz, blgp, has_bias, has_gelu, has_beta, a);
+    launch_pow2_epi<OType, false>(cbsz, blgp, has_bias, has_gelu, has_beta, a);
 }
 
 void kittens_blockwise_fp8_gemm_impl_cdna4(
@@ -1386,20 +1403,24 @@ void kittens_blockwise_fp8_gemm_impl_cdna4(
     float *sa = reinterpret_cast<float *>(const_cast<void *>(ksa));
     float *sb = reinterpret_cast<float *>(const_cast<void *>(ksb));
 
-    // pow2 build default = NVTE_KITTENS_USE_POWER_OF_2_SCALE (ON); NVTE_KITTENS_NO_POW2=1 forces the
-    // running-rescale path at runtime without a rebuild (debug).
 #ifdef NVTE_KITTENS_USE_POWER_OF_2_SCALE
-    constexpr bool pow2_build_default = true;
+    constexpr bool use_pow2 = true;
 #else
-    constexpr bool pow2_build_default = false;
+    constexpr bool use_pow2 = false;
 #endif
-    static const bool use_pow2 = pow2_build_default && (std::getenv("NVTE_KITTENS_NO_POW2") == nullptr);
 
     const int k_iters = K / BLOCK_K;
     const int padM = ((kM + BLOCK_M - 1) / BLOCK_M) * BLOCK_M;
     const int padN = ((kN + BLOCK_N - 1) / BLOCK_N) * BLOCK_N;
     const size_t pow2_ws_bytes = align_up_pow2ws((size_t)k_iters * padM * sizeof(uint32_t)) +
                                  (size_t)k_iters * padN * sizeof(uint32_t);
+    void *owned_ws = nullptr;
+    if (use_pow2 && !has_partial_k &&
+        (workspace == nullptr || workspace_size < pow2_ws_bytes)) {
+        (void)hipMalloc(&owned_ws, pow2_ws_bytes);
+        workspace = owned_ws;
+        workspace_size = pow2_ws_bytes;
+    }
     const bool pow2_ws_ok = (workspace != nullptr && workspace_size >= pow2_ws_bytes);
 
     auto run = [&]<typename OType>() {
@@ -1432,7 +1453,7 @@ void kittens_blockwise_fp8_gemm_impl_cdna4(
     if      (out_dtype == KITTENS_FLOAT32) run.template operator()<float>();
     else if (out_dtype == KITTENS_FLOAT16) run.template operator()<kittens::half>();
     else                                   run.template operator()<kittens::bf16>();
+    if (owned_ws != nullptr) { (void)hipStreamSynchronize(stream); (void)hipFree(owned_ws); }
 }
 
-#endif  // NVTE_SQ_ONLY
 }  // namespace blockwise_gfx950
