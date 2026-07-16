@@ -861,7 +861,7 @@ class TestBasicOps:
         in_shape = list(in_shape)[:-1] + [in_features]
         out_shape = in_shape[:-1] + [out_features]
 
-        # Skip invalid configurations
+        # hipBLASLt on TheRock lacks an algorithm for this shape.
         if (
             IS_HIP_EXTENSION
             and get_device_compute_capability() in ((9, 5), (9, 4))

@@ -402,7 +402,6 @@ def _load_cuda_library(lib_name: str):
 
 te_rocm_build = None
 
-
 @functools.cache
 def is_fp8_fnuz():
     if te_rocm_build:

@@ -270,6 +270,7 @@ def parse_helper(
 
     # Extract kernel timing values
     fwd_values = df[df["Name"].str.contains(fwd_search_pattern, regex=False)]["AverageNs"].to_numpy()
+    # Optional fallback: when profiling v3, CK may still emit v2 kernel names.
     if len(fwd_values) == 0 and fwd_fallback is not None:
         fwd_values = df[df["Name"].str.contains(fwd_fallback, regex=False)]["AverageNs"].to_numpy()
     bwd_values = df[df["Name"].str.contains(bwd_search_pattern, regex=False)]["AverageNs"].to_numpy()
@@ -310,7 +311,9 @@ def parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_ck, perf_
     if perf_dir_flash_attn:
         parse_helper(model, perf_dir_flash_attn, KERNEL_PATTERNS["flash_fwd"], KERNEL_PATTERNS["flash_bwd"], "FlashAttention", df_times)
     
-    # Parse FusedAttention CK (use v3 or v2 patterns based on flags)
+    # Parse FusedAttention CK (use v3 or v2 patterns based on flags).
+    # When v3 is requested, fall back to v2 kernel names if rocprofv3 did not
+    # capture v3 symbols (e.g. CK fell back to v2 at runtime on this config).
     if perf_dir_fused_ck:
         fwd_pattern = KERNEL_PATTERNS["ck_fwd_v3"] if use_ck_fwd_v3 else KERNEL_PATTERNS["ck_fwd_v2"]
         bwd_pattern = KERNEL_PATTERNS["ck_bwd_v3"] if use_ck_bwd_v3 else KERNEL_PATTERNS["ck_bwd_v2"]
@@ -324,7 +327,6 @@ def parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_ck, perf_
             fwd_fallback=KERNEL_PATTERNS["ck_fwd_v2"] if use_ck_fwd_v3 else None,
             bwd_fallback=KERNEL_PATTERNS["ck_bwd_v2"] if use_ck_bwd_v3 else None,
         )
-    
     # Parse AOTriton
     if perf_dir_fused_aotriton:
         parse_helper(model, perf_dir_fused_aotriton, KERNEL_PATTERNS["aotriton_fwd"], KERNEL_PATTERNS["aotriton_bwd"], "FusedAttention AOTriton", df_times)

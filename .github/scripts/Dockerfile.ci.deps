@@ -26,13 +26,6 @@ ARG FA_VERSION=v2.8.1
 ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
 ARG INSTALL_ROCM_TARBALL_SH_URL=https://raw.githubusercontent.com/ROCm/TheRock/release/therock-7.13/dockerfiles/install_rocm_tarball.sh
 
-# Map GPU_ARCH → AMD GPU wheel/tarball family (once).
-RUN case "${GPU_ARCH}" in \
-      gfx942) echo -n gfx94X-dcgpu > /etc/amd_gpu_family ;; \
-      gfx950) echo -n gfx950-dcgpu > /etc/amd_gpu_family ;; \
-      *) echo "GPU_ARCH must be gfx942 or gfx950 (got: ${GPU_ARCH})" >&2; exit 1 ;; \
-    esac
-
 # Base OS packages
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates curl \
@@ -43,10 +36,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Native ROCm tarball → /opt/rocm
-RUN AMD_GPU_FAMILY=$(cat /etc/amd_gpu_family) \
+RUN case "${GPU_ARCH}" in \
+      gfx942) _amd_gpu_family=gfx94X-dcgpu ;; \
+      gfx950) _amd_gpu_family=gfx950-dcgpu ;; \
+    esac \
     && curl -fsSL -o /tmp/install_rocm_tarball.sh "${INSTALL_ROCM_TARBALL_SH_URL}" \
     && chmod +x /tmp/install_rocm_tarball.sh \
-    && /tmp/install_rocm_tarball.sh "${ROCK_RELEASE_VERSION}" "${AMD_GPU_FAMILY}" stable \
+    && /tmp/install_rocm_tarball.sh "${ROCK_RELEASE_VERSION}" "${_amd_gpu_family}" stable \
     && rm -f /tmp/install_rocm_tarball.sh
 
 # Isolated Python env for pip packages
@@ -61,9 +57,12 @@ RUN python -m pip install --upgrade pip setuptools wheel \
     && pip install --no-cache-dir ipython pytest fire pydantic pybind11 ninja pandas expecttest onnxscript
 
 # Python ROCm SDK + torch from https://repo.amd.com/rocm/whl/<AMD_GPU_FAMILY>/
-RUN AMD_GPU_FAMILY=$(cat /etc/amd_gpu_family) \
-    && W="https://repo.amd.com/rocm/whl/${AMD_GPU_FAMILY}" \
-    && LIBS_PKG="rocm-sdk-libraries-$(echo "${AMD_GPU_FAMILY}" | tr '[:upper:]' '[:lower:]')" \
+RUN case "${GPU_ARCH}" in \
+      gfx942) _amd_gpu_family=gfx94X-dcgpu ;; \
+      gfx950) _amd_gpu_family=gfx950-dcgpu ;; \
+    esac \
+    && W="https://repo.amd.com/rocm/whl/${_amd_gpu_family}" \
+    && LIBS_PKG="rocm-sdk-libraries-$(echo "${_amd_gpu_family}" | tr '[:upper:]' '[:lower:]')" \
     && ROCM_WHEEL_TAG="rocm${ROCK_RELEASE_VERSION}" \
     && pip install --no-cache-dir \
         --extra-index-url "${W}" \
@@ -81,8 +80,6 @@ RUN pip install --no-cache-dir patchelf auditwheel numpy scipy \
     && curl -fsSL -o /usr/local/bin/bazel \
         https://github.com/bazelbuild/bazelisk/releases/latest/download/bazelisk-linux-amd64 \
     && chmod +x /usr/local/bin/bazel \
-    && ROCM_SDK_ROOT="$(rocm-sdk path --root)" \
-    && ln -sf "${ROCM_SDK_ROOT}/llvm/amdgcn" "${ROCM_SDK_ROOT}/amdgcn" \
     && git clone --branch "${JAX_BRANCH}" --depth 1 https://github.com/ROCm/jax.git /tmp/jax-src \
     && git clone --branch "${XLA_BRANCH}" --depth 1 https://github.com/ROCm/xla.git /tmp/xla-src \
     && cd /tmp/jax-src \
@@ -112,8 +109,7 @@ RUN pip install --no-cache-dir patchelf auditwheel numpy scipy \
 
 RUN git clone --branch "${FA_VERSION}" --depth 1 https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention \
     && cd /tmp/flash-attention \
-    && ROCM_PATH=/opt/rocm GPU_ARCHS="${GPU_ARCH}" FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE FLASH_ATTENTION_SKIP_CK_BUILD=FALSE \
-       python setup.py install \
+    && ROCM_PATH=/opt/rocm GPU_ARCHS="${GPU_ARCH}" python setup.py install \
     && rm -rf /tmp/flash-attention
 
 RUN git clone --no-checkout https://github.com/ROCm/aiter.git /tmp/aiter \

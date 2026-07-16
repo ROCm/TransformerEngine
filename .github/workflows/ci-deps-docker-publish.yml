@@ -44,19 +44,12 @@ jobs:
         env:
           REGISTRY: ${{ vars.ARTIFACTORY_DOCKER_REGISTRY }}
           REPOSITORY: ${{ vars.ARTIFACTORY_CI_DEPS_REPOSITORY }}
-          IMAGE_TAG: ${{ inputs.image_tag }}
-          GPU_ARCH: ${{ inputs.gpu_arch }}
         run: |
           set -euo pipefail
           if [ -z "${REGISTRY}" ] || [ -z "${REPOSITORY}" ]; then
             echo "Set repository variables ARTIFACTORY_DOCKER_REGISTRY and ARTIFACTORY_CI_DEPS_REPOSITORY." >&2
             exit 1
           fi
-          case "${GPU_ARCH}" in
-            gfx942|gfx950) ;;
-            *) echo "gpu_arch must be gfx942 or gfx950" >&2; exit 1 ;;
-          esac
-          echo "IMAGE_TAG=${IMAGE_TAG}" >> "${GITHUB_ENV}"
 
       - name: Log in to container registry
         uses: docker/login-action@v3
@@ -70,10 +63,10 @@ jobs:
           REGISTRY: ${{ vars.ARTIFACTORY_DOCKER_REGISTRY }}
           REPOSITORY: ${{ vars.ARTIFACTORY_CI_DEPS_REPOSITORY }}
           GPU_ARCH: ${{ inputs.gpu_arch }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
           FULL_IMAGE="${REGISTRY}/${REPOSITORY}"
-          : "${IMAGE_TAG:?IMAGE_TAG must be set by the validate step}"
           docker build \
             -f .github/scripts/Dockerfile.ci.deps \
             --build-arg "GPU_ARCH=${GPU_ARCH}" \

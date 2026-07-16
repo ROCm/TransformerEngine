@@ -830,7 +830,9 @@ def test_dcp_output_parity(recipe_name, async_save):
             dcp.save(save_state, checkpoint_id=checkpoint_dir)
         elif te.torch_version() >= (2, 9, 0):
             from torch.distributed.checkpoint.staging import BlockingAsyncStager
-
+            # CI-only staging workaround: the default async stager can hang under
+            # PYTEST_TIMEOUT on ROCm torch 2.10+. BlockingAsyncStager does not
+            # change save/load correctness; future.result() still waits for completion.
             future = dcp.async_save(
                 save_state,
                 checkpoint_id=checkpoint_dir,
