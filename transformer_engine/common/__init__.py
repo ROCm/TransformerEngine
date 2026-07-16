@@ -411,32 +411,6 @@ def is_fp8_fnuz():
     return False
 
 @functools.lru_cache(maxsize=None)
-def _preload_rocm_sdk_for_te_core():
-    """Load ROCm runtime libs from rocm-sdk-core before TE native libraries.
-
-    On ROCm 7.13+ (TheRock / ROCK wheels), ``rocm_sdk`` preloads wheel-bundled
-    libs so TE shares the same COMGR/hip paths as PyTorch and JAX. Without
-    this, ``import transformer_engine`` can abort on duplicate LLVM registration
-    or fail to resolve ROCm shared libraries without ``LD_LIBRARY_PATH``.
-
-    When ``ROCM_PATH`` is unset, sets it from sdk devel so the version check and
-    ck_jit (which read ``os.getenv("ROCM_PATH")``) resolve the pip install.
-
-    On older ROCm installs without ``rocm-sdk-core``, this is a no-op and TE
-    behaves as before (system ``/opt/rocm`` via the dynamic linker).
-    """
-    try:
-        import rocm_sdk
-    except ImportError:
-        return
-    if not os.getenv("ROCM_PATH"):
-        from rocm_sdk._devel import get_devel_root
-
-        os.environ["ROCM_PATH"] = str(get_devel_root())
-    for lib in ("amd_comgr", "amdhip64", "hiprtc", "roctx64", "hipblaslt"):
-        rocm_sdk.preload_libraries(lib)
-
-@functools.lru_cache(maxsize=None)
 def _load_core_library():
     """Load shared library with Transformer Engine C extensions"""
     return ctypes.CDLL(_get_shared_object_file("core"), mode=ctypes.RTLD_GLOBAL)
@@ -464,7 +438,6 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
         except (OSError, RuntimeError, subprocess.CalledProcessError):
             pass
 
-    _preload_rocm_sdk_for_te_core()
     _TE_LIB_CTYPES = _load_core_library()
     try:
         _te_rocm_build = _TE_LIB_CTYPES.nvte_is_rocm_build()

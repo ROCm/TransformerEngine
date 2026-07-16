@@ -236,6 +236,8 @@ def rocm_path() -> Tuple[str, str]:
         rocm_home = Path(os.getenv("ROCM_PATH"))
     if rocm_home is None:
         rocm_home = _rocm_sdk_path_root()
+        if rocm_home is not None:
+            os.environ["ROCM_PATH"] = str(rocm_home)
     hipcc_bin = None
     if rocm_home is not None:
         hipcc_bin = rocm_home / "bin" / "hipcc"
