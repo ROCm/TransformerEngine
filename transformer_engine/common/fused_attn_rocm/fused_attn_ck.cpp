@@ -749,8 +749,18 @@ void fused_attn_ck_bwd_impl(
   // First h*max_tokens_q*sizeof(float) is the lse-d buffer (passed as softmax_lsed)
   void* lse_workspace = planner.allocate(h*max_tokens_q*sizeof(float));
 
-  // CK requires dq_acc ptr; size depends on deterministic mode
-  void* dq_acc_ptr = planner.allocate(nsplits*h*max_tokens_q*d_qk*sizeof(float));
+  // CK requires a dq_acc scratch buffer. ck_attn_bwd picks the layout at launch time: fp32-packed
+  // (nsplits, H, total_q, d_qk), or -- when the v3 asm dq_shuffle path runs (is_v3_atomic_fp32=0, ragged)
+  // -- bf16 per-segment padded (nsplits, B, H, pad16(s_q), 128). The v3 choice needs a GPU probe that must
+  // not run in the workspace-sizing pass, so size the buffer to hold EITHER layout for the ragged/non-atomic
+  // case; ck_attn_bwd sets the strides. Non-ragged / atomic_fp32 only ever use the fp32-packed layout.
+  const size_t dq_acc_fp32_bytes = nsplits*h*max_tokens_q*d_qk*sizeof(float);
+  const size_t dq_acc_padded_sq = ((s_q + 15) / 16) * 16;
+  const size_t dq_acc_bf16_bytes = nsplits*b*h*dq_acc_padded_sq*128*nvte_dtype_size(dtype);
+  const bool dq_acc_max_of_both = is_ragged && !nvte_ck_is_v3_atomic_fp32;
+  const size_t dq_acc_bytes = (dq_acc_max_of_both && dq_acc_bf16_bytes > dq_acc_fp32_bytes)
+      ? dq_acc_bf16_bytes : dq_acc_fp32_bytes;
+  void* dq_acc_ptr = planner.allocate(dq_acc_bytes);
 
   void* dk_expanded_ptr = nullptr;
   void* dv_expanded_ptr = nullptr;
@@ -892,8 +902,9 @@ void fused_attn_ck_bwd_impl(
   }
 
   // Initialize workspace buffers.
-  // dq_acc is of shape (nsplits, B, S, H, D_qk); CK requires zeroing
-  NVTE_CHECK_CUDA(cudaMemsetAsync(dq_acc_ptr, 0, sizeof(float)*nsplits*h*max_tokens_q*d_qk, stream));
+  // dq_acc is sized to hold either layout (see allocation above); ck_attn_bwd picks the strides.
+  // CK requires zeroing the whole buffer.
+  NVTE_CHECK_CUDA(cudaMemsetAsync(dq_acc_ptr, 0, dq_acc_bytes, stream));
   if(devPtrAlibiSlope){
     dim3 block, grid;
     block.x = 1024;

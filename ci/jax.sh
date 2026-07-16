@@ -60,6 +60,10 @@ run_test_config() {
     run 1 test_fused_attn.py
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 test_fused_attn.py -k "TestFusedAttnWithDeterminism"
     NVTE_CK_USES_FWD_V3=0 NVTE_CK_USES_BWD_V3=0 run_default_fa_lbl "v2" 3 test_fused_attn.py # Using FAv2 for forward and backward pass
+    # bf16 atomic dq accumulation (dq_shuffle post-kernel). Default is fp32 (atomic32/dq_convert), so the
+    # bf16 dq_acc path is otherwise never exercised in CI. Scope to THD/RAGGED backward where the
+    # group-mode per-segment dq_acc layout matters (see the equal-dim-128 RAGGED_SELF config).
+    NVTE_CK_IS_V3_ATOMIC_FP32=0 run_default_fa_lbl "atomic16" 3 test_fused_attn.py -k "test_backward and RAGGED"
     run_default_fa 1 test_layer.py # it effectively always uses unfused attention
     run_default_fa 1 test_sanity_import.py
     run_default_fa 1 test_softmax.py

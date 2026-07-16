@@ -605,6 +605,21 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   const bool has_dbias = built.has_dbias;
   const BiasShape bias_shape = built.bias_shape;
 
+  // dq_acc scratch layout (mirrors AITER's asm_mha_varlen_bwd wiring). build_bwd_fmha_args sets the
+  // fp32-packed layout (nsplits, H, total_q, d_qk) with batch_stride_dq_acc=0 -- correct for the fp32
+  // dq_convert post-kernel. But the bf16 dq_shuffle post-kernel (is_v3_atomic_fp32=0) expects a
+  // per-segment padded layout (nsplits, B, H, pad16(s_q), 128); with batch_stride=0 it mis-indexes every
+  // ragged segment past cu_seqlens offset 0, corrupting dQ. Switch to the per-segment layout only when
+  // the v3 asm path actually runs (ck_attn_bwd_uses_v3 probe) -- v2/fallback keeps the fp32-packed layout.
+  // The dq_acc buffer is sized to hold either layout in fused_attn_ck.cpp.
+  if (args.is_group_mode() && !args.is_v3_atomic_fp32 && ck_attn_bwd_uses_v3(args)) {
+    const int64_t padded_sq = static_cast<int64_t>(((args.s_q + 15) / 16) * 16);
+    fmha_args.stride_dq_acc = 128;
+    fmha_args.nhead_stride_dq_acc = static_cast<int64_t>(padded_sq * 128);
+    fmha_args.batch_stride_dq_acc = static_cast<int64_t>(args.h * padded_sq * 128);
+    fmha_args.split_stride_dq_acc = static_cast<int>(args.b * args.h * padded_sq * 128);
+  }
+
   bool ck_log_config = false;
   if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
     if (env_p != nullptr && std::string(env_p) == "1")
