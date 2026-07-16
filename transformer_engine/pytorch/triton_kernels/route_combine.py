@@ -5,7 +5,7 @@
 """Token-parallel gather-combine for the permute-free MoE path (Triton).
 
 The permute-free token combine sums, for each received token, the per-route contributions of
-the experts it was routed to. The compact route buffer ``[em_max, N]`` is expert-sorted, so a
+the experts it was routed to. The compact route buffer ``[T * min(topk, E), N]`` is expert-sorted, so a
 token's routes live in different expert blocks. Doing the sum as a *scatter* (each route
 atomic-adds onto its token row) serializes on hot token rows -- a token's top-k routes land in
 different CTAs and collide on the same fp32 cell. That atomic contention is the dominant cost
@@ -27,7 +27,7 @@ import triton.language as tl
 
 @triton.jit
 def _gather_combine_kernel(
-    src_ptr,  # compact [em_max, N] (route order; valid rows [0, num_routes))
+    src_ptr,  # compact [T * min(topk, E), N] (route order; valid rows [0, num_routes))
     token_routes_ptr,  # [T, MAXK] int32: compact route positions per token
     token_count_ptr,  # [T] int32: number of routes for each token
     out_ptr,  # [T, N] out
@@ -70,7 +70,7 @@ def route_gather_combine(
     Parameters
     ----------
     src:
-        Compact per-route buffer ``[em_max, N]`` (route order; only ``[0, num_routes)`` valid).
+        Compact per-route buffer ``[T * min(topk, E), N]`` (route order; only ``[0, num_routes)`` valid).
     token_routes / token_route_count:
         Token->routes inverse map from the align place kernel (``[T, MAXK]`` route positions
         and the per-token route count).
@@ -84,7 +84,7 @@ def route_gather_combine(
         route rows, cast once. No atomics, no host sync.
     """
     if src.dim() != 2:
-        raise ValueError(f"src must be [em_max, N], got {tuple(src.shape)}.")
+        raise ValueError(f"src must be [T * min(topk, E), N], got {tuple(src.shape)}.")
     if not src.is_contiguous():
         src = src.contiguous()
     n = src.shape[1]

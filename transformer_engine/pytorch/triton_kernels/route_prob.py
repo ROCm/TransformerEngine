@@ -5,9 +5,9 @@
 """Fused per-route routing-probability apply for the permute-free MoE path (Triton).
 
 In the permute-free expert path each route ``r`` (a compact, expert-sorted position in the
-FC1 output ``[em_max, H]``) carries a scalar gating probability
+FC1 output ``[T * min(topk, E), H]``) carries a scalar gating probability
 ``prob[r] = dispatched_probs[token(r), expert(r)]`` that must scale the FC1 activation
-before FC2. The naive way to build the padded ``[em_max]`` prob vector is a PyTorch advanced
+before FC2. The naive way to build the padded ``[T * min(topk, E)]`` prob vector is a PyTorch advanced
 index ``dispatched_probs[token, expert]`` whose autograd backward is
 ``aten::_index_put_impl_`` -- a generic, fp32, atomics-heavy scatter over the *padded*
 ``routes_max`` that dominates real MoE traces.
@@ -16,7 +16,7 @@ This module folds the gather + multiply (and its gradient) into two small Triton
 that reuse the route-list align buffers TE already builds for FC1:
 
 - forward:  ``weighted[r, :] = activation[r, :] * dispatched_probs[token(r), expert(r)]``
-  gathering the scalar prob inside the kernel; no ``[em_max]`` prob tensor is materialized.
+  gathering the scalar prob inside the kernel; no ``[T * min(topk, E)]`` prob tensor is materialized.
 - backward: ``grad_act[r, :] = grad_weighted[r, :] * prob[r]`` and
   ``grad_prob[r] = sum_h grad_weighted[r, h] * activation[r, h]`` scattered (masked, bounded
   to real routes) into ``grad_dispatched_probs`` with a single atomic add per route -- no
@@ -220,7 +220,7 @@ def apply_route_probs(
     Parameters
     ----------
     activation:
-        FC1 activation output ``[em_max, H]`` in the compact/padded route layout (rows
+        FC1 activation output ``[T * min(topk, E), H]`` in the compact/padded route layout (rows
         ``[0, num_routes)`` valid, tail inert).
     dispatched_probs:
         Post-dispatch gating probs ``[num_recv_tokens, num_local_experts]`` (differentiable).
@@ -231,7 +231,7 @@ def apply_route_probs(
     Returns
     -------
     torch.Tensor
-        ``weighted`` ``[em_max, H]``: ``activation`` with each valid route scaled by its prob.
+        ``weighted`` ``[T * min(topk, E), H]``: ``activation`` with each valid route scaled by its prob.
         Gradients flow to both ``activation`` and ``dispatched_probs`` (the latter via a fast,
         bounded, masked atomic scatter -- no ``index_put``).
     """

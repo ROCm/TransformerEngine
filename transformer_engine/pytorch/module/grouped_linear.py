@@ -6,7 +6,6 @@
 
 """GroupedLinear API"""
 from typing import Union, Optional, Callable, Tuple, List
-
 from itertools import chain
 import warnings
 import weakref
@@ -64,13 +63,8 @@ if IS_HIP_EXTENSION:
     from transformer_engine.pytorch.triton_kernels.grouped_gemm import general_grouped_gemm_triton
     from transformer_engine.pytorch.triton_kernels.permute_free_grouped_gemm import (
         is_permute_free_grouped_gemm_enabled,
-        permute_free_grouped_gemm_bf16,
-        permute_free_grouped_gemm_bf16_dgrad,
-        permute_free_grouped_gemm_bf16_wgrad,
-        permute_free_gated_act_bwd,
-        permute_free_grouped_gemm_bf16_fc2,
-        permute_free_grouped_gemm_bf16_fc2_dgrad,
-        permute_free_grouped_gemm_bf16_fc2_wgrad,
+        permute_free_grouped_gemm_forward,
+        permute_free_grouped_gemm_backward,
     )
     import os
 
@@ -122,8 +116,10 @@ class _GroupedLinear(torch.autograd.Function):
             actual_m_splits,
             unpad_output,
             routing_metadata,
-            perm_free_activation,
         ) = non_tensor_args
+        # The gated-activation fusion hint rides on the routing metadata (single source of
+        # truth); ``None`` on every non-permute-free / non-FC1 path.
+        perm_free_activation = getattr(routing_metadata, "activation", None)
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
         else:
@@ -253,7 +249,7 @@ class _GroupedLinear(torch.autograd.Function):
             bias_dtype = torch.bfloat16  # FP8 GEMM only supports BF16/FP16 bias
         biases = [cast_if_needed(bias, bias_dtype) for bias in biases] if use_bias else biases
         # Initialize output tensor. The permute-free path allocates its own worst-case padded
-        # [em_max, out_features] output inside permute_free_grouped_gemm_bf16 (valid rows are
+        # [T * min(topk, E), out_features] output inside permute_free_grouped_gemm_bf16 (valid rows are
         # the compact route range [0, num_routes); the tail is inert zero padding).
         if not use_perm_free_grouped_gemm:
             out = torch.empty(
@@ -272,41 +268,25 @@ class _GroupedLinear(torch.autograd.Function):
         # Perform GEMM
         perm_free_preact = None
         if use_perm_free_grouped_gemm:
-            if getattr(routing_metadata, "route_space", False):
-                # FC2: route-ordered input, fused scatter-to-token -> [num_recv, out].
-                out = permute_free_grouped_gemm_bf16_fc2(
-                    inputmats[0],
-                    weights_fp8,
-                    routing_metadata,
-                )
-            elif perm_free_activation is not None:
-                # FC1 + fused gated activation (+ optional route prob): the epilogue emits the
-                # F-wide act(gate)*up*prob route buffer directly. Save the raw 2F pre-activation
-                # when a backward is needed so the activation grad can be reconstructed.
-                save_preact = is_grad_enabled and (
-                    inp.requires_grad
-                    or weight_requires_grad
-                    or (dispatched_probs is not None and dispatched_probs.requires_grad)
-                )
-                pf_result = permute_free_grouped_gemm_bf16(
-                    inputmats[0],
-                    weights_fp8,
-                    routing_metadata,
-                    activation=perm_free_activation,
-                    dispatched_probs=dispatched_probs,
-                    return_preact=save_preact,
-                )
-                if save_preact:
-                    out, perm_free_preact = pf_result
-                else:
-                    out = pf_result
-            else:
-                # FC1: gather-in-GEMM -> padded [em_max, out] route buffer.
-                out = permute_free_grouped_gemm_bf16(
-                    inputmats[0],
-                    weights_fp8,
-                    routing_metadata,
-                )
+            # Save the raw 2F pre-activation when a backward needs it.
+            # It is only consumed on the FC1 fused-activation path.
+            save_preact = is_grad_enabled and (
+                inp.requires_grad
+                or weight_requires_grad
+                or (dispatched_probs is not None and dispatched_probs.requires_grad)
+            )
+            # The wrapper decides FC1 vs FC2 (and whether to fuse the gated activation) from the
+            # routing metadata + fusion hints.
+            pf_result = permute_free_grouped_gemm_forward(
+                inputmats[0],
+                weights_fp8,
+                routing_metadata,
+                activation=perm_free_activation,
+                dispatched_probs=dispatched_probs,
+                save_preact=save_preact,
+            )
+            out = pf_result.out
+            perm_free_preact = pf_result.preact
         elif use_grouped_gemm_triton:
             general_grouped_gemm_func = general_grouped_gemm_triton
             kwargs = {"m_splits_tensor": m_splits_tensor}
@@ -458,7 +438,7 @@ class _GroupedLinear(torch.autograd.Function):
                 ctx.grad_output_quantizers = [None] * num_gemms
                 ctx.reduce_and_update_bwd_fp8_tensors = False
 
-        # [*, in_features] -> [*, out_features], or worst-case padded [em_max, out_features]
+        # [*, in_features] -> [*, out_features], or worst-case padded [T * min(topk, E), out_features]
         # (permute-free route-list path; valid rows are the compact range [0, num_routes)).
         if use_perm_free_grouped_gemm:
             return out, new_workspaces
@@ -483,62 +463,27 @@ class _GroupedLinear(torch.autograd.Function):
             dispatched_probs = saved_tensors[num_inputs + 3 * N + 1]
 
             # Permute-free gather GEMM: both dgrad and wgrad gather along the
-            # contraction axis inside a single Triton kernel (no permute/argsort,
-            # no device-to-host sync), reusing the forward align buffers. Returns
-            # early to bypass the fp8/debug logic.
+            # contraction axis inside a single Triton kernel.
             if getattr(ctx, "use_perm_free_grouped_gemm", False):
-                routing = ctx.routing_metadata
-                route_space = getattr(routing, "route_space", False)
-                grad_output_pf = grad_output.contiguous()
-
-                dgrad = None
-                grad_probs = None
-                wgrad_list = [None] * ctx.num_gemms
-                if route_space:
-                    # FC2: grad is token-space [num_recv, out]. dgrad gathers back to the
-                    # compact route buffer [em_max, in]; wgrad swaps operands + transposes.
-                    if ctx.requires_dgrad:
-                        weights_stacked = torch.stack(list(weights), dim=0)  # [E, H, F]
-                        dgrad = permute_free_grouped_gemm_bf16_fc2_dgrad(
-                            grad_output_pf, weights_stacked, routing
-                        )
-                    if ctx.weights_requires_grad:
-                        weights_shape = (ctx.num_gemms, weights[0].size(0), weights[0].size(1))
-                        dW = permute_free_grouped_gemm_bf16_fc2_wgrad(
-                            inputmats[0], grad_output_pf, weights_shape, routing
-                        )  # [E, H, F]
-                        wgrad_list = [dW[i] for i in range(ctx.num_gemms)]
-                else:
-                    # FC1: grad is the padded [em_max, out] route buffer; dgrad scatters the
-                    # input grad back to received-token rows.
-                    fc1_activation = getattr(ctx, "perm_free_fc1_activation", None)
-                    if fc1_activation is not None:
-                        # Reconstruct the raw 2F GEMM-output grad (and the prob grad) from the
-                        # saved pre-activation, then run the *unchanged* dgrad/wgrad on it.
-                        grad_output_pf, grad_probs = permute_free_gated_act_bwd(
-                            grad_output_pf,
-                            perm_free_preact,
-                            routing,
-                            activation=fc1_activation,
-                            dispatched_probs=dispatched_probs,
-                        )
-                        if not (dispatched_probs is not None and dispatched_probs.requires_grad):
-                            grad_probs = None
-                    if ctx.requires_dgrad:
-                        weights_stacked = torch.stack(list(weights), dim=0)  # [E, N, H]
-                        dgrad = permute_free_grouped_gemm_bf16_dgrad(
-                            grad_output_pf, weights_stacked, routing
-                        )
-                    if ctx.weights_requires_grad:
-                        weights_shape = (ctx.num_gemms, weights[0].size(0), weights[0].size(1))
-                        dW = permute_free_grouped_gemm_bf16_wgrad(
-                            inputmats[0], grad_output_pf, weights_shape, routing
-                        )  # [E, N, H]
-                        wgrad_list = [dW[i] for i in range(ctx.num_gemms)]
-
+                # The wrapper decides FC1 vs FC2 dgrad/wgrad from the routing metadata.
+                pf_result = permute_free_grouped_gemm_backward(
+                    grad_output,
+                    routing=ctx.routing_metadata,
+                    weights=weights,
+                    num_gemms=ctx.num_gemms,
+                    hidden_states=inputmats[0],
+                    requires_dgrad=ctx.requires_dgrad,
+                    requires_wgrad=ctx.weights_requires_grad,
+                    fc1_activation=getattr(ctx, "perm_free_fc1_activation", None),
+                    preact=perm_free_preact,
+                    dispatched_probs=dispatched_probs,
+                )
+                wgrad_list = (
+                    pf_result.wgrad if pf_result.wgrad is not None else [None] * ctx.num_gemms
+                )
                 return (
-                    dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
-                    grad_probs,
+                    pf_result.dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+                    pf_result.grad_probs,
                     None,
                     *wgrad_list,
                     *([None] * ctx.num_gemms),
@@ -937,9 +882,9 @@ class GroupedLinear(TransformerEngineBaseModule):
     ``[num_recv_tokens, num_local_experts]`` + a ``route_space`` direction) instead of
     permuting activations before this module. The caller must skip ``moe_permute``. FC1
     (``route_space=False``) takes ``[num_recv_tokens, in_features]`` and produces the
-    worst-case padded ``[em_max, out_features]`` route buffer (valid rows are the compact
+    worst-case padded ``[T * min(topk, E), out_features]`` route buffer (valid rows are the compact
     route range ``[0, num_routes)``; the tail is inert zero padding); FC2
-    (``route_space=True``) takes the route-ordered ``[em_max, in_features]`` and fuses the
+    (``route_space=True``) takes the route-ordered ``[T * min(topk, E), in_features]`` and fuses the
     scatter back to token order, returning ``[num_recv_tokens, out_features]``. Requires
     ``bias=False`` and bf16. The router-weight combine happens upstream (at the activation).
     """
@@ -1334,7 +1279,6 @@ class GroupedLinear(TransformerEngineBaseModule):
         actual_m_splits: Optional[List[int]] = None,
         unpad_output: bool = False,
         permute_free_metadata: Optional["PermuteFreeMetadata"] = None,
-        activation: Optional[str] = None,
         dispatched_probs: Optional[torch.Tensor] = None,
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
@@ -1373,19 +1317,18 @@ class GroupedLinear(TransformerEngineBaseModule):
                       direction). When set with ``NVTE_PERMUTE_FREE_GROUPED_GEMM=1``, run
                       the route-list GEMM on unpermuted bf16 activations. ``route_space=
                       False`` (FC1) gathers per expert into the worst-case padded
-                      ``[em_max, out_features]`` route buffer (valid rows are the compact
+                      ``[T * min(topk, E), out_features]`` route buffer (valid rows are the compact
                       range ``[0, num_routes)``; the tail is inert zero padding);
                       ``route_space=True`` (FC2) reads route-ordered input and fuses the
                       scatter back to token order, returning ``[num_recv_tokens,
                       out_features]``. TE builds/caches the expert-sorted alignment buffers
-                      on the metadata.
-        activation : str, optional
-                     When set (``"silu"`` / ``"gelu"``) on the permute-free FC1 direction
-                     (``permute_free_metadata.route_space=False``), fuse the **gated**
-                     activation into the GEMM epilogue: the weight output dim is the gate+up
-                     width (``2F``), the returned buffer is the ``F``-wide ``act(gate) * up``,
-                     and the separate activation pass is skipped. The weight output dim must be
-                     laid out as ``[gate | up]``. Ignored on other paths.
+                      on the metadata. The gated-activation fusion hint
+                      (``permute_free_metadata.activation`` = ``"silu"`` / ``"gelu"``) rides on
+                      this object: when set on the FC1 direction (``route_space=False``) it
+                      fuses the **gated** activation into the GEMM epilogue (weight output dim
+                      is the gate+up width ``2F``, laid out as ``[gate | up]``; the returned
+                      buffer is the ``F``-wide ``act(gate) * up`` and the separate activation
+                      pass is skipped). Ignored on other paths.
         dispatched_probs : torch.Tensor, optional
                      ``[num_recv_tokens, num_local_experts]`` gating probabilities. When given
                      with a fused ``activation``, each route's ``prob[token, expert]`` is
@@ -1474,7 +1417,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                 actual_m_splits,
                 unpad_output,
                 routing_metadata,
-                activation,
             )
             out, new_workspaces = linear_fn(
                 *autograd_ctx, inp, dispatched_probs, non_tensor_args, *weight_tensors, *bias_tensors

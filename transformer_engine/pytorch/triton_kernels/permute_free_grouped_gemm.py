@@ -9,7 +9,7 @@ Route-list contract (post-dispatch, no topk / no route weights):
   num_local_experts]`` marks which local expert(s) each received token feeds.
 - TE builds one expert-sorted ``sorted_slot_ids`` (received-token row per route) plus a
   compact-output map (``route_start``/``block_start``), then runs the gather-GEMM.
-- FC1 fwd output is worst-case padded ``[em_max, out_features]`` in expert order (valid rows
+- FC1 fwd output is worst-case padded ``[T * min(topk, E), out_features]`` in expert order (valid rows
   are the compact route range ``[0, num_routes)``, tail is inert zero padding); dgrad returns
   ``dA = [num_recv_tokens, in_features]`` (scatter-add of the per-route gradients).
 """
@@ -17,7 +17,8 @@ Route-list contract (post-dispatch, no topk / no route weights):
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Optional, Tuple
+from dataclasses import dataclass
+from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 import triton.language as tl
@@ -35,11 +36,10 @@ __all__ = [
     "permute_free_grouped_gemm_bf16",
     "permute_free_grouped_gemm_bf16_dgrad",
     "permute_free_grouped_gemm_bf16_wgrad",
-    "permute_free_gated_act_bwd",
-    "permute_free_grouped_gemm_bf16_fc2",
-    "permute_free_grouped_gemm_bf16_fc2_dgrad",
-    "permute_free_grouped_gemm_bf16_fc2_wgrad",
-    "moe_align_route_list",
+    "permute_free_grouped_gemm_forward",
+    "permute_free_grouped_gemm_backward",
+    "PermuteFreeForwardResult",
+    "PermuteFreeBackwardResult",
     "prepare_moe_align",
     "get_default_moe_kernel_config",
     "is_permute_free_grouped_gemm_enabled",
@@ -58,9 +58,7 @@ def is_permute_free_grouped_gemm_enabled() -> bool:
 
 def get_default_moe_kernel_config(num_tokens: int) -> Dict[str, Any]:
     """Return Triton tile config for the route-list bf16 MoE GEMM."""
-    # aiter's tuned config is an optional accelerator. Fall back to the built-in heuristic on
-    # any import-time failure -- not just ImportError: aiter can raise RuntimeError (e.g. its
-    # gluon kernels enforcing a minimum triton version) while probing this optional path.
+    # aiter's tuned config is an optional accelerator.
     try:
         from aiter.ops.triton.utils.moe_config_utils import get_optimal_moe_config
 
@@ -97,7 +95,7 @@ def moe_align_route_list(
     num_experts: int,
     block_size: int,
     scan=None,
-    max_routes_per_token: Optional[int] = None,
+    topk: Optional[int] = None,
     build_inverse_map: bool = False,
 ) -> Tuple[
     torch.Tensor,
@@ -112,12 +110,6 @@ def moe_align_route_list(
 ]:
     """Build the expert-sorted route-list buffers from a boolean routing map.
 
-    Thin wrapper over the fused, host-sync-free Triton builder :func:`route_list_align`
-    (one kernel launch + tiny per-expert prefix sums; no ``nonzero``/``argsort``/``.item()``).
-    Index buffers are over-allocated to static, shape-derived bounds so their sizes never
-    depend on device data; the real block-padded extent comes back as the device scalar
-    ``num_tokens_post_padded``.
-
     Parameters
     ----------
     routing_map:
@@ -130,10 +122,10 @@ def moe_align_route_list(
     scan:
         Optional ``(counts, within)`` from :func:`route_list_scan`, shared across block
         sizes so the block-independent scan is only paid once per routing map.
-    max_routes_per_token:
+    topk:
         Host-known upper bound (the router top-k) on the number of experts any token routes
         to. When provided, tightens the static over-allocation from ``T * num_experts`` to
-        ``T * min(max_routes_per_token, num_experts)`` (still sync-free).
+        ``T * min(topk, num_experts)`` (still sync-free).
 
     Returns
     -------
@@ -147,7 +139,7 @@ def moe_align_route_list(
         num_experts=num_experts,
         block_size=block_size,
         scan=scan,
-        max_routes_per_token=max_routes_per_token,
+        topk=topk,
         build_inverse_map=build_inverse_map,
     )
 
@@ -171,9 +163,7 @@ def prepare_moe_align(metadata: MoERoutingMetadata, block_m: int) -> MoERoutingM
         return metadata
 
     counts, within = _ensure_route_scan(metadata)
-    # The token->routes inverse map (used by the contention-free gather-combine in FC2 fwd /
-    # FC1 dgrad) is emitted by the same place kernel (``build_inverse_map=True``), so it costs
-    # no extra launch. Block-independent, so it is built once here on the fwd align.
+
     (
         sorted_slot_ids,
         expert_ids,
@@ -189,18 +179,18 @@ def prepare_moe_align(metadata: MoERoutingMetadata, block_m: int) -> MoERoutingM
         num_experts=metadata.num_experts,
         block_size=block_m,
         scan=(counts, within),
-        max_routes_per_token=metadata.topk,
+        topk=metadata.topk,
         build_inverse_map=True,
     )
-    metadata.sorted_slot_ids = sorted_slot_ids
-    metadata.expert_ids = expert_ids
-    metadata.num_tokens_post_padded = num_tokens_post_padded
-    metadata.block_start = block_start
-    metadata.route_start = route_start
-    metadata.route_to_token = route_to_token
-    metadata.block_size_m = block_m
-    metadata.token_routes = token_routes
-    metadata.token_route_count = token_route_count
+    metadata.sorted_slot_ids = sorted_slot_ids  # [T * min(topk, E)] int32: block-padded slot -> token
+    metadata.expert_ids = expert_ids  # [blocks_max] int32: expert owning each block (-1 past end)
+    metadata.num_tokens_post_padded = num_tokens_post_padded  # [1] int32 device scalar: padded extent
+    metadata.block_start = block_start  # [E] int32: first block index of each expert (block units)
+    metadata.route_start = route_start  # [E] int32: first compact route index of each expert
+    metadata.route_to_token = route_to_token  # [routes_max] int32: compact route -> token
+    metadata.block_size_m = block_m  # int: BLOCK_SIZE_M the layout is padded to
+    metadata.token_routes = token_routes  # [T, min(topk, E)] int32: token -> its compact route ids
+    metadata.token_route_count = token_route_count  # [T] int32: number of routes per token
     return metadata
 
 
@@ -229,7 +219,7 @@ def _prepare_wgrad_align(
         num_experts=metadata.num_experts,
         block_size=contract_m,
         scan=_ensure_route_scan(metadata),
-        max_routes_per_token=metadata.topk,
+        topk=metadata.topk,
     )
     metadata.wgrad_sorted_slot_ids = sorted_slot_ids
     metadata.wgrad_block_start = block_start
@@ -287,21 +277,23 @@ def permute_free_grouped_gemm_bf16(
         activation in-kernel, skipping the separate route-prob-apply pass.
     return_preact:
         When set (only valid with a fused ``activation``), also allocate and fill a
-        ``[em_max, 2F]`` buffer with the raw ``[gate | up]`` pre-activation and return it
+        ``[T * min(topk, E), 2F]`` buffer with the raw ``[gate | up]`` pre-activation and return it
         alongside the activated output. The backward needs it to reconstruct the 2F GEMM-output
         gradient; keep ``False`` for inference to skip the extra store.
 
     Returns
     -------
     torch.Tensor
-        Worst-case padded ``[em_max, out_features]`` (or ``[em_max, F]`` with a fused
+        Worst-case padded ``[T * min(topk, E), out_features]`` (or ``[T * min(topk, E), F]`` with a fused
         ``activation``), bf16 (expert-contiguous). The valid rows are the compact route range
         ``[0, num_routes)``; the tail ``[num_routes, em_max)`` is inert, *uninitialized*
-        padding (the buffer is ``torch.empty``, never zeroed). Consumers MUST read only the
-        compact range via the routing metadata (``num_tokens_post_padded`` / ``route_start``);
-        the tail holds garbage and must never be read. No host sync is needed here.
-        When ``return_preact`` is set, returns ``(output, preact)`` where ``preact`` is the
-        ``[em_max, 2F]`` raw ``[gate | up]`` buffer (same compact-range validity contract).
+        padding. Consumers MUST read only the compact range, using the routing metadata to
+        locate each expert's rows:
+
+        - ``route_start[e] = counts[0] + ... + counts[e-1]`` (``= cumsum(counts) - counts``):
+          its starting offset in the packed output.
+        - ``num_tokens_post_padded = sum_e ceil(counts[e] / block_size) * block_size``: the
+          block-padded route count (each expert's row count rounded up to ``block_size``).
     """
     if hidden_states.dtype != torch.bfloat16:
         raise TypeError(
@@ -341,12 +333,7 @@ def permute_free_grouped_gemm_bf16(
     # Worst-case (sync-free) allocation: size the output to the block-padded upper bound
     # em_max = sorted_slot_ids.shape[0], which is derived purely from shapes (num_recv_tokens,
     # num_experts, block_size) and is always >= num_routes. This avoids the device->host sync
-    # (.item()) that a compact [num_routes, N] allocation would require. The gather-GEMM writes
-    # only the compact route range [0, num_routes) (out_row is built from the compact
-    # route_start); the tail [num_routes, em_max) is never visited (bounded by
-    # num_tokens_post_padded, sentinel-masked). Since the tail is never read by consumers, the
-    # buffer is left uninitialized (torch.empty) -- skipping the em_max*N zero-init memset,
-    # which dominates the padding cost, at no correctness change.
+    # (.item()) that a compact [num_routes, N] allocation would require.
     em_max = routing.sorted_slot_ids.shape[0]
     output = torch.empty(
         (em_max, stored_features),
@@ -395,7 +382,7 @@ def permute_free_gated_act_bwd(
     """Activation (+ route-prob) backward for the fused permute-free FC1 epilogue.
 
     Reconstructs the raw ``2F`` GEMM-output gradient ``dpre = [d_gate | d_up]`` (and, when the
-    forward fused the route prob, the prob gradient) from the saved ``[em_max, 2F]``
+    forward fused the route prob, the prob gradient) from the saved ``[T * min(topk, E), 2F]``
     pre-activation. The returned ``dpre`` feeds the *unchanged* route-list dgrad / wgrad, so the
     FC1 backward stays symmetric with the non-activation path; the caller owns the autograd
     boundary and routes ``dprob`` back to ``dispatched_probs``.
@@ -403,15 +390,15 @@ def permute_free_gated_act_bwd(
     Parameters
     ----------
     grad_output:
-        ``[em_max, F]`` grad wrt the fused FC1 output (route/padded layout).
+        ``[T * min(topk, E), F]`` grad wrt the fused FC1 output (route/padded layout).
     preact:
-        ``[em_max, 2F]`` raw ``[gate | up]`` pre-activation saved by the forward.
+        ``[T * min(topk, E), 2F]`` raw ``[gate | up]`` pre-activation saved by the forward.
     dispatched_probs:
         ``[num_recv_tokens, E]`` gating probs (or ``None`` for a silu/gelu-only fusion).
 
     Returns
     -------
-    ``(dpre, dprob)`` -- ``dpre`` is ``[em_max, 2F]`` bf16; ``dprob`` matches
+    ``(dpre, dprob)`` -- ``dpre`` is ``[T * min(topk, E), 2F]`` bf16; ``dprob`` matches
     ``dispatched_probs`` (or ``None`` when no probs were fused).
     """
     routes_max = int(routing.route_to_token.shape[0])
@@ -488,7 +475,7 @@ def permute_free_grouped_gemm_bf16_dgrad(
     dgrad_config = {**dgrad_config, "BLOCK_SIZE_M": block_size_m}
 
     # Two-stage dgrad reduction (contention-free): (1) plain compact store of each per-route
-    # dX[route] = grad[route] @ W1[e] into an [em_max, in] bf16 buffer (coalesced, no atomics),
+    # dX[route] = grad[route] @ W1[e] into an [T * min(topk, E), in] bf16 buffer (coalesced, no atomics),
     # then (2) a token-parallel gather-combine summing each token's route rows. This replaces
     # the fused atomic scatter-to-token, whose per-token contention dominated the FC1 dgrad.
     em_max = routing.sorted_slot_ids.shape[0]
@@ -510,7 +497,6 @@ def permute_free_grouped_gemm_bf16_dgrad(
         compute_type=tl.bfloat16,
         config=dgrad_config,
         index_a_by_route_pos=True,
-        scatter_to_token=False,
     )
     return route_gather_combine(
         compact,
@@ -607,19 +593,20 @@ def permute_free_grouped_gemm_bf16_fc2(
     *,
     config: Optional[Dict[str, Any]] = None,
 ) -> torch.Tensor:
-    """Route-list FC2 forward with fused scatter-to-token (bf16 MoE).
+    """Route-list FC2 forward with gather-combine to token order (bf16 MoE).
 
-    ``fc2_input`` is the route-ordered activation ``[em_max, in_features]`` (FC1's padded
+    ``fc2_input`` is the route-ordered activation ``[T * min(topk, E), in_features]`` (FC1's padded
     output; valid rows are the compact range ``[0, num_routes)``). For each route the kernel
-    reads its own row (``index_a_by_route_pos=True``), computes ``fc2_input[route] @ W2[e]^T``
-    and atomic-accumulates the result onto its received-token row
-    (``scatter_to_token=True``). Because the router probs are applied upstream (at the
-    activation), this fused scatter-add *is* the token combine.
+    reads its own row (``index_a_by_route_pos=True``) and computes the compact per-route
+    ``fc2_input[route] @ W2[e]^T``; a separate contention-free gather-combine pass
+    (:func:`route_gather_combine`) then sums each token's routes into its output row. Because
+    the router probs are applied upstream (at the activation), that combine *is* the token
+    combine. (This replaces the earlier fused atomic scatter-to-token.)
 
     Parameters
     ----------
     fc2_input:
-        Route-ordered activations ``[em_max, in_features]``, bf16.
+        Route-ordered activations ``[T * min(topk, E), in_features]``, bf16.
     weights:
         Expert weights ``[num_experts, out_features, in_features]`` (W2) or list of ``[out,
         in]``.
@@ -662,7 +649,7 @@ def permute_free_grouped_gemm_bf16_fc2(
     kernel_config = {**kernel_config, "BLOCK_SIZE_M": block_size_m}
 
     # Two-stage combine (contention-free): (1) plain compact store of each per-route result
-    # y[route] = fc2_input[route] @ W2[e] into an [em_max, out] bf16 buffer (coalesced, no
+    # y[route] = fc2_input[route] @ W2[e] into an [T * min(topk, E), out] bf16 buffer (coalesced, no
     # atomics), then (2) a token-parallel gather-combine that sums each token's route rows.
     # This replaces the fused atomic scatter-to-token, whose per-token atomic contention made
     # the FC2 forward ~2x the FC1 forward. Gather has no contention, so the combine is ~free.
@@ -685,7 +672,6 @@ def permute_free_grouped_gemm_bf16_fc2(
         compute_type=tl.bfloat16,
         config=kernel_config,
         index_a_by_route_pos=True,
-        scatter_to_token=False,
     )
     return route_gather_combine(
         compact,
@@ -709,12 +695,12 @@ def permute_free_grouped_gemm_bf16_fc2_dgrad(
     of FC2's fused-scatter forward output). For each route the kernel gathers its received
     token's grad row (``index_a_by_route_pos=False``) and computes ``grad[token] @ W2[e]``
     (contracting over ``out_features``), writing the compact per-route
-    ``d(fc2_input) = [em_max, in_features]``.
+    ``d(fc2_input) = [T * min(topk, E), in_features]``.
 
     Returns
     -------
     torch.Tensor
-        ``[em_max, in_features]``, bf16 (route order; valid rows are ``[0, num_routes)``).
+        ``[T * min(topk, E), in_features]``, bf16 (route order; valid rows are ``[0, num_routes)``).
     """
     if grad_output.dtype != torch.bfloat16:
         raise TypeError(
@@ -775,7 +761,6 @@ def permute_free_grouped_gemm_bf16_fc2_dgrad(
         compute_type=tl.bfloat16,
         config=dgrad_config,
         index_a_by_route_pos=False,
-        scatter_to_token=False,
     )
     return dgrad
 
@@ -798,7 +783,7 @@ def permute_free_grouped_gemm_bf16_fc2_wgrad(
     Parameters
     ----------
     fc2_input:
-        Route-ordered activations ``[em_max, in_features(F)]``, bf16.
+        Route-ordered activations ``[T * min(topk, E), in_features(F)]``, bf16.
     grad_output:
         Token-space gradient ``[num_recv_tokens, out_features(H)]``, bf16.
     weights_shape:
@@ -815,3 +800,142 @@ def permute_free_grouped_gemm_bf16_fc2_wgrad(
         config=config,
     )
     return dW_t.transpose(1, 2).contiguous()
+
+
+# ---------------------------------------------------------------------------
+# Direction-aware dispatch: pick the FC1/FC2 fwd/bwd kernels from the routing
+# metadata so callers (e.g. GroupedLinear) don't have to branch on route_space /
+# activation themselves.
+# ---------------------------------------------------------------------------
+@dataclass
+class PermuteFreeForwardResult:
+    """Output of :func:`permute_free_grouped_gemm_forward`.
+
+    ``preact`` is the raw ``2F`` pre-activation saved for the FC1 gated-activation backward;
+    it is ``None`` on every other path (FC2, or FC1 without a fused activation / without a
+    backward).
+    """
+
+    out: torch.Tensor
+    preact: Optional[torch.Tensor] = None
+
+
+@dataclass
+class PermuteFreeBackwardResult:
+    """Gradients from :func:`permute_free_grouped_gemm_backward`.
+
+    ``dgrad`` / ``wgrad`` are ``None`` when the corresponding gradient was not requested;
+    ``wgrad`` (when present) is a per-expert list. ``grad_probs`` is the route-prob gradient
+    for the FC1 fused-prob path (``None`` otherwise).
+    """
+
+    dgrad: Optional[torch.Tensor] = None
+    grad_probs: Optional[torch.Tensor] = None
+    wgrad: Optional[List[torch.Tensor]] = None
+
+
+def permute_free_grouped_gemm_forward(
+    hidden_states: torch.Tensor,
+    weights: torch.Tensor | list[torch.Tensor],
+    routing: MoERoutingMetadata,
+    *,
+    activation: Optional[str] = None,
+    dispatched_probs: Optional[torch.Tensor] = None,
+    save_preact: bool = False,
+) -> PermuteFreeForwardResult:
+    """Dispatch the permute-free grouped-GEMM forward from the routing direction + fusion hints.
+
+    ``routing.route_space`` selects the direction:
+
+    - ``True`` (FC2): route-ordered input, fused scatter-to-token -> ``[num_recv, out]``.
+    - ``False`` (FC1): gather-in-GEMM -> padded ``[T * min(topk, E), out]`` route buffer. When
+      ``activation`` is set the gated activation (+ optional ``dispatched_probs``) is fused into
+      the epilogue; ``save_preact`` then also returns the raw ``2F`` pre-activation for the
+      backward.
+    """
+    if getattr(routing, "route_space", False):
+        return PermuteFreeForwardResult(
+            permute_free_grouped_gemm_bf16_fc2(hidden_states, weights, routing)
+        )
+    if activation is not None:
+        result = permute_free_grouped_gemm_bf16(
+            hidden_states,
+            weights,
+            routing,
+            activation=activation,
+            dispatched_probs=dispatched_probs,
+            return_preact=save_preact,
+        )
+        if save_preact:
+            out, preact = result
+            return PermuteFreeForwardResult(out, preact)
+        return PermuteFreeForwardResult(result)
+    return PermuteFreeForwardResult(
+        permute_free_grouped_gemm_bf16(hidden_states, weights, routing)
+    )
+
+
+def permute_free_grouped_gemm_backward(
+    grad_output: torch.Tensor,
+    *,
+    routing: MoERoutingMetadata,
+    weights: list[torch.Tensor],
+    num_gemms: int,
+    hidden_states: Optional[torch.Tensor] = None,
+    requires_dgrad: bool = False,
+    requires_wgrad: bool = False,
+    fc1_activation: Optional[str] = None,
+    preact: Optional[torch.Tensor] = None,
+    dispatched_probs: Optional[torch.Tensor] = None,
+) -> PermuteFreeBackwardResult:
+    """Dispatch the permute-free grouped-GEMM backward (mirror of the forward dispatch).
+
+    ``routing.route_space`` picks the FC2 vs FC1 dgrad/wgrad kernels. On the FC1
+    gated-activation path (``fc1_activation`` set) the raw ``2F`` GEMM-output gradient (and the
+    route-prob gradient) is first reconstructed from the saved ``preact`` and fed to the
+    *unchanged* dgrad/wgrad. ``hidden_states`` (the forward input) is only needed for wgrad.
+    """
+    grad_output = grad_output.contiguous()
+    route_space = getattr(routing, "route_space", False)
+    dgrad = None
+    grad_probs = None
+    wgrad = None
+
+    if route_space:
+        # FC2: grad is token-space [num_recv, out]. dgrad gathers back to the compact route
+        # buffer [T * min(topk, E), in]; wgrad swaps operands + transposes.
+        if requires_dgrad:
+            weights_stacked = torch.stack(list(weights), dim=0)  # [E, H, F]
+            dgrad = permute_free_grouped_gemm_bf16_fc2_dgrad(grad_output, weights_stacked, routing)
+        if requires_wgrad:
+            weights_shape = (num_gemms, weights[0].size(0), weights[0].size(1))
+            dW = permute_free_grouped_gemm_bf16_fc2_wgrad(
+                hidden_states, grad_output, weights_shape, routing
+            )  # [E, H, F]
+            wgrad = [dW[i] for i in range(num_gemms)]
+    else:
+        # FC1: grad is the padded [T * min(topk, E), out] route buffer; dgrad scatters the input grad
+        # back to received-token rows.
+        if fc1_activation is not None:
+            # Reconstruct the raw 2F GEMM-output grad (and the prob grad) from the saved
+            # pre-activation, then run the *unchanged* dgrad/wgrad on it.
+            grad_output, grad_probs = permute_free_gated_act_bwd(
+                grad_output,
+                preact,
+                routing,
+                activation=fc1_activation,
+                dispatched_probs=dispatched_probs,
+            )
+            if not (dispatched_probs is not None and dispatched_probs.requires_grad):
+                grad_probs = None
+        if requires_dgrad:
+            weights_stacked = torch.stack(list(weights), dim=0)  # [E, N, H]
+            dgrad = permute_free_grouped_gemm_bf16_dgrad(grad_output, weights_stacked, routing)
+        if requires_wgrad:
+            weights_shape = (num_gemms, weights[0].size(0), weights[0].size(1))
+            dW = permute_free_grouped_gemm_bf16_wgrad(
+                hidden_states, grad_output, weights_shape, routing
+            )  # [E, N, H]
+            wgrad = [dW[i] for i in range(num_gemms)]
+
+    return PermuteFreeBackwardResult(dgrad=dgrad, grad_probs=grad_probs, wgrad=wgrad)

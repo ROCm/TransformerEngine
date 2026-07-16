@@ -11,8 +11,6 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from transformer_engine.pytorch.moe_routing import (
     MoERoutingMetadata,
-    index_map_to_topk_weights,
-    routing_map_to_topk,
 )
 from transformer_engine.pytorch.triton_kernels.permute_free_grouped_gemm import (
     permute_free_grouped_gemm_bf16,
@@ -57,40 +55,6 @@ def _compact_route_order(routing_map):
     tok, exp = routing_map.nonzero(as_tuple=True)
     order = torch.argsort(exp, stable=True)
     return tok[order].to(torch.int64), exp[order].to(torch.int64)
-
-
-# ---------------------------------------------------------------------------
-# moe_routing helpers (unchanged public API)
-# ---------------------------------------------------------------------------
-@pytest.mark.parametrize("num_tokens", [32, 128])
-@pytest.mark.parametrize("topk", [2, 4])
-@pytest.mark.parametrize("num_experts", [4, 8])
-def test_routing_map_to_topk(num_tokens, topk, num_experts):
-    torch.manual_seed(42)
-    logits = torch.randn(num_tokens, num_experts, device="cuda")
-    probs = torch.softmax(logits, dim=-1)
-    _, top_indices = torch.topk(probs, k=topk, dim=-1)
-    routing_map = torch.zeros(num_tokens, num_experts, dtype=torch.bool, device="cuda")
-    routing_map.scatter_(1, top_indices, True)
-
-    topk_ids, topk_weights = routing_map_to_topk(probs, routing_map)
-    assert topk_ids.shape == (num_tokens, topk)
-    assert topk_weights.shape == (num_tokens, topk)
-    assert topk_ids.dtype == torch.int32
-    assert topk_weights.dtype == torch.float32
-
-    ref_weights = probs.gather(1, top_indices).float()
-    torch.testing.assert_close(topk_weights, ref_weights, rtol=0, atol=0)
-    torch.testing.assert_close(topk_ids, top_indices.to(torch.int32), rtol=0, atol=0)
-
-
-def test_index_map_to_topk_weights():
-    probs = torch.tensor([[0.1, 0.2, 0.7], [0.5, 0.3, 0.2]], device="cuda")
-    topk_ids = torch.tensor([[2, 0], [0, 1]], device="cuda", dtype=torch.int32)
-    weights = index_map_to_topk_weights(probs, topk_ids)
-    expected = torch.tensor([[0.7, 0.1], [0.5, 0.3]], device="cuda", dtype=torch.float32)
-    torch.testing.assert_close(weights, expected, rtol=0, atol=0)
-
 
 # ---------------------------------------------------------------------------
 # Route-list gather-GEMM: fwd / dgrad / wgrad

@@ -5,11 +5,8 @@
 """Fused route-list alignment (Triton, host-sync-free).
 
 Builds the expert-sorted, block-padded route-list buffers from a boolean ``routing_map``
-without any host sync -- no ``nonzero`` (data-dependent size), no ``argsort``, no
-``.item()``.
 
-The build is launch-bound (E is tiny), so the work is packed into three small Triton
-kernels instead of a chain of ~15 elementwise/scan torch ops:
+The work is packed into three small Triton kernels.
 
 1. ``_counts_within_kernel`` -- one program per expert computes that expert's token count
    and the exclusive within-expert rank of each routed cell (token-ascending).
@@ -74,7 +71,9 @@ def _expert_meta_kernel(
     counts = tl.load(counts_ptr + offs_e, mask=mask_e, other=0)
     blocks_per_expert = (counts + BLOCK_SIZE_M - 1) // BLOCK_SIZE_M
     cblocks = tl.cumsum(blocks_per_expert, axis=0)  # inclusive prefix over experts
+    # block_start is over padded block token counts
     block_start = cblocks - blocks_per_expert
+    # route_start is over raw token counts
     route_start = tl.cumsum(counts, axis=0) - counts
     total_blocks = tl.max(tl.where(mask_e, cblocks, 0), axis=0)
 
@@ -102,7 +101,7 @@ def _route_list_place_kernel(
     within_ptr,  # [E, T] int32, exclusive within-expert rank of each routed cell
     block_start_ptr,  # [E] int32: first block index of each expert (block units)
     route_start_ptr,  # [E] int32: first compact route index of each expert
-    sorted_slot_ids_ptr,  # [em_max] int32, sentinel-init (T)
+    sorted_slot_ids_ptr,  # [T * min(topk, E)] int32, sentinel-init (T)
     route_to_token_ptr,  # [routes_max] int32, sentinel-init (T)
     token_routes_ptr,  # [T, MAXK] int32 out: token->route positions (only if BUILD_INVERSE)
     token_count_ptr,  # [T] int32 out: routes per token (only if BUILD_INVERSE)
@@ -173,7 +172,7 @@ def route_list_align(
     num_experts: int,
     block_size: int,
     scan=None,
-    max_routes_per_token: int | None = None,
+    topk: int | None = None,
     build_inverse_map: bool = False,
 ):
     """Sync-free fused build of the route-list align buffers.
@@ -184,11 +183,11 @@ def route_list_align(
         Optional ``(counts, within)`` from :func:`route_list_scan` for this ``routing_map``.
         When supplied the block-independent scan kernel is skipped (shared across block
         sizes); otherwise it is computed here.
-    max_routes_per_token:
-        Host-known upper bound on the number of experts any token routes to (e.g. the router
+    topk:
+        Host-known upper bound on the number of experts any token routes to (the router
         top-k). When provided, the static over-allocation bound is tightened from the dense
-        ``T * num_experts`` to ``T * min(max_routes_per_token, num_experts)`` -- still
-        sync-free, but shrinking the padded buffers by ``num_experts / max_routes_per_token``.
+        ``T * num_experts`` to ``T * min(topk, num_experts)`` -- still
+        sync-free, but shrinking the padded buffers by ``num_experts / topk``.
     build_inverse_map:
         When True, the place kernel also emits the token->routes inverse map (used by the
         contention-free gather-combine in FC2 fwd / FC1 dgrad) in the same launch, so no
@@ -211,8 +210,8 @@ def route_list_align(
     E = int(num_experts)
 
     # Static (sync-free) upper bounds from shapes only. Each token routes to at most
-    # ``min(max_routes_per_token, E)`` experts, so that tightens the dense ``T * E`` bound.
-    max_per_token = E if max_routes_per_token is None else min(int(max_routes_per_token), E)
+    # ``min(topk, E)`` experts, so that tightens the dense ``T * E`` bound.
+    max_per_token = E if topk is None else min(int(topk), E)
     routes_max = T * max_per_token
     blocks_max = (routes_max + block_size - 1) // block_size + E
     em_max = blocks_max * block_size

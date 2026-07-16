@@ -23,8 +23,6 @@ import triton.language as tl
 
 from .pid_preprocessing import pid_grid, remap_xcd, get_num_xcds
 
-_USE_PERSISTENT = True
-
 
 # --- Fused gated-activation epilogue helpers (exp2-based, no libdevice) ---
 @triton.jit
@@ -122,108 +120,6 @@ def _apply_activation_and_grad(x, ACTIVATION: tl.constexpr):
     }
 )
 @triton.jit
-def _route_list_moe_kernel(
-    a_ptr,
-    b_ptr,
-    c_ptr,
-    sorted_slot_ids_ptr,
-    expert_ids_ptr,
-    num_tokens_post_padded_ptr,
-    block_start_ptr,
-    route_start_ptr,
-    N,
-    K,
-    num_recv_tokens,
-    stride_am,
-    stride_ak,
-    stride_be,
-    stride_bk,
-    stride_bn,
-    stride_cm,
-    stride_cn,
-    BLOCK_SIZE_M: tl.constexpr,
-    BLOCK_SIZE_N: tl.constexpr,
-    BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr,
-    EVEN_K: tl.constexpr,
-    INDEX_A_BY_ROUTE_POS: tl.constexpr,
-    SCATTER_TO_TOKEN: tl.constexpr,
-    compute_type: tl.constexpr,
-    NUM_XCDS: tl.constexpr,
-):
-    pid = tl.program_id(axis=0)
-    num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
-    num_pid_m = tl.cdiv(num_tokens_post_padded, BLOCK_SIZE_M)
-    num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    grid_mn = num_pid_n * num_pid_m
-    if pid >= grid_mn:
-        return
-    pid = remap_xcd(pid, grid_mn, NUM_XCDS)
-    pid_m, pid_n = pid_grid(pid, num_pid_m, num_pid_n, GROUP_SIZE_M)
-
-    off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
-    if off_experts < 0:
-        return
-
-    pos = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M).to(tl.int64)
-    slot = tl.load(sorted_slot_ids_ptr + pos)
-    token_mask = slot < num_recv_tokens
-
-    block_start = tl.load(block_start_ptr + off_experts).to(tl.int64)
-    route_start = tl.load(route_start_ptr + off_experts).to(tl.int64)
-    out_row = route_start + (pos - block_start * BLOCK_SIZE_M)
-
-    if INDEX_A_BY_ROUTE_POS:
-        a_row = out_row
-    else:
-        a_row = slot.to(tl.int64)
-
-    offs_bn = (pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N).to(tl.int64)) % N
-    offs_k = tl.arange(0, BLOCK_SIZE_K)
-    a_ptrs = a_ptr + a_row[:, None] * stride_am + offs_k[None, :] * stride_ak
-    b_ptrs = b_ptr + off_experts * stride_be + (offs_k[:, None] * stride_bk + offs_bn[None, :] * stride_bn)
-
-    accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
-    for k in range(0, tl.cdiv(K, BLOCK_SIZE_K)):
-        if EVEN_K:
-            a = tl.load(a_ptrs, mask=token_mask[:, None], other=0.0)
-            b = tl.load(b_ptrs)
-        else:
-            a = tl.load(
-                a_ptrs,
-                mask=token_mask[:, None] & (offs_k[None, :] < K - k * BLOCK_SIZE_K),
-                other=0.0,
-            )
-            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - k * BLOCK_SIZE_K, other=0.0)
-        accumulator += tl.dot(a, b)
-        a_ptrs += BLOCK_SIZE_K * stride_ak
-        b_ptrs += BLOCK_SIZE_K * stride_bk
-
-    offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
-    c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
-    if SCATTER_TO_TOKEN:
-        # Fused dgrad scatter: accumulate each per-route dX directly onto its received-token
-        # row. Padded/sentinel positions are masked out, so padding is never scattered and no
-        # compact intermediate + separate index_add is needed. C is fp32 for accurate
-        # multi-route atomic accumulation.
-        scatter_row = slot.to(tl.int64)
-        c_ptrs = c_ptr + stride_cm * scatter_row[:, None] + stride_cn * offs_cn[None, :]
-        # relaxed ordering is sufficient: this is pure accumulation and dA is only read after
-        # the kernel completes (implicit device sync). scope must be "gpu" -- the same token
-        # row is updated from multiple CTAs (a token routed to several experts lands in
-        # different blocks), so a "cta"-scoped atomic would race across workgroups.
-        tl.atomic_add(c_ptrs, accumulator, mask=c_mask, sem="relaxed", scope="gpu")
-    else:
-        c_ptrs = c_ptr + stride_cm * out_row[:, None] + stride_cn * offs_cn[None, :]
-        tl.store(c_ptrs, accumulator.to(compute_type), mask=c_mask, cache_modifier=".wt")
-
-
-@triton.heuristics(
-    {
-        "EVEN_K": lambda args: args["K"] % args["BLOCK_SIZE_K"] == 0,
-    }
-)
-@triton.jit
 def _route_list_moe_persistent_kernel(
     a_ptr,
     b_ptr,
@@ -256,7 +152,6 @@ def _route_list_moe_persistent_kernel(
     EVEN_K: tl.constexpr,
     NUM_SMS: tl.constexpr,
     INDEX_A_BY_ROUTE_POS: tl.constexpr,
-    SCATTER_TO_TOKEN: tl.constexpr,
     GATED_ACT: tl.constexpr,
     ACTIVATION: tl.constexpr,
     MUL_ROUTED_WEIGHT: tl.constexpr,
@@ -363,23 +258,8 @@ def _route_list_moe_persistent_kernel(
             else:
                 offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
                 c_mask = token_mask[:, None] & (offs_cn[None, :] < N)
-                if SCATTER_TO_TOKEN:
-                    # Fused dgrad scatter: accumulate each per-route dX onto its received-token
-                    # row; padded/sentinel positions are masked out. C is fp32 for accurate
-                    # multi-route atomic accumulation.
-                    scatter_row = slot.to(tl.int64)
-                    c_ptrs = (
-                        c_ptr + stride_cm * scatter_row[:, None] + stride_cn * offs_cn[None, :]
-                    )
-                    # relaxed ordering is sufficient (pure accumulation, dA read after kernel
-                    # completes); scope must be "gpu" since the same token row is updated from
-                    # multiple CTAs (a token routed to several experts lands in different blocks).
-                    tl.atomic_add(
-                        c_ptrs, accumulator, mask=c_mask, sem="relaxed", scope="gpu"
-                    )
-                else:
-                    c_ptrs = c_ptr + stride_cm * out_row[:, None] + stride_cn * offs_cn[None, :]
-                    tl.store(c_ptrs, accumulator.to(compute_type), mask=c_mask)
+                c_ptrs = c_ptr + stride_cm * out_row[:, None] + stride_cn * offs_cn[None, :]
+                tl.store(c_ptrs, accumulator.to(compute_type), mask=c_mask)
 
         tile_id += NUM_SMS
 
@@ -398,17 +278,14 @@ def fused_route_list_moe(
     compute_type: tl.dtype,
     config: Optional[Dict[str, Any]] = None,
     index_a_by_route_pos: bool = False,
-    scatter_to_token: bool = False,
     activation: Optional[str] = None,
     dispatched_probs: Optional[torch.Tensor] = None,
     preact_out: Optional[torch.Tensor] = None,
 ) -> None:
     """Launch route-list gather-GEMM in place.
 
-    By default writes the compact ``C[num_routes, N]`` (fwd/dgrad). When
-    ``scatter_to_token=True`` (dgrad), ``C`` is instead a compact ``[num_recv_tokens, N]``
-    (fp32) buffer and each per-route result is atomic-accumulated onto its received-token row,
-    fusing the scatter and skipping the block-padded / sentinel positions.
+    Writes the compact ``C[num_routes, N]`` (fwd/dgrad). The scatter back to token order is a
+    separate contention-free gather-combine pass (:func:`route_gather_combine`), not fused here.
 
     ``activation`` (``"silu"``/``"gelu"``) enables the fused **gated** activation epilogue: the
     GEMM output ``N`` is the gate+up width (``2F``), ``C`` is the ``F``-wide activated buffer,
@@ -422,8 +299,6 @@ def fused_route_list_moe(
     assert sorted_slot_ids.stride(0) == 1
 
     gated_act = activation is not None
-    if gated_act and not _USE_PERSISTENT:
-        raise NotImplementedError("Fused gated activation requires the persistent kernel.")
     act_id = _ACT_IDS[activation] if gated_act else ACT_SILU
     mul_routed_weight = dispatched_probs is not None
     probs = dispatched_probs if dispatched_probs is not None else C
@@ -438,80 +313,48 @@ def fused_route_list_moe(
     stride_pren = preact_out.stride(1) if save_preact else 0
 
     em = sorted_slot_ids.shape[0]
-    if _USE_PERSISTENT:
-        num_sms = torch.cuda.get_device_properties("cuda").multi_processor_count * 2
-        grid = lambda meta: (  # noqa: E731
-            min(
-                num_sms,
-                triton.cdiv(em, meta["BLOCK_SIZE_M"]) * triton.cdiv(B.shape[1], meta["BLOCK_SIZE_N"]),
-            ),
-        )
-        _route_list_moe_persistent_kernel[grid](
-            A,
-            B,
-            C,
-            sorted_slot_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            block_start,
-            route_start,
-            probs,
-            preact,
-            B.shape[1],
-            A.shape[1],
-            num_recv_tokens,
-            A.stride(0),
-            A.stride(1),
-            B.stride(0),
-            B.stride(2),
-            B.stride(1),
-            C.stride(0),
-            C.stride(1),
-            stride_pm,
-            stride_pe,
-            stride_prem,
-            stride_pren,
-            NUM_SMS=num_sms,
-            INDEX_A_BY_ROUTE_POS=index_a_by_route_pos,
-            SCATTER_TO_TOKEN=scatter_to_token,
-            GATED_ACT=gated_act,
-            ACTIVATION=act_id,
-            MUL_ROUTED_WEIGHT=mul_routed_weight,
-            SAVE_PREACT=save_preact,
-            compute_type=compute_type,
-            NUM_XCDS=get_num_xcds(),
-            **config,
-        )
-    else:
-        grid = lambda meta: (  # noqa: E731
+    num_sms = torch.cuda.get_device_properties("cuda").multi_processor_count * 2
+    grid = lambda meta: (  # noqa: E731
+        min(
+            num_sms,
             triton.cdiv(em, meta["BLOCK_SIZE_M"]) * triton.cdiv(B.shape[1], meta["BLOCK_SIZE_N"]),
-        )
-        _route_list_moe_kernel[grid](
-            A,
-            B,
-            C,
-            sorted_slot_ids,
-            expert_ids,
-            num_tokens_post_padded,
-            block_start,
-            route_start,
-            B.shape[1],
-            A.shape[1],
-            num_recv_tokens,
-            A.stride(0),
-            A.stride(1),
-            B.stride(0),
-            B.stride(2),
-            B.stride(1),
-            C.stride(0),
-            C.stride(1),
-            INDEX_A_BY_ROUTE_POS=index_a_by_route_pos,
-            SCATTER_TO_TOKEN=scatter_to_token,
-            compute_type=compute_type,
-            NUM_XCDS=get_num_xcds(),
-            **config,
-        )
-
+        ),
+    )
+    _route_list_moe_persistent_kernel[grid](
+        A,
+        B,
+        C,
+        sorted_slot_ids,
+        expert_ids,
+        num_tokens_post_padded,
+        block_start,
+        route_start,
+        probs,
+        preact,
+        B.shape[1],
+        A.shape[1],
+        num_recv_tokens,
+        A.stride(0),
+        A.stride(1),
+        B.stride(0),
+        B.stride(2),
+        B.stride(1),
+        C.stride(0),
+        C.stride(1),
+        stride_pm,
+        stride_pe,
+        stride_prem,
+        stride_pren,
+        NUM_SMS=num_sms,
+        INDEX_A_BY_ROUTE_POS=index_a_by_route_pos,
+        GATED_ACT=gated_act,
+        ACTIVATION=act_id,
+        MUL_ROUTED_WEIGHT=mul_routed_weight,
+        SAVE_PREACT=save_preact,
+        compute_type=compute_type,
+        NUM_XCDS=get_num_xcds(),
+        **config,
+    )
 
 def _gated_act_bwd_autotune_configs() -> list:
     """Tile/warp configs for the gated-act-bwd autotuner.
@@ -549,12 +392,12 @@ def _gated_act_bwd_autotune_configs() -> list:
 @triton.autotune(configs=_gated_act_bwd_autotune_configs(), key=["F", "HAS_PROBS"])
 @triton.jit
 def _gated_act_prob_bwd_kernel(
-    grad_out_ptr,  # [em_max, F]  grad wrt the fused FC1 output (= act(g)*u*prob)
-    preact_ptr,  # [em_max, 2F] raw pre-activation [gate | up]
+    grad_out_ptr,  # [T * min(topk, E), F]  grad wrt the fused FC1 output (= act(g)*u*prob)
+    preact_ptr,  # [T * min(topk, E), 2F] raw pre-activation [gate | up]
     probs_ptr,  # [num_recv_tokens, E]
     token_ptr,  # [routes_max] route -> received-token row
     expert_ptr,  # [routes_max] route -> local expert
-    dpre_ptr,  # [em_max, 2F] out: grad wrt the raw 2F GEMM output
+    dpre_ptr,  # [T * min(topk, E), 2F] out: grad wrt the raw 2F GEMM output
     grad_probs_ptr,  # [num_recv_tokens, E] out (fp32)
     nbound_ptr,  # [1] int32 device scalar: dynamic upper bound on compact routes
     num_recv_tokens,
@@ -672,9 +515,9 @@ def fused_gated_act_prob_bwd(
     Parameters
     ----------
     grad_out:
-        ``[em_max, F]`` grad wrt the fused FC1 output (route/padded layout).
+        ``[T * min(topk, E), F]`` grad wrt the fused FC1 output (route/padded layout).
     preact:
-        ``[em_max, 2F]`` raw pre-activation ``[gate | up]`` saved by the forward.
+        ``[T * min(topk, E), 2F]`` raw pre-activation ``[gate | up]`` saved by the forward.
     token, expert:
         ``[routes_max]`` per-route received-token row / local-expert id (int32).
     dispatched_probs:
@@ -691,13 +534,13 @@ def fused_gated_act_prob_bwd(
     Returns
     -------
     (dpre, grad_probs)
-        ``dpre`` is ``[em_max, 2F]`` (bf16), grad wrt the raw GEMM output; ``grad_probs`` is
+        ``dpre`` is ``[T * min(topk, E), 2F]`` (bf16), grad wrt the raw GEMM output; ``grad_probs`` is
         ``[num_recv_tokens, E]`` (matching ``dispatched_probs.dtype``) or ``None``.
     """
     em_max, F = grad_out.shape
     if preact.shape[0] != em_max or preact.shape[1] != 2 * F:
         raise ValueError(
-            f"preact must be [em_max, 2F]={ (em_max, 2 * F) }, got {tuple(preact.shape)}."
+            f"preact must be [T * min(topk, E), 2F]={ (em_max, 2 * F) }, got {tuple(preact.shape)}."
         )
     routes_max = int(token.shape[0])
     has_probs = dispatched_probs is not None

@@ -16,20 +16,11 @@ import torch
 class MoERoutingMetadata:
     """Routing tensors for the route-list gather-in-GEMM MoE path.
 
-    Caller contract (permute-free FC1, post-dispatch):
-    - Pass received activations ``[num_recv_tokens, hidden]`` (no permute, no topk).
-    - Provide a boolean ``routing_map`` ``[num_recv_tokens, num_local_experts]`` marking
-      which local expert(s) each received token feeds.
-    - TE builds one expert-sorted ``sorted_slot_ids`` (received-token row per route) and runs
-      the gather-GEMM. FC1 output is compact ``[num_routes, out_features]`` in expert order;
-      the router-weight combine and the token reduction happen upstream in Megatron.
-
     Parameters
     ----------
     routing_map:
         Boolean mask ``[num_recv_tokens, num_local_experts]``, True where a received token
-        feeds a local expert. ``num_routes = routing_map.sum()``. This is the *only* field
-        the caller needs to provide.
+        feeds a local expert. ``num_routes = routing_map.sum()``.
     num_experts:
         Local expert count on this rank. Optional -- defaults to ``routing_map.size(1)``.
     topk:
@@ -48,7 +39,7 @@ class MoERoutingMetadata:
     needed to construct them.
 
     sorted_slot_ids:
-        ``[em_max]`` received-token row to gather for each block-padded position (sentinel
+        ``[T * min(topk, E)]`` received-token row to gather for each block-padded position (sentinel
         ``num_recv_tokens`` for padding and for the over-allocated tail).
     expert_ids:
         ``[blocks_max]`` local expert owning each ``BLOCK_SIZE_M`` block (``-1`` past the
@@ -116,88 +107,32 @@ class MoERoutingMetadata:
 class PermuteFreeMetadata(MoERoutingMetadata):
     """Routing metadata for the permute-free grouped GEMM, tagged with a direction.
 
-    Extends :class:`MoERoutingMetadata` with a single ``route_space`` flag that selects
-    which of the two permute-free GEMM directions a :class:`GroupedLinear` should run:
+    Extends :class:`MoERoutingMetadata`
 
     - ``route_space=False`` (FC1): the input lives in **received-token order**
       ``[num_recv_tokens, in]``. The forward *gathers* per expert (``index_a_by_route_pos=
-      False``) into the compact/padded ``[em_max, out]`` route buffer; the dgrad
-      *scatters* the input gradient back to token rows.
+      False``) into the compact/padded ``[T * min(topk, E), out]`` route buffer; the dgrad combines
+      the input gradient back to token rows (contention-free gather-combine).
     - ``route_space=True`` (FC2): the input is already in **route order**
-      ``[em_max, in]`` (FC1's output). The forward reads by route position
-      (``index_a_by_route_pos=True``) and *scatters to token* (``scatter_to_token=True``),
-      emitting ``[num_recv_tokens, out]`` directly (the fused combine); the dgrad gathers
+      ``[T * min(topk, E), in]`` (FC1's output). The forward reads by route position
+      (``index_a_by_route_pos=True``) and combines each token's routes back to
+      ``[num_recv_tokens, out]`` (contention-free gather-combine); the dgrad gathers
       the token-space grad back into the compact route buffer.
 
     The align buffers are identical for both directions, so a single built metadata can be
     reused for FC1 and FC2 (e.g. via ``dataclasses.replace(meta, route_space=True)``),
     avoiding a duplicate align build.
 
-    Fusion hints (optional; carried on the same channel that already reaches the FC1 branch):
+    Fusion hint (optional):
 
     activation:
-        Elementwise activation to fuse into the GEMM epilogue -- ``"silu"`` or ``"gelu"``.
-        ``None`` leaves the activation to the caller (no fusion).
-    dispatched_probs:
-        Per-(received-token, local-expert) gating probabilities ``[num_recv_tokens,
-        num_experts]``. When provided, the kernel folds each route's prob
-        ``dispatched_probs[token(r), expert(r)]`` into the activation (reusing the align
-        buffers), fusing the prob multiply instead of running it as a separate op. ``None``
-        disables the fused prob scaling.
+        Gated activation to fuse into the FC1 GEMM epilogue -- ``"silu"`` or ``"gelu"``.
+        ``None`` leaves the activation to the caller (no fusion). Only consumed on the FC1
+        direction (``route_space=False``).
+
+    (The per-route gating probabilities are *not* carried here: they need a gradient, so they
+    are passed as a separate autograd tensor argument to the module rather than as metadata.)
     """
 
     route_space: bool = False
     activation: Optional[str] = None
-    dispatched_probs: Optional[torch.Tensor] = None
-
-
-def routing_map_to_topk(
-    probs: torch.Tensor,
-    routing_map: torch.Tensor,
-) -> Tuple[torch.Tensor, torch.Tensor]:
-    """Convert TE router outputs to vLLM-style ``topk_ids`` / ``topk_weights``.
-
-    Parameters
-    ----------
-    probs:
-        Router probabilities, shape ``[num_tokens, num_experts]``.
-    routing_map:
-        Boolean mask, shape ``[num_tokens, num_experts]``, True where routed.
-
-    Returns
-    -------
-    topk_ids:
-        ``int32`` tensor, shape ``[num_tokens, topk]``.
-    topk_weights:
-        ``float32`` tensor, shape ``[num_tokens, topk]``.
-    """
-    if probs.shape != routing_map.shape:
-        raise ValueError(
-            f"probs shape {probs.shape} must match routing_map shape {routing_map.shape}."
-        )
-    if routing_map.dtype != torch.bool:
-        routing_map = routing_map.bool()
-
-    topk = int(routing_map.sum(dim=1).max().item())
-    if topk == 0:
-        raise ValueError("routing_map has no routed experts.")
-
-    masked = probs.masked_fill(~routing_map, float("-inf"))
-    topk_weights, topk_ids = torch.topk(masked, k=topk, dim=-1)
-    # Rows with fewer than topk routes may include -inf from padding; zero those weights.
-    valid = routing_map.gather(1, topk_ids)
-    topk_weights = topk_weights.masked_fill(~valid, 0.0)
-    return topk_ids.to(torch.int32), topk_weights.to(torch.float32)
-
-
-def index_map_to_topk_weights(
-    probs: torch.Tensor,
-    topk_ids: torch.Tensor,
-) -> torch.Tensor:
-    """Gather router weights for an index routing map ``[num_tokens, topk]``."""
-    if probs.dim() != 2 or topk_ids.dim() != 2:
-        raise ValueError("probs and topk_ids must be 2D tensors.")
-    if probs.size(0) != topk_ids.size(0):
-        raise ValueError("probs and topk_ids must have the same num_tokens dimension.")
-    gathered = probs.gather(1, topk_ids.to(torch.long))
-    return gathered.to(torch.float32)

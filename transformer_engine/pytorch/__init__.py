@@ -43,8 +43,6 @@ from transformer_engine.pytorch.permutation import (
 )
 from transformer_engine.pytorch.moe_routing import (
     MoERoutingMetadata,
-    routing_map_to_topk,
-    index_map_to_topk_weights,
 )
 from transformer_engine.pytorch.quantization import fp8_autocast
 from transformer_engine.pytorch.quantization import fp8_model_init
