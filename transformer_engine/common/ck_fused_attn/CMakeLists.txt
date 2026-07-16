@@ -128,6 +128,10 @@ endif()
 set(__AITER_CACHE_DIR "")
 set(__AITER_MHA_PATH "")
 set(__QOLA_INCLUDE_DIR "")
+# When a kernel source-build is deferred to build time, this holds the name of
+# the custom target that produces te_libmha_{fwd,bwd}.so. Empty when we consume
+# prebuilt/user-supplied libs (nothing to build).
+set(__CK_KERNELS_TARGET "")
 if(NOT "$ENV{NVTE_CK_JIT}" STREQUAL "0")
   set(__USE_CK_JIT TRUE)
 else()
@@ -146,9 +150,32 @@ elseif(DEFINED ENV{NVTE_AITER_PREBUILT_BASE_URL})
 endif()
 
 if(__AITER_CACHE_DIR STREQUAL "")
-  # If not available or not requested, build from source via QoLA
+  # If not available or not requested, build from source via QoLA.
+  #
+  # The kernel build is expensive and its inputs (AITER pin, GPU archs, codegen
+  # patches, JIT scripts, tunable defaults) change rarely. Instead of running it
+  # at configure time -- which re-runs on every reconfigure, i.e. every
+  # `pip install` -- we emit it as a build-time custom command whose outputs are
+  # te_libmha_{fwd,bwd}.so in the build tree. Ninja then rebuilds the kernels
+  # only when a declared input changes and skips them entirely otherwise.
   list(JOIN CMAKE_HIP_ARCHITECTURES ";" GPU_ARCHS_STR)
-  message(STATUS "[AITER-BUILD] Building AITER kernels for ${GPU_ARCHS_STR} via QoLA.")
+  message(STATUS "[AITER-BUILD] CK kernels will be built from source for ${GPU_ARCHS_STR} via QoLA (build-time target).")
+
+  set(__CK_KERNELS_DIR "${CMAKE_CURRENT_BINARY_DIR}/ck_kernels")
+  set(__CK_KERNELS_LIB "${__CK_KERNELS_DIR}/lib")
+  set(__CK_KERNELS_INCLUDE "${__CK_KERNELS_DIR}/include")
+  set(__CK_FWD_SO "${__CK_KERNELS_LIB}/te_libmha_fwd.so")
+  set(__CK_BWD_SO "${__CK_KERNELS_LIB}/te_libmha_bwd.so")
+
+  # Cache-busting marker: any change to the archs/tunables/pin rewrites this file
+  # (file(GENERATE) only touches it when the content actually differs), which in
+  # turn re-triggers the custom command below via its DEPENDS.
+  set(__CK_KEY_FILE "${__CK_KERNELS_DIR}/ck_build_key.txt")
+  file(GENERATE OUTPUT "${__CK_KEY_FILE}"
+       CONTENT "jit=${__USE_CK_JIT}\narchs=${GPU_ARCHS_STR}\nbf16=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}\nextra=$ENV{CK_JIT_EXTRA_CACHE_KEY}\naiter=${AITER_SHA}\n")
+
+  set(__CK_BUILD_DEPENDS "${__QOLA_MANIFEST}" "${__CK_KEY_FILE}")
+
   if(__USE_CK_JIT)
     message(STATUS "[AITER-BUILD] CK_JIT is enabled; will build CK kernels via CK_JIT.")
     set(__CK_JIT_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/ck_jit")
@@ -158,7 +185,15 @@ if(__AITER_CACHE_DIR STREQUAL "")
     else()
       set(__CK_JIT_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/ck_jit")
     endif()
-    execute_process(
+    # Rebuild when any JIT orchestrator script/patch/runtime changes.
+    file(GLOB __CK_JIT_SCRIPTS CONFIGURE_DEPENDS
+         "${__CK_JIT_SOURCE_DIR}/*.py"
+         "${__CK_JIT_SOURCE_DIR}/*.sh"
+         "${__CK_JIT_SOURCE_DIR}/*.cpp"
+         "${__CK_JIT_SOURCE_DIR}/*.patch")
+    add_custom_command(
+      OUTPUT "${__CK_FWD_SO}" "${__CK_BWD_SO}"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${__CK_KERNELS_LIB}"
       COMMAND ${Python_EXECUTABLE} "${__CK_JIT_SOURCE_DIR}/ck_jit_build.py" full
           --with-qola
           --qola-dir ${__QOLA_DIR}
@@ -167,19 +202,23 @@ if(__AITER_CACHE_DIR STREQUAL "")
           --gpu-archs "${GPU_ARCHS_STR}"
           --aiter-dir ${__AITER_SOURCE_DIR}
           --tmp-dir "${__CK_JIT_BUILD_DIR}"
-          --install-dir ${AITER_MHA_INSTALL_DIR}
+          --install-dir "${__CK_KERNELS_LIB}"
           --jit-name "te_ck_jit"
-      RESULT_VARIABLE CKJIT_BUILD_RESULT
+      DEPENDS ${__CK_BUILD_DEPENDS} ${__CK_JIT_SCRIPTS}
+      COMMENT "[AITER-BUILD] Building CK fused-attn kernels (CK-JIT) for ${GPU_ARCHS_STR}"
+      VERBATIM
+      USES_TERMINAL
     )
-    if(NOT CKJIT_BUILD_RESULT EQUAL 0)
-      message(FATAL_ERROR "[AITER-BUILD] CK-JIT build failed.")
-    endif()
-    # CK_JIT emits the libs straight into the install dir; nothing to cache.
-    set(__AITER_MHA_PATH ${AITER_MHA_INSTALL_DIR})
+    # QoLA public headers are exported next to the JIT libs during the build.
     set(__QOLA_INCLUDE_DIR "${__QOLA_BUILD_DIR}/include")
   else()
     set(__QOLA_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/qola")
-    execute_process(
+    # Cache the freshly built libs+headers into the aiter prebuilt cache so
+    # downstream consumers (and future clean builds) see a self-contained tree.
+    get_default_aiter_cache_dir(__AITER_CACHE_DIR_FOR_QOLA)
+    add_custom_command(
+      OUTPUT "${__CK_FWD_SO}" "${__CK_BWD_SO}"
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${__CK_KERNELS_LIB}"
       COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${__QOLA_DIR}:$ENV{PYTHONPATH}"
               ${Python_EXECUTABLE} -m qola.cli build
               --manifest ${__QOLA_MANIFEST}
@@ -187,23 +226,23 @@ if(__AITER_CACHE_DIR STREQUAL "")
               --output-dir ${__QOLA_BUILD_DIR}
               --arch "${GPU_ARCHS_STR}"
               --skip-checkout
-      RESULT_VARIABLE QOLA_BUILD_RESULT
+      # Stage libs+headers into the kernels output dir consumed by ck_fused_attn.
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${__QOLA_BUILD_DIR}/lib" "${__CK_KERNELS_LIB}"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${__QOLA_BUILD_DIR}/include" "${__CK_KERNELS_INCLUDE}"
+      # Populate the prebuilt cache for reuse across clean builds.
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${__QOLA_BUILD_DIR}/lib" "${__AITER_CACHE_DIR_FOR_QOLA}/lib"
+      COMMAND ${CMAKE_COMMAND} -E copy_directory "${__QOLA_BUILD_DIR}/include" "${__AITER_CACHE_DIR_FOR_QOLA}/include"
+      DEPENDS ${__CK_BUILD_DEPENDS}
+      COMMENT "[AITER-BUILD] Building CK fused-attn kernels (QoLA) for ${GPU_ARCHS_STR}"
+      VERBATIM
+      USES_TERMINAL
     )
-    if(NOT QOLA_BUILD_RESULT EQUAL 0)
-      message(FATAL_ERROR "[AITER-BUILD] QoLA build failed.")
-    endif()
-
-    # Copy the final .so libs and exported public headers into the aiter
-    # prebuilt cache so downstream consumers see a self-contained tree.
-    get_default_aiter_cache_dir(__AITER_CACHE_DIR)
-    set(__QOLA_CACHE_LIB "${__AITER_CACHE_DIR}/lib")
-    file(MAKE_DIRECTORY ${__QOLA_CACHE_LIB})
-    file(GLOB __QOLA_BUILT_LIBS "${__QOLA_BUILD_DIR}/lib/*.so")
-    file(COPY ${__QOLA_BUILT_LIBS} DESTINATION ${__QOLA_CACHE_LIB})
-    file(COPY "${__QOLA_BUILD_DIR}/include" DESTINATION "${__AITER_CACHE_DIR}")
-    set(__AITER_MHA_PATH "${__QOLA_CACHE_LIB}")
-    set(__QOLA_INCLUDE_DIR "${__AITER_CACHE_DIR}/include")
+    set(__QOLA_INCLUDE_DIR "${__CK_KERNELS_INCLUDE}")
   endif()
+
+  add_custom_target(ck_fused_attn_kernels DEPENDS "${__CK_FWD_SO}" "${__CK_BWD_SO}")
+  set(__CK_KERNELS_TARGET ck_fused_attn_kernels)
+  set(__AITER_MHA_PATH "${__CK_KERNELS_LIB}")
 else()
   message(STATUS "[AITER-BUILD] Using pre-built AITER from ${__AITER_CACHE_DIR}")
   set(__AITER_MHA_PATH "${__AITER_CACHE_DIR}/lib")
@@ -226,10 +265,12 @@ set(CK_FUSED_ATTN_COMPILE_OPTIONS)
 list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
     -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT})
 
-# Public QoLA headers ship alongside the .so libs in ${__AITER_MHA_PATH}/../include
-# (emitted by qola.cli build, or copied from the QoLA build dir above for the
-# source-build path).
-if(NOT EXISTS "${__QOLA_INCLUDE_DIR}/qola_config.h")
+# Public QoLA headers ship alongside the .so libs in ${__QOLA_INCLUDE_DIR}.
+# When building from source they are produced by the ck_fused_attn_kernels
+# target (see add_dependencies below), so they need not exist at configure time;
+# the order-only dependency guarantees they are present before ck_fused_attn is
+# compiled. Only assert existence when consuming prebuilt/user-supplied libs.
+if(NOT __CK_KERNELS_TARGET AND NOT EXISTS "${__QOLA_INCLUDE_DIR}/qola_config.h")
   message(FATAL_ERROR "Could not find QoLA public headers at ${__QOLA_INCLUDE_DIR}.")
 endif()
 
@@ -245,7 +286,15 @@ target_link_libraries(ck_fused_attn PUBLIC ${ck_fused_attn_LINKER_LIBS})
 target_compile_options(ck_fused_attn PRIVATE ${CK_FUSED_ATTN_COMPILE_OPTIONS})
 set_target_properties(ck_fused_attn PROPERTIES INSTALL_RPATH "$ORIGIN")
 
-if (NOT "${__AITER_MHA_PATH}" STREQUAL "${AITER_MHA_INSTALL_DIR}")
+if (__CK_KERNELS_TARGET)
+  # Source build: order ck_fused_attn after the kernel libs+headers are produced,
+  # then install the freshly built artifacts from the build tree. The CK-JIT path
+  # also stages a ck_jit/ runtime tree next to the libs (absent for the QoLA path,
+  # hence OPTIONAL).
+  add_dependencies(ck_fused_attn ${__CK_KERNELS_TARGET})
+  install(FILES ${__CK_FWD_SO} ${__CK_BWD_SO} DESTINATION ${AITER_MHA_INSTALL_DIR})
+  install(DIRECTORY "${__CK_KERNELS_LIB}/ck_jit" DESTINATION ${AITER_MHA_INSTALL_DIR} OPTIONAL)
+elseif (NOT "${__AITER_MHA_PATH}" STREQUAL "${AITER_MHA_INSTALL_DIR}")
   install(FILES ${__AITER_MHA_PATH}/te_libmha_fwd.so ${__AITER_MHA_PATH}/te_libmha_bwd.so DESTINATION ${AITER_MHA_INSTALL_DIR})
 endif()
 install(TARGETS ck_fused_attn DESTINATION ${AITER_MHA_INSTALL_DIR})
