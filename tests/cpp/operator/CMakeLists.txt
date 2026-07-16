@@ -34,7 +34,7 @@ add_executable(test_operator
                test_multi_unpadding.cu
                test_causal_softmax.cu
                test_swizzle.cu
-               test_multi_swizzle.cu
+               test_multi_swizzle.cu #CUDA-only test
                test_swap_first_dims.cu
                test_grouped_gemm.cu #CUDA-only test
                ../test_common.cu)
@@ -42,11 +42,11 @@ add_executable(test_operator
 if(USE_ROCM)
   get_target_property(test_cuda_sources test_operator SOURCES)
   # Remove CUDA-only tests and add ROCm specific ones
+  # TODO: test_multi_swizzle.cu is CUDA-only for now; revisit on gfx1250 and re-enable.
   list(REMOVE_ITEM test_cuda_sources
               test_cast_float8blockwise.cu
-              test_grouped_gemm.cu)
-  # Skip on ROCm for now; TODO: revisit on gfx1250 and re-enable these tests.
-  list(REMOVE_ITEM test_cuda_sources test_multi_swizzle.cu)
+              test_grouped_gemm.cu
+              test_multi_swizzle.cu)
   list(APPEND test_cuda_sources
               test_dequantize_nvfp4.cu
               test_cublaslt_gemm.cu

@@ -41,6 +41,8 @@ run_default_fa_lbl() {
 run_test_config(){
     echo ==== Run with Fused attention backend: $_fus_attn ====
     #_WORKERS_COUNT=$TEST_WORKERS
+    # Enable GroupedLinear single-param feature
+    export NVTE_GROUPED_LINEAR_SINGLE_PARAM=1
     run_default_fa 1 test_backward_override.py
     if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
         mkdir -p ${TEST_DIR}/checkpoint
@@ -56,7 +58,7 @@ run_test_config(){
     test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 NVTE_CPU_OFFLOAD_V1=1 run 3 test_cpu_offloading_v1.py
     run_default_fa 1 test_fused_rope.py
     run_default_fa 1 test_fused_router.py
-    NVTE_GROUPED_LINEAR_SINGLE_PARAM=1 run_default_fa 1 test_fusible_ops.py
+    run_default_fa 1 test_fusible_ops.py
     run_default_fa 1 test_gemm_autotune.py
     run 1 test_gqa.py
     run 1 test_jit.py
@@ -66,7 +68,7 @@ run_test_config(){
     run_default_fa 1 test_nvfp4_fsdp2_hooks.py
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py
-    NVTE_GROUPED_LINEAR_SINGLE_PARAM=1 run 1 test_sanity.py
+    run 1 test_sanity.py
     run_default_fa 3 test_sanity_hipified_cast_transpose.py
     run_default_fa 1 test_sanity_import.py
     run_default_fa 1 test_torch_compile.py
@@ -83,10 +85,10 @@ run_test_config(){
     NVTE_ROCM_ENABLE_MXFP8=1 NVTE_TEST_TRITON_AUTOTUNE=1 run_default_fa_lbl "autotune" 3 triton_kernels/test_norms.py
     run_default_fa 1 test_parallel_cross_entropy.py
     NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 3 test_numerics.py
-    NVTE_GROUPED_LINEAR_SINGLE_PARAM=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
+    NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "triton" 1 test_float8_current_scaling_exact.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 test_numerics.py
-    NVTE_GROUPED_LINEAR_SINGLE_PARAM=1 NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 test_fusible_ops.py
+    NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 test_fusible_ops.py
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_numerics.py
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_fusible_ops.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 triton_kernels/test_cast.py
