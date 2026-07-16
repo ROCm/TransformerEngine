@@ -50,6 +50,15 @@ void quantize(const Tensor &input, const Tensor *act_input, const Tensor *noop,
   bool data_shuffle_rowwise_fp4 = output->mxfp4_shuffle_rowwise_data;
   bool data_shuffle_columnwise_fp4 = output->mxfp4_shuffle_columnwise_data;
 
+  // The plain (non-shuffled) columnwise transpose store is flushed with
+  // coalesced 128-bit (uint4) writes into each column's M/2 packed bytes, so it
+  // requires M/2 to be a multiple of 16, i.e. M % 32 == 0. Enforce it
+  // here. (Rowwise-only and shuffled-columnwise stores do not use this path.)
+  const bool uses_coalesced_colwise_store = use_colwise && !data_shuffle_columnwise_fp4;
+  NVTE_CHECK(!uses_coalesced_colwise_store || (M % MXFP4_BLOCK_SIZE == 0),
+             "MXFP4 columnwise cast/transpose requires the first (token) dimension "
+             "to be a multiple of ", MXFP4_BLOCK_SIZE, " (got M=", M, ")");
+
   auto cdiv = [](int a, int b) { return (a + b - 1) / b; };
   auto rup = [](int a, int b) { return ((a + b - 1) / b) * b; };
 
