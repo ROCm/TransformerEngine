@@ -827,7 +827,6 @@ void performTest(float (*OP)(const float),
 
 #ifdef __HIP_PLATFORM_AMD__
     if (use_4over6) GTEST_SKIP() << "NVFP4 4over6 not supported on ROCm";
-    if (row_scaled_nvfp4) GTEST_SKIP() << "Row-scaled NVFP4 not supported on ROCm";
 #endif
 
     const size_t rows = first_dimension(shape);
