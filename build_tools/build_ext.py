@@ -122,7 +122,7 @@ def get_build_ext(
             # scratch. Rooting it at a stable location lets the underlying ninja skip
             # unchanged objects. Mirrors the persistent CMake build dir above.
             root_dir = Path(__file__).resolve().parent.parent
-            build_temp = root_dir / "build" / "torch_temp"
+            build_temp = root_dir / "build" / "ext_temp"
             build_temp.mkdir(parents=True, exist_ok=True)
             self.build_temp = str(build_temp)
 
