@@ -109,6 +109,9 @@ jobs:
     needs: [select_image, build]
     timeout-minutes: 270
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || 'linux-te-mi35x-4' }}
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -124,10 +127,11 @@ jobs:
             3rdparty/hipify_torch
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: te-rocm-wheels
-          path: dist/
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TE_WHEEL_ARTIFACT_ID: ${{ needs.build.outputs.wheel_artifact_id }}
+          TE_WHEEL_ARTIFACT_DIGEST: ${{ needs.build.outputs.wheel_artifact_digest }}
+        run: ci/download_wheel_artifacts.sh dist te-rocm-wheels
 
       - name: Host Diagnostics
         run: |
@@ -260,6 +264,9 @@ jobs:
     needs: [select_image, build]
     timeout-minutes: 210
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || 'linux-te-mi35x-8' }}
+    permissions:
+      contents: read
+      actions: read
     strategy:
       fail-fast: false
       matrix:
@@ -270,10 +277,11 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Download build artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: te-rocm-wheels
-          path: dist/
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TE_WHEEL_ARTIFACT_ID: ${{ needs.build.outputs.wheel_artifact_id }}
+          TE_WHEEL_ARTIFACT_DIGEST: ${{ needs.build.outputs.wheel_artifact_digest }}
+        run: ci/download_wheel_artifacts.sh dist te-rocm-wheels
 
       - name: Host Diagnostics
         run: |
