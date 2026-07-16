@@ -20,6 +20,8 @@ fp32 with zero atomics. It relies on the token->routes inverse map (``token_rout
 
 from __future__ import annotations
 
+from typing import Optional
+
 import torch
 import triton
 import triton.language as tl
@@ -63,7 +65,7 @@ def route_gather_combine(
     num_recv_tokens: int,
     *,
     out_dtype: torch.dtype = torch.bfloat16,
-    block_n: int = 512,
+    block_n: Optional[int] = None,
 ) -> torch.Tensor:
     """Combine per-route rows into per-token rows via a contention-free gather.
 
@@ -76,6 +78,9 @@ def route_gather_combine(
         and the per-token route count).
     num_recv_tokens:
         Number of output token rows ``T``.
+    block_n:
+        N-tile width (``BLOCK_N``). ``None`` (default) picks ``min(next_pow2(N), 4096)``: wide
+        tiles issue larger contiguous per-route loads and cut redundant index loads.
 
     Returns
     -------
@@ -88,6 +93,8 @@ def route_gather_combine(
     if not src.is_contiguous():
         src = src.contiguous()
     n = src.shape[1]
+    if block_n is None:
+        block_n = min(triton.next_power_of_2(n), 4096)
     maxk = int(token_routes.shape[1])
     out = torch.empty((num_recv_tokens, n), dtype=out_dtype, device=src.device)
     compute_type = tl.bfloat16 if out_dtype == torch.bfloat16 else tl.float32
