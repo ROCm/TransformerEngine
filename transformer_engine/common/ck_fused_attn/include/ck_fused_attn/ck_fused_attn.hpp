@@ -153,6 +153,11 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream);
 // workspace (launcher metadata + dq_acc), covering both the v2 (CK launcher) and
 // v3 (asm) dispatch paths. Pure host-side computation; no kernel launch.
 size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args);
+// Probe whether AITER's v3 (asm) path will run for the given config, without
+// launching a kernel (backed by AITER's v3_api_check dry-run). Returns true iff
+// the v3 path is selected; false means the CK v2 path (or no support) would run.
+bool ck_attn_fwd_uses_v3(const CKAttnFwdArgs& args);
+bool ck_attn_bwd_uses_v3(const CkAttnBwdArgs& args);
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_H
