@@ -921,6 +921,16 @@ void fused_attn_ck_bwd_impl(
     NVTE_CHECK_CUDA(cudaMemsetAsync(dk_expanded_ptr, 0,
         max_tokens_kv*h*(d_qk+d_v)*nvte_dtype_size(dtype), stream));
   }
+  // The deterministic bwd dq_acc split buffer (inside the AITER workspace) is written only for
+  // active tiles, but convert_dq's reduction reads every split slot -- padded-KV and masked splits
+  // are left untouched. CK's own prepare_workspace_async does not zero the full extent the
+  // reduction reads for all mask/layout combinations (e.g. pure PADDING group mode leaves
+  // padded-KV splits uninitialized -> non-deterministic dq), so pre-zero the workspace here.
+  // Mirrors the dk_expanded pre-zero above; deterministic only (the non-deterministic path uses
+  // atomic-add and is zeroed by CK).
+  if(deterministic && aiter_workspace){
+    NVTE_CHECK_CUDA(cudaMemsetAsync(aiter_workspace, 0, aiter_workspace_bytes, stream));
+  }
   if(devPtrAlibiSlope){
     dim3 block, grid;
     block.x = 1024;
