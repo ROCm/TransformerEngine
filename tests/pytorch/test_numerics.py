@@ -2261,6 +2261,11 @@ def test_grouped_linear_accuracy_cutlass(
     delay_wgrad_compute,
     grouped_gemm_backend,
 ):
+    if (IS_HIP_EXTENSION and grouped_gemm_backend == "ck"
+            and recipe is not None and recipe.mxfp8()
+            and get_device_compute_capability() != (12, 5)):
+        pytest.skip("CK MXFP8 grouped GEMM only supported on gfx1250.")
+
     os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
     if IS_HIP_EXTENSION:
         os.environ.pop("NVTE_USE_HIPKITTENS_GROUPED_GEMM", None)

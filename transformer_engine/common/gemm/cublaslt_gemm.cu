@@ -1105,6 +1105,9 @@ namespace transformer_engine {
 bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
     int num_gemms, bool transa, bool transb, NVTETensor *workspace,
     bool accumulate, cudaStream_t stream);
+bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+    int num_gemms, bool transa, bool transb, NVTETensor *workspace,
+    bool accumulate, cudaStream_t stream);
 }
 #endif
 
@@ -1216,6 +1219,10 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     if (transformer_engine::is_mxfp8_scaling(inputA->scaling_mode)) {
 #ifdef USE_HIPKITTENS_GEMM
       if (transformer_engine::try_kittens_grouped_mxfp8_gemm(A, B, D, num_gemms, transa, transb,
+                                         workspace, accumulate, stream)) {
+        return;
+      }
+      if (transformer_engine::try_kittens_grouped_mxfp8_wgrad(A, B, D, num_gemms, transa, transb,
                                          workspace, accumulate, stream)) {
         return;
       }

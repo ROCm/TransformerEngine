@@ -2009,6 +2009,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                         outputPreGelu->data.dptr,
                                         static_cast<int>(outputD->data.dtype),
                                         static_cast<int>(outputPreGelu->data.dtype),
+                                        beta,
                                         workspace, workspaceSize, gemm_stream);
   }
   if (!use_hipkittens) {
@@ -2124,7 +2125,7 @@ bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NV
     size_t n_offset = 0;
     for (int i = 0; i < num_gemms; i++) {
         size_t b_expect  = n_offset * ref_k;
-        size_t c_expect  = n_offset * ref_m * sizeof(uint16_t);
+        size_t c_expect  = n_offset * ref_m * typeToSize(static_cast<DType>(out_dtype));
         size_t sb_expect = n_offset * scale_K;
 
         size_t b_actual  = (const uint8_t *)b_ptrs[i]  - (const uint8_t *)b_ptrs[0];
@@ -2149,6 +2150,105 @@ bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NV
         ref_m, n_arr.data(), ref_k,
         num_gemms, transa, transb,
         a_dtype, b_dtype, out_dtype,
+        ws->data.dptr, ws->data.shape[0], stream);
+}
+
+bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+    int num_gemms, bool transa, bool transb, NVTETensor *workspace,
+    bool accumulate, cudaStream_t stream) {
+    // NT only
+    if (transa || !transb) return false;
+    if (num_gemms <= 1) return false;
+
+    auto env_set = [](const char *name) {
+        const char *v = std::getenv(name);
+        return v && v[0] == '1';
+    };
+    static bool enabled = [&] {
+        if (cuda::sm_arch() != 95) return false;
+        bool use    = env_set("NVTE_USE_CUTLASS_GROUPED_GEMM");
+        bool use_hk = env_set("NVTE_USE_HIPKITTENS_GROUPED_GEMM");
+        bool use_ck = env_set("NVTE_USE_CK_GROUPED_GEMM");
+        return use_hk || (use && !use_ck);
+    }();
+    if (!enabled) return false;
+
+    static bool warn_fallback = env_set("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK");
+
+    std::vector<const void *> a_ptrs(num_gemms), b_ptrs(num_gemms);
+    std::vector<void *>       d_ptrs(num_gemms);
+    std::vector<const void *> sa_ptrs(num_gemms), sb_ptrs(num_gemms);
+    std::vector<int>          m_arr(num_gemms);
+
+    int ref_n = -1, ref_k = -1;
+    int out_dtype = -1, a_dtype = -1, b_dtype = -1;
+
+    for (int i = 0; i < num_gemms; i++) {
+        const auto *tA = convertNVTETensorCheck(A[i]);
+        const auto *tB = convertNVTETensorCheck(B[i]);
+        auto       *tD = convertNVTETensorCheck(D[i]);
+
+        const void *a_data  = tA->columnwise_data.dptr;
+        const void *a_scale = tA->columnwise_scale_inv.dptr;
+        const void *b_data  = tB->columnwise_data.dptr;
+        const void *b_scale = tB->columnwise_scale_inv.dptr;
+
+        int A0 = tA->columnwise_data.shape[0], A1 = tA->columnwise_data.shape[1];
+        int B0 = tB->columnwise_data.shape[0], B1 = tB->columnwise_data.shape[1];
+        int M_i = A0;   // tokens (reduction dim, varies)
+        int N_i = A1;   // hidden (uniform)
+        int K_i = B1;   // ffn_hidden (uniform)
+
+        if (M_i == 0) {
+            a_ptrs[i]  = nullptr;
+            b_ptrs[i]  = nullptr;
+            d_ptrs[i]  = tD->data.dptr;
+            sa_ptrs[i] = nullptr;
+            sb_ptrs[i] = nullptr;
+            m_arr[i]   = 0;
+            continue;
+        }
+
+        if (!a_data || !b_data) {
+            if (warn_fallback) {
+                fprintf(stderr, "[HK-wgrad] null data pointer at expert %d\n", i);
+            }
+            return false;
+        }
+
+        if (ref_n < 0) {
+            ref_n     = N_i;
+            ref_k     = K_i;
+            out_dtype = static_cast<int>(tD->data.dtype);
+            a_dtype   = static_cast<int>(tA->columnwise_data.dtype);
+            b_dtype   = static_cast<int>(tB->columnwise_data.dtype);
+        } else {
+            if (N_i != ref_n || K_i != ref_k) {
+                if (warn_fallback) {
+                    fprintf(stderr, "[HK-wgrad] N or K varies across experts\n");
+                }
+                return false;
+            }
+        }
+
+        a_ptrs[i]  = a_data;
+        b_ptrs[i]  = b_data;
+        d_ptrs[i]  = tD->data.dptr;
+        sa_ptrs[i] = a_scale;
+        sb_ptrs[i] = b_scale;
+        m_arr[i]   = M_i;
+    }
+
+    if (ref_n < 0) return false;
+
+    auto *ws = convertNVTETensorCheck(workspace[0]);
+
+    return kittens_grouped_mxfp8_wgrad(
+        a_ptrs.data(), b_ptrs.data(), d_ptrs.data(),
+        sa_ptrs.data(), sb_ptrs.data(),
+        ref_n, ref_k, m_arr.data(), num_gemms,
+        a_dtype, b_dtype, out_dtype,
+        accumulate,
         ws->data.dptr, ws->data.shape[0], stream);
 }
 #endif
