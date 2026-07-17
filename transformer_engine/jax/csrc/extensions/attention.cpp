@@ -471,6 +471,18 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     min_num_segments = input_batch * max_segments_per_seq;
   }
 
+  // ROCm CK: the deterministic CK bwd workspace size differs between group and batch mode, and
+  // is_group_mode() keys off a non-null cu_seqlens pointer. The real cu_seqlens are unavailable at
+  // this lowering-time sizing pass, so with a null pointer JAX would size the workspace for batch
+  // mode while execution runs in group mode -> under-allocated dq_acc -> OOB write into the forward
+  // output. For group-mode configs (ragged/THD or a padding mask) pass a non-null sentinel so the
+  // sizing pass matches execution. The pointer is only null-checked (never dereferenced) here.
+  const bool mask_is_padding = (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
+                                mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
+                                mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  void *cu_seqlens_sizing_sentinel =
+      (is_ragged || mask_is_padding) ? reinterpret_cast<void *>(alignof(int32_t)) : nullptr;
+
   TensorWrapper dummy_d_softmax_offset_tensor;
   if (softmax_type == NVTE_Softmax_Type::NVTE_OFF_BY_ONE_SOFTMAX ||
       softmax_type == NVTE_Softmax_Type::NVTE_LEARNABLE_SOFTMAX) {
@@ -480,10 +492,10 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
 
   for (auto num_segments = min_num_segments; num_segments <= max_num_segments; ++num_segments) {
     // the last one is the largest which will be the returned workspace size
-    auto q_cu_seqlens_tensor =
-        TensorWrapper(nullptr, std::vector<size_t>{num_segments + 1}, DType::kInt32);
-    auto kv_cu_seqlens_tensor =
-        TensorWrapper(nullptr, std::vector<size_t>{num_segments + 1}, DType::kInt32);
+    auto q_cu_seqlens_tensor = TensorWrapper(cu_seqlens_sizing_sentinel,
+                                             std::vector<size_t>{num_segments + 1}, DType::kInt32);
+    auto kv_cu_seqlens_tensor = TensorWrapper(cu_seqlens_sizing_sentinel,
+                                              std::vector<size_t>{num_segments + 1}, DType::kInt32);
     auto dummy_ragged_offset_tensor =
         TensorWrapper(nullptr, std::vector<size_t>{num_segments + 1}, DType::kInt32);
 
