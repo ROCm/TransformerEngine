@@ -422,23 +422,55 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
 
 // COLWISE=false: TE uint8 [dim, K/32] row-major -> HipKittens uint32 [k_iters, dim] iteration-major packed.
 // COLWISE=true:  TE uint8 [K/32, dim] col-major -> HipKittens uint32 [k_iters, dim] iteration-major packed.
-template<bool COLWISE>
-__global__ void pack_scales_kernel(const uint8_t *__restrict__ scales, uint32_t *__restrict__ packed,
-                                   int dim, int scale_K, int k_iters) {
+// FUSED=1: all experts share k_iters; output at packed + expert * expert_stride.
+// FUSED=2: per-expert k_iters; output at packed + output_offsets[expert].
+template<bool COLWISE, int FUSED = 0>
+__global__ void pack_scales_kernel([[maybe_unused]] const uint8_t *__restrict__ scales,
+    uint32_t *__restrict__ packed, int dim, [[maybe_unused]] int scale_K, [[maybe_unused]] int k_iters,
+    [[maybe_unused]] const uint8_t *const *__restrict__ scale_ptrs = nullptr,
+    [[maybe_unused]] int expert_stride = 0, [[maybe_unused]] const int *__restrict__ k_iters_arr = nullptr,
+    [[maybe_unused]] const int *__restrict__ output_offsets = nullptr) {
+
+    const uint8_t *my_scales;
+    uint32_t *my_packed;
+    int my_k_iters, my_scale_K;
+
+    if constexpr (FUSED == 1) {
+        int expert_id = blockIdx.y;
+        my_scales  = scale_ptrs[expert_id];
+        my_packed  = packed + (size_t)expert_id * expert_stride;
+        my_k_iters = k_iters;
+        my_scale_K = scale_K;
+    } else if constexpr (FUSED == 2) {
+        int expert_id = blockIdx.y;
+        my_scales  = scale_ptrs[expert_id];
+        my_packed  = packed + output_offsets[expert_id];
+        my_k_iters = k_iters_arr[expert_id];
+        my_scale_K = my_k_iters * 4;
+    } else {
+        my_scales  = scales;
+        my_packed  = packed;
+        my_k_iters = k_iters;
+        my_scale_K = scale_K;
+    }
+
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int total = k_iters * dim;
+    int total = my_k_iters * dim;
     if (idx >= total) return;
 
     int ki      = idx / dim;
     int row     = idx % dim;
     int kb_base = ki * 4;
 
-    uint32_t p = 0;
-    for (int j = 0; j < 4; j++) {
-        int src = COLWISE ? (kb_base + j) * dim + row : row * scale_K + kb_base + j;
-        p |= (uint32_t)scales[src] << (j * 8);
+    uint32_t p;
+    if constexpr (COLWISE) {
+        int base = kb_base * dim + row;
+        p  =  (uint32_t)my_scales[base] | ((uint32_t)my_scales[base+dim] << 8)
+           | ((uint32_t)my_scales[base + 2*dim] << 16) | ((uint32_t)my_scales[base + 3*dim] << 24);
+    } else {
+        __builtin_memcpy(&p, &my_scales[row * my_scale_K + kb_base], 4);
     }
-    packed[ki * dim + row] = p;
+    my_packed[ki * dim + row] = p;
 }
 
 
@@ -1081,6 +1113,26 @@ static void launch_pack_scales(const uint8_t *scales, uint32_t *packed, int dim,
     pack_scales_kernel<COLWISE><<<blocks, 256, 0, stream>>>(scales, packed, dim, scale_K, k_iters);
 }
 
+template<bool COLWISE>
+static void launch_pack_scales_fused(const uint8_t *const *d_scale_ptrs, uint32_t *packed,
+        int expert_stride, int num_experts, int dim, int scale_K, int k_iters, hipStream_t stream) {
+
+    int total_per_expert = k_iters * dim; int blocks_x = (total_per_expert + 255) / 256;
+    dim3 grid(blocks_x, num_experts); pack_scales_kernel<COLWISE, 1><<<grid, 256, 0, stream>>>(
+        nullptr, packed, dim, scale_K, k_iters, d_scale_ptrs, expert_stride);
+}
+
+template<bool COLWISE>
+static void launch_pack_scales_fused_varying(const uint8_t *const *d_scale_ptrs, uint32_t *packed, 
+    const int *d_output_offsets, const int *d_k_iters_arr, int max_k_iters, int num_experts, int dim, hipStream_t stream) {
+
+    int max_total = max_k_iters * dim;
+    int blocks_x = (max_total + 255) / 256;
+    dim3 grid(blocks_x, num_experts);
+    pack_scales_kernel<COLWISE, 2><<<grid, 256, 0, stream>>>(
+        nullptr, packed, dim, 0, 0, d_scale_ptrs, 0, d_k_iters_arr, d_output_offsets);
+}
+
 static size_t align_up(size_t x, size_t a) {
     return (x + a - 1) & ~(a - 1);
 }
@@ -1232,8 +1284,9 @@ bool kittens_grouped_mxfp8_gemm(
     size_t sa_pk_bytes   = align256((size_t)k_iters * num_experts * M * sizeof(uint32_t));
     size_t sb_pk_bytes   = align256((size_t)k_iters * total_N * sizeof(uint32_t));
     size_t ptrs_bytes    = align256((size_t)num_experts * sizeof(void *));
-    size_t offsets_bytes  = align256((size_t)(num_experts + 1) * sizeof(int));
-    if (workspace_size < sa_pk_bytes + sb_pk_bytes + ptrs_bytes + offsets_bytes) {
+    size_t sa_ptrs_bytes = align256((size_t)num_experts * sizeof(void *));
+    size_t offsets_bytes = align256((size_t)(num_experts + 1) * sizeof(int));
+    if (workspace_size < sa_pk_bytes + sb_pk_bytes + ptrs_bytes + sa_ptrs_bytes + offsets_bytes) {
         warn("workspace too small"); return false;
     }
 
@@ -1241,18 +1294,22 @@ bool kittens_grouped_mxfp8_gemm(
     auto *sa_pk         = (uint32_t *)ws;
     auto *sb_pk         = (uint32_t *)(ws + sa_pk_bytes);
     auto *d_a_ptrs      = (const void **)(ws + sa_pk_bytes + sb_pk_bytes);
-    auto *d_tile_offsets = (int *)(ws + sa_pk_bytes + sb_pk_bytes + ptrs_bytes);
+    auto *d_sa_ptrs     = (const uint8_t **)(ws + sa_pk_bytes + sb_pk_bytes + ptrs_bytes);
+    auto *d_tile_offsets = (int *)(ws + sa_pk_bytes + sb_pk_bytes + ptrs_bytes + sa_ptrs_bytes);
 
-    // Pack weight scales per-expert (per-expert-first layout)
-    // COLWISE = !transa: rowwise scales are [M, K/32], columnwise are [K/32, M]
+    // Upload per-expert scale_A pointers to device for fused packing
+    hipMemcpyAsync((void *)d_sa_ptrs, scale_A_array,
+                   num_experts * sizeof(void *), hipMemcpyHostToDevice, stream);
+
+    int sa_expert_stride = k_iters * M;
     BOOL_SWITCH(!transa, COLWISE_A,
         BOOL_SWITCH(transb, COLWISE_B,
-            for (int g = 0; g < num_experts; g++) {
-                launch_pack_scales<COLWISE_A>((const uint8_t *)scale_A_array[g],
-                                            sa_pk + (size_t)g * k_iters * M,
-                                            M, scale_K, k_iters, stream);
-            }
-            // Activation scales: contiguous [total_N, scale_K] from scale_B_array[0].
+            // Pack weight scales: single fused launch for all experts
+            launch_pack_scales_fused<COLWISE_A>(
+                (const uint8_t *const *)d_sa_ptrs, sa_pk,
+                sa_expert_stride, num_experts,
+                M, scale_K, k_iters, stream);
+            // Pack activation scales
             launch_pack_scales<COLWISE_B>((const uint8_t *)scale_B_array[0], sb_pk,
                                         total_N, scale_K, k_iters, stream);
     ))  // NOLINT(*)
@@ -1652,41 +1709,69 @@ bool kittens_grouped_mxfp8_wgrad(const void *const *A_array, const void *const *
 
     if (num_active == 0) return true;
 
+    // Build per-expert arrays for fused scale packing
+    std::vector<const uint8_t *> h_sa_ptrs(num_active), h_sb_ptrs(num_active);
+    std::vector<int> h_k_iters(num_active), h_sa_offsets(num_active), h_sb_offsets(num_active);
+    int max_k_iters = 0;
+    for (int i = 0; i < num_active; i++) {
+        h_k_iters[i] = h_info[i].k_iters;
+        max_k_iters = std::max(h_k_iters[i], max_k_iters);
+    }
+
+    int sa_off = 0, sb_off = 0;
+    for (int i = 0; i < num_active; i++) {
+        h_sa_offsets[i] = sa_off;
+        h_sb_offsets[i] = sb_off;
+        sa_off += h_k_iters[i] * N;
+        sb_off += h_k_iters[i] * K;
+    }
+
+    int idx = 0;
+    for (int g = 0; g < num_experts; g++) {
+        if (M_array[g] == 0) continue;
+        h_sa_ptrs[idx] = (const uint8_t *)scale_A_array[g];
+        h_sb_ptrs[idx] = (const uint8_t *)scale_B_array[g];
+        idx++;
+    }
+
     size_t sa_pk_bytes   = align256(total_sa_entries * sizeof(uint32_t));
     size_t sb_pk_bytes   = align256(total_sb_entries * sizeof(uint32_t));
     size_t info_bytes    = align256((size_t)num_active * sizeof(WgradExpertInfo));
-    if (workspace_size < sa_pk_bytes + sb_pk_bytes + info_bytes) {
+    size_t sa_ptrs_bytes = align256((size_t)num_active * sizeof(void *));
+    size_t sb_ptrs_bytes = align256((size_t)num_active * sizeof(void *));
+    size_t ki_arr_bytes  = align256((size_t)num_active * sizeof(int));
+    size_t sa_off_bytes  = align256((size_t)num_active * sizeof(int));
+    size_t sb_off_bytes  = align256((size_t)num_active * sizeof(int));
+    size_t total_ws = sa_pk_bytes + sb_pk_bytes + info_bytes
+                    + sa_ptrs_bytes + sb_ptrs_bytes + ki_arr_bytes + sa_off_bytes + sb_off_bytes;
+    if (workspace_size < total_ws) {
         warn("workspace too small");
         return false;
     }
 
     uint8_t *ws = (uint8_t *)workspace;
+    size_t off = 0;
+    auto *sa_pk         = (uint32_t *)(ws + off);          off += sa_pk_bytes;
+    auto *sb_pk         = (uint32_t *)(ws + off);          off += sb_pk_bytes;
+    auto *d_info        = (WgradExpertInfo *)(ws + off);   off += info_bytes;
+    auto *d_sa_ptrs     = (const uint8_t **)(ws + off);    off += sa_ptrs_bytes;
+    auto *d_sb_ptrs     = (const uint8_t **)(ws + off);    off += sb_ptrs_bytes;
+    auto *d_k_iters_arr = (int *)(ws + off);               off += ki_arr_bytes;
+    auto *d_sa_offsets  = (int *)(ws + off);               off += sa_off_bytes;
+    auto *d_sb_offsets  = (int *)(ws + off);
 
-    auto *sa_pk  = (uint32_t *)ws;
-    auto *sb_pk  = (uint32_t *)(ws + sa_pk_bytes);
-    auto *d_info = (WgradExpertInfo *)(ws + sa_pk_bytes + sb_pk_bytes);
+    hipMemcpyAsync(d_sa_ptrs, h_sa_ptrs.data(), num_active * sizeof(void *), hipMemcpyHostToDevice, stream);
+    hipMemcpyAsync(d_sb_ptrs, h_sb_ptrs.data(), num_active * sizeof(void *), hipMemcpyHostToDevice, stream);
+    hipMemcpyAsync(d_k_iters_arr, h_k_iters.data(), num_active * sizeof(int), hipMemcpyHostToDevice, stream);
+    hipMemcpyAsync(d_sa_offsets, h_sa_offsets.data(), num_active * sizeof(int), hipMemcpyHostToDevice, stream);
+    hipMemcpyAsync(d_sb_offsets, h_sb_offsets.data(), num_active * sizeof(int), hipMemcpyHostToDevice, stream);
 
-    // Pack scales per-expert
-    uint32_t *sa_cursor = sa_pk;
-    uint32_t *sb_cursor = sb_pk;
-    for (int g = 0; g < num_experts; g++) {
-        int M_g = M_array[g];
-        if (M_g == 0) continue;
-        int k_iters_g = M_g / BLOCK_K;
-        int scale_K_g = M_g / 32;
+    launch_pack_scales_fused_varying<true>((const uint8_t *const *)d_sa_ptrs, sa_pk, d_sa_offsets, 
+                                            d_k_iters_arr, max_k_iters, num_active, N, stream);
+    launch_pack_scales_fused_varying<true>((const uint8_t *const *)d_sb_ptrs, sb_pk, d_sb_offsets, 
+                                            d_k_iters_arr, max_k_iters, num_active, K, stream);
 
-        launch_pack_scales<true>((const uint8_t *)scale_A_array[g], sa_cursor,
-                                  N, scale_K_g, k_iters_g, stream);
-        sa_cursor += (size_t)k_iters_g * N;
-
-        launch_pack_scales<true>((const uint8_t *)scale_B_array[g], sb_cursor,
-                                  K, scale_K_g, k_iters_g, stream);
-        sb_cursor += (size_t)k_iters_g * K;
-    }
-
-    // Upload expert info
-    hipMemcpyAsync(d_info, h_info.data(),
-                   num_active * sizeof(WgradExpertInfo), hipMemcpyHostToDevice, stream);
+    hipMemcpyAsync(d_info, h_info.data(), num_active * sizeof(WgradExpertInfo), hipMemcpyHostToDevice, stream);
 
     int grid = num_active * tiles_per_expert;
     if (grid == 0) return true;
