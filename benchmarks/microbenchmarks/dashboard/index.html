@@ -22,10 +22,7 @@
     </div>
   </div>
 
-  <div class="arch-legend" aria-label="GPU architectures">
-    <span class="arch-chip" data-arch="gfx950"><i></i>gfx950</span>
-    <span class="arch-chip" data-arch="gfx942"><i></i>gfx942</span>
-  </div>
+  <div class="arch-legend" id="archLegend" aria-label="GPU architectures"></div>
 
   <div class="status-cluster">
     <span class="updated syncing" id="updated">syncing…</span>
@@ -47,8 +44,11 @@
     All Benchmarks</button>
   <button class="tab"           id="tab-prcheck" data-view="prcheck" role="tab" aria-selected="false" aria-controls="panel-prcheck">
     PR Check</button>
+  <!-- CI Board tab disabled in the TE dashboard: no live GitHub Actions integration (CFG.api="").
+       The board view/code is left intact; re-enable by uncommenting this tab.
   <button class="tab"           id="tab-board"   data-view="board"   role="tab" aria-selected="false" aria-controls="panel-board">
     CI Board</button>
+  -->
 </nav>
 
 <main id="main">
@@ -96,7 +96,7 @@
         <div class="noise-note" id="noiseNote"></div>
         <div class="table-wrap small" style="margin-top:14px">
           <table class="data" id="trendTable">
-            <thead><tr><th>commit</th><th>date</th><th>pr</th><th class="num">gfx950</th><th class="num">gfx942</th></tr></thead>
+            <thead><tr id="trendHeadRow"><th>commit</th><th>date</th><th>pr</th></tr></thead>
             <tbody id="trendBody"></tbody>
           </table>
         </div>

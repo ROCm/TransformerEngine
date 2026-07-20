@@ -18,7 +18,7 @@ const CFG = {
   noiseK: 2.0,           // a drop must exceed K * (run-to-run relative std) to count as real
   minSamples: 3,         // prior main runs needed to size a noise band (else: low confidence)
   sparkFloorPct: 6,      // sparkline min half-window (% of baseline) so trivial noise stays flat
-  archOrder: ["gfx950", "gfx942"], // TE runs; add arches here (also update index.html legend + trend header)
+  archOrder: ["gfx942", "gfx950", "gfx1250"], // TE runs; add arches here (also update styles.css --gfx* + .arch-chip)
 };
 
 const S = {
@@ -37,7 +37,7 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "
 const VIEWS = ["health", "bytype", "prcheck", "board"];
 
 // theme-aware colors: read the live CSS variables so canvas/SVG match the active theme
-const ARCHVAR = { gfx950: "--gfx950", gfx942: "--gfx942", gfx1201: "--gfx1201" };
+const ARCHVAR = { gfx950: "--gfx950", gfx942: "--gfx942", gfx1250: "--gfx1250" };
 const cssVal = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || n;
 const archVar = a => `var(${ARCHVAR[a] || "--ink-2"})`;     // for inline style="" (CSS var)
 const archCol = a => cssVal(ARCHVAR[a] || "--ink-2");        // resolved value for <canvas>
@@ -80,6 +80,13 @@ async function getJSON(url, timeout = 8000) {
   catch { return null; } finally { clearTimeout(id); }
 }
 async function getText(url, timeout = 8000) {
+  // Single-file bundle mode: each data shard is embedded in the page as a
+  // `<script type="text/csv" data-file="<name>">` block (see build_bundle.py) and
+  // read here instead of fetched (fetch is blocked on file://). Falls back to
+  // fetch for the normal server-hosted mode, so the same code works both ways.
+  const key = String(url).split("/").pop();
+  const embedded = document.querySelector(`script[type="text/csv"][data-file="${key}"]`);
+  if (embedded) return embedded.textContent.replace(/^\n/, "");
   const c = new AbortController(); const id = setTimeout(() => c.abort(), timeout);
   try { const r = await fetch(url, { signal: c.signal, cache: "no-store" }); if (!r.ok) throw 0; return await r.text(); }
   catch { return null; } finally { clearTimeout(id); }
@@ -146,6 +153,7 @@ async function loadAll() {
     }
   });
   S.records = records;
+  computePRDeltas();   // derive vs_main (PR value vs dev baseline) so PR Check works
   S.runs = [];
   S.runMeta = new Map();
   S.updated = latest || null;
@@ -192,7 +200,7 @@ async function enhanceLiveBoard() {
   }));
   if (S.view === "board") renderBoard();
 }
-function archOf(n) { return /mi355/.test(n) ? "gfx950" : /mi325/.test(n) ? "gfx942" : /navi/.test(n) ? "gfx1201" : "?"; }
+function archOf(n) { return /mi355/.test(n) ? "gfx950" : /mi325/.test(n) ? "gfx942" : "?"; }
 
 /* ----------------------------------------------------------- noise model --- */
 function isMainRec(r) { const m = S.runMeta.get(r.run_id); return m ? m.branch === "dev" : r.pr == null; }
@@ -249,6 +257,23 @@ function regOf(r, base) {
   // PR run: vs_main is a real PR-commit-vs-main-commit diff in the same job — valid as-is.
   if (!r.vs_main) return { d: null, real: false };
   return { d: r.vs_main.delta_pct, real: realRegression(r.vs_main.delta_pct, base) };
+}
+
+// Derive vs_main for PR records client-side. Our CSV ingest doesn't precompute
+// the PR-vs-dev diff (unlike upstream FlyDSL's CI job), so compare each PR
+// kernel's value against the dev baseline (prior-dev mean) here. Populates the
+// PR Check tab; a safe no-op until a `--pr` shard is ingested.
+function computePRDeltas() {
+  for (const r of S.records) {
+    if (r.pr == null || r.value == null || r.metric === "speedup") continue;
+    const base = mainBaseline(r.op, r.shape, r.dtype, r.arch, r.metric);
+    if (base.mean == null) continue;    // no dev baseline for this kernel yet
+    r.vs_main = {
+      delta_pct: (r.value - base.mean) / base.mean * 100,
+      baseline: base.mean,
+      label: "dev",
+    };
+  }
 }
 
 let _sparkN = 0;
@@ -393,6 +418,7 @@ const FAMILY_ORDER = ["gemm", "gemm_fp8", "grouped_gemm", "casting", "normalizat
 const familyLabel = f => FAMILY_LABELS[f] ||
   (f ? f.replace(/[_-]+/g, " ").replace(/\b\w/g, c => c.toUpperCase()) : "Other");
 const familyRank = f => { const i = FAMILY_ORDER.indexOf(f); return i < 0 ? FAMILY_ORDER.length : i; };
+const archRank = a => { const i = CFG.archOrder.indexOf(a); return i < 0 ? CFG.archOrder.length : i; };
 
 // Every latest dev kernel/arch, grouped by benchmark family -- the full picture,
 // not just regressions. Same latest-value + noise-band trend as Health.
@@ -401,43 +427,72 @@ function renderByType() {
   const rows = healthRows().filter(x => {
     if (!q) return true;
     const r = x.r;
-    return `${r.op} ${r.shape} ${r.dtype} ${r.family || ""}`.toLowerCase().includes(q);
+    return `${r.op} ${r.shape} ${r.dtype} ${r.family || ""} ${r.arch || ""}`.toLowerCase().includes(q);
   });
-  const groups = new Map();
+  const openAttr = q ? " open" : "";   // folded by default; auto-open while filtering
+
+  // group arch -> family -> rows
+  const byArch = new Map();
   for (const x of rows) {
-    const f = x.r.family || "other";
-    (groups.get(f) || groups.set(f, []).get(f)).push(x);
+    const a = x.r.arch || "?";
+    if (!byArch.has(a)) byArch.set(a, new Map());
+    const fm = byArch.get(a), f = x.r.family || "other";
+    (fm.get(f) || fm.set(f, []).get(f)).push(x);
   }
-  const fams = [...groups.keys()].sort((a, b) => familyRank(a) - familyRank(b) || a.localeCompare(b));
-  const openAttr = q ? " open" : "";   // folded by default; auto-open sections while filtering
+  const arches = [...byArch.keys()].sort((a, b) => archRank(a) - archRank(b) || a.localeCompare(b));
+  const nFam = new Set(rows.map(x => x.r.family || "other")).size;
   $("#typeSummary").innerHTML = rows.length
-    ? `${rows.length} kernel × arch across <b>${fams.length}</b> type${fams.length === 1 ? "" : "s"} · latest dev value + Δ vs prior-dev history`
+    ? `${rows.length} kernel × arch · <b>${arches.length}</b> arch${arches.length === 1 ? "" : "es"} · <b>${nFam}</b> type${nFam === 1 ? "" : "s"} · latest dev value + Δ vs prior-dev history`
     : "no results in snapshot";
-  $("#typeSections").innerHTML = fams.map(f => {
-    const list = groups.get(f).slice().sort((a, b) =>
-      a.r.op.localeCompare(b.r.op) || a.r.shape.localeCompare(b.r.shape) || (a.r.arch || "").localeCompare(b.r.arch || ""));
-    const units = [...new Set(list.map(x => x.r.metric))].join(", ");
-    const body = list.map(({ r, vals, noise, d, real, sev }) => {
-      const dcell = d == null ? `<td class="num k-dim">—</td>` : `<td class="num delta ${sev}">${fmtPct(d)}</td>`;
-      return `<tr data-k="${esc(kkey(r))}" data-arch="${r.arch}">
-        <td>${esc(r.op)} <span class="metric-tag">${r.metric}</span></td>
-        <td class="k-dim">${esc(r.shape)}</td>
-        <td>${esc(r.dtype)}</td>
-        <td style="color:${archVar(r.arch)}">${esc(r.arch)}</td>
-        <td class="spark-cell">${sparkline(vals, noise, real)}</td>
-        <td class="num">${fmtVal(r.value, r.metric)}</td>
-        ${dcell}
-      </tr>`;
+
+  // one collapsible <details> per benchmark family, for a given arch's family-map
+  const familyPanels = fm => {
+    const fams = [...fm.keys()].sort((a, b) => familyRank(a) - familyRank(b) || a.localeCompare(b));
+    return fams.map(f => {
+      const list = fm.get(f).slice().sort((a, b) =>
+        a.r.op.localeCompare(b.r.op) || a.r.shape.localeCompare(b.r.shape));
+      const units = [...new Set(list.map(x => x.r.metric))].join(", ");
+      const body = list.map(({ r, vals, noise, d, real, sev }) => {
+        const dcell = d == null ? `<td class="num k-dim">—</td>` : `<td class="num delta ${sev}">${fmtPct(d)}</td>`;
+        return `<tr data-k="${esc(kkey(r))}" data-arch="${r.arch}">
+          <td>${esc(r.op)} <span class="metric-tag">${r.metric}</span></td>
+          <td class="k-dim">${esc(r.shape)}</td>
+          <td>${esc(r.dtype)}</td>
+          <td style="color:${archVar(r.arch)}">${esc(r.arch)}</td>
+          <td class="spark-cell">${sparkline(vals, noise, real)}</td>
+          <td class="num">${fmtVal(r.value, r.metric)}</td>
+          ${dcell}
+        </tr>`;
+      }).join("");
+      return `<details class="panel type-panel"${openAttr}>
+        <summary class="panel-head"><span class="type-caret" aria-hidden="true">▸</span><span class="t">${esc(familyLabel(f))}</span>
+          <span class="type-count">${list.length} kernel${list.length === 1 ? "" : "s"}</span>
+          <span class="spacer"></span><span class="type-unit">${esc(units)}</span></summary>
+        <div class="table-wrap"><table class="data"><thead><tr>
+          <th>kernel</th><th>shape</th><th>dtype</th><th>arch</th><th>recent trend</th><th class="num">latest</th><th class="num">Δ vs dev</th>
+        </tr></thead><tbody>${body}</tbody></table></div>
+      </details>`;
     }).join("");
-    return `<details class="panel type-panel"${openAttr}>
-      <summary class="panel-head"><span class="type-caret" aria-hidden="true">▸</span><span class="t">${esc(familyLabel(f))}</span>
-        <span class="type-count">${list.length} kernel${list.length === 1 ? "" : "s"}</span>
-        <span class="spacer"></span><span class="type-unit">${esc(units)}</span></summary>
-      <div class="table-wrap"><table class="data"><thead><tr>
-        <th>kernel</th><th>shape</th><th>dtype</th><th>arch</th><th>recent trend</th><th class="num">latest</th><th class="num">Δ vs dev</th>
-      </tr></thead><tbody>${body}</tbody></table></div>
-    </details>`;
-  }).join("") || `<div class="empty">no results in snapshot</div>`;
+  };
+
+  if (arches.length <= 1) {
+    // single arch: family panels directly (no extra arch layer)
+    $("#typeSections").innerHTML = arches.length
+      ? familyPanels(byArch.get(arches[0]))
+      : `<div class="empty">no results in snapshot</div>`;
+  } else {
+    // multiple arches: arch (outer <details>) -> family (inner <details>)
+    $("#typeSections").innerHTML = arches.map(a => {
+      const fm = byArch.get(a);
+      const count = [...fm.values()].reduce((n, l) => n + l.length, 0);
+      return `<details class="panel arch-panel"${openAttr}>` +
+        `<summary class="panel-head"><span class="type-caret" aria-hidden="true">▸</span>` +
+        `<span class="t arch-name" style="color:${archVar(a)}">${esc(a)}</span>` +
+        `<span class="type-count">${count} kernel${count === 1 ? "" : "s"}</span></summary>` +
+        `<div class="arch-body">${familyPanels(fm)}</div>` +
+        `</details>`;
+    }).join("");
+  }
 }
 
 /* ---------------------------------------------------------- 3 · PR CHECK --- */
@@ -609,8 +664,14 @@ function drawTrend(e) {
     `<svg viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5"><circle cx="8" cy="8" r="6.5"/><path d="M8 7.3v4M8 5v.01" stroke-linecap="round"/></svg>` + note;
 
   const tickCol = cssVal("--ink-3"), gridCol = cssVal("--grid");
-  if (trendChart) trendChart.destroy();
-  trendChart = new Chart($("#trendChart"), {
+  const canvasEl = $("#trendChart");
+  // Robust teardown: destroy our instance AND any chart still bound to this canvas
+  // (Chart.getChart), so a re-entrant/interrupted redraw can't leave the canvas
+  // "already in use" -> a blank chart that only a full page reload clears.
+  if (trendChart) { trendChart.destroy(); trendChart = null; }
+  const bound = (window.Chart && Chart.getChart) ? Chart.getChart(canvasEl) : null;
+  if (bound) bound.destroy();
+  trendChart = new Chart(canvasEl, {
     type: "line", data: { labels, datasets },
     options: {
       responsive: true, maintainAspectRatio: false, animation: { duration: 220 },
@@ -622,10 +683,19 @@ function drawTrend(e) {
         tooltip: {
           backgroundColor: cssVal("--panel"), borderColor: cssVal("--border"), borderWidth: 1, titleColor: cssVal("--ink"), bodyColor: cssVal("--ink-2"),
           titleFont: { family: "IBM Plex Mono" }, bodyFont: { family: "IBM Plex Mono" },
-          filter: i => !/σ|mean/.test(i.dataset.label),
+          // Drop the band/mean helper lines AND null (gap) points. With sparse
+          // multi-arch data, hovering a gap x-position otherwise yields an empty
+          // items array -> the title callback threw on items[0], which broke
+          // Chart.js's draw loop (blank chart until reload).
+          filter: i => i && i.dataset && !/σ|mean/.test(i.dataset.label) && i.parsed && i.parsed.y != null,
           callbacks: {
-            title: items => { const p = points[items[0].dataIndex]; return daily ? `${p.date} · ${p.runs.length} run${p.runs.length === 1 ? "" : "s"}` : `${p.sha} · ${p.main ? "dev" : "#" + p.pr} · click to open`; },
-            label: i => ` ${i.dataset.label}: ${fmtVal(i.parsed.y, metric)} ${metric}`,
+            title: items => {
+              const it = items && items[0];
+              const p = it && points[it.dataIndex];
+              if (!p) return "";
+              return daily ? `${p.date} · ${p.runs.length} run${p.runs.length === 1 ? "" : "s"}` : `${p.sha} · ${p.main ? "dev" : "#" + p.pr} · click to open`;
+            },
+            label: i => (i && i.dataset && i.parsed && i.parsed.y != null) ? ` ${i.dataset.label}: ${fmtVal(i.parsed.y, metric)} ${metric}` : "",
           },
         },
       },
@@ -637,7 +707,11 @@ function drawTrend(e) {
       },
     },
   });
-  // status-aware table — always per-commit, with a real link to each commit
+  // status-aware table — always per-commit, with a real link to each commit.
+  // Header arch columns are generated from CFG.archOrder so they stay aligned
+  // with the data cells below (which also map over CFG.archOrder).
+  $("#trendHeadRow").innerHTML = `<th>commit</th><th>date</th><th>pr</th>` +
+    CFG.archOrder.map(a => `<th class="num">${esc(a)}</th>`).join("");
   $("#trendBody").innerHTML = runIds.slice().reverse().map(ri => {
     const cell = arch => {
       const r = recs.find(x => x.run_id === ri.id && x.arch === arch)
@@ -653,6 +727,10 @@ function drawTrend(e) {
       `<td class="k-dim">${ri.main ? "dev" : ri.pr ? `<a href="https://github.com/${CFG.repo}/pull/${ri.pr}" target="_blank" rel="noopener">#${ri.pr}</a>` : "branch"}</td>` +
       `${CFG.archOrder.map(cell).join("")}</tr>`;
   }).join("");
+  // If the chart was built while its container was briefly unsized (view switch or
+  // first paint), force a resize on the next frame so it isn't left blank.
+  const _ch = trendChart;
+  requestAnimationFrame(() => { if (_ch && _ch === trendChart) trendChart.resize(); });
 }
 
 /* ------------------------------------------------------------- 4 · BOARD --- */
@@ -723,7 +801,7 @@ function showView(v) {
   $$(".tab").forEach(t => { const on = t.dataset.view === v; t.classList.toggle("is-active", on); t.setAttribute("aria-selected", on ? "true" : "false"); });
   $$(".view").forEach(s => s.classList.toggle("is-active", s.dataset.view === v));
   if (location.hash.slice(1) !== v) history.replaceState(null, "", "#" + v);
-  if (v === "health" && trendChart) trendChart.resize();
+  if (v === "health" && trendChart) requestAnimationFrame(() => { if (trendChart) trendChart.resize(); });
 }
 function goTrend(k, arch) {
   S.trend.key = null; S.trend.arch = arch || "all";
@@ -731,6 +809,14 @@ function goTrend(k, arch) {
   selectKernel(k);
   const el = document.getElementById("trendsSection");
   if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+// arch legend chips, generated from CFG.archOrder so the set/order matches the
+// table, chart and selector (single source of truth for arches).
+function renderArchLegend() {
+  const el = $("#archLegend"); if (!el) return;
+  el.innerHTML = CFG.archOrder.map(a =>
+    `<span class="arch-chip" data-arch="${esc(a)}"><i></i>${esc(a)}</span>`).join("");
 }
 
 function wire() {
@@ -788,6 +874,7 @@ window.addEventListener("hashchange", () => showView(location.hash.slice(1)));
 document.addEventListener("DOMContentLoaded", () => {
   initTheme();
   wire();
+  renderArchLegend();
   if (VIEWS.includes(location.hash.slice(1))) showView(location.hash.slice(1));
   loadAll();
   setInterval(enhanceLiveBoard, 90000);

@@ -25,7 +25,7 @@
 
   --gfx950:  #54adff;
   --gfx942:  #b88ff0;
-  --gfx1201: #ec9a4f;
+  --gfx1250: #ec9a4f;
   --band:    rgba(191,193,208,.12);
 
   --mono: "SF Mono", "Fira Code", Consolas, monospace;
@@ -59,7 +59,7 @@
 
   --gfx950:  #2b7fd6;
   --gfx942:  #8654c8;
-  --gfx1201: #c1741a;
+  --gfx1250: #c1741a;
   --band:    rgba(96,108,124,.13);
 
   --hover:   rgba(20,30,45,.04);
@@ -105,7 +105,7 @@ a:hover { text-decoration: underline; }
 .arch-chip small { color: var(--ink-3); font-size: 10px; }
 .arch-chip[data-arch="gfx950"]  { --c: var(--gfx950); }
 .arch-chip[data-arch="gfx942"]  { --c: var(--gfx942); }
-.arch-chip[data-arch="gfx1201"] { --c: var(--gfx1201); }
+.arch-chip[data-arch="gfx1250"] { --c: var(--gfx1250); }
 
 .status-cluster { margin-left: auto; display: flex; align-items: center; gap: 12px; }
 .updated { font-family: var(--mono); font-size: 11px; color: var(--ink-3); display: inline-flex; align-items: center; gap: 6px; }
@@ -232,17 +232,22 @@ td.delta { font-weight: 600; }
 td.delta.bad { color: var(--bad); } td.delta.warn { color: var(--warn); } td.delta.ok { color: var(--good); } td.delta.flat { color: var(--ink-3); }
 tr.row-bad { background: var(--bad-bg); } tr.row-bad:hover { background: rgba(242,92,78,.14); }
 
-/* by-type view: one collapsible panel per benchmark family (folded by default) */
+/* by-type view: collapsible panels (folded by default). When >1 arch, an outer
+   arch panel (.arch-panel) wraps the per-family panels (.type-panel). */
 #typeSections { display: flex; flex-direction: column; gap: 16px; }
-.type-panel > summary { cursor: pointer; list-style: none; user-select: none; }
-.type-panel > summary::-webkit-details-marker { display: none; }
-.type-panel > summary::marker { content: ""; }
-.type-panel > summary:hover { background: var(--hover); }
-.type-panel:not([open]) > summary { border-bottom: 0; }
-.type-panel .type-caret { display: inline-flex; color: var(--ink-3); font-size: 11px; transition: transform .15s ease; }
-.type-panel[open] > summary .type-caret { transform: rotate(90deg); }
+.type-panel > summary, .arch-panel > summary { cursor: pointer; list-style: none; user-select: none; }
+.type-panel > summary::-webkit-details-marker, .arch-panel > summary::-webkit-details-marker { display: none; }
+.type-panel > summary::marker, .arch-panel > summary::marker { content: ""; }
+.type-panel > summary:hover, .arch-panel > summary:hover { background: var(--hover); }
+.type-panel:not([open]) > summary, .arch-panel:not([open]) > summary { border-bottom: 0; }
+.type-caret { display: inline-flex; color: var(--ink-3); font-size: 11px; transition: transform .15s ease; }
+.type-panel[open] > summary .type-caret, .arch-panel[open] > summary .type-caret { transform: rotate(90deg); }
 .type-panel .panel-head .type-count,
-.type-panel .panel-head .type-unit { font-family: var(--mono); font-size: 11px; color: var(--ink-3); text-transform: none; letter-spacing: 0; }
+.type-panel .panel-head .type-unit,
+.arch-panel .panel-head .type-count { font-family: var(--mono); font-size: 11px; color: var(--ink-3); text-transform: none; letter-spacing: 0; }
+.arch-panel > summary .arch-name { text-transform: none; font-size: 13px; font-family: var(--mono); }
+.arch-body { display: flex; flex-direction: column; gap: 12px; padding: 12px; }
+.arch-body .type-panel { background: var(--bg-3); }
 .type-panel .table-wrap { border: 0; border-radius: 0; max-height: none; }
 #typeSections table.data tbody tr { cursor: pointer; }
 #typeSections td.spark-cell { padding: 2px 12px; }

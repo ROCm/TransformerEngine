@@ -5,6 +5,12 @@ name: Perf dashboard
 # Prerequisite: the `gh-pages` branch must already exist (seed it once with the
 # dashboard files + an empty data/ dir).
 #
+# Opt-in only -- the expensive GPU benchmarks do NOT fire on every push/PR. The
+# `bench` job runs when explicitly requested:
+#   * a PR carries the `ci-perf-test` label, or
+#   * a push's head commit title contains `[ci-perf-test]`, or
+#   * a manual `workflow_dispatch`.
+#
 # TODO(perf-dashboard): prune PR shards on close. PR runs write
 # perf-<family>-pr<N>.csv and currently accumulate indefinitely. Add a companion
 # job triggered on `pull_request: closed` that deletes perf-*-pr<N>.csv and
@@ -12,15 +18,16 @@ name: Perf dashboard
 # commits gh-pages -- so merged/closed PRs don't leave dead data behind.
 
 on:
+  # Triggers are intentionally broad; the `bench` job's `if:` is the opt-in gate.
   push:
     branches: [dev]
     paths:
       - 'transformer_engine/**'
       - 'benchmarks/microbenchmarks/**'
   pull_request:
-    paths:
-      - 'transformer_engine/**'
-      - 'benchmarks/microbenchmarks/**'
+    # `labeled` so that adding the `ci-perf-test` label triggers a run; no path
+    # filter so the label works on any PR.
+    types: [opened, synchronize, reopened, labeled]
   workflow_dispatch:
 
 permissions:
@@ -34,6 +41,15 @@ concurrency:
 
 jobs:
   bench:
+    # Opt-in gate: only spend a GPU runner when a perf run was explicitly asked
+    # for (PR label, [ci-perf-test] commit tag, or manual dispatch). A skipped
+    # job consumes no runner.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      || (github.event_name == 'pull_request'
+          && contains(github.event.pull_request.labels.*.name, 'ci-perf-test'))
+      || (github.event_name == 'push'
+          && contains(github.event.head_commit.message, '[ci-perf-test]'))
     runs-on: [self-hosted, linux, gfx950]      # your AMD GPU runner label(s)
     # GitHub's hosted runners have no AMD GPU; a self-hosted runner is required.
     # If TE isn't in the runner's base env, run the job inside your TE container:
