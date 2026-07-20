@@ -7,6 +7,7 @@
  ************************************************************************/
 
 #include "transformer_engine/cast.h"
+#include "transformer_engine/transpose.h"
 
 #include <algorithm>
 #include <cstdint>
@@ -225,9 +226,10 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       break;
     }
     case GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE: {
+      QuantizationConfigWrapper quant_config_cpp;
       NVTE_SCOPED_GIL_RELEASE({
         nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
-                            at::cuda::getCurrentCUDAStream());
+                            quant_config_cpp, at::cuda::getCurrentCUDAStream());
       });
       break;
     }
@@ -238,6 +240,71 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
   }
 
   return py::reinterpret_borrow<py::object>(grouped_output_py);
+}
+
+py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
+                                const size_t num_tensors, std::optional<at::Tensor> first_dims) {
+  using namespace transformer_engine::pytorch::detail;
+  init_extension();
+
+  NVTE_CHECK(tensor.dim() == 2, "Tensor must be 2D");
+
+  std::vector<size_t> logical_shape;
+  for (const auto &d : tensor.sizes()) {
+    logical_shape.push_back(d);
+  }
+  const auto logical_first_dim = logical_shape[0];
+  const auto logical_last_dim = logical_shape[1];
+
+  bool empty_input_buffer = logical_first_dim == 0 || logical_last_dim == 0;
+
+  NVTE_CHECK(detail::IsMXFP8Quantizers(quantizer.ptr()),
+             "bgrad_group_quantize: only MXFP8 quantizer is supported.");
+
+  auto quantizer_cpp = convert_quantizer(quantizer);
+
+  auto grouped_input_tensor = GroupedTensorWrapper(num_tensors, logical_shape);
+  grouped_input_tensor.set_rowwise_data(
+      tensor.data_ptr(), GetTransformerEngineDType(tensor.scalar_type()), getTensorShape(tensor));
+
+  auto [grouped_output_tensor_cpp, grouped_output_py] = quantizer_cpp->create_grouped_tensor(
+      num_tensors, logical_shape, GetTransformerEngineDType(tensor.scalar_type()),
+      py::reinterpret_borrow<py::object>(quantizer), first_dims, logical_first_dim,
+      logical_last_dim);
+
+  if (empty_input_buffer) {
+    at::Tensor dbias_torch =
+        at::zeros({static_cast<int64_t>(num_tensors), static_cast<int64_t>(logical_last_dim)},
+                  tensor.options());
+    return py::make_tuple(py::reinterpret_borrow<py::object>(grouped_output_py),
+                          py::cast(std::move(dbias_torch)));
+  }
+
+  const std::vector<size_t> dbias_logical_shape = {num_tensors, logical_last_dim};
+  GroupedTensorWrapper grouped_dbias(num_tensors, dbias_logical_shape, NVTE_DELAYED_TENSOR_SCALING);
+  at::Tensor dbias_torch =
+      at::empty({static_cast<int64_t>(num_tensors), static_cast<int64_t>(logical_last_dim)},
+                tensor.options());
+  grouped_dbias.set_rowwise_data(dbias_torch.data_ptr(),
+                                 GetTransformerEngineDType(tensor.scalar_type()),
+                                 getTensorShape(dbias_torch));
+  TensorWrapper workspace_nvte;
+  auto stream = at::cuda::getCurrentCUDAStream();
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_group_quantize_dbias(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                              grouped_dbias.data(), workspace_nvte.data(), stream);
+  });
+  if (workspace_nvte.ndim() > 0 && workspace_nvte.numel() > 0) {
+    at::Tensor workspace_torch = allocateSpace(workspace_nvte.shape(), workspace_nvte.dtype());
+    workspace_nvte = makeTransformerEngineTensor(workspace_torch.data_ptr(), workspace_nvte.shape(),
+                                                 workspace_nvte.dtype());
+  }
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_group_quantize_dbias(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
+                              grouped_dbias.data(), workspace_nvte.data(), stream);
+  });
+  return py::make_tuple(py::reinterpret_borrow<py::object>(grouped_output_py),
+                        py::cast(std::move(dbias_torch)));
 }
 
 py::object dequantize(const py::handle &input, transformer_engine::DType otype) {
@@ -260,12 +327,95 @@ py::object dequantize(const py::handle &input, transformer_engine::DType otype) 
   return out;
 }
 
+py::object group_dequantize(const py::handle &input, transformer_engine::DType otype) {
+  using namespace pybind11::literals;
+  init_extension();
+
+  // Extract fields from the Python GroupedTensor.
+  const auto num_tensors = input.attr("num_tensors").cast<size_t>();
+  const auto logical_shape_py = input.attr("logical_shape").cast<py::tuple>();
+  const auto logical_first_dim = logical_shape_py[0].cast<size_t>();
+  const auto logical_last_dim = logical_shape_py[1].cast<size_t>();
+  const std::vector<size_t> logical_shape = {logical_first_dim, logical_last_dim};
+  const auto &quantizer = convert_quantizer(input.attr("quantizer"));
+
+  // Extract optional tensor attributes.
+  auto get_optional_tensor = [&input](const char *name) -> std::optional<at::Tensor> {
+    auto attr = input.attr(name);
+    if (attr.is_none()) return std::nullopt;
+    return attr.cast<at::Tensor>();
+  };
+  auto rowwise_data = get_optional_tensor("rowwise_data");
+  auto columnwise_data = get_optional_tensor("columnwise_data");
+  auto rowwise_scale_inv = get_optional_tensor("scale_inv");
+  auto columnwise_scale_inv = get_optional_tensor("columnwise_scale_inv");
+  auto first_dims = get_optional_tensor("first_dims");
+  auto last_dims = get_optional_tensor("last_dims");
+  auto tensor_offsets = get_optional_tensor("tensor_offsets");
+
+  // Early-return for empty input.
+  if (logical_first_dim == 0 || logical_last_dim == 0) {
+    NoneQuantizer q{py::none()};
+    auto [out_cpp, out_py] =
+        q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(), first_dims,
+                                logical_first_dim, logical_last_dim);
+    return py::reinterpret_borrow<py::object>(out_py);
+  }
+
+  // Build input GroupedTensorWrapper.
+  // Data tensors are stored as flat 1D buffers; use the quantizer's dtype
+  // (e.g. kFloat8E4M3) rather than the raw tensor scalar_type (uint8).
+  auto input_cpp = GroupedTensorWrapper(num_tensors, logical_shape, quantizer->get_scaling_mode());
+  if (rowwise_data.has_value()) {
+    input_cpp.set_rowwise_data(rowwise_data->data_ptr(), quantizer->dtype,
+                               std::vector<size_t>{static_cast<size_t>(rowwise_data->numel())});
+    if (rowwise_scale_inv.has_value()) {
+      input_cpp.set_rowwise_scale_inv(rowwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
+                                      getTensorShape(*rowwise_scale_inv));
+    }
+  }
+  if (columnwise_data.has_value()) {
+    input_cpp.set_columnwise_data(
+        columnwise_data->data_ptr(), quantizer->dtype,
+        std::vector<size_t>{static_cast<size_t>(columnwise_data->numel())});
+    if (columnwise_scale_inv.has_value()) {
+      input_cpp.set_columnwise_scale_inv(columnwise_scale_inv->data_ptr(), DType::kFloat8E8M0,
+                                         getTensorShape(*columnwise_scale_inv));
+    }
+  }
+  if (first_dims.has_value()) {
+    input_cpp.set_first_dims(first_dims->data_ptr(), DType::kInt64, getTensorShape(*first_dims));
+  }
+  if (last_dims.has_value()) {
+    input_cpp.set_last_dims(last_dims->data_ptr(), DType::kInt64, getTensorShape(*last_dims));
+  }
+  if (tensor_offsets.has_value()) {
+    input_cpp.set_tensor_offsets(tensor_offsets->data_ptr(), DType::kInt64,
+                                 getTensorShape(*tensor_offsets));
+  }
+
+  // Create output GroupedTensor using NoneQuantizer.
+  NoneQuantizer q{py::none()};
+  auto [out_cpp, out_py] = q.create_grouped_tensor(num_tensors, logical_shape, otype, py::none(),
+                                                   first_dims, logical_first_dim, logical_last_dim);
+
+  NVTE_SCOPED_GIL_RELEASE({
+    nvte_group_dequantize(input_cpp.data(), out_cpp.data(), at::cuda::getCurrentCUDAStream());
+  });
+
+  return py::reinterpret_borrow<py::object>(out_py);
+}
+
 namespace {
 
 void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
                                 std::vector<py::handle> &quantizer_py_list,
                                 std::vector<std::unique_ptr<Quantizer>> &quantizer_cpp_list,
-                                std::vector<TensorWrapper> &output_list) {
+                                std::vector<TensorWrapper> &output_list
+#ifdef __HIP_PLATFORM_AMD__
+                                , const int *valid_num_rows = nullptr
+#endif
+                                ) {
   // Check number of tensors
   const size_t num_tensors = input_list.size();
   NVTE_CHECK(quantizer_py_list.size() == num_tensors, "Expected ", num_tensors,
@@ -300,9 +450,36 @@ void multi_tensor_quantize_impl(const std::vector<TensorWrapper> &input_list,
       nvte_tensor_output_list.push_back(output_list[i].data());
     }
     NVTE_SCOPED_GIL_RELEASE({
-      nvte_multi_cast_transpose(nvte_tensor_input_list.size(), nvte_tensor_input_list.data(),
-                                nvte_tensor_output_list.data(), at::cuda::getCurrentCUDAStream());
+#ifdef __HIP_PLATFORM_AMD__
+      if (valid_num_rows != nullptr) {
+        nvte_multi_cast_transpose_with_padding(nvte_tensor_input_list.size(),
+                                               nvte_tensor_input_list.data(),
+                                               nvte_tensor_output_list.data(),
+                                               valid_num_rows,
+                                               at::cuda::getCurrentCUDAStream());
+      } else {
+#endif
+      nvte_multi_cast_transpose(nvte_tensor_input_list.size(),
+                                nvte_tensor_input_list.data(),
+                                nvte_tensor_output_list.data(),
+                                at::cuda::getCurrentCUDAStream());
+#ifdef __HIP_PLATFORM_AMD__
+      }
+#endif
     });
+#ifdef USE_ROCM
+  } else if (num_tensors > 0 && detail::IsMXFP8Quantizers(quantizer_py_list[0].ptr())) {
+    std::vector<NVTETensor> nvte_tensor_input_list;
+    std::vector<NVTETensor> nvte_tensor_output_list;
+    for (size_t i = 0; i < num_tensors; ++i) {
+      nvte_tensor_input_list.push_back(input_list[i].data());
+      nvte_tensor_output_list.push_back(output_list[i].data());
+    }
+    NVTE_SCOPED_GIL_RELEASE({
+      nvte_multi_tensor_quantize(nvte_tensor_input_list.data(), nvte_tensor_output_list.data(),
+                                 nullptr, num_tensors, at::cuda::getCurrentCUDAStream());
+    });
+#endif
   } else {
     // Quantize kernels individually
     for (size_t i = 0; i < num_tensors; ++i) {
@@ -1007,6 +1184,10 @@ void split_quantize_nvfp4_impl_with_rht_helper(const TensorWrapper &input,
   // Enable NVFP4 kernels to use math operations that sacrifice
   // accuracy for performance. These optimizations are experimental
   // and inconsistently implemented.
+  // What math is accelerated? Only the high precision math, so numerical impact is minimal
+  // 1. replace 1 / x by reciprocal_approximate_ftz(x)
+  // 2. when RHT cast fusion is available, fusion allows cast to be performed on FP32 data,
+  //    this will essentially remove a round trip between FP32 to BF16 then FP32
   const auto use_fast_math = transformer_engine::getenv<bool>("NVTE_USE_FAST_MATH");
   if (use_fast_math) {
     for (auto &config : quant_config_list) {
@@ -1283,7 +1464,11 @@ void split_quantize_nvfp4_impl(const TensorWrapper &input,
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                        const std::vector<size_t> &split_sections,
                                        std::vector<py::handle> quantizer_list,
-                                       bool disable_bulk_allocation) {
+                                       bool disable_bulk_allocation
+#ifdef __HIP_PLATFORM_AMD__
+                                       , std::optional<std::vector<size_t>> valid_split_sections
+#endif
+                                       ) {
   init_extension();
 
   // Check number of tensors
@@ -1312,6 +1497,22 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
   size_t dim0_offset = 0;
   const size_t dim0_stride =
       input_shape[0] == 0 ? 0 : input_py.element_size() * input_size / input_shape[0];
+#ifdef __HIP_PLATFORM_AMD__
+  const auto &input_sections = valid_split_sections.has_value()
+                               ? *valid_split_sections : split_sections;
+  for (size_t i = 0; i < num_splits; i++) {
+    NVTE_CHECK(dim0_offset + input_sections[i] <= input_shape[0],
+               "Attempted to split tensor with shape=", input_shape,
+               " along dim 0 with split_sections=", split_sections);
+    void *split_dptr = static_cast<void *>(input_dptr + dim0_offset * dim0_stride);
+    std::vector<size_t> in_shape = input_shape;
+    in_shape[0] = input_sections[i];
+    input_list.emplace_back(makeTransformerEngineTensor(split_dptr, in_shape, input_dtype));
+    split_shapes.push_back(input_shape);
+    split_shapes.back()[0] = split_sections[i];
+    dim0_offset += input_sections[i];
+  }
+#else
   for (size_t i = 0; i < num_splits; ++i) {
     NVTE_CHECK(dim0_offset + split_sections[i] <= input_shape[0],
                "Attempted to split tensor with shape=", input_shape,
@@ -1323,6 +1524,7 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
     input_list.emplace_back(makeTransformerEngineTensor(split_dptr, split_shape, input_dtype));
     dim0_offset += split_sections[i];
   }
+#endif
 
   // Convert quantizers to C++ objects
   std::vector<std::unique_ptr<Quantizer>> quantizer_cpp_list;
@@ -1428,9 +1630,25 @@ std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                 nvfp4_quantizers);
       break;
     }
+#ifdef __HIP_PLATFORM_AMD__
+    default: {
+      std::vector<int> valid_num_rows_vec;
+      const int *valid_num_rows_ptr = nullptr;
+      if (valid_split_sections.has_value()) {
+        for (size_t s : *valid_split_sections) {
+          valid_num_rows_vec.push_back(static_cast<int>(s));
+        }
+        valid_num_rows_ptr = valid_num_rows_vec.data();
+      }
+      multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list,
+                                 output_cpp_list, valid_num_rows_ptr);
+      break;
+    }
+#else
     default:
       // General multi-tensor quantization
       multi_tensor_quantize_impl(input_list, quantizer_list, quantizer_cpp_list, output_cpp_list);
+#endif
   }
 
   return output_py_list;

@@ -18,7 +18,7 @@
 
 #include "common/util/cuda_runtime.h"
 #include "../../common.h"
-#include "../../common/util/system.h"
+#include "../../util/system.h"
 
 #include "ck_tile/core.hpp"
 #include "ck_tile/host/kernel_launch.hpp"
@@ -102,6 +102,8 @@ struct GroupedGemmRunContext {
     const NVTETensor* B = nullptr;
     NVTETensor* D = nullptr;
     int64_t N = 0;
+
+    GPUArch arch = GPUArch::UNKNOWN;
 
     int group_num = 0;
     bool transA = false;

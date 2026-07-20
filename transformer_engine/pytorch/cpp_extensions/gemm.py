@@ -21,6 +21,7 @@ if IS_HIP_EXTENSION:
 
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
+from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
@@ -329,6 +330,7 @@ def general_gemm(
 
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
+
     workspace = get_cublas_workspace(A.device.index, ub is not None, False)
 
     # On ROCm, FP4 is dequantized to BF16 in the workspace before GEMM.
@@ -593,6 +595,18 @@ def get_grouped_gemm_setup_workspace_size(num_tensors: int) -> int:
     return ((size + alignment - 1) // alignment) * alignment
 
 
+@functools.lru_cache(maxsize=None)
+def _get_fp32_ones_tensor(num_tensors: int, device: torch.device) -> torch.Tensor:
+    """Cached ones tensor."""
+    return torch.ones(num_tensors, dtype=torch.float32, device=device)
+
+
+@functools.lru_cache(maxsize=None)
+def _get_fp32_zeros_tensor(num_tensors: int, device: torch.device) -> torch.Tensor:
+    """Cached zeros tensor."""
+    return torch.zeros(num_tensors, dtype=torch.float32, device=device)
+
+
 def general_grouped_gemm_for_grouped_tensor(
     A,
     B,
@@ -645,12 +659,12 @@ def general_grouped_gemm_for_grouped_tensor(
     device = rowwise.device if rowwise is not None else B.columnwise_data.device
 
     if alpha is None:
-        alpha = torch.ones(num_tensors, dtype=torch.float32, device=device)
+        alpha = _get_fp32_ones_tensor(num_tensors, device)
     if beta is None:
         if accumulate:
-            beta = torch.ones(num_tensors, dtype=torch.float32, device=device)
+            beta = _get_fp32_ones_tensor(num_tensors, device)
         else:
-            beta = torch.zeros(num_tensors, dtype=torch.float32, device=device)
+            beta = _get_fp32_zeros_tensor(num_tensors, device)
 
     if not alpha.is_cuda or not beta.is_cuda:
         raise ValueError("alpha and beta must be CUDA tensors.")

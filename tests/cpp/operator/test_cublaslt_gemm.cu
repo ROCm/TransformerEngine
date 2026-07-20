@@ -31,7 +31,9 @@ std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes = {
 
 std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes_mxfp8 = {
   {32, 128, 16},
+  {256, 256, 256},
   {768, 3072, 4096},
+  {4096, 16384, 4096},
 };
 
 // ============================================================================
@@ -108,6 +110,49 @@ static const ProdGemmConfig prod_gemm_sweep[] = {
     {"DeepSeek3_ExpertMLP_dn_wgrad_mbs1_NT", 2048, 7168, 4096, false, true},
     {"DeepSeek3_ExpertMLP_dn_wgrad_mbs2_NT", 2048, 7168, 8192, false, true},
     {"DeepSeek3_ExpertMLP_dn_wgrad_mbs4_NT", 2048, 7168, 16384, false, true},
+    // DeepSeek4 (from https://amd-hub.atlassian.net/browse/AIHPBLAS-3861)
+    {"DeepSeek4_M6144_N32_K7168_TN", 6144, 32, 7168, true, false},
+    {"DeepSeek4_M6144_N64_K7168_TN", 6144, 64, 7168, true, false},
+    {"DeepSeek4_M6144_N96_K7168_TN", 6144, 96, 7168, true, false},
+    {"DeepSeek4_M6144_N128_K7168_TN", 6144, 128, 7168, true, false},
+    {"DeepSeek4_M6144_N160_K7168_TN", 6144, 160, 7168, true, false},
+    {"DeepSeek4_M6144_N192_K7168_TN", 6144, 192, 7168, true, false},
+    {"DeepSeek4_M6144_N224_K7168_TN", 6144, 224, 7168, true, false},
+    {"DeepSeek4_M6144_N256_K7168_TN", 6144, 256, 7168, true, false},
+    {"DeepSeek4_M6144_N288_K7168_TN", 6144, 288, 7168, true, false},
+    {"DeepSeek4_M6144_N320_K7168_TN", 6144, 320, 7168, true, false},
+    {"DeepSeek4_M6144_N352_K7168_TN", 6144, 352, 7168, true, false},
+    {"DeepSeek4_M6144_N384_K7168_TN", 6144, 384, 7168, true, false},
+    {"DeepSeek4_M6144_N416_K7168_TN", 6144, 416, 7168, true, false},
+    {"DeepSeek4_M6144_N448_K7168_TN", 6144, 448, 7168, true, false},
+    {"DeepSeek4_M6144_N480_K7168_TN", 6144, 480, 7168, true, false},
+    {"DeepSeek4_M6144_N512_K7168_TN", 6144, 512, 7168, true, false},
+    {"DeepSeek4_M6144_N544_K7168_TN", 6144, 544, 7168, true, false},
+    {"DeepSeek4_M6144_N576_K7168_TN", 6144, 576, 7168, true, false},
+    {"DeepSeek4_M6144_N640_K7168_TN", 6144, 640, 7168, true, false},
+    {"DeepSeek4_M6144_N800_K7168_TN", 6144, 800, 7168, true, false},
+    {"DeepSeek4_M6144_N832_K7168_TN", 6144, 832, 7168, true, false},
+    {"DeepSeek4_M7168_N32_K3072_TN", 7168, 32, 3072, true, false},
+    {"DeepSeek4_M7168_N64_K3072_TN", 7168, 64, 3072, true, false},
+    {"DeepSeek4_M7168_N96_K3072_TN", 7168, 96, 3072, true, false},
+    {"DeepSeek4_M7168_N128_K3072_TN", 7168, 128, 3072, true, false},
+    {"DeepSeek4_M7168_N160_K3072_TN", 7168, 160, 3072, true, false},
+    {"DeepSeek4_M7168_N192_K3072_TN", 7168, 192, 3072, true, false},
+    {"DeepSeek4_M7168_N224_K3072_TN", 7168, 224, 3072, true, false},
+    {"DeepSeek4_M7168_N256_K3072_TN", 7168, 256, 3072, true, false},
+    {"DeepSeek4_M7168_N288_K3072_TN", 7168, 288, 3072, true, false},
+    {"DeepSeek4_M7168_N320_K3072_TN", 7168, 320, 3072, true, false},
+    {"DeepSeek4_M7168_N352_K3072_TN", 7168, 352, 3072, true, false},
+    {"DeepSeek4_M7168_N384_K3072_TN", 7168, 384, 3072, true, false},
+    {"DeepSeek4_M7168_N416_K3072_TN", 7168, 416, 3072, true, false},
+    {"DeepSeek4_M7168_N448_K3072_TN", 7168, 448, 3072, true, false},
+    {"DeepSeek4_M7168_N480_K3072_TN", 7168, 480, 3072, true, false},
+    {"DeepSeek4_M7168_N512_K3072_TN", 7168, 512, 3072, true, false},
+    {"DeepSeek4_M7168_N544_K3072_TN", 7168, 544, 3072, true, false},
+    {"DeepSeek4_M7168_N576_K3072_TN", 7168, 576, 3072, true, false},
+    {"DeepSeek4_M7168_N640_K3072_TN", 7168, 640, 3072, true, false},
+    {"DeepSeek4_M7168_N800_K3072_TN", 7168, 800, 3072, true, false},
+    {"DeepSeek4_M7168_N832_K3072_TN", 7168, 832, 3072, true, false},
     // Qwen3
     {"Qwen3_LNLinear_QKV_fwd_mbs1_TN", 4096, 9216, 4096, true, false},
     {"Qwen3_LNLinear_QKV_fwd_mbs2_TN", 8192, 9216, 4096, true, false},
@@ -256,6 +301,7 @@ __global__ void compute_ref_kernel(
 }
 
 
+
 struct TestParams {
   size_t m;
   size_t k;
@@ -265,6 +311,7 @@ struct TestParams {
   bool transa;
   bool transb;
   NVTEScalingMode scaling_mode;
+  bool force_hipblaslt;
 };
 
 
@@ -422,6 +469,7 @@ static void swizzle_mxfp8_scales(test::Tensor &t, bool rowwise) {
   nvte_swizzle_scaling_factors(input_tw.data(), output_tw.data(), 0);
   NVTE_CHECK_CUDA(cudaDeviceSynchronize());
   NVTE_CHECK_CUDA(cudaMemcpy(scale_ptr, d_tmp, num_scales, cudaMemcpyDeviceToDevice));
+  t.set_with_gemm_swizzled_scales(true);
   NVTE_CHECK_CUDA(cudaFree(d_tmp));
 }
 
@@ -436,6 +484,13 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
   if (use_mxfp8) {
     atol = 5e-4;
     rtol = std::max(rtol, 1e-3);
+    // gfx950 MXFP8 GEMMs can show larger numerical variance
+    // Relax tolerances to avoid flaky failures.
+    cudaDeviceProp prop;
+    (void)cudaGetDeviceProperties(&prop, 0);
+    if (prop.major == 9 && prop.minor == 5) {
+      rtol = std::max(rtol, 6e-2);
+    }
   }
   else if (use_fp8) {
     atol = 1e-3;
@@ -462,6 +517,10 @@ void performTest(const TestParams& params) {
 
   const bool has_fp8 = isFp8Type(atype) || isFp8Type(btype);
   const bool use_mxfp8 = params.scaling_mode == NVTEScalingMode::NVTE_MXFP8_1D_SCALING;
+  const bool use_hipkittens_mxfp8 = use_mxfp8 && !params.force_hipblaslt;
+
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
 
   if (use_mxfp8)
   {
@@ -471,13 +530,17 @@ void performTest(const TestParams& params) {
     if (params.m % 16 || params.n % 16) {
       GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
     }
-    if (params.k % 128) {
-      GTEST_SKIP() << "MXFP8 requires K to be a multiple of 128";
+    size_t required_k_multiple = 128;
+  #ifdef __HIP_PLATFORM_AMD__
+    required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
+  #endif
+    if (params.k % required_k_multiple) {
+      GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
+    }
+    if (use_hipkittens_mxfp8 && (params.m % 256 || params.n % 256 || params.k < 256)) {
+      GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
     }
   }
-
-  cudaDeviceProp prop;
-  (void)cudaGetDeviceProperties(&prop, 0);
 
 #ifdef __HIP_PLATFORM_AMD__
 
@@ -505,26 +568,18 @@ void performTest(const TestParams& params) {
 
   if (has_fp8)
   {
-    bool fp8_supported = (prop.major == 9 && prop.minor >= 4) || prop.major >= 12;
+    const bool fp8_supported = (prop.major == 9 && prop.minor >= 4) || prop.major >= 12;
     if (!fp8_supported) {
       GTEST_SKIP() << "FP8 is not supported in current config";
     }
-
-    if (use_mxfp8)
-    {
-      bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
-      if (!mxfp8_supported) {
-        GTEST_SKIP() << "MXFP8 is not supported in current config";
-      }
-      if (isFp8Type(dtype)){
-        GTEST_SKIP() << "MXFP8 with float8 output is not supported";
-      }
-      if (params.use_bias) {
-        GTEST_SKIP() << "MXFP8 GEMM with bias is not supported";
-      }
+    const bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
+    if (use_mxfp8 && !mxfp8_supported) {
+      GTEST_SKIP() << "MXFP8 is not supported in current config";
     }
-
-    if (params.use_gelu && !fp8_gelu_fusion_config) {
+    if (!use_hipkittens_mxfp8 && params.use_bias) {
+      GTEST_SKIP() << "MXFP8 GEMM with bias is not supported by hipBLASLt";
+    }
+    if (params.use_gelu && !fp8_gelu_fusion_config && !use_hipkittens_mxfp8) {
       GTEST_SKIP() << "FP8 GEMM with GELU is not supported in current config";
     }
     if (params.use_bias && dtype == DType::kFloat16) {
@@ -534,29 +589,27 @@ void performTest(const TestParams& params) {
 
   if (prop.major == 9 && prop.minor == 5) //gfx950 specific hipblasLt limitations
   {
-    if (isFp8Type(dtype)){
+    if (isFp8Type(dtype)) {
       GTEST_SKIP() << "GEMM with float8 output is not supported";
     }
-    if (params.use_gelu && dtype == DType::kBFloat16) {
+    if (params.use_gelu && dtype == DType::kBFloat16 && !use_hipkittens_mxfp8) {
       GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
     }
-    if constexpr ((std::is_same<A_Type, bf8>::value || std::is_same<B_Type, bf8>::value) &&
-      std::is_same<D_Type, fp32>::value)
-    {
-      //GEMM with bias and fp32 output is not supported with bf8 A/B
+    if constexpr ((std::is_same_v<A_Type, bf8> || std::is_same_v<B_Type, bf8>) &&
+                   std::is_same_v<D_Type, fp32>) {
       if (params.use_bias) {
         GTEST_SKIP() << "FP8 GEMM with bias is not supported in current config";
       }
     }
   }
-  if (prop.major == 9 && prop.minor == 4) //gfx942 specific hipblasLt limitations
+  else if (prop.major == 9 && prop.minor == 4) //gfx942 specific hipblasLt limitations
   {
 #if HIP_VERSION < 70100000
     if (params.use_gelu && dtype == DType::kBFloat16 && !params.transa) {
       GTEST_SKIP() << "BF16 GEMM with GELU is not supported in current config";
     }
 #endif
-    if constexpr (std::is_same<D_Type, fp8>::value && std::is_same<Bias_Type, bf16>::value) {
+    if constexpr (std::is_same_v<D_Type, fp8> && std::is_same_v<Bias_Type, bf16>) {
       if (params.use_bias && !fp8_gelu_fusion_config) {
         GTEST_SKIP() << "GEMM with BF16 bias and FP8 output is not supported in current config";
       }
@@ -610,10 +663,10 @@ void performTest(const TestParams& params) {
   bool grad = false;
   bool accumulate = false;
 
-  size_t workspace_size = 33554432;
+  size_t workspace_size = 33'554'432;
 #ifdef __HIP_PLATFORM_AMD__
   if ((prop.major == 9 && prop.minor == 5) || prop.major >= 12) {
-    workspace_size = 67108864;
+    workspace_size = 67'108'864;
   }
 #endif
   Tensor Workspace("Workspace", TShape{ workspace_size }, DType::kByte);
@@ -679,7 +732,7 @@ void performTest(const TestParams& params) {
   compareResults("D", D, RefD.rowwise_cpu_dptr<D_Type>(), true, atol, rtol);
 
   if(params.use_gelu){
-    auto [atol, rtol] = getTestTolerances(gelu_type, false, false);
+    auto [atol, rtol] = getTestTolerances(gelu_type, has_fp8, use_mxfp8);
     RefPreGeluOut.to_cpu();
     compareResults("gelu", pre_gelu_out, RefPreGeluOut.rowwise_cpu_dptr<Gelu_Type>(), true, atol, rtol);
   }
@@ -695,19 +748,30 @@ void performDqTest(const TestParams &params) {
   GTEST_ASSERT_TRUE(isFp8Type(atype) && isFp8Type(btype)) << "FP8/BF8 input datatype is expected";
   GTEST_ASSERT_FALSE(isFp8Type(dtype)) << "Non FP8/BF8 output datatype is expected";
 
-  if (params.m % 16 || params.n % 16) {
-    GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
-  }
-  if (params.k % 128) {
-    GTEST_SKIP() << "MXFP8 requires K to be a multiple of 128";
-  }
-
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
+  if (params.m % 16 || params.n % 16) {
+    GTEST_SKIP() << "MXFP8 requires M & N to be multiples of 16";
+  }
+  size_t required_k_multiple = 128;
+#ifdef __HIP_PLATFORM_AMD__
+  required_k_multiple = (prop.major == 12 && prop.minor == 5) ? 32 : 128;
+#endif
+  if (params.k % required_k_multiple) {
+    GTEST_SKIP() << "MXFP8 requires K to be a multiple of " << required_k_multiple;
+  }
+
   bool mxfp8_supported = (prop.major == 9 && prop.minor >= 5) || prop.major >= 12;
+  const bool use_hipkittens_mxfp8 = !params.force_hipblaslt;
   if (!mxfp8_supported) {
     GTEST_SKIP() << "MXFP8 is not supported in current config";
+  }
+  if (params.use_bias || params.use_gelu) {
+    GTEST_SKIP() << "DqGEMMTestSuite does not yet have reference for bias/gelu epilogues";
+  }
+  if (use_hipkittens_mxfp8 && (params.m % 256 || params.n % 256 || params.k % 128 || params.k < 256)) {
+    GTEST_SKIP() << "HipKittens requires M and N 256-aligned, K >= 256";
   }
 
   // hipBLASLt on gfx950 produces incorrect results for certain MXFP8
@@ -753,8 +817,7 @@ void performDqTest(const TestParams &params) {
   Tensor bias;
   Tensor pre_gelu_out;
 
-  size_t workspace_size = 67108864;
-  Tensor Workspace("Workspace", TShape{workspace_size}, DType::kByte);
+  Tensor Workspace("Workspace", TShape{67'108'864}, DType::kByte);
 
   //perform FP8 gemm and copy the output results from GPU memory to CPU memory
   Tensor D("D", TShape{params.n, params.m}, dtype);
@@ -783,6 +846,12 @@ void performDqTest(const TestParams &params) {
 #endif // __HIP_PLATFORM_AMD__
 
 #define MAKE_TEST_PARAMS(P_)                                                    \
+  bool force_hipblaslt_ = std::get<5>(GetParam());                              \
+  if (force_hipblaslt_) {                                                       \
+    setenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "1", 1);                            \
+  } else {                                                                      \
+    setenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "0", 1);                            \
+  }                                  \
   TestParams P_ = {.m = std::get<0>(std::get<0>(GetParam())),                   \
                    .k = std::get<1>(std::get<0>(GetParam())),                   \
                    .n = std::get<2>(std::get<0>(GetParam())),                   \
@@ -791,16 +860,17 @@ void performDqTest(const TestParams &params) {
                    .transa = std::get<3>(GetParam()).first,                     \
                    .transb = std::get<3>(GetParam()).second,                    \
                    .scaling_mode = std::get<4>(GetParam())                      \
-                                       ? NVTEScalingMode::NVTE_MXFP8_1D_SCALING \
-                                       : NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING}
+                                 ? NVTEScalingMode::NVTE_MXFP8_1D_SCALING       \
+                                 : NVTEScalingMode::NVTE_DELAYED_TENSOR_SCALING,\
+                   .force_hipblaslt = force_hipblaslt_}
 
-// <m, k, n>, use_bias, use_gelu, Layout, fp8_scalinig
+// <m, k, n>, use_bias, use_gelu, Layout, fp8_scaling, force_hipblaslt
 class GEMMTestSuite
     : public ::testing::TestWithParam<
-          std::tuple<std::tuple<size_t, size_t, size_t>, bool, bool, Layout, NVTEScalingMode>> {};
+          std::tuple<std::tuple<size_t, size_t, size_t>, bool, bool, Layout, NVTEScalingMode, bool>> {};
 
-#define MAKE_GEMM_TEST(NAME_, A_, B_, BIAS_, GELU_, D_)                     \
-  TEST_P(GEMMTestSuite, NAME_) {                                            \
+#define MAKE_GEMM_TEST(SUITE_, NAME_, A_, B_, BIAS_, GELU_, D_)              \
+  TEST_P(SUITE_, NAME_) {                                                   \
     MAKE_TEST_PARAMS(test_params);                                          \
     using A_Type = A_;                                                      \
     using B_Type = B_;                                                      \
@@ -810,43 +880,32 @@ class GEMMTestSuite
     performTest<A_Type, B_Type, Bias_Type, Gelu_Type, D_Type>(test_params); \
   }
 
-MAKE_GEMM_TEST(Testfp32xfp32xfp32xfp32xfp32, fp32, fp32, fp32, fp32, fp32);
+// Non-FP8 types
+MAKE_GEMM_TEST(GEMMTestSuite, Testfp32xfp32xfp32xfp32xfp32, fp32, fp32, fp32, fp32, fp32);
+MAKE_GEMM_TEST(GEMMTestSuite, Testfp16xfp16xfp16xfp16xfp16, fp16, fp16, fp16, fp16, fp16);
+MAKE_GEMM_TEST(GEMMTestSuite, Testbf16xbf16xbf16xbf16xbf16, bf16, bf16, bf16, bf16, bf16);
 
-MAKE_GEMM_TEST(Testfp16xfp16xfp16xfp16xfp16, fp16, fp16, fp16, fp16, fp16);
+// FP8 types — used by both OperatorTest and OperatorTestMXFP8 suites
+class FP8GEMMTestSuite
+    : public ::testing::TestWithParam<
+          std::tuple<std::tuple<size_t, size_t, size_t>, bool, bool, Layout, NVTEScalingMode, bool>> {};
 
-MAKE_GEMM_TEST(Testbf16xbf16xbf16xbf16xbf16, bf16, bf16, bf16, bf16, bf16);
-
-MAKE_GEMM_TEST(Testfp8xfp8xbf16xbf16xfp32, fp8, fp8, bf16, bf16, fp32);
-
-MAKE_GEMM_TEST(Testfp8xfp8xbf16xbf16xfp16, fp8, fp8, bf16, bf16, fp16);
-
-MAKE_GEMM_TEST(Testfp8xfp8xbf16xbf16xbf16, fp8, fp8, bf16, bf16, bf16);
-
-MAKE_GEMM_TEST(Testfp8xfp8xbf16xbf16xfp8, fp8, fp8, bf16, bf16, fp8);
-
-MAKE_GEMM_TEST(Testfp8xfp8xbf16xbf16xbf8, fp8, fp8, bf16, bf16, bf8);
-
-MAKE_GEMM_TEST(Testfp8xbf8xbf16xbf16xfp32, fp8, bf8, bf16, bf16, fp32);
-
-MAKE_GEMM_TEST(Testfp8xbf8xbf16xbf16xfp16, fp8, bf8, bf16, bf16, fp16);
-
-MAKE_GEMM_TEST(Testfp8xbf8xbf16xbf16xbf16, fp8, bf8, bf16, bf16, bf16);
-
-MAKE_GEMM_TEST(Testfp8xbf8xbf16xbf16xfp8, fp8, bf8, bf16, bf16, fp8);
-
-MAKE_GEMM_TEST(Testfp8xbf8xbf16xbf16xbf8, fp8, bf8, bf16, bf16, bf8);
-
-MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xfp32, bf8, fp8, bf16, bf16, fp32);
-
-MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xfp16, bf8, fp8, bf16, bf16, fp16);
-
-MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xbf16, bf8, fp8, bf16, bf16, bf16);
-
-MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xfp8, bf8, fp8, bf16, bf16, fp8);
-
-MAKE_GEMM_TEST(Testbf8xfp8xbf16xbf16xbf8, bf8, fp8, bf16, bf16, bf8);
-
-MAKE_GEMM_TEST(Testfp8xfp8xfp16xfp16xfp8, fp8, fp8, fp16, fp16, fp8);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp32, fp8, fp8, bf16, bf16, fp32);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp16, fp8, fp8, bf16, bf16, fp16);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xfp8xbf16xbf16xbf16, fp8, fp8, bf16, bf16, bf16);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xfp8xbf16xbf16xfp8, fp8, fp8, bf16, bf16, fp8);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xfp8xbf16xbf16xbf8, fp8, fp8, bf16, bf16, bf8);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp32, fp8, bf8, bf16, bf16, fp32);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp16, fp8, bf8, bf16, bf16, fp16);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xbf8xbf16xbf16xbf16, fp8, bf8, bf16, bf16, bf16);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xbf8xbf16xbf16xfp8, fp8, bf8, bf16, bf16, fp8);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xbf8xbf16xbf16xbf8, fp8, bf8, bf16, bf16, bf8);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp32, bf8, fp8, bf16, bf16, fp32);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp16, bf8, fp8, bf16, bf16, fp16);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testbf8xfp8xbf16xbf16xbf16, bf8, fp8, bf16, bf16, bf16);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testbf8xfp8xbf16xbf16xfp8, bf8, fp8, bf16, bf16, fp8);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testbf8xfp8xbf16xbf16xbf8, bf8, fp8, bf16, bf16, bf8);
+MAKE_GEMM_TEST(FP8GEMMTestSuite, Testfp8xfp8xfp16xfp16xfp8, fp8, fp8, fp16, fp16, fp8);
 
 static inline auto TN(const Layout& layout) {
   static const char* map[2][2] = {{"NN", "NT"}, {"TN", "TT"}};
@@ -858,22 +917,44 @@ static inline auto MKN(const std::tuple<size_t, size_t, size_t>& shape) {
          std::to_string(std::get<2>(shape));
 }
 
+static std::string GEMMTestName(const testing::TestParamInfo<GEMMTestSuite::ParamType>& info) {
+  return MKN(std::get<0>(info.param)) + "x" +
+         std::to_string(std::get<1>(info.param)) + "x" +
+         std::to_string(std::get<2>(info.param)) + "x" +
+         TN(std::get<3>(info.param)) + "x" +
+         (std::get<4>(info.param) ? "M" : "S") + "x" +
+         (std::get<5>(info.param) ? "HB" : "HK");
+}
+
 INSTANTIATE_TEST_SUITE_P(OperatorTest, GEMMTestSuite,
                          ::testing::Combine(::testing::ValuesIn(test_case_sizes),
                                             ::testing::Values(false, true),   //use bias
                                             ::testing::Values(false, true),   //use_gelu
                                             ::testing::ValuesIn(kLayouts),    //transa,transb
-                                            ::testing::Values(false, true)),  //use mxfp8
-                         [](const testing::TestParamInfo<GEMMTestSuite::ParamType>& info) {
-                           return MKN(std::get<0>(info.param)) + "x" +
-                                  std::to_string(std::get<1>(info.param)) + "x" +
-                                  std::to_string(std::get<2>(info.param)) + "x" +
-                                  TN(std::get<3>(info.param)) + "x" +
-                                  (std::get<4>(info.param) ? "M" : "S");
-                         });
+                                            ::testing::Values(false),         //use mxfp8
+                                            ::testing::Values(false)),        //force hipblaslt
+                         GEMMTestName);
+
+INSTANTIATE_TEST_SUITE_P(OperatorTestFP8, FP8GEMMTestSuite,
+                         ::testing::Combine(::testing::ValuesIn(test_case_sizes),
+                                            ::testing::Values(false, true),   //use bias
+                                            ::testing::Values(false, true),   //use_gelu
+                                            ::testing::ValuesIn(kLayouts),    //transa,transb
+                                            ::testing::Values(false),         //use mxfp8
+                                            ::testing::Values(false)),        //force hipblaslt
+                         GEMMTestName);
+
+INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP8, FP8GEMMTestSuite,
+                         ::testing::Combine(::testing::ValuesIn(test_case_sizes),
+                                            ::testing::Values(false, true),   //use bias
+                                            ::testing::Values(false, true),   //use_gelu
+                                            ::testing::ValuesIn(kLayouts),    //transa,transb
+                                            ::testing::Values(true),          //use mxfp8
+                                            ::testing::Values(false, true)),  //force hipblaslt
+                         GEMMTestName);
 
 #ifdef __HIP_PLATFORM_AMD__
-class DqGEMMTestSuite: public GEMMTestSuite {};
+class DqGEMMTestSuite: public FP8GEMMTestSuite {};
 
 #define MAKE_DQ_GEMM_TEST(NAME_, A_, B_, D_)            \
   TEST_P(DqGEMMTestSuite, NAME_) {                      \
@@ -886,14 +967,17 @@ class DqGEMMTestSuite: public GEMMTestSuite {};
 
 MAKE_DQ_GEMM_TEST(Testfp8xfp8xfp16, fp8, fp8, fp16)
 
-INSTANTIATE_TEST_SUITE_P(OperatorTest, DqGEMMTestSuite,
+INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP8, DqGEMMTestSuite,
                          ::testing::Combine(::testing::ValuesIn(test_case_sizes_mxfp8),
-                                            ::testing::Values(false),       // bias - unused
-                                            ::testing::Values(false),       // gelu - unused
-                                            ::testing::ValuesIn(kLayouts),  //transa,transb
-                                            ::testing::Values(true)),       //use mxfp8
+                                            ::testing::Values(false),        // use bias
+                                            ::testing::Values(false),        // use gelu
+                                            ::testing::ValuesIn(kLayouts),   // transa,transb
+                                            ::testing::Values(true),         // use mxfp8
+                                            ::testing::Values(false, true)), // force hipblaslt
                          [](const testing::TestParamInfo<DqGEMMTestSuite::ParamType>& info) {
-                           return MKN(std::get<0>(info.param)) + "x" + TN(std::get<3>(info.param));
+                           return MKN(std::get<0>(info.param)) + "x" +
+                                  TN(std::get<3>(info.param)) + "x" +
+                                  (std::get<5>(info.param) ? "HB" : "HK");
                          });
 
 // ============================================================================
@@ -904,14 +988,6 @@ class ProdGEMMTestSuite : public ::testing::TestWithParam<ProdGemmConfig> {};
 
 TEST_P(ProdGEMMTestSuite, TestMxfp8Dq) {
   const auto& config = GetParam();
-
-  cudaDeviceProp prop;
-  (void)cudaGetDeviceProperties(&prop, 0);
-  const bool is_tn = config.transa && !config.transb;
-  if (prop.major == 12 && prop.minor == 5 && !is_tn) {
-    GTEST_SKIP() << "hipBLASLt MXFP8 GEMM non-TN layout is not supported on gfx1250: "
-                 << config.label;
-  }
 
   TestParams params = {.m = config.m, .k = config.k, .n = config.n,
                        .use_bias = false, .use_gelu = false,

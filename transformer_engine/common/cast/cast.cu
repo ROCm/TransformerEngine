@@ -31,12 +31,12 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
 }
 
 void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                         cudaStream_t stream) {
+                         const NVTEQuantizationConfig quant_config, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_quantize);
   using namespace transformer_engine;
 
   constexpr bool IS_ACT = false;
-  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
+  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
 }
 
 void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor noop,
@@ -93,11 +93,32 @@ void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t str
                               stream);
 }
 
+void nvte_group_dequantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                           cudaStream_t stream) {
+  NVTE_API_CALL(nvte_group_dequantize);
+  using namespace transformer_engine;
+  dispatch::group_dequantize_helper(*convertNVTEGroupedTensorCheck(input),
+                                    convertNVTEGroupedTensorCheck(output), stream);
+}
+
 void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
                                 const NVTEQuantizationConfig quant_configs,
                                 const size_t num_tensors, cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_quantize);
   using namespace transformer_engine;
+
+#ifdef __HIP_PLATFORM_AMD__
+  if (num_tensors > 0 &&
+      convertNVTETensorCheck(outputs[0])->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    std::vector<Tensor *> input_list, output_list;
+    for (size_t i = 0; i < num_tensors; i++) {
+      input_list.push_back(convertNVTETensorCheck(inputs[i]));
+      output_list.push_back(convertNVTETensorCheck(outputs[i]));
+    }
+    dispatch::multi_quantize_mxfp8(input_list, output_list, stream);
+    return;
+  }
+#endif
 
   constexpr bool IS_ACT = false;
 
