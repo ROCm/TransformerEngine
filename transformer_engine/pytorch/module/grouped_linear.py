@@ -116,6 +116,7 @@ class _GroupedLinear(torch.autograd.Function):
             actual_m_splits,
             unpad_output,
             routing_metadata,
+            grouped_weight_param,
         ) = non_tensor_args
         # The gated-activation fusion hint rides on the routing metadata (single source of
         # truth); ``None`` on every non-permute-free / non-FC1 path.
@@ -131,13 +132,15 @@ class _GroupedLinear(torch.autograd.Function):
         use_grouped_gemm_triton = IS_HIP_EXTENSION and os.getenv("NVTE_USE_GROUPED_GEMM_TRITON", "0") == "1" and not fp8 and not fuse_wgrad_accumulation
 
         # Permute-free gather GEMM (fwd + dgrad gather, wgrad on default path).
-        # Training is supported: only fp8 / bias / wgrad-accumulation fusion are excluded.
+        # Training is supported: fp8 / bias are excluded. ``fuse_wgrad_accumulation`` is only
+        # supported together with a single grouped weight param, where the permute-free backward
+        # accumulates wgrad directly into the grouped param's ``main_grad``.
         use_perm_free_grouped_gemm = (
             IS_HIP_EXTENSION
             and is_permute_free_grouped_gemm_enabled()
             and routing_metadata is not None
             and not fp8
-            and not fuse_wgrad_accumulation
+            and (not fuse_wgrad_accumulation or grouped_weight_param is not None)
             and activation_dtype == torch.bfloat16
             and not use_bias
         )
@@ -145,12 +148,33 @@ class _GroupedLinear(torch.autograd.Function):
             raise RuntimeError(
                 "NVTE_PERMUTE_FREE_GROUPED_GEMM and NVTE_USE_GROUPED_GEMM_TRITON cannot both be enabled."
             )
+        # Grouped weights expose detached per-expert views; without wgrad accumulation into the
+        # grouped ``main_grad`` the positional (autograd) wgrad return goes nowhere and experts
+        # would silently freeze. Require fuse_wgrad_accumulation for that configuration.
+        if (
+            use_perm_free_grouped_gemm
+            and grouped_weight_param is not None
+            and not fuse_wgrad_accumulation
+            and is_grad_enabled
+            and grouped_weight_param.requires_grad
+            and not weights_and_biases[0].requires_grad
+        ):
+            raise RuntimeError(
+                "Permute-free grouped GEMM with single_grouped_weight requires "
+                "fuse_wgrad_accumulation=True: weight gradients are accumulated into the grouped "
+                "param's main_grad, otherwise experts would not receive gradients."
+            )
 
         num_gemms = len(m_splits)
         weights = weights_and_biases[:num_gemms]
         biases = weights_and_biases[num_gemms:]
         device = inp.device
-        weight_requires_grad = weights[0].requires_grad
+        # Grouped weights expose detached per-expert views; the grouped param carries requires_grad.
+        weight_requires_grad = (
+            grouped_weight_param.requires_grad
+            if grouped_weight_param is not None
+            else weights[0].requires_grad
+        )
 
         # Configure quantizers
         if save_original_input and isinstance(input_quantizers[0], Float8Quantizer):
@@ -374,8 +398,25 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.grad_output_quantizers = grad_output_quantizers
             ctx.grad_weight_quantizers = grad_weight_quantizers
 
-            ctx.weights_requires_grad = weights[0].requires_grad
-            if fuse_wgrad_accumulation and ctx.weights_requires_grad:
+            ctx.weights_requires_grad = weight_requires_grad
+            # Permute-free backward routes the whole [E, out, in] wgrad into the grouped param's
+            # main_grad in a single accumulate, rather than through the detached per-expert views.
+            ctx.perm_free_grouped = (
+                use_perm_free_grouped_gemm
+                and grouped_weight_param is not None
+                and fuse_wgrad_accumulation
+                and ctx.weights_requires_grad
+            )
+            if ctx.perm_free_grouped:
+                ctx.grouped_weight_ref = weakref.ref(grouped_weight_param)
+                ctx.grouped_overwrite_main_grad = getattr(
+                    grouped_weight_param, "overwrite_main_grad", False
+                )
+                if hasattr(grouped_weight_param, "__fsdp_param__"):
+                    ctx.grouped_main_grad_func = grouped_weight_param.get_main_grad
+                else:
+                    ctx.grouped_main_grad_func = lambda: grouped_weight_param.main_grad
+            elif fuse_wgrad_accumulation and ctx.weights_requires_grad:
                 # Keep weakrefs to weights to preserve attributes like main_grad
                 # when we need to modify the weight python objects
                 ctx.origin_weight_refs = [weakref.ref(w) for w in weights]
@@ -478,9 +519,31 @@ class _GroupedLinear(torch.autograd.Function):
                     preact=perm_free_preact,
                     dispatched_probs=dispatched_probs,
                 )
-                wgrad_list = (
-                    pf_result.wgrad if pf_result.wgrad is not None else [None] * ctx.num_gemms
-                )
+                if getattr(ctx, "perm_free_grouped", False) and pf_result.wgrad_stacked is not None:
+                    # Single grouped weight + fuse_wgrad_accumulation: accumulate the whole
+                    # [E, out, in] wgrad into the grouped param's main_grad and return None for
+                    # the (detached) per-expert positional gradients.
+                    grouped_weight = ctx.grouped_weight_ref()
+                    assert (
+                        grouped_weight is not None
+                    ), "grouped weight was removed while fuse_wgrad_accumulation=True"
+                    dW = pf_result.wgrad_stacked
+                    main_grad = ctx.grouped_main_grad_func().view(dW.shape)
+                    if ctx.grouped_overwrite_main_grad:
+                        main_grad.copy_(dW)
+                    else:
+                        main_grad.add_(dW)
+                    if hasattr(grouped_weight, "grad_added_to_main_grad"):
+                        grouped_weight.grad_added_to_main_grad = True
+                    wgrad_list = [None] * ctx.num_gemms
+                else:
+                    # Fall back to returning positional per-expert wgrad (separate leaf params).
+                    # Split the [E, out, in] gradient into zero-copy per-expert views.
+                    wgrad_list = (
+                        list(pf_result.wgrad_stacked)
+                        if pf_result.wgrad_stacked is not None
+                        else [None] * ctx.num_gemms
+                    )
                 return (
                     pf_result.dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
                     pf_result.grad_probs,
@@ -1417,6 +1480,9 @@ class GroupedLinear(TransformerEngineBaseModule):
                 actual_m_splits,
                 unpad_output,
                 routing_metadata,
+                # Grouped weight param (single_grouped_weight): permute-free backward accumulates
+                # wgrad into its ``main_grad`` instead of returning it through the detached views.
+                getattr(self, "weight", None) if self.single_grouped_weight else None,
             )
             out, new_workspaces = linear_fn(
                 *autograd_ctx, inp, dispatched_probs, non_tensor_args, *weight_tensors, *bias_tensors

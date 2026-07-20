@@ -9,8 +9,10 @@ import pytest
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
+from transformer_engine.pytorch import GroupedLinear
 from transformer_engine.pytorch.moe_routing import (
     MoERoutingMetadata,
+    PermuteFreeMetadata,
 )
 from transformer_engine.pytorch.triton_kernels.permute_free_grouped_gemm import (
     permute_free_grouped_gemm_bf16,
@@ -224,3 +226,107 @@ def test_apply_route_probs_fwd_bwd():
     ref.backward(g)
     assert _rel_l2(a1.grad[:num_routes], a2.grad[:num_routes]) < 2e-2
     assert _rel_l2(p1.grad, p2.grad) < 2e-2
+
+
+# ---------------------------------------------------------------------------
+# Module-level weight-gradient accumulation: grouped weight (-> main_grad) vs.
+# separate per-expert weights (-> autograd .grad).
+# ---------------------------------------------------------------------------
+def _make_grouped_linear(num_gemms, in_features, out_features, *, grouped, fuse_wgrad):
+    mod = GroupedLinear(
+        num_gemms,
+        in_features,
+        out_features,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+        fuse_wgrad_accumulation=fuse_wgrad,
+        single_grouped_weight=grouped,
+    )
+    return mod
+
+
+def test_grouped_weight_main_grad_matches_ungrouped_grad(monkeypatch):
+    """Permute-free wgrad lands in the grouped param's ``main_grad`` and matches the
+    ungrouped autograd ``.grad`` expert-for-expert (same kernel dW, different sink)."""
+    monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "1")
+    torch.manual_seed(41)
+
+    num_recv_tokens, in_features, out_features = 128, 64, 96
+    num_experts, max_hits = 8, 3
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=13)
+    num_routes = int(routing_map.sum().item())
+    m_splits = [num_recv_tokens // num_experts] * num_experts
+
+    # inp requires grad (as in real training, where it comes from a prior layer): for the
+    # grouped path the detached per-expert views do not drive autograd, so the activation is
+    # what makes the Function output require grad and triggers the backward.
+    inp = torch.randn(
+        num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    # Shared initial weights for both modules (so the kernel dW is identical).
+    W = torch.randn(num_experts, out_features, in_features, device="cuda", dtype=torch.bfloat16)
+    # Shared upstream gradient over the compact route range.
+    g = torch.randn(num_routes, out_features, device="cuda", dtype=torch.bfloat16)
+
+    # --- ungrouped: separate per-expert params, wgrad via autograd .grad ---
+    mod_a = _make_grouped_linear(
+        num_experts, in_features, out_features, grouped=False, fuse_wgrad=False
+    )
+    with torch.no_grad():
+        for i in range(num_experts):
+            getattr(mod_a, f"weight{i}").copy_(W[i])
+    routing_a = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
+    out_a = mod_a(inp, m_splits, permute_free_metadata=routing_a)
+    (out_a[:num_routes].float() * g.float()).sum().backward()
+    grad_a = torch.stack(
+        [getattr(mod_a, f"weight{i}").grad.float() for i in range(num_experts)], dim=0
+    )
+
+    # --- grouped: single grouped param, wgrad accumulated into main_grad ---
+    mod_b = _make_grouped_linear(
+        num_experts, in_features, out_features, grouped=True, fuse_wgrad=True
+    )
+    with torch.no_grad():
+        for i, view in enumerate(mod_b._get_weight_tensors()):
+            view.copy_(W[i])
+    mod_b.weight.main_grad = torch.zeros(
+        num_experts, out_features, in_features, device="cuda", dtype=torch.float32
+    )
+    mod_b.weight.grad_added_to_main_grad = False
+    routing_b = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
+    out_b = mod_b(inp, m_splits, permute_free_metadata=routing_b)
+    (out_b[:num_routes].float() * g.float()).sum().backward()
+
+    # The grouped param collects grad in main_grad, not in .grad.
+    assert mod_b.weight.grad is None
+    assert getattr(mod_b.weight, "grad_added_to_main_grad", False) is True
+    main_grad = mod_b.weight.main_grad.view(num_experts, out_features, in_features).float()
+
+    # Same kernel dW -> both sinks must match (near bit-identical: bf16 dW upcast to fp32).
+    assert _rel_l2(main_grad, grad_a) < 1e-3
+    # And every expert actually received a non-zero gradient (guards against frozen experts).
+    for e in range(num_experts):
+        assert main_grad[e].abs().sum() > 0, f"expert {e} has a zero main_grad (frozen)."
+
+
+def test_grouped_weight_requires_fuse_wgrad(monkeypatch):
+    """single_grouped_weight on the permute-free path without fuse_wgrad_accumulation must
+    raise rather than silently freeze experts (detached views -> dead positional grad)."""
+    monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "1")
+    torch.manual_seed(43)
+
+    num_recv_tokens, in_features, out_features = 64, 48, 64
+    num_experts = 4
+    m_splits = [num_recv_tokens // num_experts] * num_experts
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, 2, "cuda", seed=17)
+    inp = torch.randn(num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16)
+
+    mod = _make_grouped_linear(
+        num_experts, in_features, out_features, grouped=True, fuse_wgrad=False
+    )
+    routing = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
+    with pytest.raises(RuntimeError, match="fuse_wgrad_accumulation"):
+        mod(inp, m_splits, permute_free_metadata=routing)

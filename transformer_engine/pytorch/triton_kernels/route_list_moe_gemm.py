@@ -15,6 +15,7 @@ Two modes (``INDEX_A_BY_ROUTE_POS``):
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Optional
 
 import torch
@@ -264,6 +265,51 @@ def _route_list_moe_persistent_kernel(
         tile_id += NUM_SMS
 
 
+def _moe_fwd_autotune_configs() -> list:
+    """Tile/pipeline configs for the route-list fwd/dgrad GEMM autotuner.
+
+    ``BLOCK_SIZE_M`` is *not* swept: it is baked into the route-list align (``block_start`` /
+    ``route_start`` / ``sorted_slot_ids`` are padded to it), so it is passed at call time and the
+    tuner only brackets the free axes -- the ``N``/``K`` tiling, the L2 group size, and the
+    warp/stage pipeline. The set spans the memory-bound (fewer warps, more occupancy) and
+    compute-bound (wider tiles, deeper pipeline) regimes seen across the MoE shapes.
+    """
+    return [
+        triton.Config(
+            {"BLOCK_SIZE_N": bn, "BLOCK_SIZE_K": bk, "GROUP_SIZE_M": gm},
+            num_warps=w,
+            num_stages=s,
+        )
+        for bn, bk, gm, w, s in (
+            (64, 128, 1, 4, 2),
+            (64, 64, 1, 4, 2),
+            (128, 64, 1, 8, 2),
+            (128, 128, 1, 8, 2),
+            (128, 64, 8, 8, 2),
+            (128, 64, 4, 4, 2),
+            (128, 64, 1, 8, 3),
+            (128, 128, 8, 8, 3),
+            (256, 64, 1, 8, 2),
+            (256, 64, 8, 8, 4),
+        )
+    ]
+
+
+# Autotuned view of the kernel (shares the same body). Keyed by the GEMM dims + the fixed
+# ``BLOCK_SIZE_M`` and the epilogue-shaping constexprs (fwd vs dgrad vs gated act change the
+# effective work), which together determine the tiling trade-off. The explicit-config launch
+# below bypasses this (used for reproducible profiling / offline-tuned configs).
+_route_list_moe_persistent_kernel_autotuned = triton.autotune(
+    configs=_moe_fwd_autotune_configs(),
+    key=["N", "K", "BLOCK_SIZE_M", "GATED_ACT", "INDEX_A_BY_ROUTE_POS"],
+)(_route_list_moe_persistent_kernel)
+
+
+def _moe_autotune_enabled() -> bool:
+    """Opt-in runtime autotuning of the route-list fwd/dgrad GEMM (``BLOCK_SIZE_N/K`` etc.)."""
+    return os.getenv("NVTE_PERMUTE_FREE_MOE_AUTOTUNE", "0") == "1"
+
+
 def fused_route_list_moe(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -281,6 +327,7 @@ def fused_route_list_moe(
     activation: Optional[str] = None,
     dispatched_probs: Optional[torch.Tensor] = None,
     preact_out: Optional[torch.Tensor] = None,
+    autotune: Optional[bool] = None,
 ) -> None:
     """Launch route-list gather-GEMM in place.
 
@@ -292,9 +339,17 @@ def fused_route_list_moe(
     and ``act(gate) * up`` is computed in-kernel. When ``dispatched_probs`` (``[num_recv_tokens,
     E]``) is given, the per-route gating prob is multiplied in *after* the activation. Only
     supported on the persistent kernel.
+
+    ``config`` supplies the tile config; ``BLOCK_SIZE_M`` is always taken from it (it is baked
+    into the route-list align and cannot change per launch). When ``autotune`` is enabled (via
+    the ``autotune`` arg, else the ``NVTE_PERMUTE_FREE_MOE_AUTOTUNE`` env var) the remaining tile
+    axes (``BLOCK_SIZE_N/K`` / ``GROUP_SIZE_M`` / warps / stages) are picked by the Triton
+    autotuner (keyed per shape, cached after the first launch) instead of ``config``.
     """
     if config is None:
         raise ValueError("route-list MoE kernel requires an explicit tile config.")
+    if autotune is None:
+        autotune = _moe_autotune_enabled()
 
     assert sorted_slot_ids.stride(0) == 1
 
@@ -320,7 +375,7 @@ def fused_route_list_moe(
             triton.cdiv(em, meta["BLOCK_SIZE_M"]) * triton.cdiv(B.shape[1], meta["BLOCK_SIZE_N"]),
         ),
     )
-    _route_list_moe_persistent_kernel[grid](
+    common_args = (
         A,
         B,
         C,
@@ -345,6 +400,8 @@ def fused_route_list_moe(
         stride_pe,
         stride_prem,
         stride_pren,
+    )
+    common_kwargs = dict(
         NUM_SMS=num_sms,
         INDEX_A_BY_ROUTE_POS=index_a_by_route_pos,
         GATED_ACT=gated_act,
@@ -353,6 +410,18 @@ def fused_route_list_moe(
         SAVE_PREACT=save_preact,
         compute_type=compute_type,
         NUM_XCDS=get_num_xcds(),
+    )
+    if autotune:
+        # BLOCK_SIZE_M is fixed (tied to the align block size); the autotuner fills the rest.
+        _route_list_moe_persistent_kernel_autotuned[grid](
+            *common_args,
+            BLOCK_SIZE_M=int(config["BLOCK_SIZE_M"]),
+            **common_kwargs,
+        )
+        return
+    _route_list_moe_persistent_kernel[grid](
+        *common_args,
+        **common_kwargs,
         **config,
     )
 

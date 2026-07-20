@@ -231,6 +231,41 @@ def _prepare_wgrad_align(
     return metadata
 
 
+def _try_view_grouped(weights: list[torch.Tensor]) -> Optional[torch.Tensor]:
+    """Return a zero-copy ``[E, out, in]`` view when the per-expert tensors are contiguous,
+    uniformly-strided, sequential slices of **one shared storage** (e.g. a single grouped weight
+    buffer).
+
+    Returns ``None`` when the layout is not a single contiguous block, so the caller can fall
+    back to ``torch.stack``. Note that sequential ``data_ptr``s are not sufficient: separate
+    parameters can be allocated back-to-back yet own distinct storages, so ``as_strided`` from
+    the first tensor would overrun its storage. We therefore require a single shared storage.
+    """
+    w0 = weights[0]
+    if not w0.is_contiguous():
+        return None
+    out, in_ = w0.shape
+    stride = out * in_
+    itemsize = w0.element_size()
+    base_ptr = w0.data_ptr()
+    storage_ptr = w0.untyped_storage().data_ptr()
+    for i, w in enumerate(weights):
+        if (
+            w.shape != w0.shape
+            or w.dtype != w0.dtype
+            or not w.is_contiguous()
+            or w.untyped_storage().data_ptr() != storage_ptr
+            or w.data_ptr() != base_ptr + i * stride * itemsize
+        ):
+            return None
+    # Guard: the shared storage must actually span all E experts from w0's offset.
+    needed = (w0.storage_offset() + len(weights) * stride) * itemsize
+    if w0.untyped_storage().nbytes() < needed:
+        return None
+    # All experts form one contiguous [E, out, in] block starting at w0's storage offset.
+    return torch.as_strided(w0, (len(weights), out, in_), (stride, in_, 1))
+
+
 def _stack_expert_weights(weights: torch.Tensor | list[torch.Tensor]) -> torch.Tensor:
     if isinstance(weights, torch.Tensor):
         if weights.dim() != 3:
@@ -240,7 +275,8 @@ def _stack_expert_weights(weights: torch.Tensor | list[torch.Tensor]) -> torch.T
         return weights
     if not weights:
         raise ValueError("At least one expert weight tensor is required.")
-    return torch.stack(weights, dim=0)
+    grouped = _try_view_grouped(weights)
+    return grouped if grouped is not None else torch.stack(weights, dim=0)
 
 
 def permute_free_grouped_gemm_bf16(
@@ -824,14 +860,16 @@ class PermuteFreeForwardResult:
 class PermuteFreeBackwardResult:
     """Gradients from :func:`permute_free_grouped_gemm_backward`.
 
-    ``dgrad`` / ``wgrad`` are ``None`` when the corresponding gradient was not requested;
-    ``wgrad`` (when present) is a per-expert list. ``grad_probs`` is the route-prob gradient
-    for the FC1 fused-prob path (``None`` otherwise).
+    ``dgrad`` / ``wgrad_stacked`` are ``None`` when the corresponding gradient was not requested.
+    ``wgrad_stacked`` is the weight gradient as a single ``[E, out, in]`` tensor (the natural
+    kernel output): accumulate it directly into a grouped param's ``main_grad``, or split it into
+    per-expert views (``list(wgrad_stacked)``) for the positional autograd return. ``grad_probs``
+    is the route-prob gradient for the FC1 fused-prob path (``None`` otherwise).
     """
 
     dgrad: Optional[torch.Tensor] = None
     grad_probs: Optional[torch.Tensor] = None
-    wgrad: Optional[List[torch.Tensor]] = None
+    wgrad_stacked: Optional[torch.Tensor] = None
 
 
 def permute_free_grouped_gemm_forward(
@@ -899,20 +937,20 @@ def permute_free_grouped_gemm_backward(
     route_space = getattr(routing, "route_space", False)
     dgrad = None
     grad_probs = None
-    wgrad = None
+    wgrad_stacked = None
 
     if route_space:
         # FC2: grad is token-space [num_recv, out]. dgrad gathers back to the compact route
         # buffer [T * min(topk, E), in]; wgrad swaps operands + transposes.
         if requires_dgrad:
-            weights_stacked = torch.stack(list(weights), dim=0)  # [E, H, F]
+            weights_stacked = _stack_expert_weights(weights)  # [E, H, F], zero-copy when grouped
             dgrad = permute_free_grouped_gemm_bf16_fc2_dgrad(grad_output, weights_stacked, routing)
         if requires_wgrad:
             weights_shape = (num_gemms, weights[0].size(0), weights[0].size(1))
             dW = permute_free_grouped_gemm_bf16_fc2_wgrad(
                 hidden_states, grad_output, weights_shape, routing
             )  # [E, H, F]
-            wgrad = [dW[i] for i in range(num_gemms)]
+            wgrad_stacked = dW
     else:
         # FC1: grad is the padded [T * min(topk, E), out] route buffer; dgrad scatters the input grad
         # back to received-token rows.
@@ -929,13 +967,15 @@ def permute_free_grouped_gemm_backward(
             if not (dispatched_probs is not None and dispatched_probs.requires_grad):
                 grad_probs = None
         if requires_dgrad:
-            weights_stacked = torch.stack(list(weights), dim=0)  # [E, N, H]
+            weights_stacked = _stack_expert_weights(weights)  # [E, N, H], zero-copy when grouped
             dgrad = permute_free_grouped_gemm_bf16_dgrad(grad_output, weights_stacked, routing)
         if requires_wgrad:
             weights_shape = (num_gemms, weights[0].size(0), weights[0].size(1))
             dW = permute_free_grouped_gemm_bf16_wgrad(
                 hidden_states, grad_output, weights_shape, routing
             )  # [E, N, H]
-            wgrad = [dW[i] for i in range(num_gemms)]
+            wgrad_stacked = dW
 
-    return PermuteFreeBackwardResult(dgrad=dgrad, grad_probs=grad_probs, wgrad=wgrad)
+    return PermuteFreeBackwardResult(
+        dgrad=dgrad, grad_probs=grad_probs, wgrad_stacked=wgrad_stacked
+    )
