@@ -96,7 +96,7 @@ def _compute_nvfp4_support() -> Tuple[bool, str]:
     """Return if nvfp4 support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 4), (9, 5)):  # TODO: enabled for gfx1250 when ready
+        if gpu_arch in ((9, 4), (9, 5), (12, 5)):
             return True, ""
         return False, "Device arch gfx94x or newer is required for NVFP4 execution."
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
