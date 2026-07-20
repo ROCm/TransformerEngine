@@ -128,8 +128,14 @@ void micro_tk_1d2d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     const T *b_base = (const T *)&B[{0, 0, 0, 0}];
     const int a_row_stride = A.template stride<2>() * sizeof(T);
     const int b_row_stride = B.template stride<2>() * sizeof(T);
-    kittens::i32x4 a_srd = kittens::make_srsrc(a_base, M * a_row_stride, a_row_stride);
-    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, N * b_row_stride, b_row_stride);
+    const bool a_partial_m = (block_row + 1) * BLOCK_M > M;
+    const bool b_partial_n = (block_col + 1) * BLOCK_N > N;
+    kittens::i32x4 a_srd = a_partial_m
+        ? kittens::make_srsrc(a_base, M * a_row_stride, 0)
+        : kittens::make_srsrc(a_base, M * a_row_stride, a_row_stride);
+    kittens::i32x4 b_srd = b_partial_n
+        ? kittens::make_srsrc(b_base, N * b_row_stride, 0)
+        : kittens::make_srsrc(b_base, N * b_row_stride, b_row_stride);
 
     const int wid = kittens::warpid() % NUM_WARPS;
     constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
@@ -464,8 +470,14 @@ void micro_tk_1d2d_pow2(
     const T *b_base = (const T *)&B[{0, 0, 0, 0}];
     const int a_row_stride = A.template stride<2>() * sizeof(T);
     const int b_row_stride = B.template stride<2>() * sizeof(T);
-    kittens::i32x4 a_srd = kittens::make_srsrc(a_base, M * a_row_stride, a_row_stride);
-    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, N * b_row_stride, b_row_stride);
+    const bool a_partial_m = (block_row + 1) * BLOCK_M > M;
+    const bool b_partial_n = (block_col + 1) * BLOCK_N > N;
+    kittens::i32x4 a_srd = a_partial_m
+        ? kittens::make_srsrc(a_base, M * a_row_stride, 0)
+        : kittens::make_srsrc(a_base, M * a_row_stride, a_row_stride);
+    kittens::i32x4 b_srd = b_partial_n
+        ? kittens::make_srsrc(b_base, N * b_row_stride, 0)
+        : kittens::make_srsrc(b_base, N * b_row_stride, b_row_stride);
 
     const int wid = kittens::warpid() % NUM_WARPS;
     constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
@@ -801,8 +813,14 @@ void micro_tk_1d1d(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     const T *b_base = (const T *)&B[{0, 0, 0, 0}];
     const int a_row_stride = A.template stride<2>() * sizeof(T);
     const int b_row_stride = B.template stride<2>() * sizeof(T);
-    kittens::i32x4 a_srd = kittens::make_srsrc(a_base, M * a_row_stride, a_row_stride);
-    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, N * b_row_stride, b_row_stride);
+    const bool a_partial_m = (block_row + 1) * BLOCK_M > M;
+    const bool b_partial_n = (block_col + 1) * BLOCK_N > N;
+    kittens::i32x4 a_srd = a_partial_m
+        ? kittens::make_srsrc(a_base, M * a_row_stride, 0)
+        : kittens::make_srsrc(a_base, M * a_row_stride, a_row_stride);
+    kittens::i32x4 b_srd = b_partial_n
+        ? kittens::make_srsrc(b_base, N * b_row_stride, 0)
+        : kittens::make_srsrc(b_base, N * b_row_stride, b_row_stride);
 
     const int wid = kittens::warpid() % NUM_WARPS;
     constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
