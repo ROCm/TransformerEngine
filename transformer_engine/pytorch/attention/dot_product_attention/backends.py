@@ -57,6 +57,7 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
     attn_forward_func_with_cp,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.softmax import FusedScaleMaskSoftmax
+from transformer_engine.pytorch.attention.dot_product_attention import xattention
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.cpu_offload import (
     is_cpu_offload_enabled,
@@ -1313,7 +1314,9 @@ class FusedAttnFunc(torch.autograd.Function):
 
         max_logit = None
         if fp8:
-            fused_attention_backend = FusedAttnBackend["FP8"]
+            # ROCm's FusedAttnBackend has no "FP8" key; keep the incoming sentinel
+            # (xAttention path ignores it). On CUDA this resolves to NVTE_FP8.
+            fused_attention_backend = FusedAttnBackend.get("FP8", fused_attention_backend)
 
             # q, k, v:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
             # q_fp8, k_fp8, v_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16
@@ -1339,37 +1342,52 @@ class FusedAttnFunc(torch.autograd.Function):
             # DelayedScaling:       Float8Tensor; dtype = torch.float16 or torch.bfloat16
             #                                     fp8_dtype = tex.DType.kFloat8E4M3
             # Float8CurrentScaling: torch.Tensor; dtype = torch.float16 or torch.bfloat16
-            out_, aux_ctx_tensors, *_ = fused_attn_fwd(
-                is_training,
-                max_seqlen_q,
-                max_seqlen_kv,
-                cu_seqlens_q,
-                cu_seqlens_kv,
-                q_fp8,
-                k_fp8,
-                v_fp8,
-                out_nominal_dtype,
-                fused_attention_backend,
-                attn_bias,
-                cu_seqlens_q_padded,
-                cu_seqlens_kv_padded,
-                None,
-                None,
-                S_quantizer,
-                O_quantizer,
-                attn_scale,
-                dropout_p,
-                fast_zero_fill,
-                qkv_layout,
-                attn_bias_type,
-                attn_mask_type,
-                softmax_type,
-                window_size,
-                bottom_right_diagonal,
-                rng_gen,
-                softmax_offset,
-                cuda_graph=is_graph_capturing(),
-            )
+            if xattention.is_available():
+                # ROCm: route the fp8 kernel to xAttention (returns bf16 out; the
+                # post-processing below re-quantizes to out_fp8 for the backward).
+                out_, aux_ctx_tensors = xattention.fp8_forward(
+                    q_fp8,
+                    k_fp8,
+                    v_fp8,
+                    qkv_layout,
+                    S_quantizer,
+                    O_quantizer,
+                    attn_scale,
+                    attn_mask_type,
+                    window_size,
+                )
+            else:
+                out_, aux_ctx_tensors, *_ = fused_attn_fwd(
+                    is_training,
+                    max_seqlen_q,
+                    max_seqlen_kv,
+                    cu_seqlens_q,
+                    cu_seqlens_kv,
+                    q_fp8,
+                    k_fp8,
+                    v_fp8,
+                    out_nominal_dtype,
+                    fused_attention_backend,
+                    attn_bias,
+                    cu_seqlens_q_padded,
+                    cu_seqlens_kv_padded,
+                    None,
+                    None,
+                    S_quantizer,
+                    O_quantizer,
+                    attn_scale,
+                    dropout_p,
+                    fast_zero_fill,
+                    qkv_layout,
+                    attn_bias_type,
+                    attn_mask_type,
+                    softmax_type,
+                    window_size,
+                    bottom_right_diagonal,
+                    rng_gen,
+                    softmax_offset,
+                    cuda_graph=is_graph_capturing(),
+                )
 
             # out_fp8: Float8Tensor; dtype = torch.float16 or torch.bfloat16
             #                        fp8_dtype = tex.DType.kFloat8E4M3
@@ -1655,37 +1673,59 @@ class FusedAttnFunc(torch.autograd.Function):
                         if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16
                         else out_fp8
                     )
-                    dq_, dk_, dv_, *rest = fused_attn_bwd(
-                        ctx.max_seqlen_q,
-                        ctx.max_seqlen_kv,
-                        cu_seqlens_q,
-                        cu_seqlens_kv,
-                        q_fp8,
-                        k_fp8,
-                        v_fp8,
-                        out_,
-                        d_out_fp8,
-                        dqkv_nominal_dtype,
-                        dqkv_te_dtype,
-                        aux_ctx_tensors,
-                        ctx.fused_attention_backend,
-                        cu_seqlens_q_padded,
-                        cu_seqlens_kv_padded,
-                        ctx.S_quantizer,
-                        ctx.dP_quantizer,
-                        ctx.dQKV_quantizer,
-                        ctx.attn_scale,
-                        ctx.dropout_p,
-                        ctx.fast_zero_fill,
-                        ctx.qkv_layout,
-                        ctx.attn_bias_type,
-                        ctx.attn_mask_type,
-                        ctx.softmax_type,
-                        ctx.window_size,
-                        ctx.bottom_right_diagonal,
-                        ctx.deterministic,
-                        is_graph_capturing(),
-                    )
+                    if xattention.is_available():
+                        # ROCm: route the fp8 bwd kernel to xAttention (bf16 dq/dk/dv).
+                        dq_, dk_, dv_ = xattention.fp8_backward(
+                            d_out_fp8,
+                            q_fp8,
+                            k_fp8,
+                            v_fp8,
+                            out_,
+                            aux_ctx_tensors[0],
+                            ctx.qkv_layout,
+                            ctx.S_quantizer,
+                            ctx.dP_quantizer,
+                            ctx.dQKV_quantizer,
+                            ctx.O_quantizer,
+                            ctx.dO_quantizer,
+                            ctx.attn_scale,
+                            ctx.attn_mask_type,
+                            ctx.window_size,
+                            ctx.deterministic,
+                        )
+                        rest = [None]
+                    else:
+                        dq_, dk_, dv_, *rest = fused_attn_bwd(
+                            ctx.max_seqlen_q,
+                            ctx.max_seqlen_kv,
+                            cu_seqlens_q,
+                            cu_seqlens_kv,
+                            q_fp8,
+                            k_fp8,
+                            v_fp8,
+                            out_,
+                            d_out_fp8,
+                            dqkv_nominal_dtype,
+                            dqkv_te_dtype,
+                            aux_ctx_tensors,
+                            ctx.fused_attention_backend,
+                            cu_seqlens_q_padded,
+                            cu_seqlens_kv_padded,
+                            ctx.S_quantizer,
+                            ctx.dP_quantizer,
+                            ctx.dQKV_quantizer,
+                            ctx.attn_scale,
+                            ctx.dropout_p,
+                            ctx.fast_zero_fill,
+                            ctx.qkv_layout,
+                            ctx.attn_bias_type,
+                            ctx.attn_mask_type,
+                            ctx.softmax_type,
+                            ctx.window_size,
+                            ctx.bottom_right_diagonal,
+                            ctx.deterministic,
+                            is_graph_capturing(),
+                        )
 
                     # dq, dk, dv:             torch.Tensor; dtype = torch.float16 or torch.bfloat16
                     dq, dk, dv = dq_, dk_, dv_
@@ -2007,10 +2047,11 @@ class FusedAttention(torch.nn.Module):
             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
             if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
                 fp8_recipe = fp8_meta["local_recipes"][0]
-            assert fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8, (
-                f"cuDNN attention sub-backend {int(tex.NVTE_Fused_Attn_Backend.NVTE_FP8)}"
-                " is required for FP8 attention!"
-            )
+            if not xattention.is_available():
+                assert fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8, (
+                    f"cuDNN attention sub-backend {int(tex.NVTE_Fused_Attn_Backend.NVTE_FP8)}"
+                    " is required for FP8 attention!"
+                )
             assert fp8_meta is not None, "FP8 metadata fp8_meta is required for FP8 attention!"
             if fp8_recipe.delayed():
                 assert not context_parallel or fp8_recipe.reduce_amax, (

@@ -106,13 +106,19 @@ def reset_global_fp8_state():
 
 
 if IS_HIP_EXTENSION:
+    from transformer_engine.pytorch.attention.dot_product_attention import xattention as _xattn_mod
+
+    xattention_available = _xattn_mod.is_installed()
     from utils import EnvVarCleaner
     @pytest.fixture(autouse=True)
     def reset_attn_backend():
         env = EnvVarCleaner(["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN",
                             "NVTE_FUSED_ATTN_CK", "NVTE_FUSED_ATTN_AOTRITON",
-                            "NVTE_CK_USES_FWD_V3", "NVTE_CK_USES_BWD_V3", "NVTE_FP8_DPA_BWD"])
+                            "NVTE_CK_USES_FWD_V3", "NVTE_CK_USES_BWD_V3", "NVTE_FP8_DPA_BWD",
+                            "NVTE_XATTENTION"])
         yield
+else:
+    xattention_available = False
 
 # Define F16 data types to test
 param_types = [torch.float16]
@@ -2411,8 +2417,13 @@ def _run_mha_fp8_vs_f16(
     return out, param_names, tuple(None for x in params)
 
 
-@pytest.mark.skipif(IS_HIP_EXTENSION, reason="FP8 Fused attention is not supported on ROCm")
-@pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
+@pytest.mark.skipif(
+    IS_HIP_EXTENSION and not xattention_available,
+    reason="FP8 attention on ROCm requires the xAttention backend",
+)
+@pytest.mark.skipif(
+    not IS_HIP_EXTENSION and get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required."
+)
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
@@ -2423,6 +2434,12 @@ def _run_mha_fp8_vs_f16(
 def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode):
     """Test DotProductAttention module in FP8"""
     config = model_configs_fp8_vs_f16[model]
+    if IS_HIP_EXTENSION and xattention_available:
+        os.environ["NVTE_XATTENTION"] = "1"
+        if is_training and not fp8_dpa_bwd:
+            # xAttention is fp8-only; an f16 backward (NVTE_FP8_DPA_BWD=0) would
+            # require a bf16 fused-attn backward, which is not available on ROCm.
+            pytest.skip("xAttention (fp8-only) does not support an f16 backward on ROCm")
 
     # TODO(cyang): think of another way to verify dropout results
     # test cuDNN FP8 dropout
@@ -2470,10 +2487,10 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
         is_training=is_training,
         deterministic=_deterministic,
     )
-    _, fused_attn_supported_f16, _ = available_backends
+    _, fused_attn_supported_f16, unfused_attn_supported_f16 = available_backends
     if flash_attn_supported + fused_attn_supported_fp8 < 1:
         pytest.skip("No FP8 attention backend available.")
-    if not fused_attn_supported_f16:
+    if not fused_attn_supported_f16 and not unfused_attn_supported_f16:
         pytest.skip("No reference backend available.")
     if config.num_heads != config.num_gqa_groups and "3" in qkv_layout:
         pytest.skip("qkv_layout not applicable for MQA/GQA")
@@ -2508,13 +2525,22 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
             dtype, config, True, qkv_layout, is_training, fp8_recipe
         )
 
+    # On ROCm the bf16 fused (CK) backend may be unavailable; fall back to the
+    # unfused backend as the f16 reference so the xAttention fp8 path can still be
+    # validated. The comparison below treats it as the f16 reference either way.
+    if not fused_attn_supported_f16 and unfused_attn_supported_f16:
+        fused_attn_supported_f16 = True
+        _f16_ref_env = ("0", "0", "1")
+    else:
+        _f16_ref_env = ("0", "1", "0")
     if fused_attn_supported_f16:
-        os.environ["NVTE_FLASH_ATTN"] = "0"
-        os.environ["NVTE_FUSED_ATTN"] = "1"
-        os.environ["NVTE_UNFUSED_ATTN"] = "0"
+        os.environ["NVTE_FLASH_ATTN"] = _f16_ref_env[0]
+        os.environ["NVTE_FUSED_ATTN"] = _f16_ref_env[1]
+        os.environ["NVTE_UNFUSED_ATTN"] = _f16_ref_env[2]
+        _attention_backends["backend_selection_requires_update"] = True
         if config.dropout_p == 0.0:
             # test cuDNN FP8 dropout: need a FP16/BF16 reference on Blackwell
-            logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False (FusedAttention)")
+            logging.info("[test_dpa_fp8_vs_f16]: run with fp8_dpa = False (f16 reference)")
             fused_attn_fwd_f16, fused_attn_bwd_f16 = _run_dpa_fp8_vs_f16(
                 dtype, config, False, qkv_layout, is_training, fp8_recipe
             )
