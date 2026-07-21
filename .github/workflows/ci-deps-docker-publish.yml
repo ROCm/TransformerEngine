@@ -44,10 +44,15 @@ jobs:
         env:
           REGISTRY: ${{ vars.ARTIFACTORY_DOCKER_REGISTRY }}
           REPOSITORY: ${{ vars.ARTIFACTORY_CI_DEPS_REPOSITORY }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
           if [ -z "${REGISTRY}" ] || [ -z "${REPOSITORY}" ]; then
             echo "Set repository variables ARTIFACTORY_DOCKER_REGISTRY and ARTIFACTORY_CI_DEPS_REPOSITORY." >&2
+            exit 1
+          fi
+          if [ -z "${IMAGE_TAG}" ]; then
+            echo "image_tag input must be non-empty." >&2
             exit 1
           fi
 

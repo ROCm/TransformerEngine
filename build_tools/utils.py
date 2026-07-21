@@ -231,10 +231,9 @@ def rocm_path() -> Tuple[str, str]:
     ROCm root path and HIPCC binary path as a tuple
     If ROCm installation is not specified, use default ROCm path
     """
-    rocm_home = None
     if os.getenv("ROCM_PATH"):
         rocm_home = Path(os.getenv("ROCM_PATH"))
-    if rocm_home is None:
+    else:
         rocm_home = _rocm_sdk_path_root()
         if rocm_home is not None:
             os.environ["ROCM_PATH"] = str(rocm_home)

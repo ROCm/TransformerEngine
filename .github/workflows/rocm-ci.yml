@@ -54,8 +54,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     outputs:
-      image-tag-mi30x: ${{ steps.select-image.outputs.image-tag-mi30x }}
-      image-tag-mi35x: ${{ steps.select-image.outputs.image-tag-mi35x }}
+      image-tag: ${{ steps.select-image.outputs.image-tag }}
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -94,17 +93,10 @@ jobs:
           MANUAL_OVERRIDE="${{ inputs.docker_image_override }}"
           if [[ -n "$MANUAL_OVERRIDE" ]]; then
             echo "::notice::Manual override detected: $MANUAL_OVERRIDE"
-            IMAGE_MI30X="$MANUAL_OVERRIDE"
-            IMAGE_MI35X="$MANUAL_OVERRIDE"
-          else
-            IMAGE_MI30X="${IMAGE_BASE}_gfx942"
-            IMAGE_MI35X="${IMAGE_BASE}_gfx950"
           fi
 
-          echo "Selected mi30x (gfx942) image: $IMAGE_MI30X"
-          echo "Selected mi35x (gfx950) image: $IMAGE_MI35X"
-          echo "image-tag-mi30x=$IMAGE_MI30X" >> $GITHUB_OUTPUT
-          echo "image-tag-mi35x=$IMAGE_MI35X" >> $GITHUB_OUTPUT
+          echo "Selected base image tag: $IMAGE_BASE"
+          echo "image-tag=$IMAGE_BASE" >> $GITHUB_OUTPUT
 
   build:
     # Delegate wheel building to the reusable workflow on dev. It produces a core .whl plus framework .tar.gz sdists under artifact name `te-rocm-wheels`.
@@ -116,6 +108,8 @@ jobs:
     needs: [select_image, build]
     timeout-minutes: 270
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-4' }}
+    env:
+      DOCKER_IMAGE: ${{ inputs.docker_image_override || format('{0}{1}', needs.select_image.outputs.image-tag, matrix.arch_label == 'mi30x' && '_gfx942' || matrix.arch_label == 'mi35x' && '_gfx950') }}
     strategy:
       fail-fast: false
       matrix:
@@ -147,7 +141,7 @@ jobs:
 
       - name: Pull Docker Image
         run: |
-          docker pull ${{ matrix.arch_label == 'mi30x' && needs.select_image.outputs.image-tag-mi30x || matrix.arch_label == 'mi35x' && needs.select_image.outputs.image-tag-mi35x }}
+          docker pull ${{ env.DOCKER_IMAGE }}
 
       - &run_container
         name: Run Container
@@ -166,7 +160,7 @@ jobs:
             --group-add $(getent group video | cut -d: -f3) \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            ${{ matrix.arch_label == 'mi30x' && needs.select_image.outputs.image-tag-mi30x || matrix.arch_label == 'mi35x' && needs.select_image.outputs.image-tag-mi35x }}
+            ${{ env.DOCKER_IMAGE }}
 
       - name: Install packages
         run: |
@@ -267,6 +261,8 @@ jobs:
     needs: [select_image, build]
     timeout-minutes: 210
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
+    env:
+      DOCKER_IMAGE: ${{ inputs.docker_image_override || format('{0}{1}', needs.select_image.outputs.image-tag, matrix.arch_label == 'mi30x' && '_gfx942' || matrix.arch_label == 'mi35x' && '_gfx950') }}
     strategy:
       fail-fast: false
       matrix:
@@ -293,7 +289,7 @@ jobs:
 
       - name: Pull Docker Image
         run: |
-          docker pull ${{ matrix.arch_label == 'mi30x' && needs.select_image.outputs.image-tag-mi30x || matrix.arch_label == 'mi35x' && needs.select_image.outputs.image-tag-mi35x }}
+          docker pull ${{ env.DOCKER_IMAGE }}
 
       - *run_container
 
