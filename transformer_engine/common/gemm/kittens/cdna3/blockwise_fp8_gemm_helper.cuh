@@ -114,12 +114,35 @@ __device__ inline void store_masked(OType *c_ptr, const AccType &Cacc,
     }
 }
 
-template <typename OType, bool HAS_BIAS, bool HAS_GELU, bool HAS_BETA, typename AccType>
+enum struct GemmEpilogue {
+    DEFAULT,
+    BIAS,
+    GELU_AUX,
+    BETA,
+    BIAS_BETA,
+    GELU_AUX_BETA,
+};
+
+__host__ __device__ inline constexpr bool epilogue_has_bias(GemmEpilogue e) {
+    return e == GemmEpilogue::BIAS || e == GemmEpilogue::BIAS_BETA;
+}
+__host__ __device__ inline constexpr bool epilogue_has_gelu(GemmEpilogue e) {
+    return e == GemmEpilogue::GELU_AUX || e == GemmEpilogue::GELU_AUX_BETA;
+}
+__host__ __device__ inline constexpr bool epilogue_has_beta(GemmEpilogue e) {
+    return e == GemmEpilogue::BETA || e == GemmEpilogue::BIAS_BETA
+        || e == GemmEpilogue::GELU_AUX_BETA;
+}
+
+template <typename OType, GemmEpilogue EPILOGUE, typename AccType>
 __device__ inline void apply_epilogue(
     AccType &Cacc, int Rtile, int Ctile, int M, int N,
         const void *bias, int bias_dtype,
         const void *gelu_aux, int gelu_aux_dtype,
         const OType *c_in, float beta) {
+    constexpr bool HAS_BIAS = epilogue_has_bias(EPILOGUE);
+    constexpr bool HAS_GELU = epilogue_has_gelu(EPILOGUE);
+    constexpr bool HAS_BETA = epilogue_has_beta(EPILOGUE);
     const int lane = kittens::laneid();
     const int m_base = Rtile * AccType::rows + 4 * (lane / 16);
     const int n_base = Ctile * AccType::cols + (lane % 16);

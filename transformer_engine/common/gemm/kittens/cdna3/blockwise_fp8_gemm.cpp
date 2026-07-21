@@ -55,7 +55,7 @@ struct micro_globals {
 };
 
 template <typename AType, typename BType, typename OType, bool IS_PARTIAL_M, bool IS_PARTIAL_N,
-          bool HAS_BIAS = false, bool HAS_GELU = false, bool HAS_BETA = false,
+          GemmEpilogue EPILOGUE = GemmEpilogue::DEFAULT,
           bool IS_PARTIAL_K = false>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
@@ -311,11 +311,11 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
         __builtin_amdgcn_s_barrier();
     }
 
-    if constexpr (HAS_BIAS || HAS_GELU || HAS_BETA) {
-        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(
+    if constexpr (EPILOGUE != GemmEpilogue::DEFAULT) {
+        apply_epilogue<OType, EPILOGUE>(
             C_accum[0], row * 4 + warp_row,     col * 4 + warp_col, M, N,
             g.bias, g.bias_dtype, g.gelu_aux, g.gelu_aux_dtype, g.c_in, g.beta);
-        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(
+        apply_epilogue<OType, EPILOGUE>(
             C_accum[1], row * 4 + warp_row + WARPS_ROW, col * 4 + warp_col, M, N,
             g.bias, g.bias_dtype, g.gelu_aux, g.gelu_aux_dtype, g.c_in, g.beta);
     }
@@ -334,7 +334,7 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
 }
 
 template <typename AType, typename BType, typename OType, bool IS_PARTIAL_M, bool IS_PARTIAL_N,
-          bool HAS_BIAS = false, bool HAS_GELU = false, bool HAS_BETA = false,
+          GemmEpilogue EPILOGUE = GemmEpilogue::DEFAULT,
           bool IS_PARTIAL_K = false>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
@@ -576,11 +576,11 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
         __builtin_amdgcn_s_barrier();
     }
 
-    if constexpr (HAS_BIAS || HAS_GELU || HAS_BETA) {
-        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(
+    if constexpr (EPILOGUE != GemmEpilogue::DEFAULT) {
+        apply_epilogue<OType, EPILOGUE>(
             C_accum[0], row * 4 + warp_row,     col * 4 + warp_col, M, N,
             g.bias, g.bias_dtype, g.gelu_aux, g.gelu_aux_dtype, g.c_in, g.beta);
-        apply_epilogue<OType, HAS_BIAS, HAS_GELU, HAS_BETA>(
+        apply_epilogue<OType, EPILOGUE>(
             C_accum[1], row * 4 + warp_row + WARPS_ROW, col * 4 + warp_col, M, N,
             g.bias, g.bias_dtype, g.gelu_aux, g.gelu_aux_dtype, g.c_in, g.beta);
     }
@@ -598,8 +598,14 @@ void micro_tk_1d1d(const micro_globals<AType, BType, OType> g) {
     }
 }
 
+static GemmEpilogue select_epilogue(bool has_bias, bool has_gelu, bool has_beta) {
+    if (has_gelu) return has_beta ? GemmEpilogue::GELU_AUX_BETA : GemmEpilogue::GELU_AUX;
+    if (has_bias) return has_beta ? GemmEpilogue::BIAS_BETA     : GemmEpilogue::BIAS;
+    return has_beta ? GemmEpilogue::BETA : GemmEpilogue::DEFAULT;
+}
+
 template <bool IS_1D2D, typename AType, typename BType, typename OType,
-          bool HAS_BIAS, bool HAS_GELU, bool HAS_BETA, bool IS_PARTIAL_K>
+          GemmEpilogue EPILOGUE, bool IS_PARTIAL_K>
 static void dispatch_micro_epilogue(micro_globals<AType, BType, OType> g) {
     unsigned long mem_size = g.dynamic_shared_memory();
     const bool pm = (g.M() % BLOCK_M != 0);
@@ -610,9 +616,9 @@ static void dispatch_micro_epilogue(micro_globals<AType, BType, OType> g) {
     };
     auto kernel = [&]<bool PM, bool PN>() {
         if constexpr (IS_1D2D)
-            return micro_tk_1d2d<AType, BType, OType, PM, PN, HAS_BIAS, HAS_GELU, HAS_BETA, IS_PARTIAL_K>;
+            return micro_tk_1d2d<AType, BType, OType, PM, PN, EPILOGUE, IS_PARTIAL_K>;
         else
-            return micro_tk_1d1d<AType, BType, OType, PM, PN, HAS_BIAS, HAS_GELU, HAS_BETA, IS_PARTIAL_K>;
+            return micro_tk_1d1d<AType, BType, OType, PM, PN, EPILOGUE, IS_PARTIAL_K>;
     };
     if      (!pm && !pn) launch(kernel.template operator()<false, false>());
     else if ( pm && !pn) launch(kernel.template operator()<true,  false>());
@@ -623,15 +629,19 @@ static void dispatch_micro_epilogue(micro_globals<AType, BType, OType> g) {
 template <bool IS_1D2D, typename AType, typename BType, typename OType, bool KP>
 static void dispatch_micro_k(micro_globals<AType, BType, OType> g,
                              bool has_bias, bool has_gelu, bool has_beta) {
-    if (has_gelu) {
-        if (has_beta) dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, false, true, true, KP>(g);
-        else          dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, false, true, false, KP>(g);
-    } else if (has_bias) {
-        if (has_beta) dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, true, false, true, KP>(g);
-        else          dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, true, false, false, KP>(g);
-    } else {
-        if (has_beta) dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, false, false, true, KP>(g);
-        else          dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, false, false, false, KP>(g);
+    switch (select_epilogue(has_bias, has_gelu, has_beta)) {
+        case GemmEpilogue::DEFAULT:
+            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::DEFAULT, KP>(g); break;
+        case GemmEpilogue::BIAS:
+            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::BIAS, KP>(g); break;
+        case GemmEpilogue::GELU_AUX:
+            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::GELU_AUX, KP>(g); break;
+        case GemmEpilogue::BETA:
+            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::BETA, KP>(g); break;
+        case GemmEpilogue::BIAS_BETA:
+            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::BIAS_BETA, KP>(g); break;
+        case GemmEpilogue::GELU_AUX_BETA:
+            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::GELU_AUX_BETA, KP>(g); break;
     }
 }
 
