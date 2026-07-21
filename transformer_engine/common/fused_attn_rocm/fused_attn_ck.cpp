@@ -750,15 +750,24 @@ void fused_attn_ck_bwd_impl(
   void* lse_workspace = planner.allocate(h*max_tokens_q*sizeof(float));
 
   // CK requires a dq_acc scratch buffer. ck_attn_bwd picks the layout at launch time: fp32-packed
-  // (nsplits, H, total_q, d_qk), or -- when the v3 asm dq_shuffle path runs (is_v3_atomic_fp32=0, ragged)
-  // -- bf16 per-segment padded (nsplits, B, H, pad16(s_q), 128). The v3 choice needs a GPU probe that must
-  // not run in the workspace-sizing pass, so size the buffer to hold EITHER layout for the ragged/non-atomic
-  // case; ck_attn_bwd sets the strides. Non-ragged / atomic_fp32 only ever use the fp32-packed layout.
+  // (nsplits, H, total_q, d_qk), or -- when the v3 asm dq_shuffle path runs -- bf16 per-segment padded
+  // (nsplits, B, H, pad16(s_q), kV3DqAccHeadDim). See AITER csrc/py_itfs_cu/asm_mha_varlen_bwd.cu for the
+  // atomic16 layout. Whether v3 runs needs a probe (ck_attn_bwd_uses_v3) that depends on args only built in
+  // the execution pass, so we cannot call it here in the workspace-sizing pass; instead we size the buffer
+  // to hold EITHER layout. The bf16 group dq_shuffle kernel is hd128-only (kV3DqAccHeadDim), so it is only
+  // ever reachable when d_qk == kV3DqAccHeadDim -- gate on that (rather than probing) to avoid over-sizing
+  // hd64/hd192, and to keep this conservative but never-under-sized regardless of the launch-time decision.
+  // Element size is 2: the atomic16 dq_acc buffer is bf16 (16-bit), the only input dtype the v3 asm path
+  // admits -- do not tie it to nvte_dtype_size(dtype).
   const size_t dq_acc_fp32_bytes = nsplits*h*max_tokens_q*d_qk*sizeof(float);
-  const size_t dq_acc_padded_sq = ((s_q + 15) / 16) * 16;
-  const size_t dq_acc_bf16_bytes = nsplits*b*h*dq_acc_padded_sq*128*nvte_dtype_size(dtype);
-  const bool dq_acc_max_of_both = is_ragged && !nvte_ck_is_v3_atomic_fp32;
-  const size_t dq_acc_bytes = (dq_acc_max_of_both && dq_acc_bf16_bytes > dq_acc_fp32_bytes)
+  const bool dq_acc_bf16_possible = is_ragged && !nvte_ck_is_v3_atomic_fp32
+                                    && d_qk == static_cast<uint64_t>(ck_fused_attn::kV3DqAccHeadDim);
+  const size_t dq_acc_padded_sq =
+      ((s_q + ck_fused_attn::kV3DqAccSeqAlign - 1) / ck_fused_attn::kV3DqAccSeqAlign)
+      * ck_fused_attn::kV3DqAccSeqAlign;
+  const size_t dq_acc_bf16_bytes =
+      nsplits*b*h*dq_acc_padded_sq*ck_fused_attn::kV3DqAccHeadDim*sizeof(uint16_t);  // atomic16 = bf16
+  const size_t dq_acc_bytes = (dq_acc_bf16_possible && dq_acc_bf16_bytes > dq_acc_fp32_bytes)
       ? dq_acc_bf16_bytes : dq_acc_fp32_bytes;
   void* dq_acc_ptr = planner.allocate(dq_acc_bytes);
 

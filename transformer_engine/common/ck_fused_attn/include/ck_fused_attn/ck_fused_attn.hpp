@@ -14,6 +14,15 @@
 
 namespace ck_fused_attn{
 
+// Fixed head dim of AITER's v3 asm bf16 dq_shuffle backward path. AITER's atomic16 dq_acc scratch is
+// padded to this head dim regardless of the actual d_qk (see AITER csrc/py_itfs_cu/asm_mha_varlen_bwd.cu:
+// "padding dq_accum seqlen to 16x of max_seqlen_q, head dim to 128"), and the only ragged/group dq_shuffle
+// kernel is bwd_hd128_dq_shuffle_group. Both the dq_acc sizing (fused_attn_ck.cpp) and the stride override
+// (ck_fused_attn_bwd.cpp) reference this so the two sites can never drift apart.
+static constexpr int64_t kV3DqAccHeadDim = 128;
+// AITER pads the dq_acc seqlen up to a multiple of this in the atomic16 layout (same source reference).
+static constexpr int64_t kV3DqAccSeqAlign = 16;
+
 // input qkv dtypes
 enum class DType {
   kFloat16    = 0,  /*!< 16-bit float (E5M10) */

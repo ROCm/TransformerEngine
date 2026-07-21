@@ -1364,6 +1364,21 @@ class FusedAttnRunner:
             QKVLayout.THD_THD_THD,
             id="2-2048-2048-12-6-128-128-BF16-GQA-RAGGED_SELF",
         ),
+        # non-16-multiple seqlen: exercises the atomic16 dq_acc seqlen padding (pad16(s_q)) on the bf16
+        # dq_shuffle THD backward path; make sure the CK flow handles a max_seqlen that is not a multiple of
+        # kV3DqAccSeqAlign (2044 % 16 == 12).
+        pytest.param(
+            2,
+            2044,
+            2044,
+            12,
+            6,
+            128,
+            128,
+            jnp.bfloat16,
+            QKVLayout.THD_THD_THD,
+            id="2-2044-2044-12-6-128-128-BF16-GQA-RAGGED_SELF-UNALIGNED",
+        ),
         pytest.param(
             10,
             4096,

@@ -608,16 +608,28 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   // dq_acc scratch layout (mirrors AITER's asm_mha_varlen_bwd wiring). build_bwd_fmha_args sets the
   // fp32-packed layout (nsplits, H, total_q, d_qk) with batch_stride_dq_acc=0 -- correct for the fp32
   // dq_convert post-kernel. But the bf16 dq_shuffle post-kernel (is_v3_atomic_fp32=0) expects a
-  // per-segment padded layout (nsplits, B, H, pad16(s_q), 128); with batch_stride=0 it mis-indexes every
-  // ragged segment past cu_seqlens offset 0, corrupting dQ. Switch to the per-segment layout only when
-  // the v3 asm path actually runs (ck_attn_bwd_uses_v3 probe) -- v2/fallback keeps the fp32-packed layout.
-  // The dq_acc buffer is sized to hold either layout in fused_attn_ck.cpp.
+  // per-segment padded layout (nsplits, B, H, pad16(s_q), kV3DqAccHeadDim); with batch_stride=0 it
+  // mis-indexes every ragged segment past cu_seqlens offset 0, corrupting dQ. Switch to the per-segment
+  // layout only when the v3 asm path actually runs (ck_attn_bwd_uses_v3 probe) -- v2/fallback keeps the
+  // fp32-packed layout. The dq_acc buffer is sized to hold either layout in fused_attn_ck.cpp.
+  // Layout + padding reference: AITER csrc/py_itfs_cu/asm_mha_varlen_bwd.cu (atomic16 dq_accum =
+  // torch::zeros({1, batch, nhead, pad16(max_seqlen_q), 128})).
   if (args.is_group_mode() && !args.is_v3_atomic_fp32 && ck_attn_bwd_uses_v3(args)) {
-    const int64_t padded_sq = static_cast<int64_t>(((args.s_q + 15) / 16) * 16);
-    fmha_args.stride_dq_acc = 128;
-    fmha_args.nhead_stride_dq_acc = static_cast<int64_t>(padded_sq * 128);
-    fmha_args.batch_stride_dq_acc = static_cast<int64_t>(args.h * padded_sq * 128);
-    fmha_args.split_stride_dq_acc = static_cast<int>(args.b * args.h * padded_sq * 128);
+    // The only ragged/group dq_shuffle kernel is bwd_hd128_dq_shuffle_group, so ck_attn_bwd_uses_v3 can
+    // only be true here for d_qk == kV3DqAccHeadDim. Assert it so a future hd64/hd192 dq_shuffle kernel
+    // (which would need a different dq_acc head dim) fails loudly instead of silently corrupting dQ.
+    if (args.d_qk != kV3DqAccHeadDim) {
+      throw std::runtime_error("ck_fused_attn bwd: bf16 dq_shuffle dq_acc layout assumes d_qk == 128.");
+    }
+    const int64_t padded_sq = ((static_cast<int64_t>(args.s_q) + kV3DqAccSeqAlign - 1)
+                               / kV3DqAccSeqAlign) * kV3DqAccSeqAlign;
+    fmha_args.stride_dq_acc = kV3DqAccHeadDim;
+    fmha_args.nhead_stride_dq_acc = padded_sq * kV3DqAccHeadDim;
+    fmha_args.batch_stride_dq_acc = static_cast<int64_t>(args.h) * padded_sq * kV3DqAccHeadDim;
+    // split_stride is irrelevant in practice: the v3 asm path has no deterministic mode, so nsplits==1
+    // and the split index is always 0. Set it consistently anyway.
+    fmha_args.split_stride_dq_acc = static_cast<int>(static_cast<int64_t>(args.b) * args.h
+                                                     * padded_sq * kV3DqAccHeadDim);
   }
 
   bool ck_log_config = false;
