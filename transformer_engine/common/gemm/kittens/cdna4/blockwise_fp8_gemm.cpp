@@ -7,10 +7,10 @@
 #include <type_traits>
 #include <utility>
 #include "kittens.cuh"
-#include "blockwise_fp8_gemm.h"
+#include "../blockwise_fp8_gemm_backend.h"
 
 
-namespace blockwise_gfx950 {
+namespace {
 
 #include "blockwise_fp8_gemm_helper.cuh"
 
@@ -1392,86 +1392,96 @@ static void launch_1d1d_pow2(int cbsz, int blgp, bool has_bias, bool has_gelu, b
     launch_pow2_epi<OType, false>(cbsz, blgp, has_bias, has_gelu, has_beta, a);
 }
 
-void kittens_blockwise_fp8_gemm_impl_cdna4(
-    const void *A, const void *B, void *C,
-    const void *scale_A, const void *scale_B,
-    int M, int N, int K,
-    int a_dtype, int b_dtype,
-    int a_scaling_mode, int b_scaling_mode,
-    int out_dtype,
-    const void *bias, int bias_dtype,
-    const void *gelu_aux, int gelu_aux_dtype,
-    const void *c_in, float beta,
-    void *workspace, size_t workspace_size,
-    hipStream_t stream) {
-    const bool has_bias = (bias != nullptr);
-    const bool has_gelu = (gelu_aux != nullptr);
-    const bool has_beta = (c_in != nullptr);
-    const bool has_partial_k = (K < 2 * BLOCK_K || K % BLOCK_K != 0);
+class BlockwiseGemmCdna4 final : public BlockwiseGemmBackend {
+ public:
+    void run(const BlockwiseGemmArgs &args) override {
+        const int K = args.K;
+        const int out_dtype = args.out_dtype;
+        const void *bias = args.bias;
+        const int bias_dtype = args.bias_dtype;
+        const void *gelu_aux = args.gelu_aux;
+        const int gelu_aux_dtype = args.gelu_aux_dtype;
+        const void *c_in = args.c_in;
+        const float beta = args.beta;
+        hipStream_t stream = args.stream;
+        void *C = args.C;
+        void *workspace = args.workspace;
+        size_t workspace_size = args.workspace_size;
 
-    const void *kA = B,         *kB = A;
-    const void *ksa = scale_B,  *ksb = scale_A;
-    const int   kM = N,         kN = M;
-    const int   ka_mode = b_scaling_mode, kb_mode = a_scaling_mode;
-    const int   ka_dtype = b_dtype,       kb_dtype = a_dtype;
+        const bool has_bias = (bias != nullptr);
+        const bool has_gelu = (gelu_aux != nullptr);
+        const bool has_beta = (c_in != nullptr);
+        const bool has_partial_k = (K < 2 * BLOCK_K || K % BLOCK_K != 0);
 
-    const bool is_1d2d = (kb_mode == KITTENS_BLOCK_SCALING_2D);
-    const int cbsz = (ka_dtype == KITTENS_FP8E5M2) ? 1 : 0;
-    const int blgp = (kb_dtype == KITTENS_FP8E5M2) ? 1 : 0;
-    float *sa = reinterpret_cast<float *>(const_cast<void *>(ksa));
-    float *sb = reinterpret_cast<float *>(const_cast<void *>(ksb));
+        const void *kA = args.B,         *kB = args.A;
+        const void *ksa = args.scale_B,  *ksb = args.scale_A;
+        const int   kM = args.N,         kN = args.M;
+        const int   ka_mode = args.b_scaling_mode, kb_mode = args.a_scaling_mode;
+        const int   ka_dtype = args.b_dtype,       kb_dtype = args.a_dtype;
+
+        const bool is_1d2d = (kb_mode == KITTENS_BLOCK_SCALING_2D);
+        const int cbsz = (ka_dtype == KITTENS_FP8E5M2) ? 1 : 0;
+        const int blgp = (kb_dtype == KITTENS_FP8E5M2) ? 1 : 0;
+        float *sa = reinterpret_cast<float *>(const_cast<void *>(ksa));
+        float *sb = reinterpret_cast<float *>(const_cast<void *>(ksb));
 
 #ifdef NVTE_KITTENS_USE_POWER_OF_2_SCALE
-    constexpr bool use_pow2 = true;
+        constexpr bool use_pow2 = true;
 #else
-    constexpr bool use_pow2 = false;
+        constexpr bool use_pow2 = false;
 #endif
 
-    const int k_iters = K / BLOCK_K;
-    const int padM = ((kM + BLOCK_M - 1) / BLOCK_M) * BLOCK_M;
-    const int padN = ((kN + BLOCK_N - 1) / BLOCK_N) * BLOCK_N;
-    const size_t pow2_ws_bytes = align_up_pow2ws((size_t)k_iters * padM * sizeof(uint32_t)) +
-                                 (size_t)k_iters * padN * sizeof(uint32_t);
-    void *owned_ws = nullptr;
-    if (use_pow2 && !has_partial_k &&
-        (workspace == nullptr || workspace_size < pow2_ws_bytes)) {
-        (void)hipMalloc(&owned_ws, pow2_ws_bytes);
-        workspace = owned_ws;
-        workspace_size = pow2_ws_bytes;
-    }
-    const bool pow2_ws_ok = (workspace != nullptr && workspace_size >= pow2_ws_bytes);
-
-    auto run = [&]<typename OType>() {
-        if (!has_partial_k && use_pow2 && pow2_ws_ok) {
-            if (is_1d2d)
-                launch_1d2d_pow2<OType>(cbsz, blgp, has_bias, has_gelu, has_beta,
-                                        kA, kB, C, sa, sb, bias, bias_dtype,
-                                        gelu_aux, gelu_aux_dtype,
-                                        reinterpret_cast<const OType *>(c_in), beta,
-                                        kM, kN, K, workspace, stream);
-            else
-                launch_1d1d_pow2<OType>(cbsz, blgp, has_bias, has_gelu, has_beta,
-                                        kA, kB, C, sa, sb, bias, bias_dtype,
-                                        gelu_aux, gelu_aux_dtype,
-                                        reinterpret_cast<const OType *>(c_in), beta,
-                                        kM, kN, K, workspace, stream);
-            return;
+        const int k_iters = K / BLOCK_K;
+        const int padM = ((kM + BLOCK_M - 1) / BLOCK_M) * BLOCK_M;
+        const int padN = ((kN + BLOCK_N - 1) / BLOCK_N) * BLOCK_N;
+        const size_t pow2_ws_bytes = align_up_pow2ws((size_t)k_iters * padM * sizeof(uint32_t)) +
+                                     (size_t)k_iters * padN * sizeof(uint32_t);
+        void *owned_ws = nullptr;
+        if (use_pow2 && !has_partial_k &&
+            (workspace == nullptr || workspace_size < pow2_ws_bytes)) {
+            (void)hipMalloc(&owned_ws, pow2_ws_bytes);
+            workspace = owned_ws;
+            workspace_size = pow2_ws_bytes;
         }
-        micro_globals_fp8<OType> g{
-            _gl_A_t<kittens::fp8e4m3>((kittens::fp8e4m3 *)const_cast<void *>(kA), 1, 1, kM, K),
-            _gl_B_t<kittens::fp8e4m3>((kittens::fp8e4m3 *)const_cast<void *>(kB), 1, 1, kN, K),
-            _gl_C_t<OType>((OType *)C, 1, 1, kM, kN),
-            _gl_SA(sa, 1, 1, 1, kM * K),
-            _gl_SB(sb, 1, 1, 1, kN * K),
-            bias, bias_dtype, gelu_aux, gelu_aux_dtype,
-            reinterpret_cast<const OType *>(c_in), beta, stream};
-        dispatch_micro<OType>(is_1d2d, cbsz, blgp, has_bias, has_gelu, has_beta, has_partial_k, g);
-    };
+        const bool pow2_ws_ok = (workspace != nullptr && workspace_size >= pow2_ws_bytes);
 
-    if      (out_dtype == KITTENS_FLOAT32) run.template operator()<float>();
-    else if (out_dtype == KITTENS_FLOAT16) run.template operator()<kittens::half>();
-    else                                   run.template operator()<kittens::bf16>();
-    if (owned_ws != nullptr) { (void)hipStreamSynchronize(stream); (void)hipFree(owned_ws); }
+        auto run = [&]<typename OType>() {
+            if (!has_partial_k && use_pow2 && pow2_ws_ok) {
+                if (is_1d2d)
+                    launch_1d2d_pow2<OType>(cbsz, blgp, has_bias, has_gelu, has_beta,
+                                            kA, kB, C, sa, sb, bias, bias_dtype,
+                                            gelu_aux, gelu_aux_dtype,
+                                            reinterpret_cast<const OType *>(c_in), beta,
+                                            kM, kN, K, workspace, stream);
+                else
+                    launch_1d1d_pow2<OType>(cbsz, blgp, has_bias, has_gelu, has_beta,
+                                            kA, kB, C, sa, sb, bias, bias_dtype,
+                                            gelu_aux, gelu_aux_dtype,
+                                            reinterpret_cast<const OType *>(c_in), beta,
+                                            kM, kN, K, workspace, stream);
+                return;
+            }
+            micro_globals_fp8<OType> g{
+                _gl_A_t<kittens::fp8e4m3>((kittens::fp8e4m3 *)const_cast<void *>(kA), 1, 1, kM, K),
+                _gl_B_t<kittens::fp8e4m3>((kittens::fp8e4m3 *)const_cast<void *>(kB), 1, 1, kN, K),
+                _gl_C_t<OType>((OType *)C, 1, 1, kM, kN),
+                _gl_SA(sa, 1, 1, 1, kM * K),
+                _gl_SB(sb, 1, 1, 1, kN * K),
+                bias, bias_dtype, gelu_aux, gelu_aux_dtype,
+                reinterpret_cast<const OType *>(c_in), beta, stream};
+            dispatch_micro<OType>(is_1d2d, cbsz, blgp, has_bias, has_gelu, has_beta, has_partial_k, g);
+        };
+
+        if      (out_dtype == KITTENS_FLOAT32) run.template operator()<float>();
+        else if (out_dtype == KITTENS_FLOAT16) run.template operator()<kittens::half>();
+        else                                   run.template operator()<kittens::bf16>();
+        if (owned_ws != nullptr) { (void)hipStreamSynchronize(stream); (void)hipFree(owned_ws); }
+    }
+};
+
 }
 
-}  // namespace blockwise_gfx950
+BlockwiseGemmBackend *get_blockwise_backend_cdna4() {
+    static BlockwiseGemmCdna4 impl;
+    return &impl;
+}

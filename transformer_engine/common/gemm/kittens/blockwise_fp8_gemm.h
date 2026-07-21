@@ -14,7 +14,6 @@ void kittens_blockwise_fp8_gemm(
     const void *A, const void *B, void *C,
     const void *scale_A, const void *scale_B,
     int M, int N, int K,
-    bool transa, bool transb,
     int a_dtype, int b_dtype,
     int a_scaling_mode, int b_scaling_mode,
     int out_dtype,

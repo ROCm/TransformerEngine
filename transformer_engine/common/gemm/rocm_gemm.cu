@@ -2048,7 +2048,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       kittens_blockwise_fp8_gemm(
           p.A, p.B, outputD->data.dptr,
           p.A_scale_inv, p.B_scale_inv,
-          m, n, k, is_transa, is_transb,
+          m, n, k,
           static_cast<int>(p.Atype), static_cast<int>(p.Btype),
           p.A_scaling_mode, p.B_scaling_mode,
           static_cast<int>(outputD->data.dtype),

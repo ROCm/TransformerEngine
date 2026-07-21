@@ -5,9 +5,9 @@
 
 #include <type_traits>
 #include "kittens.cuh"
-#include "blockwise_fp8_gemm.h"
+#include "../blockwise_fp8_gemm_backend.h"
 
-namespace blockwise_gfx942 {
+namespace {
 
 #include "blockwise_fp8_gemm_helper.cuh"
 
@@ -409,65 +409,63 @@ static void dispatch_micro(micro_globals<AType, BType, OType> g,
     )
 }
 
-void kittens_blockwise_fp8_gemm_impl_cdna3(
-    const void *A, const void *B, void *C,
-    const void *scale_A, const void *scale_B,
-    int M, int N, int K,
-    bool transa, bool transb,
-    int a_dtype, int b_dtype,
-    int a_scaling_mode, int b_scaling_mode,
-    int out_dtype,
-    const void *bias, int bias_dtype,
-    const void *gelu_aux, int gelu_aux_dtype,
-    const void *c_in, float beta,
-    hipStream_t stream) {
+class BlockwiseGemmCdna3 final : public BlockwiseGemmBackend {
+ public:
+    void run(const BlockwiseGemmArgs &args) override {
+        const int K = args.K;
+        const int out_dtype = args.out_dtype;
 
-    // Dispatch passes canonical (A=weight/2D, B=activation/1D, M/N=user)
-    // The kernel uses swapped layout
-    const void *kA = B,          *kB = A;
-    const void *ksa = scale_B,   *ksb = scale_A;
-    void       *kC = C;
-    const int   kM = N,          kN = M;
-    const int   ka_mode = b_scaling_mode, kb_mode = a_scaling_mode;
-    const int   ka_dtype = b_dtype,       kb_dtype = a_dtype;
-    (void)transa; (void)transb;
+        // Dispatch passes canonical (A=weight/2D, B=activation/1D, M/N=user)
+        // The kernel uses swapped layout
+        const void *kA = args.B,          *kB = args.A;
+        const void *ksa = args.scale_B,   *ksb = args.scale_A;
+        void       *kC = args.C;
+        const int   kM = args.N,          kN = args.M;
+        const int   ka_mode = args.b_scaling_mode, kb_mode = args.a_scaling_mode;
+        const int   ka_dtype = args.b_dtype,       kb_dtype = args.a_dtype;
 
-    const bool is_1d2d   = (kb_mode == KITTENS_BLOCK_SCALING_2D);
-    const bool has_bias  = (bias != nullptr);
-    const bool has_gelu  = (gelu_aux != nullptr);
-    const bool has_beta  = (c_in != nullptr);
-    const bool has_partial_k = (K % BLOCK_K != 0);
-    const int  k_blocks  = (K + BLOCK_K - 1) / BLOCK_K;
+        const bool is_1d2d   = (kb_mode == KITTENS_BLOCK_SCALING_2D);
+        const bool has_bias  = (args.bias != nullptr);
+        const bool has_gelu  = (args.gelu_aux != nullptr);
+        const bool has_beta  = (args.c_in != nullptr);
+        const bool has_partial_k = (K % BLOCK_K != 0);
+        const int  k_blocks  = (K + BLOCK_K - 1) / BLOCK_K;
 
-    auto run = [&]<typename AType, typename BType, typename OType>() {
-        micro_globals<AType, BType, OType> g = {
-            _gl_A_t<AType>(reinterpret_cast<AType*>(const_cast<void*>(kA)), 1, 1, kM, K),
-            _gl_B_t<BType>(reinterpret_cast<BType*>(const_cast<void*>(kB)), 1, 1, kN, K),
-            _gl_C_t<OType>(reinterpret_cast<OType*>(kC), 1, 1, kM, kN),
-            _gl_SA(reinterpret_cast<float*>(const_cast<void*>(ksa)), 1, 1, k_blocks, kM),
-            is_1d2d
-                ? _gl_SB(reinterpret_cast<float*>(const_cast<void*>(ksb)), 1, 1, kittens::ceil_div(kN, SCALE_BLOCK), k_blocks)
-                : _gl_SB(reinterpret_cast<float*>(const_cast<void*>(ksb)), 1, 1, k_blocks, kN),
-            stream,
-            bias, bias_dtype, gelu_aux, gelu_aux_dtype,
-            reinterpret_cast<const OType*>(c_in), beta,
+        auto run = [&]<typename AType, typename BType, typename OType>() {
+            micro_globals<AType, BType, OType> g = {
+                _gl_A_t<AType>(reinterpret_cast<AType*>(const_cast<void*>(kA)), 1, 1, kM, K),
+                _gl_B_t<BType>(reinterpret_cast<BType*>(const_cast<void*>(kB)), 1, 1, kN, K),
+                _gl_C_t<OType>(reinterpret_cast<OType*>(kC), 1, 1, kM, kN),
+                _gl_SA(reinterpret_cast<float*>(const_cast<void*>(ksa)), 1, 1, k_blocks, kM),
+                is_1d2d
+                    ? _gl_SB(reinterpret_cast<float*>(const_cast<void*>(ksb)), 1, 1, kittens::ceil_div(kN, SCALE_BLOCK), k_blocks)
+                    : _gl_SB(reinterpret_cast<float*>(const_cast<void*>(ksb)), 1, 1, k_blocks, kN),
+                args.stream,
+                args.bias, args.bias_dtype, args.gelu_aux, args.gelu_aux_dtype,
+                reinterpret_cast<const OType*>(args.c_in), args.beta,
+            };
+            if (is_1d2d) dispatch_micro<true,  AType, BType, OType>(g, has_bias, has_gelu, has_beta, has_partial_k);
+            else         dispatch_micro<false, AType, BType, OType>(g, has_bias, has_gelu, has_beta, has_partial_k);
         };
-        if (is_1d2d) dispatch_micro<true,  AType, BType, OType>(g, has_bias, has_gelu, has_beta, has_partial_k);
-        else         dispatch_micro<false, AType, BType, OType>(g, has_bias, has_gelu, has_beta, has_partial_k);
-    };
 
-    const bool a_e5m2 = (ka_dtype == KITTENS_FP8E5M2);
-    const bool b_e5m2 = (kb_dtype == KITTENS_FP8E5M2);
-    auto run_ab = [&]<typename OType>() {
-        if      (!a_e5m2 && !b_e5m2) run.template operator()<kittens::fp8e4m3, kittens::fp8e4m3, OType>();
-        else if ( a_e5m2 && !b_e5m2) run.template operator()<kittens::fp8e5m2, kittens::fp8e4m3, OType>();
-        else                         run.template operator()<kittens::fp8e4m3, kittens::fp8e5m2, OType>();
-    };
-    if      (out_dtype == KITTENS_FLOAT32) run_ab.template operator()<float>();
-    else if (out_dtype == KITTENS_FLOAT16) run_ab.template operator()<kittens::half>();
-    else                                   run_ab.template operator()<kittens::bf16>();
-}
+        const bool a_e5m2 = (ka_dtype == KITTENS_FP8E5M2);
+        const bool b_e5m2 = (kb_dtype == KITTENS_FP8E5M2);
+        auto run_ab = [&]<typename OType>() {
+            if      (!a_e5m2 && !b_e5m2) run.template operator()<kittens::fp8e4m3, kittens::fp8e4m3, OType>();
+            else if ( a_e5m2 && !b_e5m2) run.template operator()<kittens::fp8e5m2, kittens::fp8e4m3, OType>();
+            else                         run.template operator()<kittens::fp8e4m3, kittens::fp8e5m2, OType>();
+        };
+        if      (out_dtype == KITTENS_FLOAT32) run_ab.template operator()<float>();
+        else if (out_dtype == KITTENS_FLOAT16) run_ab.template operator()<kittens::half>();
+        else                                   run_ab.template operator()<kittens::bf16>();
+    }
+};
 
 #undef BOOL_SWITCH
 
-}  // namespace blockwise_gfx942
+}
+
+BlockwiseGemmBackend *get_blockwise_backend_cdna3() {
+    static BlockwiseGemmCdna3 impl;
+    return &impl;
+}
