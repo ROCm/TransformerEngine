@@ -108,6 +108,7 @@ else:
     FusedAttnBackend = {
         "AOTriton": NVTE_Fused_Attn_Backend.NVTE_AOTriton,
         "CK": NVTE_Fused_Attn_Backend.NVTE_CK,
+        "XAttn": NVTE_Fused_Attn_Backend.NVTE_XAttn,
         "No_Backend": NVTE_Fused_Attn_Backend.NVTE_No_Backend,
     }
 

@@ -1342,7 +1342,7 @@ class FusedAttnFunc(torch.autograd.Function):
             # DelayedScaling:       Float8Tensor; dtype = torch.float16 or torch.bfloat16
             #                                     fp8_dtype = tex.DType.kFloat8E4M3
             # Float8CurrentScaling: torch.Tensor; dtype = torch.float16 or torch.bfloat16
-            if xattention.is_available():
+            if fused_attention_backend == FusedAttnBackend.get("XAttn"):
                 # ROCm: route the fp8 kernel to xAttention (returns bf16 out; the
                 # post-processing below re-quantizes to out_fp8 for the backward).
                 out_, aux_ctx_tensors = xattention.fp8_forward(
@@ -1673,7 +1673,7 @@ class FusedAttnFunc(torch.autograd.Function):
                         if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16
                         else out_fp8
                     )
-                    if xattention.is_available():
+                    if ctx.fused_attention_backend == FusedAttnBackend.get("XAttn"):
                         # ROCm: route the fp8 bwd kernel to xAttention (bf16 dq/dk/dv).
                         dq_, dk_, dv_ = xattention.fp8_backward(
                             d_out_fp8,
@@ -2047,7 +2047,7 @@ class FusedAttention(torch.nn.Module):
             fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
             if fp8_meta is not None and fp8_meta.get("local_recipes", None) is not None:
                 fp8_recipe = fp8_meta["local_recipes"][0]
-            if not xattention.is_available():
+            if not IS_HIP_EXTENSION:
                 assert fused_attention_backend == tex.NVTE_Fused_Attn_Backend.NVTE_FP8, (
                     f"cuDNN attention sub-backend {int(tex.NVTE_Fused_Attn_Backend.NVTE_FP8)}"
                     " is required for FP8 attention!"

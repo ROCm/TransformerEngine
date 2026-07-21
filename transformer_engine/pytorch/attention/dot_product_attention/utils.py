@@ -1160,6 +1160,20 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
             fused_attention_backend = None
+        # ROCm xAttention (fp8) currently supports DelayedScaling only; the C++
+        # selector cannot see the recipe, so fall back here for other recipes.
+        if (
+            IS_HIP_EXTENSION
+            and use_fused_attention
+            and fused_attention_backend == FusedAttnBackend.get("XAttn")
+        ):
+            _xa_recipe = fp8_meta["recipe"]
+            if fp8_meta.get("local_recipes", None) is not None:
+                _xa_recipe = fp8_meta["local_recipes"][0]
+            if not _xa_recipe.delayed():
+                logger.debug("Disabling xAttention: only DelayedScaling is currently supported")
+                use_fused_attention = False
+                fused_attention_backend = None
         if (
             use_fused_attention and (not IS_HIP_EXTENSION)
             and window_size is not None
@@ -1324,48 +1338,6 @@ def get_attention_backend(
         ),
         bool(available_backends[2]),
     )
-
-    # ROCm: route fp8 attention to xAttention under the FusedAttention backend.
-    # xAttention is fp8-only; when enabled (NVTE_XATTENTION=1) and the config is
-    # within its support envelope, force selection of FusedAttention/FP8 even
-    # though the ROCm fused backends themselves do not support fp8.
-    if fp8 and fp8_meta is not None and fp8_meta["recipe"].fp8_dpa:
-        # pylint: disable=import-outside-toplevel
-        from transformer_engine.pytorch.attention.dot_product_attention import xattention
-
-        if xattention.is_available():
-            _xa_recipe = fp8_meta["recipe"]
-            if fp8_meta.get("local_recipes", None) is not None:
-                _xa_recipe = fp8_meta["local_recipes"][0]
-            xattn_eligible = (
-                IS_HIP_EXTENSION
-                and _xa_recipe.delayed()
-                and head_dim_qk == head_dim_v
-                and head_dim_qk in (64, 128)
-                and not context_parallel
-                and inference_params is None
-                and qkv_format in ("bshd", "sbhd")
-                and "padding" not in attn_mask_type
-                and attn_mask_type in ("no_mask", "causal")
-                and core_attention_bias_type == "no_bias"
-                and attention_dropout == 0.0
-            )
-            if xattn_eligible:
-                use_flash_attention = False
-                use_unfused_attention = False
-                use_fused_attention = True
-                # ROCm's FusedAttnBackend has no "FP8" key; xAttention ignores the
-                # enum value, so use a non-No_Backend sentinel to pass downstream
-                # asserts. On CUDA this branch is unreachable (fp8 uses cuDNN).
-                fused_attention_backend = FusedAttnBackend.get(
-                    "FP8", FusedAttnBackend["CK"]
-                )
-                available_backends = [
-                    use_flash_attention,
-                    use_fused_attention,
-                    use_unfused_attention,
-                ]
-                logger.debug("Selecting xAttention (fp8) under the FusedAttention backend")
 
     # Select FusedAttention for performance
     if use_flash_attention and (not IS_HIP_EXTENSION) and use_fused_attention and device_compute_capability >= (9, 0):

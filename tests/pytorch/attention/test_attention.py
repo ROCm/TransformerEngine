@@ -115,7 +115,7 @@ if IS_HIP_EXTENSION:
         env = EnvVarCleaner(["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN",
                             "NVTE_FUSED_ATTN_CK", "NVTE_FUSED_ATTN_AOTRITON",
                             "NVTE_CK_USES_FWD_V3", "NVTE_CK_USES_BWD_V3", "NVTE_FP8_DPA_BWD",
-                            "NVTE_XATTENTION"])
+                            "NVTE_FUSED_ATTN_XATTN"])
         yield
 else:
     xattention_available = False
@@ -2435,7 +2435,7 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     """Test DotProductAttention module in FP8"""
     config = model_configs_fp8_vs_f16[model]
     if IS_HIP_EXTENSION and xattention_available:
-        os.environ["NVTE_XATTENTION"] = "1"
+        os.environ["NVTE_FUSED_ATTN_XATTN"] = "1"
         if is_training and not fp8_dpa_bwd:
             # xAttention is fp8-only; an f16 backward (NVTE_FP8_DPA_BWD=0) would
             # require a bf16 fused-attn backward, which is not available on ROCm.

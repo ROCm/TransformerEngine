@@ -29,7 +29,8 @@
   pybind11::enum_<NVTE_Fused_Attn_Backend>(m, "NVTE_Fused_Attn_Backend", pybind11::module_local()) \
         .value("NVTE_AOTriton", NVTE_Fused_Attn_Backend::NVTE_AOTriton)                            \
         .value("NVTE_CK", NVTE_Fused_Attn_Backend::NVTE_CK)                                        \
-        .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend); 
+        .value("NVTE_XAttn", NVTE_Fused_Attn_Backend::NVTE_XAttn)                                  \
+        .value("NVTE_No_Backend", NVTE_Fused_Attn_Backend::NVTE_No_Backend);
 #endif
 
 #define NVTE_DECLARE_COMMON_PYBIND11_HANDLES(m)                                                    \

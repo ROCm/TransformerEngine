@@ -49,6 +49,10 @@ def setup_pytorch_extension(
 
     # Source files
     sources = all_files_in_dir(Path(csrc_source_files), name_extension="cpp")
+    # The xAttention binding under csrc/xattention/ is an optional, out-of-tree
+    # module (its own setup.py + PYBIND11_MODULE, linked against a prebuilt
+    # xAttention checkout). It must not be compiled into transformer_engine_torch.
+    sources = [s for s in sources if "xattention" not in Path(s).parts]
 
     # Header files
     if rocm_build():

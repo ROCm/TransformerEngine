@@ -326,7 +326,8 @@ def get_available_attention_backends(
     """Check for all available attention backends that support a model configuration"""
     if IS_HIP_EXTENSION:
         env = EnvVarCleaner(["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN",
-                             "NVTE_FUSED_ATTN_AOTRITON", "NVTE_FUSED_ATTN_CK"])
+                             "NVTE_FUSED_ATTN_AOTRITON", "NVTE_FUSED_ATTN_CK",
+                             "NVTE_FUSED_ATTN_XATTN"])
 
     os.environ["NVTE_FLASH_ATTN"] = "1"
     os.environ["NVTE_FUSED_ATTN"] = "1"
@@ -413,7 +414,7 @@ def get_available_attention_backends(
         return available_backends, flash_attention_backend, fused_attention_backend
 
     if IS_HIP_EXTENSION:
-        backends = {"AOTriton": "AOTRITON", "CK": "CK"}
+        backends = {"AOTriton": "AOTRITON", "CK": "CK", "XAttn": "XATTN"}
         if AttentionLogging._is_logging_setup is False:
             AttentionLogging.setup_logging()
         with logging_context(highest_level=AttentionLogging._log_level):

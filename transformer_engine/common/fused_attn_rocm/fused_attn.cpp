@@ -269,6 +269,74 @@ void log_fused_attn_config(
   std::cout<<std::endl;
 }
 
+// check the fused attn config to see whether xAttention (fp8) can serve it.
+// xAttention is fp8-only (per-tensor mha_fwd_quant/mha_bwd_quant). This governs
+// backend *selection* only; the actual kernel dispatch happens in the PyTorch
+// layer (the common lib does not link the torch-based xAttention core).
+static bool is_xattn_backend_supported(
+    NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
+    NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
+    float dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t head_dim_qk,
+    size_t head_dim_v, int64_t window_size_left, int64_t window_size_right) {
+  namespace fa = transformer_engine::fused_attn_rocm;
+  const bool nvte_log_config = transformer_engine::getenv<bool>("NVTE_LOG_FUSED_ATTN_CONFIG");
+
+  // fp8-only: q and kv must both be fp8 (e4m3 or e5m2)
+  if ((q_dtype != kv_dtype) ||
+      !(q_dtype == NVTEDType::kNVTEFloat8E4M3 || q_dtype == NVTEDType::kNVTEFloat8E5M2)) {
+    if (nvte_log_config) std::cout << "xAttention requires q/k/v in fp8 (e4m3 or e5m2)" << std::endl;
+    return false;
+  }
+  // no bias / no dropout / vanilla softmax
+  if (bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) {
+    if (nvte_log_config) std::cout << "xAttention fused attn does not support bias" << std::endl;
+    return false;
+  }
+  if (dropout != 0.0f) {
+    if (nvte_log_config) std::cout << "xAttention fused attn does not support dropout" << std::endl;
+    return false;
+  }
+  if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+    if (nvte_log_config) std::cout << "xAttention fused attn only supports vanilla softmax" << std::endl;
+    return false;
+  }
+  // head dim: qk == v and in {64, 128}
+  if (head_dim_qk != head_dim_v || !(head_dim_qk == 64 || head_dim_qk == 128)) {
+    if (nvte_log_config) std::cout << "xAttention requires head_dim_qk==head_dim_v in {64, 128}" << std::endl;
+    return false;
+  }
+  // gqa divisibility
+  if (num_gqa_groups == 0 || num_attn_heads % num_gqa_groups != 0) {
+    if (nvte_log_config) std::cout << "Num attention heads must be divisible by num gqa groups" << std::endl;
+    return false;
+  }
+  // layout: bshd or sbhd only (no ragged/THD packing)
+  NVTE_QKV_Format qkv_format = nvte_get_qkv_format(qkv_layout);
+  if (!(qkv_format == NVTE_QKV_Format::NVTE_BSHD || qkv_format == NVTE_QKV_Format::NVTE_SBHD)) {
+    if (nvte_log_config) std::cout << "xAttention fused attn only supports bshd/sbhd layout" << std::endl;
+    return false;
+  }
+  // mask: no_mask or causal (no padding)
+  if (fa::is_padding_mask(attn_mask_type)) {
+    if (nvte_log_config) std::cout << "xAttention fused attn does not support padding mask" << std::endl;
+    return false;
+  }
+  // joint filter on sliding window and attn_mask (same rule as CK)
+  if (fa::is_causal_mask(attn_mask_type)) {
+    if (!((window_size_left == -1 || window_size_left >= 0) && window_size_right == 0)) {
+      if (nvte_log_config) std::cout << "When mask contains causal, window size should be (-1, 0) or (>=0, 0)" << std::endl;
+      return false;
+    }
+  } else if (attn_mask_type == NVTE_Mask_Type::NVTE_NO_MASK) {
+    if (!((window_size_left == -1 && window_size_right == -1) ||
+          (window_size_left >= 0 && window_size_right >= 0))) {
+      if (nvte_log_config) std::cout << "When no mask, window size should be (-1, -1) or (>=0, >=0)" << std::endl;
+      return false;
+    }
+  }
+  return true;
+}
+
 #pragma GCC diagnostic push
 #pragma GCC diagnostic error "-Wmissing-prototypes"
 #pragma GCC diagnostic error "-Wmissing-declarations"
@@ -298,9 +366,20 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   const bool nvte_fused_attn_ck = nvte_fused_attn && getenv<bool>("NVTE_FUSED_ATTN_CK", true);
   const bool nvte_fused_attn_aotriton =
       nvte_fused_attn && getenv<bool>("NVTE_FUSED_ATTN_AOTRITON", true);
+  // xAttention (fp8) is an optional, out-of-tree backend; opt-in only (default off).
+  const bool nvte_fused_attn_xattn = nvte_fused_attn && getenv<bool>("NVTE_FUSED_ATTN_XATTN", false);
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
+
+  // xAttention (fp8) is checked first: CK/AOTriton reject fp8, so there is no
+  // overlap with their fp16/bf16 configs.
+  if (nvte_fused_attn_xattn && is_xattn_backend_supported(
+        q_dtype, kv_dtype, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
+        num_attn_heads, num_gqa_groups, head_dim_qk, head_dim_v,
+        window_size_left, window_size_right)) {
+    return NVTE_Fused_Attn_Backend::NVTE_XAttn;
+  }
 
   // first check whether ck can be used, then check aotriton
   if(nvte_fused_attn_ck && fused_attn_rocm::is_ck_backend_supported(
