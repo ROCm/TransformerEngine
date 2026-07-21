@@ -17,6 +17,7 @@ Route-list contract (post-dispatch, no topk / no route weights):
 from __future__ import annotations
 
 import os
+import warnings
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -48,6 +49,34 @@ __all__ = [
 # Contraction step (routes accumulated per dot) for the route-list wgrad kernel. The wgrad
 # align is padded to this block size, independent of the fwd/dgrad BLOCK_SIZE_M.
 _WGRAD_CONTRACT_M = 32
+
+# Resolved lazily on first wgrad call: a callable (FlyDSL wgrad wrapper) if AITER's FlyDSL
+# kernel imports, otherwise ``False`` (fall back to the Triton kernel). ``None`` = unresolved.
+_FLYDSL_WGRAD: Any = None
+
+
+def _get_flydsl_wgrad():
+    """Resolve the AITER FlyDSL route-list wgrad kernel, or ``False`` if it can't be imported.
+
+    The FlyDSL wrapper shares the exact ``fused_route_list_moe_wgrad`` contract, so it drops
+    in as a faster backend on ROCm. If the import fails (AITER/FlyDSL not installed, or the
+    import raises for any reason) we cache the failure and warn exactly once, then use the
+    Triton kernel for the rest of the process.
+    """
+    global _FLYDSL_WGRAD
+    if _FLYDSL_WGRAD is None:
+        try:
+            from aiter.ops.flydsl.moe_wgrad import flydsl_moe_wgrad_autotuned
+
+            _FLYDSL_WGRAD = flydsl_moe_wgrad_autotuned
+        except Exception as exc:  # noqa: BLE001 -- any import failure -> Triton fallback
+            _FLYDSL_WGRAD = False
+            warnings.warn(
+                "permute-free wgrad: could not import the AITER FlyDSL wgrad kernel "
+                f"({type(exc).__name__}: {exc}); falling back to the Triton wgrad kernel.",
+                stacklevel=2,
+            )
+    return _FLYDSL_WGRAD
 
 
 def is_permute_free_grouped_gemm_enabled() -> bool:
@@ -607,18 +636,33 @@ def permute_free_grouped_gemm_bf16_wgrad(
         dtype=torch.bfloat16,
         device=hidden_states.device,
     )
-    fused_route_list_moe_wgrad(
-        x,
-        grad_output,
-        dW,
-        routing.wgrad_sorted_slot_ids,
-        routing.wgrad_block_start,
-        routing.wgrad_blocks_per_expert,
-        routing.route_start,
-        num_recv_tokens=routing.num_recv_tokens,
-        config=None,  # autotune BLOCK_SIZE_N/K / num_warps / num_stages per shape
-        contract_m=_WGRAD_CONTRACT_M,
-    )
+    flydsl_wgrad = _get_flydsl_wgrad()
+    if flydsl_wgrad:
+        # FlyDSL backend (AITER): identical route-list contract, in-place accumulate into dW.
+        # ``contract_m`` is baked into the FlyDSL kernel (WGRAD_BLOCK_M == _WGRAD_CONTRACT_M).
+        flydsl_wgrad(
+            x,
+            grad_output,
+            dW,
+            routing.wgrad_sorted_slot_ids,
+            routing.wgrad_block_start,
+            routing.wgrad_blocks_per_expert,
+            routing.route_start,
+            num_recv_tokens=routing.num_recv_tokens,
+        )
+    else:
+        fused_route_list_moe_wgrad(
+            x,
+            grad_output,
+            dW,
+            routing.wgrad_sorted_slot_ids,
+            routing.wgrad_block_start,
+            routing.wgrad_blocks_per_expert,
+            routing.route_start,
+            num_recv_tokens=routing.num_recv_tokens,
+            config=None,  # autotune BLOCK_SIZE_N/K / num_warps / num_stages per shape
+            contract_m=_WGRAD_CONTRACT_M,
+        )
     return dW
 
 

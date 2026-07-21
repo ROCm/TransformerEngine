@@ -311,22 +311,63 @@ def test_grouped_weight_main_grad_matches_ungrouped_grad(monkeypatch):
         assert main_grad[e].abs().sum() > 0, f"expert {e} has a zero main_grad (frozen)."
 
 
-def test_grouped_weight_requires_fuse_wgrad(monkeypatch):
-    """single_grouped_weight on the permute-free path without fuse_wgrad_accumulation must
-    raise rather than silently freeze experts (detached views -> dead positional grad)."""
+def test_grouped_weight_nonfused_grad_matches_ungrouped(monkeypatch):
+    """single_grouped_weight without fuse_wgrad_accumulation routes the [E, out, in] wgrad into
+    the grouped param's autograd ``.grad`` (the GEMM only sees detached per-expert views), and it
+    must match the ungrouped per-expert ``.grad`` expert-for-expert and accumulate across
+    backwards."""
     monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "1")
     torch.manual_seed(43)
 
-    num_recv_tokens, in_features, out_features = 64, 48, 64
-    num_experts = 4
+    num_recv_tokens, in_features, out_features = 128, 64, 96
+    num_experts, max_hits = 8, 3
     m_splits = [num_recv_tokens // num_experts] * num_experts
 
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, 2, "cuda", seed=17)
-    inp = torch.randn(num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16)
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=17)
+    num_routes = int(routing_map.sum().item())
+    # inp drives autograd for the grouped path (detached views carry no grad edge).
+    inp = torch.randn(
+        num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    W = torch.randn(num_experts, out_features, in_features, device="cuda", dtype=torch.bfloat16)
+    g = torch.randn(num_routes, out_features, device="cuda", dtype=torch.bfloat16)
 
-    mod = _make_grouped_linear(
+    # --- ungrouped reference: separate per-expert params, wgrad via autograd .grad ---
+    mod_a = _make_grouped_linear(
+        num_experts, in_features, out_features, grouped=False, fuse_wgrad=False
+    )
+    with torch.no_grad():
+        for i in range(num_experts):
+            getattr(mod_a, f"weight{i}").copy_(W[i])
+    routing_a = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
+    out_a = mod_a(inp, m_splits, permute_free_metadata=routing_a)
+    (out_a[:num_routes].float() * g.float()).sum().backward()
+    grad_a = torch.stack(
+        [getattr(mod_a, f"weight{i}").grad.float() for i in range(num_experts)], dim=0
+    )
+
+    # --- grouped, no fusion: wgrad accumulates into the grouped param's .grad ---
+    mod_b = _make_grouped_linear(
         num_experts, in_features, out_features, grouped=True, fuse_wgrad=False
     )
-    routing = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
-    with pytest.raises(RuntimeError, match="fuse_wgrad_accumulation"):
-        mod(inp, m_splits, permute_free_metadata=routing)
+    with torch.no_grad():
+        for i, view in enumerate(mod_b._get_weight_tensors()):
+            view.copy_(W[i])
+    routing_b = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
+    out_b = mod_b(inp, m_splits, permute_free_metadata=routing_b)
+    (out_b[:num_routes].float() * g.float()).sum().backward()
+
+    # Grad lands in the grouped param's .grad (not main_grad), shape [E, out, in].
+    assert getattr(mod_b.weight, "grad_added_to_main_grad", False) is False
+    assert mod_b.weight.grad is not None
+    assert tuple(mod_b.weight.grad.shape) == (num_experts, out_features, in_features)
+    grad_b = mod_b.weight.grad.view(num_experts, out_features, in_features).float()
+    assert _rel_l2(grad_b, grad_a) < 1e-3
+    for e in range(num_experts):
+        assert grad_b[e].abs().sum() > 0, f"expert {e} has a zero grad (frozen)."
+
+    # A second backward without zero_grad accumulates in place (grad-accumulation semantics).
+    out_b2 = mod_b(inp, m_splits, permute_free_metadata=routing_b)
+    (out_b2[:num_routes].float() * g.float()).sum().backward()
+    grad_b2 = mod_b.weight.grad.view(num_experts, out_features, in_features).float()
+    assert _rel_l2(grad_b2, 2.0 * grad_a) < 1e-3
