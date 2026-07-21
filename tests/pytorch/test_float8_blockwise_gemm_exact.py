@@ -30,7 +30,7 @@ def fp8_blockwise_gemm_supported() -> bool:
     emulated = get_device_compute_capability() >= (10, 0)
     return supported and not emulated
 
-def rocm_blockwise_unsupported_reason(
+def rocm_blockwise_is_supported(
     is_x_1d_scaled,
     is_w_1d_scaled,
     *,
@@ -40,12 +40,12 @@ def rocm_blockwise_unsupported_reason(
     is_1d2d = is_x_1d_scaled and not is_w_1d_scaled
     is_1d1d = is_x_1d_scaled and is_w_1d_scaled
     if not (is_1d2d or is_1d1d):
-        return "Only 1D by 1D and 1D by 2D block scaling GEMM is supported"
+        return False, "Only 1D by 1D and 1D by 2D block scaling GEMM is supported"
 
     if x_columnwise and not w_columnwise:
-        return "does not support TT layout"
+        return False, "does not support TT layout"
 
-    return None
+    return True, None
 
 
 def cublas_gemm_fp8_blockwise_case(
@@ -80,12 +80,12 @@ def cublas_gemm_fp8_blockwise_case(
     if not fp8_blockwise_gemm_supported():
         pytest.skip("CUDA version does not support blockwise FP8 gemm.")
     if IS_HIP_EXTENSION:
-        unsupported_reason = rocm_blockwise_unsupported_reason(
+        supported, reason = rocm_blockwise_is_supported(
             is_x_1d_scaled, is_w_1d_scaled,
             x_columnwise=x_columnwise, w_columnwise=w_columnwise,
         )
-        if unsupported_reason is not None:
-            pytest.skip(unsupported_reason)
+        if not supported:
+            pytest.skip(reason)
     # Setup device and random seed
     device = "cuda"
     seed = 0
@@ -264,10 +264,12 @@ def cublas_gemm_test_constraint_enforced(
     if not fp8_blockwise_gemm_supported():
         pytest.skip("CUDA version does not support blockwise FP8 gemm.")
     if IS_HIP_EXTENSION:
-        is_1d1d = is_x_1d_scaled and is_w_1d_scaled
-        is_1d2d = is_x_1d_scaled and not is_w_1d_scaled
-        if not (is_1d1d or is_1d2d):
-            expected_err_msg = "Only 1D by 1D and 1D by 2D block scaling GEMM is supported"
+        supported, reason = rocm_blockwise_is_supported(
+            is_x_1d_scaled, is_w_1d_scaled,
+            x_columnwise=x_columnwise, w_columnwise=w_columnwise,
+        )
+        if not supported:
+            expected_err_msg = reason
     # Setup device and random seed
     device = "cuda"
     seed = 0

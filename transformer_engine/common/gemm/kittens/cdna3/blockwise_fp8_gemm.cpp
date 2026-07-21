@@ -12,16 +12,17 @@ namespace blockwise_gfx942 {
 #include "blockwise_fp8_gemm_helper.cuh"
 
 constexpr int NUM_WARPS   = 8;
-constexpr int WARPS_ROW    = 2;
-constexpr int WARPS_COL    = 4;
+constexpr int WARPS_ROW   = 2;
+constexpr int WARPS_COL   = 4;
 constexpr int BLOCK_M     = 128;
 constexpr int BLOCK_N     = 256;
 constexpr int BLOCK_K     = 128;
 constexpr int REG_M       = BLOCK_M / 4;
 constexpr int REG_N       = BLOCK_N / 4;
 constexpr int MFMA_K      = 32;
-constexpr int SCALE_BLOCK = 128; // blockwise scale granularity
+constexpr int SCALE_BLOCK = 128;
 constexpr int NUM_THREADS = NUM_WARPS * kittens::WARP_THREADS;
+constexpr size_t SMEM_BYTES = (BLOCK_M * BLOCK_K + BLOCK_N * BLOCK_K) * sizeof(kittens::fp8e4m3);
 
 template <typename T> using _gl_A_t = kittens::gl<T, -1, -1, -1, -1>;
 template <typename T> using _gl_B_t = kittens::gl<T, -1, -1, -1, -1>;
@@ -50,7 +51,7 @@ struct micro_globals {
     int K() const { return (int)a.cols(); }
     dim3 grid()  { return dim3(((N() + BLOCK_N - 1) / BLOCK_N) * ((M() + BLOCK_M - 1) / BLOCK_M)); }
     dim3 block() { return dim3(NUM_THREADS); }
-    size_t dynamic_shared_memory() { return 49152; }
+    size_t dynamic_shared_memory() { return SMEM_BYTES; }
 };
 
 template <typename AType, typename BType, typename OType, bool IS_PARTIAL_M, bool IS_PARTIAL_N,
@@ -62,7 +63,6 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
     kittens::shared_allocator al((int*)&__shm[0]);
     kittens::st<AType, BLOCK_M, BLOCK_K> (&As) = al.allocate<kittens::st<AType, BLOCK_M, BLOCK_K>>();
     kittens::st<BType, BLOCK_N, BLOCK_K> (&Bs) = al.allocate<kittens::st<BType, BLOCK_N, BLOCK_K>>();
-    __shared__ float smem_sa[2][BLOCK_M];
 
     kittens::rt<AType, REG_M, MFMA_K> at[5];
     kittens::rt<BType, REG_N, MFMA_K> bt[3];
@@ -114,10 +114,16 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
     const uint32_t sa_range = (uint32_t)((M - row * BLOCK_M) * 4);
 
     const bool is_first_k_partial = is_k_partial && (num_k_steps == 1);
-    if (is_first_k_partial || is_last_m) load_tile_masked<NUM_THREADS>(As, g.a, row, 0, M, K);
-    else                         G::load(As, g.a, {0, 0, row, 0});
-    if (is_first_k_partial || is_last_n) load_tile_masked<NUM_THREADS>(Bs, g.b, col, 0, N, K);
-    else                         G::load(Bs, g.b, {0, 0, col, 0});
+    if (is_first_k_partial || is_last_m) {
+        load_tile_masked<NUM_THREADS>(As, g.a, row, 0, M, K);
+    } else {
+        G::load(As, g.a, {0, 0, row, 0});
+    }
+    if (is_first_k_partial || is_last_n) {
+        load_tile_masked<NUM_THREADS>(Bs, g.b, col, 0, N, K);
+    } else {
+        G::load(Bs, g.b, {0, 0, col, 0});
+    }
 
     // Prologue
     float sb_cur = llvm_amdgcn_s_buffer_load_f32(sb_srsrc, 0, 0);
@@ -199,9 +205,14 @@ void micro_tk_1d2d(const micro_globals<AType, BType, OType> g) {
 
         // Cluster 6
         asm volatile("s_waitcnt lgkmcnt(0)");
-        if (is_next_k_partial || is_last_m) load_tile_masked<NUM_THREADS>(As, g.a, row, k_step + 1, M, K);
-        else                         kittens::store_register_buffer_to_shared<NUM_THREADS>(As, a_buffer_next);
-        if (is_next_k_partial || is_last_n) load_tile_masked<NUM_THREADS>(Bs, g.b, col, k_step + 1, N, K);
+        if (is_next_k_partial || is_last_m) {
+            load_tile_masked<NUM_THREADS>(As, g.a, row, k_step + 1, M, K);
+        } else {
+            kittens::store_register_buffer_to_shared<NUM_THREADS>(As, a_buffer_next);
+        }
+        if (is_next_k_partial || is_last_n) {
+            load_tile_masked<NUM_THREADS>(Bs, g.b, col, k_step + 1, N, K);
+        }
         load_scale_global_reg<REG_M / 16>(sa_reg0, sa_block + k_step * M, local_m0, sa_range);
         load_scale_global_reg<REG_M / 16>(sa_reg1, sa_block + k_step * M, local_m1, sa_range);
         sb_next = llvm_amdgcn_s_buffer_load_f32(sb_srsrc, (k_step + 1) * 4, 0);

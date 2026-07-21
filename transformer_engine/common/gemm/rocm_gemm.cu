@@ -2062,6 +2062,11 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
       return;
     }
   }
+#else
+  NVTE_CHECK(!(is_blockwise_fp8_scaling(inputA->scaling_mode) &&
+               is_blockwise_fp8_scaling(inputB->scaling_mode)),
+             "Blockwise FP8 GEMM requires the HipKittens GEMM backend "
+             "(build with USE_HIPKITTENS_GEMM).");
 #endif
   bool is_mxfp8 = inputA->scaling_mode == NVTE_MXFP8_1D_SCALING
                || inputB->scaling_mode == NVTE_MXFP8_1D_SCALING;

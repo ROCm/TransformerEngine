@@ -6,23 +6,19 @@ cmake_minimum_required(VERSION 3.21)
 option(NVTE_KITTENS_USE_POWER_OF_2_SCALE
     "Use HW E8M0 MFMA scaling for power-of-2 blockwise FP8 scales (gfx950)" ON)
 
-function(try_enable_hipkittens_gemm)
-    list(FIND CMAKE_HIP_ARCHITECTURES "gfx942" _gfx942_index)
-    list(FIND CMAKE_HIP_ARCHITECTURES "gfx950" _gfx950_index)
-    if(_gfx942_index EQUAL -1 AND _gfx950_index EQUAL -1)
-        message(STATUS "HipKittens GEMM disabled (neither gfx942 nor gfx950 in CMAKE_HIP_ARCHITECTURES)")
-        set(USE_HIPKITTENS_GEMM OFF PARENT_SCOPE)
-        return()
-    endif()
+list(FIND CMAKE_HIP_ARCHITECTURES "gfx942" _gfx942_index)
+list(FIND CMAKE_HIP_ARCHITECTURES "gfx950" _gfx950_index)
 
-    include(CheckCXXCompilerFlag)
-    check_cxx_compiler_flag("-std=c++20" HAS_CXX20)
-    if(NOT HAS_CXX20)
-        message(WARNING "HipKittens GEMMs require C++20")
-        set(USE_HIPKITTENS_GEMM OFF PARENT_SCOPE)
-        return()
-    endif()
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-std=c++20" HAS_CXX20)
 
+if(_gfx942_index EQUAL -1 AND _gfx950_index EQUAL -1)
+    message(STATUS "HipKittens GEMM disabled (neither gfx942 nor gfx950 in CMAKE_HIP_ARCHITECTURES)")
+    set(USE_HIPKITTENS_GEMM OFF PARENT_SCOPE)
+elseif(NOT HAS_CXX20)
+    message(WARNING "HipKittens GEMMs require C++20")
+    set(USE_HIPKITTENS_GEMM OFF PARENT_SCOPE)
+else()
     set(HIPKITTENS_CDNA3_INCLUDE_DIR
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../../3rdparty/hipkittens_cdna3/include")
     set(HIPKITTENS_CDNA4_INCLUDE_DIR
@@ -83,6 +79,4 @@ function(try_enable_hipkittens_gemm)
 
     install(TARGETS kittens_gemm
         DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine/lib)
-endfunction()
-
-try_enable_hipkittens_gemm()
+endif()

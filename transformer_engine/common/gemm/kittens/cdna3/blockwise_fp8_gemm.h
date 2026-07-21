@@ -8,24 +8,7 @@
 #include <hip/hip_runtime.h>
 #include <cstddef>
 
-#ifndef KITTENS_DTYPE_ENUM_DEFINED
-#define KITTENS_DTYPE_ENUM_DEFINED
-enum KittensDType {
-    KITTENS_FLOAT32  = 4,
-    KITTENS_FLOAT16  = 5,
-    KITTENS_BFLOAT16 = 6,
-    KITTENS_FP8E4M3  = 7,
-    KITTENS_FP8E5M2  = 8,
-};
-#endif  // KITTENS_DTYPE_ENUM_DEFINED
-
-#ifndef KITTENS_SCALING_MODE_DEFINED
-#define KITTENS_SCALING_MODE_DEFINED
-enum KittensScalingMode {
-    KITTENS_BLOCK_SCALING_1D = 2,
-    KITTENS_BLOCK_SCALING_2D = 3,
-};
-#endif  // KITTENS_SCALING_MODE_DEFINED
+#include "../kittens_gemm_enums.h"
 
 namespace blockwise_gfx942 {
 void kittens_blockwise_fp8_gemm_impl_cdna3(
