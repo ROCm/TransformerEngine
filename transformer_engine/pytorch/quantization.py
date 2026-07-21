@@ -186,7 +186,7 @@ def check_recipe_support(recipe: Recipe) -> None:
     # PyTorch 2.11). The HYBRID recipe uses e4m3 for forward and e5m2 for backward,
     # producing mixed-type GEMMs during the backward pass. Only Format.E4M3 (which
     # uses e4m3 for both forward and backward) is compatible with the Triton backend.
-    use_gemm_triton = bool(int(os.environ.get("NVTE_USE_GEMM_TRITON", "0")))
+    use_gemm_triton = IS_HIP_EXTENSION and bool(int(os.environ.get("NVTE_USE_GEMM_TRITON", "0")))
     if use_gemm_triton and recipe is not None and hasattr(recipe, "fp8_format"):
         if recipe.fp8_format == Format.HYBRID:
             raise ValueError(

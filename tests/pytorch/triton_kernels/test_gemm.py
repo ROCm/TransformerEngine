@@ -39,14 +39,28 @@ import transformer_engine_torch as tex
 # --- Feature detection --------------------------------------------------------
 
 major, minor = torch.cuda.get_device_capability()
-is_gfx950 = (major == 9 and minor >= 5)
+# MXFP8 requires the fp8-scaled MFMA instructions currently available only on
+# gfx950+ (compute capability >= 9.5). Name reflects the capability, not the
+# specific arch, so it stays meaningful if future archs also support it.
+has_mxfp8_support = (major == 9 and minor >= 5)
 
 from transformer_engine.pytorch import torch_version
 _torch_ver = torch_version()
 
-requires_gfx950 = pytest.mark.skipif(
-    not is_gfx950,
-    reason="MXFP8 requires gfx950 (compute capability >= 9.5)",
+requires_mxfp8_support = pytest.mark.skipif(
+    not has_mxfp8_support,
+    reason="MXFP8 requires hardware with fp8-scaled MFMA (gfx950+, cc >= 9.5)",
+)
+
+# tl.dot_scaled()'s current API (RHS scale in [N, K//32] layout) is only
+# available from PyTorch 2.10 onwards (Triton 3.6+).
+requires_torch210 = pytest.mark.skipif(
+    _torch_ver < (2, 10),
+    reason=(
+        "Triton tl.dot_scaled() RHS scale bug fixed in PyTorch 2.10 "
+        f"(found {_torch_ver}). The TE kernel uses the new dot_scaled API "
+        "(rhs_scale in [N, K//32] layout) which requires PyTorch >= 2.10."
+    ),
 )
 
 # --- Test parameters ----------------------------------------------------------
@@ -258,15 +272,8 @@ def test_triton_vs_pytorch_fp8_mixed(M, K, N, layout, fp8_format):
     )
 
 
-@requires_gfx950
-@pytest.mark.skipif(
-    _torch_ver < (2, 10),
-    reason=(
-        "Triton tl.dot_scaled() RHS scale bug fixed in PyTorch 2.10 "
-        f"(found {_torch_ver}). The TE kernel uses the new dot_scaled API "
-        "(rhs_scale in [N, K//32] layout) which requires PyTorch >= 2.10."
-    ),
-)
+@requires_mxfp8_support
+@requires_torch210
 @pytest.mark.parametrize("M, K, N", MXFP8_SHAPES)
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_triton_vs_pytorch_mxfp8(M, K, N, layout):
@@ -345,15 +352,8 @@ def test_triton_vs_cpp_fp8_mixed(M, K, N, layout, fp8_format):
     )
 
 
-@requires_gfx950
-@pytest.mark.skipif(
-    _torch_ver < (2, 10),
-    reason=(
-        "Triton tl.dot_scaled() RHS scale bug fixed in PyTorch 2.10 "
-        f"(found {_torch_ver}). The TE kernel uses the new dot_scaled API "
-        "(rhs_scale in [N, K//32] layout) which requires PyTorch >= 2.10."
-    ),
-)
+@requires_mxfp8_support
+@requires_torch210
 @pytest.mark.parametrize("M, K, N", MXFP8_SHAPES)
 @pytest.mark.parametrize("layout", LAYOUTS)
 def test_triton_vs_cpp_mxfp8(M, K, N, layout):

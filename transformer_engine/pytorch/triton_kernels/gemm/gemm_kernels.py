@@ -15,6 +15,28 @@ import triton
 import triton.language as tl
 
 
+@triton.jit
+def swizzle_pid(pid, num_pid_m, num_pid_n, GROUP_SIZE_M: tl.constexpr):
+    """Group linear program ids into ``GROUP_SIZE_M``-tall column strips for L2 reuse.
+
+    With ``GROUP_SIZE_M == 1`` this degenerates to the naive row-major mapping
+    (`pid_m = pid // num_pid_n`); with larger groups, consecutive pids sweep
+    down a strip of ``GROUP_SIZE_M`` rows before advancing to the next N block,
+    which lets adjacent blocks reuse the same A rows in L2.
+    """
+    if GROUP_SIZE_M == 1:
+        pid_m = pid // num_pid_n
+        pid_n = pid % num_pid_n
+    else:
+        num_pid_in_group = GROUP_SIZE_M * num_pid_n
+        group_id = pid // num_pid_in_group
+        first_pid_m = group_id * GROUP_SIZE_M
+        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
+        pid_m = first_pid_m + (pid % group_size_m)
+        pid_n = (pid % num_pid_in_group) // group_size_m
+    return pid_m, pid_n
+
+
 # MXFP8 (Microscaling FP8) Matmul Kernel and Wrapper
 # Uses Triton's tl.dot_scaled() for native block-scaled FP8 matmul
 
@@ -26,7 +48,9 @@ import triton.language as tl
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4}),
         triton.Config({'BLOCK_SIZE_M': 64, 'BLOCK_SIZE_N': 256, 'BLOCK_SIZE_K': 64, 'GROUP_SIZE_M': 4}),
     ],
-    key=['M', 'N', 'K'],
+    # Include the FP8 format constexprs so E4M3/E5M2 combos get separately-
+    # tuned configs (different formats can lower to different MFMA paths).
+    key=['M', 'N', 'K', 'FP8_FORMAT_A', 'FP8_FORMAT_B'],
 )
 @triton.heuristics({
     'EVEN_K': lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0,
@@ -68,12 +92,7 @@ def mxfp8_matmul_kernel(
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
 
     # Swizzled block mapping for better L2 cache utilization
-    num_pid_in_group = GROUP_SIZE_M * num_pid_n
-    group_id = pid // num_pid_in_group
-    first_pid_m = group_id * GROUP_SIZE_M
-    group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-    pid_m = first_pid_m + (pid % group_size_m)
-    pid_n = (pid % num_pid_in_group) // group_size_m
+    pid_m, pid_n = swizzle_pid(pid, num_pid_m, num_pid_n, GROUP_SIZE_M)
 
     # Initialize accumulator
     accumulator = tl.zeros((BLOCK_SIZE_M, BLOCK_SIZE_N), dtype=tl.float32)
@@ -191,8 +210,10 @@ def mxfp8_matmul_kernel(
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 128, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 1, 'waves_per_eu': 2}, num_warps=8),
         triton.Config({'BLOCK_SIZE_M': 128, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 32, 'waves_per_eu': 2}, num_warps=4),
     ],
-    # TODO: do we need to use different data types as key?
-    key=['M', 'N', 'K'],
+    # Include the FP8 code-path flags so INPUT_FP8 / OUTPUT_FP8 variants get
+    # separately-tuned configs (they change the loop body enough that the
+    # best (BLOCK, GROUP, warps) can differ).
+    key=['M', 'N', 'K', 'INPUT_FP8', 'OUTPUT_FP8'],
     # Ran into stream capture error when using cuda_graph, thus disabled.
     #use_cuda_graph=True,
     # With ACCUMULATE=True each benchmark iteration would add computed_c to
@@ -249,16 +270,7 @@ def matmul_kernel(
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    if GROUP_SIZE_M == 1:
-        pid_m = pid // num_pid_n
-        pid_n = pid % num_pid_n
-    else:
-        num_pid_in_group = GROUP_SIZE_M * num_pid_n
-        group_id = pid // num_pid_in_group
-        first_pid_m = group_id * GROUP_SIZE_M
-        group_size_m = min(num_pid_m - first_pid_m, GROUP_SIZE_M)
-        pid_m = first_pid_m + (pid % group_size_m)
-        pid_n = (pid % num_pid_in_group) // group_size_m
+    pid_m, pid_n = swizzle_pid(pid, num_pid_m, num_pid_n, GROUP_SIZE_M)
 
     # ----------------------------------------------------------
     # Create pointers for the first blocks of A and B.
