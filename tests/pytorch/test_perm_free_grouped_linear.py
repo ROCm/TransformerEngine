@@ -304,8 +304,10 @@ def test_grouped_weight_main_grad_matches_ungrouped_grad(monkeypatch):
     assert getattr(mod_b.weight, "grad_added_to_main_grad", False) is True
     main_grad = mod_b.weight.main_grad.view(num_experts, out_features, in_features).float()
 
-    # Same kernel dW -> both sinks must match (near bit-identical: bf16 dW upcast to fp32).
-    assert _rel_l2(main_grad, grad_a) < 1e-3
+    # The grouped fp32 main_grad is accumulated directly by the kernel (no intermediate bf16
+    # dW round-trip), so it is *more* precise than the bf16 ungrouped .grad reference and
+    # differs from it only by that single bf16 rounding (~1e-3 relative).
+    assert _rel_l2(main_grad, grad_a) < 5e-3
     # And every expert actually received a non-zero gradient (guards against frozen experts).
     for e in range(num_experts):
         assert main_grad[e].abs().sum() > 0, f"expert {e} has a zero main_grad (frozen)."

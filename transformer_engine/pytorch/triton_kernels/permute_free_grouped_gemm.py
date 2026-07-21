@@ -579,6 +579,8 @@ def permute_free_grouped_gemm_bf16_wgrad(
     routing: MoERoutingMetadata,
     *,
     config: Optional[Dict[str, Any]] = None,
+    out: Optional[torch.Tensor] = None,
+    accumulate: bool = False,
 ) -> torch.Tensor:
     """Route-list fused weight-gradient (FC1 backward wrt weights).
 
@@ -594,11 +596,18 @@ def permute_free_grouped_gemm_bf16_wgrad(
         Compact per-route gradient ``[num_routes, out_features]``, bf16.
     weights_shape:
         ``(num_experts, out_features, in_features)``.
+    out:
+        Optional ``[E, out, in]`` destination to write the wgrad into directly (bf16 or fp32).
+        When given, the FlyDSL kernel folds the wgrad into it (``+=`` if ``accumulate`` else
+        ``=``) with no scratch tensor / separate elementwise pass, and this tensor is returned.
+    accumulate:
+        With ``out``: add into it (``out += dW``) rather than overwrite (``out = dW``).
 
     Returns
     -------
     torch.Tensor
-        Stacked weight gradient ``[num_experts, out_features, in_features]``, bf16.
+        The wgrad ``[num_experts, out_features, in_features]`` -- ``out`` when supplied, else a
+        freshly allocated bf16 tensor.
     """
     if hidden_states.dtype != torch.bfloat16 or grad_output.dtype != torch.bfloat16:
         raise TypeError("permute_free_grouped_gemm_bf16_wgrad requires bf16 inputs.")
@@ -631,14 +640,56 @@ def permute_free_grouped_gemm_bf16_wgrad(
 
     routing = _prepare_wgrad_align(routing, _WGRAD_CONTRACT_M)
 
+    flydsl_wgrad = _get_flydsl_wgrad()
+    # ``out`` lets the caller fold the wgrad straight into an existing accumulator (a param's
+    # ``main_grad`` / ``.grad``), skipping the scratch dW + separate add/copy. The FlyDSL kernel
+    # supports a race-free accumulate/overwrite epilogue (fp32 or bf16) for this; without it (or
+    # when it's unavailable) we fall back to computing a scratch bf16 dW and applying it.
+    if out is not None:
+        assert tuple(out.shape) == (num_experts, out_features, in_features), (
+            f"wgrad out shape {tuple(out.shape)} != {(num_experts, out_features, in_features)}"
+        )
+        if flydsl_wgrad:
+            out_dtype = "fp32" if out.dtype == torch.float32 else "bf16"
+            flydsl_wgrad(
+                x,
+                grad_output,
+                out,
+                routing.wgrad_sorted_slot_ids,
+                routing.wgrad_block_start,
+                routing.wgrad_blocks_per_expert,
+                routing.route_start,
+                num_recv_tokens=routing.num_recv_tokens,
+                accumulate=bool(accumulate),
+                out_dtype=out_dtype,
+            )
+            return out
+        # No FlyDSL kernel: compute a scratch bf16 dW (overwrite), then apply into ``out``.
+        dW = torch.zeros(
+            (num_experts, out_features, in_features),
+            dtype=torch.bfloat16,
+            device=hidden_states.device,
+        )
+        fused_route_list_moe_wgrad(
+            x, grad_output, dW,
+            routing.wgrad_sorted_slot_ids, routing.wgrad_block_start,
+            routing.wgrad_blocks_per_expert, routing.route_start,
+            num_recv_tokens=routing.num_recv_tokens, config=None,
+            contract_m=_WGRAD_CONTRACT_M,
+        )
+        if accumulate:
+            out.add_(dW)
+        else:
+            out.copy_(dW)
+        return out
+
     dW = torch.zeros(
         (num_experts, out_features, in_features),
         dtype=torch.bfloat16,
         device=hidden_states.device,
     )
-    flydsl_wgrad = _get_flydsl_wgrad()
     if flydsl_wgrad:
-        # FlyDSL backend (AITER): identical route-list contract, in-place accumulate into dW.
+        # FlyDSL backend (AITER): identical route-list contract, writes dW in place.
         # ``contract_m`` is baked into the FlyDSL kernel (WGRAD_BLOCK_M == _WGRAD_CONTRACT_M).
         flydsl_wgrad(
             x,
@@ -914,6 +965,11 @@ class PermuteFreeBackwardResult:
     dgrad: Optional[torch.Tensor] = None
     grad_probs: Optional[torch.Tensor] = None
     wgrad_stacked: Optional[torch.Tensor] = None
+    # True when the wgrad was written directly into the caller-provided ``wgrad_out`` (FC1
+    # path), so the caller must not re-apply it. False when ``wgrad_stacked`` is a fresh tensor
+    # the caller still needs to sink (FC2 -- its transpose precludes an in-place accumulate --
+    # or the plain positional-return path).
+    wgrad_applied: bool = False
 
 
 def permute_free_grouped_gemm_forward(
@@ -969,6 +1025,8 @@ def permute_free_grouped_gemm_backward(
     fc1_activation: Optional[str] = None,
     preact: Optional[torch.Tensor] = None,
     dispatched_probs: Optional[torch.Tensor] = None,
+    wgrad_out: Optional[torch.Tensor] = None,
+    wgrad_accumulate: bool = False,
 ) -> PermuteFreeBackwardResult:
     """Dispatch the permute-free grouped-GEMM backward (mirror of the forward dispatch).
 
@@ -976,12 +1034,18 @@ def permute_free_grouped_gemm_backward(
     gated-activation path (``fc1_activation`` set) the raw ``2F`` GEMM-output gradient (and the
     route-prob gradient) is first reconstructed from the saved ``preact`` and fed to the
     *unchanged* dgrad/wgrad. ``hidden_states`` (the forward input) is only needed for wgrad.
+
+    ``wgrad_out`` (optional ``[E, out, in]`` accumulator) folds the wgrad straight into the
+    caller's buffer (``+=`` if ``wgrad_accumulate`` else ``=``) instead of returning a fresh
+    tensor -- supported on the FC1 path only (FC2's transpose precludes an in-place write). When
+    used, ``result.wgrad_applied`` is ``True`` and ``result.wgrad_stacked`` is that same buffer.
     """
     grad_output = grad_output.contiguous()
     route_space = getattr(routing, "route_space", False)
     dgrad = None
     grad_probs = None
     wgrad_stacked = None
+    wgrad_applied = False
 
     if route_space:
         # FC2: grad is token-space [num_recv, out]. dgrad gathers back to the compact route
@@ -1016,10 +1080,13 @@ def permute_free_grouped_gemm_backward(
         if requires_wgrad:
             weights_shape = (num_gemms, weights[0].size(0), weights[0].size(1))
             dW = permute_free_grouped_gemm_bf16_wgrad(
-                hidden_states, grad_output, weights_shape, routing
+                hidden_states, grad_output, weights_shape, routing,
+                out=wgrad_out, accumulate=wgrad_accumulate,
             )  # [E, N, H]
             wgrad_stacked = dW
+            wgrad_applied = wgrad_out is not None
 
     return PermuteFreeBackwardResult(
-        dgrad=dgrad, grad_probs=grad_probs, wgrad_stacked=wgrad_stacked
+        dgrad=dgrad, grad_probs=grad_probs, wgrad_stacked=wgrad_stacked,
+        wgrad_applied=wgrad_applied,
     )

@@ -493,6 +493,38 @@ class _GroupedLinear(torch.autograd.Function):
             # Permute-free gather GEMM: both dgrad and wgrad gather along the
             # contraction axis inside a single Triton kernel.
             if getattr(ctx, "use_perm_free_grouped_gemm", False):
+                # Single grouped weight: the GEMM only ever sees detached per-expert views, so
+                # the whole [E, out, in] wgrad goes straight to the grouped param (the positional
+                # autograd return is dead). When the kernel supports it (FC1 path), point it at
+                # the destination accumulator up front so it folds the wgrad in directly -- no
+                # scratch dW and no separate add/copy. FC2 (route_space) transposes the kernel
+                # output, so it still returns a stacked dW we sink below.
+                grouped = getattr(ctx, "perm_free_grouped", False) and ctx.weights_requires_grad
+                route_space = getattr(ctx.routing_metadata, "route_space", False)
+                wgrad_out = None
+                wgrad_accumulate = False
+                if grouped and not route_space:
+                    grouped_weight = ctx.grouped_weight_ref()
+                    assert (
+                        grouped_weight is not None
+                    ), "grouped weight was removed before its wgrad could be applied"
+                    gw_shape = tuple(grouped_weight.shape)
+                    if ctx.grouped_fuse_wgrad:
+                        wgrad_out = ctx.grouped_main_grad_func().view(gw_shape)
+                        wgrad_accumulate = not ctx.grouped_overwrite_main_grad
+                    else:
+                        # Accumulate into the grouped param's autograd ``.grad``; allocate it on
+                        # the first backward (overwrite) and add in place thereafter so grad
+                        # accumulation across microbatches still works.
+                        if grouped_weight.grad is None:
+                            grouped_weight.grad = torch.empty(
+                                gw_shape, dtype=grouped_weight.dtype, device=grad_output.device
+                            )
+                            wgrad_accumulate = False
+                        else:
+                            wgrad_accumulate = True
+                        wgrad_out = grouped_weight.grad
+
                 # The wrapper decides FC1 vs FC2 dgrad/wgrad from the routing metadata.
                 pf_result = permute_free_grouped_gemm_backward(
                     grad_output,
@@ -505,31 +537,32 @@ class _GroupedLinear(torch.autograd.Function):
                     fc1_activation=getattr(ctx, "perm_free_fc1_activation", None),
                     preact=perm_free_preact,
                     dispatched_probs=dispatched_probs,
+                    wgrad_out=wgrad_out,
+                    wgrad_accumulate=wgrad_accumulate,
                 )
                 if getattr(ctx, "perm_free_grouped", False) and pf_result.wgrad_stacked is not None:
-                    # Single grouped weight: the GEMM only ever sees detached per-expert views, so
-                    # the whole [E, out, in] wgrad is routed straight to the grouped param instead
-                    # of through the (dead) positional autograd return.
                     grouped_weight = ctx.grouped_weight_ref()
                     assert (
                         grouped_weight is not None
                     ), "grouped weight was removed before its wgrad could be applied"
-                    dW = pf_result.wgrad_stacked
-                    if ctx.grouped_fuse_wgrad:
-                        # fuse_wgrad_accumulation: accumulate into main_grad (fp32) in one pass.
-                        main_grad = ctx.grouped_main_grad_func().view(dW.shape)
-                        if ctx.grouped_overwrite_main_grad:
-                            main_grad.copy_(dW)
-                        else:
-                            main_grad.add_(dW)
-                        if hasattr(grouped_weight, "grad_added_to_main_grad"):
+                    if pf_result.wgrad_applied:
+                        # FC1: the kernel already folded the wgrad into main_grad / .grad.
+                        if ctx.grouped_fuse_wgrad and hasattr(
+                            grouped_weight, "grad_added_to_main_grad"
+                        ):
                             grouped_weight.grad_added_to_main_grad = True
                     else:
-                        # No fusion: accumulate into the grouped param's autograd ``.grad`` (same
-                        # shape [E, out, in]), mirroring what AccumulateGrad would do for a normal
-                        # leaf. First backward takes ownership of the kernel buffer; later ones
-                        # accumulate in place so grad accumulation across microbatches still works.
-                        if grouped_weight.grad is None:
+                        # FC2 (transpose) or no direct kernel: sink the returned stacked wgrad.
+                        dW = pf_result.wgrad_stacked
+                        if ctx.grouped_fuse_wgrad:
+                            main_grad = ctx.grouped_main_grad_func().view(dW.shape)
+                            if ctx.grouped_overwrite_main_grad:
+                                main_grad.copy_(dW)
+                            else:
+                                main_grad.add_(dW)
+                            if hasattr(grouped_weight, "grad_added_to_main_grad"):
+                                grouped_weight.grad_added_to_main_grad = True
+                        elif grouped_weight.grad is None:
                             grouped_weight.grad = dW
                         else:
                             grouped_weight.grad.add_(dW)
