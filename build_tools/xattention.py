@@ -148,8 +148,9 @@ def _compile_shim(build_dir: Path) -> Path:
         / "xattention_torch_shim.cpp"
     )
     shim_obj = build_dir / "xattention_torch_shim.o"
+    compiler = os.getenv("CXX", "c++")
     subprocess.run(
-        ["c++", "-O3", "-fPIC", "-std=c++20", "-c", str(shim_src), "-o", str(shim_obj)],
+        [compiler, "-O3", "-fPIC", "-std=c++20", "-c", str(shim_src), "-o", str(shim_obj)],
         check=True,
     )
     return shim_obj
@@ -190,7 +191,9 @@ def _build_core(xa_dir: Path, arch: str, mode: str) -> Tuple[Path, Path, Optiona
         # satisfies these via the torch shim; inject the same shim into the
         # generator's link so it can be built (and run) at build time.
         shim_obj = _compile_shim(build_dir)
-        configure.append(f"-DCMAKE_EXE_LINKER_FLAGS={shim_obj}")
+        # Use *_INIT so we seed the initial linker flags without clobbering any
+        # CMAKE_EXE_LINKER_FLAGS coming from the environment or a toolchain file.
+        configure.append(f"-DCMAKE_EXE_LINKER_FLAGS_INIT={shim_obj}")
     subprocess.run(configure, check=True, cwd=str(xa_dir))
 
     targets = ["interface", "codeGen"]

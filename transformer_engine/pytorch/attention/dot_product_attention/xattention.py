@@ -42,9 +42,9 @@ def _xattention_root_and_arch() -> Tuple[Optional[str], Optional[str]]:
                 XATTENTION_ARCH,
             )
 
-            root = root or XATTENTION_ROOT
+            root = XATTENTION_ROOT
             arch = arch or XATTENTION_ARCH
-        except Exception:  # pragma: no cover - generated only by a real build
+        except ImportError:  # pragma: no cover - generated only by a real build
             pass
     if root is None:
         # dot_product_attention -> attention -> pytorch -> transformer_engine -> repo root
@@ -89,7 +89,7 @@ def _configure_runtime_env() -> None:
 
             kernel_mode = (XATTENTION_KERNEL_MODE or "AOT").upper()
             kernel_dir = XATTENTION_KERNEL_DIR
-        except Exception:  # pragma: no cover - generated only by a real build
+        except ImportError:  # pragma: no cover - generated only by a real build
             pass
 
         # Writable scratch must not live in the (possibly read-only) install tree.
@@ -123,7 +123,7 @@ try:
     import transformer_engine_xattention as _xattn  # noqa: F401
 
     _IMPORT_ERROR = None
-except Exception as e:  # pragma: no cover - depends on the optional build
+except (ImportError, OSError) as e:  # pragma: no cover - depends on the optional build
     _xattn = None
     _IMPORT_ERROR = e
 
@@ -131,13 +131,6 @@ except Exception as e:  # pragma: no cover - depends on the optional build
 def is_installed() -> bool:
     """Whether the xAttention binding module is importable (ignores the env gate)."""
     return _xattn is not None
-
-
-def is_available() -> bool:
-    """Whether the xAttention binding is importable and enabled (NVTE_XATTENTION=1)."""
-    if _xattn is None:
-        return False
-    return os.getenv("NVTE_XATTENTION", "0") == "1"
 
 
 def import_error() -> Optional[BaseException]:

@@ -57,7 +57,6 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
     attn_forward_func_with_cp,
 )
 from transformer_engine.pytorch.attention.dot_product_attention.softmax import FusedScaleMaskSoftmax
-from transformer_engine.pytorch.attention.dot_product_attention import xattention
 from transformer_engine.pytorch.attention.inference import InferenceParams
 from transformer_engine.pytorch.cpu_offload import (
     is_cpu_offload_enabled,
@@ -92,6 +91,12 @@ _flash_attn_fwd = None
 _flash_attn_bwd = None
 _flash_attn_varlen_fwd = None
 _flash_attn_varlen_bwd = None
+
+# xAttention (fp8) is a ROCm-only optional backend; importing it also configures
+# its runtime env, so keep it off the CUDA path entirely.
+xattention = None
+if IS_HIP_EXTENSION:
+    from transformer_engine.pytorch.attention.dot_product_attention import xattention
 
 if IS_HIP_EXTENSION and os.getenv("NVTE_FLASH_ATTN_AITER", "0") == "1":
     try:

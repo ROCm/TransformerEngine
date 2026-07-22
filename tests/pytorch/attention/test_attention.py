@@ -110,6 +110,7 @@ if IS_HIP_EXTENSION:
 
     xattention_available = _xattn_mod.is_installed()
     from utils import EnvVarCleaner
+
     @pytest.fixture(autouse=True)
     def reset_attn_backend():
         env = EnvVarCleaner(["NVTE_FLASH_ATTN", "NVTE_FUSED_ATTN", "NVTE_UNFUSED_ATTN",
@@ -2167,6 +2168,10 @@ qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 # the shared cuDNN set above does not cover (head_dim 64, MQA, sliding-window,
 # and small/cross-attn shape edges). Kept separate so the CUDA test_mha_fp8_vs_f16
 # matrix (which reuses model_configs_fp8_vs_f16) is unaffected.
+#
+# These run only when the (closed-source) xAttention extension is installed and on
+# gfx950/gfx1250 hardware; they always skip in CI (the prebuilt core is not in the
+# CI image). Validate locally and attach results to the PR.
 model_configs_fp8_xattn = {
     # test: ModelConfig(b, sq, hq, dqk, ...)
     # head_dim 64
@@ -2470,6 +2475,11 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     config = model_configs_fp8_dpa[model]
     if IS_HIP_EXTENSION and xattention_available:
         os.environ["NVTE_FUSED_ATTN_XATTN"] = "1"
+        if scaling_mode == "current":
+            # xAttention is the only fp8 fused-attn backend on ROCm and it only
+            # supports DelayedScaling; skip explicitly instead of falling through
+            # to the generic "no FP8 backend" skip below.
+            pytest.skip("xAttention currently supports DelayedScaling only")
         if is_training and not fp8_dpa_bwd:
             # xAttention is fp8-only; an f16 backward (NVTE_FP8_DPA_BWD=0) would
             # require a bf16 fused-attn backward, which is not available on ROCm.
@@ -2655,6 +2665,41 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
                         True,
                     )
     os.environ["NVTE_UnfusedDPA_Emulate_FP8"] = "0"
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
+@pytest.mark.skipif(not xattention_available, reason="xAttention extension is not installed.")
+@pytest.mark.parametrize("model", model_configs_fp8_xattn.keys())
+@pytest.mark.parametrize("qkv_layout", ["bshd_bshd_bshd", "sbhd_sbhd_sbhd"])
+def test_xattn_backend_selection(model, qkv_layout):
+    """xAttention must be the selected fp8 fused-attn backend across its envelope.
+
+    Exercises get_attention_backend dispatch (C++ is_xattn_backend_supported plus
+    the Python DelayedScaling recipe guard) without running the kernel, so it
+    catches selection regressions cheaply. Needs a GPU for arch detection but not
+    the xAttention kernels themselves.
+    """
+    config = model_configs_fp8_xattn[model]
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=True,
+    )
+    _, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.float8_e4m3fn,
+        qkv_layout=qkv_layout,
+        fp8=True,
+        fp8_meta={"recipe": fp8_recipe},
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    assert FusedAttnBackend["XAttn"] in fused_attn_backends, (
+        f"xAttention should be selected for config '{model}' with layout {qkv_layout}, "
+        f"got fused backends: {fused_attn_backends}"
+    )
 
 
 def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_recipe):

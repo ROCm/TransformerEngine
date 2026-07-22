@@ -215,7 +215,8 @@ To enable specific backends in compilation and/or in runtime, the following envi
 
 * NVTE_FUSED_ATTN - enable the fused attention, default = 1;
 * NVTE_FUSED_ATTN_CK - enable the AITER and CK backends, default = 1;
-* NVTE_FUSED_ATTN_AOTRITON - enable the AOTriton backend, default = 1.
+* NVTE_FUSED_ATTN_AOTRITON - enable the AOTriton backend, default = 1;
+* NVTE_FUSED_ATTN_XATTN - enable the xAttention backend (PyTorch only), default = 1.
 
 Setting env NVTE_FUSED_ATTN_<BACKEND>=0 in compilation will skip the build of the specific backend, which saves the overall building time.
 Setting env NVTE_FUSED_ATTN_<BACKEND>=0 in runtime provides the option to choose specific backends in runtime.

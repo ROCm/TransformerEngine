@@ -45,6 +45,7 @@ Backends are gated by env vars (set to `0` to disable, unset or `1` to enable):
 | `NVTE_FUSED_ATTN` | Master toggle for all fused attention | `1` |
 | `NVTE_FUSED_ATTN_CK` | CK backend | inherits `NVTE_FUSED_ATTN` |
 | `NVTE_FUSED_ATTN_AOTRITON` | AOTriton backend | inherits `NVTE_FUSED_ATTN` |
+| `NVTE_FUSED_ATTN_XATTN` | xAttention fp8 backend (PyTorch-only) | `1` |
 | `NVTE_FLASH_ATTN` | Flash attention | `1` |
 
 CI backend configs (`ci/_utils.sh::configure_fused_attn_env`): `auto`, `ck`, `aotriton`, `flash`, `unfused`.

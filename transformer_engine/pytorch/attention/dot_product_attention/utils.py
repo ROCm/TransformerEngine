@@ -1019,7 +1019,7 @@ def get_attention_backend(
                 "Disabling FusedAttention as it does not support sliding window attention for FP8"
             )
             use_fused_attention = False
-        elif not IS_HIP_EXTENSION and attention_dropout != 0.0:
+        elif attention_dropout != 0.0:
             logger.debug(
                 "Disabling FusedAttention as it only supports sliding window attention "
                 "without dropout"
@@ -1167,6 +1167,7 @@ def get_attention_backend(
         if (
             IS_HIP_EXTENSION
             and use_fused_attention
+            and fp8_meta is not None
             and fused_attention_backend == FusedAttnBackend.get("XAttn")
         ):
             _xa_recipe = fp8_meta["recipe"]

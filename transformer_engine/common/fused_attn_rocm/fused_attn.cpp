@@ -282,6 +282,8 @@ static bool is_xattn_backend_supported(
   const bool nvte_log_config = transformer_engine::getenv<bool>("NVTE_LOG_FUSED_ATTN_CONFIG");
 
   // fp8-only: q and kv must both be fp8 (e4m3 or e5m2)
+  // TODO(xattn): only e4m3 is exercised by the test suite; verify the e5m2 kernel
+  // path before relying on it.
   if ((q_dtype != kv_dtype) ||
       !(q_dtype == NVTEDType::kNVTEFloat8E4M3 || q_dtype == NVTEDType::kNVTEFloat8E5M2)) {
     if (nvte_log_config) std::cout << "xAttention requires q/k/v in fp8 (e4m3 or e5m2)" << std::endl;
@@ -366,8 +368,8 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   const bool nvte_fused_attn_ck = nvte_fused_attn && getenv<bool>("NVTE_FUSED_ATTN_CK", true);
   const bool nvte_fused_attn_aotriton =
       nvte_fused_attn && getenv<bool>("NVTE_FUSED_ATTN_AOTRITON", true);
-  // xAttention (fp8) is an optional, out-of-tree backend; opt-in only (default off).
-  const bool nvte_fused_attn_xattn = nvte_fused_attn && getenv<bool>("NVTE_FUSED_ATTN_XATTN", false);
+  // xAttention (fp8)
+  const bool nvte_fused_attn_xattn = nvte_fused_attn && getenv<bool>("NVTE_FUSED_ATTN_XATTN", true);
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
@@ -499,6 +501,12 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       input_rng_state,
       wkspace,
       stream);
+  } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_XAttn) {
+    // xAttention dispatch lives only in the PyTorch layer (see
+    // transformer_engine/pytorch/.../xattention.py). It must never be selected
+    // for a caller that routes through this C++ entry point (e.g. JAX).
+    NVTE_ERROR("NVTE_XAttn backend has no C++ dispatch; it is only supported through the "
+               "PyTorch attention layer.\n");
   }else{
     NVTE_ERROR("Invalid combination of data type and sequence length for rocm fused attention. \n");
   }
@@ -599,6 +607,12 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
       input_rng_state,
       wkspace,
       stream);
+  } else if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_XAttn) {
+    // xAttention dispatch lives only in the PyTorch layer (see
+    // transformer_engine/pytorch/.../xattention.py). It must never be selected
+    // for a caller that routes through this C++ entry point (e.g. JAX).
+    NVTE_ERROR("NVTE_XAttn backend has no C++ dispatch; it is only supported through the "
+               "PyTorch attention layer.\n");
   }else{
     NVTE_ERROR("Invalid combination of data type and sequence length for rocm fused attention. \n");
   }
