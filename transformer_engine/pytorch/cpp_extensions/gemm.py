@@ -460,7 +460,26 @@ def general_gemm(
         "beta": beta,
     }
 
-    out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+    # FlyDSL is currently an opt-in MXFP8-only backend. Keep every other
+    # datatype/recipe on the existing C++ generic_gemm path.
+    use_gemm_flydsl = (
+        IS_HIP_EXTENSION
+        and bool(int(os.environ.get("NVTE_USE_FLYDSL", "0")))
+        and isinstance(A, MXFP8TensorStorage)
+        and isinstance(B, MXFP8TensorStorage)
+    )
+
+    if use_gemm_flydsl:
+        # Lazy import keeps FlyDSL off the normal Transformer Engine import path.
+        from ..flydsl_kernels.gemm import te_generic_gemm_flydsl
+
+        out, bias_grad, gelu_input, extra_output = te_generic_gemm_flydsl(
+            *args, **kwargs
+        )
+    else:
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(
+            *args, **kwargs
+        )
 
     if IS_HIP_EXTENSION and use_bf16_tn_output_workaround:
         out = cast_if_needed(out, torch.float32)
