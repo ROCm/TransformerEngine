@@ -272,7 +272,7 @@ void log_fused_attn_config(
 // check the fused attn config to see whether xAttention (fp8) can serve it.
 // xAttention is fp8-only (per-tensor mha_fwd_quant/mha_bwd_quant). This governs
 // backend *selection* only; the actual kernel dispatch happens in the PyTorch
-// layer (the common lib does not link the torch-based xAttention core).
+// layer.
 static bool is_xattn_backend_supported(
     NVTEDType q_dtype, NVTEDType kv_dtype, NVTE_QKV_Layout qkv_layout,
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,

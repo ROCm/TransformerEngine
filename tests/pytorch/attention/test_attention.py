@@ -2168,10 +2168,6 @@ qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 # the shared cuDNN set above does not cover (head_dim 64, MQA, sliding-window,
 # and small/cross-attn shape edges). Kept separate so the CUDA test_mha_fp8_vs_f16
 # matrix (which reuses model_configs_fp8_vs_f16) is unaffected.
-#
-# These run only when the (closed-source) xAttention extension is installed and on
-# gfx950/gfx1250 hardware; they always skip in CI (the prebuilt core is not in the
-# CI image). Validate locally and attach results to the PR.
 model_configs_fp8_xattn = {
     # test: ModelConfig(b, sq, hq, dqk, ...)
     # head_dim 64

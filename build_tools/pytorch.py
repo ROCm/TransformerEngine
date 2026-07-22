@@ -49,9 +49,10 @@ def setup_pytorch_extension(
 
     # Source files
     sources = all_files_in_dir(Path(csrc_source_files), name_extension="cpp")
-    # The xAttention binding under csrc/xattention/ is an optional, out-of-tree
-    # module (its own setup.py + PYBIND11_MODULE, linked against a prebuilt
-    # xAttention checkout). It must not be compiled into transformer_engine_torch.
+    # The xAttention binding under csrc/xattention/ is built as a separate in-tree
+    # extension (transformer_engine_xattention; see build_tools/xattention.py),
+    # linked against the 3rdparty/xAttention submodule. It must not be compiled
+    # into transformer_engine_torch.
     sources = [s for s in sources if "xattention" not in Path(s).parts]
 
     # Header files

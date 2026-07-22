@@ -278,10 +278,6 @@ if __name__ == "__main__":
                     )
                 )
 
-                # Optional xAttention fp8 attention backend (ROCm gfx950/gfx1250).
-                # Built as a self-contained second extension (needs -std=c++20 and
-                # a static-archive link group). Skipped gracefully when the
-                # submodule is absent or the target arch is unsupported.
                 if rocm_build():
                     from build_tools.xattention import (
                         setup_xattention_extension,

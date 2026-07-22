@@ -7,8 +7,7 @@
 // libtorch compatibility shim.
 //
 // The prebuilt, closed-source xAttention core (lib/<arch>/xattention_tileiras.a)
-// was compiled against a newer libtorch that exposes the PyObject-preservation
-// methods
+// was compiled against a libtorch that exposes the PyObject-preservation methods
 //     c10::TensorImpl::incref_pyobject() const
 //     c10::TensorImpl::decref_pyobject() const
 // These do not exist in the torch 2.8 shipped in the build container, so the
