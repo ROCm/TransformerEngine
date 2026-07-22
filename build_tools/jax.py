@@ -144,6 +144,9 @@ def setup_jax_extension(
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
         cxx_flags.append("-DNVTE_WITH_CUBLASMP")
 
+    # NCCL EP is CUDA-only; nccl_ep_enabled() returns False on ROCm, so the
+    # -DNVTE_WITH_NCCL_EP define is never added and the EP sources no-op at their
+    # #ifdef boundary (matching the gate in build_tools/pytorch.py).
     # Disabled on ROCm
     if not rocm_build() and nccl_ep_enabled():
         cxx_flags.append("-DNVTE_WITH_NCCL_EP")

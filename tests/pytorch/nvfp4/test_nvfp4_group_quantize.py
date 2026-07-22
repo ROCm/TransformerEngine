@@ -203,7 +203,7 @@ def test_rht_with_quantization_block_tiling_versus_reference(
 
     # Swizzled SF is emitted only by the Blackwell RHT cast-fusion kernel; no fusion path on ROCm.
     if IS_HIP_EXTENSION and optimize_for_gemm:
-        pytest.skip("RHT cast-fusion swizzled SF is Blackwell-only")
+        pytest.skip("RHT cast-fusion swizzled SF is not supported on ROCm")
 
     # The grouped RHT cast-fusion kernel that honors with_gemm_swizzled_scales
     # (group_row_cast_col_hadamard_transform_cast_fusion.cu) is only dispatched

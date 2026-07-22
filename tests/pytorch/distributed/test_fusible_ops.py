@@ -32,7 +32,6 @@ from transformer_engine.pytorch import (
 )
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.utils import is_fp8_fnuz
-import transformer_engine_torch as tex
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
@@ -888,6 +887,7 @@ def _test_fp8_scale_update(
         """Expected absmax and FP8 scale"""
         amax = ref.abs().amax()
         max_val = {
+            # ROCm: fnuz FP8 (gfx942) caps E4M3 at 240; OCP (gfx950+/CUDA) caps at 448.
             "forward": 448.0 if not is_fp8_fnuz() else 240.0,
             "backward": 57344.0,
         }[stage]

@@ -202,6 +202,14 @@ def skip_unsupported_backward_override(
         and layer_type == "grouped_linear"
     ):
         pytest.skip("NVFP4 4over6 currently does not support grouped quantization.")
+    if (
+        IS_HIP_EXTENSION
+        and quant_recipe is not None
+        and quant_recipe.nvfp4()
+        and getattr(quant_recipe, "row_scaled_activation", False)
+        and layer_type == "grouped_linear"
+    ):
+        pytest.skip("Row-scaled NVFP4 grouped GEMM is not supported on ROCm.")
     if backward_override is None:
         return
     if quant_recipe is None and backward_override is not None:
