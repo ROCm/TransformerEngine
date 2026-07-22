@@ -1346,7 +1346,7 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
-@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize("model", ["small", "126m"])
 @pytest.mark.parametrize(
     "fp8_recipe",
     [
@@ -1418,6 +1418,7 @@ def test_linear_accuracy_flydsl(
     try:
         # Native TE backend.
         os.environ.pop("NVTE_USE_FLYDSL", None)
+        os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
 
         reset_rng_states()
         FP8GlobalStateManager.reset()
@@ -1430,6 +1431,7 @@ def test_linear_accuracy_flydsl(
 
         # FlyDSL backend.
         os.environ["NVTE_USE_FLYDSL"] = "1"
+        os.environ["NVTE_FLYDSL_GEMM_WARN_FALLBACK"] = "1"
 
         reset_rng_states()
         FP8GlobalStateManager.reset()
@@ -1442,6 +1444,7 @@ def test_linear_accuracy_flydsl(
 
     finally:
         os.environ.pop("NVTE_USE_FLYDSL", None)
+        os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
         FP8GlobalStateManager.reset()
 
     atol, rtol = get_tolerances(dtype)

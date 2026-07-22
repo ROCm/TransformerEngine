@@ -27,6 +27,8 @@ from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, roc
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
+from .exceptions import FlyDSLUnsupportedError
+
 # Transformer Engine-local FlyDSL utilities.
 from .fp8_gemm_utils import (
     G2SLoader,
@@ -1127,11 +1129,27 @@ def doGemm(
         f"got {C.dtype}"
     )
     assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
-    assert M_runtime % _BLOCK_M == 0, f"M={M_runtime} must be a multiple of {_BLOCK_M}"
-    assert N_runtime % _BLOCK_N == 0, f"N={N_runtime} must be a multiple of {_BLOCK_N}"
-    assert K_runtime % _BLOCK_K == 0, f"K={K_runtime} must be a multiple of {_BLOCK_K}"
+    if M_runtime % _BLOCK_M != 0:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL FP8 GEMM requires M to be a multiple of {_BLOCK_M}, "
+            f"got M={M_runtime}"
+        )
+    if N_runtime % _BLOCK_N != 0:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL FP8 GEMM requires N to be a multiple of {_BLOCK_N}, "
+            f"got N={N_runtime}"
+        )
+    if K_runtime % _BLOCK_K != 0:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL FP8 GEMM requires K to be a multiple of {_BLOCK_K}, "
+            f"got K={K_runtime}"
+        )
     num_k_tiles = K_runtime // _BLOCK_K
-    assert num_k_tiles >= 4, f"K={K_runtime} gives {num_k_tiles} K128 tiles; need at least 4"
+    if num_k_tiles < 4:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL FP8 GEMM requires at least 4 K{_BLOCK_K} tiles, "
+            f"got K={K_runtime} ({num_k_tiles} tiles)"
+        )
     assert A_scale_inv.dtype == torch.float32 and A_scale_inv.numel() == 1
     assert B_scale_inv.dtype == torch.float32 and B_scale_inv.numel() == 1
     assert C.shape == (M_runtime, N_runtime), (
