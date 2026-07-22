@@ -1346,6 +1346,145 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
 
 @pytest.mark.parametrize("dtype", param_types)
 @pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize(
+    "fp8_recipe",
+    [
+        None,
+        recipe.Float8CurrentScaling(),
+        recipe.DelayedScaling(),
+        recipe.MXFP8BlockScaling(),
+    ],
+)
+def test_linear_accuracy_flydsl(
+    dtype,
+    bs,
+    model,
+    fp8_recipe,
+):
+    """Compare FlyDSL and native TE Linear forward, dgrad, and wgrad."""
+
+    if not IS_HIP_EXTENSION:
+        pytest.skip("FlyDSL GEMM is only supported on HIP.")
+
+    fp8 = fp8_recipe is not None
+    config = model_configs[model]
+
+    if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
+        if not mxfp8_available:
+            pytest.skip(reason_for_no_mxfp8)
+    elif fp8 and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+
+    if config.max_seqlen_q % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    # Validate the GEMM backend, not quantized parameter storage.
+    # FlyDSL GEMM does not currently support bias.
+    with quantized_model_init(enabled=False, recipe=fp8_recipe):
+        linear_ref = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            device="cuda",
+        ).eval()
+
+        linear_flydsl = Linear(
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            device="cuda",
+        ).eval()
+
+    with torch.no_grad():
+        linear_flydsl.weight.copy_(linear_ref.weight)
+
+    input_shape = (
+        config.max_seqlen_q,
+        bs,
+        config.hidden_size,
+    )
+
+    inp_ref = torch.randn(
+        input_shape,
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    inp_flydsl = inp_ref.detach().clone().requires_grad_(True)
+
+    try:
+        # Native TE backend.
+        os.environ.pop("NVTE_USE_FLYDSL", None)
+
+        reset_rng_states()
+        FP8GlobalStateManager.reset()
+
+        with autocast(enabled=fp8, recipe=fp8_recipe):
+            out_ref = linear_ref(inp_ref)
+
+        out_ref.sum().backward()
+        torch.cuda.synchronize()
+
+        # FlyDSL backend.
+        os.environ["NVTE_USE_FLYDSL"] = "1"
+
+        reset_rng_states()
+        FP8GlobalStateManager.reset()
+
+        with autocast(enabled=fp8, recipe=fp8_recipe):
+            out_flydsl = linear_flydsl(inp_flydsl)
+
+        out_flydsl.sum().backward()
+        torch.cuda.synchronize()
+
+    finally:
+        os.environ.pop("NVTE_USE_FLYDSL", None)
+        FP8GlobalStateManager.reset()
+
+    atol, rtol = get_tolerances(dtype)
+
+    if fp8:
+        atol = max(atol, 1e-2)
+        rtol = max(rtol, 1e-2)
+
+    torch.testing.assert_close(
+        out_flydsl,
+        out_ref,
+        atol=atol,
+        rtol=rtol,
+    )
+
+    torch.testing.assert_close(
+        inp_flydsl.grad,
+        inp_ref.grad,
+        atol=atol,
+        rtol=rtol,
+    )
+
+    # Wgrad is an NT GEMM with a reduction over the flattened
+    # sequence/batch dimension. FlyDSL and the native TE backend may use
+    # different FP32 accumulation orders, so allow the small expected
+    # non-associative rounding difference.
+    wgrad_atol = atol
+    wgrad_rtol = rtol
+
+    if dtype == torch.float32 and not fp8:
+        wgrad_atol = max(wgrad_atol, 1e-4)
+        wgrad_rtol = max(wgrad_rtol, 1e-4)
+
+    torch.testing.assert_close(
+        linear_flydsl.weight.grad,
+        linear_ref.weight.grad,
+        atol=wgrad_atol,
+        rtol=wgrad_rtol,
+    )
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("bs", batch_sizes)
 @pytest.mark.parametrize("model", ["small"])
 @pytest.mark.parametrize("fp8_model_params", all_boolean)
 @pytest.mark.parametrize("module_str", ["linear", "layernorm_mlp", "layernorm_linear"])

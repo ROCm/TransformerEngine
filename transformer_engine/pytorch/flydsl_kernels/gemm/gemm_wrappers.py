@@ -18,6 +18,39 @@ from .fp8_gemm import fp8_matmul
 from .mxfp8_gemm import mxfp8_matmul
 
 
+def _product(shape):
+    """Return the product of dimensions in ``shape``."""
+    result = 1
+    for dim in shape:
+        result *= dim
+    return result
+
+
+def _get_gemm_output_shape(A, transa, B, transb) -> torch.Size:
+    """Compute TE's logical GEMM output shape.
+
+    This matches ``getGemmOutputShape`` in the C++/Triton backends: the
+    physical GEMM is flattened to ``[M, N]``, while the returned tensor keeps
+    B's leading dimensions when ``transb`` is false.
+    """
+    A_shape = A if isinstance(A, torch.Size) else A.shape
+    B_shape = B if isinstance(B, torch.Size) else B.shape
+
+    if len(A_shape) < 2 or len(B_shape) < 2:
+        raise ValueError(
+            "FlyDSL GEMM expects both logical operands to have rank >= 2, "
+            f"got A={tuple(A_shape)} and B={tuple(B_shape)}"
+        )
+
+    A0 = _product(A_shape[:-1])
+    A1 = A_shape[-1]
+    B1 = B_shape[-1]
+
+    output_shape = [B1] if transb else list(B_shape[:-1])
+    output_shape.append(A0 if transa else A1)
+    return torch.Size(output_shape)
+
+
 def reinterpret_as_fp8_tensor(
     a: torch.Tensor,
     dtype: tex.DType,
@@ -74,11 +107,6 @@ def _validate_common_epilogue(
     if bias is not None and bias.numel() != 0:
         raise NotImplementedError(
             "FlyDSL GEMM bias is not implemented"
-        )
-
-    if gelu or grad:
-        raise NotImplementedError(
-            "FlyDSL GEMM GELU/gradient epilogues are not implemented"
         )
 
 
@@ -294,16 +322,23 @@ def _run_regular_gemm(
             f"A and B must be on the same device, got {A.device} and {B.device}"
         )
 
+    output_shape = _get_gemm_output_shape(A, transa, B, transb)
+
     a_flydsl, b_flydsl, m, n, _ = _canonicalize_blas_operands(
         A, transa, B, transb
     )
+    if _product(output_shape) != m * n:
+        raise RuntimeError(
+            f"FlyDSL {backend_name} logical output shape {tuple(output_shape)} "
+            f"does not match flattened GEMM shape {(m, n)}"
+        )
 
     if output_dtype is None:
         output_dtype = dtype
 
     D = _validate_or_allocate_output(
         D,
-        shape=(m, n),
+        shape=output_shape,
         dtype=output_dtype,
         device=A.device,
         backend_name=backend_name,
@@ -315,6 +350,29 @@ def _run_regular_gemm(
         D.view(m, n),
     )
     return D
+
+
+def _materialize_rowwise_from_columnwise(
+    transpose_data: torch.Tensor,
+    name: str,
+) -> torch.Tensor:
+    """Reconstruct logical rowwise FP8 data from TE columnwise storage.
+
+    This matches Triton's ``materialize_rowwise_from_columnwise`` exactly.
+    TE stores an n-D rowwise tensor ``[D0, ..., Dn-2, K]`` columnwise as
+    ``[K, D0, ..., Dn-2]``. Recover rowwise storage by rotating the leading
+    K dimension back to the tail.
+    """
+    if transpose_data.ndim < 2:
+        raise ValueError(
+            f"{name} must have rank >= 2, got {tuple(transpose_data.shape)}"
+        )
+
+    if transpose_data.ndim == 2:
+        return transpose_data.transpose(0, 1).contiguous()
+
+    perm = list(range(1, transpose_data.ndim)) + [0]
+    return transpose_data.permute(*perm).contiguous()
 
 
 def _get_fp8_logical_rowwise_payload(t, name):
@@ -345,16 +403,10 @@ def _get_fp8_logical_rowwise_payload(t, name):
         f"{name}._transpose",
     )
 
-    if transpose_data.ndim < 2:
-        raise ValueError(
-            f"{name}._transpose must have rank >= 2, "
-            f"got {tuple(transpose_data.shape)}"
-        )
-
-    # TE's columnwise payload represents the transpose of the logical rowwise
-    # tensor. Materialize rowwise storage before applying BLAS transpose flags,
-    # exactly as the Triton wrapper's materialize_rowwise_from_columnwise path.
-    return transpose_data.transpose(-2, -1).contiguous()
+    return _materialize_rowwise_from_columnwise(
+        transpose_data,
+        f"{name}._transpose",
+    )
 
 
 def _select_mxfp8_data_and_scale(
@@ -462,12 +514,21 @@ def _run_mxfp8(
     if B_data.dtype == torch.uint8:
         B_data = reinterpret_as_fp8_tensor(B_data, b_fp8_dtype)
 
+    output_shape = _get_gemm_output_shape(
+        A_data.shape, transa, B_data.shape, transb
+    )
+
     a_flydsl, b_flydsl, m, n, k = _canonicalize_blas_operands(
         A_data,
         transa,
         B_data,
         transb,
     )
+    if _product(output_shape) != m * n:
+        raise RuntimeError(
+            f"FlyDSL MXFP8 logical output shape {tuple(output_shape)} "
+            f"does not match flattened GEMM shape {(m, n)}"
+        )
 
     A_scale = _flatten_mxfp8_scale(A_scale, "A")
     B_scale = _flatten_mxfp8_scale(B_scale, "B")
@@ -525,19 +586,20 @@ def _run_mxfp8(
 
     D = _validate_or_allocate_output(
         D,
-        shape=(m, n),
+        shape=output_shape,
         dtype=output_dtype,
         device=a_flydsl.device,
         backend_name="MXFP8",
     )
 
-    return mxfp8_matmul(
+    mxfp8_matmul(
         a_flydsl,
         a_scale,
         b_flydsl,
         b_scale,
         D.view(m, n),
     )
+    return D
 
 
 def _run_fp8(
@@ -590,9 +652,18 @@ def _run_fp8(
                 f"scale, got dtype={scale.dtype}, shape={tuple(scale.shape)}"
             )
 
+    output_shape = _get_gemm_output_shape(
+        A_data.shape, transa, B_data.shape, transb
+    )
+
     a_flydsl, b_flydsl, m, n, _ = _canonicalize_blas_operands(
         A_data, transa, B_data, transb
     )
+    if _product(output_shape) != m * n:
+        raise RuntimeError(
+            f"FlyDSL FP8 logical output shape {tuple(output_shape)} "
+            f"does not match flattened GEMM shape {(m, n)}"
+        )
 
     if a_flydsl.device != b_flydsl.device:
         raise ValueError(
@@ -602,7 +673,7 @@ def _run_fp8(
 
     D = _validate_or_allocate_output(
         D,
-        shape=(m, n),
+        shape=output_shape,
         dtype=output_dtype,
         device=a_flydsl.device,
         backend_name="FP8",
