@@ -460,13 +460,25 @@ def general_gemm(
         "beta": beta,
     }
 
-    # FlyDSL is currently an opt-in MXFP8-only backend. Keep every other
+    # FlyDSL is currently an opt-in BF16/MXFP8-only backend. Keep every other
     # datatype/recipe on the existing C++ generic_gemm path.
+
+    is_mxfp8_gemm = (
+        isinstance(A, MXFP8TensorStorage)
+        and isinstance(B, MXFP8TensorStorage)
+    )
+
+    is_bf16_gemm = (
+        isinstance(A, torch.Tensor)
+        and isinstance(B, torch.Tensor)
+        and A.dtype == torch.bfloat16
+        and B.dtype == torch.bfloat16
+    )
+
     use_gemm_flydsl = (
         IS_HIP_EXTENSION
         and bool(int(os.environ.get("NVTE_USE_FLYDSL", "0")))
-        and isinstance(A, MXFP8TensorStorage)
-        and isinstance(B, MXFP8TensorStorage)
+        and (is_mxfp8_gemm or is_bf16_gemm)
     )
 
     if use_gemm_flydsl:
