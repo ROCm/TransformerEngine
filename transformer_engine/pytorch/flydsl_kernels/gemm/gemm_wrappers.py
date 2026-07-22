@@ -4,6 +4,8 @@
 
 """TE entry points for the FlyDSL GEMM backend."""
 
+import os
+
 import torch
 import transformer_engine_torch as tex
 
@@ -80,22 +82,43 @@ def _validate_common_epilogue(
         )
 
 
-def _is_mxfp8_operand(t):
-    """Return whether ``t`` exposes TE MXFP8 rowwise storage."""
-    return hasattr(t, "_rowwise_data") and hasattr(t, "_rowwise_scale_inv")
-
-
-def _is_fp8_operand(t):
-    """Return whether ``t`` is a regular TE tensor-wise FP8 operand."""
+def _classify_input(t):
+    """Classify a GEMM operand for the FlyDSL backend."""
     try:
-        from transformer_engine.pytorch import Float8Tensor
+        from transformer_engine.pytorch.float8_tensor import Float8Tensor
         from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import (
             Float8TensorStorage,
         )
+        if isinstance(t, (Float8Tensor, Float8TensorStorage)):
+            return "fp8", t
     except ImportError:
-        return False
+        pass
 
-    return isinstance(t, (Float8Tensor, Float8TensorStorage))
+    try:
+        from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor
+        from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import (
+            MXFP8TensorStorage,
+        )
+        if isinstance(t, (MXFP8Tensor, MXFP8TensorStorage)):
+            return "mxfp8", t
+    except ImportError:
+        pass
+
+    try:
+        from transformer_engine.pytorch.quantized_tensor import (
+            QuantizedTensorStorage,
+        )
+        if isinstance(t, QuantizedTensorStorage):
+            raise ValueError(
+                f"The FlyDSL GEMM backend does not support "
+                f"{type(t).__name__}. Only Float8Tensor / "
+                f"Float8TensorStorage and MXFP8Tensor / "
+                f"MXFP8TensorStorage are implemented."
+            )
+    except ImportError:
+        pass
+
+    return "regular", None
 
 
 def _reinterpret_fp8_payload(data, fp8_dtype, name):
@@ -136,23 +159,365 @@ def _valid_fp8_transpose(t):
     )
 
 
-def _run_fp8_tn(A, B, D):
-    """Run tensor-wise E4M3 x E4M3 FlyDSL FP8 for TE's TN convention.
 
-    TE supplies:
-        A: weight     [N, K], transa=True
-        B: activation [..., K], transb=False
+def _mxfp8_debug_enabled() -> bool:
+    value = os.getenv("DEBUG_FLYDSL_MXFP8_GEMM", "")
+    return value.lower() not in ("", "0", "false", "no", "off")
 
-    ``fp8_matmul`` consumes:
-        a: activation [M, K]
-        b: weight.T   [K, N]
-        c: output     [M, N]
+
+def _mxfp8_debug(message: str) -> None:
+    if _mxfp8_debug_enabled():
+        print(f"[DEBUG_FLYDSL_MXFP8_GEMM] {message}")
+
+
+def _canonicalize_blas_pair(
+    A_data: torch.Tensor,
+    transa: bool,
+    B_data: torch.Tensor,
+    transb: bool,
+):
+    """Swap TE BLAS operands and apply their original transpose flags."""
+    a_flydsl = B_data.transpose(0, 1) if transb else B_data
+    b_flydsl = A_data.transpose(0, 1) if transa else A_data
+    return a_flydsl, b_flydsl
+
+
+def _flatten_rowwise(t: torch.Tensor, name: str) -> torch.Tensor:
+    """Flatten all leading dimensions while preserving the final dimension."""
+    if t.ndim < 2:
+        raise ValueError(
+            f"FlyDSL GEMM expects {name} to have rank >= 2, got {tuple(t.shape)}"
+        )
+    return t.reshape(-1, t.shape[-1])
+
+
+def _canonicalize_blas_operands(
+    A_data: torch.Tensor,
+    transa: bool,
+    B_data: torch.Tensor,
+    transb: bool,
+):
+    """Convert TE's BLAS-shaped operands to FlyDSL row-major operands.
+
+    TE's generic GEMM interface follows BLAS column-major interpretation.
+    FlyDSL kernels consume ordinary row-major matrices:
+
+        a_flydsl: [M, K]
+        b_flydsl: [K, N]
+
+    The standard conversion is to swap A/B and apply the original transpose
+    flags to the swapped operands:
+
+        a_flydsl = op(B)
+        b_flydsl = op(A)
     """
-    if not (_is_fp8_operand(A) and _is_fp8_operand(B)):
-        raise TypeError(
-            "FlyDSL FP8 GEMM expects Float8Tensor or Float8TensorStorage operands"
+    if transa and transb:
+        raise NotImplementedError(
+            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
         )
 
+    A_flat = _flatten_rowwise(A_data, "A")
+    B_flat = _flatten_rowwise(B_data, "B")
+
+    a_flydsl, b_flydsl = _canonicalize_blas_pair(
+        A_flat,
+        transa,
+        B_flat,
+        transb,
+    )
+
+    m, k = a_flydsl.shape
+    kb, n = b_flydsl.shape
+    if kb != k:
+        layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
+        raise ValueError(
+            f"FlyDSL {layout} canonicalization produced incompatible operands: "
+            f"{tuple(a_flydsl.shape)} @ {tuple(b_flydsl.shape)}"
+        )
+
+    return a_flydsl, b_flydsl, m, n, k
+
+
+def _validate_or_allocate_output(
+    D,
+    *,
+    shape,
+    dtype,
+    device,
+    backend_name,
+):
+    if D is None:
+        return torch.empty(shape, dtype=dtype, device=device)
+
+    if tuple(D.shape) != tuple(shape):
+        raise ValueError(
+            f"D shape {tuple(D.shape)} does not match expected {tuple(shape)}"
+        )
+    if D.dtype != dtype:
+        raise TypeError(
+            f"FlyDSL {backend_name} requires {dtype} output, got {D.dtype}"
+        )
+    if D.device != device:
+        raise ValueError(
+            f"D must be on {device}, got {D.device}"
+        )
+    if not D.is_contiguous():
+        raise ValueError(
+            f"FlyDSL {backend_name} requires contiguous output storage"
+        )
+    return D
+
+
+def _run_regular_gemm(
+    A,
+    transa,
+    B,
+    transb,
+    D,
+    *,
+    dtype,
+    matmul,
+    backend_name,
+):
+    """Run FP16/BF16/FP32 through shared TN/NN/NT shape handling."""
+    if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
+        raise TypeError(
+            f"FlyDSL {backend_name} GEMM expects plain torch.Tensor operands"
+        )
+    if A.dtype != dtype or B.dtype != dtype:
+        raise TypeError(
+            f"FlyDSL {backend_name} GEMM requires {dtype} inputs, "
+            f"got A={A.dtype} and B={B.dtype}"
+        )
+    if A.device != B.device:
+        raise ValueError(
+            f"A and B must be on the same device, got {A.device} and {B.device}"
+        )
+
+    a_flydsl, b_flydsl, m, n, _ = _canonicalize_blas_operands(
+        A, transa, B, transb
+    )
+
+    D = _validate_or_allocate_output(
+        D,
+        shape=(m, n),
+        dtype=dtype,
+        device=A.device,
+        backend_name=backend_name,
+    )
+
+    matmul(
+        a_flydsl,
+        b_flydsl,
+        D.view(m, n),
+    )
+    return D
+
+
+def _get_fp8_logical_rowwise_payload(t, name):
+    """Return logical rowwise FP8 data, matching the Triton wrapper.
+
+    Prefer TE's rowwise ``_data``. If only valid columnwise ``_transpose``
+    storage exists, materialize a rowwise copy once for canonicalization.
+    """
+    fp8_dtype = getattr(t, "_fp8_dtype", None)
+    data = getattr(t, "_data", None)
+
+    if data is not None:
+        return _reinterpret_fp8_payload(
+            data,
+            fp8_dtype,
+            f"{name}._data",
+        )
+
+    if not _valid_fp8_transpose(t):
+        raise RuntimeError(
+            f"{name} has neither valid rowwise (_data) nor "
+            f"columnwise (_transpose) FP8 storage"
+        )
+
+    transpose_data = _reinterpret_fp8_payload(
+        t._transpose,
+        fp8_dtype,
+        f"{name}._transpose",
+    )
+
+    if transpose_data.ndim < 2:
+        raise ValueError(
+            f"{name}._transpose must have rank >= 2, "
+            f"got {tuple(transpose_data.shape)}"
+        )
+
+    # TE's columnwise payload represents the transpose of the logical rowwise
+    # tensor. Materialize rowwise storage before applying BLAS transpose flags,
+    # exactly as the Triton wrapper's materialize_rowwise_from_columnwise path.
+    return transpose_data.transpose(-2, -1).contiguous()
+
+
+def _select_mxfp8_data_and_scale(
+    t,
+    *,
+    will_transpose: bool,
+    name: str,
+):
+    """Select the TE MXFP8 representation required by BLAS semantics."""
+    if will_transpose:
+        data = getattr(t, "_columnwise_data", None)
+        scale = getattr(t, "_columnwise_scale_inv", None)
+        orientation = "columnwise"
+    else:
+        data = getattr(t, "_rowwise_data", None)
+        scale = getattr(t, "_rowwise_scale_inv", None)
+        orientation = "rowwise"
+
+    _mxfp8_debug(
+        f"{name}: will_transpose={will_transpose}, "
+        f"selected={orientation}, data_present={data is not None}, "
+        f"scale_present={scale is not None}"
+    )
+
+    if data is None or scale is None:
+        raise RuntimeError(
+            f"{name} does not contain required {orientation} MXFP8 data and scales"
+        )
+
+    _mxfp8_debug(
+        f"{name} selected data shape={tuple(data.shape)}, "
+        f"dtype={data.dtype}, stride={tuple(data.stride())}; "
+        f"scale shape={tuple(scale.shape)}, dtype={scale.dtype}, "
+        f"stride={tuple(scale.stride())}"
+    )
+    return data, scale
+
+
+def _flatten_mxfp8_scale(t: torch.Tensor, name: str) -> torch.Tensor:
+    if t.ndim < 2:
+        raise ValueError(
+            f"FlyDSL MXFP8 expects {name} scale rank >= 2, "
+            f"got {tuple(t.shape)}"
+        )
+    original_shape = tuple(t.shape)
+    if t.ndim > 2:
+        t = t.reshape(-1, t.shape[-1])
+    _mxfp8_debug(
+        f"{name} scale flatten: {original_shape} -> {tuple(t.shape)}, "
+        f"contiguous={t.is_contiguous()}"
+    )
+    return t
+
+
+def _run_mxfp8(
+    A,
+    transa,
+    B,
+    transb,
+    D,
+):
+    """Canonicalize TE MXFP8 operands, then launch the fused backend."""
+    layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
+    _mxfp8_debug(
+        f"entry: layout={layout}, A_type={type(A).__name__}, "
+        f"B_type={type(B).__name__}, D_provided={D is not None}"
+    )
+
+    # Match TE CanonicalizeGemmInput / Triton data_and_scale_for_transpose:
+    # A: transa=True -> rowwise,  transa=False -> columnwise
+    # B: transb=True -> columnwise, transb=False -> rowwise
+    A_data, A_scale = _select_mxfp8_data_and_scale(
+        A,
+        will_transpose=not transa,
+        name="A",
+    )
+    B_data, B_scale = _select_mxfp8_data_and_scale(
+        B,
+        will_transpose=transb,
+        name="B",
+    )
+
+    a_flydsl, b_flydsl, m, n, k = _canonicalize_blas_operands(
+        A_data,
+        transa,
+        B_data,
+        transb,
+    )
+
+    A_scale = _flatten_mxfp8_scale(A_scale, "A")
+    B_scale = _flatten_mxfp8_scale(B_scale, "B")
+    a_scale, b_scale = _canonicalize_blas_pair(
+        A_scale,
+        transa,
+        B_scale,
+        transb,
+    )
+
+    _mxfp8_debug(
+        f"canonicalized layout={layout}: "
+        f"a={tuple(a_flydsl.shape)}, stride={tuple(a_flydsl.stride())}; "
+        f"b={tuple(b_flydsl.shape)}, stride={tuple(b_flydsl.stride())}"
+    )
+    _mxfp8_debug(
+        f"canonicalized scales: "
+        f"a_scale={tuple(a_scale.shape)}, stride={tuple(a_scale.stride())}; "
+        f"b_scale={tuple(b_scale.shape)}, stride={tuple(b_scale.stride())}"
+    )
+    _mxfp8_debug(f"derived GEMM dimensions: M={m}, N={n}, K={k}")
+
+    if a_flydsl.device != b_flydsl.device:
+        raise ValueError(
+            f"A and B must be on the same device, got "
+            f"{a_flydsl.device} and {b_flydsl.device}"
+        )
+
+    scale_group_size = 32
+    if k % scale_group_size != 0:
+        raise ValueError(
+            f"K={k} must be divisible by MXFP8 scale group size "
+            f"{scale_group_size}"
+        )
+
+    # Shared BLAS canonicalization yields:
+    #   a_scale [M, K/32]
+    #   b_scale [K/32, N]
+    expected_a_scale = (m, k // scale_group_size)
+    expected_b_scale = (k // scale_group_size, n)
+    if tuple(a_scale.shape) != expected_a_scale:
+        raise ValueError(
+            f"A scale shape {tuple(a_scale.shape)} != expected "
+            f"{expected_a_scale}"
+        )
+    if tuple(b_scale.shape) != expected_b_scale:
+        raise ValueError(
+            f"B scale shape {tuple(b_scale.shape)} != expected "
+            f"{expected_b_scale}"
+        )
+    if a_scale.dtype != torch.uint8 or b_scale.dtype != torch.uint8:
+        raise TypeError("FlyDSL MXFP8 expects raw E8M0 scales as torch.uint8")
+
+    D = _validate_or_allocate_output(
+        D,
+        shape=(m, n),
+        dtype=torch.float16,
+        device=a_flydsl.device,
+        backend_name="MXFP8",
+    )
+
+    return mxfp8_matmul(
+        a_flydsl,
+        a_scale,
+        b_flydsl,
+        b_scale,
+        D.view(m, n),
+    )
+
+
+def _run_fp8(
+    A,
+    transa,
+    B,
+    transb,
+    D,
+):
+    """Run tensor-wise E4M3 x E4M3 FP8 for TN/NN/NT."""
     a_fp8_dtype = getattr(A, "_fp8_dtype", None)
     b_fp8_dtype = getattr(B, "_fp8_dtype", None)
     if (
@@ -165,43 +530,16 @@ def _run_fp8_tn(A, B, D):
             f"got A={a_fp8_dtype} and B={b_fp8_dtype}"
         )
 
-    # A is transposed by the TE TN call. Prefer its already-materialized
-    # columnwise payload, which has the exact [K, N] layout consumed by
-    # fp8_matmul. Fall back to a transpose view of rowwise [N, K] storage.
-    if _valid_fp8_transpose(A):
-        A_t = _reinterpret_fp8_payload(A._transpose, a_fp8_dtype, "A._transpose")
-        if A_t.ndim != 2:
-            raise ValueError(
-                f"FlyDSL FP8 TN expects transposed weight storage to be rank 2, "
-                f"got {tuple(A_t.shape)}"
-            )
-        k, n = A_t.shape
-    else:
-        A_data = _reinterpret_fp8_payload(getattr(A, "_data", None), a_fp8_dtype, "A._data")
-        if A_data.ndim != 2:
-            raise ValueError(
-                f"FlyDSL FP8 TN expects weight A to be rank 2, "
-                f"got {tuple(A_data.shape)}"
-            )
-        n, k = A_data.shape
-        A_t = A_data.transpose(0, 1)
-
-    # B is not transposed by TE, so rowwise storage is required. Flatten any
-    # leading activation dimensions into M while retaining the K dimension.
-    B_data = _reinterpret_fp8_payload(getattr(B, "_data", None), b_fp8_dtype, "B._data")
-    if B_data.ndim < 2:
-        raise ValueError(
-            f"FlyDSL FP8 TN expects activation B to have rank >= 2, "
-            f"got {tuple(B_data.shape)}"
+    if transa and transb:
+        raise NotImplementedError(
+            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
         )
 
-    B_flat = B_data.reshape(-1, B_data.shape[-1])
-    m, kb = B_flat.shape
-    if kb != k:
-        raise ValueError(
-            f"FP8 inner dimensions do not match: weight K={k} and "
-            f"activation K={kb}"
-        )
+    # Match Triton's regular-FP8 handling: establish logical rowwise
+    # payloads first, then apply the same shared BLAS-to-row-major
+    # canonicalization used for FP16/BF16/FP32.
+    A_data = _get_fp8_logical_rowwise_payload(A, "A")
+    B_data = _get_fp8_logical_rowwise_payload(B, "B")
 
     A_scale_inv = getattr(A, "_scale_inv", None)
     B_scale_inv = getattr(B, "_scale_inv", None)
@@ -217,334 +555,35 @@ def _run_fp8_tn(A, B, D):
                 f"scale, got dtype={scale.dtype}, shape={tuple(scale.shape)}"
             )
 
-    output_shape = (*B_data.shape[:-1], n)
-    if D is None:
-        D = torch.empty(
-            output_shape,
-            dtype=torch.float16,
-            device=B_data.device,
-        )
-    else:
-        if tuple(D.shape) != output_shape:
-            raise ValueError(
-                f"D shape {tuple(D.shape)} does not match expected {output_shape}"
-            )
-        if D.dtype != torch.float16:
-            raise TypeError(
-                f"FlyDSL FP8 requires FP16 output, got {D.dtype}"
-            )
-        if D.device != B_data.device:
-            raise ValueError(
-                f"D must be on {B_data.device}, got {D.device}"
-            )
-        if not D.is_contiguous():
-            raise ValueError(
-                "FlyDSL FP8 requires contiguous output storage"
-            )
+    a_flydsl, b_flydsl, m, n, _ = _canonicalize_blas_operands(
+        A_data, transa, B_data, transb
+    )
 
-    if A_t.device != B_data.device:
+    if a_flydsl.device != b_flydsl.device:
         raise ValueError(
-            f"A and B must be on the same device, got {A_t.device} "
-            f"and {B_data.device}"
+            f"A and B must be on the same device, got "
+            f"{a_flydsl.device} and {b_flydsl.device}"
         )
 
+    D = _validate_or_allocate_output(
+        D,
+        shape=(m, n),
+        dtype=torch.float16,
+        device=a_flydsl.device,
+        backend_name="FP8",
+    )
+
+    # Operand swap means B's tensor-wise scale belongs to a_flydsl and A's
+    # tensor-wise scale belongs to b_flydsl.
     fp8_matmul(
-        B_flat,
+        a_flydsl,
         B_scale_inv,
-        A_t,
+        b_flydsl,
         A_scale_inv,
         D.view(m, n),
     )
-
     return D
 
-
-def _run_mxfp8_tn(A, B, D):
-    """Run the existing FlyDSL MXFP8 TN path."""
-    A_data = A._rowwise_data
-    A_scale = A._rowwise_scale_inv
-    B_data = B._rowwise_data
-    B_scale = B._rowwise_scale_inv
-
-    if A_data is None or A_scale is None:
-        raise RuntimeError("A does not contain rowwise MXFP8 data and scales")
-
-    if B_data is None or B_scale is None:
-        raise RuntimeError("B does not contain rowwise MXFP8 data and scales")
-
-    n, k = A_data.shape
-    B_flat = B_data.reshape(-1, B_data.shape[-1])
-    m, kb = B_flat.shape
-
-    if kb != k:
-        raise ValueError(f"MXFP8 inner dimensions do not match: {k} and {kb}")
-
-    A_scale = A_scale.reshape(n, -1)
-    B_scale = B_scale.reshape(m, -1)
-    output_shape = (*B_data.shape[:-1], n)
-
-    if D is None:
-        D = torch.empty(
-            output_shape,
-            dtype=torch.float16,
-            device=B_data.device,
-        )
-    else:
-        if tuple(D.shape) != output_shape:
-            raise ValueError(
-                f"D shape {tuple(D.shape)} does not match expected {output_shape}"
-            )
-        if D.dtype != torch.float16:
-            raise TypeError(
-                f"FlyDSL MXFP8 requires FP16 output, got {D.dtype}"
-            )
-        if not D.is_contiguous():
-            raise ValueError(
-                "FlyDSL MXFP8 requires contiguous output storage"
-            )
-
-    # Public mxfp8_matmul contract:
-    #   a:       [M, K]
-    #   a_scale: [M, K/32]
-    #   b:       [K, N]
-    #   b_scale: [N, K/32]
-    #   c:       [M, N] FP16
-    mxfp8_matmul(
-        B_flat,
-        B_scale,
-        A_data.transpose(0, 1),
-        A_scale,
-        D.view(m, n),
-    )
-
-    return D
-
-
-def _run_bf16_tn(A, B, D):
-    """Run FlyDSL BF16 for TE's TN operand convention.
-
-    TE supplies:
-        A: weight     [N, K]
-        B: activation [..., K]
-
-    ``bf16_matmul`` consumes:
-        a: activation [M, K]
-        b: weight.T   [K, N]
-        c: output     [M, N]
-    """
-    if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
-        raise TypeError(
-            "FlyDSL BF16 GEMM expects plain torch.Tensor operands"
-        )
-
-    if A.dtype != torch.bfloat16 or B.dtype != torch.bfloat16:
-        raise TypeError(
-            "FlyDSL BF16 GEMM requires BF16 inputs, "
-            f"got A={A.dtype} and B={B.dtype}"
-        )
-
-    if A.ndim != 2:
-        raise ValueError(
-            f"FlyDSL BF16 TN expects weight A to be rank 2, got {tuple(A.shape)}"
-        )
-    if B.ndim < 2:
-        raise ValueError(
-            f"FlyDSL BF16 TN expects activation B to have rank >= 2, got {tuple(B.shape)}"
-        )
-
-    n, k = A.shape
-    B_flat = B.reshape(-1, B.shape[-1])
-    m, kb = B_flat.shape
-
-    if kb != k:
-        raise ValueError(
-            f"BF16 inner dimensions do not match: A{tuple(A.shape)} and "
-            f"B{tuple(B.shape)}"
-        )
-
-    output_shape = (*B.shape[:-1], n)
-
-    if D is None:
-        D = torch.empty(
-            output_shape,
-            dtype=torch.bfloat16,
-            device=B.device,
-        )
-    else:
-        if tuple(D.shape) != output_shape:
-            raise ValueError(
-                f"D shape {tuple(D.shape)} does not match expected {output_shape}"
-            )
-        if D.dtype != torch.bfloat16:
-            raise TypeError(
-                f"FlyDSL BF16 requires BF16 output, got {D.dtype}"
-            )
-        if D.device != B.device:
-            raise ValueError(
-                f"D must be on {B.device}, got {D.device}"
-            )
-        if not D.is_contiguous():
-            raise ValueError(
-                "FlyDSL BF16 requires contiguous output storage"
-            )
-
-    if A.device != B.device:
-        raise ValueError(
-            f"A and B must be on the same device, got {A.device} and {B.device}"
-        )
-
-    bf16_matmul(
-        B_flat,
-        A.transpose(0, 1),
-        D.view(m, n),
-    )
-
-    return D
-
-
-def _run_fp16_tn(A, B, D):
-    """Run FlyDSL FP16 for TE's TN operand convention."""
-    if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
-        raise TypeError(
-            "FlyDSL FP16 GEMM expects plain torch.Tensor operands"
-        )
-
-    if A.dtype != torch.float16 or B.dtype != torch.float16:
-        raise TypeError(
-            "FlyDSL FP16 GEMM requires FP16 inputs, "
-            f"got A={A.dtype} and B={B.dtype}"
-        )
-
-    if A.ndim != 2:
-        raise ValueError(
-            f"FlyDSL FP16 TN expects weight A to be rank 2, got {tuple(A.shape)}"
-        )
-    if B.ndim < 2:
-        raise ValueError(
-            f"FlyDSL FP16 TN expects activation B to have rank >= 2, got {tuple(B.shape)}"
-        )
-
-    n, k = A.shape
-    B_flat = B.reshape(-1, B.shape[-1])
-    m, kb = B_flat.shape
-
-    if kb != k:
-        raise ValueError(
-            f"FP16 inner dimensions do not match: A{tuple(A.shape)} and "
-            f"B{tuple(B.shape)}"
-        )
-
-    output_shape = (*B.shape[:-1], n)
-
-    if D is None:
-        D = torch.empty(
-            output_shape,
-            dtype=torch.float16,
-            device=B.device,
-        )
-    else:
-        if tuple(D.shape) != output_shape:
-            raise ValueError(
-                f"D shape {tuple(D.shape)} does not match expected {output_shape}"
-            )
-        if D.dtype != torch.float16:
-            raise TypeError(
-                f"FlyDSL FP16 requires FP16 output, got {D.dtype}"
-            )
-        if D.device != B.device:
-            raise ValueError(
-                f"D must be on {B.device}, got {D.device}"
-            )
-        if not D.is_contiguous():
-            raise ValueError(
-                "FlyDSL FP16 requires contiguous output storage"
-            )
-
-    if A.device != B.device:
-        raise ValueError(
-            f"A and B must be on the same device, got {A.device} and {B.device}"
-        )
-    
-    fp16_matmul(
-        B_flat,
-        A.transpose(0, 1),
-        D.view(m, n),
-    )
-
-    return D
-
-
-
-def _run_fp32_tn(A, B, D):
-    """Run FlyDSL FP32 for TE's TN operand convention."""
-    if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
-        raise TypeError(
-            "FlyDSL FP32 GEMM expects plain torch.Tensor operands"
-        )
-
-    if A.dtype != torch.float32 or B.dtype != torch.float32:
-        raise TypeError(
-            "FlyDSL FP32 GEMM requires FP32 inputs, "
-            f"got A={A.dtype} and B={B.dtype}"
-        )
-
-    if A.ndim != 2:
-        raise ValueError(
-            f"FlyDSL FP32 TN expects weight A to be rank 2, got {tuple(A.shape)}"
-        )
-    if B.ndim < 2:
-        raise ValueError(
-            f"FlyDSL FP32 TN expects activation B to have rank >= 2, got {tuple(B.shape)}"
-        )
-
-    n, k = A.shape
-    B_flat = B.reshape(-1, B.shape[-1])
-    m, kb = B_flat.shape
-
-    if kb != k:
-        raise ValueError(
-            f"FP32 inner dimensions do not match: A{tuple(A.shape)} and "
-            f"B{tuple(B.shape)}"
-        )
-
-    output_shape = (*B.shape[:-1], n)
-
-    if D is None:
-        D = torch.empty(
-            output_shape,
-            dtype=torch.float32,
-            device=B.device,
-        )
-    else:
-        if tuple(D.shape) != output_shape:
-            raise ValueError(
-                f"D shape {tuple(D.shape)} does not match expected {output_shape}"
-            )
-        if D.dtype != torch.float32:
-            raise TypeError(
-                f"FlyDSL FP32 requires FP32 output, got {D.dtype}"
-            )
-        if D.device != B.device:
-            raise ValueError(
-                f"D must be on {B.device}, got {D.device}"
-            )
-        if not D.is_contiguous():
-            raise ValueError(
-                "FlyDSL FP32 requires contiguous output storage"
-            )
-
-    if A.device != B.device:
-        raise ValueError(
-            f"A and B must be on the same device, got {A.device} and {B.device}"
-        )
-
-    fp32_matmul(
-        B_flat,
-        A.transpose(0, 1),
-        D.view(m, n),
-    )
-
-    return D
 
 def te_generic_gemm_flydsl(
     A,
@@ -572,12 +611,19 @@ def te_generic_gemm_flydsl(
 ):
     """Run a supported FlyDSL GEMM through TE's generic GEMM interface.
 
-    Currently supported:
-      - MXFP8 TN input with FP16 output
-      - tensor-wise E4M3 x E4M3 FP8 TN input with FP16 output
-      - BF16 TN input with BF16 output
-      - FP16 TN input with FP16 output
-      - FP32 TN input with FP32 output
+    Supported layouts:
+      - TN: transa=True,  transb=False
+      - NN: transa=False, transb=False
+      - NT: transa=False, transb=True
+
+    TT is intentionally rejected.
+
+    Supported dtypes:
+      - MXFP8 input with FP16 output
+      - tensor-wise E4M3 x E4M3 FP8 input with FP16 output
+      - BF16 input with BF16 output
+      - FP16 input with FP16 output
+      - FP32 input with FP32 output
     """
     del bias_type
     del gelu_in
@@ -588,10 +634,10 @@ def te_generic_gemm_flydsl(
     del comm_type
     del extra_output
     del bulk_overlap
-    
-    if not transa or transb:
+
+    if transa and transb:
         raise NotImplementedError(
-            "FlyDSL GEMM currently supports only transa=True, transb=False"
+            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
         )
 
     _validate_common_epilogue(
@@ -604,46 +650,54 @@ def te_generic_gemm_flydsl(
         beta=beta,
     )
 
-    a_is_mxfp8 = _is_mxfp8_operand(A)
-    b_is_mxfp8 = _is_mxfp8_operand(B)
+    a_kind, _ = _classify_input(A)
+    b_kind, _ = _classify_input(B)
 
-    if a_is_mxfp8 or b_is_mxfp8:
-        if not (a_is_mxfp8 and b_is_mxfp8):
+    if a_kind == "mxfp8" or b_kind == "mxfp8":
+         # Validate both are MXFP8
+        if a_kind != b_kind:
             raise ValueError(
                 "Mixed MXFP8 and non-MXFP8 FlyDSL GEMM inputs are not supported"
             )
 
+        # Sanity: both operands must have at least one pre-quantized copy.
+        if getattr(A, '_rowwise_data', None) is None and getattr(A, '_columnwise_data', None) is None:
+            raise RuntimeError("MXFP8Tensor has neither rowwise nor columnwise data")
+        if getattr(B, '_rowwise_data', None) is None and getattr(B, '_columnwise_data', None) is None:
+            raise RuntimeError("MXFP8Tensor has neither rowwise nor columnwise data")
+
+        # Only supports FP16 output for now.
         if output_dtype not in (None, tex.DType.kFloat16):
             raise NotImplementedError(
                 "FlyDSL MXFP8 currently supports only FP16 output, "
                 f"got {output_dtype}"
             )
 
-        D = _run_mxfp8_tn(A, B, D)
+        D = _run_mxfp8(A, transa, B, transb, D)
         return D, None, None, None
 
-    a_is_fp8 = _is_fp8_operand(A)
-    b_is_fp8 = _is_fp8_operand(B)
-
-    if a_is_fp8 or b_is_fp8:
-        if not (a_is_fp8 and b_is_fp8):
+    if a_kind == "fp8" or b_kind == "fp8":
+        if a_kind != b_kind:
             raise ValueError(
                 "Mixed regular FP8 and non-FP8 FlyDSL GEMM inputs are not supported"
             )
-
         if output_dtype not in (None, tex.DType.kFloat16):
             raise NotImplementedError(
                 "FlyDSL tensor-wise FP8 currently supports only FP16 output, "
                 f"got {output_dtype}"
             )
 
-        D = _run_fp8_tn(A, B, D)
+        D = _run_fp8(A, transa, B, transb, D)
         return D, None, None, None
 
-    if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
+    if a_kind != "regular" or b_kind != "regular":
         raise TypeError(
             "Unsupported FlyDSL GEMM operand types: "
             f"{type(A).__name__} and {type(B).__name__}"
+        )
+    if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
+        raise TypeError(
+            "FlyDSL regular GEMM expects plain torch.Tensor operands"
         )
 
     if A.dtype == torch.bfloat16 and B.dtype == torch.bfloat16:
@@ -652,8 +706,16 @@ def te_generic_gemm_flydsl(
                 "FlyDSL BF16 currently supports only BF16 output, "
                 f"got {output_dtype}"
             )
-
-        D = _run_bf16_tn(A, B, D)
+        D = _run_regular_gemm(
+            A,
+            transa,
+            B,
+            transb,
+            D,
+            dtype=torch.bfloat16,
+            matmul=bf16_matmul,
+            backend_name="BF16",
+        )
         return D, None, None, None
 
     if A.dtype == torch.float16 and B.dtype == torch.float16:
@@ -662,8 +724,16 @@ def te_generic_gemm_flydsl(
                 "FlyDSL FP16 currently supports only FP16 output, "
                 f"got {output_dtype}"
             )
-
-        D = _run_fp16_tn(A, B, D)
+        D = _run_regular_gemm(
+            A,
+            transa,
+            B,
+            transb,
+            D,
+            dtype=torch.float16,
+            matmul=fp16_matmul,
+            backend_name="FP16",
+        )
         return D, None, None, None
 
     if A.dtype == torch.float32 and B.dtype == torch.float32:
@@ -672,11 +742,20 @@ def te_generic_gemm_flydsl(
                 "FlyDSL FP32 currently supports only FP32 output, "
                 f"got {output_dtype}"
             )
-
-        D = _run_fp32_tn(A, B, D)
+        D = _run_regular_gemm(
+            A,
+            transa,
+            B,
+            transb,
+            D,
+            dtype=torch.float32,
+            matmul=fp32_matmul,
+            backend_name="FP32",
+        )
         return D, None, None, None
 
     raise NotImplementedError(
-        "FlyDSL GEMM currently supports only MXFP8, tensor-wise E4M3 FP8, BF16, FP16, or FP32 inputs; "
+        "FlyDSL GEMM currently supports only MXFP8, tensor-wise E4M3 FP8, "
+        "BF16, FP16, or FP32 inputs; "
         f"got A={A.dtype} and B={B.dtype}"
     )

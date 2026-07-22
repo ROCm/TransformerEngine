@@ -2,16 +2,23 @@
 #
 # See LICENSE for license information.
 
-"""FlyDSL MXFP8 4-wave GEMM kernel for Transformer Engine.
+"""FlyDSL MXFP8 GEMM implementation.
 
-The kernel specializes on K at compile time because the K128 loop is fully
-hand-unrolled. M/N are runtime launch dimensions. The private optimized core
-consumes A and B as FP8 E4M3 tensors shaped [M, K] and [N, K], and writes
-float16 C shaped [M, N]. The public ``mxfp8_matmul`` entry point accepts the
-Transformer Engine TN contract and performs the required private adaptation.
+This module contains both the HK-derived optimized 4-wave kernel and its
+MXFP8-specific launch preparation. Transformer Engine BLAS canonicalization
+is performed by ``gemm_wrappers.py`` before entering ``mxfp8_matmul``.
+
+Canonical launch inputs:
+
+    a:       [M, K] FP8 payload
+    a_scale: [M, K/32] raw E8M0 bytes
+    b:       [K, N] FP8 payload
+    b_scale: [K/32, N] raw E8M0 bytes
+    D:       [M, N] float16 output
 """
 
 import functools
+import os
 
 import torch
 
@@ -44,16 +51,33 @@ BLOCK_K = _BLOCK_K
 SCALE_GROUP_SIZE = 32
 
 
-def pack_mx32_scales_iter(scales_u8: torch.Tensor) -> torch.Tensor:
-    """Pack raw [Rows, K/32] E8M0 uint8 scales as [K/128, Rows] uint32.
+def _debug_enabled() -> bool:
+    value = os.getenv("DEBUG_FLYDSL_MXFP8_GEMM", "")
+    return value.lower() not in ("", "0", "false", "no", "off")
 
-    This is the intermediate HK/TE iteration-major form: each word contains
-    four consecutive K32 scale bytes for one K128 iteration and one matrix row.
-    It is *not* the final MFMA operand layout.
-    """
-    assert scales_u8.dtype == torch.uint8
+
+def _debug(message: str) -> None:
+    if _debug_enabled():
+        print(f"[DEBUG_FLYDSL_MXFP8_GEMM] {message}")
+
+
+def pack_mx32_scales_iter(scales_u8: torch.Tensor) -> torch.Tensor:
+    """Pack raw [Rows, K/32] E8M0 scales as [K/128, Rows] uint32."""
+    if scales_u8.dtype != torch.uint8:
+        raise TypeError(
+            f"MXFP8 scales must be torch.uint8 E8M0 bytes, got {scales_u8.dtype}"
+        )
+    if scales_u8.ndim != 2:
+        raise ValueError(
+            f"MXFP8 scales must be rank 2, got shape {tuple(scales_u8.shape)}"
+        )
+
     rows, qk = scales_u8.shape
-    assert qk % 4 == 0
+    if qk % 4 != 0:
+        raise ValueError(
+            f"Scale K dimension must be divisible by 4 K32 groups, got {qk}"
+        )
+
     s32 = scales_u8.contiguous().view(rows, qk // 4, 4).to(torch.int32)
     packed = (
         s32[:, :, 0]
@@ -65,35 +89,32 @@ def pack_mx32_scales_iter(scales_u8: torch.Tensor) -> torch.Tensor:
 
 
 def pack_mx32_scales_for_hk(scales_u8: torch.Tensor) -> torch.Tensor:
-    """True HK MFMA scale packing: raw [Rows, K/32] -> [K/128, Rows] i32.
+    """Convert raw rowwise E8M0 scales to [K/128, Rows] MFMA-ready words."""
+    scale_iter = pack_mx32_scales_iter(scales_u8)
+    rows = scales_u8.shape[0]
 
-    HK's GEMM hot loop loads one uint32 scale operand per lane for each 64-row
-    A/B half.  The four bytes in that operand correspond to the four 16-row
-    MFMA slices inside the 64-row half; the scaled-MFMA op_sel/op_sel_hi bits
-    select the byte.  With this layout the GEMM kernel does no hot-loop byte
-    extraction or broadcast.
-    """
-    assert scales_u8.dtype == torch.uint8
-    rows, qk = scales_u8.shape
-    assert qk % 4 == 0
-    assert rows % 64 == 0, f"rows={rows} must be a multiple of 64 for HK MFMA scale packing"
+    if rows % 64 != 0:
+        raise ValueError(
+            f"Rows={rows} must be a multiple of 64 for HK MFMA scale packing"
+        )
 
-    scale_iter = pack_mx32_scales_iter(scales_u8)  # [K/128, Rows], int32
     device = scales_u8.device
-
     row = torch.arange(rows, device=device, dtype=torch.int64)
-    r16 = row % 16
-    k_sub = (row // 16) % 4
+    row_within_16 = row % 16
+    k_subgroup = (row // 16) % 4
     tile = row // 64
 
     packed = torch.zeros_like(scale_iter)
-    for g in range(4):
-        src_row = tile * 64 + g * 16 + r16
-        src_val = scale_iter[:, src_row]
-        byte_val = (src_val >> (k_sub * 8).view(1, rows)) & 0xFF
-        packed |= byte_val << (g * 8)
+    for group in range(4):
+        source_row = tile * 64 + group * 16 + row_within_16
+        source_value = scale_iter[:, source_row]
+        byte_value = (
+            source_value >> (k_subgroup * 8).view(1, rows)
+        ) & 0xFF
+        packed |= byte_value << (group * 8)
 
     return packed.contiguous()
+
 
 def _encode_waitcnt(vmcnt=63, lgkmcnt=15):
     """Encode the CDNA4/gfx950 ``S_WAITCNT`` SIMM16 operand.
@@ -1116,74 +1137,7 @@ def _cached_launch(K: int):
 
 
 
-def mxfp8_matmul(
-    a: torch.Tensor,
-    a_scale: torch.Tensor,
-    b: torch.Tensor,
-    b_scale: torch.Tensor,
-    c: torch.Tensor,
-    stream=None,
-):
-    """TE-facing TN MXFP8 adapter.
-
-    Public/backend contract:
-        a:       [M, K] FP8 payload
-        a_scale: [M, K/32] raw E8M0 bytes
-        b:       [K, N] FP8 payload
-        b_scale: [N, K/32] raw E8M0 bytes
-        c:       [M, N] float16 output
-
-    The optimized HK core currently consumes B as row-major [N, K] and consumes
-    MFMA-ready packed int32 scales. Keep those implementation details behind
-    this adapter so the TE-facing contract matches the Triton/TE TN contract.
-    """
-    if a.ndim != 2 or b.ndim != 2:
-        raise ValueError(
-            f"FlyDSL MXFP8 TN expects rank-2 operands, got A{tuple(a.shape)} "
-            f"and B{tuple(b.shape)}"
-        )
-
-    m, k = a.shape
-    kb, n = b.shape
-    if kb != k:
-        raise ValueError(f"Inner dimensions do not match: A{tuple(a.shape)} and B{tuple(b.shape)}")
-
-    expected_a_scale = (m, k // SCALE_GROUP_SIZE)
-    expected_b_scale = (n, k // SCALE_GROUP_SIZE)
-    if tuple(a_scale.shape) != expected_a_scale:
-        raise ValueError(
-            f"A scale shape {tuple(a_scale.shape)} != expected {expected_a_scale}"
-        )
-    if tuple(b_scale.shape) != expected_b_scale:
-        raise ValueError(
-            f"B scale shape {tuple(b_scale.shape)} != expected {expected_b_scale}"
-        )
-    if a_scale.dtype != torch.uint8 or b_scale.dtype != torch.uint8:
-        raise TypeError(
-            "FlyDSL MXFP8 expects raw E8M0 scales stored as torch.uint8"
-        )
-    if tuple(c.shape) != (m, n):
-        raise ValueError(f"C shape {tuple(c.shape)} != expected {(m, n)}")
-    if c.dtype != torch.float16:
-        raise TypeError(
-            f"The current FlyDSL MXFP8 kernel stores float16 output, got {c.dtype}"
-        )
-
-    # TE/Triton expose B logically as [K, N]. The existing optimized HK core
-    # streams contiguous K rows, so adapt B to its private [N, K] representation.
-    # In the normal TE TN path, b is itself a transpose view of contiguous
-    # rowwise weight storage, so b.T is already contiguous and this is not a
-    # physical transpose/copy.
-    b_hk = b.transpose(0, 1).contiguous()
-
-    # Convert TE's raw per-K32 E8M0 scales into the MFMA-ready words consumed by
-    # the optimized scaled-MFMA hot loop.
-    a_scale_hk = pack_mx32_scales_for_hk(a_scale)
-    b_scale_hk = pack_mx32_scales_for_hk(b_scale)
-
-    doGemm(a, a_scale_hk, b_hk, b_scale_hk, c, stream=stream)
-
-def doGemm(
+def do_gemm(
     A: torch.Tensor,
     As: torch.Tensor,
     B: torch.Tensor,
@@ -1240,3 +1194,119 @@ def doGemm(
         N_runtime,
         stream=stream,
     )
+
+
+__all__ = [
+    "BLOCK_M",
+    "BLOCK_N",
+    "BLOCK_K",
+    "do_gemm",
+]
+
+
+
+def mxfp8_matmul(
+    a: torch.Tensor,
+    a_scale: torch.Tensor,
+    b: torch.Tensor,
+    b_scale: torch.Tensor,
+    D: torch.Tensor,
+    stream=None,
+):
+    """Launch the fused MXFP8 kernel from canonical row-major operands.
+
+    BLAS operand canonicalization, shape derivation, and output allocation are
+    intentionally owned by ``gemm_wrappers.py``. This function only validates
+    the MXFP8-specific scale contract, converts B to the HK [N, K] convention,
+    packs E8M0 scales, and launches the optimized 4-wave implementation.
+    """
+    if a.ndim != 2 or b.ndim != 2:
+        raise ValueError(
+            f"FlyDSL MXFP8 expects rank-2 canonical operands, got "
+            f"a={tuple(a.shape)} and b={tuple(b.shape)}"
+        )
+
+    m, k = a.shape
+    kb, n = b.shape
+    if kb != k:
+        raise ValueError(
+            f"Incompatible canonical MXFP8 operands: "
+            f"{tuple(a.shape)} @ {tuple(b.shape)}"
+        )
+
+    if a.device != b.device:
+        raise ValueError(
+            f"a and b must be on the same device, got {a.device} and {b.device}"
+        )
+    if D.device != a.device:
+        raise ValueError(f"D must be on {a.device}, got {D.device}")
+    if tuple(D.shape) != (m, n):
+        raise ValueError(
+            f"D shape {tuple(D.shape)} does not match expected {(m, n)}"
+        )
+    if D.dtype != torch.float16:
+        raise TypeError(
+            f"FlyDSL MXFP8 requires torch.float16 output, got {D.dtype}"
+        )
+    if not D.is_contiguous():
+        raise ValueError("FlyDSL MXFP8 requires contiguous output storage")
+
+    if k % SCALE_GROUP_SIZE != 0:
+        raise ValueError(
+            f"K={k} must be divisible by MXFP8 scale group size "
+            f"{SCALE_GROUP_SIZE}"
+        )
+
+    # Canonical scale contract:
+    #   a_scale [M, K/32]
+    #   b_scale [K/32, N]
+    expected_a_scale = (m, k // SCALE_GROUP_SIZE)
+    expected_b_scale = (k // SCALE_GROUP_SIZE, n)
+    if tuple(a_scale.shape) != expected_a_scale:
+        raise ValueError(
+            f"a_scale shape {tuple(a_scale.shape)} != expected "
+            f"{expected_a_scale}"
+        )
+    if tuple(b_scale.shape) != expected_b_scale:
+        raise ValueError(
+            f"b_scale shape {tuple(b_scale.shape)} != expected "
+            f"{expected_b_scale}"
+        )
+    if a_scale.dtype != torch.uint8 or b_scale.dtype != torch.uint8:
+        raise TypeError("FlyDSL MXFP8 expects raw E8M0 scales as torch.uint8")
+
+    # The HK core consumes B and its scales in row-oriented [N, K] form.
+    b_hk = b.transpose(0, 1).contiguous()
+    b_scale_rows = b_scale.transpose(0, 1).contiguous()
+    a_scale_hk = pack_mx32_scales_for_hk(a_scale)
+    b_scale_hk = pack_mx32_scales_for_hk(b_scale_rows)
+
+    _debug(
+        f"private kernel inputs: a={tuple(a.shape)}, "
+        f"contiguous={a.is_contiguous()}; "
+        f"b_hk={tuple(b_hk.shape)}, contiguous={b_hk.is_contiguous()}; "
+        f"a_scale_hk={tuple(a_scale_hk.shape)}, "
+        f"b_scale_hk={tuple(b_scale_hk.shape)}, D={tuple(D.shape)}"
+    )
+    _debug("launching fused MXFP8 4-wave kernel")
+
+    do_gemm(
+        a,
+        a_scale_hk,
+        b_hk,
+        b_scale_hk,
+        D.view(m, n),
+        stream=stream,
+    )
+
+    _debug("launch complete")
+    return D
+
+
+__all__ = [
+    "BLOCK_M",
+    "BLOCK_N",
+    "BLOCK_K",
+    "SCALE_GROUP_SIZE",
+    "mxfp8_matmul",
+]

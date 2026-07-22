@@ -460,11 +460,7 @@ def general_gemm(
         "beta": beta,
     }
 
-    use_gemm_flydsl = (
-        IS_HIP_EXTENSION
-        and layout == "TN"
-        and bool(int(os.environ.get("NVTE_USE_FLYDSL", "0")))
-    )
+    use_gemm_flydsl = IS_HIP_EXTENSION and bool(int(os.environ.get("NVTE_USE_FLYDSL", "0")))
 
     if use_gemm_flydsl:
         # Lazy import keeps FlyDSL off the normal Transformer Engine import path.
