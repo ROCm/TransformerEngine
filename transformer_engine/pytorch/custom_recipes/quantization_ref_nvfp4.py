@@ -17,7 +17,7 @@ from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage, 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 if IS_HIP_EXTENSION:
-    from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type
+    from transformer_engine.pytorch.utils import get_torch_float8_e4m3_type, is_fp8_fnuz
 
 
 def nvfp4_ref_rht_2d_quantizer_factory(role):
@@ -142,7 +142,10 @@ def cast_to_e4m3(decode_scale, global_amax):
     TODO(etsykunov): Make less unintuitive.
     """
     decode_scale = decode_scale * global_amax
-    FLOAT8_E4M3_MAX = torch.tensor(448.0, device=decode_scale.device, dtype=torch.float32)
+    if IS_HIP_EXTENSION:
+        FLOAT8_E4M3_MAX = torch.tensor(240.0 if is_fp8_fnuz() else 448.0, device=decode_scale.device, dtype=torch.float32)
+    else:
+        FLOAT8_E4M3_MAX = torch.tensor(448.0, device=decode_scale.device, dtype=torch.float32)
     decode_scale = torch.clamp(decode_scale, min=-FLOAT8_E4M3_MAX, max=FLOAT8_E4M3_MAX)
     if IS_HIP_EXTENSION:
         return decode_scale.to(get_torch_float8_e4m3_type())
@@ -705,7 +708,10 @@ class NVFP4QuantizerRef(Quantizer):
             )  # (128, 8, 1)
         x = x.view(m, n // tile_len_x, tile_len_x)
         FLOAT4_E2M1_MAX = torch.tensor(6.0, device=x.device, dtype=torch.float32)
-        FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
+        if IS_HIP_EXTENSION:
+            FLOAT8_E4M3_MAX = torch.tensor(240.0 if is_fp8_fnuz() else 448.0, device=x.device, dtype=torch.float32)
+        else:
+            FLOAT8_E4M3_MAX = torch.tensor(448.0, device=x.device, dtype=torch.float32)
         global_scale_e4m3_max = float(nvfp4_e4m3_max if nvfp4_use_4over6 else 448)
         GLOBAL_SCALE_E4M3_MAX = torch.tensor(
             global_scale_e4m3_max, device=x.device, dtype=torch.float32
@@ -1167,7 +1173,7 @@ class NVFP4QuantizerRef(Quantizer):
                 "nvfp4_e4m3_max",
                 getattr(qresult_w, "_nvfp4_e4m3_max", self.nvfp4_e4m3_max),
             )
-            default_fp8_max = 448.0
+            default_fp8_max = 240.0 if (IS_HIP_EXTENSION and is_fp8_fnuz()) else 448.0
             if qresult_x_nvfp4_use_4over6:
                 fp8_max_x = float(qresult_x_e4m3_max)
             else:

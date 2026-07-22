@@ -557,6 +557,7 @@ TEST_P(DequantizeNVFP4TestSuite, TestDequantizeNVFP4)
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
     }
+    if (te_fp8_fnuz()) GTEST_SKIP() << "NVFP4 not supported on gfx942 (fnuz)";
 
     const auto tensor_size = std::get<0>(GetParam());
     const DType output_type = std::get<1>(GetParam());
@@ -605,6 +606,7 @@ TEST_P(DequantizeNVFP4SwizzledTestSuite, TestDequantizeNVFP4Swizzled)
     if (getDeviceComputeCapability() < blackwellComputeCapability) {
         GTEST_SKIP();
     }
+    if (te_fp8_fnuz()) GTEST_SKIP() << "NVFP4 not supported on gfx942 (fnuz)";
 
     const auto tensor_size = std::get<0>(GetParam());
     const DType output_type = std::get<1>(GetParam());
