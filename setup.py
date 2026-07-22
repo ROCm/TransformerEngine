@@ -156,6 +156,14 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
     ]
     test_reqs: List[str] = ["pytest>=8.2.1"]
 
+    # Optional FlyDSL dependency for ROCm PyTorch builds.
+    if (
+        rocm_build()
+        and "pytorch" in frameworks
+        and bool(int(os.getenv("NVTE_USE_FLYDSL", "0")))
+    ):
+        install_reqs.extend(["flydsl"])
+
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         if "pytorch" in frameworks:
