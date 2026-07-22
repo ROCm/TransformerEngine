@@ -1005,14 +1005,41 @@ def test_unaligned_shapes(
     is_x_1d_scaled,
     is_w_1d_scaled,
 ) -> None:
-    legal = legalX1d if is_x_1d_scaled else legalX2d
     if IS_HIP_EXTENSION:
-        legal = (K % 16 == 0) and (N % 16 == 0) # M is unconstrained for rocm
-    if not legal:
-        if IS_HIP_EXTENSION:
-            expected_err_msg = "must be multiple of 16"
+        legal = (K % 16 == 0) and (N % 16 == 0)  # M is unconstrained for rocm
+        if not legal:
+            cublas_gemm_test_constraint_enforced(
+                x_dtype,
+                w_dtype,
+                out_dtype,
+                M,
+                K,
+                N,
+                accumulate,
+                use_split_accumulator,
+                is_x_1d_scaled,
+                is_w_1d_scaled,
+                expected_err_msg="must be multiple of 16",
+            )
         else:
-            expected_err_msg = "dimension requirement"
+            cublas_gemm_fp8_blockwise_case(
+                x_dtype,
+                w_dtype,
+                out_dtype,
+                M,
+                K,
+                N,
+                "uniform",  # noise type
+                1.0,  # x_magnitude
+                1.0,  # w_magnitude
+                accumulate,
+                use_split_accumulator,
+                is_x_1d_scaled,
+                is_w_1d_scaled,
+            )
+        return
+    legal = legalX1d if is_x_1d_scaled else legalX2d
+    if not legal:
         cublas_gemm_test_constraint_enforced(
             x_dtype,
             w_dtype,
@@ -1024,7 +1051,7 @@ def test_unaligned_shapes(
             use_split_accumulator,
             is_x_1d_scaled,
             is_w_1d_scaled,
-            expected_err_msg=expected_err_msg,
+            expected_err_msg="dimension requirement",
         )
     else:
         cublas_gemm_fp8_blockwise_case(
