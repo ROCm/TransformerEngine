@@ -460,37 +460,10 @@ def general_gemm(
         "beta": beta,
     }
 
-    # FlyDSL is currently an opt-in TN backend for:
-    #   - MXFP8
-    #   - tensor-wise E4M3 x E4M3 FP8
-    #   - matching BF16 or FP16 inputs
-    # Keep every other datatype, recipe, and layout on the existing C++ path.
-    from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
-    
-    is_mxfp8_gemm = (
-        isinstance(A, MXFP8TensorStorage)
-        and isinstance(B, MXFP8TensorStorage)
-    )
-
-    is_fp8_gemm = (
-        isinstance(A, Float8TensorStorage)
-        and isinstance(B, Float8TensorStorage)
-        and A._fp8_dtype == tex.DType.kFloat8E4M3
-        and B._fp8_dtype == tex.DType.kFloat8E4M3
-    )
-
-    is_fp16_bf16_gemm = (
-        type(A) is torch.Tensor
-        and type(B) is torch.Tensor
-        and A.dtype == B.dtype
-        and A.dtype in (torch.bfloat16, torch.float16)
-    )
-
     use_gemm_flydsl = (
         IS_HIP_EXTENSION
         and layout == "TN"
         and bool(int(os.environ.get("NVTE_USE_FLYDSL", "0")))
-        and (is_mxfp8_gemm or is_fp8_gemm or is_fp16_bf16_gemm)
     )
 
     if use_gemm_flydsl:
