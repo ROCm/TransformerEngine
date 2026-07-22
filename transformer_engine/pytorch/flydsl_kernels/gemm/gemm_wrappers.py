@@ -518,6 +518,8 @@ def _run_fp8(
     B,
     transb,
     D,
+    *,
+    output_dtype: torch.dtype,
 ):
     """Run tensor-wise E4M3 x E4M3 FP8 for TN/NN/NT."""
     a_fp8_dtype = getattr(A, "_fp8_dtype", None)
@@ -570,7 +572,7 @@ def _run_fp8(
     D = _validate_or_allocate_output(
         D,
         shape=(m, n),
-        dtype=torch.float16,
+        dtype=output_dtype,
         device=a_flydsl.device,
         backend_name="FP8",
     )
@@ -622,7 +624,7 @@ def te_generic_gemm_flydsl(
 
     Supported dtypes:
       - MXFP8 input with FP16, BF16, or FP32 output
-      - tensor-wise E4M3 x E4M3 FP8 input with FP16 output
+      - tensor-wise E4M3 x E4M3 FP8 input with FP16, BF16, or FP32 output
       - BF16 input with BF16 output
       - FP16 input with FP16 output
       - FP32 input with FP32 output
@@ -695,13 +697,27 @@ def te_generic_gemm_flydsl(
             raise ValueError(
                 "Mixed regular FP8 and non-FP8 FlyDSL GEMM inputs are not supported"
             )
-        if output_dtype not in (None, tex.DType.kFloat16):
+
+        fp8_output_dtypes = {
+            None: torch.float16,
+            tex.DType.kFloat16: torch.float16,
+            tex.DType.kBFloat16: torch.bfloat16,
+            tex.DType.kFloat32: torch.float32,
+        }
+        if output_dtype not in fp8_output_dtypes:
             raise NotImplementedError(
-                "FlyDSL tensor-wise FP8 currently supports only FP16 output, "
+                "FlyDSL tensor-wise FP8 supports FP16, BF16, or FP32 output, "
                 f"got {output_dtype}"
             )
 
-        D = _run_fp8(A, transa, B, transb, D)
+        D = _run_fp8(
+            A,
+            transa,
+            B,
+            transb,
+            D,
+            output_dtype=fp8_output_dtypes[output_dtype],
+        )
         return D, None, None, None
 
     if a_kind != "regular" or b_kind != "regular":

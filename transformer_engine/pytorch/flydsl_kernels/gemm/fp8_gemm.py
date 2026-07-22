@@ -7,9 +7,9 @@
 The kernel specializes on K at compile time because the K128 loop is fully
 hand-unrolled. M/N are runtime launch dimensions. The private optimized core
 consumes A and B as FP8 E4M3 tensors shaped [M, K] and [N, K], one FP32 inverse
-scale per operand, and writes float16 C shaped [M, N]. The public ``fp8_matmul``
-entry point accepts Transformer Engine's TN contract and performs the required
-private adaptation.
+scale per operand, and writes float16, bfloat16, or float32 C shaped [M, N]. The public
+``fp8_matmul`` entry point accepts Transformer Engine's TN contract and
+performs the required private adaptation.
 
 This module imports ``flydsl`` at import time and must therefore be imported
 lazily only after FlyDSL availability has been confirmed.
@@ -183,13 +183,32 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
     )
 
 
-def _compile_kernel(K: int, use_xcd_remap: bool = True):
-    """Build the specialized 4-wave kernel for compile-time ``K``.
+def _compile_kernel(
+    K: int,
+    output_dtype: torch.dtype,
+    use_xcd_remap: bool = True,
+):
+    """Build the specialized 4-wave kernel for compile-time K/output dtype.
 
     ``K`` must contain at least four K128 tiles. Runtime M/N are expected to
     be exact multiples of ``BLOCK_M``/``BLOCK_N``; the kernel has no edge masks.
     """
     BLOCK_M, BLOCK_N, BLOCK_K = _BLOCK_M, _BLOCK_N, _BLOCK_K
+
+    if output_dtype == torch.float16:
+        output_element_bytes = 2
+        output_fx_dtype = fx.Float16
+    elif output_dtype == torch.bfloat16:
+        output_element_bytes = 2
+        output_fx_dtype = fx.BFloat16
+    elif output_dtype == torch.float32:
+        output_element_bytes = 4
+        output_fx_dtype = fx.Float32
+    else:
+        raise TypeError(
+            "FlyDSL FP8 supports only float16, bfloat16, and float32 "
+            f"outputs, got {output_dtype}"
+        )
     NUM_THREADS = 256
     WARP_SIZE = 64
 
@@ -311,7 +330,7 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True):
         # instruction form unchanged while avoiding i32 wrap in buffer_store().
         c_n_idx_for_base = fx.Index(c_n)
         c_tile_base_elems = bx_m_idx * c_n_idx_for_base + by_n_idx
-        c_tile_base_bytes = c_tile_base_elems * fx.Index(2)  # C is f16.
+        c_tile_base_bytes = c_tile_base_elems * fx.Index(output_element_bytes)
         c_rsrc = buffer_ops.create_buffer_resource(
             C,
             max_size=True,
@@ -512,7 +531,10 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True):
             for ii in range_constexpr(4):
                 row = row_base + fx.Index(ii)
                 c_idx = row * fx.Index(c_n) + col
-                buffer_ops.buffer_store((Vec(acc)[ii] * output_scale).to(fx.Float16), c_rsrc, c_idx)
+                value = Vec(acc)[ii] * output_scale
+                if output_dtype != torch.float32:
+                    value = value.to(output_fx_dtype)
+                buffer_ops.buffer_store(value, c_rsrc, c_idx)
 
 
         # Explicit register coordinates for HK-style four-quadrant mapping.
@@ -955,8 +977,16 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True):
     return launch_gemm
 
 @functools.lru_cache(maxsize=None)
-def _cached_launch(K: int, use_xcd_remap: bool = True):
-    return _compile_kernel(K, use_xcd_remap=use_xcd_remap)
+def _cached_launch(
+    K: int,
+    output_dtype: torch.dtype,
+    use_xcd_remap: bool = True,
+):
+    return _compile_kernel(
+        K,
+        output_dtype,
+        use_xcd_remap=use_xcd_remap,
+    )
 
 
 
@@ -975,7 +1005,7 @@ def fp8_matmul(
         a_scale_inv: one-element FP32 inverse quantization scale
         b:           [K, N] FP8 E4M3 weight payload
         b_scale_inv: one-element FP32 inverse quantization scale
-        c:           [M, N] float16 output
+        c:           [M, N] float16, bfloat16, or float32 output
 
     The optimized private core streams both operands as row-major [Rows, K],
     so B is adapted from TE's logical [K, N] representation to [N, K].
@@ -1016,9 +1046,10 @@ def fp8_matmul(
 
     if tuple(c.shape) != (m, n):
         raise ValueError(f"C shape {tuple(c.shape)} != expected {(m, n)}")
-    if c.dtype != torch.float16:
+    if c.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise TypeError(
-            f"The current FlyDSL FP8 kernel stores float16 output, got {c.dtype}"
+            "FlyDSL FP8 supports only float16, bfloat16, and float32 "
+            f"outputs, got {c.dtype}"
         )
     if not c.is_contiguous():
         raise ValueError("FlyDSL FP8 requires contiguous output storage")
@@ -1056,7 +1087,14 @@ def doGemm(
     N_runtime, Kb_runtime = B.shape
     assert A.dtype == torch.float8_e4m3fn, f"A dtype {A.dtype} != torch.float8_e4m3fn"
     assert B.dtype == torch.float8_e4m3fn, f"B dtype {B.dtype} != torch.float8_e4m3fn"
-    assert C.dtype == torch.float16, f"C dtype {C.dtype} != torch.float16"
+    assert C.dtype in (
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ), (
+        "C dtype must be torch.float16, torch.bfloat16, or torch.float32, "
+        f"got {C.dtype}"
+    )
     assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
     assert M_runtime % _BLOCK_M == 0, f"M={M_runtime} must be a multiple of {_BLOCK_M}"
     assert N_runtime % _BLOCK_N == 0, f"N={N_runtime} must be a multiple of {_BLOCK_N}"
@@ -1077,7 +1115,11 @@ def doGemm(
     A_scale_arg = A_scale_inv.contiguous().view(-1)
     B_scale_arg = B_scale_inv.contiguous().view(-1)
 
-    launch = _cached_launch(int(K_runtime), bool(use_xcd_remap))
+    launch = _cached_launch(
+        int(K_runtime),
+        C.dtype,
+        bool(use_xcd_remap),
+    )
     launch(
         A_arg,
         B_arg,
