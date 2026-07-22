@@ -1012,7 +1012,9 @@ def get_attention_backend(
     if window_size is None:
         window_size = check_set_window_size(attn_mask_type, window_size)
     if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-        if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha):
+        if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha) and not IS_HIP_EXTENSION:
+            # On ROCm the fp8 fused backend (xAttention) supports sliding window; let its
+            # C++ backend selector enforce the exact window constraints instead.
             logger.debug(
                 "Disabling FusedAttention as it does not support sliding window attention for FP8"
             )

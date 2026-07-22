@@ -2163,6 +2163,40 @@ param_types_fp8_vs_f16 = [torch.float16, torch.bfloat16]
 qkv_layout_fp8_vs_f16 = ["sbh3d", "bshd_bshd_bshd", "sbhd_sbhd_sbhd"]
 qkv_format_fp8_vs_f16 = ["bshd", "sbhd"]
 
+# ROCm-only: extra configs exercising the xAttention fp8 backend's envelope that
+# the shared cuDNN set above does not cover (head_dim 64, MQA, sliding-window,
+# and small/cross-attn shape edges). Kept separate so the CUDA test_mha_fp8_vs_f16
+# matrix (which reuses model_configs_fp8_vs_f16) is unaffected.
+model_configs_fp8_xattn = {
+    # test: ModelConfig(b, sq, hq, dqk, ...)
+    # head_dim 64
+    "xattn_hd64": ModelConfig(2, 2048, 16, 64),
+    "xattn_hd64_causal": ModelConfig(2, 2048, 16, 64, attn_mask_type="causal"),
+    "xattn_hd64_gqa_causal": ModelConfig(
+        2, 2048, 24, 64, num_gqa_groups=12, attn_mask_type="causal"
+    ),
+    # MQA (num_gqa_groups == 1)
+    "xattn_mqa_causal": ModelConfig(2, 2048, 16, 128, num_gqa_groups=1, attn_mask_type="causal"),
+    # sliding-window attention (causal, left window)
+    "xattn_swa_causal_128": ModelConfig(
+        2, 2048, 16, 128, attn_mask_type="causal", window_size=(512, 0)
+    ),
+    "xattn_swa_causal_64": ModelConfig(
+        2, 2048, 16, 64, attn_mask_type="causal", window_size=(256, 0)
+    ),
+    # sliding-window attention (no_mask, symmetric window)
+    "xattn_swa_nomask": ModelConfig(2, 2048, 16, 128, window_size=(256, 256)),
+    # shape edges: small seqlen and cross-attention (sq != skv)
+    "xattn_small_causal": ModelConfig(2, 512, 16, 64, attn_mask_type="causal"),
+    "xattn_cross": ModelConfig(2, 1024, 16, 128, max_seqlen_kv=2048),
+}
+
+# DPA-only model set: shared cuDNN configs plus (on ROCm) the xAttention extras.
+model_configs_fp8_dpa = {
+    **model_configs_fp8_vs_f16,
+    **(model_configs_fp8_xattn if IS_HIP_EXTENSION else {}),
+}
+
 
 @pytest.mark.skipif(IS_HIP_EXTENSION, reason="FP8 Fused attention is not supported on ROCm")
 @pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
@@ -2426,14 +2460,14 @@ def _run_mha_fp8_vs_f16(
 )
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
-@pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
+@pytest.mark.parametrize("model", model_configs_fp8_dpa.keys())
 @pytest.mark.parametrize("qkv_layout", qkv_layout_fp8_vs_f16)
 @pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
 @pytest.mark.parametrize("is_training", [True, False])
 @pytest.mark.parametrize("scaling_mode", ["delayed", "current"])
 def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scaling_mode):
     """Test DotProductAttention module in FP8"""
-    config = model_configs_fp8_vs_f16[model]
+    config = model_configs_fp8_dpa[model]
     if IS_HIP_EXTENSION and xattention_available:
         os.environ["NVTE_FUSED_ATTN_XATTN"] = "1"
         if is_training and not fp8_dpa_bwd:
@@ -2737,6 +2771,7 @@ def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_rec
             max_seqlen_q=config.max_seqlen_q,
             max_seqlen_kv=config.max_seqlen_kv,
             attn_mask_type=config.attn_mask_type,
+            window_size=config.window_size,
             checkpoint_core_attention=False,
             core_attention_bias_type=config.attn_bias_type,
             fp8_output=fp8_dpa,
