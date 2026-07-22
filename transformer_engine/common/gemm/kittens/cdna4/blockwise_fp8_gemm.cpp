@@ -3,7 +3,6 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 
-#include <cstdlib>
 #include <type_traits>
 #include <utility>
 #include "kittens.cuh"

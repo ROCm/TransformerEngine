@@ -30,22 +30,23 @@ def fp8_blockwise_gemm_supported() -> bool:
     emulated = get_device_compute_capability() >= (10, 0)
     return supported and not emulated
 
-def rocm_blockwise_is_supported(
-    is_x_1d_scaled,
-    is_w_1d_scaled,
-    *,
-    x_columnwise: bool = False,
-    w_columnwise: bool = False,
-):
-    is_1d2d = is_x_1d_scaled and not is_w_1d_scaled
-    is_1d1d = is_x_1d_scaled and is_w_1d_scaled
-    if not (is_1d2d or is_1d1d):
-        return False, "Only 1D by 1D and 1D by 2D block scaling GEMM is supported"
+if IS_HIP_EXTENSION:
+    def rocm_blockwise_is_supported(
+        is_x_1d_scaled,
+        is_w_1d_scaled,
+        *,
+        x_columnwise: bool = False,
+        w_columnwise: bool = False,
+    ):
+        is_1d2d = is_x_1d_scaled and not is_w_1d_scaled
+        is_1d1d = is_x_1d_scaled and is_w_1d_scaled
+        if not (is_1d2d or is_1d1d):
+            return False, "Only 1D by 1D and 1D by 2D block scaling GEMM is supported"
 
-    if x_columnwise and not w_columnwise:
-        return False, "does not support TT layout"
+        if x_columnwise and not w_columnwise:
+            return False, "does not support TT layout"
 
-    return True, None
+        return True, None
 
 
 def cublas_gemm_fp8_blockwise_case(
@@ -72,7 +73,8 @@ def cublas_gemm_fp8_blockwise_case(
     rtol: float = 0.0
 ):
     if IS_HIP_EXTENSION:
-        atol = rtol = 8e-3
+        atol = 1e-5
+        rtol = 1.3e-6
     if x_dtype == fp8_e5m2_type and w_dtype == fp8_e5m2_type:
         pytest.skip("FP8 GEMM doesn't support both a and b types being torch.float8_e5m2")
     if not (is_x_1d_scaled or is_w_1d_scaled):
