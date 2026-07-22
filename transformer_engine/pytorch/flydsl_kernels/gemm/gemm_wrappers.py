@@ -419,7 +419,22 @@ def _run_mxfp8(
     *,
     output_dtype: torch.dtype,
 ):
-    """Canonicalize TE MXFP8 operands, then launch the fused backend."""
+    """Canonicalize independently typed E4M3/E5M2 MXFP8 operands."""
+    a_fp8_dtype = getattr(A, "_fp8_dtype", None)
+    b_fp8_dtype = getattr(B, "_fp8_dtype", None)
+    supported_fp8_dtypes = (
+        tex.DType.kFloat8E4M3,
+        tex.DType.kFloat8E5M2,
+    )
+    if (
+        a_fp8_dtype not in supported_fp8_dtypes
+        or b_fp8_dtype not in supported_fp8_dtypes
+    ):
+        raise NotImplementedError(
+            "FlyDSL MXFP8 supports E4M3 and E5M2 independently for A/B; "
+            f"got A={a_fp8_dtype} and B={b_fp8_dtype}"
+        )
+
     layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
     _mxfp8_debug(
         f"entry: layout={layout}, A_type={type(A).__name__}, "
@@ -440,6 +455,14 @@ def _run_mxfp8(
         name="B",
     )
 
+    # MXFP8Tensor stores rowwise/columnwise payloads as raw uint8. Reinterpret
+    # those exact bytes using each operand's own FP8 metadata before applying
+    # BLAS canonicalization. No copy or numerical conversion is performed here.
+    if A_data.dtype == torch.uint8:
+        A_data = reinterpret_as_fp8_tensor(A_data, a_fp8_dtype)
+    if B_data.dtype == torch.uint8:
+        B_data = reinterpret_as_fp8_tensor(B_data, b_fp8_dtype)
+
     a_flydsl, b_flydsl, m, n, k = _canonicalize_blas_operands(
         A_data,
         transa,
@@ -458,8 +481,10 @@ def _run_mxfp8(
 
     _mxfp8_debug(
         f"canonicalized layout={layout}: "
-        f"a={tuple(a_flydsl.shape)}, stride={tuple(a_flydsl.stride())}; "
-        f"b={tuple(b_flydsl.shape)}, stride={tuple(b_flydsl.stride())}"
+        f"a={tuple(a_flydsl.shape)}, dtype={a_flydsl.dtype}, "
+        f"stride={tuple(a_flydsl.stride())}; "
+        f"b={tuple(b_flydsl.shape)}, dtype={b_flydsl.dtype}, "
+        f"stride={tuple(b_flydsl.stride())}"
     )
     _mxfp8_debug(
         f"canonicalized scales: "
@@ -630,7 +655,7 @@ def te_generic_gemm_flydsl(
     TT is intentionally rejected.
 
     Supported dtypes:
-      - MXFP8 input with FP16, BF16, or FP32 output
+      - MXFP8 E4M3/E5M2 A/B combinations with FP16, BF16, or FP32 output
       - tensor-wise E4M3/E5M2 FP8 A/B combinations with FP16, BF16, or FP32 output
       - BF16 input with FP16, BF16, or FP32 output
       - FP16 input with FP16, BF16, or FP32 output

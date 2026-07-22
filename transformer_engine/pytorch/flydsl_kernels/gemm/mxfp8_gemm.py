@@ -10,9 +10,9 @@ is performed by ``gemm_wrappers.py`` before entering ``mxfp8_matmul``.
 
 Canonical launch inputs:
 
-    a:       [M, K] FP8 payload
+    a:       [M, K] FP8 E4M3 or E5M2 payload
     a_scale: [M, K/32] raw E8M0 bytes
-    b:       [K, N] FP8 payload
+    b:       [K, N] FP8 E4M3 or E5M2 payload
     b_scale: [K/32, N] raw E8M0 bytes
     D:       [M, N] float16, bfloat16, or float32 output
 """
@@ -199,13 +199,31 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
     )
 
 
-def _compile_kernel(K: int, output_dtype: torch.dtype):
-    """Build the specialized 4-wave kernel for compile-time ``K`` and output dtype.
+def _compile_kernel(
+    K: int,
+    a_fp8_dtype: torch.dtype,
+    b_fp8_dtype: torch.dtype,
+    output_dtype: torch.dtype,
+):
+    """Build the specialized kernel for compile-time K, A/B FP8 types, and output dtype.
 
     ``K`` must contain at least four K128 tiles. Runtime M/N are expected to
     be exact multiples of ``BLOCK_M``/``BLOCK_N``; the kernel has no edge masks.
     """
     BLOCK_M, BLOCK_N, BLOCK_K = _BLOCK_M, _BLOCK_N, _BLOCK_K
+
+    fp8_input_types = {
+        torch.float8_e4m3fn: (fx.Float8E4M3FN, 0),
+        torch.float8_e5m2: (fx.Float8E5M2, 1),
+    }
+    try:
+        a_fx_dtype, a_matrix_format = fp8_input_types[a_fp8_dtype]
+        b_fx_dtype, b_matrix_format = fp8_input_types[b_fp8_dtype]
+    except KeyError as exc:
+        raise TypeError(
+            "FlyDSL MXFP8 input dtype must be torch.float8_e4m3fn or "
+            f"torch.float8_e5m2, got A={a_fp8_dtype}, B={b_fp8_dtype}"
+        ) from exc
 
     if output_dtype == torch.float16:
         output_element_bytes = 2
@@ -262,14 +280,14 @@ def _compile_kernel(K: int, output_dtype: torch.dtype):
     class SharedStorage:
         # Each logical 256x128 page is two independent 128x128 half-pages.
         # The hot loop refills one 16-byte pass of one half-page at a time.
-        a0_0: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
-        a0_1: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
-        a1_0: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
-        a1_1: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
-        b0_0: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
-        b0_1: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
-        b1_0: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
-        b1_1: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
+        a0_0: fx.Array[a_fx_dtype, LDS_ELEMS_HALF, 16]
+        a0_1: fx.Array[a_fx_dtype, LDS_ELEMS_HALF, 16]
+        a1_0: fx.Array[a_fx_dtype, LDS_ELEMS_HALF, 16]
+        a1_1: fx.Array[a_fx_dtype, LDS_ELEMS_HALF, 16]
+        b0_0: fx.Array[b_fx_dtype, LDS_ELEMS_HALF, 16]
+        b0_1: fx.Array[b_fx_dtype, LDS_ELEMS_HALF, 16]
+        b1_0: fx.Array[b_fx_dtype, LDS_ELEMS_HALF, 16]
+        b1_1: fx.Array[b_fx_dtype, LDS_ELEMS_HALF, 16]
 
     @flyc.kernel(known_block_size=[NUM_THREADS, 1, 1])
     def kernel_gemm(
@@ -281,9 +299,10 @@ def _compile_kernel(K: int, output_dtype: torch.dtype):
         lds_b0 = (lds.b0_0, lds.b0_1)
         lds_b1 = (lds.b1_0, lds.b1_1)
 
-        f8_ir_t = fx.Float8E4M3FN.ir_type
-        gA = make_fp8_buffer_tensor(A, f8_ir_t)
-        gB = make_fp8_buffer_tensor(B, f8_ir_t)
+        a_f8_ir_t = a_fx_dtype.ir_type
+        b_f8_ir_t = b_fx_dtype.ir_type
+        gA = make_fp8_buffer_tensor(A, a_f8_ir_t)
+        gB = make_fp8_buffer_tensor(B, b_f8_ir_t)
         a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
         b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
         as_rsrc = buffer_ops.create_buffer_resource(As, max_size=True)
@@ -316,8 +335,8 @@ def _compile_kernel(K: int, output_dtype: torch.dtype):
         # the global K coordinate is XOR-unswizzled for the physical LDS slot.
         gl_off_a = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
         gl_off_b = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
-        a_g2s = G2SLoader(a_div, gl_off_a, LOAD_PASSES_HALF, f8_ir_t, wave_id)
-        b_g2s = G2SLoader(b_div, gl_off_b, LOAD_PASSES_HALF, f8_ir_t, wave_id)
+        a_g2s = G2SLoader(a_div, gl_off_a, LOAD_PASSES_HALF, a_f8_ir_t, wave_id)
+        b_g2s = G2SLoader(b_div, gl_off_b, LOAD_PASSES_HALF, b_f8_ir_t, wave_id)
         s2r = S2RLoader(fx.Int32(0), 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
@@ -544,7 +563,8 @@ def _compile_kernel(K: int, output_dtype: torch.dtype):
                     f"a[{acc_pin}:{acc_pin + 3}], "
                     f"$2, $3 "
                     f"op_sel:[{mi & 1},{ni & 1},0] "
-                    f"op_sel_hi:[{mi >> 1},{ni >> 1},0]"
+                    f"op_sel_hi:[{mi >> 1},{ni >> 1},0] "
+                    f"cbsz:{a_matrix_format} blgp:{b_matrix_format}"
                 ),
                 (f"v,v,v,v,~{{a{acc_pin}}},~{{a{acc_pin + 1}}},~{{a{acc_pin + 2}}},~{{a{acc_pin + 3}}}"),
                 has_side_effects=True,
@@ -571,7 +591,8 @@ def _compile_kernel(K: int, output_dtype: torch.dtype):
                     f"a[{old_pin}:{old_pin + 3}], "
                     f"$2, $3 "
                     f"op_sel:[{mi & 1},{ni & 1},0] "
-                    f"op_sel_hi:[{mi >> 1},{ni >> 1},0]"
+                    f"op_sel_hi:[{mi >> 1},{ni >> 1},0] "
+                    f"cbsz:{a_matrix_format} blgp:{b_matrix_format}"
                 ),
                 (f"v,v,v,v,~{{a{dst_pin}}},~{{a{dst_pin + 1}}},~{{a{dst_pin + 2}}},~{{a{dst_pin + 3}}}"),
                 has_side_effects=True,
@@ -1151,8 +1172,18 @@ def _compile_kernel(K: int, output_dtype: torch.dtype):
     return launch_gemm
 
 @functools.lru_cache(maxsize=None)
-def _cached_launch(K: int, output_dtype: torch.dtype):
-    return _compile_kernel(K, output_dtype)
+def _cached_launch(
+    K: int,
+    a_fp8_dtype: torch.dtype,
+    b_fp8_dtype: torch.dtype,
+    output_dtype: torch.dtype,
+):
+    return _compile_kernel(
+        K,
+        a_fp8_dtype,
+        b_fp8_dtype,
+        output_dtype,
+    )
 
 
 
@@ -1173,6 +1204,12 @@ def do_gemm(
     """
     M_runtime, K_runtime = A.shape
     N_runtime, Kb_runtime = B.shape
+    supported_fp8_dtypes = (
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+    )
+    assert A.dtype in supported_fp8_dtypes, f"unsupported A MXFP8 dtype: {A.dtype}"
+    assert B.dtype in supported_fp8_dtypes, f"unsupported B MXFP8 dtype: {B.dtype}"
     assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
     assert M_runtime % _BLOCK_M == 0, f"M={M_runtime} must be a multiple of {_BLOCK_M}"
     assert N_runtime % _BLOCK_N == 0, f"N={N_runtime} must be a multiple of {_BLOCK_N}"
@@ -1206,7 +1243,12 @@ def do_gemm(
     Bs_arg = Bs.contiguous().view(-1)
     C_arg = C.contiguous().view(-1)
 
-    launch = _cached_launch(int(K_runtime), C.dtype)
+    launch = _cached_launch(
+        int(K_runtime),
+        A.dtype,
+        B.dtype,
+        C.dtype,
+    )
     launch(
         A_arg,
         As_arg,
@@ -1255,6 +1297,16 @@ def mxfp8_matmul(
         raise ValueError(
             f"Incompatible canonical MXFP8 operands: "
             f"{tuple(a.shape)} @ {tuple(b.shape)}"
+        )
+
+    supported_fp8_dtypes = (
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+    )
+    if a.dtype not in supported_fp8_dtypes or b.dtype not in supported_fp8_dtypes:
+        raise TypeError(
+            "FlyDSL MXFP8 expects E4M3 or E5M2 payloads independently, "
+            f"got a={a.dtype} and b={b.dtype}"
         )
 
     if a.device != b.device:
