@@ -41,14 +41,13 @@ static int build_uniform_q(int bs,
 }
 
 template <typename DataType, typename Config>
-void run_fwd_head_dim_case(const std::string& label, float dropout_p, bool dump_err)
+void run_fwd_head_dim_case(int bs, const std::string& label, float dropout_p, bool dump_err)
 {
     using Launcher = AttnForwardMfma16x16KernelLauncher<DataType, Config>;
 
     constexpr int head_num   = Config::head_num;
     constexpr int max_seq_kv = Config::max_seq_kv;
     constexpr int head_dim   = Config::head_dim;
-    const int bs             = Config::bs;
 
     std::vector<int> h_cu_seqlens_q, h_cu_seqlens_q_padded, h_padded_q_to_batch;
     const int sq         = Config::max_seq_q;
@@ -140,7 +139,7 @@ void run_fwd_head_dim_case(const std::string& label, float dropout_p, bool dump_
                                   dropout_p, sqr_dk_scale, d_O, d_softmax_lse,
                                   d_cu_seqlens_q, d_cu_seqlens_q_padded,
                                   d_cu_seqlens_kv, d_cu_seqlens_kv_padded,
-                                  d_padded_q_to_batch, total_padded_q);
+                                  d_padded_q_to_batch, total_padded_q, bs);
 
     HIP_CHECK(hipMemcpy(h_O_gpu.data(), d_O, size_O * sizeof(DataType), hipMemcpyDeviceToHost));
 
@@ -174,19 +173,19 @@ int main()
     std::cout << "MFMA 16x16 forward head-dimension sweep (CPU reference vs GPU kernel)\n";
 
     run_fwd_head_dim_case<float,
-                          FmhaKernelConfig<bs, heads, max_seq_kv, 128, 256, false,
+                          FmhaKernelConfig<heads, max_seq_kv, 128, 256, false,
                                            CausalMaskType::DISABLE, sq>>(
-        "head_dim_128", dropout_p, dump_err);
+        bs, "head_dim_128", dropout_p, dump_err);
 
     run_fwd_head_dim_case<float,
-                          FmhaKernelConfig<bs, heads, max_seq_kv, 256, 256, false,
+                          FmhaKernelConfig<heads, max_seq_kv, 256, 256, false,
                                            CausalMaskType::DISABLE, sq>>(
-        "head_dim_256", dropout_p, dump_err);
+        bs, "head_dim_256", dropout_p, dump_err);
 
     run_fwd_head_dim_case<float,
-                          FmhaKernelConfig<bs, heads, max_seq_kv, 512, 256, false,
+                          FmhaKernelConfig<heads, max_seq_kv, 512, 256, false,
                                            CausalMaskType::DISABLE, sq>>(
-        "head_dim_512", dropout_p, dump_err);
+        bs, "head_dim_512", dropout_p, dump_err);
 
     std::cout << "All head-dimension MFMA forward tests finished successfully.\n";
     return 0;

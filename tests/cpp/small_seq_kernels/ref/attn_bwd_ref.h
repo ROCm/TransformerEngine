@@ -7,6 +7,8 @@
 #include <cstring>
 #include <vector>
 
+using namespace small_seq_kernels;
+
 // ---------------------------------------------------------------------------
 // CPU helper functions used by attn_backward
 // ---------------------------------------------------------------------------

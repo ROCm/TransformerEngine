@@ -7,6 +7,10 @@
 #include <cstring>
 #include <vector>
 
+// CausalMaskType and friends live in namespace small_seq_kernels; pull them into scope
+// for this standalone CPU reference.
+using namespace small_seq_kernels;
+
 /**
  * Multi-Head Attention Forward Pass (CPU Reference Implementation)
  *

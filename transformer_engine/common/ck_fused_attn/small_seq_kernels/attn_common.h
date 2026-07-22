@@ -22,6 +22,10 @@
         }                                                                                  \
     } while(0)
 
+// All named small-seq kernel entities live in this namespace to avoid clashing with
+// similarly-named symbols in other fused-attn backends (e.g. FmhaKernelConfig).
+namespace small_seq_kernels {
+
 // ---------------------------------------------------------------------------
 // Causal mask type
 // ---------------------------------------------------------------------------
@@ -43,11 +47,12 @@ inline std::map<CausalMaskType, std::string> CausalMaskTypeName = {
 // Kernel configuration struct
 //
 // Template parameters encode the static layout dimensions used by all kernels.
-// Runtime variability (actual Q/KV lengths per batch) is handled via cu_seqlens.
+// Runtime variability (actual batch size and actual Q/KV lengths per batch) is
+// handled at runtime: batch is passed as a kernel-launch argument (mapped to the
+// grid z-dimension) and per-batch sequence lengths come from cu_seqlens.
 // ---------------------------------------------------------------------------
 
-template <int BS,
-          int HEAD_NUM,
+template <int HEAD_NUM,
           int MAX_SEQ_KV,
           int HEAD_DIM,
           int STEP2_BLOCK_SIZE     = 256,
@@ -56,7 +61,6 @@ template <int BS,
           int MAX_SEQ_Q            = 1>
 struct FmhaKernelConfig
 {
-    static constexpr int bs                        = BS;
     static constexpr int head_num                  = HEAD_NUM;
     static constexpr int max_seq_q                 = MAX_SEQ_Q;
     // Backward compat alias for scalar fwd/bwd kernels (hardcoded seq_q=1)
@@ -67,3 +71,5 @@ struct FmhaKernelConfig
     static constexpr bool enable_dropout_mask      = ENABLE_DROPOUT_MASK;
     static constexpr enum CausalMaskType mask_type = MAKS_TYPE;
 };
+
+}  // namespace small_seq_kernels

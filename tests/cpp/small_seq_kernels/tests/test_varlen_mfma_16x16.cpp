@@ -114,7 +114,8 @@ inline void build_fixed_cu_seqlens_kv(int bs,
 // ---------------------------------------------------------------------------
 
 template <typename DataType, typename Config>
-bool test_fwd(bool varlen_q, int fix_sq,
+bool test_fwd(int bs,
+              bool varlen_q, int fix_sq,
               bool varlen_kv, int fix_skv,
               const std::string& label,
               const std::vector<int>& h_cu_seqlens_q,
@@ -127,7 +128,6 @@ bool test_fwd(bool varlen_q, int fix_sq,
 {
     using Launcher = AttnForwardMfma16x16KernelLauncher<DataType, Config>;
 
-    constexpr int bs         = Config::bs;
     constexpr int head_num   = Config::head_num;
     constexpr int max_seq_kv = Config::max_seq_kv;
     constexpr int max_seq_q  = Config::max_seq_q;
@@ -194,7 +194,7 @@ bool test_fwd(bool varlen_q, int fix_sq,
                                   static_cast<const DataType*>(nullptr),
                                   0.0f, sqr_dk_scale, d_O, d_softmax_lse,
                                   d_cu_sq, d_cu_sqp, d_cu_skv, d_cu_skvp,
-                                  nullptr, total_padded_q);
+                                  nullptr, total_padded_q, bs);
     HIP_CHECK(hipDeviceSynchronize());
 
     HIP_CHECK(hipMemcpy(h_O_gpu.data(), d_O, size_O * sizeof(DataType), hipMemcpyDeviceToHost));
@@ -216,7 +216,8 @@ bool test_fwd(bool varlen_q, int fix_sq,
 // ---------------------------------------------------------------------------
 
 template <typename DataType, typename Config>
-bool test_bwd(bool varlen_q, int fix_sq,
+bool test_bwd(int bs,
+              bool varlen_q, int fix_sq,
               bool varlen_kv, int fix_skv,
               const std::string& label,
               const std::vector<int>& h_cu_seqlens_q,
@@ -230,7 +231,6 @@ bool test_bwd(bool varlen_q, int fix_sq,
     using BwdLauncher = AttnBackwardMfma16x16KernelLauncher<DataType, Config>;
     using FwdLauncher = AttnForwardMfma16x16KernelLauncher<DataType, Config>;
 
-    constexpr int bs         = Config::bs;
     constexpr int head_num   = Config::head_num;
     constexpr int max_seq_kv = Config::max_seq_kv;
     constexpr int max_seq_q  = Config::max_seq_q;
@@ -312,7 +312,7 @@ bool test_bwd(bool varlen_q, int fix_sq,
     FwdLauncher::run_attn_fwd_kernel(d_Q, d_K, d_V, static_cast<const DataType*>(nullptr), 0.0f,
                                      sqr_dk_scale, d_O, d_softmax_lse,
                                      d_cu_sq, d_cu_sqp, d_cu_skv, d_cu_skvp,
-                                     d_padded_q_to_batch, total_padded_q);
+                                     d_padded_q_to_batch, total_padded_q, bs);
     HIP_CHECK(hipDeviceSynchronize());
 
     std::vector<float> h_softmax_lse(total_padded_q * head_num);
@@ -340,7 +340,7 @@ bool test_bwd(bool varlen_q, int fix_sq,
 
     BwdLauncher::run_attn_bwd_kernel(d_Q, d_K, d_V, d_dO, d_softmax_lse,
                                   d_dQ, d_dK, d_dV, sqr_dk_scale,
-                                  d_cu_sq, d_cu_sqp, d_cu_skv, d_cu_skvp);
+                                  d_cu_sq, d_cu_sqp, d_cu_skv, d_cu_skvp, bs);
     HIP_CHECK(hipDeviceSynchronize());
 
     HIP_CHECK(hipMemcpy(h_grad_Q_gpu.data(), d_dQ, size_Q * sizeof(DataType), hipMemcpyDeviceToHost));
@@ -372,11 +372,11 @@ bool test_bwd(bool varlen_q, int fix_sq,
 // ---------------------------------------------------------------------------
 
 template <typename DataType, typename Config>
-void run_test_case(bool varlen_q, int fix_sq,
+void run_test_case(int bs,
+                   bool varlen_q, int fix_sq,
                    bool varlen_kv, int fix_skv,
                    const std::string& label)
 {
-    constexpr int bs         = Config::bs;
     constexpr int max_seq_q  = Config::max_seq_q;
     constexpr int max_seq_kv = Config::max_seq_kv;
 
@@ -410,12 +410,12 @@ void run_test_case(bool varlen_q, int fix_sq,
               << "  total_padded_kv=" << total_padded_kv_seq << std::endl;
 
     test_fwd<DataType, Config>(
-        varlen_q, fix_sq, varlen_kv, fix_skv, label,
+        bs, varlen_q, fix_sq, varlen_kv, fix_skv, label,
         h_cu_sq, h_cu_sqp, h_q2b, h_cu_skv, h_cu_skvp,
         total_padded_q, total_padded_kv_seq);
 
     test_bwd<DataType, Config>(
-        varlen_q, fix_sq, varlen_kv, fix_skv, label,
+        bs, varlen_q, fix_sq, varlen_kv, fix_skv, label,
         h_cu_sq, h_cu_sqp, h_q2b, h_cu_skv, h_cu_skvp,
         total_padded_q, total_padded_kv_seq);
 
@@ -430,29 +430,29 @@ int main()
 {
     // Test 1: sq∈[1,16] varlen+pad, skv∈[2,16] varlen+pad
     {
-        using Cfg = FmhaKernelConfig<2048, 8, 16, 128, 256, false, CausalMaskType::DISABLE, 16>;
-        run_test_case<float, Cfg>(true, 0, true, 0,
+        using Cfg = FmhaKernelConfig<8, 16, 128, 256, false, CausalMaskType::DISABLE, 16>;
+        run_test_case<float, Cfg>(2048, true, 0, true, 0,
             "Test 1: sq varlen+pad [1,16], skv varlen+pad [2,16]");
     }
 
     // Test 2: sq=1 fixed, skv∈[2,16] varlen+pad
     {
-        using Cfg = FmhaKernelConfig<2048, 8, 16, 128, 256, false, CausalMaskType::DISABLE, 1>;
-        run_test_case<float, Cfg>(false, 1, true, 0,
+        using Cfg = FmhaKernelConfig<8, 16, 128, 256, false, CausalMaskType::DISABLE, 1>;
+        run_test_case<float, Cfg>(2048, false, 1, true, 0,
             "Test 2: sq=1 fixed, skv varlen+pad [2,16]");
     }
 
     // Test 3: sq=16, skv=16; fixed, no padding
     {
-        using Cfg = FmhaKernelConfig<2048, 8, 16, 128, 256, false, CausalMaskType::DISABLE, 16>;
-        run_test_case<float, Cfg>(false, 16, false, 16,
+        using Cfg = FmhaKernelConfig<8, 16, 128, 256, false, CausalMaskType::DISABLE, 16>;
+        run_test_case<float, Cfg>(2048, false, 16, false, 16,
             "Test 3: sq=16 fixed, skv=16 fixed");
     }
 
     // Test 4: sq=17, skv=17; fixed, no padding
     {
-        using Cfg = FmhaKernelConfig<2048, 8, 17, 128, 256, false, CausalMaskType::DISABLE, 17>;
-        run_test_case<float, Cfg>(false, 17, false, 17,
+        using Cfg = FmhaKernelConfig<8, 17, 128, 256, false, CausalMaskType::DISABLE, 17>;
+        run_test_case<float, Cfg>(2048, false, 17, false, 17,
             "Test 4: sq=17 fixed, skv=17 fixed");
     }
 

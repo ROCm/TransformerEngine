@@ -23,11 +23,10 @@
 
 template <typename DataType, typename Config>
 void test_run_attn_fwd_mfma_multiq_kernel(
-    float dropout_p, int warmup_iters, int test_iters, bool check_correctness, bool dump_err)
+    int bs, float dropout_p, int warmup_iters, int test_iters, bool check_correctness, bool dump_err)
 {
     using Launcher = AttnForwardMfmaDispatchLauncher<DataType, Config>;
 
-    constexpr int bs         = Config::bs;
     constexpr int head_num   = Config::head_num;
     constexpr int max_seq_kv = Config::max_seq_kv;
     constexpr int head_dim   = Config::head_dim;
@@ -139,7 +138,7 @@ void test_run_attn_fwd_mfma_multiq_kernel(
                                       dropout_p, sqr_dk_scale, d_O, d_aux,
                                       d_cu_seqlens_q, d_cu_seqlens_q_padded,
                                       d_cu_seqlens_kv, d_cu_seqlens_kv_padded,
-                                      d_padded_q_to_batch, total_padded_q);
+                                      d_padded_q_to_batch, total_padded_q, bs);
     };
 
     for(int i = 0; i < warmup_iters; i++) launch();
@@ -219,8 +218,8 @@ void test_run_attn_fwd_mfma_multiq_kernel(
 
 struct RunFwdMfmaMultiQ {
     template <typename DataType, typename Config>
-    void operator()(float dropout_p, int warmup, int iters, bool check, bool dump) const {
-        test_run_attn_fwd_mfma_multiq_kernel<DataType, Config>(dropout_p, warmup, iters, check, dump);
+    void operator()(int bs, float dropout_p, int warmup, int iters, bool check, bool dump) const {
+        test_run_attn_fwd_mfma_multiq_kernel<DataType, Config>(bs, dropout_p, warmup, iters, check, dump);
     }
 };
 
@@ -245,36 +244,36 @@ int main(int argc, char const* argv[])
     // max_seq_q=1 (dispatch → 4x4x4)
     std::cout << "\n========== Test B1: Multi-Q correctness, max_seq_q=1, SEQ_KV=8, bs=128 ==========" << std::endl;
     {
-        using Cfg = FmhaKernelConfig<128, 8, 8, 128, 256, false, CausalMaskType::DISABLE, 1>;
-        test_run_attn_fwd_mfma_multiq_kernel<float, Cfg>(0, 1, 1, true, true);
+        using Cfg = FmhaKernelConfig<8, 8, 128, 256, false, CausalMaskType::DISABLE, 1>;
+        test_run_attn_fwd_mfma_multiq_kernel<float, Cfg>(128, 0, 1, 1, true, true);
     }
 
     // max_seq_q=2 (dispatch → 4x4x4)
     std::cout << "\n========== Test B2: Multi-Q correctness, max_seq_q=2, SEQ_KV=8, bs=128 ==========" << std::endl;
     {
-        using Cfg = FmhaKernelConfig<128, 8, 8, 128, 256, false, CausalMaskType::DISABLE, 2>;
-        test_run_attn_fwd_mfma_multiq_kernel<float, Cfg>(0, 1, 1, true, true);
+        using Cfg = FmhaKernelConfig<8, 8, 128, 256, false, CausalMaskType::DISABLE, 2>;
+        test_run_attn_fwd_mfma_multiq_kernel<float, Cfg>(128, 0, 1, 1, true, true);
     }
 
     // max_seq_q=4 (dispatch → 4x4x4)
     std::cout << "\n========== Test B3: Multi-Q correctness, max_seq_q=4, SEQ_KV=8, bs=128 ==========" << std::endl;
     {
-        using Cfg = FmhaKernelConfig<128, 8, 8, 128, 256, false, CausalMaskType::DISABLE, 4>;
-        test_run_attn_fwd_mfma_multiq_kernel<float, Cfg>(0, 1, 1, true, true);
+        using Cfg = FmhaKernelConfig<8, 8, 128, 256, false, CausalMaskType::DISABLE, 4>;
+        test_run_attn_fwd_mfma_multiq_kernel<float, Cfg>(128, 0, 1, 1, true, true);
     }
 
     // max_seq_q=8 (dispatch → 16x16x16)
     std::cout << "\n========== Test B4: Multi-Q correctness, max_seq_q=8, SEQ_KV=8, bs=128 ==========" << std::endl;
     {
-        using Cfg = FmhaKernelConfig<128, 8, 8, 128, 256, false, CausalMaskType::DISABLE, 8>;
-        test_run_attn_fwd_mfma_multiq_kernel<float, Cfg>(0, 1, 1, true, true);
+        using Cfg = FmhaKernelConfig<8, 8, 128, 256, false, CausalMaskType::DISABLE, 8>;
+        test_run_attn_fwd_mfma_multiq_kernel<float, Cfg>(128, 0, 1, 1, true, true);
     }
 
     // max_seq_q=16 (dispatch → 16x16x16)
     std::cout << "\n========== Test B5: Multi-Q correctness, max_seq_q=16, SEQ_KV=16, bs=128 ==========" << std::endl;
     {
-        using Cfg = FmhaKernelConfig<128, 8, 16, 128, 256, false, CausalMaskType::DISABLE, 16>;
-        test_run_attn_fwd_mfma_multiq_kernel<float, Cfg>(0, 1, 1, true, true);
+        using Cfg = FmhaKernelConfig<8, 16, 128, 256, false, CausalMaskType::DISABLE, 16>;
+        test_run_attn_fwd_mfma_multiq_kernel<float, Cfg>(128, 0, 1, 1, true, true);
     }
 
     // =====================================================================
@@ -284,26 +283,26 @@ int main(int argc, char const* argv[])
 
     // max_seq_q=1 → 4x4x4
     {
-        using Cfg = FmhaKernelConfig<30720, 32, 16, 128, 256, false, CausalMaskType::DISABLE, 1>;
-        test_run_attn_fwd_mfma_multiq_kernel<hip_bfloat16, Cfg>(0, 3, 5, false, false);
+        using Cfg = FmhaKernelConfig<32, 16, 128, 256, false, CausalMaskType::DISABLE, 1>;
+        test_run_attn_fwd_mfma_multiq_kernel<hip_bfloat16, Cfg>(30720, 0, 3, 5, false, false);
     }
 
     // max_seq_q=4 → 4x4x4
     {
-        using Cfg = FmhaKernelConfig<30720, 32, 16, 128, 256, false, CausalMaskType::DISABLE, 4>;
-        test_run_attn_fwd_mfma_multiq_kernel<hip_bfloat16, Cfg>(0, 3, 5, false, false);
+        using Cfg = FmhaKernelConfig<32, 16, 128, 256, false, CausalMaskType::DISABLE, 4>;
+        test_run_attn_fwd_mfma_multiq_kernel<hip_bfloat16, Cfg>(30720, 0, 3, 5, false, false);
     }
 
     // max_seq_q=8 → 16x16x16
     {
-        using Cfg = FmhaKernelConfig<30720, 32, 16, 128, 256, false, CausalMaskType::DISABLE, 8>;
-        test_run_attn_fwd_mfma_multiq_kernel<hip_bfloat16, Cfg>(0, 3, 5, false, false);
+        using Cfg = FmhaKernelConfig<32, 16, 128, 256, false, CausalMaskType::DISABLE, 8>;
+        test_run_attn_fwd_mfma_multiq_kernel<hip_bfloat16, Cfg>(30720, 0, 3, 5, false, false);
     }
 
     // max_seq_q=16 → 16x16x16
     {
-        using Cfg = FmhaKernelConfig<30720, 32, 16, 128, 256, false, CausalMaskType::DISABLE, 16>;
-        test_run_attn_fwd_mfma_multiq_kernel<hip_bfloat16, Cfg>(0, 3, 5, false, false);
+        using Cfg = FmhaKernelConfig<32, 16, 128, 256, false, CausalMaskType::DISABLE, 16>;
+        test_run_attn_fwd_mfma_multiq_kernel<hip_bfloat16, Cfg>(30720, 0, 3, 5, false, false);
     }
 
     return 0;

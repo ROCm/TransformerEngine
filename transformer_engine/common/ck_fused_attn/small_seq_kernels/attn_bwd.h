@@ -5,6 +5,8 @@
 #include "attn_common.h"
 #include <type_traits>
 
+namespace small_seq_kernels {
+
 // ---------------------------------------------------------------------------
 // Kernel 1: compute_grad_v_kernel
 //
@@ -21,7 +23,8 @@ __global__ void compute_grad_v_kernel(const T* attn_weights,
                                       const int* cu_seqlens_q,
                                       const int* cu_seqlens_q_padded,
                                       const int* cu_seqlens_kv,
-                                      const int* cu_seqlens_kv_padded)
+                                      const int* cu_seqlens_kv_padded,
+                                      int batch)
 {
     constexpr int seq_q                 = Config::seq_q; // == 1
     constexpr int max_seq_kv            = Config::max_seq_kv;
@@ -49,7 +52,7 @@ __global__ void compute_grad_v_kernel(const T* attn_weights,
         int seq_head_idx = cur_idx % (Config::seq_q * Config::head_num);
         int head_idx     = seq_head_idx % Config::head_num;
 
-        if(batch_idx >= Config::bs)
+        if(batch_idx >= batch)
             continue;
 
         // Skip batches where actual Q seq is 0 — no grad_O to read from.
@@ -124,7 +127,8 @@ __global__ void compute_grad_attn_kernel(const T* grad_O,
                                          const int* cu_seqlens_q,
                                          const int* cu_seqlens_q_padded,
                                          const int* cu_seqlens_kv,
-                                         const int* cu_seqlens_kv_padded)
+                                         const int* cu_seqlens_kv_padded,
+                                         int batch)
 {
     constexpr int seq_q = Config::seq_q; // == 1
     static_assert(seq_q == 1, "seq_q must be 1 for this kernel implementation.");
@@ -144,7 +148,7 @@ __global__ void compute_grad_attn_kernel(const T* grad_O,
         int seq_head_idx  = cur_batch_idx % (Config::seq_q * Config::head_num);
         int head_idx      = seq_head_idx % Config::head_num;
 
-        if(batch_idx >= Config::bs)
+        if(batch_idx >= batch)
             continue;
 
         // Skip batches where actual Q seq is 0 — no row exists in workspace for them.
@@ -362,7 +366,8 @@ __global__ void compute_grad_qk_kernel(const T* grad_scores,
                                        const int* cu_seqlens_q,
                                        const int* cu_seqlens_q_padded,
                                        const int* cu_seqlens_kv,
-                                       const int* cu_seqlens_kv_padded)
+                                       const int* cu_seqlens_kv_padded,
+                                       int batch)
 {
     constexpr int seq_q                 = Config::seq_q;
     constexpr int max_seq_kv            = Config::max_seq_kv;
@@ -391,7 +396,7 @@ __global__ void compute_grad_qk_kernel(const T* grad_scores,
         int seq_q_idx    = seq_head_idx / Config::head_num;
         int head_idx     = seq_head_idx % Config::head_num;
 
-        if(batch_idx >= Config::bs)
+        if(batch_idx >= batch)
             continue;
 
         // Skip batches where actual Q seq is 0 — no grad_Q/grad_K to compute.
@@ -514,18 +519,19 @@ struct AttnBackwardKernelLauncher
                                     const int* cu_seqlens_kv,
                                     const int* cu_seqlens_kv_padded,
                                     const int* padded_q_to_batch,
-                                    int total_padded_q)
+                                    int total_padded_q,
+                                    int batch)
     {
-        constexpr int bs         = Config::bs;
+        const int bs             = batch;
         constexpr int head_num   = Config::head_num;
         constexpr int seq_q      = Config::seq_q;
         constexpr int max_seq_kv = Config::max_seq_kv;
         constexpr int head_dim   = Config::head_dim;
         constexpr int warp_size  = 64;
 
-        constexpr int merge_bs = bs * head_num;
-        float scale            = sqr_dk_scale;
-        float dropout_scale    = (dropout_p > 0.0f) ? (1.0f / (1.0f - dropout_p)) : 1.0f;
+        const int merge_bs  = bs * head_num;
+        float scale         = sqr_dk_scale;
+        float dropout_scale = (dropout_p > 0.0f) ? (1.0f / (1.0f - dropout_p)) : 1.0f;
 
         dim3 block(warp_size);
 
@@ -534,7 +540,7 @@ struct AttnBackwardKernelLauncher
         dim3 grid_v((bs * seq_q * head_num + tasks_per_block_v - 1) / tasks_per_block_v);
         compute_grad_v_kernel<T, Config, tasks_per_block_v><<<grid_v, block>>>(
             attn_weights, grad_O, grad_V, cu_seqlens_q, cu_seqlens_q_padded, cu_seqlens_kv,
-            cu_seqlens_kv_padded);
+            cu_seqlens_kv_padded, batch);
 
         // Step 2: Compute grad_attn = grad_O @ V^T — grid covers all (bs * head_num) tasks
         constexpr int tasks_per_block_attn  = 16;
@@ -544,7 +550,7 @@ struct AttnBackwardKernelLauncher
             (tasks_per_block_attn * process_head_per_warp));
         compute_grad_attn_kernel<T, Config, tasks_per_block_attn><<<grid_grad_attn, block>>>(
             grad_O, V, workspace, cu_seqlens_q, cu_seqlens_q_padded, cu_seqlens_kv,
-            cu_seqlens_kv_padded);
+            cu_seqlens_kv_padded, batch);
 
         // Step 3: Softmax backward — grid covers [total_padded_q, head_num, max_seq_kv] elements
         constexpr int work_thread_num = Config::step2_block_size / max_seq_kv * max_seq_kv;
@@ -560,6 +566,8 @@ struct AttnBackwardKernelLauncher
         dim3 grid_qk((bs * seq_q * head_num + tasks_per_block_qk - 1) / tasks_per_block_qk);
         compute_grad_qk_kernel<T, Config, tasks_per_block_qk><<<grid_qk, block>>>(
             workspace, Q, K, grad_Q, grad_K, scale, cu_seqlens_q, cu_seqlens_q_padded,
-            cu_seqlens_kv, cu_seqlens_kv_padded);
+            cu_seqlens_kv, cu_seqlens_kv_padded, batch);
     }
 };
+
+}  // namespace small_seq_kernels

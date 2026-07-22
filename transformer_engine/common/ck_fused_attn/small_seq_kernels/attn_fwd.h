@@ -5,6 +5,8 @@
 #include "attn_common.h"
 #include <type_traits>
 
+namespace small_seq_kernels {
+
 // ---------------------------------------------------------------------------
 // Kernel 1: compute_scores_kernel
 //
@@ -22,7 +24,8 @@ __global__ void compute_scores_kernel(const T* Q,
                                       const int* cu_seqlens_q,
                                       const int* cu_seqlens_q_padded,
                                       const int* cu_seqlens_kv,
-                                      const int* cu_seqlens_kv_padded)
+                                      const int* cu_seqlens_kv_padded,
+                                      int batch)
 {
     // seq_q is 1 in static layout (storage), but actual Q length per batch may be 0 or 1.
     constexpr int seq_q = Config::seq_q; // == 1 (padded storage dimension)
@@ -46,7 +49,7 @@ __global__ void compute_scores_kernel(const T* Q,
         int seq_idx      = seq_head_idx / Config::head_num;
         int head_idx     = seq_head_idx % Config::head_num;
 
-        if(batch_idx >= Config::bs)
+        if(batch_idx >= batch)
             continue;
 
         // Skip batches where actual Q sequence length is 0.
@@ -288,7 +291,8 @@ __global__ void compute_output_kernel(const T* attn_weights,
                                       const int* cu_seqlens_q,
                                       const int* cu_seqlens_q_padded,
                                       const int* cu_seqlens_kv,
-                                      const int* cu_seqlens_kv_padded)
+                                      const int* cu_seqlens_kv_padded,
+                                      int batch)
 {
     constexpr int seq_q                 = Config::seq_q;
     constexpr int max_seq_kv            = Config::max_seq_kv;
@@ -320,7 +324,7 @@ __global__ void compute_output_kernel(const T* attn_weights,
         int seq_q_idx    = seq_head_idx / Config::head_num;
         int head_idx     = seq_head_idx % Config::head_num;
 
-        if(batch_idx >= Config::bs)
+        if(batch_idx >= batch)
             continue;
 
         // Skip batches where actual Q seq length is 0 — no output to write.
@@ -406,18 +410,19 @@ struct AttnForwardKernelLauncher
                                     const int* cu_seqlens_kv,
                                     const int* cu_seqlens_kv_padded,
                                     const int* padded_q_to_batch,
-                                    int total_padded_q)
+                                    int total_padded_q,
+                                    int batch)
     {
-        constexpr int bs         = Config::bs;
+        const int bs             = batch;
         constexpr int head_num   = Config::head_num;
         constexpr int seq_q      = Config::seq_q;
         constexpr int max_seq_kv = Config::max_seq_kv;
         constexpr int head_dim   = Config::head_dim;
         constexpr int warp_size  = 64;
 
-        constexpr int merge_bs = bs * head_num;
-        float scale            = sqr_dk_scale;
-        float dropout_scale    = (dropout_p > 0.0f) ? (1.0f / (1.0f - dropout_p)) : 1.0f;
+        const int merge_bs  = bs * head_num;
+        float scale         = sqr_dk_scale;
+        float dropout_scale = (dropout_p > 0.0f) ? (1.0f / (1.0f - dropout_p)) : 1.0f;
 
         // Step 1: QK^T scores — grid covers all (batch * head_num) tasks
         constexpr int kernel1_threads = 64;
@@ -425,7 +430,7 @@ struct AttnForwardKernelLauncher
         dim3 grid(merge_bs / kernel1_threads);
         compute_scores_kernel<T, Config, 1><<<grid, block>>>(
             Q, K, workspace, scale, cu_seqlens_q, cu_seqlens_q_padded, cu_seqlens_kv,
-            cu_seqlens_kv_padded);
+            cu_seqlens_kv_padded, batch);
 
         // Step 2: Mask + softmax — grid covers [total_padded_q, head_num, max_seq_kv] elements
         constexpr int work_thread_num =
@@ -445,6 +450,8 @@ struct AttnForwardKernelLauncher
         dim3 grid3((merge_bs / process_head_per_warp + 2 - 1) / 2);
         compute_output_kernel<T, Config, 2, kernel3_block_k><<<grid3, block3>>>(
             workspace, V, O, cu_seqlens_q, cu_seqlens_q_padded, cu_seqlens_kv,
-            cu_seqlens_kv_padded);
+            cu_seqlens_kv_padded, batch);
     }
 };
+
+}  // namespace small_seq_kernels

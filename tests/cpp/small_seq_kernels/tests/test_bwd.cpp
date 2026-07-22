@@ -22,11 +22,10 @@
 
 template <typename DataType, typename Config>
 void test_run_attn_bwd_kernel(
-    float dropout_p, int warmup_iters, int test_iters, bool check_correctness, bool dump_err)
+    int bs, float dropout_p, int warmup_iters, int test_iters, bool check_correctness, bool dump_err)
 {
     using Launcher = AttnBackwardKernelLauncher<DataType, Config>;
 
-    constexpr int bs         = Config::bs;
     constexpr int head_num   = Config::head_num;
     constexpr int max_seq_kv = Config::max_seq_kv;
     constexpr int head_dim   = Config::head_dim;
@@ -200,7 +199,7 @@ void test_run_attn_bwd_kernel(
                                       d_grad_Q, d_grad_K, d_grad_V, d_workspace,
                                       d_cu_seqlens_q, d_cu_seqlens_q_padded,
                                       d_cu_seqlens_kv, d_cu_seqlens_kv_padded,
-                                      d_padded_q_to_batch, total_padded_q);
+                                      d_padded_q_to_batch, total_padded_q, bs);
     };
 
     for(int i = 0; i < warmup_iters; i++) bwd_launch();
@@ -450,7 +449,7 @@ void test_run_attn_bwd_with_seqlens(const std::vector<int>& h_cu_seqlens_q,
                                   d_grad_Q, d_grad_K, d_grad_V, d_workspace,
                                   d_cu_seqlens_q, d_cu_seqlens_q_padded,
                                   d_cu_seqlens_kv, d_cu_seqlens_kv_padded,
-                                  d_padded_q_to_batch, total_padded_q);
+                                  d_padded_q_to_batch, total_padded_q, bs);
 
     HIP_CHECK(hipMemcpy(h_grad_Q_gpu.data(), d_grad_Q, size_Q * sizeof(DataType), hipMemcpyDeviceToHost));
     HIP_CHECK(hipMemcpy(h_grad_K_gpu.data(), d_grad_K, size_K * sizeof(DataType), hipMemcpyDeviceToHost));
@@ -484,16 +483,16 @@ void test_run_attn_bwd_with_seqlens(const std::vector<int>& h_cu_seqlens_q,
 int main(int argc, char const* argv[])
 {
     std::cout << "\n========== Correctness Test (bs=30720, SEQ_KV=16) ==========" << std::endl;
-    using CorrConfig = FmhaKernelConfig<30720, 32, 16, 128, 128, false, CausalMaskType::DISABLE>;
-    test_run_attn_bwd_kernel<float, CorrConfig>(0, 10, 10, true, true);
+    using CorrConfig = FmhaKernelConfig<32, 16, 128, 128, false, CausalMaskType::DISABLE>;
+    test_run_attn_bwd_kernel<float, CorrConfig>(30720, 0, 10, 10, true, true);
 
     std::cout << "\n========== Performance Test (bfloat16, TOP_LEFT mask) ==========" << std::endl;
-    using PerfConfig = FmhaKernelConfig<30720, 32, 16, 128, 128, false, CausalMaskType::TOP_LEFT>;
-    test_run_attn_bwd_kernel<hip_bfloat16, PerfConfig>(0, 3, 5, false, false);
+    using PerfConfig = FmhaKernelConfig<32, 16, 128, 128, false, CausalMaskType::TOP_LEFT>;
+    test_run_attn_bwd_kernel<hip_bfloat16, PerfConfig>(30720, 0, 3, 5, false, false);
 
     std::cout << "\n========== Mixed-Q Test (bs=128, 0/1 tokens) ==========" << std::endl;
-    using MixedConfig = FmhaKernelConfig<128, 4, 8, 64, 256, false, CausalMaskType::DISABLE>;
-    test_run_attn_bwd_kernel<float, MixedConfig>(0, 2, 5, true, true);
+    using MixedConfig = FmhaKernelConfig<4, 8, 64, 256, false, CausalMaskType::DISABLE>;
+    test_run_attn_bwd_kernel<float, MixedConfig>(128, 0, 2, 5, true, true);
 
     std::cout << "\n========== Corner: Empty segments (even batches active, bs=128) =========="
               << std::endl;
@@ -514,7 +513,7 @@ int main(int argc, char const* argv[])
             if(h_cu_seqlens_q_padded[b + 1] > h_cu_seqlens_q_padded[b])
                 h_padded_q_to_batch[h_cu_seqlens_q_padded[b]] = b;
 
-        using CornerConfig = FmhaKernelConfig<128, 4, 8, 64, 256, false, CausalMaskType::DISABLE>;
+        using CornerConfig = FmhaKernelConfig<4, 8, 64, 256, false, CausalMaskType::DISABLE>;
         test_run_attn_bwd_with_seqlens<float, CornerConfig>(
             h_cu_seqlens_q, h_cu_seqlens_q_padded, h_padded_q_to_batch,
             total_padded_q, 0.0f, true, true, "Empty segments");
@@ -535,7 +534,7 @@ int main(int argc, char const* argv[])
         for(int i = 0; i < 256; i++) h_padded_q_to_batch[i] = i / 2;
         int total_padded_q = 256;
 
-        using CornerConfig = FmhaKernelConfig<128, 4, 8, 64, 256, false, CausalMaskType::DISABLE>;
+        using CornerConfig = FmhaKernelConfig<4, 8, 64, 256, false, CausalMaskType::DISABLE>;
         test_run_attn_bwd_with_seqlens<float, CornerConfig>(
             h_cu_seqlens_q, h_cu_seqlens_q_padded, h_padded_q_to_batch,
             total_padded_q, 0.0f, true, true, "Q padded > actual");

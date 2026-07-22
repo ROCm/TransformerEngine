@@ -33,13 +33,13 @@ set(CMAKE_HIP_STANDARD_REQUIRED ON)
 # Kernel headers
 #
 # The MFMA kernel headers (attn_*.h) are vendored once for the Transformer
-# Engine build under transformer_engine/common/fused_attn_rocm/small_seq_kernels.
+# Engine build under transformer_engine/common/ck_fused_attn/small_seq_kernels.
 # These reference tests include them directly from that canonical location
 # instead of keeping a duplicate copy here.
 # ---------------------------------------------------------------------------
 
 set(KERNEL_INCLUDE_DIR
-    "${CMAKE_SOURCE_DIR}/../../../transformer_engine/common/fused_attn_rocm/small_seq_kernels"
+    "${CMAKE_SOURCE_DIR}/../../../transformer_engine/common/ck_fused_attn/small_seq_kernels"
     CACHE PATH "Path to the vendored small-seq MFMA kernel headers")
 
 # ---------------------------------------------------------------------------

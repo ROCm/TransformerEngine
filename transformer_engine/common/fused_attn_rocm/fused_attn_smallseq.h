@@ -7,8 +7,8 @@
 #ifndef TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_FUSED_ATTN_SMALLSEQ_H_
 #define TRANSFORMER_ENGINE_FUSED_ATTN_ROCM_FUSED_ATTN_SMALLSEQ_H_
 
-#include <cstddef>
-
+// size_t (used throughout the declarations below) comes from transformer_engine/fused_attn.h,
+// matching the sibling headers in this module (fused_attn_ck.h, fused_attn_aotriton.h, utils.h).
 #include <transformer_engine/fused_attn.h>
 
 namespace transformer_engine {
@@ -29,12 +29,8 @@ bool small_seq_static_config_ok(NVTEDType q_dtype,
 
 bool is_runtime_small_seq_eligible(size_t runtime_max_seqlen_q, size_t runtime_max_seqlen_kv);
 
-bool supports_hip_small_seq(size_t num_attn_heads,
-                            size_t num_gqa_groups,
-                            size_t head_dim_qk,
-                            size_t head_dim_v);
-
-size_t small_seq_extra_workspace_bytes(size_t max_tokens_q);
+size_t small_seq_fwd_extra_workspace_bytes(size_t max_tokens_q);
+size_t small_seq_bwd_extra_workspace_bytes();
 
 bool is_nvte_ck_small_seq_enabled();
 

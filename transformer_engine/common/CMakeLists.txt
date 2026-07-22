@@ -356,10 +356,8 @@ else() #USE_ROCM
 
   add_library(transformer_engine SHARED ${te_hip_sources})
 
-  if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/fused_attn_rocm/small_seq_kernels")
-    target_include_directories(transformer_engine PRIVATE
-      "${CMAKE_CURRENT_SOURCE_DIR}/fused_attn_rocm/small_seq_kernels")
-  endif()
+  target_include_directories(transformer_engine PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/ck_fused_attn/small_seq_kernels")
 
   # Workaround for TheRock installation that moved some headers from system-wide location
   # to rocm_sysdeps but missing it in the default include path.

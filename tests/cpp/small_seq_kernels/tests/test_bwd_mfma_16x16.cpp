@@ -116,6 +116,7 @@ inline void build_fixed_cu_seqlens_kv(int bs,
 
 template <typename DataType, typename Config>
 void test_run_attn_bwd_mfma_16x16(
+    int bs,
     bool varlen_q, int fix_sq,
     bool varlen_kv, int fix_skv,
     const std::string& label,
@@ -127,7 +128,6 @@ void test_run_attn_bwd_mfma_16x16(
     using BwdLauncher = AttnBackwardMfma16x16KernelLauncher<DataType, Config>;
     using FwdLauncher = AttnForwardMfma16x16KernelLauncher<DataType, Config>;
 
-    constexpr int bs         = Config::bs;
     constexpr int head_num   = Config::head_num;
     constexpr int max_seq_kv = Config::max_seq_kv;
     constexpr int max_seq_q  = Config::max_seq_q;
@@ -240,7 +240,7 @@ void test_run_attn_bwd_mfma_16x16(
                                      sqr_dk_scale, d_O, d_softmax_lse,
                                      d_cu_seqlens_q, d_cu_seqlens_q_padded,
                                      d_cu_seqlens_kv, d_cu_seqlens_kv_padded,
-                                     d_padded_q_to_batch, total_padded_q);
+                                     d_padded_q_to_batch, total_padded_q, bs);
     HIP_CHECK(hipDeviceSynchronize());
 
     std::vector<float> h_softmax_lse(total_padded_q * head_num);
@@ -270,7 +270,7 @@ void test_run_attn_bwd_mfma_16x16(
         BwdLauncher::run_attn_bwd_kernel(d_Q, d_K, d_V, d_grad_O, d_softmax_lse,
                                          d_grad_Q, d_grad_K, d_grad_V, sqr_dk_scale,
                                          d_cu_seqlens_q, d_cu_seqlens_q_padded,
-                                         d_cu_seqlens_kv, d_cu_seqlens_kv_padded);
+                                         d_cu_seqlens_kv, d_cu_seqlens_kv_padded, bs);
     };
 
     for(int i = 0; i < warmup_iters; i++) bwd_launch();
@@ -341,8 +341,9 @@ int main(int argc, char const* argv[])
     // Test 1: sq∈[1,16], skv∈[2,16]; varlen + padding
     // Looser cmp_rtol/cmp_atol: CPU ref P uses chunked bf16 dots; MFMA S differs (see log max ~0.23).
     {
-        using Cfg = FmhaKernelConfig<2048, 8, 16, 128, 256, false, CausalMaskType::DISABLE, 16>;
+        using Cfg = FmhaKernelConfig<8, 16, 128, 256, false, CausalMaskType::DISABLE, 16>;
         test_run_attn_bwd_mfma_16x16<float, Cfg>(
+            2048,
             true, 0, true, 0,
             "Test 1: sq∈[1,16] varlen+pad, skv∈[2,16] varlen+pad",
             1, 1, true, true,
@@ -351,8 +352,9 @@ int main(int argc, char const* argv[])
 
     // Test 2: sq=1 (fixed, no padding), skv∈[2,16] (varlen + padding)
     {
-        using Cfg = FmhaKernelConfig<2048, 8, 16, 128, 256, false, CausalMaskType::DISABLE, 1>;
+        using Cfg = FmhaKernelConfig<8, 16, 128, 256, false, CausalMaskType::DISABLE, 1>;
         test_run_attn_bwd_mfma_16x16<float, Cfg>(
+            2048,
             false, 1, true, 0,
             "Test 2: sq=1 fixed, skv∈[2,16] varlen+pad",
             1, 1, true, true,
@@ -361,8 +363,9 @@ int main(int argc, char const* argv[])
 
     // Test 3: sq=16, skv=16; fixed, no padding
     {
-        using Cfg = FmhaKernelConfig<2048, 8, 16, 128, 256, false, CausalMaskType::DISABLE, 16>;
+        using Cfg = FmhaKernelConfig<8, 16, 128, 256, false, CausalMaskType::DISABLE, 16>;
         test_run_attn_bwd_mfma_16x16<float, Cfg>(
+            2048,
             false, 16, false, 16,
             "Test 3: sq=16 fixed, skv=16 fixed",
             1, 1, true, true);
@@ -370,8 +373,9 @@ int main(int argc, char const* argv[])
 
     // Test 4: sq=17, skv=17; fixed, no padding
     {
-        using Cfg = FmhaKernelConfig<2048, 8, 17, 128, 256, false, CausalMaskType::DISABLE, 17>;
+        using Cfg = FmhaKernelConfig<8, 17, 128, 256, false, CausalMaskType::DISABLE, 17>;
         test_run_attn_bwd_mfma_16x16<float, Cfg>(
+            2048,
             false, 17, false, 17,
             "Test 4: sq=17 fixed, skv=17 fixed",
             1, 1, true, true);

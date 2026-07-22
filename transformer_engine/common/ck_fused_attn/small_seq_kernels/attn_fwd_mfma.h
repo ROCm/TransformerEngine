@@ -14,6 +14,8 @@ using floatx4 = float __attribute__((ext_vector_type(4)));
 #define CEIL_DIV(a, b) (((a) + (b)-1) / (b))
 #endif
 
+namespace small_seq_kernels {
+
 template <typename T>
 __device__ __forceinline__ bf16x8 load_cvt_bf16x8(const T* src)
 {
@@ -382,17 +384,22 @@ struct AttnForwardMfmaKernelLauncher
                                     const int* cu_seqlens_kv,
                                     const int* cu_seqlens_kv_padded,
                                     const int* padded_q_to_batch,
-                                    int total_padded_q)
+                                    int total_padded_q,
+                                    int batch,
+                                    hipStream_t stream = 0)
     {
         float dropout_scale = (dropout_p > 0.0f) ? (1.0f / (1.0f - dropout_p)) : 1.0f;
 
-        dim3 grid(1, CEIL_DIV(Config::head_num, 16), Config::bs);
+        // Batch is a runtime argument mapped to the grid z-dimension.
+        dim3 grid(1, CEIL_DIV(Config::head_num, 16), batch);
         dim3 block(256);
 
-        fmha_fwd_mfma_kernel<T, Config><<<grid, block>>>(
+        fmha_fwd_mfma_kernel<T, Config><<<grid, block, 0, stream>>>(
             Q, K, V, O, workspace,
             dropout_mask, dropout_scale, sqr_dk_scale,
             cu_seqlens_q, cu_seqlens_q_padded,
             cu_seqlens_kv, cu_seqlens_kv_padded);
     }
 };
+
+}  // namespace small_seq_kernels

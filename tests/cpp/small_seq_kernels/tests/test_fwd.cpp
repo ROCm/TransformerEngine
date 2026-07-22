@@ -22,11 +22,10 @@
 
 template <typename DataType, typename Config>
 void test_run_attn_fwd_kernel(
-    float dropout_p, int warmup_iters, int test_iters, bool check_correctness, bool dump_err)
+    int bs, float dropout_p, int warmup_iters, int test_iters, bool check_correctness, bool dump_err)
 {
     using Launcher = AttnForwardKernelLauncher<DataType, Config>;
 
-    constexpr int bs         = Config::bs;
     constexpr int head_num   = Config::head_num;
     constexpr int max_seq_kv = Config::max_seq_kv;
     constexpr int head_dim   = Config::head_dim;
@@ -124,7 +123,7 @@ void test_run_attn_fwd_kernel(
                                       dropout_p, sqr_dk_scale, d_O, d_workspace,
                                       d_cu_seqlens_q, d_cu_seqlens_q_padded,
                                       d_cu_seqlens_kv, d_cu_seqlens_kv_padded,
-                                      d_padded_q_to_batch, total_padded_q);
+                                      d_padded_q_to_batch, total_padded_q, bs);
     };
 
     for(int i = 0; i < warmup_iters; i++) launch();
@@ -306,7 +305,7 @@ void test_run_attn_fwd_with_seqlens(const std::vector<int>& h_cu_seqlens_q,
                                   dropout_p, sqr_dk_scale, d_O, d_workspace,
                                   d_cu_seqlens_q, d_cu_seqlens_q_padded,
                                   d_cu_seqlens_kv, d_cu_seqlens_kv_padded,
-                                  d_padded_q_to_batch, total_padded_q);
+                                  d_padded_q_to_batch, total_padded_q, bs);
 
     HIP_CHECK(hipMemcpy(h_O_gpu.data(), d_O, size_O * sizeof(DataType), hipMemcpyDeviceToHost));
 
@@ -330,8 +329,8 @@ void test_run_attn_fwd_with_seqlens(const std::vector<int>& h_cu_seqlens_q,
 
 struct RunFwd {
     template <typename DataType, typename Config>
-    void operator()(float dropout_p, int warmup, int iters, bool check, bool dump) const {
-        test_run_attn_fwd_kernel<DataType, Config>(dropout_p, warmup, iters, check, dump);
+    void operator()(int bs, float dropout_p, int warmup, int iters, bool check, bool dump) const {
+        test_run_attn_fwd_kernel<DataType, Config>(bs, dropout_p, warmup, iters, check, dump);
     }
 };
 
@@ -348,8 +347,8 @@ int main(int argc, char const* argv[])
 
     std::cout << "\n========== Correctness Test (mixed Q=0/1, SEQ_KV=8, bs=128) ==========" << std::endl;
     {
-        using MixedConfig = FmhaKernelConfig<128, 8, 8, 128, 256, false, CausalMaskType::DISABLE>;
-        test_run_attn_fwd_kernel<float, MixedConfig>(0, 1, 1, true, true);
+        using MixedConfig = FmhaKernelConfig<8, 8, 128, 256, false, CausalMaskType::DISABLE>;
+        test_run_attn_fwd_kernel<float, MixedConfig>(128, 0, 1, 1, true, true);
     }
 
     std::cout << "\n========== Performance Test (bfloat16, SEQ_KV 2..16) ==========" << std::endl;
@@ -375,7 +374,7 @@ int main(int argc, char const* argv[])
             if(h_cu_seqlens_q_padded[b + 1] > h_cu_seqlens_q_padded[b])
                 h_padded_q_to_batch[h_cu_seqlens_q_padded[b]] = b;
 
-        using CornerConfig = FmhaKernelConfig<128, 8, 8, 128, 256, false, CausalMaskType::DISABLE>;
+        using CornerConfig = FmhaKernelConfig<8, 8, 128, 256, false, CausalMaskType::DISABLE>;
         test_run_attn_fwd_with_seqlens<float, CornerConfig>(
             h_cu_seqlens_q, h_cu_seqlens_q_padded, h_padded_q_to_batch,
             total_padded_q, 0.0f, true, true, "Empty segments");
@@ -396,7 +395,7 @@ int main(int argc, char const* argv[])
         for(int i = 0; i < 256; i++) h_padded_q_to_batch[i] = i / 2;
         int total_padded_q = 256;
 
-        using CornerConfig = FmhaKernelConfig<128, 8, 8, 128, 256, false, CausalMaskType::DISABLE>;
+        using CornerConfig = FmhaKernelConfig<8, 8, 128, 256, false, CausalMaskType::DISABLE>;
         test_run_attn_fwd_with_seqlens<float, CornerConfig>(
             h_cu_seqlens_q, h_cu_seqlens_q_padded, h_padded_q_to_batch,
             total_padded_q, 0.0f, true, true, "Q padded > actual");

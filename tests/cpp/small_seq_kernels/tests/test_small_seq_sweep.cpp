@@ -98,9 +98,8 @@ static void print_csv_row(const char* mode, int bs, int sq, int skv,
 // ---------------------------------------------------------------------------
 
 template <typename Launcher, typename DataType, typename Config>
-BenchResult run_fwd_bench(int sq, int skv, int warmup, int niters)
+BenchResult run_fwd_bench(int bs, int sq, int skv, int warmup, int niters)
 {
-    constexpr int bs   = Config::bs;
     constexpr int nh   = Config::head_num;
     constexpr int hd   = Config::head_dim;
 
@@ -156,7 +155,7 @@ BenchResult run_fwd_bench(int sq, int skv, int warmup, int niters)
     auto launch = [&]() {
         Launcher::run_attn_fwd_kernel(dQ, dK, dV,
             static_cast<const DataType*>(nullptr), 0.0f, scale, dO, dW,
-            d_csq, d_csqp, d_cskv, d_cskvp, d_q2b, tot_q);
+            d_csq, d_csqp, d_cskv, d_cskvp, d_q2b, tot_q, bs);
     };
 
     for(int i = 0; i < warmup; i++) launch();
@@ -190,11 +189,10 @@ BenchResult run_fwd_bench(int sq, int skv, int warmup, int niters)
 // ---------------------------------------------------------------------------
 
 template <typename Launcher, typename DataType, typename Config>
-BenchResult run_bwd_bench(int sq, int skv, int warmup, int niters)
+BenchResult run_bwd_bench(int bs, int sq, int skv, int warmup, int niters)
 {
     using FwdLauncher = AttnForwardMfma16x16KernelLauncher<DataType, Config>;
 
-    constexpr int bs  = Config::bs;
     constexpr int nh  = Config::head_num;
     constexpr int hd  = Config::head_dim;
 
@@ -257,7 +255,7 @@ BenchResult run_bwd_bench(int sq, int skv, int warmup, int niters)
 
     FwdLauncher::run_attn_fwd_kernel(dQ, dK, dV, static_cast<const DataType*>(nullptr), 0.0f,
                                      scale, dO, d_lse,
-                                     d_csq, d_csqp, d_cskv, d_cskvp, d_q2b, tot_q);
+                                     d_csq, d_csqp, d_cskv, d_cskvp, d_q2b, tot_q, bs);
     HIP_CHECK(hipDeviceSynchronize());
 
     auto launch = [&]() {
@@ -266,7 +264,7 @@ BenchResult run_bwd_bench(int sq, int skv, int warmup, int niters)
         HIP_CHECK(hipMemset(dGV, 0, sK * sizeof(DataType)));
         Launcher::run_attn_bwd_kernel(dQ, dK, dV, dGO, d_lse,
             dGQ, dGK, dGV, scale,
-            d_csq, d_csqp, d_cskv, d_cskvp);
+            d_csq, d_csqp, d_cskv, d_cskvp, bs);
     };
 
     for(int i = 0; i < warmup; i++) launch();
@@ -310,28 +308,28 @@ struct SeqSweep
         // --- Forward: 4x4x4 (only for SEQ <= 4) ---
         if constexpr(SEQ <= 4)
         {
-            using Cfg = FmhaKernelConfig<BS, HEAD_NUM, SEQ, HEAD_DIM, 256, false,
+            using Cfg = FmhaKernelConfig<HEAD_NUM, SEQ, HEAD_DIM, 256, false,
                                          CausalMaskType::DISABLE, SEQ>;
             using L = AttnForwardMfmaKernelLauncher<DataType, Cfg>;
-            auto r = run_fwd_bench<L, DataType, Cfg>(SEQ, SEQ, warmup, iters);
+            auto r = run_fwd_bench<L, DataType, Cfg>(BS, SEQ, SEQ, warmup, iters);
             print_csv_row("fwd", BS, SEQ, SEQ, HEAD_NUM, HEAD_DIM, "mfma_4x4", r);
         }
 
         // --- Forward: 16x16x16 ---
         {
-            using Cfg = FmhaKernelConfig<BS, HEAD_NUM, SEQ, HEAD_DIM, 256, false,
+            using Cfg = FmhaKernelConfig<HEAD_NUM, SEQ, HEAD_DIM, 256, false,
                                          CausalMaskType::DISABLE, SEQ>;
             using L = AttnForwardMfma16x16KernelLauncher<DataType, Cfg>;
-            auto r = run_fwd_bench<L, DataType, Cfg>(SEQ, SEQ, warmup, iters);
+            auto r = run_fwd_bench<L, DataType, Cfg>(BS, SEQ, SEQ, warmup, iters);
             print_csv_row("fwd", BS, SEQ, SEQ, HEAD_NUM, HEAD_DIM, "mfma_16x16", r);
         }
 
         // --- Backward: 16x16x16 ---
         {
-            using Cfg = FmhaKernelConfig<BS, HEAD_NUM, SEQ, HEAD_DIM, 256, false,
+            using Cfg = FmhaKernelConfig<HEAD_NUM, SEQ, HEAD_DIM, 256, false,
                                          CausalMaskType::DISABLE, SEQ>;
             using L = AttnBackwardMfma16x16KernelLauncher<DataType, Cfg>;
-            auto r = run_bwd_bench<L, DataType, Cfg>(SEQ, SEQ, warmup, iters);
+            auto r = run_bwd_bench<L, DataType, Cfg>(BS, SEQ, SEQ, warmup, iters);
             print_csv_row("bwd", BS, SEQ, SEQ, HEAD_NUM, HEAD_DIM, "mfma_16x16", r);
         }
 
@@ -347,26 +345,26 @@ struct SeqSweep<MAX_SEQ, MAX_SEQ>
     {
         if constexpr(MAX_SEQ <= 4)
         {
-            using Cfg = FmhaKernelConfig<BS, HEAD_NUM, MAX_SEQ, HEAD_DIM, 256, false,
+            using Cfg = FmhaKernelConfig<HEAD_NUM, MAX_SEQ, HEAD_DIM, 256, false,
                                          CausalMaskType::DISABLE, MAX_SEQ>;
             using L = AttnForwardMfmaKernelLauncher<DataType, Cfg>;
-            auto r = run_fwd_bench<L, DataType, Cfg>(MAX_SEQ, MAX_SEQ, warmup, iters);
+            auto r = run_fwd_bench<L, DataType, Cfg>(BS, MAX_SEQ, MAX_SEQ, warmup, iters);
             print_csv_row("fwd", BS, MAX_SEQ, MAX_SEQ, HEAD_NUM, HEAD_DIM, "mfma_4x4", r);
         }
 
         {
-            using Cfg = FmhaKernelConfig<BS, HEAD_NUM, MAX_SEQ, HEAD_DIM, 256, false,
+            using Cfg = FmhaKernelConfig<HEAD_NUM, MAX_SEQ, HEAD_DIM, 256, false,
                                          CausalMaskType::DISABLE, MAX_SEQ>;
             using L = AttnForwardMfma16x16KernelLauncher<DataType, Cfg>;
-            auto r = run_fwd_bench<L, DataType, Cfg>(MAX_SEQ, MAX_SEQ, warmup, iters);
+            auto r = run_fwd_bench<L, DataType, Cfg>(BS, MAX_SEQ, MAX_SEQ, warmup, iters);
             print_csv_row("fwd", BS, MAX_SEQ, MAX_SEQ, HEAD_NUM, HEAD_DIM, "mfma_16x16", r);
         }
 
         {
-            using Cfg = FmhaKernelConfig<BS, HEAD_NUM, MAX_SEQ, HEAD_DIM, 256, false,
+            using Cfg = FmhaKernelConfig<HEAD_NUM, MAX_SEQ, HEAD_DIM, 256, false,
                                          CausalMaskType::DISABLE, MAX_SEQ>;
             using L = AttnBackwardMfma16x16KernelLauncher<DataType, Cfg>;
-            auto r = run_bwd_bench<L, DataType, Cfg>(MAX_SEQ, MAX_SEQ, warmup, iters);
+            auto r = run_bwd_bench<L, DataType, Cfg>(BS, MAX_SEQ, MAX_SEQ, warmup, iters);
             print_csv_row("bwd", BS, MAX_SEQ, MAX_SEQ, HEAD_NUM, HEAD_DIM, "mfma_16x16", r);
         }
     }
@@ -382,14 +380,14 @@ struct CrossSeqSweep
     template <typename DataType, int BS, int HEAD_NUM, int HEAD_DIM>
     static void run(int warmup, int iters)
     {
-        using Cfg = FmhaKernelConfig<BS, HEAD_NUM, 16, HEAD_DIM, 256, false,
+        using Cfg = FmhaKernelConfig<HEAD_NUM, 16, HEAD_DIM, 256, false,
                                      CausalMaskType::DISABLE, 1>;
         using FwdL = AttnForwardMfma16x16KernelLauncher<DataType, Cfg>;
         using BwdL = AttnBackwardMfma16x16KernelLauncher<DataType, Cfg>;
 
-        auto rf = run_fwd_bench<FwdL, DataType, Cfg>(1, SKV, warmup, iters);
+        auto rf = run_fwd_bench<FwdL, DataType, Cfg>(BS, 1, SKV, warmup, iters);
         print_csv_row("fwd", BS, 1, SKV, HEAD_NUM, HEAD_DIM, "mfma_16x16", rf);
-        auto rb = run_bwd_bench<BwdL, DataType, Cfg>(1, SKV, warmup, iters);
+        auto rb = run_bwd_bench<BwdL, DataType, Cfg>(BS, 1, SKV, warmup, iters);
         print_csv_row("bwd", BS, 1, SKV, HEAD_NUM, HEAD_DIM, "mfma_16x16", rb);
 
         CrossSeqSweep<SKV + 1, MAX_SKV>::template run<DataType, BS, HEAD_NUM, HEAD_DIM>(

@@ -6,6 +6,8 @@
 
 #include <hip/hip_bfloat16.h>
 
+using namespace small_seq_kernels;
+
 #include <algorithm>
 #include <cmath>
 #include <iostream>
@@ -473,15 +475,14 @@ struct TestRunner
               typename... Args>
     static void run(Func fn, Args&&... args)
     {
-        using KernelConfig = FmhaKernelConfig<BS,
-                                              HEAD_NUM,
+        using KernelConfig = FmhaKernelConfig<HEAD_NUM,
                                               SEQ_KV,
                                               HEAD_DIM,
                                               STEP2_BLOCK_SIZE,
                                               ENABLE_DROPOUT_MASK,
                                               MASK_TYPE,
                                               MAX_SEQ_Q>;
-        fn.template operator()<DataType, KernelConfig>(std::forward<Args>(args)...);
+        fn.template operator()<DataType, KernelConfig>(BS, std::forward<Args>(args)...);
 
         TestRunner<SEQ_KV + 1, MAX_SEQ_KV>::template run<DataType,
                                                          BS,
@@ -510,14 +511,13 @@ struct TestRunner<MAX_SEQ_KV, MAX_SEQ_KV>
               typename... Args>
     static void run(Func fn, Args&&... args)
     {
-        using KernelConfig = FmhaKernelConfig<BS,
-                                              HEAD_NUM,
+        using KernelConfig = FmhaKernelConfig<HEAD_NUM,
                                               MAX_SEQ_KV,
                                               HEAD_DIM,
                                               STEP2_BLOCK_SIZE,
                                               ENABLE_DROPOUT_MASK,
                                               MASK_TYPE,
                                               MAX_SEQ_Q>;
-        fn.template operator()<DataType, KernelConfig>(std::forward<Args>(args)...);
+        fn.template operator()<DataType, KernelConfig>(BS, std::forward<Args>(args)...);
     }
 };

@@ -18,6 +18,8 @@ using floatx4 = float __attribute__((ext_vector_type(4)));
 #define CEIL_DIV(a, b) (((a) + (b)-1) / (b))
 #endif
 
+namespace small_seq_kernels {
+
 template <typename T>
 __device__ __forceinline__ bf16x8 bwd_load_cvt_bf16x8(const T* src)
 {
@@ -670,24 +672,29 @@ struct AttnBackwardMfma16x16KernelLauncher
                                     const int* cu_seqlens_q,
                                     const int* cu_seqlens_q_padded,
                                     const int* cu_seqlens_kv,
-                                    const int* cu_seqlens_kv_padded)
+                                    const int* cu_seqlens_kv_padded,
+                                    int batch,
+                                    hipStream_t stream = 0)
     {
         float scale = sqr_dk_scale;
 
-        dim3 grid(1, Config::head_num, Config::bs);
+        // Batch is a runtime argument mapped to the grid z-dimension.
+        dim3 grid(1, Config::head_num, batch);
         dim3 block(256);
 
         // Kernel B: grad_V = P^T @ grad_O (P recomputed from Q, K, LSE)
-        fmha_bwd_grad_v_mfma_16x16_kernel<T, Config><<<grid, block>>>(
+        fmha_bwd_grad_v_mfma_16x16_kernel<T, Config><<<grid, block, 0, stream>>>(
             Q, K, softmax_lse, grad_O, grad_V, scale,
             cu_seqlens_q, cu_seqlens_q_padded,
             cu_seqlens_kv, cu_seqlens_kv_padded);
 
         // Kernel A: fused grad_attn / softmax_bwd / grad_Q / grad_K
-        fmha_bwd_fused_mfma_16x16_kernel<T, Config><<<grid, block>>>(
+        fmha_bwd_fused_mfma_16x16_kernel<T, Config><<<grid, block, 0, stream>>>(
             Q, K, V, grad_O, softmax_lse,
             grad_Q, grad_K, scale,
             cu_seqlens_q, cu_seqlens_q_padded,
             cu_seqlens_kv, cu_seqlens_kv_padded);
     }
 };
+
+}  // namespace small_seq_kernels

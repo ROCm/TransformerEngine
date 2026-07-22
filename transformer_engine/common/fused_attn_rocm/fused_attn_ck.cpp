@@ -524,7 +524,7 @@ void fused_attn_ck_fwd_impl(
       is_ragged;
   if(ck_small_seq_enabled) {
     ck_smallseq_workspace_prefix =
-        planner.allocate(small_seq_extra_workspace_bytes(max_tokens_q));
+        planner.allocate(small_seq_fwd_extra_workspace_bytes(max_tokens_q));
   }
 
   void* devPtrAlibiSlope = nullptr;
@@ -835,7 +835,7 @@ void fused_attn_ck_bwd_impl(
       is_ragged;
   if(ck_small_seq_enabled) {
     ck_smallseq_workspace_prefix =
-        planner.allocate(small_seq_extra_workspace_bytes(max_tokens_q));
+        planner.allocate(small_seq_bwd_extra_workspace_bytes());
   }
 
   // First h*max_tokens_q*sizeof(float) is the lse-d buffer (passed as softmax_lsed)
@@ -1118,17 +1118,15 @@ void fused_attn_ck_bwd_impl(
     pad_remap_lse<PadDirection::Remove>(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxLSEWithoutPadding, stream);
     bool ran_smallseq_bwd = false;
     if(ck_smallseq_workspace_prefix != nullptr && is_ragged && ck_small_seq_enabled) {
-      void* workspace_next = ck_smallseq_workspace_prefix;
-      void* max_seqlen_workspace_q = workspace_next;
+      // Backward prefix holds only the two runtime-max-seqlen probe slots (Q then KV);
+      void* max_seqlen_workspace_q = ck_smallseq_workspace_prefix;
       void* max_seqlen_workspace_kv =
-          static_cast<void*>(static_cast<int8_t*>(workspace_next) + sizeof(uint64_t));
+          static_cast<void*>(static_cast<int8_t*>(ck_smallseq_workspace_prefix) + sizeof(uint64_t));
       hipStream_t hip_stream = reinterpret_cast<hipStream_t>(stream);
       const size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
           b, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, max_seqlen_workspace_q, hip_stream));
       const size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
           b, devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV, max_seqlen_workspace_kv, hip_stream));
-      workspace_next =
-          static_cast<void*>(static_cast<int8_t*>(workspace_next) + 2 * sizeof(uint64_t));
       if(nvte_log_ck_config) {
         std::cout << std::endl << "attn_bwd(ck small-seq): ";
         std::cout << "b: " << b << ", ";
@@ -1141,10 +1139,6 @@ void fused_attn_ck_bwd_impl(
                   << std::endl;
       }
       if(is_runtime_small_seq_eligible(runtime_max_seqlen_q, runtime_max_seqlen_kv)) {
-        const int total_padded_q = static_cast<int>(max_tokens_q);
-        workspace_next = static_cast<void*>(static_cast<int8_t*>(workspace_next) +
-                                             static_cast<size_t>(total_padded_q) * sizeof(int));
-        (void)workspace_next;  // Same prefix carve as fwd; small-seq bwd path does not consume padded map.
         ran_smallseq_bwd = fused_attn_smallseq_bwd(
             b, h, d_qk, max_tokens_q, max_tokens_kv, scaling_factor, devPtrQ, devPtrK, devPtrV,
             devPtrdO, devPtrSoftmaxLSEWithoutPadding, devPtrdQ, devPtrdK, devPtrdV,

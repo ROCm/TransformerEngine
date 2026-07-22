@@ -10,7 +10,6 @@
 #include "transformer_engine/fused_attn.h"
 #include "fused_attn_aotriton.h"
 #include "fused_attn_ck.h"
-#include "fused_attn_smallseq.h"
 #include "../common.h"
 #include "../util/cuda_runtime.h" //cuda::sm_arch
 #include "../util/system.h" //getenv
