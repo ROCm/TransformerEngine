@@ -159,7 +159,6 @@ def _valid_fp8_transpose(t):
     )
 
 
-
 def _mxfp8_debug_enabled() -> bool:
     value = os.getenv("DEBUG_FLYDSL_MXFP8_GEMM", "")
     return value.lower() not in ("", "0", "false", "no", "off")
