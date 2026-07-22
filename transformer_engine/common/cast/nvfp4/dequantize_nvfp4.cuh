@@ -72,14 +72,8 @@ __global__ void __launch_bounds__(512)
 #else
   float amax = (tensor_amax != nullptr) ? (ROW_SCALED_NVFP4 ? tensor_amax[y] : tensor_amax[0]) : 1.0f;
 #endif
-#if defined(__HIP_DEVICE_COMPILE__)
-  // ROCm fp8e4m3 max is arch-specific (240 fnuz / 448 OCP); match the encode scale.
-  constexpr float factor_inv =
-      1.0f / (detail::TypeExtrema<fp4e2m1>::max * detail::TypeExtrema<fp8e4m3>::max);
-#else
   static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
   constexpr float factor_inv = 1.0f / (6.0f * static_cast<float>(E4M3_MAX));
-#endif
   float final_scale = static_cast<float>(scale) * amax * factor_inv;
 #pragma unroll
   for (int i = 0; i < 4; i++) {
