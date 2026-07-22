@@ -18,7 +18,7 @@ struct ColScale { float v[WIDTH]; };
 template <int HEIGHT>
 struct RowRatio { float v[HEIGHT][4]; };
 
-__device__ inline float scalar_load_scale(const float *p, int i) {
+__device__ inline float load_scaleB_scalar(const float *p, int i) {
     float v;
     asm volatile("s_load_dword %0, %1, %2\n"
                  : "=s"(v)
@@ -27,7 +27,7 @@ __device__ inline float scalar_load_scale(const float *p, int i) {
     return v;
 }
 
-__device__ inline kittens::fp8e8m0_4 scalar_load_scale_u32(const kittens::fp8e8m0_4 *p, int i) {
+__device__ inline kittens::fp8e8m0_4 load_scaleB_scalar_u32(const kittens::fp8e8m0_4 *p, int i) {
     kittens::fp8e8m0_4 v;
     asm volatile("s_load_dword %0, %1, %2\n"
                  : "=s"(v)
@@ -105,6 +105,26 @@ __device__ inline float rtne_cast_roundtrip(float v) {
     }
 }
 
+enum struct GemmEpilogue {
+    DEFAULT,
+    BIAS,
+    GELU_AUX,
+    BETA,
+    BIAS_BETA,
+    GELU_AUX_BETA,
+};
+
+__host__ __device__ inline constexpr bool epilogue_has_bias(GemmEpilogue e) {
+    return e == GemmEpilogue::BIAS || e == GemmEpilogue::BIAS_BETA;
+}
+__host__ __device__ inline constexpr bool epilogue_has_gelu(GemmEpilogue e) {
+    return e == GemmEpilogue::GELU_AUX || e == GemmEpilogue::GELU_AUX_BETA;
+}
+__host__ __device__ inline constexpr bool epilogue_has_beta(GemmEpilogue e) {
+    return e == GemmEpilogue::BETA || e == GemmEpilogue::BIAS_BETA
+        || e == GemmEpilogue::GELU_AUX_BETA;
+}
+
 template <typename OType, bool HAS_BIAS, bool HAS_GELU, bool HAS_BETA, typename AccType>
 __device__ inline void apply_epilogue(
     AccType &acc, int m_off, int n_off, int M, int N,
@@ -151,6 +171,17 @@ __device__ inline void apply_epilogue(
     }
 }
 
+template <typename OType, GemmEpilogue EPILOGUE, typename AccType>
+__device__ inline void apply_epilogue(
+    AccType &acc, int m_off, int n_off, int M, int N,
+    const void *bias, int bias_dtype,
+    const void *gelu_aux, int gelu_aux_dtype,
+    const OType *c_in, float beta) {
+    apply_epilogue<OType, epilogue_has_bias(EPILOGUE), epilogue_has_gelu(EPILOGUE),
+                   epilogue_has_beta(EPILOGUE)>(
+        acc, m_off, n_off, M, N, bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta);
+}
+
 template <typename AccType>
 __device__ inline RowScale<AccType::height> load_row_scale(
     const float *sa_row_k, int local_m_base, int m_valid) {
@@ -194,7 +225,7 @@ __device__ inline void scale_accumulate(
 }
 
 template <typename AccType>
-__device__ inline ColScale<AccType::width> load_col_scale(
+__device__ inline ColScale<AccType::width> load_scaleB_col(
     const float *sb_col_k, int local_n_base, int n_valid) {
     ColScale<AccType::width> cs;
     const int col_g = kittens::laneid() % 16;
@@ -204,6 +235,16 @@ __device__ inline ColScale<AccType::width> load_col_scale(
         cs.v[j] = n0 < n_valid ? sb_col_k[n0] : 0.f;
     }
     return cs;
+}
+
+template <int WIDTH>
+__device__ inline ColScale<WIDTH> col_scale_ratio(const ColScale<WIDTH> &prev, const ColScale<WIDTH> &curr) {
+    ColScale<WIDTH> r;
+    #pragma unroll
+    for (int j = 0; j < WIDTH; j++) {
+        r.v[j] = prev.v[j] / curr.v[j];
+    }
+    return r;
 }
 
 template <typename AccType>
