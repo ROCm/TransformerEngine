@@ -277,6 +277,21 @@ if __name__ == "__main__":
                         current_file_path / "transformer_engine",
                     )
                 )
+
+                # Optional xAttention fp8 attention backend (ROCm gfx950/gfx1250).
+                # Built as a self-contained second extension (needs -std=c++20 and
+                # a static-archive link group). Skipped gracefully when the
+                # submodule is absent or the target arch is unsupported.
+                if rocm_build():
+                    from build_tools.xattention import (
+                        setup_xattention_extension,
+                        xattention_enabled,
+                    )
+
+                    if xattention_enabled():
+                        ext_modules.append(
+                            setup_xattention_extension("transformer_engine/pytorch/csrc")
+                        )
             if "jax" in frameworks:
                 from build_tools.jax import setup_jax_extension
 

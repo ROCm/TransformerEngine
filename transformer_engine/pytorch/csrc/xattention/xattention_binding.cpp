@@ -7,8 +7,9 @@
 
 // Thin pybind11/torch binding exposing xAttention's flash-attn-shaped
 // interface (xattn::interface) to Python for the TransformerEngine
-// "XAttention" attention backend. Built out-of-tree against an xAttention
-// checkout (see setup.py); this is not part of the main TE build.
+// "XAttention" attention backend. Built in-tree as a self-contained second
+// extension (transformer_engine_xattention) against the 3rdparty/xAttention
+// submodule; see build_tools/xattention.py.
 
 #include <torch/extension.h>
 

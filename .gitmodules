@@ -33,3 +33,6 @@
 [submodule "3rdparty/ck_jit"]
 	path = 3rdparty/ck_jit
 	url = https://github.com/ROCm/ck-jit.git
+[submodule "3rdparty/xAttention"]
+	path = 3rdparty/xAttention
+	url = https://github.com/AMD-ROCm-Core-Perf-Team/xAttention.git

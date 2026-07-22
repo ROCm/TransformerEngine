@@ -10,9 +10,10 @@ per-tensor quant kernels (mha_fwd_quant / mha_bwd_quant), so that on ROCm it can
 serve as the fp8 kernel underneath the FusedAttention backend.
 
 All xAttention-specific logic lives here; FusedAttnFunc only calls
-``fp8_forward`` / ``fp8_backward`` behind ``is_available()``. The binding module
-(``transformer_engine_xattention``) is built out-of-tree — see
-``transformer_engine/pytorch/csrc/xattention/``.
+``fp8_forward`` / ``fp8_backward`` behind the ``NVTE_XAttn`` backend selection.
+The binding module (``transformer_engine_xattention``) is built in-tree as a
+self-contained second extension against the ``3rdparty/xAttention`` submodule —
+see ``build_tools/xattention.py``.
 
 Scope (fp8 DelayedScaling): bshd/sbhd, non-padding, non-CP, head_dim 64/128,
 causal / no-mask / sliding-window. Anything else must be filtered out by
@@ -20,15 +21,109 @@ causal / no-mask / sliding-window. Anything else must be filtered out by
 """
 
 import os
+from pathlib import Path
 from typing import List, Optional, Tuple
 
 import torch
+
+
+def _xattention_root_and_arch() -> Tuple[Optional[str], Optional[str]]:
+    """Locate the installed xAttention data root and packaged arch.
+
+    Order: explicit env override, then the build-time generated paths module,
+    then the in-tree submodule relative to this package (editable install).
+    """
+    root = os.getenv("NVTE_XATTENTION_SOURCE_DIR")
+    arch = os.getenv("NVTE_XATTENTION_ARCH")
+    if root is None:
+        try:
+            from ._xattention_paths import (  # pylint: disable=import-outside-toplevel
+                XATTENTION_ROOT,
+                XATTENTION_ARCH,
+            )
+
+            root = root or XATTENTION_ROOT
+            arch = arch or XATTENTION_ARCH
+        except Exception:  # pragma: no cover - generated only by a real build
+            pass
+    if root is None:
+        # dot_product_attention -> attention -> pytorch -> transformer_engine -> repo root
+        cand = Path(__file__).resolve().parents[4] / "3rdparty" / "xAttention"
+        if cand.is_dir():
+            root = str(cand)
+    return root, arch
+
+
+def _configure_runtime_env() -> None:
+    """Point the prebuilt closed core at its SP3 toolchain and writable scratch.
+
+    The core bakes in absolute paths from the packaging machine, so the SP3
+    toolchain dir and (for JIT) writable scratch/kernel-cache dirs must be set
+    via ``XATT_*`` env vars before it runs. User-set values are always honored.
+    Runs at import (before the binding is loaded); failures are non-fatal.
+    """
+    try:
+        root, arch = _xattention_root_and_arch()
+        if root is None:
+            return
+        root = Path(root)
+        if arch is None:
+            sp3_base = root / "sp3"
+            sp3_dirs = [p.name for p in sp3_base.glob("*") if p.is_dir()] if sp3_base.is_dir() else []
+            if len(sp3_dirs) == 1:
+                arch = sp3_dirs[0]
+
+        # SP3 toolchain (required for JIT codegen; harmless to set for AOT).
+        if arch and "XATT_SP3_DIR" not in os.environ:
+            sp3 = root / "sp3" / arch
+            if sp3.is_dir():
+                os.environ["XATT_SP3_DIR"] = str(sp3)
+
+        # Kernel build mode + prebuilt kernel dir (AOT) recorded at build time.
+        kernel_mode, kernel_dir = "AOT", None
+        try:
+            from ._xattention_paths import (  # pylint: disable=import-outside-toplevel
+                XATTENTION_KERNEL_MODE,
+                XATTENTION_KERNEL_DIR,
+            )
+
+            kernel_mode = (XATTENTION_KERNEL_MODE or "AOT").upper()
+            kernel_dir = XATTENTION_KERNEL_DIR
+        except Exception:  # pragma: no cover - generated only by a real build
+            pass
+
+        # Writable scratch must not live in the (possibly read-only) install tree.
+        cache = (
+            Path(os.getenv("XDG_CACHE_HOME", str(Path.home() / ".cache")))
+            / "transformer_engine"
+            / "xattention"
+        )
+        if "XATT_TMP_DIR" not in os.environ:
+            tmp = cache / "tmp"
+            tmp.mkdir(parents=True, exist_ok=True)
+            os.environ["XATT_TMP_DIR"] = str(tmp)
+
+        # XATT_KERNEL_DIR is the parent of the "<arch>" dir (the runtime appends
+        # "/<arch>" itself). AOT: point at the prebuilt kernels; JIT: a writable
+        # cache the runtime codegen can populate.
+        if "XATT_KERNEL_DIR" not in os.environ:
+            if kernel_mode == "AOT" and kernel_dir and Path(kernel_dir).is_dir():
+                os.environ["XATT_KERNEL_DIR"] = str(kernel_dir)
+            else:
+                kern = cache / "kernels"
+                kern.mkdir(parents=True, exist_ok=True)
+                os.environ["XATT_KERNEL_DIR"] = str(kern)
+    except Exception:  # pragma: no cover - defensive; never break import
+        pass
+
+
+_configure_runtime_env()
 
 try:
     import transformer_engine_xattention as _xattn  # noqa: F401
 
     _IMPORT_ERROR = None
-except Exception as e:  # pragma: no cover - depends on out-of-tree build
+except Exception as e:  # pragma: no cover - depends on the optional build
     _xattn = None
     _IMPORT_ERROR = e
 
