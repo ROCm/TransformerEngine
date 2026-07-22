@@ -7,10 +7,40 @@
 import torch
 import transformer_engine_torch as tex
 
+from transformer_engine.pytorch.utils import get_device_compute_capability
+
 from .bf16_gemm import bf16_matmul
 from .fp16_gemm import fp16_matmul
+from .fp8_gemm import fp8_matmul
 from .mxfp8_gemm import mxfp8_matmul
 
+
+def reinterpret_as_fp8_tensor(
+    a: torch.Tensor,
+    dtype: tex.DType,
+) -> torch.Tensor:
+    """View TE's uint8 payload as the native torch FP8 dtype for this GPU."""
+    capability = get_device_compute_capability()
+
+    # gfx950 uses OCP FP8. gfx942 and earlier ROCm architectures use FNUZ.
+    use_ocp_fp8 = capability == (9, 5)
+
+    if dtype == tex.DType.kFloat8E4M3:
+        torch_dtype = (
+            torch.float8_e4m3fn
+            if use_ocp_fp8
+            else torch.float8_e4m3fnuz
+        )
+    elif dtype == tex.DType.kFloat8E5M2:
+        torch_dtype = (
+            torch.float8_e5m2
+            if use_ocp_fp8
+            else torch.float8_e5m2fnuz
+        )
+    else:
+        raise TypeError(f"Unsupported TE FP8 dtype: {dtype}")
+
+    return a.view(torch_dtype)
 
 def _validate_common_epilogue(
     *,
@@ -52,6 +82,180 @@ def _validate_common_epilogue(
 def _is_mxfp8_operand(t):
     """Return whether ``t`` exposes TE MXFP8 rowwise storage."""
     return hasattr(t, "_rowwise_data") and hasattr(t, "_rowwise_scale_inv")
+
+
+def _is_fp8_operand(t):
+    """Return whether ``t`` is a regular TE tensor-wise FP8 operand."""
+    try:
+        from transformer_engine.pytorch import Float8Tensor
+        from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import (
+            Float8TensorStorage,
+        )
+    except ImportError:
+        return False
+
+    return isinstance(t, (Float8Tensor, Float8TensorStorage))
+
+
+def _reinterpret_fp8_payload(data, fp8_dtype, name):
+    """Reinterpret TE's uint8 payload using its ``tex.DType`` metadata."""
+    if data is None:
+        raise RuntimeError(f"{name} does not contain the required FP8 payload")
+
+    if fp8_dtype not in (
+        tex.DType.kFloat8E4M3,
+        tex.DType.kFloat8E5M2,
+    ):
+        raise TypeError(
+            f"{name} has unsupported TE FP8 dtype metadata: {fp8_dtype}"
+        )
+
+    # TE stores Float8Tensor payloads as uint8. Use TE's shared conversion
+    # helper so ROCm's correct native torch FP8 type is selected from tex.DType.
+    if data.dtype == torch.uint8:
+        return reinterpret_as_fp8_tensor(data, fp8_dtype)
+
+    # A materialized payload may already have been reinterpreted. Accept it
+    # only when its TE metadata is one of the recognized FP8 enum values.
+    if data.element_size() == 1 and data.dtype.is_floating_point:
+        return data
+
+    raise TypeError(
+        f"{name} FP8 storage must be uint8 or an already reinterpreted "
+        f"one-byte floating-point tensor, got {data.dtype}"
+    )
+
+
+def _valid_fp8_transpose(t):
+    """Return whether a TE Float8 operand has usable columnwise storage."""
+    return (
+        hasattr(t, "_transpose")
+        and t._transpose is not None
+        and not getattr(t, "_transpose_invalid", False)
+    )
+
+
+def _run_fp8_tn(A, B, D):
+    """Run tensor-wise E4M3 x E4M3 FlyDSL FP8 for TE's TN convention.
+
+    TE supplies:
+        A: weight     [N, K], transa=True
+        B: activation [..., K], transb=False
+
+    ``fp8_matmul`` consumes:
+        a: activation [M, K]
+        b: weight.T   [K, N]
+        c: output     [M, N]
+    """
+    if not (_is_fp8_operand(A) and _is_fp8_operand(B)):
+        raise TypeError(
+            "FlyDSL FP8 GEMM expects Float8Tensor or Float8TensorStorage operands"
+        )
+
+    a_fp8_dtype = getattr(A, "_fp8_dtype", None)
+    b_fp8_dtype = getattr(B, "_fp8_dtype", None)
+    if (
+        a_fp8_dtype != tex.DType.kFloat8E4M3
+        or b_fp8_dtype != tex.DType.kFloat8E4M3
+    ):
+        raise NotImplementedError(
+            "The current FlyDSL FP8 kernel supports only "
+            "tex.DType.kFloat8E4M3 x tex.DType.kFloat8E4M3; "
+            f"got A={a_fp8_dtype} and B={b_fp8_dtype}"
+        )
+
+    # A is transposed by the TE TN call. Prefer its already-materialized
+    # columnwise payload, which has the exact [K, N] layout consumed by
+    # fp8_matmul. Fall back to a transpose view of rowwise [N, K] storage.
+    if _valid_fp8_transpose(A):
+        A_t = _reinterpret_fp8_payload(A._transpose, a_fp8_dtype, "A._transpose")
+        if A_t.ndim != 2:
+            raise ValueError(
+                f"FlyDSL FP8 TN expects transposed weight storage to be rank 2, "
+                f"got {tuple(A_t.shape)}"
+            )
+        k, n = A_t.shape
+    else:
+        A_data = _reinterpret_fp8_payload(getattr(A, "_data", None), a_fp8_dtype, "A._data")
+        if A_data.ndim != 2:
+            raise ValueError(
+                f"FlyDSL FP8 TN expects weight A to be rank 2, "
+                f"got {tuple(A_data.shape)}"
+            )
+        n, k = A_data.shape
+        A_t = A_data.transpose(0, 1)
+
+    # B is not transposed by TE, so rowwise storage is required. Flatten any
+    # leading activation dimensions into M while retaining the K dimension.
+    B_data = _reinterpret_fp8_payload(getattr(B, "_data", None), b_fp8_dtype, "B._data")
+    if B_data.ndim < 2:
+        raise ValueError(
+            f"FlyDSL FP8 TN expects activation B to have rank >= 2, "
+            f"got {tuple(B_data.shape)}"
+        )
+
+    B_flat = B_data.reshape(-1, B_data.shape[-1])
+    m, kb = B_flat.shape
+    if kb != k:
+        raise ValueError(
+            f"FP8 inner dimensions do not match: weight K={k} and "
+            f"activation K={kb}"
+        )
+
+    A_scale_inv = getattr(A, "_scale_inv", None)
+    B_scale_inv = getattr(B, "_scale_inv", None)
+    for name, scale in (
+        ("A._scale_inv", A_scale_inv),
+        ("B._scale_inv", B_scale_inv),
+    ):
+        if not isinstance(scale, torch.Tensor):
+            raise RuntimeError(f"{name} is not populated")
+        if scale.dtype != torch.float32 or scale.numel() != 1:
+            raise ValueError(
+                f"{name} must contain exactly one FP32 tensor-wise inverse "
+                f"scale, got dtype={scale.dtype}, shape={tuple(scale.shape)}"
+            )
+
+    output_shape = (*B_data.shape[:-1], n)
+    if D is None:
+        D = torch.empty(
+            output_shape,
+            dtype=torch.float16,
+            device=B_data.device,
+        )
+    else:
+        if tuple(D.shape) != output_shape:
+            raise ValueError(
+                f"D shape {tuple(D.shape)} does not match expected {output_shape}"
+            )
+        if D.dtype != torch.float16:
+            raise TypeError(
+                f"FlyDSL FP8 requires FP16 output, got {D.dtype}"
+            )
+        if D.device != B_data.device:
+            raise ValueError(
+                f"D must be on {B_data.device}, got {D.device}"
+            )
+        if not D.is_contiguous():
+            raise ValueError(
+                "FlyDSL FP8 requires contiguous output storage"
+            )
+
+    if A_t.device != B_data.device:
+        raise ValueError(
+            f"A and B must be on the same device, got {A_t.device} "
+            f"and {B_data.device}"
+        )
+
+    fp8_matmul(
+        B_flat,
+        B_scale_inv,
+        A_t,
+        A_scale_inv,
+        D.view(m, n),
+    )
+
+    return D
 
 
 def _run_mxfp8_tn(A, B, D):
@@ -297,6 +501,7 @@ def te_generic_gemm_flydsl(
 
     Currently supported:
       - MXFP8 TN input with FP16 output
+      - tensor-wise E4M3 x E4M3 FP8 TN input with FP16 output
       - BF16 TN input with BF16 output
       - FP16 TN input with FP16 output
     """
@@ -343,6 +548,24 @@ def te_generic_gemm_flydsl(
         D = _run_mxfp8_tn(A, B, D)
         return D, None, None, None
 
+    a_is_fp8 = _is_fp8_operand(A)
+    b_is_fp8 = _is_fp8_operand(B)
+
+    if a_is_fp8 or b_is_fp8:
+        if not (a_is_fp8 and b_is_fp8):
+            raise ValueError(
+                "Mixed regular FP8 and non-FP8 FlyDSL GEMM inputs are not supported"
+            )
+
+        if output_dtype not in (None, tex.DType.kFloat16):
+            raise NotImplementedError(
+                "FlyDSL tensor-wise FP8 currently supports only FP16 output, "
+                f"got {output_dtype}"
+            )
+
+        D = _run_fp8_tn(A, B, D)
+        return D, None, None, None
+
     if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
         raise TypeError(
             "Unsupported FlyDSL GEMM operand types: "
@@ -370,6 +593,6 @@ def te_generic_gemm_flydsl(
         return D, None, None, None
 
     raise NotImplementedError(
-        "FlyDSL GEMM currently supports only MXFP8, BF16, or FP16 inputs; "
+        "FlyDSL GEMM currently supports only MXFP8, tensor-wise E4M3 FP8, BF16, or FP16 inputs; "
         f"got A={A.dtype} and B={B.dtype}"
     )
