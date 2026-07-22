@@ -471,6 +471,8 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
     min_num_segments = input_batch * max_segments_per_seq;
   }
 
+  void *cu_seqlens_sizing_sentinel = nullptr;
+#ifdef USE_ROCM
   // ROCm CK: the deterministic CK bwd workspace size differs between group and batch mode, and
   // is_group_mode() keys off a non-null cu_seqlens pointer. The real cu_seqlens are unavailable at
   // this lowering-time sizing pass, so with a null pointer JAX would size the workspace for batch
@@ -480,8 +482,9 @@ pybind11::tuple GetFusedAttnBackwardWorkspaceSizes(
   const bool mask_is_padding = (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
                                 mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
                                 mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  void *cu_seqlens_sizing_sentinel =
+  cu_seqlens_sizing_sentinel =
       (is_ragged || mask_is_padding) ? reinterpret_cast<void *>(alignof(int32_t)) : nullptr;
+#endif  // USE_ROCM
 
   TensorWrapper dummy_d_softmax_offset_tensor;
   if (softmax_type == NVTE_Softmax_Type::NVTE_OFF_BY_ONE_SOFTMAX ||
