@@ -278,6 +278,7 @@ def _run_regular_gemm(
     dtype,
     matmul,
     backend_name,
+    output_dtype=None,
 ):
     """Run FP16/BF16/FP32 through shared TN/NN/NT shape handling."""
     if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
@@ -298,10 +299,13 @@ def _run_regular_gemm(
         A, transa, B, transb
     )
 
+    if output_dtype is None:
+        output_dtype = dtype
+
     D = _validate_or_allocate_output(
         D,
         shape=(m, n),
-        dtype=dtype,
+        dtype=output_dtype,
         device=A.device,
         backend_name=backend_name,
     )
@@ -625,8 +629,8 @@ def te_generic_gemm_flydsl(
     Supported dtypes:
       - MXFP8 input with FP16, BF16, or FP32 output
       - tensor-wise E4M3 x E4M3 FP8 input with FP16, BF16, or FP32 output
-      - BF16 input with BF16 output
-      - FP16 input with FP16 output
+      - BF16 input with FP16, BF16, or FP32 output
+      - FP16 input with FP16, BF16, or FP32 output
       - FP32 input with FP32 output
     """
     del bias_type
@@ -731,9 +735,15 @@ def te_generic_gemm_flydsl(
         )
 
     if A.dtype == torch.bfloat16 and B.dtype == torch.bfloat16:
-        if output_dtype not in (None, tex.DType.kBFloat16):
+        bf16_output_dtypes = {
+            None: torch.bfloat16,
+            tex.DType.kFloat16: torch.float16,
+            tex.DType.kBFloat16: torch.bfloat16,
+            tex.DType.kFloat32: torch.float32,
+        }
+        if output_dtype not in bf16_output_dtypes:
             raise NotImplementedError(
-                "FlyDSL BF16 currently supports only BF16 output, "
+                "FlyDSL BF16 supports FP16, BF16, or FP32 output, "
                 f"got {output_dtype}"
             )
         D = _run_regular_gemm(
@@ -745,13 +755,20 @@ def te_generic_gemm_flydsl(
             dtype=torch.bfloat16,
             matmul=bf16_matmul,
             backend_name="BF16",
+            output_dtype=bf16_output_dtypes[output_dtype],
         )
         return D, None, None, None
 
     if A.dtype == torch.float16 and B.dtype == torch.float16:
-        if output_dtype not in (None, tex.DType.kFloat16):
+        fp16_output_dtypes = {
+            None: torch.float16,
+            tex.DType.kFloat16: torch.float16,
+            tex.DType.kBFloat16: torch.bfloat16,
+            tex.DType.kFloat32: torch.float32,
+        }
+        if output_dtype not in fp16_output_dtypes:
             raise NotImplementedError(
-                "FlyDSL FP16 currently supports only FP16 output, "
+                "FlyDSL FP16 supports FP16, BF16, or FP32 output, "
                 f"got {output_dtype}"
             )
         D = _run_regular_gemm(
@@ -763,6 +780,7 @@ def te_generic_gemm_flydsl(
             dtype=torch.float16,
             matmul=fp16_matmul,
             backend_name="FP16",
+            output_dtype=fp16_output_dtypes[output_dtype],
         )
         return D, None, None, None
 

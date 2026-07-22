@@ -6,8 +6,9 @@
 
 The kernel specializes on K at compile time because the K64 loop is fully
 hand-unrolled. M/N are runtime launch dimensions. The private optimized core
-consumes A and B as BF16 tensors shaped [M, K] and [N, K], and writes BF16 C
-shaped [M, N]. The public ``bf16_matmul`` entry point accepts Transformer
+consumes A and B as BF16 tensors shaped [M, K] and [N, K], and writes FP16,
+BF16, or FP32 C shaped [M, N]. The public ``bf16_matmul`` entry point accepts
+Transformer
 Engine's TN contract and performs the required private adaptation.
 
 This module imports ``flydsl`` at import time and must therefore be imported
@@ -183,8 +184,12 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
     )
 
 
-def _compile_kernel(K: int, use_xcd_remap: bool = True):
-    """Build the specialized 4-wave kernel for compile-time ``K``.
+def _compile_kernel(
+    K: int,
+    output_dtype: torch.dtype,
+    use_xcd_remap: bool = True,
+):
+    """Build the specialized 4-wave kernel for compile-time ``K`` and output dtype.
 
     ``K`` must contain at least four K64 tiles. Runtime M/N are expected to
     be exact multiples of ``BLOCK_M``/``BLOCK_N``; the kernel has no edge masks.
@@ -206,6 +211,21 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True):
 
     ELEM_BYTES = 2
     VEC_BYTES = 16
+
+    if output_dtype == torch.float16:
+        output_element_bytes = 2
+        output_fx_dtype = fx.Float16
+    elif output_dtype == torch.bfloat16:
+        output_element_bytes = 2
+        output_fx_dtype = fx.BFloat16
+    elif output_dtype == torch.float32:
+        output_element_bytes = 4
+        output_fx_dtype = fx.Float32
+    else:
+        raise TypeError(
+            "FlyDSL BF16 GEMM output dtype must be torch.float16, "
+            f"torch.bfloat16, or torch.float32, got {output_dtype}"
+        )
 
     LDS_ELEMS_A = BLOCK_M * BLOCK_K
     LDS_ELEMS_B = BLOCK_N * BLOCK_K
@@ -306,7 +326,7 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True):
         # instruction form unchanged while avoiding i32 wrap in buffer_store().
         c_n_idx_for_base = fx.Index(c_n)
         c_tile_base_elems = bx_m_idx * c_n_idx_for_base + by_n_idx
-        c_tile_base_bytes = c_tile_base_elems * fx.Index(2)  # C is BF16.
+        c_tile_base_bytes = c_tile_base_elems * fx.Index(output_element_bytes)
         c_rsrc = buffer_ops.create_buffer_resource(
             C,
             max_size=True,
@@ -536,7 +556,10 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True):
             for ii in range_constexpr(4):
                 row = row_base + fx.Index(ii)
                 c_idx = row * fx.Index(c_n) + col
-                buffer_ops.buffer_store(Vec(acc)[ii].to(fx.BFloat16), c_rsrc, c_idx)
+                value = Vec(acc)[ii]
+                if const_expr(output_dtype != torch.float32):
+                    value = value.to(output_fx_dtype)
+                buffer_ops.buffer_store(value, c_rsrc, c_idx)
 
 
         # Explicit register coordinates for HK-style four-quadrant mapping.
@@ -976,8 +999,16 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True):
     return launch_gemm
 
 @functools.lru_cache(maxsize=None)
-def _cached_launch(K: int, use_xcd_remap: bool = True):
-    return _compile_kernel(K, use_xcd_remap=use_xcd_remap)
+def _cached_launch(
+    K: int,
+    output_dtype: torch.dtype,
+    use_xcd_remap: bool = True,
+):
+    return _compile_kernel(
+        K,
+        output_dtype,
+        use_xcd_remap=use_xcd_remap,
+    )
 
 
 def bf16_matmul(
@@ -991,7 +1022,7 @@ def bf16_matmul(
     Public/backend contract:
         a: [M, K] BF16
         b: [K, N] BF16
-        c: [M, N] BF16 output
+        c: [M, N] FP16, BF16, or FP32 output
 
     The optimized core streams both operands with K contiguous and therefore
     privately consumes B as [N, K]. In the normal TE TN path, ``b`` is a
@@ -1017,9 +1048,14 @@ def bf16_matmul(
         )
     if tuple(c.shape) != (m, n):
         raise ValueError(f"C shape {tuple(c.shape)} != expected {(m, n)}")
-    if c.dtype != torch.bfloat16:
+    if c.dtype not in (
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ):
         raise TypeError(
-            f"The current FlyDSL BF16 kernel stores torch.bfloat16 output, got {c.dtype}"
+            "FlyDSL BF16 GEMM output dtype must be torch.float16, "
+            f"torch.bfloat16, or torch.float32, got {c.dtype}"
         )
     if a.device != b.device or a.device != c.device:
         raise ValueError(
@@ -1048,7 +1084,14 @@ def doGemm(
     N_runtime, Kb_runtime = B.shape
     assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
     assert A.dtype == torch.bfloat16 and B.dtype == torch.bfloat16
-    assert C.dtype == torch.bfloat16
+    assert C.dtype in (
+        torch.float16,
+        torch.bfloat16,
+        torch.float32,
+    ), (
+        "C dtype must be torch.float16, torch.bfloat16, or torch.float32, "
+        f"got {C.dtype}"
+    )
     assert M_runtime % _BLOCK_M == 0, f"M={M_runtime} must be a multiple of {_BLOCK_M}"
     assert N_runtime % _BLOCK_N == 0, f"N={N_runtime} must be a multiple of {_BLOCK_N}"
     assert K_runtime % _BLOCK_K == 0, f"K={K_runtime} must be a multiple of {_BLOCK_K}"
@@ -1061,5 +1104,9 @@ def doGemm(
     A_arg = A.contiguous().view(torch.uint8).view(-1)
     B_arg = B.contiguous().view(torch.uint8).view(-1)
     C_arg = C.view(-1)
-    launch = _cached_launch(int(K_runtime), bool(use_xcd_remap))
+    launch = _cached_launch(
+        int(K_runtime),
+        C.dtype,
+        bool(use_xcd_remap),
+    )
     launch(A_arg, B_arg, C_arg, M_runtime, N_runtime, stream=stream)
