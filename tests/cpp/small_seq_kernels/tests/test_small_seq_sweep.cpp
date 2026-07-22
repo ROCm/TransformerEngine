@@ -1,5 +1,8 @@
-// Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
-// SPDX-License-Identifier: MIT
+/*************************************************************************
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * License for AMD contributions = MIT. See LICENSE for more information
+ ************************************************************************/
 //
 // Small-sequence sweep benchmark matching the TransformerEngine benchmark:
 //   bs=2048, nheads=32, hdim=128, bfloat16

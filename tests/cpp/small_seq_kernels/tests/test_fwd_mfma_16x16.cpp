@@ -1,5 +1,8 @@
-// Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
-// SPDX-License-Identifier: MIT
+/*************************************************************************
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * License for AMD contributions = MIT. See LICENSE for more information
+ ************************************************************************/
 //
 // Test host for the fused MFMA 16x16x16 forward kernel (attn_fwd_mfma_16x16.h).
 // Uses the same test infrastructure and CPU reference as test_fwd_mfma.cpp.

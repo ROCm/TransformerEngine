@@ -1,5 +1,8 @@
-// Copyright (c) Advanced Micro Devices, Inc., or its affiliates.
-// SPDX-License-Identifier: MIT
+/*************************************************************************
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+ *
+ * License for AMD contributions = MIT. See LICENSE for more information
+ ************************************************************************/
 //
 // MFMA 16x16x16 forward smoke + correctness for head_dim 128, 256, 512.
 // Uses AttnForwardMfma16x16KernelLauncher (same path as test_fwd_mfma_16x16).

@@ -93,7 +93,8 @@ size_t small_seq_bwd_extra_workspace_bytes() {
 }
 
 bool is_nvte_ck_small_seq_enabled() {
-  if (transformer_engine::cuda::sm_arch() != 94) {
+  const int arch = transformer_engine::cuda::sm_arch();
+  if (arch != 94 && arch != 95) {
     return false;
   }
   const char* env_p = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");

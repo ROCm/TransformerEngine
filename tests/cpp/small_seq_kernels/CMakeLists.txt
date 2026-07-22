@@ -1,3 +1,6 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# See LICENSE for license information.
 cmake_minimum_required(VERSION 3.21)
 
 # Declare project with both CXX and HIP languages.

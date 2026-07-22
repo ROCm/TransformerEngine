@@ -2004,17 +2004,11 @@ def ck_smallseq_env(monkeypatch):
     """Enable CK small-seq path and disable XLA GPU graphs for these tests."""
     if not is_hip_extension():
         pytest.skip("CK unfused small-seq tests only on ROCm")
-    # gfx942 uses the dedicated unfused small-seq path (NVTE_FUSED_ATTN_CK_SMALLSEQ),
-    # which requires XLA GPU graphs (command buffers) disabled. XLA_FLAGS must be
-    # set before the process starts, so it cannot be injected via monkeypatch here.
-    # Newer XLA disables graph capture with an empty --xla_gpu_enable_command_buffer=;
-    # older XLA used --xla_gpu_graph_level=0 (removed in current releases).
-    if get_device_compute_capability(0) == 94:
-        xla_flags = os.environ.get("XLA_FLAGS", "")
-        if (
-            "xla_gpu_enable_command_buffer=" not in xla_flags
-            and "xla_gpu_graph_level=0" not in xla_flags
-        ):
+    # This test uses the dedicated small-seq CK path (NVTE_FUSED_ATTN_CK_SMALLSEQ),
+    # which requires XLA GPU graph capture (command buffers) disabled via an empty
+    # --xla_gpu_enable_command_buffer=
+    if get_device_compute_capability(0) == 94 or get_device_compute_capability(0)==95:
+        if "xla_gpu_enable_command_buffer=" not in os.environ.get("XLA_FLAGS", ""):
             pytest.skip("Test must be run with XLA_FLAGS='--xla_gpu_enable_command_buffer='")
         monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1")
     yield
