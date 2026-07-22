@@ -8,6 +8,7 @@ import torch
 import transformer_engine_torch as tex
 
 from .bf16_gemm import bf16_matmul
+from .fp16_gemm import fp16_matmul
 from .mxfp8_gemm import mxfp8_matmul
 
 
@@ -196,6 +197,78 @@ def _run_bf16_tn(A, B, D):
     return D
 
 
+def _run_fp16_tn(A, B, D):
+    """Run FlyDSL FP16 for TE's TN operand convention."""
+    if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
+        raise TypeError(
+            "FlyDSL FP16 GEMM expects plain torch.Tensor operands"
+        )
+
+    if A.dtype != torch.float16 or B.dtype != torch.float16:
+        raise TypeError(
+            "FlyDSL FP16 GEMM requires FP16 inputs, "
+            f"got A={A.dtype} and B={B.dtype}"
+        )
+
+    if A.ndim != 2:
+        raise ValueError(
+            f"FlyDSL FP16 TN expects weight A to be rank 2, got {tuple(A.shape)}"
+        )
+    if B.ndim < 2:
+        raise ValueError(
+            f"FlyDSL FP16 TN expects activation B to have rank >= 2, got {tuple(B.shape)}"
+        )
+
+    n, k = A.shape
+    B_flat = B.reshape(-1, B.shape[-1])
+    m, kb = B_flat.shape
+
+    if kb != k:
+        raise ValueError(
+            f"FP16 inner dimensions do not match: A{tuple(A.shape)} and "
+            f"B{tuple(B.shape)}"
+        )
+
+    output_shape = (*B.shape[:-1], n)
+
+    if D is None:
+        D = torch.empty(
+            output_shape,
+            dtype=torch.float16,
+            device=B.device,
+        )
+    else:
+        if tuple(D.shape) != output_shape:
+            raise ValueError(
+                f"D shape {tuple(D.shape)} does not match expected {output_shape}"
+            )
+        if D.dtype != torch.float16:
+            raise TypeError(
+                f"FlyDSL FP16 requires FP16 output, got {D.dtype}"
+            )
+        if D.device != B.device:
+            raise ValueError(
+                f"D must be on {B.device}, got {D.device}"
+            )
+        if not D.is_contiguous():
+            raise ValueError(
+                "FlyDSL FP16 requires contiguous output storage"
+            )
+
+    if A.device != B.device:
+        raise ValueError(
+            f"A and B must be on the same device, got {A.device} and {B.device}"
+        )
+    
+    fp16_matmul(
+        B_flat,
+        A.transpose(0, 1),
+        D.view(m, n),
+    )
+
+    return D
+
+
 def te_generic_gemm_flydsl(
     A,
     transa,
@@ -225,6 +298,7 @@ def te_generic_gemm_flydsl(
     Currently supported:
       - MXFP8 TN input with FP16 output
       - BF16 TN input with BF16 output
+      - FP16 TN input with FP16 output
     """
     del bias_type
     del gelu_in
@@ -235,7 +309,7 @@ def te_generic_gemm_flydsl(
     del comm_type
     del extra_output
     del bulk_overlap
-
+    
     if not transa or transb:
         raise NotImplementedError(
             "FlyDSL GEMM currently supports only transa=True, transb=False"
@@ -285,7 +359,17 @@ def te_generic_gemm_flydsl(
         D = _run_bf16_tn(A, B, D)
         return D, None, None, None
 
+    if A.dtype == torch.float16 and B.dtype == torch.float16:
+        if output_dtype not in (None, tex.DType.kFloat16):
+            raise NotImplementedError(
+                "FlyDSL FP16 currently supports only FP16 output, "
+                f"got {output_dtype}"
+            )
+
+        D = _run_fp16_tn(A, B, D)
+        return D, None, None, None
+
     raise NotImplementedError(
-        "FlyDSL GEMM currently supports only MXFP8 or BF16 inputs; "
+        "FlyDSL GEMM currently supports only MXFP8, BF16, or FP16 inputs; "
         f"got A={A.dtype} and B={B.dtype}"
     )
