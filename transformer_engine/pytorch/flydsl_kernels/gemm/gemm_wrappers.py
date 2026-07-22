@@ -525,16 +525,19 @@ def _run_fp8(
     *,
     output_dtype: torch.dtype,
 ):
-    """Run tensor-wise E4M3 x E4M3 FP8 for TN/NN/NT."""
+    """Run tensor-wise E4M3/E5M2 FP8 combinations for TN/NN/NT."""
     a_fp8_dtype = getattr(A, "_fp8_dtype", None)
     b_fp8_dtype = getattr(B, "_fp8_dtype", None)
+    supported_fp8_dtypes = (
+        tex.DType.kFloat8E4M3,
+        tex.DType.kFloat8E5M2,
+    )
     if (
-        a_fp8_dtype != tex.DType.kFloat8E4M3
-        or b_fp8_dtype != tex.DType.kFloat8E4M3
+        a_fp8_dtype not in supported_fp8_dtypes
+        or b_fp8_dtype not in supported_fp8_dtypes
     ):
         raise NotImplementedError(
-            "The current FlyDSL FP8 kernel supports only "
-            "tex.DType.kFloat8E4M3 x tex.DType.kFloat8E4M3; "
+            "FlyDSL FP8 supports E4M3 and E5M2 independently for A/B; "
             f"got A={a_fp8_dtype} and B={b_fp8_dtype}"
         )
 
@@ -628,7 +631,7 @@ def te_generic_gemm_flydsl(
 
     Supported dtypes:
       - MXFP8 input with FP16, BF16, or FP32 output
-      - tensor-wise E4M3 x E4M3 FP8 input with FP16, BF16, or FP32 output
+      - tensor-wise E4M3/E5M2 FP8 A/B combinations with FP16, BF16, or FP32 output
       - BF16 input with FP16, BF16, or FP32 output
       - FP16 input with FP16, BF16, or FP32 output
       - FP32 input with FP32 output

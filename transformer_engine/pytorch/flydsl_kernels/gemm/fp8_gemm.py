@@ -6,7 +6,8 @@
 
 The kernel specializes on K at compile time because the K128 loop is fully
 hand-unrolled. M/N are runtime launch dimensions. The private optimized core
-consumes A and B as FP8 E4M3 tensors shaped [M, K] and [N, K], one FP32 inverse
+consumes independently typed FP8 E4M3 or E5M2 A/B tensors shaped [M, K] and
+[N, K], one FP32 inverse
 scale per operand, and writes float16, bfloat16, or float32 C shaped [M, N]. The public
 ``fp8_matmul`` entry point accepts Transformer Engine's TN contract and
 performs the required private adaptation.
@@ -185,15 +186,30 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
 
 def _compile_kernel(
     K: int,
+    a_fp8_dtype: torch.dtype,
+    b_fp8_dtype: torch.dtype,
     output_dtype: torch.dtype,
     use_xcd_remap: bool = True,
 ):
-    """Build the specialized 4-wave kernel for compile-time K/output dtype.
+    """Build the specialized kernel for compile-time K, A/B FP8 types, and output dtype.
 
     ``K`` must contain at least four K128 tiles. Runtime M/N are expected to
     be exact multiples of ``BLOCK_M``/``BLOCK_N``; the kernel has no edge masks.
     """
     BLOCK_M, BLOCK_N, BLOCK_K = _BLOCK_M, _BLOCK_N, _BLOCK_K
+
+    fp8_input_types = {
+        torch.float8_e4m3fn: (fx.Float8E4M3FN, 0),
+        torch.float8_e5m2: (fx.Float8E5M2, 1),
+    }
+    try:
+        a_fx_dtype, a_matrix_format = fp8_input_types[a_fp8_dtype]
+        b_fx_dtype, b_matrix_format = fp8_input_types[b_fp8_dtype]
+    except KeyError as exc:
+        raise TypeError(
+            "FlyDSL FP8 input dtype must be torch.float8_e4m3fn or "
+            f"torch.float8_e5m2, got A={a_fp8_dtype}, B={b_fp8_dtype}"
+        ) from exc
 
     if output_dtype == torch.float16:
         output_element_bytes = 2
@@ -248,14 +264,14 @@ def _compile_kernel(
     class SharedStorage:
         # Each logical 256x128 page is two independent 128x128 half-pages.
         # The hot loop refills one 16-byte pass of one half-page at a time.
-        a0_0: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
-        a0_1: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
-        a1_0: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
-        a1_1: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
-        b0_0: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
-        b0_1: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
-        b1_0: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
-        b1_1: fx.Array[fx.Float8E4M3FN, LDS_ELEMS_HALF, 16]
+        a0_0: fx.Array[a_fx_dtype, LDS_ELEMS_HALF, 16]
+        a0_1: fx.Array[a_fx_dtype, LDS_ELEMS_HALF, 16]
+        a1_0: fx.Array[a_fx_dtype, LDS_ELEMS_HALF, 16]
+        a1_1: fx.Array[a_fx_dtype, LDS_ELEMS_HALF, 16]
+        b0_0: fx.Array[b_fx_dtype, LDS_ELEMS_HALF, 16]
+        b0_1: fx.Array[b_fx_dtype, LDS_ELEMS_HALF, 16]
+        b1_0: fx.Array[b_fx_dtype, LDS_ELEMS_HALF, 16]
+        b1_1: fx.Array[b_fx_dtype, LDS_ELEMS_HALF, 16]
 
     @flyc.kernel(known_block_size=[NUM_THREADS, 1, 1])
     def kernel_gemm(
@@ -273,9 +289,10 @@ def _compile_kernel(
         lds_b0 = (lds.b0_0, lds.b0_1)
         lds_b1 = (lds.b1_0, lds.b1_1)
 
-        f8_ir_t = fx.Float8E4M3FN.ir_type
-        gA = make_fp8_buffer_tensor(A, f8_ir_t)
-        gB = make_fp8_buffer_tensor(B, f8_ir_t)
+        a_f8_ir_t = a_fx_dtype.ir_type
+        b_f8_ir_t = b_fx_dtype.ir_type
+        gA = make_fp8_buffer_tensor(A, a_f8_ir_t)
+        gB = make_fp8_buffer_tensor(B, b_f8_ir_t)
         a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
         b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
         a_scale_rsrc = buffer_ops.create_buffer_resource(A_scale_inv, max_size=True)
@@ -315,8 +332,8 @@ def _compile_kernel(
         # the global K coordinate is XOR-unswizzled for the physical LDS slot.
         gl_off_a = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
         gl_off_b = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
-        a_g2s = G2SLoader(a_div, gl_off_a, LOAD_PASSES_HALF, f8_ir_t, wave_id)
-        b_g2s = G2SLoader(b_div, gl_off_b, LOAD_PASSES_HALF, f8_ir_t, wave_id)
+        a_g2s = G2SLoader(a_div, gl_off_a, LOAD_PASSES_HALF, a_f8_ir_t, wave_id)
+        b_g2s = G2SLoader(b_div, gl_off_b, LOAD_PASSES_HALF, b_f8_ir_t, wave_id)
         s2r = S2RLoader(fx.Int32(0), 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
@@ -474,7 +491,8 @@ def _compile_kernel(
                     f"v_mfma_f32_16x16x128_f8f6f4 "
                     f"a[{acc_pin}:{acc_pin + 3}], "
                     f"$0, $1, "
-                    f"a[{acc_pin}:{acc_pin + 3}]"
+                    f"a[{acc_pin}:{acc_pin + 3}] "
+                    f"cbsz:{a_matrix_format} blgp:{b_matrix_format}"
                 ),
                 (
                     f"v,v,~{{a{acc_pin}}},~{{a{acc_pin + 1}}},"
@@ -497,7 +515,8 @@ def _compile_kernel(
                     f"v_mfma_f32_16x16x128_f8f6f4 "
                     f"a[{dst_pin}:{dst_pin + 3}], "
                     f"$0, $1, "
-                    f"a[{old_pin}:{old_pin + 3}]"
+                    f"a[{old_pin}:{old_pin + 3}] "
+                    f"cbsz:{a_matrix_format} blgp:{b_matrix_format}"
                 ),
                 (
                     f"v,v,~{{a{dst_pin}}},~{{a{dst_pin + 1}}},"
@@ -979,11 +998,15 @@ def _compile_kernel(
 @functools.lru_cache(maxsize=None)
 def _cached_launch(
     K: int,
+    a_fp8_dtype: torch.dtype,
+    b_fp8_dtype: torch.dtype,
     output_dtype: torch.dtype,
     use_xcd_remap: bool = True,
 ):
     return _compile_kernel(
         K,
+        a_fp8_dtype,
+        b_fp8_dtype,
         output_dtype,
         use_xcd_remap=use_xcd_remap,
     )
@@ -1001,9 +1024,9 @@ def fp8_matmul(
     """TE-facing TN tensor-wise FP8 adapter.
 
     Public/backend contract:
-        a:           [M, K] FP8 E4M3 activation payload
+        a:           [M, K] FP8 E4M3 or E5M2 activation payload
         a_scale_inv: one-element FP32 inverse quantization scale
-        b:           [K, N] FP8 E4M3 weight payload
+        b:           [K, N] FP8 E4M3 or E5M2 weight payload
         b_scale_inv: one-element FP32 inverse quantization scale
         c:           [M, N] float16, bfloat16, or float32 output
 
@@ -1019,9 +1042,13 @@ def fp8_matmul(
             f"and B{tuple(b.shape)}"
         )
 
-    if a.dtype != torch.float8_e4m3fn or b.dtype != torch.float8_e4m3fn:
+    supported_fp8_dtypes = (
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+    )
+    if a.dtype not in supported_fp8_dtypes or b.dtype not in supported_fp8_dtypes:
         raise TypeError(
-            "FlyDSL FP8 GEMM requires torch.float8_e4m3fn payloads, "
+            "FlyDSL FP8 GEMM expects E4M3 or E5M2 payloads, "
             f"got A={a.dtype} and B={b.dtype}"
         )
 
@@ -1085,8 +1112,12 @@ def doGemm(
     """Launch tensor-wise FP8 GEMM with TE-style inverse input scales."""
     M_runtime, K_runtime = A.shape
     N_runtime, Kb_runtime = B.shape
-    assert A.dtype == torch.float8_e4m3fn, f"A dtype {A.dtype} != torch.float8_e4m3fn"
-    assert B.dtype == torch.float8_e4m3fn, f"B dtype {B.dtype} != torch.float8_e4m3fn"
+    supported_fp8_dtypes = (
+        torch.float8_e4m3fn,
+        torch.float8_e5m2,
+    )
+    assert A.dtype in supported_fp8_dtypes, f"unsupported A FP8 dtype: {A.dtype}"
+    assert B.dtype in supported_fp8_dtypes, f"unsupported B FP8 dtype: {B.dtype}"
     assert C.dtype in (
         torch.float16,
         torch.bfloat16,
@@ -1117,6 +1148,8 @@ def doGemm(
 
     launch = _cached_launch(
         int(K_runtime),
+        A.dtype,
+        B.dtype,
         C.dtype,
         bool(use_xcd_remap),
     )
