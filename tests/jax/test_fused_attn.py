@@ -537,6 +537,11 @@ class FusedAttnRunner:
         """
         num_segments_per_seq = self.max_seqlen_q
         if self.max_seqlen_q == 1:
+            # Q: one length-1 segment per batch. Take offsets_q from get_seqlens_and_offsets: this
+            # integration's SequenceDescriptor expects the intra-sequence offset form the helper
+            # produces (all-zero), NOT PR #542's cumulative arange form -- the arange form makes
+            # get_runtime_max_seqlen underflow and faults the GPU. Only override seqlens_q to ones,
+            # since the helper's seqlens are wrong here (bincount(length=1) drops the id==1 segment).
             segment_ids_q = jnp.ones((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
             segment_pos_q = jnp.zeros((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
             pad_q = jnp.zeros((self.batch_size, self.max_seqlen_q), dtype=jnp.int32)
@@ -546,7 +551,24 @@ class FusedAttnRunner:
             segment_ids_q, segment_pos_q, pad_q = generate_random_segment_ids(
                 self.batch_size, self.max_seqlen_q, num_segments_per_seq, seed=42
             )
-            seqlens_q, offsets_q = get_seqlens_and_offsets(segment_ids_q)
+            # Compute seqlens/offsets directly instead of using get_seqlens_and_offsets.
+            # get_seqlens_and_offsets uses bincount(length=max_seqlen) which cannot capture
+            # segment IDs equal to max_seqlen (when num_segments == max_seqlen_q, segment
+            # IDs range from 1 to max_seqlen_q). The missing segment plus the appended
+            # sentinel causes _fix_len_take in impl() to leak entries across batches.
+            # Since each Q segment has exactly 1 token (max_segment_size = max_seqlen_q //
+            # num_segments_per_seq = 1), we build seqlens as all-ones with no sentinels.
+            seqlens_q = jnp.ones((self.batch_size, num_segments_per_seq), dtype=jnp.int32)
+            offsets_q = jnp.concatenate(
+                [
+                    jnp.tile(
+                        jnp.arange(num_segments_per_seq, dtype=jnp.int32)[None, :],
+                        (self.batch_size, 1),
+                    ),
+                    jnp.full((self.batch_size, 1), -1, dtype=jnp.int32),
+                ],
+                axis=1,
+            )
 
         min_segment_len = None if self.window_size is None else seqlens_q
         segment_ids_kv, segment_pos_kv, pad_kv = generate_random_segment_ids(
@@ -557,6 +579,16 @@ class FusedAttnRunner:
             min_segment_len=min_segment_len,
         )
         seqlens_kv, offsets_kv = get_seqlens_and_offsets(segment_ids_kv)
+        # get_seqlens_and_offsets derives seqlens via bincount(length=max_seqlen_kv), which drops
+        # the segment whose ID == max_seqlen_kv. That happens whenever num_segments_per_seq ==
+        # max_seqlen_kv (i.e. self-attention), corrupting KV seqlens and yielding empty-KV
+        # softmax NaNs. Recompute seqlens with a wide-enough bincount so the last segment is
+        # retained; the offsets from _find_offsets are already correct.
+        kv_counts = jax.vmap(partial(jnp.bincount, length=self.max_seqlen_kv + 1))(
+            segment_ids_kv.astype(jnp.int32)
+        )
+        seqlens_kv = kv_counts[..., 1:]
+        seqlens_kv = jnp.where(seqlens_kv, seqlens_kv, -1)
         return (
             num_segments_per_seq,
             segment_ids_q,
@@ -1996,30 +2028,36 @@ class TestFusedAttnCkSmallseq:
     """
 
     @staticmethod
-    @pytest.mark.parametrize("dtype", [jnp.bfloat16, jnp.float16], ids=["BF16", "FP16"])
+    # fp16 is not supported on the CK small-seq path yet (the MFMA kernels are bf16-only); the
+    # backend guard rejects fp16 so it falls back to regular CK. Only bf16 is exercised here.
+    @pytest.mark.parametrize("dtype", [jnp.bfloat16], ids=["BF16"])
     @pytest.mark.parametrize(
         "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, qkv_layout",
         [
-            # cross-attention (q=1 attends over kv), THD + no bias
-            # pytest.param(4000, 1, 2, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-2-16-16-128-128"),
+            # cross-attention (s_q = 1, s_kv <= 16), THD + padding
+            pytest.param(4000, 1, 2, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-2-16-16-128-128"),
             pytest.param(4000, 1, 4, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-4-16-16-128-128"),
-            # pytest.param(4000, 1, 6, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-6-16-16-128-128"),
-            # pytest.param(4000, 1, 8, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-8-16-16-128-128"),
+            pytest.param(4000, 1, 6, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-6-16-16-128-128"),
+            pytest.param(4000, 1, 8, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-8-16-16-128-128"),
             pytest.param(4000, 1, 12, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-12-16-16-128-128"),
-            # pytest.param(4000, 1, 16, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-16-16-16-128-128"),
-            # pytest.param(4000, 1, 4, 32, 32, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-256-1-4-32-32-128-128"),
-            # pytest.param(4000, 1, 6, 16, 16, 256, 256, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-128-1-6-16-16-256-256"),
-            # self-attention (s_q == s_kv), THD + padding
-            pytest.param(4000, 8, 8, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-4000-8-8-16-16-128-128"),
-            # pytest.param(4000, 16, 16, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-4000-16-16-16-16-128-128"),
-            # pytest.param(4000, 17, 17, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-8-17-17-16-16-128-128"),
+            pytest.param(4000, 1, 16, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-16-16-16-128-128"),
+            pytest.param(4000, 1, 4, 32, 32, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-256-1-4-32-32-128-128"),
+            pytest.param(4000, 1, 6, 16, 16, 256, 256, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-128-1-6-16-16-256-256"),
             # cross-attention (s_q != s_kv), THD + padding
             pytest.param(4000, 4, 8, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-4-8-16-16-128-128"),
-            # pytest.param(4000, 8, 12, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-8-12-16-16-128-128"),
-            # pytest.param(4000, 12, 16, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-12-16-16-16-128-128"),
-            # self-attention, BSHD + no mask + no bias
+            pytest.param(4000, 8, 12, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-8-12-16-16-128-128"),
+            pytest.param(4000, 12, 16, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-12-16-16-16-128-128"),
+            # self-attention, THD + padding
+            pytest.param(4000, 8, 8, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-4000-8-8-16-16-128-128"),
+            pytest.param(4000, 16, 16, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-4000-16-16-16-16-128-128"),
+            pytest.param(4000, 17, 17, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-8-17-17-16-16-128-128"),
+            # self-attention, BSHD
+            pytest.param(4000, 2, 2, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-2-2-16-16-128-128"),
+            pytest.param(4000, 4, 4, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-4-4-16-16-128-128"),
+            pytest.param(4000, 8, 8, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-8-8-16-16-128-128"),
+            pytest.param(4000, 12, 12, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-12-12-16-16-128-128"),
             pytest.param(4000, 16, 16, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-16-16-16-16-128-128"),
-            # pytest.param(4000, 17, 17, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-17-17-16-16-128-128"),
+            pytest.param(4000, 17, 17, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-17-17-16-16-128-128"),
         ],
     )
     def test_smallseq(

@@ -504,6 +504,13 @@ void fused_attn_ck_fwd_impl(
   bool is_padding = is_padding_mask(mask_type);
   bool bshd_to_thd = is_BSHD && is_padding;
 
+  // BSHD self-attention reuses the THD small-seq kernels: each dense sequence is treated as a
+  // single segment of length s by synthesizing uniform cu_seqlens ([0,s,2s,...]). Requires
+  // s_q == s_kv in [2, kSmallSeqMaxSeqlen]; the dtype/heads/head_dim/mask eligibility is enforced
+  // by small_seq_static_config_ok() below.
+  const bool bshd_self_small_seq =
+      is_BSHD && !is_ragged && s_q == s_kv && s_q >= 2 && s_q <= kSmallSeqMaxSeqlen;
+
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype);
@@ -521,10 +528,18 @@ void fused_attn_ck_fwd_impl(
       is_nvte_ck_small_seq_enabled() &&
       small_seq_static_config_ok(static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype),
                                  bias_type, dropout_probability, d_qk, d_v, h, hg, mask_type) &&
-      is_ragged;
+      (is_ragged || bshd_self_small_seq);
+  // For BSHD self-attn we synthesize uniform cu_seqlens ([0,s,2s,...]) into these buffers and
+  // feed them (as both actual and padded cu_seqlens) to the THD small-seq kernels.
+  void* ck_smallseq_cu_seqlens_q = nullptr;
+  void* ck_smallseq_cu_seqlens_kv = nullptr;
   if(ck_small_seq_enabled) {
     ck_smallseq_workspace_prefix =
         planner.allocate(small_seq_fwd_extra_workspace_bytes(max_tokens_q));
+    if(bshd_self_small_seq) {
+      ck_smallseq_cu_seqlens_q = planner.allocate((b + 1) * sizeof(int32_t));
+      ck_smallseq_cu_seqlens_kv = planner.allocate((b + 1) * sizeof(int32_t));
+    }
   }
 
   void* devPtrAlibiSlope = nullptr;
@@ -534,7 +549,7 @@ void fused_attn_ck_fwd_impl(
   }
 
   void* devPtrSoftmaxLSEWithoutPadding = nullptr;
-  if((is_SBHD && is_padding) || bshd_to_thd || is_ragged){
+  if((is_SBHD && is_padding) || bshd_to_thd || is_ragged || bshd_self_small_seq){
     devPtrSoftmaxLSEWithoutPadding = planner.allocate(h*max_tokens_q*sizeof(float));
   }
 
@@ -605,6 +620,19 @@ void fused_attn_ck_fwd_impl(
     generate_cu_seqlen_padded(s_q, s_kv, b, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedKV, stream);
     if(nvte_log_ck_config){
       std::cout << "\nattn_fwd(ck): generating cu_seqlen_padded in BSHD+padding to THD+padding conversion.\n";
+    }
+  }
+  if(bshd_self_small_seq && ck_small_seq_enabled){
+    // Dense BSHD self-attn: synthesize uniform cu_seqlens = [0,s,2s,...] (actual == padded, no
+    // padding) and point every cu_seqlens pointer at them so the THD small-seq path treats each
+    // dense sequence as one length-s segment.
+    generate_cu_seqlen_padded(s_q, s_kv, b, ck_smallseq_cu_seqlens_q, ck_smallseq_cu_seqlens_kv, stream);
+    devPtrCuSeqlensQ = ck_smallseq_cu_seqlens_q;
+    devPtrCuSeqlensKV = ck_smallseq_cu_seqlens_kv;
+    devPtrCuSeqlenPaddedQ = ck_smallseq_cu_seqlens_q;
+    devPtrCuSeqlenPaddedKV = ck_smallseq_cu_seqlens_kv;
+    if(nvte_log_ck_config){
+      std::cout << "\nattn_fwd(ck): BSHD self-attn routed to small-seq via synthesized uniform cu_seqlens.\n";
     }
   }
   if(is_padding && nvte_ck_zero_out_pad){
@@ -686,9 +714,9 @@ void fused_attn_ck_fwd_impl(
     // add padding for o and softmax_lse
     pad_remap<PadDirection::Add>(dtype, b, h, s_q, d_v, max_tokens_q, false, o_stride[0], o_stride[1], o_stride[2], devPtrO, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrOWithoutPadding, stream);
     pad_remap_lse<PadDirection::Add>(b, h, s_q, max_tokens_q, false, devPtrSoftmaxAux, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxLSEWithoutPadding, stream);
-  }else if(bshd_to_thd || is_ragged){
+  }else if(bshd_to_thd || is_ragged || bshd_self_small_seq){
     bool ran_smallseq = false;
-    if(ck_smallseq_workspace_prefix != nullptr && is_ragged && ck_small_seq_enabled) {
+    if(ck_smallseq_workspace_prefix != nullptr && (is_ragged || bshd_self_small_seq) && ck_small_seq_enabled) {
       void* workspace_next = ck_smallseq_workspace_prefix;
       void* max_seqlen_workspace_q = workspace_next;
       void* max_seqlen_workspace_kv =
@@ -815,6 +843,11 @@ void fused_attn_ck_bwd_impl(
   bool bshd_to_thd = is_BSHD && is_padding;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
 
+  // BSHD self-attention reuses the THD small-seq kernels via synthesized uniform cu_seqlens
+  // ([0,s,2s,...]); mirrors the forward path. Requires s_q == s_kv in [2, kSmallSeqMaxSeqlen].
+  const bool bshd_self_small_seq =
+      is_BSHD && !is_ragged && s_q == s_kv && s_q >= 2 && s_q <= kSmallSeqMaxSeqlen;
+
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype);
@@ -832,10 +865,17 @@ void fused_attn_ck_bwd_impl(
       is_nvte_ck_small_seq_enabled() &&
       small_seq_static_config_ok(static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype),
                                  bias_type, dropout_probability, d_qk, d_v, h, hg, mask_type) &&
-      is_ragged;
+      (is_ragged || bshd_self_small_seq);
+  // Synthesized uniform cu_seqlens buffers for BSHD self-attn (see forward path).
+  void* ck_smallseq_cu_seqlens_q = nullptr;
+  void* ck_smallseq_cu_seqlens_kv = nullptr;
   if(ck_small_seq_enabled) {
     ck_smallseq_workspace_prefix =
         planner.allocate(small_seq_bwd_extra_workspace_bytes());
+    if(bshd_self_small_seq) {
+      ck_smallseq_cu_seqlens_q = planner.allocate((b + 1) * sizeof(int32_t));
+      ck_smallseq_cu_seqlens_kv = planner.allocate((b + 1) * sizeof(int32_t));
+    }
   }
 
   // First h*max_tokens_q*sizeof(float) is the lse-d buffer (passed as softmax_lsed)
@@ -894,7 +934,7 @@ void fused_attn_ck_bwd_impl(
   void* devPtrCuSeqlenPaddedQ = devPtrSeqOffsetsQ;
   void* devPtrCuSeqlenPaddedKV = devPtrSeqOffsetsKV;
 
-  if((is_SBHD && is_padding) || bshd_to_thd || is_ragged){
+  if((is_SBHD && is_padding) || bshd_to_thd || is_ragged || bshd_self_small_seq){
     devPtrSoftmaxLSEWithoutPadding = planner.allocate(h*max_tokens_q*sizeof(float));
   }
   if(is_SBHD && is_padding){
@@ -1015,6 +1055,18 @@ void fused_attn_ck_bwd_impl(
       std::cout << "\nattn_bwd(ck): generating cu_seqlen_padded in BSHD+padding to THD+padding conversion.\n";
     }
   }
+  if(bshd_self_small_seq && ck_small_seq_enabled){
+    // Dense BSHD self-attn: synthesize uniform cu_seqlens = [0,s,2s,...] and point every
+    // cu_seqlens pointer at them (mirrors the forward path).
+    generate_cu_seqlen_padded(s_q, s_kv, b, ck_smallseq_cu_seqlens_q, ck_smallseq_cu_seqlens_kv, stream);
+    devPtrCuSeqlensQ = ck_smallseq_cu_seqlens_q;
+    devPtrCuSeqlensKV = ck_smallseq_cu_seqlens_kv;
+    devPtrCuSeqlenPaddedQ = ck_smallseq_cu_seqlens_q;
+    devPtrCuSeqlenPaddedKV = ck_smallseq_cu_seqlens_kv;
+    if(nvte_log_ck_config){
+      std::cout << "\nattn_bwd(ck): BSHD self-attn routed to small-seq via synthesized uniform cu_seqlens.\n";
+    }
+  }
 
   if (nvte_log_ck_config) {
     std::cout<<std::endl<<"attn_bwd(ck): ";
@@ -1114,10 +1166,10 @@ void fused_attn_ck_bwd_impl(
     pad_remap<PadDirection::Add>(dtype, b, h, s_q, d_qk, max_tokens_q, is_ragged, q_stride[0], q_stride[1], q_stride[2], devPtrdQ, devPtrCuSeqlensQ, devPtrSeqOffsetsQ, devPtrdQWithoutPadding, stream);
     pad_remap<PadDirection::Add>(dtype, b, hg, s_kv, d_qk, max_tokens_kv, is_ragged, k_stride[0], k_stride[1], k_stride[2], devPtrdK, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdKWithoutPadding, stream);
     pad_remap<PadDirection::Add>(dtype, b, hg, s_kv, d_v, max_tokens_kv, is_ragged, v_stride[0], v_stride[1], v_stride[2], devPtrdV, devPtrCuSeqlensKV, devPtrSeqOffsetsKV, devPtrdVWithoutPadding, stream);
-  }else if(bshd_to_thd || is_ragged){
+  }else if(bshd_to_thd || is_ragged || bshd_self_small_seq){
     pad_remap_lse<PadDirection::Remove>(b, h, s_q, max_tokens_q, is_ragged, devPtrSoftmaxAux, devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ, devPtrSoftmaxLSEWithoutPadding, stream);
     bool ran_smallseq_bwd = false;
-    if(ck_smallseq_workspace_prefix != nullptr && is_ragged && ck_small_seq_enabled) {
+    if(ck_smallseq_workspace_prefix != nullptr && (is_ragged || bshd_self_small_seq) && ck_small_seq_enabled) {
       // Backward prefix holds only the two runtime-max-seqlen probe slots (Q then KV);
       void* max_seqlen_workspace_q = ck_smallseq_workspace_prefix;
       void* max_seqlen_workspace_kv =

@@ -56,7 +56,10 @@ bool small_seq_static_config_ok(NVTEDType q_dtype,
   if(dropout != 0.0f) return false;
   if(bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) return false;
   if(q_dtype != kv_dtype) return false;
-  if(!(q_dtype == NVTEDType::kNVTEFloat16 || q_dtype == NVTEDType::kNVTEBFloat16)) return false;
+  // fp16 is intentionally unsupported on the small-seq path for now: the MFMA kernels are
+  // bf16-only (they load Q/K/V as bf16 and use bf16 MFMA intrinsics), so fp16 would be silently
+  // downcast and produce wrong results. Reject fp16 here so it falls back to the regular CK path.
+  if(q_dtype != NVTEDType::kNVTEBFloat16) return false;
   if(head_dim_qk != head_dim_v) return false;
   if(head_dim_qk != 128 && head_dim_qk != 256) return false;
   if(num_gqa_groups == 0 || num_attn_heads % num_gqa_groups != 0) return false;

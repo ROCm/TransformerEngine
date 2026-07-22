@@ -49,9 +49,6 @@ MANIFEST
 develop-eggs/
 dist/
 downloads/
-crossattn_hip_kernel/
-fail.txr
-log.txt
 .pytest_cache/
 compile_commands.json
 .nfs
