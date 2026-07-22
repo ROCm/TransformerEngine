@@ -14,7 +14,7 @@ Canonical launch inputs:
     a_scale: [M, K/32] raw E8M0 bytes
     b:       [K, N] FP8 payload
     b_scale: [K/32, N] raw E8M0 bytes
-    D:       [M, N] float16 output
+    D:       [M, N] float16, bfloat16, or float32 output
 """
 
 import functools
@@ -199,13 +199,29 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
     )
 
 
-def _compile_kernel(K: int):
-    """Build the specialized 4-wave kernel for compile-time ``K``.
+def _compile_kernel(K: int, output_dtype: torch.dtype):
+    """Build the specialized 4-wave kernel for compile-time ``K`` and output dtype.
 
     ``K`` must contain at least four K128 tiles. Runtime M/N are expected to
     be exact multiples of ``BLOCK_M``/``BLOCK_N``; the kernel has no edge masks.
     """
     BLOCK_M, BLOCK_N, BLOCK_K = _BLOCK_M, _BLOCK_N, _BLOCK_K
+
+    if output_dtype == torch.float16:
+        output_element_bytes = 2
+        output_fx_dtype = fx.Float16
+    elif output_dtype == torch.bfloat16:
+        output_element_bytes = 2
+        output_fx_dtype = fx.BFloat16
+    elif output_dtype == torch.float32:
+        output_element_bytes = 4
+        output_fx_dtype = fx.Float32
+    else:
+        raise TypeError(
+            "FlyDSL MXFP8 supports only float16, bfloat16, and float32 "
+            f"outputs, got {output_dtype}"
+        )
+
     NUM_THREADS = 256
     WARP_SIZE = 64
 
@@ -315,7 +331,7 @@ def _compile_kernel(K: int):
         # instruction form unchanged while avoiding i32 wrap in buffer_store().
         c_n_idx_for_base = fx.Index(c_n)
         c_tile_base_elems = bx_m_idx * c_n_idx_for_base + by_n_idx
-        c_tile_base_bytes = c_tile_base_elems * fx.Index(2)  # C is f16.
+        c_tile_base_bytes = c_tile_base_elems * fx.Index(output_element_bytes)
         c_rsrc = buffer_ops.create_buffer_resource(
             C,
             max_size=True,
@@ -589,7 +605,10 @@ def _compile_kernel(K: int):
             for ii in range_constexpr(4):
                 row = row_base + fx.Index(ii)
                 c_idx = row * fx.Index(c_n) + col
-                buffer_ops.buffer_store(Vec(acc)[ii].to(fx.Float16), c_rsrc, c_idx)
+                value = Vec(acc)[ii]
+                if output_dtype != torch.float32:
+                    value = value.to(output_fx_dtype)
+                buffer_ops.buffer_store(value, c_rsrc, c_idx)
 
 
         # Explicit register coordinates for HK-style four-quadrant mapping.
@@ -1132,8 +1151,8 @@ def _compile_kernel(K: int):
     return launch_gemm
 
 @functools.lru_cache(maxsize=None)
-def _cached_launch(K: int):
-    return _compile_kernel(K)
+def _cached_launch(K: int, output_dtype: torch.dtype):
+    return _compile_kernel(K, output_dtype)
 
 
 
@@ -1169,6 +1188,10 @@ def do_gemm(
     assert C.shape == (M_runtime, N_runtime), (
         f"C shape {tuple(C.shape)} != ({M_runtime}, {N_runtime})"
     )
+    assert C.dtype in (torch.float16, torch.bfloat16, torch.float32), (
+        "C dtype must be torch.float16, torch.bfloat16, or torch.float32, "
+        f"got {C.dtype}"
+    )
     if stream is None:
         stream = torch.cuda.current_stream()
     # Match the Transformer Engine integration descriptor contract exactly.  The optimized
@@ -1183,7 +1206,7 @@ def do_gemm(
     Bs_arg = Bs.contiguous().view(-1)
     C_arg = C.contiguous().view(-1)
 
-    launch = _cached_launch(int(K_runtime))
+    launch = _cached_launch(int(K_runtime), C.dtype)
     launch(
         A_arg,
         As_arg,
@@ -1218,7 +1241,7 @@ def mxfp8_matmul(
     BLAS operand canonicalization, shape derivation, and output allocation are
     intentionally owned by ``gemm_wrappers.py``. This function only validates
     the MXFP8-specific scale contract, converts B to the HK [N, K] convention,
-    packs E8M0 scales, and launches the optimized 4-wave implementation.
+    packs E8M0 scales, and launches the output-dtype-specialized 4-wave implementation.
     """
     if a.ndim != 2 or b.ndim != 2:
         raise ValueError(
@@ -1244,9 +1267,10 @@ def mxfp8_matmul(
         raise ValueError(
             f"D shape {tuple(D.shape)} does not match expected {(m, n)}"
         )
-    if D.dtype != torch.float16:
+    if D.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise TypeError(
-            f"FlyDSL MXFP8 requires torch.float16 output, got {D.dtype}"
+            "FlyDSL MXFP8 supports torch.float16, torch.bfloat16, or "
+            f"torch.float32 output, got {D.dtype}"
         )
     if not D.is_contiguous():
         raise ValueError("FlyDSL MXFP8 requires contiguous output storage")
@@ -1286,7 +1310,8 @@ def mxfp8_matmul(
         f"contiguous={a.is_contiguous()}; "
         f"b_hk={tuple(b_hk.shape)}, contiguous={b_hk.is_contiguous()}; "
         f"a_scale_hk={tuple(a_scale_hk.shape)}, "
-        f"b_scale_hk={tuple(b_scale_hk.shape)}, D={tuple(D.shape)}"
+        f"b_scale_hk={tuple(b_scale_hk.shape)}, D={tuple(D.shape)}, "
+        f"D_dtype={D.dtype}"
     )
     _debug("launching fused MXFP8 4-wave kernel")
 

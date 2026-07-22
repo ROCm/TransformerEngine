@@ -412,6 +412,8 @@ def _run_mxfp8(
     B,
     transb,
     D,
+    *,
+    output_dtype: torch.dtype,
 ):
     """Canonicalize TE MXFP8 operands, then launch the fused backend."""
     layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
@@ -496,7 +498,7 @@ def _run_mxfp8(
     D = _validate_or_allocate_output(
         D,
         shape=(m, n),
-        dtype=torch.float16,
+        dtype=output_dtype,
         device=a_flydsl.device,
         backend_name="MXFP8",
     )
@@ -619,7 +621,7 @@ def te_generic_gemm_flydsl(
     TT is intentionally rejected.
 
     Supported dtypes:
-      - MXFP8 input with FP16 output
+      - MXFP8 input with FP16, BF16, or FP32 output
       - tensor-wise E4M3 x E4M3 FP8 input with FP16 output
       - BF16 input with BF16 output
       - FP16 input with FP16 output
@@ -666,14 +668,26 @@ def te_generic_gemm_flydsl(
         if getattr(B, '_rowwise_data', None) is None and getattr(B, '_columnwise_data', None) is None:
             raise RuntimeError("MXFP8Tensor has neither rowwise nor columnwise data")
 
-        # Only supports FP16 output for now.
-        if output_dtype not in (None, tex.DType.kFloat16):
+        mxfp8_output_dtypes = {
+            None: torch.float16,
+            tex.DType.kFloat16: torch.float16,
+            tex.DType.kBFloat16: torch.bfloat16,
+            tex.DType.kFloat32: torch.float32,
+        }
+        if output_dtype not in mxfp8_output_dtypes:
             raise NotImplementedError(
-                "FlyDSL MXFP8 currently supports only FP16 output, "
+                "FlyDSL MXFP8 supports FP16, BF16, or FP32 output, "
                 f"got {output_dtype}"
             )
 
-        D = _run_mxfp8(A, transa, B, transb, D)
+        D = _run_mxfp8(
+            A,
+            transa,
+            B,
+            transb,
+            D,
+            output_dtype=mxfp8_output_dtypes[output_dtype],
+        )
         return D, None, None, None
 
     if a_kind == "fp8" or b_kind == "fp8":
