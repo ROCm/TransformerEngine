@@ -18,6 +18,7 @@ from transformer_engine.pytorch.triton_kernels.permute_free_grouped_gemm import 
     permute_free_grouped_gemm_bf16,
     permute_free_grouped_gemm_bf16_dgrad,
     permute_free_grouped_gemm_bf16_wgrad,
+    permute_free_grouped_gemm_bf16_fc2_wgrad,
 )
 
 pytestmark = pytest.mark.skipif(
@@ -141,6 +142,103 @@ def test_route_list_wgrad():
     )
     ref.index_add_(0, route_expert, per_route)
     assert _rel_l2(dW, ref) < 2e-2
+
+
+def test_route_list_fc2_wgrad():
+    """FC2 wgrad emits [E, H, F] directly (swap_gather on FlyDSL / transpose on Triton), and
+    the out/accumulate destination folds the result in without a separate add."""
+    torch.manual_seed(19)
+    num_recv_tokens, in_features, out_features = 128, 96, 128  # F=in, H=out (W2 is [E, H, F])
+    num_experts, max_hits = 8, 4
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=4)
+    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
+    route_to_token, route_expert = _compact_route_order(routing_map)
+    num_routes = route_to_token.numel()
+
+    fc2_input = torch.randn(num_routes, in_features, device="cuda", dtype=torch.bfloat16)
+    grad_output = torch.randn(num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16)
+    weights_shape = (num_experts, out_features, in_features)  # [E, H, F]
+
+    # dW2[e] = sum_{routes r with expert==e} outer(grad_output[token_r], fc2_input[r])
+    ref = torch.zeros(num_experts, out_features, in_features, device="cuda", dtype=torch.float32)
+    per_route = torch.einsum(
+        "rh,rf->rhf", grad_output[route_to_token].float(), fc2_input.float()
+    )
+    ref.index_add_(0, route_expert, per_route)
+
+    # Fresh output (no transpose needed downstream).
+    dW2 = permute_free_grouped_gemm_bf16_fc2_wgrad(fc2_input, grad_output, weights_shape, routing)
+    assert dW2.shape == weights_shape
+    assert _rel_l2(dW2, ref) < 2e-2
+
+    # Direct fp32 accumulate into an existing buffer: overwrite then add == 2x.
+    out = torch.zeros(weights_shape, device="cuda", dtype=torch.float32)
+    permute_free_grouped_gemm_bf16_fc2_wgrad(
+        fc2_input, grad_output, weights_shape, routing, out=out, accumulate=False
+    )
+    assert _rel_l2(out, ref) < 2e-2
+    permute_free_grouped_gemm_bf16_fc2_wgrad(
+        fc2_input, grad_output, weights_shape, routing, out=out, accumulate=True
+    )
+    assert _rel_l2(out, 2.0 * ref) < 2e-2
+
+
+def test_route_list_fc2_wgrad_recompute_from_preact():
+    """FC2 wgrad recompute-from-preact: rebuild act = act(gate)*up*prob from the saved 2F
+    pre-activation into a transient buffer, feed the unchanged wgrad, and match a stored-act
+    reference (the backward then checkpoints only the 2F preact, never the F-wide act)."""
+    from transformer_engine.pytorch.triton_kernels.permute_free_grouped_gemm import (
+        get_default_moe_kernel_config,
+        prepare_moe_align,
+    )
+    from transformer_engine.pytorch.triton_kernels.route_prob import _expert_per_route
+
+    torch.manual_seed(29)
+    num_recv_tokens, in_features, out_features = 128, 96, 128  # F=in, H=out (W2 is [E, H, F])
+    num_experts, max_hits = 8, 4
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=6)
+    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
+    cfg = get_default_moe_kernel_config(num_recv_tokens)
+    prepare_moe_align(routing, int(cfg["BLOCK_SIZE_M"]))
+
+    routes_max = int(routing.route_to_token.shape[0])
+    num_routes = int(routing_map.sum().item())
+    tok = routing.route_to_token.to(torch.int64)
+    exp = _expert_per_route(routing, routes_max).to(torch.int64)
+
+    preact = torch.randn(routes_max, 2 * in_features, device="cuda", dtype=torch.bfloat16)
+    grad_output = torch.randn(num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16)
+    probs = torch.rand(num_recv_tokens, num_experts, device="cuda", dtype=torch.float32)
+    weights_shape = (num_experts, out_features, in_features)  # [E, H, F]
+
+    # Reference act (route layout, compact head) using the kernel's own route arrays.
+    g = preact[:num_routes, :in_features].float()
+    u = preact[:num_routes, in_features:].float()
+    p = probs[tok[:num_routes], exp[:num_routes]]
+    act_ref = torch.nn.functional.silu(g) * u * p[:, None]
+    act_stored = act_ref.to(torch.bfloat16)
+
+    # Stored-act baseline: feed the materialized activation directly.
+    dW2_stored = permute_free_grouped_gemm_bf16_fc2_wgrad(
+        act_stored, grad_output, weights_shape, routing
+    )
+    # Recompute path: feed preact + probs, rebuild act in-flight.
+    dW2_rc = permute_free_grouped_gemm_bf16_fc2_wgrad(
+        None, grad_output, weights_shape, routing,
+        preact=preact, dispatched_probs=probs, activation="silu",
+    )
+
+    # fp32 reference dW2[e] = sum_{r: exp==e} outer(grad_output[tok_r], act_ref[r]).
+    ref = torch.zeros(num_experts, out_features, in_features, device="cuda", dtype=torch.float32)
+    per_route = torch.einsum("rh,rf->rhf", grad_output[tok[:num_routes]].float(), act_ref)
+    ref.index_add_(0, exp[:num_routes], per_route)
+
+    assert _rel_l2(dW2_stored, ref) < 2e-2
+    assert _rel_l2(dW2_rc, ref) < 2e-2
+    # Recompute should also track the stored-act path closely (same GEMM, act rebuilt).
+    assert _rel_l2(dW2_rc, dW2_stored) < 1e-2
 
 
 def test_route_list_fwd_dgrad_wgrad_consistency():
