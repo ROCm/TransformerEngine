@@ -7,6 +7,8 @@
 """Shared utilities for microbenchmarks: model configs, timing, throughput, runner."""
 
 import argparse
+import itertools
+import math
 import torch
 import torch.utils.benchmark as benchmark
 
@@ -104,6 +106,101 @@ def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
     else:
         m = timer.adaptive_autorange(min_run_time=min_run_time)
     return m.mean * 1e3, m
+
+
+# ---------------------------------------------------------------------------
+# Rotating input buffers (opt-in via --rotating-buffers; default off)
+# ---------------------------------------------------------------------------
+# When enabled, benchmark inputs are cycled through a ring of buffers so that
+# back-to-back kernel launches read/write different memory and don't benefit
+# from artificial L2-cache residency.  Populated by run_benchmarks() from the
+# parsed CLI args; the defaults below preserve the original single-buffer
+# behavior.
+_ROTATE_BUFFERS = False
+_ROTATE_COUNT = 0  # 0 => auto-size the ring to exceed the last-level cache
+
+
+def rotation_enabled():
+    """True if ``--rotating-buffers`` was passed to the current run."""
+    return _ROTATE_BUFFERS
+
+
+def _last_level_cache_bytes():
+    """Bytes of the last-level cache that buffer rotation must exceed.
+
+    HIP reports ``L2_cache_size`` as the small per-XCD L2 (e.g. 4 MB on gfx950),
+    but the real last-level cache is the much larger AMD Infinity Cache.
+
+    Actual last-level/Infinity Cache sizes:
+      - gfx942 / gfx950: 256 MB
+      - gfx1250:         192 MB
+
+    We use 256 MB for all devices: a slightly oversized ring is harmless (it
+    only allocates a little more memory) and avoids per-arch probing.
+    """
+    return 256 * 1024 * 1024
+
+
+def _rotation_count(bytes_per_buffer, cache_mult=2.0, min_buffers=2):
+    """Ring size: ``--rotating-buffers N`` if given, else enough to exceed the
+    last-level cache.
+
+    Sizing the ring to at least *cache_mult* x the last-level cache (the ~256 MB
+    AMD Infinity Cache) ensures a buffer is evicted before it is reused.
+    """
+    if _ROTATE_COUNT and _ROTATE_COUNT > 0:
+        return max(1, int(_ROTATE_COUNT))
+    if bytes_per_buffer <= 0:
+        return min_buffers
+    cache = _last_level_cache_bytes()
+    if not cache:
+        return min_buffers
+    return max(min_buffers, math.ceil(cache_mult * cache / bytes_per_buffer))
+
+
+def _tensor_nbytes(t):
+    """Byte size of a torch tensor, or 0 if it can't be determined."""
+    numel = getattr(t, "numel", None)
+    element_size = getattr(t, "element_size", None)
+    if callable(numel) and callable(element_size):
+        return int(numel()) * int(element_size())
+    return 0
+
+
+def rotating(build, *, bytes_per_buffer=None):
+    """Return a zero-arg callable yielding an input buffer to time.
+
+    With ``--rotating-buffers`` off (default) this returns a single cached
+    buffer from ``build()`` on every call, exactly matching the
+    single-buffer behavior.  With the flag on it builds a ring of ``build()``
+    buffers (sized to exceed the last-level cache, or ``--rotating-buffers N``)
+    and returns the next one on each call.
+
+    ``build`` is a zero-arg callable returning one fresh buffer.
+    ``bytes_per_buffer`` overrides the auto-sizing hint for buffers whose byte
+    size can't be inferred (e.g. FP8 tensors).
+    """
+    first = build()
+    if not _ROTATE_BUFFERS:
+        return lambda: first
+    nbytes = bytes_per_buffer if bytes_per_buffer is not None else _tensor_nbytes(first)
+    count = _rotation_count(nbytes)
+    buffers = [first] + [build() for _ in range(max(0, count - 1))]
+    ring = itertools.cycle(buffers)
+    return lambda: next(ring)
+
+
+def make_input(shape, dtype, *, device="cuda", requires_grad=False):
+    """Rotation-aware input: a zero-arg callable returning a ``randn`` tensor.
+
+    Honors ``--rotating-buffers`` (see :func:`rotating`); off by default, so it
+    returns the same tensor each call.
+    """
+    return rotating(
+        lambda: torch.randn(
+            *shape, dtype=dtype, device=device, requires_grad=requires_grad
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -275,6 +372,16 @@ def make_parser(**kwargs):
             "--csv-samples is ignored in this mode."
         ),
     )
+    parser.add_argument(
+        "--rotating-buffers", nargs="?", type=int, const=0, default=None, metavar="N",
+        help=(
+            "Rotate benchmark inputs through a ring of buffers so back-to-back "
+            "launches touch different memory (avoids artificial cache "
+            "residency). Optionally pass N to set the ring size; omit N to "
+            "auto-size the ring to exceed the last-level cache (the 256 MB "
+            "Infinity Cache on gfx942/gfx950, not just L2). Off by default."
+        ),
+    )
     return parser
 
 
@@ -333,6 +440,11 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
     """
     if args is None:
         args = make_parser().parse_args()
+
+    global _ROTATE_BUFFERS, _ROTATE_COUNT
+    _rotating = getattr(args, "rotating_buffers", None)
+    _ROTATE_BUFFERS = _rotating is not None
+    _ROTATE_COUNT = _rotating or 0
 
     if args.kernel_profile:
         from torch.profiler import profile, ProfilerActivity

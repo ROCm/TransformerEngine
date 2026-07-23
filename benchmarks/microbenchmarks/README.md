@@ -31,6 +31,23 @@ python benchmark_gemm.py --csv --csv-samples gemm_samples.csv
 The samples CSV contains one row per timing sample with columns for all
 benchmark parameters plus `label`, `sample_idx`, and `time_ms`.
 
+### Rotating input buffers
+
+By default each benchmark reuses a single input buffer, so back-to-back kernel
+launches may read data still resident in cache and report optimistic numbers.
+Pass `--rotating-buffers` to instead cycle inputs through a ring of buffers
+sized to exceed the **last-level cache**, so each launch touches different
+memory (closer to a cold-cache, steady-state workload):
+
+```bash
+python benchmark_gemm.py --rotating-buffers        # auto-size the ring past the LLC
+python benchmark_casting.py --rotating-buffers 16  # or fix the ring size (16 buffers)
+```
+
+Passing `--rotating-buffers N` fixes the number of buffers; omitting `N`
+auto-sizes the ring to ~2x the device's last-level cache. The option
+is **off by default**.
+
 ## Shared configuration
 
 Common benchmark settings live in `utils.py`.
