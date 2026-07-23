@@ -2,10 +2,12 @@
 # Copyright (c) 2025 FlyDSL Project Contributors
 
 import flydsl.expr as fx
-from flydsl._mlir.dialects import llvm as _llvm
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import llvm as _llvm, vector
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
 from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Vector as Vec
+from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 
 # ceildiv is the canonical cdiv from the shared layer
 def cdiv(numer: int, denom: int) -> int:
@@ -68,6 +70,23 @@ def compute_global_swizzle(lane_id, wave_id, K, n_rounds, preshuffled):
             col = (lane_id % 8) * 16
             r, c = swizzle_128(row, col)
             offsets.append(r * K + c)
+    return offsets
+
+
+def compute_global_linear_128x128(lane_id, wave_id, leading_dim, n_rounds):
+    """Offsets for an unswizzled row-major 128x128 tile.
+
+    This uses the same 16-byte/thread DMA decomposition as
+    ``compute_global_swizzle`` but does not XOR-permute the logical source
+    coordinates. It is used by the NN A path, whose LDS page is physically
+    [K128, M128] for the CDNA4 transpose-read instruction.
+    """
+    offsets = []
+    n_waves = fx.block_dim.x // 64
+    for round in range_constexpr(n_rounds):
+        row = lane_id // 8 + wave_id * 8 + round * (n_waves * 8)
+        col = (lane_id % 8) * 16
+        offsets.append(row * leading_dim + col)
     return offsets
 
 
@@ -138,6 +157,36 @@ class S2RLoader:
     def load_one(self, lds_src, lds_offset):
         v = self._vec_load_16xf8(lds_src, lds_offset)
         return v.bitcast(fx.Int32)
+
+    def _ds_read_b64_tr_b8(self, lds_src, byte_offset):
+        """Issue one gfx950 ``ds_read_b64_tr_b8`` and return i32x2.
+
+        The inline-asm output uses one even-aligned 64-bit VGPR tuple. The
+        compiler owns allocation of the ``=v`` tuple; the memory clobber keeps
+        the operation ordered with respect to LDS traffic.
+        """
+        base_i32 = fx.Int32(fx.ptrtoint(lds_src.ptr))
+        addr_i32 = base_i32 + fx.Int32(byte_offset)
+        raw_type = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
+        raw = _llvm.inline_asm(
+            raw_type,
+            [as_mlir_value(addr_i32)],
+            "ds_read_b64_tr_b8 $0, $1\n",
+            "=v,v,~{memory}",
+            has_side_effects=True,
+        )
+        return Vec(vector.BitCastOp(raw_type, raw).result, (2,), fx.Int32)
+
+    def load_one_transpose(self, lds_src, first_byte_offset, second_byte_offset):
+        """Load one K64 FP8 MFMA operand half from physical LDS [K, M].
+
+        CDNA4 requires two ``ds_read_b64_tr_b8`` instructions for the complete
+        K64 operand. Each instruction returns i32x2; concatenation preserves the
+        existing i32x4 half-fragment interface used by the GEMM hot loop.
+        """
+        lo = self._ds_read_b64_tr_b8(lds_src, first_byte_offset)
+        hi = self._ds_read_b64_tr_b8(lds_src, second_byte_offset)
+        return lo.shuffle(hi, [0, 1, 2, 3])
 
 
 class StoreC:

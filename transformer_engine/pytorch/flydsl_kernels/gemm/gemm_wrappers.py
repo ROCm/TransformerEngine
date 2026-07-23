@@ -15,6 +15,8 @@ from .bf16_gemm import bf16_matmul
 from .fp16_gemm import fp16_matmul
 from .fp32_gemm import fp32_matmul
 from .fp8_gemm import fp8_matmul
+from .fp8_gemm_nn import fp8_matmul as fp8_matmul_nn
+from .fp8_gemm_nt import fp8_matmul as fp8_matmul_nt
 from .mxfp8_gemm import mxfp8_matmul
 
 
@@ -611,7 +613,17 @@ def _run_fp8(
     *,
     output_dtype: torch.dtype,
 ):
-    """Run tensor-wise E4M3/E5M2 FP8 combinations for TN/NN/NT."""
+    """Run tensor-wise E4M3/E5M2 FP8 combinations for TN/NN/NT.
+
+    NN and NT are dispatched directly from TE's existing physical
+    representations without transpose kernels or materialized payloads:
+
+      - NN core: [K, M] x [N, K]
+      - NT core: [K, M] x [K, N]
+
+    TN retains the shared canonicalized path through
+    ``fp8_gemm.fp8_matmul``.
+    """
     a_fp8_dtype = getattr(A, "_fp8_dtype", None)
     b_fp8_dtype = getattr(B, "_fp8_dtype", None)
     supported_fp8_dtypes = (
@@ -632,12 +644,6 @@ def _run_fp8(
             "FlyDSL GEMM does not support transa=True, transb=True (TT)"
         )
 
-    # Match Triton's regular-FP8 handling: establish logical rowwise
-    # payloads first, then apply the same shared BLAS-to-row-major
-    # canonicalization used for FP16/BF16/FP32.
-    A_data = _get_fp8_logical_rowwise_payload(A, "A")
-    B_data = _get_fp8_logical_rowwise_payload(B, "B")
-
     A_scale_inv = getattr(A, "_scale_inv", None)
     B_scale_inv = getattr(B, "_scale_inv", None)
     for name, scale in (
@@ -651,6 +657,212 @@ def _run_fp8(
                 f"{name} must contain exactly one FP32 tensor-wise inverse "
                 f"scale, got dtype={scale.dtype}, shape={tuple(scale.shape)}"
             )
+
+    # TE exposes GEMM operands in BLAS/column-major convention.  The
+    # row-major FlyDSL result is formed from the swapped operands:
+    #
+    #   flydsl_a = op(B)
+    #   flydsl_b = op(A)
+    #
+    # For NN, the dedicated kernel consumes:
+    #
+    #   flydsl_a physical [K, M] = B columnwise storage
+    #   flydsl_b physical [N, K] = A columnwise storage
+    #
+    # Here FlyDSL M is TE's n and FlyDSL N is TE's m, so the kernel writes
+    # the existing TE output allocation in its ordinary [M, N] view.  Both
+    # payloads already exist; this path performs no transpose or materialization.
+    if not transa and not transb:
+        if not _valid_fp8_transpose(B):
+            raise RuntimeError(
+                "FlyDSL FP8 NN requires valid B columnwise (_transpose) storage"
+            )
+        if not _valid_fp8_transpose(A):
+            raise RuntimeError(
+                "FlyDSL FP8 NN requires valid A columnwise (_transpose) storage"
+            )
+
+        a_flydsl = _reinterpret_fp8_payload(
+            B._transpose,
+            b_fp8_dtype,
+            "B._transpose",
+        )
+        b_flydsl = _reinterpret_fp8_payload(
+            A._transpose,
+            a_fp8_dtype,
+            "A._transpose",
+        )
+
+        if a_flydsl.ndim != 2 or b_flydsl.ndim != 2:
+            raise ValueError(
+                "FlyDSL FP8 NN direct path expects rank-2 columnwise storage, "
+                f"got B._transpose={tuple(a_flydsl.shape)} and "
+                f"A._transpose={tuple(b_flydsl.shape)}"
+            )
+        if not a_flydsl.is_contiguous() or not b_flydsl.is_contiguous():
+            raise ValueError(
+                "FlyDSL FP8 NN requires contiguous TE columnwise storage; "
+                "refusing to materialize replacement operands"
+            )
+
+        k, m = a_flydsl.shape
+        n, kb = b_flydsl.shape
+        if kb != k:
+            raise ValueError(
+                "FlyDSL FP8 NN storage mismatch after BLAS operand swap: "
+                f"B._transpose{tuple(a_flydsl.shape)} and "
+                f"A._transpose{tuple(b_flydsl.shape)}"
+            )
+
+        # Float8TensorStorage does not expose a public ``shape`` attribute.
+        # The direct NN operands already determine the flattened kernel output
+        # shape exactly. Preserve TE's preallocated logical output shape when
+        # one is provided; otherwise use the flattened [M, N] shape.
+        output_shape = (
+            D.shape
+            if D is not None
+            else torch.Size((m, n))
+        )
+        if _product(output_shape) != m * n:
+            raise RuntimeError(
+                f"FlyDSL FP8 NN logical output shape {tuple(output_shape)} "
+                f"does not match kernel shape {(m, n)}"
+            )
+
+        if a_flydsl.device != b_flydsl.device:
+            raise ValueError(
+                f"A and B must be on the same device, got "
+                f"{a_flydsl.device} and {b_flydsl.device}"
+            )
+
+        D = _validate_or_allocate_output(
+            D,
+            shape=output_shape,
+            dtype=output_dtype,
+            device=a_flydsl.device,
+            backend_name="FP8 NN",
+        )
+
+        # Scales follow the swapped FlyDSL operands.
+        fp8_matmul_nn(
+            a_flydsl,
+            B_scale_inv,
+            b_flydsl,
+            A_scale_inv,
+            D.view(m, n),
+        )
+        return D
+
+    # For TE NT (transa=False, transb=True), the dedicated kernel consumes
+    # both swapped operands directly from TE columnwise storage:
+    #
+    #   kernel A physical [K, M] = B._transpose
+    #   kernel B physical [K, N] = A._transpose
+    #
+    # Both operands are therefore staged as physical K-major tiles and read
+    # from LDS with ``ds_read_b64_tr_b8``. No torch transpose,
+    # ``.contiguous()``, or temporary FP8 payload is introduced.
+    if not transa and transb:
+        if not _valid_fp8_transpose(B):
+            raise RuntimeError(
+                "FlyDSL FP8 NT requires valid B columnwise (_transpose) storage"
+            )
+        if not _valid_fp8_transpose(A):
+            raise RuntimeError(
+                "FlyDSL FP8 NT requires valid A columnwise (_transpose) storage"
+            )
+
+        # TE columnwise payloads are contiguous transposes of the logical
+        # rowwise tensors. After the BLAS operand swap, their exposed shapes are:
+        #
+        #   B._transpose: [M, K]
+        #   A._transpose: [N, K]
+        #
+        # The NT kernel consumes the same physical bytes as:
+        #
+        #   kernel A: [K, M]
+        #   kernel B: [K, N]
+        #
+        # Reinterpret only the 2-D shape. ``view`` is zero-copy and preserves
+        # the exact columnwise allocation; no torch transpose or materialization
+        # is performed.
+        b_columnwise = _reinterpret_fp8_payload(
+            B._transpose,
+            b_fp8_dtype,
+            "B._transpose",
+        )
+        a_columnwise = _reinterpret_fp8_payload(
+            A._transpose,
+            a_fp8_dtype,
+            "A._transpose",
+        )
+
+        if b_columnwise.ndim != 2 or a_columnwise.ndim != 2:
+            raise ValueError(
+                "FlyDSL FP8 NT direct path expects rank-2 columnwise storage, "
+                f"got B._transpose={tuple(b_columnwise.shape)} and "
+                f"A._transpose={tuple(a_columnwise.shape)}"
+            )
+        if not b_columnwise.is_contiguous() or not a_columnwise.is_contiguous():
+            raise ValueError(
+                "FlyDSL FP8 NT requires contiguous TE columnwise storage; "
+                "refusing to materialize replacement operands"
+            )
+
+        m, k = b_columnwise.shape
+        n, ka = a_columnwise.shape
+        if ka != k:
+            raise ValueError(
+                "FlyDSL FP8 NT columnwise K mismatch after BLAS operand swap: "
+                f"B._transpose{tuple(b_columnwise.shape)} and "
+                f"A._transpose{tuple(a_columnwise.shape)}"
+            )
+
+        a_flydsl = b_columnwise.view(k, m)
+        b_flydsl = a_columnwise.view(k, n)
+
+        # Float8TensorStorage does not expose a public ``shape`` attribute.
+        # Preserve TE's preallocated logical output shape when available.
+        output_shape = (
+            D.shape
+            if D is not None
+            else torch.Size((m, n))
+        )
+        if _product(output_shape) != m * n:
+            raise RuntimeError(
+                f"FlyDSL FP8 NT logical output shape {tuple(output_shape)} "
+                f"does not match kernel shape {(m, n)}"
+            )
+
+        if a_flydsl.device != b_flydsl.device:
+            raise ValueError(
+                f"A and B must be on the same device, got "
+                f"{a_flydsl.device} and {b_flydsl.device}"
+            )
+
+        D = _validate_or_allocate_output(
+            D,
+            shape=output_shape,
+            dtype=output_dtype,
+            device=a_flydsl.device,
+            backend_name="FP8 NT",
+        )
+
+        # Scales follow the BLAS-swapped kernel operands.
+        fp8_matmul_nt(
+            a_flydsl,
+            B_scale_inv,
+            b_flydsl,
+            A_scale_inv,
+            D.view(m, n),
+        )
+        return D
+
+    # Match Triton's regular-FP8 handling: establish logical rowwise
+    # payloads first, then apply the same shared BLAS-to-row-major
+    # canonicalization used for FP16/BF16/FP32.
+    A_data = _get_fp8_logical_rowwise_payload(A, "A")
+    B_data = _get_fp8_logical_rowwise_payload(B, "B")
 
     output_shape = _get_gemm_output_shape(
         A_data.shape, transa, B_data.shape, transb

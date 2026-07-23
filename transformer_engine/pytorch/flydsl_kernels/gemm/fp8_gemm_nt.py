@@ -2,14 +2,14 @@
 #
 # See LICENSE for license information.
 
-"""FlyDSL tensor-wise FP8 4-wave GEMM kernel for Transformer Engine.
+"""FlyDSL tensor-wise FP8 4-wave NT GEMM kernel for Transformer Engine.
 
 The kernel specializes on K at compile time because the K128 loop is fully
 hand-unrolled. M/N are runtime launch dimensions. The private optimized core
-consumes independently typed FP8 E4M3 or E5M2 A/B tensors shaped [M, K] and
-[N, K], one FP32 inverse
+consumes independently typed FP8 E4M3 or E5M2 A/B tensors shaped [K, M] and
+[K, N], one FP32 inverse
 scale per operand, and writes float16, bfloat16, or float32 C shaped [M, N]. The public
-``fp8_matmul`` entry point accepts Transformer Engine's TN contract and
+``fp8_matmul`` entry point accepts an NT contract and
 performs the required private adaptation.
 
 This module imports ``flydsl`` at import time and must therefore be imported
@@ -33,6 +33,7 @@ from .exceptions import FlyDSLUnsupportedError
 from .fp8_gemm_utils import (
     G2SLoader,
     S2RLoader,
+    compute_global_linear_128x128,
     compute_global_swizzle,
     make_fp8_buffer_tensor,
     pack_i32x4_i32x8,
@@ -332,8 +333,8 @@ def _compile_kernel(
         # The utility mapping is identical to the previous manual staging:
         # each step contributes one contiguous 16-byte vector per thread, while
         # the global K coordinate is XOR-unswizzled for the physical LDS slot.
-        gl_off_a = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
-        gl_off_b = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
+        gl_off_a = compute_global_linear_128x128(lane, wave_id, c_m, LOAD_PASSES_HALF)
+        gl_off_b = compute_global_linear_128x128(lane, wave_id, c_n, LOAD_PASSES_HALF)
         a_g2s = G2SLoader(a_div, gl_off_a, LOAD_PASSES_HALF, a_f8_ir_t, wave_id)
         b_g2s = G2SLoader(b_div, gl_off_b, LOAD_PASSES_HALF, b_f8_ir_t, wave_id)
         s2r = S2RLoader(fx.Int32(0), 1)
@@ -426,9 +427,10 @@ def _compile_kernel(
             rocdl.sched_barrier(0)
 
         def hot_loop_scheduler_q0_refill_a1_2n():
+            # One logical transposed K64 half is two ds_read_b64_tr_b8 instructions.
             for _ in range_constexpr(8):
                 rocdl.sched_vmem(1)
-                rocdl.sched_dsrd(1)
+                rocdl.sched_dsrd(2)
                 rocdl.sched_mfma(2)
             rocdl.sched_barrier(0)
 
@@ -439,13 +441,17 @@ def _compile_kernel(
             rocdl.sched_barrier(0)
 
         def stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a):
-            # One pass writes 256 threads * 16 B = 4 KiB. Four passes fill one
-            # 128x128 half-page (16 KiB). Each half has its own LDS base.
-            global_base = (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(K) + k_base
+            # NT A is contiguous [K, M]. Stage a physical row-major [K128, M128]
+            # half-page without the TN XOR swizzle; S2R performs the transpose.
+            m_base = bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))
+            global_base = k_base * fx.Index(c_m) + m_base
             a_g2s.load_one(lds_a[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
-            global_base = (by_n_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(K) + k_base
+            # NT B is contiguous [K, N]. Stage a physical row-major [K128, N128]
+            # half-page without XOR swizzling; S2R performs the transpose.
+            n_base = by_n_idx + fx.Index(subtile * (BLOCK_N // 2))
+            global_base = k_base * fx.Index(c_n) + n_base
             b_g2s.load_one(lds_b[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_a_subtile(k_base, subtile, lds_a):
@@ -472,10 +478,24 @@ def _compile_kernel(
             x1 = load_frag_half_at_byte_base(lds_page, row_byte_base, 1)
             return pack_frag_halves(x0, x1)
 
+        def load_b_frag_half(lds_b, local_row, half, k_half):
+            # B is physically [K, N]. Each LDS half-page is [K128, N128].
+            # One K64 MFMA half requires two ds_read_b64_tr_b8 instructions,
+            # exactly like the transposed A path.
+            half_col = local_row - fx.Index(half * (BLOCK_N // 2))
+            k_base = fx.Index(k_half * 64)
+            first = k_base * fx.Index(BLOCK_N // 2) + half_col
+            second = first + fx.Index(32 * (BLOCK_N // 2))
+            return s2r.load_one_transpose(
+                lds_b[half],
+                fx.Int32(first),
+                fx.Int32(second),
+            )
+
         def load_b_frag(lds_b, local_row, half):
-            # B is [N, K]. Each 128-row half-page has a local row origin of 0.
-            half_row = local_row - fx.Index(half * (BLOCK_N // 2))
-            return load_frag_at_byte_base(lds_b[half], half_row * fx.Index(BLOCK_K))
+            x0 = load_b_frag_half(lds_b, local_row, half, 0)
+            x1 = load_b_frag_half(lds_b, local_row, half, 1)
+            return pack_frag_halves(x0, x1)
 
         def _acc_idx(subtile_id, mi, ni):
             return subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
@@ -593,11 +613,25 @@ def _compile_kernel(
             )
 
         def load_a_subtile_mi_half(lds_a, sm, mi, half):
-            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
-            a_row_addr = subtile_m_idx * fx.Index(SUBTILE_M) + fx.Index(mi * MFMA_M) + lane_mod_16
-            half_row = a_row_addr - fx.Index(sm * (BLOCK_M // 2))
-            row_byte_base = half_row * fx.Index(BLOCK_K)
-            return load_frag_half_at_byte_base(lds_a[sm], row_byte_base, half)
+            # Physical LDS A is [K128, M128]. The CDNA4 transpose-read lane
+            # mapping addresses 8 K rows x 16 M columns per K64 operand half.
+            #
+            # The wave-level base follows the documented transpose-load layout:
+            #   k_row = lane_div_32 * 4 + (lane_mod_16 // 4)   -> 0..7
+            #   m_col = m_tile + n-group/lane-in-quad offset  -> 0..15
+            # Two addresses separated by 32 K rows produce the complementary
+            # halves required for the complete K64 i32x4 operand.
+            local_m_tile = (
+                (reg_subtile_m_idx0 + fx.Index(sm * 2)) * fx.Index(SUBTILE_M)
+                + fx.Index(mi * MFMA_M)
+                - fx.Index(sm * (BLOCK_M // 2))
+            )
+            k_row = (fx.Index(lane) // fx.Index(32)) * fx.Index(4) + (lane_mod_16 // fx.Index(4))
+            m_col = local_m_tile + ((fx.Index(lane) // fx.Index(16)) % fx.Index(2)) * fx.Index(8) + (lane_mod_16 % fx.Index(4)) * fx.Index(2)
+            k_half_base = fx.Index(half * 64)
+            first = (k_half_base + k_row) * fx.Index(BLOCK_M // 2) + m_col
+            second = (k_half_base + k_row + fx.Index(32)) * fx.Index(BLOCK_M // 2) + m_col
+            return s2r.load_one_transpose(lds_a[sm], fx.Int32(first), fx.Int32(second))
 
         def load_a_subtile_mi_regs(lds_a, sm, mi):
             x0 = load_a_subtile_mi_half(lds_a, sm, mi, 0)
@@ -998,7 +1032,7 @@ def _compile_kernel(
     return launch_gemm
 
 @functools.lru_cache(maxsize=None)
-def _cached_launch(
+def _cached_launch_nt(
     K: int,
     a_fp8_dtype: torch.dtype,
     b_fp8_dtype: torch.dtype,
@@ -1023,24 +1057,25 @@ def fp8_matmul(
     c: torch.Tensor,
     stream=None,
 ):
-    """TE-facing TN tensor-wise FP8 adapter.
+    """TE-facing NT tensor-wise FP8 adapter.
 
     Public/backend contract:
-        a:           [M, K] FP8 E4M3 or E5M2 activation payload
+        a:           [K, M] FP8 E4M3 or E5M2 activation payload
         a_scale_inv: one-element FP32 inverse quantization scale
         b:           [K, N] FP8 E4M3 or E5M2 weight payload
         b_scale_inv: one-element FP32 inverse quantization scale
         c:           [M, N] float16, bfloat16, or float32 output
 
-    The optimized private core streams both operands as row-major [Rows, K],
-    so B is adapted from TE's logical [K, N] representation to [N, K].
+    The NT core consumes TE's existing physical payloads directly:
+    A and B are contiguous columnwise payloads [K, M] and [K, N].
+    No transpose or materialization is performed.
     """
     if not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
         raise TypeError("FlyDSL FP8 GEMM expects plain torch.Tensor payloads")
 
     if a.ndim != 2 or b.ndim != 2:
         raise ValueError(
-            f"FlyDSL FP8 TN expects rank-2 operands, got A{tuple(a.shape)} "
+            f"FlyDSL FP8 NT expects rank-2 operands, got A{tuple(a.shape)} "
             f"and B{tuple(b.shape)}"
         )
 
@@ -1054,7 +1089,7 @@ def fp8_matmul(
             f"got A={a.dtype} and B={b.dtype}"
         )
 
-    m, k = a.shape
+    k, m = a.shape
     kb, n = b.shape
     if kb != k:
         raise ValueError(
@@ -1089,13 +1124,20 @@ def fp8_matmul(
             "A, B, inverse scales, and C must be on the same device"
         )
 
-    # In the normal TE TN path, b is a transpose view of contiguous rowwise
-    # weight storage, so b.T is already contiguous and this does not require a
-    # physical transpose/copy.
-    b_hk = b.transpose(0, 1).contiguous()
+    if not a.is_contiguous():
+        raise ValueError(
+            "FlyDSL FP8 NT requires contiguous A [K, M] storage; "
+            "refusing to materialize a replacement"
+        )
+    if not b.is_contiguous():
+        raise ValueError(
+            "FlyDSL FP8 NT requires contiguous B [K, N] storage; "
+            "refusing to materialize a replacement"
+        )
+
     doGemm(
         a,
-        b_hk,
+        b,
         c,
         a_scale_inv,
         b_scale_inv,
@@ -1112,8 +1154,8 @@ def doGemm(
     use_xcd_remap: bool = True,
 ):
     """Launch tensor-wise FP8 GEMM with TE-style inverse input scales."""
-    M_runtime, K_runtime = A.shape
-    N_runtime, Kb_runtime = B.shape
+    K_runtime, M_runtime = A.shape
+    Kb_runtime, N_runtime = B.shape
     supported_fp8_dtypes = (
         torch.float8_e4m3fn,
         torch.float8_e5m2,
@@ -1164,7 +1206,7 @@ def doGemm(
     A_scale_arg = A_scale_inv.contiguous().view(-1)
     B_scale_arg = B_scale_inv.contiguous().view(-1)
 
-    launch = _cached_launch(
+    launch = _cached_launch_nt(
         int(K_runtime),
         A.dtype,
         B.dtype,
