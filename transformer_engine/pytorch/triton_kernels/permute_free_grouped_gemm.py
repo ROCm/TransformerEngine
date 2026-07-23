@@ -83,6 +83,104 @@ def _get_flydsl_wgrad():
     return _FLYDSL_WGRAD
 
 
+# Resolved lazily on first forward call: a ``(autotuned, supported)`` callable pair (FlyDSL
+# fwd wrappers) if AITER's kernel imports, otherwise ``False`` (Triton fallback). ``None`` =
+# unresolved.
+_FLYDSL_FWD: Any = None
+
+
+def _get_flydsl_fwd():
+    """Resolve the AITER FlyDSL route-list forward gather-GEMM, or ``False`` if unavailable.
+
+    Mirrors :func:`_get_flydsl_wgrad`: the FlyDSL fwd wrapper shares the exact
+    ``fused_route_list_moe`` gather contract (same routing metadata, same fused gated
+    activation / route-prob / pre-activation-save epilogue, and the transposed-B dgrad view),
+    so it drops in as a faster bf16 backend on ROCm. Set ``NVTE_PERMUTE_FREE_FLYDSL_FWD=0`` to
+    force the Triton kernel. Returns an ``(autotuned, supported)`` pair, or ``False``.
+    """
+    global _FLYDSL_FWD
+    if _FLYDSL_FWD is None:
+        if os.getenv("NVTE_PERMUTE_FREE_FLYDSL_FWD", "1") != "1":
+            _FLYDSL_FWD = False
+            return _FLYDSL_FWD
+        try:
+            from aiter.ops.flydsl.moe_fwd import (
+                flydsl_moe_fwd_autotuned,
+                flydsl_moe_fwd_supported,
+            )
+
+            _FLYDSL_FWD = (flydsl_moe_fwd_autotuned, flydsl_moe_fwd_supported)
+        except Exception as exc:  # noqa: BLE001 -- any import failure -> Triton fallback
+            _FLYDSL_FWD = False
+            warnings.warn(
+                "permute-free fwd: could not import the AITER FlyDSL fwd kernel "
+                f"({type(exc).__name__}: {exc}); falling back to the Triton fwd kernel.",
+                stacklevel=2,
+            )
+    return _FLYDSL_FWD
+
+
+def _route_list_moe_fwd(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    C: torch.Tensor,
+    routing: MoERoutingMetadata,
+    *,
+    num_recv_tokens: int,
+    config: Dict[str, Any],
+    index_a_by_route_pos: bool = False,
+    activation: Optional[str] = None,
+    dispatched_probs: Optional[torch.Tensor] = None,
+    preact_out: Optional[torch.Tensor] = None,
+) -> None:
+    """Run the route-list forward gather-GEMM, preferring the FlyDSL backend.
+
+    Drop-in for :func:`fused_route_list_moe`: dispatches to the AITER FlyDSL bf16 kernel when
+    it's importable and can handle these operands (dtype / contraction contiguity / tile
+    divisibility), else the Triton kernel. Both share the routing metadata and the fused
+    gated-activation / route-prob / pre-activation-save epilogue, so the output is identical.
+    """
+    flydsl = _get_flydsl_fwd()
+    block_m = int(config["BLOCK_SIZE_M"])
+    if flydsl:
+        autotuned, supported = flydsl
+        if supported(A, B, block_m=block_m):
+            autotuned(
+                A,
+                B,
+                C,
+                routing.sorted_slot_ids,
+                routing.expert_ids,
+                routing.block_start,
+                routing.route_start,
+                num_recv_tokens=num_recv_tokens,
+                block_m=block_m,
+                index_a_by_route_pos=index_a_by_route_pos,
+                activation=activation,
+                dispatched_probs=dispatched_probs,
+                preact_out=preact_out,
+            )
+            return
+
+    fused_route_list_moe(
+        A,
+        B,
+        C,
+        routing.sorted_slot_ids,
+        routing.expert_ids,
+        routing.num_tokens_post_padded,
+        routing.block_start,
+        routing.route_start,
+        num_recv_tokens=num_recv_tokens,
+        compute_type=tl.bfloat16,
+        config=config,
+        index_a_by_route_pos=index_a_by_route_pos,
+        activation=activation,
+        dispatched_probs=dispatched_probs,
+        preact_out=preact_out,
+    )
+
+
 def is_permute_free_grouped_gemm_enabled() -> bool:
     from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
@@ -418,17 +516,12 @@ def permute_free_grouped_gemm_bf16(
         else None
     )
 
-    fused_route_list_moe(
+    _route_list_moe_fwd(
         hidden_states,
         weights_stacked,
         output,
-        routing.sorted_slot_ids,
-        routing.expert_ids,
-        routing.num_tokens_post_padded,
-        routing.block_start,
-        routing.route_start,
+        routing,
         num_recv_tokens=num_recv_tokens,
-        compute_type=tl.bfloat16,
         config=kernel_config,
         index_a_by_route_pos=False,
         activation=activation,
@@ -587,17 +680,12 @@ def permute_free_grouped_gemm_bf16_dgrad(
         dtype=torch.bfloat16,
         device=grad_output.device,
     )
-    fused_route_list_moe(
+    _route_list_moe_fwd(
         grad_output,
         weights_t,
         compact,
-        routing.sorted_slot_ids,
-        routing.expert_ids,
-        routing.num_tokens_post_padded,
-        routing.block_start,
-        routing.route_start,
+        routing,
         num_recv_tokens=routing.num_recv_tokens,
-        compute_type=tl.bfloat16,
         config=dgrad_config,
         index_a_by_route_pos=True,
     )
