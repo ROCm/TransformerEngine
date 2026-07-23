@@ -27,7 +27,11 @@ import triton.language as tl
 from ..moe_routing import MoERoutingMetadata, PermuteFreeMetadata
 from .route_list_align import route_list_align, route_list_scan
 from .route_combine import route_gather_combine
-from .route_list_moe_gemm import fused_route_list_moe, fused_gated_act_prob_bwd
+from .route_list_moe_gemm import (
+    fused_route_list_moe,
+    fused_gated_act_prob_bwd,
+    fused_gated_act_prob_fwd,
+)
 from .route_list_moe_wgrad import fused_route_list_moe_wgrad
 from .route_prob import _expert_per_route
 
@@ -485,6 +489,40 @@ def permute_free_gated_act_bwd(
     )
 
 
+def permute_free_gated_act_recompute(
+    preact: torch.Tensor,
+    routing: MoERoutingMetadata,
+    *,
+    activation: str,
+    dispatched_probs: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Rebuild the fused FC1 activation ``act(gate) * up * prob`` from the saved pre-activation.
+
+    Lets the backward checkpoint only the ``2F`` pre-activation (``[T * min(topk, E), 2F]``) and
+    reconstruct the ``F``-wide activation just-in-time for the FC2 wgrad, feeding the
+    *unchanged* full-speed wgrad kernel a transient buffer (freed right after) instead of
+    persisting the activation across the fwd/bwd boundary. Uses the same per-route routing
+    arrays as :func:`permute_free_gated_act_bwd`.
+
+    Returns
+    -------
+    torch.Tensor
+        ``act``, shape ``[T * min(topk, E), F]``, bf16 (route/padded layout).
+    """
+    routes_max = int(routing.route_to_token.shape[0])
+    token = routing.route_to_token.to(torch.int32)
+    expert = _expert_per_route(routing, routes_max)
+    return fused_gated_act_prob_fwd(
+        preact,
+        token,
+        expert,
+        num_recv_tokens=routing.num_recv_tokens,
+        activation=activation,
+        dispatched_probs=dispatched_probs,
+        num_routes_bound=routing.num_tokens_post_padded,
+    )
+
+
 def permute_free_grouped_gemm_bf16_dgrad(
     grad_output: torch.Tensor,
     weights: torch.Tensor | list[torch.Tensor],
@@ -581,6 +619,7 @@ def permute_free_grouped_gemm_bf16_wgrad(
     config: Optional[Dict[str, Any]] = None,
     out: Optional[torch.Tensor] = None,
     accumulate: bool = False,
+    swap_gather: bool = False,
 ) -> torch.Tensor:
     """Route-list fused weight-gradient (FC1 backward wrt weights).
 
@@ -602,6 +641,12 @@ def permute_free_grouped_gemm_bf16_wgrad(
         ``=``) with no scratch tensor / separate elementwise pass, and this tensor is returned.
     accumulate:
         With ``out``: add into it (``out += dW``) rather than overwrite (``out = dW``).
+    swap_gather:
+        Move the ``SORTED`` token-gather from ``hidden_states`` (K) to ``grad_output`` (N) -- the
+        FC2 wgrad mode. ``hidden_states`` is then a route-ordered ``[num_routes, in]`` operand and
+        ``grad_output`` a token-space ``[num_recv, out]`` operand, so the kernel emits ``dW`` in
+        ``[E, out, in]`` directly (no transpose). FlyDSL-only; the Triton fallback doesn't
+        support it.
 
     Returns
     -------
@@ -641,6 +686,12 @@ def permute_free_grouped_gemm_bf16_wgrad(
     routing = _prepare_wgrad_align(routing, _WGRAD_CONTRACT_M)
 
     flydsl_wgrad = _get_flydsl_wgrad()
+    if swap_gather and not flydsl_wgrad:
+        # The Triton route-list wgrad has no swap-gather mode; the FC2 caller handles the
+        # no-FlyDSL case itself (compute [F, H] then transpose), so it never asks for it here.
+        raise RuntimeError(
+            "swap_gather wgrad requires the FlyDSL backend; Triton fallback does not support it."
+        )
     # ``out`` lets the caller fold the wgrad straight into an existing accumulator (a param's
     # ``main_grad`` / ``.grad``), skipping the scratch dW + separate add/copy. The FlyDSL kernel
     # supports a race-free accumulate/overwrite epilogue (fp32 or bf16) for this; without it (or
@@ -662,6 +713,7 @@ def permute_free_grouped_gemm_bf16_wgrad(
                 num_recv_tokens=routing.num_recv_tokens,
                 accumulate=bool(accumulate),
                 out_dtype=out_dtype,
+                swap_gather=bool(swap_gather),
             )
             return out
         # No FlyDSL kernel: compute a scratch bf16 dW (overwrite), then apply into ``out``.
@@ -700,6 +752,7 @@ def permute_free_grouped_gemm_bf16_wgrad(
             routing.wgrad_blocks_per_expert,
             routing.route_start,
             num_recv_tokens=routing.num_recv_tokens,
+            swap_gather=bool(swap_gather),
         )
     else:
         fused_route_list_moe_wgrad(
@@ -903,13 +956,24 @@ def permute_free_grouped_gemm_bf16_fc2_wgrad(
     routing: MoERoutingMetadata,
     *,
     config: Optional[Dict[str, Any]] = None,
+    out: Optional[torch.Tensor] = None,
+    accumulate: bool = False,
+    preact: Optional[torch.Tensor] = None,
+    dispatched_probs: Optional[torch.Tensor] = None,
+    activation: Optional[str] = None,
 ) -> torch.Tensor:
     """FC2 wgrad: ``dW2[e] = sum_{route in e} grad[token(route)]^T @ fc2_input[route]``.
 
-    Reuses the FC1 route-list wgrad kernel with the two operands swapped: the token-gathered
-    operand is the token-space ``grad_output`` and the route-read operand is the compact
-    ``fc2_input``. The kernel returns ``[E, F, H]`` (= ``dW2^T`` per expert), so we transpose
-    the last two dims back to ``[E, H, F]``.
+    The two operands play mirror roles to FC1: ``grad_output`` is token-space and must be
+    token-gathered, ``fc2_input`` is route-ordered and read contiguously. Which one the kernel
+    gathers decides the output orientation:
+
+    * **FlyDSL** (``swap_gather``): gather ``grad_output`` on the N-operand and route-walk
+      ``fc2_input`` on the K-operand, so the kernel emits ``dW2`` in ``[E, H, F]`` directly --
+      coalesced, no transpose, and foldable straight into ``out`` (``main_grad`` / ``.grad``).
+    * **Triton fallback** (no swap mode): compute ``[E, F, H] = dW2^T`` with operands swapped,
+      then ``transpose(1, 2).contiguous()`` back to ``[E, H, F]`` and, if ``out`` is given,
+      apply it there.
 
     Parameters
     ----------
@@ -919,10 +983,42 @@ def permute_free_grouped_gemm_bf16_fc2_wgrad(
         Token-space gradient ``[num_recv_tokens, out_features(H)]``, bf16.
     weights_shape:
         ``(num_experts, out_features(H), in_features(F))`` -- the W2 shape.
+    out / accumulate:
+        Optional ``[E, H, F]`` destination; ``+=`` if ``accumulate`` else ``=``. Returned when given.
+    preact / dispatched_probs / activation:
+        Recompute-from-preact mode. When ``preact`` (``[T * min(topk, E), 2F]`` raw ``[gate | up]``)
+        is given, ``fc2_input`` is ignored and the ``F``-wide activation ``act(gate)*up*prob`` is
+        re-materialised here into a transient buffer (freed after the wgrad), so the backward can
+        checkpoint only the ``2F`` preact instead of the ``F``-wide activation. ``activation`` picks
+        the nonlinearity (``"silu"``/``"gelu"``); ``dispatched_probs`` (``[num_recv, E]``) is the
+        fused route-prob table (omit when the forward did not fuse probs). The wgrad kernel itself
+        is unchanged and runs at full stored-act speed.
     """
     num_experts, out_features, in_features = (int(v) for v in weights_shape)
-    # Call the FC1 wgrad with swapped roles: hidden_states = token-gathered grad (K=H),
-    # grad_output(route-read) = fc2_input (N=F). Result dW is [E, F, H] = dW2^T.
+
+    # Recompute-from-preact: rebuild the transient activation for the (unchanged) wgrad.
+    if preact is not None:
+        if activation is None:
+            raise ValueError("permute_free FC2 wgrad recompute requires an activation.")
+        fc2_input = permute_free_gated_act_recompute(
+            preact, routing, activation=activation, dispatched_probs=dispatched_probs
+        )
+
+    if _get_flydsl_wgrad():
+        # swap_gather: emit [E, H(out), F(in)] directly. hidden_states = fc2_input (route K=in),
+        # grad_output = grad_output (token-gathered N=out).
+        return permute_free_grouped_gemm_bf16_wgrad(
+            fc2_input,
+            grad_output,
+            (num_experts, out_features, in_features),
+            routing,
+            config=config,
+            out=out,
+            accumulate=accumulate,
+            swap_gather=True,
+        )
+
+    # Triton fallback: no swap mode. Compute [E, F, H] = dW2^T with operands swapped, transpose.
     dW_t = permute_free_grouped_gemm_bf16_wgrad(
         grad_output,
         fc2_input,
@@ -930,7 +1026,14 @@ def permute_free_grouped_gemm_bf16_fc2_wgrad(
         routing,
         config=config,
     )
-    return dW_t.transpose(1, 2).contiguous()
+    dW = dW_t.transpose(1, 2).contiguous()  # [E, H, F]
+    if out is None:
+        return dW
+    if accumulate:
+        out.add_(dW)
+    else:
+        out.copy_(dW)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -1037,8 +1140,9 @@ def permute_free_grouped_gemm_backward(
 
     ``wgrad_out`` (optional ``[E, out, in]`` accumulator) folds the wgrad straight into the
     caller's buffer (``+=`` if ``wgrad_accumulate`` else ``=``) instead of returning a fresh
-    tensor -- supported on the FC1 path only (FC2's transpose precludes an in-place write). When
-    used, ``result.wgrad_applied`` is ``True`` and ``result.wgrad_stacked`` is that same buffer.
+    tensor. Both FC1 and FC2 support it (FC2 emits ``[E, H, F]`` directly via ``swap_gather`` on
+    FlyDSL, or transposes + applies on the Triton fallback). When used, ``result.wgrad_applied``
+    is ``True`` and ``result.wgrad_stacked`` is that same buffer.
     """
     grad_output = grad_output.contiguous()
     route_space = getattr(routing, "route_space", False)
@@ -1049,16 +1153,19 @@ def permute_free_grouped_gemm_backward(
 
     if route_space:
         # FC2: grad is token-space [num_recv, out]. dgrad gathers back to the compact route
-        # buffer [T * min(topk, E), in]; wgrad swaps operands + transposes.
+        # buffer [T * min(topk, E), in]; wgrad token-gathers the grad on its N-operand
+        # (swap_gather) so it emits [E, H, F] directly -- foldable into ``wgrad_out``.
         if requires_dgrad:
             weights_stacked = _stack_expert_weights(weights)  # [E, H, F], zero-copy when grouped
             dgrad = permute_free_grouped_gemm_bf16_fc2_dgrad(grad_output, weights_stacked, routing)
         if requires_wgrad:
             weights_shape = (num_gemms, weights[0].size(0), weights[0].size(1))
             dW = permute_free_grouped_gemm_bf16_fc2_wgrad(
-                hidden_states, grad_output, weights_shape, routing
+                hidden_states, grad_output, weights_shape, routing,
+                out=wgrad_out, accumulate=wgrad_accumulate,
             )  # [E, H, F]
             wgrad_stacked = dW
+            wgrad_applied = wgrad_out is not None
     else:
         # FC1: grad is the padded [T * min(topk, E), out] route buffer; dgrad scatters the input grad
         # back to received-token rows.

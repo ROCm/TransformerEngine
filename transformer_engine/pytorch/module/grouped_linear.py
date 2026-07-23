@@ -495,15 +495,14 @@ class _GroupedLinear(torch.autograd.Function):
             if getattr(ctx, "use_perm_free_grouped_gemm", False):
                 # Single grouped weight: the GEMM only ever sees detached per-expert views, so
                 # the whole [E, out, in] wgrad goes straight to the grouped param (the positional
-                # autograd return is dead). When the kernel supports it (FC1 path), point it at
-                # the destination accumulator up front so it folds the wgrad in directly -- no
-                # scratch dW and no separate add/copy. FC2 (route_space) transposes the kernel
-                # output, so it still returns a stacked dW we sink below.
+                # autograd return is dead). Point the kernel at the destination accumulator up
+                # front so it folds the wgrad in directly -- no scratch dW and no separate
+                # add/copy. Both FC1 and FC2 (route_space, via swap_gather) emit [E, out, in]
+                # directly into the buffer.
                 grouped = getattr(ctx, "perm_free_grouped", False) and ctx.weights_requires_grad
-                route_space = getattr(ctx.routing_metadata, "route_space", False)
                 wgrad_out = None
                 wgrad_accumulate = False
-                if grouped and not route_space:
+                if grouped:
                     grouped_weight = ctx.grouped_weight_ref()
                     assert (
                         grouped_weight is not None

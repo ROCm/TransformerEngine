@@ -25,6 +25,24 @@ import triton.language as tl
 from .pid_preprocessing import pid_grid, remap_xcd, get_num_xcds
 
 
+# --- Work-stealing tile-counter buffer (opt-in via NVTE_MOE_WORK_STEAL) ---
+# Layout mirrors the Primus-Turbo grouped-GEMM WS kernel: [xcd0, ..., xcd_{X-1}, global],
+# each slot COUNTER_STRIDE int32 wide so the per-XCD atomics do not false-share an L2 line
+# (64 * 4B = 256B >= one MI3xx line). Cached per device; zeroed on the active stream before
+# each WS launch. Not stream-safe under concurrent multi-stream launches (single-stream
+# autograd is the expected caller), matching the reference kernel's caveat.
+_WS_COUNTER_STRIDE = 64
+_ws_counters: Dict[torch.device, torch.Tensor] = {}
+
+
+def _get_ws_counter(device: torch.device, num_xcds: int) -> torch.Tensor:
+    buf = _ws_counters.get(device)
+    if buf is None or buf.numel() < (num_xcds + 1) * _WS_COUNTER_STRIDE:
+        buf = torch.zeros((num_xcds + 1) * _WS_COUNTER_STRIDE, dtype=torch.int32, device=device)
+        _ws_counters[device] = buf
+    return buf
+
+
 # --- Fused gated-activation epilogue helpers (exp2-based, no libdevice) ---
 @triton.jit
 def _tanh(x):
@@ -132,6 +150,8 @@ def _route_list_moe_persistent_kernel(
     route_start_ptr,
     probs_ptr,
     preact_ptr,
+    tile_counter_ptr,
+    global_counter_ptr,
     N,
     K,
     num_recv_tokens,
@@ -159,18 +179,57 @@ def _route_list_moe_persistent_kernel(
     SAVE_PREACT: tl.constexpr,
     compute_type: tl.constexpr,
     NUM_XCDS: tl.constexpr,
+    # Work stealing (opt-in). WORK_STEAL swaps the static ``tile_id += NUM_SMS`` stride for an
+    # atomic tile claim so fast CUs absorb the work of slow/lightly-loaded ones (MoE expert
+    # imbalance / straggler tolerance). WS_MODE: 0=global counter only, 1=per-XCD partition
+    # only, 2=hierarchical (per-XCD phase 1 + global phase-2 fallback). The per-XCD budget is
+    # derived on-device from the *actual* num_tiles (num_tokens_post_padded is a device scalar
+    # and em_max over-allocates heavily under EP, so a host-side split would be wrong).
+    WORK_STEAL: tl.constexpr = False,
+    WS_MODE: tl.constexpr = 0,
+    COUNTER_STRIDE: tl.constexpr = 64,
 ):
-    start_pid = tl.program_id(axis=0)
+    pid = tl.program_id(axis=0)
     num_tokens_post_padded = tl.load(num_tokens_post_padded_ptr)
     num_pid_m = tl.cdiv(num_tokens_post_padded, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)
-    tile_id = start_pid
     offs_k = tl.arange(0, BLOCK_SIZE_K)
     num_tiles = num_pid_m * num_pid_n
-    num_valid_tiles = tl.cdiv((num_tiles - tile_id), NUM_SMS)
 
-    for _ in range(0, num_valid_tiles):
-        tile_id_remapped = remap_xcd(tile_id, num_tiles, NUM_XCDS)
+    if WORK_STEAL:
+        # Cap the logical XCD count at the launched grid so every per-XCD slice is actually
+        # claimed by some program (else phase-2 would skip past an unclaimed slice).
+        active_xcds = tl.minimum(tl.num_programs(0), NUM_XCDS)
+        xcd_id = pid % active_xcds
+        if WS_MODE == 0:
+            per_xcd = 0
+        elif WS_MODE == 1:
+            per_xcd = tl.cdiv(num_tiles, active_xcds)
+        else:
+            per_xcd = tl.cdiv(num_tiles, active_xcds * 2)
+        phase1_total = per_xcd * active_xcds
+        local_counter = tile_counter_ptr + xcd_id * COUNTER_STRIDE
+        local_idx = tl.atomic_add(local_counter, 1, sem="relaxed", scope="gpu")
+        in_phase2 = local_idx >= per_xcd
+        if in_phase2:
+            g_idx = tl.atomic_add(global_counter_ptr, 1, sem="relaxed", scope="gpu")
+            tile_id = phase1_total + g_idx
+        else:
+            tile_id = xcd_id * per_xcd + local_idx
+    else:
+        active_xcds = 0
+        xcd_id = 0
+        per_xcd = 0
+        phase1_total = 0
+        local_counter = tile_counter_ptr
+        in_phase2 = False
+        tile_id = pid
+
+    while tile_id < num_tiles:
+        if WORK_STEAL:
+            tile_id_remapped = tile_id
+        else:
+            tile_id_remapped = remap_xcd(tile_id, num_tiles, NUM_XCDS)
         pid_m, pid_n = pid_grid(tile_id_remapped, num_pid_m, num_pid_n, GROUP_SIZE_M)
 
         off_experts = tl.load(expert_ids_ptr + pid_m).to(tl.int64)
@@ -262,7 +321,20 @@ def _route_list_moe_persistent_kernel(
                 c_ptrs = c_ptr + stride_cm * out_row[:, None] + stride_cn * offs_cn[None, :]
                 tl.store(c_ptrs, accumulator.to(compute_type), mask=c_mask)
 
-        tile_id += NUM_SMS
+        if WORK_STEAL:
+            if in_phase2:
+                g_idx = tl.atomic_add(global_counter_ptr, 1, sem="relaxed", scope="gpu")
+                tile_id = phase1_total + g_idx
+            else:
+                local_idx = tl.atomic_add(local_counter, 1, sem="relaxed", scope="gpu")
+                if local_idx >= per_xcd:
+                    in_phase2 = True
+                    g_idx = tl.atomic_add(global_counter_ptr, 1, sem="relaxed", scope="gpu")
+                    tile_id = phase1_total + g_idx
+                else:
+                    tile_id = xcd_id * per_xcd + local_idx
+        else:
+            tile_id += NUM_SMS
 
 
 def _moe_fwd_autotune_configs() -> list:
@@ -375,6 +447,16 @@ def fused_route_list_moe(
             triton.cdiv(em, meta["BLOCK_SIZE_M"]) * triton.cdiv(B.shape[1], meta["BLOCK_SIZE_N"]),
         ),
     )
+
+    # Work stealing is opt-in (NVTE_MOE_WORK_STEAL=1). WS_MODE: 0=global, 1=per-xcd, 2=hier.
+    _WS_MODES = {"global": 0, "per-xcd": 1, "hierarchical": 2}
+    work_steal = os.getenv("NVTE_MOE_WORK_STEAL", "0") == "1"
+    ws_mode = _WS_MODES.get(os.getenv("NVTE_MOE_WS_MODE", "hierarchical"), 2)
+    num_xcds = get_num_xcds()
+    ws_counter = _get_ws_counter(A.device, num_xcds)
+    if work_steal:
+        ws_counter.zero_()
+
     common_args = (
         A,
         B,
@@ -386,6 +468,8 @@ def fused_route_list_moe(
         route_start,
         probs,
         preact,
+        ws_counter,
+        ws_counter[num_xcds * _WS_COUNTER_STRIDE :],
         B.shape[1],
         A.shape[1],
         num_recv_tokens,
@@ -409,7 +493,10 @@ def fused_route_list_moe(
         MUL_ROUTED_WEIGHT=mul_routed_weight,
         SAVE_PREACT=save_preact,
         compute_type=compute_type,
-        NUM_XCDS=get_num_xcds(),
+        NUM_XCDS=num_xcds,
+        WORK_STEAL=work_steal,
+        WS_MODE=ws_mode,
+        COUNTER_STRIDE=_WS_COUNTER_STRIDE,
     )
     if autotune:
         # BLOCK_SIZE_M is fixed (tied to the align block size); the autotuner fills the rest.
@@ -658,3 +745,130 @@ def fused_gated_act_prob_bwd(
     if has_probs:
         grad_probs = grad_probs.to(dispatched_probs.dtype)
     return dpre, grad_probs
+
+
+@triton.autotune(configs=_gated_act_bwd_autotune_configs(), key=["F", "HAS_PROBS"])
+@triton.jit
+def _gated_act_prob_fwd_kernel(
+    preact_ptr,  # [routes_max, 2F] raw pre-activation [gate | up]
+    probs_ptr,  # [num_recv_tokens, E]
+    token_ptr,  # [routes_max] route -> received-token row
+    expert_ptr,  # [routes_max] route -> local expert
+    act_ptr,  # [routes_max, F] out: act(gate) * up * prob
+    nbound_ptr,  # [1] int32 device scalar: dynamic upper bound on compact routes
+    num_recv_tokens,
+    F,
+    stride_prem,
+    stride_preh,
+    stride_pm,
+    stride_pe,
+    stride_am,
+    stride_ah,
+    ACTIVATION: tl.constexpr,
+    HAS_PROBS: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    """Recompute the fused gated-activation FC1 output ``act(gate) * up * prob`` from preact.
+
+    This is the *forward* counterpart of :func:`_gated_act_prob_bwd_kernel`: given the saved
+    ``2F`` pre-activation ``[gate | up]`` and the per-route prob it re-materialises the
+    ``F``-wide activation that the forward fused into the FC1 epilogue, so the backward can
+    checkpoint only the ``2F`` preact (never the ``F``-wide act) and rebuild it just-in-time
+    for the FC2 wgrad. Padded / over-allocated routes carry the ``token == num_recv_tokens``
+    sentinel and get ``prob == 0`` (their act rows are ignored downstream). ``nbound_ptr``
+    bounds tail programs to the real compact route extent (sync-free, EP-friendly early exit).
+    """
+    pid = tl.program_id(axis=0)
+    num_routes_bound = tl.load(nbound_ptr)
+    if pid * BLOCK_M >= num_routes_bound:
+        return
+    r_offs = pid * BLOCK_M + tl.arange(0, BLOCK_M)
+    r_mask = r_offs < num_routes_bound
+    if HAS_PROBS:
+        token = tl.load(token_ptr + r_offs, mask=r_mask, other=num_recv_tokens).to(tl.int64)
+        valid = token < num_recv_tokens
+        expert = tl.load(expert_ptr + r_offs, mask=r_mask, other=0).to(tl.int64)
+        prob = tl.load(
+            probs_ptr + token * stride_pm + expert * stride_pe, mask=valid, other=0.0
+        ).to(tl.float32)
+
+    for h0 in range(0, F, BLOCK_H):
+        offs = h0 + tl.arange(0, BLOCK_H)
+        hmask = offs < F
+        m = r_mask[:, None] & hmask[None, :]
+        prow = r_offs[:, None] * stride_prem
+        g = tl.load(
+            preact_ptr + prow + offs[None, :] * stride_preh, mask=m, other=0.0
+        ).to(tl.float32)
+        u = tl.load(
+            preact_ptr + prow + (offs[None, :] + F) * stride_preh, mask=m, other=0.0
+        ).to(tl.float32)
+        act = _apply_activation(g, ACTIVATION) * u
+        if HAS_PROBS:
+            act = act * prob[:, None]
+        tl.store(
+            act_ptr + r_offs[:, None] * stride_am + offs[None, :] * stride_ah,
+            act.to(act_ptr.dtype.element_ty),
+            mask=m,
+        )
+
+
+def fused_gated_act_prob_fwd(
+    preact: torch.Tensor,
+    token: torch.Tensor,
+    expert: torch.Tensor,
+    *,
+    num_recv_tokens: int,
+    activation: str,
+    dispatched_probs: Optional[torch.Tensor] = None,
+    num_routes_bound: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Recompute the fused gated-activation FC1 output from the saved pre-activation.
+
+    Re-materialises ``act = act(gate) * up * prob`` (``[routes_max, F]``, bf16) from the
+    ``[routes_max, 2F]`` preact ``[gate | up]`` -- the inverse of checkpointing the ``F``-wide
+    activation. Feeding this transient buffer to the *unchanged* FC2 wgrad keeps that kernel at
+    full (stored-act) speed while only the ``2F`` preact is persisted across the fwd/bwd
+    boundary. See :func:`fused_gated_act_prob_bwd` for the argument contract (token / expert /
+    ``num_routes_bound`` are the same per-route routing arrays).
+    """
+    routes_max, two_f = preact.shape
+    if two_f % 2 != 0:
+        raise ValueError(f"preact must be [routes_max, 2F], got a {two_f}-wide last dim.")
+    F = two_f // 2
+    has_probs = dispatched_probs is not None
+
+    act = torch.empty((routes_max, F), dtype=torch.bfloat16, device=preact.device)
+    if has_probs:
+        probs_ptr = dispatched_probs
+        stride_pm, stride_pe = dispatched_probs.stride(0), dispatched_probs.stride(1)
+    else:
+        probs_ptr = preact  # unused
+        stride_pm = stride_pe = 0
+
+    act_id = _ACT_IDS[activation]
+    if num_routes_bound is None:
+        nbound = torch.tensor([routes_max], dtype=torch.int32, device=preact.device)
+    else:
+        nbound = num_routes_bound
+    grid = lambda meta: (triton.cdiv(routes_max, meta["BLOCK_M"]),)  # noqa: E731
+    _gated_act_prob_fwd_kernel[grid](
+        preact,
+        probs_ptr,
+        token,
+        expert,
+        act,
+        nbound,
+        num_recv_tokens,
+        F,
+        preact.stride(0),
+        preact.stride(1),
+        stride_pm,
+        stride_pe,
+        act.stride(0),
+        act.stride(1),
+        ACTIVATION=act_id,
+        HAS_PROBS=has_probs,
+    )
+    return act
