@@ -279,7 +279,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     float dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, 
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, 
-    int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic) {
+    int64_t window_size_right, bool return_max_logit, bool /*cuda_graph*/, bool deterministic) {
   using namespace transformer_engine;
 
   //gfx1250 is disabled in ck_fused_attn/CMakeLists.txt and is not supported by curretnt aotriton
@@ -347,7 +347,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
                          const NVTETensor page_table_v, const NVTETensor rng_state,
                          size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
-                         bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
+                         bool return_max_logit, bool /*cuda_graph*/, float attn_scale, float dropout,
                          NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
                          NVTE_QKV_Format qkv_scale_inv_format, NVTE_Bias_Type bias_type,
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
@@ -395,7 +395,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
       h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right,
-      return_max_logit, cuda_graph, false);
+      return_max_logit, false /*Ignored*/, false);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd(
@@ -445,7 +445,7 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          NVTE_Bias_Type bias_type,
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
                          int64_t window_size_left, int64_t window_size_right,
-                         bool bottom_right_diagonal, bool deterministic, bool cuda_graph,
+                         bool bottom_right_diagonal, bool deterministic, bool /*cuda_graph*/,
                          NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
@@ -496,8 +496,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout, h_q,
-      h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right, false,
-      cuda_graph, deterministic);
+      h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right, false /*Ignored*/,
+      false, deterministic);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {
