@@ -441,20 +441,23 @@ void dump_bwd_timings(const char* dump_path, float average_runtime){
   file << average_runtime << "\n";
 }
 
-hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
+struct BwdFmhaArgs {
+  aiter::mha_bwd_args fmha_args;
+  bool is_mqa_gqa;
+  bool has_dbias;
+  BiasShape bias_shape;
+};
+
+// Populate the AITER mha_bwd_args from TE's CkAttnBwdArgs. Shared by ck_attn_bwd
+// (real launch) and ck_attn_bwd_uses_v3 (v3 availability probe) so the probe can
+// never disagree with the launch. v3_api_check is left false here; callers flip it.
+// The stream-dependent max_seqlen override (NVTE_CK_RUNTIME_MAX_SEQLEN) is applied
+// by ck_attn_bwd after this returns; it does not affect v3 kernel selection.
+BwdFmhaArgs build_bwd_fmha_args(const CkAttnBwdArgs& args){
 
   bool has_dropout = (args.dropout_probability > 0.f);
   bool has_dbias = args.dbias_ptr != nullptr;
   bool is_mqa_gqa = (args.h > args.hg);
-
-  bool ck_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      ck_log_config = true;
-  }
-  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
-  // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
 
   bias_enum bias_type = bias_enum::no_bias;
   BiasShape bias_shape = BiasShape::k11SS;
@@ -577,6 +580,39 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.p_drop = args.dropout_probability;
   fmha_args.p_undrop = 1.0 - args.dropout_probability;
   fmha_args.drop_seed_offset = std::pair<const void*, const void*>{args.philox_seed_ptr, args.philox_offset_ptr};
+
+  return {fmha_args, is_mqa_gqa, has_dbias, bias_shape};
+}
+
+// Probe whether AITER's v3 (asm) backward path will run for this config, without
+// launching any kernel. Builds the same args as ck_attn_bwd and relies on AITER's
+// v3_api_check dry-run (returns 1 when v3 is available, -1 otherwise).
+bool ck_attn_bwd_uses_v3(const CkAttnBwdArgs& args){
+  aiter::mha_bwd_args fmha_args = build_bwd_fmha_args(args).fmha_args;
+  fmha_args.v3_api_check = true;
+  // No kernel is launched in check mode, so the stream/log flags are irrelevant.
+  ck_tile::stream_config stream_config{nullptr, false, false};
+  return QOLA_NS(mha_bwd)(fmha_args, stream_config) == 1;
+}
+
+hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
+
+  // build_bwd_fmha_args also derives the flags the post-dispatch MQA/GQA and dbias
+  // reductions below need, so we unpack them here rather than recomputing.
+  BwdFmhaArgs built = build_bwd_fmha_args(args);
+  aiter::mha_bwd_args& fmha_args = built.fmha_args;
+  const bool is_mqa_gqa = built.is_mqa_gqa;
+  const bool has_dbias = built.has_dbias;
+  const BiasShape bias_shape = built.bias_shape;
+
+  bool ck_log_config = false;
+  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      ck_log_config = true;
+  }
+  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
+  // print kernel name on verbose mode
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
 
   // modify the max_seqlen_q for better performance in 0-length cases
   // lse_workspace_ptr used as buffer
