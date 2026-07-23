@@ -45,8 +45,9 @@ python benchmark_casting.py --rotating-buffers 16  # or fix the ring size (16 bu
 ```
 
 Passing `--rotating-buffers N` fixes the number of buffers; omitting `N`
-auto-sizes the ring to ~2x the device's last-level cache. The option
-is **off by default**.
+auto-sizes the ring to ~2x a conservative 256 MB last-level cache (the AMD
+Infinity Cache; see `utils.py::_last_level_cache_bytes`). The option is
+**off by default**.
 
 ## Shared configuration
 

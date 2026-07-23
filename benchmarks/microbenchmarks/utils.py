@@ -112,17 +112,12 @@ def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
 # Rotating input buffers (opt-in via --rotating-buffers; default off)
 # ---------------------------------------------------------------------------
 # When enabled, benchmark inputs are cycled through a ring of buffers so that
-# back-to-back kernel launches read/write different memory and don't benefit
-# from artificial L2-cache residency.  Populated by run_benchmarks() from the
+# back-to-back kernel launches read different input memory and don't benefit
+# from artificial cache residency.  Populated by run_benchmarks() from the
 # parsed CLI args; the defaults below preserve the original single-buffer
 # behavior.
 _ROTATE_BUFFERS = False
 _ROTATE_COUNT = 0  # 0 => auto-size the ring to exceed the last-level cache
-
-
-def rotation_enabled():
-    """True if ``--rotating-buffers`` was passed to the current run."""
-    return _ROTATE_BUFFERS
 
 
 def _last_level_cache_bytes():
@@ -443,6 +438,8 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
 
     global _ROTATE_BUFFERS, _ROTATE_COUNT
     _rotating = getattr(args, "rotating_buffers", None)
+    if _rotating is not None and _rotating < 0:
+        raise ValueError("--rotating-buffers expects N >= 0")
     _ROTATE_BUFFERS = _rotating is not None
     _ROTATE_COUNT = _rotating or 0
 

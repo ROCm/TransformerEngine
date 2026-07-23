@@ -12,8 +12,7 @@ from utils import (
     compute_tflops,
     make_forward_backward_metric_records,
     run_benchmarks,
-    make_input,
-    rotation_enabled,
+    rotating,
 )
 
 BENCHMARK_LABEL = "Grouped GEMM"
@@ -99,7 +98,7 @@ def generate_grok_v2_test_cases():
     )
 
 
-def make_fwd_bwd_funcs_te(next_x, w, group_lens, activation_dtype):
+def make_fwd_bwd_funcs_te(next_xs, w, group_lens, activation_dtype):
     from transformer_engine.pytorch.cpp_extensions import general_grouped_gemm
 
     B = int(group_lens.numel())
@@ -113,24 +112,15 @@ def make_fwd_bwd_funcs_te(next_x, w, group_lens, activation_dtype):
     weights = [w[i] for i in range(B)]
     device = w.device
 
-    def _split_current():
-        x = next_x()
-        assert x.numel() > 0 and x.shape[0] == sum_M
-        return list(torch.split(x.reshape(-1, x.shape[-1]), m_splits))
-
-    # When not rotating, split the single activation buffer once (matches the
-    # original behavior); when rotating, follow the current buffer each call.
-    _static_xs = None if rotation_enabled() else _split_current()
-
-    def _xs():
-        return _static_xs if _static_xs is not None else _split_current()
-
+    # next_xs() yields the per-expert split of the (current) activation buffer.
+    # The splits are precomputed once per buffer (see bench_grouped_gemm), so the
+    # timed region below only measures general_grouped_gemm, not reshape/split.
     out = torch.empty((sum_M, N), device=device, dtype=activation_dtype)
 
     def fwd_func_te():
         general_grouped_gemm(
             A=weights,
-            B=_xs(),
+            B=next_xs(),
             out=[out],
             quantization_params=[None] * B,
             out_dtype=activation_dtype,
@@ -167,7 +157,7 @@ def make_fwd_bwd_funcs_te(next_x, w, group_lens, activation_dtype):
         )
 
         general_grouped_gemm(
-            A=_xs(),
+            A=next_xs(),
             B=splits,
             out=dws,
             quantization_params=[None] * B,
@@ -189,12 +179,23 @@ def make_fwd_bwd_funcs_te(next_x, w, group_lens, activation_dtype):
 def bench_grouped_gemm(Case, B, M, N, K, dtype):
     device = "cuda"
 
-    next_x = make_input((B * M, K), dtype, device=device)
     w = torch.randn((B, N, K), dtype=dtype, device=device)
     group_lens = generate_grouped_gemm_group_lens(B, M, balance=True).to(device)
+    m_splits = [int(v) for v in group_lens.tolist()]
+
+    # Rotation ring of *pre-split* activation buffers, built once at setup, so
+    # the timed region only measures the grouped GEMM (not reshape/split). With
+    # rotation off this is a single cached split, matching the original behavior.
+    elem_bytes = torch.empty(0, dtype=dtype).element_size()
+
+    def _build_xs():
+        x = torch.randn((B * M, K), dtype=dtype, device=device)
+        return list(torch.split(x.reshape(-1, x.shape[-1]), m_splits))
+
+    next_xs = rotating(_build_xs, bytes_per_buffer=B * M * K * elem_bytes)
 
     fwd_func_te, bwd_func_te_inner = make_fwd_bwd_funcs_te(
-        next_x, w, group_lens, activation_dtype=dtype
+        next_xs, w, group_lens, activation_dtype=dtype
     )
 
     out_te = fwd_func_te()
