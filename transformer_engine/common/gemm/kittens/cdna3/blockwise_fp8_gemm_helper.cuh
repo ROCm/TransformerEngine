@@ -75,23 +75,18 @@ __device__ inline float rtne_cast_roundtrip(float v) {
     }
 }
 
-template <typename AccType>
-__device__ inline void apply_rtne_bias(AccType &Cacc) {
-    #pragma unroll
-    for (int i = 0; i < AccType::height; i++) {
-        #pragma unroll
-        for (int j = 0; j < AccType::width; j++) {
-            Cacc.tiles[i][j].data[0].x = rtne_bias(Cacc.tiles[i][j].data[0].x);
-            Cacc.tiles[i][j].data[0].y = rtne_bias(Cacc.tiles[i][j].data[0].y);
-            Cacc.tiles[i][j].data[1].x = rtne_bias(Cacc.tiles[i][j].data[1].x);
-            Cacc.tiles[i][j].data[1].y = rtne_bias(Cacc.tiles[i][j].data[1].y);
-        }
+template <typename OType>
+__device__ inline OType convert_out(float v) {
+    if constexpr (std::is_same_v<OType, kittens::bf16>) {
+        return kittens::base_types::convertor<OType, float>::convert(rtne_bias(v));
+    } else {
+        return kittens::base_types::convertor<OType, float>::convert(v);
     }
 }
 
 template <typename OType, typename AccType>
-__device__ inline void store_masked(OType *c_ptr, const AccType &Cacc,
-                                      int Rtile, int Ctile, int M, int N) {
+__device__ inline void store_output(OType *c_ptr, const AccType &Cacc,
+                                    int Rtile, int Ctile, int M, int N) {
     const int lane = kittens::laneid();
     const int m_base = Rtile * AccType::rows + 4 * (lane / 16);
     const int n_base = Ctile * AccType::cols + (lane % 16);
@@ -102,14 +97,10 @@ __device__ inline void store_masked(OType *c_ptr, const AccType &Cacc,
         for (int j = 0; j < AccType::width; j++) {
             const int col = n_base + j * 16;
             if (col >= N) continue;
-            const float v0 = Cacc.tiles[i][j].data[0].x;
-            const float v1 = Cacc.tiles[i][j].data[0].y;
-            const float v2 = Cacc.tiles[i][j].data[1].x;
-            const float v3 = Cacc.tiles[i][j].data[1].y;
-            if (m0 + 0 < M) c_ptr[(m0 + 0) * N + col] = kittens::base_types::convertor<OType, float>::convert(v0);
-            if (m0 + 1 < M) c_ptr[(m0 + 1) * N + col] = kittens::base_types::convertor<OType, float>::convert(v1);
-            if (m0 + 2 < M) c_ptr[(m0 + 2) * N + col] = kittens::base_types::convertor<OType, float>::convert(v2);
-            if (m0 + 3 < M) c_ptr[(m0 + 3) * N + col] = kittens::base_types::convertor<OType, float>::convert(v3);
+            if (m0 + 0 < M) c_ptr[(m0 + 0) * N + col] = convert_out<OType>(Cacc.tiles[i][j].data[0].x);
+            if (m0 + 1 < M) c_ptr[(m0 + 1) * N + col] = convert_out<OType>(Cacc.tiles[i][j].data[0].y);
+            if (m0 + 2 < M) c_ptr[(m0 + 2) * N + col] = convert_out<OType>(Cacc.tiles[i][j].data[1].x);
+            if (m0 + 3 < M) c_ptr[(m0 + 3) * N + col] = convert_out<OType>(Cacc.tiles[i][j].data[1].y);
         }
     }
 }

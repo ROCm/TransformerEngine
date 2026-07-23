@@ -342,17 +342,8 @@ void micro_tk(const micro_globals<AType, BType, OType> g) {
             g.bias, g.bias_dtype, g.gelu_aux, g.gelu_aux_dtype, g.c_in, g.beta);
     }
 
-    if constexpr (std::is_same_v<OType, kittens::bf16>) {
-        apply_rtne_bias(C_accum[0]);
-        apply_rtne_bias(C_accum[1]);
-    }
-    if (is_last_m || is_last_n) {
-        store_masked(g.c.raw_ptr, C_accum[0], row * 4 + warp_row,     col * 4 + warp_col, M, N);
-        store_masked(g.c.raw_ptr, C_accum[1], row * 4 + warp_row + WARPS_ROW, col * 4 + warp_col, M, N);
-    } else {
-        kittens::store(g.c, C_accum[0], {0, 0, row * 4 + warp_row,     col * 4 + warp_col});
-        kittens::store(g.c, C_accum[1], {0, 0, row * 4 + warp_row + WARPS_ROW, col * 4 + warp_col});
-    }
+    store_output(g.c.raw_ptr, C_accum[0], row * 4 + warp_row,     col * 4 + warp_col, M, N);
+    store_output(g.c.raw_ptr, C_accum[1], row * 4 + warp_row + WARPS_ROW, col * 4 + warp_col, M, N);
 }
 
 #define BOOL_SWITCH(val, NAME, ...) \
