@@ -2,6 +2,8 @@
 
 This directory contains lightweight Python microbenchmarks for selected
 Transformer Engine kernels and helper scripts for comparing benchmark CSVs.
+Timing is powered by [`usv`](https://github.com/matthiasdiener/usv) (install it
+in your environment first, e.g. `pip install -e /path/to/usv`).
 
 ## Benchmarks
 
@@ -31,6 +33,30 @@ python benchmark_gemm.py --csv --csv-samples gemm_samples.csv
 The samples CSV contains one row per timing sample with columns for all
 benchmark parameters plus `label`, `sample_idx`, and `time_ms`.
 
+## Timing options (usv)
+
+Each benchmark prints **one line per run** and finishes with a terminal-only
+min / median / max throughput summary across all cases. Timing is delegated to
+`usv`, so the following optional flags are available on every benchmark (all off
+by default, so the default behavior is unchanged):
+
+| Flag | Meaning |
+| --- | --- |
+| `--interleave` | Sample a run's callables (e.g. fwd / fwd+bwd) round-robin, spreading time-correlated noise across them. |
+| `--warmup N` | Untimed warmup iterations per benchmark. |
+| `--iters N` | Timed samples per benchmark. If unset, sample until ~0.2 s of kernel time elapses (autorange-like). |
+| `--cache-flush` | Flush an L2-sized buffer before each sample (cold-cache timing). |
+| `--cudagraph` | Capture each callable into a CUDA/HIP graph and time replays (removes launch overhead). |
+| `--rotate` | Rotate inputs through an L2-sized ring of buffers (defeats L2 residency). |
+| `--cooldown SECONDS` | Idle sleep after each benchmark to let the GPU cool. |
+| `--monitor` | Sample `rocm-smi` during timing and warn if the GPU clock drifts (AMD). |
+| `--timeout SECONDS` | Abort a benchmark if timing exceeds this many seconds (GPU-hang guard). |
+
+```bash
+python benchmark_gemm.py --interleave --rotate
+python benchmark_gemm.py --iters 200 --cache-flush --monitor
+```
+
 ## Shared configuration
 
 Common benchmark settings live in `utils.py`.
@@ -54,10 +80,15 @@ Use `run_benchmarks(test_cases, bench_fn, param_columns)`.
   `make_metric_record(...)` or `make_forward_backward_metric_records(...)`.
 
 Each metric record represents one benchmark line such as `GEMM Forward`. The
-runner prints that line to stdout and expands it into two CSV columns:
+runner prints all of a run's metrics on a single line and expands each into two
+CSV columns:
 
 - `<label> Time (ms)`
 - `<label> <unit>`
+
+To time the callables, `bench_fn` uses `time_funcs({name: callable})` (which
+honors the usv flags above and enables `--interleave`); `make_input(shape,
+dtype, ...)` returns a rotation-aware input factory that respects `--rotate`.
 
 For example, a `GEMM Forward` metric with unit `TFLOPS` becomes:
 

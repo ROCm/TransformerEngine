@@ -17,7 +17,8 @@ import torch
 import transformer_engine.pytorch as te
 from utils import (
     DTYPE_LIST, MODEL_HIDDEN_SIZES, M_SIZE_LIST,
-    time_func, compute_gbps, make_forward_backward_metric_records, run_benchmarks,
+    time_funcs, compute_gbps, make_forward_backward_metric_records, run_benchmarks,
+    make_input,
 )
 
 NORM_TYPES = [
@@ -49,13 +50,16 @@ def bench_norm(Case, M, hidden_size, norm_name, norm_cls, dtype):
     device = "cuda"
 
     norm = norm_cls(hidden_size).to(device=device, dtype=dtype)
-    x = torch.randn(M, hidden_size, dtype=dtype, device=device, requires_grad=True)
+    next_x = make_input((M, hidden_size), dtype, device=device, requires_grad=True)
 
-    fwd_func = lambda: norm(x)
+    def fwd_func():
+        return norm(next_x())
+
     out = fwd_func()
     grad_out = torch.randn_like(out)
 
     def fwd_bwd_func():
+        x = next_x()
         out = norm(x)
         out.backward(grad_out)
         x.grad = None
@@ -64,13 +68,13 @@ def bench_norm(Case, M, hidden_size, norm_name, norm_cls, dtype):
 
     fwd_bwd_func()
 
-    elem_bytes = x.element_size()
+    elem_bytes = torch.empty(0, dtype=dtype).element_size()
     fwd_bytes = 2 * M * hidden_size * elem_bytes   # read x, write y
     bwd_bytes = 4 * M * hidden_size * elem_bytes   # read grad+x+y, write grad_x
 
-    fwd_ms, fwd_measurement = time_func(fwd_func)
-    fwd_bwd_ms, fwd_bwd_measurement = time_func(fwd_bwd_func)
-    bwd_ms = fwd_bwd_ms - fwd_ms
+    ms = time_funcs({"fwd": fwd_func, "fwd_bwd": fwd_bwd_func})
+    fwd_ms = ms["fwd"].median * 1e3
+    bwd_ms = ms["fwd_bwd"].median * 1e3 - fwd_ms
 
     fwd_gbps = compute_gbps(fwd_bytes, fwd_ms)
     bwd_gbps = compute_gbps(bwd_bytes, bwd_ms)
@@ -83,8 +87,8 @@ def bench_norm(Case, M, hidden_size, norm_name, norm_cls, dtype):
         bwd_ms,
         bwd_gbps,
         backward_derived=True,
-        fwd_measurement=fwd_measurement,
-        fwd_bwd_measurement=fwd_bwd_measurement,
+        fwd_measurement=ms["fwd"],
+        fwd_bwd_measurement=ms["fwd_bwd"],
     )
 
 
