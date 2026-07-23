@@ -47,28 +47,8 @@ __device__ inline void load_scale_to_lds(kittens::i32x4 srd, uint32_t lds_base_w
     raw_buffer_load_lds_(__builtin_bit_cast(i32x4_v_, srd), (as3_u32_ptr_)0, 4, voffset, 0, 0, 0);
 }
 
-__device__ inline float rtne_bias(float v) {
-    uint32_t bits = __builtin_bit_cast(uint32_t, v);
-    if ((bits & 0x7f800000u) == 0x7f800000u) return v;
-    bits += 0x7fffu + ((bits >> 16) & 1u);
-    return __builtin_bit_cast(float, bits);
-}
-
-template <typename AccType>
-__device__ inline void apply_rtne_bias(AccType &acc) {
-    #pragma unroll
-    for (int i = 0; i < AccType::height; i++)
-        #pragma unroll
-        for (int j = 0; j < AccType::width; j++) {
-            acc.tiles[i][j].data[0].x = rtne_bias(acc.tiles[i][j].data[0].x);
-            acc.tiles[i][j].data[0].y = rtne_bias(acc.tiles[i][j].data[0].y);
-            acc.tiles[i][j].data[1].x = rtne_bias(acc.tiles[i][j].data[1].x);
-            acc.tiles[i][j].data[1].y = rtne_bias(acc.tiles[i][j].data[1].y);
-        }
-}
-
 template <typename OType, typename AccType>
-__device__ inline void store_masked(OType *c_ptr, const AccType &acc,
+__device__ inline void store_output(OType *c_ptr, const AccType &acc,
                                      int m_off, int n_off, int M, int N) {
     const int lane = kittens::laneid();
     const int row_g = 4 * (lane / 16);
@@ -82,10 +62,17 @@ __device__ inline void store_masked(OType *c_ptr, const AccType &acc,
             const int col = n_off + j * 16 + col_g;
             if (col >= N) continue;
             OType *p = c_ptr + row_base + col;
-            if (m0 + 0 < M) p[0]     = kittens::base_types::convertor<OType, float>::convert(acc.tiles[i][j].data[0].x);
-            if (m0 + 1 < M) p[N]     = kittens::base_types::convertor<OType, float>::convert(acc.tiles[i][j].data[0].y);
-            if (m0 + 2 < M) p[2 * N] = kittens::base_types::convertor<OType, float>::convert(acc.tiles[i][j].data[1].x);
-            if (m0 + 3 < M) p[3 * N] = kittens::base_types::convertor<OType, float>::convert(acc.tiles[i][j].data[1].y);
+            if constexpr (std::is_same_v<OType, kittens::bf16>) {
+                if (m0 + 0 < M) p[0]     = __float2bfloat16(acc.tiles[i][j].data[0].x);
+                if (m0 + 1 < M) p[N]     = __float2bfloat16(acc.tiles[i][j].data[0].y);
+                if (m0 + 2 < M) p[2 * N] = __float2bfloat16(acc.tiles[i][j].data[1].x);
+                if (m0 + 3 < M) p[3 * N] = __float2bfloat16(acc.tiles[i][j].data[1].y);
+            } else {
+                if (m0 + 0 < M) p[0]     = kittens::base_types::convertor<OType, float>::convert(acc.tiles[i][j].data[0].x);
+                if (m0 + 1 < M) p[N]     = kittens::base_types::convertor<OType, float>::convert(acc.tiles[i][j].data[0].y);
+                if (m0 + 2 < M) p[2 * N] = kittens::base_types::convertor<OType, float>::convert(acc.tiles[i][j].data[1].x);
+                if (m0 + 3 < M) p[3 * N] = kittens::base_types::convertor<OType, float>::convert(acc.tiles[i][j].data[1].y);
+            }
         }
     }
 }
@@ -97,11 +84,13 @@ __device__ inline float read_elem(const void *p, int dtype, int idx) {
 }
 
 template <typename OType>
-__device__ inline float rtne_cast_roundtrip(float v) {
+__device__ inline float round_to_out_dtype(float v) {
     if constexpr (std::is_same_v<OType, float>) {
         return v;
+    } else if constexpr (std::is_same_v<OType, kittens::bf16>) {
+        return __bfloat162float(__float2bfloat16(v));
     } else {
-        return static_cast<float>(kittens::base_types::convertor<OType, float>::convert(rtne_bias(v)));
+        return __half2float(__float2half(v));
     }
 }
 
@@ -154,7 +143,7 @@ __device__ inline void apply_epilogue(
                 float x = v[r];
                 if constexpr (HAS_BIAS) x += bias_v;
                 if constexpr (HAS_BETA) {
-                    x = rtne_cast_roundtrip<OType>(x);
+                    x = round_to_out_dtype<OType>(x);
                     x += beta * static_cast<float>(c_in[m_g * N + col]);
                 }
                 if constexpr (HAS_GELU) {

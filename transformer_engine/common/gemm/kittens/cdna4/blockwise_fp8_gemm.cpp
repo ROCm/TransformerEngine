@@ -3,6 +3,8 @@
  * License for AMD contributions = MIT. See LICENSE for more information
 *************************************************************************/
 
+#include <cstdlib>
+#include <cstring>
 #include <type_traits>
 #include <utility>
 #include "kittens.cuh"
@@ -456,26 +458,19 @@ void micro_tk(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType> g) {
     const int n_off1 = block_col * BLOCK_N + HALF_COL + warp_n * REG_N;
 
     OType *c_ptr = C.raw_ptr;
-    const int ca = block_row * WARPS_ROW * 2 + warp_m;
-    const int cc = block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m;
-    const int cn0 = block_col * WARPS_COL * 2 + warp_n;
-    const int cn1 = block_col * WARPS_COL * 2 + WARPS_COL + warp_n;
-    const bool full = (block_row + 1) * BLOCK_M <= M && (block_col + 1) * BLOCK_N <= N;
 
     // Sequential per-accumulator store; batching all 4 spills reg and halves perf.
-    auto finish = [&](RT_C &c, int a_row, float sb, const ColScale<RT_C::width> &cs, int m_off, int n_off, int crow, int ccol) {
+    auto finish = [&](RT_C &c, int a_row, float sb, const ColScale<RT_C::width> &cs, int m_off, int n_off) {
         if constexpr (IS_1D2D) apply_row_ratio_sb(c, load_row_ratio<RT_C>(smem_sa_prev, a_row), sb);
         else                   apply_row_col_ratio(c, load_row_ratio<RT_C>(smem_sa_prev, a_row), cs);
         if constexpr (EPILOGUE != GemmEpilogue::DEFAULT)
             apply_epilogue<OType, EPILOGUE>(c, m_off, n_off, M, N, g.bias, g.bias_dtype, g.gelu_aux, g.gelu_aux_dtype, g.c_in, g.beta);
-        if constexpr (std::is_same_v<OType, kittens::bf16>) apply_rtne_bias(c);
-        if (full) kittens::store(C, c, {0, 0, crow, ccol});
-        else      store_masked(c_ptr, c, m_off, n_off, M, N);
+        store_output(c_ptr, c, m_off, n_off, M, N);
     };
-    finish(cA, a_row_h0, curr_sb_h0, curr_cs0, m_off0, n_off0, ca, cn0);
-    finish(cB, a_row_h0, curr_sb_h1, curr_cs1, m_off0, n_off1, ca, cn1);
-    finish(cC, a_row_h1, curr_sb_h0, curr_cs0, m_off1, n_off0, cc, cn0);
-    finish(cD, a_row_h1, curr_sb_h1, curr_cs1, m_off1, n_off1, cc, cn1);
+    finish(cA, a_row_h0, curr_sb_h0, curr_cs0, m_off0, n_off0);
+    finish(cB, a_row_h0, curr_sb_h1, curr_cs1, m_off0, n_off1);
+    finish(cC, a_row_h1, curr_sb_h0, curr_cs0, m_off1, n_off0);
+    finish(cD, a_row_h1, curr_sb_h1, curr_cs1, m_off1, n_off1);
 }
 
 template <typename OType, int CBSZ, int BLGP,
@@ -802,11 +797,6 @@ void micro_tk_pow2(
     const int n_off1 = block_col * BLOCK_N + HALF_COL + warp_n * REG_N;
 
     OType *c_ptr = C.raw_ptr;
-    const int ca = block_row * WARPS_ROW * 2 + warp_m;
-    const int cc = block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m;
-    const int cn0 = block_col * WARPS_COL * 2 + warp_n;
-    const int cn1 = block_col * WARPS_COL * 2 + WARPS_COL + warp_n;
-    const bool full = (block_row + 1) * BLOCK_M <= M && (block_col + 1) * BLOCK_N <= N;
 
     if constexpr (EPILOGUE != GemmEpilogue::DEFAULT) {
         apply_epilogue<OType, EPILOGUE>(cA, m_off0, n_off0, M, N, bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta);
@@ -814,20 +804,10 @@ void micro_tk_pow2(
         apply_epilogue<OType, EPILOGUE>(cC, m_off1, n_off0, M, N, bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta);
         apply_epilogue<OType, EPILOGUE>(cD, m_off1, n_off1, M, N, bias, bias_dtype, gelu_aux, gelu_aux_dtype, c_in, beta);
     }
-    if constexpr (std::is_same_v<OType, kittens::bf16>) {
-        apply_rtne_bias(cA); apply_rtne_bias(cB); apply_rtne_bias(cC); apply_rtne_bias(cD);
-    }
-    if (full) {
-        kittens::store(C, cA, {0, 0, ca, cn0});
-        kittens::store(C, cB, {0, 0, ca, cn1});
-        kittens::store(C, cC, {0, 0, cc, cn0});
-        kittens::store(C, cD, {0, 0, cc, cn1});
-    } else {
-        store_masked(c_ptr, cA, m_off0, n_off0, M, N);
-        store_masked(c_ptr, cB, m_off0, n_off1, M, N);
-        store_masked(c_ptr, cC, m_off1, n_off0, M, N);
-        store_masked(c_ptr, cD, m_off1, n_off1, M, N);
-    }
+    store_output(c_ptr, cA, m_off0, n_off0, M, N);
+    store_output(c_ptr, cB, m_off0, n_off1, M, N);
+    store_output(c_ptr, cC, m_off1, n_off0, M, N);
+    store_output(c_ptr, cD, m_off1, n_off1, M, N);
 }
 
 template <typename OType, int CBSZ, int BLGP, bool IS_1D2D,
@@ -953,28 +933,11 @@ void micro_tk_partial_k(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType>
         apply_epilogue<OType, EPILOGUE>(cD, m_off1, n_off1, M, N, g.bias, g.bias_dtype, g.gelu_aux, g.gelu_aux_dtype, g.c_in, g.beta);
     }
 
-    if constexpr (std::is_same_v<OType, kittens::bf16>) {
-        apply_rtne_bias(cA); apply_rtne_bias(cB); apply_rtne_bias(cC); apply_rtne_bias(cD);
-    }
-
     OType *c_ptr = C.raw_ptr;
-    const int ca = block_row * WARPS_ROW * 2 + warp_m;
-    const int cc = block_row * WARPS_ROW * 2 + WARPS_ROW + warp_m;
-    const int cn0 = block_col * WARPS_COL * 2 + warp_n;
-    const int cn1 = block_col * WARPS_COL * 2 + WARPS_COL + warp_n;
-
-    const bool full = (block_row + 1) * BLOCK_M <= M && (block_col + 1) * BLOCK_N <= N;
-    if (full) {
-        kittens::store(C, cA, {0, 0, ca, cn0});
-        kittens::store(C, cB, {0, 0, ca, cn1});
-        kittens::store(C, cC, {0, 0, cc, cn0});
-        kittens::store(C, cD, {0, 0, cc, cn1});
-    } else {
-        store_masked(c_ptr, cA, m_off0, n_off0, M, N);
-        store_masked(c_ptr, cB, m_off0, n_off1, M, N);
-        store_masked(c_ptr, cC, m_off1, n_off0, M, N);
-        store_masked(c_ptr, cD, m_off1, n_off1, M, N);
-    }
+    store_output(c_ptr, cA, m_off0, n_off0, M, N);
+    store_output(c_ptr, cB, m_off0, n_off1, M, N);
+    store_output(c_ptr, cC, m_off1, n_off0, M, N);
+    store_output(c_ptr, cD, m_off1, n_off1, M, N);
 }
 
 
@@ -1146,11 +1109,10 @@ class BlockwiseGemmCdna4 final : public BlockwiseGemmBackend {
         float *sa = reinterpret_cast<float *>(const_cast<void *>(ksa));
         float *sb = reinterpret_cast<float *>(const_cast<void *>(ksb));
 
-#ifdef NVTE_KITTENS_USE_POWER_OF_2_SCALE
-        constexpr bool use_pow2 = true;
-#else
-        constexpr bool use_pow2 = false;
-#endif
+        static const bool use_pow2 = []() {
+            const char *e = std::getenv("NVTE_BLOCKWISE_FP8_POWER_OF_2_SCALE");
+            return e == nullptr || std::strcmp(e, "0") != 0;
+        }();
 
         const int k_iters = K / BLOCK_K;
         const int padM = ((kM + BLOCK_M - 1) / BLOCK_M) * BLOCK_M;
