@@ -27,12 +27,30 @@ bool small_seq_static_config_ok(NVTEDType q_dtype,
                                 size_t num_gqa_groups,
                                 NVTE_Mask_Type mask_type);
 
+/** Same checks as small_seq_static_config_ok(), but returns the first failing condition as a
+ *  human-readable string (or nullptr if the static config is eligible). Used for
+ *  NVTE_LOG_CK_CONFIG diagnostics so a disabled small-seq path reports *why* it was skipped. */
+const char* small_seq_static_config_reason(NVTEDType q_dtype,
+                                           NVTEDType kv_dtype,
+                                           NVTE_Bias_Type bias_type,
+                                           float dropout,
+                                           size_t head_dim_qk,
+                                           size_t head_dim_v,
+                                           size_t num_attn_heads,
+                                           size_t num_gqa_groups,
+                                           NVTE_Mask_Type mask_type);
+
 bool is_runtime_small_seq_eligible(size_t runtime_max_seqlen_q, size_t runtime_max_seqlen_kv);
 
 size_t small_seq_fwd_extra_workspace_bytes(size_t max_tokens_q);
 size_t small_seq_bwd_extra_workspace_bytes();
 
 bool is_nvte_ck_small_seq_enabled();
+
+/** nullptr if the arch + NVTE_FUSED_ATTN_CK_SMALLSEQ env gate passes, otherwise the reason it
+ *  fails (arch not gfx942/gfx950, or the env var not set to "1"). Mirrors
+ *  is_nvte_ck_small_seq_enabled() for NVTE_LOG_CK_CONFIG diagnostics. */
+const char* small_seq_enable_reason();
 
 bool fused_attn_smallseq_fwd(size_t batch_size,
                              size_t num_heads,

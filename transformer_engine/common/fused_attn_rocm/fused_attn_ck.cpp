@@ -683,6 +683,48 @@ void fused_attn_ck_fwd_impl(
   //   THD (is_ragged): per-batch seqlens vary at runtime -> probe max seqlen and
   //                    check eligibility; fall through to traditional CK if not small.
   // ---------------------------------------------------------------------------
+
+  // Small-seq eligibility diagnostics (NVTE_LOG_CK_CONFIG). Dumps every gate and the variables
+  // feeding it -- including the actual runtime max seqlens -- so a skipped small-seq path reports
+  // *why* it was skipped. Runs regardless of ck_small_seq_enabled; execution-mode only (the
+  // sizing-only path already returned above).
+  if(nvte_log_ck_config) {
+    const char* enable_reason = small_seq_enable_reason();
+    const char* static_reason = small_seq_static_config_reason(
+        static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), bias_type,
+        dropout_probability, d_qk, d_v, h, hg, mask_type);
+    const bool shape_ok = (is_ragged || bshd_self_small_seq);
+    std::cout << std::endl << "attn_fwd(ck small-seq eligibility): ck_small_seq_enabled: "
+              << ck_small_seq_enabled << std::endl;
+    std::cout << "  env/arch gate: " << (enable_reason ? enable_reason : "ok")
+              << " [NVTE_FUSED_ATTN_CK_SMALLSEQ must be \"1\", arch gfx942/gfx950]" << std::endl;
+    std::cout << "  static config: " << (static_reason ? static_reason : "ok")
+              << " | dtype: " << static_cast<int>(dtype) << ", bias_type: " << bias_type
+              << ", dropout_p: " << dropout_probability << ", d_qk: " << d_qk << ", d_v: " << d_v
+              << ", h: " << h << ", hg: " << hg << " (gqa: " << (h != hg) << ")"
+              << ", mask_type: " << mask_type << std::endl;
+    std::cout << "  shape gate: " << (shape_ok ? "ok" : "FAIL")
+              << " | is_ragged(THD): " << is_ragged << ", is_BSHD: " << is_BSHD
+              << ", bshd_self_small_seq: " << bshd_self_small_seq << ", s_q: " << s_q
+              << ", s_kv: " << s_kv << ", kSmallSeqMaxSeqlen: " << kSmallSeqMaxSeqlen << std::endl;
+    if(is_ragged) {
+      // Probe the actual runtime max seqlens. Allocate our own scratch so this works even when
+      // ck_small_seq_enabled is false (no prefix reserved). Debug-only, gated on the log flag.
+      uint64_t* diag_probe = nullptr;
+      if(hipMalloc(&diag_probe, sizeof(uint64_t)) == hipSuccess) {
+        const size_t rt_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+            b, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, diag_probe, stream));
+        const size_t rt_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+            b, devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV, diag_probe, stream));
+        std::cout << "  runtime seqlen probe: runtime_max_seqlen_q: " << rt_q
+                  << ", runtime_max_seqlen_kv: " << rt_kv << ", runtime_eligible(<= "
+                  << kSmallSeqMaxSeqlen << "): " << is_runtime_small_seq_eligible(rt_q, rt_kv)
+                  << std::endl;
+        hipFree(diag_probe);
+      }
+    }
+  }
+
   if(ck_small_seq_enabled) {
     // padded_q_to_batch lives right after the two runtime-max-seqlen probe slots in the prefix.
     int* devPtrPaddedQToBatch = static_cast<int*>(static_cast<void*>(
@@ -1121,6 +1163,43 @@ void fused_attn_ck_bwd_impl(
   // CK small-seq backward path (self-contained; mirrors the forward). Two separate
   // flows chosen by layout;
   // ---------------------------------------------------------------------------
+
+  // Small-seq eligibility diagnostics (NVTE_LOG_CK_CONFIG); mirrors the forward path.
+  if(nvte_log_ck_config) {
+    const char* enable_reason = small_seq_enable_reason();
+    const char* static_reason = small_seq_static_config_reason(
+        static_cast<NVTEDType>(dtype), static_cast<NVTEDType>(dtype), bias_type,
+        dropout_probability, d_qk, d_v, h, hg, mask_type);
+    const bool shape_ok = (is_ragged || bshd_self_small_seq);
+    std::cout << std::endl << "attn_bwd(ck small-seq eligibility): ck_small_seq_enabled: "
+              << ck_small_seq_enabled << std::endl;
+    std::cout << "  env/arch gate: " << (enable_reason ? enable_reason : "ok")
+              << " [NVTE_FUSED_ATTN_CK_SMALLSEQ must be \"1\", arch gfx942/gfx950]" << std::endl;
+    std::cout << "  static config: " << (static_reason ? static_reason : "ok")
+              << " | dtype: " << static_cast<int>(dtype) << ", bias_type: " << bias_type
+              << ", dropout_p: " << dropout_probability << ", d_qk: " << d_qk << ", d_v: " << d_v
+              << ", h: " << h << ", hg: " << hg << " (gqa: " << (h != hg) << ")"
+              << ", mask_type: " << mask_type << std::endl;
+    std::cout << "  shape gate: " << (shape_ok ? "ok" : "FAIL")
+              << " | is_ragged(THD): " << is_ragged << ", is_BSHD: " << is_BSHD
+              << ", bshd_self_small_seq: " << bshd_self_small_seq << ", s_q: " << s_q
+              << ", s_kv: " << s_kv << ", kSmallSeqMaxSeqlen: " << kSmallSeqMaxSeqlen << std::endl;
+    if(is_ragged) {
+      uint64_t* diag_probe = nullptr;
+      if(hipMalloc(&diag_probe, sizeof(uint64_t)) == hipSuccess) {
+        const size_t rt_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+            b, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, diag_probe, stream));
+        const size_t rt_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+            b, devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV, diag_probe, stream));
+        std::cout << "  runtime seqlen probe: runtime_max_seqlen_q: " << rt_q
+                  << ", runtime_max_seqlen_kv: " << rt_kv << ", runtime_eligible(<= "
+                  << kSmallSeqMaxSeqlen << "): " << is_runtime_small_seq_eligible(rt_q, rt_kv)
+                  << std::endl;
+        hipFree(diag_probe);
+      }
+    }
+  }
+
   if(ck_small_seq_enabled) {
     const void* ss_cu_q  = devPtrCuSeqlensQ;
     const void* ss_cu_qp = devPtrCuSeqlenPaddedQ;
