@@ -15,9 +15,8 @@
 namespace ck_fused_attn{
 
 // print the fmha traits and fmha_args when calling ck apis
-void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fwd_args& fmha_args){
+void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fwd_args& fmha_args, std::ostream* log_file){
 
-  std::ostream* log_file = get_ck_log_stream();
   (*log_file) << "\n" << func_name << "\n";
 
   // debug fmha_traits
@@ -234,6 +233,7 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
       ck_log_config = true;
   }
   const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
+  auto* log_file = get_ck_log_stream();
   // print kernel name on verbose mode
   ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
 
@@ -241,16 +241,16 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
 
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")){
     if(args.is_group_mode() && std::string(env_p) == "1"){
-      if(ck_log_config){
-        std::cout << "attn_fwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
+      if(log_file){
+        *log_file << "attn_fwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
       }
       fmha_args.max_seqlen_q = get_runtime_max_seqlen(args.b, args.cu_seqlen_q_ptr, args.cu_seqlen_q_padded_ptr, args.lse_ptr, stream);
     }
   }
 
   // print ck traits and fmha_args when needed
-  if(ck_log_config){
-     log_fwd_config(__FUNCTION__, has_dropout, fmha_args);
+  if(log_file){
+     log_fwd_config(__FUNCTION__, has_dropout, fmha_args, log_file);
   }
   float average_runtime = QOLA_NS(mha_fwd)(fmha_args, stream_config);
   if(average_runtime < 0){
