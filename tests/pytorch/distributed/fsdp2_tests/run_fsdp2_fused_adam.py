@@ -735,19 +735,6 @@ def test_dcp_output_parity(recipe_name, async_save):
             "requires using power of two scaling factors."
         )
 
-    if recipe_name == "NVFP4BlockScaling" and async_save and IS_HIP_EXTENSION:
-        pytest.xfail(
-            "NVFP4BlockScaling + async DCP is not bitwise-identical on torch 2.8. The default "
-            "async stager (BlockingAsyncStager) copies each parameter into a plain "
-            "torch.empty(logical_shape, dtype) buffer, dequantizing the NVFP4Tensor; the "
-            "checkpoint then stores bf16 values instead of the fp4 data + scales. On load the "
-            "values are re-quantized, and NVFP4's E4M3 block scales / amax do not survive the "
-            "bf16 round-trip (MXFP8 does, since its scales are E8M0 powers of two). The upstream "
-            "fix (NVIDIA/TransformerEngine#2721) intercepts aten.new_empty to preserve the "
-            "subclass, but torch 2.8's stager uses torch.empty (not new_empty), so the hook "
-            "never fires; #2721 also covers Float8Tensor only. Sync DCP is bitwise-correct."
-        )
-
     import torch.distributed.checkpoint as dcp
 
     world_size, device = _get_dist_info()
@@ -865,13 +852,22 @@ def test_dcp_output_parity(recipe_name, async_save):
         # fsdp_pre_all_gather metadata rather than as a sharded tensor, so DCP
         # saves it cast to the model's param_dtype (bf16) instead of fp32; the
         # precision loss in the reloaded scale_inv prevents bitwise parity.
-        if isinstance(
+        # NVFP4BlockScaling (async only): NVFP4Tensor's per-tensor amax is likewise
+        # passed via fsdp_pre_all_gather metadata (a scalar, not all-gathered), so
+        # async DCP staging saves it cast to param_dtype (bf16); the reloaded amax
+        # feeds NVFP4's two-level dequantization, so the rounding prevents bitwise
+        # parity. Sync DCP saves the amax as an fp32 tensor and stays bitwise-exact.
+        loose_parity = isinstance(
             recipe,
             (
                 transformer_engine.common.recipe.DelayedScaling,
                 transformer_engine.common.recipe.Float8CurrentScaling,
             ),
-        ):
+        ) or (
+            isinstance(recipe, transformer_engine.common.recipe.NVFP4BlockScaling)
+            and async_save
+        )
+        if loose_parity:
             torch.testing.assert_close(
                 loaded_output,
                 ref_output,
@@ -909,13 +905,7 @@ def test_dcp_output_parity(recipe_name, async_save):
         loss2.backward()
         optimizer2.step()
 
-        if isinstance(
-            recipe,
-            (
-                transformer_engine.common.recipe.DelayedScaling,
-                transformer_engine.common.recipe.Float8CurrentScaling,
-            ),
-        ):
+        if loose_parity:
             torch.testing.assert_close(
                 out2,
                 out1,

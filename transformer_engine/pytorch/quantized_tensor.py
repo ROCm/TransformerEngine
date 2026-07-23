@@ -671,7 +671,7 @@ class QuantizedTensor(torch.Tensor):
         # New empty op (used by DCP async staging to create CPU copies)
         if func == torch.ops.aten.new_empty.default:
             tensor = args[0]
-            size = args[1]
+            size = torch.Size(args[1])
             dtype = kwargs.get("dtype", tensor.dtype)
             device = kwargs.get("device", tensor.device)
             pin_memory = kwargs.get("pin_memory", False)
@@ -680,8 +680,16 @@ class QuantizedTensor(torch.Tensor):
                     f"{type(tensor).__name__} does not have a quantizer; "
                     "cannot create new_empty QuantizedTensor"
                 )
+            # torch's async-DCP StateDictStager (_offload_tensor in
+            # torch/distributed/checkpoint/_state_dict_stager.py) allocates a
+            # rank-0 placeholder via ``new_empty([])`` and then copies the source
+            # tensor's inner buffers onto it. A rank-0 shape has no block
+            # dimension and cannot form a valid quantized tensor, so shape the
+            # placeholder like the source; the stager overwrites its data next.
+            if len(size) == 0:
+                size = tensor.shape
             out = tensor._quantizer.make_empty(
-                shape=torch.Size(size),
+                shape=size,
                 dtype=dtype,
                 device=device,
                 requires_grad=tensor.requires_grad,
