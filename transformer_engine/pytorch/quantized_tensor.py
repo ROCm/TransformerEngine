@@ -680,12 +680,9 @@ class QuantizedTensor(torch.Tensor):
                     f"{type(tensor).__name__} does not have a quantizer; "
                     "cannot create new_empty QuantizedTensor"
                 )
-            # torch's async-DCP StateDictStager (_offload_tensor in
-            # torch/distributed/checkpoint/_state_dict_stager.py) allocates a
-            # rank-0 placeholder via ``new_empty([])`` and then copies the source
-            # tensor's inner buffers onto it. A rank-0 shape has no block
-            # dimension and cannot form a valid quantized tensor, so shape the
-            # placeholder like the source; the stager overwrites its data next.
+            # torch's async-DCP StateDictStager calls new_empty([]) as a rank-0
+            # placeholder then copies the source buffers onto it; a rank-0 shape
+            # can't form a valid quantized tensor, so shape it like the source.
             if len(size) == 0:
                 size = tensor.shape
             out = tensor._quantizer.make_empty(
