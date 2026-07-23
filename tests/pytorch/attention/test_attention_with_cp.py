@@ -656,7 +656,8 @@ def test_cp_with_fused_attention(
     # config uses b>2.
     SM90_DET_FUSED_THD_BWD_MAX_BHSS = 1 << 30
     if (
-        _deterministic
+        not IS_HIP_EXTENSION
+        and _deterministic
         and qkv_format == "thd"
         and get_device_compute_capability() == (9, 0)
         and config.batch_size * config.num_heads * config.max_seqlen_q * config.max_seqlen_kv
