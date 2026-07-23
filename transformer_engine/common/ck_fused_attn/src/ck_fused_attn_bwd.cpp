@@ -487,6 +487,7 @@ size_t v3_dq_acc_bytes(const CkAttnBwdArgs& args){
   const size_t a16_hdim = (args.d_qk == 192) ? 192 : 128;
   const size_t dq_acc_seq = args.is_v3_atomic_fp32 ? seqlen_q : a16_seq;
   const size_t dq_acc_hdim = args.is_v3_atomic_fp32 ? args.d_qk : a16_hdim;
+  // Sizing is based off of aiter/csrc/cpp_itfs/mha_bwd.cu
   const size_t eff_batch = (args.is_group_mode() && args.is_v3_atomic_fp32) ? 1 : args.b;
   return eff_batch * args.h * dq_acc_seq * dq_acc_hdim * elem;
 }
