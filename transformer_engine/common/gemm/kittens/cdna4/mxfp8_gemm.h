@@ -8,7 +8,7 @@
 #include <hip/hip_runtime.h>
 #include <cstddef>
 
-#include "../kittens_gemm_enums.h"
+#include "../kittens_common.h"
 
 bool kittens_mxfp8_gemm(
     const void *A, const void *B, void *C,

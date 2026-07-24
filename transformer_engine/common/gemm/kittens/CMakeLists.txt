@@ -66,8 +66,8 @@ else()
         list(APPEND _kittens_arch_objs $<TARGET_OBJECTS:kittens_gemm_cdna4>)
     endif()
 
-    add_library(kittens_gemm SHARED blockwise_fp8_gemm.cpp ${_kittens_arch_objs})
-    set_source_files_properties(blockwise_fp8_gemm.cpp PROPERTIES LANGUAGE HIP)
+    add_library(kittens_gemm SHARED ${_kittens_arch_objs})
+    set_target_properties(kittens_gemm PROPERTIES LINKER_LANGUAGE HIP)
     target_include_directories(kittens_gemm PRIVATE ${HIP_INCLUDE_DIRS})
     target_link_libraries(kittens_gemm PUBLIC hip::host hip::device)
 

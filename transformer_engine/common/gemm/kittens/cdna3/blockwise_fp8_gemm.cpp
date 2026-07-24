@@ -5,7 +5,7 @@
 
 #include <type_traits>
 #include "kittens.cuh"
-#include "../blockwise_fp8_gemm_backend.h"
+#include "../kittens_common.h"
 
 namespace {
 
