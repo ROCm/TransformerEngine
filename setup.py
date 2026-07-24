@@ -39,8 +39,25 @@ current_file_path = Path(__file__).parent.resolve()
 
 
 from setuptools.command.build_ext import build_ext as BuildExtension
+from setuptools.command.build_py import build_py as _build_py
 
 os.environ["NVTE_PROJECT_BUILDING"] = "1"
+
+_ROCM_INIT_TEMPLATE = current_file_path / "build_tools" / "templates" / "_rocm_init.py"
+
+
+class BuildPy(_build_py):
+    """Generate _rocm_init.py for ROCm builds only."""
+
+    def run(self):
+        super().run()
+        if not rocm_build():
+            return
+        dest = Path(self.build_lib) / "transformer_engine" / "_rocm_init.py"
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(_ROCM_INIT_TEMPLATE, dest)
+        if self.compile:
+            self.byte_compile([str(dest)])
 
 if "pytorch" in frameworks:
     from torch.utils.cpp_extension import BuildExtension
@@ -239,7 +256,6 @@ if __name__ == "__main__":
             int(os.getenv("NVTE_RELEASE_BUILD", "0"))
         ), "NVTE_RELEASE_BUILD env must be set for metapackage build."
         ext_modules = []
-        cmdclass = {}
         package_data = {}
         include_package_data = False
         install_requires = []
@@ -258,7 +274,6 @@ if __name__ == "__main__":
     else:
         install_requires, test_requires = setup_requirements()
         ext_modules = [setup_common_extension()]
-        cmdclass = {"build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist}
         package_data = {
             "": ["VERSION.txt"],
             "transformer_engine.pytorch.triton_kernels.gmm": ["configs/*.json"],
@@ -314,7 +329,12 @@ if __name__ == "__main__":
         long_description=long_description,
         long_description_content_type="text/x-rst",
         ext_modules=ext_modules,
-        cmdclass={"egg_info": HipifyMeta, "build_ext": CMakeBuildExtension, "bdist_wheel": TimedBdist},
+        cmdclass={
+            "egg_info": HipifyMeta,
+            "build_py": BuildPy,
+            "build_ext": CMakeBuildExtension,
+            "bdist_wheel": TimedBdist,
+        },
         python_requires=f">={min_python_version_str()}",
         classifiers=["Programming Language :: Python :: 3"],
         install_requires=install_requires,
