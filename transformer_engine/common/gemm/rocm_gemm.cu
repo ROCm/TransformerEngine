@@ -2016,9 +2016,6 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  "Only 1D by 1D and 1D by 2D block scaling GEMM is supported");
       NVTE_CHECK(!(is_transa && is_transb),
                  "Blockwise FP8 GEMM does not support TT layout");
-      NVTE_CHECK(!(inputA->dtype() == DType::kFloat8E5M2 &&
-                   inputB->dtype() == DType::kFloat8E5M2),
-                 "Blockwise FP8 GEMM does not support e5m2 by e5m2 inputs");
       NVTE_CHECK(!has_gelu || grad,
                  "Blockwise FP8 GEMM only supports DGELU grad epilogue");
       NVTE_CHECK(!(has_bias && grad),

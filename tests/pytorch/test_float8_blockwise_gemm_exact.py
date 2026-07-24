@@ -75,8 +75,9 @@ def cublas_gemm_fp8_blockwise_case(
     if IS_HIP_EXTENSION:
         atol = 1e-5
         rtol = 1.3e-6
-    if x_dtype == fp8_e5m2_type and w_dtype == fp8_e5m2_type:
-        pytest.skip("FP8 GEMM doesn't support both a and b types being torch.float8_e5m2")
+    if not IS_HIP_EXTENSION:
+        if x_dtype == fp8_e5m2_type and w_dtype == fp8_e5m2_type:
+            pytest.skip("FP8 GEMM doesn't support both a and b types being torch.float8_e5m2")
     if not (is_x_1d_scaled or is_w_1d_scaled):
         pytest.skip("FP8 GEMM doesn't support 2dimensional qtile by 2dimensional qtile")
     if not fp8_blockwise_gemm_supported():
@@ -900,9 +901,7 @@ def test_illegal_dtype_enforced(
 ) -> None:
     # e5m2 by e5m2 not supported.
     if IS_HIP_EXTENSION:
-        expected_err_msg = "does not support e5m2 by e5m2 inputs"
-    else:
-        expected_err_msg = "CUBLAS_STATUS_NOT_SUPPORTED"
+        pytest.skip("ROCm blockwise FP8 GEMM supports e5m2 by e5m2 inputs")
     cublas_gemm_test_constraint_enforced(
         x_dtype,
         w_dtype,
@@ -914,7 +913,6 @@ def test_illegal_dtype_enforced(
         use_split_accumulator,
         is_x_1d_scaled,
         is_w_1d_scaled,
-        expected_err_msg=expected_err_msg,
     )
 
 

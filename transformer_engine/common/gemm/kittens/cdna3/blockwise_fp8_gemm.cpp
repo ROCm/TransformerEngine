@@ -446,7 +446,8 @@ class BlockwiseGemmCdna3 final : public BlockwiseGemmBackend {
         auto run_ab = [&]<typename OType>() {
             if      (!a_e5m2 && !b_e5m2) run.template operator()<kittens::fp8e4m3, kittens::fp8e4m3, OType>();
             else if ( a_e5m2 && !b_e5m2) run.template operator()<kittens::fp8e5m2, kittens::fp8e4m3, OType>();
-            else                         run.template operator()<kittens::fp8e4m3, kittens::fp8e5m2, OType>();
+            else if (!a_e5m2 &&  b_e5m2) run.template operator()<kittens::fp8e4m3, kittens::fp8e5m2, OType>();
+            else                         run.template operator()<kittens::fp8e5m2, kittens::fp8e5m2, OType>();
         };
         if      (out_dtype == KITTENS_FLOAT32) run_ab.template operator()<float>();
         else if (out_dtype == KITTENS_FLOAT16) run_ab.template operator()<kittens::half>();
