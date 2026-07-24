@@ -57,7 +57,7 @@ struct micro_globals {
 
 template <typename AType, typename BType, typename OType, bool IS_PARTIAL_M, bool IS_PARTIAL_N,
           bool IS_1D2D, GemmEpilogue EPILOGUE = GemmEpilogue::DEFAULT,
-          bool IS_PARTIAL_K = false>
+          bool IS_PARTIAL_K = false, bool A_E4M3 = true, bool B_E4M3 = true>
 __global__ __launch_bounds__(NUM_THREADS, 2)
 void micro_tk(const micro_globals<AType, BType, OType> g) {
     extern __shared__ kittens::alignment_dummy __shm[];
@@ -170,8 +170,8 @@ void micro_tk(const micro_globals<AType, BType, OType> g) {
         // TODO: evaluate s_setprio(2) for the MMA clusters below
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        kittens::mma_ABt(partial[0], at[0], bt[0], partial[0]);
-        kittens::mma_ABt(partial[1], at[1], bt[0], partial[1]);
+        mma_ABt<A_E4M3, B_E4M3>(partial[0], at[0], bt[0]);
+        mma_ABt<A_E4M3, B_E4M3>(partial[1], at[1], bt[0]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -188,8 +188,8 @@ void micro_tk(const micro_globals<AType, BType, OType> g) {
         // Cluster 3
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
-        kittens::mma_ABt(partial[0], at[2], bt[1], partial[0]);
-        kittens::mma_ABt(partial[1], at[3], bt[1], partial[1]);
+        mma_ABt<A_E4M3, B_E4M3>(partial[0], at[2], bt[1]);
+        mma_ABt<A_E4M3, B_E4M3>(partial[1], at[3], bt[1]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -206,8 +206,8 @@ void micro_tk(const micro_globals<AType, BType, OType> g) {
 
         // Cluster 5
         __builtin_amdgcn_s_setprio(1);
-        kittens::mma_ABt(partial[0], at[0], bt[0], partial[0]);
-        kittens::mma_ABt(partial[1], at[1], bt[0], partial[1]);
+        mma_ABt<A_E4M3, B_E4M3>(partial[0], at[0], bt[0]);
+        mma_ABt<A_E4M3, B_E4M3>(partial[1], at[1], bt[0]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -233,8 +233,8 @@ void micro_tk(const micro_globals<AType, BType, OType> g) {
 
         // Cluster 7
         __builtin_amdgcn_s_setprio(1);
-        kittens::mma_ABt(partial[0], at[4], bt[2], partial[0]);
-        kittens::mma_ABt(partial[1], at[3], bt[2], partial[1]);
+        mma_ABt<A_E4M3, B_E4M3>(partial[0], at[4], bt[2]);
+        mma_ABt<A_E4M3, B_E4M3>(partial[1], at[3], bt[2]);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
@@ -270,8 +270,8 @@ void micro_tk(const micro_globals<AType, BType, OType> g) {
     __builtin_amdgcn_sched_barrier(0);
 
     __builtin_amdgcn_s_setprio(1);
-    kittens::mma_ABt(partial[0], at[0], bt[0], partial[0]);
-    kittens::mma_ABt(partial[1], at[1], bt[0], partial[1]);
+    mma_ABt<A_E4M3, B_E4M3>(partial[0], at[0], bt[0]);
+    mma_ABt<A_E4M3, B_E4M3>(partial[1], at[1], bt[0]);
     __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -284,8 +284,8 @@ void micro_tk(const micro_globals<AType, BType, OType> g) {
     __builtin_amdgcn_sched_barrier(0);
 
     __builtin_amdgcn_s_setprio(1);
-    kittens::mma_ABt(partial[0], at[2], bt[1], partial[0]);
-    kittens::mma_ABt(partial[1], at[3], bt[1], partial[1]);
+    mma_ABt<A_E4M3, B_E4M3>(partial[0], at[2], bt[1]);
+    mma_ABt<A_E4M3, B_E4M3>(partial[1], at[3], bt[1]);
     __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -301,15 +301,15 @@ void micro_tk(const micro_globals<AType, BType, OType> g) {
     __builtin_amdgcn_sched_barrier(0);
 
     __builtin_amdgcn_s_setprio(1);
-    kittens::mma_ABt(partial[0], at[0], bt[0], partial[0]);
-    kittens::mma_ABt(partial[1], at[1], bt[0], partial[1]);
+    mma_ABt<A_E4M3, B_E4M3>(partial[0], at[0], bt[0]);
+    mma_ABt<A_E4M3, B_E4M3>(partial[1], at[1], bt[0]);
     __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
 
     __builtin_amdgcn_s_setprio(1);
-    kittens::mma_ABt(partial[0], at[2], bt[1], partial[0]);
-    kittens::mma_ABt(partial[1], at[3], bt[1], partial[1]);
+    mma_ABt<A_E4M3, B_E4M3>(partial[0], at[2], bt[1]);
+    mma_ABt<A_E4M3, B_E4M3>(partial[1], at[3], bt[1]);
     __builtin_amdgcn_s_setprio(0);
     __builtin_amdgcn_s_barrier();
     __builtin_amdgcn_sched_barrier(0);
@@ -359,7 +359,7 @@ static GemmEpilogue select_epilogue(bool has_bias, bool has_gelu, bool has_beta)
 }
 
 template <bool IS_1D2D, typename AType, typename BType, typename OType,
-          GemmEpilogue EPILOGUE, bool IS_PARTIAL_K>
+          GemmEpilogue EPILOGUE, bool IS_PARTIAL_K, bool A_E4M3, bool B_E4M3>
 static void dispatch_micro_epilogue(micro_globals<AType, BType, OType> g) {
     unsigned long mem_size = g.dynamic_shared_memory();
     const bool is_partial_m = (g.M() % BLOCK_M != 0);
@@ -370,35 +370,37 @@ static void dispatch_micro_epilogue(micro_globals<AType, BType, OType> g) {
     };
     BOOL_SWITCH(is_partial_m, IS_PARTIAL_M,
         BOOL_SWITCH(is_partial_n, IS_PARTIAL_N,
-            launch(micro_tk<AType, BType, OType, IS_PARTIAL_M, IS_PARTIAL_N, IS_1D2D, EPILOGUE, IS_PARTIAL_K>);
+            launch(micro_tk<AType, BType, OType, IS_PARTIAL_M, IS_PARTIAL_N, IS_1D2D, EPILOGUE, IS_PARTIAL_K, A_E4M3, B_E4M3>);
         )
     )
 }
 
-template <bool IS_1D2D, typename AType, typename BType, typename OType, bool IS_PARTIAL_K>
+template <bool IS_1D2D, typename AType, typename BType, typename OType, bool IS_PARTIAL_K,
+          bool A_E4M3, bool B_E4M3>
 static void dispatch_micro_k(micro_globals<AType, BType, OType> g,
                              bool has_bias, bool has_gelu, bool has_beta) {
     switch (select_epilogue(has_bias, has_gelu, has_beta)) {
         case GemmEpilogue::DEFAULT:
-            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::DEFAULT, IS_PARTIAL_K>(g); break;
+            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::DEFAULT, IS_PARTIAL_K, A_E4M3, B_E4M3>(g); break;
         case GemmEpilogue::BIAS:
-            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::BIAS, IS_PARTIAL_K>(g); break;
+            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::BIAS, IS_PARTIAL_K, A_E4M3, B_E4M3>(g); break;
         case GemmEpilogue::GELU_AUX:
-            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::GELU_AUX, IS_PARTIAL_K>(g); break;
+            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::GELU_AUX, IS_PARTIAL_K, A_E4M3, B_E4M3>(g); break;
         case GemmEpilogue::BETA:
-            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::BETA, IS_PARTIAL_K>(g); break;
+            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::BETA, IS_PARTIAL_K, A_E4M3, B_E4M3>(g); break;
         case GemmEpilogue::BIAS_BETA:
-            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::BIAS_BETA, IS_PARTIAL_K>(g); break;
+            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::BIAS_BETA, IS_PARTIAL_K, A_E4M3, B_E4M3>(g); break;
         case GemmEpilogue::GELU_AUX_BETA:
-            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::GELU_AUX_BETA, IS_PARTIAL_K>(g); break;
+            dispatch_micro_epilogue<IS_1D2D, AType, BType, OType, GemmEpilogue::GELU_AUX_BETA, IS_PARTIAL_K, A_E4M3, B_E4M3>(g); break;
     }
 }
 
-template <bool IS_1D2D, typename AType, typename BType, typename OType>
+template <bool IS_1D2D, typename AType, typename BType, typename OType,
+          bool A_E4M3, bool B_E4M3>
 static void dispatch_micro(micro_globals<AType, BType, OType> g,
                            bool has_bias, bool has_gelu, bool has_beta, bool has_partial_k) {
     BOOL_SWITCH(has_partial_k, IS_PARTIAL_K,
-        dispatch_micro_k<IS_1D2D, AType, BType, OType, IS_PARTIAL_K>(g, has_bias, has_gelu, has_beta);
+        dispatch_micro_k<IS_1D2D, AType, BType, OType, IS_PARTIAL_K, A_E4M3, B_E4M3>(g, has_bias, has_gelu, has_beta);
     )
 }
 
@@ -424,7 +426,9 @@ class BlockwiseGemmCdna3 final : public BlockwiseGemmBackend {
         const bool has_partial_k = (K % BLOCK_K != 0);
         const int  k_blocks  = (K + BLOCK_K - 1) / BLOCK_K;
 
-        auto run = [&]<typename AType, typename BType, typename OType>() {
+        auto run = [&]<bool A_E4M3, bool B_E4M3, typename OType>() {
+            using AType = kittens::fp8e4m3;
+            using BType = kittens::fp8e4m3;
             micro_globals<AType, BType, OType> g = {
                 _gl_A_t<AType>(reinterpret_cast<AType*>(const_cast<void*>(kA)), 1, 1, kM, K),
                 _gl_B_t<BType>(reinterpret_cast<BType*>(const_cast<void*>(kB)), 1, 1, kN, K),
@@ -437,17 +441,17 @@ class BlockwiseGemmCdna3 final : public BlockwiseGemmBackend {
                 args.bias, args.bias_dtype, args.gelu_aux, args.gelu_aux_dtype,
                 reinterpret_cast<const OType*>(args.c_in), args.beta,
             };
-            if (is_1d2d) dispatch_micro<true,  AType, BType, OType>(g, has_bias, has_gelu, has_beta, has_partial_k);
-            else         dispatch_micro<false, AType, BType, OType>(g, has_bias, has_gelu, has_beta, has_partial_k);
+            if (is_1d2d) dispatch_micro<true,  AType, BType, OType, A_E4M3, B_E4M3>(g, has_bias, has_gelu, has_beta, has_partial_k);
+            else         dispatch_micro<false, AType, BType, OType, A_E4M3, B_E4M3>(g, has_bias, has_gelu, has_beta, has_partial_k);
         };
 
-        const bool a_e5m2 = (ka_dtype == KITTENS_FP8E5M2);
-        const bool b_e5m2 = (kb_dtype == KITTENS_FP8E5M2);
+        const bool a_e4m3 = (ka_dtype != KITTENS_FP8E5M2);
+        const bool b_e4m3 = (kb_dtype != KITTENS_FP8E5M2);
         auto run_ab = [&]<typename OType>() {
-            if      (!a_e5m2 && !b_e5m2) run.template operator()<kittens::fp8e4m3, kittens::fp8e4m3, OType>();
-            else if ( a_e5m2 && !b_e5m2) run.template operator()<kittens::fp8e5m2, kittens::fp8e4m3, OType>();
-            else if (!a_e5m2 &&  b_e5m2) run.template operator()<kittens::fp8e4m3, kittens::fp8e5m2, OType>();
-            else                         run.template operator()<kittens::fp8e5m2, kittens::fp8e5m2, OType>();
+            if      ( a_e4m3 &&  b_e4m3) run.template operator()<true,  true,  OType>();
+            else if (!a_e4m3 &&  b_e4m3) run.template operator()<false, true,  OType>();
+            else if ( a_e4m3 && !b_e4m3) run.template operator()<true,  false, OType>();
+            else                         run.template operator()<false, false, OType>();
         };
         if      (out_dtype == KITTENS_FLOAT32) run_ab.template operator()<float>();
         else if (out_dtype == KITTENS_FLOAT16) run_ab.template operator()<kittens::half>();

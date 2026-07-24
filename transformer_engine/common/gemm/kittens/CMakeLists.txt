@@ -17,13 +17,15 @@ elseif(NOT HAS_CXX20)
     set(USE_HIPKITTENS_GEMM OFF PARENT_SCOPE)
 else()
     set(HIPKITTENS_CDNA3_INCLUDE_DIR
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../3rdparty/hipkittens_cdna3/include")
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../3rdparty/hipkittens/include")
     set(HIPKITTENS_CDNA4_INCLUDE_DIR
         "${CMAKE_CURRENT_SOURCE_DIR}/../../../../3rdparty/hipkittens/include")
 
     set(CMAKE_CXX_STANDARD 20)
     project(kittens_gemm LANGUAGES HIP CXX)
     find_package(hip)
+
+    include_directories("${ROCM_PATH}/include/hip")
 
     set(_kittens_arch_objs "")
 

@@ -25,6 +25,33 @@ extern "C" __device__ float
 llvm_amdgcn_raw_buffer_load_f32(int32x4_lds_t rsrc, int voffset, int soffset,
                                 int aux) __asm("llvm.amdgcn.raw.buffer.load.f32");
 
+template <bool A_E4M3, bool B_E4M3>
+__device__ __forceinline__ void mfma_fmt(float2 (&D)[2], const kittens::fp8e4m3_4 (&A)[2],
+                                         const kittens::fp8e4m3_4 (&B)[2], const float2 (&C)[2]) {
+    typedef __attribute__((__vector_size__(4 * sizeof(float)))) float float4_t;
+    if constexpr (!A_E4M3 && B_E4M3) {
+        *(float4_t*)D = __builtin_amdgcn_mfma_f32_16x16x32_bf8_fp8(*(long*)A, *(long*)B, *(float4_t*)C, 0, 0, 0);
+    } else if constexpr (A_E4M3 && !B_E4M3) {
+        *(float4_t*)D = __builtin_amdgcn_mfma_f32_16x16x32_fp8_bf8(*(long*)A, *(long*)B, *(float4_t*)C, 0, 0, 0);
+    } else {
+        *(float4_t*)D = __builtin_amdgcn_mfma_f32_16x16x32_bf8_bf8(*(long*)A, *(long*)B, *(float4_t*)C, 0, 0, 0);
+    }
+}
+
+template <bool A_E4M3 = true, bool B_E4M3 = true, typename RT_C, typename RT_A, typename RT_B>
+__device__ __forceinline__ void mma_ABt(RT_C &acc, const RT_A &a, const RT_B &b) {
+    if constexpr (A_E4M3 && B_E4M3) {
+        kittens::mma_ABt(acc, a, b, acc);
+    } else {
+        #pragma unroll
+        for (int n = 0; n < acc.height; n++)
+            #pragma unroll
+            for (int m = 0; m < acc.width; m++)
+                mfma_fmt<A_E4M3, B_E4M3>(acc.tiles[n][m].data, a.tiles[n][0].data,
+                                         b.tiles[m][0].data, acc.tiles[n][m].data);
+    }
+}
+
 
 template <int HEIGHT>
 __device__ inline void load_scale_global_reg(float (&sa_reg)[HEIGHT * 4], const float *sa_base,
