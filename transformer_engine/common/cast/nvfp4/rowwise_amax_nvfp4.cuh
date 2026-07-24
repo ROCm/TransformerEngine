@@ -1,20 +1,8 @@
 /*************************************************************************
- * This file was modified for portability to AMDGPU
  * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
- * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
- * See LICENSE for license information.
+ * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
-
-/*! \file rowwise_amax_nvfp4.cuh
- *  \brief Per-row amax for row-scaled NVFP4 quantization.
- *
- *  The upstream row-wise amax kernel lives in quantize_transpose_nvfp4.cuh,
- *  which also holds Blackwell-only kernels (CUtensorMap/tcgen05) that do not
- *  compile on ROCm. This header provides an equivalent, portable
- *  nvfp4::compute_rowwise_amax so the ROCm dispatch can support row-scaled
- *  NVFP4; the quantize and dequantize kernels already handle row-scaled inputs.
- */
 
 #ifndef TRANSFORMER_ENGINE_ROWWISE_AMAX_NVFP4_CUH_
 #define TRANSFORMER_ENGINE_ROWWISE_AMAX_NVFP4_CUH_
