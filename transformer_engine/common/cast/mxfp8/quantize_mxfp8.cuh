@@ -32,6 +32,7 @@
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "./rocm_vectorized_2d.cuh"
+#include "../../util/rocm_device_utils.cuh"
 #endif
 
 namespace transformer_engine {
@@ -290,7 +291,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
       }
       scales_colwise[scale_idx] = biased_exponent;
 
-      const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+      const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
 
 // 3. Scale elements
@@ -442,7 +443,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         scales_rowwise[scale_idx] = biased_exponent;
       }
 
-      const float block_scale_inverse = ptx::exp2f_rcp(biased_exponent);
+      const float block_scale_inverse = ptx::exp2f_rcp<float>(biased_exponent);
       const ptx::floatx2 block_scale_inverse_2x = {block_scale_inverse, block_scale_inverse};
 
       // 3. Scale elements

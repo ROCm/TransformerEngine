@@ -311,13 +311,22 @@ py::object dequantize(const py::handle &input, DType otype);
 py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const size_t num_tensors,
                           std::optional<at::Tensor> first_dims);
 
+py::object group_dequantize(const py::handle &input, DType otype);
+
+py::object bgrad_group_quantize(const at::Tensor &tensor, py::handle quantizer,
+                                const size_t num_tensors, std::optional<at::Tensor> first_dims);
+
 std::vector<py::object> multi_tensor_quantize(const std::vector<at::Tensor> &tensor_list,
                                               std::vector<py::handle> quantizer_list);
 
 std::vector<py::object> split_quantize(const at::Tensor &tensor,
                                        const std::vector<size_t> &split_sections,
                                        std::vector<py::handle> quantizer_list,
-                                       bool disable_bulk_allocation = false);
+                                       bool disable_bulk_allocation = false
+#ifdef __HIP_PLATFORM_AMD__
+                                       , std::optional<std::vector<size_t>> valid_split_sections = std::nullopt
+#endif
+                                       );
 
 /***************************************************************************************************
  * Bias gradient fusions
@@ -459,6 +468,12 @@ size_t get_cudnn_version();
 void placeholder();
 #endif
 
+std::vector<at::Tensor> convert_host_pointers_to_tensor(
+    std::vector<std::vector<at::Tensor>> tensor_lists);
+
+std::tuple<at::Tensor, at::Tensor, at::Tensor> get_device_pointer_for_data_and_scales(
+    std::vector<at::Tensor> data_tensors, std::vector<at::Tensor> scale_tensors, bool swizzle,
+    bool rowwise, transformer_engine::DType data_dtype);
 at::Tensor splits_to_offsets(const at::Tensor &first_dims, int64_t logical_last_dim);
 
 /***************************************************************************************************
@@ -566,6 +581,8 @@ void fused_multi_row_unpadding(at::Tensor input, at::Tensor output,
 
 void inplace_swizzle_scale_for_gemm(py::handle &tensor);
 
+void grouped_swizzle_for_gemm(py::handle &tensor, bool rowwise, bool columnwise);
+
 #ifndef USE_ROCM
 /***************************************************************************************************
  * NVSHMEM APIs
@@ -604,6 +621,17 @@ void rocshmem_finalize();
 void bulk_overlap_ag_with_external_gemm(CommOverlap &allgather_communicator, at::Stream send_stream,
                                         at::Stream recv_stream);
 #endif // !USE_ROCM
+
+/***************************************************************************************************
+ * Newton-Schulz (cuSolverMp)
+ **************************************************************************************************/
+
+int64_t cusolvermp_ctx_create(int64_t nccl_comm_ptr, int nranks, int rank);
+
+void cusolvermp_ctx_destroy(int64_t ctx_ptr);
+
+void newton_schulz(int64_t ctx_ptr, int64_t m, int64_t n, at::Tensor x, int64_t num_iterations,
+                   std::vector<float> coefficients);
 
 }  // namespace transformer_engine::pytorch
 

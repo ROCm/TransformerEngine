@@ -135,6 +135,31 @@ __device__ __forceinline__ int rocm_upper_bound(const T* arr, int n, T val) {
   return lo;
 }
 
+// Binary reduction ops for rocm_subwarp_allreduce
+struct rocm_op {
+    struct max {
+        __device__ __forceinline__ float operator()(float a, float b) const { return fmaxf(a, b); }
+    };
+
+    struct min {
+        __device__ __forceinline__ float operator()(float a, float b) const { return fminf(a, b); }
+    };
+
+    struct sum {
+        __device__ __forceinline__ float operator()(float a, float b) const { return a + b; }
+    };
+};
+
+// Butterfly all-reduce within a subwarp. All lanes get the result.
+template <int WIDTH, typename T, typename OP>
+__device__ __forceinline__ T rocm_subwarp_allreduce(T val, const OP &op) {
+#pragma unroll
+    for (int offset = WIDTH / 2; offset > 0; offset >>= 1) {
+        val = op(val, __shfl_xor(val, offset, WIDTH));
+    }
+    return val;
+}
+
 template <int WARPS>
 __device__ __forceinline__ float rocm_block_reduce_max(float val, int warp_id) {
     __shared__ float staging[WARPS];
@@ -160,4 +185,18 @@ __device__ __forceinline__ float rocm_block_reduce_max(float val, int warp_id) {
         val = v;
     }
     return val;
+}
+
+// N-wide alignment check and vectorized load/store using NTVec.
+template <int N, typename T>
+__device__ __forceinline__ bool is_aligned_n(const T *p) {
+  return (reinterpret_cast<uintptr_t>(p)) % (N * sizeof(T)) == 0;
+}
+
+template <int N, typename T>
+__device__ __forceinline__ void load_store_n(T *dst, const T *src,
+                                             int dst_offset, int src_offset) {
+  NTVec<T, N> v;
+  v.load(src + src_offset * N);
+  v.store(dst + dst_offset * N);
 }

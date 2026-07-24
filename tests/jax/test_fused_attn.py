@@ -677,13 +677,20 @@ class FusedAttnRunner:
         else:
             self.softmax_offset = None
 
-        def gen_valid(bs, max_seqlen, pad_ratio):
+        def generate_valid_segment_ids_and_pos(bs, max_seqlen, pad_ratio):
             pad_len = int(max_seqlen * pad_ratio)
             valid_len = max_seqlen - pad_len
-            tokens = jnp.concatenate([jnp.ones((bs, valid_len)), jnp.zeros((bs, pad_len))], axis=-1)
-            return tokens, jnp.logical_not(tokens)
+            tokens = jnp.concatenate(
+                [
+                    jnp.ones((bs, valid_len), dtype=jnp.int32),
+                    jnp.zeros((bs, pad_len), dtype=jnp.int32),
+                ],
+                axis=-1,
+            )
+            segment_pos = jnp.broadcast_to(jnp.arange(max_seqlen, dtype=jnp.int32), tokens.shape)
+            return tokens, segment_pos, jnp.logical_not(tokens)
 
-        def generate_random_segment_ids(
+        def generate_random_segment_ids_and_pos(
             batch_size,
             sequence_length,
             num_segments,
@@ -746,9 +753,11 @@ class FusedAttnRunner:
                     self.offsets_kv,
                 ) = self._setup_segments_ck_smallseq(generate_random_segment_ids)
             else:
-                self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_random_segment_ids(
-                    self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
-                )
+                self.segment_ids_q, self.segment_pos_q, self.pad_q = (
+                generate_random_segment_ids_and_pos(
+                        self.batch_size, self.max_seqlen_q, self.num_segments_per_seq, seed=42
+                    )
+            )
                 self.seqlens_q, self.offsets_q = get_seqlens_and_offsets(self.segment_ids_q)
                 # TODO(rewang): record only self attention and find the reason of cross attention
                 if self.qkv_layout == QKVLayout.T3HD or self.max_seqlen_q == self.max_seqlen_kv:
@@ -763,23 +772,24 @@ class FusedAttnRunner:
                     ):  # SWA or BRCM requires kv_len >= q_len
                         min_segment_len = self.seqlens_q
                     self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = (
-                        generate_random_segment_ids(
-                            self.batch_size,
-                            self.max_seqlen_kv,
-                            self.num_segments_per_seq,
-                            seed=2024,
-                            min_segment_len=min_segment_len,
+                        (
+                    generate_random_segment_ids_and_pos(
+                                self.batch_size,
+                                self.max_seqlen_kv,
+                                self.num_segments_per_seq,
+                                seed=2024,
+                                min_segment_len=min_segment_len,
                         )
-                    )
+                        )
+                )
                 self.seqlens_kv, self.offsets_kv = get_seqlens_and_offsets(self.segment_ids_kv)
         else:
-            self.segment_ids_q, self.pad_q = gen_valid(
+            self.segment_ids_q, self.segment_pos_q, self.pad_q = generate_valid_segment_ids_and_pos(
                 self.batch_size, self.max_seqlen_q, pad_ratio
             )
-            self.segment_ids_kv, self.pad_kv = gen_valid(
-                self.batch_size, self.max_seqlen_kv, pad_ratio
+            self.segment_ids_kv, self.segment_pos_kv, self.pad_kv = (
+                generate_valid_segment_ids_and_pos(self.batch_size, self.max_seqlen_kv, pad_ratio)
             )
-            self.segment_pos_q = self.segment_pos_kv = None
             self.seqlens_q = self.seqlens_kv = self.offsets_q = self.offsets_kv = None
 
         # For reference code
@@ -829,24 +839,15 @@ class FusedAttnRunner:
                         (self.offsets_q, self.offsets_kv),
                     )
                 case SeqDescFormat.SegmentIDs:
-                    # Exercise the path to generate the segment_pos in from_segment_ids_and_pos()
-                    # if no CP and load balancing, else explicitly pass the segment_pos
+                    # from_segment_ids_and_pos requires explicit segment_pos.
                     self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
                         (
                             self.cp_reorder_fn(self.segment_ids_q),
                             self.cp_reorder_fn(self.segment_ids_kv),
                         ),
                         (
-                            (
-                                self.cp_reorder_fn(self.segment_pos_q),
-                                self.cp_reorder_fn(self.segment_pos_kv),
-                            )
-                            if self.cp_size > 1 and self.cp_load_balanced
-                            else None
-                        ),
-                        is_thd=self.qkv_layout.is_thd(),
-                        is_segment_ids_reordered=(
-                            True if self.cp_size > 1 and self.cp_load_balanced else False
+                            self.cp_reorder_fn(self.segment_pos_q),
+                            self.cp_reorder_fn(self.segment_pos_kv),
                         ),
                     )
                 case _:
@@ -874,9 +875,7 @@ class FusedAttnRunner:
                 case SeqDescFormat.SegmentIDs:
                     self.sequence_desciptor = SequenceDescriptor.from_segment_ids_and_pos(
                         (self.segment_ids_q, self.segment_ids_kv),
-                        None,
-                        is_thd=self.qkv_layout.is_thd(),
-                        is_segment_ids_reordered=False,
+                        (self.segment_pos_q, self.segment_pos_kv),
                     )
                 case _:
                     raise ValueError(f"Unknown {self.seq_desc_format=}")

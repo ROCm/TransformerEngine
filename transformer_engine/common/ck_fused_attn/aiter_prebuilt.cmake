@@ -19,7 +19,9 @@ string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER_CONTENT}")
 string(REGEX MATCH "^[0-9]+" ROCM_VER_MAJOR "${ROCM_VER}")
 
 # AITER commit
-get_git_commit("${__AITER_SOURCE_DIR}" AITER_SHA)
+if(NOT DEFINED AITER_SHA OR "${AITER_SHA}" STREQUAL "")
+  get_git_commit("${__AITER_SOURCE_DIR}" AITER_SHA)
+endif()
 
 # Cache key & local paths
 set(AITER_CACHE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../build/aiter-prebuilts")

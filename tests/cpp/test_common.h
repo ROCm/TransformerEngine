@@ -373,7 +373,7 @@ static constexpr float E2M1_LUT[16] = {
 #endif
 
 inline size_t divide_round_up(const size_t N, const size_t M) {
-    return (N - 1 + M) / M;
+    return ((N + M) - 1) / M;
 }
 
 inline size_t round_up_to_nearest_multiple(const size_t N, const size_t M) {

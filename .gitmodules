@@ -14,9 +14,6 @@
 [submodule "3rdparty/aotriton"]
 	path = 3rdparty/aotriton
 	url = https://github.com/ROCm/aotriton.git
-[submodule "3rdparty/aiter"]
-	path = 3rdparty/aiter
-	url = https://github.com/ROCm/aiter.git
 [submodule "examples/pytorch/nanogpt"]
 	path = examples/pytorch/nanogpt
 	url = https://github.com/floraamd/nanoGPTwTE.git
@@ -26,6 +23,13 @@
 [submodule "3rdparty/QoLA"]
 	path = 3rdparty/QoLA
 	url = https://github.com/ROCm/QoLA.git
+[submodule "3rdparty/hipkittens"]
+	path = 3rdparty/hipkittens
+	url = https://github.com/HazyResearch/HipKittens.git
+[submodule "3rdparty/composable_kernel"]
+	path = 3rdparty/composable_kernel
+	url = https://github.com/ROCm/composable_kernel.git
+	branch = develop
 [submodule "3rdparty/ck_jit"]
 	path = 3rdparty/ck_jit
 	url = https://github.com/ROCm/ck-jit.git
