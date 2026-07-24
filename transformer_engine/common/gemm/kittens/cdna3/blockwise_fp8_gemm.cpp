@@ -23,6 +23,7 @@ constexpr int MFMA_K      = 32;
 constexpr int SCALE_BLOCK = 128;
 constexpr int NUM_THREADS = NUM_WARPS * kittens::WARP_THREADS;
 constexpr size_t SMEM_BYTES = (BLOCK_M * BLOCK_K + BLOCK_N * BLOCK_K) * sizeof(kittens::fp8e4m3);
+static_assert(SMEM_BYTES <= 64 * 1024, "SMEM_BYTES exceeds gfx942 LDS size (64 KB)");
 
 template <typename T> using _gl_A_t = kittens::gl<T, -1, -1, -1, -1>;
 template <typename T> using _gl_B_t = kittens::gl<T, -1, -1, -1, -1>;
@@ -166,6 +167,7 @@ void micro_tk(const micro_globals<AType, BType, OType> g) {
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 1
+        // TODO: evaluate s_setprio(2) for the MMA clusters below
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_setprio(1);
         kittens::mma_ABt(partial[0], at[0], bt[0], partial[0]);
