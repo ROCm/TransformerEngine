@@ -72,6 +72,8 @@ from ..tensor.float8_tensor import (
     Float8Tensor,
 )
 from ..tensor.mxfp8_tensor import MXFP8Quantizer
+if IS_HIP_EXTENSION:
+    from ..tensor.mxfp4_tensor import MXFP4Quantizer
 from ..tensor.nvfp4_tensor import NVFP4Quantizer
 from ..tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from ._common import apply_normalization, WeightGradStore
@@ -2359,6 +2361,8 @@ class LayerNormMLP(TransformerEngineBaseModule):
                     (MXFP8Quantizer, Float8BlockQuantizer, NVFP4Quantizer),
                 ),
             )
+            if IS_HIP_EXTENSION and isinstance(fc2_input_quantizer, MXFP4Quantizer):
+                fc2_input_quantizer.set_usage(rowwise=True, columnwise=True)
             fc2_input_quantizer.internal = True
             fc2_input_quantizer.optimize_for_gemm = True
             if fp8_output:

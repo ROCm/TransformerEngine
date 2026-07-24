@@ -15,9 +15,8 @@
 namespace ck_fused_attn{
 
 // print the fmha traits and fmha_args when calling ck apis
-void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fwd_args& fmha_args){
+void log_fwd_config(const char* func_name, bool has_dropout, const aiter::mha_fwd_args& fmha_args, std::ostream* log_file){
 
-  std::ostream* log_file = get_ck_log_stream();
   (*log_file) << "\n" << func_name << "\n";
 
   // debug fmha_traits
@@ -102,18 +101,12 @@ void dump_fwd_timings(const char* dump_path, float average_runtime){
   file << average_runtime << "\n";
 }
 
-hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
-
-  bool has_dropout = (args.is_training && args.dropout_probability > 0.f);
-
-  bool ck_log_config = false;
-  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      ck_log_config = true;
-  }
-  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
-  // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
+// Populate the AITER mha_fwd_args from TE's CKAttnFwdArgs. Shared by ck_attn_fwd
+// (real launch) and ck_attn_fwd_uses_v3 (v3 availability probe) so the probe can
+// never disagree with the launch. v3_api_check is left false here; callers flip it.
+// The stream-dependent max_seqlen override (NVTE_CK_RUNTIME_MAX_SEQLEN) is applied
+// by ck_attn_fwd after this returns; it does not affect v3 kernel selection.
+aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
 
   bias_enum bias_type = bias_enum::no_bias;
   BiasShape bias_shape = BiasShape::k11SS;
@@ -219,18 +212,48 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
   fmha_args.block_scale_size_q  = 0;
   fmha_args.block_scale_size_kv = 0;
 
+  return fmha_args;
+}
+
+// Probe whether AITER's v3 (asm) forward path will run for this config, without
+// launching any kernel. Builds the same args as ck_attn_fwd and relies on AITER's
+// v3_api_check dry-run (returns 1 when v3 is available, -1 otherwise).
+bool ck_attn_fwd_uses_v3(const CKAttnFwdArgs& args){
+  aiter::mha_fwd_args fmha_args = build_fwd_fmha_args(args);
+  fmha_args.v3_api_check = true;
+  // No kernel is launched in check mode, so the stream/log flags are irrelevant.
+  ck_tile::stream_config stream_config{nullptr, false, false};
+  return QOLA_NS(mha_fwd)(fmha_args, stream_config) == 1;
+}
+
+hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
+
+  bool has_dropout = (args.is_training && args.dropout_probability > 0.f);
+
+  bool ck_log_config = false;
+  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      ck_log_config = true;
+  }
+  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
+  auto* log_file = get_ck_log_stream();
+  // print kernel name on verbose mode
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
+
+  aiter::mha_fwd_args fmha_args = build_fwd_fmha_args(args);
+
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")){
     if(args.is_group_mode() && std::string(env_p) == "1"){
-      if(ck_log_config){
-        std::cout << "attn_fwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
+      if(log_file){
+        *log_file << "attn_fwd(ck): Enabling runtime max_seqlen calculation for small seqlen optimization.";
       }
       fmha_args.max_seqlen_q = get_runtime_max_seqlen(args.b, args.cu_seqlen_q_ptr, args.cu_seqlen_q_padded_ptr, args.lse_ptr, stream);
     }
   }
 
   // print ck traits and fmha_args when needed
-  if(ck_log_config){
-     log_fwd_config(__FUNCTION__, has_dropout, fmha_args);
+  if(log_file){
+     log_fwd_config(__FUNCTION__, has_dropout, fmha_args, log_file);
   }
   float average_runtime = QOLA_NS(mha_fwd)(fmha_args, stream_config);
   if(average_runtime < 0){
