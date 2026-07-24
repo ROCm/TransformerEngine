@@ -1165,7 +1165,7 @@ class BlockwiseGemmCdna4 final : public BlockwiseGemmBackend {
 
 }
 
-BlockwiseGemmBackend *get_blockwise_backend_cdna4() {
+BlockwiseGemmBackend *BlockwiseGemmBackend::get_cdna4() {
     static BlockwiseGemmCdna4 impl;
     return &impl;
 }

@@ -458,7 +458,7 @@ class BlockwiseGemmCdna3 final : public BlockwiseGemmBackend {
 
 }
 
-BlockwiseGemmBackend *get_blockwise_backend_cdna3() {
+BlockwiseGemmBackend *BlockwiseGemmBackend::get_cdna3() {
     static BlockwiseGemmCdna3 impl;
     return &impl;
 }

@@ -9,6 +9,7 @@
 #include <cstddef>
 
 #include "kittens_gemm_enums.h"
+#include "blockwise_fp8_gemm.h"
 
 struct BlockwiseGemmArgs {
     const void *A;
@@ -35,7 +36,21 @@ class BlockwiseGemmBackend {
  public:
     virtual ~BlockwiseGemmBackend() = default;
     virtual void run(const BlockwiseGemmArgs &args) = 0;
-};
 
-BlockwiseGemmBackend *get_blockwise_backend_cdna3();
-BlockwiseGemmBackend *get_blockwise_backend_cdna4();
+ private:
+    static BlockwiseGemmBackend *get_cdna3();
+    static BlockwiseGemmBackend *get_cdna4();
+
+    friend void kittens_blockwise_fp8_gemm(
+        const void *A, const void *B, void *C,
+        const void *scale_A, const void *scale_B,
+        int M, int N, int K,
+        int a_dtype, int b_dtype,
+        int a_scaling_mode, int b_scaling_mode,
+        int out_dtype,
+        const void *bias, int bias_dtype,
+        const void *gelu_aux, int gelu_aux_dtype,
+        const void *c_in, float beta,
+        void *workspace, size_t workspace_size,
+        hipStream_t stream);
+};

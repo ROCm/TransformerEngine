@@ -26,9 +26,9 @@ void kittens_blockwise_fp8_gemm(
 
     BlockwiseGemmBackend *backend = nullptr;
     if (arch == 95) {
-        backend = get_blockwise_backend_cdna4();
+        backend = BlockwiseGemmBackend::get_cdna4();
     } else if (arch == 94) {
-        backend = get_blockwise_backend_cdna3();
+        backend = BlockwiseGemmBackend::get_cdna3();
     }
     if (backend == nullptr) {
         throw std::runtime_error(
