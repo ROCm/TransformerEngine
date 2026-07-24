@@ -77,6 +77,16 @@ bool is_ck_backend_supported(
     return false;
   }
 
+  // WA for failed validation in CK FMHA with SWA and non-vanilla sink
+  const bool is_swa = window_size_left >= 0;
+  if (is_swa && softmax_type != NVTE_VANILLA_SOFTMAX) {
+    if (nvte_log_ck_config) {
+      std::cout << "CK fused attn does not support non-vanilla sink with SWA"
+                << std::endl;
+    }
+    return false;
+  }
+
   // joint filter based on sliding window and attn_mask
   bool is_causal = is_causal_mask(attn_mask_type);
   if(is_causal){
@@ -134,6 +144,16 @@ bool is_ck_backend_supported(
   if(is_padding && (bias_type==NVTE_Bias_Type::NVTE_POST_SCALE_BIAS || bias_type==NVTE_Bias_Type::NVTE_ALIBI)){
     if(nvte_log_ck_config){
       std::cout<<"padding mask cannot work with post_scale_bias or alibi"<<std::endl;
+    }
+    return false;
+  }
+
+  // WA failed fwd test
+  bool is_no_mask_window = (window_size_left == -1 && window_size_right == -1);
+  if(is_ragged && !is_causal && is_no_mask_window && (max_seqlen_q != max_seqlen_kv)){
+    if(nvte_log_ck_config){
+      std::cout<<"Ragged (THD) cross-attention with plain no-mask padding and "
+                  "max_seqlen_q != max_seqlen_kv is not supported by CK yet"<<std::endl;
     }
     return false;
   }
@@ -629,12 +649,14 @@ void fused_attn_ck_fwd_impl(
   ck_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
   ck_args.window_size_left = window_size_left;
   ck_args.window_size_right = window_size_right;
-  ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3;
   ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
   const bool has_sink = (softmax_type != NVTE_VANILLA_SOFTMAX && devPtrSoftmaxOffset != nullptr);
   ck_args.has_sink = has_sink;
   ck_args.sink_ptr = has_sink ? devPtrSoftmaxOffset : nullptr;
   ck_args.sink_size = has_sink ? 1 : 0;
+  
+  // ASM v3 does not support sink; force CK tile path
+  ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3 && !has_sink;
 
   if(is_SBHD && is_padding){
     // remove padding for q, k, v
@@ -701,13 +723,16 @@ void fused_attn_ck_bwd_impl(
   float scaling_factor, float dropout_probability, 
   NVTE_QKV_Layout layout,
   NVTE_Bias_Type bias_type, NVTE_Mask_Type mask_type,
+  NVTE_Softmax_Type softmax_type,
   int64_t window_size_left, int64_t window_size_right,
   bool deterministic,
   void* devPtrQ, void* devPtrK, void* devPtrV,
   void* devPtrO, void* devPtrSoftmaxAux, void* devPtrBias,
+  void* devPtrSoftmaxOffset,
   void* devPtrdQ, void* devPtrdK, void* devPtrdV, 
   void* devPtrdO, 
   void* devPtrdBias,
+  void* devPtrDSoftmaxOffset,
   void* devPtrDropoutSeed, 
   void* devPtrDropoutOffset,
   void* devPtrCuSeqlensQ, void* devPtrCuSeqlensKV,
@@ -728,6 +753,8 @@ void fused_attn_ck_bwd_impl(
 
   size_t kN0 = (d_qk <= 128)? 128:64;
   size_t nsplits = deterministic? ceil(1.0*s_kv/kN0):1;
+
+  const bool has_sink = (softmax_type != NVTE_VANILLA_SOFTMAX && devPtrSoftmaxOffset != nullptr);
 
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
   bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
@@ -894,6 +921,10 @@ void fused_attn_ck_bwd_impl(
   }
 
   // Initialize workspace buffers.
+  if(has_sink){
+    // CK accumulates the sink gradient via atomicAdd (one scalar per head); requires zeroing
+    NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrDSoftmaxOffset, 0, sizeof(float)*h, stream));
+  }
   // dq_acc is of shape (nsplits, B, S, H, D_qk); CK requires zeroing
   NVTE_CHECK_CUDA(cudaMemsetAsync(dq_acc_ptr, 0, sizeof(float)*nsplits*h*max_tokens_q*d_qk, stream));
   if(devPtrAlibiSlope){
@@ -959,7 +990,10 @@ void fused_attn_ck_bwd_impl(
     std::cout<<"deterministic: "<<deterministic<<", ";
     std::cout<<"nvte_ck_uses_bwd_v3: "<<nvte_ck_uses_bwd_v3<<", ";
     std::cout<<"nvte_ck_is_v3_atomic_fp32: "<<nvte_ck_is_v3_atomic_fp32<<", ";
-    std::cout<<"nvte_ck_how_v3_bf16_cvt: "<<nvte_ck_how_v3_bf16_cvt<<std::endl;
+    std::cout<<"nvte_ck_how_v3_bf16_cvt: "<<nvte_ck_how_v3_bf16_cvt<<", ";
+    std::cout<<"has_sink: "<<has_sink<<", ";
+    std::cout<<"sink_ptr: "<<(has_sink ? devPtrSoftmaxOffset : nullptr)<<", ";
+    std::cout<<"d_sink_ptr: "<<(has_sink ? devPtrDSoftmaxOffset : nullptr)<<std::endl;
   }
   // Common fields filled here; mode-specific fields are overwritten below.
   ck_fused_attn::CkAttnBwdArgs ck_args;
@@ -978,9 +1012,16 @@ void fused_attn_ck_bwd_impl(
   ck_args.dv_expanded_ptr = dv_expanded_ptr;
   ck_args.lse_workspace_ptr = lse_workspace;
   ck_args.deterministic = deterministic;
-  ck_args.uses_bwd_v3 = nvte_ck_uses_bwd_v3;
+  // ASM v3 bwd does not compute the sink gradient; force the CK tile path so
+  // has_sink users still get a correct (if slower) d_sink, mirroring the fwd
+  // ASM v3 sink guard above.
+  ck_args.uses_bwd_v3 = nvte_ck_uses_bwd_v3 && !has_sink;
   ck_args.is_v3_atomic_fp32 = nvte_ck_is_v3_atomic_fp32;
   ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
+  ck_args.has_sink = has_sink;
+  ck_args.sink_ptr = has_sink ? devPtrSoftmaxOffset : nullptr;
+  ck_args.sink_size = has_sink ? 1 : 0;
+  ck_args.d_sink_ptr = has_sink ? devPtrDSoftmaxOffset : nullptr;
 
   if(is_SBHD && is_padding){
     // remove padding for q, k, v, o, do
@@ -1218,12 +1259,15 @@ void fused_attn_ck_bwd(
   size_t b, size_t h_q, size_t h_kv, size_t max_seqlen_q, size_t max_seqlen_kv, size_t d_qk, size_t d_v,
   float attn_scale, float dropout, 
   NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type,
+  NVTE_Softmax_Type softmax_type,
   int64_t window_size_left, int64_t window_size_right,
   bool deterministic,
   const Tensor* input_Q, const Tensor* input_K, const Tensor* input_V, const Tensor* input_O, const Tensor* input_dO, const Tensor* input_Bias, 
+  const Tensor* input_SoftmaxOffset,
   const Tensor* output_S,
   Tensor* output_dQ, Tensor* output_dK, Tensor* output_dV,
   Tensor* output_dBias,
+  Tensor* output_dSoftmaxOffset,
   const Tensor* input_cu_seqlens_q,
   const Tensor* input_cu_seqlens_kv,
   const Tensor* input_cu_seqlens_q_padded,
@@ -1250,6 +1294,13 @@ void fused_attn_ck_bwd(
     bias_h = output_dBias->data.shape[1];
   }
 
+  void *devPtrSoftmaxOffset = nullptr;
+  void *devPtrDSoftmaxOffset = nullptr;
+  if (softmax_type != NVTE_VANILLA_SOFTMAX) {
+    devPtrSoftmaxOffset = input_SoftmaxOffset->data.dptr;
+    devPtrDSoftmaxOffset = output_dSoftmaxOffset->data.dptr;
+  }
+
   void *devPtrdQ = output_dQ->data.dptr;
   void *devPtrdK = output_dK->data.dptr;
   void *devPtrdV = output_dV->data.dptr;
@@ -1273,12 +1324,15 @@ void fused_attn_ck_bwd(
     attn_scale, dropout, 
     qkv_layout,
     bias_type, attn_mask_type,
+    softmax_type,
     window_size_left, window_size_right,
     deterministic,
     devPtrQ, devPtrK, devPtrV, 
     devPtrO, devPtrSoftmaxStats, devPtrBias,
+    devPtrSoftmaxOffset,
     devPtrdQ, devPtrdK, devPtrdV, 
     devPtrdO, devPtrdBias,
+    devPtrDSoftmaxOffset,
     rng_state->data.dptr, 
     reinterpret_cast<void *>(reinterpret_cast<uint64_t *>(rng_state->data.dptr) + 1),
     devPtrCuSeqlensQ, devPtrCuSeqlensKV, 

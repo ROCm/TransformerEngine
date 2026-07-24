@@ -366,6 +366,8 @@ void log_bwd_config(const char* func_name, const aiter::mha_bwd_args& fmha_args)
   log_value(log_file, "dv_ptr", fmha_args.dv_ptr);
   log_value(log_file, "dbias_ptr", fmha_args.dbias_ptr);
   log_value(log_file, "dq_acc_ptr", fmha_args.dq_acc_ptr);
+  log_value(log_file, "sink_ptr", fmha_args.sink_ptr);
+  log_value(log_file, "d_sink_ptr", fmha_args.d_sink_ptr);
 
   log_value(log_file, "seqstart_q_ptr", fmha_args.seqstart_q_ptr);
   log_value(log_file, "seqstart_k_ptr", fmha_args.seqstart_k_ptr);
@@ -496,6 +498,8 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
                           ? (bias_shape==BiasShape::kBHSS ? args.dbias_ptr : args.dbias_expanded_ptr)
                           : nullptr;
   fmha_args.dq_acc_ptr = args.dq_acc_ptr;
+  fmha_args.sink_ptr = args.sink_ptr;
+  fmha_args.d_sink_ptr = args.d_sink_ptr;
 
   if (args.is_group_mode()) {
     fmha_args.seqstart_q_ptr = args.cu_seqlen_q_padded_ptr==nullptr? args.cu_seqlen_q_ptr : args.cu_seqlen_q_padded_ptr;

@@ -136,6 +136,9 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
   void* dbias_expanded_ptr = nullptr;
   void* dbias_ptr = nullptr;
 
+  // Softmax sink gradient
+  void* d_sink_ptr = nullptr;
+
   // Workspace shared with forward LSE
   void* lse_workspace_ptr = nullptr;
 

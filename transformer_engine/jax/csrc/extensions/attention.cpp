@@ -122,22 +122,28 @@ void PrepareFusedAttnForwardAuxTensors(NVTETensorPack *tensor_pack, const size_t
 void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack, const size_t input_batch,
                                         const size_t bias_batch, const size_t attn_heads,
                                         const size_t bias_heads, const size_t q_max_seqlen,
-                                        const size_t kv_max_seqlen, DType dtype,
-                                        NVTE_Fused_Attn_Backend backend, void *softmax_buf,
+                                        const size_t kv_max_seqlen, DType dtype, 
+                                        [[maybe_unused]]NVTE_Bias_Type bias_type,
+                                        [[maybe_unused]]NVTE_Fused_Attn_Backend backend,
+                                        void *softmax_buf,
                                         void *rng_state_buf, void *bias_buf,
                                         void *softmax_offset_buf = nullptr) {
+#ifndef USE_ROCM
   // Backward calls put everything into the tensor pack for every backend
   // so we set dummy bias_type and backend choices here to follow the correct code path
   auto dummy_bias_type = NVTE_Bias_Type::NVTE_POST_SCALE_BIAS;
-#ifndef USE_ROCM
-  auto dummy_backend = NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
-#else
   auto dummy_backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
-#endif
   PrepareFusedAttnForwardAuxTensors(tensor_pack, input_batch, bias_batch, attn_heads, bias_heads,
                                     q_max_seqlen, kv_max_seqlen, dtype, dummy_bias_type,
                                     dummy_backend, softmax_buf, rng_state_buf, bias_buf,
                                     softmax_offset_buf);
+#else
+  PrepareFusedAttnForwardAuxTensors(tensor_pack, input_batch, bias_batch, attn_heads, bias_heads,
+                                    q_max_seqlen, kv_max_seqlen, dtype, bias_type,
+                                    backend, softmax_buf, rng_state_buf, bias_buf,
+                                    softmax_offset_buf);
+#endif
+  
 
 #ifndef USE_ROCM
   // correct softmax shape for max512 sequence length kernel
@@ -543,8 +549,8 @@ static void FusedAttnBackwardImpl(
       q_max_seqlen, kv_max_seqlen, qk_head_dim, v_head_dim, window_size_left, window_size_right,
       false, false, deterministic);
   PrepareFusedAttnBackwardAuxTensors(&aux_input_tensors, input_batch, bias_batch, attn_heads,
-                                     bias_heads, q_max_seqlen, kv_max_seqlen, dtype, backend,
-                                     softmax_aux, rng_state, bias, softmax_offset);
+                                     bias_heads, q_max_seqlen, kv_max_seqlen, dtype, bias_type, 
+                                     backend, softmax_aux, rng_state, bias, softmax_offset);
 
   /* Call the underly NVTE API */
   // Prepare Q, K, V pointers and shapes based on layout
