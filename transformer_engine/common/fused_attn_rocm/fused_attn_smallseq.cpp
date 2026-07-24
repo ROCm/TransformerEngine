@@ -44,34 +44,6 @@
 namespace transformer_engine {
 namespace fused_attn_rocm {
 
-const char* small_seq_static_config_reason(NVTEDType q_dtype,
-                                           NVTEDType kv_dtype,
-                                           NVTE_Bias_Type bias_type,
-                                           float dropout,
-                                           size_t head_dim_qk,
-                                           size_t head_dim_v,
-                                           size_t num_attn_heads,
-                                           size_t num_gqa_groups,
-                                           NVTE_Mask_Type mask_type) {
-  if(dropout != 0.0f) return "dropout != 0";
-  if(bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) return "bias_type != NVTE_NO_BIAS";
-  if(q_dtype != kv_dtype) return "q_dtype != kv_dtype";
-  // fp16 is intentionally unsupported on the small-seq path for now: the MFMA kernels are
-  // bf16-only (they load Q/K/V as bf16 and use bf16 MFMA intrinsics), so fp16 would be silently
-  // downcast and produce wrong results. Reject fp16 here so it falls back to the regular CK path.
-  if(q_dtype != NVTEDType::kNVTEBFloat16) return "dtype != bf16 (fp16 unsupported on small-seq)";
-  if(head_dim_qk != head_dim_v) return "head_dim_qk != head_dim_v";
-  if(head_dim_qk != 128 && head_dim_qk != 256) return "head_dim not in {128, 256}";
-  if(num_gqa_groups == 0 || num_attn_heads % num_gqa_groups != 0)
-    return "num_attn_heads not a multiple of num_gqa_groups";
-  if(num_attn_heads != num_gqa_groups)
-    return "GQA/MQA unsupported (num_attn_heads != num_gqa_groups)";
-  if(num_attn_heads != 16 && num_attn_heads != 32) return "num_attn_heads not in {16, 32}";
-  if(!(is_padding_mask(mask_type) || mask_type == NVTE_Mask_Type::NVTE_NO_MASK))
-    return "mask_type not padding/no-mask";
-  return nullptr;
-}
-
 bool small_seq_static_config_ok(NVTEDType q_dtype,
                                 NVTEDType kv_dtype,
                                 NVTE_Bias_Type bias_type,
@@ -81,9 +53,20 @@ bool small_seq_static_config_ok(NVTEDType q_dtype,
                                 size_t num_attn_heads,
                                 size_t num_gqa_groups,
                                 NVTE_Mask_Type mask_type) {
-  return small_seq_static_config_reason(q_dtype, kv_dtype, bias_type, dropout, head_dim_qk,
-                                        head_dim_v, num_attn_heads, num_gqa_groups,
-                                        mask_type) == nullptr;
+  if(dropout != 0.0f) return false;
+  if(bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) return false;
+  if(q_dtype != kv_dtype) return false;
+  // fp16 is intentionally unsupported on the small-seq path for now: the MFMA kernels are
+  // bf16-only (they load Q/K/V as bf16 and use bf16 MFMA intrinsics), so fp16 would be silently
+  // downcast and produce wrong results. Reject fp16 here so it falls back to the regular CK path.
+  if(q_dtype != NVTEDType::kNVTEBFloat16) return false;
+  if(head_dim_qk != head_dim_v) return false;
+  if(head_dim_qk != 128 && head_dim_qk != 256) return false;
+  if(num_gqa_groups == 0 || num_attn_heads % num_gqa_groups != 0) return false;
+  if(num_attn_heads != num_gqa_groups) return false;
+  if(num_attn_heads != 16 && num_attn_heads != 32) return false;
+  if(!(is_padding_mask(mask_type) || mask_type == NVTE_Mask_Type::NVTE_NO_MASK)) return false;
+  return true;
 }
 
 bool is_runtime_small_seq_eligible(size_t runtime_max_seqlen_q, size_t runtime_max_seqlen_kv) {
@@ -109,20 +92,13 @@ size_t small_seq_bwd_extra_workspace_bytes() {
   return 2 * sizeof(uint64_t);
 }
 
-const char* small_seq_enable_reason() {
+bool is_nvte_ck_small_seq_enabled() {
   const int arch = transformer_engine::cuda::sm_arch();
   if (arch != 94 && arch != 95) {
-    return "arch not gfx942/gfx950";
+    return false;
   }
   const char* env_p = std::getenv("NVTE_FUSED_ATTN_CK_SMALLSEQ");
-  if (env_p == nullptr || std::strcmp(env_p, "1") != 0) {
-    return "NVTE_FUSED_ATTN_CK_SMALLSEQ not set to \"1\"";
-  }
-  return nullptr;
-}
-
-bool is_nvte_ck_small_seq_enabled() {
-  return small_seq_enable_reason() == nullptr;
+  return env_p != nullptr && std::strcmp(env_p, "1") == 0;
 }
 
 #ifdef USE_FUSED_ATTN_CK
