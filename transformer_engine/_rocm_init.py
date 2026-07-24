@@ -15,18 +15,9 @@ import os
 _PRELOAD_LIBS = (
     "amd_comgr",
     "amdhip64",
-    "roctx64",
     "hiprtc",
-    "hipblas",
-    "hipfft",
-    "hiprand",
-    "hipsparse",
-    "hipsparselt",
-    "hipsolver",
-    "rccl",
+    "roctx64",
     "hipblaslt",
-    "miopen",
-    "hipdnn",
 )
 
 
