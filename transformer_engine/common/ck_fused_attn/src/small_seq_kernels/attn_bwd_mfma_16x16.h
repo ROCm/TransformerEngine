@@ -54,6 +54,7 @@ __global__ void fmha_bwd_grad_v_mfma_16x16_kernel(
     const T* grad_O,
     T* grad_V,
     float scale,
+    int uniform_seq_len,
     const int* cu_seqlens_q,
     const int* cu_seqlens_q_padded,
     const int* cu_seqlens_kv,
@@ -78,13 +79,13 @@ __global__ void fmha_bwd_grad_v_mfma_16x16_kernel(
     const int lane_row  = lane_id / 16;
     const int lane_col  = lane_id % 16;
 
-    const int actual_q = cu_seqlens_q[batch_idx + 1] - cu_seqlens_q[batch_idx];
+    const int actual_q = get_seq_len(batch_idx, uniform_seq_len, cu_seqlens_q);
     if(actual_q == 0)
         return;
 
-    const int seq_kv    = cu_seqlens_kv[batch_idx + 1] - cu_seqlens_kv[batch_idx];
-    const int q_offset  = cu_seqlens_q_padded[batch_idx];
-    const int kv_offset = cu_seqlens_kv_padded[batch_idx];
+    const int seq_kv    = get_seq_len(batch_idx, uniform_seq_len, cu_seqlens_kv);
+    const int q_offset  = get_token_offset(batch_idx, uniform_seq_len, cu_seqlens_q_padded);
+    const int kv_offset = get_token_offset(batch_idx, uniform_seq_len, cu_seqlens_kv_padded);
 
     __shared__ __attribute__((aligned(128))) float attn_lds[lds_q_rows * attn_pad];
     __shared__ __attribute__((aligned(128))) bhalf_t Q_lds_bwd[lds_q_rows * hd_pad];
@@ -292,6 +293,7 @@ __global__ void fmha_bwd_fused_mfma_16x16_kernel(
     T* grad_Q,
     T* grad_K,
     float scale,
+    int uniform_seq_len,
     const int* cu_seqlens_q,
     const int* cu_seqlens_q_padded,
     const int* cu_seqlens_kv,
@@ -316,13 +318,13 @@ __global__ void fmha_bwd_fused_mfma_16x16_kernel(
     const int lane_row  = lane_id / 16;
     const int lane_col  = lane_id % 16;
 
-    const int actual_q = cu_seqlens_q[batch_idx + 1] - cu_seqlens_q[batch_idx];
+    const int actual_q = get_seq_len(batch_idx, uniform_seq_len, cu_seqlens_q);
     if(actual_q == 0)
         return;
 
-    const int seq_kv    = cu_seqlens_kv[batch_idx + 1] - cu_seqlens_kv[batch_idx];
-    const int q_offset  = cu_seqlens_q_padded[batch_idx];
-    const int kv_offset = cu_seqlens_kv_padded[batch_idx];
+    const int seq_kv    = get_seq_len(batch_idx, uniform_seq_len, cu_seqlens_kv);
+    const int q_offset  = get_token_offset(batch_idx, uniform_seq_len, cu_seqlens_q_padded);
+    const int kv_offset = get_token_offset(batch_idx, uniform_seq_len, cu_seqlens_kv_padded);
 
     __shared__ __attribute__((aligned(128))) bhalf_t Q_lds[lds_q_rows * hd_pad];
     __shared__ __attribute__((aligned(128))) bhalf_t dO_lds[lds_q_rows * hd_pad];
@@ -672,6 +674,7 @@ struct AttnBackwardMfma16x16KernelLauncher
                                     T* grad_K,
                                     T* grad_V,
                                     float sqr_dk_scale,
+                                    int uniform_seq_len,
                                     const int* cu_seqlens_q,
                                     const int* cu_seqlens_q_padded,
                                     const int* cu_seqlens_kv,
@@ -687,14 +690,14 @@ struct AttnBackwardMfma16x16KernelLauncher
 
         // Kernel B: grad_V = P^T @ grad_O (P recomputed from Q, K, LSE)
         fmha_bwd_grad_v_mfma_16x16_kernel<T, Config><<<grid, block, 0, stream>>>(
-            Q, K, softmax_lse, grad_O, grad_V, scale,
+            Q, K, softmax_lse, grad_O, grad_V, scale, uniform_seq_len,
             cu_seqlens_q, cu_seqlens_q_padded,
             cu_seqlens_kv, cu_seqlens_kv_padded);
 
         // Kernel A: fused grad_attn / softmax_bwd / grad_Q / grad_K
         fmha_bwd_fused_mfma_16x16_kernel<T, Config><<<grid, block, 0, stream>>>(
             Q, K, V, grad_O, softmax_lse,
-            grad_Q, grad_K, scale,
+            grad_Q, grad_K, scale, uniform_seq_len,
             cu_seqlens_q, cu_seqlens_q_padded,
             cu_seqlens_kv, cu_seqlens_kv_padded);
     }

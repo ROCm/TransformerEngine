@@ -75,4 +75,27 @@ struct FmhaKernelConfig
     static constexpr enum CausalMaskType mask_type = MAKS_TYPE;
 };
 
+// ---------------------------------------------------------------------------
+// Device helpers: BSHD uniform layout vs THD varlen (cu_seqlens)
+//
+// When uniform_seq_len > 0 the kernel runs in dense BSHD mode: every batch
+// has the same sequence length and offsets are batch_idx * uniform_seq_len.
+// When uniform_seq_len == 0, lengths/offsets come from cu_seqlens_*.
+// ---------------------------------------------------------------------------
+
+__device__ __forceinline__ int get_seq_len(int batch_idx,
+                                           int uniform_seq_len,
+                                           const int* cu_seqlens) {
+    if(uniform_seq_len > 0) return uniform_seq_len;
+    return cu_seqlens[batch_idx + 1] - cu_seqlens[batch_idx];
+}
+
+__device__ __forceinline__ int get_token_offset(int batch_idx,
+                                               int uniform_seq_len,
+                                               const int* cu_seqlens_padded) {
+    if(uniform_seq_len > 0) return batch_idx * uniform_seq_len;
+    return cu_seqlens_padded[batch_idx];
+}
+
+
 }  // namespace small_seq_kernels

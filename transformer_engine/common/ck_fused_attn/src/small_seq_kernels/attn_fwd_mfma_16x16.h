@@ -67,6 +67,7 @@ __global__ void fmha_fwd_mfma_16x16_kernel(
     const T* dropout_mask,
     float dropout_scale,
     float scale,
+    int uniform_seq_len,
     const int* cu_seqlens_q,
     const int* cu_seqlens_q_padded,
     const int* cu_seqlens_kv,
@@ -95,13 +96,13 @@ __global__ void fmha_fwd_mfma_16x16_kernel(
     const int lane_row  = lane_id / 16;
     const int lane_col  = lane_id % 16;
 
-    const int actual_q = cu_seqlens_q[batch_idx + 1] - cu_seqlens_q[batch_idx];
+    const int actual_q = get_seq_len(batch_idx, uniform_seq_len, cu_seqlens_q);
     if(actual_q == 0)
         return;
 
-    const int seq_kv    = cu_seqlens_kv[batch_idx + 1] - cu_seqlens_kv[batch_idx];
-    const int kv_offset = cu_seqlens_kv_padded[batch_idx];
-    const int q_offset  = cu_seqlens_q_padded[batch_idx];
+    const int seq_kv    = get_seq_len(batch_idx, uniform_seq_len, cu_seqlens_kv);
+    const int kv_offset = get_token_offset(batch_idx, uniform_seq_len, cu_seqlens_kv_padded);
+    const int q_offset  = get_token_offset(batch_idx, uniform_seq_len, cu_seqlens_q_padded);
 
     // LDS
     __shared__ __attribute__((aligned(128))) bhalf_t Q_lds[lds_q_rows * hd_pad];
@@ -380,11 +381,11 @@ struct AttnForwardMfma16x16KernelLauncher
                                     float sqr_dk_scale,
                                     T* O,
                                     float* softmax_lse,
+                                    int uniform_seq_len,
                                     const int* cu_seqlens_q,
                                     const int* cu_seqlens_q_padded,
                                     const int* cu_seqlens_kv,
                                     const int* cu_seqlens_kv_padded,
-                                    const int* padded_q_to_batch,
                                     int total_padded_q,
                                     int batch,
                                     hipStream_t stream = 0)
@@ -398,7 +399,7 @@ struct AttnForwardMfma16x16KernelLauncher
 
         fmha_fwd_mfma_16x16_kernel<T, Config><<<grid, block, 0, stream>>>(
             Q, K, V, O, softmax_lse,
-            dropout_mask, dropout_scale, scale,
+            dropout_mask, dropout_scale, scale, uniform_seq_len,
             cu_seqlens_q, cu_seqlens_q_padded,
             cu_seqlens_kv, cu_seqlens_kv_padded);
     }

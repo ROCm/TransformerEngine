@@ -30,6 +30,17 @@ bool is_ck_backend_supported(
   size_t head_dim_v,
   int64_t window_size_left,
   int64_t window_size_right);
+
+constexpr size_t kSmallSeqMaxSeqlen = 17;
+
+bool is_static_small_seq_eligible(DType dtype,
+                                  NVTE_Bias_Type bias_type,
+                                  NVTE_Mask_Type mask_type,
+                                  float dropout,
+                                  size_t head_dim_qk,
+                                  size_t head_dim_v,
+                                  size_t num_attn_heads,
+                                  size_t num_gqa_groups);
 }  // namespace fused_attn_rocm
 
 void fused_attn_ck_fwd(

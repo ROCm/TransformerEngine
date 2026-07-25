@@ -751,7 +751,7 @@ class FusedAttnRunner:
                     self.pad_kv,
                     self.seqlens_kv,
                     self.offsets_kv,
-                ) = self._setup_segments_ck_smallseq(generate_random_segment_ids)
+                ) = self._setup_segments_ck_smallseq(generate_random_segment_ids_and_pos)
             else:
                 self.segment_ids_q, self.segment_pos_q, self.pad_q = (
                 generate_random_segment_ids_and_pos(

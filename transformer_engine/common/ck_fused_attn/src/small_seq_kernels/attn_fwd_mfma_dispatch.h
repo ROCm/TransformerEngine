@@ -38,11 +38,11 @@ struct AttnForwardMfmaDispatchLauncher
                                     float sqr_dk_scale,
                                     T* O,
                                     void* aux,
+                                    int uniform_seq_len,
                                     const int* cu_seqlens_q,
                                     const int* cu_seqlens_q_padded,
                                     const int* cu_seqlens_kv,
                                     const int* cu_seqlens_kv_padded,
-                                    const int* padded_q_to_batch,
                                     int total_padded_q,
                                     int batch,
                                     hipStream_t stream = 0)
@@ -51,15 +51,15 @@ struct AttnForwardMfmaDispatchLauncher
         {
             AttnForwardMfmaKernelLauncher<T, Config>::run_attn_fwd_kernel(
                 Q, K, V, dropout_mask, dropout_p, sqr_dk_scale, O, static_cast<T*>(aux),
-                cu_seqlens_q, cu_seqlens_q_padded, cu_seqlens_kv, cu_seqlens_kv_padded,
-                padded_q_to_batch, total_padded_q, batch, stream);
+                uniform_seq_len, cu_seqlens_q, cu_seqlens_q_padded, cu_seqlens_kv,
+                cu_seqlens_kv_padded, total_padded_q, batch, stream);
         }
         else
         {
             AttnForwardMfma16x16KernelLauncher<T, Config>::run_attn_fwd_kernel(
                 Q, K, V, dropout_mask, dropout_p, sqr_dk_scale, O, static_cast<float*>(aux),
-                cu_seqlens_q, cu_seqlens_q_padded, cu_seqlens_kv, cu_seqlens_kv_padded,
-                padded_q_to_batch, total_padded_q, batch, stream);
+                uniform_seq_len, cu_seqlens_q, cu_seqlens_q_padded, cu_seqlens_kv,
+                cu_seqlens_kv_padded, total_padded_q, batch, stream);
         }
     }
 };
