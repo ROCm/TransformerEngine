@@ -180,7 +180,14 @@ def _run_attention_profiler(model, attention, column_name, dirname):
         "-c",
         py_code,
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+    except FileNotFoundError:
+        print(
+            "WARNING: rocprofv3 not found on PATH; kernel timing columns may be empty.",
+            file=sys.stderr,
+        )
+        return
     if result.returncode != 0:
         print(
             f"WARNING: rocprofv3 failed (exit {result.returncode}); "

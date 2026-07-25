@@ -70,7 +70,7 @@ run_test_config(){
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
     run_default_fa 3 test_sanity_hipified_cast_transpose.py
-    with_amd_smi_pythonpath run_default_fa 1 test_sanity_import.py
+    run_default_fa 1 test_sanity_import.py
     run_default_fa 1 test_torch_compile.py
     run_default_fa 1 attention/test_attention.py # Backend selection is controlled by the test
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 attention/test_attention.py -k "test_deterministic_bwd_ck"
@@ -103,7 +103,7 @@ run_test_config_mgpu(){
     #this test is not really mGPU but time sensitive so run it here because sGPU tests
     #run in parallel on CI and it affects timing
     run_default_fa 1 test_gemm_sm_count.py
-    with_amd_smi_pythonpath run_default_fa 3 test_sanity_import.py
+    run_default_fa 3 test_sanity_import.py
     run_default_fa 3 distributed/test_cast_master_weights_to_fp8.py
     run_default_fa 3 distributed/test_comm_gemm_overlap.py
     run_default_fa 2 distributed/test_fusible_ops.py

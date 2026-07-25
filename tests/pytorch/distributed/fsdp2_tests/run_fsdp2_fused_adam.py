@@ -836,7 +836,7 @@ def test_dcp_output_parity(recipe_name, async_save):
             future = dcp.async_save(
                 save_state,
                 checkpoint_id=checkpoint_dir,
-                async_stager=BlockingAsyncStager(), 
+                async_stager=BlockingAsyncStager(),
             )
             future.result()  # Block on async save completion
         else:
