@@ -531,8 +531,8 @@ BwdFmhaArgs build_bwd_fmha_args(const CkAttnBwdArgs& args){
   }
 
   aiter::mha_bwd_args fmha_args{};
-  fmha_args.sink_ptr = nullptr;
-  fmha_args.d_sink_ptr = nullptr;
+  fmha_args.sink_ptr = args.sink_ptr;
+  fmha_args.d_sink_ptr = args.d_sink_ptr;
   fmha_args.mask_type = static_cast<int>(static_cast<mask_enum>(args.attn_mask_type));
   // Mirrors AITER's small-seqlen guard at aiter/ops/mha.py:1689.
   fmha_args.use_asm_v3 = (args.s_q < 16) ? false : args.uses_bwd_v3;
@@ -566,8 +566,6 @@ BwdFmhaArgs build_bwd_fmha_args(const CkAttnBwdArgs& args){
   fmha_args.dbias_ptr = ((!args.is_group_mode()) && has_dbias)
                           ? (bias_shape==BiasShape::kBHSS ? args.dbias_ptr : args.dbias_expanded_ptr)
                           : nullptr;
-  fmha_args.sink_ptr = args.sink_ptr;
-  fmha_args.d_sink_ptr = args.d_sink_ptr;
 
   if (args.is_group_mode()) {
     fmha_args.seqstart_q_ptr = args.cu_seqlen_q_padded_ptr==nullptr? args.cu_seqlen_q_ptr : args.cu_seqlen_q_padded_ptr;
