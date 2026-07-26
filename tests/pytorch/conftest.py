@@ -37,22 +37,8 @@ _TRITON_GEMM_GATE_MARKERS = (
 )
 
 
-# Tests known to fail with fp32 on gfx942 under NVTE_USE_GEMM_TRITON=1.
-# Value True  -> skip only the fp32-parametrized variants of that test
-# Value False -> skip every variant of that test (not parametrized on dtype
-#                but exercises fp32 internally)
-_KNOWN_BAD_FP32_ON_GFX942 = {
-    # tests/pytorch/triton_kernels/test_gemm.py
-    "test_triton_vs_pytorch_regular": True,
-    # tests/pytorch/test_fusible_ops.py
-    "test_basic_linear": True,
-    "test_custom_forward_fused_op2": False,
-    "test_custom_backward_fused_op": False,
-}
-
-
 def _has_fp32_param(item) -> bool:
-    """Whether an item's parametrize values include fp32."""
+    """Whether an item's parametrize values include fp32 (torch.float32 or "fp32")."""
     import torch  # local import so conftest import stays cheap
 
     params = getattr(item, "callspec", None)
@@ -62,6 +48,40 @@ def _has_fp32_param(item) -> bool:
         if v is torch.float32 or (isinstance(v, str) and v == "fp32"):
             return True
     return False
+
+
+def _correctness_kernel_is_pure_fp32(item) -> bool:
+    """test_correctness parametrizes on (in_dtype, out_dtype) strings; skip only
+    the pure-fp32 combo. fp16->fp32 accumulate and fp8->fp32 are separate code
+    paths that pass on gfx942."""
+    params = getattr(item, "callspec", None)
+    if params is None:
+        return False
+    return params.params.get("in_dtype") == "fp32" and params.params.get("out_dtype") == "fp32"
+
+
+def _always(item) -> bool:
+    return True
+
+
+# Tests known to fail with fp32 on gfx942 under NVTE_USE_GEMM_TRITON=1. The value
+# is a predicate on the pytest item that returns True if this specific variant
+# should be skipped (allows finer-grained control than "any fp32 param" for tests
+# with multiple dtype-like parameters).
+_KNOWN_BAD_FP32_ON_GFX942 = {
+    # tests/pytorch/triton_kernels/test_gemm.py -- Triton vs torch.matmul
+    "test_triton_vs_pytorch_regular": _has_fp32_param,
+    # tests/pytorch/triton_kernels/test_gemm.py -- Triton vs C++ backend
+    "test_triton_vs_cpp_regular": _has_fp32_param,
+    "test_triton_vs_cpp_bias_forward": _has_fp32_param,
+    # tests/pytorch/triton_kernels/test_gemm_kernel.py -- low-level kernel
+    # (parametrizes on separate in_dtype / out_dtype strings)
+    "test_correctness": _correctness_kernel_is_pure_fp32,
+    # tests/pytorch/test_fusible_ops.py
+    "test_basic_linear": _has_fp32_param,
+    "test_custom_forward_fused_op2": _always,
+    "test_custom_backward_fused_op": _always,
+}
 
 
 def pytest_collection_modifyitems(config, items):
@@ -87,10 +107,10 @@ def pytest_collection_modifyitems(config, items):
     )
     for item in items:
         func_name = item.name.split("[")[0]
-        if func_name not in _KNOWN_BAD_FP32_ON_GFX942:
+        predicate = _KNOWN_BAD_FP32_ON_GFX942.get(func_name)
+        if predicate is None:
             continue
-        requires_fp32_param = _KNOWN_BAD_FP32_ON_GFX942[func_name]
-        if requires_fp32_param and not _has_fp32_param(item):
+        if not predicate(item):
             continue
         item.add_marker(skip_marker)
 
