@@ -54,8 +54,7 @@ ENV GPU_ARCH=${GPU_ARCH} \
     PATH=/opt/venv/bin:/opt/rocm/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
 RUN python -m pip install --upgrade pip setuptools wheel \
-    && pip install --no-cache-dir ipython pytest fire pydantic pybind11 ninja pandas expecttest onnxscript \
-    && pip install --no-cache-dir /opt/rocm/share/amd_smi
+    && pip install --no-cache-dir ipython pytest fire pydantic pybind11 ninja pandas expecttest onnxscript
 
 # Python ROCm SDK + torch from https://repo.amd.com/rocm/whl/<AMD_GPU_FAMILY>/
 RUN case "${GPU_ARCH}" in \

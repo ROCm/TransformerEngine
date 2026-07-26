@@ -19,6 +19,10 @@ from transformer_engine.pytorch.attention.dot_product_attention.context_parallel
 )
 from transformer_engine.pytorch.attention.dot_product_attention.utils import combine_and_quantize
 import transformer_engine_torch as tex
+
+# Launched as a script by torchrun, so the directory of this file is only on
+# sys.path when the interpreter adds it implicitly -- which PYTHONSAFEPATH disables.
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from test_attention_with_cp import model_configs_flash_attn, model_configs_fused_attn
 from transformer_engine.pytorch import (
     autocast,

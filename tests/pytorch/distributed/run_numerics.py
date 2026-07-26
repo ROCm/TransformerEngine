@@ -32,6 +32,10 @@ from transformer_engine.common.recipe import (
 from transformer_engine.pytorch import Float8CurrentScalingQuantizer, NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.distributed import gather_along_first_dim
+
+# Launched as a script by torchrun, so the directory of this file is only on
+# sys.path when the interpreter adds it implicitly -- which PYTHONSAFEPATH disables.
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from run_layer_with_overlap import _compare_tensors
 
 if IS_HIP_EXTENSION:

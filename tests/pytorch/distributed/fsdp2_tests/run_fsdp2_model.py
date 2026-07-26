@@ -54,6 +54,9 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch import QuantizedTensor
 from contextlib import nullcontext
 
+# Launched as a script by torchrun, so the directory of this file is only on
+# sys.path when the interpreter adds it implicitly -- which PYTHONSAFEPATH disables.
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from fsdp2_utils import get_recipe_from_string, save_custom_attrs, restore_custom_attrs
 
 

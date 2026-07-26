@@ -50,14 +50,24 @@ class BuildPy(_build_py):
     """Generate _rocm_init.py for ROCm builds only."""
 
     def run(self):
+        # Generated into the source tree so build_py picks it up as an ordinary module of
+        # the package, putting the same file in the checkout and in the wheel. Both need
+        # it: transformer_engine/__init__.py imports it with `from . import _rocm_init`
+        # and tolerates its absence, so an install without it silently skips the rocm-sdk
+        # preload and loads the native libraries against an uninitialized ROCm runtime.
+        # The generated file is gitignored.
+        #
+        # The write has to stay ahead of super().run(): build_py globs the package
+        # directory as it runs, so a later write would land in the checkout but miss the
+        # wheel.
+        dest = current_file_path / "transformer_engine" / "_rocm_init.py"
+        if rocm_build():
+            shutil.copy2(_ROCM_INIT_TEMPLATE, dest)
+        else:
+            # Drop a copy left behind by an earlier ROCm build in the same tree,
+            # so the wheel contents follow this build's config, not build history.
+            dest.unlink(missing_ok=True)
         super().run()
-        if not rocm_build():
-            return
-        dest = Path(self.build_lib) / "transformer_engine" / "_rocm_init.py"
-        dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(_ROCM_INIT_TEMPLATE, dest)
-        if self.compile:
-            self.byte_compile([str(dest)])
 
 if "pytorch" in frameworks:
     from torch.utils.cpp_extension import BuildExtension
