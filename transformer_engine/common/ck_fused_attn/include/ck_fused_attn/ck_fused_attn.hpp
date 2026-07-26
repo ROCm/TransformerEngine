@@ -14,15 +14,6 @@
 
 namespace ck_fused_attn{
 
-// Fixed head dim of AITER's v3 asm bf16 dq_shuffle backward path. AITER's atomic16 dq_acc scratch is
-// padded to this head dim regardless of the actual d_qk (see AITER csrc/py_itfs_cu/asm_mha_varlen_bwd.cu:
-// "padding dq_accum seqlen to 16x of max_seqlen_q, head dim to 128"), and the only ragged/group dq_shuffle
-// kernel is bwd_hd128_dq_shuffle_group. Both the dq_acc sizing (fused_attn_ck.cpp) and the stride override
-// (ck_fused_attn_bwd.cpp) reference this so the two sites can never drift apart.
-static constexpr int64_t kV3DqAccHeadDim = 128;
-// AITER pads the dq_acc seqlen up to a multiple of this in the atomic16 layout (same source reference).
-static constexpr int64_t kV3DqAccSeqAlign = 16;
-
 // input qkv dtypes
 enum class DType {
   kFloat16    = 0,  /*!< 16-bit float (E5M10) */
@@ -122,7 +113,6 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
   // dQ
   void* dq_ptr = nullptr;
   uint64_t stride_b_dq = 0, stride_h_dq = 0, stride_s_dq = 0;
-  void* dq_acc_ptr = nullptr;
 
   // dK / dV expanded (MQA/GQA reduction inputs; null when h==hg)
   void* dk_expanded_ptr = nullptr;
@@ -143,6 +133,13 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
   // Workspace shared with forward LSE
   void* lse_workspace_ptr = nullptr;
 
+  // AOT scratch for AITER's internal bwd allocations (launcher metadata + dq_acc
+  // accumulator). Carved from the caller's workspace and handed to aiter through
+  // the workspace_alloc callback; ck_attn_bwd_workspace_size() reports the bytes
+  // to reserve. aiter_workspace_bytes bounds the bump allocator.
+  void* aiter_workspace_ptr = nullptr;
+  size_t aiter_workspace_bytes = 0;
+
   // V3 ASM kernel selection
   bool deterministic = false;
   bool uses_bwd_v3 = false;
@@ -152,6 +149,10 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
 hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream);
 hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream);
 
+// Bytes of AOT device scratch ck_attn_bwd needs for AITER's internal bwd
+// workspace (launcher metadata + dq_acc), covering both the v2 (CK launcher) and
+// v3 (asm) dispatch paths. Pure host-side computation; no kernel launch.
+size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args);
 // Probe whether AITER's v3 (asm) path will run for the given config, without
 // launching a kernel (backed by AITER's v3_api_check dry-run). Returns true iff
 // the v3 path is selected; false means the CK v2 path (or no support) would run.
