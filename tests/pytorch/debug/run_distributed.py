@@ -20,8 +20,8 @@ import nvdlfw_inspect.api as debug_api
 from transformer_engine.debug import set_weight_tensor_tp_group_reduce
 from transformer_engine.pytorch import is_fp8_available
 
-# Launched as a script by torchrun, so the directory of this file is only on
-# sys.path when the interpreter adds it implicitly -- which PYTHONSAFEPATH disables.
+# Executed as a script, so sibling imports rely on the interpreter putting this file's
+# directory on sys.path -- which safe-path mode (PYTHONSAFEPATH, python -P) disables.
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from test_numerics import (
     _emulate_linear,

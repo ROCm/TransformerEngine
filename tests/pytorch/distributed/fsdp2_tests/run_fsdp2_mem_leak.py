@@ -48,8 +48,8 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
 
-# Launched as a script by torchrun, so the directory of this file is only on
-# sys.path when the interpreter adds it implicitly -- which PYTHONSAFEPATH disables.
+# Executed as a script, so sibling imports rely on the interpreter putting this file's
+# directory on sys.path -- which safe-path mode (PYTHONSAFEPATH, python -P) disables.
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from fsdp2_utils import get_recipe_from_string, save_custom_attrs, restore_custom_attrs
 

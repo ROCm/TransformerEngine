@@ -18,9 +18,9 @@ from typing import Optional
 
 import transformer_engine.pytorch as te
 
-# Also run directly as a script to regenerate checkpoint files, and the directory of
-# this file is only on sys.path when the interpreter adds it implicitly -- which
-# PYTHONSAFEPATH disables.
+# Also executed as a script to regenerate the checkpoint files, where sibling imports
+# rely on the interpreter putting this file's directory on sys.path -- which safe-path
+# mode (PYTHONSAFEPATH, python -P) disables.
 sys.path.append(str(pathlib.Path(__file__).resolve().parent))
 from utils import make_recipe
 

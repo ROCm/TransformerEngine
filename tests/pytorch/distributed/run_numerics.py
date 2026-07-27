@@ -33,8 +33,8 @@ from transformer_engine.pytorch import Float8CurrentScalingQuantizer, NVFP4Quant
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.distributed import gather_along_first_dim
 
-# Launched as a script by torchrun, so the directory of this file is only on
-# sys.path when the interpreter adds it implicitly -- which PYTHONSAFEPATH disables.
+# Executed as a script, so sibling imports rely on the interpreter putting this file's
+# directory on sys.path -- which safe-path mode (PYTHONSAFEPATH, python -P) disables.
 sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from run_layer_with_overlap import _compare_tensors
 
