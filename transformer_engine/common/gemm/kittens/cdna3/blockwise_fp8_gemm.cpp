@@ -214,13 +214,15 @@ void micro_tk(const micro_globals<AType, BType, OType> g) {
 
         // Cluster 6
         asm volatile("s_waitcnt lgkmcnt(0)");
-        if (is_next_k_partial || is_last_m) {
-            load_tile_masked<NUM_THREADS>(As, g.a, row, k_step + 1, M, K);
-        } else {
-            kittens::store_register_buffer_to_shared<NUM_THREADS>(As, a_buffer_next);
-        }
-        if (is_next_k_partial || is_last_n) {
-            load_tile_masked<NUM_THREADS>(Bs, g.b, col, k_step + 1, N, K);
+        if (!is_next_k_partial) {
+            if (is_last_m) {
+                load_tile_masked<NUM_THREADS>(As, g.a, row, k_step + 1, M, K);
+            } else {
+                kittens::store_register_buffer_to_shared<NUM_THREADS>(As, a_buffer_next);
+            }
+            if (is_last_n) {
+                load_tile_masked<NUM_THREADS>(Bs, g.b, col, k_step + 1, N, K);
+            }
         }
         load_scale_global_reg<REG_M / 16>(sa_reg0, sa_block + k_step * M, local_m0, sa_range);
         load_scale_global_reg<REG_M / 16>(sa_reg1, sa_block + k_step * M, local_m1, sa_range);
@@ -240,8 +242,12 @@ void micro_tk(const micro_globals<AType, BType, OType> g) {
         __builtin_amdgcn_sched_barrier(0);
 
         // Cluster 8
-        if (!(is_next_k_partial || is_last_n))
+        if (is_next_k_partial) {
+            load_tile_masked<NUM_THREADS>(As, g.a, row, k_step + 1, M, K);
+            load_tile_masked<NUM_THREADS>(Bs, g.b, col, k_step + 1, N, K);
+        } else if (!is_last_n) {
             kittens::store_register_buffer_to_shared<NUM_THREADS>(Bs, b_buffer_next);
+        }
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
