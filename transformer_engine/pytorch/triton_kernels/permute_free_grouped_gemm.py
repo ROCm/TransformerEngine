@@ -54,6 +54,12 @@ __all__ = [
 # align is padded to this block size, independent of the fwd/dgrad BLOCK_SIZE_M.
 _WGRAD_CONTRACT_M = 32
 
+# Max forward align/kernel ``block_m`` for the *gated* FlyDSL fwd. It stages a ``2F`` [gate|up]
+# B-tile in LDS, so a larger Triton-optimal ``block_m`` (e.g. 256) overflows the 160 KB budget
+# for wide-N tiles and forces FlyDSL onto a tiny (64x64) tile (losing most of its edge). Capping
+# at 128 keeps a fast wide-N tile. See ``_fwd_align_block_size_m``.
+_FLYDSL_GATED_BLOCK_M = 128
+
 # Resolved lazily on first wgrad call: a callable (FlyDSL wgrad wrapper) if AITER's FlyDSL
 # kernel imports, otherwise ``False`` (fall back to the Triton kernel). ``None`` = unresolved.
 _FLYDSL_WGRAD: Any = None
@@ -132,6 +138,7 @@ def _route_list_moe_fwd(
     activation: Optional[str] = None,
     dispatched_probs: Optional[torch.Tensor] = None,
     preact_out: Optional[torch.Tensor] = None,
+    gated_a: bool = False,
 ) -> None:
     """Run the route-list forward gather-GEMM, preferring the FlyDSL backend.
 
@@ -159,6 +166,7 @@ def _route_list_moe_fwd(
                 activation=activation,
                 dispatched_probs=dispatched_probs,
                 preact_out=preact_out,
+                gated_a=gated_a,
             )
             return
 
@@ -178,7 +186,34 @@ def _route_list_moe_fwd(
         activation=activation,
         dispatched_probs=dispatched_probs,
         preact_out=preact_out,
+        gated_a=gated_a,
     )
+
+
+def _fwd_align_block_size_m(
+    A: torch.Tensor,
+    B: torch.Tensor,
+    *,
+    gated: bool,
+    default_block_m: int,
+) -> int:
+    """Pick the forward align/kernel ``block_m``, favoring the backend that will run.
+
+    ``block_m`` is baked into ``prepare_moe_align`` (it sets the row padding), so the fwd GEMM
+    and the align must agree on it. The gated FlyDSL fwd is LDS-limited: a Triton-optimal
+    ``block_m`` of 256 forces it onto a tiny tile (measured ~1.06x vs Triton) whereas 128 keeps
+    a fast wide-N tile (~1.35x). When the FlyDSL gated path will actually be selected, cap
+    ``block_m`` at :data:`_FLYDSL_GATED_BLOCK_M`; otherwise keep the (Triton-optimal) default.
+    """
+    if not gated or default_block_m <= _FLYDSL_GATED_BLOCK_M:
+        return default_block_m
+    flydsl = _get_flydsl_fwd()
+    if not flydsl:
+        return default_block_m
+    _, supported = flydsl
+    if supported(A, B, block_m=_FLYDSL_GATED_BLOCK_M):
+        return _FLYDSL_GATED_BLOCK_M
+    return default_block_m
 
 
 def is_permute_free_grouped_gemm_enabled() -> bool:
@@ -492,8 +527,15 @@ def permute_free_grouped_gemm_bf16(
     # Fused gated activation halves the stored width (2F -> F).
     stored_features = out_features // 2 if gated_act else out_features
 
-    kernel_config = config or get_default_moe_kernel_config(num_recv_tokens)
-    block_size_m = int(kernel_config["BLOCK_SIZE_M"])
+    # Copy so the backend-aware block_m override never mutates the caller's config dict.
+    kernel_config = dict(config or get_default_moe_kernel_config(num_recv_tokens))
+    block_size_m = _fwd_align_block_size_m(
+        hidden_states,
+        weights_stacked,
+        gated=gated_act,
+        default_block_m=int(kernel_config["BLOCK_SIZE_M"]),
+    )
+    kernel_config["BLOCK_SIZE_M"] = block_size_m
 
     routing = prepare_moe_align(routing, block_size_m)
 
@@ -864,24 +906,32 @@ def permute_free_grouped_gemm_bf16_fc2(
     routing: MoERoutingMetadata,
     *,
     config: Optional[Dict[str, Any]] = None,
+    activation: Optional[str] = None,
+    dispatched_probs: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Route-list FC2 forward with gather-combine to token order (bf16 MoE).
 
-    ``fc2_input`` is the route-ordered activation ``[T * min(topk, E), in_features]`` (FC1's padded
-    output; valid rows are the compact range ``[0, num_routes)``). For each route the kernel
-    reads its own row (``index_a_by_route_pos=True``) and computes the compact per-route
-    ``fc2_input[route] @ W2[e]^T``; a separate contention-free gather-combine pass
-    (:func:`route_gather_combine`) then sums each token's routes into its output row. Because
-    the router probs are applied upstream (at the activation), that combine *is* the token
-    combine. (This replaces the earlier fused atomic scatter-to-token.)
+    ``fc2_input`` is the route-ordered FC1 output. When ``activation`` is set (``"silu"`` /
+    ``"gelu"``) it is the raw ``2F`` ``[gate | up]`` pre-activation and the kernel fuses
+    ``act(gate) * up [* prob]`` on the ``A`` operand before the GEMM; otherwise it is the
+    ``F``-wide activated buffer (legacy path). For each route the kernel reads its row
+    (``index_a_by_route_pos=True``) and computes the compact per-route GEMM; a separate
+    contention-free gather-combine pass sums each token's routes into its output row.
 
     Parameters
     ----------
     fc2_input:
-        Route-ordered activations ``[T * min(topk, E), in_features]``, bf16.
+        Route-ordered activations ``[T * min(topk, E), in_features]`` (``F``) or, when
+        ``activation`` is set, the raw ``2F`` ``[gate | up]`` pre-activation from FC1.
     weights:
         Expert weights ``[num_experts, out_features, in_features]`` (W2) or list of ``[out,
         in]``.
+    activation:
+        When set, fuse ``act(gate) * up`` (+ optional ``dispatched_probs``) on the ``A``
+        operand (FC2 prologue). Requires ``fc2_input.shape[-1] == 2 * in_features``.
+    dispatched_probs:
+        Optional ``[num_recv_tokens, num_experts]`` gating probabilities (fused in the FC2
+        prologue when ``activation`` is set).
     routing:
         ``MoERoutingMetadata`` carrying (or able to build) the route-list align buffers.
 
@@ -903,7 +953,14 @@ def permute_free_grouped_gemm_bf16_fc2(
         weights_stacked = weights_stacked.contiguous()
 
     num_experts, out_features, in_features = weights_stacked.shape
-    if fc2_input.shape[-1] != in_features:
+    gated_a = activation is not None
+    if gated_a:
+        if fc2_input.shape[-1] != 2 * in_features:
+            raise ValueError(
+                f"gated FC2 expects 2F preact input ({2 * in_features} cols), "
+                f"got {fc2_input.shape[-1]}."
+            )
+    elif fc2_input.shape[-1] != in_features:
         raise ValueError(
             f"fc2_input in_features ({fc2_input.shape[-1]}) does not match weights "
             f"({in_features})."
@@ -931,19 +988,17 @@ def permute_free_grouped_gemm_bf16_fc2(
         dtype=torch.bfloat16,
         device=fc2_input.device,
     )
-    fused_route_list_moe(
+    _route_list_moe_fwd(
         fc2_input,
         weights_stacked,
         compact,
-        routing.sorted_slot_ids,
-        routing.expert_ids,
-        routing.num_tokens_post_padded,
-        routing.block_start,
-        routing.route_start,
+        routing,
         num_recv_tokens=routing.num_recv_tokens,
-        compute_type=tl.bfloat16,
         config=kernel_config,
         index_a_by_route_pos=True,
+        activation=activation,
+        dispatched_probs=dispatched_probs,
+        gated_a=gated_a,
     )
     return route_gather_combine(
         compact,
@@ -1020,17 +1075,12 @@ def permute_free_grouped_gemm_bf16_fc2_dgrad(
         dtype=torch.bfloat16,
         device=grad_output.device,
     )
-    fused_route_list_moe(
+    _route_list_moe_fwd(
         grad_output,
         weights_t,
         dgrad,
-        routing.sorted_slot_ids,
-        routing.expert_ids,
-        routing.num_tokens_post_padded,
-        routing.block_start,
-        routing.route_start,
+        routing,
         num_recv_tokens=grad_output.shape[0],
-        compute_type=tl.bfloat16,
         config=dgrad_config,
         index_a_by_route_pos=False,
     )
@@ -1170,35 +1220,26 @@ def permute_free_grouped_gemm_forward(
     *,
     activation: Optional[str] = None,
     dispatched_probs: Optional[torch.Tensor] = None,
-    save_preact: bool = False,
 ) -> PermuteFreeForwardResult:
     """Dispatch the permute-free grouped-GEMM forward from the routing direction + fusion hints.
 
     ``routing.route_space`` selects the direction:
 
-    - ``True`` (FC2): route-ordered input, fused scatter-to-token -> ``[num_recv, out]``.
-    - ``False`` (FC1): gather-in-GEMM -> padded ``[T * min(topk, E), out]`` route buffer. When
-      ``activation`` is set the gated activation (+ optional ``dispatched_probs``) is fused into
-      the epilogue; ``save_preact`` then also returns the raw ``2F`` pre-activation for the
-      backward.
+    - ``True`` (FC2): route-ordered ``2F`` pre-activation (FC1 output), fused
+      ``act(gate)*up[*prob]`` prologue + GEMM + gather-combine -> ``[num_recv, out]``.
+    - ``False`` (FC1): gather-in-GEMM -> padded ``[T * min(topk, E), 2F]`` raw ``[gate | up]``
+      pre-activation (no activation fusion here; the ``activation`` hint is consumed on FC2).
     """
     if getattr(routing, "route_space", False):
         return PermuteFreeForwardResult(
-            permute_free_grouped_gemm_bf16_fc2(hidden_states, weights, routing)
+            permute_free_grouped_gemm_bf16_fc2(
+                hidden_states,
+                weights,
+                routing,
+                activation=activation,
+                dispatched_probs=dispatched_probs,
+            )
         )
-    if activation is not None:
-        result = permute_free_grouped_gemm_bf16(
-            hidden_states,
-            weights,
-            routing,
-            activation=activation,
-            dispatched_probs=dispatched_probs,
-            return_preact=save_preact,
-        )
-        if save_preact:
-            out, preact = result
-            return PermuteFreeForwardResult(out, preact)
-        return PermuteFreeForwardResult(result)
     return PermuteFreeForwardResult(
         permute_free_grouped_gemm_bf16(hidden_states, weights, routing)
     )
@@ -1216,6 +1257,7 @@ def permute_free_grouped_gemm_backward(
     fc1_activation: Optional[str] = None,
     preact: Optional[torch.Tensor] = None,
     dispatched_probs: Optional[torch.Tensor] = None,
+    fc2_activation: Optional[str] = None,
     wgrad_out: Optional[torch.Tensor] = None,
     wgrad_accumulate: bool = False,
 ) -> PermuteFreeBackwardResult:
@@ -1225,6 +1267,11 @@ def permute_free_grouped_gemm_backward(
     gated-activation path (``fc1_activation`` set) the raw ``2F`` GEMM-output gradient (and the
     route-prob gradient) is first reconstructed from the saved ``preact`` and fed to the
     *unchanged* dgrad/wgrad. ``hidden_states`` (the forward input) is only needed for wgrad.
+
+    On the FC2 path (``route_space=True``), when ``fc2_activation`` is set together with
+    ``preact`` the wgrad rebuilds its F-wide input (``act(gate)*up*prob``) in-flight from the FC1
+    pre-activation instead of consuming a stored ``hidden_states`` -- the FC1->FC2 recompute
+    handoff, letting the FC2 forward skip saving its F-wide input.
 
     ``wgrad_out`` (optional ``[E, out, in]`` accumulator) folds the wgrad straight into the
     caller's buffer (``+=`` if ``wgrad_accumulate`` else ``=``) instead of returning a fresh
@@ -1241,34 +1288,40 @@ def permute_free_grouped_gemm_backward(
 
     if route_space:
         # FC2: grad is token-space [num_recv, out]. dgrad gathers back to the compact route
-        # buffer [T * min(topk, E), in]; wgrad token-gathers the grad on its N-operand
-        # (swap_gather) so it emits [E, H, F] directly -- foldable into ``wgrad_out``.
+        # buffer [T * min(topk, E), F] (GEMM operand), then the gated-activation backward maps
+        # dL/dF -> dL/d(2F) (+ dprob) when the forward fused the FC2 prologue.
         if requires_dgrad:
             weights_stacked = _stack_expert_weights(weights)  # [E, H, F], zero-copy when grouped
-            dgrad = permute_free_grouped_gemm_bf16_fc2_dgrad(grad_output, weights_stacked, routing)
+            dgrad_f = permute_free_grouped_gemm_bf16_fc2_dgrad(
+                grad_output, weights_stacked, routing
+            )
+            if fc2_activation is not None and hidden_states is not None:
+                dgrad, grad_probs = permute_free_gated_act_bwd(
+                    dgrad_f,
+                    hidden_states,
+                    routing,
+                    activation=fc2_activation,
+                    dispatched_probs=dispatched_probs,
+                )
+                if not (dispatched_probs is not None and dispatched_probs.requires_grad):
+                    grad_probs = None
+            else:
+                dgrad = dgrad_f
         if requires_wgrad:
             weights_shape = (num_gemms, weights[0].size(0), weights[0].size(1))
+            recompute = fc2_activation is not None and hidden_states is not None
             dW = permute_free_grouped_gemm_bf16_fc2_wgrad(
                 hidden_states, grad_output, weights_shape, routing,
                 out=wgrad_out, accumulate=wgrad_accumulate,
+                preact=hidden_states if recompute else None,
+                dispatched_probs=dispatched_probs if recompute else None,
+                activation=fc2_activation if recompute else None,
             )  # [E, H, F]
             wgrad_stacked = dW
             wgrad_applied = wgrad_out is not None
     else:
-        # FC1: grad is the padded [T * min(topk, E), out] route buffer; dgrad scatters the input grad
-        # back to received-token rows.
-        if fc1_activation is not None:
-            # Reconstruct the raw 2F GEMM-output grad (and the prob grad) from the saved
-            # pre-activation, then run the *unchanged* dgrad/wgrad on it.
-            grad_output, grad_probs = permute_free_gated_act_bwd(
-                grad_output,
-                preact,
-                routing,
-                activation=fc1_activation,
-                dispatched_probs=dispatched_probs,
-            )
-            if not (dispatched_probs is not None and dispatched_probs.requires_grad):
-                grad_probs = None
+        # FC1: grad is the padded [T * min(topk, E), 2F] route buffer (from FC2 act-bwd); dgrad
+        # scatters the input grad back to received-token rows. No FC1 activation backward.
         if requires_dgrad:
             weights_stacked = _stack_expert_weights(weights)  # [E, N, H], zero-copy when grouped
             dgrad = permute_free_grouped_gemm_bf16_dgrad(grad_output, weights_stacked, routing)

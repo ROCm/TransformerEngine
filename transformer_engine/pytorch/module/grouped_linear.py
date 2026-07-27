@@ -198,12 +198,25 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Initialize input tensors
         in_features = weights[0].size(-1)
-        if inp.size(-1) != in_features:
+        perm_free_route_space = (
+            getattr(routing_metadata, "route_space", False) if routing_metadata is not None else False
+        )
+        # FC2 with a fused gated prologue consumes FC1's raw 2F [gate|up] buffer (width 2F).
+        expect_in_features = (
+            2 * in_features
+            if (
+                use_perm_free_grouped_gemm
+                and perm_free_route_space
+                and perm_free_activation is not None
+            )
+            else in_features
+        )
+        if inp.size(-1) != expect_in_features:
             raise ValueError(
                 f"Input tensor (shape={tuple(inp.size())}) is not compatible with "
                 f"weight tensor (shape={tuple(weights[0].size())})"
             )
-        inp_view = inp.reshape(-1, in_features)
+        inp_view = inp.reshape(-1, expect_in_features)
         inputmats: list
         if fp8 and not debug:
             # Disable bulk allocation when CPU offloading is active: offloading skips small
@@ -274,27 +287,18 @@ class _GroupedLinear(torch.autograd.Function):
                 use_split_accumulator = recipe.fp8_gemm_fprop.use_split_accumulator
 
         # Perform GEMM
-        perm_free_preact = None
         if use_perm_free_grouped_gemm:
-            # Save the raw 2F pre-activation when a backward needs it.
-            # It is only consumed on the FC1 fused-activation path.
-            save_preact = is_grad_enabled and (
-                inp.requires_grad
-                or weight_requires_grad
-                or (dispatched_probs is not None and dispatched_probs.requires_grad)
-            )
-            # The wrapper decides FC1 vs FC2 (and whether to fuse the gated activation) from the
-            # routing metadata + fusion hints.
+            perm_free_route_space = getattr(routing_metadata, "route_space", False)
+            # FC1 emits raw 2F [gate|up]; the ``activation`` hint on the metadata is consumed on
+            # FC2 (fused prologue). Route probs ride with FC2 as well.
             pf_result = permute_free_grouped_gemm_forward(
                 inputmats[0],
                 weights_fp8,
                 routing_metadata,
-                activation=perm_free_activation,
-                dispatched_probs=dispatched_probs,
-                save_preact=save_preact,
+                activation=perm_free_activation if perm_free_route_space else None,
+                dispatched_probs=dispatched_probs if perm_free_route_space else None,
             )
             out = pf_result.out
-            perm_free_preact = pf_result.preact
         elif use_grouped_gemm_triton:
             general_grouped_gemm_func = general_grouped_gemm_triton
             kwargs = {"m_splits_tensor": m_splits_tensor}
@@ -359,22 +363,22 @@ class _GroupedLinear(torch.autograd.Function):
             else:
                 inputmats = [None] * num_gemms
 
-            # Permute-free FC1 fused-activation backward needs the raw 2F pre-activation and the
-            # dispatched probs; append them (possibly None) after the biases so the existing
-            # front-based slicing in backward is unaffected.
+            # Permute-free FC2 backward needs the route probs when the forward fused them.
             tensors_to_save, tensor_objects = prepare_for_saving(
                 *inputmats,
                 *weights_fp8,
                 *weights,
                 *biases,
-                perm_free_preact,
                 dispatched_probs,
             )
             ctx.save_for_backward(*tensors_to_save)
             ctx.tensor_objects = tensor_objects
-            ctx.perm_free_fc1_activation = (
+            ctx.perm_free_fc2_activation = (
                 perm_free_activation
-                if (use_perm_free_grouped_gemm and not getattr(routing_metadata, "route_space", False))
+                if (
+                    use_perm_free_grouped_gemm
+                    and getattr(routing_metadata, "route_space", False)
+                )
                 else None
             )
 
@@ -485,10 +489,7 @@ class _GroupedLinear(torch.autograd.Function):
             weights = saved_tensors[num_inputs: num_inputs + N]
             saved_weights = saved_tensors[num_inputs + N : num_inputs + 2 * N]
             biases = saved_tensors[num_inputs + 2 * N : num_inputs + 3 * N]
-            # Trailing extras (permute-free FC1 fused activation): raw 2F pre-activation and the
-            # dispatched probs; None on every other path.
-            perm_free_preact = saved_tensors[num_inputs + 3 * N]
-            dispatched_probs = saved_tensors[num_inputs + 3 * N + 1]
+            dispatched_probs = saved_tensors[num_inputs + 3 * N]
 
             # Permute-free gather GEMM: both dgrad and wgrad gather along the
             # contraction axis inside a single Triton kernel.
@@ -533,9 +534,8 @@ class _GroupedLinear(torch.autograd.Function):
                     hidden_states=inputmats[0],
                     requires_dgrad=ctx.requires_dgrad,
                     requires_wgrad=ctx.weights_requires_grad,
-                    fc1_activation=getattr(ctx, "perm_free_fc1_activation", None),
-                    preact=perm_free_preact,
                     dispatched_probs=dispatched_probs,
+                    fc2_activation=getattr(ctx, "perm_free_fc2_activation", None),
                     wgrad_out=wgrad_out,
                     wgrad_accumulate=wgrad_accumulate,
                 )

@@ -126,9 +126,9 @@ class PermuteFreeMetadata(MoERoutingMetadata):
     Fusion hint (optional):
 
     activation:
-        Gated activation to fuse into the FC1 GEMM epilogue -- ``"silu"`` or ``"gelu"``.
-        ``None`` leaves the activation to the caller (no fusion). Only consumed on the FC1
-        direction (``route_space=False``).
+        Gated activation to fuse into the FC2 GEMM prologue -- ``"silu"`` or ``"gelu"``.
+        ``None`` leaves the activation to the caller (no fusion). FC1 emits raw ``2F``;
+        this hint is consumed on the FC2 direction (``route_space=True``).
 
     (The per-route gating probabilities are *not* carried here: they need a gradient, so they
     are passed as a separate autograd tensor argument to the module rather than as metadata.)
