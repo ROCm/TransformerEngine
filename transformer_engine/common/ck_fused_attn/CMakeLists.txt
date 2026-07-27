@@ -187,10 +187,7 @@ if(__AITER_CACHE_DIR STREQUAL "")
     endif()
     # Rebuild when any JIT orchestrator script/patch/runtime changes.
     file(GLOB __CK_JIT_SCRIPTS CONFIGURE_DEPENDS
-         "${__CK_JIT_SOURCE_DIR}/*.py"
-         "${__CK_JIT_SOURCE_DIR}/*.sh"
-         "${__CK_JIT_SOURCE_DIR}/*.cpp"
-         "${__CK_JIT_SOURCE_DIR}/*.patch")
+         "${__CK_JIT_SOURCE_DIR}/*")
     add_custom_command(
       OUTPUT "${__CK_FWD_SO}" "${__CK_BWD_SO}"
       COMMAND ${CMAKE_COMMAND} -E make_directory "${__CK_KERNELS_LIB}"
