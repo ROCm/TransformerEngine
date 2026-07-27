@@ -33,14 +33,24 @@ bool is_ck_backend_supported(
 
 constexpr size_t kSmallSeqMaxSeqlen = 17;
 
-bool is_static_small_seq_eligible(DType dtype,
-                                  NVTE_Bias_Type bias_type,
-                                  NVTE_Mask_Type mask_type,
-                                  float dropout,
-                                  size_t head_dim_qk,
-                                  size_t head_dim_v,
-                                  size_t num_attn_heads,
-                                  size_t num_gqa_groups);
+// Small-seq eligibility is split into static and runtime checks:
+// - Static: config known at call time (dtype, head dims, heads, bias, dropout, mask).
+//   Used during workspace sizing to reserve THD probe buffers and to gate the small-seq path
+//   before any device data is read.
+// - Runtime: actual per-batch max seqlen for THD/ragged inputs (from cu_seqlens on device).
+//   Even when static config matches, individual batches may exceed kSmallSeqMaxSeqlen; probe
+//   at execute time and fall back to regular CK when out of range.
+bool is_small_seq_supported_static(DType dtype,
+                                   NVTE_Bias_Type bias_type,
+                                   NVTE_Mask_Type mask_type,
+                                   float dropout,
+                                   size_t head_dim_qk,
+                                   size_t head_dim_v,
+                                   size_t num_attn_heads,
+                                   size_t num_gqa_groups);
+
+bool is_small_seq_supported_runtime(size_t runtime_max_seqlen_q,
+                                    size_t runtime_max_seqlen_kv);
 }  // namespace fused_attn_rocm
 
 void fused_attn_ck_fwd(

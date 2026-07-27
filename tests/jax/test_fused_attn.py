@@ -378,6 +378,8 @@ class FusedAttnRunner:
     stripe_size: int | None = None
     num_segments_per_seq: int | None = None
     use_old_rng: bool = True #ROCm may use new-style RNG
+    # THD ragged segment setup for small-seqlen CK tests
+    use_thd_smallseq_segments: bool = False
 
     # Specifies sharding resources for distributed tests
     number_of_devices: int = 1
@@ -406,7 +408,7 @@ class FusedAttnRunner:
         if self.qkv_layout.is_thd():
             if 90400 <= get_cudnn_version() < 90500:
                 return self.num_segments_per_seq
-            elif is_hip_extension() and os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") == "1":
+            elif is_hip_extension() and self.use_thd_smallseq_segments:
                 return self.num_segments_per_seq
             else:
                 # +1 for testing runtime_segments < max_segments
@@ -738,7 +740,7 @@ class FusedAttnRunner:
             return segment_ids, segment_pos, segment_pad
 
         if self.qkv_layout.is_thd():
-            if is_hip_extension() and os.environ.get("NVTE_FUSED_ATTN_CK_SMALLSEQ", "0") == "1":
+            if is_hip_extension() and self.use_thd_smallseq_segments:
                 (
                     self.num_segments_per_seq,
                     self.segment_ids_q,
@@ -2000,13 +2002,20 @@ def test_backward_bitwise_reproducible(
 # ROCm CK small-seq tests.
 @pytest.fixture
 def ck_smallseq_env(monkeypatch):
-    """Enable CK small-seq path and disable XLA GPU graphs for these tests."""
+    """ROCm test env for small-sequence CK attention tests.
+
+    On gfx942 only: enable NVTE_FUSED_ATTN_CK_SMALLSEQ and require
+    XLA command buffers disabled. 
+    
+    On gfx950, normal CK/aiter kernels are used.
+    """
     if not is_hip_extension():
         pytest.skip("CK unfused small-seq tests only on ROCm")
     # This test uses the dedicated small-seq CK path (NVTE_FUSED_ATTN_CK_SMALLSEQ),
     # which requires XLA GPU graph capture (command buffers) disabled via an empty
     # --xla_gpu_enable_command_buffer=
-    if get_device_compute_capability(0) == 94 or get_device_compute_capability(0)==95:
+    if get_device_compute_capability(0) == 94:
+        # gfx942-only MFMA small-seq path; requires command buffers disabled.
         if "xla_gpu_enable_command_buffer=" not in os.environ.get("XLA_FLAGS", ""):
             pytest.skip("Test must be run with XLA_FLAGS='--xla_gpu_enable_command_buffer='")
         monkeypatch.setenv("NVTE_FUSED_ATTN_CK_SMALLSEQ", "1")
@@ -2016,41 +2025,48 @@ def ck_smallseq_env(monkeypatch):
 @pytest.mark.usefixtures("ck_smallseq_env")
 class TestFusedAttnCkSmallseq:
     """
-    ROCm CK small-seq (NVTE_FUSED_ATTN_CK_SMALLSEQ).
-    Covers 1<=s_q<=16, 2<=s_kv<=16 THD self/cross attention and BSHD.
+    Small-sequence CK attention (1<=s_q<=16, 2<=s_kv<=16 THD self/cross and BSHD).
+
+    On gfx942 with NVTE_FUSED_ATTN_CK_SMALLSEQ, exercises the dedicated MFMA
+    small-seq path. On gfx950 and newer, the same shapes run through normal CK/aiter
+    kernels, which now cover these cases at comparable performance.
     """
 
     @staticmethod
     # fp16 is not supported on the CK small-seq path yet (the MFMA kernels are bf16-only); the
     # backend guard rejects fp16 so it falls back to regular CK. Only bf16 is exercised here.
     @pytest.mark.parametrize("dtype", [jnp.bfloat16], ids=["BF16"])
+    @pytest.mark.parametrize("head_dim", [128, 256], ids=["d128", "d256"])
+    @pytest.mark.parametrize("num_heads", [16, 32], ids=["h16", "h32"])
     @pytest.mark.parametrize(
-        "b, s_q, s_kv, h_q, h_kv, d_qk, d_v, qkv_layout",
+        "b, s_q, s_kv, qkv_layout",
         [
             # cross-attention (s_q = 1, s_kv <= 16), THD + padding
-            pytest.param(4000, 1, 2, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-2-16-16-128-128"),
-            pytest.param(4000, 1, 4, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-4-16-16-128-128"),
-            pytest.param(4000, 1, 6, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-6-16-16-128-128"),
-            pytest.param(4000, 1, 8, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-8-16-16-128-128"),
-            pytest.param(4000, 1, 12, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-12-16-16-128-128"),
-            pytest.param(4000, 1, 16, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-16-16-16-128-128"),
-            pytest.param(4000, 1, 4, 32, 32, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-256-1-4-32-32-128-128"),
-            pytest.param(4000, 1, 6, 16, 16, 256, 256, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-128-1-6-16-16-256-256"),
+            pytest.param(4000, 1, 2, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-2"),
+            pytest.param(4000, 1, 3, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-3"),
+            pytest.param(4000, 1, 5, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-5"),
+            pytest.param(4000, 1, 6, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-6"),
+            pytest.param(4000, 1, 12, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-12"),
+            pytest.param(4000, 1, 13, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-13"),
+            pytest.param(4000, 1, 16, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-1-16"),
             # cross-attention (s_q != s_kv), THD + padding
-            pytest.param(4000, 4, 8, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-4-8-16-16-128-128"),
-            pytest.param(4000, 8, 12, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-8-12-16-16-128-128"),
-            pytest.param(4000, 12, 16, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-12-16-16-16-128-128"),
+            pytest.param(4000, 4, 8, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-4-8"),
+            pytest.param(4000, 8, 12, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-8-12"),
+            pytest.param(4000, 12, 16, QKVLayout.THD_THD_THD, id="cross-attn-THD_THD_THD-4000-12-16"),
             # self-attention, THD + padding
-            pytest.param(4000, 8, 8, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-4000-8-8-16-16-128-128"),
-            pytest.param(4000, 16, 16, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-4000-16-16-16-16-128-128"),
-            pytest.param(4000, 17, 17, 16, 16, 128, 128, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-8-17-17-16-16-128-128"),
+            pytest.param(4000, 2, 2, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-4000-2-2"),
+            pytest.param(4000, 3, 3, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-4000-3-3"),
+            pytest.param(4000, 5, 5, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-4000-5-5"),
+            pytest.param(4000, 6, 6, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-4000-6-6"),
+            pytest.param(4000, 8, 8, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-4000-8-8"),
+            pytest.param(4000, 16, 16, QKVLayout.THD_THD_THD, id="self-attn-THD_THD_THD-4000-16-16"),
             # self-attention, BSHD
-            pytest.param(4000, 2, 2, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-2-2-16-16-128-128"),
-            pytest.param(4000, 4, 4, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-4-4-16-16-128-128"),
-            pytest.param(4000, 8, 8, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-8-8-16-16-128-128"),
-            pytest.param(4000, 12, 12, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-12-12-16-16-128-128"),
-            pytest.param(4000, 16, 16, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-16-16-16-16-128-128"),
-            pytest.param(4000, 17, 17, 16, 16, 128, 128, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-17-17-16-16-128-128"),
+            pytest.param(4000, 2, 2, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-2-2"),
+            pytest.param(4000, 4, 4, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-4-4"),
+            pytest.param(4000, 8, 8, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-8-8"),
+            pytest.param(4000, 12, 12, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-12-12"),
+            pytest.param(4000, 16, 16, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-16-16"),
+            pytest.param(4000, 17, 17, QKVLayout.BSHD_BSHD_BSHD, id="self-attn-BSHD_BSHD_BSHD-4000-17-17"),
         ],
     )
     def test_smallseq(
@@ -2058,10 +2074,8 @@ class TestFusedAttnCkSmallseq:
         b,
         s_q,
         s_kv,
-        h_q,
-        h_kv,
-        d_qk,
-        d_v,
+        num_heads,
+        head_dim,
         qkv_layout,
     ):
         """CK small-seq THD/BSHD: no bias; padding mask for THD, no mask for BSHD.
@@ -2076,10 +2090,10 @@ class TestFusedAttnCkSmallseq:
             batch_size=b,
             max_seqlen_q=s_q,
             max_seqlen_kv=s_kv,
-            num_heads_q=h_q,
-            num_heads_kv=h_kv,
-            head_dim_qk=d_qk,
-            head_dim_v=d_v,
+            num_heads_q=num_heads,
+            num_heads_kv=num_heads,
+            head_dim_qk=head_dim,
+            head_dim_v=head_dim,
             attn_bias_type=AttnBiasType.NO_BIAS,
             attn_mask_type=attn_mask_type,
             softmax_type=AttnSoftmaxType.VANILLA_SOFTMAX,
@@ -2091,6 +2105,7 @@ class TestFusedAttnCkSmallseq:
             bias_shape=None,
             window_size=None,
             seq_desc_format=SeqDescFormat.Seqlens,
+            use_thd_smallseq_segments=True,
         )
         runner.test_forward()
         runner.test_backward()

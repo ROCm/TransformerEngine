@@ -168,10 +168,6 @@ uint64_t get_runtime_max_seqlen(uint64_t b,
 // ---------------------------------------------------------------------------
 // Small-sequence attention (gfx942/gfx950, NVTE_FUSED_ATTN_CK_SMALLSEQ=1)
 // ---------------------------------------------------------------------------
-constexpr size_t kSmallSeqMaxSeqlen = 17;
-
-bool is_runtime_small_seq_eligible(size_t runtime_max_seqlen_q, size_t runtime_max_seqlen_kv);
-
 size_t small_seq_thd_extra_workspace_bytes();
 
 void ck_attn_smallseq_fwd_thd(size_t batch_size,

@@ -292,11 +292,6 @@ void launch_bwd_bshd_dispatch(size_t batch,
 
 }  // namespace
 
-bool is_runtime_small_seq_eligible(size_t runtime_max_seqlen_q, size_t runtime_max_seqlen_kv) {
-  return runtime_max_seqlen_q > 0 && runtime_max_seqlen_q <= kSmallSeqMaxSeqlen &&
-         runtime_max_seqlen_kv > 0 && runtime_max_seqlen_kv <= kSmallSeqMaxSeqlen;
-}
-
 size_t small_seq_thd_extra_workspace_bytes() {
   // [max_seqlen_q probe][max_seqlen_kv probe] for THD runtime eligibility checks.
   return 2 * sizeof(uint64_t);
