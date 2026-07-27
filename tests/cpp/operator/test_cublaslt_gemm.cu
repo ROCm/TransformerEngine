@@ -497,6 +497,12 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
   else if (use_fp8) {
     atol = 1e-3;
     rtol = std::max(rtol, 1e-2);
+    // gfx950 FP8 GEMMs can show larger numerical variance
+    cudaDeviceProp prop;
+    (void)cudaGetDeviceProperties(&prop, 0);
+    if (prop.major == 9 && prop.minor == 5) {
+      rtol = std::max(rtol, 2e-2);
+    }
   }
   else if (type == DType::kBFloat16) {
     //relax for certain prime number TN gemm

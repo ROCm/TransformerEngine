@@ -76,7 +76,8 @@ if mxfp8_available:
     _quantization_list.append("mxfp8")
 if nvfp4_available:
     _quantization_list.append("nvfp4")
-    _quantization_list.append("nvfp4_4over6")
+    if not IS_HIP_EXTENSION:  # NVFP4 4over6 is not supported on ROCm
+        _quantization_list.append("nvfp4_4over6")
 
 
 @pytest.fixture(autouse=True, scope="function")
