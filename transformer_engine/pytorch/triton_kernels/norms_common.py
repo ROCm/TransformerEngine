@@ -8,6 +8,7 @@ import warnings
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.triton_kernels.common import (
@@ -245,6 +246,7 @@ def _te_norm_fwd_triton(
     IS_FP8 = isinstance(quantizer, Float8Quantizer)
     IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
     IS_FP8_CURRENT_SCALING = isinstance(quantizer, Float8CurrentScalingQuantizer)
+    IS_FP8_BLOCKWISE = isinstance(quantizer, Float8BlockQuantizer)
     BLOCK_SIZE = block_size(input_tensor, norm=kernel)
     USE_BLOCKED = use_blocked(input_tensor)
 
@@ -397,7 +399,7 @@ def _te_norm_fwd_triton(
             quantizer.amax,
             N, ATOMIC_REDUCTION_BLOCK_SIZE,
         )
-    elif IS_MXFP8 or IS_FP8_CURRENT_SCALING or isinstance(quantizer, NVFP4Quantizer):
+    elif IS_MXFP8 or IS_FP8_CURRENT_SCALING or IS_FP8_BLOCKWISE or isinstance(quantizer, NVFP4Quantizer):
         _out = quantizer.make_empty(
             input_tensor.shape,
             dtype=te_dtype_to_torch_dtype(otype),
