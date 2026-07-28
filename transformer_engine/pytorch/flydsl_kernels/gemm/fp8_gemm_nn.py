@@ -2,15 +2,20 @@
 #
 # See LICENSE for license information.
 
-"""FlyDSL tensor-wise FP8 4-wave NN GEMM kernel for Transformer Engine.
+"""FlyDSL tensor-wise FP8 NN 4-wave GEMM kernel.
+
+This NN variant preserves the working 4-wave pipeline and the kernel contract
+C = A @ B.T. A is physically [M, K] and B is physically [N, K]. During
+staging, each B 128x128 half-page is transposed into XOR-swizzled physical LDS
+[K128, N128]. The validated four-read ``ds_read_b64_tr_b8`` sequence then
+reconstructs exactly the ordinary B[N, K] fragment consumed by the production
+FP8 MFMA.
 
 The kernel specializes on K at compile time because the K128 loop is fully
-hand-unrolled. M/N are runtime launch dimensions. The private optimized core
-consumes independently typed FP8 E4M3 or E5M2 A/B tensors shaped [K, M] and
-[N, K], one FP32 inverse
-scale per operand, and writes float16, bfloat16, or float32 C shaped [M, N]. The public
-``fp8_matmul`` entry point accepts an NN contract and
-performs the required private adaptation.
+hand-unrolled. M/N are runtime launch dimensions. The public entry point and private optimized core consume independently typed
+FP8 E4M3 or E5M2 A/B tensors shaped [M, K] and [N, K], one FP32 inverse scale
+per operand, and write float16, bfloat16, or float32 C shaped [M, N]. Operand
+normalization is performed by the Transformer Engine wrapper.
 
 This module imports ``flydsl`` at import time and must therefore be imported
 lazily only after FlyDSL availability has been confirmed.
@@ -32,8 +37,8 @@ from .exceptions import FlyDSLUnsupportedError
 # Transformer Engine-local FlyDSL utilities.
 from .fp8_gemm_utils import (
     G2SLoader,
+    G2STransposeLoader,
     S2RLoader,
-    compute_global_linear_128x128,
     compute_global_swizzle,
     make_fp8_buffer_tensor,
     pack_i32x4_i32x8,
@@ -293,11 +298,8 @@ def _compile_kernel(
         lds_b1 = (lds.b1_0, lds.b1_1)
 
         a_f8_ir_t = a_fx_dtype.ir_type
-        b_f8_ir_t = b_fx_dtype.ir_type
         gA = make_fp8_buffer_tensor(A, a_f8_ir_t)
-        gB = make_fp8_buffer_tensor(B, b_f8_ir_t)
         a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
-        b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
         a_scale_rsrc = buffer_ops.create_buffer_resource(A_scale_inv, max_size=True)
         b_scale_rsrc = buffer_ops.create_buffer_resource(B_scale_inv, max_size=True)
         output_scale = (
@@ -330,13 +332,26 @@ def _compile_kernel(
         wave_id = tx_i32 // fx.Int32(WARP_SIZE)
         lane = tx_i32 % fx.Int32(WARP_SIZE)
 
-        # The utility mapping is identical to the previous manual staging:
-        # each step contributes one contiguous 16-byte vector per thread, while
-        # the global K coordinate is XOR-unswizzled for the physical LDS slot.
-        gl_off_a = compute_global_linear_128x128(lane, wave_id, c_m, LOAD_PASSES_HALF)
-        gl_off_b = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
-        a_g2s = G2SLoader(a_div, gl_off_a, LOAD_PASSES_HALF, a_f8_ir_t, wave_id)
-        b_g2s = G2SLoader(b_div, gl_off_b, LOAD_PASSES_HALF, b_f8_ir_t, wave_id)
+        # A keeps the ordinary row-major [M, K] direct-to-LDS path.
+        gl_off_a = compute_global_swizzle(
+            lane,
+            wave_id,
+            K,
+            LOAD_PASSES_HALF,
+            preshuffled=False,
+        )
+        a_g2s = G2SLoader(
+            a_div,
+            gl_off_a,
+            LOAD_PASSES_HALF,
+            a_f8_ir_t,
+            wave_id,
+        )
+
+        # B arrives row-major [N, K]. Stage each source 16-byte K vector into
+        # the transposed XOR-swizzled physical LDS image [K128, N128] required
+        # by the validated ds_read_b64_tr_b8 inverse mapping.
+        b_g2s = G2STransposeLoader(B, K, wave_id)
         s2r = S2RLoader(fx.Int32(0), 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
@@ -427,10 +442,9 @@ def _compile_kernel(
             rocdl.sched_barrier(0)
 
         def hot_loop_scheduler_q0_refill_a1_2n():
-            # One logical A K64 half is two ds_read_b64_tr_b8 instructions.
             for _ in range_constexpr(8):
                 rocdl.sched_vmem(1)
-                rocdl.sched_dsrd(2)
+                rocdl.sched_dsrd(1)
                 rocdl.sched_mfma(2)
             rocdl.sched_barrier(0)
 
@@ -441,15 +455,21 @@ def _compile_kernel(
             rocdl.sched_barrier(0)
 
         def stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a):
-            # NN A is contiguous [K, M]. Stage a physical row-major [K128, M128]
-            # half-page without the TN XOR swizzle; S2R performs the transpose.
-            m_base = bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))
-            global_base = k_base * fx.Index(c_m) + m_base
+            # One pass writes 256 threads * 16 B = 4 KiB. Four passes fill one
+            # 128x128 half-page (16 KiB). Each half has its own LDS base.
+            global_base = (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(K) + k_base
             a_g2s.load_one(lds_a[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
-            global_base = (by_n_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(K) + k_base
-            b_g2s.load_one(lds_b[subtile], fx.Int32(global_base), pass_in_subtile)
+            # Load row-major global B[N, K], but write the half-page as
+            # XOR-swizzled physical LDS [K128, N128].
+            global_n_base = by_n_idx + fx.Index(subtile * (BLOCK_N // 2))
+            b_g2s.load_one(
+                lds_b[subtile],
+                global_n_base,
+                k_base,
+                pass_in_subtile,
+            )
 
         def stage_a_subtile(k_base, subtile, lds_a):
             for pass_in_subtile in range_constexpr(LOAD_PASSES_HALF):
@@ -475,10 +495,43 @@ def _compile_kernel(
             x1 = load_frag_half_at_byte_base(lds_page, row_byte_base, 1)
             return pack_frag_halves(x0, x1)
 
-        def load_b_frag(lds_b, local_row, half):
-            # B is [N, K]. Each 128-row half-page has a local row origin of 0.
-            half_row = local_row - fx.Index(half * (BLOCK_N // 2))
-            return load_frag_at_byte_base(lds_b[half], half_row * fx.Index(BLOCK_K))
+        def load_b_frag_transpose(lds_page, local_n_tile):
+            # Exact inverse mapping validated against the ordinary B[N, K]
+            # production MFMA fragment:
+            #
+            #   source_k = lane_div_16*16 + lane_in_16//2
+            #   source_n = local_n_tile + (lane_in_16&1)*8
+            #
+            # base^0x440 advances logical K by 8 under the 128-byte XOR
+            # swizzle. The DS immediate 0x2000 advances logical K by 64.
+            lane_div16_i32 = fx.Int32(lane_div_16)
+            lane_in16_i32 = fx.Int32(lane_mod_16)
+            source_k = (
+                lane_div16_i32 * fx.Int32(16)
+                + lane_in16_i32 // fx.Int32(2)
+            )
+            source_n = (
+                fx.Int32(local_n_tile)
+                + (lane_in16_i32 % fx.Int32(2)) * fx.Int32(8)
+            )
+
+            physical_k, physical_n = swizzle_128(source_k, source_n)
+            base = physical_k * fx.Int32(BLOCK_N // 2) + physical_n
+            other = base ^ fx.Int32(0x440)
+
+            x0 = s2r.load_one_transpose(
+                lds_page,
+                base,
+                other,
+                immediate_offset=0,
+            )
+            x1 = s2r.load_one_transpose(
+                lds_page,
+                base,
+                other,
+                immediate_offset=0x2000,
+            )
+            return pack_frag_halves(x0, x1)
 
         def _acc_idx(subtile_id, mi, ni):
             return subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
@@ -584,8 +637,12 @@ def _compile_kernel(
 
         def load_b_subtile_ni_regs(lds_b, sn, ni):
             subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
-            b_row_addr = subtile_n_idx * fx.Index(SUBTILE_N) + fx.Index(ni * MFMA_N) + lane_mod_16
-            return load_b_frag(lds_b, b_row_addr, sn)
+            local_n_tile = (
+                subtile_n_idx * fx.Index(SUBTILE_N)
+                + fx.Index(ni * MFMA_N)
+                - fx.Index(sn * (BLOCK_N // 2))
+            )
+            return load_b_frag_transpose(lds_b[sn], local_n_tile)
 
         def load_b_subtile_regs(lds_b, sn):
             return (
@@ -596,25 +653,11 @@ def _compile_kernel(
             )
 
         def load_a_subtile_mi_half(lds_a, sm, mi, half):
-            # Physical LDS A is [K128, M128]. The CDNA4 transpose-read lane
-            # mapping addresses 8 K rows x 16 M columns per K64 operand half.
-            #
-            # The wave-level base follows the documented transpose-load layout:
-            #   k_row = lane_div_32 * 4 + (lane_mod_16 // 4)   -> 0..7
-            #   m_col = m_tile + n-group/lane-in-quad offset  -> 0..15
-            # Two addresses separated by 32 K rows produce the complementary
-            # halves required for the complete K64 i32x4 operand.
-            local_m_tile = (
-                (reg_subtile_m_idx0 + fx.Index(sm * 2)) * fx.Index(SUBTILE_M)
-                + fx.Index(mi * MFMA_M)
-                - fx.Index(sm * (BLOCK_M // 2))
-            )
-            k_row = (fx.Index(lane) // fx.Index(32)) * fx.Index(4) + (lane_mod_16 // fx.Index(4))
-            m_col = local_m_tile + ((fx.Index(lane) // fx.Index(16)) % fx.Index(2)) * fx.Index(8) + (lane_mod_16 % fx.Index(4)) * fx.Index(2)
-            k_half_base = fx.Index(half * 64)
-            first = (k_half_base + k_row) * fx.Index(BLOCK_M // 2) + m_col
-            second = (k_half_base + k_row + fx.Index(32)) * fx.Index(BLOCK_M // 2) + m_col
-            return s2r.load_one_transpose(lds_a[sm], fx.Int32(first), fx.Int32(second))
+            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
+            a_row_addr = subtile_m_idx * fx.Index(SUBTILE_M) + fx.Index(mi * MFMA_M) + lane_mod_16
+            half_row = a_row_addr - fx.Index(sm * (BLOCK_M // 2))
+            row_byte_base = half_row * fx.Index(BLOCK_K)
+            return load_frag_half_at_byte_base(lds_a[sm], row_byte_base, half)
 
         def load_a_subtile_mi_regs(lds_a, sm, mi):
             x0 = load_a_subtile_mi_half(lds_a, sm, mi, 0)
@@ -1015,7 +1058,7 @@ def _compile_kernel(
     return launch_gemm
 
 @functools.lru_cache(maxsize=None)
-def _cached_launch_nn(
+def _cached_launch(
     K: int,
     a_fp8_dtype: torch.dtype,
     b_fp8_dtype: torch.dtype,
@@ -1040,49 +1083,43 @@ def fp8_matmul(
     c: torch.Tensor,
     stream=None,
 ):
-    """TE-facing NN tensor-wise FP8 adapter.
+    """Launch correctness-first NN tensor-wise FP8 GEMM.
 
-    Public/backend contract:
-        a:           [K, M] FP8 E4M3 or E5M2 activation payload
+    Contract:
+        a:           [M, K] FP8 payload
         a_scale_inv: one-element FP32 inverse quantization scale
-        b:           [N, K] FP8 E4M3 or E5M2 weight payload
+        b:           [N, K] FP8 payload
         b_scale_inv: one-element FP32 inverse quantization scale
         c:           [M, N] float16, bfloat16, or float32 output
 
-    The NN core consumes TE's existing physical payloads directly:
-    A is contiguous columnwise storage [K, M] and B is contiguous rowwise
-    storage [N, K]. No transpose or materialization is performed.
+    B remains [N, K] through GMEM->LDS. The kernel performs a naive scalar
+    LDS gather along K for a fixed N row, constructing the same MFMA B
+    fragments as the optimized transpose-read path. This variant intentionally
+    does not use ds_read_b64_tr_b8.
     """
     if not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
-        raise TypeError("FlyDSL FP8 GEMM expects plain torch.Tensor payloads")
-
+        raise TypeError("FlyDSL FP8 NN GEMM expects plain torch.Tensor payloads")
     if a.ndim != 2 or b.ndim != 2:
         raise ValueError(
             f"FlyDSL FP8 NN expects rank-2 operands, got A{tuple(a.shape)} "
             f"and B{tuple(b.shape)}"
         )
 
-    supported_fp8_dtypes = (
-        torch.float8_e4m3fn,
-        torch.float8_e5m2,
-    )
+    supported_fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2)
     if a.dtype not in supported_fp8_dtypes or b.dtype not in supported_fp8_dtypes:
         raise TypeError(
-            "FlyDSL FP8 GEMM expects E4M3 or E5M2 payloads, "
+            "FlyDSL FP8 NN GEMM expects E4M3 or E5M2 payloads, "
             f"got A={a.dtype} and B={b.dtype}"
         )
 
-    k, m = a.shape
+    m, k = a.shape
     n, kb = b.shape
     if kb != k:
         raise ValueError(
             f"Inner dimensions do not match: A{tuple(a.shape)} and B{tuple(b.shape)}"
         )
 
-    for name, scale in (
-        ("A_scale_inv", a_scale_inv),
-        ("B_scale_inv", b_scale_inv),
-    ):
+    for name, scale in (("A_scale_inv", a_scale_inv), ("B_scale_inv", b_scale_inv)):
         if not isinstance(scale, torch.Tensor):
             raise TypeError(f"{name} must be a torch.Tensor")
         if scale.dtype != torch.float32 or scale.numel() != 1:
@@ -1103,29 +1140,10 @@ def fp8_matmul(
 
     tensors = (a, b, a_scale_inv, b_scale_inv, c)
     if any(t.device != a.device for t in tensors[1:]):
-        raise ValueError(
-            "A, B, inverse scales, and C must be on the same device"
-        )
+        raise ValueError("A, B, inverse scales, and C must be on the same device")
 
-    if not a.is_contiguous():
-        raise ValueError(
-            "FlyDSL FP8 NN requires contiguous A [K, M] storage; "
-            "refusing to materialize a replacement"
-        )
-    if not b.is_contiguous():
-        raise ValueError(
-            "FlyDSL FP8 NN requires contiguous B [N, K] storage; "
-            "refusing to materialize a replacement"
-        )
+    doGemm(a, b, c, a_scale_inv, b_scale_inv, stream=stream)
 
-    doGemm(
-        a,
-        b,
-        c,
-        a_scale_inv,
-        b_scale_inv,
-        stream=stream,
-    )
 
 def doGemm(
     A: torch.Tensor,
@@ -1136,43 +1154,33 @@ def doGemm(
     stream=None,
     use_xcd_remap: bool = True,
 ):
-    """Launch tensor-wise FP8 GEMM with TE-style inverse input scales."""
-    K_runtime, M_runtime = A.shape
+    """Launch NN FP8 GEMM with C = A @ B.T, A [M,K], B [N,K]."""
+    M_runtime, K_runtime = A.shape
     N_runtime, Kb_runtime = B.shape
-    supported_fp8_dtypes = (
-        torch.float8_e4m3fn,
-        torch.float8_e5m2,
-    )
+    supported_fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2)
     assert A.dtype in supported_fp8_dtypes, f"unsupported A FP8 dtype: {A.dtype}"
     assert B.dtype in supported_fp8_dtypes, f"unsupported B FP8 dtype: {B.dtype}"
-    assert C.dtype in (
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
-    ), (
+    assert C.dtype in (torch.float16, torch.bfloat16, torch.float32), (
         "C dtype must be torch.float16, torch.bfloat16, or torch.float32, "
         f"got {C.dtype}"
     )
     assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
     if M_runtime % _BLOCK_M != 0:
         raise FlyDSLUnsupportedError(
-            f"FlyDSL FP8 GEMM requires M to be a multiple of {_BLOCK_M}, "
-            f"got M={M_runtime}"
+            f"FlyDSL FP8 NN GEMM requires M to be a multiple of {_BLOCK_M}, got M={M_runtime}"
         )
     if N_runtime % _BLOCK_N != 0:
         raise FlyDSLUnsupportedError(
-            f"FlyDSL FP8 GEMM requires N to be a multiple of {_BLOCK_N}, "
-            f"got N={N_runtime}"
+            f"FlyDSL FP8 NN GEMM requires N to be a multiple of {_BLOCK_N}, got N={N_runtime}"
         )
     if K_runtime % _BLOCK_K != 0:
         raise FlyDSLUnsupportedError(
-            f"FlyDSL FP8 GEMM requires K to be a multiple of {_BLOCK_K}, "
-            f"got K={K_runtime}"
+            f"FlyDSL FP8 NN GEMM requires K to be a multiple of {_BLOCK_K}, got K={K_runtime}"
         )
     num_k_tiles = K_runtime // _BLOCK_K
     if num_k_tiles < 4:
         raise FlyDSLUnsupportedError(
-            f"FlyDSL FP8 GEMM requires at least 4 K{_BLOCK_K} tiles, "
+            f"FlyDSL FP8 NN GEMM requires at least 4 K{_BLOCK_K} tiles, "
             f"got K={K_runtime} ({num_k_tiles} tiles)"
         )
     assert A_scale_inv.dtype == torch.float32 and A_scale_inv.numel() == 1
@@ -1189,12 +1197,8 @@ def doGemm(
     A_scale_arg = A_scale_inv.contiguous().view(-1)
     B_scale_arg = B_scale_inv.contiguous().view(-1)
 
-    launch = _cached_launch_nn(
-        int(K_runtime),
-        A.dtype,
-        B.dtype,
-        C.dtype,
-        bool(use_xcd_remap),
+    launch = _cached_launch(
+        int(K_runtime), A.dtype, B.dtype, C.dtype, bool(use_xcd_remap)
     )
     launch(
         A_arg,

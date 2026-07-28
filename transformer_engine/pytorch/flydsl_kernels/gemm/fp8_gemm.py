@@ -5,12 +5,10 @@
 """FlyDSL tensor-wise FP8 4-wave GEMM kernel for Transformer Engine.
 
 The kernel specializes on K at compile time because the K128 loop is fully
-hand-unrolled. M/N are runtime launch dimensions. The private optimized core
-consumes independently typed FP8 E4M3 or E5M2 A/B tensors shaped [M, K] and
-[N, K], one FP32 inverse
-scale per operand, and writes float16, bfloat16, or float32 C shaped [M, N]. The public
-``fp8_matmul`` entry point accepts Transformer Engine's TN contract and
-performs the required private adaptation.
+hand-unrolled. M/N are runtime launch dimensions. The public entry point and private optimized core consume independently typed
+FP8 E4M3 or E5M2 A/B tensors shaped [M, K] and [N, K], one FP32 inverse scale
+per operand, and write float16, bfloat16, or float32 C shaped [M, N]. Operand
+normalization is performed by the Transformer Engine wrapper.
 
 This module imports ``flydsl`` at import time and must therefore be imported
 lazily only after FlyDSL availability has been confirmed.
@@ -1023,17 +1021,18 @@ def fp8_matmul(
     c: torch.Tensor,
     stream=None,
 ):
-    """TE-facing TN tensor-wise FP8 adapter.
+    """Launch TN tensor-wise FP8 GEMM using final kernel operand order.
 
-    Public/backend contract:
+    Contract:
         a:           [M, K] FP8 E4M3 or E5M2 activation payload
         a_scale_inv: one-element FP32 inverse quantization scale
-        b:           [K, N] FP8 E4M3 or E5M2 weight payload
+        b:           [N, K] FP8 E4M3 or E5M2 weight payload
         b_scale_inv: one-element FP32 inverse quantization scale
         c:           [M, N] float16, bfloat16, or float32 output
 
-    The optimized private core streams both operands as row-major [Rows, K],
-    so B is adapted from TE's logical [K, N] representation to [N, K].
+    The wrapper is responsible for adapting TE's logical [K, N] operand into
+    the core's row-major [N, K] representation. No operand swap or transpose
+    is performed in this module.
     """
     if not isinstance(a, torch.Tensor) or not isinstance(b, torch.Tensor):
         raise TypeError("FlyDSL FP8 GEMM expects plain torch.Tensor payloads")
@@ -1055,7 +1054,7 @@ def fp8_matmul(
         )
 
     m, k = a.shape
-    kb, n = b.shape
+    n, kb = b.shape
     if kb != k:
         raise ValueError(
             f"Inner dimensions do not match: A{tuple(a.shape)} and B{tuple(b.shape)}"
@@ -1089,13 +1088,9 @@ def fp8_matmul(
             "A, B, inverse scales, and C must be on the same device"
         )
 
-    # In the normal TE TN path, b is a transpose view of contiguous rowwise
-    # weight storage, so b.T is already contiguous and this does not require a
-    # physical transpose/copy.
-    b_hk = b.transpose(0, 1).contiguous()
     doGemm(
         a,
-        b_hk,
+        b,
         c,
         a_scale_inv,
         b_scale_inv,

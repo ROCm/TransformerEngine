@@ -5,7 +5,8 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm, vector
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
-from flydsl.expr import arith, const_expr, range_constexpr, rocdl
+from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
+from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 
@@ -119,6 +120,70 @@ class G2SLoader:
         fx.copy(self.g2lds_atom, src, dst, soffset=fx.Int32(k_offset))
 
 
+class G2STransposeLoader:
+    """Stage a row-major 128x128 byte tile as swizzled physical [K, N].
+
+    The source is a row-major byte matrix ``[N, K]``. Each thread loads one
+    contiguous 16-byte K vector from global memory, then scatters those bytes
+    into the 128-byte XOR-swizzled LDS image consumed by
+    ``ds_read_b64_tr_b8``.
+
+    One ``load_one`` call covers one of the four 4-KiB staging passes for a
+    128x128 half-page.
+    """
+
+    def __init__(self, gl_src, leading_dim, wave_id):
+        self.gl_rsrc = buffer_ops.create_buffer_resource(gl_src, max_size=True)
+        self.leading_dim = fx.Int32(leading_dim)
+        self.wave_id = fx.Int32(wave_id)
+        self.lane_id = fx.thread_idx.x % 64
+        self.n_waves = fx.block_dim.x // 64
+        self.i8_lds_ptr_t = fx.PointerType.get(
+            elem_ty=ir.IntegerType.get_signless(8),
+            address_space=2,
+            alignment=1,
+        )
+
+    def _store_u8(self, lds_dst, byte_offset, value):
+        base_i32 = fx.Int32(fx.ptrtoint(lds_dst.ptr))
+        addr_i32 = base_i32 + fx.Int32(byte_offset)
+        i8_ptr = fx.inttoptr(self.i8_lds_ptr_t, addr_i32)
+        view = fx.make_view(i8_ptr, fx.make_layout(1, 1))
+        fx.memref_store_vec(Vec.filled(1, value, fx.Uint8), view)
+
+    def load_one(self, lds_dst, global_n_base, k_base, step):
+        """Load one 16-byte/thread pass and transpose it into LDS.
+
+        ``global_n_base`` is the first source N row of this 128-row half-page.
+        ``k_base`` is the first global K byte of the current K128 tile.
+        """
+        row = (
+            self.lane_id // fx.Int32(8)
+            + self.wave_id * fx.Int32(8)
+            + fx.Int32(step) * fx.Int32(self.n_waves * 8)
+        )
+        col = (self.lane_id % fx.Int32(8)) * fx.Int32(16)
+
+        global_byte = (
+            (fx.Int32(global_n_base) + row) * self.leading_dim
+            + fx.Int32(k_base)
+            + col
+        )
+        packed_i32x4 = buffer_ops.buffer_load(
+            self.gl_rsrc,
+            global_byte // fx.Int32(4),
+            vec_width=4,
+            dtype=T.i32,
+        )
+        packed_u8x16 = Vec(packed_i32x4).bitcast(fx.Uint8)
+
+        for byte_i in range_constexpr(16):
+            logical_k = col + fx.Int32(byte_i)
+            physical_k, physical_n = swizzle_128(logical_k, row)
+            lds_byte = physical_k * fx.Int32(128) + physical_n
+            self._store_u8(lds_dst, lds_byte, packed_u8x16[byte_i])
+
+
 def pack_i32x4_i32x8(lo, hi):
     # Pack two i32x4 as one i32x8
     return lo.shuffle(hi, list(range(8)))
@@ -135,6 +200,23 @@ class S2RLoader:
         ptr_off = fx.add_offset(lds_src.ptr, off_tup)
         i8_iter = fx.recast_iter(fx.Uint8, ptr_off)
         view = fx.make_view(i8_iter, fx.make_layout(16, 1))
+        return view.load()
+
+    def _vec_load_1xf8(self, lds_src, offset):
+        """Naive one-byte LDS load with direct dynamic byte addressing.
+
+        Avoid ``make_int_tuple`` entirely because this FlyDSL build cannot
+        reliably infer tuple types from dynamic Index expressions.
+        """
+        base_i32 = fx.Int32(fx.ptrtoint(lds_src.ptr))
+        addr_i32 = base_i32 + fx.Int32(offset)
+        i8_lds_ptr_t = fx.PointerType.get(
+            elem_ty=ir.IntegerType.get_signless(8),
+            address_space=2,
+            alignment=1,
+        )
+        i8_ptr = fx.inttoptr(i8_lds_ptr_t, addr_i32)
+        view = fx.make_view(i8_ptr, fx.make_layout(1, 1))
         return view.load()
 
     def load(self, lds_src, preshuffled=False):
@@ -158,34 +240,58 @@ class S2RLoader:
         v = self._vec_load_16xf8(lds_src, lds_offset)
         return v.bitcast(fx.Int32)
 
-    def _ds_read_b64_tr_b8(self, lds_src, byte_offset):
+    def _ds_read_b64_tr_b8(self, lds_src, byte_offset, immediate_offset=0):
         """Issue one gfx950 ``ds_read_b64_tr_b8`` and return i32x2.
 
-        The inline-asm output uses one even-aligned 64-bit VGPR tuple. The
-        compiler owns allocation of the ``=v`` tuple; the memory clobber keeps
-        the operation ordered with respect to LDS traffic.
+        ``immediate_offset`` is encoded in the DS instruction itself. The NN
+        K128 path uses 0 and 0x2000, where 0x2000 advances the logical K row by
+        64 in a 128-byte-wide physical LDS image.
         """
+        if immediate_offset == 0:
+            asm = "ds_read_b64_tr_b8 $0, $1 offset:0\n"
+        elif immediate_offset == 0x2000:
+            asm = "ds_read_b64_tr_b8 $0, $1 offset:8192\n"
+        else:
+            raise ValueError(
+                "ds_read_b64_tr_b8 supports immediate offsets 0 and 0x2000, "
+                f"got {immediate_offset:#x}"
+            )
+
         base_i32 = fx.Int32(fx.ptrtoint(lds_src.ptr))
         addr_i32 = base_i32 + fx.Int32(byte_offset)
         raw_type = ir.VectorType.get([2], ir.IntegerType.get_signless(32))
         raw = _llvm.inline_asm(
             raw_type,
             [as_mlir_value(addr_i32)],
-            "ds_read_b64_tr_b8 $0, $1\n",
+            asm,
             "=v,v,~{memory}",
             has_side_effects=True,
         )
         return Vec(vector.BitCastOp(raw_type, raw).result, (2,), fx.Int32)
 
-    def load_one_transpose(self, lds_src, first_byte_offset, second_byte_offset):
-        """Load one K64 FP8 MFMA operand half from physical LDS [K, M].
+    def load_one_transpose(
+        self,
+        lds_src,
+        first_byte_offset,
+        second_byte_offset,
+        immediate_offset=0,
+    ):
+        """Load one 16-byte portion of a K128 FP8 MFMA operand.
 
-        CDNA4 requires two ``ds_read_b64_tr_b8`` instructions for the complete
-        K64 operand. Each instruction returns i32x2; concatenation preserves the
-        existing i32x4 half-fragment interface used by the GEMM hot loop.
+        Two transpose reads return four packed i32 values. Calling this once
+        with immediate 0 and once with immediate 0x2000 yields the two i32x4
+        portions that concatenate into the production i32x8 MFMA fragment.
         """
-        lo = self._ds_read_b64_tr_b8(lds_src, first_byte_offset)
-        hi = self._ds_read_b64_tr_b8(lds_src, second_byte_offset)
+        lo = self._ds_read_b64_tr_b8(
+            lds_src,
+            first_byte_offset,
+            immediate_offset,
+        )
+        hi = self._ds_read_b64_tr_b8(
+            lds_src,
+            second_byte_offset,
+            immediate_offset,
+        )
         return lo.shuffle(hi, [0, 1, 2, 3])
 
 
