@@ -857,22 +857,27 @@ def test_dcp_output_parity(recipe_name, async_save):
         # async DCP staging saves it cast to param_dtype (bf16); the reloaded amax
         # feeds NVFP4's two-level dequantization, so the rounding prevents bitwise
         # parity. Sync DCP saves the amax as an fp32 tensor and stays bitwise-exact.
-        loose_parity = isinstance(
-            recipe,
-            (
-                transformer_engine.common.recipe.DelayedScaling,
-                transformer_engine.common.recipe.Float8CurrentScaling,
-            ),
-        ) or (
-            isinstance(recipe, transformer_engine.common.recipe.NVFP4BlockScaling)
-            and async_save
+        nvfp4_async = (
+            isinstance(recipe, transformer_engine.common.recipe.NVFP4BlockScaling) and async_save
         )
+        loose_parity = (
+            isinstance(
+                recipe,
+                (
+                    transformer_engine.common.recipe.DelayedScaling,
+                    transformer_engine.common.recipe.Float8CurrentScaling,
+                ),
+            )
+            or nvfp4_async
+        )
+        # NVFP4 dequantization widens the reloaded amax further than the FP8 recipes
+        parity_atol = 0.2 if nvfp4_async else 0.1
         if loose_parity:
             torch.testing.assert_close(
                 loaded_output,
                 ref_output,
                 rtol=0.05,
-                atol=0.1,
+                atol=parity_atol,
                 msg=lambda x: f"Fresh model loaded from DCP checkpoint produces different output: {x}",
             )
         else:
@@ -910,7 +915,7 @@ def test_dcp_output_parity(recipe_name, async_save):
                 out2,
                 out1,
                 rtol=0.05,
-                atol=0.1,
+                atol=parity_atol,
                 msg=lambda x: f"Training step after DCP load produces different output: {x}",
             )
         else:
