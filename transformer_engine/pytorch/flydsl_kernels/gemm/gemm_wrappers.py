@@ -781,11 +781,11 @@ def _select_fp8_storage_for_layout(A, transa, B, transb):
 
         TN: wrapper swaps B._data/A._data -> [M,K], [N,K]
         NN: wrapper swaps B._data/A._transpose -> [M,K], [N,K]
-        NT: wrapper swaps B._data/A._data -> [K,M], [K,N]
+        NT: wrapper swaps B._transpose/A._transpose -> [M,K], [N,K]
 
-    In particular, NT must use the contiguous rowwise K-major payloads.
-    Passing ``_transpose.transpose(0, 1)`` would create strided views and
-    force the NT adapter to materialize them before launch.
+    NT is the NN transpose-storage path applied to both operands. Both
+    transpose allocations stay contiguous in their native [outer,K] shapes;
+    no tensor transpose, reshape reinterpretation, or materialization occurs.
     """
     layout = (bool(transa), bool(transb))
 
@@ -808,18 +808,16 @@ def _select_fp8_storage_for_layout(A, transa, B, transb):
         B_data = _flatten_rowwise(B_payload, B_storage)
 
     elif layout == (False, True):  # NT / dW
-        # fp8_gemm_nt consumes contiguous K-major operands directly:
-        #   kernel a = B._data [K, M]
-        #   kernel b = A._data [K, N]
-        # Select rowwise storage here so the ownership swap in _run_fp8 is
-        # zero-copy and no noncontiguous transpose view reaches the kernel.
-        A_payload = _get_fp8_rowwise_payload(A, "A")
-        A_storage = "A._data"
-        A_data = _flatten_rowwise(A_payload, A_storage)
+        # NT extends NN's transpose-storage handling to both operands.
+        # After ownership swap, B._transpose is kernel A [M,K] and
+        # A._transpose is kernel B [N,K].
+        A_payload = _get_fp8_columnwise_payload(A, "A")
+        A_storage = "A._transpose"
+        A_data = _flatten_columnwise(A_payload, A_storage)
 
-        B_payload = _get_fp8_rowwise_payload(B, "B")
-        B_storage = "B._data"
-        B_data = _flatten_rowwise(B_payload, B_storage)
+        B_payload = _get_fp8_columnwise_payload(B, "B")
+        B_storage = "B._transpose"
+        B_data = _flatten_columnwise(B_payload, B_storage)
 
     else:
         raise FlyDSLUnsupportedError(
@@ -926,14 +924,13 @@ def _run_fp8(
         matmul = fp8_matmul_nt
         kernel_layout = "NT"
 
-        # Exact fp8_gemm_nt contract, with no view or materialization:
-        #   a_flydsl = B._data [K, M]
-        #   b_flydsl = A._data [K, N]
+        # Correct fp8_gemm_nt contract: NN's [outer,K] transpose-storage
+        # path applied to both operands.
         a_flydsl = B_data
         b_flydsl = A_data
 
-        k, m = a_flydsl.shape
-        kb, n = b_flydsl.shape
+        m, k = a_flydsl.shape
+        n, kb = b_flydsl.shape
 
     else:
         raise FlyDSLUnsupportedError(
