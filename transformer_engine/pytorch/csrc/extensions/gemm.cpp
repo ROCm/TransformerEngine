@@ -358,22 +358,24 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                                                  accumulate, use_split_accumulator,
                                                  extra_output_tensor, main_stream);
           });
+        } else {
 #ifdef __HIP_PLATFORM_AMD__
-        } else if (!comm_overlap->is_aggregate()) {
+          // The aggregated ring exchange needs the userbuffers transport, so the ROCm
+          // split path serves both modes.
           NVTE_SCOPED_GIL_RELEASE({
             comm_overlap->rocm_split_overlap_ag(A_tensor, transa, B_tensor, transb, D_tensor,
                                                 bias_tensor, te_pre_gelu_out, te_workspace, grad,
                                                 accumulate, use_split_accumulator,
                                                 extra_output_tensor, main_stream);
           });
-#endif // #ifdef __HIP_PLATFORM_AMD
-        } else {
+#else
           NVTE_SCOPED_GIL_RELEASE({
             comm_overlap->split_overlap_ag(A_tensor, transa, B_tensor, transb, out_tensor,
                                            bias_tensor, te_pre_gelu_out, te_workspace, grad,
                                            accumulate, use_split_accumulator, extra_output_tensor,
                                            main_stream);
           });
+#endif // #ifdef __HIP_PLATFORM_AMD
         }
       } else {
         if (comm_overlap->is_atomic_gemm()) {
