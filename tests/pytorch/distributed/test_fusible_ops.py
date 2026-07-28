@@ -32,7 +32,6 @@ from transformer_engine.pytorch import (
 )
 import transformer_engine.pytorch.ops as te_ops
 from transformer_engine.pytorch.utils import is_fp8_fnuz
-import transformer_engine_torch as tex
 
 # Import utility functions
 _current_file = pathlib.Path(__file__).resolve()
@@ -110,17 +109,17 @@ def make_reference_and_test_tensors(
         quantizer = Float8Quantizer(
             scale=torch.ones(1, dtype=torch.float32, device=test_device).squeeze(),
             amax=torch.zeros(1, dtype=torch.float32, device=test_device),
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
         )
         test = quantizer(test)
     elif quantization == "fp8_current_scaling":
         quantizer = Float8CurrentScalingQuantizer(
-            fp8_dtype=tex.DType.kFloat8E4M3,
+            fp8_dtype=te.DType.kFloat8E4M3,
             device=test_device,
         )
         test = quantizer(test)
     elif quantization == "mxfp8":
-        test = MXFP8Quantizer(fp8_dtype=tex.DType.kFloat8E4M3)(test)
+        test = MXFP8Quantizer(fp8_dtype=te.DType.kFloat8E4M3)(test)
     elif quantization == "nvfp4":
         test = NVFP4Quantizer(
             with_rht=False,
@@ -888,6 +887,7 @@ def _test_fp8_scale_update(
         """Expected absmax and FP8 scale"""
         amax = ref.abs().amax()
         max_val = {
+            # ROCm: fnuz FP8 (gfx942) caps E4M3 at 240; OCP (gfx950+/CUDA) caps at 448.
             "forward": 448.0 if not is_fp8_fnuz() else 240.0,
             "backward": 57344.0,
         }[stage]
@@ -1046,9 +1046,8 @@ if torch.cuda.device_count() >= 2 and 2 not in _world_sizes:
 @pytest.mark.parametrize("world_size", _world_sizes)
 def test_distributed_fuser_ops(world_size: int) -> None:
     """Launch parallel job that runs parallel tests"""
-    #TODO: find out why cannot align the following two lines with NV upstream
-    python_exe = sys.executable
-    current_file = os.path.abspath(__file__)
+    python_exe = pathlib.Path(sys.executable)
+    current_file = pathlib.Path(__file__).resolve()
     command = [
         python_exe,
         "-m",

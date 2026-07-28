@@ -363,10 +363,7 @@ class FusedAttnFwdPrimitive(BasePrimitive):
         ).get_fused_attn_backend()
 
         if not is_hip_extension():
-            if backend == NVTE_Fused_Attn_Backend.NVTE_F16_max512_seqlen:
-                softmax_shape = (*batch_shape, attn_heads, q_max_seqlen, kv_max_seqlen)
-                softmax_dtype = q_dtype
-            elif backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
+            if backend == NVTE_Fused_Attn_Backend.NVTE_F16_arbitrary_seqlen:
                 # cuDNN 9.6 reduces the required softmax shape
                 if get_cudnn_version() >= (9, 6, 0):
                     if config.qkv_layout.is_thd():
@@ -3192,6 +3189,15 @@ class FusedRingAttnStripedFwdPrimitive(FusedAttnFwdPrimitive):
                     return output_per_step.astype(jnp.float32), softmax_aux_per_step
 
                 def correction(output, softmax_aux, output_per_step, softmax_aux_per_step):
+                    if is_hip_extension():
+                        # Fully-masked striped steps must contribute nothing; the CK kernel can
+                        # emit non-finite output/LSE for them, so neutralize to avoid 0 * NaN.
+                        softmax_aux_per_step = jnp.where(
+                            jnp.isnan(softmax_aux_per_step), -jnp.inf, softmax_aux_per_step
+                        )
+                        output_per_step = jnp.where(
+                            jnp.isfinite(output_per_step), output_per_step, output
+                        )
                     new_out = output - jax.nn.sigmoid(softmax_aux_per_step - softmax_aux) * (
                         output - output_per_step
                     )
@@ -3338,6 +3344,11 @@ class FusedRingAttnStripedBwdPrimitive(FusedAttnBwdPrimitive):
                 dq_per_step, dkv_per_step, dbias_per_step = compute(current_config)
 
                 kv_next, dkv = jnp.unstack(kv_dkv)
+                if is_hip_extension():
+                    # Fully-masked striped steps contribute zero gradient; guard against
+                    # non-finite CK grads poisoning the running sum (see forward correction).
+                    dq_per_step = jnp.where(jnp.isfinite(dq_per_step), dq_per_step, 0)
+                    dkv_per_step = jnp.where(jnp.isfinite(dkv_per_step), dkv_per_step, 0)
                 dq += dq_per_step
                 dkv += dkv_per_step
                 if config.attn_bias_type is not AttnBiasType.NO_BIAS:
