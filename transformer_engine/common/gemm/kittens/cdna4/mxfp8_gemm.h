@@ -8,14 +8,7 @@
 #include <hip/hip_runtime.h>
 #include <cstddef>
 
-// Values match NVTEDType in transformer_engine.h
-enum KittensDType {
-    KITTENS_FLOAT32  = 4,
-    KITTENS_FLOAT16  = 5,
-    KITTENS_BFLOAT16 = 6,
-    KITTENS_FP8E4M3  = 7,
-    KITTENS_FP8E5M2  = 8,
-};
+#include "../kittens_common.h"
 
 bool kittens_mxfp8_gemm(
     const void *A, const void *B, void *C,

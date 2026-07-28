@@ -116,7 +116,7 @@ inline bool is_mxfp_scaling(const NVTEScalingMode &mode) {
 #endif //#ifdef __HIP_PLATFORM_AMD__
 inline bool is_nvfp_scaling(const NVTEScalingMode &mode) { return mode == NVTE_NVFP4_1D_SCALING; }
 
-inline bool is_fp8_block_scaling(const NVTEScalingMode &mode) {
+inline bool is_blockwise_fp8_scaling(const NVTEScalingMode &mode) {
   return mode == NVTE_BLOCK_SCALING_1D || mode == NVTE_BLOCK_SCALING_2D;
 }
 

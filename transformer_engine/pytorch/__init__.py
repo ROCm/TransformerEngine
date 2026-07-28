@@ -50,7 +50,6 @@ from transformer_engine.pytorch.quantization import quantized_model_init
 from transformer_engine.pytorch.quantization import is_fp8_available
 from transformer_engine.pytorch.quantization import is_mxfp8_available
 from transformer_engine.pytorch.quantization import is_fp8_block_scaling_available
-from transformer_engine.pytorch.quantization import is_fp8_block_scaling_quantization_available
 from transformer_engine.pytorch.quantization import is_nvfp4_available
 from transformer_engine.pytorch.quantization import is_mxfp4_available
 from transformer_engine.pytorch.quantization import get_default_recipe

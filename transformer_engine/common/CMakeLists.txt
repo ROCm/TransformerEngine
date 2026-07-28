@@ -9,7 +9,7 @@ cmake_minimum_required(VERSION 3.21)
 option(USE_ROCM "Use ROCm" ON)
 option(USE_FUSED_ATTN_AOTRITON "Use aotriton backend" ON)
 option(USE_FUSED_ATTN_CK "Use ck backend" ON)
-option(USE_HIPKITTENS_GEMM "Use HipKittens MXFP8 GEMM kernels" ON)
+option(USE_HIPKITTENS_GEMM "Use HipKittens blockwise FP8 and MXFP8 GEMM kernels" ON)
 set(USE_CUDA OFF)
 
 if (USE_ROCM)

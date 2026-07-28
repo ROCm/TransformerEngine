@@ -2023,6 +2023,624 @@ def test_layernorm_mlp_accuracy_checkpoint(
         torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
 
 
+def _test_grouped_linear_accuracy(
+    block,
+    num_gemms,
+    bs,
+    dtype,
+    config,
+    recipe,
+    fp8,
+    fuse_wgrad_accumulation,
+    delay_wgrad_compute=False,
+):
+    reset_rng_states()
+    if fp8:
+        FP8GlobalStateManager.reset()
+
+    inp_hidden_states = torch.randn(
+        (config.max_seqlen_q, bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    inp_hidden_states.retain_grad()
+
+    if num_gemms > 1:
+        split_size = 1
+        if fp8:
+            split_size = get_align_size_for_quantization(recipe)
+        m = config.max_seqlen_q // split_size
+        dist = torch.sort(torch.randint(0, m, (num_gemms - 2,))).values.tolist()
+        dist.append(dist[-1])  # Manually add a zero
+        m_splits = torch.tensor(dist + [m]) - torch.tensor([0] + dist)
+        m_splits = m_splits * split_size
+        assert m_splits.sum() == config.max_seqlen_q and len(m_splits) == num_gemms
+    else:
+        m_splits = torch.tensor([config.max_seqlen_q])
+
+    with autocast(enabled=fp8, recipe=recipe):
+        if isinstance(block, GroupedLinear):
+            m_splits = m_splits * bs
+            out = block(inp_hidden_states, m_splits.tolist())
+        else:
+            out = torch.cat(
+                [
+                    block[i](inp)
+                    for i, inp in enumerate(torch.split(inp_hidden_states, m_splits.tolist()))
+                ]
+            )
+    loss = out.sum()
+    loss.backward()
+    if delay_wgrad_compute:
+        if isinstance(block, GroupedLinear):
+            block.backward_dw()
+        else:
+            for i in range(num_gemms):
+                block[i].backward_dw()
+
+    torch.cuda.synchronize()
+    outputs = [out, inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            if getattr(p, "main_grad", None) is not None:
+                outputs.append(p.main_grad)
+                assert p.grad is None  # grad should be None if fuse_wgrad_accumulation is True
+            else:
+                outputs.append(p.grad)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", param_types, ids=str)
+@pytest.mark.parametrize("num_gemms", [3, 6])
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+@pytest.mark.parametrize("bias", all_boolean)
+@pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
+@pytest.mark.parametrize("use_triton", all_boolean)
+def test_grouped_linear_accuracy(
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    recipe,
+    fp8_model_params,
+    fuse_wgrad_accumulation,
+    bias,
+    delay_wgrad_compute,
+    use_triton,
+    parallel_mode=None,
+    use_cutlass=False,
+):
+
+    fp8 = recipe is not None
+    if not IS_HIP_EXTENSION and use_triton:
+        pytest.skip("Triton grouped gemm is only supported on HIP.")
+
+    if IS_HIP_EXTENSION:
+        if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
+            pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
+        if recipe is not None and recipe.float8_block_scaling():
+            pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
+    if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
+    if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+
+    config = model_configs[model]
+    if config.max_seqlen_q % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    if recipe is not None and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+            )
+    if use_triton:
+        os.environ["NVTE_USE_GROUPED_GEMM_TRITON"] = "1"
+        
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        grouped_linear = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=bias,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            device="cuda",
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            delay_wgrad_compute=delay_wgrad_compute,
+            save_original_input=False,
+        ).eval()
+        sequential_linear = torch.nn.ModuleList(
+            [
+                Linear(
+                    config.hidden_size,
+                    4 * config.hidden_size,
+                    bias=bias,
+                    params_dtype=dtype,
+                    parallel_mode=parallel_mode,
+                    device="cuda",
+                    fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+                ).eval()
+                for _ in range(num_gemms)
+            ]
+        )
+
+    # Share params
+    with torch.no_grad():
+        for i in range(num_gemms):
+            sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
+            if bias:
+                sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
+            if fuse_wgrad_accumulation:
+                weight_i = getattr(grouped_linear, f"weight{i}")
+                weight_i.main_grad = torch.rand_like(weight_i, dtype=torch.float32)
+                sequential_linear[i].weight.main_grad = weight_i.main_grad.clone()
+
+    outputs_ref = _test_grouped_linear_accuracy(
+        sequential_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8,
+        fuse_wgrad_accumulation,
+        delay_wgrad_compute,
+    )
+    outputs = _test_grouped_linear_accuracy(
+        grouped_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8,
+        fuse_wgrad_accumulation,
+        delay_wgrad_compute,
+    )
+
+    if use_triton:
+        os.environ.pop("NVTE_USE_GROUPED_GEMM_TRITON", None)
+
+    atol, rtol = 0, 0
+    if use_cutlass:
+        atol, rtol = 1e-3, 1e-3
+        if IS_HIP_EXTENSION:
+            atol, rtol = 1e-3, 8e-3
+    if use_triton:
+        atol, rtol = get_tolerances(dtype)
+        if dtype == torch.float32:
+            atol = 2.6e-6
+            rtol = 5e-2
+    for o, o_ref in zip(outputs, outputs_ref):
+        torch.testing.assert_close(o, o_ref, rtol=rtol, atol=atol)
+
+
+@pytest.mark.skipif(
+    torch.cuda.get_device_capability() != (9, 0) and not IS_HIP_EXTENSION,
+    reason="Only enable CUTLASS grouped gemm on Hopper",
+)
+@pytest.mark.parametrize("dtype", param_types, ids=str)
+@pytest.mark.parametrize("num_gemms", [3, 6])
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize(
+    "fp8_model_params",
+    all_boolean if IS_HIP_EXTENSION else [False],
+)
+@pytest.mark.parametrize(
+    "recipe",
+    (fp8_recipes + [None]) if IS_HIP_EXTENSION else [None],
+)
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+@pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
+def test_grouped_linear_accuracy_cutlass(
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    recipe,
+    fp8_model_params,
+    fuse_wgrad_accumulation,
+    delay_wgrad_compute,
+):
+    os.environ["NVTE_USE_CUTLASS_GROUPED_GEMM"] = "1"
+    test_grouped_linear_accuracy(
+        dtype,
+        num_gemms,
+        bs,
+        model,
+        recipe,
+        fp8_model_params,
+        fuse_wgrad_accumulation,
+        False,
+        delay_wgrad_compute,
+        False,
+        None,
+        use_cutlass=True,
+    )
+    os.environ.pop("NVTE_USE_CUTLASS_GROUPED_GEMM", None)
+
+
+@pytest.mark.parametrize("dtype", param_types, ids=str)
+@pytest.mark.parametrize("num_gemms", [3])
+@pytest.mark.parametrize("bs", [1])
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+@pytest.mark.parametrize("fp8_model_params", [False])
+@pytest.mark.parametrize("fuse_wgrad_accumulation", [True])
+@pytest.mark.parametrize("bias", [False])
+@pytest.mark.parametrize("delay_wgrad_compute", [True])
+def test_grouped_linear_accuracy_save_original_input(
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    recipe,
+    fp8_model_params,
+    fuse_wgrad_accumulation,
+    bias,
+    delay_wgrad_compute,
+    parallel_mode=None,
+):
+    fp8 = recipe is not None
+    if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
+    if fp8 and recipe.delayed():
+        pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+    if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
+        pytest.skip("Delayed wgrad compute is not supported in debug mode.")
+
+    config = model_configs[model]
+    if config.max_seqlen_q % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    if recipe is not None and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+            )
+
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        grouped_linear = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=bias,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            device="cuda",
+            fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+            delay_wgrad_compute=delay_wgrad_compute,
+            save_original_input=True,
+        ).eval()
+        sequential_linear = torch.nn.ModuleList(
+            [
+                Linear(
+                    config.hidden_size,
+                    4 * config.hidden_size,
+                    bias=bias,
+                    params_dtype=dtype,
+                    parallel_mode=parallel_mode,
+                    device="cuda",
+                    fuse_wgrad_accumulation=fuse_wgrad_accumulation,
+                ).eval()
+                for _ in range(num_gemms)
+            ]
+        )
+
+    # Share params
+    with torch.no_grad():
+        for i in range(num_gemms):
+            sequential_linear[i].weight = Parameter(getattr(grouped_linear, f"weight{i}").clone())
+            if bias:
+                sequential_linear[i].bias = Parameter(getattr(grouped_linear, f"bias{i}").clone())
+            if fuse_wgrad_accumulation:
+                weight_i = getattr(grouped_linear, f"weight{i}")
+                weight_i.main_grad = torch.rand_like(weight_i, dtype=torch.float32)
+                sequential_linear[i].weight.main_grad = weight_i.main_grad.clone()
+
+    outputs_ref = _test_grouped_linear_accuracy(
+        sequential_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8,
+        fuse_wgrad_accumulation,
+        delay_wgrad_compute,
+    )
+    outputs = _test_grouped_linear_accuracy(
+        grouped_linear,
+        num_gemms,
+        bs,
+        dtype,
+        config,
+        recipe,
+        fp8,
+        fuse_wgrad_accumulation,
+        delay_wgrad_compute,
+    )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("recipe", fp8_recipes + [None])
+def test_grouped_linear_accuracy_single_gemm(recipe):
+    """Split the tests to save CI time"""
+    test_grouped_linear_accuracy(
+        dtype=torch.float32,
+        num_gemms=1,
+        bs=2,
+        model="126m",
+        recipe=recipe,
+        fp8_model_params=True,
+        fuse_wgrad_accumulation=True,
+        bias=True,
+        delay_wgrad_compute=False,
+        use_triton=False,
+    )
+
+
+def _test_padding_grouped_linear_accuracy(block, num_gemms, bs, dtype, config, recipe, fp8=False):
+
+    def _pad_tensor_for_fp8(hidden_states, tokens_per_expert):
+        align_size = get_align_size_for_quantization(recipe)
+        padded_tokens_per_expert = [
+            (num_tokens + align_size - 1) // align_size * align_size
+            for num_tokens in tokens_per_expert
+        ]
+        hidden_states = torch.split(hidden_states, tokens_per_expert)
+        padded_hidden_states = []
+        for hidden_state, actual_num_tokens, padded_num_tokens in zip(
+            hidden_states, tokens_per_expert, padded_tokens_per_expert
+        ):
+            padded_hidden_states.append(hidden_state)
+            if padded_num_tokens > actual_num_tokens:
+                pad_tensor = torch.zeros(
+                    padded_num_tokens - actual_num_tokens,
+                    hidden_state.shape[1],
+                    dtype=hidden_state.dtype,
+                    device=hidden_state.device,
+                )
+                padded_hidden_states.append(pad_tensor)
+        padded_hidden_states = torch.cat(padded_hidden_states, dim=0)
+        return padded_hidden_states, padded_tokens_per_expert
+
+    def _unpad_tensor_for_fp8(padded_hidden_states, actual_tokens_per_expert, tokens_per_expert):
+        inputmats = torch.split(
+            padded_hidden_states.view(-1, padded_hidden_states.shape[-1]), tokens_per_expert
+        )
+        hidden_states = torch.cat(
+            [
+                grad_output_mat[: actual_tokens_per_expert[i]]
+                for i, grad_output_mat in enumerate(inputmats)
+            ],
+            dim=0,
+        )
+
+        return hidden_states
+
+    def _generate_random_numbers(n, total_sum):
+        if n <= 0:
+            return []
+
+        # reset seed
+        random.seed(seed)
+
+        breaks = sorted(random.sample(range(1, total_sum), n - 1))
+        random_numbers = (
+            [breaks[0]]
+            + [breaks[i] - breaks[i - 1] for i in range(1, n - 1)]
+            + [total_sum - breaks[-1]]
+        )
+
+        return random_numbers
+
+    reset_rng_states()
+    if fp8:
+        FP8GlobalStateManager.reset()
+
+    inp_hidden_states = torch.randn(
+        (config.max_seqlen_q * bs, config.hidden_size),
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    inp_hidden_states.retain_grad()
+
+    m_splits = _generate_random_numbers(num_gemms, config.max_seqlen_q * bs)
+
+    with autocast(enabled=fp8, recipe=recipe):
+        if isinstance(block, TorchGroupedLinearWithPadding):
+            out = block(inp_hidden_states, m_splits)
+        else:
+            if fp8:
+                padded_inp_hidden_states, padding_m_splits = _pad_tensor_for_fp8(
+                    inp_hidden_states, m_splits
+                )
+                padded_inp_hidden_states = block(padded_inp_hidden_states, padding_m_splits)
+                out = _unpad_tensor_for_fp8(padded_inp_hidden_states, m_splits, padding_m_splits)
+            else:
+                out = block(inp_hidden_states, m_splits)
+
+    loss = out.sum()
+    loss.backward()
+
+    torch.cuda.synchronize()
+    outputs = [out, inp_hidden_states.grad]
+    for p in block.parameters():
+        if p.requires_grad:
+            outputs.append(p.grad)
+    return outputs
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("num_gemms", [3, 6])
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize("fp8", [True])
+@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+def test_padding_grouped_linear_accuracy(
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    fp8,
+    recipe,
+    fp8_model_params,
+    parallel_mode=None,
+):
+    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
+
+    if IS_HIP_EXTENSION and recipe is not None and recipe.float8_block_scaling():
+        pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
+
+    config = model_configs[model]
+    if config.max_seqlen_q % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    if recipe is not None and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+            )
+
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        grouped_linear = TorchGroupedLinearWithPadding(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            fp8=fp8,
+        ).eval()
+
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        ref_grouped_linear = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            device="cuda",
+            save_original_input=False,
+        ).eval()
+
+    # Share params
+    with torch.no_grad():
+        inner_grouped_linear = grouped_linear.linear_fn
+        for i in range(num_gemms):
+            setattr(
+                ref_grouped_linear,
+                f"weight{i}",
+                Parameter(getattr(inner_grouped_linear, f"weight{i}").clone()),
+            )
+
+    outputs = _test_padding_grouped_linear_accuracy(
+        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8
+    )
+    outputs_ref = _test_padding_grouped_linear_accuracy(
+        ref_grouped_linear, num_gemms, bs, dtype, config, recipe, fp8
+    )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
+@pytest.mark.parametrize("dtype", param_types)
+@pytest.mark.parametrize("num_gemms", [3])
+@pytest.mark.parametrize("bs", [1])
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize("fp8", [True])
+@pytest.mark.parametrize("recipe", fp8_recipes)
+@pytest.mark.parametrize("fp8_model_params", [False])
+def test_padding_grouped_linear_accuracy_save_original_input(
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    fp8,
+    recipe,
+    fp8_model_params,
+    parallel_mode=None,
+):
+    if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
+        pytest.skip("FP8 parameters are not supported in debug mode.")
+    if fp8 and recipe.delayed():
+        pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+
+    if IS_HIP_EXTENSION and recipe is not None and recipe.float8_block_scaling():
+        pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
+
+    config = model_configs[model]
+    if config.max_seqlen_q % 16 != 0 and fp8:
+        pytest.skip("FP8 requires sequence length to be divisible by 16.")
+
+    if recipe is not None and recipe.nvfp4():
+        if dtype not in get_nvfp4_inp_supported_dtypes(recipe, dtype):
+            pytest.skip(
+                f"Input dtype {dtype} not supported for NVFP4 Recipe {recipe.__class__.__name__}"
+            )
+
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        grouped_linear = TorchGroupedLinearWithPadding(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            fp8=fp8,
+        ).eval()
+
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=recipe):
+        ref_grouped_linear = GroupedLinear(
+            num_gemms,
+            config.hidden_size,
+            4 * config.hidden_size,
+            bias=False,
+            params_dtype=dtype,
+            parallel_mode=parallel_mode,
+            device="cuda",
+            save_original_input=True,
+        ).eval()
+
+    # Share params
+    with torch.no_grad():
+        inner_grouped_linear = grouped_linear.linear_fn
+        for i in range(num_gemms):
+            setattr(
+                ref_grouped_linear,
+                f"weight{i}",
+                Parameter(getattr(inner_grouped_linear, f"weight{i}").clone()),
+            )
+
+    outputs = _test_padding_grouped_linear_accuracy(
+        grouped_linear, num_gemms, bs, dtype, config, recipe, fp8
+    )
+    outputs_ref = _test_padding_grouped_linear_accuracy(
+        ref_grouped_linear, num_gemms, bs, dtype, config, recipe, fp8
+    )
+
+    # Shoule be bit-wise match
+    for i, (o, o_ref) in enumerate(zip(outputs, outputs_ref)):
+        torch.testing.assert_close(o, o_ref, rtol=0, atol=0)
+
+
 def _test_gpt_e2e_cuda_graph(block, bs, dtype, config, graph):
     reset_rng_states()
 
