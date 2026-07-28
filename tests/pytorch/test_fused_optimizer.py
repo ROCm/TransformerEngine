@@ -1060,8 +1060,13 @@ class TestAdamTest:
 
             self.model_.load_state_dict(copy.deepcopy(self.model.state_dict()))
 
-    @largeTensorTest("60GB", "cuda")
     def test_large_tensor(self):
+        import gc
+
+        gc.collect()
+        torch.cuda.empty_cache()
+        if torch.cuda.memory.mem_get_info()[0] < 60 * 1024**3:
+            pytest.skip("Insufficient available memory")
         t = torch.zeros(2359332864, dtype=torch.half, device="cuda")
         t2 = torch.zeros(2359332864, dtype=torch.half, device="cuda")
         grad = torch.randn_like(t)

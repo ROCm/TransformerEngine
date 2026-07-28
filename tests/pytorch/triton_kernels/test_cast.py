@@ -83,20 +83,31 @@ def test_quantize(scaling, shape, in_dtype, out_dtype):
     )
     
     atol_scale, rtol_scale = get_tolerances(torch.float32)
-    te_compare_results(
-        quantized_out_triton._get_quantizer().scale,
-        quantized_out_tex._get_quantizer().scale,
-        atol=atol_scale, rtol=rtol_scale,
-        msg='Scale results do not match!',
-        use_torch_semantics=True
-    ),
-    te_compare_results(
-        quantized_out_triton._get_quantizer().amax,
-        quantized_out_tex._get_quantizer().amax,
-        atol=atol_scale, rtol=rtol_scale,
-        msg='AMAX results do not match!',
-        use_torch_semantics=True
-    )
+    if scaling == "delayed":
+        te_compare_results(
+            quantized_out_triton._get_quantizer().scale,
+            quantized_out_tex._get_quantizer().scale,
+            atol=atol_scale, rtol=rtol_scale,
+            msg='Scale results do not match!',
+            use_torch_semantics=True
+        )
+        te_compare_results(
+            quantized_out_triton._get_quantizer().amax,
+            quantized_out_tex._get_quantizer().amax,
+            atol=atol_scale, rtol=rtol_scale,
+            msg='AMAX results do not match!',
+            use_torch_semantics=True
+        )
+    else:
+        # Current scaling keeps no scale/amax on the quantizer; the computed scale is on
+        # the output as _scale_inv.
+        te_compare_results(
+            quantized_out_triton._scale_inv,
+            quantized_out_tex._scale_inv,
+            atol=atol_scale, rtol=rtol_scale,
+            msg='Scale_inv results do not match!',
+            use_torch_semantics=True
+        )
 
 
 @pytest.mark.parametrize("t_shape",
@@ -196,11 +207,13 @@ def test_amax_atomic_vs_two_stage(shape, in_dtype, out_dtype):
         with autocast(enabled=True, recipe=recipe.Float8CurrentScaling()):
             out_2stage = te_quantize_triton(input_tensor, quantizer=quantizer_2stage)
 
+        # Current scaling keeps no amax on the quantizer; _scale_inv is a deterministic
+        # function of amax, so equal scales imply equal amax.
         te_compare_results(
-            out_atomic._get_quantizer().amax,
-            out_2stage._get_quantizer().amax,
+            out_atomic._scale_inv,
+            out_2stage._scale_inv,
             atol=0.0, rtol=0.0,
-            msg='AMAX results do not match!',
+            msg='Scale_inv results do not match!',
             use_torch_semantics=True
         )
     finally:
