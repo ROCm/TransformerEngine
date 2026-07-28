@@ -2,19 +2,23 @@
 #
 # See LICENSE for license information.
 
-"""FlyDSL MXFP8 GEMM implementation.
+"""FlyDSL MXFP8 TN/NN/NT 4-wave GEMM implementation.
 
-This module contains both the HK-derived optimized 4-wave kernel and its
-MXFP8-specific launch preparation. Transformer Engine BLAS canonicalization
-is performed by ``gemm_wrappers.py`` before entering ``mxfp8_matmul``.
+All supported MXFP8 layouts share one source-level kernel generator while
+remaining separate compile-time specializations:
 
-Canonical launch inputs:
+    TN: A [M,K] normal read,    B [N,K] normal read
+    NN: A [M,K] normal read,    B [K,N] transpose read
+    NT: A [K,M] transpose read, B [K,N] transpose read
 
-    a:       [M, K] FP8 E4M3 or E5M2 payload
-    a_scale: [M, K/32] raw E8M0 bytes
-    b:       [K, N] FP8 E4M3 or E5M2 payload
-    b_scale: [K/32, N] raw E8M0 bytes
-    D:       [M, N] float16, bfloat16, or float32 output
+The layout is a Python-only cache key. It is never passed as a runtime kernel
+argument. Global addressing, LDS fragment reads, scheduler directives, and
+scale-source orientation are selected while building each specialized kernel,
+so generated TN/NN/NT kernels contain no runtime layout branches.
+
+All operand payloads use direct ``BufferCopyLDS128b`` global-to-LDS staging.
+Transpose variants differ only in K-major global addressing and
+``ds_read_b64_tr_b8`` LDS-to-register fragment reconstruction.
 """
 
 import functools
@@ -62,8 +66,19 @@ def _debug(message: str) -> None:
         print(f"[DEBUG_FLYDSL_MXFP8_GEMM] {message}")
 
 
-def pack_mx32_scales_iter(scales_u8: torch.Tensor) -> torch.Tensor:
-    """Pack raw [Rows, K/32] E8M0 scales as [K/128, Rows] uint32."""
+def pack_mx32_scales_iter(
+    scales_u8: torch.Tensor,
+    *,
+    source_colwise: bool = False,
+) -> torch.Tensor:
+    """Pack raw E8M0 scales as iteration-major ``[K/128, dim]`` uint32.
+
+    ``source_colwise=False`` consumes TE rowwise scales ``[dim, K/32]``.
+    ``source_colwise=True`` consumes TE columnwise scales ``[K/32, dim]``.
+
+    Both paths produce the same packed representation consumed by every
+    TN/NN/NT MXFP8 kernel specialization.
+    """
     if scales_u8.dtype != torch.uint8:
         raise TypeError(
             f"MXFP8 scales must be torch.uint8 E8M0 bytes, got {scales_u8.dtype}"
@@ -73,13 +88,27 @@ def pack_mx32_scales_iter(scales_u8: torch.Tensor) -> torch.Tensor:
             f"MXFP8 scales must be rank 2, got shape {tuple(scales_u8.shape)}"
         )
 
-    rows, qk = scales_u8.shape
+    if source_colwise:
+        qk, dim = scales_u8.shape
+        if qk % 4 != 0:
+            raise ValueError(
+                f"Columnwise scale K dimension must be divisible by 4 K32 groups, got {qk}"
+            )
+        s32 = scales_u8.contiguous().view(qk // 4, 4, dim).to(torch.int32)
+        return (
+            s32[:, 0, :]
+            | (s32[:, 1, :] << 8)
+            | (s32[:, 2, :] << 16)
+            | (s32[:, 3, :] << 24)
+        ).contiguous()
+
+    dim, qk = scales_u8.shape
     if qk % 4 != 0:
         raise ValueError(
-            f"Scale K dimension must be divisible by 4 K32 groups, got {qk}"
+            f"Rowwise scale K dimension must be divisible by 4 K32 groups, got {qk}"
         )
 
-    s32 = scales_u8.contiguous().view(rows, qk // 4, 4).to(torch.int32)
+    s32 = scales_u8.contiguous().view(dim, qk // 4, 4).to(torch.int32)
     packed = (
         s32[:, :, 0]
         | (s32[:, :, 1] << 8)
@@ -89,18 +118,25 @@ def pack_mx32_scales_iter(scales_u8: torch.Tensor) -> torch.Tensor:
     return packed.transpose(0, 1).contiguous()
 
 
-def pack_mx32_scales_for_hk(scales_u8: torch.Tensor) -> torch.Tensor:
-    """Convert raw rowwise E8M0 scales to [K/128, Rows] MFMA-ready words."""
-    scale_iter = pack_mx32_scales_iter(scales_u8)
-    rows = scales_u8.shape[0]
+def pack_mx32_scales_for_hk(
+    scales_u8: torch.Tensor,
+    *,
+    source_colwise: bool = False,
+) -> torch.Tensor:
+    """Convert raw TE E8M0 scales to ``[K/128, dim]`` MFMA-ready words."""
+    scale_iter = pack_mx32_scales_iter(
+        scales_u8,
+        source_colwise=source_colwise,
+    )
+    dim = scales_u8.shape[1] if source_colwise else scales_u8.shape[0]
 
-    if rows % 64 != 0:
+    if dim % 64 != 0:
         raise ValueError(
-            f"Rows={rows} must be a multiple of 64 for HK MFMA scale packing"
+            f"Scale outer dimension={dim} must be a multiple of 64 for HK MFMA packing"
         )
 
     device = scales_u8.device
-    row = torch.arange(rows, device=device, dtype=torch.int64)
+    row = torch.arange(dim, device=device, dtype=torch.int64)
     row_within_16 = row % 16
     k_subgroup = (row // 16) % 4
     tile = row // 64
@@ -110,7 +146,7 @@ def pack_mx32_scales_for_hk(scales_u8: torch.Tensor) -> torch.Tensor:
         source_row = tile * 64 + group * 16 + row_within_16
         source_value = scale_iter[:, source_row]
         byte_value = (
-            source_value >> (k_subgroup * 8).view(1, rows)
+            source_value >> (k_subgroup * 8).view(1, dim)
         ) & 0xFF
         packed |= byte_value << (group * 8)
 
@@ -205,12 +241,20 @@ def _compile_kernel(
     a_fp8_dtype: torch.dtype,
     b_fp8_dtype: torch.dtype,
     output_dtype: torch.dtype,
+    layout: str,
 ):
-    """Build the specialized kernel for compile-time K, A/B FP8 types, and output dtype.
+    """Build one compile-time-specialized TN, NN, or NT kernel.
 
-    ``K`` must contain at least four K128 tiles. Runtime M/N are expected to
-    be exact multiples of ``BLOCK_M``/``BLOCK_N``; the kernel has no edge masks.
+    ``layout`` is a Python string consumed while constructing the FlyDSL IR.
+    It is not a runtime kernel argument. Each cache entry therefore contains
+    only the addressing, LDS reads, and scheduler directives for that layout.
     """
+    if layout not in ("TN", "NN", "NT"):
+        raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
+
+    a_transpose_read = layout == "NT"
+    b_transpose_read = layout in ("NN", "NT")
+
     BLOCK_M, BLOCK_N, BLOCK_K = _BLOCK_M, _BLOCK_N, _BLOCK_K
 
     fp8_input_types = {
@@ -277,6 +321,153 @@ def _compile_kernel(
     LOAD_PASSES_HALF = LDS_ELEMS_HALF // (NUM_THREADS * VEC_BYTES)
     assert LOAD_PASSES_HALF == LOAD_PASSES_A_SUBTILE == LOAD_PASSES_B_SUBTILE
 
+    # Resolve every layout-dependent choice before FlyDSL captures kernel_gemm.
+    # These are ordinary Python callables/constants, so each cached layout emits
+    # only its selected addressing, fragment-read, and scheduler path.
+    Q0_SCHED_DSRD = 2 if a_transpose_read else 1
+    PREFETCH_SCHED_DSRD = 4 if a_transpose_read else 2
+
+    if a_transpose_read:
+        def _a_leading_dim(c_m):
+            return c_m
+
+        def _a_global_base(k_base, subtile, c_m, bx_m_idx):
+            return (
+                k_base * fx.Index(c_m)
+                + bx_m_idx
+                + fx.Index(subtile * (BLOCK_M // 2))
+            )
+
+        def _load_a_half(
+            load_transposed_frag_half,
+            load_frag_half_at_byte_base,
+            lds_a,
+            sm,
+            mi,
+            half,
+            reg_subtile_m_idx0,
+            lane_mod_16,
+        ):
+            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
+            local_m_tile = (
+                subtile_m_idx * fx.Index(SUBTILE_M)
+                + fx.Index(mi * MFMA_M)
+                - fx.Index(sm * (BLOCK_M // 2))
+            )
+            return load_transposed_frag_half(
+                lds_a[sm],
+                local_m_tile,
+                half,
+            )
+    else:
+        def _a_leading_dim(c_m):
+            del c_m
+            return K
+
+        def _a_global_base(k_base, subtile, c_m, bx_m_idx):
+            del c_m
+            return (
+                (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2)))
+                * fx.Index(K)
+                + k_base
+            )
+
+        def _load_a_half(
+            load_transposed_frag_half,
+            load_frag_half_at_byte_base,
+            lds_a,
+            sm,
+            mi,
+            half,
+            reg_subtile_m_idx0,
+            lane_mod_16,
+        ):
+            del load_transposed_frag_half
+            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
+            a_row_addr = (
+                subtile_m_idx * fx.Index(SUBTILE_M)
+                + fx.Index(mi * MFMA_M)
+                + lane_mod_16
+            )
+            half_row = a_row_addr - fx.Index(sm * (BLOCK_M // 2))
+            row_byte_base = half_row * fx.Index(BLOCK_K)
+            return load_frag_half_at_byte_base(
+                lds_a[sm],
+                row_byte_base,
+                half,
+            )
+
+    if b_transpose_read:
+        def _b_leading_dim(c_n):
+            return c_n
+
+        def _b_global_base(k_base, subtile, c_n, by_n_idx):
+            return (
+                k_base * fx.Index(c_n)
+                + by_n_idx
+                + fx.Index(subtile * (BLOCK_N // 2))
+            )
+
+        def _load_b_ni(
+            load_transposed_frag,
+            load_normal_b_frag,
+            lds_b,
+            sn,
+            ni,
+            reg_subtile_n_idx0,
+            lane_mod_16,
+        ):
+            del load_normal_b_frag, lane_mod_16
+            subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
+            local_n_tile = (
+                subtile_n_idx * fx.Index(SUBTILE_N)
+                + fx.Index(ni * MFMA_N)
+                - fx.Index(sn * (BLOCK_N // 2))
+            )
+            return load_transposed_frag(lds_b[sn], local_n_tile)
+    else:
+        def _b_leading_dim(c_n):
+            del c_n
+            return K
+
+        def _b_global_base(k_base, subtile, c_n, by_n_idx):
+            del c_n
+            return (
+                (by_n_idx + fx.Index(subtile * (BLOCK_N // 2)))
+                * fx.Index(K)
+                + k_base
+            )
+
+        def _load_b_ni(
+            load_transposed_frag,
+            load_normal_b_frag,
+            lds_b,
+            sn,
+            ni,
+            reg_subtile_n_idx0,
+            lane_mod_16,
+        ):
+            del load_transposed_frag
+            subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
+            b_row_addr = (
+                subtile_n_idx * fx.Index(SUBTILE_N)
+                + fx.Index(ni * MFMA_N)
+                + lane_mod_16
+            )
+            return load_normal_b_frag(lds_b, b_row_addr, sn)
+
+    if (not a_transpose_read) or (not b_transpose_read):
+        def _normal_read_columns(lane_div_16, lane_mod_16):
+            reg_k_col0 = lane_div_16 * 16
+            reg_k_col1 = 64 + lane_div_16 * 16
+            _, col0 = swizzle_128(lane_mod_16, reg_k_col0)
+            _, col1 = swizzle_128(lane_mod_16, reg_k_col1)
+            return col0, col1
+    else:
+        def _normal_read_columns(lane_div_16, lane_mod_16):
+            del lane_div_16, lane_mod_16
+            return fx.Int32(0), fx.Int32(0)
+
     @fx.struct
     class SharedStorage:
         # Each logical 256x128 page is two independent 128x128 half-pages.
@@ -319,25 +510,49 @@ def _compile_kernel(
         by_n = pid_n * BLOCK_N
 
         # The flattened/XCD-swizzled block coordinates are i32, while global
-        # address arithmetic below is expressed in MLIR index type.  Convert
+        # address arithmetic below is expressed in MLIR index type. Convert
         # once here and use these index-typed tile bases for every address.
         bx_m_idx = fx.Index(bx_m)
         by_n_idx = fx.Index(by_n)
 
-        # Keep wave/lane arithmetic in i32. compute_global_swizzle() combines
-        # these values with i32 constants, so Index-typed coordinates would make
-        # arith.addi receive mixed operand types.
         tx_i32 = fx.Int32(tx)
         wave_id = tx_i32 // fx.Int32(WARP_SIZE)
         lane = tx_i32 % fx.Int32(WARP_SIZE)
 
-        # The utility mapping is identical to the previous manual staging:
-        # each step contributes one contiguous 16-byte vector per thread, while
-        # the global K coordinate is XOR-unswizzled for the physical LDS slot.
-        gl_off_a = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
-        gl_off_b = compute_global_swizzle(lane, wave_id, K, LOAD_PASSES_HALF, preshuffled=False)
-        a_g2s = G2SLoader(a_div, gl_off_a, LOAD_PASSES_HALF, a_f8_ir_t, wave_id)
-        b_g2s = G2SLoader(b_div, gl_off_b, LOAD_PASSES_HALF, b_f8_ir_t, wave_id)
+        # Compile-time global leading dimensions:
+        #   normal source    [X,K] -> leading dimension K
+        #   transpose source [K,X] -> leading dimension X
+        a_leading_dim = _a_leading_dim(c_m)
+        b_leading_dim = _b_leading_dim(c_n)
+
+        gl_off_a = compute_global_swizzle(
+            lane,
+            wave_id,
+            a_leading_dim,
+            LOAD_PASSES_HALF,
+            preshuffled=False,
+        )
+        gl_off_b = compute_global_swizzle(
+            lane,
+            wave_id,
+            b_leading_dim,
+            LOAD_PASSES_HALF,
+            preshuffled=False,
+        )
+        a_g2s = G2SLoader(
+            a_div,
+            gl_off_a,
+            LOAD_PASSES_HALF,
+            a_f8_ir_t,
+            wave_id,
+        )
+        b_g2s = G2SLoader(
+            b_div,
+            gl_off_b,
+            LOAD_PASSES_HALF,
+            b_f8_ir_t,
+            wave_id,
+        )
         s2r = S2RLoader(fx.Int32(0), 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
@@ -437,26 +652,21 @@ def _compile_kernel(
             rocdl.sched_barrier(0)
 
         def hot_loop_scheduler_q0_refill_a1_2n():
-            # Steady-state Q0 schedule. Each chunk contains exactly:
-            #   1 K+2 VMEM/LDS refill pass
-            #   1 current-tile A-bottom K64 ds_read_b128
-            #   2 current-tile Q0 MFMAs
-            # Repeated eight times, this distributes all eight A-bottom LDS reads
-            # across Q0 and maximizes their distance from reuse of that half-page.
+            # TN/NN: one normal A-bottom LDS read per chunk.
+            # NT: one transpose-read A half plus the matching transpose-read
+            # scheduling pressure retained from the passing NT specialization.
             for _ in range_constexpr(8):
                 rocdl.sched_vmem(1)
-                rocdl.sched_dsrd(1)
+                rocdl.sched_dsrd(Q0_SCHED_DSRD)
                 rocdl.sched_mfma(2)
 
             rocdl.sched_barrier(0)
 
         def hot_loop_scheduler_q_prefetch_4n():
-            # Q2/Q3 carry-prefetch schedule used by both the steady loop and the
-            # penultimate tail tile. Each of eight chunks contains:
-            #   2 LDS reads for one complete next-tile A-top or B-left fragment
-            #   4 MFMAs using the current tile
+            # TN/NN retain two scheduled DS reads per chunk. NT retains four
+            # because both carried operands use two DS_READ_TR instructions.
             for _ in range_constexpr(8):
-                rocdl.sched_dsrd(2)
+                rocdl.sched_dsrd(PREFETCH_SCHED_DSRD)
                 rocdl.sched_mfma(4)
 
             rocdl.sched_barrier(0)
@@ -502,14 +712,18 @@ def _compile_kernel(
             )
 
         def stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a):
-            # One pass writes 256 threads * 16 B = 4 KiB. Four passes fill one
-            # 128x128 half-page (16 KiB). Each half has its own LDS base.
-            global_base = (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(K) + k_base
-            a_g2s.load_one(lds_a[subtile], fx.Int32(global_base), pass_in_subtile)
+            a_g2s.load_one(
+                lds_a[subtile],
+                fx.Int32(_a_global_base(k_base, subtile, c_m, bx_m_idx)),
+                pass_in_subtile,
+            )
 
         def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
-            global_base = (by_n_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(K) + k_base
-            b_g2s.load_one(lds_b[subtile], fx.Int32(global_base), pass_in_subtile)
+            b_g2s.load_one(
+                lds_b[subtile],
+                fx.Int32(_b_global_base(k_base, subtile, c_n, by_n_idx)),
+                pass_in_subtile,
+            )
 
         def stage_a_subtile(k_base, subtile, lds_a):
             for pass_in_subtile in range_constexpr(LOAD_PASSES_HALF):
@@ -535,10 +749,43 @@ def _compile_kernel(
             x1 = load_frag_half_at_byte_base(lds_page, row_byte_base, 1)
             return pack_frag_halves(x0, x1)
 
-        def load_b_frag(lds_b, local_row, half):
-            # B is [N, K]. Each 128-row half-page has a local row origin of 0.
+        def load_normal_b_frag(lds_b, local_row, half):
+            # Physical [N,K] page, ordinary TN-style fixed-row read.
             half_row = local_row - fx.Index(half * (BLOCK_N // 2))
-            return load_frag_at_byte_base(lds_b[half], half_row * fx.Index(BLOCK_K))
+            return load_frag_at_byte_base(
+                lds_b[half],
+                half_row * fx.Index(BLOCK_K),
+            )
+
+        def load_transposed_frag_half(lds_page, local_x_tile, half):
+            # Exact inverse mapping validated by the MXFP8 NN fragment probe.
+            lane_div16_i32 = fx.Int32(lane_div_16)
+            lane_in16_i32 = fx.Int32(lane_mod_16)
+            source_k = (
+                lane_div16_i32 * fx.Int32(16)
+                + lane_in16_i32 // fx.Int32(2)
+            )
+            source_x = (
+                fx.Int32(local_x_tile)
+                + (lane_in16_i32 % fx.Int32(2)) * fx.Int32(8)
+            )
+
+            physical_k, physical_x = swizzle_128(source_k, source_x)
+            base = physical_k * fx.Int32(128) + physical_x
+            other = base ^ fx.Int32(0x440)
+            immediate_offset = 0 if half == 0 else 0x2000
+
+            return s2r.load_one_transpose(
+                lds_page,
+                base,
+                other,
+                immediate_offset=immediate_offset,
+            )
+
+        def load_transposed_frag(lds_page, local_x_tile):
+            x0 = load_transposed_frag_half(lds_page, local_x_tile, 0)
+            x1 = load_transposed_frag_half(lds_page, local_x_tile, 1)
+            return pack_frag_halves(x0, x1)
 
         def _acc_idx(subtile_id, mi, ni):
             return subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
@@ -640,13 +887,10 @@ def _compile_kernel(
         #   cB: (warp_m,     warp_n + 2)
         #   cC: (warp_m + 2, warp_n)
         #   cD: (warp_m + 2, warp_n + 2)
-        reg_k_col0 = lane_div_16 * 16
-        reg_k_col1 = 64 + lane_div_16 * 16
-
-        # Every fragment row differs only by multiples of 16, so row % 16 is
-        # always lane_mod_16. Hoist the logical->physical XOR mapping once.
-        _, reg_lds_k_col0 = swizzle_128(lane_mod_16, reg_k_col0)
-        _, reg_lds_k_col1 = swizzle_128(lane_mod_16, reg_k_col1)
+        reg_lds_k_col0, reg_lds_k_col1 = _normal_read_columns(
+            lane_div_16,
+            lane_mod_16,
+        )
 
         reg_subtile_m_idx0 = wave_id // 2
         reg_subtile_n_idx0 = wave_id % 2
@@ -655,15 +899,19 @@ def _compile_kernel(
         zero_pinned_accumulators()
 
         def load_b_subtile_ni_regs(lds_b, scale_tile, sn, ni):
-            # Fine-grained B register load for one 16-row N-direction MFMA slice.
-            # Return one packed B fragment and its matching scale operand.
             subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
             b_scales = scale_tile[2] if sn == 0 else scale_tile[3]
 
-            b_row_addr = subtile_n_idx * fx.Index(SUBTILE_N) + fx.Index(ni * MFMA_N) + lane_mod_16
-            b_ni = load_b_frag(lds_b, b_row_addr, sn)
-            b_scale_ni = b_scales[ni]
-            return b_ni, b_scale_ni
+            b_ni = _load_b_ni(
+                load_transposed_frag,
+                load_normal_b_frag,
+                lds_b,
+                sn,
+                ni,
+                reg_subtile_n_idx0,
+                lane_mod_16,
+            )
+            return b_ni, b_scales[ni]
 
         def load_b_subtile_regs(lds_b, scale_tile, sn):
             b0, bs0 = load_b_subtile_ni_regs(lds_b, scale_tile, sn, 0)
@@ -673,12 +921,18 @@ def _compile_kernel(
             return b0, b1, b2, b3, bs0, bs1, bs2, bs3
 
         def load_a_subtile_mi_half(lds_a, sm, mi, half):
-            # One ds_read_b128 for one K64 half of one A MFMA slice.
             subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
-            a_row_addr = subtile_m_idx * fx.Index(SUBTILE_M) + fx.Index(mi * MFMA_M) + lane_mod_16
-            half_row = a_row_addr - fx.Index(sm * (BLOCK_M // 2))
-            row_byte_base = half_row * fx.Index(BLOCK_K)
-            return load_frag_half_at_byte_base(lds_a[sm], row_byte_base, half)
+
+            return _load_a_half(
+                load_transposed_frag_half,
+                load_frag_half_at_byte_base,
+                lds_a,
+                sm,
+                mi,
+                half,
+                reg_subtile_m_idx0,
+                lane_mod_16,
+            )
 
         def load_a_subtile_mi_regs(lds_a, scale_tile, sm, mi):
             # Fine-grained A register load for one 16-row M-direction MFMA slice.
@@ -1172,22 +1426,6 @@ def _compile_kernel(
 
     return launch_gemm
 
-@functools.lru_cache(maxsize=None)
-def _cached_launch(
-    K: int,
-    a_fp8_dtype: torch.dtype,
-    b_fp8_dtype: torch.dtype,
-    output_dtype: torch.dtype,
-):
-    return _compile_kernel(
-        K,
-        a_fp8_dtype,
-        b_fp8_dtype,
-        output_dtype,
-    )
-
-
-
 def do_gemm(
     A: torch.Tensor,
     As: torch.Tensor,
@@ -1195,78 +1433,85 @@ def do_gemm(
     Bs: torch.Tensor,
     C: torch.Tensor,
     stream=None,
+    *,
+    layout: str = "TN",
 ):
-    """Launch the K-specialized kernel with runtime M/N.
+    """Launch one cached compile-time MXFP8 layout specialization."""
+    if layout == "TN":
+        M_runtime, K_runtime = A.shape
+        N_runtime, Kb_runtime = B.shape
+    elif layout == "NN":
+        M_runtime, K_runtime = A.shape
+        Kb_runtime, N_runtime = B.shape
+    elif layout == "NT":
+        K_runtime, M_runtime = A.shape
+        Kb_runtime, N_runtime = B.shape
+    else:
+        raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
 
-    A and B are shaped [M, K] and [N, K]. As/Bs are preshuffled packed
-    uint32 scale words shaped [K/128, M] and [K/128, N]. C is shaped [M, N].
-    M and N are not hardcoded; K is used only to choose/cache the compile-time
-    specialized launch function.
-    """
-    M_runtime, K_runtime = A.shape
-    N_runtime, Kb_runtime = B.shape
-    supported_fp8_dtypes = (
-        torch.float8_e4m3fn,
-        torch.float8_e5m2,
-    )
-    assert A.dtype in supported_fp8_dtypes, f"unsupported A MXFP8 dtype: {A.dtype}"
-    assert B.dtype in supported_fp8_dtypes, f"unsupported B MXFP8 dtype: {B.dtype}"
     assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
+    supported_fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2)
+    assert A.dtype in supported_fp8_dtypes, f"unsupported A FP8 dtype: {A.dtype}"
+    assert B.dtype in supported_fp8_dtypes, f"unsupported B FP8 dtype: {B.dtype}"
+
     if M_runtime % _BLOCK_M != 0:
         raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP8 GEMM requires M to be a multiple of {_BLOCK_M}, "
-            f"got M={M_runtime}"
+            f"FlyDSL MXFP8 {layout} GEMM requires M to be a multiple of "
+            f"{_BLOCK_M}, got M={M_runtime}"
         )
     if N_runtime % _BLOCK_N != 0:
         raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP8 GEMM requires N to be a multiple of {_BLOCK_N}, "
-            f"got N={N_runtime}"
+            f"FlyDSL MXFP8 {layout} GEMM requires N to be a multiple of "
+            f"{_BLOCK_N}, got N={N_runtime}"
         )
     if K_runtime % _BLOCK_K != 0:
         raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP8 GEMM requires K to be a multiple of {_BLOCK_K}, "
-            f"got K={K_runtime}"
+            f"FlyDSL MXFP8 {layout} GEMM requires K to be a multiple of "
+            f"{_BLOCK_K}, got K={K_runtime}"
         )
     num_k_tiles = K_runtime // _BLOCK_K
     if num_k_tiles < 4:
         raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP8 GEMM requires at least 4 K{_BLOCK_K} tiles, "
-            f"got K={K_runtime} ({num_k_tiles} tiles)"
+            f"FlyDSL MXFP8 {layout} GEMM requires at least 4 K{_BLOCK_K} "
+            f"tiles, got K={K_runtime} ({num_k_tiles} tiles)"
         )
+
     expected_as = (K_runtime // _BLOCK_K, M_runtime)
     expected_bs = (K_runtime // _BLOCK_K, N_runtime)
     assert As.dtype == torch.int32, f"As dtype {As.dtype} != torch.int32 packed scales"
     assert Bs.dtype == torch.int32, f"Bs dtype {Bs.dtype} != torch.int32 packed scales"
-    assert As.shape == expected_as, f"As shape {tuple(As.shape)} != {expected_as}"
-    assert Bs.shape == expected_bs, f"Bs shape {tuple(Bs.shape)} != {expected_bs}"
-    assert C.shape == (M_runtime, N_runtime), (
-        f"C shape {tuple(C.shape)} != ({M_runtime}, {N_runtime})"
+    assert tuple(As.shape) == expected_as, f"As shape {tuple(As.shape)} != {expected_as}"
+    assert tuple(Bs.shape) == expected_bs, f"Bs shape {tuple(Bs.shape)} != {expected_bs}"
+    assert tuple(C.shape) == (M_runtime, N_runtime), (
+        f"C shape {tuple(C.shape)} != {(M_runtime, N_runtime)}"
     )
-    assert C.dtype in (torch.float16, torch.bfloat16, torch.float32), (
-        "C dtype must be torch.float16, torch.bfloat16, or torch.float32, "
-        f"got {C.dtype}"
-    )
+    if C.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        raise TypeError(
+            "C dtype must be torch.float16, torch.bfloat16, or torch.float32, "
+            f"got {C.dtype}"
+        )
+
+    tensors = (A, As, B, Bs, C)
+    if any(t.device != A.device for t in tensors[1:]):
+        raise ValueError("A, B, packed scales, and C must be on the same device")
+
     if stream is None:
         stream = torch.cuda.current_stream()
-    # Match the Transformer Engine integration descriptor contract exactly.  The optimized
-    # G2SLoader path consumes flat byte-addressed A/B tensors; scales and C are
-    # likewise passed as flat contiguous storage.  Passing the original 2-D
-    # torch tensors changes the tensor descriptor/layout seen by
-    # make_fp8_buffer_tensor() and causes the loader's linear offsets to address
-    # the wrong elements.
+
+    # Preserve the exact flat descriptor contract used by the passing kernels.
     A_arg = A.view(torch.uint8).contiguous().view(-1)
     B_arg = B.view(torch.uint8).contiguous().view(-1)
     As_arg = As.contiguous().view(-1)
     Bs_arg = Bs.contiguous().view(-1)
     C_arg = C.contiguous().view(-1)
 
-    launch = _cached_launch(
-        int(K_runtime),
+    _cached_launch(
+        K_runtime,
         A.dtype,
         B.dtype,
         C.dtype,
-    )
-    launch(
+        layout,
+    )(
         A_arg,
         As_arg,
         B_arg,
@@ -1278,13 +1523,49 @@ def do_gemm(
     )
 
 
-__all__ = [
-    "BLOCK_M",
-    "BLOCK_N",
-    "BLOCK_K",
-    "do_gemm",
-]
+@functools.lru_cache(maxsize=None)
+def _cached_launch(
+    K: int,
+    a_fp8_dtype: torch.dtype,
+    b_fp8_dtype: torch.dtype,
+    output_dtype: torch.dtype,
+    layout: str,
+):
+    """Cache independent TN/NN/NT binaries with no runtime layout argument."""
+    return _compile_kernel(
+        K,
+        a_fp8_dtype,
+        b_fp8_dtype,
+        output_dtype,
+        layout,
+    )
 
+
+def _validate_common_payloads(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    D: torch.Tensor,
+    *,
+    layout: str,
+):
+    if a.ndim != 2 or b.ndim != 2:
+        raise ValueError(
+            f"FlyDSL MXFP8 {layout} expects rank-2 operands, got "
+            f"a={tuple(a.shape)} and b={tuple(b.shape)}"
+        )
+    supported_fp8_dtypes = (torch.float8_e4m3fn, torch.float8_e5m2)
+    if a.dtype not in supported_fp8_dtypes or b.dtype not in supported_fp8_dtypes:
+        raise TypeError(
+            f"FlyDSL MXFP8 {layout} expects E4M3 or E5M2 payloads "
+            f"independently, got a={a.dtype} and b={b.dtype}"
+        )
+    if a.device != b.device or D.device != a.device:
+        raise ValueError("A, B, and D must be on the same device")
+    if D.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        raise TypeError(
+            "FlyDSL MXFP8 output must be float16, bfloat16, or float32, "
+            f"got {D.dtype}"
+        )
 
 
 def mxfp8_matmul(
@@ -1294,107 +1575,131 @@ def mxfp8_matmul(
     b_scale: torch.Tensor,
     D: torch.Tensor,
     stream=None,
+    *,
+    layout: str = "TN",
 ):
-    """Launch the fused MXFP8 kernel from canonical row-major operands.
+    """Normalize scale orientation and launch a compile-time layout binary.
 
-    BLAS operand canonicalization, shape derivation, and output allocation are
-    intentionally owned by ``gemm_wrappers.py``. This function only validates
-    the MXFP8-specific scale contract, converts B to the HK [N, K] convention,
-    packs E8M0 scales, and launches the output-dtype-specialized 4-wave implementation.
+    Wrapper-visible contracts:
+
+        TN: a [M,K], b [K,N], scales [M,K/32] and [K/32,N]
+        NN: a [M,K], b [K,N], scales [M,K/32] and [K/32,N]
+        NT: a [K,M], b [K,N], scales [K/32,M] and [K/32,N]
+
+    TN preserves the existing adapter conversion to the kernel's normal-read
+    B [N,K] representation. NN and NT preserve K-major payloads and use
+    ``ds_read_b64_tr_b8`` inside their compile-time-specialized kernels.
     """
-    if a.ndim != 2 or b.ndim != 2:
-        raise ValueError(
-            f"FlyDSL MXFP8 expects rank-2 canonical operands, got "
-            f"a={tuple(a.shape)} and b={tuple(b.shape)}"
-        )
+    if layout not in ("TN", "NN", "NT"):
+        raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
 
-    m, k = a.shape
-    kb, n = b.shape
+    _validate_common_payloads(a, b, D, layout=layout)
+
+    if layout in ("TN", "NN"):
+        m, k = a.shape
+        kb, n = b.shape
+    else:
+        k, m = a.shape
+        kb, n = b.shape
+
     if kb != k:
         raise ValueError(
-            f"Incompatible canonical MXFP8 operands: "
-            f"{tuple(a.shape)} @ {tuple(b.shape)}"
+            f"Incompatible MXFP8 {layout} operands: "
+            f"A{tuple(a.shape)} and B{tuple(b.shape)}"
         )
-
-    supported_fp8_dtypes = (
-        torch.float8_e4m3fn,
-        torch.float8_e5m2,
-    )
-    if a.dtype not in supported_fp8_dtypes or b.dtype not in supported_fp8_dtypes:
-        raise TypeError(
-            "FlyDSL MXFP8 expects E4M3 or E5M2 payloads independently, "
-            f"got a={a.dtype} and b={b.dtype}"
-        )
-
-    if a.device != b.device:
-        raise ValueError(
-            f"a and b must be on the same device, got {a.device} and {b.device}"
-        )
-    if D.device != a.device:
-        raise ValueError(f"D must be on {a.device}, got {D.device}")
     if tuple(D.shape) != (m, n):
-        raise ValueError(
-            f"D shape {tuple(D.shape)} does not match expected {(m, n)}"
-        )
-    if D.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise TypeError(
-            "FlyDSL MXFP8 supports torch.float16, torch.bfloat16, or "
-            f"torch.float32 output, got {D.dtype}"
-        )
-    if not D.is_contiguous():
-        raise ValueError("FlyDSL MXFP8 requires contiguous output storage")
-
+        raise ValueError(f"D shape {tuple(D.shape)} != expected {(m, n)}")
     if k % SCALE_GROUP_SIZE != 0:
         raise ValueError(
             f"K={k} must be divisible by MXFP8 scale group size "
             f"{SCALE_GROUP_SIZE}"
         )
 
-    # Canonical scale contract:
-    #   a_scale [M, K/32]
-    #   b_scale [K/32, N]
-    expected_a_scale = (m, k // SCALE_GROUP_SIZE)
+    if layout == "NT":
+        expected_a_scale = (k // SCALE_GROUP_SIZE, m)
+    else:
+        expected_a_scale = (m, k // SCALE_GROUP_SIZE)
     expected_b_scale = (k // SCALE_GROUP_SIZE, n)
+
     if tuple(a_scale.shape) != expected_a_scale:
         raise ValueError(
             f"a_scale shape {tuple(a_scale.shape)} != expected "
-            f"{expected_a_scale}"
+            f"{expected_a_scale} for {layout}"
         )
     if tuple(b_scale.shape) != expected_b_scale:
         raise ValueError(
             f"b_scale shape {tuple(b_scale.shape)} != expected "
-            f"{expected_b_scale}"
+            f"{expected_b_scale} for {layout}"
         )
     if a_scale.dtype != torch.uint8 or b_scale.dtype != torch.uint8:
         raise TypeError("FlyDSL MXFP8 expects raw E8M0 scales as torch.uint8")
+    if a_scale.device != a.device or b_scale.device != a.device:
+        raise ValueError("A, B, scales, and D must be on the same device")
 
-    # The HK core consumes B and its scales in row-oriented [N, K] form.
-    b_hk = b.transpose(0, 1).contiguous()
-    b_scale_rows = b_scale.transpose(0, 1).contiguous()
-    a_scale_hk = pack_mx32_scales_for_hk(a_scale)
-    b_scale_hk = pack_mx32_scales_for_hk(b_scale_rows)
+    if layout == "TN":
+        # Preserve the passing TN kernel contract exactly: normal-read B [N,K].
+        a_kernel = a
+        b_kernel = b.transpose(0, 1).contiguous()
+        a_scale_hk = pack_mx32_scales_for_hk(
+            a_scale,
+            source_colwise=False,
+        )
+        b_scale_hk = pack_mx32_scales_for_hk(
+            b_scale.transpose(0, 1).contiguous(),
+            source_colwise=False,
+        )
+    elif layout == "NN":
+        a_kernel = a
+        b_kernel = b
+        a_scale_hk = pack_mx32_scales_for_hk(
+            a_scale,
+            source_colwise=False,
+        )
+        b_scale_hk = pack_mx32_scales_for_hk(
+            b_scale,
+            source_colwise=True,
+        )
+    else:
+        a_kernel = a
+        b_kernel = b
+        a_scale_hk = pack_mx32_scales_for_hk(
+            a_scale,
+            source_colwise=True,
+        )
+        b_scale_hk = pack_mx32_scales_for_hk(
+            b_scale,
+            source_colwise=True,
+        )
 
     _debug(
-        f"private kernel inputs: a={tuple(a.shape)}, "
-        f"contiguous={a.is_contiguous()}; "
-        f"b_hk={tuple(b_hk.shape)}, contiguous={b_hk.is_contiguous()}; "
+        f"{layout} kernel inputs: a={tuple(a_kernel.shape)}, "
+        f"b={tuple(b_kernel.shape)}, "
         f"a_scale_hk={tuple(a_scale_hk.shape)}, "
-        f"b_scale_hk={tuple(b_scale_hk.shape)}, D={tuple(D.shape)}, "
-        f"D_dtype={D.dtype}"
+        f"b_scale_hk={tuple(b_scale_hk.shape)}, D={tuple(D.shape)}"
     )
-    _debug("launching fused MXFP8 4-wave kernel")
 
     do_gemm(
-        a,
+        a_kernel,
         a_scale_hk,
-        b_hk,
+        b_kernel,
         b_scale_hk,
         D.view(m, n),
+        layout=layout,
         stream=stream,
     )
-
-    _debug("launch complete")
     return D
+
+
+def mxfp8_matmul_nn(*args, **kwargs):
+    """Compatibility entry point for the common NN specialization."""
+    kwargs["layout"] = "NN"
+    return mxfp8_matmul(*args, **kwargs)
+
+
+def mxfp8_matmul_nt(*args, **kwargs):
+    """Compatibility entry point for the common NT specialization."""
+    kwargs["layout"] = "NT"
+    return mxfp8_matmul(*args, **kwargs)
 
 
 __all__ = [
@@ -1402,5 +1707,8 @@ __all__ = [
     "BLOCK_N",
     "BLOCK_K",
     "SCALE_GROUP_SIZE",
+    "do_gemm",
     "mxfp8_matmul",
+    "mxfp8_matmul_nn",
+    "mxfp8_matmul_nt",
 ]

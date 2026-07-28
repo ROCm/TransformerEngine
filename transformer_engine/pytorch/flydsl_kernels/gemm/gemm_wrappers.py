@@ -18,8 +18,6 @@ from .fp16_gemm import fp16_matmul
 from .fp32_gemm import fp32_matmul
 from .fp8_gemm import fp8_matmul
 from .mxfp8_gemm import mxfp8_matmul
-from .mxfp8_gemm_nn import mxfp8_matmul as mxfp8_matmul_nn
-from .mxfp8_gemm_nt import mxfp8_matmul as mxfp8_matmul_nt
 
 
 def _product(shape):
@@ -595,20 +593,20 @@ def _run_mxfp8(
 
     layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
     dispatch = {
-        (True, False): ("TN", mxfp8_matmul),
-        (False, False): ("NN", mxfp8_matmul_nn),
-        (False, True): ("NT", mxfp8_matmul_nt),
+        (True, False): "TN",
+        (False, False): "NN",
+        (False, True): "NT",
     }
     try:
-        kernel_layout, matmul = dispatch[(bool(transa), bool(transb))]
+        kernel_layout = dispatch[(bool(transa), bool(transb))]
     except KeyError as exc:
         raise FlyDSLUnsupportedError(
             "FlyDSL GEMM does not support transa=True, transb=True (TT)"
         ) from exc
 
     _mxfp8_debug(
-        f"entry: layout={layout}, selected_kernel="
-        f"{matmul.__module__}.{matmul.__name__}, "
+        f"entry: layout={layout}, common_kernel="
+        f"{mxfp8_matmul.__module__}.{mxfp8_matmul.__name__}, "
         f"A_type={type(A).__name__}, B_type={type(B).__name__}, "
         f"D_provided={D is not None}"
     )
@@ -762,12 +760,13 @@ def _run_mxfp8(
         f"M={m}, N={n}, K={k}"
     )
 
-    matmul(
+    mxfp8_matmul(
         a_flydsl,
         a_scale,
         b_flydsl,
         b_scale,
         D.view(m, n),
+        layout=kernel_layout,
     )
     return D
 
