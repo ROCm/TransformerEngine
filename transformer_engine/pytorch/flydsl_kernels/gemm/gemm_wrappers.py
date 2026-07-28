@@ -17,8 +17,6 @@ from .bf16_gemm import bf16_matmul
 from .fp16_gemm import fp16_matmul
 from .fp32_gemm import fp32_matmul
 from .fp8_gemm import fp8_matmul
-from .fp8_gemm_nn import fp8_matmul as fp8_matmul_nn
-from .fp8_gemm_nt import fp8_matmul as fp8_matmul_nt
 from .mxfp8_gemm import mxfp8_matmul
 from .mxfp8_gemm_nn import mxfp8_matmul as mxfp8_matmul_nn
 from .mxfp8_gemm_nt import mxfp8_matmul as mxfp8_matmul_nt
@@ -775,17 +773,19 @@ def _run_mxfp8(
 
 
 def _select_fp8_storage_for_layout(A, transa, B, transb):
-    """Select the exact existing TE FP8 backing required by each layout.
+    """Select existing TE FP8 backings and normalize to one core contract.
 
-    Fixed zero-copy routes selected for the final kernel contracts:
+    Tensor-wise FP8 columnwise storage is a materialized transpose, unlike
+    MXFP8 columnwise storage, which denotes a different quantization direction.
 
-        TN: wrapper swaps B._data/A._data -> [M,K], [N,K]
-        NN: wrapper swaps B._data/A._transpose -> [M,K], [N,K]
-        NT: wrapper swaps B._transpose/A._transpose -> [M,K], [N,K]
+    After selecting the required TE backing and swapping BLAS operand ownership,
+    every supported layout produces the same kernel-visible operands:
 
-    NT is the NN transpose-storage path applied to both operands. Both
-    transpose allocations stay contiguous in their native [outer,K] shapes;
-    no tensor transpose, reshape reinterpretation, or materialization occurs.
+        TN: B._data      [M,K], A._data      [N,K]
+        NN: B._data      [M,K], A._transpose [N,K]
+        NT: B._transpose [M,K], A._transpose [N,K]
+
+    No kernel-side transpose, transpose staging, or transpose-read is needed.
     """
     layout = (bool(transa), bool(transb))
 
@@ -808,9 +808,8 @@ def _select_fp8_storage_for_layout(A, transa, B, transb):
         B_data = _flatten_rowwise(B_payload, B_storage)
 
     elif layout == (False, True):  # NT / dW
-        # NT extends NN's transpose-storage handling to both operands.
-        # After ownership swap, B._transpose is kernel A [M,K] and
-        # A._transpose is kernel B [N,K].
+        # Both selected transpose allocations are already materialized
+        # row-major [outer,K] backings for the normalized common core.
         A_payload = _get_fp8_columnwise_payload(A, "A")
         A_storage = "A._transpose"
         A_data = _flatten_columnwise(A_payload, A_storage)
@@ -843,7 +842,7 @@ def _run_fp8(
     *,
     output_dtype: torch.dtype,
 ):
-    """Dispatch tensor-wise FP8 using exact per-kernel storage contracts."""
+    """Normalize tensor-wise FP8 storage and invoke the common FP8 core."""
     supported_fp8_dtypes = (
         tex.DType.kFloat8E4M3,
         tex.DType.kFloat8E5M2,
@@ -900,42 +899,17 @@ def _run_fp8(
     a_scale = B_scale_inv
     b_scale = A_scale_inv
 
-    if layout == "TN":
-        matmul = fp8_matmul
-        kernel_layout = "TN"
+    # Storage selection is layout-specific; execution is not. Tensor-wise FP8
+    # transpose backing is already a materialized row-major transpose, so all
+    # supported layouts normalize to the common [M,K] x [N,K] core contract.
+    matmul = fp8_matmul
+    kernel_layout = "common"
 
-        a_flydsl = B_data
-        b_flydsl = A_data
+    a_flydsl = B_data
+    b_flydsl = A_data
 
-        m, k = a_flydsl.shape
-        n, kb = b_flydsl.shape
-
-    elif layout == "NN":
-        matmul = fp8_matmul_nn
-        kernel_layout = "NN"
-
-        a_flydsl = B_data
-        b_flydsl = A_data
-
-        m, k = a_flydsl.shape
-        n, kb = b_flydsl.shape
-
-    elif layout == "NT":
-        matmul = fp8_matmul_nt
-        kernel_layout = "NT"
-
-        # Correct fp8_gemm_nt contract: NN's [outer,K] transpose-storage
-        # path applied to both operands.
-        a_flydsl = B_data
-        b_flydsl = A_data
-
-        m, k = a_flydsl.shape
-        n, kb = b_flydsl.shape
-
-    else:
-        raise FlyDSLUnsupportedError(
-            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
-        )
+    m, k = a_flydsl.shape
+    n, kb = b_flydsl.shape
 
     if not a_flydsl.is_contiguous() or not b_flydsl.is_contiguous():
         raise FlyDSLUnsupportedError(
@@ -972,12 +946,12 @@ def _run_fp8(
         shape=logical_output_shape,
         dtype=output_dtype,
         device=a_flydsl.device,
-        backend_name=f"FP8 {kernel_layout}",
+        backend_name=f"FP8 {layout} via {kernel_layout} core",
     )
 
     _fp8_debug(
         f"dispatch entry: transa={bool(transa)}, transb={bool(transb)}, "
-        f"layout={layout}, selected_kernel={matmul.__module__}.{matmul.__name__}"
+        f"layout={layout}, normalized_core={matmul.__module__}.{matmul.__name__}"
     )
     _fp8_debug(f"selected TE storage: A={A_storage}, B={B_storage}")
     _fp8_tensor_debug(f"selected/{A_storage}", A_data)
