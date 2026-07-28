@@ -12,7 +12,13 @@ from pathlib import Path
 import setuptools
 
 from .utils import rocm_build, rocm_path
-from .utils import get_cuda_include_dirs, all_files_in_dir, debug_build_enabled, setup_mpi_flags
+from .utils import (
+    get_cuda_include_dirs,
+    all_files_in_dir,
+    debug_build_enabled,
+    setup_mpi_flags,
+    nccl_ep_enabled,
+)
 from typing import List
 
 
@@ -91,6 +97,20 @@ def setup_jax_extension(
         include_dirs = [hip_root / "include"]
     else:
         include_dirs = get_cuda_include_dirs()
+        cudnn_frontend_include_dir = None
+        for base_path in (Path(common_header_files), *Path(common_header_files).parents):
+            candidate = base_path / "3rdparty" / "cudnn-frontend" / "include"
+            if candidate.exists():
+                cudnn_frontend_include_dir = candidate
+                break
+        if cudnn_frontend_include_dir is None:
+            for base_path in Path(__file__).resolve().parents:
+                candidate = base_path / "3rdparty" / "cudnn-frontend" / "include"
+                if candidate.exists():
+                    cudnn_frontend_include_dir = candidate
+                    break
+        if cudnn_frontend_include_dir is not None:
+            include_dirs.append(cudnn_frontend_include_dir)
     include_dirs.extend(
         [
             common_header_files,
@@ -120,6 +140,16 @@ def setup_jax_extension(
         cxx_flags.extend(["-D__HIP_PLATFORM_AMD__", "-DUSE_ROCM"])
 
     setup_mpi_flags(include_dirs, cxx_flags)
+
+    if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
+        cxx_flags.append("-DNVTE_WITH_CUBLASMP")
+
+    # NCCL EP is CUDA-only; nccl_ep_enabled() returns False on ROCm, so the
+    # -DNVTE_WITH_NCCL_EP define is never added and the EP sources no-op at their
+    # #ifdef boundary (matching the gate in build_tools/pytorch.py).
+    # Disabled on ROCm
+    if not rocm_build() and nccl_ep_enabled():
+        cxx_flags.append("-DNVTE_WITH_NCCL_EP")
 
     # Define TE/JAX as a Pybind11Extension
     from pybind11.setup_helpers import Pybind11Extension
