@@ -34,7 +34,9 @@
 
 #ifdef USE_HIPKITTENS_GEMM
 #include "kittens/kittens_common.h"
+#ifdef KITTENS_HAVE_CDNA4
 #include "kittens/cdna4/mxfp8_gemm.h"
+#endif
 #endif
 
 namespace transformer_engine {
@@ -2071,6 +2073,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 #ifdef USE_HIPKITTENS_GEMM
 
   bool use_hipkittens = false;
+#ifdef KITTENS_HAVE_CDNA4
   if (is_mxfp8) {
     bool is_gfx950 = (cuda::sm_arch() == 95);
     bool force_hipblaslt = false;
@@ -2096,6 +2099,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                         static_cast<int>(outputPreGelu->data.dtype),
                                         workspace, workspaceSize, gemm_stream);
   }
+#endif
   if (!use_hipkittens) {
     if (is_mxfp8) {
       NVTE_CHECK(inputBias->data.dptr == nullptr,

@@ -86,15 +86,21 @@ inline void kittens_blockwise_fp8_gemm(
     const int arch = transformer_engine::cuda::sm_arch();
 
     BlockwiseGemmBackend *backend = nullptr;
+#ifdef KITTENS_HAVE_CDNA4
     if (arch == 95) {
         backend = BlockwiseGemmBackend::get_cdna4();
-    } else if (arch == 94) {
+    }
+#endif
+#ifdef KITTENS_HAVE_CDNA3
+    if (arch == 94) {
         backend = BlockwiseGemmBackend::get_cdna3();
     }
+#endif
     if (backend == nullptr) {
         throw std::runtime_error(
-            "kittens_blockwise_fp8_gemm: not implemented for this GPU arch (sm_arch=" +
-            std::to_string(arch) + "). Only gfx942 and gfx950 are supported.");
+            "kittens_blockwise_fp8_gemm: not built for this GPU arch (sm_arch=" +
+            std::to_string(arch) + "). This build includes only the HipKittens "
+            "backends compiled into it; rebuild with the matching gfx target.");
     }
 
     BlockwiseGemmArgs args{
