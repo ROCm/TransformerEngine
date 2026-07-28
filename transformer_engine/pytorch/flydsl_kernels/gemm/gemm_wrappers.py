@@ -20,6 +20,8 @@ from .fp8_gemm import fp8_matmul
 from .fp8_gemm_nn import fp8_matmul as fp8_matmul_nn
 from .fp8_gemm_nt import fp8_matmul as fp8_matmul_nt
 from .mxfp8_gemm import mxfp8_matmul
+from .mxfp8_gemm_nn import mxfp8_matmul as mxfp8_matmul_nn
+from .mxfp8_gemm_nt import mxfp8_matmul as mxfp8_matmul_nt
 
 
 def _product(shape):
@@ -255,7 +257,7 @@ def _flatten_rowwise(t: torch.Tensor, name: str) -> torch.Tensor:
 
 
 def _flatten_columnwise(t: torch.Tensor, name: str) -> torch.Tensor:
-    """Flatten TE columnwise storage while preserving its leading dimension."""
+    """Flatten TE columnwise storage as [last_dim, product(leading_dims)]."""
     if t.ndim < 2:
         raise ValueError(
             f"FlyDSL GEMM expects {name} to have rank >= 2, got {tuple(t.shape)}"
@@ -308,6 +310,42 @@ def _canonicalize_blas_operands(
         )
 
     return a_flydsl, b_flydsl, m, n, k
+
+
+def _resolve_output_shape(
+    A,
+    transa,
+    B,
+    transb,
+    D,
+    *,
+    m,
+    n,
+    backend_name,
+):
+    """Resolve TE's public output shape independently of kernel storage.
+
+    FlyDSL kernels always write a flattened row-major ``[M, N]`` matrix.
+    TE's public tensor may retain leading dimensions (for example
+    ``[sequence, batch, hidden]``).  Quantized rowwise/columnwise payloads are
+    physical storage views and must never be used to infer that public shape.
+
+    A caller-provided ``D`` is authoritative.  Otherwise derive the logical
+    shape from the original TE operands, before selecting or flattening any
+    backing storage.
+    """
+    if D is not None:
+        output_shape = torch.Size(D.shape)
+    else:
+        output_shape = _get_gemm_output_shape(A, transa, B, transb)
+
+    if _product(output_shape) != m * n:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL {backend_name} logical output shape "
+            f"{tuple(output_shape)} does not match flattened kernel shape "
+            f"{(m, n)}"
+        )
+    return output_shape
 
 
 def _validate_or_allocate_output(
@@ -367,16 +405,19 @@ def _run_regular_gemm(
             f"A and B must be on the same device, got {A.device} and {B.device}"
         )
 
-    output_shape = _get_gemm_output_shape(A, transa, B, transb)
-
     a_flydsl, b_flydsl, m, n, _ = _canonicalize_blas_operands(
         A, transa, B, transb
     )
-    if _product(output_shape) != m * n:
-        raise RuntimeError(
-            f"FlyDSL {backend_name} logical output shape {tuple(output_shape)} "
-            f"does not match flattened GEMM shape {(m, n)}"
-        )
+    output_shape = _resolve_output_shape(
+        A,
+        transa,
+        B,
+        transb,
+        D,
+        m=m,
+        n=n,
+        backend_name=backend_name,
+    )
 
     if output_dtype is None:
         output_dtype = dtype
@@ -499,21 +540,57 @@ def _select_mxfp8_data_and_scale(
     return data, scale
 
 
-def _flatten_mxfp8_scale(t: torch.Tensor, name: str) -> torch.Tensor:
+def _mxfp8_logical_shape(t, name: str) -> torch.Size:
+    """Return MXFP8 logical shape from a populated backing tensor.
+
+    MXFP8TensorStorage is not a torch.Tensor and does not expose ``.shape``.
+    Rowwise and columnwise MXFP8 payloads retain the same logical row-major
+    shape, so either populated backing is sufficient for shape derivation.
+    """
+    data = getattr(t, "_rowwise_data", None)
+    if data is None:
+        data = getattr(t, "_columnwise_data", None)
+    if data is None:
+        raise FlyDSLUnsupportedError(
+            f"{name} has neither rowwise nor columnwise MXFP8 data"
+        )
+    return torch.Size(data.shape)
+
+
+def _flatten_mxfp8_scale(
+    t: torch.Tensor,
+    name: str,
+    *,
+    source_colwise: bool,
+) -> torch.Tensor:
+    """Flatten a raw TE MXFP8 scale tensor without changing orientation.
+
+    Rowwise source:
+        [..., K/32] -> [outer, K/32]
+
+    Columnwise source:
+        [K/32, ...] -> [K/32, outer]
+    """
     if t.ndim < 2:
         raise ValueError(
             f"FlyDSL MXFP8 expects {name} scale rank >= 2, "
             f"got {tuple(t.shape)}"
         )
+
     original_shape = tuple(t.shape)
-    if t.ndim > 2:
+    if source_colwise:
+        t = t.reshape(t.shape[0], -1)
+        orientation = "columnwise"
+    else:
         t = t.reshape(-1, t.shape[-1])
+        orientation = "rowwise"
+
     _mxfp8_debug(
-        f"{name} scale flatten: {original_shape} -> {tuple(t.shape)}, "
+        f"{name} {orientation} scale flatten: "
+        f"{original_shape} -> {tuple(t.shape)}, "
         f"contiguous={t.is_contiguous()}"
     )
     return t
-
 
 def _run_mxfp8(
     A,
@@ -524,7 +601,24 @@ def _run_mxfp8(
     *,
     output_dtype: torch.dtype,
 ):
-    """Canonicalize independently typed E4M3/E5M2 MXFP8 operands."""
+    """Dispatch MXFP8 through exact TN/NN/NT physical contracts.
+
+    TE owns BLAS-shaped operands. After the usual ownership swap, FlyDSL
+    kernels consume:
+
+        TN: a = B.rowwise      [M, K]
+            b = A.rowwise.T    [K, N]  (validated TN adapter contract)
+
+        NN: a = B.rowwise      [M, K]
+            b = A.columnwise   [K, N]
+
+        NT: a = B.columnwise   [K, M]
+            b = A.columnwise   [K, N]
+
+    MXFP8 rowwise and columnwise payloads retain the same logical row-major
+    shape. Columnwise selection changes the quantization axis; the specialized
+    NN/NT kernels provide the required transpose-read semantics.
+    """
     a_fp8_dtype = getattr(A, "_fp8_dtype", None)
     b_fp8_dtype = getattr(B, "_fp8_dtype", None)
     supported_fp8_dtypes = (
@@ -535,118 +629,181 @@ def _run_mxfp8(
         a_fp8_dtype not in supported_fp8_dtypes
         or b_fp8_dtype not in supported_fp8_dtypes
     ):
-        raise NotImplementedError(
+        raise FlyDSLUnsupportedError(
             "FlyDSL MXFP8 supports E4M3 and E5M2 independently for A/B; "
             f"got A={a_fp8_dtype} and B={b_fp8_dtype}"
         )
 
     layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
+    dispatch = {
+        (True, False): ("TN", mxfp8_matmul),
+        (False, False): ("NN", mxfp8_matmul_nn),
+        (False, True): ("NT", mxfp8_matmul_nt),
+    }
+    try:
+        kernel_layout, matmul = dispatch[(bool(transa), bool(transb))]
+    except KeyError as exc:
+        raise FlyDSLUnsupportedError(
+            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
+        ) from exc
+
     _mxfp8_debug(
-        f"entry: layout={layout}, A_type={type(A).__name__}, "
-        f"B_type={type(B).__name__}, D_provided={D is not None}"
+        f"entry: layout={layout}, selected_kernel="
+        f"{matmul.__module__}.{matmul.__name__}, "
+        f"A_type={type(A).__name__}, B_type={type(B).__name__}, "
+        f"D_provided={D is not None}"
     )
 
-    # Select the MXFP8 representation required by the transpose flags:
-    # A: transa=True -> rowwise,  transa=False -> columnwise
-    # B: transb=True -> columnwise, transb=False -> rowwise
+    # Resolve public shapes from actual payload tensors. Never access
+    # MXFP8TensorStorage.shape: the storage wrapper has no such attribute.
+    A_logical_shape = _mxfp8_logical_shape(A, "A")
+    B_logical_shape = _mxfp8_logical_shape(B, "B")
+
+    # Match TE/C++ MXFP8 representation selection exactly:
+    #   A: transa=True  -> rowwise;  transa=False -> columnwise
+    #   B: transb=False -> rowwise;  transb=True  -> columnwise
+    A_source_colwise = not bool(transa)
+    B_source_colwise = bool(transb)
+
     A_data, A_scale = _select_mxfp8_data_and_scale(
         A,
-        will_transpose=not transa,
+        will_transpose=A_source_colwise,
         name="A",
     )
     B_data, B_scale = _select_mxfp8_data_and_scale(
         B,
-        will_transpose=transb,
+        will_transpose=B_source_colwise,
         name="B",
     )
 
-    # MXFP8Tensor stores rowwise/columnwise payloads as raw uint8. Reinterpret
-    # those exact bytes using each operand's own FP8 metadata before applying
-    # BLAS canonicalization. No copy or numerical conversion is performed here.
+    # Both MXFP8 payload orientations are stored row-major with the original
+    # logical shape. Flatten leading dimensions only; do not transpose or
+    # materialize selected columnwise payloads.
+    A_data = _flatten_rowwise(A_data, "A MXFP8 payload")
+    B_data = _flatten_rowwise(B_data, "B MXFP8 payload")
+
     if A_data.dtype == torch.uint8:
         A_data = reinterpret_as_fp8_tensor(A_data, a_fp8_dtype)
     if B_data.dtype == torch.uint8:
         B_data = reinterpret_as_fp8_tensor(B_data, b_fp8_dtype)
 
-    output_shape = _get_gemm_output_shape(
-        A_data.shape, transa, B_data.shape, transb
-    )
-
-    a_flydsl, b_flydsl, m, n, k = _canonicalize_blas_operands(
-        A_data,
-        transa,
-        B_data,
-        transb,
-    )
-    if _product(output_shape) != m * n:
-        raise RuntimeError(
-            f"FlyDSL MXFP8 logical output shape {tuple(output_shape)} "
-            f"does not match flattened GEMM shape {(m, n)}"
-        )
-
-    A_scale = _flatten_mxfp8_scale(A_scale, "A")
-    B_scale = _flatten_mxfp8_scale(B_scale, "B")
-    a_scale, b_scale = _canonicalize_blas_pair(
+    A_scale = _flatten_mxfp8_scale(
         A_scale,
-        transa,
+        "A",
+        source_colwise=A_source_colwise,
+    )
+    B_scale = _flatten_mxfp8_scale(
         B_scale,
-        transb,
+        "B",
+        source_colwise=B_source_colwise,
     )
 
-    _mxfp8_debug(
-        f"canonicalized layout={layout}: "
-        f"a={tuple(a_flydsl.shape)}, dtype={a_flydsl.dtype}, "
-        f"stride={tuple(a_flydsl.stride())}; "
-        f"b={tuple(b_flydsl.shape)}, dtype={b_flydsl.dtype}, "
-        f"stride={tuple(b_flydsl.stride())}"
-    )
-    _mxfp8_debug(
-        f"canonicalized scales: "
-        f"a_scale={tuple(a_scale.shape)}, stride={tuple(a_scale.stride())}; "
-        f"b_scale={tuple(b_scale.shape)}, stride={tuple(b_scale.stride())}"
-    )
-    _mxfp8_debug(f"derived GEMM dimensions: M={m}, N={n}, K={k}")
+    # Kernel operand ownership is always swapped relative to TE:
+    #   kernel a <- TE B
+    #   kernel b <- TE A
+    if kernel_layout == "TN":
+        # Preserve the validated TN adapter contract:
+        #   a [M,K], b [K,N]
+        a_flydsl = B_data
+        b_flydsl = A_data.transpose(0, 1)
+        a_scale = B_scale
+        b_scale = A_scale.transpose(0, 1)
+
+        m, k = a_flydsl.shape
+        kb, n = b_flydsl.shape
+        expected_a_scale = (m, k // 32)
+        expected_b_scale = (k // 32, n)
+
+    elif kernel_layout == "NN":
+        # A's columnwise MXFP8 payload is still row-major in its original
+        # shape, which is exactly the NN kernel's K-major [K,N] source.
+        a_flydsl = B_data
+        b_flydsl = A_data
+        a_scale = B_scale
+        b_scale = A_scale
+
+        m, k = a_flydsl.shape
+        kb, n = b_flydsl.shape
+        expected_a_scale = (m, k // 32)
+        expected_b_scale = (k // 32, n)
+
+    else:
+        # Both selected columnwise payloads directly satisfy the NT kernel's
+        # K-major contracts without tensor transposes or copies.
+        a_flydsl = B_data
+        b_flydsl = A_data
+        a_scale = B_scale
+        b_scale = A_scale
+
+        k, m = a_flydsl.shape
+        kb, n = b_flydsl.shape
+        expected_a_scale = (k // 32, m)
+        expected_b_scale = (k // 32, n)
+
+    if kb != k:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL MXFP8 {layout} selected incompatible payloads: "
+            f"a={tuple(a_flydsl.shape)} and b={tuple(b_flydsl.shape)}"
+        )
 
     if a_flydsl.device != b_flydsl.device:
         raise ValueError(
-            f"A and B must be on the same device, got "
+            f"FlyDSL MXFP8 {layout} operands must be on the same device, got "
             f"{a_flydsl.device} and {b_flydsl.device}"
         )
 
-    scale_group_size = 32
-    if k % scale_group_size != 0:
+    if k % 32 != 0:
         raise ValueError(
-            f"K={k} must be divisible by MXFP8 scale group size "
-            f"{scale_group_size}"
+            f"K={k} must be divisible by MXFP8 scale group size 32"
         )
 
-    # Shared BLAS canonicalization yields:
-    #   a_scale [M, K/32]
-    #   b_scale [K/32, N]
-    expected_a_scale = (m, k // scale_group_size)
-    expected_b_scale = (k // scale_group_size, n)
     if tuple(a_scale.shape) != expected_a_scale:
         raise ValueError(
-            f"A scale shape {tuple(a_scale.shape)} != expected "
-            f"{expected_a_scale}"
+            f"FlyDSL MXFP8 {layout} a_scale shape "
+            f"{tuple(a_scale.shape)} != expected {expected_a_scale}"
         )
     if tuple(b_scale.shape) != expected_b_scale:
         raise ValueError(
-            f"B scale shape {tuple(b_scale.shape)} != expected "
-            f"{expected_b_scale}"
+            f"FlyDSL MXFP8 {layout} b_scale shape "
+            f"{tuple(b_scale.shape)} != expected {expected_b_scale}"
         )
     if a_scale.dtype != torch.uint8 or b_scale.dtype != torch.uint8:
         raise TypeError("FlyDSL MXFP8 expects raw E8M0 scales as torch.uint8")
+
+    # Derive the public result shape from payload shapes, not storage wrappers.
+    if D is not None:
+        output_shape = torch.Size(D.shape)
+    else:
+        output_shape = _get_gemm_output_shape(
+            A_logical_shape,
+            transa,
+            B_logical_shape,
+            transb,
+        )
+    if _product(output_shape) != m * n:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL MXFP8 {layout} logical output shape "
+            f"{tuple(output_shape)} does not match kernel output {(m, n)}"
+        )
 
     D = _validate_or_allocate_output(
         D,
         shape=output_shape,
         dtype=output_dtype,
         device=a_flydsl.device,
-        backend_name="MXFP8",
+        backend_name=f"MXFP8 {kernel_layout}",
     )
 
-    mxfp8_matmul(
+    _mxfp8_debug(
+        f"dispatch layout={layout}: "
+        f"a={tuple(a_flydsl.shape)}, stride={tuple(a_flydsl.stride())}; "
+        f"b={tuple(b_flydsl.shape)}, stride={tuple(b_flydsl.stride())}; "
+        f"a_scale={tuple(a_scale.shape)}; "
+        f"b_scale={tuple(b_scale.shape)}; "
+        f"M={m}, N={n}, K={k}"
+    )
+
+    matmul(
         a_flydsl,
         a_scale,
         b_flydsl,
@@ -655,19 +812,14 @@ def _run_mxfp8(
     )
     return D
 
-
 def _select_fp8_storage_for_layout(A, transa, B, transb):
     """Select the exact existing TE FP8 backing required by each layout.
 
-    Fixed zero-copy routes selected for the final kernel contracts:
+    Fixed zero-copy routes:
 
-        TN: wrapper swaps B._data/A._data -> [M,K], [N,K]
-        NN: wrapper swaps B._data/A._transpose -> [M,K], [N,K]
-        NT: wrapper swaps B._data/A._data -> [K,M], [K,N]
-
-    In particular, NT must use the contiguous rowwise K-major payloads.
-    Passing ``_transpose.transpose(0, 1)`` would create strided views and
-    force the NT adapter to materialize them before launch.
+        TN: A._data,      B._data
+        NN: A._transpose, B._data
+        NT: A._transpose, B._transpose
     """
     layout = (bool(transa), bool(transb))
 
@@ -690,18 +842,13 @@ def _select_fp8_storage_for_layout(A, transa, B, transb):
         B_data = _flatten_rowwise(B_payload, B_storage)
 
     elif layout == (False, True):  # NT / dW
-        # fp8_gemm_nt consumes contiguous K-major operands directly:
-        #   kernel a = B._data [K, M]
-        #   kernel b = A._data [K, N]
-        # Select rowwise storage here so the ownership swap in _run_fp8 is
-        # zero-copy and no noncontiguous transpose view reaches the kernel.
-        A_payload = _get_fp8_rowwise_payload(A, "A")
-        A_storage = "A._data"
-        A_data = _flatten_rowwise(A_payload, A_storage)
+        A_payload = _get_fp8_columnwise_payload(A, "A")
+        A_storage = "A._transpose"
+        A_data = _flatten_columnwise(A_payload, A_storage)
 
-        B_payload = _get_fp8_rowwise_payload(B, "B")
-        B_storage = "B._data"
-        B_data = _flatten_rowwise(B_payload, B_storage)
+        B_payload = _get_fp8_columnwise_payload(B, "B")
+        B_storage = "B._transpose"
+        B_data = _flatten_columnwise(B_payload, B_storage)
 
     else:
         raise FlyDSLUnsupportedError(
@@ -727,7 +874,21 @@ def _run_fp8(
     *,
     output_dtype: torch.dtype,
 ):
-    """Dispatch tensor-wise FP8 using exact per-kernel storage contracts."""
+    """Dispatch tensor-wise FP8 through one canonical operand contract.
+
+    First select the exact existing TE storage required by the BLAS flags.
+    Then canonicalize both payloads and scales identically:
+
+        a_flydsl, b_flydsl = op(B), op(A)
+        a_scale,  b_scale  = B scale, A scale
+
+    Every kernel is called with:
+
+        matmul(a_flydsl, a_scale, b_flydsl, b_scale, D)
+
+    The layout-specific kernels differ only in the physical layouts they
+    expect for canonicalized ``a_flydsl`` and ``b_flydsl``.
+    """
     supported_fp8_dtypes = (
         tex.DType.kFloat8E4M3,
         tex.DType.kFloat8E5M2,
@@ -752,20 +913,31 @@ def _run_fp8(
         if not isinstance(scale, torch.Tensor):
             raise FlyDSLUnsupportedError(f"{name} is not populated")
         if scale.dtype != torch.float32 or scale.numel() != 1:
-            raise FlyDSLUnsupportedError(
+            raise ValueError(
                 f"{name} must contain exactly one FP32 tensor-wise inverse "
                 f"scale, got dtype={scale.dtype}, shape={tuple(scale.shape)}"
             )
 
     layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
+    dispatch = {
+        (True, False): ("TN", fp8_matmul),
+        (False, False): ("NN", fp8_matmul_nn),
+        (False, True): ("NT", fp8_matmul_nt),
+    }
+    try:
+        kernel_layout, matmul = dispatch[(bool(transa), bool(transb))]
+    except KeyError as exc:
+        raise FlyDSLUnsupportedError(
+            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
+        ) from exc
 
     (
         A_data,
         A_storage,
-        A_payload_shape,
+        A_physical_shape,
         B_data,
         B_storage,
-        B_payload_shape,
+        B_physical_shape,
     ) = _select_fp8_storage_for_layout(
         A,
         bool(transa),
@@ -781,76 +953,81 @@ def _run_fp8(
         b_storage=B_storage,
     )
 
+    # Scales follow the original TE tensors after BLAS operand ownership swap.
     a_scale = B_scale_inv
     b_scale = A_scale_inv
 
     if layout == "TN":
-        matmul = fp8_matmul
-        kernel_layout = "TN"
-
+        # a_flydsl = B._data [M,K]
+        # b_flydsl = A._data [N,K]
         a_flydsl = B_data
         b_flydsl = A_data
-
         m, k = a_flydsl.shape
         n, kb = b_flydsl.shape
 
     elif layout == "NN":
-        matmul = fp8_matmul_nn
-        kernel_layout = "NN"
-
+        # a_flydsl = B._data [M,K]
+        # b_flydsl = A._transpose flattened as [N,K]
         a_flydsl = B_data
         b_flydsl = A_data
-
         m, k = a_flydsl.shape
         n, kb = b_flydsl.shape
 
-    elif layout == "NT":
-        matmul = fp8_matmul_nt
-        kernel_layout = "NT"
-
-        # Exact fp8_gemm_nt contract, with no view or materialization:
-        #   a_flydsl = B._data [K, M]
-        #   b_flydsl = A._data [K, N]
-        a_flydsl = B_data
-        b_flydsl = A_data
-
-        k, m = a_flydsl.shape
-        kb, n = b_flydsl.shape
-
     else:
-        raise FlyDSLUnsupportedError(
-            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
-        )
-
-    if not a_flydsl.is_contiguous() or not b_flydsl.is_contiguous():
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP8 {layout} kernel contract requires contiguous final "
-            f"operands, got a={tuple(a_flydsl.shape)} "
-            f"stride={tuple(a_flydsl.stride())} and "
-            f"b={tuple(b_flydsl.shape)} stride={tuple(b_flydsl.stride())}"
-        )
+        # TE columnwise backings are contiguous allocations exposed as:
+        #   B._transpose flattened [M,K]
+        #   A._transpose flattened [N,K]
+        #
+        # fp8_gemm_nt consumes those same bytes with K-major tensor metadata:
+        #   kernel_a [K,M] aliases B._transpose
+        #   kernel_b [K,N] aliases A._transpose
+        m, k = B_data.shape
+        n, kb = A_data.shape
+        a_flydsl = B_data.view(k, m)
+        b_flydsl = A_data.view(kb, n)
 
     if kb != k:
         raise FlyDSLUnsupportedError(
             f"FlyDSL FP8 {layout} selected incompatible physical backings: "
             f"{B_storage}={tuple(B_data.shape)} and "
-            f"{A_storage}={tuple(A_data.shape)}; "
-            f"kernel operands are {tuple(a_flydsl.shape)} and "
-            f"{tuple(b_flydsl.shape)}"
+            f"{A_storage}={tuple(A_data.shape)}"
         )
 
-    if D is not None:
-        logical_output_shape = torch.Size(D.shape)
-    elif layout in ("TN", "NN"):
-        logical_output_shape = torch.Size((*B_payload_shape[:-1], n))
-    else:
-        logical_output_shape = torch.Size((m, n))
-    if _product(logical_output_shape) != m * n:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP8 {layout} logical output shape "
-            f"{tuple(logical_output_shape)} does not match kernel output "
-            f"shape {(m, n)}"
-        )
+    _fp8_debug(
+        f"dispatch entry: transa={bool(transa)}, transb={bool(transb)}, "
+        f"layout={layout}, selected_kernel={matmul.__module__}.{matmul.__name__}"
+    )
+    _fp8_debug(
+        f"selected TE storage: A={A_storage}, B={B_storage}"
+    )
+    _fp8_tensor_debug(f"selected/{A_storage}", A_data)
+    _fp8_tensor_debug(f"selected/{B_storage}", B_data)
+    _fp8_debug(
+        "canonical contract: "
+        "matmul(a_flydsl, a_scale, b_flydsl, b_scale, D)"
+    )
+    _fp8_tensor_debug("a_flydsl", a_flydsl)
+    _fp8_tensor_debug("b_flydsl", b_flydsl)
+    _fp8_scale_debug("a_scale", a_scale)
+    _fp8_scale_debug("b_scale", b_scale)
+    _fp8_debug(
+        f"canonical ownership: a_flydsl<-TE B, b_flydsl<-TE A; "
+        f"derived M={m}, N={n}, K={k}"
+    )
+
+    # Kernel storage is always flattened, but the public TE result must retain
+    # the logical leading dimensions of the original operands when D is not
+    # preallocated.  Never infer the public shape from _data/_transpose.
+    logical_output_shape = _resolve_output_shape(
+        A,
+        transa,
+        B,
+        transb,
+        D,
+        m=m,
+        n=n,
+        backend_name=f"FP8 {layout}",
+    )
 
     D = _validate_or_allocate_output(
         D,
@@ -859,19 +1036,6 @@ def _run_fp8(
         device=a_flydsl.device,
         backend_name=f"FP8 {kernel_layout}",
     )
-
-    _fp8_debug(
-        f"dispatch entry: transa={bool(transa)}, transb={bool(transb)}, "
-        f"layout={layout}, selected_kernel={matmul.__module__}.{matmul.__name__}"
-    )
-    _fp8_debug(f"selected TE storage: A={A_storage}, B={B_storage}")
-    _fp8_tensor_debug(f"selected/{A_storage}", A_data)
-    _fp8_tensor_debug(f"selected/{B_storage}", B_data)
-    _fp8_tensor_debug("a_flydsl", a_flydsl)
-    _fp8_tensor_debug("b_flydsl", b_flydsl)
-    _fp8_scale_debug("a_scale", a_scale)
-    _fp8_scale_debug("b_scale", b_scale)
-    _fp8_debug(f"derived M={m}, N={n}, K={k}")
     _fp8_tensor_debug("output/D", D)
 
     matmul(
