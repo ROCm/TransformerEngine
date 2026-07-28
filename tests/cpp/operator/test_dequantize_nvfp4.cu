@@ -213,9 +213,9 @@ void performTest(const size_t rows, const size_t cols, DType otype) {
                        gen,
                        finite_nonneg_e4m3_dis);
 
-    // With the current test_common NVFP4 helper path on ROCm, there is no direct
-    // way to populate a separate global amax buffer for dequant, so this test
-    // explicitly covers the HIP nullptr -> 1.0f fallback path for now.
+    // The NVFP4 Tensor helper allocates a zero-initialized amax buffer. Null it so the
+    // dequant kernel takes the HIP nullptr -> 1.0f fallback, matching the reference below.
+    input.set_tensor_amax_nullptr();
     const float amax = 1.0f;
 
     run_single_case<OutputType>("rowwise_1d_dequant",
@@ -246,6 +246,7 @@ class DequantizeNVFP4TestSuite
           std::tuple<std::pair<size_t, size_t>, transformer_engine::DType>> {};
 
 TEST_P(DequantizeNVFP4TestSuite, TestDequantizeNVFP4) {
+    if (te_fp8_fnuz()) GTEST_SKIP() << "NVFP4 not supported on gfx942 (fnuz)";
     const auto tensor_size = std::get<0>(GetParam());
     const DType output_type = std::get<1>(GetParam());
 

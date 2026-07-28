@@ -238,8 +238,8 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_overlap_ag,
             ub_overlap_rs,
             ub_overlap_rs_dgrad,
-            ub_bulk_wgrad, #ROCm: there is a but in upstream - order of dgrad and wgrad here bug here
-            ub_bulk_dgrad, #does not match order in LayerNormMLP::forward. Fix it there
+            ub_bulk_wgrad, #ROCm: there is a bug in upstream with dgrad and wgrad
+            ub_bulk_dgrad, #order not matching _LayerNormMLP::_forward
             gemm_gelu_fusion,
             fsdp_group,
             fp8_meta,

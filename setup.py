@@ -130,7 +130,7 @@ def setup_common_extension() -> CMakeExtension:
 
     # NCCL EP (Hopper+): on by default; auto-skipped when no arch >= 90 is
     # targeted. Set NVTE_WITH_NCCL_EP=0 to force off.
-    # NCCL EP is a CUDA/NCCL-only feature (NVIDIA nccl submodule); always off on ROCm.
+    # Disabled on ROCm
     if rocm_build():
         cmake_flags.append("-DNVTE_WITH_NCCL_EP=OFF")
     elif nccl_ep_enabled(archs):

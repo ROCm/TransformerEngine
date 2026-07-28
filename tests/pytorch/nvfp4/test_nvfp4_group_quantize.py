@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -19,6 +21,7 @@ from transformer_engine.common.recipe import NVFP4BlockScaling
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import random
 import math
 
@@ -198,6 +201,10 @@ def test_rht_with_quantization_block_tiling_versus_reference(
     # matrix with redundant cases.
     if optimize_for_gemm and not with_rht:
         pytest.skip("optimize_for_gemm requires with_rht=True (framework gate)")
+
+    # Swizzled SF is emitted only by the Blackwell RHT cast-fusion kernel; no fusion path on ROCm.
+    if IS_HIP_EXTENSION and optimize_for_gemm:
+        pytest.skip("RHT cast-fusion swizzled SF is not supported on ROCm")
 
     # The grouped RHT cast-fusion kernel that honors with_gemm_swizzled_scales
     # (group_row_cast_col_hadamard_transform_cast_fusion.cu) is only dispatched

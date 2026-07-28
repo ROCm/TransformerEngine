@@ -561,7 +561,7 @@ def _test_permutation_mask_map(
     # Results Check
     #
     ###################################################################################################################################
-    if te_dtype == tex.DType.kBFloat16:
+    if te_dtype == te.DType.kBFloat16:
         # +8% increase in the tolerance (from 2.0e-2) for test failure due to rare numerical rounding error
         tols = dict(rtol=2.16e-2, atol=1.0e-5)
     else:

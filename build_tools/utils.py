@@ -352,6 +352,8 @@ def nccl_ep_enabled(archs: str = None) -> bool:
     logic in both TE/Common (setup.py) and TE/JAX (build_tools/jax.py) so a
     single env var controls both sides consistently.
     """
+    if rocm_build():
+        return False  # NCCL EP is not supported on ROCm.
     if archs is None:
         archs = cuda_archs()
     nccl_ep_env = os.getenv("NVTE_WITH_NCCL_EP")

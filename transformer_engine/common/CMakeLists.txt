@@ -318,7 +318,7 @@ set(cuda_only_cuda_sources
      fused_attn/fused_attn_fp8.cu
      fused_attn/utils.cu
      swizzle/swizzle_block_scaling.cu
-     util/topk.cu) #CUDA-only: standalone_topk.cuh uses cub internals + cooperative_groups::reduce (no HIP equivalent)
+     util/topk.cu) #CUDA-only
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
      fused_attn/flash_attn.cu
@@ -506,7 +506,6 @@ target_include_directories(transformer_engine PRIVATE
 endif()
 
 # Compiling Userbuffers with native MPI bootstrapping requires linking against MPI
-# Changed
 option(NVTE_UB_WITH_MPI "Bootstrap Userbuffers with MPI" OFF)
 if (NVTE_UB_WITH_MPI)
     # OpenMPI C++ headers are deprecated -- flag unused w/ MPICH

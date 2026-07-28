@@ -202,6 +202,7 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   if (compile_result != NVRTC_SUCCESS) {
     std::string log;
 
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
     // Decode CUDA version number to "major.minor" string
     auto version_string = [](int v) -> std::string {
       if (v < 0) {
@@ -229,6 +230,7 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
           "Consider changing the CUDA header search path (by setting NVTE_CUDA_INCLUDE_DIR) "
           "or the linked CUDA Runtime (by setting CUDA_HOME or LD_LIBRARY_PATH).\n\n");
     }
+#endif
 
     // Get build log
     log += concat_strings("NVRTC compilation log for ", filename, ":\n");

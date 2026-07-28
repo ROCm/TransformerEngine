@@ -28,11 +28,15 @@
 #ifdef __HIP_PLATFORM_AMD__
 #include "../mxfp4/quantize_mxfp4.cuh"
 #endif //#ifdef __HIP_PLATFORM_AMD__
-//TODO: ROCm TE does not support nvfp4 yet
+// The optimized NVFP4 kernels are Blackwell-only (CUtensorMap/tcgen05); ROCm uses
+// the generic quantize_transpose_vector_blockwise_fp4 path plus this portable
+// row-wise amax for row-scaled NVFP4.
 #ifndef __HIP_PLATFORM_AMD__
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
 #include "../nvfp4/quantize_4over6_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
+#else
+#include "../nvfp4/rowwise_amax_nvfp4.cuh"
 #endif //#ifndef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine {
@@ -150,7 +154,9 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
           (output_tensor->has_data() ||
            (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
-      // Launch NVFP4 quantize kernel
+      // Launch NVFP4 quantize kernel. 4over6 and the optimized quantize_transpose kernels are
+      // CUDA-only (Blackwell); ROCm falls through to the portable blockwise path below, which
+      // supports row-scaled NVFP4.
 #ifndef __HIP_PLATFORM_AMD__
       if (nvfp4_use_4over6) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
@@ -322,7 +328,9 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
           (output_tensor->has_data() ||
            (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
-      // Launch NVFP4 quantize kernel
+      // Launch NVFP4 quantize kernel. 4over6 and the optimized quantize_transpose kernels are
+      // CUDA-only (Blackwell); ROCm falls through to the portable blockwise path below, which
+      // supports row-scaled NVFP4.
 #ifndef __HIP_PLATFORM_AMD__
       if (nvfp4_use_4over6) {
         if (quant_config_cpp.nvfp4_2d_quantization) {

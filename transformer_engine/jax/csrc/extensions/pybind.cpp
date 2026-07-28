@@ -69,12 +69,14 @@ pybind11::dict Registrations() {
   dict["te_fused_attn_backward_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(FusedAttnBackwardHandler));
+#ifndef USE_ROCM  // Disabled on ROCm
   dict["te_fused_attn_score_mod_forward_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(FusedAttnScoreModForwardHandler));
   dict["te_fused_attn_score_mod_backward_ffi"] =
       pybind11::dict(pybind11::arg("prepare") = EncapsulateFFI(CudnnHandleInitHandler),
                      pybind11::arg("execute") = EncapsulateFFI(FusedAttnScoreModBackwardHandler));
+#endif
 
   // GEMM
   dict["te_gemm_ffi"] =
@@ -148,8 +150,8 @@ pybind11::dict Registrations() {
                      pybind11::arg("execute") = EncapsulateFFI(EpCombineBwdHandler));
 #endif  // NVTE_WITH_NCCL_EP
 
-  // TopK (CUDA-only: nvte_topk/standalone_topk.cuh has no HIP equivalent)
-#ifndef USE_ROCM
+  // TopK
+#ifndef USE_ROCM  // Disabled on ROCm
   dict["te_topk_ffi"] = EncapsulateFFI(TopkHandler);
 #endif
 

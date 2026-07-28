@@ -358,22 +358,24 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
                                                  accumulate, use_split_accumulator,
                                                  extra_output_tensor, main_stream);
           });
+        } else {
 #ifdef __HIP_PLATFORM_AMD__
-        } else if (!comm_overlap->is_aggregate()) {
+          // The aggregated ring exchange needs the userbuffers transport, so the ROCm
+          // split path serves both modes.
           NVTE_SCOPED_GIL_RELEASE({
             comm_overlap->rocm_split_overlap_ag(A_tensor, transa, B_tensor, transb, D_tensor,
                                                 bias_tensor, te_pre_gelu_out, te_workspace, grad,
                                                 accumulate, use_split_accumulator,
                                                 extra_output_tensor, main_stream);
           });
-#endif // #ifdef __HIP_PLATFORM_AMD
-        } else {
+#else
           NVTE_SCOPED_GIL_RELEASE({
             comm_overlap->split_overlap_ag(A_tensor, transa, B_tensor, transb, out_tensor,
                                            bias_tensor, te_pre_gelu_out, te_workspace, grad,
                                            accumulate, use_split_accumulator, extra_output_tensor,
                                            main_stream);
           });
+#endif // #ifdef __HIP_PLATFORM_AMD
         }
       } else {
         if (comm_overlap->is_atomic_gemm()) {
@@ -669,6 +671,7 @@ std::optional<std::vector<at::Tensor>> te_general_grouped_gemm(
   return bias;
 }
 
+#ifndef USE_ROCM  // CUDA-only path; ROCm uses te_general_grouped_gemm.
 py::object te_general_grouped_gemm_for_grouped_tensor(
     py::handle A, bool transa, py::handle B, bool transb, py::handle D, py::object bias,
     std::optional<at::Tensor> bias_scale, at::Tensor alpha, at::Tensor beta,
@@ -868,4 +871,5 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
 
   return py::reinterpret_borrow<py::object>(D);
 }
+#endif  // !USE_ROCM
 }  // namespace transformer_engine::pytorch

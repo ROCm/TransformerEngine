@@ -852,18 +852,32 @@ def test_dcp_output_parity(recipe_name, async_save):
         # fsdp_pre_all_gather metadata rather than as a sharded tensor, so DCP
         # saves it cast to the model's param_dtype (bf16) instead of fp32; the
         # precision loss in the reloaded scale_inv prevents bitwise parity.
-        if isinstance(
-            recipe,
-            (
-                transformer_engine.common.recipe.DelayedScaling,
-                transformer_engine.common.recipe.Float8CurrentScaling,
-            ),
-        ):
+        # NVFP4BlockScaling (async only): NVFP4Tensor's per-tensor amax is likewise
+        # passed via fsdp_pre_all_gather metadata (a scalar, not all-gathered), so
+        # async DCP staging saves it cast to param_dtype (bf16); the reloaded amax
+        # feeds NVFP4's two-level dequantization, so the rounding prevents bitwise
+        # parity. Sync DCP saves the amax as an fp32 tensor and stays bitwise-exact.
+        nvfp4_async = (
+            isinstance(recipe, transformer_engine.common.recipe.NVFP4BlockScaling) and async_save
+        )
+        loose_parity = (
+            isinstance(
+                recipe,
+                (
+                    transformer_engine.common.recipe.DelayedScaling,
+                    transformer_engine.common.recipe.Float8CurrentScaling,
+                ),
+            )
+            or nvfp4_async
+        )
+        # NVFP4 dequantization widens the reloaded amax further than the FP8 recipes
+        parity_atol = 0.2 if nvfp4_async else 0.1
+        if loose_parity:
             torch.testing.assert_close(
                 loaded_output,
                 ref_output,
                 rtol=0.05,
-                atol=0.1,
+                atol=parity_atol,
                 msg=lambda x: f"Fresh model loaded from DCP checkpoint produces different output: {x}",
             )
         else:
@@ -896,23 +910,19 @@ def test_dcp_output_parity(recipe_name, async_save):
         loss2.backward()
         optimizer2.step()
 
-        if isinstance(
-            recipe,
-            (
-                transformer_engine.common.recipe.DelayedScaling,
-                transformer_engine.common.recipe.Float8CurrentScaling,
-            ),
-        ):
+        if loose_parity:
             torch.testing.assert_close(
                 out2,
                 out1,
                 rtol=0.05,
-                atol=0.1,
-                msg="Training step after DCP load produces different output",
+                atol=parity_atol,
+                msg=lambda x: f"Training step after DCP load produces different output: {x}",
             )
         else:
             torch.testing.assert_close(
-                out2, out1, msg="Training step after DCP load produces different output"
+                out2,
+                out1,
+                msg=lambda x: f"Training step after DCP load produces different output: {x}",
             )
     finally:
         dist.barrier()

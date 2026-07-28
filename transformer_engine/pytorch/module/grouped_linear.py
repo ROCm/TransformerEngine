@@ -120,6 +120,9 @@ class _GroupedLinear(torch.autograd.Function):
         Input/weight/grad_output quantizers are assumed to be of the same type, otherwise it would
         trigger a fatal error in the cuBLASLt grouped GEMM check.
         """
+        # CUDA-only path; ROCm uses general_grouped_gemm.
+        if IS_HIP_EXTENSION:
+            return False
         # 1. Filter by environment variable
         if not bool(int(os.getenv("NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM", "0"))):
             return False

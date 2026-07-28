@@ -108,6 +108,11 @@ def _shard_model(model, world_size):
             if hasattr(module, "reset_parameters"):
                 module.reset_parameters()
     restore_custom_attrs(model, custom_attrs)
+    # Enable FSDP2 mode so TE recreates the FP8 weight transpose in backward
+    # instead of caching it per forward layer (avoids per-layer memory growth).
+    for module in model.modules():
+        if hasattr(module, "use_fsdp2"):
+            module.use_fsdp2 = True
     return model
 
 

@@ -191,9 +191,9 @@ def _compute_nvfp4_support() -> Tuple[bool, str]:
     """Return if nvfp4 support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 4), (9, 5)):  # TODO: enabled for gfx1250 when ready
+        if gpu_arch in ((9, 5),):  # gfx950; TODO: enable for gfx1250 when ready
             return True, ""
-        return False, "Device arch gfx94x or newer is required for NVFP4 execution."
+        return False, "Device arch gfx950 or newer is required for NVFP4 execution."
     if get_device_compute_capability() >= (10, 0):  # blackwell and above
         return True, ""
     return False, "Device compute capability 10.0 or higher required for NVFP4 execution."
@@ -254,7 +254,7 @@ def check_mxfp4_support() -> Tuple[bool, str]:
     """Return if mxfp4 support is available"""
     if IS_HIP_EXTENSION:
         gpu_arch = get_device_compute_capability()
-        if gpu_arch == (9, 5): #TODO: enabled for gfx1250 when ready
+        if gpu_arch == (9, 5):  # TODO: enable for gfx1250 when ready
             return True, ""
         return False, "Device arch gfx95x or newer is required for MXFP4 execution."
     return False, "Only ROCm gfx950 supports MXFP4"
@@ -1723,10 +1723,13 @@ class MXFP4BlockScalingRecipeState(RecipeState):
         mode: str,
         num_quantizers: int = 1,
         device: Optional[torch.device] = None,
+        roles: Optional[List[QuantizerRole]] = None,
     ) -> None:
+        self._validate_roles(roles, num_quantizers)
         self.recipe = recipe
         self.mode = mode
         self.num_quantizers = num_quantizers
+        self.roles = roles
         self.dtype = get_fp4_te_dtype(recipe)
 
         if device is None:

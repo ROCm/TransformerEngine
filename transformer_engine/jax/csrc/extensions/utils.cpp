@@ -8,7 +8,9 @@
 #include "utils.h"
 
 #include <cuda_runtime_api.h>
+#ifndef USE_ROCM  // Disabled on ROCm
 #include <cudnn_frontend_version.h>
+#endif
 
 #include <cassert>
 
@@ -27,7 +29,9 @@ int GetCudaRuntimeVersion() {
 size_t GetCudnnRuntimeVersion() { return cudnnGetVersion(); }
 #endif
 
+#ifndef USE_ROCM
 size_t GetCudnnFrontendVersion() { return CUDNN_FRONTEND_VERSION; }
+#endif
 
 int GetDeviceComputeCapability(int gpu_id) { return transformer_engine::cuda::sm_arch(gpu_id); }
 

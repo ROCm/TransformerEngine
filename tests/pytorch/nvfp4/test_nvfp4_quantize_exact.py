@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,6 +10,7 @@ from dataclasses import dataclass
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
@@ -81,6 +84,8 @@ def maybe_skip_row_scaled_unsupported_quantization(
     M: int | None = None,
     N: int | None = None,
 ) -> None:
+    if IS_HIP_EXTENSION and use_4over6:
+        pytest.skip("NVFP4 4over6 is not supported on ROCm")
     if use_4over6 and with_2d_quantization:
         if x_dtype != torch.bfloat16 or M is None or N is None or M % 32 != 0 or N % 32 != 0:
             pytest.skip("NVFP4 2D 4over6 exact tests require the optimized BF16 kernel path")

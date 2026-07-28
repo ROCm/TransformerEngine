@@ -284,9 +284,13 @@ def test_dot_product_attention(
         flash_attn_supported, fused_attn_supported, unfused_attn_supported = available_backends
 
     # FlashAttention does not support pad_between_seqs, but _run_dot_product_attention
-    # mannually pads and unpads the input and output of FlashAttention for testing purposes
+    # mannually pads and unpads the input and output of FlashAttention for testing purposes.
+    # On ROCm the FlashAttention backend is disabled for THD with padding between sequences
+    # (flash-attn 2 cannot handle it and flash-attn 3 is not available), so do not force the
+    # FlashAttention leg here; FusedAttention (CK) covers this case.
     if (
         pad_between_seqs
+        and not IS_HIP_EXTENSION
         and FlashAttentionUtils.is_installed
         and not (
             config.max_seqlen_q != config.max_seqlen_kv

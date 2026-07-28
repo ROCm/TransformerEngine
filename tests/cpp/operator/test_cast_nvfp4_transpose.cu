@@ -75,11 +75,7 @@ std::vector<InputType> create_transpose(const InputType* const input, const size
 float compute_global_encode_scaling_factor_FP4(const float global_amax, const bool use_fast_math,
                                                const int e4m3_max = 448) {
   NVTE_CHECK(e4m3_max == 448 || e4m3_max == 256, "Unsupported NVFP4 E4M3 max.");
-#ifdef __HIP_PLATFORM_AMD__
-  const float fp8_max = Numeric_Traits<fp8e4m3>::maxNorm;
-#else
   const float fp8_max = static_cast<float>(e4m3_max);
-#endif
   constexpr float fp4_max = 6.0f;       // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
   // If scale is infinity, return the max normalized value
@@ -824,6 +820,11 @@ void performTest(float (*OP)(const float),
     const bool row_scaled_nvfp4 = scaling_mode == NVFP4ScalingMode::RowScaled1D;
     const bool rowwise = true;
     const bool columnwise = !row_scaled_nvfp4;
+
+#ifdef __HIP_PLATFORM_AMD__
+    if (te_fp8_fnuz()) GTEST_SKIP() << "NVFP4 not supported on gfx942 (fnuz)";
+    if (use_4over6) GTEST_SKIP() << "NVFP4 4over6 not supported on ROCm";
+#endif
 
     const size_t rows = first_dimension(shape);
     const size_t cols = last_dimension(shape);

@@ -319,6 +319,7 @@ if IS_HIP_EXTENSION:
         return qx_t_ref, sx_t_ref
 
 
+    @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
     @pytest.mark.parametrize("rows,cols", [(64, 64), (128, 128)])
     def test_hadamard_transform_amax(rows, cols):
         """

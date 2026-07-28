@@ -1,11 +1,15 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
  ************************************************************************/
 
 #include <cuda.h>
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
 #include <cudaTypedefs.h>
+#endif
 
 #include "../common.h"
 #include "../util/cuda_driver.h"
@@ -157,6 +161,7 @@ void prepare_flash_attn_bwd(Tensor q, Tensor k, Tensor v, Tensor qkv, cudaStream
 // multi_tensor_transpose_to_bhsd: BSHD/SBHD -> BHSD
 // ============================================================================
 
+#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
 namespace multi_tensor_transpose_to_bhsd {
 
 using flash_attention::Vec;
@@ -725,6 +730,7 @@ void multi_tensor_transpose_to_bhsd(Tensor *inputs, Tensor *outputs, size_t num_
 }
 
 }  // namespace multi_tensor_transpose_to_bhsd
+#endif
 
 // ===================================================================================
 // multi_tensor_pad_last_dim: pad the last dim of multiple tensors to certain alignment
@@ -866,6 +872,7 @@ void nvte_multi_tensor_transpose_to_bhsd(NVTETensor *inputs, NVTETensor *outputs
                                          size_t num_tensors, NVTE_QKV_Format original_format,
                                          cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_transpose_to_bhsd);
+#ifndef __HIP_PLATFORM_AMD__
   NVTE_CHECK(original_format == NVTE_QKV_Format::NVTE_BSHD ||
                  original_format == NVTE_QKV_Format::NVTE_SBHD,
              "nvte_multi_tensor_transpose_to_bhsd: only BSHD/SBHD -> BHSD is currently "
@@ -883,6 +890,14 @@ void nvte_multi_tensor_transpose_to_bhsd(NVTETensor *inputs, NVTETensor *outputs
     multi_tensor_transpose_to_bhsd::multi_tensor_transpose_to_bhsd(
         in_vec.data() + offset, out_vec.data() + offset, batch, original_format, stream);
   }
+#else
+  (void)inputs;
+  (void)outputs;
+  (void)num_tensors;
+  (void)original_format;
+  (void)stream;
+  NVTE_ERROR("nvte_multi_tensor_transpose_to_bhsd is not supported on ROCm.");
+#endif
 }
 
 void nvte_multi_tensor_pad_last_dim(NVTETensor *inputs, NVTETensor *outputs, size_t num_tensors,

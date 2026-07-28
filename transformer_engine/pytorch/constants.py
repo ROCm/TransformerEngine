@@ -112,7 +112,7 @@ class Custom_DType_Dict(dict):
     def __missing__(self, key):
         if key in _FP8_KEYS:
             value = (
-                get_torch_float8_e4m3_type() if key == tex.DType.kFloat8E4M3
+                get_torch_float8_e4m3_type() if key == DType.kFloat8E4M3
                 else get_torch_float8_e5m2_type()
             )
             self[key] = value

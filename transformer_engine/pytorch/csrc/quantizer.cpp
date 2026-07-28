@@ -2639,7 +2639,7 @@ void NVFP4Quantizer::quantize_impl(const TensorWrapper& input, TensorWrapper& ou
       // skip the separate hadamard_transform call.
 #ifndef USE_ROCM
       // unfused path also needs memory allocation for intermediate buffer for RHT output
-      at::Tensor rht_output_t;
+      at::Tensor rht_output_t;  // The RHT(x_t) output, in columnwise layout
 #endif
       bool skip_hadamard = compute_amax && rht_output_t.defined();
       if (this->columnwise_usage && !skip_hadamard) {
@@ -2733,8 +2733,10 @@ MXFP4Quantizer::MXFP4Quantizer(const py::handle& quantizer) : Quantizer(quantize
 
 void MXFP4Quantizer::set_quantization_params(TensorWrapper* tensor) const {}
 
-std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(const std::vector<size_t>& shape,
-                                                                   DType dtype) const {
+std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(
+    const std::vector<size_t>& shape, DType dtype, std::optional<at::Device> device_opt,
+    bool pin_memory) const {
+  const auto device = resolve_device(device_opt);
   using namespace pybind11::literals;
 
   // Tensor dimensions
@@ -2755,7 +2757,8 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(const std::ve
   // Allocate tensors
   at::Tensor rowwise_data_tensor, rowwise_scale_inv_tensor;
   at::Tensor columnwise_data_tensor, columnwise_scale_inv_tensor;
-  const auto uint8_tensor_opts = at::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);
+  const auto uint8_tensor_opts =
+      at::TensorOptions().dtype(torch::kUInt8).device(device).pinned_memory(pin_memory);
   if (rowwise_usage) {
     const std::vector<int64_t> scale_inv_shape_int64(rowwise_scale_inv_shape.begin(),
                                                      rowwise_scale_inv_shape.end());
@@ -2826,11 +2829,14 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(const std::ve
 std::pair<GroupedTensorWrapper, py::object> MXFP4Quantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
-    const size_t logical_first_dim, const size_t logical_last_dim) const {
+    const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
+    const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+      precomputed_tensor_offsets.has_value()
+          ? precomputed_tensor_offsets
+          : build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
   NVTE_CHECK(total_elements % 2 == 0, "MXFP4 data size must be divisible by 2.");

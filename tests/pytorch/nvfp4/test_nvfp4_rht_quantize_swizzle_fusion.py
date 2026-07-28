@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -27,6 +29,7 @@ from transformer_engine.pytorch.tensor.storage.nvfp4_tensor_storage import (
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from typing import Tuple
 
@@ -36,6 +39,9 @@ from nvfp4_utils import (
 )
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
+
+# RHT cast-fusion emits GEMM-swizzled scales only on Blackwell; no fusion path on ROCm.
+pytestmark = pytest.mark.skipif(IS_HIP_EXTENSION, reason="RHT cast-fusion is not supported on ROCm")
 
 
 def _unpack_quantized_tensor(

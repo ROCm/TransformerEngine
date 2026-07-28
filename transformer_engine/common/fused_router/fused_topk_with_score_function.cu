@@ -415,7 +415,7 @@ __global__ void fused_topk_with_score_function_forward_kernel(
         __syncwarp();
         // Compute the group score
         if (lane_id == 0) {
-//TODO: release after /opt/rocm/include/hip/amd_detail/amd_hip_bfloat16.h remove explict constructor restriction
+// TODO: release after /opt/rocm/include/hip/amd_detail/amd_hip_bfloat16.h removes explicit constructor restriction
 #ifdef __HIP_PLATFORM_AMD__
           CompType tmp(0.0f);
 #else
