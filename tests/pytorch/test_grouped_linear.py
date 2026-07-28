@@ -1950,6 +1950,8 @@ def test_swizzle_scales_and_pack_ptrs_for_discrete_weights(
     """Helper function for preparing discrete weights for cuDNN group GEMM kernel"""
 
     # Skip unsupported configurations
+    if IS_HIP_EXTENSION:
+        pytest.skip("Helper is only used by the CuTe grouped MLP kernels, unsupported on ROCm.")
     if not mxfp8_available and swizzle_type in ("mxfp8_rowwise", "mxfp8_columnwise"):
         pytest.skip(reason_for_no_mxfp8)
     if not nvfp4_available and swizzle_type == "nvfp4":
