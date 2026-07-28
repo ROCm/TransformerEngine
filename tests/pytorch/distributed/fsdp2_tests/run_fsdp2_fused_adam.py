@@ -911,11 +911,13 @@ def test_dcp_output_parity(recipe_name, async_save):
                 out1,
                 rtol=0.05,
                 atol=0.1,
-                msg="Training step after DCP load produces different output",
+                msg=lambda x: f"Training step after DCP load produces different output: {x}",
             )
         else:
             torch.testing.assert_close(
-                out2, out1, msg="Training step after DCP load produces different output"
+                out2,
+                out1,
+                msg=lambda x: f"Training step after DCP load produces different output: {x}",
             )
     finally:
         dist.barrier()
