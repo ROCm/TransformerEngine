@@ -66,92 +66,193 @@ def _debug(message: str) -> None:
         print(f"[DEBUG_FLYDSL_MXFP8_GEMM] {message}")
 
 
-def pack_mx32_scales_iter(
-    scales_u8: torch.Tensor,
-    *,
-    source_colwise: bool = False,
-) -> torch.Tensor:
-    """Pack raw E8M0 scales as iteration-major ``[K/128, dim]`` uint32.
+_SCALE_PACK_THREADS = 256
 
-    ``source_colwise=False`` consumes TE rowwise scales ``[dim, K/32]``.
-    ``source_colwise=True`` consumes TE columnwise scales ``[K/32, dim]``.
 
-    Both paths produce the same packed representation consumed by every
-    TN/NN/NT MXFP8 kernel specialization.
+def _compile_mx32_scale_pack_kernel(
+    dim: int,
+    qk: int,
+    source_colwise: bool,
+    stride0: int,
+    stride1: int,
+):
+    """Build one fused raw-E8M0 -> HK-scale packing kernel.
+
+    One GPU thread produces one final ``uint32`` word in the GEMM-consumed
+    ``[K/128, dim]`` layout.  There is no intermediate ``scale_iter`` tensor
+    and no eager PyTorch shift/index/OR kernels.
     """
-    if scales_u8.dtype != torch.uint8:
-        raise TypeError(
-            f"MXFP8 scales must be torch.uint8 E8M0 bytes, got {scales_u8.dtype}"
-        )
-    if scales_u8.ndim != 2:
+    if dim % 64 != 0:
         raise ValueError(
-            f"MXFP8 scales must be rank 2, got shape {tuple(scales_u8.shape)}"
+            f"Scale outer dimension={dim} must be a multiple of 64"
         )
-
-    if source_colwise:
-        qk, dim = scales_u8.shape
-        if qk % 4 != 0:
-            raise ValueError(
-                f"Columnwise scale K dimension must be divisible by 4 K32 groups, got {qk}"
-            )
-        s32 = scales_u8.contiguous().view(qk // 4, 4, dim).to(torch.int32)
-        return (
-            s32[:, 0, :]
-            | (s32[:, 1, :] << 8)
-            | (s32[:, 2, :] << 16)
-            | (s32[:, 3, :] << 24)
-        ).contiguous()
-
-    dim, qk = scales_u8.shape
     if qk % 4 != 0:
         raise ValueError(
-            f"Rowwise scale K dimension must be divisible by 4 K32 groups, got {qk}"
+            f"Scale K/32 dimension={qk} must be divisible by 4"
         )
 
-    s32 = scales_u8.contiguous().view(dim, qk // 4, 4).to(torch.int32)
-    packed = (
-        s32[:, :, 0]
-        | (s32[:, :, 1] << 8)
-        | (s32[:, :, 2] << 16)
-        | (s32[:, :, 3] << 24)
+    k128_tiles = qk // 4
+    total_words = k128_tiles * dim
+    if total_words % _SCALE_PACK_THREADS != 0:
+        raise ValueError(
+            f"Packed scale words={total_words} must be divisible by "
+            f"{_SCALE_PACK_THREADS}"
+        )
+
+    # Select source addressing before FlyDSL captures the kernel.  The emitted
+    # rowwise and columnwise binaries contain no runtime orientation branch.
+    if source_colwise:
+        def _source_offset(source_k32, source_row):
+            # Logical source is [K/32, dim], but the underlying TE tensor may
+            # be a non-contiguous view. Strides are in uint8 elements.
+            return (
+                source_k32 * fx.Index(stride0)
+                + source_row * fx.Index(stride1)
+            )
+    else:
+        def _source_offset(source_k32, source_row):
+            # Logical source is [dim, K/32], with arbitrary positive strides.
+            return (
+                source_row * fx.Index(stride0)
+                + source_k32 * fx.Index(stride1)
+            )
+
+    @flyc.kernel(known_block_size=[_SCALE_PACK_THREADS, 1, 1])
+    def kernel_pack_mx32_scales(src: fx.Tensor, dst: fx.Tensor):
+        src_rsrc = buffer_ops.create_buffer_resource(src, max_size=True)
+        dst_rsrc = buffer_ops.create_buffer_resource(dst, max_size=True)
+
+        linear = (
+            fx.Index(fx.block_idx.x) * fx.Index(_SCALE_PACK_THREADS)
+            + fx.Index(gpu.thread_id("x"))
+        )
+        k128 = linear // fx.Index(dim)
+        dst_row = linear % fx.Index(dim)
+
+        row_within_16 = dst_row % fx.Index(16)
+        k_subgroup = (dst_row // fx.Index(16)) % fx.Index(4)
+        tile = dst_row // fx.Index(64)
+        source_k32 = k128 * fx.Index(4) + k_subgroup
+
+        def load_scale_byte(group):
+            source_row = (
+                tile * fx.Index(64)
+                + fx.Index(group * 16)
+                + row_within_16
+            )
+            value_i8 = buffer_ops.buffer_load(
+                src_rsrc,
+                _source_offset(source_k32, source_row),
+                vec_width=1,
+                dtype=T.i8,
+            )
+            # Preserve the raw E8M0 byte when widening.  Going through Uint8
+            # avoids sign extension for scale bytes >= 0x80.
+            return fx.Int32(fx.Uint8(value_i8))
+
+        b0 = load_scale_byte(0)
+        b1 = load_scale_byte(1)
+        b2 = load_scale_byte(2)
+        b3 = load_scale_byte(3)
+        packed = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
+        buffer_ops.buffer_store(packed, dst_rsrc, linear)
+
+    @flyc.jit
+    def launch_pack_mx32_scales(
+        src: fx.Tensor,
+        dst: fx.Tensor,
+        stream: fx.Stream = fx.Stream(None),
+    ):
+        kernel_pack_mx32_scales(src, dst).launch(
+            grid=(total_words // _SCALE_PACK_THREADS, 1, 1),
+            block=(_SCALE_PACK_THREADS, 1, 1),
+            stream=stream,
+        )
+
+    return launch_pack_mx32_scales
+
+
+@functools.lru_cache(maxsize=None)
+def _cached_mx32_scale_pack_launch(
+    dim: int,
+    qk: int,
+    source_colwise: bool,
+    stride0: int,
+    stride1: int,
+):
+    """Cache orientation-and-stride-specialized fused pack binaries."""
+    return _compile_mx32_scale_pack_kernel(
+        dim, qk, source_colwise, stride0, stride1
     )
-    return packed.transpose(0, 1).contiguous()
 
 
 def pack_mx32_scales_for_hk(
     scales_u8: torch.Tensor,
     *,
     source_colwise: bool = False,
+    stream=None,
 ) -> torch.Tensor:
-    """Convert raw TE E8M0 scales to ``[K/128, dim]`` MFMA-ready words."""
-    scale_iter = pack_mx32_scales_iter(
-        scales_u8,
-        source_colwise=source_colwise,
-    )
-    dim = scales_u8.shape[1] if source_colwise else scales_u8.shape[0]
+    """Launch one fused GPU kernel producing HK MFMA-ready scale words.
 
-    if dim % 64 != 0:
+    Input contracts:
+      * rowwise:    ``[dim, K/32]``
+      * columnwise: ``[K/32, dim]``
+
+    Output contract:
+      * ``[K/128, dim]`` ``torch.int32``
+    """
+    if scales_u8.dtype != torch.uint8:
+        raise TypeError(
+            f"MXFP8 scales must be torch.uint8 E8M0 bytes, got "
+            f"{scales_u8.dtype}"
+        )
+    if scales_u8.ndim != 2:
         raise ValueError(
-            f"Scale outer dimension={dim} must be a multiple of 64 for HK MFMA packing"
+            f"MXFP8 scales must be rank 2, got {tuple(scales_u8.shape)}"
+        )
+    if not scales_u8.is_cuda:
+        raise ValueError("MXFP8 scale packing requires a CUDA/ROCm tensor")
+    if any(stride <= 0 for stride in scales_u8.stride()):
+        raise ValueError(
+            f"MXFP8 scale packing requires positive strides, got "
+            f"{scales_u8.stride()}"
         )
 
-    device = scales_u8.device
-    row = torch.arange(dim, device=device, dtype=torch.int64)
-    row_within_16 = row % 16
-    k_subgroup = (row // 16) % 4
-    tile = row // 64
+    if source_colwise:
+        qk, dim = scales_u8.shape
+    else:
+        dim, qk = scales_u8.shape
 
-    packed = torch.zeros_like(scale_iter)
-    for group in range(4):
-        source_row = tile * 64 + group * 16 + row_within_16
-        source_value = scale_iter[:, source_row]
-        byte_value = (
-            source_value >> (k_subgroup * 8).view(1, dim)
-        ) & 0xFF
-        packed |= byte_value << (group * 8)
+    if qk % 4 != 0:
+        raise ValueError(
+            f"Scale K/32 dimension={qk} must be divisible by 4"
+        )
+    if dim % 64 != 0:
+        raise ValueError(
+            f"Scale outer dimension={dim} must be a multiple of 64"
+        )
 
-    return packed.contiguous()
+    packed = torch.empty(
+        (qk // 4, dim),
+        dtype=torch.int32,
+        device=scales_u8.device,
+    )
+    if stream is None:
+        stream = torch.cuda.current_stream(scales_u8.device)
 
+    stride0, stride1 = (int(x) for x in scales_u8.stride())
+    _cached_mx32_scale_pack_launch(
+        dim,
+        qk,
+        bool(source_colwise),
+        stride0,
+        stride1,
+    )(
+        scales_u8,
+        packed,
+        stream=stream,
+    )
+    return packed
 
 def _encode_waitcnt(vmcnt=63, lgkmcnt=15):
     """Encode the CDNA4/gfx950 ``S_WAITCNT`` SIMM16 operand.
@@ -1643,10 +1744,14 @@ def mxfp8_matmul(
         a_scale_hk = pack_mx32_scales_for_hk(
             a_scale,
             source_colwise=False,
+            stream=stream,
         )
+        # b_scale is already TE columnwise [K/32,N].  Consume it directly;
+        # do not launch an eager transpose/contiguous kernel.
         b_scale_hk = pack_mx32_scales_for_hk(
-            b_scale.transpose(0, 1).contiguous(),
-            source_colwise=False,
+            b_scale,
+            source_colwise=True,
+            stream=stream,
         )
     elif layout == "NN":
         a_kernel = a
@@ -1654,10 +1759,12 @@ def mxfp8_matmul(
         a_scale_hk = pack_mx32_scales_for_hk(
             a_scale,
             source_colwise=False,
+            stream=stream,
         )
         b_scale_hk = pack_mx32_scales_for_hk(
             b_scale,
             source_colwise=True,
+            stream=stream,
         )
     else:
         a_kernel = a
@@ -1665,10 +1772,12 @@ def mxfp8_matmul(
         a_scale_hk = pack_mx32_scales_for_hk(
             a_scale,
             source_colwise=True,
+            stream=stream,
         )
         b_scale_hk = pack_mx32_scales_for_hk(
             b_scale,
             source_colwise=True,
+            stream=stream,
         )
 
     _debug(
@@ -1707,6 +1816,7 @@ __all__ = [
     "BLOCK_N",
     "BLOCK_K",
     "SCALE_GROUP_SIZE",
+    "pack_mx32_scales_for_hk",
     "do_gemm",
     "mxfp8_matmul",
     "mxfp8_matmul_nn",
