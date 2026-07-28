@@ -33,9 +33,6 @@
 #include "./cutlass_grouped_gemm.cuh"
 #else
 #include "ck_grouped_gemm/ck_grouped_gemm.h"
-#ifdef USE_HIPKITTENS_GEMM
-#include "kittens/mxfp8_gemm.h"
-#endif
 #endif
 
 #ifndef __HIP_PLATFORM_AMD__
