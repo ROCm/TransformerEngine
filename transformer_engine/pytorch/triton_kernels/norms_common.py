@@ -15,7 +15,7 @@ from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_torch_dtype,
     te_dtype_to_triton_dtype,
 )
-from ..quantized_tensor import Quantizer
+from ..quantized_tensor import Quantizer, QuantizedTensor
 from .utils import num_programs, block_size, use_blocked, make_ln_out, get_num_sms, use_cuda_graph_autotune
 from .common import get_fp8_max
 from .rmsnorm import (
@@ -405,7 +405,12 @@ def _te_norm_fwd_triton(
             dtype=te_dtype_to_torch_dtype(otype),
             device=input_tensor.device
         )
-        out = quantizer.quantize(out, out=_out)
+        if isinstance(_out, QuantizedTensor):
+            out = quantizer.quantize(out, out=_out)
+        else:
+            # Internal quantizers allocate storage objects, cast into them directly
+            tex.quantize(out.contiguous(), quantizer, _out, None)
+            out = _out
     return out, mu, rsigma
 
 
