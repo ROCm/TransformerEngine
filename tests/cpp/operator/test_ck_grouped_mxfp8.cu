@@ -424,7 +424,7 @@ static ck_tile::HostTensor<ck_tile::bfloat16_t> run_ck_tile_reference_for_group(
   return c_ref;
 }
 
-static float max_abs_bf16_tensor(const Tensor& t, size_t rows, size_t cols) {
+static float max_abs_bf16_tensor(Tensor& t, size_t rows, size_t cols) {
   const bf16_t* p = t.rowwise_cpu_dptr<bf16_t>();
   float m = 0.0f;
   for (size_t i = 0; i < rows * cols; ++i) {
@@ -443,8 +443,8 @@ static float max_abs_ck_ref(const ck_tile::HostTensor<ck_tile::bfloat16_t>& t) {
   return m;
 }
 
-static ErrorStats compare_te_vs_hip(const Tensor& te_out_rowmajor,
-                                    const Tensor& hip_ref_colmajor,
+static ErrorStats compare_te_vs_hip(Tensor& te_out_rowmajor,
+                                    Tensor& hip_ref_colmajor,
                                     size_t m,
                                     size_t n,
                                     float rtol,
@@ -460,7 +460,7 @@ static ErrorStats compare_te_vs_hip(const Tensor& te_out_rowmajor,
   return stats;
 }
 
-static ErrorStats compare_te_vs_ck(const Tensor& te_out_rowmajor,
+static ErrorStats compare_te_vs_ck(Tensor& te_out_rowmajor,
                                    const ck_tile::HostTensor<ck_tile::bfloat16_t>& ck_ref,
                                    size_t m,
                                    size_t n,
@@ -477,7 +477,7 @@ static ErrorStats compare_te_vs_ck(const Tensor& te_out_rowmajor,
 }
 
 static ErrorStats compare_ck_vs_hip(const ck_tile::HostTensor<ck_tile::bfloat16_t>& ck_ref,
-                                    const Tensor& hip_ref_colmajor,
+                                    Tensor& hip_ref_colmajor,
                                     size_t m,
                                     size_t n,
                                     float rtol,

@@ -25,14 +25,14 @@ def _empty_tensor() -> torch.Tensor:
 def _setup_conditional_transpose_storage(
         tensor: QuantizedTensor,
     ) -> QuantizedTensor:
-        shape = tensor.shape
+        shape = tensor.size()
         quantizer = tensor._get_quantizer()
 
         # Allocate FP8 data transpose if needed
         data_transpose = None
         create_transpose = quantizer.columnwise_usage and not is_non_tn_fp8_gemm_supported(); 
         if quantizer.columnwise_usage and create_transpose:
-            if tensor.ndim == 0:
+            if len(shape) == 0:
                 # If the original tensor is a scalar, its transpose is also a scalar.
                 data_transpose = torch.empty((), dtype=torch.uint8, device=tensor.device)
             else:
@@ -91,15 +91,19 @@ def te_quantize_triton(
         if input_tensor.nelement() > 0:
             if not out._transpose_invalid:
                 quantizer = out._get_quantizer()
-                input_scale = quantizer.scale
-                amax_out = quantizer.amax
+                from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
+                is_current_scaling = isinstance(quantizer, Float8CurrentScalingQuantizer)
+                if is_current_scaling:
+                    # Current scaling computes amax/scale in the kernel; supply workspace buffers.
+                    input_scale = torch.empty(1, dtype=torch.float32, device=input_tensor.device)
+                    amax_out = torch.empty(1, dtype=torch.float32, device=input_tensor.device)
+                else:
+                    input_scale = quantizer.scale
+                    amax_out = quantizer.amax
                 otype = quantizer.dtype
                 cast_out = out._data
                 trans_out = out._transpose
                 scale_inv_out = out._scale_inv
-
-                from ..tensor.float8_tensor import Float8CurrentScalingQuantizer
-                is_current_scaling = isinstance(quantizer, Float8CurrentScalingQuantizer)
 
                 te_cast_transpose_noop_triton(
                     input_tensor,
@@ -116,7 +120,8 @@ def te_quantize_triton(
                 )
                 
             else:
-                out.remove_caches() #Make sure to remove transpose if it is marked as invalid
+                # Drop the invalid transpose cache (storage has no remove_caches()).
+                out._transpose = None
                 out = tex.quantize(input_tensor, quantizer, out, noop_flag)
     elif isinstance(out, MXFP8TensorStorage):
         te_cast_transpose_mxfp8_triton(input_tensor, out)

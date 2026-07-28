@@ -501,6 +501,10 @@ void CommOverlapP2PBase::rocm_split_overlap_rs(const TensorWrapper &A, bool tran
   for (size_t i = 0; i < _stream_compute.size(); i++)
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[i], _start_compute, 0));
 
+  // Anchor event for the staggered GEMM chaining below.
+  userbuffers_tiny_delay(l_stream_send[0]);
+  NVTE_CHECK_CUDA(cudaEventRecord(_start_compute, l_stream_send[0]));
+
   for (int i = 0; i < _tp_size; i++) {
     int stream_id = i % _stream_compute.size();
     int input_b_chunk_id = (_tp_id + i + 1) % _tp_size;
@@ -508,6 +512,15 @@ void CommOverlapP2PBase::rocm_split_overlap_rs(const TensorWrapper &A, bool tran
     auto input_b_chunk = get_tensor_chunk(B, input_b_chunk_id * input_chunk_size, {n_chunk, k});
     auto output_chunk = get_buffer_chunk_by_id(D, i);
     auto workspace_chunk = get_tensor_chunk(workspace, stream_id * workspace_size_chunk, {workspace_size_chunk});
+
+    // Serialize GEMM i behind GEMM i-2 to enforce launch order across compute streams.
+    if (i == 1) {
+      NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[stream_id], _start_compute, 0));
+    } else if (i > 1) {
+      NVTE_CHECK_CUDA(
+          cudaEventRecord(_start_compute, _stream_compute[(i - 2) % _stream_compute.size()]));
+      NVTE_CHECK_CUDA(cudaStreamWaitEvent(_stream_compute[stream_id], _start_compute, 0));
+    }
 
     nvte_cublas_gemm(A.data(), input_b_chunk.data(), output_chunk.data(), bias.data(),
                      pre_gelu_out.data(), transa, transb, grad, workspace_chunk.data(),

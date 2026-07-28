@@ -401,8 +401,8 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
                                 const int m, const int n, const int k) {
   using namespace transformer_engine;
-  const bool a_blockwise = is_blockwise_fp8_scaling(A.scaling_mode);
-  const bool b_blockwise = is_blockwise_fp8_scaling(B.scaling_mode);
+  const bool a_blockwise = is_fp8_block_scaling(A.scaling_mode);
+  const bool b_blockwise = is_fp8_block_scaling(B.scaling_mode);
   NVTE_CHECK((a_blockwise && b_blockwise) || A.scaling_mode == B.scaling_mode,
              "Inputs A and B to GEMM need to have the same scaling mode!");
   NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
@@ -454,7 +454,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
     ret.lda = k;
-  } else if (is_blockwise_fp8_scaling(A.scaling_mode)) {
+  } else if (is_fp8_block_scaling(A.scaling_mode)) {
     ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
     ret.transA = transA;
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
@@ -506,7 +506,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
     ret.ldb = k;
-  } else if (is_blockwise_fp8_scaling(B.scaling_mode)) {
+  } else if (is_fp8_block_scaling(B.scaling_mode)) {
     ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
     ret.transB = transB;
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
@@ -2002,8 +2002,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 
 #ifdef USE_HIPKITTENS_GEMM
   {
-    const bool inputA_blockwise = is_blockwise_fp8_scaling(inputA->scaling_mode);
-    const bool inputB_blockwise = is_blockwise_fp8_scaling(inputB->scaling_mode);
+    const bool inputA_blockwise = is_fp8_block_scaling(inputA->scaling_mode);
+    const bool inputB_blockwise = is_fp8_block_scaling(inputB->scaling_mode);
     if (inputA_blockwise && inputB_blockwise) {
       const bool has_bias        = (inputBias->data.dptr != nullptr);
       const bool has_gelu        = (outputPreGelu->data.dptr != nullptr);
@@ -2060,8 +2060,8 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     }
   }
 #else
-  NVTE_CHECK(!(is_blockwise_fp8_scaling(inputA->scaling_mode) &&
-               is_blockwise_fp8_scaling(inputB->scaling_mode)),
+  NVTE_CHECK(!(is_fp8_block_scaling(inputA->scaling_mode) &&
+               is_fp8_block_scaling(inputB->scaling_mode)),
              "Blockwise FP8 GEMM requires the HipKittens GEMM backend "
              "(build with USE_HIPKITTENS_GEMM).");
 #endif
