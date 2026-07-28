@@ -2135,6 +2135,8 @@ def test_grouped_linear_accuracy(
     if IS_HIP_EXTENSION:
         if dtype not in (torch.float32,) and fuse_wgrad_accumulation and not fp8:
             pytest.skip(f"ROCm does not support fused wgrad accumulation for {dtype}.")
+        if recipe is not None and recipe.float8_block_scaling():
+            pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
     if fp8 and fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if NVTE_TEST_NVINSPECT_ENABLED and delay_wgrad_compute:
@@ -2530,6 +2532,9 @@ def test_padding_grouped_linear_accuracy(
     if fp8_model_params and NVTE_TEST_NVINSPECT_ENABLED:
         pytest.skip("FP8 parameters are not supported in debug mode.")
 
+    if IS_HIP_EXTENSION and recipe is not None and recipe.float8_block_scaling():
+        pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
+
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
@@ -2606,6 +2611,9 @@ def test_padding_grouped_linear_accuracy_save_original_input(
         pytest.skip("FP8 parameters are not supported in debug mode.")
     if fp8 and recipe.delayed():
         pytest.skip("DelayedScaling recipe is not supported with save_original_input")
+
+    if IS_HIP_EXTENSION and recipe is not None and recipe.float8_block_scaling():
+        pytest.skip("ROCm grouped GEMM does not yet support FP8 block scaling.")
 
     config = model_configs[model]
     if config.max_seqlen_q % 16 != 0 and fp8:

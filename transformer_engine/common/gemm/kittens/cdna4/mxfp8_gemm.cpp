@@ -34,6 +34,14 @@ using gl_scale_rt = kittens::gl<kittens::fp8e8m0, -1, 1, 16, 64>;
 
 using G = kittens::group<NUM_WARPS>;
 
+// Scale tile shared by mxfp8 kernels; one fp8e8m0_4 per (group, lane)
+using ST_Scale = kittens::st<kittens::fp8e8m0, 16, 64, kittens::st_16x64_s>;
+
+// Reads the pre-packed lane-native scale for group lg on this lane
+__device__ __forceinline__ kittens::fp8e8m0_4 lane_rd(const ST_Scale &s, int lg) {
+    return reinterpret_cast<const uint32_t *>(s.data)[lg * 64 + kittens::laneid()];
+}
+
 __device__ inline float read_bias(const void *bias, int bias_dtype, int idx) {
     if (bias_dtype == 1) {
         return __bfloat162float(reinterpret_cast<const __hip_bfloat16 *>(bias)[idx]);
@@ -155,7 +163,6 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
 
     using ST_A     = kittens::st_fp8e4m3<HALF_ROW, BLOCK_K, kittens::st_16x128_s>;
     using ST_B     = kittens::st_fp8e4m3<HALF_COL, BLOCK_K, kittens::st_16x128_s>;
-    using ST_Scale = kittens::st<kittens::fp8e8m0, 16, 64, kittens::st_16x64_s>;
     using RT_A     = kittens::rt_fp8e4m3<REG_M, BLOCK_K>;
     using RT_B     = kittens::rt_fp8e4m3<REG_N, BLOCK_K>;
     using RT_C     = kittens::rt_fl<REG_M, REG_N, kittens::col_l, kittens::rt_16x16_s>;
@@ -163,7 +170,9 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
 
     __shared__ ST_A As[2][2];
     __shared__ ST_B Bs[2][2];
-    __shared__ ST_Scale scale_A_smem[2], scale_B_smem[2];
+
+    // B needs 8 scale groups = 2 tiles
+    __shared__ ST_Scale scale_A_smem[2], scale_B_lo[2], scale_B_hi[2];
 
     RT_A a;
     RT_B b0, b1;
@@ -222,11 +231,6 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
     G::prefill_swizzled_offsets(As[0][0], A_local, sw_A);
     G::prefill_swizzled_offsets(Bs[0][0], B_local, sw_B);
 
-    int a_row_h0 = warp_m * REG_M;
-    int a_row_h1 = HALF_ROW + warp_m * REG_M;
-    int b_row_h0 = warp_n * REG_N;
-    int b_row_h1 = HALF_COL + warp_n * REG_N;
-
     int tic = 0, toc = 1;
     int tic_scales = 0, toc_scales = 1;
 
@@ -257,8 +261,9 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
     asm volatile("s_waitcnt vmcnt(6)"); // wait for tic[1] halves; 3 toc loads + scales in flight
     __builtin_amdgcn_s_barrier();
 
-    G::load(scale_A_smem[0], scale_A_gl, {0 * sa_stride + sa_batch, 0, 0, 0});
-    G::load(scale_B_smem[0], scale_B_gl, {0 * sb_stride + sb_batch, 0, 0, 0});
+    G::load(scale_A_smem[0], scale_A_gl, {sa_batch, 0, 0, 0});
+    G::load(scale_B_lo[0],   scale_B_gl, {2 * sb_batch,     0, 0, 0});
+    G::load(scale_B_hi[0],   scale_B_gl, {2 * sb_batch + 1, 0, 0, 0});
     asm volatile("s_waitcnt vmcnt(0)"); // drain all VMEM before first MMA
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
@@ -267,7 +272,8 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1, tic_scales ^= 1, toc_scales ^= 1) {
         if (k + 1 < k_iters) {
             G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
-            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * sb_stride + sb_batch, 0, 0, 0});
+            G::load(scale_B_lo[toc_scales],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch),     0, 0, 0});
+            G::load(scale_B_hi[toc_scales],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch) + 1, 0, 0, 0});
         }
         auto bs0 = kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][0], {warp_n, 0});
         kittens::load(b0, bs0);
@@ -277,10 +283,10 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
         asm volatile("s_waitcnt lgkmcnt(8)"); // wait for scale + data LDS stores; As[toc][1] can overlap
         __builtin_amdgcn_s_barrier();
 
-        kittens::fp8e8m0_4 sa_h0 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h0);
-        kittens::fp8e8m0_4 sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
-        kittens::fp8e8m0_4 sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
-        kittens::fp8e8m0_4 sa_h1 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h1);
+        kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[tic_scales], warp_m);
+        kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[tic_scales], warp_n);
+        kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[tic_scales], warp_n);
+        kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[tic_scales], 2 + warp_m);
         __builtin_amdgcn_s_setprio(2);
         kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
         __builtin_amdgcn_s_setprio(0);
@@ -324,15 +330,16 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
         int k = k_iters - 2;
         if (k + 1 < k_iters) {
             G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
-            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * sb_stride + sb_batch, 0, 0, 0});
+            G::load(scale_B_lo[toc_scales],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch),     0, 0, 0});
+            G::load(scale_B_hi[toc_scales],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch) + 1, 0, 0, 0});
         }
         asm volatile("s_waitcnt vmcnt(0)"); // drain all VMEM: last prefetch iteration
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
-        kittens::fp8e8m0_4 sa_h0 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h0);
-        kittens::fp8e8m0_4 sa_h1 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h1);
-        kittens::fp8e8m0_4 sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
-        kittens::fp8e8m0_4 sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
+        kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[tic_scales], warp_m);
+        kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[tic_scales], 2 + warp_m);
+        kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[tic_scales], warp_n);
+        kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[tic_scales], warp_n);
 
         auto bs0 = kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][0], {warp_n, 0});
         kittens::load(b0, bs0);
@@ -388,10 +395,10 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
-        kittens::fp8e8m0_4 sa_h0 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h0);
-        kittens::fp8e8m0_4 sa_h1 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h1);
-        kittens::fp8e8m0_4 sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
-        kittens::fp8e8m0_4 sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
+        kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[tic_scales], warp_m);
+        kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[tic_scales], 2 + warp_m);
+        kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[tic_scales], warp_n);
+        kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[tic_scales], warp_n);
 
         auto as0 = kittens::subtile_inplace<REG_M, BLOCK_K>(As[tic][0], {warp_m, 0});
         kittens::load(a, as0);
@@ -436,39 +443,74 @@ void mxfp8_gemm_tn_kernel(const gl_fp8_rt A, const gl_fp8_rt B, const OutGL C, c
         block_m, block_row, block_col, warp_m, warp_n);
 }
 
-// COLWISE=false: TE uint8 [dim, K/32] row-major -> HipKittens uint32 [k_iters, dim] iteration-major packed.
-// COLWISE=true:  TE uint8 [K/32, dim] col-major -> HipKittens uint32 [k_iters, dim] iteration-major packed.
-// FUSED=1: all experts share k_iters; output at packed + expert * expert_stride.
-// FUSED=2: per-expert k_iters; output at packed + output_offsets[expert].
-template<bool COLWISE, int FUSED = 0>
+// Packs raw scales into the lane-native layout the GEMM kernels read: one block per 256-row scale
+// tile packs its words into shared, then NG*64 lane threads emit one fp8e8m0_4 per (group, lane).
+// A: STEP=64,NG=4 (256 words/tile); B: STEP=32,NG=8 (512 words, hi/lo tile pair).
+// COLWISE=false: raw uint8 [dim, K/32] row-major; COLWISE=true: [K/32, dim] col-major.
+// FUSED=1: one launch for all experts (shared k_iters); output at ln + expert * expert_stride.
+template<bool COLWISE, int STEP, int NG, int FUSED = 0>
 __global__ void pack_scales_kernel([[maybe_unused]] const uint8_t *__restrict__ scales,
-    uint32_t *__restrict__ packed, int dim, [[maybe_unused]] int scale_K, [[maybe_unused]] int k_iters,
+    uint32_t *__restrict__ ln, int dim, int scale_K, int k_iters, int tiles_per_col,
     [[maybe_unused]] const uint8_t *const *__restrict__ scale_ptrs = nullptr,
-    [[maybe_unused]] int expert_stride = 0, [[maybe_unused]] const int *__restrict__ k_iters_arr = nullptr,
-    [[maybe_unused]] const int *__restrict__ output_offsets = nullptr) {
+    [[maybe_unused]] int expert_stride = 0) {
+
+    constexpr int TILE_WORDS = 256;
+    constexpr int PAD_WORDS  = (NG - 1) * STEP + 64; // covers OOB pack_scales read
+    __shared__ uint32_t tile[PAD_WORDS];
 
     const uint8_t *my_scales;
-    uint32_t *my_packed;
-    int my_k_iters, my_scale_K;
+    uint32_t *my_ln;
 
     if constexpr (FUSED == 1) {
         int expert_id = blockIdx.y;
-        my_scales  = scale_ptrs[expert_id];
-        my_packed  = packed + (size_t)expert_id * expert_stride;
-        my_k_iters = k_iters;
-        my_scale_K = scale_K;
-    } else if constexpr (FUSED == 2) {
-        int expert_id = blockIdx.y;
-        my_scales  = scale_ptrs[expert_id];
-        my_packed  = packed + output_offsets[expert_id];
-        my_k_iters = k_iters_arr[expert_id];
-        my_scale_K = my_k_iters * 4;
+        my_scales = scale_ptrs[expert_id];
+        my_ln     = ln + (size_t)expert_id * expert_stride;
     } else {
-        my_scales  = scales;
-        my_packed  = packed;
-        my_k_iters = k_iters;
-        my_scale_K = scale_K;
+        my_scales = scales;
+        my_ln     = ln;
     }
+
+    int tile_id = blockIdx.x;
+    if (tile_id >= k_iters * tiles_per_col) return;
+
+    int k_iter  = tile_id / tiles_per_col;
+    int cblk    = tile_id % tiles_per_col;
+    int kb_base = k_iter * 4;
+    int row0    = cblk * TILE_WORDS;
+
+    for (int i = threadIdx.x; i < PAD_WORDS; i += blockDim.x) {
+        uint32_t p = 0;
+        if (i < TILE_WORDS) {
+            int row = row0 + i;
+            if constexpr (COLWISE) {
+                int base = kb_base * dim + row;
+                p  =  (uint32_t)my_scales[base]              | ((uint32_t)my_scales[base +     dim] << 8)
+                   | ((uint32_t)my_scales[base + 2 * dim] << 16) | ((uint32_t)my_scales[base + 3 * dim] << 24);
+            } else {
+                __builtin_memcpy(&p, &my_scales[(size_t)row * scale_K + kb_base], 4);
+            }
+        }
+        tile[i] = p; // OOB tail (i>=256) zero-filled
+    }
+    __syncthreads();
+
+    int tid = threadIdx.x, lane = tid % 64, grp = tid / 64;
+    kittens::fp8e8m0_4 out = kittens::pack_scales((const kittens::fp8e8m0 *)tile, grp * STEP);
+    my_ln[((size_t)tile_id * NG + grp) * 64 + lane] = out;
+}
+
+// Iteration-major packer retained for the wgrad path, which still consumes the perm layout.
+// Per-expert k_iters; output at packed + output_offsets[expert].
+template<bool COLWISE>
+__global__ void pack_scales_iter_kernel(uint32_t *__restrict__ packed, int dim,
+    const uint8_t *const *__restrict__ scale_ptrs,
+    const int *__restrict__ k_iters_arr, const int *__restrict__ output_offsets) {
+
+    int expert_id = blockIdx.y;
+    const uint8_t *my_scales = scale_ptrs[expert_id];
+    uint32_t *my_packed      = packed + output_offsets[expert_id];
+    int my_k_iters           = k_iters_arr[expert_id];
+    int my_scale_K           = my_k_iters * 4;
 
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
     int total = my_k_iters * dim;
@@ -510,7 +552,6 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
 
     using ST_A     = kittens::st_fp8e4m3<BLOCK_K, HALF_ROW, kittens::st_16x128_s>;
     using ST_B     = kittens::st_fp8e4m3<HALF_COL, BLOCK_K, kittens::st_16x128_s>;
-    using ST_Scale = kittens::st<kittens::fp8e8m0, 16, 64, kittens::st_16x64_s>;
     using RT_A     = kittens::rt<kittens::fp8e4m3, REG_M, BLOCK_K, kittens::col_l, kittens::rt_16x128_s>;
     using RT_B     = kittens::rt_fp8e4m3<REG_N, BLOCK_K>;
     using RT_C     = kittens::rt_fl<REG_M, REG_N, kittens::col_l, kittens::rt_16x16_s>;
@@ -518,7 +559,8 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
 
     __shared__ ST_A As[2][2];
     __shared__ ST_B Bs[2][2];
-    __shared__ ST_Scale scale_A_smem[2], scale_B_smem[2];
+    // B needs 8 scale groups = 2 tiles
+    __shared__ ST_Scale scale_A_smem[2], scale_B_lo[2], scale_B_hi[2];
 
     RT_A a;
     RT_B b0, b1;
@@ -573,31 +615,46 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
     G::prefill_swizzled_offsets(As[0][0], A_local, sw_A);
     G::prefill_swizzled_offsets(Bs[0][0], B_local, sw_B);
 
-    int a_row_h0  = warp_m * REG_M;
-    int a_row_h1  = HALF_ROW + warp_m * REG_M;
-    int b_row_h0  = warp_n * REG_N;
-    int b_row_h1  = HALF_COL + warp_n * REG_N;
+    // SRDs come from the *_local views so the grouped path picks up per-expert base pointers.
+    const T *a_base = (const T *)&A_local[{0, 0, 0, 0}];
+    const T *b_base = (const T *)&B_local[{0, 0, 0, 0}];
+    const int a_row_stride = A_local.template stride<2>() * sizeof(T);
+    const int b_row_stride = B_local.template stride<2>() * sizeof(T);
+    kittens::i32x4 a_srd = kittens::make_srsrc(a_base, A_local.rows() * a_row_stride, a_row_stride);
+    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, B_local.rows() * b_row_stride, b_row_stride);
+
+    const int wid = kittens::warpid() % NUM_WARPS;
+    constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
+    uint32_t a_lds[2][2], b_lds[2][2];
+    for (int i = 0; i < 2; i++) for (int j = 0; j < 2; j++) {
+        a_lds[i][j] = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+            reinterpret_cast<uintptr_t>(&As[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
+        b_lds[i][j] = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+            reinterpret_cast<uintptr_t>(&Bs[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
+    }
+
     int a_col_off = warp_m * REG_M;
 
     int tic = 0, toc = 1;
     int tic_scales = 0, toc_scales = 1;
 
-    G::load(Bs[tic][0], B_local, {0, 0, n_tile * 2,     0}, sw_B);
-    G::load(As[tic][0], A_local, {0, 0, 0, a_row_tile * 2    }, sw_A);
-    G::load(Bs[tic][1], B_local, {0, 0, n_tile * 2 + 1,  0}, sw_B);
-    G::load(As[tic][1], A_local, {0, 0, 0, a_row_tile * 2 + 1}, sw_A);
+    G::load(Bs[tic][0], B_local, {0, 0, n_tile * 2,     0}, sw_B, b_srd, b_base, b_lds[tic][0]);
+    G::load(As[tic][0], A_local, {0, 0, 0, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[tic][0]);
+    G::load(Bs[tic][1], B_local, {0, 0, n_tile * 2 + 1,  0}, sw_B, b_srd, b_base, b_lds[tic][1]);
+    G::load(As[tic][1], A_local, {0, 0, 0, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[tic][1]);
 
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(As[toc][0], A_local, {0, 0, 1, a_row_tile * 2    }, sw_A);
-    G::load(Bs[toc][0], B_local, {0, 0, n_tile * 2,     1}, sw_B);
-    G::load(Bs[toc][1], B_local, {0, 0, n_tile * 2 + 1, 1}, sw_B);
+    G::load(As[toc][0], A_local, {0, 0, 1, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[toc][0]);
+    G::load(Bs[toc][0], B_local, {0, 0, n_tile * 2,     1}, sw_B, b_srd, b_base, b_lds[toc][0]);
+    G::load(Bs[toc][1], B_local, {0, 0, n_tile * 2 + 1, 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(scale_A_smem[0], scale_A_gl, {0 * sa_stride + sa_batch, 0, 0, 0});
-    G::load(scale_B_smem[0], scale_B_gl, {0 * sb_stride + sb_batch, 0, 0, 0});
+    G::load(scale_A_smem[0], scale_A_gl, {sa_batch, 0, 0, 0});
+    G::load(scale_B_lo[0],   scale_B_gl, {2 * sb_batch,     0, 0, 0});
+    G::load(scale_B_hi[0],   scale_B_gl, {2 * sb_batch + 1, 0, 0, 0});
     asm volatile("s_waitcnt vmcnt(0)");
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
@@ -608,28 +665,29 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1, tic_scales ^= 1, toc_scales ^= 1) {
         if (k + 1 < k_iters) {
             G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
-            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * sb_stride + sb_batch, 0, 0, 0});
+            G::load(scale_B_lo[toc_scales],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch),     0, 0, 0});
+            G::load(scale_B_hi[toc_scales],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch) + 1, 0, 0, 0});
         }
 
         auto bs0 = kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][0], {warp_n, 0});
         kittens::load(b0, bs0);
         kittens::load(a, As[tic][0], a_col_off);
-        G::load(As[toc][1], A_local, {0, 0, k + 1, a_row_tile * 2 + 1}, sw_A);
+        G::load(As[toc][1], A_local, {0, 0, k + 1, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[toc][1]);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-        kittens::fp8e8m0_4 sa_h0 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h0);
-        kittens::fp8e8m0_4 sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
+        kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[tic_scales], warp_m);
+        kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[tic_scales], warp_n);
         __builtin_amdgcn_s_setprio(2);
         kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
-        kittens::fp8e8m0_4 sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
+        kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[tic_scales], warp_n);
         auto bs1 = kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][1], {warp_n, 0});
         kittens::load(b1, bs1);
-        G::load(As[tic][0], A_local, {0, 0, k + 2, a_row_tile * 2    }, sw_A);
+        G::load(As[tic][0], A_local, {0, 0, k + 2, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[tic][0]);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
@@ -638,9 +696,9 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
-        kittens::fp8e8m0_4 sa_h1 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h1);
+        kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[tic_scales], 2 + warp_m);
         kittens::load(a, As[tic][1], a_col_off);
-        G::load(Bs[tic][0], B_local, {0, 0, n_tile * 2,    k + 2}, sw_B);
+        G::load(Bs[tic][0], B_local, {0, 0, n_tile * 2,    k + 2}, sw_B, b_srd, b_base, b_lds[tic][0]);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
@@ -650,7 +708,7 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
-        G::load(Bs[tic][1], B_local, {0, 0, n_tile * 2 + 1, k + 2}, sw_B);
+        G::load(Bs[tic][1], B_local, {0, 0, n_tile * 2 + 1, k + 2}, sw_B, b_srd, b_base, b_lds[tic][1]);
         asm volatile("s_waitcnt vmcnt(6)"); // wait for toc data; next-iter prefetches in flight
         __builtin_amdgcn_s_barrier();
 
@@ -664,20 +722,21 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
         int k = k_iters - 2;
         if (k + 1 < k_iters) {
             G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
-            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * sb_stride + sb_batch, 0, 0, 0});
+            G::load(scale_B_lo[toc_scales],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch),     0, 0, 0});
+            G::load(scale_B_hi[toc_scales],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch) + 1, 0, 0, 0});
         }
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
-        kittens::fp8e8m0_4 sa_h0 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h0);
-        kittens::fp8e8m0_4 sa_h1 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h1);
-        kittens::fp8e8m0_4 sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
-        kittens::fp8e8m0_4 sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
+        kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[tic_scales], warp_m);
+        kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[tic_scales], 2 + warp_m);
+        kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[tic_scales], warp_n);
+        kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[tic_scales], warp_n);
 
         auto bs0 = kittens::subtile_inplace<REG_N, BLOCK_K>(Bs[tic][0], {warp_n, 0});
         kittens::load(b0, bs0);
         kittens::load(a, As[tic][0], a_col_off);
-        G::load(As[toc][1], A_local, {0, 0, k + 1, a_row_tile * 2 + 1}, sw_A);
+        G::load(As[toc][1], A_local, {0, 0, k + 1, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[toc][1]);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -726,10 +785,10 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nn_kernel(const gl_
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
-        kittens::fp8e8m0_4 sa_h0 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h0);
-        kittens::fp8e8m0_4 sa_h1 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h1);
-        kittens::fp8e8m0_4 sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
-        kittens::fp8e8m0_4 sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
+        kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[tic_scales], warp_m);
+        kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[tic_scales], 2 + warp_m);
+        kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[tic_scales], warp_n);
+        kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[tic_scales], warp_n);
 
         kittens::load(a, As[tic][0], a_col_off);
         __builtin_amdgcn_s_barrier();
@@ -792,7 +851,6 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
 
     using ST_A     = kittens::st_fp8e4m3<BLOCK_K, HALF_ROW, kittens::st_16x128_s>;
     using ST_B     = kittens::st_fp8e4m3<BLOCK_K, HALF_COL, kittens::st_16x128_s>;
-    using ST_Scale = kittens::st<kittens::fp8e8m0, 16, 64, kittens::st_16x64_s>;
     using RT_A     = kittens::rt<kittens::fp8e4m3, REG_M, BLOCK_K, kittens::col_l, kittens::rt_16x128_s>;
     using RT_B     = kittens::rt<kittens::fp8e4m3, REG_N, BLOCK_K, kittens::col_l, kittens::rt_16x128_s>;
     using RT_C     = kittens::rt_fl<REG_M, REG_N, kittens::col_l, kittens::rt_16x16_s>;
@@ -800,7 +858,8 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
 
     __shared__ ST_A As[2][2];
     __shared__ ST_B Bs[2][2];
-    __shared__ ST_Scale scale_A_smem[2], scale_B_smem[2];
+    // B needs 8 scale groups = 2 tiles
+    __shared__ ST_Scale scale_A_smem[2], scale_B_lo[2], scale_B_hi[2];
 
     RT_A a;
     RT_B b0, b1;
@@ -855,32 +914,47 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
     G::prefill_swizzled_offsets(As[0][0], A_local, sw_A);
     G::prefill_swizzled_offsets(Bs[0][0], B_local, sw_B);
 
-    int a_row_h0  = warp_m * REG_M;
-    int a_row_h1  = HALF_ROW + warp_m * REG_M;
-    int b_row_h0  = warp_n * REG_N;
-    int b_row_h1  = HALF_COL + warp_n * REG_N;
+    // SRDs come from the *_local views so the grouped path picks up per-expert base pointers.
+    const T *a_base = (const T *)&A_local[{0, 0, 0, 0}];
+    const T *b_base = (const T *)&B_local[{0, 0, 0, 0}];
+    const int a_row_stride = A_local.template stride<2>() * sizeof(T);
+    const int b_row_stride = B_local.template stride<2>() * sizeof(T);
+    kittens::i32x4 a_srd = kittens::make_srsrc(a_base, A_local.rows() * a_row_stride, a_row_stride);
+    kittens::i32x4 b_srd = kittens::make_srsrc(b_base, B_local.rows() * b_row_stride, b_row_stride);
+
+    const int wid = kittens::warpid() % NUM_WARPS;
+    constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
+    uint32_t a_lds[2][2], b_lds[2][2];
+    for (int i = 0; i < 2; i++) for (int j = 0; j < 2; j++) {
+        a_lds[i][j] = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+            reinterpret_cast<uintptr_t>(&As[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
+        b_lds[i][j] = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(
+            reinterpret_cast<uintptr_t>(&Bs[i][j].data[0]) + wid * elem_per_warp * sizeof(T)));
+    }
+
     int a_col_off = warp_m * REG_M;
     int b_col_off = warp_n * REG_N;
 
     int tic = 0, toc = 1;
     int tic_scales = 0, toc_scales = 1;
 
-    G::load(Bs[tic][0], B_local, {0, 0, 0, n_tile * 2    }, sw_B);
-    G::load(As[tic][0], A_local, {0, 0, 0, a_row_tile * 2    }, sw_A);
-    G::load(Bs[tic][1], B_local, {0, 0, 0, n_tile * 2 + 1}, sw_B);
-    G::load(As[tic][1], A_local, {0, 0, 0, a_row_tile * 2 + 1}, sw_A);
+    G::load(Bs[tic][0], B_local, {0, 0, 0, n_tile * 2    }, sw_B, b_srd, b_base, b_lds[tic][0]);
+    G::load(As[tic][0], A_local, {0, 0, 0, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[tic][0]);
+    G::load(Bs[tic][1], B_local, {0, 0, 0, n_tile * 2 + 1}, sw_B, b_srd, b_base, b_lds[tic][1]);
+    G::load(As[tic][1], A_local, {0, 0, 0, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[tic][1]);
 
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(As[toc][0], A_local, {0, 0, 1, a_row_tile * 2    }, sw_A);
-    G::load(Bs[toc][0], B_local, {0, 0, 1, n_tile * 2    }, sw_B);
-    G::load(Bs[toc][1], B_local, {0, 0, 1, n_tile * 2 + 1}, sw_B);
+    G::load(As[toc][0], A_local, {0, 0, 1, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[toc][0]);
+    G::load(Bs[toc][0], B_local, {0, 0, 1, n_tile * 2    }, sw_B, b_srd, b_base, b_lds[toc][0]);
+    G::load(Bs[toc][1], B_local, {0, 0, 1, n_tile * 2 + 1}, sw_B, b_srd, b_base, b_lds[toc][1]);
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
 
-    G::load(scale_A_smem[0], scale_A_gl, {0 * sa_stride + sa_batch, 0, 0, 0});
-    G::load(scale_B_smem[0], scale_B_gl, {0 * sb_stride + sb_batch, 0, 0, 0});
+    G::load(scale_A_smem[0], scale_A_gl, {sa_batch, 0, 0, 0});
+    G::load(scale_B_lo[0],   scale_B_gl, {2 * sb_batch,     0, 0, 0});
+    G::load(scale_B_hi[0],   scale_B_gl, {2 * sb_batch + 1, 0, 0, 0});
     asm volatile("s_waitcnt vmcnt(0)");
     asm volatile("s_waitcnt lgkmcnt(0)");
     __builtin_amdgcn_s_barrier();
@@ -891,26 +965,27 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
     for (int k = 0; k < k_iters - 2; k++, tic ^= 1, toc ^= 1, tic_scales ^= 1, toc_scales ^= 1) {
         if (k + 1 < k_iters) {
             G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
-            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * sb_stride + sb_batch, 0, 0, 0});
+            G::load(scale_B_lo[toc_scales],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch),     0, 0, 0});
+            G::load(scale_B_hi[toc_scales],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch) + 1, 0, 0, 0});
         }
 
         kittens::load(b0, Bs[tic][0], b_col_off);
         kittens::load(a, As[tic][0], a_col_off);
-        G::load(As[toc][1], A_local, {0, 0, k + 1, a_row_tile * 2 + 1}, sw_A);
+        G::load(As[toc][1], A_local, {0, 0, k + 1, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[toc][1]);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
-        kittens::fp8e8m0_4 sa_h0 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h0);
-        kittens::fp8e8m0_4 sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
+        kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[tic_scales], warp_m);
+        kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[tic_scales], warp_n);
         __builtin_amdgcn_s_setprio(2);
         kittens::mma_ABt_scaled<CBSZ, BLGP>(cA, a, b0, cA, &sa_h0, &sb_h0);
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
-        kittens::fp8e8m0_4 sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
+        kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[tic_scales], warp_n);
         kittens::load(b1, Bs[tic][1], b_col_off);
-        G::load(As[tic][0], A_local, {0, 0, k + 2, a_row_tile * 2    }, sw_A);
+        G::load(As[tic][0], A_local, {0, 0, k + 2, a_row_tile * 2    }, sw_A, a_srd, a_base, a_lds[tic][0]);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
@@ -919,9 +994,9 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
         __builtin_amdgcn_s_setprio(0);
         __builtin_amdgcn_s_barrier();
 
-        kittens::fp8e8m0_4 sa_h1 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h1);
+        kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[tic_scales], 2 + warp_m);
         kittens::load(a, As[tic][1], a_col_off);
-        G::load(Bs[tic][0], B_local, {0, 0, k + 2, n_tile * 2    }, sw_B);
+        G::load(Bs[tic][0], B_local, {0, 0, k + 2, n_tile * 2    }, sw_B, b_srd, b_base, b_lds[tic][0]);
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
 
@@ -931,7 +1006,7 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
         __builtin_amdgcn_s_barrier();
         __builtin_amdgcn_sched_barrier(0);
 
-        G::load(Bs[tic][1], B_local, {0, 0, k + 2, n_tile * 2 + 1}, sw_B);
+        G::load(Bs[tic][1], B_local, {0, 0, k + 2, n_tile * 2 + 1}, sw_B, b_srd, b_base, b_lds[tic][1]);
         asm volatile("s_waitcnt vmcnt(6)"); // wait for toc data; next-iter prefetches in flight
         __builtin_amdgcn_s_barrier();
 
@@ -945,19 +1020,20 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
         int k = k_iters - 2;
         if (k + 1 < k_iters) {
             G::load(scale_A_smem[toc_scales], scale_A_gl, {(k + 1) * sa_stride + sa_batch, 0, 0, 0});
-            G::load(scale_B_smem[toc_scales], scale_B_gl, {(k + 1) * sb_stride + sb_batch, 0, 0, 0});
+            G::load(scale_B_lo[toc_scales],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch),     0, 0, 0});
+            G::load(scale_B_hi[toc_scales],   scale_B_gl, {2 * ((k + 1) * sb_stride + sb_batch) + 1, 0, 0, 0});
         }
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
-        kittens::fp8e8m0_4 sa_h0 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h0);
-        kittens::fp8e8m0_4 sa_h1 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h1);
-        kittens::fp8e8m0_4 sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
-        kittens::fp8e8m0_4 sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
+        kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[tic_scales], warp_m);
+        kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[tic_scales], 2 + warp_m);
+        kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[tic_scales], warp_n);
+        kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[tic_scales], warp_n);
 
         kittens::load(b0, Bs[tic][0], b_col_off);
         kittens::load(a, As[tic][0], a_col_off);
-        G::load(As[toc][1], A_local, {0, 0, k + 1, a_row_tile * 2 + 1}, sw_A);
+        G::load(As[toc][1], A_local, {0, 0, k + 1, a_row_tile * 2 + 1}, sw_A, a_srd, a_base, a_lds[toc][1]);
         __builtin_amdgcn_s_barrier();
 
         asm volatile("s_waitcnt lgkmcnt(0)");
@@ -1004,10 +1080,10 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
         asm volatile("s_waitcnt vmcnt(0)");
         asm volatile("s_waitcnt lgkmcnt(0)");
         __builtin_amdgcn_s_barrier();
-        kittens::fp8e8m0_4 sa_h0 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h0);
-        kittens::fp8e8m0_4 sa_h1 = kittens::pack_scales(scale_A_smem[tic_scales].data, a_row_h1);
-        kittens::fp8e8m0_4 sb_h0 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h0);
-        kittens::fp8e8m0_4 sb_h1 = kittens::pack_scales(scale_B_smem[tic_scales].data, b_row_h1);
+        kittens::fp8e8m0_4 sa_h0 = lane_rd(scale_A_smem[tic_scales], warp_m);
+        kittens::fp8e8m0_4 sa_h1 = lane_rd(scale_A_smem[tic_scales], 2 + warp_m);
+        kittens::fp8e8m0_4 sb_h0 = lane_rd(scale_B_lo[tic_scales], warp_n);
+        kittens::fp8e8m0_4 sb_h1 = lane_rd(scale_B_hi[tic_scales], warp_n);
 
         kittens::load(a, As[tic][0], a_col_off);
         __builtin_amdgcn_s_barrier();
@@ -1071,8 +1147,9 @@ static void launch_gemm_typed(
                    TRANSB ? (size_t)K : (size_t)N, TRANSB ? (size_t)N : (size_t)K);
     gl_scale_rt gl_SA(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sa)),
                       k_iters * tiles_M, nullptr, nullptr, nullptr);
+    // B scale buffer is 2 tiles for the hi/lo group split
     gl_scale_rt gl_SB(reinterpret_cast<kittens::fp8e8m0 *>(const_cast<uint32_t *>(packed_sb)),
-                      k_iters * tiles_N, nullptr, nullptr, nullptr);
+                      2 * k_iters * tiles_N, nullptr, nullptr, nullptr);
 
     auto launch = [&](auto gl_C) {
         if constexpr (TRANSA && !TRANSB) {
@@ -1160,20 +1237,23 @@ static void dispatch_gemm(
     }
 }
 
-template<bool COLWISE>
-static void launch_pack_scales(const uint8_t *scales, uint32_t *packed, int dim, int scale_K, int k_iters, hipStream_t stream) {
-    int total  = k_iters * dim;
-    int blocks = (total + 255) / 256;
-    pack_scales_kernel<COLWISE><<<blocks, 256, 0, stream>>>(scales, packed, dim, scale_K, k_iters);
+template<bool COLWISE, int STEP, int NG>
+static void launch_pack_scales(const uint8_t *scales, uint32_t *ln, int dim, int scale_K, int k_iters, hipStream_t stream) {
+    int tiles_per_col = dim / 256;
+    pack_scales_kernel<COLWISE, STEP, NG><<<k_iters * tiles_per_col, NG * 64, 0, stream>>>(
+        scales, ln, dim, scale_K, k_iters, tiles_per_col);
 }
 
-template<bool COLWISE>
-static void launch_pack_scales_fused(const uint8_t *const *d_scale_ptrs, uint32_t *packed,
+// One launch packs every expert: blockIdx.y selects the expert, output strided by expert_stride
+// (lane words per expert = k_iters * dim for A's NG=4, twice that for B's NG=8).
+template<bool COLWISE, int STEP, int NG>
+static void launch_pack_scales_fused(const uint8_t *const *d_scale_ptrs, uint32_t *ln,
         int expert_stride, int num_experts, int dim, int scale_K, int k_iters, hipStream_t stream) {
 
-    int total_per_expert = k_iters * dim; int blocks_x = (total_per_expert + 255) / 256;
-    dim3 grid(blocks_x, num_experts); pack_scales_kernel<COLWISE, 1><<<grid, 256, 0, stream>>>(
-        nullptr, packed, dim, scale_K, k_iters, d_scale_ptrs, expert_stride);
+    int tiles_per_col = dim / 256;
+    dim3 grid(k_iters * tiles_per_col, num_experts);
+    pack_scales_kernel<COLWISE, STEP, NG, 1><<<grid, NG * 64, 0, stream>>>(
+        nullptr, ln, dim, scale_K, k_iters, tiles_per_col, d_scale_ptrs, expert_stride);
 }
 
 template<bool COLWISE>
@@ -1183,8 +1263,8 @@ static void launch_pack_scales_fused_varying(const uint8_t *const *d_scale_ptrs,
     int max_total = max_k_iters * dim;
     int blocks_x = (max_total + 255) / 256;
     dim3 grid(blocks_x, num_experts);
-    pack_scales_kernel<COLWISE, 2><<<grid, 256, 0, stream>>>(
-        nullptr, packed, dim, 0, 0, d_scale_ptrs, 0, d_k_iters_arr, d_output_offsets);
+    pack_scales_iter_kernel<COLWISE><<<grid, 256, 0, stream>>>(
+        packed, dim, d_scale_ptrs, d_k_iters_arr, d_output_offsets);
 }
 
 static size_t hk_align_up(size_t x, size_t a) {
@@ -1217,16 +1297,20 @@ static bool mxfp8_gemm_impl(
 
     int k_iters = K / BLOCK_K;
     int scale_K = K / 32;
+    int tiles_M = M / BLOCK_ROW;
+    int tiles_N = N / BLOCK_COL;
 
-    size_t sa_bytes = hk_align_up((size_t)k_iters * M * sizeof(uint32_t), 256);
-    size_t sb_bytes = (size_t)k_iters * N * sizeof(uint32_t);
+    // Lane-native scale buffers: A = 256 words/tile, B = 512 (hi/lo pair). If they overflow the
+    // caller's budget we return false and fall back to hipBLASLt.
+    size_t sa_bytes = hk_align_up((size_t)k_iters * tiles_M * 256 * sizeof(uint32_t), 256);
+    size_t sb_bytes = hk_align_up((size_t)k_iters * tiles_N * 512 * sizeof(uint32_t), 256);
     if (workspace_size < sa_bytes + sb_bytes) return false;
 
     auto *packed_sa = (uint32_t *)workspace;
     auto *packed_sb = (uint32_t *)((uint8_t *)workspace + sa_bytes);
 
-    launch_pack_scales<!TRANSA>((const uint8_t *)scale_A, packed_sa, M, scale_K, k_iters, stream);
-    launch_pack_scales<TRANSB>((const uint8_t *)scale_B, packed_sb, N, scale_K, k_iters, stream);
+    launch_pack_scales<!TRANSA, 64, 4>((const uint8_t *)scale_A, packed_sa, M, scale_K, k_iters, stream);
+    launch_pack_scales<TRANSB, 32, 8>((const uint8_t *)scale_B, packed_sb, N, scale_K, k_iters, stream);
 
     GemmEpilogue ep = select_epilogue(bias, aux_gelu);
     dispatch_gemm<TRANSA, TRANSB, ACCUMULATE>(ep, a_fp8_code, b_fp8_code,
@@ -1336,7 +1420,7 @@ bool kittens_grouped_mxfp8_gemm(
     if (grid == 0) return true;
 
     size_t sa_pk_bytes    = hk_align256((size_t)k_iters * num_experts * M * sizeof(uint32_t));
-    size_t sb_pk_bytes    = hk_align256((size_t)k_iters * total_N * sizeof(uint32_t));
+    size_t sb_pk_bytes    = hk_align256((size_t)2 * k_iters * total_N * sizeof(uint32_t));
     size_t a_ptrs_bytes   = hk_align256((size_t)num_experts * sizeof(void *));
     size_t b_ptrs_bytes   = hk_align256((size_t)num_experts * sizeof(void *));
     size_t c_ptrs_bytes   = hk_align256((size_t)num_experts * sizeof(void *));
@@ -1373,7 +1457,7 @@ bool kittens_grouped_mxfp8_gemm(
     HK_BOOL_SWITCH(!transa, COLWISE_A,
         HK_BOOL_SWITCH(transb, COLWISE_B,
             // Pack weight scales: single fused launch for all experts
-            launch_pack_scales_fused<COLWISE_A>(
+            launch_pack_scales_fused<COLWISE_A, 64, 4>(
                 (const uint8_t *const *)d_sa_ptrs, sa_pk,
                 sa_expert_stride, num_experts,
                 M, scale_K, k_iters, stream);
@@ -1381,9 +1465,9 @@ bool kittens_grouped_mxfp8_gemm(
             for (int g = 0; g < num_experts; g++) {
                 int N_g = N_array[g];
                 h_sb_tile_offsets[g] = sb_tile_cursor;
-                launch_pack_scales<COLWISE_B>((const uint8_t *)scale_B_array[g], sb_cursor,
-                                              N_g, scale_K, k_iters, stream);
-                sb_cursor    += (size_t)k_iters * N_g;
+                launch_pack_scales<COLWISE_B, 32, 8>((const uint8_t *)scale_B_array[g], sb_cursor,
+                                                     N_g, scale_K, k_iters, stream);
+                sb_cursor    += (size_t)2 * k_iters * N_g;  // B: 2 lane tiles per source tile
                 sb_tile_cursor += N_g / BLOCK_COL;
             }
             h_sb_tile_offsets[num_experts] = sb_tile_cursor;
@@ -1412,8 +1496,9 @@ bool kittens_grouped_mxfp8_gemm(
     gl_fp8_rt gl_B((kittens::fp8e4m3 *)B_array[0], nullptr, nullptr, b1, b2);
     gl_scale_rt gl_SA(reinterpret_cast<kittens::fp8e8m0 *>(sa_pk),
                       num_experts * k_iters * tiles_M, nullptr, nullptr, nullptr);
+    // B scale buffer is 2 tiles per source tile for the hi/lo group split
     gl_scale_rt gl_SB(reinterpret_cast<kittens::fp8e8m0 *>(sb_pk),
-                      k_iters * total_n_tiles, nullptr, nullptr, nullptr);
+                      2 * k_iters * total_n_tiles, nullptr, nullptr, nullptr);
 
     static float dummy_aux = 0.f;
     gl_f32_rt aux_gl(&dummy_aux, nullptr, nullptr, 1, 1);

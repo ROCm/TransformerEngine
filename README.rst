@@ -297,6 +297,21 @@ To enable MXFP8 support, use NVTE_ROCM_ENABLE_MXFP8 environment variable which c
 * 1 - enable MXFP8 support in fp8;
 * 2 - make MXFP8 a default fp8 recipe.
 
+Blockwise FP8 GEMM support on ROCm (gfx942 and gfx950)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Blockwise FP8 GEMM is supported on gfx942 and gfx950 GPUs through the HipKittens backend and is enabled by default.
+It supports 1Dx2D and 1Dx1D scaling, e4m3/e5m2 inputs in any combination except e5m2 x e5m2, bf16/fp32/fp16 output, and bias/beta/DGELU epilogues.
+The K and N dimensions must be multiples of 16.
+The backend shares the existing USE_HIPKITTENS_GEMM build option with MXFP8:
+
+* OFF - disable the HipKittens blockwise FP8 and MXFP8 GEMM backend;
+* ON - enable the HipKittens GEMM backend (default).
+
+On gfx950 there are two blockwise FP8 GEMM kernels, selected at runtime by the NVTE_BLOCKWISE_FP8_POWER_OF_2_SCALE environment variable:
+
+* 0 - compute the GEMM with the FP32 scales directly;
+* 1 - cast the incoming FP32 scales to E8M0 (power-of-2) and compute the GEMM with those scales (default).
+
 Two-stage amax Kernel
 ^^^^^^^^^^^^^^^^^^^^^
 

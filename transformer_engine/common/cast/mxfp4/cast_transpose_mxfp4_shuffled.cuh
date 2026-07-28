@@ -137,10 +137,28 @@ __device__ __forceinline__ float shfl_xor2_dpp(float v) {
         __builtin_amdgcn_update_dpp(iv, iv, 0x4e, 0xf, 0xf, false)));
 }
 
+/*
+ * xor-4 lane exchange, off the LDS-bpermute path.  __shfl_xor(v, 4) lowers to
+ * ds_bpermute, which also needs a per-lane source index (lane ^ 4) computed on
+ * the VALU.  A fixed-pattern ds_swizzle does the same exchange in one DS op with
+ * no index math -> ~13% fewer VALU instructions here (the kernel is VALU-bound,
+ * so cutting VALU work is what pays off; measured +0.6..+5.4% across configs,
+ * biggest on the compute-heavy Hadamard/shuffled paths).  Bitmask mode: AND=0x1f, OR=0,
+ * XOR=4 (<<10) => new_lane = (lane & 0x1f) ^ 4.  The +/-4 partner stays inside
+ * the 32-lane swizzle group (reduction groups are 8-lane aligned), so it is
+ * exact vs __shfl_xor.  (xor-1 / xor-2 stay on DPP quad_perm -- those fuse into
+ * v_max_f32_dpp, which ds_swizzle cannot.)
+ */
+__device__ __forceinline__ float shfl_xor4_swizzle(float v) {
+    const int iv = static_cast<int>(float_as_uint(v));
+    const int r = __builtin_amdgcn_ds_swizzle(iv, 0x101f);
+    return uint_as_float(static_cast<uint32_t>(r));
+}
+
 __device__ __forceinline__ float warp_reduce_max_8_dpp(float val) {
-    // bit 2 crosses quads -> keep as __shfl_xor (ds_bpermute).
-    val = fmaxf(val, __shfl_xor(val, 4));
-    // bits 1 and 0 are intra-quad -> DPP quad_perm (VALU path).
+    // xor-4 crosses quads -> ds_swizzle (LDS, no index math).
+    val = fmaxf(val, shfl_xor4_swizzle(val));
+    // bits 1 and 0 are intra-quad -> DPP quad_perm (fuses into v_max_f32_dpp).
     val = fmaxf(val, shfl_xor2_dpp(val));
     val = fmaxf(val, shfl_xor1_dpp(val));
 
