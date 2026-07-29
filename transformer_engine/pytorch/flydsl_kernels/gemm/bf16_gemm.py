@@ -2,14 +2,18 @@
 #
 # See LICENSE for license information.
 
-"""FlyDSL BF16 4-wave GEMM kernel for Transformer Engine.
+"""FlyDSL BF16 TN/NN/NT 4-wave GEMM kernel for Transformer Engine.
 
-The kernel specializes on K at compile time because the K64 loop is fully
-hand-unrolled. M/N are runtime launch dimensions. The private optimized core
-consumes A and B as BF16 tensors shaped [M, K] and [N, K], and writes FP16,
-BF16, or FP32 C shaped [M, N]. The public ``bf16_matmul`` entry point accepts
-Transformer
-Engine's TN contract and performs the required private adaptation.
+All supported layouts share one source-level kernel generator while compiling
+to separate cached binaries:
+
+    TN: A [M,K] normal read,    B [N,K] normal read
+    NN: A [M,K] normal read,    B [K,N] transpose read
+    NT: A [K,M] transpose read, B [K,N] transpose read
+
+The layout is a Python-only cache key. Global addressing and LDS fragment
+reconstruction are selected while building each specialization, so no runtime
+layout branch is emitted in the GEMM kernel.
 
 This module imports ``flydsl`` at import time and must therefore be imported
 lazily only after FlyDSL availability has been confirmed.
@@ -31,6 +35,7 @@ from .exceptions import FlyDSLUnsupportedError
 from .fp16_gemm_utils import (
     G2SLoader,
     S2RLoader,
+    compute_global_bf16_transpose_swizzle,
     compute_global_swizzle,
     make_bf16_byte_buffer_tensor,
     pack_i32x4_i32x8,
@@ -188,13 +193,20 @@ def _xcd_swizzle(num_pid_m, num_pid_n):
 def _compile_kernel(
     K: int,
     output_dtype: torch.dtype,
+    layout: str,
     use_xcd_remap: bool = True,
 ):
-    """Build the specialized 4-wave kernel for compile-time ``K`` and output dtype.
+    """Build one compile-time-specialized TN, NN, or NT BF16 kernel.
 
     ``K`` must contain at least four K64 tiles. Runtime M/N are expected to
     be exact multiples of ``BLOCK_M``/``BLOCK_N``; the kernel has no edge masks.
     """
+    if layout not in ("TN", "NN", "NT"):
+        raise ValueError(f"Unsupported BF16 kernel layout: {layout}")
+
+    a_transpose_read = layout == "NT"
+    b_transpose_read = layout in ("NN", "NT")
+
     BLOCK_M, BLOCK_N, BLOCK_K = _BLOCK_M, _BLOCK_N, _BLOCK_K
     NUM_THREADS = 256
     WARP_SIZE = 64
@@ -247,11 +259,180 @@ def _compile_kernel(
     LOAD_PASSES_HALF = LDS_BYTES_HALF // (NUM_THREADS * VEC_BYTES)
     assert LOAD_PASSES_HALF == LOAD_PASSES_A_SUBTILE == LOAD_PASSES_B_SUBTILE
 
+    # Resolve layout-specific addressing and fragment reads before capture.
+    Q0_SCHED_DSRD = 4 if a_transpose_read else 2
+    PREFETCH_SCHED_DSRD = 8 if a_transpose_read else 4
+
+    if a_transpose_read:
+        def _a_leading_dim_bytes(c_m):
+            return c_m * ELEM_BYTES
+
+        def _a_global_base_bytes(k_base, subtile, c_m, bx_m_idx):
+            return (
+                k_base * fx.Index(c_m * ELEM_BYTES)
+                + (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2)))
+                * fx.Index(ELEM_BYTES)
+            )
+
+        def _load_a_half(
+            load_transposed_frag_half,
+            load_frag_half_at_byte_base,
+            lds_a,
+            sm,
+            mi,
+            half,
+            reg_subtile_m_idx0,
+            lane_mod_16,
+        ):
+            del load_frag_half_at_byte_base, lane_mod_16
+            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
+            local_m_tile = (
+                subtile_m_idx * fx.Index(SUBTILE_M)
+                + fx.Index(mi * MFMA_M)
+                - fx.Index(sm * (BLOCK_M // 2))
+            )
+            return load_transposed_frag_half(lds_a[sm], local_m_tile, half)
+    else:
+        def _a_leading_dim_bytes(c_m):
+            del c_m
+            return K * ELEM_BYTES
+
+        def _a_global_base_bytes(k_base, subtile, c_m, bx_m_idx):
+            del c_m
+            return (
+                (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2)))
+                * fx.Index(K * ELEM_BYTES)
+                + k_base * fx.Index(ELEM_BYTES)
+            )
+
+        def _load_a_half(
+            load_transposed_frag_half,
+            load_frag_half_at_byte_base,
+            lds_a,
+            sm,
+            mi,
+            half,
+            reg_subtile_m_idx0,
+            lane_mod_16,
+        ):
+            del load_transposed_frag_half
+            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
+            a_row_addr = (
+                subtile_m_idx * fx.Index(SUBTILE_M)
+                + fx.Index(mi * MFMA_M)
+                + lane_mod_16
+            )
+            half_row = a_row_addr - fx.Index(sm * (BLOCK_M // 2))
+            return load_frag_half_at_byte_base(
+                lds_a[sm],
+                half_row * fx.Index(BLOCK_K * ELEM_BYTES),
+                half,
+            )
+
+    if b_transpose_read:
+        def _b_leading_dim_bytes(c_n):
+            return c_n * ELEM_BYTES
+
+        def _b_global_base_bytes(k_base, subtile, c_n, by_n_idx):
+            return (
+                k_base * fx.Index(c_n * ELEM_BYTES)
+                + (by_n_idx + fx.Index(subtile * (BLOCK_N // 2)))
+                * fx.Index(ELEM_BYTES)
+            )
+
+        def _load_b_ni(
+            load_transposed_frag,
+            load_normal_b_frag,
+            lds_b,
+            sn,
+            ni,
+            reg_subtile_n_idx0,
+            lane_mod_16,
+        ):
+            del load_normal_b_frag, lane_mod_16
+            subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
+            local_n_tile = (
+                subtile_n_idx * fx.Index(SUBTILE_N)
+                + fx.Index(ni * MFMA_N)
+                - fx.Index(sn * (BLOCK_N // 2))
+            )
+            return load_transposed_frag(lds_b[sn], local_n_tile)
+    else:
+        def _b_leading_dim_bytes(c_n):
+            del c_n
+            return K * ELEM_BYTES
+
+        def _b_global_base_bytes(k_base, subtile, c_n, by_n_idx):
+            del c_n
+            return (
+                (by_n_idx + fx.Index(subtile * (BLOCK_N // 2)))
+                * fx.Index(K * ELEM_BYTES)
+                + k_base * fx.Index(ELEM_BYTES)
+            )
+
+        def _load_b_ni(
+            load_transposed_frag,
+            load_normal_b_frag,
+            lds_b,
+            sn,
+            ni,
+            reg_subtile_n_idx0,
+            lane_mod_16,
+        ):
+            del load_transposed_frag
+            subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
+            b_row_addr = (
+                subtile_n_idx * fx.Index(SUBTILE_N)
+                + fx.Index(ni * MFMA_N)
+                + lane_mod_16
+            )
+            return load_normal_b_frag(lds_b, b_row_addr, sn)
+
+    # Resolve global staging maps before FlyDSL captures ``kernel_gemm``.
+    # BF16 uses K64, so each transpose-read half-page is two independent
+    # [K64, X64] slices with 128-byte physical rows.
+    if a_transpose_read:
+        def _a_global_offsets(lane, wave_id, c_m):
+            return compute_global_bf16_transpose_swizzle(
+                lane,
+                wave_id,
+                _a_leading_dim_bytes(c_m),
+                LOAD_PASSES_HALF,
+            )
+    else:
+        def _a_global_offsets(lane, wave_id, c_m):
+            del c_m
+            return compute_global_swizzle(
+                lane,
+                wave_id,
+                K * ELEM_BYTES,
+                LOAD_PASSES_HALF,
+                preshuffled=False,
+            )
+
+    if b_transpose_read:
+        def _b_global_offsets(lane, wave_id, c_n):
+            return compute_global_bf16_transpose_swizzle(
+                lane,
+                wave_id,
+                _b_leading_dim_bytes(c_n),
+                LOAD_PASSES_HALF,
+            )
+    else:
+        def _b_global_offsets(lane, wave_id, c_n):
+            del c_n
+            return compute_global_swizzle(
+                lane,
+                wave_id,
+                K * ELEM_BYTES,
+                LOAD_PASSES_HALF,
+                preshuffled=False,
+            )
+
     @fx.struct
     class SharedStorage:
-        # Each logical 256x64 BF16 page is two independent 128x64 half-pages.
-        # Store LDS as bytes so BufferCopyLDS128b sees i8 on both source and
-        # destination. Each half-page remains exactly 16 KiB.
+        # Preserve the passing TN byte-staging contract exactly.  A BF16 K64
+        # half-page is 128 rows x 128 bytes = 16 KiB.
         a0_0: fx.Array[fx.Uint8, LDS_BYTES_HALF, 16]
         a0_1: fx.Array[fx.Uint8, LDS_BYTES_HALF, 16]
         a1_0: fx.Array[fx.Uint8, LDS_BYTES_HALF, 16]
@@ -275,8 +456,9 @@ def _compile_kernel(
         lds_b0 = (lds.b0_0, lds.b0_1)
         lds_b1 = (lds.b1_0, lds.b1_1)
 
-        # A/B arrive as contiguous uint8 byte views. Keeping staging byte-addressed
-        # preserves the original 16-byte G2L instruction cadence and vmcnt values.
+        # A/B arrive as contiguous uint8 byte views of the original
+        # row-major BF16 tensors. This preserves the validated 16-byte
+        # BufferCopyLDS128b path and byte-based address arithmetic.
         gA = make_bf16_byte_buffer_tensor(A)
         gB = make_bf16_byte_buffer_tensor(B)
         a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
@@ -307,13 +489,26 @@ def _compile_kernel(
         wave_id = tx_i32 // fx.Int32(WARP_SIZE)
         lane = tx_i32 % fx.Int32(WARP_SIZE)
 
-        # The utility mapping is identical to the previous manual staging:
-        # each step contributes one contiguous 16-byte vector per thread, while
-        # the global K coordinate is XOR-unswizzled for the physical LDS slot.
-        gl_off_a = compute_global_swizzle(lane, wave_id, K * ELEM_BYTES, LOAD_PASSES_HALF, preshuffled=False)
-        gl_off_b = compute_global_swizzle(lane, wave_id, K * ELEM_BYTES, LOAD_PASSES_HALF, preshuffled=False)
-        a_g2s = G2SLoader(a_div, gl_off_a, LOAD_PASSES_HALF, fx.Uint8.ir_type, wave_id)
-        b_g2s = G2SLoader(b_div, gl_off_b, LOAD_PASSES_HALF, fx.Uint8.ir_type, wave_id)
+        # Offsets are always bytes.  TN uses the original 128-byte XOR
+        # swizzle.  NN/NT stage K-major BF16 data as two [K64, X64] slices for
+        # ds_read_b64_tr_b16; the layout choice was resolved before capture.
+        gl_off_a = _a_global_offsets(lane, wave_id, c_m)
+        gl_off_b = _b_global_offsets(lane, wave_id, c_n)
+
+        a_g2s = G2SLoader(
+            a_div,
+            gl_off_a,
+            LOAD_PASSES_HALF,
+            fx.Uint8.ir_type,
+            wave_id,
+        )
+        b_g2s = G2SLoader(
+            b_div,
+            gl_off_b,
+            LOAD_PASSES_HALF,
+            fx.Uint8.ir_type,
+            wave_id,
+        )
         s2r = S2RLoader(fx.Int32(0), 1)
 
         layout_lane16 = fx.make_layout((4, 16), (16, 1))
@@ -410,7 +605,7 @@ def _compile_kernel(
             # reads overlap four independent 8-MFMA K32 groups.
             for _ in range_constexpr(4):
                 rocdl.sched_vmem(2)
-                rocdl.sched_dsrd(2)
+                rocdl.sched_dsrd(Q0_SCHED_DSRD)
                 rocdl.sched_mfma(8)
             rocdl.sched_barrier(0)
 
@@ -418,18 +613,22 @@ def _compile_kernel(
             # Eight two-read prefetch groups overlap four complete-quadrant
             # 16-MFMA groups (two K32 slices for each of Q2 and Q3).
             for _ in range_constexpr(4):
-                rocdl.sched_dsrd(4)
+                rocdl.sched_dsrd(PREFETCH_SCHED_DSRD)
                 rocdl.sched_mfma(16)
             rocdl.sched_barrier(0)
 
         def stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a):
             # One pass writes 256 threads * 16 B = 4 KiB. Four passes fill one
             # 128x64 half-page (16 KiB). Each half has its own LDS base.
-            global_base = (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(K * ELEM_BYTES) + k_base * fx.Index(ELEM_BYTES)
+            global_base = _a_global_base_bytes(
+                k_base, subtile, c_m, bx_m_idx
+            )
             a_g2s.load_one(lds_a[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
-            global_base = (by_n_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(K * ELEM_BYTES) + k_base * fx.Index(ELEM_BYTES)
+            global_base = _b_global_base_bytes(
+                k_base, subtile, c_n, by_n_idx
+            )
             b_g2s.load_one(lds_b[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_a_subtile(k_base, subtile, lds_a):
@@ -459,7 +658,47 @@ def _compile_kernel(
         def load_b_frag(lds_b, local_row, half):
             # B is [N, K]. Each 128-row half-page has a local row origin of 0.
             half_row = local_row - fx.Index(half * (BLOCK_N // 2))
-            return load_frag_at_byte_base(lds_b[half], half_row * fx.Index(BLOCK_K * ELEM_BYTES))
+            return load_frag_at_byte_base(
+                lds_b[half],
+                half_row * fx.Index(BLOCK_K * ELEM_BYTES),
+            )
+
+        def load_transposed_frag_half(lds_page, local_x_tile, half):
+            # BF16 uses v_mfma_f32_16x16x32_bf16, not the MXFP8 K128
+            # instruction.  A 128-X half-page is therefore two independent
+            # swizzled [K64, X64] BF16 slices. One ds_read_b64_tr_b16 returns
+            # four BF16 values/lane; two reads form one K32 MFMA fragment.
+            local_x_i32 = fx.Int32(local_x_tile)
+            slice_idx = local_x_i32 // fx.Int32(64)
+            x_in_slice = local_x_i32 % fx.Int32(64)
+            lane_div16_i32 = fx.Int32(lane_div_16)
+            lane_in16_i32 = fx.Int32(lane_mod_16)
+
+            source_k = (
+                lane_div16_i32 * fx.Int32(8)
+                + lane_in16_i32 // fx.Int32(4)
+            )
+            source_x_byte = (
+                x_in_slice * fx.Int32(ELEM_BYTES)
+                + (lane_in16_i32 % fx.Int32(4)) * fx.Int32(8)
+            )
+
+            physical_k, physical_x = swizzle_128(source_k, source_x_byte)
+            slice_base = slice_idx * fx.Int32(64 * 128)
+            base = slice_base + physical_k * fx.Int32(128) + physical_x
+            other = base ^ fx.Int32(0x220)
+            immediate_offset = 0 if half == 0 else 0x1000
+            return s2r.load_one_transpose_bf16(
+                lds_page,
+                base,
+                other,
+                immediate_offset=immediate_offset,
+            )
+
+        def load_transposed_frag(lds_page, local_x_tile):
+            x0 = load_transposed_frag_half(lds_page, local_x_tile, 0)
+            x1 = load_transposed_frag_half(lds_page, local_x_tile, 1)
+            return pack_frag_halves(x0, x1)
 
         def _acc_idx(subtile_id, mi, ni):
             return subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
@@ -585,9 +824,15 @@ def _compile_kernel(
         zero_pinned_accumulators()
 
         def load_b_subtile_ni_regs(lds_b, sn, ni):
-            subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
-            b_row_addr = subtile_n_idx * fx.Index(SUBTILE_N) + fx.Index(ni * MFMA_N) + lane_mod_16
-            return load_b_frag(lds_b, b_row_addr, sn)
+            return _load_b_ni(
+                load_transposed_frag,
+                load_b_frag,
+                lds_b,
+                sn,
+                ni,
+                reg_subtile_n_idx0,
+                lane_mod_16,
+            )
 
         def load_b_subtile_regs(lds_b, sn):
             return (
@@ -598,11 +843,16 @@ def _compile_kernel(
             )
 
         def load_a_subtile_mi_half(lds_a, sm, mi, half):
-            subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
-            a_row_addr = subtile_m_idx * fx.Index(SUBTILE_M) + fx.Index(mi * MFMA_M) + lane_mod_16
-            half_row = a_row_addr - fx.Index(sm * (BLOCK_M // 2))
-            row_byte_base = half_row * fx.Index(BLOCK_K * ELEM_BYTES)
-            return load_frag_half_at_byte_base(lds_a[sm], row_byte_base, half)
+            return _load_a_half(
+                load_transposed_frag_half,
+                load_frag_half_at_byte_base,
+                lds_a,
+                sm,
+                mi,
+                half,
+                reg_subtile_m_idx0,
+                lane_mod_16,
+            )
 
         def load_a_subtile_mi_regs(lds_a, sm, mi):
             x0 = load_a_subtile_mi_half(lds_a, sm, mi, 0)
@@ -1003,11 +1253,13 @@ def _compile_kernel(
 def _cached_launch(
     K: int,
     output_dtype: torch.dtype,
+    layout: str,
     use_xcd_remap: bool = True,
 ):
     return _compile_kernel(
         K,
         output_dtype,
+        layout,
         use_xcd_remap=use_xcd_remap,
     )
 
@@ -1016,95 +1268,124 @@ def bf16_matmul(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
+    *,
+    layout: str,
+    m: int,
+    n: int,
+    k: int,
     stream=None,
 ):
-    """TE-facing TN BF16 GEMM adapter.
-
-    Public/backend contract:
-        a: [M, K] BF16
-        b: [K, N] BF16
-        c: [M, N] FP16, BF16, or FP32 output
-
-    The optimized core streams both operands with K contiguous and therefore
-    privately consumes B as [N, K]. In the normal TE TN path, ``b`` is a
-    transpose view of contiguous rowwise weight storage, so ``b.T`` is already
-    contiguous and does not require a physical transpose.
-    """
+    """Launch the wrapper-selected BF16 TN/NN/NT specialization."""
+    if layout not in ("TN", "NN", "NT"):
+        raise ValueError(f"Unsupported BF16 layout: {layout}")
     if a.ndim != 2 or b.ndim != 2:
         raise ValueError(
-            f"FlyDSL BF16 TN expects rank-2 operands, got A{tuple(a.shape)} "
+            f"FlyDSL BF16 expects rank-2 operands, got A{tuple(a.shape)} "
             f"and B{tuple(b.shape)}"
-        )
-
-    m, k = a.shape
-    kb, n = b.shape
-    if kb != k:
-        raise ValueError(
-            f"Inner dimensions do not match: A{tuple(a.shape)} and B{tuple(b.shape)}"
         )
     if a.dtype != torch.bfloat16 or b.dtype != torch.bfloat16:
         raise TypeError(
-            "FlyDSL BF16 GEMM expects both operands to have torch.bfloat16 dtype, "
-            f"got {a.dtype} and {b.dtype}"
+            "FlyDSL BF16 GEMM expects torch.bfloat16 operands, "
+            f"got A={a.dtype}, B={b.dtype}"
         )
+    if not a.is_contiguous() or not b.is_contiguous():
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL BF16 {layout} requires original contiguous row-major "
+            f"operands, got A stride={tuple(a.stride())}, "
+            f"B stride={tuple(b.stride())}"
+        )
+
+    m = int(m)
+    n = int(n)
+    k = int(k)
+
+    expected_shapes = {
+        "TN": ((m, k), (n, k)),
+        "NN": ((m, k), (k, n)),
+        "NT": ((k, m), (k, n)),
+    }
+    expected_a, expected_b = expected_shapes[layout]
+    if tuple(a.shape) != expected_a or tuple(b.shape) != expected_b:
+        raise ValueError(
+            f"FlyDSL BF16 {layout} physical operands do not match contract: "
+            f"A{tuple(a.shape)} expected {expected_a}; "
+            f"B{tuple(b.shape)} expected {expected_b}"
+        )
+
     if tuple(c.shape) != (m, n):
         raise ValueError(f"C shape {tuple(c.shape)} != expected {(m, n)}")
-    if c.dtype not in (
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
-    ):
+    if c.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise TypeError(
-            "FlyDSL BF16 GEMM output dtype must be torch.float16, "
-            f"torch.bfloat16, or torch.float32, got {c.dtype}"
+            "FlyDSL BF16 output must be float16, bfloat16, or float32, "
+            f"got {c.dtype}"
         )
     if a.device != b.device or a.device != c.device:
         raise ValueError(
-            f"A, B, and C must be on the same device, got {a.device}, {b.device}, and {c.device}"
+            f"A, B, and C must be on the same device, got "
+            f"{a.device}, {b.device}, and {c.device}"
         )
     if not c.is_contiguous():
         raise ValueError("FlyDSL BF16 GEMM requires contiguous output storage")
 
-    b_hk = b.transpose(0, 1).contiguous()
-    doGemm(a, b_hk, c, stream=stream)
-
+    doGemm(
+        a,
+        b,
+        c,
+        layout=layout,
+        m=m,
+        n=n,
+        k=k,
+        stream=stream,
+    )
 
 def doGemm(
     A: torch.Tensor,
     B: torch.Tensor,
     C: torch.Tensor,
+    *,
+    layout: str,
+    m: int,
+    n: int,
+    k: int,
     stream=None,
     use_xcd_remap: bool = True,
 ):
-    """Launch the private K-specialized BF16 core.
+    """Launch one cached K/output/layout-specialized BF16 core.
 
-    A and B are shaped [M, K] and [N, K]; C is shaped [M, N]. M and N
-    remain runtime values, while K selects the cached compile-time specialization.
+    A and B are passed unchanged from ``gemm_wrappers.py``. Their pointers
+    reference the original rowwise allocations:
+
+      TN: A backing [M,K], B backing [N,K]
+      NN: A backing [M,K], B backing [K,N]
+      NT: A backing [K,M], B backing [K,N]
+
+    NN/NT orientation is implemented by compile-time global addressing and
+    ``ds_read_b64_tr_b16`` only.
     """
-    M_runtime, K_runtime = A.shape
-    N_runtime, Kb_runtime = B.shape
-    assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
-    assert A.dtype == torch.bfloat16 and B.dtype == torch.bfloat16
-    assert C.dtype in (
-        torch.float16,
-        torch.bfloat16,
-        torch.float32,
-    ), (
-        "C dtype must be torch.float16, torch.bfloat16, or torch.float32, "
-        f"got {C.dtype}"
-    )
+    if layout not in ("TN", "NN", "NT"):
+        raise ValueError(f"Unsupported BF16 layout: {layout}")
+
+    M_runtime = int(m)
+    N_runtime = int(n)
+    K_runtime = int(k)
+
+    if A.dtype != torch.bfloat16 or B.dtype != torch.bfloat16:
+        raise TypeError(
+            f"BF16 {layout} requires BF16 inputs, got {A.dtype} and {B.dtype}"
+        )
+    if C.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        raise TypeError(f"Unsupported BF16 output dtype: {C.dtype}")
+
     if M_runtime % _BLOCK_M != 0:
         raise FlyDSLUnsupportedError(
             f"FlyDSL BF16 GEMM requires M to be a multiple of {_BLOCK_M}, "
             f"got M={M_runtime}"
         )
-
     if N_runtime % _BLOCK_N != 0:
         raise FlyDSLUnsupportedError(
             f"FlyDSL BF16 GEMM requires N to be a multiple of {_BLOCK_N}, "
             f"got N={N_runtime}"
         )
-
     if K_runtime % _BLOCK_K != 0:
         raise FlyDSLUnsupportedError(
             f"FlyDSL BF16 GEMM requires K to be a multiple of {_BLOCK_K}, "
@@ -1117,16 +1398,33 @@ def doGemm(
             f"FlyDSL BF16 GEMM requires at least 4 K{_BLOCK_K} tiles, "
             f"got K={K_runtime} ({num_k_tiles} tiles)"
         )
-    assert C.shape == (M_runtime, N_runtime)
+
+    if tuple(C.shape) != (M_runtime, N_runtime):
+        raise ValueError(
+            f"C shape {tuple(C.shape)} != expected {(M_runtime, N_runtime)}"
+        )
+
     if stream is None:
         stream = torch.cuda.current_stream()
 
-    A_arg = A.contiguous().view(torch.uint8).view(-1)
-    B_arg = B.contiguous().view(torch.uint8).view(-1)
-    C_arg = C.view(-1)
     launch = _cached_launch(
-        int(K_runtime),
+        K_runtime,
         C.dtype,
+        layout,
         bool(use_xcd_remap),
     )
-    launch(A_arg, B_arg, C_arg, M_runtime, N_runtime, stream=stream)
+    # Preserve the original validated byte-addressed G2L path. These are
+    # metadata-only dtype/flatten views of the already-contiguous row-major
+    # tensors selected by gemm_wrappers.py; no transpose or copy is performed.
+    A_arg = A.view(torch.uint8).view(-1)
+    B_arg = B.view(torch.uint8).view(-1)
+    C_arg = C.view(-1)
+
+    launch(
+        A_arg,
+        B_arg,
+        C_arg,
+        M_runtime,
+        N_runtime,
+        stream=stream,
+    )

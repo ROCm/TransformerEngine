@@ -237,10 +237,9 @@ def _canonicalize_blas_pair(
     B_data: torch.Tensor,
     transb: bool,
 ):
-    """Swap TE BLAS operands and apply their original transpose flags."""
-    a_flydsl = B_data.transpose(0, 1) if transb else B_data
-    b_flydsl = A_data.transpose(0, 1) if transa else A_data
-    return a_flydsl, b_flydsl
+    """Swap TE BLAS operand ownership without changing either tensor layout."""
+    del transa, transb
+    return B_data, A_data
 
 
 def _flatten_rowwise(t: torch.Tensor, name: str) -> torch.Tensor:
@@ -275,11 +274,10 @@ def _canonicalize_blas_operands(
         a_flydsl: [M, K]
         b_flydsl: [K, N]
 
-    The standard conversion is to swap A/B and apply the original transpose
-    flags to the swapped operands:
+    Operand ownership is swapped without creating tensor transpose views:
 
-        a_flydsl = op(B)
-        b_flydsl = op(A)
+        a_flydsl = B
+        b_flydsl = A
     """
     if transa and transb:
         raise NotImplementedError(
@@ -335,6 +333,112 @@ def _validate_or_allocate_output(
         raise ValueError(
             f"FlyDSL {backend_name} requires contiguous output storage"
         )
+    return D
+
+
+def _run_bf16_gemm(
+    A,
+    transa,
+    B,
+    transb,
+    D,
+    *,
+    output_dtype: torch.dtype,
+):
+    """Dispatch BF16 using the original row-major operand allocations.
+
+    No operand transpose view is created:
+
+        TN: kernel A = TE B [M,K], kernel B = TE A [N,K]
+        NN: kernel A = TE B [M,K], kernel B = TE A [K,N]
+        NT: kernel A = TE B [K,M], kernel B = TE A [K,N]
+    """
+    if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
+        raise TypeError("FlyDSL BF16 GEMM expects plain torch.Tensor operands")
+    if A.dtype != torch.bfloat16 or B.dtype != torch.bfloat16:
+        raise TypeError(
+            "FlyDSL BF16 GEMM requires torch.bfloat16 inputs, "
+            f"got A={A.dtype} and B={B.dtype}"
+        )
+    if A.device != B.device:
+        raise ValueError(
+            f"A and B must be on the same device, got {A.device} and {B.device}"
+        )
+
+    dispatch = {
+        (True, False): "TN",
+        (False, False): "NN",
+        (False, True): "NT",
+    }
+    try:
+        layout = dispatch[(bool(transa), bool(transb))]
+    except KeyError as exc:
+        raise FlyDSLUnsupportedError(
+            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
+        ) from exc
+
+    output_shape = _get_gemm_output_shape(A, transa, B, transb)
+
+    # Preserve the original row-major storage. This only collapses leading
+    # batch dimensions, matching the wrapper's existing regular-GEMM contract.
+    A_data = _flatten_rowwise(A, "A")
+    B_data = _flatten_rowwise(B, "B")
+
+    # Kernel ownership is always swapped relative to TE's BLAS arguments.
+    a_flydsl = B_data
+    b_flydsl = A_data
+
+    if layout == "TN":
+        m, k = a_flydsl.shape
+        n, kb = b_flydsl.shape
+        expected_a = (m, k)
+        expected_b = (n, k)
+    elif layout == "NN":
+        m, k = a_flydsl.shape
+        kb, n = b_flydsl.shape
+        expected_a = (m, k)
+        expected_b = (k, n)
+    else:
+        k, m = a_flydsl.shape
+        kb, n = b_flydsl.shape
+        expected_a = (k, m)
+        expected_b = (k, n)
+
+    if kb != k:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL BF16 {layout} received incompatible row-major operands: "
+            f"a={tuple(a_flydsl.shape)}, b={tuple(b_flydsl.shape)}"
+        )
+    if tuple(a_flydsl.shape) != expected_a or tuple(b_flydsl.shape) != expected_b:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL BF16 {layout} physical contract mismatch: "
+            f"a={tuple(a_flydsl.shape)} expected={expected_a}; "
+            f"b={tuple(b_flydsl.shape)} expected={expected_b}"
+        )
+
+    if _product(output_shape) != m * n:
+        raise RuntimeError(
+            f"FlyDSL BF16 logical output shape {tuple(output_shape)} "
+            f"does not match kernel output {(m, n)}"
+        )
+
+    D = _validate_or_allocate_output(
+        D,
+        shape=output_shape,
+        dtype=output_dtype,
+        device=A.device,
+        backend_name=f"BF16 {layout}",
+    )
+
+    bf16_matmul(
+        a_flydsl,
+        b_flydsl,
+        D.view(m, n),
+        layout=layout,
+        m=m,
+        n=n,
+        k=k,
+    )
     return D
 
 
@@ -1125,15 +1229,12 @@ def te_generic_gemm_flydsl(
                 "FlyDSL BF16 supports FP16, BF16, or FP32 output, "
                 f"got {output_dtype}"
             )
-        D = _run_regular_gemm(
+        D = _run_bf16_gemm(
             A,
             transa,
             B,
             transb,
             D,
-            dtype=torch.bfloat16,
-            matmul=bf16_matmul,
-            backend_name="BF16",
             output_dtype=bf16_output_dtypes[output_dtype],
         )
         return D, None, None, None
