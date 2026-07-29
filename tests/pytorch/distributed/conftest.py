@@ -31,26 +31,31 @@ except Exception:  # torch missing/broken -> let the tests themselves report it
 _LAUNCHERS = ("torchrun", "mpirun")
 
 @cache
-def _terminate_timeout_seconds():
+def _terminate_timeout_seconds(run_timeout=None):
     """Grace between SIGTERM and the SIGKILL backstop."""
     try:
-        return str(max(1, int(os.environ.get("TE_DIST_LAUNCH_KILL_AFTER", "60"))))
+        explicit = int(os.environ.get("TE_DIST_LAUNCH_KILL_AFTER", "60"))
+        if run_timeout and run_timeout < 2*explicit:
+            return max(1, run_timeout // 2)
+        return max(1, explicit)
     except ValueError:
-        return "60"
+        return 60
 
 
-def _launch_timeout_seconds():
-    """Inner per-launch bound, in seconds, as a string for the coreutil."""
-    explicit = os.environ.get("TE_DIST_LAUNCH_TIMEOUT")
-    if explicit:
-        return explicit
+def _launch_timeout_seconds(run_timeout=None, terminate_timeout=None):
+    """Inner per-launch bound, in seconds"""
     # Fire a bit before the outer pytest-timeout so the child is reaped cleanly
     # rather than orphaned when the watchdog calls os._exit().
     try:
-        outer = int(os.environ.get("PYTEST_TIMEOUT", "1200"))
+        explicit = os.environ.get("TE_DIST_LAUNCH_TIMEOUT")
+        if explicit:
+            return int(explicit)
+        outer = run_timeout or int(os.environ.get("PYTEST_TIMEOUT", "1200"))
     except ValueError:
-        return "1200"
-    return str(max(60, outer - 60 - int(_terminate_timeout_seconds())))
+        return 1200
+    if terminate_timeout is None:
+        terminate_timeout = _terminate_timeout_seconds(run_timeout)
+    return max(60, outer - 60 - terminate_timeout)  # at least 1 minute for the child to run
 
 
 def _is_launcher(cmd):
@@ -62,8 +67,10 @@ def _is_launcher(cmd):
     return head in _LAUNCHERS
 
 
-def _wrap(cmd):
-    return ["timeout", "-k", _terminate_timeout_seconds(), "-v", _launch_timeout_seconds(), *cmd]
+def _wrap(cmd, timeout):
+    terminate_timeout = _terminate_timeout_seconds(timeout)
+    launch_timeout = _launch_timeout_seconds(timeout, terminate_timeout)
+    return ["timeout", "-k", str(terminate_timeout), "-v", str(launch_timeout), *cmd]
 
 
 # Patch at import (collection) time so it is active for every test in this dir.
@@ -72,7 +79,7 @@ if IS_HIP_EXTENSION and shutil.which("timeout") is not None:
 
     def _run_with_timeout(cmd, *args, **kwargs):
         if _is_launcher(cmd):
-            cmd = _wrap(cmd)
+            cmd = _wrap(cmd, kwargs.get("timeout", 0))
         return _orig_run(cmd, *args, **kwargs)
 
     subprocess.run = _run_with_timeout
