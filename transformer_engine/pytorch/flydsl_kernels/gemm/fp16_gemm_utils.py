@@ -38,6 +38,8 @@ def make_bf16_buffer_tensor(arg_bf16):
 # Keep the exact existing behavior; this is only a symbol alias.
 make_bf16_byte_buffer_tensor = make_bf16_buffer_tensor
 
+make_fp16_byte_buffer_tensor = make_bf16_byte_buffer_tensor
+
 
 def compute_global_swizzle(
     lane_id,
@@ -95,6 +97,8 @@ def compute_global_bf16_transpose_swizzle(
         )
     return offsets
 
+
+compute_global_fp16_transpose_swizzle = compute_global_bf16_transpose_swizzle
 
 class G2SLoader:
     """Issue native 16-byte BF16 BufferDesc-to-BF16 LDS copies."""
@@ -221,3 +225,19 @@ class S2RLoader:
             immediate_offset,
         )
         return lo.shuffle(hi, [0, 1, 2, 3])
+
+
+    def load_one_transpose_fp16(
+        self,
+        lds_src,
+        first_byte_offset,
+        second_byte_offset,
+        immediate_offset=0,
+    ):
+        """Return one i32x4 K32 FP16 fragment from two transpose reads."""
+        return self.load_one_transpose_bf16(
+            lds_src,
+            first_byte_offset,
+            second_byte_offset,
+            immediate_offset,
+        )

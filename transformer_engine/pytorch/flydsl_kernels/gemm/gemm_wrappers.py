@@ -442,6 +442,113 @@ def _run_bf16_gemm(
     return D
 
 
+
+def _run_fp16_gemm(
+    A,
+    transa,
+    B,
+    transb,
+    D,
+    *,
+    output_dtype: torch.dtype,
+):
+    """Dispatch FP16 using the original row-major operand allocations.
+
+    No operand transpose view is created:
+
+        TN: kernel A = TE B [M,K], kernel B = TE A [N,K]
+        NN: kernel A = TE B [M,K], kernel B = TE A [K,N]
+        NT: kernel A = TE B [K,M], kernel B = TE A [K,N]
+    """
+    if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
+        raise TypeError("FlyDSL FP16 GEMM expects plain torch.Tensor operands")
+    if A.dtype != torch.float16 or B.dtype != torch.float16:
+        raise TypeError(
+            "FlyDSL FP16 GEMM requires torch.float16 inputs, "
+            f"got A={A.dtype} and B={B.dtype}"
+        )
+    if A.device != B.device:
+        raise ValueError(
+            f"A and B must be on the same device, got {A.device} and {B.device}"
+        )
+
+    dispatch = {
+        (True, False): "TN",
+        (False, False): "NN",
+        (False, True): "NT",
+    }
+    try:
+        layout = dispatch[(bool(transa), bool(transb))]
+    except KeyError as exc:
+        raise FlyDSLUnsupportedError(
+            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
+        ) from exc
+
+    output_shape = _get_gemm_output_shape(A, transa, B, transb)
+
+    # Preserve the original row-major storage. This only collapses leading
+    # batch dimensions, matching the wrapper's existing regular-GEMM contract.
+    A_data = _flatten_rowwise(A, "A")
+    B_data = _flatten_rowwise(B, "B")
+
+    # Kernel ownership is always swapped relative to TE's BLAS arguments.
+    a_flydsl = B_data
+    b_flydsl = A_data
+
+    if layout == "TN":
+        m, k = a_flydsl.shape
+        n, kb = b_flydsl.shape
+        expected_a = (m, k)
+        expected_b = (n, k)
+    elif layout == "NN":
+        m, k = a_flydsl.shape
+        kb, n = b_flydsl.shape
+        expected_a = (m, k)
+        expected_b = (k, n)
+    else:
+        k, m = a_flydsl.shape
+        kb, n = b_flydsl.shape
+        expected_a = (k, m)
+        expected_b = (k, n)
+
+    if kb != k:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL FP16 {layout} received incompatible row-major operands: "
+            f"a={tuple(a_flydsl.shape)}, b={tuple(b_flydsl.shape)}"
+        )
+    if tuple(a_flydsl.shape) != expected_a or tuple(b_flydsl.shape) != expected_b:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL FP16 {layout} physical contract mismatch: "
+            f"a={tuple(a_flydsl.shape)} expected={expected_a}; "
+            f"b={tuple(b_flydsl.shape)} expected={expected_b}"
+        )
+
+    if _product(output_shape) != m * n:
+        raise RuntimeError(
+            f"FlyDSL FP16 logical output shape {tuple(output_shape)} "
+            f"does not match kernel output {(m, n)}"
+        )
+
+    D = _validate_or_allocate_output(
+        D,
+        shape=output_shape,
+        dtype=output_dtype,
+        device=A.device,
+        backend_name=f"FP16 {layout}",
+    )
+
+    fp16_matmul(
+        a_flydsl,
+        b_flydsl,
+        D.view(m, n),
+        layout=layout,
+        m=m,
+        n=n,
+        k=k,
+    )
+    return D
+
+
 def _run_regular_gemm(
     A,
     transa,
@@ -1251,15 +1358,12 @@ def te_generic_gemm_flydsl(
                 "FlyDSL FP16 supports FP16, BF16, or FP32 output, "
                 f"got {output_dtype}"
             )
-        D = _run_regular_gemm(
+        D = _run_fp16_gemm(
             A,
             transa,
             B,
             transb,
             D,
-            dtype=torch.float16,
-            matmul=fp16_matmul,
-            backend_name="FP16",
             output_dtype=fp16_output_dtypes[output_dtype],
         )
         return D, None, None, None
