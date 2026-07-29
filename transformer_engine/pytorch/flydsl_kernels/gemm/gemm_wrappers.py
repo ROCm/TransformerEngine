@@ -561,10 +561,10 @@ def _run_mxfp8(
     """Dispatch MXFP8 through exact TN/NN/NT physical contracts.
 
     TE owns BLAS-shaped operands. After the usual ownership swap, FlyDSL
-    kernels consume:
+    kernels consume the selected backing directly:
 
         TN: a = B.rowwise      [M, K]
-            b = A.rowwise.T    [K, N]  (validated TN adapter contract)
+            b = A.rowwise      [N, K]
 
         NN: a = B.rowwise      [M, K]
             b = A.columnwise   [K, N]
@@ -659,17 +659,17 @@ def _run_mxfp8(
     #   kernel a <- TE B
     #   kernel b <- TE A
     if kernel_layout == "TN":
-        # Preserve the validated TN adapter contract:
-        #   a [M,K], b [K,N]
+        # Selected rowwise backings already match the TN normal-read contract:
+        #   a [M,K], b [N,K]
         a_flydsl = B_data
-        b_flydsl = A_data.transpose(0, 1)
+        b_flydsl = A_data
         a_scale = B_scale
-        b_scale = A_scale.transpose(0, 1)
+        b_scale = A_scale
 
         m, k = a_flydsl.shape
-        kb, n = b_flydsl.shape
+        n, kb = b_flydsl.shape
         expected_a_scale = (m, k // 32)
-        expected_b_scale = (k // 32, n)
+        expected_b_scale = (n, k // 32)
 
     elif kernel_layout == "NN":
         # A's columnwise MXFP8 payload is still row-major in its original

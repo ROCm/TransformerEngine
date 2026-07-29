@@ -1683,20 +1683,23 @@ def mxfp8_matmul(
 
     Wrapper-visible contracts:
 
-        TN: a [M,K], b [K,N], scales [M,K/32] and [K/32,N]
+        TN: a [M,K], b [N,K], scales [M,K/32] and [N,K/32]
         NN: a [M,K], b [K,N], scales [M,K/32] and [K/32,N]
         NT: a [K,M], b [K,N], scales [K/32,M] and [K/32,N]
 
-    TN preserves the existing adapter conversion to the kernel's normal-read
-    B [N,K] representation. NN and NT preserve K-major payloads and use
-    ``ds_read_b64_tr_b8`` inside their compile-time-specialized kernels.
+    TN consumes the selected rowwise payloads directly. NN and NT preserve
+    K-major payloads and use ``ds_read_b64_tr_b8`` inside their
+    compile-time-specialized kernels.
     """
     if layout not in ("TN", "NN", "NT"):
         raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
 
     _validate_common_payloads(a, b, D, layout=layout)
 
-    if layout in ("TN", "NN"):
+    if layout == "TN":
+        m, k = a.shape
+        n, kb = b.shape
+    elif layout == "NN":
         m, k = a.shape
         kb, n = b.shape
     else:
@@ -1720,7 +1723,11 @@ def mxfp8_matmul(
         expected_a_scale = (k // SCALE_GROUP_SIZE, m)
     else:
         expected_a_scale = (m, k // SCALE_GROUP_SIZE)
-    expected_b_scale = (k // SCALE_GROUP_SIZE, n)
+
+    if layout == "TN":
+        expected_b_scale = (n, k // SCALE_GROUP_SIZE)
+    else:
+        expected_b_scale = (k // SCALE_GROUP_SIZE, n)
 
     if tuple(a_scale.shape) != expected_a_scale:
         raise ValueError(
@@ -1738,19 +1745,18 @@ def mxfp8_matmul(
         raise ValueError("A, B, scales, and D must be on the same device")
 
     if layout == "TN":
-        # Preserve the passing TN kernel contract exactly: normal-read B [N,K].
+        # TN selected backings already match the normal-read kernel contract:
+        #   a [M,K], b [N,K]
         a_kernel = a
-        b_kernel = b.transpose(0, 1).contiguous()
+        b_kernel = b
         a_scale_hk = pack_mx32_scales_for_hk(
             a_scale,
             source_colwise=False,
             stream=stream,
         )
-        # b_scale is already TE columnwise [K/32,N].  Consume it directly;
-        # do not launch an eager transpose/contiguous kernel.
         b_scale_hk = pack_mx32_scales_for_hk(
             b_scale,
-            source_colwise=True,
+            source_colwise=False,
             stream=stream,
         )
     elif layout == "NN":
