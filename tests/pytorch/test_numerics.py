@@ -1434,7 +1434,9 @@ def test_linear_accuracy_flydsl(
         os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
         FP8GlobalStateManager.reset()
 
-    atol, rtol = get_tolerances(dtype)
+    tols = dtype_tols(dtype)
+    atol = tols["atol"]
+    rtol = tols["rtol"]
 
     if fp8:
         atol = max(atol, 1e-2)
