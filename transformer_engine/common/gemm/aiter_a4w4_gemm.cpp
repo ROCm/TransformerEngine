@@ -4,11 +4,13 @@
  * See LICENSE for license information.
  ************************************************************************/
 
-// NVTE C API for AITER's a4w4 (FP4) GEMM.  Translates the C descriptor into
-// the aiter_gemm wrapper library's C++ types.  When TE is built without the
-// AITER a4w4 backend (USE_AITER_GEMM undefined -- e.g. non-gfx950), the
-// symbols still exist but report failure so the framework layer degrades
-// gracefully instead of failing to link.
+// NVTE C API for AITER's a4w4 (FP4) GEMM.  QoLA exports a C ABI over a
+// descriptor that is layout-identical to NVTEAiterGemmTensor, so these are
+// pure forwards -- the static_asserts below are what keep that true.
+//
+// When TE is built without the AITER a4w4 backend (USE_AITER_GEMM undefined
+// -- e.g. non-gfx950), the symbols still exist but report failure so the
+// framework layer degrades gracefully instead of failing to link.
 
 #include "transformer_engine/aiter_gemm.h"
 
@@ -16,21 +18,42 @@
 
 #include <hip/hip_runtime.h>
 
-#include "aiter_gemm/aiter_gemm.hpp"
+#include <cstddef>
+
+#include "qola_gemm_a4w4.h"
 
 namespace {
 
-aiter_gemm::TensorDesc to_desc(const NVTEAiterGemmTensor *t) {
-  aiter_gemm::TensorDesc d;
-  d.ptr = t->ptr;
-  d.ndim = t->ndim;
-  for (int i = 0; i < t->ndim && i < 8; ++i) {
-    d.shape[i] = t->shape[i];
-    d.strides[i] = t->strides[i];
-  }
-  d.dtype = static_cast<aiter_gemm::DType>(t->dtype);
-  d.device_id = t->device_id;
-  return d;
+static_assert(sizeof(NVTEAiterGemmTensor) == sizeof(qola_tensor_t),
+              "NVTEAiterGemmTensor must mirror qola_tensor_t");
+static_assert(offsetof(NVTEAiterGemmTensor, ptr) == offsetof(qola_tensor_t, ptr),
+              "NVTEAiterGemmTensor::ptr must mirror qola_tensor_t::ptr");
+static_assert(offsetof(NVTEAiterGemmTensor, ndim) == offsetof(qola_tensor_t, ndim),
+              "NVTEAiterGemmTensor::ndim must mirror qola_tensor_t::ndim");
+static_assert(offsetof(NVTEAiterGemmTensor, dtype) == offsetof(qola_tensor_t, dtype),
+              "NVTEAiterGemmTensor::dtype must mirror qola_tensor_t::dtype");
+static_assert(offsetof(NVTEAiterGemmTensor, device_id) == offsetof(qola_tensor_t, device_id),
+              "NVTEAiterGemmTensor::device_id must mirror qola_tensor_t::device_id");
+static_assert(offsetof(NVTEAiterGemmTensor, shape) == offsetof(qola_tensor_t, shape),
+              "NVTEAiterGemmTensor::shape must mirror qola_tensor_t::shape");
+static_assert(offsetof(NVTEAiterGemmTensor, strides) == offsetof(qola_tensor_t, strides),
+              "NVTEAiterGemmTensor::strides must mirror qola_tensor_t::strides");
+
+// The dtype enumerators are part of the shared ABI too.  Compared as ints
+// because the two enums are deliberately distinct types.
+static_assert(static_cast<int>(kNVTEAiterGemmFP4x2) == static_cast<int>(QOLA_DTYPE_FP4X2),
+              "a4w4 dtype enum drift");
+static_assert(static_cast<int>(kNVTEAiterGemmE8M0) == static_cast<int>(QOLA_DTYPE_E8M0),
+              "a4w4 dtype enum drift");
+static_assert(static_cast<int>(kNVTEAiterGemmBF16) == static_cast<int>(QOLA_DTYPE_BF16),
+              "a4w4 dtype enum drift");
+static_assert(static_cast<int>(kNVTEAiterGemmFP16) == static_cast<int>(QOLA_DTYPE_FP16),
+              "a4w4 dtype enum drift");
+static_assert(static_cast<int>(kNVTEAiterGemmFP32) == static_cast<int>(QOLA_DTYPE_FP32),
+              "a4w4 dtype enum drift");
+
+inline const qola_tensor_t *as_qola(const NVTEAiterGemmTensor *t) {
+  return reinterpret_cast<const qola_tensor_t *>(t);
 }
 
 }  // namespace
@@ -40,15 +63,11 @@ extern "C" int nvte_aiter_gemm_a4w4_blockscale(const NVTEAiterGemmTensor *XQ,
                                                const NVTEAiterGemmTensor *x_scale,
                                                const NVTEAiterGemmTensor *w_scale,
                                                const NVTEAiterGemmTensor *Y, int split_k,
-                                               const char *kernel_name, void *stream) {
-  aiter_gemm::TensorDesc xq = to_desc(XQ);
-  aiter_gemm::TensorDesc wq = to_desc(WQ);
-  aiter_gemm::TensorDesc xs = to_desc(x_scale);
-  aiter_gemm::TensorDesc ws = to_desc(w_scale);
-  aiter_gemm::TensorDesc y = to_desc(Y);
-  hipError_t err = aiter_gemm::gemm_a4w4_blockscale(
-      xq, wq, xs, ws, y, split_k, kernel_name, static_cast<hipStream_t>(stream));
-  return err == hipSuccess ? 0 : 1;
+                                               const char *kernel_name, void *stream, char *err_buf,
+                                               size_t err_buf_size) {
+  return QOLA_C(gemm_a4w4_blockscale)(as_qola(XQ), as_qola(WQ), as_qola(x_scale), as_qola(w_scale),
+                                      as_qola(Y), split_k, kernel_name,
+                                      static_cast<hipStream_t>(stream), err_buf, err_buf_size);
 }
 
 extern "C" int nvte_aiter_gemm_a4w4_asm(const NVTEAiterGemmTensor *A, const NVTEAiterGemmTensor *B,
@@ -57,36 +76,45 @@ extern "C" int nvte_aiter_gemm_a4w4_asm(const NVTEAiterGemmTensor *A, const NVTE
                                         const NVTEAiterGemmTensor *out,
                                         const NVTEAiterGemmTensor *bias, const char *kernel_name,
                                         float alpha, float beta, int bpreshuffle, int log2_k_split,
-                                        void *stream) {
-  aiter_gemm::TensorDesc a = to_desc(A);
-  aiter_gemm::TensorDesc b = to_desc(B);
-  aiter_gemm::TensorDesc as = to_desc(a_scale);
-  aiter_gemm::TensorDesc bs = to_desc(b_scale);
-  aiter_gemm::TensorDesc o = to_desc(out);
-  aiter_gemm::TensorDesc bias_desc;
-  const aiter_gemm::TensorDesc *bias_ptr = nullptr;
-  if (bias != nullptr && bias->ptr != nullptr) {
-    bias_desc = to_desc(bias);
-    bias_ptr = &bias_desc;
-  }
-  hipError_t err = aiter_gemm::gemm_a4w4_asm(a, b, as, bs, o, bias_ptr, kernel_name, alpha, beta,
-                                             bpreshuffle, log2_k_split,
-                                             static_cast<hipStream_t>(stream));
-  return err == hipSuccess ? 0 : 1;
+                                        void *stream, char *err_buf, size_t err_buf_size) {
+  return QOLA_C(gemm_a4w4_asm)(as_qola(A), as_qola(B), as_qola(a_scale), as_qola(b_scale),
+                               as_qola(out), as_qola(bias), kernel_name, alpha, beta, bpreshuffle,
+                               log2_k_split, static_cast<hipStream_t>(stream), err_buf,
+                               err_buf_size);
 }
 
 #else  // !USE_AITER_GEMM
 
-extern "C" int nvte_aiter_gemm_a4w4_blockscale(const NVTEAiterGemmTensor *, const NVTEAiterGemmTensor *,
-                                               const NVTEAiterGemmTensor *, const NVTEAiterGemmTensor *,
-                                               const NVTEAiterGemmTensor *, int, const char *, void *) {
+#include <cstring>
+
+namespace {
+
+void report_disabled(char *err_buf, size_t err_buf_size) {
+  const char *msg = "TransformerEngine was built without the AITER a4w4 GEMM backend";
+  if (err_buf != nullptr && err_buf_size > 0) {
+    std::strncpy(err_buf, msg, err_buf_size - 1);
+    err_buf[err_buf_size - 1] = '\0';
+  }
+}
+
+}  // namespace
+
+extern "C" int nvte_aiter_gemm_a4w4_blockscale(const NVTEAiterGemmTensor *,
+                                               const NVTEAiterGemmTensor *,
+                                               const NVTEAiterGemmTensor *,
+                                               const NVTEAiterGemmTensor *,
+                                               const NVTEAiterGemmTensor *, int, const char *,
+                                               void *, char *err_buf, size_t err_buf_size) {
+  report_disabled(err_buf, err_buf_size);
   return -1;
 }
 
 extern "C" int nvte_aiter_gemm_a4w4_asm(const NVTEAiterGemmTensor *, const NVTEAiterGemmTensor *,
                                         const NVTEAiterGemmTensor *, const NVTEAiterGemmTensor *,
                                         const NVTEAiterGemmTensor *, const NVTEAiterGemmTensor *,
-                                        const char *, float, float, int, int, void *) {
+                                        const char *, float, float, int, int, void *, char *err_buf,
+                                        size_t err_buf_size) {
+  report_disabled(err_buf, err_buf_size);
   return -1;
 }
 

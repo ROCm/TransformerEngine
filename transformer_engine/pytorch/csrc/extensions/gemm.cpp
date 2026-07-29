@@ -880,16 +880,20 @@ py::object te_general_grouped_gemm_for_discrete_out(py::handle A, bool transa, p
 
 namespace {
 
+// Size of the buffer handed to the a4w4 entry points for failure messages.
+constexpr size_t kAiterGemmErrLen = 512;
+
 NVTEAiterGemmTensor make_aiter_gemm_tensor(const at::Tensor &t, int dtype) {
   NVTEAiterGemmTensor d{};
   d.ptr = t.data_ptr();
-  d.ndim = static_cast<int>(t.dim());
-  for (int i = 0; i < d.ndim && i < 8; ++i) {
+  d.ndim = static_cast<int32_t>(t.dim());
+  NVTE_CHECK(d.ndim <= 8, "AITER a4w4 GEMM operands support at most 8 dimensions");
+  for (int i = 0; i < d.ndim; ++i) {
     d.shape[i] = t.size(i);
     d.strides[i] = t.stride(i);
   }
   d.dtype = dtype;
-  d.device_id = static_cast<int>(t.device().index());
+  d.device_id = static_cast<int32_t>(t.device().index());
   return d;
 }
 
@@ -917,11 +921,13 @@ void gemm_a4w4_blockscale(at::Tensor XQ, at::Tensor WQ, at::Tensor x_scale, at::
   NVTEAiterGemmTensor ws = make_aiter_gemm_tensor(w_scale, kNVTEAiterGemmE8M0);
   NVTEAiterGemmTensor y = make_aiter_gemm_tensor(Y, aiter_gemm_out_dtype(Y));
   int rc;
+  char err[kAiterGemmErrLen] = {};
   NVTE_SCOPED_GIL_RELEASE({
     rc = nvte_aiter_gemm_a4w4_blockscale(&xq, &wq, &xs, &ws, &y, static_cast<int>(split_k),
-                                         kernel_name.c_str(), at::cuda::getCurrentCUDAStream());
+                                         kernel_name.c_str(), at::cuda::getCurrentCUDAStream(), err,
+                                         sizeof(err));
   });
-  NVTE_CHECK(rc == 0, "nvte_aiter_gemm_a4w4_blockscale failed (rc=", rc, ")");
+  NVTE_CHECK(rc == 0, "nvte_aiter_gemm_a4w4_blockscale failed (rc=", rc, "): ", err);
 }
 
 // ASM (f4gemm) a4w4 GEMM. `bias` optional; kernel_name empty -> ASM heuristic.
@@ -940,13 +946,14 @@ void gemm_a4w4_asm(at::Tensor A, at::Tensor B, at::Tensor a_scale, at::Tensor b_
     bias_ptr = &bias_t;
   }
   int rc;
+  char err[kAiterGemmErrLen] = {};
   NVTE_SCOPED_GIL_RELEASE({
     rc = nvte_aiter_gemm_a4w4_asm(&a, &b, &as, &bs, &o, bias_ptr, kernel_name.c_str(),
                                   static_cast<float>(alpha), static_cast<float>(beta),
                                   bpreshuffle ? 1 : 0, static_cast<int>(log2_k_split),
-                                  at::cuda::getCurrentCUDAStream());
+                                  at::cuda::getCurrentCUDAStream(), err, sizeof(err));
   });
-  NVTE_CHECK(rc == 0, "nvte_aiter_gemm_a4w4_asm failed (rc=", rc, ")");
+  NVTE_CHECK(rc == 0, "nvte_aiter_gemm_a4w4_asm failed (rc=", rc, "): ", err);
 }
 
 #endif  // USE_ROCM
