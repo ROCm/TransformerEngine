@@ -494,7 +494,9 @@ def general_gemm(
     }
 
     if not _is_nvfp4_row_scaled_tensor(A) and not _is_nvfp4_row_scaled_tensor(B):
-        use_gemm_flydsl = IS_HIP_EXTENSION and bool(int(os.environ.get("NVTE_USE_FLYDSL", "0")))
+        use_gemm_flydsl = (IS_HIP_EXTENSION
+                          and get_device_compute_capability() == (9, 5)
+                          and bool(int(os.environ.get("NVTE_USE_FLYDSL", "0"))))
         if use_gemm_flydsl:
             # Lazy import keeps FlyDSL off the normal Transformer Engine import path.
             from ..flydsl_kernels.gemm import (
