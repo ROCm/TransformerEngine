@@ -37,6 +37,18 @@ export PYTHONFAULTHANDLER=1
 export PYTEST_TIMEOUT=${PYTEST_TIMEOUT:-600}               # per-test (per-parametrization) timeout, seconds
 export PYTEST_TIMEOUT_METHOD=${PYTEST_TIMEOUT_METHOD:-thread} # unstick a hung main thread; see note above
 export CTEST_TIMEOUT=${CTEST_TIMEOUT:-300}                 # per-cpp-test timeout, seconds
+# Tests run from the TE root, where the checkout would otherwise shadow the installed
+# package: `python -m pytest` prepends cwd to sys.path, and `python <script>` prepends
+# the script's directory. The checkout has no compiled libraries and none of the files
+# generated at build time, while the .so lookup falls back to site-packages -- so an
+# import landing there runs source-tree Python against installed native libraries, with
+# mismatched halves. On ROCm wheels it also skips the rocm-sdk preload, which segfaults
+# during test collection. PYTHONSAFEPATH drops both implicit sys.path entries, so the
+# installed package always wins; being an env var, it applies to torchrun/mpirun children
+# and subprocesses too. Editable installs are unaffected: they resolve through a finder
+# in site-packages, not through cwd. Note that any non-empty value enables it -- unset
+# it, rather than setting 0, to opt out.
+export PYTHONSAFEPATH=${PYTHONSAFEPATH:-1}
 
 _script_error_count=0
 _run_error_count=0

@@ -582,6 +582,15 @@ void fused_attn_ck_fwd_impl(
     // reset the final results since padded places need to be 0
     NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrO, 0, o_storage_bytes, stream));
   }
+  if(devPtrSoftmaxLSEWithoutPadding){
+    // ck only writes the lse of the tokens covered by cu_seqlens, but pad_remap_lse below
+    // copies the whole padded range back into devPtrSoftmaxAux. Prefill the buffer with
+    // 0xF0 (a large negative number, same sentinel the framework layers use) so that the
+    // padded rows end up with a well defined -inf like lse instead of stale workspace data.
+    // Consumers that combine lse across calls, e.g. the jax ring attention softmax
+    // correction, produce NaNs when they read that garbage.
+    NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrSoftmaxLSEWithoutPadding, 0xF0, h*max_tokens_q*sizeof(float), stream));
+  }
 
   if (nvte_log_ck_config) {
     std::cout<<std::endl<<"attn_fwd(ck): ";

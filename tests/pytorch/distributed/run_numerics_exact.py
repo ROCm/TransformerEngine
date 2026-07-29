@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -24,6 +25,10 @@ from transformer_engine.pytorch import NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.custom_recipes import quantization_ref_nvfp4
 from transformer_engine.pytorch.custom_recipes import utils
+
+# Executed as a script, so sibling imports rely on the interpreter putting this file's
+# directory on sys.path -- which safe-path mode (PYTHONSAFEPATH, python -P) disables.
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from run_layer_with_overlap import _compare_tensors
 
 

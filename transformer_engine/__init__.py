@@ -13,6 +13,16 @@ import functools
 import os
 from importlib import metadata
 from typing import Optional, Tuple
+
+# If built against ROCm runtime wheels, initialize rocm-sdk before native libs load.
+try:
+    from . import _rocm_init
+except ImportError:
+    pass
+else:
+    _rocm_init.initialize()
+    del _rocm_init
+
 import transformer_engine.common
 
 _use_pytorch = True

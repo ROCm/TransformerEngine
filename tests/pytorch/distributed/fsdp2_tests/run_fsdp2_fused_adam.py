@@ -35,6 +35,7 @@ import argparse
 import functools
 import os
 import shutil
+import sys
 import pytest
 
 import torch
@@ -49,6 +50,9 @@ import transformer_engine.pytorch as te
 from transformer_engine.pytorch import QuantizedTensor
 import transformer_engine.common.recipe
 
+# Executed as a script, so sibling imports rely on the interpreter putting this file's
+# directory on sys.path -- which safe-path mode (PYTHONSAFEPATH, python -P) disables.
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from fsdp2_utils import get_recipe_from_string, save_custom_attrs, restore_custom_attrs
 
 
@@ -794,6 +798,17 @@ def test_dcp_output_parity(recipe_name, async_save):
 
         if not async_save:
             dcp.save(save_state, checkpoint_id=checkpoint_dir)
+        elif IS_HIP_EXTENSION and te.torch_version() >= (2, 9, 0):
+            from torch.distributed.checkpoint.staging import BlockingAsyncStager
+            # CI-only staging workaround: the default async stager can hang under
+            # PYTEST_TIMEOUT on ROCm torch 2.10+. BlockingAsyncStager does not
+            # change save/load correctness; future.result() still waits for completion.
+            future = dcp.async_save(
+                save_state,
+                checkpoint_id=checkpoint_dir,
+                async_stager=BlockingAsyncStager(),
+            )
+            future.result()  # Block on async save completion
         else:
             future = dcp.async_save(save_state, checkpoint_id=checkpoint_dir)
             future.result()

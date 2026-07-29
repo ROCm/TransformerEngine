@@ -911,7 +911,19 @@ class TestBasicOps:
         in_shape = list(in_shape)[:-1] + [in_features]
         out_shape = in_shape[:-1] + [out_features]
 
-        # Skip invalid configurations
+        # hipBLASLt on TheRock lacks an algorithm for this shape.
+        if (
+            IS_HIP_EXTENSION
+            and get_device_compute_capability() in ((9, 5), (9, 4))
+            and accumulate_into_main_grad
+            and quantization is None
+            and weight_shape == (3, 5)
+            and dtype in (torch.float16, torch.bfloat16)
+        ):
+            pytest.skip(
+                "hipBLASLt does not provide suitable algorithms for this config"
+            )
+
         maybe_skip_quantization(quantization, dims=in_shape, device=device, dtype=dtype)
         maybe_skip_quantization(quantization, dims=out_shape)
         quantization_needed = any(

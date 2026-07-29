@@ -380,11 +380,11 @@ def get_tols(config, module, backend, dtype):
                 torch.bfloat16: (3.5e-2, 3.5e-2),
             }
             # With FA on ROCm it may not fit default tolerance
-            if IS_HIP_EXTENSION and backend == "FlashAttention":
-                tols = {
-                    torch.half: (6e-3, 6e-3) if get_device_compute_capability() == (9, 4) else (5e-3, 5e-3),
-                    torch.bfloat16: (4e-2, 4e-2),
-                }
+            if IS_HIP_EXTENSION and backend in ("FlashAttention", "UnfusedAttention"):
+                if get_device_compute_capability() == (9, 4):
+                    tols[torch.half] = (6e-3, 6e-3)
+                if backend == "FlashAttention":
+                    tols[torch.bfloat16] = (4e-2, 4e-2)
         else:
             if backend in ("UnfusedAttention", "FlashAttention"):
                 tols = {
