@@ -21,4 +21,13 @@ It is the caller's responsibility to clean up generated files.
 
 Default and release-specific TE CI images are listed in [`ci_config.json`](ci_config.json) under `docker_images`.
 
+For `dev` and other branches using the `default` entry, the workflow appends a GPU-arch suffix to the image tag:
+
+| Runner label | GPU arch | Tag suffix |
+|--------------|----------|------------|
+| `linux-te-mi30x-*` | gfx942 (MI300X) | `_gfx942` |
+| `linux-te-mi35x-*` | gfx950 (MI350X) | `_gfx950` |
+
+Example full reference: `registry-sc-harbor.amd.com/framework/te-ci:therock_7.13.0_ubuntu24.04_py3.12_pytorch_2.10.0_triton_3.6.0_jax_0.10.2_fa_2.8.1_gfx942` (see [`ci_config.json`](ci_config.json) for the base tag).
+
 The default image is built from [`.github/scripts/Dockerfile.ci.deps`](../.github/scripts/Dockerfile.ci.deps). It pins [ROCm/aiter](https://github.com/ROCm/aiter) at commit [`77455e3ecf4f0d28756afc452e914940c45b944b`](https://github.com/ROCm/aiter/commit/77455e3ecf4f0d28756afc452e914940c45b944b). That revision was validated in CI for **MXFP4 FP4 GEMM** kernel coverage.

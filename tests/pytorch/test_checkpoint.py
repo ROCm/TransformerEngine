@@ -1,3 +1,4 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -8,6 +9,7 @@ import argparse
 import functools
 import os
 import pathlib
+import sys
 
 import pytest
 import torch
@@ -16,6 +18,10 @@ from typing import Optional
 
 import transformer_engine.pytorch as te
 
+# Also executed as a script to regenerate the checkpoint files, where sibling imports
+# rely on the interpreter putting this file's directory on sys.path -- which safe-path
+# mode (PYTHONSAFEPATH, python -P) disables.
+sys.path.append(str(pathlib.Path(__file__).resolve().parent))
 from utils import make_recipe
 
 # Check supported quantization schemes

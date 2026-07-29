@@ -90,6 +90,17 @@ if(USE_CUDA)
 else()
   set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
   find_package(hip REQUIRED)
+  find_package(hiprand REQUIRED)
+  find_package(hiprtc REQUIRED)
+  find_package(hipblaslt REQUIRED)
+  # ROCm libs used by libtransformer_engine.so must be direct link deps of test
+  # binaries. DT_RUNPATH on the executable does not apply to transitive NEEDED
+  # libs, so gtest_discover_tests fails loading e.g. libroctx64.so.4 otherwise.
+  set(TE_ROCM_TEST_LIBS hip::host hip::device roctx64 hiprtc roc::hipblaslt hip::hiprand)
+  list(APPEND CMAKE_BUILD_RPATH "${ROCM_PATH}/lib")
+  # Emit RPATH (not RUNPATH) so ${ROCM_PATH}/lib also covers any remaining
+  # transitive ROCm NEEDED entries from libtransformer_engine.so.
+  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -Wl,--disable-new-dtags")
 endif()
 
 if(USE_ROCM)
