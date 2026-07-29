@@ -17,6 +17,9 @@ group that would otherwise contaminate the main extension). It is only added to
 the build when the submodule is checked out and the target GPU arch is one
 xAttention ships (gfx950 -> mi350, gfx1250 -> mi450); otherwise the build skips
 it gracefully and the runtime wrapper reports the backend as unavailable.
+
+The backend additionally requires torch >= 2.10, which the rest of TransformerEngine
+does not; see ``torch_is_supported``.
 """
 
 import os
@@ -37,6 +40,9 @@ _GFX_TO_XATTN_ARCH = {
 # is intended for development. Dev opt-in: NVTE_XATTENTION_JIT=1 or
 # NVTE_XATTENTION_KERNEL_MODE=JIT.
 _DEFAULT_KERNEL_MODE = "AOT"
+
+# Minimum torch for the xAttention backend; see ``torch_is_supported``.
+_MIN_TORCH_VERSION = (2, 10)
 
 
 def kernel_mode() -> str:
@@ -122,38 +128,50 @@ def target_xattn_arch() -> Optional[str]:
     return None
 
 
+def torch_is_supported() -> bool:
+    """Whether the installed torch is new enough for the xAttention backend.
+
+    The closed core references ``c10::TensorImpl::{incref,decref}_pyobject``,
+    which torch only defines from 2.10 on. Older torch cannot link the extension
+    without stubbing those symbols out, and stubbing them is not safe: they are
+    ``override final`` on ``TensorImpl``, so at -O3 the compiler devirtualizes
+    ``intrusive_ptr``'s calls into direct references that bind to any local
+    definition. Only the decrefs devirtualize into our objects (the matching
+    increfs stay inside libtorch), so a stub silently drops torch's PyObject
+    refcounting and retains the wrapper -- and the storage -- of every tensor
+    crossing the boundary. Requiring 2.10 keeps that failure mode impossible.
+    """
+    try:
+        import torch  # pylint: disable=import-outside-toplevel
+    except ImportError:
+        return False
+    try:
+        major, minor = (int(part) for part in torch.__version__.split(".")[:2])
+    except ValueError:
+        # Unparseable version (custom build); assume new enough and let the link
+        # speak for itself rather than skipping the backend silently.
+        return True
+    return (major, minor) >= _MIN_TORCH_VERSION
+
+
 def xattention_enabled() -> bool:
     """Whether to build the xAttention extension in this build.
 
     Requires an opt-out-able toggle (``NVTE_BUILD_XATTENTION``, default on when
-    provisioned), a checked-out source tree, and a supported target arch.
+    provisioned), a checked-out source tree, a supported target arch, and a
+    supported torch (see ``torch_is_supported``).
     """
     if os.getenv("NVTE_BUILD_XATTENTION", "1") == "0":
         return False
-    return xattention_source_dir() is not None and target_xattn_arch() is not None
-
-
-def _compile_shim(build_dir: Path) -> Path:
-    """Compile the torch-ABI shim to an object for injecting into AOT links.
-
-    Returns the path to the compiled ``.o`` (defines the weak
-    ``incref/decref_pyobject`` symbols the closed core needs).
-    """
-    shim_src = (
-        Path(__file__).parent.parent
-        / "transformer_engine"
-        / "pytorch"
-        / "csrc"
-        / "xattention"
-        / "xattention_torch_shim.cpp"
-    )
-    shim_obj = build_dir / "xattention_torch_shim.o"
-    compiler = os.getenv("CXX", "c++")
-    subprocess.run(
-        [compiler, "-O3", "-fPIC", "-std=c++20", "-c", str(shim_src), "-o", str(shim_obj)],
-        check=True,
-    )
-    return shim_obj
+    if xattention_source_dir() is None or target_xattn_arch() is None:
+        return False
+    if not torch_is_supported():
+        print(
+            "Skipping xAttention extension: requires torch >= "
+            f"{'.'.join(str(part) for part in _MIN_TORCH_VERSION)}."
+        )
+        return False
+    return True
 
 
 def _build_core(xa_dir: Path, arch: str, mode: str) -> Tuple[Path, Path, Optional[Path]]:
@@ -184,16 +202,6 @@ def _build_core(xa_dir: Path, arch: str, mode: str) -> Tuple[Path, Path, Optiona
         # The assembly-text helper is only needed by xAttention's own unit tests.
         "-DXATT_ENABLE_CODE_INSPECTION=OFF",
     ]
-    if mode == "AOT":
-        # The AOT kernel generator (xattn_generate_kernels) links the closed
-        # core, which references c10::TensorImpl::{incref,decref}_pyobject —
-        # symbols absent from the container's libtorch. The runtime binding
-        # satisfies these via the torch shim; inject the same shim into the
-        # generator's link so it can be built (and run) at build time.
-        shim_obj = _compile_shim(build_dir)
-        # Use *_INIT so we seed the initial linker flags without clobbering any
-        # CMAKE_EXE_LINKER_FLAGS coming from the environment or a toolchain file.
-        configure.append(f"-DCMAKE_EXE_LINKER_FLAGS_INIT={shim_obj}")
     subprocess.run(configure, check=True, cwd=str(xa_dir))
 
     targets = ["interface", "codeGen"]
@@ -298,10 +306,7 @@ def setup_xattention_extension(csrc_source_files) -> "object":
     rocm_home = Path(rocm_home)
 
     binding_dir = Path(csrc_source_files) / "xattention"
-    sources = [
-        str(binding_dir / "xattention_binding.cpp"),
-        str(binding_dir / "xattention_torch_shim.cpp"),
-    ]
+    sources = [str(binding_dir / "xattention_binding.cpp")]
 
     include_dirs = [
         str(xa_dir / "include"),
