@@ -98,9 +98,8 @@ inline void kittens_blockwise_fp8_gemm(
 #endif
     if (backend == nullptr) {
         throw std::runtime_error(
-            "kittens_blockwise_fp8_gemm: not built for this GPU arch (sm_arch=" +
-            std::to_string(arch) + "). This build includes only the HipKittens "
-            "backends compiled into it; rebuild with the matching gfx target.");
+            "kittens_blockwise_fp8_gemm: not implemented for this GPU arch (sm_arch=" +
+            std::to_string(arch) + "). Only gfx942 and gfx950 are supported.");
     }
 
     BlockwiseGemmArgs args{
