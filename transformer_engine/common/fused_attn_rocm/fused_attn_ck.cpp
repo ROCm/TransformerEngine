@@ -77,16 +77,6 @@ bool is_ck_backend_supported(
     return false;
   }
 
-  // WA for failed validation in CK FMHA with SWA and non-vanilla sink
-  const bool is_swa = window_size_left >= 0;
-  if (is_swa && softmax_type != NVTE_VANILLA_SOFTMAX) {
-    if (nvte_log_ck_config) {
-      std::cout << "CK fused attn does not support non-vanilla sink with SWA"
-                << std::endl;
-    }
-    return false;
-  }
-
   // joint filter based on sliding window and attn_mask
   bool is_causal = is_causal_mask(attn_mask_type);
   if(is_causal){
@@ -653,8 +643,13 @@ void fused_attn_ck_fwd_impl(
   const bool has_sink = (softmax_type != NVTE_VANILLA_SOFTMAX && devPtrSoftmaxOffset != nullptr);
   ck_args.has_sink = has_sink;
   ck_args.sink_ptr = has_sink ? devPtrSoftmaxOffset : nullptr;
-  ck_args.sink_size = has_sink ? 1 : 0;
-  
+  // sink_size is CK's StreamingLLM sink *prefix width* in key columns, which is a
+  // different feature from the learnable softmax offset NVTE asks for here. The
+  // offset only needs has_sink + sink_ptr (CK folds it into the softmax
+  // denominator). 
+  //(aiter's mha_bwd_args has no sink_size at all). Keep it at 0.
+  ck_args.sink_size = 0;
+
   // ASM v3 does not support sink; force CK tile path
   ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3 && !has_sink;
 
@@ -1048,7 +1043,9 @@ void fused_attn_ck_bwd_impl(
   ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
   ck_args.has_sink = has_sink;
   ck_args.sink_ptr = has_sink ? devPtrSoftmaxOffset : nullptr;
-  ck_args.sink_size = has_sink ? 1 : 0;
+  // See the forward pass: sink_size is the StreamingLLM key-column prefix, not the
+  // learnable softmax offset, and must stay 0 to keep the mask identical to fwd.
+  ck_args.sink_size = 0;
   ck_args.d_sink_ptr = has_sink ? devPtrDSoftmaxOffset : nullptr;
 
   if(is_SBHD && is_padding){

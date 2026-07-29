@@ -1159,10 +1159,12 @@ class FusedAttnRunner:
                     jnp.isinf(primitive_dsoftmax_offset)
                 ), "Fused dsoftmax_offset contains Inf"
 
+            # softmax_offset is always fp32, but its gradient is only as accurate as the
+            # attention math that produced it, so tolerance follows the compute dtype.
             assert_allclose(
                 primitive_dsoftmax_offset,
                 reference_dsoftmax_offset,
-                dtype=self.softmax_offset.dtype,
+                dtype=self.dtype,
             )
 
         if self.coll_count_ref is not None:
