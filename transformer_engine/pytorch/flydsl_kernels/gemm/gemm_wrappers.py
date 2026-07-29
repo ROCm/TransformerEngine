@@ -19,6 +19,12 @@ from .fp32_gemm import fp32_matmul
 from .fp8_gemm import fp8_matmul
 from .mxfp8_gemm import mxfp8_matmul
 
+# TODO: Some backend-independent GEMM wrapper utilities overlap with the
+# Triton GEMM backend (PR#667), including operand classification, logical
+# output-shape derivation, and quantized-storage inspection. Once both
+# integrations stabilize, factor the genuinely common pieces into a shared
+# GEMM wrapper utility module while preserving backend-specific layout and
+# storage canonicalization.
 
 def _product(shape):
     """Return the product of dimensions in ``shape``."""
@@ -101,11 +107,13 @@ def _validate_common_epilogue(
             "FlyDSL GEMM currently supports only alpha=1 and beta=0"
         )
 
+    # TODO: Add accumulate option
     if accumulate:
         raise NotImplementedError(
             "FlyDSL GEMM accumulation is not implemented"
         )
 
+    # TODO: Add fused bias and BGRADB epilogues
     if bias is not None and bias.numel() != 0:
         raise NotImplementedError(
             "FlyDSL GEMM bias is not implemented"
@@ -549,58 +557,108 @@ def _run_fp16_gemm(
     return D
 
 
-def _run_regular_gemm(
+def _run_fp32_gemm(
     A,
     transa,
     B,
     transb,
     D,
-    *,
-    dtype,
-    matmul,
-    backend_name,
-    output_dtype=None,
 ):
-    """Run FP16/BF16/FP32 through shared TN/NN/NT shape handling."""
+    """Normalize FP32 TN/NN/NT inputs to the current kernel's TN interface.
+
+    The existing FP32 entry point expects ordinary row-major GEMM operands:
+
+        a_tn: [M, K]
+        b_tn: [K, N]
+
+    TE provides BLAS-shaped operands, so ownership is swapped and only the
+    operands whose BLAS transpose flags require it are materialized:
+
+        TN: a_tn = B
+            b_tn = A.T
+
+        NN: a_tn = B
+            b_tn = A
+
+        NT: a_tn = B.T
+            b_tn = A
+
+    ``transpose(...).contiguous()`` is therefore used only for the FP32
+    operands that are not already in the current TN kernel orientation.
+    BF16/FP16/FP8/MXFP8 dispatch is unchanged.
+    """
     if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
+        raise TypeError("FlyDSL FP32 GEMM expects plain torch.Tensor operands")
+    if A.dtype != torch.float32 or B.dtype != torch.float32:
         raise TypeError(
-            f"FlyDSL {backend_name} GEMM expects plain torch.Tensor operands"
-        )
-    if A.dtype != dtype or B.dtype != dtype:
-        raise TypeError(
-            f"FlyDSL {backend_name} GEMM requires {dtype} inputs, "
+            "FlyDSL FP32 GEMM requires torch.float32 inputs, "
             f"got A={A.dtype} and B={B.dtype}"
         )
     if A.device != B.device:
         raise ValueError(
             f"A and B must be on the same device, got {A.device} and {B.device}"
         )
+    if bool(transa) and bool(transb):
+        raise FlyDSLUnsupportedError(
+            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
+        )
 
     output_shape = _get_gemm_output_shape(A, transa, B, transb)
 
-    a_flydsl, b_flydsl, m, n, _ = _canonicalize_blas_operands(
-        A, transa, B, transb
-    )
-    if _product(output_shape) != m * n:
+    A_flat = _flatten_rowwise(A, "A")
+    B_flat = _flatten_rowwise(B, "B")
+
+    # Standard BLAS-column-major -> row-major conversion:
+    # swap operands, then apply the original operand transpose flags.
+    # TODO: Optimize FP32 NN/NT execution. These layouts are currently
+    # materialized into the TN kernel contract with explicit transpose copies.
+    if bool(transb):
+        a_tn = B_flat.transpose(0, 1).contiguous()
+    else:
+        a_tn = B_flat
+
+    if bool(transa):
+        b_tn = A_flat.transpose(0, 1).contiguous()
+    else:
+        b_tn = A_flat
+
+    if not a_tn.is_contiguous():
+        a_tn = a_tn.contiguous()
+    if not b_tn.is_contiguous():
+        b_tn = b_tn.contiguous()
+
+    if a_tn.ndim != 2 or b_tn.ndim != 2:
         raise RuntimeError(
-            f"FlyDSL {backend_name} logical output shape {tuple(output_shape)} "
-            f"does not match flattened GEMM shape {(m, n)}"
+            f"FlyDSL FP32 TN normalization produced rank mismatch: "
+            f"a={tuple(a_tn.shape)}, b={tuple(b_tn.shape)}"
         )
 
-    if output_dtype is None:
-        output_dtype = dtype
+    m, k = a_tn.shape
+    kb, n = b_tn.shape
+    if kb != k:
+        layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL FP32 {layout} could not normalize to TN: "
+            f"a_tn={tuple(a_tn.shape)}, b_tn={tuple(b_tn.shape)}"
+        )
+
+    if _product(output_shape) != m * n:
+        raise RuntimeError(
+            f"FlyDSL FP32 logical output shape {tuple(output_shape)} "
+            f"does not match normalized TN output {(m, n)}"
+        )
 
     D = _validate_or_allocate_output(
         D,
         shape=output_shape,
-        dtype=output_dtype,
+        dtype=torch.float32,
         device=A.device,
-        backend_name=backend_name,
+        backend_name="FP32 via TN core",
     )
 
-    matmul(
-        a_flydsl,
-        b_flydsl,
+    fp32_matmul(
+        a_tn,
+        b_tn,
         D.view(m, n),
     )
     return D
@@ -1374,15 +1432,12 @@ def te_generic_gemm_flydsl(
                 "FlyDSL FP32 currently supports only FP32 output, "
                 f"got {output_dtype}"
             )
-        D = _run_regular_gemm(
+        D = _run_fp32_gemm(
             A,
             transa,
             B,
             transb,
             D,
-            dtype=torch.float32,
-            matmul=fp32_matmul,
-            backend_name="FP32",
         )
         return D, None, None, None
 
