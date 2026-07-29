@@ -137,16 +137,6 @@ bool is_ck_backend_supported(
     }
     return false;
   }
-
-  // WA failed fwd test
-  bool is_no_mask_window = (window_size_left == -1 && window_size_right == -1);
-  if(is_ragged && !is_causal && is_no_mask_window && (max_seqlen_q != max_seqlen_kv)){
-    if(nvte_log_ck_config){
-      std::cout<<"Ragged (THD) cross-attention with plain no-mask padding and "
-                  "max_seqlen_q != max_seqlen_kv is not supported by CK yet"<<std::endl;
-    }
-    return false;
-  }
   return true;
 #else
   return false;
@@ -490,6 +480,7 @@ void fused_attn_ck_fwd_impl(
 
   bool is_padding = is_padding_mask(mask_type);
   bool bshd_to_thd = is_BSHD && is_padding;
+  const bool has_sink = (softmax_type != NVTE_VANILLA_SOFTMAX && devPtrSoftmaxOffset != nullptr);
 
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
@@ -588,8 +579,6 @@ void fused_attn_ck_fwd_impl(
   }
 
   if (nvte_log_ck_config) {
-    const bool log_has_sink =
-        (softmax_type != NVTE_VANILLA_SOFTMAX && devPtrSoftmaxOffset != nullptr);
     std::cout<<std::endl<<"attn_fwd(ck): ";
     std::cout<<"layout: "<<layout<<", ";
     std::cout<<"max_tokens_q: "<<max_tokens_q<<", ";
@@ -623,8 +612,8 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"mask_type: "<<mask_type<<", ";
     std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<", ";
     std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<", ";
-    std::cout<<"has_sink: "<<log_has_sink<<", ";
-    std::cout<<"sink_ptr: "<<(log_has_sink ? devPtrSoftmaxOffset : nullptr)<<std::endl;
+    std::cout<<"has_sink: "<<has_sink<<", ";
+    std::cout<<"sink_ptr: "<<(has_sink ? devPtrSoftmaxOffset : nullptr)<<std::endl;
   }
   // Common fields filled here; mode-specific fields are overwritten below.
   ck_fused_attn::CKAttnFwdArgs ck_args;
@@ -640,16 +629,9 @@ void fused_attn_ck_fwd_impl(
   ck_args.window_size_left = window_size_left;
   ck_args.window_size_right = window_size_right;
   ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
-  const bool has_sink = (softmax_type != NVTE_VANILLA_SOFTMAX && devPtrSoftmaxOffset != nullptr);
+  
   ck_args.has_sink = has_sink;
   ck_args.sink_ptr = has_sink ? devPtrSoftmaxOffset : nullptr;
-  // sink_size is CK's StreamingLLM sink *prefix width* in key columns, which is a
-  // different feature from the learnable softmax offset NVTE asks for here. The
-  // offset only needs has_sink + sink_ptr (CK folds it into the softmax
-  // denominator). 
-  //(aiter's mha_bwd_args has no sink_size at all). Keep it at 0.
-  ck_args.sink_size = 0;
-
   // ASM v3 does not support sink; force CK tile path
   ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3 && !has_sink;
 
@@ -1043,9 +1025,6 @@ void fused_attn_ck_bwd_impl(
   ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
   ck_args.has_sink = has_sink;
   ck_args.sink_ptr = has_sink ? devPtrSoftmaxOffset : nullptr;
-  // See the forward pass: sink_size is the StreamingLLM key-column prefix, not the
-  // learnable softmax offset, and must stay 0 to keep the mask identical to fwd.
-  ck_args.sink_size = 0;
   ck_args.d_sink_ptr = has_sink ? devPtrDSoftmaxOffset : nullptr;
 
   if(is_SBHD && is_padding){

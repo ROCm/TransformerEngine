@@ -82,7 +82,6 @@ struct CKAttnCommonArgs {
   // Softmax sink (learnable / off-by-one)
   const void* sink_ptr = nullptr;
   bool has_sink = false;
-  int64_t sink_size = 0;
 
   // O layout (o_ptr lives in derived because fwd writes it / bwd reads it)
   uint64_t stride_b_o = 0, stride_h_o = 0, stride_s_o = 0;

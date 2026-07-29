@@ -132,7 +132,7 @@ void PrepareFusedAttnBackwardAuxTensors(NVTETensorPack *tensor_pack, const size_
   // Backward calls put everything into the tensor pack for every backend
   // so we set dummy bias_type and backend choices here to follow the correct code path
   auto dummy_bias_type = NVTE_Bias_Type::NVTE_POST_SCALE_BIAS;
-  auto dummy_backend = NVTE_Fused_Attn_Backend::NVTE_No_Backend;
+  auto dummy_backend = NVTE_Fused_Attn_Backend::NVTE_F16_arbitrary_seqlen;
   PrepareFusedAttnForwardAuxTensors(tensor_pack, input_batch, bias_batch, attn_heads, bias_heads,
                                     q_max_seqlen, kv_max_seqlen, dtype, dummy_bias_type,
                                     dummy_backend, softmax_buf, rng_state_buf, bias_buf,
