@@ -116,24 +116,39 @@ def cleanup_env():
 # --- Helpers ------------------------------------------------------------------
 
 def get_shapes(layout, M, K, N):
-    """Returns (A_shape, B_shape) based on layout."""
-    if layout == "TN":
+    """Returns (A_shape, B_shape) for the given TE ``general_gemm`` layout.
+
+    The first / second letter of ``layout`` is transa / transb (``T`` =
+    transposed, ``N`` = not). The stored operand shape depends on that
+    flag: transposed operands are stored with the transposed shape.
+
+    Under all three layouts the produced output has logical shape
+    ``(N, M)`` -- see ``compute_pytorch_reference``. Every layout must
+    therefore reference both ``M`` and ``N`` (early versions of this
+    helper used ``M`` in place of ``N`` for NN/NT, which silently made
+    the output square in ``K`` and left the ``N`` parameter unused).
+    """
+    if layout == "TN":     # A transposed, B not transposed
         return (M, K), (N, K)
-    elif layout == "NN":
-        return (M, K), (K, M)
-    elif layout == "NT":
-        return (M, K), (M, K)
+    elif layout == "NN":   # neither transposed
+        return (K, M), (N, K)
+    elif layout == "NT":   # A not transposed, B transposed
+        return (K, M), (K, N)
     else:
         raise ValueError(f"Unsupported layout: {layout}")
 
 
 def compute_pytorch_reference(A_ref, B_ref, layout):
-    """torch.matmul with correct transpose for layout."""
+    """torch.matmul reference producing the same ``(N, M)`` output shape as
+    ``general_gemm`` for the given ``get_shapes()`` operands."""
     if layout == "TN":
+        # (N, K) x (K, M) = (N, M)
         return torch.matmul(B_ref, A_ref.T)
     elif layout == "NN":
+        # (N, K) x (K, M) = (N, M)
         return torch.matmul(B_ref, A_ref)
     elif layout == "NT":
+        # (N, K) x (K, M) = (N, M)
         return torch.matmul(B_ref.T, A_ref)
     else:
         raise ValueError(f"Unsupported layout: {layout}")
