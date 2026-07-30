@@ -309,7 +309,6 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
         qkv_layout,
         bias_type,
         attn_mask_type,
-        softmax_type,
         dropout,
         num_attn_heads, num_gqa_groups,
         max_seqlen_q, max_seqlen_kv,

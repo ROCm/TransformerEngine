@@ -209,8 +209,8 @@ aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
   // sink_size is CK's StreamingLLM sink *prefix width* in key columns, which is a
   // different feature from the learnable softmax offset NVTE asks for here. The
   // offset only needs has_sink + sink_ptr (CK folds it into the softmax
-  // denominator). 
-  //(aiter's mha_bwd_args has no sink_size at all). Keep it at 0.
+  // denominator).
+  // (aiter's mha_bwd_args has no sink_size at all). Keep it at 0.
   fmha_args.sink_size        = 0;
   fmha_args.min_seqlen_q     = 0;
   fmha_args.block_scale_size_q  = 0;

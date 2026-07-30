@@ -26,7 +26,6 @@ bool is_ck_backend_supported(
   NVTE_QKV_Layout qkv_layout,
   NVTE_Bias_Type bias_type,
   NVTE_Mask_Type attn_mask_type,
-  NVTE_Softmax_Type softmax_type,
   float dropout,
   size_t num_attn_heads, size_t num_gqa_groups,
   size_t max_seqlen_q, size_t max_seqlen_kv,
@@ -468,9 +467,11 @@ void fused_attn_ck_fwd_impl(
   size_t *workspace_size,
   cudaStream_t stream){
 
+  const bool has_sink = (softmax_type != NVTE_VANILLA_SOFTMAX && devPtrSoftmaxOffset != nullptr);
   const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
 
-  bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 1);
+  // ASM v3 does not support sink; force CK tile path
+  bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 1) && !has_sink;
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
   bool nvte_ck_zero_out_pad = getenv<int>("NVTE_CK_ZERO_OUT_PAD", 1);
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
@@ -480,7 +481,7 @@ void fused_attn_ck_fwd_impl(
 
   bool is_padding = is_padding_mask(mask_type);
   bool bshd_to_thd = is_BSHD && is_padding;
-  const bool has_sink = (softmax_type != NVTE_VANILLA_SOFTMAX && devPtrSoftmaxOffset != nullptr);
+
 
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
@@ -638,11 +639,10 @@ void fused_attn_ck_fwd_impl(
   ck_args.window_size_left = window_size_left;
   ck_args.window_size_right = window_size_right;
   ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
-  
+
   ck_args.has_sink = has_sink;
   ck_args.sink_ptr = has_sink ? devPtrSoftmaxOffset : nullptr;
-  // ASM v3 does not support sink; force CK tile path
-  ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3 && !has_sink;
+  ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3;
 
   if(is_SBHD && is_padding){
     // remove padding for q, k, v
@@ -728,16 +728,18 @@ void fused_attn_ck_bwd_impl(
   size_t *workspace_size,
   cudaStream_t stream) {
   
+  const bool has_sink = (softmax_type != NVTE_VANILLA_SOFTMAX && devPtrSoftmaxOffset != nullptr);
   const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
   // bwd v3 is optional by enabling the following envs
   // default values follows the ck example setting
-  bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 1);
+  // ASM v3 bwd does not compute the sink gradient; force the CK tile path so
+  // has_sink users still get a correct (if slower) d_sink, mirroring the fwd
+  // ASM v3 sink guard above.
+  bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 1) && !has_sink;
   bool nvte_ck_is_v3_atomic_fp32 = getenv<int>("NVTE_CK_IS_V3_ATOMIC_FP32", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
 
   bool is_mqa_gqa = (h > hg);
-
-  const bool has_sink = (softmax_type != NVTE_VANILLA_SOFTMAX && devPtrSoftmaxOffset != nullptr);
 
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
   bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
@@ -1026,10 +1028,7 @@ void fused_attn_ck_bwd_impl(
   ck_args.aiter_workspace_ptr = aiter_workspace;
   ck_args.aiter_workspace_bytes = aiter_workspace_bytes;
   ck_args.deterministic = deterministic;
-  // ASM v3 bwd does not compute the sink gradient; force the CK tile path so
-  // has_sink users still get a correct (if slower) d_sink, mirroring the fwd
-  // ASM v3 sink guard above.
-  ck_args.uses_bwd_v3 = nvte_ck_uses_bwd_v3 && !has_sink;
+  ck_args.uses_bwd_v3 = nvte_ck_uses_bwd_v3;
   ck_args.is_v3_atomic_fp32 = nvte_ck_is_v3_atomic_fp32;
   ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
   ck_args.has_sink = has_sink;

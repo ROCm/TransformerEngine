@@ -1146,7 +1146,7 @@ class FusedAttnRunner:
         grad_shardings = (self.qkvo_sharding, self.qkvo_sharding, self.qkvo_sharding)
 
         optional_dgrad_idx = 3
-        
+
         # We can compute dBias only for the [1, h, s, s] layout
         compute_dbias = self.bias_shape == BiasShape._1HSS
         if compute_dbias:
