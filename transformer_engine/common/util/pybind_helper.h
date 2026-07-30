@@ -41,7 +41,16 @@
       .value("kBFloat16", transformer_engine::DType::kBFloat16)                                    \
       .value("kFloat8E4M3", transformer_engine::DType::kFloat8E4M3)                                \
       .value("kFloat8E5M2", transformer_engine::DType::kFloat8E5M2)                                \
-      .value("kFloat4E2M1", transformer_engine::DType::kFloat4E2M1);                               \
+      .value("kFloat4E2M1", transformer_engine::DType::kFloat4E2M1)                                \
+      .def("__reduce_ex__",                                                                        \
+           [](transformer_engine::DType self, pybind11::object /*protocol*/) {                     \
+             return pybind11::make_tuple(pybind11::type::of(pybind11::cast(self)),                 \
+                                         pybind11::make_tuple(static_cast<int>(self)));            \
+           })                                                                                      \
+      .def("__reduce__", [](transformer_engine::DType self) {                                      \
+        return pybind11::make_tuple(pybind11::type::of(pybind11::cast(self)),                      \
+                                    pybind11::make_tuple(static_cast<int>(self)));                 \
+      });                                                                                          \
   pybind11::enum_<NVTE_Bias_Type>(m, "NVTE_Bias_Type", pybind11::module_local())                   \
       .value("NVTE_NO_BIAS", NVTE_Bias_Type::NVTE_NO_BIAS)                                         \
       .value("NVTE_PRE_SCALE_BIAS", NVTE_Bias_Type::NVTE_PRE_SCALE_BIAS)                           \
@@ -66,7 +75,9 @@
       .value("NVTE_SBHD_2BSHD", NVTE_QKV_Format::NVTE_SBHD_2BSHD)                                  \
       .value("NVTE_BSHD_2SBHD", NVTE_QKV_Format::NVTE_BSHD_2SBHD)                                  \
       .value("NVTE_THD_2BSHD", NVTE_QKV_Format::NVTE_THD_2BSHD)                                    \
-      .value("NVTE_THD_2SBHD", NVTE_QKV_Format::NVTE_THD_2SBHD);                                   \
+      .value("NVTE_THD_2SBHD", NVTE_QKV_Format::NVTE_THD_2SBHD)                                    \
+      .value("NVTE_BHSD", NVTE_QKV_Format::NVTE_BHSD)                                              \
+      .value("NVTE_QKV_Format_NOT_SET", NVTE_QKV_Format::NVTE_QKV_Format_NOT_SET);                 \
   pybind11::enum_<NVTE_QKV_Layout>(m, "NVTE_QKV_Layout", pybind11::module_local())                 \
       .value("NVTE_SB3HD", NVTE_QKV_Layout::NVTE_SB3HD)                                            \
       .value("NVTE_SBH3D", NVTE_QKV_Layout::NVTE_SBH3D)                                            \
@@ -92,7 +103,8 @@
       .value("NVTE_Paged_KV_SBHD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_BSHD_BSHD)        \
       .value("NVTE_Paged_KV_SBHD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_Paged_KV_SBHD_SBHD_SBHD)        \
       .value("NVTE_Paged_KV_THD_BSHD_BSHD", NVTE_QKV_Layout::NVTE_Paged_KV_THD_BSHD_BSHD)          \
-      .value("NVTE_Paged_KV_THD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_Paged_KV_THD_SBHD_SBHD);         \
+      .value("NVTE_Paged_KV_THD_SBHD_SBHD", NVTE_QKV_Layout::NVTE_Paged_KV_THD_SBHD_SBHD)          \
+      .value("NVTE_BHSD_BHSD_BHSD", NVTE_QKV_Layout::NVTE_BHSD_BHSD_BHSD);                         \
   pybind11::enum_<transformer_engine::CommOverlapType>(m, "CommOverlapType",                       \
                                                        pybind11::module_local())                   \
       .value("RS", transformer_engine::CommOverlapType::RS)                                        \
@@ -116,11 +128,15 @@
                                                                    pybind11::module_local())       \
       .def(py::init([]() { return new transformer_engine::CommOverlapCore(); }),                   \
            py::call_guard<py::gil_scoped_release>())                                               \
+      .def("get_tp_size", &transformer_engine::CommOverlapCore::get_tp_size,                       \
+           py::call_guard<py::gil_scoped_release>())                                               \
       .def("is_atomic_gemm", &transformer_engine::CommOverlapCore::is_atomic_gemm,                 \
            py::call_guard<py::gil_scoped_release>())                                               \
       .def("is_p2p_overlap", &transformer_engine::CommOverlapCore::is_p2p_overlap,                 \
            py::call_guard<py::gil_scoped_release>())                                               \
       .def("is_fp8_ubuf", &transformer_engine::CommOverlapCore::is_fp8_ubuf,                       \
+           py::call_guard<py::gil_scoped_release>())                                               \
+      .def("with_cublasmp", &transformer_engine::CommOverlapCore::with_cublasmp,                   \
            py::call_guard<py::gil_scoped_release>());                                              \
   py::class_<transformer_engine::CommOverlapBase,                                                  \
              std::shared_ptr<transformer_engine::CommOverlapBase>,                                 \
@@ -144,6 +160,8 @@
       },                                                                                           \
       py::call_guard<py::gil_scoped_release>(), py::arg("device_id") = -1);                        \
   m.def("ubuf_built_with_mpi", &transformer_engine::ubuf_built_with_mpi,                           \
+        py::call_guard<py::gil_scoped_release>());                                                 \
+  m.def("nvte_built_with_cublasmp", &nvte_built_with_cublasmp,                                     \
         py::call_guard<py::gil_scoped_release>());                                                 \
   NVTE_DECLARE_FUSED_ATTENTION_HANDLES(m)                                                          \
   pybind11::enum_<transformer_engine::Float8BlockScaleTensorFormat>(                               \

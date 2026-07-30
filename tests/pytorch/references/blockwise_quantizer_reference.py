@@ -278,6 +278,8 @@ class BlockwiseQuantizerReference:
         assert quant_dtype in (
             torch.float8_e4m3fn,
             torch.float8_e5m2,
+            torch.float8_e4m3fnuz,
+            torch.float8_e5m2fnuz,
         ), "Unsupported quant dtype."
 
         assert quant_tile_shape in ((1, 128), (128, 128))

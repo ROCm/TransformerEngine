@@ -28,11 +28,15 @@
 #ifdef __HIP_PLATFORM_AMD__
 #include "../mxfp4/quantize_mxfp4.cuh"
 #endif //#ifdef __HIP_PLATFORM_AMD__
-//TODO: ROCm TE does not support nvfp4 yet
+// The optimized NVFP4 kernels are Blackwell-only (CUtensorMap/tcgen05); ROCm uses
+// the generic quantize_transpose_vector_blockwise_fp4 path plus this portable
+// row-wise amax for row-scaled NVFP4.
 #ifndef __HIP_PLATFORM_AMD__
 #include "../nvfp4/group_quantize_transpose_nvfp4.cuh"
-#include "../nvfp4/quantize_nvfp4.cuh"
+#include "../nvfp4/quantize_4over6_nvfp4.cuh"
 #include "../nvfp4/quantize_transpose_nvfp4.cuh"
+#else
+#include "../nvfp4/rowwise_amax_nvfp4.cuh"
 #endif //#ifndef __HIP_PLATFORM_AMD__
 
 namespace transformer_engine {
@@ -127,15 +131,42 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       CheckOutputTensor(*output_tensor, "output", false);
 
       // Choose kernel
-      int32_t rows = input_tensor->flat_first_dim();
-      int32_t cols = input_tensor->flat_last_dim();
+      const auto [rows, cols] = input_tensor->flat_2d_dims();
       auto dtype = input_tensor->dtype();
-      bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
-                                  (cols % 32 == 0) && output_tensor->has_data();
+      const bool row_scaled_nvfp4 = output_tensor->row_scaled_nvfp4;
+      const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
+      NVTE_CHECK(nvfp4_use_4over6 || output_tensor->nvfp4_e4m3_max == 448,
+                 "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
+      NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
+                 "NVFP4 4over6 quantization does not support stochastic rounding.");
+      if (row_scaled_nvfp4) {
+        NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
+                   "Row-scaled NVFP4 quantization does not support 2D quantization.");
+        NVTE_CHECK(!output_tensor->has_columnwise_data(),
+                   "Row-scaled NVFP4 quantization does not produce columnwise output.");
+        nvfp4::compute_rowwise_amax(*input_tensor, noop_tensor, output_tensor, stream);
+      }
+      // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
+      // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
+      // quantize_transpose_vector_blockwise_fp4.
+      bool use_optimized_kernel =
+          (dtype == DType::kBFloat16) && (rows % 32 == 0) && (cols % 32 == 0) &&
+          (output_tensor->has_data() ||
+           (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
-      // Launch NVFP4 quantize kernel
+      // Launch NVFP4 quantize kernel. 4over6 and the optimized quantize_transpose kernels are
+      // CUDA-only (Blackwell); ROCm falls through to the portable blockwise path below, which
+      // supports row-scaled NVFP4.
 #ifndef __HIP_PLATFORM_AMD__
-      if (use_optimized_kernel) {
+      if (nvfp4_use_4over6) {
+        if (quant_config_cpp.nvfp4_2d_quantization) {
+          nvfp4::quantize_4over6</*use_2d_quantization=*/true>(
+              *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+        } else {
+          nvfp4::quantize_4over6</*use_2d_quantization=*/false>(
+              *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+        }
+      } else if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
           nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
               *input_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
@@ -158,13 +189,14 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
-            /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
+            /*row_scaled_nvfp4=*/row_scaled_nvfp4,
+            /*noop_tensor=*/noop_tensor->data,
+            /*stream=*/stream);
 #ifndef __HIP_PLATFORM_AMD__
       }
 #endif
       break;
     }
-#ifndef __HIP_PLATFORM_AMD__
     case NVTE_BLOCK_SCALING_2D: {
       // TODO(kwyss): IS_ACT, ParamOP, OP parameters support.
       NVTE_CHECK(!IS_ACT, "IS_ACT is not implemented for FWD NVTE_BLOCK_SCALING_2D");
@@ -196,7 +228,6 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
           columnwise_option, force_pow_2_scales, noop_tensor->data, stream);
       break;
     }
-#endif//#ifndef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
   }
@@ -280,15 +311,36 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       CheckOutputTensor(*output_tensor, "output", false);
 
       // Choose kernel
-      int32_t rows = grad_tensor->flat_first_dim();
-      int32_t cols = grad_tensor->flat_last_dim();
+      const auto [rows, cols] = grad_tensor->flat_2d_dims();
       auto dtype = grad_tensor->dtype();
-      bool use_optimized_kernel = (dtype == DType::kBFloat16) && (rows % 32 == 0) &&
-                                  (cols % 32 == 0) && output_tensor->has_data();
+      const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
+      NVTE_CHECK(nvfp4_use_4over6 || output_tensor->nvfp4_e4m3_max == 448,
+                 "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
+      NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
+                 "NVFP4 4over6 quantization does not support stochastic rounding.");
+      NVTE_CHECK(!output_tensor->row_scaled_nvfp4,
+                 "Backward NVFP4 quantization does not support row-scaled outputs.");
+      // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
+      // both-directions keep their existing routing. Columnwise-only 1D and non-bf16 fall back to
+      // quantize_transpose_vector_blockwise_fp4.
+      bool use_optimized_kernel =
+          (dtype == DType::kBFloat16) && (rows % 32 == 0) && (cols % 32 == 0) &&
+          (output_tensor->has_data() ||
+           (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
-      // Launch NVFP4 quantize kernel
+      // Launch NVFP4 quantize kernel. 4over6 and the optimized quantize_transpose kernels are
+      // CUDA-only (Blackwell); ROCm falls through to the portable blockwise path below, which
+      // supports row-scaled NVFP4.
 #ifndef __HIP_PLATFORM_AMD__
-      if (use_optimized_kernel) {
+      if (nvfp4_use_4over6) {
+        if (quant_config_cpp.nvfp4_2d_quantization) {
+          nvfp4::quantize_4over6</*use_2d_quantization=*/true>(
+              *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+        } else {
+          nvfp4::quantize_4over6</*use_2d_quantization=*/false>(
+              *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
+        }
+      } else if (use_optimized_kernel) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
           nvfp4::quantize_transpose</*use_2d_quantization=*/true>(
               *grad_tensor, noop_tensor, output_tensor, &quant_config_cpp, stream);
@@ -311,13 +363,14 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*use_stochastic_rounding=*/quant_config_cpp.stochastic_rounding,
             /*rng_state=*/quant_config_cpp.rng_state,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
-            /*noop_tensor=*/noop_tensor->data, /*stream=*/stream);
+            /*row_scaled_nvfp4=*/false,
+            /*noop_tensor=*/noop_tensor->data,
+            /*stream=*/stream);
 #ifndef __HIP_PLATFORM_AMD__
       }
 #endif
       break;
     }
-#ifndef __HIP_PLATFORM_AMD__
     case NVTE_BLOCK_SCALING_2D: {
       // TODO(kwyss): IS_BIAS, IS_DACT, ParamOP, OP parameters support.
       NVTE_CHECK((!IS_DBIAS && !IS_DACT),
@@ -351,7 +404,6 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
           columnwise_option, force_pow_2_scales, noop_tensor->data, stream);
       break;
     }
-#endif //#ifndef __HIP_PLATFORM_AMD__
     default:
       NVTE_ERROR("Not implemented scaling mode: " + to_string(output_tensor->scaling_mode) + ".");
   }
@@ -406,12 +458,18 @@ void group_quantize_fwd_host_aware_helper(const NVTETensor input, NVTETensor *ou
       // output list here is allowed to have empty tensor
 
       // Choose kernel
-      int32_t rows = input_tensor->flat_first_dim();
-      int32_t cols = input_tensor->flat_last_dim();
+      const auto [rows, cols] = input_tensor->flat_2d_dims();
       auto dtype = input_tensor->dtype();
 
+      const bool nvfp4_use_4over6 = quant_config_cpp.nvfp4_4over6_mode != kNVTENVFP44Over6Disabled;
+      for (const auto *output_tensor : output_tensors) {
+        NVTE_CHECK(nvfp4_use_4over6 || output_tensor->nvfp4_e4m3_max == 448,
+                   "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
+      }
       NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                  "2D quantization is not supported for group quantize.");
+      NVTE_CHECK(!nvfp4_use_4over6,
+                 "NVFP4 4over6 quantization is not supported for group quantize.");
 
       // Launch NVFP4 group quantize kernel
       nvfp4::group_quantize_transpose</*use_2d_quantization*/ false>(

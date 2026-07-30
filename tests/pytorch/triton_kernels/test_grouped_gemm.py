@@ -352,6 +352,11 @@ def test_tgmm(
     trans_lhs = trans_lhs_from_str(trans_lhs_str)
     rng_seed = rng_seed_from_str(rng_seed_str)
 
+    # Skip very large M before allocating inputs; gen_tgmm_tensors allocates ~24 GiB and would
+    # OOM under memory pressure before the check ran.
+    if M > 1e6:
+        pytest.skip(f"Skipping test for large M={M}")
+
     lhs, rhs, multiple_group_sizes, out_torch, bias_grad_torch = gen_tgmm_tensors(
         M,
         K,
@@ -368,10 +373,6 @@ def test_tgmm(
     out_triton = torch.empty_like(out_torch)
     bias_grad_triton = torch.empty_like(bias_grad_torch) if with_bias_grad else None
 
-    # Skip tests for very large M values where numerical differences become significant.
-    if M > 1e6:
-        pytest.skip(f"Skipping test for large M={M}")
-    
     atol = None
 
     kernel_wrapper = triton_ptgmm if persistent else triton_nptgmm
