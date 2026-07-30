@@ -8,7 +8,8 @@
 
 import argparse
 import torch
-import torch.utils.benchmark as benchmark
+
+import usv
 
 # ---------------------------------------------------------------------------
 # Sequence / batch-token sizes
@@ -88,22 +89,81 @@ def generate_gemm_test_cases(configs=None, m_sizes=None, dtypes=None):
 # Timing helpers
 # ---------------------------------------------------------------------------
 
-def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
-    """Time *fn* and return ``(mean_ms, measurement)``.
+# Parsed CLI args (usv timing options, rotation, ...); populated by run_benchmarks.
+_ARGS = None
 
-    The ``Measurement`` object carries per-sample times accessible via
-    ``measurement.times`` (total wall time per run) and
-    ``measurement.number_per_run``.
 
-    method: "adaptive" uses adaptive_autorange (good for compute-bound),
-            "blocked"  uses blocked_autorange  (good for memory-bound).
-    """
-    timer = benchmark.Timer(stmt="fn()", globals={"fn": fn})
-    if method == "blocked":
-        m = timer.blocked_autorange(min_run_time=min_run_time)
+def _usv_opts():
+    """Translate the parsed CLI flags into ``usv.do_bench_many`` keyword args."""
+    a = _ARGS
+    if a is None:
+        return {"min_iters_time": DEFAULT_MIN_RUN_TIME_SECONDS}
+    opts = {
+        "interleave": getattr(a, "interleave", False),
+        "cache_flush": getattr(a, "cache_flush", False),
+        "cudagraph": getattr(a, "cudagraph", False),
+        "monitor": getattr(a, "monitor", False),
+    }
+    warmup = getattr(a, "warmup", None)
+    if warmup is not None:
+        opts["warmup"] = warmup
+    iters = getattr(a, "iters", None)
+    if iters is not None:
+        opts["iters"] = iters
     else:
-        m = timer.adaptive_autorange(min_run_time=min_run_time)
-    return m.mean * 1e3, m
+        # Mimic torch.utils.benchmark autorange: sample until this much kernel
+        # time elapses (the iters count acts as a floor).
+        opts["min_iters_time"] = DEFAULT_MIN_RUN_TIME_SECONDS
+    cooldown = getattr(a, "cooldown", 0.0)
+    if cooldown:
+        opts["cooldown_s"] = cooldown
+    timeout = getattr(a, "timeout", None)
+    if timeout is not None:
+        opts["timeout"] = timeout
+    return opts
+
+
+def time_funcs(funcs):
+    """Time a ``{name: callable}`` group with usv; return ``{name: Measurement}``.
+
+    Honors the global CLI options (``--interleave``, ``--warmup`` / ``--iters``,
+    ``--cache-flush``, ``--cudagraph``, ``--cooldown``, ``--monitor``,
+    ``--timeout``).  With ``--interleave`` the callables are sampled round-robin,
+    so time-correlated noise is spread across them instead of biasing one.
+    """
+    return usv.do_bench_many(dict(funcs), **_usv_opts())
+
+
+def time_func(fn, method=None, min_run_time=None):
+    """Time a single callable with usv; return ``(median_ms, Measurement)``.
+
+    ``method`` / ``min_run_time`` are accepted for backwards compatibility and
+    ignored - timing is controlled by the CLI flags parsed by run_benchmarks.
+    """
+    m = time_funcs({"_": fn})["_"]
+    return m.median * 1e3, m
+
+
+def rotating(factory):
+    """Return a zero-arg callable yielding an input to time.
+
+    With ``--rotate`` it cycles through an L2-sized ring of freshly built
+    buffers (:func:`usv.rotating_buffers`) so back-to-back launches touch
+    different memory; otherwise it returns a single cached buffer each call.
+    """
+    if _ARGS is not None and getattr(_ARGS, "rotate", False):
+        return usv.rotating_buffers(factory)
+    cached = factory()
+    return lambda: cached
+
+
+def make_input(shape, dtype, *, device="cuda", requires_grad=False):
+    """Rotation-aware input: a zero-arg callable returning a ``torch.randn`` tensor."""
+    return rotating(
+        lambda: torch.randn(
+            *shape, dtype=dtype, device=device, requires_grad=requires_grad
+        )
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -129,8 +189,8 @@ def make_metric_record(label, ms, unit, throughput, derived=False,
     ``run_benchmarks`` formats these records for stdout and expands them into
     ``<label> Time (ms)`` and ``<label> <unit>`` CSV columns.
 
-    If *measurement* is provided (a ``torch.utils.benchmark.Measurement``),
-    the per-sample times are available for the ``--csv-samples`` output.
+    If *measurement* is provided (a :class:`usv.Measurement`), its per-call
+    samples are available for the ``--csv-samples`` output.
     Records with *samples_only=True* are excluded from stdout and the main
     CSV but their samples are still written to the samples CSV.
     """
@@ -221,20 +281,51 @@ def _metric_row_from_records(metric_records):
     return row
 
 
-def _print_metric_records(metric_records):
-    printable = [m for m in metric_records if not m.get("samples_only")]
-    if not printable:
-        return
-    label_width = max(24, *(len(metric["label"]) for metric in printable))
-    for metric in printable:
+def _format_case_line(case_label, metric_records):
+    """Render one benchmark run as a single line: ``params | metric | metric``."""
+    parts = []
+    for metric in metric_records:
+        if metric.get("samples_only"):
+            continue
         ms_str = _format_metric_number(metric["ms"], metric.get("ms_precision", 3))
         throughput_str = _format_metric_number(
             metric["throughput"], metric.get("throughput_precision", 2)
         )
         derived_suffix = " (derived)" if metric.get("derived", False) else ""
+        parts.append(
+            f"{metric['label']} {ms_str} ms {throughput_str} "
+            f"{metric['unit']}{derived_suffix}"
+        )
+    return f"{case_label} | " + " | ".join(parts)
+
+
+def _print_summary(all_case_metrics):
+    """Print per-metric min / median / max throughput across all cases.
+
+    Terminal-only aggregate; deliberately not written to any CSV.
+    """
+    from statistics import median
+
+    summary = {}  # label -> [unit, [throughputs]]
+    order = []
+    for _case_params, records in all_case_metrics:
+        for metric in records:
+            if metric.get("samples_only"):
+                continue
+            label = metric["label"]
+            if label not in summary:
+                summary[label] = [metric["unit"], []]
+                order.append(label)
+            summary[label][1].append(metric["throughput"])
+    if not order:
+        return
+    width = max(len(label) for label in order)
+    print(f"\nSummary (throughput over {len(all_case_metrics)} cases):")
+    for label in order:
+        unit, vals = summary[label]
         print(
-            f"  {metric['label']:<{label_width}} {ms_str} ms | "
-            f"{throughput_str} {metric['unit']}{derived_suffix}"
+            f"  {label:<{width}}  min {min(vals):.2f}  "
+            f"median {median(vals):.2f}  max {max(vals):.2f}  {unit}"
         )
 
 
@@ -274,6 +365,46 @@ def make_parser(**kwargs):
             "Use with --csv to write kernel-level data to CSV. "
             "--csv-samples is ignored in this mode."
         ),
+    )
+    # usv timing options (all optional; the defaults preserve prior behavior).
+    parser.add_argument(
+        "--interleave", action="store_true", default=False,
+        help="Sample each benchmark's callables round-robin (usv --interleave).",
+    )
+    parser.add_argument(
+        "--warmup", type=int, default=None, metavar="N",
+        help="Untimed warmup iterations per benchmark (usv default if unset).",
+    )
+    parser.add_argument(
+        "--iters", type=int, default=None, metavar="N",
+        help=(
+            "Timed samples per benchmark. If unset, sample until "
+            f"{DEFAULT_MIN_RUN_TIME_SECONDS}s of kernel time elapses."
+        ),
+    )
+    parser.add_argument(
+        "--cache-flush", action="store_true", default=False,
+        help="Flush an L2-sized buffer before each sample (cold-cache timing).",
+    )
+    parser.add_argument(
+        "--cudagraph", action="store_true", default=False,
+        help="Capture each callable into a CUDA/HIP graph and time replays.",
+    )
+    parser.add_argument(
+        "--rotate", action="store_true", default=False,
+        help="Rotate inputs through an L2-sized ring of buffers (usv).",
+    )
+    parser.add_argument(
+        "--cooldown", type=float, default=0.0, metavar="SECONDS",
+        help="Idle sleep after each benchmark to let the GPU cool down.",
+    )
+    parser.add_argument(
+        "--monitor", action="store_true", default=False,
+        help="Sample rocm-smi during timing; warn on GPU clock drift (AMD).",
+    )
+    parser.add_argument(
+        "--timeout", type=float, default=None, metavar="SECONDS",
+        help="Abort a benchmark if timing exceeds this many seconds (hang guard).",
     )
     return parser
 
@@ -334,6 +465,9 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
     if args is None:
         args = make_parser().parse_args()
 
+    global _ARGS
+    _ARGS = args
+
     if args.kernel_profile:
         from torch.profiler import profile, ProfilerActivity
 
@@ -344,13 +478,10 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
 
     for case in test_cases:
         label = "  ".join(f"{k}={case[k]}" for k in param_columns)
-        print(f"\n{'='*60}")
-        print(f"Testing: {label}")
-        print(f"{'='*60}")
 
         metric_records = bench_fn(**case)
         metric_row = _metric_row_from_records(metric_records)
-        _print_metric_records(metric_records)
+        print(_format_case_line(label, metric_records))
         current_metric_columns = list(metric_row.keys())
 
         if resolved_metric_columns is None:
@@ -419,6 +550,8 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
                 )
                 all_kernel_rows.append(kr)
 
+    _print_summary(all_case_metrics)
+
     if args.csv is not None:
         import pandas as pd
         out_csv = args.csv if isinstance(args.csv, str) else (
@@ -460,13 +593,12 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
                 if measurement is None:
                     continue
                 lbl = metric["label"]
-                for i, t in enumerate(measurement.times):
+                for i, t in enumerate(measurement.samples):
                     sr = dict(case_params)
                     sr["label"] = lbl
                     sr["sample_idx"] = i
-                    # measurement.times is already per-iteration (raw block time
-                    # divided by number_per_run); convert seconds -> ms only.
-                    sr["time_ms"] = t * 1e3
+                    # usv Measurement.samples are per-call seconds; -> ms.
+                    sr["time_ms"] = float(t) * 1e3
                     sample_rows.append(sr)
         if sample_rows:
             df = pd.DataFrame(
