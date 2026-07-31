@@ -182,18 +182,39 @@ jobs:
           EOF
           )"
 
-      - name: Run sGPU tests in parallel (pytorch, jax, examples, core)
+      # The scheduler orders its queue longest-first, so it needs a per-item cost
+      # estimate. That table is produced by the previous run of this same job and
+      # carried forward in the cache -- there is no separate measurement pass.
+      # `restore` and `save` are separate actions on purpose: `actions/cache`
+      # skips its implicit save when the job fails, and a failing test run is
+      # exactly when the timings are most worth keeping.
+      - name: Restore learned test weights
+        uses: actions/cache/restore@v4
+        with:
+          path: ci-weights
+          key: te-sgpu-weights-${{ matrix.arch_label }}-${{ github.run_id }}
+          restore-keys: te-sgpu-weights-${{ matrix.arch_label }}-
+
+      - name: Run sGPU tests as one queue (pytorch, jax, examples, core)
         id: run-tests
         # Below the job's timeout-minutes so an overrun kills only this step;
         # the `if: always()` report + upload steps still run (artifacts survive).
         timeout-minutes: 240
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          ARCH: ${{ matrix.arch_label == 'mi30x' && 'gfx942' || 'gfx950' }}
         run: |
           # One subdir per suite so PyTorch/JAX/Core get independent reports and
           # never collide on identically-named XML (e.g. test_sanity_import.auto.xml
           # exists in both the torch and jax suites and runs in parallel).
           rm -rf test-results && mkdir -p test-results/torch test-results/jax test-results/core
+
+          # Seed from the in-tree table on a cache miss; after that the cached
+          # copy is authoritative, since it has been refined by every run since.
+          mkdir -p ci-weights
+          W="ci-weights/test_weights.${ARCH}.txt"
+          [ -s "$W" ] || cp "ci/test_weights.${ARCH}.txt" "$W" 2>/dev/null || true
+          echo "weights: $W ($(wc -l < "$W" 2>/dev/null || echo 0) items)"
 
           docker exec \
             -e TEST_SGPU=1 \
@@ -201,10 +222,41 @@ jobs:
             -e JUNITXML_PREFIX=/workspace/test-results/ \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
-            te-runner bash /workspace/.github/scripts/run_parallel_sgpu.sh \
-              --first-gpu 0 \
+            te-runner bash /workspace/.github/scripts/run_queue_sgpu.sh \
+              --gpus 4 --first-gpu 0 \
               --log-dir /workspace/ \
-              /workspace/.github/scripts/ci_sgpu_jobs.conf
+              --weights "/workspace/$W" \
+              /workspace/.github/scripts/ci_sgpu_queue.conf
+
+      # Runs even when tests failed: a red run still measures how long each item
+      # took, and build_weights.py's asymmetric blend is built to absorb the bias
+      # a short-because-it-crashed measurement introduces. Only items killed at
+      # their deadline (rc 124/137) are dropped, since that measurement is a
+      # ceiling that would otherwise compound run over run.
+      - name: Update learned test weights
+        if: always() && hashFiles('timings.tsv') != ''
+        env:
+          ARCH: ${{ matrix.arch_label == 'mi30x' && 'gfx942' || 'gfx950' }}
+        run: |
+          docker exec te-runner python3 /workspace/ci/build_weights.py \
+            --from-timing /workspace/timings.tsv \
+            --merge -o "/workspace/ci-weights/test_weights.${ARCH}.txt"
+
+      - name: Save learned test weights
+        if: always() && hashFiles('ci-weights/*') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: ci-weights
+          key: te-sgpu-weights-${{ matrix.arch_label }}-${{ github.run_id }}
+
+      - name: Publish scheduling report
+        if: always()
+        run: |
+          if [ -f schedule.md ]; then
+            cat schedule.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "::warning::no schedule.md -- the queue did not reach its report phase"
+          fi
 
       - name: Generate test report
         if: always()
@@ -224,7 +276,7 @@ jobs:
         if: always()
         run: |
           EXIT_STATUS=0
-          for config in .github/scripts/ci_sgpu_jobs.conf; do
+          for config in .github/scripts/ci_sgpu_queue.conf; do
             while IFS= read -r line || [[ -n "$line" ]]; do
               [[ "$line" =~ ^[[:space:]]*# ]] && continue
               [[ -z "${line//[[:space:]]/}" ]] && continue
@@ -249,6 +301,10 @@ jobs:
           path: |
             *.log
             test-results/**/*.xml
+            timings.tsv
+            schedule.txt
+            queue.tsv
+            ci-weights/*.txt
           if-no-files-found: ignore
           retention-days: 5
 

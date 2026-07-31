@@ -1,0 +1,93 @@
+# Bootstrap work-item weights for .github/scripts/run_queue_sgpu.sh (gfx950).
+# Units: MEASURED SECONDS of per-item wall clock, from a full TEST_LEVEL=3 run.
+# Seconds matter, not just relative order: run_queue_sgpu.sh also derives each
+# item's kill deadline from its weight (3x + 300s), so a value in any other
+# unit will kill healthy items or fail to bound hung ones.
+#
+# Items absent here take the unknown-weight default: scheduled first, and given
+# the MAX_ITEM_SECS deadline rather than a derived one. Both are the safe
+# direction for something whose cost is not yet known.
+#
+# CI refreshes this table into the actions/cache after every run; regenerate the
+# in-tree copy with:
+#   ci/build_weights.py --from-timing <log-dir>/timings.tsv -o ci/test_weights.gfx950.txt
+core 1251.0
+torch/triton_kernels.test_norms.ck.autotune 675.0
+torch/triton_kernels.test_grouped_gemm.ck 578.0
+jax/test_custom_call_compute.auto 539.0
+jax/test_fused_attn.auto 528.0
+jax/test_fused_attn.auto.v2 524.0
+torch/test_numerics.ck.triton 372.0
+examples 324.0
+torch/test_numerics.ck.amax+triton 260.0
+torch/mxfp4..ck 241.0
+jax/test_layer.auto 239.0
+torch/test_numerics.flash 223.0
+torch/test_numerics.unfused 221.0
+torch/test_numerics.aotriton 210.0
+torch/test_numerics.ck 209.0
+torch/test_numerics.ck.amax 209.0
+torch/test_permutation.ck 201.0
+torch/test_sanity.aotriton 154.0
+torch/test_sanity.ck 152.0
+torch/test_fusible_ops.ck.triton 143.0
+torch/triton_kernels.test_cast.ck.amax 139.0
+torch/triton_kernels.test_cast.ck 138.0
+torch/test_sanity.unfused 137.0
+torch/test_sanity.flash 136.0
+torch/test_fusible_ops.ck.amax+triton 124.0
+torch/test_cpu_offloading.ck 103.0
+torch/test_fused_rope.ck 102.0
+torch/benchmark 95.0
+torch/test_cuda_graphs.unfused 86.0
+torch/test_cuda_graphs.aotriton 84.0
+torch/test_cuda_graphs.ck 83.0
+torch/test_cuda_graphs.flash 83.0
+torch/nvfp4..ck 82.0
+torch/attention.test_attention.ck 81.0
+torch/attention.test_kv_cache.ck 79.0
+torch/triton_kernels.test_norms.ck 73.0
+torch/test_backward_override.ck 65.0
+jax/test_fused_attn.aotriton 57.0
+torch/test_cpu_offloading_v1.aotriton 56.0
+torch/test_fusible_ops.ck 56.0
+torch/test_grouped_linear.unfused 56.0
+torch/test_grouped_linear.aotriton 55.0
+torch/test_grouped_linear.ck 55.0
+torch/test_grouped_linear.flash 55.0
+torch/test_fusible_ops.ck.amax 54.0
+torch/test_cpu_offloading_v1.ck 51.0
+torch/test_numerics.ck.mxfp8 45.0
+torch/triton_kernels.test_cast_mxfp4.ck 44.0
+torch/test_multi_tensor.ck 43.0
+torch/test_float8_blockwise_scaling_exact.ck 43.0
+torch/triton_kernels.test_cast_mxfp8.ck 42.0
+jax/test_fused_attn.auto.deterministic 41.0
+torch/test_jit.unfused 37.0
+torch/test_float8_current_scaling_exact.ck.triton 37.0
+torch/test_gemm_autotune.ck 37.0
+torch/test_jit.ck 36.0
+torch/test_jit.flash 36.0
+torch/test_jit.aotriton 35.0
+jax/test_functions.auto 33.0
+torch/test_float8_current_scaling_exact.ck 32.0
+torch/test_recipe.ck 31.0
+torch/test_torch_compile.ck 31.0
+torch/test_gqa.ck 30.0
+torch/test_gqa.flash 30.0
+torch/test_fused_router.ck 29.0
+torch/test_gqa.aotriton 29.0
+torch/attention.test_attention.ck.deterministic 28.0
+torch/test_gqa.unfused 28.0
+torch/test_checkpoint.ck 28.0
+torch/test_sanity_import.ck 27.0
+torch/test_quantized_tensor.ck 26.0
+torch/test_float8blockwisetensor.ck 26.0
+torch/test_parallel_cross_entropy.ck 26.0
+torch/test_sanity_hipified_cast_transpose.ck 25.0
+torch/test_nvfp4_fsdp2_hooks.ck 25.0
+torch/attention.test_cp_utils.ck 25.0
+torch/test_deferred_init.ck 24.0
+torch/triton_kernels.test_utils.ck 24.0
+jax/test_softmax.auto 22.0
+jax/test_sanity_import.auto 4.0

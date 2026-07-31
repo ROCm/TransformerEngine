@@ -56,10 +56,22 @@ run_test_config(){
     export NVTE_GROUPED_LINEAR_SINGLE_PARAM=1
     run_default_fa 1 test_backward_override.py
     if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
-        mkdir -p ${TEST_DIR}/checkpoint
-        python ${TEST_DIR}/test_checkpoint.py --save-checkpoint all --checkpoint-dir ${TEST_DIR}/checkpoint
-        NVTE_TEST_CHECKPOINT_ARTIFACT_PATH=${TEST_DIR}/checkpoint run 1 test_checkpoint.py
-        rm -rf ${TEST_DIR}/checkpoint
+        #The checkpoint artifact is generated outside pytest_run, so it is not
+        #covered by TEST_FILTER. Gate it on the same tag the test itself uses,
+        #otherwise every filtered invocation regenerates the artifact -- and
+        #concurrent ones race on the shared checkpoint directory.
+        _ckpt_variant=`get_test_variant_tag $_fus_attn ""`
+        _ckpt_tag=`get_test_name_tag test_checkpoint.py $_ckpt_variant`
+        if [ -n "$TE_CI_LIST_ONLY" ]; then
+            #Only emit the work item; do not generate the artifact. Save, test
+            #and cleanup stay one unit when the item is dispatched.
+            run 1 test_checkpoint.py
+        elif check_test_filter "$_ckpt_tag"; then
+            mkdir -p ${TEST_DIR}/checkpoint
+            python ${TEST_DIR}/test_checkpoint.py --save-checkpoint all --checkpoint-dir ${TEST_DIR}/checkpoint
+            NVTE_TEST_CHECKPOINT_ARTIFACT_PATH=${TEST_DIR}/checkpoint run 1 test_checkpoint.py
+            rm -rf ${TEST_DIR}/checkpoint
+        fi
     fi
     run 1 test_cuda_graphs.py
     run_default_fa 1 test_deferred_init.py
@@ -133,6 +145,10 @@ run_test_config_mgpu(){
 
 run_benchmark() {
     check_test_filter benchmark || return
+    if [ -n "$TE_CI_LIST_ONLY" ]; then
+        echo "TE_CI_ITEM benchmark"
+        return
+    fi
     echo "\n============= Running benchmarks attention script ============="
     BENCH_SCRIPT="$DIR/../benchmarks/attention/benchmark_attention_rocm.py"
     
@@ -168,10 +184,16 @@ check_flash_attn_installed() {
 
 #Master script mode: prepare testing prerequisites first
 start_message
-install_prerequisites
-pip list | egrep "flash|ml_dtypes|numpy|torch|transformer_e|typing_ext"
-#check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
-ck_jit_prebuild build || exit $?
+#Prerequisites and the CK JIT cache are container-wide state, so a scheduler
+#that dispatches many TEST_FILTER-ed invocations does them once up front with
+#TE_CI_SETUP_ONLY and then passes TE_CI_SKIP_SETUP on every item.
+if [ -z "$TE_CI_SKIP_SETUP$TE_CI_LIST_ONLY" ]; then
+    install_prerequisites
+    pip list | egrep "flash|ml_dtypes|numpy|torch|transformer_e|typing_ext"
+    #check_test_jobs_requested && init_test_jobs `python -c "import torch; print(torch.cuda.device_count())"`
+    ck_jit_prebuild build || exit $?
+    test -n "$TE_CI_SETUP_ONLY" && exit 0
+fi
 
 for _fus_attn in auto flash ck aotriton unfused; do
     configure_fused_attn_env $_fus_attn || continue
@@ -220,5 +242,5 @@ if [ $TEST_LEVEL -ge 3 ]; then
     fi
 fi
 
-ck_jit_prebuild list
+test -z "$TE_CI_SKIP_SETUP$TE_CI_LIST_ONLY" && ck_jit_prebuild list
 return_run_results

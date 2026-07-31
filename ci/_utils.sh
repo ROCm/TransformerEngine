@@ -350,6 +350,17 @@ pytest_run() {
     shift 3
     _test_name_tag=`get_test_name_tag $1 $_test_variant_tag`
     check_test_filter $_test_name_tag || return
+    # List mode: emit the work item instead of running it, so an external
+    # scheduler can pack items across GPUs. The tag alone is enough to
+    # re-dispatch the item: setting TEST_FILTER to it and re-entering this
+    # script replays the very same call line, so the inline NVTE_* prefixes and
+    # -k expressions are reapplied by the script itself and never have to be
+    # serialized here. The suite scripts stay the single source of truth for
+    # what runs at each TEST_LEVEL.
+    if [ -n "$TE_CI_LIST_ONLY" ]; then
+        echo "TE_CI_ITEM $_test_name_tag"
+        return
+    fi
     _start_ts=`date +%s`
     echo "Run [$_test_variant_tag] $@ at `time_elapsed $TEST_START_TS`"
     # A per-test timeout is applied to every item. Callers may still append their

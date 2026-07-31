@@ -116,11 +116,17 @@ fi
 
 #Master script mode: prepares testing prerequisites
 start_message
-install_prerequisites
-pip list | egrep "flax|fidle|jax|ml_dtypes|numpy|transformer_e|typing_ext"
-#check_test_jobs_requested
-#test $? -eq 0 && init_test_jobs `python -c "import jax; print(len([d for d in jax.devices() if 'rocm' in d.client.platform_version]))"`
-ck_jit_prebuild build || exit $?
+#See ci/pytorch.sh for the TE_CI_SETUP_ONLY / TE_CI_SKIP_SETUP contract. Running
+#the CK JIT prebuild here once, sequentially, also removes the race this script
+#used to have with ci/pytorch.sh over the shared blob cache.
+if [ -z "$TE_CI_SKIP_SETUP$TE_CI_LIST_ONLY" ]; then
+    install_prerequisites
+    pip list | egrep "flax|fidle|jax|ml_dtypes|numpy|transformer_e|typing_ext"
+    #check_test_jobs_requested
+    #test $? -eq 0 && init_test_jobs `python -c "import jax; print(len([d for d in jax.devices() if 'rocm' in d.client.platform_version]))"`
+    ck_jit_prebuild build || exit $?
+    test -n "$TE_CI_SETUP_ONLY" && exit 0
+fi
 
 for _fus_attn in auto ck aotriton; do
     configure_fused_attn_env $_fus_attn || continue
@@ -155,5 +161,5 @@ if [ -n "$TEST_JOBS_MODE" -a -n "$TEST_MGPU" ]; then
     done
 fi
 
-ck_jit_prebuild list
+test -z "$TE_CI_SKIP_SETUP$TE_CI_LIST_ONLY" && ck_jit_prebuild list
 return_run_results
