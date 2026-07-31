@@ -48,7 +48,11 @@ endif()
 # QoLA-managed AITER source tree to that commit before any consumer reads it
 # (header validation below, header includes for the .cpp build later, and
 # QoLA's own kernel build if the prebuilt cache misses).
-set(__QOLA_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/qola_manifest.toml")
+# TE keeps a single QoLA manifest so the whole build shares one AITER commit,
+# one patch set and one checkout.  Each consumer builds only its own module
+# group (see `qola build --group`).
+set(__QOLA_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/../qola_manifest.toml")
+set(__QOLA_GROUP "ck_fused_attn")
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${__QOLA_MANIFEST}")
 file(STRINGS "${__QOLA_MANIFEST}" __AITER_COMMIT_LINES
      REGEX "^[ \t]*aiter_commit[ \t]*=[ \t]*\"[^\"]+\"")
@@ -155,8 +159,11 @@ if(__AITER_CACHE_DIR STREQUAL "")
     else()
       set(__CK_JIT_SOURCE_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/ck_jit")
     endif()
+    # ck_jit_build.py shells out to `qola build` with a fixed argument list and
+    # cannot forward --group, so the group is passed through the environment.
     execute_process(
-      COMMAND ${Python_EXECUTABLE} "${__CK_JIT_SOURCE_DIR}/ck_jit_build.py" full
+      COMMAND ${CMAKE_COMMAND} -E env "QOLA_BUILD_GROUPS=${__QOLA_GROUP}"
+          ${Python_EXECUTABLE} "${__CK_JIT_SOURCE_DIR}/ck_jit_build.py" full
           --with-qola
           --qola-dir ${__QOLA_DIR}
           --qola-manifest ${__QOLA_MANIFEST}
@@ -182,6 +189,7 @@ if(__AITER_CACHE_DIR STREQUAL "")
               --manifest ${__QOLA_MANIFEST}
               --aiter-root ${__AITER_SOURCE_DIR}
               --output-dir ${__QOLA_BUILD_DIR}
+              --group ${__QOLA_GROUP}
               --arch "${GPU_ARCHS_STR}"
               --skip-checkout
       RESULT_VARIABLE QOLA_BUILD_RESULT

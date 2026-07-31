@@ -1,0 +1,47 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# SPDX-License-Identifier: MIT
+#
+# Single QoLA consumer manifest for TransformerEngine.
+#
+# One manifest means one AITER commit, one patch set and one source checkout
+# for the whole build. Consumers select the kernels they need with
+# `qola build --group <name>`; the arch list is passed per group from CMake,
+# which is why [build].architectures below is the union of what any group
+# supports rather than a per-group value.
+#
+# Groups:
+#   ck_fused_attn - torch-free MHA fwd/bwd kernels behind the CK fused-attn
+#                   backend (transformer_engine/common/ck_fused_attn).
+#   aiter_gemm    - torch-free a4w4 (FP4) GEMM kernels, gfx950 only.
+
+[qola]
+aiter_commit = "ab55045555071eb951b1bf50e29cdd3d194e1e51"    # pinned AITER submodule commit -- zain/torch-free/a4w4-poc
+namespace = "te"
+rocm_versions = ["7.2"]
+
+[build]
+architectures = ["gfx950", "gfx942"]
+
+[[modules]]
+name = "libmha_fwd"
+group = "ck_fused_attn"
+mode = "cpp_itfs"
+receipt = 700
+drop_srcs = ["mha_fwd_split.cu", "mha_fwd_batch_prefill.cu"]
+drop_directions = ["fwd_splitkv", "batch_prefill"]
+
+[[modules]]
+name = "libmha_bwd"
+group = "ck_fused_attn"
+mode = "cpp_itfs"
+receipt = 700
+
+[[modules]]
+name = "libgemm_a4w4_blockscale"
+group = "aiter_gemm"
+mode = "cpp_itfs"
+
+[[modules]]
+name = "libgemm_a4w4_asm"
+group = "aiter_gemm"
+mode = "cpp_itfs"

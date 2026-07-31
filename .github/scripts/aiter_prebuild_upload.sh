@@ -24,7 +24,11 @@ ROCM_VER=`head -n1 "${ROCM_PATH}/.info/version" | cut -d. -f1`
 
 QOLA_DIR="${ROOT_DIR}/3rdparty/QoLA"
 AITER_DIR="${QOLA_DIR}/3rdparty/aiter"
-QOLA_MANIFEST="${ROOT_DIR}/transformer_engine/common/ck_fused_attn/qola_manifest.toml"
+QOLA_MANIFEST="${ROOT_DIR}/transformer_engine/common/qola_manifest.toml"
+# This cache feeds aiter_prebuilt.cmake, which only consumes the fused-attn
+# kernels. The shared manifest also declares the gfx950-only a4w4 GEMM group,
+# so the build must be restricted or the gfx942 leg would fail.
+QOLA_GROUP="ck_fused_attn"
 GIT_CONFIG_GLOBAL="$(mktemp /tmp/gitconfig.XXXXXX)"
 trap 'rm -f "${GIT_CONFIG_GLOBAL}"' EXIT
 git config --file "${GIT_CONFIG_GLOBAL}" --add safe.directory "${AITER_DIR}"
@@ -64,6 +68,7 @@ if [[ "${1:-}" == "--build" ]]; then
       --manifest "${QOLA_MANIFEST}" \
       --aiter-root "${AITER_DIR}" \
       --output-dir "${QOLA_BUILD_DIR}" \
+      --group "${QOLA_GROUP}" \
       "${arch_args[@]}"
 
   # Stage QoLA outputs into the cache layout expected by aiter_prebuilt.cmake.
