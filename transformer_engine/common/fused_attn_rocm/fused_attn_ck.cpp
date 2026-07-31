@@ -467,7 +467,7 @@ void fused_attn_ck_fwd_impl(
   size_t *workspace_size,
   cudaStream_t stream){
 
-  const bool has_sink = (softmax_type != NVTE_VANILLA_SOFTMAX && devPtrSoftmaxOffset != nullptr);
+  const bool has_sink = softmax_type != NVTE_VANILLA_SOFTMAX;
   const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
 
   // ASM v3 does not support sink; force CK tile path
@@ -728,7 +728,7 @@ void fused_attn_ck_bwd_impl(
   size_t *workspace_size,
   cudaStream_t stream) {
   
-  const bool has_sink = (softmax_type != NVTE_VANILLA_SOFTMAX && devPtrSoftmaxOffset != nullptr);
+  const bool has_sink = softmax_type != NVTE_VANILLA_SOFTMAX;
   const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
   // bwd v3 is optional by enabling the following envs
   // default values follows the ck example setting
