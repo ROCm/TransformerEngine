@@ -48,6 +48,24 @@ concurrency:
 env:
   TEST_LEVEL: ${{ (github.event_name == 'push' && '3') || inputs.test_level || '1' }}
 
+  # ---------------------------------------------------------------------------
+  # DEBUG, BRANCH-LOCAL -- REVERT BEFORE MERGING TO dev
+  #
+  # Scheduler experiment: run only the sGPU mi30x job and reuse an earlier run's
+  # wheels. These are hardcoded rather than workflow_dispatch inputs because the
+  # dispatch form is rendered from the default branch's copy of this file, so
+  # inputs added on a topic branch never show up in the UI.
+  #
+  # Reverting means: drop this block, drop `if: false` from `build` and
+  # `mgpu_tests`, restore `arch_label: [mi30x, mi35x]` in `sgpu_tests`, and drop
+  # `run-id`/`github-token` from the download-artifact steps.
+  #
+  # A reusable workflow shares its caller's run id, so this is the id of the whole
+  # CI run that built the wheels -- the same run whose logs-sgpu-* artifacts you
+  # downloaded. te-rocm-wheels is uploaded with retention-days: 1, so this only
+  # works within 24h of that build; after that, set `build` back to running.
+  REUSE_WHEELS_RUN_ID: '30612285497'
+
 jobs:
   select_image:
     name: Select Docker Image
@@ -100,20 +118,28 @@ jobs:
 
   build:
     # Delegate wheel building to the reusable workflow on dev. It produces a core .whl plus framework .tar.gz sdists under artifact name `te-rocm-wheels`.
+    # DEBUG: disabled, reusing REUSE_WHEELS_RUN_ID's wheels. The test jobs below
+    # tolerate a skipped (but not a failed) build.
+    if: false
     uses: ./.github/workflows/rocm-wheels-build.yml
     secrets: inherit
 
   sgpu_tests:
     name: sGPU Tests (${{ matrix.arch_label }})
     needs: [select_image, build]
+    if: ${{ !cancelled() && needs.select_image.result == 'success' && needs.build.result != 'failure' }}
     timeout-minutes: 270
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-4' }}
+    # actions:read lets download-artifact reach another workflow run's artifacts.
+    permissions:
+      contents: read
+      actions: read
     env:
       DOCKER_IMAGE: ${{ inputs.docker_image_override || format('{0}{1}', needs.select_image.outputs.image-tag, matrix.arch_label == 'mi30x' && '_gfx942' || matrix.arch_label == 'mi35x' && '_gfx950') }}
     strategy:
       fail-fast: false
       matrix:
-        arch_label: [mi30x, mi35x]
+        arch_label: [mi30x]  # DEBUG: was [mi30x, mi35x]
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
@@ -129,6 +155,8 @@ jobs:
         with:
           name: te-rocm-wheels
           path: dist/
+          run-id: ${{ env.REUSE_WHEELS_RUN_ID || github.run_id }}  # DEBUG
+          github-token: ${{ secrets.GITHUB_TOKEN }}                # DEBUG
 
       - name: Host Diagnostics
         run: |
@@ -192,7 +220,7 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: ci-weights
-          key: te-sgpu-weights-${{ matrix.arch_label }}-${{ github.run_id }}
+          key: te-sgpu-weights-${{ matrix.arch_label }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: te-sgpu-weights-${{ matrix.arch_label }}-
 
       - name: Run sGPU tests as one queue (pytorch, jax, examples, core)
@@ -247,7 +275,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ci-weights
-          key: te-sgpu-weights-${{ matrix.arch_label }}-${{ github.run_id }}
+          key: te-sgpu-weights-${{ matrix.arch_label }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Publish scheduling report
         if: always()
@@ -315,8 +343,12 @@ jobs:
   mgpu_tests:
     name: mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})
     needs: [select_image, build]
+    if: false  # DEBUG: was ${{ !cancelled() && needs.select_image.result == 'success' && needs.build.result != 'failure' }}
     timeout-minutes: 210
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
+    permissions:
+      contents: read
+      actions: read
     env:
       DOCKER_IMAGE: ${{ inputs.docker_image_override || format('{0}{1}', needs.select_image.outputs.image-tag, matrix.arch_label == 'mi30x' && '_gfx942' || matrix.arch_label == 'mi35x' && '_gfx950') }}
     strategy:
@@ -333,6 +365,8 @@ jobs:
         with:
           name: te-rocm-wheels
           path: dist/
+          run-id: ${{ env.REUSE_WHEELS_RUN_ID || github.run_id }}  # DEBUG
+          github-token: ${{ secrets.GITHUB_TOKEN }}                # DEBUG
 
       - name: Host Diagnostics
         run: |
