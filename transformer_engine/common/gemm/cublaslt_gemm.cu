@@ -1098,6 +1098,17 @@ void nvte_cublas_handle_init() { auto _ = cublasHandleManager::Instance().GetHan
 }  //  namespace transformer_engine
 #endif // __HIP_PLATFORM_AMD__
 
+#ifdef USE_HIPKITTENS_GEMM
+namespace transformer_engine {
+bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+    int num_gemms, bool transa, bool transb, NVTETensor *workspace,
+    bool accumulate, cudaStream_t stream);
+bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+    int num_gemms, bool transa, bool transb, NVTETensor *workspace,
+    bool accumulate, cudaStream_t stream);
+}
+#endif
+
 void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
                             const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms,
                             bool transa, bool transb, bool grad, NVTETensor *workspace,
@@ -1113,7 +1124,9 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   const int current_device = transformer_engine::cuda::current_device();
   const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
 #endif
-  const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
+  const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false)
+                        || transformer_engine::getenv<bool>("NVTE_USE_HIPKITTENS_GROUPED_GEMM", false)
+                        || transformer_engine::getenv<bool>("NVTE_USE_CK_GROUPED_GEMM", false);
   const bool warn_fallback =
       transformer_engine::getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
 
@@ -1203,6 +1216,16 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
 
     bool handled_by_ck = false;
     if (transformer_engine::is_mxfp8_scaling(inputA->scaling_mode)) {
+#ifdef USE_HIPKITTENS_GEMM
+      if (transformer_engine::try_kittens_grouped_mxfp8_gemm(A, B, D, num_gemms, transa, transb,
+                                         workspace, accumulate, stream)) {
+        return;
+      }
+      if (transformer_engine::try_kittens_grouped_mxfp8_wgrad(A, B, D, num_gemms, transa, transb,
+                                         workspace, accumulate, stream)) {
+        return;
+      }
+#endif
       handled_by_ck = ck_tile_mx_grouped_gemm(
           A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
     } else {
