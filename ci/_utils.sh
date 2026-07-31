@@ -2,6 +2,32 @@
 #
 # See LICENSE for license information.
 
+# ROCM_PATH resolution
+resolve_rocm_path() {
+    if [ -n "${ROCM_PATH:-}" ]; then
+        printf '%s\n' "$ROCM_PATH"
+        return 0
+    fi
+    if command -v rocm-sdk >/dev/null 2>&1; then
+        local _root
+        _root="$(rocm-sdk path --root)"
+        if [ -f "${_root}/bin/hipcc" ]; then
+            printf '%s\n' "$_root"
+            return 0
+        fi
+    fi
+    if [ -d "/opt/rocm/core" ]; then
+        printf '/opt/rocm/core\n'
+        return 0
+    fi
+    if [ -d "/opt/rocm" ]; then
+        printf '/opt/rocm\n'
+        return 0
+    fi
+    echo "Could not find ROCm installation" >&2
+    exit 1
+}
+
 REALPATH=realpath
 realpath $DIR >/dev/null 2>/dev/null
 test $? -ne 0 && REALPATH=echo
@@ -287,15 +313,9 @@ check_test_filter() {
 
 start_message() {
     echo "Started with TEST_LEVEL=$TEST_LEVEL sGPU='$TEST_SGPU' mGPU='$TEST_MGPU' at `date`"
-    if [ -n "$ROCM_PATH" ]; then
-        _rocm_path="$ROCM_PATH"
-    elif [ -d "/opt/rocm/core" ]; then
-        _rocm_path="/opt/rocm/core"
-    else
-        _rocm_path="/opt/rocm"
-    fi
-    _rocm_path=`$REALPATH "$_rocm_path"`
-    test -d "$_rocm_path" && echo "ROCm: $_rocm_path" || echo "ROCm path not found"
+    _rocm_path=$(resolve_rocm_path)
+    _rocm_path=`$REALPATH "$_rocm_path" 2>/dev/null || echo "$_rocm_path"`
+    echo "ROCM PATH: $_rocm_path"
     python3 --version
 }
 
