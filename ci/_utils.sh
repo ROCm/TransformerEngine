@@ -5,23 +5,23 @@
 # ROCM_PATH resolution
 resolve_rocm_path() {
     if [ -n "${ROCM_PATH:-}" ]; then
-        printf '%s\n' "$ROCM_PATH"
+        echo "$ROCM_PATH"
         return 0
     fi
     if command -v rocm-sdk >/dev/null 2>&1; then
         local _root
         _root="$(rocm-sdk path --root)"
-        if [ -f "${_root}/bin/hipcc" ]; then
-            printf '%s\n' "$_root"
+        if [ -n "$_root" ] && [ -f "${_root}/bin/hipcc" ]; then
+            echo "$_root"
             return 0
         fi
     fi
     if [ -d "/opt/rocm/core" ]; then
-        printf '/opt/rocm/core\n'
+        echo /opt/rocm/core
         return 0
     fi
     if [ -d "/opt/rocm" ]; then
-        printf '/opt/rocm\n'
+        echo /opt/rocm
         return 0
     fi
     echo "Could not find ROCm installation" >&2
