@@ -50,12 +50,19 @@ def _launch_timeout_seconds(run_timeout=None, terminate_timeout=None):
         explicit = os.environ.get("TE_DIST_LAUNCH_TIMEOUT")
         if explicit:
             return int(explicit)
-        outer = run_timeout or int(os.environ.get("PYTEST_TIMEOUT", "1200"))
+        outer = run_timeout
+        if run_timeout:
+            # extra 10 seconds for timeout to kill the process before timeout itself is killed
+            outer = run_timeout - 10
+        else:
+            outer = int(os.environ.get("PYTEST_TIMEOUT", "1200"))
     except ValueError:
         return 1200
     if terminate_timeout is None:
         terminate_timeout = _terminate_timeout_seconds(run_timeout)
-    return max(60, outer - 60 - terminate_timeout)  # at least 1 minute for the child to run
+    # Give at least 1 minute for the child to run to avoid too fast process termination
+    # if pytest timeout or subprocess.run timeout are set to a small value.
+    return max(60, outer - terminate_timeout)
 
 
 def _is_launcher(cmd):
