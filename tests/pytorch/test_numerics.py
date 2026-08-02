@@ -2126,8 +2126,24 @@ def test_gpt_cuda_graph(dtype, bs, model):
         for param1, param2 in zip(block.parameters(), graphed_block.parameters()):
             param2.copy_(param1)
 
-    out, grads = _test_gpt_e2e_cuda_graph(block, bs, dtype, config, False)
-    graphed_out, graphed_grads = _test_gpt_e2e_cuda_graph(graphed_block, bs, dtype, config, True)
+    # WAR (ROCm): torch>=2.12 (pytorch/pytorch#179053) makes hipBLASLt handles
+    # per-(device, stream). The graph-capture stream's handle is created lazily
+    # during capture, and hipblasLtCreate performs an internal hipMalloc that is
+    # illegal mid-capture, failing with HIP error 900 ("operation not permitted
+    # when stream is capturing"). The upstream capture_begin pre-init
+    # (pytorch/pytorch#180692) only covers the calling thread, not the autograd
+    # backward thread, so torch's own bmm in the captured backward still trips it.
+    # Route torch's matmul/bmm off hipBLASLt for this test until upstream fixes it.
+    _prev_blas_library = None
+    if IS_HIP_EXTENSION:
+        _prev_blas_library = torch.backends.cuda.preferred_blas_library()
+        torch.backends.cuda.preferred_blas_library("cublas")
+    try:
+        out, grads = _test_gpt_e2e_cuda_graph(block, bs, dtype, config, False)
+        graphed_out, graphed_grads = _test_gpt_e2e_cuda_graph(graphed_block, bs, dtype, config, True)
+    finally:
+        if _prev_blas_library is not None:
+            torch.backends.cuda.preferred_blas_library(_prev_blas_library)
     params = list(block.parameters())
     graphed_params = list(graphed_block.parameters())
 
