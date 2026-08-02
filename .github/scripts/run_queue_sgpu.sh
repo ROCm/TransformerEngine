@@ -41,11 +41,10 @@ SKIP_SETUP=""
 # Items with no recorded weight sort first: an unknown item is more likely to be
 # a new (or newly slow) one, and a long item started late is what stretches the
 # tail. Losing the gamble costs far less than mis-scheduling a genuinely big item.
+# With no weights file at all -- the first run on a new arch, or a cache miss --
+# every item takes this, the queue keeps its natural order, and the run is simply
+# unordered. That costs makespan once; the table it writes fixes the next run.
 DEFAULT_WEIGHT=${TE_CI_DEFAULT_WEIGHT:-999999}
-# Ceiling for the per-item deadline derived from the weight below. Also the
-# deadline for unknown items, whose DEFAULT_WEIGHT makes the derived budget
-# meaningless.
-MAX_ITEM_SECS=${TE_CI_MAX_ITEM_SECS:-7200}
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -245,32 +244,23 @@ worker() {
             junit_dir=""
         fi
 
-        # Bound the item at 3x its learned weight, plus slack for the ~5% noise
-        # floor and a genuinely slower run; past that it is hung, not slow.
-        # Nothing else bounds an *item*: pytest's --timeout is per test, so an
-        # item of many just-under-PYTEST_TIMEOUT tests -- or a hang during
-        # collection or conftest import, which pytest-timeout does not cover --
-        # otherwise runs until the job's timeout-minutes kills all N workers at
-        # once, discarding every in-flight item on every GPU. rc 124 here means
-        # the deadline fired; build_weights.py drops those rows, since the
-        # measurement is the ceiling itself and would compound run over run.
-        budget=$(( weight * 3 + 300 ))
-        [[ $budget -gt $MAX_ITEM_SECS ]] && budget=$MAX_ITEM_SECS
-
+        # No scheduler-imposed deadline: the suite scripts' own PYTEST_TIMEOUT and
+        # the workflow's timeout-minutes are the only limits, exactly as they are
+        # outside the queue. Deriving one from the weight would make the timeout
+        # depend on measurement history, so the same test could pass one run and
+        # be killed the next -- the queue must not change what "a test failed"
+        # means. build_weights.py still drops rc 124/137 rows, because a duration
+        # that ends in a kill is a ceiling wherever the kill came from.
         start=$(date +%s)
         if [[ -n "$tag" ]]; then
             HIP_VISIBLE_DEVICES=$gpu TE_CI_SKIP_SETUP=1 TEST_FILTER="$tag" \
                 JUNITXML_PREFIX="$junit_dir" \
-                timeout --kill-after=60 "$budget" "$cmd" ${rest:-} > "$itemlog" 2>&1
+                "$cmd" ${rest:-} > "$itemlog" 2>&1
         else
             HIP_VISIBLE_DEVICES=$gpu JUNITXML_PREFIX="$junit_dir" \
-                timeout --kill-after=60 "$budget" "$cmd" ${rest:-} > "$itemlog" 2>&1
+                "$cmd" ${rest:-} > "$itemlog" 2>&1
         fi
         rc=$?
-        if [[ $rc -eq 124 || $rc -eq 137 ]]; then
-            echo "::error::[${label}] ${safetag} killed at its ${budget}s deadline" >&2
-            echo "TE_CI_ITEM_DEADLINE_EXCEEDED after ${budget}s" >> "$itemlog"
-        fi
         end=$(date +%s)
 
         echo "$rc" > "${itemlog}.rc"
@@ -332,83 +322,101 @@ done
 report() {
     local tf="$LOG_DIR/timings.tsv"
 
+    # Every section is a fixed-width table with a header row, so the report can be
+    # read straight out of the GHA step summary or grepped/cut by column.
+    local rule="  ------ -------- -------- ------- ---------- -------- ----------------------------------------"
+
     echo "=== sGPU queue: ${TOTAL_ITEMS} items, ${NUM_GPUS} GPUs, drained in ${WALL}s ==="
     echo
     echo "-- schedule: what ran where, in execution order --"
-    sort -t$'\t' -k3,3n -k6,6n "$tf" | awk -F'\t' -v dw="$DEFAULT_WEIGHT" '
-        $3 != last { if (NR > 1) print ""; last = $3 }
+    echo "$rule"
+    printf "  %-6s %-8s %-8s %-7s %-10s %-8s %s\n" \
+           GPU START DURATION RESULT ESTIMATE "% CHANGE" TEST_NAME
+    echo "$rule"
+    # rc is reported as a word, not a number: the report is read by people, and
+    # "killed" vs "fail" is the distinction that actually changes what you do next.
+    sort -t$'\t' -k3,3n -k6,6n "$tf" | awk -F'\t' -v dw="$DEFAULT_WEIGHT" -v rule="$rule" '
+        $3 != last { if (NR > 1) print rule; last = $3 }
         {
             est = ($8 == dw ? "unknown" : $8 "s")
             # Estimate error is the scheduler feedback loop made visible: a large
             # positive miss is an item that should have been dispatched earlier.
             err = ($8 > 0 && $8 != dw) ? sprintf("%+.0f%%", ($4 - $8) * 100 / $8) : "n/a"
-            printf "  gpu%-2s  t+%-7s %6ss  rc=%-4s est=%-9s %-7s %s/%s\n",
-                   $3, $6 "s", $4, $5, est, err, $1, $2
+            res = ($5 == 0 ? "pass" : ($5 == 1 ? "fail" : \
+                  ($5 == 124 || $5 == 137 ? "killed" : "error")))
+            printf "  gpu%-3s %-8s %-8s %-7s %-10s %-8s %s/%s\n",
+                   $3, "t+" $6 "s", $4 "s", res, est, err, $1, $2
         }'
+    echo "$rule"
+    echo "  START = seconds after the queue opened. DURATION = wall clock for the whole"
+    echo "  item, process startup included. ESTIMATE = the weight it was scheduled on."
 
     echo
     echo "-- per-GPU utilisation --"
+    echo "  ------ ------- --------- --------- --------- --------"
+    printf "  %-6s %-7s %-9s %-9s %-9s %s\n" GPU ITEMS BUSY IDLE UTIL FAILED
+    echo "  ------ ------- --------- --------- --------- --------"
     awk -F'\t' -v w="$WALL" '
-        { busy[$3] += $4; n[$3]++; if ($5 != 0) bad[$3]++; if ($7 > last[$3]) last[$3] = $7 }
+        { busy[$3] += $4; n[$3]++; if ($5 != 0) bad[$3]++ }
         END {
             for (g in busy)
-                printf "  gpu%-3s %3d items  %6ss busy  %5ss idle  %5.1f%% util  %d failed\n",
-                       g, n[g], busy[g], w - busy[g], busy[g] * 100 / w, bad[g] + 0
+                printf "  gpu%-3s %-7d %-9s %-9s %-9s %d\n",
+                       g, n[g], busy[g] "s", (w - busy[g]) "s",
+                       sprintf("%.1f%%", busy[g] * 100 / w), bad[g] + 0
         }' "$tf" | sort
-
-    echo
-    echo "-- timeline (one column ~$(( WALL / 60 + 1 ))s; = ran, # failed, . idle) --"
-    # Idle gaps are the whole point: a run of dots on one GPU while another is
-    # still busy is exactly the tail a better ordering would have filled.
-    awk -F'\t' -v w="$WALL" -v cols=60 -v first="$FIRST_GPU" -v n="$NUM_GPUS" '
-        { from = int($6 * cols / w); to = int($7 * cols / w)
-          if (to >= cols) to = cols - 1
-          for (c = from; c <= to; c++) cell[$3, c] = ($5 == 0 ? "=" : "#") }
-        END {
-            for (g = first; g < first + n; g++) {
-                line = ""
-                for (c = 0; c < cols; c++) line = line ((g, c) in cell ? cell[g, c] : ".")
-                printf "  gpu%-3s |%s|\n", g, line
-            }
-            printf "  %7s 0s%*ss\n", "", cols - 2, w
-        }' "$tf"
+    echo "  ------ ------- --------- --------- --------- --------"
 
     echo
     echo "-- efficiency --"
+    echo "  ----------------- ---------- --------------------------------------------------"
+    printf "  %-17s %-10s %s\n" METRIC VALUE MEANING
+    echo "  ----------------- ---------- --------------------------------------------------"
     awk -F'\t' -v w="$WALL" -v n="$NUM_GPUS" '
         { work += $4; if ($4 > big) { big = $4; bigname = $1 "/" $2 } }
         END {
-            bound = work / n; if (big > bound) bound = big
-            printf "  total work      %8.0fs across %d items\n", work, NR
-            printf "  capacity        %8.0fs (%ss x %d GPUs)\n", w * n, w, n
-            printf "  lower bound     %8.0fs  max(work/%d, largest item)\n", bound, n
-            printf "  actual makespan %8.0fs  %+.1f%% over the bound\n", w, (w - bound) * 100 / bound
-            printf "  utilisation     %8.1f%%\n", work * 100 / (w * n)
-            printf "  largest item    %8.0fs  %s%s\n", big, bigname,
-                   (big > work / n ? "   <-- item-bound: splitting would now pay" : "")
+            printf "  %-17s %-10s %s\n", "total work", sprintf("%.0fs", work),
+                   sprintf("sum of all %d item durations", NR)
+            printf "  %-17s %-10s %s\n", "actual run time", sprintf("%.0fs", w),
+                   sprintf("wall clock, first item start to last item finish")
+            printf "  %-17s %-10s %s\n", "utilisation", sprintf("%.1f%%", work * 100 / (w * n)),
+                   sprintf("share of %ss x %d GPUs actually spent running tests", w, n)
+            printf "  %-17s %-10s %s\n", "largest item", sprintf("%.0fs", big),
+                   bigname (big > work / n ? "  <-- floor: splitting it would now pay" : "")
         }' "$tf"
+    echo "  ----------------- ---------- --------------------------------------------------"
 
     echo
-    echo "-- weight accuracy (misses over 30s; these are what the next run corrects) --"
+    echo "-- weight accuracy: misses over 30s, which the next run corrects --"
     # 30s is roughly one process startup, and below the ~5% run-to-run noise for
     # anything long enough to matter. Listing smaller misses would bury the real
     # ones -- a healthy table has almost every item within a few seconds.
+    echo "  --------- --------- --------- -------- ---------------------------------------"
+    printf "  %-9s %-9s %-9s %-8s %s\n" MISS ESTIMATE ACTUAL "% CHANGE" TEST_NAME
+    echo "  --------- --------- --------- -------- ---------------------------------------"
     awk -F'\t' -v dw="$DEFAULT_WEIGHT" '$8 != dw && $8 > 0 {
             d = $4 - $8; a = (d < 0 ? -d : d)
-            if (a >= 30) printf "%.0f\t%+.0f\t%s\t%s\t%s\n", a, d, $8, $4, $1 "/" $2 }' "$tf" \
+            if (a >= 30) printf "%.0f\t%+.0f\t%s\t%s\t%.0f\t%s\n", a, d, $8, $4,
+                                (d * 100 / $8), $1 "/" $2 }' "$tf" \
         | sort -k1,1nr | head -15 \
-        | awk -F'\t' '{printf "  %+7ss  est %6ss -> actual %6ss  %s\n", $2, $3, $4, $5}'
-    awk -F'\t' -v dw="$DEFAULT_WEIGHT" '$8 == dw {printf "  unknown     -> actual %6ss  %s/%s\n", $4, $1, $2}' "$tf"
+        | awk -F'\t' '{printf "  %-9s %-9s %-9s %-8s %s\n",
+                              $2 "s", $3 "s", $4 "s", sprintf("%+d%%", $5), $6}'
+    awk -F'\t' -v dw="$DEFAULT_WEIGHT" '$8 == dw {
+            printf "  %-9s %-9s %-9s %-8s %s\n", "n/a", "unknown", $4 "s", "n/a", $1 "/" $2 }' "$tf"
+    echo "  --------- --------- --------- -------- ---------------------------------------"
 
     echo
     echo "-- failures --"
+    echo "  -------- --------- --------------------------------------------------------------"
+    printf "  %-8s %-9s %s\n" RESULT DURATION TEST_NAME
+    echo "  -------- --------- --------------------------------------------------------------"
     if awk -F'\t' '$5 != 0 {found = 1} END {exit !found}' "$tf"; then
         awk -F'\t' '$5 != 0 {
-            printf "  rc=%-4s %6ss  %s/%s%s\n", $5, $4, $1, $2,
-                   ($5 == 124 || $5 == 137 ? "   (killed at per-item deadline)" : "") }' "$tf"
+            res = ($5 == 1 ? "fail" : ($5 == 124 || $5 == 137 ? "killed" : "error"))
+            printf "  %-8s %-9s %s/%s\n", res, $4 "s", $1, $2 }' "$tf"
     else
-        echo "  none"
+        printf "  %-8s %-9s %s\n" "-" "-" "none"
     fi
+    echo "  -------- --------- --------------------------------------------------------------"
 
     # An item that never got a timings.tsv row was never dispatched -- only
     # possible if a worker died outright. Silence here would read as success.

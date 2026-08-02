@@ -209,11 +209,12 @@ jobs:
           # exists in both the torch and jax suites and runs in parallel).
           rm -rf test-results && mkdir -p test-results/torch test-results/jax test-results/core
 
-          # Seed from the in-tree table on a cache miss; after that the cached
-          # copy is authoritative, since it has been refined by every run since.
+          # No in-tree seed table: on a cache miss the file is simply absent, the
+          # queue runs in its natural order for one run, and this run's timings
+          # create the table. A checked-in copy would go stale silently and is
+          # worth less than the one unordered run it saves.
           mkdir -p ci-weights
           W="ci-weights/test_weights.${ARCH}.txt"
-          [ -s "$W" ] || cp "ci/test_weights.${ARCH}.txt" "$W" 2>/dev/null || true
           echo "weights: $W ($(wc -l < "$W" 2>/dev/null || echo 0) items)"
 
           docker exec \
@@ -230,8 +231,8 @@ jobs:
 
       # Runs even when tests failed: a red run still measures how long each item
       # took, and build_weights.py's asymmetric blend is built to absorb the bias
-      # a short-because-it-crashed measurement introduces. Only items killed at
-      # their deadline (rc 124/137) are dropped, since that measurement is a
+      # a short-because-it-crashed measurement introduces. Only items whose
+      # process was killed (rc 124/137) are dropped, since that measurement is a
       # ceiling that would otherwise compound run over run.
       - name: Update learned test weights
         if: always() && hashFiles('timings.tsv') != ''

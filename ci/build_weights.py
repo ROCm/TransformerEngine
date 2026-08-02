@@ -65,12 +65,11 @@ def from_junit(root_dir):
     return weights
 
 
-# rc values that mean the item was killed rather than measured. 124 is the
-# scheduler's per-item deadline (GNU timeout), 137 its SIGKILL follow-up or an
+# rc values that mean the item was killed rather than measured. 124 is a GNU
+# timeout expiry (the job's own step timeout, for instance), 137 a SIGKILL or an
 # OOM-kill. Either way the recorded duration is a ceiling imposed from outside,
-# not the item's cost -- and merging a ceiling is the one case the asymmetric
-# blend cannot absorb, because it raises the weight, which raises next run's
-# deadline, which raises the next ceiling. Drop them; the previous weight stands.
+# not the item's cost, so blending it in would teach the table a number the item
+# never actually took. Drop them; the previous weight stands.
 KILLED_RCS = frozenset(("124", "137"))
 
 
