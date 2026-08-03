@@ -11,17 +11,10 @@ from pathlib import Path
 
 import setuptools
 
-<<<<<<< HEAD
 from .utils import rocm_build, rocm_path
 from .utils import (
     get_cuda_include_dirs,
     all_files_in_dir,
-=======
-from .utils import (
-    get_cuda_include_dirs,
-    all_files_in_dir,
-    cudnn_frontend_include_path,
->>>>>>> 868d8d9216da361c666519652115e23688db5211
     debug_build_enabled,
     setup_mpi_flags,
     nccl_ep_enabled,
@@ -31,7 +24,6 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/JAX extensions."""
-<<<<<<< HEAD
     # If NVTE_RELEASE_BUILD is set, we assume not building but sources packaging
     if rocm_build() and not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):
         """Update requirements with current JAX version to avoid undesired update."""
@@ -41,9 +33,6 @@ def install_requirements() -> List[str]:
         except ImportError:
             pass
     return ["jax", "flax>=0.7.1"]
-=======
-    return ["jax", "flax>=0.7.1", "nvidia-cudnn-frontend>=1.25.0"]
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
 
 def test_requirements() -> List[str]:
@@ -103,7 +92,6 @@ def setup_jax_extension(
     sources = all_files_in_dir(extensions_dir, name_extension="cpp")
 
     # Header files
-<<<<<<< HEAD
     if rocm_build():
         hip_root, _ = rocm_path()
         include_dirs = [hip_root / "include"]
@@ -123,10 +111,6 @@ def setup_jax_extension(
                     break
         if cudnn_frontend_include_dir is not None:
             include_dirs.append(cudnn_frontend_include_dir)
-=======
-    include_dirs = get_cuda_include_dirs()
-    include_dirs.append(cudnn_frontend_include_path())
->>>>>>> 868d8d9216da361c666519652115e23688db5211
     include_dirs.extend(
         [
             common_header_files,
@@ -160,15 +144,11 @@ def setup_jax_extension(
     if bool(int(os.getenv("NVTE_WITH_CUBLASMP", 0))):
         cxx_flags.append("-DNVTE_WITH_CUBLASMP")
 
-<<<<<<< HEAD
     # NCCL EP is CUDA-only; nccl_ep_enabled() returns False on ROCm, so the
     # -DNVTE_WITH_NCCL_EP define is never added and the EP sources no-op at their
     # #ifdef boundary (matching the gate in build_tools/pytorch.py).
     # Disabled on ROCm
     if not rocm_build() and nccl_ep_enabled():
-=======
-    if nccl_ep_enabled():
->>>>>>> 868d8d9216da361c666519652115e23688db5211
         cxx_flags.append("-DNVTE_WITH_NCCL_EP")
 
     # Define TE/JAX as a Pybind11Extension
