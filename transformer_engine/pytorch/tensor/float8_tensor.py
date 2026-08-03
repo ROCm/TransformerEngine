@@ -311,16 +311,12 @@ class Float8CurrentScalingQuantizer(Quantizer):
             quantizer.amax_reduction_group = group
 
         # Launch cast kernel
-<<<<<<< HEAD
         if IS_HIP_EXTENSION:
             use_cast_transpose_triton =  bool( int(os.environ.get('NVTE_USE_CAST_TRANSPOSE_TRITON', '0')) )
             quantize_func = te_quantize_triton if use_cast_transpose_triton else tex.quantize
-            quantize_func(src, self, dst, noop_flag)
+            quantize_func(src, quantizer, dst, noop_flag)
         else:
-            tex.quantize(src, self, dst, noop_flag)
-=======
-        tex.quantize(src, quantizer, dst, noop_flag)
->>>>>>> 868d8d9216da361c666519652115e23688db5211
+            tex.quantize(src, quantizer, dst, noop_flag)
 
         # Update FP8 dtype
         dst._fp8_dtype = self.dtype

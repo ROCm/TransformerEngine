@@ -426,7 +426,6 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
             system_nvrtc, _NVRTC_LIB_CTYPES = _load_cuda_library("nvrtc")
             system_curand, _CURAND_LIB_CTYPES = _load_cuda_library("curand")
 
-<<<<<<< HEAD
             # This additional step is necessary to be able to install TE wheels
             # and import TE (without any guards) in an environment where the cuda
             # toolkit might be absent without being guarded
@@ -437,23 +436,6 @@ if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE
                 _CUDNN_ALL_LIB_CTYPES = _load_cuda_library_from_python("cudnn", strict=True)
         except (OSError, RuntimeError, subprocess.CalledProcessError):
             pass
-=======
-    # `_load_cuda_library` is used for packages that must be loaded
-    # during runtime. Both system and pypi packages are searched
-    # and an error is thrown if not found.
-    _, _CUDNN_LIB_CTYPES = _load_cuda_library("cudnn")
-    system_nvrtc, _NVRTC_LIB_CTYPES = _load_cuda_library("nvrtc")
-    system_curand, _CURAND_LIB_CTYPES = _load_cuda_library("curand")
-
-    # This additional step is necessary to be able to install TE wheels
-    # and import TE (without any guards) in an environment where the cuda
-    # toolkit might be absent without being guarded
-    load_libs_for_no_ctk = not system_nvrtc and not system_curand
-    if load_libs_for_no_ctk:
-        _CUBLAS_LIB_CTYPES = _load_cuda_library_from_python("cublas", strict=True)
-        _CUDART_LIB_CTYPES = _load_cuda_library_from_python("cudart", strict=True)
-        _CUDNN_ALL_LIB_CTYPES = _load_cuda_library_from_python("cudnn", strict=True)
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
     _TE_LIB_CTYPES = _load_core_library()
     try:

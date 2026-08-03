@@ -20,15 +20,12 @@ from torch.utils._pytree import tree_map
 import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
-<<<<<<< HEAD
-=======
 from transformer_engine.pytorch.constants import dist_group_type
 from transformer_engine.pytorch.tensor._quantization_helpers import (
     _QuantizeFunc,
     _IdentityFunc,
     _stride_from_shape,
 )
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
 
 # Custom ops that should pass through __torch_dispatch__ without unwrapping
@@ -417,8 +414,6 @@ class Quantizer(abc.ABC):
             "columnwise": self.columnwise_usage,
         }
 
-<<<<<<< HEAD
-=======
     @classmethod
     def _annotated_fields(cls) -> Dict[str, Any]:
         """Annotated fields (name -> annotation) across the ``Quantizer`` MRO,
@@ -492,7 +487,6 @@ class Quantizer(abc.ABC):
         return hash(self._value_key())
 
 
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 class QuantizedTensor(torch.Tensor):
     """Abstract base class for tensor with quantized data
 

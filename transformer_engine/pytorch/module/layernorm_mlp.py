@@ -2795,22 +2795,20 @@ class LayerNormMLP(TransformerEngineBaseModule):
             fc1_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
         fc2_weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM2_WEIGHT]
         fc2_weight_quantizer.internal = True
-<<<<<<< HEAD
         if IS_HIP_EXTENSION:
             fc2_weight_quantizer.set_usage(columnwise = self.keep_fp8_weight_transpose_cache)
-=======
-        # Weight scale factors must be GEMM-swizzled before cuBLAS/CUTLASS can
-        # consume them. Pre-swizzle once at quantize time (persisted on the cached
-        # workspace when the weight is cached) instead of lazily inside every GEMM.
-        # No-op for recipes whose scales don't need swizzling (e.g. per-tensor FP8).
-        # The exception is quantized_model_init, where the weight parameter is
-        # itself quantized and gets all-gathered (FSDP2) and optimizer-updated in
-        # its unswizzled layout; swizzling would break the all-gather and the
-        # dequantize-on-update, so leave the quantizer state untouched.
-        if not self.primary_weights_in_fp8:
-            fc1_weight_quantizer.optimize_for_gemm = True
-            fc2_weight_quantizer.optimize_for_gemm = True
->>>>>>> 868d8d9216da361c666519652115e23688db5211
+        else:
+            # Weight scale factors must be GEMM-swizzled before cuBLAS/CUTLASS can
+            # consume them. Pre-swizzle once at quantize time (persisted on the cached
+            # workspace when the weight is cached) instead of lazily inside every GEMM.
+            # No-op for recipes whose scales don't need swizzling (e.g. per-tensor FP8).
+            # The exception is quantized_model_init, where the weight parameter is
+            # itself quantized and gets all-gathered (FSDP2) and optimizer-updated in
+            # its unswizzled layout; swizzling would break the all-gather and the
+            # dequantize-on-update, so leave the quantizer state untouched.
+            if not self.primary_weights_in_fp8:
+                fc1_weight_quantizer.optimize_for_gemm = True
+                fc2_weight_quantizer.optimize_for_gemm = True
         return [fc1_weight_quantizer, fc2_weight_quantizer]
 
     def backward_dw(self):

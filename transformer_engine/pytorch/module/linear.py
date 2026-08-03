@@ -2230,7 +2230,6 @@ class Linear(TransformerEngineBaseModule):
             return [None]
         weight_quantizer = self.quantizers["scaling_fwd"][FP8FwdTensorIdx.GEMM1_WEIGHT]
         weight_quantizer.internal = True
-<<<<<<< HEAD
         if IS_HIP_EXTENSION:
             # NVFP4 must produce columnwise data at quantization time (no lazy transpose like
             # Float8Tensor), but only when the backward will actually use it in FP4 form.
@@ -2243,14 +2242,13 @@ class Linear(TransformerEngineBaseModule):
                 weight_quantizer.set_usage(columnwise=False)
             else:
                 weight_quantizer.set_usage(columnwise=True if is_nvfp4 else self.keep_fp8_weight_transpose_cache)
-=======
-        # Preswizzle the weights during quantization instead of lazily inside every GEMM.
-        # This wont work when primay weights are in fp8 because of 2 reasons
-        # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
-        # currently dont support dequantization.
-        # 2. For FSDP2, quantized weight all-gather would need to be done in the
-        # unswizzled layout.
-        if not self.primary_weights_in_fp8:
-            weight_quantizer.optimize_for_gemm = True
->>>>>>> 868d8d9216da361c666519652115e23688db5211
+        else:
+            # Preswizzle the weights during quantization instead of lazily inside every GEMM.
+            # This wont work when primay weights are in fp8 because of 2 reasons
+            # 1. optimizer step updates would need to dequantize the weights. But swizzled weights
+            # currently dont support dequantization.
+            # 2. For FSDP2, quantized weight all-gather would need to be done in the
+            # unswizzled layout.
+            if not self.primary_weights_in_fp8:
+                weight_quantizer.optimize_for_gemm = True
         return [weight_quantizer]

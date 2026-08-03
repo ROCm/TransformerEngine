@@ -412,14 +412,11 @@ class FusedTopkWithScoreFunctionBwdPrimitive(BasePrimitive):
         arg_infos,
         result_infos,
     ):
-<<<<<<< HEAD
-=======
         # NOTE: do NOT include ``routing_map_format`` in this ``del``: the
         # ``sharded_impl`` closure below resolves it by name at call time
         # (when XLA invokes the partitioned impl), so deleting it here
         # raises ``NameError: cannot access free variable 'routing_map_format'``
         # at execution time of the bwd custom_partitioning.
->>>>>>> 868d8d9216da361c666519652115e23688db5211
         del result_infos
         grad_spec = get_padded_spec(arg_infos[2])
         out_sharding = NamedSharding(mesh, PartitionSpec(*grad_spec))

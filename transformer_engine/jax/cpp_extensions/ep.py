@@ -23,11 +23,7 @@ from jax.sharding import NamedSharding, PartitionSpec
 
 import transformer_engine_jax
 from .base import BasePrimitive, register_primitive
-<<<<<<< HEAD
-from ..sharding import global_mesh_resource
-=======
 from ..sharding import global_mesh_resource, get_mesh_axis_size
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
 __all__ = [
     "EpConfig",
@@ -129,10 +125,6 @@ def _ep_outer_axis():
 
     When set, EP-output globals carry an extra leading ``dp_size`` dim so SPMD
     sees each DP color's slab as distinct (rather than replicated across DP).
-<<<<<<< HEAD
-    """
-    gsr = global_mesh_resource()
-=======
 
     A dp/fsdp axis that is sized 1 in the active mesh is treated as absent so
     we don't pin EP-output specs to a degenerate axis that JAX may collapse.
@@ -142,7 +134,6 @@ def _ep_outer_axis():
         return gsr.dp_resource
     if gsr.fsdp_resource is not None and get_mesh_axis_size(gsr.fsdp_resource) > 1:
         return gsr.fsdp_resource
->>>>>>> 868d8d9216da361c666519652115e23688db5211
     return gsr.dp_resource or gsr.fsdp_resource
 
 
@@ -213,25 +204,12 @@ class EpPreparePrimitive(BasePrimitive):
         leading = _ep_leading_dims(is_outer)
         token_counts_aval = jax.core.ShapedArray(leading + (num_local_experts,), jnp.int32)
         handle_mem_aval = jax.core.ShapedArray(leading + (handle_mem_size,), jnp.uint8)
-<<<<<<< HEAD
-        # FFI scratch for the int32 -> int64 topk_idx upcast. int32 with last
-        # dim doubled to keep the int64 byte count without JAX_ENABLE_X64.
-        # TODO(phuong): drop once NCCL EP supports int32 topk_idx.
-        workspace_shape = topk_idx_aval.shape[:-1] + (topk_idx_aval.shape[-1] * 2,)
-        workspace_aval = jax.core.ShapedArray(workspace_shape, jnp.int32)
-        return token_counts_aval, handle_mem_aval, workspace_aval
-=======
         return token_counts_aval, handle_mem_aval
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
         kwargs["is_outer"] = True
-<<<<<<< HEAD
-        return EpPreparePrimitive.abstract(*args, **kwargs)[:2]  # pylint: disable=missing-kwoa
-=======
         return EpPreparePrimitive.abstract(*args, **kwargs)  # pylint: disable=missing-kwoa
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
     @staticmethod
     def lowering(ctx, topk_idx, *, top_k, dispatch_output_per_expert_alignment, is_outer):
@@ -246,11 +224,7 @@ class EpPreparePrimitive(BasePrimitive):
     @staticmethod
     def impl(topk_idx, top_k, dispatch_output_per_expert_alignment, is_outer):
         assert EpPreparePrimitive.inner_primitive is not None
-<<<<<<< HEAD
-        token_counts, handle_mem, _workspace = EpPreparePrimitive.inner_primitive.bind(
-=======
         token_counts, handle_mem = EpPreparePrimitive.inner_primitive.bind(
->>>>>>> 868d8d9216da361c666519652115e23688db5211
             topk_idx,
             top_k=top_k,
             dispatch_output_per_expert_alignment=dispatch_output_per_expert_alignment,
@@ -328,12 +302,8 @@ class EpDispatchPrimitive(BasePrimitive):
     ):
         # is_outer=True: global leading dim = (dp*ep,) (or (ep,) with no DP);
         # False: per-shard = (1,).
-<<<<<<< HEAD
-        del topk_weights_aval, top_k, dispatch_output_per_expert_alignment, handle_mem_aval
-=======
         del topk_idx_aval, topk_weights_aval, top_k, dispatch_output_per_expert_alignment
         del handle_mem_aval
->>>>>>> 868d8d9216da361c666519652115e23688db5211
         assert (
             len(tokens_aval.shape) >= 2
         ), f"tokens must be at least 2D [..., H], got shape {tokens_aval.shape}"
@@ -343,23 +313,12 @@ class EpDispatchPrimitive(BasePrimitive):
         leading = _ep_leading_dims(is_outer)
         recv_tokens_aval = jax.core.ShapedArray(leading + (recv_pr, hidden_dim), tok_dtype)
         recv_topk_weights_aval = jax.core.ShapedArray(leading + (recv_pr,), jnp.float32)
-<<<<<<< HEAD
-        # int32 with last dim doubled to keep the int64 byte count without JAX_ENABLE_X64.
-        workspace_shape = topk_idx_aval.shape[:-1] + (topk_idx_aval.shape[-1] * 2,)
-        workspace_aval = jax.core.ShapedArray(workspace_shape, jnp.int32)
-        return (recv_tokens_aval, recv_topk_weights_aval, workspace_aval)
-=======
         return (recv_tokens_aval, recv_topk_weights_aval)
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
     @staticmethod
     def outer_abstract(*args, **kwargs):
         kwargs["is_outer"] = True
-<<<<<<< HEAD
-        return EpDispatchPrimitive.abstract(*args, **kwargs)[:2]  # pylint: disable=missing-kwoa
-=======
         return EpDispatchPrimitive.abstract(*args, **kwargs)  # pylint: disable=missing-kwoa
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
     @staticmethod
     def lowering(
@@ -397,11 +356,7 @@ class EpDispatchPrimitive(BasePrimitive):
         is_outer,
     ):
         assert EpDispatchPrimitive.inner_primitive is not None
-<<<<<<< HEAD
-        recv_tokens, recv_topk_weights, _workspace = EpDispatchPrimitive.inner_primitive.bind(
-=======
         recv_tokens, recv_topk_weights = EpDispatchPrimitive.inner_primitive.bind(
->>>>>>> 868d8d9216da361c666519652115e23688db5211
             handle_mem,
             topk_idx,
             tokens,

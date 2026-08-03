@@ -805,12 +805,9 @@ class _GroupedLinear(torch.autograd.Function):
             ctx.debug = debug
             ctx.save_original_input = save_original_input
             ctx.input_quantizers = input_quantizers
-<<<<<<< HEAD
             ctx.use_grouped_gemm_triton = use_grouped_gemm_triton
             ctx.num_input_tensors = len(inputmats)
-=======
             ctx.dgrad_out = dgrad_out
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
             # backward overrides
             if backward_override is not None:
@@ -1841,14 +1838,11 @@ class GroupedLinear(TransformerEngineBaseModule):
         inp: torch.Tensor,
         m_splits: torch.Tensor,
         is_first_microbatch: Optional[bool] = None,
-<<<<<<< HEAD
         m_splits_tensor: Optional[torch.Tensor] = None,
         actual_m_splits: Optional[List[int]] = None,
         unpad_output: bool = False,
-=======
         out: Optional[torch.Tensor] = None,
         dgrad_out: Optional[torch.Tensor] = None,
->>>>>>> 868d8d9216da361c666519652115e23688db5211
     ) -> Union[torch.Tensor, Tuple[torch.Tensor, ...]]:
         """
         Apply the linear transformation to the input.
@@ -1872,7 +1866,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                              * it also allows skipping gradient accumulation during the
                                first microbatch (since it is the first gradient being
                                produced)
-<<<<<<< HEAD
         actual_m_splits : Optional[List[int]], default = None
                          Unpadded per-group row counts when inp is unpadded and
                          m_splits contains the padded sizes. Used by the ROCm
@@ -1881,7 +1874,6 @@ class GroupedLinear(TransformerEngineBaseModule):
                       When True, unpad the GEMM output from sum(m_splits) to
                       sum(actual_m_splits) rows before returning. Used by the
                       ROCm fused-pad-cast-transpose path; ignored on CUDA.
-=======
         out : torch.Tensor, default = None
              Optional preallocated buffer for the forward output; the returned tensor
              aliases it with no copy. Must be a 2D, contiguous, non-grad tensor of shape
@@ -1895,7 +1887,6 @@ class GroupedLinear(TransformerEngineBaseModule):
              [num_tokens, in_features] with the same constraints as out. Receives the
              final gradient only when inp has a single consumer in the autograd graph;
              otherwise autograd accumulates into a new tensor.
->>>>>>> 868d8d9216da361c666519652115e23688db5211
         """
         debug = self.is_debug_iter()
         is_grad_enabled = torch.is_grad_enabled()
