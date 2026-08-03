@@ -102,6 +102,10 @@ struct CKAttnFwdArgs : CKAttnCommonArgs {
 
   // V3 ASM kernel selection
   bool uses_fwd_v3 = false;
+
+  // Split-KV support
+  int num_splits = 0;
+  void* splitkv_workspace_ptr = nullptr;
 };
 
 // Backward attention request.
@@ -165,6 +169,13 @@ size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args);
 // the v3 path is selected; false means the CK v2 path (or no support) would run.
 bool ck_attn_fwd_uses_v3(const CKAttnFwdArgs& args);
 bool ck_attn_bwd_uses_v3(const CkAttnBwdArgs& args);
+
+// Gen the number of splits for split-KV support.
+int ck_attn_fwd_num_splits(const CKAttnFwdArgs& args);
+
+// Gen the workspace size for fwd config.
+// Extra workspace in particular is needed for split-KV support.
+size_t ck_attn_fwd_workspace_size(const CKAttnFwdArgs& args);
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_H
