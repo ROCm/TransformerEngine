@@ -21,7 +21,7 @@ install_prerequisites() {
         script_error "Failed to install Flax and dependencies"
         return $rc
     fi
-    pip install pytest-timeout
+    pip install pytest-timeout etils
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to install test prerequisites"
@@ -38,7 +38,7 @@ run() {
 run_default_fa() {
     #Run tests that do not use fused attention with only one backend
     if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
-        run $*
+        run "$@"
     fi
 }
 
@@ -69,10 +69,10 @@ run_test_config_mgpu() {
     echo ==== Run mGPU with Fused attention backend: $_fus_attn ====
     configure_omp_threads 8
 
-    # Mitigate distributed tests hang by adding 5min timeout
-    _timeout_args="--timeout 300 --timeout-method thread"
     # Workaround for some distributed tests hang/abortion
     export XLA_FLAGS="--xla_gpu_enable_nccl_comm_splitting=false"
+    export JAX_COMPILATION_CACHE_DIR="/tmp/jax_cache"
+    export JAX_PERSISTENT_CACHE_MIN_COMPILE_TIME_SECS="0"
 
     if [ $_fus_attn = $_DEFAULT_FUSED_ATTN ]; then
         _dfa_level=2
@@ -82,11 +82,21 @@ run_test_config_mgpu() {
         export NVTE_JAX_UNITTEST_LEVEL=L2
     fi
 
-    run_default_fa 2 test_distributed_dense.py
+    run_default_fa 1 test_distributed_dense.py
     # RCCL_MSCCL_ENABLE=0 is to avoid hangs in some distributed tests (ROCM-1719)
-    RCCL_MSCCL_ENABLE=0 run $_dfa_level test_distributed_fused_attn.py $_timeout_args
+    RCCL_MSCCL_ENABLE=0 run $_dfa_level test_distributed_fused_attn.py
+    run_default_fa 1 test_distributed_helper.py
     run_default_fa 3 test_distributed_layernorm.py
-    run_default_fa 2 test_distributed_layernorm_mlp.py $_timeout_args
+    # JAX 0.10+ on ROCm lowers sharded FP8 dot_general (with_jax_gemm=True,
+    # Float8CurrentScaling) to __triton_nested_gemm_fusion with f16 accumulation,
+    # which overflows before scale_inv is applied. JAX 0.8 used __cublas$gemm /
+    # hipBLASLt instead. Run those cases with Triton GEMM disabled only.
+    _layernorm_mlp_jax_gemm_k="Float8CurrentScaling and with_jax_gemm_True"
+    run_default_fa 2 test_distributed_layernorm_mlp.py -k "not (${_layernorm_mlp_jax_gemm_k})"
+    _saved_xla_flags="$XLA_FLAGS"
+    export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false"
+    run_default_fa 2 test_distributed_layernorm_mlp.py -k "${_layernorm_mlp_jax_gemm_k}"
+    export XLA_FLAGS="$_saved_xla_flags"
     run_default_fa 3 test_distributed_softmax.py
 
     run_default_fa 3 test_sanity_import.py

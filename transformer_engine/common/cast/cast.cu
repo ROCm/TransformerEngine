@@ -30,15 +30,6 @@ void nvte_quantize(const NVTETensor input, NVTETensor output, cudaStream_t strea
   dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
 }
 
-void nvte_group_quantize(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                         cudaStream_t stream) {
-  NVTE_API_CALL(nvte_group_quantize);
-  using namespace transformer_engine;
-
-  constexpr bool IS_ACT = false;
-  dispatch::group_quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, nullptr, stream);
-}
-
 void nvte_quantize_noop(const NVTETensor input, NVTETensor output, NVTETensor noop,
                         cudaStream_t stream) {
   NVTE_API_CALL(nvte_quantize_noop);
@@ -60,32 +51,6 @@ void nvte_quantize_v2(const NVTETensor input, NVTETensor output,
   dispatch::quantize_fwd_helper<IS_ACT, Empty, nullptr>(input, output, quant_config, stream);
 }
 
-void nvte_quantize_dbias(const NVTETensor input, NVTETensor output, NVTETensor dbias,
-                         NVTETensor workspace, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_quantize_dbias);
-  using namespace transformer_engine;
-
-  constexpr bool IS_DBIAS = true;
-  constexpr bool IS_DACT = false;
-  constexpr const NVTETensor activation_input = nullptr;
-
-  dispatch::quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, nullptr>(
-      input, activation_input, output, dbias, workspace, nullptr, stream);
-}
-
-void nvte_group_quantize_dbias(const NVTEGroupedTensor input, NVTEGroupedTensor output,
-                               NVTEGroupedTensor dbias, NVTETensor workspace, cudaStream_t stream) {
-  NVTE_API_CALL(nvte_group_quantize_dbias);
-  using namespace transformer_engine;
-
-  constexpr bool IS_DBIAS = true;
-  constexpr bool IS_DACT = false;
-  constexpr const NVTEGroupedTensor activation_input = nullptr;
-
-  dispatch::group_quantize_bwd_helper<IS_DBIAS, IS_DACT, Empty, nullptr>(
-      input, activation_input, output, dbias, workspace, nullptr, stream);
-}
-
 void nvte_dequantize(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
   NVTE_API_CALL(nvte_dequantize);
   using namespace transformer_engine;
@@ -98,6 +63,19 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
                                 const size_t num_tensors, cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_quantize);
   using namespace transformer_engine;
+
+#ifdef __HIP_PLATFORM_AMD__
+  if (num_tensors > 0 &&
+      convertNVTETensorCheck(outputs[0])->scaling_mode == NVTE_MXFP8_1D_SCALING) {
+    std::vector<Tensor *> input_list, output_list;
+    for (size_t i = 0; i < num_tensors; i++) {
+      input_list.push_back(convertNVTETensorCheck(inputs[i]));
+      output_list.push_back(convertNVTETensorCheck(outputs[i]));
+    }
+    dispatch::multi_quantize_mxfp8(input_list, output_list, stream);
+    return;
+  }
+#endif
 
   constexpr bool IS_ACT = false;
 
@@ -125,20 +103,4 @@ void nvte_multi_tensor_quantize(const NVTETensor *inputs, NVTETensor *outputs,
   for (int s = 0; s < num_stream_used; s++) {
     NVTE_CHECK_CUDA(cudaStreamWaitEvent(stream, detail::get_compute_stream_event(s)));
   }
-}
-
-// Group quantize assumes contiguous inputs and outputs in memory allocation
-// Note: this API assumes knowing split sections from the host, if split information
-// comes from D2H copy, it will break cuda graph capture
-void nvte_group_nvfp4_quantize_with_amax(const NVTETensor input, NVTETensor *outputs,
-                                         const size_t *split_sections, const size_t num_tensors,
-                                         const NVTEQuantizationConfig quant_config,
-                                         cudaStream_t stream) {
-  NVTE_API_CALL(nvte_group_nvfp4_quantize_with_amax);
-  using namespace transformer_engine;
-
-  constexpr bool IS_ACT = false;
-
-  dispatch::group_quantize_fwd_host_aware_helper<IS_ACT, Empty, nullptr>(
-      input, outputs, split_sections, num_tensors, quant_config, stream);
 }

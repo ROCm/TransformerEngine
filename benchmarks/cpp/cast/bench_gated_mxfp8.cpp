@@ -20,7 +20,7 @@ using namespace te_bench;
 using namespace transformer_engine;
 using fp8_e4m3 = test::fp8e4m3;
 
-// SwiGLU shapes from LLaMA (8B, 70B, 405B) and Qwen (7B, 72B)
+// SwiGLU shapes from LLaMA (8B, 70B, 405B), Qwen (7B, 72B), and DeepSeek-V3/V4 MoE experts
 #define COMMON_SHAPES    \
   ->Args({1024, 14336})  \
   ->Args({1024, 18944})  \
@@ -38,7 +38,13 @@ using fp8_e4m3 = test::fp8e4m3;
   ->Args({16384, 28672}) \
   ->Args({16384, 53248}) \
   ->Args({32768, 28672}) \
-  ->Args({32768, 53248})
+  ->Args({32768, 53248}) \
+  ->Args({1024, 2048})   \
+  ->Args({4096, 2048})   \
+  ->Args({8192, 2048})   \
+  ->Args({1024, 3072})   \
+  ->Args({4096, 3072})   \
+  ->Args({8192, 3072})
 
 template <typename IType, typename OType, int SCALE_DIM_Y, int SCALE_DIM_X>
 static void BM_GatedMXFP8_Forward(benchmark::State &state) {

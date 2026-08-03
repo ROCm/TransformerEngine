@@ -18,22 +18,10 @@ string(STRIP "${ROCM_VER_CONTENT}" ROCM_VER_CONTENT)
 string(REGEX MATCH "^[0-9]+\\.[0-9]+" ROCM_VER "${ROCM_VER_CONTENT}")
 string(REGEX MATCH "^[0-9]+" ROCM_VER_MAJOR "${ROCM_VER}")
 
-# AITER commit — read from the QoLA manifest so the cache key tracks the
-# commit QoLA will actually check out and build, not whatever happens to be
-# the submodule's current HEAD at configure time.
-set(__QOLA_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/qola_manifest.toml")
-set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${__QOLA_MANIFEST}")
-file(STRINGS "${__QOLA_MANIFEST}" __AITER_COMMIT_LINES
-     REGEX "^[ \t]*aiter_commit[ \t]*=[ \t]*\"[^\"]+\"")
-list(LENGTH __AITER_COMMIT_LINES __AITER_COMMIT_COUNT)
-if(NOT __AITER_COMMIT_COUNT EQUAL 1)
-  message(FATAL_ERROR
-          "Expected exactly one 'aiter_commit = \"...\"' line in "
-          "${__QOLA_MANIFEST}, found ${__AITER_COMMIT_COUNT}.")
+# AITER commit
+if(NOT DEFINED AITER_SHA OR "${AITER_SHA}" STREQUAL "")
+  get_git_commit("${__AITER_SOURCE_DIR}" AITER_SHA)
 endif()
-list(GET __AITER_COMMIT_LINES 0 __AITER_COMMIT_LINE)
-string(REGEX MATCH "\"([^\"]+)\"" _UNUSED "${__AITER_COMMIT_LINE}")
-set(AITER_SHA "${CMAKE_MATCH_1}")
 
 # Cache key & local paths
 set(AITER_CACHE_ROOT "${CMAKE_CURRENT_LIST_DIR}/../../../build/aiter-prebuilts")

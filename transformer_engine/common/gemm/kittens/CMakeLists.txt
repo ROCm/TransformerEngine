@@ -1,0 +1,80 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+# License for AMD contributions = MIT. See LICENSE for more information
+
+cmake_minimum_required(VERSION 3.21)
+
+list(FIND CMAKE_HIP_ARCHITECTURES "gfx942" _gfx942_index)
+list(FIND CMAKE_HIP_ARCHITECTURES "gfx950" _gfx950_index)
+
+include(CheckCXXCompilerFlag)
+check_cxx_compiler_flag("-std=c++20" HAS_CXX20)
+
+if(_gfx942_index EQUAL -1 AND _gfx950_index EQUAL -1)
+    message(STATUS "HipKittens GEMM disabled (neither gfx942 nor gfx950 in CMAKE_HIP_ARCHITECTURES)")
+    set(USE_HIPKITTENS_GEMM OFF PARENT_SCOPE)
+elseif(NOT HAS_CXX20)
+    message(WARNING "HipKittens GEMMs require C++20")
+    set(USE_HIPKITTENS_GEMM OFF PARENT_SCOPE)
+else()
+    set(HIPKITTENS_CDNA3_INCLUDE_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../3rdparty/hipkittens/include")
+    set(HIPKITTENS_CDNA4_INCLUDE_DIR
+        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../3rdparty/hipkittens/include")
+
+    set(CMAKE_CXX_STANDARD 20)
+    project(kittens_gemm LANGUAGES HIP CXX)
+    find_package(hip)
+
+    include_directories("${ROCM_PATH}/include/hip")
+
+    set(_kittens_arch_objs "")
+
+    if(NOT _gfx942_index EQUAL -1)
+        if(NOT EXISTS "${HIPKITTENS_CDNA3_INCLUDE_DIR}/kittens.cuh")
+            message(FATAL_ERROR
+                "Could not find HipKittens (CDNA3) headers at ${HIPKITTENS_CDNA3_INCLUDE_DIR}. "
+                "Try running 'git submodule update --init --recursive'.")
+        endif()
+        add_library(kittens_gemm_cdna3 OBJECT cdna3/blockwise_fp8_gemm.cpp)
+        set_source_files_properties(cdna3/blockwise_fp8_gemm.cpp PROPERTIES LANGUAGE HIP)
+        set_target_properties(kittens_gemm_cdna3 PROPERTIES
+            HIP_ARCHITECTURES "gfx942" POSITION_INDEPENDENT_CODE ON)
+        target_include_directories(kittens_gemm_cdna3 PRIVATE
+            ${HIP_INCLUDE_DIRS} "${HIPKITTENS_CDNA3_INCLUDE_DIR}")
+        target_compile_options(kittens_gemm_cdna3 PRIVATE
+            -DKITTENS_CDNA3 -fno-gpu-rdc -O3)
+        target_link_libraries(kittens_gemm_cdna3 PRIVATE hip::host hip::device)
+        list(APPEND _kittens_arch_objs $<TARGET_OBJECTS:kittens_gemm_cdna3>)
+        set(KITTENS_HAVE_CDNA3 ON PARENT_SCOPE)
+    endif()
+
+    if(NOT _gfx950_index EQUAL -1)
+        if(NOT EXISTS "${HIPKITTENS_CDNA4_INCLUDE_DIR}/kittens.cuh")
+            message(FATAL_ERROR
+                "Could not find HipKittens (CDNA4) headers at ${HIPKITTENS_CDNA4_INCLUDE_DIR}. "
+                "Try running 'git submodule update --init --recursive'.")
+        endif()
+        add_library(kittens_gemm_cdna4 OBJECT cdna4/blockwise_fp8_gemm.cpp cdna4/mxfp8_gemm.cpp)
+        set_source_files_properties(cdna4/mxfp8_gemm.cpp
+            PROPERTIES LANGUAGE HIP COMPILE_FLAGS "-gline-tables-only")
+        set_source_files_properties(cdna4/blockwise_fp8_gemm.cpp
+            PROPERTIES LANGUAGE HIP COMPILE_FLAGS "-gline-tables-only -ffast-math")
+        set_target_properties(kittens_gemm_cdna4 PROPERTIES
+            HIP_ARCHITECTURES "gfx950" POSITION_INDEPENDENT_CODE ON)
+        target_include_directories(kittens_gemm_cdna4 PRIVATE
+            ${HIP_INCLUDE_DIRS} "${HIPKITTENS_CDNA4_INCLUDE_DIR}")
+        target_compile_options(kittens_gemm_cdna4 PRIVATE
+            -DKITTENS_CDNA4 -fno-gpu-rdc -O3)
+        target_link_libraries(kittens_gemm_cdna4 PRIVATE hip::host hip::device)
+        list(APPEND _kittens_arch_objs $<TARGET_OBJECTS:kittens_gemm_cdna4>)
+        set(KITTENS_HAVE_CDNA4 ON PARENT_SCOPE)
+    endif()
+
+    add_library(kittens_gemm SHARED ${_kittens_arch_objs})
+    set_target_properties(kittens_gemm PROPERTIES LINKER_LANGUAGE HIP)
+    target_include_directories(kittens_gemm PRIVATE ${HIP_INCLUDE_DIRS})
+    target_link_libraries(kittens_gemm PUBLIC hip::host hip::device)
+
+    install(TARGETS kittens_gemm
+        DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine/lib)
+endif()

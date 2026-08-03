@@ -38,9 +38,23 @@ run_default_fa_lbl() {
     fi
 }
 
+check_mxfp8_supported() {
+    #Guard MXFP8-only test filters, which collect no tests on unsupported archs
+    _result=$(NVTE_ROCM_ENABLE_MXFP8=1 python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.quantization import is_mxfp8_available; print(is_mxfp8_available())" 2>/dev/null)
+    if [ "$_result" = "True" ]; then
+        return 0
+    else
+        echo "MXFP8 is not supported on this device, skipping MXFP8-only tests" >&2
+        return 1
+    fi
+}
+
 run_test_config(){
     echo ==== Run with Fused attention backend: $_fus_attn ====
     #_WORKERS_COUNT=$TEST_WORKERS
+    # Enable GroupedLinear single-param feature
+    export NVTE_GROUPED_LINEAR_SINGLE_PARAM=1
+    run_default_fa 1 test_backward_override.py
     if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
         mkdir -p ${TEST_DIR}/checkpoint
         python ${TEST_DIR}/test_checkpoint.py --save-checkpoint all --checkpoint-dir ${TEST_DIR}/checkpoint
@@ -49,8 +63,10 @@ run_test_config(){
     fi
     run 1 test_cuda_graphs.py
     run_default_fa 1 test_deferred_init.py
-    run_default_fa 1 test_quantized_tensor.py
     run_default_fa 1 test_float8_current_scaling_exact.py
+    run_default_fa 1 test_float8blockwisetensor.py
+    run_default_fa 1 test_float8_blockwise_scaling_exact.py
+    run_default_fa 1 test_quantized_tensor.py
     test $_fus_attn = auto -o $_fus_attn = ck && run 1 test_cpu_offloading.py
     test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 NVTE_CPU_OFFLOAD_V1=1 run 3 test_cpu_offloading_v1.py
     run_default_fa 1 test_fused_rope.py
@@ -58,14 +74,18 @@ run_test_config(){
     run_default_fa 1 test_fusible_ops.py
     run_default_fa 1 test_gemm_autotune.py
     run 1 test_gqa.py
+    run 1 test_grouped_linear.py
     run 1 test_jit.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
+    check_mxfp8_supported && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "mxfp8" 1 test_numerics.py -k "MXFP8BlockScaling and 126m and not grouped"
+    run_default_fa 1 test_nvfp4_fsdp2_hooks.py
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py
     run 1 test_sanity.py
     run_default_fa 3 test_sanity_hipified_cast_transpose.py
     run_default_fa 1 test_sanity_import.py
+    run_default_fa 1 test_torch_compile.py
     run_default_fa 1 attention/test_attention.py # Backend selection is controlled by the test
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 attention/test_attention.py -k "test_deterministic_bwd_ck"
     run_default_fa 1 attention/test_cp_utils.py

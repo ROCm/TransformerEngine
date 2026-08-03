@@ -88,16 +88,15 @@ jobs:
           fi
 
           echo "Selected config key: $JSON_KEY"
-          IMAGE_TO_USE=$(jq -r --arg key "$JSON_KEY" '.docker_images[$key]' ci/ci_config.json)
+          IMAGE_BASE=$(jq -r --arg key "$JSON_KEY" '.docker_images[$key]' ci/ci_config.json)
 
           MANUAL_OVERRIDE="${{ inputs.docker_image_override }}"
           if [[ -n "$MANUAL_OVERRIDE" ]]; then
             echo "::notice::Manual override detected: $MANUAL_OVERRIDE"
-            IMAGE_TO_USE="$MANUAL_OVERRIDE"
           fi
 
-          echo "Selected image: $IMAGE_TO_USE"
-          echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
+          echo "Selected base image tag: $IMAGE_BASE"
+          echo "image-tag=$IMAGE_BASE" >> $GITHUB_OUTPUT
 
   build:
     # Delegate wheel building to the reusable workflow on dev. It produces a core .whl plus framework .tar.gz sdists under artifact name `te-rocm-wheels`.
@@ -107,8 +106,10 @@ jobs:
   sgpu_tests:
     name: sGPU Tests (${{ matrix.arch_label }})
     needs: [select_image, build]
-    timeout-minutes: 360
-    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || 'linux-te-mi35x-4' }}
+    timeout-minutes: 270
+    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-4' }}
+    env:
+      DOCKER_IMAGE: ${{ inputs.docker_image_override || format('{0}{1}', needs.select_image.outputs.image-tag, matrix.arch_label == 'mi30x' && '_gfx942' || matrix.arch_label == 'mi35x' && '_gfx950') }}
     strategy:
       fail-fast: false
       matrix:
@@ -140,13 +141,14 @@ jobs:
 
       - name: Pull Docker Image
         run: |
-          docker pull ${{ needs.select_image.outputs.image-tag }}
+          docker pull ${{ env.DOCKER_IMAGE }}
 
       - &run_container
         name: Run Container
         run: |
           DEVICE_FLAG="$(cat /etc/podinfo/gha-render-devices 2>/dev/null || echo --device=/dev/dri)"
           test -n "$DEVICE_FLAG"
+          echo "Using device flag: $DEVICE_FLAG"
           docker run -dt \
             --rm \
             --name te-runner \
@@ -158,7 +160,7 @@ jobs:
             --group-add $(getent group video | cut -d: -f3) \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            ${{ needs.select_image.outputs.image-tag }}
+            ${{ env.DOCKER_IMAGE }}
 
       - name: Install packages
         run: |
@@ -184,11 +186,10 @@ jobs:
         id: run-tests
         # Below the job's timeout-minutes so an overrun kills only this step;
         # the `if: always()` report + upload steps still run (artifacts survive).
-        timeout-minutes: 180
+        timeout-minutes: 240
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          rm -f FAIL_*
           # One subdir per suite so PyTorch/JAX/Core get independent reports and
           # never collide on identically-named XML (e.g. test_sanity_import.auto.xml
           # exists in both the torch and jax suites and runs in parallel).
@@ -200,91 +201,10 @@ jobs:
             -e JUNITXML_PREFIX=/workspace/test-results/ \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
-            te-runner bash -c "$(cat <<'EOF'
-          #!/usr/bin/bash
-          set -x -o pipefail
-          ulimit -c 0 # Disable core dumps
-
-          # Each suite appends its own subdir to the inherited base prefix so the
-          # base path is defined once in the docker-exec env above (inline VAR=val
-          # applies only to that backgrounded subprocess; the sourced _utils.sh
-          # reads it from the env).
-          HIP_VISIBLE_DEVICES=0 JUNITXML_PREFIX=${JUNITXML_PREFIX}torch/ ci/pytorch.sh > /workspace/torch.log 2>&1 &
-          TORCH_PID=$!
-
-          HIP_VISIBLE_DEVICES=1 JUNITXML_PREFIX=${JUNITXML_PREFIX}jax/ ci/jax.sh > /workspace/jax.log 2>&1 &
-          JAX_PID=$!
-
-          (
-            set -e
-            python -c "import os; print('HF_TOKEN set:', bool(os.environ.get('HF_TOKEN')))"
-
-            JAX_CONSTRAINTS=/tmp/jax-constraints.txt
-            pip freeze | grep -iE '^(jax|jaxlib|jax[_-]rocm|jax[_-]plugins)[=@]' > "$JAX_CONSTRAINTS" || true
-
-            export HIP_VISIBLE_DEVICES=2
-
-            cd /workspace/examples/pytorch/mnist
-            python main.py
-            python main.py --use-te
-            python main.py --use-fp8
-
-            cd /workspace/examples/jax/mnist
-            pip3 install -c "$JAX_CONSTRAINTS" -r requirements.txt
-            python test_single_gpu_mnist.py
-            python test_single_gpu_mnist.py --use-te
-            python test_single_gpu_mnist.py --use-fp8
-
-            cd /workspace/examples/jax/encoder
-            pip3 install -c "$JAX_CONSTRAINTS" -r requirements.txt
-            python test_single_gpu_encoder.py
-            python test_single_gpu_encoder.py --use-fp8
-          ) > /workspace/examples.log 2>&1 &
-          EXAMPLES_PID=$!
-
-          HIP_VISIBLE_DEVICES=3 JUNITXML_PREFIX=${JUNITXML_PREFIX}core/ ci/core.sh > /workspace/core.log 2>&1 &
-          CORE_PID=$!
-
-          wait $TORCH_PID;    torch_rc=$?
-          wait $JAX_PID;      jax_rc=$?
-          wait $EXAMPLES_PID; examples_rc=$?
-          wait $CORE_PID;     core_rc=$?
-
-          if [ $torch_rc -ne 0 ]; then
-            echo "::group::[FAILED] PyTorch Log"
-            cat /workspace/torch.log
-            echo "::endgroup::"
-            echo "::error::PyTorch tests FAILED."
-            touch /workspace/FAIL_TORCH
-          fi
-
-          if [ $jax_rc -ne 0 ]; then
-            echo "::group::[FAILED] JAX Log"
-            cat /workspace/jax.log
-            echo "::endgroup::"
-            echo "::error::JAX tests FAILED."
-            touch /workspace/FAIL_JAX
-          fi
-
-          if [ $examples_rc -ne 0 ]; then
-            echo "::group::[FAILED] Examples Log"
-            cat /workspace/examples.log
-            echo "::endgroup::"
-            echo "::error::Examples FAILED."
-            touch /workspace/FAIL_EXAMPLES
-          fi
-
-          if [ $core_rc -ne 0 ]; then
-            echo "::group::[FAILED] Core Log"
-            cat /workspace/core.log
-            echo "::endgroup::"
-            echo "::error::Core tests FAILED."
-            touch /workspace/FAIL_CORE
-          fi
-
-          test $torch_rc -eq 0 -a $jax_rc -eq 0 -a $examples_rc -eq 0 -a $core_rc -eq 0
-          EOF
-          )"
+            te-runner bash /workspace/.github/scripts/run_parallel_sgpu.sh \
+              --first-gpu 0 \
+              --log-dir /workspace/ \
+              /workspace/.github/scripts/ci_sgpu_jobs.conf
 
       - name: Generate test report
         if: always()
@@ -304,22 +224,21 @@ jobs:
         if: always()
         run: |
           EXIT_STATUS=0
-          if [[ -f FAIL_TORCH ]]; then
-            echo "::error::PyTorch tests failed."
-            EXIT_STATUS=1
-          fi
-          if [[ -f FAIL_JAX ]]; then
-            echo "::error::JAX tests failed."
-            EXIT_STATUS=1
-          fi
-          if [[ -f FAIL_EXAMPLES ]]; then
-            echo "::error::Examples failed."
-            EXIT_STATUS=1
-          fi
-          if [[ -f FAIL_CORE ]]; then
-            echo "::error::Core tests failed."
-            EXIT_STATUS=1
-          fi
+          for config in .github/scripts/ci_sgpu_jobs.conf; do
+            while IFS= read -r line || [[ -n "$line" ]]; do
+              [[ "$line" =~ ^[[:space:]]*# ]] && continue
+              [[ -z "${line//[[:space:]]/}" ]] && continue
+              read -r label logfile rest <<< "$line"
+              rc=$(cat "${logfile}.rc" 2>/dev/null || echo "missing")
+              if [[ "$rc" != "0" ]]; then
+                echo "::group::[FAILED] ${label} Log (rc=${rc})"
+                cat "$logfile" 2>/dev/null || echo "(log not found)"
+                echo "::endgroup::"
+                echo "::error::${label} tests FAILED."
+                EXIT_STATUS=1
+              fi
+            done < "$config"
+          done
           exit $EXIT_STATUS
 
       - name: Upload logs
@@ -340,8 +259,10 @@ jobs:
   mgpu_tests:
     name: mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})
     needs: [select_image, build]
-    timeout-minutes: 360
-    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || 'linux-te-mi35x-8' }}
+    timeout-minutes: 210
+    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
+    env:
+      DOCKER_IMAGE: ${{ inputs.docker_image_override || format('{0}{1}', needs.select_image.outputs.image-tag, matrix.arch_label == 'mi30x' && '_gfx942' || matrix.arch_label == 'mi35x' && '_gfx950') }}
     strategy:
       fail-fast: false
       matrix:
@@ -368,7 +289,7 @@ jobs:
 
       - name: Pull Docker Image
         run: |
-          docker pull ${{ needs.select_image.outputs.image-tag }}
+          docker pull ${{ env.DOCKER_IMAGE }}
 
       - *run_container
 

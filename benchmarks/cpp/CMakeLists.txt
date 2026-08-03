@@ -1,3 +1,9 @@
+#########################################################################
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# License for AMD contributions = MIT. See LICENSE for more information
+#########################################################################
+
 cmake_minimum_required(VERSION 3.18)
 
 if(NOT DEFINED CMAKE_CXX_COMPILER)
@@ -82,9 +88,10 @@ function(add_te_benchmark TARGET_NAME SOURCE_FILE)
   )
 endfunction()
 
-add_te_benchmark(bench_quantize_mxfp8_fused cast/bench_quantize_mxfp8_fused.cpp)
-add_te_benchmark(bench_dequantize_mxfp8 cast/bench_dequantize_mxfp8.cpp)
-add_te_benchmark(bench_gated_mxfp8 cast/bench_gated_mxfp8.cpp)
 add_te_benchmark(bench_casttranspose cast/bench_casttranspose.cpp)
 add_te_benchmark(bench_multi_cast_transpose cast/bench_multi_cast_transpose.cpp)
 add_te_benchmark(bench_normalization normalization/bench_normalization.cpp)
+add_te_benchmark(bench_dequantize_mxfp8 cast/bench_dequantize_mxfp8.cpp)
+add_te_benchmark(bench_gated_mxfp8 cast/bench_gated_mxfp8.cpp)
+add_te_benchmark(bench_group_quantize_mxfp8 cast/bench_group_quantize_mxfp8.cpp)
+add_te_benchmark(bench_quantize_mxfp8_fused cast/bench_quantize_mxfp8_fused.cpp)

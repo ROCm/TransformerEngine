@@ -4,6 +4,7 @@
 import torch
 from typing import Optional
 from transformer_engine.pytorch.router import (
+    RoutingMapFormat,
     fused_topk_with_score_function,
     fused_compute_score_for_moe_aux_loss,
     fused_moe_aux_loss,
@@ -15,6 +16,30 @@ seed = 42
 torch.manual_seed(seed)
 if torch.cuda.is_available():
     torch.cuda.manual_seed(seed)
+
+
+def _get_tolerances(dtype: torch.dtype, num_experts: int):
+    """Return (atol, rtol) scaled by the number of experts.
+
+    With many experts the fused and reference kernels accumulate
+    floating-point reductions (e.g. normalization sums) in different
+    orders, causing O(num_experts * machine_eps) rounding divergence.
+    Scale the default tolerances accordingly so that small expert
+    counts keep tight checks while large counts (1024+) get the
+    headroom they need.
+    """
+    # Default tolerances for torch.testing.assert_close
+    base_atol, base_rtol = 1e-5, 1.3e-6
+    # TODO: account for fp16, bf16 as dtype
+    if dtype != torch.float32:
+        raise NotImplementedError("tolerances implemented for fp32 only")
+    eps = 2e-7
+    # The worst-case rounding error from summing N values is O(N * eps).
+    # Use 2 * num_experts * eps as the tolerance floor so tests pass for
+    # large expert counts while remaining tight for small ones.
+    atol = max(base_atol, 2 * num_experts * eps)
+    rtol = max(base_rtol, 2 * num_experts * eps)
+    return atol, rtol
 
 
 # Pytorch-based group topk
@@ -153,6 +178,13 @@ def run_comparison(
     score_function,
     enable_bias,
 ):
+    if topk >= num_experts:
+        pytest.skip(f"topk ({topk}) >= num_experts ({num_experts})")
+    if group_topk is not None and num_groups is not None:
+        group_size = num_experts // num_groups
+        per_group_topk = topk // group_topk
+        if per_group_topk >= group_size:
+            pytest.skip(f"per-group topk ({per_group_topk}) >= group_size ({group_size})")
     # Set some parameters
     if score_function in ("sigmoid", "sqrtsoftplus"):
         # Construct logits with a narrow range to avoid very small activation values,
@@ -215,7 +247,8 @@ def run_comparison(
         expert_bias=expert_bias_clone,
     )
 
-    torch.testing.assert_close(probs, probs_fused)
+    atol, rtol = _get_tolerances(dtype, num_experts)
+    torch.testing.assert_close(probs, probs_fused, atol=atol, rtol=rtol)
     torch.testing.assert_close(routing_map, routing_map_fused)
 
     # Fake the loss
@@ -227,13 +260,13 @@ def run_comparison(
     loss_fused.backward()
 
     # Check the gradient
-    torch.testing.assert_close(logits.grad, logits_clone.grad)
+    torch.testing.assert_close(logits.grad, logits_clone.grad, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 8992])
-@pytest.mark.parametrize("num_experts", [128, 32])
-@pytest.mark.parametrize("topk", [4, 8])
+@pytest.mark.parametrize("num_experts", [1024, 128, 32])
+@pytest.mark.parametrize("topk", [4, 8, 16, 32])
 @pytest.mark.parametrize("group_topk", [None, 4])
 @pytest.mark.parametrize("scaling_factor", [None, 1.2])
 @pytest.mark.parametrize("enable_bias", [True, False])
@@ -263,8 +296,8 @@ def test_topk_sigmoid(
 
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 8992])
-@pytest.mark.parametrize("num_experts", [128, 32])
-@pytest.mark.parametrize("topk", [4, 8])
+@pytest.mark.parametrize("num_experts", [1024, 128, 32])
+@pytest.mark.parametrize("topk", [4, 8, 16, 32])
 @pytest.mark.parametrize("group_topk", [None, 4])
 @pytest.mark.parametrize("scaling_factor", [None, 1.2])
 @pytest.mark.parametrize("enable_bias", [True, False])
@@ -294,8 +327,8 @@ def test_topk_sqrtsoftplus(
 
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 14234])
-@pytest.mark.parametrize("num_experts", [128, 32])
-@pytest.mark.parametrize("topk", [4, 8])
+@pytest.mark.parametrize("num_experts", [1024, 128, 32])
+@pytest.mark.parametrize("topk", [4, 8, 16, 32])
 @pytest.mark.parametrize("use_pre_softmax", [True, False])
 @pytest.mark.parametrize("group_topk", [None, 4])
 @pytest.mark.parametrize("scaling_factor", [None, 1.2])
@@ -325,10 +358,12 @@ def test_topk_softmax(
 
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168])
-@pytest.mark.parametrize("num_experts", [256, 128, 32])
-@pytest.mark.parametrize("topk", [1, 4, 8])
+@pytest.mark.parametrize("num_experts", [1024, 256, 128, 32])
+@pytest.mark.parametrize("topk", [1, 4, 8, 16, 32])
 @pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
 def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_function):
+    if topk >= num_experts:
+        pytest.skip(f"topk ({topk}) >= num_experts ({num_experts})")
     if score_function in ("sigmoid", "sqrtsoftplus"):
         # Construct logits with a narrow range to avoid very small activation values
         offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
@@ -364,7 +399,8 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
         score_function=score_function,
     )
 
-    torch.testing.assert_close(scores, scores_fused)
+    atol, rtol = _get_tolerances(dtype, num_experts)
+    torch.testing.assert_close(scores, scores_fused, atol=atol, rtol=rtol)
     torch.testing.assert_close(routing_map, routing_map_fused)
 
     loss = torch.sum(scores)
@@ -372,22 +408,27 @@ def test_fused_scores_for_aux_loss(dtype, num_tokens, num_experts, topk, score_f
     loss_fused = torch.sum(scores_fused)
     loss_fused.backward()
 
-    torch.testing.assert_close(logits.grad, logits_clone.grad)
+    torch.testing.assert_close(logits.grad, logits_clone.grad, atol=atol, rtol=rtol)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32])
 @pytest.mark.parametrize("num_tokens", [2048, 7168, 14234])
-@pytest.mark.parametrize("num_experts", [256, 128, 32])
-@pytest.mark.parametrize("topk", [4])
-def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
+@pytest.mark.parametrize("num_experts", [1024, 256, 128, 32])
+@pytest.mark.parametrize("topk", [4, 32])
+@pytest.mark.parametrize("expert_multiplier", [1, 2])
+def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk, expert_multiplier):
+    if topk >= num_experts:
+        pytest.skip(f"topk ({topk}) >= num_experts ({num_experts})")
+    # Sequence aux loss batches independent sequences along the expert dimension.
+    num_cols = num_experts * expert_multiplier
     # Construct the special probs to avoid inf in the sigmoid function
     offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
-    probs = torch.arange(-num_experts // 2, num_experts // 2, device="cuda", dtype=dtype) * 1e-2
+    probs = torch.arange(-num_cols // 2, num_cols // 2, device="cuda", dtype=dtype) * 1e-2
     probs = probs.unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
-    probs = probs.view(num_tokens, num_experts)
+    probs = probs.view(num_tokens, num_cols)
     probs.requires_grad = True
 
-    tokens_per_expert = torch.randint(1, 1000, (num_experts,), device="cuda", dtype=torch.int32)
+    tokens_per_expert = torch.randint(1, 1000, (num_cols,), device="cuda", dtype=torch.int32)
     coeff = 0.01
 
     probs_clone = deepcopy(probs)
@@ -411,13 +452,146 @@ def test_fused_moe_aux_loss(dtype, num_tokens, num_experts, topk):
         coeff=coeff,
     )
 
-    torch.testing.assert_close(aux_loss, aux_loss_fused)
+    atol, rtol = _get_tolerances(dtype, num_cols)
+    torch.testing.assert_close(aux_loss, aux_loss_fused, atol=atol, rtol=rtol)
 
     # Backward
     aux_loss.backward()
     aux_loss_fused.backward()
 
-    torch.testing.assert_close(probs.grad, probs_clone.grad)
+    torch.testing.assert_close(probs.grad, probs_clone.grad, atol=atol, rtol=rtol)
+
+
+def _bytemap_to_bitmap_u8(bytemap: torch.Tensor) -> torch.Tensor:
+    """Reference packer: bool[T, E] -> uint8[T, ceil(E/8)] LSB-first.
+
+    Matches numpy.packbits(..., bitorder='little')
+    """
+    flat = bytemap.to(torch.uint8).cpu().numpy()
+    import numpy as np
+
+    return torch.from_numpy(np.packbits(flat, axis=-1, bitorder="little")).to(bytemap.device)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize(
+    "num_tokens,num_experts,topk",
+    [(128, 32, 4), (256, 128, 8), (256, 130, 8), (128, 1024, 16)],
+)
+@pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
+def test_topk_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_function):
+    """fused_topk_with_score_function should produce identical probs and an
+    LSB-packed bitmap routing_map when routing_map_format=BITMAP_U8, and
+    backward gradients should match the bytemap path exactly."""
+    if topk >= num_experts:
+        pytest.skip(f"topk ({topk}) >= num_experts ({num_experts})")
+    if score_function in ("sigmoid", "sqrtsoftplus"):
+        offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
+        logits = (
+            torch.arange(-num_experts // 2, num_experts // 2, device="cuda", dtype=dtype) * 1e-2
+        )
+        logits = logits.unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
+    else:
+        logits = (
+            torch.arange(
+                -num_tokens * num_experts // 2,
+                num_tokens * num_experts // 2,
+                device="cuda",
+                dtype=dtype,
+            )
+            * 1e-4
+        )
+        logits = logits.view(num_tokens, num_experts)
+
+    logits_byte = logits.detach().clone().requires_grad_(True)
+    logits_bit = logits.detach().clone().requires_grad_(True)
+
+    probs_byte, routing_map_byte = fused_topk_with_score_function(
+        logits=logits_byte,
+        topk=topk,
+        use_pre_softmax=False,
+        num_groups=None,
+        group_topk=None,
+        scaling_factor=None,
+        score_function=score_function,
+        expert_bias=None,
+        routing_map_format=RoutingMapFormat.BYTEMAP,
+    )
+    probs_bit, routing_map_bit = fused_topk_with_score_function(
+        logits=logits_bit,
+        topk=topk,
+        use_pre_softmax=False,
+        num_groups=None,
+        group_topk=None,
+        scaling_factor=None,
+        score_function=score_function,
+        expert_bias=None,
+        routing_map_format=RoutingMapFormat.BITMAP_U8,
+    )
+
+    assert probs_byte.dtype == probs_bit.dtype
+    torch.testing.assert_close(probs_byte, probs_bit, atol=0.0, rtol=0.0)
+
+    expected_shape = (num_tokens, (num_experts + 7) // 8)
+    assert (
+        routing_map_bit.shape == expected_shape
+    ), f"Bitmap shape {tuple(routing_map_bit.shape)} != {expected_shape}"
+    assert routing_map_bit.dtype == torch.uint8
+    assert routing_map_byte.dtype == torch.bool
+
+    packed_expected = _bytemap_to_bitmap_u8(routing_map_byte)
+    torch.testing.assert_close(routing_map_bit, packed_expected, atol=0, rtol=0)
+
+    # Backward parity: grad of probs.sum() must be bit-identical across formats.
+    probs_byte.sum().backward()
+    probs_bit.sum().backward()
+    torch.testing.assert_close(logits_byte.grad, logits_bit.grad, atol=0.0, rtol=0.0)
+
+
+@pytest.mark.parametrize("dtype", [torch.float32])
+@pytest.mark.parametrize(
+    "num_tokens,num_experts,topk",
+    [(128, 32, 4), (256, 128, 8), (256, 130, 8)],
+)
+@pytest.mark.parametrize("score_function", ["softmax", "sigmoid", "sqrtsoftplus"])
+def test_score_for_aux_loss_bitmap_vs_bytemap(dtype, num_tokens, num_experts, topk, score_function):
+    """fused_compute_score_for_moe_aux_loss: bitmap routing_map must equal
+    LSB-packed bytemap; scores must be bit-identical across formats."""
+    if topk >= num_experts:
+        pytest.skip(f"topk ({topk}) >= num_experts ({num_experts})")
+    offset = torch.arange(-num_tokens // 2, num_tokens // 2, dtype=dtype, device="cuda") * 1e-4
+    logits = torch.arange(-num_experts // 2, num_experts // 2, device="cuda", dtype=dtype) * 1e-2
+    logits = logits.unsqueeze(0).repeat(num_tokens, 1) + offset.unsqueeze(1)
+
+    logits_byte = logits.detach().clone().requires_grad_(True)
+    logits_bit = logits.detach().clone().requires_grad_(True)
+
+    routing_map_byte, scores_byte = fused_compute_score_for_moe_aux_loss(
+        logits=logits_byte,
+        topk=topk,
+        score_function=score_function,
+        routing_map_format="bytemap",
+    )
+    routing_map_bit, scores_bit = fused_compute_score_for_moe_aux_loss(
+        logits=logits_bit,
+        topk=topk,
+        score_function=score_function,
+        routing_map_format="bitmap_u8",
+    )
+
+    torch.testing.assert_close(scores_byte, scores_bit, atol=0.0, rtol=0.0)
+
+    expected_shape = (num_tokens, (num_experts + 7) // 8)
+    assert routing_map_bit.shape == expected_shape
+    assert routing_map_bit.dtype == torch.uint8
+    assert routing_map_byte.dtype == torch.bool
+    packed_expected = _bytemap_to_bitmap_u8(routing_map_byte)
+    torch.testing.assert_close(routing_map_bit, packed_expected, atol=0, rtol=0)
+
+    # Backward parity through scores.
+    scores_byte.sum().backward()
+    scores_bit.sum().backward()
+    torch.testing.assert_close(logits_byte.grad, logits_bit.grad, atol=0.0, rtol=0.0)
 
 
 def profile_topk_softmax(

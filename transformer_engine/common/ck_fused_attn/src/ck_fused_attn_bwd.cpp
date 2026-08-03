@@ -6,6 +6,7 @@
 
 #include <iostream>
 #include <cstddef>
+#include <cstdint>
 #include <cstdlib>
 #include <memory>
 #include <stdexcept>
@@ -515,6 +516,7 @@ size_t v3_dq_acc_bytes(const CkAttnBwdArgs& args){
   const size_t a16_hdim = (args.d_qk == 192) ? 192 : 128;
   const size_t dq_acc_seq = args.is_v3_atomic_fp32 ? seqlen_q : a16_seq;
   const size_t dq_acc_hdim = args.is_v3_atomic_fp32 ? args.d_qk : a16_hdim;
+  // Sizing is based off of aiter/csrc/cpp_itfs/mha_bwd.cu
   const size_t eff_batch = (args.is_group_mode() && args.is_v3_atomic_fp32) ? 1 : args.b;
   return eff_batch * args.h * dq_acc_seq * dq_acc_hdim * elem;
 }
@@ -537,16 +539,23 @@ size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args){
 #endif
 }
 
-hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
+struct BwdFmhaArgs {
+  aiter::mha_bwd_args fmha_args;
+  bool is_mqa_gqa;
+  bool has_dbias;
+  BiasShape bias_shape;
+};
+
+// Populate the AITER mha_bwd_args from TE's CkAttnBwdArgs. Shared by ck_attn_bwd
+// (real launch) and ck_attn_bwd_uses_v3 (v3 availability probe) so the probe can
+// never disagree with the launch. v3_api_check is left false here; callers flip it.
+// The stream-dependent max_seqlen override (NVTE_CK_RUNTIME_MAX_SEQLEN) is applied
+// by ck_attn_bwd after this returns; it does not affect v3 kernel selection.
+BwdFmhaArgs build_bwd_fmha_args(const CkAttnBwdArgs& args){
 
   bool has_dropout = (args.dropout_probability > 0.f);
   bool has_dbias = args.dbias_ptr != nullptr;
   bool is_mqa_gqa = (args.h > args.hg);
-
-  auto* log_file = get_ck_log_stream();
-  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
-  // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, log_file != nullptr};
 
   bias_enum bias_type = bias_enum::no_bias;
   BiasShape bias_shape = BiasShape::k11SS;
@@ -605,11 +614,12 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.seqlen_q_ptr = nullptr;
   fmha_args.seqlen_k_ptr = nullptr;
 
-  // Group mode contract (matches aiter asm_mha_varlen_bwd.cu): seqlen_q/k
-  // carry the total token counts, max_seqlen_q/k the per-sequence maximum.
-  // aiter sizes dq_acc and related workspaces from seqlen_q; passing the
-  // per-sequence length in group mode under-sizes them and the kernel writes
-  // past the end.
+  // Group mode contract (matches aiter asm_mha_varlen_bwd.cu and the v2 launcher's
+  // total_seqlen_q_padded == seqstart_q[batch] assumption in fmha_bwd.hpp): seqlen_q/k
+  // carry the padded total token counts, max_seqlen_q/k the per-sequence maximum.
+  // aiter sizes dq_acc and the device workspace upper bound from seqlen_q; passing the
+  // per-sequence length in group mode under-sizes them so the dq_acc overflow region is
+  // left unzeroed (and can be written past the end) -> corrupt/NaN dq.
   fmha_args.seqlen_q = args.is_group_mode() ? args.max_tokens_q : args.s_q;
   fmha_args.seqlen_k = args.is_group_mode() ? args.max_tokens_kv : args.s_kv;
   fmha_args.batch = args.b;
@@ -672,6 +682,53 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
   fmha_args.p_undrop = 1.0 - args.dropout_probability;
   fmha_args.drop_seed_offset = std::pair<const void*, const void*>{args.philox_seed_ptr, args.philox_offset_ptr};
 
+  return {fmha_args, is_mqa_gqa, has_dbias, bias_shape};
+}
+
+// Probe whether AITER's v3 (asm) backward path will run for this config, without
+// launching any kernel. Builds the same args as ck_attn_bwd and relies on AITER's
+// v3_api_check dry-run (returns 1 when v3 is available, -1 otherwise).
+bool ck_attn_bwd_uses_v3(const CkAttnBwdArgs& args){
+#if defined(NVTE_AITER_V3_BWD_GFX1250)
+  // The gfx1250 tier is asm-v3 by construction (CK-free, no v2 launcher to fall
+  // back to), so ck_attn_bwd always routes there on that device.
+  if(is_gfx1250_device()){
+    return true;
+  }
+#endif
+#if defined(NVTE_AITER_CK_FULL)
+  aiter::mha_bwd_args fmha_args = build_bwd_fmha_args(args).fmha_args;
+  fmha_args.v3_api_check = true;
+  // No kernel is launched in check mode, so the stream/log flags are irrelevant.
+  ck_tile::stream_config stream_config{nullptr, false, false};
+  return QOLA_NS(mha_bwd)(fmha_args, stream_config) == 1;
+#else
+  // gfx1250-only build: no CK-full backward library to dry-run against.
+  (void)args;
+  return false;
+#endif
+}
+
+hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
+
+  // build_bwd_fmha_args also derives the flags the post-dispatch MQA/GQA and dbias
+  // reductions below need, so we unpack them here rather than recomputing.
+  BwdFmhaArgs built = build_bwd_fmha_args(args);
+  aiter::mha_bwd_args& fmha_args = built.fmha_args;
+  const bool is_mqa_gqa = built.is_mqa_gqa;
+  const bool has_dbias = built.has_dbias;
+  const BiasShape bias_shape = built.bias_shape;
+
+  bool ck_log_config = false;
+  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      ck_log_config = true;
+  }
+  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
+  auto* log_file = get_ck_log_stream();
+  // print kernel name on verbose mode
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, log_file != nullptr};
+
   // modify the max_seqlen_q for better performance in 0-length cases
   // lse_workspace_ptr used as buffer
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")) {
@@ -704,6 +761,9 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream){
     }
     void* ptr = static_cast<int8_t*>(ws_base) + base;
     ws_offset = base + bytes;
+    // Honor aiter's zero_init hint; aiter zeroes the dq_acc region itself in
+    // prepare_workspace_async when the kernel requires it (deterministic splits,
+    // atomic-add accumulation), given a correctly sized workspace.
     if(zero_init){
       if(hipMemsetAsync(ptr, 0, bytes, stream) != hipSuccess){
         throw std::runtime_error("ck_fused_attn bwd: hipMemsetAsync failed for AITER workspace.");

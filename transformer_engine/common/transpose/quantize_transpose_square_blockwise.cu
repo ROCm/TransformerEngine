@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -17,6 +19,9 @@
 #include "common/util/cuda_runtime.h"
 #include "common/util/ptx.cuh"
 #include "common/utils.cuh"
+#ifdef __HIP_PLATFORM_AMD__
+#include "common/util/rocm_device_utils.cuh"
+#endif
 
 #if (!defined(__CUDA_MINIMUM_ARCH__) && __CUDA_ARCH__ >= 900) || \
     (defined(__CUDA_MINIMUM_ARCH__) && __CUDA_MINIMUM_ARCH__ >= 900)
@@ -28,7 +33,11 @@ namespace {
 
 // const values configuration
 
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx1250__)
+constexpr size_t kThreadsPerWarp = 64;
+#else
 constexpr size_t kThreadsPerWarp = 32;
+#endif
 #ifdef TMA_HW_SUPPORTED
 constexpr size_t BLOCK_TILE_DIM = 128;
 constexpr size_t WARP_TILE_DIM_X = 32;
@@ -40,7 +49,11 @@ constexpr size_t BLOCK_TILE_DIM = 128;
 constexpr size_t WARP_TILE_DIM_X = 64;
 constexpr size_t WARP_TILE_DIM_Y = 32;
 constexpr size_t THREAD_TILE_DIM_X = 8;
+#if defined(__HIP_PLATFORM_AMD__) && !defined(__gfx1250__)
+constexpr size_t THREAD_TILE_DIM_Y = 4;
+#else
 constexpr size_t THREAD_TILE_DIM_Y = 8;
+#endif
 #endif
 
 #ifdef TMA_HW_SUPPORTED
@@ -62,6 +75,7 @@ constexpr size_t NUM_THREADS_Y_IN_WARP = kThreadsPerWarp / NUM_THREADS_X_IN_WARP
 
 #define MIN(a, b) (a < b ? a : b)
 
+#ifndef __HIP_PLATFORM_AMD__
 template <bool kReturnTranspose, typename CType, typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_BLOCK)
     block_scaled_cast_transpose_kernel(const IType* const input, OType* const output_c,
@@ -247,6 +261,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK)
 #endif
   }
 }
+#endif  // __HIP_PLATFORM_AMD__
 
 template <bool kReturnTranspose, typename CType, typename IType, typename OType>
 __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose_kernel_notaligned(
@@ -357,10 +372,14 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
     }
   }
   // Reduce amax in the warp (32x32 tile)
+#ifdef __HIP_PLATFORM_AMD__
+  warp_tile_amax = rocm_subwarp_allreduce<kThreadsPerWarp>(amax, rocm_op::max{});
+#else
   warp_tile_amax = warp_reduce_max<kThreadsPerWarp>(amax);
   // broadcast the amax to all threads in a warp from the lane 0
   constexpr int lane_zero = 0;
   warp_tile_amax = __shfl_sync(0xFFFFFFFF, warp_tile_amax, lane_zero);
+#endif
 
   // reduce warp_tile_amax across multiple warps in a thread block using shared mem
   if (tid_in_warp == 0) {
@@ -456,6 +475,7 @@ __global__ void __launch_bounds__(THREADS_PER_BLOCK) block_scaled_cast_transpose
   }
 }
 
+#ifndef __HIP_PLATFORM_AMD__
 template <typename OutputType>
 CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size_t global_dim_y) {
   CUtensorMapDataType dataType;
@@ -473,6 +493,7 @@ CUtensorMap get_tensor_map(const SimpleTensor& tensor, size_t global_dim_x, size
                        /*stride_elems=*/global_dim_x, /*offset_elems=*/0, sizeof(OutputType) * 8);
   return tensor_map_output_trans;
 }
+#endif  // __HIP_PLATFORM_AMD__
 
 }  // namespace
 }  // namespace transformer_engine
@@ -543,6 +564,7 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
               return_transpose, kReturnTranspose,
 
               dim3 grid(num_blocks_x, num_blocks_y, 1);
+#ifndef __HIP_PLATFORM_AMD__
               const bool full_tile =
                   row_length % BLOCK_TILE_DIM == 0 && num_rows % BLOCK_TILE_DIM == 0;
 
@@ -573,6 +595,20 @@ void quantize_transpose_square_blockwise(const SimpleTensor& input, SimpleTensor
                         scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
                         pow_2_scale, noop_ptr);
               }  // full-tile
+#else
+              const size_t threads_per_block =
+                  (transformer_engine::cuda::sm_arch(transformer_engine::cuda::current_device()) == 125) ? 256 : 512;
+              block_scaled_cast_transpose_kernel_notaligned<kReturnTranspose, float, InputType,
+                                                            OutputType>
+                  <<<grid, threads_per_block, 0, stream>>>(
+                      reinterpret_cast<const InputType*>(input.dptr),
+                      reinterpret_cast<OutputType*>(output.dptr),
+                      reinterpret_cast<OutputType*>(output_t.dptr),
+                      reinterpret_cast<float*>(scale_inv.dptr),
+                      reinterpret_cast<float*>(scale_inv_t.dptr), row_length, num_rows,
+                      scale_stride_x, scale_stride_y, scale_t_stride_x, scale_t_stride_y, epsilon,
+                      pow_2_scale, noop_ptr);
+#endif  // __HIP_PLATFORM_AMD__
               )  // return_transpose
           )      // OutputType
       )          // InputType

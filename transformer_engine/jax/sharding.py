@@ -226,9 +226,8 @@ def with_sharding_constraint_by_logical_axes(
 
         flax_rules = flax.linen.get_logical_axis_rules()
         if len(flax_rules) > 0:
-            return flax.linen.with_logical_constraint(
-                x, logical_axis_names, fallback=flax.linen.spmd.RulesFallback.AXIS_IS_UNSHARDED
-            )
+            pspec = flax.linen.logical_to_mesh_axes(logical_axis_names)
+            return with_sharding_constraint(x, pspec)
     except ImportError:
         pass
 
@@ -363,6 +362,12 @@ class MeshResource:
         fsdp_resource: Axis name for full-sharded data parallelism, default is None
         pp_resource: Axis name for pipeline parallelism (layer sharding), default is None
         cp_resource: Axis name for context parallelism (sequence sharding), default is None
+        ep_resource: Axis name for expert parallelism. Dispatch input tokens
+            must be sharded on their leading dim by ``ep_resource`` (alone or
+            compound with ``dp_resource`` / ``fsdp_resource`` as outer, e.g.
+            ``PartitionSpec(("dp", "ep"), None, None)``). Dispatch output
+            ``[ep_size, recv_capacity, H]`` is always sharded by ``ep_resource``
+            on the leading ``ep_size`` dim.
     """
 
     dp_resource: str = None
@@ -371,9 +376,14 @@ class MeshResource:
     fsdp_resource: str = None
     pp_resource: str = None
     cp_resource: str = None
+    ep_resource: str = None
 
 
 _GLOBAL_MESH_RESOURCE = None
+# ROCm: True once _validate_mesh_resource_configuration has successfully run for the
+# current _GLOBAL_MESH_RESOURCE.  Reset to False on every global_shard_guard
+# entry so that a new resource is always (re-)validated on first use.
+_GLOBAL_MESH_RESOURCE_VALIDATED = False
 
 
 @contextmanager
@@ -386,21 +396,29 @@ def global_shard_guard(resource: MeshResource):
     Args:
         resource: MeshResource instance defining the sharding configuration
     """
-    global _GLOBAL_MESH_RESOURCE
+    global _GLOBAL_MESH_RESOURCE, _GLOBAL_MESH_RESOURCE_VALIDATED
     old_resources = _GLOBAL_MESH_RESOURCE
+    old_validated = _GLOBAL_MESH_RESOURCE_VALIDATED
     try:
         _GLOBAL_MESH_RESOURCE = resource
         # ROCm: JAX 0.9 compat (all backends)
-        # Validate once at context-setup time, where get_abstract_mesh() correctly
-        # reflects the physical mesh.  Calling _validate_mesh_resource_configuration
-        # from global_mesh_resource() (i.e. on every access) breaks in JAX 0.9
-        # because get_abstract_mesh() returns an empty AbstractMesh when called
-        # from inside a custom_partitioning sharded_impl during jit(...).lower().
-        if resource is not None:
+        # Attempt early (eager) validation if a mesh is already active at
+        # guard-entry time.  Guard with is_mesh_available() so that callers
+        # who enter global_shard_guard before any JAX mesh context is active
+        # (e.g. maxtext's transformer_engine_context) do not hit an
+        # AssertionError in get_mesh_axis_size() when get_abstract_mesh()
+        # returns an empty OrderedDict().
+        # Reset the validated flag for the new resource so that
+        # global_mesh_resource() re-validates on its first call with an
+        # active mesh (lazy validation path, see below).
+        _GLOBAL_MESH_RESOURCE_VALIDATED = False
+        if resource is not None and is_mesh_available():
             _validate_mesh_resource_configuration(resource)
+            _GLOBAL_MESH_RESOURCE_VALIDATED = True
         yield
     finally:
         _GLOBAL_MESH_RESOURCE = old_resources
+        _GLOBAL_MESH_RESOURCE_VALIDATED = old_validated
 
 
 def global_mesh_resource() -> MeshResource:
@@ -409,19 +427,62 @@ def global_mesh_resource() -> MeshResource:
     Returns:
         The current MeshResource instance
     """
+    global _GLOBAL_MESH_RESOURCE_VALIDATED
     assert _GLOBAL_MESH_RESOURCE is not None, (
         "Global mesh resource is not set. Please set the MeshResource via a global_shard_guard"
         " context. If you are not using multiple GPUs, you can use an empty MeshResource by"
         " wrapping your program in 'with global_shard_guard(MeshResource()):'"
     )
     # ROCm: JAX 0.9 compat (all backends)
-    # _validate_mesh_resource_configuration is intentionally NOT called here.
-    # Validation is done once in global_shard_guard() at context-setup time, where
-    # get_abstract_mesh() correctly reflects the physical mesh. Calling it here
-    # would break in JAX 0.9 when global_mesh_resource() is invoked from inside a
-    # custom_partitioning sharded_impl during jit(...).lower(), at which point
-    # get_abstract_mesh() returns an empty AbstractMesh.
+    # Lazy validation: if the mesh was not yet active when global_shard_guard
+    # was entered (eager validation skipped), validate here on the first call
+    # that actually finds an active mesh.  This covers frameworks like maxtext
+    # that set up global_shard_guard before activating the JAX mesh context.
+    #
+    # The _GLOBAL_MESH_RESOURCE_VALIDATED flag ensures validation runs at most
+    # once per global_shard_guard context (reset to False on guard entry,
+    # set to True after successful validation):
+    #   • After validation: `not _GLOBAL_MESH_RESOURCE_VALIDATED` is False →
+    #     only one boolean check per call, faster than the pre-JAX-0.9-compat
+    #     code that ran get_mesh_axis_size() unconditionally on every call.
+    #   • Inside jit(...).lower(): is_mesh_available() returns False (JAX 0.9
+    #     get_abstract_mesh() is empty there) → validation safely skipped.
+    if not _GLOBAL_MESH_RESOURCE_VALIDATED and is_mesh_available():
+        _validate_mesh_resource_configuration(_GLOBAL_MESH_RESOURCE)
+        _GLOBAL_MESH_RESOURCE_VALIDATED = True
     return _GLOBAL_MESH_RESOURCE
+
+
+def get_active_resource_axis(resource_name: str) -> Optional[str]:
+    """Resolve a :class:`MeshResource` attribute to its mesh axis name,
+    or return ``None`` if that resource is not active.
+
+    "Active" means all three are true:
+
+    * a physical mesh is set (``is_mesh_available()``),
+    * the ``MeshResource`` attribute is non-``None``,
+    * the corresponding mesh axis has more than 1 device.
+
+    Mirrors the three-step ``is_X_enabled`` idiom in
+    :func:`get_sharding_map_logic_axis_to_mesh_axis` but returns the
+    axis name itself (or ``None``) so callers can use it directly in
+    collectives / ``shard_map`` specs.
+
+    Args:
+        resource_name: Attribute name on :class:`MeshResource`, e.g.
+            ``"fsdp_resource"`` or ``"ep_resource"``.
+
+    Returns:
+        The mesh axis name when active, else ``None``.
+    """
+    if not is_mesh_available():
+        return None
+    if _GLOBAL_MESH_RESOURCE is None:
+        return None
+    axis = getattr(_GLOBAL_MESH_RESOURCE, resource_name)
+    if axis is None or get_mesh_axis_size(axis) <= 1:
+        return None
+    return axis
 
 
 def all_reduce_sum_along_dp_fsdp(x: jnp.array, mesh: jax.sharding.Mesh):
@@ -489,3 +550,8 @@ def dp_or_fsdp_axis_size():
     dp_size = get_mesh_axis_size(global_mesh_resource().dp_resource)
     fsdp_size = get_mesh_axis_size(global_mesh_resource().fsdp_resource)
     return dp_size if dp_size > 1 else fsdp_size
+
+
+def ep_axis_size():
+    """Get the size of the dispatch/EP axis (ep_resource). Returns 1 if unset."""
+    return get_mesh_axis_size(global_mesh_resource().ep_resource)

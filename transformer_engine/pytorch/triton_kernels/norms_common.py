@@ -8,14 +8,15 @@ import warnings
 import transformer_engine_torch as tex
 
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer, Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
 from transformer_engine.pytorch.triton_kernels.common import (
     te_dtype_to_torch_dtype,
     te_dtype_to_triton_dtype,
 )
-from ..quantized_tensor import Quantizer
-from .utils import num_programs, block_size, use_blocked, make_ln_out, get_num_sms
+from ..quantized_tensor import Quantizer, QuantizedTensor
+from .utils import num_programs, block_size, use_blocked, make_ln_out, get_num_sms, use_cuda_graph_autotune
 from .common import get_fp8_max
 from .rmsnorm import (
     _rmsnorm_fwd_triton,
@@ -86,7 +87,7 @@ def _get_fp8_transpose_configs():
 _fp8_transpose_2d_triton = triton.autotune(
     configs=_get_fp8_transpose_configs(),
     key=['n_rows', 'n_cols'],
-    use_cuda_graph=True,
+    use_cuda_graph=use_cuda_graph_autotune(),
 )(_fp8_transpose_2d_impl)
 
 _fp8_transpose_kernels = {
@@ -245,6 +246,7 @@ def _te_norm_fwd_triton(
     IS_FP8 = isinstance(quantizer, Float8Quantizer)
     IS_MXFP8 = isinstance(quantizer, MXFP8Quantizer)
     IS_FP8_CURRENT_SCALING = isinstance(quantizer, Float8CurrentScalingQuantizer)
+    IS_FP8_BLOCKWISE = isinstance(quantizer, Float8BlockQuantizer)
     BLOCK_SIZE = block_size(input_tensor, norm=kernel)
     USE_BLOCKED = use_blocked(input_tensor)
 
@@ -397,13 +399,18 @@ def _te_norm_fwd_triton(
             quantizer.amax,
             N, ATOMIC_REDUCTION_BLOCK_SIZE,
         )
-    elif IS_MXFP8 or IS_FP8_CURRENT_SCALING or isinstance(quantizer, NVFP4Quantizer):
+    elif IS_MXFP8 or IS_FP8_CURRENT_SCALING or IS_FP8_BLOCKWISE or isinstance(quantizer, NVFP4Quantizer):
         _out = quantizer.make_empty(
             input_tensor.shape,
             dtype=te_dtype_to_torch_dtype(otype),
             device=input_tensor.device
         )
-        out = quantizer.quantize(out, out=_out)
+        if isinstance(_out, QuantizedTensor):
+            out = quantizer.quantize(out, out=_out)
+        else:
+            # Internal quantizers allocate storage objects, cast into them directly
+            tex.quantize(out.contiguous(), quantizer, _out, None)
+            out = _out
     return out, mu, rsigma
 
 
@@ -503,6 +510,13 @@ def te_layernorm_bwd_triton(
             '"sm_margin" is not supported in the Triton based backward layer-norm kernel. '
             + f"sm_margin={sm_margin} will be ignored."
         )
+
+    dz = dz.contiguous()
+    x = x.contiguous()
+    mu = mu.contiguous()
+    rsigma = rsigma.contiguous()
+    gamma = gamma.contiguous()
+
     M, N = x.shape
     # calculate dw and db separately when M is small
     IGNORE_DW_DB_IN_FUSED = M <= 512

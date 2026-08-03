@@ -12,7 +12,7 @@ set(AITER_MHA_INSTALL_DIR "${CMAKE_INSTALL_PREFIX}/transformer_engine/lib")
 # gfx1250 carries AITER V3 bwd kernels only (hd128, bf16, batch mode). The
 # runtime envelope is enforced in nvte_get_fused_attn_backend().
 set(__QOLA_DIR "${CMAKE_CURRENT_LIST_DIR}/../../../3rdparty/QoLA")
-set(__AITER_SOURCE_DIR "${__QOLA_DIR}/build/third_party/aiter")
+set(__AITER_SOURCE_DIR "${CMAKE_CURRENT_BINARY_DIR}/qola/third_party/aiter")
 if (DEFINED ENV{NVTE_AITER_SOURCE_DIR} AND NOT $ENV{NVTE_AITER_SOURCE_DIR} STREQUAL "")
   set(__AITER_SOURCE_DIR $ENV{NVTE_AITER_SOURCE_DIR})
   message(STATUS "Using AITER source from NVTE_AITER_SOURCE_DIR=${__AITER_SOURCE_DIR}. Disable AITER checkout.")
@@ -36,21 +36,37 @@ endif()
 # QoLA-managed AITER source tree to that commit before any consumer reads it
 # (header validation below, header includes for the .cpp build later, and
 # QoLA's own kernel build if the prebuilt cache misses).
+set(__QOLA_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/qola_manifest.toml")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${__QOLA_MANIFEST}")
+file(STRINGS "${__QOLA_MANIFEST}" __AITER_COMMIT_LINES
+     REGEX "^[ \t]*aiter_commit[ \t]*=[ \t]*\"[^\"]+\"")
+list(LENGTH __AITER_COMMIT_LINES __AITER_COMMIT_COUNT)
+if(NOT __AITER_COMMIT_COUNT EQUAL 1)
+  message(FATAL_ERROR
+          "Expected exactly one 'aiter_commit = \"...\"' line in "
+          "${__QOLA_MANIFEST}, found ${__AITER_COMMIT_COUNT}.")
+endif()
+list(GET __AITER_COMMIT_LINES 0 __AITER_COMMIT_LINE)
+string(REGEX MATCH "\"([^\"]+)\"" _UNUSED "${__AITER_COMMIT_LINE}")
+set(AITER_SHA "${CMAKE_MATCH_1}")
+if("${AITER_SHA}" STREQUAL "")
+  message(FATAL_ERROR
+          "Failed to parse 'aiter_commit = \"...\"' line in ${__QOLA_MANIFEST}.")
+endif()
+
+# Defines get_prebuilt_aiter()/get_default_aiter_cache_dir() and keys the prebuilt
+# cache on AITER_SHA (parsed above). Included unconditionally rather than only on
+# the prebuilt-cache path because the gfx1250 V3 tier below needs the cache-dir
+# helper even when the CK-full prebuilt lookup is skipped.
 include("${CMAKE_CURRENT_LIST_DIR}/aiter_prebuilt.cmake")
 
 if(Python_EXECUTABLE)
-  set(__QOLA_MANIFEST "${CMAKE_CURRENT_LIST_DIR}/qola_manifest.toml")
-  # Redirect GIT_CONFIG_GLOBAL to a tempfile carrying `safe.directory = *` so
-  # git operations inside the QoLA-managed AITER tree (and its recursive
-  # submodules) work in containerized builds where the bind-mounted .git is
-  # owned by a different UID than the build process. Mirrors the pattern in
-  # transformer_engine/common/CMakeLists.txt:get_git_commit().
   if (NOT __SKIP_AITER_CHECKOUT)
     execute_process(
       COMMAND sh -c
         "PYTHONPATH=\"${__QOLA_DIR}:$PYTHONPATH\" '${Python_EXECUTABLE}' -m qola.cli checkout \
-        --manifest '${__QOLA_MANIFEST}' \
-        --aiter-root '${__AITER_SOURCE_DIR}'"
+--manifest '${__QOLA_MANIFEST}' \
+--aiter-root '${__AITER_SOURCE_DIR}'"
       RESULT_VARIABLE AITER_CHECKOUT_RESULT
       OUTPUT_VARIABLE AITER_CHECKOUT_OUTPUT
       ERROR_VARIABLE AITER_CHECKOUT_ERROR
@@ -172,16 +188,16 @@ if(__CK_FULL_ARCH_COUNT GREATER 0)
             --tmp-dir "${__CK_JIT_BUILD_DIR}"
             --install-dir ${AITER_MHA_INSTALL_DIR}
             --jit-name "te_ck_jit"
-        RESULT_VARIABLE QOLA_BUILD_RESULT
+        RESULT_VARIABLE CKJIT_BUILD_RESULT
       )
-      if(NOT QOLA_BUILD_RESULT EQUAL 0)
-        message(FATAL_ERROR "[AITER-BUILD] QoLA build failed.")
+      if(NOT CKJIT_BUILD_RESULT EQUAL 0)
+        message(FATAL_ERROR "[AITER-BUILD] CK-JIT build failed.")
       endif()
       # CK_JIT emits the libs straight into the install dir; nothing to cache.
       set(__AITER_MHA_PATH ${AITER_MHA_INSTALL_DIR})
       set(__QOLA_INCLUDE_DIR "${__QOLA_BUILD_DIR}/include")
     else()
-      set(__QOLA_BUILD_DIR "${__QOLA_DIR}/build")
+      set(__QOLA_BUILD_DIR "${CMAKE_CURRENT_BINARY_DIR}/qola")
       execute_process(
         COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${__QOLA_DIR}:$ENV{PYTHONPATH}"
                 ${Python_EXECUTABLE} -m qola.cli build
@@ -221,7 +237,7 @@ endif()
 # does not apply here -- this tier is CK-free.
 if(__HAS_GFX1250)
   set(__QOLA_MANIFEST_V3 "${CMAKE_CURRENT_LIST_DIR}/qola_manifest_gfx1250.toml")
-  set(__QOLA_BUILD_DIR_V3 "${__QOLA_DIR}/build_gfx1250")
+  set(__QOLA_BUILD_DIR_V3 "${CMAKE_CURRENT_BINARY_DIR}/qola_gfx1250")
   if (__SKIP_AITER_CHECKOUT)
     set(__SKIP_CHECKOUT_ARGS "--skip-checkout")
   else()
@@ -275,15 +291,22 @@ add_library(ck_fused_attn SHARED ${ck_fused_attn_SOURCES})
 # (CDNA) the headers pull real ck_tile; for a gfx1250-only build the real CK
 # template headers do not compile, so build CK-free (ENABLE_CK=0) and let the
 # wrapper fall back to the ck_tile shim + HIP-native 16-bit numerics.
+#
+# FAV_NATIVE_ON gates the AITER-native forward split-KV entry points
+# (mha_fwd_calculate_num_splits / mha_fwd_workspace_size). QoLA only exports them
+# from the CK-full forward library; the gfx1250 manifest builds its V3 forward lib
+# without that flag, so a gfx1250-only build must compile them out.
 if(__HAVE_CK_FULL)
   set(__ENABLE_CK 1)
+  set(__FAV_NATIVE_ON 1)
 else()
   set(__ENABLE_CK 0)
+  set(__FAV_NATIVE_ON 0)
 endif()
 set(CK_FUSED_ATTN_COMPILE_OPTIONS)
 list(APPEND CK_FUSED_ATTN_COMPILE_OPTIONS
     -DCK_TILE_FLOAT_TO_BFLOAT16_DEFAULT=${CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT}
-    -DENABLE_CK=${__ENABLE_CK})
+    -DENABLE_CK=${__ENABLE_CK} -DFAV_NATIVE_ON=${__FAV_NATIVE_ON})
 # Tier guards consumed by src/ck_fused_attn_{fwd,bwd}.cpp:
 #   NVTE_AITER_CK_FULL        -> qola::te::{mha_fwd,mha_bwd} (CDNA) are linked
 #   NVTE_AITER_V3_BWD_GFX1250 -> qola::te_v3::mha_bwd (gfx1250) is linked +

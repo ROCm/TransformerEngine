@@ -10,7 +10,6 @@
 #include <cstdlib>
 #include <iostream>
 #include <numeric>
-#include <vector>
 
 #include "../../common.h"
 #include "../common.h"
@@ -42,7 +41,7 @@ void rmsnorm_fwd(const Tensor &x, const Tensor &gamma, const float epsilon, Tens
 
   NVTE_CHECK(z->data.shape == x.data.shape, "Output tensor must have the same shape as x.");
 
-  NVTE_CHECK(rsigma->data.shape == std::vector<size_t>{x.data.shape[0]},
+  NVTE_CHECK(rsigma->data.shape == Shape{x.data.shape[0]},
              "RSigma must be 1D tensor with shape (x.shape[0],).");
   NVTE_CHECK(rsigma->data.dtype == DType::kFloat32, "RSigma must be a float32 tensor.");
 
@@ -230,6 +229,20 @@ void rmsnorm_bwd_add(const Tensor &dz, const Tensor &x, const Tensor &add, const
   bool is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, rsigma.data.dptr, dx->data.dptr,
                                    dz.data.dptr, dgamma->data.dptr, add.data.dptr);
   bool gamma_in_weight_dtype = false;
+#ifndef __HIP_PLATFORM_AMD__
+  if (use_cudnn_norm_bwd()) {
+    norm_backend = NVTE_Norm_Backend::Cudnn;
+    gamma_in_weight_dtype = use_zero_centered_gamma_in_weight_dtype();
+  } else {
+    norm_backend = NVTE_Norm_Backend::Te;
+    // TE backend does not currently support zero_centered_gamma_in_weight_dtype
+    NVTE_CHECK(!use_zero_centered_gamma_in_weight_dtype(),
+               "zero_centered_gamma_in_weight_dtype is currently not supported "
+               "for rmsnorm_bwd_add with TE backend");
+    is_aligned = is_ptr_aligned(x.data.dptr, gamma.data.dptr, rsigma.data.dptr, dx->data.dptr,
+                                dz.data.dptr, dgamma->data.dptr, add.data.dptr);
+  }
+#endif
 
   auto plan = NormalizationPlanRegistry::getInstance().getNormalizationPlan(
       norm_backend, NVTE_Norm_Type::RMSNorm, NVTE_Norm_Stage::BackwardAdd,

@@ -9,7 +9,7 @@
 # Keep aiter_commit in lockstep with qola_manifest.toml — both consume the same
 # checked-out AITER source tree.
 [qola]
-aiter_commit = "0403bcdfd0b507e0459012b82e00785a818f774a"    # pinned AITER submodule commit
+aiter_commit = "7a24cd87525834fa9aeaa021e6ee80ab7de028f9"    # pinned AITER submodule commit
 namespace = "te_v3"
 rocm_versions = ["7.2"]
 

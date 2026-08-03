@@ -1,5 +1,5 @@
 [qola]
-aiter_commit = "bb1010b249377e53c6bad264b2be28525f0fc06e"    # pinned AITER submodule commit
+aiter_commit = "7a24cd87525834fa9aeaa021e6ee80ab7de028f9"    # pinned AITER submodule commit
 namespace = "te"
 rocm_versions = ["7.2"]
 

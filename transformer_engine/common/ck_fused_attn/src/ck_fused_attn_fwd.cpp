@@ -150,14 +150,12 @@ void dump_fwd_timings(const char* dump_path, float average_runtime){
   file << average_runtime << "\n";
 }
 
-hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
-
-  bool has_dropout = (args.is_training && args.dropout_probability > 0.f);
-
-  auto* log_file = get_ck_log_stream();
-  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
-  // print kernel name on verbose mode
-  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
+// Populate the AITER mha_fwd_args from TE's CKAttnFwdArgs. Shared by ck_attn_fwd
+// (real launch) and ck_attn_fwd_uses_v3 (v3 availability probe) so the probe can
+// never disagree with the launch. v3_api_check is left false here; callers flip it.
+// The stream-dependent max_seqlen override (NVTE_CK_RUNTIME_MAX_SEQLEN) is applied
+// by ck_attn_fwd after this returns; it does not affect v3 kernel selection.
+aiter::mha_fwd_args build_fwd_fmha_args(const CKAttnFwdArgs& args){
 
   bias_enum bias_type = bias_enum::no_bias;
   BiasShape bias_shape = BiasShape::k11SS;
@@ -279,6 +277,52 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
   fmha_args.block_scale_size_q  = 0;
   fmha_args.block_scale_size_kv = 0;
 
+  fmha_args.num_splits = args.num_splits;
+  fmha_args.splitkv_workspace_ptr = args.splitkv_workspace_ptr;
+
+  return fmha_args;
+}
+
+// Probe whether AITER's v3 (asm) forward path will run for this config, without
+// launching any kernel. Builds the same args as ck_attn_fwd and relies on AITER's
+// v3_api_check dry-run (returns 1 when v3 is available, -1 otherwise).
+bool ck_attn_fwd_uses_v3(const CKAttnFwdArgs& args){
+#if defined(NVTE_AITER_V3_FWD_GFX1250)
+  // The gfx1250 tier is asm-v3 by construction (CK-free, no v2 launcher to fall
+  // back to), so ck_attn_fwd always routes there on that device.
+  if(is_gfx1250_device()){
+    return true;
+  }
+#endif
+#if defined(NVTE_AITER_CK_FULL)
+  aiter::mha_fwd_args fmha_args = build_fwd_fmha_args(args);
+  fmha_args.v3_api_check = true;
+  // No kernel is launched in check mode, so the stream/log flags are irrelevant.
+  ck_tile::stream_config stream_config{nullptr, false, false};
+  return QOLA_NS(mha_fwd)(fmha_args, stream_config) == 1;
+#else
+  // gfx1250-only build: no CK-full forward library to dry-run against.
+  (void)args;
+  return false;
+#endif
+}
+
+hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
+
+  bool has_dropout = (args.is_training && args.dropout_probability > 0.f);
+
+  bool ck_log_config = false;
+  if (const char* env_p = std::getenv("CK_FUSED_ATTN_LOG_CONFIG") ) {
+    if (env_p != nullptr && std::string(env_p) == "1")
+      ck_log_config = true;
+  }
+  const char* dump_path = std::getenv("NVTE_DUMP_AITER_RT");
+  auto* log_file = get_ck_log_stream();
+  // print kernel name on verbose mode
+  ck_tile::stream_config stream_config{stream, dump_path!=nullptr, get_ck_log_stream() != nullptr};
+
+  aiter::mha_fwd_args fmha_args = build_fwd_fmha_args(args);
+
   if(const char* env_p = std::getenv("NVTE_CK_RUNTIME_MAX_SEQLEN")){
     if(args.is_group_mode() && std::string(env_p) == "1"){
       if(log_file){
@@ -331,6 +375,24 @@ hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream){
     dump_fwd_timings(dump_path, average_runtime);
   }
   return hipSuccess;
+}
+
+int ck_attn_fwd_num_splits(const CKAttnFwdArgs& args){
+#if FAV_NATIVE_ON
+  aiter::mha_fwd_args fmha_args = build_fwd_fmha_args(args);
+  return QOLA_NS(mha_fwd_calculate_num_splits)(fmha_args);
+#else
+  return -1;
+#endif
+}
+
+size_t ck_attn_fwd_workspace_size(const CKAttnFwdArgs& args){
+#if FAV_NATIVE_ON
+  aiter::mha_fwd_args fmha_args = build_fwd_fmha_args(args);
+  return QOLA_NS(mha_fwd_workspace_size)(fmha_args);
+#else
+  return 0;
+#endif
 }
 
 }//namespace ck_fused_attn

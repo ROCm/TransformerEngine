@@ -16,11 +16,6 @@
 namespace transformer_engine {
 namespace grouped_gemm {
 
-enum class GPUArch {
-  GFX942,
-  GFX950,
-  UNKNOWN
-};
 
 struct TileCfg_256x256x128_16x16x128_2x2x1 {
   static constexpr ck_tile::index_t M_Tile = 256;
@@ -34,6 +29,29 @@ struct TileCfg_256x256x128_16x16x128_2x2x1 {
   static constexpr ck_tile::index_t M_Warp_Tile = 16;
   static constexpr ck_tile::index_t N_Warp_Tile = 16;
   static constexpr ck_tile::index_t K_Warp_Tile = 128;
+
+  static constexpr bool kPadM = false;
+  static constexpr bool kPadN = false;
+  static constexpr bool kPadK = false;
+
+  static constexpr bool DoubleSmemBuffer = false;
+
+  static constexpr ck_tile::index_t TilePartitionerGroupNum = 16;
+  static constexpr ck_tile::index_t TilePartitionerM01 = 8;
+};
+
+struct TileCfg_128x128x128_16x16x64_2x2x1 {
+  static constexpr ck_tile::index_t M_Tile = 128;
+  static constexpr ck_tile::index_t N_Tile = 128;
+  static constexpr ck_tile::index_t K_Tile = 128;
+
+  static constexpr ck_tile::index_t M_Warp = 2;
+  static constexpr ck_tile::index_t N_Warp = 2;
+  static constexpr ck_tile::index_t K_Warp = 1;
+
+  static constexpr ck_tile::index_t M_Warp_Tile = 16;
+  static constexpr ck_tile::index_t N_Warp_Tile = 16;
+  static constexpr ck_tile::index_t K_Warp_Tile = 64;
 
   static constexpr bool kPadM = false;
   static constexpr bool kPadN = false;
@@ -294,18 +312,6 @@ class QuantGroupedGemmRunner : public RunnerInterface {
   }
 };
 
-static inline GPUArch detect_gpu_arch() {
-  int arch = cuda::sm_arch(0);
-
-  if (arch == 94) {
-    return GPUArch::GFX942;
-  }
-  if (arch == 95) {
-    return GPUArch::GFX950;
-  }
-  return GPUArch::UNKNOWN;
-}
-
 template <GPUArch Arch>
 struct FP8TileCfg;
 
@@ -317,6 +323,11 @@ struct FP8TileCfg<GPUArch::GFX942> {
 template <>
 struct FP8TileCfg<GPUArch::GFX950> {
   using type = TileCfg_128x128x128_16x16x128_2x2x1;
+};
+
+template <>
+struct FP8TileCfg<GPUArch::GFX1250> {
+  using type = TileCfg_128x128x128_16x16x64_2x2x1;
 };
 
 struct FP8GroupedShapeAlignment {
@@ -466,13 +477,15 @@ bool ck_tile_grouped_gemm_fp8_dispatch(DType a_dtype,
                                        DType b_dtype,
                                        DType d_dtype,
                                        const GroupedGemmRunContext& ctx) {
-  switch (detect_gpu_arch()) {
+  switch (ctx.arch) {
     case GPUArch::GFX942:
       return ck_tile_grouped_gemm_fp8_dispatch_arch<GPUArch::GFX942>(a_dtype, b_dtype, d_dtype, ctx);
     case GPUArch::GFX950:
       return ck_tile_grouped_gemm_fp8_dispatch_arch<GPUArch::GFX950>(a_dtype, b_dtype, d_dtype, ctx);
+    case GPUArch::GFX1250:
+      return ck_tile_grouped_gemm_fp8_dispatch_arch<GPUArch::GFX1250>(a_dtype, b_dtype, d_dtype, ctx);
     default:
-      NVTE_ERROR("ck_tile_grouped_gemm: available architectures = {gfx942, gfx950}");
+      NVTE_ERROR("ck_tile_grouped_gemm: available architectures = {gfx942, gfx950, gfx1250}");
       return false;
   }
 }

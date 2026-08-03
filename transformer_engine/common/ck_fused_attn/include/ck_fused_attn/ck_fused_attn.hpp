@@ -98,6 +98,10 @@ struct CKAttnFwdArgs : CKAttnCommonArgs {
 
   // V3 ASM kernel selection
   bool uses_fwd_v3 = false;
+
+  // Split-KV support
+  int num_splits = 0;
+  void* splitkv_workspace_ptr = nullptr;
 };
 
 // Backward attention request.
@@ -153,6 +157,18 @@ hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream);
 // workspace (launcher metadata + dq_acc), covering both the v2 (CK launcher) and
 // v3 (asm) dispatch paths. Pure host-side computation; no kernel launch.
 size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args);
+// Probe whether AITER's v3 (asm) path will run for the given config, without
+// launching a kernel (backed by AITER's v3_api_check dry-run). Returns true iff
+// the v3 path is selected; false means the CK v2 path (or no support) would run.
+bool ck_attn_fwd_uses_v3(const CKAttnFwdArgs& args);
+bool ck_attn_bwd_uses_v3(const CkAttnBwdArgs& args);
+
+// Gen the number of splits for split-KV support.
+int ck_attn_fwd_num_splits(const CKAttnFwdArgs& args);
+
+// Gen the workspace size for fwd config.
+// Extra workspace in particular is needed for split-KV support.
+size_t ck_attn_fwd_workspace_size(const CKAttnFwdArgs& args);
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_H
