@@ -131,14 +131,14 @@ __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
       const size_t total_vecs = numel / NVEC;
       const size_t tail_start = total_vecs * NVEC;
 
-      InputType thread_amax_val = 0.f;
+      InputType thread_amax_val = InputType(0.f);
       const bool aligned = (reinterpret_cast<uintptr_t>(base) % IVecT::BYTES) == 0;
 
       if (aligned) {
-        InputType acc0 = 0.f;
-        InputType acc1 = 0.f;
-        InputType acc2 = 0.f;
-        InputType acc3 = 0.f;
+        InputType acc0 = InputType(0.f);
+        InputType acc1 = InputType(0.f);
+        InputType acc2 = InputType(0.f);
+        InputType acc3 = InputType(0.f);
         size_t v = tid;
         // 4-way vectorized load and reduce
         for (; v + 3 * blockDim.x < total_vecs; v += 4 * blockDim.x) {

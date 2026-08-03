@@ -113,6 +113,11 @@ def setup_common_extension() -> CMakeExtension:
         cmake_flags.append(
             f"-DCK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT={os.getenv('NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAULT', '3')}"
         )
+        # Norm and fused-softmax build as static kernels on ROCm. Upstream v2.18
+        # defaults both to NVRTC JIT (LEGACY_STATIC_* OFF); the hipRTC JIT path is
+        # not yet functional on ROCm, so force the static kernels here.
+        cmake_flags.append("-DNVTE_BUILD_LEGACY_STATIC_NORM=ON")
+        cmake_flags.append("-DNVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=ON")
 
         if int(os.getenv("NVTE_FUSED_ATTN_AOTRITON", "1"))==0 or int(os.getenv("NVTE_FUSED_ATTN", "1"))==0:
             cmake_flags.append("-DUSE_FUSED_ATTN_AOTRITON=OFF")

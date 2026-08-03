@@ -762,12 +762,6 @@ make_string_header_from_file(transpose/rtc/transpose.cu
                              string_code_transpose_rtc_transpose_cu)
 make_string_header_from_file(transpose/rtc/swap_first_dims.cu
                              string_code_transpose_rtc_swap_first_dims_cu)
-make_string_header_from_file(fused_softmax/scaled_masked_softmax.cu
-                             string_code_fused_softmax_scaled_masked_softmax_cu)
-make_string_header_from_file(fused_softmax/scaled_upper_triang_masked_softmax.cu
-                             string_code_fused_softmax_scaled_upper_triang_masked_softmax_cu)
-make_string_header_from_file(fused_softmax/scaled_aligned_causal_masked_softmax.cu
-                             string_code_fused_softmax_scaled_aligned_causal_masked_softmax_cu)
 make_string_header_from_file(utils.cuh
                              string_code_utils_cuh)
 else()
@@ -784,6 +778,16 @@ else()
   make_string_header_from_file(amd_detail/hip_float8.h
                               string_code_amd_detail_hip_float8_h)
 endif()
+# Fused-softmax RTC string headers: generated on both platforms. The softmax
+# .cu/.hip translation units #include these unconditionally (for the NVRTC/hipRTC
+# JIT path); ROCm builds the static kernels (NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=ON)
+# but the include must still resolve.
+make_string_header_from_file(fused_softmax/scaled_masked_softmax.cu
+                             string_code_fused_softmax_scaled_masked_softmax_cu)
+make_string_header_from_file(fused_softmax/scaled_upper_triang_masked_softmax.cu
+                             string_code_fused_softmax_scaled_upper_triang_masked_softmax_cu)
+make_string_header_from_file(fused_softmax/scaled_aligned_causal_masked_softmax.cu
+                             string_code_fused_softmax_scaled_aligned_causal_masked_softmax_cu)
 make_string_header_from_file(util/math.h
                              string_code_util_math_h)
 
