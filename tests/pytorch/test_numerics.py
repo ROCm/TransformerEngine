@@ -2130,10 +2130,11 @@ def test_gpt_cuda_graph(dtype, bs, model):
     # per-(device, stream). The graph-capture stream's handle is created lazily
     # during capture, and hipblasLtCreate performs an internal hipMalloc that is
     # illegal mid-capture, failing with HIP error 900 ("operation not permitted
-    # when stream is capturing"). The upstream capture_begin pre-init
+    # when stream is capturing"). The capture_begin pre-init
     # (pytorch/pytorch#180692) only covers the calling thread, not the autograd
     # backward thread, so torch's own bmm in the captured backward still trips it.
-    # Route torch's matmul/bmm off hipBLASLt for this test until upstream fixes it.
+    # Route torch's matmul/bmm off hipBLASLt for this test until PyTorch
+    # extends the pre-init to cover it.
     _prev_blas_library = None
     if IS_HIP_EXTENSION:
         _prev_blas_library = torch.backends.cuda.preferred_blas_library()
