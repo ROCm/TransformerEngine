@@ -65,21 +65,20 @@ RUN W="https://repo.amd.com/rocm/whl-multi-arch" \
            "${W}/amd_torchvision_device_${arch}-${TORCHVISION_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" ; \
        done
 
-# Install Jax — prebuilt ROCm 7.14 (TheRock, multi-arch) wheels from PyPI.
-# jax pulls jaxlib; jax-rocm7-plugin pulls jax-rocm7-pjrt. ROCm runtime is provided
-# by the rocm-sdk-* wheels above, so the plugin's [with-rocm] extra (which would
-# pull duplicate amd_*_instinct libs) is intentionally not requested.
+# Install Jax
 RUN pip install --no-cache-dir \
         "jax==${JAX_VERSION}" \
         "jax-rocm7-pjrt==${JAX_VERSION}" \
         "jax-rocm7-plugin==${JAX_VERSION}"
 
+# Install Flash Attention
 RUN export ROCM_PATH="$(rocm-sdk path --root)" \
     && git clone --branch "${FA_VERSION}" --depth 1 https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention \
     && cd /tmp/flash-attention \
     && GPU_ARCHS="${GPU_ARCH}" python setup.py install \
     && rm -rf /tmp/flash-attention
 
+# Install Aiter
 RUN export ROCM_PATH="$(rocm-sdk path --root)" \
     && git clone --no-checkout https://github.com/ROCm/aiter.git /tmp/aiter \
     && cd /tmp/aiter \

@@ -138,29 +138,6 @@ KERNEL_PATTERNS = {
 
 ROCPROF_STATS_CSV = "results.stats.csv"
 
-
-def _resolve_rocprofv3():
-    """Path to the rocprofv3 shipped in rocm-sdk-core.
-
-    The `rocprofv3` on PATH is the rocm-sdk trampoline, which execs the copy in
-    rocm-sdk-devel. That copy loads librocprofiler-sdk.so.1 from _rocm_sdk_devel,
-    while torch/TE have already loaded the byte-identical copy from _rocm_sdk_core.
-    rocprofiler-register treats the two different paths as a conflict and aborts
-    (registration.cpp: "already set ... not overriding"), so rocprofv3 dies with
-    SIGABRT and no kernel stats are produced. Running the core copy makes the tool
-    and the profiled app share the same library, avoiding the conflict.
-    """
-    try:
-        from rocm_sdk_core._cli import _get_core_module_path
-
-        core_bin = _get_core_module_path() / "bin" / "rocprofv3"
-        if core_bin.is_file():
-            return str(core_bin)
-    except Exception:
-        pass
-    return shutil.which("rocprofv3") or "rocprofv3"
-
-
 def _profiler_python_code(model, attention, column_name, benchmark_dir):
     return (
         f"import sys; sys.path.insert(0, {benchmark_dir!r}); "
@@ -189,7 +166,7 @@ def _run_attention_profiler(model, attention, column_name, dirname):
     benchmark_dir = os.path.dirname(os.path.abspath(__file__))
     py_code = _profiler_python_code(model, attention, column_name, benchmark_dir)
     cmd = [
-        _resolve_rocprofv3(),
+        "rocprofv3",
         "--hip-trace",
         "--kernel-trace",
         "--stats",
@@ -203,7 +180,9 @@ def _run_attention_profiler(model, attention, column_name, dirname):
         py_code,
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # Pass os.environ explicitly: C code may set ROCPROFILER_REGISTER_LIBRARY
+        # via setenv() without updating Python's environ cache, which breaks rocprofv3.
+        result = subprocess.run(cmd, capture_output=True, text=True, env=os.environ.copy())
     except FileNotFoundError:
         print(
             "WARNING: rocprofv3 not found on PATH; kernel timing columns may be empty.",
