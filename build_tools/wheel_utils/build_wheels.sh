@@ -22,6 +22,7 @@ mkdir -p /wheelhouse/logs
 git config --global --add safe.directory /TransformerEngine
 cd /TransformerEngine
 
+<<<<<<< HEAD
 #hipify and aiter expect python in PATH, also ninja may be installed to python bindir
 #set it first because system python may be too old
 PATH="/opt/python/cp310-cp310/bin/:$PATH"
@@ -56,6 +57,10 @@ if $ROCM_BUILD ; then
 else
   /opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel
 fi
+=======
+# Install deps
+/opt/python/cp310-cp310/bin/pip install cmake pybind11[global] ninja setuptools wheel 'nvidia-cudnn-frontend>=1.25.0'
+>>>>>>> 868d8d9216da361c666519652115e23688db5211
 
 if $BUILD_METAPACKAGE ; then
         cd /TransformerEngine

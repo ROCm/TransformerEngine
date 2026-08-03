@@ -29,6 +29,10 @@ from build_tools.utils import (
     all_files_in_dir,
     cuda_archs,
     cuda_version,
+<<<<<<< HEAD
+=======
+    cudnn_frontend_include_path,
+>>>>>>> 868d8d9216da361c666519652115e23688db5211
     get_frameworks,
     remove_dups,
     min_python_version_str,
@@ -101,7 +105,14 @@ class TimedBdist(bdist_wheel):
 
 def setup_common_extension() -> CMakeExtension:
     """Setup CMake extension for common library"""
+<<<<<<< HEAD
     cmake_flags = []
+=======
+    cmake_flags = [
+        "-DCMAKE_CUDA_ARCHITECTURES={}".format(archs),
+        f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}",
+    ]
+>>>>>>> 868d8d9216da361c666519652115e23688db5211
     if bool(int(os.getenv("NVTE_UB_WITH_MPI", "0"))):
             assert (
                 os.getenv("MPI_HOME") is not None
@@ -157,10 +168,14 @@ def setup_common_extension() -> CMakeExtension:
 
     # NCCL EP (Hopper+): on by default; auto-skipped when no arch >= 90 is
     # targeted. Set NVTE_WITH_NCCL_EP=0 to force off.
+<<<<<<< HEAD
     # Disabled on ROCm
     if rocm_build():
         cmake_flags.append("-DNVTE_WITH_NCCL_EP=OFF")
     elif nccl_ep_enabled(archs):
+=======
+    if nccl_ep_enabled(archs):
+>>>>>>> 868d8d9216da361c666519652115e23688db5211
         nccl_home = build_nccl_ep_submodule()
         cmake_flags.append(f"-DNCCL_INCLUDE_DIR={nccl_home}/include")
     else:

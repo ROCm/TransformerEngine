@@ -84,6 +84,7 @@ include_directories(../../transformer_engine/common)
 include_directories(../../transformer_engine)
 include_directories(${CMAKE_SOURCE_DIR})
 
+<<<<<<< HEAD
 if(USE_CUDA)
   find_package(CUDAToolkit REQUIRED)
   include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
@@ -126,6 +127,10 @@ if(USE_ROCM)
       set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_deps})
   endfunction()
 endif()
+=======
+find_package(CUDAToolkit REQUIRED)
+include(${CMAKE_SOURCE_DIR}/../../transformer_engine/common/cmake/cuDNN.cmake)
+>>>>>>> 868d8d9216da361c666519652115e23688db5211
 
 add_subdirectory(operator)
 add_subdirectory(util)

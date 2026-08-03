@@ -481,6 +481,7 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(out.float(), tokens.float(), atol=5e-2, rtol=5e-2)
         torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
+<<<<<<< HEAD
     # Input validation
 
     def test_topk_int32_raises_clear_error(self):
@@ -494,6 +495,8 @@ class TestEP(unittest.TestCase):
         self.assertIn("topk_idx", msg)
         self.assertIn(".long()", msg)
 
+=======
+>>>>>>> 868d8d9216da361c666519652115e23688db5211
 
 def _init_distributed():
     dist.init_process_group(backend="nccl")

@@ -428,6 +428,13 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            # Test runner sets cu_seqlens_q == cu_seqlens_q_padded for the
+            # FlashAttention path, i.e. no inter-sequence padding. Declare this
+            # explicitly so the sync-free auto-detect (which conservatively
+            # picks True when padded cu_seqlens are present) does not disable FA.
+            pad_between_seqs=(
+                (kernel_backend != "FlashAttention") if qkv_format == "thd" else None
+            ),
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:
@@ -545,6 +552,12 @@ def run_dpa_with_cp(
             cu_seqlens_kv=cu_seqlens_kv,
             cu_seqlens_q_padded=cu_seqlens_q_padded,
             cu_seqlens_kv_padded=cu_seqlens_kv_padded,
+            # See note above (non-CP branch): same explicit declaration so
+            # FlashAttention isn't disabled by the conservative sync-free
+            # auto-detect when this test path constructs no inter-seq padding.
+            pad_between_seqs=(
+                (kernel_backend != "FlashAttention") if qkv_format == "thd" else None
+            ),
             fp8_output=fp8_mha,
         )
         if config.return_max_logit:
@@ -646,6 +659,7 @@ def run_dpa_with_cp(
             )
             cu_pads_q = cu_seqlens_q_padded - cu_seqlens_q
             num_pads_q = cu_pads_q[1:] - cu_pads_q[:-1]
+<<<<<<< HEAD
             for x in [dq, out, dq_, out_]:
                 if IS_HIP_EXTENSION and torch.count_nonzero(x[cu_seqlens_q_padded[-1] :]).item() != 0:
                     warnings.warn(f"Rank:{rank} non-zero elements in padding region")
@@ -663,6 +677,8 @@ def run_dpa_with_cp(
                         ).item()
                         == 0
                     )
+=======
+>>>>>>> 868d8d9216da361c666519652115e23688db5211
             cu_seqlens_kv_padded = cu_seqlens_kv_padded // world_size
             cu_seqlens_kv = get_cu_seqlens_on_cp_rank(
                 cu_seqlens_kv, cu_seqlens_kv_padded, world_size, rank, True, True

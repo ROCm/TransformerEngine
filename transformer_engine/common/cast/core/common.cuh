@@ -8,11 +8,22 @@
 
 /*! \file common.cuh
  *  \brief Common functions in quantize.
+ *
+ *  Umbrella header. The contents are split into:
+ *   - grouped_layout.cuh: architecture-neutral work-decomposition helpers
+ *     (offset/tensor-id lookup, job/block descriptors, dbias reductions).
+ *   - grouped_tma.cuh: architecture-specific TMA descriptor management and
+ *     bulk-copy staging (pulls in arch-specific PTX via ptx.cuh).
+ *
+ *  Sources that only need the arch-neutral helpers should include
+ *  grouped_layout.cuh directly so they are not forced into arch-specific
+ *  (smXXXa/smXXXf) compilation.
  */
 
 #ifndef TRANSFORMER_ENGINE_QUANTIZE_CORE_COMMON_CUH_
 #define TRANSFORMER_ENGINE_QUANTIZE_CORE_COMMON_CUH_
 
+<<<<<<< HEAD
 #include <cuda.h>
 #ifndef __HIP_PLATFORM_AMD__
 #include <cudaTypedefs.h>
@@ -589,5 +600,9 @@ __device__ __forceinline__ void store_output_stage(
 }  // namespace common
 }  // namespace dispatch
 }  // namespace transformer_engine
+=======
+#include "grouped_layout.cuh"
+#include "grouped_tma.cuh"
+>>>>>>> 868d8d9216da361c666519652115e23688db5211
 
 #endif  // TRANSFORMER_ENGINE_QUANTIZE_CORE_COMMON_CUH_

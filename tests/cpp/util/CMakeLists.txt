@@ -20,12 +20,24 @@ else()
 endif()
 
 find_package(OpenMP REQUIRED)
+<<<<<<< HEAD
 
 if(USE_CUDA)
 target_link_libraries(test_util PUBLIC CUDA::cudart GTest::gtest_main ${TE_LIB} CUDA::nvrtc CUDNN::cudnn OpenMP::OpenMP_CXX)
 else()
 target_link_libraries(test_util PUBLIC GTest::gtest_main ${TE_LIB} OpenMP::OpenMP_CXX ${TE_ROCM_TEST_LIBS})
 endif()
+=======
+find_package(Threads REQUIRED)
+target_link_libraries(test_util PUBLIC
+                      CUDA::cudart
+                      GTest::gtest_main
+                      ${TE_LIB}
+                      CUDA::nvrtc
+                      CUDNN::cudnn
+                      OpenMP::OpenMP_CXX
+                      Threads::Threads)
+>>>>>>> 868d8d9216da361c666519652115e23688db5211
 target_compile_options(test_util PRIVATE -O2 -fopenmp)
 
 include(GoogleTest)

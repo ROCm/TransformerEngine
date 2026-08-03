@@ -107,6 +107,7 @@ void nvte_compute_amax(const NVTETensor input, NVTETensor output, cudaStream_t s
 void nvte_compute_amax_with_config(const NVTETensor input, NVTETensor output,
                                    const NVTEQuantizationConfig config, cudaStream_t stream);
 
+<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
 
 size_t nvte_amax_workspace_num_blocks(size_t N);
@@ -127,6 +128,21 @@ void nvte_compute_amax_with_workspace(const NVTETensor input, NVTETensor output,
                                       cudaStream_t stream);
 
 #endif
+=======
+/*! \brief Compute per-group FP8 amax values for a grouped tensor.
+ *
+ *  The grouped tensor's shape metadata is read on device, so this API is safe
+ *  to use inside CUDA graph capture. The output grouped tensor supplies the
+ *  per-group shape metadata and receives one amax value per group.
+ *
+ *  \param[in]     input            Input grouped tensor. Must be unquantized.
+ *  \param[in,out] output           Grouped FP8 tensor with per-tensor scaling.
+ *  \param[in]     config           Quantization configuration.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_group_compute_amax_with_config(const NVTEGroupedTensor input, NVTEGroupedTensor output,
+                                         const NVTEQuantizationConfig config, cudaStream_t stream);
+>>>>>>> 868d8d9216da361c666519652115e23688db5211
 
 /*! \brief Update an FP8 tensor's scale based on its amax.
  *
@@ -139,6 +155,20 @@ void nvte_compute_amax_with_workspace(const NVTETensor input, NVTETensor output,
  */
 void nvte_compute_scale_from_amax(NVTETensor output, const NVTEQuantizationConfig config,
                                   cudaStream_t stream);
+
+/*! \brief Update a grouped FP8 tensor's per-group scale/scale_inv from its amax.
+ *
+ *  Grouped counterpart of nvte_compute_scale_from_amax: for each group derives
+ *  scale = max_fp8 / amax and scale_inv = 1/scale. All metadata is read on
+ *  device, so this is safe inside CUDA graph capture.Currently used in grouped FP8
+ *  current-scaling.
+ *
+ *  \param[in,out] output           Grouped FP8 tensor with per-tensor scaling.
+ *  \param[in]     config           Quantization configuration.
+ *  \param[in]     stream           CUDA stream used for the operation.
+ */
+void nvte_group_compute_scale_from_amax(NVTEGroupedTensor output,
+                                        const NVTEQuantizationConfig config, cudaStream_t stream);
 
 /*! \brief Compute partial amax for FP8 blockwise scaling.
  *

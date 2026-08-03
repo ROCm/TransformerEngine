@@ -17,6 +17,7 @@
 
 #include "../../common.h"
 #include "../fp8/dequantize_fp8.cuh"
+#include "../fp8_blockwise/group_dequantize_fp8_blockwise.cuh"
 #include "../mxfp8/dequantize_mxfp8.cuh"
 #include "../mxfp8/group_dequantize_mxfp8.cuh"
 #include "../nvfp4/dequantize_nvfp4.cuh"
@@ -77,6 +78,11 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
 #else
       NVTE_ERROR("MXFP8 Grouped Dequantization is not supported on ROCm.");
 #endif
+      break;
+    }
+    case NVTE_BLOCK_SCALING_1D:
+    case NVTE_BLOCK_SCALING_2D: {
+      fp8_blockwise::group_dequantize(&input, output, stream);
       break;
     }
     default:

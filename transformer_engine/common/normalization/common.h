@@ -33,6 +33,7 @@
 #include "../cast/mxfp8/quantize_mxfp8.cuh"
 #endif
 #include "../util/system.h"
+#include "kernel_params.h"
 
 namespace transformer_engine {
 
@@ -76,6 +77,7 @@ struct LaunchParams {
   }
 };
 
+<<<<<<< HEAD
 struct KernelParamsBase {
   KernelParamsBase()
       : ctas_per_col(0),
@@ -178,6 +180,8 @@ using BackwardAddKernelParams = BackwardKernelParams;
 #ifdef __HIP_PLATFORM_AMD__
 enum class NVTE_Norm_Backend { Te };
 #else
+=======
+>>>>>>> 868d8d9216da361c666519652115e23688db5211
 enum class NVTE_Norm_Backend { Te, Cudnn };
 #endif
 enum class NVTE_Norm_Stage { Forward, Backward, BackwardAdd };
@@ -281,7 +285,21 @@ class TeNormalizationRegistry {
       getInstance().general_function_map[general_key].emplace(hidden_size, Function(func));
     return 0;
   }
+<<<<<<< HEAD
   
+=======
+
+  // Overload for capturing-callable dispatchers (e.g. NVRTC closures).
+  static int registerFunction(TupleKeyType key, Function func) {
+    auto [general_key, batch_size, hidden_size, is_tuned] = key;
+    if (is_tuned)
+      getInstance().tuned_function_map.emplace(key, std::move(func));
+    else
+      getInstance().general_function_map[general_key].emplace(hidden_size, std::move(func));
+    return 0;
+  }
+
+>>>>>>> 868d8d9216da361c666519652115e23688db5211
   static Function getKernel(TupleKeyType key) {
     auto& instance = getInstance();
     auto [general_key, batch_size, hidden_size, is_tuned] = key;
