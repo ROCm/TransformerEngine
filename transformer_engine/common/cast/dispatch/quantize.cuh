@@ -19,12 +19,18 @@
 #include "../../transpose/cast_transpose.h"
 #include "../../util/vectorized_pointwise.h"
 #include "../core/common.cuh"
+#ifndef __HIP_PLATFORM_AMD__
+// Grouped delayed-scaling FP8 quantize uses CUDA-only inline PTX (st.global.cs).
 #include "../fp8/group_quantize_fp8.cuh"
+#endif
 #include "../fp8/quantize_fp8.cuh"
 #ifdef __HIP_PLATFORM_AMD__
 #include "../fp8/rocm_cast.cuh"
 #endif
+#ifndef __HIP_PLATFORM_AMD__
+// Grouped FP8 block-scaling quantize uses Hopper TMA (CUtensorMap), CUDA-only.
 #include "../fp8_blockwise/group_quantize_fp8_blockwise.cuh"
+#endif
 #include "../mxfp8/group_quantize_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
 #ifdef __HIP_PLATFORM_AMD__
@@ -518,8 +524,13 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
   // Dispatch to quantization kernel depending on data format
   switch (scaling_mode) {
     case NVTE_DELAYED_TENSOR_SCALING: {
+#ifndef __HIP_PLATFORM_AMD__
       fp8::group_quantize<IS_ACT, ParamOP, OP>(input_tensor, noop_tensor, output_tensor,
                                                &quant_config_cpp, stream);
+#else
+      NVTE_ERROR(
+          "Grouped delayed-scaling FP8 quantization is not supported on ROCm platform.");
+#endif
       break;
     }
     case NVTE_MXFP8_1D_SCALING: {
@@ -534,8 +545,13 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
                  "Fused grouped FP8 block-scaling quantize does not support "
                  "force_pow_2_scales=True. Set force_pow_2_scales=False, or use the unfused "
                  "split-quantize path (NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0).");
+#ifndef __HIP_PLATFORM_AMD__
       fp8_blockwise::group_quantize_blockwise_1d(input_tensor, output_tensor, noop_tensor,
                                                  quant_config_cpp.amax_epsilon, stream);
+#else
+      NVTE_ERROR(
+          "Grouped FP8 block-scaling quantization is not supported on ROCm platform.");
+#endif
       break;
     }
     case NVTE_BLOCK_SCALING_2D: {
@@ -544,8 +560,13 @@ void group_quantize_fwd_helper(const NVTEGroupedTensor input, NVTEGroupedTensor 
                  "Fused grouped FP8 block-scaling quantize does not support "
                  "force_pow_2_scales=True. Set force_pow_2_scales=False, or use the unfused "
                  "split-quantize path (NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0).");
+#ifndef __HIP_PLATFORM_AMD__
       fp8_blockwise::group_quantize_blockwise_2d(input_tensor, output_tensor, noop_tensor,
                                                  quant_config_cpp.amax_epsilon, stream);
+#else
+      NVTE_ERROR(
+          "Grouped FP8 block-scaling quantization is not supported on ROCm platform.");
+#endif
       break;
     }
     default:
@@ -596,6 +617,7 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
                  "Fused grouped FP8 block-scaling quantize does not support "
                  "force_pow_2_scales=True. Set force_pow_2_scales=False, or use the unfused "
                  "split-quantize path (NVTE_GROUPED_LINEAR_USE_FUSED_GROUPED_GEMM=0).");
+#ifndef __HIP_PLATFORM_AMD__
       // dbias is computed in-kernel and reduced per-expert inside group_quantize_blockwise_{1d,2d}
       // (mirrors MXFP8); those also handle the two-call workspace sizing protocol.
       GroupedTensor *dbias_arg = IS_DBIAS ? dbias_tensor : nullptr;
@@ -609,6 +631,10 @@ void group_quantize_bwd_helper(const NVTEGroupedTensor grad, const NVTEGroupedTe
                                                    quant_config_cpp.amax_epsilon, stream, dbias_arg,
                                                    workspace_arg);
       }
+#else
+      NVTE_ERROR(
+          "Grouped FP8 block-scaling quantization is not supported on ROCm platform.");
+#endif
       break;
     }
     default:

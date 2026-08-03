@@ -1067,7 +1067,7 @@ __device__ __forceinline__ T abs_val(T val) {
   } else if constexpr (detail::is_same_v<T, __half>) {
     return __habs(val);
   } else {
-    return fabsf(val);
+    return static_cast<T>(fabsf(static_cast<float>(val)));
   }
 }
 
@@ -1082,7 +1082,7 @@ __device__ __forceinline__ T max_val(T a, T b) {
   } else if constexpr (detail::is_same_v<T, __half>) {
     return __hmax(a, b);
   } else {
-    return fmaxf(a, b);
+    return static_cast<T>(fmaxf(static_cast<float>(a), static_cast<float>(b)));
   }
 }
 
