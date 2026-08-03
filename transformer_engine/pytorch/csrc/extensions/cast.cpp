@@ -358,6 +358,10 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
       break;
     }
     case GroupedQuantizationMode::FP8_CURRENT_SCALING_GROUPED_QUANTIZE: {
+#ifdef USE_ROCM
+      NVTE_ERROR(
+          "FP8 current-scaling grouped quantization is not supported on ROCm platform.");
+#else
       auto *fp8_quantizer_cpp = static_cast<Float8CurrentScalingQuantizer *>(quantizer_cpp.get());
       compute_grouped_fp8_current_scaling_amax_and_scale(
           grouped_input_tensor, grouped_output_tensor_cpp, grouped_output_py, fp8_quantizer_cpp,
@@ -370,6 +374,7 @@ py::object group_quantize(const at::Tensor &tensor, py::handle quantizer, const 
         nvte_group_quantize(grouped_input_tensor.data(), grouped_output_tensor_cpp.data(),
                             quant_config_cpp, at::cuda::getCurrentCUDAStream());
       });
+#endif  // USE_ROCM
       break;
     }
     case GroupedQuantizationMode::MXFP8_GROUPED_QUANTIZE: {
