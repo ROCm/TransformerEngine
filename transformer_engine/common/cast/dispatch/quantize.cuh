@@ -21,13 +21,10 @@
 #include "../core/common.cuh"
 #include "../fp8/group_quantize_fp8.cuh"
 #include "../fp8/quantize_fp8.cuh"
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
 #include "../fp8/rocm_cast.cuh"
 #endif
-=======
 #include "../fp8_blockwise/group_quantize_fp8_blockwise.cuh"
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 #include "../mxfp8/group_quantize_mxfp8.cuh"
 #include "../mxfp8/quantize_mxfp8.cuh"
 #ifdef __HIP_PLATFORM_AMD__

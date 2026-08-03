@@ -168,11 +168,7 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
     return;
   }
 
-<<<<<<< HEAD
-  const int device_id = cuda::current_device();
 #ifndef __HIP_PLATFORM_AMD__
-=======
->>>>>>> 868d8d9216da361c666519652115e23688db5211
   // Choose whether to compile to PTX or cubin
   const int sm_arch_ = cuda::sm_arch(device_id);
   const int compile_sm_arch = std::min(sm_arch_, max_supported_sm_arch());
@@ -194,11 +190,7 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   }
 #endif //__HIP_PLATFORM_AMD__
   opts.push_back(concat_strings("-I", cuda::include_directory(true)));
-<<<<<<< HEAD
-
-=======
   opts.insert(opts.end(), extra_options.begin(), extra_options.end());
->>>>>>> 868d8d9216da361c666519652115e23688db5211
   std::vector<const char*> opts_ptrs;
   for (const auto& opt : opts) {
     opts_ptrs.push_back(opt.c_str());
@@ -206,21 +198,15 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
 
   // Compile source
   nvrtcProgram program;
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
-  constexpr int num_headers = 3;
-  const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h, string_code_amd_detail_hip_float8_h};
-  const char* include_names[num_headers] = {"utils_hip.cuh", "util/math.h", "common/amd_detail/hip_float8.h"};
+  std::vector<const char*> headers = {string_code_utils_cuh, string_code_util_math_h,
+                                      string_code_amd_detail_hip_float8_h};
+  std::vector<const char*> include_names = {"utils_hip.cuh", "util/math.h",
+                                            "common/amd_detail/hip_float8.h"};
 #else
-  constexpr int num_headers = 2;
-  constexpr const char* headers[num_headers] = {string_code_utils_cuh, string_code_util_math_h};
-  constexpr const char* include_names[num_headers] = {"utils.cuh", "util/math.h"};
-#endif // __HIP_PLATFORM_AMD__
-  NVTE_CHECK_NVRTC(nvrtcCreateProgram(&program, code.c_str(), filename.c_str(), num_headers,
-                                      headers, include_names));
-=======
   std::vector<const char*> headers = {string_code_utils_cuh, string_code_util_math_h};
   std::vector<const char*> include_names = {"utils.cuh", "util/math.h"};
+#endif // __HIP_PLATFORM_AMD__
   headers.reserve(headers.size() + extra_headers.size());
   include_names.reserve(include_names.size() + extra_headers.size());
   for (const auto& header : extra_headers) {
@@ -232,7 +218,6 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   NVTE_CHECK_NVRTC(nvrtcCreateProgram(&program, code.c_str(), filename.c_str(),
                                       static_cast<int>(headers.size()), headers.data(),
                                       include_names.data()));
->>>>>>> 868d8d9216da361c666519652115e23688db5211
   NVTE_CHECK_NVRTC(nvrtcAddNameExpression(program, kernel_name.c_str()));
   const nvrtcResult compile_result =
       nvrtcCompileProgram(program, opts_ptrs.size(), opts_ptrs.data());

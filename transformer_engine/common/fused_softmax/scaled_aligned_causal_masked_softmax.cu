@@ -109,14 +109,10 @@ struct Max {
 template <typename T>
 __device__ __forceinline__ T WARP_SHFL_XOR_NATIVE(T value, int laneMask, int width = warpSize,
                                                   unsigned int mask = 0xffffffff) {
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
     return __shfl_xor(value, laneMask, width);
 #else
-#if CUDA_VERSION >= 9000
-=======
 #if defined(__CUDACC_RTC__) || CUDA_VERSION >= 9000
->>>>>>> 868d8d9216da361c666519652115e23688db5211
   return __shfl_xor_sync(mask, value, laneMask, width);
 #else
   return __shfl_xor(value, laneMask, width);

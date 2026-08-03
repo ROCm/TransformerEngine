@@ -200,10 +200,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_ep_instance_state_type_id", &GetEpInstanceStateTypeIdCapsule);
   m.def("get_ep_instance_state_type_info", &GetEpInstanceStateTypeInfoCapsule);
 #endif  // NVTE_WITH_NCCL_EP
-<<<<<<< HEAD
-#endif
-=======
->>>>>>> 868d8d9216da361c666519652115e23688db5211
+#endif  // !USE_ROCM
 
   pybind11::enum_<DType>(m, "DType", pybind11::module_local())
       .value("kByte", DType::kByte)

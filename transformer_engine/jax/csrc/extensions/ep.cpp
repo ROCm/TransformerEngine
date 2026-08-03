@@ -197,11 +197,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpInstantiateHandler, EpInstantiateImpl, FFI::Bind
 
 Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type topk_idx,
                         Result_Type recv_tokens_per_expert, Result_Type handle_mem,
-<<<<<<< HEAD
-                        Result_Type workspace, EpConfig config) {
-=======
                         EpConfig config) {
->>>>>>> 868d8d9216da361c666519652115e23688db5211
   (void)ep_state;  // lifetime only.
   auto topk_dims = topk_idx.dimensions();
   NVTE_CHECK(topk_dims.size() >= 2,
@@ -212,24 +208,8 @@ Error_Type EpPrepareFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_T
 
   std::vector<size_t> topk_shape = {product(topk_dims, 0, topk_dims.size() - 1),
                                     static_cast<size_t>(topk_dims.back())};
-<<<<<<< HEAD
-  // NCCL EP currently requires int64 topk_idx; upcast int32 on-stream.
-  // TODO(phuong): drop once NCCL EP accepts int32.
-  void* topk_idx_data = topk_idx.untyped_data();
-  if (idx_etype == ::xla::ffi::DataType::S32) {
-    const size_t n = topk_shape[0] * topk_shape[1];
-    NVTE_CHECK(static_cast<size_t>(workspace->element_count()) >= n,
-               "workspace too small for int32 → int64 upcast: element_count=",
-               workspace->element_count(), " < required ", n);
-    int64_t* ws = reinterpret_cast<int64_t*>(workspace->untyped_data());
-    nvte_convert_int32_to_int64(reinterpret_cast<const int32_t*>(topk_idx_data), ws, n, stream);
-    topk_idx_data = ws;
-  }
-  auto topk_idx_ = TensorWrapper(topk_idx_data, topk_shape, DType::kInt64);
-=======
   auto topk_idx_ = TensorWrapper(topk_idx.untyped_data(), topk_shape,
                                  convert_ffi_datatype_to_te_dtype(idx_etype));
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
   std::vector<size_t> tc_shape = {static_cast<size_t>(recv_tokens_per_expert->element_count())};
   auto recv_tokens_per_expert_ =
@@ -254,10 +234,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
                                   .Arg<Buffer_Type>()                         // topk_idx
                                   .Ret<Buffer_Type>()  // recv_tokens_per_expert
                                   .Ret<Buffer_Type>()  // handle_mem
-<<<<<<< HEAD
-                                  .Ret<Buffer_Type>()  // workspace (FFI scratch)
-=======
->>>>>>> 868d8d9216da361c666519652115e23688db5211
                                   .Attrs<EpConfig>(),
                               FFI_CudaGraph_Traits);
 
@@ -265,12 +241,7 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpPrepareHandler, EpPrepareFFI,
 
 Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_Type handle_mem,
                          Buffer_Type topk_idx, Buffer_Type tokens, Buffer_Type topk_weights,
-<<<<<<< HEAD
-                         Result_Type recv_tokens, Result_Type recv_topk_weights,
-                         Result_Type workspace, EpConfig config) {
-=======
                          Result_Type recv_tokens, Result_Type recv_topk_weights, EpConfig config) {
->>>>>>> 868d8d9216da361c666519652115e23688db5211
   (void)ep_state;
   auto token_dims = tokens.dimensions();
   NVTE_CHECK(token_dims.size() >= 2,
@@ -289,24 +260,8 @@ Error_Type EpDispatchFFI(cudaStream_t stream, EpInstanceState* ep_state, Buffer_
              ") must match topk_idx last dim (", idx_dims.back(), ")");
   std::vector<size_t> idx_shape = {product(idx_dims, 0, idx_dims.size() - 1),
                                    static_cast<size_t>(idx_dims.back())};
-<<<<<<< HEAD
-  // NCCL EP currently requires int64 topk_idx; upcast int32 on-stream.
-  // TODO(phuong): drop once NCCL EP accepts int32.
-  void* topk_idx_data = topk_idx.untyped_data();
-  if (idx_etype == ::xla::ffi::DataType::S32) {
-    const size_t n = idx_shape[0] * idx_shape[1];
-    NVTE_CHECK(static_cast<size_t>(workspace->element_count()) >= n,
-               "workspace too small for int32 → int64 upcast: element_count=",
-               workspace->element_count(), " < required ", n);
-    int64_t* ws = reinterpret_cast<int64_t*>(workspace->untyped_data());
-    nvte_convert_int32_to_int64(reinterpret_cast<const int32_t*>(topk_idx_data), ws, n, stream);
-    topk_idx_data = ws;
-  }
-  auto topk_idx_ = TensorWrapper(topk_idx_data, idx_shape, DType::kInt64);
-=======
   auto topk_idx_ = TensorWrapper(topk_idx.untyped_data(), idx_shape,
                                  convert_ffi_datatype_to_te_dtype(idx_etype));
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
   const size_t T_flat = product(token_dims, 0, token_dims.size() - 1);
   const size_t H = static_cast<size_t>(token_dims.back());
@@ -357,10 +312,6 @@ XLA_FFI_DEFINE_HANDLER_SYMBOL(EpDispatchHandler, EpDispatchFFI,
                                   .Arg<Buffer_Type>()                         // topk_weights
                                   .Ret<Buffer_Type>()                         // recv_tokens
                                   .Ret<Buffer_Type>()                         // recv_topk_weights
-<<<<<<< HEAD
-                                  .Ret<Buffer_Type>()  // workspace (FFI scratch)
-=======
->>>>>>> 868d8d9216da361c666519652115e23688db5211
                                   .Attrs<EpConfig>(),
                               FFI_CudaGraph_Traits);
 

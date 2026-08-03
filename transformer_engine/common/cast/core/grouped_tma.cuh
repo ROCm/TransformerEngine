@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -16,6 +18,9 @@
 
 #ifndef TRANSFORMER_ENGINE_QUANTIZE_CORE_GROUPED_TMA_CUH_
 #define TRANSFORMER_ENGINE_QUANTIZE_CORE_GROUPED_TMA_CUH_
+
+// Disabled on ROCm
+#ifndef __HIP_PLATFORM_AMD__
 
 #include <cuda.h>
 #include <cudaTypedefs.h>
@@ -213,5 +218,7 @@ __device__ __forceinline__ void store_output_stage(
 }  // namespace common
 }  // namespace dispatch
 }  // namespace transformer_engine
+
+#endif  // !__HIP_PLATFORM_AMD__
 
 #endif  // TRANSFORMER_ENGINE_QUANTIZE_CORE_GROUPED_TMA_CUH_

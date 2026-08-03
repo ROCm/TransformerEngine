@@ -45,9 +45,8 @@ static_assert(sizeof(uint32_t) == 4);
 static_assert(sizeof(uint64_t) == 8);
 #endif
 
-<<<<<<< HEAD
 #endif // __HIP_PLATFORM_AMD__
-=======
+
 // Minimal subset of <type_traits> used by RTC kernel headers. Keep these in a
 // project-owned namespace because adding primary templates to std is undefined.
 namespace transformer_engine {
@@ -78,7 +77,6 @@ using conditional_t = typename conditional<B, T, F>::type;
 
 }  // namespace detail
 }  // namespace transformer_engine
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////
 

@@ -366,7 +366,6 @@ void nvte_compute_amax_with_config(const NVTETensor input_, const NVTETensor out
   compute_amax_impl(input_, output_, stream, nullptr, config_);
 }
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
 void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor output_,
                                       NVTETensor workspace_, const NVTEQuantizationConfig config_,
@@ -375,13 +374,12 @@ void nvte_compute_amax_with_workspace(const NVTETensor input_, const NVTETensor 
   compute_amax_impl(input_, output_, stream, workspace_, config_);
 }
 #endif
-=======
+
 void nvte_group_compute_amax_with_config(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                                          const NVTEQuantizationConfig config, cudaStream_t stream) {
   NVTE_API_CALL(nvte_group_compute_amax_with_config);
   group_compute_amax_impl(input, output, config, stream);
 }
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
 namespace transformer_engine {
 namespace {

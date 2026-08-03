@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -60,6 +62,11 @@ struct ForwardKernelParams : public KernelParamsBase {
 
   // Whether to compute scale and amax
   bool fp8_out = false;
+
+#ifdef __HIP_PLATFORM_AMD__
+  // Whether the output is MXFP8-quantized (ROCm norm backend).
+  bool mxfp8_out = false;
+#endif
 };
 
 struct BackwardKernelParams : public KernelParamsBase {

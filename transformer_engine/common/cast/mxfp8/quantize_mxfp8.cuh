@@ -566,9 +566,6 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
   destroy_barriers<STAGES>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
-<<<<<<< HEAD
-#endif //#ifndef __HIP_PLATFORM_AMD__
-=======
 
 // Zeroes out a scale buffer (used to clear padding of swizzled scales).
 static __global__ void __launch_bounds__(256)
@@ -582,7 +579,7 @@ static __global__ void __launch_bounds__(256)
   }
 }
 
->>>>>>> 868d8d9216da361c666519652115e23688db5211
+#endif //#ifndef __HIP_PLATFORM_AMD__
 }  // namespace quantize_kernel
 
 template <bool IS_DBIAS, bool IS_DACT, bool IS_ACT, typename ParamOP,
