@@ -214,10 +214,7 @@ def test_dot_product_mem_calc():
 @pytest.mark.parametrize("model_configs", [model_configs_base])
 @pytest.mark.parametrize("model", model_configs_base.keys())
 @pytest.mark.parametrize("ckpt_attn", [False])
-<<<<<<< HEAD
 @pytest.mark.parametrize("workspace_opt", [False] if IS_HIP_EXTENSION else [True, False])
-=======
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 @pytest.mark.parametrize("qkv_layout", [None])
 @pytest.mark.parametrize("swa", [False])
 @pytest.mark.parametrize("pad_between_seqs", [False, True])
@@ -226,6 +223,7 @@ def test_dot_product_attention(
     model_configs,
     model,
     ckpt_attn,
+    workspace_opt,
     qkv_layout,
     swa,
     pad_between_seqs,
@@ -326,13 +324,13 @@ def test_dot_product_attention(
             "UnfusedDotProductAttention",
             ckpt_attn,
             qkv_layout,
+            workspace_opt,
             pad_between_seqs,
             is_training,
         )
 
     # FusedAttention backend
     if fused_attn_supported:
-<<<<<<< HEAD
         if len(fused_attn_backends) == 1:
             fused_attn_fwd, fused_max_logit, fused_attn_bwd = _run_dot_product_attention(
                 dtype,
@@ -388,17 +386,6 @@ def test_dot_product_attention(
                 pad_between_seqs,
                 is_training,
             )
-=======
-        fused_attn_fwd, fused_max_logit, fused_attn_bwd = _run_dot_product_attention(
-            dtype,
-            config,
-            "FusedAttention",
-            ckpt_attn,
-            qkv_layout,
-            pad_between_seqs,
-            is_training,
-        )
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
     # FlashAttention backend
     if flash_attn_supported:
@@ -408,6 +395,7 @@ def test_dot_product_attention(
             "FlashAttention",
             ckpt_attn,
             qkv_layout,
+            workspace_opt,
             pad_between_seqs,
             is_training,
         )
@@ -1225,6 +1213,7 @@ def _run_dot_product_attention(
     backend: str,
     ckpt_attn: bool,
     qkv_layout: str,
+    workspace_opt: bool,
     pad_between_seqs: bool,
     is_training: bool,
 ) -> Tuple[torch.Tensor, Tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
@@ -1238,6 +1227,7 @@ def _run_dot_product_attention(
         os.environ["NVTE_FLASH_ATTN"] = "1"
     if backend == "FusedAttention":
         os.environ["NVTE_FUSED_ATTN"] = "1"
+        os.environ["NVTE_FUSED_ATTN_FORCE_WORKSPACE_OPT"] = "1" if workspace_opt else "0"
     if backend == "UnfusedDotProductAttention":
         os.environ["NVTE_UNFUSED_ATTN"] = "1"
     _attention_backends["backend_selection_requires_update"] = True
@@ -1641,6 +1631,7 @@ def test_transformer_layer(
     # Get configs
     config = model_configs[model]
     tols = dict(atol=5e-2, rtol=5e-2)
+    workspace_opt = True
 
     # Test backend availability
     is_training = True
@@ -1688,6 +1679,7 @@ def test_transformer_layer(
             "UnfusedDotProductAttention",
             ckpt_attn,
             qkv_format,
+            workspace_opt,
             fused_qkv_params,
             RoPE,
             is_training,
@@ -1695,7 +1687,6 @@ def test_transformer_layer(
 
     # FusedAttention backend
     if fused_attn_supported:
-<<<<<<< HEAD
         if len(fused_attn_backends) == 1:
             fused_attn_fwd, fused_attn_bwd = _run_transformer_layer(
                 dtype,
@@ -1753,19 +1744,6 @@ def test_transformer_layer(
                 is_training,
             )
 
-=======
-        fused_attn_fwd, fused_attn_bwd = _run_transformer_layer(
-            dtype,
-            config,
-            "FusedAttention",
-            ckpt_attn,
-            qkv_format,
-            fused_qkv_params,
-            RoPE,
-            is_training,
-        )
->>>>>>> 868d8d9216da361c666519652115e23688db5211
-
     # FlashAttention backend
     if flash_attn_supported:
         flash_attn_fwd, flash_attn_bwd = _run_transformer_layer(
@@ -1774,6 +1752,7 @@ def test_transformer_layer(
             "FlashAttention",
             ckpt_attn,
             qkv_format,
+            workspace_opt,
             fused_qkv_params,
             RoPE,
             is_training,
@@ -1854,6 +1833,7 @@ def _run_transformer_layer(
     backend: str,
     ckpt_attn: bool,
     qkv_format: str,
+    workspace_opt: bool,
     fused_qkv_params: bool,
     RoPE: bool,
     is_training: bool,

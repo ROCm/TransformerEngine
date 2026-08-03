@@ -1697,12 +1697,8 @@ def test_grouped_linear_grouped_tensor_path_matches_legacy(
         pytest.skip(
             "GroupedTensor grouped GEMM path requires Hopper (SM90) or Blackwell (SM10x and SM110)."
         )
-<<<<<<< HEAD
-    if use_fp8 and device_capability < (10, 0):
-        pytest.skip("Quantized GroupedTensor grouped GEMM path requires Blackwell (SM100+).")
     if IS_HIP_EXTENSION:
         pytest.skip("GroupedTensor grouped GEMM needs nvte_grouped_gemm, unsupported on ROCm.")
-=======
     # MXFP8/NVFP4 grouped quantization kernels require Blackwell, but FP8 per-tensor
     # current scaling also runs on the Hopper grouped GEMM path.
     is_current_scaling = use_fp8 and fp8_recipe.float8_current_scaling()
@@ -1710,7 +1706,6 @@ def test_grouped_linear_grouped_tensor_path_matches_legacy(
         pytest.skip(
             "Quantized GroupedTensor grouped GEMM path (MXFP8/NVFP4) requires Blackwell (SM100+)."
         )
->>>>>>> 868d8d9216da361c666519652115e23688db5211
     cublaslt_version = tex.get_cublasLt_version()
     if device_capability < (10, 0) and cublaslt_version < 130400:
         pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")
@@ -2017,12 +2012,8 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
         pytest.skip(
             "GroupedTensor grouped GEMM path requires Hopper (SM90) or Blackwell (SM10x and SM110)."
         )
-<<<<<<< HEAD
-    if use_fp8 and device_capability < (10, 0):
-        pytest.skip("Quantized GroupedTensor grouped GEMM path requires Blackwell (SM100+).")
     if IS_HIP_EXTENSION:
         pytest.skip("GroupedTensor grouped GEMM needs nvte_grouped_gemm, unsupported on ROCm.")
-=======
     # MXFP8/NVFP4 grouped quantization kernels require Blackwell, but FP8 per-tensor
     # current scaling also runs on the Hopper grouped GEMM path.
     is_current_scaling = use_fp8 and fp8_recipe.float8_current_scaling()
@@ -2030,7 +2021,6 @@ def test_grouped_linear_fused_path_cuda_graph_safe(fp8_recipe, bias, monkeypatch
         pytest.skip(
             "Quantized GroupedTensor grouped GEMM path (MXFP8/NVFP4) requires Blackwell (SM100+)."
         )
->>>>>>> 868d8d9216da361c666519652115e23688db5211
     cublaslt_version = tex.get_cublasLt_version()
     if device_capability < (10, 0) and cublaslt_version < 130400:
         pytest.skip("Grouped GEMM on Hopper requires cuBLAS 13.4+.")

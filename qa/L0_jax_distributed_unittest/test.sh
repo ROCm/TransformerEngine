@@ -41,13 +41,8 @@ wait
 TE_PATH=$TE_PATH bash $TE_PATH/examples/jax/ep/run_test_ep.sh || test_fail "run_test_ep.sh"
 wait
 
-<<<<<<< HEAD
-# MoE custom_vjp distributed suite. Runs one Python process per GPU
-# via tests/jax/run_multiprocess_moe_vjp.sh (mirrors the pattern in
-=======
 # TE-EP MoE custom_vjp distributed suite. Runs one Python process per
 # GPU via tests/jax/run_te_ep_moe.sh (mirrors the pattern in
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 # examples/jax/encoder/run_test_multiprocessing_encoder.sh). Requires
 # >=4 visible GPUs.
 TE_PATH=$TE_PATH bash $TE_PATH/tests/jax/run_te_ep_moe.sh \

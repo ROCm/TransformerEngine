@@ -26,13 +26,8 @@ TEST(UtilTest, NVRTC) {
   // GPU data buffer
   int* device_buffer;
   std::vector<int> host_buffer(2);
-<<<<<<< HEAD
-  (void)cudaMalloc((void**)&device_buffer, 2*sizeof(int));  // NOLINT(*)
-  (void)cudaMemset(device_buffer, 0, 2*sizeof(int));
-=======
-  cudaMalloc((void**)&device_buffer, 2 * sizeof(int));  // NOLINT(*)
-  cudaMemset(device_buffer, 0, 2 * sizeof(int));
->>>>>>> 868d8d9216da361c666519652115e23688db5211
+  (void)cudaMalloc((void**)&device_buffer, 2 * sizeof(int));  // NOLINT(*)
+  (void)cudaMemset(device_buffer, 0, 2 * sizeof(int));
 
   // CUDA kernel implementations
   const char code1[] = R"code(
