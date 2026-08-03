@@ -374,6 +374,24 @@ def te_generic_gemm_triton(A,
         if a_kind != b_kind:
             raise ValueError("Mixed MXFP8 and non-MXFP8 inputs not supported")
 
+        # mxfp8_matmul_kernel does not support alpha/beta/accumulate (unlike the
+        # regular FP8/BF16 matmul_kernel). Fusible ops like ForwardLinearScaleAdd
+        # / BackwardLinearScale pass alpha=<scale>, accumulate_into_out=True to
+        # fuse the scale/add into the GEMM as C = alpha*A*B + beta*C. If we
+        # silently ignored them the kernel would produce C = A*B instead --
+        # completely wrong output. Refuse until the MXFP8 kernel grows those
+        # parameters (see TODO in gemm_kernels.py::mxfp8_matmul_kernel).
+        if alpha != 1.0 or beta != 0.0 or accumulate:
+            raise ValueError(
+                "The Triton GEMM backend (NVTE_USE_GEMM_TRITON=1) does not support "
+                f"MXFP8 with alpha={alpha}, beta={beta}, accumulate={accumulate}: the "
+                "MXFP8 kernel does not yet implement the C = alpha*A*B + beta*C epilogue. "
+                "Fusible ops that fold a scale/add into the GEMM (ForwardLinearScaleAdd, "
+                "BackwardLinearScale, BackwardLinearAdd, ForwardLinearBiasAdd) are not "
+                "supported for MXFP8 through Triton yet -- unset NVTE_USE_GEMM_TRITON for "
+                "these paths, or switch to non-MXFP8 recipes."
+            )
+
         # Sanity: both operands must have at least one pre-quantized copy.
         if getattr(A, '_rowwise_data', None) is None and getattr(A, '_columnwise_data', None) is None:
             raise RuntimeError("MXFP8Tensor has neither rowwise nor columnwise data")
