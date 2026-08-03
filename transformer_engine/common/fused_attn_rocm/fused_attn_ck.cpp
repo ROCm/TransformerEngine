@@ -151,6 +151,32 @@ bool is_ck_backend_supported(
 #endif // USE_FUSED_ATTN_CK
 }
 
+bool is_small_seq_supported_static(DType dtype,
+                                   NVTE_Bias_Type bias_type,
+                                   NVTE_Mask_Type mask_type,
+                                   float dropout,
+                                   size_t head_dim_qk,
+                                   size_t head_dim_v,
+                                   size_t num_attn_heads,
+                                   size_t num_gqa_groups) {
+  if(dropout != 0.0f) return false;
+  if(bias_type != NVTE_Bias_Type::NVTE_NO_BIAS) return false;
+  if(dtype != DType::kBFloat16) return false;
+  if(head_dim_qk != head_dim_v) return false;
+  if(head_dim_qk != 128 && head_dim_qk != 256) return false;
+  if(num_gqa_groups == 0 || num_attn_heads % num_gqa_groups != 0) return false;
+  if(num_attn_heads != num_gqa_groups) return false;
+  if(num_attn_heads != 16 && num_attn_heads != 32) return false;
+  if(!is_padding_mask(mask_type) && mask_type != NVTE_Mask_Type::NVTE_NO_MASK) return false;
+  return true;
+}
+
+bool is_small_seq_supported_runtime(size_t runtime_max_seqlen_q,
+                                    size_t runtime_max_seqlen_kv) {
+  return runtime_max_seqlen_q > 0 && runtime_max_seqlen_q <= kSmallSeqMaxSeqlen &&
+         runtime_max_seqlen_kv > 0 && runtime_max_seqlen_kv <= kSmallSeqMaxSeqlen;
+}
+
 
 #ifdef USE_FUSED_ATTN_CK
 ck_fused_attn::DType nvte_to_ck_dtype(DType t_dtype){
@@ -487,6 +513,11 @@ void fused_attn_ck_fwd_impl(
   bool is_padding = is_padding_mask(mask_type);
   bool bshd_to_thd = is_BSHD && is_padding;
 
+  const bool ck_small_seq_env_enabled =
+      getenv<std::string>("NVTE_FUSED_ATTN_CK_SMALLSEQ") == "1";
+  bool ck_small_seq_enabled = false;
+  void* ck_smallseq_workspace_prefix = nullptr;
+
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype);
@@ -498,6 +529,22 @@ void fused_attn_ck_fwd_impl(
   // (planner returns nullptr, accumulates total) and execution mode.
   WorkspacePlanner planner(workspace);
 
+  if(ck_small_seq_env_enabled) {
+    if(cuda::sm_arch() == 94) {
+      if(is_small_seq_supported_static(dtype, bias_type, mask_type, dropout_probability, d_qk, d_v,
+                                     h, hg)) {
+        if(is_ragged) {
+          ck_small_seq_enabled = true;
+          ck_smallseq_workspace_prefix =
+              planner.allocate(ck_fused_attn::small_seq_thd_extra_workspace_bytes());
+        } else {
+          ck_small_seq_enabled =
+              is_BSHD && s_q == s_kv && s_q >= 2 && s_q <= kSmallSeqMaxSeqlen;
+        }
+      }
+    }
+  }
+
   void* devPtrAlibiSlope = nullptr;
   if(bias_type == NVTE_Bias_Type::NVTE_ALIBI){
     // ck requires an alibi slope array even if in standard (vanilla) mode
@@ -505,7 +552,7 @@ void fused_attn_ck_fwd_impl(
   }
 
   void* devPtrSoftmaxLSEWithoutPadding = nullptr;
-  if((is_SBHD && is_padding) || bshd_to_thd || is_ragged){
+  if((is_SBHD && is_padding) || bshd_to_thd || is_ragged || ck_small_seq_enabled){
     devPtrSoftmaxLSEWithoutPadding = planner.allocate(h*max_tokens_q*sizeof(float));
   }
 
@@ -660,6 +707,59 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"num_splits: "<<ck_args.num_splits<<std::endl;
   }
 
+  // ---------------------------------------------------------------------------
+  // CK small-seq forward (NVTE_FUSED_ATTN_CK_SMALLSEQ).
+  //
+  // BSHD (is_BSHD): uniform s_q in [2, 17], ck_attn_smallseq_fwd_bshd on Q/K/V/O;
+  //   LSE [h,tokens] -> pad_remap_lse -> devPtrSoftmaxAux [b,h,s].
+  //
+  // THD (is_ragged): probe runtime max seqlen via cu_seqlens; if <= 17,
+  //   ck_attn_smallseq_fwd_thd with cu_seqlens; LSE remap to THD layout on O.
+  //
+  // ---------------------------------------------------------------------------
+  if(ck_small_seq_enabled) {
+    if(is_BSHD) {
+      if(nvte_log_ck_config) {
+        std::cout << std::endl << "attn_fwd(ck small-seq, BSHD self-attn): b: " << b
+                  << ", s: " << s_q << ", flow: ck-smallseq" << std::endl;
+      }
+      ck_fused_attn::ck_attn_smallseq_fwd_bshd(
+          b, h, s_q, s_kv, d_qk, scaling_factor, devPtrQ, devPtrK, devPtrV, devPtrO,
+          devPtrSoftmaxLSEWithoutPadding, nvte_to_ck_dtype(dtype), stream);
+      pad_remap_lse<PadDirection::Add>(b, h, s_q, max_tokens_q, false, devPtrSoftmaxAux,
+                                       devPtrCuSeqlensQ, devPtrSeqOffsetsQ,
+                                       devPtrSoftmaxLSEWithoutPadding, stream);
+      return;
+    } else {
+      void* max_seqlen_workspace_q = ck_smallseq_workspace_prefix;
+      void* max_seqlen_workspace_kv =
+          static_cast<void*>(static_cast<int8_t*>(ck_smallseq_workspace_prefix) + sizeof(uint64_t));
+      const size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+          b, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, max_seqlen_workspace_q, stream));
+      const size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+          b, devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV, max_seqlen_workspace_kv, stream));
+      const bool run_smallseq =
+          is_small_seq_supported_runtime(runtime_max_seqlen_q, runtime_max_seqlen_kv);
+      if(nvte_log_ck_config) {
+        std::cout << std::endl << "attn_fwd(ck small-seq, THD): b: " << b
+                  << ", runtime_max_seqlen_q: " << runtime_max_seqlen_q
+                  << ", runtime_max_seqlen_kv: " << runtime_max_seqlen_kv
+                  << ", flow: " << (run_smallseq ? "ck-smallseq" : "regular ck/aiter") << std::endl;
+      }
+
+      if(run_smallseq) {
+        ck_fused_attn::ck_attn_smallseq_fwd_thd(
+            b, h, d_qk, max_tokens_q, max_tokens_kv, scaling_factor, devPtrQ, devPtrK, devPtrV,
+            devPtrO, devPtrSoftmaxLSEWithoutPadding, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ,
+            devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV, nvte_to_ck_dtype(dtype), stream);
+        pad_remap_lse<PadDirection::Add>(b, h, s_q, max_tokens_q, true, devPtrSoftmaxAux,
+                                           devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ,
+                                           devPtrSoftmaxLSEWithoutPadding, stream);
+        return;
+      }
+    }
+  }
+
   if(is_SBHD && is_padding){
     // remove padding for q, k, v
     pad_remap<PadDirection::Remove>(dtype, b, h, s_q, d_qk, max_tokens_q, false, q_stride[0], q_stride[1], q_stride[2], devPtrQ, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrQWithoutPadding, stream);
@@ -758,6 +858,11 @@ void fused_attn_ck_bwd_impl(
   bool bshd_to_thd = is_BSHD && is_padding;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
 
+  const bool ck_small_seq_env_enabled =
+      getenv<std::string>("NVTE_FUSED_ATTN_CK_SMALLSEQ") == "1";
+  bool ck_small_seq_enabled = false;
+  void* ck_smallseq_workspace_prefix = nullptr;
+
   // extract the qkv and o storage bytes to allocate buffer for padding removing
   // b from cu_seqlen is not the actual storage batch for pad_between_seqs case
   size_t q_storage_bytes = max_tokens_q*h*d_qk*nvte_dtype_size(dtype);
@@ -768,6 +873,22 @@ void fused_attn_ck_bwd_impl(
   // Reserve workspace chunks. Same allocation sequence runs in sizing mode
   // (planner returns nullptr, accumulates total) and execution mode.
   WorkspacePlanner planner(workspace);
+
+  if(ck_small_seq_env_enabled) {
+    if(cuda::sm_arch() == 94) {
+      if(is_small_seq_supported_static(dtype, bias_type, mask_type, dropout_probability, d_qk, d_v,
+                                     h, hg)) {
+        if(is_ragged) {
+          ck_small_seq_enabled = true;
+          ck_smallseq_workspace_prefix =
+              planner.allocate(ck_fused_attn::small_seq_thd_extra_workspace_bytes());
+        } else {
+          ck_small_seq_enabled =
+              is_BSHD && s_q == s_kv && s_q >= 2 && s_q <= kSmallSeqMaxSeqlen;
+        }
+      }
+    }
+  }
 
   // First h*max_tokens_q*sizeof(float) is the lse-d buffer (passed as softmax_lsed)
   void* lse_workspace = planner.allocate(h*max_tokens_q*sizeof(float));
@@ -850,7 +971,7 @@ void fused_attn_ck_bwd_impl(
   void* devPtrCuSeqlenPaddedQ = devPtrSeqOffsetsQ;
   void* devPtrCuSeqlenPaddedKV = devPtrSeqOffsetsKV;
 
-  if((is_SBHD && is_padding) || bshd_to_thd || is_ragged){
+  if((is_SBHD && is_padding) || bshd_to_thd || is_ragged || ck_small_seq_enabled){
     devPtrSoftmaxLSEWithoutPadding = planner.allocate(h*max_tokens_q*sizeof(float));
   }
   if(is_SBHD && is_padding){
@@ -1033,6 +1154,54 @@ void fused_attn_ck_bwd_impl(
   ck_args.uses_bwd_v3 = nvte_ck_uses_bwd_v3;
   ck_args.is_v3_atomic_fp32 = nvte_ck_is_v3_atomic_fp32;
   ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
+
+  // ---------------------------------------------------------------------------
+  // CK small-seq backward (mirrors forward). 
+  // ---------------------------------------------------------------------------
+  if(ck_small_seq_enabled) {
+    if(is_BSHD) {
+      if(nvte_log_ck_config) {
+        std::cout << std::endl << "attn_bwd(ck small-seq, BSHD self-attn): b: " << b
+                  << ", s: " << s_q << ", flow: ck-smallseq" << std::endl;
+      }
+      pad_remap_lse<PadDirection::Remove>(b, h, s_q, max_tokens_q, false, devPtrSoftmaxAux,
+                                          devPtrCuSeqlensQ, devPtrSeqOffsetsQ,
+                                          devPtrSoftmaxLSEWithoutPadding, stream);
+      ck_fused_attn::ck_attn_smallseq_bwd_bshd(
+          b, h, s_q, s_kv, d_qk, scaling_factor, devPtrQ, devPtrK, devPtrV, devPtrdO,
+          devPtrSoftmaxLSEWithoutPadding, devPtrdQ, devPtrdK, devPtrdV, nvte_to_ck_dtype(dtype),
+          stream);
+      return;
+    } else {
+      void* max_seqlen_workspace_q = ck_smallseq_workspace_prefix;
+      void* max_seqlen_workspace_kv =
+          static_cast<void*>(static_cast<int8_t*>(ck_smallseq_workspace_prefix) + sizeof(uint64_t));
+      const size_t runtime_max_seqlen_q = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+          b, devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, max_seqlen_workspace_q, stream));
+      const size_t runtime_max_seqlen_kv = static_cast<size_t>(ck_fused_attn::get_runtime_max_seqlen(
+          b, devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV, max_seqlen_workspace_kv, stream));
+      const bool run_smallseq =
+          is_small_seq_supported_runtime(runtime_max_seqlen_q, runtime_max_seqlen_kv);
+      if(nvte_log_ck_config) {
+        std::cout << std::endl << "attn_bwd(ck small-seq, THD): b: " << b
+                  << ", runtime_max_seqlen_q: " << runtime_max_seqlen_q
+                  << ", runtime_max_seqlen_kv: " << runtime_max_seqlen_kv
+                  << ", flow: " << (run_smallseq ? "ck-smallseq" : "regular ck/aiter") << std::endl;
+      }
+
+      if(run_smallseq) {
+        pad_remap_lse<PadDirection::Remove>(b, h, s_q, max_tokens_q, true, devPtrSoftmaxAux,
+                                            devPtrCuSeqlenPaddedQ, devPtrCuSeqlenPaddedQ,
+                                            devPtrSoftmaxLSEWithoutPadding, stream);
+        ck_fused_attn::ck_attn_smallseq_bwd_thd(
+            b, h, d_qk, max_tokens_q, max_tokens_kv, scaling_factor, devPtrQ, devPtrK, devPtrV,
+            devPtrdO, devPtrSoftmaxLSEWithoutPadding, devPtrdQ, devPtrdK, devPtrdV,
+            devPtrCuSeqlensQ, devPtrCuSeqlenPaddedQ, devPtrCuSeqlensKV, devPtrCuSeqlenPaddedKV,
+            nvte_to_ck_dtype(dtype), stream);
+        return;
+      }
+    }
+  }
 
   if(is_SBHD && is_padding){
     // remove padding for q, k, v, o, do

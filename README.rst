@@ -3,7 +3,7 @@
     Copyright (c) 2023-2026, Advanced Micro Devices, Inc. All rights reserved.
     Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 
-    See LICENSE for license information.
+    See LICENSE for license information.Please also add one subsection in readme to tell our customers who to use small_seq attn
 
 |License|
 
@@ -274,6 +274,53 @@ ROCm TE provides the compile-time env NVTE_CK_FUSED_ATTN_FLOAT_TO_BFLOAT16_DEFAU
 * 2 - truncate;
 * 3 - standard asm, default;
 * 4 - rta_asm.
+
+Small-Sequence Attention in CK Backend (gfx950 and gfx942)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+For workloads with very short sequences, ROCm TE supports these shapes on both gfx950
+(MI350) and gfx942 (MI300/MI325). Both ``THD`` (variable-length / ragged, e.g.
+cross-attention) and ``BSHD`` (dense self-attention with ``s_q == s_kv``) layouts are
+supported. The CK backend must be enabled (``NVTE_FUSED_ATTN_CK=1``, the default).
+
+Sequence length limits depend on layout:
+
+* **``THD``** — eligibility is based on the **runtime** maximum sequence length per batch
+  (from ``cu_seqlens`` on device). On **gfx950**, both Q and KV runtime max seqlen must be
+  **at most 16**.
+
+* **``BSHD``** — eligibility uses the **static** sequence length ``s_q == s_kv`` (no
+  ``cu_seqlens`` probe). Self-attention with ``2 <= s_q == s_kv <= 17`` is supported, on both gfx950 and gfx942.
+
+**gfx950 — traditional CK/AITER path (default).**
+  On gfx950, short-sequence problems use the regular CK fused-attention backend. No extra environment variables
+  are required; ``NVTE_FUSED_ATTN_CK_SMALLSEQ`` is ignored on this architecture. Apply the
+  sequence length limits above: ``THD`` up to **16** per side, ``BSHD`` up to **17**.
+
+**gfx942 — dedicated MFMA small-seq path (opt-in).**
+  On gfx942 only, set ``NVTE_FUSED_ATTN_CK_SMALLSEQ=1`` to route eligible problems through
+  dedicated CK small-sequence MFMA kernels that are more efficient than the general
+  fused-attention path for these shapes. When enabled, a problem is routed to the MFMA
+  small-seq kernels only when all of the following hold; otherwise TE transparently falls
+  back to the regular CK/AITER fused-attention path:
+
+  * GPU architecture is gfx942;
+  * data type is BF16 (FP16 is not supported on this path yet);
+  * head dimension is 128 or 256, with matching Q/K and V head dimensions;
+  * number of attention heads is 16 or 32, with no GQA/MQA (num_heads == num_gqa_groups);
+  * no attention bias and no dropout;
+  * mask type is padding mask (``THD``) or no mask (``BSHD``);
+  * sequence length within layout limits above.
+
+  When using the JAX integration with ``THD`` layouts on this path, both of the following must be set before the process starts:
+
+  * ``NVTE_FUSED_ATTN_CK_SMALLSEQ=1``
+  * ``XLA_FLAGS='--xla_gpu_enable_command_buffer='`` — disables XLA GPU graph capture (command buffers / cudagraphs), which is incompatible with the runtime ``cu_seqlens`` segment check performed by the MFMA small-seq ``THD`` path.
+
+  Example:
+
+.. code-block:: bash
+
+    XLA_FLAGS='--xla_gpu_enable_command_buffer=' NVTE_FUSED_ATTN_CK_SMALLSEQ=1 python your_script.py
 
 Experimental Triton Kernels on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

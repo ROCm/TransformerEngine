@@ -57,9 +57,10 @@ run_test_config() {
     export NVTE_JAX_UNITTEST_LEVEL=L0 # this env variable controls parameters set for some tests
     run_default_fa 1 test_custom_call_compute.py
     run_default_fa 1 test_functions.py
-    run 1 test_fused_attn.py
+    run 1 test_fused_attn.py -k 'not TestFusedAttnCkSmallseq' # skip smallseq in normal flow
+    XLA_FLAGS='--xla_gpu_enable_command_buffer=' run 1 test_fused_attn.py -k 'TestFusedAttnCkSmallseq' # CK small-seq path; requires GPU graph capture disabled
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 test_fused_attn.py -k "TestFusedAttnWithDeterminism"
-    NVTE_CK_USES_FWD_V3=0 NVTE_CK_USES_BWD_V3=0 run_default_fa_lbl "v2" 3 test_fused_attn.py # Using FAv2 for forward and backward pass
+    NVTE_CK_USES_FWD_V3=0 NVTE_CK_USES_BWD_V3=0 run_default_fa_lbl "v2" 3 test_fused_attn.py -k 'not TestFusedAttnCkSmallseq' # Using FAv2 for forward and backward pass
     run_default_fa 1 test_layer.py # it effectively always uses unfused attention
     run_default_fa 1 test_sanity_import.py
     run_default_fa 1 test_softmax.py

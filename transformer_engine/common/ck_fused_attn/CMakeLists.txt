@@ -211,7 +211,8 @@ set(ck_fused_attn_SOURCES)
 list(APPEND ck_fused_attn_SOURCES
        src/ck_fused_attn_fwd.cpp
        src/ck_fused_attn_bwd.cpp
-       src/ck_fused_attn_utils.cpp)
+       src/ck_fused_attn_utils.cpp
+       src/ck_fused_attn_smallseq.cpp)
 
 message(STATUS "Found the following fused attention files:")
 foreach(file ${ck_fused_attn_SOURCES})
@@ -235,6 +236,7 @@ target_include_directories(ck_fused_attn PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/inc
 target_include_directories(ck_fused_attn PRIVATE ${CK_INCLUDE_DIR} ${__CK_SOURCE_DIR}/example/ck_tile/01_fmha)
 target_include_directories(ck_fused_attn PRIVATE ${AITER_INCLUDE_DIR})
 target_include_directories(ck_fused_attn PRIVATE ${__QOLA_INCLUDE_DIR})
+target_include_directories(ck_fused_attn PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src/small_seq_kernels")
 
 find_package(hip)
 target_link_directories(ck_fused_attn PUBLIC ${__AITER_MHA_PATH})
