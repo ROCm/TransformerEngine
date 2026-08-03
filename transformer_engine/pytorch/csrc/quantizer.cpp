@@ -2983,14 +2983,14 @@ std::pair<TensorWrapper, py::object> MXFP4Quantizer::create_tensor(
 std::pair<GroupedTensorWrapper, py::object> MXFP4Quantizer::create_grouped_tensor(
     const size_t num_tensors, const std::vector<size_t>& logical_shape, const DType dtype,
     py::object quantizer, const std::optional<at::Tensor>& first_dims,
+    const std::optional<at::Tensor>& last_dims,
     const std::optional<at::Tensor>& precomputed_tensor_offsets, const size_t logical_first_dim,
     const size_t logical_last_dim) const {
   using namespace pybind11::literals;
 
   const auto tensor_offsets =
-      precomputed_tensor_offsets.has_value()
-          ? precomputed_tensor_offsets
-          : build_grouped_tensor_offsets(num_tensors, first_dims, logical_last_dim);
+      resolve_grouped_tensor_offsets(num_tensors, first_dims, last_dims, precomputed_tensor_offsets,
+                                     logical_first_dim, logical_last_dim);
   const int64_t total_elements =
       static_cast<int64_t>(logical_first_dim) * static_cast<int64_t>(logical_last_dim);
   NVTE_CHECK(total_elements % 2 == 0, "MXFP4 data size must be divisible by 2.");

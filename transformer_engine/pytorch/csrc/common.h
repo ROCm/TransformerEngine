@@ -367,7 +367,8 @@ class MXFP4Quantizer : public Quantizer {
   std::pair<GroupedTensorWrapper, py::object> create_grouped_tensor(
       size_t num_tensors, const std::vector<size_t>& logical_shape, DType dtype,
       py::object quantizer, const std::optional<at::Tensor>& first_dims,
-      const std::optional<at::Tensor>& tensor_offsets, size_t logical_first_dim,
+      const std::optional<at::Tensor>& last_dims,
+      const std::optional<at::Tensor>& precomputed_tensor_offsets, size_t logical_first_dim,
       size_t logical_last_dim) const override;
 
   std::pair<TensorWrapper, py::object> convert_and_update_tensor(py::object shape) const override;
