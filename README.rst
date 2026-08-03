@@ -208,6 +208,22 @@ If you want to check that only previously tuned algorithms are used by your appl
   diff algo_tune.csv algo_tune_check.csv
 
 
+Single-Launch Grouped GEMM Backends on ROCm
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+For Mixture of Experts workloads, ROCm TE supports single-launch grouped GEMMs. Two backends are available:
+
+* **HipKittens** -- MXFP8 grouped GEMM only, requires expert dimensions to be 256-aligned. Default when the grouped GEMM path is enabled on gfx950.
+* **CK** (Composable Kernel) -- Grouped GEMM used as a fallback when HipKittens constraints are not met, or when explicitly selected.
+
+These backends are not enabled by default. The following environment variables control backend selection:
+
+* ``NVTE_USE_CUTLASS_GROUPED_GEMM=1`` -- Enable the single-launch grouped GEMM path. On gfx950, defaults to HipKittens with CK fallback.
+* ``NVTE_USE_HIPKITTENS_GROUPED_GEMM=1`` -- Explicitly enable HipKittens grouped GEMM. Takes priority over CK.
+* ``NVTE_USE_CK_GROUPED_GEMM=1`` -- Explicitly select CK, bypassing HipKittens.
+
+When none are set, TE uses multi-stream dispatch (one hipBLASLt GEMM per expert).
+
+
 Fused Attention Backends on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Currently ROCm TE supports two backends, AOTriton and CK, for fused attention.
@@ -328,6 +344,21 @@ To enable MXFP8 support, use NVTE_ROCM_ENABLE_MXFP8 environment variable which c
 * 1 - enable MXFP8 support in fp8;
 * 2 - make MXFP8 a default fp8 recipe.
 
+Blockwise FP8 GEMM support on ROCm (gfx942 and gfx950)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Blockwise FP8 GEMM is supported on gfx942 and gfx950 GPUs through the HipKittens backend and is enabled by default.
+It supports 1Dx2D and 1Dx1D scaling, e4m3/e5m2 inputs in any combination except e5m2 x e5m2, bf16/fp32/fp16 output, and bias/beta/DGELU epilogues.
+The K and N dimensions must be multiples of 16.
+The backend shares the existing USE_HIPKITTENS_GEMM build option with MXFP8:
+
+* OFF - disable the HipKittens blockwise FP8 and MXFP8 GEMM backend;
+* ON - enable the HipKittens GEMM backend (default).
+
+On gfx950 there are two blockwise FP8 GEMM kernels, selected at runtime by the NVTE_BLOCKWISE_FP8_POWER_OF_2_SCALE environment variable:
+
+* 0 - compute the GEMM with the FP32 scales directly;
+* 1 - cast the incoming FP32 scales to E8M0 (power-of-2) and compute the GEMM with those scales (default).
+
 Two-stage amax Kernel
 ^^^^^^^^^^^^^^^^^^^^^
 
@@ -400,21 +431,19 @@ precision-like API that can be used seamlessly with your framework-specific code
 framework agnostic C++ API that can be integrated with other deep learning libraries to enable FP8
 support for Transformers.
 
-As the number of parameters in Transformer models continues to grow, training and inference for
-architectures such as BERT, GPT and T5 become very memory and compute-intensive. Most deep learning
-frameworks train with FP32 by default. This is not essential, however, to achieve full accuracy for
-many deep learning models. Using mixed-precision training, which combines single-precision (FP32)
-with lower precision (e.g. FP16) format when training a model, results in significant speedups with
-minimal differences in accuracy as compared to FP32 training. With Hopper GPU
-architecture FP8 precision was introduced, which offers improved performance over FP16 with no
-degradation in accuracy. Although all major deep learning frameworks support FP16, FP8 support is
-not available natively in frameworks today.
+As Transformer models scale to hundreds of billions of parameters across large language models,
+MoE architectures, and multimodal models, training and inference become increasingly
+memory and compute-intensive. Mixed-precision training, which combines single-precision (FP32) with
+lower precision formats, delivers significant speedups with minimal impact on accuracy. FP8, introduced
+with the Hopper GPU architecture, offers further performance gains over FP16 with no degradation in
+accuracy, and newer formats like MXFP8 and NVFP4 on Blackwell push efficiency even further.
 
-TE addresses the problem of FP8 support by providing APIs that integrate with popular Large Language
-Model (LLM) libraries. It provides a Python API consisting of modules to easily build a Transformer
-layer as well as a framework-agnostic library in C++ including structs and kernels needed for FP8
-support. Modules provided by TE internally maintain scaling factors and other values needed for FP8
-training, greatly simplifying mixed precision training for users.
+TE integrates with popular LLM frameworks and provides optimizations that make low-precision training
+work seamlessly with advanced features like MoE, tensor/sequence/context parallelism, and fused
+operations. It provides a Python API consisting of modules to easily build a Transformer layer as
+well as a framework-agnostic library in C++ including structs and kernels needed for FP8 support.
+Modules provided by TE internally maintain scaling factors and other values needed for FP8 training,
+greatly simplifying mixed precision training for users.
 
 Highlights
 ==========
@@ -502,7 +531,7 @@ Flax
       for _ in range(10):
         loss, (param_grads, other_grads) = fwd_bwd_fn(params, other_variables, inp)
 
-For a more comprehensive tutorial, check out our `Getting Started Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/getting_started.html>`_.
+For a more comprehensive tutorial, check out our `Getting Started Guide <https://docs.nvidia.com/deeplearning/transformer-engine/user-guide/getting_started/index.html>`_.
 
 .. overview-end-marker-do-not-remove
 
@@ -744,7 +773,7 @@ FP8 and MXFP8 have been tested extensively across different model architectures 
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 | Model      | Framework        | Source                                                                                                  |
 +============+==================+=========================================================================================================+
-| MPT-1.3B   |  Mosaic Composer | https://www.mosaicml.com/blog/coreweave-nvidia-h100-part-1                                              |
+| MPT-1.3B   |  Mosaic Composer | https://www.databricks.com/blog/coreweave-nvidia-h100-part-1                                            |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
 | LLama2-7B  |  Alibaba Pai     | https://mp.weixin.qq.com/s/NQT0uKXLbXyh5031zBdeBQ                                                       |
 +------------+------------------+---------------------------------------------------------------------------------------------------------+
@@ -820,8 +849,8 @@ Previous News
   :alt: H200
 
 * [11/2023] `Inflection-2: The Next Step Up <https://inflection.ai/inflection-2>`_
-* [11/2023] `Unleashing The Power Of Transformers With NVIDIA Transformer Engine <https://lambdalabs.com/blog/unleashing-the-power-of-transformers-with-nvidia-transformer-engine>`_
+* [11/2023] `Unleashing The Power Of Transformers With NVIDIA Transformer Engine <https://lambda.ai/blog/unleashing-the-power-of-transformers-with-nvidia-transformer-engine>`_
 * [11/2023] `Accelerating PyTorch Training Workloads with FP8 <https://towardsdatascience.com/accelerating-pytorch-training-workloads-with-fp8-5a5123aec7d7>`_
 * [09/2023] `Transformer Engine added to AWS DL Container for PyTorch Training <https://github.com/aws/deep-learning-containers/pull/3315>`_
 * [06/2023] `Breaking MLPerf Training Records with NVIDIA H100 GPUs <https://developer.nvidia.com/blog/breaking-mlperf-training-records-with-nvidia-h100-gpus/>`_
-* [04/2023] `Benchmarking Large Language Models on NVIDIA H100 GPUs with CoreWeave (Part 1) <https://www.mosaicml.com/blog/coreweave-nvidia-h100-part-1>`_
+* [04/2023] `Benchmarking Large Language Models on NVIDIA H100 GPUs with CoreWeave (Part 1) <https://www.databricks.com/blog/coreweave-nvidia-h100-part-1>`_

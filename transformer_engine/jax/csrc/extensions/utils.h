@@ -23,10 +23,12 @@ namespace jax {
 int GetCudaRuntimeVersion();
 #ifndef USE_ROCM
 size_t GetCudnnRuntimeVersion();
+size_t GetCudnnFrontendVersion();
 #else
 // use a very high number for cudnn in rocm to enable all filtering
 //(99, 0, 0)
 inline size_t GetCudnnRuntimeVersion() { return 990000; }
+inline size_t GetCudnnFrontendVersion() { return 990000; }
 // TODO: Make consteval when upgrading to c++20
 constexpr size_t cudnnGetVersion() { return 990000; }
 #endif

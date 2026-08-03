@@ -38,7 +38,7 @@ run() {
 run_default_fa() {
     #Run tests that do not use fused attention with only one backend
     if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
-        run $*
+        run "$@"
     fi
 }
 
@@ -88,7 +88,16 @@ run_test_config_mgpu() {
     RCCL_MSCCL_ENABLE=0 run $_dfa_level test_distributed_fused_attn.py
     run_default_fa 1 test_distributed_helper.py
     run_default_fa 3 test_distributed_layernorm.py
-    run_default_fa 2 test_distributed_layernorm_mlp.py
+    # JAX 0.10+ on ROCm lowers sharded FP8 dot_general (with_jax_gemm=True,
+    # Float8CurrentScaling) to __triton_nested_gemm_fusion with f16 accumulation,
+    # which overflows before scale_inv is applied. JAX 0.8 used __cublas$gemm /
+    # hipBLASLt instead. Run those cases with Triton GEMM disabled only.
+    _layernorm_mlp_jax_gemm_k="Float8CurrentScaling and with_jax_gemm_True"
+    run_default_fa 2 test_distributed_layernorm_mlp.py -k "not (${_layernorm_mlp_jax_gemm_k})"
+    _saved_xla_flags="$XLA_FLAGS"
+    export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false"
+    run_default_fa 2 test_distributed_layernorm_mlp.py -k "${_layernorm_mlp_jax_gemm_k}"
+    export XLA_FLAGS="$_saved_xla_flags"
     run_default_fa 3 test_distributed_softmax.py
 
     run_default_fa 3 test_sanity_import.py

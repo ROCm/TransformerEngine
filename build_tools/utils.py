@@ -216,15 +216,29 @@ def rocm_build() -> bool:
         raise FileNotFoundError("Could not detect ROCm or CUDA platform")
 
 
+def _rocm_sdk_path_root() -> Optional[Path]:
+    """Return rocm-sdk devel root if the pip package is installed."""
+    try:
+        from rocm_sdk._devel import get_devel_root
+
+        return get_devel_root()
+    except (ImportError, ModuleNotFoundError, OSError):
+        return None
+
 @functools.lru_cache(maxsize=None)
 def rocm_path() -> Tuple[str, str]:
     """
     ROCm root path and HIPCC binary path as a tuple
     If ROCm installation is not specified, use default ROCm path
     """
-    hipcc_bin = None
     if os.getenv("ROCM_PATH"):
         rocm_home = Path(os.getenv("ROCM_PATH"))
+    else:
+        rocm_home = _rocm_sdk_path_root()
+        if rocm_home is not None:
+            os.environ["ROCM_PATH"] = str(rocm_home)
+    hipcc_bin = None
+    if rocm_home is not None:
         hipcc_bin = rocm_home / "bin" / "hipcc"
     if hipcc_bin is None:
         hipcc_bin = shutil.which("hipcc")
@@ -341,6 +355,39 @@ def cuda_archs() -> str:
         else:
             archs = "70;80;89;90"
     return archs
+
+
+def nccl_ep_enabled(archs: str = None) -> bool:
+    """Return True when NCCL EP should be compiled into this build.
+
+    Reads NVTE_WITH_NCCL_EP (default on). Auto-skips with a printed warning
+    when no arch >= 90 is targeted; raises RuntimeError if the flag was
+    explicitly set to 1 but no qualifying arch is present. Mirrors the same
+    logic in both TE/Common (setup.py) and TE/JAX (build_tools/jax.py) so a
+    single env var controls both sides consistently.
+    """
+    if rocm_build():
+        return False  # NCCL EP is not supported on ROCm.
+    if archs is None:
+        archs = cuda_archs()
+    nccl_ep_env = os.getenv("NVTE_WITH_NCCL_EP")
+    nccl_ep_explicit = nccl_ep_env is not None
+    build_ep = bool(int(nccl_ep_env if nccl_ep_explicit else "1"))
+    if build_ep:
+        arch_tokens = [a.strip() for a in str(archs or "").split(";") if a.strip()]
+        has_hopper_or_newer = any(
+            t.lower() == "native" or (t.rstrip("af").isdigit() and int(t.rstrip("af")) >= 90)
+            for t in arch_tokens
+        )
+        if not has_hopper_or_newer:
+            if nccl_ep_explicit:
+                raise RuntimeError(
+                    f"NVTE_WITH_NCCL_EP=1 was set but NVTE_CUDA_ARCHS ('{archs}') "
+                    "contains no arch >= 90. NCCL EP requires Hopper or newer."
+                )
+            print(f"[NCCL EP] No arch >= 90 in NVTE_CUDA_ARCHS ('{archs}'); skipping build.")
+            build_ep = False
+    return build_ep
 
 
 def cuda_version() -> Tuple[int, ...]:
