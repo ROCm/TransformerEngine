@@ -107,7 +107,6 @@ void nvte_compute_amax(const NVTETensor input, NVTETensor output, cudaStream_t s
 void nvte_compute_amax_with_config(const NVTETensor input, NVTETensor output,
                                    const NVTEQuantizationConfig config, cudaStream_t stream);
 
-<<<<<<< HEAD
 #ifdef __HIP_PLATFORM_AMD__
 
 size_t nvte_amax_workspace_num_blocks(size_t N);
@@ -128,7 +127,7 @@ void nvte_compute_amax_with_workspace(const NVTETensor input, NVTETensor output,
                                       cudaStream_t stream);
 
 #endif
-=======
+
 /*! \brief Compute per-group FP8 amax values for a grouped tensor.
  *
  *  The grouped tensor's shape metadata is read on device, so this API is safe
@@ -142,7 +141,6 @@ void nvte_compute_amax_with_workspace(const NVTETensor input, NVTETensor output,
  */
 void nvte_group_compute_amax_with_config(const NVTEGroupedTensor input, NVTEGroupedTensor output,
                                          const NVTEQuantizationConfig config, cudaStream_t stream);
->>>>>>> 868d8d9216da361c666519652115e23688db5211
 
 /*! \brief Update an FP8 tensor's scale based on its amax.
  *
