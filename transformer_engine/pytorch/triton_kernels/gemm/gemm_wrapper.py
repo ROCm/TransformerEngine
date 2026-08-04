@@ -164,13 +164,14 @@ def matmul(a, b, c, a_scale, b_scale, c_scale, bias, c_amax, epilogue='DEFAULT',
 
 
 def mxfp8_matmul(a, a_scale, b, b_scale, c, M, N, K, a_fp8_dtype, b_fp8_dtype,
+                 bias=None, epilogue='DEFAULT',
                  accumulate=False, alpha=1.0, beta=0.0):
     """
     MXFP8 matmul wrapper using tl.dot_scaled()
 
-    Computes ``c = alpha * (a @ b) + beta * c`` when ``accumulate=True``, else
-    ``c = alpha * (a @ b)``. ``alpha=1.0`` gets a compile-time fast-path via
-    the ``ALPHA_IS_ONE`` constexpr.
+    Computes ``c = alpha * (a @ b) + bias + beta * c`` (each term optional per
+    ``epilogue`` / ``accumulate`` / ``alpha``). ``alpha=1.0`` gets a
+    compile-time fast-path via the ``ALPHA_IS_ONE`` constexpr.
 
     Args:
         a: FP8 data tensor [M, K] (uint8)
@@ -182,6 +183,8 @@ def mxfp8_matmul(a, a_scale, b, b_scale, c, M, N, K, a_fp8_dtype, b_fp8_dtype,
         M, N, K: Matrix dimensions
         a_fp8_dtype: FP8 dtype for A (tex.DType.kFloat8E4M3 or kFloat8E5M2)
         b_fp8_dtype: FP8 dtype for B
+        bias: Bias vector along N, or None. Only consulted when ``epilogue == 'BIAS'``.
+        epilogue: 'DEFAULT' (no bias) or 'BIAS' (add per-N bias vector).
         accumulate: If True, add ``beta * c_existing`` to the result.
         alpha: GEMM output scale (α).
         beta: Accumulate scale (β). Only consulted when ``accumulate=True``.
@@ -214,9 +217,16 @@ def mxfp8_matmul(a, a_scale, b, b_scale, c, M, N, K, a_fp8_dtype, b_fp8_dtype,
         triton.cdiv(M, META['BLOCK_SIZE_M']) * triton.cdiv(N, META['BLOCK_SIZE_N']),
     )
 
+    # A dummy 1-element bias tensor when the epilogue is DEFAULT so the
+    # kernel signature stays stable (matches the pattern in matmul()).
+    bias_tensor = bias if (bias is not None and epilogue == 'BIAS') else torch.empty(
+        1, device=a.device, dtype=torch.float32
+    )
+
     mxfp8_matmul_kernel[grid](
         a, b, c,
         a_scale, b_scale,
+        bias_tensor,
         float(alpha), float(beta),
         M, N, K,
         a.stride(0), a.stride(1),
@@ -227,6 +237,7 @@ def mxfp8_matmul(a, a_scale, b, b_scale, c, M, N, K, a_fp8_dtype, b_fp8_dtype,
         VEC_SIZE=MXFP8_BLOCK_SCALING_SIZE,  # 32
         FP8_FORMAT_A=fp8_format_a,
         FP8_FORMAT_B=fp8_format_b,
+        EPILOGUE=epilogue,
         ACCUMULATE=accumulate,
         ALPHA_IS_ONE=(float(alpha) == 1.0),
     )
@@ -385,19 +396,15 @@ def te_generic_gemm_triton(A,
         if a_kind != b_kind:
             raise ValueError("Mixed MXFP8 and non-MXFP8 inputs not supported")
 
-        # mxfp8_matmul_kernel doesn't have a BIAS epilogue; hipBLASLt's MXFP8
-        # path also refuses bias (see rocm_gemm.cu:2108 "hipBLASLt MXFP8 GEMM
-        # does not support bias"). Refuse here so ForwardLinearBiasAdd and
-        # similar bias-fused paths skip cleanly instead of silently producing
-        # wrong output. Follow-up: implement the BIAS epilogue in
-        # mxfp8_matmul_kernel and route bias through here.
-        if bias is not None and bias.numel() > 0:
+        # mxfp8_matmul_kernel supports the BIAS epilogue directly (unlike
+        # hipBLASLt's MXFP8 path, which asserts on bias -- HipKittens handles
+        # it fused). BGRADB (bias-gradient) is not implemented for MXFP8; the
+        # backward wgrad path uses a separate op and doesn't route through here.
+        if bias is not None and bias.numel() > 0 and grad:
             raise ValueError(
                 "The Triton GEMM backend (NVTE_USE_GEMM_TRITON=1) does not support "
-                "MXFP8 GEMM with a bias epilogue: mxfp8_matmul_kernel has no BIAS "
-                "path (matches hipBLASLt's MXFP8-no-bias assertion). Fusible ops "
-                "like ForwardLinearBiasAdd are not yet supported for MXFP8 through "
-                "Triton -- unset NVTE_USE_GEMM_TRITON for these paths."
+                "MXFP8 GEMM with the BGRADB (bias-gradient) epilogue. The forward "
+                "BIAS epilogue is supported; only the grad path is not."
             )
 
         # Sanity: both operands must have at least one pre-quantized copy.
@@ -750,6 +757,8 @@ def te_generic_gemm_triton(A,
             d_row_major,                  # Output
             actual_m, actual_n, actual_k,  # Use pre-computed dimensions
             b_fp8_dtype, a_fp8_dtype,     # Swap FP8 formats to match swapped operands
+            bias=bias_tensor if epilogue == 'BIAS' else None,
+            epilogue=epilogue,
             accumulate=accumulate, alpha=alpha, beta=beta,
         )
     else:

@@ -362,6 +362,44 @@ def test_triton_mxfp8_alpha_beta_accumulate(M, K, N, layout, alpha, beta, accumu
     )
 
 
+@requires_mxfp8_support
+@requires_torch210
+@pytest.mark.parametrize("M, K, N", MXFP8_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_triton_mxfp8_bias(M, K, N, layout):
+    """MXFP8 forward GEMM with the BIAS epilogue.
+
+    ``mxfp8_matmul_kernel`` implements a BIAS path so ``TransformerLayer`` /
+    ``te.ops.Linear(bias=True)`` under MXFP8 flow through Triton instead of
+    falling back to hipBLASLt (which asserts on MXFP8+bias). Compares the
+    fused-bias output against a plain-matmul reference with the same bias
+    added post-hoc.
+    """
+    torch.manual_seed(42)
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(M, K, N, layout)
+
+    # BLAS output shape is (N, M); BIAS is a vector along the last dim of
+    # the returned tensor, i.e. length M for TN (fprop) but length N for the
+    # non-TN layouts. call_gemm_with_bias sets the layout the same way.
+    out_features = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout).shape[-1]
+    bias = torch.randn(out_features, dtype=torch.bfloat16, device='cuda')
+
+    triton_out, _ = call_gemm_with_bias(A_mxfp8, B_mxfp8, layout, torch.bfloat16, bias, grad=False, use_triton=True)
+
+    # Bias must actually change the result -- guards against BIAS silently
+    # decaying to DEFAULT and the test passing vacuously.
+    no_bias_out = call_gemm(A_mxfp8, B_mxfp8, layout, out_dtype=torch.bfloat16, use_triton=True)
+    assert not torch.allclose(triton_out.float(), no_bias_out.float(), atol=1e-4), (
+        "Triton MXFP8 output matches no-bias output; BIAS epilogue appears inactive."
+    )
+
+    expected = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout) + bias.float()
+    torch.testing.assert_close(
+        triton_out.float(), expected.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
 # ==============================================================================
 # Approach 2: Triton vs C++ tex.generic_gemm reference
 # ==============================================================================
