@@ -127,7 +127,7 @@ reduce_block_into_lanes_max_op(T *x, T val, int lanes = 1,
 
 template <typename x_t>
 struct L2NormFunctor {
-  __device__ __forceinline__ void operator()(int chunk_size, volatile int *noop_gmem,
+  __device__ __forceinline__ void operator()(int64_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<1> &tl,  // NOLINT(*),
                                              float *output, float *output_per_tensor,
                                              bool per_tensor, int max_chunks_per_tensor) {
@@ -137,7 +137,7 @@ struct L2NormFunctor {
 
     int tensor_loc = tl.block_to_tensor[blockIdx.x];
     int chunk_idx = tl.block_to_chunk[blockIdx.x];
-    int n = tl.sizes[tensor_loc];
+    int64_t n = tl.sizes[tensor_loc];
 
     x_t *x = reinterpret_cast<x_t *>(tl.addresses[0][tensor_loc]);
     x += chunk_idx * chunk_size;
@@ -196,7 +196,7 @@ struct L2NormFunctor {
 
 template <typename x_t>
 struct UnscaleL2NormFunctor {
-  __device__ __forceinline__ void operator()(int chunk_size, volatile int *noop_gmem,
+  __device__ __forceinline__ void operator()(int64_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<1> &tl,  // NOLINT(*),
                                              const float *inv_scale, float *output,
                                              float *output_per_tensor, bool per_tensor,
@@ -207,7 +207,7 @@ struct UnscaleL2NormFunctor {
 
     int tensor_loc = tl.block_to_tensor[blockIdx.x];
     int chunk_idx = tl.block_to_chunk[blockIdx.x];
-    int n = tl.sizes[tensor_loc];
+    int64_t n = tl.sizes[tensor_loc];
 
     x_t *x = reinterpret_cast<x_t *>(tl.addresses[0][tensor_loc]);
     x += chunk_idx * chunk_size;
@@ -423,7 +423,7 @@ void multi_tensor_unscale_l2norm_cuda_custom(int chunk_size, NVTETensor noop_fla
 // Probably better to template, but since we are not likely to support other norm
 template <typename x_t>
 struct MaxNormFunctor {
-  __device__ __forceinline__ void operator()(int chunk_size, volatile int *noop_gmem,
+  __device__ __forceinline__ void operator()(int64_t chunk_size, volatile int *noop_gmem,
                                              TensorListMetadata<1> &tl,  // NOLINT(*),
                                              float *output, float *output_per_tensor,
                                              bool per_tensor, int max_chunks_per_tensor) {
@@ -433,7 +433,7 @@ struct MaxNormFunctor {
 
     int tensor_loc = tl.block_to_tensor[blockIdx.x];
     int chunk_idx = tl.block_to_chunk[blockIdx.x];
-    int n = tl.sizes[tensor_loc];
+    int64_t n = tl.sizes[tensor_loc];
 
     x_t *x = reinterpret_cast<x_t *>(tl.addresses[0][tensor_loc]);
     x += chunk_idx * chunk_size;

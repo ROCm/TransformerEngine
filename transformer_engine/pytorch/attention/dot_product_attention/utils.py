@@ -9,7 +9,7 @@ Utils/Helper classes and methods for attention
 """
 import math
 import os
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 import warnings
 import logging
 import functools
@@ -38,13 +38,18 @@ from transformer_engine.pytorch.cpp_extensions.fused_attn import (
     META_DP,
 )
 from transformer_engine.pytorch.attention.inference import InferenceParams
+from transformer_engine.pytorch.quantized_tensor import QuantizedTensorStorage
 from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Tensor,
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
+from transformer_engine.pytorch.tensor.float8_tensor import Float8TensorStorage
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
+from transformer_engine.pytorch.tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+
 from transformer_engine.pytorch.quantization import get_fp8_te_dtype
-from transformer_engine.pytorch.constants import TE_DType
+from transformer_engine.pytorch.constants import TE_DType, MXFP8_BLOCK_SCALING_SIZE
 
 
 from transformer_engine.pytorch.utils import (
@@ -146,8 +151,11 @@ class FlashAttentionUtils:
     fa4_version = PkgVersion("0")
     use_v4 = False
     v4_installation_steps = """\
-pip install flash-attn-4==4.0.0b8 nvidia-cutlass-dsl[cu13]"""
+pip install flash-attn-4==4.0.0b11 nvidia-cutlass-dsl[cu13]"""
     v4_warning_printed = False
+    # Set by backends.py if FA4 is installed; calls flash_attn.cute.interface._validate_head_dims
+    # which raises AssertionError for unsupported (head_dim, head_dim_v) combinations.
+    v4_validate_head_dims: Callable = None
 
     @staticmethod
     def set_flash_attention_version():
@@ -235,6 +243,8 @@ class AttentionParams:
         Whether context parallelism is used or not.
     cp_comm_type : str, default = "p2p"
         The communication type of context parallelism.
+    cp_size : int, default = 1
+        The group size of context parallelism.
     deterministic : bool, default = False
         Whether to run `DotProductAttention` with determinism or not.
     is_training : bool, default = True
@@ -253,6 +263,14 @@ class AttentionParams:
         Whether support for cuda graph capture is needed or not.
     num_splits : int, default = 1
         The number of kernels to split attention to.
+    fp8_output : bool, default = False
+        Whether output is requested in FP8.
+    checkpoint_core_attention : bool, default = False
+        Whether core attention is recomputed during backward.
+    has_score_mod : bool, default = False
+        Whether a score_mod callback was provided.
+    has_score_mod_bprop : bool, default = False
+        Whether a score_mod bprop callback was provided.
     """
 
     qkv_type: Union[torch.Tensor, Float8Tensor] = torch.Tensor
@@ -276,6 +294,7 @@ class AttentionParams:
     attention_dropout: float = 0.0
     context_parallel: bool = False
     cp_comm_type: str = "p2p"
+    cp_size: int = 1
     deterministic: bool = False
     is_training: bool = True
     fp8: bool = False
@@ -285,6 +304,10 @@ class AttentionParams:
     return_max_logit: bool = False
     cuda_graph: bool = False
     num_splits: int = 1
+    fp8_output: bool = False
+    checkpoint_core_attention: bool = False
+    has_score_mod: bool = False
+    has_score_mod_bprop: bool = False
 
     def __eq__(self, other):
         """
@@ -300,7 +323,7 @@ class AttentionParams:
             if fname != "fp8_meta":
                 if sf != of:
                     return False
-            elif sf.get("recipe", None) != of.get("recipe", None):
+            elif (sf or {}).get("recipe", None) != (of or {}).get("recipe", None):
                 return False
         return True
 
@@ -355,6 +378,7 @@ def get_attention_backend(
     attention_dropout = attention_params.attention_dropout
     context_parallel = attention_params.context_parallel
     cp_comm_type = attention_params.cp_comm_type
+    cp_size = attention_params.cp_size  # pylint: disable=unused-variable
     deterministic = attention_params.deterministic
     is_training = attention_params.is_training
     fp8 = attention_params.fp8
@@ -364,6 +388,10 @@ def get_attention_backend(
     return_max_logit = attention_params.return_max_logit
     cuda_graph = attention_params.cuda_graph
     num_splits = attention_params.num_splits
+    fp8_output = attention_params.fp8_output
+    checkpoint_core_attention = attention_params.checkpoint_core_attention
+    has_score_mod = attention_params.has_score_mod
+    has_score_mod_bprop = attention_params.has_score_mod_bprop
 
     # Run config
     logger = logging.getLogger("DotProductAttention")
@@ -374,9 +402,9 @@ def get_attention_backend(
     cudnn_version = get_cudnn_version()
     run_config = {
         "transformer_engine_version": te.__version__,
-        "compute_capability": (
-            "sm" + str(10 * device_compute_capability[0] + device_compute_capability[1])
-        ),
+        "compute_capability": "sm"
+        + str(10 * device_compute_capability[0] + device_compute_capability[1]),
+        "cuda_version": torch.version.cuda,
         "flash_attn_version": (
             str(FlashAttentionUtils.version)
             if FlashAttentionUtils.is_installed
@@ -429,7 +457,7 @@ def get_attention_backend(
     # regardless of whether FA2 or FA3 is installed. If FA2 or FA3 is not installed but is
     # necessary for performance/functionality, a warning will be issued to prompt users to
     # install an appropriate FA version.
-    qkv_format, q_format, _ = get_qkv_format(qkv_layout, inference_params)
+    qkv_format, q_format, kv_format = get_qkv_format(qkv_layout, inference_params)
 
     # Filter: Environment variables
     use_flash_attention = int(os.getenv("NVTE_FLASH_ATTN", "1"))
@@ -449,6 +477,18 @@ def get_attention_backend(
         logger.debug("Disabling FusedAttention due to NVTE_FUSED_ATTN=0")
     if not use_unfused_attention:
         logger.debug("Disabling UnfusedDotProductAttention due to NVTE_UNFUSED_ATTN=0")
+
+    def _any_flash_attention_enabled() -> bool:
+        return bool(
+            use_flash_attention
+            or use_flash_attention_2
+            or use_flash_attention_3
+            or use_flash_attention_4
+        )
+
+    def _disable_all_flash_attention() -> None:
+        nonlocal use_flash_attention
+        use_flash_attention = False
 
     # Filter: Compute capability
     if not IS_HIP_EXTENSION and device_compute_capability < (8, 0):
@@ -470,9 +510,14 @@ def get_attention_backend(
     # On SM90, prefer FA3 over FA4 when FA3 is available.
     # FA3 is more mature on Hopper; FA4's SM90 backward has limitations
     # (MLA, non-standard head dims, SplitKV).
-    if use_flash_attention_4 and use_flash_attention_3 and device_compute_capability == (9, 0):
-        if FlashAttentionUtils.v4_is_installed:
-            logger.debug("Disabling FlashAttention 4 to prefer FlashAttention 3 on SM90")
+    if (
+        device_compute_capability == (9, 0)
+        and use_flash_attention_3
+        and FlashAttentionUtils.v3_is_installed
+        and use_flash_attention_4
+        and FlashAttentionUtils.v4_is_installed
+    ):
+        logger.debug("Disabling FlashAttention 4 to prefer FlashAttention 3 on SM90")
         use_flash_attention_4 = False
 
     # Filter: Data type
@@ -494,21 +539,30 @@ def get_attention_backend(
     if qkv_dtype not in [torch.bfloat16, torch.float16, torch.float8_e4m3fn] or qkv_type not in [
         torch.Tensor,
         Float8Tensor,
+        Float8TensorStorage,
     ]:
         if use_flash_attention_3 and FlashAttentionUtils.v3_is_installed:
             logger.debug(
-                "Disabling FlashAttention 3 for unsupported qkv_dtype = %s, qkv_type = %s. "
-                "Supported: qkv_dtype = {torch.bfloat16, torch.float16, torch.float8_e4m3fn}, "
-                "qkv_type = {torch.Tensor, Float8Tensor}. ",
+                "Disabling FlashAttention 3 for unsupported qkv_dtype = %s, qkv_type = %s."
+                " Supported: qkv_dtype = {torch.bfloat16, torch.float16, torch.float8_e4m3fn},"
+                " qkv_type = {torch.Tensor, Float8Tensor, Float8TensorStorage}. ",
                 qkv_dtype,
                 qkv_type,
             )
         use_flash_attention_3 = False
+    if qkv_dtype not in [torch.bfloat16, torch.float16, torch.float8_e4m3fn] or qkv_type not in (
+        torch.Tensor,
+        Float8Tensor,
+        Float8TensorStorage,
+        MXFP8Tensor,
+        MXFP8TensorStorage,
+    ):
         if use_fused_attention:
             logger.debug(
-                "Disabling FusedAttention for unsupported qkv_dtype = %s, qkv_type = %s. "
-                "Supported: qkv_dtype = {torch.bfloat16, torch.float16, torch.float8_e4m3fn}, "
-                "qkv_type = {torch.Tensor, Float8Tensor}. ",
+                "Disabling FusedAttention for unsupported qkv_dtype = %s, qkv_type = %s. Supported:"
+                " qkv_dtype = {torch.bfloat16, torch.float16, torch.float8_e4m3fn}, qkv_type ="
+                " {torch.Tensor, Float8Tensor, Float8TensorStorage, MXFP8Tensor,"
+                " MXFP8TensorStorage}. ",
                 qkv_dtype,
                 qkv_type,
             )
@@ -516,6 +570,9 @@ def get_attention_backend(
 
     # Filter: Execution type
     if fp8 and fp8_meta["recipe"].fp8_dpa:
+        fp8_recipe = fp8_meta["recipe"]
+        if fp8_meta.get("local_recipes", None) is not None:
+            fp8_recipe = fp8_meta["local_recipes"][0]
         if use_flash_attention_2 and FlashAttentionUtils.is_installed:
             logger.debug("Disabling FlashAttention 2 for FP8 attention")
             use_flash_attention_2 = False
@@ -526,6 +583,12 @@ def get_attention_backend(
             if FlashAttentionUtils.v3_is_installed:
                 logger.debug("Disabling FlashAttention 3 for FP8 training")
             use_flash_attention_3 = False
+        if use_flash_attention_3 and not (
+            fp8_recipe.delayed() or fp8_recipe.float8_current_scaling()
+        ):
+            if FlashAttentionUtils.v3_is_installed:
+                logger.debug("Disabling FlashAttention 3 for %s", fp8_recipe.__class__.__name__)
+            use_flash_attention_3 = False
         if use_unfused_attention:
             allow_emulation = (
                 os.getenv("NVTE_UnfusedDPA_Emulate_FP8", "0") == "1" or is_in_onnx_export_mode()
@@ -533,15 +596,21 @@ def get_attention_backend(
             if not allow_emulation:
                 logger.debug("Disabling UnfusedDotProductAttention for FP8 attention")
                 use_unfused_attention = False
-        fp8_recipe = fp8_meta["recipe"]
-        if fp8_meta.get("local_recipes", None) is not None:
-            fp8_recipe = fp8_meta["local_recipes"][0]
+        if use_fused_attention and fp8_recipe.delayed() and not IS_HIP_EXTENSION:
+            if (
+                device_compute_capability >= (10, 0)
+                and deterministic
+                and cudnn_version < (9, 18, 0)
+            ):
+                logger.debug(
+                    "Disabling FusedAttention for FP8 delayed scaling on arch >= sm100 with"
+                    " determinism for cuDNN < 9.18.0"
+                )
+                use_fused_attention = False
         if use_fused_attention and fp8_recipe.float8_current_scaling() and not IS_HIP_EXTENSION:
             if device_compute_capability < (10, 0):
                 logger.debug("Disabling FusedAttention for FP8 current scaling on arch < sm100")
                 use_fused_attention = False
-            # TODO(cyanguwa): Modify the min cuDNN version supporting FP8 current scaling
-            # determinism for Blackwell
             else:
                 if cudnn_version < (9, 14, 0):
                     logger.debug(
@@ -551,10 +620,35 @@ def get_attention_backend(
                 else:
                     if deterministic and cudnn_version < (9, 18, 0):
                         logger.debug(
-                            "Disabling FusedAttention for FP8 current scaling requiring determinism"
-                            " with cuDNN < 9.18.0"
+                            "Disabling FusedAttention for FP8 current scaling with determinism"
+                            " for cuDNN < 9.18.0"
                         )
                         use_fused_attention = False
+        if use_fused_attention and fp8_recipe.mxfp8() and not IS_HIP_EXTENSION:
+            if device_compute_capability < (10, 0):
+                logger.debug("Disabling FusedAttention for MXFP8 on arch < sm100")
+                use_fused_attention = False
+            elif fp8_recipe.fp8_mha:
+                logger.debug("Disabling FusedAttention for MXFP8 with fp8_mha=True")
+                use_fused_attention = False
+            else:
+                if cudnn_version < (9, 21, 0):
+                    logger.debug("Disabling FusedAttention for MXFP8 with cuDNN < 9.21.0")
+                    use_fused_attention = False
+                elif cudnn_version in ((9, 23, 0), (9, 23, 1)):
+                    # 9.23.0/9.23.1: known bugs with MXFP8 SDPA
+                    logger.debug("Disabling FusedAttention for MXFP8 with cuDNN 9.23.0/9.23.1")
+                    use_fused_attention = False
+                elif qkv_format == "thd":
+                    logger.debug("Disabling FusedAttention for MXFP8 with qkv_format = thd")
+                    use_fused_attention = False
+        if (
+            use_fused_attention
+            and (fp8_recipe.float8_block_scaling() or fp8_recipe.nvfp4())
+            and not IS_HIP_EXTENSION
+        ):
+            logger.debug("Disabling FusedAttention for %s", fp8_recipe.__class__.__name__)
+            use_fused_attention = False
 
         if device_compute_capability == (12, 0) and not IS_HIP_EXTENSION:
             if use_flash_attention:
@@ -598,11 +692,77 @@ def get_attention_backend(
             use_unfused_attention = False
             logger.debug("Disabling all backends for max_logit with FP8 attention")
 
+    # Filter: score_mod
+    if has_score_mod_bprop and not has_score_mod:
+        logger.debug("Disabling all backends because score_mod_bprop requires score_mod")
+        _disable_all_flash_attention()
+        use_fused_attention = False
+        use_unfused_attention = False
+    if has_score_mod:
+        if _any_flash_attention_enabled():
+            logger.debug("Disabling FlashAttention for score_mod")
+            _disable_all_flash_attention()
+        if use_unfused_attention:
+            logger.debug("Disabling UnfusedDotProductAttention for score_mod")
+            use_unfused_attention = False
+
+        score_mod_unsupported_reasons = []
+        if qkv_dtype not in [torch.float16, torch.bfloat16]:
+            score_mod_unsupported_reasons.append(
+                f"unsupported qkv_dtype = {qkv_dtype}; supported: torch.float16, torch.bfloat16"
+            )
+        if qkv_type is not torch.Tensor:
+            score_mod_unsupported_reasons.append(
+                f"unsupported qkv_type = {qkv_type}; supported: torch.Tensor"
+            )
+        if fp8:
+            score_mod_unsupported_reasons.append("FP8 DotProductAttention is enabled")
+        if fp8_output:
+            score_mod_unsupported_reasons.append("fp8_output is enabled")
+        if inference_params is not None:
+            score_mod_unsupported_reasons.append("KV caching is enabled")
+        if context_parallel:
+            score_mod_unsupported_reasons.append("context parallelism is enabled")
+        if "thd" in (qkv_format, q_format, kv_format):
+            score_mod_unsupported_reasons.append(
+                f"unsupported QKV format: q_format = {q_format}, kv_format = {kv_format}"
+            )
+        if pad_between_seqs:
+            score_mod_unsupported_reasons.append("pad_between_seqs is enabled")
+        if attn_mask_type != "no_mask":
+            score_mod_unsupported_reasons.append(f"attn_mask_type = {attn_mask_type}")
+        if window_size is not None and window_size != (-1, -1):
+            score_mod_unsupported_reasons.append(f"window_size = {window_size}")
+        if core_attention_bias_type != "no_bias":
+            score_mod_unsupported_reasons.append(
+                f"core_attention_bias_type = {core_attention_bias_type}"
+            )
+        if alibi_slopes_shape is not None:
+            score_mod_unsupported_reasons.append("ALiBi slopes were provided")
+        if softmax_type != "vanilla":
+            score_mod_unsupported_reasons.append(f"softmax_type = {softmax_type}")
+        if attention_dropout != 0.0:
+            score_mod_unsupported_reasons.append(f"attention_dropout = {attention_dropout}")
+        if return_max_logit:
+            score_mod_unsupported_reasons.append("return_max_logit is enabled")
+        if checkpoint_core_attention:
+            score_mod_unsupported_reasons.append("checkpoint_core_attention is enabled")
+        if cuda_graph:
+            score_mod_unsupported_reasons.append("CUDA graph capture is enabled")
+        if num_splits != 1:
+            score_mod_unsupported_reasons.append(f"num_splits = {num_splits}")
+        if score_mod_unsupported_reasons and use_fused_attention:
+            logger.debug(
+                "Disabling FusedAttention for score_mod because %s",
+                "; ".join(score_mod_unsupported_reasons),
+            )
+            use_fused_attention = False
+
     # Filter: KV cache
     # backend  | precision      |    KV cache     | architecture | qkv_format    | page_size
     # ---------------------------------------------------------------------------------------
     # Fused    | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | >= 1
-    # Flash v2 | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | >= 256
+    # Flash v2 | FP16/BF16      | non-paged/paged | sm80+        | bshd,sbhd,thd | % 256 == 0
     # Flash v3 | FP16/BF16      | non-paged/paged | sm90         | bshd,sbhd,thd | >= 1
     #          | FP8            | non-paged/paged | sm90         | thd           | >= 1
     # Flash v4 | FP16/BF16      | TODO            | sm80+        | bshd,sbhd,thd | TODO
@@ -642,9 +802,9 @@ def get_attention_backend(
                 use_fused_attention = False
                 use_unfused_attention = False
         if inference_params.is_paged:
-            if use_flash_attention_2 and inference_params.page_size < 256:
+            if use_flash_attention_2 and inference_params.page_size % 256 != 0:
                 if FlashAttentionUtils.is_installed:
-                    logger.debug("Disabling FlashAttention 2 for page size < 256")
+                    logger.debug("Disabling FlashAttention 2 for page size not divisible by 256")
                 use_flash_attention_2 = False
             if use_flash_attention_2:
                 if not FlashAttentionUtils.is_installed:
@@ -654,16 +814,22 @@ def get_attention_backend(
                         "Disabling FlashAttention 2 as paged attention requires flash-attn 2.5+"
                     )
                     use_flash_attention_2 = False
+        else:
+            # Non-paged KV cache still passes a block_table to FA2 for thd_2bshd support,
+            # and FA2 enforces page_size % 256 == 0 on the effective page size (max_seqlen_kv).
+            if use_flash_attention_2 and max_seqlen_kv % 256 != 0:
+                if FlashAttentionUtils.is_installed:
+                    logger.debug(
+                        "Disabling FlashAttention 2 for non-paged KV cache"
+                        " with max_seqlen_kv not divisible by 256"
+                    )
+                use_flash_attention_2 = False
         if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
             logger.debug("Disabling FlashAttention 4 as it does not support KV cache.")
             use_flash_attention_4 = False
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
-        if use_flash_attention_2 and FlashAttentionUtils.is_installed:
-            logger.debug("Disabling FlashAttention 2 as it does not support MLA.")
-            use_flash_attention_2 = False
-
         qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
         if use_fused_attention and qkv_layout_group != "hd_hd_hd":
             logger.debug(
@@ -686,26 +852,28 @@ def get_attention_backend(
                 )
             use_fused_attention = False
 
+    fa2_padded_head_dim = max(head_dim_qk, head_dim_v)
     if (  # pylint: disable=too-many-boolean-expressions
         use_flash_attention_2
         and FlashAttentionUtils.is_installed
         and (
-            head_dim_qk > 256
-            or head_dim_qk % 8 != 0
+            fa2_padded_head_dim > 256
+            or fa2_padded_head_dim % 8 != 0
             or (
                 not IS_HIP_EXTENSION
-                and head_dim_qk > 192
+                and fa2_padded_head_dim > 192
                 and device_compute_capability not in ((8, 0), (9, 0), (10, 0), (12, 0))
             )
         )
     ):
         logger.debug(
             "Disabling FlashAttention 2 due to unsupported head_dim_qk and head_dim_v. "
-            "Supported: head_dim_qk = head_dim_v, head_dim_qk %%8 = 0, "
-            "head_dim_qk <= 256 (>192 requires sm80/90/100+). "
-            "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
+            "Supported after padding: padded head_dim %%8 = 0, padded head_dim <= 256 "
+            "(>192 requires sm80/90/100+). "
+            "Found: head_dim_qk = %s, head_dim_v = %s, padded head_dim = %s, on sm%s.",
             head_dim_qk,
             head_dim_v,
+            fa2_padded_head_dim,
             ".".join([str(i) for i in device_compute_capability]),
         )
         use_flash_attention_2 = False
@@ -745,21 +913,25 @@ def get_attention_backend(
             )
             use_flash_attention_3 = False
 
-    if use_flash_attention_4 and FlashAttentionUtils.v4_is_installed:
-        # FA4 head dimension support is architecture-dependent
-        # (matches _validate_head_dims in flash_attn.cute.interface):
-        #   SM90:      head_dim <= 256 and head_dim_v <= 256
-        #   SM100/110: head_dim <= 128 and head_dim_v <= 128,
-        #              OR DeepSeek MLA shape (head_dim=192, head_dim_v=128)
-        #   SM80/120:  constrained by shared memory (~256 max in practice)
-        _fa4_hdim_ok = True
-        if (10, 0) <= device_compute_capability < (12, 0):
-            _is_standard = head_dim_qk <= 128 and head_dim_v <= 128
-            _is_deepseek = head_dim_qk == 192 and head_dim_v == 128
-            _fa4_hdim_ok = _is_standard or _is_deepseek
-        else:
-            _fa4_hdim_ok = head_dim_qk <= 256 and head_dim_v <= 256
-        if not _fa4_hdim_ok:
+    if (
+        use_flash_attention_4
+        and FlashAttentionUtils.v4_is_installed
+        and FlashAttentionUtils.v4_validate_head_dims is not None
+    ):
+        # Defer to FA4's own _validate_head_dims to keep TE in sync with FA4 supported shapes
+        # (e.g., (256, 256) on SM100, (192, 128) DeepSeek, (64, 512) MLA-absorbed).
+        # The function asserts on unsupported combinations; SM80/SM120 have no validation branch
+        # in FA4 so the call passes through silently for those archs.
+        _fa4_alignment = 16 // torch.empty(0, dtype=qkv_dtype).element_size()
+        try:
+            # pylint: disable-next=not-callable
+            FlashAttentionUtils.v4_validate_head_dims(
+                head_dim_qk,
+                head_dim_v,
+                device_compute_capability[0],
+                _fa4_alignment,
+            )
+        except AssertionError:
             logger.debug(
                 "Disabling FlashAttention 4 due to unsupported head dimensions. "
                 "Found: head_dim_qk = %s, head_dim_v = %s, on sm%s.",
@@ -768,13 +940,33 @@ def get_attention_backend(
                 device_compute_capability[0] * 10 + device_compute_capability[1],
             )
             use_flash_attention_4 = False
-        # Workaround: SM100 backward kernel bug when MLA + 2CTA (head_dim_qk >= 128).
-        # FlashAttentionBackwardSm100 computes dK_reduce_ncol = gcd(32, tile_hdim // 2)
-        # based on Q/K head_dim but reuses it for dV TMEM load atoms. When
-        # (tile_hdimv // 2) % dK_reduce_ncol != 0, dV reads are misaligned.
-        # See: flash_attn/cute/flash_bwd_sm100.py, line ~262 and ~3890.
-        elif (
-            _fa4_hdim_ok
+        # flash-attn-4 4.0.0b11 validates (256, 256) on SM100, but its dedicated
+        # hd256 kernel diverges from the reference for cross-attention/decode-like
+        # shapes such as sq=1, skv=2048. Keep FA4 enabled for the self-attention
+        # hd256 path covered by the dedicated test, and fall back for cross-attn.
+        if (
+            use_flash_attention_4
+            and (10, 0) <= device_compute_capability < (12, 0)
+            and head_dim_qk == head_dim_v == 256
+            and max_seqlen_q != max_seqlen_kv
+        ):
+            logger.debug(
+                "Disabling FlashAttention 4 for SM100 head_dim=256 cross-attention. "
+                "Found: max_seqlen_q = %s, max_seqlen_kv = %s.",
+                max_seqlen_q,
+                max_seqlen_kv,
+            )
+            use_flash_attention_4 = False
+        # Workaround: SM100 backward kernel bug when MLA + 2CTA (head_dim_qk >= 128) for
+        # the standard (non-dedicated) kernel path. FlashAttentionBackwardSm100 computes
+        # dK_reduce_ncol = gcd(32, tile_hdim // 2) based on Q/K head_dim but reuses it for
+        # dV TMEM load atoms. When (tile_hdimv // 2) % dK_reduce_ncol != 0, dV reads are
+        # misaligned (e.g. dqk=128, dv=96 gives 48 % 32 != 0). The dedicated (256, 256)
+        # kernel uses its own tmem layout and is not affected.
+        # See: flash_attn/cute/flash_bwd_sm100.py ~L262 and ~L3890. Still present in
+        # flash-attn-4 4.0.0b11.
+        if (
+            use_flash_attention_4
             and is_training
             and head_dim_qk != head_dim_v
             and head_dim_qk >= 128
@@ -797,15 +989,21 @@ def get_attention_backend(
     if qkv_format == "thd":
         if pad_between_seqs:
             if (  # pylint: disable=too-many-boolean-expressions
-                (use_flash_attention_2 and FlashAttentionUtils.is_installed)
-                or (use_flash_attention_3 and FlashAttentionUtils.v3_is_installed)
-                or (use_flash_attention_4 and FlashAttentionUtils.v4_is_installed)
-            ):
+                use_flash_attention_2 and FlashAttentionUtils.is_installed
+            ) or (use_flash_attention_4 and FlashAttentionUtils.v4_is_installed):
                 logger.debug(
-                    "Disabling FlashAttention for qkv_format = thd when there is "
+                    "Disabling FlashAttention 2 and 4 for qkv_format = thd when there is "
                     "padding between sequences, i.e. [a, a, PAD, b, b, b, PAD, c, PAD]"
                 )
-            use_flash_attention = False
+            use_flash_attention_2 = False
+            use_flash_attention_4 = False
+            # FA3 supports pad_between_seqs via seqused_q/seqused_k
+            if use_unfused_attention:
+                logger.debug("Disabling UnfusedDotProductAttention for pad_between_seqs = True")
+            use_unfused_attention = False
+            # ROCm does not support FA3 with thd + padding between sequences
+            if IS_HIP_EXTENSION:
+                use_flash_attention = False
         if device_compute_capability == (12, 0) and not IS_HIP_EXTENSION:
             if cudnn_version < (9, 18, 1):
                 if use_fused_attention:
@@ -845,29 +1043,36 @@ def get_attention_backend(
         logger.debug("Disabling FlashAttention for softmax_type = %s", softmax_type)
         use_flash_attention = False
         if fp8 and fp8_meta["recipe"].fp8_dpa:
-            logger.debug("Disabling FusedAttention for softmax_type = %s in FP8", softmax_type)
-            use_fused_attention = False
+            if use_fused_attention and (
+                device_compute_capability < (10, 0) or cudnn_version < (9, 21, 0)
+            ):
+                logger.debug(
+                    "Disabling FusedAttention for softmax_type = %s in FP8 on sm < 100 with cuDNN"
+                    " version < 9.21",
+                    softmax_type,
+                )
+                use_fused_attention = False
+            if use_unfused_attention:
+                logger.debug(
+                    "Disabling UnfusedDotProductAttention for softmax_type = %s in FP8",
+                    softmax_type,
+                )
+                use_unfused_attention = False
+        if qkv_format == "thd" and not IS_HIP_EXTENSION and cudnn_version < (9, 18, 0):
             logger.debug(
-                "Disabling UnfusedDotProductAttention for softmax_type = %s in FP8", softmax_type
+                "Disabling FusedAttention for softmax_type = %s, qkv_format = thd and cuDNN"
+                " version < 9.18",
+                softmax_type,
             )
-            use_unfused_attention = False
-        if qkv_format == "thd":
-            if not IS_HIP_EXTENSION and cudnn_version < (9, 18, 0):
-                logger.debug(
-                    "Disabling FusedAttention for softmax_type = %s, qkv_format = thd and cuDNN"
-                    " version < 9.18",
-                    softmax_type,
-                )
-                use_fused_attention = False
-        if context_parallel:
-            if cp_comm_type != "a2a":
-                logger.debug(
-                    "Disabling FusedAttention for context parallelism with softmax_type = %s and"
-                    " cp_comm_type = %s",
-                    softmax_type,
-                    cp_comm_type,
-                )
-                use_fused_attention = False
+            use_fused_attention = False
+        if context_parallel and cp_comm_type != "a2a":
+            logger.debug(
+                "Disabling FusedAttention for context parallelism with softmax_type = %s and"
+                " cp_comm_type = %s",
+                softmax_type,
+                cp_comm_type,
+            )
+            use_fused_attention = False
 
     # Filter: Context parallelism
     # qkv_format | attn_mask_type              | attn_bias_type           | supported backends
@@ -954,10 +1159,50 @@ def get_attention_backend(
                 " bias for THD format"
             )
             use_fused_attention = False
-        elif fp8 and fp8_meta["recipe"].fp8_dpa and head_dim_qk != head_dim_v:
+        elif fp8 and fp8_meta["recipe"].fp8_dpa and qkv_format == "thd":
             logger.debug(
                 "Disabling FusedAttention as it does not support context parallelism with FP8"
-                " MLA attention"
+                " attention and THD format"
+            )
+            use_fused_attention = False
+        elif fp8 and fp8_meta["recipe"].fp8_dpa and core_attention_bias_type != "no_bias":
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with FP8"
+                " attention and bias"
+            )
+            use_fused_attention = False
+        elif core_attention_bias_type != "no_bias" and cp_comm_type != "p2p":
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with bias"
+                " and cp_comm_type = %s",
+                cp_comm_type,
+            )
+            use_fused_attention = False
+        elif qkv_format == "thd" and cp_comm_type in ["all_gather", "a2a+p2p"]:
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with THD"
+                " format and cp_comm_type = %s",
+                cp_comm_type,
+            )
+            use_fused_attention = False
+        elif (
+            window_size is not None
+            and (window_size[0] != -1 or window_size[1] not in [-1, 0])
+            and cp_comm_type in ["p2p", "a2a+p2p"]
+        ):
+            logger.debug(
+                "Disabling FusedAttention as it does not support context parallelism with sliding"
+                " window attention and cp_comm_type = %s",
+                cp_comm_type,
+            )
+            use_fused_attention = False
+        elif cp_comm_type in ["a2a", "a2a+p2p"] and (num_heads % 2 != 0 or num_gqa_groups % 2 != 0):
+            logger.debug(
+                "Disabling FusedAttention as cp_comm_type = %s requires num_heads and"
+                " num_gqa_groups divisible by 2 (got num_heads = %s, num_gqa_groups = %s)",
+                cp_comm_type,
+                num_heads,
+                num_gqa_groups,
             )
             use_fused_attention = False
 
@@ -1012,9 +1257,14 @@ def get_attention_backend(
     if window_size is None:
         window_size = check_set_window_size(attn_mask_type, window_size)
     if use_fused_attention and (window_size[0] != -1 or window_size[1] not in [-1, 0]):
-        if fp8 and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha):
+        if (
+            fp8
+            and (fp8_meta["recipe"].fp8_dpa or fp8_meta["recipe"].fp8_mha)
+            and (device_compute_capability < (10, 0) or cudnn_version < (9, 21, 0))
+        ):
             logger.debug(
                 "Disabling FusedAttention as it does not support sliding window attention for FP8"
+                " on sm < 100 with cuDNN version < 9.21"
             )
             use_fused_attention = False
         elif not IS_HIP_EXTENSION and attention_dropout != 0.0:
@@ -1107,7 +1357,7 @@ def get_attention_backend(
         ):
             fu_core_attention_bias_shape = "bhss"
 
-    # rocm ck backend support 4 bias shapes (11ss, 1hss, b1ss, and bhss)
+    # rocm ck backend supports 4 bias shapes (11ss, 1hss, b1ss, and bhss)
     if IS_HIP_EXTENSION:
         if use_fused_attention and fu_core_attention_bias_shape == "111s":
             logger.debug("Disabling FusedAttention as ROCm backends do not support 111s")
@@ -1123,13 +1373,11 @@ def get_attention_backend(
                 "Disabling FusedAttention as dbias calculation is not supported for 111s"
             )
             use_fused_attention = False
-        elif not fu_core_attention_bias_requires_grad:
-            # max512 backend will only support [1, h, s, s]
-            os.environ["NVTE_FUSED_ATTN_BACKEND"] = "1"
-
     # Filter: cuDNN support
     fused_attention_backend = None
     if use_fused_attention:
+        # ``DType`` is implicitly convertible to ``transformer_engine::DType``
+        # on the C++ side, so pass it straight to the pybind function.
         q_type = TE_DType[qkv_dtype]
         kv_type = q_type
         if fp8 and fp8_meta["recipe"].fp8_dpa:
@@ -1160,8 +1408,17 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
             fused_attention_backend = None
+        elif has_score_mod and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]:
+            logger.debug(
+                "Disabling FusedAttention for score_mod because sub-backend %s is not "
+                "F16/BF16 arbitrary-seqlen",
+                int(fused_attention_backend),
+            )
+            use_fused_attention = False
+            fused_attention_backend = None
         if (
-            use_fused_attention and (not IS_HIP_EXTENSION)
+            use_fused_attention
+            and (not IS_HIP_EXTENSION)
             and window_size is not None
             and window_size[0] != -1
             and fused_attention_backend != FusedAttnBackend["F16_arbitrary_seqlen"]
@@ -1174,7 +1431,8 @@ def get_attention_backend(
             use_fused_attention = False
             fused_attention_backend = None
         if (
-            use_fused_attention and (not IS_HIP_EXTENSION)
+            use_fused_attention
+            and (not IS_HIP_EXTENSION)
             and fused_attention_backend == FusedAttnBackend["F16_max512_seqlen"]
             and fu_core_attention_bias_type == "post_scale_bias"
             and fu_core_attention_bias_shape != "1hss"
@@ -1209,9 +1467,12 @@ def get_attention_backend(
             )
             use_flash_attention_2 = False
     if use_flash_attention_3 and deterministic and FlashAttentionUtils.v3_is_installed:
-        if head_dim_qk >= 256:
+        if is_training and max(head_dim_qk, head_dim_v) >= 256:
             logger.debug(
-                "Disabling FlashAttention 3 for deterministic execution with head_dim_qk >= 256."
+                "Disabling FlashAttention 3 for deterministic backward with"
+                " max(head_dim_qk, head_dim_v) >= 256. Found: head_dim_qk = %s, head_dim_v = %s.",
+                head_dim_qk,
+                head_dim_v,
             )
             use_flash_attention_3 = False
     if use_fused_attention and deterministic and (not IS_HIP_EXTENSION):
@@ -1756,11 +2017,12 @@ def get_full_cu_seqlens(
 
     if is_in_onnx_export_mode():
         return _get_cu_seqlens(batch_size, max_seqlen, device)
-    if (batch_size, max_seqlen) not in _cu_seqlens_cache:
-        _cu_seqlens_cache[(batch_size, max_seqlen)] = _get_cu_seqlens(
-            batch_size, max_seqlen, device
-        )
-    return _cu_seqlens_cache[(batch_size, max_seqlen)]
+
+    is_inference = torch.is_inference_mode_enabled()
+    cu_seqlens_cache_key = (batch_size, max_seqlen, device, is_inference)
+    if cu_seqlens_cache_key not in _cu_seqlens_cache:
+        _cu_seqlens_cache[cu_seqlens_cache_key] = _get_cu_seqlens(batch_size, max_seqlen, device)
+    return _cu_seqlens_cache[cu_seqlens_cache_key]
 
 
 @jit_fuser
@@ -2272,24 +2534,68 @@ def get_attention_quantizers(fp8, quantizers):
     """Get the list of quantizers used in attention from the quantizers list."""
     if not fp8:
         return [None] * 6
+
     QKV_quantizer = quantizers["scaling_fwd"][META_QKV]
-    QKV_quantizer.internal = True
+    QKV_quantizer.internal = False
     QKV_quantizer.set_usage(rowwise=True, columnwise=False)
-    O_quantizer = quantizers["scaling_fwd"][META_O]
-    O_quantizer.set_usage(rowwise=True, columnwise=False)
+
     S_quantizer = quantizers["scaling_fwd"][META_S]
     S_quantizer.internal = True
     S_quantizer.set_usage(rowwise=True, columnwise=False)
 
-    dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
-    dQKV_quantizer.interal = True
-    dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
+    O_quantizer = quantizers["scaling_fwd"][META_O]
+    O_quantizer.internal = False
+    O_quantizer.set_usage(rowwise=True, columnwise=False)
+
     dO_quantizer = quantizers["scaling_bwd"][META_DO]
+    dO_quantizer.internal = False
     dO_quantizer.set_usage(rowwise=True, columnwise=False)
-    dO_quantizer.internal = True
+
     dP_quantizer = quantizers["scaling_bwd"][META_DP]
+    dP_quantizer.internal = True
     dP_quantizer.set_usage(rowwise=True, columnwise=False)
-    dP_quantizer.interal = True
+
+    dQKV_quantizer = quantizers["scaling_bwd"][META_DQKV]
+    dQKV_quantizer.internal = False
+    dQKV_quantizer.set_usage(rowwise=True, columnwise=False)
+
+    # MXFP8 attention: detect from the QKV quantizer instance rather than the
+    # recipe predicate so that CustomRecipe (whose `mxfp8()` predicate returns
+    # False) gets the same treatment as the built-in MXFP8 recipe. The kernel
+    # handles S/dP internally for MXFP8, hence S/dP are nulled out.
+    if isinstance(QKV_quantizer, MXFP8Quantizer):
+        QKV_quantizer.columnwise_usage = True
+        QKV_quantizer.optimize_for_gemm = True
+        S_quantizer = None
+        O_quantizer.columnwise_usage = True
+
+        dO_quantizer.columnwise_usage = True
+        dO_quantizer.optimize_for_gemm = True
+        dP_quantizer = None
+        dQKV_quantizer.columnwise_usage = True
+
+    _fp8_types = (Float8Quantizer, Float8CurrentScalingQuantizer, MXFP8Quantizer)
+    # S/dP are intentionally None under MXFP8 attention; skip the type check
+    # for those slots in that case.
+    _allow_none = {"S", "dP"} if isinstance(QKV_quantizer, MXFP8Quantizer) else set()
+    for _name, _q in [
+        ("QKV", QKV_quantizer),
+        ("O", O_quantizer),
+        ("S", S_quantizer),
+        ("dQKV", dQKV_quantizer),
+        ("dO", dO_quantizer),
+        ("dP", dP_quantizer),
+    ]:
+        if _q is None and _name in _allow_none:
+            continue
+        assert isinstance(_q, _fp8_types), (
+            "FP8 attention requires FP8-compatible quantizers for all DPA tensor slots, "
+            f"but {_name} quantizer is {type(_q).__name__}. "
+            "When using CustomRecipe with fp8_dpa=True, ensure the factory returns an "
+            "FP8 quantizer (Float8Quantizer, Float8CurrentScalingQuantizer, or "
+            "MXFP8Quantizer) for all DPA roles (module_type='dpa') and for None roles "
+            "(boundary slots like O output and dQKV grad-input)."
+        )
 
     return QKV_quantizer, O_quantizer, S_quantizer, dQKV_quantizer, dO_quantizer, dP_quantizer
 
@@ -2343,18 +2649,289 @@ def print_quantizers(
                 type_str = "DS"
             elif isinstance(q, Float8CurrentScalingQuantizer):
                 type_str = "CS"
-            print(
-                f"{label} >> {names[i]:14s}: {type_str}, {q.scale.item():.4e} x"
-                f" {q.amax.item():.4e} = {q.scale.item()*q.amax.item():.4e}"
+            elif isinstance(q, MXFP8Quantizer):
+                type_str = "MXFP8"
+            if type_str == "DS":
+                print(
+                    f"{label} >> {names[i]:14s}: {type_str}, {q.scale.item():.4e} x"
+                    f" {q.amax.item():.4e} = {q.scale.item()*q.amax.item():.4e}"
+                )
+            else:
+                print(f"{label} >> {names[i]:14s}: {type_str}")
+
+
+def transpose_to_bhsd_htd_pytorch(tensor, src_format):
+    """Permute to BHSD or HTD format using native PyTorch operations."""
+    if src_format in ("bhsd", "htd"):
+        return tensor
+    dim_s = src_format.find("s") if "s" in src_format else src_format.find("t")
+    dim_others = [i for i in range(tensor.ndim) if i != dim_s]
+    new_dims = [*dim_others[:-1], dim_s, dim_others[-1]]
+    return tensor.permute(*new_dims).contiguous()
+
+
+def mxfp8_quantize_fast_path(tensor_quantizer_pairs, src_format):
+    """MXFP8 attention requires quantization along S and D dimensions. This fast path
+    quantizes tensors without swizzle, and pads, permutes and swizzles the scale_invs
+    to achieve faster speed due to the smaller sizes of scale_invs compare to the data.
+    The output tensors have _rowwise_data and _columnwise_data in src_format, and
+    _rowwise_scale_inv and _columnwise_scale_inv in BHSD format.
+
+    Parameters
+    ----------
+    tensor_quantizer_pairs : list of (torch.Tensor, MXFP8Quantizer)
+        Each pair is a tensor and its quantizer (with the desired
+        rowwise_usage / columnwise_usage already set).
+    src_format : str
+        Layout of input tensors: ``"bshd"`` or ``"sbhd"``.
+        All tensors in the list must have the same src_format.
+    Returns
+    -------
+    fp8_tensors : list of MXFP8Tensors
+        Data in ``src_format``, scale_inv in BHSD format.
+    scale_inv_format : str
+        Always ``"bhsd"``.
+    """
+    if not tensor_quantizer_pairs:
+        return [], src_format
+    assert src_format in (
+        "bshd",
+        "sbhd",
+    ), f"mxfp8_quantize_fast_path only supports bshd/sbhd, got {src_format!r}."
+    _s_dim = {"bshd": 1, "sbhd": 0}
+    _d_dim = {"bshd": 3, "sbhd": 3}
+
+    fp8_tensors = []
+    for tensor, quantizer in tensor_quantizer_pairs:
+        original_shape = tensor.shape
+        rs_shape = list(original_shape)
+        rs_shape[_d_dim[src_format]] //= MXFP8_BLOCK_SCALING_SIZE
+        cs_shape = list(original_shape)
+        cs_shape[_s_dim[src_format]] //= MXFP8_BLOCK_SCALING_SIZE
+
+        # view tensor as 2D for quantization
+        # BSHD -> (B*S, H*D)
+        # SBHD -> (S, B*H*D)
+        if src_format == "bshd":
+            tensor = tensor.view(*tensor.shape[:2], -1)
+        else:
+            tensor = tensor.view(tensor.shape[0], -1)
+
+        # quantize
+        orig_optimize = quantizer.optimize_for_gemm
+        quantizer.optimize_for_gemm = False
+        fp8_tensor = quantizer(tensor)
+        quantizer.optimize_for_gemm = orig_optimize
+
+        # reshape rowwise/columnwise data to original shape
+        fp8_tensor._rowwise_data = (
+            fp8_tensor._rowwise_data.view(original_shape)
+            if fp8_tensor._rowwise_data is not None
+            else None
+        )
+        fp8_tensor._columnwise_data = (
+            fp8_tensor._columnwise_data.view(original_shape)
+            if fp8_tensor._columnwise_data is not None
+            else None
+        )
+        fp8_tensor._rowwise_scale_inv = (
+            fp8_tensor._rowwise_scale_inv.view(rs_shape)
+            if fp8_tensor._rowwise_scale_inv is not None
+            else None
+        )
+        fp8_tensor._columnwise_scale_inv = (
+            fp8_tensor._columnwise_scale_inv.view(cs_shape)
+            if fp8_tensor._columnwise_scale_inv is not None
+            else None
+        )
+        fp8_tensors.append(fp8_tensor)
+
+    # ---- Pad + permute + swizzle scale_inv to BHSD ----
+    rs_list = [t._rowwise_scale_inv for t in fp8_tensors]
+    cs_list = [t._columnwise_scale_inv for t in fp8_tensors]
+
+    def _align_up(x, a):
+        return ((x + a - 1) // a) * a
+
+    def _bhsd_shape(src_4d, d_pad):
+        if src_format == "sbhd":
+            S, B, H, _ = src_4d.shape
+        else:
+            B, S, H, _ = src_4d.shape
+        return (B, H, S, d_pad)
+
+    def _build_outputs(scale_list, alignment):
+        entries = []
+        total = 0
+        for s in scale_list:
+            if s is None:
+                entries.append(None)
+                continue
+            d_pad = _align_up(s.shape[-1], alignment)
+            shape = _bhsd_shape(s, d_pad)
+            numel = 1
+            for dim in shape:
+                numel *= dim
+            entries.append((total, numel, shape))
+            total += numel
+        if total == 0:
+            return [None] * len(scale_list)
+        device = next(s for s in scale_list if s is not None).device
+        buf = torch.empty(total, dtype=torch.uint8, device=device)
+        return [buf[e[0] : e[0] + e[1]].view(e[2]) if e is not None else None for e in entries]
+
+    # allocate buffers with padding in mind
+    rs_outs = _build_outputs(rs_list, 4)
+    cs_outs = _build_outputs(cs_list, 128)
+
+    # permute scale_invs to BHSD; batched
+    rs_permuted = tex.multi_tensor_transpose_to_bhsd(
+        rs_list,
+        original_format=src_format,
+        outputs=rs_outs,
+    )
+    cs_permuted = tex.multi_tensor_transpose_to_bhsd(
+        cs_list,
+        original_format=src_format,
+        outputs=cs_outs,
+    )
+
+    # build output tensors
+    result = []
+    for t, rp, cp in zip(fp8_tensors, rs_permuted, cs_permuted):
+        rp = rp.view(-1, rp.shape[-1]) if rp is not None else None
+        cp = cp.view(-1, cp.shape[-1]) if cp is not None else None
+        result.append(
+            MXFP8Tensor(
+                shape=t.shape,
+                dtype=t.dtype,
+                rowwise_data=t._rowwise_data,
+                rowwise_scale_inv=rp,
+                columnwise_data=t._columnwise_data,
+                columnwise_scale_inv=cp,
+                quantizer=t._quantizer,
+                requires_grad=False,
+                fp8_dtype=t._fp8_dtype,
+                with_gemm_swizzled_scales=t._with_gemm_swizzled_scales,
+            )
+        )
+
+    # swizzle in place; batched
+    tex.multi_tensor_swizzle_scales_for_gemm_unchecked_(result, True, False)
+    tex.multi_tensor_swizzle_scales_for_gemm_unchecked_(result, False, True)
+    for t in result:
+        t._with_gemm_swizzled_scales = True
+
+    return result, "bhsd"
+
+
+def combine_and_quantize(
+    qkv_layout,
+    q,
+    k,
+    v,
+    qkv_quantizer,
+    used_in_forward=True,
+    used_in_backward=False,
+    keep_same_data_and_scale_inv_format=False,
+):
+    """Combine Q, K, V tensors based on qkv_layout and quantize them together."""
+    if isinstance(qkv_quantizer, MXFP8Quantizer):
+        qkv_format, q_format, kv_format = get_qkv_format(qkv_layout)
+        assert qkv_format in ("bshd", "sbhd"), (
+            "combine_and_quantize only supports bshd/sbhd for MXFP8 quantization, got"
+            f" {qkv_format!r}."
+        )
+
+        _s_dim = {"sbhd": 0, "bshd": 1}
+        _d_dim = {"sbhd": 3, "bshd": 3}
+        d_qk = q.shape[_d_dim[qkv_format]]
+        d_v = v.shape[_d_dim[qkv_format]]
+        s_q = q.shape[_s_dim[q_format]]
+        s_kv = v.shape[_s_dim[kv_format]]
+        assert s_q % 128 == 0 and s_kv % 128 == 0 and d_qk % 32 == 0 and d_v % 32 == 0, (
+            "MXFP8 quantization requires s_q % 128 == 0, s_kv % 128 == 0, d_qk % 32 == 0, d_v % 32"
+            f" == 0. Found {s_q=}, {s_kv=}, {d_qk=}, {d_v=}."
+        )
+
+        if qkv_layout not in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd"):
+            keep_same_data_and_scale_inv_format = True
+
+        # ---- Fast path: quantize in original layout, permute scale_inv to BHSD, then swizzle ----
+        if not keep_same_data_and_scale_inv_format:
+            q_quantizer, k_quantizer, v_quantizer = [qkv_quantizer.copy() for _ in range(3)]
+            if used_in_forward and not used_in_backward:
+                q_quantizer.rowwise_usage = True
+                q_quantizer.columnwise_usage = False
+                k_quantizer.rowwise_usage = True
+                k_quantizer.columnwise_usage = False
+                v_quantizer.rowwise_usage = False
+                v_quantizer.columnwise_usage = True
+            elif (not used_in_forward) and used_in_backward:
+                q_quantizer.rowwise_usage = True
+                q_quantizer.columnwise_usage = True
+                k_quantizer.rowwise_usage = True
+                k_quantizer.columnwise_usage = True
+                v_quantizer.rowwise_usage = True
+                v_quantizer.columnwise_usage = False
+            (q_fp8, k_fp8, v_fp8), qkv_scale_inv_format = mxfp8_quantize_fast_path(
+                [(q, q_quantizer), (k, k_quantizer), (v, v_quantizer)], qkv_format
+            )
+            return q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format
+
+        # ---- Slow path: permute data to BHSD, then quantize with swizzle ----
+        if qkv_layout in ("bshd_bshd_bshd", "sbhd_sbhd_sbhd"):
+            q, k, v = tex.multi_tensor_transpose_to_bhsd(
+                [q, k, v],
+                original_format=qkv_format,
+            )
+        else:
+            q = transpose_to_bhsd_htd_pytorch(q, q_format)
+            k = transpose_to_bhsd_htd_pytorch(k, kv_format)
+            v = transpose_to_bhsd_htd_pytorch(v, kv_format)
+        qkv_layout = "bhsd_bhsd_bhsd"
+        qkv_scale_inv_format = "bhsd"
+
+        original_shapes = [x.shape for x in [q, k, v]]
+        q, k, v = [x.view(-1, x.shape[-1]) for x in [q, k, v]]
+
+        q_quantizer, k_quantizer, v_quantizer = [qkv_quantizer.copy() for _ in range(3)]
+        if used_in_forward and not used_in_backward:
+            q_quantizer.rowwise_usage = True
+            q_quantizer.columnwise_usage = False
+            k_quantizer.rowwise_usage = True
+            k_quantizer.columnwise_usage = False
+            v_quantizer.rowwise_usage = False
+            v_quantizer.columnwise_usage = True
+        elif (not used_in_forward) and used_in_backward:
+            q_quantizer.rowwise_usage = True
+            q_quantizer.columnwise_usage = True
+            k_quantizer.rowwise_usage = True
+            k_quantizer.columnwise_usage = True
+            v_quantizer.rowwise_usage = True
+            v_quantizer.columnwise_usage = False
+        q_fp8, k_fp8, v_fp8 = [
+            quant(x) for quant, x in zip([q_quantizer, k_quantizer, v_quantizer], [q, k, v])
+        ]
+
+        for fp8_tensor, shape in zip([q_fp8, k_fp8, v_fp8], original_shapes):
+            fp8_tensor._rowwise_data = (
+                fp8_tensor._rowwise_data.view(shape)
+                if fp8_tensor._rowwise_data is not None
+                else None
+            )
+            fp8_tensor._columnwise_data = (
+                fp8_tensor._columnwise_data.view(shape)
+                if fp8_tensor._columnwise_data is not None
+                else None
             )
 
+        return q_fp8, k_fp8, v_fp8, qkv_layout, qkv_scale_inv_format
 
-def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
-    """Combine q,k,v based on qkv_layout and quantize them together"""
-    # 1: qkv packed, 2: kv packed, 3: qkv separate
     qkv_layout = qkv_layout.replace("paged_kv_", "")
     qkv_group = len(qkv_layout.split("_"))
     src_nominal_dtype = q.dtype
+    # 1: qkv packed, 2: kv packed, 3: qkv separate
     match qkv_group:
         case 1:
             dim = qkv_layout.find("3")
@@ -2394,24 +2971,28 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
         for x in [q_data, k_data, v_data]
     ]
 
-    return q_fp8, k_fp8, v_fp8
+    return q_fp8, k_fp8, v_fp8, qkv_layout, None
 
 
 def combine_and_dequantize(
     qkv_layout, q_fp8, k_fp8, v_fp8, src_nominal_dtype=None, des_nominal_dtype=None
 ):
     """Combine q,k,v based on qkv_layout and dequantize them together"""
-    # 1: qkv packed, 2: kv packed, 3: qkv separate
-    qkv_layout = qkv_layout.replace("paged_kv_", "")
-    qkv_group = len(qkv_layout.split("_"))
-    if all(isinstance(x, Float8Tensor) for x in [q_fp8, k_fp8, v_fp8]):
+    if all(isinstance(x, QuantizedTensorStorage) for x in [q_fp8, k_fp8, v_fp8]):
         src_nominal_dtype = q_fp8.dtype
     else:
         assert src_nominal_dtype is not None, "The nominal dtype of input tensors is required!"
     if des_nominal_dtype is None:
         des_nominal_dtype = src_nominal_dtype
 
+    if all(isinstance(x, (MXFP8Tensor, MXFP8TensorStorage)) for x in [q_fp8, k_fp8, v_fp8]):
+        q, k, v = [x.dequantize(dtype=des_nominal_dtype) for x in [q_fp8, k_fp8, v_fp8]]
+        return q, k, v
+
+    qkv_layout = qkv_layout.replace("paged_kv_", "")
+    qkv_group = len(qkv_layout.split("_"))
     q_data, k_data, v_data = [x._data for x in [q_fp8, k_fp8, v_fp8]]
+    # 1: qkv packed, 2: kv packed, 3: qkv separate
     match qkv_group:
         case 1:
             dim = qkv_layout.find("3")
