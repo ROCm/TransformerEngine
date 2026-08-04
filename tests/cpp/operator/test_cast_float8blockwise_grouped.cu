@@ -373,6 +373,13 @@ struct TestConfig {
 class GroupedFP8BlockwiseTestSuite : public ::testing::TestWithParam<TestConfig> {};
 
 TEST_P(GroupedFP8BlockwiseTestSuite, Test) {
+#ifdef __HIP_PLATFORM_AMD__
+  // Grouped FP8 block-scaling quantize is CUDA-only (Hopper TMA); it is guarded
+  // off on ROCm (group_quantize_fwd_helper throws NVTE_ERROR). ROCm reports
+  // compute capability 9.4, which passes the Hopper (>=90) gate, so an explicit
+  // skip is required.
+  GTEST_SKIP() << "Grouped FP8 block-scaling quantize is not supported on ROCm.";
+#endif
   const TestConfig& cfg = GetParam();
   perform_test<bf16, fp8e4m3>(cfg.shape_rep, cfg.block_dim, cfg.dir, cfg.first_dims, cfg.K,
                               /*force_pow_2_scales=*/false, /*epsilon=*/0.0f);
