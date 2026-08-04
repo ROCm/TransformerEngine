@@ -1813,6 +1813,8 @@ def test_grouped_linear_caller_output_buffers(use_fused_path, supply, monkeypatc
     and, on the fused path with a padded input, that only the valid rows are touched.
     """
     if use_fused_path:
+        if IS_HIP_EXTENSION:
+            pytest.skip("GroupedTensor grouped GEMM needs nvte_grouped_gemm, unsupported on ROCm.")
         device_capability = torch.cuda.get_device_capability()
         if not (9, 0) <= device_capability <= (11, 0):
             pytest.skip(
