@@ -11,7 +11,10 @@ from typing import Union
 import torch
 import torch.distributed
 import transformer_engine_torch as tex
-from .utils import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
+# NOTE: get_torch_float8_e4m3_type/e5m2_type are imported lazily inside
+# Custom_DType_Dict.__missing__ (below). A module-level `from .utils import ...`
+# forms a circular import on ROCm: utils imports debug_quantization, which imports
+# quantized_tensor, which imports back from constants (see quantized_tensor.py).
 
 class DType(enum.IntEnum):
     """Transformer Engine data types used to tag tensors passed to the
@@ -111,6 +114,8 @@ _FP8_KEYS = (DType.kFloat8E4M3, DType.kFloat8E5M2)
 class Custom_DType_Dict(dict):
     def __missing__(self, key):
         if key in _FP8_KEYS:
+            from .utils import get_torch_float8_e4m3_type, get_torch_float8_e5m2_type
+
             value = (
                 get_torch_float8_e4m3_type() if key == DType.kFloat8E4M3
                 else get_torch_float8_e5m2_type()
