@@ -103,7 +103,13 @@ run_test_config(){
     NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 3 test_numerics.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "triton" 1 test_float8_current_scaling_exact.py
-    NVTE_USE_GEMM_TRITON=1 run_default_fa_lbl "gemm-triton" 3 test_numerics.py
+    # NVTE_ROCM_ENABLE_MXFP8=1 opens up MXFP8 recipe parametrizations
+    # (is_mxfp8_available() on ROCm gates on this env var). Restricted to
+    # test_numerics.py for now -- test_fusible_ops.py MXFP8 exercises fused-op
+    # paths that hit dev-side C++ bugs (gated_mxfp8 swizzle assert, grouped
+    # GEMM bias assert) that fail identically under hipBLASLt / HipKittens /
+    # Triton, so leave it alone until dev fixes those.
+    NVTE_ROCM_ENABLE_MXFP8=1 NVTE_USE_GEMM_TRITON=1 run_default_fa_lbl "gemm-triton" 3 test_numerics.py
     NVTE_USE_GEMM_TRITON=1 run_default_fa_lbl "gemm-triton" 1 test_fusible_ops.py
     NVTE_USE_GEMM_TRITON=1 run_default_fa_lbl "gemm-triton" 1 test_float8_current_scaling_exact.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 test_numerics.py
