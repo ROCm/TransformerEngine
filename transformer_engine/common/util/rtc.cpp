@@ -55,15 +55,7 @@ inline int max_supported_sm_arch() {
 }  // namespace
 
 bool is_enabled() {
-#ifdef __HIP_PLATFORM_AMD__
-  // On ROCm the hipRTC norm/softmax JIT path is not functional; the fork builds
-  // the static kernels (NVTE_BUILD_LEGACY_STATIC_{NORM,FUSED_SOFTMAX}=ON) and the
-  // registry selects those only when NVRTC is disabled. Default NVRTC OFF on ROCm
-  // so the static kernels are used; opt back in with NVTE_ENABLE_NVRTC=1.
-  static const bool is_enabled_ = getenv<bool>("NVTE_ENABLE_NVRTC");
-#else
   static const bool is_enabled_ = !getenv<bool>("NVTE_DISABLE_NVRTC");
-#endif
   return is_enabled_;
 }
 
