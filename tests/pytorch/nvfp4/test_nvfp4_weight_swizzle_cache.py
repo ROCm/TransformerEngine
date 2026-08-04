@@ -13,6 +13,7 @@ re-quantize (the original hang/corruption)."""
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
 from transformer_engine.common.recipe import NVFP4BlockScaling
@@ -20,7 +21,13 @@ from transformer_engine.common.recipe import NVFP4BlockScaling
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
-pytestmark = pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+pytestmark = [
+    pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe),
+    pytest.mark.skipif(
+        IS_HIP_EXTENSION,
+        reason="In-kernel GEMM-swizzled scale-factor output is not supported on ROCm",
+    ),
+]
 
 
 def _make_module(kind, in_features, out_features, device, num_gemms=1):

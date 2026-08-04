@@ -22,6 +22,7 @@ from typing import Tuple
 
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex  # noqa: F401
@@ -36,6 +37,11 @@ from nvfp4_utils import (
 )
 
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
+
+pytestmark = pytest.mark.skipif(
+    IS_HIP_EXTENSION,
+    reason="In-kernel GEMM-swizzled scale-factor output is not supported on ROCm",
+)
 
 
 def _unpack_quantized_tensor(

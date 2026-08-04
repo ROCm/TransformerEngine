@@ -56,6 +56,7 @@ _RECIPE_POLICIES: dict[tuple[str, str], CheckpointExtraStatePolicy] = {
     (_RECIPE_MODULE, "DelayedScaling"): CheckpointExtraStatePolicy.STATEFUL_FP8_DELAYED_SCALING,
     (_RECIPE_MODULE, "Float8CurrentScaling"): CheckpointExtraStatePolicy.STATELESS,
     (_RECIPE_MODULE, "MXFP8BlockScaling"): CheckpointExtraStatePolicy.STATELESS,
+    (_RECIPE_MODULE, "MXFP4BlockScaling"): CheckpointExtraStatePolicy.STATELESS,
     (_RECIPE_MODULE, "Float8BlockScaling"): CheckpointExtraStatePolicy.STATELESS,
     (_RECIPE_MODULE, "NVFP4BlockScaling"): CheckpointExtraStatePolicy.STATELESS,
     (_RECIPE_MODULE, "CustomRecipe"): CheckpointExtraStatePolicy.DYNAMIC,
