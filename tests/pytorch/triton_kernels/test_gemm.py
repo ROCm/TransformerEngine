@@ -154,19 +154,37 @@ def compute_pytorch_reference(A_ref, B_ref, layout):
         raise ValueError(f"Unsupported layout: {layout}")
 
 
-def create_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b):
-    """Create Float8Tensor inputs and dequantized references."""
+def create_regular_tensors(M, K, N, layout, dtype=torch.float32):
+    """Random (A, B) regular tensors sized for ``layout`` at ``(M, K, N)``.
+
+    Values are ``randn * 0.5`` -- magnitude ~O(1), consistent seed handled by
+    the caller. Used both as-is (regular GEMM tests) and as the fp32 input to
+    the Float8 / MXFP8 quantizers in ``create_fp8_tensors`` / ``create_mxfp8_tensors``.
+    """
     A_shape, B_shape = get_shapes(layout, M, K, N)
-    A_f32 = torch.randn(A_shape, dtype=torch.float32, device='cuda') * 0.5
-    B_f32 = torch.randn(B_shape, dtype=torch.float32, device='cuda') * 0.5
+    A = torch.randn(A_shape, dtype=dtype, device='cuda') * 0.5
+    B = torch.randn(B_shape, dtype=dtype, device='cuda') * 0.5
+    return A, B
+
+
+def create_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b,
+                       a_scale=1.0, b_scale=1.0):
+    """Create Float8Tensor inputs and dequantized references.
+
+    ``a_scale`` / ``b_scale`` set the per-tensor quantization scale (fp32
+    magnitudes get multiplied by this before quantizing). Non-unity values
+    exercise the kernel's ``scale_inv`` fold-back -- with ``scale=1.0`` a bug
+    that dropped ``scale_inv`` would still pass since ``1/scale = 1``.
+    """
+    A_f32, B_f32 = create_regular_tensors(M, K, N, layout, dtype=torch.float32)
 
     A_fp8 = Float8Quantizer(
-        scale=torch.full([1], 1.0, dtype=torch.float32, device='cuda'),
+        scale=torch.full([1], a_scale, dtype=torch.float32, device='cuda'),
         amax=torch.empty([1], dtype=torch.float32, device='cuda'),
         fp8_dtype=fp8_dtype_a,
     )(A_f32)
     B_fp8 = Float8Quantizer(
-        scale=torch.full([1], 1.0, dtype=torch.float32, device='cuda'),
+        scale=torch.full([1], b_scale, dtype=torch.float32, device='cuda'),
         amax=torch.empty([1], dtype=torch.float32, device='cuda'),
         fp8_dtype=fp8_dtype_b,
     )(B_f32)
@@ -176,9 +194,7 @@ def create_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b):
 
 def create_mxfp8_tensors(M, K, N, layout):
     """Create MXFP8Tensor inputs and dequantized references."""
-    A_shape, B_shape = get_shapes(layout, M, K, N)
-    A_f32 = torch.randn(A_shape, dtype=torch.float32, device='cuda') * 0.5
-    B_f32 = torch.randn(B_shape, dtype=torch.float32, device='cuda') * 0.5
+    A_f32, B_f32 = create_regular_tensors(M, K, N, layout, dtype=torch.float32)
 
     quantizer = MXFP8Quantizer(
         fp8_dtype=tex.DType.kFloat8E4M3,
@@ -232,9 +248,7 @@ def call_gemm_with_bias(A, B, layout, out_dtype, bias, grad, use_triton=True):
 def test_triton_vs_pytorch_regular(M, K, N, layout, dtype):
     """Test Triton GEMM vs torch.matmul for regular tensors."""
     torch.manual_seed(42)
-    A_shape, B_shape = get_shapes(layout, M, K, N)
-    A = torch.randn(A_shape, dtype=dtype, device='cuda') * 0.5
-    B = torch.randn(B_shape, dtype=dtype, device='cuda') * 0.5
+    A, B = create_regular_tensors(M, K, N, layout, dtype=dtype)
 
     # Triton result
     output = call_gemm(A, B, layout, out_dtype=dtype, use_triton=True)
@@ -257,6 +271,40 @@ def test_triton_vs_pytorch_fp8(M, K, N, layout, fp8_format):
     torch.manual_seed(42)
     fp8_dtype_a, fp8_dtype_b = fp8_format
     A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b)
+
+    output = call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_triton=True)
+    expected = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
+
+    torch.testing.assert_close(
+        output.float(), expected.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize(
+    "a_scale, b_scale",
+    [(4.0, 0.25), (16.0, 0.125), (0.5, 2.0)],
+    ids=["a=4,b=0.25", "a=16,b=0.125", "a=0.5,b=2"],
+)
+def test_triton_vs_pytorch_fp8_scales(layout, a_scale, b_scale):
+    """FP8 GEMM with non-unity per-tensor scales.
+
+    ``test_triton_vs_pytorch_fp8`` above quantizes both operands with
+    ``scale=1.0`` -- ``scale_inv=1.0`` -- so a kernel bug that dropped the
+    ``accumulator *= a_scale * b_scale`` fold-back would still pass the assert.
+    Use asymmetric non-unity scales (chosen so the product is 1 to keep the
+    output magnitude comparable) so any missing scale multiply produces a
+    systematically wrong result. Uses a single shape to keep the parametrize
+    matrix small -- correctness at one shape is enough to catch a dropped
+    scale multiply.
+    """
+    torch.manual_seed(42)
+    M, K, N = 768, 768, 4096
+    A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
+        M, K, N, layout, tex.DType.kFloat8E4M3, tex.DType.kFloat8E4M3,
+        a_scale=a_scale, b_scale=b_scale,
+    )
 
     output = call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_triton=True)
     expected = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
@@ -410,9 +458,7 @@ def test_triton_mxfp8_bias(M, K, N, layout):
 def test_triton_vs_cpp_regular(M, K, N, layout, dtype):
     """Test Triton GEMM vs C++ generic_gemm for regular tensors."""
     torch.manual_seed(42)
-    A_shape, B_shape = get_shapes(layout, M, K, N)
-    A = torch.randn(A_shape, dtype=dtype, device='cuda') * 0.5
-    B = torch.randn(B_shape, dtype=dtype, device='cuda') * 0.5
+    A, B = create_regular_tensors(M, K, N, layout, dtype=dtype)
 
     triton_out = call_gemm(A, B, layout, out_dtype=dtype, use_triton=True)
     cpp_out = call_gemm(A, B, layout, out_dtype=dtype, use_triton=False)
@@ -499,9 +545,7 @@ BIAS_SHAPES = [(128, 256, 512), (229, 541, 541), (71, 71, 3571)]
 def test_triton_vs_cpp_bias_forward(M, K, N, dtype):
     """Forward with BIAS epilogue: Triton must match C++ when bias is fused."""
     torch.manual_seed(42)
-    A_shape, B_shape = get_shapes("TN", M, K, N)
-    A = torch.randn(A_shape, dtype=dtype, device='cuda') * 0.5
-    B = torch.randn(B_shape, dtype=dtype, device='cuda') * 0.5
+    A, B = create_regular_tensors(M, K, N, "TN", dtype=dtype)
     bias = torch.randn((M,), dtype=dtype, device='cuda')
 
     triton_out, _ = call_gemm_with_bias(A, B, "TN", dtype, bias, grad=False, use_triton=True)
