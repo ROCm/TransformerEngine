@@ -33,21 +33,25 @@ benchmark parameters plus `label`, `sample_idx`, and `time_ms`.
 
 ### Rotating input buffers
 
-By default each benchmark reuses a single input buffer, so back-to-back kernel
-launches may read data still resident in cache and report optimistic numbers.
-Pass `--rotating-buffers` to instead cycle inputs through a ring of buffers
-sized to exceed the **last-level cache**, so each launch touches different
-memory (closer to a cold-cache, steady-state workload):
+By default each benchmark cycles its inputs through a ring of buffers whose
+total footprint exceeds the **last-level cache**, so back-to-back kernel
+launches touch different memory (closer to a cold-cache, steady-state workload)
+instead of reading data still resident in cache and reporting optimistic
+numbers. This matches the `--rotating` option of `hipblaslt-bench`, which
+likewise takes a rotating memory budget in MB. Pass `--no-rotating` to instead
+time a single cached input buffer:
 
 ```bash
-python benchmark_gemm.py --rotating-buffers        # auto-size the ring past the LLC
-python benchmark_casting.py --rotating-buffers 16  # or fix the ring size (16 buffers)
+python benchmark_gemm.py                     # rotate, auto-size the ring past the LLC
+python benchmark_casting.py --rotating 512   # rotate within a 512 MB budget
+python benchmark_gemm.py --no-rotating       # single cached input buffer
 ```
 
-Passing `--rotating-buffers N` fixes the number of buffers; omitting `N`
-auto-sizes the ring to ~2x a conservative 256 MB last-level cache (the AMD
-Infinity Cache; see `utils.py::_last_level_cache_bytes`). The option is
-**off by default**.
+Rotation is **on by default**. Passing `--rotating MB` sets the rotating memory
+budget in megabytes (the ring holds enough buffers to span it); omitting the
+value auto-sizes the ring to ~2x a conservative 256 MB last-level cache (the AMD
+Infinity Cache; see `utils.py::_last_level_cache_bytes`). `--no-rotating`
+disables rotation entirely.
 
 ## Shared configuration
 
