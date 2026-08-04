@@ -305,6 +305,63 @@ def test_triton_vs_pytorch_mxfp8(M, K, N, layout):
     )
 
 
+@requires_mxfp8_support
+@requires_torch210
+@pytest.mark.parametrize("M, K, N", MXFP8_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize(
+    "alpha, beta, accumulate",
+    [
+        # alpha != 1, no accumulate: D = alpha * A @ B
+        (-2.5, 0.0, False),
+        (3.5,  0.0, False),
+        # alpha=1, accumulate=True with beta=1: D = A @ B + D_prev (fused wgrad accumulate)
+        (1.0,  1.0, True),
+        # alpha != 1 and accumulate: D = alpha * A @ B + beta * D_prev
+        # (mirrors ForwardLinearScaleAdd / BackwardLinearScale)
+        (-2.5, 1.0, True),
+    ],
+    ids=["alpha=-2.5", "alpha=3.5", "acc-beta=1", "alpha=-2.5,acc-beta=1"],
+)
+def test_triton_mxfp8_alpha_beta_accumulate(M, K, N, layout, alpha, beta, accumulate):
+    """MXFP8 Triton GEMM with the alpha/beta/accumulate epilogue.
+
+    This exercises the fused-op pipeline entry points where
+    ``BasicLinear._functional_forward`` folds a scale/add into the GEMM by
+    passing ``alpha=<scale>, accumulate_into_out=True``. A prior version of
+    ``mxfp8_matmul`` silently dropped these three parameters, so the kernel
+    computed ``C = A @ B`` regardless -- producing wrong output whenever
+    the wrapping op relied on the fused epilogue.
+    """
+    torch.manual_seed(42)
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(M, K, N, layout)
+
+    # Pre-existing content of D that will be scaled by beta when accumulate=True.
+    out_shape = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout).shape
+    d_init = torch.randn(out_shape, dtype=torch.bfloat16, device='cuda') * 0.5
+
+    # Reference: recompute in fp32 from dequantized inputs.
+    ab = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
+    expected = alpha * ab
+    if accumulate:
+        expected = expected + beta * d_init.float()
+
+    d = d_init.clone()
+    os.environ['NVTE_USE_GEMM_TRITON'] = '1'
+    from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
+    out, _, _, _ = general_gemm(
+        A=A_mxfp8, B=B_mxfp8,
+        out_dtype=torch.bfloat16, layout=layout,
+        out=d,
+        alpha=alpha, beta=beta, accumulate=accumulate,
+    )
+
+    torch.testing.assert_close(
+        out.float(), expected.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
 # ==============================================================================
 # Approach 2: Triton vs C++ tex.generic_gemm reference
 # ==============================================================================

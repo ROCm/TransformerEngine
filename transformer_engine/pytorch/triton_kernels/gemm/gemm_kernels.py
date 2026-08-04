@@ -51,6 +51,11 @@ def swizzle_pid(pid, num_pid_m, num_pid_n, GROUP_SIZE_M: tl.constexpr):
     # Include the FP8 format constexprs so E4M3/E5M2 combos get separately-
     # tuned configs (different formats can lower to different MFMA paths).
     key=['M', 'N', 'K', 'FP8_FORMAT_A', 'FP8_FORMAT_B'],
+    # With ACCUMULATE=True each benchmark iteration would add computed_c to
+    # the output again, multi-copying the result (and generating NaN/Inf as
+    # the value explodes). Snapshot and restore c_ptr around every benchmark
+    # run. Harmless when ACCUMULATE=False (kernel overwrites regardless).
+    restore_value=['c_ptr'],
 )
 @triton.heuristics({
     'EVEN_K': lambda args: args['K'] % args['BLOCK_SIZE_K'] == 0,
@@ -61,6 +66,10 @@ def mxfp8_matmul_kernel(
     a_ptr, b_ptr, c_ptr,
     # Scale pointers (E8M0 format, uint8)
     a_scale_ptr, b_scale_ptr,
+    # GEMM output scale (α) and accumulate scale (β): D = α·(A·B) + β·C.
+    # Passed as scalars (not tensors) so the fast-path constexpr toggle
+    # ALPHA_IS_ONE below can compile the α multiply out entirely.
+    alpha, beta,
     # Matrix dimensions
     M, N, K,
     # Data strides
@@ -79,6 +88,11 @@ def mxfp8_matmul_kernel(
     VEC_SIZE: tl.constexpr,  # MXFP8_BLOCK_SCALING_SIZE (always 32)
     FP8_FORMAT_A: tl.constexpr,  # "e4m3" or "e5m2"
     FP8_FORMAT_B: tl.constexpr,  # "e4m3" or "e5m2"
+    # β accumulate: D := existing_C * β + α·(A·B) (fused wgrad accumulate
+    # and the ForwardLinearScaleAdd / BackwardLinearScale epilogue ops).
+    ACCUMULATE: tl.constexpr,
+    # Fast-path: skip `accumulator *= alpha` when α is known to be 1.0.
+    ALPHA_IS_ONE: tl.constexpr,
 ):
     """
     MXFP8 matmul kernel using tl.dot_scaled() for block-scaled FP8 computation.
@@ -191,12 +205,22 @@ def mxfp8_matmul_kernel(
         a_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += BLOCK_SIZE_K * stride_bk
 
+    # Apply α (GEMM output scale). Skipped via constexpr fast-path when α=1.
+    if not ALPHA_IS_ONE:
+        accumulator = accumulator * alpha
+
     # Store output (convert to target dtype)
     offs_cm = pid_m * BLOCK_SIZE_M + tl.arange(0, BLOCK_SIZE_M)
     offs_cn = pid_n * BLOCK_SIZE_N + tl.arange(0, BLOCK_SIZE_N)
     # int64 promotion (see matmul_kernel A/B).
     c_ptrs = c_ptr + stride_cm * offs_cm[:, None].to(tl.int64) + stride_cn * offs_cn[None, :]
     c_mask = (offs_cm[:, None] < M) & (offs_cn[None, :] < N)
+
+    # β accumulate: D = α·(A·B) + β·C. Fold existing C in *before* the dtype
+    # narrowing to keep accumulation in fp32. Matches matmul_kernel's ordering.
+    if ACCUMULATE:
+        existing_c = tl.load(c_ptrs, mask=c_mask, other=0.0).to(tl.float32)
+        accumulator = accumulator + beta * existing_c
 
     c = accumulator.to(c_ptr.type.element_ty)
     tl.store(c_ptrs, c, mask=c_mask)
