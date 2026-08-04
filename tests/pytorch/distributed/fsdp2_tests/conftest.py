@@ -63,11 +63,16 @@ def dist_init():
     local_rank = int(os.environ["LOCAL_RANK"])
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend="cpu:gloo,cuda:nccl")
-    torch.manual_seed(42)
-    torch.cuda.manual_seed(42)
     yield
     if dist.is_initialized():
         dist.destroy_process_group()
+
+
+@pytest.fixture(autouse=True)
+def _seed_rng():
+    """Seed before each test so results do not depend on the preceding ones."""
+    torch.manual_seed(42)
+    torch.cuda.manual_seed(42)
 
 
 @pytest.fixture(autouse=True)

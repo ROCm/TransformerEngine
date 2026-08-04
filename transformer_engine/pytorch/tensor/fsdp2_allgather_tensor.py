@@ -142,7 +142,7 @@ class FSDPAGTensor(torch.Tensor):
 
             self._module.init_fp8_metadata(num_gemms=num_gemms)
         if not self._module.fp8:
-            return (self._data,), (self._data.requires_grad,)
+            return (self._data,), (self._data.requires_grad, None)
         # Use the actual data
         base = self._data
         # Access the quantizer using fp8_meta_index
@@ -157,8 +157,10 @@ class FSDPAGTensor(torch.Tensor):
             rowwise_scale_inv = sharded_fp8_tensor._rowwise_scale_inv if quantizer.rowwise_usage else torch.empty(0, dtype=torch.uint8, device=base.device)
             columnwise_data = sharded_fp8_tensor._columnwise_data if quantizer.columnwise_usage else torch.empty(0, dtype=torch.uint8, device=base.device)
             columnwise_scale_inv = sharded_fp8_tensor._columnwise_scale_inv if quantizer.columnwise_usage else torch.empty(0, dtype=torch.uint8, device=base.device)
-            return (rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv, ), (base.requires_grad,)
-        return (sharded_fp8_tensor._data,), (base.requires_grad,)
+            return (rowwise_data, rowwise_scale_inv, columnwise_data, columnwise_scale_inv, ), (base.requires_grad, None)
+        # Current scaling has no quantizer.scale; pass the tensor's scale_inv to post_all_gather.
+        scale_inv = sharded_fp8_tensor._scale_inv if isinstance(quantizer, Float8CurrentScalingQuantizer) else None
+        return (sharded_fp8_tensor._data,), (base.requires_grad, scale_inv)
         
     def fsdp_post_all_gather(
         self,
@@ -168,7 +170,7 @@ class FSDPAGTensor(torch.Tensor):
         *,
         out: Optional[torch.Tensor] = None,
     ):
-        (requires_grad, ) = metadata
+        (requires_grad, scale_inv) = metadata
         if not self._module.fp8:
             (data,) = all_gather_outputs
             return data, all_gather_outputs
@@ -193,6 +195,9 @@ class FSDPAGTensor(torch.Tensor):
             out._rowwise_scale_inv = rowwise_scale_inv 
             out._columnwise_data = None if columnwise_data.numel() == 0 else columnwise_data
             out._columnwise_scale_inv =  None if columnwise_scale_inv.numel() == 0 else columnwise_scale_inv
+        elif isinstance(quantizer, Float8CurrentScalingQuantizer):
+            out._scale_inv = scale_inv
+            out._data = data
         else:
             out._scale_inv = 1 / quantizer.scale
             out._data = data
