@@ -146,50 +146,50 @@ void launch_rmsnorm_bwd_general_(LaunchParams<BackwardKernelParams> &launch_para
                                                        BL_FINAL, STATIC_FALLBACK)                                                               \
   [[maybe_unused]] static const int                                                                                                             \
       _rmsn_bwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##CTAS_PER_ROW##_##WARPS_M##_##WARPS_N##_##BL_MAIN##_##BL_FINAL = \
-          ([] {                                                                                                                                 \
+          (                                                                                                                                 \
             ::transformer_engine::normalization::rtc_norm::register_rmsnorm_bwd_tuned(                                                          \
                 TypeToDType<WTYPE>::value, TypeToDType<ITYPE>::value, TypeToDType<OTYPE>::value,                                                \
                 TypeToDType<CTYPE>::value, HIDDEN_SIZE, CTAS_PER_ROW, WARPS_M, WARPS_N, BL_MAIN,                                                \
-                BL_FINAL, false, STATIC_FALLBACK);                                                                                              \
-            return 0;                                                                                                                           \
-          })()
+                BL_FINAL, false, STATIC_FALLBACK),                                                                                              \
+            0                                                                                                                           \
+          )
 #define REGISTER_NORM_LAUNCHER_RMSN_BWD_tuned_BackwardAdd(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                                                  \
                                                           CTAS_PER_ROW, WARPS_M, WARPS_N, BL_MAIN,                                                  \
                                                           BL_FINAL, ADD_FLAG, STATIC_FALLBACK)                                                      \
   static_assert(ADD_FLAG, "RMSNorm BackwardAdd registrations require ADD_FLAG=true");                                                               \
   [[maybe_unused]] static const int                                                                                                                 \
       _rmsn_bwd_tuned_add_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##CTAS_PER_ROW##_##WARPS_M##_##WARPS_N##_##BL_MAIN##_##BL_FINAL = \
-          ([] {                                                                                                                                     \
+          (                                                                                                                                     \
             ::transformer_engine::normalization::rtc_norm::register_rmsnorm_bwd_tuned(                                                              \
                 TypeToDType<WTYPE>::value, TypeToDType<ITYPE>::value, TypeToDType<OTYPE>::value,                                                    \
                 TypeToDType<CTYPE>::value, HIDDEN_SIZE, CTAS_PER_ROW, WARPS_M, WARPS_N, BL_MAIN,                                                    \
-                BL_FINAL, ADD_FLAG, STATIC_FALLBACK);                                                                                               \
-            return 0;                                                                                                                               \
-          })()
+                BL_FINAL, ADD_FLAG, STATIC_FALLBACK),                                                                                               \
+            0                                                                                                                               \
+          )
 #define REGISTER_NORM_LAUNCHER_RMSN_BWD_general_Backward(                                                                        \
     HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, WARPS_M, WARPS_N, BL_MAIN, BL_FINAL, STATIC_FALLBACK)                               \
   [[maybe_unused]] static const int                                                                                              \
       _rmsn_bwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##WARPS_M##_##WARPS_N##_##BL_MAIN##_##BL_FINAL = \
-          ([] {                                                                                                                  \
+          (                                                                                                                  \
             ::transformer_engine::normalization::rtc_norm::register_rmsnorm_bwd_general(                                         \
                 TypeToDType<WTYPE>::value, TypeToDType<ITYPE>::value, TypeToDType<OTYPE>::value,                                 \
                 TypeToDType<CTYPE>::value, HIDDEN_SIZE, WARPS_M, WARPS_N, BL_MAIN, BL_FINAL,                                     \
-                false, STATIC_FALLBACK);                                                                                         \
-            return 0;                                                                                                            \
-          })()
+                false, STATIC_FALLBACK),                                                                                         \
+            0                                                                                                            \
+          )
 #define REGISTER_NORM_LAUNCHER_RMSN_BWD_general_BackwardAdd(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE,                                        \
                                                             CTYPE, WARPS_M, WARPS_N, BL_MAIN,                                        \
                                                             BL_FINAL, ADD_FLAG, STATIC_FALLBACK)                                     \
   static_assert(ADD_FLAG, "RMSNorm BackwardAdd registrations require ADD_FLAG=true");                                                \
   [[maybe_unused]] static const int                                                                                                  \
       _rmsn_bwd_general_add_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##WARPS_M##_##WARPS_N##_##BL_MAIN##_##BL_FINAL = \
-          ([] {                                                                                                                      \
+          (                                                                                                                      \
             ::transformer_engine::normalization::rtc_norm::register_rmsnorm_bwd_general(                                             \
                 TypeToDType<WTYPE>::value, TypeToDType<ITYPE>::value, TypeToDType<OTYPE>::value,                                     \
                 TypeToDType<CTYPE>::value, HIDDEN_SIZE, WARPS_M, WARPS_N, BL_MAIN, BL_FINAL,                                         \
-                ADD_FLAG, STATIC_FALLBACK);                                                                                          \
-            return 0;                                                                                                                \
-          })()
+                ADD_FLAG, STATIC_FALLBACK),                                                                                          \
+            0                                                                                                                \
+          )
 
 #if NVTE_BUILD_LEGACY_STATIC_NORM
 #define REGISTER_NORM_LAUNCHER(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE,                   \

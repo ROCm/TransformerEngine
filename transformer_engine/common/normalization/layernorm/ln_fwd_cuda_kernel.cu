@@ -133,24 +133,24 @@ void launch_ln_fwd_general_(LaunchParams<ForwardKernelParams> &launch_params,
                                             WARPS_M, WARPS_N, BYTES_PER_LDG, STATIC_FALLBACK)                                          \
   [[maybe_unused]] static const int                                                                                                    \
       _ln_fwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##CTAS_PER_ROW##_##WARPS_M##_##WARPS_N##_##BYTES_PER_LDG = \
-          ([] {                                                                                                                        \
+          (                                                                                                                        \
             ::transformer_engine::normalization::rtc_norm::register_ln_fwd_tuned(                                                      \
                 TypeToDType<WTYPE>::value, TypeToDType<ITYPE>::value, TypeToDType<OTYPE>::value,                                       \
                 TypeToDType<CTYPE>::value, HIDDEN_SIZE, CTAS_PER_ROW, WARPS_M, WARPS_N,                                                \
-                BYTES_PER_LDG, STATIC_FALLBACK);                                                                                       \
-            return 0;                                                                                                                  \
-          })()
+                BYTES_PER_LDG, STATIC_FALLBACK),                                                                                       \
+            0                                                                                                                  \
+          )
 #define REGISTER_NORM_LAUNCHER_LN_FWD_general(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, WARPS_M,                         \
                                               WARPS_N, BYTES_PER_LDG, STATIC_FALLBACK)                                  \
   [[maybe_unused]] static const int                                                                                     \
       _ln_fwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##WARPS_M##_##WARPS_N##_##BYTES_PER_LDG = \
-          ([] {                                                                                                         \
+          (                                                                                                         \
             ::transformer_engine::normalization::rtc_norm::register_ln_fwd_general(                                     \
                 TypeToDType<WTYPE>::value, TypeToDType<ITYPE>::value, TypeToDType<OTYPE>::value,                        \
                 TypeToDType<CTYPE>::value, HIDDEN_SIZE, WARPS_M, WARPS_N, BYTES_PER_LDG,                                \
-                STATIC_FALLBACK);                                                                                       \
-            return 0;                                                                                                   \
-          })()
+                STATIC_FALLBACK),                                                                                       \
+            0                                                                                                   \
+          )
 
 #if NVTE_BUILD_LEGACY_STATIC_NORM
 #define REGISTER_NORM_LAUNCHER(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE,                   \
