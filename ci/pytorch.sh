@@ -12,7 +12,7 @@ TEST_DIR=${TE_PATH}tests/pytorch
 #: ${TEST_WORKERS:=4}
 
 install_prerequisites() {
-    pip install 'numpy>=1.22.4' pandas safetensors pytest-timeout
+    pip install 'numpy>=1.22.4' pandas safetensors pyyaml pytest-timeout
     rc=$?
     if [ $rc -ne 0 ]; then
         script_error "Failed to install test prerequisites"
@@ -38,9 +38,22 @@ run_default_fa_lbl() {
     fi
 }
 
+check_mxfp8_supported() {
+    #Guard MXFP8-only test filters, which collect no tests on unsupported archs
+    _result=$(NVTE_ROCM_ENABLE_MXFP8=1 python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.quantization import is_mxfp8_available; print(is_mxfp8_available())" 2>/dev/null)
+    if [ "$_result" = "True" ]; then
+        return 0
+    else
+        echo "MXFP8 is not supported on this device, skipping MXFP8-only tests" >&2
+        return 1
+    fi
+}
+
 run_test_config(){
     echo ==== Run with Fused attention backend: $_fus_attn ====
     #_WORKERS_COUNT=$TEST_WORKERS
+    # Enable GroupedLinear single-param feature
+    export NVTE_GROUPED_LINEAR_SINGLE_PARAM=1
     run_default_fa 1 test_backward_override.py
     if [ $_fus_attn = "$_DEFAULT_FUSED_ATTN" ]; then
         mkdir -p ${TEST_DIR}/checkpoint
@@ -61,10 +74,11 @@ run_test_config(){
     run_default_fa 1 test_fusible_ops.py
     run_default_fa 1 test_gemm_autotune.py
     run 1 test_gqa.py
+    run 1 test_grouped_linear.py
     run 1 test_jit.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
-    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "mxfp8" 1 test_numerics.py -k "recipe0 and 126m and not grouped"
+    check_mxfp8_supported && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "mxfp8" 1 test_numerics.py -k "MXFP8BlockScaling and 126m and not grouped"
     run_default_fa 1 test_nvfp4_fsdp2_hooks.py
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py

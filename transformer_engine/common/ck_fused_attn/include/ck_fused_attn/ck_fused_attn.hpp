@@ -98,6 +98,10 @@ struct CKAttnFwdArgs : CKAttnCommonArgs {
 
   // V3 ASM kernel selection
   bool uses_fwd_v3 = false;
+
+  // Split-KV support
+  int num_splits = 0;
+  void* splitkv_workspace_ptr = nullptr;
 };
 
 // Backward attention request.
@@ -113,7 +117,6 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
   // dQ
   void* dq_ptr = nullptr;
   uint64_t stride_b_dq = 0, stride_h_dq = 0, stride_s_dq = 0;
-  void* dq_acc_ptr = nullptr;
 
   // dK / dV expanded (MQA/GQA reduction inputs; null when h==hg)
   void* dk_expanded_ptr = nullptr;
@@ -134,6 +137,13 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
   // Workspace shared with forward LSE
   void* lse_workspace_ptr = nullptr;
 
+  // AOT scratch for AITER's internal bwd allocations (launcher metadata + dq_acc
+  // accumulator). Carved from the caller's workspace and handed to aiter through
+  // the workspace_alloc callback; ck_attn_bwd_workspace_size() reports the bytes
+  // to reserve. aiter_workspace_bytes bounds the bump allocator.
+  void* aiter_workspace_ptr = nullptr;
+  size_t aiter_workspace_bytes = 0;
+
   // V3 ASM kernel selection
   bool deterministic = false;
   bool uses_bwd_v3 = false;
@@ -143,11 +153,22 @@ struct CkAttnBwdArgs : CKAttnCommonArgs {
 hipError_t ck_attn_fwd(const CKAttnFwdArgs& args, hipStream_t stream);
 hipError_t ck_attn_bwd(const CkAttnBwdArgs& args, hipStream_t stream);
 
+// Bytes of AOT device scratch ck_attn_bwd needs for AITER's internal bwd
+// workspace (launcher metadata + dq_acc), covering both the v2 (CK launcher) and
+// v3 (asm) dispatch paths. Pure host-side computation; no kernel launch.
+size_t ck_attn_bwd_workspace_size(const CkAttnBwdArgs& args);
 // Probe whether AITER's v3 (asm) path will run for the given config, without
 // launching a kernel (backed by AITER's v3_api_check dry-run). Returns true iff
 // the v3 path is selected; false means the CK v2 path (or no support) would run.
 bool ck_attn_fwd_uses_v3(const CKAttnFwdArgs& args);
 bool ck_attn_bwd_uses_v3(const CkAttnBwdArgs& args);
+
+// Gen the number of splits for split-KV support.
+int ck_attn_fwd_num_splits(const CKAttnFwdArgs& args);
+
+// Gen the workspace size for fwd config.
+// Extra workspace in particular is needed for split-KV support.
+size_t ck_attn_fwd_workspace_size(const CKAttnFwdArgs& args);
 
 }//namespace ck_fused_attn
 #endif // CK_FUSED_ATTN_H

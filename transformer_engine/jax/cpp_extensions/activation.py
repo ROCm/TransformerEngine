@@ -66,6 +66,7 @@ class ClampedSwigluParams:
 
     limit: float = 7.0
     alpha: float = 1.702
+    glu_linear_offset: float = 1.0
 
     def __hash__(self):
         """Custom hash function to ensure dataclass is hashable for jax jit to work.
@@ -73,7 +74,7 @@ class ClampedSwigluParams:
         Returns:
             int: Hash value of the dataclass instance.
         """
-        return hash((self.limit, self.alpha))
+        return hash((self.limit, self.alpha, self.glu_linear_offset))
 
     def to_ffi_lowering_dict(self):
         """Convert the activation parameters to a dictionary format for FFI lowering.
@@ -82,7 +83,11 @@ class ClampedSwigluParams:
             dict: A dictionary representation of the activation parameters consumable by
             XLA FFI bindings for activation functions.
         """
-        return {"limit": np.float32(self.limit), "alpha": np.float32(self.alpha)}
+        return {
+            "limit": np.float32(self.limit),
+            "alpha": np.float32(self.alpha),
+            "glu_linear_offset": np.float32(self.glu_linear_offset),
+        }
 
 
 @dataclass(frozen=True)
@@ -123,11 +128,9 @@ def _convert_to_activation_function(fn_or_string, act_params: ActivationParams):
     if fn_or_string == "linear":
         return lambda x: x
     if fn_or_string == "clamped_linear":
-        # This function is used for ClampedSwiGLU
-        # used in GPT OSS where the gates are not only clamped
-        # but also shifted by +1
         limit = act_params.clamped_swiglu.limit
-        return lambda x: jnp.clip(x, min=-limit, max=limit) + 1
+        offset = act_params.clamped_swiglu.glu_linear_offset
+        return lambda x: jnp.clip(x, min=-limit, max=limit) + offset
     if fn_or_string == "quick_gelu":
         return lambda x: jax.nn.sigmoid(1.702 * x) * x
     if fn_or_string == "squared_relu":
