@@ -17,6 +17,7 @@ from torch.distributed._tensor import DTensor
 import transformer_engine_torch as tex
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8Quantizer
 from transformer_engine.pytorch.quantized_tensor import QuantizedTensor
+from ..constants import DType
 from .multi_tensor_apply import multi_tensor_applier
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch.utils import is_fp8_fnuz
@@ -414,7 +415,7 @@ class FusedAdam(torch.optim.Optimizer):
         param_for_empty = (
             local_param.dequantize() if isinstance(local_param, QuantizedTensor) else local_param
         )
-        #ROCm: create plain `torch.Tensor` instead of `FSDPAGTensor` subclasses
+        # ROCm: create plain `torch.Tensor` instead of `FSDPAGTensor` subclasses
         if IS_HIP_EXTENSION:
             if store_param_remainders:
                 data = torch.zeros(
@@ -436,7 +437,7 @@ class FusedAdam(torch.optim.Optimizer):
             quantizer = Float8Quantizer(
                 scale=torch.ones([1], dtype=torch.float32, device=param.device),
                 amax=torch.zeros([1], dtype=torch.float32, device=param.device),
-                fp8_dtype=tex.DType.kFloat8E4M3,
+                fp8_dtype=DType.kFloat8E4M3,
             )
             self.state[param][state_name] = quantizer.make_empty(data.shape)
             self.state[param][state_name].quantize_(data.float())
@@ -613,7 +614,7 @@ class FusedAdam(torch.optim.Optimizer):
             state_scales = {"exp_avg": [], "exp_avg_sq": [], "master_param": []}
 
             # Only used when extra params include fp8 tensors. Otherwise, it doesn't matter what the out_dtype is.
-            out_dtype = tex.DType.kFloat32
+            out_dtype = DType.kFloat32
 
             has_fp16 = False
             has_bf16 = False
@@ -670,26 +671,22 @@ class FusedAdam(torch.optim.Optimizer):
                             unscaled_lists[name].append(unscaled)
                             scaled_lists[name].append(state_tensor)
                             state_scales[name].append(self._scales[p][name])
-                # ROCm: extract local tensor data from DTensor (FSDP2) to ensure
+                # ROCm: extract local gradient tensor from DTensor (FSDP2) to ensure
                 # consistent shapes with optimizer states (which are local tensors).
-                local_p = p._local_tensor if IS_HIP_EXTENSION and isinstance(p, DTensor) else p
                 local_g = ( p_grad._local_tensor if IS_HIP_EXTENSION and
                            isinstance(p_grad, DTensor) else p_grad )
-
-                local_p_data = p._local_tensor.data if isinstance(p, DTensor) else p.data
-                local_g_data = (
-                    p_grad._local_tensor.data
-                    if isinstance(p_grad, DTensor)
-                    else p_grad.data
-                )
-
-                if isinstance(p, Float8Tensor) or (
-                    isinstance(p, DTensor) and isinstance(p._local_tensor, Float8Tensor)
+                local_p = p._local_tensor if isinstance(p, DTensor) else p
+                # Only delayed-scaling Float8Tensor uses the fused FP8 Adam kernel.
+                # Everything else (MXFP8/NVFP4/blockwise, current-scaling Float8) goes
+                # through the FP32 master + requantize path. A fused Adam+requantize
+                # kernel (like multi_tensor_adam_fp8 for delayed-scaling Float8Tensor)
+                # would avoid the FP32 round-trip in that path.
+                if isinstance(local_p, Float8Tensor) and isinstance(
+                    local_p._quantizer, Float8Quantizer
                 ):
-                    p = p._local_tensor if isinstance(p, DTensor) else p
-                    out_dtype = p._fp8_dtype
-                    p_fp8_model.append(p._data.data)
-                    scale, amax, scale_inv = get_fp8_meta(p)
+                    out_dtype = local_p._fp8_dtype
+                    p_fp8_model.append(local_p._data.data)
+                    scale, amax, scale_inv = get_fp8_meta(local_p)
                     scales.append(scale)
                     amaxes.append(amax)
                     scale_invs.append(scale_inv)
@@ -698,22 +695,12 @@ class FusedAdam(torch.optim.Optimizer):
                     g_of_fp8_model.append(local_g.data)
                     m_of_fp8_model.append(unscaled_state["exp_avg"])
                     v_of_fp8_model.append(unscaled_state["exp_avg_sq"])
-                elif isinstance(p, QuantizedTensor) or (
-                    isinstance(p, DTensor) and isinstance(p._local_tensor, QuantizedTensor)
-                ):
-                    # Block-scaling quantized params (MXFP8Tensor, Float8BlockwiseQTensor,
-                    # NVFP4Tensor). Operate on FP32 master weights, requantize back after
-                    # Adam update.
-                    # Note: a fused Adam+requantize kernel (like multi_tensor_adam_fp8
-                    # for Float8Tensor) would avoid the FP32 round-trip here.
+                elif isinstance(local_p, QuantizedTensor):
                     if not self.master_weights:
-                        local_p = p._local_tensor if isinstance(p, DTensor) else p
                         raise RuntimeError(
                             "FusedAdam without master_weights does not support "
                             f"{type(local_p).__name__} parameters. Use master_weights=True."
                         )
-                    # Route to the FP32 master-weight path: Adam updates the FP32 master,
-                    # then we write back to the quantized param after kernels run.
                     # Gradients may be BF16/FP16 from the backward pass — cast to FP32
                     # to match the FP32 Adam kernel expectations.
                     p_f32_model.append(unscaled_state["master_param"].data)
