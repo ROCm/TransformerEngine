@@ -485,6 +485,7 @@ def test_dpa_num_splits(dtype, model_configs, model):
         model_configs,
         model,
         False,
+        True,
         None,
         False,
         False,
@@ -1177,7 +1178,7 @@ def test_dpa_qkv_layout_thd(dtype, model_configs, model, qkv_layout, pad_between
     if (pad_between_seqs==False and get_cudnn_version() < (9, 3, 0)):
         pytest.skip("cuDNN 9.3.0+ is required to run pad_between_seqs = False");
     test_dot_product_attention(
-        dtype, model_configs, model, False, qkv_layout, False, pad_between_seqs
+        dtype, model_configs, model, False, True, qkv_layout, False, pad_between_seqs
     )
 
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
