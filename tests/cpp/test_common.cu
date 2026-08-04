@@ -160,14 +160,25 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 
     scale_inv_meta ret_rowwise, ret_colwise;
 
+    size_t align_Y_rowwise = scale_tensor_alignment_Y_rowwise;
+    size_t align_X_rowwise = scale_tensor_alignment_X_rowwise;
+    size_t align_Y_colwise = scale_tensor_alignment_Y_colwise;
+    size_t align_X_colwise = scale_tensor_alignment_X_colwise;
+#ifdef __HIP_PLATFORM_AMD__
+    // gfx1250 MX pre-swizzle requires MXFP8 scales padded to a multiple of 4 in both dims
+    if (getDeviceComputeCapability() == 125) {
+      align_Y_rowwise = align_X_rowwise = align_Y_colwise = align_X_colwise = 4;
+    }
+#endif
+
     const size_t block_size_X_rowwise = 32;
-    size_t scale_dim_Y_rowwise = DIVUP_TO_MULTIPLE(first_dim, scale_tensor_alignment_Y_rowwise);
-    size_t scale_dim_X_rowwise = DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_size_X_rowwise), scale_tensor_alignment_X_rowwise);
+    size_t scale_dim_Y_rowwise = DIVUP_TO_MULTIPLE(first_dim, align_Y_rowwise);
+    size_t scale_dim_X_rowwise = DIVUP_TO_MULTIPLE(DIVUP(last_dim, block_size_X_rowwise), align_X_rowwise);
     ret_rowwise.shape = {scale_dim_Y_rowwise, scale_dim_X_rowwise};
 
     const size_t block_size_Y_colwise = 32;
-    size_t scale_dim_Y_colwise = DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_size_Y_colwise), scale_tensor_alignment_Y_colwise);
-    size_t scale_dim_X_colwise = DIVUP_TO_MULTIPLE(last_dim, scale_tensor_alignment_X_colwise);
+    size_t scale_dim_Y_colwise = DIVUP_TO_MULTIPLE(DIVUP(first_dim, block_size_Y_colwise), align_Y_colwise);
+    size_t scale_dim_X_colwise = DIVUP_TO_MULTIPLE(last_dim, align_X_colwise);
     ret_colwise.shape = {scale_dim_Y_colwise, scale_dim_X_colwise};
 
     ret_rowwise.type = DType::kFloat8E8M0;
@@ -1322,8 +1333,14 @@ std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
       alignment_X = is_rowwise ? nvfp4_scale_tensor_alignment_X_rowwise
                                : nvfp4_scale_tensor_alignment_X_colwise;
     } else {
-      alignment_Y = 1;
-      alignment_X = 1;
+      // MXFP8: gfx1250 MX pre-swizzle requires scales padded to a multiple of 4 in both dims
+      if (getDeviceComputeCapability() == 125) {
+        alignment_Y = 4;
+        alignment_X = 4;
+      } else {
+        alignment_Y = 1;
+        alignment_X = 1;
+      }
     }
 #else
     const size_t alignment_Y = is_rowwise
