@@ -290,7 +290,8 @@ class _GroupedLinear(torch.autograd.Function):
         if use_perm_free_grouped_gemm:
             perm_free_route_space = getattr(routing_metadata, "route_space", False)
             # FC1 emits raw 2F [gate|up]; the ``activation`` hint on the metadata is consumed on
-            # FC2 (fused prologue). Route probs ride with FC2 as well.
+            # FC2, which applies the gated activation in a standalone pass and then runs a plain
+            # GEMM (the fused-prologue path regressed throughput). Route probs ride with FC2 too.
             pf_result = permute_free_grouped_gemm_forward(
                 inputmats[0],
                 weights_fp8,

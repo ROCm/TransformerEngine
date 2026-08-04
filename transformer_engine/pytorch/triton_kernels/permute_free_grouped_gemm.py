@@ -54,11 +54,56 @@ __all__ = [
 # align is padded to this block size, independent of the fwd/dgrad BLOCK_SIZE_M.
 _WGRAD_CONTRACT_M = 32
 
+# The AITER v3 (MegaMOE-port) wgrad kernel unrolls its variable-K pipeline in CHUNK*BLOCK_K =
+# 4*64 = 256-token groups, so its SORTED band must be padded to 256 (vs the v2 kernel's 32).
+_WGRAD_CONTRACT_M_V3 = 256
+
+
+def _wgrad_contract_m() -> int:
+    """Wgrad align block size: 256 for the AITER v3 Mega-port kernel, else the v2 default (32).
+
+    Gated by ``AITER_MOE_FLYDSL_V3_WGRAD`` (its *own* flag, separate from the shared
+    ``AITER_MOE_FLYDSL_V3`` fwd/dgrad switch) so the route-list align matches whichever FlyDSL
+    wgrad kernel consumes it -- the two use incompatible per-expert band paddings (v2 needs 32,
+    the v3 Mega variable-K pipeline needs 256). The v3 wgrad is opt-in because it is slower than
+    v2 (contraction-axis gather), so the common flag must keep wgrad on the 32-align v2 path."""
+    v = os.environ.get("AITER_MOE_FLYDSL_V3_WGRAD")
+    if v is not None and v.strip().lower() not in ("", "0", "false", "no", "off"):
+        return _WGRAD_CONTRACT_M_V3
+    return _WGRAD_CONTRACT_M
+
 # Max forward align/kernel ``block_m`` for the *gated* FlyDSL fwd. It stages a ``2F`` [gate|up]
 # B-tile in LDS, so a larger Triton-optimal ``block_m`` (e.g. 256) overflows the 160 KB budget
 # for wide-N tiles and forces FlyDSL onto a tiny (64x64) tile (losing most of its edge). Capping
 # at 128 keeps a fast wide-N tile. See ``_fwd_align_block_size_m``.
 _FLYDSL_GATED_BLOCK_M = 128
+
+
+def _env_int(name: str, default: int) -> int:
+    v = os.environ.get(name)
+    try:
+        return int(v) if v is not None and v.strip() != "" else default
+    except ValueError:
+        return default
+
+# Preferred forward align/kernel ``block_m`` for the FlyDSL fwd on the large-token tier. The
+# non-gated FC1 fwd, the FC1 dgrad (transposed-B), and the ``gated_a`` FC2 prologue all fit
+# ``block_m = 256`` in LDS and each measures faster there than at 128 on the DeepSeek-V3 shape
+# (non-gated FC1 fwd +3%, FC1 dgrad +11%, gated_a FC2 +11%), because it snaps them onto the
+# ``256x32`` MegaMOE-like tile. The align is shared across a layer's FC1 fwd / dgrad / FC2, so
+# this single bump lifts all three; the gated FC1 epilogue (2F B-tile) cannot fit 256 and stays
+# at :data:`_FLYDSL_GATED_BLOCK_M`. See ``_fwd_align_block_size_m``. Overridable via
+# ``PF_FLYDSL_FWD_BLOCK_M`` (e.g. set to 128 to A/B against the pre-bump behavior).
+_FLYDSL_FWD_BLOCK_M = _env_int("PF_FLYDSL_FWD_BLOCK_M", 256)
+
+# Token count above which the 256 bump is applied. It matches the boundary aiter's own tuned
+# Triton config uses to switch to ``BLOCK_SIZE_M = 256`` (``get_optimal_moe_config`` picks 256 for
+# ``M >= 4096``), so the align only grows when the extra ``E_local * 128`` padded rows are a small
+# fraction of the routed work. Below this the (Triton-optimal) default is kept unchanged, so small
+# and medium workloads are never padded up. This bump only matters when the aiter tuned config is
+# unavailable (the fallback ladder caps the large tier at 128); when it is available the default is
+# already 256 and the bump is a no-op.
+_FLYDSL_FWD_LARGE_TIER = 4096
 
 # Resolved lazily on first wgrad call: a callable (FlyDSL wgrad wrapper) if AITER's FlyDSL
 # kernel imports, otherwise ``False`` (fall back to the Triton kernel). ``None`` = unresolved.
@@ -196,19 +241,57 @@ def _fwd_align_block_size_m(
     *,
     gated: bool,
     default_block_m: int,
+    num_tokens: int,
+    gated_a: bool = False,
 ) -> int:
     """Pick the forward align/kernel ``block_m``, favoring the backend that will run.
 
-    ``block_m`` is baked into ``prepare_moe_align`` (it sets the row padding), so the fwd GEMM
-    and the align must agree on it. The gated FlyDSL fwd is LDS-limited: a Triton-optimal
-    ``block_m`` of 256 forces it onto a tiny tile (measured ~1.06x vs Triton) whereas 128 keeps
-    a fast wide-N tile (~1.35x). When the FlyDSL gated path will actually be selected, cap
-    ``block_m`` at :data:`_FLYDSL_GATED_BLOCK_M`; otherwise keep the (Triton-optimal) default.
+    ``block_m`` is baked into ``prepare_moe_align`` (it sets the row padding) and is *shared* by a
+    layer's FC1 fwd, FC1 dgrad and FC2 fwd (they reuse ``routing.block_size_m``), so it is chosen
+    once here. When the FlyDSL backend will run and the workload is on the large-token tier
+    (``num_tokens >= _FLYDSL_FWD_LARGE_TIER``), prefer :data:`_FLYDSL_FWD_BLOCK_M` (256): it lifts
+    the non-gated FC1 fwd, FC1 dgrad, and ``gated_a`` FC2 onto the faster ``256x32`` tile. The
+    gated FC1 epilogue stages a ``2F`` [gate|up] B-tile that overflows LDS at 256, so it drops back
+    to :data:`_FLYDSL_GATED_BLOCK_M` (128). Small/medium tiers and the Triton backend keep the
+    (Triton-optimal) default, so those workloads are never padded up.
     """
-    if not gated or default_block_m <= _FLYDSL_GATED_BLOCK_M:
-        return default_block_m
     flydsl = _get_flydsl_fwd()
     if not flydsl:
+        return default_block_m
+
+    # Candidate ladder for the FlyDSL backend.
+    if gated:
+        # The gated FC1 epilogue stages a 2F [gate|up] B-tile: even the LDS-valid 256 tiles are
+        # the slow tiny ones, so the measured-best policy is a hard cap at _FLYDSL_GATED_BLOCK_M
+        # (~1.35x at 128 vs ~1.06x at 256). Never bump; only allow the picker to confirm/keep a
+        # value <= 128 (dropping the default when it exceeds the cap).
+        cap = min(default_block_m, _FLYDSL_GATED_BLOCK_M)
+        candidates = {c for c in (_FLYDSL_GATED_BLOCK_M, default_block_m) if c <= cap}
+    else:
+        # Non-gated FC1 / dgrad / gated_a FC2: offer the default and any smaller floor (so the
+        # picker can drop to a smaller LDS-valid block_m), plus the 256 bump on the large-token
+        # tier, where it is a measured win and the extra E_local*128 align padding is a negligible
+        # fraction of the routed work.
+        candidates = {c for c in (_FLYDSL_GATED_BLOCK_M, default_block_m) if c <= default_block_m}
+        if num_tokens >= _FLYDSL_FWD_LARGE_TIER:
+            candidates.add(_FLYDSL_FWD_BLOCK_M)
+
+    # Let the FlyDSL backend pick the largest LDS-valid block_m for this epilogue (256 for
+    # non-gated / gated_a, 128 for the gated 2F B-tile). Centralized in aiter so the LDS budget
+    # lives with the kernel; degrade gracefully on an older aiter without the picker.
+    try:
+        from aiter.ops.flydsl.moe_fwd import flydsl_moe_fwd_pick_block_m
+    except Exception:  # pylint: disable=broad-except -- older aiter: use the legacy cap below
+        flydsl_moe_fwd_pick_block_m = None
+    if flydsl_moe_fwd_pick_block_m is not None:
+        picked = flydsl_moe_fwd_pick_block_m(
+            A, B, gated=gated, gated_a=gated_a, candidates=tuple(candidates)
+        )
+        if picked is not None:
+            return picked
+
+    # Legacy fallback (older aiter without the picker): cap the gated fwd to 128, else default.
+    if not gated or default_block_m <= _FLYDSL_GATED_BLOCK_M:
         return default_block_m
     _, supported = flydsl
     if supported(A, B, block_m=_FLYDSL_GATED_BLOCK_M):
@@ -534,6 +617,7 @@ def permute_free_grouped_gemm_bf16(
         weights_stacked,
         gated=gated_act,
         default_block_m=int(kernel_config["BLOCK_SIZE_M"]),
+        num_tokens=num_recv_tokens,
     )
     kernel_config["BLOCK_SIZE_M"] = block_size_m
 
@@ -813,7 +897,8 @@ def permute_free_grouped_gemm_bf16_wgrad(
     if not grad_output.is_contiguous():
         grad_output = grad_output.contiguous()
 
-    routing = _prepare_wgrad_align(routing, _WGRAD_CONTRACT_M)
+    contract_m = _wgrad_contract_m()
+    routing = _prepare_wgrad_align(routing, contract_m)
 
     flydsl_wgrad = _get_flydsl_wgrad()
     if swap_gather and not flydsl_wgrad:
@@ -857,7 +942,7 @@ def permute_free_grouped_gemm_bf16_wgrad(
             routing.wgrad_sorted_slot_ids, routing.wgrad_block_start,
             routing.wgrad_blocks_per_expert, routing.route_start,
             num_recv_tokens=routing.num_recv_tokens, config=None,
-            contract_m=_WGRAD_CONTRACT_M,
+            contract_m=contract_m,
         )
         if accumulate:
             out.add_(dW)
@@ -895,7 +980,7 @@ def permute_free_grouped_gemm_bf16_wgrad(
             routing.route_start,
             num_recv_tokens=routing.num_recv_tokens,
             config=None,  # autotune BLOCK_SIZE_N/K / num_warps / num_stages per shape
-            contract_m=_WGRAD_CONTRACT_M,
+            contract_m=contract_m,
         )
     return dW
 
@@ -1225,20 +1310,30 @@ def permute_free_grouped_gemm_forward(
 
     ``routing.route_space`` selects the direction:
 
-    - ``True`` (FC2): route-ordered ``2F`` pre-activation (FC1 output), fused
-      ``act(gate)*up[*prob]`` prologue + GEMM + gather-combine -> ``[num_recv, out]``.
+    - ``True`` (FC2): route-ordered ``2F`` pre-activation (FC1 output). The gated activation
+      ``act(gate)*up[*prob]`` is applied in a standalone pass into an ``F``-wide transient, then
+      a plain gather-GEMM + gather-combine -> ``[num_recv, out]``. (Fusing the activation into
+      the FC2 GEMM prologue regressed throughput, so FC2 is kept as a plain DMA GEMM mirroring
+      FC1.) The ``F``-wide transient is freed after FC2; only the ``2F`` pre-activation is
+      checkpointed for backward (which recomputes the ``F`` activation just-in-time).
     - ``False`` (FC1): gather-in-GEMM -> padded ``[T * min(topk, E), 2F]`` raw ``[gate | up]``
       pre-activation (no activation fusion here; the ``activation`` hint is consumed on FC2).
     """
     if getattr(routing, "route_space", False):
-        return PermuteFreeForwardResult(
-            permute_free_grouped_gemm_bf16_fc2(
+        fc2_input = hidden_states
+        if activation is not None:
+            # Standalone gated-activation pass on the raw 2F [gate|up] pre-activation, producing
+            # the F-wide FC2 operand. This is the same route-wise kernel the backward uses to
+            # recompute the activation, so the caller can keep checkpointing only the 2F
+            # pre-activation (this F-wide buffer is transient and freed after the FC2 GEMM).
+            fc2_input = permute_free_gated_act_recompute(
                 hidden_states,
-                weights,
                 routing,
                 activation=activation,
                 dispatched_probs=dispatched_probs,
             )
+        return PermuteFreeForwardResult(
+            permute_free_grouped_gemm_bf16_fc2(fc2_input, weights, routing)
         )
     return PermuteFreeForwardResult(
         permute_free_grouped_gemm_bf16(hidden_states, weights, routing)
