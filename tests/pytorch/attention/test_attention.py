@@ -2698,6 +2698,192 @@ def test_xattn_backend_selection(model, qkv_layout):
     )
 
 
+# e4m3fn stores its largest finite value 448 as S.1111.110 and reserves S.1111.111 for
+# NaN, so a round-to-nearest cast flips into the NaN codepoint at midpoint(448, 480).
+_E4M3_NAN_KNEE = 464.0
+
+
+def _assert_xattn_ran(tensor, what):
+    """Fail loudly when a kernel did not actually run.
+
+    xAttention leaves its outputs untouched if the AOT .co fails to load, and an
+    all-zero tensor contains no NaN -- so every saturation check below would pass
+    vacuously. Check liveness before concluding anything from a NaN count.
+    """
+    assert tensor.float().abs().max().item() != 0.0, (
+        f"{what} is all zeros: the xAttention kernel did not run. Check XATT_KERNEL_DIR "
+        "and the prebuilt .co cache rather than trusting this test's result."
+    )
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
+@pytest.mark.skipif(not xattention_available, reason="xAttention extension is not installed.")
+@pytest.mark.parametrize(
+    "direction",
+    [
+        "backward",
+        pytest.param(
+            "forward",
+            marks=pytest.mark.xfail(
+                strict=True,
+                reason=(
+                    "xAttention sets MODE.FP16_OVFL in mha_bwd_mi350.cpp only, so the "
+                    "forward S/O casts still round into the e4m3fn NaN codepoint. Drop "
+                    "this marker once the setreg also lands in mha_fwd_mi350.cpp."
+                ),
+            ),
+        ),
+    ],
+)
+def test_xattn_fp8_cast_saturates(direction):
+    """xAttention's internal fp8 casts must clip over-range values, not emit NaN.
+
+    DelayedScaling hands the kernel a scale derived from a *previous* step's amax,
+    so the scale is stale by design. That is only safe when over-range values
+    saturate: a lagging scale should cost a few clipped outliers, not poison the
+    whole tensor.
+
+    Drives the scale orders of magnitude past the knee and requires the output to
+    stay finite. Exercised at the binding level because a standalone DPA loop
+    cannot reach it -- scale_s/scale_ds stay pinned at their seed of 1.0 unless a
+    Linear-family module drives the amax->scale update.
+    """
+    xattn = _xattn_mod._xattn
+    b, s, h, d = 2, 512, 8, 64
+    softmax_scale = d**-0.5
+
+    torch.manual_seed(0)
+    q, k, v = [
+        (torch.randn(b, s, h, d, device="cuda") * 0.25).to(torch.float8_e4m3fn) for _ in range(3)
+    ]
+
+    def fwd(out_dtype, scale_s=1.0, scale_o=1.0):
+        out = torch.empty(b, s, h, d, device="cuda", dtype=out_dtype)
+        return xattn.fwd_quant(
+            q=q,
+            k=k,
+            v=v,
+            descale_q=1.0,
+            descale_k=1.0,
+            descale_v=1.0,
+            scale_s=scale_s,
+            descale_s=1.0 / scale_s,
+            scale_o=scale_o,
+            out=out,
+            softmax_scale=softmax_scale,
+            is_causal=True,
+            window_size_left=-1,
+            window_size_right=-1,
+            input_bshd=True,
+            output_bshd=True,
+        )
+
+    if direction == "forward":
+        base = fwd(torch.bfloat16)
+        _assert_xattn_ran(base[0], "xAttention fp8 forward output")
+        o_peak = base[0].float().abs().max().item()
+
+        # O cast: the output peak scales linearly with scale_o, so the knee is exact.
+        for scale_o in (1e2, 1e4, 1e6):
+            out = fwd(torch.float8_e4m3fn, scale_o=scale_o)[0]
+            n_nan = int(torch.isnan(out.float()).sum().item())
+            assert n_nan == 0, (
+                f"xAttention forward O cast produced {n_nan} NaN at scale_o={scale_o:g} "
+                f"(scaled peak {o_peak * scale_o:.1f} vs e4m3fn NaN codepoint "
+                f"{_E4M3_NAN_KNEE}); an over-range value must saturate to 448 instead"
+            )
+
+        # S/P cast, reached by inflating the softmax numerator's quantization scale.
+        for scale_s in (1e2, 1e4, 1e6):
+            out = fwd(torch.bfloat16, scale_s=scale_s)[0]
+            n_nan = int(torch.isnan(out.float()).sum().item())
+            assert n_nan == 0, (
+                f"xAttention forward S cast produced {n_nan} NaN at scale_s={scale_s:g}; "
+                "an over-range value must saturate to 448 instead"
+            )
+        return
+
+    out_fp8 = torch.empty(b, s, h, d, device="cuda", dtype=torch.float8_e4m3fn)
+    fwd_res = xattn.fwd_quant(
+        q=q,
+        k=k,
+        v=v,
+        descale_q=1.0,
+        descale_k=1.0,
+        descale_v=1.0,
+        scale_s=1.0,
+        descale_s=1.0,
+        scale_o=1.0,
+        out=out_fp8,
+        softmax_scale=softmax_scale,
+        is_causal=True,
+        window_size_left=-1,
+        window_size_right=-1,
+        input_bshd=True,
+        output_bshd=True,
+    )
+    _assert_xattn_ran(out_fp8, "xAttention fp8 forward output seeding the backward")
+    softmax_lse = fwd_res[1].contiguous()
+    _assert_xattn_ran(softmax_lse, "xAttention softmax_lse")
+    d_out = (torch.randn(b, s, h, d, device="cuda") * 0.25).to(torch.float8_e4m3fn)
+
+    def bwd(scale_ds):
+        dq = torch.empty(b, s, h, d, device="cuda", dtype=torch.bfloat16)
+        dk = torch.empty_like(dq)
+        dv = torch.empty_like(dq)
+        return xattn.bwd_quant(
+            dout=d_out,
+            q=q,
+            k=k,
+            v=v,
+            out=out_fp8,
+            softmax_lse=softmax_lse,
+            descale_q=1.0,
+            descale_k=1.0,
+            descale_v=1.0,
+            descale_o=1.0,
+            descale_do=1.0,
+            scale_s=1.0,
+            descale_s=1.0,
+            scale_ds=scale_ds,
+            descale_ds=1.0 / scale_ds,
+            scale_dq=1.0,
+            scale_dk=1.0,
+            scale_dv=1.0,
+            dq=dq,
+            dk=dk,
+            dv=dv,
+            alibi_slopes=None,
+            p_dropout=0.0,
+            softmax_scale=softmax_scale,
+            is_causal=True,
+            window_size_left=-1,
+            window_size_right=-1,
+            softcap=0.0,
+            deterministic=False,
+            input_bshd=True,
+            output_bshd=True,
+        )
+
+    # amax_ds is reduced over the scaled fp32 dS *before* the cast, so it stays
+    # correct even on a run whose gradients overflow -- that is what makes the
+    # scaled peak below an exact quantity rather than an estimate.
+    base = bwd(1.0)
+    _assert_xattn_ran(base[0], "xAttention fp8 backward dq")
+    amax_ds = base[7].float().item()
+
+    for scale_ds in (1e4, 1e6, 1e9):
+        grads = bwd(scale_ds)
+        peak = amax_ds * scale_ds
+        for name, grad in zip(("dq", "dk", "dv"), grads[:3]):
+            n_nan = int(torch.isnan(grad.float()).sum().item())
+            assert n_nan == 0, (
+                f"xAttention backward dS cast produced {n_nan} NaN in {name} at "
+                f"scale_ds={scale_ds:g} (scaled peak {peak:.3e} vs e4m3fn NaN codepoint "
+                f"{_E4M3_NAN_KNEE}); an over-range value must saturate to 448 instead"
+            )
+
+
 def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_recipe):
     """Run DotProductAttention module in FP8"""
     reset_rng_states()
