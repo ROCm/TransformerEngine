@@ -25,6 +25,7 @@ import torch
 
 import flydsl.compiler as flyc
 import flydsl.expr as fx
+from flydsl.compiler.ast_rewriter import ASTRewriter
 from flydsl._mlir.dialects import llvm
 from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
@@ -41,6 +42,7 @@ from .fp16_gemm_utils import (
     pack_i32x4_i32x8,
     swizzle_128,
 )
+from .fp8_gemm_utils import wait_barrier
 
 
 _BLOCK_M = 256
@@ -1428,3 +1430,193 @@ def doGemm(
         N_runtime,
         stream=stream,
     )
+
+
+@ASTRewriter.transform
+def dense_mma_pipeline_bf16(
+    lds,
+    a_g2s,
+    b_g2s,
+    a_s2r,
+    b_s2r,
+    mfma,
+    store_c,
+    A0_gl_offset,
+    A1_gl_offset,
+    B0_gl_offset,
+    B1_gl_offset,
+    a_k_step,
+    b_k_step,
+    block_m,
+    block_n,
+    wave_m,
+    wave_n,
+    K,
+    BLOCK_M,
+    BLOCK_N,
+    nt_vmcnt,
+    a_g2s_hi=None,
+):
+    """Shared 4-quadrant pipelined MMA loop + store epilogue for the fixed-K bf16 tile (NT/NN/TN).
+
+    ``a_g2s_hi`` (optional): a second A global->LDS loader used ONLY for the upper LDS
+    half-tile (rows [LDS_BLOCK_M, BLOCK_M)). Defaults to ``a_g2s`` (contiguous dense/grouped
+    GEMM, where both halves share one swizzle). A gathering GEMM passes a distinct loader whose
+    per-lane offsets are redirected through the gather index for the upper rows.
+    """
+    a_g2s_hi = a_g2s if a_g2s_hi is None else a_g2s_hi
+    K_ITERS = K // BLOCK_K
+    assert K_ITERS >= 2, f"K_ITERS={K_ITERS} too small; need K >= {2 * BLOCK_K}"
+    N_TILES_A = BLOCK_M // 128
+    N_TILES_B = BLOCK_N // 256
+    N_ACCUMS = N_TILES_A * N_TILES_B
+    LDS_BLOCK_M = BLOCK_M // 2
+    LDS_BLOCK_N = BLOCK_N // 2
+    N_LDS_STEPS_A = LDS_BLOCK_M // 64
+    N_LDS_STEPS_B = LDS_BLOCK_N // 64
+
+    a_cur0 = lds.A_lds_cur_0
+    a_cur1 = lds.A_lds_cur_1
+    a_next0 = lds.A_lds_next_0
+    a_next1 = lds.A_lds_next_1
+    b_cur0 = lds.B_lds_cur_0
+    b_cur1 = lds.B_lds_cur_1
+    b_next0 = lds.B_lds_next_0
+    b_next1 = lds.B_lds_next_1
+
+    c00_frag = [mfma.zero_value] * N_ACCUMS
+    c01_frag = [mfma.zero_value] * N_ACCUMS
+    c10_frag = [mfma.zero_value] * N_ACCUMS
+    c11_frag = [mfma.zero_value] * N_ACCUMS
+
+    b_g2s.load(b_cur0, B0_gl_offset + 0 * b_k_step)
+    a_g2s.load(a_cur0, A0_gl_offset + 0 * a_k_step)
+    b_g2s.load(b_cur1, B1_gl_offset + 0 * b_k_step)
+    a_g2s_hi.load(a_cur1, A1_gl_offset + 0 * a_k_step)
+
+    if wave_m == 1:
+        rocdl.s_barrier()
+    wait_barrier(N_LDS_STEPS_A + N_LDS_STEPS_B)
+
+    b_g2s.load(b_next0, B0_gl_offset + 1 * b_k_step)
+    a_g2s.load(a_next0, A0_gl_offset + 1 * a_k_step)
+    b_g2s.load(b_next1, B1_gl_offset + 1 * b_k_step)
+
+    wait_barrier(N_LDS_STEPS_A + 2 * N_LDS_STEPS_B)
+
+    for k in range_constexpr(K_ITERS - 2):
+        b0_frag = b_s2r.load(b_cur0)
+        a0_frag = a_s2r.load(a_cur0)
+        a_g2s_hi.load(a_next1, A1_gl_offset + (k + 1) * a_k_step)
+        rocdl.s_barrier()
+
+        rocdl.s_setprio(1)
+        c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
+        rocdl.s_setprio(0)
+        rocdl.s_barrier()
+
+        b1_frag = b_s2r.load(b_cur1)
+        b_g2s.load(b_cur0, B0_gl_offset + (k + 2) * b_k_step)
+        rocdl.s_barrier()
+
+        rocdl.s_setprio(1)
+        c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
+        rocdl.s_setprio(0)
+        rocdl.s_barrier()
+
+        a1_frag = a_s2r.load(a_cur1)
+        a_g2s.load(a_cur0, A0_gl_offset + (k + 2) * a_k_step)
+        rocdl.s_barrier()
+
+        rocdl.s_setprio(1)
+        c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
+        rocdl.s_setprio(0)
+        rocdl.s_barrier()
+
+        b_g2s.load(b_cur1, B1_gl_offset + (k + 2) * b_k_step)
+        wait_barrier(2 * N_LDS_STEPS_A + N_LDS_STEPS_B)
+
+        rocdl.s_setprio(1)
+        c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
+        rocdl.s_setprio(0)
+        rocdl.s_barrier()
+
+        if const_expr(nt_vmcnt >= 0):
+            llvm.inline_asm(
+                res=None,
+                operands_=[],
+                asm_string=f"s_waitcnt vmcnt({nt_vmcnt})",
+                constraints="",
+                has_side_effects=True,
+            )
+        a_cur0, a_next0 = a_next0, a_cur0
+        a_cur1, a_next1 = a_next1, a_cur1
+        b_cur0, b_next0 = b_next0, b_cur0
+        b_cur1, b_next1 = b_next1, b_cur1
+
+    k = K_ITERS - 2
+    b0_frag = b_s2r.load(b_cur0)
+    a0_frag = a_s2r.load(a_cur0)
+    rocdl.s_barrier()
+    rocdl.s_setprio(1)
+    c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
+    rocdl.s_setprio(0)
+    rocdl.s_barrier()
+
+    b1_frag = b_s2r.load(b_cur1)
+    rocdl.s_barrier()
+    rocdl.s_setprio(1)
+    c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
+    rocdl.s_setprio(0)
+    rocdl.s_barrier()
+
+    a1_frag = a_s2r.load(a_cur1)
+    rocdl.s_barrier()
+    rocdl.s_setprio(1)
+    c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
+    rocdl.s_setprio(0)
+    rocdl.s_barrier()
+
+    b0_frag = b_s2r.load(b_next0)
+    a_g2s_hi.load(a_next1, A1_gl_offset + (k + 1) * a_k_step)
+    rocdl.s_barrier()
+    rocdl.s_setprio(1)
+    c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
+    rocdl.s_setprio(0)
+    rocdl.s_barrier()
+
+    a_cur0, a_next0 = a_next0, a_cur0
+    a_cur1, a_next1 = a_next1, a_cur1
+    b_cur0, b_next0 = b_next0, b_cur0
+    b_cur1, b_next1 = b_next1, b_cur1
+
+    a0_frag = a_s2r.load(a_cur0)
+    wait_barrier(0)
+    rocdl.s_setprio(1)
+    c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
+    rocdl.s_setprio(0)
+    rocdl.s_barrier()
+
+    b1_frag = b_s2r.load(b_cur1)
+    rocdl.s_barrier()
+    rocdl.s_setprio(1)
+    c01_frag = mfma.call(a0_frag, b1_frag, c01_frag)
+    rocdl.s_setprio(0)
+    rocdl.s_barrier()
+
+    a1_frag = a_s2r.load(a_cur1)
+    rocdl.s_barrier()
+    rocdl.s_setprio(1)
+    c10_frag = mfma.call(a1_frag, b0_frag, c10_frag)
+    c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
+    rocdl.s_setprio(0)
+    rocdl.s_barrier()
+
+    wave_n_offset = wave_n * (N_TILES_B * 32)
+    wave_m_offset = wave_m * (N_TILES_A * 32)
+    base_row = block_m * BLOCK_M + wave_m_offset
+    base_col = block_n * BLOCK_N + wave_n_offset
+    store_c.store(c00_frag, base_row + 0, base_col + 0)
+    store_c.store(c01_frag, base_row + 0, base_col + LDS_BLOCK_N)
+    store_c.store(c10_frag, base_row + LDS_BLOCK_M, base_col + 0)
+    store_c.store(c11_frag, base_row + LDS_BLOCK_M, base_col + LDS_BLOCK_N)
