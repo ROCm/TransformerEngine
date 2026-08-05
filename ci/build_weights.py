@@ -3,67 +3,42 @@
 #
 # See LICENSE for license information.
 
-"""Build a work-item weight table for the sGPU queue scheduler.
+"""Fold one CI run's measured timings into the sGPU scheduler's weight table.
 
-``run_queue_sgpu.sh`` orders its queue longest-first, which needs a per-item
-cost estimate. Both sources below are produced by a normal CI run, so no extra
-measurement pass is required:
+``run_queue_sgpu.sh`` orders its queue longest-first, which needs a per-item cost
+estimate. That estimate comes from the run that just finished, so no separate
+measurement pass is required: the scheduler writes ``timings.tsv`` as it
+dispatches, and every run refines the table that the next one reads.
 
-  --from-timing <file>  read ``timings.tsv`` written by the scheduler itself.
-                        Preferred for scheduling: it is per-item wall clock, so
-                        it includes process startup and CUDA/HIP init, which is
-                        exactly what the makespan is made of.
-  --from-junit <dir>    sum the per-testcase ``time`` attributes of every
-                        ``<label>/<tag>.xml`` the run wrote. Useful when only
-                        the ``logs-sgpu-*`` artifacts are available, but it
-                        counts test time only -- a short item can look ~4x
-                        cheaper than it really is once startup is included.
+Inputs and outputs:
 
-Output is ``<label>/<tag> <seconds>`` per line, plus ``<label> <seconds>`` for
-opaque whole-suite items. Weights are per GPU architecture -- skip patterns
-differ between gfx942 and gfx950 -- so keep one table per arch.
+  TIMINGS     ``timings.tsv`` written by the scheduler. Per-item wall clock, so
+              it includes process startup and HIP init -- which is what the
+              makespan is actually made of, and what a test-time-only source
+              such as JUnit XML would understate several-fold.
+  --items     ``items.tsv``, also from the scheduler: every work item that
+              exists at this TEST_LEVEL, whether or not this host ran it.
+  -o TABLE    the weight table, read and rewritten in place. Lines are
+              ``<label>/<tag> <seconds>``, plus ``<label> <seconds>`` for opaque
+              whole-suite items.
 
-With ``--merge`` the output file is read first and the new measurement is
-blended into it, so every CI run refines the table instead of replacing it from
-a single noisy sample. See ``merge_weights`` for why the blend is asymmetric.
+Keep one table per (GPU arch, TEST_LEVEL). Skip patterns differ between gfx942
+and gfx950, and the level changes both which items run and how long several of
+them take (tests/jax reads NVTE_JAX_UNITTEST_LEVEL, test_grouped_gemm.py reads
+TEST_LEVEL), so that is the coarsest keying under which a weight still means one
+thing. Holding them apart is the caller's job -- the workflow puts arch and level
+in the file name.
+
+Each run is blended into the table rather than replacing it, so no single noisy
+sample can move a weight far; see ``merge_weights`` for why the blend is
+asymmetric. Measurements that were cut short are dropped instead of blended
+(``read_timings``), and items that no longer exist are dropped from the table
+(``prune_weights``).
 """
 
 import argparse
-import os
 import sys
-import xml.etree.ElementTree as ET
 from collections import defaultdict
-
-
-def from_junit(root_dir):
-    """Sum testcase durations for every <label>/<tag>.xml under root_dir."""
-    weights = defaultdict(float)
-    for label in sorted(os.listdir(root_dir)):
-        subdir = os.path.join(root_dir, label)
-        if not os.path.isdir(subdir):
-            continue
-        for name in sorted(os.listdir(subdir)):
-            if not name.endswith(".xml"):
-                continue
-            tag = name[: -len(".xml")]
-            path = os.path.join(subdir, name)
-            try:
-                tree = ET.parse(path)
-            except ET.ParseError as err:
-                # A truncated report means the run was cut off mid-item. Skipping
-                # it keeps the weight unknown, which sorts the item first next
-                # time -- the safe direction for something that may be slow.
-                print(f"warning: skipping unparsable {path}: {err}", file=sys.stderr)
-                continue
-            total = 0.0
-            for case in tree.getroot().iter("testcase"):
-                try:
-                    total += float(case.get("time") or 0.0)
-                except ValueError:
-                    pass
-            weights[f"{label}/{tag}"] += total
-    return weights
-
 
 # rc values that mean the item was killed rather than measured. 124 is a GNU
 # timeout expiry (the job's own step timeout, for instance), 137 a SIGKILL or an
@@ -73,26 +48,81 @@ def from_junit(root_dir):
 KILLED_RCS = frozenset(("124", "137"))
 
 
-def from_timing(path):
-    """Read the scheduler's timings.tsv: label, tag, gpu, seconds, rc."""
-    weights = defaultdict(float)
+def read_timings(path):
+    """Read the scheduler's timings.tsv.
+
+    Columns are label, tag, gpu, secs, rc, start_off, end_off, est, incomplete;
+    only the first five and the last are read here.
+
+    Returns ``(measured, dispatched)``. ``measured`` maps key -> seconds and
+    holds only the rows worth learning from; ``dispatched`` is every key the run
+    started, which is a weaker but separate fact -- an item can have run and
+    still have produced no usable number, and only the second set answers "does
+    this item still exist" (see ``prune_weights``).
+
+    Two kinds of row are excluded from ``measured``, for the same reason: the
+    duration records where the item was stopped, not what it costs. An rc in
+    ``KILLED_RCS`` says so outright. The ``incomplete`` flag covers what rc
+    cannot -- a ``--timeout-method=thread`` expiry exits 1, indistinguishable
+    from an ordinary test failure (which is a perfectly good measurement), and a
+    segfault exits 139. The scheduler sets that flag from the result sidecar the
+    dying process left behind, which is the only reliable witness.
+    """
+    measured = defaultdict(float)
+    dispatched = set()
     with open(path, encoding="utf-8") as handle:
         for line in handle:
             fields = line.rstrip("\n").split("\t")
             if len(fields) < 4:
                 continue
             label, tag, _gpu, secs = fields[0], fields[1], fields[2], fields[3]
+            # "whole" is the scheduler's placeholder for an opaque suite item,
+            # which the queue keys by bare label.
+            key = label if tag == "whole" else f"{label}/{tag}"
+            dispatched.add(key)
             if len(fields) > 4 and fields[4] in KILLED_RCS:
+                continue
+            if len(fields) > 8 and fields[8] == "1":
                 continue
             try:
                 value = float(secs)
             except ValueError:
                 continue
-            # "whole" is the scheduler's placeholder for an opaque suite item,
-            # which the queue keys by bare label.
-            key = label if tag == "whole" else f"{label}/{tag}"
-            weights[key] += value
-    return weights
+            measured[key] += value
+    return measured, dispatched
+
+
+def read_items(path):
+    """Read items.tsv -- every work item that exists at this TEST_LEVEL.
+
+    The file is ``<label>\\t<tag>`` per line, with an empty tag for an opaque
+    whole-suite item. Returns ``(keys, labels)``: the item keys, and the set of
+    suite labels the file speaks for.
+
+    Both are needed because pruning has to be per label. A suite can be absent
+    from the file entirely -- it was filtered out of the run, or its expansion
+    came back untrustworthy -- and that absence must not be read as "none of its
+    items exist any more".
+
+    Returns ``(None, None)`` when the file cannot be read, which disables
+    pruning. That is the conservative direction: a weight kept for a test that
+    is gone wastes one line, while a weight dropped for a live test makes the
+    scheduler treat it as unknown and mis-order a whole run.
+    """
+    try:
+        handle = open(path, encoding="utf-8")
+    except OSError as err:
+        print(f"warning: cannot read {path} ({err}); nothing will be pruned", file=sys.stderr)
+        return None, None
+    keys, labels = set(), set()
+    with handle:
+        for line in handle:
+            label, _, tag = line.rstrip("\n").partition("\t")
+            if not label:
+                continue
+            labels.add(label)
+            keys.add(f"{label}/{tag}" if tag else label)
+    return keys, labels
 
 
 def read_weights(path):
@@ -138,54 +168,83 @@ def merge_weights(old, new, alpha_up=0.5, alpha_down=0.1):
     return merged
 
 
+def prune_weights(weights, dispatched, live_keys, live_labels):
+    """Drop the weights of work items that no longer exist.
+
+    A key survives if any of these holds:
+
+      * the run dispatched it -- then it plainly exists, whatever else says, and
+        that holds even when it was killed and so taught the table nothing;
+      * its suite is not covered by the item list -- nothing is known about it;
+      * the item list contains it.
+
+    What is left is a key whose suite was listed in full and which that listing
+    did not contain: a test that was deleted, or renamed. Renames need no
+    handling at this end -- the new name simply arrives as an unknown key, which
+    the scheduler already sorts first.
+
+    Returns ``(kept, pruned)``.
+    """
+    kept, pruned = {}, []
+    for key, value in weights.items():
+        label = key.split("/", 1)[0]
+        if key in dispatched or label not in live_labels or key in live_keys:
+            kept[key] = value
+        else:
+            pruned.append(key)
+    return kept, pruned
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
-    source = parser.add_mutually_exclusive_group(required=True)
-    source.add_argument(
-        "--from-junit", metavar="DIR", help="directory of per-suite JUnit XML subdirectories"
-    )
-    source.add_argument(
-        "--from-timing", metavar="FILE", help="timings.tsv written by run_queue_sgpu.sh"
-    )
-    parser.add_argument("-o", "--output", default="-", help="output file (default: stdout)")
     parser.add_argument(
-        "--merge",
-        action="store_true",
-        help="blend into the existing --output table instead of replacing it",
+        "timings", metavar="TIMINGS", help="timings.tsv written by run_queue_sgpu.sh"
+    )
+    parser.add_argument(
+        "-o", "--output", required=True, metavar="TABLE", help="weight table to update in place"
+    )
+    parser.add_argument(
+        "--items",
+        metavar="FILE",
+        help="items.tsv listing every work item that exists at this level; "
+        "without it, no weight is ever pruned",
     )
     args = parser.parse_args()
 
-    if args.from_junit:
-        weights = from_junit(args.from_junit)
-    else:
-        weights = from_timing(args.from_timing)
-
-    if not weights:
-        print("error: no weights produced from the given source", file=sys.stderr)
+    measured, dispatched = read_timings(args.timings)
+    if not measured:
+        # Every row was killed, cut short or malformed. There is nothing to
+        # learn and the existing table is still the best estimate available, so
+        # leave it exactly as it is rather than rewriting it from nothing.
+        print(f"error: no usable measurements in {args.timings}", file=sys.stderr)
         return 1
 
-    if args.merge:
-        if args.output == "-":
-            parser.error("--merge needs -o/--output (the table to merge into)")
-        previous = read_weights(args.output)
-        weights = merge_weights(previous, weights)
-        print(
-            f"merged {len(weights)} weights "
-            f"({len(previous)} known, {len(set(weights) - set(previous))} new)",
-            file=sys.stderr,
-        )
+    previous = read_weights(args.output)
+    weights = merge_weights(previous, measured)
+    print(
+        f"merged {len(measured)} measurements into {len(previous)} known weights "
+        f"({len(set(weights) - set(previous))} new)",
+        file=sys.stderr,
+    )
+
+    if args.items:
+        live_keys, live_labels = read_items(args.items)
+        if live_keys is not None:
+            weights, pruned = prune_weights(weights, dispatched, live_keys, live_labels)
+            # Named individually rather than counted: a prune is how a deleted
+            # test leaves the table, and it is also exactly what a broken suite
+            # expansion would look like, so the list is worth reading.
+            for key in sorted(pruned):
+                print(f"pruned {key}: its suite no longer lists it", file=sys.stderr)
 
     lines = [
         f"{key} {value:.1f}\n" for key, value in sorted(weights.items(), key=lambda kv: -kv[1])
     ]
-    if args.output == "-":
-        sys.stdout.writelines(lines)
-    else:
-        with open(args.output, "w", encoding="utf-8") as handle:
-            handle.writelines(lines)
-        print(f"wrote {len(lines)} weights to {args.output}", file=sys.stderr)
+    with open(args.output, "w", encoding="utf-8") as handle:
+        handle.writelines(lines)
+    print(f"wrote {len(lines)} weights to {args.output}", file=sys.stderr)
     return 0
 
 

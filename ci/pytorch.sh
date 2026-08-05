@@ -40,6 +40,7 @@ run_default_fa_lbl() {
 
 check_mxfp8_supported() {
     #Guard MXFP8-only test filters, which collect no tests on unsupported archs
+    check_list_all && return 0
     _result=$(NVTE_ROCM_ENABLE_MXFP8=1 python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.quantization import is_mxfp8_available; print(is_mxfp8_available())" 2>/dev/null)
     if [ "$_result" = "True" ]; then
         return 0
@@ -173,6 +174,7 @@ if [ -n "$SINGLE_CONFIG" ]; then
 fi
 
 check_flash_attn_installed() {
+    check_list_all && return 0
     _result=$(python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils; print(FlashAttentionUtils.is_installed)" 2>/dev/null)
     if [ "$_result" = "True" ]; then
         return 0

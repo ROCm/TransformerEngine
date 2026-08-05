@@ -139,6 +139,17 @@ check_level() {
     test $TEST_LEVEL -ge $1
 }
 
+# TE_CI_LIST_ALL widens list mode from "what this host would run" to "what this
+# TEST_LEVEL could run anywhere". Level gating, the backend matrix and TEST_FILTER
+# still apply -- only host capability probes are answered yes without probing.
+# The scheduler uses the wider list as the authoritative set of work items that
+# exist, so ci/build_weights.py can tell a test that was deleted or renamed (drop
+# its weight) from one this host merely skipped (keep it). A probe result varies
+# by machine; whether a test file exists does not.
+check_list_all() {
+    test -n "$TE_CI_LIST_ONLY" -a -n "$TE_CI_LIST_ALL"
+}
+
 check_test_jobs_requested() {
     return 1 #Disable parallel jobs because some tests do not support parallel execution
     test -z "$SINGLE_CONFIG" -a -n "$TEST_JOBS" || return 1
