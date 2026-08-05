@@ -739,12 +739,15 @@ def permute_free_grouped_gemm_bf16_wgrad(
     weights_shape:
         ``(num_experts, out_features, in_features)``.
     out:
-        Optional ``[E, out, in]`` bf16 destination to fold the wgrad into directly
-        (``+=`` if ``accumulate`` else ``=``).
+        Optional ``[E, out, in]`` destination (bf16 or fp32) to fold the wgrad into directly
+        (``+=`` if ``accumulate`` else ``=``). An fp32 sink (e.g. ``main_grad``) accumulates
+        in-kernel via the fp32-store kernel variant -- no bf16 scratch + separate fold.
     accumulate:
         With ``out``: add into it rather than overwrite.
     swap_gather:
-        FC2 wgrad mode (token-gather on grad). Not implemented in the current FlyDSL kernel.
+        FC2 wgrad mode. Gathers ``grad_output`` (token-space ``[num_recv, out_features]``) and
+        walks ``hidden_states`` (block-padded ``[em_max, in_features]``) contiguously, emitting the
+        native ``[E, out_features, in_features]`` layout directly (no transpose).
 
     Returns
     -------
@@ -792,21 +795,15 @@ def permute_free_grouped_gemm_bf16_wgrad(
     routing = _prepare_wgrad_align(routing, contract_m)
     grad_base = (routing.block_start.to(torch.int64) * int(routing.block_size_m)).to(torch.int32)
 
-    if swap_gather:
-        raise RuntimeError(
-            "swap_gather wgrad (FC2 direct [E, H, F] layout) is not implemented in the "
-            "current FlyDSL wgrad kernel."
-        )
-
     flydsl_wgrad = _get_flydsl_wgrad()
 
     if out is not None:
         assert tuple(out.shape) == (num_experts, out_features, in_features), (
             f"wgrad out shape {tuple(out.shape)} != {(num_experts, out_features, in_features)}"
         )
-        if out.dtype != torch.bfloat16:
+        if out.dtype not in (torch.bfloat16, torch.float32):
             raise TypeError(
-                f"FlyDSL wgrad requires bf16 out, got {out.dtype}."
+                f"FlyDSL wgrad requires bf16 or fp32 out, got {out.dtype}."
             )
         flydsl_wgrad(
             x,
@@ -818,6 +815,7 @@ def permute_free_grouped_gemm_bf16_wgrad(
             grad_base,
             num_recv_tokens=routing.num_recv_tokens,
             accumulate=bool(accumulate),
+            swap_gather=bool(swap_gather),
         )
         return out
 
@@ -836,6 +834,7 @@ def permute_free_grouped_gemm_bf16_wgrad(
         grad_base,
         num_recv_tokens=routing.num_recv_tokens,
         accumulate=bool(accumulate),
+        swap_gather=bool(swap_gather),
     )
     return dW
 
@@ -1046,8 +1045,9 @@ def permute_free_grouped_gemm_bf16_fc2_wgrad(
     token-gathered, ``fc2_input`` is route-ordered and read contiguously. Which one the kernel
     gathers decides the output orientation:
 
-    * **FC2 wgrad** uses operand swap + transpose: compute ``[E, F, H]`` via the FC1 FlyDSL
-      kernel, then ``transpose(1, 2)`` to ``[E, H, F]``.
+    * **FC2 wgrad** uses ``swap_gather``: the FlyDSL kernel token-gathers ``grad_output`` and
+      walks the block-padded ``fc2_input`` contiguously, writing the native ``[E, H, F]`` layout
+      directly (no transpose, and ``out``/``accumulate`` fold straight into a bf16 destination).
 
     Parameters
     ----------
@@ -1078,17 +1078,33 @@ def permute_free_grouped_gemm_bf16_fc2_wgrad(
             preact, routing, activation=activation, dispatched_probs=dispatched_probs
         )
 
-    # FC2 wgrad: operand swap + transpose via the FC1 FlyDSL kernel.
-    dW_t = permute_free_grouped_gemm_bf16_wgrad(
-        grad_output,
+    # FC2 wgrad via swap_gather: gather grad_output [num_recv, H] (N=H) and walk the block-padded
+    # fc2_input [em_max, F] (K=F) contiguously -> native [E, H, F], no transpose.
+    weights_shape = (num_experts, out_features, in_features)  # [E, H, F]
+    if out is not None and out.dtype in (torch.bfloat16, torch.float32):
+        # bf16 or fp32 sink: the kernel writes/accumulates straight into it (fp32 via the
+        # fp32-store variant), so no scratch dW and no separate fold pass.
+        return permute_free_grouped_gemm_bf16_wgrad(
+            fc2_input,
+            grad_output,
+            weights_shape,
+            routing,
+            config=config,
+            out=out,
+            accumulate=accumulate,
+            swap_gather=True,
+        )
+    dW = permute_free_grouped_gemm_bf16_wgrad(
         fc2_input,
-        (num_experts, in_features, out_features),
+        grad_output,
+        weights_shape,
         routing,
         config=config,
-    )
-    dW = dW_t.transpose(1, 2).contiguous()  # [E, H, F]
+        swap_gather=True,
+    )  # [E, H, F] bf16
     if out is None:
         return dW
+    # Exotic sink dtype the kernel can't write directly: fold the bf16 result here.
     if accumulate:
         out.add_(dW)
     else:
@@ -1258,21 +1274,12 @@ def permute_free_grouped_gemm_backward(
             dgrad = permute_free_grouped_gemm_bf16_dgrad(grad_output, weights_stacked, routing)
         if requires_wgrad:
             weights_shape = (num_gemms, weights[0].size(0), weights[0].size(1))
-            if wgrad_out is not None and wgrad_out.dtype != torch.bfloat16:
-                # fp32 main_grad sink: the bf16 kernel can't write it directly, so emit the bf16
-                # dW and fold it into the fp32 buffer here (mirrors the FC2 wgrad out handling).
-                dW = permute_free_grouped_gemm_bf16_wgrad(
-                    hidden_states, grad_output, weights_shape, routing,
-                )  # [E, N, H]
-                if wgrad_accumulate:
-                    wgrad_out.add_(dW)
-                else:
-                    wgrad_out.copy_(dW)
-            else:
-                dW = permute_free_grouped_gemm_bf16_wgrad(
-                    hidden_states, grad_output, weights_shape, routing,
-                    out=wgrad_out, accumulate=wgrad_accumulate,
-                )  # [E, N, H]
+            # bf16 or fp32 ``main_grad`` sink both accumulate in-kernel (fp32 via the fp32-store
+            # variant); no scratch dW + separate fold.
+            dW = permute_free_grouped_gemm_bf16_wgrad(
+                hidden_states, grad_output, weights_shape, routing,
+                out=wgrad_out, accumulate=wgrad_accumulate,
+            )  # [E, N, H]
             wgrad_stacked = dW
             wgrad_applied = wgrad_out is not None
 

@@ -42,6 +42,7 @@ def flydsl_moe_wgrad(
     warps_n: int = 2,
     warps_k: int = 2,
     accumulate: bool = False,
+    swap_gather: bool = False,
 ) -> None:
     """Compute FC1 grouped wgrad ``grad[slot]^T @ x[token(slot)]`` into ``dw``, per expert.
 
@@ -51,21 +52,28 @@ def flydsl_moe_wgrad(
     received-token row (sentinel ``num_recv_tokens`` for padding), and ``grad_base[e]`` is the
     block-padded first-slot row of expert ``e`` (``block_start[e] * block_size_m``).
 
+    ``swap_gather`` selects the FC2 wgrad variant: ``grad`` is the token-space ``[num_recv, N]``
+    operand (gathered) and ``x`` is the block-padded ``[em_max, K]`` operand (contiguous walk),
+    emitting the native ``dw[E, N, K]`` orientation with no transpose.
+
     ``block_n``/``block_k`` and ``warps_n``/``warps_k`` select the workgroup tile; the
     defaults (``128x128`` over ``2x2`` warps) are a strong general config on CDNA4.
     """
     num_experts, N, K = dw.shape
 
     assert x.dtype == grad.dtype == torch.bfloat16
-    assert dw.dtype == torch.bfloat16
+    assert dw.dtype in (torch.bfloat16, torch.float32)
     assert x.is_contiguous() and grad.is_contiguous() and dw.is_contiguous()
 
+    out_dtype = "fp32" if dw.dtype == torch.float32 else "bf16"
     exe = compile_moe_wgrad_v2(
         block_n=int(block_n),
         block_k=int(block_k),
         warps_n=int(warps_n),
         warps_k=int(warps_k),
         accumulate=bool(accumulate),
+        swap_gather=bool(swap_gather),
+        out_dtype=out_dtype,
     )
 
     _run_compiled(
@@ -119,6 +127,7 @@ def _wgrad_run(
     warps_n=2,
     warps_k=2,
     accumulate=False,
+    swap_gather=False,
 ):
     """Dispatch target for the FlyDSL autotuner: compile (lru-cached) + launch one tile."""
     exe = compile_moe_wgrad_v2(
@@ -127,6 +136,7 @@ def _wgrad_run(
         warps_n=int(warps_n),
         warps_k=int(warps_k),
         accumulate=bool(accumulate),
+        swap_gather=bool(swap_gather),
     )
     _run_compiled(
         exe,
@@ -194,17 +204,20 @@ def flydsl_moe_wgrad_autotuned(
     *,
     num_recv_tokens: int,
     accumulate: bool = False,
+    swap_gather: bool = False,
 ) -> None:
     """Shape-autotuned variant of :func:`flydsl_moe_wgrad`.
 
     First call for a given ``(x.shape, N, num_experts)`` benchmarks every tile in
     ``_AUTOTUNE_TILES`` and caches the fastest (in-memory + on disk under
-    ``~/.flydsl/autotune/``).
+    ``~/.flydsl/autotune/``). The tile geometry is independent of ``swap_gather`` (the two
+    variants share the same memory-access shape), so the sweep runs on the default variant and
+    the fastest tile is reused for the ``swap_gather`` launch.
     """
     num_experts, N, K = dw.shape
 
     assert x.dtype == grad.dtype == torch.bfloat16
-    assert dw.dtype == torch.bfloat16
+    assert dw.dtype in (torch.bfloat16, torch.float32)
     assert x.is_contiguous() and grad.is_contiguous() and dw.is_contiguous()
 
     block_n, block_k, warps_n, warps_k = _select_wgrad_config(
@@ -225,4 +238,5 @@ def flydsl_moe_wgrad_autotuned(
         warps_n=warps_n,
         warps_k=warps_k,
         accumulate=bool(accumulate),
+        swap_gather=bool(swap_gather),
     )

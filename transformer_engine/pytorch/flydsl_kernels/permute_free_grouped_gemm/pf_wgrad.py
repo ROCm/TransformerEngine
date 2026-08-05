@@ -78,7 +78,21 @@ def compile_moe_wgrad_v2(
     warps_n: int = 1,
     warps_k: int = 1,
     accumulate: bool = False,
+    swap_gather: bool = False,
+    out_dtype: str = "bf16",
 ):
+    # ``out_dtype`` selects the ``dW`` element type: ``"bf16"`` (default) truncates the f32 MFMA
+    # accumulator on store; ``"fp32"`` stores/reads-modify-writes the f32 accumulator directly.
+    # The latter lets an fp32 ``main_grad`` sink accumulate in-kernel (no bf16 scratch + fold).
+    if out_dtype not in ("bf16", "fp32"):
+        raise ValueError(f"moe_wgrad out_dtype must be 'bf16' or 'fp32', got {out_dtype!r}")
+    # ``swap_gather`` mirrors the two operands' gather/contiguous roles for the FC2 wgrad:
+    # FC1 walks ``GRAD`` (the [em_max, N] block-padded gradient) contiguously and token-gathers
+    # ``X`` (the [num_recv, K] activation) -> ``dW[E, N, K]``. FC2 instead token-gathers ``GRAD``
+    # (the [num_recv, N] token-space dL/dFC2out) and walks ``X`` (the [em_max, K] block-padded
+    # activation) contiguously, so the same kernel emits the native ``dW2[E, H, F]`` layout with
+    # no transpose. Only the per-operand ``clamp_row`` and which operand's resource is bounded to
+    # ``[num_recv, feat]`` differ.
     if block_n % (warps_n * WMMA_M) != 0 or block_k % (warps_k * WMMA_N) != 0:
         raise ValueError("block_n/block_k must be multiples of warps_*16")
 
@@ -110,9 +124,11 @@ def compile_moe_wgrad_v2(
     G_FILLS = (WGRAD_BLOCK_M * block_n) // (n_threads * FILL_V)
     X_FILLS = (WGRAD_BLOCK_M * block_k) // (n_threads * FILL_V)
 
+    out_is_f32 = out_dtype == "fp32"
     KERNEL_NAME = (
         f"moe_wgrad_routelist_bf16_{block_n}x{block_k}_w{warps_n}x{warps_k}"
-        f"{'_acc' if accumulate else ''}_dsz_s3_dsa_v2"
+        f"{'_o32' if out_is_f32 else ''}{'_acc' if accumulate else ''}"
+        f"{'_sg' if swap_gather else ''}_dsz_s3_dsa_v2"
     )
 
     # LDS allocation: NUM_BUF-buffered grad tile + x tile (2 bytes/bf16).
@@ -212,17 +228,25 @@ def compile_moe_wgrad_v2(
         K_idx = arith.index_cast(T.index, K)
         nrecv_idx = arith.index_cast(T.index, num_recv_tokens)
 
-        # DMA fill cannot mask padding slots in registers, so bound the token-gathered
-        # ``x`` operand's resource to its real [num_recv, K] extent: the sentinel token
+        # DMA fill cannot mask padding slots in registers, so bound the *token-gathered*
+        # operand's resource to its real [num_recv, feat] extent: the sentinel token
         # (== num_recv) and any pipeline overrun then read out-of-bounds -> hardware
         # returns 0. A zeroed gathered column makes the padding slot's outer product
-        # ``grad (x) 0 == 0``, so the paired contiguous-walk grad operand may safely read
-        # garbage (clamped to row 0) for those slots.
-        x_addr_i64 = arith.index_cast(T.i64, ptrtoint(X))
-        x_nrec_bytes = nrecv_idx * K_idx * arith.index(2)
-        x_rsrc = buffer_ops.create_buffer_resource_from_addr(
-            x_addr_i64, num_records_bytes=x_nrec_bytes
-        )
+        # ``gathered (x) 0 == 0``, so the paired contiguous-walk operand may safely read
+        # garbage (clamped to row 0) for those slots. FC1 gathers ``x`` (stride K); FC2
+        # (``swap_gather``) gathers ``grad`` (stride N).
+        if swap_gather:
+            grad_addr_i64 = arith.index_cast(T.i64, ptrtoint(GRAD))
+            grad_nrec_bytes = nrecv_idx * N_idx * arith.index(2)
+            grad_rsrc = buffer_ops.create_buffer_resource_from_addr(
+                grad_addr_i64, num_records_bytes=grad_nrec_bytes
+            )
+        else:
+            x_addr_i64 = arith.index_cast(T.i64, ptrtoint(X))
+            x_nrec_bytes = nrecv_idx * K_idx * arith.index(2)
+            x_rsrc = buffer_ops.create_buffer_resource_from_addr(
+                x_addr_i64, num_records_bytes=x_nrec_bytes
+            )
 
         n_block_base = n_tile * block_n
         k_block_base = k_tile * block_k
@@ -303,17 +327,19 @@ def compile_moe_wgrad_v2(
                 )
 
         def dma_fill(g_ids, x_ids, slot_base_idx, g_buf_byte, x_buf_byte, wbuf=None):
-            # FC1: token-gather ``x`` (clamp_row=False); compact grad route walk (clamp_row=True).
+            # FC1 (swap_gather=False): block-padded grad route walk (clamp_row=True) + token-gather
+            # ``x`` (clamp_row=False). FC2 (swap_gather=True) flips both: token-gather ``grad``
+            # (clamp_row=False) + block-padded activation walk on ``x`` (clamp_row=True).
             # ``wbuf`` is the Python ring-slot index this tile is being staged into (for alias scopes).
             g_sid = _g_sid(wbuf) if wbuf is not None else None
             x_sid = _x_sid(wbuf) if wbuf is not None else None
             _dma_one(
                 grad_rsrc, g_ids, slot_base_idx, CPR_G_SWZ, n_base_idx, N_idx,
-                g_lds_off, g_buf_byte, G_FILLS, clamp_row=True, sid=g_sid,
+                g_lds_off, g_buf_byte, G_FILLS, clamp_row=not swap_gather, sid=g_sid,
             )
             _dma_one(
                 x_rsrc, x_ids, slot_base_idx, CPR_X_SWZ, k_base_idx, K_idx,
-                x_lds_off, x_buf_byte, X_FILLS, clamp_row=False, sid=x_sid,
+                x_lds_off, x_buf_byte, X_FILLS, clamp_row=swap_gather, sid=x_sid,
             )
 
         def _dma_barrier(keep=0):
@@ -517,6 +543,9 @@ def compile_moe_wgrad_v2(
         # Epilogue: C[m=n_feat, n=k_feat], lane holds 4 rows. Each dW element is owned by
         # exactly one workgroup (grid = N x K x E over disjoint output tiles), so when
         # ``accumulate`` is set the read-modify-write into the destination is race-free.
+        # ``out_ty`` is the ``dW`` element type: bf16 truncates the f32 accumulator on store;
+        # fp32 stores it directly (and accumulates without the bf16 round-trip).
+        out_ty = T.f32 if out_is_f32 else bf16
         E_NK_row = arith.index_cast(T.index, expert) * N_idx * K_idx
         for mi in range_constexpr(M_STEPS):
             for nj in range_constexpr(N_STEPS):
@@ -542,10 +571,11 @@ def compile_moe_wgrad_v2(
                         out_off = E_NK_row + n_out_idx * K_idx + c_n_idx
                         if const_expr(accumulate):
                             prev = buffer_ops.buffer_load(
-                                dW_rsrc, out_off, vec_width=1, dtype=bf16
+                                dW_rsrc, out_off, vec_width=1, dtype=out_ty
                             )
-                            val = arith.addf(val, arith.extf(T.f32, prev))
-                        store_val = arith.truncf(bf16, val)
+                            prev_f32 = prev if const_expr(out_is_f32) else arith.extf(T.f32, prev)
+                            val = arith.addf(val, prev_f32)
+                        store_val = val if const_expr(out_is_f32) else arith.truncf(bf16, val)
                         buffer_ops.buffer_store(store_val, dW_rsrc, out_off)
                         scf.YieldOp([])
 

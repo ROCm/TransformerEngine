@@ -71,11 +71,11 @@ def _generate_moe_test_cases(
     return test_cases
 
 
-def generate_deepseekv3_test_cases(include_gateup: bool = False):
-    # DSV3-GateUP hangs on some hardware; only benchmark DSV3-Down by default.
+def generate_deepseekv3_test_cases():
+    # DSV3-GateUP hangs on some hardware; only benchmark DSV3-Down.
     return _generate_moe_test_cases(
         "DSV3", n_routed_experts=256, moe_intermediate_size=2048, hidden_size=7168,
-        skip_shapes=None if include_gateup else ["GateUP"],
+        skip_shapes=["GateUP"],
     )
 
 
