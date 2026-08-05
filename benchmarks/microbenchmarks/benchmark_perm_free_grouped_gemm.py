@@ -182,17 +182,17 @@ def _permute_free_act_gemm(
     weights: torch.Tensor,
     routing,
 ) -> torch.Tensor:
-    """Permute-free FC1 gather-GEMM with the gated SiLU activation fused into the epilogue.
+    """Permute-free FC1 gather-GEMM + standalone SiLU gated activation (no in-kernel fusion).
 
-    ``weights`` is the gate+up projection ``[E, 2F, K]``; the kernel emits the F-wide
-    activated buffer ``silu(gate) * up`` directly, skipping the separate activation pass.
-    Only valid for gate+up (GateUP) shapes -- ``out_features`` must be even.
+    ``weights`` is the gate+up projection ``[E, 2F, K]``; returns the F-wide activated buffer.
     """
     from transformer_engine.pytorch.moe import (
+        permute_free_gated_act_recompute,
         permute_free_grouped_gemm_bf16,
     )
 
-    return permute_free_grouped_gemm_bf16(hidden, weights, routing, activation="silu")
+    preact = permute_free_grouped_gemm_bf16(hidden, weights, routing)
+    return permute_free_gated_act_recompute(preact, routing, activation="silu")
 
 
 def _build_backend_fns(

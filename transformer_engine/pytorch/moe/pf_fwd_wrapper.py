@@ -7,9 +7,9 @@ Mirrors the route-list forward gather-GEMM contract so the same routing
 metadata (``sorted_slot_ids`` / ``expert_ids`` / ``block_start``) can be reused verbatim.
 Writes the block-padded ``[em_max, WIDTH_N]`` slot output in place.
 
-Forward gather-GEMM is FlyDSL-only. This module retains Triton kernels for routing
-metadata construction, gated-activation recompute/bwd, and the token-order gather-combine
-pass that follows the compact route-list GEMM outputs.
+Forward gather-GEMM is FlyDSL-only (v3 MegaMOE-ported plain GEMM). Gated activation and
+route-prob apply live in standalone Triton helpers (:mod:`pf_helper_kernels`), not in the
+GEMM kernel.
 """
 
 from __future__ import annotations
@@ -26,10 +26,6 @@ __all__ = [
     "flydsl_moe_fwd_pick_block_m",
 ]
 
-# Activation ids for fused-epilogue kernels (v2, not yet in-tree).
-ACT_SILU = 0
-ACT_GELU = 1
-_ACT_IDS = {"silu": ACT_SILU, "gelu": ACT_GELU}
 _WMMA = 16
 _FILL_V = 8
 _WARP = 64
@@ -53,8 +49,8 @@ def _v3_enabled() -> bool:
 
 # MegaMOE's hand-tuned bf16 grouped-GEMM tile geometry (offline-swept in primus-turbo's
 # bench_mega_moe: BLOCK_M/BLOCK_N=256, GROUP_M=4 fwd / GROUP_M=8 FC1 NN dgrad, num_xcd=1,
-# nt_vmcnt=3). TE's FlyDSL fwd align already bumps non-gated FC1 / dgrad / plain FC2 to
-# block_size_m=256; v3 pins the same Mega M-tile rather than trusting the wrapper arg.
+# nt_vmcnt=3). TE's FlyDSL fwd align already bumps FC1 / dgrad / FC2 to block_size_m=256;
+# v3 pins the same Mega M-tile rather than trusting the wrapper arg.
 _V3_BLOCK_M = 256
 _V3_BLOCK_N = 256
 _V3_GROUP_M = 4
@@ -64,22 +60,15 @@ _V3_NUM_XCD = 1
 
 def _run_v3_fwd(
     A, B, C, sorted_slot_ids, expert_ids, *, num_recv_tokens, block_m,
-    transpose_b, index_a_by_route_pos, gated, gated_a, mul_prob, save_preact,
+    transpose_b, index_a_by_route_pos,
 ):
     """Dispatch a plain fwd/dgrad GEMM to the v3 (MegaMOE-ported) kernels.
 
-    Covers the three non-fused paths: FC1 gather (``index_a_by_route_pos=False``), FC2
-    route-read (``index_a_by_route_pos=True``) and dgrad (``transpose_b``). Fused epilogues
-    (gated activation / route-prob / pre-activation save) have no v3 equivalent and raise.
-    v3 uses MegaMOE's fixed tile geometry (32x32x16, ``BLOCK_N=256``, ``GROUP_M=4``,
-    ``num_xcd=1``), so the wrapper's ``block_n``/``block_k``/warp args are ignored here.
+    Covers the three paths: FC1 gather (``index_a_by_route_pos=False``), FC2 route-read
+    (``index_a_by_route_pos=True``) and dgrad (``transpose_b``). v3 uses MegaMOE's fixed tile
+    geometry (32x32x16, ``BLOCK_N=256``, ``GROUP_M=4``, ``num_xcd=1``), so the wrapper's
+    ``block_n``/``block_k``/warp args are ignored here.
     """
-    if gated or gated_a or mul_prob or save_preact:
-        raise RuntimeError(
-            "Fused permute-free forward (gated activation / dispatched_probs / preact_out) "
-            "requires the v2 FlyDSL kernel (moe_fwd_flydsl_v2), which is not in-tree yet. "
-            "Use standalone gated-act + plain v3 GEMM (GroupedLinear FC2 path), or port v2."
-        )
     block_m = int(block_m)
     em_max = int(sorted_slot_ids.shape[0])
     if em_max % block_m != 0:
@@ -194,22 +183,18 @@ def _fwd_buffering():
     return (3 if use_dma else 2), pad
 
 
-def _lds_bytes(block_m, block_n, block_k, gated, transpose_b=False, gated_a=False):
-    n_bt = 2 if gated else 1
+def _lds_bytes(block_m, block_n, block_k, transpose_b=False):
     nbuf, pad = _fwd_buffering()
     a_tile = block_m * (block_k + pad)
-    # Hybrid gated_a DMA path stages the raw ``up`` half in a parallel A tile (2x A LDS).
-    hybrid_a = gated_a and _env_flag("MOE_FWD_DMA", True) and _env_flag("MOE_FWD_GATEDA_DMA", False)
-    a_tiles = 2 if hybrid_a else 1
     # dgrad stages B as [k, n] (row stride = block_n+pad); fwd as [n, k] (block_k+pad).
     b_tile = block_k * (block_n + pad) if transpose_b else block_n * (block_k + pad)
-    return (a_tiles * a_tile + n_bt * b_tile) * nbuf * 2
+    return (a_tile + b_tile) * nbuf * 2
 
 
-def _default_block_n(block_m, block_k, gated, transpose_b=False):
+def _default_block_n(block_m, block_k, transpose_b=False):
     """Widest N tile (128 then 64) that fits LDS -- wider N raises arithmetic intensity."""
     for bn in (128, 64):
-        if _lds_bytes(block_m, bn, block_k, gated, transpose_b) <= _LDS_LIMIT and bn % _mfma_dim(transpose_b) == 0:
+        if _lds_bytes(block_m, bn, block_k, transpose_b) <= _LDS_LIMIT and bn % _mfma_dim(transpose_b) == 0:
             return bn
     return 64
 
@@ -249,22 +234,13 @@ def flydsl_moe_fwd(
     warps_m: Optional[int] = None,
     warps_n: Optional[int] = None,
     index_a_by_route_pos: bool = False,
-    activation: Optional[str] = None,
-    dispatched_probs: Optional[torch.Tensor] = None,
-    preact_out: Optional[torch.Tensor] = None,
-    gated_a: bool = False,
 ) -> None:
     """Route-list gather-GEMM forward, writing the compact ``C[em_max, WIDTH_N]`` in place.
 
     ``A`` is ``[*, K]`` (received-token acts, gathered by ``sorted_slot_ids`` when
     ``index_a_by_route_pos=False``, else read at the compact route row). ``B`` is
-    ``[num_experts, N_OUT, K]`` (contiguous inner ``K``). With ``activation`` set the fused
-    **gated** epilogue (FC1, ``gated_a=False``) applies ``act(gate) * up`` over ``N_OUT = 2F``
-    into the ``F``-wide ``C``; ``dispatched_probs`` multiplies the per-route prob after the
-    activation, and ``preact_out`` (``[em_max, 2F]``) saves the raw ``[gate | up]``
-    pre-activation. With ``gated_a=True`` (FC2) ``A`` is the raw ``[gate | up]`` pre-activation
-    (width ``2F``), the prologue applies ``act(gate) * up [* prob]`` into an ``F``-wide tile,
-    and the GEMM contracts over ``K = F`` against ``B[e, H, F]``.
+    ``[num_experts, N_OUT, K]`` (contiguous inner ``K``). Gated activation and route-prob
+    apply are **not** fused here; use the standalone helpers in :mod:`pf_helper_kernels`.
     """
     assert A.dtype == B.dtype == C.dtype == torch.bfloat16
     assert A.stride(1) == 1, "A must be contiguous along the contraction (K)"
@@ -272,22 +248,12 @@ def flydsl_moe_fwd(
     transpose_b = B.stride(2) != 1
     if transpose_b:
         assert B.stride(1) == 1, "transposed B must be contiguous along N (dgrad view)"
-        assert activation is None, "dgrad (transposed B) does not support fused activation"
 
-    gated = activation is not None and not gated_a
-    if gated_a:
-        if activation is None:
-            raise ValueError("gated_a requires activation ('silu' or 'gelu')")
-        if not index_a_by_route_pos:
-            raise ValueError("gated_a requires index_a_by_route_pos=True")
-
-    # Plain GEMM: in-tree v3 kernels (pf_fwd / pf_dgrad). Fused epilogues need v2 (not ported).
+    # Plain GEMM: in-tree v3 kernels (pf_fwd / pf_dgrad).
     _run_v3_fwd(
         A, B, C, sorted_slot_ids, expert_ids,
         num_recv_tokens=num_recv_tokens, block_m=block_m,
         transpose_b=transpose_b, index_a_by_route_pos=index_a_by_route_pos,
-        gated=gated, gated_a=gated_a,
-        mul_prob=dispatched_probs is not None, save_preact=preact_out is not None,
     )
 
 
@@ -337,32 +303,27 @@ _FWD_TUNE_CONFIGS = [
 _FWD_CACHE: dict = {}
 
 
-def _valid_config(block_m, bn, bk, wm, wn, K, gated, gated_a=False, transpose_b=False):
+def _valid_config(block_m, bn, bk, wm, wn, K, transpose_b=False):
     if K % bk != 0 or bn % _mfma_dim(transpose_b) != 0:
         return False
     if not _warp_valid(block_m, bn, bk, wm, wn, transpose_b):
         return False
-    return _lds_bytes(block_m, bn, bk, gated, gated_a=gated_a) <= _LDS_LIMIT
+    return _lds_bytes(block_m, bn, bk, transpose_b) <= _LDS_LIMIT
 
 
 def flydsl_moe_fwd_pick_block_m(
     A: torch.Tensor,
     B: torch.Tensor,
     *,
-    gated: bool = False,
-    gated_a: bool = False,
     candidates=(256, 128),
 ) -> Optional[int]:
-    """Largest ``block_m`` in ``candidates`` the FlyDSL fwd can actually run for these operands
-    and epilogue mode, or ``None`` if the operands are unsupported at every candidate.
+    """Largest ``block_m`` in ``candidates`` the FlyDSL fwd can actually run for these operands,
+    or ``None`` if the operands are unsupported at every candidate.
 
     "Can run" == bf16 operands contiguous along the contraction AND at least one autotuner tile
-    in :data:`_FWD_TUNE_CONFIGS` fits the per-workgroup LDS budget for the epilogue. The gated FC1
-    epilogue stages a ``2F`` ``[gate|up]`` B-tile, so it only fits ``block_m <= 128``; the non-gated
-    FC1 fwd and the ``gated_a`` FC2 prologue fit ``block_m = 256``, which lifts the shared
-    fwd/dgrad/FC2 align onto the faster ``256x32`` MegaMOE-like tile. Callers should include their
-    token-count default among ``candidates`` (the picker only walks high->low over what is passed),
-    so a small-token workload is never padded up beyond what the caller offered.
+    in :data:`_FWD_TUNE_CONFIGS` fits the per-workgroup LDS budget. Callers should include their
+    default among ``candidates`` (the picker only walks high->low over what is passed), so a
+    small-token workload is never padded up beyond what the caller offered.
     """
     if A.dtype != torch.bfloat16 or B.dtype != torch.bfloat16:
         return None
@@ -373,7 +334,7 @@ def flydsl_moe_fwd_pick_block_m(
     K = int(B.shape[2])
     for block_m in sorted({int(c) for c in candidates}, reverse=True):
         if any(
-            _valid_config(block_m, bn, bk, wm, wn, K, gated, gated_a)
+            _valid_config(block_m, bn, bk, wm, wn, K)
             for (bn, bk, wm, wn) in _FWD_TUNE_CONFIGS
         ):
             return block_m
@@ -392,35 +353,24 @@ def flydsl_moe_fwd_autotuned(
     block_m: int,
     block_k: int = 64,
     index_a_by_route_pos: bool = False,
-    activation: Optional[str] = None,
-    dispatched_probs: Optional[torch.Tensor] = None,
-    preact_out: Optional[torch.Tensor] = None,
-    gated_a: bool = False,
     warmup: int = 3,
     iters: int = 10,
 ) -> None:
     """Shape-autotuned :func:`flydsl_moe_fwd`.
 
-    On the first call for a given (block_m, GEMM shape, epilogue mode) the valid subset of
+    On the first call for a given (block_m, GEMM shape) the valid subset of
     ``_FWD_TUNE_CONFIGS`` is benchmarked and the fastest ``(block_n, block_k, warps_m, warps_n)``
     is cached. The production DMA+swizzle fill path is always used; only tile geometry is swept.
     """
-    gated = activation is not None and not gated_a
     N_OUT, K = int(B.shape[1]), int(B.shape[2])
     width_n = int(C.shape[1])
-    key = (
-        int(block_m), N_OUT, K, width_n, bool(gated), bool(gated_a),
-        activation, dispatched_probs is not None, preact_out is not None,
-        bool(index_a_by_route_pos),
-    )
+    key = (int(block_m), N_OUT, K, width_n, bool(index_a_by_route_pos))
 
     def _launch(bn, bk, wm, wn):
         flydsl_moe_fwd(
             A, B, C, sorted_slot_ids, expert_ids, block_start,
             num_recv_tokens=num_recv_tokens, block_m=block_m, block_n=bn, block_k=bk,
             warps_m=wm, warps_n=wn, index_a_by_route_pos=index_a_by_route_pos,
-            activation=activation, dispatched_probs=dispatched_probs, preact_out=preact_out,
-            gated_a=gated_a,
         )
 
     best = _FWD_CACHE.get(key)
@@ -428,7 +378,7 @@ def flydsl_moe_fwd_autotuned(
         candidates = [
             (bn, bk, wm, wn)
             for (bn, bk, wm, wn) in _FWD_TUNE_CONFIGS
-            if _valid_config(block_m, bn, bk, wm, wn, K, gated, gated_a)
+            if _valid_config(block_m, bn, bk, wm, wn, K)
         ]
         if not candidates:
             _launch(None, block_k, None, None)  # heuristic fallback

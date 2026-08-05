@@ -13,12 +13,16 @@ from transformer_engine.pytorch import GroupedLinear
 from transformer_engine.pytorch.moe import (
     MoERoutingMetadata,
     PermuteFreeMetadata,
-    get_default_moe_kernel_config,
+    is_permute_free_grouped_gemm_enabled,
+    permute_free_gated_act_bwd,
     permute_free_grouped_gemm_backward,
     permute_free_grouped_gemm_bf16,
     permute_free_grouped_gemm_bf16_dgrad,
+    permute_free_grouped_gemm_bf16_fc2,
+    permute_free_grouped_gemm_bf16_fc2_dgrad,
     permute_free_grouped_gemm_bf16_fc2_wgrad,
     permute_free_grouped_gemm_bf16_wgrad,
+    permute_free_grouped_gemm_forward,
     prepare_moe_align,
 )
 from transformer_engine.pytorch.moe.permute_free_grouped_gemm import (
@@ -234,10 +238,7 @@ def test_route_list_fc2_wgrad_recompute_from_preact():
     """FC2 wgrad recompute-from-preact: rebuild act = act(gate)*up*prob from the saved 2F
     pre-activation into a transient buffer, feed the unchanged wgrad, and match a stored-act
     reference (the backward then checkpoints only the 2F preact, never the F-wide act)."""
-    from transformer_engine.pytorch.moe import (
-        get_default_moe_kernel_config,
-        prepare_moe_align,
-    )
+    from transformer_engine.pytorch.moe import prepare_moe_align
 
     torch.manual_seed(29)
     num_recv_tokens, in_features, out_features = 128, 96, 128  # F=in, H=out (W2 is [E, H, F])
@@ -298,7 +299,6 @@ def test_fc2_backward_dispatch_recompute_matches_stored():
     """FC2 backward dispatch: wgrad from the saved 2F preact (+ fc2_activation) matches the
     legacy stored-F activation path."""
     from transformer_engine.pytorch.moe import (
-        get_default_moe_kernel_config,
         permute_free_grouped_gemm_backward,
         prepare_moe_align,
     )
@@ -366,10 +366,7 @@ def test_fc1_fc2_gated_pipeline(monkeypatch):
     PyTorch reference through the permute-free GroupedLinear modules."""
     import dataclasses
 
-    from transformer_engine.pytorch.moe import (
-        get_default_moe_kernel_config,
-        prepare_moe_align,
-    )
+    from transformer_engine.pytorch.moe import prepare_moe_align
 
     monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "1")
     torch.manual_seed(37)
@@ -502,15 +499,256 @@ def test_route_list_fwd_dgrad_wgrad_consistency():
     assert _rel_l2(dW, ref_w.grad) < 2e-2
 
 
+def test_route_list_fc2_fwd():
+    """FC2 forward (F-wide input): per-route GEMM + token gather-combine."""
+    torch.manual_seed(51)
+    num_recv_tokens, in_features, out_features = 128, 128, 128
+    num_experts, max_hits = 8, 3
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=21)
+    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
+    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+    em_max = int(routing.sorted_slot_ids.shape[0])
+    slot_token = routing.sorted_slot_ids
+    slot_expert = _expert_per_route(routing, em_max)
+    valid = slot_token < num_recv_tokens
+    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
+    exp = slot_expert.to(torch.int64).clamp_min(0)
+
+    fc2_input = torch.zeros(em_max, in_features, device="cuda", dtype=torch.bfloat16)
+    fc2_input[valid] = torch.randn(
+        int(valid.sum().item()), in_features, device="cuda", dtype=torch.bfloat16
+    )
+    weights = torch.randn(
+        num_experts, out_features, in_features, device="cuda", dtype=torch.bfloat16
+    )
+
+    out = permute_free_grouped_gemm_bf16_fc2(fc2_input, weights, routing)
+    assert out.shape == (num_recv_tokens, out_features)
+
+    per_slot = torch.einsum("rf,rhf->rh", fc2_input.float(), weights[exp].float())
+    per_slot = per_slot * valid[:, None].float()
+    ref = torch.zeros(num_recv_tokens, out_features, device="cuda", dtype=torch.float32)
+    ref.index_add_(0, tok, per_slot)
+    assert _rel_l2(out, ref) < 2e-2
+
+
+def test_route_list_fc2_fwd_standalone_act():
+    """FC2 forward dispatch: standalone gated-act recompute + plain GEMM (no in-kernel fusion)."""
+    torch.manual_seed(53)
+    num_recv_tokens, in_features, out_features = 128, 128, 128
+    num_experts, max_hits = 8, 3
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=23)
+    routing = PermuteFreeMetadata(
+        routing_map=routing_map, num_experts=num_experts, route_space=True, activation="silu"
+    )
+    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+    em_max = int(routing.sorted_slot_ids.shape[0])
+    slot_token = routing.sorted_slot_ids
+    slot_expert = _expert_per_route(routing, em_max)
+    valid = slot_token < num_recv_tokens
+    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
+    exp = slot_expert.to(torch.int64).clamp_min(0)
+
+    preact = torch.zeros(em_max, 2 * in_features, device="cuda", dtype=torch.bfloat16)
+    preact[valid] = torch.randn(
+        int(valid.sum().item()), 2 * in_features, device="cuda", dtype=torch.bfloat16
+    )
+    probs = torch.rand(num_recv_tokens, num_experts, device="cuda", dtype=torch.float32)
+    weights = torch.randn(
+        num_experts, out_features, in_features, device="cuda", dtype=torch.bfloat16
+    )
+
+    out = permute_free_grouped_gemm_forward(
+        preact, weights, routing, activation="silu", dispatched_probs=probs
+    ).out
+    assert out.shape == (num_recv_tokens, out_features)
+
+    g = preact[:, :in_features].float()
+    u = preact[:, in_features:].float()
+    act = torch.nn.functional.silu(g) * u * probs[tok, exp][:, None] * valid[:, None].float()
+    per_slot = torch.einsum("rf,rhf->rh", act, weights[exp].float()) * valid[:, None].float()
+    ref = torch.zeros(num_recv_tokens, out_features, device="cuda", dtype=torch.float32)
+    ref.index_add_(0, tok, per_slot)
+    assert _rel_l2(out, ref) < 2e-2
+
+
+def test_route_list_fc2_dgrad():
+    """FC2 dgrad: token-space grad gathered per route into block-padded ``[em_max, F]``."""
+    torch.manual_seed(57)
+    num_recv_tokens, in_features, out_features = 128, 128, 128
+    num_experts, max_hits = 8, 4
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=25)
+    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
+    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+    em_max = int(routing.sorted_slot_ids.shape[0])
+    slot_token = routing.sorted_slot_ids
+    slot_expert = _expert_per_route(routing, em_max)
+    valid = slot_token < num_recv_tokens
+    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
+    exp = slot_expert.to(torch.int64).clamp_min(0)
+
+    grad_output = torch.randn(num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16)
+    weights = torch.randn(
+        num_experts, out_features, in_features, device="cuda", dtype=torch.bfloat16
+    )
+
+    dgrad = permute_free_grouped_gemm_bf16_fc2_dgrad(grad_output, weights, routing)
+    assert dgrad.shape == (em_max, in_features)
+
+    per_slot = torch.einsum("rh,rhf->rf", grad_output[tok].float(), weights[exp].float())
+    assert _rel_l2(dgrad[valid], per_slot[valid]) < 2e-2
+
+
+def test_route_list_gated_act_bwd():
+    """Standalone gated-activation backward: dpre + dprob vs autograd reference."""
+    torch.manual_seed(59)
+    num_recv_tokens, in_features = 128, 128
+    num_experts, max_hits = 8, 4
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=27)
+    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
+    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+    em_max = int(routing.sorted_slot_ids.shape[0])
+    slot_token = routing.sorted_slot_ids
+    slot_expert = _expert_per_route(routing, em_max)
+    valid = slot_token < num_recv_tokens
+    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
+    exp = slot_expert.to(torch.int64).clamp_min(0)
+
+    gate = torch.randn(em_max, in_features, device="cuda", dtype=torch.float32)
+    up = torch.randn(em_max, in_features, device="cuda", dtype=torch.float32)
+    gate = (gate * valid[:, None].float()).requires_grad_(True)
+    up = (up * valid[:, None].float()).requires_grad_(True)
+    probs = torch.rand(
+        num_recv_tokens, num_experts, device="cuda", dtype=torch.float32, requires_grad=True
+    )
+    grad_out = torch.zeros(em_max, in_features, device="cuda", dtype=torch.bfloat16)
+    grad_out[valid] = torch.randn(
+        int(valid.sum().item()), in_features, device="cuda", dtype=torch.bfloat16
+    )
+
+    pr = probs[tok, exp]
+    act = torch.nn.functional.silu(gate) * up * pr[:, None] * valid[:, None].float()
+    (act * grad_out.float()).sum().backward()
+    dpre_ref = torch.cat([gate.grad, up.grad], dim=1)
+
+    preact = torch.cat([gate.detach(), up.detach()], dim=1).to(torch.bfloat16)
+    dpre, dprob = permute_free_gated_act_bwd(
+        grad_out, preact, routing, activation="silu", dispatched_probs=probs.detach()
+    )
+    assert dpre.shape == (em_max, 2 * in_features)
+    assert dprob.shape == (num_recv_tokens, num_experts)
+    assert _rel_l2(dpre[valid], dpre_ref[valid]) < 2e-2
+    assert _rel_l2(dprob, probs.grad) < 2e-2
+
+
+def test_route_list_wgrad_out_accumulate():
+    """FC1 wgrad in-kernel fold into bf16/fp32 ``out`` (overwrite + accumulate)."""
+    torch.manual_seed(61)
+    num_recv_tokens, in_features, out_features = 128, 128, 128
+    num_experts, max_hits = 8, 4
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=29)
+    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
+    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+    em_max = int(routing.sorted_slot_ids.shape[0])
+    slot_token = routing.sorted_slot_ids
+    slot_expert = _expert_per_route(routing, em_max)
+    valid = slot_token < num_recv_tokens
+    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
+
+    hidden = torch.randn(num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16)
+    weights_shape = (num_experts, out_features, in_features)
+    grad = torch.zeros(em_max, out_features, device="cuda", dtype=torch.bfloat16)
+    grad[valid] = torch.randn(
+        int(valid.sum().item()), out_features, device="cuda", dtype=torch.bfloat16
+    )
+
+    per_slot = torch.einsum("rn,rk->rnk", grad.float(), hidden[tok].float())
+    per_slot = per_slot * valid[:, None, None].float()
+    ref = torch.zeros(num_experts, out_features, in_features, device="cuda", dtype=torch.float32)
+    ref.index_add_(0, slot_expert.to(torch.int64).clamp_min(0), per_slot)
+
+    for dtype in (torch.bfloat16, torch.float32):
+        out = torch.zeros(weights_shape, device="cuda", dtype=dtype)
+        ret = permute_free_grouped_gemm_bf16_wgrad(
+            hidden, grad, weights_shape, routing, out=out, accumulate=False
+        )
+        assert ret is out
+        assert _rel_l2(out, ref) < 2e-2
+        permute_free_grouped_gemm_bf16_wgrad(
+            hidden, grad, weights_shape, routing, out=out, accumulate=True
+        )
+        assert _rel_l2(out, 2.0 * ref) < 2e-2
+
+
+def test_permute_free_forward_dispatch():
+    """``permute_free_grouped_gemm_forward`` routes FC1 plain GEMM and FC2 standalone-act paths."""
+    torch.manual_seed(63)
+    num_recv_tokens, hidden_dim, ffn = 128, 128, 128
+    num_experts, max_hits = 8, 3
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=31)
+
+    fc1_routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
+    fc1_routing = prepare_moe_align(fc1_routing, _FLYDSL_FWD_BLOCK_M)
+    hidden = torch.randn(num_recv_tokens, hidden_dim, device="cuda", dtype=torch.bfloat16)
+    w1 = torch.randn(num_experts, 2 * ffn, hidden_dim, device="cuda", dtype=torch.bfloat16)
+    res_fc1 = permute_free_grouped_gemm_forward(hidden, w1, fc1_routing)
+    direct = permute_free_grouped_gemm_bf16(hidden, w1, fc1_routing)
+    valid_fc1 = fc1_routing.sorted_slot_ids < num_recv_tokens
+    assert _rel_l2(res_fc1.out[valid_fc1], direct[valid_fc1]) < 1e-3
+
+    fc2_routing = PermuteFreeMetadata(
+        routing_map=routing_map, num_experts=num_experts, route_space=True, activation="silu"
+    )
+    prepare_moe_align(fc2_routing, _FLYDSL_FWD_BLOCK_M)
+    em_max = int(fc2_routing.sorted_slot_ids.shape[0])
+    slot_token = fc2_routing.sorted_slot_ids
+    slot_expert = _expert_per_route(fc2_routing, em_max)
+    valid = slot_token < num_recv_tokens
+    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
+    exp = slot_expert.to(torch.int64).clamp_min(0)
+
+    preact = torch.zeros(em_max, 2 * ffn, device="cuda", dtype=torch.bfloat16)
+    preact[valid] = torch.randn(
+        int(valid.sum().item()), 2 * ffn, device="cuda", dtype=torch.bfloat16
+    )
+    probs = torch.rand(num_recv_tokens, num_experts, device="cuda", dtype=torch.float32)
+    w2 = torch.randn(num_experts, hidden_dim, ffn, device="cuda", dtype=torch.bfloat16)
+    out = permute_free_grouped_gemm_forward(
+        preact, w2, fc2_routing, activation="silu", dispatched_probs=probs
+    ).out
+    assert out.shape == (num_recv_tokens, hidden_dim)
+
+    g = preact[:, :ffn].float()
+    u = preact[:, ffn:].float()
+    act = torch.nn.functional.silu(g) * u * probs[tok, exp][:, None] * valid[:, None].float()
+    per_slot = torch.einsum("rf,rhf->rh", act, w2[exp].float()) * valid[:, None].float()
+    ref = torch.zeros(num_recv_tokens, hidden_dim, device="cuda", dtype=torch.float32)
+    ref.index_add_(0, tok, per_slot)
+    assert _rel_l2(out, ref) < 2e-2
+
+
+def test_is_permute_free_grouped_gemm_enabled(monkeypatch):
+    """Env gate: True only on ROCm with ``NVTE_PERMUTE_FREE_GROUPED_GEMM=1``."""
+    monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "1")
+    assert is_permute_free_grouped_gemm_enabled() is True
+    monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "0")
+    assert is_permute_free_grouped_gemm_enabled() is False
+    monkeypatch.delenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", raising=False)
+    assert is_permute_free_grouped_gemm_enabled() is False
+
+
 @pytest.mark.skip(reason="apply_route_probs not ported to transformer_engine.pytorch.moe yet")
 def test_apply_route_probs_fwd_bwd():
     """Fused per-route prob apply (gather+multiply) vs an autograd advanced-index reference."""
-    from transformer_engine.pytorch.moe import (
-        get_default_moe_kernel_config,
-        prepare_moe_align,
-    )
+    from transformer_engine.pytorch.moe import prepare_moe_align
     # apply_route_probs was not ported; kept for when route_prob helper lands in moe/.
-    _ = get_default_moe_kernel_config, prepare_moe_align
+    _ = prepare_moe_align
 
     torch.manual_seed(31)
     num_recv_tokens, hidden_dim = 128, 192
@@ -518,8 +756,7 @@ def test_apply_route_probs_fwd_bwd():
 
     routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=9)
     routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
-    cfg = get_default_moe_kernel_config(num_recv_tokens)
-    prepare_moe_align(routing, int(cfg["BLOCK_SIZE_M"]))
+    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
 
     em_max = int(routing.sorted_slot_ids.shape[0])
     num_routes = int(routing_map.sum().item())

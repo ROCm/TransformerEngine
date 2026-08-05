@@ -14,9 +14,8 @@
 from __future__ import annotations
 
 import os
-import warnings
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -40,14 +39,13 @@ __all__ = [
     "PermuteFreeForwardResult",
     "PermuteFreeBackwardResult",
     "prepare_moe_align",
-    "get_default_moe_kernel_config",
     "is_permute_free_grouped_gemm_enabled",
 ]
 
 _WGRAD_CONTRACT_M = 32
 
-# Max forward align/kernel ``block_m`` for fwd/dgrad FlyDSL Permute-free Grouped GEMM.
-_FLYDSL_GATED_BLOCK_M = 256
+# Minimum v3 gather/dgrad block_m (128x256 MFMA floor).
+_FLYDSL_MIN_BLOCK_M = 128
 _FLYDSL_FWD_BLOCK_M = 256
 _FLYDSL_FWD_LARGE_TIER = 128
 
@@ -94,16 +92,12 @@ def _pf_moe_fwd(
     routing: MoERoutingMetadata,
     *,
     num_recv_tokens: int,
-    config: Dict[str, Any],
+    block_m: int,
     index_a_by_route_pos: bool = False,
-    activation: Optional[str] = None,
-    dispatched_probs: Optional[torch.Tensor] = None,
-    preact_out: Optional[torch.Tensor] = None,
-    gated_a: bool = False,
 ) -> None:
-    """Run the route-list gather-GEMM (forward or dgrad) via FlyDSL."""
+    """Run the route-list gather-GEMM (forward or dgrad) via FlyDSL autotuning."""
     autotuned, supported = _get_flydsl_fwd()
-    block_m = int(config["BLOCK_SIZE_M"])
+    block_m = int(block_m)
     if not supported(A, B, block_m=block_m):
         raise RuntimeError(
             "FlyDSL grouped GEMM does not support these operands "
@@ -119,10 +113,6 @@ def _pf_moe_fwd(
         num_recv_tokens=num_recv_tokens,
         block_m=block_m,
         index_a_by_route_pos=index_a_by_route_pos,
-        activation=activation,
-        dispatched_probs=dispatched_probs,
-        preact_out=preact_out,
-        gated_a=gated_a,
     )
 
 
@@ -130,10 +120,7 @@ def _fwd_align_block_size_m(
     A: torch.Tensor,
     B: torch.Tensor,
     *,
-    gated: bool,
-    default_block_m: int,
     num_tokens: int,
-    gated_a: bool = False,
 ) -> int:
     """Pick the forward align/kernel ``block_m``, favoring the backend that will run.
 
@@ -141,34 +128,25 @@ def _fwd_align_block_size_m(
     layer's FC1 fwd, FC1 dgrad and FC2 fwd (they reuse ``routing.block_size_m``), so it is chosen
     once here. When the FlyDSL backend will run and the workload is on the large-token tier
     (``num_tokens >= _FLYDSL_FWD_LARGE_TIER``), prefer :data:`_FLYDSL_FWD_BLOCK_M` (256): it lifts
-    the non-gated FC1 fwd, FC1 dgrad, and ``gated_a`` FC2 onto the faster ``256x32`` tile. The
-    gated FC1 epilogue stages a ``2F`` [gate|up] B-tile that overflows LDS at 256, so it drops back
-    to :data:`_FLYDSL_GATED_BLOCK_M` (128). Small/medium tiers keep the token-count default.
+    FC1 fwd, FC1 dgrad, and FC2 onto the faster ``256x32`` tile. Small/medium tiers default to
+    :data:`_FLYDSL_MIN_BLOCK_M` (128), the v3 gather/dgrad floor.
     """
-    if gated:
-        # The gated FC1 epilogue stages a 2F [gate|up] B-tile: even the LDS-valid 256 tiles are
-        # the slow tiny ones, so the measured-best policy is a hard cap at _FLYDSL_GATED_BLOCK_M
-        # (~1.35x at 128 vs ~1.06x at 256). Never bump; only allow the picker to confirm/keep a
-        # value <= 128 (dropping the default when it exceeds the cap).
-        cap = min(default_block_m, _FLYDSL_GATED_BLOCK_M)
-        candidates = {c for c in (_FLYDSL_GATED_BLOCK_M, default_block_m) if c <= cap}
-    else:
-        # Non-gated FC1 / dgrad / gated_a FC2: offer the default and any smaller floor (so the
-        # picker can drop to a smaller LDS-valid block_m), plus the 256 bump on the large-token
-        # tier, where it is a measured win and the extra E_local*128 align padding is a negligible
-        # fraction of the routed work.
-        candidates = {c for c in (_FLYDSL_GATED_BLOCK_M, default_block_m) if c <= default_block_m}
-        if num_tokens >= _FLYDSL_FWD_LARGE_TIER:
-            candidates.add(_FLYDSL_FWD_BLOCK_M)
-        # The v3 gather/dgrad tile requires block_m >= 128 (128x256 MFMA minimum), so on a
-        # small-token tier where the token-count default is < 128 we must still floor the align
-        # block_m to 128 rather than emit a sub-tile the kernel cannot run.
-        from .pf_fwd_wrapper import _v3_enabled
+    default_block_m = (
+        _FLYDSL_FWD_BLOCK_M if num_tokens >= _FLYDSL_FWD_LARGE_TIER else _FLYDSL_MIN_BLOCK_M
+    )
+    # Offer the default and any smaller floor (so the picker can drop to a smaller LDS-valid
+    # block_m), plus the 256 bump on the large-token tier, where it is a measured win and the
+    # extra E_local*128 align padding is a negligible fraction of the routed work.
+    candidates = {c for c in (_FLYDSL_MIN_BLOCK_M, default_block_m) if c <= default_block_m}
+    if num_tokens >= _FLYDSL_FWD_LARGE_TIER:
+        candidates.add(_FLYDSL_FWD_BLOCK_M)
+    from .pf_fwd_wrapper import _v3_enabled
 
-        if _v3_enabled():
-            candidates = {c for c in candidates if c >= _FLYDSL_GATED_BLOCK_M} or {
-                _FLYDSL_GATED_BLOCK_M
-            }
+    # The v3 gather/dgrad tile requires block_m >= 128 (128x256 MFMA minimum), so on a
+    # small-token tier where the default would be < 128 we must still floor the align
+    # block_m to 128 rather than emit a sub-tile the kernel cannot run.
+    if _v3_enabled():
+        candidates = {c for c in candidates if c >= _FLYDSL_MIN_BLOCK_M} or {_FLYDSL_MIN_BLOCK_M}
 
     # Prefer the in-tree FlyDSL block_m picker when available.
     try:
@@ -176,58 +154,29 @@ def _fwd_align_block_size_m(
     except Exception:  # pylint: disable=broad-except
         flydsl_moe_fwd_pick_block_m = None
     if flydsl_moe_fwd_pick_block_m is not None:
-        picked = flydsl_moe_fwd_pick_block_m(
-            A, B, gated=gated, gated_a=gated_a, candidates=tuple(candidates)
-        )
+        picked = flydsl_moe_fwd_pick_block_m(A, B, candidates=tuple(candidates))
         if picked is not None:
             return picked
-
-    # Legacy fallback: cap the gated fwd to 128, else default.
-    if not gated or default_block_m <= _FLYDSL_GATED_BLOCK_M:
-        return default_block_m
-    _, supported = _get_flydsl_fwd()
-    if supported(A, B, block_m=_FLYDSL_GATED_BLOCK_M):
-        return _FLYDSL_GATED_BLOCK_M
     return default_block_m
+
+
+def _ensure_fwd_align(
+    routing: MoERoutingMetadata,
+    A: torch.Tensor,
+    B: torch.Tensor,
+) -> int:
+    """Return ``routing.block_size_m``, building fwd align buffers when missing."""
+    if routing.sorted_slot_ids is not None and routing.block_size_m is not None:
+        return int(routing.block_size_m)
+    block_m = _fwd_align_block_size_m(A, B, num_tokens=routing.num_recv_tokens)
+    prepare_moe_align(routing, block_m)
+    return block_m
 
 
 def is_permute_free_grouped_gemm_enabled() -> bool:
     from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
     return IS_HIP_EXTENSION and os.getenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "0") == "1"
-
-
-def get_default_moe_kernel_config(num_tokens: int) -> Dict[str, Any]:
-    """Return align ``block_m`` tile config for the route-list bf16 MoE path."""
-    # aiter's tuned config is an optional accelerator.
-    try:
-        from aiter.ops.triton.utils.moe_config_utils import get_optimal_moe_config
-
-        return get_optimal_moe_config(torch.bfloat16, M=num_tokens)
-    except Exception:  # pylint: disable=broad-except
-        pass
-
-    if num_tokens <= 32:
-        block_m = 16
-    elif num_tokens <= 96:
-        block_m = 32
-    elif num_tokens <= 512:
-        block_m = 64
-    else:
-        block_m = 128
-
-    block_n = 64 if num_tokens <= 64 else 128
-    block_k = 128 if num_tokens <= 64 else 64
-    group_m = 16 if num_tokens // max(block_m, 1) > 128 else 1
-
-    return {
-        "BLOCK_SIZE_M": block_m,
-        "BLOCK_SIZE_N": block_n,
-        "BLOCK_SIZE_K": block_k,
-        "GROUP_SIZE_M": group_m,
-        "num_warps": 4 if num_tokens <= 128 else 8,
-        "num_stages": 2,
-    }
 
 
 def moe_align_route_list(
@@ -415,16 +364,13 @@ def permute_free_grouped_gemm_bf16(
     hidden_states: torch.Tensor,
     weights: torch.Tensor | list[torch.Tensor],
     routing: MoERoutingMetadata,
-    *,
-    config: Optional[Dict[str, Any]] = None,
-    activation: Optional[str] = None,
-    dispatched_probs: Optional[torch.Tensor] = None,
-    return_preact: bool = False,
 ) -> torch.Tensor:
     """Route-list gather-in-GEMM (FC1 forward) for bf16 MoE.
 
     Computes ``C[slot] = A[sorted_slot_ids[slot]] @ W[expert(slot)]^T`` for each block-padded
-    slot, writing directly into the ``[em_max, out_features]`` block-padded output.
+    slot, writing directly into the ``[em_max, out_features]`` block-padded output. Gated
+    activation is **not** fused here; FC1 emits the raw ``2F`` ``[gate | up]`` pre-activation
+    and the standalone gated-act helpers apply ``act(gate) * up [* prob]`` on FC2.
 
     Parameters
     ----------
@@ -434,28 +380,14 @@ def permute_free_grouped_gemm_bf16(
         Expert weights ``[num_experts, out_features, in_features]`` or list of ``[out, in]``.
     routing:
         ``MoERoutingMetadata`` carrying (or able to build) the route-list align buffers.
-    activation:
-        When set (``"silu"`` / ``"gelu"``), fuses the **gated** activation into the GEMM
-        epilogue: ``out_features`` is the gate+up width (``2F``), the output is the ``F``-wide
-        activated buffer ``act(gate) * up``, and the separate activation kernel is skipped. The
-        weight output dim must be laid out as ``[gate | up]``.
-    dispatched_probs:
-        Optional ``[num_recv_tokens, num_experts]`` gating probabilities. When given (with a
-        fused ``activation``), each route's ``prob[token, expert]`` is multiplied into the
-        activation in-kernel, skipping the separate route-prob-apply pass.
-    return_preact:
-        When set (only valid with a fused ``activation``), also allocate and fill a
-        ``[T * min(topk, E), 2F]`` buffer with the raw ``[gate | up]`` pre-activation and return it
-        alongside the activated output. The backward needs it to reconstruct the 2F GEMM-output
-        gradient; keep ``False`` for inference to skip the extra store.
 
     Returns
     -------
     torch.Tensor
-        Block-padded ``[em_max, out_features]`` (or ``[em_max, F]`` with a fused ``activation``),
-        bf16 (expert-contiguous, each expert padded to ``block_size``). The valid rows are the
-        block-padded slots whose ``sorted_slot_ids[slot] < num_recv_tokens``; the padding slots
-        carry inert dead values. Consumers locate each expert's rows via the routing metadata:
+        Block-padded ``[em_max, out_features]``, bf16 (expert-contiguous, each expert padded to
+        ``block_size``). The valid rows are the block-padded slots whose
+        ``sorted_slot_ids[slot] < num_recv_tokens``; the padding slots carry inert dead values.
+        Consumers locate each expert's rows via the routing metadata:
 
         - ``block_start[e]`` (block units): expert ``e``'s rows occupy padded slots
           ``[block_start[e] * block_size, ...)``, with within-rank offset matching each route.
@@ -484,26 +416,7 @@ def permute_free_grouped_gemm_bf16(
             f"num_experts mismatch: weights have {num_experts}, routing has {routing.num_experts}."
         )
 
-    gated_act = activation is not None
-    if gated_act and out_features % 2 != 0:
-        raise ValueError(
-            f"Gated activation requires an even (gate+up) out_features, got {out_features}."
-        )
-    # Fused gated activation halves the stored width (2F -> F).
-    stored_features = out_features // 2 if gated_act else out_features
-
-    # Copy so the backend-aware block_m override never mutates the caller's config dict.
-    kernel_config = dict(config or get_default_moe_kernel_config(num_recv_tokens))
-    block_size_m = _fwd_align_block_size_m(
-        hidden_states,
-        weights_stacked,
-        gated=gated_act,
-        default_block_m=int(kernel_config["BLOCK_SIZE_M"]),
-        num_tokens=num_recv_tokens,
-    )
-    kernel_config["BLOCK_SIZE_M"] = block_size_m
-
-    routing = prepare_moe_align(routing, block_size_m)
+    block_size_m = _ensure_fwd_align(routing, hidden_states, weights_stacked)
 
     # Worst-case (sync-free) allocation: size the output to the block-padded upper bound
     # em_max = sorted_slot_ids.shape[0], which is derived purely from shapes (num_recv_tokens,
@@ -511,17 +424,9 @@ def permute_free_grouped_gemm_bf16(
     # (.item()) that a compact [num_routes, N] allocation would require.
     em_max = routing.sorted_slot_ids.shape[0]
     output = torch.empty(
-        (em_max, stored_features),
+        (em_max, out_features),
         dtype=torch.bfloat16,
         device=hidden_states.device,
-    )
-
-    if return_preact and not gated_act:
-        raise ValueError("return_preact requires a fused activation.")
-    preact = (
-        torch.empty((em_max, out_features), dtype=torch.bfloat16, device=hidden_states.device)
-        if return_preact
-        else None
     )
 
     _pf_moe_fwd(
@@ -530,14 +435,9 @@ def permute_free_grouped_gemm_bf16(
         output,
         routing,
         num_recv_tokens=num_recv_tokens,
-        config=kernel_config,
+        block_m=block_size_m,
         index_a_by_route_pos=False,
-        activation=activation,
-        dispatched_probs=dispatched_probs,
-        preact_out=preact,
     )
-    if return_preact:
-        return output, preact
     return output
 
 
@@ -635,8 +535,6 @@ def permute_free_grouped_gemm_bf16_dgrad(
     grad_output: torch.Tensor,
     weights: torch.Tensor | list[torch.Tensor],
     routing: MoERoutingMetadata,
-    *,
-    config: Optional[Dict[str, Any]] = None,
 ) -> torch.Tensor:
     """Route-list gather-in-GEMM dgrad (FC1 backward wrt input).
 
@@ -677,13 +575,7 @@ def permute_free_grouped_gemm_bf16_dgrad(
         weights_stacked = weights_stacked.contiguous()
     weights_t = weights_stacked.transpose(1, 2)
 
-    if routing.sorted_slot_ids is None or routing.block_size_m is None:
-        fwd_config = config or get_default_moe_kernel_config(routing.num_recv_tokens)
-        routing = prepare_moe_align(routing, int(fwd_config["BLOCK_SIZE_M"]))
-    block_size_m = int(routing.block_size_m)
-
-    dgrad_config = get_default_moe_kernel_config(int(grad_output.shape[0]))
-    dgrad_config = {**dgrad_config, "BLOCK_SIZE_M": block_size_m}
+    block_size_m = _ensure_fwd_align(routing, grad_output, weights_t)
 
     # Two-stage dgrad reduction (contention-free): (1) plain compact store of each per-route
     # dX[route] = grad[route] @ W1[e] into an [T * min(topk, E), in] bf16 buffer (coalesced, no atomics),
@@ -701,7 +593,7 @@ def permute_free_grouped_gemm_bf16_dgrad(
         compact,
         routing,
         num_recv_tokens=routing.num_recv_tokens,
-        config=dgrad_config,
+        block_m=block_size_m,
         index_a_by_route_pos=True,
     )
     return route_gather_combine(
@@ -719,7 +611,6 @@ def permute_free_grouped_gemm_bf16_wgrad(
     weights_shape,
     routing: MoERoutingMetadata,
     *,
-    config: Optional[Dict[str, Any]] = None,
     out: Optional[torch.Tensor] = None,
     accumulate: bool = False,
     swap_gather: bool = False,
@@ -790,8 +681,11 @@ def permute_free_grouped_gemm_bf16_wgrad(
     # can pass that padded per-expert base to the kernel; routes are contiguous within an expert,
     # so base + within-rank indexes the correct padded grad row.
     if routing.block_start is None or routing.block_size_m is None:
-        fwd_config = config or get_default_moe_kernel_config(routing.num_recv_tokens)
-        routing = prepare_moe_align(routing, int(fwd_config["BLOCK_SIZE_M"]))
+        stub_w = torch.empty(
+            num_experts, out_features, in_features,
+            device=hidden_states.device, dtype=torch.bfloat16,
+        )
+        _ensure_fwd_align(routing, hidden_states, stub_w)
     routing = _prepare_wgrad_align(routing, contract_m)
     grad_base = (routing.block_start.to(torch.int64) * int(routing.block_size_m)).to(torch.int32)
 
@@ -843,34 +737,21 @@ def permute_free_grouped_gemm_bf16_fc2(
     fc2_input: torch.Tensor,
     weights: torch.Tensor | list[torch.Tensor],
     routing: MoERoutingMetadata,
-    *,
-    config: Optional[Dict[str, Any]] = None,
-    activation: Optional[str] = None,
-    dispatched_probs: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """Route-list FC2 forward with gather-combine to token order (bf16 MoE).
 
-    ``fc2_input`` is the route-ordered FC1 output. When ``activation`` is set (``"silu"`` /
-    ``"gelu"``) it is the raw ``2F`` ``[gate | up]`` pre-activation and the kernel fuses
-    ``act(gate) * up [* prob]`` on the ``A`` operand before the GEMM; otherwise it is the
-    ``F``-wide activated buffer (legacy path). For each route the kernel reads its row
-    (``index_a_by_route_pos=True``) and computes the compact per-route GEMM; a separate
-    contention-free gather-combine pass sums each token's routes into its output row.
+    ``fc2_input`` is the route-ordered ``F``-wide FC1 activation (or a transient buffer rebuilt
+    from the saved ``2F`` pre-activation via :func:`permute_free_gated_act_recompute`). For each
+    route the kernel reads its row (``index_a_by_route_pos=True``) and computes the compact
+    per-route GEMM; a separate contention-free gather-combine pass sums each token's routes
+    into its output row.
 
     Parameters
     ----------
     fc2_input:
-        Route-ordered activations ``[T * min(topk, E), in_features]`` (``F``) or, when
-        ``activation`` is set, the raw ``2F`` ``[gate | up]`` pre-activation from FC1.
+        Route-ordered activations ``[em_max, in_features(F)]``, bf16.
     weights:
-        Expert weights ``[num_experts, out_features, in_features]`` (W2) or list of ``[out,
-        in]``.
-    activation:
-        When set, fuse ``act(gate) * up`` (+ optional ``dispatched_probs``) on the ``A``
-        operand (FC2 prologue). Requires ``fc2_input.shape[-1] == 2 * in_features``.
-    dispatched_probs:
-        Optional ``[num_recv_tokens, num_experts]`` gating probabilities (fused in the FC2
-        prologue when ``activation`` is set).
+        Expert weights ``[num_experts, out_features(H), in_features(F)]`` (W2) or list of ``[H, F]``.
     routing:
         ``MoERoutingMetadata`` carrying (or able to build) the route-list align buffers.
 
@@ -892,14 +773,7 @@ def permute_free_grouped_gemm_bf16_fc2(
         weights_stacked = weights_stacked.contiguous()
 
     num_experts, out_features, in_features = weights_stacked.shape
-    gated_a = activation is not None
-    if gated_a:
-        if fc2_input.shape[-1] != 2 * in_features:
-            raise ValueError(
-                f"gated FC2 expects 2F preact input ({2 * in_features} cols), "
-                f"got {fc2_input.shape[-1]}."
-            )
-    elif fc2_input.shape[-1] != in_features:
+    if fc2_input.shape[-1] != in_features:
         raise ValueError(
             f"fc2_input in_features ({fc2_input.shape[-1]}) does not match weights "
             f"({in_features})."
@@ -909,12 +783,7 @@ def permute_free_grouped_gemm_bf16_fc2(
             f"num_experts mismatch: weights have {num_experts}, routing has {routing.num_experts}."
         )
 
-    if routing.sorted_slot_ids is None or routing.block_size_m is None:
-        fwd_config = config or get_default_moe_kernel_config(routing.num_recv_tokens)
-        routing = prepare_moe_align(routing, int(fwd_config["BLOCK_SIZE_M"]))
-    block_size_m = int(routing.block_size_m)
-    kernel_config = get_default_moe_kernel_config(int(fc2_input.shape[0]))
-    kernel_config = {**kernel_config, "BLOCK_SIZE_M": block_size_m}
+    block_size_m = _ensure_fwd_align(routing, fc2_input, weights_stacked)
 
     # Two-stage combine (contention-free): (1) plain compact store of each per-route result
     # y[route] = fc2_input[route] @ W2[e] into an [T * min(topk, E), out] bf16 buffer (coalesced, no
@@ -933,11 +802,8 @@ def permute_free_grouped_gemm_bf16_fc2(
         compact,
         routing,
         num_recv_tokens=routing.num_recv_tokens,
-        config=kernel_config,
+        block_m=block_size_m,
         index_a_by_route_pos=True,
-        activation=activation,
-        dispatched_probs=dispatched_probs,
-        gated_a=gated_a,
     )
     return route_gather_combine(
         compact,
@@ -952,8 +818,6 @@ def permute_free_grouped_gemm_bf16_fc2_dgrad(
     grad_output: torch.Tensor,
     weights: torch.Tensor | list[torch.Tensor],
     routing: MoERoutingMetadata,
-    *,
-    config: Optional[Dict[str, Any]] = None,
 ) -> torch.Tensor:
     """FC2 dgrad: gather the token-space grad back into the compact route buffer.
 
@@ -997,12 +861,7 @@ def permute_free_grouped_gemm_bf16_fc2_dgrad(
         weights_stacked = weights_stacked.contiguous()
     weights_t = weights_stacked.transpose(1, 2)
 
-    if routing.sorted_slot_ids is None or routing.block_size_m is None:
-        fwd_config = config or get_default_moe_kernel_config(routing.num_recv_tokens)
-        routing = prepare_moe_align(routing, int(fwd_config["BLOCK_SIZE_M"]))
-    block_size_m = int(routing.block_size_m)
-    dgrad_config = get_default_moe_kernel_config(int(grad_output.shape[0]))
-    dgrad_config = {**dgrad_config, "BLOCK_SIZE_M": block_size_m}
+    block_size_m = _ensure_fwd_align(routing, grad_output, weights_t)
 
     # Padded route-order output; the gather-GEMM writes only the compact [0, num_routes)
     # range and never visits the tail (bounded by num_tokens_post_padded, sentinel-masked).
@@ -1020,7 +879,7 @@ def permute_free_grouped_gemm_bf16_fc2_dgrad(
         dgrad,
         routing,
         num_recv_tokens=grad_output.shape[0],
-        config=dgrad_config,
+        block_m=block_size_m,
         index_a_by_route_pos=False,
     )
     return dgrad
@@ -1032,7 +891,6 @@ def permute_free_grouped_gemm_bf16_fc2_wgrad(
     weights_shape,
     routing: MoERoutingMetadata,
     *,
-    config: Optional[Dict[str, Any]] = None,
     out: Optional[torch.Tensor] = None,
     accumulate: bool = False,
     preact: Optional[torch.Tensor] = None,
@@ -1089,7 +947,6 @@ def permute_free_grouped_gemm_bf16_fc2_wgrad(
             grad_output,
             weights_shape,
             routing,
-            config=config,
             out=out,
             accumulate=accumulate,
             swap_gather=True,
@@ -1099,7 +956,6 @@ def permute_free_grouped_gemm_bf16_fc2_wgrad(
         grad_output,
         weights_shape,
         routing,
-        config=config,
         swap_gather=True,
     )  # [E, H, F] bf16
     if out is None:
