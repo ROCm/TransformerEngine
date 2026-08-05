@@ -38,6 +38,18 @@ cd benchmarks/microbenchmarks
 ./run_all_benchmarks.sh --ingest --out-dir dashboard/data --runs 5   # a fresh baseline (needs >=4)
 ```
 
+By default the shards hold **host wall-clock** time and its throughput. Add
+`--kernel-profile` to instead record **GPU kernel (device) time** (via
+`torch.profiler`, excluding host launch/timing overhead):
+
+```bash
+./run_all_benchmarks.sh --ingest --kernel-profile --out-dir dashboard/data
+```
+
+Pick one timing mode per shard and stick with it — kernel and wall-clock values
+aren't comparable, so appending both into one shard makes the trend meaningless
+(start a fresh `--ref`/`--pr` shard when switching).
+
 The arch (`gfx942` / `gfx950` / `gfx1250`) is auto-detected via `rocminfo`.
 
 View it locally (no server dependency other than a static file server, because

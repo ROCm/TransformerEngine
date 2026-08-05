@@ -22,6 +22,8 @@ Usage: run_all_benchmarks.sh [options]
                    a noise band needs >=4 runs). Default: 1
   --ref REF        ingest baseline ref (default: dev)
   --pr N           ingest as PR <N> instead of --ref (isolated from the baseline)
+  --kernel-profile record GPU kernel (device) time instead of host wall-clock
+                   (passes --kernel-profile through to each benchmark)
   --bundle         after ingesting, emit a self-contained dashboard/dist/dashboard.html
   -h, --help       show this help
 
@@ -51,6 +53,7 @@ RUNS=1
 REF="dev"
 PR=""
 BUNDLE=0
+KERNEL_PROFILE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -59,6 +62,7 @@ while [[ $# -gt 0 ]]; do
     --runs) RUNS="$2"; shift 2 ;;
     --ref) REF="$2"; shift 2 ;;
     --pr) PR="$2"; shift 2 ;;
+    --kernel-profile) KERNEL_PROFILE="--kernel-profile"; shift ;;
     --bundle) BUNDLE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument '$1'" >&2; usage >&2; exit 2 ;;
@@ -86,7 +90,7 @@ for ((run = 1; run <= RUNS; run++)); do
   [[ "$RUNS" -gt 1 ]] && echo "===== pass $run/$RUNS ====="
   for b in "${BENCHMARKS[@]}"; do
     echo ">>> $b"
-    "$PY" "$b" --csv
+    "$PY" "$b" --csv ${KERNEL_PROFILE}
   done
   if [[ "$INGEST" == 1 ]]; then
     echo ">>> ingest -> $OUT_DIR"

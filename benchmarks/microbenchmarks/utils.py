@@ -88,8 +88,38 @@ def generate_gemm_test_cases(configs=None, m_sizes=None, dtypes=None):
 # Timing helpers
 # ---------------------------------------------------------------------------
 
+# Set by run_benchmarks() under --kernel-profile: when True, time_func reports
+# GPU kernel (device) time per call instead of host wall-clock time.
+_KERNEL_METRIC = False
+
+
+def _kernel_time_ms(fn, warmup=10, iters=50):
+    """Mean GPU kernel (device) time per call, in ms, via torch.profiler.
+
+    Sums the self device time of every kernel launched per call, so it excludes
+    host launch overhead and host-side timing noise -- the same device-time
+    metric that --kernel-profile breaks down per kernel.
+    """
+    from torch.profiler import profile, ProfilerActivity
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        for _ in range(iters):
+            fn()
+        torch.cuda.synchronize()
+    device_us = sum(e.self_device_time_total for e in prof.key_averages())
+    return (device_us / iters) / 1e3
+
+
 def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
     """Time *fn* and return ``(mean_ms, measurement)``.
+
+    Normally returns host wall-clock time via ``torch.utils.benchmark``. Under
+    ``--kernel-profile`` (set by :func:`run_benchmarks`) it instead returns the
+    mean GPU kernel (device) time per call and a ``None`` measurement, so the
+    reported time and throughput -- and the dashboard shards built from them --
+    reflect kernel time rather than host wall-clock time.
 
     The ``Measurement`` object carries per-sample times accessible via
     ``measurement.times`` (total wall time per run) and
@@ -98,6 +128,8 @@ def time_func(fn, method="adaptive", min_run_time=DEFAULT_MIN_RUN_TIME_SECONDS):
     method: "adaptive" uses adaptive_autorange (good for compute-bound),
             "blocked"  uses blocked_autorange  (good for memory-bound).
     """
+    if _KERNEL_METRIC:
+        return _kernel_time_ms(fn), None
     timer = benchmark.Timer(stmt="fn()", globals={"fn": fn})
     if method == "blocked":
         m = timer.blocked_autorange(min_run_time=min_run_time)
@@ -269,10 +301,10 @@ def make_parser(**kwargs):
     parser.add_argument(
         "--kernel-profile", action="store_true", default=False,
         help=(
-            "Profile GPU kernels using torch.profiler in addition to normal "
-            "timing. Prints per-kernel CUDA times output. "
-            "Use with --csv to write kernel-level data to CSV. "
-            "--csv-samples is ignored in this mode."
+            "Report GPU kernel (device) time as the headline metric instead of "
+            "host wall-clock time (via torch.profiler), and print a per-kernel "
+            "breakdown. Use with --csv to also write a <name>_kernel_profile.csv "
+            "per-kernel table. --csv-samples is ignored in this mode."
         ),
     )
     return parser
@@ -334,6 +366,9 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
     if args is None:
         args = make_parser().parse_args()
 
+    global _KERNEL_METRIC
+    _KERNEL_METRIC = bool(args.kernel_profile)
+
     if args.kernel_profile:
         from torch.profiler import profile, ProfilerActivity
 
@@ -369,11 +404,17 @@ def run_benchmarks(test_cases, bench_fn, param_columns, default_csv=None,
         all_case_metrics.append((case_params, metric_records))
 
         if args.kernel_profile:
-            with profile(
-                activities=[ProfilerActivity.CUDA],
-            ) as prof:
-                bench_fn(**case)
-                torch.cuda.synchronize()
+            # time_func already reported kernel time above; disable it here so
+            # this per-kernel breakdown pass doesn't nest torch profilers.
+            _KERNEL_METRIC = False
+            try:
+                with profile(
+                    activities=[ProfilerActivity.CUDA],
+                ) as prof:
+                    bench_fn(**case)
+                    torch.cuda.synchronize()
+            finally:
+                _KERNEL_METRIC = True
 
             averages = prof.key_averages()
             gpu_events = [e for e in averages if e.self_device_time_total > 0]
