@@ -176,8 +176,6 @@ def _score_reduce_lowering(ctx, Hq, Hk, W_o, *, out_dtype):
             _score_reduce_kernel,
             Hq, Hk, W_o,
             grid=grid_fn,
-            num_warps=4,
-            num_stages=2,
             constexprs={
                 "B": B,
                 "oH": oH,

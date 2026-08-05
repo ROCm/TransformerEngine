@@ -7,13 +7,12 @@
 """Python interface for GEMM extensions"""
 
 from typing import Iterable, Optional, Tuple, Union, List
-import ctypes
 import os
 import functools
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
-from ..constants import TE_DType
+from ..constants import TE_DType, DType
 from ..utils import get_sm_count, _empty_tensor
 if IS_HIP_EXTENSION:
     from ..utils import get_device_compute_capability
@@ -22,6 +21,7 @@ if IS_HIP_EXTENSION:
 from ..quantized_tensor import Quantizer
 from ..tensor.storage.float8_blockwise_tensor_storage import Float8BlockwiseQTensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
+from ..tensor.storage.grouped_tensor_storage import GroupedTensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..tensor.utils import is_custom
 from ..custom_recipes.gemm import custom_gemm
@@ -52,48 +52,6 @@ def get_cublas_workspace_size_bytes() -> None:
         # 32 MiB for NVFP4 GEMM, plus additional 1024 B for alignment and misc scales
         return 32 * 1024 * 1024 + 1024
     return 4_194_304
-
-
-def _hipkittens_workspace_bytes(m: int, n: int, k: int, layout: str) -> int:
-    """Compute workspace bytes needed for HipKittens MXFP8 GEMM."""
-    def _align(x: int) -> int:
-        return (x + 255) & ~255
-
-    transa = layout[0] == "T"
-    transb = layout[1] == "T"
-    k_iters = k // 128
-    scale_k = k // 32
-    sa_pk = _align(k_iters * m * 4)
-    sb_pk = k_iters * n * 4
-    needed = _align(sa_pk) + sb_pk
-    if not transa:
-        needed += _align(m * k) + _align(m * scale_k)
-    if transb:
-        needed += _align(n * k) + _align(n * scale_k) + _align(sb_pk)
-    return needed
-
-
-_workspace_cache: dict[int, torch.Tensor] = {}
-
-
-def _get_or_grow_workspace(device: int, needed: int) -> torch.Tensor:
-    """Return a cached workspace tensor, growing it if needed."""
-    needed = max(needed, get_cublas_workspace_size_bytes())
-    ws = _workspace_cache.get(device)
-    if ws is None or ws.shape[0] < needed:
-        ws = torch.empty(needed, dtype=torch.uint8, device=device)
-        _workspace_cache[device] = ws
-    return ws
-
-
-@functools.lru_cache(maxsize=None)
-def _use_hipkittens() -> bool:
-    """Check if HipKittens MXFP8 backend is active."""
-    if not IS_HIP_EXTENSION:
-        return False
-    if get_device_compute_capability() != (9, 5):
-        return False
-    return os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP8", "0") != "1"
 
 
 @functools.lru_cache(maxsize=None)
@@ -344,6 +302,38 @@ def mxfp4_gemm(
     return result
 
 
+def _is_nvfp4_row_scaled_tensor(tensor: torch.Tensor) -> bool:
+    """Whether tensor carries row-scaled NVFP4 global amax metadata."""
+    return isinstance(tensor, NVFP4TensorStorage) and tensor._row_scaled_nvfp4
+
+
+def _nvfp4_row_scaled_gemm_inputs(
+    A: NVFP4TensorStorage,
+    B: NVFP4TensorStorage,
+    *,
+    transa: bool,
+) -> Tuple[NVFP4TensorStorage, NVFP4TensorStorage, torch.Tensor]:
+    """Return GEMM aliases and FP32 output scales for row-scaled NVFP4."""
+    A_metadata = A.get_metadata()
+    weight_amax = A._amax_rowwise if transa else A._amax_columnwise
+    assert weight_amax is not None and weight_amax.numel() == 1
+    A_metadata["amax_rowwise" if transa else "amax_columnwise"] = weight_amax.new_ones(1)
+    A_metadata["row_scaled_nvfp4"] = False
+
+    B_metadata = B.get_metadata()
+    rhs_rowwise_amax = B._amax_rowwise
+    assert rhs_rowwise_amax is not None
+    B_metadata["amax_rowwise"] = rhs_rowwise_amax.new_ones(1)
+    B_metadata["row_scaled_nvfp4"] = False
+
+    assert rhs_rowwise_amax.dtype == torch.float32 and weight_amax.dtype == torch.float32
+    return (
+        NVFP4TensorStorage(**A_metadata),
+        NVFP4TensorStorage(**B_metadata),
+        (rhs_rowwise_amax * weight_amax).view(-1, 1),
+    )
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -373,17 +363,7 @@ def general_gemm(
     alpha = validate_gemm_scale(alpha, True)
     beta = validate_gemm_scale(beta, accumulate)
 
-    is_mxfp8 = isinstance(A, MXFP8TensorStorage)
-    if is_mxfp8 and _use_hipkittens():
-        a_size = A.size()
-        b_size = B.size()
-        m  = a_size[0] if transa else a_size[-1]
-        n  = b_size[-1] if transb else b_size[0]
-        k  = a_size[-1] if transa else a_size[0]
-        needed = _hipkittens_workspace_bytes(m, n, k, layout)
-        workspace = _get_or_grow_workspace(A.device.index, needed)
-    else:
-        workspace = get_cublas_workspace(A.device.index, ub is not None, False)
+    workspace = get_cublas_workspace(A.device.index, ub is not None, False)
 
     # On ROCm, FP4 is dequantized to BF16 in the workspace before GEMM.
     # Compute the required extra space and extend the workspace if needed.
@@ -512,7 +492,65 @@ def general_gemm(
         "beta": beta,
     }
 
-    out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+    if not _is_nvfp4_row_scaled_tensor(A) and not _is_nvfp4_row_scaled_tensor(B):
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+    else:
+        if _is_nvfp4_row_scaled_tensor(A):
+            raise NotImplementedError("Row-scaled NVFP4 GEMM does not support row-scaled A.")
+        assert layout[1] == "N", "Row-scaled NVFP4 GEMM currently supports N-layout B only."
+        if grad:
+            raise RuntimeError(
+                "Row-scaled NVFP4 GEMM currently supports fprop only. "
+                "Backward NVFP4 gradient quantizers should use scalar global amax."
+            )
+        assert not gelu, "Row-scaled NVFP4 GEMM currently does not support fused GELU."
+        assert not accumulate, "Row-scaled NVFP4 GEMM currently does not support accumulation."
+        assert (
+            quantization_params is None
+        ), "Row-scaled NVFP4 GEMM currently does not support output quantization."
+        assert ub is None, "Row-scaled NVFP4 GEMM currently does not support CommOverlap."
+        assert (
+            extra_output is None
+        ), "Row-scaled NVFP4 GEMM currently does not support extra output."
+        assert not bulk_overlap, "Row-scaled NVFP4 GEMM currently does not support bulk overlap."
+        assert out is None or (
+            isinstance(out, torch.Tensor) and not is_custom(out)
+        ), "Row-scaled NVFP4 GEMM currently supports only plain torch.Tensor outputs."
+        assert isinstance(
+            A, NVFP4TensorStorage
+        ), "Row-scaled NVFP4 GEMM currently requires NVFP4 A."
+        # cuBLAS folds NVFP4 global amax values into GEMM alpha. Keep the row-scaled
+        # recipe's global scales out of alpha and apply them in FP32 below.
+        gemm_A, gemm_B, rowwise_global_scales = _nvfp4_row_scaled_gemm_inputs(A, B, transa=transa)
+
+        requested_out, requested_out_dtype = out, out_dtype
+        fp32_out = (
+            torch.empty_like(requested_out, dtype=torch.float32)
+            if requested_out is not None
+            else None
+        )
+        gemm_args = list(args)
+        gemm_args[0] = gemm_A  # A
+        gemm_args[2] = gemm_B  # B
+        gemm_args[4] = fp32_out  # out
+        gemm_args[5] = None  # quantization_params
+        gemm_args[6] = TE_DType[torch.float32]  # out_dtype
+        gemm_args[7] = None  # bias
+        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*gemm_args, **kwargs)
+        out_2d = out.reshape(-1, out.shape[-1])
+
+        assert rowwise_global_scales.dtype == torch.float32 and out.dtype == torch.float32
+        assert rowwise_global_scales.numel() == out_2d.shape[0]
+
+        out_2d.mul_(rowwise_global_scales)
+        if bias is not None:
+            out_2d.add_(bias.to(dtype=torch.float32))
+
+        if requested_out is not None:
+            requested_out.copy_(out.to(dtype=requested_out.dtype))
+            out = requested_out
+        elif requested_out_dtype is not None and requested_out_dtype != torch.float32:
+            out = out.to(dtype=requested_out_dtype)
 
     if IS_HIP_EXTENSION and use_bf16_tn_output_workaround:
         out = cast_if_needed(out, torch.float32)
@@ -537,7 +575,7 @@ def general_grouped_gemm(
     bias: Optional[List[torch.Tensor]] = None,
     use_bias: bool = False,
     use_split_accumulator: bool = False,
-    D_dtype: Optional[tex.DType] = None,
+    D_dtype: Optional[DType] = None,
     single_output=False,
 ) -> Tuple[List[torch.Tensor], ...]:
     """
@@ -569,6 +607,44 @@ def general_grouped_gemm(
         bias_dtype = TE_DType[grad_bias[0].dtype] if grad else TE_DType[bias[0].dtype]
     else:
         bias_dtype = TE_DType[torch.bfloat16]
+
+    if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in A):
+        raise NotImplementedError("Row-scaled NVFP4 grouped GEMM does not support row-scaled A.")
+    if any(_is_nvfp4_row_scaled_tensor(tensor) for tensor in B):
+        assert D_dtype is None, "Row-scaled NVFP4 grouped GEMM currently does not support D_dtype."
+        if single_output:
+            assert (
+                m_splits is not None
+            ), "Row-scaled NVFP4 grouped GEMM requires m_splits with single output."
+        out_init = out[0] if single_output else None
+        if single_output:
+            start_idx = 0
+            out_views = []
+            for i in range(num_gemms):
+                size = m_splits[i]
+                out_views.append(out_init[start_idx : start_idx + size])
+                start_idx += size
+        else:
+            out_views = out
+        for i in range(num_gemms):
+            if out_views[i].numel() == 0:
+                continue
+            general_gemm(
+                A[i],
+                B[i],
+                quantization_params=quantization_params[i],
+                out_dtype=out_views[i].dtype,
+                out=out_views[i],
+                gelu=gelu,
+                accumulate=accumulate,
+                layout=layout,
+                bias=bias[i] if use_bias else None,
+                use_split_accumulator=use_split_accumulator,
+                grad=grad,
+            )
+        if single_output:
+            out = out_init
+        return out, grad_bias, gelu_input
 
     if isinstance(quantization_params[0], DebugQuantizer):
         assert not gelu, "GELU not supported in debug mode"
@@ -631,20 +707,20 @@ def general_grouped_gemm(
 
 @functools.lru_cache(maxsize=None)
 def get_grouped_gemm_setup_workspace_size(num_tensors: int) -> int:
-    """Return workspace size for grouped GEMM pointer setup.
-    Must match GroupedGemmSetupWorkspace::required_setup_size in cublaslt_grouped_gemm.cu.
-    """
-    ptr_bytes = ctypes.sizeof(ctypes.c_void_p)
-    int_bytes = ctypes.sizeof(ctypes.c_int)
-    ptr_size = num_tensors * ptr_bytes
-    int_size = num_tensors * int_bytes
-    k_ptr_alignment = 16
-    # Each pointer array is placed at a 16-byte-aligned offset (matching kPtrAlignment in C++).
-    # aligned_ptr_size = round_up(num_tensors * ptr_bytes, 16)
-    aligned_ptr_size = ((ptr_size + k_ptr_alignment - 1) // k_ptr_alignment) * k_ptr_alignment
-    size = 8 * aligned_ptr_size + 6 * int_size
-    alignment = 256
-    return ((size + alignment - 1) // alignment) * alignment
+    """Return workspace size for grouped GEMM pointer setup."""
+    return tex.get_grouped_gemm_setup_workspace_size(num_tensors)
+
+
+@functools.lru_cache(maxsize=None)
+def _get_fp32_ones_tensor(num_tensors: int, device: torch.device) -> torch.Tensor:
+    """Cached ones tensor."""
+    return torch.ones(num_tensors, dtype=torch.float32, device=device)
+
+
+@functools.lru_cache(maxsize=None)
+def _get_fp32_zeros_tensor(num_tensors: int, device: torch.device) -> torch.Tensor:
+    """Cached zeros tensor."""
+    return torch.zeros(num_tensors, dtype=torch.float32, device=device)
 
 
 def general_grouped_gemm_for_grouped_tensor(
@@ -656,6 +732,7 @@ def general_grouped_gemm_for_grouped_tensor(
     accumulate: bool = False,
     use_split_accumulator: bool = False,
     bias=None,
+    bias_scale: Optional[torch.Tensor] = None,
     grad: bool = False,
     alpha: Optional[torch.Tensor] = None,
     beta: Optional[torch.Tensor] = None,
@@ -678,6 +755,13 @@ def general_grouped_gemm_for_grouped_tensor(
     if is_discrete_in and is_discrete_out:
         raise ValueError("Both A and out are discrete. This is not supported yet.")
 
+    if isinstance(A, GroupedTensorStorage) and A.row_scaled_nvfp4:
+        raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
+    if isinstance(B, GroupedTensorStorage) and B.row_scaled_nvfp4:
+        raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
+    if isinstance(out, GroupedTensorStorage) and out.row_scaled_nvfp4:
+        raise NotImplementedError("Row-scaled NVFP4 GroupedTensor GEMM is not supported yet.")
+
     if is_discrete_out:
         # wgrad case.
         grouped_gemm_impl = tex.te_general_grouped_gemm_for_discrete_out
@@ -694,17 +778,25 @@ def general_grouped_gemm_for_grouped_tensor(
             "Apply bias manually after the GEMM."
         )
 
+    if bias_scale is not None and bias is None:
+        raise ValueError("bias_scale requires bias to be provided.")
+
     num_tensors = B.num_tensors
     rowwise = B.rowwise_data
     device = rowwise.device if rowwise is not None else B.columnwise_data.device
 
+    # Hopper (SM90) uses a single shared alpha/beta scalar;
+    # Blackwell+ (SM100) supports per-group alpha/beta arrays.
+    per_group = torch.cuda.get_device_capability() >= (10, 0)
+    num_alphabeta = num_tensors if per_group else 1
+
     if alpha is None:
-        alpha = torch.ones(num_tensors, dtype=torch.float32, device=device)
+        alpha = _get_fp32_ones_tensor(num_alphabeta, device)
     if beta is None:
         if accumulate:
-            beta = torch.ones(num_tensors, dtype=torch.float32, device=device)
+            beta = _get_fp32_ones_tensor(num_alphabeta, device)
         else:
-            beta = torch.zeros(num_tensors, dtype=torch.float32, device=device)
+            beta = _get_fp32_zeros_tensor(num_alphabeta, device)
 
     if not alpha.is_cuda or not beta.is_cuda:
         raise ValueError("alpha and beta must be CUDA tensors.")
@@ -730,6 +822,7 @@ def general_grouped_gemm_for_grouped_tensor(
         transb,
         out,
         bias,
+        bias_scale,
         alpha,
         beta,
         workspace_setup,

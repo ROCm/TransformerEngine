@@ -24,6 +24,7 @@
 #include "../../util/math.h"
 #include "../../util/ptx.cuh"
 #include "../../utils.cuh"
+#include "swizzle.cuh"
 
 #ifdef __HIP_PLATFORM_AMD__
 #include "./rocm_vectorized_2d.cuh"
@@ -52,12 +53,13 @@ constexpr size_t THREADS_PER_CHUNK_X_COLWISE = CHUNK_DIM_X;                     
 constexpr size_t ITERATIONS = CHUNK_DIM_Y / BUFFER_DIM_Y;                       //    8 = 128 / 16
 static_assert(ITERATIONS >= 1);
 
-template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X>
+template <typename IType, typename OType, size_t SCALE_DIM_Y, size_t SCALE_DIM_X,
+          bool WITH_GEMM_SWIZZLED_SCALES>
 __global__ void __launch_bounds__(THREADS_PER_CHUNK)
     dequantize_mxfp8_kernel(const __grid_constant__ CUtensorMap tensor_map_input,
                             const __grid_constant__ CUtensorMap tensor_map_output,
                             const e8m0_t *const scales_ptr, const size_t rows, const size_t cols,
-                            const size_t scales_stride) {
+                            const size_t scales_stride, const size_t num_scale_tiles_X) {
 #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
   constexpr bool USE_ROWWISE_SCALING = SCALE_DIM_X > 1;
 
@@ -168,7 +170,18 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             ? (scales_rowwise_chunk_offset_X + tid_rowwise_X / THREADS_PER_SCALE_X_ROWWISE)
             : (scales_colwise_chunk_offset_X + tid_colwise_X);
 
-    const int scale_idx = scale_offset_Y * scales_stride + scale_offset_X;
+    size_t scale_idx;
+    if constexpr (WITH_GEMM_SWIZZLED_SCALES) {
+      if constexpr (USE_ROWWISE_SCALING) {
+        scale_idx =
+            swizzle::gemm_swizzled_scale_idx(scale_offset_Y, scale_offset_X, num_scale_tiles_X);
+      } else {
+        scale_idx =
+            swizzle::gemm_swizzled_scale_idx(scale_offset_X, scale_offset_Y, num_scale_tiles_X);
+      }
+    } else {
+      scale_idx = scale_offset_Y * scales_stride + scale_offset_X;
+    }
     const e8m0_t biased_exponent = scales_ptr[scale_idx];
     const float block_scale = ptx::exp2f(biased_exponent);
 
@@ -252,16 +265,16 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
     NVTE_CHECK(is_fp8_dtype(input.columnwise_data.dtype), "Input must have FP8 type.");
   }
 
-  NVTE_CHECK(!input.with_gemm_swizzled_scales, "Input must have scales in compact format.");
   NVTE_CHECK(!is_fp8_dtype(output->data.dtype), "Output must be in higher precision.");
   NVTE_CHECK(output->shape() == input.shape(), "Input and output shapes need to match.");
+
+  const bool with_gemm_swizzled_scales = input.with_gemm_swizzled_scales;
 
   // TODO: Make more general
   const size_t scale_dim_X_rowwise = use_rowwise_scaling ? 32 : 1;
   const size_t scale_dim_Y_colwise = use_colwise_scaling ? 32 : 1;
 
-  const size_t rows = input.flat_first_dim();
-  const size_t cols = input.flat_last_dim();
+  const auto [rows, cols] = input.flat_2d_dims();
   const size_t chunks_Y = DIVUP(rows, CHUNK_DIM_Y);
   const size_t chunks_X = DIVUP(cols, CHUNK_DIM_X);
 
@@ -289,6 +302,9 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
 
   const size_t scales_stride = use_rowwise_scaling ? scales_X_rowwise : scales_X_colwise;
 
+  const size_t num_scale_tiles_X = use_rowwise_scaling ? DIVUP(cols, static_cast<size_t>(128))
+                                                       : DIVUP(rows, static_cast<size_t>(128));
+
   const SimpleTensor &input_data = use_rowwise_scaling ? input.data : input.columnwise_data;
 
   const dim3 block(THREADS_PER_CHUNK);
@@ -309,24 +325,27 @@ inline void dequantize(const Tensor &input, Tensor *output, cudaStream_t stream)
                   <<<grid, block, 0, stream>>>(reinterpret_cast<const IType *>(input_data.dptr), reinterpret_cast<OType *>(output->data.dptr), scales_ptr,
                                                rows, cols, scales_stride););  // NOLINT(*)
 #else // #ifdef __HIP_PLATFORM_AMD__
-                  alignas(64) CUtensorMap tensor_map_input{};
-                  alignas(64) CUtensorMap tensor_map_output{};
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                      with_gemm_swizzled_scales, WITH_GEMM_SWIZZLED_SCALES,
 
-                  create_2D_tensor_map(tensor_map_input, input_data, rows, cols, SHMEM_DIM_Y,
-                                       SHMEM_DIM_X, cols, 0, typeToNumBits(input.dtype()));
-                  create_2D_tensor_map(tensor_map_output, output->data, rows, cols, SHMEM_DIM_Y,
-                                       SHMEM_DIM_X, cols, 0, typeToNumBits(output->dtype()));
+                      alignas(64) CUtensorMap tensor_map_input{};
+                      alignas(64) CUtensorMap tensor_map_output{};
 
-                  dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X>
-                  <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_output, scales_ptr,
-                                               rows, cols, scales_stride););  // NOLINT(*)
+                      create_2D_tensor_map(tensor_map_input, input_data, rows, cols, SHMEM_DIM_Y,
+                                           SHMEM_DIM_X, cols, 0, typeToNumBits(input.dtype()));
+                      create_2D_tensor_map(tensor_map_output, output->data, rows, cols, SHMEM_DIM_Y,
+                                           SHMEM_DIM_X, cols, 0, typeToNumBits(output->dtype()));
+
+                      dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X,
+                                              WITH_GEMM_SWIZZLED_SCALES>
+                      <<<grid, block, 0, stream>>>(tensor_map_input, tensor_map_output, scales_ptr,
+                                                   rows, cols, scales_stride,
+                                                   num_scale_tiles_X););  // NOLINT(*)
 #endif // #ifdef __HIP_PLATFORM_AMD__
-          );                                                                  // NOLINT(*)
-      );                                                                      // NOLINT(*)
-  );                                                                          // NOLINT(*)
-#ifdef __HIP_PLATFORM_AMD__
-  );                                                                          // NOLINT(*)
-#endif
+              );                                                          // NOLINT(*)
+          );                                                              // NOLINT(*)
+      );                                                                  // NOLINT(*)
+  );                                                                      // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 

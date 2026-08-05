@@ -19,6 +19,7 @@
 namespace transformer_engine {
 namespace nvfp4_recipe {
 
+#if FP4_TYPE_SUPPORTED
 /*
  * ---------------------------------------------------------------------------
  * NVFP4 2D PARTIAL-SHARD KERNEL DESIGN
@@ -66,29 +67,16 @@ namespace nvfp4_recipe {
  * ---------------------------------------------------------------------------
  */
 
-#ifndef __HIP_PLATFORM_AMD__
-// constexpr float factor = 6.0 * 6.0 * 448.0 * 448.0;
-constexpr float factor_inv = 1.0 / (6.0 * 6.0 * 448.0 * 448.0);
-#endif
 constexpr int kTileDim = 16;
 constexpr int kThreadsPerBlock = 256;
 
 // Kernel to compute alpha *= amax_A * amax_B / factor
 __global__ void compute_nvfp4_per_tensor_scale_kernel(float alpha_in, const float *amax_A,
-                                                      const float *amax_B, float *alpha_out) {
-#ifdef __HIP_PLATFORM_AMD__
-  constexpr float fp4_max = detail::TypeExtrema<fp4e2m1>::max;
-#if defined(__HIP_DEVICE_COMPILE__)
-  constexpr float fp8_max = detail::TypeExtrema<fp8e4m3>::max;
-#else
-  constexpr float fp8_max = 240.0f;  // host placeholder; only device path executes
-#endif
-  const float fi = 1.0f / (fp4_max * fp4_max * fp8_max * fp8_max);
-  *alpha_out = alpha_in * (*amax_A) * (*amax_B) * fi;
-#else
-  // factor is defined in the enclosing namespace
+                                                      const float *amax_B, float fp8_max_A,
+                                                      float fp8_max_B, float *alpha_out) {
+  constexpr float fp4_max = 6.0f;
+  const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
   *alpha_out = alpha_in * (*amax_A) * (*amax_B) * factor_inv;
-#endif
 }
 
 template <typename IType>
@@ -357,8 +345,8 @@ void nvfp4_2d_partial_cast(const Tensor inp, Tensor out, const Tensor scale,
  */
 
 // Vectorized transpose kernel parameters
-constexpr int TRANSPOSE_TILE_DIM = 64;     // Logical FP4 elements per tile dimension
-constexpr int TRANSPOSE_TILE_PACKED = 32;  // TILE_DIM / 2 bytes
+constexpr int TRANSPOSE_TILE_DIM = 64;  // Logical FP4 elements per tile dimension
+// constexpr int TRANSPOSE_TILE_PACKED = 32;  // TILE_DIM / 2 bytes
 constexpr int TRANSPOSE_BLOCK_SIZE = 256;  // threads per block
 
 // Shared memory: store unpacked 4-bit values as bytes for easy transpose
@@ -643,7 +631,7 @@ void nvfp4_expand_scale_to_fp8(const Tensor input, Tensor output, size_t tile_ro
  *
  * Computes per-block decode scale from block amax and global amax:
  *   global_scale = (fp8_max * fp4_max) / global_amax = 2688 / global_amax
- *   per_block_decode_scale = block_amax / fp4_max * global_scale
+ *   per_block_decode_scale = block_amax * (global_scale * (1 / fp4_max))
  *                          = block_amax * 448 / global_amax
  *
  * This matches the CUDA device function compute_decoding_scaling_factor() in core_nvfp4.cuh
@@ -679,9 +667,11 @@ __global__ void nvfp4_compute_per_block_scale_kernel(
   float global_scale =
       (global_amax > 0.0f) ? fminf((fp8_max * fp4_max) / safe_global_amax, flt_max) : 1.0f;
 
-  // Compute per-block decode scale: S_dec_b = block_amax / fp4_max * S_enc
+  // Compute per-block decode scale: S_dec_b = block_amax * (S_enc * (1 / fp4_max))
   float amax_val = block_amax[idx];
-  float result = fminf((amax_val / fp4_max) * global_scale, flt_max);
+  constexpr float fp4_max_inv = 1.0f / fp4_max;
+  const float global_scale_multiplier = global_scale * fp4_max_inv;
+  float result = fminf(amax_val * global_scale_multiplier, flt_max);
   scale[idx] = result;
 }
 
@@ -803,10 +793,12 @@ __global__ void nvfp4_fused_scale_kernel(
     float safe_global_amax = fmaxf(g_amax, tiny);
     float global_scale =
         (g_amax > 0.0f) ? fminf((fp8_max * fp4_max) / safe_global_amax, flt_max) : 1.0f;
+    constexpr float fp4_max_inv = 1.0f / fp4_max;
+    const float global_scale_multiplier = global_scale * fp4_max_inv;
 
     // Read block amax and compute per-block decode scale
     float amax_val = block_amax[tile_row * tile_cols + out_col];
-    scale_val = fminf((amax_val / fp4_max) * global_scale, flt_max);
+    scale_val = fminf(amax_val * global_scale_multiplier, flt_max);
 
     // Write per-block scale (only once per tile, when out_row % block_len == 0)
     if (out_row % block_len == 0) {
@@ -845,78 +837,109 @@ void nvfp4_fused_scale(const Tensor block_amax, const Tensor global_amax, Tensor
       block_len);
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
+
+#endif  // FP4_TYPE_SUPPORTED
 }  // namespace nvfp4_recipe
 }  // namespace transformer_engine
 
 void nvte_nvfp4_expand_scale_to_fp8(const NVTETensor input, NVTETensor output, size_t tile_rows,
                                     size_t tile_cols, size_t rows_padded, size_t block_len,
                                     cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_expand_scale_to_fp8);
   using namespace transformer_engine;
   nvfp4_recipe::nvfp4_expand_scale_to_fp8(*convertNVTETensorCheck(input),
                                           *convertNVTETensorCheck(output), tile_rows, tile_cols,
                                           rows_padded, block_len, stream);
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
 }
 
 void nvte_nvfp4_compute_per_block_scale(const NVTETensor block_amax, NVTETensor scale,
                                         const NVTETensor global_amax, cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_compute_per_block_scale);
   using namespace transformer_engine;
   nvfp4_recipe::nvfp4_compute_per_block_scale(*convertNVTETensorCheck(block_amax),
                                               *convertNVTETensorCheck(scale),
                                               *convertNVTETensorCheck(global_amax), stream);
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
 }
 
 void nvte_nvfp4_compute_global_scale(const NVTETensor global_amax, NVTETensor global_scale,
                                      cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_compute_global_scale);
   using namespace transformer_engine;
   nvfp4_recipe::nvfp4_compute_global_scale(*convertNVTETensorCheck(global_amax),
                                            *convertNVTETensorCheck(global_scale), stream);
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
 }
 
 void nvte_nvfp4_scale_transpose(const NVTETensor input, NVTETensor output, size_t M_tiles,
                                 size_t K_tiles, cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_scale_transpose);
   using namespace transformer_engine;
   nvfp4_recipe::nvfp4_scale_transpose(*convertNVTETensorCheck(input),
                                       *convertNVTETensorCheck(output), M_tiles, K_tiles, stream);
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
 }
 
 void nvte_nvfp4_data_transpose(const NVTETensor input, NVTETensor output, cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_data_transpose);
   using namespace transformer_engine;
   nvfp4_recipe::nvfp4_transpose(*convertNVTETensorCheck(input), *convertNVTETensorCheck(output),
                                 stream);
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
 }
 
 void nvte_nvfp4_2d_compute_partial_amax(const NVTETensor inp, NVTETensor amax, size_t h, size_t w,
                                         size_t amax_stride_h, size_t amax_stride_w,
                                         size_t start_offset, size_t block_len,
                                         cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_2d_compute_partial_amax);
   using namespace transformer_engine;
   nvfp4_recipe::nvfp4_2d_compute_partial_amax(*convertNVTETensorCheck(inp),
                                               *convertNVTETensorCheck(amax), h, w, amax_stride_h,
                                               amax_stride_w, start_offset, block_len, stream);
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
 }
 
 void nvte_nvfp4_2d_partial_cast(const NVTETensor inp, NVTETensor out, const NVTETensor scale,
                                 const NVTETensor global_scale, size_t h, size_t w,
                                 size_t scale_stride_h, size_t scale_stride_w, size_t start_offset,
                                 size_t block_len, cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_2d_partial_cast);
   using namespace transformer_engine;
   nvfp4_recipe::nvfp4_2d_partial_cast(*convertNVTETensorCheck(inp), *convertNVTETensorCheck(out),
                                       *convertNVTETensorCheck(scale),
                                       *convertNVTETensorCheck(global_scale), h, w, scale_stride_h,
                                       scale_stride_w, start_offset, block_len, stream);
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
 }
 
 void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_rowwise_amax_A,
                                          const NVTETensor inpB, const bool use_rowwise_amax_B,
                                          float alpha_in, NVTETensor alpha_out,
                                          cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_compute_per_tensor_scale);
   using namespace transformer_engine;
 
@@ -927,6 +950,8 @@ void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_r
   void *amax_A_ptr = use_rowwise_amax_A ? tA->amax.dptr : tA->columnwise_amax.dptr;
   void *amax_B_ptr = use_rowwise_amax_B ? tB->amax.dptr : tB->columnwise_amax.dptr;
   void *alpha_ptr = tOut->data.dptr;
+  const float fp8_max_A = static_cast<float>(tA->nvfp4_e4m3_max);
+  const float fp8_max_B = static_cast<float>(tB->nvfp4_e4m3_max);
 
   // check for not null pointers
   NVTE_CHECK(amax_A_ptr != nullptr, "amax_A_ptr is null");
@@ -935,18 +960,26 @@ void nvte_nvfp4_compute_per_tensor_scale(const NVTETensor inpA, const bool use_r
 
   nvfp4_recipe::compute_nvfp4_per_tensor_scale_kernel<<<1, 1, 0, stream>>>(
       alpha_in, reinterpret_cast<const float *>(amax_A_ptr),
-      reinterpret_cast<const float *>(amax_B_ptr), reinterpret_cast<float *>(alpha_ptr));
+      reinterpret_cast<const float *>(amax_B_ptr), fp8_max_A, fp8_max_B,
+      reinterpret_cast<float *>(alpha_ptr));
   NVTE_CHECK_CUDA(cudaGetLastError());
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
 }
 
 void nvte_nvfp4_fused_scale(const NVTETensor block_amax, const NVTETensor global_amax,
                             NVTETensor per_block_scale, NVTETensor target_scale,
                             NVTETensor target_amax, size_t tile_rows, size_t tile_cols,
                             size_t rows_padded, size_t block_len, cudaStream_t stream) {
+#if FP4_TYPE_SUPPORTED
   NVTE_API_CALL(nvte_nvfp4_fused_scale);
   using namespace transformer_engine;
   nvfp4_recipe::nvfp4_fused_scale(
       *convertNVTETensorCheck(block_amax), *convertNVTETensorCheck(global_amax),
       *convertNVTETensorCheck(per_block_scale), *convertNVTETensorCheck(target_scale),
       *convertNVTETensorCheck(target_amax), tile_rows, tile_cols, rows_padded, block_len, stream);
+#else
+  NVTE_ERROR("FP4 support requires CUDA 12.8+, but compile-time CUDA version is ", CUDA_VERSION);
+#endif  // FP4_TYPE_SUPPORTED
 }
