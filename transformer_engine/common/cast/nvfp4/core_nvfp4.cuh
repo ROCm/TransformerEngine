@@ -47,7 +47,8 @@ __device__ __forceinline__ nvfp4_scale_t compute_decoding_scaling_factor(const f
   // However, this is part of the emulation code to ensure exact match.
   using namespace detail;
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
-  const float S_dec_b = block_amax / fp4_max * S_enc;
+  constexpr float fp4_max_inv = 1.0f / fp4_max;
+  const float S_dec_b = block_amax * (S_enc * fp4_max_inv);
   return static_cast<nvfp4_scale_t>(fminf(S_dec_b, TypeExtrema<float>::max));
 }
 #endif  // FP4_TYPE_SUPPORTED
@@ -59,11 +60,12 @@ namespace quantization_SF {
 // Compute per-block E4M3 encoding/decoding scaling factor
 __device__ __forceinline__ fp8e4m3 compute_decoding_scaling_factor(const float block_amax,
                                                                    const float S_enc) {
-  constexpr float rcp_6f = 1.0f / 6.0f;
+  using namespace detail;
+  constexpr float fp4_max_inv = 1.0f / TypeExtrema<fp4e2m1>::max;  // 1 / 6.0f
   // const float S_dec_b = block_amax * rcp_6f;
   // const fp8e4m3 S_dec_b_fp8 = static_cast<fp8e4m3>(S_dec_b * S_enc);
   // return S_dec_b_fp8;
-  return static_cast<fp8e4m3>(block_amax * rcp_6f * S_enc);
+  return static_cast<fp8e4m3>(block_amax * (S_enc * fp4_max_inv));
 }
 #endif  // FP4_TYPE_SUPPORTED
 }  // namespace quantization_SF
@@ -73,10 +75,14 @@ namespace core {
 #if FP4_TYPE_SUPPORTED
 using namespace ptx;
 
-// Compute the global encode scale factor for a given global amax
+// Compute the global encode scale factor for a given global amax.
+// NVFP4 uses the full E4M3 range by default. Some 4over6 tensors dispatch
+// E4M3_MAX=256 to leave room for map-to-4 scale expansion.
+template <int E4M3_MAX = 448>
 __device__ __forceinline__ float compute_global_encode_scaling_factor_FP4(const float global_amax) {
   using namespace detail;
-  constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;  // 448.0f;
+  static_assert(E4M3_MAX == 448 || E4M3_MAX == 256, "Unsupported NVFP4 E4M3 max.");
+  constexpr float fp8_max = static_cast<float>(E4M3_MAX);
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;  // 6.0f;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
   // If scale is infinity, return max value of float32

@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -11,6 +13,7 @@ and collective operations.
 """
 from contextlib import contextmanager
 from dataclasses import dataclass
+from packaging import version
 from typing import Callable, Optional
 import warnings
 
@@ -20,7 +23,8 @@ from jax.interpreters import pxla
 from jax.sharding import PartitionSpec, get_abstract_mesh
 import numpy as np
 
-_PXLA_THREAD_RESOURCES = pxla.thread_resources
+if version.parse(jax.__version__) < version.parse("0.9.0"):
+    _PXLA_THREAD_RESOURCES = pxla.thread_resources
 
 # Axis Names
 BATCH_AXES = "nvte_batch"
@@ -39,9 +43,11 @@ W_JOINED_AXES = "nvte_w_joined"
 
 def _get_mesh():
     # Handle Mesh's set via `with mesh:`
-    mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
-    if mesh is not None and not mesh.empty:
-        return mesh
+    # ROCm: add JAX version guard for all backends
+    if version.parse(jax.__version__) < version.parse("0.9.0"):
+        mesh = _PXLA_THREAD_RESOURCES.env.physical_mesh
+        if mesh is not None and not mesh.empty:
+            return mesh
     # Handle Mesh's set via `jax.set_mesh(mesh)`
     return jax.sharding.get_abstract_mesh()
 
@@ -164,6 +170,31 @@ def with_sharding_constraint(x: jnp.array, pspec: PartitionSpec):
         return x
 
     cleaned_pspec = PartitionSpec(*cleaned_axis_names)
+
+    # ROCm: JAX 0.9 compat (all backends) — when an AbstractMesh is active,
+    # jax.lax.with_sharding_constraint requires the input to already carry a
+    # NamedSharding. This affects both concrete arrays in eager mode and traced
+    # values inside jax.jit whose abstract sharding is not a NamedSharding (e.g.
+    # Module.init() traces over a single-device input and JAX propagates the
+    # SingleDeviceSharding through the Tracer). In both cases the constraint must
+    # be skipped because JAX raises unconditionally.
+    # A UserWarning is emitted only for concrete (non-Tracer) arrays so the user
+    # gets a visible signal in eager mode; the jit-traced skip is unavoidable and
+    # kept silent to avoid spurious warnings from traced code.
+    if hasattr(x, "sharding") and not isinstance(x.sharding, jax.sharding.NamedSharding):
+        if not isinstance(x, jax.core.Tracer):
+            warnings.warn(
+                f"with_sharding_constraint: the sharding constraint {cleaned_pspec!r} was not"
+                f" applied because the input array carries a {type(x.sharding).__name__} rather"
+                " than a NamedSharding. This typically happens in eager mode when arrays have not"
+                " yet been placed on a mesh (e.g. during model initialisation). Wrap the call in"
+                " jax.jit or ensure the array is on a named mesh before applying sharding"
+                " constraints.",
+                UserWarning,
+                stacklevel=2,
+            )
+        return x
+
     return jax.lax.with_sharding_constraint(x, cleaned_pspec)
 
 
@@ -195,9 +226,8 @@ def with_sharding_constraint_by_logical_axes(
 
         flax_rules = flax.linen.get_logical_axis_rules()
         if len(flax_rules) > 0:
-            return flax.linen.with_logical_constraint(
-                x, logical_axis_names, fallback=flax.linen.spmd.RulesFallback.AXIS_IS_UNSHARDED
-            )
+            pspec = flax.linen.logical_to_mesh_axes(logical_axis_names)
+            return with_sharding_constraint(x, pspec)
     except ImportError:
         pass
 
@@ -332,6 +362,12 @@ class MeshResource:
         fsdp_resource: Axis name for full-sharded data parallelism, default is None
         pp_resource: Axis name for pipeline parallelism (layer sharding), default is None
         cp_resource: Axis name for context parallelism (sequence sharding), default is None
+        ep_resource: Axis name for expert parallelism. Dispatch input tokens
+            must be sharded on their leading dim by ``ep_resource`` (alone or
+            compound with ``dp_resource`` / ``fsdp_resource`` as outer, e.g.
+            ``PartitionSpec(("dp", "ep"), None, None)``). Dispatch output
+            ``[ep_size, recv_capacity, H]`` is always sharded by ``ep_resource``
+            on the leading ``ep_size`` dim.
     """
 
     dp_resource: str = None
@@ -340,9 +376,14 @@ class MeshResource:
     fsdp_resource: str = None
     pp_resource: str = None
     cp_resource: str = None
+    ep_resource: str = None
 
 
 _GLOBAL_MESH_RESOURCE = None
+# ROCm: True once _validate_mesh_resource_configuration has successfully run for the
+# current _GLOBAL_MESH_RESOURCE.  Reset to False on every global_shard_guard
+# entry so that a new resource is always (re-)validated on first use.
+_GLOBAL_MESH_RESOURCE_VALIDATED = False
 
 
 @contextmanager
@@ -355,13 +396,29 @@ def global_shard_guard(resource: MeshResource):
     Args:
         resource: MeshResource instance defining the sharding configuration
     """
-    global _GLOBAL_MESH_RESOURCE
+    global _GLOBAL_MESH_RESOURCE, _GLOBAL_MESH_RESOURCE_VALIDATED
     old_resources = _GLOBAL_MESH_RESOURCE
+    old_validated = _GLOBAL_MESH_RESOURCE_VALIDATED
     try:
         _GLOBAL_MESH_RESOURCE = resource
+        # ROCm: JAX 0.9 compat (all backends)
+        # Attempt early (eager) validation if a mesh is already active at
+        # guard-entry time.  Guard with is_mesh_available() so that callers
+        # who enter global_shard_guard before any JAX mesh context is active
+        # (e.g. maxtext's transformer_engine_context) do not hit an
+        # AssertionError in get_mesh_axis_size() when get_abstract_mesh()
+        # returns an empty OrderedDict().
+        # Reset the validated flag for the new resource so that
+        # global_mesh_resource() re-validates on its first call with an
+        # active mesh (lazy validation path, see below).
+        _GLOBAL_MESH_RESOURCE_VALIDATED = False
+        if resource is not None and is_mesh_available():
+            _validate_mesh_resource_configuration(resource)
+            _GLOBAL_MESH_RESOURCE_VALIDATED = True
         yield
     finally:
         _GLOBAL_MESH_RESOURCE = old_resources
+        _GLOBAL_MESH_RESOURCE_VALIDATED = old_validated
 
 
 def global_mesh_resource() -> MeshResource:
@@ -370,13 +427,62 @@ def global_mesh_resource() -> MeshResource:
     Returns:
         The current MeshResource instance
     """
+    global _GLOBAL_MESH_RESOURCE_VALIDATED
     assert _GLOBAL_MESH_RESOURCE is not None, (
         "Global mesh resource is not set. Please set the MeshResource via a global_shard_guard"
         " context. If you are not using multiple GPUs, you can use an empty MeshResource by"
         " wrapping your program in 'with global_shard_guard(MeshResource()):'"
     )
-    _validate_mesh_resource_configuration(_GLOBAL_MESH_RESOURCE)
+    # ROCm: JAX 0.9 compat (all backends)
+    # Lazy validation: if the mesh was not yet active when global_shard_guard
+    # was entered (eager validation skipped), validate here on the first call
+    # that actually finds an active mesh.  This covers frameworks like maxtext
+    # that set up global_shard_guard before activating the JAX mesh context.
+    #
+    # The _GLOBAL_MESH_RESOURCE_VALIDATED flag ensures validation runs at most
+    # once per global_shard_guard context (reset to False on guard entry,
+    # set to True after successful validation):
+    #   • After validation: `not _GLOBAL_MESH_RESOURCE_VALIDATED` is False →
+    #     only one boolean check per call, faster than the pre-JAX-0.9-compat
+    #     code that ran get_mesh_axis_size() unconditionally on every call.
+    #   • Inside jit(...).lower(): is_mesh_available() returns False (JAX 0.9
+    #     get_abstract_mesh() is empty there) → validation safely skipped.
+    if not _GLOBAL_MESH_RESOURCE_VALIDATED and is_mesh_available():
+        _validate_mesh_resource_configuration(_GLOBAL_MESH_RESOURCE)
+        _GLOBAL_MESH_RESOURCE_VALIDATED = True
     return _GLOBAL_MESH_RESOURCE
+
+
+def get_active_resource_axis(resource_name: str) -> Optional[str]:
+    """Resolve a :class:`MeshResource` attribute to its mesh axis name,
+    or return ``None`` if that resource is not active.
+
+    "Active" means all three are true:
+
+    * a physical mesh is set (``is_mesh_available()``),
+    * the ``MeshResource`` attribute is non-``None``,
+    * the corresponding mesh axis has more than 1 device.
+
+    Mirrors the three-step ``is_X_enabled`` idiom in
+    :func:`get_sharding_map_logic_axis_to_mesh_axis` but returns the
+    axis name itself (or ``None``) so callers can use it directly in
+    collectives / ``shard_map`` specs.
+
+    Args:
+        resource_name: Attribute name on :class:`MeshResource`, e.g.
+            ``"fsdp_resource"`` or ``"ep_resource"``.
+
+    Returns:
+        The mesh axis name when active, else ``None``.
+    """
+    if not is_mesh_available():
+        return None
+    if _GLOBAL_MESH_RESOURCE is None:
+        return None
+    axis = getattr(_GLOBAL_MESH_RESOURCE, resource_name)
+    if axis is None or get_mesh_axis_size(axis) <= 1:
+        return None
+    return axis
 
 
 def all_reduce_sum_along_dp_fsdp(x: jnp.array, mesh: jax.sharding.Mesh):
@@ -418,8 +524,11 @@ def all_reduce_max_along_all_axes_except_PP(x: jnp.array, mesh: jax.sharding.Mes
     Returns:
         Reduced tensor
     """
-    all_axes = get_all_mesh_axes()
-    for axis in all_axes:
+    # ROCm: JAX 0.9 compat (all backends)
+    # Use mesh.axis_names from the concrete mesh argument rather than calling
+    # get_all_mesh_axes() → _get_mesh() → get_abstract_mesh(), which returns
+    # empty in JAX 0.9 when called from inside a custom_partitioning sharded_impl.
+    for axis in mesh.axis_names:
         if axis != global_mesh_resource().pp_resource:
             x = lax_paral_op(x, jax.lax.pmax, axis, mesh)
     return x
@@ -441,3 +550,8 @@ def dp_or_fsdp_axis_size():
     dp_size = get_mesh_axis_size(global_mesh_resource().dp_resource)
     fsdp_size = get_mesh_axis_size(global_mesh_resource().fsdp_resource)
     return dp_size if dp_size > 1 else fsdp_size
+
+
+def ep_axis_size():
+    """Get the size of the dispatch/EP axis (ep_resource). Returns 1 if unset."""
+    return get_mesh_axis_size(global_mesh_resource().ep_resource)

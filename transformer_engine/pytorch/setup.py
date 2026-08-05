@@ -48,6 +48,11 @@ if bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))) or os.path.isdir(build_tools_
         shutil.rmtree(build_tools_copy)
     shutil.copytree(build_tools_dir, build_tools_copy)
 
+license_src = current_file_path.parent.parent / "LICENSE"
+license_dst = current_file_path / "LICENSE"
+if license_src.is_file():
+    shutil.copyfile(license_src, license_dst)
+
 
 from build_tools.build_ext import get_build_ext, SdistWithLocalVersion
 from build_tools.utils import rocm_build, rocm_version
@@ -198,9 +203,12 @@ if __name__ == "__main__":
         python_requires=f">={min_python_version_str()}",
         install_requires=install_requires,
         tests_require=test_requirements(),
+        license_files=("LICENSE",),
     )
     if any(x in sys.argv for x in (".", "sdist", "bdist_wheel")):
         shutil.rmtree(common_headers_dir)
         shutil.rmtree("build_tools")
+        if license_dst.is_file():
+            license_dst.unlink()
         if rocm_build():
             clear_hipify_tools_copy(current_file_path)

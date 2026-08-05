@@ -12,6 +12,7 @@
 #include "fused_attn_ck.h"
 #include "../common.h"
 #include "../util/cuda_runtime.h" //cuda::sm_arch
+#include "../util/system.h" //getenv
 #include "utils.h"
 
 // map NVTE_QKV_Layout to NVTE_QKV_Layout_Group
@@ -141,12 +142,9 @@ NVTE_QKV_Format nvte_get_kv_format(NVTE_QKV_Layout qkv_layout) {
 //    causal_bottom_right, padding_causal_bottom_right | (-1,  0) or (>=0, 0)
 std::pair<int64_t, int64_t> check_set_window_size(NVTE_Mask_Type attn_mask_type, std::pair<int64_t, int64_t> window_size){
   //mask_type contain causal
-  bool nvte_log_fused_attn_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_FUSED_ATTN_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_fused_attn_config = true;
-  }
-  if(attn_mask_type==NVTE_CAUSAL_MASK || attn_mask_type==NVTE_PADDING_CAUSAL_MASK || attn_mask_type==NVTE_CAUSAL_BOTTOM_RIGHT_MASK || attn_mask_type==NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK){
+  const bool nvte_log_fused_attn_config =
+      transformer_engine::getenv<bool>("NVTE_LOG_FUSED_ATTN_CONFIG");
+  if(transformer_engine::fused_attn_rocm::is_causal_mask(attn_mask_type)){
     if(window_size==std::make_pair<int64_t, int64_t>(-1, -1) || (window_size.first >=0 && window_size.second!=0)){
       //TODO: better INFO logging
       if(nvte_log_fused_attn_config){
@@ -236,11 +234,8 @@ void log_fused_attn_config(
     size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, int64_t window_size_right) {
 
   //log the fused attn config at NVTE common level
-  bool nvte_log_fused_attn_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_FUSED_ATTN_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_fused_attn_config = true;
-  }
+  const bool nvte_log_fused_attn_config =
+      transformer_engine::getenv<bool>("NVTE_LOG_FUSED_ATTN_CONFIG");
   if(!nvte_log_fused_attn_config){
     return;
   }
@@ -284,7 +279,7 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
     NVTE_Bias_Type bias_type, NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
     float dropout, size_t num_attn_heads, size_t num_gqa_groups, size_t max_seqlen_q, 
     size_t max_seqlen_kv, size_t head_dim_qk, size_t head_dim_v, int64_t window_size_left, 
-    int64_t window_size_right, bool return_max_logit, bool cuda_graph, bool deterministic) {
+    int64_t window_size_right, bool return_max_logit, bool /*cuda_graph*/, bool deterministic) {
   using namespace transformer_engine;
 
   //gfx1250 is disabled in ck_fused_attn/CMakeLists.txt and is not supported by curretnt aotriton
@@ -297,24 +292,12 @@ NVTE_Fused_Attn_Backend nvte_get_fused_attn_backend(
   if (return_max_logit) return NVTE_Fused_Attn_Backend::NVTE_No_Backend;
 
   // by default, fused attn is enabled
-  bool nvte_fused_attn = true;
-  if (const char* env_p = std::getenv("NVTE_FUSED_ATTN") ) {
-    if (env_p != nullptr && std::string(env_p) == "0")
-      nvte_fused_attn = false;
-  }
+  const bool nvte_fused_attn = getenv<bool>("NVTE_FUSED_ATTN", true);
 
-  // by default, both ck and aotriton backends are enabled by nvte_fused_attn
-  bool nvte_fused_attn_ck = nvte_fused_attn;
-  bool nvte_fused_attn_aotriton = nvte_fused_attn;
-
-  if (const char* env_p = std::getenv("NVTE_FUSED_ATTN_CK") ) {
-    if (env_p != nullptr && std::string(env_p) == "0")
-      nvte_fused_attn_ck = false;
-  }
-  if (const char* env_p = std::getenv("NVTE_FUSED_ATTN_AOTRITON") ) {
-    if (env_p != nullptr && std::string(env_p) == "0")
-      nvte_fused_attn_aotriton = false;
-  }
+  // by default, both ck and aotriton backends inherit the master toggle
+  const bool nvte_fused_attn_ck = nvte_fused_attn && getenv<bool>("NVTE_FUSED_ATTN_CK", true);
+  const bool nvte_fused_attn_aotriton =
+      nvte_fused_attn && getenv<bool>("NVTE_FUSED_ATTN_AOTRITON", true);
 
   // fix the incompatible window size from upstream frameworks pytorch/jax
   std::tie(window_size_left, window_size_right) = check_set_window_size(attn_mask_type, std::make_pair(window_size_left, window_size_right));
@@ -364,13 +347,18 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          const NVTETensor cu_seqlens_kv_padded, const NVTETensor page_table_k,
                          const NVTETensor page_table_v, const NVTETensor rng_state,
                          size_t max_seqlen_q, size_t max_seqlen_kv, bool is_training,
-                         bool return_max_logit, bool cuda_graph, float attn_scale, float dropout,
-                         NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+                         bool return_max_logit, bool /*cuda_graph*/, float attn_scale, float dropout,
+                         NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+                         NVTE_QKV_Format qkv_scale_inv_format, NVTE_Bias_Type bias_type,
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
                          int64_t window_size_left, int64_t window_size_right,
                          bool bottom_right_diagonal, NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_fwd);
   using namespace transformer_engine;
+  // ROCm output is always in the Q format; FP8 scale-inv formats are unused.
+  NVTE_CHECK(o_format == nvte_get_q_format(qkv_layout),
+             "ROCm fused attention: unsupported o_format.");
+  (void)qkv_scale_inv_format;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
   const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
@@ -407,7 +395,7 @@ void nvte_fused_attn_fwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       is_training, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout,
       h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right,
-      return_max_logit, cuda_graph, false);
+      return_max_logit, false /*Ignored*/, false);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     fused_attn_ck_fwd(
@@ -451,13 +439,22 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
                          const NVTETensor cu_seqlens_q_padded,
                          const NVTETensor cu_seqlens_kv_padded, size_t max_seqlen_q,
                          size_t max_seqlen_kv, float attn_scale, float dropout,
-                         NVTE_QKV_Layout qkv_layout, NVTE_Bias_Type bias_type,
+                         NVTE_QKV_Layout qkv_layout, NVTE_QKV_Format o_format,
+                         NVTE_QKV_Format do_format, NVTE_QKV_Layout dqkv_layout,
+                         NVTE_QKV_Format qkv_scale_inv_format, NVTE_QKV_Format do_scale_inv_format,
+                         NVTE_Bias_Type bias_type,
                          NVTE_Mask_Type attn_mask_type, NVTE_Softmax_Type softmax_type,
                          int64_t window_size_left, int64_t window_size_right,
-                         bool bottom_right_diagonal, bool deterministic, bool cuda_graph,
+                         bool bottom_right_diagonal, bool deterministic, bool /*cuda_graph*/,
                          NVTETensor workspace, cudaStream_t stream) {
   NVTE_API_CALL(nvte_flash_attn_bwd);
   using namespace transformer_engine;
+  // ROCm output/grads follow the Q format / qkv_layout; FP8 scale-inv formats are unused.
+  NVTE_CHECK(o_format == nvte_get_q_format(qkv_layout) &&
+                 do_format == nvte_get_q_format(qkv_layout) && dqkv_layout == qkv_layout,
+             "ROCm fused attention: unsupported output/grad format.");
+  (void)qkv_scale_inv_format;
+  (void)do_scale_inv_format;
   const Tensor *input_cu_seqlens_q = convertNVTETensorCheck(cu_seqlens_q);
   const Tensor *input_cu_seqlens_kv = convertNVTETensorCheck(cu_seqlens_kv);
   const Tensor *input_cu_seqlens_q_padded = convertNVTETensorCheck(cu_seqlens_q_padded);
@@ -499,8 +496,8 @@ void nvte_fused_attn_bwd(const NVTETensor Q, const NVTETensor K, const NVTETenso
 
   NVTE_Fused_Attn_Backend fused_attention_backend = nvte_get_fused_attn_backend(
       true, Q_type, KV_type, qkv_layout, bias_type, attn_mask_type, softmax_type, dropout, h_q,
-      h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right, false,
-      cuda_graph, deterministic);
+      h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, window_size_left, window_size_right, false /*Ignored*/,
+      false, deterministic);
 
   if (fused_attention_backend == NVTE_Fused_Attn_Backend::NVTE_CK) {
     if ((bias_type != NVTE_NO_BIAS) && (bias_type != NVTE_ALIBI)) {

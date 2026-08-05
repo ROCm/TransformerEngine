@@ -18,7 +18,6 @@ import torch
 from torch import nn
 import torch.distributed as dist
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
-import transformer_engine_torch as tex
 from transformer_engine.common.recipe import (
     MXFP8BlockScaling,
     DelayedScaling,
@@ -32,6 +31,10 @@ from transformer_engine.common.recipe import (
 from transformer_engine.pytorch import Float8CurrentScalingQuantizer, NVFP4Quantizer
 from transformer_engine.pytorch.constants import NVFP4_BLOCK_SCALING_SIZE
 from transformer_engine.pytorch.distributed import gather_along_first_dim
+
+# Executed as a script, so sibling imports rely on the interpreter putting this file's
+# directory on sys.path -- which safe-path mode (PYTHONSAFEPATH, python -P) disables.
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from run_layer_with_overlap import _compare_tensors
 
 if IS_HIP_EXTENSION:
@@ -424,7 +427,7 @@ def _test_quantizer(input_dtype, fp8_dtype):
 
     Args:
         input_dtype (torch.dtype): The data type of the input.
-        fp8_dtype (tex.DType): The data type of the fp8.
+        fp8_dtype (te.DType): The data type of the fp8.
     """
 
     M, N = WORLD_SIZE * BATCH_SIZE, HIDDEN_SIZE
@@ -468,7 +471,7 @@ def test_quantizer():
         return
 
     input_dtypes = [torch.float32, torch.bfloat16]
-    fp8_dtypes = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
+    fp8_dtypes = [te.DType.kFloat8E4M3, te.DType.kFloat8E5M2]
 
     for input_dtype in input_dtypes:
         for fp8_dtype in fp8_dtypes:
@@ -539,7 +542,7 @@ def _test_quantized_all_gather(input_dtype, low_precision_dtype, quantizer_cls):
 
     Args:
         input_dtype (torch.dtype): The data type of the input.
-        low_precision_dtype (tex.DType): The data type of the low precision, can be fp4 or fp8.
+        low_precision_dtype (te.DType): The data type of the low precision, can be fp4 or fp8.
     """
 
     M, N = WORLD_SIZE * BATCH_SIZE, HIDDEN_SIZE // 2
@@ -648,8 +651,8 @@ def test_quantized_all_gather():
         return
 
     input_dtypes = [torch.bfloat16]
-    fp4_dtype = [tex.DType.kFloat4E2M1]
-    fp8_dtype = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2]
+    fp4_dtype = [te.DType.kFloat4E2M1]
+    fp8_dtype = [te.DType.kFloat8E4M3, te.DType.kFloat8E5M2]
     quantizer_cls_nvfp4 = [NVFP4Quantizer]
     # add FP8 quantizers if needed
     quantizer_cls_fp8 = []

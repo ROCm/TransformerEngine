@@ -15,11 +15,10 @@ import warnings
 import torch
 from torch.distributed.fsdp._fully_shard._fsdp_common import TrainingState
 import transformer_engine_torch as tex
-from transformer_engine_torch import DType as TE_DType
 
 from transformer_engine.common.recipe import MXFP8BlockScaling, Recipe
-from ..constants import MXFP8_BLOCK_SCALING_SIZE
-from ..utils import devices_match, round_up_to_nearest_multiple
+from ..constants import MXFP8_BLOCK_SCALING_SIZE, DType
+from ..utils import devices_match, get_device_compute_capability, round_up_to_nearest_multiple
 from .storage.mxfp8_tensor_storage import MXFP8TensorStorage, _FromMXFP8Func
 from ..quantized_tensor import QuantizedTensor, Quantizer
 from ._quantization_helpers import _IdentityFunc
@@ -41,17 +40,17 @@ class MXFP8Quantizer(Quantizer):
 
     """
 
-    dtype: TE_DType
+    dtype: DType
 
     def __init__(
         self,
-        fp8_dtype: TE_DType,
+        fp8_dtype: Union[DType, tex.DType],
         *,
         rowwise: bool = True,
         columnwise: bool = True,
     ) -> None:
         super().__init__(rowwise=rowwise, columnwise=columnwise)
-        self.dtype = fp8_dtype
+        self.dtype = DType.cast(fp8_dtype)
 
     def copy(self) -> MXFP8Quantizer:
         """Create shallow copy"""
@@ -144,9 +143,15 @@ class MXFP8Quantizer(Quantizer):
             data = torch.empty(shape, dtype=torch.uint8, device=device)
             # ROCm TE does not implement fuse padding zeros so use zero tensor here
             if IS_HIP_EXTENSION:
+                m_dim = math.prod(shape[:-1])
+                k_scale = math.ceil(shape[-1] / MXFP8_BLOCK_SCALING_SIZE)
+                # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
+                if get_device_compute_capability() == (12, 5):
+                    m_dim = round_up_to_nearest_multiple(m_dim, 4)
+                    k_scale = round_up_to_nearest_multiple(k_scale, 4)
                 scale_inv = torch.zeros(
-                    math.prod(shape[:-1]), 
-                    math.ceil(shape[-1] / MXFP8_BLOCK_SCALING_SIZE),
+                    m_dim,
+                    k_scale,
                     dtype=torch.uint8,
                     device=device,
                     pin_memory=pin_memory,
@@ -169,9 +174,15 @@ class MXFP8Quantizer(Quantizer):
             )
             # ROCm TE does not implement fuse padding zeros so use zero tensor here
             if IS_HIP_EXTENSION:
+                k_scale = math.ceil(math.prod(shape[:-1]) / MXFP8_BLOCK_SCALING_SIZE)
+                m_dim = shape[-1]
+                # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
+                if get_device_compute_capability() == (12, 5):
+                    k_scale = round_up_to_nearest_multiple(k_scale, 4)
+                    m_dim = round_up_to_nearest_multiple(m_dim, 4)
                 columnwise_scale_inv = torch.zeros(
-                    math.ceil(math.prod(shape[:-1]) / MXFP8_BLOCK_SCALING_SIZE),
-                    shape[-1],
+                    k_scale,
+                    m_dim,
                     dtype=torch.uint8,
                     device=device,
                     pin_memory=pin_memory,
@@ -228,6 +239,16 @@ class MXFP8Quantizer(Quantizer):
         Swizzle kernel will be performed before GEMM to suit the need of CuBLAS.
         CuBLAS doc: https://docs.nvidia.com/cuda/cublas/index.html#d-block-scaling-factors-layout
         """
+        if IS_HIP_EXTENSION:
+            if columnwise:
+                return (
+                    math.prod(shape[:-1]) // MXFP8_BLOCK_SCALING_SIZE,
+                    shape[-1],
+                )
+            return (
+                math.prod(shape[:-1]),
+                shape[-1] // MXFP8_BLOCK_SCALING_SIZE,
+            )
         if columnwise:
             # Columnwise: scale_inv shape is [prod(shape[:-1]) // BLOCK_SIZE, shape[-1]]
             # with padding to multiples of [4, 128]
@@ -251,7 +272,7 @@ class MXFP8Quantizer(Quantizer):
         data: torch.Tensor,
         scale_inv: torch.Tensor,
         fake_dtype: torch.dtype,
-        fp8_dtype: TE_DType = tex.DType.kFloat8E4M3,
+        fp8_dtype: DType = DType.kFloat8E4M3,
     ) -> MXFP8Tensor:
         """Create a new MXFP8Tensor from data and scale_inv."""
         return MXFP8Tensor(
@@ -264,6 +285,7 @@ class MXFP8Quantizer(Quantizer):
             fp8_dtype=fp8_dtype,
             quantizer=self,
             with_gemm_swizzled_scales=False,
+            device=data.device,
         )
 
     def onnx_quantize(self, tensor: torch.Tensor) -> QuantizedTensor:
@@ -295,8 +317,9 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
     ----------
     data : torch.Tensor
           Raw FP8 data in a uint8 tensor
-    fp8_dtype : transformer_engine_torch.DType, default = kFloat8E4M3
-               FP8 format.
+    fp8_dtype : transformer_engine.pytorch.DType or transformer_engine_torch.DType,
+                optional, default = kFloat8E4M3 FP8 format. transformer_engine_torch.DType
+                is accepted for backward compatibility.
     fp8_scale_inv : torch.Tensor
                    Reciprocal of the scaling factor applied when
                    casting to FP8, i.e. the scaling factor that must
@@ -316,7 +339,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: TE_DType,
+        fp8_dtype: DType,
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         **kwargs,
@@ -449,6 +472,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 requires_grad=False,
                 fp8_dtype=tensor._fp8_dtype,
                 with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+                device=tensor.device,
             )
 
         if func == torch.ops.aten.copy_.default:
@@ -513,8 +537,18 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
             scale_invs = [tensor._rowwise_scale_inv, tensor._columnwise_scale_inv]
             split_sizes_for_scale = [split_size, split_size // MXFP8_BLOCK_SCALING_SIZE]
-            # Padding requirements: rowwise dim0 should be divisble by 128, columnwise dim0 should be divisble by 4
-            padding_multiples = [128, 4]
+            if IS_HIP_EXTENSION:
+                if get_device_compute_capability() == (12, 5):
+                    # gfx1250 MX pre-swizzle layout requires both dims padded to multiple of 4
+                    padding_multiples = [4, 4]
+                else:
+                    # ROCm/HIP backend uses an unpadded scale-inv layout (see `MXFP8Quantizer.make_empty`),
+                    # so applying the padding here would produce a per-shard scale-inv whose dim-0
+                    # does not match the destination scale-inv allocated for the FSDP2 local shard.
+                    padding_multiples = [1, 1]
+            else:
+                # Padding requirements: rowwise dim0 should be divisible by 128, columnwise dim0 should be divisible by 4
+                padding_multiples = [128, 4]
             for scale_inv, scale_split_size, pad_multiple in zip(
                 scale_invs, split_sizes_for_scale, padding_multiples
             ):
@@ -555,6 +589,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                     requires_grad=False,
                     fp8_dtype=tensor._fp8_dtype,
                     with_gemm_swizzled_scales=False,
+                    device=tensor.device,
                 )
                 for splitted_tensor_data in zip(*out_data)
             ]
@@ -644,6 +679,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 requires_grad=False,
                 fp8_dtype=tensor._fp8_dtype,
                 with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+                device=tensor.device,
             )
 
         # Default case
@@ -673,7 +709,13 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
 
         # Get FSDP state
         fsdp_state = _get_module_fsdp_state(module)
-        reshard_after_forward = fsdp_state._fsdp_param_group._reshard_after_forward
+        param_group = fsdp_state._fsdp_param_group
+        if param_group is None:
+            raise RuntimeError(
+                "FSDP state for this module has no parameter group; "
+                "cannot determine reshard_after_forward."
+            )
+        reshard_after_forward = param_group._reshard_after_forward
 
         # Remove padding from scale inverses before allgather
         # Rowwise scale_inv should be divisible by [128,4], columnwise by [4, 128]
@@ -701,7 +743,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         # are used again in backward. And hence if we need the columnwise data/scale_inv,
         # we need to send them as well for allgather in forward pass itself.
         if reshard_after_forward:
-            training_state = fsdp_state._fsdp_param_group._training_state
+            training_state = param_group._training_state
             is_backward_pass = training_state == TrainingState.PRE_BACKWARD
             # Allgather only the necessary tensors based on forward/backward pass
             rowwise_usage = not is_backward_pass
@@ -789,45 +831,17 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 shape=(rowwise_data.shape if rowwise_data is not None else columnwise_data.shape),
                 quantizer=self._quantizer,
                 with_gemm_swizzled_scales=False,
+                device=(
+                    rowwise_data.device if rowwise_data is not None else columnwise_data.device
+                ),
             )
         out._quantizer.set_usage(rowwise=rowwise_usage, columnwise=columnwise_usage)
         return out, all_gather_outputs
 
-    @classmethod
-    def _make_in_reduce_ex(
-        cls,
-        rowwise_data: torch.Tensor,
-        rowwise_scale_inv: torch.Tensor,
-        columnwise_data: torch.Tensor,
-        columnwise_scale_inv: torch.Tensor,
-        fp8_dtype: TE_DType,
-        dtype: torch.dtype,
-        shape: torch.shape,
-        quantizer: Optional[Quantizer] = None,
-        with_gemm_swizzled_scales: bool = False,
-    ) -> MXFP8Tensor:
-        """Build MXFP8Tensor, for use in __reduce__
-
-        __reduce_ex__ assumes object constructor has positional
-        arguments.
-
-        """
-        return MXFP8Tensor(
-            rowwise_data=rowwise_data,
-            rowwise_scale_inv=rowwise_scale_inv,
-            fp8_dtype=fp8_dtype,
-            columnwise_data=columnwise_data,
-            columnwise_scale_inv=columnwise_scale_inv,
-            dtype=dtype,
-            shape=shape,
-            quantizer=quantizer,
-            with_gemm_swizzled_scales=with_gemm_swizzled_scales,
-        )
-
     def __reduce_ex__(self, protocol: int) -> tuple:
         """Custom pickling"""
         return (
-            MXFP8Tensor._make_in_reduce_ex,
+            _make_mxfp8_tensor_in_reduce_ex,
             (
                 self._rowwise_data,
                 self._rowwise_scale_inv,
@@ -839,6 +853,42 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
                 self._quantizer,
                 self._with_gemm_swizzled_scales,
             ),
+        )
+
+    @classmethod
+    def _make_in_reduce_ex(
+        cls,
+        rowwise_data: torch.Tensor,
+        rowwise_scale_inv: torch.Tensor,
+        columnwise_data: torch.Tensor,
+        columnwise_scale_inv: torch.Tensor,
+        fp8_dtype: DType,
+        dtype: torch.dtype,
+        shape: torch.Size,
+        quantizer: Optional[Quantizer] = None,
+        with_gemm_swizzled_scales: bool = False,
+    ) -> MXFP8Tensor:
+        """This classmethod is kept for backward compatibility only.
+        ``__reduce_ex__`` used to point at this classmethod, but bound
+        classmethods pickle as ``(getattr, (cls, name))`` which adds an
+        extra reduction step to the pickle stream. The current
+        ``__reduce_ex__`` references the module-level
+        ``_make_mxfp8_tensor_in_reduce_ex`` instead so the pickle stream
+        uses a single ``GLOBAL`` opcode. This classmethod is retained so
+        that previously pickled ``MXFP8Tensor`` payloads (which still
+        reference ``MXFP8Tensor._make_in_reduce_ex``) can still be
+        unpickled.
+        """
+        return _make_mxfp8_tensor_in_reduce_ex(
+            rowwise_data,
+            rowwise_scale_inv,
+            columnwise_data,
+            columnwise_scale_inv,
+            fp8_dtype,
+            dtype,
+            shape,
+            quantizer,
+            with_gemm_swizzled_scales,
         )
 
     def _get_data(self) -> MXFP8Tensor:
@@ -917,7 +967,7 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
             return self._rowwise_data.shape
         if self._columnwise_data is not None:
             return self._columnwise_data.shape
-        raise RuntimeError("MXFP8Tensor has no data!")
+        return torch.Tensor.size(self)
 
     @property
     def is_cuda(self):
@@ -927,6 +977,40 @@ class MXFP8Tensor(MXFP8TensorStorage, QuantizedTensor):
         if self._columnwise_data is not None:
             return self._columnwise_data.is_cuda
         raise RuntimeError("MXFP8Tensor has no data!")
+
+
+def _make_mxfp8_tensor_in_reduce_ex(
+    rowwise_data: torch.Tensor,
+    rowwise_scale_inv: torch.Tensor,
+    columnwise_data: torch.Tensor,
+    columnwise_scale_inv: torch.Tensor,
+    fp8_dtype: DType,
+    dtype: torch.dtype,
+    shape: torch.Size,
+    quantizer: Optional[Quantizer] = None,
+    with_gemm_swizzled_scales: bool = False,
+) -> MXFP8Tensor:
+    """Reconstruct an ``MXFP8Tensor`` from its ``__reduce_ex__`` payload."""
+    # Infer device from inner buffers so the wrapper subclass stays
+    # consistent with its data (CPU after DCP staging deserialize,
+    # CUDA after the usual quantize path).
+    device = None
+    if rowwise_data is not None:
+        device = rowwise_data.device
+    elif columnwise_data is not None:
+        device = columnwise_data.device
+    return MXFP8Tensor(
+        rowwise_data=rowwise_data,
+        rowwise_scale_inv=rowwise_scale_inv,
+        fp8_dtype=fp8_dtype,
+        columnwise_data=columnwise_data,
+        columnwise_scale_inv=columnwise_scale_inv,
+        dtype=dtype,
+        shape=shape,
+        quantizer=quantizer,
+        with_gemm_swizzled_scales=with_gemm_swizzled_scales,
+        device=device,
+    )
 
 
 class _ViewFunc(torch.autograd.Function):
@@ -988,6 +1072,7 @@ class _ViewFunc(torch.autograd.Function):
             fp8_dtype=tensor._fp8_dtype,
             quantizer=tensor._quantizer,
             with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+            device=tensor.device,
         )
 
     @staticmethod
@@ -1015,6 +1100,7 @@ class _ViewFunc(torch.autograd.Function):
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
                 with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
+                device=grad.device,
             )
             return dgrad, None
         return grad.view(ctx.shape), None
@@ -1076,6 +1162,7 @@ class _ReshapeFunc(torch.autograd.Function):
             fp8_dtype=tensor._fp8_dtype,
             quantizer=tensor._quantizer,
             with_gemm_swizzled_scales=tensor._with_gemm_swizzled_scales,
+            device=tensor.device,
         )
 
     @staticmethod
@@ -1101,6 +1188,7 @@ class _ReshapeFunc(torch.autograd.Function):
                 columnwise_scale_inv=grad._columnwise_scale_inv,
                 fp8_dtype=grad._fp8_dtype,
                 quantizer=grad._quantizer,
+                device=grad.device,
                 with_gemm_swizzled_scales=grad._with_gemm_swizzled_scales,
             )
             return dgrad, None

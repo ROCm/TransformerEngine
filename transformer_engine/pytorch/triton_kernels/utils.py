@@ -2,12 +2,28 @@
 # License for AMD contributions = MIT. See LICENSE for more information
 
 import os
+from functools import cache
 import torch
 import triton
 from transformer_engine.pytorch.tensor.float8_tensor import Float8Tensor, Float8CurrentScalingQuantizer
+from transformer_engine.pytorch.tensor.float8_blockwise_tensor import Float8BlockQuantizer
 from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Tensor, MXFP8Quantizer
 from transformer_engine.pytorch.tensor.nvfp4_tensor import NVFP4Quantizer
+from transformer_engine.pytorch.utils import get_sm_count
 from .common import te_dtype_to_torch_dtype
+
+@cache
+def use_cuda_graph_autotune():
+    """Return whether Triton autotuning should benchmark configs with CUDA/HIP graphs.
+
+    Graph-based benchmarking is enabled by default on CUDA and disabled on ROCm/HIP.
+    Set ``NVTE_TRITON_AUTOTUNE_WITH_CUDA_GRAPH`` to ``1`` or ``0`` to override the default.
+    """
+    override = os.getenv("NVTE_TRITON_AUTOTUNE_WITH_CUDA_GRAPH")
+    if override is not None:
+        return override == "1"
+    return torch.version.hip is None
+
 
 def get_ln_sm_margin(sm_margin_type):
     assert sm_margin_type in {"FWD", "BWD", "INF"}
@@ -34,12 +50,10 @@ def get_inf_ln_sm_margin():
 
 
 def get_num_sms(sm_margin=None):
-    num_sms = torch.cuda.get_device_properties(
-        torch.cuda.current_device()
-    ).multi_processor_count
+    n = get_sm_count()
     if sm_margin is not None and sm_margin > 0:
-        num_sms = max(num_sms - int(sm_margin), 1)
-    return num_sms
+        n = max(n - int(sm_margin), 1)
+    return n
 
 
 def num_programs(x, sm_margin=None):
@@ -60,7 +74,7 @@ def make_ln_out(ln_out, quantizer=None, input_shape=None, out_dtype=torch.float3
 
     if ln_out is None:
         # TODO(micky774): Remove corresponding FP8Quantizer check when kernels properly support MXFP8/float8_current_scaling as a fused operation
-        if quantizer is None or isinstance(quantizer, (MXFP8Quantizer, Float8CurrentScalingQuantizer, NVFP4Quantizer)):
+        if quantizer is None or isinstance(quantizer, (MXFP8Quantizer, Float8CurrentScalingQuantizer, NVFP4Quantizer, Float8BlockQuantizer)):
             return torch.empty(input_shape, dtype=out_dtype, device='cuda')
         return quantizer.make_empty(input_shape, dtype=out_dtype)
 

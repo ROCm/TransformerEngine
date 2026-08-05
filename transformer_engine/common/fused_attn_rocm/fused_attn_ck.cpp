@@ -30,20 +30,16 @@ bool is_ck_backend_supported(
   float dropout,
   size_t num_attn_heads, size_t num_gqa_groups,
   size_t max_seqlen_q, size_t max_seqlen_kv,
-  size_t head_dim_qk, 
-  size_t head_dim_v, 
-  int64_t window_size_left, 
+  size_t head_dim_qk,
+  size_t head_dim_v,
+  int64_t window_size_left,
   int64_t window_size_right) {
 
 #ifdef USE_FUSED_ATTN_CK
 
   // debug info setting
-  bool nvte_log_ck_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_ck_config = true;
-  }
-  
+  const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
+
   // single filters
   
   // filter based on num_heads and num_gqa_groups
@@ -90,10 +86,7 @@ bool is_ck_backend_supported(
   }
 
   // joint filter based on sliding window and attn_mask
-  bool is_causal = (attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_MASK ||
-                    attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK||
-                    attn_mask_type == NVTE_Mask_Type::NVTE_CAUSAL_BOTTOM_RIGHT_MASK||
-                    attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  bool is_causal = is_causal_mask(attn_mask_type);
   if(is_causal){
     // causal mask window must be with causal top left or causal bottom right mask type
     if (!((window_size_left ==-1 || window_size_left >=0) && window_size_right ==0 )){
@@ -137,9 +130,7 @@ bool is_ck_backend_supported(
   // in NVTE, padding can happen in both THD format or BSHD/SBHD format
   // For THD format, padding is natural
   // For BSHD/SBHD, padding can be inferred by a cu_seqlen which shows the actual seqlen for each batch, while the dim(S) is the max_seqlen
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  bool is_padding = is_padding_mask(attn_mask_type);
   if(is_ragged && !is_padding){
     if(nvte_log_ck_config){
       std::cout<<"Ragged QKV input requires padding mask"<<std::endl;
@@ -483,11 +474,7 @@ void fused_attn_ck_fwd_impl(
   size_t *workspace_size,
   cudaStream_t stream){
 
-  bool nvte_log_ck_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_ck_config = true;
-  }
+  const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
 
   bool nvte_ck_uses_fwd_v3 = getenv<int>("NVTE_CK_USES_FWD_V3", 1);
   int nvte_ck_how_v3_bf16_cvt = getenv<int>("NVTE_CK_HOW_V3_BF16_CVT", 1);
@@ -497,9 +484,7 @@ void fused_attn_ck_fwd_impl(
   bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD || qkv_format==NVTE_QKV_Format::NVTE_SBHD_2BSHD;
   bool is_BSHD = qkv_format==NVTE_QKV_Format::NVTE_BSHD;
 
-  bool is_padding = (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-                     mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  bool is_padding = is_padding_mask(mask_type);
   bool bshd_to_thd = is_BSHD && is_padding;
 
   // extract the qkv and o storage bytes to allocate buffer for padding removing
@@ -557,6 +542,37 @@ void fused_attn_ck_fwd_impl(
     devPtrCuSeqlenPaddedKV = planner.allocate((b+1)*sizeof(int32_t));
   }
 
+  // Common fields filled here; mode-specific fields are overwritten below.
+  ck_fused_attn::CKAttnFwdArgs ck_args;
+  ck_args.dtype = nvte_to_ck_dtype(dtype);
+  ck_args.b = b; ck_args.h = h; ck_args.hg = hg;
+  ck_args.s_q = s_q; ck_args.s_kv = s_kv; ck_args.d_qk = d_qk; ck_args.d_v = d_v;
+  ck_args.is_training = is_training;
+  ck_args.scaling_factor = scaling_factor;
+  ck_args.dropout_probability = dropout_probability;
+  ck_args.philox_seed_ptr = devPtrDropoutSeed;
+  ck_args.philox_offset_ptr = devPtrDropoutOffset;
+  ck_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
+  ck_args.window_size_left = window_size_left;
+  ck_args.window_size_right = window_size_right;
+  ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3;
+  ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
+  //This condition should match actual if/else conditions for group_mode
+  if ((is_SBHD && is_padding) || bshd_to_thd || is_ragged)
+  {
+    //ptr itself is not needed for nsplit calculation but to properly set is_group_mode
+    ck_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
+  }
+
+  ck_args.num_splits = ck_attn_fwd_num_splits(ck_args);
+  if (ck_args.num_splits > 0)
+  {
+    size_t splitkv_workspace_bytes = ck_attn_fwd_workspace_size(ck_args);
+    if (splitkv_workspace_bytes > 0) {
+      ck_args.splitkv_workspace_ptr = planner.allocate(splitkv_workspace_bytes);
+    }
+  }
+
   // Sizing-only path: report and exit before any kernel/memset.
   if(planner.is_sizing()){
     *workspace_size = planner.total();
@@ -597,6 +613,15 @@ void fused_attn_ck_fwd_impl(
     // reset the final results since padded places need to be 0
     NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrO, 0, o_storage_bytes, stream));
   }
+  if(devPtrSoftmaxLSEWithoutPadding){
+    // ck only writes the lse of the tokens covered by cu_seqlens, but pad_remap_lse below
+    // copies the whole padded range back into devPtrSoftmaxAux. Prefill the buffer with
+    // 0xF0 (a large negative number, same sentinel the framework layers use) so that the
+    // padded rows end up with a well defined -inf like lse instead of stale workspace data.
+    // Consumers that combine lse across calls, e.g. the jax ring attention softmax
+    // correction, produce NaNs when they read that garbage.
+    NVTE_CHECK_CUDA(cudaMemsetAsync(devPtrSoftmaxLSEWithoutPadding, 0xF0, h*max_tokens_q*sizeof(float), stream));
+  }
 
   if (nvte_log_ck_config) {
     std::cout<<std::endl<<"attn_fwd(ck): ";
@@ -631,23 +656,9 @@ void fused_attn_ck_fwd_impl(
     std::cout<<"(bias_b, bias_h): ("<<bias_b<<", "<<bias_h<<"), ";
     std::cout<<"mask_type: "<<mask_type<<", ";
     std::cout<<"window_size: ("<<window_size_left<<", "<<window_size_right<<")"<<", ";
-    std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<std::endl;
+    std::cout<<"nvte_ck_uses_fwd_v3: "<<nvte_ck_uses_fwd_v3<<", ";
+    std::cout<<"num_splits: "<<ck_args.num_splits<<std::endl;
   }
-  // Common fields filled here; mode-specific fields are overwritten below.
-  ck_fused_attn::CKAttnFwdArgs ck_args;
-  ck_args.dtype = nvte_to_ck_dtype(dtype);
-  ck_args.b = b; ck_args.h = h; ck_args.hg = hg;
-  ck_args.s_q = s_q; ck_args.s_kv = s_kv; ck_args.d_qk = d_qk; ck_args.d_v = d_v;
-  ck_args.is_training = is_training;
-  ck_args.scaling_factor = scaling_factor;
-  ck_args.dropout_probability = dropout_probability;
-  ck_args.philox_seed_ptr = devPtrDropoutSeed;
-  ck_args.philox_offset_ptr = devPtrDropoutOffset;
-  ck_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
-  ck_args.window_size_left = window_size_left;
-  ck_args.window_size_right = window_size_right;
-  ck_args.uses_fwd_v3 = nvte_ck_uses_fwd_v3;
-  ck_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
 
   if(is_SBHD && is_padding){
     // remove padding for q, k, v
@@ -730,11 +741,7 @@ void fused_attn_ck_bwd_impl(
   size_t *workspace_size,
   cudaStream_t stream) {
   
-  bool nvte_log_ck_config = false;
-  if (const char* env_p = std::getenv("NVTE_LOG_CK_CONFIG") ) {
-    if (env_p != nullptr && std::string(env_p) == "1")
-      nvte_log_ck_config = true;
-  } 
+  const bool nvte_log_ck_config = getenv<bool>("NVTE_LOG_CK_CONFIG");
   // bwd v3 is optional by enabling the following envs
   // default values follows the ck example setting
   bool nvte_ck_uses_bwd_v3 = getenv<int>("NVTE_CK_USES_BWD_V3", 1);
@@ -743,16 +750,11 @@ void fused_attn_ck_bwd_impl(
 
   bool is_mqa_gqa = (h > hg);
 
-  size_t kN0 = (d_qk <= 128)? 128:64;
-  size_t nsplits = deterministic? ceil(1.0*s_kv/kN0):1;
-
   NVTE_QKV_Format qkv_format = nvte_get_qkv_format(layout);
   bool is_ragged = qkv_format==NVTE_QKV_Format::NVTE_THD;
   bool is_SBHD = qkv_format==NVTE_QKV_Format::NVTE_SBHD || qkv_format==NVTE_QKV_Format::NVTE_SBHD_2BSHD;
   bool is_BSHD = qkv_format==NVTE_QKV_Format::NVTE_BSHD;
-  bool is_padding = (mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK ||
-                     mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
+  bool is_padding = is_padding_mask(mask_type);
   bool bshd_to_thd = is_BSHD && is_padding;
   NVTE_QKV_Layout_Group layout_group = nvte_get_qkv_layout_group(layout);
 
@@ -770,8 +772,33 @@ void fused_attn_ck_bwd_impl(
   // First h*max_tokens_q*sizeof(float) is the lse-d buffer (passed as softmax_lsed)
   void* lse_workspace = planner.allocate(h*max_tokens_q*sizeof(float));
 
-  // CK requires dq_acc ptr; size depends on deterministic mode
-  void* dq_acc_ptr = planner.allocate(nsplits*h*max_tokens_q*d_qk*sizeof(float));
+  // Reserve AOT scratch for AITER's internal bwd workspace (launcher metadata +
+  // dq_acc accumulator), carved by ck_attn_bwd's workspace_alloc callback instead
+  // of allocated per call. The size is a pure host-side query; the full ck_args
+  // built below (execution pass only) carries the pointer into the dispatch, so
+  // assemble just the trait-bearing fields here.
+  ck_fused_attn::CkAttnBwdArgs ws_size_args;
+  ws_size_args.dtype = nvte_to_ck_dtype(dtype);
+  ws_size_args.b = b; ws_size_args.h = h; ws_size_args.hg = hg;
+  ws_size_args.s_q = s_q; ws_size_args.s_kv = s_kv; ws_size_args.d_qk = d_qk; ws_size_args.d_v = d_v;
+  ws_size_args.max_tokens_q = max_tokens_q; ws_size_args.max_tokens_kv = max_tokens_kv;
+  ws_size_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
+  ws_size_args.dropout_probability = dropout_probability;
+  ws_size_args.deterministic = deterministic;
+  ws_size_args.uses_bwd_v3 = nvte_ck_uses_bwd_v3;
+  ws_size_args.is_v3_atomic_fp32 = nvte_ck_is_v3_atomic_fp32;
+  ws_size_args.how_v3_bf16_cvt = nvte_ck_how_v3_bf16_cvt;
+  ws_size_args.dbias_ptr = devPtrdBias;
+  if((is_SBHD && is_padding) || bshd_to_thd || is_ragged){
+    // group mode: a non-null cu_seqlen flips is_group_mode(); bias is forced off
+    ws_size_args.cu_seqlen_q_ptr = devPtrCuSeqlensQ;
+  }else{
+    // batch mode: bias shape feeds the trait/workspace sizing
+    ws_size_args.attn_bias_type = nvte_to_ck_bias_type(bias_type);
+    ws_size_args.bias_b = bias_b; ws_size_args.bias_h = bias_h;
+  }
+  const size_t aiter_workspace_bytes = ck_fused_attn::ck_attn_bwd_workspace_size(ws_size_args);
+  void* aiter_workspace = planner.allocate(aiter_workspace_bytes);
 
   void* dk_expanded_ptr = nullptr;
   void* dv_expanded_ptr = nullptr;
@@ -913,8 +940,13 @@ void fused_attn_ck_bwd_impl(
   }
 
   // Initialize workspace buffers.
-  // dq_acc is of shape (nsplits, B, S, H, D_qk); CK requires zeroing
-  NVTE_CHECK_CUDA(cudaMemsetAsync(dq_acc_ptr, 0, sizeof(float)*nsplits*h*max_tokens_q*d_qk, stream));
+  // dk_expanded/dv_expanded scratch is written only for valid KV rows by the GQA
+  // main kernel, but the post-dispatch reduction reads every row; pre-zero so
+  // masked/padded rows don't feed uninitialized workspace into dk/dv (-> NaN).
+  if(dk_expanded_ptr){
+    NVTE_CHECK_CUDA(cudaMemsetAsync(dk_expanded_ptr, 0,
+        max_tokens_kv*h*(d_qk+d_v)*nvte_dtype_size(dtype), stream));
+  }
   if(devPtrAlibiSlope){
     dim3 block, grid;
     block.x = 1024;
@@ -992,10 +1024,11 @@ void fused_attn_ck_bwd_impl(
   ck_args.attn_mask_type = set_ck_mask(mask_type, window_size_left, window_size_right);
   ck_args.window_size_left = window_size_left;
   ck_args.window_size_right = window_size_right;
-  ck_args.dq_acc_ptr = dq_acc_ptr;
   ck_args.dk_expanded_ptr = dk_expanded_ptr;
   ck_args.dv_expanded_ptr = dv_expanded_ptr;
   ck_args.lse_workspace_ptr = lse_workspace;
+  ck_args.aiter_workspace_ptr = aiter_workspace;
+  ck_args.aiter_workspace_bytes = aiter_workspace_bytes;
   ck_args.deterministic = deterministic;
   ck_args.uses_bwd_v3 = nvte_ck_uses_bwd_v3;
   ck_args.is_v3_atomic_fp32 = nvte_ck_is_v3_atomic_fp32;
@@ -1202,10 +1235,6 @@ void fused_attn_ck_fwd(
   }
   size_t workspace_size = 0;
 
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  
   fused_attn_ck_fwd_impl(
     b, h_q, h_kv, max_seqlen_q, max_seqlen_kv, d_qk, d_v, bias_b, bias_h,
     max_tokens_q, max_tokens_kv,
@@ -1224,19 +1253,8 @@ void fused_attn_ck_fwd(
     &workspace_size,
     stream);
 
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
+  set_workspace_size(workspace, workspace_size);
+  return;
 #else
   NVTE_ERROR("CK fused attn backend not compiled.");
 #endif // USE_FUSED_ATTN_CK
@@ -1290,11 +1308,6 @@ void fused_attn_ck_bwd(
 
   size_t workspace_size = 0;
 
-  bool is_ragged = nvte_get_qkv_format(qkv_layout)==NVTE_QKV_Format::NVTE_THD; 
-  bool is_padding = (attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_MASK || 
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_MASK ||
-                     attn_mask_type == NVTE_Mask_Type::NVTE_PADDING_CAUSAL_BOTTOM_RIGHT_MASK);
-  
   // extract the max_tokens for padding/unpadding and softmax_lse buffer
   // b from cu_seqlen and max_seqlen are not the actual storage batch and seqlen for pad_between_seqs case
   size_t max_tokens_q = std::accumulate((input_Q->data).shape.begin(), (input_Q->data).shape.end(), static_cast<size_t>(1), std::multiplies<size_t>())/h_q/d_qk;
@@ -1321,19 +1334,8 @@ void fused_attn_ck_bwd(
     &workspace_size,
     stream);
 
-  if (workspace_size > 0) {
-    if (workspace->data.dptr == nullptr) {
-      workspace->data.shape = {workspace_size};
-      workspace->data.dtype = DType::kByte;
-      return;
-    }
-  } else if (workspace_size == 0) {
-    workspace->data.shape = {1};
-    workspace->data.dtype = DType::kByte;
-    return;
-  } else {
-    NVTE_ERROR("Unexpected workspace_size.");
-  }
+  set_workspace_size(workspace, workspace_size);
+  return;
 #else
   NVTE_ERROR("CK fused attn backend not compiled.");
 #endif // USE_FUSED_ATTN_CK

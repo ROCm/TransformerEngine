@@ -341,11 +341,12 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                  const void *alpha, const void *beta, bool use_split_accumulator, int math_sm_count,
                  int m_split, int n_split, bool gemm_producer, const Tensor *inputCounter,
                  cudaStream_t stream) {
+  NVTE_CHECK(!inputA->row_scaled_nvfp4 && !inputB->row_scaled_nvfp4,
+             "cuBLAS GEMM does not support row-scaled NVFP4 inputs.");
+
   // Tensor dims in row-major order
-  const int A0 = inputA->flat_first_dim();
-  const int A1 = inputA->flat_last_dim();
-  const int B0 = inputB->flat_first_dim();
-  const int B1 = inputB->flat_last_dim();
+  const auto [A0, A1] = inputA->flat_2d_dims();
+  const auto [B0, B1] = inputB->flat_2d_dims();
 
   // GEMM dims in column-major order
   const int m = transa == CUBLAS_OP_T ? A0 : A1;
@@ -1097,6 +1098,17 @@ void nvte_cublas_handle_init() { auto _ = cublasHandleManager::Instance().GetHan
 }  //  namespace transformer_engine
 #endif // __HIP_PLATFORM_AMD__
 
+#ifdef USE_HIPKITTENS_GEMM
+namespace transformer_engine {
+bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+    int num_gemms, bool transa, bool transb, NVTETensor *workspace,
+    bool accumulate, cudaStream_t stream);
+bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+    int num_gemms, bool transa, bool transb, NVTETensor *workspace,
+    bool accumulate, cudaStream_t stream);
+}
+#endif
+
 void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
                             const NVTETensor *bias, NVTETensor *pre_gelu_out, const int num_gemms,
                             bool transa, bool transb, bool grad, NVTETensor *workspace,
@@ -1104,14 +1116,17 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
                             cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_gemm);
 
-#ifdef __HIP_PLATFORM_AMD__
-  if (num_gemms <= 0)
+  if (num_gemms <= 0) {
     return;
-#else
+  }
+
+#ifndef __HIP_PLATFORM_AMD__
   const int current_device = transformer_engine::cuda::current_device();
   const bool is_hopper = (transformer_engine::cuda::sm_arch(current_device) == 90);
 #endif
-  const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false);
+  const bool use_cutlass = transformer_engine::getenv<bool>("NVTE_USE_CUTLASS_GROUPED_GEMM", false)
+                        || transformer_engine::getenv<bool>("NVTE_USE_HIPKITTENS_GROUPED_GEMM", false)
+                        || transformer_engine::getenv<bool>("NVTE_USE_CK_GROUPED_GEMM", false);
   const bool warn_fallback =
       transformer_engine::getenv<bool>("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", false);
 
@@ -1162,16 +1177,19 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     auto *inputB = transformer_engine::convertNVTETensorCheck(B[0]);
     auto *OutputD = transformer_engine::convertNVTETensorCheck(D[0]);
 #ifdef __HIP_PLATFORM_AMD__
-    auto A_dt = inputA->data.dtype;
-    auto B_dt = inputB->data.dtype;
+    auto effective_dtype = [](const transformer_engine::Tensor *t) {
+      NVTE_CHECK(t->has_data() || t->has_columnwise_data(),
+                "Input tensor has neither row-wise nor column-wise data.");
+      return t->has_data() ? t->data.dtype : t->columnwise_data.dtype;
+    };
+
+    auto A_dt = effective_dtype(inputA);
+    auto B_dt = effective_dtype(inputB);
     auto D_dt = OutputD->data.dtype;
-    return (
-            (is_fp8_dtype(A_dt) && is_fp8_dtype(B_dt))
-          ) ||
-          (
-            (A_dt == B_dt) && (A_dt == D_dt) &&
-            (is_fp16_dtype(A_dt))
-          );
+
+    return ((is_fp8_dtype(A_dt) && is_fp8_dtype(B_dt)) ||
+            ((A_dt == B_dt) && (A_dt == D_dt) && is_fp16_dtype(A_dt)));
+
 #else
     auto A_type = get_cuda_dtype(inputA->data.dtype);
     auto B_type = get_cuda_dtype(inputB->data.dtype);
@@ -1194,11 +1212,32 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
   if (is_empty_arr(bias) && is_empty_arr(pre_gelu_out) && is_supported_dtype() &&
 #ifdef __HIP_PLATFORM_AMD__
       true)                               {
-    if (!ck_tile_grouped_gemm(A, B, D, num_gemms, transa, transb, workspace, accumulate, stream)) {
-        if (warn_fallback) {
-          NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
-        }
-        cublas_path();
+    auto *inputA = transformer_engine::convertNVTETensorCheck(A[0]);
+
+    bool handled_by_ck = false;
+    if (transformer_engine::is_mxfp8_scaling(inputA->scaling_mode)) {
+#ifdef USE_HIPKITTENS_GEMM
+      if (transformer_engine::try_kittens_grouped_mxfp8_gemm(A, B, D, num_gemms, transa, transb,
+                                         workspace, accumulate, stream)) {
+        return;
+      }
+      if (transformer_engine::try_kittens_grouped_mxfp8_wgrad(A, B, D, num_gemms, transa, transb,
+                                         workspace, accumulate, stream)) {
+        return;
+      }
+#endif
+      handled_by_ck = ck_tile_mx_grouped_gemm(
+          A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
+    } else {
+      handled_by_ck = ck_tile_grouped_gemm(
+          A, B, D, num_gemms, transa, transb, workspace, accumulate, stream);
+    }
+
+    if (!handled_by_ck) {
+      if (warn_fallback) {
+        NVTE_WARN("Fallback to cuBLAS grouped GEMM.");
+      }
+      cublas_path();
     }
 #else
       all_groups_uniform_k128(B, transb)) {

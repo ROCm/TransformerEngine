@@ -14,9 +14,8 @@
 import transformer_engine.pytorch as te
 import transformer_engine_torch as tex
 from transformer_engine.pytorch import NVFP4Quantizer
-from transformer_engine.pytorch.custom_recipes.quantization_nvfp4 import NVFP4QuantizerRef
+from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVFP4QuantizerRef
 from transformer_engine.pytorch.custom_recipes import utils
-from transformer_engine.pytorch.constants import TE_DType
 from transformer_engine.common.recipe import NVFP4BlockScaling
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
@@ -38,6 +37,7 @@ def check_quantization_nvfp4_versus_reference(
     M: int,
     N: int,
     contiguous: bool,
+    return_rowwise: bool,
     return_transpose: bool,
     use_cpp_allocator: bool,
     swizzled_scale: bool = False,
@@ -48,7 +48,7 @@ def check_quantization_nvfp4_versus_reference(
 ) -> None:
     assert with_rht and with_post_rht_amax, "RHT and post-RHT amax reduction must be enabled."
 
-    te_dtype = tex.DType.kFloat4E2M1
+    te_dtype = te.DType.kFloat4E2M1
 
     # Setup device and random seed
     device = "cuda"
@@ -64,7 +64,7 @@ def check_quantization_nvfp4_versus_reference(
     # Quantize
     nvfp4_quantizer = NVFP4Quantizer(
         fp4_dtype=te_dtype,
-        rowwise=True,
+        rowwise=return_rowwise,
         columnwise=return_transpose,
         with_amax_reduction=False,
         amax_reduction_group=None,
@@ -81,9 +81,11 @@ def check_quantization_nvfp4_versus_reference(
         x_nvfp4_sut = nvfp4_quantizer.update_quantized(x, x_nvfp4_sut)
 
     # Extract data from NVFP4Tensor
-    assert x_nvfp4_sut._rowwise_data is not None
-    qx: torch.Tensor = x_nvfp4_sut._rowwise_data.view(dtype=torch.uint8)
-    assert x_nvfp4_sut._rowwise_scale_inv is not None
+    qx: torch.Tensor = (
+        x_nvfp4_sut._rowwise_data.view(dtype=torch.uint8)
+        if x_nvfp4_sut._rowwise_data is not None
+        else None
+    )
     sx: torch.Tensor = x_nvfp4_sut._rowwise_scale_inv
     qx_t = (
         x_nvfp4_sut._columnwise_data.view(dtype=torch.uint8)
@@ -94,13 +96,13 @@ def check_quantization_nvfp4_versus_reference(
     amax_rowwise = x_nvfp4_sut._amax_rowwise
     amax_colwise = x_nvfp4_sut._amax_columnwise
 
-    qx = unpack_fp4(qx)
+    qx = unpack_fp4(qx) if qx is not None else None
     qx_t = unpack_fp4(qx_t) if qx_t is not None else None
 
     # Reference quantization using NVFP4QuantizerRef with built-in RHT
     ref_quantizer = NVFP4QuantizerRef(
         dtype=utils.Fp4Formats.E2M1,
-        rowwise=True,
+        rowwise=return_rowwise,
         columnwise=return_transpose,
         pow_2_scales=False,
         eps=0.0,
@@ -133,13 +135,14 @@ def check_quantization_nvfp4_versus_reference(
         sx_t_ref = None
         ref_amax_colwise_t = None
 
-    torch.testing.assert_close(amax_rowwise, ref_amax_rowwise, atol=0.0, rtol=0.0)
+    if return_rowwise:
+        torch.testing.assert_close(amax_rowwise, ref_amax_rowwise, atol=0.0, rtol=0.0)
 
-    torch.testing.assert_close(qx, qx_ref, atol=0.0, rtol=0.0)
-    # Compare only the valid portion of scale tensors (reference may not have padding)
-    ref_sx_shape = sx_ref.shape
-    sx_valid = sx[: ref_sx_shape[0], : ref_sx_shape[1]]
-    torch.testing.assert_close(sx_valid, sx_ref, atol=0.0, rtol=0.0)
+        torch.testing.assert_close(qx, qx_ref, atol=0.0, rtol=0.0)
+        # Compare only the valid portion of scale tensors (reference may not have padding)
+        ref_sx_shape = sx_ref.shape
+        sx_valid = sx[: ref_sx_shape[0], : ref_sx_shape[1]]
+        torch.testing.assert_close(sx_valid, sx_ref, atol=0.0, rtol=0.0)
 
     if return_transpose:
         torch.testing.assert_close(amax_colwise, ref_amax_colwise_t, atol=0.0, rtol=0.0)
@@ -187,9 +190,7 @@ def check_quantization_nvfp4_versus_reference(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
-@pytest.mark.parametrize(
-    "return_transpose", [True, False], ids=["quantize_transpose", "skip_transpose"]
-)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
@@ -200,15 +201,29 @@ def test_rht_with_quantization_block_tiling_versus_reference(
     x_dtype: torch.dtype,
     M: int,
     N: int,
-    return_transpose: bool,
+    quantize_mode: str,
     use_cpp_allocator: bool,
     with_random_sign_mask: bool,
 ) -> None:
+
+    if quantize_mode == "rowwise_only":
+        return_rowwise = True
+        return_transpose = False
+    elif quantize_mode == "both_directions":
+        return_rowwise = True
+        return_transpose = True
+    elif quantize_mode == "columnwise_only":
+        return_rowwise = False
+        return_transpose = True
+    else:
+        raise ValueError(f"Invalid quantize mode: {quantize_mode}")
+
     check_quantization_nvfp4_versus_reference(
         x_dtype=x_dtype,
         M=M,
         N=N,
         contiguous=True,
+        return_rowwise=return_rowwise,
         return_transpose=return_transpose,
         use_cpp_allocator=use_cpp_allocator,
         with_random_sign_mask=with_random_sign_mask,
@@ -223,9 +238,7 @@ def test_rht_with_quantization_block_tiling_versus_reference(
     ],
 )
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
-@pytest.mark.parametrize(
-    "return_transpose", [True, False], ids=["quantize_transpose", "skip_transpose"]
-)
+@pytest.mark.parametrize("quantize_mode", ["rowwise_only", "both_directions", "columnwise_only"])
 @pytest.mark.parametrize(
     "use_cpp_allocator", [True, False], ids=["cpp_allocator", "python_allocator"]
 )
@@ -236,15 +249,29 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     x_dtype: torch.dtype,
     M: int,
     N: int,
-    return_transpose: bool,
+    quantize_mode: str,
     use_cpp_allocator: bool,
     with_random_sign_mask: bool,
 ):
+
+    if quantize_mode == "rowwise_only":
+        return_rowwise = True
+        return_transpose = False
+    elif quantize_mode == "both_directions":
+        return_rowwise = True
+        return_transpose = True
+    elif quantize_mode == "columnwise_only":
+        return_rowwise = False
+        return_transpose = True
+    else:
+        raise ValueError(f"Invalid quantize mode: {quantize_mode}")
+
     check_quantization_nvfp4_versus_reference(
         x_dtype=x_dtype,
         M=M,
         N=N,
         contiguous=False,
+        return_rowwise=return_rowwise,
         return_transpose=return_transpose,
         use_cpp_allocator=use_cpp_allocator,
         with_random_sign_mask=with_random_sign_mask,
@@ -292,6 +319,7 @@ if IS_HIP_EXTENSION:
         return qx_t_ref, sx_t_ref
 
 
+    @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
     @pytest.mark.parametrize("rows,cols", [(64, 64), (128, 128)])
     def test_hadamard_transform_amax(rows, cols):
         """

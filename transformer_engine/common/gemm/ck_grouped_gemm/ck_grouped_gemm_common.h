@@ -8,17 +8,24 @@
 
 #include <hip/hip_runtime.h>
 
+#include <algorithm>
 #include <array>
 #include <type_traits>
 #include <vector>
 #include <memory>
 
 #include <transformer_engine/transformer_engine.h>
+
+#include "common/util/cuda_runtime.h"
 #include "../../common.h"
+#include "../../util/system.h"
 
 #include "ck_tile/core.hpp"
+#include "ck_tile/host/kernel_launch.hpp"
 #include "ck_tile/ops/epilogue.hpp"
+#include "ck_tile/ops/elementwise/unary_element_wise_operation.hpp"
 #include "ck_tile/ops/gemm.hpp"
+#include "ck_tile/ops/gemm/kernel/mx_grouped_gemm_kernel.hpp"
 
 namespace transformer_engine {
 namespace grouped_gemm {
@@ -70,11 +77,33 @@ static inline const transformer_engine::SimpleTensor& scale_inv_view(const trans
   return t.scale_inv;
 }
 
+enum class GPUArch {
+  GFX942,
+  GFX950,
+  GFX1250,
+  UNKNOWN
+};
+
+static inline GPUArch detect_gpu_arch() {
+  switch (cuda::sm_arch()) {
+    case 94:
+      return GPUArch::GFX942;
+    case 95:
+      return GPUArch::GFX950;
+    case 125:
+      return GPUArch::GFX1250;
+    default:
+      return GPUArch::UNKNOWN;
+  }
+}
+
 struct GroupedGemmRunContext {
     const NVTETensor* A = nullptr;
     const NVTETensor* B = nullptr;
     NVTETensor* D = nullptr;
     int64_t N = 0;
+
+    GPUArch arch = GPUArch::UNKNOWN;
 
     int group_num = 0;
     bool transA = false;
