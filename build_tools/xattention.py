@@ -334,6 +334,9 @@ def setup_xattention_extension(csrc_source_files) -> "object":
         name="transformer_engine_xattention",
         sources=sources,
         include_dirs=include_dirs,
+        # c10_hip provides getCurrentHIPStream(); CppExtension only links the
+        # CPU-side torch libraries by default.
+        libraries=["c10_hip"],
         extra_compile_args={"cxx": cxx_flags},
         extra_link_args=link_args,
     )
