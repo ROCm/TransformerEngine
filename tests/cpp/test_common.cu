@@ -167,7 +167,8 @@ std::pair<scale_inv_meta, scale_inv_meta> get_scales(const NVTEShape& shape,
 #ifdef __HIP_PLATFORM_AMD__
     // gfx1250 MX pre-swizzle requires MXFP8 scales padded to a multiple of 4 in both dims
     if (getDeviceComputeCapability() == 125) {
-      align_Y_rowwise = align_X_rowwise = align_Y_colwise = align_X_colwise = 4;
+      align_Y_rowwise = align_X_rowwise = align_Y_colwise = align_X_colwise =
+          mxfp8_gfx1250_scale_tensor_alignment;
     }
 #endif
 
@@ -1334,13 +1335,8 @@ std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
                                : nvfp4_scale_tensor_alignment_X_colwise;
     } else {
       // MXFP8: gfx1250 MX pre-swizzle requires scales padded to a multiple of 4 in both dims
-      if (getDeviceComputeCapability() == 125) {
-        alignment_Y = 4;
-        alignment_X = 4;
-      } else {
-        alignment_Y = 1;
-        alignment_X = 1;
-      }
+      alignment_Y = alignment_X =
+          (getDeviceComputeCapability() == 125) ? mxfp8_gfx1250_scale_tensor_alignment : 1;
     }
 #else
     const size_t alignment_Y = is_rowwise
