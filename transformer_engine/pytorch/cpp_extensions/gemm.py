@@ -9,6 +9,7 @@
 from typing import Iterable, Optional, Tuple, Union, List
 import os
 import functools
+import warnings
 import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
@@ -493,7 +494,38 @@ def general_gemm(
     }
 
     if not _is_nvfp4_row_scaled_tensor(A) and not _is_nvfp4_row_scaled_tensor(B):
-        out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+        use_gemm_flydsl = (IS_HIP_EXTENSION
+                          and get_device_compute_capability() == (9, 5)
+                          and bool(int(os.environ.get("NVTE_USE_FLYDSL", "0"))))
+        if use_gemm_flydsl:
+            # Lazy import keeps FlyDSL off the normal Transformer Engine import path.
+            from ..flydsl_kernels.gemm import (
+                FlyDSLUnsupportedError,
+                te_generic_gemm_flydsl,
+            )
+
+            try:
+                out, bias_grad, gelu_input, extra_output = te_generic_gemm_flydsl(
+                    *args,
+                    **kwargs,
+                )
+            except FlyDSLUnsupportedError as exc:
+                warn_fallback = os.environ.get(
+                    "NVTE_FLYDSL_GEMM_WARN_FALLBACK",
+                    "0",
+                ).lower() not in ("", "0", "false", "no", "off")
+
+                if warn_fallback:
+                    warnings.warn(
+                        "[FLYDSL WARNING]: FlyDSL GEMM does not support this configuration; "
+                        f"falling back to the default backend. Reason: {exc}",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+
+                out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+        else:
+            out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
     else:
         if _is_nvfp4_row_scaled_tensor(A):
             raise NotImplementedError("Row-scaled NVFP4 GEMM does not support row-scaled A.")
