@@ -4,8 +4,8 @@
 
 """Permute-free route-list grouped GEMM for MoE (bf16).
 
-- TE builds one expert-sorted ``sorted_slot_ids`` (received-token row per route) plus a
-  compact-output map (``route_start``/``block_start``), then runs the gather-GEMM.
+- TE builds one expert-sorted ``sorted_slot_ids`` (received-token row per block-padded slot)
+  plus the per-expert ``block_start`` (block units), then runs the gather-GEMM.
 - FC1 fwd output is worst-case padded ``[T * min(topk, E), out_features]`` in expert order (valid rows
   are the compact route range ``[0, num_routes)``, tail is inert zero padding); dgrad returns
   ``dA = [num_recv_tokens, in_features]`` (scatter-add of the per-route gradients).
@@ -116,7 +116,6 @@ def _pf_moe_fwd(
         routing.sorted_slot_ids,
         routing.expert_ids,
         routing.block_start,
-        routing.route_start,
         num_recv_tokens=num_recv_tokens,
         block_m=block_m,
         index_a_by_route_pos=index_a_by_route_pos,
@@ -161,6 +160,15 @@ def _fwd_align_block_size_m(
         candidates = {c for c in (_FLYDSL_GATED_BLOCK_M, default_block_m) if c <= default_block_m}
         if num_tokens >= _FLYDSL_FWD_LARGE_TIER:
             candidates.add(_FLYDSL_FWD_BLOCK_M)
+        # The v3 gather/dgrad tile requires block_m >= 128 (128x256 MFMA minimum), so on a
+        # small-token tier where the token-count default is < 128 we must still floor the align
+        # block_m to 128 rather than emit a sub-tile the kernel cannot run.
+        from .pf_fwd_wrapper import _v3_enabled
+
+        if _v3_enabled():
+            candidates = {c for c in candidates if c >= _FLYDSL_GATED_BLOCK_M} or {
+                _FLYDSL_GATED_BLOCK_M
+            }
 
     # Prefer the in-tree FlyDSL block_m picker when available.
     try:
@@ -263,9 +271,9 @@ def moe_align_route_list(
     Returns
     -------
     ``(sorted_slot_ids, expert_ids, num_tokens_post_padded, block_start, blocks_per_expert,
-       route_start, route_to_token, token_routes, token_route_count)``. Index tensors are
-    ``int32``; ``num_tokens_post_padded`` (``[1]``) is a device scalar. The last two are the
-    token->routes inverse map, ``None`` unless ``build_inverse_map``.
+       token_routes, token_route_count)``. Index tensors are ``int32``;
+    ``num_tokens_post_padded`` (``[1]``) is a device scalar. The last two are the token->routes
+    inverse map, ``None`` unless ``build_inverse_map``.
     """
     return route_list_align(
         routing_map,
@@ -303,8 +311,6 @@ def prepare_moe_align(metadata: MoERoutingMetadata, block_m: int) -> MoERoutingM
         num_tokens_post_padded,
         block_start,
         _blocks_per_expert,
-        route_start,
-        route_to_token,
         token_routes,
         token_route_count,
     ) = moe_align_route_list(
@@ -319,8 +325,6 @@ def prepare_moe_align(metadata: MoERoutingMetadata, block_m: int) -> MoERoutingM
     metadata.expert_ids = expert_ids  # [blocks_max] int32: expert owning each block (-1 past end)
     metadata.num_tokens_post_padded = num_tokens_post_padded  # [1] int32 device scalar: padded extent
     metadata.block_start = block_start  # [E] int32: first block index of each expert (block units)
-    metadata.route_start = route_start  # [E] int32: first compact route index of each expert
-    metadata.route_to_token = route_to_token  # [routes_max] int32: compact route -> token
     metadata.block_size_m = block_m  # int: BLOCK_SIZE_M the layout is padded to
     metadata.token_routes = token_routes  # [T, min(topk, E)] int32: token -> its compact route ids
     metadata.token_route_count = token_route_count  # [T] int32: number of routes per token
@@ -343,8 +347,6 @@ def _prepare_wgrad_align(
         _num_tokens_post_padded,
         block_start,
         blocks_per_expert,
-        route_start,
-        _route_to_token,
         _token_routes,
         _token_route_count,
     ) = moe_align_route_list(
@@ -358,9 +360,6 @@ def _prepare_wgrad_align(
     metadata.wgrad_block_start = block_start
     metadata.wgrad_blocks_per_expert = blocks_per_expert
     metadata.wgrad_block_size = contract_m
-    # route_start is block-size-independent; keep whichever is already cached.
-    if metadata.route_start is None:
-        metadata.route_start = route_start
     return metadata
 
 
@@ -424,8 +423,8 @@ def permute_free_grouped_gemm_bf16(
 ) -> torch.Tensor:
     """Route-list gather-in-GEMM (FC1 forward) for bf16 MoE.
 
-    Computes ``C[route] = A[route_to_token[route]] @ W[e]^T`` for each expert-sorted route,
-    writing directly into a compact ``[num_routes, out_features]`` output.
+    Computes ``C[slot] = A[sorted_slot_ids[slot]] @ W[expert(slot)]^T`` for each block-padded
+    slot, writing directly into the ``[em_max, out_features]`` block-padded output.
 
     Parameters
     ----------
@@ -453,14 +452,13 @@ def permute_free_grouped_gemm_bf16(
     Returns
     -------
     torch.Tensor
-        Worst-case padded ``[T * min(topk, E), out_features]`` (or ``[T * min(topk, E), F]`` with a fused
-        ``activation``), bf16 (expert-contiguous). The valid rows are the compact route range
-        ``[0, num_routes)``; the tail ``[num_routes, em_max)`` is inert, *uninitialized*
-        padding. Consumers MUST read only the compact range, using the routing metadata to
-        locate each expert's rows:
+        Block-padded ``[em_max, out_features]`` (or ``[em_max, F]`` with a fused ``activation``),
+        bf16 (expert-contiguous, each expert padded to ``block_size``). The valid rows are the
+        block-padded slots whose ``sorted_slot_ids[slot] < num_recv_tokens``; the padding slots
+        carry inert dead values. Consumers locate each expert's rows via the routing metadata:
 
-        - ``route_start[e] = counts[0] + ... + counts[e-1]`` (``= cumsum(counts) - counts``):
-          its starting offset in the packed output.
+        - ``block_start[e]`` (block units): expert ``e``'s rows occupy padded slots
+          ``[block_start[e] * block_size, ...)``, with within-rank offset matching each route.
         - ``num_tokens_post_padded = sum_e ceil(counts[e] / block_size) * block_size``: the
           block-padded route count (each expert's row count rounded up to ``block_size``).
     """
@@ -573,13 +571,16 @@ def permute_free_gated_act_bwd(
     ``(dpre, dprob)`` -- ``dpre`` is ``[T * min(topk, E), 2F]`` bf16; ``dprob`` matches
     ``dispatched_probs`` (or ``None`` when no probs were fused).
     """
-    routes_max = int(routing.route_to_token.shape[0])
-    token = routing.route_to_token.to(torch.int32)
-    expert = _expert_per_route(routing, routes_max)
-    # The route buffers are statically sized to the worst case ``routes_max = T * topk``, but
-    # only the dense head ``[0, num_routes)`` is real (under EP this can be ~topk*E_local/E
-    # smaller). ``num_tokens_post_padded`` is a device scalar >= num_routes (block-padded), so
-    # it bounds the kernel to the real routes -- sync-free -- and lets the tail exit early.
+    # Block-padded canonical layout: grad_out (FC2 dgrad) and preact both live in the [em_max]
+    # padded slot order, and the kernel indexes grad_out/preact/dpre by the same row as
+    # token/expert -- so we must feed the padded slot arrays (sorted_slot_ids + slot expert),
+    # not the compact route arrays, or the padded valid slots beyond routes_max never get a dpre
+    # row (and each route pairs a correct token with the wrong padded grad row).
+    em_max = int(routing.sorted_slot_ids.shape[0])
+    token = routing.sorted_slot_ids.to(torch.int32)
+    expert = _expert_per_route(routing, em_max)
+    # ``num_tokens_post_padded`` is a device scalar bounding the real padded extent, so the tail
+    # programs exit early (sync-free) instead of streaming the padding through HBM.
     return fused_gated_act_prob_bwd(
         grad_output.contiguous(),
         preact,
@@ -610,11 +611,15 @@ def permute_free_gated_act_recompute(
     Returns
     -------
     torch.Tensor
-        ``act``, shape ``[T * min(topk, E), F]``, bf16 (route/padded layout).
+        ``act``, shape ``[em_max, F]``, bf16 (block-padded slot layout, matching the FC1
+        forward output and the layout the wgrad route-reads).
     """
-    routes_max = int(routing.route_to_token.shape[0])
-    token = routing.route_to_token.to(torch.int32)
-    expert = _expert_per_route(routing, routes_max)
+    # Block-padded canonical layout: emit one row per padded slot (keyed by sorted_slot_ids) so
+    # the rebuilt activation lines up with the [em_max] grad the wgrad route-reads. Padding slots
+    # (token sentinel >= num_recv_tokens) are masked to zero by the kernel.
+    em_max = int(routing.sorted_slot_ids.shape[0])
+    token = routing.sorted_slot_ids.to(torch.int32)
+    expert = _expert_per_route(routing, em_max)
     return fused_gated_act_prob_fwd(
         preact,
         token,
@@ -721,9 +726,9 @@ def permute_free_grouped_gemm_bf16_wgrad(
 ) -> torch.Tensor:
     """Route-list fused weight-gradient (FC1 backward wrt weights), FlyDSL-only.
 
-    Computes ``dW[e] = sum_{route in e} grad[route]^T @ A[route_to_token[route]]`` by
-    gathering the activation operand (received-token row) and reading the compact grad row
-    in the FlyDSL kernel.
+    Computes ``dW[e] = sum_{slot in e} grad[slot]^T @ A[sorted_slot_ids[slot]]`` by gathering
+    the activation operand (received-token row) and reading the block-padded grad row (base
+    ``block_start[e] * block_size_m`` + within-rank) in the FlyDSL kernel.
 
     Parameters
     ----------
@@ -777,7 +782,15 @@ def permute_free_grouped_gemm_bf16_wgrad(
         grad_output = grad_output.contiguous()
 
     contract_m = _WGRAD_CONTRACT_M
+    # The grad operand lives in the forward's block-padded [em_max] slot layout (its row for
+    # route (e, w) is block_start[e]*block_size_m + w). Ensure the forward align is present so we
+    # can pass that padded per-expert base to the kernel; routes are contiguous within an expert,
+    # so base + within-rank indexes the correct padded grad row.
+    if routing.block_start is None or routing.block_size_m is None:
+        fwd_config = config or get_default_moe_kernel_config(routing.num_recv_tokens)
+        routing = prepare_moe_align(routing, int(fwd_config["BLOCK_SIZE_M"]))
     routing = _prepare_wgrad_align(routing, contract_m)
+    grad_base = (routing.block_start.to(torch.int64) * int(routing.block_size_m)).to(torch.int32)
 
     if swap_gather:
         raise RuntimeError(
@@ -802,7 +815,7 @@ def permute_free_grouped_gemm_bf16_wgrad(
             routing.wgrad_sorted_slot_ids,
             routing.wgrad_block_start,
             routing.wgrad_blocks_per_expert,
-            routing.route_start,
+            grad_base,
             num_recv_tokens=routing.num_recv_tokens,
             accumulate=bool(accumulate),
         )
@@ -820,7 +833,7 @@ def permute_free_grouped_gemm_bf16_wgrad(
         routing.wgrad_sorted_slot_ids,
         routing.wgrad_block_start,
         routing.wgrad_blocks_per_expert,
-        routing.route_start,
+        grad_base,
         num_recv_tokens=routing.num_recv_tokens,
         accumulate=bool(accumulate),
     )
@@ -1245,10 +1258,21 @@ def permute_free_grouped_gemm_backward(
             dgrad = permute_free_grouped_gemm_bf16_dgrad(grad_output, weights_stacked, routing)
         if requires_wgrad:
             weights_shape = (num_gemms, weights[0].size(0), weights[0].size(1))
-            dW = permute_free_grouped_gemm_bf16_wgrad(
-                hidden_states, grad_output, weights_shape, routing,
-                out=wgrad_out, accumulate=wgrad_accumulate,
-            )  # [E, N, H]
+            if wgrad_out is not None and wgrad_out.dtype != torch.bfloat16:
+                # fp32 main_grad sink: the bf16 kernel can't write it directly, so emit the bf16
+                # dW and fold it into the fp32 buffer here (mirrors the FC2 wgrad out handling).
+                dW = permute_free_grouped_gemm_bf16_wgrad(
+                    hidden_states, grad_output, weights_shape, routing,
+                )  # [E, N, H]
+                if wgrad_accumulate:
+                    wgrad_out.add_(dW)
+                else:
+                    wgrad_out.copy_(dW)
+            else:
+                dW = permute_free_grouped_gemm_bf16_wgrad(
+                    hidden_states, grad_output, weights_shape, routing,
+                    out=wgrad_out, accumulate=wgrad_accumulate,
+                )  # [E, N, H]
             wgrad_stacked = dW
             wgrad_applied = wgrad_out is not None
 

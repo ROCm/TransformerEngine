@@ -5,9 +5,10 @@
 
 Mirrors the route-list wgrad contract so the same routing metadata
 (``sorted_slot_ids`` holding the received-token row per slot, plus ``block_start`` /
-``blocks_per_expert`` / ``route_start``) can be reused verbatim.
+``blocks_per_expert`` and the per-expert block-padded grad base ``grad_base``) can be reused
+verbatim.
 
-Fixed kernel configuration (matches ``pf_wgrad.py``): FC1 route-list wgrad with compact
+Fixed kernel configuration (matches ``pf_wgrad.py``): FC1 route-list wgrad with block-padded
 ``grad`` + token-gathered ``x``, bf16 into ``dw`` (overwrite or accumulate), DMA + XOR
 chunk swizzle fill, 3-stage LDS pipeline. Only the workgroup tile geometry is selectable
 / autotuned.
@@ -33,7 +34,7 @@ def flydsl_moe_wgrad(
     sorted_slot_ids: torch.Tensor,
     block_start: torch.Tensor,
     blocks_per_expert: torch.Tensor,
-    route_start: torch.Tensor,
+    grad_base: torch.Tensor,
     *,
     num_recv_tokens: int,
     block_n: int = 128,
@@ -42,13 +43,13 @@ def flydsl_moe_wgrad(
     warps_k: int = 2,
     accumulate: bool = False,
 ) -> None:
-    """Compute FC1 grouped wgrad ``grad[route]^T @ x[token(route)]`` into ``dw``, per expert.
+    """Compute FC1 grouped wgrad ``grad[slot]^T @ x[token(slot)]`` into ``dw``, per expert.
 
     See the permute-free wgrad API for the argument contract: ``x`` is
-    ``[num_recv_tokens, K]`` (gathered by received-token row), ``grad`` is the compact
-    ``[num_routes, N]`` per-route gradient, ``sorted_slot_ids`` maps each block-padded
-    route slot to its received-token row (sentinel ``num_recv_tokens`` for padding), and
-    ``route_start[e]`` is the compact first-route index of expert ``e``.
+    ``[num_recv_tokens, K]`` (gathered by received-token row), ``grad`` is the block-padded
+    ``[em_max, N]`` per-slot gradient, ``sorted_slot_ids`` maps each block-padded slot to its
+    received-token row (sentinel ``num_recv_tokens`` for padding), and ``grad_base[e]`` is the
+    block-padded first-slot row of expert ``e`` (``block_start[e] * block_size_m``).
 
     ``block_n``/``block_k`` and ``warps_n``/``warps_k`` select the workgroup tile; the
     defaults (``128x128`` over ``2x2`` warps) are a strong general config on CDNA4.
@@ -75,7 +76,7 @@ def flydsl_moe_wgrad(
         ptr_arg(sorted_slot_ids),
         ptr_arg(block_start),
         ptr_arg(blocks_per_expert),
-        ptr_arg(route_start),
+        ptr_arg(grad_base),
         int(N),
         int(K),
         int(num_recv_tokens),
@@ -108,7 +109,7 @@ def _wgrad_run(
     sorted_slot_ids,
     block_start,
     blocks_per_expert,
-    route_start,
+    grad_base,
     N,
     K,
     num_recv_tokens,
@@ -135,7 +136,7 @@ def _wgrad_run(
         ptr_arg(sorted_slot_ids),
         ptr_arg(block_start),
         ptr_arg(blocks_per_expert),
-        ptr_arg(route_start),
+        ptr_arg(grad_base),
         int(N),
         int(K),
         int(num_recv_tokens),
@@ -165,14 +166,14 @@ def _get_autotuner(warmup=10, rep=30):
 
 
 def _select_wgrad_config(
-    x, grad, sorted_slot_ids, block_start, blocks_per_expert, route_start,
+    x, grad, sorted_slot_ids, block_start, blocks_per_expert, grad_base,
     N, K, num_recv_tokens, num_experts,
 ):
     """Return the autotuned ``(block_n, block_k, warps_n, warps_k)`` for this problem."""
     tuner = _get_autotuner()
     scratch = torch.empty(num_experts, N, K, device=x.device, dtype=torch.bfloat16)
     args = (
-        scratch, x, grad, sorted_slot_ids, block_start, blocks_per_expert, route_start,
+        scratch, x, grad, sorted_slot_ids, block_start, blocks_per_expert, grad_base,
         int(N), int(K), int(num_recv_tokens), int(num_experts),
     )
     key = tuner._make_key(args, {})
@@ -189,7 +190,7 @@ def flydsl_moe_wgrad_autotuned(
     sorted_slot_ids: torch.Tensor,
     block_start: torch.Tensor,
     blocks_per_expert: torch.Tensor,
-    route_start: torch.Tensor,
+    grad_base: torch.Tensor,
     *,
     num_recv_tokens: int,
     accumulate: bool = False,
@@ -207,7 +208,7 @@ def flydsl_moe_wgrad_autotuned(
     assert x.is_contiguous() and grad.is_contiguous() and dw.is_contiguous()
 
     block_n, block_k, warps_n, warps_k = _select_wgrad_config(
-        x, grad, sorted_slot_ids, block_start, blocks_per_expert, route_start,
+        x, grad, sorted_slot_ids, block_start, blocks_per_expert, grad_base,
         N, K, num_recv_tokens, num_experts,
     )
     flydsl_moe_wgrad(
@@ -217,7 +218,7 @@ def flydsl_moe_wgrad_autotuned(
         sorted_slot_ids,
         block_start,
         blocks_per_expert,
-        route_start,
+        grad_base,
         num_recv_tokens=int(num_recv_tokens),
         block_n=block_n,
         block_k=block_k,

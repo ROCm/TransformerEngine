@@ -593,7 +593,9 @@ class _GroupedLinear(torch.autograd.Function):
         # Convert splits to list of ints for compatibility with split functions
         m_splits = m_splits.tolist()
 
-        inp_view = inp.reshape(-1, in_features)
+        # Use ``expect_in_features`` (2F on the gated FC2 route-space path, else in_features) so a
+        # raw 2F [gate|up] preact is not mangled into F-wide rows by the reshape.
+        inp_view = inp.reshape(-1, expect_in_features)
         inputmats: list
         if fp8 and not debug:
             # Disable bulk allocation when CPU offloading is active: offloading skips small
@@ -1149,8 +1151,9 @@ class _GroupedLinear(torch.autograd.Function):
                     )
                 return (
                     pf_result.dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
-                    pf_result.grad_probs,
-                    None,
+                    None,  # m_splits
+                    pf_result.grad_probs,  # dispatched_probs
+                    None,  # non_tensor_args
                     *wgrad_list,
                     *([None] * ctx.num_gemms),
                 )

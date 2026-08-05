@@ -3,16 +3,17 @@
 
 """Permute-free MoE weight-gradient (wgrad) grouped GEMM in FlyDSL.
 
-Contract: the gradient operand is the *compact* ``[num_routes, N]`` buffer
-and ``SORTED`` maps each padded route slot to a received-token row::
+Contract: the gradient operand is the *block-padded* ``[em_max, N]`` buffer
+and ``SORTED`` maps each padded slot to a received-token row::
 
-    dW[e][n, k] = sum_{routed slot s of e, valid} grad[route_start[e] + local(s), n]
+    dW[e][n, k] = sum_{routed slot s of e, valid} grad[grad_base[e] + local(s), n]
                                                  * x[SORTED[s], k]
 
-where ``local(s)`` is the slot's offset within expert ``e``'s block-padded range and
-padding slots (``SORTED[s] == num_recv_tokens``) are masked to zero. The grad walk is a
-plain contiguous row scan (no ``SORTED`` indirection); ``SORTED`` is only consulted for
-the ``x`` gather token and the padding mask.
+where ``grad_base[e] = block_start[e] * block_size_m`` is the expert's block-padded first-slot
+row, ``local(s)`` is the slot's offset within expert ``e``'s block-padded range, and padding
+slots (``SORTED[s] == num_recv_tokens``) are masked to zero. The grad walk is a plain
+contiguous row scan (no ``SORTED`` indirection); ``SORTED`` is only consulted for the ``x``
+gather token and the padding mask.
 
 The contraction tile is staged through LDS and transposed on-read:
 
@@ -129,11 +130,11 @@ def compile_moe_wgrad_v2(
     def wgrad_kernel(
         dW: fx.Pointer,          # [E, N, K] bf16 output
         X: fx.Pointer,           # [num_recv_tokens, K] bf16 (received-token activations)
-        GRAD: fx.Pointer,        # [num_routes, N] bf16 (compact per-route gradient)
-        SORTED: fx.Pointer,      # [padded] i32 received-token row per route slot (sentinel = num_recv_tokens)
+        GRAD: fx.Pointer,        # [em_max, N] bf16 (block-padded per-slot gradient)
+        SORTED: fx.Pointer,      # [padded] i32 received-token row per slot (sentinel = num_recv_tokens)
         BLOCK_START: fx.Pointer,      # [E] i32 (block units)
         BLOCKS_PER_EXPERT: fx.Pointer,  # [E] i32
-        ROUTE_START: fx.Pointer,  # [E] i32 (compact first-route index = cumsum(counts) - counts)
+        GRAD_BASE: fx.Pointer,  # [E] i32 (block-padded first-slot row = block_start[e] * block_size_m)
         N: fx.Int32,
         K: fx.Int32,
         num_recv_tokens: fx.Int32,
@@ -147,7 +148,7 @@ def compile_moe_wgrad_v2(
         sorted_rsrc = ptr_rsrc(SORTED)
         bstart_rsrc = ptr_rsrc(BLOCK_START)
         bpe_rsrc = ptr_rsrc(BLOCKS_PER_EXPERT)
-        rstart_rsrc = ptr_rsrc(ROUTE_START)
+        gbase_rsrc = ptr_rsrc(GRAD_BASE)
 
         # DMA path: raw addrspace(3) global backs LDS; reads + DMA both GEP off it.
         smem_raw_ptr = _llvm.mlir_addressof(ir.Type.parse("!llvm.ptr<3>"), LDS_SYM)
@@ -228,15 +229,15 @@ def compile_moe_wgrad_v2(
         n_base_idx = arith.index_cast(T.index, n_block_base)
         k_base_idx = arith.index_cast(T.index, k_block_base)
 
-        # Per-expert routed-slot range. ``base_slot`` is the block-padded slot offset into
-        # ``SORTED`` (holds the received-token row for the ``x`` gather); ``route_start_e``
-        # is the compact first-route index into the ``[num_routes, N]`` grad buffer.
+        # Per-expert routed-slot range. ``base_slot`` is the wgrad-align slot offset into
+        # ``SORTED`` (holds the received-token row for the ``x`` gather); ``grad_base_idx`` is
+        # expert ``e``'s block-padded first-slot row into the ``[em_max, N]`` grad buffer.
         bstart = buffer_load_i32(bstart_rsrc, expert)
         nblocks = buffer_load_i32(bpe_rsrc, expert)
-        rstart = buffer_load_i32(rstart_rsrc, expert)
+        gbase = buffer_load_i32(gbase_rsrc, expert)
         base_slot = arith.index_cast(T.index, bstart) * arith.index(WGRAD_BLOCK_M)
         num_slots = arith.index_cast(T.index, nblocks) * arith.index(WGRAD_BLOCK_M)
-        route_start_e_idx = arith.index_cast(T.index, rstart)
+        grad_base_idx = arith.index_cast(T.index, gbase)
 
         CPR_G = block_n // FILL_V
         CPR_X = block_k // FILL_V
@@ -284,7 +285,7 @@ def compile_moe_wgrad_v2(
                 if const_expr(clamp_row):
                     # grad: contiguous route walk; clamp overrun to row 0 for fault safety
                     # (its padding contribution is cancelled by the zeroed x column).
-                    row_idx = valid.select(route_start_e_idx + slot_base_idx + slot_idx, c0)
+                    row_idx = valid.select(grad_base_idx + slot_base_idx + slot_idx, c0)
                 else:
                     # x: gather by received-token; sentinel/OOB row -> hardware 0.
                     row_idx = token
@@ -556,7 +557,7 @@ def compile_moe_wgrad_v2(
         SORTED: fx.Pointer,
         BLOCK_START: fx.Pointer,
         BLOCKS_PER_EXPERT: fx.Pointer,
-        ROUTE_START: fx.Pointer,
+        GRAD_BASE: fx.Pointer,
         N: fx.Int32,
         K: fx.Int32,
         num_recv_tokens: fx.Int32,
@@ -577,7 +578,7 @@ def compile_moe_wgrad_v2(
         gz = num_experts
         wgrad_kernel._func.__name__ = KERNEL_NAME
         wgrad_kernel(
-            dW, X, GRAD, SORTED, BLOCK_START, BLOCKS_PER_EXPERT, ROUTE_START,
+            dW, X, GRAD, SORTED, BLOCK_START, BLOCKS_PER_EXPERT, GRAD_BASE,
             N, K, num_recv_tokens,
         ).launch(grid=(gx, gy, gz), block=(n_threads, 1, 1), stream=stream)
 

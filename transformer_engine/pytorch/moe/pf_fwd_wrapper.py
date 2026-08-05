@@ -4,8 +4,8 @@
 """FlyDSL permute-free MoE route-list forward gather-GEMM op wrapper.
 
 Mirrors the route-list forward gather-GEMM contract so the same routing
-metadata (``sorted_slot_ids`` / ``expert_ids`` / ``block_start`` / ``route_start``) can be
-reused verbatim. Writes the compact ``[em_max, WIDTH_N]`` route output in place.
+metadata (``sorted_slot_ids`` / ``expert_ids`` / ``block_start``) can be reused verbatim.
+Writes the block-padded ``[em_max, WIDTH_N]`` slot output in place.
 
 Forward gather-GEMM is FlyDSL-only. This module retains Triton kernels for routing
 metadata construction, gated-activation recompute/bwd, and the token-order gather-combine
@@ -241,7 +241,6 @@ def flydsl_moe_fwd(
     sorted_slot_ids: torch.Tensor,
     expert_ids: torch.Tensor,
     block_start: torch.Tensor,
-    route_start: torch.Tensor,
     *,
     num_recv_tokens: int,
     block_m: int,
@@ -388,7 +387,6 @@ def flydsl_moe_fwd_autotuned(
     sorted_slot_ids: torch.Tensor,
     expert_ids: torch.Tensor,
     block_start: torch.Tensor,
-    route_start: torch.Tensor,
     *,
     num_recv_tokens: int,
     block_m: int,
@@ -418,7 +416,7 @@ def flydsl_moe_fwd_autotuned(
 
     def _launch(bn, bk, wm, wn):
         flydsl_moe_fwd(
-            A, B, C, sorted_slot_ids, expert_ids, block_start, route_start,
+            A, B, C, sorted_slot_ids, expert_ids, block_start,
             num_recv_tokens=num_recv_tokens, block_m=block_m, block_n=bn, block_k=bk,
             warps_m=wm, warps_n=wn, index_a_by_route_pos=index_a_by_route_pos,
             activation=activation, dispatched_probs=dispatched_probs, preact_out=preact_out,

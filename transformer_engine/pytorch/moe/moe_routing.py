@@ -47,19 +47,14 @@ class MoERoutingMetadata:
     num_tokens_post_padded:
         ``[1]`` device scalar = real ``em`` (block-padded route count). Bounds the kernel.
     block_start:
-        ``[num_experts]`` per-expert first block index (block units).
-    route_start:
-        ``[num_experts]`` per-expert first *compact* route index (``cumsum(counts) - counts``).
-        Maps a block-padded position to its compact output row.
-    route_to_token:
-        ``[routes_max]`` received-token row for each compact route (first ``num_routes``
-        entries valid); used by the dgrad scatter-add back to ``[num_recv_tokens, K]``.
+        ``[num_experts]`` per-expert first block index (block units). Expert ``e``'s block-padded
+        slots start at ``block_start[e] * block_size_m``.
     token_routes / token_route_count:
-        Inverse of ``route_to_token`` (token -> its compact route positions), built sync-free
-        for the contention-free gather-combine that replaces the atomic scatter in the token
-        combine (FC2 fwd) and the FC1 input-grad reduction (FC1 dgrad). ``token_routes`` is
+        Token -> its block-padded slot positions, built sync-free for the contention-free
+        gather-combine that replaces the atomic scatter in the token combine (FC2 fwd) and the
+        FC1 input-grad reduction (FC1 dgrad). ``token_routes`` is
         ``[num_recv_tokens, min(topk, num_experts)]`` (int32); for token ``t`` the first
-        ``token_route_count[t]`` entries are its route positions (expert-ascending), the rest
+        ``token_route_count[t]`` entries are its padded slots (expert-ascending), the rest
         are unused padding.
     block_size_m:
         ``BLOCK_SIZE_M`` used to build the fwd/dgrad align buffers.
@@ -77,8 +72,6 @@ class MoERoutingMetadata:
     expert_ids: Optional[torch.Tensor] = None
     num_tokens_post_padded: Optional[torch.Tensor] = None
     block_start: Optional[torch.Tensor] = None
-    route_start: Optional[torch.Tensor] = None
-    route_to_token: Optional[torch.Tensor] = None
     token_routes: Optional[torch.Tensor] = None
     token_route_count: Optional[torch.Tensor] = None
     block_size_m: Optional[int] = None
