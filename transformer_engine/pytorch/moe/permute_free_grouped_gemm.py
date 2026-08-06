@@ -43,7 +43,7 @@ __all__ = [
 
 _WGRAD_CONTRACT_M = 32
 
-# Minimum v3 gather/dgrad block_m (128x256 MFMA floor).
+# Minimum gather/dgrad align block_m (128x256 MFMA floor).
 _FLYDSL_MIN_BLOCK_M = 128
 _FLYDSL_FWD_BLOCK_M = 256
 
@@ -114,8 +114,9 @@ def _pf_moe_fwd(
     num_recv_tokens: int,
     block_m: int,
     index_a_by_route_pos: bool = False,
+    dgrad: bool = False,
 ) -> None:
-    """Run the route-list gather-GEMM (forward or dgrad) via the FlyDSL v3 kernels."""
+    """Run the route-list gather-GEMM (forward or dgrad) via the FlyDSL permute-free kernels."""
     launch, supported = _get_flydsl_fwd()
     block_m = int(block_m)
     if not supported(A, B, block_m=block_m):
@@ -132,44 +133,13 @@ def _pf_moe_fwd(
         num_recv_tokens=num_recv_tokens,
         block_m=block_m,
         index_a_by_route_pos=index_a_by_route_pos,
+        dgrad=dgrad,
     )
 
 
-def _fwd_align_block_size_m(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    *,
-    num_tokens: int,
-) -> int:
-    """Pick the forward align/kernel ``block_m``, favoring the backend that will run.
-
-    ``block_m`` is baked into ``prepare_moe_align`` (it sets the row padding) and is *shared* by a
-    layer's FC1 fwd, FC1 dgrad and FC2 fwd (they reuse ``routing.block_size_m``), so it is chosen
-    once here. For ``num_tokens >= _FLYDSL_MIN_BLOCK_M`` (128), offer :data:`_FLYDSL_FWD_BLOCK_M`
-    (256, MegaMOE tile) alongside the v3 floor; smaller batches stay at 128 only.
-    """
-    default_block_m = (
-        _FLYDSL_FWD_BLOCK_M if num_tokens >= _FLYDSL_MIN_BLOCK_M else _FLYDSL_MIN_BLOCK_M
-    )
-    candidates = {c for c in (_FLYDSL_MIN_BLOCK_M, default_block_m) if c <= default_block_m}
-    from .pf_fwd_wrapper import _v3_enabled
-
-    # The v3 gather/dgrad tile requires block_m >= 128 (128x256 MFMA minimum), so on a
-    # small-token tier where the default would be < 128 we must still floor the align
-    # block_m to 128 rather than emit a sub-tile the kernel cannot run.
-    if _v3_enabled():
-        candidates = {c for c in candidates if c >= _FLYDSL_MIN_BLOCK_M} or {_FLYDSL_MIN_BLOCK_M}
-
-    # Prefer the in-tree FlyDSL block_m picker when available.
-    try:
-        from .pf_fwd_wrapper import flydsl_moe_fwd_pick_block_m
-    except Exception:  # pylint: disable=broad-except
-        flydsl_moe_fwd_pick_block_m = None
-    if flydsl_moe_fwd_pick_block_m is not None:
-        picked = flydsl_moe_fwd_pick_block_m(A, B, candidates=tuple(candidates))
-        if picked is not None:
-            return picked
-    return default_block_m
+def _fwd_align_block_size_m(num_tokens: int) -> int:
+    """Forward align ``block_m`` (128 or 256); shared by FC1 fwd/dgrad and FC2 fwd."""
+    return _FLYDSL_FWD_BLOCK_M if num_tokens >= _FLYDSL_MIN_BLOCK_M else _FLYDSL_MIN_BLOCK_M
 
 
 def _ensure_fwd_align(
@@ -180,7 +150,7 @@ def _ensure_fwd_align(
     """Return ``routing.block_size_m``, building fwd align buffers when missing."""
     if routing.sorted_slot_ids is not None and routing.block_size_m is not None:
         return int(routing.block_size_m)
-    block_m = _fwd_align_block_size_m(A, B, num_tokens=routing.num_recv_tokens)
+    block_m = _fwd_align_block_size_m(routing.num_recv_tokens)
     prepare_moe_align(routing, block_m)
     return block_m
 
@@ -607,12 +577,10 @@ def permute_free_grouped_gemm_bf16_dgrad(
             f"num_experts mismatch: weights have {num_experts}, routing has {routing.num_experts}."
         )
 
-    # Contract over out_features via the [E, in, out] transposed *view* (stride relabel only).
     if weights_stacked.stride(-1) != 1:
         weights_stacked = weights_stacked.contiguous()
-    weights_t = weights_stacked.transpose(1, 2)
 
-    block_size_m = _ensure_fwd_align(routing, grad_output, weights_t)
+    block_size_m = _ensure_fwd_align(routing, grad_output, weights_stacked)
 
     # Two-stage dgrad reduction (contention-free): (1) plain compact store of each per-route
     # dX[route] = grad[route] @ W1[e] into an [T * min(topk, E), in] bf16 buffer (coalesced, no atomics),
@@ -626,12 +594,13 @@ def permute_free_grouped_gemm_bf16_dgrad(
     )
     _pf_moe_fwd(
         grad_output,
-        weights_t,
+        weights_stacked,
         compact,
         routing,
         num_recv_tokens=routing.num_recv_tokens,
         block_m=block_size_m,
         index_a_by_route_pos=True,
+        dgrad=True,
     )
     return route_gather_combine(
         compact,
@@ -893,33 +862,32 @@ def permute_free_grouped_gemm_bf16_fc2_dgrad(
             f"num_experts mismatch: weights have {num_experts}, routing has {routing.num_experts}."
         )
 
-    # Contract over out_features via the [E, in, out] transposed view (stride relabel only).
     if weights_stacked.stride(-1) != 1:
         weights_stacked = weights_stacked.contiguous()
-    weights_t = weights_stacked.transpose(1, 2)
 
-    block_size_m = _ensure_fwd_align(routing, grad_output, weights_t)
+    block_size_m = _ensure_fwd_align(routing, grad_output, weights_stacked)
 
     # Padded route-order output; the gather-GEMM writes only the compact [0, num_routes)
     # range and never visits the tail (bounded by num_tokens_post_padded, sentinel-masked).
     # Left uninitialized (torch.empty) to skip the em_max*N zero-init; consumers read only the
     # compact range via the routing metadata, so the garbage tail is never observed.
     em_max = routing.sorted_slot_ids.shape[0]
-    dgrad = torch.empty(
+    dx = torch.empty(
         (em_max, in_features),
         dtype=torch.bfloat16,
         device=grad_output.device,
     )
     _pf_moe_fwd(
         grad_output,
-        weights_t,
-        dgrad,
+        weights_stacked,
+        dx,
         routing,
         num_recv_tokens=grad_output.shape[0],
         block_m=block_size_m,
         index_a_by_route_pos=False,
+        dgrad=True,
     )
-    return dgrad
+    return dx
 
 
 def permute_free_grouped_gemm_bf16_fc2_wgrad(

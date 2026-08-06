@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 
-"""Permute-free MoE data-gradient (dgrad) grouped-GEMM (v3): MegaMOE's fast bf16 NN GEMM.
+"""Permute-free MoE data-gradient (dgrad) grouped-GEMM: MegaMOE's fast bf16 NN GEMM.
 
 Backward companion to ``pf_fwd``. dgrad contracts the incoming grad against the
 weight over the output-feature axis (NN layout)::
@@ -219,7 +219,7 @@ def compile_grouped_gemm_dgrad_bf16(
         group_res = create_buffer_resource(TILE_TO_GROUP, max_size=True)
         sorted_res = create_buffer_resource(SORTED, max_size=True)
         # Real BLOCK_M tile count as a scalar (host-known, capture-safe -- no per-call device
-        # tensor, which a HIP graph capture forbids). Matches the v2 int contract.
+        # tensor, which a HIP graph capture forbids). Host-known int scalar.
         real_tiles = NUM_TILE_BLOCKS
         real_grid = real_tiles * n_blocks
 
@@ -248,7 +248,7 @@ def compile_grouped_gemm_dgrad_bf16(
             block_m = first_pid_m + (pid_in_group % group_size_m)
             block_n = pid_in_group // group_size_m
             g_idx = buffer_load(group_res, block_m, vec_width=1, dtype=fx.T.i32())
-            # PF padding blocks mark expert_ids=-1; skip the full Mega pipeline (v2 parity).
+            # PF padding blocks mark expert_ids=-1; skip the full Mega pipeline.
             if g_idx >= fx.Int32(0):
                 gbase = g_idx * fx.Int32(N) * fx.Int32(Kout)
                 sorted_row_base = block_m * fx.Int32(BLOCK_M)

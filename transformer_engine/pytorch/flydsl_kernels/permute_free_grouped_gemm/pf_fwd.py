@@ -1,31 +1,28 @@
 # SPDX-License-Identifier: MIT
 # Copyright (C) 2026, Advanced Micro Devices, Inc. All rights reserved.
 
-"""Permute-free MoE forward *gather* grouped-GEMM (v3): MegaMOE's fast bf16 GEMM + PF gather.
+"""Permute-free MoE forward gather grouped-GEMM: MegaMOE's fast bf16 GEMM + route-list gather.
 
 This is a port of the MegaMOE grouped bf16 GEMM (32x32x16 MFMA, 8-wave / 512-thread
 workgroup, deep distance-2 3-buffer DMA ring, XCD swizzle with ``GROUP_M`` front-loading)
 into Transformer Engine FlyDSL, with a *single* change: the A operand is fetched
 through a per-row gather index instead of a contiguous pool.
 
-Motivation. The v2 permute-free kernel (16x16x32, gather-in-K-loop) trails MegaMOE's dense
-grouped GEMM by ~13%. Swapping v2's MFMA atom to 32x32x16 or deepening ``block_k`` both
-regressed, so the lever is not the atom or LDS depth -- it is the gather structure vs. Mega's
-pipeline. v3 tests the opposite direction: keep Mega's pipeline *verbatim* and only redirect the
-A fetch through ``sorted_slot_ids``, so we pay Mega's throughput while keeping PF's memory model
-(no pre-permutation, gather-on-demand).
+The gather is folded into MegaMOE's pipeline rather than implemented as a separate
+pre-permute: we keep Mega's DMA/LDS/MFMA path verbatim and only redirect the A fetch
+through ``sorted_slot_ids``, preserving Mega's throughput while keeping the permute-free
+memory model (no pre-permutation, gather-on-demand).
 
-Contract (mirrors MegaMOE ``grouped_gemm_bf16_only`` + aiter PF routing metadata):
+Contract (mirrors MegaMOE ``grouped_gemm_bf16_only`` + permute-free routing metadata):
   * ``A``            [num_recv, K] bf16   received-token activations, UNPERMUTED (gather source)
   * ``B``            [E, N, K]    bf16    per-expert weights, NT (contiguous inner K)
   * ``C``            [em_max, N]  bf16    compact expert-major output (block-padded, in place)
   * ``sorted_slot_ids`` [em_max]  i32     received-token row per padded slot (sentinel = num_recv)
   * ``expert_ids``   [num_m_blocks] i32   expert id per ``BLOCK_M`` output block (padding tail:
-                                          ``-1``; those blocks early-exit like v2)
+                                          ``-1``; those blocks early-exit in-kernel)
   * ``num_tile_blocks`` [1]      i32      real (non-padding) ``BLOCK_M`` block count (device)
 
-Only the plain (non-activation) forward GEMM is ported here; the fused gated epilogue lives in
-v2 and can be layered on later once the GEMM-throughput parity is confirmed.
+Gated activation and route-prob apply live in standalone Triton helpers, not here.
 """
 
 from __future__ import annotations
@@ -235,7 +232,7 @@ def compile_grouped_gemm_gather_bf16(
         group_res = create_buffer_resource(TILE_TO_GROUP, max_size=True)
         sorted_res = create_buffer_resource(SORTED, max_size=True)
         # Real (non-padding) BLOCK_M tile count as a scalar (host-known, capture-safe -- avoids a
-        # per-call device tensor that a HIP graph capture forbids). Matches the v2 int contract.
+        # per-call device tensor that a HIP graph capture forbids). Host-known int scalar.
         real_tiles = NUM_TILE_BLOCKS
         # XCD-swizzle over the REAL tile range only (front-loaded); swizzling the full padded
         # pool scatters real tiles -> ~2x slower.
@@ -263,7 +260,7 @@ def compile_grouped_gemm_gather_bf16(
             block_m = first_pid_m + (pid_in_group % group_size_m)
             block_n = pid_in_group // group_size_m
             g_idx = buffer_load(group_res, block_m, vec_width=1, dtype=fx.T.i32())
-            # PF padding blocks mark expert_ids=-1; skip the full Mega pipeline (v2 parity).
+            # PF padding blocks mark expert_ids=-1; skip the full Mega pipeline.
             if g_idx >= fx.Int32(0):
                 gbase = g_idx * fx.Int32(K) * c_n
                 # Worst-case pool (cap*N > 2^31): rebase C per tile in int64, int32 in-resource

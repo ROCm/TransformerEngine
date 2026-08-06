@@ -438,8 +438,7 @@ def test_fc1_fc2_gated_pipeline(monkeypatch):
     fc1_meta = PermuteFreeMetadata(
         routing_map=routing_map, num_experts=num_experts, activation="silu"
     )
-    # Prepare at the v3-compatible forward block_m (>= 128, multiple of 128); the token-count
-    # default (64 at 128 tokens) is below the v3 gather/dgrad tile minimum. FC1 and FC2 share the
+    # Prepare at the FlyDSL-compatible forward block_m (>= 128, multiple of 128). FC1 and FC2 share the
     # same block-padded slot layout, so the derived fc2_meta inherits this align.
     prepare_moe_align(fc1_meta, _FLYDSL_FWD_BLOCK_M)
     fc2_meta = dataclasses.replace(fc1_meta, route_space=True)
@@ -510,7 +509,7 @@ def test_fc1_fc2_gated_pipeline(monkeypatch):
 def test_route_list_fwd_dgrad_wgrad_consistency():
     """fwd + dgrad + wgrad against a single autograd reference in compact route space."""
     torch.manual_seed(23)
-    # The v3 gather/dgrad tiles need both contraction dims (in for fwd, out for dgrad) to be a
+    # The gather/dgrad tiles need both contraction dims (in for fwd, out for dgrad) to be a
     # multiple of the FlyDSL block_k (64) and >= 128 (K_ITERS >= 2), so use 128-wide features.
     num_recv_tokens, in_features, out_features = 96, 128, 128
     num_experts, max_hits = 6, 3
@@ -1025,7 +1024,7 @@ def test_grouped_weight_main_grad_matches_ungrouped_grad(monkeypatch):
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     torch.manual_seed(41)
 
-    # The v3 fwd/dgrad tiles need both contraction dims (in for fwd, out for dgrad) >= 128 and a
+    # The fwd/dgrad tiles need both contraction dims (in for fwd, out for dgrad) >= 128 and a
     # multiple of block_k (64); use 128-wide features.
     num_recv_tokens, in_features, out_features = 128, 128, 128
     num_experts, max_hits = 8, 3
@@ -1102,7 +1101,7 @@ def test_grouped_weight_nonfused_grad_matches_ungrouped(monkeypatch):
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
     torch.manual_seed(43)
 
-    # 128-wide features to satisfy the v3 fwd/dgrad tile (K>=128, multiple of block_k=64).
+    # 128-wide features to satisfy the fwd/dgrad tile (K>=128, multiple of block_k=64).
     num_recv_tokens, in_features, out_features = 128, 128, 128
     num_experts, max_hits = 8, 3
     m_splits = [num_recv_tokens // num_experts] * num_experts
