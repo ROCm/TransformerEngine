@@ -743,6 +743,203 @@ def test_is_permute_free_grouped_gemm_enabled(monkeypatch):
     assert is_permute_free_grouped_gemm_enabled() is False
 
 
+def test_slot_expert_ids_cache():
+    """``prepare_moe_align`` caches per-slot expert ids; ``_expert_per_route`` reuses the cache."""
+    torch.manual_seed(67)
+    num_recv_tokens, num_experts, max_hits = 128, 8, 3
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=33)
+    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
+
+    # Not built until the align runs.
+    assert routing.slot_expert_ids is None
+    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+    em_max = int(routing.sorted_slot_ids.shape[0])
+
+    # Populated at align time with the right shape/dtype.
+    assert routing.slot_expert_ids is not None
+    assert routing.slot_expert_ids.shape == (em_max,)
+    assert routing.slot_expert_ids.dtype == torch.int32
+
+    # Matches a manual block-broadcast of ``expert_ids`` (expert_ids[slot // block_m]).
+    block_m = int(routing.block_size_m)
+    pos = torch.arange(em_max, device="cuda", dtype=torch.int64)
+    block_idx = (pos // block_m).clamp(max=routing.expert_ids.numel() - 1)
+    manual = routing.expert_ids[block_idx].to(torch.int32)
+    assert torch.equal(routing.slot_expert_ids, manual)
+
+    # ``_expert_per_route`` returns the *cached* tensor (no redundant recompute).
+    assert _expert_per_route(routing, em_max) is routing.slot_expert_ids
+
+    # Valid slots carry the expert-sorted compact route experts.
+    _, route_expert = _compact_route_order(routing_map)
+    valid = routing.sorted_slot_ids < num_recv_tokens
+    assert torch.equal(routing.slot_expert_ids[valid].to(torch.int64), route_expert)
+
+    # Rebuild-on-early-return: drop the cache but keep the align, then re-prepare with the same
+    # block_m (hits the cached-align early return) -- it must repopulate rather than stay None.
+    routing.slot_expert_ids = None
+    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+    assert routing.slot_expert_ids is not None
+    assert torch.equal(routing.slot_expert_ids, manual)
+
+
+def test_permute_free_backward_fc1_dispatch():
+    """``permute_free_grouped_gemm_backward`` FC1 path (``route_space=False``): dgrad + wgrad match
+    the standalone kernels, and ``wgrad_out`` folds in place (``wgrad_applied``)."""
+    torch.manual_seed(71)
+    num_recv_tokens, in_features, out_features = 128, 128, 128
+    num_experts, max_hits = 8, 3
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=35)
+    routing = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)  # FC1
+    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+    em_max = int(routing.sorted_slot_ids.shape[0])
+    valid = routing.sorted_slot_ids < num_recv_tokens
+
+    hidden = torch.randn(num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16)
+    weights = [
+        torch.randn(out_features, in_features, device="cuda", dtype=torch.bfloat16)
+        for _ in range(num_experts)
+    ]
+    W = torch.stack(weights, dim=0)
+    grad = torch.zeros(em_max, out_features, device="cuda", dtype=torch.bfloat16)
+    grad[valid] = torch.randn(
+        int(valid.sum().item()), out_features, device="cuda", dtype=torch.bfloat16
+    )
+
+    res = permute_free_grouped_gemm_backward(
+        grad, routing=routing, weights=weights, num_gemms=num_experts,
+        hidden_states=hidden, requires_dgrad=True, requires_wgrad=True,
+    )
+    dgrad_ref = permute_free_grouped_gemm_bf16_dgrad(grad, W, routing)
+    wgrad_ref = permute_free_grouped_gemm_bf16_wgrad(
+        hidden, grad, (num_experts, out_features, in_features), routing
+    )
+    assert res.dgrad.shape == (num_recv_tokens, in_features)
+    assert res.wgrad_stacked.shape == (num_experts, out_features, in_features)
+    assert res.wgrad_applied is False
+    assert res.grad_probs is None
+    assert _rel_l2(res.dgrad, dgrad_ref) < 1e-3
+    assert _rel_l2(res.wgrad_stacked, wgrad_ref) < 1e-3
+
+    # wgrad_out fold (fp32 sink, overwrite): wgrad_applied True and the buffer is returned.
+    wgrad_out = torch.zeros(
+        num_experts, out_features, in_features, device="cuda", dtype=torch.float32
+    )
+    res2 = permute_free_grouped_gemm_backward(
+        grad, routing=routing, weights=weights, num_gemms=num_experts,
+        hidden_states=hidden, requires_wgrad=True,
+        wgrad_out=wgrad_out, wgrad_accumulate=False,
+    )
+    assert res2.wgrad_applied is True
+    assert res2.wgrad_stacked is wgrad_out
+    assert res2.dgrad is None
+    assert _rel_l2(wgrad_out, wgrad_ref) < 5e-3
+
+
+def test_permute_free_backward_fc2_dgrad_probs():
+    """FC2 backward dispatch dgrad path: dgrad + grad_probs match the standalone act-bwd, and
+    grad_probs is suppressed when ``dispatched_probs`` does not require grad."""
+    torch.manual_seed(73)
+    num_recv_tokens, in_features, out_features = 128, 128, 128  # F=in, H=out
+    num_experts, max_hits = 8, 4
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=37)
+    routing = PermuteFreeMetadata(
+        routing_map=routing_map, num_experts=num_experts, route_space=True, activation="silu"
+    )
+    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+    em_max = int(routing.sorted_slot_ids.shape[0])
+    valid = routing.sorted_slot_ids < num_recv_tokens
+
+    preact = torch.zeros(em_max, 2 * in_features, device="cuda", dtype=torch.bfloat16)
+    preact[valid] = torch.randn(
+        int(valid.sum().item()), 2 * in_features, device="cuda", dtype=torch.bfloat16
+    )
+    grad_output = torch.randn(num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16)
+    weights = [
+        torch.randn(out_features, in_features, device="cuda", dtype=torch.bfloat16)
+        for _ in range(num_experts)
+    ]
+    W = torch.stack(weights, dim=0)
+
+    probs = torch.rand(
+        num_recv_tokens, num_experts, device="cuda", dtype=torch.float32, requires_grad=True
+    )
+    res = permute_free_grouped_gemm_backward(
+        grad_output, routing=routing, weights=weights, num_gemms=num_experts,
+        hidden_states=preact, requires_dgrad=True,
+        fc2_activation="silu", dispatched_probs=probs,
+    )
+    # Reference: fc2_dgrad -> standalone gated act-bwd.
+    dgrad_f = permute_free_grouped_gemm_bf16_fc2_dgrad(grad_output, W, routing)
+    dpre_ref, dprob_ref = permute_free_gated_act_bwd(
+        dgrad_f, preact, routing, activation="silu", dispatched_probs=probs.detach()
+    )
+    assert res.dgrad.shape == (em_max, 2 * in_features)
+    assert res.grad_probs is not None
+    assert res.grad_probs.shape == (num_recv_tokens, num_experts)
+    assert _rel_l2(res.dgrad[valid], dpre_ref[valid]) < 2e-2
+    assert _rel_l2(res.grad_probs, dprob_ref) < 2e-2
+
+    # No prob grad requested -> grad_probs suppressed.
+    res_nop = permute_free_grouped_gemm_backward(
+        grad_output, routing=routing, weights=weights, num_gemms=num_experts,
+        hidden_states=preact, requires_dgrad=True,
+        fc2_activation="silu", dispatched_probs=probs.detach(),
+    )
+    assert res_nop.grad_probs is None
+    assert _rel_l2(res_nop.dgrad[valid], dpre_ref[valid]) < 2e-2
+
+
+def test_route_list_gated_act_bwd_gelu():
+    """Gelu (tanh) variant of the standalone gated-activation backward (ACT_GELU path)."""
+    torch.manual_seed(79)
+    num_recv_tokens, in_features = 128, 128
+    num_experts, max_hits = 8, 3
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=39)
+    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
+    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+    em_max = int(routing.sorted_slot_ids.shape[0])
+    slot_token = routing.sorted_slot_ids
+    slot_expert = _expert_per_route(routing, em_max)
+    valid = slot_token < num_recv_tokens
+    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
+    exp = slot_expert.to(torch.int64).clamp_min(0)
+
+    gate = torch.randn(em_max, in_features, device="cuda", dtype=torch.float32)
+    up = torch.randn(em_max, in_features, device="cuda", dtype=torch.float32)
+    gate = (gate * valid[:, None].float()).requires_grad_(True)
+    up = (up * valid[:, None].float()).requires_grad_(True)
+    probs = torch.rand(
+        num_recv_tokens, num_experts, device="cuda", dtype=torch.float32, requires_grad=True
+    )
+    grad_out = torch.zeros(em_max, in_features, device="cuda", dtype=torch.bfloat16)
+    grad_out[valid] = torch.randn(
+        int(valid.sum().item()), in_features, device="cuda", dtype=torch.bfloat16
+    )
+
+    pr = probs[tok, exp]
+    act = (
+        torch.nn.functional.gelu(gate, approximate="tanh")
+        * up
+        * pr[:, None]
+        * valid[:, None].float()
+    )
+    (act * grad_out.float()).sum().backward()
+    dpre_ref = torch.cat([gate.grad, up.grad], dim=1)
+
+    preact = torch.cat([gate.detach(), up.detach()], dim=1).to(torch.bfloat16)
+    dpre, dprob = permute_free_gated_act_bwd(
+        grad_out, preact, routing, activation="gelu", dispatched_probs=probs.detach()
+    )
+    assert dpre.shape == (em_max, 2 * in_features)
+    assert _rel_l2(dpre[valid], dpre_ref[valid]) < 3e-2
+    assert _rel_l2(dprob, probs.grad) < 3e-2
+
+
 @pytest.mark.skip(reason="apply_route_probs not ported to transformer_engine.pytorch.moe yet")
 def test_apply_route_probs_fwd_bwd():
     """Fused per-route prob apply (gather+multiply) vs an autograd advanced-index reference."""

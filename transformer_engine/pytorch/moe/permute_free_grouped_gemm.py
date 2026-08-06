@@ -57,6 +57,18 @@ def _get_flydsl_fwd():
     return flydsl_moe_fwd_autotuned, flydsl_moe_fwd_supported
 
 
+def _expand_expert_ids_per_slot(
+    expert_ids: torch.Tensor,
+    block_m: int,
+    routes_max: int,
+) -> torch.Tensor:
+    """Broadcast block-level ``expert_ids`` to per-slot ids ``[routes_max]``."""
+    block_m = int(block_m)
+    pos = torch.arange(routes_max, device=expert_ids.device, dtype=torch.int64)
+    block_idx = (pos // block_m).clamp(max=expert_ids.numel() - 1)
+    return expert_ids[block_idx].to(torch.int32)
+
+
 def _expert_per_route(routing: MoERoutingMetadata, routes_max: int) -> torch.Tensor:
     """Per-route local expert id ``[routes_max]`` from the route-list block metadata."""
     if (
@@ -65,10 +77,16 @@ def _expert_per_route(routing: MoERoutingMetadata, routes_max: int) -> torch.Ten
         or routing.block_size_m <= 0
     ):
         raise ValueError("_expert_per_route requires prepared routing align buffers.")
-    block_m = int(routing.block_size_m)
-    pos = torch.arange(routes_max, device=routing.expert_ids.device, dtype=torch.int64)
-    block_idx = (pos // block_m).clamp(max=routing.expert_ids.numel() - 1)
-    return routing.expert_ids[block_idx.to(torch.int64)].to(torch.int32)
+    if (
+        routing.slot_expert_ids is not None
+        and routing.slot_expert_ids.shape[0] == routes_max
+    ):
+        return routing.slot_expert_ids
+    slot_expert_ids = _expand_expert_ids_per_slot(
+        routing.expert_ids, routing.block_size_m, routes_max
+    )
+    routing.slot_expert_ids = slot_expert_ids
+    return slot_expert_ids
 
 def _env_int(name: str, default: int) -> int:
     v = os.environ.get(name)
@@ -250,6 +268,12 @@ def prepare_moe_align(metadata: MoERoutingMetadata, block_m: int) -> MoERoutingM
         and metadata.block_size_m == block_m
         and metadata.token_routes is not None
     ):
+        if metadata.slot_expert_ids is None:
+            metadata.slot_expert_ids = _expand_expert_ids_per_slot(
+                metadata.expert_ids,
+                block_m,
+                metadata.sorted_slot_ids.shape[0],
+            )
         return metadata
 
     counts, within = _ensure_route_scan(metadata)
@@ -272,6 +296,9 @@ def prepare_moe_align(metadata: MoERoutingMetadata, block_m: int) -> MoERoutingM
     )
     metadata.sorted_slot_ids = sorted_slot_ids  # [T * min(topk, E)] int32: block-padded slot -> token
     metadata.expert_ids = expert_ids  # [blocks_max] int32: expert owning each block (-1 past end)
+    metadata.slot_expert_ids = _expand_expert_ids_per_slot(
+        expert_ids, block_m, sorted_slot_ids.shape[0]
+    )
     metadata.num_tokens_post_padded = num_tokens_post_padded  # [1] int32 device scalar: padded extent
     metadata.block_start = block_start  # [E] int32: first block index of each expert (block units)
     metadata.block_size_m = block_m  # int: BLOCK_SIZE_M the layout is padded to

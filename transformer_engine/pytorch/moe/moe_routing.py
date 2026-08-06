@@ -44,6 +44,10 @@ class MoERoutingMetadata:
     expert_ids:
         ``[blocks_max]`` local expert owning each ``BLOCK_SIZE_M`` block (``-1`` past the
         real block count; those blocks are never visited).
+    slot_expert_ids:
+        ``[T * min(topk, E)]`` per-slot local expert id, derived from ``expert_ids`` and
+        ``block_size_m`` (``expert_ids[slot // block_size_m]``). Populated by
+        ``prepare_moe_align`` for the standalone gated-activation kernels.
     num_tokens_post_padded:
         ``[1]`` device scalar = real ``em`` (block-padded route count). Bounds the kernel.
     block_start:
@@ -70,6 +74,7 @@ class MoERoutingMetadata:
     topk: Optional[int] = None
     sorted_slot_ids: Optional[torch.Tensor] = None
     expert_ids: Optional[torch.Tensor] = None
+    slot_expert_ids: Optional[torch.Tensor] = None
     num_tokens_post_padded: Optional[torch.Tensor] = None
     block_start: Optional[torch.Tensor] = None
     token_routes: Optional[torch.Tensor] = None
