@@ -13,6 +13,24 @@ import torch
 
 
 @dataclass
+class WgradAlign:
+    """Lazily-built block-``CONTRACT_M`` align buffers for the route-list wgrad kernel.
+
+    Held in a *mutable* container so that a metadata and its ``dataclasses.replace`` copy
+    (e.g. the FC2 ``route_space=True`` view) share one instance by reference. The wgrad align
+    is a pure function of ``routing_map`` (identical for FC1 and FC2), but it is built lazily in
+    the backward -- after the ``replace`` that shares the fwd align has already happened. Sharing
+    this holder lets whichever backward runs first build the buffers once; the other reuses them,
+    avoiding a duplicate align build (and a second live copy).
+    """
+
+    sorted_slot_ids: Optional[torch.Tensor] = None
+    block_start: Optional[torch.Tensor] = None
+    blocks_per_expert: Optional[torch.Tensor] = None
+    block_size: Optional[int] = None
+
+
+@dataclass
 class MoERoutingMetadata:
     """Routing tensors for the route-list gather-in-GEMM MoE path.
 
@@ -62,8 +80,10 @@ class MoERoutingMetadata:
         are unused padding.
     block_size_m:
         ``BLOCK_SIZE_M`` used to build the fwd/dgrad align buffers.
-    wgrad_*:
-        Separate block-``CONTRACT_M`` align buffers for the route-list wgrad kernel.
+    wgrad_align:
+        Shared, lazily-built block-``CONTRACT_M`` align buffers for the route-list wgrad kernel
+        (see :class:`WgradAlign`). The holder is shared by reference across a metadata and its
+        ``dataclasses.replace`` copy, so FC1 and FC2 build the (identical) wgrad align only once.
     route_counts / route_within:
         Cached block-size-independent scan (per-expert counts and within-expert ranks)
         shared by the fwd/dgrad and wgrad align builds.
@@ -80,10 +100,10 @@ class MoERoutingMetadata:
     token_routes: Optional[torch.Tensor] = None
     token_route_count: Optional[torch.Tensor] = None
     block_size_m: Optional[int] = None
-    wgrad_sorted_slot_ids: Optional[torch.Tensor] = None
-    wgrad_block_start: Optional[torch.Tensor] = None
-    wgrad_blocks_per_expert: Optional[torch.Tensor] = None
-    wgrad_block_size: Optional[int] = None
+    # Shared mutable holder so a metadata and its ``dataclasses.replace`` copy (FC2 route-space
+    # view) reuse one wgrad align build. ``replace`` copies this reference, and ``__post_init__``
+    # only creates a fresh holder when the field is genuinely absent, preserving the shared one.
+    wgrad_align: Optional[WgradAlign] = None
     # Block-size-independent scan (per-expert counts + within-expert ranks), shared by the
     # fwd/dgrad and wgrad align builds so it is computed once per routing map.
     route_counts: Optional[torch.Tensor] = None
@@ -94,6 +114,10 @@ class MoERoutingMetadata:
         # expert), so the caller can pass just ``routing_map``.
         if self.num_experts is None:
             self.num_experts = int(self.routing_map.size(1))
+        # Fresh holder only for a genuinely new metadata; a ``replace`` copy passes the existing
+        # (possibly already-populated) holder through so FC1 and FC2 share the same wgrad align.
+        if self.wgrad_align is None:
+            self.wgrad_align = WgradAlign()
 
     @property
     def num_recv_tokens(self) -> int:

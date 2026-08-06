@@ -305,11 +305,14 @@ def prepare_moe_align(metadata: MoERoutingMetadata, block_m: int) -> MoERoutingM
 def _prepare_wgrad_align(
     metadata: MoERoutingMetadata, contract_m: int
 ) -> MoERoutingMetadata:
-    """Build and cache the block-``contract_m`` align buffers for the wgrad kernel."""
-    if (
-        metadata.wgrad_sorted_slot_ids is not None
-        and metadata.wgrad_block_size == contract_m
-    ):
+    """Build and cache the block-``contract_m`` align buffers for the wgrad kernel.
+
+    The buffers live in the shared :class:`WgradAlign` holder, so the FC1 metadata and its
+    ``dataclasses.replace`` FC2 route-space copy reuse a single build (whichever backward runs
+    first fills the holder; the other hits the cache below).
+    """
+    cache = metadata.wgrad_align
+    if cache.sorted_slot_ids is not None and cache.block_size == contract_m:
         return metadata
 
     (
@@ -327,10 +330,10 @@ def _prepare_wgrad_align(
         scan=_ensure_route_scan(metadata),
         topk=metadata.topk,
     )
-    metadata.wgrad_sorted_slot_ids = sorted_slot_ids
-    metadata.wgrad_block_start = block_start
-    metadata.wgrad_blocks_per_expert = blocks_per_expert
-    metadata.wgrad_block_size = contract_m
+    cache.sorted_slot_ids = sorted_slot_ids
+    cache.block_start = block_start
+    cache.blocks_per_expert = blocks_per_expert
+    cache.block_size = contract_m
     return metadata
 
 
@@ -725,9 +728,9 @@ def permute_free_grouped_gemm_bf16_wgrad(
             x,
             grad_output,
             out,
-            routing.wgrad_sorted_slot_ids,
-            routing.wgrad_block_start,
-            routing.wgrad_blocks_per_expert,
+            routing.wgrad_align.sorted_slot_ids,
+            routing.wgrad_align.block_start,
+            routing.wgrad_align.blocks_per_expert,
             grad_base,
             num_recv_tokens=routing.num_recv_tokens,
             accumulate=bool(accumulate),
@@ -744,9 +747,9 @@ def permute_free_grouped_gemm_bf16_wgrad(
         x,
         grad_output,
         dW,
-        routing.wgrad_sorted_slot_ids,
-        routing.wgrad_block_start,
-        routing.wgrad_blocks_per_expert,
+        routing.wgrad_align.sorted_slot_ids,
+        routing.wgrad_align.block_start,
+        routing.wgrad_align.blocks_per_expert,
         grad_base,
         num_recv_tokens=routing.num_recv_tokens,
         accumulate=bool(accumulate),
