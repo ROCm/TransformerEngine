@@ -361,6 +361,66 @@ def test_fc2_backward_dispatch_recompute_matches_stored():
     assert _rel_l2(recompute.wgrad_stacked, stored.wgrad_stacked) < 1e-2
 
 
+def test_fc2_backward_dispatch_fused_dgrad_wgrad_matches_split():
+    """FC2 backward with both grads + a gated activation: the act-bwd re-emits the F-wide
+    fc2_input for the wgrad (one fused pass over the 2F preact). Both dgrad and wgrad must match
+    running dgrad-only and wgrad-only (separate recompute) independently."""
+    from transformer_engine.pytorch.moe import (
+        permute_free_grouped_gemm_backward,
+        prepare_moe_align,
+    )
+
+    torch.manual_seed(43)
+    num_recv_tokens, in_features, out_features = 128, 96, 128  # F=in, H=out (W2 is [E, H, F])
+    num_experts, max_hits = 8, 4
+
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=12)
+    routing = PermuteFreeMetadata(
+        routing_map=routing_map, num_experts=num_experts, route_space=True, activation="silu"
+    )
+    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+
+    em_max = int(routing.sorted_slot_ids.shape[0])
+    valid = routing.sorted_slot_ids < num_recv_tokens
+
+    preact = torch.zeros(em_max, 2 * in_features, device="cuda", dtype=torch.bfloat16)
+    preact[valid] = torch.randn(
+        int(valid.sum().item()), 2 * in_features, device="cuda", dtype=torch.bfloat16
+    )
+    grad_output = torch.randn(num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16)
+    probs = torch.rand(
+        num_recv_tokens, num_experts, device="cuda", dtype=torch.float32, requires_grad=True
+    )
+    weights = [
+        torch.randn(out_features, in_features, device="cuda", dtype=torch.bfloat16)
+        for _ in range(num_experts)
+    ]
+
+    common = dict(
+        routing=routing, weights=weights, num_gemms=num_experts,
+        hidden_states=preact, fc2_activation="silu", dispatched_probs=probs,
+    )
+    # Fused: dgrad + wgrad in one call -> the wgrad reuses the act-bwd's fc2_input.
+    fused = permute_free_grouped_gemm_backward(
+        grad_output, requires_dgrad=True, requires_wgrad=True, **common
+    )
+    # Split references: dgrad-only (act-bwd) and wgrad-only (own recompute-from-preact).
+    dref = permute_free_grouped_gemm_backward(
+        grad_output, requires_dgrad=True, requires_wgrad=False, **common
+    )
+    wref = permute_free_grouped_gemm_backward(
+        grad_output, requires_dgrad=False, requires_wgrad=True, **common
+    )
+
+    assert fused.dgrad.shape == (em_max, 2 * in_features)
+    assert fused.wgrad_stacked.shape == (num_experts, out_features, in_features)
+    # dgrad is bit-identical (same act-bwd, EMIT_ACT only adds a store).
+    assert torch.equal(fused.dgrad, dref.dgrad)
+    assert torch.equal(fused.grad_probs, dref.grad_probs)
+    # wgrad from the fused (re-emitted) act matches the standalone recompute to bf16 rounding.
+    assert _rel_l2(fused.wgrad_stacked, wref.wgrad_stacked) < 1e-2
+
+
 def test_fc1_fc2_gated_pipeline(monkeypatch):
     """End-to-end FC1 raw 2F -> FC2 standalone gated activation: forward outputs and backward grads
     match a PyTorch reference through the permute-free GroupedLinear modules."""

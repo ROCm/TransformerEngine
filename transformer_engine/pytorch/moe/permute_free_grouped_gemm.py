@@ -473,7 +473,8 @@ def permute_free_gated_act_bwd(
     *,
     activation: str,
     dispatched_probs: Optional[torch.Tensor] = None,
-) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    return_fc2_input: bool = False,
+):
     """Activation (+ route-prob) backward for the fused permute-free FC1 epilogue.
 
     Reconstructs the raw ``2F`` GEMM-output gradient ``dpre = [d_gate | d_up]`` (and, when the
@@ -491,10 +492,16 @@ def permute_free_gated_act_bwd(
     dispatched_probs:
         ``[num_recv_tokens, E]`` gating probs (or ``None`` for a silu/gelu-only fusion).
 
+    ``return_fc2_input`` additionally re-materialises the ``F``-wide forward activation
+    ``fc2_input = act(gate)*up[*prob]`` inside this pass (one extra multiply + store from values
+    already in registers) so the FC2 wgrad can consume it directly instead of re-streaming the
+    ``2F`` preact through a separate recompute -- eliminating a full ``2F`` HBM read.
+
     Returns
     -------
-    ``(dpre, dprob)`` -- ``dpre`` is ``[T * min(topk, E), 2F]`` bf16; ``dprob`` matches
-    ``dispatched_probs`` (or ``None`` when no probs were fused).
+    ``(dpre, dprob)`` by default, or ``(dpre, dprob, fc2_input)`` when ``return_fc2_input`` --
+    ``dpre`` is ``[T * min(topk, E), 2F]`` bf16; ``dprob`` matches ``dispatched_probs`` (or
+    ``None`` when no probs were fused); ``fc2_input`` is ``[em_max, F]`` bf16.
     """
     # Block-padded canonical layout: grad_out (FC2 dgrad) and preact both live in the [em_max]
     # padded slot order, and the kernel indexes grad_out/preact/dpre by the same row as
@@ -506,7 +513,7 @@ def permute_free_gated_act_bwd(
     expert = _expert_per_route(routing, em_max)
     # ``num_tokens_post_padded`` is a device scalar bounding the real padded extent, so the tail
     # programs exit early (sync-free) instead of streaming the padding through HBM.
-    return fused_gated_act_prob_bwd(
+    dpre, dprob, fc2_input = fused_gated_act_prob_bwd(
         grad_output.contiguous(),
         preact,
         token,
@@ -515,23 +522,29 @@ def permute_free_gated_act_bwd(
         activation=activation,
         dispatched_probs=dispatched_probs,
         num_routes_bound=routing.num_tokens_post_padded,
+        emit_act=return_fc2_input,
     )
+    if return_fc2_input:
+        return dpre, dprob, fc2_input
+    return dpre, dprob
 
 
-def permute_free_gated_act_recompute(
+def permute_free_gated_act_fwd(
     preact: torch.Tensor,
     routing: MoERoutingMetadata,
     *,
     activation: str,
     dispatched_probs: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
-    """Rebuild the fused FC1 activation ``act(gate) * up * prob`` from the saved pre-activation.
+    """Apply the fused gated activation ``act(gate) * up * prob`` to the ``2F`` pre-activation.
 
-    Lets the backward checkpoint only the ``2F`` pre-activation (``[T * min(topk, E), 2F]``) and
-    reconstruct the ``F``-wide activation just-in-time for the FC2 wgrad, feeding the
-    *unchanged* full-speed wgrad kernel a transient buffer (freed right after) instead of
-    persisting the activation across the fwd/bwd boundary. Uses the same per-route routing
-    arrays as :func:`permute_free_gated_act_bwd`.
+    Maps the raw ``[T * min(topk, E), 2F]`` ``[gate | up]`` GEMM output to the ``F``-wide FC2
+    input in the block-padded slot layout. Used both by the forward (to form the FC2 input) and,
+    on the backward, to reconstruct that ``F``-wide activation just-in-time for the FC2 wgrad --
+    so the backward can checkpoint only the ``2F`` pre-activation and feed the *unchanged*
+    full-speed wgrad kernel a transient buffer (freed right after) instead of persisting the
+    activation across the fwd/bwd boundary. Uses the same per-route routing arrays as
+    :func:`permute_free_gated_act_bwd`.
 
     Returns
     -------
@@ -540,7 +553,7 @@ def permute_free_gated_act_recompute(
         forward output and the layout the wgrad route-reads).
     """
     # Block-padded canonical layout: emit one row per padded slot (keyed by sorted_slot_ids) so
-    # the rebuilt activation lines up with the [em_max] grad the wgrad route-reads. Padding slots
+    # the activation lines up with the [em_max] grad the wgrad route-reads. Padding slots
     # (token sentinel >= num_recv_tokens) are masked to zero by the kernel.
     em_max = int(routing.sorted_slot_ids.shape[0])
     token = routing.sorted_slot_ids.to(torch.int32)
@@ -766,7 +779,7 @@ def permute_free_grouped_gemm_bf16_fc2(
     """Route-list FC2 forward with gather-combine to token order (bf16 MoE).
 
     ``fc2_input`` is the route-ordered ``F``-wide FC1 activation (or a transient buffer rebuilt
-    from the saved ``2F`` pre-activation via :func:`permute_free_gated_act_recompute`). For each
+    from the saved ``2F`` pre-activation via :func:`permute_free_gated_act_fwd`). For each
     route the kernel reads its row (``index_a_by_route_pos=True``) and computes the compact
     per-route GEMM; a separate contention-free gather-combine pass sums each token's routes
     into its output row.
@@ -957,7 +970,7 @@ def permute_free_grouped_gemm_bf16_fc2_wgrad(
     if preact is not None:
         if activation is None:
             raise ValueError("permute_free FC2 wgrad recompute requires an activation.")
-        fc2_input = permute_free_gated_act_recompute(
+        fc2_input = permute_free_gated_act_fwd(
             preact, routing, activation=activation, dispatched_probs=dispatched_probs
         )
 
@@ -1038,7 +1051,7 @@ def permute_free_grouped_gemm_forward(
     if getattr(routing, "route_space", False):
         fc2_input = hidden_states
         if activation is not None:
-            fc2_input = permute_free_gated_act_recompute(
+            fc2_input = permute_free_gated_act_fwd(
                 hidden_states,
                 routing,
                 activation=activation,
@@ -1083,33 +1096,55 @@ def permute_free_grouped_gemm_backward(
     if route_space:
         # FC2: grad is token-space [num_recv, out]. dgrad gathers back to the route buffer,
         # then the standalone gated-activation backward maps dL/dF -> dL/d(2F) (+ dprob).
+        recompute = fc2_activation is not None and hidden_states is not None
+        # When both grads are wanted with a gated activation, fuse the wgrad's activation
+        # recompute into the act-bwd (which is already streaming the 2F preact) so the wgrad
+        # can reuse the F-wide fc2_input instead of re-reading the 2F preact a second time.
+        fused_fc2_input = None
         if requires_dgrad:
             weights_stacked = _stack_expert_weights(weights)  # [E, H, F], zero-copy when grouped
             dgrad_f = permute_free_grouped_gemm_bf16_fc2_dgrad(
                 grad_output, weights_stacked, routing
             )
-            if fc2_activation is not None and hidden_states is not None:
-                dgrad, grad_probs = permute_free_gated_act_bwd(
-                    dgrad_f,
-                    hidden_states,
-                    routing,
-                    activation=fc2_activation,
-                    dispatched_probs=dispatched_probs,
-                )
+            if recompute:
+                if requires_wgrad:
+                    dgrad, grad_probs, fused_fc2_input = permute_free_gated_act_bwd(
+                        dgrad_f,
+                        hidden_states,
+                        routing,
+                        activation=fc2_activation,
+                        dispatched_probs=dispatched_probs,
+                        return_fc2_input=True,
+                    )
+                else:
+                    dgrad, grad_probs = permute_free_gated_act_bwd(
+                        dgrad_f,
+                        hidden_states,
+                        routing,
+                        activation=fc2_activation,
+                        dispatched_probs=dispatched_probs,
+                    )
                 if not (dispatched_probs is not None and dispatched_probs.requires_grad):
                     grad_probs = None
             else:
                 dgrad = dgrad_f
         if requires_wgrad:
             weights_shape = (num_gemms, weights[0].size(0), weights[0].size(1))
-            recompute = fc2_activation is not None and hidden_states is not None
-            dW = permute_free_grouped_gemm_bf16_fc2_wgrad(
-                hidden_states, grad_output, weights_shape, routing,
-                out=wgrad_out, accumulate=wgrad_accumulate,
-                preact=hidden_states if recompute else None,
-                dispatched_probs=dispatched_probs if recompute else None,
-                activation=fc2_activation if recompute else None,
-            )  # [E, H, F]
+            if fused_fc2_input is not None:
+                # Reuse the F-wide activation emitted by the act-bwd above: a plain stored-act
+                # wgrad, no second pass over the 2F preact.
+                dW = permute_free_grouped_gemm_bf16_fc2_wgrad(
+                    fused_fc2_input, grad_output, weights_shape, routing,
+                    out=wgrad_out, accumulate=wgrad_accumulate,
+                )  # [E, H, F]
+            else:
+                dW = permute_free_grouped_gemm_bf16_fc2_wgrad(
+                    hidden_states, grad_output, weights_shape, routing,
+                    out=wgrad_out, accumulate=wgrad_accumulate,
+                    preact=hidden_states if recompute else None,
+                    dispatched_probs=dispatched_probs if recompute else None,
+                    activation=fc2_activation if recompute else None,
+                )  # [E, H, F]
             wgrad_stacked = dW
             wgrad_applied = wgrad_out is not None
     else:

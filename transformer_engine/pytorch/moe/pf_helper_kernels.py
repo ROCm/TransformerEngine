@@ -152,6 +152,7 @@ def _gated_act_prob_bwd_kernel(
     expert_ptr,  # [routes_max] route -> local expert
     dpre_ptr,  # [T * min(topk, E), 2F] out: grad wrt the raw 2F GEMM output
     grad_probs_ptr,  # [num_recv_tokens, E] out (fp32)
+    act_out_ptr,  # [T * min(topk, E), F] out: fused fc2_input = act(g)*u*prob (EMIT_ACT only)
     nbound_ptr,  # [1] int32 device scalar: dynamic upper bound on compact routes
     num_recv_tokens,
     F,
@@ -165,8 +166,11 @@ def _gated_act_prob_bwd_kernel(
     stride_dpreh,
     stride_gpm,
     stride_gpe,
+    stride_aom,
+    stride_aoh,
     ACTIVATION: tl.constexpr,
     HAS_PROBS: tl.constexpr,
+    EMIT_ACT: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
@@ -183,6 +187,12 @@ def _gated_act_prob_bwd_kernel(
     exactly one route, so the prob-grad scatter is a plain store (no atomics). Padded /
     over-allocated routes carry the ``token == num_recv_tokens`` sentinel and are masked
     out of the prob load/store; their ``dpre`` rows are inert (ignored downstream).
+
+    When ``EMIT_ACT`` is set the kernel *also* stores the ``F``-wide forward activation
+    ``fc2_input = act(gate)*up[*prob]`` to ``act_out_ptr`` -- the same buffer the FC2 wgrad
+    would otherwise recompute in a second full pass over the ``2F`` preact. Since ``act(gate)``,
+    ``up`` and ``prob`` are already live in registers here, this is one extra multiply + store
+    and removes the redundant ``2F`` HBM read (see :func:`fused_gated_act_prob_fwd`).
 
     The compact route buffers are statically over-allocated to the worst-case
     ``routes_max = T * topk`` (sync-free shape bound), but the real routes occupy only the
@@ -242,6 +252,17 @@ def _gated_act_prob_bwd_kernel(
             d_up.to(dpre_ptr.dtype.element_ty),
             mask=m,
         )
+        if EMIT_ACT:
+            # Re-emit the F-wide forward activation from values already in registers, so the
+            # FC2 wgrad can consume it directly instead of re-streaming the 2F preact.
+            fi = act_g * u
+            if HAS_PROBS:
+                fi = fi * prob[:, None]
+            tl.store(
+                act_out_ptr + r_offs[:, None] * stride_aom + offs[None, :] * stride_aoh,
+                fi.to(act_out_ptr.dtype.element_ty),
+                mask=m,
+            )
 
     if HAS_PROBS:
         tl.store(
@@ -262,6 +283,7 @@ def fused_gated_act_prob_bwd(
     dispatched_probs: Optional[torch.Tensor] = None,
     grad_probs_shape: Optional[torch.Size] = None,
     num_routes_bound: Optional[torch.Tensor] = None,
+    emit_act: bool = False,
 ):
     """Backward of the fused gated-activation (+ route-prob) FC1 epilogue.
 
@@ -283,12 +305,18 @@ def fused_gated_act_prob_bwd(
         populated; passing the actual extent (e.g. ``num_tokens_post_padded`` from the routing
         metadata) lets tail programs exit early instead of streaming the padding through HBM.
         When ``None`` the full static ``routes_max`` is used (no early exit).
+    emit_act:
+        When ``True`` the kernel additionally re-materialises the ``F``-wide forward activation
+        ``fc2_input = act(gate)*up[*prob]`` (``[T * min(topk, E), F]`` bf16) from the values it
+        already computes, so the FC2 wgrad can consume it directly instead of re-reading the ``2F``
+        preact in a separate recompute pass. Returned as the third element (``None`` otherwise).
 
     Returns
     -------
-    (dpre, grad_probs)
+    (dpre, grad_probs, fc2_input)
         ``dpre`` is ``[T * min(topk, E), 2F]`` (bf16), grad wrt the raw GEMM output; ``grad_probs`` is
-        ``[num_recv_tokens, E]`` (matching ``dispatched_probs.dtype``) or ``None``.
+        ``[num_recv_tokens, E]`` (matching ``dispatched_probs.dtype``) or ``None``; ``fc2_input`` is
+        ``[T * min(topk, E), F]`` (bf16) when ``emit_act`` else ``None``.
     """
     em_max, F = grad_out.shape
     if preact.shape[0] != em_max or preact.shape[1] != 2 * F:
@@ -299,6 +327,12 @@ def fused_gated_act_prob_bwd(
     has_probs = dispatched_probs is not None
 
     dpre = torch.empty((em_max, 2 * F), dtype=torch.bfloat16, device=grad_out.device)
+    if emit_act:
+        act_out = torch.empty((em_max, F), dtype=torch.bfloat16, device=grad_out.device)
+        stride_aom, stride_aoh = act_out.stride(0), act_out.stride(1)
+    else:
+        act_out = None
+        stride_aom = stride_aoh = 0
     if has_probs:
         grad_probs = torch.zeros(dispatched_probs.shape, dtype=torch.float32, device=grad_out.device)
         probs_ptr = dispatched_probs
@@ -323,6 +357,7 @@ def fused_gated_act_prob_bwd(
         expert,
         dpre,
         grad_probs if has_probs else grad_out,
+        act_out if emit_act else dpre,
         nbound,
         num_recv_tokens,
         F,
@@ -336,12 +371,15 @@ def fused_gated_act_prob_bwd(
         dpre.stride(1),
         stride_gpm,
         stride_gpe,
+        stride_aom,
+        stride_aoh,
         ACTIVATION=act_id,
         HAS_PROBS=has_probs,
+        EMIT_ACT=emit_act,
     )
     if has_probs:
         grad_probs = grad_probs.to(dispatched_probs.dtype)
-    return dpre, grad_probs
+    return dpre, grad_probs, act_out
 
 
 @triton.autotune(configs=_gated_act_bwd_autotune_configs(), key=["F", "HAS_PROBS"])

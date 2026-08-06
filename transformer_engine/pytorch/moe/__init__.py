@@ -18,7 +18,7 @@ from .permute_free_grouped_gemm import (
     permute_free_grouped_gemm_bf16_wgrad,
     permute_free_grouped_gemm_forward,
     permute_free_gated_act_bwd,
-    permute_free_gated_act_recompute,
+    permute_free_gated_act_fwd,
     prepare_moe_align,
 )
 
@@ -36,6 +36,6 @@ __all__ = [
     "permute_free_grouped_gemm_bf16_wgrad",
     "permute_free_grouped_gemm_forward",
     "permute_free_gated_act_bwd",
-    "permute_free_gated_act_recompute",
+    "permute_free_gated_act_fwd",
     "prepare_moe_align",
 ]

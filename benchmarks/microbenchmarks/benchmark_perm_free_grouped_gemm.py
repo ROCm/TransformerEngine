@@ -187,12 +187,12 @@ def _permute_free_act_gemm(
     ``weights`` is the gate+up projection ``[E, 2F, K]``; returns the F-wide activated buffer.
     """
     from transformer_engine.pytorch.moe import (
-        permute_free_gated_act_recompute,
+        permute_free_gated_act_fwd,
         permute_free_grouped_gemm_bf16,
     )
 
     preact = permute_free_grouped_gemm_bf16(hidden, weights, routing)
-    return permute_free_gated_act_recompute(preact, routing, activation="silu")
+    return permute_free_gated_act_fwd(preact, routing, activation="silu")
 
 
 def _build_backend_fns(
