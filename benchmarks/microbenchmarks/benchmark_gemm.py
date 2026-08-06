@@ -10,7 +10,7 @@ import torch
 import transformer_engine.pytorch as te
 from utils import (
     generate_gemm_test_cases,
-    time_func, compute_tflops, make_forward_backward_metric_records, run_benchmarks,
+    time_forward_backward, compute_tflops, make_forward_backward_metric_records, run_benchmarks,
 )
 
 BENCHMARK_LABEL = "GEMM"
@@ -26,20 +26,23 @@ def bench_gemm(Case, M, N, K, dtype):
     out = fwd_func()
     grad_out = torch.randn_like(out)
 
+    def zero_grads():
+        x.grad = None
+        linear.weight.grad = None
+
     def fwd_bwd_func():
         out = linear(x)
         out.backward(grad_out)
-        x.grad = None
-        linear.weight.grad = None
+        zero_grads()
 
     fwd_bwd_func()
 
     fwd_flops = 2 * M * N * K
     bwd_flops = 2 * fwd_flops  # dX + dW
 
-    fwd_ms, fwd_measurement = time_func(fwd_func)
-    fwd_bwd_ms, fwd_bwd_measurement = time_func(fwd_bwd_func)
-    bwd_ms = fwd_bwd_ms - fwd_ms
+    fwd_ms, bwd_ms, record_kwargs = time_forward_backward(
+        fwd_func, fwd_bwd_func, grad_out
+    )
 
     fwd_tflops = compute_tflops(fwd_flops, fwd_ms)
     bwd_tflops = compute_tflops(bwd_flops, bwd_ms)
@@ -51,9 +54,7 @@ def bench_gemm(Case, M, N, K, dtype):
         fwd_tflops,
         bwd_ms,
         bwd_tflops,
-        backward_derived=True,
-        fwd_measurement=fwd_measurement,
-        fwd_bwd_measurement=fwd_bwd_measurement,
+        **record_kwargs,
     )
 
 

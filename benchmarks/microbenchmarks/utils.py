@@ -247,6 +247,24 @@ def make_forward_backward_metric_records(label_prefix, unit,
     return records
 
 
+def time_forward_backward(fwd_func, fwd_bwd_func, grad_out):
+    """Return ``(fwd_ms, bwd_ms, record_kwargs)`` for
+    :func:`make_forward_backward_metric_records`.
+
+    Backward is derived as ``fwd_bwd - fwd``: TE frees its saved tensors on the
+    first backward (no retained-graph re-run) and CUDA-event region timing
+    includes host launch gaps, so a direct backward measurement isn't reliable.
+    """
+    fwd_ms, fwd_meas = time_func(fwd_func)
+    fwd_bwd_ms, fwd_bwd_meas = time_func(fwd_bwd_func)
+    return fwd_ms, fwd_bwd_ms - fwd_ms, {
+        "backward_derived": True,
+        "fwd_measurement": fwd_meas,
+        "bwd_measurement": None,
+        "fwd_bwd_measurement": fwd_bwd_meas,
+    }
+
+
 def _metric_time_key(metric):
     return f"{metric['label']} Time (ms)"
 

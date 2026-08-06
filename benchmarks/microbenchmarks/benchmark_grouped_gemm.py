@@ -9,7 +9,7 @@ import torch
 import transformer_engine.pytorch as te
 from utils import (
     DTYPE_LIST,
-    time_func,
+    time_forward_backward,
     compute_tflops,
     make_forward_backward_metric_records,
     run_benchmarks,
@@ -122,21 +122,24 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype):
     out_te = fwd_func_te()
     grad_out = torch.randn_like(out_te)
 
-    def fwd_bwd_func_te():
-        out = grouped_linear(x, m_splits, m_splits_tensor=m_splits_tensor)
-        out.backward(grad_out)
+    def zero_grads():
         x.grad = None
         for param in grouped_linear.parameters():
             param.grad = None
+
+    def fwd_bwd_func_te():
+        out = grouped_linear(x, m_splits, m_splits_tensor=m_splits_tensor)
+        out.backward(grad_out)
+        zero_grads()
 
     fwd_bwd_func_te()
 
     fwd_total_flops = 2 * sum_M * N * K
     bwd_total_flops = 2 * fwd_total_flops
 
-    fwd_te_ms, fwd_measurement = time_func(fwd_func_te)
-    fwd_bwd_te_ms, fwd_bwd_measurement = time_func(fwd_bwd_func_te)
-    bwd_te_ms = fwd_bwd_te_ms - fwd_te_ms
+    fwd_te_ms, bwd_te_ms, record_kwargs = time_forward_backward(
+        fwd_func_te, fwd_bwd_func_te, grad_out
+    )
 
     fwd_te_tflops = compute_tflops(fwd_total_flops, fwd_te_ms)
     bwd_te_tflops = compute_tflops(bwd_total_flops, bwd_te_ms)
@@ -148,9 +151,7 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype):
         fwd_te_tflops,
         bwd_te_ms,
         bwd_te_tflops,
-        backward_derived=True,
-        fwd_measurement=fwd_measurement,
-        fwd_bwd_measurement=fwd_bwd_measurement,
+        **record_kwargs,
     )
 
 
