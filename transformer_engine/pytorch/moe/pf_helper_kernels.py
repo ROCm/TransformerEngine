@@ -613,8 +613,7 @@ def _expert_meta_kernel(
         tl.store(block_start_ptr + offs_e, block_start, mask=mask_e)
         tl.store(ntpp_ptr, total_blocks * BLOCK_SIZE_M)
 
-    # expert_ids[b] = #{e : cblocks[e] <= b} (== searchsorted(cblocks, b, right=True)),
-    # then -1 for blocks past the real extent.
+    # expert_ids[b] = #{e : cblocks[e] <= b} then -1 for blocks past the real extent.
     offs_b = pid * BLOCK_B + tl.arange(0, BLOCK_B)
     mask_b = offs_b < blocks_max
     cblocks_valid = tl.where(mask_e, cblocks, (1 << 30))
@@ -751,11 +750,14 @@ def route_list_align(
         counts, within = scan
 
     # Per-expert placement metadata + per-block expert ids (single launch).
-    blocks_per_expert = torch.empty((E,), dtype=torch.int32, device=device)
-    block_start = torch.empty((E,), dtype=torch.int32, device=device)
-    expert_ids = torch.empty((blocks_max,), dtype=torch.int32, device=device)
-    num_tokens_post_padded = torch.empty((1,), dtype=torch.int32, device=device)
+    blocks_per_expert = torch.empty((E,), dtype=torch.int32, device=device)  # [E]: ceil(count[e]/block_m)
+    block_start = torch.empty((E,), dtype=torch.int32, device=device)  # [E]: first M-block index of expert e
+    expert_ids = torch.empty((blocks_max,), dtype=torch.int32, device=device)  # [blocks_max]: owner of M-block b (-1 past end)
+    num_tokens_post_padded = torch.empty((1,), dtype=torch.int32, device=device)  # [1] device scalar: real em (padded route count)
     block_b = 256
+    # From per-expert route counts, derive the expert-sorted block layout: how many M-blocks
+    # each expert needs, where each expert's slots start (block_start), which expert owns each
+    # M-block (expert_ids), and the real padded route extent (num_tokens_post_padded).
     _expert_meta_kernel[(triton.cdiv(blocks_max, block_b),)](
         counts,
         blocks_per_expert,
@@ -781,8 +783,9 @@ def route_list_align(
         token_routes = torch.empty((1,), dtype=torch.int32, device=device)  # unused stub
         token_route_count = token_routes
 
-    # Scatter each routed cell into its deterministic block-padded slot. The sentinel-init
-    # buffer is filled once (one launch); the place kernel then overwrites the routed slots.
+    # One program per token: for each routed (t, e), write sorted_slot_ids[slot] = t where
+    # slot = block_start[e] * block_m + within[e, t]. Unwritten slots stay at sentinel T.
+    # Optionally emits token_routes / token_route_count (token -> padded slot indices).
     sorted_slot_ids = torch.full((em_max,), T, dtype=torch.int32, device=device)
     _route_list_place_kernel[(T,)](
         routing_map,

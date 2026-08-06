@@ -362,16 +362,15 @@ def test_fc2_backward_dispatch_recompute_matches_stored():
 
 
 def test_fc1_fc2_gated_pipeline(monkeypatch):
-    """End-to-end FC1 raw 2F -> FC2 fused activation: forward outputs and backward grads match a
-    PyTorch reference through the permute-free GroupedLinear modules."""
+    """End-to-end FC1 raw 2F -> FC2 standalone gated activation: forward outputs and backward grads
+    match a PyTorch reference through the permute-free GroupedLinear modules."""
     import dataclasses
 
     from transformer_engine.pytorch.moe import prepare_moe_align
 
     monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "1")
     torch.manual_seed(37)
-    # FFN width is a multiple of the FlyDSL block_k (64) so the fused FC2 gated_a prologue
-    # runs on FlyDSL (the default backend) rather than falling back to Triton.
+    # FFN width is a multiple of the FlyDSL block_k (64) for kernel alignment.
     num_recv_tokens, hidden, ffn = 128, 128, 128
     num_experts, max_hits = 8, 3
 
@@ -562,7 +561,7 @@ def test_route_list_fc2_fwd_standalone_act():
 
     out = permute_free_grouped_gemm_forward(
         preact, weights, routing, activation="silu", dispatched_probs=probs
-    ).out
+    )
     assert out.shape == (num_recv_tokens, out_features)
 
     g = preact[:, :in_features].float()
@@ -700,7 +699,7 @@ def test_permute_free_forward_dispatch():
     res_fc1 = permute_free_grouped_gemm_forward(hidden, w1, fc1_routing)
     direct = permute_free_grouped_gemm_bf16(hidden, w1, fc1_routing)
     valid_fc1 = fc1_routing.sorted_slot_ids < num_recv_tokens
-    assert _rel_l2(res_fc1.out[valid_fc1], direct[valid_fc1]) < 1e-3
+    assert _rel_l2(res_fc1[valid_fc1], direct[valid_fc1]) < 1e-3
 
     fc2_routing = PermuteFreeMetadata(
         routing_map=routing_map, num_experts=num_experts, route_space=True, activation="silu"
@@ -721,7 +720,7 @@ def test_permute_free_forward_dispatch():
     w2 = torch.randn(num_experts, hidden_dim, ffn, device="cuda", dtype=torch.bfloat16)
     out = permute_free_grouped_gemm_forward(
         preact, w2, fc2_routing, activation="silu", dispatched_probs=probs
-    ).out
+    )
     assert out.shape == (num_recv_tokens, hidden_dim)
 
     g = preact[:, :ffn].float()
@@ -938,49 +937,6 @@ def test_route_list_gated_act_bwd_gelu():
     assert dpre.shape == (em_max, 2 * in_features)
     assert _rel_l2(dpre[valid], dpre_ref[valid]) < 3e-2
     assert _rel_l2(dprob, probs.grad) < 3e-2
-
-
-@pytest.mark.skip(reason="apply_route_probs not ported to transformer_engine.pytorch.moe yet")
-def test_apply_route_probs_fwd_bwd():
-    """Fused per-route prob apply (gather+multiply) vs an autograd advanced-index reference."""
-    from transformer_engine.pytorch.moe import prepare_moe_align
-    # apply_route_probs was not ported; kept for when route_prob helper lands in moe/.
-    _ = prepare_moe_align
-
-    torch.manual_seed(31)
-    num_recv_tokens, hidden_dim = 128, 192
-    num_experts, max_hits = 8, 3
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=9)
-    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
-    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    num_routes = int(routing_map.sum().item())
-    act = torch.randn(em_max, hidden_dim, device="cuda", dtype=torch.bfloat16)
-    probs = torch.rand(num_recv_tokens, num_experts, device="cuda", dtype=torch.float32)
-
-    a1 = act.clone().requires_grad_(True)
-    p1 = probs.clone().requires_grad_(True)
-    out = apply_route_probs(a1, p1, routing)
-
-    # Reference: differentiable advanced index over the block-padded slot order.
-    tok = routing.sorted_slot_ids.to(torch.int64).clamp(0, num_recv_tokens - 1)
-    exp = _expert_per_route(routing, em_max).to(torch.int64).clamp_min(0)
-    valid = routing.sorted_slot_ids < num_recv_tokens
-    a2 = act.clone().requires_grad_(True)
-    p2 = probs.clone().requires_grad_(True)
-    pr = torch.where(valid, p2[tok, exp], torch.zeros_like(p2[tok, exp]))
-    ref = a2 * pr[:, None]
-
-    assert _rel_l2(out[valid], ref[valid]) < 2e-2
-
-    g = torch.randn(em_max, hidden_dim, device="cuda", dtype=torch.bfloat16)
-    g[num_routes:] = 0
-    out.backward(g)
-    ref.backward(g)
-    assert _rel_l2(a1.grad[:num_routes], a2.grad[:num_routes]) < 2e-2
-    assert _rel_l2(p1.grad, p2.grad) < 2e-2
 
 
 # ---------------------------------------------------------------------------

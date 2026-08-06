@@ -540,7 +540,7 @@ class _GroupedLinear(torch.autograd.Function):
         perm_free_route_space = (
             getattr(routing_metadata, "route_space", False) if routing_metadata is not None else False
         )
-        # FC2 with a fused gated prologue consumes FC1's raw 2F [gate|up] buffer (width 2F).
+        # FC2 with gated activation consumes FC1's raw 2F [gate|up] buffer (width 2F).
         expect_in_features = (
             2 * in_features
             if (
@@ -671,14 +671,13 @@ class _GroupedLinear(torch.autograd.Function):
             # FC1 emits raw 2F [gate|up]; the ``activation`` hint on the metadata is consumed on
             # FC2, which applies the gated activation in a standalone pass and then runs a plain
             # GEMM (the fused-prologue path regressed throughput). Route probs ride with FC2 too.
-            pf_result = permute_free_grouped_gemm_forward(
+            out = permute_free_grouped_gemm_forward(
                 inputmats[0],
                 weights_fp8,
                 routing_metadata,
                 activation=perm_free_activation if perm_free_route_space else None,
                 dispatched_probs=dispatched_probs if perm_free_route_space else None,
             )
-            out = pf_result.out
         elif use_grouped_gemm_triton:
             general_grouped_gemm_func = general_grouped_gemm_triton
             kwargs = {"m_splits_tensor": m_splits_tensor}
@@ -1126,7 +1125,7 @@ class _GroupedLinear(torch.autograd.Function):
                         ):
                             grouped_weight.grad_added_to_main_grad = True
                     else:
-                        # FC2 (transpose) or no direct kernel: sink the returned stacked wgrad.
+                        # Fresh wgrad tensor: sink into main_grad / .grad.
                         dW = pf_result.wgrad_stacked
                         if ctx.grouped_fuse_wgrad:
                             main_grad = ctx.grouped_main_grad_func().view(dW.shape)
@@ -2018,22 +2017,20 @@ class GroupedLinear(TransformerEngineBaseModule):
                       False`` (FC1) gathers per expert into the worst-case padded
                       ``[T * min(topk, E), out_features]`` route buffer (valid rows are the compact
                       range ``[0, num_routes)``; the tail is inert zero padding);
-                      ``route_space=True`` (FC2) reads route-ordered input and fuses the
-                      scatter back to token order, returning ``[num_recv_tokens,
-                      out_features]``. TE builds/caches the expert-sorted alignment buffers
-                      on the metadata. The gated-activation fusion hint
-                      (``permute_free_metadata.activation`` = ``"silu"`` / ``"gelu"``) rides on
-                      this object: when set on the FC1 direction (``route_space=False``) it
-                      fuses the **gated** activation into the GEMM epilogue (weight output dim
-                      is the gate+up width ``2F``, laid out as ``[gate | up]``; the returned
-                      buffer is the ``F``-wide ``act(gate) * up`` and the separate activation
-                      pass is skipped). Ignored on other paths.
+                      ``route_space=True`` (FC2) reads route-ordered input, applies the
+                      standalone gated activation (when ``activation`` is set), runs a plain
+                      GEMM, and scatter-combines back to token order, returning
+                      ``[num_recv_tokens, out_features]``. TE builds/caches the expert-sorted
+                      alignment buffers on the metadata. The ``activation`` hint
+                      (``"silu"`` / ``"gelu"``) is carried on this object for the FC2
+                      direction: FC1 (``route_space=False``) emits raw ``2F`` ``[gate | up]``;
+                      FC2 recompute applies ``act(gate) * up`` (and optionally route probs)
+                      before the GEMM.
         dispatched_probs : torch.Tensor, optional
-                     ``[num_recv_tokens, num_local_experts]`` gating probabilities. When given
-                     with a fused ``activation``, each route's ``prob[token, expert]`` is
-                     multiplied into the activation in-kernel (skipping the separate route-prob
-                     pass); its gradient is returned to the router through autograd. Must be a
-                     leaf/differentiable tensor for training.
+                     ``[num_recv_tokens, num_local_experts]`` gating probabilities. On the FC2
+                     permute-free path, multiplied into the gated activation during the
+                     standalone recompute pass; its gradient is returned to the router through
+                     autograd. Must be a leaf/differentiable tensor for training.
         """
         debug = self.is_debug_iter()
         is_grad_enabled = torch.is_grad_enabled()

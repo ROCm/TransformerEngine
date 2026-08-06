@@ -121,12 +121,13 @@ class PermuteFreeMetadata(MoERoutingMetadata):
     reused for FC1 and FC2 (e.g. via ``dataclasses.replace(meta, route_space=True)``),
     avoiding a duplicate align build.
 
-    Fusion hint (optional):
+    Activation hint (optional):
 
     activation:
-        Gated activation to fuse into the FC2 GEMM prologue -- ``"silu"`` or ``"gelu"``.
-        ``None`` leaves the activation to the caller (no fusion). FC1 emits raw ``2F``;
-        this hint is consumed on the FC2 direction (``route_space=True``).
+        Gated activation for the FC2 standalone pass -- ``"silu"`` or ``"gelu"``.
+        ``None`` leaves activation to the caller. FC1 emits raw ``2F``; this hint is
+        consumed on the FC2 direction (``route_space=True``) to run
+        :func:`permute_free_gated_act_recompute` before the plain FC2 GEMM.
 
     (The per-route gating probabilities are *not* carried here: they need a gradient, so they
     are passed as a separate autograd tensor argument to the module rather than as metadata.)

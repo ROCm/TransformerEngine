@@ -222,7 +222,7 @@ def _build_backend_fns(
     fns["ck"] = ck_fn
     fns["triton"] = triton_fn
     fns["permute_free"] = lambda: _permute_free_gemm(hidden, weights, routing)
-    # GateUP-only: permute-free FC1 with the fused gated SiLU epilogue.
+    # GateUP-only: permute-free FC1 GEMM + standalone SiLU gated activation.
     if is_gated:
         fns["permute_free_act"] = lambda: _permute_free_act_gemm(hidden, weights, routing)
     return fns

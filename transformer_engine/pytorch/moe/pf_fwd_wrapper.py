@@ -32,9 +32,6 @@ _WARP = 64
 _LDS_PAD = 8
 _LDS_LIMIT = 163840  # gfx950 per-workgroup LDS (160 KB)
 
-_WARP_CHOICES = [1, 2, 4, 8, 16]
-
-
 def _env_flag(name: str, default: bool) -> bool:
     v = os.environ.get(name)
     if v is None:
@@ -140,37 +137,6 @@ def _warp_valid(block_m, block_n, block_k, wm, wn, transpose_b=False):
     return True
 
 
-def _pick_warps(block_m: int, block_n: int, block_k: int, transpose_b=False):
-    """Pick (warps_m, warps_n) balancing per-warp MFMA tile (M_STEPS x N_STEPS) vs occupancy.
-
-    Prefers keeping the per-warp atom counts moderate (fewer accumulators -> more waves) while
-    landing a 256-512 thread workgroup, which measured fastest across the Qwen MoE shapes.
-    """
-    wmma = _mfma_dim(transpose_b)
-    best = None
-    for wm in _WARP_CHOICES:
-        for wn in _WARP_CHOICES:
-            if not _warp_valid(block_m, block_n, block_k, wm, wn, transpose_b):
-                continue
-            n_threads = wm * wn * _WARP
-            if n_threads > 512:
-                continue
-            m_steps = block_m // (wm * wmma)
-            n_steps = block_n // (wn * wmma)
-            # Favor a small, balanced per-warp atom footprint (fewer accumulators -> more
-            # waves), then a 256-512 thread workgroup. Ties broken toward |m_steps-n_steps|
-            # small (balanced reuse of A and B fragments).
-            score = (
-                m_steps * n_steps,
-                abs(m_steps - n_steps),
-                0 if 256 <= n_threads <= 512 else 1,
-                n_threads,
-            )
-            if best is None or score < best[0]:
-                best = (score, (wm, wn))
-    return best[1] if best is not None else None
-
-
 def _fwd_buffering():
     """(num_buffers, lds_pad) for the production DMA+swizzle fill path.
 
@@ -189,14 +155,6 @@ def _lds_bytes(block_m, block_n, block_k, transpose_b=False):
     # dgrad stages B as [k, n] (row stride = block_n+pad); fwd as [n, k] (block_k+pad).
     b_tile = block_k * (block_n + pad) if transpose_b else block_n * (block_k + pad)
     return (a_tile + b_tile) * nbuf * 2
-
-
-def _default_block_n(block_m, block_k, transpose_b=False):
-    """Widest N tile (128 then 64) that fits LDS -- wider N raises arithmetic intensity."""
-    for bn in (128, 64):
-        if _lds_bytes(block_m, bn, block_k, transpose_b) <= _LDS_LIMIT and bn % _mfma_dim(transpose_b) == 0:
-            return bn
-    return 64
 
 
 def flydsl_moe_fwd_supported(
@@ -270,9 +228,8 @@ def flydsl_moe_fwd(
 # Measured on FC1 no-act (qwen235b, block_m=256), idle machine, alias scopes on:
 # 256x32 w4x4 ~1628us, 128x64 w4x4 ~1694us, 128x64 w8x2 ~1726us.
 #
-# An exhaustive sweep of the valid space (all block_n in 64..512 x block_k in 32..256 x warp
-# grids >=4 waves; benchmarks/microbenchmarks/sweep_fc1_configs.py) found nothing better, so
-# the list below is not missing a winner. Two directions are dead ends and are deliberately
+# An exhaustive sweep of the valid tile space found nothing better, so the list below is not
+# missing a winner. Two directions are dead ends and are deliberately
 # absent: block_n>=384 costs 4-22x (per-wave accumulator spill plus 120-144KB LDS pinning
 # occupancy to 1 workgroup), and trading block_m down to reach block_k=128 -- 4x fewer
 # barriers, which the ATT trace makes look attractive -- costs 59% (2581us at block_m=128

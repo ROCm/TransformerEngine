@@ -7,7 +7,6 @@
 from .permute_free_grouped_gemm import (
     MoERoutingMetadata,
     PermuteFreeBackwardResult,
-    PermuteFreeForwardResult,
     PermuteFreeMetadata,
     is_permute_free_grouped_gemm_enabled,
     permute_free_grouped_gemm_backward,
@@ -26,7 +25,6 @@ from .permute_free_grouped_gemm import (
 __all__ = [
     "MoERoutingMetadata",
     "PermuteFreeBackwardResult",
-    "PermuteFreeForwardResult",
     "PermuteFreeMetadata",
     "is_permute_free_grouped_gemm_enabled",
     "permute_free_grouped_gemm_backward",
