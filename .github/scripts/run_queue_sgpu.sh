@@ -5,25 +5,22 @@
 #
 # Run all sGPU test suites as one global work queue across N GPUs.
 #
-# Usage: run_queue_sgpu.sh --arch <gfx> [options] [config]...
-#   -a, --arch <gfx>      GPU arch these timings belong to, e.g. gfx942. Required
-#                         (or TE_CI_ARCH); it keys the learned weight table
-#   -l, --log-dir <dir>   where the per-phase log tree is written
-#                         (default test-results/logs)
-#       --only <regex>    keep only items whose "<label>/<tag>" matches (smoke
-#                         tests, or re-running just the items that failed)
-#   -h, --help            this text
+# Usage: run_queue_sgpu.sh [-l|--log-dir <dir>] [<config>...]
 #
-# With no config the full sGPU set (ci_sgpu_queue.conf) is run. TEST_LEVEL and
-# the other ci/_utils.sh variables are read from the environment as usual, so a
-# local run inside the dev container is just:
+# Config format (one suite per line; # comments and blank lines are ignored):
+#   <label>  <logfile>  <mode>  <command> [args...]
+#     mode=list    expanded into one work item per test invocation
+#     mode=opaque  scheduled as a single work item
 #
-#   TEST_LEVEL=1 .github/scripts/run_queue_sgpu.sh --arch gfx942
+# With no config given, .github/scripts/ci_sgpu_queue.conf is used. Unlike
+# run_parallel_sgpu.sh, line order carries no GPU assignment: every item from
+# every config goes into one queue and workers pull on completion.
 #
-# The queue uses every GPU it can see. To restrict what it can see the same way you would for any other
-# ROCm program
+# The queue uses every GPU it can see; restrict it with HIP_VISIBLE_DEVICES.
 #
-#   HIP_VISIBLE_DEVICES=0,1 .github/scripts/run_queue_sgpu.sh --arch gfx942
+# Example usage:
+#   TEST_LEVEL=1 .github/scripts/run_queue_sgpu.sh
+#   HIP_VISIBLE_DEVICES=0,1 TEST_LEVEL=1 .github/scripts/run_queue_sgpu.sh
 #
 set -u
 
@@ -32,18 +29,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 # Two directories in the repo root:
 #
-#   test-results/  everything one run produced. This script adds logs/ under it:
-#                  the per-phase log tree
-#   ci-weights/    the learned weight table, which is the one thing that must
-#                  outlive the run that measured it. Same name the workflow uses
-#                  for the cached copy.
+#   test-results/  everything one run produced; this script adds logs/ under it
+#   ci-weights/    the learned weight table, the one thing that must outlive the
+#                  run that measured it. Same name the workflow caches.
 LOG_DIR=${LOG_DIR:-${REPO_ROOT}/test-results/logs}
-ARCH=${TE_CI_ARCH:-}
-ONLY_RE=""
-REPORT_TITLE="sGPU queue schedule"
 
-# ::error:: and ::warning:: are GitHub Actions annotations, and this script also
-# runs by hand in the dev container -- emit them only where they mean something.
 if [[ -n "${GITHUB_ACTIONS:-}" ]]; then
     log_error() { echo "::error::$*" >&2; }
     log_warn()  { echo "::warning::$*" >&2; }
@@ -52,8 +42,6 @@ else
     log_warn()  { echo "Warning: $*" >&2; }
 fi
 
-# The header comment is the usage text; reprinting it keeps the two in sync.
-usage() { awk 'NR > 5 && /^#/ {sub(/^# ?/, ""); print; next} NR > 5 {exit}' "$0"; }
 # Items with no recorded weight sort first: an unknown item is more likely to be
 # a new (or newly slow) one, and a long item started late is what stretches the
 # tail. Losing the gamble costs far less than mis-scheduling a genuinely big item.
@@ -62,29 +50,38 @@ usage() { awk 'NR > 5 && /^#/ {sub(/^# ?/, ""); print; next} NR > 5 {exit}' "$0"
 # unordered. That costs makespan once; the table it writes fixes the next run.
 DEFAULT_WEIGHT=${TE_CI_DEFAULT_WEIGHT:-999999}
 
+# ---------------------------------------------------------------------------
+# Parse arguments
 while [[ $# -gt 0 ]]; do
     case "$1" in
-        -a|--arch)       ARCH="$2"; shift 2 ;;
-        --arch=*)        ARCH="${1#*=}"; shift ;;
-        -l|--log-dir)    LOG_DIR="$2"; shift 2 ;;
-        --log-dir=*)     LOG_DIR="${1#*=}"; shift ;;
-        --only)          ONLY_RE="$2"; shift 2 ;;
-        --only=*)        ONLY_RE="${1#*=}"; shift ;;
-        -h|--help)       usage; exit 0 ;;
-        -*)              echo "Unknown option: $1" >&2; usage >&2; exit 1 ;;
-        *)               break ;;
+        -l|--log-dir)
+            LOG_DIR="$2"; shift 2 ;;
+        --log-dir=*)
+            LOG_DIR="${1#*=}"; shift ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            echo "Usage: $0 [-l|--log-dir <dir>] [<config>...]" >&2
+            exit 1 ;;
+        *)
+            break ;;
     esac
 done
 
-if [[ -z "$ARCH" ]]; then
-    log_error "--arch is required (e.g. --arch gfx942), or set TE_CI_ARCH"
-    exit 1
+# Resolve config paths to absolute against the caller's CWD *before* changing
+# directory, so relative paths passed by the caller remain valid: the configs
+# are not read until Phase 1, long after the cd to the repo root below.
+declare -a CONFIGS=()
+if [[ $# -gt 0 ]]; then
+    for c in "$@"; do CONFIGS+=( "$(realpath -m "$c")" ); done
+else
+    CONFIGS=( "${SCRIPT_DIR}/ci_sgpu_queue.conf" )
 fi
-
-if [[ $# -eq 0 ]]; then
-    set -- "${SCRIPT_DIR}/ci_sgpu_queue.conf"
-    echo "No config given; using $1"
-fi
+for c in "${CONFIGS[@]}"; do
+    if [[ ! -f "$c" ]]; then
+        log_error "suite list not found: $c"
+        exit 1
+    fi
+done
 
 # The pool is every GPU this run can see: HIP_VISIBLE_DEVICES if set
 # else what rocminfo counts.
@@ -103,6 +100,10 @@ detect_gpu_pool() {
     GPU_SOURCE="rocminfo${ROCR_VISIBLE_DEVICES:+, ROCR_VISIBLE_DEVICES=$ROCR_VISIBLE_DEVICES}"
 }
 
+detect_arch() {
+    rocminfo 2>/dev/null | grep -E "^ *Name: *gfx" | head -1 | sed "s/.*gfx/gfx/;s/[: ].*//"
+}
+
 if ! detect_gpu_pool; then
     log_error "no GPU found: rocminfo reports none and HIP_VISIBLE_DEVICES is unset." \
               "Set HIP_VISIBLE_DEVICES to the devices this run may use."
@@ -112,6 +113,13 @@ fi
 NUM_GPUS=${#GPU_IDS[@]}
 echo "== GPUs: ${NUM_GPUS} visible -- ids ${GPU_IDS[*]} (via ${GPU_SOURCE}) =="
 
+ARCH=$(detect_arch)
+if [[ -z "$ARCH" ]]; then
+    log_error "could not read the GPU arch from rocminfo; it keys the weight table"
+    exit 1
+fi
+echo "== Arch: ${ARCH} =="
+
 # The weight table is keyed by arch and TEST_LEVEL -- the coarsest keying under
 # which a weight still means one thing. Read below to order the queue and
 # rewritten in Phase 7, so a first local run is unordered and every run after it
@@ -119,8 +127,6 @@ echo "== GPUs: ${NUM_GPUS} visible -- ids ${GPU_IDS[*]} (via ${GPU_SOURCE}) =="
 WEIGHTS_FILE="${REPO_ROOT}/ci-weights/test_weights.${ARCH}.l${TEST_LEVEL:-99}.txt"
 mkdir -p "$(dirname "$WEIGHTS_FILE")" 2>/dev/null
 
-resolved_configs=()
-for c in "$@"; do resolved_configs+=( "$(realpath -m "$c")" ); done
 [[ "$LOG_DIR" != /* ]] && LOG_DIR="$(realpath -m "$LOG_DIR")"
 
 
@@ -186,54 +192,67 @@ LOCK_FILE="$QUEUE_DIR/queue.lock"
 # what ci/build_weights.py prunes on.
 echo "== Expanding suites into work items =="
 declare -a SUITE_LABELS SUITE_LOGFILES
-while IFS= read -r line; do
-    [[ "$line" =~ ^[[:space:]]*# ]] && continue
-    [[ -z "${line//[[:space:]]/}" ]] && continue
-    read -r label logfile mode cmd rest <<< "$line"
-    SUITE_LABELS+=( "$label" )
-    SUITE_LOGFILES+=( "$logfile" )
-    if [[ "$mode" == "list" ]]; then
-        # The tags themselves are not logged here -- they go straight into
-        # queue.tsv and items.tsv, which is where anything reading them looks.
-        # What is left is stderr, banner-separated by suite and pass: the suite
-        # scripts report a declined capability probe on it, which is noise on a
-        # good run but the only explanation of a list that came back short.
-        echo "=== ${label}: list -- what this runner will run ===" >> "$EXPAND_LOG"
-        mapfile -t tags < <(TE_CI_LIST_ONLY=1 "$cmd" ${rest:-} \
-                            2>> "$EXPAND_LOG" \
-                            | sed -n 's/^TE_CI_ITEM //p')
-        if [[ ${#tags[@]} -eq 0 ]]; then
-            log_error "suite '${label}' (${cmd}) produced no work items"
-            tail -20 "$EXPAND_LOG" >&2
-            exit 1
-        fi
-        for tag in "${tags[@]}"; do
-            printf '%s\t%s\t%s\t%s\n' "$label" "$cmd" "$tag" "${rest:-}" >> "$QUEUE_FILE.raw"
-        done
-        echo "=== ${label}: list-all -- what exists at this level ===" >> "$EXPAND_LOG"
-        mapfile -t all_tags < <(TE_CI_LIST_ONLY=1 TE_CI_LIST_ALL=1 "$cmd" ${rest:-} \
+for config in "${CONFIGS[@]}"; do
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        read -r label logfile mode cmd rest <<< "$line"
+        SUITE_LABELS+=( "$label" )
+        SUITE_LOGFILES+=( "$logfile" )
+        if [[ "$mode" == "list" ]]; then
+            # The tags themselves are not logged here -- they go straight into
+            # queue.tsv and items.tsv, which is where anything reading them
+            # looks. What is left is stderr, banner-separated by suite and pass:
+            # the suite scripts report a declined capability probe on it, which
+            # is noise on a good run but the only explanation of a list that
+            # came back short.
+            echo "=== ${label}: list -- what this runner will run ===" >> "$EXPAND_LOG"
+            mapfile -t tags < <(TE_CI_LIST_ONLY=1 "$cmd" ${rest:-} \
                                 2>> "$EXPAND_LOG" \
                                 | sed -n 's/^TE_CI_ITEM //p')
-        # The wider list must be a superset. If it is not, it cannot be trusted
-        # as "everything that exists", so the label is left out of items.tsv --
-        # which is exactly what tells build_weights.py to prune nothing for it.
-        # Warn rather than fail: this only degrades bookkeeping, and refusing to
-        # run the tests over it would be a much worse trade.
-        if [[ ${#all_tags[@]} -lt ${#tags[@]} ]]; then
-            log_warn "suite '${label}': list-all returned ${#all_tags[@]} items," \
-                     "fewer than the ${#tags[@]} queued; its weights will not be pruned"
-        else
-            for tag in "${all_tags[@]}"; do
-                printf '%s\t%s\n' "$label" "$tag" >> "$ITEMS_FILE"
+            if [[ ${#tags[@]} -eq 0 ]]; then
+                log_error "suite '${label}' (${cmd}) produced no work items"
+                tail -20 "$EXPAND_LOG" >&2
+                exit 1
+            fi
+            for tag in "${tags[@]}"; do
+                printf '%s\t%s\t%s\t%s\n' "$label" "$cmd" "$tag" "${rest:-}" >> "$QUEUE_FILE.raw"
             done
+            echo "=== ${label}: list-all -- what exists at this level ===" >> "$EXPAND_LOG"
+            mapfile -t all_tags < <(TE_CI_LIST_ONLY=1 TE_CI_LIST_ALL=1 "$cmd" ${rest:-} \
+                                    2>> "$EXPAND_LOG" \
+                                    | sed -n 's/^TE_CI_ITEM //p')
+            # The wider list must be a superset. If it is not, it cannot be
+            # trusted as "everything that exists", so the label is left out of
+            # items.tsv -- which is exactly what tells build_weights.py to prune
+            # nothing for it. Warn rather than fail: this only degrades
+            # bookkeeping, and refusing to run the tests would be a worse trade.
+            if [[ ${#all_tags[@]} -lt ${#tags[@]} ]]; then
+                log_warn "suite '${label}': list-all returned ${#all_tags[@]} items," \
+                         "fewer than the ${#tags[@]} queued; its weights will not be pruned"
+            else
+                for tag in "${all_tags[@]}"; do
+                    printf '%s\t%s\n' "$label" "$tag" >> "$ITEMS_FILE"
+                done
+            fi
+            echo "  ${label}: ${#tags[@]} items (${#all_tags[@]} exist at this level)"
+        else
+            printf '%s\t%s\t%s\t%s\n' "$label" "$cmd" "" "${rest:-}" >> "$QUEUE_FILE.raw"
+            printf '%s\t%s\n' "$label" "" >> "$ITEMS_FILE"
+            echo "  ${label}: 1 item (opaque)"
         fi
-        echo "  ${label}: ${#tags[@]} items (${#all_tags[@]} exist at this level)"
-    else
-        printf '%s\t%s\t%s\t%s\n' "$label" "$cmd" "" "${rest:-}" >> "$QUEUE_FILE.raw"
-        printf '%s\t%s\n' "$label" "" >> "$ITEMS_FILE"
-        echo "  ${label}: 1 item (opaque)"
-    fi
-done < <(cat "${resolved_configs[@]}")
+    done < "$config"
+done
+
+# A label repeated across configs would install its prerequisites twice in
+# Phase 3 and have Phase 5 roll the same item logs into the same suite log
+# twice. The tag check below cannot catch it: an opaque suite has no tag.
+dupe_labels=$(printf '%s\n' "${SUITE_LABELS[@]}" | sort | uniq -d)
+if [[ -n "$dupe_labels" ]]; then
+    log_error "duplicate suite labels across configs:"
+    echo "$dupe_labels" >&2
+    exit 1
+fi
 
 # Duplicate tags within a suite would collide on both the JUnit XML filename and
 # the TEST_FILTER dispatch (one invocation would run both). Fail loudly instead.
@@ -246,7 +265,7 @@ fi
 
 # ---------------------------------------------------------------------------
 # Phase 2: weight and order the queue (longest processing time first)
-awk -v wf="$WEIGHTS_FILE" -v dw="$DEFAULT_WEIGHT" -v only="$ONLY_RE" '
+awk -v wf="$WEIGHTS_FILE" -v dw="$DEFAULT_WEIGHT" '
     BEGIN {
         FS = OFS = "\t"
         if (wf != "" && (getline line < wf) >= 0) {
@@ -259,7 +278,6 @@ awk -v wf="$WEIGHTS_FILE" -v dw="$DEFAULT_WEIGHT" -v only="$ONLY_RE" '
     }
     {
         key = $3 == "" ? $1 : $1 "/" $3
-        if (only != "" && key !~ only) next
         # Truncate to an integer: the weight is also used in shell arithmetic to
         # derive the per-item deadline, and bash cannot parse "675.0".
         print (key in w ? int(w[key]) : dw), $0
@@ -268,7 +286,7 @@ awk -v wf="$WEIGHTS_FILE" -v dw="$DEFAULT_WEIGHT" -v only="$ONLY_RE" '
 rm -f "$QUEUE_FILE.raw"
 
 if [[ ! -s "$QUEUE_FILE" ]]; then
-    log_error "queue is empty${ONLY_RE:+ (no item matched --only '${ONLY_RE}')}"
+    log_error "queue is empty: every suite expanded to nothing"
     exit 1
 fi
 
@@ -418,8 +436,8 @@ done
 wait
 
 WALL=$(( $(date +%s) - START_TS ))
-# The report divides by WALL in several places; a sub-second run (a --only of one
-# trivial item) would otherwise abort the whole report on a division by zero.
+# The report divides by WALL in several places; a run short enough to round to
+# zero seconds would otherwise abort the whole report on a division by zero.
 [[ $WALL -lt 1 ]] && WALL=1
 
 # ---------------------------------------------------------------------------
@@ -436,8 +454,9 @@ WALL=$(( $(date +%s) - START_TS ))
 OVERALL_RC=0
 for i in "${!SUITE_LABELS[@]}"; do
     label="${SUITE_LABELS[$i]}"
-    # A suite with no items in the queue (filtered out by --only) must not get a
-    # suite log and rc=0 -- that would read as "passed" to downstream consumers.
+    # Phase 1 fails a suite that expands to nothing, so this should never skip.
+    # It stays because the alternative to skipping is an empty suite log and
+    # rc=0, which reads as "passed" to the workflow's gate.
     awk -F'\t' -v l="$label" '$2==l {found=1} END {exit !found}' "$QUEUE_FILE" || continue
     suite_log="$SUITE_LOG_DIR/${SUITE_LOGFILES[$i]}"
     : > "$suite_log"
@@ -456,227 +475,19 @@ done
 
 # ---------------------------------------------------------------------------
 # Phase 6: scheduling report
-#
-# timings.tsv columns: label, tag, gpu, secs, rc, start_off, end_off, est,
-# incomplete.
-# Everything below is derived from that one file, so the same report can be
-# regenerated after the fact from an uploaded artifact.
-#
-# Each section is a rows_* function emitting TSV whose first line is the header,
-# and one of two renderers turns that into either an aligned plain-text table
-# (job log + schedule.txt) or a GitHub-flavoured Markdown one (schedule.md, which
-# is appended to the job summary alongside the junit_report.py sections). Keeping
-# the data and the formatting separate is what lets both exist without the awk
-# being written twice.
-
-txt_table() {
-    awk -F'\t' '
-        { rows = NR; if (NF > cols) cols = NF
-          for (i = 1; i <= NF; i++) {
-              cell[NR, i] = $i
-              if (length($i) > w[i]) w[i] = length($i) } }
-        END {
-            for (r = 1; r <= rows; r++) {
-                line = "  "
-                for (i = 1; i <= cols; i++) line = line sprintf("%-" w[i] "s  ", cell[r, i])
-                sub(/ +$/, "", line); print line
-                if (r == 1) {                       # rule under the header row
-                    line = "  "
-                    for (i = 1; i <= cols; i++) {
-                        d = ""; while (length(d) < w[i]) d = d "-"
-                        line = line d "  " }
-                    sub(/ +$/, "", line); print line
-                }
-            }
-        }'
-}
-
-md_table() {
-    awk -F'\t' '
-        { out = ""
-          for (i = 1; i <= NF; i++) { c = $i; gsub(/\|/, "\\|", c); out = out "| " c " " }
-          print out "|"
-          if (NR == 1) { s = "|"; for (i = 1; i <= NF; i++) s = s "---|"; print s } }'
-}
-
-# rc is reported as a word, not a number: the report is read by people, and
-# "killed" vs "fail" is the distinction that changes what you do next. "cut"
-# marks a duration that is where the item was stopped rather than what it costs,
-# which is also why the next run's weight table ignores that row.
-rows_schedule() {
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
-           GPU Start Duration Result Estimate "% change" "Test name"
-    sort -t$'\t' -k3,3n -k6,6n "$TIMINGS_FILE" \
-        | awk -F'\t' -v dw="$DEFAULT_WEIGHT" -v OFS='\t' '{
-            est = ($8 == dw ? "unknown" : $8 "s")
-            # The % change is the scheduler feedback loop made visible: a large
-            # positive miss is an item that should have been dispatched earlier.
-            chg = ($8 > 0 && $8 != dw) ? sprintf("%+.0f%%", ($4 - $8) * 100 / $8) : "n/a"
-            res = ($5 == 0 ? "pass" : ($5 == 1 ? "fail" : \
-                  ($5 == 124 || $5 == 137 ? "killed" : "error")))
-            if ($9 == 1) res = res " (cut)"
-            print "gpu" $3, "t+" $6 "s", $4 "s", res, est, chg, $1 "/" $2 }'
-}
-
-# Iterating the assigned ids rather than the keys present keeps the rows ordered
-# and surfaces a GPU that took no work at all -- which would otherwise just
-# vanish. The ids need not be contiguous or start at zero, since they may have
-# come from HIP_VISIBLE_DEVICES.
-rows_gpu() {
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' GPU Items Busy Idle Util Failed
-    awk -F'\t' -v w="$WALL" -v ids="${GPU_IDS[*]}" -v OFS='\t' '
-        { busy[$3] += $4; n[$3]++; if ($5 != 0) bad[$3]++ }
-        END {
-            ng = split(ids, g, " ")
-            for (i = 1; i <= ng; i++)
-                print "gpu" g[i], n[g[i]] + 0, (busy[g[i]] + 0) "s", (w - busy[g[i]]) "s",
-                      sprintf("%.1f%%", (busy[g[i]] + 0) * 100 / w), bad[g[i]] + 0
-        }' "$TIMINGS_FILE"
-}
-
-rows_efficiency() {
-    printf '%s\t%s\t%s\n' Metric Value Meaning
-    awk -F'\t' -v w="$WALL" -v n="$NUM_GPUS" -v OFS='\t' '
-        { work += $4; if ($4 > big) { big = $4; bigname = $1 "/" $2 } }
-        END {
-            print "total work", sprintf("%.0fs", work),
-                  sprintf("sum of all %d item durations", NR)
-            print "actual run time", sprintf("%.0fs", w),
-                  "wall clock, first item start to last item finish"
-            print "utilisation", sprintf("%.1f%%", work * 100 / (w * n)),
-                  sprintf("share of %ss x %d GPUs actually spent running tests", w, n)
-            # Once one item exceeds the per-GPU average there is no ordering that
-            # finishes sooner than that item, so it becomes the thing to split.
-            print "largest item", sprintf("%.0fs", big),
-                  bigname (big > work / n ? " -- floor: splitting it would now pay" : "")
-        }' "$TIMINGS_FILE"
-}
-
-# 30s is roughly one process startup, and below the ~5% run-to-run noise for
-# anything long enough to matter. Listing smaller misses would bury the real
-# ones -- a healthy table has almost every item within a few seconds.
-rows_weights() {
-    printf '%s\t%s\t%s\t%s\t%s\n' Miss Estimate Actual "% change" "Test name"
-    awk -F'\t' -v dw="$DEFAULT_WEIGHT" '$8 != dw && $8 > 0 {
-            d = $4 - $8; a = (d < 0 ? -d : d)
-            if (a >= 30) printf "%.0f\t%+.0fs\t%ss\t%ss\t%+.0f%%\t%s\n",
-                                a, d, $8, $4, d * 100 / $8, $1 "/" $2 }' "$TIMINGS_FILE" \
-        | sort -k1,1nr | head -15 | cut -f2-
-    awk -F'\t' -v dw="$DEFAULT_WEIGHT" -v OFS='\t' '$8 == dw {
-            print "n/a", "unknown", $4 "s", "n/a", $1 "/" $2 }' "$TIMINGS_FILE"
-}
-
-rows_failures() {
-    printf '%s\t%s\t%s\n' Result Duration "Test name"
-    if awk -F'\t' '$5 != 0 {found = 1} END {exit !found}' "$TIMINGS_FILE"; then
-        awk -F'\t' -v OFS='\t' '$5 != 0 {
-            res = ($5 == 1 ? "fail" : ($5 == 124 || $5 == 137 ? "killed" : "error"))
-            print res, $4 "s", $1 "/" $2 }' "$TIMINGS_FILE"
-    else
-        printf '%s\t%s\t%s\n' - - none
-    fi
-}
-
-# An item that never got a timings.tsv row was never dispatched -- only possible
-# if a worker died outright. Silence here would read as success.
-missing_items() {
-    awk -F'\t' 'NR == FNR {seen[$1 "/" $2] = 1; next}
-                { k = ($4 == "" ? $2 "/whole" : $2 "/" $4); if (!(k in seen)) print k }' \
-        "$TIMINGS_FILE" "$QUEUE_FILE"
-}
-
-RAN_ITEMS=$(wc -l < "$TIMINGS_FILE")
-FAILED_ITEMS=$(awk -F'\t' '$5 != 0' "$TIMINGS_FILE" | wc -l)
-
-report() {
-    echo "=== sGPU queue: ${TOTAL_ITEMS} items, ${NUM_GPUS} GPUs, drained in ${WALL}s ==="
-    echo
-    echo "-- efficiency --"
-    rows_efficiency | txt_table
-    echo
-    echo "-- per-GPU utilisation --"
-    rows_gpu | txt_table
-    echo
-    echo "-- failures --"
-    rows_failures | txt_table
-    echo
-    echo "-- schedule: what ran where, in execution order --"
-    rows_schedule | txt_table
-    echo
-    echo "-- weight accuracy: misses over 30s, which the next run corrects --"
-    rows_weights | txt_table
-    if [[ "$RAN_ITEMS" -ne "$TOTAL_ITEMS" ]]; then
-        echo
-        echo "  !! ${RAN_ITEMS}/${TOTAL_ITEMS} items produced a timing record; the rest never ran:"
-        missing_items | sed 's/^/     /'
-    fi
-}
-
-report_md() {
-    local mark=":white_check_mark:"
-    [[ "$FAILED_ITEMS" -gt 0 || "$RAN_ITEMS" -ne "$TOTAL_ITEMS" ]] && mark=":x:"
-    local util
-    util=$(awk -F'\t' -v w="$WALL" -v n="$NUM_GPUS" \
-               '{work += $4} END {printf "%.1f", work * 100 / (w * n)}' "$TIMINGS_FILE")
-
-    echo "## ${REPORT_TITLE}"
-    echo
-    echo "${mark} **${RAN_ITEMS} items** on ${NUM_GPUS} GPUs -- ${FAILED_ITEMS} failed" \
-         "-- ${WALL}s wall clock at ${util}% GPU utilisation"
-    echo
-    if [[ "$RAN_ITEMS" -ne "$TOTAL_ITEMS" ]]; then
-        echo "> :warning: **Only ${RAN_ITEMS} of ${TOTAL_ITEMS} items produced a timing"
-        echo "> record.** The rest were never dispatched, which means a worker died:"
-        echo
-        missing_items | sed 's/^/> - `/; s/$/`/'
-        echo
-    fi
-    echo "### Efficiency"
-    echo
-    rows_efficiency | md_table
-    echo
-    echo "### Per-GPU utilisation"
-    echo
-    rows_gpu | md_table
-    echo
-    echo "### Failures"
-    echo
-    rows_failures | md_table
-    echo
-    echo "<details><summary>Schedule -- what ran where, in execution order</summary>"
-    echo
-    rows_schedule | md_table
-    echo
-    echo "</details>"
-    echo
-    echo "<details><summary>Weight accuracy -- misses over 30s, which the next run corrects</summary>"
-    echo
-    rows_weights | md_table
-    echo
-    echo "</details>"
-    echo
-}
-
-report | tee "$REPORT_DIR/schedule.txt"
-report_md > "$REPORT_DIR/schedule.md"
+# ---------------------------------------------------------------------------
+if ! python3 "$REPO_ROOT/ci/schedule_report.py" "$LOG_DIR" \
+        --gpus "${GPU_IDS[*]}" \
+        --wall "$WALL" \
+        --default-weight "$DEFAULT_WEIGHT"; then
+    log_warn "could not write the scheduling report"
+fi
 
 # ---------------------------------------------------------------------------
-# Phase 7: fold this run's timings back into the weight table
-#
-# Every run that gets here updates the table, and only runs that get here do --
-# one owner, so the asymmetric blend sees each measurement exactly once. A queue
-# killed outright (the CI step's timeout, say) therefore teaches the table
-# nothing, which is the right way round: its durations are mostly ceilings
-# imposed by the kill, not costs.
-#
-# Unconditional on the test results, though. A red run still measures how long
-# each item took, and build_weights.py drops the individual rows that were killed
-# or cut short.
+# Phase 7: Update the learned weight table for the next run. 
+# ---------------------------------------------------------------------------
 echo
-if ! command -v python3 > /dev/null 2>&1; then
-    log_warn "python3 not found; $WEIGHTS_FILE was not updated" \
-             "and the next run will be unordered again"
-elif ! python3 "$REPO_ROOT/ci/build_weights.py" "$TIMINGS_FILE" \
+if ! python3 "$REPO_ROOT/ci/build_weights.py" "$TIMINGS_FILE" \
         --items "$ITEMS_FILE" -o "$WEIGHTS_FILE"; then
     log_warn "could not update $WEIGHTS_FILE; the next run will use the table as it stands"
 fi

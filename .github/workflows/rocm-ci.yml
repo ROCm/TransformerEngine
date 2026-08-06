@@ -208,7 +208,6 @@ jobs:
         timeout-minutes: 240
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-          ARCH: ${{ matrix.arch_label == 'mi30x' && 'gfx942' || 'gfx950' }}
         run: |
           # The queue clears test-results/ itself and creates one XML subdir per
           # suite, so PyTorch/JAX/Core get independent reports and never collide
@@ -221,9 +220,13 @@ jobs:
           # queue runs in its natural order for one run, and this run's timings
           # create the table. A checked-in copy would go stale silently and is
           # worth less than the one unordered run it saves.
+          #
+          # Listed rather than named: the queue derives the file from the arch it
+          # reads off rocminfo, and deriving it a second time from the matrix
+          # label would be a second thing to keep in step.
           mkdir -p ci-weights
-          W="ci-weights/test_weights.${ARCH}.l${{ env.TEST_LEVEL }}.txt"
-          echo "weights: $W ($(wc -l < "$W" 2>/dev/null || echo 0) items)"
+          wc -l ci-weights/*.txt 2>/dev/null \
+            || echo "no weight table restored; this run will be unordered"
 
           docker exec \
             -e TEST_SGPU=1 \
@@ -233,9 +236,7 @@ jobs:
             -e HF_TOKEN="$HF_TOKEN" \
             -e GITHUB_ACTIONS \
             te-runner bash /workspace/.github/scripts/run_queue_sgpu.sh \
-              --arch "$ARCH" \
-              --log-dir /workspace/test-results/logs \
-              /workspace/.github/scripts/ci_sgpu_queue.conf
+              --log-dir /workspace/test-results/logs
 
       # The queue's own last phase updated ci-weights/ before it exited, including
       # when tests failed -- a red run still measures how long each item took. Only
@@ -284,32 +285,30 @@ jobs:
         if: always()
         run: |
           EXIT_STATUS=0
-          for config in .github/scripts/ci_sgpu_queue.conf; do
-            while IFS= read -r line || [[ -n "$line" ]]; do
-              [[ "$line" =~ ^[[:space:]]*# ]] && continue
-              [[ -z "${line//[[:space:]]/}" ]] && continue
-              read -r label logfile rest <<< "$line"
-              rc=$(cat "test-results/logs/suites/${logfile}.rc" 2>/dev/null || echo "missing")
-              [[ "$rc" == "0" ]] && continue
-              echo "::error::${label} tests FAILED (rc=${rc})."
-              EXIT_STATUS=1
-              for f in test-results/logs/items/"${label}".*.log; do
-                [[ -e "$f" ]] || continue
-                irc=$(cat "${f}.rc" 2>/dev/null || echo 1)
-                [[ "$irc" == "0" ]] && continue
-                echo "::group::[FAILED] $(basename "$f" .log) (rc=${irc})"
-                cat "$f"
-                echo "::endgroup::"
-              done
-            done < "$config"
-          done
+          while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ "$line" =~ ^[[:space:]]*# ]] && continue
+            [[ -z "${line//[[:space:]]/}" ]] && continue
+            read -r label logfile rest <<< "$line"
+            rc=$(cat "test-results/logs/suites/${logfile}.rc" 2>/dev/null || echo "missing")
+            [[ "$rc" == "0" ]] && continue
+            echo "::error::${label} tests FAILED (rc=${rc})."
+            EXIT_STATUS=1
+            for f in test-results/logs/items/"${label}".*.log; do
+              [[ -e "$f" ]] || continue
+              irc=$(cat "${f}.rc" 2>/dev/null || echo 1)
+              [[ "$irc" == "0" ]] && continue
+              echo "::group::[FAILED] $(basename "$f" .log) (rc=${irc})"
+              cat "$f"
+              echo "::endgroup::"
+            done
+          done < .github/scripts/ci_sgpu_queue.conf
           exit $EXIT_STATUS
 
       # test-results/ is the whole run: XML per suite plus one directory per
       # scheduler phase under logs/. A download answers "what did it plan, what
       # did it set up, what did each item print, what did each item cost" from a
       # single tree. logs/queue/ is what makes it reproducible after the fact --
-      # schedule.txt and the weight table can both be regenerated from
+      # schedule.md and the weight table can both be regenerated from
       # timings.tsv + items.tsv alone.
       - name: Upload logs
         if: always()
