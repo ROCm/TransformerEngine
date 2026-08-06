@@ -22,12 +22,11 @@ const CFG = {
 
 const S = {
   records: [], runs: [], updated: null, runMeta: new Map(),
-  arches: [],      // arches present in the data, sorted (discovered at load)
-  archModel: {},   // arch -> GPU model label (gfx950 -> MI355X), carried in the shard rows
+  models: [],      // GPU models present in the data, sorted (discovered at load)
   view: "health", noiseAware: true, boardFilter: "all",
   pr: { sel: null },
-  trend: { key: null, arch: "all", metric: null, q: "", range: "all", xmode: "commits" },
-  byType: { q: "" },
+  trend: { key: null, model: "all", metric: null, q: "", range: "all", xmode: "commits" },
+  byType: { q: "", facets: { family: "all", mode: "all", dtype: "all", model: "all" } },
   theme: "dark",
 };
 
@@ -38,13 +37,12 @@ const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "
 const VIEWS = ["health", "bytype", "prcheck", "board"];
 
 // theme-aware colors: read the live CSS variables so canvas/SVG match the active theme.
-// Arches get a palette slot by their position in S.arches, so nothing is hardcoded per arch.
+// Models get a palette slot by their position in S.models, so nothing is hardcoded per model.
 const SERIES_N = 6;
 const cssVal = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || n;
-const seriesVar = a => { const i = S.arches.indexOf(a); return i < 0 ? "--ink-2" : `--series-${i % SERIES_N}`; };
-const archVar = a => `var(${seriesVar(a)})`;                 // for inline style="" (CSS var)
-const archCol = a => cssVal(seriesVar(a));                   // resolved value for <canvas>
-const archLabel = a => (S.archModel && S.archModel[a]) || a; // GPU model (MI355X) if known, else arch
+const seriesVar = m => { const i = S.models.indexOf(m); return i < 0 ? "--ink-2" : `--series-${i % SERIES_N}`; };
+const modelVar = m => `var(${seriesVar(m)})`;                // for inline style="" (CSS var)
+const modelCol = m => cssVal(seriesVar(m));                  // resolved value for <canvas>
 const commitUrl = sha => sha ? `https://github.com/${CFG.repo}/commit/${sha}` : "#";
 
 function relTime(iso) {
@@ -131,7 +129,8 @@ function toRecord(o) {
   return {
     op: o.op, shape: o.shape, dtype: o.dtype, metric: o.metric,
     value: num(o.value), ts: o.ts, commit: o.commit, run_id: num(o.run_id),
-    arch: o.arch, model: o.model, runner: o.runner, pr: num(o.pr), source: "ci",
+    model: o.model, runner: o.runner, pr: num(o.pr), source: "ci",
+    mode: /\[kernel\]/.test(o.op) ? "kernel" : "wall-clock",   // compute-kernel series carry a " [kernel]" op suffix
     status: "ok", regression: false, vs_main: null, vs_tag: null,
     extra: o.time_ms ? { median_ms: +o.time_ms } : {},
   };
@@ -157,11 +156,9 @@ async function loadAll() {
     }
   });
   S.records = records;
-  // Discover arches (sorted) and the arch -> GPU model label from the rows; both
-  // are display concerns -- arch stays the key for grouping/colors/baselines.
-  S.arches = [...new Set(records.map(r => r.arch).filter(Boolean))].sort();
-  S.archModel = {};
-  for (const r of records) if (r.arch && r.model) S.archModel[r.arch] = r.model;
+  // Discover GPU models (sorted) from the rows; the model is the key for
+  // grouping/colors/baselines and is shown directly as the series label.
+  S.models = [...new Set(records.map(r => r.model).filter(Boolean))].sort();
   computePRDeltas();   // derive vs_main (PR value vs dev baseline) so PR Check works
   S.runs = [];
   S.runMeta = new Map();
@@ -203,22 +200,22 @@ async function enhanceLiveBoard() {
     const j = await getJSON(`${CFG.api}/actions/runs/${r.run_id}/jobs?per_page=100`);
     if (!j || !j.jobs) return;
     r.jobs = j.jobs.filter(x => /linux-flydsl-(mi355|mi325|navi)/.test(x.name)).map(x => ({
-      runner: (x.name.match(/\((linux-flydsl-[^)]+)\)/) || [])[1], arch: archOf(x.name),
+      runner: (x.name.match(/\((linux-flydsl-[^)]+)\)/) || [])[1], model: modelOf(x.name),
       status: x.status, conclusion: x.conclusion, url: x.html_url,
     }));
   }));
   if (S.view === "board") renderBoard();
 }
-function archOf(n) { return /mi355/.test(n) ? "gfx950" : /mi325/.test(n) ? "gfx942" : "?"; }
+function modelOf(n) { return /mi355/.test(n) ? "MI355X" : /mi325/.test(n) ? "MI325X" : "?"; }
 
 /* ----------------------------------------------------------- noise model --- */
 function isMainRec(r) { const m = S.runMeta.get(r.run_id); return m ? m.branch === "dev" : r.pr == null; }
 
-// chronological main-branch series for one kernel/arch/metric
-function mainSeries(op, shape, dtype, arch, metric) {
+// chronological main-branch series for one kernel/model/metric
+function mainSeries(op, shape, dtype, model, metric) {
   return S.records
     .filter(r => r.source === "ci" && r.op === op && r.shape === shape && r.dtype === dtype &&
-      r.arch === arch && r.metric === metric && r.value != null && isMainRec(r))
+      r.model === model && r.metric === metric && r.value != null && isMainRec(r))
     .sort((a, b) => (a.ts || "").localeCompare(b.ts || ""));
 }
 function noiseOf(values) {
@@ -241,8 +238,8 @@ function sev(deltaPct, real) { return real ? "bad" : deltaPct <= CFG.warnPct ? "
 // On push-to-main, flydsl.yaml rebuilds origin/main in the same job, so a main run's own
 // vs_main is current-vs-itself (re-run variance) — useless as a historical signal. We instead
 // compare the latest main value against prior main runs.
-function mainBaseline(op, shape, dtype, arch, metric) {
-  const series = mainSeries(op, shape, dtype, arch, metric);
+function mainBaseline(op, shape, dtype, model, metric) {
+  const series = mainSeries(op, shape, dtype, model, metric);
   if (!series.length) return noiseOf([]);
   const latestRun = series[series.length - 1].run_id;
   return noiseOf(series.filter(s => s.run_id !== latestRun).map(s => s.value));
@@ -275,7 +272,7 @@ function regOf(r, base) {
 function computePRDeltas() {
   for (const r of S.records) {
     if (r.pr == null || r.value == null || r.metric === "speedup") continue;
-    const base = mainBaseline(r.op, r.shape, r.dtype, r.arch, r.metric);
+    const base = mainBaseline(r.op, r.shape, r.dtype, r.model, r.metric);
     if (base.mean == null) continue;    // no dev baseline for this kernel yet
     r.vs_main = {
       delta_pct: (r.value - base.mean) / base.mean * 100,
@@ -338,22 +335,22 @@ function sparkline(values, noise, lastReal) {
     `<circle cx="${lx.toFixed(1)}" cy="${ly.toFixed(1)}" r="2.8" fill="${col}"/>${axisTxt}</svg>`;
 }
 
-/* latest main-run record per (kernel,arch) */
-function latestMainByKernelArch() {
+/* latest main-run record per (kernel,model) */
+function latestMainByKernelModel() {
   const m = new Map();
   for (const r of S.records) {
     if (r.source !== "ci" || r.metric === "speedup" || r.value == null || !isMainRec(r)) continue;
-    const k = `${r.arch}|${kkey(r)}`; const ex = m.get(k);
+    const k = `${r.model}|${kkey(r)}`; const ex = m.get(k);
     if (!ex || (r.ts || "") > (ex.ts || "")) m.set(k, r);
   }
   return m;
 }
 
-/* one row per latest-main kernel/arch: latest value vs PRIOR main history */
+/* one row per latest-main kernel/model: latest value vs PRIOR main history */
 function healthRows() {
-  return [...latestMainByKernelArch().values()].map(r => {
-    const noise = mainBaseline(r.op, r.shape, r.dtype, r.arch, r.metric);
-    const vals = mainSeries(r.op, r.shape, r.dtype, r.arch, r.metric).map(s => s.value);
+  return [...latestMainByKernelModel().values()].map(r => {
+    const noise = mainBaseline(r.op, r.shape, r.dtype, r.model, r.metric);
+    const vals = mainSeries(r.op, r.shape, r.dtype, r.model, r.metric).map(s => s.value);
     const { d, real } = regOf(r, noise);
     return { r, vals, noise, d, real, sev: d == null ? "flat" : sev(d, real) };
   });
@@ -381,9 +378,9 @@ function renderHealth() {
     `latest dev vs <b>prior dev history</b> · confirmed = below the ${CFG.noiseK}σ noise band ` +
     `(needs ≥${CFG.minSamples} prior dev runs)`;
   $("#heroStats").innerHTML =
-    `<div class="stat"><span class="v">${rows.length}</span><span class="l">kernel × arch</span></div>` +
+    `<div class="stat"><span class="v">${rows.length}</span><span class="l">kernel × model</span></div>` +
     `<div class="stat warn"><span class="v">${watch.length}</span><span class="l">to check</span></div>` +
-    `<div class="stat"><span class="v">${new Set(rows.map(x => x.r.arch)).size}</span><span class="l">arches</span></div>` +
+    `<div class="stat"><span class="v">${new Set(rows.map(x => x.r.model)).size}</span><span class="l">models</span></div>` +
     `<div class="stat"><span class="v" style="font-size:15px">${relTime(lastRun)}</span><span class="l">last run</span></div>`;
   const badge = $("#healthBadge"); badge.hidden = false; badge.textContent = n; badge.classList.toggle("zero", n === 0);
   $("#regHeadTitle").textContent = list.length ? `${reals.length} confirmed · ${watch.length} to check` : "Regressions on dev";
@@ -402,10 +399,10 @@ function renderHealth() {
     const href = commitUrl(r.commit);
     const w = Math.max(4, Math.min(46, Math.abs(d) / maxAbs * 46));
     const bc = sev === "bad" ? "var(--bad)" : sev === "warn" ? "var(--warn)" : "var(--good)";
-    return `<div class="reg-row s-${sev}" style="--i:${i}" data-k="${esc(kkey(r))}" data-arch="${r.arch}">
+    return `<div class="reg-row s-${sev}" style="--i:${i}" data-k="${esc(kkey(r))}" data-model="${r.model}">
       <span class="op">${esc(r.op)} <span class="metric-tag">${r.metric}</span></span>
       <span class="shape">${esc(r.shape)} · ${esc(r.dtype)}</span>
-      <span class="reg-arch" style="color:${archVar(r.arch)}">${esc(archLabel(r.arch))}</span>
+      <span class="reg-arch" style="color:${modelVar(r.model)}">${esc(r.model)}</span>
       ${sparkline(vals, noise, real)}
       <span class="reg-delta ${sev}"><span class="dbar" style="width:${w}px;background:${bc}"></span>${fmtPct(d)}</span>
       <span class="commit"><a href="${href}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${r.pr ? "#" + r.pr : "dev"}·${sha}</a></span>
@@ -428,32 +425,59 @@ const familyLabel = f => FAMILY_LABELS[f] ||
   (f ? f.replace(/[_-]+/g, " ").replace(/\b\w/g, c => c.toUpperCase()) : "Other");
 const familyRank = f => { const i = FAMILY_ORDER.indexOf(f); return i < 0 ? FAMILY_ORDER.length : i; };
 
-// Every latest dev kernel/arch, grouped by benchmark family -- the full picture,
+// Populate the by-type facet <select>s from the current snapshot, preserving the
+// active selection (dropping any value that no longer exists in the data).
+function populateFacets() {
+  const rows = healthRows();
+  const buildOpt = (vals, cur, labelFn) =>
+    [`<option value="all">all</option>`,
+     ...vals.map(v => `<option value="${esc(v)}"${v === cur ? " selected" : ""}>${esc(labelFn ? labelFn(v) : v)}</option>`)].join("");
+  const uniq = acc => [...new Set(rows.map(acc).filter(Boolean))];
+  const fams = uniq(x => x.r.family).sort((a, b) => familyRank(a) - familyRank(b) || a.localeCompare(b));
+  const set = (id, key, vals, labelFn) => {
+    const el = $("#" + id); if (!el) return;
+    if (!vals.includes(S.byType.facets[key])) S.byType.facets[key] = "all";   // drop stale selection
+    el.innerHTML = buildOpt(vals, S.byType.facets[key], labelFn);
+    el.value = S.byType.facets[key];
+  };
+  set("facetFamily", "family", fams, familyLabel);
+  set("facetMode", "mode", uniq(x => x.r.mode).sort(), null);
+  set("facetDtype", "dtype", uniq(x => x.r.dtype).sort(), null);
+  set("facetModel", "model", uniq(x => x.r.model).sort(), null);
+}
+
+// Every latest dev kernel/model, grouped by benchmark family -- the full picture,
 // not just regressions. Same latest-value + noise-band trend as Health.
 function renderByType() {
   const q = (S.byType.q || "").toLowerCase();
+  const f = S.byType.facets;
   const rows = healthRows().filter(x => {
-    if (!q) return true;
     const r = x.r;
-    return `${r.op} ${r.shape} ${r.dtype} ${r.family || ""} ${r.arch || ""}`.toLowerCase().includes(q);
+    if (f.family !== "all" && (r.family || "other") !== f.family) return false;
+    if (f.mode !== "all" && r.mode !== f.mode) return false;
+    if (f.dtype !== "all" && r.dtype !== f.dtype) return false;
+    if (f.model !== "all" && r.model !== f.model) return false;
+    if (q && !`${r.op} ${r.shape} ${r.dtype} ${r.family || ""} ${r.model || ""}`.toLowerCase().includes(q)) return false;
+    return true;
   });
-  const openAttr = q ? " open" : "";   // folded by default; auto-open while filtering
+  const anyFilter = q || Object.values(f).some(v => v !== "all");
+  const openAttr = anyFilter ? " open" : "";   // folded by default; auto-open while filtering/faceting
 
-  // group arch -> family -> rows
-  const byArch = new Map();
+  // group model -> family -> rows
+  const byModel = new Map();
   for (const x of rows) {
-    const a = x.r.arch || "?";
-    if (!byArch.has(a)) byArch.set(a, new Map());
-    const fm = byArch.get(a), f = x.r.family || "other";
+    const a = x.r.model || "?";
+    if (!byModel.has(a)) byModel.set(a, new Map());
+    const fm = byModel.get(a), f = x.r.family || "other";
     (fm.get(f) || fm.set(f, []).get(f)).push(x);
   }
-  const arches = [...byArch.keys()].sort((a, b) => a.localeCompare(b));
+  const models = [...byModel.keys()].sort((a, b) => a.localeCompare(b));
   const nFam = new Set(rows.map(x => x.r.family || "other")).size;
   $("#typeSummary").innerHTML = rows.length
-    ? `${rows.length} kernel × arch · <b>${arches.length}</b> arch${arches.length === 1 ? "" : "es"} · <b>${nFam}</b> type${nFam === 1 ? "" : "s"} · latest dev value + Δ vs prior-dev history`
+    ? `${rows.length} kernel × model · <b>${models.length}</b> model${models.length === 1 ? "" : "s"} · <b>${nFam}</b> type${nFam === 1 ? "" : "s"} · latest dev value + Δ vs prior-dev history`
     : "no results in snapshot";
 
-  // one collapsible <details> per benchmark family, for a given arch's family-map
+  // one collapsible <details> per benchmark family, for a given model's family-map
   const familyPanels = fm => {
     const fams = [...fm.keys()].sort((a, b) => familyRank(a) - familyRank(b) || a.localeCompare(b));
     return fams.map(f => {
@@ -462,11 +486,11 @@ function renderByType() {
       const units = [...new Set(list.map(x => x.r.metric))].join(", ");
       const body = list.map(({ r, vals, noise, d, real, sev }) => {
         const dcell = d == null ? `<td class="num k-dim">—</td>` : `<td class="num delta ${sev}">${fmtPct(d)}</td>`;
-        return `<tr data-k="${esc(kkey(r))}" data-arch="${r.arch}">
+        return `<tr data-k="${esc(kkey(r))}" data-model="${r.model}">
           <td>${esc(r.op)} <span class="metric-tag">${r.metric}</span></td>
           <td class="k-dim">${esc(r.shape)}</td>
           <td>${esc(r.dtype)}</td>
-          <td style="color:${archVar(r.arch)}">${esc(archLabel(r.arch))}</td>
+          <td style="color:${modelVar(r.model)}">${esc(r.model)}</td>
           <td class="spark-cell">${sparkline(vals, noise, real)}</td>
           <td class="num">${fmtVal(r.value, r.metric)}</td>
           ${dcell}
@@ -477,25 +501,25 @@ function renderByType() {
           <span class="type-count">${list.length} kernel${list.length === 1 ? "" : "s"}</span>
           <span class="spacer"></span><span class="type-unit">${esc(units)}</span></summary>
         <div class="table-wrap"><table class="data"><thead><tr>
-          <th>kernel</th><th>shape</th><th>dtype</th><th>arch</th><th>recent trend</th><th class="num">latest</th><th class="num">Δ vs dev</th>
+          <th>kernel</th><th>shape</th><th>dtype</th><th>model</th><th>recent trend</th><th class="num">latest</th><th class="num">Δ vs dev</th>
         </tr></thead><tbody>${body}</tbody></table></div>
       </details>`;
     }).join("");
   };
 
-  if (arches.length <= 1) {
-    // single arch: family panels directly (no extra arch layer)
-    $("#typeSections").innerHTML = arches.length
-      ? familyPanels(byArch.get(arches[0]))
+  if (models.length <= 1) {
+    // single model: family panels directly (no extra model layer)
+    $("#typeSections").innerHTML = models.length
+      ? familyPanels(byModel.get(models[0]))
       : `<div class="empty">no results in snapshot</div>`;
   } else {
-    // multiple arches: arch (outer <details>) -> family (inner <details>)
-    $("#typeSections").innerHTML = arches.map(a => {
-      const fm = byArch.get(a);
+    // multiple models: model (outer <details>) -> family (inner <details>)
+    $("#typeSections").innerHTML = models.map(a => {
+      const fm = byModel.get(a);
       const count = [...fm.values()].reduce((n, l) => n + l.length, 0);
       return `<details class="panel arch-panel"${openAttr}>` +
         `<summary class="panel-head"><span class="type-caret" aria-hidden="true">▸</span>` +
-        `<span class="t arch-name" style="color:${archVar(a)}">${esc(archLabel(a))}</span>` +
+        `<span class="t arch-name" style="color:${modelVar(a)}">${esc(a)}</span>` +
         `<span class="type-count">${count} kernel${count === 1 ? "" : "s"}</span></summary>` +
         `<div class="arch-body">${familyPanels(fm)}</div>` +
         `</details>`;
@@ -530,7 +554,7 @@ function renderPRCheck() {
   const latestRun = recs.reduce((a, r) => (r.ts || "") > (a.ts || "") ? r : a, { ts: "" }).run_id;
   const cur = recs.filter(r => r.run_id === latestRun);
   const rows = cur.map(r => {
-    const { d, real } = regOf(r, mainBaseline(r.op, r.shape, r.dtype, r.arch, r.metric));
+    const { d, real } = regOf(r, mainBaseline(r.op, r.shape, r.dtype, r.model, r.metric));
     return { r, real, d, sev: sev(d, real) };
   }).sort((a, b) => a.d - b.d);
   const nbad = rows.filter(x => x.real).length;
@@ -538,10 +562,10 @@ function renderPRCheck() {
   $("#prSummary").innerHTML = `${rows.length} kernels · <b style="color:${nbad ? "var(--bad)" : "var(--good)"}">${nbad} real regression${nbad === 1 ? "" : "s"}</b> · ${nwatch} watch`;
   const runUrl = S.runMeta.get(latestRun)?.url || `https://github.com/${CFG.repo}/actions/runs/${latestRun}`;
   pane.innerHTML = `<div class="table-wrap"><table class="data"><thead><tr>
-    <th>kernel</th><th>shape</th><th>dtype</th><th>arch</th><th class="num">PR</th><th class="num">dev</th><th class="num">Δ vs dev</th><th>baseline</th>
+    <th>kernel</th><th>shape</th><th>dtype</th><th>model</th><th class="num">PR</th><th class="num">dev</th><th class="num">Δ vs dev</th><th>baseline</th>
     </tr></thead><tbody>${rows.map(({ r, d, sev }) => `<tr class="${sev === "bad" ? "row-bad" : ""}">
       <td>${esc(r.op)} <span class="metric-tag">${r.metric}</span></td><td class="k-dim">${esc(r.shape)}</td><td>${esc(r.dtype)}</td>
-      <td style="color:${archVar(r.arch)}">${esc(archLabel(r.arch))}</td>
+      <td style="color:${modelVar(r.model)}">${esc(r.model)}</td>
       <td class="num">${fmtVal(r.value, r.metric)}</td>
       <td class="num k-dim">${fmtVal(r.vs_main.baseline, r.metric)}</td>
       <td class="num delta ${sev}">${fmtPct(d)}</td>
@@ -587,8 +611,8 @@ function selectKernel(k, rerail = true) {
   const metrics = [...e.metrics];
   if (!metrics.includes(S.trend.metric)) S.trend.metric = metrics.find(m => m !== "speedup") || metrics[0];
   $("#metricSel").innerHTML = metrics.map(m => `<button data-m="${m}" class="${m === S.trend.metric ? "is-active" : ""}">${m}</button>`).join("");
-  $("#trendArch").innerHTML = ["all", ...S.arches].map(a =>
-    `<button data-a="${a}" class="${a === S.trend.arch ? "is-active" : ""}">${esc(archLabel(a))}</button>`).join("");
+  $("#trendModel").innerHTML = ["all", ...S.models].map(a =>
+    `<button data-a="${a}" class="${a === S.trend.model ? "is-active" : ""}">${esc(a)}</button>`).join("");
   $("#trendRange").innerHTML = [["7d", "7 days"], ["30d", "30 days"], ["all", "all"]].map(([v, t]) =>
     `<button data-r="${v}" class="${v === S.trend.range ? "is-active" : ""}">${t}</button>`).join("");
   $("#trendXMode").innerHTML = [["commits", "by commit"], ["daily", "by day"]].map(([v, t]) =>
@@ -596,6 +620,7 @@ function selectKernel(k, rerail = true) {
   $("#trendTitle").innerHTML = `${esc(e.op)} <small>${esc(e.shape)} · ${esc(e.dtype)} · ${S.trend.metric}</small>`;
   if (rerail) $$("#kernelList .kitem").forEach(b => b.classList.toggle("is-active", b.dataset.k === k));
   drawTrend(e);
+  writeHash();
 }
 function drawTrend(e) {
   const metric = S.trend.metric, op = e.op, shape = e.shape, dtype = e.dtype;
@@ -610,8 +635,8 @@ function drawTrend(e) {
     const cutoff = Date.now() - days * 86400000;
     runIds = runIds.filter(ri => !ri.ts || new Date(ri.ts).getTime() >= cutoff);
   }
-  const val = new Map();                       // run_id|arch -> value
-  for (const r of recs) val.set(r.run_id + "|" + r.arch, r.value);
+  const val = new Map();                       // run_id|model -> value
+  for (const r of recs) val.set(r.run_id + "|" + r.model, r.value);
 
   // x-axis points: one per commit, or one per day (daily mean) when xmode=daily
   const daily = S.trend.xmode === "daily";
@@ -627,19 +652,19 @@ function drawTrend(e) {
     points = runIds.map(ri => ({ date: (ri.ts || "").slice(0, 10), dateLabel: (ri.ts || "").slice(5, 10), sha: (ri.commit || "").slice(0, 7), commit: ri.commit, pr: ri.pr, main: ri.main, id: ri.id }));
   }
   const labels = points.map((p, i) => p.sha || p.dateLabel || String(i));
-  const valueAt = (p, arch) => {
-    if (daily) { const vs = p.runs.map(ri => val.get(ri.id + "|" + arch)).filter(v => v != null); return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null; }
-    return val.get(p.id + "|" + arch) ?? null;
+  const valueAt = (p, model) => {
+    if (daily) { const vs = p.runs.map(ri => val.get(ri.id + "|" + model)).filter(v => v != null); return vs.length ? vs.reduce((a, b) => a + b, 0) / vs.length : null; }
+    return val.get(p.id + "|" + model) ?? null;
   };
-  const single = S.trend.arch !== "all";
-  const archs = single ? [S.trend.arch] : S.arches;
+  const single = S.trend.model !== "all";
+  const models = single ? [S.trend.model] : S.models;
 
   const datasets = [];
   let note = "";
   const span = `${points.length} ${daily ? "day" + (points.length === 1 ? "" : "s") : "commits"}` +
     (S.trend.range === "all" ? "" : ` · last ${days}d`);
   if (single) {
-    const noise = mainBaseline(op, shape, dtype, S.trend.arch, metric);
+    const noise = mainBaseline(op, shape, dtype, S.trend.model, metric);
     if (noise.lo != null && noise.relStd != null && noise.n >= CFG.minSamples) {
       datasets.push({ label: "+2σ", data: points.map(() => noise.hi), borderColor: "transparent", pointRadius: 0, fill: "+1", backgroundColor: cssVal("--band"), order: 20 });
       datasets.push({ label: "-2σ", data: points.map(() => noise.lo), borderColor: "transparent", pointRadius: 0, fill: false, order: 20 });
@@ -650,19 +675,19 @@ function drawTrend(e) {
       note = `${span} · n=${noise.n} prior dev runs — too few for a noise band; fixed <b>${CFG.regressionPct}%</b> gate.`;
     }
   } else {
-    note = `${span} · one line per arch.` + (daily ? " Daily mean per arch — smooths CI jitter to expose real drift." : " Red = dev below its prior-dev band, or a PR slower than dev.");
+    note = `${span} · one line per model.` + (daily ? " Daily mean per model — smooths CI jitter to expose real drift." : " Red = dev below its prior-dev band, or a PR slower than dev.");
   }
-  for (const arch of archs) {
-    const noise = mainBaseline(op, shape, dtype, arch, metric);
-    const data = points.map(p => valueAt(p, arch));
+  for (const model of models) {
+    const noise = mainBaseline(op, shape, dtype, model, metric);
+    const data = points.map(p => valueAt(p, model));
     if (data.every(v => v == null)) continue;
     const ptColor = points.map((p, i) => {
-      if (daily) return archCol(arch);          // daily means aren't per-run regression calls
-      const r = recs.find(x => x.run_id === p.id && x.arch === arch);
-      return (r && regOf(r, noise).real) ? cssVal("--bad") : archCol(arch);
+      if (daily) return modelCol(model);        // daily means aren't per-run regression calls
+      const r = recs.find(x => x.run_id === p.id && x.model === model);
+      return (r && regOf(r, noise).real) ? cssVal("--bad") : modelCol(model);
     });
     datasets.push({
-      label: archLabel(arch), data, borderColor: archCol(arch), backgroundColor: archCol(arch) + "22",
+      label: model, data, borderColor: modelCol(model), backgroundColor: modelCol(model) + "22",
       pointBackgroundColor: ptColor, pointBorderColor: ptColor,
       pointRadius: daily ? 4 : points.length > 30 ? 1.5 : 3, pointHoverRadius: 6,
       borderWidth: daily ? 2.4 : 2, tension: .25, spanGaps: true, order: 1, fill: single ? "origin" : false,
@@ -689,10 +714,10 @@ function drawTrend(e) {
       plugins: {
         legend: { labels: { color: cssVal("--ink-2"), font: { family: "IBM Plex Mono", size: 11 }, boxWidth: 10, usePointStyle: true, filter: i => !/σ|mean/.test(i.text) } },
         tooltip: {
-          backgroundColor: cssVal("--panel"), borderColor: cssVal("--border"), borderWidth: 1, titleColor: cssVal("--ink"), bodyColor: cssVal("--ink-2"),
+          backgroundColor: cssVal("--bg-2"), borderColor: cssVal("--border"), borderWidth: 1, titleColor: cssVal("--ink"), bodyColor: cssVal("--ink-2"),
           titleFont: { family: "IBM Plex Mono" }, bodyFont: { family: "IBM Plex Mono" },
           // Drop the band/mean helper lines AND null (gap) points. With sparse
-          // multi-arch data, hovering a gap x-position otherwise yields an empty
+          // multi-model data, hovering a gap x-position otherwise yields an empty
           // items array -> the title callback threw on items[0], which broke
           // Chart.js's draw loop (blank chart until reload).
           filter: i => i && i.dataset && !/σ|mean/.test(i.dataset.label) && i.parsed && i.parsed.y != null,
@@ -716,24 +741,24 @@ function drawTrend(e) {
     },
   });
   // status-aware table — always per-commit, with a real link to each commit.
-  // Header arch columns are generated from S.arches so they stay aligned
-  // with the data cells below (which also map over S.arches).
+  // Header model columns are generated from S.models so they stay aligned
+  // with the data cells below (which also map over S.models).
   $("#trendHeadRow").innerHTML = `<th>commit</th><th>date</th><th>pr</th>` +
-    S.arches.map(a => `<th class="num">${esc(archLabel(a))}</th>`).join("");
+    S.models.map(a => `<th class="num">${esc(a)}</th>`).join("");
   $("#trendBody").innerHTML = runIds.slice().reverse().map(ri => {
-    const cell = arch => {
-      const r = recs.find(x => x.run_id === ri.id && x.arch === arch)
-        || S.records.find(x => x.run_id === ri.id && x.arch === arch && x.op === op && x.shape === shape && x.dtype === dtype);
+    const cell = model => {
+      const r = recs.find(x => x.run_id === ri.id && x.model === model)
+        || S.records.find(x => x.run_id === ri.id && x.model === model && x.op === op && x.shape === shape && x.dtype === dtype);
       if (!r) return `<td class="num st-na">—</td>`;
       if (r.value == null) return `<td class="num cell-status ${r.status === "skip" ? "st-skip" : "st-missing"}">${r.status}</td>`;
-      const real = regOf(r, mainBaseline(op, shape, dtype, arch, metric)).real;
-      return `<td class="num" style="color:${real ? "var(--bad)" : archVar(arch)}">${fmtVal(r.value, metric)}</td>`;
+      const real = regOf(r, mainBaseline(op, shape, dtype, model, metric)).real;
+      return `<td class="num" style="color:${real ? "var(--bad)" : modelVar(model)}">${fmtVal(r.value, metric)}</td>`;
     };
     const sha = (ri.commit || "").slice(0, 7);
     return `<tr><td><a class="commit-link" href="${commitUrl(ri.commit)}" target="_blank" rel="noopener">${sha || "—"}</a></td>` +
       `<td class="k-dim">${(ri.ts || "").slice(0, 10)}</td>` +
       `<td class="k-dim">${ri.main ? "dev" : ri.pr ? `<a href="https://github.com/${CFG.repo}/pull/${ri.pr}" target="_blank" rel="noopener">#${ri.pr}</a>` : "branch"}</td>` +
-      `${S.arches.map(cell).join("")}</tr>`;
+      `${S.models.map(cell).join("")}</tr>`;
   }).join("");
   // If the chart was built while its container was briefly unsized (view switch or
   // first paint), force a resize on the next frame so it isn't left blank.
@@ -775,13 +800,13 @@ function renderBoard() {
 
   if (!list.length) { grid.innerHTML = `<div class="empty">no recent runs in snapshot</div>`; return; }
   grid.innerHTML = list.map(r => {
-    const byRunner = {}; for (const j of (r.jobs || [])) byRunner[j.arch] = j;
+    const byRunner = {}; for (const j of (r.jobs || [])) byRunner[j.model] = j;
     const overall = (r.status !== "completed") ? "running" : (r.conclusion || "none");
-    const chips = S.arches.map(arch => {
-      const j = byRunner[arch]; const st = chipState(j);
+    const chips = S.models.map(model => {
+      const j = byRunner[model]; const st = chipState(j);
       const label = st === "running" ? "run" : st === "success" ? "pass" : st === "failure" ? "fail" : st === "none" ? "—" : st.slice(0, 4);
-      const link = j?.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener" title="${arch} · ${st}"></a>` : "";
-      return `<div class="chip" data-c="${esc(st)}"><span class="arch">${esc(arch)}</span><span class="st">${esc(label)}</span>${link}</div>`;
+      const link = j?.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener" title="${model} · ${st}"></a>` : "";
+      return `<div class="chip" data-c="${esc(st)}"><span class="arch">${esc(model)}</span><span class="st">${esc(label)}</span>${link}</div>`;
     }).join("");
     // vs_main is only a real diff for PR runs (a main run rebuilds its own commit as baseline).
     const wd = r.pr ? worstDeltaForRun(r.run_id) : null;
@@ -801,30 +826,88 @@ function renderBoard() {
 }
 
 /* ------------------------------------------------------------------ shell -- */
-function renderAll() { renderArchLegend(); renderHealth(); renderByType(); renderKernelRail(); renderPRCheck(); renderBoard(); }
+function renderAll() { renderModelLegend(); renderHealth(); populateFacets(); renderByType(); renderKernelRail(); renderPRCheck(); renderBoard(); }
+
+// --- shareable URL state: the location hash carries the active view AND its
+// selection (trend kernel/metric/model/range/x, or by-type facets/search, or the
+// selected PR) so a copied link restores exactly what you're looking at.
+function writeHash() {
+  const p = new URLSearchParams();
+  if (S.view === "health") {
+    if (S.trend.key) p.set("k", S.trend.key);
+    if (S.trend.metric) p.set("m", S.trend.metric);
+    if (S.trend.model && S.trend.model !== "all") p.set("model", S.trend.model);
+    if (S.trend.range && S.trend.range !== "all") p.set("r", S.trend.range);
+    if (S.trend.xmode && S.trend.xmode !== "commits") p.set("x", S.trend.xmode);
+  } else if (S.view === "bytype") {
+    for (const [k, v] of Object.entries(S.byType.facets)) if (v && v !== "all") p.set(k, v);
+    if (S.byType.q) p.set("q", S.byType.q);
+  } else if (S.view === "prcheck" && S.pr.sel != null) {
+    p.set("pr", String(S.pr.sel));
+  }
+  const qs = p.toString();
+  const h = "#" + S.view + (qs ? "?" + qs : "");
+  if (location.hash !== h) history.replaceState(null, "", h);
+}
+function readHash() {
+  const raw = location.hash.slice(1);
+  const qi = raw.indexOf("?");
+  const view = (qi >= 0 ? raw.slice(0, qi) : raw) || "health";
+  const p = new URLSearchParams(qi >= 0 ? raw.slice(qi + 1) : "");
+  if (VIEWS.includes(view)) S.view = view;
+  if (S.view === "health") {
+    if (p.has("k")) S.trend.key = p.get("k");
+    if (p.has("m")) S.trend.metric = p.get("m");
+    S.trend.model = p.get("model") || "all";
+    S.trend.range = p.get("r") || "all";
+    S.trend.xmode = p.get("x") || "commits";
+  } else if (S.view === "bytype") {
+    S.byType.facets = {
+      family: p.get("family") || "all", mode: p.get("mode") || "all",
+      dtype: p.get("dtype") || "all", model: p.get("model") || "all",
+    };
+    S.byType.q = p.get("q") || "";
+  } else if (S.view === "prcheck" && p.has("pr")) {
+    S.pr.sel = +p.get("pr");
+  }
+}
+// Re-render the active view after the hash changes out-of-band (a link pasted
+// into the same tab while the page is already open).
+function applyState() {
+  showView(S.view);
+  if (S.view === "health") {
+    if (S.trend.key && kernelIndex().get(S.trend.key)) selectKernel(S.trend.key);
+    else { S.trend.key = null; renderKernelRail(); }
+  } else if (S.view === "bytype") {
+    $("#typeSearch").value = S.byType.q;
+    populateFacets(); renderByType();
+  } else if (S.view === "prcheck") {
+    renderPRCheck();
+  }
+}
 function showView(v) {
   if (v === "trends") v = "health";
   if (!VIEWS.includes(v)) v = "health";
   S.view = v;
   $$(".tab").forEach(t => { const on = t.dataset.view === v; t.classList.toggle("is-active", on); t.setAttribute("aria-selected", on ? "true" : "false"); });
   $$(".view").forEach(s => s.classList.toggle("is-active", s.dataset.view === v));
-  if (location.hash.slice(1) !== v) history.replaceState(null, "", "#" + v);
+  writeHash();
   if (v === "health" && trendChart) requestAnimationFrame(() => { if (trendChart) trendChart.resize(); });
 }
-function goTrend(k, arch) {
-  S.trend.key = null; S.trend.arch = arch || "all";
+function goTrend(k, model) {
+  S.trend.key = null; S.trend.model = model || "all";
   if (S.view !== "health") showView("health");
   selectKernel(k);
   const el = document.getElementById("trendsSection");
   if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-// arch legend chips, generated from S.arches so the set/order matches the
-// table, chart and selector (single source of truth for arches).
-function renderArchLegend() {
-  const el = $("#archLegend"); if (!el) return;
-  el.innerHTML = S.arches.map(a =>
-    `<span class="arch-chip" data-arch="${esc(a)}" style="--c:${archVar(a)}"><i></i>${esc(archLabel(a))}</span>`).join("");
+// model legend chips, generated from S.models so the set/order matches the
+// table, chart and selector (single source of truth for models).
+function renderModelLegend() {
+  const el = $("#modelLegend"); if (!el) return;
+  el.innerHTML = S.models.map(a =>
+    `<span class="arch-chip" data-model="${esc(a)}" style="--c:${modelVar(a)}"><i></i>${esc(a)}</span>`).join("");
 }
 
 function wire() {
@@ -838,15 +921,17 @@ function wire() {
   $("#refresh").addEventListener("click", doRefresh);
   $("#bannerClose").addEventListener("click", hideBanner);
   $("#noiseAware").addEventListener("change", e => { S.noiseAware = e.target.checked; renderHealth(); if (S.trend.key) drawTrend(kernelIndex().get(S.trend.key)); });
-  $("#regList").addEventListener("click", e => { const row = e.target.closest(".reg-row"); if (row) goTrend(row.dataset.k, row.dataset.arch); });
-  $("#typeSearch").addEventListener("input", e => { S.byType.q = e.target.value; renderByType(); });
-  $("#typeSections").addEventListener("click", e => { const tr = e.target.closest("tr[data-k]"); if (tr) goTrend(tr.dataset.k, tr.dataset.arch); });
-  $("#prSelect").addEventListener("change", e => { S.pr.sel = +e.target.value; renderPRCheck(); });
+  $("#regList").addEventListener("click", e => { const row = e.target.closest(".reg-row"); if (row) goTrend(row.dataset.k, row.dataset.model); });
+  $("#typeSearch").addEventListener("input", e => { S.byType.q = e.target.value; renderByType(); writeHash(); });
+  $("#typeFacets").addEventListener("change", e => { const s = e.target.closest("select[data-facet]"); if (!s) return; S.byType.facets[s.dataset.facet] = s.value; renderByType(); writeHash(); });
+  $("#facetReset").addEventListener("click", () => { S.byType.facets = { family: "all", mode: "all", dtype: "all", model: "all" }; S.byType.q = ""; $("#typeSearch").value = ""; populateFacets(); renderByType(); writeHash(); });
+  $("#typeSections").addEventListener("click", e => { const tr = e.target.closest("tr[data-k]"); if (tr) goTrend(tr.dataset.k, tr.dataset.model); });
+  $("#prSelect").addEventListener("change", e => { S.pr.sel = +e.target.value; renderPRCheck(); writeHash(); });
   $("#boardFilter").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.boardFilter = b.dataset.f; $$("#boardFilter button").forEach(x => x.classList.toggle("is-active", x === b)); renderBoard(); });
   $("#kernelSearch").addEventListener("input", e => { S.trend.q = e.target.value; renderKernelRail(); });
   $("#kernelList").addEventListener("click", e => { const b = e.target.closest(".kitem"); if (b) selectKernel(b.dataset.k); });
   $("#metricSel").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.metric = b.dataset.m; selectKernel(S.trend.key); });
-  $("#trendArch").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.arch = b.dataset.a; selectKernel(S.trend.key); });
+  $("#trendModel").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.model = b.dataset.a; selectKernel(S.trend.key); });
   $("#trendRange").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.range = b.dataset.r; selectKernel(S.trend.key); });
   $("#trendXMode").addEventListener("click", e => { const b = e.target.closest("button"); if (!b) return; S.trend.xmode = b.dataset.x; selectKernel(S.trend.key); });
   $("#themeBtn").addEventListener("click", toggleTheme);
@@ -878,11 +963,16 @@ async function doRefresh() {
   await loadAll(); $("#refresh").classList.remove("spin"); refreshing = false; toast("data reloaded");
 }
 
-window.addEventListener("hashchange", () => showView(location.hash.slice(1)));
-document.addEventListener("DOMContentLoaded", () => {
+window.addEventListener("hashchange", () => { readHash(); applyState(); });
+document.addEventListener("DOMContentLoaded", async () => {
   initTheme();
   wire();
-  if (VIEWS.includes(location.hash.slice(1))) showView(location.hash.slice(1));
-  loadAll();
+  readHash();
+  showView(S.view);
+  await loadAll();
+  if (S.view === "health" && S.trend.key) {
+    if (kernelIndex().get(S.trend.key)) selectKernel(S.trend.key);
+    else { S.trend.key = null; renderKernelRail(); }   // stale link -> fall back to default
+  }
   setInterval(enhanceLiveBoard, 90000);
 });

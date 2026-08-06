@@ -55,7 +55,7 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 METRIC_UNITS = ("TFLOPS", "GB/s")
 
 # Long-format shard columns (one row per measurement) and the shard catalog.
-SHARD_HEADER = ["ts", "commit", "run_id", "arch", "model", "runner",
+SHARD_HEADER = ["ts", "commit", "run_id", "model", "runner",
                 "op", "shape", "dtype", "metric", "value", "time_ms", "pr"]
 INDEX_HEADER = ["file", "family", "ref", "pr"]
 
@@ -82,28 +82,6 @@ def _git_head():
             stderr=subprocess.DEVNULL).decode().strip()
     except Exception:
         return "unknown"
-
-
-def _detect_arch():
-    """Best-effort GPU arch for this machine (one GPU type per box).
-
-    Tries ``rocminfo`` first (present on any ROCm install, no torch needed), then
-    falls back to torch's ``gcnArchName``. Returns a bare ``gfxNNNN`` string, or
-    None if nothing could be determined.
-    """
-    try:
-        out = subprocess.run(["rocminfo"], stdout=subprocess.PIPE,
-                             stderr=subprocess.DEVNULL, timeout=20).stdout.decode(errors="ignore")
-        m = re.search(r"gfx[0-9a-fA-F]+", out)   # first gfx agent name = the GPU
-        if m:
-            return m.group(0)
-    except (OSError, subprocess.SubprocessError):
-        pass
-    try:
-        import torch
-        return torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
-    except Exception:
-        return None
 
 
 def _model_token(name):
@@ -207,7 +185,7 @@ def long_rows_from_csv(path, meta):
                 ms = _num(row.get(f"{label} Time (ms)"))
                 yield {
                     "ts": meta["ts"], "commit": meta["commit"], "run_id": meta["run_id"],
-                    "arch": meta["arch"], "model": meta.get("model", ""),
+                    "model": meta.get("model", ""),
                     "runner": meta["runner"],
                     "op": label + meta.get("op_suffix", ""), "shape": shape, "dtype": dtype,
                     "metric": unit, "value": round(value, 4),
@@ -269,9 +247,6 @@ def main():
     parser.add_argument("--ts", default=None, help="ISO-8601 UTC timestamp (default: now)")
     parser.add_argument("--run-id", type=int, default=None,
                         help="Explicit run id (default: unique per invocation)")
-    parser.add_argument("--arch", default=None,
-                        help="GPU arch tag (e.g. gfx950); auto-detected via rocminfo/torch "
-                             "if omitted")
     parser.add_argument("--runner", default="local", help="Runner label")
     parser.add_argument("--model", default=None,
                         help="GPU model label for the dashboard (e.g. MI355X); "
@@ -296,12 +271,9 @@ def main():
         ref, pr_field = f"pr{args.pr}", str(args.pr)
     else:
         ref, pr_field = args.ref, ""
-    arch = args.arch or _detect_arch()
-    if not arch:
-        sys.exit("could not determine the GPU arch; pass --arch (e.g. --arch gfx950)")
     model = args.model or _detect_model()
     meta = {"ts": ts, "commit": commit, "run_id": run_id,
-            "arch": arch, "model": model or "", "runner": args.runner,
+            "model": model or "", "runner": args.runner,
             "pr": pr_field, "op_suffix": args.op_suffix}
 
     out_dir = Path(args.out_dir)
@@ -328,8 +300,7 @@ def main():
         sys.exit("no throughput (TFLOPS / GB/s) rows found in the given CSV(s)")
     added = update_index(out_dir, entries)
 
-    print(f"run {commit[:8]} @ {ts} (run_id {run_id}) ref={ref} "
-          f"arch={arch}{'' if args.arch else ' (auto)'}"
+    print(f"run {commit[:8]} @ {ts} (run_id {run_id}) ref={ref}"
           f"{f' model={model}' if model else ''}: +{total} rows")
     for name, n in per_shard:
         print(f"  {name}: +{n}")

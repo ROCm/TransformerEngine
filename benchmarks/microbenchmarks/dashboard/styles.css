@@ -99,7 +99,10 @@ a:hover { text-decoration: underline; }
   border-bottom: 2px solid var(--brand);
 }
 .header-left { display: flex; align-items: center; gap: 12px; }
-.header-left > div { display: flex; flex-direction: column; line-height: 1; }
+.brand-link { display: flex; align-items: center; gap: 12px; text-decoration: none; color: inherit; }
+.brand-link:hover { text-decoration: none; }
+.brand-link:hover .brand-name { color: var(--brand); }
+.brand-link > div { display: flex; flex-direction: column; line-height: 1; }
 .brand-name { font-family: var(--sans); font-weight: 700; font-size: 20px; color: var(--ink); }
 .brand-name b { color: var(--brand); font-weight: 700; }
 .brand-sub { font-family: var(--mono); font-size: 10px; color: var(--ink-3); letter-spacing: 2px; margin-top: 4px; }
@@ -208,6 +211,11 @@ main { padding: 24px; max-width: 1440px; margin: 0 auto; }
   font-family: var(--mono); font-size: 12px; padding: 7px 12px; outline: none; transition: .12s; }
 .search:focus, select.sel:focus { border-color: var(--brand-2); }
 .search::placeholder { color: var(--ink-3); }
+.facets { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 2px 0 6px; }
+.facet { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 11px; color: var(--ink-3); text-transform: uppercase; letter-spacing: .3px; }
+.facet select.sel { width: 190px; min-width: 0; padding: 5px 8px; font-size: 12px; text-transform: none; letter-spacing: 0; }
+.btn-mini { font-family: var(--mono); font-size: 11px; background: var(--bg-2); border: 1px solid var(--border); border-radius: 6px; color: var(--ink-2); padding: 5px 10px; cursor: pointer; transition: .12s; }
+.btn-mini:hover { color: var(--ink); border-color: var(--brand-2); }
 select.sel { min-width: 380px; cursor: pointer; }
 .check { display: inline-flex; align-items: center; gap: 6px; font-family: var(--mono); font-size: 12px; color: var(--ink-3); cursor: pointer; user-select: none; }
 .check input { accent-color: var(--brand); width: 14px; height: 14px; }

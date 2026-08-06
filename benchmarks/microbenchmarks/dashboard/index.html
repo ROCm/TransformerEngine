@@ -3,8 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>TransformerEngine · CI Performance Dashboard</title>
-<meta name="description" content="Kernel performance regressions and trends for ROCm/TransformerEngine microbenchmarks on gfx950.">
+<title>TransformerEngine · Performance Dashboard</title>
+<meta name="description" content="Performance trends for ROCm/TransformerEngine.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%230c0f14'/%3E%3Cpath d='M6 22 L13 10 L17 17 L21 11 L26 22' fill='none' stroke='%2334d2c2' stroke-width='2.4' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
 <link rel="stylesheet" href="./styles.css">
 </head>
@@ -12,17 +12,19 @@
 
 <header class="topbar">
   <div class="header-left">
-    <svg class="brand-mark" viewBox="0 0 36 36" width="32" height="32" aria-hidden="true">
-      <rect width="36" height="36" rx="9" fill="#141519"/>
-      <path d="M6 26 L14 10 L19 20 L24 11 L30 26" fill="none" stroke="var(--brand)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
-    </svg>
-    <div>
-      <span class="brand-name">Transformer<b>Engine</b></span>
-      <span class="brand-sub">CI PERFORMANCE</span>
-    </div>
+    <a class="brand-link" href="https://github.com/ROCm/TransformerEngine" target="_blank" rel="noopener" title="ROCm/TransformerEngine on GitHub" aria-label="ROCm/TransformerEngine on GitHub">
+      <svg class="brand-mark" viewBox="0 0 36 36" width="32" height="32" aria-hidden="true">
+        <rect width="36" height="36" rx="9" fill="#141519"/>
+        <path d="M6 26 L14 10 L19 20 L24 11 L30 26" fill="none" stroke="var(--brand)" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+      <div>
+        <span class="brand-name">Transformer<b>Engine</b></span>
+        <span class="brand-sub">PERFORMANCE DASHBOARD</span>
+      </div>
+    </a>
   </div>
 
-  <div class="arch-legend" id="archLegend" aria-label="GPU architectures"></div>
+  <div class="arch-legend" id="modelLegend" aria-label="GPU models"></div>
 
   <div class="status-cluster">
     <span class="updated syncing" id="updated">syncing…</span>
@@ -72,7 +74,7 @@
         <label class="check"><input type="checkbox" id="noiseAware" checked> noise-aware gate</label>
       </div>
       <div class="col-head">
-        <span>kernel</span><span>shape · dtype</span><span>arch</span><span>recent trend</span><span class="r">Δ vs dev</span><span class="r c-commit">run</span>
+        <span>kernel</span><span>shape · dtype</span><span>model</span><span>recent trend</span><span class="r">Δ vs dev</span><span class="r c-commit">run</span>
       </div>
       <div id="regList"></div>
     </div>
@@ -89,7 +91,7 @@
           <span class="spacer"></span>
           <div class="seg" id="trendRange" role="group" aria-label="Time range"></div>
           <div class="seg" id="trendXMode" role="group" aria-label="X axis"></div>
-          <div class="seg" id="trendArch" role="group" aria-label="Arch"></div>
+          <div class="seg" id="trendModel" role="group" aria-label="GPU model"></div>
           <div class="seg" id="metricSel" role="group" aria-label="Metric"></div>
         </div>
         <div class="chart-frame"><canvas id="trendChart"></canvas></div>
@@ -110,6 +112,13 @@
       <h2 class="section-title">All benchmark results</h2>
       <span class="spacer"></span>
       <input class="search" id="typeSearch" type="search" placeholder="filter kernels…" spellcheck="false">
+    </div>
+    <div class="facets" id="typeFacets">
+      <label class="facet">type <select class="sel" id="facetFamily" data-facet="family" aria-label="Filter by benchmark type"></select></label>
+      <label class="facet">timing <select class="sel" id="facetMode" data-facet="mode" aria-label="Filter by timing mode"></select></label>
+      <label class="facet">dtype <select class="sel" id="facetDtype" data-facet="dtype" aria-label="Filter by dtype"></select></label>
+      <label class="facet">model <select class="sel" id="facetModel" data-facet="model" aria-label="Filter by GPU model"></select></label>
+      <button class="btn-mini" id="facetReset" type="button">reset</button>
     </div>
     <div class="view-head" style="margin-top:-6px"><span class="hint" id="typeSummary"></span></div>
     <div id="typeSections"></div>

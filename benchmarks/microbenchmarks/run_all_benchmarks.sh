@@ -32,7 +32,7 @@ Usage: run_all_benchmarks.sh [options]
   -h, --help       show this help
 
 The benchmarks need TE + torch + a GPU; the ingest step is stdlib-only and
-auto-detects the arch (gfx942/gfx950/gfx1250). Override the benchmark
+auto-detects the GPU model (e.g. MI355X). Override the benchmark
 interpreter with PYTHON=... if needed.
 EOF
 }

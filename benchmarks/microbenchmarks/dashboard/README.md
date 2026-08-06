@@ -25,7 +25,7 @@ dashboard/
 ../build_bundle.py        emit a single self-contained dashboard.html
 ```
 
-Each shard row is `ts,commit,run_id,arch,model,runner,op,shape,dtype,metric,value,time_ms,pr`.
+Each shard row is `ts,commit,run_id,model,runner,op,shape,dtype,metric,value,time_ms,pr`.
 Shards are **append-only**; every ingest call is one run (unique `run_id`).
 
 ## Quickstart
@@ -63,7 +63,7 @@ own `--ref` to keep a clean shard/history:
 ./run_all_benchmarks.sh --ingest --runs 5 --compute-kernel --ref dev-kernel --out-dir dashboard/data
 ```
 
-The arch (`gfx942` / `gfx950` / `gfx1250`) is auto-detected via `rocminfo`.
+The GPU model label (e.g. `MI355X`) is auto-detected via `rocminfo`.
 
 View it locally (no server dependency other than a static file server, because
 the front-end `fetch()`es the shards):
@@ -115,12 +115,12 @@ and publishes, but only **on demand** — it skips normal pushes/PRs. Trigger it
 PR runs ingest as `--pr <N>` (isolated from the `dev` baseline) and surface in the
 **PR Check** tab; dev runs build the baseline shown in **Health** / **Trends**.
 
-## Adding an arch
+## Adding a GPU model
 
-Arches are fully data-driven: the dashboard discovers them from the ingested
+Models are fully data-driven: the dashboard discovers them from the ingested
 rows (sorted alphabetically) and colors each by a palette slot (`--series-N` in
-`styles.css`), so no per-arch list to maintain. The GPU model label (e.g.
+`styles.css`), so no per-model list to maintain. The GPU model label (e.g.
 `MI355X`) is auto-detected at ingest (rocminfo/torch) and carried in each shard
-row's `model` column; the dashboard shows it in place of the `gfx…` arch. Any
-arch is accepted — ingest auto-detects it (or pass `--arch`/`--model`), so there
-is nothing to add for a new GPU.
+row's `model` column, which the dashboard uses as the series key. Any GPU is
+accepted — ingest auto-detects it (or pass `--model`), so there is nothing to add
+for a new GPU.
