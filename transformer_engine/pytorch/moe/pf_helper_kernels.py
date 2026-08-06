@@ -12,7 +12,7 @@ gather-combine pass that follows the compact route-list GEMM outputs.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import Optional
 
 import torch
 import triton
@@ -42,8 +42,6 @@ def _gelu_tanh(x):
 # Activation selector for the fused epilogue. Keep the set small and explicit; add a helper
 # above and an entry here to extend. Passed to the kernel as a compile-time int so each
 # activation specializes to its own instance (no runtime branch in the hot path).
-ACT_SILU: tl.constexpr = 0
-ACT_GELU: tl.constexpr = 1
 _ACT_IDS = {"silu": 0, "gelu": 1}
 
 

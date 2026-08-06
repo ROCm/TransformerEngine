@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Optional, Tuple
 
 import torch
 
@@ -49,10 +49,10 @@ _FLYDSL_FWD_BLOCK_M = 256
 
 
 def _get_flydsl_fwd():
-    """Return ``(flydsl_moe_fwd_autotuned, flydsl_moe_fwd_supported)``."""
-    from .pf_fwd_wrapper import flydsl_moe_fwd_autotuned, flydsl_moe_fwd_supported
+    """Return ``(flydsl_moe_fwd, flydsl_moe_fwd_supported)``."""
+    from .pf_fwd_wrapper import flydsl_moe_fwd, flydsl_moe_fwd_supported
 
-    return flydsl_moe_fwd_autotuned, flydsl_moe_fwd_supported
+    return flydsl_moe_fwd, flydsl_moe_fwd_supported
 
 
 def _expand_expert_ids_per_slot(
@@ -115,21 +115,20 @@ def _pf_moe_fwd(
     block_m: int,
     index_a_by_route_pos: bool = False,
 ) -> None:
-    """Run the route-list gather-GEMM (forward or dgrad) via FlyDSL autotuning."""
-    autotuned, supported = _get_flydsl_fwd()
+    """Run the route-list gather-GEMM (forward or dgrad) via the FlyDSL v3 kernels."""
+    launch, supported = _get_flydsl_fwd()
     block_m = int(block_m)
     if not supported(A, B, block_m=block_m):
         raise RuntimeError(
             "FlyDSL grouped GEMM does not support these operands "
             f"(block_m={block_m}, A={tuple(A.shape)}, B={tuple(B.shape)})."
         )
-    autotuned(
+    launch(
         A,
         B,
         C,
         routing.sorted_slot_ids,
         routing.expert_ids,
-        routing.block_start,
         num_recv_tokens=num_recv_tokens,
         block_m=block_m,
         index_a_by_route_pos=index_a_by_route_pos,

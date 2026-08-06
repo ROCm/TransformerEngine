@@ -21,12 +21,10 @@ import torch
 
 __all__ = [
     "flydsl_moe_fwd",
-    "flydsl_moe_fwd_autotuned",
     "flydsl_moe_fwd_supported",
     "flydsl_moe_fwd_pick_block_m",
 ]
 
-_WMMA = 16
 _FILL_V = 8
 _WARP = 64
 _LDS_PAD = 8
@@ -162,8 +160,6 @@ def flydsl_moe_fwd_supported(
     B: torch.Tensor,
     *,
     block_m: int,
-    block_n: int = 64,
-    block_k: int = 64,
 ) -> bool:
     """Whether the in-tree FlyDSL fwd/dgrad kernels can handle these operands."""
     if A.dtype != torch.bfloat16 or B.dtype != torch.bfloat16:
@@ -172,8 +168,7 @@ def flydsl_moe_fwd_supported(
         return False
     if B.stride(2) != 1 and B.stride(1) != 1:
         return False
-    em_max = None  # only known at launch for C; skip em_max % block_m precheck here
-    _ = (block_n, block_k, em_max)
+    # em_max % block_m is only known at launch (from C), so it is not prechecked here.
     return True
 
 
@@ -183,14 +178,9 @@ def flydsl_moe_fwd(
     C: torch.Tensor,
     sorted_slot_ids: torch.Tensor,
     expert_ids: torch.Tensor,
-    block_start: torch.Tensor,
     *,
     num_recv_tokens: int,
     block_m: int,
-    block_n: Optional[int] = None,
-    block_k: int = 64,
-    warps_m: Optional[int] = None,
-    warps_n: Optional[int] = None,
     index_a_by_route_pos: bool = False,
 ) -> None:
     """Route-list gather-GEMM forward, writing the compact ``C[em_max, WIDTH_N]`` in place.
@@ -199,6 +189,9 @@ def flydsl_moe_fwd(
     ``index_a_by_route_pos=False``, else read at the compact route row). ``B`` is
     ``[num_experts, N_OUT, K]`` (contiguous inner ``K``). Gated activation and route-prob
     apply are **not** fused here; use the standalone helpers in :mod:`pf_helper_kernels`.
+
+    The v3 (MegaMOE-ported) kernels use a fixed tile geometry, so only ``block_m`` is a tunable
+    knob (chosen once by the align via :func:`flydsl_moe_fwd_pick_block_m`).
     """
     assert A.dtype == B.dtype == C.dtype == torch.bfloat16
     assert A.stride(1) == 1, "A must be contiguous along the contraction (K)"
@@ -256,10 +249,6 @@ _FWD_TUNE_CONFIGS = [
     (256, 64, 2, 4),
 ]
 
-# Winner cache: {shape/mode key -> (block_n, block_k, warps_m, warps_n)}.
-_FWD_CACHE: dict = {}
-
-
 def _valid_config(block_m, bn, bk, wm, wn, K, transpose_b=False):
     if K % bk != 0 or bn % _mfma_dim(transpose_b) != 0:
         return False
@@ -277,7 +266,7 @@ def flydsl_moe_fwd_pick_block_m(
     """Largest ``block_m`` in ``candidates`` the FlyDSL fwd can actually run for these operands,
     or ``None`` if the operands are unsupported at every candidate.
 
-    "Can run" == bf16 operands contiguous along the contraction AND at least one autotuner tile
+    "Can run" == bf16 operands contiguous along the contraction AND at least one candidate tile
     in :data:`_FWD_TUNE_CONFIGS` fits the per-workgroup LDS budget. Callers should include their
     default among ``candidates`` (the picker only walks high->low over what is passed), so a
     small-token workload is never padded up beyond what the caller offered.
@@ -296,71 +285,3 @@ def flydsl_moe_fwd_pick_block_m(
         ):
             return block_m
     return None
-
-
-def flydsl_moe_fwd_autotuned(
-    A: torch.Tensor,
-    B: torch.Tensor,
-    C: torch.Tensor,
-    sorted_slot_ids: torch.Tensor,
-    expert_ids: torch.Tensor,
-    block_start: torch.Tensor,
-    *,
-    num_recv_tokens: int,
-    block_m: int,
-    block_k: int = 64,
-    index_a_by_route_pos: bool = False,
-    warmup: int = 3,
-    iters: int = 10,
-) -> None:
-    """Shape-autotuned :func:`flydsl_moe_fwd`.
-
-    On the first call for a given (block_m, GEMM shape) the valid subset of
-    ``_FWD_TUNE_CONFIGS`` is benchmarked and the fastest ``(block_n, block_k, warps_m, warps_n)``
-    is cached. The production DMA+swizzle fill path is always used; only tile geometry is swept.
-    """
-    N_OUT, K = int(B.shape[1]), int(B.shape[2])
-    width_n = int(C.shape[1])
-    key = (int(block_m), N_OUT, K, width_n, bool(index_a_by_route_pos))
-
-    def _launch(bn, bk, wm, wn):
-        flydsl_moe_fwd(
-            A, B, C, sorted_slot_ids, expert_ids, block_start,
-            num_recv_tokens=num_recv_tokens, block_m=block_m, block_n=bn, block_k=bk,
-            warps_m=wm, warps_n=wn, index_a_by_route_pos=index_a_by_route_pos,
-        )
-
-    best = _FWD_CACHE.get(key)
-    if best is None:
-        candidates = [
-            (bn, bk, wm, wn)
-            for (bn, bk, wm, wn) in _FWD_TUNE_CONFIGS
-            if _valid_config(block_m, bn, bk, wm, wn, K)
-        ]
-        if not candidates:
-            _launch(None, block_k, None, None)  # heuristic fallback
-            return
-        best_t = None
-        for cfg in candidates:
-            try:
-                for _ in range(warmup):
-                    _launch(*cfg)
-                start = torch.cuda.Event(enable_timing=True)
-                end = torch.cuda.Event(enable_timing=True)
-                torch.cuda.synchronize()
-                start.record()
-                for _ in range(iters):
-                    _launch(*cfg)
-                end.record()
-                torch.cuda.synchronize()
-                t = start.elapsed_time(end) / iters
-            except Exception:  # noqa: BLE001 -- skip configs that fail to compile/run
-                continue
-            if best_t is None or t < best_t:
-                best_t, best = t, cfg
-        if best is None:
-            _launch(None, block_k, None, None)
-            return
-        _FWD_CACHE[key] = best
-
-    _launch(*best)

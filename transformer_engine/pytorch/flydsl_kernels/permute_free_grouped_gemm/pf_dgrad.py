@@ -213,7 +213,6 @@ def compile_grouped_gemm_dgrad_bf16(
         NUM_TILE_BLOCKS: fx.Int32,
         SORTED: fx.Tensor,
         A_ELEMS: fx.Int32,
-        c_m: fx.Int32,
     ):
         n_blocks = ceildiv(fx.Int32(Kout), BLOCK_N)
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
@@ -286,7 +285,6 @@ def compile_grouped_gemm_dgrad_bf16(
             NUM_TILE_BLOCKS,
             SORTED,
             A_ELEMS,
-            c_m,
             value_attrs=make_value_attrs(waves_per_eu, agpr_alloc, "512,512"),
         ).launch(grid=(grid_x, 1, 1), block=(512, 1, 1), stream=stream)
 

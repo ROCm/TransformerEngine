@@ -953,7 +953,7 @@ def test_permute_free_backward_fc2_dgrad_probs():
 
 
 def test_route_list_gated_act_bwd_gelu():
-    """Gelu (tanh) variant of the standalone gated-activation backward (ACT_GELU path)."""
+    """Gelu (tanh) variant of the standalone gated-activation backward (gelu path)."""
     torch.manual_seed(79)
     num_recv_tokens, in_features = 128, 128
     num_experts, max_hits = 8, 3

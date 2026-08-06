@@ -27,8 +27,6 @@ import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from benchmark_grouped_gemm import (
-    EP_SIZE_LIST,
-    GROUPED_GEMM_M_SIZE_LIST,
     generate_deepseekv2_lite_test_cases,
     generate_deepseekv2_test_cases,
     generate_deepseekv3_test_cases,
