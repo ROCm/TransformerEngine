@@ -7,7 +7,7 @@
 Grouped GEMM for FC1/FC2 forward, backward (dgrad), and wgrad is FlyDSL-only
 (``pf_fwd_wrapper``, ``pf_wgrad_wrapper``). This module retains Triton kernels for
 routing metadata construction, gated-activation recompute/bwd, and the token-order
-gather-combine pass that follows the compact route-list GEMM outputs.
+gather-combine pass that follows the block-padded route-ordered GEMM outputs.
 """
 
 from __future__ import annotations
@@ -151,7 +151,7 @@ def _gated_act_prob_bwd_kernel(
     dpre_ptr,  # [T * min(topk, E), 2F] out: grad wrt the raw 2F GEMM output
     grad_probs_ptr,  # [num_recv_tokens, E] out (fp32)
     act_out_ptr,  # [T * min(topk, E), F] out: fused fc2_input = act(g)*u*prob (EMIT_ACT only)
-    nbound_ptr,  # [1] int32 device scalar: dynamic upper bound on compact routes
+    nbound_ptr,  # [1] int32 device scalar: dynamic upper bound on route slots
     num_recv_tokens,
     F,
     stride_gom,
@@ -192,9 +192,9 @@ def _gated_act_prob_bwd_kernel(
     ``up`` and ``prob`` are already live in registers here, this is one extra multiply + store
     and removes the redundant ``2F`` HBM read (see :func:`fused_gated_act_prob_fwd`).
 
-    The compact route buffers are statically over-allocated to the worst-case
+    The block-padded route buffers are statically over-allocated to the worst-case
     ``routes_max = T * topk`` (sync-free shape bound), but the real routes occupy only the
-    dense head ``[0, num_routes)`` -- under expert parallelism this can be ~topk*E_local/E
+    dense route-ordered head ``[0, num_routes)`` -- under expert parallelism this can be ~topk*E_local/E
     times smaller. ``nbound_ptr`` carries the actual (block-padded) route extent as a device
     scalar so tail programs beyond it exit before touching HBM, instead of grinding through
     the padding at full memory bandwidth.
@@ -298,7 +298,7 @@ def fused_gated_act_prob_bwd(
         route-prob multiply. When given, its gradient is returned.
     num_routes_bound:
         Optional ``[1]`` int32 device scalar giving a (block-padded) upper bound on the number
-        of *real* compact routes. The route buffers are statically sized to the worst case
+        of *real* route slots. The route buffers are statically sized to the worst case
         ``routes_max = T * topk``, but under expert parallelism only a small dense head is
         populated; passing the actual extent (e.g. ``num_tokens_post_padded`` from the routing
         metadata) lets tail programs exit early instead of streaming the padding through HBM.
@@ -388,7 +388,7 @@ def _gated_act_prob_fwd_kernel(
     token_ptr,  # [routes_max] route -> received-token row
     expert_ptr,  # [routes_max] route -> local expert
     act_ptr,  # [routes_max, F] out: act(gate) * up * prob
-    nbound_ptr,  # [1] int32 device scalar: dynamic upper bound on compact routes
+    nbound_ptr,  # [1] int32 device scalar: dynamic upper bound on route slots
     num_recv_tokens,
     F,
     stride_prem,
@@ -410,7 +410,7 @@ def _gated_act_prob_fwd_kernel(
     checkpoint only the ``2F`` preact (never the ``F``-wide act) and rebuild it just-in-time
     for the FC2 wgrad. Padded / over-allocated routes carry the ``token == num_recv_tokens``
     sentinel and get ``prob == 0`` (their act rows are ignored downstream). ``nbound_ptr``
-    bounds tail programs to the real compact route extent (sync-free, EP-friendly early exit).
+    bounds tail programs to the real block-padded route extent (sync-free, EP-friendly early exit).
     """
     pid = tl.program_id(axis=0)
     num_routes_bound = tl.load(nbound_ptr)

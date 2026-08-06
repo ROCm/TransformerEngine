@@ -131,15 +131,15 @@ class PermuteFreeMetadata(MoERoutingMetadata):
 
     Extends :class:`MoERoutingMetadata`
 
-    - ``route_space=False`` (FC1): the input lives in **received-token order**
+    - ``route_space=False`` (FC1): the input lives in **token-ordered**
       ``[num_recv_tokens, in]``. The forward *gathers* per expert (``index_a_by_route_pos=
-      False``) into the compact/padded ``[T * min(topk, E), out]`` route buffer; the dgrad combines
-      the input gradient back to token rows (contention-free gather-combine).
-    - ``route_space=True`` (FC2): the input is already in **route order**
-      ``[T * min(topk, E), in]`` (FC1's output). The forward reads by route position
+      False``) into the **block-padded route-ordered** ``[em_max, out]`` buffer; the dgrad
+      combines the input gradient back to token rows (contention-free gather-combine).
+    - ``route_space=True`` (FC2): the input is already **block-padded route-ordered**
+      ``[em_max, in]`` (FC1's output). The forward reads by route slot
       (``index_a_by_route_pos=True``) and combines each token's routes back to
-      ``[num_recv_tokens, out]`` (contention-free gather-combine); the dgrad gathers
-      the token-space grad back into the compact route buffer.
+      **token-ordered** ``[num_recv_tokens, out]`` (contention-free gather-combine); the dgrad
+      gathers the token-ordered grad back into the block-padded route-ordered buffer.
 
     The align buffers are identical for both directions, so a single built metadata can be
     reused for FC1 and FC2 (e.g. via ``dataclasses.replace(meta, route_space=True)``),

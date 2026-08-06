@@ -32,7 +32,7 @@ tile. All warps **cooperatively fill** the shared LDS contraction tile once per 
 columns out of the shared tile. ``warps_n = warps_k = 1`` reduces to the single-warp v2.
 
 Fixed configuration (no runtime toggles):
-  - bf16 inputs, bf16 output (FC1: compact grad + token-gathered ``x``)
+  - bf16 inputs, bf16 output (FC1: block-padded route-ordered grad + token-gathered ``x``)
   - optional ``accumulate``: overwrite (default) or read-modify-write into ``dW``
   - DMA + XOR chunk swizzle fill, 3-stage LDS pipeline, LLVM DMA alias scopes
 """

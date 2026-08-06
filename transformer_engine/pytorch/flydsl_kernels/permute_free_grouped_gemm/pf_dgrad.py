@@ -10,11 +10,12 @@ weight over the output-feature axis (NN layout)::
 
 There are two flavours, matching the TE permute-free contract (``index_a_by_route_pos``):
 
-* **route-read** (FC1 dgrad, ``gather=False``): ``grad`` is already compact route order
-  ``[em_max, N]``; row ``s`` is read directly. ``grad`` and ``dXrow`` share the row count.
-* **gather** (FC2 dgrad, ``gather=True``): ``grad`` is token-space ``[num_recv, N]`` and each
+* **route-read** (FC1 dgrad, ``gather=False``): ``grad`` is **dense route-ordered**
+  ``[num_routes, N]`` (or block-padded with only the dense head populated); row ``s`` is read
+  directly. ``dx`` is **block-padded route-ordered** ``[em_max, K]``.
+* **gather** (FC2 dgrad, ``gather=True``): ``grad`` is **token-ordered** ``[num_recv, N]`` and each
   route slot ``s`` gathers ``grad[SORTED[s]]`` (sentinel ``SORTED[s] == num_recv`` -> 0), writing
-  the compact route-order ``dXrow[em_max, K]``. Mirrors the forward NT gather, one row map
+  block-padded route-ordered ``dXrow[em_max, K]``. Mirrors the forward NT gather, one row map
   redirecting the two LDS A half-tiles, only on the NN tile.
 
 The weight is bit-identical to the forward ``[E, N, K]`` (forward reads it NT, dgrad NN).
@@ -22,7 +23,7 @@ The weight is bit-identical to the forward ``[E, N, K]`` (forward reads it NT, d
 Contract:
   * ``grad_y`` [rows, N]     bf16   incoming grad (rows = em_max route-read / num_recv gather)
   * ``weight`` [E, N, K]     bf16   per-expert weights (shared with forward)
-  * ``dx``     [em_max, K]   bf16   compact expert-major input grad per slot (in place)
+  * ``dx``     [em_max, K]   bf16   block-padded route-ordered input grad per slot (in place)
   * ``expert_ids``      [num_m_blocks] i32   expert id per BLOCK_M slot block
   * ``num_tile_blocks`` [1]  i32   real (non-padding) BLOCK_M block count (device)
   * ``sorted_slot_ids`` [em_max] i32  gather index (gather=True); unused for route-read
@@ -170,7 +171,7 @@ def _dgrad_routeread_body(
     GY_flat, GY_tile, WEIGHT, DX_tile, lds, sorted_res, sorted_row_base, block_n, gbase,
     *, N, Kout, BLOCK_M, BLOCK_N, out_fp16, nt_vmcnt,
 ):
-    """FC1 dgrad tile: read the compact route grad directly (plain Mega NN tile)."""
+    """FC1 dgrad tile: read the dense route-ordered grad directly (plain Mega NN tile)."""
     gemm_bf16_nn_tile(
         GY_tile, WEIGHT, DX_tile, fx.Int32(BLOCK_M), fx.Int32(Kout), lds, fx.Int32(0), block_n,
         K=N, BLOCK_M=BLOCK_M, BLOCK_N=BLOCK_N, out_fp16=out_fp16, nt_vmcnt=nt_vmcnt,
@@ -194,9 +195,9 @@ def compile_grouped_gemm_dgrad_bf16(
 ):
     """Compile (cached) the grouped BF16 NN dgrad launcher for one ``(N, Kout, tile)`` combo.
 
-    ``gather=False`` (FC1 dgrad): ``grad`` is compact route order, read per tile (plain Mega NN
-    tile). ``gather=True`` (FC2 dgrad): ``grad`` is token-space, gathered via ``SORTED`` into the
-    compact route output (NN gather tile). Both rebase the C tile in i64 to survive worst-case
+    ``gather=False`` (FC1 dgrad): ``grad`` is dense route-ordered, read per tile (plain Mega NN
+    tile). ``gather=True`` (FC2 dgrad): ``grad`` is token-ordered, gathered via ``SORTED`` into the
+    block-padded route-ordered output (NN gather tile). Both rebase the C tile in i64 to survive worst-case
     pools; the grid front-loads via XCD swizzle over the real tile range.
     """
     SharedStorage = _make_shared_storage(BLOCK_M, BLOCK_N)
@@ -294,7 +295,7 @@ def compile_grouped_gemm_dgrad_bf16(
 def grouped_gemm_dgrad_bf16(
     grad_y,  # [rows, N] bf16   incoming grad (rows = em_max route-read / num_recv gather)
     weight,  # [E, N, K] bf16    per-expert weights (shared with forward)
-    dx,  # [em_max, K] bf16     compact expert-major input grad per slot (in place)
+    dx,  # [em_max, K] bf16     block-padded route-ordered input grad per slot (in place)
     expert_ids,  # [num_m_blocks] i32
     num_tile_blocks,  # int   real BLOCK_M block count (host scalar; capture-safe)
     sorted_slot_ids=None,  # [em_max] i32   gather index (required when gather=True)

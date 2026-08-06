@@ -650,7 +650,7 @@ class _GroupedLinear(torch.autograd.Function):
         biases = [cast_if_needed(bias, bias_dtype) for bias in biases] if use_bias else biases
         # Initialize output tensor. The permute-free path allocates its own worst-case padded
         # [T * min(topk, E), out_features] output inside permute_free_grouped_gemm_bf16 (valid rows are
-        # the compact route range [0, num_routes); the tail is inert zero padding).
+        # the dense route range [0, num_routes); the tail is inert zero padding).
         if not use_perm_free_grouped_gemm:
             out = torch.empty(
                 [sum(m_splits), weights_fp8[0].size(0)],
@@ -855,7 +855,7 @@ class _GroupedLinear(torch.autograd.Function):
                 ctx.reduce_and_update_bwd_fp8_tensors = False
 
         # [*, in_features] -> [*, out_features], or worst-case padded [T * min(topk, E), out_features]
-        # (permute-free route-list path; valid rows are the compact range [0, num_routes)).
+        # (permute-free route-list path; valid rows are the dense route range [0, num_routes)).
         if use_perm_free_grouped_gemm:
             return out, new_workspaces
         return out.view(-1, *inp.shape[1:-1], out.shape[-1]), new_workspaces
@@ -1549,7 +1549,7 @@ class GroupedLinear(TransformerEngineBaseModule):
     ``[num_recv_tokens, num_local_experts]`` + a ``route_space`` direction) instead of
     permuting activations before this module. The caller must skip ``moe_permute``. FC1
     (``route_space=False``) takes ``[num_recv_tokens, in_features]`` and produces the
-    worst-case padded ``[T * min(topk, E), out_features]`` route buffer (valid rows are the compact
+    worst-case padded ``[T * min(topk, E), out_features]`` route buffer (valid rows are the dense
     route range ``[0, num_routes)``; the tail is inert zero padding); FC2
     (``route_space=True``) takes the route-ordered ``[T * min(topk, E), in_features]`` and fuses the
     scatter back to token order, returning ``[num_recv_tokens, out_features]``. Requires
@@ -2014,8 +2014,8 @@ class GroupedLinear(TransformerEngineBaseModule):
                       direction). When set with ``NVTE_PERMUTE_FREE_GROUPED_GEMM=1``, run
                       the route-list GEMM on unpermuted bf16 activations. ``route_space=
                       False`` (FC1) gathers per expert into the worst-case padded
-                      ``[T * min(topk, E), out_features]`` route buffer (valid rows are the compact
-                      range ``[0, num_routes)``; the tail is inert zero padding);
+                      ``[T * min(topk, E), out_features]`` route buffer (valid rows are the dense
+                      route range ``[0, num_routes)``; the tail is inert zero padding);
                       ``route_space=True`` (FC2) reads route-ordered input, applies the
                       standalone gated activation (when ``activation`` is set), runs a plain
                       GEMM, and scatter-combines back to token order, returning

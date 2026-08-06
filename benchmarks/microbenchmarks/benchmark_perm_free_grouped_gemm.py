@@ -267,11 +267,12 @@ def _build_train_phase_fns(
     # Run the permute-free forward once (outside timing) to finalize the block-padded align on
     # ``routing`` (the fwd enforces a v3 block-size floor, which fixes em_max) and to learn the
     # padded slot extent. The dgrad/wgrad now consume the block-padded ``[em_max, out_features]``
-    # slot gradient -- i.e. the gradient of this fwd output -- not a compact ``[num_routes]`` one.
+    # slot gradient -- i.e. the gradient of this fwd output -- not a dense route-ordered
+    # ``[num_routes]`` one.
     em_max = int(permute_free_grouped_gemm_bf16(hidden, weights, routing).shape[0])
 
     # Upstream gradients. ``grad_out_pf`` is the block-padded slot grad for the permute-free
-    # dgrad/wgrad; the traditional path keeps its compact expert-sorted ``[total_m, n]`` grad.
+    # dgrad/wgrad; the traditional path keeps its expert-sorted ``[total_m, n]`` grad.
     # Allocated once, outside the timed region.
     grad_out_pf = torch.randn(em_max, n, dtype=dtype, device=device)
     grad_out_perm = torch.randn(total_m, n, dtype=dtype, device=device)

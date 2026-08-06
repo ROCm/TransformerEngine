@@ -62,8 +62,8 @@ def _random_routing_map(num_recv_tokens, num_experts, max_hits, device, seed):
     return routing_map
 
 
-def _compact_route_order(routing_map):
-    """Expert-sorted (token, expert) route lists, matching ``moe_align_route_list``."""
+def _dense_route_order(routing_map):
+    """Expert-sorted (token, expert) dense route list, matching ``moe_align_route_list``."""
     tok, exp = routing_map.nonzero(as_tuple=True)
     order = torch.argsort(exp, stable=True)
     return tok[order].to(torch.int64), exp[order].to(torch.int64)
@@ -86,7 +86,7 @@ def test_route_list_fwd():
 
     out_full = permute_free_grouped_gemm_bf16(hidden, weights, routing)
 
-    route_to_token, route_expert = _compact_route_order(routing_map)
+    route_to_token, route_expert = _dense_route_order(routing_map)
     num_routes = route_to_token.numel()
     # Block-padded canonical layout: the output is [em_max, out] in expert-sorted, block-padded
     # slot order. Padded slot s holds hidden[sorted_slot_ids[s]] @ W[expert(s)]^T for the valid
@@ -491,12 +491,12 @@ def test_fc1_fc2_gated_pipeline(monkeypatch):
         assert getattr(fc1, f"weight{i}").grad is not None
         assert getattr(fc2, f"weight{i}").grad is not None
         assert getattr(fc2, f"weight{i}").grad.abs().sum() > 0
-    # Sanity: compact route head got a non-zero FC1 output grad (FC2 act-bwd -> FC1).
+    # Sanity: dense route head got a non-zero FC1 output grad (FC2 act-bwd -> FC1).
     assert preact.grad[:num_routes].abs().sum() > 0
 
     # Numerical check on probs.grad (locks the gated-act backward's per-slot (token, expert)
     # mapping): with loss = out.sum(), dL/dprob[t, e] = routing_map[t, e] * <silu(gate)*up[t,e],
-    # sum_h w2[e, h, :]>. A wrong expert-per-slot map (e.g. compact route index misread as a
+    # sum_h w2[e, h, :]>. A wrong expert-per-slot map (e.g. dense route index misread as a
     # block-padded slot) silently corrupts this even though probs.grad stays non-zero.
     with torch.no_grad():
         act_noprob = torch.nn.functional.silu(gate) * up  # [T, E, F] (CPU float)
@@ -507,7 +507,7 @@ def test_fc1_fc2_gated_pipeline(monkeypatch):
 
 
 def test_route_list_fwd_dgrad_wgrad_consistency():
-    """fwd + dgrad + wgrad against a single autograd reference in compact route space."""
+    """fwd + dgrad + wgrad against a single autograd reference in dense route-ordered space."""
     torch.manual_seed(23)
     # The gather/dgrad tiles need both contraction dims (in for fwd, out for dgrad) to be a
     # multiple of the FlyDSL block_k (64) and >= 128 (K_ITERS >= 2), so use 128-wide features.
@@ -516,9 +516,9 @@ def test_route_list_fwd_dgrad_wgrad_consistency():
 
     routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=5)
     routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
-    route_to_token, route_expert = _compact_route_order(routing_map)
+    route_to_token, route_expert = _dense_route_order(routing_map)
     num_routes = route_to_token.numel()
-    # Prepare the fwd/dgrad align (block-padded slot layout) up front so we can map the compact
+    # Prepare the fwd/dgrad align (block-padded slot layout) up front so we can map the dense
     # per-route grad into padded-slot order for the block-padded dgrad.
     routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
     em_max = int(routing.sorted_slot_ids.shape[0])
@@ -531,20 +531,20 @@ def test_route_list_fwd_dgrad_wgrad_consistency():
     )
 
     # Forward output is block-padded [em_max]; the valid padded slots are expert-ascending, the
-    # same order as the compact route list, so out_full[valid] lines up with the compact ref.
+    # same order as the dense route list, so out_full[valid] lines up with the dense ref.
     out_full = permute_free_grouped_gemm_bf16(hidden, weights, routing)
     out = out_full[valid]
     # One per-route gradient in the block-padded [em_max] slot layout that both the dgrad and the
     # wgrad now route-read (padded slot = block_start[e]*block_size_m + within-rank). The valid
-    # slots are expert-ascending, matching the compact autograd reference order. ``grad`` keeps a
-    # compact [num_routes] copy only to seed the compact reference backward.
+    # slots are expert-ascending, matching the dense autograd reference order. ``grad`` keeps a
+    # dense route-ordered [num_routes] copy only to seed the dense reference backward.
     grad = torch.randn(num_routes, out_features, device="cuda", dtype=torch.bfloat16)
     grad_bp = torch.zeros(em_max, out_features, device="cuda", dtype=torch.bfloat16)
     grad_bp[valid] = grad
     dA = permute_free_grouped_gemm_bf16_dgrad(grad_bp, weights, routing)
     dW = permute_free_grouped_gemm_bf16_wgrad(hidden, grad_bp, weights.shape, routing)
 
-    # Autograd reference in compact route space.
+    # Autograd reference in dense route-ordered space.
     ref_hidden = hidden.float().clone().requires_grad_(True)
     ref_w = weights.float().clone().requires_grad_(True)
     ref_out = torch.einsum(
@@ -829,8 +829,8 @@ def test_slot_expert_ids_cache():
     # ``_expert_per_route`` returns the *cached* tensor (no redundant recompute).
     assert _expert_per_route(routing, em_max) is routing.slot_expert_ids
 
-    # Valid slots carry the expert-sorted compact route experts.
-    _, route_expert = _compact_route_order(routing_map)
+    # Valid slots carry the expert-sorted dense route experts.
+    _, route_expert = _dense_route_order(routing_map)
     valid = routing.sorted_slot_ids < num_recv_tokens
     assert torch.equal(routing.slot_expert_ids[valid].to(torch.int64), route_expert)
 
@@ -1041,7 +1041,7 @@ def test_grouped_weight_main_grad_matches_ungrouped_grad(monkeypatch):
     )
     # Shared initial weights for both modules (so the kernel dW is identical).
     W = torch.randn(num_experts, out_features, in_features, device="cuda", dtype=torch.bfloat16)
-    # Shared upstream gradient over the compact route range.
+    # Shared upstream gradient over the dense route-ordered range.
     g = torch.randn(num_routes, out_features, device="cuda", dtype=torch.bfloat16)
 
     # --- ungrouped: separate per-expert params, wgrad via autograd .grad ---
@@ -1054,7 +1054,7 @@ def test_grouped_weight_main_grad_matches_ungrouped_grad(monkeypatch):
     routing_a = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
     out_a = mod_a(inp, m_splits, permute_free_metadata=routing_a)
     # Block-padded canonical: the module output is [em_max, out] in padded slot order; the valid
-    # (expert-ascending) slots line up with the compact upstream grad g. Slicing [:num_routes]
+    # (expert-ascending) slots line up with the dense upstream grad g. Slicing [:num_routes]
     # would cut across the padding gaps, so gather the valid slots instead.
     valid_a = routing_a.sorted_slot_ids < num_recv_tokens
     (out_a[valid_a].float() * g.float()).sum().backward()
