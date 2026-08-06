@@ -18,11 +18,12 @@ const CFG = {
   noiseK: 2.0,           // a drop must exceed K * (run-to-run relative std) to count as real
   minSamples: 3,         // prior main runs needed to size a noise band (else: low confidence)
   sparkFloorPct: 6,      // sparkline min half-window (% of baseline) so trivial noise stays flat
-  archOrder: ["gfx942", "gfx950", "gfx1250"], // TE runs; add arches here (also update styles.css --gfx* + .arch-chip)
 };
 
 const S = {
   records: [], runs: [], updated: null, runMeta: new Map(),
+  arches: [],      // arches present in the data, sorted (discovered at load)
+  archModel: {},   // arch -> GPU model label (gfx950 -> MI355X), carried in the shard rows
   view: "health", noiseAware: true, boardFilter: "all",
   pr: { sel: null },
   trend: { key: null, arch: "all", metric: null, q: "", range: "all", xmode: "commits" },
@@ -36,11 +37,14 @@ const kkey = r => `${r.op} ${r.shape} ${r.dtype}`;
 const esc = s => String(s ?? "").replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const VIEWS = ["health", "bytype", "prcheck", "board"];
 
-// theme-aware colors: read the live CSS variables so canvas/SVG match the active theme
-const ARCHVAR = { gfx950: "--gfx950", gfx942: "--gfx942", gfx1250: "--gfx1250" };
+// theme-aware colors: read the live CSS variables so canvas/SVG match the active theme.
+// Arches get a palette slot by their position in S.arches, so nothing is hardcoded per arch.
+const SERIES_N = 6;
 const cssVal = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim() || n;
-const archVar = a => `var(${ARCHVAR[a] || "--ink-2"})`;     // for inline style="" (CSS var)
-const archCol = a => cssVal(ARCHVAR[a] || "--ink-2");        // resolved value for <canvas>
+const seriesVar = a => { const i = S.arches.indexOf(a); return i < 0 ? "--ink-2" : `--series-${i % SERIES_N}`; };
+const archVar = a => `var(${seriesVar(a)})`;                 // for inline style="" (CSS var)
+const archCol = a => cssVal(seriesVar(a));                   // resolved value for <canvas>
+const archLabel = a => (S.archModel && S.archModel[a]) || a; // GPU model (MI355X) if known, else arch
 const commitUrl = sha => sha ? `https://github.com/${CFG.repo}/commit/${sha}` : "#";
 
 function relTime(iso) {
@@ -127,7 +131,7 @@ function toRecord(o) {
   return {
     op: o.op, shape: o.shape, dtype: o.dtype, metric: o.metric,
     value: num(o.value), ts: o.ts, commit: o.commit, run_id: num(o.run_id),
-    arch: o.arch, runner: o.runner, pr: num(o.pr), source: "ci",
+    arch: o.arch, model: o.model, runner: o.runner, pr: num(o.pr), source: "ci",
     status: "ok", regression: false, vs_main: null, vs_tag: null,
     extra: o.time_ms ? { median_ms: +o.time_ms } : {},
   };
@@ -153,6 +157,11 @@ async function loadAll() {
     }
   });
   S.records = records;
+  // Discover arches (sorted) and the arch -> GPU model label from the rows; both
+  // are display concerns -- arch stays the key for grouping/colors/baselines.
+  S.arches = [...new Set(records.map(r => r.arch).filter(Boolean))].sort();
+  S.archModel = {};
+  for (const r of records) if (r.arch && r.model) S.archModel[r.arch] = r.model;
   computePRDeltas();   // derive vs_main (PR value vs dev baseline) so PR Check works
   S.runs = [];
   S.runMeta = new Map();
@@ -396,7 +405,7 @@ function renderHealth() {
     return `<div class="reg-row s-${sev}" style="--i:${i}" data-k="${esc(kkey(r))}" data-arch="${r.arch}">
       <span class="op">${esc(r.op)} <span class="metric-tag">${r.metric}</span></span>
       <span class="shape">${esc(r.shape)} · ${esc(r.dtype)}</span>
-      <span class="reg-arch" style="color:${archVar(r.arch)}">${esc(r.arch)}</span>
+      <span class="reg-arch" style="color:${archVar(r.arch)}">${esc(archLabel(r.arch))}</span>
       ${sparkline(vals, noise, real)}
       <span class="reg-delta ${sev}"><span class="dbar" style="width:${w}px;background:${bc}"></span>${fmtPct(d)}</span>
       <span class="commit"><a href="${href}" target="_blank" rel="noopener" onclick="event.stopPropagation()">${r.pr ? "#" + r.pr : "dev"}·${sha}</a></span>
@@ -418,7 +427,6 @@ const FAMILY_ORDER = ["gemm", "gemm_fp8", "grouped_gemm", "casting", "normalizat
 const familyLabel = f => FAMILY_LABELS[f] ||
   (f ? f.replace(/[_-]+/g, " ").replace(/\b\w/g, c => c.toUpperCase()) : "Other");
 const familyRank = f => { const i = FAMILY_ORDER.indexOf(f); return i < 0 ? FAMILY_ORDER.length : i; };
-const archRank = a => { const i = CFG.archOrder.indexOf(a); return i < 0 ? CFG.archOrder.length : i; };
 
 // Every latest dev kernel/arch, grouped by benchmark family -- the full picture,
 // not just regressions. Same latest-value + noise-band trend as Health.
@@ -439,7 +447,7 @@ function renderByType() {
     const fm = byArch.get(a), f = x.r.family || "other";
     (fm.get(f) || fm.set(f, []).get(f)).push(x);
   }
-  const arches = [...byArch.keys()].sort((a, b) => archRank(a) - archRank(b) || a.localeCompare(b));
+  const arches = [...byArch.keys()].sort((a, b) => a.localeCompare(b));
   const nFam = new Set(rows.map(x => x.r.family || "other")).size;
   $("#typeSummary").innerHTML = rows.length
     ? `${rows.length} kernel × arch · <b>${arches.length}</b> arch${arches.length === 1 ? "" : "es"} · <b>${nFam}</b> type${nFam === 1 ? "" : "s"} · latest dev value + Δ vs prior-dev history`
@@ -458,7 +466,7 @@ function renderByType() {
           <td>${esc(r.op)} <span class="metric-tag">${r.metric}</span></td>
           <td class="k-dim">${esc(r.shape)}</td>
           <td>${esc(r.dtype)}</td>
-          <td style="color:${archVar(r.arch)}">${esc(r.arch)}</td>
+          <td style="color:${archVar(r.arch)}">${esc(archLabel(r.arch))}</td>
           <td class="spark-cell">${sparkline(vals, noise, real)}</td>
           <td class="num">${fmtVal(r.value, r.metric)}</td>
           ${dcell}
@@ -487,7 +495,7 @@ function renderByType() {
       const count = [...fm.values()].reduce((n, l) => n + l.length, 0);
       return `<details class="panel arch-panel"${openAttr}>` +
         `<summary class="panel-head"><span class="type-caret" aria-hidden="true">▸</span>` +
-        `<span class="t arch-name" style="color:${archVar(a)}">${esc(a)}</span>` +
+        `<span class="t arch-name" style="color:${archVar(a)}">${esc(archLabel(a))}</span>` +
         `<span class="type-count">${count} kernel${count === 1 ? "" : "s"}</span></summary>` +
         `<div class="arch-body">${familyPanels(fm)}</div>` +
         `</details>`;
@@ -533,7 +541,7 @@ function renderPRCheck() {
     <th>kernel</th><th>shape</th><th>dtype</th><th>arch</th><th class="num">PR</th><th class="num">dev</th><th class="num">Δ vs dev</th><th>baseline</th>
     </tr></thead><tbody>${rows.map(({ r, d, sev }) => `<tr class="${sev === "bad" ? "row-bad" : ""}">
       <td>${esc(r.op)} <span class="metric-tag">${r.metric}</span></td><td class="k-dim">${esc(r.shape)}</td><td>${esc(r.dtype)}</td>
-      <td style="color:${archVar(r.arch)}">${esc(r.arch)}</td>
+      <td style="color:${archVar(r.arch)}">${esc(archLabel(r.arch))}</td>
       <td class="num">${fmtVal(r.value, r.metric)}</td>
       <td class="num k-dim">${fmtVal(r.vs_main.baseline, r.metric)}</td>
       <td class="num delta ${sev}">${fmtPct(d)}</td>
@@ -579,8 +587,8 @@ function selectKernel(k, rerail = true) {
   const metrics = [...e.metrics];
   if (!metrics.includes(S.trend.metric)) S.trend.metric = metrics.find(m => m !== "speedup") || metrics[0];
   $("#metricSel").innerHTML = metrics.map(m => `<button data-m="${m}" class="${m === S.trend.metric ? "is-active" : ""}">${m}</button>`).join("");
-  $("#trendArch").innerHTML = ["all", ...CFG.archOrder].map(a =>
-    `<button data-a="${a}" class="${a === S.trend.arch ? "is-active" : ""}">${a}</button>`).join("");
+  $("#trendArch").innerHTML = ["all", ...S.arches].map(a =>
+    `<button data-a="${a}" class="${a === S.trend.arch ? "is-active" : ""}">${esc(archLabel(a))}</button>`).join("");
   $("#trendRange").innerHTML = [["7d", "7 days"], ["30d", "30 days"], ["all", "all"]].map(([v, t]) =>
     `<button data-r="${v}" class="${v === S.trend.range ? "is-active" : ""}">${t}</button>`).join("");
   $("#trendXMode").innerHTML = [["commits", "by commit"], ["daily", "by day"]].map(([v, t]) =>
@@ -624,7 +632,7 @@ function drawTrend(e) {
     return val.get(p.id + "|" + arch) ?? null;
   };
   const single = S.trend.arch !== "all";
-  const archs = single ? [S.trend.arch] : CFG.archOrder;
+  const archs = single ? [S.trend.arch] : S.arches;
 
   const datasets = [];
   let note = "";
@@ -654,7 +662,7 @@ function drawTrend(e) {
       return (r && regOf(r, noise).real) ? cssVal("--bad") : archCol(arch);
     });
     datasets.push({
-      label: arch, data, borderColor: archCol(arch), backgroundColor: archCol(arch) + "22",
+      label: archLabel(arch), data, borderColor: archCol(arch), backgroundColor: archCol(arch) + "22",
       pointBackgroundColor: ptColor, pointBorderColor: ptColor,
       pointRadius: daily ? 4 : points.length > 30 ? 1.5 : 3, pointHoverRadius: 6,
       borderWidth: daily ? 2.4 : 2, tension: .25, spanGaps: true, order: 1, fill: single ? "origin" : false,
@@ -708,10 +716,10 @@ function drawTrend(e) {
     },
   });
   // status-aware table — always per-commit, with a real link to each commit.
-  // Header arch columns are generated from CFG.archOrder so they stay aligned
-  // with the data cells below (which also map over CFG.archOrder).
+  // Header arch columns are generated from S.arches so they stay aligned
+  // with the data cells below (which also map over S.arches).
   $("#trendHeadRow").innerHTML = `<th>commit</th><th>date</th><th>pr</th>` +
-    CFG.archOrder.map(a => `<th class="num">${esc(a)}</th>`).join("");
+    S.arches.map(a => `<th class="num">${esc(archLabel(a))}</th>`).join("");
   $("#trendBody").innerHTML = runIds.slice().reverse().map(ri => {
     const cell = arch => {
       const r = recs.find(x => x.run_id === ri.id && x.arch === arch)
@@ -725,7 +733,7 @@ function drawTrend(e) {
     return `<tr><td><a class="commit-link" href="${commitUrl(ri.commit)}" target="_blank" rel="noopener">${sha || "—"}</a></td>` +
       `<td class="k-dim">${(ri.ts || "").slice(0, 10)}</td>` +
       `<td class="k-dim">${ri.main ? "dev" : ri.pr ? `<a href="https://github.com/${CFG.repo}/pull/${ri.pr}" target="_blank" rel="noopener">#${ri.pr}</a>` : "branch"}</td>` +
-      `${CFG.archOrder.map(cell).join("")}</tr>`;
+      `${S.arches.map(cell).join("")}</tr>`;
   }).join("");
   // If the chart was built while its container was briefly unsized (view switch or
   // first paint), force a resize on the next frame so it isn't left blank.
@@ -769,7 +777,7 @@ function renderBoard() {
   grid.innerHTML = list.map(r => {
     const byRunner = {}; for (const j of (r.jobs || [])) byRunner[j.arch] = j;
     const overall = (r.status !== "completed") ? "running" : (r.conclusion || "none");
-    const chips = CFG.archOrder.map(arch => {
+    const chips = S.arches.map(arch => {
       const j = byRunner[arch]; const st = chipState(j);
       const label = st === "running" ? "run" : st === "success" ? "pass" : st === "failure" ? "fail" : st === "none" ? "—" : st.slice(0, 4);
       const link = j?.url ? `<a href="${esc(j.url)}" target="_blank" rel="noopener" title="${arch} · ${st}"></a>` : "";
@@ -793,7 +801,7 @@ function renderBoard() {
 }
 
 /* ------------------------------------------------------------------ shell -- */
-function renderAll() { renderHealth(); renderByType(); renderKernelRail(); renderPRCheck(); renderBoard(); }
+function renderAll() { renderArchLegend(); renderHealth(); renderByType(); renderKernelRail(); renderPRCheck(); renderBoard(); }
 function showView(v) {
   if (v === "trends") v = "health";
   if (!VIEWS.includes(v)) v = "health";
@@ -811,12 +819,12 @@ function goTrend(k, arch) {
   if (el) el.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 
-// arch legend chips, generated from CFG.archOrder so the set/order matches the
+// arch legend chips, generated from S.arches so the set/order matches the
 // table, chart and selector (single source of truth for arches).
 function renderArchLegend() {
   const el = $("#archLegend"); if (!el) return;
-  el.innerHTML = CFG.archOrder.map(a =>
-    `<span class="arch-chip" data-arch="${esc(a)}"><i></i>${esc(a)}</span>`).join("");
+  el.innerHTML = S.arches.map(a =>
+    `<span class="arch-chip" data-arch="${esc(a)}" style="--c:${archVar(a)}"><i></i>${esc(archLabel(a))}</span>`).join("");
 }
 
 function wire() {
@@ -874,7 +882,6 @@ window.addEventListener("hashchange", () => showView(location.hash.slice(1)));
 document.addEventListener("DOMContentLoaded", () => {
   initTheme();
   wire();
-  renderArchLegend();
   if (VIEWS.includes(location.hash.slice(1))) showView(location.hash.slice(1));
   loadAll();
   setInterval(enhanceLiveBoard, 90000);

@@ -22,8 +22,12 @@ Usage: run_all_benchmarks.sh [options]
                    a noise band needs >=4 runs). Default: 1
   --ref REF        ingest baseline ref (default: dev)
   --pr N           ingest as PR <N> instead of --ref (isolated from the baseline)
-  --kernel-profile record GPU kernel (device) time instead of host wall-clock
-                   (passes --kernel-profile through to each benchmark)
+  --python-time    record host wall-clock time instead of the default GPU kernel
+                   (device) time (benchmarks otherwise run with --kernel-profile
+                   so the shards hold kernel time)
+  --compute-kernel record compute-kernel-only time (drops host/torch scaffolding
+                   like randn/copies) as a separate series (ingested with an
+                   op-suffix ' [kernel]'); pair with --ref to keep its own shard
   --bundle         after ingesting, emit a self-contained dashboard/dist/dashboard.html
   -h, --help       show this help
 
@@ -53,7 +57,10 @@ RUNS=1
 REF="dev"
 PR=""
 BUNDLE=0
-KERNEL_PROFILE=""
+# Dashboard shards hold GPU kernel (device) time by default; --python-time opts out.
+KERNEL_PROFILE="--kernel-profile"
+# Non-empty for --compute-kernel: op-label suffix so its rows form their own series.
+OP_SUFFIX=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -63,6 +70,8 @@ while [[ $# -gt 0 ]]; do
     --ref) REF="$2"; shift 2 ;;
     --pr) PR="$2"; shift 2 ;;
     --kernel-profile) KERNEL_PROFILE="--kernel-profile"; shift ;;
+    --python-time) KERNEL_PROFILE=""; shift ;;
+    --compute-kernel) KERNEL_PROFILE="--compute-kernel"; OP_SUFFIX=" [kernel]"; shift ;;
     --bundle) BUNDLE=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "error: unknown argument '$1'" >&2; usage >&2; exit 2 ;;
@@ -84,6 +93,9 @@ if [[ -n "$PR" ]]; then
   ingest_args=(--pr "$PR" --out-dir "$OUT_DIR")
 else
   ingest_args=(--ref "$REF" --out-dir "$OUT_DIR")
+fi
+if [[ -n "$OP_SUFFIX" ]]; then
+  ingest_args+=(--op-suffix "$OP_SUFFIX")
 fi
 
 for ((run = 1; run <= RUNS; run++)); do

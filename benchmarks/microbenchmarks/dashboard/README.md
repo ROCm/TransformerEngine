@@ -25,7 +25,7 @@ dashboard/
 ../build_bundle.py        emit a single self-contained dashboard.html
 ```
 
-Each shard row is `ts,commit,run_id,arch,runner,op,shape,dtype,metric,value,time_ms,pr`.
+Each shard row is `ts,commit,run_id,arch,model,runner,op,shape,dtype,metric,value,time_ms,pr`.
 Shards are **append-only**; every ingest call is one run (unique `run_id`).
 
 ## Quickstart
@@ -38,17 +38,30 @@ cd benchmarks/microbenchmarks
 ./run_all_benchmarks.sh --ingest --out-dir dashboard/data --runs 5   # a fresh baseline (needs >=4)
 ```
 
-By default the shards hold **host wall-clock** time and its throughput. Add
-`--kernel-profile` to instead record **GPU kernel (device) time** (via
-`torch.profiler`, excluding host launch/timing overhead):
+By default the shards hold **GPU kernel (device) time** and its throughput (the
+benchmarks run with `--kernel-profile`, via `torch.profiler`, excluding host
+launch/timing overhead). Pass `--python-time` to instead record **host
+wall-clock** time:
 
 ```bash
-./run_all_benchmarks.sh --ingest --kernel-profile --out-dir dashboard/data
+./run_all_benchmarks.sh --ingest --python-time --out-dir dashboard/data
 ```
 
 Pick one timing mode per shard and stick with it — kernel and wall-clock values
 aren't comparable, so appending both into one shard makes the trend meaningless
 (start a fresh `--ref`/`--pr` shard when switching).
+
+To also track **compute-kernel-only** numbers (the op's own GPU kernels, with
+host/torch scaffolding like `randn`/copies excluded), add `--compute-kernel`.
+Those rows are ingested with an op-suffix ` [kernel]`, so they show up as their
+own trend series alongside the e2e ops (the front-end keys a series on
+`op`/`shape`/`dtype`, so the suffix is what keeps them separate). Give them their
+own `--ref` to keep a clean shard/history:
+
+```bash
+./run_all_benchmarks.sh --ingest --runs 5 --out-dir dashboard/data                       # e2e (default)
+./run_all_benchmarks.sh --ingest --runs 5 --compute-kernel --ref dev-kernel --out-dir dashboard/data
+```
 
 The arch (`gfx942` / `gfx950` / `gfx1250`) is auto-detected via `rocminfo`.
 
@@ -104,7 +117,10 @@ PR runs ingest as `--pr <N>` (isolated from the `dev` baseline) and surface in t
 
 ## Adding an arch
 
-Arch is data-driven from `CFG.archOrder` in `app.js`. To add one: append it to
-`archOrder`, add a `--gfx<arch>` color + `.arch-chip[data-arch="gfx<arch>"]` rule
-in `styles.css`, and (if it's a new alias) allow it in `dashboard_ingest.py`'s
-`ALLOWED_ARCHES`.
+Arches are fully data-driven: the dashboard discovers them from the ingested
+rows (sorted alphabetically) and colors each by a palette slot (`--series-N` in
+`styles.css`), so no per-arch list to maintain. The GPU model label (e.g.
+`MI355X`) is auto-detected at ingest (rocminfo/torch) and carried in each shard
+row's `model` column; the dashboard shows it in place of the `gfx…` arch. Any
+arch is accepted — ingest auto-detects it (or pass `--arch`/`--model`), so there
+is nothing to add for a new GPU.

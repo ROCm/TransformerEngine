@@ -55,12 +55,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 METRIC_UNITS = ("TFLOPS", "GB/s")
 
 # Long-format shard columns (one row per measurement) and the shard catalog.
-SHARD_HEADER = ["ts", "commit", "run_id", "arch", "runner",
+SHARD_HEADER = ["ts", "commit", "run_id", "arch", "model", "runner",
                 "op", "shape", "dtype", "metric", "value", "time_ms", "pr"]
 INDEX_HEADER = ["file", "family", "ref", "pr"]
-
-# GPU arch tags the dashboard understands (one GPU type per machine).
-ALLOWED_ARCHES = ("gfx942", "gfx950", "gfx1250")
 
 
 def _unit_of(col):
@@ -97,13 +94,9 @@ def _detect_arch():
     try:
         out = subprocess.run(["rocminfo"], stdout=subprocess.PIPE,
                              stderr=subprocess.DEVNULL, timeout=20).stdout.decode(errors="ignore")
-        # rocminfo lists a gfx name only for GPU agents; prefer a known arch.
-        for tok in re.findall(r"gfx[0-9a-fA-F]+", out):
-            if tok in ALLOWED_ARCHES:
-                return tok
-        first = re.search(r"gfx[0-9a-fA-F]+", out)
-        if first:
-            return first.group(0)          # unknown gfx -> surfaced by the caller's check
+        m = re.search(r"gfx[0-9a-fA-F]+", out)   # first gfx agent name = the GPU
+        if m:
+            return m.group(0)
     except (OSError, subprocess.SubprocessError):
         pass
     try:
@@ -111,6 +104,48 @@ def _detect_arch():
         return torch.cuda.get_device_properties(0).gcnArchName.split(":")[0]
     except Exception:
         return None
+
+
+def _model_token(name):
+    """Short GPU model from a marketing name (e.g. 'MI355X'), or None.
+
+    Only GPU names qualify (an Instinct ``MI###`` code or a Radeon card), so the
+    CPU ``Marketing Name`` lines ``rocminfo`` also emits are ignored.
+    """
+    if not name:
+        return None
+    m = re.search(r"MI\s?\d{3,4}[A-Za-z]*", name)
+    if m:
+        return m.group(0).replace(" ", "").upper()
+    if "Radeon" in name:
+        return name.replace("AMD", "").strip() or None
+    return None
+
+
+def _detect_model():
+    """Best-effort short GPU model label (e.g. 'MI355X'), or None.
+
+    Discovered on the GPU box from ``rocminfo`` ("Marketing Name"), then torch,
+    so the arch->model label mapping is never hardcoded in the dashboard.
+    """
+    candidates = []
+    try:
+        out = subprocess.run(["rocminfo"], stdout=subprocess.PIPE,
+                             stderr=subprocess.DEVNULL, timeout=20).stdout.decode(errors="ignore")
+        candidates += [ln.split(":", 1)[1].strip()
+                       for ln in out.splitlines() if "Marketing Name" in ln]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    try:
+        import torch
+        candidates.append(torch.cuda.get_device_name(0))
+    except Exception:
+        pass
+    for name in candidates:
+        tok = _model_token(name)
+        if tok:
+            return tok
+    return None
 
 
 def _run_id_from_ts(ts):
@@ -172,8 +207,9 @@ def long_rows_from_csv(path, meta):
                 ms = _num(row.get(f"{label} Time (ms)"))
                 yield {
                     "ts": meta["ts"], "commit": meta["commit"], "run_id": meta["run_id"],
-                    "arch": meta["arch"], "runner": meta["runner"],
-                    "op": label, "shape": shape, "dtype": dtype,
+                    "arch": meta["arch"], "model": meta.get("model", ""),
+                    "runner": meta["runner"],
+                    "op": label + meta.get("op_suffix", ""), "shape": shape, "dtype": dtype,
                     "metric": unit, "value": round(value, 4),
                     "time_ms": "" if ms is None else round(ms, 4),
                     "pr": meta["pr"],
@@ -234,9 +270,16 @@ def main():
     parser.add_argument("--run-id", type=int, default=None,
                         help="Explicit run id (default: unique per invocation)")
     parser.add_argument("--arch", default=None,
-                        help="GPU arch (" + "|".join(ALLOWED_ARCHES) + "); "
-                             "auto-detected via rocminfo if omitted")
+                        help="GPU arch tag (e.g. gfx950); auto-detected via rocminfo/torch "
+                             "if omitted")
     parser.add_argument("--runner", default="local", help="Runner label")
+    parser.add_argument("--model", default=None,
+                        help="GPU model label for the dashboard (e.g. MI355X); "
+                             "auto-detected from rocminfo/torch if omitted")
+    parser.add_argument("--op-suffix", default="",
+                        help="Append this string to every op label (e.g. ' [kernel]') so a "
+                             "compute-kernel run forms its own dashboard series instead of "
+                             "merging into the matching e2e op.")
     args = parser.parse_args()
 
     now = datetime.now(timezone.utc)
@@ -254,11 +297,12 @@ def main():
     else:
         ref, pr_field = args.ref, ""
     arch = args.arch or _detect_arch()
-    if arch not in ALLOWED_ARCHES:
-        sys.exit(f"could not determine a supported GPU arch (got {arch!r}); "
-                 f"pass --arch with one of: {', '.join(ALLOWED_ARCHES)}")
+    if not arch:
+        sys.exit("could not determine the GPU arch; pass --arch (e.g. --arch gfx950)")
+    model = args.model or _detect_model()
     meta = {"ts": ts, "commit": commit, "run_id": run_id,
-            "arch": arch, "runner": args.runner, "pr": pr_field}
+            "arch": arch, "model": model or "", "runner": args.runner,
+            "pr": pr_field, "op_suffix": args.op_suffix}
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -284,8 +328,9 @@ def main():
         sys.exit("no throughput (TFLOPS / GB/s) rows found in the given CSV(s)")
     added = update_index(out_dir, entries)
 
-    print(f"run {commit[:8]} @ {ts} (run_id {run_id}) ref={ref} arch={arch}"
-          f"{'' if args.arch else ' (auto)'}: +{total} rows")
+    print(f"run {commit[:8]} @ {ts} (run_id {run_id}) ref={ref} "
+          f"arch={arch}{'' if args.arch else ' (auto)'}"
+          f"{f' model={model}' if model else ''}: +{total} rows")
     for name, n in per_shard:
         print(f"  {name}: +{n}")
     if added:
