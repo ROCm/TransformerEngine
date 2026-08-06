@@ -574,6 +574,19 @@ def test_cp_with_fused_attention(
             " yet!"
         )
 
+    # ROCm: upstream v2.18 narrowed the fused-path THD skip from
+    # {all_gather, a2a+p2p} to just a2a+p2p, so THD + all_gather now runs. The
+    # flash path gained a matching FA3-gated skip ("THD + all_gather requires
+    # FA3 seqused_k ..."), but the fused path did not. ROCm's CK fused-attn
+    # backend has no equivalent seqused_k path, so THD + all_gather CP produces
+    # incorrect results (relative diff -> inf). Skip here, mirroring the flash
+    # path, until CK gains this support.
+    if IS_HIP_EXTENSION and qkv_format == "thd" and cp_comm_type == "all_gather":
+        pytest.skip(
+            "THD + all_gather CP fused attention is unsupported on ROCm (CK lacks the FA3"
+            " seqused_k path)."
+        )
+
     if (config.window_size[0] != -1 or config.window_size[1] not in [-1, 0]) and cp_comm_type in [
         "p2p",
         "a2a+p2p",
