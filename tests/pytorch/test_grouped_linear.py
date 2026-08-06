@@ -25,6 +25,7 @@ from transformer_engine.pytorch import (
     MXFP8Quantizer,
     NVFP4Quantizer,
     autocast,
+    get_device_compute_capability,
     is_bf16_available,
     quantized_model_init,
 )
@@ -428,6 +429,63 @@ def test_grouped_linear_accuracy_cutlass(
         model,
         None,
         False,
+        fuse_wgrad_accumulation,
+        False,
+        delay_wgrad_compute,
+        use_triton=False,
+        parallel_mode=None,
+        use_cutlass=True,
+    )
+
+
+# ROCm grouped GEMM backends (HipKittens / CK). Kept separate from the CUTLASS test above so the
+# upstream one stays untouched. The backend is picked by env var; use_cutlass only relaxes the
+# tolerances, since a non-reference GEMM will not be bit-exact against the sequential Linear.
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm-only grouped GEMM backends")
+@pytest.mark.parametrize("dtype", param_types, ids=str)
+@pytest.mark.parametrize("num_gemms", [3, 6])
+@pytest.mark.parametrize("bs", batch_sizes)
+@pytest.mark.parametrize("model", ["126m"])
+@pytest.mark.parametrize("recipe", fp8_recipes + [None], ids=recipe_id)
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
+@pytest.mark.parametrize("fuse_wgrad_accumulation", all_boolean)
+@pytest.mark.parametrize("delay_wgrad_compute", all_boolean)
+@pytest.mark.parametrize("grouped_gemm_backend", ["hipkittens", "ck"], ids=str)
+def test_grouped_linear_accuracy_rocm_backends(
+    dtype,
+    num_gemms,
+    bs,
+    model,
+    recipe,
+    fp8_model_params,
+    fuse_wgrad_accumulation,
+    delay_wgrad_compute,
+    grouped_gemm_backend,
+    monkeypatch,
+):
+    if (
+        grouped_gemm_backend == "ck"
+        and recipe is not None
+        and recipe.mxfp8()
+        and get_device_compute_capability() != (12, 5)
+    ):
+        pytest.skip("CK MXFP8 grouped GEMM only supported on gfx1250.")
+
+    monkeypatch.setenv("NVTE_USE_CUTLASS_GROUPED_GEMM", "1")
+    monkeypatch.delenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM", raising=False)
+    monkeypatch.delenv("NVTE_USE_CK_GROUPED_GEMM", raising=False)
+    if grouped_gemm_backend == "hipkittens":
+        monkeypatch.setenv("NVTE_USE_HIPKITTENS_GROUPED_GEMM", "1")
+    else:
+        monkeypatch.setenv("NVTE_USE_CK_GROUPED_GEMM", "1")
+
+    test_grouped_linear_accuracy(
+        dtype,
+        num_gemms,
+        bs,
+        model,
+        recipe,
+        fp8_model_params,
         fuse_wgrad_accumulation,
         False,
         delay_wgrad_compute,
