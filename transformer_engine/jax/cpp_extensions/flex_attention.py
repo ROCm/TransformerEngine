@@ -1,3 +1,4 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -16,6 +17,8 @@ import numpy as np
 from jax import ffi
 
 import transformer_engine_jax
+
+from ..util import is_hip_extension
 
 __all__ = [
     "FusedAttnScoreModHelper",
@@ -594,6 +597,13 @@ def _shape_dtype(value) -> jax.ShapeDtypeStruct:
 
 
 def _import_cudnn_for_score_mod():
+    # score_mod fused attention is a cuDNN-frontend (CUDA-only) feature. On ROCm
+    # there is no cuDNN frontend -- GetCudnnFrontendVersion() is a stub -- so the
+    # feature is unavailable. Signal that via ImportError (the "unavailable" path
+    # callers already handle) rather than letting the version-match check raise a
+    # confusing RuntimeError against the stub version.
+    if is_hip_extension():
+        raise ImportError("score_mod fused_attn is not supported on ROCm (no cuDNN frontend).")
     try:
         cudnn = importlib.import_module("cudnn")
     except ImportError as exc:
