@@ -119,7 +119,7 @@ start_message
 #See ci/pytorch.sh for the TE_CI_SETUP_ONLY / TE_CI_SKIP_SETUP contract. Running
 #the CK JIT prebuild here once, sequentially, also removes the race this script
 #used to have with ci/pytorch.sh over the shared blob cache.
-if [ -z "$TE_CI_SKIP_SETUP$TE_CI_LIST_ONLY" ]; then
+if check_setup_needed; then
     install_prerequisites
     pip list | egrep "flax|fidle|jax|ml_dtypes|numpy|transformer_e|typing_ext"
     #check_test_jobs_requested
@@ -161,5 +161,5 @@ if [ -n "$TEST_JOBS_MODE" -a -n "$TEST_MGPU" ]; then
     done
 fi
 
-test -z "$TE_CI_SKIP_SETUP$TE_CI_LIST_ONLY" && ck_jit_prebuild list
+ck_jit_prebuild list
 return_run_results

@@ -151,6 +151,15 @@ check_list_all() {
     test -n "$TE_CI_LIST_ONLY" -a -n "$TE_CI_LIST_ALL"
 }
 
+# Whether this invocation is the one that should do container-wide setup. The
+# scheduler hoists that out of the per-item runs -- once per suite with
+# TE_CI_SETUP_ONLY, then TE_CI_SKIP_SETUP on every item it dispatches -- and list
+# mode sets nothing up at all, since it only prints what it would have run. Every
+# setup step goes through here rather than spelling the condition out again.
+check_setup_needed() {
+    test -z "$TE_CI_SKIP_SETUP$TE_CI_LIST_ONLY"
+}
+
 # Every host capability probe goes through here, selected by label. Returns 0 to
 # run the guarded tests, 1 to skip them.
 check_supported() {
@@ -456,7 +465,12 @@ pytest_run() {
 }
 
 PYTHON_TE_IMPORT="import sys; sys.path[:] = [p for p in sys.path if p not in ['', '.']]; import transformer_engine"
+# Usage: ck_jit_prebuild build|list
+# Build the CK JIT blob cache, or report what is in it. Like check_supported, the
+# guard lives with the thing it guards: a dispatched item or a list run returns
+# here without touching the cache, so no caller has to remember to ask.
 ck_jit_prebuild() {
+    check_setup_needed || return 0
     _prebuild_list="${TE_PATH}ci/ck_jit_prebuild.txt"
     if [ ! -f "$_prebuild_list" ]; then
         script_error "ck_jit_prebuild: blob list not found: $_prebuild_list"
