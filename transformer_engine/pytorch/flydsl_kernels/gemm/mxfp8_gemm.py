@@ -29,7 +29,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
@@ -83,18 +83,18 @@ def _compile_mx32_scale_pack_kernel(
     and no eager PyTorch shift/index/OR kernels.
     """
     if dim % 64 != 0:
-        raise ValueError(
+        raise FlyDSLUnsupportedError(
             f"Scale outer dimension={dim} must be a multiple of 64"
         )
     if qk % 4 != 0:
-        raise ValueError(
+        raise FlyDSLUnsupportedError(
             f"Scale K/32 dimension={qk} must be divisible by 4"
         )
 
     k128_tiles = qk // 4
     total_words = k128_tiles * dim
     if total_words % _SCALE_PACK_THREADS != 0:
-        raise ValueError(
+        raise FlyDSLUnsupportedError(
             f"Packed scale words={total_words} must be divisible by "
             f"{_SCALE_PACK_THREADS}"
         )
@@ -119,8 +119,22 @@ def _compile_mx32_scale_pack_kernel(
 
     @flyc.kernel(known_block_size=[_SCALE_PACK_THREADS, 1, 1])
     def kernel_pack_mx32_scales(src: fx.Tensor, dst: fx.Tensor):
-        src_rsrc = buffer_ops.create_buffer_resource(src, max_size=True)
-        dst_rsrc = buffer_ops.create_buffer_resource(dst, max_size=True)
+        # Address both buffers as flat 1-D arrays so a linear slice coordinate
+        # maps to base+off, matching the legacy buffer_load semantics. Building
+        # buffer tensors directly from the 2-D src/dst would make logical_divide
+        # walk the layout column-major and corrupt every strided access.
+        src_flat = fx.rocdl.make_buffer_tensor(
+            fx.Tensor(fx.make_view(fx.get_iter(src), fx.make_layout(dim * qk, 1))),
+            max_size=True,
+        )
+        dst_flat = fx.rocdl.make_buffer_tensor(
+            fx.Tensor(fx.make_view(fx.get_iter(dst), fx.make_layout(total_words, 1))),
+            max_size=True,
+        )
+        src_div = fx.logical_divide(src_flat, fx.make_layout(1, 1))
+        dst_div = fx.logical_divide(dst_flat, fx.make_layout(1, 1))
+        scale_load_atom = fx.make_copy_atom(fx.rocdl.BufferCopy8b(), fx.Uint8)
+        scale_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
 
         linear = (
             fx.Index(fx.block_idx.x) * fx.Index(_SCALE_PACK_THREADS)
@@ -140,22 +154,23 @@ def _compile_mx32_scale_pack_kernel(
                 + fx.Index(group * 16)
                 + row_within_16
             )
-            value_i8 = buffer_ops.buffer_load(
-                src_rsrc,
-                _source_offset(source_k32, source_row),
-                vec_width=1,
-                dtype=T.i8,
-            )
-            # Preserve the raw E8M0 byte when widening.  Going through Uint8
-            # avoids sign extension for scale bytes >= 0x80.
-            return fx.Int32(fx.Uint8(value_i8))
+            off = _source_offset(source_k32, source_row)
+            reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Uint8)
+            fx.copy(scale_load_atom, fx.slice(src_div, (None, fx.Int32(off))), reg)
+            value_u8 = fx.memref_load_vec(reg)[0]
+            # The byte load widens via sext, so mask to the low 8 bits to
+            # preserve the raw E8M0 byte for scales >= 0x80 before packing.
+            return fx.Int32(value_u8) & fx.Int32(0xFF)
 
         b0 = load_scale_byte(0)
         b1 = load_scale_byte(1)
         b2 = load_scale_byte(2)
         b3 = load_scale_byte(3)
         packed = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-        buffer_ops.buffer_store(packed, dst_rsrc, linear)
+        reg_i32 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
+        fx.memref_store_vec(Vec.filled(1, packed, fx.Int32), reg_i32)
+        fx.copy(scale_store_atom, reg_i32, fx.slice(dst_div, (None, fx.Int32(linear))))
+
 
     @flyc.jit
     def launch_pack_mx32_scales(
@@ -598,8 +613,11 @@ def _compile_kernel(
         gB = make_fp8_buffer_tensor(B, b_f8_ir_t)
         a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
         b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
-        as_rsrc = buffer_ops.create_buffer_resource(As, max_size=True)
-        bs_rsrc = buffer_ops.create_buffer_resource(Bs, max_size=True)
+        as_rsrc = fx.rocdl.make_buffer_tensor(As, max_size=True)
+        bs_rsrc = fx.rocdl.make_buffer_tensor(Bs, max_size=True)
+        as_div = fx.logical_divide(as_rsrc, fx.make_layout(1, 1))
+        bs_div = fx.logical_divide(bs_rsrc, fx.make_layout(1, 1))
+        scale_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
         tx = gpu.thread_id("x")
 
         num_blocks_m = c_m // BLOCK_M
@@ -661,17 +679,15 @@ def _compile_kernel(
         lane_div_16 = fx.get(coord_lane16, 0)
         lane_mod_16 = fx.get(coord_lane16, 1)
 
-        # C can exceed the signed-i32 element/byte offset range for large M*N.
-        # Bias the buffer descriptor base once per CTA using an index/i64 GEP,
-        # then store with only tile-local i32 offsets.  This keeps the hot store
-        # instruction form unchanged while avoiding i32 wrap in buffer_store().
-        c_n_idx_for_base = fx.Index(c_n)
-        c_tile_base_elems = bx_m_idx * c_n_idx_for_base + by_n_idx
-        c_tile_base_bytes = c_tile_base_elems * fx.Index(output_element_bytes)
-        c_rsrc = buffer_ops.create_buffer_resource(
-            C,
-            max_size=True,
-            base_byte_offset=c_tile_base_bytes,
+        # Per-CTA tile base in C elements, folded into each store's linear
+        # coordinate below (matching the scale-load addressing on this build;
+        # add_offset on a dynamic Index is unsupported here).
+        c_tile_base_elems = bx_m_idx * fx.Index(c_n) + by_n_idx
+        gC = fx.rocdl.make_buffer_tensor(C, max_size=True)
+        c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
+        c_store_atom = fx.make_copy_atom(
+            fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
+            output_fx_dtype,
         )
 
         PIN_ACC_BASE = 0
@@ -773,22 +789,16 @@ def _compile_kernel(
             rocdl.sched_barrier(0)
 
         def load_a_scale_row(k128, row):
-            packed = buffer_ops.buffer_load(
-                as_rsrc,
-                k128 * c_m_idx + bx_m_idx + row,
-                vec_width=1,
-                dtype=T.i32,
-            )
-            return packed
+            off = k128 * c_m_idx + bx_m_idx + row
+            reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
+            fx.copy(scale_ld_atom, fx.slice(as_div, (None, fx.Int32(off))), reg)
+            return fx.memref_load_vec(reg)[0]
 
         def load_b_scale_row(k128, row):
-            packed = buffer_ops.buffer_load(
-                bs_rsrc,
-                k128 * c_n_idx + by_n_idx + row,
-                vec_width=1,
-                dtype=T.i32,
-            )
-            return packed
+            off = k128 * c_n_idx + by_n_idx + row
+            reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
+            fx.copy(scale_ld_atom, fx.slice(bs_div, (None, fx.Int32(off))), reg)
+            return fx.memref_load_vec(reg)[0]
 
         def load_a_scale_subtile(k128, sm):
             subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
@@ -974,11 +984,13 @@ def _compile_kernel(
             col = subtile_n_idx * SUBTILE_N + fx.Index(ni * MFMA_N) + lane_mod_16
             for ii in range_constexpr(4):
                 row = row_base + fx.Index(ii)
-                c_idx = row * fx.Index(c_n) + col
+                c_idx = c_tile_base_elems + row * fx.Index(c_n) + col
                 value = Vec(acc)[ii]
                 if output_dtype != torch.float32:
                     value = value.to(output_fx_dtype)
-                buffer_ops.buffer_store(value, c_rsrc, c_idx)
+                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
+                fx.memref_store_vec(Vec.filled(1, value, output_fx_dtype), reg)
+                fx.copy(c_store_atom, reg, fx.slice(c_div, (None, fx.Int32(c_idx))))
 
 
         # Explicit register coordinates for HK-style four-quadrant mapping.

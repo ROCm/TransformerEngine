@@ -26,7 +26,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
@@ -516,17 +516,15 @@ def _compile_kernel(
         lane_div_16 = fx.get(coord_lane16, 0)
         lane_mod_16 = fx.get(coord_lane16, 1)
 
-        # C can exceed the signed-i32 element/byte offset range for large M*N.
-        # Bias the buffer descriptor base once per CTA using an index/i64 GEP,
-        # then store with only tile-local i32 offsets.  This keeps the hot store
-        # instruction form unchanged while avoiding i32 wrap in buffer_store().
-        c_n_idx_for_base = fx.Index(c_n)
-        c_tile_base_elems = bx_m_idx * c_n_idx_for_base + by_n_idx
-        c_tile_base_bytes = c_tile_base_elems * fx.Index(output_element_bytes)
-        c_rsrc = buffer_ops.create_buffer_resource(
-            C,
-            max_size=True,
-            base_byte_offset=c_tile_base_bytes,
+        # Per-CTA tile base in C elements, folded into each store's linear
+        # coordinate below (matching the scale-load addressing on this build;
+        # add_offset on a dynamic Index is unsupported here).
+        c_tile_base_elems = bx_m_idx * fx.Index(c_n) + by_n_idx
+        gC = fx.rocdl.make_buffer_tensor(C, max_size=True)
+        c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
+        c_store_atom = fx.make_copy_atom(
+            fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
+            output_fx_dtype,
         )
 
         PIN_ACC_BASE = 0
@@ -795,11 +793,13 @@ def _compile_kernel(
             col = subtile_n_idx * SUBTILE_N + fx.Index(ni * MFMA_N) + lane_mod_16
             for ii in range_constexpr(4):
                 row = row_base + fx.Index(ii)
-                c_idx = row * fx.Index(c_n) + col
+                c_idx = c_tile_base_elems + row * fx.Index(c_n) + col
                 value = Vec(acc)[ii]
                 if const_expr(output_dtype != torch.float32):
                     value = value.to(output_fx_dtype)
-                buffer_ops.buffer_store(value, c_rsrc, c_idx)
+                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
+                fx.memref_store_vec(Vec.filled(1, value, output_fx_dtype), reg)
+                fx.copy(c_store_atom, reg, fx.slice(c_div, (None, fx.Int32(c_idx))))
 
 
         # Explicit register coordinates for HK-style four-quadrant mapping.

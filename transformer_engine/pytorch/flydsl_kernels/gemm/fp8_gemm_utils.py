@@ -5,7 +5,7 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm, vector
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
-from flydsl.expr import arith, buffer_ops, const_expr, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
@@ -118,70 +118,6 @@ class G2SLoader:
         src = fx.slice(self.gl_src, (None, fx.Int32(self.gl_offsets[step])))
         dst = self._lds_dst_at(lds_dst, step)
         fx.copy(self.g2lds_atom, src, dst, soffset=fx.Int32(k_offset))
-
-
-class G2STransposeLoader:
-    """Stage a row-major 128x128 byte tile as swizzled physical [K, N].
-
-    The source is a row-major byte matrix ``[N, K]``. Each thread loads one
-    contiguous 16-byte K vector from global memory, then scatters those bytes
-    into the 128-byte XOR-swizzled LDS image consumed by
-    ``ds_read_b64_tr_b8``.
-
-    One ``load_one`` call covers one of the four 4-KiB staging passes for a
-    128x128 half-page.
-    """
-
-    def __init__(self, gl_src, leading_dim, wave_id):
-        self.gl_rsrc = buffer_ops.create_buffer_resource(gl_src, max_size=True)
-        self.leading_dim = fx.Int32(leading_dim)
-        self.wave_id = fx.Int32(wave_id)
-        self.lane_id = fx.thread_idx.x % 64
-        self.n_waves = fx.block_dim.x // 64
-        self.i8_lds_ptr_t = fx.PointerType.get(
-            elem_ty=ir.IntegerType.get_signless(8),
-            address_space=2,
-            alignment=1,
-        )
-
-    def _store_u8(self, lds_dst, byte_offset, value):
-        base_i32 = fx.Int32(fx.ptrtoint(lds_dst.ptr))
-        addr_i32 = base_i32 + fx.Int32(byte_offset)
-        i8_ptr = fx.inttoptr(self.i8_lds_ptr_t, addr_i32)
-        view = fx.make_view(i8_ptr, fx.make_layout(1, 1))
-        fx.memref_store_vec(Vec.filled(1, value, fx.Uint8), view)
-
-    def load_one(self, lds_dst, global_n_base, k_base, step):
-        """Load one 16-byte/thread pass and transpose it into LDS.
-
-        ``global_n_base`` is the first source N row of this 128-row half-page.
-        ``k_base`` is the first global K byte of the current K128 tile.
-        """
-        row = (
-            self.lane_id // fx.Int32(8)
-            + self.wave_id * fx.Int32(8)
-            + fx.Int32(step) * fx.Int32(self.n_waves * 8)
-        )
-        col = (self.lane_id % fx.Int32(8)) * fx.Int32(16)
-
-        global_byte = (
-            (fx.Int32(global_n_base) + row) * self.leading_dim
-            + fx.Int32(k_base)
-            + col
-        )
-        packed_i32x4 = buffer_ops.buffer_load(
-            self.gl_rsrc,
-            global_byte // fx.Int32(4),
-            vec_width=4,
-            dtype=T.i32,
-        )
-        packed_u8x16 = Vec(packed_i32x4).bitcast(fx.Uint8)
-
-        for byte_i in range_constexpr(16):
-            logical_k = col + fx.Int32(byte_i)
-            physical_k, physical_n = swizzle_128(logical_k, row)
-            lds_byte = physical_k * fx.Int32(128) + physical_n
-            self._store_u8(lds_dst, lds_byte, packed_u8x16[byte_i])
 
 
 def pack_i32x4_i32x8(lo, hi):
