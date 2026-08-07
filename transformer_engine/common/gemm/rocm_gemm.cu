@@ -188,6 +188,8 @@ static hipDataType get_hipblaslt_dtype(const transformer_engine::DType t) {
       return te_fp8_fnuz() ? HIP_R_8F_E4M3_FNUZ : HIP_R_8F_E4M3;
     case DType::kFloat8E5M2:
       return te_fp8_fnuz() ? HIP_R_8F_E5M2_FNUZ: HIP_R_8F_E5M2;
+    case DType::kFloat4E2M1:
+      return HIP_R_4F_E2M1;
     default:
       NVTE_ERROR("Invalid type");
   }
@@ -435,7 +437,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       }
     }
   } else if (is_mxfp_scaling(A.scaling_mode)) {
-    // MXFP8
+    // MXFP8, MXFP4
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
     if (is_A_transposed) {
@@ -487,7 +489,9 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       }
     }
   } else if (is_mxfp_scaling(B.scaling_mode)) {
-    // MXFP8
+    // MXFP8 and MXFP4 (is_mxfp_scaling() covers both). The FP4 data dtype flows
+    // through B.data.dtype and leading dims are in elements (hipBLASLt handles the
+    // two-per-byte FP4 packing), so both formats share this canonicalization.
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
     if (is_B_transposed) {
@@ -801,6 +805,7 @@ static std::unordered_map<hipDataType, std::string_view> type_name_map = {
   {HIP_R_8F_E5M2_FNUZ, "float8e5m2"},
   {HIP_R_8F_E4M3, "float8e4m3"},
   {HIP_R_8F_E5M2, "float8e5m2"},
+  {HIP_R_4F_E2M1, "float4e2m1"},
 };
 static NameMapper<hipDataType> typeNameMapper(type_name_map);
 
@@ -1291,10 +1296,15 @@ void hipblaslt_gemm(const Tensor *inputA,
   //   alpha'[i] = alpha * amax_A * amax_B / (fp4_max^2 * fp8_max^2)
   // Alpha is passed as a device vector of length m via
   // HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST. Beta stays on host.
-  const bool use_fp4 = is_fp4_dtype(param.Atype) || is_fp4_dtype(param.Btype);
+  //
+  // Only NVFP4 uses this dequant fallback. MXFP4 (also an FP4 data dtype) has a native
+  // hipBLASLt path, so gate on the scaling mode rather than the FP4 data dtype (which
+  // would match both).
+  const bool use_nvfp4 =
+      is_nvfp_scaling(inputA->scaling_mode) || is_nvfp_scaling(inputB->scaling_mode);
   const void* alpha_ptr = static_cast<const void*>(&alpha);
   const void* beta_ptr  = static_cast<const void*>(&beta);
-  if (use_fp4) {
+  if (use_nvfp4) {
     dequant_fp4_gemm_inputs(param, *inputA, transa, *inputB, transb,
                             m, n, k, alpha, workspace, workspaceSize,
                             &alpha_ptr, stream);
@@ -1335,6 +1345,8 @@ void hipblaslt_gemm(const Tensor *inputA,
   void *pre_gelu_out = outputPreGelu->data.dptr;
   const bool gelu = pre_gelu_out != nullptr;
   const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
+  // MXFP4 native path: FP4 E2M1 data + UE8M0 block-32 scales through hipBLASLt.
+  const bool use_mxfp4 = is_mxfp4_scaling(inputA->scaling_mode);
 
   const hipDataType A_type = get_hipblaslt_dtype(param.Atype);
   const hipDataType B_type = get_hipblaslt_dtype(param.Btype);
@@ -1417,7 +1429,7 @@ void hipblaslt_gemm(const Tensor *inputA,
 #else
     constexpr int scaling_mode = 0;
 #endif
-  if (use_fp8) {
+  if (use_fp8 || use_mxfp4) {
     // Split accumulator.
     const int8_t fastAccuMode = (use_split_accumulator) ? 0 : 1;
     /*
@@ -1519,18 +1531,18 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                    HIPBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
 
-    if (use_fp4) {
+    if (use_nvfp4) {
     int32_t pointer_mode = HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST;
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
         operationDesc, HIPBLASLT_MATMUL_DESC_POINTER_MODE,
         &pointer_mode, sizeof(pointer_mode)));
   }
 
-  GemmAlgoCache::Key gemm_cfg(algoCache.device_cap(device_id), A_type, B_type, D_type, 
-    use_fp8 ? bias_type : (hipDataType)-1,
-    (use_fp8 && gelu) ? aux_type : (hipDataType)-1,
+  GemmAlgoCache::Key gemm_cfg(algoCache.device_cap(device_id), A_type, B_type, D_type,
+    (use_fp8 || use_mxfp4) ? bias_type : (hipDataType)-1,
+    ((use_fp8 || use_mxfp4) && gelu) ? aux_type : (hipDataType)-1,
     m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, scaling_mode, epilogue,
-    use_fp4);
+    use_nvfp4);
   GemmAlgoCache::Algo cached_algo;
   if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
   {
@@ -1974,6 +1986,27 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
     NVTE_CHECK((n % 16) == 0, "GEMM N dimension must be multiple of 16 for MXFP8 scaling (got N=", n, ")");
 #ifndef USE_HIPKITTENS_GEMM
     NVTE_CHECK(inputBias->data.dptr == nullptr, "hipBLASlt MXFP8 GEMM does not support bias.");
+#endif
+  }
+  // MXFP4 GEMM capability gate. hipBLASLt shipped the MXFP4 kernels in >=1.3.
+  if (inputA->scaling_mode == NVTE_MXFP4_1D_SCALING ||
+      inputB->scaling_mode == NVTE_MXFP4_1D_SCALING) {
+#if (HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3)
+    NVTE_CHECK(cuda::sm_arch() == 95, "MXFP4 GEMM is only supported on gfx950");
+    NVTE_CHECK((k % 256) == 0,
+               "hipBLASLt MXFP4 GEMM requires K to be a multiple of 256 (got K=", k, ")");
+    NVTE_CHECK((m % 32) == 0, "hipBLASLt MXFP4 GEMM requires M to be a multiple of 32 (got M=", m, ")");
+    NVTE_CHECK((n % 32) == 0, "hipBLASLt MXFP4 GEMM requires N to be a multiple of 32 (got N=", n, ")");
+    NVTE_CHECK(outputD->data.dtype == DType::kBFloat16 || outputD->data.dtype == DType::kFloat32,
+               "hipBLASLt MXFP4 GEMM supports only BF16 or FP32 output");
+    NVTE_CHECK(inputBias->data.dptr == nullptr,
+               "hipBLASLt MXFP4 GEMM does not support fused bias");
+    NVTE_CHECK(outputPreGelu->data.dptr == nullptr,
+               "hipBLASLt MXFP4 GEMM does not support fused GELU");
+    NVTE_CHECK(*reinterpret_cast<const float *>(beta_ptr) == 0.0f,
+               "hipBLASLt MXFP4 GEMM does not support accumulate (beta != 0)");
+#else
+    NVTE_ERROR("MXFP4 GEMM requires hipBLASLt >= 1.3");
 #endif
   }
 

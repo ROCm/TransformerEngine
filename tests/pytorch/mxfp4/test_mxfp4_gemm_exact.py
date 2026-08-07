@@ -2,11 +2,14 @@
 #
 # See LICENSE for license information.
 
-"""MXFP4 GEMM tests: native AITER a4w4 GEMM vs Python reference GEMM.
+"""MXFP4 GEMM tests: native GEMM (AITER a4w4 or hipBLASLt) vs Python reference GEMM.
 
-Requires the aiter package (ROCm gfx950 only).
+Requires the aiter package (ROCm gfx950 only). The hipBLASLt backend is exercised by
+setting NVTE_ROCM_USE_HIPBLASLT_MXFP4=1, which routes MXFP4 GEMMs through the native
+hipBLASLt path (rocm_gemm.cu) instead of AITER.
 """
 
+import os
 import pytest
 import torch
 import transformer_engine.pytorch as te
@@ -27,92 +30,63 @@ except ImportError:
 BLOCK_SIZE = 32
 
 
-def check_mxfp4_gemm_versus_reference(
-    x_dtype: torch.dtype,
-    w_dtype: torch.dtype,
-    out_dtype: torch.dtype,
-    M: int,
-    K: int,
-    N: int,
-    accumulate: bool,
-):
+def _quantize_pair(x, w, M, K, N, x_dtype, w_dtype, device, *, shuffle: bool):
+    """Quantize (x, w) to MXFP4 with either AITER-shuffled or plain (hipBLASLt) layout."""
     te_dtype = tex.DType.kFloat4E2M1
-    device = "cuda"
-    seed = 0
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-
-    x = torch.randn((M, K), dtype=x_dtype, device=device)
-    w = torch.randn((N, K), dtype=w_dtype, device=device)
-
-    if accumulate:
-        out = torch.randn((M, N), dtype=out_dtype, device=device)
-    else:
-        out = None
-
-    # Native MXFP4 quantization (shuffled for AITER GEMM)
+    # hipBLASLt consumes plain (un-shuffled) FP4 data + plain scales; AITER needs the
+    # 16x16 weight shuffle and swizzled scales.
     x_quantizer = MXFP4Quantizer(
         fp4_dtype=te_dtype,
         rowwise=True,
         columnwise=True,
         shuffle_rowwise_data=False,
-        shuffle_columnwise_data=False,
-        with_gemm_swizzled_scales=True,
+        shuffle_columnwise_data=shuffle,
+        with_gemm_swizzled_scales=shuffle,
         use_hadamard=False,
     )
     w_quantizer = MXFP4Quantizer(
         fp4_dtype=te_dtype,
         rowwise=True,
         columnwise=True,
-        shuffle_rowwise_data=True,
-        shuffle_columnwise_data=True,
-        with_gemm_swizzled_scales=True,
+        shuffle_rowwise_data=shuffle,
+        shuffle_columnwise_data=shuffle,
+        with_gemm_swizzled_scales=shuffle,
         use_hadamard=False,
     )
-
-    # Reference quantization (plain layout, no shuffle)
-    x_quantizer_ref = MXFP4Quantizer(
-        fp4_dtype=te_dtype,
-        rowwise=True,
-        columnwise=True,
-        shuffle_rowwise_data=False,
-        shuffle_columnwise_data=False,
-        with_gemm_swizzled_scales=False,
-        use_hadamard=False,
-    )
-    w_quantizer_ref = MXFP4Quantizer(
-        fp4_dtype=te_dtype,
-        rowwise=True,
-        columnwise=True,
-        shuffle_rowwise_data=False,
-        shuffle_columnwise_data=False,
-        with_gemm_swizzled_scales=False,
-        use_hadamard=False,
-    )
-
     x_mxfp4 = x_quantizer.make_empty((M, K), dtype=x_dtype, device=device, requires_grad=False)
     x_mxfp4 = x_quantizer.update_quantized(x, x_mxfp4)
     w_mxfp4 = w_quantizer.make_empty((N, K), dtype=w_dtype, device=device, requires_grad=False)
     w_mxfp4 = w_quantizer.update_quantized(w, w_mxfp4)
+    return x_mxfp4, w_mxfp4
 
-    x_mxfp4_ref = x_quantizer_ref.make_empty((M, K), dtype=x_dtype, device=device, requires_grad=False)
-    x_mxfp4_ref = x_quantizer_ref.update_quantized(x, x_mxfp4_ref)
-    w_mxfp4_ref = w_quantizer_ref.make_empty((N, K), dtype=w_dtype, device=device, requires_grad=False)
-    w_mxfp4_ref = w_quantizer_ref.update_quantized(w, w_mxfp4_ref)
 
-    # Extract un-shuffled quantized data for the reference GEMM
-    qx_data = x_mxfp4_ref._rowwise_data.view(dtype=torch.uint8)[:M, :]
-    qw_data = w_mxfp4_ref._rowwise_data.view(dtype=torch.uint8)[:N, :]
-    sx_native = x_mxfp4_ref._rowwise_scale_inv
-    sw_native = w_mxfp4_ref._rowwise_scale_inv
+def _reference_gemm(x, w, M, K, N, out_dtype, out, accumulate, device):
+    """MXFP4 reference GEMM: quantize plain, dequant-matmul via MXFP4QuantizerRef."""
+    te_dtype = tex.DType.kFloat4E2M1
+    ref_quantizer_cfg = dict(
+        fp4_dtype=te_dtype,
+        rowwise=True,
+        columnwise=True,
+        shuffle_rowwise_data=False,
+        shuffle_columnwise_data=False,
+        with_gemm_swizzled_scales=False,
+        use_hadamard=False,
+    )
+    x_ref_q = MXFP4Quantizer(**ref_quantizer_cfg)
+    w_ref_q = MXFP4Quantizer(**ref_quantizer_cfg)
+    x_ref = x_ref_q.make_empty((M, K), dtype=x.dtype, device=device, requires_grad=False)
+    x_ref = x_ref_q.update_quantized(x, x_ref)
+    w_ref = w_ref_q.make_empty((N, K), dtype=w.dtype, device=device, requires_grad=False)
+    w_ref = w_ref_q.update_quantized(w, w_ref)
 
+    qx_data = x_ref._rowwise_data.view(dtype=torch.uint8)[:M, :]
+    qw_data = w_ref._rowwise_data.view(dtype=torch.uint8)[:N, :]
     expected_scale_cols = K // BLOCK_SIZE
-    sx_trimmed = sx_native[:M, :expected_scale_cols]
-    sw_trimmed = sw_native[:N, :expected_scale_cols]
+    sx_trimmed = x_ref._rowwise_scale_inv[:M, :expected_scale_cols]
+    sw_trimmed = w_ref._rowwise_scale_inv[:N, :expected_scale_cols]
 
-    # Reference GEMM
     ref_quantizer = MXFP4QuantizerRef(rowwise=True, columnwise=True)
-    y_ref = ref_quantizer.qgemm(
+    return ref_quantizer.qgemm(
         qx=qx_data,
         qw=qw_data,
         m_params=None,  # MMParams not used in reference
@@ -124,7 +98,8 @@ def check_mxfp4_gemm_versus_reference(
         accumulate=accumulate,
     )
 
-    # Native AITER GEMM via general_gemm
+
+def _native_gemm(w_mxfp4, x_mxfp4, out_dtype, out, accumulate):
     from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
 
     y_native, *_ = general_gemm(
@@ -137,14 +112,48 @@ def check_mxfp4_gemm_versus_reference(
         out=out.clone() if accumulate else None,
         accumulate=accumulate,
     )
+    return y_native
+
+
+def _sanitize(t):
+    return torch.where(t.isnan(), torch.zeros_like(t), t)
+
+
+def check_mxfp4_gemm_versus_reference(
+    x_dtype: torch.dtype,
+    w_dtype: torch.dtype,
+    out_dtype: torch.dtype,
+    M: int,
+    K: int,
+    N: int,
+    accumulate: bool,
+    backend: str,
+):
+    device = "cuda"
+    torch.manual_seed(0)
+    torch.cuda.manual_seed(0)
+
+    x = torch.randn((M, K), dtype=x_dtype, device=device)
+    w = torch.randn((N, K), dtype=w_dtype, device=device)
+    out = torch.randn((M, N), dtype=out_dtype, device=device) if accumulate else None
+
+    shuffle = backend == "aiter"
+    x_mxfp4, w_mxfp4 = _quantize_pair(
+        x, w, M, K, N, x_dtype, w_dtype, device, shuffle=shuffle
+    )
+
+    y_ref = _reference_gemm(x, w, M, K, N, out_dtype, out, accumulate, device)
+    y_native = _native_gemm(w_mxfp4, x_mxfp4, out_dtype, out, accumulate)
 
     assert y_ref is not y_native
     assert not torch.isnan(y_ref.float()).all(), "All reference elements are NaN"
 
-    y_ref = torch.where(y_ref.isnan(), torch.zeros_like(y_ref), y_ref)
-    y_native = torch.where(y_native.isnan(), torch.zeros_like(y_native), y_native)
+    torch.testing.assert_close(_sanitize(y_native), _sanitize(y_ref), atol=8e-3, rtol=8e-3)
 
-    torch.testing.assert_close(y_native, y_ref, atol=8e-3, rtol=8e-3)
+
+_BACKENDS = ["aiter"]
+if _use_hipblaslt := os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0") == "1":
+    _BACKENDS = ["hipblaslt"]
 
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
@@ -163,6 +172,7 @@ def check_mxfp4_gemm_versus_reference(
 @pytest.mark.parametrize("w_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
+@pytest.mark.parametrize("backend", _BACKENDS)
 def test_mxfp4_gemm_versus_reference(
     M: int,
     K: int,
@@ -170,8 +180,17 @@ def test_mxfp4_gemm_versus_reference(
     x_dtype: torch.dtype,
     w_dtype: torch.dtype,
     out_dtype: torch.dtype,
-    accumulate: bool
+    accumulate: bool,
+    backend: str,
 ):
+    # The hipBLASLt MXFP4 path requires K % 256 == 0 (TE's padded UE8M0 scale layout; K%128 runs
+    # but is numerically wrong -- design doc §3.5/§10) and does not support accumulate yet
+    # (§10 #4). AITER covers the full matrix.
+    if backend == "hipblaslt":
+        if K % 256 != 0:
+            pytest.skip("hipBLASLt MXFP4 currently requires K to be a multiple of 256")
+        if accumulate:
+            pytest.skip("hipBLASLt MXFP4 does not support accumulate yet")
     check_mxfp4_gemm_versus_reference(
         x_dtype=x_dtype,
         w_dtype=w_dtype,
@@ -180,4 +199,49 @@ def test_mxfp4_gemm_versus_reference(
         K=K,
         N=N,
         accumulate=accumulate,
+        backend=backend,
     )
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.skipif(not _aiter_available, reason="aiter package not available")
+@pytest.mark.skipif(
+    os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0") != "1",
+    reason="hipBLASLt MXFP4 backend not enabled (set NVTE_ROCM_USE_HIPBLASLT_MXFP4=1)",
+)
+@pytest.mark.parametrize(
+    "M, K, N",
+    [
+        (256, 256, 256),
+        (1024, 1024, 1024),
+        (4096, 512, 3072),
+    ],
+)
+def test_mxfp4_gemm_hipblaslt_matches_aiter(M: int, K: int, N: int):
+    """Cross-check: same inputs, hipBLASLt vs AITER MXFP4 GEMM produce close results."""
+    device = "cuda"
+    dtype = torch.bfloat16
+    torch.manual_seed(0)
+    torch.cuda.manual_seed(0)
+
+    x = torch.randn((M, K), dtype=dtype, device=device)
+    w = torch.randn((N, K), dtype=dtype, device=device)
+
+    prev = os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4")
+    try:
+        # AITER path (shuffled operands)
+        os.environ["NVTE_ROCM_USE_HIPBLASLT_MXFP4"] = "0"
+        x_a, w_a = _quantize_pair(x, w, M, K, N, dtype, dtype, device, shuffle=True)
+        y_aiter = _native_gemm(w_a, x_a, dtype, None, False)
+
+        # hipBLASLt path (plain operands)
+        os.environ["NVTE_ROCM_USE_HIPBLASLT_MXFP4"] = "1"
+        x_h, w_h = _quantize_pair(x, w, M, K, N, dtype, dtype, device, shuffle=False)
+        y_hip = _native_gemm(w_h, x_h, dtype, None, False)
+    finally:
+        if prev is None:
+            os.environ.pop("NVTE_ROCM_USE_HIPBLASLT_MXFP4", None)
+        else:
+            os.environ["NVTE_ROCM_USE_HIPBLASLT_MXFP4"] = prev
+
+    torch.testing.assert_close(_sanitize(y_hip), _sanitize(y_aiter), atol=8e-3, rtol=8e-3)

@@ -1753,12 +1753,21 @@ class MXFP4BlockScalingRecipeState(RecipeState):
 
         use_hadamard = self.recipe.use_hadamard
 
+        # The hipBLASLt MXFP4 GEMM path consumes plain (un-shuffled) FP4 data and plain
+        # (non-swizzled) UE8M0 scales; only the AITER a4w4 backend needs the 16x16 weight
+        # shuffle and swizzled scales
+        use_hipblaslt = os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0") == "1"
+        swizzled_scales = not use_hipblaslt
+
         if self.mode == "forward":
 
             def _make_quantizer(idx: int):
                 is_activation = idx % 3 == 0
                 is_weight = idx % 3 == 1
-                if is_activation:
+                if use_hipblaslt:
+                    shuffle_rowwise_data = False
+                    shuffle_columnwise_data = False
+                elif is_activation:
                     shuffle_rowwise_data = False
                     shuffle_columnwise_data = True
                 elif is_weight:
@@ -1773,7 +1782,7 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                     columnwise=True,
                     shuffle_rowwise_data=shuffle_rowwise_data,
                     shuffle_columnwise_data=shuffle_columnwise_data,
-                    with_gemm_swizzled_scales=True,
+                    with_gemm_swizzled_scales=swizzled_scales,
                     use_hadamard=use_hadamard,
                 )
 
@@ -1787,7 +1796,7 @@ class MXFP4BlockScalingRecipeState(RecipeState):
                     columnwise=True,
                     shuffle_rowwise_data=False,
                     shuffle_columnwise_data=False,
-                    with_gemm_swizzled_scales=True,
+                    with_gemm_swizzled_scales=swizzled_scales,
                     use_hadamard=use_hadamard,
                 )
                 for _ in range(self.num_quantizers)

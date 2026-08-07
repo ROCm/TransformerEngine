@@ -36,6 +36,16 @@ std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes_mxfp8 = {
   {4096, 16384, 4096},
 };
 
+// MXFP4 (m, k, n): M/N multiples of 32 (block size), K a multiple of 256 (see rocm_gemm.cu
+// gate; K%128-not-%256 runs but is numerically wrong through TE's padded-scale layout).
+// Square + non-square.
+std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes_mxfp4 = {
+  {256, 256, 256},
+  {128, 256, 512},
+  {768, 3072, 4096},
+  {4096, 512, 3072},
+};
+
 // ============================================================================
 // Production LLM MXFP8 GEMM shapes.
 // ============================================================================
@@ -853,6 +863,122 @@ void performDqTest(const TestParams &params) {
 }
 #endif // __HIP_PLATFORM_AMD__
 
+#ifdef __HIP_PLATFORM_AMD__
+// FP4 E2M1 value table (matches rocm_gemm.cu / OCP microscaling).
+static const float kHostFP4E2M1Table[16] = {
+    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
+   -0.0f,-0.5f,-1.0f,-1.5f,-2.0f,-3.0f,-4.0f,-6.0f};
+
+// CPU-dequantize the row-wise data of an MXFP4 test::Tensor (E2M1 packed two-per-byte +
+// UE8M0 block-32 scales, padded scale layout) into the row-wise BF16 buffer of dst, then
+// upload. Used to build a high-precision reference for the native MXFP4 GEMM.
+static void dequantize_mxfp4_rowwise_to_bf16(test::Tensor &src_fp4, test::Tensor &dst_bf16) {
+  const NVTEShape data_shape = src_fp4.rowwise_shape();       // logical [R, C]
+  NVTE_CHECK(data_shape.ndim == 2, "Expected 2D MXFP4 data");
+  const size_t R = data_shape.data[0];
+  const size_t C = data_shape.data[1];
+  NVTE_CHECK((C % 2) == 0, "MXFP4 columns must be even (two-per-byte packing)");
+
+  const size_t packed_bytes = R * (C / 2);
+  std::vector<uint8_t> h_data(packed_bytes);
+  NVTE_CHECK_CUDA(cudaMemcpy(h_data.data(), src_fp4.rowwise_dptr(), packed_bytes,
+                             cudaMemcpyDeviceToHost));
+
+  const NVTEShape scale_shape = src_fp4.rowwise_scale_inv_shape();  // padded [Ypad, Xpad]
+  NVTE_CHECK(scale_shape.ndim == 2, "Expected 2D MXFP4 scale_inv");
+  const size_t x_pad = scale_shape.data[1];
+  const size_t num_scales = scale_shape.data[0] * scale_shape.data[1];
+  std::vector<uint8_t> h_scale(num_scales);
+  NVTE_CHECK_CUDA(cudaMemcpy(h_scale.data(), src_fp4.rowwise_scale_inv_dptr(), num_scales,
+                             cudaMemcpyDeviceToHost));
+
+  bf16 *dst = dst_bf16.rowwise_cpu_dptr<bf16>();
+  for (size_t r = 0; r < R; ++r) {
+    for (size_t c = 0; c < C; ++c) {
+      const uint8_t byte = h_data[r * (C / 2) + c / 2];
+      const uint8_t nib = (c & 1) ? (byte >> 4) : (byte & 0xF);
+      const uint8_t e8m0 = h_scale[r * x_pad + c / 32];
+      const float scale = exp2f(static_cast<float>(e8m0) - 127.0f);
+      dst[r * C + c] = static_cast<bf16>(kHostFP4E2M1Table[nib] * scale);
+    }
+  }
+  dst_bf16.from_cpu();
+}
+
+// Native MXFP4 (hipBLASLt) GEMM vs a BF16 reference GEMM built by dequantizing the same
+// MXFP4 operands. Restricted to TN layout (the F4F4 kernels are TN in practice), so both
+// operands consume row-wise data.
+template <typename D_Type>
+void performMxfp4Test(const TestParams &params) {
+  DType dtype = TypeInfo<D_Type>::dtype;
+
+  cudaDeviceProp prop;
+  (void)cudaGetDeviceProperties(&prop, 0);
+
+  // hipBLASLt native MXFP4 GEMM requires gfx950 (ROCm >= 7.13 / hipBLASLt >= 1.3).
+  if (!(prop.major == 9 && prop.minor == 5)) {
+    GTEST_SKIP() << "MXFP4 GEMM is only supported on gfx950";
+  }
+  if (!(params.transa && !params.transb)) {
+    GTEST_SKIP() << "MXFP4 GEMM test only covers TN layout";
+  }
+  if (params.m % 32 || params.n % 32 || params.k % 256) {
+    GTEST_SKIP() << "MXFP4 requires M, N multiples of 32 and K a multiple of 256";
+  }
+
+  // TN: A is [m, k], B is [n, k]; both consumed row-wise.
+  TShape a_shape = TShape{params.m, params.k};
+  TShape b_shape = TShape{params.n, params.k};
+
+  Tensor A_src("A", a_shape, DType::kBFloat16);
+  Tensor B_src("B", b_shape, DType::kBFloat16);
+  fillUniform(&A_src);
+  fillUniform(&B_src);
+
+  Tensor A_fp4("A_fp4", a_shape, DType::kFloat4E2M1, /*rowwise=*/true, /*columnwise=*/false,
+               NVTE_MXFP4_1D_SCALING);
+  Tensor B_fp4("B_fp4", b_shape, DType::kFloat4E2M1, /*rowwise=*/true, /*columnwise=*/false,
+               NVTE_MXFP4_1D_SCALING);
+  nvte_quantize(A_src.data(), A_fp4.data(), 0);
+  nvte_quantize(B_src.data(), B_fp4.data(), 0);
+
+  // High-precision reference operands = exact dequant of the MXFP4 data.
+  Tensor A_ref("A_ref", a_shape, DType::kBFloat16);
+  Tensor B_ref("B_ref", b_shape, DType::kBFloat16);
+  dequantize_mxfp4_rowwise_to_bf16(A_fp4, A_ref);
+  dequantize_mxfp4_rowwise_to_bf16(B_fp4, B_ref);
+
+  Tensor bias;
+  if (params.use_bias) {
+    bias = Tensor("bias", TShape{params.m}, dtype);
+    fillUniform(&bias);
+  }
+  Tensor pre_gelu_out;
+  Tensor Workspace("Workspace", TShape{67'108'864}, DType::kByte);
+
+  Tensor D("D", TShape{params.n, params.m}, dtype);
+  nvte_cublas_gemm(A_fp4.data(), B_fp4.data(), D.data(), bias.data(), pre_gelu_out.data(),
+                   params.transa, params.transb, false, Workspace.data(), false, false,
+                   prop.multiProcessorCount, 0);
+  D.to_cpu();
+
+  Tensor D_ref("D_ref", TShape{params.n, params.m}, dtype);
+  nvte_cublas_gemm(A_ref.data(), B_ref.data(), D_ref.data(), bias.data(), pre_gelu_out.data(),
+                   params.transa, params.transb, false, Workspace.data(), false, false,
+                   prop.multiProcessorCount, 0);
+  D_ref.to_cpu();
+
+  (void)cudaDeviceSynchronize();
+  auto err = cudaGetLastError();
+  ASSERT_EQ(err, cudaSuccess) << cudaGetErrorString(err);
+
+  // FP4 is coarse; the native kernel and the BF16 reference differ mainly in accumulation.
+  const double atol = 3e-2;
+  const double rtol = 6e-2;
+  compareResults("D", D, D_ref.rowwise_cpu_dptr<D_Type>(), true, atol, rtol);
+}
+#endif // __HIP_PLATFORM_AMD__
+
 #define MAKE_TEST_PARAMS(P_)                                                    \
   bool force_hipblaslt_ = std::get<5>(GetParam());                              \
   if (force_hipblaslt_) {                                                       \
@@ -986,6 +1112,43 @@ INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP8, DqGEMMTestSuite,
                            return MKN(std::get<0>(info.param)) + "x" +
                                   TN(std::get<3>(info.param)) + "x" +
                                   (std::get<5>(info.param) ? "HB" : "HK");
+                         });
+
+// ============================================================================
+// Native MXFP4 (hipBLASLt) GEMM tests
+// ============================================================================
+class Mxfp4GEMMTestSuite
+    : public ::testing::TestWithParam<
+          std::tuple<std::tuple<size_t, size_t, size_t>, bool, Layout>> {};
+
+#define MAKE_MXFP4_GEMM_TEST(NAME_, D_)                                        \
+  TEST_P(Mxfp4GEMMTestSuite, NAME_) {                                          \
+    const auto shape = std::get<0>(GetParam());                               \
+    TestParams params = {.m = std::get<0>(shape),                             \
+                         .k = std::get<1>(shape),                             \
+                         .n = std::get<2>(shape),                             \
+                         .use_bias = std::get<1>(GetParam()),                 \
+                         .use_gelu = false,                                   \
+                         .transa = std::get<2>(GetParam()).first,             \
+                         .transb = std::get<2>(GetParam()).second,            \
+                         .scaling_mode = NVTEScalingMode::NVTE_MXFP4_1D_SCALING, \
+                         .force_hipblaslt = false};                           \
+    performMxfp4Test<D_>(params);                                             \
+  }
+
+// TE MXFP4 path supports only BF16/FP32 output (FP16 F4H kernel exists in hipBLASLt but TE's
+// descriptor finds "no suitable algorithms" for it -- see §3.5/§10.1) and no bias/GELU epilogue.
+MAKE_MXFP4_GEMM_TEST(Testbf16, bf16)
+MAKE_MXFP4_GEMM_TEST(Testfp32, fp32)
+
+INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP4, Mxfp4GEMMTestSuite,
+                         ::testing::Combine(::testing::ValuesIn(test_case_sizes_mxfp4),
+                                            ::testing::Values(false),         // bias unsupported
+                                            ::testing::Values(kTN)),          // TN only
+                         [](const testing::TestParamInfo<Mxfp4GEMMTestSuite::ParamType>& info) {
+                           return MKN(std::get<0>(info.param)) + "x" +
+                                  (std::get<1>(info.param) ? "bias" : "nobias") + "x" +
+                                  TN(std::get<2>(info.param));
                          });
 
 // ============================================================================

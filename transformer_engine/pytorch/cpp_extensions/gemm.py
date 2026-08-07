@@ -427,21 +427,23 @@ def general_gemm(
     # Use bfloat16 as default bias_dtype
     bias_dtype = TE_DType[torch.bfloat16 if bias is None else bias.dtype]
 
-    # MXFP4 GEMM: route to AITER a4w4 ASM kernels
+    # MXFP4 GEMM: route to AITER a4w4 ASM kernels, unless the hipBLASLt backend is
+    # opted in via NVTE_ROCM_USE_HIPBLASLT_MXFP4
     from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
 
     if isinstance(A, MXFP4TensorStorage) or isinstance(B, MXFP4TensorStorage):
-        result = mxfp4_gemm(
-            A,
-            B,
-            layout=layout,
-            out_dtype=out_dtype if out_dtype is not None else torch.bfloat16,
-            bias=bias,
-            out=out,
-            grad=grad,
-            accumulate=accumulate,
-        )
-        return result, None, None, None
+        if os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0") != "1":
+            result = mxfp4_gemm(
+                A,
+                B,
+                layout=layout,
+                out_dtype=out_dtype if out_dtype is not None else torch.bfloat16,
+                bias=bias,
+                out=out,
+                grad=grad,
+                accumulate=accumulate,
+            )
+            return result, None, None, None
 
     if isinstance(A, Float8BlockwiseQTensorStorage) or isinstance(B, Float8BlockwiseQTensorStorage):
         # FP8 block-scaling requires split accumulator
