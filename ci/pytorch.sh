@@ -38,18 +38,6 @@ run_default_fa_lbl() {
     fi
 }
 
-check_mxfp8_supported() {
-    #Guard MXFP8-only test filters, which collect no tests on unsupported archs
-    check_list_all && return 0
-    _result=$(NVTE_ROCM_ENABLE_MXFP8=1 python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.quantization import is_mxfp8_available; print(is_mxfp8_available())" 2>/dev/null)
-    if [ "$_result" = "True" ]; then
-        return 0
-    else
-        echo "MXFP8 is not supported on this device, skipping MXFP8-only tests" >&2
-        return 1
-    fi
-}
-
 run_test_config(){
     echo ==== Run with Fused attention backend: $_fus_attn ====
     #_WORKERS_COUNT=$TEST_WORKERS
@@ -91,7 +79,7 @@ run_test_config(){
     run 1 test_jit.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py
-    check_mxfp8_supported && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "mxfp8" 1 test_numerics.py -k "MXFP8BlockScaling and 126m and not grouped"
+    check_supported mxfp8 && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "mxfp8" 1 test_numerics.py -k "MXFP8BlockScaling and 126m and not grouped"
     run_default_fa 1 test_nvfp4_fsdp2_hooks.py
     run_default_fa 1 test_permutation.py
     run_default_fa 1 test_recipe.py
@@ -130,7 +118,7 @@ run_test_config_mgpu(){
     #this test is not really mGPU but time sensitive so run it here because sGPU tests
     #run in parallel on CI and it affects timing
     run_default_fa 1 test_gemm_sm_count.py
-    run_default_fa 3 test_sanity_import.py
+    run_default_fa_lbl "mgpu" 3 test_sanity_import.py
     run_default_fa 3 distributed/test_cast_master_weights_to_fp8.py
     run_default_fa 3 distributed/test_comm_gemm_overlap.py
     run_default_fa 2 distributed/test_fusible_ops.py
@@ -173,17 +161,6 @@ if [ -n "$SINGLE_CONFIG" ]; then
     exit $?
 fi
 
-check_flash_attn_installed() {
-    check_list_all && return 0
-    _result=$(python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils; print(FlashAttentionUtils.is_installed)" 2>/dev/null)
-    if [ "$_result" = "True" ]; then
-        return 0
-    else
-        echo "Flash attention is not installed" >&2
-        return 1
-    fi
-}
-
 #Master script mode: prepare testing prerequisites first
 start_message
 #Prerequisites and the CK JIT cache are container-wide state, so a scheduler
@@ -219,7 +196,7 @@ for _fus_attn in auto flash ck aotriton unfused; do
     fi
 
     if [ $_fus_attn = flash ]; then
-        check_flash_attn_installed || continue
+        check_supported flash_attn || continue
     fi
 
     if [ -n "$TEST_JOBS_MODE" ]; then

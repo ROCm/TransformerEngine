@@ -79,6 +79,7 @@ export PYTHONSAFEPATH=${PYTHONSAFEPATH:-1}
 _script_error_count=0
 _run_error_count=0
 _ignored_error_count=0
+_seen_test_tags=""
 TEST_ERROR_IGNORE=""
 
 script_error() {
@@ -143,11 +144,38 @@ check_level() {
 # TEST_LEVEL could run anywhere". Level gating, the backend matrix and TEST_FILTER
 # still apply -- only host capability probes are answered yes without probing.
 # The scheduler uses the wider list as the authoritative set of work items that
-# exist, so ci/build_weights.py can tell a test that was deleted or renamed (drop
-# its weight) from one this host merely skipped (keep it). A probe result varies
-# by machine; whether a test file exists does not.
+# exist, so .github/scripts/scheduler/build_weights.py can tell a test that was deleted or
+# renamed (drop its weight) from one this host merely skipped (keep it). A probe
+# result varies by machine; whether a test file exists does not.
 check_list_all() {
     test -n "$TE_CI_LIST_ONLY" -a -n "$TE_CI_LIST_ALL"
+}
+
+# Every host capability probe goes through here, selected by label. Returns 0 to
+# run the guarded tests, 1 to skip them.
+check_supported() {
+    check_list_all && return 0
+    case "$1" in
+        "mxfp8")
+            #MXFP8-only test filters collect no tests on unsupported archs
+            _probe_result=$(NVTE_ROCM_ENABLE_MXFP8=1 python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.quantization import is_mxfp8_available; print(is_mxfp8_available())" 2>/dev/null)
+            _probe_message="MXFP8 is not supported on this device, skipping MXFP8-only tests"
+        ;;
+        "flash_attn")
+            _probe_result=$(python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.attention.dot_product_attention.utils import FlashAttentionUtils; print(FlashAttentionUtils.is_installed)" 2>/dev/null)
+            _probe_message="Flash attention is not installed"
+        ;;
+        *)
+            #A mistyped label must not read as "unsupported": that would skip the
+            #guarded tests on every host and look exactly like a machine that
+            #cannot run them. Count it so the run's exit code reports it.
+            script_error "check_supported: unknown capability $1"
+            return 1
+        ;;
+    esac
+    test "$_probe_result" = "True" && return 0
+    echo "$_probe_message" >&2
+    return 1
 }
 
 check_test_jobs_requested() {
@@ -322,6 +350,27 @@ check_test_filter() {
     return 1
 }
 
+# The test name tag names the JUnit XML file and is the TEST_FILTER key a
+# scheduler re-dispatches on, so two call lines may not share one: the second
+# would overwrite the first's results, and one dispatch would run both. Anything
+# that changes what a line runs -- an env prefix, a -k expression, extra pytest
+# args -- needs its own label to keep the tags apart.
+#
+# Fatal rather than counted-and-continued. Skipping the offending call line
+# leaves a run that looks complete but is quietly short by an item, and in list
+# mode that short list is what the scheduler queues -- so the tests the
+# duplicate displaced never run at all, on this run or any after it. The only
+# signal would be a non-zero exit code at the very end, long after the message
+# scrolled past.
+check_test_tag_unique() {
+    case " $_seen_test_tags " in
+    *" $1 "*)
+        script_error "Duplicate test tag $1: give the call site a distinct label"
+        exit 1
+    esac
+    _seen_test_tags="$_seen_test_tags $1"
+}
+
 start_message() {
     echo "Started with TEST_LEVEL=$TEST_LEVEL sGPU='$TEST_SGPU' mGPU='$TEST_MGPU' at `date`"
     _rocm_path=$(resolve_rocm_path)
@@ -361,6 +410,7 @@ pytest_run() {
     shift 3
     _test_name_tag=`get_test_name_tag $1 $_test_variant_tag`
     check_test_filter $_test_name_tag || return
+    check_test_tag_unique $_test_name_tag || return
     # List mode: emit the work item instead of running it, so an external
     # scheduler can pack items across GPUs. The tag alone is enough to
     # re-dispatch the item: setting TEST_FILTER to it and re-entering this
