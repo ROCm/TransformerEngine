@@ -2,14 +2,19 @@
 #
 # See LICENSE for license information.
 
-"""MXFP4 GEMM tests: native GEMM (AITER a4w4 or hipBLASLt) vs Python reference GEMM.
+"""MXFP4 GEMM tests.
 
-Requires the aiter package (ROCm gfx950 only). The hipBLASLt backend is exercised by
-setting NVTE_ROCM_USE_HIPBLASLT_MXFP4=1, which routes MXFP4 GEMMs through the native
-hipBLASLt path (rocm_gemm.cu) instead of AITER.
+This module tests native MXFP4 GEMM implementations against Python reference GEMMs:
+- AITER a4w4 kernels
+- hipBLASLt F4F4 kernels
+
+Both backends are exercised automatically (parametrized). Each test toggles
+NVTE_ROCM_USE_HIPBLASLT_MXFP4 via monkeypatch to route general_gemm to the backend
+under test, so the caller does not need to set any environment variable.
+
+Requires the aiter package (ROCm gfx950 only).
 """
 
-import os
 import pytest
 import torch
 import transformer_engine.pytorch as te
@@ -115,10 +120,6 @@ def _native_gemm(w_mxfp4, x_mxfp4, out_dtype, out, accumulate):
     return y_native
 
 
-def _sanitize(t):
-    return torch.where(t.isnan(), torch.zeros_like(t), t)
-
-
 def check_mxfp4_gemm_versus_reference(
     x_dtype: torch.dtype,
     w_dtype: torch.dtype,
@@ -148,14 +149,13 @@ def check_mxfp4_gemm_versus_reference(
     assert y_ref is not y_native
     assert not torch.isnan(y_ref.float()).all(), "All reference elements are NaN"
 
-    torch.testing.assert_close(_sanitize(y_native), _sanitize(y_ref), atol=8e-3, rtol=8e-3)
+    y_ref = torch.where(y_ref.isnan(), torch.zeros_like(y_ref), y_ref)
+    y_native = torch.where(y_native.isnan(), torch.zeros_like(y_native), y_native)
+
+    torch.testing.assert_close(y_native, y_ref, atol=8e-3, rtol=8e-3)
 
 
-_BACKENDS = ["aiter"]
-if _use_hipblaslt := os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0") == "1":
-    _BACKENDS = ["hipblaslt"]
-
-
+_BACKENDS = ["aiter", "hipblaslt"]
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.skipif(not _aiter_available, reason="aiter package not available")
 @pytest.mark.parametrize(
@@ -182,15 +182,14 @@ def test_mxfp4_gemm_versus_reference(
     out_dtype: torch.dtype,
     accumulate: bool,
     backend: str,
+    monkeypatch,
 ):
-    # The hipBLASLt MXFP4 path requires K % 256 == 0 (TE's padded UE8M0 scale layout; K%128 runs
-    # but is numerically wrong -- design doc §3.5/§10) and does not support accumulate yet
-    # (§10 #4). AITER covers the full matrix.
     if backend == "hipblaslt":
         if K % 256 != 0:
             pytest.skip("hipBLASLt MXFP4 currently requires K to be a multiple of 256")
         if accumulate:
             pytest.skip("hipBLASLt MXFP4 does not support accumulate yet")
+    monkeypatch.setenv("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "1" if backend == "hipblaslt" else "0")
     check_mxfp4_gemm_versus_reference(
         x_dtype=x_dtype,
         w_dtype=w_dtype,
@@ -205,10 +204,6 @@ def test_mxfp4_gemm_versus_reference(
 
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.skipif(not _aiter_available, reason="aiter package not available")
-@pytest.mark.skipif(
-    os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0") != "1",
-    reason="hipBLASLt MXFP4 backend not enabled (set NVTE_ROCM_USE_HIPBLASLT_MXFP4=1)",
-)
 @pytest.mark.parametrize(
     "M, K, N",
     [
@@ -217,7 +212,7 @@ def test_mxfp4_gemm_versus_reference(
         (4096, 512, 3072),
     ],
 )
-def test_mxfp4_gemm_hipblaslt_matches_aiter(M: int, K: int, N: int):
+def test_mxfp4_gemm_hipblaslt_matches_aiter(M: int, K: int, N: int, monkeypatch):
     """Cross-check: same inputs, hipBLASLt vs AITER MXFP4 GEMM produce close results."""
     device = "cuda"
     dtype = torch.bfloat16
@@ -227,21 +222,16 @@ def test_mxfp4_gemm_hipblaslt_matches_aiter(M: int, K: int, N: int):
     x = torch.randn((M, K), dtype=dtype, device=device)
     w = torch.randn((N, K), dtype=dtype, device=device)
 
-    prev = os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4")
-    try:
-        # AITER path (shuffled operands)
-        os.environ["NVTE_ROCM_USE_HIPBLASLT_MXFP4"] = "0"
-        x_a, w_a = _quantize_pair(x, w, M, K, N, dtype, dtype, device, shuffle=True)
-        y_aiter = _native_gemm(w_a, x_a, dtype, None, False)
+    # AITER path (shuffled operands)
+    monkeypatch.setenv("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0")
+    x_a, w_a = _quantize_pair(x, w, M, K, N, dtype, dtype, device, shuffle=True)
+    y_aiter = _native_gemm(w_a, x_a, dtype, None, False)
 
-        # hipBLASLt path (plain operands)
-        os.environ["NVTE_ROCM_USE_HIPBLASLT_MXFP4"] = "1"
-        x_h, w_h = _quantize_pair(x, w, M, K, N, dtype, dtype, device, shuffle=False)
-        y_hip = _native_gemm(w_h, x_h, dtype, None, False)
-    finally:
-        if prev is None:
-            os.environ.pop("NVTE_ROCM_USE_HIPBLASLT_MXFP4", None)
-        else:
-            os.environ["NVTE_ROCM_USE_HIPBLASLT_MXFP4"] = prev
+    # hipBLASLt path (plain operands)
+    monkeypatch.setenv("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "1")
+    x_h, w_h = _quantize_pair(x, w, M, K, N, dtype, dtype, device, shuffle=False)
+    y_hip = _native_gemm(w_h, x_h, dtype, None, False)
 
-    torch.testing.assert_close(_sanitize(y_hip), _sanitize(y_aiter), atol=8e-3, rtol=8e-3)
+    y_aiter = torch.where(y_aiter.isnan(), torch.zeros_like(y_aiter), y_aiter)
+    y_hip = torch.where(y_hip.isnan(), torch.zeros_like(y_hip), y_hip)
+    torch.testing.assert_close(y_hip, y_aiter, atol=8e-3, rtol=8e-3)

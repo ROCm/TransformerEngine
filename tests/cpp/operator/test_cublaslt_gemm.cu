@@ -37,8 +37,7 @@ std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes_mxfp8 = {
 };
 
 // MXFP4 (m, k, n): M/N multiples of 32 (block size), K a multiple of 256 (see rocm_gemm.cu
-// gate; K%128-not-%256 runs but is numerically wrong through TE's padded-scale layout).
-// Square + non-square.
+// gate).
 std::vector<std::tuple<size_t, size_t, size_t>> test_case_sizes_mxfp4 = {
   {256, 256, 256},
   {128, 256, 512},
@@ -869,9 +868,7 @@ static const float kHostFP4E2M1Table[16] = {
     0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
    -0.0f,-0.5f,-1.0f,-1.5f,-2.0f,-3.0f,-4.0f,-6.0f};
 
-// CPU-dequantize the row-wise data of an MXFP4 test::Tensor (E2M1 packed two-per-byte +
-// UE8M0 block-32 scales, padded scale layout) into the row-wise BF16 buffer of dst, then
-// upload. Used to build a high-precision reference for the native MXFP4 GEMM.
+// CPU-dequantize the row-wise data of an MXFP4 test::Tensor
 static void dequantize_mxfp4_rowwise_to_bf16(test::Tensor &src_fp4, test::Tensor &dst_bf16) {
   const NVTEShape data_shape = src_fp4.rowwise_shape();       // logical [R, C]
   NVTE_CHECK(data_shape.ndim == 2, "Expected 2D MXFP4 data");
@@ -905,9 +902,7 @@ static void dequantize_mxfp4_rowwise_to_bf16(test::Tensor &src_fp4, test::Tensor
   dst_bf16.from_cpu();
 }
 
-// Native MXFP4 (hipBLASLt) GEMM vs a BF16 reference GEMM built by dequantizing the same
-// MXFP4 operands. Restricted to TN layout (the F4F4 kernels are TN in practice), so both
-// operands consume row-wise data.
+// Native MXFP4 (hipBLASLt) GEMM vs a BF16 reference GEMM built by dequantizing the same MXFP4 operands.
 template <typename D_Type>
 void performMxfp4Test(const TestParams &params) {
   DType dtype = TypeInfo<D_Type>::dtype;
