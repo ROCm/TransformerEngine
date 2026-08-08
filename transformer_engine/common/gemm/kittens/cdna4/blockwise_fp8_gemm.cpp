@@ -9,9 +9,10 @@
 #include <utility>
 #include "kittens.cuh"
 #include "../kittens_common.h"
+#include "../kittens_kernel_common.cuh"
 
 
-namespace {
+namespace te_kittens::cdna4 {
 
 #include "blockwise_fp8_gemm_helper.cuh"
 
@@ -941,16 +942,6 @@ void micro_tk_partial_k(micro_globals<kittens::fp8e4m3, kittens::fp8e4m3, OType>
 }
 
 
-#define BOOL_SWITCH(val, NAME, ...) \
-    if (val) { constexpr bool NAME = true; __VA_ARGS__ } \
-    else { constexpr bool NAME = false; __VA_ARGS__ }
-
-static GemmEpilogue select_epilogue(bool has_bias, bool has_gelu, bool has_beta) {
-    if (has_gelu) return has_beta ? GemmEpilogue::GELU_AUX_BETA : GemmEpilogue::GELU_AUX;
-    if (has_bias) return has_beta ? GemmEpilogue::BIAS_BETA     : GemmEpilogue::BIAS;
-    return has_beta ? GemmEpilogue::BETA : GemmEpilogue::DEFAULT;
-}
-
 template <typename OType, int CBSZ, int BLGP, bool IS_1D2D,
           GemmEpilogue EPILOGUE, bool IS_PARTIAL_K>
 static void dispatch_micro_kernel(micro_globals_fp8<OType> g) {
@@ -991,13 +982,12 @@ static void dispatch_micro_epilogue(int cbsz, int blgp, bool has_bias, bool has_
 template <typename OType>
 static void dispatch_micro(bool is_1d2d, int cbsz, int blgp, bool has_bias, bool has_gelu, bool has_beta,
                            bool has_partial_k, micro_globals_fp8<OType> g) {
-    BOOL_SWITCH(is_1d2d, IS_1D2D,
-        BOOL_SWITCH(has_partial_k, IS_PARTIAL_K,
+    KITTENS_BOOL_SWITCH(is_1d2d, IS_1D2D,
+        KITTENS_BOOL_SWITCH(has_partial_k, IS_PARTIAL_K,
             dispatch_micro_epilogue<OType, IS_1D2D, IS_PARTIAL_K>(cbsz, blgp, has_bias, has_gelu, has_beta, g);
         )
     )
 }
-#undef BOOL_SWITCH
 
 template <typename OType, int CBSZ, int BLGP, GemmEpilogue EPILOGUE, bool B_BROADCAST>
 static void launch_pow2_kernel(const pow2_kernel_args<OType> &a) {
@@ -1049,7 +1039,7 @@ static void launch_pow2(int cbsz, int blgp, bool has_bias, bool has_gelu, bool h
     const int padM = tiles_M * BLOCK_M;
     const int padN = tiles_N * BLOCK_N;
 
-    const size_t sa_bytes = align_up_pow2ws((size_t)k_iters * padM * sizeof(uint32_t));
+    const size_t sa_bytes = kittens_align_up((size_t)k_iters * padM * sizeof(uint32_t), 256);
     uint32_t *packed_sa = reinterpret_cast<uint32_t *>(workspace);
     uint32_t *packed_sb = reinterpret_cast<uint32_t *>((uint8_t *)workspace + sa_bytes);
 
@@ -1117,7 +1107,7 @@ class BlockwiseGemmCdna4 final : public BlockwiseGemmBackend {
         const int k_iters = K / BLOCK_K;
         const int padM = ((kM + BLOCK_M - 1) / BLOCK_M) * BLOCK_M;
         const int padN = ((kN + BLOCK_N - 1) / BLOCK_N) * BLOCK_N;
-        const size_t pow2_ws_bytes = align_up_pow2ws((size_t)k_iters * padM * sizeof(uint32_t)) +
+        const size_t pow2_ws_bytes = kittens_align_up((size_t)k_iters * padM * sizeof(uint32_t), 256) +
                                      (size_t)k_iters * padN * sizeof(uint32_t);
         void *owned_ws = nullptr;
         if (use_pow2 && !has_partial_k &&
@@ -1163,9 +1153,9 @@ class BlockwiseGemmCdna4 final : public BlockwiseGemmBackend {
     }
 };
 
-}
+}  // namespace te_kittens::cdna4
 
 BlockwiseGemmBackend *BlockwiseGemmBackend::get_cdna4() {
-    static BlockwiseGemmCdna4 impl;
+    static te_kittens::cdna4::BlockwiseGemmCdna4 impl;
     return &impl;
 }

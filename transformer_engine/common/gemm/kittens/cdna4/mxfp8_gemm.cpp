@@ -4,10 +4,12 @@
 *************************************************************************/
 
 #include "kittens.cuh"
-#include "mxfp8_gemm.h"
+#include "../kittens_common.h"
+#include "../kittens_kernel_common.cuh"
 #include <algorithm>
 #include <cstdlib>
 
+namespace te_kittens::cdna4 {
 
 constexpr int NUM_WARPS = 8;
 constexpr int NUM_THREADS = NUM_WARPS * kittens::WARP_THREADS;
@@ -1108,10 +1110,6 @@ __global__ __launch_bounds__(NUM_THREADS, 2) void mxfp8_gemm_nt_kernel(const gl_
         block_m, block_row, block_col, warp_m, warp_n);
 }
 
-#define HK_BOOL_SWITCH(val, NAME, ...) \
-    if (val) { constexpr bool NAME = true; __VA_ARGS__ } \
-    else { constexpr bool NAME = false; __VA_ARGS__ }
-
 template<bool TRANSA, bool TRANSB, GemmEpilogue EPILOGUE, int CBSZ, int BLGP, bool ACCUMULATE, typename AuxGLType>
 static void launch_gemm_typed(
     const void *A, const void *B, void *C,
@@ -1251,10 +1249,6 @@ static void launch_pack_scales_fused_varying(const uint8_t *const *d_scale_ptrs,
         nullptr, ln, dim, 0, max_k_iters, tiles_per_col, d_scale_ptrs, 0, d_k_iters_arr, d_output_offsets);
 }
 
-static size_t hk_align_up(size_t x, size_t a) {
-    return (x + a - 1) & ~(a - 1);
-}
-
 static bool check_tn_constraints(int M, int N, int K) {
     return M % BLOCK_ROW == 0 && N % BLOCK_COL == 0 && K % BLOCK_K == 0 && K >= 256;
 }
@@ -1286,8 +1280,8 @@ static bool mxfp8_gemm_impl(
 
     // Lane-native scale buffers: A = 256 words/tile, B = 512 (hi/lo pair). If they overflow the
     // caller's budget we return false and fall back to hipBLASLt.
-    size_t sa_bytes = hk_align_up((size_t)k_iters * tiles_M * 256 * sizeof(uint32_t), 256);
-    size_t sb_bytes = hk_align_up((size_t)k_iters * tiles_N * 512 * sizeof(uint32_t), 256);
+    size_t sa_bytes = kittens_align_up((size_t)k_iters * tiles_M * 256 * sizeof(uint32_t), 256);
+    size_t sb_bytes = kittens_align_up((size_t)k_iters * tiles_N * 512 * sizeof(uint32_t), 256);
     if (workspace_size < sa_bytes + sb_bytes) return false;
 
     auto *packed_sa = (uint32_t *)workspace;
@@ -1324,7 +1318,7 @@ static int out_code(int dt) {
     }
 }
 
-bool kittens_mxfp8_gemm(
+static bool mxfp8_gemm(
     const void *A, const void *B, void *C,
     const void *scale_A, const void *scale_B,
     int M, int N, int K,
@@ -1344,46 +1338,43 @@ bool kittens_mxfp8_gemm(
     bool accumulate = beta != 0.0f;
 
     bool result = false;
-    HK_BOOL_SWITCH(transa, TRANSA,
-        HK_BOOL_SWITCH(transb, TRANSB,
-            HK_BOOL_SWITCH(accumulate, ACCUMULATE,
+    KITTENS_BOOL_SWITCH(transa, TRANSA,
+        KITTENS_BOOL_SWITCH(transb, TRANSB,
+            KITTENS_BOOL_SWITCH(accumulate, ACCUMULATE,
                 if constexpr (!(TRANSA && TRANSB)) {
                     result = mxfp8_gemm_impl<TRANSA, TRANSB, ACCUMULATE>(A, B, C, scale_A, scale_B, M, N, K,
                         a_fp8, b_fp8, bias, bias_dc, aux_gelu, out_dc, aux_dc,
                         workspace, workspace_size, stream);
                 } else {
-                    assert(0 && "kittens_mxfp8_gemm: TT layout is not supported");
+                    assert(0 && "mxfp8_gemm: TT layout is not supported");
                 }
     ))) // NOLINT(*)
     return result;
 }
 
-static size_t hk_align256(size_t x) {
-    return (x + 255) & ~(size_t)255;
+// Traces why a grouped launch was declined
+static void warn_fallback(const char *tag, const char *reason) {
+    static bool enabled = [] {
+        const char *v = std::getenv("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK");
+        return v && v[0] == '1';
+    }();
+    if (enabled) {
+        fprintf(stderr, "[%s] falling back: %s\n", tag, reason);
+    }
 }
 
-bool kittens_grouped_mxfp8_gemm(
+static bool grouped_mxfp8_gemm(
     const void *const *A_array, const void *const *B_array, void *const *C_array,
     const void *const *scale_A_array, const void *const *scale_B_array,
     int M, const int *N_array, int K, int num_experts,
     bool transa, bool transb, int a_dtype, int b_dtype, int out_dtype,
     void *workspace, size_t workspace_size, hipStream_t stream) {
 
-    auto warn = [](const char *reason) {
-        static bool enabled = [] {
-            const char *v = std::getenv("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK");
-            return v && v[0] == '1';
-        }();
-        if (enabled) {
-            fprintf(stderr, "[HK-grouped] falling back: %s\n", reason);
-        }
-    };
-
-    if (transa && transb) { warn("TT layout not supported"); return false; }
-    if (!transa && transb) { warn("NT layout: use kittens_grouped_mxfp8_wgrad"); return false; }
-    if (M % BLOCK_ROW != 0) { warn("M not 256-aligned"); return false; }
-    if (K % BLOCK_K != 0 || K < 256) { warn("K not 128-aligned or < 256"); return false; }
-    if (num_experts <= 0) { warn("num_experts <= 0"); return false; }
+    if (transa && transb) { warn_fallback("HK-grouped", "TT layout not supported"); return false; }
+    if (!transa && transb) { warn_fallback("HK-grouped", "NT layout: use grouped_mxfp8_wgrad"); return false; }
+    if (M % BLOCK_ROW != 0) { warn_fallback("HK-grouped", "M not 256-aligned"); return false; }
+    if (K % BLOCK_K != 0 || K < 256) { warn_fallback("HK-grouped", "K not 128-aligned or < 256"); return false; }
+    if (num_experts <= 0) { warn_fallback("HK-grouped", "num_experts <= 0"); return false; }
 
     int tiles_M = M / BLOCK_COL;
     int k_iters = K / BLOCK_K;
@@ -1393,7 +1384,7 @@ bool kittens_grouped_mxfp8_gemm(
     int total_N = 0;
     int total_n_tiles = 0;
     for (int g = 0; g < num_experts; g++) {
-        if (N_array[g] % BLOCK_COL != 0) { warn("N_array not 256-aligned"); return false; }
+        if (N_array[g] % BLOCK_COL != 0) { warn_fallback("HK-grouped", "N_array not 256-aligned"); return false; }
         h_tile_offsets[g] = total_n_tiles;
         total_N += N_array[g];
         total_n_tiles += N_array[g] / BLOCK_COL;
@@ -1403,18 +1394,18 @@ bool kittens_grouped_mxfp8_gemm(
     int grid = tiles_M * total_n_tiles;
     if (grid == 0) return true;
 
-    size_t sa_pk_bytes    = hk_align256((size_t)k_iters * num_experts * M * sizeof(uint32_t));
-    size_t sb_pk_bytes    = hk_align256((size_t)2 * k_iters * total_N * sizeof(uint32_t));
-    size_t a_ptrs_bytes   = hk_align256((size_t)num_experts * sizeof(void *));
-    size_t b_ptrs_bytes   = hk_align256((size_t)num_experts * sizeof(void *));
-    size_t c_ptrs_bytes   = hk_align256((size_t)num_experts * sizeof(void *));
-    size_t sa_ptrs_bytes  = hk_align256((size_t)num_experts * sizeof(void *));
-    size_t offsets_bytes  = hk_align256((size_t)(num_experts + 1) * sizeof(int));
-    size_t sb_off_bytes   = hk_align256((size_t)(num_experts + 1) * sizeof(int));
+    size_t sa_pk_bytes    = kittens_align_up((size_t)k_iters * num_experts * M * sizeof(uint32_t), 256);
+    size_t sb_pk_bytes    = kittens_align_up((size_t)2 * k_iters * total_N * sizeof(uint32_t), 256);
+    size_t a_ptrs_bytes   = kittens_align_up((size_t)num_experts * sizeof(void *), 256);
+    size_t b_ptrs_bytes   = kittens_align_up((size_t)num_experts * sizeof(void *), 256);
+    size_t c_ptrs_bytes   = kittens_align_up((size_t)num_experts * sizeof(void *), 256);
+    size_t sa_ptrs_bytes  = kittens_align_up((size_t)num_experts * sizeof(void *), 256);
+    size_t offsets_bytes  = kittens_align_up((size_t)(num_experts + 1) * sizeof(int), 256);
+    size_t sb_off_bytes   = kittens_align_up((size_t)(num_experts + 1) * sizeof(int), 256);
     size_t total_ws = sa_pk_bytes + sb_pk_bytes + a_ptrs_bytes + b_ptrs_bytes
                     + c_ptrs_bytes + sa_ptrs_bytes + offsets_bytes + sb_off_bytes;
     if (workspace_size < total_ws) {
-        warn("workspace too small"); return false;
+        warn_fallback("HK-grouped", "workspace too small"); return false;
     }
 
     uint8_t *ws = (uint8_t *)workspace;
@@ -1438,8 +1429,8 @@ bool kittens_grouped_mxfp8_gemm(
     std::vector<int> h_sb_tile_offsets(num_experts + 1);
     int sb_tile_cursor = 0;
     uint32_t *sb_cursor = sb_pk;
-    HK_BOOL_SWITCH(!transa, COLWISE_A,
-        HK_BOOL_SWITCH(transb, COLWISE_B,
+    KITTENS_BOOL_SWITCH(!transa, COLWISE_A,
+        KITTENS_BOOL_SWITCH(transb, COLWISE_B,
             // Pack weight scales: single fused launch for all experts
             launch_pack_scales_fused<COLWISE_A, 64, 4>(
                 (const uint8_t *const *)d_sa_ptrs, sa_pk,
@@ -1804,25 +1795,15 @@ void mxfp8_wgrad_nt_kernel(
     kittens::store(C_local, oC, out_coord_C); kittens::store(C_local, oD, out_coord_D);
 }
 
-bool kittens_grouped_mxfp8_wgrad(const void *const *A_array, const void *const *B_array, void *const *D_array,
+static bool grouped_mxfp8_wgrad(const void *const *A_array, const void *const *B_array, void *const *D_array,
     const void *const *scale_A_array, const void *const *scale_B_array,
     int N, int K, const int *M_array, int num_experts,
     int a_dtype, int b_dtype, int out_dtype, bool accumulate,
     void *workspace, size_t workspace_size, hipStream_t stream) {
 
-    auto warn = [](const char *reason) {
-        static bool enabled = [] {
-            const char *v = std::getenv("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK");
-            return v && v[0] == '1';
-        }();
-        if (enabled) {
-            fprintf(stderr, "[HK-wgrad] falling back: %s\n", reason);
-        }
-    };
-
-    if (N % BLOCK_ROW != 0) { warn("N not 256-aligned"); return false; }
-    if (K % BLOCK_COL != 0) { warn("K not 256-aligned"); return false; }
-    if (num_experts <= 0)    { warn("num_experts <= 0"); return false; }
+    if (N % BLOCK_ROW != 0) { warn_fallback("HK-wgrad", "N not 256-aligned"); return false; }
+    if (K % BLOCK_COL != 0) { warn_fallback("HK-wgrad", "K not 256-aligned"); return false; }
+    if (num_experts <= 0)    { warn_fallback("HK-wgrad", "num_experts <= 0"); return false; }
 
     int tiles_M = N / BLOCK_ROW;
     int tiles_N = K / BLOCK_COL;
@@ -1842,7 +1823,7 @@ bool kittens_grouped_mxfp8_wgrad(const void *const *A_array, const void *const *
         int M_g = M_array[g];
         if (M_g == 0) continue;
         if (M_g % BLOCK_K != 0 || M_g < 256) {
-            warn("M_i not 128-aligned or < 256");
+            warn_fallback("HK-wgrad", "M_i not 128-aligned or < 256");
             return false;
         }
         int k_iters_g = M_g / BLOCK_K;
@@ -1888,18 +1869,18 @@ bool kittens_grouped_mxfp8_wgrad(const void *const *A_array, const void *const *
         idx++;
     }
 
-    size_t sa_pk_bytes   = hk_align256(total_sa_entries * sizeof(uint32_t));
-    size_t sb_pk_bytes   = hk_align256(total_sb_entries * sizeof(uint32_t));
-    size_t info_bytes    = hk_align256((size_t)num_active * sizeof(WgradExpertInfo));
-    size_t sa_ptrs_bytes = hk_align256((size_t)num_active * sizeof(void *));
-    size_t sb_ptrs_bytes = hk_align256((size_t)num_active * sizeof(void *));
-    size_t ki_arr_bytes  = hk_align256((size_t)num_active * sizeof(int));
-    size_t sa_off_bytes  = hk_align256((size_t)num_active * sizeof(int));
-    size_t sb_off_bytes  = hk_align256((size_t)num_active * sizeof(int));
+    size_t sa_pk_bytes   = kittens_align_up(total_sa_entries * sizeof(uint32_t), 256);
+    size_t sb_pk_bytes   = kittens_align_up(total_sb_entries * sizeof(uint32_t), 256);
+    size_t info_bytes    = kittens_align_up((size_t)num_active * sizeof(WgradExpertInfo), 256);
+    size_t sa_ptrs_bytes = kittens_align_up((size_t)num_active * sizeof(void *), 256);
+    size_t sb_ptrs_bytes = kittens_align_up((size_t)num_active * sizeof(void *), 256);
+    size_t ki_arr_bytes  = kittens_align_up((size_t)num_active * sizeof(int), 256);
+    size_t sa_off_bytes  = kittens_align_up((size_t)num_active * sizeof(int), 256);
+    size_t sb_off_bytes  = kittens_align_up((size_t)num_active * sizeof(int), 256);
     size_t total_ws = sa_pk_bytes + sb_pk_bytes + info_bytes
                     + sa_ptrs_bytes + sb_ptrs_bytes + ki_arr_bytes + sa_off_bytes + sb_off_bytes;
     if (workspace_size < total_ws) {
-        warn("workspace too small");
+        warn_fallback("HK-wgrad", "workspace too small");
         return false;
     }
 
@@ -1941,7 +1922,7 @@ bool kittens_grouped_mxfp8_wgrad(const void *const *A_array, const void *const *
     gl_fp8_rt gl_B((kittens::fp8e4m3 *)B_array[0], nullptr, nullptr, (size_t)max_M, (size_t)K);
 
     auto launch_wgrad = [&](auto gl_D) {
-        HK_BOOL_SWITCH(accumulate, ACCUMULATE,
+        KITTENS_BOOL_SWITCH(accumulate, ACCUMULATE,
             mxfp8_wgrad_nt_kernel<ACCUMULATE><<<grid, NUM_THREADS, 0, stream>>>(
                 gl_A, gl_B, gl_D, gl_SA, gl_SB,
                 d_info, tiles_M, tiles_N, tiles_per_expert);
@@ -1960,4 +1941,37 @@ bool kittens_grouped_mxfp8_wgrad(const void *const *A_array, const void *const *
     return true;
 }
 
-#undef HK_BOOL_SWITCH
+class MXFP8GemmCdna4 final : public MXFP8GemmBackend {
+ public:
+    bool gemm(const MXFP8GemmArgs &args) override {
+        return mxfp8_gemm(args.A, args.B, args.C, args.scale_A, args.scale_B,
+                          args.M, args.N, args.K, args.transa, args.transb,
+                          args.a_dtype, args.b_dtype, args.bias, args.bias_dtype,
+                          args.aux_gelu, args.out_dtype, args.aux_dtype, args.beta,
+                          args.workspace, args.workspace_size, args.stream);
+    }
+
+    bool grouped_gemm(const MXFP8GroupedGemmArgs &args) override {
+        return grouped_mxfp8_gemm(args.A_array, args.B_array, args.C_array,
+                                  args.scale_A_array, args.scale_B_array,
+                                  args.M, args.N_array, args.K, args.num_experts,
+                                  args.transa, args.transb,
+                                  args.a_dtype, args.b_dtype, args.out_dtype,
+                                  args.workspace, args.workspace_size, args.stream);
+    }
+
+    bool grouped_wgrad(const MXFP8WgradArgs &args) override {
+        return grouped_mxfp8_wgrad(args.A_array, args.B_array, args.D_array,
+                                   args.scale_A_array, args.scale_B_array,
+                                   args.N, args.K, args.M_array, args.num_experts,
+                                   args.a_dtype, args.b_dtype, args.out_dtype, args.accumulate,
+                                   args.workspace, args.workspace_size, args.stream);
+    }
+};
+
+}  // namespace te_kittens::cdna4
+
+MXFP8GemmBackend *MXFP8GemmBackend::get_cdna4() {
+    static te_kittens::cdna4::MXFP8GemmCdna4 impl;
+    return &impl;
+}
