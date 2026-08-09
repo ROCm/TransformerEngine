@@ -9,7 +9,7 @@
 #include <algorithm>
 #include <cstdlib>
 
-namespace te_kittens::cdna4 {
+namespace te_kittens::cdna4::mxfp8 {
 
 constexpr int NUM_WARPS = 8;
 constexpr int NUM_THREADS = NUM_WARPS * kittens::WARP_THREADS;
@@ -1969,9 +1969,9 @@ class MXFP8GemmCdna4 final : public MXFP8GemmBackend {
     }
 };
 
-}  // namespace te_kittens::cdna4
+}  // namespace te_kittens::cdna4::mxfp8
 
 MXFP8GemmBackend *MXFP8GemmBackend::get_cdna4() {
-    static te_kittens::cdna4::MXFP8GemmCdna4 impl;
+    static te_kittens::cdna4::mxfp8::MXFP8GemmCdna4 impl;
     return &impl;
 }

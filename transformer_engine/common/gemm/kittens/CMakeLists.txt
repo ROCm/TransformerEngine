@@ -34,7 +34,7 @@ else()
     set(_kittens_have_defs "")
 
     function(kittens_add_arch)
-        cmake_parse_arguments(A "" "TAG;GFX" "SOURCES;FLAGS" ${ARGN})
+        cmake_parse_arguments(A "" "TAG;GFX" "SOURCES;FLAGS;SOURCE_FLAGS" ${ARGN})
         if(NOT "${A_GFX}" IN_LIST _kittens_enabled_archs)
             return()
         endif()
@@ -49,6 +49,24 @@ else()
 
         add_library(${_target} OBJECT ${A_SOURCES})
         set_source_files_properties(${A_SOURCES} PROPERTIES LANGUAGE HIP)
+
+        # SOURCE_FLAGS is a flat <source> <flags> list
+        list(LENGTH A_SOURCE_FLAGS _sf_len)
+        if(_sf_len GREATER 0)
+            math(EXPR _sf_last "${_sf_len} - 2")
+            foreach(_i RANGE 0 ${_sf_last} 2)
+                math(EXPR _j "${_i} + 1")
+                list(GET A_SOURCE_FLAGS ${_i} _sf_src)
+                list(GET A_SOURCE_FLAGS ${_j} _sf_opts)
+                if(NOT "${_sf_src}" IN_LIST A_SOURCES)
+                    message(FATAL_ERROR
+                        "kittens_add_arch(TAG ${A_TAG}): SOURCE_FLAGS names ${_sf_src}, "
+                        "which is not in SOURCES.")
+                endif()
+                set_source_files_properties(${_sf_src} PROPERTIES COMPILE_FLAGS "${_sf_opts}")
+            endforeach()
+        endif()
+
         set_target_properties(${_target} PROPERTIES
             HIP_ARCHITECTURES "${A_GFX}" POSITION_INDEPENDENT_CODE ON)
         target_include_directories(${_target} PRIVATE
@@ -66,9 +84,8 @@ else()
 
     kittens_add_arch(TAG cdna4 GFX gfx950
                      SOURCES cdna4/blockwise_fp8_gemm.cpp cdna4/mxfp8_gemm.cpp
-                     FLAGS -gline-tables-only)
-    set_source_files_properties(cdna4/blockwise_fp8_gemm.cpp
-        PROPERTIES COMPILE_FLAGS "-ffast-math")
+                     FLAGS -gline-tables-only
+                     SOURCE_FLAGS cdna4/blockwise_fp8_gemm.cpp "-ffast-math")
 
     add_library(kittens_gemm SHARED ${_kittens_arch_objs})
     set_target_properties(kittens_gemm PROPERTIES LINKER_LANGUAGE HIP)

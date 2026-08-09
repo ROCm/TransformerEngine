@@ -12,7 +12,7 @@
 #include "../kittens_kernel_common.cuh"
 
 
-namespace te_kittens::cdna4 {
+namespace te_kittens::cdna4::blockwise_fp8 {
 
 #include "blockwise_fp8_gemm_helper.cuh"
 
@@ -1153,9 +1153,9 @@ class BlockwiseGemmCdna4 final : public BlockwiseGemmBackend {
     }
 };
 
-}  // namespace te_kittens::cdna4
+}  // namespace te_kittens::cdna4::blockwise_fp8
 
 BlockwiseGemmBackend *BlockwiseGemmBackend::get_cdna4() {
-    static te_kittens::cdna4::BlockwiseGemmCdna4 impl;
+    static te_kittens::cdna4::blockwise_fp8::BlockwiseGemmCdna4 impl;
     return &impl;
 }
