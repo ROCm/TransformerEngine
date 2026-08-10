@@ -14,10 +14,12 @@ currently supported FlyDSL surface:
 - TN / NN / NT layouts
 - batched multidimensional FP8 flattening
 - fused BIAS epilogue across all backends (regular, tensor-wise FP8, MXFP8)
+- fused GELU_AUX / GELU_AUX_BIAS epilogue for MXFP8
 
 The fused forward BIAS epilogue is implemented for every FlyDSL GEMM backend.
-BGRADB (fused bias-gradient, grad=True) is not implemented on any FlyDSL path
-yet.
+Fused forward GELU (GELU_AUX, saving the pre-activation aux) is implemented for
+MXFP8 only. BGRADB (fused bias-gradient) and DGELU (fused GELU gradient,
+grad=True) are not implemented on any FlyDSL path yet.
 
 Each test compares the FlyDSL path against two independent references:
 
@@ -233,6 +235,37 @@ def call_gemm_with_bias(A, B, layout, out_dtype, bias, use_flydsl=True):
     assert gelu_input is None
     assert extra_output is None
     return output, bias_grad
+
+
+def call_gemm_with_gelu(A, B, layout, out_dtype, bias=None, use_flydsl=True):
+    """Call ``general_gemm`` with a fused forward GELU (GELU_AUX) epilogue.
+
+    Returns ``(output, gelu_input)`` where ``output`` is ``gelu(A@B[+bias])``
+    and ``gelu_input`` is the saved pre-activation (``A@B[+bias]``) that the
+    backward pass consumes.
+    """
+    os.environ["NVTE_USE_FLYDSL"] = "1" if use_flydsl else "0"
+
+    output, bias_grad, gelu_input, extra_output = general_gemm(
+        A=A,
+        B=B,
+        out_dtype=out_dtype,
+        layout=layout,
+        bias=bias,
+        quantization_params=None,
+        gelu=True,
+        grad=False,
+        accumulate=False,
+    )
+
+    assert bias_grad is None
+    assert extra_output is None
+    return output, gelu_input
+
+
+def gelu_tanh_ref(x):
+    """tanh-approx GELU reference (matches the kernel and torch approximate='tanh')."""
+    return torch.nn.functional.gelu(x, approximate="tanh")
 
 
 def assert_gemm_close(actual, expected, *, atol, rtol):
@@ -702,6 +735,110 @@ def test_flydsl_vs_cpp_mxfp8_bias(M, K, N, layout, fp8_format):
 
 
 # ==============================================================================
+# Fused GELU epilogue coverage (MXFP8)
+#
+# GELU_AUX applies tanh-approx GELU to the C output while saving the
+# pre-activation (A@B, or A@B+bias for GELU_AUX_BIAS) to a second aux output
+# for the backward pass. general_gemm returns the aux in the third tuple slot
+# (gelu_input). Currently implemented for the MXFP8 backend only.
+# ==============================================================================
+
+@requires_mxfp8_support
+@pytest.mark.parametrize("M, K, N", MXFP8_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize(
+    "fp8_format",
+    FP8_FORMAT_COMBOS,
+    ids=FP8_FORMAT_IDS,
+)
+def test_flydsl_vs_pytorch_mxfp8_gelu(M, K, N, layout, fp8_format):
+    """MXFP8 forward GELU_AUX vs PyTorch: check both output and saved aux."""
+    os.environ["NVTE_ROCM_ENABLE_MXFP8"] = "1"
+    torch.manual_seed(42)
+
+    fp8_dtype_a, fp8_dtype_b = fp8_format
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(
+        M,
+        K,
+        N,
+        layout,
+        fp8_dtype_a,
+        fp8_dtype_b,
+    )
+
+    pre_act = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
+
+    output, gelu_input = call_gemm_with_gelu(
+        A_mxfp8,
+        B_mxfp8,
+        layout,
+        out_dtype=torch.float32,
+        use_flydsl=True,
+    )
+    assert gelu_input is not None, "GELU_AUX did not return the pre-activation aux."
+
+    # GELU must actually change the result vs the plain matmul output.
+    no_gelu_out = call_gemm(
+        A_mxfp8,
+        B_mxfp8,
+        layout,
+        out_dtype=torch.float32,
+        use_flydsl=True,
+    )
+    assert not torch.allclose(output.float(), no_gelu_out.float(), atol=1e-4), (
+        "FlyDSL MXFP8 output matches the no-GELU output; "
+        "the GELU epilogue appears inactive."
+    )
+
+    # Aux is the pre-activation (A@B); output is gelu(A@B).
+    assert_gemm_close(gelu_input, pre_act, atol=5e-3, rtol=1e-2)
+    assert_gemm_close(output, gelu_tanh_ref(pre_act), atol=5e-3, rtol=1e-2)
+
+
+@requires_mxfp8_support
+@pytest.mark.parametrize("M, K, N", MXFP8_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize(
+    "fp8_format",
+    FP8_FORMAT_COMBOS,
+    ids=FP8_FORMAT_IDS,
+)
+def test_flydsl_vs_pytorch_mxfp8_gelu_bias(M, K, N, layout, fp8_format):
+    """MXFP8 forward GELU_AUX_BIAS vs PyTorch: bias folded before GELU, aux saved."""
+    os.environ["NVTE_ROCM_ENABLE_MXFP8"] = "1"
+    torch.manual_seed(42)
+
+    fp8_dtype_a, fp8_dtype_b = fp8_format
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(
+        M,
+        K,
+        N,
+        layout,
+        fp8_dtype_a,
+        fp8_dtype_b,
+    )
+
+    ab = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
+    out_features = ab.shape[-1]
+    bias = torch.randn(out_features, dtype=torch.float32, device="cuda")
+    pre_act = ab + bias.float()
+
+    output, gelu_input = call_gemm_with_gelu(
+        A_mxfp8,
+        B_mxfp8,
+        layout,
+        out_dtype=torch.float32,
+        bias=bias,
+        use_flydsl=True,
+    )
+    assert gelu_input is not None, "GELU_AUX_BIAS did not return the pre-activation aux."
+
+    # Aux is the post-bias pre-activation (A@B + bias); output is gelu of it.
+    assert_gemm_close(gelu_input, pre_act, atol=5e-3, rtol=1e-2)
+    assert_gemm_close(output, gelu_tanh_ref(pre_act), atol=5e-3, rtol=1e-2)
+
+
+# ==============================================================================
 # Batched multidimensional FP8 coverage
 # ==============================================================================
 
@@ -820,6 +957,13 @@ if __name__ == "__main__":
             (tex.DType.kFloat8E5M2, tex.DType.kFloat8E4M3),
         )
         test_flydsl_vs_pytorch_mxfp8_bias(
+            256,
+            512,
+            256,
+            "TN",
+            (tex.DType.kFloat8E4M3, tex.DType.kFloat8E4M3),
+        )
+        test_flydsl_vs_pytorch_mxfp8_gelu(
             256,
             512,
             256,

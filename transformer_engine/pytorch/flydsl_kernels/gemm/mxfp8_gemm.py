@@ -29,7 +29,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, math, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
@@ -292,20 +292,16 @@ def _compile_kernel(
 
         DEFAULT        plain matmul
         BIAS           + per-output-feature bias vector (indexed by N)
-        GELU_AUX       (reserved) GELU with saved pre-activation aux
-        GELU_AUX_BIAS  (reserved) bias then GELU with saved aux
+        GELU_AUX       GELU(A@B), saving the pre-activation to the Aux output
+        GELU_AUX_BIAS  GELU(A@B + bias), saving the pre-activation to Aux
 
-    Only DEFAULT and BIAS are implemented; the GELU modes are accepted so the
-    store-loop structure and dispatch signature are already in place.
+    The GELU modes write a second M x N output (pre-activation, tanh-approx
+    GELU applied to C) for the backward pass.
     """
     if layout not in ("TN", "NN", "NT"):
         raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
     if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
         raise ValueError(f"Unsupported MXFP8 epilogue: {epilogue}")
-    if epilogue in ("GELU_AUX", "GELU_AUX_BIAS"):
-        raise NotImplementedError(
-            f"MXFP8 epilogue {epilogue} is reserved but not yet implemented"
-        )
     has_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")
     has_gelu = epilogue in ("GELU_AUX", "GELU_AUX_BIAS")
 
@@ -540,7 +536,7 @@ def _compile_kernel(
 
     @flyc.kernel(known_block_size=[NUM_THREADS, 1, 1])
     def kernel_gemm(
-        A: fx.Tensor, As: fx.Tensor, B: fx.Tensor, Bs: fx.Tensor, C: fx.Tensor, Bias: fx.Tensor, c_m: fx.Int32, c_n: fx.Int32
+        A: fx.Tensor, As: fx.Tensor, B: fx.Tensor, Bs: fx.Tensor, C: fx.Tensor, Bias: fx.Tensor, Aux: fx.Tensor, c_m: fx.Int32, c_n: fx.Int32
     ):
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_a0 = (lds.a0_0, lds.a0_1)
@@ -651,6 +647,34 @@ def _compile_kernel(
                 reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
                 fx.copy(bias_ld_atom, fx.slice(bias_div, (None, fx.Int32(col))), reg)
                 return fx.memref_load_vec(reg)[0]
+
+        # GELU_AUX saves the pre-activation value (A@B[+bias]) to a second M x N
+        # output so the backward pass can recompute the GELU gradient. Same tile
+        # base / store atom shape as C; DEFAULT gets a dummy 1-element tensor.
+        if const_expr(has_gelu):
+            gAux = fx.rocdl.make_buffer_tensor(Aux, max_size=True)
+            aux_div = fx.logical_divide(gAux, fx.make_layout(1, 1))
+            aux_store_atom = fx.make_copy_atom(
+                fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
+                output_fx_dtype,
+            )
+
+            def gelu_tanh(x):
+                # tanh-approx GELU (matches PyTorch approximate='tanh' and the
+                # FlyDSL preshuffle reference), expressed through a non-positive
+                # exponent so exp() cannot overflow:
+                #   0.5*x*(1 + tanh(y)),  y = sqrt(2/pi)*(x + 0.044715*x^3)
+                half_f32 = fx.Float32(0.5)
+                one_f32 = fx.Float32(1.0)
+                zero_f32 = fx.Float32(0.0)
+                two_f32 = fx.Float32(2.0)
+                x3 = x * x * x
+                y = fx.Float32(0.7978845608) * (x + fx.Float32(0.044715) * x3)
+                abs_y = fx.Float32(y).maximumf(zero_f32 - y)
+                e_neg2abs = math.exp(fx.Float32(-2.0) * abs_y)
+                denom = one_f32 + e_neg2abs
+                numerator = (y > zero_f32).select(two_f32, two_f32 * e_neg2abs)
+                return half_f32 * x * (numerator * (one_f32 / denom))
 
         PIN_ACC_BASE = 0
 
@@ -958,10 +982,23 @@ def _compile_kernel(
                 c_idx = c_tile_base_elems + row * fx.Index(c_n) + col
 
                 # Epilogue stages run on the fp32 accumulator, in order, before
-                # the output-dtype narrowing. GELU will slot in here later.
+                # the output-dtype narrowing:
+                #   value = acc [+ bias]           (pre-activation)
+                #   GELU_AUX: save pre-activation to Aux, then value = gelu(value)
                 value = Vec(acc)[ii]
                 if const_expr(has_bias):
                     value = value + bias_value
+
+                if const_expr(has_gelu):
+                    # Save the pre-activation (post-bias) value for backward,
+                    # then apply GELU to the C output.
+                    aux_val = value
+                    if output_dtype != torch.float32:
+                        aux_val = aux_val.to(output_fx_dtype)
+                    aux_reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
+                    fx.memref_store_vec(Vec.filled(1, aux_val, output_fx_dtype), aux_reg)
+                    fx.copy(aux_store_atom, aux_reg, fx.slice(aux_div, (None, fx.Int32(c_idx))))
+                    value = gelu_tanh(value)
 
                 if output_dtype != torch.float32:
                     value = value.to(output_fx_dtype)
@@ -1498,6 +1535,7 @@ def _compile_kernel(
         Bs: fx.Tensor,
         C: fx.Tensor,
         Bias: fx.Tensor,
+        Aux: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
@@ -1511,6 +1549,7 @@ def _compile_kernel(
             Bs,
             C,
             Bias,
+            Aux,
             c_m,
             c_n,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
@@ -1529,8 +1568,13 @@ def do_gemm(
     layout: str = "TN",
     epilogue: str = "DEFAULT",
     bias: torch.Tensor = None,
+    aux: torch.Tensor = None,
 ):
-    """Launch one cached compile-time MXFP8 layout specialization."""
+    """Launch one cached compile-time MXFP8 layout specialization.
+
+    The GELU epilogues require a caller-allocated ``aux`` output (M x N, same
+    dtype as C), filled in place with the pre-activation values for backward.
+    """
     if layout == "TN":
         M_runtime, K_runtime = A.shape
         N_runtime, Kb_runtime = B.shape
@@ -1595,6 +1639,23 @@ def do_gemm(
     elif bias is not None:
         raise ValueError(f"MXFP8 epilogue {epilogue} does not accept a bias tensor")
 
+    needs_aux = epilogue in ("GELU_AUX", "GELU_AUX_BIAS")
+    if needs_aux:
+        # Pre-activation output for the backward pass: caller-allocated M x N,
+        # same dtype as C, filled in place through its buffer descriptor.
+        if aux is None:
+            raise ValueError(f"MXFP8 epilogue {epilogue} requires an aux output tensor")
+        if tuple(aux.shape) != (M_runtime, N_runtime):
+            raise ValueError(
+                f"MXFP8 aux shape {tuple(aux.shape)} != {(M_runtime, N_runtime)}"
+            )
+        if aux.dtype != C.dtype:
+            raise TypeError(f"MXFP8 aux dtype {aux.dtype} != C dtype {C.dtype}")
+        if aux.device != A.device:
+            raise ValueError("aux must be on the same device as A, B, and C")
+    elif aux is not None:
+        raise ValueError(f"MXFP8 epilogue {epilogue} does not accept an aux tensor")
+
     if stream is None:
         stream = torch.cuda.current_stream()
 
@@ -1604,11 +1665,15 @@ def do_gemm(
     As_arg = As.contiguous().view(-1)
     Bs_arg = Bs.contiguous().view(-1)
     C_arg = C.contiguous().view(-1)
-    # DEFAULT keeps the kernel signature uniform with a dummy 1-element bias.
+    # DEFAULT keeps the kernel signature uniform with dummy 1-element buffers.
     if needs_bias:
         Bias_arg = bias.contiguous().view(-1)
     else:
         Bias_arg = torch.zeros(1, dtype=torch.float32, device=A.device)
+    if needs_aux:
+        Aux_arg = aux.view(-1)
+    else:
+        Aux_arg = torch.zeros(1, dtype=C.dtype, device=A.device)
 
     _cached_launch(
         K_runtime,
@@ -1624,6 +1689,7 @@ def do_gemm(
         Bs_arg,
         C_arg,
         Bias_arg,
+        Aux_arg,
         M_runtime,
         N_runtime,
         stream=stream,
@@ -1688,6 +1754,7 @@ def mxfp8_matmul(
     layout: str = "TN",
     epilogue: str = "DEFAULT",
     bias: torch.Tensor = None,
+    aux: torch.Tensor = None,
 ):
     """Normalize scale orientation and launch a compile-time layout binary.
 
@@ -1813,6 +1880,7 @@ def mxfp8_matmul(
         stream=stream,
         epilogue=epilogue,
         bias=bias,
+        aux=aux.view(m, n) if aux is not None else None,
     )
     return D
 

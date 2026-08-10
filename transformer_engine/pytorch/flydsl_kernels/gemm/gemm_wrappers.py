@@ -98,8 +98,9 @@ def _validate_common_epilogue(
     """Validate features not yet implemented by the FlyDSL GEMM backend.
 
     Fused forward BIAS is supported by all FlyDSL GEMM backends (mxfp8, fp8,
-    fp16, bf16, fp32). BGRADB (fused bias gradient, ``grad=True`` with a bias)
-    is not implemented on any FlyDSL path yet.
+    fp16, bf16, fp32). Fused forward GELU_AUX is implemented for MXFP8 only
+    (the per-backend ``_run_*`` reject it elsewhere). BGRADB (fused bias
+    gradient) and DGELU (fused GELU gradient) are not implemented anywhere yet.
     """
     if quantizer is not None:
         raise NotImplementedError(
@@ -124,6 +125,13 @@ def _validate_common_epilogue(
             "FlyDSL GEMM fused bias gradient (BGRADB) is not implemented"
         )
 
+    # Fused forward GELU (GELU_AUX) is supported; the backward fused GELU
+    # gradient (DGELU) is not. TODO: add DGELU to the FlyDSL GEMM backends.
+    if gelu and grad:
+        raise NotImplementedError(
+            "FlyDSL GEMM fused GELU gradient (DGELU) is not implemented"
+        )
+
 
 def _resolve_bias(bias, n):
     """Normalize a TE bias into the kernel's ``(epilogue, bias_arg)`` contract.
@@ -139,6 +147,21 @@ def _resolve_bias(bias, n):
             f"FlyDSL GEMM bias length {bias.numel()} != N (out_features) {n}"
         )
     return "BIAS", bias.reshape(-1).to(torch.float32).contiguous()
+
+
+def _resolve_epilogue(bias, n, gelu=False):
+    """Resolve the ``(epilogue, bias_arg)`` contract including fused GELU.
+
+    Combines the bias vector (see :func:`_resolve_bias`) with an optional
+    forward GELU into one of DEFAULT / BIAS / GELU_AUX / GELU_AUX_BIAS. The
+    GELU epilogues additionally produce a pre-activation aux output, which the
+    caller allocates and passes to the kernel.
+    """
+    bias_epilogue, bias_arg = _resolve_bias(bias, n)
+    has_bias = bias_epilogue == "BIAS"
+    if gelu:
+        return ("GELU_AUX_BIAS" if has_bias else "GELU_AUX"), bias_arg
+    return bias_epilogue, bias_arg
 
 
 def _classify_input(t):
@@ -861,6 +884,7 @@ def _run_mxfp8(
     *,
     output_dtype: torch.dtype,
     bias=None,
+    gelu=False,
 ):
     """Dispatch MXFP8 through exact TN/NN/NT physical contracts.
 
@@ -1064,7 +1088,11 @@ def _run_mxfp8(
         f"M={m}, N={n}, K={k}"
     )
 
-    epilogue, bias_arg = _resolve_bias(bias, n)
+    epilogue, bias_arg = _resolve_epilogue(bias, n, gelu=gelu)
+    # GELU_AUX modes emit a pre-activation aux output (M x N, output dtype)
+    # for the backward pass; the wrapper allocates it and the kernel fills it
+    # in place. Return it so the dispatcher can hand it back as gelu_input.
+    aux = torch.empty_like(D) if gelu else None
     mxfp8_matmul(
         a_flydsl,
         a_scale,
@@ -1074,8 +1102,9 @@ def _run_mxfp8(
         layout=kernel_layout,
         epilogue=epilogue,
         bias=bias_arg,
+        aux=aux.view(m, n) if aux is not None else None,
     )
-    return D
+    return D, aux
 
 
 def _select_fp8_storage_for_layout(A, transa, B, transb):
@@ -1376,7 +1405,7 @@ def te_generic_gemm_flydsl(
                 f"got {output_dtype}"
             )
 
-        D = _run_mxfp8(
+        D, gelu_input = _run_mxfp8(
             A,
             transa,
             B,
@@ -1384,8 +1413,17 @@ def te_generic_gemm_flydsl(
             D,
             output_dtype=mxfp8_output_dtypes[output_dtype],
             bias=bias,
+            gelu=gelu,
         )
-        return D, None, None, None
+        return D, None, gelu_input, None
+
+    # Fused forward GELU is implemented for MXFP8 only so far; the tensor-wise
+    # FP8 and regular (fp16/bf16/fp32) paths do not support it yet.
+    # TODO: extend GELU_AUX to the other FlyDSL GEMM backends.
+    if gelu:
+        raise NotImplementedError(
+            "FlyDSL GEMM fused GELU is currently implemented for MXFP8 only"
+        )
 
     if a_kind == "fp8" or b_kind == "fp8":
         if a_kind != b_kind:
