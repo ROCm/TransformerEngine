@@ -143,17 +143,44 @@ def _qkv_format(qkv_layout: str) -> str:
     return "".join(c for c in qkv_layout.split("_")[0] if c.isalpha())
 
 
+def _torch_fp8_dtype(fp8_dtype) -> torch.dtype:
+    """The torch fp8 dtype matching a TE ``tex.DType``."""
+    import transformer_engine_torch as tex  # pylint: disable=import-outside-toplevel
+
+    return torch.float8_e5m2 if fp8_dtype == tex.DType.kFloat8E5M2 else torch.float8_e4m3fn
+
+
 def _fp8_data(t) -> torch.Tensor:
     """Reinterpret a Float8Tensor's uint8 ``_data`` as its fp8 torch dtype.
 
     TE stores fp8 bytes as uint8; xAttention requires a float8_e4m3fn/e5m2 tensor.
     """
-    import transformer_engine_torch as tex  # pylint: disable=import-outside-toplevel
+    return t._data.view(_torch_fp8_dtype(t._fp8_dtype))
 
-    torch_dtype = (
-        torch.float8_e5m2 if t._fp8_dtype == tex.DType.kFloat8E5M2 else torch.float8_e4m3fn
+
+def _host_scalars(tensors: List[torch.Tensor]) -> List[float]:
+    """Read several device scalars to the host in a single synchronization.
+
+    xAttention takes its scales as host floats, and the per-tensor fp8 path needs
+    five to seven of them per call. Read one at a time, each is its own
+    device-to-host copy that drains the stream; packing them first costs one small
+    kernel and leaves a single sync.
+    """
+    return torch.cat([t.detach().reshape(1) for t in tensors]).tolist()
+
+
+def _has_static_scale(quantizer) -> bool:
+    """Whether ``quantizer``'s scale is known before the kernel runs.
+
+    DelayedScaling carries a scale forward from the previous iteration's amax
+    history, so xAttention can quantize as it writes. CurrentScaling derives the
+    scale from the tensor's own amax, which does not exist until afterwards.
+    """
+    from ...tensor.float8_tensor import (  # pylint: disable=import-outside-toplevel
+        Float8Quantizer,
     )
-    return t._data.view(torch_dtype)
+
+    return isinstance(quantizer, Float8Quantizer)
 
 
 def _to_bshd(x: torch.Tensor, fmt: str) -> torch.Tensor:
@@ -185,12 +212,17 @@ def fp8_forward(
     softmax_scale: float,
     attn_mask_type: str,
     window_size: Optional[Tuple[int, int]],
+    fp8_output: bool = False,
 ) -> Tuple[torch.Tensor, List[torch.Tensor]]:
     """Run the xAttention per-tensor fp8 forward.
 
-    Inputs q/k/v are Float8Tensors (already quantized by the caller). Returns a
-    bf16 output plus aux_ctx_tensors ``[softmax_lse]`` for the backward. Writes
+    Inputs q/k/v are Float8Tensors (already quantized by the caller). Returns the
+    output plus aux_ctx_tensors ``[softmax_lse]`` for the backward, and writes
     amax_s/amax_o back into the S/O quantizers for delayed-scaling history.
+
+    The output is a Float8Tensor when ``fp8_output`` is set and the O quantizer's
+    scale is known ahead of the kernel, sparing the caller a requantization pass;
+    otherwise it is bf16.
     """
     assert _xattn is not None, f"xAttention binding not available: {_IMPORT_ERROR}"
     causal = "causal" in attn_mask_type
@@ -201,25 +233,44 @@ def fp8_forward(
     kd = _to_bshd(_fp8_data(k_fp8), fmt)
     vd = _to_bshd(_fp8_data(v_fp8), fmt)
 
-    descale_q = q_fp8._scale_inv.item()
-    descale_k = k_fp8._scale_inv.item()
-    descale_v = v_fp8._scale_inv.item()
-    scale_s = s_quantizer.scale.item()
-    descale_s = 1.0 / scale_s
-    scale_o = o_quantizer.scale.item()
+    # The kernel folds scale_o into the output store whenever per-tensor quant is
+    # on, so it may only be non-unit when we are actually asking for fp8 out.
+    quantize_out = fp8_output and _has_static_scale(o_quantizer)
 
-    out = torch.empty_like(qd, dtype=torch.bfloat16)
+    scales = [q_fp8._scale_inv, k_fp8._scale_inv, v_fp8._scale_inv, s_quantizer.scale]
+    if quantize_out:
+        scales.append(o_quantizer.scale)
+    descale_q, descale_k, descale_v, scale_s, *rest = _host_scalars(scales)
+    descale_s = 1.0 / scale_s
+    scale_o = rest[0] if quantize_out else 1.0
+
+    if quantize_out:
+        # TE keeps fp8 payloads as uint8; the kernel wants the fp8 view of them.
+        out_data = torch.empty_like(qd, dtype=torch.uint8)
+        out = out_data.view(_torch_fp8_dtype(o_quantizer.dtype))
+    else:
+        out = torch.empty_like(qd, dtype=torch.bfloat16)
+
     res = _xattn.fwd_quant(
         qd, kd, vd, descale_q, descale_k, descale_v, scale_s, descale_s, scale_o,
         out, float(softmax_scale), causal, wl, wr, True, True,
     )
     out_bshd, softmax_lse, amax_s, amax_o = res[0], res[1], res[2], res[3]
 
+    # amax_o is captured before scale_o is applied, so the history stays in the
+    # output's true units whichever output dtype we asked for.
     s_quantizer.amax.copy_(amax_s.reshape(s_quantizer.amax.shape).to(s_quantizer.amax.dtype))
     o_quantizer.amax.copy_(amax_o.reshape(o_quantizer.amax.shape).to(o_quantizer.amax.dtype))
 
-    out_hp = _from_bshd(out_bshd, fmt)
-    return out_hp, [softmax_lse.contiguous()]
+    if quantize_out:
+        # scale_inv is derived from the quantizer on device; no host round trip.
+        return (
+            o_quantizer.create_tensor_from_data(
+                _from_bshd(out_data, fmt), fake_dtype=q_fp8.dtype
+            ),
+            [softmax_lse.contiguous()],
+        )
+    return _from_bshd(out_bshd, fmt), [softmax_lse.contiguous()]
 
 
 def fp8_backward(
@@ -255,14 +306,18 @@ def fp8_backward(
     od = _to_bshd(_fp8_data(out_fp8), fmt)
     dod = _to_bshd(_fp8_data(d_out_fp8), fmt)
 
-    descale_q = q_fp8._scale_inv.item()
-    descale_k = k_fp8._scale_inv.item()
-    descale_v = v_fp8._scale_inv.item()
-    descale_o = out_fp8._scale_inv.item()
-    descale_do = d_out_fp8._scale_inv.item()
-    scale_s = s_quantizer.scale.item()
+    descale_q, descale_k, descale_v, descale_o, descale_do, scale_s, scale_ds = _host_scalars(
+        [
+            q_fp8._scale_inv,
+            k_fp8._scale_inv,
+            v_fp8._scale_inv,
+            out_fp8._scale_inv,
+            d_out_fp8._scale_inv,
+            s_quantizer.scale,
+            dp_quantizer.scale,
+        ]
+    )
     descale_s = 1.0 / scale_s
-    scale_ds = dp_quantizer.scale.item()
     descale_ds = 1.0 / scale_ds
 
     b, s, h, d = qd.shape

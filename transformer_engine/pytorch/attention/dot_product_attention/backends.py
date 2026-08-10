@@ -1343,13 +1343,20 @@ class FusedAttnFunc(torch.autograd.Function):
                 dP_quantizer,
             )
 
+            # whether O is needed in fp8 downstream, either as the returned output
+            # or as the backward's O input; current scaling may keep the latter in
+            # high precision instead
+            needs_fp8_out = is_output_fp8 or (
+                is_bwd_fp8 and not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16)
+            )
+
             # out_:
             # DelayedScaling:       Float8Tensor; dtype = torch.float16 or torch.bfloat16
             #                                     fp8_dtype = tex.DType.kFloat8E4M3
             # Float8CurrentScaling: torch.Tensor; dtype = torch.float16 or torch.bfloat16
             if fused_attention_backend == FusedAttnBackend.get("XAttn"):
-                # ROCm: route the fp8 kernel to xAttention (returns bf16 out; the
-                # post-processing below re-quantizes to out_fp8 for the backward).
+                # ROCm: route the fp8 kernel to xAttention, which writes fp8 out
+                # directly when it can, sparing the requantization below.
                 out_, aux_ctx_tensors = xattention.fp8_forward(
                     q_fp8,
                     k_fp8,
@@ -1360,6 +1367,7 @@ class FusedAttnFunc(torch.autograd.Function):
                     attn_scale,
                     attn_mask_type,
                     window_size,
+                    needs_fp8_out,
                 )
             else:
                 out_, aux_ctx_tensors, *_ = fused_attn_fwd(
@@ -1404,10 +1412,7 @@ class FusedAttnFunc(torch.autograd.Function):
                 if not is_output_fp8 or not is_bwd_fp8:
                     out = out_.dequantize().view(out_.shape)
             else:
-                if is_output_fp8 or (
-                    is_bwd_fp8
-                    and not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16)
-                ):
+                if needs_fp8_out:
                     out_fp8 = O_quantizer(out_)
 
             # print quantizers
