@@ -35,6 +35,7 @@ from flydsl.expr.typing import Vector as Vec
 
 # Transformer Engine-local FlyDSL utilities.
 from .exceptions import FlyDSLUnsupportedError
+from .gemm_common_utils import require_block_tiling
 from .fp8_gemm_utils import (
     G2SLoader,
     S2RLoader,
@@ -1492,27 +1493,15 @@ def do_gemm(
     assert A.dtype in supported_fp8_dtypes, f"unsupported A FP8 dtype: {A.dtype}"
     assert B.dtype in supported_fp8_dtypes, f"unsupported B FP8 dtype: {B.dtype}"
 
-    if M_runtime % _BLOCK_M != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP8 {layout} GEMM requires M to be a multiple of "
-            f"{_BLOCK_M}, got M={M_runtime}"
-        )
-    if N_runtime % _BLOCK_N != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP8 {layout} GEMM requires N to be a multiple of "
-            f"{_BLOCK_N}, got N={N_runtime}"
-        )
-    if K_runtime % _BLOCK_K != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP8 {layout} GEMM requires K to be a multiple of "
-            f"{_BLOCK_K}, got K={K_runtime}"
-        )
-    num_k_tiles = K_runtime // _BLOCK_K
-    if num_k_tiles < 4:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP8 {layout} GEMM requires at least 4 K{_BLOCK_K} "
-            f"tiles, got K={K_runtime} ({num_k_tiles} tiles)"
-        )
+    require_block_tiling(
+        M_runtime,
+        N_runtime,
+        K_runtime,
+        block_m=_BLOCK_M,
+        block_n=_BLOCK_N,
+        block_k=_BLOCK_K,
+        label=f"MXFP8 {layout} GEMM",
+    )
 
     expected_as = (K_runtime // _BLOCK_K, M_runtime)
     expected_bs = (K_runtime // _BLOCK_K, N_runtime)

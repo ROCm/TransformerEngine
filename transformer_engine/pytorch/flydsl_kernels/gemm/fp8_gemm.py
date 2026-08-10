@@ -25,7 +25,7 @@ from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
-from .exceptions import FlyDSLUnsupportedError
+from .gemm_common_utils import require_block_tiling
 
 # Transformer Engine-local FlyDSL utilities.
 from .fp8_gemm_utils import (
@@ -1040,27 +1040,15 @@ def doGemm(
         f"got {C.dtype}"
     )
     assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
-    if M_runtime % _BLOCK_M != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP8 GEMM requires M to be a multiple of {_BLOCK_M}, "
-            f"got M={M_runtime}"
-        )
-    if N_runtime % _BLOCK_N != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP8 GEMM requires N to be a multiple of {_BLOCK_N}, "
-            f"got N={N_runtime}"
-        )
-    if K_runtime % _BLOCK_K != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP8 GEMM requires K to be a multiple of {_BLOCK_K}, "
-            f"got K={K_runtime}"
-        )
-    num_k_tiles = K_runtime // _BLOCK_K
-    if num_k_tiles < 4:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP8 GEMM requires at least 4 K{_BLOCK_K} tiles, "
-            f"got K={K_runtime} ({num_k_tiles} tiles)"
-        )
+    require_block_tiling(
+        M_runtime,
+        N_runtime,
+        K_runtime,
+        block_m=_BLOCK_M,
+        block_n=_BLOCK_N,
+        block_k=_BLOCK_K,
+        label="FP8 GEMM",
+    )
     assert A_scale_inv.dtype == torch.float32 and A_scale_inv.numel() == 1
     assert B_scale_inv.dtype == torch.float32 and B_scale_inv.numel() == 1
     assert C.shape == (M_runtime, N_runtime), (

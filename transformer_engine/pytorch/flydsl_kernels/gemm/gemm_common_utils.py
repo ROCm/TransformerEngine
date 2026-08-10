@@ -11,6 +11,37 @@ G2S/S2R loaders, buffer-tensor makers) stays in the per-dtype modules.
 import flydsl.expr as fx
 from flydsl.expr import arith, rocdl
 
+from .exceptions import FlyDSLUnsupportedError
+
+
+def require_block_tiling(m, n, k, *, block_m, block_n, block_k, label, min_k_tiles=4):
+    """Validate the host-side M/N/K tiling contract shared by every GEMM core.
+
+    ``label`` is the human-readable kernel identifier used in the error text
+    (e.g. ``"FP16 GEMM"`` or ``"MXFP8 TN GEMM"``). Raises
+    ``FlyDSLUnsupportedError`` so callers fall back to the default backend on
+    unsupported shapes. Returns the number of K tiles.
+    """
+    if m % block_m != 0:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL {label} requires M to be a multiple of {block_m}, got M={m}"
+        )
+    if n % block_n != 0:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL {label} requires N to be a multiple of {block_n}, got N={n}"
+        )
+    if k % block_k != 0:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL {label} requires K to be a multiple of {block_k}, got K={k}"
+        )
+    num_k_tiles = k // block_k
+    if num_k_tiles < min_k_tiles:
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL {label} requires at least {min_k_tiles} K{block_k} tiles, "
+            f"got K={k} ({num_k_tiles} tiles)"
+        )
+    return num_k_tiles
+
 
 def cdiv(numer: int, denom: int) -> int:
     return (numer + denom - 1) // denom

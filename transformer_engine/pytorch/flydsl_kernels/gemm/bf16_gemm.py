@@ -32,6 +32,7 @@ from flydsl.expr.typing import Vector as Vec
 
 # Transformer Engine-local FlyDSL utilities.
 from .exceptions import FlyDSLUnsupportedError
+from .gemm_common_utils import require_block_tiling
 from .fp16_gemm_utils import (
     G2SLoader,
     S2RLoader,
@@ -1285,28 +1286,15 @@ def doGemm(
     if C.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise TypeError(f"Unsupported BF16 output dtype: {C.dtype}")
 
-    if M_runtime % _BLOCK_M != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL BF16 GEMM requires M to be a multiple of {_BLOCK_M}, "
-            f"got M={M_runtime}"
-        )
-    if N_runtime % _BLOCK_N != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL BF16 GEMM requires N to be a multiple of {_BLOCK_N}, "
-            f"got N={N_runtime}"
-        )
-    if K_runtime % _BLOCK_K != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL BF16 GEMM requires K to be a multiple of {_BLOCK_K}, "
-            f"got K={K_runtime}"
-        )
-
-    num_k_tiles = K_runtime // _BLOCK_K
-    if num_k_tiles < 4:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL BF16 GEMM requires at least 4 K{_BLOCK_K} tiles, "
-            f"got K={K_runtime} ({num_k_tiles} tiles)"
-        )
+    require_block_tiling(
+        M_runtime,
+        N_runtime,
+        K_runtime,
+        block_m=_BLOCK_M,
+        block_n=_BLOCK_N,
+        block_k=_BLOCK_K,
+        label="BF16 GEMM",
+    )
 
     if tuple(C.shape) != (M_runtime, N_runtime):
         raise ValueError(

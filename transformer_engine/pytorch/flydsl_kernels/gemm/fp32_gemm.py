@@ -26,7 +26,7 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 # Transformer Engine-local FlyDSL utilities.
-from .exceptions import FlyDSLUnsupportedError
+from .gemm_common_utils import require_block_tiling
 from .fp16_gemm_utils import (
     G2SLoader,
     S2RLoader,
@@ -956,30 +956,15 @@ def doGemm(
     assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
     assert A.dtype == torch.float32 and B.dtype == torch.float32
     assert C.dtype == torch.float32
-    if M_runtime % _BLOCK_M != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP32 GEMM requires M to be a multiple of {_BLOCK_M}, "
-            f"got M={M_runtime}"
-        )
-
-    if N_runtime % _BLOCK_N != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP32 GEMM requires N to be a multiple of {_BLOCK_N}, "
-            f"got N={N_runtime}"
-        )
-
-    if K_runtime % _BLOCK_K != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP32 GEMM requires K to be a multiple of {_BLOCK_K}, "
-            f"got K={K_runtime}"
-        )
-
-    num_k_tiles = K_runtime // _BLOCK_K
-    if num_k_tiles < 4:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL FP32 GEMM requires at least 4 K{_BLOCK_K} tiles, "
-            f"got K={K_runtime} ({num_k_tiles} tiles)"
-        )
+    require_block_tiling(
+        M_runtime,
+        N_runtime,
+        K_runtime,
+        block_m=_BLOCK_M,
+        block_n=_BLOCK_N,
+        block_k=_BLOCK_K,
+        label="FP32 GEMM",
+    )
     assert C.shape == (M_runtime, N_runtime)
     if stream is None:
         stream = torch.cuda.current_stream()
