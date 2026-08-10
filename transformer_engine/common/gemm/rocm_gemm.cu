@@ -595,6 +595,11 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
 // on device; only that scalar is copied back to the host. The GEMM then computes c0*(A*B) + beta*C
 // in its fp32 accumulator with a single round to the output dtype (matching the reference addmm).
 // No post-GEMM scaling or C copy is needed.
+//
+// FIXME(AIHPBLAS-3571): the host-scalar-alpha detour (device->host c0 copy + stream sync) only
+// exists because hipBLASLt has no NVFP4 device-alpha solution. Once
+// https://amd-hub.atlassian.net/browse/AIHPBLAS-3571 is fixed, pass c0 as a device scalar alpha and
+// drop the c0 readback / hipStreamSynchronize below.
 static void setup_nvfp4_gemm_native(
     const transformer_engine::Tensor& inputA, cublasOperation_t transa,
     const transformer_engine::Tensor& inputB, cublasOperation_t transb,
@@ -653,6 +658,7 @@ static void setup_nvfp4_gemm_native(
                     static_cast<int>(b_sinv.shape[1]), k_scale, num_ktiles, amax_A, amax_B, alpha_in,
                     factor_inv, c0_dev, stream);
   float host_c0 = 0.0f;
+  // FIXME(AIHPBLAS-3571): drop this c0 readback + sync once hipBLASLt supports NVFP4 device alpha.
   NVTE_CHECK_CUDA(hipMemcpyAsync(&host_c0, c0_dev, sizeof(float), hipMemcpyDeviceToHost, stream));
   NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
   *alpha_out = host_c0;
