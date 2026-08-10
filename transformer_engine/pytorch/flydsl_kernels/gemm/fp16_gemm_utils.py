@@ -1,6 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
-"""Byte-staging helpers for the BF16 four-wave GEMM."""
+"""Byte-level staging helpers for the four-wave GEMM kernels.
+
+These loaders and swizzle helpers operate on flat byte views and carry no dtype
+label, so the half-precision (FP16/BF16) and FP32 cores all share them; each
+core selects its own MFMA opcode. The module keeps its historical
+``fp16_gemm_utils`` filename.
+"""
 
 import flydsl.expr as fx
 from flydsl._mlir import ir
@@ -24,16 +30,13 @@ from .gemm_common_utils import (
 )
 
 
-def make_bf16_buffer_tensor(arg_bf16):
-    """Create a BF16 BufferDesc directly from the wrapper-provided tensor."""
-    return fx.rocdl.make_buffer_tensor(arg_bf16, max_size=False)
+def make_byte_buffer_tensor(arg):
+    """Create a BufferDesc directly from the wrapper-provided tensor.
 
-
-# Backward-compatible name used by fp16_gemm.py.
-# Keep the exact existing behavior; this is only a symbol alias.
-make_bf16_byte_buffer_tensor = make_bf16_buffer_tensor
-
-make_fp16_byte_buffer_tensor = make_bf16_byte_buffer_tensor
+    Dtype-independent: the operand is consumed as a flat byte view, so FP16,
+    BF16, and FP32 all share this maker.
+    """
+    return fx.rocdl.make_buffer_tensor(arg, max_size=False)
 
 
 def compute_global_swizzle(
@@ -48,7 +51,7 @@ def compute_global_swizzle(
     for round in range_constexpr(n_rounds):
         if const_expr(preshuffled):
             raise AssertionError(
-                "BF16 first-pass port does not support preshuffled operands"
+                "16-bit first-pass port does not support preshuffled operands"
             )
         row = lane_id // 8 + wave_id * 8 + round * (n_waves * 8)
         col_bytes = (lane_id % 8) * 16
@@ -57,13 +60,13 @@ def compute_global_swizzle(
     return offsets
 
 
-def compute_global_bf16_transpose_swizzle(
+def compute_global_transpose_swizzle(
     lane_id,
     wave_id,
     leading_dim_bytes,
     n_rounds,
 ):
-    """Offsets for a K-major BF16 source staged for ``ds_read_b64_tr_b16``.
+    """Offsets for a K-major 16-bit source staged for ``ds_read_b64_tr_b16``.
 
     One 128-row output half-page is represented in LDS as two independent
     swizzled ``[K64, X64]`` slices. Each slice is 64 rows by 128 bytes, so the
@@ -71,7 +74,7 @@ def compute_global_bf16_transpose_swizzle(
     16-byte/thread DMA cadence.
 
     The returned offsets are relative to the source tile base:
-      ``source[k, x_base]`` for a contiguous K-major BF16 matrix.
+      ``source[k, x_base]`` for a contiguous K-major 16-bit matrix.
     """
     offsets = []
     n_waves = fx.block_dim.x // 64
@@ -93,10 +96,8 @@ def compute_global_bf16_transpose_swizzle(
     return offsets
 
 
-compute_global_fp16_transpose_swizzle = compute_global_bf16_transpose_swizzle
-
 class G2SLoader:
-    """Issue native 16-byte BF16 BufferDesc-to-BF16 LDS copies."""
+    """Issue native 16-byte BufferDesc-to-LDS copies."""
 
     def __init__(self, gl_src, gl_offsets, n_load_steps, lds_dtype, wave_id):
         self.g2lds_atom = fx.make_copy_atom(fx.rocdl.BufferCopyLDS128b(), 128)
@@ -143,7 +144,7 @@ class G2SLoader:
 
 
 class S2RLoader:
-    """LDS readers used to assemble BF16 K64 fragments."""
+    """LDS readers used to assemble 16-bit K64 fragments."""
 
     def __init__(self, wave_idx, n_tiles):
         self.lane_id = fx.thread_idx.x % 64
@@ -197,14 +198,14 @@ class S2RLoader:
             fx.Int32,
         )
 
-    def load_one_transpose_bf16(
+    def load_one_transpose(
         self,
         lds_src,
         first_byte_offset,
         second_byte_offset,
         immediate_offset=0,
     ):
-        """Return one i32x4 K32 BF16 fragment from two transpose reads."""
+        """Return one i32x4 K32 16-bit fragment from two transpose reads."""
         lo = self._ds_read_b64_tr_b16(
             lds_src,
             first_byte_offset,
@@ -216,19 +217,3 @@ class S2RLoader:
             immediate_offset,
         )
         return lo.shuffle(hi, [0, 1, 2, 3])
-
-
-    def load_one_transpose_fp16(
-        self,
-        lds_src,
-        first_byte_offset,
-        second_byte_offset,
-        immediate_offset=0,
-    ):
-        """Return one i32x4 K32 FP16 fragment from two transpose reads."""
-        return self.load_one_transpose_bf16(
-            lds_src,
-            first_byte_offset,
-            second_byte_offset,
-            immediate_offset,
-        )

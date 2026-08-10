@@ -31,7 +31,7 @@ from .fp16_gemm_utils import (
     G2SLoader,
     S2RLoader,
     compute_global_swizzle,
-    make_bf16_byte_buffer_tensor as make_fp32_byte_buffer_tensor,
+    make_byte_buffer_tensor as make_fp32_byte_buffer_tensor,
     pack_i32x4_i32x8,
     swizzle_128,
     xcd_swizzle,

@@ -13,8 +13,7 @@ from transformer_engine.pytorch.utils import get_device_compute_capability
 
 from .exceptions import FlyDSLUnsupportedError
 
-from .bf16_gemm import bf16_matmul
-from .fp16_gemm import fp16_matmul
+from .half_prec_gemm import bf16_matmul, fp16_matmul
 from .fp32_gemm import fp32_matmul
 from .fp8_gemm import fp8_matmul
 from .mxfp8_gemm import mxfp8_matmul

@@ -2,10 +2,16 @@
 #
 # See LICENSE for license information.
 
-"""FlyDSL FP16 TN/NN/NT 4-wave GEMM kernel for Transformer Engine.
+"""FlyDSL half-precision (FP16/BF16) TN/NN/NT 4-wave GEMM kernel for Transformer Engine.
 
-All supported layouts share one source-level kernel generator while compiling
-to separate cached binaries:
+FP16 and BF16 share one source-level kernel generator: the algorithm is
+identical and only the ``v_mfma_f32_16x16x32_{f16,bf16}`` opcode differs. That
+opcode is selected at compile time via ``mfma_suffix``, so each (dtype, K,
+output, layout) combination still compiles to its own cached binary with no
+runtime dtype branch.
+
+All supported layouts share the same generator while compiling to separate
+cached binaries:
 
     TN: A [M,K] normal read,    B [N,K] normal read
     NN: A [M,K] normal read,    B [K,N] transpose read
@@ -36,14 +42,17 @@ from .gemm_common_utils import require_block_tiling
 from .fp16_gemm_utils import (
     G2SLoader,
     S2RLoader,
-    compute_global_fp16_transpose_swizzle,
+    compute_global_transpose_swizzle,
     compute_global_swizzle,
-    make_fp16_byte_buffer_tensor,
+    make_byte_buffer_tensor,
     pack_i32x4_i32x8,
     swizzle_128,
     xcd_swizzle,
     barrier
 )
+
+# FP16 and BF16 differ only in the MFMA opcode suffix.
+_MFMA_SUFFIX = {torch.float16: "f16", torch.bfloat16: "bf16"}
 
 
 _BLOCK_M = 256
@@ -84,13 +93,6 @@ LOAD_PASSES_A_SUBTILE = LOAD_PASSES_A // 2
 LOAD_PASSES_B_SUBTILE = LOAD_PASSES_B // 2
 PASSES_PER_A_MI = LOAD_PASSES_A_SUBTILE // MFMA_M_PER_SUBTILE
 
-LDS_SYM_A0 = "fp16_pp_smem_a0"
-LDS_SYM_A1 = "fp16_pp_smem_a1"
-LDS_SYM_B0 = "fp16_pp_smem_b0"
-LDS_SYM_B1 = "fp16_pp_smem_b1"
-LDS_ALIAS_DOMAIN = '#llvm.alias_scope_domain<id = "fp16_pp_lds">'
-SCOPE_IDS = ("a0", "a1", "b0", "b1")
-
 assert BLOCK_K == 64
 # DO NOT CHANGE THE FOLLOWING LINE.
 assert NUM_THREADS == 256
@@ -104,15 +106,19 @@ def _compile_kernel(
     K: int,
     output_dtype: torch.dtype,
     layout: str,
+    mfma_suffix: str,
     use_xcd_remap: bool = True,
 ):
-    """Build one compile-time-specialized TN, NN, or NT FP16 kernel.
+    """Build one compile-time-specialized TN, NN, or NT half-precision kernel.
 
+    ``mfma_suffix`` selects the ``v_mfma_f32_16x16x32_{f16,bf16}`` opcode.
     ``K`` must contain at least four K64 tiles. Runtime M/N are expected to
     be exact multiples of ``BLOCK_M``/``BLOCK_N``; the kernel has no edge masks.
     """
     if layout not in ("TN", "NN", "NT"):
-        raise ValueError(f"Unsupported FP16 kernel layout: {layout}")
+        raise ValueError(f"Unsupported half-precision kernel layout: {layout}")
+    if mfma_suffix not in ("f16", "bf16"):
+        raise ValueError(f"Unsupported MFMA suffix: {mfma_suffix}")
 
     a_transpose_read = layout == "NT"
     b_transpose_read = layout in ("NN", "NT")
@@ -146,7 +152,7 @@ def _compile_kernel(
         output_fx_dtype = fx.Float32
     else:
         raise TypeError(
-            "FlyDSL FP16 GEMM output dtype must be torch.float16, "
+            "FlyDSL half-precision GEMM output dtype must be torch.float16, "
             f"torch.bfloat16, or torch.float32, got {output_dtype}"
         )
 
@@ -299,11 +305,11 @@ def _compile_kernel(
             return load_normal_b_frag(lds_b, b_row_addr, sn)
 
     # Resolve global staging maps before FlyDSL captures ``kernel_gemm``.
-    # FP16 uses K64, so each transpose-read half-page is two independent
+    # Half-precision uses K64, so each transpose-read half-page is two independent
     # [K64, X64] slices with 128-byte physical rows.
     if a_transpose_read:
         def _a_global_offsets(lane, wave_id, c_m):
-            return compute_global_fp16_transpose_swizzle(
+            return compute_global_transpose_swizzle(
                 lane,
                 wave_id,
                 _a_leading_dim_bytes(c_m),
@@ -322,7 +328,7 @@ def _compile_kernel(
 
     if b_transpose_read:
         def _b_global_offsets(lane, wave_id, c_n):
-            return compute_global_fp16_transpose_swizzle(
+            return compute_global_transpose_swizzle(
                 lane,
                 wave_id,
                 _b_leading_dim_bytes(c_n),
@@ -341,7 +347,7 @@ def _compile_kernel(
 
     @fx.struct
     class SharedStorage:
-        # Preserve the passing TN byte-staging contract exactly.  A FP16 K64
+        # Preserve the passing TN byte-staging contract exactly.  A half-precision K64
         # half-page is 128 rows x 128 bytes = 16 KiB.
         a0_0: fx.Array[fx.Uint8, LDS_BYTES_HALF, 16]
         a0_1: fx.Array[fx.Uint8, LDS_BYTES_HALF, 16]
@@ -367,10 +373,10 @@ def _compile_kernel(
         lds_b1 = (lds.b1_0, lds.b1_1)
 
         # A/B arrive as contiguous uint8 byte views of the original
-        # row-major FP16 tensors. This preserves the validated 16-byte
+        # row-major half-precision tensors. This preserves the validated 16-byte
         # BufferCopyLDS128b path and byte-based address arithmetic.
-        gA = make_fp16_byte_buffer_tensor(A)
-        gB = make_fp16_byte_buffer_tensor(B)
+        gA = make_byte_buffer_tensor(A)
+        gB = make_byte_buffer_tensor(B)
         a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
         b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
         tx = gpu.thread_id("x")
@@ -400,7 +406,7 @@ def _compile_kernel(
         lane = tx_i32 % fx.Int32(WARP_SIZE)
 
         # Offsets are always bytes.  TN uses the original 128-byte XOR
-        # swizzle.  NN/NT stage K-major BF16 data as two [K64, X64] slices for
+        # swizzle.  NN/NT stage K-major 16-bit data as two [K64, X64] slices for
         # ds_read_b64_tr_b16; the layout choice was resolved before capture.
         gl_off_a = _a_global_offsets(lane, wave_id, c_m)
         gl_off_b = _b_global_offsets(lane, wave_id, c_n)
@@ -572,10 +578,10 @@ def _compile_kernel(
             )
 
         def load_transposed_frag_half(lds_page, local_x_tile, half):
-            # FP16 uses v_mfma_f32_16x16x32_f16, not the MXFP8 K128
+            # Half-precision uses v_mfma_f32_16x16x32_{f16,bf16}, not the MXFP8 K128
             # instruction.  A 128-X half-page is therefore two independent
-            # swizzled [K64, X64] FP16 slices. One ds_read_b64_tr_b16 returns
-            # four FP16 values/lane; two reads form one K32 MFMA fragment.
+            # swizzled [K64, X64] half-precision slices. One ds_read_b64_tr_b16 returns
+            # four half-precision values/lane; two reads form one K32 MFMA fragment.
             local_x_i32 = fx.Int32(local_x_tile)
             slice_idx = local_x_i32 // fx.Int32(64)
             x_in_slice = local_x_i32 % fx.Int32(64)
@@ -596,7 +602,7 @@ def _compile_kernel(
             base = slice_base + physical_k * fx.Int32(128) + physical_x
             other = base ^ fx.Int32(0x220)
             immediate_offset = 0 if half == 0 else 0x1000
-            return s2r.load_one_transpose_fp16(
+            return s2r.load_one_transpose(
                 lds_page,
                 base,
                 other,
@@ -611,9 +617,9 @@ def _compile_kernel(
         def _acc_idx(subtile_id, mi, ni):
             return subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
 
-        def _fp16_k32_frag(full_frag, k32):
-            # A/B 16x64 FP16 wave fragments are i32x8. Each K32 MFMA
-            # consumes one contiguous i32x4 slice (eight FP16 values/lane).
+        def _k32_frag(full_frag, k32):
+            # A/B 16x64 half-precision wave fragments are i32x8. Each K32 MFMA
+            # consumes one contiguous i32x4 slice (eight half-precision values/lane).
             lo = k32 * 4
             v = Vec(full_frag)
             return Vec.from_elements(
@@ -621,13 +627,13 @@ def _compile_kernel(
                 fx.Int32,
             )
 
-        def _pinned_fp16_mfma_once(acc_idx, a_k32, b_k32):
+        def _pinned_mfma_once(acc_idx, a_k32, b_k32):
             acc_pin = PIN_ACC_BASE + acc_idx * 4
             llvm.InlineAsmOp(
                 None,
                 [arith._to_raw(a_k32), arith._to_raw(b_k32)],
                 (
-                    f"v_mfma_f32_16x16x32_f16 "
+                    f"v_mfma_f32_16x16x32_{mfma_suffix} "
                     f"a[{acc_pin}:{acc_pin + 3}], "
                     f"$0, $1, "
                     f"a[{acc_pin}:{acc_pin + 3}]"
@@ -640,12 +646,12 @@ def _compile_kernel(
             )
 
         def pinned_mfma(acc_idx, a_frag, b_frag):
-            """Accumulate one logical 16x16x64 FP16 product into pinned AGPRs."""
+            """Accumulate one logical 16x16x64 half-precision product into pinned AGPRs."""
             for k32 in range_constexpr(2):
-                _pinned_fp16_mfma_once(
+                _pinned_mfma_once(
                     acc_idx,
-                    _fp16_k32_frag(a_frag, k32),
-                    _fp16_k32_frag(b_frag, k32),
+                    _k32_frag(a_frag, k32),
+                    _k32_frag(b_frag, k32),
                 )
 
         def pinned_final_mfma(dst_slot, old_acc_idx, a_frag, b_frag):
@@ -668,12 +674,12 @@ def _compile_kernel(
             a_frags = (a0, a1, a2, a3)
             b_frags = (b0, b1)
             for mi in range_constexpr(4):
-                a_k32 = _fp16_k32_frag(a_frags[mi], k32)
+                a_k32 = _k32_frag(a_frags[mi], k32)
                 for nj in range_constexpr(2):
-                    _pinned_fp16_mfma_once(
+                    _pinned_mfma_once(
                         _acc_idx(subtile_id, mi, n_base + nj),
                         a_k32,
-                        _fp16_k32_frag(b_frags[nj], k32),
+                        _k32_frag(b_frags[nj], k32),
                     )
 
         def mfma_4n_4mi_k32(subtile_id, k32, a0, a1, a2, a3, b0, b1, b2, b3):
@@ -681,12 +687,12 @@ def _compile_kernel(
             a_frags = (a0, a1, a2, a3)
             b_frags = (b0, b1, b2, b3)
             for mi in range_constexpr(4):
-                a_k32 = _fp16_k32_frag(a_frags[mi], k32)
+                a_k32 = _k32_frag(a_frags[mi], k32)
                 for ni in range_constexpr(4):
-                    _pinned_fp16_mfma_once(
+                    _pinned_mfma_once(
                         _acc_idx(subtile_id, mi, ni),
                         a_k32,
-                        _fp16_k32_frag(b_frags[ni], k32),
+                        _k32_frag(b_frags[ni], k32),
                     )
 
         def store_acc_vector_for_logical_idx(logical_acc_idx, acc):
@@ -1164,17 +1170,19 @@ def _cached_launch(
     K: int,
     output_dtype: torch.dtype,
     layout: str,
+    mfma_suffix: str,
     use_xcd_remap: bool = True,
 ):
     return _compile_kernel(
         K,
         output_dtype,
         layout,
+        mfma_suffix,
         use_xcd_remap=use_xcd_remap,
     )
 
 
-def fp16_matmul(
+def _half_prec_matmul(
     a: torch.Tensor,
     b: torch.Tensor,
     c: torch.Tensor,
@@ -1183,24 +1191,30 @@ def fp16_matmul(
     m: int,
     n: int,
     k: int,
+    input_dtype: torch.dtype,
+    label: str,
     stream=None,
 ):
-    """Launch the wrapper-selected BF16 TN/NN/NT specialization."""
+    """Validate operands and launch a half-precision TN/NN/NT specialization.
+
+    ``input_dtype`` is the required FP16/BF16 operand dtype and ``label`` is the
+    human-readable kernel name used in error messages.
+    """
     if layout not in ("TN", "NN", "NT"):
-        raise ValueError(f"Unsupported FP16 layout: {layout}")
+        raise ValueError(f"Unsupported {label} layout: {layout}")
     if a.ndim != 2 or b.ndim != 2:
         raise ValueError(
-            f"FlyDSL BF16 expects rank-2 operands, got A{tuple(a.shape)} "
+            f"FlyDSL {label} expects rank-2 operands, got A{tuple(a.shape)} "
             f"and B{tuple(b.shape)}"
         )
-    if a.dtype != torch.float16 or b.dtype != torch.float16:
+    if a.dtype != input_dtype or b.dtype != input_dtype:
         raise TypeError(
-            "FlyDSL FP16 GEMM expects torch.float16 operands, "
+            f"FlyDSL {label} GEMM expects {input_dtype} operands, "
             f"got A={a.dtype}, B={b.dtype}"
         )
     if not a.is_contiguous() or not b.is_contiguous():
         raise FlyDSLUnsupportedError(
-            f"FlyDSL BF16 {layout} requires original contiguous row-major "
+            f"FlyDSL {label} {layout} requires original contiguous row-major "
             f"operands, got A stride={tuple(a.stride())}, "
             f"B stride={tuple(b.stride())}"
         )
@@ -1217,7 +1231,7 @@ def fp16_matmul(
     expected_a, expected_b = expected_shapes[layout]
     if tuple(a.shape) != expected_a or tuple(b.shape) != expected_b:
         raise ValueError(
-            f"FlyDSL BF16 {layout} physical operands do not match contract: "
+            f"FlyDSL {label} {layout} physical operands do not match contract: "
             f"A{tuple(a.shape)} expected {expected_a}; "
             f"B{tuple(b.shape)} expected {expected_b}"
         )
@@ -1226,7 +1240,7 @@ def fp16_matmul(
         raise ValueError(f"C shape {tuple(c.shape)} != expected {(m, n)}")
     if c.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise TypeError(
-            "FlyDSL FP16 output must be float16, bfloat16, or float32, "
+            f"FlyDSL {label} output must be float16, bfloat16, or float32, "
             f"got {c.dtype}"
         )
     if a.device != b.device or a.device != c.device:
@@ -1235,7 +1249,7 @@ def fp16_matmul(
             f"{a.device}, {b.device}, and {c.device}"
         )
     if not c.is_contiguous():
-        raise ValueError("FlyDSL FP16 GEMM requires contiguous output storage")
+        raise ValueError(f"FlyDSL {label} GEMM requires contiguous output storage")
 
     doGemm(
         a,
@@ -1245,8 +1259,63 @@ def fp16_matmul(
         m=m,
         n=n,
         k=k,
+        input_dtype=input_dtype,
+        label=label,
         stream=stream,
     )
+
+
+def fp16_matmul(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    *,
+    layout: str,
+    m: int,
+    n: int,
+    k: int,
+    stream=None,
+):
+    """Launch the wrapper-selected FP16 TN/NN/NT specialization."""
+    _half_prec_matmul(
+        a,
+        b,
+        c,
+        layout=layout,
+        m=m,
+        n=n,
+        k=k,
+        input_dtype=torch.float16,
+        label="FP16",
+        stream=stream,
+    )
+
+
+def bf16_matmul(
+    a: torch.Tensor,
+    b: torch.Tensor,
+    c: torch.Tensor,
+    *,
+    layout: str,
+    m: int,
+    n: int,
+    k: int,
+    stream=None,
+):
+    """Launch the wrapper-selected BF16 TN/NN/NT specialization."""
+    _half_prec_matmul(
+        a,
+        b,
+        c,
+        layout=layout,
+        m=m,
+        n=n,
+        k=k,
+        input_dtype=torch.bfloat16,
+        label="BF16",
+        stream=stream,
+    )
+
 
 def doGemm(
     A: torch.Tensor,
@@ -1257,10 +1326,12 @@ def doGemm(
     m: int,
     n: int,
     k: int,
+    input_dtype: torch.dtype,
+    label: str,
     stream=None,
     use_xcd_remap: bool = True,
 ):
-    """Launch one cached K/output/layout-specialized FP16 core.
+    """Launch one cached K/output/layout-specialized half-precision core.
 
     A and B are passed unchanged from ``gemm_wrappers.py``. Their pointers
     reference the original rowwise allocations:
@@ -1273,18 +1344,19 @@ def doGemm(
     ``ds_read_b64_tr_b16`` only.
     """
     if layout not in ("TN", "NN", "NT"):
-        raise ValueError(f"Unsupported FP16 layout: {layout}")
+        raise ValueError(f"Unsupported {label} layout: {layout}")
 
     M_runtime = int(m)
     N_runtime = int(n)
     K_runtime = int(k)
 
-    if A.dtype != torch.float16 or B.dtype != torch.float16:
+    if A.dtype != input_dtype or B.dtype != input_dtype:
         raise TypeError(
-            f"BF16 {layout} requires BF16 inputs, got {A.dtype} and {B.dtype}"
+            f"{label} {layout} requires {input_dtype} inputs, "
+            f"got {A.dtype} and {B.dtype}"
         )
     if C.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise TypeError(f"Unsupported FP16 output dtype: {C.dtype}")
+        raise TypeError(f"Unsupported {label} output dtype: {C.dtype}")
 
     require_block_tiling(
         M_runtime,
@@ -1293,7 +1365,7 @@ def doGemm(
         block_m=_BLOCK_M,
         block_n=_BLOCK_N,
         block_k=_BLOCK_K,
-        label="FP16 GEMM",
+        label=f"{label} GEMM",
     )
 
     if tuple(C.shape) != (M_runtime, N_runtime):
@@ -1308,6 +1380,7 @@ def doGemm(
         K_runtime,
         C.dtype,
         layout,
+        _MFMA_SUFFIX[input_dtype],
         bool(use_xcd_remap),
     )
     # Preserve the original validated byte-addressed G2L path. These are
