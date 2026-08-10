@@ -100,12 +100,33 @@ def _compile_kernel(
     b_fp8_dtype: torch.dtype,
     output_dtype: torch.dtype,
     use_xcd_remap: bool = True,
+    epilogue: str = "DEFAULT",
 ):
     """Build the specialized kernel for compile-time K, A/B FP8 types, and output dtype.
 
     ``K`` must contain at least four K128 tiles. Runtime M/N are expected to
     be exact multiples of ``BLOCK_M``/``BLOCK_N``; the kernel has no edge masks.
+
+    ``epilogue`` selects the fused post-GEMM stages, resolved at compile time
+    so the store loop stays branch-free:
+
+        DEFAULT        plain matmul
+        BIAS           + per-output-feature bias vector (indexed by N)
+        GELU_AUX       (reserved) GELU with saved pre-activation aux
+        GELU_AUX_BIAS  (reserved) bias then GELU with saved aux
+
+    Only DEFAULT and BIAS are implemented; the GELU modes are accepted so the
+    store-loop structure and dispatch signature are already in place.
     """
+    if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
+        raise ValueError(f"Unsupported FP8 epilogue: {epilogue}")
+    if epilogue in ("GELU_AUX", "GELU_AUX_BIAS"):
+        raise NotImplementedError(
+            f"FP8 epilogue {epilogue} is reserved but not yet implemented"
+        )
+    has_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")
+    has_gelu = epilogue in ("GELU_AUX", "GELU_AUX_BIAS")
+
     BLOCK_M, BLOCK_N, BLOCK_K = _BLOCK_M, _BLOCK_N, _BLOCK_K
 
     fp8_input_types = {
@@ -190,6 +211,7 @@ def _compile_kernel(
         C: fx.Tensor,
         A_scale_inv: fx.Tensor,
         B_scale_inv: fx.Tensor,
+        Bias: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
     ):
@@ -267,6 +289,20 @@ def _compile_kernel(
             fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
             output_fx_dtype,
         )
+
+        # Bias is a length-N fp32 vector indexed by the global output-feature
+        # (N) coordinate and broadcast across the M/token rows. const_expr folds
+        # this compile-time flag at trace time so the setup (and load_bias) are
+        # inlined into the kernel scope with no runtime dispatch branch.
+        if const_expr(has_bias):
+            gBias = fx.rocdl.make_buffer_tensor(Bias, max_size=True)
+            bias_div = fx.logical_divide(gBias, fx.make_layout(1, 1))
+            bias_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+
+            def load_bias(col):
+                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+                fx.copy(bias_ld_atom, fx.slice(bias_div, (None, fx.Int32(col))), reg)
+                return fx.memref_load_vec(reg)[0]
 
         PIN_ACC_BASE = 0
 
@@ -461,10 +497,24 @@ def _compile_kernel(
             subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
             row_base = subtile_m_idx * SUBTILE_M + fx.Index(mi * MFMA_M) + lane_div_16 * 4
             col = subtile_n_idx * SUBTILE_N + fx.Index(ni * MFMA_N) + lane_mod_16
+
+            # Bias depends only on the output-feature (N) coordinate, so read it
+            # once per column (global index by_n_idx + col) and reuse across the
+            # four M rows below.
+            if const_expr(has_bias):
+                bias_value = load_bias(by_n_idx + col)
+
             for ii in range_constexpr(4):
                 row = row_base + fx.Index(ii)
                 c_idx = c_tile_base_elems + row * fx.Index(c_n) + col
+
+                # Epilogue stages run on the fp32 accumulator, in order, before
+                # the output-dtype narrowing. Bias is added after the tensor-wise
+                # output scale, matching the reference epilogue ordering.
                 value = Vec(acc)[ii] * output_scale
+                if const_expr(has_bias):
+                    value = value + bias_value
+
                 if output_dtype != torch.float32:
                     value = value.to(output_fx_dtype)
                 reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
@@ -892,6 +942,7 @@ def _compile_kernel(
         C: fx.Tensor,
         A_scale_inv: fx.Tensor,
         B_scale_inv: fx.Tensor,
+        Bias: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
@@ -904,6 +955,7 @@ def _compile_kernel(
             C,
             A_scale_inv,
             B_scale_inv,
+            Bias,
             c_m,
             c_n,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
@@ -918,6 +970,7 @@ def _cached_launch(
     b_fp8_dtype: torch.dtype,
     output_dtype: torch.dtype,
     use_xcd_remap: bool = True,
+    epilogue: str = "DEFAULT",
 ):
     return _compile_kernel(
         K,
@@ -925,6 +978,7 @@ def _cached_launch(
         b_fp8_dtype,
         output_dtype,
         use_xcd_remap=use_xcd_remap,
+        epilogue=epilogue,
     )
 
 
@@ -936,6 +990,9 @@ def fp8_matmul(
     b_scale_inv: torch.Tensor,
     c: torch.Tensor,
     stream=None,
+    *,
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
 ):
     """Launch TN tensor-wise FP8 GEMM using final kernel operand order.
 
@@ -1011,6 +1068,8 @@ def fp8_matmul(
         a_scale_inv,
         b_scale_inv,
         stream=stream,
+        epilogue=epilogue,
+        bias=bias,
     )
 
 def doGemm(
@@ -1021,6 +1080,8 @@ def doGemm(
     B_scale_inv: torch.Tensor,
     stream=None,
     use_xcd_remap: bool = True,
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
 ):
     """Launch tensor-wise FP8 GEMM with TE-style inverse input scales."""
     M_runtime, K_runtime = A.shape
@@ -1054,6 +1115,25 @@ def doGemm(
     assert C.shape == (M_runtime, N_runtime), (
         f"C shape {tuple(C.shape)} != ({M_runtime}, {N_runtime})"
     )
+
+    if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
+        raise ValueError(f"Unsupported FP8 epilogue: {epilogue}")
+    needs_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")
+    if needs_bias:
+        if bias is None:
+            raise ValueError(f"FP8 epilogue {epilogue} requires a bias tensor")
+        # Bias is indexed by the output-feature (N) axis and broadcast over M.
+        if bias.dtype != torch.float32:
+            raise TypeError(f"FP8 bias must be float32, got {bias.dtype}")
+        if bias.numel() != N_runtime:
+            raise ValueError(
+                f"FP8 bias length {bias.numel()} != N (out_features) {N_runtime}"
+            )
+        if bias.device != A.device:
+            raise ValueError("bias must be on the same device as A, B, and C")
+    elif bias is not None:
+        raise ValueError(f"FP8 epilogue {epilogue} does not accept a bias tensor")
+
     if stream is None:
         stream = torch.cuda.current_stream()
 
@@ -1062,6 +1142,11 @@ def doGemm(
     C_arg = C.contiguous().view(-1)
     A_scale_arg = A_scale_inv.contiguous().view(-1)
     B_scale_arg = B_scale_inv.contiguous().view(-1)
+    # DEFAULT keeps the kernel signature uniform with a dummy 1-element bias.
+    if needs_bias:
+        Bias_arg = bias.contiguous().view(-1)
+    else:
+        Bias_arg = torch.zeros(1, dtype=torch.float32, device=A.device)
 
     launch = _cached_launch(
         int(K_runtime),
@@ -1069,6 +1154,7 @@ def doGemm(
         B.dtype,
         C.dtype,
         bool(use_xcd_remap),
+        epilogue,
     )
     launch(
         A_arg,
@@ -1076,6 +1162,7 @@ def doGemm(
         C_arg,
         A_scale_arg,
         B_scale_arg,
+        Bias_arg,
         M_runtime,
         N_runtime,
         stream=stream,

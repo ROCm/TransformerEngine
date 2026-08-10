@@ -92,12 +92,32 @@ assert LOAD_PASSES_A % 2 == 0
 assert LOAD_PASSES_B % 2 == 0
 
 
-def _compile_kernel(K: int, use_xcd_remap: bool = True):
+def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT"):
     """Build the specialized 4-wave kernel for compile-time ``K``.
 
     ``K`` must contain at least four K32 tiles. Runtime M/N are expected to
     be exact multiples of ``BLOCK_M``/``BLOCK_N``; the kernel has no edge masks.
+
+    ``epilogue`` selects the fused post-GEMM stages, resolved at compile time
+    so the store loop stays branch-free:
+
+        DEFAULT        plain matmul
+        BIAS           + per-output-feature bias vector (indexed by N)
+        GELU_AUX       (reserved) GELU with saved pre-activation aux
+        GELU_AUX_BIAS  (reserved) bias then GELU with saved aux
+
+    Only DEFAULT and BIAS are implemented; the GELU modes are accepted so the
+    store-loop structure and dispatch signature are already in place.
     """
+    if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
+        raise ValueError(f"Unsupported FP32 epilogue: {epilogue}")
+    if epilogue in ("GELU_AUX", "GELU_AUX_BIAS"):
+        raise NotImplementedError(
+            f"FP32 epilogue {epilogue} is reserved but not yet implemented"
+        )
+    has_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")
+    has_gelu = epilogue in ("GELU_AUX", "GELU_AUX_BIAS")
+
     BLOCK_M, BLOCK_N, BLOCK_K = _BLOCK_M, _BLOCK_N, _BLOCK_K
     NUM_THREADS = 256
     WARP_SIZE = 64
@@ -154,6 +174,7 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True):
         A: fx.Tensor,
         B: fx.Tensor,
         C: fx.Tensor,
+        Bias: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
     ):
@@ -216,6 +237,20 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True):
         gC = fx.rocdl.make_buffer_tensor(C, max_size=True)
         c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
         c_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+
+        # Bias is a length-N fp32 vector indexed by the global output-feature
+        # (N) coordinate and broadcast across the M/token rows. const_expr folds
+        # this compile-time flag at trace time so the setup (and load_bias) are
+        # inlined into the kernel scope with no runtime dispatch branch.
+        if const_expr(has_bias):
+            gBias = fx.rocdl.make_buffer_tensor(Bias, max_size=True)
+            bias_div = fx.logical_divide(gBias, fx.make_layout(1, 1))
+            bias_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+
+            def load_bias(col):
+                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+                fx.copy(bias_ld_atom, fx.slice(bias_div, (None, fx.Int32(col))), reg)
+                return fx.memref_load_vec(reg)[0]
 
         PIN_ACC_BASE = 0
 
@@ -436,11 +471,25 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True):
             subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
             row_base = subtile_m_idx * SUBTILE_M + fx.Index(mi * MFMA_M) + lane_div_16 * 4
             col = subtile_n_idx * SUBTILE_N + fx.Index(ni * MFMA_N) + lane_mod_16
+
+            # Bias depends only on the output-feature (N) coordinate, so read it
+            # once per column (global index by_n_idx + col) and reuse across the
+            # four M rows below.
+            if const_expr(has_bias):
+                bias_value = load_bias(by_n_idx + col)
+
             for ii in range_constexpr(4):
                 row = row_base + fx.Index(ii)
                 c_idx = c_tile_base_elems + row * fx.Index(c_n) + col
+
+                # Epilogue stages run on the fp32 accumulator; output is fp32
+                # so there is no dtype narrowing. GELU will slot in here later.
+                value = Vec(acc)[ii]
+                if const_expr(has_bias):
+                    value = value + bias_value
+
                 reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
-                fx.memref_store_vec(Vec.filled(1, Vec(acc)[ii], fx.Float32), reg)
+                fx.memref_store_vec(Vec.filled(1, value, fx.Float32), reg)
                 fx.copy(c_store_atom, reg, fx.slice(c_div, (None, fx.Int32(c_idx))))
 
 
@@ -863,6 +912,7 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True):
         A: fx.Tensor,
         B: fx.Tensor,
         C: fx.Tensor,
+        Bias: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
@@ -873,6 +923,7 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True):
             A,
             B,
             C,
+            Bias,
             c_m,
             c_n,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
@@ -881,8 +932,8 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True):
     return launch_gemm
 
 @functools.lru_cache(maxsize=None)
-def _cached_launch(K: int, use_xcd_remap: bool = True):
-    return _compile_kernel(K, use_xcd_remap=use_xcd_remap)
+def _cached_launch(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT"):
+    return _compile_kernel(K, use_xcd_remap=use_xcd_remap, epilogue=epilogue)
 
 
 
@@ -891,6 +942,9 @@ def fp32_matmul(
     b: torch.Tensor,
     c: torch.Tensor,
     stream=None,
+    *,
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
 ):
     """TE-facing TN FP32 GEMM adapter.
 
@@ -936,7 +990,7 @@ def fp32_matmul(
         raise ValueError("FlyDSL FP32 GEMM requires contiguous output storage")
 
     b_hk = b.transpose(0, 1).contiguous()
-    doGemm(a, b_hk, c, stream=stream)
+    doGemm(a, b_hk, c, stream=stream, epilogue=epilogue, bias=bias)
 
 
 def doGemm(
@@ -945,6 +999,8 @@ def doGemm(
     C: torch.Tensor,
     stream=None,
     use_xcd_remap: bool = True,
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
 ):
     """Launch the private K-specialized FP32 core.
 
@@ -966,11 +1022,35 @@ def doGemm(
         label="FP32 GEMM",
     )
     assert C.shape == (M_runtime, N_runtime)
+
+    if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
+        raise ValueError(f"Unsupported FP32 epilogue: {epilogue}")
+    needs_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")
+    if needs_bias:
+        if bias is None:
+            raise ValueError(f"FP32 epilogue {epilogue} requires a bias tensor")
+        # Bias is indexed by the output-feature (N) axis and broadcast over M.
+        if bias.dtype != torch.float32:
+            raise TypeError(f"FP32 bias must be float32, got {bias.dtype}")
+        if bias.numel() != N_runtime:
+            raise ValueError(
+                f"FP32 bias length {bias.numel()} != N (out_features) {N_runtime}"
+            )
+        if bias.device != A.device:
+            raise ValueError("bias must be on the same device as A, B, and C")
+    elif bias is not None:
+        raise ValueError(f"FP32 epilogue {epilogue} does not accept a bias tensor")
+
     if stream is None:
         stream = torch.cuda.current_stream()
 
     A_arg = A.contiguous().view(torch.uint8).view(-1)
     B_arg = B.contiguous().view(torch.uint8).view(-1)
     C_arg = C.view(-1)
-    launch = _cached_launch(int(K_runtime), bool(use_xcd_remap))
-    launch(A_arg, B_arg, C_arg, M_runtime, N_runtime, stream=stream)
+    # DEFAULT keeps the kernel signature uniform with a dummy 1-element bias.
+    if needs_bias:
+        Bias_arg = bias.contiguous().view(-1)
+    else:
+        Bias_arg = torch.zeros(1, dtype=torch.float32, device=A.device)
+    launch = _cached_launch(int(K_runtime), bool(use_xcd_remap), epilogue)
+    launch(A_arg, B_arg, C_arg, Bias_arg, M_runtime, N_runtime, stream=stream)

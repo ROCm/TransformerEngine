@@ -29,7 +29,7 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
@@ -279,15 +279,35 @@ def _compile_kernel(
     b_fp8_dtype: torch.dtype,
     output_dtype: torch.dtype,
     layout: str,
+    epilogue: str = "DEFAULT",
 ):
     """Build one compile-time-specialized TN, NN, or NT kernel.
 
     ``layout`` is a Python string consumed while constructing the FlyDSL IR.
     It is not a runtime kernel argument. Each cache entry therefore contains
     only the addressing, LDS reads, and scheduler directives for that layout.
+
+    ``epilogue`` selects the fused post-GEMM stages, resolved at compile time
+    so the store loop stays branch-free:
+
+        DEFAULT        plain matmul
+        BIAS           + per-output-feature bias vector (indexed by N)
+        GELU_AUX       (reserved) GELU with saved pre-activation aux
+        GELU_AUX_BIAS  (reserved) bias then GELU with saved aux
+
+    Only DEFAULT and BIAS are implemented; the GELU modes are accepted so the
+    store-loop structure and dispatch signature are already in place.
     """
     if layout not in ("TN", "NN", "NT"):
         raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
+    if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
+        raise ValueError(f"Unsupported MXFP8 epilogue: {epilogue}")
+    if epilogue in ("GELU_AUX", "GELU_AUX_BIAS"):
+        raise NotImplementedError(
+            f"MXFP8 epilogue {epilogue} is reserved but not yet implemented"
+        )
+    has_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")
+    has_gelu = epilogue in ("GELU_AUX", "GELU_AUX_BIAS")
 
     a_transpose_read = layout == "NT"
     b_transpose_read = layout in ("NN", "NT")
@@ -520,7 +540,7 @@ def _compile_kernel(
 
     @flyc.kernel(known_block_size=[NUM_THREADS, 1, 1])
     def kernel_gemm(
-        A: fx.Tensor, As: fx.Tensor, B: fx.Tensor, Bs: fx.Tensor, C: fx.Tensor, c_m: fx.Int32, c_n: fx.Int32
+        A: fx.Tensor, As: fx.Tensor, B: fx.Tensor, Bs: fx.Tensor, C: fx.Tensor, Bias: fx.Tensor, c_m: fx.Int32, c_n: fx.Int32
     ):
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_a0 = (lds.a0_0, lds.a0_1)
@@ -615,6 +635,22 @@ def _compile_kernel(
             fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
             output_fx_dtype,
         )
+
+        # Bias is a length-N fp32 vector indexed by the output-feature (N)
+        # coordinate and broadcast across the M/token rows. Only staged when
+        # the epilogue requests it; DEFAULT receives a dummy 1-element tensor.
+        # const_expr folds this compile-time flag at trace time so the setup
+        # (and load_bias) are inlined into the kernel scope with no runtime
+        # dispatch branch.
+        if const_expr(has_bias):
+            gBias = fx.rocdl.make_buffer_tensor(Bias, max_size=True)
+            bias_div = fx.logical_divide(gBias, fx.make_layout(1, 1))
+            bias_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+
+            def load_bias(col):
+                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+                fx.copy(bias_ld_atom, fx.slice(bias_div, (None, fx.Int32(col))), reg)
+                return fx.memref_load_vec(reg)[0]
 
         PIN_ACC_BASE = 0
 
@@ -908,10 +944,25 @@ def _compile_kernel(
             subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
             row_base = subtile_m_idx * SUBTILE_M + fx.Index(mi * MFMA_M) + lane_div_16 * 4
             col = subtile_n_idx * SUBTILE_N + fx.Index(ni * MFMA_N) + lane_mod_16
+
+            # Bias depends only on the output-feature (N) coordinate, so read it
+            # once per column and reuse across the four M rows below. Index by
+            # the GLOBAL feature (by_n_idx + col), matching the C store's
+            # c_tile_base_elems fold; the tile-local col alone would reread
+            # bias[0..BLOCK_N) for every N-block.
+            if const_expr(has_bias):
+                bias_value = load_bias(by_n_idx + col)
+
             for ii in range_constexpr(4):
                 row = row_base + fx.Index(ii)
                 c_idx = c_tile_base_elems + row * fx.Index(c_n) + col
+
+                # Epilogue stages run on the fp32 accumulator, in order, before
+                # the output-dtype narrowing. GELU will slot in here later.
                 value = Vec(acc)[ii]
+                if const_expr(has_bias):
+                    value = value + bias_value
+
                 if output_dtype != torch.float32:
                     value = value.to(output_fx_dtype)
                 reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
@@ -1446,6 +1497,7 @@ def _compile_kernel(
         B: fx.Tensor,
         Bs: fx.Tensor,
         C: fx.Tensor,
+        Bias: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
@@ -1458,6 +1510,7 @@ def _compile_kernel(
             B,
             Bs,
             C,
+            Bias,
             c_m,
             c_n,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
@@ -1474,6 +1527,8 @@ def do_gemm(
     stream=None,
     *,
     layout: str = "TN",
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
 ):
     """Launch one cached compile-time MXFP8 layout specialization."""
     if layout == "TN":
@@ -1522,6 +1577,24 @@ def do_gemm(
     if any(t.device != A.device for t in tensors[1:]):
         raise ValueError("A, B, packed scales, and C must be on the same device")
 
+    if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
+        raise ValueError(f"Unsupported MXFP8 epilogue: {epilogue}")
+    needs_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")
+    if needs_bias:
+        if bias is None:
+            raise ValueError(f"MXFP8 epilogue {epilogue} requires a bias tensor")
+        # Bias is indexed by the output-feature (N) axis and broadcast over M.
+        if bias.dtype != torch.float32:
+            raise TypeError(f"MXFP8 bias must be float32, got {bias.dtype}")
+        if bias.numel() != N_runtime:
+            raise ValueError(
+                f"MXFP8 bias length {bias.numel()} != N (out_features) {N_runtime}"
+            )
+        if bias.device != A.device:
+            raise ValueError("bias must be on the same device as A, B, and C")
+    elif bias is not None:
+        raise ValueError(f"MXFP8 epilogue {epilogue} does not accept a bias tensor")
+
     if stream is None:
         stream = torch.cuda.current_stream()
 
@@ -1531,6 +1604,11 @@ def do_gemm(
     As_arg = As.contiguous().view(-1)
     Bs_arg = Bs.contiguous().view(-1)
     C_arg = C.contiguous().view(-1)
+    # DEFAULT keeps the kernel signature uniform with a dummy 1-element bias.
+    if needs_bias:
+        Bias_arg = bias.contiguous().view(-1)
+    else:
+        Bias_arg = torch.zeros(1, dtype=torch.float32, device=A.device)
 
     _cached_launch(
         K_runtime,
@@ -1538,12 +1616,14 @@ def do_gemm(
         B.dtype,
         C.dtype,
         layout,
+        epilogue,
     )(
         A_arg,
         As_arg,
         B_arg,
         Bs_arg,
         C_arg,
+        Bias_arg,
         M_runtime,
         N_runtime,
         stream=stream,
@@ -1557,6 +1637,7 @@ def _cached_launch(
     b_fp8_dtype: torch.dtype,
     output_dtype: torch.dtype,
     layout: str,
+    epilogue: str = "DEFAULT",
 ):
     """Cache independent TN/NN/NT binaries with no runtime layout argument."""
     return _compile_kernel(
@@ -1565,6 +1646,7 @@ def _cached_launch(
         b_fp8_dtype,
         output_dtype,
         layout,
+        epilogue,
     )
 
 
@@ -1604,6 +1686,8 @@ def mxfp8_matmul(
     stream=None,
     *,
     layout: str = "TN",
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
 ):
     """Normalize scale orientation and launch a compile-time layout binary.
 
@@ -1727,6 +1811,8 @@ def mxfp8_matmul(
         D.view(m, n),
         layout=layout,
         stream=stream,
+        epilogue=epilogue,
+        bias=bias,
     )
     return D
 

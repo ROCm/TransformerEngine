@@ -108,17 +108,37 @@ def _compile_kernel(
     layout: str,
     mfma_suffix: str,
     use_xcd_remap: bool = True,
+    epilogue: str = "DEFAULT",
 ):
     """Build one compile-time-specialized TN, NN, or NT half-precision kernel.
 
     ``mfma_suffix`` selects the ``v_mfma_f32_16x16x32_{f16,bf16}`` opcode.
     ``K`` must contain at least four K64 tiles. Runtime M/N are expected to
     be exact multiples of ``BLOCK_M``/``BLOCK_N``; the kernel has no edge masks.
+
+    ``epilogue`` selects the fused post-GEMM stages, resolved at compile time
+    so the store loop stays branch-free:
+
+        DEFAULT        plain matmul
+        BIAS           + per-output-feature bias vector (indexed by N)
+        GELU_AUX       (reserved) GELU with saved pre-activation aux
+        GELU_AUX_BIAS  (reserved) bias then GELU with saved aux
+
+    Only DEFAULT and BIAS are implemented; the GELU modes are accepted so the
+    store-loop structure and dispatch signature are already in place.
     """
     if layout not in ("TN", "NN", "NT"):
         raise ValueError(f"Unsupported half-precision kernel layout: {layout}")
     if mfma_suffix not in ("f16", "bf16"):
         raise ValueError(f"Unsupported MFMA suffix: {mfma_suffix}")
+    if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
+        raise ValueError(f"Unsupported half-precision epilogue: {epilogue}")
+    if epilogue in ("GELU_AUX", "GELU_AUX_BIAS"):
+        raise NotImplementedError(
+            f"half-precision epilogue {epilogue} is reserved but not yet implemented"
+        )
+    has_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")
+    has_gelu = epilogue in ("GELU_AUX", "GELU_AUX_BIAS")
 
     a_transpose_read = layout == "NT"
     b_transpose_read = layout in ("NN", "NT")
@@ -363,6 +383,7 @@ def _compile_kernel(
         A: fx.Tensor,
         B: fx.Tensor,
         C: fx.Tensor,
+        Bias: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
     ):
@@ -442,6 +463,20 @@ def _compile_kernel(
             fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
             output_fx_dtype,
         )
+
+        # Bias is a length-N fp32 vector indexed by the global output-feature
+        # (N) coordinate and broadcast across the M/token rows. const_expr folds
+        # this compile-time flag at trace time so the setup (and load_bias) are
+        # inlined into the kernel scope with no runtime dispatch branch.
+        if const_expr(has_bias):
+            gBias = fx.rocdl.make_buffer_tensor(Bias, max_size=True)
+            bias_div = fx.logical_divide(gBias, fx.make_layout(1, 1))
+            bias_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+
+            def load_bias(col):
+                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+                fx.copy(bias_ld_atom, fx.slice(bias_div, (None, fx.Int32(col))), reg)
+                return fx.memref_load_vec(reg)[0]
 
         PIN_ACC_BASE = 0
 
@@ -707,10 +742,23 @@ def _compile_kernel(
             subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
             row_base = subtile_m_idx * SUBTILE_M + fx.Index(mi * MFMA_M) + lane_div_16 * 4
             col = subtile_n_idx * SUBTILE_N + fx.Index(ni * MFMA_N) + lane_mod_16
+
+            # Bias depends only on the output-feature (N) coordinate, so read it
+            # once per column (global index by_n_idx + col) and reuse across the
+            # four M rows below.
+            if const_expr(has_bias):
+                bias_value = load_bias(by_n_idx + col)
+
             for ii in range_constexpr(4):
                 row = row_base + fx.Index(ii)
                 c_idx = c_tile_base_elems + row * fx.Index(c_n) + col
+
+                # Epilogue stages run on the fp32 accumulator, in order, before
+                # the output-dtype narrowing. GELU will slot in here later.
                 value = Vec(acc)[ii]
+                if const_expr(has_bias):
+                    value = value + bias_value
+
                 if const_expr(output_dtype != torch.float32):
                     value = value.to(output_fx_dtype)
                 reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
@@ -1148,6 +1196,7 @@ def _compile_kernel(
         A: fx.Tensor,
         B: fx.Tensor,
         C: fx.Tensor,
+        Bias: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
@@ -1158,6 +1207,7 @@ def _compile_kernel(
             A,
             B,
             C,
+            Bias,
             c_m,
             c_n,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
@@ -1172,6 +1222,7 @@ def _cached_launch(
     layout: str,
     mfma_suffix: str,
     use_xcd_remap: bool = True,
+    epilogue: str = "DEFAULT",
 ):
     return _compile_kernel(
         K,
@@ -1179,6 +1230,7 @@ def _cached_launch(
         layout,
         mfma_suffix,
         use_xcd_remap=use_xcd_remap,
+        epilogue=epilogue,
     )
 
 
@@ -1194,6 +1246,8 @@ def _half_prec_matmul(
     input_dtype: torch.dtype,
     label: str,
     stream=None,
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
 ):
     """Validate operands and launch a half-precision TN/NN/NT specialization.
 
@@ -1262,6 +1316,8 @@ def _half_prec_matmul(
         input_dtype=input_dtype,
         label=label,
         stream=stream,
+        epilogue=epilogue,
+        bias=bias,
     )
 
 
@@ -1275,6 +1331,8 @@ def fp16_matmul(
     n: int,
     k: int,
     stream=None,
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
 ):
     """Launch the wrapper-selected FP16 TN/NN/NT specialization."""
     _half_prec_matmul(
@@ -1288,6 +1346,8 @@ def fp16_matmul(
         input_dtype=torch.float16,
         label="FP16",
         stream=stream,
+        epilogue=epilogue,
+        bias=bias,
     )
 
 
@@ -1301,6 +1361,8 @@ def bf16_matmul(
     n: int,
     k: int,
     stream=None,
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
 ):
     """Launch the wrapper-selected BF16 TN/NN/NT specialization."""
     _half_prec_matmul(
@@ -1314,6 +1376,8 @@ def bf16_matmul(
         input_dtype=torch.bfloat16,
         label="BF16",
         stream=stream,
+        epilogue=epilogue,
+        bias=bias,
     )
 
 
@@ -1330,6 +1394,8 @@ def doGemm(
     label: str,
     stream=None,
     use_xcd_remap: bool = True,
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
 ):
     """Launch one cached K/output/layout-specialized half-precision core.
 
@@ -1373,6 +1439,24 @@ def doGemm(
             f"C shape {tuple(C.shape)} != expected {(M_runtime, N_runtime)}"
         )
 
+    if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
+        raise ValueError(f"Unsupported {label} epilogue: {epilogue}")
+    needs_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")
+    if needs_bias:
+        if bias is None:
+            raise ValueError(f"{label} epilogue {epilogue} requires a bias tensor")
+        # Bias is indexed by the output-feature (N) axis and broadcast over M.
+        if bias.dtype != torch.float32:
+            raise TypeError(f"{label} bias must be float32, got {bias.dtype}")
+        if bias.numel() != N_runtime:
+            raise ValueError(
+                f"{label} bias length {bias.numel()} != N (out_features) {N_runtime}"
+            )
+        if bias.device != A.device:
+            raise ValueError("bias must be on the same device as A, B, and C")
+    elif bias is not None:
+        raise ValueError(f"{label} epilogue {epilogue} does not accept a bias tensor")
+
     if stream is None:
         stream = torch.cuda.current_stream()
 
@@ -1382,6 +1466,7 @@ def doGemm(
         layout,
         _MFMA_SUFFIX[input_dtype],
         bool(use_xcd_remap),
+        epilogue,
     )
     # Preserve the original validated byte-addressed G2L path. These are
     # metadata-only dtype/flatten views of the already-contiguous row-major
@@ -1389,11 +1474,17 @@ def doGemm(
     A_arg = A.view(torch.uint8).view(-1)
     B_arg = B.view(torch.uint8).view(-1)
     C_arg = C.view(-1)
+    # DEFAULT keeps the kernel signature uniform with a dummy 1-element bias.
+    if needs_bias:
+        Bias_arg = bias.contiguous().view(-1)
+    else:
+        Bias_arg = torch.zeros(1, dtype=torch.float32, device=A.device)
 
     launch(
         A_arg,
         B_arg,
         C_arg,
+        Bias_arg,
         M_runtime,
         N_runtime,
         stream=stream,
