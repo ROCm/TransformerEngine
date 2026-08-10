@@ -259,8 +259,8 @@ def fp8_forward(
 
     # amax_o is captured before scale_o is applied, so the history stays in the
     # output's true units whichever output dtype we asked for.
-    s_quantizer.amax.copy_(amax_s.reshape(s_quantizer.amax.shape).to(s_quantizer.amax.dtype))
-    o_quantizer.amax.copy_(amax_o.reshape(o_quantizer.amax.shape).to(o_quantizer.amax.dtype))
+    s_quantizer.amax.copy_(amax_s)
+    o_quantizer.amax.copy_(amax_o)
 
     if quantize_out:
         # scale_inv is derived from the quantizer on device; no host round trip.
@@ -337,8 +337,9 @@ def fp8_backward(
     amax_dq, amax_dk, amax_dv, amax_ds = res[4], res[5], res[6], res[7]
 
     # Delayed-scaling history: dQKV quantizer tracks a single amax across dq/dk/dv.
-    amax_dqkv = torch.max(torch.stack([amax_dq.reshape(()), amax_dk.reshape(()), amax_dv.reshape(())]))
-    dqkv_quantizer.amax.copy_(amax_dqkv.reshape(dqkv_quantizer.amax.shape).to(dqkv_quantizer.amax.dtype))
-    dp_quantizer.amax.copy_(amax_ds.reshape(dp_quantizer.amax.shape).to(dp_quantizer.amax.dtype))
+    amax_dqkv = dqkv_quantizer.amax
+    torch.maximum(amax_dq, amax_dk, out=amax_dqkv)
+    torch.maximum(amax_dqkv, amax_dv, out=amax_dqkv)
+    dp_quantizer.amax.copy_(amax_ds)
 
     return _from_bshd(dq_o, fmt), _from_bshd(dk_o, fmt), _from_bshd(dv_o, fmt)
