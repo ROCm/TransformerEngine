@@ -14,13 +14,22 @@
 #ifdef __HIP_PLATFORM_AMD__
 
 static constexpr int kHadamardDim     = 16;
-static constexpr int kWarpSize        = 64;
 static constexpr int kThreadsPerWHT   = 4;
 static constexpr int kElemsPerThread  = 4;
-static constexpr int kRowsPerWarp     = kWarpSize / kThreadsPerWHT;   // 16
-static constexpr int kWarpsPerBlock   = 4;
-static constexpr int kRowsPerBlock    = kRowsPerWarp * kWarpsPerBlock; // 64
-static constexpr int kThreadsPerBlock = kWarpSize   * kWarpsPerBlock;  // 256
+// gfx1250 is wave32; gfx942/gfx950 are wave64. __gfx1250__ is only defined in the device
+// compilation pass, so keep the block-level constants (kThreadsPerBlock, kRowsPerBlock) fixed and
+// wave-invariant: the host launch config is then identical across archs and only the intra-wave
+// organisation (used in device code) changes. The invariants kWarpSize*kWarpsPerBlock == 256 and
+// kRowsPerWarp*kWarpsPerBlock == 64 hold for both wave sizes.
+#if defined(__gfx1250__)
+static constexpr int kWarpSize        = 32;
+#else
+static constexpr int kWarpSize        = 64;
+#endif
+static constexpr int kThreadsPerBlock = 256;                          // wave-invariant (host launch)
+static constexpr int kRowsPerBlock    = 64;                           // wave-invariant (grid)
+static constexpr int kRowsPerWarp     = kWarpSize / kThreadsPerWHT;   // 8 (w32) / 16 (w64)
+static constexpr int kWarpsPerBlock   = kThreadsPerBlock / kWarpSize;  // 8 (w32) / 4 (w64)
 static constexpr float kHadamardScale = 0.25f;
 
 // -----------------------------------------------------------------------
