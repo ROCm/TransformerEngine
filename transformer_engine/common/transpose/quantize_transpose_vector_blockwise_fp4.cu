@@ -152,14 +152,13 @@ constexpr int kThreadsPerBlock = 256;  // Thread block size, 8 warps in total
 #endif
 
 // Tile dimension and thread block size:
-//   gfx942:          kTileDim=64  (64 KB LDS, kThreadsPerBlock=128, 4 warps)
-//   gfx950 / NVIDIA: kTileDim=128 (128 KB LDS, kThreadsPerBlock=256, 8 warps)
-// On AMD, __gfx950__ is only defined during device compilation, so the host
-// must select tile_dim at runtime via cuda::sm_arch() using the constants below.
+//   gfx942:            kTileDim=64  (64 KB LDS, kThreadsPerBlock=128, 4 warps)
+//   gfx950/gfx1250/NV: kTileDim=128 (128 KB LDS, kThreadsPerBlock=256, 8 warps)
+// Keep this in sync with the host's runtime choice (cuda::sm_arch() >= 95 ? 128 : 64) below.
 #ifdef __HIP_PLATFORM_AMD__
 constexpr int kTileDimGfx950 = 128;
 constexpr int kTileDimGfx942 = 64;
-#if !defined(__gfx950__)
+#if defined(__gfx942__)
 constexpr int kTileDim = kTileDimGfx942;
 #else
 constexpr int kTileDim = kTileDimGfx950;
