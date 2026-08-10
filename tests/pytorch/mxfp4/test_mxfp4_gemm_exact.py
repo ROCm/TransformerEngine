@@ -8,11 +8,8 @@ This module tests native MXFP4 GEMM implementations against Python reference GEM
 - AITER a4w4 kernels
 - hipBLASLt F4F4 kernels
 
-Both backends are exercised automatically (parametrized). Each test toggles
-NVTE_ROCM_USE_HIPBLASLT_MXFP4 via monkeypatch to route general_gemm to the backend
-under test, so the caller does not need to set any environment variable.
-
 Requires the aiter package (ROCm gfx950 only).
+Requires the hipBLASLt>=1.3.0 (ROCm gfx950 only).
 """
 
 import pytest
@@ -35,18 +32,19 @@ except ImportError:
 BLOCK_SIZE = 32
 
 
-def _quantize_pair(x, w, M, K, N, x_dtype, w_dtype, device, *, shuffle: bool):
-    """Quantize (x, w) to MXFP4 with either AITER-shuffled or plain (hipBLASLt) layout."""
+def _quantize_pair(x, w, M, K, N, x_dtype, w_dtype, device, *, shuffle: bool, swizzled_scales=None):
+    """Quantize (x, w) to MXFP4.
+    """
     te_dtype = tex.DType.kFloat4E2M1
-    # hipBLASLt consumes plain (un-shuffled) FP4 data + plain scales; AITER needs the
-    # 16x16 weight shuffle and swizzled scales.
+    if swizzled_scales is None:
+        swizzled_scales = shuffle
     x_quantizer = MXFP4Quantizer(
         fp4_dtype=te_dtype,
         rowwise=True,
         columnwise=True,
         shuffle_rowwise_data=False,
         shuffle_columnwise_data=shuffle,
-        with_gemm_swizzled_scales=shuffle,
+        with_gemm_swizzled_scales=swizzled_scales,
         use_hadamard=False,
     )
     w_quantizer = MXFP4Quantizer(
@@ -55,7 +53,7 @@ def _quantize_pair(x, w, M, K, N, x_dtype, w_dtype, device, *, shuffle: bool):
         columnwise=True,
         shuffle_rowwise_data=shuffle,
         shuffle_columnwise_data=shuffle,
-        with_gemm_swizzled_scales=shuffle,
+        with_gemm_swizzled_scales=swizzled_scales,
         use_hadamard=False,
     )
     x_mxfp4 = x_quantizer.make_empty((M, K), dtype=x_dtype, device=device, requires_grad=False)
@@ -128,7 +126,9 @@ def check_mxfp4_gemm_versus_reference(
     K: int,
     N: int,
     accumulate: bool,
-    backend: str,
+    *,
+    shuffle: bool,
+    swizzled_scales=None,
 ):
     device = "cuda"
     torch.manual_seed(0)
@@ -138,9 +138,8 @@ def check_mxfp4_gemm_versus_reference(
     w = torch.randn((N, K), dtype=w_dtype, device=device)
     out = torch.randn((M, N), dtype=out_dtype, device=device) if accumulate else None
 
-    shuffle = backend == "aiter"
     x_mxfp4, w_mxfp4 = _quantize_pair(
-        x, w, M, K, N, x_dtype, w_dtype, device, shuffle=shuffle
+        x, w, M, K, N, x_dtype, w_dtype, device, shuffle=shuffle, swizzled_scales=swizzled_scales
     )
 
     y_ref = _reference_gemm(x, w, M, K, N, out_dtype, out, accumulate, device)
@@ -155,25 +154,24 @@ def check_mxfp4_gemm_versus_reference(
     torch.testing.assert_close(y_native, y_ref, atol=8e-3, rtol=8e-3)
 
 
-_BACKENDS = ["aiter", "hipblaslt"]
+_SHAPES = [
+    (128, 128, 128),
+    (256, 256, 256),
+    (256, 1024, 256),
+    (1024, 1024, 1024),
+    (4096, 512, 3072),
+]
+
+
+# AITER a4w4 backend: shuffled FP4 data + swizzled scales. Requires the aiter package.
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.skipif(not _aiter_available, reason="aiter package not available")
-@pytest.mark.parametrize(
-    "M, K, N",
-    [
-        (128, 128, 128),
-        (256, 256, 256),
-        (256, 1024, 256),
-        (1024, 1024, 1024),
-        (4096, 512, 3072),
-    ],
-)
+@pytest.mark.parametrize("M, K, N", _SHAPES)
 @pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("w_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("out_dtype", [torch.bfloat16], ids=str)
 @pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
-@pytest.mark.parametrize("backend", _BACKENDS)
-def test_mxfp4_gemm_versus_reference(
+def test_mxfp4_gemm_aiter_versus_reference(
     M: int,
     K: int,
     N: int,
@@ -181,15 +179,10 @@ def test_mxfp4_gemm_versus_reference(
     w_dtype: torch.dtype,
     out_dtype: torch.dtype,
     accumulate: bool,
-    backend: str,
     monkeypatch,
 ):
-    if backend == "hipblaslt":
-        if K % 256 != 0:
-            pytest.skip("hipBLASLt MXFP4 currently requires K to be a multiple of 256")
-        if accumulate:
-            pytest.skip("hipBLASLt MXFP4 does not support accumulate yet")
-    monkeypatch.setenv("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "1" if backend == "hipblaslt" else "0")
+    """AITER a4w4 MXFP4 GEMM vs the Python MXFP4 reference."""
+    monkeypatch.setenv("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0")
     check_mxfp4_gemm_versus_reference(
         x_dtype=x_dtype,
         w_dtype=w_dtype,
@@ -198,40 +191,43 @@ def test_mxfp4_gemm_versus_reference(
         K=K,
         N=N,
         accumulate=accumulate,
-        backend=backend,
+        shuffle=True,
     )
 
 
+# hipBLASLt F4F4 backend: plain FP4 data, with plain (VEC32_UE8M0) or pre-swizzled
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
-@pytest.mark.skipif(not _aiter_available, reason="aiter package not available")
-@pytest.mark.parametrize(
-    "M, K, N",
-    [
-        (256, 256, 256),
-        (1024, 1024, 1024),
-        (4096, 512, 3072),
-    ],
-)
-def test_mxfp4_gemm_hipblaslt_matches_aiter(M: int, K: int, N: int, monkeypatch):
-    """Cross-check: same inputs, hipBLASLt vs AITER MXFP4 GEMM produce close results."""
-    device = "cuda"
-    dtype = torch.bfloat16
-    torch.manual_seed(0)
-    torch.cuda.manual_seed(0)
-
-    x = torch.randn((M, K), dtype=dtype, device=device)
-    w = torch.randn((N, K), dtype=dtype, device=device)
-
-    # AITER path (shuffled operands)
-    monkeypatch.setenv("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0")
-    x_a, w_a = _quantize_pair(x, w, M, K, N, dtype, dtype, device, shuffle=True)
-    y_aiter = _native_gemm(w_a, x_a, dtype, None, False)
-
-    # hipBLASLt path (plain operands)
+@pytest.mark.parametrize("M, K, N", _SHAPES)
+@pytest.mark.parametrize("x_dtype", [torch.bfloat16], ids=str)
+@pytest.mark.parametrize("w_dtype", [torch.bfloat16], ids=str)
+@pytest.mark.parametrize("out_dtype", [torch.bfloat16], ids=str)
+@pytest.mark.parametrize("accumulate", [True, False], ids=["accumulate", "no_accumulate"])
+@pytest.mark.parametrize("use_swizzled", [False, True], ids=["plain_scales", "swizzled_scales"])
+def test_mxfp4_gemm_hipblaslt_versus_reference(
+    M: int,
+    K: int,
+    N: int,
+    x_dtype: torch.dtype,
+    w_dtype: torch.dtype,
+    out_dtype: torch.dtype,
+    accumulate: bool,
+    use_swizzled: bool,
+    monkeypatch,
+):
+    """hipBLASLt MXFP4 GEMM vs the Python MXFP4 reference, plain or pre-swizzled scales."""
+    if K % 256 != 0:
+        pytest.skip("hipBLASLt MXFP4 currently requires K to be a multiple of 256")
+    if accumulate:
+        pytest.skip("hipBLASLt MXFP4 does not support accumulate yet")
     monkeypatch.setenv("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "1")
-    x_h, w_h = _quantize_pair(x, w, M, K, N, dtype, dtype, device, shuffle=False)
-    y_hip = _native_gemm(w_h, x_h, dtype, None, False)
-
-    y_aiter = torch.where(y_aiter.isnan(), torch.zeros_like(y_aiter), y_aiter)
-    y_hip = torch.where(y_hip.isnan(), torch.zeros_like(y_hip), y_hip)
-    torch.testing.assert_close(y_hip, y_aiter, atol=8e-3, rtol=8e-3)
+    check_mxfp4_gemm_versus_reference(
+        x_dtype=x_dtype,
+        w_dtype=w_dtype,
+        out_dtype=out_dtype,
+        M=M,
+        K=K,
+        N=N,
+        accumulate=accumulate,
+        shuffle=False,
+        swizzled_scales=use_swizzled,
+    )

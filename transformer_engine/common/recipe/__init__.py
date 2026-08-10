@@ -752,6 +752,7 @@ class MXFP4BlockScaling(Recipe):
     fp8_mha: bool = False
     backward_override: Optional[str] = os.getenv("NVTE_BACKWARD_OVERRIDE", None)
     use_hadamard: bool = os.getenv("NVTE_MXFP4_USE_HADAMARD", "0") == "1"
+    use_swizzled_scales: bool = False
 
     def __post_init__(self) -> None:
         assert self.fp4_format == Format.E2M1, "Only E2M1 is supported for MXFP4 scaling."

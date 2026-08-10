@@ -321,6 +321,7 @@ struct TestParams {
   bool transb;
   NVTEScalingMode scaling_mode;
   bool force_hipblaslt;
+  bool mxfp4_swizzled = false;  // MXFP4 only: emit pre-swizzled scales + GEMM mode 1001
 };
 
 
@@ -868,8 +869,25 @@ static const float kHostFP4E2M1Table[16] = {
     0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
    -0.0f,-0.5f,-1.0f,-1.5f,-2.0f,-3.0f,-4.0f,-6.0f};
 
-// CPU-dequantize the row-wise data of an MXFP4 test::Tensor
-static void dequantize_mxfp4_rowwise_to_bf16(test::Tensor &src_fp4, test::Tensor &dst_bf16) {
+// Host replica of compute_scale_shuffle_index (cast_transpose_mxfp4_shuffled.cuh): maps a
+// (data-row, scale-column) pair into the 32x8-tiled offset used by both the AITER a4w4 layout
+// and hipBLASLt's pre-swizzled scale mode (BLK32_UE8M0_32_8_EXT, "1001"). scale_n_pad is the
+// padded number of scale columns (== scale_inv shape[1]).
+static inline size_t mxfp4_scale_shuffle_index(size_t row, size_t col, size_t scale_n_pad) {
+  const size_t i0 = row / 32;
+  const size_t i1 = (row % 32) / 16;
+  const size_t i2 = row % 16;
+  const size_t i3 = col / 8;
+  const size_t i4 = (col % 8) / 4;
+  const size_t i5 = col % 4;
+  return i0 * (scale_n_pad / 8) * 256 + i3 * 256 + i5 * 64 + i2 * 4 + i4 * 2 + i1;  // 256 = 32*8
+}
+
+// CPU-dequantize the row-wise data of an MXFP4 test::Tensor. When the tensor carries
+// pre-swizzled scales (with_gemm_swizzled_scales), the E8M0 bytes are read through the 32x8
+// tile mapping instead of the plain linear layout.
+static void dequantize_mxfp4_rowwise_to_bf16(test::Tensor &src_fp4, test::Tensor &dst_bf16,
+                                             bool swizzled_scales) {
   const NVTEShape data_shape = src_fp4.rowwise_shape();       // logical [R, C]
   NVTE_CHECK(data_shape.ndim == 2, "Expected 2D MXFP4 data");
   const size_t R = data_shape.data[0];
@@ -894,7 +912,10 @@ static void dequantize_mxfp4_rowwise_to_bf16(test::Tensor &src_fp4, test::Tensor
     for (size_t c = 0; c < C; ++c) {
       const uint8_t byte = h_data[r * (C / 2) + c / 2];
       const uint8_t nib = (c & 1) ? (byte >> 4) : (byte & 0xF);
-      const uint8_t e8m0 = h_scale[r * x_pad + c / 32];
+      const size_t scale_idx = swizzled_scales
+          ? mxfp4_scale_shuffle_index(r, c / 32, x_pad)
+          : (r * x_pad + c / 32);
+      const uint8_t e8m0 = h_scale[scale_idx];
       const float scale = exp2f(static_cast<float>(e8m0) - 127.0f);
       dst[r * C + c] = static_cast<bf16>(kHostFP4E2M1Table[nib] * scale);
     }
@@ -934,14 +955,20 @@ void performMxfp4Test(const TestParams &params) {
                NVTE_MXFP4_1D_SCALING);
   Tensor B_fp4("B_fp4", b_shape, DType::kFloat4E2M1, /*rowwise=*/true, /*columnwise=*/false,
                NVTE_MXFP4_1D_SCALING);
+  // When exercising the pre-swizzled scale path, tag the outputs so the quantizer emits scales
+  // in the 32x8 tile order and the GEMM selects hipBLASLt scale mode 1001. FP4 data stays plain.
+  if (params.mxfp4_swizzled) {
+    A_fp4.set_with_gemm_swizzled_scales(true);
+    B_fp4.set_with_gemm_swizzled_scales(true);
+  }
   nvte_quantize(A_src.data(), A_fp4.data(), 0);
   nvte_quantize(B_src.data(), B_fp4.data(), 0);
 
-  // High-precision reference operands = exact dequant of the MXFP4 data.
+  // High-precision reference operands = exact dequant of the MXFP4 data (swizzle-aware).
   Tensor A_ref("A_ref", a_shape, DType::kBFloat16);
   Tensor B_ref("B_ref", b_shape, DType::kBFloat16);
-  dequantize_mxfp4_rowwise_to_bf16(A_fp4, A_ref);
-  dequantize_mxfp4_rowwise_to_bf16(B_fp4, B_ref);
+  dequantize_mxfp4_rowwise_to_bf16(A_fp4, A_ref, params.mxfp4_swizzled);
+  dequantize_mxfp4_rowwise_to_bf16(B_fp4, B_ref, params.mxfp4_swizzled);
 
   Tensor bias;
   if (params.use_bias) {
@@ -1114,7 +1141,7 @@ INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP8, DqGEMMTestSuite,
 // ============================================================================
 class Mxfp4GEMMTestSuite
     : public ::testing::TestWithParam<
-          std::tuple<std::tuple<size_t, size_t, size_t>, bool, Layout>> {};
+          std::tuple<std::tuple<size_t, size_t, size_t>, bool, Layout, bool>> {};
 
 #define MAKE_MXFP4_GEMM_TEST(NAME_, D_)                                        \
   TEST_P(Mxfp4GEMMTestSuite, NAME_) {                                          \
@@ -1127,7 +1154,8 @@ class Mxfp4GEMMTestSuite
                          .transa = std::get<2>(GetParam()).first,             \
                          .transb = std::get<2>(GetParam()).second,            \
                          .scaling_mode = NVTEScalingMode::NVTE_MXFP4_1D_SCALING, \
-                         .force_hipblaslt = false};                           \
+                         .force_hipblaslt = false,                            \
+                         .mxfp4_swizzled = std::get<3>(GetParam())};          \
     performMxfp4Test<D_>(params);                                             \
   }
 
@@ -1139,11 +1167,13 @@ MAKE_MXFP4_GEMM_TEST(Testfp32, fp32)
 INSTANTIATE_TEST_SUITE_P(OperatorTestMXFP4, Mxfp4GEMMTestSuite,
                          ::testing::Combine(::testing::ValuesIn(test_case_sizes_mxfp4),
                                             ::testing::Values(false),         // bias unsupported
-                                            ::testing::Values(kTN)),          // TN only
+                                            ::testing::Values(kTN),           // TN only
+                                            ::testing::Values(false, true)),  // plain / swizzled scales
                          [](const testing::TestParamInfo<Mxfp4GEMMTestSuite::ParamType>& info) {
                            return MKN(std::get<0>(info.param)) + "x" +
                                   (std::get<1>(info.param) ? "bias" : "nobias") + "x" +
-                                  TN(std::get<2>(info.param));
+                                  TN(std::get<2>(info.param)) + "x" +
+                                  (std::get<3>(info.param) ? "swizzled" : "plain");
                          });
 
 // ============================================================================

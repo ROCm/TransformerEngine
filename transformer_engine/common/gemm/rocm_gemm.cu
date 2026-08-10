@@ -1443,7 +1443,25 @@ void hipblaslt_gemm(const Tensor *inputA,
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
       scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
     } else if ((is_block_scaling(inputA->scaling_mode) && is_block_scaling(inputB->scaling_mode))) {
+      // MXFP4 can optionally use hipBLASLt's pre-swizzled UE8M0 scale mode
+      // (BLK32_UE8M0_32_8_EXT, "1001"), where the E8M0 bytes are laid out in the 32x8
+      // hardware tile order the F4F4 kernel reads in place -- faster than gathering plain
+      // (VEC32_UE8M0) scales on the fly.
+      if (use_mxfp4) {
+        NVTE_CHECK(inputA->with_gemm_swizzled_scales == inputB->with_gemm_swizzled_scales,
+                   "MXFP4 GEMM requires both operands to use the same scale layout "
+                   "(both plain or both pre-swizzled).");
+      }
+      const bool mxfp4_swizzled = use_mxfp4 && inputA->with_gemm_swizzled_scales &&
+                                  inputB->with_gemm_swizzled_scales;
+#if (HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3)
+      scaling_mode = mxfp4_swizzled ? HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT
+                                    : HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+#else
+      NVTE_CHECK(!mxfp4_swizzled,
+                 "MXFP4 pre-swizzled scale mode (1001) requires hipBLASLt >= 1.3.");
       scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;
+#endif
       NVTE_CHECK(!is_fp8_dtype(outputD->data.dtype), "FP8 output is not supported with block scaling mode.");
 #endif
     } else {

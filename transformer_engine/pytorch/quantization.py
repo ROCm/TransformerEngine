@@ -1753,11 +1753,16 @@ class MXFP4BlockScalingRecipeState(RecipeState):
 
         use_hadamard = self.recipe.use_hadamard
 
-        # The hipBLASLt MXFP4 GEMM path consumes plain (un-shuffled) FP4 data and plain
-        # (non-swizzled) UE8M0 scales; only the AITER a4w4 backend needs the 16x16 weight
-        # shuffle and swizzled scales
+        # The hipBLASLt MXFP4 GEMM path consumes plain (un-shuffled) FP4 data. Its UE8M0
+        # scales are plain (VEC32_UE8M0) by default, but can optionally be pre-swizzled into
+        # the 32x8 tile order that hipBLASLt's BLK32_UE8M0_32_8_EXT (mode 1001) reads in place
+        # -- opt in via the recipe's use_swizzled_scales flag. The AITER a4w4 backend always
+        # needs the 16x16 weight shuffle and swizzled scales.
         use_hipblaslt = os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0") == "1"
-        swizzled_scales = not use_hipblaslt
+        use_swizzled = use_hipblaslt and self.recipe.use_swizzled_scales
+        # AITER path swizzles scales; hipBLASLt path swizzles only when the recipe opts in.
+        # FP4 data shuffle stays off on the hipBLASLt path regardless
+        swizzled_scales = use_swizzled if use_hipblaslt else True
 
         if self.mode == "forward":
 
