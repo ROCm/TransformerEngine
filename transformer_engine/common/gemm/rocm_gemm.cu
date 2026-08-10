@@ -406,39 +406,57 @@ __global__ void compute_fp4_alpha_vector_kernel(float alpha_in, const float* __r
   }
 }
 
-// Re-lay NVFP4 FP8 (E4M3) block scales from TE's row-major [roundup(dim,128), roundup(k/16,4)]
-// layout into the K-tiled layout hipBLASLt reads on gfx1250: a stack of ceil(k/128) slabs (K-tile
-// outer), each slab [dim x 8] row-major with a fixed block stride of 8 (one 128-element K-tile ==
-// 8 blocks of 16). The slab is dim rows tall (NOT padded to 128). K<128 pads the block count to 8;
-// K>128 stacks slabs. offset(row,block) = (block/8)*(dim*8) + row*8 + block%8.
-__global__ void nvfp4_swizzle_ktile8_kernel(const uint8_t* __restrict__ in,
-                                            uint8_t* __restrict__ out, int dim, int k_scale,
-                                            int in_stride) {
-  const int64_t total = static_cast<int64_t>(dim) * k_scale;
-  for (int64_t idx = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; idx < total;
-       idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
-    const int row = static_cast<int>(idx / k_scale);
-    const int block = static_cast<int>(idx % k_scale);
-    const int64_t in_off = static_cast<int64_t>(row) * in_stride + block;
-    const int64_t out_off =
-        static_cast<int64_t>(block >> 3) * (static_cast<int64_t>(dim) * 8) +
-        static_cast<int64_t>(row) * 8 + (block & 7);
-    out[out_off] = in[in_off];
+// Fused NVFP4 native-GEMM prep in a single launch: re-lay both operands' FP8 (E4M3) block scales
+// into the layout hipBLASLt reads and compute the per-tensor correction c0 on device.
+//
+// hipBLASLt reads the scales K-tiled: a stack of ceil(k/128) slabs (K-tile outer), each slab
+// [dim x 8] row-major with block stride 8 (one 128-element K-tile == 8 blocks of 16), dim rows tall
+// (NOT padded to 128). Iterating over the OUTPUT writes every byte once -- valid scale or 0 for the
+// padded blocks of the last K-tile -- so no separate zeroing memset is needed. Both operands are
+// processed in one grid; thread 0 also writes c0 = alpha * amax_A * amax_B / (fp4_max^2 fp8_max^2).
+__global__ void nvfp4_prep_kernel(const uint8_t* __restrict__ inA, uint8_t* __restrict__ outA,
+                                  int dimA, int in_strideA, const uint8_t* __restrict__ inB,
+                                  uint8_t* __restrict__ outB, int dimB, int in_strideB, int k_scale,
+                                  int num_ktiles, const float* __restrict__ amax_A,
+                                  const float* __restrict__ amax_B, float alpha_in, float factor_inv,
+                                  float* __restrict__ c0_out) {
+  const int64_t tid = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (tid == 0) {
+    *c0_out = alpha_in * (*amax_A) * (*amax_B) * factor_inv;
+  }
+  const int64_t outA_elems = static_cast<int64_t>(num_ktiles) * dimA * 8;
+  const int64_t total = outA_elems + static_cast<int64_t>(num_ktiles) * dimB * 8;
+  for (int64_t idx = tid; idx < total; idx += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+    const bool is_a = idx < outA_elems;
+    const uint8_t* in = is_a ? inA : inB;
+    uint8_t* out = is_a ? outA : outB;
+    const int dim = is_a ? dimA : dimB;
+    const int in_stride = is_a ? in_strideA : in_strideB;
+    const int64_t o = is_a ? idx : idx - outA_elems;
+
+    const int64_t slab = static_cast<int64_t>(dim) * 8;
+    const int ktile = static_cast<int>(o / slab);
+    const int within = static_cast<int>(o % slab);
+    const int row = within >> 3;
+    const int block = ktile * 8 + (within & 7);
+    out[o] = (block < k_scale) ? in[static_cast<int64_t>(row) * in_stride + block]
+                               : static_cast<uint8_t>(0);
   }
 }
 
-// Zero-fills the destination (padded blocks in the last K-tile must read as 0) and swizzles into it.
-static void launch_nvfp4_swizzle_ktile8(const void* in, void* out, int dim, int k_scale,
-                                        int in_stride, size_t out_bytes, hipStream_t stream) {
-  NVTE_CHECK_CUDA(hipMemsetAsync(out, 0, out_bytes, stream));
-  const int64_t total = static_cast<int64_t>(dim) * k_scale;
-  if (total == 0) return;
+static void launch_nvfp4_prep(const void* inA, void* outA, int dimA, int in_strideA,
+                              const void* inB, void* outB, int dimB, int in_strideB, int k_scale,
+                              int num_ktiles, const float* amax_A, const float* amax_B,
+                              float alpha_in, float factor_inv, float* c0_out,
+                              hipStream_t stream) {
+  const int64_t total = (static_cast<int64_t>(dimA) + dimB) * num_ktiles * 8;
   constexpr int kBlockSize = 256;
   const int64_t blocks = (total + kBlockSize - 1) / kBlockSize;
-  const int grid = static_cast<int>(blocks > 65535 ? 65535 : blocks);
-  nvfp4_swizzle_ktile8_kernel<<<grid, kBlockSize, 0, stream>>>(
-      reinterpret_cast<const uint8_t*>(in), reinterpret_cast<uint8_t*>(out), dim, k_scale,
-      in_stride);
+  const int grid = static_cast<int>(blocks < 1 ? 1 : (blocks > 65535 ? 65535 : blocks));
+  nvfp4_prep_kernel<<<grid, kBlockSize, 0, stream>>>(
+      reinterpret_cast<const uint8_t*>(inA), reinterpret_cast<uint8_t*>(outA), dimA, in_strideA,
+      reinterpret_cast<const uint8_t*>(inB), reinterpret_cast<uint8_t*>(outB), dimB, in_strideB,
+      k_scale, num_ktiles, amax_A, amax_B, alpha_in, factor_inv, c0_out);
   NVTE_CHECK_CUDA(hipGetLastError());
 }
 
@@ -572,10 +590,11 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
 //
 // hipBLASLt applies the FP8 (E4M3) block scales but has no NVFP4 solution that accepts a device
 // alpha, so the per-tensor (global) correction cannot ride on a device alpha the way the CUDA path
-// does. Instead we copy the two device amax scalars to the host and form
+// does. A single fused kernel swizzles both operands' scales and forms
 //   c0 = alpha * amax_A * amax_B / (fp4_max^2 * fp8_max^2)
-// there; the GEMM then computes c0*(A*B) + beta*C in its fp32 accumulator with a single round to
-// the output dtype (matching the reference addmm). No post-GEMM scaling or C copy is needed.
+// on device; only that scalar is copied back to the host. The GEMM then computes c0*(A*B) + beta*C
+// in its fp32 accumulator with a single round to the output dtype (matching the reference addmm).
+// No post-GEMM scaling or C copy is needed.
 static void setup_nvfp4_gemm_native(
     const transformer_engine::Tensor& inputA, cublasOperation_t transa,
     const transformer_engine::Tensor& inputB, cublasOperation_t transb,
@@ -597,20 +616,9 @@ static void setup_nvfp4_gemm_native(
   NVTE_CHECK(amax_A != nullptr, "NVFP4 GEMM requires amax_A");
   NVTE_CHECK(amax_B != nullptr, "NVFP4 GEMM requires amax_B");
 
-  // Fold the per-tensor correction into a host scalar alpha (hipBLASLt has no device-alpha NVFP4
-  // solution). The two amax scalars live on device; read them back to form c0 on the host.
-  float host_amax[2] = {0.0f, 0.0f};
-  NVTE_CHECK_CUDA(
-      hipMemcpyAsync(&host_amax[0], amax_A, sizeof(float), hipMemcpyDeviceToHost, stream));
-  NVTE_CHECK_CUDA(
-      hipMemcpyAsync(&host_amax[1], amax_B, sizeof(float), hipMemcpyDeviceToHost, stream));
-  NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
-  *alpha_out = alpha_in * host_amax[0] * host_amax[1] * factor_inv;
-
   // hipBLASLt reads the FP8 (E4M3) block scales in a K-tiled layout, not the row-major layout TE
-  // emits, so re-lay A's and B's scales into workspace (launch_nvfp4_swizzle_ktile8). The GEMM uses
-  // the swizzled copies; TE's original scale buffers are left untouched. Source buffer selection
-  // mirrors CanonicalizeGemmInput's NVFP4 branch.
+  // emits. Source buffer selection mirrors CanonicalizeGemmInput's NVFP4 branch; TE's originals are
+  // left untouched.
   const auto& a_sinv = (transa == CUBLAS_OP_T) ? inputA.scale_inv : inputA.columnwise_scale_inv;
   const auto& b_sinv = (transb == CUBLAS_OP_N) ? inputB.scale_inv : inputB.columnwise_scale_inv;
   NVTE_CHECK(a_sinv.shape.size() == 2 && b_sinv.shape.size() == 2,
@@ -625,7 +633,8 @@ static void setup_nvfp4_gemm_native(
   auto align256 = [](size_t x) { return (x + 255) & ~static_cast<size_t>(255); };
   const size_t res_a = align256(swz_a_bytes);
   const size_t res_b = align256(swz_b_bytes);
-  const size_t reserve = res_a + res_b;
+  const size_t res_c0 = 256;  // device scratch for the c0 scalar
+  const size_t reserve = res_a + res_b + res_c0;
   const size_t aligned_ws = workspaceSize & ~static_cast<size_t>(255);
   NVTE_CHECK(aligned_ws >= reserve,
              "NVFP4 native GEMM needs at least ", reserve,
@@ -636,10 +645,17 @@ static void setup_nvfp4_gemm_native(
   uint8_t* base = reinterpret_cast<uint8_t*>(workspace) + workspaceSize;
   void* swz_a = base;
   void* swz_b = base + res_a;
-  launch_nvfp4_swizzle_ktile8(a_sinv.dptr, swz_a, m, k_scale, static_cast<int>(a_sinv.shape[1]),
-                              swz_a_bytes, stream);
-  launch_nvfp4_swizzle_ktile8(b_sinv.dptr, swz_b, n, k_scale, static_cast<int>(b_sinv.shape[1]),
-                              swz_b_bytes, stream);
+  float* c0_dev = reinterpret_cast<float*>(base + res_a + res_b);
+
+  // One fused launch swizzles both operands' scales (padding written inline, no memset) and forms
+  // c0 on device; a single 4-byte copy then brings c0 to the host for the GEMM's host scalar alpha.
+  launch_nvfp4_prep(a_sinv.dptr, swz_a, m, static_cast<int>(a_sinv.shape[1]), b_sinv.dptr, swz_b, n,
+                    static_cast<int>(b_sinv.shape[1]), k_scale, num_ktiles, amax_A, amax_B, alpha_in,
+                    factor_inv, c0_dev, stream);
+  float host_c0 = 0.0f;
+  NVTE_CHECK_CUDA(hipMemcpyAsync(&host_c0, c0_dev, sizeof(float), hipMemcpyDeviceToHost, stream));
+  NVTE_CHECK_CUDA(hipStreamSynchronize(stream));
+  *alpha_out = host_c0;
   *a_scale_swz_out = swz_a;
   *b_scale_swz_out = swz_b;
 }
