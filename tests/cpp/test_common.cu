@@ -1337,7 +1337,8 @@ std::array<size_t, 4> get_scale_tensor_dims(const size_t rows,
       alignment_Y = alignment_X =
           (getDeviceComputeCapability() == 125) ? mxfp8_gfx1250_scale_tensor_alignment : 1;
     } else {
-      alignment_Y = alignment_X = 1;
+      alignment_Y = 1;
+      alignment_X = 1;
     }
 #else
     const size_t alignment_Y = is_rowwise
