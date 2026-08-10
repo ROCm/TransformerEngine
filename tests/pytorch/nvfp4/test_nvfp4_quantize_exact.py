@@ -18,7 +18,6 @@ from transformer_engine.pytorch.custom_recipes.quantization_ref_nvfp4 import NVF
 from transformer_engine.pytorch.custom_recipes import utils
 from transformer_engine.common.recipe import NVFP4BlockScaling
 
-
 recipe_available, reason_for_no_recipe = te.is_nvfp4_available(return_reason=True)
 
 
@@ -84,8 +83,6 @@ def maybe_skip_row_scaled_unsupported_quantization(
     M: int | None = None,
     N: int | None = None,
 ) -> None:
-    if IS_HIP_EXTENSION and use_4over6:
-        pytest.skip("NVFP4 4over6 is not supported on ROCm")
     if use_4over6 and with_2d_quantization:
         if x_dtype != torch.bfloat16 or M is None or N is None or M % 32 != 0 or N % 32 != 0:
             pytest.skip("NVFP4 2D 4over6 exact tests require the optimized BF16 kernel path")
@@ -151,6 +148,8 @@ def check_quantization_nvfp4_versus_reference(
     )
 
     if use_4over6:
+        if IS_HIP_EXTENSION and nvfp4_4over6_err_use_fast_math:
+            pytest.skip("NVFP4 4over6 fast-math error mode is not supported on ROCm")
         with nvfp4_4over6_err_fast_math(nvfp4_4over6_err_use_fast_math):
             if use_cpp_allocator:
                 x_nvfp4_sut = nvfp4_quantizer(x)
@@ -363,6 +362,8 @@ def test_nvfp4_quantization_extrema_versus_reference(
     )
 
     if nvfp4_4over6_config.use_4over6:
+        if IS_HIP_EXTENSION and nvfp4_4over6_config.err_use_fast_math:
+            pytest.skip("NVFP4 4over6 fast-math error mode is not supported on ROCm")
         with nvfp4_4over6_err_fast_math(nvfp4_4over6_config.err_use_fast_math):
             if use_cpp_allocator:
                 x_nvfp4_sut = nvfp4_quantizer(x)
@@ -508,6 +509,8 @@ def test_nvfp4_quantization_boundary_values(
     )
 
     if nvfp4_4over6_config.use_4over6:
+        if IS_HIP_EXTENSION and nvfp4_4over6_config.err_use_fast_math:
+            pytest.skip("NVFP4 4over6 fast-math error mode is not supported on ROCm")
         with nvfp4_4over6_err_fast_math(nvfp4_4over6_config.err_use_fast_math):
             if use_cpp_allocator:
                 x_nvfp4_sut = nvfp4_quantizer(x)
@@ -639,6 +642,8 @@ def test_nvfp4_quantization_noncontiguous_inputs(
     )
 
     if nvfp4_4over6_config.use_4over6:
+        if IS_HIP_EXTENSION and nvfp4_4over6_config.err_use_fast_math:
+            pytest.skip("NVFP4 4over6 fast-math error mode is not supported on ROCm")
         with nvfp4_4over6_err_fast_math(nvfp4_4over6_config.err_use_fast_math):
             if use_cpp_allocator:
                 x_nvfp4_sut = nvfp4_quantizer(x_nc)
@@ -811,3 +816,45 @@ def test_nvfp4_2d_columnwise_only_matches_both_directions(
 
     # Sanity: column-only path must not allocate a rowwise output.
     assert out_col_only._rowwise_data is None
+
+
+@pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
+@pytest.mark.parametrize("M, N", [(128, 128), (256, 256), (512, 1024), (320, 256)])
+@pytest.mark.parametrize(
+    "with_2d_quantization", [True, False], ids=["2d_quantization", "1d_quantization"]
+)
+def test_nvfp4_4over6_columnwise_only_matches_both_directions(
+    M: int,
+    N: int,
+    with_2d_quantization: bool,
+):
+    """Columnwise-only 4over6 must match the columnwise half of both-directions.
+
+    Without a rowwise pass the candidate errors have to be reduced by the
+    columnwise-only path itself; if that reduction is skipped, selection reads an
+    uninitialised buffer and silently falls back to map-to-6.
+    """
+    if with_2d_quantization and not IS_HIP_EXTENSION:
+        pytest.skip("CUDA routes 4over6 to a kernel that requires rowwise output for 2D")
+    device = "cuda"
+    torch.manual_seed(0)
+    torch.cuda.manual_seed(0)
+    x = torch.randn((M, N), dtype=torch.bfloat16, device=device)
+
+    def _quantize(*, rowwise: bool):
+        return NVFP4Quantizer(
+            fp4_dtype=tex.DType.kFloat4E2M1,
+            rowwise=rowwise,
+            columnwise=True,
+            with_2d_quantization=with_2d_quantization,
+            nvfp4_use_4over6=True,
+        )(x)
+
+    both = _quantize(rowwise=True)
+    col_only = _quantize(rowwise=False)
+
+    torch.testing.assert_close(col_only._columnwise_data, both._columnwise_data, atol=0, rtol=0)
+    torch.testing.assert_close(
+        col_only._columnwise_scale_inv, both._columnwise_scale_inv, atol=0, rtol=0
+    )
+    assert col_only._rowwise_data is None

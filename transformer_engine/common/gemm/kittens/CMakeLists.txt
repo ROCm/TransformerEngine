@@ -57,6 +57,9 @@ else()
         add_library(kittens_gemm_cdna4 OBJECT cdna4/blockwise_fp8_gemm.cpp cdna4/mxfp8_gemm.cpp)
         set_source_files_properties(cdna4/mxfp8_gemm.cpp
             PROPERTIES LANGUAGE HIP COMPILE_FLAGS "-gline-tables-only")
+        # -ffast-math folds fpext(fptrunc(x)) back to x, so any deliberate narrow-then-widen
+        # in this file has to be made opaque to the optimizer -- see round_to_out_dtype() in
+        # cdna4/blockwise_fp8_gemm_helper.cuh.
         set_source_files_properties(cdna4/blockwise_fp8_gemm.cpp
             PROPERTIES LANGUAGE HIP COMPILE_FLAGS "-gline-tables-only -ffast-math")
         set_target_properties(kittens_gemm_cdna4 PROPERTIES

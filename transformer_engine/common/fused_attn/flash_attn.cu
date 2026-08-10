@@ -161,7 +161,6 @@ void prepare_flash_attn_bwd(Tensor q, Tensor k, Tensor v, Tensor qkv, cudaStream
 // multi_tensor_transpose_to_bhsd: BSHD/SBHD -> BHSD
 // ============================================================================
 
-#ifndef __HIP_PLATFORM_AMD__  // Disabled on ROCm
 namespace multi_tensor_transpose_to_bhsd {
 
 using flash_attention::Vec;
@@ -178,9 +177,11 @@ struct PermuteParams {
   PermuteSlot slots[kMaxPermuteTensors];
 };
 
+#ifndef __HIP_PLATFORM_AMD__  // CUtensorMap has no ROCm counterpart
 struct TmaMapParams {
   CUtensorMap maps[kMaxPermuteTensors];
 };
+#endif
 
 // ---------- path 3: fallback_not_vec_aligned ----------
 
@@ -368,6 +369,8 @@ __launch_bounds__(fallback_permute_threads) __global__
 }
 
 // ---------- path 1: TMA ----------
+
+#ifndef __HIP_PLATFORM_AMD__  // TMA: CUtensorMap, cp.async.bulk, mbarrier, SM 10.0+
 
 constexpr int tma_permute_threads = 128;
 constexpr int tma_permute_s_tile_default = 32;
@@ -589,6 +592,8 @@ static void create_strided_tensor_map(CUtensorMap &map, void *ptr, DType dtype, 
   }
 }
 
+#endif  // !__HIP_PLATFORM_AMD__ (path 1: TMA)
+
 void multi_tensor_transpose_to_bhsd(Tensor *inputs, Tensor *outputs, size_t num_tensors,
                                     NVTE_QKV_Format original_format, cudaStream_t stream) {
   using namespace transformer_engine;
@@ -605,7 +610,15 @@ void multi_tensor_transpose_to_bhsd(Tensor *inputs, Tensor *outputs, size_t num_
   size_t s_max = 0, h_max = 0, s_min = SIZE_MAX;
   size_t d_in_max = 0, d_out_max = 0;
   bool any_not_vec_aligned = false;
+#ifdef __HIP_PLATFORM_AMD__
+  // Both readers below are compiled out on ROCm, so this only keeps the variable
+  // defined and states the intent: had they been reachable, the sm >= 100 test
+  // would not have excluded us -- sm_arch() returns the raw gfx number, so
+  // gfx1250 reports 125 and satisfies it.
+  bool all_tma_ok = false;
+#else
   bool all_tma_ok = true;
+#endif
 
   for (size_t i = 0; i < num_tensors; ++i) {
     const size_t H = outputs[i].shape()[1];
@@ -623,6 +636,7 @@ void multi_tensor_transpose_to_bhsd(Tensor *inputs, Tensor *outputs, size_t num_
     if (inner < 32 || inner % 16 != 0) all_tma_ok = false;
   }
 
+#ifndef __HIP_PLATFORM_AMD__
   if (all_tma_ok) {
     const int sm = cuda::sm_arch(cuda::current_device());
     if (sm < 100) {
@@ -641,12 +655,14 @@ void multi_tensor_transpose_to_bhsd(Tensor *inputs, Tensor *outputs, size_t num_
       }
     }
   }
+#endif  // !__HIP_PLATFORM_AMD__
 
   // Dispatch order:
   //  1. TMA path: SM 10.0+, D_in*elem >= 32 && 16-aligned, supported dtype,
   //     and s_tile*D_in*elem is uint4-aligned.
   //  2. Fallback path (vec-aligned): vectorized loads/stores when D_in*elem % 4 == 0.
   //  3. Fallback path (not-vec-aligned): shared-memory transpose when D_in*elem % 4 != 0.
+#ifndef __HIP_PLATFORM_AMD__
   if (all_tma_ok) {
     const size_t s_tile = std::min(static_cast<size_t>(tma_permute_s_tile_default), s_min);
     bool tma_aligned = true;
@@ -686,6 +702,7 @@ void multi_tensor_transpose_to_bhsd(Tensor *inputs, Tensor *outputs, size_t num_
       return;
     }
   }
+#endif  // !__HIP_PLATFORM_AMD__ (TMA dispatch)
 
   if (!any_not_vec_aligned) {
     const unsigned int permute_s_splits = std::max(
@@ -730,7 +747,6 @@ void multi_tensor_transpose_to_bhsd(Tensor *inputs, Tensor *outputs, size_t num_
 }
 
 }  // namespace multi_tensor_transpose_to_bhsd
-#endif
 
 // ===================================================================================
 // multi_tensor_pad_last_dim: pad the last dim of multiple tensors to certain alignment
@@ -872,7 +888,6 @@ void nvte_multi_tensor_transpose_to_bhsd(NVTETensor *inputs, NVTETensor *outputs
                                          size_t num_tensors, NVTE_QKV_Format original_format,
                                          cudaStream_t stream) {
   NVTE_API_CALL(nvte_multi_tensor_transpose_to_bhsd);
-#ifndef __HIP_PLATFORM_AMD__
   NVTE_CHECK(original_format == NVTE_QKV_Format::NVTE_BSHD ||
                  original_format == NVTE_QKV_Format::NVTE_SBHD,
              "nvte_multi_tensor_transpose_to_bhsd: only BSHD/SBHD -> BHSD is currently "
@@ -890,14 +905,6 @@ void nvte_multi_tensor_transpose_to_bhsd(NVTETensor *inputs, NVTETensor *outputs
     multi_tensor_transpose_to_bhsd::multi_tensor_transpose_to_bhsd(
         in_vec.data() + offset, out_vec.data() + offset, batch, original_format, stream);
   }
-#else
-  (void)inputs;
-  (void)outputs;
-  (void)num_tensors;
-  (void)original_format;
-  (void)stream;
-  NVTE_ERROR("nvte_multi_tensor_transpose_to_bhsd is not supported on ROCm.");
-#endif
 }
 
 void nvte_multi_tensor_pad_last_dim(NVTETensor *inputs, NVTETensor *outputs, size_t num_tensors,

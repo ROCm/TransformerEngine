@@ -1,6 +1,4 @@
 /*************************************************************************
- * This file was modified for portability to AMDGPU
- * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -13,9 +11,6 @@
 
 namespace transformer_engine {
 namespace jax {
-
-// Disabled on ROCm
-#ifndef USE_ROCM
 
 // ---------------------------------------------------------------------------
 // JAX FFI handler
@@ -104,8 +99,6 @@ pybind11::tuple GetTopkWorkspaceSizes(int batch_size, int seq_len, int k) {
   auto work_shape = MakeShapeVector(workspace_tensor.shape());
   return pybind11::make_tuple(std::make_pair(work_shape, workspace_tensor.dtype()));
 }
-
-#endif
 
 }  // namespace jax
 }  // namespace transformer_engine

@@ -8,6 +8,8 @@
 
 #include <algorithm>
 #include <array>
+#include <cfloat>
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -186,6 +188,146 @@ NVFP4FourOverSixQuantization quantize_4over6_pair(
       quantized_map4,
       quantized_map6,
   };
+}
+
+// CUDA keeps upstream's looser rule; its fast-math configs score in packed fp16.
+#ifdef __HIP_PLATFORM_AMD__
+constexpr bool kAcceptEitherCandidate = false;
+#else
+constexpr bool kAcceptEitherCandidate = true;
+#endif
+
+struct NVFP4FourOverSixDecision {
+    NVFP4FourOverSixCandidate candidate = NVFP4FourOverSixCandidate::Map6;
+    // Candidate errors too close for FP32 summation order to resolve.
+    bool ambiguous = false;
+};
+
+// Mirrors fp4_roundtrip_err() in quantize_transpose_vector_blockwise_fp4.cu,
+// operand order included.
+float fp4_roundtrip_err_ref(const float x, const float block_scale_inverse, const float sf,
+                            const float global_amax, const float err_denom, const bool use_mse) {
+    const float2 scaled = {x * block_scale_inverse, 0.0f};
+    const fp4e2m1x2 quantized(scaled);
+    const float dequant = static_cast<float>(cvt_fp4x2_to_double2(quantized).x);
+    const float val = dequant * sf * global_amax / err_denom;
+    const float diff = val - x;
+    return use_mse ? diff * diff : std::fabs(diff);
+}
+
+// Lower round-trip error wins; ties go to map-to-6.
+NVFP4FourOverSixDecision decide_4over6_candidate(const std::vector<float>& block,
+                                                 const float block_amax,
+                                                 const float S_enc,
+                                                 const int e4m3_max,
+                                                 const bool use_mse) {
+    const NVFP4FourOverSixQuantization quantization =
+        compute_4over6_quantization_scales(block_amax, S_enc);
+    const float err_denom = 6.0f * static_cast<float>(e4m3_max);
+    const float global_amax = err_denom / S_enc;
+
+    double err_map4 = 0.0;
+    double err_map6 = 0.0;
+    for (const float x : block) {
+        err_map4 += fp4_roundtrip_err_ref(x, quantization.reciprocal_map4,
+                                          static_cast<float>(quantization.scale_map4), global_amax,
+                                          err_denom, use_mse);
+        err_map6 += fp4_roundtrip_err_ref(x, quantization.reciprocal_map6,
+                                          static_cast<float>(quantization.scale_map6), global_amax,
+                                          err_denom, use_mse);
+    }
+
+    // Worst-case FP32 summation drift of the kernel's warp reduction.
+    const double tie_band = 4.0 * static_cast<double>(block.size()) *
+                            static_cast<double>(FLT_EPSILON) * std::max(err_map4, err_map6);
+
+    NVFP4FourOverSixDecision decision;
+    decision.ambiguous = std::fabs(err_map4 - err_map6) <= tie_band;
+    decision.candidate =
+        err_map4 < err_map6 ? NVFP4FourOverSixCandidate::Map4 : NVFP4FourOverSixCandidate::Map6;
+    return decision;
+}
+
+// Laid out like the scale tensor so the checker can index it by scale_idx.
+template <typename InputType>
+std::vector<NVFP4FourOverSixDecision> compute_4over6_expected_decisions(
+    float (*OP)(const float),
+    const InputType* const input,
+    const size_t rows,
+    const size_t cols,
+    const size_t scales_stride,
+    const float* const amax,
+    const bool use_fast_math,
+    const bool use_2d_quantization,
+    const bool row_scaled_nvfp4,
+    const bool use_mse,
+    const int e4m3_max) {
+
+    constexpr size_t block_size_Y = 16;
+    constexpr size_t block_size_X = 16;
+    const size_t blocks_X = divide_round_up(cols, block_size_X);
+    std::vector<NVFP4FourOverSixDecision> decisions(rows * scales_stride);
+
+    // Same numerical truncation the reference quantizers apply.
+    auto activated = [OP, input, cols](const size_t i, const size_t j) {
+        const float act_elt = OP(static_cast<float>(input[i * cols + j]));
+        return static_cast<float>(static_cast<InputType>(act_elt));
+    };
+
+    if (use_2d_quantization) {
+        const float S_enc = compute_global_encode_scaling_factor_FP4(*amax, use_fast_math,
+                                                                     e4m3_max);
+        const size_t blocks_Y = divide_round_up(rows, block_size_Y);
+        for (size_t block_Y = 0; block_Y < blocks_Y; ++block_Y) {
+            for (size_t block_X = 0; block_X < blocks_X; ++block_X) {
+                const size_t i_min = block_Y * block_size_Y;
+                const size_t i_max = std::min(i_min + block_size_Y, rows);
+                const size_t j_min = block_X * block_size_X;
+                const size_t j_max = std::min(j_min + block_size_X, cols);
+
+                std::vector<float> block;
+                block.reserve(block_size_Y * block_size_X);
+                float block_amax = 0.0f;
+                for (size_t i = i_min; i < i_max; ++i) {
+                    for (size_t j = j_min; j < j_max; ++j) {
+                        const float elt = activated(i, j);
+                        block.push_back(elt);
+                        block_amax = std::max(block_amax, std::abs(elt));
+                    }
+                }
+
+                const NVFP4FourOverSixDecision decision =
+                    decide_4over6_candidate(block, block_amax, S_enc, e4m3_max, use_mse);
+                // Block scale and its candidate replicate down the block's rows.
+                for (size_t i = i_min; i < i_max; ++i) {
+                    decisions[i * scales_stride + block_X] = decision;
+                }
+            }
+        }
+        return decisions;
+    }
+
+    for (size_t i = 0; i < rows; ++i) {
+        const float S_enc = compute_global_encode_scaling_factor_FP4(
+            row_scaled_nvfp4 ? amax[i] : *amax, use_fast_math, e4m3_max);
+        for (size_t block_X = 0; block_X < blocks_X; ++block_X) {
+            const size_t j_min = block_X * block_size_X;
+            const size_t j_max = std::min(j_min + block_size_X, cols);
+
+            std::vector<float> block;
+            block.reserve(block_size_X);
+            float block_amax = 0.0f;
+            for (size_t j = j_min; j < j_max; ++j) {
+                const float elt = activated(i, j);
+                block.push_back(elt);
+                block_amax = std::max(block_amax, std::abs(elt));
+            }
+
+            decisions[i * scales_stride + block_X] =
+                decide_4over6_candidate(block, block_amax, S_enc, e4m3_max, use_mse);
+        }
+    }
+    return decisions;
 }
 
 // 1D Scaling: Original implementation with 1x16 blocks
@@ -735,6 +877,7 @@ void compare_nvfp4_4over6_candidates(const std::string& name,
                                      const fp8e4m3* const ref_scales_map4,
                                      const fp4e2m1x2* const ref_data_map6,
                                      const fp8e4m3* const ref_scales_map6,
+                                     const std::vector<NVFP4FourOverSixDecision>& decisions,
                                      const size_t rows,
                                      const size_t cols,
                                      const size_t blocks_X,
@@ -742,6 +885,16 @@ void compare_nvfp4_4over6_candidates(const std::string& name,
     constexpr int max_mismatches_to_print = 3;
     const auto* const test_data_pairs = reinterpret_cast<const fp4e2m1x2*>(test_data);
     size_t total_mismatches = 0;
+    size_t wrong_candidate = 0;
+    size_t expected_map4 = 0;
+    size_t expected_map6 = 0;
+    // Blocks whose two candidates encode to the same bytes: a selection cannot be
+    // read back out of them, so they neither pin the kernel nor weaken the check.
+    size_t identical_candidates = 0;
+    // Blocks that do encode differently but whose candidate errors are too close
+    // for the host to call. These are the only ones where the kernel keeps any
+    // latitude, so their count is the coverage this check gives up.
+    size_t unpinned_blocks = 0;
 
     for (size_t row = 0; row < rows; ++row) {
         for (size_t block_x = 0; block_x < blocks_X; ++block_x) {
@@ -754,34 +907,72 @@ void compare_nvfp4_4over6_candidates(const std::string& name,
                 bitwise_equal(test_scales[scale_idx], ref_scales_map6[scale_idx]);
             const bool data_matches_map6 =
                 nvfp4_output_block_matches(test_data_pairs, ref_data_map6, row, cols, block_x);
+            const bool matches_map4 = scale_matches_map4 && data_matches_map4;
+            const bool matches_map6 = scale_matches_map6 && data_matches_map6;
 
-            if ((scale_matches_map4 && data_matches_map4) ||
-                (scale_matches_map6 && data_matches_map6)) {
+            const bool candidates_differ =
+                !bitwise_equal(ref_scales_map4[scale_idx], ref_scales_map6[scale_idx]) ||
+                !nvfp4_output_block_matches(ref_data_map4, ref_data_map6, row, cols, block_x);
+
+            const NVFP4FourOverSixDecision& decision = decisions[scale_idx];
+            bool matched = false;
+            const char* expectation = nullptr;
+            if (decision.ambiguous || kAcceptEitherCandidate) {
+                // Too close to call from the host; either encoding is a correct answer.
+                if (candidates_differ) {
+                    ++unpinned_blocks;
+                } else {
+                    ++identical_candidates;
+                }
+                matched = matches_map4 || matches_map6;
+                expectation = "map-to-4 or map-to-6 (candidate errors within the tie band)";
+            } else if (decision.candidate == NVFP4FourOverSixCandidate::Map4) {
+                ++expected_map4;
+                matched = matches_map4;
+                expectation = "map-to-4";
+            } else {
+                ++expected_map6;
+                matched = matches_map6;
+                expectation = "map-to-6";
+            }
+
+            if (matched) {
                 continue;
             }
 
             ++total_mismatches;
+            const bool matched_other = matches_map4 || matches_map6;
+            if (matched_other) {
+                ++wrong_candidate;
+            }
             if (total_mismatches <= max_mismatches_to_print) {
                 std::cout << "Error in tensor " << name << ": 4over6 block mismatch at row "
-                          << row << ", block_x " << block_x
-                          << ". The output did not match either map-to-4 or map-to-6 exactly."
-                          << std::endl;
+                          << row << ", block_x " << block_x << ". Expected " << expectation
+                          << "; the output "
+                          << (matched_other ? "matched the other candidate instead"
+                                            : "matched neither candidate exactly")
+                          << "." << std::endl;
             }
         }
     }
 
     std::cout << "=== SUMMARY for tensor " << name << " ===" << std::endl;
     std::cout << "Total 4over6 blocks checked: " << (rows * blocks_X) << std::endl;
+    std::cout << "Blocks pinned to map-to-4: " << expected_map4
+              << ", pinned to map-to-6: " << expected_map6
+              << ", left unpinned by the tie band: " << unpinned_blocks
+              << ", encoding identically either way: " << identical_candidates << std::endl;
     if (total_mismatches > 0) {
         std::cout << "STATUS: FAILED for output" << std::endl;
-        std::cout << "Total mismatched 4over6 blocks found: " << total_mismatches << std::endl;
+        std::cout << "Total mismatched 4over6 blocks found: " << total_mismatches
+                  << " (" << wrong_candidate << " picked the wrong candidate)" << std::endl;
         std::cout << "============================" << std::endl;
         GTEST_FAIL() << "Found " << total_mismatches << " 4over6 block mismatches in tensor "
-                     << name;
+                     << name << " (" << wrong_candidate << " picked the wrong candidate)";
     }
 
     std::cout << "STATUS: PASSED for output" << std::endl;
-    std::cout << "Each 4over6 block matched either map-to-4 or map-to-6 exactly" << std::endl;
+    std::cout << "Each 4over6 block matched the candidate the reference selected" << std::endl;
     std::cout << "============================" << std::endl;
 }
 
@@ -823,7 +1014,8 @@ void performTest(float (*OP)(const float),
 
 #ifdef __HIP_PLATFORM_AMD__
     if (te_fp8_fnuz()) GTEST_SKIP() << "NVFP4 not supported on gfx942 (fnuz)";
-    if (use_4over6) GTEST_SKIP() << "NVFP4 4over6 not supported on ROCm";
+    if (use_4over6 && use_4over6_err_use_fast_math)
+      GTEST_SKIP() << "NVFP4 4over6 fast-math error mode is not supported on ROCm";
 #endif
 
     const size_t rows = first_dimension(shape);
@@ -863,6 +1055,8 @@ void performTest(float (*OP)(const float),
     std::unique_ptr<fp4e2m1x2[]> ref_output_t_map6;
     std::unique_ptr<fp8e4m3[]> ref_scales_map6;
     std::unique_ptr<fp8e4m3[]> ref_scales_t_map6;
+    std::vector<NVFP4FourOverSixDecision> expected_decisions;
+    std::vector<NVFP4FourOverSixDecision> expected_decisions_t;
 
     fillCase<fp32>(&input, InputsFillCase::uniform);
 
@@ -974,6 +1168,21 @@ void performTest(float (*OP)(const float),
                                use_4over6,
                                e4m3_max,
                                NVFP4FourOverSixCandidate::Map6);
+
+        // The kernel is free to pick either candidate per block, but not freely:
+        // it must pick the one with the smaller round-trip error. Derive that
+        // choice here so the checker can hold it to exactly one reference.
+        const bool use_mse = mode == kNVTENVFP44Over6MinMSE;
+        expected_decisions = compute_4over6_expected_decisions<InputType>(
+            OP, input.rowwise_cpu_dptr<InputType>(), rows, cols, scales_stride, ref_amax.data(),
+            use_fast_math, is_2d_quantization, row_scaled_nvfp4, use_mse, e4m3_max);
+        if (!row_scaled_nvfp4) {
+            const std::vector<InputType> input_t =
+                create_transpose(input.rowwise_cpu_dptr<InputType>(), rows, cols);
+            expected_decisions_t = compute_4over6_expected_decisions<InputType>(
+                OP, input_t.data(), cols, rows, scales_stride_t, ref_amax.data(), use_fast_math,
+                is_2d_quantization, row_scaled_nvfp4, use_mse, e4m3_max);
+        }
     } else {
         compute_ref<InputType>(OP,
                                input.rowwise_cpu_dptr<InputType>(),
@@ -997,8 +1206,11 @@ void performTest(float (*OP)(const float),
     hipDeviceProp_t prop;
     hipGetDeviceProperties(&prop, 0);
     const bool is_gfx950 = prop.major == 9 && prop.minor == 5;
-    for (bool use_stochastic_rounding : (is_gfx950 ? std::vector<bool>{false, true}
-                                                   : std::vector<bool>{false})) {
+    // 4over6 excluded: the quantize dispatch refuses it combined with stochastic
+    // rounding, the same way this test already excludes it from fast math below.
+    for (bool use_stochastic_rounding : (is_gfx950 && !use_4over6
+                                             ? std::vector<bool>{false, true}
+                                             : std::vector<bool>{false})) {
 #endif
 
     // Initialize stochastic rounding
@@ -1056,6 +1268,7 @@ void performTest(float (*OP)(const float),
                                         ref_scales.get(),
                                         ref_output_map6.get(),
                                         ref_scales_map6.get(),
+                                        expected_decisions,
                                         rows,
                                         cols,
                                         unpadded_blocks_X,
@@ -1068,6 +1281,7 @@ void performTest(float (*OP)(const float),
                                             ref_scales_t.get(),
                                             ref_output_t_map6.get(),
                                             ref_scales_t_map6.get(),
+                                            expected_decisions_t,
                                             cols,
                                             rows,
                                             unpadded_blocks_X_t,

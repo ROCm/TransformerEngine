@@ -310,8 +310,7 @@ set(cuda_only_cuda_sources
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/utils.cu
-     swizzle/swizzle_block_scaling.cu
-     util/topk.cu) #CUDA-only
+     swizzle/swizzle_block_scaling.cu) #CUDA-only
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
      fused_attn/flash_attn.cu
@@ -443,6 +442,27 @@ else() #USE_ROCM
   # process source code files
   include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/hipify/hipify.cmake")
   TE_Hipify(${CMAKE_CURRENT_SOURCE_DIR})
+
+  # TE_Hipify runs at configure time via execute_process, so CMake holds no dependency on the
+  # CUDA sources it reads. Without registering them, editing a source here leaves the previously
+  # generated _hip.* in place and the build silently compiles the old revision. Generated outputs
+  # are excluded: they are rewritten during configure, so listing them would re-trigger forever.
+  set(_hipify_deps)
+  foreach(_src ${transformer_engine_SOURCES})
+    get_filename_component(_abs "${CMAKE_CURRENT_SOURCE_DIR}/${_src}" ABSOLUTE)
+    list(APPEND _hipify_deps "${_abs}")
+  endforeach()
+  file(GLOB_RECURSE _hipify_hdrs
+       "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
+       "${CMAKE_CURRENT_SOURCE_DIR}/*.cuh"
+       "${CMAKE_CURRENT_SOURCE_DIR}/*.hpp")
+  foreach(_hdr ${_hipify_hdrs})
+    if(NOT _hdr MATCHES "_hip\\.(h|cuh|hpp)$")
+      list(APPEND _hipify_deps "${_hdr}")
+    endif()
+  endforeach()
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_hipify_deps})
+
   TE_GetHipifiedSources("${transformer_engine_SOURCES}" ${CMAKE_CURRENT_SOURCE_DIR} te_hip_sources)
 
   message("${message_line}")

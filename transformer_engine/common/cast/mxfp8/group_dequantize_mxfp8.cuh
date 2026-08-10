@@ -26,10 +26,27 @@
 #include "../../utils.cuh"
 #include "group_quantize_mxfp8.cuh"
 
+#else
+
+#include <cuda_runtime.h>
+#include <transformer_engine/transformer_engine.h>
+
+#include <vector>
+
+#include "../../common.h"
+#include "../../util/ptx.cuh"
+#include "../../utils.cuh"
+#include "./rocm_vectorized_2d.cuh"
+
+#endif  // #ifndef __HIP_PLATFORM_AMD__
+
 namespace transformer_engine {
 namespace dispatch {
 namespace mxfp8 {
 namespace group_dequantize_kernel {
+#ifdef __HIP_PLATFORM_AMD__
+#include "rocm_group_dequantize_mxfp8.cuh"
+#else
 
 constexpr int MAX_SUPPORTED_TENSOR_DESCRIPTORS = 64;
 __device__ alignas(128) CUtensorMap g_tensor_maps_input[MAX_SUPPORTED_TENSOR_DESCRIPTORS];
@@ -373,10 +390,145 @@ __global__ void __launch_bounds__(128)
   destroy_barriers<ITERATIONS>(mbar, is_master_thread);
 #endif  // #if (defined __CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
 }
+#endif  // #ifdef __HIP_PLATFORM_AMD__
 }  // namespace group_dequantize_kernel
 
 inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
                              cudaStream_t stream) {
+#ifdef __HIP_PLATFORM_AMD__
+  using namespace group_dequantize_kernel;
+
+  const bool use_rowwise_scaling = input->has_data();
+  const bool use_colwise_scaling = input->has_columnwise_data();
+  NVTE_CHECK(use_rowwise_scaling || use_colwise_scaling,
+             "Input tensor must have either rowwise or columnwise data.");
+  NVTE_CHECK(!(use_rowwise_scaling && use_colwise_scaling),
+             "Dequantize only supports rowwise or columnwise scaling, not both simultaneously.");
+
+  NVTE_CHECK(!input->with_gemm_swizzled_scales, "Input must have scales in compact format.");
+  NVTE_CHECK(!is_fp8_dtype(output->dtype()), "Output must be in higher precision.");
+  NVTE_CHECK(!is_fp4_dtype(output->dtype()), "Output must not be FP4.");
+  NVTE_CHECK(is_fp8_dtype(input->dtype()), "Input must have FP8 type.");
+
+  NVTE_CHECK(input->num_tensors == output->num_tensors,
+             "Number of input and output tensors must be same.");
+
+  ShapeRepresentation shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
+  if (input->all_same_shape()) {
+    shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
+  } else if (input->all_same_first_dim()) {
+    shape_rep = ShapeRepresentation::VARYING_LAST_DIM;
+  } else if (input->all_same_last_dim()) {
+    shape_rep = ShapeRepresentation::VARYING_FIRST_DIM;
+  } else if (input->varying_both_dims()) {
+    shape_rep = ShapeRepresentation::VARYING_BOTH_DIMS;
+  }
+
+  const bool is_single_tensor = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
+                                 shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
+
+  const size_t first_logical_dim = input->logical_shape.data[0];
+  const size_t last_logical_dim = input->logical_shape.data[1];
+  const size_t elts_total = first_logical_dim * last_logical_dim;
+  if (elts_total == 0) return;
+
+  const size_t num_tensors = input->num_tensors;
+
+  size_t blocks_X = 0;
+  size_t blocks_Y = 1;
+  if (is_single_tensor) {
+    blocks_Y = DIVUP(first_logical_dim, CHUNK_DIM_Y);
+    blocks_X = DIVUP(last_logical_dim, CHUNK_DIM_X);
+  } else {
+    NVTE_CHECK(last_logical_dim % CHUNK_DIM_X == 0,
+               "Last dimension of a grouped tensor should be divisible by 128.");
+    if (shape_rep == ShapeRepresentation::VARYING_LAST_DIM) {
+      blocks_X = DIVUP(first_logical_dim, CHUNK_DIM_Y) * (last_logical_dim / CHUNK_DIM_X);
+    } else {
+      blocks_X = DIVUP(elts_total, CHUNK_DIM_Y * CHUNK_DIM_X);
+    }
+  }
+
+  const dim3 grid(blocks_X, blocks_Y);
+  const dim3 block(THREADS_PER_CHUNK);
+
+  const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(input->tensor_offsets.dptr);
+  const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input->first_dims.dptr);
+  const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input->last_dims.dptr);
+
+  // Only the uniform-last-dim path indexes colwise scales from the group's global row.
+  if (use_colwise_scaling && last_dims_ptr == nullptr && num_tensors > 1) {
+    constexpr size_t COLWISE_SCALE_ROWS = 32;
+    std::vector<int64_t> host_first_dims(num_tensors);
+    if (first_dims_ptr != nullptr) {
+      NVTE_CHECK_CUDA(cudaMemcpyAsync(host_first_dims.data(), first_dims_ptr,
+                                      num_tensors * sizeof(int64_t), cudaMemcpyDeviceToHost,
+                                      stream));
+      NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+    } else {
+      NVTE_CHECK(first_logical_dim % num_tensors == 0, "Uniform grouped tensor has ",
+                 first_logical_dim, " rows, which is not divisible by ", num_tensors, " tensors.");
+      host_first_dims.assign(num_tensors, static_cast<int64_t>(first_logical_dim / num_tensors));
+    }
+    for (size_t t = 0; t < num_tensors; t++) {
+      NVTE_CHECK(static_cast<size_t>(host_first_dims[t]) % COLWISE_SCALE_ROWS == 0,
+                 "Columnwise grouped dequantize requires each per-tensor first dimension to be "
+                 "divisible by ",
+                 COLWISE_SCALE_ROWS, "; tensor ", t, " has ", host_first_dims[t], ".");
+    }
+  }
+
+  // Row strides must be a whole number of vectors; VECTOR_WIDTH is 16 elements.
+  constexpr size_t VECTOR_ELEMS = 16;
+  if (last_dims_ptr == nullptr) {
+    NVTE_CHECK(last_logical_dim % VECTOR_ELEMS == 0,
+               "Grouped dequantize requires the last dimension to be divisible by ", VECTOR_ELEMS,
+               "; got ", last_logical_dim, ".");
+  } else {
+    std::vector<int64_t> host_last_dims(num_tensors);
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(host_last_dims.data(), last_dims_ptr,
+                                    num_tensors * sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
+    NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+    for (size_t t = 0; t < num_tensors; t++) {
+      NVTE_CHECK(static_cast<size_t>(host_last_dims[t]) % VECTOR_ELEMS == 0,
+                 "Grouped dequantize requires each per-tensor last dimension to be divisible by ",
+                 VECTOR_ELEMS, "; tensor ", t, " has ", host_last_dims[t], ".");
+    }
+  }
+
+  const e8m0_t *const scales_ptr =
+      use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(input->scale_inv.dptr)
+                          : reinterpret_cast<e8m0_t *>(input->columnwise_scale_inv.dptr);
+
+  const SimpleTensor &input_data = use_rowwise_scaling ? input->data : input->columnwise_data;
+
+  const size_t scale_dim_X_rowwise = use_rowwise_scaling ? 32 : 1;
+  const size_t scale_dim_Y_colwise = use_colwise_scaling ? 32 : 1;
+
+  TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+      scale_dim_Y_colwise, SCALE_DIM_Y,
+      TRANSFORMER_ENGINE_MX_SCALE_DIM_SWITCH(
+          scale_dim_X_rowwise, SCALE_DIM_X,
+          TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
+              input->dtype(), IType,
+              TRANSFORMER_ENGINE_TYPE_SWITCH_NON_FP8ONLY(
+                  output->dtype(), OType,
+                  // Only the single-tensor layout has one row stride, so only it can be
+                  // proven vector-aligned on the host; groups take the general path.
+                  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                      is_single_tensor && !(last_logical_dim % (32 * sizeof(OType))), IS_ALIGNED,
+                      grouped_dequantize_mxfp8_kernel<IType, OType, SCALE_DIM_Y, SCALE_DIM_X,
+                                                      IS_ALIGNED><<<grid, block, 0, stream>>>(
+                          reinterpret_cast<const IType *>(input_data.dptr),
+                          reinterpret_cast<OType *>(output->data.dptr), scales_ptr,
+                          first_logical_dim, last_logical_dim, num_tensors, offsets_ptr,
+                          first_dims_ptr, last_dims_ptr););  // NOLINT(*)
+              );                                             // NOLINT(*)
+          );                                                 // NOLINT(*)
+      );                                                     // NOLINT(*)
+  );                                                         // NOLINT(*)
+  NVTE_CHECK_CUDA(cudaGetLastError());
+#else
   using namespace group_dequantize_kernel;
 
   checkCuDriverContext(stream);
@@ -490,12 +642,11 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
           });  // NOLINT(*)
   );           // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
+#endif  // #ifdef __HIP_PLATFORM_AMD__
 }
 
 }  // namespace mxfp8
 }  // namespace dispatch
 }  // namespace transformer_engine
-
-#endif  // __HIP_PLATFORM_AMD__
 
 #endif  // TRANSFORMER_ENGINE_GROUP_DEQUANTIZE_MXFP8_CUH_
