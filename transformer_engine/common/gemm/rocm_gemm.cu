@@ -406,6 +406,52 @@ __global__ void compute_fp4_alpha_vector_kernel(float alpha_in, const float* __r
   }
 }
 
+// Apply the NVFP4 per-tensor amax correction to the GEMM output in place:
+//   D[i] = c0 * D[i] + beta * C_saved[i],   c0 = alpha * amax_A * amax_B / (fp4_max^2 * fp8_max^2)
+// The native (gfx1250) GEMM runs with host alpha=1, beta=0 because hipBLASLt has no NVFP4
+// solution that accepts a device alpha, so the correction the CUDA path folds into a device
+// alpha scalar is applied here instead. C_saved is null when beta == 0 (D already holds A*B).
+template <typename OType>
+__global__ void nvfp4_post_scale_kernel(OType* __restrict__ D, const OType* __restrict__ C_saved,
+                                        const float* __restrict__ amax_A,
+                                        const float* __restrict__ amax_B, float alpha, float beta,
+                                        float factor_inv, int64_t n_elems) {
+  const float c0 = alpha * (*amax_A) * (*amax_B) * factor_inv;
+  for (int64_t i = static_cast<int64_t>(blockIdx.x) * blockDim.x + threadIdx.x; i < n_elems;
+       i += static_cast<int64_t>(blockDim.x) * gridDim.x) {
+    float v = c0 * static_cast<float>(D[i]);
+    if (C_saved != nullptr) {
+      v += beta * static_cast<float>(C_saved[i]);
+    }
+    D[i] = static_cast<OType>(v);
+  }
+}
+
+static void launch_nvfp4_post_scale(void* D, const void* C_saved, DType out_dtype,
+                                    const float* amax_A, const float* amax_B, float alpha,
+                                    float beta, float factor_inv, int64_t n_elems,
+                                    hipStream_t stream) {
+  if (n_elems == 0) return;
+  constexpr int kBlockSize = 256;
+  const int64_t blocks = (n_elems + kBlockSize - 1) / kBlockSize;
+  const int grid = static_cast<int>(blocks > 65535 ? 65535 : blocks);
+  switch (out_dtype) {
+    case DType::kBFloat16:
+      nvfp4_post_scale_kernel<hip_bfloat16><<<grid, kBlockSize, 0, stream>>>(
+          reinterpret_cast<hip_bfloat16*>(D), reinterpret_cast<const hip_bfloat16*>(C_saved),
+          amax_A, amax_B, alpha, beta, factor_inv, n_elems);
+      break;
+    case DType::kFloat32:
+      nvfp4_post_scale_kernel<float><<<grid, kBlockSize, 0, stream>>>(
+          reinterpret_cast<float*>(D), reinterpret_cast<const float*>(C_saved),
+          amax_A, amax_B, alpha, beta, factor_inv, n_elems);
+      break;
+    default:
+      NVTE_ERROR("NVFP4 GEMM output must be BF16 or FP32");
+  }
+  NVTE_CHECK_CUDA(hipGetLastError());
+}
+
 GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cublasOperation_t transA,
                                 const transformer_engine::Tensor &B, const cublasOperation_t transB,
                                 const int m, const int n, const int k) {
@@ -531,28 +577,28 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   return ret;
 }
 
-// Set up the per-tensor amax correction for a native NVFP4 hipBLASLt GEMM.
+// Prepare the per-tensor NVFP4 amax correction for a native (gfx1250) hipBLASLt GEMM.
 //
-// hipBLASLt applies the FP8 (E4M3) per-16-element block scales directly (via the
-// A/B scale pointers and HIPBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3 scale mode), so the
-// FP4 operands are handed to the GEMM unchanged. The only correction left to apply is
-// the per-tensor (global) NVFP4 scale derived from the operand amaxes:
-//   alpha'[i] = alpha * amax_A * amax_B / (fp4_max^2 * fp8_max^2)  for i in [0, m)
+// hipBLASLt applies the FP8 (E4M3) block scales, but has no NVFP4 solution that accepts a
+// device alpha (scalar or vector), so the per-tensor (global) correction cannot ride on the
+// GEMM alpha the way the CUDA path does. Instead the GEMM runs with host alpha=1, beta=0 and
+// the correction is applied afterwards by launch_nvfp4_post_scale():
+//   D = (alpha * amax_A * amax_B / (fp4_max^2 * fp8_max^2)) * (A*B) + beta * C
 //
-// hipBLASLt does not yet support a device scalar alpha for NVFP4, so the correction is
-// folded into a device alpha vector of length m (all entries equal) and consumed via
-// HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST. The vector is carved from the tail
-// of the caller's workspace; workspaceSize is reduced so hipBLASLt only uses the front part.
-static void setup_nvfp4_gemm_alpha(
+// This routine resolves the amax pointers / factor and, for accumulation (beta != 0), copies
+// the original C (== D) into a workspace temp before the GEMM overwrites it. workspaceSize is
+// reduced to reserve that temp so hipBLASLt only uses the remaining front portion.
+static void setup_nvfp4_gemm_postscale(
     const transformer_engine::Tensor& inputA, cublasOperation_t transa,
     const transformer_engine::Tensor& inputB, cublasOperation_t transb,
-    int m, float alpha,
+    int m, int n, void* D, DType out_dtype, float beta,
     void* workspace, size_t& workspaceSize,
-    const void** alpha_ptr_out, hipStream_t stream) {
+    const float** amax_A_out, const float** amax_B_out, float* factor_inv_out,
+    void** c_saved_out, hipStream_t stream) {
 
   const float fp4_max = 6.0f;
   const float fp8_max = te_fp8_fnuz() ? 240.0f : 448.0f;
-  const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max * fp8_max);
+  *factor_inv_out = 1.0f / (fp4_max * fp4_max * fp8_max * fp8_max);
 
   const float* amax_A = (transa == CUBLAS_OP_T)
       ? reinterpret_cast<const float*>(inputA.amax.dptr)
@@ -562,24 +608,23 @@ static void setup_nvfp4_gemm_alpha(
       : reinterpret_cast<const float*>(inputB.columnwise_amax.dptr);
   NVTE_CHECK(amax_A != nullptr, "NVFP4 GEMM requires amax_A");
   NVTE_CHECK(amax_B != nullptr, "NVFP4 GEMM requires amax_B");
+  *amax_A_out = amax_A;
+  *amax_B_out = amax_B;
+  *c_saved_out = nullptr;
 
-  // Carve the alpha vector (m floats) from the end of the workspace.
-  // Layout: [hipBLASLt workspace ... | alpha_vec]
-  const size_t alpha_vec_bytes = static_cast<size_t>(m) * sizeof(float);
-  NVTE_CHECK(workspaceSize >= alpha_vec_bytes,
-             "NVFP4 GEMM requires at least ", alpha_vec_bytes,
-             " bytes workspace for the alpha vector, but only ", workspaceSize,
-             " bytes are available. Increase the cuBLAS workspace size.");
-  workspaceSize = (workspaceSize / sizeof(float)) * sizeof(float) - alpha_vec_bytes;
-  float* device_alpha_vec =
-      reinterpret_cast<float*>(reinterpret_cast<uint8_t*>(workspace) + workspaceSize);
-
-  constexpr int kBlockSize = 256;
-  const int num_blocks = (m + kBlockSize - 1) / kBlockSize;
-  compute_fp4_alpha_vector_kernel<<<num_blocks, kBlockSize, 0, stream>>>(
-      alpha, amax_A, amax_B, factor_inv, device_alpha_vec, m);
-  NVTE_CHECK_CUDA(hipGetLastError());
-  *alpha_ptr_out = static_cast<const void*>(device_alpha_vec);
+  if (beta != 0.0f) {
+    // Preserve C (== D) so the post-scale can add beta*C after the beta=0 GEMM overwrites D.
+    const size_t c_bytes = static_cast<size_t>(m) * n * typeToSize(out_dtype);
+    const size_t reserve = (c_bytes + 255) & ~static_cast<size_t>(255);
+    const size_t aligned_ws = workspaceSize & ~static_cast<size_t>(255);
+    NVTE_CHECK(aligned_ws >= reserve,
+               "NVFP4 GEMM with accumulation needs at least ", reserve,
+               " bytes workspace to preserve C, but only ", workspaceSize, " are available.");
+    workspaceSize = aligned_ws - reserve;
+    void* c_saved = reinterpret_cast<uint8_t*>(workspace) + workspaceSize;
+    NVTE_CHECK_CUDA(hipMemcpyAsync(c_saved, D, c_bytes, hipMemcpyDeviceToDevice, stream));
+    *c_saved_out = c_saved;
+  }
 }
 
 // Dequantize FP4 inputs to BF16 in-place within the workspace and set up
@@ -1352,10 +1397,11 @@ void hipblaslt_gemm(const Tensor *inputA,
   // On every other architecture hipBLASLt cannot consume the block scales, so we fall
   // back to dequantizing FP4 -> BF16 (block scales only) and running a standard BF16 GEMM.
   //
-  // In both cases the per-tensor amax correction is computed on-device and applied as a
-  // per-row alpha vector via HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST (hipBLASLt
-  // has no device scalar alpha for NVFP4). Beta stays on host.
-  //   alpha'[i] = alpha * amax_A * amax_B / (fp4_max^2 * fp8_max^2)
+  // The per-tensor amax correction (alpha * amax_A * amax_B / (fp4_max^2 * fp8_max^2)) is
+  // applied differently per path because hipBLASLt has no NVFP4 solution that accepts a device
+  // alpha: the native path runs the GEMM with host alpha=1, beta=0 and applies the correction
+  // afterwards (setup_nvfp4_gemm_postscale + launch_nvfp4_post_scale), while the BF16 dequant
+  // fallback folds it into a device alpha vector (HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST).
   const bool use_fp4 = is_fp4_dtype(param.Atype) || is_fp4_dtype(param.Btype);
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
   const bool use_nvfp4_native = use_fp4 && (cuda::sm_arch() == 125);
@@ -1365,10 +1411,23 @@ void hipblaslt_gemm(const Tensor *inputA,
 #endif
   const void* alpha_ptr = static_cast<const void*>(&alpha);
   const void* beta_ptr  = static_cast<const void*>(&beta);
+
+  // Native NVFP4 (gfx1250) applies the per-tensor amax correction after the GEMM (hipBLASLt has
+  // no device-alpha NVFP4 solution), so the GEMM itself runs with host alpha=1, beta=0 and the
+  // correction is folded into D by launch_nvfp4_post_scale() below.
+  const float nvfp4_gemm_alpha = 1.0f;
+  const float nvfp4_gemm_beta = 0.0f;
+  const float* nvfp4_amax_A = nullptr;
+  const float* nvfp4_amax_B = nullptr;
+  float nvfp4_factor_inv = 0.0f;
+  void* nvfp4_c_saved = nullptr;
   if (use_nvfp4_native) {
-    setup_nvfp4_gemm_alpha(*inputA, transa, *inputB, transb,
-                           m, alpha, workspace, workspaceSize,
-                           &alpha_ptr, stream);
+    setup_nvfp4_gemm_postscale(*inputA, transa, *inputB, transb, m, n,
+                               outputD->data.dptr, outputD->data.dtype, beta,
+                               workspace, workspaceSize, &nvfp4_amax_A, &nvfp4_amax_B,
+                               &nvfp4_factor_inv, &nvfp4_c_saved, stream);
+    alpha_ptr = static_cast<const void*>(&nvfp4_gemm_alpha);
+    beta_ptr = static_cast<const void*>(&nvfp4_gemm_beta);
   } else if (use_fp4) {
     dequant_fp4_gemm_inputs(param, *inputA, transa, *inputB, transb,
                             m, n, k, alpha, workspace, workspaceSize,
@@ -1557,8 +1616,8 @@ void hipblaslt_gemm(const Tensor *inputA,
   if (use_nvfp4_native) {
     // Native NVFP4 GEMM (gfx1250): the FP4 (E2M1) operands carry FP8 (E4M3) scales,
     // one per 16-element block along the contraction (innermost) dimension. hipBLASLt
-    // applies these block scales directly; the per-tensor amax correction is supplied
-    // separately through the device alpha vector configured in setup_nvfp4_gemm_alpha().
+    // applies these block scales directly; the per-tensor amax correction is applied
+    // after the GEMM (see launch_nvfp4_post_scale) since hipBLASLt has no device alpha here.
     scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_VEC16_UE4M3;
     NVTE_CHECK_HIPBLASLT(
         hipblasLtMatmulDescSetAttribute(operationDesc, HIPBLASLT_MATMUL_DESC_A_SCALE_POINTER,
@@ -1620,7 +1679,9 @@ void hipblaslt_gemm(const Tensor *inputA,
                                                    HIPBLASLT_MATMUL_DESC_EPILOGUE,
                                                    &epilogue, sizeof(epilogue)));
 
-    if (use_fp4) {
+  // Only the BF16 dequant fallback uses the device alpha vector; the native NVFP4 path applies
+  // its per-tensor correction after the GEMM, so it keeps the default host pointer mode.
+  if (use_fp4 && !use_nvfp4_native) {
     int32_t pointer_mode = HIPBLASLT_POINTER_MODE_ALPHA_DEVICE_VECTOR_BETA_HOST;
     NVTE_CHECK_HIPBLASLT(hipblasLtMatmulDescSetAttribute(
         operationDesc, HIPBLASLT_MATMUL_DESC_POINTER_MODE,
@@ -1631,7 +1692,7 @@ void hipblaslt_gemm(const Tensor *inputA,
     use_fp8 ? bias_type : (hipDataType)-1,
     (use_fp8 && gelu) ? aux_type : (hipDataType)-1,
     m, n, k, param.lda, param.ldb, ldd, param.transA, param.transB, scaling_mode, epilogue,
-    use_fp4);
+    use_fp4 && !use_nvfp4_native);
   GemmAlgoCache::Algo cached_algo;
   if (algoCache.find(gemm_cfg, workspaceSize, cached_algo) == 0 || !cached_algo.algo.has_value())
   {
@@ -1826,6 +1887,13 @@ void hipblaslt_gemm(const Tensor *inputA,
                                    workspace,                              /* workspace */
                                    workspaceSize,
                                    stream));                               /* stream */
+
+  // Native NVFP4 (gfx1250): hipBLASLt applied the block scales but not the per-tensor amax
+  // correction (no device-alpha support), so D currently holds the unscaled A*B. Fold it in now.
+  if (use_nvfp4_native) {
+    launch_nvfp4_post_scale(D, nvfp4_c_saved, outputD->data.dtype, nvfp4_amax_A, nvfp4_amax_B,
+                            alpha, beta, nvfp4_factor_inv, static_cast<int64_t>(m) * n, stream);
+  }
 
   // Update FP8 scale-inv in output tensor
   // Note: This is a WAR for the case when we have fp8 output but D->scale_inv is not allocated.
