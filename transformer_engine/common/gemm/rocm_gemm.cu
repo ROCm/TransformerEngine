@@ -409,6 +409,9 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   const bool b_blockwise = is_fp8_block_scaling(B.scaling_mode);
   NVTE_CHECK((a_blockwise && b_blockwise) || A.scaling_mode == B.scaling_mode,
              "Inputs A and B to GEMM need to have the same scaling mode!");
+  NVTE_CHECK(A.with_gemm_swizzled_scales == B.with_gemm_swizzled_scales,
+             "Inputs A and B to GEMM need to have the same scale layout "
+             "(both plain or both pre-swizzled)!");
   NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
   NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
   GemmParam ret;
@@ -489,9 +492,6 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       }
     }
   } else if (is_mxfp_scaling(B.scaling_mode)) {
-    // MXFP8 and MXFP4 (is_mxfp_scaling() covers both). The FP4 data dtype flows
-    // through B.data.dtype and leading dims are in elements (hipBLASLt handles the
-    // two-per-byte FP4 packing), so both formats share this canonicalization.
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
     if (is_B_transposed) {
@@ -1345,7 +1345,6 @@ void hipblaslt_gemm(const Tensor *inputA,
   void *pre_gelu_out = outputPreGelu->data.dptr;
   const bool gelu = pre_gelu_out != nullptr;
   const bool use_fp8 = is_fp8_dtype(param.Atype) || is_fp8_dtype(param.Btype);
-  // MXFP4 native path: FP4 E2M1 data + UE8M0 block-32 scales through hipBLASLt.
   const bool use_mxfp4 = is_mxfp4_scaling(inputA->scaling_mode);
 
   const hipDataType A_type = get_hipblaslt_dtype(param.Atype);
@@ -1443,15 +1442,9 @@ void hipblaslt_gemm(const Tensor *inputA,
 #if HIPBLASLT_VERSION_MAJOR > 0 || HIPBLASLT_VERSION_MINOR >= 15
       scaling_mode = HIPBLASLT_MATMUL_MATRIX_SCALE_SCALAR_32F;
     } else if ((is_block_scaling(inputA->scaling_mode) && is_block_scaling(inputB->scaling_mode))) {
-      // MXFP4 can optionally use hipBLASLt's pre-swizzled UE8M0 scale mode
-      // (BLK32_UE8M0_32_8_EXT, "1001"), where the E8M0 bytes are laid out in the 32x8
-      // hardware tile order the F4F4 kernel reads in place -- faster than gathering plain
-      // (VEC32_UE8M0) scales on the fly.
-      if (use_mxfp4) {
-        NVTE_CHECK(inputA->with_gemm_swizzled_scales == inputB->with_gemm_swizzled_scales,
-                   "MXFP4 GEMM requires both operands to use the same scale layout "
-                   "(both plain or both pre-swizzled).");
-      }
+      // Block scaling: MXFP8 and MXFP4 both use UE8M0 block-32 scales.
+      // MXFP4 can additionally use hipBLASLt's pre-swizzled UE8M0 scale mode
+      // (BLK32_UE8M0_32_8_EXT, "1001").
       const bool mxfp4_swizzled = use_mxfp4 && inputA->with_gemm_swizzled_scales &&
                                   inputB->with_gemm_swizzled_scales;
 #if (HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3)
