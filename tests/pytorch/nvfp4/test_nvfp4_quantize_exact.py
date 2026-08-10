@@ -117,6 +117,8 @@ def check_quantization_nvfp4_versus_reference(
 ) -> None:
     if nvfp4_e4m3_max != 448 and not use_4over6:
         pytest.skip("E4M3 max 256 is only meaningful for 4over6")
+    if IS_HIP_EXTENSION and use_4over6 and nvfp4_4over6_err_use_fast_math:
+        pytest.skip("NVFP4 4over6 fast-math error mode is not supported on ROCm")
     maybe_skip_row_scaled_unsupported_quantization(
         row_scaled_nvfp4, return_transpose, with_2d_quantization, use_4over6, x_dtype, M, N
     )
@@ -148,8 +150,6 @@ def check_quantization_nvfp4_versus_reference(
     )
 
     if use_4over6:
-        if IS_HIP_EXTENSION and nvfp4_4over6_err_use_fast_math:
-            pytest.skip("NVFP4 4over6 fast-math error mode is not supported on ROCm")
         with nvfp4_4over6_err_fast_math(nvfp4_4over6_err_use_fast_math):
             if use_cpp_allocator:
                 x_nvfp4_sut = nvfp4_quantizer(x)
@@ -818,6 +818,7 @@ def test_nvfp4_2d_columnwise_only_matches_both_directions(
     assert out_col_only._rowwise_data is None
 
 
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="Covers the ROCm blockwise 4over6 path")
 @pytest.mark.skipif(not recipe_available, reason=reason_for_no_recipe)
 @pytest.mark.parametrize("M, N", [(128, 128), (256, 256), (512, 1024), (320, 256)])
 @pytest.mark.parametrize(

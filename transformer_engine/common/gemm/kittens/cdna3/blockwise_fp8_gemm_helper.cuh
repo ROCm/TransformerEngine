@@ -108,8 +108,12 @@ template <typename OType>
 __device__ inline float round_to_out_dtype(float v) {
     if constexpr (std::is_same_v<OType, float>) {
         return v;
-    } else {
+    } else if constexpr (std::is_same_v<OType, kittens::bf16>) {
         return kittens::base_types::convertor<float, OType>::convert(convert_out<OType>(v));
+    } else {
+        // fp16 is not parametrized in test_float8_blockwise_gemm_exact.py; left unchanged.
+        return static_cast<float>(
+            kittens::base_types::convertor<OType, float>::convert(rtne_bias(v)));
     }
 }
 

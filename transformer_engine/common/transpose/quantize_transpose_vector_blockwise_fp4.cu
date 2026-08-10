@@ -27,6 +27,19 @@
 #endif
 
 namespace transformer_engine {
+// The 4over6 body exists only on ROCm; expanding both arms on CUDA would instantiate every
+// specialization twice for a branch it cannot take.
+#ifdef __HIP_PLATFORM_AMD__
+#define NVTE_SWITCH_4OVER6(CONDITION, FLAG, ...) \
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(CONDITION, FLAG, __VA_ARGS__)
+#else
+#define NVTE_SWITCH_4OVER6(CONDITION, FLAG, ...) \
+  {                                              \
+    constexpr bool FLAG = false;                 \
+    { __VA_ARGS__ }                              \
+  }
+#endif
+
 
 #if defined(__HIP_PLATFORM_AMD__) || CUDA_VERSION >= 12080
 namespace quantize_transpose_nvfp4 {
@@ -192,14 +205,9 @@ static __device__ constexpr unsigned int WARP_REDUCE_AMAX_GROUP_MASKS[8] = {
     0x01010101, 0x02020202, 0x04040404, 0x08080808, 0x10101010, 0x20202020, 0x40404040, 0x80808080};
 
 #ifdef __HIP_PLATFORM_AMD__
-// Sum the 16 row errors of a 2D block in upstream's tree order: pair rows 8
-// apart, then 4, then 2, then 1 (quantize_4over6_nvfp4.cuh::reduce_group_sum_16).
-// fp32 addition is not associative and 4over6 selection compares two sums that
-// are frequently equal to within an ulp, so the association is part of the
-// contract rather than an implementation detail. Upstream can run this tree in
-// warp shuffles because one warp there owns 16 consecutive rows; here a warp
-// owns only 4, so the rows paired first sit in different warps and the whole
-// set has to be staged in shared memory and reduced by one thread.
+// Upstream's tree order: pair rows 8 apart, then 4, 2, 1
+// (quantize_4over6_nvfp4.cuh::reduce_group_sum_16). Staged in shared memory because a
+// ROCm warp owns 4 rows, not 16.
 template <int kBlockSize, typename CType>
 __device__ __forceinline__ float reduceBlockError(const CType* staged) {
   float v[kBlockSize];
@@ -248,20 +256,15 @@ __device__ __forceinline__ float ComputeEncodeScaleFP4(ScaleType decode_scale,
 }
 
 #ifdef __HIP_PLATFORM_AMD__
-// Round-trip one value through FP4 at a given scale and return its contribution
-// to the block error.
-// E2M1 holds 16 values, so decode by table rather than through the packed-pair
-// conversion intrinsic, whose element ordering is easy to get wrong here.
+// Round-trip one value through FP4 at a given scale, returning its block-error term.
 __device__ __forceinline__ float fp4_decode_e2m1(const __hip_fp4_storage_t q) {
   constexpr float kMagnitude[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
   const float m = kMagnitude[q & 0x7];
   return (q & 0x8) ? -m : m;
 }
 
-// Rounding is pinned with the _rn intrinsics and the operand order upstream uses
-// (quantize_4over6_nvfp4.cuh:199). Selection turns on comparing two sums that are
-// often close, so an FMA contraction here flips near-ties and the result stops
-// being bit-comparable with the reference.
+// _rn intrinsics and upstream's operand order (quantize_4over6_nvfp4.cuh:199): an FMA
+// contraction here flips near-ties.
 __device__ __forceinline__ float fp4_roundtrip_err(const float x, const float block_scale_inverse,
                                                    const float sf, const float global_amax,
                                                    const float err_denom, const bool use_mse) {
@@ -273,16 +276,8 @@ __device__ __forceinline__ float fp4_roundtrip_err(const float x, const float bl
   return use_mse ? __fmul_rn(diff, diff) : fabsf(diff);
 }
 
-// 4over6: a block scale expanded by 1.5x maps the block max onto FP4 code 4
-// rather than code 6, spacing the codes more finely for blocks whose values sit
-// away from the top of the range. Score both encodings of the block and keep the
-// one that reconstructs it with less error.
-//
-// Takes the block as a plain array: the rowwise and columnwise call sites walk
-// shared memory differently, so a shared loop cannot serve both.
-//
-// Split in two so a caller that has already reduced the block error can rebuild the
-// two scales without walking the block again.
+// 4over6: score a block scale expanded by 1.5x (block max onto FP4 code 4) against the
+// plain one, and keep whichever reconstructs the block with less error.
 template <typename ScaleType>
 __device__ __forceinline__ void Compute4Over6Scales(const float amax,
                                                     const float global_decode_scale,
@@ -595,10 +590,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       kIs2DBlockScaling ? (kFP4BlockScalingSize / kNumRowsPerWarp) : 1;
   __shared__ CType amax_smem_red[k2DBlockAmaxDim][k2DBlockAmaxDim][k2DBlockAmaxReduceDim];
   __shared__ CType amax_smem[k2DBlockAmaxDim][k2DBlockAmaxDim];
-  // 4over6 scores its two candidates over the same block the scale serves, so the
-  // error is reduced over the same 16x16 block the 2D amax is. Unlike the amax it
-  // stages all 16 rows: max is associative, the fp32 sum is not, so the rows cannot
-  // be pre-combined per warp without diverging from upstream's tree.
+  // Unlike the amax, all 16 rows are staged: the fp32 sum is not associative.
   constexpr int k4Over6Dim = kUse4Over6 ? k2DBlockAmaxDim : 1;
   constexpr int k4Over6RowDim = kUse4Over6 ? kFP4BlockScalingSize : 1;
   __shared__ CType err_smem_red[2][k4Over6Dim][k4Over6Dim][k4Over6RowDim];
@@ -959,16 +951,9 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     const unsigned mask = ((1 << kNumThreadsReduce) - 1) << src_lane;
     const bool is_src_lane = (threadIdx.x % kNumThreadsReduce) == 0;
 #ifdef __HIP_PLATFORM_AMD__
-    // Step 3.0: 4over6 block errors for the whole tile.
-    // Upstream scores the columnwise candidates on their own column groups
-    // (quantize_4over6_nvfp4.cuh::quantize_stage_colwise) instead of reusing what the
-    // rowwise pass computed. Both passes cover the same 16x16 block but sum its errors
-    // along different axes, and fp32 addition is not associative, so the two can land on
-    // different candidates for one block; that is the algorithm, not a bug.
-    //
-    // Done here rather than inside the loop below because a block's 16 columns are split
-    // across both smem_idx halves, so no single pass of that loop sees a whole block.
-    // Keeping it separate also leaves nothing live across the barriers.
+    // Step 3.0: 4over6 block errors for the whole tile. Scored on their own column groups
+    // per upstream (quantize_4over6_nvfp4.cuh::quantize_stage_colwise); kept out of the loop
+    // below because a block's 16 columns span both smem_idx halves.
     if constexpr (kUse4Over6 && kIs2DBlockScaling) {
       const int row_blk = threadIdx.x % kNumThreadsStore;
       int c = c_s;
@@ -1276,16 +1261,8 @@ void quantize_transpose_vector_blockwise_fp4(
                                   TRANSFORMER_ENGINE_SWITCH_CONDITION(
                                       row_scaled_nvfp4, kRowScaledNVFP4,
 
-  // 4over6 only has a body on ROCm, so pin the switch
-  // false on CUDA rather than instantiate every
-  // specialization twice for a branch it cannot take.
-#ifdef __HIP_PLATFORM_AMD__
-                                      TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                                      NVTE_SWITCH_4OVER6(
                                           nvfp4_4over6_mode != kNVTENVFP44Over6Disabled, kUse4Over6,
-#else
-                                      TRANSFORMER_ENGINE_SWITCH_CONDITION(
-                                          false, kUse4Over6,
-#endif
 
 #ifdef __HIP_PLATFORM_AMD__
                                           size_t smem_bytes =

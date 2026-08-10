@@ -373,13 +373,11 @@ at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor) {
     return at::empty(0, at::CUDA(at::kFloat));
   }
 
-  // A per-call tensor returns to the caching allocator at the caller's closing brace while
-  // amax_kernel and amax_final_reduce are still only enqueued. Stream-ordered reuse covers
-  // that in eager mode, but graph capture replaces stream order with a DAG, so the freed
-  // block is aliased in the graph mempool and replays read partials they never wrote.
-  // One buffer per (device, stream), sized to the block cap: same stream serializes.
-  static std::mutex amax_ws_mutex;
-  static std::map<std::pair<int, cudaStream_t>, at::Tensor> amax_ws_cache;
+  // Persistent: a per-call tensor is reclaimed while its kernels are still enqueued, which
+  // graph capture turns into an aliased read. One buffer per (device, stream).
+  // Leaked deliberately: these hold device memory and must not be destroyed at static teardown.
+  static std::mutex &amax_ws_mutex = *new std::mutex;
+  static auto &amax_ws_cache = *new std::map<std::pair<int, cudaStream_t>, at::Tensor>;
 
   const int device_id = at::cuda::current_device();
   const cudaStream_t stream = at::cuda::getCurrentCUDAStream();

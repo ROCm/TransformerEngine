@@ -456,25 +456,35 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
   const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input->first_dims.dptr);
   const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input->last_dims.dptr);
 
+  // Per-tensor dims are device-resident, so reading them needs a host sync that capture forbids.
+  auto read_dims_to_host = [&](const int64_t *dev_dims) {
+    cudaStreamCaptureStatus capture_status = cudaStreamCaptureStatusNone;
+    NVTE_CHECK_CUDA(cudaStreamIsCapturing(stream, &capture_status));
+    NVTE_CHECK(capture_status == cudaStreamCaptureStatusNone,
+               "Grouped dequantize cannot validate per-tensor dimensions during graph capture.");
+    std::vector<int64_t> host_dims(num_tensors);
+    NVTE_CHECK_CUDA(cudaMemcpyAsync(host_dims.data(), dev_dims, num_tensors * sizeof(int64_t),
+                                    cudaMemcpyDeviceToHost, stream));
+    NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+    return host_dims;
+  };
+
   // Only the uniform-last-dim path indexes colwise scales from the group's global row.
   if (use_colwise_scaling && last_dims_ptr == nullptr && num_tensors > 1) {
     constexpr size_t COLWISE_SCALE_ROWS = 32;
-    std::vector<int64_t> host_first_dims(num_tensors);
+    std::vector<int64_t> first_dims;
     if (first_dims_ptr != nullptr) {
-      NVTE_CHECK_CUDA(cudaMemcpyAsync(host_first_dims.data(), first_dims_ptr,
-                                      num_tensors * sizeof(int64_t), cudaMemcpyDeviceToHost,
-                                      stream));
-      NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+      first_dims = read_dims_to_host(first_dims_ptr);
     } else {
       NVTE_CHECK(first_logical_dim % num_tensors == 0, "Uniform grouped tensor has ",
                  first_logical_dim, " rows, which is not divisible by ", num_tensors, " tensors.");
-      host_first_dims.assign(num_tensors, static_cast<int64_t>(first_logical_dim / num_tensors));
+      first_dims.assign(num_tensors, static_cast<int64_t>(first_logical_dim / num_tensors));
     }
     for (size_t t = 0; t < num_tensors; t++) {
-      NVTE_CHECK(static_cast<size_t>(host_first_dims[t]) % COLWISE_SCALE_ROWS == 0,
+      NVTE_CHECK(static_cast<size_t>(first_dims[t]) % COLWISE_SCALE_ROWS == 0,
                  "Columnwise grouped dequantize requires each per-tensor first dimension to be "
                  "divisible by ",
-                 COLWISE_SCALE_ROWS, "; tensor ", t, " has ", host_first_dims[t], ".");
+                 COLWISE_SCALE_ROWS, "; tensor ", t, " has ", first_dims[t], ".");
     }
   }
 
@@ -485,14 +495,11 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
                "Grouped dequantize requires the last dimension to be divisible by ", VECTOR_ELEMS,
                "; got ", last_logical_dim, ".");
   } else {
-    std::vector<int64_t> host_last_dims(num_tensors);
-    NVTE_CHECK_CUDA(cudaMemcpyAsync(host_last_dims.data(), last_dims_ptr,
-                                    num_tensors * sizeof(int64_t), cudaMemcpyDeviceToHost, stream));
-    NVTE_CHECK_CUDA(cudaStreamSynchronize(stream));
+    const std::vector<int64_t> last_dims = read_dims_to_host(last_dims_ptr);
     for (size_t t = 0; t < num_tensors; t++) {
-      NVTE_CHECK(static_cast<size_t>(host_last_dims[t]) % VECTOR_ELEMS == 0,
+      NVTE_CHECK(static_cast<size_t>(last_dims[t]) % VECTOR_ELEMS == 0,
                  "Grouped dequantize requires each per-tensor last dimension to be divisible by ",
-                 VECTOR_ELEMS, "; tensor ", t, " has ", host_last_dims[t], ".");
+                 VECTOR_ELEMS, "; tensor ", t, " has ", last_dims[t], ".");
     }
   }
 

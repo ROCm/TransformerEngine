@@ -611,10 +611,6 @@ void multi_tensor_transpose_to_bhsd(Tensor *inputs, Tensor *outputs, size_t num_
   size_t d_in_max = 0, d_out_max = 0;
   bool any_not_vec_aligned = false;
 #ifdef __HIP_PLATFORM_AMD__
-  // Both readers below are compiled out on ROCm, so this only keeps the variable
-  // defined and states the intent: had they been reachable, the sm >= 100 test
-  // would not have excluded us -- sm_arch() returns the raw gfx number, so
-  // gfx1250 reports 125 and satisfies it.
   bool all_tma_ok = false;
 #else
   bool all_tma_ok = true;

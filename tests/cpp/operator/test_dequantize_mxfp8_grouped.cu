@@ -231,11 +231,11 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
                                   &offsets_tensor, sizeof(offsets_tensor));
   }
 
+#ifdef __HIP_PLATFORM_AMD__
   bool bad_last_dim = false;
   for (size_t t = 0; t < num_tensors; ++t) {
     if (last_dims_h[t] % 16 != 0) bad_last_dim = true;
   }
-#ifdef __HIP_PLATFORM_AMD__
   auto free_device = [&]() {
     cudaFree(in_data_d);
     cudaFree(out_grouped_d);
@@ -346,16 +346,18 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
 
     int result = memcmp(out_grouped_h.data() + data_offset, out_ref_h.data() + data_offset,
                         tensor_elts * sizeof(OutputType));
-    // memcmp is the assertion; != would let -0.0 vs +0.0 and NaN payloads through.
-    ASSERT_EQ(result, 0) << "Bitwise mismatch in tensor " << t;
-    for (size_t i = 0; i < tensor_elts; ++i) {
-      if (out_grouped_h[data_offset + i] != out_ref_h[data_offset + i]) {
-        GTEST_FAIL() << "Bitwise mismatch at tensor " << t << " element " << i
-                     << " (global offset " << (data_offset + i) << "): grouped="
-                     << static_cast<float>(out_grouped_h[data_offset + i])
-                     << " vs reference=" << static_cast<float>(out_ref_h[data_offset + i]);
+    if (result != 0) {
+      for (size_t i = 0; i < tensor_elts; ++i) {
+        if (out_grouped_h[data_offset + i] != out_ref_h[data_offset + i]) {
+          GTEST_FAIL() << "Bitwise mismatch at tensor " << t << " element " << i
+                       << " (global offset " << (data_offset + i) << "): grouped="
+                       << static_cast<float>(out_grouped_h[data_offset + i])
+                       << " vs reference=" << static_cast<float>(out_ref_h[data_offset + i]);
+        }
       }
     }
+    // memcmp is the assertion; != would let -0.0 vs +0.0 and NaN payloads through.
+    ASSERT_EQ(result, 0) << "Bitwise mismatch in tensor " << t;
   }
 
   // Cleanup
