@@ -128,8 +128,15 @@ def _wgrad_run(
     warps_k=2,
     accumulate=False,
     swap_gather=False,
+    out_dtype="bf16",
 ):
-    """Dispatch target for the FlyDSL autotuner: compile (lru-cached) + launch one tile."""
+    """Dispatch target for the FlyDSL autotuner: compile (lru-cached) + launch one tile.
+
+    ``swap_gather`` / ``accumulate`` / ``out_dtype`` are forwarded to the compile so the sweep
+    benchmarks the *actual* kernel variant being launched (the FC1 non-swap and FC2 swap kernels
+    gather a different operand and write ``dw`` in a different orientation, so their optimal tile
+    can differ even at the same ``(N, K)``).
+    """
     exe = compile_moe_wgrad_v2(
         block_n=int(block_n),
         block_k=int(block_k),
@@ -137,6 +144,7 @@ def _wgrad_run(
         warps_k=int(warps_k),
         accumulate=bool(accumulate),
         swap_gather=bool(swap_gather),
+        out_dtype=out_dtype,
     )
     _run_compiled(
         exe,
@@ -168,7 +176,10 @@ def _get_autotuner(warmup=10, rep=30):
         _wgrad_autotuner = Autotuner(
             _wgrad_run,
             configs,
-            key=["x", "N", "num_experts"],
+            # ``swap_gather`` / ``accumulate`` / ``out_dtype`` gate distinct kernel variants
+            # (different gather operand, store orientation, and epilogue), each with its own
+            # best tile -- key on them so FC1 (non-swap) and FC2 (swap) don't share a tile.
+            key=["x", "N", "num_experts", "swap_gather", "accumulate", "out_dtype"],
             warmup=warmup,
             rep=rep,
         )
@@ -178,17 +189,28 @@ def _get_autotuner(warmup=10, rep=30):
 def _select_wgrad_config(
     x, grad, sorted_slot_ids, block_start, blocks_per_expert, grad_base,
     N, K, num_recv_tokens, num_experts,
+    *,
+    accumulate=False,
+    swap_gather=False,
+    out_dtype="bf16",
 ):
-    """Return the autotuned ``(block_n, block_k, warps_n, warps_k)`` for this problem."""
+    """Return the autotuned ``(block_n, block_k, warps_n, warps_k)`` for this problem.
+
+    The sweep is run for the *specific* ``swap_gather`` / ``accumulate`` / ``out_dtype`` variant
+    being launched (they are part of the cache key), so the tile is benchmarked against the real
+    kernel rather than a stand-in.
+    """
     tuner = _get_autotuner()
-    scratch = torch.empty(num_experts, N, K, device=x.device, dtype=torch.bfloat16)
+    scratch_dtype = torch.float32 if out_dtype == "fp32" else torch.bfloat16
+    scratch = torch.empty(num_experts, N, K, device=x.device, dtype=scratch_dtype)
     args = (
         scratch, x, grad, sorted_slot_ids, block_start, blocks_per_expert, grad_base,
         int(N), int(K), int(num_recv_tokens), int(num_experts),
     )
-    key = tuner._make_key(args, {})
+    variant = {"accumulate": bool(accumulate), "swap_gather": bool(swap_gather), "out_dtype": out_dtype}
+    key = tuner._make_key(args, variant)
     if key not in tuner.cache:
-        tuner(*args)
+        tuner(*args, **variant)
     cfg = tuner.cache[key].kwargs
     return cfg["block_n"], cfg["block_k"], cfg["warps_n"], cfg["warps_k"]
 
@@ -208,11 +230,11 @@ def flydsl_moe_wgrad_autotuned(
 ) -> None:
     """Shape-autotuned variant of :func:`flydsl_moe_wgrad`.
 
-    First call for a given ``(x.shape, N, num_experts)`` benchmarks every tile in
-    ``_AUTOTUNE_TILES`` and caches the fastest (in-memory + on disk under
-    ``~/.flydsl/autotune/``). The tile geometry is independent of ``swap_gather`` (the two
-    variants share the same memory-access shape), so the sweep runs on the default variant and
-    the fastest tile is reused for the ``swap_gather`` launch.
+    First call for a given ``(x.shape, N, num_experts, swap_gather, accumulate, out_dtype)``
+    benchmarks every tile in ``_AUTOTUNE_TILES`` and caches the fastest (in-memory + on disk
+    under ``~/.flydsl/autotune/``). ``swap_gather`` (FC1 non-swap vs FC2 swap) is part of the
+    key and is compiled into the benchmarked kernel, so each variant gets its own measured-best
+    tile instead of inheriting the other's.
     """
     num_experts, N, K = dw.shape
 
@@ -220,9 +242,13 @@ def flydsl_moe_wgrad_autotuned(
     assert dw.dtype in (torch.bfloat16, torch.float32)
     assert x.is_contiguous() and grad.is_contiguous() and dw.is_contiguous()
 
+    out_dtype = "fp32" if dw.dtype == torch.float32 else "bf16"
     block_n, block_k, warps_n, warps_k = _select_wgrad_config(
         x, grad, sorted_slot_ids, block_start, blocks_per_expert, grad_base,
         N, K, num_recv_tokens, num_experts,
+        accumulate=bool(accumulate),
+        swap_gather=bool(swap_gather),
+        out_dtype=out_dtype,
     )
     flydsl_moe_wgrad(
         x,

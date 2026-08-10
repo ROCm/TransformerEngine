@@ -3,8 +3,9 @@
 
 """FlyDSL permute-free MoE route-list forward gather-GEMM op wrapper.
 
-Mirrors the route-list forward gather-GEMM contract so the same routing
-metadata (``sorted_slot_ids`` / ``expert_ids`` / ``block_start``) can be reused verbatim.
+Mirrors the route-list forward gather-GEMM contract: the fwd/dgrad launch consumes
+``sorted_slot_ids`` and ``expert_ids`` from the routing align (plus ``block_m`` for tile
+geometry). ``block_start`` is not passed here; it is built alongside the align for wgrad only.
 Writes the block-padded ``[em_max, WIDTH_N]`` slot output in place.
 
 Forward gather-GEMM is FlyDSL-only (MegaMOE-ported plain GEMM).

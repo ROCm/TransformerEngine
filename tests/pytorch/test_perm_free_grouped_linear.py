@@ -1,9 +1,9 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
-# Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-#
-# See LICENSE for license information.
+
 
 """Tests for the route-list permute-free bf16 MoE gather-GEMM kernels."""
+
+import dataclasses
 
 import pytest
 import torch
@@ -15,25 +15,39 @@ from transformer_engine.pytorch.moe import (
     PermuteFreeMetadata,
     is_permute_free_grouped_gemm_enabled,
     permute_free_gated_act_bwd,
-    permute_free_grouped_gemm_backward,
+    permute_free_gated_act_fwd,
     permute_free_grouped_gemm_bf16,
     permute_free_grouped_gemm_bf16_dgrad,
     permute_free_grouped_gemm_bf16_fc2,
     permute_free_grouped_gemm_bf16_fc2_dgrad,
     permute_free_grouped_gemm_bf16_fc2_wgrad,
     permute_free_grouped_gemm_bf16_wgrad,
-    permute_free_grouped_gemm_forward,
     prepare_moe_align,
 )
 from transformer_engine.pytorch.moe.permute_free_grouped_gemm import (
     _FLYDSL_FWD_BLOCK_M,
+    _WGRAD_CONTRACT_M,
     _expert_per_route,
+    _prepare_wgrad_align,
+    moe_align_route_list,
 )
+from transformer_engine.pytorch.moe.pf_helper_kernels import route_list_scan
+from utils import assert_close, dtype_tols
 
 pytestmark = pytest.mark.skipif(
     not (IS_HIP_EXTENSION and torch.cuda.is_available()),
     reason="Permute-free grouped GEMM tests require ROCm and CUDA device.",
 )
+
+_TEST_SEED = 1
+
+# Absolute floor for the elementwise bound, as a fraction of the reference's peak magnitude.
+# ``dtype_tols`` only supplies a relative bound, which is meaningless on the gather-combine
+# outputs: those sum several routes into one token, so cancellation leaves elements near zero
+# whose error is set by the magnitude of the summands rather than by their own value. The
+# worst floor measured over every comparison in this file (1116 of them, 6 seeds, gfx950) is
+# 4.6e-3 x peak, i.e. ~1.2 bf16 ULP; allow 4 ULP, matching the bf16 rtol ``dtype_tols`` uses.
+_BF16_ATOL_SCALE = 4 * 2**-8
 
 
 @pytest.fixture(autouse=True)
@@ -43,11 +57,23 @@ def _cuda_sync_after_test():
         torch.cuda.synchronize()
 
 
-def _rel_l2(actual: torch.Tensor, ref: torch.Tensor) -> float:
-    return ((actual.float() - ref.float()).norm() / ref.float().norm().clamp_min(1e-8)).item()
+@pytest.fixture(autouse=True)
+def _test_seed():
+    torch.manual_seed(_TEST_SEED)
+    yield
 
 
-def _random_routing_map(num_recv_tokens, num_experts, max_hits, device, seed):
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+def _assert_bf16_close(actual: torch.Tensor, ref: torch.Tensor) -> None:
+    """Elementwise-compare a bf16 kernel result against a higher-precision reference."""
+    tols = dtype_tols(torch.bfloat16)
+    tols["atol"] = max(tols["atol"], _BF16_ATOL_SCALE * ref.abs().max().item())
+    assert_close(actual, ref, **tols)
+
+
+def _random_routing_map(num_recv_tokens, num_experts, max_hits, device, seed=_TEST_SEED):
     """Boolean [num_recv_tokens, num_experts] with 1..max_hits local experts per token."""
     gen = torch.Generator(device=device).manual_seed(seed)
     routing_map = torch.zeros(num_recv_tokens, num_experts, dtype=torch.bool, device=device)
@@ -68,727 +94,495 @@ def _dense_route_order(routing_map):
     order = torch.argsort(exp, stable=True)
     return tok[order].to(torch.int64), exp[order].to(torch.int64)
 
+
+def _route_slots(routing, num_recv_tokens):
+    """Per-slot indices of an aligned routing metadata.
+
+    Returns ``(em_max, valid, tok, exp)``: the block-padded slot count, the mask of slots
+    backing a real route, and the token / local-expert id of each slot (padding slots are
+    clamped in range so they can be indexed and then masked out).
+    """
+    em_max = int(routing.sorted_slot_ids.shape[0])
+    valid = routing.sorted_slot_ids < num_recv_tokens
+    tok = routing.sorted_slot_ids.to(torch.int64).clamp_(0, num_recv_tokens - 1)
+    exp = _expert_per_route(routing, em_max).to(torch.int64).clamp_min(0)
+    return em_max, valid, tok, exp
+
+
+def _randn_route_buffer(em_max, width, valid):
+    """Block-padded route buffer: random bf16 on the valid slots, zeros on the padding."""
+    buf = torch.zeros(em_max, width, device="cuda", dtype=torch.bfloat16)
+    buf[valid] = torch.randn(int(valid.sum().item()), width, device="cuda", dtype=torch.bfloat16)
+    return buf
+
+
+def _sum_by_expert(per_slot, exp, weights_shape):
+    """Reduce a per-route ``[em_max, out, in]`` outer product into ``[E, out, in]``."""
+    ref = torch.zeros(weights_shape, device=per_slot.device, dtype=torch.float32)
+    ref.index_add_(0, exp, per_slot)
+    return ref
+
+
+def _gated_act_ref(gate: torch.Tensor, activation: str) -> torch.Tensor:
+    if activation == "silu":
+        return torch.nn.functional.silu(gate)
+    if activation == "gelu":
+        return torch.nn.functional.gelu(gate, approximate="tanh")
+    raise ValueError(f"unsupported activation: {activation}")
+
+
 # ---------------------------------------------------------------------------
 # Route-list gather-GEMM: fwd / dgrad / wgrad
 # ---------------------------------------------------------------------------
-def test_route_list_fwd():
-    torch.manual_seed(7)
-    num_recv_tokens, in_features, out_features = 128, 128, 256
-    num_experts, max_hits = 8, 3
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=1)
-    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
-
-    hidden = torch.randn(num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16)
-    weights = torch.randn(
-        num_experts, out_features, in_features, device="cuda", dtype=torch.bfloat16
-    )
-
-    out_full = permute_free_grouped_gemm_bf16(hidden, weights, routing)
-
-    route_to_token, route_expert = _dense_route_order(routing_map)
-    num_routes = route_to_token.numel()
-    # Block-padded canonical layout: the output is [em_max, out] in expert-sorted, block-padded
-    # slot order. Padded slot s holds hidden[sorted_slot_ids[s]] @ W[expert(s)]^T for the valid
-    # slots (sorted_slot_ids[s] < num_recv_tokens); padding slots carry inert dead values and
-    # are dropped only at the final padded->token gather-combine.
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    assert out_full.shape == (em_max, out_features)
-    slot_token = routing.sorted_slot_ids
-    slot_expert = _expert_per_route(routing, em_max)
-    valid = slot_token < num_recv_tokens
-    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
-    ref = torch.einsum(
-        "rk,rnk->rn",
-        hidden[tok].float(),
-        weights[slot_expert.to(torch.int64)].float(),
-    )
-    assert int(valid.sum().item()) == num_routes
-    assert _rel_l2(out_full[valid], ref[valid]) < 2e-2
+# FlyDSL FC1 dgrad (route-read NN): out_features (N) must be a multiple of 64.
+# FC1 fwd: in_features (K) >= 128 and % 64. FC2 fwd/dgrad mirror FC1 with swapped layouts.
+_GEMM_SHAPE_CONFIGS = [
+    # id, T, in, out, E, max_h, fc1_fwd (in, out), fc2_fwd (in, out), fc2_T
+    ("orig", 128, 96, 128, 8, 4, (128, 256), (128, 128), None),
+    ("mid", 96, 128, 128, 6, 3, None, None, None),
+    ("wide", 192, 128, 192, 8, 2, (192, 384), (192, 192), None),
+    ("few-experts", 64, 96, 128, 4, 1, (128, 512), (128, 128), 128),
+    ("large", 256, 128, 256, 16, 4, (256, 512), (256, 256), None),
+]
 
 
-def test_route_list_dgrad():
-    torch.manual_seed(11)
-    num_recv_tokens, in_features, out_features = 128, 96, 128
-    num_experts, max_hits = 8, 4
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=2)
-    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
-    num_routes = int(routing_map.sum().item())
-    # Block-padded canonical: the incoming route grad lives in the same [em_max] block-padded
-    # slot order as the FC1 forward output (the FC2 dgrad hands it back in this layout). Prepare
-    # the align at the forward block size so the standalone dgrad reuses the same slot layout.
-    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    slot_token = routing.sorted_slot_ids
-    slot_expert = _expert_per_route(routing, em_max)
-    valid = slot_token < num_recv_tokens
-
-    weights = torch.randn(
-        num_experts, out_features, in_features, device="cuda", dtype=torch.bfloat16
-    )
-    grad = torch.zeros(em_max, out_features, device="cuda", dtype=torch.bfloat16)
-    grad[valid] = torch.randn(
-        int(valid.sum().item()), out_features, device="cuda", dtype=torch.bfloat16
-    )
-
-    dA = permute_free_grouped_gemm_bf16_dgrad(grad, weights, routing)
-    assert dA.shape == (num_recv_tokens, in_features)
-
-    # dA[t] = sum_{padded slots s with token==t, valid} grad[s] @ W[expert(s)]
-    per_slot = torch.einsum(
-        "rn,rnk->rk", grad.float(), weights[slot_expert.to(torch.int64)].float()
-    )
-    per_slot = per_slot * valid[:, None].float()
-    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
-    ref = torch.zeros(num_recv_tokens, in_features, device="cuda", dtype=torch.float32)
-    ref.index_add_(0, tok, per_slot)
-    assert int(valid.sum().item()) == num_routes
-    assert _rel_l2(dA, ref) < 2e-2
+def _build_route_list_gemm_cases():
+    cases = []
+    for sid, t, inf, outf, e, max_hits, fc1_fwd, fc2_fwd, fc2_t in _GEMM_SHAPE_CONFIGS:
+        fc1_fwd = fc1_fwd or (inf, outf)
+        fc2_fwd = fc2_fwd or (inf, outf)
+        t_fc2 = fc2_t or t
+        specs = [
+            ("fc1", "fwd", None, t, *fc1_fwd),
+            ("fc1", "dgrad", None, t, inf, outf),
+            ("fc1", "wgrad", None, t, inf, outf),
+            ("fc2", "fwd", None, t_fc2, *fc2_fwd),
+            ("fc2", "dgrad", None, t_fc2, inf, outf),
+            ("fc2", "wgrad", "stored", t_fc2, inf, outf),
+            ("fc2", "wgrad", "recompute", t_fc2, inf, outf),
+        ]
+        for layer, mode, variant, tokens, in_features, out_features in specs:
+            variant_id = f"-{variant}" if variant else ""
+            cases.append(
+                pytest.param(
+                    layer,
+                    mode,
+                    variant,
+                    tokens,
+                    in_features,
+                    out_features,
+                    e,
+                    max_hits,
+                    id=f"{layer}-{mode}{variant_id}-{sid}",
+                )
+            )
+    return cases
 
 
-def test_route_list_wgrad():
-    torch.manual_seed(17)
-    num_recv_tokens, in_features, out_features = 128, 96, 128
-    num_experts, max_hits = 8, 4
+@pytest.mark.parametrize(
+    "layer,mode,wgrad_variant,num_recv_tokens,in_features,out_features,num_experts,max_hits",
+    _build_route_list_gemm_cases(),
+)
+def test_route_list_gemm(
+    layer,
+    mode,
+    wgrad_variant,
+    num_recv_tokens,
+    in_features,
+    out_features,
+    num_experts,
+    max_hits,
+):
+    """Route-list grouped GEMM kernels: FC1 vs FC2 (mirrored token/route layouts).
 
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=3)
+    FC1: activation token-ordered, grad block-padded route-ordered.
+    FC2: activation block-padded route-ordered, grad token-ordered.
+    """
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda")
     routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
     num_routes = int(routing_map.sum().item())
-    # Block-padded canonical: the incoming route grad lives in the [em_max] block-padded slot
-    # order (same layout the forward writes / FC2 dgrad hands back). Prepare the forward align so
-    # the wgrad reads grad at block_start[e]*block_size_m + within-rank.
-    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    slot_token = routing.sorted_slot_ids
-    slot_expert = _expert_per_route(routing, em_max)
-    valid = slot_token < num_recv_tokens
-
-    hidden = torch.randn(num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16)
     weights_shape = (num_experts, out_features, in_features)
-    grad = torch.zeros(em_max, out_features, device="cuda", dtype=torch.bfloat16)
-    grad[valid] = torch.randn(
-        int(valid.sum().item()), out_features, device="cuda", dtype=torch.bfloat16
-    )
+    weights = torch.randn(weights_shape, device="cuda", dtype=torch.bfloat16)
 
-    dW = permute_free_grouped_gemm_bf16_wgrad(hidden, grad, weights_shape, routing)
-    assert dW.shape == weights_shape
+    # FC1 forward is the only entry point that builds the align itself (on demand, inside the
+    # kernel wrapper), so read the slot layout back only after the call.
+    if layer == "fc1" and mode == "fwd":
+        hidden = torch.randn(num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16)
+        out = permute_free_grouped_gemm_bf16(hidden, weights, routing)
+        em_max, valid, tok, exp = _route_slots(routing, num_recv_tokens)
+        assert out.shape == (em_max, out_features)
+        assert int(valid.sum().item()) == num_routes
+        ref = torch.einsum("rk,rnk->rn", hidden[tok].float(), weights[exp].float())
+        _assert_bf16_close(out[valid], ref[valid])
+        return
 
-    # dW[e] = sum_{valid slots s with expert==e} outer(grad[s], hidden[slot_token[s]])
-    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
-    per_slot = torch.einsum("rn,rk->rnk", grad.float(), hidden[tok].float())
-    per_slot = per_slot * valid[:, None, None].float()
-    ref = torch.zeros(num_experts, out_features, in_features, device="cuda", dtype=torch.float32)
-    # Past-end padding slots carry expert id -1; clamp for the scatter (their rows are zeroed).
-    ref.index_add_(0, slot_expert.to(torch.int64).clamp_min(0), per_slot)
-    assert int(valid.sum().item()) == num_routes
-    assert _rel_l2(dW, ref) < 2e-2
-
-
-def test_route_list_fc2_wgrad():
-    """FC2 wgrad via operand-swap + transpose; ``out``/``accumulate`` fold in bf16 or fp32."""
-    torch.manual_seed(19)
-    num_recv_tokens, in_features, out_features = 128, 96, 128  # F=in, H=out (W2 is [E, H, F])
-    num_experts, max_hits = 8, 4
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=4)
-    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
-    num_routes = int(routing_map.sum().item())
-    # Block-padded canonical: fc2_input (the FC1 output) lives in the [em_max] block-padded slot
-    # order; grad_output stays token-space and is gathered internally.
-    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    slot_token = routing.sorted_slot_ids
-    slot_expert = _expert_per_route(routing, em_max)
-    valid = slot_token < num_recv_tokens
-
-    fc2_input = torch.zeros(em_max, in_features, device="cuda", dtype=torch.bfloat16)
-    fc2_input[valid] = torch.randn(
-        int(valid.sum().item()), in_features, device="cuda", dtype=torch.bfloat16
-    )
-    grad_output = torch.randn(num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16)
-    weights_shape = (num_experts, out_features, in_features)  # [E, H, F]
-
-    # dW2[e] = sum_{valid slots s with expert==e} outer(grad_output[slot_token[s]], fc2_input[s])
-    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
-    per_slot = torch.einsum("rh,rf->rhf", grad_output[tok].float(), fc2_input.float())
-    per_slot = per_slot * valid[:, None, None].float()
-    ref = torch.zeros(num_experts, out_features, in_features, device="cuda", dtype=torch.float32)
-    # Past-end padding slots carry expert id -1; clamp for the scatter (their rows are zeroed).
-    ref.index_add_(0, slot_expert.to(torch.int64).clamp_min(0), per_slot)
-
-    # Fresh output (no transpose needed downstream).
-    dW2 = permute_free_grouped_gemm_bf16_fc2_wgrad(fc2_input, grad_output, weights_shape, routing)
-    assert dW2.shape == weights_shape
-    assert _rel_l2(dW2, ref) < 2e-2
-
-    # Direct fp32 accumulate into an existing buffer: overwrite then add == 2x.
-    out = torch.zeros(weights_shape, device="cuda", dtype=torch.float32)
-    permute_free_grouped_gemm_bf16_fc2_wgrad(
-        fc2_input, grad_output, weights_shape, routing, out=out, accumulate=False
-    )
-    assert _rel_l2(out, ref) < 2e-2
-    permute_free_grouped_gemm_bf16_fc2_wgrad(
-        fc2_input, grad_output, weights_shape, routing, out=out, accumulate=True
-    )
-    assert _rel_l2(out, 2.0 * ref) < 2e-2
-
-
-def test_route_list_fc2_wgrad_recompute_from_preact():
-    """FC2 wgrad recompute-from-preact: rebuild act = act(gate)*up*prob from the saved 2F
-    pre-activation into a transient buffer, feed the unchanged wgrad, and match a stored-act
-    reference (the backward then checkpoints only the 2F preact, never the F-wide act)."""
-    from transformer_engine.pytorch.moe import prepare_moe_align
-
-    torch.manual_seed(29)
-    num_recv_tokens, in_features, out_features = 128, 96, 128  # F=in, H=out (W2 is [E, H, F])
-    num_experts, max_hits = 8, 4
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=6)
-    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
     prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+    em_max, valid, tok, exp = _route_slots(routing, num_recv_tokens)
+    valid_f = valid[:, None].float()
 
-    # Block-padded canonical: preact / act / grad all live in the [em_max] block-padded slot
-    # order (padding slots have token sentinel >= num_recv_tokens and are dropped by the kernel).
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    num_routes = int(routing_map.sum().item())
-    slot_token = routing.sorted_slot_ids
-    slot_expert = _expert_per_route(routing, em_max)
-    valid = slot_token < num_recv_tokens
-    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
-    exp = slot_expert.to(torch.int64).clamp_min(0)
+    if mode == "fwd":
+        # FC2 forward: route-ordered activation in, token-ordered gather-combine out.
+        fc2_input = _randn_route_buffer(em_max, in_features, valid)
+        out = permute_free_grouped_gemm_bf16_fc2(fc2_input, weights, routing)
+        assert out.shape == (num_recv_tokens, out_features)
+        per_slot = torch.einsum("rf,rhf->rh", fc2_input.float(), weights[exp].float()) * valid_f
+        ref = torch.zeros(num_recv_tokens, out_features, device="cuda", dtype=torch.float32)
+        ref.index_add_(0, tok, per_slot)
+        _assert_bf16_close(out, ref)
+        return
 
-    preact = torch.zeros(em_max, 2 * in_features, device="cuda", dtype=torch.bfloat16)
-    preact[valid] = torch.randn(
-        int(valid.sum().item()), 2 * in_features, device="cuda", dtype=torch.bfloat16
-    )
+    if mode == "dgrad":
+        if layer == "fc1":
+            grad = _randn_route_buffer(em_max, out_features, valid)
+            dgrad = permute_free_grouped_gemm_bf16_dgrad(grad, weights, routing)
+            assert dgrad.shape == (num_recv_tokens, in_features)
+            assert int(valid.sum().item()) == num_routes
+            per_slot = torch.einsum("rn,rnk->rk", grad.float(), weights[exp].float()) * valid_f
+            ref = torch.zeros(num_recv_tokens, in_features, device="cuda", dtype=torch.float32)
+            ref.index_add_(0, tok, per_slot)
+            _assert_bf16_close(dgrad, ref)
+            return
+
+        grad_output = torch.randn(
+            num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16
+        )
+        dgrad = permute_free_grouped_gemm_bf16_fc2_dgrad(grad_output, weights, routing)
+        assert dgrad.shape == (em_max, in_features)
+        ref = torch.einsum("rh,rhf->rf", grad_output[tok].float(), weights[exp].float())
+        _assert_bf16_close(dgrad[valid], ref[valid])
+        return
+
+    assert mode == "wgrad"
+    if layer == "fc1":
+        grad = _randn_route_buffer(em_max, out_features, valid)
+        hidden = torch.randn(num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16)
+        dW = permute_free_grouped_gemm_bf16_wgrad(hidden, grad, weights_shape, routing)
+        assert dW.shape == weights_shape
+        assert int(valid.sum().item()) == num_routes
+        per_slot = torch.einsum("rn,rk->rnk", grad.float(), hidden[tok].float())
+        ref = _sum_by_expert(per_slot * valid[:, None, None].float(), exp, weights_shape)
+        _assert_bf16_close(dW, ref)
+        return
+
     grad_output = torch.randn(num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16)
+
+    if wgrad_variant == "stored":
+        fc2_input = _randn_route_buffer(em_max, in_features, valid)
+        per_slot = torch.einsum("rh,rf->rhf", grad_output[tok].float(), fc2_input.float())
+        ref = _sum_by_expert(per_slot * valid[:, None, None].float(), exp, weights_shape)
+
+        dW2 = permute_free_grouped_gemm_bf16_fc2_wgrad(
+            fc2_input, grad_output, weights_shape, routing
+        )
+        assert dW2.shape == weights_shape
+        _assert_bf16_close(dW2, ref)
+
+        # ``out=`` folds the wgrad straight into a caller buffer (the fp32 ``main_grad`` sink),
+        # overwriting or accumulating in-kernel.
+        out = torch.zeros(weights_shape, device="cuda", dtype=torch.float32)
+        permute_free_grouped_gemm_bf16_fc2_wgrad(
+            fc2_input, grad_output, weights_shape, routing, out=out, accumulate=False
+        )
+        _assert_bf16_close(out, ref)
+        permute_free_grouped_gemm_bf16_fc2_wgrad(
+            fc2_input, grad_output, weights_shape, routing, out=out, accumulate=True
+        )
+        _assert_bf16_close(out, 2.0 * ref)
+        return
+
+    # Recompute-from-preact: the wgrad rebuilds the F-wide activation from the saved 2F preact
+    # instead of consuming a stored one, and must match the stored-activation wgrad.
+    assert wgrad_variant == "recompute"
+    preact = _randn_route_buffer(em_max, 2 * in_features, valid)
     probs = torch.rand(num_recv_tokens, num_experts, device="cuda", dtype=torch.float32)
-    weights_shape = (num_experts, out_features, in_features)  # [E, H, F]
+    act_ref = (
+        _gated_act_ref(preact[:, :in_features].float(), "silu")
+        * preact[:, in_features:].float()
+        * probs[tok, exp][:, None]
+        * valid_f
+    )
 
-    # Reference act in the block-padded slot layout using the kernel's own slot arrays.
-    g = preact[:, :in_features].float()
-    u = preact[:, in_features:].float()
-    p = probs[tok, exp]
-    act_ref = torch.nn.functional.silu(g) * u * p[:, None]
-    act_ref = act_ref * valid[:, None].float()
-    act_stored = act_ref.to(torch.bfloat16)
-
-    # Stored-act baseline: feed the materialized activation directly.
     dW2_stored = permute_free_grouped_gemm_bf16_fc2_wgrad(
-        act_stored, grad_output, weights_shape, routing
+        act_ref.to(torch.bfloat16), grad_output, weights_shape, routing
     )
-    # Recompute path: feed preact + probs, rebuild act in-flight.
-    dW2_rc = permute_free_grouped_gemm_bf16_fc2_wgrad(
-        None, grad_output, weights_shape, routing,
-        preact=preact, dispatched_probs=probs, activation="silu",
-    )
-
-    # fp32 reference dW2[e] = sum_{valid slots s: exp==e} outer(grad_output[tok_s], act_ref[s]).
-    ref = torch.zeros(num_experts, out_features, in_features, device="cuda", dtype=torch.float32)
-    per_route = torch.einsum("rh,rf->rhf", grad_output[tok].float(), act_ref)
-    ref.index_add_(0, exp, per_route)
-
-    assert _rel_l2(dW2_stored, ref) < 2e-2
-    assert _rel_l2(dW2_rc, ref) < 2e-2
-    # Recompute should also track the stored-act path closely (same GEMM, act rebuilt).
-    assert _rel_l2(dW2_rc, dW2_stored) < 1e-2
-
-
-def test_fc2_backward_dispatch_recompute_matches_stored():
-    """FC2 backward dispatch: wgrad from the saved 2F preact (+ fc2_activation) matches the
-    legacy stored-F activation path."""
-    from transformer_engine.pytorch.moe import (
-        permute_free_grouped_gemm_backward,
-        prepare_moe_align,
-    )
-
-    torch.manual_seed(31)
-    num_recv_tokens, in_features, out_features = 128, 96, 128  # F=in, H=out (W2 is [E, H, F])
-    num_experts, max_hits = 8, 4
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=8)
-    routing = PermuteFreeMetadata(
-        routing_map=routing_map, num_experts=num_experts, route_space=True, activation="silu"
-    )
-    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-
-    # Block-padded canonical: preact / act live in the [em_max] block-padded slot order.
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    slot_token = routing.sorted_slot_ids
-    slot_expert = _expert_per_route(routing, em_max)
-    valid = slot_token < num_recv_tokens
-    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
-    exp = slot_expert.to(torch.int64).clamp_min(0)
-
-    preact = torch.zeros(em_max, 2 * in_features, device="cuda", dtype=torch.bfloat16)
-    preact[valid] = torch.randn(
-        int(valid.sum().item()), 2 * in_features, device="cuda", dtype=torch.bfloat16
-    )
-    grad_output = torch.randn(num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16)
-    probs = torch.rand(num_recv_tokens, num_experts, device="cuda", dtype=torch.float32)
-    weights = [
-        torch.randn(out_features, in_features, device="cuda", dtype=torch.bfloat16)
-        for _ in range(num_experts)
-    ]
-
-    g = preact[:, :in_features].float()
-    u = preact[:, in_features:].float()
-    p = probs[tok, exp]
-    act_stored = (torch.nn.functional.silu(g) * u * p[:, None] * valid[:, None].float()).to(
-        torch.bfloat16
-    )
-
-    stored = permute_free_grouped_gemm_backward(
+    dW2_recompute = permute_free_grouped_gemm_bf16_fc2_wgrad(
+        None,
         grad_output,
-        routing=routing,
-        weights=weights,
-        num_gemms=num_experts,
-        hidden_states=act_stored,
-        requires_wgrad=True,
-    )
-    recompute = permute_free_grouped_gemm_backward(
-        grad_output,
-        routing=routing,
-        weights=weights,
-        num_gemms=num_experts,
-        hidden_states=preact,
-        requires_wgrad=True,
+        weights_shape,
+        routing,
+        preact=preact,
         dispatched_probs=probs,
-        fc2_activation="silu",
+        activation="silu",
     )
-    assert recompute.wgrad_stacked.shape == (num_experts, out_features, in_features)
-    assert _rel_l2(recompute.wgrad_stacked, stored.wgrad_stacked) < 1e-2
-
-
-def test_fc2_backward_dispatch_fused_dgrad_wgrad_matches_split():
-    """FC2 backward with both grads + a gated activation: the act-bwd re-emits the F-wide
-    fc2_input for the wgrad (one fused pass over the 2F preact). Both dgrad and wgrad must match
-    running dgrad-only and wgrad-only (separate recompute) independently."""
-    from transformer_engine.pytorch.moe import (
-        permute_free_grouped_gemm_backward,
-        prepare_moe_align,
+    ref = _sum_by_expert(
+        torch.einsum("rh,rf->rhf", grad_output[tok].float(), act_ref), exp, weights_shape
     )
 
-    torch.manual_seed(43)
-    num_recv_tokens, in_features, out_features = 128, 96, 128  # F=in, H=out (W2 is [E, H, F])
-    num_experts, max_hits = 8, 4
+    _assert_bf16_close(dW2_stored, ref)
+    _assert_bf16_close(dW2_recompute, ref)
+    _assert_bf16_close(dW2_recompute, dW2_stored)
 
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=12)
-    routing = PermuteFreeMetadata(
-        routing_map=routing_map, num_experts=num_experts, route_space=True, activation="silu"
+
+# ---------------------------------------------------------------------------
+# Standalone gated activation (FC1 epilogue / FC2 prologue)
+# ---------------------------------------------------------------------------
+_GATED_ACT_SHAPES = [
+    pytest.param(128, 128, 8, 4, id="orig"),
+    pytest.param(96, 128, 6, 3, id="mid"),
+    pytest.param(192, 192, 8, 2, id="wide"),
+    pytest.param(128, 192, 4, 2, id="narrow-experts"),
+    pytest.param(256, 256, 16, 4, id="large"),
+    pytest.param(64, 128, 4, 1, id="few-experts"),
+]
+_GATED_ACT_CASES = [
+    pytest.param("fwd", "silu", id="fwd-silu"),
+    pytest.param("fwd", "gelu", id="fwd-gelu"),
+    pytest.param("bwd", "silu", id="bwd-silu"),
+    pytest.param("bwd", "gelu", id="bwd-gelu"),
+]
+_GATED_ACT_PROB_CASES = [
+    pytest.param(True, id="probs"),
+    pytest.param(False, id="no-probs"),
+]
+
+
+@pytest.mark.parametrize("use_probs", _GATED_ACT_PROB_CASES)
+@pytest.mark.parametrize("num_recv_tokens,in_features,num_experts,max_hits", _GATED_ACT_SHAPES)
+@pytest.mark.parametrize("mode,activation", _GATED_ACT_CASES)
+def test_route_list_gated_act(
+    mode, activation, use_probs, num_recv_tokens, in_features, num_experts, max_hits
+):
+    """Standalone gated activation ``act(gate)*up[*prob]`` vs PyTorch autograd.
+
+    ``use_probs=False`` covers the prob-less fusion, where the backward returns no ``dprob``.
+    """
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda")
+    routing = prepare_moe_align(
+        MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts), _FLYDSL_FWD_BLOCK_M
     )
-    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+    em_max, valid, tok, exp = _route_slots(routing, num_recv_tokens)
+    valid_f = valid[:, None].float()
 
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    valid = routing.sorted_slot_ids < num_recv_tokens
+    if mode == "fwd":
+        preact = _randn_route_buffer(em_max, 2 * in_features, valid)
+        probs = (
+            torch.rand(num_recv_tokens, num_experts, device="cuda", dtype=torch.float32)
+            if use_probs
+            else None
+        )
 
-    preact = torch.zeros(em_max, 2 * in_features, device="cuda", dtype=torch.bfloat16)
-    preact[valid] = torch.randn(
-        int(valid.sum().item()), 2 * in_features, device="cuda", dtype=torch.bfloat16
-    )
-    grad_output = torch.randn(num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16)
-    probs = torch.rand(
-        num_recv_tokens, num_experts, device="cuda", dtype=torch.float32, requires_grad=True
-    )
-    weights = [
-        torch.randn(out_features, in_features, device="cuda", dtype=torch.bfloat16)
-        for _ in range(num_experts)
-    ]
+        act = permute_free_gated_act_fwd(
+            preact, routing, activation=activation, dispatched_probs=probs
+        )
+        assert act.shape == (em_max, in_features)
 
-    common = dict(
-        routing=routing, weights=weights, num_gemms=num_experts,
-        hidden_states=preact, fc2_activation="silu", dispatched_probs=probs,
-    )
-    # Fused: dgrad + wgrad in one call -> the wgrad reuses the act-bwd's fc2_input.
-    fused = permute_free_grouped_gemm_backward(
-        grad_output, requires_dgrad=True, requires_wgrad=True, **common
-    )
-    # Split references: dgrad-only (act-bwd) and wgrad-only (own recompute-from-preact).
-    dref = permute_free_grouped_gemm_backward(
-        grad_output, requires_dgrad=True, requires_wgrad=False, **common
-    )
-    wref = permute_free_grouped_gemm_backward(
-        grad_output, requires_dgrad=False, requires_wgrad=True, **common
-    )
+        gate, up = preact[:, :in_features].float(), preact[:, in_features:].float()
+        act_ref = _gated_act_ref(gate, activation) * up * valid_f
+        if use_probs:
+            act_ref = act_ref * probs[tok, exp][:, None]
+        _assert_bf16_close(act[valid], act_ref[valid])
+        return
 
-    assert fused.dgrad.shape == (em_max, 2 * in_features)
-    assert fused.wgrad_stacked.shape == (num_experts, out_features, in_features)
-    # dgrad is bit-identical (same act-bwd, EMIT_ACT only adds a store).
-    assert torch.equal(fused.dgrad, dref.dgrad)
-    assert torch.equal(fused.grad_probs, dref.grad_probs)
-    # wgrad from the fused (re-emitted) act matches the standalone recompute to bf16 rounding.
-    assert _rel_l2(fused.wgrad_stacked, wref.wgrad_stacked) < 1e-2
+    gate = (torch.randn(em_max, in_features, device="cuda") * valid_f).requires_grad_(True)
+    up = (torch.randn(em_max, in_features, device="cuda") * valid_f).requires_grad_(True)
+    probs = None
+    if use_probs:
+        probs = torch.rand(
+            num_recv_tokens, num_experts, device="cuda", dtype=torch.float32, requires_grad=True
+        )
+    grad_out = _randn_route_buffer(em_max, in_features, valid)
 
-
-def test_fc1_fc2_gated_pipeline(monkeypatch):
-    """End-to-end FC1 raw 2F -> FC2 standalone gated activation: forward outputs and backward grads
-    match a PyTorch reference through the permute-free GroupedLinear modules."""
-    import dataclasses
-
-    from transformer_engine.pytorch.moe import prepare_moe_align
-
-    monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "1")
-    torch.manual_seed(37)
-    # FFN width is a multiple of the FlyDSL block_k (64) for kernel alignment.
-    num_recv_tokens, hidden, ffn = 128, 128, 128
-    num_experts, max_hits = 8, 3
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=9)
-    fc1_meta = PermuteFreeMetadata(
-        routing_map=routing_map, num_experts=num_experts, activation="silu"
-    )
-    # Prepare at the FlyDSL-compatible forward block_m (>= 128, multiple of 128). FC1 and FC2 share the
-    # same block-padded slot layout, so the derived fc2_meta inherits this align.
-    prepare_moe_align(fc1_meta, _FLYDSL_FWD_BLOCK_M)
-    fc2_meta = dataclasses.replace(fc1_meta, route_space=True)
-    num_routes = int(routing_map.sum().item())
-    m_splits = [num_recv_tokens // num_experts] * num_experts
-    m_splits[-1] += num_recv_tokens - sum(m_splits)
-
-    inp = torch.randn(num_recv_tokens, hidden, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    probs = torch.rand(num_recv_tokens, num_experts, device="cuda", dtype=torch.float32, requires_grad=True)
-
-    fc1 = GroupedLinear(
-        num_experts, hidden, 2 * ffn, bias=False, params_dtype=torch.bfloat16, device="cuda"
-    )
-    fc2 = GroupedLinear(
-        num_experts, ffn, hidden, bias=False, params_dtype=torch.bfloat16, device="cuda"
-    )
-    torch.manual_seed(38)
-    with torch.no_grad():
-        for i in range(num_experts):
-            getattr(fc1, f"weight{i}").normal_(0, 0.05)
-            getattr(fc2, f"weight{i}").normal_(0, 0.05)
-
-    preact = fc1(inp, m_splits, permute_free_metadata=fc1_meta)
-    assert preact.shape[1] == 2 * ffn
-    preact.retain_grad()  # non-leaf: keep its grad so we can sanity-check the FC2->FC1 edge
-    out = fc2(preact, m_splits, permute_free_metadata=fc2_meta, dispatched_probs=probs)
-
-    # Reference: FC1 raw 2F [gate|up] -> silu(gate)*up*prob -> FC2, summed over each token's
-    # experts (the fused FC2 prologue must reproduce this token-space output). Computed on the
-    # CPU so no GPU (re)allocation happens between the forward and the backward -- the FlyDSL
-    # FC2 dgrad autotune is sensitive to heap layout shifts (a latent OOB read faults only when
-    # a large device alloc/free reshuffles the pool between fwd and bwd).
-    with torch.no_grad():
-        w1 = torch.stack([getattr(fc1, f"weight{i}").cpu() for i in range(num_experts)]).float()
-        w2 = torch.stack([getattr(fc2, f"weight{i}").cpu() for i in range(num_experts)]).float()
-        pre_ref = torch.einsum("th,enh->ten", inp.detach().cpu().float(), w1)  # [T, E, 2F]
-        gate, up = pre_ref[..., :ffn], pre_ref[..., ffn:]
-        act = torch.nn.functional.silu(gate) * up * probs.detach().cpu().float()[..., None]
-        y = torch.einsum("tef,ehf->teh", act, w2)  # [T, E, H]
-        ref = (y * routing_map.cpu().float()[..., None]).sum(dim=1)  # [T, H]
-    rel = (out.detach().cpu().float() - ref).norm() / ref.norm().clamp_min(1e-8)
-    assert rel < 3e-2, rel.item()
-
-    loss = out.float().sum()
-    loss.backward()
-
-    assert inp.grad is not None
-    assert probs.grad is not None
-    for i in range(num_experts):
-        assert getattr(fc1, f"weight{i}").grad is not None
-        assert getattr(fc2, f"weight{i}").grad is not None
-        assert getattr(fc2, f"weight{i}").grad.abs().sum() > 0
-    # Sanity: dense route head got a non-zero FC1 output grad (FC2 act-bwd -> FC1).
-    assert preact.grad[:num_routes].abs().sum() > 0
-
-    # Numerical check on probs.grad (locks the gated-act backward's per-slot (token, expert)
-    # mapping): with loss = out.sum(), dL/dprob[t, e] = routing_map[t, e] * <silu(gate)*up[t,e],
-    # sum_h w2[e, h, :]>. A wrong expert-per-slot map (e.g. dense route index misread as a
-    # block-padded slot) silently corrupts this even though probs.grad stays non-zero.
-    with torch.no_grad():
-        act_noprob = torch.nn.functional.silu(gate) * up  # [T, E, F] (CPU float)
-        w2sum = w2.sum(dim=1)  # [E, F] = sum over output features
-        dprob_ref = routing_map.cpu().float() * torch.einsum("tef,ef->te", act_noprob, w2sum)
-    rel_p = (probs.grad.detach().cpu() - dprob_ref).norm() / dprob_ref.norm().clamp_min(1e-8)
-    assert rel_p < 3e-2, rel_p.item()
-
-
-def test_route_list_fwd_dgrad_wgrad_consistency():
-    """fwd + dgrad + wgrad against a single autograd reference in dense route-ordered space."""
-    torch.manual_seed(23)
-    # The gather/dgrad tiles need both contraction dims (in for fwd, out for dgrad) to be a
-    # multiple of the FlyDSL block_k (64) and >= 128 (K_ITERS >= 2), so use 128-wide features.
-    num_recv_tokens, in_features, out_features = 96, 128, 128
-    num_experts, max_hits = 6, 3
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=5)
-    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
-    route_to_token, route_expert = _dense_route_order(routing_map)
-    num_routes = route_to_token.numel()
-    # Prepare the fwd/dgrad align (block-padded slot layout) up front so we can map the dense
-    # per-route grad into padded-slot order for the block-padded dgrad.
-    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    valid = routing.sorted_slot_ids < num_recv_tokens
-    assert int(valid.sum().item()) == num_routes
-
-    hidden = torch.randn(num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16)
-    weights = torch.randn(
-        num_experts, out_features, in_features, device="cuda", dtype=torch.bfloat16
-    )
-
-    # Forward output is block-padded [em_max]; the valid padded slots are expert-ascending, the
-    # same order as the dense route list, so out_full[valid] lines up with the dense ref.
-    out_full = permute_free_grouped_gemm_bf16(hidden, weights, routing)
-    out = out_full[valid]
-    # One per-route gradient in the block-padded [em_max] slot layout that both the dgrad and the
-    # wgrad now route-read (padded slot = block_start[e]*block_size_m + within-rank). The valid
-    # slots are expert-ascending, matching the dense autograd reference order. ``grad`` keeps a
-    # dense route-ordered [num_routes] copy only to seed the dense reference backward.
-    grad = torch.randn(num_routes, out_features, device="cuda", dtype=torch.bfloat16)
-    grad_bp = torch.zeros(em_max, out_features, device="cuda", dtype=torch.bfloat16)
-    grad_bp[valid] = grad
-    dA = permute_free_grouped_gemm_bf16_dgrad(grad_bp, weights, routing)
-    dW = permute_free_grouped_gemm_bf16_wgrad(hidden, grad_bp, weights.shape, routing)
-
-    # Autograd reference in dense route-ordered space.
-    ref_hidden = hidden.float().clone().requires_grad_(True)
-    ref_w = weights.float().clone().requires_grad_(True)
-    ref_out = torch.einsum(
-        "rk,rnk->rn", ref_hidden[route_to_token], ref_w[route_expert]
-    )
-    assert _rel_l2(out, ref_out) < 2e-2
-    ref_out.backward(grad.float())
-
-    assert _rel_l2(dA, ref_hidden.grad) < 2e-2
-    assert _rel_l2(dW, ref_w.grad) < 2e-2
-
-
-def test_route_list_fc2_fwd():
-    """FC2 forward (F-wide input): per-route GEMM + token gather-combine."""
-    torch.manual_seed(51)
-    num_recv_tokens, in_features, out_features = 128, 128, 128
-    num_experts, max_hits = 8, 3
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=21)
-    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
-    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    slot_token = routing.sorted_slot_ids
-    slot_expert = _expert_per_route(routing, em_max)
-    valid = slot_token < num_recv_tokens
-    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
-    exp = slot_expert.to(torch.int64).clamp_min(0)
-
-    fc2_input = torch.zeros(em_max, in_features, device="cuda", dtype=torch.bfloat16)
-    fc2_input[valid] = torch.randn(
-        int(valid.sum().item()), in_features, device="cuda", dtype=torch.bfloat16
-    )
-    weights = torch.randn(
-        num_experts, out_features, in_features, device="cuda", dtype=torch.bfloat16
-    )
-
-    out = permute_free_grouped_gemm_bf16_fc2(fc2_input, weights, routing)
-    assert out.shape == (num_recv_tokens, out_features)
-
-    per_slot = torch.einsum("rf,rhf->rh", fc2_input.float(), weights[exp].float())
-    per_slot = per_slot * valid[:, None].float()
-    ref = torch.zeros(num_recv_tokens, out_features, device="cuda", dtype=torch.float32)
-    ref.index_add_(0, tok, per_slot)
-    assert _rel_l2(out, ref) < 2e-2
-
-
-def test_route_list_fc2_fwd_standalone_act():
-    """FC2 forward dispatch: standalone gated-act recompute + plain GEMM (no in-kernel fusion)."""
-    torch.manual_seed(53)
-    num_recv_tokens, in_features, out_features = 128, 128, 128
-    num_experts, max_hits = 8, 3
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=23)
-    routing = PermuteFreeMetadata(
-        routing_map=routing_map, num_experts=num_experts, route_space=True, activation="silu"
-    )
-    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    slot_token = routing.sorted_slot_ids
-    slot_expert = _expert_per_route(routing, em_max)
-    valid = slot_token < num_recv_tokens
-    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
-    exp = slot_expert.to(torch.int64).clamp_min(0)
-
-    preact = torch.zeros(em_max, 2 * in_features, device="cuda", dtype=torch.bfloat16)
-    preact[valid] = torch.randn(
-        int(valid.sum().item()), 2 * in_features, device="cuda", dtype=torch.bfloat16
-    )
-    probs = torch.rand(num_recv_tokens, num_experts, device="cuda", dtype=torch.float32)
-    weights = torch.randn(
-        num_experts, out_features, in_features, device="cuda", dtype=torch.bfloat16
-    )
-
-    out = permute_free_grouped_gemm_forward(
-        preact, weights, routing, activation="silu", dispatched_probs=probs
-    )
-    assert out.shape == (num_recv_tokens, out_features)
-
-    g = preact[:, :in_features].float()
-    u = preact[:, in_features:].float()
-    act = torch.nn.functional.silu(g) * u * probs[tok, exp][:, None] * valid[:, None].float()
-    per_slot = torch.einsum("rf,rhf->rh", act, weights[exp].float()) * valid[:, None].float()
-    ref = torch.zeros(num_recv_tokens, out_features, device="cuda", dtype=torch.float32)
-    ref.index_add_(0, tok, per_slot)
-    assert _rel_l2(out, ref) < 2e-2
-
-
-def test_route_list_fc2_dgrad():
-    """FC2 dgrad: token-space grad gathered per route into block-padded ``[em_max, F]``."""
-    torch.manual_seed(57)
-    num_recv_tokens, in_features, out_features = 128, 128, 128
-    num_experts, max_hits = 8, 4
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=25)
-    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
-    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    slot_token = routing.sorted_slot_ids
-    slot_expert = _expert_per_route(routing, em_max)
-    valid = slot_token < num_recv_tokens
-    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
-    exp = slot_expert.to(torch.int64).clamp_min(0)
-
-    grad_output = torch.randn(num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16)
-    weights = torch.randn(
-        num_experts, out_features, in_features, device="cuda", dtype=torch.bfloat16
-    )
-
-    dgrad = permute_free_grouped_gemm_bf16_fc2_dgrad(grad_output, weights, routing)
-    assert dgrad.shape == (em_max, in_features)
-
-    per_slot = torch.einsum("rh,rhf->rf", grad_output[tok].float(), weights[exp].float())
-    assert _rel_l2(dgrad[valid], per_slot[valid]) < 2e-2
-
-
-def test_route_list_gated_act_bwd():
-    """Standalone gated-activation backward: dpre + dprob vs autograd reference."""
-    torch.manual_seed(59)
-    num_recv_tokens, in_features = 128, 128
-    num_experts, max_hits = 8, 4
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=27)
-    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
-    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    slot_token = routing.sorted_slot_ids
-    slot_expert = _expert_per_route(routing, em_max)
-    valid = slot_token < num_recv_tokens
-    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
-    exp = slot_expert.to(torch.int64).clamp_min(0)
-
-    gate = torch.randn(em_max, in_features, device="cuda", dtype=torch.float32)
-    up = torch.randn(em_max, in_features, device="cuda", dtype=torch.float32)
-    gate = (gate * valid[:, None].float()).requires_grad_(True)
-    up = (up * valid[:, None].float()).requires_grad_(True)
-    probs = torch.rand(
-        num_recv_tokens, num_experts, device="cuda", dtype=torch.float32, requires_grad=True
-    )
-    grad_out = torch.zeros(em_max, in_features, device="cuda", dtype=torch.bfloat16)
-    grad_out[valid] = torch.randn(
-        int(valid.sum().item()), in_features, device="cuda", dtype=torch.bfloat16
-    )
-
-    pr = probs[tok, exp]
-    act = torch.nn.functional.silu(gate) * up * pr[:, None] * valid[:, None].float()
-    (act * grad_out.float()).sum().backward()
+    act_ref = _gated_act_ref(gate, activation) * up * valid_f
+    if use_probs:
+        act_ref = act_ref * probs[tok, exp][:, None]
+    (act_ref * grad_out.float()).sum().backward()
     dpre_ref = torch.cat([gate.grad, up.grad], dim=1)
 
     preact = torch.cat([gate.detach(), up.detach()], dim=1).to(torch.bfloat16)
+    fused_probs = probs.detach() if use_probs else None
     dpre, dprob = permute_free_gated_act_bwd(
-        grad_out, preact, routing, activation="silu", dispatched_probs=probs.detach()
+        grad_out, preact, routing, activation=activation, dispatched_probs=fused_probs
     )
     assert dpre.shape == (em_max, 2 * in_features)
-    assert dprob.shape == (num_recv_tokens, num_experts)
-    assert _rel_l2(dpre[valid], dpre_ref[valid]) < 2e-2
-    assert _rel_l2(dprob, probs.grad) < 2e-2
+    _assert_bf16_close(dpre[valid], dpre_ref[valid])
+    if use_probs:
+        assert dprob.shape == (num_recv_tokens, num_experts)
+        _assert_bf16_close(dprob, probs.grad)
+    else:
+        assert dprob is None
+
+    # ``return_fc2_input`` re-materialises the F-wide forward activation from values the
+    # backward already holds, so the FC2 wgrad can skip a second pass over the 2F preact. It
+    # must not perturb the gradients and must match a standalone forward.
+    dpre_emit, dprob_emit, fc2_input = permute_free_gated_act_bwd(
+        grad_out,
+        preact,
+        routing,
+        activation=activation,
+        dispatched_probs=fused_probs,
+        return_fc2_input=True,
+    )
+    fc2_ref = permute_free_gated_act_fwd(
+        preact, routing, activation=activation, dispatched_probs=fused_probs
+    )
+    assert fc2_input.shape == (em_max, in_features)
+    assert torch.equal(dpre_emit[valid], dpre[valid])
+    _assert_bf16_close(fc2_input[valid], fc2_ref[valid])
+    if use_probs:
+        _assert_bf16_close(dprob_emit, dprob)
+    else:
+        assert dprob_emit is None
 
 
-def test_route_list_wgrad_out_accumulate():
-    """FC1 wgrad in-kernel fold into bf16/fp32 ``out`` (overwrite + accumulate)."""
-    torch.manual_seed(61)
-    num_recv_tokens, in_features, out_features = 128, 128, 128
-    num_experts, max_hits = 8, 4
+# ---------------------------------------------------------------------------
+# Routing / align infrastructure
+# ---------------------------------------------------------------------------
+_ALIGN_SHAPES = [
+    pytest.param(128, 8, 4, id="orig"),
+    pytest.param(96, 6, 3, id="mid"),
+]
 
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=29)
-    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
-    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+
+def _route_scan_ref(routing_map):
+    """CPU reference for ``route_list_scan``: per-expert counts + within-expert ranks [E, T]."""
+    vals = routing_map.to(torch.int32)
+    counts = vals.sum(dim=0).to(torch.int32)
+    within = (vals.cumsum(dim=0) - vals).to(torch.int32).T.contiguous()
+    return counts, within
+
+
+@pytest.mark.parametrize(
+    "tighten_bound",
+    [pytest.param(False, id="dense-bound"), pytest.param(True, id="topk-bound")],
+)
+@pytest.mark.parametrize("num_recv_tokens,num_experts,max_hits", _ALIGN_SHAPES)
+def test_route_list_align_buffers(num_recv_tokens, num_experts, max_hits, tighten_bound):
+    """``route_list_scan`` + ``moe_align_route_list`` build the expert-sorted route list.
+
+    Covers the block-independent scan, the per-expert block layout, the token->route inverse
+    map, and the ``topk`` hint tightening the (still sync-free) static over-allocation.
+    """
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda")
+    routes_per_token = routing_map.sum(dim=1).to(torch.int32)
+    assert int(routes_per_token.max().item()) <= max_hits
+    topk = max_hits if tighten_bound else None
+
+    counts, within = route_list_scan(routing_map, num_experts=num_experts)
+    counts_ref, within_ref = _route_scan_ref(routing_map)
+    assert counts.dtype == torch.int32 and within.dtype == torch.int32
+    assert torch.equal(counts, counts_ref)
+    assert torch.equal(within, within_ref)
+
+    (
+        sorted_slot_ids,
+        _expert_ids,
+        num_tokens_post_padded,
+        block_start,
+        blocks_per_expert,
+        token_routes,
+        token_route_count,
+    ) = moe_align_route_list(
+        routing_map,
+        num_experts=num_experts,
+        block_size=_FLYDSL_FWD_BLOCK_M,
+        scan=(counts, within),
+        topk=topk,
+        build_inverse_map=True,
+    )
+
+    # Static (sync-free) over-allocation: T * min(topk, E) routes rounded up to whole blocks,
+    # plus one partial block per expert. The topk hint shrinks it by up to E / topk.
+    max_per_token = num_experts if topk is None else min(topk, num_experts)
+    blocks_max = (
+        num_recv_tokens * max_per_token + _FLYDSL_FWD_BLOCK_M - 1
+    ) // _FLYDSL_FWD_BLOCK_M + num_experts
+    assert sorted_slot_ids.shape[0] == blocks_max * _FLYDSL_FWD_BLOCK_M
+    assert tighten_bound == (max_per_token < num_experts)
+
+    # Per-expert block layout: ceil(count / block_m) blocks each, laid out back to back.
+    blocks_ref = (counts_ref + _FLYDSL_FWD_BLOCK_M - 1) // _FLYDSL_FWD_BLOCK_M
+    assert torch.equal(blocks_per_expert, blocks_ref)
+    assert torch.equal(block_start, (blocks_ref.cumsum(0) - blocks_ref).to(torch.int32))
+    assert int(num_tokens_post_padded.item()) == int(blocks_ref.sum().item()) * _FLYDSL_FWD_BLOCK_M
+
+    # The valid slots are exactly the dense expert-sorted route list; the rest is padding.
+    route_token, _ = _dense_route_order(routing_map)
+    valid = sorted_slot_ids < num_recv_tokens
+    assert torch.equal(sorted_slot_ids[valid].to(torch.int64), route_token)
+
+    # Inverse map: token_routes[t, :count] are the padded slots owned by token t.
+    assert token_routes.shape == (num_recv_tokens, max_per_token)
+    assert torch.equal(token_route_count, routes_per_token)
+    listed = torch.arange(max_per_token, device="cuda")[None, :] < routes_per_token[:, None]
+    owner = sorted_slot_ids[token_routes.to(torch.int64)]
+    tokens = torch.arange(num_recv_tokens, device="cuda", dtype=torch.int32)
+    assert torch.equal(owner[listed], tokens[:, None].expand_as(owner)[listed])
+
+
+def test_route_list_align_caching():
+    """``prepare_moe_align`` / ``_prepare_wgrad_align`` build once and cache on the metadata.
+
+    The fwd/dgrad align (``BLOCK_SIZE_M``) and the wgrad align (``CONTRACT_M``) are separate
+    builds over the same routing map, sharing one block-independent scan; the wgrad holder is
+    shared by reference with the FC2 ``route_space`` view so only one backward pays for it.
+    """
+    num_recv_tokens, num_experts, max_hits = 128, 8, 3
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda")
+    routing = PermuteFreeMetadata(
+        routing_map=routing_map, num_experts=num_experts, topk=max_hits
+    )
+    num_routes = int(routing_map.sum().item())
+
+    # Nothing is built until the align runs.
+    assert routing.slot_expert_ids is None
+    assert routing.route_counts is None
+    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
     em_max = int(routing.sorted_slot_ids.shape[0])
-    slot_token = routing.sorted_slot_ids
-    slot_expert = _expert_per_route(routing, em_max)
-    valid = slot_token < num_recv_tokens
-    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
+    scan_counts = routing.route_counts
+    assert scan_counts is not None
 
-    hidden = torch.randn(num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16)
-    weights_shape = (num_experts, out_features, in_features)
-    grad = torch.zeros(em_max, out_features, device="cuda", dtype=torch.bfloat16)
-    grad[valid] = torch.randn(
-        int(valid.sum().item()), out_features, device="cuda", dtype=torch.bfloat16
+    # slot_expert_ids is the block-level expert_ids broadcast to per-slot granularity, and
+    # ``_expert_per_route`` hands back that cached tensor rather than recomputing it.
+    assert routing.slot_expert_ids.shape == (em_max,)
+    assert routing.slot_expert_ids.dtype == torch.int32
+    block_idx = (torch.arange(em_max, device="cuda") // int(routing.block_size_m)).clamp(
+        max=routing.expert_ids.numel() - 1
     )
+    manual = routing.expert_ids[block_idx].to(torch.int32)
+    assert torch.equal(routing.slot_expert_ids, manual)
+    assert _expert_per_route(routing, em_max) is routing.slot_expert_ids
 
-    per_slot = torch.einsum("rn,rk->rnk", grad.float(), hidden[tok].float())
-    per_slot = per_slot * valid[:, None, None].float()
-    ref = torch.zeros(num_experts, out_features, in_features, device="cuda", dtype=torch.float32)
-    ref.index_add_(0, slot_expert.to(torch.int64).clamp_min(0), per_slot)
+    # Valid slots carry the expert-sorted dense route experts.
+    _, route_expert = _dense_route_order(routing_map)
+    valid = routing.sorted_slot_ids < num_recv_tokens
+    assert torch.equal(routing.slot_expert_ids[valid].to(torch.int64), route_expert)
 
-    for dtype in (torch.bfloat16, torch.float32):
-        out = torch.zeros(weights_shape, device="cuda", dtype=dtype)
-        ret = permute_free_grouped_gemm_bf16_wgrad(
-            hidden, grad, weights_shape, routing, out=out, accumulate=False
-        )
-        assert ret is out
-        assert _rel_l2(out, ref) < 2e-2
-        permute_free_grouped_gemm_bf16_wgrad(
-            hidden, grad, weights_shape, routing, out=out, accumulate=True
-        )
-        assert _rel_l2(out, 2.0 * ref) < 2e-2
+    # Rebuild-on-early-return: drop the cache but keep the align, then re-prepare with the same
+    # block_m (hits the cached-align early return) -- it must repopulate rather than stay None.
+    routing.slot_expert_ids = None
+    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
+    assert torch.equal(routing.slot_expert_ids, manual)
 
+    # The FC2 route-space view shares the mutable wgrad-align holder, so whichever backward runs
+    # first builds the block-CONTRACT_M buffers and the other reuses them.
+    fc2_routing = dataclasses.replace(routing, route_space=True)
+    assert fc2_routing.wgrad_align is routing.wgrad_align
 
-def test_permute_free_forward_dispatch():
-    """``permute_free_grouped_gemm_forward`` routes FC1 plain GEMM and FC2 standalone-act paths."""
-    torch.manual_seed(63)
-    num_recv_tokens, hidden_dim, ffn = 128, 128, 128
-    num_experts, max_hits = 8, 3
+    _prepare_wgrad_align(routing, _WGRAD_CONTRACT_M)
+    wgrad_align = routing.wgrad_align
+    assert wgrad_align.block_size == _WGRAD_CONTRACT_M
+    assert wgrad_align.block_start is not None
+    assert wgrad_align.blocks_per_expert is not None
+    assert wgrad_align.sorted_slot_ids.shape[0] != em_max
+    # The scan is block-size independent, so the second align reuses the cached one.
+    assert routing.route_counts is scan_counts
 
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=31)
+    _prepare_wgrad_align(fc2_routing, _WGRAD_CONTRACT_M)
+    assert fc2_routing.wgrad_align.sorted_slot_ids is wgrad_align.sorted_slot_ids
 
-    fc1_routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
-    fc1_routing = prepare_moe_align(fc1_routing, _FLYDSL_FWD_BLOCK_M)
-    hidden = torch.randn(num_recv_tokens, hidden_dim, device="cuda", dtype=torch.bfloat16)
-    w1 = torch.randn(num_experts, 2 * ffn, hidden_dim, device="cuda", dtype=torch.bfloat16)
-    res_fc1 = permute_free_grouped_gemm_forward(hidden, w1, fc1_routing)
-    direct = permute_free_grouped_gemm_bf16(hidden, w1, fc1_routing)
-    valid_fc1 = fc1_routing.sorted_slot_ids < num_recv_tokens
-    assert _rel_l2(res_fc1[valid_fc1], direct[valid_fc1]) < 1e-3
-
-    fc2_routing = PermuteFreeMetadata(
-        routing_map=routing_map, num_experts=num_experts, route_space=True, activation="silu"
-    )
-    prepare_moe_align(fc2_routing, _FLYDSL_FWD_BLOCK_M)
-    em_max = int(fc2_routing.sorted_slot_ids.shape[0])
-    slot_token = fc2_routing.sorted_slot_ids
-    slot_expert = _expert_per_route(fc2_routing, em_max)
-    valid = slot_token < num_recv_tokens
-    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
-    exp = slot_expert.to(torch.int64).clamp_min(0)
-
-    preact = torch.zeros(em_max, 2 * ffn, device="cuda", dtype=torch.bfloat16)
-    preact[valid] = torch.randn(
-        int(valid.sum().item()), 2 * ffn, device="cuda", dtype=torch.bfloat16
-    )
-    probs = torch.rand(num_recv_tokens, num_experts, device="cuda", dtype=torch.float32)
-    w2 = torch.randn(num_experts, hidden_dim, ffn, device="cuda", dtype=torch.bfloat16)
-    out = permute_free_grouped_gemm_forward(
-        preact, w2, fc2_routing, activation="silu", dispatched_probs=probs
-    )
-    assert out.shape == (num_recv_tokens, hidden_dim)
-
-    g = preact[:, :ffn].float()
-    u = preact[:, ffn:].float()
-    act = torch.nn.functional.silu(g) * u * probs[tok, exp][:, None] * valid[:, None].float()
-    per_slot = torch.einsum("rf,rhf->rh", act, w2[exp].float()) * valid[:, None].float()
-    ref = torch.zeros(num_recv_tokens, hidden_dim, device="cuda", dtype=torch.float32)
-    ref.index_add_(0, tok, per_slot)
-    assert _rel_l2(out, ref) < 2e-2
+    # Both block sizes describe the same set of routes, only padded differently.
+    for slots in (routing.sorted_slot_ids, wgrad_align.sorted_slot_ids):
+        assert int((slots < num_recv_tokens).sum().item()) == num_routes
 
 
 def test_is_permute_free_grouped_gemm_enabled(monkeypatch):
@@ -801,235 +595,138 @@ def test_is_permute_free_grouped_gemm_enabled(monkeypatch):
     assert is_permute_free_grouped_gemm_enabled() is False
 
 
-def test_slot_expert_ids_cache():
-    """``prepare_moe_align`` caches per-slot expert ids; ``_expert_per_route`` reuses the cache."""
-    torch.manual_seed(67)
-    num_recv_tokens, num_experts, max_hits = 128, 8, 3
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=33)
-    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
-
-    # Not built until the align runs.
-    assert routing.slot_expert_ids is None
-    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    em_max = int(routing.sorted_slot_ids.shape[0])
-
-    # Populated at align time with the right shape/dtype.
-    assert routing.slot_expert_ids is not None
-    assert routing.slot_expert_ids.shape == (em_max,)
-    assert routing.slot_expert_ids.dtype == torch.int32
-
-    # Matches a manual block-broadcast of ``expert_ids`` (expert_ids[slot // block_m]).
-    block_m = int(routing.block_size_m)
-    pos = torch.arange(em_max, device="cuda", dtype=torch.int64)
-    block_idx = (pos // block_m).clamp(max=routing.expert_ids.numel() - 1)
-    manual = routing.expert_ids[block_idx].to(torch.int32)
-    assert torch.equal(routing.slot_expert_ids, manual)
-
-    # ``_expert_per_route`` returns the *cached* tensor (no redundant recompute).
-    assert _expert_per_route(routing, em_max) is routing.slot_expert_ids
-
-    # Valid slots carry the expert-sorted dense route experts.
-    _, route_expert = _dense_route_order(routing_map)
-    valid = routing.sorted_slot_ids < num_recv_tokens
-    assert torch.equal(routing.slot_expert_ids[valid].to(torch.int64), route_expert)
-
-    # Rebuild-on-early-return: drop the cache but keep the align, then re-prepare with the same
-    # block_m (hits the cached-align early return) -- it must repopulate rather than stay None.
-    routing.slot_expert_ids = None
-    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    assert routing.slot_expert_ids is not None
-    assert torch.equal(routing.slot_expert_ids, manual)
+# ---------------------------------------------------------------------------
+# Module level: GroupedLinear end-to-end and weight-gradient sinks
+# ---------------------------------------------------------------------------
+# FlyDSL tiles: hidden/ffn >= 128 and multiples of 64 (block_k).
+_FC1_FC2_PIPELINE_SHAPES = [
+    pytest.param(128, 128, 128, 8, 3, id="orig"),
+    pytest.param(96, 128, 128, 6, 3, id="mid"),
+    pytest.param(192, 192, 192, 8, 2, id="wide"),
+    pytest.param(128, 128, 192, 4, 2, id="narrow-experts"),
+    pytest.param(256, 256, 256, 16, 4, id="large"),
+]
 
 
-def test_permute_free_backward_fc1_dispatch():
-    """``permute_free_grouped_gemm_backward`` FC1 path (``route_space=False``): dgrad + wgrad match
-    the standalone kernels, and ``wgrad_out`` folds in place (``wgrad_applied``)."""
-    torch.manual_seed(71)
-    num_recv_tokens, in_features, out_features = 128, 128, 128
-    num_experts, max_hits = 8, 3
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=35)
-    routing = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)  # FC1
-    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    valid = routing.sorted_slot_ids < num_recv_tokens
-
-    hidden = torch.randn(num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16)
-    weights = [
-        torch.randn(out_features, in_features, device="cuda", dtype=torch.bfloat16)
-        for _ in range(num_experts)
-    ]
-    W = torch.stack(weights, dim=0)
-    grad = torch.zeros(em_max, out_features, device="cuda", dtype=torch.bfloat16)
-    grad[valid] = torch.randn(
-        int(valid.sum().item()), out_features, device="cuda", dtype=torch.bfloat16
+def _stack_expert_weights(mod, num_experts):
+    """Per-expert module weights as one CPU fp32 ``[E, out, in]`` tensor."""
+    return torch.stack(
+        [getattr(mod, f"weight{i}").detach().cpu().float() for i in range(num_experts)]
     )
 
-    res = permute_free_grouped_gemm_backward(
-        grad, routing=routing, weights=weights, num_gemms=num_experts,
-        hidden_states=hidden, requires_dgrad=True, requires_wgrad=True,
-    )
-    dgrad_ref = permute_free_grouped_gemm_bf16_dgrad(grad, W, routing)
-    wgrad_ref = permute_free_grouped_gemm_bf16_wgrad(
-        hidden, grad, (num_experts, out_features, in_features), routing
-    )
-    assert res.dgrad.shape == (num_recv_tokens, in_features)
-    assert res.wgrad_stacked.shape == (num_experts, out_features, in_features)
-    assert res.wgrad_applied is False
-    assert res.grad_probs is None
-    assert _rel_l2(res.dgrad, dgrad_ref) < 1e-3
-    assert _rel_l2(res.wgrad_stacked, wgrad_ref) < 1e-3
 
-    # wgrad_out fold (fp32 sink, overwrite): wgrad_applied True and the buffer is returned.
-    wgrad_out = torch.zeros(
-        num_experts, out_features, in_features, device="cuda", dtype=torch.float32
-    )
-    res2 = permute_free_grouped_gemm_backward(
-        grad, routing=routing, weights=weights, num_gemms=num_experts,
-        hidden_states=hidden, requires_wgrad=True,
-        wgrad_out=wgrad_out, wgrad_accumulate=False,
-    )
-    assert res2.wgrad_applied is True
-    assert res2.wgrad_stacked is wgrad_out
-    assert res2.dgrad is None
-    assert _rel_l2(wgrad_out, wgrad_ref) < 5e-3
+def _stack_expert_grads(mod, num_experts, *, to_cpu=False):
+    """Per-expert weight gradients as one fp32 ``[E, out, in]`` tensor."""
+    grads = [getattr(mod, f"weight{i}").grad for i in range(num_experts)]
+    assert all(g is not None for g in grads), "a per-expert weight received no gradient"
+    return torch.stack([g.detach().cpu().float() if to_cpu else g.detach().float() for g in grads])
 
 
-def test_permute_free_backward_fc2_dgrad_probs():
-    """FC2 backward dispatch dgrad path: dgrad + grad_probs match the standalone act-bwd, and
-    grad_probs is suppressed when ``dispatched_probs`` does not require grad."""
-    torch.manual_seed(73)
-    num_recv_tokens, in_features, out_features = 128, 128, 128  # F=in, H=out
-    num_experts, max_hits = 8, 4
+def _moe_gated_reference(inp, probs, w1, w2, routing_map, ffn):
+    """Token-expert MoE forward in fp32: FC1 -> silu-gated act (* prob) -> FC2 -> route sum.
 
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=37)
-    routing = PermuteFreeMetadata(
-        routing_map=routing_map, num_experts=num_experts, route_space=True, activation="silu"
+    Returns ``(preact, out)``; ``preact`` is the raw ``[T, E, 2F]`` FC1 output with
+    ``retain_grad`` set so the caller can read its gradient after ``out.backward()``.
+    """
+    preact = torch.einsum("th,enh->ten", inp, w1)
+    preact.retain_grad()
+    gate, up = preact[..., :ffn], preact[..., ffn:]
+    act = torch.nn.functional.silu(gate) * up * probs[..., None]
+    routed = torch.einsum("tef,ehf->teh", act, w2)
+    return preact, (routed * routing_map[..., None]).sum(dim=1)
+
+
+@pytest.mark.parametrize(
+    "num_recv_tokens,hidden,ffn,num_experts,max_hits", _FC1_FC2_PIPELINE_SHAPES
+)
+def test_fc1_fc2_gated_pipeline(monkeypatch, num_recv_tokens, hidden, ffn, num_experts, max_hits):
+    """End-to-end FC1 raw 2F -> FC2 gated activation via GroupedLinear.
+
+    Each layer's forward output and backward gradients are checked against a CPU fp32 autograd
+    reference. The reference runs on the CPU between the GPU forward and backward so no device
+    allocation perturbs the heap layout across that boundary.
+    """
+    monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "1")
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda")
+    fc1_meta = PermuteFreeMetadata(
+        routing_map=routing_map, num_experts=num_experts, activation="silu"
     )
-    prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    valid = routing.sorted_slot_ids < num_recv_tokens
+    prepare_moe_align(fc1_meta, _FLYDSL_FWD_BLOCK_M)
+    fc2_meta = dataclasses.replace(fc1_meta, route_space=True)
+    em_max, valid, _, _ = _route_slots(fc1_meta, num_recv_tokens)
+    slot_token = fc1_meta.sorted_slot_ids[valid].cpu().to(torch.int64)
+    slot_expert = _expert_per_route(fc1_meta, em_max)[valid].cpu().to(torch.int64)
+    m_splits = [num_recv_tokens // num_experts] * num_experts
+    m_splits[-1] += num_recv_tokens - sum(m_splits)
 
-    preact = torch.zeros(em_max, 2 * in_features, device="cuda", dtype=torch.bfloat16)
-    preact[valid] = torch.randn(
-        int(valid.sum().item()), 2 * in_features, device="cuda", dtype=torch.bfloat16
+    inp = torch.randn(
+        num_recv_tokens, hidden, device="cuda", dtype=torch.bfloat16, requires_grad=True
     )
-    grad_output = torch.randn(num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16)
-    weights = [
-        torch.randn(out_features, in_features, device="cuda", dtype=torch.bfloat16)
-        for _ in range(num_experts)
-    ]
-    W = torch.stack(weights, dim=0)
-
     probs = torch.rand(
         num_recv_tokens, num_experts, device="cuda", dtype=torch.float32, requires_grad=True
     )
-    res = permute_free_grouped_gemm_backward(
-        grad_output, routing=routing, weights=weights, num_gemms=num_experts,
-        hidden_states=preact, requires_dgrad=True,
-        fc2_activation="silu", dispatched_probs=probs,
+    fc1 = GroupedLinear(
+        num_experts, hidden, 2 * ffn, bias=False, params_dtype=torch.bfloat16, device="cuda"
     )
-    # Reference: fc2_dgrad -> standalone gated act-bwd.
-    dgrad_f = permute_free_grouped_gemm_bf16_fc2_dgrad(grad_output, W, routing)
-    dpre_ref, dprob_ref = permute_free_gated_act_bwd(
-        dgrad_f, preact, routing, activation="silu", dispatched_probs=probs.detach()
+    fc2 = GroupedLinear(
+        num_experts, ffn, hidden, bias=False, params_dtype=torch.bfloat16, device="cuda"
     )
-    assert res.dgrad.shape == (em_max, 2 * in_features)
-    assert res.grad_probs is not None
-    assert res.grad_probs.shape == (num_recv_tokens, num_experts)
-    assert _rel_l2(res.dgrad[valid], dpre_ref[valid]) < 2e-2
-    assert _rel_l2(res.grad_probs, dprob_ref) < 2e-2
+    with torch.no_grad():
+        for i in range(num_experts):
+            getattr(fc1, f"weight{i}").normal_(0, 0.05)
+            getattr(fc2, f"weight{i}").normal_(0, 0.05)
 
-    # No prob grad requested -> grad_probs suppressed.
-    res_nop = permute_free_grouped_gemm_backward(
-        grad_output, routing=routing, weights=weights, num_gemms=num_experts,
-        hidden_states=preact, requires_dgrad=True,
-        fc2_activation="silu", dispatched_probs=probs.detach(),
-    )
-    assert res_nop.grad_probs is None
-    assert _rel_l2(res_nop.dgrad[valid], dpre_ref[valid]) < 2e-2
+    preact = fc1(inp, m_splits, permute_free_metadata=fc1_meta)
+    preact.retain_grad()
+    out = fc2(preact, m_splits, permute_free_metadata=fc2_meta, dispatched_probs=probs)
 
-
-def test_route_list_gated_act_bwd_gelu():
-    """Gelu (tanh) variant of the standalone gated-activation backward (gelu path)."""
-    torch.manual_seed(79)
-    num_recv_tokens, in_features = 128, 128
-    num_experts, max_hits = 8, 3
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=39)
-    routing = MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts)
-    routing = prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    em_max = int(routing.sorted_slot_ids.shape[0])
-    slot_token = routing.sorted_slot_ids
-    slot_expert = _expert_per_route(routing, em_max)
-    valid = slot_token < num_recv_tokens
-    tok = slot_token.to(torch.int64).clamp_(0, num_recv_tokens - 1)
-    exp = slot_expert.to(torch.int64).clamp_min(0)
-
-    gate = torch.randn(em_max, in_features, device="cuda", dtype=torch.float32)
-    up = torch.randn(em_max, in_features, device="cuda", dtype=torch.float32)
-    gate = (gate * valid[:, None].float()).requires_grad_(True)
-    up = (up * valid[:, None].float()).requires_grad_(True)
-    probs = torch.rand(
-        num_recv_tokens, num_experts, device="cuda", dtype=torch.float32, requires_grad=True
-    )
-    grad_out = torch.zeros(em_max, in_features, device="cuda", dtype=torch.bfloat16)
-    grad_out[valid] = torch.randn(
-        int(valid.sum().item()), in_features, device="cuda", dtype=torch.bfloat16
+    inp_ref = inp.detach().cpu().float().requires_grad_(True)
+    probs_ref = probs.detach().cpu().float().requires_grad_(True)
+    w1_ref = _stack_expert_weights(fc1, num_experts).requires_grad_(True)
+    w2_ref = _stack_expert_weights(fc2, num_experts).requires_grad_(True)
+    preact_ref, out_ref = _moe_gated_reference(
+        inp_ref, probs_ref, w1_ref, w2_ref, routing_map.cpu().float(), ffn
     )
 
-    pr = probs[tok, exp]
-    act = (
-        torch.nn.functional.gelu(gate, approximate="tanh")
-        * up
-        * pr[:, None]
-        * valid[:, None].float()
-    )
-    (act * grad_out.float()).sum().backward()
-    dpre_ref = torch.cat([gate.grad, up.grad], dim=1)
+    assert preact.shape[1] == 2 * ffn
+    _assert_bf16_close(preact[valid].detach().cpu(), preact_ref.detach()[slot_token, slot_expert])
+    _assert_bf16_close(out.detach().cpu(), out_ref.detach())
 
-    preact = torch.cat([gate.detach(), up.detach()], dim=1).to(torch.bfloat16)
-    dpre, dprob = permute_free_gated_act_bwd(
-        grad_out, preact, routing, activation="gelu", dispatched_probs=probs.detach()
-    )
-    assert dpre.shape == (em_max, 2 * in_features)
-    assert _rel_l2(dpre[valid], dpre_ref[valid]) < 3e-2
-    assert _rel_l2(dprob, probs.grad) < 3e-2
+    out_ref.sum().backward()
+    out.float().sum().backward()
+
+    _assert_bf16_close(inp.grad.cpu(), inp_ref.grad)
+    _assert_bf16_close(probs.grad.cpu(), probs_ref.grad)
+    _assert_bf16_close(preact.grad[valid].cpu(), preact_ref.grad[slot_token, slot_expert])
+    for mod, ref in ((fc1, w1_ref), (fc2, w2_ref)):
+        wgrad = _stack_expert_grads(mod, num_experts, to_cpu=True)
+        _assert_bf16_close(wgrad, ref.grad)
 
 
-# ---------------------------------------------------------------------------
-# Module-level weight-gradient accumulation: grouped weight (-> main_grad) vs.
-# separate per-expert weights (-> autograd .grad).
-# ---------------------------------------------------------------------------
-def _make_grouped_linear(num_gemms, in_features, out_features, *, grouped, fuse_wgrad):
-    mod = GroupedLinear(
-        num_gemms,
-        in_features,
-        out_features,
-        bias=False,
-        params_dtype=torch.bfloat16,
-        device="cuda",
-        fuse_wgrad_accumulation=fuse_wgrad,
-        single_grouped_weight=grouped,
-    )
-    return mod
+@pytest.mark.parametrize(
+    "fuse_wgrad_accumulation",
+    [pytest.param(True, id="fused"), pytest.param(False, id="nonfused")],
+)
+def test_grouped_weight_grad_matches_ungrouped(monkeypatch, fuse_wgrad_accumulation):
+    """``single_grouped_weight`` wgrad matches the ungrouped per-expert ``.grad``.
 
+    The permute-free backward writes the whole ``[E, out, in]`` wgrad to the grouped param
+    directly (the GEMM only sees detached per-expert views), so only the sink differs:
 
-def test_grouped_weight_main_grad_matches_ungrouped_grad(monkeypatch):
-    """Permute-free wgrad lands in the grouped param's ``main_grad`` and matches the
-    ungrouped autograd ``.grad`` expert-for-expert (same kernel dW, different sink)."""
+    * fused (``fuse_wgrad_accumulation=True``): it lands in ``main_grad`` (fp32).
+    * nonfused: it lands in the autograd ``.grad`` (bf16) and accumulates across backwards.
+    """
     monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "1")
     # single_grouped_weight requires this gate, else the module falls back to per-expert params.
     monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
-    torch.manual_seed(41)
 
     # The fwd/dgrad tiles need both contraction dims (in for fwd, out for dgrad) >= 128 and a
     # multiple of block_k (64); use 128-wide features.
     num_recv_tokens, in_features, out_features = 128, 128, 128
     num_experts, max_hits = 8, 3
+    grouped_shape = (num_experts, out_features, in_features)
 
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=13)
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda")
     num_routes = int(routing_map.sum().item())
     m_splits = [num_recv_tokens // num_experts] * num_experts
 
@@ -1039,122 +736,67 @@ def test_grouped_weight_main_grad_matches_ungrouped_grad(monkeypatch):
     inp = torch.randn(
         num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
     )
-    # Shared initial weights for both modules (so the kernel dW is identical).
-    W = torch.randn(num_experts, out_features, in_features, device="cuda", dtype=torch.bfloat16)
-    # Shared upstream gradient over the dense route-ordered range.
-    g = torch.randn(num_routes, out_features, device="cuda", dtype=torch.bfloat16)
+    # Shared initial weights (so the kernel dW is identical) and upstream gradient.
+    weights = torch.randn(grouped_shape, device="cuda", dtype=torch.bfloat16)
+    grad_output = torch.randn(num_routes, out_features, device="cuda", dtype=torch.bfloat16)
 
-    # --- ungrouped: separate per-expert params, wgrad via autograd .grad ---
-    mod_a = _make_grouped_linear(
-        num_experts, in_features, out_features, grouped=False, fuse_wgrad=False
-    )
-    with torch.no_grad():
-        for i in range(num_experts):
-            getattr(mod_a, f"weight{i}").copy_(W[i])
-    routing_a = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
-    out_a = mod_a(inp, m_splits, permute_free_metadata=routing_a)
-    # Block-padded canonical: the module output is [em_max, out] in padded slot order; the valid
-    # (expert-ascending) slots line up with the dense upstream grad g. Slicing [:num_routes]
-    # would cut across the padding gaps, so gather the valid slots instead.
-    valid_a = routing_a.sorted_slot_ids < num_recv_tokens
-    (out_a[valid_a].float() * g.float()).sum().backward()
-    grad_a = torch.stack(
-        [getattr(mod_a, f"weight{i}").grad.float() for i in range(num_experts)], dim=0
-    )
+    def run(mod, weight_views):
+        with torch.no_grad():
+            for view, init in zip(weight_views, weights):
+                view.copy_(init)
+        routing = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
+        out = mod(inp, m_splits, permute_free_metadata=routing)
+        # Block-padded canonical: the output is [em_max, out] in padded slot order, and the
+        # valid (expert-ascending) slots line up with the dense upstream grad. Slicing
+        # [:num_routes] would cut across the padding gaps, so gather the valid slots instead.
+        valid = routing.sorted_slot_ids < num_recv_tokens
+        (out[valid].float() * grad_output.float()).sum().backward()
+        return routing, valid
 
-    # --- grouped: single grouped param, wgrad accumulated into main_grad ---
-    mod_b = _make_grouped_linear(
-        num_experts, in_features, out_features, grouped=True, fuse_wgrad=True
-    )
-    with torch.no_grad():
-        for i, view in enumerate(mod_b._get_weight_tensors()):
-            view.copy_(W[i])
-    mod_b.weight.main_grad = torch.zeros(
-        num_experts, out_features, in_features, device="cuda", dtype=torch.float32
-    )
-    mod_b.weight.grad_added_to_main_grad = False
-    routing_b = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
-    out_b = mod_b(inp, m_splits, permute_free_metadata=routing_b)
-    valid_b = routing_b.sorted_slot_ids < num_recv_tokens
-    (out_b[valid_b].float() * g.float()).sum().backward()
-
-    # The grouped param collects grad in main_grad, not in .grad.
-    assert mod_b.weight.grad is None
-    assert getattr(mod_b.weight, "grad_added_to_main_grad", False) is True
-    main_grad = mod_b.weight.main_grad.view(num_experts, out_features, in_features).float()
-
-    # Both paths fold the same bf16 kernel dW into their sink (grouped -> fp32 main_grad,
-    # ungrouped -> bf16 .grad), so they match to within bf16 rounding (~1e-3 relative).
-    assert _rel_l2(main_grad, grad_a) < 5e-3
-    # And every expert actually received a non-zero gradient (guards against frozen experts).
-    for e in range(num_experts):
-        assert main_grad[e].abs().sum() > 0, f"expert {e} has a zero main_grad (frozen)."
-
-
-def test_grouped_weight_nonfused_grad_matches_ungrouped(monkeypatch):
-    """single_grouped_weight without fuse_wgrad_accumulation routes the [E, out, in] wgrad into
-    the grouped param's autograd ``.grad`` (the GEMM only sees detached per-expert views), and it
-    must match the ungrouped per-expert ``.grad`` expert-for-expert and accumulate across
-    backwards."""
-    monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "1")
-    # single_grouped_weight requires this gate, else the module falls back to per-expert params.
-    monkeypatch.setenv("NVTE_GROUPED_LINEAR_SINGLE_PARAM", "1")
-    torch.manual_seed(43)
-
-    # 128-wide features to satisfy the fwd/dgrad tile (K>=128, multiple of block_k=64).
-    num_recv_tokens, in_features, out_features = 128, 128, 128
-    num_experts, max_hits = 8, 3
-    m_splits = [num_recv_tokens // num_experts] * num_experts
-
-    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda", seed=17)
-    num_routes = int(routing_map.sum().item())
-    # inp drives autograd for the grouped path (detached views carry no grad edge).
-    inp = torch.randn(
-        num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
-    )
-    W = torch.randn(num_experts, out_features, in_features, device="cuda", dtype=torch.bfloat16)
-    g = torch.randn(num_routes, out_features, device="cuda", dtype=torch.bfloat16)
+    def make(*, single_grouped_weight, fuse):
+        return GroupedLinear(
+            num_experts,
+            in_features,
+            out_features,
+            bias=False,
+            params_dtype=torch.bfloat16,
+            device="cuda",
+            fuse_wgrad_accumulation=fuse,
+            single_grouped_weight=single_grouped_weight,
+        )
 
     # --- ungrouped reference: separate per-expert params, wgrad via autograd .grad ---
-    mod_a = _make_grouped_linear(
-        num_experts, in_features, out_features, grouped=False, fuse_wgrad=False
-    )
-    with torch.no_grad():
-        for i in range(num_experts):
-            getattr(mod_a, f"weight{i}").copy_(W[i])
-    routing_a = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
-    out_a = mod_a(inp, m_splits, permute_free_metadata=routing_a)
-    # Block-padded canonical: gather the valid (expert-ascending) slots rather than slicing
-    # [:num_routes], which would cut across the padding gaps.
-    valid_a = routing_a.sorted_slot_ids < num_recv_tokens
-    (out_a[valid_a].float() * g.float()).sum().backward()
-    grad_a = torch.stack(
-        [getattr(mod_a, f"weight{i}").grad.float() for i in range(num_experts)], dim=0
-    )
+    ungrouped_mod = make(single_grouped_weight=False, fuse=False)
+    run(ungrouped_mod, [getattr(ungrouped_mod, f"weight{i}") for i in range(num_experts)])
+    grad_ref = _stack_expert_grads(ungrouped_mod, num_experts)
 
-    # --- grouped, no fusion: wgrad accumulates into the grouped param's .grad ---
-    mod_b = _make_grouped_linear(
-        num_experts, in_features, out_features, grouped=True, fuse_wgrad=False
-    )
-    with torch.no_grad():
-        for i, view in enumerate(mod_b._get_weight_tensors()):
-            view.copy_(W[i])
-    routing_b = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
-    out_b = mod_b(inp, m_splits, permute_free_metadata=routing_b)
-    valid_b = routing_b.sorted_slot_ids < num_recv_tokens
-    (out_b[valid_b].float() * g.float()).sum().backward()
+    # --- grouped: single param, wgrad sink selected by fuse_wgrad_accumulation ---
+    grouped_mod = make(single_grouped_weight=True, fuse=fuse_wgrad_accumulation)
+    grouped_weight = grouped_mod.weight
+    if fuse_wgrad_accumulation:
+        grouped_weight.main_grad = torch.zeros(grouped_shape, device="cuda", dtype=torch.float32)
+        grouped_weight.grad_added_to_main_grad = False
+    _, valid = run(grouped_mod, list(grouped_mod._get_weight_tensors()))
 
-    # Grad lands in the grouped param's .grad (not main_grad), shape [E, out, in].
-    assert getattr(mod_b.weight, "grad_added_to_main_grad", False) is False
-    assert mod_b.weight.grad is not None
-    assert tuple(mod_b.weight.grad.shape) == (num_experts, out_features, in_features)
-    grad_b = mod_b.weight.grad.view(num_experts, out_features, in_features).float()
-    assert _rel_l2(grad_b, grad_a) < 1e-3
+    if fuse_wgrad_accumulation:
+        assert grouped_weight.grad is None
+        assert getattr(grouped_weight, "grad_added_to_main_grad", False) is True
+        grouped_grad = grouped_weight.main_grad.view(grouped_shape).float()
+    else:
+        assert getattr(grouped_weight, "grad_added_to_main_grad", False) is False
+        assert tuple(grouped_weight.grad.shape) == grouped_shape
+        grouped_grad = grouped_weight.grad.view(grouped_shape).float()
+
+    # Same kernel dW on both sides, so the only difference is the sink dtype (exact for the bf16
+    # .grad, one bf16 rounding of the reference for the fp32 main_grad): no absolute floor needed.
+    assert_close(grouped_grad, grad_ref, **dtype_tols(torch.bfloat16))
     for e in range(num_experts):
-        assert grad_b[e].abs().sum() > 0, f"expert {e} has a zero grad (frozen)."
+        assert grouped_grad[e].abs().sum() > 0, f"expert {e} has a zero grad (frozen)."
 
-    # A second backward without zero_grad accumulates in place (grad-accumulation semantics).
-    out_b2 = mod_b(inp, m_splits, permute_free_metadata=routing_b)
-    (out_b2[valid_b].float() * g.float()).sum().backward()
-    grad_b2 = mod_b.weight.grad.view(num_experts, out_features, in_features).float()
-    assert _rel_l2(grad_b2, 2.0 * grad_a) < 1e-3
+    if not fuse_wgrad_accumulation:
+        # A second backward without zero_grad accumulates in place (grad-accumulation semantics).
+        routing = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
+        out = grouped_mod(inp, m_splits, permute_free_metadata=routing)
+        (out[valid].float() * grad_output.float()).sum().backward()
+        accumulated = grouped_weight.grad.view(grouped_shape).float()
+        assert_close(accumulated, 2.0 * grad_ref, **dtype_tols(torch.bfloat16))

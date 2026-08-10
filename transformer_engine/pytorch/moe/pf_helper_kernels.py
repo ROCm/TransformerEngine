@@ -402,7 +402,7 @@ def _gated_act_prob_fwd_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
-    """Recompute the fused gated-activation FC1 output ``act(gate) * up * prob`` from preact.
+    """Compute the fused gated-activation FC1 output ``act(gate) * up * prob`` from preact.
 
     This is the *forward* counterpart of :func:`_gated_act_prob_bwd_kernel`: given the saved
     ``2F`` pre-activation ``[gate | up]`` and the per-route prob it re-materialises the
