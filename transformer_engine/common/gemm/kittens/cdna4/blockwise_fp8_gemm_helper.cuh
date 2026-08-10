@@ -83,16 +83,9 @@ __device__ inline float read_elem(const void *p, int dtype, int idx) {
     return reinterpret_cast<const float *>(p)[idx];
 }
 
-// cuBLAS converts the GEMM result to the output type before accumulating beta*C, so the
-// blockwise reference does the same (see qgemm() in
-// tests/pytorch/references/blockwise_fp8_gemm_reference.py). Keeping the accumulator in
-// fp32 across the beta add is more accurate but does not reproduce that result, so the
-// round is deliberate rather than an oversight.
-//
-// This translation unit is built with -ffast-math (see gemm/kittens/CMakeLists.txt), which
-// folds fpext(fptrunc(x)) straight back to x -- written plainly, the round-trip below emits
-// no conversion at all and the whole epilogue silently reverts to an fp32 accumulate. The
-// empty asm makes the narrowed value opaque so the conversion has to happen.
+// Deliberate: the reference rounds to the output type before the beta*C add
+// (blockwise_fp8_gemm_reference.py::qgemm). This TU is built with -ffast-math, which folds
+// fpext(fptrunc(x)) back to x, so the empty asm is required to keep the conversion.
 template <typename OType>
 __device__ inline float round_to_out_dtype(float v) {
     if constexpr (std::is_same_v<OType, float>) {

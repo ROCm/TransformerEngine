@@ -346,9 +346,7 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
 
     int result = memcmp(out_grouped_h.data() + data_offset, out_ref_h.data() + data_offset,
                         tensor_elts * sizeof(OutputType));
-    // memcmp is the assertion; the loop below only locates the mismatch. Comparing with != as
-    // the gate would let -0.0 vs +0.0 and distinct NaN payloads pass after memcmp caught them,
-    // and the e8m0 scale bytes are drawn across the full [0,255] range including NaN.
+    // memcmp is the assertion; != would let -0.0 vs +0.0 and NaN payloads through.
     ASSERT_EQ(result, 0) << "Bitwise mismatch in tensor " << t;
     for (size_t i = 0; i < tensor_elts; ++i) {
       if (out_grouped_h[data_offset + i] != out_ref_h[data_offset + i]) {

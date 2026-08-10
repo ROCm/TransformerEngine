@@ -443,10 +443,8 @@ else() #USE_ROCM
   include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/hipify/hipify.cmake")
   TE_Hipify(${CMAKE_CURRENT_SOURCE_DIR})
 
-  # TE_Hipify runs at configure time via execute_process, so CMake holds no dependency on the
-  # CUDA sources it reads. Without registering them, editing a source here leaves the previously
-  # generated _hip.* in place and the build silently compiles the old revision. Generated outputs
-  # are excluded: they are rewritten during configure, so listing them would re-trigger forever.
+  # TE_Hipify runs at configure time, so its inputs must be registered or edits go unnoticed.
+  # Generated _hip.* are excluded to avoid re-triggering configure on their own output.
   set(_hipify_deps)
   foreach(_src ${transformer_engine_SOURCES})
     get_filename_component(_abs "${CMAKE_CURRENT_SOURCE_DIR}/${_src}" ABSOLUTE)

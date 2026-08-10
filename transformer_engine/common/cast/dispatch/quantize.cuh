@@ -140,8 +140,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
                  "NVFP4 4over6 quantization does not support stochastic rounding.");
 #ifdef __HIP_PLATFORM_AMD__
-      // The fast-math error path is an optimisation of candidate selection, not a
-      // capability; refuse it rather than silently scoring with the exact one.
+      // Refuse the fast-math error path rather than silently scoring with the exact one.
       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.nvfp4_4over6_err_use_fast_math,
                  "NVFP4 4over6 fast-math error mode is not supported on ROCm.");
 #endif
@@ -160,9 +159,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
           (output_tensor->has_data() ||
            (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
-      // Launch NVFP4 quantize kernel. Upstream's dedicated 4over6 and optimized
-      // quantize_transpose kernels are CUDA-only (Blackwell); ROCm falls through to the portable
-      // blockwise path below, which implements 4over6 and row-scaled NVFP4 itself.
+      // Launch NVFP4 quantize kernel. ROCm uses the portable blockwise path below.
 #ifndef __HIP_PLATFORM_AMD__
       if (nvfp4_use_4over6) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
@@ -327,8 +324,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
                  "NVFP4 4over6 quantization does not support stochastic rounding.");
 #ifdef __HIP_PLATFORM_AMD__
-      // The fast-math error path is an optimisation of candidate selection, not a
-      // capability; refuse it rather than silently scoring with the exact one.
+      // Refuse the fast-math error path rather than silently scoring with the exact one.
       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.nvfp4_4over6_err_use_fast_math,
                  "NVFP4 4over6 fast-math error mode is not supported on ROCm.");
 #endif
@@ -342,9 +338,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
           (output_tensor->has_data() ||
            (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
-      // Launch NVFP4 quantize kernel. Upstream's dedicated 4over6 and optimized
-      // quantize_transpose kernels are CUDA-only (Blackwell); ROCm falls through to the portable
-      // blockwise path below, which implements 4over6 and row-scaled NVFP4 itself.
+      // Launch NVFP4 quantize kernel. ROCm uses the portable blockwise path below.
 #ifndef __HIP_PLATFORM_AMD__
       if (nvfp4_use_4over6) {
         if (quant_config_cpp.nvfp4_2d_quantization) {

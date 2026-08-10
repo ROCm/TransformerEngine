@@ -888,12 +888,9 @@ void compare_nvfp4_4over6_candidates(const std::string& name,
     size_t wrong_candidate = 0;
     size_t expected_map4 = 0;
     size_t expected_map6 = 0;
-    // Blocks whose two candidates encode to the same bytes: a selection cannot be
-    // read back out of them, so they neither pin the kernel nor weaken the check.
+    // Both candidates encode identically; no selection is observable.
     size_t identical_candidates = 0;
-    // Blocks that do encode differently but whose candidate errors are too close
-    // for the host to call. These are the only ones where the kernel keeps any
-    // latitude, so their count is the coverage this check gives up.
+    // Candidate errors too close for the host to call.
     size_t unpinned_blocks = 0;
 
     for (size_t row = 0; row < rows; ++row) {
@@ -1169,9 +1166,7 @@ void performTest(float (*OP)(const float),
                                e4m3_max,
                                NVFP4FourOverSixCandidate::Map6);
 
-        // The kernel is free to pick either candidate per block, but not freely:
-        // it must pick the one with the smaller round-trip error. Derive that
-        // choice here so the checker can hold it to exactly one reference.
+        // Reference choice: the candidate with the smaller round-trip error.
         const bool use_mse = mode == kNVTENVFP44Over6MinMSE;
         expected_decisions = compute_4over6_expected_decisions<InputType>(
             OP, input.rowwise_cpu_dptr<InputType>(), rows, cols, scales_stride, ref_amax.data(),
@@ -1206,8 +1201,7 @@ void performTest(float (*OP)(const float),
     hipDeviceProp_t prop;
     hipGetDeviceProperties(&prop, 0);
     const bool is_gfx950 = prop.major == 9 && prop.minor == 5;
-    // 4over6 excluded: the quantize dispatch refuses it combined with stochastic
-    // rounding, the same way this test already excludes it from fast math below.
+    // The quantize dispatch refuses 4over6 combined with stochastic rounding.
     for (bool use_stochastic_rounding : (is_gfx950 && !use_4over6
                                              ? std::vector<bool>{false, true}
                                              : std::vector<bool>{false})) {
