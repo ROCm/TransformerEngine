@@ -10,21 +10,19 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 
-# ceildiv is the canonical cdiv from the shared layer
-def cdiv(numer: int, denom: int) -> int:
-    return (numer + denom - 1) // denom
-
-
-ceildiv = cdiv
-
-def divmod(a, b):
-    """Integer divmod that works on DSL values (e.g. ``Int32``).
-
-    The builtin ``divmod`` rejects DSL scalar types, so this uses the overloaded
-    ``//`` / ``%`` operators to emit the corresponding ops.
-    """
-    return (a // b, a % b)
-
+# Dtype-independent primitives live in the shared module; re-export them so the
+# GEMM kernels can keep importing them from this per-dtype module unchanged.
+from .gemm_common_utils import (
+    barrier,
+    cdiv,
+    ceildiv,
+    divmod,
+    encode_waitcnt,
+    min,
+    pack_i32x4_i32x8,
+    swizzle_128,
+    xcd_swizzle,
+)
 
 def preshuffle_b(b_t):
     """Permute row-major ``B_T`` ``(N, K)`` for ``b_preshuffled=True``."""
@@ -49,13 +47,11 @@ def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
     return fx.Tensor(fx.make_view(iter_f8, fx.get_layout(t_i8)))
 
 
-def swizzle_128(row, col):
-    offset = row * 128 + col
-    swizzle = ((offset % (16 * 128)) >> 8) << 4
-    swizzled_offset = offset ^ swizzle
-    return swizzled_offset // 128, swizzled_offset % 128
-
-
+# Returns, for one lane (lane_id, wave_id), a list of n_rounds swizzled flat
+# global offsets indexed by DMA pass: offsets[step] = r*K + c where (r,c) =
+# swizzle_128(row, col). Each is the static per-thread/per-pass source of one
+# 16-byte load; the dynamic K-tile base is added later as soffset. K is the
+# global row stride (a_leading_dim / b_leading_dim), not the 128 tile width.
 def compute_global_swizzle(lane_id, wave_id, K, n_rounds, preshuffled):
     offsets = []
     n_waves = fx.block_dim.x // 64
@@ -118,11 +114,6 @@ class G2SLoader:
         src = fx.slice(self.gl_src, (None, fx.Int32(self.gl_offsets[step])))
         dst = self._lds_dst_at(lds_dst, step)
         fx.copy(self.g2lds_atom, src, dst, soffset=fx.Int32(k_offset))
-
-
-def pack_i32x4_i32x8(lo, hi):
-    # Pack two i32x4 as one i32x8
-    return lo.shuffle(hi, list(range(8)))
 
 
 class S2RLoader:
@@ -289,16 +280,6 @@ class StoreC:
                     scaled = (vec_f32[i] * (a_scales[ti][i] * b_scales[tj])).to(fx.BFloat16)
                     c_index = (row + i) * self.c_cols + col
                     self._store_bf16(scaled, arith.select(col_valid, c_index, oob))
-
-
-def wait_barrier(count):
-    _llvm.inline_asm(
-        res=None,
-        operands_=[],
-        asm_string=f"s_waitcnt vmcnt({count})\ns_barrier",
-        constraints="",
-        has_side_effects=True,
-    )
 
 
 class Mfma16x16x128:

@@ -9,24 +9,19 @@ from flydsl.expr import const_expr, range_constexpr
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 
-
-def cdiv(numer: int, denom: int) -> int:
-    return (numer + denom - 1) // denom
-
-
-ceildiv = cdiv
-
-
-def divmod(a, b):
-    return (a // b, a % b)
-
-
-def swizzle_128(row, col_in_bytes):
-    """HK 128-byte row XOR swizzle; ``col_in_bytes`` is a byte coordinate."""
-    offset = row * 128 + col_in_bytes
-    swizzle = ((offset % (16 * 128)) >> 8) << 4
-    swizzled_offset = offset ^ swizzle
-    return swizzled_offset // 128, swizzled_offset % 128
+# Dtype-independent primitives live in the shared module; re-export them so the
+# GEMM kernels can keep importing them from this per-dtype module unchanged.
+from .gemm_common_utils import (
+    barrier,
+    cdiv,
+    ceildiv,
+    divmod,
+    encode_waitcnt,
+    min,
+    pack_i32x4_i32x8,
+    swizzle_128,
+    xcd_swizzle,
+)
 
 
 def make_bf16_buffer_tensor(arg_bf16):
@@ -145,10 +140,6 @@ class G2SLoader:
             self._lds_dst_at(lds_dst, step),
             soffset=fx.Int32(byte_offset),
         )
-
-
-def pack_i32x4_i32x8(lo, hi):
-    return lo.shuffle(hi, list(range(8)))
 
 
 class S2RLoader:

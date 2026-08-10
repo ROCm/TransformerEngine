@@ -42,6 +42,8 @@ from .fp8_gemm_utils import (
     make_fp8_buffer_tensor,
     pack_i32x4_i32x8,
     swizzle_128,
+    xcd_swizzle,
+    barrier
 )
 
 
@@ -76,7 +78,7 @@ def _compile_mx32_scale_pack_kernel(
     stride0: int,
     stride1: int,
 ):
-    """Build one fused raw-E8M0 -> HK-scale packing kernel.
+    """Build one fused scale packing kernel.
 
     One GPU thread produces one final ``uint32`` word in the GEMM-consumed
     ``[K/128, dim]`` layout.  There is no intermediate ``scale_iter`` tensor
@@ -268,88 +270,6 @@ def pack_mx32_scales_for_hk(
         stream=stream,
     )
     return packed
-
-def _encode_waitcnt(vmcnt=63, lgkmcnt=15):
-    """Encode the CDNA4/gfx950 ``S_WAITCNT`` SIMM16 operand.
-
-    ``rocdl.s_waitcnt`` accepts the raw 16-bit immediate operand of the
-    32-bit ``S_WAITCNT`` ISA instruction. On CDNA4, that SIMM16 field is:
-
-        SIMM16[3:0]   = vmcnt[3:0]
-        SIMM16[6:4]   = expcnt[2:0]
-        SIMM16[11:8]  = lgkmcnt[3:0]
-        SIMM16[15:14] = vmcnt[5:4]
-
-    ``vmcnt`` is therefore one six-bit counter split across two noncontiguous
-    fields; bits [5:4] are placed in SIMM16[15:14], while bits [3:0] remain
-    in SIMM16[3:0].
-
-    A wait-counter field set to its maximum representable value is effectively
-    unconstrained: the instruction does not wait on that counter. This helper
-    always encodes ``expcnt=7`` and defaults to ``vmcnt=63`` and ``lgkmcnt=15``,
-    so callers specify only the counters on which they intend to wait.
-
-    For example, ``_encode_waitcnt(lgkmcnt=0)`` returns ``0xC07F``, which the
-    assembler renders as ``s_waitcnt lgkmcnt(0)``.
-    See: https://llvm.org/docs/AMDGPU/gfx9_waitcnt.html
-    """
-    if not 0 <= vmcnt <= 63:
-        raise ValueError(f"vmcnt must be in [0, 63], got {vmcnt}")
-    if not 0 <= lgkmcnt <= 15:
-        raise ValueError(f"lgkmcnt must be in [0, 15], got {lgkmcnt}")
-
-    return (
-        (7 << 4)  # expcnt=7 -> SIMM16[6:4] (unconstrained)
-        | (vmcnt & 0x0F)  # vmcnt[3:0] -> SIMM16[3:0]
-        | ((lgkmcnt & 0x0F) << 8)  # lgkmcnt[3:0] -> SIMM16[11:8]
-        | ((vmcnt & 0x30) << 10)  # vmcnt[5:4] -> SIMM16[15:14]
-    )
-
-
-# Keep the documented gfx950 encoding invariant executable and import-time cheap.
-assert _encode_waitcnt(lgkmcnt=0) == 0xC07F
-
-
-def _barrier(vmcnt=63, lgkmcnt=15):
-    if vmcnt != 63 or lgkmcnt != 15:
-        rocdl.s_waitcnt(_encode_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt))
-    rocdl.s_barrier()
-
-def _min(a, b):
-    return arith.select(a < b, a, b)
-
-
-def _divmod(a, b):
-    return a // b, a % b
-
-
-def _xcd_swizzle(num_pid_m, num_pid_n):
-    NUM_XCDS = 8
-    WGM = 4
-    NUM_CUS = 32 * NUM_XCDS
-    SWIZZLE_THRESHOLD = 4 * NUM_CUS
-
-    wgid = fx.block_idx.x
-    num_wg = num_pid_m * num_pid_n
-
-    # Simple row-major path.
-    simple_m, simple_n = _divmod(wgid, num_pid_n)
-
-    # XCD-remapped grouped-M path.
-    intra_xcd, xcd = _divmod(wgid, NUM_XCDS)
-    wgid_remap = xcd * (num_wg // NUM_XCDS) + intra_xcd
-    num_wgid_in_group = WGM * num_pid_n
-    group_id, intra_group = _divmod(wgid_remap, num_wgid_in_group)
-    first_pid_m = group_id * WGM
-    group_size_m = _min(num_pid_m - first_pid_m, WGM)
-    pid_n, intra_group_m = _divmod(intra_group, group_size_m)
-    pid_m = first_pid_m + intra_group_m
-
-    use_simple = (num_wg < SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
-    return (
-        arith.select(use_simple, simple_m, pid_m),
-        arith.select(use_simple, simple_n, pid_n),
-    )
 
 
 def _compile_kernel(
@@ -623,7 +543,7 @@ def _compile_kernel(
         num_blocks_m = c_m // BLOCK_M
         num_blocks_n = c_n // BLOCK_N
 
-        pid_m, pid_n = _xcd_swizzle(num_blocks_m, num_blocks_n)
+        pid_m, pid_n = xcd_swizzle(num_blocks_m, num_blocks_n)
 
         bx_m = pid_m * BLOCK_M
         by_n = pid_n * BLOCK_N
@@ -644,6 +564,11 @@ def _compile_kernel(
         a_leading_dim = _a_leading_dim(c_m)
         b_leading_dim = _b_leading_dim(c_n)
 
+        # gl_off_a/gl_off_b: per-lane lists of LOAD_PASSES_HALF swizzled flat
+        # global offsets, indexed by DMA pass. gl_off_a[step] is this lane's
+        # static 16-byte source for pass `step`; G2SLoader adds the dynamic
+        # K-tile base as soffset. Offsets are pre-swizzled so bytes land in the
+        # bank-conflict-free LDS slots the MFMA read (S2RLoader) expects.
         gl_off_a = compute_global_swizzle(
             lane,
             wave_id,
@@ -1083,7 +1008,7 @@ def _compile_kernel(
             #   next steady iteration or final tail.
 
             # Wait only far enough for the current page; the next-page refill may remain in flight.
-            _barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
+            barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             # Immediately issue MFMA-ready K+2 scale loads.
@@ -1146,7 +1071,7 @@ def _compile_kernel(
             # overwrite the current page's A-bottom half-page. Keep this wait as
             # late as possible to maximize read/compute overlap.
             rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
+            barrier(lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             a10 = pack_frag_halves(a10_x0, a10_x1)
@@ -1187,7 +1112,7 @@ def _compile_kernel(
             # Leave exactly the K+2 refill and scale loads outstanding. The following
             # LDS reads consume the already-ready next page, not the page being refilled.
             rocdl.sched_barrier(0)
-            _barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE + LOAD_PASSES_SCALES, lgkmcnt=0)
+            barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE + LOAD_PASSES_SCALES, lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             next_a00, next_as00 = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 0)
@@ -1240,7 +1165,7 @@ def _compile_kernel(
             return next_a0_regs, next_b0_regs, next_scales_ready, refill_scales
 
         def hk_one_k_tail_with_next(cur_a, cur_b, next_a, next_b, a0_regs, b0_regs, cur_scales, next_scales):
-            _barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
+            barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
 
             a00, a01, a02, a03, as00, as01, as02, as03 = a0_regs
             b00, b01, b02, b03, bs00, bs01, bs02, bs03 = b0_regs
@@ -1256,7 +1181,7 @@ def _compile_kernel(
             mfma_4n(_acc_idx(0, 3, 0), a03, as03, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
 
             rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
+            barrier(lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             a10, as10 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 0)
@@ -1270,7 +1195,7 @@ def _compile_kernel(
             mfma_4n(_acc_idx(1, 3, 0), a03, as03, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
 
             rocdl.sched_barrier(0)
-            _barrier(LOAD_PASSES_A_SUBTILE + LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
+            barrier(vmcnt=LOAD_PASSES_A_SUBTILE + LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             next_a00, next_as00 = load_a_subtile_mi_regs(next_a, next_scales, 0, 0)
@@ -1323,7 +1248,7 @@ def _compile_kernel(
             return next_a0_regs, next_b0_regs
 
         def hk_one_k_final(cur_a, cur_b, a0_regs, b0_regs, cur_scales):
-            _barrier(vmcnt=0, lgkmcnt=0)
+            barrier(vmcnt=0, lgkmcnt=0)
 
             a00, a01, a02, a03, as00, as01, as02, as03 = a0_regs
             b00, b01, b02, b03, bs00, bs01, bs02, bs03 = b0_regs
@@ -1336,7 +1261,7 @@ def _compile_kernel(
             b13, bs13 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 3)
 
             rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
+            barrier(lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             a10, as10 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 0)
@@ -1345,7 +1270,7 @@ def _compile_kernel(
             a13, as13 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 3)
 
             rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
+            barrier(lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             a_frags = (a00, a01, a02, a03, a10, a11, a12, a13)
@@ -1424,7 +1349,7 @@ def _compile_kernel(
         stage_a_subtile(fx.Index(BLOCK_K), 1, lds_a1)
 
         rocdl.sched_barrier(0)
-        _barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 4 * LOAD_PASSES_B_SUBTILE)
+        barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 4 * LOAD_PASSES_B_SUBTILE)
         rocdl.sched_barrier(0)
 
         # scales0 is already MFMA-ready; no byte extraction or broadcast is needed.
@@ -1438,7 +1363,7 @@ def _compile_kernel(
         a0_regs = load_a_subtile_regs(lds_a0, scales0, 0)
 
         rocdl.sched_barrier(0)
-        _barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 3 * LOAD_PASSES_B_SUBTILE)
+        barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 3 * LOAD_PASSES_B_SUBTILE)
         rocdl.sched_barrier(0)
 
         # Complete the K0 carried-register seed with B-left.
