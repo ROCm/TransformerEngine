@@ -97,6 +97,10 @@ run_test_config(){
     run_default_fa 1 triton_kernels/test_utils.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 triton_kernels/test_norms.py
     NVTE_ROCM_ENABLE_MXFP8=1 NVTE_TEST_TRITON_AUTOTUNE=1 run_default_fa_lbl "autotune" 3 triton_kernels/test_norms.py
+    # The FlyDSL GEMM kernels currently require gfx950; on other archs
+    # general_gemm won't select FlyDSL, so gate on the same gfx950 check the
+    # MXFP8 tests use to avoid silently exercising the C++ backend instead.
+    check_mxfp8_supported && NVTE_USE_FLYDSL=1 NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "flydsl" 1 flydsl_kernels/test_gemm.py
     run_default_fa 1 test_parallel_cross_entropy.py
     NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 3 test_numerics.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py

@@ -1,4 +1,4 @@
-# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # License for AMD contributions = MIT. See LICENSE for more information
 
@@ -971,77 +971,3 @@ def test_flydsl_vs_pytorch_fp8_multidim(
     expected = torch.matmul(B_flat, A_flat.T)
 
     assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
-
-
-if __name__ == "__main__":
-    # Quick smoke tests using one case from each supported input family.
-    os.environ["NVTE_USE_FLYDSL"] = "1"
-    os.environ["NVTE_ROCM_ENABLE_MXFP8"] = "1"
-
-    test_flydsl_vs_pytorch_regular(
-        256,
-        512,
-        256,
-        "TN",
-        torch.float16,
-    )
-    test_flydsl_vs_pytorch_fp8(
-        256,
-        512,
-        256,
-        "TN",
-        (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2),
-    )
-    test_flydsl_vs_pytorch_regular_bias(
-        256,
-        512,
-        256,
-        "TN",
-        torch.bfloat16,
-    )
-    test_flydsl_vs_pytorch_fp8_bias(
-        256,
-        512,
-        256,
-        "TN",
-        (tex.DType.kFloat8E4M3, tex.DType.kFloat8E4M3),
-    )
-    test_flydsl_vs_pytorch_regular_gelu(
-        256,
-        512,
-        256,
-        "TN",
-        torch.bfloat16,
-    )
-    test_flydsl_vs_pytorch_fp8_gelu(
-        256,
-        512,
-        256,
-        "TN",
-        (tex.DType.kFloat8E4M3, tex.DType.kFloat8E4M3),
-    )
-
-    if has_mxfp8_support:
-        test_flydsl_vs_pytorch_mxfp8(
-            256,
-            512,
-            256,
-            "TN",
-            (tex.DType.kFloat8E5M2, tex.DType.kFloat8E4M3),
-        )
-        test_flydsl_vs_pytorch_mxfp8_bias(
-            256,
-            512,
-            256,
-            "TN",
-            (tex.DType.kFloat8E4M3, tex.DType.kFloat8E4M3),
-        )
-        test_flydsl_vs_pytorch_mxfp8_gelu(
-            256,
-            512,
-            256,
-            "TN",
-            (tex.DType.kFloat8E4M3, tex.DType.kFloat8E4M3),
-        )
-
-    print("All FlyDSL GEMM smoke tests passed!")
