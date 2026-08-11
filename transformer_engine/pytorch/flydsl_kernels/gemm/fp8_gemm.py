@@ -32,13 +32,13 @@ from .fp8_gemm_utils import (
     G2SLoader,
     S2RLoader,
     compute_global_swizzle,
+    divmod,
     make_fp8_buffer_tensor,
     pack_i32x4_i32x8,
     swizzle_128,
     xcd_swizzle,
-    barrier
+    barrier,
 )
-
 
 
 _BLOCK_M = 256
@@ -53,7 +53,7 @@ NUM_THREADS = 256
 WARP_SIZE = 64
 NUM_WAVES = NUM_THREADS // WARP_SIZE
 
-SUBTILE_M = 64 
+SUBTILE_M = 64
 SUBTILE_N = 64
 
 MFMA_M = 16
@@ -149,8 +149,7 @@ def _compile_kernel(
         output_fx_dtype = fx.Float32
     else:
         raise TypeError(
-            "FlyDSL FP8 supports only float16, bfloat16, and float32 "
-            f"outputs, got {output_dtype}"
+            f"FlyDSL FP8 supports only float16, bfloat16, and float32 outputs, got {output_dtype}"
         )
     NUM_THREADS = 256
     WARP_SIZE = 64
@@ -181,7 +180,9 @@ def _compile_kernel(
 
     assert K % BLOCK_K == 0, f"K must be a multiple of {BLOCK_K}, got {K}"
     NUM_K_TILES = K // BLOCK_K
-    assert NUM_K_TILES >= 4, f"K={K} gives {NUM_K_TILES} K128 tiles; the two-page pipeline needs at least 4"
+    assert (
+        NUM_K_TILES >= 4
+    ), f"K={K} gives {NUM_K_TILES} K128 tiles; the two-page pipeline needs at least 4"
 
     LDS_ELEMS_HALF = (BLOCK_M // 2) * BLOCK_K
     LOAD_PASSES_HALF = LDS_ELEMS_HALF // (NUM_THREADS * VEC_BYTES)
@@ -451,7 +452,9 @@ def _compile_kernel(
             return load_frag_at_byte_base(lds_b[half], half_row * fx.Index(BLOCK_K))
 
         def _acc_idx(subtile_id, mi, ni):
-            return subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
+            return (
+                subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
+            )
 
         def pinned_mfma(acc_idx, a_frag, b_frag):
             """Issue ordinary FP8 MFMA into the fixed physical accumulator bank."""
@@ -462,17 +465,12 @@ def _compile_kernel(
                     arith._to_raw(a_frag),
                     arith._to_raw(b_frag),
                 ],
-                (
-                    f"v_mfma_f32_16x16x128_f8f6f4 "
-                    f"a[{acc_pin}:{acc_pin + 3}], "
-                    f"$0, $1, "
-                    f"a[{acc_pin}:{acc_pin + 3}] "
-                    f"cbsz:{a_matrix_format} blgp:{b_matrix_format}"
-                ),
-                (
-                    f"v,v,~{{a{acc_pin}}},~{{a{acc_pin + 1}}},"
-                    f"~{{a{acc_pin + 2}}},~{{a{acc_pin + 3}}}"
-                ),
+                "v_mfma_f32_16x16x128_f8f6f4 "
+                f"a[{acc_pin}:{acc_pin + 3}], "
+                "$0, $1, "
+                f"a[{acc_pin}:{acc_pin + 3}] "
+                f"cbsz:{a_matrix_format} blgp:{b_matrix_format}",
+                f"v,v,~{{a{acc_pin}}},~{{a{acc_pin + 1}}},~{{a{acc_pin + 2}}},~{{a{acc_pin + 3}}}",
                 has_side_effects=True,
             )
 
@@ -486,17 +484,12 @@ def _compile_kernel(
                     arith._to_raw(a_frag),
                     arith._to_raw(b_frag),
                 ],
-                (
-                    f"v_mfma_f32_16x16x128_f8f6f4 "
-                    f"a[{dst_pin}:{dst_pin + 3}], "
-                    f"$0, $1, "
-                    f"a[{old_pin}:{old_pin + 3}] "
-                    f"cbsz:{a_matrix_format} blgp:{b_matrix_format}"
-                ),
-                (
-                    f"v,v,~{{a{dst_pin}}},~{{a{dst_pin + 1}}},"
-                    f"~{{a{dst_pin + 2}}},~{{a{dst_pin + 3}}}"
-                ),
+                "v_mfma_f32_16x16x128_f8f6f4 "
+                f"a[{dst_pin}:{dst_pin + 3}], "
+                "$0, $1, "
+                f"a[{old_pin}:{old_pin + 3}] "
+                f"cbsz:{a_matrix_format} blgp:{b_matrix_format}",
+                f"v,v,~{{a{dst_pin}}},~{{a{dst_pin + 1}}},~{{a{dst_pin + 2}}},~{{a{dst_pin + 3}}}",
                 has_side_effects=True,
             )
 
@@ -555,7 +548,6 @@ def _compile_kernel(
                 reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
                 fx.memref_store_vec(Vec.filled(1, value, output_fx_dtype), reg)
                 fx.copy(c_store_atom, reg, fx.slice(c_div, (None, fx.Int32(c_idx))))
-
 
         # Explicit register coordinates for HK-style four-quadrant mapping.
         # BLOCK_M/BLOCK_N are 256x256.  Four waves map to warp positions
@@ -851,7 +843,7 @@ def _compile_kernel(
             #
             # Finalize accumulators in their own physical AGPR slots, but delay
             # each AGPR read/store until several independent final MFMAs have
-            # been issued. 
+            # been issued.
             #
             #   MFMA 0, MFMA 1, MFMA 2, MFMA 3, drain 0,
             #   MFMA 4, drain 1, MFMA 5, drain 2, ...
@@ -969,7 +961,6 @@ def _compile_kernel(
             )
             hk_one_k_final(lds_a0, lds_b0, a0_regs, b0_regs)
 
-
     @flyc.jit
     def launch_gemm(
         A: fx.Tensor,
@@ -1000,6 +991,7 @@ def _compile_kernel(
 
     return launch_gemm
 
+
 @functools.lru_cache(maxsize=None)
 def _cached_launch(
     K: int,
@@ -1017,7 +1009,6 @@ def _cached_launch(
         use_xcd_remap=use_xcd_remap,
         epilogue=epilogue,
     )
-
 
 
 def fp8_matmul(
@@ -1050,8 +1041,7 @@ def fp8_matmul(
 
     if a.ndim != 2 or b.ndim != 2:
         raise ValueError(
-            f"FlyDSL FP8 TN expects rank-2 operands, got A{tuple(a.shape)} "
-            f"and B{tuple(b.shape)}"
+            f"FlyDSL FP8 TN expects rank-2 operands, got A{tuple(a.shape)} and B{tuple(b.shape)}"
         )
 
     supported_fp8_dtypes = (
@@ -1060,16 +1050,13 @@ def fp8_matmul(
     )
     if a.dtype not in supported_fp8_dtypes or b.dtype not in supported_fp8_dtypes:
         raise TypeError(
-            "FlyDSL FP8 GEMM expects E4M3 or E5M2 payloads, "
-            f"got A={a.dtype} and B={b.dtype}"
+            f"FlyDSL FP8 GEMM expects E4M3 or E5M2 payloads, got A={a.dtype} and B={b.dtype}"
         )
 
     m, k = a.shape
     n, kb = b.shape
     if kb != k:
-        raise ValueError(
-            f"Inner dimensions do not match: A{tuple(a.shape)} and B{tuple(b.shape)}"
-        )
+        raise ValueError(f"Inner dimensions do not match: A{tuple(a.shape)} and B{tuple(b.shape)}")
 
     for name, scale in (
         ("A_scale_inv", a_scale_inv),
@@ -1087,17 +1074,14 @@ def fp8_matmul(
         raise ValueError(f"C shape {tuple(c.shape)} != expected {(m, n)}")
     if c.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise TypeError(
-            "FlyDSL FP8 supports only float16, bfloat16, and float32 "
-            f"outputs, got {c.dtype}"
+            f"FlyDSL FP8 supports only float16, bfloat16, and float32 outputs, got {c.dtype}"
         )
     if not c.is_contiguous():
         raise ValueError("FlyDSL FP8 requires contiguous output storage")
 
     tensors = (a, b, a_scale_inv, b_scale_inv, c)
     if any(t.device != a.device for t in tensors[1:]):
-        raise ValueError(
-            "A, B, inverse scales, and C must be on the same device"
-        )
+        raise ValueError("A, B, inverse scales, and C must be on the same device")
 
     doGemm(
         a,
@@ -1110,6 +1094,7 @@ def fp8_matmul(
         bias=bias,
         aux=aux,
     )
+
 
 def doGemm(
     A: torch.Tensor,
@@ -1136,10 +1121,7 @@ def doGemm(
         torch.float16,
         torch.bfloat16,
         torch.float32,
-    ), (
-        "C dtype must be torch.float16, torch.bfloat16, or torch.float32, "
-        f"got {C.dtype}"
-    )
+    ), f"C dtype must be torch.float16, torch.bfloat16, or torch.float32, got {C.dtype}"
     assert K_runtime == Kb_runtime, f"A.K={K_runtime} != B.K={Kb_runtime}"
     require_block_tiling(
         M_runtime,
@@ -1153,9 +1135,10 @@ def doGemm(
     require_launch_size("FP8 GEMM", ("A", A), ("B", B), ("C", C))
     assert A_scale_inv.dtype == torch.float32 and A_scale_inv.numel() == 1
     assert B_scale_inv.dtype == torch.float32 and B_scale_inv.numel() == 1
-    assert C.shape == (M_runtime, N_runtime), (
-        f"C shape {tuple(C.shape)} != ({M_runtime}, {N_runtime})"
-    )
+    assert C.shape == (
+        M_runtime,
+        N_runtime,
+    ), f"C shape {tuple(C.shape)} != ({M_runtime}, {N_runtime})"
 
     if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
         raise ValueError(f"Unsupported FP8 epilogue: {epilogue}")
@@ -1167,9 +1150,7 @@ def doGemm(
         if bias.dtype != torch.float32:
             raise TypeError(f"FP8 bias must be float32, got {bias.dtype}")
         if bias.numel() != N_runtime:
-            raise ValueError(
-                f"FP8 bias length {bias.numel()} != N (out_features) {N_runtime}"
-            )
+            raise ValueError(f"FP8 bias length {bias.numel()} != N (out_features) {N_runtime}")
         if bias.device != A.device:
             raise ValueError("bias must be on the same device as A, B, and C")
     elif bias is not None:
@@ -1182,9 +1163,7 @@ def doGemm(
         if aux is None:
             raise ValueError(f"FP8 epilogue {epilogue} requires an aux output tensor")
         if tuple(aux.shape) != (M_runtime, N_runtime):
-            raise ValueError(
-                f"FP8 aux shape {tuple(aux.shape)} != {(M_runtime, N_runtime)}"
-            )
+            raise ValueError(f"FP8 aux shape {tuple(aux.shape)} != {(M_runtime, N_runtime)}")
         if aux.dtype != C.dtype:
             raise TypeError(f"FP8 aux dtype {aux.dtype} != C dtype {C.dtype}")
         if aux.device != A.device:

@@ -96,6 +96,7 @@ REGULAR_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
 
 # --- Fixtures -----------------------------------------------------------------
 
+
 @pytest.fixture(autouse=True)
 def cleanup_env():
     """Save and restore FlyDSL-related environment variables between tests."""
@@ -116,6 +117,7 @@ def cleanup_env():
 
 
 # --- Helpers ------------------------------------------------------------------
+
 
 def get_shapes(layout, M, K, N):
     """Return the A/B storage shapes used by TE's public GEMM tests."""
@@ -283,6 +285,7 @@ def assert_gemm_close(actual, expected, *, atol, rtol):
 # Approach 1: FlyDSL vs PyTorch torch.matmul reference
 # ==============================================================================
 
+
 @pytest.mark.parametrize("M, K, N", FLYDSL_SHAPES)
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize(
@@ -389,6 +392,7 @@ def test_flydsl_vs_pytorch_mxfp8(M, K, N, layout, fp8_format):
 # ==============================================================================
 # Approach 2: FlyDSL vs native C++ ``generic_gemm`` reference
 # ==============================================================================
+
 
 @pytest.mark.parametrize("M, K, N", FLYDSL_SHAPES)
 @pytest.mark.parametrize("layout", LAYOUTS)
@@ -516,6 +520,7 @@ def test_flydsl_vs_cpp_mxfp8(M, K, N, layout, fp8_format):
 # the output, catching a silent decay to DEFAULT) and a vs-cpp cross-check.
 # ==============================================================================
 
+
 @pytest.mark.parametrize("M, K, N", FLYDSL_SHAPES)
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("dtype", REGULAR_DTYPES, ids=["fp32", "fp16", "bf16"])
@@ -532,14 +537,19 @@ def test_flydsl_vs_pytorch_regular_bias(M, K, N, layout, dtype):
     bias = torch.randn(out_features, dtype=dtype, device="cuda")
 
     output, bias_grad = call_gemm_with_bias(
-        A, B, layout, out_dtype=dtype, bias=bias, use_flydsl=True,
+        A,
+        B,
+        layout,
+        out_dtype=dtype,
+        bias=bias,
+        use_flydsl=True,
     )
     assert bias_grad is None
 
     no_bias_out = call_gemm(A, B, layout, out_dtype=dtype, use_flydsl=True)
-    assert not torch.allclose(output.float(), no_bias_out.float(), atol=1e-4), (
-        "FlyDSL output matches the no-bias output; BIAS epilogue appears inactive."
-    )
+    assert not torch.allclose(
+        output.float(), no_bias_out.float(), atol=1e-4
+    ), "FlyDSL output matches the no-bias output; BIAS epilogue appears inactive."
 
     expected = expected_ab + bias.float()
     assert_gemm_close(output, expected, atol=1e-3, rtol=1e-2)
@@ -560,10 +570,20 @@ def test_flydsl_vs_cpp_regular_bias(M, K, N, layout, dtype):
     bias = torch.randn(out_features, dtype=dtype, device="cuda")
 
     flydsl_out, _ = call_gemm_with_bias(
-        A, B, layout, out_dtype=dtype, bias=bias, use_flydsl=True,
+        A,
+        B,
+        layout,
+        out_dtype=dtype,
+        bias=bias,
+        use_flydsl=True,
     )
     cpp_out, _ = call_gemm_with_bias(
-        A, B, layout, out_dtype=dtype, bias=bias, use_flydsl=False,
+        A,
+        B,
+        layout,
+        out_dtype=dtype,
+        bias=bias,
+        use_flydsl=False,
     )
 
     assert_gemm_close(flydsl_out, cpp_out, atol=1e-3, rtol=1e-2)
@@ -578,7 +598,12 @@ def test_flydsl_vs_pytorch_fp8_bias(M, K, N, layout, fp8_format):
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
     A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
-        M, K, N, layout, fp8_dtype_a, fp8_dtype_b,
+        M,
+        K,
+        N,
+        layout,
+        fp8_dtype_a,
+        fp8_dtype_b,
     )
 
     expected_ab = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
@@ -586,16 +611,25 @@ def test_flydsl_vs_pytorch_fp8_bias(M, K, N, layout, fp8_format):
     bias = torch.randn(out_features, dtype=torch.float32, device="cuda")
 
     output, bias_grad = call_gemm_with_bias(
-        A_fp8, B_fp8, layout, out_dtype=torch.float32, bias=bias, use_flydsl=True,
+        A_fp8,
+        B_fp8,
+        layout,
+        out_dtype=torch.float32,
+        bias=bias,
+        use_flydsl=True,
     )
     assert bias_grad is None
 
     no_bias_out = call_gemm(
-        A_fp8, B_fp8, layout, out_dtype=torch.float32, use_flydsl=True,
+        A_fp8,
+        B_fp8,
+        layout,
+        out_dtype=torch.float32,
+        use_flydsl=True,
     )
-    assert not torch.allclose(output.float(), no_bias_out.float(), atol=1e-4), (
-        "FlyDSL FP8 output matches the no-bias output; BIAS epilogue appears inactive."
-    )
+    assert not torch.allclose(
+        output.float(), no_bias_out.float(), atol=1e-4
+    ), "FlyDSL FP8 output matches the no-bias output; BIAS epilogue appears inactive."
 
     expected = expected_ab + bias.float()
     assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
@@ -610,19 +644,36 @@ def test_flydsl_vs_cpp_fp8_bias(M, K, N, layout, fp8_format):
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
     A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
-        M, K, N, layout, fp8_dtype_a, fp8_dtype_b,
+        M,
+        K,
+        N,
+        layout,
+        fp8_dtype_a,
+        fp8_dtype_b,
     )
 
     out_features = compute_pytorch_reference(
-        A_deq.float(), B_deq.float(), layout,
+        A_deq.float(),
+        B_deq.float(),
+        layout,
     ).shape[-1]
     bias = torch.randn(out_features, dtype=torch.float32, device="cuda")
 
     flydsl_out, _ = call_gemm_with_bias(
-        A_fp8, B_fp8, layout, out_dtype=torch.float32, bias=bias, use_flydsl=True,
+        A_fp8,
+        B_fp8,
+        layout,
+        out_dtype=torch.float32,
+        bias=bias,
+        use_flydsl=True,
     )
     cpp_out, _ = call_gemm_with_bias(
-        A_fp8, B_fp8, layout, out_dtype=torch.float32, bias=bias, use_flydsl=False,
+        A_fp8,
+        B_fp8,
+        layout,
+        out_dtype=torch.float32,
+        bias=bias,
+        use_flydsl=False,
     )
 
     assert_gemm_close(flydsl_out, cpp_out, atol=5e-3, rtol=1e-2)
@@ -675,10 +726,9 @@ def test_flydsl_vs_pytorch_mxfp8_bias(M, K, N, layout, fp8_format):
         out_dtype=torch.float32,
         use_flydsl=True,
     )
-    assert not torch.allclose(output.float(), no_bias_out.float(), atol=1e-4), (
-        "FlyDSL MXFP8 output matches the no-bias output; "
-        "the BIAS epilogue appears inactive."
-    )
+    assert not torch.allclose(
+        output.float(), no_bias_out.float(), atol=1e-4
+    ), "FlyDSL MXFP8 output matches the no-bias output; the BIAS epilogue appears inactive."
 
     expected = expected_ab + bias.float()
     assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
@@ -745,6 +795,7 @@ def test_flydsl_vs_cpp_mxfp8_bias(M, K, N, layout, fp8_format):
 # aux == pre_act, with a guard that GELU actually changes the output.
 # ==============================================================================
 
+
 @pytest.mark.parametrize("M, K, N", FLYDSL_SHAPES)
 @pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("dtype", REGULAR_DTYPES, ids=["fp32", "fp16", "bf16"])
@@ -759,14 +810,18 @@ def test_flydsl_vs_pytorch_regular_gelu(M, K, N, layout, dtype):
     pre_act = compute_pytorch_reference(A.float(), B.float(), layout)
 
     output, gelu_input = call_gemm_with_gelu(
-        A, B, layout, out_dtype=dtype, use_flydsl=True,
+        A,
+        B,
+        layout,
+        out_dtype=dtype,
+        use_flydsl=True,
     )
     assert gelu_input is not None, "GELU_AUX did not return the pre-activation aux."
 
     no_gelu_out = call_gemm(A, B, layout, out_dtype=dtype, use_flydsl=True)
-    assert not torch.allclose(output.float(), no_gelu_out.float(), atol=1e-4), (
-        "FlyDSL output matches the no-GELU output; GELU epilogue appears inactive."
-    )
+    assert not torch.allclose(
+        output.float(), no_gelu_out.float(), atol=1e-4
+    ), "FlyDSL output matches the no-GELU output; GELU epilogue appears inactive."
 
     assert_gemm_close(gelu_input, pre_act, atol=1e-3, rtol=1e-2)
     assert_gemm_close(output, gelu_tanh_ref(pre_act), atol=1e-3, rtol=1e-2)
@@ -781,22 +836,35 @@ def test_flydsl_vs_pytorch_fp8_gelu(M, K, N, layout, fp8_format):
 
     fp8_dtype_a, fp8_dtype_b = fp8_format
     A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
-        M, K, N, layout, fp8_dtype_a, fp8_dtype_b,
+        M,
+        K,
+        N,
+        layout,
+        fp8_dtype_a,
+        fp8_dtype_b,
     )
 
     pre_act = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
 
     output, gelu_input = call_gemm_with_gelu(
-        A_fp8, B_fp8, layout, out_dtype=torch.float32, use_flydsl=True,
+        A_fp8,
+        B_fp8,
+        layout,
+        out_dtype=torch.float32,
+        use_flydsl=True,
     )
     assert gelu_input is not None, "GELU_AUX did not return the pre-activation aux."
 
     no_gelu_out = call_gemm(
-        A_fp8, B_fp8, layout, out_dtype=torch.float32, use_flydsl=True,
+        A_fp8,
+        B_fp8,
+        layout,
+        out_dtype=torch.float32,
+        use_flydsl=True,
     )
-    assert not torch.allclose(output.float(), no_gelu_out.float(), atol=1e-4), (
-        "FlyDSL FP8 output matches the no-GELU output; GELU epilogue appears inactive."
-    )
+    assert not torch.allclose(
+        output.float(), no_gelu_out.float(), atol=1e-4
+    ), "FlyDSL FP8 output matches the no-GELU output; GELU epilogue appears inactive."
 
     assert_gemm_close(gelu_input, pre_act, atol=5e-3, rtol=1e-2)
     assert_gemm_close(output, gelu_tanh_ref(pre_act), atol=5e-3, rtol=1e-2)
@@ -844,10 +912,9 @@ def test_flydsl_vs_pytorch_mxfp8_gelu(M, K, N, layout, fp8_format):
         out_dtype=torch.float32,
         use_flydsl=True,
     )
-    assert not torch.allclose(output.float(), no_gelu_out.float(), atol=1e-4), (
-        "FlyDSL MXFP8 output matches the no-GELU output; "
-        "the GELU epilogue appears inactive."
-    )
+    assert not torch.allclose(
+        output.float(), no_gelu_out.float(), atol=1e-4
+    ), "FlyDSL MXFP8 output matches the no-GELU output; the GELU epilogue appears inactive."
 
     # Aux is the pre-activation (A@B); output is gelu(A@B).
     assert_gemm_close(gelu_input, pre_act, atol=5e-3, rtol=1e-2)
@@ -900,6 +967,7 @@ def test_flydsl_vs_pytorch_mxfp8_gelu_bias(M, K, N, layout, fp8_format):
 # ==============================================================================
 # Batched multidimensional FP8 coverage
 # ==============================================================================
+
 
 @pytest.mark.parametrize(
     "batch_size, M, K, N",

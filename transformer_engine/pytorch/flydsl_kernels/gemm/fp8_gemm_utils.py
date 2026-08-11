@@ -24,6 +24,7 @@ from .gemm_common_utils import (
     xcd_swizzle,
 )
 
+
 def preshuffle_b(b_t):
     """Permute row-major ``B_T`` ``(N, K)`` for ``b_preshuffled=True``."""
     n, k = b_t.shape[-2:]
@@ -60,7 +61,11 @@ def compute_global_swizzle(lane_id, wave_id, K, n_rounds, preshuffled):
             row = lane_id % 8 + wave_id * 8 + round * (n_waves * 8)
             col = (lane_id // 8) * 16
             offsets.append(
-                (row // 16) * (K * 16) + (row % 16) * 16 + (col // 64) * 1024 + ((col % 64) // 16) * 256 + (col % 16)
+                (row // 16) * (K * 16)
+                + (row % 16) * 16
+                + (col // 64) * 1024
+                + ((col % 64) // 16) * 256
+                + (col % 16)
             )
         else:
             row = lane_id // 8 + wave_id * 8 + round * (n_waves * 8)
@@ -264,10 +269,12 @@ class StoreC:
 
     def store(self, c_frag, base_row, base_col):
         a_scales = [
-            self._load_scale_vec4(base_row + i * 16 + (self.lane_id // 16) * 4) for i in range_constexpr(self.n_tiles_a)
+            self._load_scale_vec4(base_row + i * 16 + (self.lane_id // 16) * 4)
+            for i in range_constexpr(self.n_tiles_a)
         ]
         b_scales = [
-            self._load_scale_scalar(base_col + i * 16 + self.lane_id % 16) for i in range_constexpr(self.n_tiles_b)
+            self._load_scale_scalar(base_col + i * 16 + self.lane_id % 16)
+            for i in range_constexpr(self.n_tiles_b)
         ]
         for ti in range_constexpr(self.n_tiles_a):
             row = base_row + ti * 16 + (self.lane_id // 16) * 4
@@ -316,7 +323,10 @@ class Mfma16x16x128:
 
         a_frags = [self._make_operand_frag(a[idx]) for idx in range_constexpr(self.n_tiles_a)]
         b_frags = [self._make_operand_frag(b[idx]) for idx in range_constexpr(self.n_tiles_b)]
-        c_frags = [self._make_accum_frag(c[idx]) for idx in range_constexpr(self.n_tiles_a * self.n_tiles_b)]
+        c_frags = [
+            self._make_accum_frag(c[idx])
+            for idx in range_constexpr(self.n_tiles_a * self.n_tiles_b)
+        ]
         if const_expr(set_prio):
             rocdl.s_setprio(1)
         for i in range_constexpr(self.n_tiles_a):
@@ -326,7 +336,10 @@ class Mfma16x16x128:
         if const_expr(set_prio):
             rocdl.s_setprio(0)
             rocdl.s_barrier()
-        return [c_frags[idx].load().ir_value() for idx in range_constexpr(self.n_tiles_a * self.n_tiles_b)]
+        return [
+            c_frags[idx].load().ir_value()
+            for idx in range_constexpr(self.n_tiles_a * self.n_tiles_b)
+        ]
 
     def call_one(self, a, b, c, i, j):
         assert i < self.n_tiles_a and j < self.n_tiles_b

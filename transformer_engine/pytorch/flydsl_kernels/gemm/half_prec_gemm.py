@@ -44,11 +44,12 @@ from .fp16_gemm_utils import (
     S2RLoader,
     compute_global_transpose_swizzle,
     compute_global_swizzle,
+    divmod,
     make_byte_buffer_tensor,
     pack_i32x4_i32x8,
     swizzle_128,
     xcd_swizzle,
-    barrier
+    barrier,
 )
 
 # FP16 and BF16 differ only in the MFMA opcode suffix.
@@ -68,7 +69,7 @@ NUM_THREADS = 256
 WARP_SIZE = 64
 NUM_WAVES = NUM_THREADS // WARP_SIZE
 
-SUBTILE_M = 64 
+SUBTILE_M = 64
 SUBTILE_N = 64
 
 MFMA_M = 16
@@ -184,7 +185,9 @@ def _compile_kernel(
 
     assert K % BLOCK_K == 0, f"K must be a multiple of {BLOCK_K}, got {K}"
     NUM_K_TILES = K // BLOCK_K
-    assert NUM_K_TILES >= 4, f"K={K} gives {NUM_K_TILES} K64 tiles; the two-page pipeline needs at least 4"
+    assert (
+        NUM_K_TILES >= 4
+    ), f"K={K} gives {NUM_K_TILES} K64 tiles; the two-page pipeline needs at least 4"
 
     LDS_ELEMS_HALF = (BLOCK_M // 2) * BLOCK_K
     LDS_BYTES_HALF = LDS_ELEMS_HALF * ELEM_BYTES
@@ -196,15 +199,14 @@ def _compile_kernel(
     PREFETCH_SCHED_DSRD = 8 if a_transpose_read else 4
 
     if a_transpose_read:
+
         def _a_leading_dim_bytes(c_m):
             return c_m * ELEM_BYTES
 
         def _a_global_base_bytes(k_base, subtile, c_m, bx_m_idx):
-            return (
-                k_base * fx.Index(c_m * ELEM_BYTES)
-                + (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2)))
-                * fx.Index(ELEM_BYTES)
-            )
+            return k_base * fx.Index(c_m * ELEM_BYTES) + (
+                bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))
+            ) * fx.Index(ELEM_BYTES)
 
         def _load_a_half(
             load_transposed_frag_half,
@@ -224,18 +226,18 @@ def _compile_kernel(
                 - fx.Index(sm * (BLOCK_M // 2))
             )
             return load_transposed_frag_half(lds_a[sm], local_m_tile, half)
+
     else:
+
         def _a_leading_dim_bytes(c_m):
             del c_m
             return K * ELEM_BYTES
 
         def _a_global_base_bytes(k_base, subtile, c_m, bx_m_idx):
             del c_m
-            return (
-                (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2)))
-                * fx.Index(K * ELEM_BYTES)
-                + k_base * fx.Index(ELEM_BYTES)
-            )
+            return (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(
+                K * ELEM_BYTES
+            ) + k_base * fx.Index(ELEM_BYTES)
 
         def _load_a_half(
             load_transposed_frag_half,
@@ -249,11 +251,7 @@ def _compile_kernel(
         ):
             del load_transposed_frag_half
             subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
-            a_row_addr = (
-                subtile_m_idx * fx.Index(SUBTILE_M)
-                + fx.Index(mi * MFMA_M)
-                + lane_mod_16
-            )
+            a_row_addr = subtile_m_idx * fx.Index(SUBTILE_M) + fx.Index(mi * MFMA_M) + lane_mod_16
             half_row = a_row_addr - fx.Index(sm * (BLOCK_M // 2))
             return load_frag_half_at_byte_base(
                 lds_a[sm],
@@ -262,15 +260,14 @@ def _compile_kernel(
             )
 
     if b_transpose_read:
+
         def _b_leading_dim_bytes(c_n):
             return c_n * ELEM_BYTES
 
         def _b_global_base_bytes(k_base, subtile, c_n, by_n_idx):
-            return (
-                k_base * fx.Index(c_n * ELEM_BYTES)
-                + (by_n_idx + fx.Index(subtile * (BLOCK_N // 2)))
-                * fx.Index(ELEM_BYTES)
-            )
+            return k_base * fx.Index(c_n * ELEM_BYTES) + (
+                by_n_idx + fx.Index(subtile * (BLOCK_N // 2))
+            ) * fx.Index(ELEM_BYTES)
 
         def _load_b_ni(
             load_transposed_frag,
@@ -289,18 +286,18 @@ def _compile_kernel(
                 - fx.Index(sn * (BLOCK_N // 2))
             )
             return load_transposed_frag(lds_b[sn], local_n_tile)
+
     else:
+
         def _b_leading_dim_bytes(c_n):
             del c_n
             return K * ELEM_BYTES
 
         def _b_global_base_bytes(k_base, subtile, c_n, by_n_idx):
             del c_n
-            return (
-                (by_n_idx + fx.Index(subtile * (BLOCK_N // 2)))
-                * fx.Index(K * ELEM_BYTES)
-                + k_base * fx.Index(ELEM_BYTES)
-            )
+            return (by_n_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(
+                K * ELEM_BYTES
+            ) + k_base * fx.Index(ELEM_BYTES)
 
         def _load_b_ni(
             load_transposed_frag,
@@ -313,17 +310,14 @@ def _compile_kernel(
         ):
             del load_transposed_frag
             subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
-            b_row_addr = (
-                subtile_n_idx * fx.Index(SUBTILE_N)
-                + fx.Index(ni * MFMA_N)
-                + lane_mod_16
-            )
+            b_row_addr = subtile_n_idx * fx.Index(SUBTILE_N) + fx.Index(ni * MFMA_N) + lane_mod_16
             return load_normal_b_frag(lds_b, b_row_addr, sn)
 
     # Resolve global staging maps before FlyDSL captures ``kernel_gemm``.
     # Half-precision uses K64, so each transpose-read half-page is two independent
     # [K64, X64] slices with 128-byte physical rows.
     if a_transpose_read:
+
         def _a_global_offsets(lane, wave_id, c_m):
             return compute_global_transpose_swizzle(
                 lane,
@@ -331,7 +325,9 @@ def _compile_kernel(
                 _a_leading_dim_bytes(c_m),
                 LOAD_PASSES_HALF,
             )
+
     else:
+
         def _a_global_offsets(lane, wave_id, c_m):
             del c_m
             return compute_global_swizzle(
@@ -343,6 +339,7 @@ def _compile_kernel(
             )
 
     if b_transpose_read:
+
         def _b_global_offsets(lane, wave_id, c_n):
             return compute_global_transpose_swizzle(
                 lane,
@@ -350,7 +347,9 @@ def _compile_kernel(
                 _b_leading_dim_bytes(c_n),
                 LOAD_PASSES_HALF,
             )
+
     else:
+
         def _b_global_offsets(lane, wave_id, c_n):
             del c_n
             return compute_global_swizzle(
@@ -594,15 +593,11 @@ def _compile_kernel(
         def stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a):
             # One pass writes 256 threads * 16 B = 4 KiB. Four passes fill one
             # 128x64 half-page (16 KiB). Each half has its own LDS base.
-            global_base = _a_global_base_bytes(
-                k_base, subtile, c_m, bx_m_idx
-            )
+            global_base = _a_global_base_bytes(k_base, subtile, c_m, bx_m_idx)
             a_g2s.load_one(lds_a[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
-            global_base = _b_global_base_bytes(
-                k_base, subtile, c_n, by_n_idx
-            )
+            global_base = _b_global_base_bytes(k_base, subtile, c_n, by_n_idx)
             b_g2s.load_one(lds_b[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_a_subtile(k_base, subtile, lds_a):
@@ -648,14 +643,10 @@ def _compile_kernel(
             lane_div16_i32 = fx.Int32(lane_div_16)
             lane_in16_i32 = fx.Int32(lane_mod_16)
 
-            source_k = (
-                lane_div16_i32 * fx.Int32(8)
-                + lane_in16_i32 // fx.Int32(4)
-            )
-            source_x_byte = (
-                x_in_slice * fx.Int32(ELEM_BYTES)
-                + (lane_in16_i32 % fx.Int32(4)) * fx.Int32(8)
-            )
+            source_k = lane_div16_i32 * fx.Int32(8) + lane_in16_i32 // fx.Int32(4)
+            source_x_byte = x_in_slice * fx.Int32(ELEM_BYTES) + (
+                lane_in16_i32 % fx.Int32(4)
+            ) * fx.Int32(8)
 
             physical_k, physical_x = swizzle_128(source_k, source_x_byte)
             slice_base = slice_idx * fx.Int32(64 * 128)
@@ -675,7 +666,9 @@ def _compile_kernel(
             return pack_frag_halves(x0, x1)
 
         def _acc_idx(subtile_id, mi, ni):
-            return subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
+            return (
+                subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
+            )
 
         def _k32_frag(full_frag, k32):
             # A/B 16x64 half-precision wave fragments are i32x8. Each K32 MFMA
@@ -692,16 +685,11 @@ def _compile_kernel(
             llvm.InlineAsmOp(
                 None,
                 [arith._to_raw(a_k32), arith._to_raw(b_k32)],
-                (
-                    f"v_mfma_f32_16x16x32_{mfma_suffix} "
-                    f"a[{acc_pin}:{acc_pin + 3}], "
-                    f"$0, $1, "
-                    f"a[{acc_pin}:{acc_pin + 3}]"
-                ),
-                (
-                    f"v,v,~{{a{acc_pin}}},~{{a{acc_pin + 1}}},"
-                    f"~{{a{acc_pin + 2}}},~{{a{acc_pin + 3}}}"
-                ),
+                f"v_mfma_f32_16x16x32_{mfma_suffix} "
+                f"a[{acc_pin}:{acc_pin + 3}], "
+                "$0, $1, "
+                f"a[{acc_pin}:{acc_pin + 3}]",
+                f"v,v,~{{a{acc_pin}}},~{{a{acc_pin + 1}}},~{{a{acc_pin + 2}}},~{{a{acc_pin + 3}}}",
                 has_side_effects=True,
             )
 
@@ -800,7 +788,6 @@ def _compile_kernel(
                 reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
                 fx.memref_store_vec(Vec.filled(1, value, output_fx_dtype), reg)
                 fx.copy(c_store_atom, reg, fx.slice(c_div, (None, fx.Int32(c_idx))))
-
 
         # Explicit register coordinates for HK-style four-quadrant mapping.
         # BLOCK_M/BLOCK_N are 256x256.  Four waves map to warp positions
@@ -1108,7 +1095,7 @@ def _compile_kernel(
             #
             # Finalize accumulators in their own physical AGPR slots, but delay
             # each AGPR read/store until several independent final MFMAs have
-            # been issued. 
+            # been issued.
             #
             #   MFMA 0, MFMA 1, MFMA 2, MFMA 3, drain 0,
             #   MFMA 4, drain 1, MFMA 5, drain 2, ...
@@ -1226,7 +1213,6 @@ def _compile_kernel(
             )
             hk_one_k_final(lds_a0, lds_b0, a0_regs, b0_regs)
 
-
     @flyc.jit
     def launch_gemm(
         A: fx.Tensor,
@@ -1252,6 +1238,7 @@ def _compile_kernel(
         ).launch(grid=(grid_x, 1, 1), block=(NUM_THREADS, 1, 1), stream=stream)
 
     return launch_gemm
+
 
 @functools.lru_cache(maxsize=None)
 def _cached_launch(
@@ -1297,13 +1284,11 @@ def _half_prec_matmul(
         raise ValueError(f"Unsupported {label} layout: {layout}")
     if a.ndim != 2 or b.ndim != 2:
         raise ValueError(
-            f"FlyDSL {label} expects rank-2 operands, got A{tuple(a.shape)} "
-            f"and B{tuple(b.shape)}"
+            f"FlyDSL {label} expects rank-2 operands, got A{tuple(a.shape)} and B{tuple(b.shape)}"
         )
     if a.dtype != input_dtype or b.dtype != input_dtype:
         raise TypeError(
-            f"FlyDSL {label} GEMM expects {input_dtype} operands, "
-            f"got A={a.dtype}, B={b.dtype}"
+            f"FlyDSL {label} GEMM expects {input_dtype} operands, got A={a.dtype}, B={b.dtype}"
         )
     if not a.is_contiguous() or not b.is_contiguous():
         raise FlyDSLUnsupportedError(
@@ -1333,13 +1318,11 @@ def _half_prec_matmul(
         raise ValueError(f"C shape {tuple(c.shape)} != expected {(m, n)}")
     if c.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise TypeError(
-            f"FlyDSL {label} output must be float16, bfloat16, or float32, "
-            f"got {c.dtype}"
+            f"FlyDSL {label} output must be float16, bfloat16, or float32, got {c.dtype}"
         )
     if a.device != b.device or a.device != c.device:
         raise ValueError(
-            f"A, B, and C must be on the same device, got "
-            f"{a.device}, {b.device}, and {c.device}"
+            f"A, B, and C must be on the same device, got {a.device}, {b.device}, and {c.device}"
         )
     if not c.is_contiguous():
         raise ValueError(f"FlyDSL {label} GEMM requires contiguous output storage")
@@ -1463,8 +1446,7 @@ def doGemm(
 
     if A.dtype != input_dtype or B.dtype != input_dtype:
         raise TypeError(
-            f"{label} {layout} requires {input_dtype} inputs, "
-            f"got {A.dtype} and {B.dtype}"
+            f"{label} {layout} requires {input_dtype} inputs, got {A.dtype} and {B.dtype}"
         )
     if C.dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise TypeError(f"Unsupported {label} output dtype: {C.dtype}")
@@ -1481,9 +1463,7 @@ def doGemm(
     require_launch_size(f"{label} GEMM", ("A", A), ("B", B), ("C", C))
 
     if tuple(C.shape) != (M_runtime, N_runtime):
-        raise ValueError(
-            f"C shape {tuple(C.shape)} != expected {(M_runtime, N_runtime)}"
-        )
+        raise ValueError(f"C shape {tuple(C.shape)} != expected {(M_runtime, N_runtime)}")
 
     if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
         raise ValueError(f"Unsupported {label} epilogue: {epilogue}")
@@ -1495,9 +1475,7 @@ def doGemm(
         if bias.dtype != torch.float32:
             raise TypeError(f"{label} bias must be float32, got {bias.dtype}")
         if bias.numel() != N_runtime:
-            raise ValueError(
-                f"{label} bias length {bias.numel()} != N (out_features) {N_runtime}"
-            )
+            raise ValueError(f"{label} bias length {bias.numel()} != N (out_features) {N_runtime}")
         if bias.device != A.device:
             raise ValueError("bias must be on the same device as A, B, and C")
     elif bias is not None:
@@ -1510,9 +1488,7 @@ def doGemm(
         if aux is None:
             raise ValueError(f"{label} epilogue {epilogue} requires an aux output tensor")
         if tuple(aux.shape) != (M_runtime, N_runtime):
-            raise ValueError(
-                f"{label} aux shape {tuple(aux.shape)} != {(M_runtime, N_runtime)}"
-            )
+            raise ValueError(f"{label} aux shape {tuple(aux.shape)} != {(M_runtime, N_runtime)}")
         if aux.dtype != C.dtype:
             raise TypeError(f"{label} aux dtype {aux.dtype} != C dtype {C.dtype}")
         if aux.device != A.device:

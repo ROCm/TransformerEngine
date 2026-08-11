@@ -494,22 +494,27 @@ def general_gemm(
     }
 
     if not _is_nvfp4_row_scaled_tensor(A) and not _is_nvfp4_row_scaled_tensor(B):
-        use_gemm_flydsl = (IS_HIP_EXTENSION
-                          and get_device_compute_capability() == (9, 5)
-                          and bool(int(os.environ.get("NVTE_USE_FLYDSL", "0"))))
+        use_gemm_flydsl = (
+            IS_HIP_EXTENSION
+            and get_device_compute_capability() == (9, 5)
+            and bool(int(os.environ.get("NVTE_USE_FLYDSL", "0")))
+        )
         if use_gemm_flydsl:
-            # Lazy import keeps FlyDSL off the normal Transformer Engine import path.
-            from ..flydsl_kernels.gemm import (
-                FlyDSLUnsupportedError,
-                te_generic_gemm_flydsl,
-            )
-
             try:
+                # Lazy import keeps FlyDSL off the normal Transformer Engine
+                # import path. It is done inside the try so a wheel built without
+                # flydsl (NVTE_USE_FLYDSL unset at build time) degrades to the
+                # default backend instead of raising a bare ImportError.
+                from ..flydsl_kernels.gemm import (
+                    FlyDSLUnsupportedError,
+                    te_generic_gemm_flydsl,
+                )
+
                 out, bias_grad, gelu_input, extra_output = te_generic_gemm_flydsl(
                     *args,
                     **kwargs,
                 )
-            except FlyDSLUnsupportedError as exc:
+            except (FlyDSLUnsupportedError, ImportError) as exc:
                 warn_fallback = os.environ.get(
                     "NVTE_FLYDSL_GEMM_WARN_FALLBACK",
                     "0",

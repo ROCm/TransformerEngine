@@ -31,11 +31,12 @@ from .fp16_gemm_utils import (
     G2SLoader,
     S2RLoader,
     compute_global_swizzle,
+    divmod,
     make_byte_buffer_tensor as make_fp32_byte_buffer_tensor,
     pack_i32x4_i32x8,
     swizzle_128,
     xcd_swizzle,
-    barrier
+    barrier,
 )
 
 
@@ -51,7 +52,7 @@ NUM_THREADS = 256
 WARP_SIZE = 64
 NUM_WAVES = NUM_THREADS // WARP_SIZE
 
-SUBTILE_M = 64 
+SUBTILE_M = 64
 SUBTILE_N = 64
 
 MFMA_M = 16
@@ -144,7 +145,9 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
 
     assert K % BLOCK_K == 0, f"K must be a multiple of {BLOCK_K}, got {K}"
     NUM_K_TILES = K // BLOCK_K
-    assert NUM_K_TILES >= 4, f"K={K} gives {NUM_K_TILES} K32 tiles; the two-page pipeline needs at least 4"
+    assert (
+        NUM_K_TILES >= 4
+    ), f"K={K} gives {NUM_K_TILES} K32 tiles; the two-page pipeline needs at least 4"
 
     LDS_ELEMS_HALF = (BLOCK_M // 2) * BLOCK_K
     LDS_BYTES_HALF = LDS_ELEMS_HALF * ELEM_BYTES
@@ -216,8 +219,12 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
         # The utility mapping is identical to the previous manual staging:
         # each step contributes one contiguous 16-byte vector per thread, while
         # the global K coordinate is XOR-unswizzled for the physical LDS slot.
-        gl_off_a = compute_global_swizzle(lane, wave_id, K * ELEM_BYTES, LOAD_PASSES_HALF, preshuffled=False)
-        gl_off_b = compute_global_swizzle(lane, wave_id, K * ELEM_BYTES, LOAD_PASSES_HALF, preshuffled=False)
+        gl_off_a = compute_global_swizzle(
+            lane, wave_id, K * ELEM_BYTES, LOAD_PASSES_HALF, preshuffled=False
+        )
+        gl_off_b = compute_global_swizzle(
+            lane, wave_id, K * ELEM_BYTES, LOAD_PASSES_HALF, preshuffled=False
+        )
         a_g2s = G2SLoader(a_div, gl_off_a, LOAD_PASSES_HALF, fx.Uint8.ir_type, wave_id)
         b_g2s = G2SLoader(b_div, gl_off_b, LOAD_PASSES_HALF, fx.Uint8.ir_type, wave_id)
         s2r = S2RLoader(fx.Int32(0), 1)
@@ -365,11 +372,15 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
         def stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a):
             # One pass writes 256 threads * 16 B = 4 KiB. Four passes fill one
             # 128x64 half-page (16 KiB). Each half has its own LDS base.
-            global_base = (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(K * ELEM_BYTES) + k_base * fx.Index(ELEM_BYTES)
+            global_base = (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(
+                K * ELEM_BYTES
+            ) + k_base * fx.Index(ELEM_BYTES)
             a_g2s.load_one(lds_a[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
-            global_base = (by_n_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(K * ELEM_BYTES) + k_base * fx.Index(ELEM_BYTES)
+            global_base = (by_n_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(
+                K * ELEM_BYTES
+            ) + k_base * fx.Index(ELEM_BYTES)
             b_g2s.load_one(lds_b[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_a_subtile(k_base, subtile, lds_a):
@@ -402,7 +413,9 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
             return load_frag_at_byte_base(lds_b[half], half_row * fx.Index(BLOCK_K * ELEM_BYTES))
 
         def _acc_idx(subtile_id, mi, ni):
-            return subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
+            return (
+                subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
+            )
 
         def _fp32_k4_operand(full_frag, k32_half, k4):
             # A/B 16x32 FP32 wave fragments are i32x8: one FP32 value per
@@ -415,16 +428,11 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
             llvm.InlineAsmOp(
                 None,
                 [arith._to_raw(a_k4), arith._to_raw(b_k4)],
-                (
-                    f"v_mfma_f32_16x16x4_f32 "
-                    f"a[{acc_pin}:{acc_pin + 3}], "
-                    f"$0, $1, "
-                    f"a[{acc_pin}:{acc_pin + 3}]"
-                ),
-                (
-                    f"v,v,~{{a{acc_pin}}},~{{a{acc_pin + 1}}},"
-                    f"~{{a{acc_pin + 2}}},~{{a{acc_pin + 3}}}"
-                ),
+                "v_mfma_f32_16x16x4_f32 "
+                f"a[{acc_pin}:{acc_pin + 3}], "
+                "$0, $1, "
+                f"a[{acc_pin}:{acc_pin + 3}]",
+                f"v,v,~{{a{acc_pin}}},~{{a{acc_pin + 1}}},~{{a{acc_pin + 2}}},~{{a{acc_pin + 3}}}",
                 has_side_effects=True,
             )
 
@@ -521,7 +529,6 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
                 reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
                 fx.memref_store_vec(Vec.filled(1, value, fx.Float32), reg)
                 fx.copy(c_store_atom, reg, fx.slice(c_div, (None, fx.Int32(c_idx))))
-
 
         # Explicit register coordinates for HK-style four-quadrant mapping.
         # BLOCK_M/BLOCK_N are 256x256.  Four waves map to warp positions
@@ -818,7 +825,7 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
             #
             # Finalize accumulators in their own physical AGPR slots, but delay
             # each AGPR read/store until several independent final MFMAs have
-            # been issued. 
+            # been issued.
             #
             #   MFMA 0, MFMA 1, MFMA 2, MFMA 3, drain 0,
             #   MFMA 4, drain 1, MFMA 5, drain 2, ...
@@ -936,7 +943,6 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
             )
             hk_one_k_final(lds_a0, lds_b0, a0_regs, b0_regs)
 
-
     @flyc.jit
     def launch_gemm(
         A: fx.Tensor,
@@ -963,10 +969,10 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
 
     return launch_gemm
 
+
 @functools.lru_cache(maxsize=None)
 def _cached_launch(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT"):
     return _compile_kernel(K, use_xcd_remap=use_xcd_remap, epilogue=epilogue)
-
 
 
 def fp32_matmul(
@@ -993,16 +999,13 @@ def fp32_matmul(
     """
     if a.ndim != 2 or b.ndim != 2:
         raise ValueError(
-            f"FlyDSL FP32 TN expects rank-2 operands, got A{tuple(a.shape)} "
-            f"and B{tuple(b.shape)}"
+            f"FlyDSL FP32 TN expects rank-2 operands, got A{tuple(a.shape)} and B{tuple(b.shape)}"
         )
 
     m, k = a.shape
     kb, n = b.shape
     if kb != k:
-        raise ValueError(
-            f"Inner dimensions do not match: A{tuple(a.shape)} and B{tuple(b.shape)}"
-        )
+        raise ValueError(f"Inner dimensions do not match: A{tuple(a.shape)} and B{tuple(b.shape)}")
     if a.dtype != torch.float32 or b.dtype != torch.float32:
         raise TypeError(
             "FlyDSL FP32 GEMM expects both operands to have torch.float32 dtype, "
@@ -1016,8 +1019,7 @@ def fp32_matmul(
         )
     if a.device != b.device or a.device != c.device:
         raise ValueError(
-            f"A, B, and C must be on the same device, got "
-            f"{a.device}, {b.device}, and {c.device}"
+            f"A, B, and C must be on the same device, got {a.device}, {b.device}, and {c.device}"
         )
     if not c.is_contiguous():
         raise ValueError("FlyDSL FP32 GEMM requires contiguous output storage")
@@ -1068,9 +1070,7 @@ def doGemm(
         if bias.dtype != torch.float32:
             raise TypeError(f"FP32 bias must be float32, got {bias.dtype}")
         if bias.numel() != N_runtime:
-            raise ValueError(
-                f"FP32 bias length {bias.numel()} != N (out_features) {N_runtime}"
-            )
+            raise ValueError(f"FP32 bias length {bias.numel()} != N (out_features) {N_runtime}")
         if bias.device != A.device:
             raise ValueError("bias must be on the same device as A, B, and C")
     elif bias is not None:
@@ -1083,9 +1083,7 @@ def doGemm(
         if aux is None:
             raise ValueError(f"FP32 epilogue {epilogue} requires an aux output tensor")
         if tuple(aux.shape) != (M_runtime, N_runtime):
-            raise ValueError(
-                f"FP32 aux shape {tuple(aux.shape)} != {(M_runtime, N_runtime)}"
-            )
+            raise ValueError(f"FP32 aux shape {tuple(aux.shape)} != {(M_runtime, N_runtime)}")
         if aux.dtype != torch.float32:
             raise TypeError(f"FP32 aux must be float32, got {aux.dtype}")
         if aux.device != A.device:
