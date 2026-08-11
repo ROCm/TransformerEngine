@@ -10,6 +10,8 @@ G2S/S2R loaders, buffer-tensor makers) stays in the per-dtype modules.
 
 import flydsl.expr as fx
 from flydsl.expr import arith, rocdl
+from flydsl.expr.buffer_ops import _unwrap_value
+from flydsl.expr.utils.arith import ArithValue
 
 from .exceptions import FlyDSLUnsupportedError
 
@@ -155,3 +157,24 @@ def swizzle_128(row, col_in_bytes):
 def pack_i32x4_i32x8(lo, hi):
     # Pack two i32x4 as one i32x8
     return lo.shuffle(hi, list(range(8)))
+
+
+def _i64(v):
+    # widen an i32 runtime value to i64 (avoids overflow in worst-case base offsets)
+    return ArithValue(arith.extsi(fx.T.i64(), _unwrap_value(v)), signed=True)
+
+
+def make_value_attrs(waves_per_eu, agpr_alloc, fwg):
+    """Kernel value_attrs. agpr_alloc: 0 = compiler default; N>0 = force exactly
+    N AGPRs ("N,N"); -N = allow up to N ("0,N")."""
+    d = {"rocdl.waves_per_eu": waves_per_eu, "rocdl.flat_work_group_size": fwg}
+    if agpr_alloc != 0:
+        if agpr_alloc < 0:
+            alloc = f"0,{-agpr_alloc}"
+        else:
+            alloc = f"{agpr_alloc},{agpr_alloc}"
+        d["passthrough"] = [
+            ["amdgpu-agpr-alloc", alloc],
+            ["amdgpu-mfma-vgpr-form", "false"],
+        ]
+    return d

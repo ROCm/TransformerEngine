@@ -19,7 +19,7 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr import arith, range_constexpr
-from flydsl.expr.buffer_ops import _unwrap_value, buffer_store, create_buffer_resource
+from flydsl.expr.buffer_ops import buffer_store, create_buffer_resource
 
 from .half_prec_gemm import BLOCK_K, dense_mma_pipeline_bf16
 from .fp16_gemm_utils import G2SLoader, ceildiv, make_byte_buffer_tensor, swizzle_128
@@ -304,22 +304,6 @@ def compute_global_swizzle_nn_bf16(lane_id, wave_id, c_n, n_steps):
     return offsets
 
 
-def make_value_attrs(waves_per_eu, agpr_alloc, fwg):
-    """Kernel value_attrs. agpr_alloc: 0 = compiler default; N>0 = force exactly
-    N AGPRs ("N,N"); -N = allow up to N ("0,N")."""
-    d = {"rocdl.waves_per_eu": waves_per_eu, "rocdl.flat_work_group_size": fwg}
-    if agpr_alloc != 0:
-        if agpr_alloc < 0:
-            alloc = f"0,{-agpr_alloc}"
-        else:
-            alloc = f"{agpr_alloc},{agpr_alloc}"
-        d["passthrough"] = [
-            ["amdgpu-agpr-alloc", alloc],
-            ["amdgpu-mfma-vgpr-form", "false"],
-        ]
-    return d
-
-
 def xcd_remap_pid(pid, total_pids, num_xcd):
     """Remap the tile id so same-XCD workgroups gather into one contiguous
     block, keeping each XCD's L2 reuse within that XCD. Bijection over
@@ -332,11 +316,6 @@ def xcd_remap_pid(pid, total_pids, num_xcd):
     local = pid // num_xcd
     offset = xcd * per_xcd + arith.select(xcd < rem, xcd, rem)
     return offset + local
-
-
-def _i64(v):
-    # widen an i32 runtime value to i64 (avoids overflow in worst-case base offsets)
-    return ArithValue(arith.extsi(fx.T.i64(), _unwrap_value(v)), signed=True)
 
 
 def _make_shared_storage(BLOCK_M, BLOCK_N):

@@ -43,16 +43,15 @@ from flydsl.expr.typing import AddressSpace, PointerType
 
 from ..gemm.half_prec_gemm import BLOCK_K, dense_mma_pipeline_bf16
 from ..gemm.fp16_gemm_utils import G2SLoader, ceildiv, make_byte_buffer_tensor
+from ..gemm.gemm_common_utils import _i64, make_value_attrs
 from ..gemm.pf_gemm_utils import (
     Mfma32x32x16,
     S2RLoaderBf16,
     StoreCBf16,
-    _i64,
     _make_shared_storage,
     compute_global_gather_swizzle_bf16,
     compute_global_identity_swizzle_bf16,
     compute_global_swizzle_bf16,
-    make_value_attrs,
     xcd_remap_pid,
 )
 
