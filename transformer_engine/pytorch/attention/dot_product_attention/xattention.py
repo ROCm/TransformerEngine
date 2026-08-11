@@ -251,16 +251,16 @@ def fp8_forward(
     else:
         out = torch.empty_like(qd, dtype=torch.bfloat16)
 
+    # The kernel reduces amax straight into the quantizers' slots, so there is no
+    # allocation to make here and nothing to copy back afterwards. amax_o is
+    # captured before scale_o is applied, so the history stays in the output's
+    # true units whichever output dtype we asked for.
     res = _xattn.fwd_quant(
         qd, kd, vd, descale_q, descale_k, descale_v, scale_s, descale_s, scale_o,
-        out, float(softmax_scale), causal, wl, wr, True, True,
+        out, s_quantizer.amax, o_quantizer.amax,
+        float(softmax_scale), causal, wl, wr, True, True,
     )
-    out_bshd, softmax_lse, amax_s, amax_o = res[0], res[1], res[2], res[3]
-
-    # amax_o is captured before scale_o is applied, so the history stays in the
-    # output's true units whichever output dtype we asked for.
-    s_quantizer.amax.copy_(amax_s)
-    o_quantizer.amax.copy_(amax_o)
+    out_bshd, softmax_lse = res[0], res[1]
 
     if quantize_out:
         # scale_inv is derived from the quantizer on device; no host round trip.
@@ -325,21 +325,24 @@ def fp8_backward(
     dk = torch.empty_like(kd, dtype=torch.bfloat16)
     dv = torch.empty_like(vd, dtype=torch.bfloat16)
 
+    # Delayed-scaling history: the dQKV quantizer tracks a single amax across
+    # dq/dk/dv, but the kernel's three reductions are plain stores to distinct
+    # addresses, so aliasing them onto one slot would race. Give them adjacent
+    # slots in one buffer and fold it afterwards. dS maps 1:1 and goes direct.
+    amax_dqkv = torch.empty(3, device=qd.device, dtype=torch.float32)
+
     res = _xattn.bwd_quant(
         dod, qd, kd, vd, od, softmax_lse,
         descale_q, descale_k, descale_v, descale_o, descale_do,
         scale_s, descale_s, scale_ds, descale_ds,
         1.0, 1.0, 1.0,  # dq/dk/dv are bf16 -> output scales unused
-        dq, dk, dv, None,
+        dq, dk, dv,
+        amax_dqkv[0:1], amax_dqkv[1:2], amax_dqkv[2:3], dp_quantizer.amax,
+        None,
         0.0, float(softmax_scale), causal, wl, wr, 0.0, bool(deterministic), True, True,
     )
     dq_o, dk_o, dv_o = res[0], res[1], res[2]
-    amax_dq, amax_dk, amax_dv, amax_ds = res[4], res[5], res[6], res[7]
 
-    # Delayed-scaling history: dQKV quantizer tracks a single amax across dq/dk/dv.
-    amax_dqkv = dqkv_quantizer.amax
-    torch.maximum(amax_dq, amax_dk, out=amax_dqkv)
-    torch.maximum(amax_dqkv, amax_dv, out=amax_dqkv)
-    dp_quantizer.amax.copy_(amax_ds)
+    torch.amax(amax_dqkv, dim=0, keepdim=True, out=dqkv_quantizer.amax)
 
     return _from_bshd(dq_o, fmt), _from_bshd(dk_o, fmt), _from_bshd(dv_o, fmt)

@@ -44,6 +44,18 @@ struct Workspace {
   size_t size = 0;
 };
 
+// xAttention takes the amax out-params as raw device pointers and validates
+// nothing about them, so a host tensor or a non-fp32 one would corrupt memory
+// instead of raising. Check here, at the boundary we own.
+std::optional<at::Tensor> checked_amax(std::optional<at::Tensor> t, const char *name) {
+  if (t.has_value()) {
+    TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kFloat32 && t->numel() == 1 &&
+                    t->is_contiguous(),
+                name, " must be a contiguous 1-element fp32 device tensor");
+  }
+  return t;
+}
+
 // q is (b, s, h, d) when BSHD and (b, h, s, d) otherwise; k supplies the KV
 // head count and sequence length.
 Workspace fwd_workspace(const at::Tensor &q, bool input_bshd) {
@@ -66,7 +78,8 @@ std::vector<at::Tensor> xattn_fwd(at::Tensor q, at::Tensor k, at::Tensor v,
                                   int64_t window_size_right, bool input_bshd, bool output_bshd) {
   // {out, softmax_lse}
   Workspace ws = fwd_workspace(q, input_bshd);
-  return xi::mha_fwd(q, k, v, std::move(out), static_cast<float>(softmax_scale), is_causal,
+  return xi::mha_fwd(q, k, v, std::move(out), /*softmax_lse_=*/std::nullopt,
+                     static_cast<float>(softmax_scale), is_causal,
                      /*return_softmax=*/false, input_bshd, output_bshd,
                      static_cast<int>(window_size_left), static_cast<int>(window_size_right),
                      ws.ptr, ws.size, current_stream());
@@ -81,7 +94,7 @@ std::vector<at::Tensor> xattn_bwd(at::Tensor dout, at::Tensor q, at::Tensor k, a
                                   double softmax_scale, bool is_causal, int64_t window_size_left,
                                   int64_t window_size_right, double softcap, bool deterministic,
                                   bool input_bshd, bool output_bshd) {
-  // {dq, dk, dv, softmax_d}
+  // {dq, dk, dv}
   Workspace ws = bwd_workspace(q, k, input_bshd);
   return xi::mha_bwd(dout, q, k, v, out, softmax_lse, std::move(dq), std::move(dk), std::move(dv),
                      std::move(alibi_slopes), static_cast<float>(p_dropout),
@@ -95,16 +108,21 @@ std::vector<at::Tensor> xattn_bwd(at::Tensor dout, at::Tensor q, at::Tensor k, a
 std::vector<at::Tensor> xattn_fwd_quant(at::Tensor q, at::Tensor k, at::Tensor v, double descale_q,
                                         double descale_k, double descale_v, double scale_s,
                                         double descale_s, double scale_o,
-                                        std::optional<at::Tensor> out, double softmax_scale,
+                                        std::optional<at::Tensor> out,
+                                        std::optional<at::Tensor> amax_s,
+                                        std::optional<at::Tensor> amax_o, double softmax_scale,
                                         bool is_causal, int64_t window_size_left,
                                         int64_t window_size_right, bool input_bshd,
                                         bool output_bshd) {
-  // {out, lse, amax_s, amax_o}
+  // {out, lse, amax_s, amax_o}. Supplying amax_s/amax_o lets the caller hand in
+  // its quantizers' amax slots so the reduction lands there directly.
   Workspace ws = fwd_workspace(q, input_bshd);
   return xi::mha_fwd_quant(
       q, k, v, static_cast<float>(descale_q), static_cast<float>(descale_k),
       static_cast<float>(descale_v), static_cast<float>(scale_s), static_cast<float>(descale_s),
-      static_cast<float>(scale_o), std::move(out), static_cast<float>(softmax_scale), is_causal,
+      static_cast<float>(scale_o), std::move(out), /*softmax_lse_=*/std::nullopt,
+      checked_amax(std::move(amax_s), "amax_s"), checked_amax(std::move(amax_o), "amax_o"),
+      static_cast<float>(softmax_scale), is_causal,
       /*return_softmax=*/false, input_bshd, output_bshd, static_cast<int>(window_size_left),
       static_cast<int>(window_size_right), ws.ptr, ws.size, current_stream());
 }
@@ -118,6 +136,7 @@ std::vector<at::Tensor> xattn_fwd_mx(at::Tensor q, at::Tensor k, at::Tensor v, a
   // {out, lse}
   Workspace ws = fwd_workspace(q, input_bshd);
   return xi::mha_fwd_mx(q, k, v, q_scale, k_scale, v_scale, std::move(out),
+                        /*softmax_lse_=*/std::nullopt,
                         static_cast<float>(softmax_scale), is_causal, /*return_softmax=*/false,
                         input_bshd, output_bshd, static_cast<int>(window_size_left),
                         static_cast<int>(window_size_right), ws.ptr, ws.size, current_stream());
@@ -129,11 +148,14 @@ std::vector<at::Tensor> xattn_bwd_quant(
     at::Tensor softmax_lse, double descale_q, double descale_k, double descale_v, double descale_o,
     double descale_do, double scale_s, double descale_s, double scale_ds, double descale_ds,
     double scale_dq, double scale_dk, double scale_dv, std::optional<at::Tensor> dq,
-    std::optional<at::Tensor> dk, std::optional<at::Tensor> dv,
-    std::optional<at::Tensor> alibi_slopes, double p_dropout, double softmax_scale, bool is_causal,
-    int64_t window_size_left, int64_t window_size_right, double softcap, bool deterministic,
-    bool input_bshd, bool output_bshd) {
-  // {dq, dk, dv, softmax_d, amax_dq, amax_dk, amax_dv, amax_ds}
+    std::optional<at::Tensor> dk, std::optional<at::Tensor> dv, std::optional<at::Tensor> amax_dq,
+    std::optional<at::Tensor> amax_dk, std::optional<at::Tensor> amax_dv,
+    std::optional<at::Tensor> amax_ds, std::optional<at::Tensor> alibi_slopes, double p_dropout,
+    double softmax_scale, bool is_causal, int64_t window_size_left, int64_t window_size_right,
+    double softcap, bool deterministic, bool input_bshd, bool output_bshd) {
+  // {dq, dk, dv, amax_dq, amax_dk, amax_dv, amax_ds}. The four amax reductions
+  // write to distinct addresses, so a caller folding them together must still
+  // pass four separate slots (they are plain stores, not atomic maxima).
   Workspace ws = bwd_workspace(q, k, input_bshd);
   return xi::mha_bwd_quant(
       dout, q, k, v, out, softmax_lse, static_cast<float>(descale_q), static_cast<float>(descale_k),
@@ -141,6 +163,8 @@ std::vector<at::Tensor> xattn_bwd_quant(
       static_cast<float>(scale_s), static_cast<float>(descale_s), static_cast<float>(scale_ds),
       static_cast<float>(descale_ds), static_cast<float>(scale_dq), static_cast<float>(scale_dk),
       static_cast<float>(scale_dv), std::move(dq), std::move(dk), std::move(dv),
+      checked_amax(std::move(amax_dq), "amax_dq"), checked_amax(std::move(amax_dk), "amax_dk"),
+      checked_amax(std::move(amax_dv), "amax_dv"), checked_amax(std::move(amax_ds), "amax_ds"),
       std::move(alibi_slopes), static_cast<float>(p_dropout), static_cast<float>(softmax_scale),
       is_causal, static_cast<int>(window_size_left), static_cast<int>(window_size_right),
       static_cast<float>(softcap), deterministic, input_bshd, output_bshd, ws.ptr, ws.size,
@@ -168,8 +192,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fwd_quant", &xattn_fwd_quant, "xAttention forward (per-tensor fp8)", py::arg("q"),
         py::arg("k"), py::arg("v"), py::arg("descale_q"), py::arg("descale_k"), py::arg("descale_v"),
         py::arg("scale_s"), py::arg("descale_s"), py::arg("scale_o"), py::arg("out"),
-        py::arg("softmax_scale"), py::arg("is_causal"), py::arg("window_size_left"),
-        py::arg("window_size_right"), py::arg("input_bshd"), py::arg("output_bshd"));
+        py::arg("amax_s"), py::arg("amax_o"), py::arg("softmax_scale"), py::arg("is_causal"),
+        py::arg("window_size_left"), py::arg("window_size_right"), py::arg("input_bshd"),
+        py::arg("output_bshd"));
 
   m.def("fwd_mx", &xattn_fwd_mx, "xAttention forward (MXFP8)", py::arg("q"), py::arg("k"),
         py::arg("v"), py::arg("q_scale"), py::arg("k_scale"), py::arg("v_scale"), py::arg("out"),
@@ -181,7 +206,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("descale_q"), py::arg("descale_k"), py::arg("descale_v"), py::arg("descale_o"),
         py::arg("descale_do"), py::arg("scale_s"), py::arg("descale_s"), py::arg("scale_ds"),
         py::arg("descale_ds"), py::arg("scale_dq"), py::arg("scale_dk"), py::arg("scale_dv"),
-        py::arg("dq"), py::arg("dk"), py::arg("dv"), py::arg("alibi_slopes"), py::arg("p_dropout"),
+        py::arg("dq"), py::arg("dk"), py::arg("dv"), py::arg("amax_dq"), py::arg("amax_dk"),
+        py::arg("amax_dv"), py::arg("amax_ds"), py::arg("alibi_slopes"), py::arg("p_dropout"),
         py::arg("softmax_scale"), py::arg("is_causal"), py::arg("window_size_left"),
         py::arg("window_size_right"), py::arg("softcap"), py::arg("deterministic"),
         py::arg("input_bshd"), py::arg("output_bshd"));
