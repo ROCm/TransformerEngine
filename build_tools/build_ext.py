@@ -113,6 +113,19 @@ def get_build_ext(
     class _CMakeBuildExtension(extension_cls):
         """Setuptools command with support for CMake extension modules"""
 
+        def finalize_options(self) -> None:
+            super().finalize_options()
+            # Persist the intermediate object directory (build_temp) across builds.
+            # Framework extensions (e.g. transformer_engine_torch) are compiled by
+            # setuptools/pip into build_temp, but pip normally points it at an
+            # ephemeral temp dir, so every `pip install` recompiles all objects from
+            # scratch. Rooting it at a stable location lets the underlying ninja skip
+            # unchanged objects. Mirrors the persistent CMake build dir above.
+            root_dir = Path(__file__).resolve().parent.parent
+            build_temp = root_dir / "build" / "ext_temp"
+            build_temp.mkdir(parents=True, exist_ok=True)
+            self.build_temp = str(build_temp)
+
         def run(self) -> None:
             # Build CMake extensions
             for ext in self.extensions:

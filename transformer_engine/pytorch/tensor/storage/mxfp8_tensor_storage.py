@@ -7,7 +7,7 @@
 """Mixin class holding data specific for MXFP8Tensor"""
 
 from __future__ import annotations
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any, Tuple, Union
 from collections.abc import Iterable
 import math
 import torch
@@ -19,7 +19,7 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from ...quantized_tensor import QuantizedTensorStorage, Quantizer
 
-from ...constants import TE_DType as torch_to_transformer_engine_dtype
+from ...constants import TE_DType as torch_to_transformer_engine_dtype, DType
 
 from ...utils import _empty_tensor
 
@@ -34,16 +34,26 @@ class _FromMXFP8Func(torch.autograd.Function):
         dtype: torch.dtype,
     ) -> torch.Tensor:
         # pylint: disable=missing-function-docstring
-        dtype = torch_to_transformer_engine_dtype[dtype]
+        if tensor._rowwise_data is not None and tensor._rowwise_data.numel() == 0:
+            return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
+        if tensor._columnwise_data is not None and tensor._columnwise_data.numel() == 0:
+            return torch.empty(tensor.size(), dtype=dtype, device=tensor.device)
+
+        te_dtype = torch_to_transformer_engine_dtype[dtype]
 
         if IS_HIP_EXTENSION and int(os.environ.get('NVTE_USE_DEQUANTIZE_TRITON', '0')):
             from ...triton_kernels.cast import te_dequantize_triton
-            return te_dequantize_triton(tensor, dtype)
+            return te_dequantize_triton(tensor, te_dtype)
 
-        # Make sure FP8 data is in expected format
-        if tensor._rowwise_data is not None or tensor._columnwise_data is not None:
-            return tex.dequantize(tensor, dtype)
-        raise ValueError("Cannot dequantize MXFP8 tensor with no data")
+        if tensor._rowwise_data is None and tensor._columnwise_data is None:
+            raise ValueError("Cannot dequantize MXFP8 tensor with no data")
+        # ``tex.dequantize`` requires CUDA-resident buffers.
+        src_device = tensor.device
+        if src_device.type != "cuda":
+            cuda_tensor = tensor.to(device=torch.device("cuda"))
+            result = tex.dequantize(cuda_tensor, te_dtype)
+            return result.to(device=src_device)
+        return tex.dequantize(tensor, te_dtype)
 
     @staticmethod
     def backward(
@@ -77,7 +87,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
     # Builder class for casting to MXFP8
     _quantizer: Optional[Quantizer]
     # FP8 data type
-    _fp8_dtype: TE_DType
+    _fp8_dtype: DType
     # Whether scaling factors are in the swizzled format expected by
     # GEMM
     _with_gemm_swizzled_scales: bool
@@ -88,7 +98,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         rowwise_scale_inv: Optional[torch.Tensor],
         columnwise_data: Optional[torch.Tensor],
         columnwise_scale_inv: Optional[torch.Tensor],
-        fp8_dtype: TE_DType,
+        fp8_dtype: Union[DType, tex.DType],
         quantizer: Optional[Quantizer],
         with_gemm_swizzled_scales: bool,
         *args,
@@ -105,7 +115,7 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         instance._rowwise_scale_inv = rowwise_scale_inv
         instance._columnwise_scale_inv = columnwise_scale_inv
         instance._quantizer = quantizer.copy() if quantizer is not None else None
-        instance._fp8_dtype = fp8_dtype
+        instance._fp8_dtype = DType.cast(fp8_dtype)
         instance._with_gemm_swizzled_scales = with_gemm_swizzled_scales
 
         return instance
@@ -190,6 +200,8 @@ class MXFP8TensorStorage(QuantizedTensorStorage):
         """Dequantize to a higher precision."""
         if dtype is None:
             dtype = self._dtype
+        if self._rowwise_data is not None and self._rowwise_data.numel() == 0:
+            return torch.empty(self.size(), dtype=dtype, device=self.device)
         return _FromMXFP8Func.forward(None, self, dtype)
 
     def size(self, *args, **kwargs):

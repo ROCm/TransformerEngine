@@ -256,9 +256,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         float after_gate_elt;
         bool dgate_elt = true;  // gating is ideally an identity function
         if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
-          // In case of GPT OSS, clamp the activation and gate values
-          dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;  // Derivative of clamp
-          gate_elt = min(max(-p.limit, gate_elt), p.limit) + 1.0f;
+          dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;
+          gate_elt = min(max(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
         }
         if constexpr (IS_BWD) {
           float grad_elt = static_cast<float>(in_grad_sh[shmem_offset_colwise]);
@@ -385,7 +384,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         scales_colwise[scale_idx] = biased_exponent_act;
       }
 
-      float block_scale_inverse_act = ptx::exp2f_rcp(biased_exponent_act);
+      float block_scale_inverse_act = ptx::exp2f_rcp<float>(biased_exponent_act);
       float block_scale_inverse_gate;
 
       if constexpr (IS_BWD) {
@@ -403,7 +402,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         if (tid_Y_colwise == 0 && (!out_of_bounds_colwise)) {
           scales_colwise[scale_idx_gate] = biased_exponent_gate;
         }
-        block_scale_inverse_gate = ptx::exp2f_rcp(biased_exponent_gate);
+        block_scale_inverse_gate = ptx::exp2f_rcp<float>(biased_exponent_gate);
       }
 
 // 3. Scale elements
@@ -521,9 +520,8 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
             float after_gate_elt;
             bool dgate_elt = true;
             if constexpr (std::is_same<ParamOP, ClampedSwiGLUParam>::value) {
-              // In case of GPT OSS, clamp the activation and gate values
-              dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;  // Derivative of clamp
-              gate_elt = min(max(-p.limit, gate_elt), p.limit) + 1.0f;
+              dgate_elt = gate_elt <= p.limit && gate_elt >= -p.limit;
+              gate_elt = min(max(-p.limit, gate_elt), p.limit) + p.glu_linear_offset;
             }
             if constexpr (IS_BWD) {
               float grad_elt = static_cast<float>(in_grad.data.elt[e]);
@@ -595,7 +593,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         scales_rowwise[scale_idx] = biased_exponent_act;
       }
 
-      const float block_scale_inverse_act = ptx::exp2f_rcp(biased_exponent_act);
+      const float block_scale_inverse_act = ptx::exp2f_rcp<float>(biased_exponent_act);
       const ptx::floatx2 block_scale_inverse_2x_act = {block_scale_inverse_act,
                                                        block_scale_inverse_act};
 
@@ -617,7 +615,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         if (!out_of_bounds_rowwise) {
           scales_rowwise[scale_idx_gate] = biased_exponent_gate;
         }
-        block_scale_inverse_gate = ptx::exp2f_rcp(biased_exponent_gate);
+        block_scale_inverse_gate = ptx::exp2f_rcp<float>(biased_exponent_gate);
         block_scale_inverse_2x_gate = {block_scale_inverse_gate, block_scale_inverse_gate};
       }
 

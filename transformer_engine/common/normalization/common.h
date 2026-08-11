@@ -327,7 +327,7 @@ class TeNormalizationRegistry {
 class NormalizationPlanBase {
  public:
   virtual ~NormalizationPlanBase() = default;
-  virtual std::vector<size_t> getWorkspaceShape() const = 0;
+  virtual Shape getWorkspaceShape() const = 0;
 
   virtual void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
                        void* eps_dptr, void* rsigma_dptr, void* workspace_dptr,
@@ -351,7 +351,7 @@ class TeNormalizationPlan : public NormalizationPlanBase {
                       , const NVTEScalingMode mode, const bool training
 #endif
                     );
-  std::vector<size_t> getWorkspaceShape() const override;
+  Shape getWorkspaceShape() const override;
 
   void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
                void* eps_dptr, void* rsigma_dptr, void* workspace_dptr,
@@ -381,7 +381,7 @@ class CudnnNormalizationPlan : public NormalizationPlanBase {
                          const bool zero_centered_gamma, const NVTEScalingMode mode,
                          const bool training);
 
-  std::vector<size_t> getWorkspaceShape() const override;
+  Shape getWorkspaceShape() const override;
 
   void execute(Tensor* z, void* x_dptr, void* gamma_dptr, void* beta_dptr, void* mean_dptr,
                void* eps_dptr, void* rsigma_dptr, void* workspace_dptr,
@@ -407,7 +407,7 @@ class CudnnNormalizationPlan : public NormalizationPlanBase {
   std::shared_ptr<fe::graph::Tensor_attributes> _z_mx_row, _z_mx_col, _sf_row, _sf_col;
   const bool _training;
   // BWD
-  std::shared_ptr<fe::graph::Tensor_attributes> _dz, _dx, _dgamma, _dbeta;
+  std::shared_ptr<fe::graph::Tensor_attributes> _dz, _dx, _dgamma, _dbeta, _add;
 
   fe::graph::Graph _graph;
   std::unordered_map<std::shared_ptr<fe::graph::Tensor_attributes>, void*> _variant_pack;

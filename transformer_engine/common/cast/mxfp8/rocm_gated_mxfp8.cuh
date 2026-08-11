@@ -179,7 +179,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         const float scale_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(act_amax, rocm_op::max{});
         const e8m0_t biased_exp =
             ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const float scale_inv = ptx::exp2f_rcp(biased_exp);
+        const float scale_inv = ptx::exp2f_rcp<float>(biased_exp);
 
         Vec<OType, ELEMS_PER_THREAD> out_vec;
 #pragma unroll
@@ -214,7 +214,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         const float scale_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(gate_amax, rocm_op::max{});
         const e8m0_t biased_exp =
             ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const float scale_inv = ptx::exp2f_rcp(biased_exp);
+        const float scale_inv = ptx::exp2f_rcp<float>(biased_exp);
 
         Vec<OType, ELEMS_PER_THREAD> out_vec;
 #pragma unroll
@@ -338,7 +338,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         const float scale_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(act_amax, rocm_op::max{});
         const e8m0_t biased_exp =
             ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const float scale_inv = ptx::exp2f_rcp(biased_exp);
+        const float scale_inv = ptx::exp2f_rcp<float>(biased_exp);
 
         Vec<OType, ELEMS_PER_THREAD> out_vec;
 #pragma unroll
@@ -373,7 +373,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
         const float scale_amax = rocm_subwarp_allreduce<SUBWARP_WIDTH>(gate_amax, rocm_op::max{});
         const e8m0_t biased_exp =
             ptx::float_to_e8m0(scale_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const float scale_inv = ptx::exp2f_rcp(biased_exp);
+        const float scale_inv = ptx::exp2f_rcp<float>(biased_exp);
 
         Vec<OType, ELEMS_PER_THREAD> out_vec;
 #pragma unroll
@@ -488,7 +488,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
         const e8m0_t biased_exponent =
             ptx::float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const float scale_reciprocal = ptx::exp2f_rcp(biased_exponent);
+        const float scale_reciprocal = ptx::exp2f_rcp<float>(biased_exponent);
 
         if ((tid_colwise_Y == 0) && !out_of_bounds) {
           const int global_scales_offset_Y = iteration_scale_colwise_offset_Y;
@@ -526,7 +526,7 @@ __global__ void __launch_bounds__(THREADS_PER_CHUNK)
 
         const e8m0_t biased_exponent =
             ptx::float_to_e8m0(mx_block_Y_amax * Quantized_Limits<OType>::max_norm_rcp);
-        const float scale_reciprocal = ptx::exp2f_rcp(biased_exponent);
+        const float scale_reciprocal = ptx::exp2f_rcp<float>(biased_exponent);
 
         if ((tid_colwise_Y == 0) && !out_of_bounds) {
           const int global_scales_offset_Y = iteration_scale_colwise_offset_Y;

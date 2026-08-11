@@ -17,6 +17,7 @@ pytest-timeout fires. The inner bound defaults to ``PYTEST_TIMEOUT`` minus a
 grace so the child is always reaped first.
 """
 
+from functools import cache
 import os
 import shutil
 import subprocess
@@ -28,8 +29,14 @@ except Exception:  # torch missing/broken -> let the tests themselves report it
 
 # Commands treated as distributed launchers worth bounding.
 _LAUNCHERS = ("torchrun", "mpirun")
-# Grace between SIGTERM and the SIGKILL backstop.
-_KILL_AFTER = os.environ.get("TE_DIST_LAUNCH_KILL_AFTER", "60")
+
+@cache
+def _terminate_timeout_seconds():
+    """Grace between SIGTERM and the SIGKILL backstop."""
+    try:
+        return str(max(1, int(os.environ.get("TE_DIST_LAUNCH_KILL_AFTER", "60"))))
+    except ValueError:
+        return "60"
 
 
 def _launch_timeout_seconds():
@@ -43,7 +50,7 @@ def _launch_timeout_seconds():
         outer = int(os.environ.get("PYTEST_TIMEOUT", "1200"))
     except ValueError:
         return "1200"
-    return str(max(60, outer - 120))
+    return str(max(60, outer - 60 - int(_terminate_timeout_seconds())))
 
 
 def _is_launcher(cmd):
@@ -56,7 +63,7 @@ def _is_launcher(cmd):
 
 
 def _wrap(cmd):
-    return ["timeout", f"-k{_KILL_AFTER}", "-v", _launch_timeout_seconds(), *cmd]
+    return ["timeout", "-k", _terminate_timeout_seconds(), "-v", _launch_timeout_seconds(), *cmd]
 
 
 # Patch at import (collection) time so it is active for every test in this dir.

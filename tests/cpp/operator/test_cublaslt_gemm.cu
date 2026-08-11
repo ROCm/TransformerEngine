@@ -301,19 +301,6 @@ __global__ void compute_ref_kernel(
 }
 
 
-constexpr size_t kMXFP8GroupSize = 32;
-constexpr size_t kKTileSize      = 128;
-
-static size_t compute_mxfp8_workspace_size(size_t m, size_t k, size_t n, bool transa, bool transb, size_t base_size) {
-  size_t k_iters = k / kKTileSize;
-  size_t scale_k = k / kMXFP8GroupSize;
-  size_t sa_pk   = round_up_to_nearest_multiple(k_iters * m * 4, 256);
-  size_t sb_pk   = k_iters * n * 4;
-  size_t needed  = round_up_to_nearest_multiple(sa_pk, 256) + sb_pk;
-  if (!transa) needed += round_up_to_nearest_multiple(m * k, 256) + round_up_to_nearest_multiple(m * scale_k, 256) + round_up_to_nearest_multiple(sa_pk, 256);
-  if (transb)  needed += round_up_to_nearest_multiple(n * k, 256) + round_up_to_nearest_multiple(n * scale_k, 256) + round_up_to_nearest_multiple(sb_pk, 256);
-  return std::max(base_size, needed);
-}
 
 struct TestParams {
   size_t m;
@@ -332,18 +319,19 @@ template <typename A_Type, typename B_Type, typename Bias_Type,
           typename Gelu_Type, typename D_Type>
 static void run_reference(
     const TestParams& params,
-    const Tensor& A,
-    const Tensor& B,
+    Tensor& A,
+    Tensor& B,
     const Tensor* Bias,                 // nullable
-    const Tensor& D_for_scale,
+    Tensor& D_for_scale,
     Tensor& RefD,
     Tensor* RefPreGeluOut)              // nullable
 {
   const bool use_mxfp8 = (params.scaling_mode == NVTE_MXFP8_1D_SCALING);
 
-  const float d_scale = D_for_scale.scale();
-
   const bool is_fp8_output = test::isFp8Type(test::TypeInfo<D_Type>::dtype);
+
+  // Only FP8 output has a scale (set via setRandomScale); non-FP8 output is unscaled.
+  const float d_scale = is_fp8_output ? D_for_scale.scale() : 1.0f;
 
   const bool a_use_colwise = (!params.transa) && A.columnwise();
   const bool b_use_colwise = ( params.transb) && B.columnwise();
@@ -377,8 +365,9 @@ static void run_reference(
     a_scale_ld = a_s.data[1];
     b_scale_ld = b_s.data[1];
   } else {
-    a_scale_inv_scalar = A.rowwise_scale_inv();
-    b_scale_inv_scalar = B.rowwise_scale_inv();
+    // Per-tensor scale_inv exists only for FP8 inputs; non-FP8 inputs stay at 1.0.
+    if (test::isFp8Type(test::TypeInfo<A_Type>::dtype)) a_scale_inv_scalar = A.rowwise_scale_inv();
+    if (test::isFp8Type(test::TypeInfo<B_Type>::dtype)) b_scale_inv_scalar = B.rowwise_scale_inv();
   }
 
   // optional bias device pointer
@@ -508,6 +497,12 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
   else if (use_fp8) {
     atol = 1e-3;
     rtol = std::max(rtol, 1e-2);
+    // gfx950 FP8 GEMMs can show larger numerical variance
+    cudaDeviceProp prop;
+    (void)cudaGetDeviceProperties(&prop, 0);
+    if (prop.major == 9 && prop.minor == 5) {
+      rtol = std::max(rtol, 2e-2);
+    }
   }
   else if (type == DType::kBFloat16) {
     //relax for certain prime number TN gemm
@@ -676,15 +671,10 @@ void performTest(const TestParams& params) {
   bool grad = false;
   bool accumulate = false;
 
-  size_t workspace_size = 33554432;
+  size_t workspace_size = 33'554'432;
 #ifdef __HIP_PLATFORM_AMD__
   if ((prop.major == 9 && prop.minor == 5) || prop.major >= 12) {
-    workspace_size = 67108864;
-  }
-  if (use_hipkittens_mxfp8) {
-    workspace_size = compute_mxfp8_workspace_size(params.m, params.k, params.n,
-                                                  params.transa, params.transb,
-                                                  workspace_size);
+    workspace_size = 67'108'864;
   }
 #endif
   Tensor Workspace("Workspace", TShape{ workspace_size }, DType::kByte);
@@ -835,10 +825,7 @@ void performDqTest(const TestParams &params) {
   Tensor bias;
   Tensor pre_gelu_out;
 
-  size_t workspace_size = compute_mxfp8_workspace_size(params.m, params.k, params.n,
-                                                  params.transa, params.transb,
-                                                  67108864); // 64 MiB required for hipBLASlt
-  Tensor Workspace("Workspace", TShape{workspace_size}, DType::kByte);
+  Tensor Workspace("Workspace", TShape{67'108'864}, DType::kByte);
 
   //perform FP8 gemm and copy the output results from GPU memory to CPU memory
   Tensor D("D", TShape{params.n, params.m}, dtype);
