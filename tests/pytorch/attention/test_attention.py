@@ -2718,23 +2718,7 @@ def _assert_xattn_ran(tensor, what):
 
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
 @pytest.mark.skipif(not xattention_available, reason="xAttention extension is not installed.")
-@pytest.mark.parametrize(
-    "direction",
-    [
-        "backward",
-        pytest.param(
-            "forward",
-            marks=pytest.mark.xfail(
-                strict=True,
-                reason=(
-                    "xAttention sets MODE.FP16_OVFL in mha_bwd_mi350.cpp only, so the "
-                    "forward S/O casts still round into the e4m3fn NaN codepoint. Drop "
-                    "this marker once the setreg also lands in mha_fwd_mi350.cpp."
-                ),
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("direction", ["backward", "forward"])
 def test_xattn_fp8_cast_saturates(direction):
     """xAttention's internal fp8 casts must clip over-range values, not emit NaN.
 
@@ -2770,6 +2754,8 @@ def test_xattn_fp8_cast_saturates(direction):
             descale_s=1.0 / scale_s,
             scale_o=scale_o,
             out=out,
+            amax_s=None,
+            amax_o=None,
             softmax_scale=softmax_scale,
             is_causal=True,
             window_size_left=-1,
@@ -2815,6 +2801,8 @@ def test_xattn_fp8_cast_saturates(direction):
         descale_s=1.0,
         scale_o=1.0,
         out=out_fp8,
+        amax_s=None,
+        amax_o=None,
         softmax_scale=softmax_scale,
         is_causal=True,
         window_size_left=-1,
@@ -2853,6 +2841,10 @@ def test_xattn_fp8_cast_saturates(direction):
             dq=dq,
             dk=dk,
             dv=dv,
+            amax_dq=None,
+            amax_dk=None,
+            amax_dv=None,
+            amax_ds=None,
             alibi_slopes=None,
             p_dropout=0.0,
             softmax_scale=softmax_scale,
@@ -2870,7 +2862,8 @@ def test_xattn_fp8_cast_saturates(direction):
     # scaled peak below an exact quantity rather than an estimate.
     base = bwd(1.0)
     _assert_xattn_ran(base[0], "xAttention fp8 backward dq")
-    amax_ds = base[7].float().item()
+    # {dq, dk, dv, amax_dq, amax_dk, amax_dv, amax_ds}
+    amax_ds = base[6].float().item()
 
     for scale_ds in (1e4, 1e6, 1e9):
         grads = bwd(scale_ds)
@@ -2882,6 +2875,128 @@ def test_xattn_fp8_cast_saturates(direction):
                 f"scale_ds={scale_ds:g} (scaled peak {peak:.3e} vs e4m3fn NaN codepoint "
                 f"{_E4M3_NAN_KNEE}); an over-range value must saturate to 448 instead"
             )
+
+
+@pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
+@pytest.mark.skipif(not xattention_available, reason="xAttention extension is not installed.")
+@pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
+@pytest.mark.parametrize("model", ["xattn_hd64_causal", "xattn_swa_causal_128"])
+@pytest.mark.parametrize("fp8_dpa_bwd", [True, False])
+def test_xattn_fp8_multi_step_output_scale(model, fp8_dpa_bwd):
+    """The attention output must not carry O's quantization scale.
+
+    xAttention folds ``scale_o`` into its output store whenever per-tensor quant
+    is on, whatever the output dtype. Asking for a high-precision ``out`` while
+    handing over a real ``scale_o`` therefore returns an output silently
+    multiplied by it -- around 100x once the scale leaves its seed.
+
+    DelayedScaling hides this from every single-step test: ``O_quantizer.scale``
+    stays 1.0 until the first autocast exit refreshes it from the amax history,
+    so the error only appears from the second step on. Feeding identical q/k/v in
+    for several steps and requiring the output magnitude to hold flat catches it
+    without a reference implementation, and the error dwarfs the tolerance.
+
+    Both ``fp8_dpa_bwd`` settings are covered because they select different
+    output paths: with the fp8 backward on, the forward writes fp8 directly and
+    ``scale_o`` is correct by construction; with it off, the adapter must ask for
+    bf16 and pass ``scale_o=1.0`` instead.
+
+    Causal configs only. With no mask the attention logit amax falls below 1, so
+    the delayed ``scale_s`` climbs past 448 and xAttention's non-saturating S cast
+    turns the output into NaN -- a separate kernel-side issue this cannot guard.
+    """
+    config = model_configs_fp8_xattn[model]
+    dtype = torch.bfloat16
+    steps = 4
+    # The bug multiplies the output by O_quantizer.scale, which lands in the
+    # hundreds; step-to-step drift from the amax history itself is sub-percent.
+    tolerance = 1.05
+
+    fp8_recipe = recipe.DelayedScaling(
+        margin=0,
+        fp8_format=recipe.Format.HYBRID,
+        amax_history_len=1,
+        amax_compute_algo="most_recent",
+        fp8_dpa=True,
+    )
+
+    os.environ["NVTE_FUSED_ATTN_XATTN"] = "1"
+    os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
+    _, _, fused_attn_backends = get_available_attention_backends(
+        config,
+        qkv_dtype=torch.float8_e4m3fn,
+        qkv_layout="bshd_bshd_bshd",
+        fp8=True,
+        fp8_meta={"recipe": fp8_recipe},
+        is_training=True,
+        deterministic=_deterministic,
+    )
+    if FusedAttnBackend["XAttn"] not in fused_attn_backends:
+        pytest.skip("xAttention is not the selected fp8 fused-attn backend")
+
+    os.environ["NVTE_FLASH_ATTN"] = "0"
+    os.environ["NVTE_FUSED_ATTN"] = "1"
+    os.environ["NVTE_UNFUSED_ATTN"] = "0"
+    _attention_backends["backend_selection_requires_update"] = True
+
+    reset_rng_states()
+    dpa = DotProductAttention(
+        config.num_heads,
+        config.head_dim_qk,
+        num_gqa_groups=config.num_gqa_groups,
+        attention_dropout=0.0,
+        qkv_format="bshd",
+        attn_mask_type=config.attn_mask_type,
+        window_size=config.window_size,
+        layer_number=1,
+    ).to(dtype=dtype, device="cuda")
+
+    q = torch.randn(
+        config.batch_size,
+        config.max_seqlen_q,
+        config.num_heads,
+        config.head_dim_qk,
+        dtype=dtype,
+        device="cuda",
+        requires_grad=True,
+    )
+    kv_shape = (
+        config.batch_size,
+        config.max_seqlen_kv,
+        config.num_gqa_groups,
+        config.head_dim_qk,
+    )
+    k = torch.randn(kv_shape, dtype=dtype, device="cuda", requires_grad=True)
+    v = torch.randn(kv_shape, dtype=dtype, device="cuda", requires_grad=True)
+    out_grad = torch.randn(
+        config.batch_size,
+        config.max_seqlen_q,
+        config.num_heads * config.head_dim_qk,
+        dtype=dtype,
+        device="cuda",
+    )
+
+    norms = []
+    for _ in range(steps):
+        for t in (q, k, v):
+            t.grad = None
+        with autocast(enabled=True, recipe=fp8_recipe):
+            out = dpa(q, k, v, attn_mask_type=config.attn_mask_type)
+        out.backward(out_grad)
+        norms.append(out.detach().float().norm().item())
+
+    _assert_xattn_ran(out, "xAttention fp8 attention output")
+    # Checked before the ratio below: a NaN norm makes min/max order-dependent.
+    assert torch.isfinite(torch.tensor(norms)).all(), (
+        f"xAttention fp8 output went non-finite across steps: {norms}"
+    )
+    ratio = max(norms) / min(norms)
+    assert ratio <= tolerance, (
+        f"xAttention fp8 output magnitude is not stable across {steps} steps "
+        f"(max/min = {ratio:.2f} > {tolerance}); per-step norms {norms}. The output "
+        "is picking up O_quantizer.scale, which DelayedScaling only lifts off its "
+        "seed of 1.0 from the second step on."
+    )
 
 
 def _run_dpa_fp8_vs_f16(dtype, config, fp8_dpa, qkv_layout, is_training, fp8_recipe):
