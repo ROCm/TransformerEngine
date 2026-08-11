@@ -25,6 +25,7 @@ from flydsl.expr import arith, const_expr, gpu, math, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
+from .exceptions import FlyDSLUnsupportedError
 from .gemm_common_utils import require_block_tiling, require_launch_size
 
 # Transformer Engine-local FlyDSL utilities.
@@ -1066,11 +1067,11 @@ def fp8_matmul(
     if tuple(c.shape) != (m, n):
         raise ValueError(f"C shape {tuple(c.shape)} != expected {(m, n)}")
     if c.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise TypeError(
+        raise FlyDSLUnsupportedError(
             f"FlyDSL FP8 supports only float16, bfloat16, and float32 outputs, got {c.dtype}"
         )
     if not c.is_contiguous():
-        raise ValueError("FlyDSL FP8 requires contiguous output storage")
+        raise FlyDSLUnsupportedError("FlyDSL FP8 requires contiguous output storage")
 
     tensors = (a, b, a_scale_inv, b_scale_inv, c)
     if any(t.device != a.device for t in tensors[1:]):

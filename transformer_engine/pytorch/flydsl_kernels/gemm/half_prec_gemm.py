@@ -1325,7 +1325,7 @@ def _half_prec_matmul(
             f"A, B, and C must be on the same device, got {a.device}, {b.device}, and {c.device}"
         )
     if not c.is_contiguous():
-        raise ValueError(f"FlyDSL {label} GEMM requires contiguous output storage")
+        raise FlyDSLUnsupportedError(f"FlyDSL {label} GEMM requires contiguous output storage")
 
     doGemm(
         a,
@@ -1449,7 +1449,7 @@ def doGemm(
             f"{label} {layout} requires {input_dtype} inputs, got {A.dtype} and {B.dtype}"
         )
     if C.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise TypeError(f"Unsupported {label} output dtype: {C.dtype}")
+        raise FlyDSLUnsupportedError(f"Unsupported {label} output dtype: {C.dtype}")
 
     require_block_tiling(
         M_runtime,

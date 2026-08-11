@@ -76,7 +76,7 @@ def cdiv(numer: int, denom: int) -> int:
 ceildiv = cdiv
 
 
-def divmod(a, b):
+def divmod(a, b):  # pylint: disable=redefined-builtin
     """Integer divmod that works on DSL values (e.g. ``Int32``).
 
     The builtin ``divmod`` rejects DSL scalar types, so this uses the overloaded
@@ -85,7 +85,7 @@ def divmod(a, b):
     return (a // b, a % b)
 
 
-def min(a, b):
+def min(a, b):  # pylint: disable=redefined-builtin
     return arith.select(a < b, a, b)
 
 

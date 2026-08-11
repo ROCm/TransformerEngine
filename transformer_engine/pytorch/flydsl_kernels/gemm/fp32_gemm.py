@@ -26,6 +26,7 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 # Transformer Engine-local FlyDSL utilities.
+from .exceptions import FlyDSLUnsupportedError
 from .gemm_common_utils import require_block_tiling, require_launch_size
 from .fp16_gemm_utils import (
     G2SLoader,
@@ -1006,7 +1007,7 @@ def fp32_matmul(
     if tuple(c.shape) != (m, n):
         raise ValueError(f"C shape {tuple(c.shape)} != expected {(m, n)}")
     if c.dtype != torch.float32:
-        raise TypeError(
+        raise FlyDSLUnsupportedError(
             f"The current FlyDSL FP32 kernel stores torch.float32 output, got {c.dtype}"
         )
     if a.device != b.device or a.device != c.device:
@@ -1014,7 +1015,7 @@ def fp32_matmul(
             f"A, B, and C must be on the same device, got {a.device}, {b.device}, and {c.device}"
         )
     if not c.is_contiguous():
-        raise ValueError("FlyDSL FP32 GEMM requires contiguous output storage")
+        raise FlyDSLUnsupportedError("FlyDSL FP32 GEMM requires contiguous output storage")
 
     doGemm(a, b, c, stream=stream, epilogue=epilogue, bias=bias, aux=aux)
 

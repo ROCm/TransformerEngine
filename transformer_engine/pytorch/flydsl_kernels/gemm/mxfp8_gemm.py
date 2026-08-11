@@ -1626,12 +1626,18 @@ def do_gemm(
     if stream is None:
         stream = torch.cuda.current_stream()
 
+    # A non-contiguous output cannot receive the kernel's writes: the flat
+    # descriptor below would target a throwaway ``.contiguous()`` copy. Reject
+    # it here so ``general_gemm`` falls back rather than silently dropping C.
+    if not C.is_contiguous():
+        raise FlyDSLUnsupportedError("FlyDSL MXFP8 requires contiguous output storage")
+
     # Preserve the exact flat descriptor contract used by the passing kernels.
     A_arg = A.view(torch.uint8).contiguous().view(-1)
     B_arg = B.view(torch.uint8).contiguous().view(-1)
     As_arg = As.contiguous().view(-1)
     Bs_arg = Bs.contiguous().view(-1)
-    C_arg = C.contiguous().view(-1)
+    C_arg = C.view(-1)
     # DEFAULT keeps the kernel signature uniform with dummy 1-element buffers.
     if needs_bias:
         Bias_arg = bias.contiguous().view(-1)
@@ -1704,7 +1710,9 @@ def _validate_common_payloads(
     if a.device != b.device or D.device != a.device:
         raise ValueError("A, B, and D must be on the same device")
     if D.dtype not in (torch.float16, torch.bfloat16, torch.float32):
-        raise TypeError(f"FlyDSL MXFP8 output must be float16, bfloat16, or float32, got {D.dtype}")
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL MXFP8 output must be float16, bfloat16, or float32, got {D.dtype}"
+        )
 
 
 def mxfp8_matmul(

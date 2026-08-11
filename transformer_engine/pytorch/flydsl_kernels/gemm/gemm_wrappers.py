@@ -295,11 +295,13 @@ def _validate_or_allocate_output(
     if tuple(D.shape) != tuple(shape):
         raise ValueError(f"D shape {tuple(D.shape)} does not match expected {tuple(shape)}")
     if D.dtype != dtype:
-        raise TypeError(f"FlyDSL {backend_name} requires {dtype} output, got {D.dtype}")
+        raise FlyDSLUnsupportedError(
+            f"FlyDSL {backend_name} requires {dtype} output, got {D.dtype}"
+        )
     if D.device != device:
         raise ValueError(f"D must be on {device}, got {D.device}")
     if not D.is_contiguous():
-        raise ValueError(f"FlyDSL {backend_name} requires contiguous output storage")
+        raise FlyDSLUnsupportedError(f"FlyDSL {backend_name} requires contiguous output storage")
     return D
 
 
