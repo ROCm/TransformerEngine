@@ -1,5 +1,9 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
+#
+# Adapted by AMD from the FlyDSL project's GEMM utility helpers.
 """Byte-level staging helpers for the four-wave GEMM kernels.
 
 These loaders and swizzle helpers operate on flat byte views and carry no dtype
