@@ -97,38 +97,41 @@ def _validate_common_epilogue(
 ):
     """Validate features not yet implemented by the FlyDSL GEMM backend.
 
-    Fused forward BIAS is supported by all FlyDSL GEMM backends (mxfp8, fp8,
-    fp16, bf16, fp32). Fused forward GELU_AUX is implemented for MXFP8 only
-    (the per-backend ``_run_*`` reject it elsewhere). BGRADB (fused bias
-    gradient) and DGELU (fused GELU gradient) are not implemented anywhere yet.
+    Fused forward BIAS and forward GELU_AUX are supported by all FlyDSL GEMM
+    backends (mxfp8, fp8, fp16, bf16, fp32). BGRADB (fused bias gradient) and
+    DGELU (fused GELU gradient) are not implemented anywhere yet.
+
+    Unsupported configurations raise ``FlyDSLUnsupportedError`` so
+    ``general_gemm`` transparently falls back to the C++ backend rather than
+    crashing -- these are valid GEMM requests, just not ones FlyDSL can serve.
     """
     if quantizer is not None:
-        raise NotImplementedError(
+        raise FlyDSLUnsupportedError(
             "FlyDSL GEMM output quantization is not implemented"
         )
 
     if float(alpha) != 1.0 or float(beta) != 0.0:
-        raise NotImplementedError(
+        raise FlyDSLUnsupportedError(
             "FlyDSL GEMM currently supports only alpha=1 and beta=0"
         )
 
     # TODO: Add accumulate option
     if accumulate:
-        raise NotImplementedError(
+        raise FlyDSLUnsupportedError(
             "FlyDSL GEMM accumulation is not implemented"
         )
 
     # Forward BIAS is implemented across all backends; the fused bias-gradient
     # (BGRADB) path is not. TODO: add BGRADB to the FlyDSL GEMM backends.
     if grad and bias is not None and bias.numel() != 0:
-        raise NotImplementedError(
+        raise FlyDSLUnsupportedError(
             "FlyDSL GEMM fused bias gradient (BGRADB) is not implemented"
         )
 
     # Fused forward GELU (GELU_AUX) is supported; the backward fused GELU
     # gradient (DGELU) is not. TODO: add DGELU to the FlyDSL GEMM backends.
     if gelu and grad:
-        raise NotImplementedError(
+        raise FlyDSLUnsupportedError(
             "FlyDSL GEMM fused GELU gradient (DGELU) is not implemented"
         )
 
@@ -283,17 +286,6 @@ def _fp8_scale_debug(name: str, scale: torch.Tensor) -> None:
     )
 
 
-def _canonicalize_blas_pair(
-    A_data: torch.Tensor,
-    transa: bool,
-    B_data: torch.Tensor,
-    transb: bool,
-):
-    """Swap TE BLAS operand ownership without changing either tensor layout."""
-    del transa, transb
-    return B_data, A_data
-
-
 def _flatten_rowwise(t: torch.Tensor, name: str) -> torch.Tensor:
     """Flatten all leading dimensions while preserving the final dimension."""
     if t.ndim < 2:
@@ -310,52 +302,6 @@ def _flatten_columnwise(t: torch.Tensor, name: str) -> torch.Tensor:
             f"FlyDSL GEMM expects {name} to have rank >= 2, got {tuple(t.shape)}"
         )
     return t.reshape(t.shape[0], -1)
-
-
-def _canonicalize_blas_operands(
-    A_data: torch.Tensor,
-    transa: bool,
-    B_data: torch.Tensor,
-    transb: bool,
-):
-    """Convert TE's BLAS-shaped operands to FlyDSL row-major operands.
-
-    TE's generic GEMM interface follows BLAS column-major interpretation.
-    FlyDSL kernels consume ordinary row-major matrices:
-
-        a_flydsl: [M, K]
-        b_flydsl: [K, N]
-
-    Operand ownership is swapped without creating tensor transpose views:
-
-        a_flydsl = B
-        b_flydsl = A
-    """
-    if transa and transb:
-        raise NotImplementedError(
-            "FlyDSL GEMM does not support transa=True, transb=True (TT)"
-        )
-
-    A_flat = _flatten_rowwise(A_data, "A")
-    B_flat = _flatten_rowwise(B_data, "B")
-
-    a_flydsl, b_flydsl = _canonicalize_blas_pair(
-        A_flat,
-        transa,
-        B_flat,
-        transb,
-    )
-
-    m, k = a_flydsl.shape
-    kb, n = b_flydsl.shape
-    if kb != k:
-        layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
-        raise ValueError(
-            f"FlyDSL {layout} canonicalization produced incompatible operands: "
-            f"{tuple(a_flydsl.shape)} @ {tuple(b_flydsl.shape)}"
-        )
-
-    return a_flydsl, b_flydsl, m, n, k
 
 
 def _validate_or_allocate_output(
@@ -1375,7 +1321,7 @@ def te_generic_gemm_flydsl(
     del bulk_overlap
 
     if transa and transb:
-        raise NotImplementedError(
+        raise FlyDSLUnsupportedError(
             "FlyDSL GEMM does not support transa=True, transb=True (TT)"
         )
 
@@ -1412,7 +1358,7 @@ def te_generic_gemm_flydsl(
             tex.DType.kFloat32: torch.float32,
         }
         if output_dtype not in mxfp8_output_dtypes:
-            raise NotImplementedError(
+            raise FlyDSLUnsupportedError(
                 "FlyDSL MXFP8 supports FP16, BF16, or FP32 output, "
                 f"got {output_dtype}"
             )
@@ -1442,7 +1388,7 @@ def te_generic_gemm_flydsl(
             tex.DType.kFloat32: torch.float32,
         }
         if output_dtype not in fp8_output_dtypes:
-            raise NotImplementedError(
+            raise FlyDSLUnsupportedError(
                 "FlyDSL tensor-wise FP8 supports FP16, BF16, or FP32 output, "
                 f"got {output_dtype}"
             )
@@ -1477,7 +1423,7 @@ def te_generic_gemm_flydsl(
             tex.DType.kFloat32: torch.float32,
         }
         if output_dtype not in bf16_output_dtypes:
-            raise NotImplementedError(
+            raise FlyDSLUnsupportedError(
                 "FlyDSL BF16 supports FP16, BF16, or FP32 output, "
                 f"got {output_dtype}"
             )
@@ -1501,7 +1447,7 @@ def te_generic_gemm_flydsl(
             tex.DType.kFloat32: torch.float32,
         }
         if output_dtype not in fp16_output_dtypes:
-            raise NotImplementedError(
+            raise FlyDSLUnsupportedError(
                 "FlyDSL FP16 supports FP16, BF16, or FP32 output, "
                 f"got {output_dtype}"
             )
@@ -1519,7 +1465,7 @@ def te_generic_gemm_flydsl(
 
     if A.dtype == torch.float32 and B.dtype == torch.float32:
         if output_dtype not in (None, tex.DType.kFloat32):
-            raise NotImplementedError(
+            raise FlyDSLUnsupportedError(
                 "FlyDSL FP32 currently supports only FP32 output, "
                 f"got {output_dtype}"
             )
@@ -1534,7 +1480,7 @@ def te_generic_gemm_flydsl(
         )
         return D, None, gelu_input, None
 
-    raise NotImplementedError(
+    raise FlyDSLUnsupportedError(
         "FlyDSL GEMM currently supports only MXFP8, tensor-wise E4M3 FP8, "
         "BF16, FP16, or FP32 inputs; "
         f"got A={A.dtype} and B={B.dtype}"
