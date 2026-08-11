@@ -189,9 +189,7 @@ static hipDataType get_hipblaslt_dtype(const transformer_engine::DType t) {
     case DType::kFloat8E5M2:
       return te_fp8_fnuz() ? HIP_R_8F_E5M2_FNUZ: HIP_R_8F_E5M2;
     case DType::kFloat4E2M1:
-      // hipBLASLt exposes the packed FP4 (E2M1) type as HIP_R_4F_E2M1_EXT, which is a
-      // plain int constant provided for HIP versions that predate the hipDataType enum value.
-      return static_cast<hipDataType>(HIP_R_4F_E2M1_EXT);
+      return HIP_R_4F_E2M1;
     default:
       NVTE_ERROR("Invalid type");
   }
