@@ -33,6 +33,7 @@ odd-sized Triton edge-mask cases.
 """
 
 import os
+import warnings
 
 import pytest
 import torch
@@ -49,15 +50,68 @@ import transformer_engine_torch as tex
 
 # --- Feature detection --------------------------------------------------------
 
-major, minor = torch.cuda.get_device_capability()
+
+def _device_capability():
+    """Compute capability as (major, minor), or None on a CPU-only box.
+
+    Deferred behind a helper so importing this module never initialises CUDA at
+    collection time (which would error the whole module on a CPU-only runner
+    instead of skipping it).
+    """
+    if not torch.cuda.is_available():
+        return None
+    return torch.cuda.get_device_capability()
+
+
+# All FlyDSL GEMM dispatch is gated on gfx950 in cpp_extensions/gemm.py, not
+# just MXFP8. On any other arch general_gemm silently runs the C++ backend, so
+# every test here would either exercise hipBLASLt or (for the vs-cpp cases) be
+# a tautology. Skip the whole module unless we are on gfx950 with FlyDSL
+# installed (flydsl is only present when NVTE_USE_FLYDSL=1 at build time).
+_CAP = _device_capability()
+has_flydsl_support = _CAP == (9, 5)
+pytestmark = pytest.mark.skipif(
+    not has_flydsl_support,
+    reason="FlyDSL GEMM dispatch requires gfx950",
+)
+if has_flydsl_support:
+    pytest.importorskip("flydsl", reason="FlyDSL package is not installed")
 
 # The current FlyDSL MXFP8 implementation uses the gfx950 fp8-scaled MFMA.
-has_mxfp8_support = major == 9 and minor >= 5
+has_mxfp8_support = has_flydsl_support
 
 requires_mxfp8_support = pytest.mark.skipif(
     not has_mxfp8_support,
     reason="FlyDSL MXFP8 requires gfx950+ fp8-scaled MFMA support",
 )
+
+
+# --- FlyDSL fallback detection ------------------------------------------------
+
+_FLYDSL_FALLBACK_TAG = "[FLYDSL WARNING]"
+
+
+def _run_capturing_fallback(fn):
+    """Run ``fn`` with FlyDSL fallback warnings enabled and captured.
+
+    Returns ``(result, fell_back)`` where ``fell_back`` is True if the dispatch
+    emitted a ``[FLYDSL WARNING]`` fallback for any GEMM in ``fn``. The env var
+    makes cpp_extensions/gemm.py warn (instead of silently) when a FlyDSL GEMM
+    is unsupported and it falls back to the default backend.
+    """
+    old = os.environ.get("NVTE_FLYDSL_GEMM_WARN_FALLBACK")
+    os.environ["NVTE_FLYDSL_GEMM_WARN_FALLBACK"] = "1"
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            result = fn()
+        fell_back = any(_FLYDSL_FALLBACK_TAG in str(w.message) for w in caught)
+        return result, fell_back
+    finally:
+        if old is None:
+            os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
+        else:
+            os.environ["NVTE_FLYDSL_GEMM_WARN_FALLBACK"] = old
 
 
 # --- Test parameters ----------------------------------------------------------
@@ -192,21 +246,38 @@ def create_mxfp8_tensors(
     )
 
 
+def _assert_flydsl_ran(use_flydsl, fell_back):
+    """Fail if FlyDSL was requested for a supported config but silently fell back.
+
+    Every shape in this suite is tile-aligned and a config the PR claims to
+    support, so a fallback means FlyDSL did not actually run and the comparison
+    below would be vacuous (native vs native).
+    """
+    if use_flydsl and fell_back:
+        pytest.fail(
+            "FlyDSL GEMM unexpectedly fell back to the native backend; "
+            "the FlyDSL path was not exercised."
+        )
+
+
 def call_gemm(A, B, layout, out_dtype, use_flydsl=True):
     """Call ``general_gemm`` through either FlyDSL or the native C++ path."""
     os.environ["NVTE_USE_FLYDSL"] = "1" if use_flydsl else "0"
 
-    output, bias_grad, gelu_input, extra_output = general_gemm(
-        A=A,
-        B=B,
-        out_dtype=out_dtype,
-        layout=layout,
-        bias=None,
-        quantization_params=None,
-        gelu=False,
-        grad=False,
-        accumulate=False,
+    (output, bias_grad, gelu_input, extra_output), fell_back = _run_capturing_fallback(
+        lambda: general_gemm(
+            A=A,
+            B=B,
+            out_dtype=out_dtype,
+            layout=layout,
+            bias=None,
+            quantization_params=None,
+            gelu=False,
+            grad=False,
+            accumulate=False,
+        )
     )
+    _assert_flydsl_ran(use_flydsl, fell_back)
 
     assert bias_grad is None
     assert gelu_input is None
@@ -222,17 +293,20 @@ def call_gemm_with_bias(A, B, layout, out_dtype, bias, use_flydsl=True):
     """
     os.environ["NVTE_USE_FLYDSL"] = "1" if use_flydsl else "0"
 
-    output, bias_grad, gelu_input, extra_output = general_gemm(
-        A=A,
-        B=B,
-        out_dtype=out_dtype,
-        layout=layout,
-        bias=bias,
-        quantization_params=None,
-        gelu=False,
-        grad=False,
-        accumulate=False,
+    (output, bias_grad, gelu_input, extra_output), fell_back = _run_capturing_fallback(
+        lambda: general_gemm(
+            A=A,
+            B=B,
+            out_dtype=out_dtype,
+            layout=layout,
+            bias=bias,
+            quantization_params=None,
+            gelu=False,
+            grad=False,
+            accumulate=False,
+        )
     )
+    _assert_flydsl_ran(use_flydsl, fell_back)
 
     assert gelu_input is None
     assert extra_output is None
@@ -248,17 +322,20 @@ def call_gemm_with_gelu(A, B, layout, out_dtype, bias=None, use_flydsl=True):
     """
     os.environ["NVTE_USE_FLYDSL"] = "1" if use_flydsl else "0"
 
-    output, bias_grad, gelu_input, extra_output = general_gemm(
-        A=A,
-        B=B,
-        out_dtype=out_dtype,
-        layout=layout,
-        bias=bias,
-        quantization_params=None,
-        gelu=True,
-        grad=False,
-        accumulate=False,
+    (output, bias_grad, gelu_input, extra_output), fell_back = _run_capturing_fallback(
+        lambda: general_gemm(
+            A=A,
+            B=B,
+            out_dtype=out_dtype,
+            layout=layout,
+            bias=bias,
+            quantization_params=None,
+            gelu=True,
+            grad=False,
+            accumulate=False,
+        )
     )
+    _assert_flydsl_ran(use_flydsl, fell_back)
 
     assert bias_grad is None
     assert extra_output is None
