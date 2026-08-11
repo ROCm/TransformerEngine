@@ -201,7 +201,7 @@ def setup_requirements() -> Tuple[List[str], List[str]]:
         and "pytorch" in frameworks
         and bool(int(os.getenv("NVTE_USE_FLYDSL", "0")))
     ):
-        install_reqs.extend(["flydsl>=0.2.4,<0.3"])
+        install_reqs.extend(["flydsl==0.3.0"])
 
     # Framework-specific requirements
     if not bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):

@@ -29,12 +29,13 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, buffer_ops, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, math, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 # Transformer Engine-local FlyDSL utilities.
 from .exceptions import FlyDSLUnsupportedError
+from .gemm_common_utils import require_block_tiling
 from .fp8_gemm_utils import (
     G2SLoader,
     S2RLoader,
@@ -42,6 +43,8 @@ from .fp8_gemm_utils import (
     make_fp8_buffer_tensor,
     pack_i32x4_i32x8,
     swizzle_128,
+    xcd_swizzle,
+    barrier
 )
 
 
@@ -76,25 +79,25 @@ def _compile_mx32_scale_pack_kernel(
     stride0: int,
     stride1: int,
 ):
-    """Build one fused raw-E8M0 -> HK-scale packing kernel.
+    """Build one fused scale packing kernel.
 
     One GPU thread produces one final ``uint32`` word in the GEMM-consumed
     ``[K/128, dim]`` layout.  There is no intermediate ``scale_iter`` tensor
     and no eager PyTorch shift/index/OR kernels.
     """
     if dim % 64 != 0:
-        raise ValueError(
+        raise FlyDSLUnsupportedError(
             f"Scale outer dimension={dim} must be a multiple of 64"
         )
     if qk % 4 != 0:
-        raise ValueError(
+        raise FlyDSLUnsupportedError(
             f"Scale K/32 dimension={qk} must be divisible by 4"
         )
 
     k128_tiles = qk // 4
     total_words = k128_tiles * dim
     if total_words % _SCALE_PACK_THREADS != 0:
-        raise ValueError(
+        raise FlyDSLUnsupportedError(
             f"Packed scale words={total_words} must be divisible by "
             f"{_SCALE_PACK_THREADS}"
         )
@@ -119,8 +122,22 @@ def _compile_mx32_scale_pack_kernel(
 
     @flyc.kernel(known_block_size=[_SCALE_PACK_THREADS, 1, 1])
     def kernel_pack_mx32_scales(src: fx.Tensor, dst: fx.Tensor):
-        src_rsrc = buffer_ops.create_buffer_resource(src, max_size=True)
-        dst_rsrc = buffer_ops.create_buffer_resource(dst, max_size=True)
+        # Address both buffers as flat 1-D arrays so a linear slice coordinate
+        # maps to base+off, matching the legacy buffer_load semantics. Building
+        # buffer tensors directly from the 2-D src/dst would make logical_divide
+        # walk the layout column-major and corrupt every strided access.
+        src_flat = fx.rocdl.make_buffer_tensor(
+            fx.Tensor(fx.make_view(fx.get_iter(src), fx.make_layout(dim * qk, 1))),
+            max_size=True,
+        )
+        dst_flat = fx.rocdl.make_buffer_tensor(
+            fx.Tensor(fx.make_view(fx.get_iter(dst), fx.make_layout(total_words, 1))),
+            max_size=True,
+        )
+        src_div = fx.logical_divide(src_flat, fx.make_layout(1, 1))
+        dst_div = fx.logical_divide(dst_flat, fx.make_layout(1, 1))
+        scale_load_atom = fx.make_copy_atom(fx.rocdl.BufferCopy8b(), fx.Uint8)
+        scale_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
 
         linear = (
             fx.Index(fx.block_idx.x) * fx.Index(_SCALE_PACK_THREADS)
@@ -140,22 +157,23 @@ def _compile_mx32_scale_pack_kernel(
                 + fx.Index(group * 16)
                 + row_within_16
             )
-            value_i8 = buffer_ops.buffer_load(
-                src_rsrc,
-                _source_offset(source_k32, source_row),
-                vec_width=1,
-                dtype=T.i8,
-            )
-            # Preserve the raw E8M0 byte when widening.  Going through Uint8
-            # avoids sign extension for scale bytes >= 0x80.
-            return fx.Int32(fx.Uint8(value_i8))
+            off = _source_offset(source_k32, source_row)
+            reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Uint8)
+            fx.copy(scale_load_atom, fx.slice(src_div, (None, fx.Int32(off))), reg)
+            value_u8 = fx.memref_load_vec(reg)[0]
+            # The byte load widens via sext, so mask to the low 8 bits to
+            # preserve the raw E8M0 byte for scales >= 0x80 before packing.
+            return fx.Int32(value_u8) & fx.Int32(0xFF)
 
         b0 = load_scale_byte(0)
         b1 = load_scale_byte(1)
         b2 = load_scale_byte(2)
         b3 = load_scale_byte(3)
         packed = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-        buffer_ops.buffer_store(packed, dst_rsrc, linear)
+        reg_i32 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
+        fx.memref_store_vec(Vec.filled(1, packed, fx.Int32), reg_i32)
+        fx.copy(scale_store_atom, reg_i32, fx.slice(dst_div, (None, fx.Int32(linear))))
+
 
     @flyc.jit
     def launch_pack_mx32_scales(
@@ -254,88 +272,6 @@ def pack_mx32_scales_for_hk(
     )
     return packed
 
-def _encode_waitcnt(vmcnt=63, lgkmcnt=15):
-    """Encode the CDNA4/gfx950 ``S_WAITCNT`` SIMM16 operand.
-
-    ``rocdl.s_waitcnt`` accepts the raw 16-bit immediate operand of the
-    32-bit ``S_WAITCNT`` ISA instruction. On CDNA4, that SIMM16 field is:
-
-        SIMM16[3:0]   = vmcnt[3:0]
-        SIMM16[6:4]   = expcnt[2:0]
-        SIMM16[11:8]  = lgkmcnt[3:0]
-        SIMM16[15:14] = vmcnt[5:4]
-
-    ``vmcnt`` is therefore one six-bit counter split across two noncontiguous
-    fields; bits [5:4] are placed in SIMM16[15:14], while bits [3:0] remain
-    in SIMM16[3:0].
-
-    A wait-counter field set to its maximum representable value is effectively
-    unconstrained: the instruction does not wait on that counter. This helper
-    always encodes ``expcnt=7`` and defaults to ``vmcnt=63`` and ``lgkmcnt=15``,
-    so callers specify only the counters on which they intend to wait.
-
-    For example, ``_encode_waitcnt(lgkmcnt=0)`` returns ``0xC07F``, which the
-    assembler renders as ``s_waitcnt lgkmcnt(0)``.
-    See: https://llvm.org/docs/AMDGPU/gfx9_waitcnt.html
-    """
-    if not 0 <= vmcnt <= 63:
-        raise ValueError(f"vmcnt must be in [0, 63], got {vmcnt}")
-    if not 0 <= lgkmcnt <= 15:
-        raise ValueError(f"lgkmcnt must be in [0, 15], got {lgkmcnt}")
-
-    return (
-        (7 << 4)  # expcnt=7 -> SIMM16[6:4] (unconstrained)
-        | (vmcnt & 0x0F)  # vmcnt[3:0] -> SIMM16[3:0]
-        | ((lgkmcnt & 0x0F) << 8)  # lgkmcnt[3:0] -> SIMM16[11:8]
-        | ((vmcnt & 0x30) << 10)  # vmcnt[5:4] -> SIMM16[15:14]
-    )
-
-
-# Keep the documented gfx950 encoding invariant executable and import-time cheap.
-assert _encode_waitcnt(lgkmcnt=0) == 0xC07F
-
-
-def _barrier(vmcnt=63, lgkmcnt=15):
-    if vmcnt != 63 or lgkmcnt != 15:
-        rocdl.s_waitcnt(_encode_waitcnt(vmcnt=vmcnt, lgkmcnt=lgkmcnt))
-    rocdl.s_barrier()
-
-def _min(a, b):
-    return arith.select(a < b, a, b)
-
-
-def _divmod(a, b):
-    return a // b, a % b
-
-
-def _xcd_swizzle(num_pid_m, num_pid_n):
-    NUM_XCDS = 8
-    WGM = 4
-    NUM_CUS = 32 * NUM_XCDS
-    SWIZZLE_THRESHOLD = 4 * NUM_CUS
-
-    wgid = fx.block_idx.x
-    num_wg = num_pid_m * num_pid_n
-
-    # Simple row-major path.
-    simple_m, simple_n = _divmod(wgid, num_pid_n)
-
-    # XCD-remapped grouped-M path.
-    intra_xcd, xcd = _divmod(wgid, NUM_XCDS)
-    wgid_remap = xcd * (num_wg // NUM_XCDS) + intra_xcd
-    num_wgid_in_group = WGM * num_pid_n
-    group_id, intra_group = _divmod(wgid_remap, num_wgid_in_group)
-    first_pid_m = group_id * WGM
-    group_size_m = _min(num_pid_m - first_pid_m, WGM)
-    pid_n, intra_group_m = _divmod(intra_group, group_size_m)
-    pid_m = first_pid_m + intra_group_m
-
-    use_simple = (num_wg < SWIZZLE_THRESHOLD) | (num_wg % NUM_XCDS != 0)
-    return (
-        arith.select(use_simple, simple_m, pid_m),
-        arith.select(use_simple, simple_n, pid_n),
-    )
-
 
 def _compile_kernel(
     K: int,
@@ -343,15 +279,31 @@ def _compile_kernel(
     b_fp8_dtype: torch.dtype,
     output_dtype: torch.dtype,
     layout: str,
+    epilogue: str = "DEFAULT",
 ):
     """Build one compile-time-specialized TN, NN, or NT kernel.
 
     ``layout`` is a Python string consumed while constructing the FlyDSL IR.
     It is not a runtime kernel argument. Each cache entry therefore contains
     only the addressing, LDS reads, and scheduler directives for that layout.
+
+    ``epilogue`` selects the fused post-GEMM stages, resolved at compile time
+    so the store loop stays branch-free:
+
+        DEFAULT        plain matmul
+        BIAS           + per-output-feature bias vector (indexed by N)
+        GELU_AUX       GELU(A@B), saving the pre-activation to the Aux output
+        GELU_AUX_BIAS  GELU(A@B + bias), saving the pre-activation to Aux
+
+    The GELU modes write a second M x N output (pre-activation, tanh-approx
+    GELU applied to C) for the backward pass.
     """
     if layout not in ("TN", "NN", "NT"):
         raise ValueError(f"Unsupported MXFP8 kernel layout: {layout}")
+    if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
+        raise ValueError(f"Unsupported MXFP8 epilogue: {epilogue}")
+    has_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")
+    has_gelu = epilogue in ("GELU_AUX", "GELU_AUX_BIAS")
 
     a_transpose_read = layout == "NT"
     b_transpose_read = layout in ("NN", "NT")
@@ -584,7 +536,7 @@ def _compile_kernel(
 
     @flyc.kernel(known_block_size=[NUM_THREADS, 1, 1])
     def kernel_gemm(
-        A: fx.Tensor, As: fx.Tensor, B: fx.Tensor, Bs: fx.Tensor, C: fx.Tensor, c_m: fx.Int32, c_n: fx.Int32
+        A: fx.Tensor, As: fx.Tensor, B: fx.Tensor, Bs: fx.Tensor, C: fx.Tensor, Bias: fx.Tensor, Aux: fx.Tensor, c_m: fx.Int32, c_n: fx.Int32
     ):
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
         lds_a0 = (lds.a0_0, lds.a0_1)
@@ -598,14 +550,17 @@ def _compile_kernel(
         gB = make_fp8_buffer_tensor(B, b_f8_ir_t)
         a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
         b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
-        as_rsrc = buffer_ops.create_buffer_resource(As, max_size=True)
-        bs_rsrc = buffer_ops.create_buffer_resource(Bs, max_size=True)
+        as_rsrc = fx.rocdl.make_buffer_tensor(As, max_size=True)
+        bs_rsrc = fx.rocdl.make_buffer_tensor(Bs, max_size=True)
+        as_div = fx.logical_divide(as_rsrc, fx.make_layout(1, 1))
+        bs_div = fx.logical_divide(bs_rsrc, fx.make_layout(1, 1))
+        scale_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
         tx = gpu.thread_id("x")
 
         num_blocks_m = c_m // BLOCK_M
         num_blocks_n = c_n // BLOCK_N
 
-        pid_m, pid_n = _xcd_swizzle(num_blocks_m, num_blocks_n)
+        pid_m, pid_n = xcd_swizzle(num_blocks_m, num_blocks_n)
 
         bx_m = pid_m * BLOCK_M
         by_n = pid_n * BLOCK_N
@@ -626,6 +581,11 @@ def _compile_kernel(
         a_leading_dim = _a_leading_dim(c_m)
         b_leading_dim = _b_leading_dim(c_n)
 
+        # gl_off_a/gl_off_b: per-lane lists of LOAD_PASSES_HALF swizzled flat
+        # global offsets, indexed by DMA pass. gl_off_a[step] is this lane's
+        # static 16-byte source for pass `step`; G2SLoader adds the dynamic
+        # K-tile base as soffset. Offsets are pre-swizzled so bytes land in the
+        # bank-conflict-free LDS slots the MFMA read (S2RLoader) expects.
         gl_off_a = compute_global_swizzle(
             lane,
             wave_id,
@@ -661,18 +621,60 @@ def _compile_kernel(
         lane_div_16 = fx.get(coord_lane16, 0)
         lane_mod_16 = fx.get(coord_lane16, 1)
 
-        # C can exceed the signed-i32 element/byte offset range for large M*N.
-        # Bias the buffer descriptor base once per CTA using an index/i64 GEP,
-        # then store with only tile-local i32 offsets.  This keeps the hot store
-        # instruction form unchanged while avoiding i32 wrap in buffer_store().
-        c_n_idx_for_base = fx.Index(c_n)
-        c_tile_base_elems = bx_m_idx * c_n_idx_for_base + by_n_idx
-        c_tile_base_bytes = c_tile_base_elems * fx.Index(output_element_bytes)
-        c_rsrc = buffer_ops.create_buffer_resource(
-            C,
-            max_size=True,
-            base_byte_offset=c_tile_base_bytes,
+        # Per-CTA tile base in C elements, folded into each store's linear
+        # coordinate below (matching the scale-load addressing on this build;
+        # add_offset on a dynamic Index is unsupported here).
+        c_tile_base_elems = bx_m_idx * fx.Index(c_n) + by_n_idx
+        gC = fx.rocdl.make_buffer_tensor(C, max_size=True)
+        c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
+        c_store_atom = fx.make_copy_atom(
+            fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
+            output_fx_dtype,
         )
+
+        # Bias is a length-N fp32 vector indexed by the output-feature (N)
+        # coordinate and broadcast across the M/token rows. Only staged when
+        # the epilogue requests it; DEFAULT receives a dummy 1-element tensor.
+        # const_expr folds this compile-time flag at trace time so the setup
+        # (and load_bias) are inlined into the kernel scope with no runtime
+        # dispatch branch.
+        if const_expr(has_bias):
+            gBias = fx.rocdl.make_buffer_tensor(Bias, max_size=True)
+            bias_div = fx.logical_divide(gBias, fx.make_layout(1, 1))
+            bias_ld_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+
+            def load_bias(col):
+                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+                fx.copy(bias_ld_atom, fx.slice(bias_div, (None, fx.Int32(col))), reg)
+                return fx.memref_load_vec(reg)[0]
+
+        # GELU_AUX saves the pre-activation value (A@B[+bias]) to a second M x N
+        # output so the backward pass can recompute the GELU gradient. Same tile
+        # base / store atom shape as C; DEFAULT gets a dummy 1-element tensor.
+        if const_expr(has_gelu):
+            gAux = fx.rocdl.make_buffer_tensor(Aux, max_size=True)
+            aux_div = fx.logical_divide(gAux, fx.make_layout(1, 1))
+            aux_store_atom = fx.make_copy_atom(
+                fx.rocdl.BufferCopy32b() if output_element_bytes == 4 else fx.rocdl.BufferCopy16b(),
+                output_fx_dtype,
+            )
+
+            def gelu_tanh(x):
+                # tanh-approx GELU (matches PyTorch approximate='tanh' and the
+                # FlyDSL preshuffle reference), expressed through a non-positive
+                # exponent so exp() cannot overflow:
+                #   0.5*x*(1 + tanh(y)),  y = sqrt(2/pi)*(x + 0.044715*x^3)
+                half_f32 = fx.Float32(0.5)
+                one_f32 = fx.Float32(1.0)
+                zero_f32 = fx.Float32(0.0)
+                two_f32 = fx.Float32(2.0)
+                x3 = x * x * x
+                y = fx.Float32(0.7978845608) * (x + fx.Float32(0.044715) * x3)
+                abs_y = fx.Float32(y).maximumf(zero_f32 - y)
+                e_neg2abs = math.exp(fx.Float32(-2.0) * abs_y)
+                denom = one_f32 + e_neg2abs
+                numerator = (y > zero_f32).select(two_f32, two_f32 * e_neg2abs)
+                return half_f32 * x * (numerator * (one_f32 / denom))
 
         PIN_ACC_BASE = 0
 
@@ -773,22 +775,16 @@ def _compile_kernel(
             rocdl.sched_barrier(0)
 
         def load_a_scale_row(k128, row):
-            packed = buffer_ops.buffer_load(
-                as_rsrc,
-                k128 * c_m_idx + bx_m_idx + row,
-                vec_width=1,
-                dtype=T.i32,
-            )
-            return packed
+            off = k128 * c_m_idx + bx_m_idx + row
+            reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
+            fx.copy(scale_ld_atom, fx.slice(as_div, (None, fx.Int32(off))), reg)
+            return fx.memref_load_vec(reg)[0]
 
         def load_b_scale_row(k128, row):
-            packed = buffer_ops.buffer_load(
-                bs_rsrc,
-                k128 * c_n_idx + by_n_idx + row,
-                vec_width=1,
-                dtype=T.i32,
-            )
-            return packed
+            off = k128 * c_n_idx + by_n_idx + row
+            reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
+            fx.copy(scale_ld_atom, fx.slice(bs_div, (None, fx.Int32(off))), reg)
+            return fx.memref_load_vec(reg)[0]
 
         def load_a_scale_subtile(k128, sm):
             subtile_m_idx = reg_subtile_m_idx0 + fx.Index(sm * 2)
@@ -972,13 +968,43 @@ def _compile_kernel(
             subtile_n_idx = reg_subtile_n_idx0 + fx.Index(sn * 2)
             row_base = subtile_m_idx * SUBTILE_M + fx.Index(mi * MFMA_M) + lane_div_16 * 4
             col = subtile_n_idx * SUBTILE_N + fx.Index(ni * MFMA_N) + lane_mod_16
+
+            # Bias depends only on the output-feature (N) coordinate, so read it
+            # once per column and reuse across the four M rows below. Index by
+            # the GLOBAL feature (by_n_idx + col), matching the C store's
+            # c_tile_base_elems fold; the tile-local col alone would reread
+            # bias[0..BLOCK_N) for every N-block.
+            if const_expr(has_bias):
+                bias_value = load_bias(by_n_idx + col)
+
             for ii in range_constexpr(4):
                 row = row_base + fx.Index(ii)
-                c_idx = row * fx.Index(c_n) + col
+                c_idx = c_tile_base_elems + row * fx.Index(c_n) + col
+
+                # Epilogue stages run on the fp32 accumulator, in order, before
+                # the output-dtype narrowing:
+                #   value = acc [+ bias]           (pre-activation)
+                #   GELU_AUX: save pre-activation to Aux, then value = gelu(value)
                 value = Vec(acc)[ii]
+                if const_expr(has_bias):
+                    value = value + bias_value
+
+                if const_expr(has_gelu):
+                    # Save the pre-activation (post-bias) value for backward,
+                    # then apply GELU to the C output.
+                    aux_val = value
+                    if output_dtype != torch.float32:
+                        aux_val = aux_val.to(output_fx_dtype)
+                    aux_reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
+                    fx.memref_store_vec(Vec.filled(1, aux_val, output_fx_dtype), aux_reg)
+                    fx.copy(aux_store_atom, aux_reg, fx.slice(aux_div, (None, fx.Int32(c_idx))))
+                    value = gelu_tanh(value)
+
                 if output_dtype != torch.float32:
                     value = value.to(output_fx_dtype)
-                buffer_ops.buffer_store(value, c_rsrc, c_idx)
+                reg = fx.make_rmem_tensor(fx.make_layout(1, 1), output_fx_dtype)
+                fx.memref_store_vec(Vec.filled(1, value, output_fx_dtype), reg)
+                fx.copy(c_store_atom, reg, fx.slice(c_div, (None, fx.Int32(c_idx))))
 
 
         # Explicit register coordinates for HK-style four-quadrant mapping.
@@ -1071,7 +1097,7 @@ def _compile_kernel(
             #   next steady iteration or final tail.
 
             # Wait only far enough for the current page; the next-page refill may remain in flight.
-            _barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
+            barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             # Immediately issue MFMA-ready K+2 scale loads.
@@ -1134,7 +1160,7 @@ def _compile_kernel(
             # overwrite the current page's A-bottom half-page. Keep this wait as
             # late as possible to maximize read/compute overlap.
             rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
+            barrier(lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             a10 = pack_frag_halves(a10_x0, a10_x1)
@@ -1175,7 +1201,7 @@ def _compile_kernel(
             # Leave exactly the K+2 refill and scale loads outstanding. The following
             # LDS reads consume the already-ready next page, not the page being refilled.
             rocdl.sched_barrier(0)
-            _barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE + LOAD_PASSES_SCALES, lgkmcnt=0)
+            barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE + LOAD_PASSES_SCALES, lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             next_a00, next_as00 = load_a_subtile_mi_regs(next_a, next_scales_ready, 0, 0)
@@ -1228,7 +1254,7 @@ def _compile_kernel(
             return next_a0_regs, next_b0_regs, next_scales_ready, refill_scales
 
         def hk_one_k_tail_with_next(cur_a, cur_b, next_a, next_b, a0_regs, b0_regs, cur_scales, next_scales):
-            _barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
+            barrier(vmcnt=2 * LOAD_PASSES_A_SUBTILE + 2 * LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
 
             a00, a01, a02, a03, as00, as01, as02, as03 = a0_regs
             b00, b01, b02, b03, bs00, bs01, bs02, bs03 = b0_regs
@@ -1244,7 +1270,7 @@ def _compile_kernel(
             mfma_4n(_acc_idx(0, 3, 0), a03, as03, b00, b01, b02, b03, bs00, bs01, bs02, bs03)
 
             rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
+            barrier(lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             a10, as10 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 0)
@@ -1258,7 +1284,7 @@ def _compile_kernel(
             mfma_4n(_acc_idx(1, 3, 0), a03, as03, b10, b11, b12, b13, bs10, bs11, bs12, bs13)
 
             rocdl.sched_barrier(0)
-            _barrier(LOAD_PASSES_A_SUBTILE + LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
+            barrier(vmcnt=LOAD_PASSES_A_SUBTILE + LOAD_PASSES_B_SUBTILE, lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             next_a00, next_as00 = load_a_subtile_mi_regs(next_a, next_scales, 0, 0)
@@ -1311,7 +1337,7 @@ def _compile_kernel(
             return next_a0_regs, next_b0_regs
 
         def hk_one_k_final(cur_a, cur_b, a0_regs, b0_regs, cur_scales):
-            _barrier(vmcnt=0, lgkmcnt=0)
+            barrier(vmcnt=0, lgkmcnt=0)
 
             a00, a01, a02, a03, as00, as01, as02, as03 = a0_regs
             b00, b01, b02, b03, bs00, bs01, bs02, bs03 = b0_regs
@@ -1324,7 +1350,7 @@ def _compile_kernel(
             b13, bs13 = load_b_subtile_ni_regs(cur_b, cur_scales, 1, 3)
 
             rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
+            barrier(lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             a10, as10 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 0)
@@ -1333,7 +1359,7 @@ def _compile_kernel(
             a13, as13 = load_a_subtile_mi_regs(cur_a, cur_scales, 1, 3)
 
             rocdl.sched_barrier(0)
-            _barrier(lgkmcnt=0)
+            barrier(lgkmcnt=0)
             rocdl.sched_barrier(0)
 
             a_frags = (a00, a01, a02, a03, a10, a11, a12, a13)
@@ -1412,7 +1438,7 @@ def _compile_kernel(
         stage_a_subtile(fx.Index(BLOCK_K), 1, lds_a1)
 
         rocdl.sched_barrier(0)
-        _barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 4 * LOAD_PASSES_B_SUBTILE)
+        barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 4 * LOAD_PASSES_B_SUBTILE)
         rocdl.sched_barrier(0)
 
         # scales0 is already MFMA-ready; no byte extraction or broadcast is needed.
@@ -1426,7 +1452,7 @@ def _compile_kernel(
         a0_regs = load_a_subtile_regs(lds_a0, scales0, 0)
 
         rocdl.sched_barrier(0)
-        _barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 3 * LOAD_PASSES_B_SUBTILE)
+        barrier(vmcnt=3 * LOAD_PASSES_A_SUBTILE + 3 * LOAD_PASSES_B_SUBTILE)
         rocdl.sched_barrier(0)
 
         # Complete the K0 carried-register seed with B-left.
@@ -1508,6 +1534,8 @@ def _compile_kernel(
         B: fx.Tensor,
         Bs: fx.Tensor,
         C: fx.Tensor,
+        Bias: fx.Tensor,
+        Aux: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
@@ -1520,6 +1548,8 @@ def _compile_kernel(
             B,
             Bs,
             C,
+            Bias,
+            Aux,
             c_m,
             c_n,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
@@ -1536,8 +1566,15 @@ def do_gemm(
     stream=None,
     *,
     layout: str = "TN",
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
+    aux: torch.Tensor = None,
 ):
-    """Launch one cached compile-time MXFP8 layout specialization."""
+    """Launch one cached compile-time MXFP8 layout specialization.
+
+    The GELU epilogues require a caller-allocated ``aux`` output (M x N, same
+    dtype as C), filled in place with the pre-activation values for backward.
+    """
     if layout == "TN":
         M_runtime, K_runtime = A.shape
         N_runtime, Kb_runtime = B.shape
@@ -1555,27 +1592,15 @@ def do_gemm(
     assert A.dtype in supported_fp8_dtypes, f"unsupported A FP8 dtype: {A.dtype}"
     assert B.dtype in supported_fp8_dtypes, f"unsupported B FP8 dtype: {B.dtype}"
 
-    if M_runtime % _BLOCK_M != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP8 {layout} GEMM requires M to be a multiple of "
-            f"{_BLOCK_M}, got M={M_runtime}"
-        )
-    if N_runtime % _BLOCK_N != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP8 {layout} GEMM requires N to be a multiple of "
-            f"{_BLOCK_N}, got N={N_runtime}"
-        )
-    if K_runtime % _BLOCK_K != 0:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP8 {layout} GEMM requires K to be a multiple of "
-            f"{_BLOCK_K}, got K={K_runtime}"
-        )
-    num_k_tiles = K_runtime // _BLOCK_K
-    if num_k_tiles < 4:
-        raise FlyDSLUnsupportedError(
-            f"FlyDSL MXFP8 {layout} GEMM requires at least 4 K{_BLOCK_K} "
-            f"tiles, got K={K_runtime} ({num_k_tiles} tiles)"
-        )
+    require_block_tiling(
+        M_runtime,
+        N_runtime,
+        K_runtime,
+        block_m=_BLOCK_M,
+        block_n=_BLOCK_N,
+        block_k=_BLOCK_K,
+        label=f"MXFP8 {layout} GEMM",
+    )
 
     expected_as = (K_runtime // _BLOCK_K, M_runtime)
     expected_bs = (K_runtime // _BLOCK_K, N_runtime)
@@ -1596,6 +1621,41 @@ def do_gemm(
     if any(t.device != A.device for t in tensors[1:]):
         raise ValueError("A, B, packed scales, and C must be on the same device")
 
+    if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
+        raise ValueError(f"Unsupported MXFP8 epilogue: {epilogue}")
+    needs_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")
+    if needs_bias:
+        if bias is None:
+            raise ValueError(f"MXFP8 epilogue {epilogue} requires a bias tensor")
+        # Bias is indexed by the output-feature (N) axis and broadcast over M.
+        if bias.dtype != torch.float32:
+            raise TypeError(f"MXFP8 bias must be float32, got {bias.dtype}")
+        if bias.numel() != N_runtime:
+            raise ValueError(
+                f"MXFP8 bias length {bias.numel()} != N (out_features) {N_runtime}"
+            )
+        if bias.device != A.device:
+            raise ValueError("bias must be on the same device as A, B, and C")
+    elif bias is not None:
+        raise ValueError(f"MXFP8 epilogue {epilogue} does not accept a bias tensor")
+
+    needs_aux = epilogue in ("GELU_AUX", "GELU_AUX_BIAS")
+    if needs_aux:
+        # Pre-activation output for the backward pass: caller-allocated M x N,
+        # same dtype as C, filled in place through its buffer descriptor.
+        if aux is None:
+            raise ValueError(f"MXFP8 epilogue {epilogue} requires an aux output tensor")
+        if tuple(aux.shape) != (M_runtime, N_runtime):
+            raise ValueError(
+                f"MXFP8 aux shape {tuple(aux.shape)} != {(M_runtime, N_runtime)}"
+            )
+        if aux.dtype != C.dtype:
+            raise TypeError(f"MXFP8 aux dtype {aux.dtype} != C dtype {C.dtype}")
+        if aux.device != A.device:
+            raise ValueError("aux must be on the same device as A, B, and C")
+    elif aux is not None:
+        raise ValueError(f"MXFP8 epilogue {epilogue} does not accept an aux tensor")
+
     if stream is None:
         stream = torch.cuda.current_stream()
 
@@ -1605,6 +1665,15 @@ def do_gemm(
     As_arg = As.contiguous().view(-1)
     Bs_arg = Bs.contiguous().view(-1)
     C_arg = C.contiguous().view(-1)
+    # DEFAULT keeps the kernel signature uniform with dummy 1-element buffers.
+    if needs_bias:
+        Bias_arg = bias.contiguous().view(-1)
+    else:
+        Bias_arg = torch.zeros(1, dtype=torch.float32, device=A.device)
+    if needs_aux:
+        Aux_arg = aux.view(-1)
+    else:
+        Aux_arg = torch.zeros(1, dtype=C.dtype, device=A.device)
 
     _cached_launch(
         K_runtime,
@@ -1612,12 +1681,15 @@ def do_gemm(
         B.dtype,
         C.dtype,
         layout,
+        epilogue,
     )(
         A_arg,
         As_arg,
         B_arg,
         Bs_arg,
         C_arg,
+        Bias_arg,
+        Aux_arg,
         M_runtime,
         N_runtime,
         stream=stream,
@@ -1631,6 +1703,7 @@ def _cached_launch(
     b_fp8_dtype: torch.dtype,
     output_dtype: torch.dtype,
     layout: str,
+    epilogue: str = "DEFAULT",
 ):
     """Cache independent TN/NN/NT binaries with no runtime layout argument."""
     return _compile_kernel(
@@ -1639,6 +1712,7 @@ def _cached_launch(
         b_fp8_dtype,
         output_dtype,
         layout,
+        epilogue,
     )
 
 
@@ -1678,6 +1752,9 @@ def mxfp8_matmul(
     stream=None,
     *,
     layout: str = "TN",
+    epilogue: str = "DEFAULT",
+    bias: torch.Tensor = None,
+    aux: torch.Tensor = None,
 ):
     """Normalize scale orientation and launch a compile-time layout binary.
 
@@ -1801,6 +1878,9 @@ def mxfp8_matmul(
         D.view(m, n),
         layout=layout,
         stream=stream,
+        epilogue=epilogue,
+        bias=bias,
+        aux=aux.view(m, n) if aux is not None else None,
     )
     return D
 

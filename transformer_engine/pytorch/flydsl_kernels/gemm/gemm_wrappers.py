@@ -13,8 +13,7 @@ from transformer_engine.pytorch.utils import get_device_compute_capability
 
 from .exceptions import FlyDSLUnsupportedError
 
-from .bf16_gemm import bf16_matmul
-from .fp16_gemm import fp16_matmul
+from .half_prec_gemm import bf16_matmul, fp16_matmul
 from .fp32_gemm import fp32_matmul
 from .fp8_gemm import fp8_matmul
 from .mxfp8_gemm import mxfp8_matmul
@@ -96,7 +95,13 @@ def _validate_common_epilogue(
     alpha,
     beta,
 ):
-    """Validate features not yet implemented by the FlyDSL GEMM backend."""
+    """Validate features not yet implemented by the FlyDSL GEMM backend.
+
+    Fused forward BIAS is supported by all FlyDSL GEMM backends (mxfp8, fp8,
+    fp16, bf16, fp32). Fused forward GELU_AUX is implemented for MXFP8 only
+    (the per-backend ``_run_*`` reject it elsewhere). BGRADB (fused bias
+    gradient) and DGELU (fused GELU gradient) are not implemented anywhere yet.
+    """
     if quantizer is not None:
         raise NotImplementedError(
             "FlyDSL GEMM output quantization is not implemented"
@@ -113,11 +118,50 @@ def _validate_common_epilogue(
             "FlyDSL GEMM accumulation is not implemented"
         )
 
-    # TODO: Add fused bias and BGRADB epilogues
-    if bias is not None and bias.numel() != 0:
+    # Forward BIAS is implemented across all backends; the fused bias-gradient
+    # (BGRADB) path is not. TODO: add BGRADB to the FlyDSL GEMM backends.
+    if grad and bias is not None and bias.numel() != 0:
         raise NotImplementedError(
-            "FlyDSL GEMM bias is not implemented"
+            "FlyDSL GEMM fused bias gradient (BGRADB) is not implemented"
         )
+
+    # Fused forward GELU (GELU_AUX) is supported; the backward fused GELU
+    # gradient (DGELU) is not. TODO: add DGELU to the FlyDSL GEMM backends.
+    if gelu and grad:
+        raise NotImplementedError(
+            "FlyDSL GEMM fused GELU gradient (DGELU) is not implemented"
+        )
+
+
+def _resolve_bias(bias, n):
+    """Normalize a TE bias into the kernel's ``(epilogue, bias_arg)`` contract.
+
+    FlyDSL kernels index bias by the output-feature (N) axis and expect a
+    contiguous length-N fp32 vector. TE may hand bias in the output dtype.
+    Returns ``("DEFAULT", None)`` when no bias is present.
+    """
+    if bias is None or bias.numel() == 0:
+        return "DEFAULT", None
+    if bias.numel() != n:
+        raise ValueError(
+            f"FlyDSL GEMM bias length {bias.numel()} != N (out_features) {n}"
+        )
+    return "BIAS", bias.reshape(-1).to(torch.float32).contiguous()
+
+
+def _resolve_epilogue(bias, n, gelu=False):
+    """Resolve the ``(epilogue, bias_arg)`` contract including fused GELU.
+
+    Combines the bias vector (see :func:`_resolve_bias`) with an optional
+    forward GELU into one of DEFAULT / BIAS / GELU_AUX / GELU_AUX_BIAS. The
+    GELU epilogues additionally produce a pre-activation aux output, which the
+    caller allocates and passes to the kernel.
+    """
+    bias_epilogue, bias_arg = _resolve_bias(bias, n)
+    has_bias = bias_epilogue == "BIAS"
+    if gelu:
+        return ("GELU_AUX_BIAS" if has_bias else "GELU_AUX"), bias_arg
+    return bias_epilogue, bias_arg
 
 
 def _classify_input(t):
@@ -352,6 +396,7 @@ def _run_bf16_gemm(
     D,
     *,
     output_dtype: torch.dtype,
+    bias=None,
 ):
     """Dispatch BF16 using the original row-major operand allocations.
 
@@ -438,6 +483,7 @@ def _run_bf16_gemm(
         backend_name=f"BF16 {layout}",
     )
 
+    epilogue, bias_arg = _resolve_bias(bias, n)
     bf16_matmul(
         a_flydsl,
         b_flydsl,
@@ -446,6 +492,8 @@ def _run_bf16_gemm(
         m=m,
         n=n,
         k=k,
+        epilogue=epilogue,
+        bias=bias_arg,
     )
     return D
 
@@ -459,6 +507,7 @@ def _run_fp16_gemm(
     D,
     *,
     output_dtype: torch.dtype,
+    bias=None,
 ):
     """Dispatch FP16 using the original row-major operand allocations.
 
@@ -545,6 +594,7 @@ def _run_fp16_gemm(
         backend_name=f"FP16 {layout}",
     )
 
+    epilogue, bias_arg = _resolve_bias(bias, n)
     fp16_matmul(
         a_flydsl,
         b_flydsl,
@@ -553,6 +603,8 @@ def _run_fp16_gemm(
         m=m,
         n=n,
         k=k,
+        epilogue=epilogue,
+        bias=bias_arg,
     )
     return D
 
@@ -563,6 +615,8 @@ def _run_fp32_gemm(
     B,
     transb,
     D,
+    *,
+    bias=None,
 ):
     """Normalize FP32 TN/NN/NT inputs to the current kernel's TN interface.
 
@@ -656,10 +710,13 @@ def _run_fp32_gemm(
         backend_name="FP32 via TN core",
     )
 
+    epilogue, bias_arg = _resolve_bias(bias, n)
     fp32_matmul(
         a_tn,
         b_tn,
         D.view(m, n),
+        epilogue=epilogue,
+        bias=bias_arg,
     )
     return D
 
@@ -826,6 +883,8 @@ def _run_mxfp8(
     D,
     *,
     output_dtype: torch.dtype,
+    bias=None,
+    gelu=False,
 ):
     """Dispatch MXFP8 through exact TN/NN/NT physical contracts.
 
@@ -1029,6 +1088,11 @@ def _run_mxfp8(
         f"M={m}, N={n}, K={k}"
     )
 
+    epilogue, bias_arg = _resolve_epilogue(bias, n, gelu=gelu)
+    # GELU_AUX modes emit a pre-activation aux output (M x N, output dtype)
+    # for the backward pass; the wrapper allocates it and the kernel fills it
+    # in place. Return it so the dispatcher can hand it back as gelu_input.
+    aux = torch.empty_like(D) if gelu else None
     mxfp8_matmul(
         a_flydsl,
         a_scale,
@@ -1036,8 +1100,11 @@ def _run_mxfp8(
         b_scale,
         D.view(m, n),
         layout=kernel_layout,
+        epilogue=epilogue,
+        bias=bias_arg,
+        aux=aux.view(m, n) if aux is not None else None,
     )
-    return D
+    return D, aux
 
 
 def _select_fp8_storage_for_layout(A, transa, B, transb):
@@ -1109,6 +1176,7 @@ def _run_fp8(
     D,
     *,
     output_dtype: torch.dtype,
+    bias=None,
 ):
     """Normalize tensor-wise FP8 storage and invoke the common FP8 core."""
     supported_fp8_dtypes = (
@@ -1231,12 +1299,15 @@ def _run_fp8(
     _fp8_debug(f"derived M={m}, N={n}, K={k}")
     _fp8_tensor_debug("output/D", D)
 
+    epilogue, bias_arg = _resolve_bias(bias, n)
     matmul(
         a_flydsl,
         a_scale,
         b_flydsl,
         b_scale,
         D.view(m, n),
+        epilogue=epilogue,
+        bias=bias_arg,
     )
     return D
 
@@ -1296,6 +1367,9 @@ def te_generic_gemm_flydsl(
             "FlyDSL GEMM does not support transa=True, transb=True (TT)"
         )
 
+    a_kind, _ = _classify_input(A)
+    b_kind, _ = _classify_input(B)
+
     _validate_common_epilogue(
         quantizer=quantizer,
         bias=bias,
@@ -1305,9 +1379,6 @@ def te_generic_gemm_flydsl(
         alpha=alpha,
         beta=beta,
     )
-
-    a_kind, _ = _classify_input(A)
-    b_kind, _ = _classify_input(B)
 
     if a_kind == "mxfp8" or b_kind == "mxfp8":
          # Validate both are MXFP8
@@ -1334,15 +1405,25 @@ def te_generic_gemm_flydsl(
                 f"got {output_dtype}"
             )
 
-        D = _run_mxfp8(
+        D, gelu_input = _run_mxfp8(
             A,
             transa,
             B,
             transb,
             D,
             output_dtype=mxfp8_output_dtypes[output_dtype],
+            bias=bias,
+            gelu=gelu,
         )
-        return D, None, None, None
+        return D, None, gelu_input, None
+
+    # Fused forward GELU is implemented for MXFP8 only so far; the tensor-wise
+    # FP8 and regular (fp16/bf16/fp32) paths do not support it yet.
+    # TODO: extend GELU_AUX to the other FlyDSL GEMM backends.
+    if gelu:
+        raise NotImplementedError(
+            "FlyDSL GEMM fused GELU is currently implemented for MXFP8 only"
+        )
 
     if a_kind == "fp8" or b_kind == "fp8":
         if a_kind != b_kind:
@@ -1369,6 +1450,7 @@ def te_generic_gemm_flydsl(
             transb,
             D,
             output_dtype=fp8_output_dtypes[output_dtype],
+            bias=bias,
         )
         return D, None, None, None
 
@@ -1401,6 +1483,7 @@ def te_generic_gemm_flydsl(
             transb,
             D,
             output_dtype=bf16_output_dtypes[output_dtype],
+            bias=bias,
         )
         return D, None, None, None
 
@@ -1423,6 +1506,7 @@ def te_generic_gemm_flydsl(
             transb,
             D,
             output_dtype=fp16_output_dtypes[output_dtype],
+            bias=bias,
         )
         return D, None, None, None
 
@@ -1438,6 +1522,7 @@ def te_generic_gemm_flydsl(
             B,
             transb,
             D,
+            bias=bias,
         )
         return D, None, None, None
 
