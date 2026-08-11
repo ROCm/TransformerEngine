@@ -119,8 +119,48 @@ def _configure_runtime_env() -> None:
 
 _configure_runtime_env()
 
+
+def _import_binding():
+    """Import the ``transformer_engine_xattention`` extension module.
+
+    The extension is declared with a top-level name, but a non-inplace install
+    moves every freshly built ``.so`` into the ``transformer_engine`` package
+    directory (``build_tools/build_ext.py``), which is not on ``sys.path``. So a
+    plain top-level import only resolves for inplace/editable builds. TE handles
+    the same problem for ``transformer_engine_torch`` by loading the shared
+    object by path and registering it in ``sys.modules``
+    (``transformer_engine/common/__init__.py``); mirror that here as a fallback
+    so wheel installs work too.
+    """
+    import sys  # pylint: disable=import-outside-toplevel
+    import importlib.util  # pylint: disable=import-outside-toplevel
+
+    name = "transformer_engine_xattention"
+    try:
+        return importlib.import_module(name)
+    except ImportError:
+        pass
+
+    # dot_product_attention -> attention -> pytorch -> transformer_engine
+    pkg_dir = Path(__file__).resolve().parents[3]
+    for so in sorted(pkg_dir.glob(f"{name}.*.so")) + sorted(pkg_dir.glob(f"{name}.so")):
+        spec = importlib.util.spec_from_file_location(name, so)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[name] = module
+        try:
+            spec.loader.exec_module(module)
+        except BaseException:
+            del sys.modules[name]
+            raise
+        return module
+
+    raise ImportError(f"No {name} extension module in {pkg_dir} or on sys.path")
+
+
 try:
-    import transformer_engine_xattention as _xattn  # noqa: F401
+    _xattn = _import_binding()
 
     _IMPORT_ERROR = None
 except (ImportError, OSError) as e:  # pragma: no cover - depends on the optional build
