@@ -115,7 +115,7 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype):
         params_dtype=dtype,
         device=device,
     )
-    # Rotate the activation buffer (off by default) so back-to-back grouped GEMMs
+    # Rotate the activation buffer (on by default) so back-to-back grouped GEMMs 
     # read different memory; GroupedLinear splits it internally per m_splits.
     next_x = make_input((sum_M, K), dtype, device=device, requires_grad=True)
 
