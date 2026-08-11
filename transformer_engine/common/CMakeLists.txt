@@ -13,13 +13,7 @@ option(USE_HIPKITTENS_GEMM "Use HipKittens blockwise FP8 and MXFP8 GEMM kernels"
 set(USE_CUDA OFF)
 
 if (USE_ROCM)
-  #Check if ROCm exists
-  if( ((EXISTS "/opt/rocm/") OR (EXISTS $ENV{ROCM_PATH})) )
-    message("Using AMD Platform")
-  else()
-    message(FATAL_ERROR "Could not find ROCm installation")
-  endif()
-
+  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
 else()
   #Check if CUDA exists
   if (EXISTS "$ENV{CUDA_HOME}/bin/nvcc")
@@ -133,7 +127,6 @@ set(CUTLASS_TOOLS_INCLUDE_DIR
 else()
   set(CMAKE_CXX_STANDARD 17)
   #define GPU ARCH before enabling HIP to avoid potential failures with arch detection
-  include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/rocm_utils.cmake")
   project(transformer_engine LANGUAGES HIP CXX)
 
   # If using ROCm, ninja must be installed to build TE.
