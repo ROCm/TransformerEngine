@@ -22,7 +22,7 @@ from flydsl.expr import arith, range_constexpr
 from flydsl.expr.buffer_ops import _unwrap_value, buffer_store, create_buffer_resource
 
 from .half_prec_gemm import BLOCK_K, dense_mma_pipeline_bf16
-from .fp16_gemm_utils import G2SLoader, ceildiv, make_bf16_buffer_tensor, swizzle_128
+from .fp16_gemm_utils import G2SLoader, ceildiv, make_byte_buffer_tensor, swizzle_128
 
 
 def _inttoptr_lds(byte_addr):
@@ -228,15 +228,33 @@ class StoreCBf16:
                 self._store_masked(acc[r], row_base + m, n_valid)
 
 
-def compute_global_swizzle_bf16(lane_id, wave_id, K, n_rounds):
+def buffer_load_i32(rsrc, off):
+    """Load one i32 scalar from a buffer resource at ``off`` (i32- or index-typed)."""
+    return buffer_ops.buffer_load(rsrc, off, vec_width=1, dtype=T.i32)
+
+
+def _global_swizzle_bf16(lane_id, wave_id, K, n_rounds, src_row):
+    """Per-lane global A element offsets for the flat-buffer bf16 (gather) pipeline.
+
+    ``src_row`` is a callable mapping the contiguous *tile* row to its global source row;
+    the public variants below differ only in that mapping. The bank swizzle (``c``) stays
+    keyed on the tile row so the LDS destination layout -- and therefore the S2R
+    transpose-read -- is unchanged; only the global fetch address is redirected. Any index
+    loads happen once (K-invariant) and amortize over the whole K-loop.
+    """
     offsets = []
     n_waves = fx.block_dim.x // 64
     for r in range_constexpr(n_rounds):
         row = lane_id // 8 + wave_id * 8 + r * (n_waves * 8)
         col_byte = (lane_id % 8) * 16
         _, c = swizzle_128(row, col_byte)
-        offsets.append(row * K + c // 2)
+        offsets.append(src_row(row) * K + c // 2)
     return offsets
+
+
+def compute_global_swizzle_bf16(lane_id, wave_id, K, n_rounds):
+    """Contiguous (non-gathering) grouped-GEMM A offsets: source row == tile row."""
+    return _global_swizzle_bf16(lane_id, wave_id, K, n_rounds, lambda row: row)
 
 
 def compute_global_gather_swizzle_bf16(lane_id, wave_id, K, n_rounds, sorted_res, sorted_row_base):
@@ -249,17 +267,27 @@ def compute_global_gather_swizzle_bf16(lane_id, wave_id, K, n_rounds, sorted_res
     global fetch address is redirected. The index loads happen once (K-invariant), so they are
     amortized over the whole K-loop.
     """
-    offsets = []
-    n_waves = fx.block_dim.x // 64
-    for r in range_constexpr(n_rounds):
-        row = lane_id // 8 + wave_id * 8 + r * (n_waves * 8)
-        col_byte = (lane_id % 8) * 16
-        _, c = swizzle_128(row, col_byte)
-        src_row = buffer_ops.buffer_load(
-            sorted_res, sorted_row_base + row, vec_width=1, dtype=T.i32
-        )
-        offsets.append(src_row * K + c // 2)
-    return offsets
+    return _global_swizzle_bf16(
+        lane_id,
+        wave_id,
+        K,
+        n_rounds,
+        lambda row: buffer_load_i32(sorted_res, sorted_row_base + row),
+    )
+
+
+def compute_global_identity_swizzle_bf16(lane_id, wave_id, K, n_rounds, sorted_row_base):
+    """Per-lane global A offsets reading the *route row directly* (identity gather).
+
+    Same flat-buffer pipeline as :func:`compute_global_gather_swizzle_bf16` but the source row is
+    ``sorted_row_base + row`` computed arithmetically instead of loaded from a gather table. This
+    is the FC2 route-read (``index_a_by_route_pos``) path: it needs no ``sorted_slot_ids`` tensor,
+    so it stays inside a HIP graph capture (no per-call identity allocation) while reusing the
+    proven whole-buffer / base-0 gather tile (avoiding the per-tile A-rebase multi-block hazard).
+    """
+    return _global_swizzle_bf16(
+        lane_id, wave_id, K, n_rounds, lambda row: sorted_row_base + row
+    )
 
 
 def compute_global_swizzle_nn_bf16(lane_id, wave_id, c_n, n_steps):
@@ -393,8 +421,8 @@ def _gemm_bf16_nn_tn_tile_impl(
         B0_gl_offset = B0_gl_offset + b_group_base
         B1_gl_offset = B1_gl_offset + b_group_base
 
-    gA = make_bf16_buffer_tensor(A)
-    gB = make_bf16_buffer_tensor(B)
+    gA = make_byte_buffer_tensor(A)
+    gB = make_byte_buffer_tensor(B)
     a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
     b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
     if a_transpose:

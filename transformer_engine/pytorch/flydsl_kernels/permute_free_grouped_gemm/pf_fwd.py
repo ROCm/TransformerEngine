@@ -42,7 +42,7 @@ from flydsl.expr.buffer_ops import (
 from flydsl.expr.typing import AddressSpace, PointerType
 
 from ..gemm.half_prec_gemm import BLOCK_K, dense_mma_pipeline_bf16
-from ..gemm.fp16_gemm_utils import G2SLoader, ceildiv, make_bf16_buffer_tensor, swizzle_128
+from ..gemm.fp16_gemm_utils import G2SLoader, ceildiv, make_byte_buffer_tensor
 from ..gemm.pf_gemm_utils import (
     Mfma32x32x16,
     S2RLoaderBf16,
@@ -50,31 +50,13 @@ from ..gemm.pf_gemm_utils import (
     _i64,
     _make_shared_storage,
     compute_global_gather_swizzle_bf16,
+    compute_global_identity_swizzle_bf16,
     compute_global_swizzle_bf16,
     make_value_attrs,
     xcd_remap_pid,
 )
 
 __all__ = ["compile_grouped_gemm_gather_bf16", "grouped_gemm_gather_bf16"]
-
-
-def compute_global_identity_swizzle_bf16(lane_id, wave_id, K, n_rounds, sorted_row_base):
-    """Per-lane global A offsets reading the *route row directly* (identity gather).
-
-    Same flat-buffer pipeline as :func:`compute_global_gather_swizzle_bf16` but the source row is
-    ``sorted_row_base + row`` computed arithmetically instead of loaded from a gather table. This
-    is the FC2 route-read (``index_a_by_route_pos``) path: it needs no ``sorted_slot_ids`` tensor,
-    so it stays inside a HIP graph capture (no per-call identity allocation) while reusing the
-    proven whole-buffer / base-0 gather tile (avoiding the per-tile A-rebase multi-block hazard).
-    """
-    offsets = []
-    n_waves = fx.block_dim.x // 64
-    for r in range_constexpr(n_rounds):
-        row = lane_id // 8 + wave_id * 8 + r * (n_waves * 8)
-        col_byte = (lane_id % 8) * 16
-        _, c = swizzle_128(row, col_byte)
-        offsets.append((sorted_row_base + row) * K + c // 2)
-    return offsets
 
 
 def gemm_bf16_nt_gather_tile(
@@ -131,8 +113,8 @@ def gemm_bf16_nt_gather_tile(
     # ``A`` MUST be a flat 1D buffer view (built by the caller): a linear gather offset
     # (src_row*K + col) indexes row-major elements. A raw 2D tensor's logical_divide/slice
     # indexes the outer (row) dim, so a flat offset runs off the end -> garbage.
-    gA = make_bf16_buffer_tensor(A)
-    gB = make_bf16_buffer_tensor(B_T)
+    gA = make_byte_buffer_tensor(A)
+    gB = make_byte_buffer_tensor(B_T)
     a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
     b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 

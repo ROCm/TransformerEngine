@@ -52,6 +52,7 @@ from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator
 
+from ..gemm.pf_gemm_utils import buffer_load_i32
 from ..tensor_shim import ptr_rsrc
 
 __all__ = ["compile_moe_wgrad_v2", "WGRAD_BLOCK_M"]
@@ -278,11 +279,11 @@ def compile_moe_wgrad_v2(
         # prefetched *two* steps ahead and carried across the loop as iter_args.
         def load_slot_ids(s_base_idx):
             g_ids = [
-                buffer_load_i32_idx(sorted_rsrc, base_slot + s_base_idx + _tile_idx(i, CPR_G)[0])
+                buffer_load_i32(sorted_rsrc, base_slot + s_base_idx + _tile_idx(i, CPR_G)[0])
                 for i in range_constexpr(G_FILLS)
             ]
             x_ids = [
-                buffer_load_i32_idx(sorted_rsrc, base_slot + s_base_idx + _tile_idx(i, CPR_X)[0])
+                buffer_load_i32(sorted_rsrc, base_slot + s_base_idx + _tile_idx(i, CPR_X)[0])
                 for i in range_constexpr(X_FILLS)
             ]
             return g_ids, x_ids
@@ -662,10 +663,3 @@ def _tr_read_frag_swz(
     hi = _read(row_lo + fx.Int32(4))
     return lo.shuffle(hi, [0, 1, 2, 3, 4, 5, 6, 7])
 
-
-def buffer_load_i32(rsrc, off_i32):
-    return buffer_ops.buffer_load(rsrc, off_i32, vec_width=1, dtype=T.i32)
-
-
-def buffer_load_i32_idx(rsrc, off_idx):
-    return buffer_ops.buffer_load(rsrc, off_idx, vec_width=1, dtype=T.i32)

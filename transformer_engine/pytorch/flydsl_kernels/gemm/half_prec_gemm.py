@@ -51,7 +51,6 @@ from .fp16_gemm_utils import (
     xcd_swizzle,
     barrier
 )
-from .fp8_gemm_utils import wait_barrier
 
 # FP16 and BF16 differ only in the MFMA opcode suffix.
 _MFMA_SUFFIX = {torch.float16: "f16", torch.bfloat16: "bf16"}
@@ -1557,13 +1556,13 @@ def dense_mma_pipeline_bf16(
 
     if wave_m == 1:
         rocdl.s_barrier()
-    wait_barrier(N_LDS_STEPS_A + N_LDS_STEPS_B)
+    barrier(vmcnt=N_LDS_STEPS_A + N_LDS_STEPS_B)
 
     b_g2s.load(b_next0, B0_gl_offset + 1 * b_k_step)
     a_g2s.load(a_next0, A0_gl_offset + 1 * a_k_step)
     b_g2s.load(b_next1, B1_gl_offset + 1 * b_k_step)
 
-    wait_barrier(N_LDS_STEPS_A + 2 * N_LDS_STEPS_B)
+    barrier(vmcnt=N_LDS_STEPS_A + 2 * N_LDS_STEPS_B)
 
     for k in range_constexpr(K_ITERS - 2):
         b0_frag = b_s2r.load(b_cur0)
@@ -1595,7 +1594,7 @@ def dense_mma_pipeline_bf16(
         rocdl.s_barrier()
 
         b_g2s.load(b_cur1, B1_gl_offset + (k + 2) * b_k_step)
-        wait_barrier(2 * N_LDS_STEPS_A + N_LDS_STEPS_B)
+        barrier(vmcnt=2 * N_LDS_STEPS_A + N_LDS_STEPS_B)
 
         rocdl.s_setprio(1)
         c11_frag = mfma.call(a1_frag, b1_frag, c11_frag)
@@ -1652,7 +1651,7 @@ def dense_mma_pipeline_bf16(
     b_cur1, b_next1 = b_next1, b_cur1
 
     a0_frag = a_s2r.load(a_cur0)
-    wait_barrier(0)
+    barrier(vmcnt=0)
     rocdl.s_setprio(1)
     c00_frag = mfma.call(a0_frag, b0_frag, c00_frag)
     rocdl.s_setprio(0)

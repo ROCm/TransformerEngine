@@ -46,7 +46,7 @@ from flydsl.expr.buffer_ops import (
 from flydsl.expr.typing import AddressSpace, PointerType
 
 from ..gemm.half_prec_gemm import BLOCK_K, dense_mma_pipeline_bf16
-from ..gemm.fp16_gemm_utils import G2SLoader, ceildiv, make_bf16_buffer_tensor
+from ..gemm.fp16_gemm_utils import G2SLoader, ceildiv, make_byte_buffer_tensor
 from ..gemm.pf_gemm_utils import (
     Mfma32x32x16,
     S2RLoaderBf16,
@@ -107,8 +107,8 @@ def gemm_bf16_nn_gather_tile(
     B0_gl_offset = block_n * BLOCK_N + b_group_base
     B1_gl_offset = block_n * BLOCK_N + LDS_BLOCK_N + b_group_base
 
-    gA = make_bf16_buffer_tensor(A)
-    gB = make_bf16_buffer_tensor(B)
+    gA = make_byte_buffer_tensor(A)
+    gB = make_byte_buffer_tensor(B)
     a_div = fx.logical_divide(gA, fx.make_layout(1, 1))
     b_div = fx.logical_divide(gB, fx.make_layout(1, 1))
 
