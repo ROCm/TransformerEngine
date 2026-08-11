@@ -194,6 +194,28 @@ def long_rows_from_csv(path, meta):
                 }
 
 
+def emit_rows(args, meta):
+    """Yield one long shard row per ``--metric NAME=VALUE`` flag.
+
+    For e2e producers (e.g. Megatron) that report a single throughput number
+    rather than the microbenchmark wide-CSV. Values are higher-is-better (the
+    dashboard flags a drop past the noise band as a regression).
+    """
+    for spec in args.metric or []:
+        name, sep, val = spec.partition("=")
+        value = _num(val)
+        if not sep or value is None:
+            sys.exit(f"--metric {spec!r} must be NAME=VALUE with a numeric value")
+        yield {
+            "ts": meta["ts"], "commit": meta["commit"], "run_id": meta["run_id"],
+            "model": meta.get("model", ""), "runner": meta["runner"],
+            "op": args.op + meta.get("op_suffix", ""),
+            "shape": args.shape, "dtype": args.dtype,
+            "metric": name.strip(), "value": round(value, 4),
+            "time_ms": "", "pr": meta["pr"],
+        }
+
+
 def append_shard(path, rows):
     """Append *rows* to shard *path*, writing a header if it's new. Returns (was_new, n)."""
     was_new = not path.exists()
@@ -236,7 +258,7 @@ def update_index(out_dir, entries):
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("csv", nargs="+", help="benchmark_<family>.csv file(s) for ONE run")
+    parser.add_argument("csv", nargs="*", help="benchmark_<family>.csv file(s) for ONE run")
     parser.add_argument("--out-dir", default=str(SCRIPT_DIR / "dashboard" / "data"),
                         help="Dashboard data dir (default: dashboard/data)")
     parser.add_argument("--ref", default="dev",
@@ -255,6 +277,19 @@ def main():
                         help="Append this string to every op label (e.g. ' [kernel]') so a "
                              "compute-kernel run forms its own dashboard series instead of "
                              "merging into the matching e2e op.")
+    parser.add_argument("--emit", action="store_true",
+                        help="Emit rows from flags instead of a benchmark CSV -- for e2e "
+                             "producers (e.g. Megatron) that report a throughput value. "
+                             "Requires --family, --op and at least one --metric.")
+    parser.add_argument("--family", default=None,
+                        help="Shard family for --emit (-> perf-<family>-<ref>.csv)")
+    parser.add_argument("--op", default=None,
+                        help="Op label for --emit (e.g. 'megatron dsv3')")
+    parser.add_argument("--shape", default="",
+                        help="Config label for --emit (e.g. '16B 1xMI355X')")
+    parser.add_argument("--dtype", default="bf16", help="Dtype label for --emit")
+    parser.add_argument("--metric", action="append", metavar="NAME=VALUE",
+                        help="Metric row for --emit; repeatable (e.g. TFLOPS=512.3)")
     args = parser.parse_args()
 
     now = datetime.now(timezone.utc)
@@ -278,6 +313,20 @@ def main():
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    if args.emit:
+        if not (args.family and args.op and args.metric):
+            sys.exit("--emit requires --family, --op and at least one --metric NAME=VALUE")
+        rows = list(emit_rows(args, meta))
+        shard = out_dir / f"perf-{args.family}-{ref}.csv"
+        _, n = append_shard(shard, rows)
+        update_index(out_dir, [{"file": shard.name, "family": args.family,
+                                "ref": ref, "pr": pr_field}])
+        print(f"run {commit[:8]} @ {ts} (run_id {run_id}) ref={ref}"
+              f"{f' model={model}' if model else ''} emit: +{n} rows -> {shard.name}")
+        return
+    if not args.csv:
+        sys.exit("no input: pass benchmark CSV(s), or use --emit (--family/--op/--metric)")
 
     entries, per_shard, total = [], [], 0
     for path in args.csv:
