@@ -313,8 +313,8 @@ check_test_filter() {
 
 start_message() {
     echo "Started with TEST_LEVEL=$TEST_LEVEL sGPU='$TEST_SGPU' mGPU='$TEST_MGPU' at `date`"
-    _rocm_path=$(resolve_rocm_path)
-    _rocm_path=`$REALPATH "$_rocm_path" 2>/dev/null || echo "$_rocm_path"`
+    export ROCM_PATH=$(resolve_rocm_path)
+    _rocm_path=`$REALPATH "$ROCM_PATH" 2>/dev/null || echo "$ROCM_PATH"`
     echo "ROCM PATH: $_rocm_path"
     python3 --version
 }
