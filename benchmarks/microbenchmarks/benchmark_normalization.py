@@ -17,7 +17,7 @@ import torch
 import transformer_engine.pytorch as te
 from utils import (
     DTYPE_LIST, MODEL_HIDDEN_SIZES, M_SIZE_LIST,
-    time_func, compute_gbps, make_forward_backward_metric_records, run_benchmarks,
+    time_forward_backward, compute_gbps, make_forward_backward_metric_records, run_benchmarks,
 )
 
 NORM_TYPES = [
@@ -55,12 +55,15 @@ def bench_norm(Case, M, hidden_size, norm_name, norm_cls, dtype):
     out = fwd_func()
     grad_out = torch.randn_like(out)
 
-    def fwd_bwd_func():
-        out = norm(x)
-        out.backward(grad_out)
+    def zero_grads():
         x.grad = None
         for p in norm.parameters():
             p.grad = None
+
+    def fwd_bwd_func():
+        out = norm(x)
+        out.backward(grad_out)
+        zero_grads()
 
     fwd_bwd_func()
 
@@ -68,9 +71,9 @@ def bench_norm(Case, M, hidden_size, norm_name, norm_cls, dtype):
     fwd_bytes = 2 * M * hidden_size * elem_bytes   # read x, write y
     bwd_bytes = 4 * M * hidden_size * elem_bytes   # read grad+x+y, write grad_x
 
-    fwd_ms, fwd_measurement = time_func(fwd_func)
-    fwd_bwd_ms, fwd_bwd_measurement = time_func(fwd_bwd_func)
-    bwd_ms = fwd_bwd_ms - fwd_ms
+    fwd_ms, bwd_ms, record_kwargs = time_forward_backward(
+        fwd_func, fwd_bwd_func, grad_out
+    )
 
     fwd_gbps = compute_gbps(fwd_bytes, fwd_ms)
     bwd_gbps = compute_gbps(bwd_bytes, bwd_ms)
@@ -82,9 +85,7 @@ def bench_norm(Case, M, hidden_size, norm_name, norm_cls, dtype):
         fwd_gbps,
         bwd_ms,
         bwd_gbps,
-        backward_derived=True,
-        fwd_measurement=fwd_measurement,
-        fwd_bwd_measurement=fwd_bwd_measurement,
+        **record_kwargs,
     )
 
 
