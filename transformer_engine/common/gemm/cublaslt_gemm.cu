@@ -1187,8 +1187,11 @@ void nvte_multi_tensor_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor
     auto B_dt = effective_dtype(inputB);
     auto D_dt = OutputD->data.dtype;
 
-    // Allow 16-bit A/B with D being the same 16-bit type or Float32 (fused
-    // wgrad accumulation into FP32 main_grad); CK supports 16-bit-in/FP32-out).
+    // Supported grouped-GEMM dtype combinations for the CK path:
+    //   - FP8 inputs: A and B both FP8 (D dtype handled by the FP8 path).
+    //   - 16-bit inputs: A and B the same 16-bit type (both BF16 or both FP16),
+    //     with output D either that same 16-bit type or Float32
+    //     (fused wgrad accumulation into an FP32 main_grad buffer).
     return ((is_fp8_dtype(A_dt) && is_fp8_dtype(B_dt)) ||
             ((A_dt == B_dt) && is_fp16_dtype(A_dt) &&
              (A_dt == D_dt || D_dt == transformer_engine::DType::kFloat32)));
