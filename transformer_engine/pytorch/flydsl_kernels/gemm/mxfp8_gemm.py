@@ -218,9 +218,9 @@ def pack_mx32_scales_for_hk(
         dim, qk = scales_u8.shape
 
     if qk % 4 != 0:
-        raise ValueError(f"Scale K/32 dimension={qk} must be divisible by 4")
+        raise FlyDSLUnsupportedError(f"Scale K/32 dimension={qk} must be divisible by 4")
     if dim % 64 != 0:
-        raise ValueError(f"Scale outer dimension={dim} must be a multiple of 64")
+        raise FlyDSLUnsupportedError(f"Scale outer dimension={dim} must be a multiple of 64")
 
     packed = torch.empty(
         (qk // 4, dim),
@@ -1754,7 +1754,9 @@ def mxfp8_matmul(
     if tuple(D.shape) != (m, n):
         raise ValueError(f"D shape {tuple(D.shape)} != expected {(m, n)}")
     if k % SCALE_GROUP_SIZE != 0:
-        raise ValueError(f"K={k} must be divisible by MXFP8 scale group size {SCALE_GROUP_SIZE}")
+        raise FlyDSLUnsupportedError(
+            f"K={k} must be divisible by MXFP8 scale group size {SCALE_GROUP_SIZE}"
+        )
 
     if layout == "NT":
         expected_a_scale = (k // SCALE_GROUP_SIZE, m)

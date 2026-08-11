@@ -940,7 +940,7 @@ def _run_mxfp8(
         )
 
     if k % 32 != 0:
-        raise ValueError(f"K={k} must be divisible by MXFP8 scale group size 32")
+        raise FlyDSLUnsupportedError(f"K={k} must be divisible by MXFP8 scale group size 32")
 
     if tuple(a_scale.shape) != expected_a_scale:
         raise ValueError(
