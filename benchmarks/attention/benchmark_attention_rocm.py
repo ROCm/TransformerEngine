@@ -138,7 +138,6 @@ KERNEL_PATTERNS = {
 
 ROCPROF_STATS_CSV = "results.stats.csv"
 
-
 def _profiler_python_code(model, attention, column_name, benchmark_dir):
     return (
         f"import sys; sys.path.insert(0, {benchmark_dir!r}); "
@@ -181,7 +180,9 @@ def _run_attention_profiler(model, attention, column_name, dirname):
         py_code,
     ]
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        # Pass os.environ explicitly: C code may set ROCPROFILER_REGISTER_LIBRARY
+        # via setenv() without updating Python's environ cache, which breaks rocprofv3.
+        result = subprocess.run(cmd, capture_output=True, text=True, env=os.environ.copy())
     except FileNotFoundError:
         print(
             "WARNING: rocprofv3 not found on PATH; kernel timing columns may be empty.",
