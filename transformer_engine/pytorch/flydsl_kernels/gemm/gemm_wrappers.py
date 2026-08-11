@@ -535,26 +535,27 @@ def _run_fp32_gemm(
 ):
     """Normalize FP32 TN/NN/NT inputs to the current kernel's TN interface.
 
-    The existing FP32 entry point expects ordinary row-major GEMM operands:
+    The private FP32 core is TN-only and, like every other dtype backend,
+    consumes its operands as:
 
         a_tn: [M, K]
-        b_tn: [K, N]
+        b_tn: [N, K]
 
     TE provides BLAS-shaped operands, so ownership is swapped and only the
     operands whose BLAS transpose flags require it are materialized:
 
         TN: a_tn = B
-            b_tn = A.T
+            b_tn = A
 
         NN: a_tn = B
-            b_tn = A
+            b_tn = A.T
 
         NT: a_tn = B.T
-            b_tn = A
+            b_tn = A.T
 
     ``transpose(...).contiguous()`` is therefore used only for the FP32
-    operands that are not already in the current TN kernel orientation.
-    BF16/FP16/FP8/MXFP8 dispatch is unchanged.
+    operands that are not already in the TN kernel orientation. The core
+    performs no internal transpose. BF16/FP16/FP8/MXFP8 dispatch is unchanged.
     """
     if not isinstance(A, torch.Tensor) or not isinstance(B, torch.Tensor):
         raise TypeError("FlyDSL FP32 GEMM expects plain torch.Tensor operands")
@@ -572,19 +573,20 @@ def _run_fp32_gemm(
     A_flat = _flatten_rowwise(A, "A")
     B_flat = _flatten_rowwise(B, "B")
 
-    # Standard BLAS-column-major -> row-major conversion:
-    # swap operands, then apply the original operand transpose flags.
-    # TODO: Optimize FP32 NN/NT execution. These layouts are currently
-    # materialized into the TN kernel contract with explicit transpose copies.
+    # Swap TE's BLAS operands into the core's TN ownership and materialize the
+    # NN/NT layouts into the [M, K] x [N, K] kernel contract with explicit
+    # transpose copies here in the wrapper. The core (like every other dtype
+    # backend) consumes b as [N, K] directly and performs no internal transpose.
+    # TODO: Optimize FP32 NN/NT execution.
     if bool(transb):
         a_tn = B_flat.transpose(0, 1).contiguous()
     else:
         a_tn = B_flat
 
     if bool(transa):
-        b_tn = A_flat.transpose(0, 1).contiguous()
-    else:
         b_tn = A_flat
+    else:
+        b_tn = A_flat.transpose(0, 1).contiguous()
 
     if not a_tn.is_contiguous():
         a_tn = a_tn.contiguous()
@@ -598,7 +600,7 @@ def _run_fp32_gemm(
         )
 
     m, k = a_tn.shape
-    kb, n = b_tn.shape
+    n, kb = b_tn.shape
     if kb != k:
         layout = f"{'T' if transa else 'N'}{'T' if transb else 'N'}"
         raise FlyDSLUnsupportedError(

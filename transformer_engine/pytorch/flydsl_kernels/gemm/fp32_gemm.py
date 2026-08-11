@@ -7,8 +7,8 @@
 The kernel specializes on K at compile time because the K32 loop is fully
 hand-unrolled. M/N are runtime launch dimensions. The private optimized core
 consumes A and B as FP32 tensors shaped [M, K] and [N, K], and writes FP32 C
-shaped [M, N]. The public ``fp32_matmul`` entry point accepts Transformer
-Engine's TN contract and performs the required private adaptation.
+shaped [M, N]. The public ``fp32_matmul`` entry point forwards these operands
+to the core directly; NN/NT layout normalization is handled by the wrapper.
 
 This module imports ``flydsl`` at import time and must therefore be imported
 lazily only after FlyDSL availability has been confirmed.
@@ -980,15 +980,14 @@ def fp32_matmul(
 ):
     """TE-facing TN FP32 GEMM adapter.
 
-    Public/backend contract:
+    Public/backend contract (matching every other dtype backend):
         a: [M, K] FP32
-        b: [K, N] FP32
+        b: [N, K] FP32
         c: [M, N] FP32 output
 
-    The optimized core streams both operands with K contiguous and therefore
-    privately consumes B as [N, K]. In the normal TE TN path, ``b`` is a
-    transpose view of contiguous rowwise weight storage, so ``b.T`` is already
-    contiguous and does not require a physical transpose.
+    The optimized core streams both operands with K contiguous and consumes B
+    as [N, K] directly, so this adapter performs no internal transpose. The
+    wrapper is responsible for normalizing NN/NT layouts into this contract.
     """
     if a.ndim != 2 or b.ndim != 2:
         raise ValueError(
@@ -996,7 +995,7 @@ def fp32_matmul(
         )
 
     m, k = a.shape
-    kb, n = b.shape
+    n, kb = b.shape
     if kb != k:
         raise ValueError(f"Inner dimensions do not match: A{tuple(a.shape)} and B{tuple(b.shape)}")
     if a.dtype != torch.float32 or b.dtype != torch.float32:
@@ -1017,8 +1016,7 @@ def fp32_matmul(
     if not c.is_contiguous():
         raise ValueError("FlyDSL FP32 GEMM requires contiguous output storage")
 
-    b_hk = b.transpose(0, 1).contiguous()
-    doGemm(a, b_hk, c, stream=stream, epilogue=epilogue, bias=bias, aux=aux)
+    doGemm(a, b, c, stream=stream, epilogue=epilogue, bias=bias, aux=aux)
 
 
 def doGemm(
