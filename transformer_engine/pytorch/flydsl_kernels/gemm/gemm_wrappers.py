@@ -1310,15 +1310,29 @@ def te_generic_gemm_flydsl(
       - FP16 input with FP16, BF16, or FP32 output
       - FP32 input with FP32 output
     """
+    # These are hints or unused given the epilogue/dtype guards below: bias_type
+    # is inferred, gelu_in is only for DGELU (rejected), and FlyDSL has no
+    # separate workspace or split-accumulator path.
     del bias_type
     del gelu_in
     del workspace
     del workspaceSize
     del use_split_accumulator
-    del comm_overlap
-    del comm_type
-    del extra_output
-    del bulk_overlap
+
+    # Comm+GEMM overlap (tensor-parallel) is not implemented. These carry real
+    # side effects -- extra_output is the reduce-scatter destination -- so they
+    # must be rejected, not dropped: silently discarding them would no-op the
+    # collective and return wrong results. Raise FlyDSLUnsupportedError so
+    # general_gemm falls back to the C++ backend.
+    if (
+        comm_overlap is not None
+        or comm_type is not None
+        or extra_output is not None
+        or bulk_overlap
+    ):
+        raise FlyDSLUnsupportedError(
+            "FlyDSL GEMM does not support comm+GEMM overlap"
+        )
 
     if transa and transb:
         raise FlyDSLUnsupportedError(
