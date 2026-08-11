@@ -326,7 +326,7 @@ def get_cuda_include_dirs() -> Tuple[str, str]:
     if not force_wheels and cuda_toolkit_include_path() is not None:
         return [cuda_toolkit_include_path()]
 
-    # Use pip wheels to include all headers.        
+    # Use pip wheels to include all headers.
     try:
         import nvidia
     except ModuleNotFoundError as e:
@@ -556,7 +556,7 @@ def uninstall_te_wheel_packages():
             "transformer_engine_cu12",
             "transformer_engine_torch",
             "transformer_engine_jax",
-            "transformer_engine_rocm7",
+            "transformer_engine_rocm10",
             "transformer_engine_rocm_jax",
             "transformer_engine_rocm_torch",
         ]
