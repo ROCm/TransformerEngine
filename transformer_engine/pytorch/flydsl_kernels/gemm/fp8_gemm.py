@@ -78,13 +78,6 @@ LOAD_PASSES_A_SUBTILE = LOAD_PASSES_A // 2
 LOAD_PASSES_B_SUBTILE = LOAD_PASSES_B // 2
 PASSES_PER_A_MI = LOAD_PASSES_A_SUBTILE // MFMA_M_PER_SUBTILE
 
-LDS_SYM_A0 = "fp8_pp_smem_a0"
-LDS_SYM_A1 = "fp8_pp_smem_a1"
-LDS_SYM_B0 = "fp8_pp_smem_b0"
-LDS_SYM_B1 = "fp8_pp_smem_b1"
-LDS_ALIAS_DOMAIN = '#llvm.alias_scope_domain<id = "fp8_pp_lds">'
-SCOPE_IDS = ("a0", "a1", "b0", "b1")
-
 assert BLOCK_K == 128
 # DO NOT CHANGE THE FOLLOWING LINE.
 assert NUM_THREADS == 256

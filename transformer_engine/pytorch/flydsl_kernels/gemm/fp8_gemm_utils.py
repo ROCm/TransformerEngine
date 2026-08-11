@@ -9,8 +9,7 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm, vector
 from flydsl._mlir.dialects.fly_rocdl import TargetAddressSpace
-from flydsl.expr import arith, const_expr, range_constexpr, rocdl
-from flydsl.expr.typing import T
+from flydsl.expr import const_expr, range_constexpr, rocdl
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import _to_raw as as_mlir_value
 
@@ -27,13 +26,6 @@ from .gemm_common_utils import (
     swizzle_128,
     xcd_swizzle,
 )
-
-
-def preshuffle_b(b_t):
-    """Permute row-major ``B_T`` ``(N, K)`` for ``b_preshuffled=True``."""
-    n, k = b_t.shape[-2:]
-    assert n % 16 == 0 and k % 64 == 0, f"need N%16==0 and K%64==0, got N={n} K={k}"
-    return b_t.reshape(n // 16, 16, k // 64, 4, 16).permute(0, 2, 3, 1, 4).contiguous()
 
 
 def make_fp8_buffer_tensor(arg_i8, fp8_ir_t):
@@ -76,23 +68,6 @@ def compute_global_swizzle(lane_id, wave_id, K, n_rounds, preshuffled):
             col = (lane_id % 8) * 16
             r, c = swizzle_128(row, col)
             offsets.append(r * K + c)
-    return offsets
-
-
-def compute_global_linear_128x128(lane_id, wave_id, leading_dim, n_rounds):
-    """Offsets for an unswizzled row-major 128x128 tile.
-
-    This uses the same 16-byte/thread DMA decomposition as
-    ``compute_global_swizzle`` but does not XOR-permute the logical source
-    coordinates. It is used by the NN A path, whose LDS page is physically
-    [K128, M128] for the CDNA4 transpose-read instruction.
-    """
-    offsets = []
-    n_waves = fx.block_dim.x // 64
-    for round in range_constexpr(n_rounds):
-        row = lane_id // 8 + wave_id * 8 + round * (n_waves * 8)
-        col = (lane_id % 8) * 16
-        offsets.append(row * leading_dim + col)
     return offsets
 
 
@@ -229,123 +204,3 @@ class S2RLoader:
             immediate_offset,
         )
         return lo.shuffle(hi, [0, 1, 2, 3])
-
-
-class StoreC:
-    def __init__(self, A_scale, B_scale, C, c_rows, c_cols, c_idx_fn, n_tiles_a, n_tiles_b):
-        self.c_rows = c_rows
-        self.c_cols = c_cols
-        self.lane_id = fx.thread_idx.x % 64
-        self.c_idx_fn = c_idx_fn
-        self.n_tiles_a = n_tiles_a
-        self.n_tiles_b = n_tiles_b
-        # Exact byte counts from compile-time shape (BF16 C output, FP32 scales).
-        # ``num_records_bytes`` is required when ``max_size=False`` -- see
-        # ``make_buffer_tensor`` docstring for the silent-OOB rationale.
-        c_nbytes = c_rows * c_cols * 2  # BFloat16 = 2 bytes
-        sa_nbytes = c_rows * 4  # Float32 row-wise scale
-        sb_nbytes = c_cols * 4  # Float32 col-wise scale
-        gC = fx.rocdl.make_buffer_tensor(C, max_size=False, num_records_bytes=c_nbytes)
-        gSA = fx.rocdl.make_buffer_tensor(A_scale, max_size=False, num_records_bytes=sa_nbytes)
-        gSB = fx.rocdl.make_buffer_tensor(B_scale, max_size=False, num_records_bytes=sb_nbytes)
-        self.c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
-        self.sa_div = fx.logical_divide(gSA, fx.make_layout(1, 1))
-        self.sb_div = fx.logical_divide(gSB, fx.make_layout(1, 1))
-
-        self.scale_atom_4 = fx.make_copy_atom(fx.rocdl.BufferCopy128b(), fx.Float32)
-        self.scale_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
-        self.out_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), fx.BFloat16)
-        self.reg_f32_4 = fx.make_rmem_tensor(fx.make_layout(4, 1), fx.Float32)
-        self.reg_f32_1 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
-        self.reg_bf16_1 = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.BFloat16)
-
-    def _load_scale_vec4(self, row):
-        fx.copy(self.scale_atom_4, fx.slice(self.sa_div, (None, fx.Int32(row))), self.reg_f32_4)
-        return Vec(fx.memref_load_vec(self.reg_f32_4))
-
-    def _load_scale_scalar(self, col):
-        fx.copy(self.scale_atom_1, fx.slice(self.sb_div, (None, fx.Int32(col))), self.reg_f32_1)
-        return Vec(fx.memref_load_vec(self.reg_f32_1))[0]
-
-    def _store_bf16(self, value_bf16, c_index):
-        fx.memref_store_vec(Vec.filled(1, value_bf16, fx.BFloat16), self.reg_bf16_1)
-        fx.copy(self.out_atom_1, self.reg_bf16_1, fx.slice(self.c_div, (None, fx.Int32(c_index))))
-
-    def store(self, c_frag, base_row, base_col):
-        a_scales = [
-            self._load_scale_vec4(base_row + i * 16 + (self.lane_id // 16) * 4)
-            for i in range_constexpr(self.n_tiles_a)
-        ]
-        b_scales = [
-            self._load_scale_scalar(base_col + i * 16 + self.lane_id % 16)
-            for i in range_constexpr(self.n_tiles_b)
-        ]
-        for ti in range_constexpr(self.n_tiles_a):
-            row = base_row + ti * 16 + (self.lane_id // 16) * 4
-            for tj in range_constexpr(self.n_tiles_b):
-                col = base_col + tj * 16 + self.lane_id % 16
-                col_valid = col < self.c_cols
-                oob = fx.Int32(self.c_rows * self.c_cols)
-                vec_f32 = Vec(c_frag[self.c_idx_fn(ti, tj)])
-                for i in range_constexpr(4):
-                    scaled = (vec_f32[i] * (a_scales[ti][i] * b_scales[tj])).to(fx.BFloat16)
-                    c_index = (row + i) * self.c_cols + col
-                    self._store_bf16(scaled, arith.select(col_valid, c_index, oob))
-
-
-class Mfma16x16x128:
-    def __init__(self, n_tiles_a, n_tiles_b):
-        self.atom = fx.make_mma_atom(fx.rocdl.cdna4.MFMA_Scale(16, 16, 128, fx.Float8E4M3FN))
-        self.zero_value = Vec.filled(4, 0.0, fx.Float32)
-        self.n_tiles_a = n_tiles_a
-        self.n_tiles_b = n_tiles_b
-
-    def idx(self, i, j):
-        return i * self.n_tiles_b + j
-
-    def _make_operand_frag(self, value):
-        frag = fx.make_rmem_tensor(8, fx.Int32)
-        frag.store(Vec(value))
-        return frag
-
-    def _make_accum_frag(self, value):
-        frag = fx.make_rmem_tensor(4, fx.Float32)
-        frag.store(Vec(value))
-        return frag
-
-    def _do_mma(self, a, b, c):
-        a_frag = self._make_operand_frag(a)
-        b_frag = self._make_operand_frag(b)
-        c_frag = self._make_accum_frag(c)
-        fx.gemm(self.atom, c_frag, a_frag, b_frag, c_frag)
-        return c_frag.load().ir_value()
-
-    def call(self, a, b, c, *, set_prio=True):
-        assert len(a) == self.n_tiles_a
-        assert len(b) == self.n_tiles_b
-        assert len(c) == self.n_tiles_a * self.n_tiles_b
-
-        a_frags = [self._make_operand_frag(a[idx]) for idx in range_constexpr(self.n_tiles_a)]
-        b_frags = [self._make_operand_frag(b[idx]) for idx in range_constexpr(self.n_tiles_b)]
-        c_frags = [
-            self._make_accum_frag(c[idx])
-            for idx in range_constexpr(self.n_tiles_a * self.n_tiles_b)
-        ]
-        if const_expr(set_prio):
-            rocdl.s_setprio(1)
-        for i in range_constexpr(self.n_tiles_a):
-            for j in range_constexpr(self.n_tiles_b):
-                cf = c_frags[self.idx(i, j)]
-                fx.gemm(self.atom, cf, a_frags[i], b_frags[j], cf)
-        if const_expr(set_prio):
-            rocdl.s_setprio(0)
-            rocdl.s_barrier()
-        return [
-            c_frags[idx].load().ir_value()
-            for idx in range_constexpr(self.n_tiles_a * self.n_tiles_b)
-        ]
-
-    def call_one(self, a, b, c, i, j):
-        assert i < self.n_tiles_a and j < self.n_tiles_b
-
-        return self._do_mma(a[i], b[j], c[self.idx(i, j)])
