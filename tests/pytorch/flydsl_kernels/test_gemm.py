@@ -1119,8 +1119,11 @@ def test_flydsl_vs_pytorch_fp8_multidim(
         use_flydsl=True,
     )
 
+    # general_gemm keeps B's leading dims for a non-transposed B, so the output
+    # is (batch, N, batch*M) while the flattened reference is (batch*N, batch*M).
+    # The values are the same fully-flattened matmul; reshape to match rank.
     A_flat = A_fp8.dequantize().reshape(-1, K)
     B_flat = B_fp8.dequantize().reshape(-1, K)
-    expected = torch.matmul(B_flat, A_flat.T)
+    expected = torch.matmul(B_flat, A_flat.T).reshape(output.shape)
 
     assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
