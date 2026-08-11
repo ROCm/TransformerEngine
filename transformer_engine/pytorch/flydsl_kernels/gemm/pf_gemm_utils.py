@@ -6,7 +6,7 @@
 
 Shared building blocks for ``pf_fwd.py`` and ``pf_dgrad.py``. Dense 4-wave BF16
 utilities live in ``fp16_gemm_utils.py``; the pipelined MMA loop lives in
-``bf16_gemm.py`` as ``dense_mma_pipeline_bf16``.
+``half_prec_gemm.py`` as ``dense_mma_pipeline_bf16``.
 """
 
 import flydsl.expr as fx
@@ -21,7 +21,7 @@ from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr import arith, range_constexpr
 from flydsl.expr.buffer_ops import _unwrap_value, buffer_store, create_buffer_resource
 
-from .bf16_gemm import BLOCK_K, dense_mma_pipeline_bf16
+from .half_prec_gemm import BLOCK_K, dense_mma_pipeline_bf16
 from .fp16_gemm_utils import G2SLoader, ceildiv, make_bf16_buffer_tensor, swizzle_128
 
 

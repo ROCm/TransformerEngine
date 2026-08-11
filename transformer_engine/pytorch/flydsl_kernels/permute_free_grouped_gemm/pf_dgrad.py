@@ -45,7 +45,7 @@ from flydsl.expr.buffer_ops import (
 )
 from flydsl.expr.typing import AddressSpace, PointerType
 
-from ..gemm.bf16_gemm import BLOCK_K, dense_mma_pipeline_bf16
+from ..gemm.half_prec_gemm import BLOCK_K, dense_mma_pipeline_bf16
 from ..gemm.fp16_gemm_utils import G2SLoader, ceildiv, make_bf16_buffer_tensor
 from ..gemm.pf_gemm_utils import (
     Mfma32x32x16,
