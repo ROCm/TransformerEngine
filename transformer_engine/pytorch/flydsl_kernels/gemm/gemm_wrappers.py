@@ -397,6 +397,7 @@ def _run_bf16_gemm(
     *,
     output_dtype: torch.dtype,
     bias=None,
+    gelu=False,
 ):
     """Dispatch BF16 using the original row-major operand allocations.
 
@@ -483,7 +484,8 @@ def _run_bf16_gemm(
         backend_name=f"BF16 {layout}",
     )
 
-    epilogue, bias_arg = _resolve_bias(bias, n)
+    epilogue, bias_arg = _resolve_epilogue(bias, n, gelu=gelu)
+    aux = torch.empty_like(D) if gelu else None
     bf16_matmul(
         a_flydsl,
         b_flydsl,
@@ -494,8 +496,9 @@ def _run_bf16_gemm(
         k=k,
         epilogue=epilogue,
         bias=bias_arg,
+        aux=aux.view(m, n) if aux is not None else None,
     )
-    return D
+    return D, aux
 
 
 
@@ -508,6 +511,7 @@ def _run_fp16_gemm(
     *,
     output_dtype: torch.dtype,
     bias=None,
+    gelu=False,
 ):
     """Dispatch FP16 using the original row-major operand allocations.
 
@@ -594,7 +598,8 @@ def _run_fp16_gemm(
         backend_name=f"FP16 {layout}",
     )
 
-    epilogue, bias_arg = _resolve_bias(bias, n)
+    epilogue, bias_arg = _resolve_epilogue(bias, n, gelu=gelu)
+    aux = torch.empty_like(D) if gelu else None
     fp16_matmul(
         a_flydsl,
         b_flydsl,
@@ -605,8 +610,9 @@ def _run_fp16_gemm(
         k=k,
         epilogue=epilogue,
         bias=bias_arg,
+        aux=aux.view(m, n) if aux is not None else None,
     )
-    return D
+    return D, aux
 
 
 def _run_fp32_gemm(
@@ -617,6 +623,7 @@ def _run_fp32_gemm(
     D,
     *,
     bias=None,
+    gelu=False,
 ):
     """Normalize FP32 TN/NN/NT inputs to the current kernel's TN interface.
 
@@ -710,15 +717,17 @@ def _run_fp32_gemm(
         backend_name="FP32 via TN core",
     )
 
-    epilogue, bias_arg = _resolve_bias(bias, n)
+    epilogue, bias_arg = _resolve_epilogue(bias, n, gelu=gelu)
+    aux = torch.empty_like(D) if gelu else None
     fp32_matmul(
         a_tn,
         b_tn,
         D.view(m, n),
         epilogue=epilogue,
         bias=bias_arg,
+        aux=aux.view(m, n) if aux is not None else None,
     )
-    return D
+    return D, aux
 
 
 
@@ -1177,6 +1186,7 @@ def _run_fp8(
     *,
     output_dtype: torch.dtype,
     bias=None,
+    gelu=False,
 ):
     """Normalize tensor-wise FP8 storage and invoke the common FP8 core."""
     supported_fp8_dtypes = (
@@ -1299,7 +1309,8 @@ def _run_fp8(
     _fp8_debug(f"derived M={m}, N={n}, K={k}")
     _fp8_tensor_debug("output/D", D)
 
-    epilogue, bias_arg = _resolve_bias(bias, n)
+    epilogue, bias_arg = _resolve_epilogue(bias, n, gelu=gelu)
+    aux = torch.empty_like(D) if gelu else None
     matmul(
         a_flydsl,
         a_scale,
@@ -1308,8 +1319,9 @@ def _run_fp8(
         D.view(m, n),
         epilogue=epilogue,
         bias=bias_arg,
+        aux=aux.view(m, n) if aux is not None else None,
     )
-    return D
+    return D, aux
 
 
 def te_generic_gemm_flydsl(
@@ -1417,14 +1429,6 @@ def te_generic_gemm_flydsl(
         )
         return D, None, gelu_input, None
 
-    # Fused forward GELU is implemented for MXFP8 only so far; the tensor-wise
-    # FP8 and regular (fp16/bf16/fp32) paths do not support it yet.
-    # TODO: extend GELU_AUX to the other FlyDSL GEMM backends.
-    if gelu:
-        raise NotImplementedError(
-            "FlyDSL GEMM fused GELU is currently implemented for MXFP8 only"
-        )
-
     if a_kind == "fp8" or b_kind == "fp8":
         if a_kind != b_kind:
             raise ValueError(
@@ -1443,7 +1447,7 @@ def te_generic_gemm_flydsl(
                 f"got {output_dtype}"
             )
 
-        D = _run_fp8(
+        D, gelu_input = _run_fp8(
             A,
             transa,
             B,
@@ -1451,8 +1455,9 @@ def te_generic_gemm_flydsl(
             D,
             output_dtype=fp8_output_dtypes[output_dtype],
             bias=bias,
+            gelu=gelu,
         )
-        return D, None, None, None
+        return D, None, gelu_input, None
 
     if a_kind != "regular" or b_kind != "regular":
         raise TypeError(
@@ -1476,7 +1481,7 @@ def te_generic_gemm_flydsl(
                 "FlyDSL BF16 supports FP16, BF16, or FP32 output, "
                 f"got {output_dtype}"
             )
-        D = _run_bf16_gemm(
+        D, gelu_input = _run_bf16_gemm(
             A,
             transa,
             B,
@@ -1484,8 +1489,9 @@ def te_generic_gemm_flydsl(
             D,
             output_dtype=bf16_output_dtypes[output_dtype],
             bias=bias,
+            gelu=gelu,
         )
-        return D, None, None, None
+        return D, None, gelu_input, None
 
     if A.dtype == torch.float16 and B.dtype == torch.float16:
         fp16_output_dtypes = {
@@ -1499,7 +1505,7 @@ def te_generic_gemm_flydsl(
                 "FlyDSL FP16 supports FP16, BF16, or FP32 output, "
                 f"got {output_dtype}"
             )
-        D = _run_fp16_gemm(
+        D, gelu_input = _run_fp16_gemm(
             A,
             transa,
             B,
@@ -1507,8 +1513,9 @@ def te_generic_gemm_flydsl(
             D,
             output_dtype=fp16_output_dtypes[output_dtype],
             bias=bias,
+            gelu=gelu,
         )
-        return D, None, None, None
+        return D, None, gelu_input, None
 
     if A.dtype == torch.float32 and B.dtype == torch.float32:
         if output_dtype not in (None, tex.DType.kFloat32):
@@ -1516,15 +1523,16 @@ def te_generic_gemm_flydsl(
                 "FlyDSL FP32 currently supports only FP32 output, "
                 f"got {output_dtype}"
             )
-        D = _run_fp32_gemm(
+        D, gelu_input = _run_fp32_gemm(
             A,
             transa,
             B,
             transb,
             D,
             bias=bias,
+            gelu=gelu,
         )
-        return D, None, None, None
+        return D, None, gelu_input, None
 
     raise NotImplementedError(
         "FlyDSL GEMM currently supports only MXFP8, tensor-wise E4M3 FP8, "

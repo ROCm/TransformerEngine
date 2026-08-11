@@ -14,12 +14,12 @@ currently supported FlyDSL surface:
 - TN / NN / NT layouts
 - batched multidimensional FP8 flattening
 - fused BIAS epilogue across all backends (regular, tensor-wise FP8, MXFP8)
-- fused GELU_AUX / GELU_AUX_BIAS epilogue for MXFP8
+- fused GELU_AUX / GELU_AUX_BIAS epilogue across all backends
 
-The fused forward BIAS epilogue is implemented for every FlyDSL GEMM backend.
-Fused forward GELU (GELU_AUX, saving the pre-activation aux) is implemented for
-MXFP8 only. BGRADB (fused bias-gradient) and DGELU (fused GELU gradient,
-grad=True) are not implemented on any FlyDSL path yet.
+The fused forward BIAS and GELU (GELU_AUX, saving the pre-activation aux)
+epilogues are implemented for every FlyDSL GEMM backend. BGRADB (fused
+bias-gradient) and DGELU (fused GELU gradient, grad=True) are not implemented
+on any FlyDSL path yet.
 
 Each test compares the FlyDSL path against two independent references:
 
@@ -735,13 +735,72 @@ def test_flydsl_vs_cpp_mxfp8_bias(M, K, N, layout, fp8_format):
 
 
 # ==============================================================================
-# Fused GELU epilogue coverage (MXFP8)
+# Fused GELU epilogue coverage
 #
 # GELU_AUX applies tanh-approx GELU to the C output while saving the
 # pre-activation (A@B, or A@B+bias for GELU_AUX_BIAS) to a second aux output
 # for the backward pass. general_gemm returns the aux in the third tuple slot
-# (gelu_input). Currently implemented for the MXFP8 backend only.
+# (gelu_input). Implemented across all FlyDSL backends (regular fp32/fp16/bf16,
+# tensor-wise FP8, MXFP8). Each test checks output == gelu(pre_act) and
+# aux == pre_act, with a guard that GELU actually changes the output.
 # ==============================================================================
+
+@pytest.mark.parametrize("M, K, N", FLYDSL_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("dtype", REGULAR_DTYPES, ids=["fp32", "fp16", "bf16"])
+def test_flydsl_vs_pytorch_regular_gelu(M, K, N, layout, dtype):
+    """Regular fp32/fp16/bf16 forward GELU_AUX vs PyTorch."""
+    torch.manual_seed(42)
+
+    A_shape, B_shape = get_shapes(layout, M, K, N)
+    A = torch.randn(A_shape, dtype=dtype, device="cuda") * 0.5
+    B = torch.randn(B_shape, dtype=dtype, device="cuda") * 0.5
+
+    pre_act = compute_pytorch_reference(A.float(), B.float(), layout)
+
+    output, gelu_input = call_gemm_with_gelu(
+        A, B, layout, out_dtype=dtype, use_flydsl=True,
+    )
+    assert gelu_input is not None, "GELU_AUX did not return the pre-activation aux."
+
+    no_gelu_out = call_gemm(A, B, layout, out_dtype=dtype, use_flydsl=True)
+    assert not torch.allclose(output.float(), no_gelu_out.float(), atol=1e-4), (
+        "FlyDSL output matches the no-GELU output; GELU epilogue appears inactive."
+    )
+
+    assert_gemm_close(gelu_input, pre_act, atol=1e-3, rtol=1e-2)
+    assert_gemm_close(output, gelu_tanh_ref(pre_act), atol=1e-3, rtol=1e-2)
+
+
+@pytest.mark.parametrize("M, K, N", FLYDSL_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("fp8_format", FP8_FORMAT_COMBOS, ids=FP8_FORMAT_IDS)
+def test_flydsl_vs_pytorch_fp8_gelu(M, K, N, layout, fp8_format):
+    """Tensor-wise FP8 forward GELU_AUX vs PyTorch."""
+    torch.manual_seed(42)
+
+    fp8_dtype_a, fp8_dtype_b = fp8_format
+    A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
+        M, K, N, layout, fp8_dtype_a, fp8_dtype_b,
+    )
+
+    pre_act = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
+
+    output, gelu_input = call_gemm_with_gelu(
+        A_fp8, B_fp8, layout, out_dtype=torch.float32, use_flydsl=True,
+    )
+    assert gelu_input is not None, "GELU_AUX did not return the pre-activation aux."
+
+    no_gelu_out = call_gemm(
+        A_fp8, B_fp8, layout, out_dtype=torch.float32, use_flydsl=True,
+    )
+    assert not torch.allclose(output.float(), no_gelu_out.float(), atol=1e-4), (
+        "FlyDSL FP8 output matches the no-GELU output; GELU epilogue appears inactive."
+    )
+
+    assert_gemm_close(gelu_input, pre_act, atol=5e-3, rtol=1e-2)
+    assert_gemm_close(output, gelu_tanh_ref(pre_act), atol=5e-3, rtol=1e-2)
+
 
 @requires_mxfp8_support
 @pytest.mark.parametrize("M, K, N", MXFP8_SHAPES)
@@ -941,6 +1000,20 @@ if __name__ == "__main__":
         torch.bfloat16,
     )
     test_flydsl_vs_pytorch_fp8_bias(
+        256,
+        512,
+        256,
+        "TN",
+        (tex.DType.kFloat8E4M3, tex.DType.kFloat8E4M3),
+    )
+    test_flydsl_vs_pytorch_regular_gelu(
+        256,
+        512,
+        256,
+        "TN",
+        torch.bfloat16,
+    )
+    test_flydsl_vs_pytorch_fp8_gelu(
         256,
         512,
         256,
