@@ -474,6 +474,68 @@ def test_flydsl_vs_pytorch_mxfp8(M, K, N, layout, fp8_format):
     assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
 
 
+def test_flydsl_mxfp8_unsupported_shape_falls_back():
+    """An MXFP8 shape FlyDSL cannot tile must fall back, not crash.
+
+    M=128 is not a multiple of the 256-wide kernel M tile, so FlyDSL rejects it
+    with ``FlyDSLUnsupportedError`` -- the only type ``general_gemm`` catches.
+    Dispatch must degrade to the C++ backend rather than propagating an
+    uncatchable ValueError/RuntimeError, and the fallen-back result must still
+    be correct.
+
+    An M/N-tiling mismatch is used rather than an untileable K: the C++ MXFP8
+    backend shares FlyDSL's K%128 constraint, so a K-based rejection would also
+    fail C++ and could never produce a comparable result. K=512 here keeps the
+    scale packing and K-tile count valid, isolating the M-tiling rejection.
+    """
+    os.environ["NVTE_ROCM_ENABLE_MXFP8"] = "1"
+    os.environ["NVTE_USE_FLYDSL"] = "1"
+    torch.manual_seed(42)
+
+    M, K, N = 128, 512, 256
+    fp8_dtype = tex.DType.kFloat8E4M3
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(
+        M,
+        K,
+        N,
+        "TN",
+        fp8_dtype,
+        fp8_dtype,
+    )
+
+    old_warn = os.environ.get("NVTE_FLYDSL_GEMM_WARN_FALLBACK")
+    os.environ["NVTE_FLYDSL_GEMM_WARN_FALLBACK"] = "1"
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            output, _, _, _ = general_gemm(
+                A=A_mxfp8,
+                B=B_mxfp8,
+                out_dtype=torch.float32,
+                layout="TN",
+                bias=None,
+                quantization_params=None,
+                gelu=False,
+                grad=False,
+                accumulate=False,
+            )
+    finally:
+        if old_warn is None:
+            os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
+        else:
+            os.environ["NVTE_FLYDSL_GEMM_WARN_FALLBACK"] = old_warn
+
+    fallback_msgs = [str(w.message) for w in caught if _FLYDSL_FALLBACK_TAG in str(w.message)]
+    for msg in fallback_msgs:
+        print(msg)  # visible with ``pytest -s``
+    assert fallback_msgs, (
+        "an untileable MXFP8 shape should fall back to the C++ backend, "
+        "but no [FLYDSL WARNING] fallback was emitted"
+    )
+    expected = compute_pytorch_reference(A_deq.float(), B_deq.float(), "TN")
+    assert_gemm_close(output, expected, atol=5e-3, rtol=1e-2)
+
+
 # ==============================================================================
 # Approach 2: FlyDSL vs native C++ ``generic_gemm`` reference
 # ==============================================================================
