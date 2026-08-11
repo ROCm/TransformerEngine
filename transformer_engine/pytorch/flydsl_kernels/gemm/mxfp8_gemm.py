@@ -35,7 +35,7 @@ from flydsl.expr.typing import Vector as Vec
 
 # Transformer Engine-local FlyDSL utilities.
 from .exceptions import FlyDSLUnsupportedError
-from .gemm_common_utils import require_block_tiling
+from .gemm_common_utils import require_block_tiling, require_launch_size
 from .fp8_gemm_utils import (
     G2SLoader,
     S2RLoader,
@@ -1600,6 +1600,10 @@ def do_gemm(
         block_n=_BLOCK_N,
         block_k=_BLOCK_K,
         label=f"MXFP8 {layout} GEMM",
+    )
+    require_launch_size(
+        f"MXFP8 {layout} GEMM",
+        ("A", A), ("B", B), ("As", As), ("Bs", Bs), ("C", C),
     )
 
     expected_as = (K_runtime // _BLOCK_K, M_runtime)

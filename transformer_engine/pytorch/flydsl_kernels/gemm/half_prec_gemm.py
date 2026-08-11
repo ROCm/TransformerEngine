@@ -38,7 +38,7 @@ from flydsl.expr.typing import Vector as Vec
 
 # Transformer Engine-local FlyDSL utilities.
 from .exceptions import FlyDSLUnsupportedError
-from .gemm_common_utils import require_block_tiling
+from .gemm_common_utils import require_block_tiling, require_launch_size
 from .fp16_gemm_utils import (
     G2SLoader,
     S2RLoader,
@@ -1478,6 +1478,7 @@ def doGemm(
         block_k=_BLOCK_K,
         label=f"{label} GEMM",
     )
+    require_launch_size(f"{label} GEMM", ("A", A), ("B", B), ("C", C))
 
     if tuple(C.shape) != (M_runtime, N_runtime):
         raise ValueError(

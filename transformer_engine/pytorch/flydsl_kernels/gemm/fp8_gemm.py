@@ -25,7 +25,7 @@ from flydsl.expr import arith, const_expr, gpu, math, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
-from .gemm_common_utils import require_block_tiling
+from .gemm_common_utils import require_block_tiling, require_launch_size
 
 # Transformer Engine-local FlyDSL utilities.
 from .fp8_gemm_utils import (
@@ -1150,6 +1150,7 @@ def doGemm(
         block_k=_BLOCK_K,
         label="FP8 GEMM",
     )
+    require_launch_size("FP8 GEMM", ("A", A), ("B", B), ("C", C))
     assert A_scale_inv.dtype == torch.float32 and A_scale_inv.numel() == 1
     assert B_scale_inv.dtype == torch.float32 and B_scale_inv.numel() == 1
     assert C.shape == (M_runtime, N_runtime), (

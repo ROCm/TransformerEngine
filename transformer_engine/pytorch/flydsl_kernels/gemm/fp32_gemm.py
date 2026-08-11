@@ -26,7 +26,7 @@ from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 # Transformer Engine-local FlyDSL utilities.
-from .gemm_common_utils import require_block_tiling
+from .gemm_common_utils import require_block_tiling, require_launch_size
 from .fp16_gemm_utils import (
     G2SLoader,
     S2RLoader,
@@ -1055,6 +1055,7 @@ def doGemm(
         block_k=_BLOCK_K,
         label="FP32 GEMM",
     )
+    require_launch_size("FP32 GEMM", ("A", A), ("B", B), ("C", C))
     assert C.shape == (M_runtime, N_runtime)
 
     if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
