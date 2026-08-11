@@ -122,11 +122,13 @@ FLYDSL_SHAPES = [
     (512, 512, 512),
     (512, 1024, 512),
     (1024, 512, 1024),
+    (512, 512, 1024),  # M != N: exercises the operand-swap contract asymmetrically
 ]
 
 MXFP8_SHAPES = [
     (512, 512, 512),
     (512, 1024, 512),
+    (512, 512, 1024),  # M != N
 ]
 
 LAYOUTS = ["TN", "NN", "NT"]
@@ -174,13 +176,19 @@ def cleanup_env():
 
 
 def get_shapes(layout, M, K, N):
-    """Return the A/B storage shapes used by TE's public GEMM tests."""
-    if layout == "TN":
+    """Return the (A, B) storage shapes for a given TE ``general_gemm`` layout.
+
+    Every layout produces a logical ``(N, M)`` output (see
+    ``compute_pytorch_reference``), so each must reference both M and N --
+    otherwise NN/NT silently collapse to square outputs and never exercise the
+    M/N operand-swap contract asymmetrically.
+    """
+    if layout == "TN":  # A transposed, B not transposed
         return (M, K), (N, K)
-    if layout == "NN":
-        return (M, K), (K, M)
-    if layout == "NT":
-        return (M, K), (M, K)
+    if layout == "NN":  # neither transposed
+        return (K, M), (N, K)
+    if layout == "NT":  # A not transposed, B transposed
+        return (K, M), (K, N)
     raise ValueError(f"Unsupported layout: {layout}")
 
 
