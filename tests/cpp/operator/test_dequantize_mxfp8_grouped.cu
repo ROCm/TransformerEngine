@@ -347,6 +347,8 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
     int result = memcmp(out_grouped_h.data() + data_offset, out_ref_h.data() + data_offset,
                         tensor_elts * sizeof(OutputType));
     if (result != 0) {
+      // Find first mismatch for error reporting
+      // ROCm scans bytes, not elements: memcmp flags differences element comparison misses.
       const auto *grouped_bytes =
           reinterpret_cast<const unsigned char *>(out_grouped_h.data() + data_offset);
       const auto *ref_bytes =
