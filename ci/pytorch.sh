@@ -66,6 +66,7 @@ run_test_config(){
     run_default_fa 1 test_float8_current_scaling_exact.py
     run_default_fa 1 test_float8blockwisetensor.py
     run_default_fa 1 test_float8_blockwise_scaling_exact.py
+    run_default_fa 1 test_float8_blockwise_gemm_exact.py
     run_default_fa 1 test_quantized_tensor.py
     test $_fus_attn = auto -o $_fus_attn = ck && run 1 test_cpu_offloading.py
     test $_fus_attn = auto -o $_fus_attn = ck -o $_fus_attn = aotriton && NVTE_FLASH_ATTN=0 NVTE_CPU_OFFLOAD_V1=1 run 3 test_cpu_offloading_v1.py
@@ -75,6 +76,7 @@ run_test_config(){
     run_default_fa 1 test_gemm_autotune.py
     run 1 test_gqa.py
     run 1 test_grouped_linear.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_grouped_tensor.py
     run 1 test_jit.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_multi_tensor.py
     run 1 test_numerics.py

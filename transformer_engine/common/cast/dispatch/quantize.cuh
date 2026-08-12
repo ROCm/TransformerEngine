@@ -139,6 +139,11 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
                  "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
                  "NVFP4 4over6 quantization does not support stochastic rounding.");
+#ifdef __HIP_PLATFORM_AMD__
+      // Refuse the fast-math error path rather than silently scoring with the exact one.
+      NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.nvfp4_4over6_err_use_fast_math,
+                 "NVFP4 4over6 fast-math error mode is not supported on ROCm.");
+#endif
       if (row_scaled_nvfp4) {
         NVTE_CHECK(!quant_config_cpp.nvfp4_2d_quantization,
                    "Row-scaled NVFP4 quantization does not support 2D quantization.");
@@ -154,9 +159,7 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
           (output_tensor->has_data() ||
            (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
-      // Launch NVFP4 quantize kernel. 4over6 and the optimized quantize_transpose kernels are
-      // CUDA-only (Blackwell); ROCm falls through to the portable blockwise path below, which
-      // supports row-scaled NVFP4.
+      // Launch NVFP4 quantize kernel. ROCm uses the portable blockwise path below.
 #ifndef __HIP_PLATFORM_AMD__
       if (nvfp4_use_4over6) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
@@ -191,6 +194,8 @@ void quantize_fwd_helper(const NVTETensor input, NVTETensor output,
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*row_scaled_nvfp4=*/row_scaled_nvfp4,
             /*noop_tensor=*/noop_tensor->data,
+            /*nvfp4_e4m3_max=*/output_tensor->nvfp4_e4m3_max,
+            /*nvfp4_4over6_mode=*/quant_config_cpp.nvfp4_4over6_mode,
             /*stream=*/stream);
 #ifndef __HIP_PLATFORM_AMD__
       }
@@ -318,6 +323,11 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
                  "Non-4over6 NVFP4 quantization requires E4M3 max 448.");
       NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.stochastic_rounding,
                  "NVFP4 4over6 quantization does not support stochastic rounding.");
+#ifdef __HIP_PLATFORM_AMD__
+      // Refuse the fast-math error path rather than silently scoring with the exact one.
+      NVTE_CHECK(!nvfp4_use_4over6 || !quant_config_cpp.nvfp4_4over6_err_use_fast_math,
+                 "NVFP4 4over6 fast-math error mode is not supported on ROCm.");
+#endif
       NVTE_CHECK(!output_tensor->row_scaled_nvfp4,
                  "Backward NVFP4 quantization does not support row-scaled outputs.");
       // Columnwise-only is supported on the optimized path only for 2D scaling; rowwise-only and
@@ -328,9 +338,7 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
           (output_tensor->has_data() ||
            (output_tensor->has_columnwise_data() && quant_config_cpp.nvfp4_2d_quantization));
 
-      // Launch NVFP4 quantize kernel. 4over6 and the optimized quantize_transpose kernels are
-      // CUDA-only (Blackwell); ROCm falls through to the portable blockwise path below, which
-      // supports row-scaled NVFP4.
+      // Launch NVFP4 quantize kernel. ROCm uses the portable blockwise path below.
 #ifndef __HIP_PLATFORM_AMD__
       if (nvfp4_use_4over6) {
         if (quant_config_cpp.nvfp4_2d_quantization) {
@@ -365,6 +373,8 @@ void quantize_bwd_helper(const NVTETensor grad, const NVTETensor input, NVTETens
             /*use_2d_quantization=*/quant_config_cpp.nvfp4_2d_quantization,
             /*row_scaled_nvfp4=*/false,
             /*noop_tensor=*/noop_tensor->data,
+            /*nvfp4_e4m3_max=*/output_tensor->nvfp4_e4m3_max,
+            /*nvfp4_4over6_mode=*/quant_config_cpp.nvfp4_4over6_mode,
             /*stream=*/stream);
 #ifndef __HIP_PLATFORM_AMD__
       }
