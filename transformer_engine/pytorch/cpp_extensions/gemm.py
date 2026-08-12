@@ -356,7 +356,10 @@ def general_gemm(
 ) -> Iterable[Optional[torch.Tensor]]:
     """GEMM supporting fp8 inputs."""
 
-    assert layout in ("TN", "NN", "NT"), f"GEMM layout {layout} not supported."
+    # "TT" is reachable only through the hipBLASLt path (e.g. MXFP4 all-layout support); the
+    # AITER mxfp4_gemm branch below still rejects unsupported layouts, so a TT request without
+    # hipBLASLt errors cleanly there.
+    assert layout in ("TN", "NN", "NT", "TT"), f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
 

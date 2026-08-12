@@ -447,10 +447,20 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       NVTE_CHECK(A.has_columnwise_data(), "Input A is missing column-wise usage");
     }
     ret.A = is_A_transposed ? A.data.dptr : A.columnwise_data.dptr;
-    ret.transA = transA;
     ret.Atype = is_A_transposed ? A.data.dtype : A.columnwise_data.dtype;
     ret.A_scale_inv = is_A_transposed ? A.scale_inv.dptr : A.columnwise_scale_inv.dptr;
-    ret.lda = is_A_transposed ? k : m;
+    if (is_mxfp4_scaling(A.scaling_mode)) {
+      // MXFP4 (two FP4 values per byte): the column-wise buffer must be presented in TN-internal
+      // form (OP_T, lda=k) so hipBLASLt's UE8M0 (VEC32_UE8M0) block-scale indexing aligns with
+      // TE's column-wise scale layout (cf. the NVFP4 branch below). Consuming it with the caller's
+      // OP_N/lda=m transposes the scale indexing and yields wrong results. MXFP8 (one byte per
+      // element) keeps its original presentation, which is already correct.
+      ret.transA = CUBLAS_OP_T;
+      ret.lda = k;
+    } else {
+      ret.transA = transA;
+      ret.lda = is_A_transposed ? k : m;
+    }
   } else if (is_nvfp_scaling(A.scaling_mode)) {
     // NVFP4: dequant path always produces TN layout for the BF16 GEMM,
     // but the source data may come from either rowwise or columnwise buffers.
@@ -499,10 +509,17 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       NVTE_CHECK(B.has_data(), "Input B is missing row-wise usage");
     }
     ret.B = is_B_transposed ? B.columnwise_data.dptr : B.data.dptr;
-    ret.transB = transB;
     ret.Btype = is_B_transposed ? B.columnwise_data.dtype : B.data.dtype;
     ret.B_scale_inv = is_B_transposed ? B.columnwise_scale_inv.dptr : B.scale_inv.dptr;
-    ret.ldb = is_B_transposed ? n : k;
+    if (is_mxfp4_scaling(B.scaling_mode)) {
+      // MXFP4: present B in TN-internal form (OP_N, ldb=k); see the A branch. MXFP8 keeps its
+      // original presentation.
+      ret.transB = CUBLAS_OP_N;
+      ret.ldb = k;
+    } else {
+      ret.transB = transB;
+      ret.ldb = is_B_transposed ? n : k;
+    }
   } else if (is_nvfp_scaling(B.scaling_mode)) {
     // NVFP4: dequant path always produces TN layout for the BF16 GEMM,
     // but the source data may come from either rowwise or columnwise buffers.
