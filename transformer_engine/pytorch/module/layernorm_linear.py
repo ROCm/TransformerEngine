@@ -21,10 +21,13 @@ import transformer_engine_torch as tex
 
 from transformer_engine.common.recipe import Recipe
 from transformer_engine.pytorch.torch_version import torch_version
-from transformer_engine.pytorch.tensor.utils import is_custom
+from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     get_ub,
+    get_ub_is_fp8,
+    is_ub_initialized,
+    using_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
     get_dummy_wgrad,
@@ -32,7 +35,7 @@ from .base import (
     _2X_ACC_DGRAD,
     _2X_ACC_WGRAD,
 )
-from ..quantization import FP8GlobalStateManager
+from ..quantization import FP8GlobalStateManager, QuantizerRole
 from ..utils import (
     assert_dim_for_fp8_exec,
     cast_if_needed,
@@ -153,6 +156,7 @@ class _LayerNormLinear(torch.autograd.Function):
             debug,
             keep_fp8_weight_transpose_cache,
             use_fsdp2,
+            is_fsdp2,
         ) = non_tensor_args
         if fp8:
             backward_override = FP8GlobalStateManager.get_fp8_recipe().backward_override
@@ -318,12 +322,21 @@ class _LayerNormLinear(torch.autograd.Function):
             is_weight_param_quantized = isinstance(weight, QuantizedTensorStorage)
 
             # Configure quantizer
-            # If weight is already quantized, no need to set quantizer states
+            # If weight is already quantized, weight._quantizer is its true quantizer.
             # for debug mode we create quantizer every iteration, thus we need to set the quantizer states
             if is_weight_param_quantized and not debug:
                 weight_quantizer = weight._quantizer
             elif weight_quantizer is not None:
-                weight_quantizer.set_usage(rowwise=True, columnwise=is_grad_enabled and  backward_override is None and keep_fp8_weight_transpose_cache)
+                # FSDP2: Skip columnwise/transpose creation during forward
+                # to avoid accumulating caches across layers. Backward's
+                # FSDP2 all-gather will recreate them. (Issue #2681)
+                weight_quantizer.set_usage(
+                    rowwise=True,
+                    columnwise=is_grad_enabled
+                    and backward_override is None
+                    and keep_fp8_weight_transpose_cache
+                    and not is_fsdp2,
+                )
                 # NVFP4 must produce columnwise data at quantization time
                 # (no lazy transpose like Float8Tensor), but not in backward override modes
                 # where the weight is dequantized before use.
@@ -343,6 +356,7 @@ class _LayerNormLinear(torch.autograd.Function):
                 workspace_dtype=activation_dtype,
                 cache=cache_weight,
             )
+
             weightmat.update_usage(rowwise_usage=True)
 
         else:
@@ -414,7 +428,10 @@ class _LayerNormLinear(torch.autograd.Function):
             clear_tensor_data(ln_out, ln_out_total)
             ln_out = ln_out_total = None
         elif with_input_all_gather and not return_layernorm_output_gathered:
-            clear_tensor_data(ln_out_total)
+            # ln_out_total aliases ln_out for the cuBLASMp backend; skip the
+            # deallocation to avoid corrupting the backward-saved tensor.
+            if ln_out_total is not ln_out:
+                clear_tensor_data(ln_out_total)
             ln_out_total = None
 
         # ------------------------------------------------------
@@ -423,7 +440,9 @@ class _LayerNormLinear(torch.autograd.Function):
         # ------------------------------------------------------
         out = None
         if ub_overlap_rs_fprop:
-            out = reduce_scatter_out
+            # cuBLASMp writes the reduce-scattered output directly into the
+            # GEMM output tensor; Userbuffers writes it into the extra-output buffer.
+            out = gemm_out if ub_obj is not None and ub_obj.with_cublasmp() else reduce_scatter_out
         elif parallel_mode == "row" and tp_size > 1:
             nvtx_range_push(f"{nvtx_label}.row_parallel_comm")
             out = gemm_out
@@ -499,9 +518,15 @@ class _LayerNormLinear(torch.autograd.Function):
                     ln_bias,
                 )
 
+            # FSDP2: Don't save FP8 workspace for non-quantized weights.
+            # Backward will re-quantize from FSDP2 all-gathered weight.
+            # (Issue #2681)
+            wt_save = weightmat
+            if is_fsdp2 and weightmat is not weight:
+                wt_save = None
             tensors_to_save, tensor_objects = prepare_for_saving(
                 inputmat,
-                weightmat,
+                wt_save,
                 weight,
                 bias,
                 ln_weight,
@@ -514,6 +539,7 @@ class _LayerNormLinear(torch.autograd.Function):
             ctx.requires_dgrad = inp_requires_grad
             ctx.requires_wgrad = weight.requires_grad
             ctx.is_weight_param_quantized = is_weight_param_quantized
+            ctx.is_fsdp2 = is_fsdp2
             if fuse_wgrad_accumulation and weight.requires_grad:
                 # Keep weakref to weight to preserve attributes like main_grad
                 # when we need to modify the weight python object
@@ -773,6 +799,19 @@ class _LayerNormLinear(torch.autograd.Function):
             # Note: Gradient w.r.t. GEMM input (i.e. norm output).
             # --------------------------------------------------
 
+            # FSDP2: Re-create workspace from all-gathered weight when
+            # workspace was not saved. (Issue #2681)
+            # Use saved_weight (the original weight parameter) since
+            # origin_weight is only set when fuse_wgrad_accumulation=True.
+            if weight is None:
+                if isinstance(saved_weight, QuantizedTensorStorage):
+                    # saved weight is already set to right usages by
+                    # fsdp2 quantized-tensor hooks when workspace was not saved.
+                    weight = saved_weight
+                elif ctx.weight_quantizer is not None:
+                    ctx.weight_quantizer.set_usage(rowwise=True, columnwise=True)
+                    weight = ctx.weight_quantizer(saved_weight)
+
             # Make sure required data is available
             if isinstance(grad_output, QuantizedTensorStorage):
                 grad_output.update_usage(rowwise_usage=True)
@@ -837,12 +876,26 @@ class _LayerNormLinear(torch.autograd.Function):
             if ctx.fp8 and not ctx.keep_fp8_weight_transpose_cache:
                 weight.update_usage(columnwise_usage=False)
 
+            # FSDP2 only handles deallocation all-gathered weights that it allocates.
+            # Columnwise data is derived from rowwise data after allgather for fp8
+            # and 2d block-scaled weights in TE managed memory. So we need to clear
+            # it here.
+            # (Issues #2681, #2717)
+            if getattr(ctx, "is_fsdp2", False) and isinstance(weight, QuantizedTensorStorage):
+                clear_columnwise_cache(weight)
+
             # Prepare grad input tensor
             # Note: Perform tensor-parallel communication
             dgrad = None
             dgrad_work = None
             if ctx.ub_overlap_rs_dgrad:
-                dgrad = reduce_scatter_out
+                # cuBLASMp writes the reduce-scattered dgrad directly into the
+                # GEMM output tensor; Userbuffers uses the extra-output buffer.
+                dgrad = (
+                    gemm_out
+                    if ub_obj_dgrad is not None and ub_obj_dgrad.with_cublasmp()
+                    else reduce_scatter_out
+                )
             elif ctx.ub_bulk_wgrad:
                 dgrad = ub_obj_wgrad.get_buffer(local_chunk=True)
             elif ctx.parallel_mode == "column" and ctx.tp_size > 1:
@@ -863,6 +916,28 @@ class _LayerNormLinear(torch.autograd.Function):
             # --------------------------------------------------
             # Grad input tensor has been computed...
             # --------------------------------------------------
+
+            # cuBLASMp's AG+GEMM consumes the gathered grad_output inline and
+            # does not preserve it for wgrad. Userbuffers leaves the gathered
+            # tensor in its persistent buffer; cuBLASMp does not, so we gather
+            # here. Route through the same FP8-aware all-gather as the
+            # non-overlap path in
+            # ``TransformerEngineBaseModule.grad_output_preprocess`` by passing
+            # the grad_output quantizer. Columnwise data needed for wgrad is
+            # produced by ``update_usage(columnwise_usage=True)`` further below.
+            if (
+                ctx.requires_wgrad
+                and ctx.ub_overlap_ag
+                and ctx.ub_obj_gradout is not None
+                and ctx.ub_obj_gradout.with_cublasmp()
+            ):
+                if ctx.grad_output_quantizer is not None:
+                    ctx.grad_output_quantizer.set_usage(rowwise=True, columnwise=False)
+                grad_output, _ = gather_along_first_dim(
+                    grad_output,
+                    ctx.tp_group,
+                    quantizer=ctx.grad_output_quantizer,
+                )
 
             # --------------------------------------------------
             # Compute grad weight
@@ -1020,8 +1095,10 @@ class _LayerNormLinear(torch.autograd.Function):
                     if ctx.ln_out_needs_gather:
                         # Gathered input is internal
                         clear_tensor_data(ln_out_total)
-                    if ctx.parallel_mode == "row" and ctx.sequence_parallel:
-                        # Gathered grad output tensor is internal
+                    if ctx.sequence_parallel and (
+                        ctx.parallel_mode == "row" or (ctx.parallel_mode == "column" and ctx.fp8)
+                    ):
+                        # Gathered (row-SP) or quantized (column-SP FP8) grad_output is internal
                         clear_tensor_data(grad_output)
 
                 # Update grad input if overlapping reduce-scatter with wgrad GEMM
@@ -1332,6 +1409,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.ub_overlap_rs_dgrad = (
             ub_overlap_rs_dgrad and self.sequence_parallel and self.parallel_mode == "column"
         )
+        # Bulk overlaps require the Userbuffers backend; the cuBLASMp backend
+        # falls back to async NCCL ops via torch.distributed.
         self.ub_bulk_wgrad = (
             ub_bulk_wgrad
             and self.sequence_parallel
@@ -1362,8 +1441,22 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.ub_overlap_ag_dgrad,
             ]
         ):
+            assert is_ub_initialized(), "initialize_ub() must be called before layer construction."
             assert ub_name is not None, "Userbuffer name [string] is not set."
         self.ub_name = ub_name
+
+        if using_cublasmp_backend():
+            if self.ub_bulk_dgrad:
+                warnings.warn(
+                    f"cuBLASMp backend does not support bulk overlaps for '{self.ub_name}_dgrad' "
+                    f"and '{self.ub_name}_wgrad' GEMMs. Falling back on DGRAD+RS overlap for "
+                    f"'{self.ub_name}_dgrad' GEMM with no bulk overlap for '{self.ub_name}_wgrad' "
+                    "GEMM. In order to enable bulk overlaps for these GEMMs, set "
+                    "`with_cublasmp=False` when calling `initialize_ub()`."
+                )
+            self.ub_overlap_rs_dgrad = self.ub_overlap_rs_dgrad or self.ub_bulk_dgrad
+            self.ub_bulk_dgrad = False
+            self.ub_bulk_wgrad = False
 
         if self.symmetric_ar_type is not None:
             assert torch_version() >= (
@@ -1533,6 +1626,32 @@ class LayerNormLinear(TransformerEngineBaseModule):
         elif recipe.nvfp4():
             self._customize_quantizers_nvfp4(fwd, recipe)
 
+    def get_quantizer_roles(
+        self,
+        *,
+        fwd: bool,
+        num_quantizers: int,
+    ) -> Optional[List[QuantizerRole]]:
+        """QuantizerRole list for quantizers used by ``LayerNormLinear``.
+
+        The output (fwd) and grad-input (bwd) slots default to ``None``
+        (unknown consumer).  Set :attr:`output_quantizer_role` /
+        :attr:`grad_input_quantizer_role` to provide consumer identity.
+        """
+        name = self.name or ""
+        if fwd:
+            base = [
+                QuantizerRole(module_type="linear", tensor_type="input", name=name),
+                QuantizerRole(module_type="linear", tensor_type="weight", name=name),
+                self._output_quantizer_role,
+            ]
+        else:
+            base = [
+                QuantizerRole(module_type="linear", tensor_type="grad_output", name=name),
+                self._grad_input_quantizer_role,
+            ]
+        return [base[i % len(base)] for i in range(num_quantizers)]
+
     def reset_layer_norm_parameters(self) -> None:
         """Init LN params"""
         warnings.warn(
@@ -1620,14 +1739,10 @@ class LayerNormLinear(TransformerEngineBaseModule):
             is_first_microbatch = False
 
         if self.ub_overlap_rs_fprop:
-            if get_ub(
-                self.ub_name + "_fprop", FP8GlobalStateManager.is_fp8_enabled()
-            ).is_fp8_ubuf():
+            if get_ub_is_fp8(self.ub_name + "_fprop", FP8GlobalStateManager.is_fp8_enabled()):
                 fp8_output = True
         if self.ub_overlap_rs_dgrad:
-            if get_ub(
-                self.ub_name + "_dgrad", FP8GlobalStateManager.is_fp8_enabled()
-            ).is_fp8_ubuf():
+            if get_ub_is_fp8(self.ub_name + "_dgrad", FP8GlobalStateManager.is_fp8_enabled()):
                 fp8_grad = True
 
         inp = self.prepare_forward(
@@ -1663,7 +1778,7 @@ class LayerNormLinear(TransformerEngineBaseModule):
             else:
                 fwd_fn = _LayerNormLinear.forward
                 autograd_ctx = [None]
-            cache_name = None if is_first_microbatch is None else "weight"
+            cache_name = None if (is_first_microbatch is None or self.is_fsdp2) else "weight"
             weight_workspace = (
                 self._fp8_workspaces.get(cache_name) if cache_name is not None else None
             )
@@ -1708,7 +1823,8 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 self.symmetric_ar_type,
                 debug,
                 self.keep_fp8_weight_transpose_cache,
-                self.use_fsdp2
+                self.use_fsdp2,
+                self.is_fsdp2,
             )
             out, ln_out, new_weight_workspace = fwd_fn(
                 *autograd_ctx,
@@ -1743,6 +1859,9 @@ class LayerNormLinear(TransformerEngineBaseModule):
     def _get_quantizers(self, fp8_output, fp8_grad, is_grad_enabled):
         if not self.fp8:
             return [None] * 6
+
+        self._warn_missing_output_quantizer_role(fp8_output, fp8_grad)
+
         grad_input_quantizer = None
         grad_weight_quantizer = None
         grad_output_quantizer = None
@@ -1761,13 +1880,6 @@ class LayerNormLinear(TransformerEngineBaseModule):
                 grad_output_quantizer.optimize_for_gemm = True
             if fp8_grad:
                 grad_input_quantizer = self.quantizers["scaling_bwd"][FP8BwdTensorIdx.GRAD_INPUT1]
-        fp8_recipe = FP8GlobalStateManager.get_fp8_recipe()
-        if fp8_recipe.backward_override == "dequantized" and (
-            fp8_recipe.mxfp8() or fp8_recipe.nvfp4()
-        ):
-            input_quantizer.optimize_for_gemm = False
-            if grad_output_quantizer is not None:
-                grad_output_quantizer.optimize_for_gemm = False
 
         return (
             input_quantizer,

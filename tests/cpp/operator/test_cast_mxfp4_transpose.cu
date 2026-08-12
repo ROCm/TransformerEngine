@@ -297,7 +297,7 @@ void print_detailed_tensor_comparison(const std::string& name,
     printf("==================================\n");
 }
 
-void compareResults_mxfp4(const Tensor &test,
+void compareResults_mxfp4(Tensor &test,
                         const void *ref, const void *ref_t, const int rows, const int cols,
                         double atol = 1e-5, double rtol = 1e-8, bool if_on_gpus = true, bool dump_data = false) {
     if (if_on_gpus) test.to_cpu();
@@ -363,7 +363,7 @@ const std::array<size_t,4> scale_dims_t = get_scale_tensor_dims(cols, rows, 1, 3
                         ref_output_t.get(),
                         ref_scales.get(),
                         ref_scales_t.get(),
-                        output.scale(),
+                        1.0f,  // global_amax unused: MXFP4 reference uses per-block scaling
                         rows,
                         cols,
                         scales_stride,

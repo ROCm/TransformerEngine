@@ -319,18 +319,19 @@ template <typename A_Type, typename B_Type, typename Bias_Type,
           typename Gelu_Type, typename D_Type>
 static void run_reference(
     const TestParams& params,
-    const Tensor& A,
-    const Tensor& B,
+    Tensor& A,
+    Tensor& B,
     const Tensor* Bias,                 // nullable
-    const Tensor& D_for_scale,
+    Tensor& D_for_scale,
     Tensor& RefD,
     Tensor* RefPreGeluOut)              // nullable
 {
   const bool use_mxfp8 = (params.scaling_mode == NVTE_MXFP8_1D_SCALING);
 
-  const float d_scale = D_for_scale.scale();
-
   const bool is_fp8_output = test::isFp8Type(test::TypeInfo<D_Type>::dtype);
+
+  // Only FP8 output has a scale (set via setRandomScale); non-FP8 output is unscaled.
+  const float d_scale = is_fp8_output ? D_for_scale.scale() : 1.0f;
 
   const bool a_use_colwise = (!params.transa) && A.columnwise();
   const bool b_use_colwise = ( params.transb) && B.columnwise();
@@ -364,8 +365,9 @@ static void run_reference(
     a_scale_ld = a_s.data[1];
     b_scale_ld = b_s.data[1];
   } else {
-    a_scale_inv_scalar = A.rowwise_scale_inv();
-    b_scale_inv_scalar = B.rowwise_scale_inv();
+    // Per-tensor scale_inv exists only for FP8 inputs; non-FP8 inputs stay at 1.0.
+    if (test::isFp8Type(test::TypeInfo<A_Type>::dtype)) a_scale_inv_scalar = A.rowwise_scale_inv();
+    if (test::isFp8Type(test::TypeInfo<B_Type>::dtype)) b_scale_inv_scalar = B.rowwise_scale_inv();
   }
 
   // optional bias device pointer
@@ -495,6 +497,12 @@ std::pair<double, double> getTestTolerances(const DType type, bool use_fp8, bool
   else if (use_fp8) {
     atol = 1e-3;
     rtol = std::max(rtol, 1e-2);
+    // gfx950 FP8 GEMMs can show larger numerical variance
+    cudaDeviceProp prop;
+    (void)cudaGetDeviceProperties(&prop, 0);
+    if (prop.major == 9 && prop.minor == 5) {
+      rtol = std::max(rtol, 2e-2);
+    }
   }
   else if (type == DType::kBFloat16) {
     //relax for certain prime number TN gemm

@@ -99,7 +99,7 @@ void performTest() {
     std::copy(input.rowwise_cpu_dptr<InputType>(),
               input.rowwise_cpu_dptr<InputType>() + height * width,
               ref_input_list.back().begin());
-    ref_scale_list[tensor_id] = output.scale();
+    ref_scale_list[tensor_id] = isFp8Type(otype) ? output.scale() : 1.0f;
     ref_height_list[tensor_id] = height;
     ref_width_list[tensor_id] = width;
   }
@@ -140,7 +140,7 @@ void performTest() {
                      atol_amax, rtol_amax);
       compareResults("scale_inv",
                      output_list[tensor_id].rowwise_scale_inv(),
-                     1.f / output_list[tensor_id].scale(),
+                     1.f / ref_scale_list[tensor_id],
                      atol_amax, rtol_amax);
     }
     auto [atol, rtol] = getTolerances(otype);

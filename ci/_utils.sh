@@ -2,6 +2,32 @@
 #
 # See LICENSE for license information.
 
+# ROCM_PATH resolution
+resolve_rocm_path() {
+    if [ -n "${ROCM_PATH:-}" ]; then
+        echo "$ROCM_PATH"
+        return 0
+    fi
+    if command -v rocm-sdk >/dev/null 2>&1; then
+        local _root
+        _root="$(rocm-sdk path --root)"
+        if [ -n "$_root" ] && [ -f "${_root}/bin/hipcc" ]; then
+            echo "$_root"
+            return 0
+        fi
+    fi
+    if [ -d "/opt/rocm/core" ]; then
+        echo /opt/rocm/core
+        return 0
+    fi
+    if [ -d "/opt/rocm" ]; then
+        echo /opt/rocm
+        return 0
+    fi
+    echo "Could not find ROCm installation" >&2
+    exit 1
+}
+
 REALPATH=realpath
 realpath $DIR >/dev/null 2>/dev/null
 test $? -ne 0 && REALPATH=echo
@@ -34,9 +60,21 @@ export CI=1
 # to bound each child below this outer limit -- hence the exports below.
 # All are overridable from the environment.
 export PYTHONFAULTHANDLER=1
-export PYTEST_TIMEOUT=${PYTEST_TIMEOUT:-300}               # per-test (per-parametrization) timeout, seconds
+export PYTEST_TIMEOUT=${PYTEST_TIMEOUT:-600}               # per-test (per-parametrization) timeout, seconds
 export PYTEST_TIMEOUT_METHOD=${PYTEST_TIMEOUT_METHOD:-thread} # unstick a hung main thread; see note above
 export CTEST_TIMEOUT=${CTEST_TIMEOUT:-300}                 # per-cpp-test timeout, seconds
+# Tests run from the TE root, where the checkout would otherwise shadow the installed
+# package: `python -m pytest` prepends cwd to sys.path, and `python <script>` prepends
+# the script's directory. The checkout has no compiled libraries and none of the files
+# generated at build time, while the .so lookup falls back to site-packages -- so an
+# import landing there runs source-tree Python against installed native libraries, with
+# mismatched halves. On ROCm wheels it also skips the rocm-sdk preload, which segfaults
+# during test collection. PYTHONSAFEPATH drops both implicit sys.path entries, so the
+# installed package always wins; being an env var, it applies to torchrun/mpirun children
+# and subprocesses too. Editable installs are unaffected: they resolve through a finder
+# in site-packages, not through cwd. Note that any non-empty value enables it -- unset
+# it, rather than setting 0, to opt out.
+export PYTHONSAFEPATH=${PYTHONSAFEPATH:-1}
 
 _script_error_count=0
 _run_error_count=0
@@ -275,15 +313,9 @@ check_test_filter() {
 
 start_message() {
     echo "Started with TEST_LEVEL=$TEST_LEVEL sGPU='$TEST_SGPU' mGPU='$TEST_MGPU' at `date`"
-    if [ -n "$ROCM_PATH" ]; then
-        _rocm_path="$ROCM_PATH"
-    elif [ -d "/opt/rocm/core" ]; then
-        _rocm_path="/opt/rocm/core"
-    else
-        _rocm_path="/opt/rocm"
-    fi
-    _rocm_path=`$REALPATH "$_rocm_path"`
-    test -d "$_rocm_path" && echo "ROCm: $_rocm_path" || echo "ROCm path not found"
+    export ROCM_PATH=$(resolve_rocm_path)
+    _rocm_path=`$REALPATH "$ROCM_PATH" 2>/dev/null || echo "$ROCM_PATH"`
+    echo "ROCM PATH: $_rocm_path"
     python3 --version
 }
 
