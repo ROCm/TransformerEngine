@@ -194,7 +194,6 @@ try:
     import triton
     from jax._src.lib import gpu_triton
     from triton.compiler import compiler as tc
-    from triton.backends.nvidia import compiler as cb
     from triton.runtime import autotuner
 except ImportError as e:
     raise ImportError(
@@ -209,16 +208,37 @@ __all__ = ["triton_call_lowering", "get_triton_info"]
 # Triton kernel cache (module-level, shared across all kernels)
 _TRITON_KERNEL_CACHE = {}
 
-# Process-scoped temp dir for ROCm HSACO blobs (removed at interpreter exit).
-_HSACO_TMPDIR = None
-
 
 def _hsaco_dir():
-    """Return a process-scoped temp directory for HSACO blobs (created lazily)."""
-    global _HSACO_TMPDIR
-    if _HSACO_TMPDIR is None:
-        _HSACO_TMPDIR = tempfile.TemporaryDirectory(prefix="te_jax_hsaco_")
-    return _HSACO_TMPDIR.name
+    """Return the HSACO blob dir; a JAX persistent-cache hit replays the path in a later process."""
+    jax_cache = os.environ.get("JAX_COMPILATION_CACHE_DIR")
+    if jax_cache:
+        root = os.path.join(jax_cache, "te_jax_hsaco")
+    else:
+        home = os.path.expanduser("~")
+        if not home or home == "/" or home.startswith("~"):
+            home = tempfile.gettempdir()
+        xdg = os.environ.get("XDG_CACHE_HOME") or os.path.join(home, ".cache")
+        root = os.path.join(xdg, "te_jax_hsaco")
+    root = os.path.abspath(root)
+    os.makedirs(root, exist_ok=True)
+    return root
+
+
+def _write_hsaco(binary):
+    """Write HSACO to a content-addressed path; the kernel cache key can go stale."""
+    path = os.path.join(_hsaco_dir(), f"{hashlib.sha256(binary).hexdigest()}.hsaco")
+    if os.path.exists(path):
+        return path
+    fd, tmp_path = tempfile.mkstemp(suffix=".hsaco.tmp", dir=os.path.dirname(path))
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(binary)
+        os.replace(tmp_path, path)
+    finally:
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+    return path
 
 
 def get_triton_info():
@@ -364,7 +384,9 @@ def compile_triton(
         )
         binary_key = backend.binary_ext
     else:
-        # CUDA path (unchanged).
+        # Triton built for AMD only does not ship triton/backends/nvidia.
+        from triton.backends.nvidia import compiler as cb
+
         cuda_option_kwargs = {}
         if version.parse(_TRITON_VERSION) < version.parse("3.6.0"):
             cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
@@ -410,15 +432,10 @@ def compile_triton(
 
     compiled = tc.compile(src, target=target, options=options.__dict__)
 
-    # TritonKernel's binary arg is a std::string: PTX is text, but HSACO is bytes
-    # (nanobind won't coerce), so write HSACO to a process-scoped temp dir and
-    # pass the path. The plugin loads it at launch; the dir is removed at exit.
+    # HSACO is bytes and nanobind won't coerce it to the std::string binary arg, so pass a path.
     binary = compiled.asm[binary_key]
     if is_hip:
-        fd, hsaco_path = tempfile.mkstemp(suffix=".hsaco", dir=_hsaco_dir())
-        with os.fdopen(fd, "wb") as f:
-            f.write(binary)
-        binary = hsaco_path
+        binary = _write_hsaco(binary)
 
     # Create kernel object for JAX
     # From jax/jaxlib/gpu/triton_kernels.cc:
@@ -483,8 +500,8 @@ def triton_call_lowering(
                     tl.constexpr arguments AND scalar runtime arguments (like
                     num_tokens, strides) that are known at JAX trace time.
         num_warps: Warps per block for non-autotuned kernels (required for Gluon
-                    layouts; default 4 on ROCm, 32 on CUDA). Ignored when autotuned.
-        num_stages: Pipeline stages for non-autotuned kernels (default 1). Ignored
+                    layouts; default 4). Ignored when autotuned.
+        num_stages: Pipeline stages for non-autotuned kernels (default 3). Ignored
                     when autotuned.
 
     Returns:
