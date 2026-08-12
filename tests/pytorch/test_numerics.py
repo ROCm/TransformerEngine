@@ -6,6 +6,7 @@
 
 import math
 import os
+import warnings
 from typing import Dict, List, Tuple, Optional
 import pytest
 
@@ -1351,11 +1352,22 @@ def test_linear_accuracy_flydsl(
 ):
     """Compare FlyDSL and native TE Linear forward, dgrad, and wgrad."""
 
-    if not IS_HIP_EXTENSION:
-        pytest.skip("FlyDSL GEMM is only supported on HIP.")
+    # FlyDSL GEMM dispatch is gated on gfx950 in cpp_extensions/gemm.py. On any
+    # other arch NVTE_USE_FLYDSL=1 is a no-op and the FlyDSL path would just be
+    # the native backend compared against itself, so skip rather than pass
+    # vacuously.
+    if not IS_HIP_EXTENSION or get_device_compute_capability() != (9, 5):
+        pytest.skip("FlyDSL GEMM is only supported on gfx950.")
+    # flydsl is only installed when NVTE_USE_FLYDSL=1 at build time; without it
+    # the lazy import in general_gemm raises, so skip instead of erroring.
+    pytest.importorskip("flydsl", reason="FlyDSL package is not installed.")
 
     fp8 = fp8_recipe is not None
     config = model_configs[model]
+
+    # "small" is the designated fallback case (not a config this PR claims to
+    # support); every other model is expected to run on FlyDSL.
+    expect_fallback = model == "small"
 
     if isinstance(fp8_recipe, recipe.MXFP8BlockScaling):
         if not mxfp8_available:
@@ -1423,16 +1435,31 @@ def test_linear_accuracy_flydsl(
         reset_rng_states()
         FP8GlobalStateManager.reset()
 
-        with autocast(enabled=fp8, recipe=fp8_recipe):
-            out_flydsl = linear_flydsl(inp_flydsl)
+        # Capture the [FLYDSL WARNING] fallback notices emitted by
+        # cpp_extensions/gemm.py so we can tell whether FlyDSL actually ran.
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            with autocast(enabled=fp8, recipe=fp8_recipe):
+                out_flydsl = linear_flydsl(inp_flydsl)
 
-        out_flydsl.sum().backward()
-        torch.cuda.synchronize()
+            out_flydsl.sum().backward()
+            torch.cuda.synchronize()
+
+        fell_back = any("[FLYDSL WARNING]" in str(w.message) for w in caught)
 
     finally:
         os.environ.pop("NVTE_USE_FLYDSL", None)
         os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
         FP8GlobalStateManager.reset()
+
+    # A silent fallback on a supported config means FlyDSL never ran, so the
+    # correctness asserts below would pass vacuously (native vs native).
+    if not expect_fallback and fell_back:
+        pytest.fail(
+            "FlyDSL GEMM unexpectedly fell back to the native backend for "
+            f"model={model}, dtype={dtype}, fp8_recipe={fp8_recipe}; "
+            "the FlyDSL path was not exercised."
+        )
 
     tols = dtype_tols(dtype)
     atol = tols["atol"]
