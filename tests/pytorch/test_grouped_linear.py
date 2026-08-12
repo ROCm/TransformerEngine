@@ -462,6 +462,7 @@ def test_grouped_linear_accuracy_rocm_backends(
     delay_wgrad_compute,
     grouped_gemm_backend,
     monkeypatch,
+    capfd,
 ):
     if (
         grouped_gemm_backend == "ck"
@@ -479,6 +480,16 @@ def test_grouped_linear_accuracy_rocm_backends(
     else:
         monkeypatch.setenv("NVTE_USE_CK_GROUPED_GEMM", "1")
 
+    # For the configs CK grouped GEMM is guaranteed to handle, 
+    # assert it does not silently fall back to multi-stream hipBLASLt.
+    expect_ck_no_fallback = (
+        grouped_gemm_backend == "ck"
+        and recipe is None
+        and dtype in (torch.bfloat16, torch.float16)
+    )
+    if expect_ck_no_fallback:
+        monkeypatch.setenv("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK", "1")
+
     test_grouped_linear_accuracy(
         dtype,
         num_gemms,
@@ -493,6 +504,16 @@ def test_grouped_linear_accuracy_rocm_backends(
         parallel_mode=None,
         use_cutlass=True,
     )
+
+    if expect_ck_no_fallback:
+        # NVTE_WARN writes to std::cerr; capfd captures file-descriptor-level
+        # output, including C/C++ stderr.
+        captured = capfd.readouterr()
+        assert "Fallback to cuBLAS grouped GEMM" not in captured.err, (
+            "CK grouped GEMM fell back to multi-stream hipBLASLt for a config it "
+            f"should handle (dtype={dtype}, fuse_wgrad={fuse_wgrad_accumulation}, "
+            f"delay_wgrad={delay_wgrad_compute}):\n{captured.err}"
+        )
 
 
 @pytest.mark.parametrize("dtype", param_types, ids=str)
