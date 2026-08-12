@@ -771,10 +771,16 @@ else()
   make_string_header_from_file(amd_detail/hip_float8.h
                               string_code_amd_detail_hip_float8_h)
 endif()
-# Fused-softmax RTC string headers: generated on both platforms. The softmax
-# .cu/.hip translation units #include these unconditionally (for the NVRTC/hipRTC
-# JIT path); ROCm builds the static kernels (NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=ON)
-# but the include must still resolve.
+# Fused-softmax RTC string headers: generated on both platforms, on purpose.
+# The softmax TU unconditionally compiles make_softmax_rtc_code(), which odr-uses
+# these string symbols, and that function is called under a *runtime* gate
+# (rtc::is_enabled_norm_softmax(), false by default on ROCm) -- not a compile-time
+# #if -- so the symbols must link and the include must resolve even though ROCm
+# runs the static kernels (NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=ON) at runtime.
+# Guarding the generation would require #ifdef-guarding the include + rtc_code
+# helper + call sites across these hot dispatch paths, and would turn the
+# NVTE_ENABLE_NVRTC=1 opt-in (used to trial the hipRTC JIT) into a rebuild. Kept
+# unconditional; revisit if/when the hipRTC softmax JIT is enabled on ROCm.
 make_string_header_from_file(fused_softmax/scaled_masked_softmax.cu
                              string_code_fused_softmax_scaled_masked_softmax_cu)
 make_string_header_from_file(fused_softmax/scaled_upper_triang_masked_softmax.cu
