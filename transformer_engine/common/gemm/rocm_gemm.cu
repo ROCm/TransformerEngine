@@ -33,6 +33,7 @@
 #include "../util/logging.h"
 
 #ifdef USE_HIPKITTENS_GEMM
+#include "rocm_fp4_e2m1_table.h"
 #include "kittens/kittens_common.h"
 #ifdef KITTENS_HAVE_CDNA4
 #include "kittens/cdna4/mxfp8_gemm.h"
@@ -329,10 +330,7 @@ Tensor make_mxfp8_rowwise_from_columnwise(const Tensor& input, std::vector<void*
 }
 
 // FP4 e2m1 lookup table
-__device__ constexpr float kFP4E2M1Table[16] = {
-    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
-   -0.0f,-0.5f,-1.0f,-1.5f,-2.0f,-3.0f,-4.0f,-6.0f
-};
+__device__ constexpr float kFP4E2M1Table[16] = NVTE_ROCM_FP4_E2M1_VALUES;
 
 // Dequantize FP4 (e2m1) packed data with FP8 e4m3 block scales to BF16.
 // Only applies block scales: output = fp4_value * block_scale.
@@ -492,6 +490,7 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
       }
     }
   } else if (is_mxfp_scaling(B.scaling_mode)) {
+    // MXFP8, MXFP4
     // Note: Row-wise and column-wise data are scaled along different
     // dimensions (with matrix interpreted in row-major order).
     if (is_B_transposed) {
@@ -1444,9 +1443,8 @@ void hipblaslt_gemm(const Tensor *inputA,
     } else if ((is_block_scaling(inputA->scaling_mode) && is_block_scaling(inputB->scaling_mode))) {
       // Block scaling: MXFP8 and MXFP4 both use UE8M0 block-32 scales.
       // MXFP4 can additionally use hipBLASLt's pre-swizzled UE8M0 scale mode
-      // (BLK32_UE8M0_32_8_EXT, "1001").
-      const bool mxfp4_swizzled = use_mxfp4 && inputA->with_gemm_swizzled_scales &&
-                                  inputB->with_gemm_swizzled_scales;
+      // (BLK32_UE8M0_32_8_EXT).
+      const bool mxfp4_swizzled = use_mxfp4 && inputA->with_gemm_swizzled_scales;
 #if (HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3)
       scaling_mode = mxfp4_swizzled ? HIPBLASLT_MATMUL_MATRIX_SCALE_BLK32_UE8M0_32_8_EXT
                                     : HIPBLASLT_MATMUL_MATRIX_SCALE_VEC32_UE8M0;

@@ -432,7 +432,7 @@ def general_gemm(
     from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
 
     if isinstance(A, MXFP4TensorStorage) or isinstance(B, MXFP4TensorStorage):
-        if os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0") != "1":
+        if not bool(int(os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0"))):
             result = mxfp4_gemm(
                 A,
                 B,

@@ -864,10 +864,10 @@ void performDqTest(const TestParams &params) {
 #endif // __HIP_PLATFORM_AMD__
 
 #ifdef __HIP_PLATFORM_AMD__
-// FP4 E2M1 value table (matches rocm_gemm.cu / OCP microscaling).
-static const float kHostFP4E2M1Table[16] = {
-    0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f,
-   -0.0f,-0.5f,-1.0f,-1.5f,-2.0f,-3.0f,-4.0f,-6.0f};
+#include "gemm/rocm_fp4_e2m1_table.h"
+
+// FP4 E2M1 value table
+static const float kHostFP4E2M1Table[16] = NVTE_ROCM_FP4_E2M1_VALUES;
 
 // Host replica of compute_scale_shuffle_index (cast_transpose_mxfp4_shuffled.cuh): maps a
 // (data-row, scale-column) pair into the 32x8-tiled offset used by both the AITER a4w4 layout
@@ -1159,8 +1159,7 @@ class Mxfp4GEMMTestSuite
     performMxfp4Test<D_>(params);                                             \
   }
 
-// TE MXFP4 path supports only BF16/FP32 output (FP16 F4H kernel exists in hipBLASLt but TE's
-// descriptor finds "no suitable algorithms" for it -- see §3.5/§10.1) and no bias/GELU epilogue.
+// TE MXFP4 path supports only BF16/FP32 output and no bias/GELU epilogue.
 MAKE_MXFP4_GEMM_TEST(Testbf16, bf16)
 MAKE_MXFP4_GEMM_TEST(Testfp32, fp32)
 

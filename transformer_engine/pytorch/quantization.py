@@ -1758,7 +1758,7 @@ class MXFP4BlockScalingRecipeState(RecipeState):
         # the 32x8 tile order that hipBLASLt's BLK32_UE8M0_32_8_EXT (mode 1001) reads in place
         # -- opt in via the recipe's use_swizzled_scales flag. The AITER a4w4 backend always
         # needs the 16x16 weight shuffle and swizzled scales.
-        use_hipblaslt = os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0") == "1"
+        use_hipblaslt = bool(int(os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0")))
         use_swizzled = use_hipblaslt and self.recipe.use_swizzled_scales
         # AITER path swizzles scales; hipBLASLt path swizzles only when the recipe opts in.
         # FP4 data shuffle stays off on the hipBLASLt path regardless
