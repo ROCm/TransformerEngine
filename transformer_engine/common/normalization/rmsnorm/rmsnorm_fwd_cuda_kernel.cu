@@ -127,29 +127,42 @@ void launch_rmsnorm_fwd_general_(LaunchParams<ForwardKernelParams> &launch_param
 #endif
 }
 
+// Static-init wrapper for the RTC-registration side effect.
+// ROCm divergence (guarded): hipclang -O3 dead-strips the upstream IIFE form
+// ([]{ register_...(); return 0; }()) used to initialize an anon-namespace
+// `static const int`, which drops the RTC kernel registration entirely. A comma
+// expression forces the initializer (and its registration side effect) to be
+// emitted. CUDA keeps upstream's IIFE verbatim so this file stays byte-identical
+// to upstream off ROCm.
+#ifdef __HIP_PLATFORM_AMD__
+#define NVTE_NORM_REGISTER_STATIC_INIT(...) ((__VA_ARGS__), 0)
+#else
+#define NVTE_NORM_REGISTER_STATIC_INIT(...) \
+  ([] {                                     \
+    (__VA_ARGS__);                          \
+    return 0;                               \
+  }())
+#endif
+
 #define REGISTER_NORM_LAUNCHER_RMSN_FWD_tuned(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE,                                                   \
                                               CTAS_PER_ROW, WARPS_M, WARPS_N, BYTES_PER_LDG,                                             \
                                               STATIC_FALLBACK)                                                                           \
   [[maybe_unused]] static const int                                                                                                      \
       _rmsn_fwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##CTAS_PER_ROW##_##WARPS_M##_##WARPS_N##_##BYTES_PER_LDG = \
-          (                                                                                                                          \
+          NVTE_NORM_REGISTER_STATIC_INIT(                                                                               \
             ::transformer_engine::normalization::rtc_norm::register_rmsnorm_fwd_tuned(                                                   \
                 TypeToDType<WTYPE>::value, TypeToDType<ITYPE>::value, TypeToDType<OTYPE>::value,                                         \
                 TypeToDType<CTYPE>::value, HIDDEN_SIZE, CTAS_PER_ROW, WARPS_M, WARPS_N,                                                  \
-                BYTES_PER_LDG, STATIC_FALLBACK),                                                                                         \
-            0                                                                                                                    \
-          )
+                BYTES_PER_LDG, STATIC_FALLBACK))
 #define REGISTER_NORM_LAUNCHER_RMSN_FWD_general(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, WARPS_M,                         \
                                                 WARPS_N, BYTES_PER_LDG, STATIC_FALLBACK)                                  \
   [[maybe_unused]] static const int                                                                                       \
       _rmsn_fwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##WARPS_M##_##WARPS_N##_##BYTES_PER_LDG = \
-          (                                                                                                           \
+          NVTE_NORM_REGISTER_STATIC_INIT(                                                                               \
             ::transformer_engine::normalization::rtc_norm::register_rmsnorm_fwd_general(                                  \
                 TypeToDType<WTYPE>::value, TypeToDType<ITYPE>::value, TypeToDType<OTYPE>::value,                          \
                 TypeToDType<CTYPE>::value, HIDDEN_SIZE, WARPS_M, WARPS_N, BYTES_PER_LDG,                                  \
-                STATIC_FALLBACK),                                                                                         \
-            0                                                                                                     \
-          )
+                STATIC_FALLBACK))
 
 #if NVTE_BUILD_LEGACY_STATIC_NORM
 #define REGISTER_NORM_LAUNCHER(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE,                   \

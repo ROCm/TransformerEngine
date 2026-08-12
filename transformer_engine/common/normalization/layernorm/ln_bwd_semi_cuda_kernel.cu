@@ -137,28 +137,41 @@ void launch_ln_bwd_general_(LaunchParams<BackwardKernelParams> &launch_params,
   NVTE_CHECK_CUDA(cudaGetLastError());
 }
 
+// Static-init wrapper for the RTC-registration side effect.
+// ROCm divergence (guarded): hipclang -O3 dead-strips the upstream IIFE form
+// ([]{ register_...(); return 0; }()) used to initialize an anon-namespace
+// `static const int`, which drops the RTC kernel registration entirely. A comma
+// expression forces the initializer (and its registration side effect) to be
+// emitted. CUDA keeps upstream's IIFE verbatim so this file stays byte-identical
+// to upstream off ROCm.
+#ifdef __HIP_PLATFORM_AMD__
+#define NVTE_NORM_REGISTER_STATIC_INIT(...) ((__VA_ARGS__), 0)
+#else
+#define NVTE_NORM_REGISTER_STATIC_INIT(...) \
+  ([] {                                     \
+    (__VA_ARGS__);                          \
+    return 0;                               \
+  }())
+#endif
+
 #define REGISTER_NORM_LAUNCHER_LN_BWD_tuned(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, CTAS_PER_ROW,                                            \
                                             WARPS_M, WARPS_N, BL_MAIN, BL_FINAL, STATIC_FALLBACK)                                             \
   [[maybe_unused]] static const int                                                                                                           \
       _ln_bwd_tuned_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##CTAS_PER_ROW##_##WARPS_M##_##WARPS_N##_##BL_MAIN##_##BL_FINAL = \
-          (                                                                                                                               \
+          NVTE_NORM_REGISTER_STATIC_INIT(                                                                               \
             ::transformer_engine::normalization::rtc_norm::register_ln_bwd_tuned(                                                             \
                 TypeToDType<WTYPE>::value, TypeToDType<ITYPE>::value, TypeToDType<OTYPE>::value,                                              \
                 TypeToDType<CTYPE>::value, HIDDEN_SIZE, CTAS_PER_ROW, WARPS_M, WARPS_N, BL_MAIN,                                              \
-                BL_FINAL, STATIC_FALLBACK),                                                                                                   \
-            0                                                                                                                         \
-          )
+                BL_FINAL, STATIC_FALLBACK))
 #define REGISTER_NORM_LAUNCHER_LN_BWD_general(HIDDEN_SIZE, WTYPE, ITYPE, OTYPE, CTYPE, WARPS_M,                                \
                                               WARPS_N, BL_MAIN, BL_FINAL, STATIC_FALLBACK)                                     \
   [[maybe_unused]] static const int                                                                                            \
       _ln_bwd_general_##HIDDEN_SIZE##_##WTYPE##_##ITYPE##_##OTYPE##_##CTYPE##_##WARPS_M##_##WARPS_N##_##BL_MAIN##_##BL_FINAL = \
-          (                                                                                                                \
+          NVTE_NORM_REGISTER_STATIC_INIT(                                                                               \
             ::transformer_engine::normalization::rtc_norm::register_ln_bwd_general(                                            \
                 TypeToDType<WTYPE>::value, TypeToDType<ITYPE>::value, TypeToDType<OTYPE>::value,                               \
                 TypeToDType<CTYPE>::value, HIDDEN_SIZE, WARPS_M, WARPS_N, BL_MAIN, BL_FINAL,                                   \
-                STATIC_FALLBACK),                                                                                              \
-            0                                                                                                          \
-          )
+                STATIC_FALLBACK))
 
 #if NVTE_BUILD_LEGACY_STATIC_NORM
 #define REGISTER_NORM_LAUNCHER(NORM_TYPE, NORM_STAGE, LAUNCH_TYPE, HIDDEN_SIZE, WTYPE, ITYPE,                   \
