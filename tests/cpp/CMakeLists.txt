@@ -80,7 +80,7 @@ include_directories(${CMAKE_SOURCE_DIR})
 
 if(USE_CUDA)
   find_package(CUDAToolkit REQUIRED)
-  include(${CMAKE_SOURCE_DIR}/../../3rdparty/cudnn-frontend/cmake/cuDNN.cmake)
+  include(${CMAKE_SOURCE_DIR}/../../transformer_engine/common/cmake/cuDNN.cmake)
 else()
   set(GPU_TARGETS ${CMAKE_HIP_ARCHITECTURES})
   find_package(hip REQUIRED)

@@ -29,6 +29,7 @@ from build_tools.utils import (
     all_files_in_dir,
     cuda_archs,
     cuda_version,
+    cudnn_frontend_include_path,
     get_frameworks,
     remove_dups,
     min_python_version_str,
@@ -138,6 +139,11 @@ def setup_common_extension() -> CMakeExtension:
 
     else:
         cmake_flags.extend(("-DUSE_ROCM=OFF", "-DCMAKE_CUDA_ARCHITECTURES={}".format(archs)))
+
+        # Upstream v2.18 removed the 3rdparty/cudnn-frontend submodule; the common
+        # CMake now expects CUDNN_FRONTEND_INCLUDE_DIR from the caller, sourced from
+        # the nvidia-cudnn-frontend pip package. CUDA-only (ROCm uses a stub).
+        cmake_flags.append(f"-DCUDNN_FRONTEND_INCLUDE_DIR={cudnn_frontend_include_path()}")
 
         if bool(int(os.getenv("NVTE_ENABLE_NVSHMEM", "0"))):
             assert (
