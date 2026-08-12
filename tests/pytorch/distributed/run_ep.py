@@ -482,7 +482,6 @@ class TestEP(unittest.TestCase):
         torch.testing.assert_close(tokens_p.grad.float(), tokens.float(), atol=5e-2, rtol=5e-2)
 
 
-
 def _init_distributed():
     dist.init_process_group(backend="nccl")
     torch.cuda.set_device(int(os.environ["LOCAL_RANK"]))
