@@ -49,6 +49,24 @@ check_mxfp8_supported() {
     fi
 }
 
+# FlyDSL GEMM dispatch requires gfx950 (see cpp_extensions/gemm.py); on other
+# archs general_gemm silently runs the C++ backend, so the FlyDSL suite would
+# exercise the wrong path. Detect once and cache, since run_test_config runs
+# per fused-attn backend. Not MXFP8-gated: the suite also covers fp32/16/8.
+_FLYDSL_SUPPORTED=""
+check_flydsl_supported() {
+    if [ -z "$_FLYDSL_SUPPORTED" ]; then
+        _cap=$(python -c "${PYTHON_TE_IMPORT}; from transformer_engine.pytorch.utils import get_device_compute_capability; print(get_device_compute_capability())" 2>/dev/null)
+        if [ "$_cap" = "(9, 5)" ]; then
+            _FLYDSL_SUPPORTED="yes"
+        else
+            _FLYDSL_SUPPORTED="no"
+            echo "FlyDSL GEMM requires gfx950, skipping FlyDSL tests" >&2
+        fi
+    fi
+    [ "$_FLYDSL_SUPPORTED" = "yes" ]
+}
+
 run_test_config(){
     echo ==== Run with Fused attention backend: $_fus_attn ====
     #_WORKERS_COUNT=$TEST_WORKERS
@@ -97,10 +115,10 @@ run_test_config(){
     run_default_fa 1 triton_kernels/test_utils.py
     NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 triton_kernels/test_norms.py
     NVTE_ROCM_ENABLE_MXFP8=1 NVTE_TEST_TRITON_AUTOTUNE=1 run_default_fa_lbl "autotune" 3 triton_kernels/test_norms.py
-    # The FlyDSL GEMM kernels currently require gfx950; on other archs
-    # general_gemm won't select FlyDSL, so gate on the same gfx950 check the
-    # MXFP8 tests use to avoid silently exercising the C++ backend instead.
-    check_mxfp8_supported && NVTE_USE_FLYDSL=1 NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "flydsl" 1 flydsl_kernels/test_gemm.py
+    # FlyDSL covers fp32/16/8 and MXFP8 GEMMs; NVTE_ROCM_ENABLE_MXFP8=1 lets the
+    # MXFP8 cases run where supported. Gate on gfx950 (the arch FlyDSL dispatch
+    # requires), not MXFP8 availability, so the non-MXFP8 cases still run.
+    check_flydsl_supported && NVTE_USE_FLYDSL=1 NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa_lbl "flydsl" 1 flydsl_kernels/test_gemm.py
     run_default_fa 1 test_parallel_cross_entropy.py
     NVTE_USE_DEQUANTIZE_TRITON=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 NVTE_USE_LAYERNORM_TRITON=1 run_default_fa_lbl "triton" 3 test_numerics.py
     NVTE_USE_CAST_TRANSPOSE_TRITON=1 NVTE_USE_RMSNORM_TRITON=1 run_default_fa_lbl "triton" 1 test_fusible_ops.py
