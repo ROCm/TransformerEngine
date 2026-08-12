@@ -9,8 +9,6 @@ import os
 import torch
 import transformer_engine_torch as tex
 
-from transformer_engine.pytorch.utils import get_device_compute_capability
-
 from .exceptions import FlyDSLUnsupportedError
 
 from .half_prec_gemm import bf16_matmul, fp16_matmul
@@ -63,16 +61,17 @@ def reinterpret_as_fp8_tensor(
     a: torch.Tensor,
     dtype: tex.DType,
 ) -> torch.Tensor:
-    """View TE's uint8 payload as the native torch FP8 dtype for this GPU."""
-    capability = get_device_compute_capability()
+    """View TE's uint8 payload as the native torch FP8 dtype.
 
-    # gfx950 uses OCP FP8. gfx942 and earlier ROCm architectures use FNUZ.
-    use_ocp_fp8 = capability == (9, 5)
-
+    FlyDSL dispatch is gated to gfx950 (CDNA4), which supports only OCP FP8
+    (e4m3fn / e5m2); the hardware has no FNUZ format. FNUZ is gfx94x-only, so
+    the fnuz torch dtypes cannot occur on this path. TODO: add the FNUZ mapping
+    when gfx942 support is added to the FlyDSL GEMM backends in a future PR.
+    """
     if dtype == tex.DType.kFloat8E4M3:
-        torch_dtype = torch.float8_e4m3fn if use_ocp_fp8 else torch.float8_e4m3fnuz
+        torch_dtype = torch.float8_e4m3fn
     elif dtype == tex.DType.kFloat8E5M2:
-        torch_dtype = torch.float8_e5m2 if use_ocp_fp8 else torch.float8_e5m2fnuz
+        torch_dtype = torch.float8_e5m2
     else:
         raise TypeError(f"Unsupported TE FP8 dtype: {dtype}")
 
