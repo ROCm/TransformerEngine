@@ -31,9 +31,9 @@
 #include "../util/cuda_runtime.h"
 #include "../util/vectorized_pointwise.h"
 #include "../util/logging.h"
+#include "rocm_fp4_e2m1_table.h"
 
 #ifdef USE_HIPKITTENS_GEMM
-#include "rocm_fp4_e2m1_table.h"
 #include "kittens/kittens_common.h"
 #ifdef KITTENS_HAVE_CDNA4
 #include "kittens/cdna4/mxfp8_gemm.h"
@@ -407,9 +407,11 @@ GemmParam CanonicalizeGemmInput(const transformer_engine::Tensor &A, const cubla
   const bool b_blockwise = is_fp8_block_scaling(B.scaling_mode);
   NVTE_CHECK((a_blockwise && b_blockwise) || A.scaling_mode == B.scaling_mode,
              "Inputs A and B to GEMM need to have the same scaling mode!");
-  NVTE_CHECK(A.with_gemm_swizzled_scales == B.with_gemm_swizzled_scales,
-             "Inputs A and B to GEMM need to have the same scale layout "
-             "(both plain or both pre-swizzled)!");
+  if (is_mxfp4_scaling(A.scaling_mode)) {
+    NVTE_CHECK(A.with_gemm_swizzled_scales == B.with_gemm_swizzled_scales,
+               "Inputs A and B to MXFP4 GEMM need to have the same scale layout "
+               "(both plain or both pre-swizzled)!");
+  }
   NVTE_CHECK(A.has_data() || A.has_columnwise_data(), "Input A does not hold any data!");
   NVTE_CHECK(B.has_data() || B.has_columnwise_data(), "Input B does not hold any data!");
   GemmParam ret;

@@ -15,6 +15,10 @@
 #include <transformer_engine/transformer_engine.h>
 #include "../test_common.h"
 
+#ifdef __HIP_PLATFORM_AMD__
+#include <hipblaslt/hipblaslt.h>  // HIPBLASLT_VERSION_{MAJOR,MINOR} for the MXFP4 capability gate
+#endif
+
 using namespace transformer_engine;
 using namespace test; 
 
@@ -979,7 +983,9 @@ void performMxfp4Test(const TestParams &params) {
   cudaDeviceProp prop;
   (void)cudaGetDeviceProperties(&prop, 0);
 
-  // hipBLASLt native MXFP4 GEMM requires gfx950 (ROCm >= 7.13 / hipBLASLt >= 1.3).
+#if !((HIPBLASLT_VERSION_MAJOR > 1) || (HIPBLASLT_VERSION_MAJOR == 1 && HIPBLASLT_VERSION_MINOR >= 3))
+  GTEST_SKIP() << "MXFP4 GEMM requires hipBLASLt >= 1.3";
+#endif
   if (!(prop.major == 9 && prop.minor == 5)) {
     GTEST_SKIP() << "MXFP4 GEMM is only supported on gfx950";
   }

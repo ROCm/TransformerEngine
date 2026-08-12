@@ -356,10 +356,14 @@ def general_gemm(
 ) -> Iterable[Optional[torch.Tensor]]:
     """GEMM supporting fp8 inputs."""
 
-    # "TT" is reachable only through the hipBLASLt path (e.g. MXFP4 all-layout support); the
-    # AITER mxfp4_gemm branch below still rejects unsupported layouts, so a TT request without
-    # hipBLASLt errors cleanly there.
-    assert layout in ("TN", "NN", "NT", "TT"), f"GEMM layout {layout} not supported."
+    # "TT" is only supported for MXFP4 (hipBLASLt ships F4F4 kernels for all four layouts); other
+    # backends (FP8/BF16/MXFP8) keep the historical TN/NN/NT restriction. For MXFP4+AITER the
+    # mxfp4_gemm branch below still rejects TT, so a TT request without hipBLASLt errors there.
+    from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
+
+    is_mxfp4 = isinstance(A, MXFP4TensorStorage) or isinstance(B, MXFP4TensorStorage)
+    allowed_layouts = ("TN", "NN", "NT", "TT") if is_mxfp4 else ("TN", "NN", "NT")
+    assert layout in allowed_layouts, f"GEMM layout {layout} not supported."
     transa = layout[0] == "T"
     transb = layout[1] == "T"
 
@@ -432,8 +436,6 @@ def general_gemm(
 
     # MXFP4 GEMM: route to AITER a4w4 ASM kernels, unless the hipBLASLt backend is
     # opted in via NVTE_ROCM_USE_HIPBLASLT_MXFP4
-    from ..tensor.storage.mxfp4_tensor_storage import MXFP4TensorStorage
-
     if isinstance(A, MXFP4TensorStorage) or isinstance(B, MXFP4TensorStorage):
         if not bool(int(os.environ.get("NVTE_ROCM_USE_HIPBLASLT_MXFP4", "0"))):
             result = mxfp4_gemm(
