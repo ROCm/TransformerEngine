@@ -575,6 +575,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("get_cudnn_version", &transformer_engine::pytorch::get_cudnn_version, "Get cuDNN version",
         py::call_guard<py::gil_scoped_release>());
 #endif
+  m.def(
+      "is_hipkittens_gemm_available", []() { return nvte_is_hipkittens_gemm_available() != 0; },
+      "Whether libtransformer_engine was built with the HipKittens GEMM backend "
+      "(USE_HIPKITTENS_GEMM). False on CUDA and on ROCm builds where it was auto-disabled.",
+      py::call_guard<py::gil_scoped_release>());
   m.def("copy_data_ptrs_to_device", &transformer_engine::pytorch::copy_data_ptrs_to_device,
         py::arg("tensors"), py::arg("device"), py::call_guard<py::gil_scoped_release>());
   m.def("splits_to_offsets", &transformer_engine::pytorch::splits_to_offsets,

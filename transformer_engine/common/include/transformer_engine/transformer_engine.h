@@ -680,6 +680,17 @@ NVTEScalingMode nvte_grouped_tensor_scaling_mode(const NVTEGroupedTensor tensor)
  */
 NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor);
 
+/*! \brief Whether the library was built with the HipKittens GEMM backend.
+ *
+ *  Reflects the compile-time USE_HIPKITTENS_GEMM setting of libtransformer_engine.
+ *  On ROCm the CMake auto-disables HipKittens for archs other than gfx942/gfx950
+ *  or when C++20 is unavailable; blockwise-FP8 and MXFP8 GEMM are only present
+ *  when this returns true. Always false on CUDA builds.
+ *
+ *  \return 1 if built with USE_HIPKITTENS_GEMM, 0 otherwise.
+ */
+int nvte_is_hipkittens_gemm_available();
+
 #ifdef __cplusplus
 }  // extern "C"
 

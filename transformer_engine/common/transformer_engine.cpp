@@ -1463,3 +1463,11 @@ NVTEShape nvte_get_grouped_tensor_logical_shape(const NVTEGroupedTensor tensor) 
   const auto &t = *transformer_engine::convertNVTEGroupedTensorCheck(tensor);
   return t.logical_shape;
 }
+
+int nvte_is_hipkittens_gemm_available() {
+#ifdef USE_HIPKITTENS_GEMM
+  return 1;
+#else
+  return 0;
+#endif
+}

@@ -203,12 +203,12 @@ def _compute_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
     if IS_HIP_EXTENSION:
         # Blockwise FP8 GEMM on ROCm is implemented only by the HipKittens GEMM
-        # backend (USE_HIPKITTENS_GEMM). When TE is built with HipKittens
-        # disabled, the GEMM path throws at runtime, so report the recipe as
-        # unavailable here and let callers/tests skip. Set
-        # NVTE_HIPKITTENS_GEMM_DISABLED=1 for such builds.
-        if os.environ.get("NVTE_HIPKITTENS_GEMM_DISABLED", "0") == "1":
-            return False, "FP8 block scaling requires the HipKittens GEMM backend (built with it disabled)."
+        # backend, whose kernels are compiled into libtransformer_engine only when
+        # USE_HIPKITTENS_GEMM is set. CMake auto-disables it for archs other than
+        # gfx942/gfx950 or when C++20 is unavailable; without it the GEMM path
+        # throws at runtime, so report the recipe unavailable and let callers skip.
+        if not tex.is_hipkittens_gemm_available():
+            return False, "FP8 block scaling requires the HipKittens GEMM backend, not built in."
         gpu_arch = get_device_compute_capability()
         if gpu_arch in ((9, 4), (9, 5)):  # TODO: enabled for gfx1250 when ready
             return True, ""
