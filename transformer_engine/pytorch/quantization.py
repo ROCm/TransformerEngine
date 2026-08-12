@@ -202,17 +202,18 @@ def _compute_nvfp4_support() -> Tuple[bool, str]:
 def _compute_fp8_block_scaling_support() -> Tuple[bool, str]:
     """Return if fp8 block scaling support is available"""
     if IS_HIP_EXTENSION:
-        # Blockwise FP8 GEMM on ROCm is implemented only by the HipKittens GEMM
-        # backend, whose kernels are compiled into libtransformer_engine only when
-        # USE_HIPKITTENS_GEMM is set. CMake auto-disables it for archs other than
-        # gfx942/gfx950 or when C++20 is unavailable; without it the GEMM path
-        # throws at runtime, so report the recipe unavailable and let callers skip.
+        gpu_arch = get_device_compute_capability()
+        if gpu_arch not in ((9, 4), (9, 5)):  # TODO: enable for gfx1250 when ready
+            return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
+        # On a supported arch, blockwise FP8 GEMM is implemented only by the
+        # HipKittens backend. Its kernels are compiled into libtransformer_engine
+        # unless USE_HIPKITTENS_GEMM was explicitly turned off at build time
+        # (kittens/CMakeLists.txt otherwise keeps it on for gfx942/gfx950 -- the
+        # C++20 requirement is met by every supported ROCm toolchain). Guard
+        # against that opt-out so the GEMM path does not throw at runtime.
         if not tex.is_hipkittens_gemm_available():
             return False, "FP8 block scaling requires the HipKittens GEMM backend, not built in."
-        gpu_arch = get_device_compute_capability()
-        if gpu_arch in ((9, 4), (9, 5)):  # TODO: enabled for gfx1250 when ready
-            return True, ""
-        return False, "Device arch gfx94x or newer is required for FP8 block scaling execution."
+        return True, ""
     if get_device_compute_capability() >= (9, 0) and float(torch.version.cuda) >= 12.9:
         return True, ""
     return (
