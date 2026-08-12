@@ -335,6 +335,11 @@ def _nvfp4_row_scaled_gemm_inputs(
     )
 
 
+# Warn only once when NVTE_USE_FLYDSL=1 but the flydsl package is missing, so a
+# misconfigured run is surfaced without spamming the per-GEMM hot path.
+_flydsl_import_warned = False
+
+
 def general_gemm(
     A: torch.Tensor,
     B: torch.Tensor,
@@ -514,7 +519,24 @@ def general_gemm(
                     *args,
                     **kwargs,
                 )
-            except (FlyDSLUnsupportedError, ImportError) as exc:
+            except ImportError as exc:
+                # NVTE_USE_FLYDSL=1 was requested but the flydsl package is not
+                # installed. This is a misconfiguration, not an unsupported GEMM
+                # config, so always warn (once) regardless of the opt-in fallback
+                # flag before degrading to the default backend.
+                global _flydsl_import_warned
+                if not _flydsl_import_warned:
+                    _flydsl_import_warned = True
+                    warnings.warn(
+                        "[FLYDSL WARNING]: NVTE_USE_FLYDSL=1 but the flydsl package "
+                        "is not installed; falling back to the default backend. "
+                        f"Install it (e.g. `pip install flydsl`) to enable it. Reason: {exc}",
+                        UserWarning,
+                        stacklevel=2,
+                    )
+
+                out, bias_grad, gelu_input, extra_output = tex.generic_gemm(*args, **kwargs)
+            except FlyDSLUnsupportedError as exc:
                 warn_fallback = os.environ.get(
                     "NVTE_FLYDSL_GEMM_WARN_FALLBACK",
                     "0",
