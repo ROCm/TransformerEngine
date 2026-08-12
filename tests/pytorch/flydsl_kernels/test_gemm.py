@@ -1000,6 +1000,11 @@ def test_flydsl_vs_pytorch_regular_gelu_bias(M, K, N, layout, dtype):
     )
     assert gelu_input is not None, "GELU_AUX_BIAS did not return the pre-activation aux."
 
+    no_gelu_out = call_gemm(A, B, layout, out_dtype=dtype, use_flydsl=True)
+    assert not torch.allclose(
+        output.float(), no_gelu_out.float(), atol=1e-4
+    ), "FlyDSL output matches the no-epilogue output; GELU_AUX_BIAS appears inactive."
+
     # Aux is the post-bias pre-activation (A@B + bias); output is gelu of it.
     assert_gemm_close(gelu_input, pre_act, atol=1e-3, rtol=1e-2)
     assert_gemm_close(output, gelu_tanh_ref(pre_act), atol=1e-3, rtol=1e-2)
@@ -1079,6 +1084,17 @@ def test_flydsl_vs_pytorch_fp8_gelu_bias(M, K, N, layout, fp8_format):
         use_flydsl=True,
     )
     assert gelu_input is not None, "GELU_AUX_BIAS did not return the pre-activation aux."
+
+    no_gelu_out = call_gemm(
+        A_fp8,
+        B_fp8,
+        layout,
+        out_dtype=torch.float32,
+        use_flydsl=True,
+    )
+    assert not torch.allclose(
+        output.float(), no_gelu_out.float(), atol=1e-4
+    ), "FlyDSL FP8 output matches the no-epilogue output; GELU_AUX_BIAS appears inactive."
 
     # Aux is the post-bias pre-activation (A@B + bias); output is gelu of it.
     assert_gemm_close(gelu_input, pre_act, atol=5e-3, rtol=1e-2)
@@ -1173,6 +1189,17 @@ def test_flydsl_vs_pytorch_mxfp8_gelu_bias(M, K, N, layout, fp8_format):
         use_flydsl=True,
     )
     assert gelu_input is not None, "GELU_AUX_BIAS did not return the pre-activation aux."
+
+    no_gelu_out = call_gemm(
+        A_mxfp8,
+        B_mxfp8,
+        layout,
+        out_dtype=torch.float32,
+        use_flydsl=True,
+    )
+    assert not torch.allclose(
+        output.float(), no_gelu_out.float(), atol=1e-4
+    ), "FlyDSL MXFP8 output matches the no-epilogue output; GELU_AUX_BIAS appears inactive."
 
     # Aux is the post-bias pre-activation (A@B + bias); output is gelu of it.
     assert_gemm_close(gelu_input, pre_act, atol=5e-3, rtol=1e-2)
