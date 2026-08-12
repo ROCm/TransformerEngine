@@ -65,12 +65,20 @@ bool is_enabled() {
 
 bool is_enabled_norm_softmax() {
 #ifdef __HIP_PLATFORM_AMD__
-  // On ROCm the hipRTC JIT of the norm/softmax kernels is not functional
-  // (HIPRTC_ERROR_COMPILATION at runtime). The fork builds+registers the static
-  // kernels (NVTE_BUILD_LEGACY_STATIC_{NORM,FUSED_SOFTMAX}=ON); those dispatchers
-  // select the static path when this returns false. Default OFF on ROCm; opt back
-  // in with NVTE_ENABLE_NVRTC=1. Scoped to norm/softmax so the transpose RTC fast
-  // paths (is_enabled()) keep working on ROCm.
+  // Default OFF on ROCm; the fork uses the static norm/softmax kernels built with
+  // NVTE_BUILD_LEGACY_STATIC_{NORM,FUSED_SOFTMAX}=ON, and the dispatchers select
+  // that static path when this returns false.
+  //
+  // The softmax RTC path is known-broken on ROCm: the fused_softmax compile calls
+  // pass "--use_fast_math" (a valid NVRTC flag) as an hipRTC option, and hipRTC
+  // rejects it at argument parsing ("unknown argument: '--use_fast_math'" ->
+  // HIPRTC_ERROR_COMPILATION), before any kernel code is compiled. The norm RTC
+  // path passes no such flag and has not been validated on hipRTC either way.
+  // Until the softmax flag issue is fixed and the norm path is validated, keep
+  // the JIT off and use the static kernels. Opt in with NVTE_ENABLE_NVRTC=1.
+  //
+  // Scoped to norm/softmax so the transpose/cast-transpose RTC fast paths
+  // (is_enabled()) keep working on ROCm.
   static const bool enabled_ = getenv<bool>("NVTE_ENABLE_NVRTC");
   return enabled_;
 #else
