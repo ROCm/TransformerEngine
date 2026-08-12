@@ -30,12 +30,15 @@ def initialize() -> None:
         return
 
     if not os.getenv("ROCM_PATH"):
-        # Prefer the system ROCm tree when present: FlyDSL's MLIR linker
-        # resolution expects that layout to locate ld.lld. Fall back to the
-        # rocm-sdk devel wheel for wheel-only environments with no system tree.
-        _system_rocm = "/opt/rocm"
-        if os.path.exists(_system_rocm):
-            os.environ["ROCM_PATH"] = _system_rocm
+        # Prefer a system ROCm tree when present: FlyDSL's MLIR linker resolution
+        # expects that layout to locate ld.lld. Probe the standard system roots in
+        # the same order as the rest of TE (see common/__init__.py and
+        # build_tools/utils.py::rocm_path), then fall back to the rocm-sdk devel
+        # wheel for wheel-only environments with no system tree.
+        for _candidate in ("/opt/rocm/core", "/opt/rocm"):
+            if os.path.exists(_candidate):
+                os.environ["ROCM_PATH"] = _candidate
+                break
         else:
             os.environ["ROCM_PATH"] = str(get_devel_root())
     rocm_sdk.initialize_process(preload_shortnames=list(_PRELOAD_LIBS))
