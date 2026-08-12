@@ -511,7 +511,7 @@ void dispatch_scaled_aligned_causal_masked_softmax_forward(output_t *dst, const 
   dim3 block_size(warp_width, warps_per_block);
   dim3 grid_size(blocks);
 
-  if (rtc::is_enabled()) {
+  if (rtc::is_enabled_norm_softmax()) {
     auto &rtc_manager = rtc::KernelManager::instance();
     const std::string kernel_label = make_softmax_rtc_label<input_t>("forward", log2_elements);
     if (!rtc_manager.is_compiled(kernel_label)) {
@@ -577,7 +577,7 @@ void dispatch_scaled_aligned_causal_masked_softmax_backward(
   dim3 block_size(warp_width, warps_per_block);
   dim3 grid_size(blocks);
 
-  if (rtc::is_enabled()) {
+  if (rtc::is_enabled_norm_softmax()) {
     auto &rtc_manager = rtc::KernelManager::instance();
     const std::string kernel_label = make_softmax_rtc_label<input_t>("backward", log2_elements);
     if (!rtc_manager.is_compiled(kernel_label)) {

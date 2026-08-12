@@ -427,7 +427,7 @@ void dispatch_scaled_upper_triang_masked_softmax_forward(output_t *dst, const in
     int blocks_per_seq = attn_batches / batches_per_block;
     dim3 blocks(seq_len, blocks_per_seq, 1);
     dim3 threads(warp_size, warps_per_block, 1);
-    if (rtc::is_enabled()) {
+    if (rtc::is_enabled_norm_softmax()) {
       auto &rtc_manager = rtc::KernelManager::instance();
       const std::string kernel_label = make_softmax_rtc_label<input_t>("forward", log2_elements);
       if (!rtc_manager.is_compiled(kernel_label)) {
@@ -563,7 +563,7 @@ void dispatch_scaled_upper_triang_masked_softmax_backward(output_t *grad_input, 
     int blocks_per_seq = attn_batches / batches_per_block;
     dim3 blocks(seq_len, blocks_per_seq, 1);
     dim3 threads(warp_size, warps_per_block, 1);
-    if (rtc::is_enabled()) {
+    if (rtc::is_enabled_norm_softmax()) {
       auto &rtc_manager = rtc::KernelManager::instance();
       const std::string kernel_label = make_softmax_rtc_label<input_t>("backward", log2_elements);
       if (!rtc_manager.is_compiled(kernel_label)) {

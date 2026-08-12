@@ -55,17 +55,27 @@ inline int max_supported_sm_arch() {
 }  // namespace
 
 bool is_enabled() {
-#ifdef __HIP_PLATFORM_AMD__
-  // On ROCm the hipRTC norm/softmax JIT path is not functional (HIPRTC_ERROR_COMPILATION
-  // at runtime). The fork builds+registers the static kernels
-  // (NVTE_BUILD_LEGACY_STATIC_{NORM,FUSED_SOFTMAX}=ON); the registry selects those only
-  // when NVRTC is disabled. Default NVRTC OFF on ROCm so the static kernels are used;
-  // opt back in with NVTE_ENABLE_NVRTC=1.
-  static const bool is_enabled_ = getenv<bool>("NVTE_ENABLE_NVRTC");
-#else
+  // Global RTC gate (upstream default on every platform). Governs the transpose,
+  // cast-transpose and swap-first-dims RTC fast paths, which ARE functional on
+  // ROCm. Do not disable this on ROCm — see is_enabled_norm_softmax() for the
+  // norm/softmax-scoped opt-out.
   static const bool is_enabled_ = !getenv<bool>("NVTE_DISABLE_NVRTC");
-#endif
   return is_enabled_;
+}
+
+bool is_enabled_norm_softmax() {
+#ifdef __HIP_PLATFORM_AMD__
+  // On ROCm the hipRTC JIT of the norm/softmax kernels is not functional
+  // (HIPRTC_ERROR_COMPILATION at runtime). The fork builds+registers the static
+  // kernels (NVTE_BUILD_LEGACY_STATIC_{NORM,FUSED_SOFTMAX}=ON); those dispatchers
+  // select the static path when this returns false. Default OFF on ROCm; opt back
+  // in with NVTE_ENABLE_NVRTC=1. Scoped to norm/softmax so the transpose RTC fast
+  // paths (is_enabled()) keep working on ROCm.
+  static const bool enabled_ = getenv<bool>("NVTE_ENABLE_NVRTC");
+  return enabled_;
+#else
+  return is_enabled();
+#endif
 }
 
 Kernel::Kernel(std::string mangled_name, std::string compiled_code)

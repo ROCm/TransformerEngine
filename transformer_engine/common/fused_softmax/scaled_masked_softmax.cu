@@ -509,7 +509,7 @@ void dispatch_scaled_softmax_forward(output_t *dst, const input_t *src, const ac
     NVTE_CHECK(query_seq_len % batches_per_block == 0, "Unsupported shape.");
     dim3 blocks(query_seq_len / batches_per_block, attn_heads, batches);
     dim3 threads(warp_size, warps_per_block, 1);
-    if (rtc::is_enabled()) {
+    if (rtc::is_enabled_norm_softmax()) {
       auto &rtc_manager = rtc::KernelManager::instance();
       const std::string kernel_label =
           make_softmax_rtc_label<input_t>("scaled", "forward", log2_elements);
@@ -626,7 +626,7 @@ void dispatch_scaled_masked_softmax_forward(output_t *dst, const input_t *src, c
     NVTE_CHECK(query_seq_len % batches_per_block == 0, "Unsupported shape.");
     dim3 blocks(query_seq_len / batches_per_block, attn_heads, batches);
     dim3 threads(warp_size, warps_per_block, 1);
-    if (rtc::is_enabled()) {
+    if (rtc::is_enabled_norm_softmax()) {
       auto &rtc_manager = rtc::KernelManager::instance();
       const std::string kernel_label =
           make_softmax_rtc_label<input_t>("masked", "forward", log2_elements);
@@ -758,7 +758,7 @@ void dispatch_scaled_masked_softmax_backward(output_t *grad_input, const input_t
     int batches_per_block = warps_per_block * batches_per_warp;
     int blocks = batch_count / batches_per_block;
     dim3 threads(warp_size, warps_per_block, 1);
-    if (rtc::is_enabled()) {
+    if (rtc::is_enabled_norm_softmax()) {
       auto &rtc_manager = rtc::KernelManager::instance();
       const std::string kernel_label =
           make_softmax_rtc_label<input_t>("masked", "backward", log2_elements);
