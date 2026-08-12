@@ -520,17 +520,19 @@ def general_gemm(
                     **kwargs,
                 )
             except ImportError as exc:
-                # NVTE_USE_FLYDSL=1 was requested but the flydsl package is not
-                # installed. This is a misconfiguration, not an unsupported GEMM
-                # config, so always warn (once) regardless of the opt-in fallback
-                # flag before degrading to the default backend.
+                # NVTE_USE_FLYDSL=1 was requested but the flydsl package is
+                # missing or too old (see flydsl_kernels.gemm._MIN_FLYDSL). This
+                # is a misconfiguration, not an unsupported GEMM config, so always
+                # warn (once) regardless of the opt-in fallback flag before
+                # degrading to the default backend.
                 global _flydsl_import_warned
                 if not _flydsl_import_warned:
                     _flydsl_import_warned = True
                     warnings.warn(
                         "[FLYDSL WARNING]: NVTE_USE_FLYDSL=1 but the flydsl package "
-                        "is not installed; falling back to the default backend. "
-                        f"Install it (e.g. `pip install flydsl`) to enable it. Reason: {exc}",
+                        "is unavailable; falling back to the default backend. "
+                        f"Install a supported version (e.g. `pip install flydsl`) to "
+                        f"enable it. Reason: {exc}",
                         UserWarning,
                         stacklevel=2,
                     )
