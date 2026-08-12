@@ -66,8 +66,8 @@ def _device_capability():
 # All FlyDSL GEMM dispatch is gated on gfx950 in cpp_extensions/gemm.py, not
 # just MXFP8. On any other arch general_gemm silently runs the C++ backend, so
 # every test here would either exercise hipBLASLt or (for the vs-cpp cases) be
-# a tautology. Skip the whole module unless we are on gfx950 with FlyDSL
-# installed (flydsl is only present when NVTE_USE_FLYDSL=1 at build time).
+# a tautology. Skip the whole module unless we are on gfx950 with the
+# user-installed flydsl package present (importorskip below).
 _CAP = _device_capability()
 has_flydsl_support = _CAP == (9, 5)
 pytestmark = pytest.mark.skipif(
