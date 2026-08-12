@@ -14,8 +14,16 @@ extern "C" bool nvte_is_rocm_build() {
 }
 
 #ifdef USE_ROCM
-extern "C" bool nvte_uses_fp8_fnuz() 
+extern "C" bool nvte_uses_fp8_fnuz()
 {
   return te_fp8_fnuz();
+}
+
+extern "C" int nvte_is_hipkittens_gemm_available() {
+#ifdef USE_HIPKITTENS_GEMM
+  return 1;
+#else
+  return 0;
+#endif
 }
 #endif
