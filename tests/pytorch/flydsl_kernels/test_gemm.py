@@ -976,6 +976,37 @@ def test_flydsl_vs_pytorch_regular_gelu(M, K, N, layout, dtype):
 
 @pytest.mark.parametrize("M, K, N", FLYDSL_SHAPES)
 @pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("dtype", REGULAR_DTYPES, ids=["fp32", "fp16", "bf16"])
+def test_flydsl_vs_pytorch_regular_gelu_bias(M, K, N, layout, dtype):
+    """Regular fp32/fp16/bf16 forward GELU_AUX_BIAS vs PyTorch: bias folded before GELU, aux saved."""
+    torch.manual_seed(42)
+
+    A_shape, B_shape = get_shapes(layout, M, K, N)
+    A = torch.randn(A_shape, dtype=dtype, device="cuda") * 0.5
+    B = torch.randn(B_shape, dtype=dtype, device="cuda") * 0.5
+
+    ab = compute_pytorch_reference(A.float(), B.float(), layout)
+    out_features = ab.shape[-1]
+    bias = torch.randn(out_features, dtype=torch.float32, device="cuda")
+    pre_act = ab + bias.float()
+
+    output, gelu_input = call_gemm_with_gelu(
+        A,
+        B,
+        layout,
+        out_dtype=dtype,
+        bias=bias,
+        use_flydsl=True,
+    )
+    assert gelu_input is not None, "GELU_AUX_BIAS did not return the pre-activation aux."
+
+    # Aux is the post-bias pre-activation (A@B + bias); output is gelu of it.
+    assert_gemm_close(gelu_input, pre_act, atol=1e-3, rtol=1e-2)
+    assert_gemm_close(output, gelu_tanh_ref(pre_act), atol=1e-3, rtol=1e-2)
+
+
+@pytest.mark.parametrize("M, K, N", FLYDSL_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
 @pytest.mark.parametrize("fp8_format", FP8_FORMAT_COMBOS, ids=FP8_FORMAT_IDS)
 def test_flydsl_vs_pytorch_fp8_gelu(M, K, N, layout, fp8_format):
     """Tensor-wise FP8 forward GELU_AUX vs PyTorch."""
@@ -1013,6 +1044,43 @@ def test_flydsl_vs_pytorch_fp8_gelu(M, K, N, layout, fp8_format):
         output.float(), no_gelu_out.float(), atol=1e-4
     ), "FlyDSL FP8 output matches the no-GELU output; GELU epilogue appears inactive."
 
+    assert_gemm_close(gelu_input, pre_act, atol=5e-3, rtol=1e-2)
+    assert_gemm_close(output, gelu_tanh_ref(pre_act), atol=5e-3, rtol=1e-2)
+
+
+@pytest.mark.parametrize("M, K, N", FLYDSL_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("fp8_format", FP8_FORMAT_COMBOS, ids=FP8_FORMAT_IDS)
+def test_flydsl_vs_pytorch_fp8_gelu_bias(M, K, N, layout, fp8_format):
+    """Tensor-wise FP8 forward GELU_AUX_BIAS vs PyTorch: bias folded before GELU, aux saved."""
+    torch.manual_seed(42)
+
+    fp8_dtype_a, fp8_dtype_b = fp8_format
+    A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
+        M,
+        K,
+        N,
+        layout,
+        fp8_dtype_a,
+        fp8_dtype_b,
+    )
+
+    ab = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
+    out_features = ab.shape[-1]
+    bias = torch.randn(out_features, dtype=torch.float32, device="cuda")
+    pre_act = ab + bias.float()
+
+    output, gelu_input = call_gemm_with_gelu(
+        A_fp8,
+        B_fp8,
+        layout,
+        out_dtype=torch.float32,
+        bias=bias,
+        use_flydsl=True,
+    )
+    assert gelu_input is not None, "GELU_AUX_BIAS did not return the pre-activation aux."
+
+    # Aux is the post-bias pre-activation (A@B + bias); output is gelu of it.
     assert_gemm_close(gelu_input, pre_act, atol=5e-3, rtol=1e-2)
     assert_gemm_close(output, gelu_tanh_ref(pre_act), atol=5e-3, rtol=1e-2)
 
