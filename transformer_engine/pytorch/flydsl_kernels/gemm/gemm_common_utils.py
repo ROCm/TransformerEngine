@@ -1,5 +1,9 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
+#
+# Adapted by AMD from the FlyDSL project's GEMM utility helpers.
 """Dtype-independent primitives shared by the FlyDSL GEMM kernels.
 
 These helpers carry no dtype specialization, so the per-dtype utils modules
