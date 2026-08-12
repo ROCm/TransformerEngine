@@ -208,37 +208,16 @@ __all__ = ["triton_call_lowering", "get_triton_info"]
 # Triton kernel cache (module-level, shared across all kernels)
 _TRITON_KERNEL_CACHE = {}
 
+# Process-scoped temp dir for ROCm HSACO blobs (removed at interpreter exit).
+_HSACO_TMPDIR = None
+
 
 def _hsaco_dir():
-    """Return the HSACO blob dir; a JAX persistent-cache hit replays the path in a later process."""
-    jax_cache = os.environ.get("JAX_COMPILATION_CACHE_DIR")
-    if jax_cache:
-        root = os.path.join(jax_cache, "te_jax_hsaco")
-    else:
-        home = os.path.expanduser("~")
-        if not home or home == "/" or home.startswith("~"):
-            home = tempfile.gettempdir()
-        xdg = os.environ.get("XDG_CACHE_HOME") or os.path.join(home, ".cache")
-        root = os.path.join(xdg, "te_jax_hsaco")
-    root = os.path.abspath(root)
-    os.makedirs(root, exist_ok=True)
-    return root
-
-
-def _write_hsaco(binary):
-    """Write HSACO to a content-addressed path; the kernel cache key can go stale."""
-    path = os.path.join(_hsaco_dir(), f"{hashlib.sha256(binary).hexdigest()}.hsaco")
-    if os.path.exists(path):
-        return path
-    fd, tmp_path = tempfile.mkstemp(suffix=".hsaco.tmp", dir=os.path.dirname(path))
-    try:
-        with os.fdopen(fd, "wb") as f:
-            f.write(binary)
-        os.replace(tmp_path, path)
-    finally:
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-    return path
+    """Return a process-scoped temp directory for HSACO blobs (created lazily)."""
+    global _HSACO_TMPDIR
+    if _HSACO_TMPDIR is None:
+        _HSACO_TMPDIR = tempfile.TemporaryDirectory(prefix="te_jax_hsaco_")
+    return _HSACO_TMPDIR.name
 
 
 def get_triton_info():
@@ -433,9 +412,13 @@ def compile_triton(
     compiled = tc.compile(src, target=target, options=options.__dict__)
 
     # HSACO is bytes and nanobind won't coerce it to the std::string binary arg, so pass a path.
+    # The plugin unlinks the file once loaded; lowering reruns per process, so it is rewritten.
     binary = compiled.asm[binary_key]
     if is_hip:
-        binary = _write_hsaco(binary)
+        fd, hsaco_path = tempfile.mkstemp(suffix=".hsaco", dir=_hsaco_dir())
+        with os.fdopen(fd, "wb") as f:
+            f.write(binary)
+        binary = hsaco_path
 
     # Create kernel object for JAX
     # From jax/jaxlib/gpu/triton_kernels.cc:
