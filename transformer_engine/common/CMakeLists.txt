@@ -808,20 +808,27 @@ make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu
 target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
+# Default ON for ROCm, OFF for CUDA. On ROCm the norm/softmax hipRTC JIT is not
+# functional, so rtc::is_enabled_norm_softmax() defaults NVRTC off there and the
+# dispatchers select these static kernels — they MUST be compiled in. Defaulting
+# ON when USE_ROCM keeps a CMake-driven ROCm configure (direct cmake or a
+# downstream add_subdirectory) self-consistent: NVRTC-off + static kernels present.
+# setup.py also passes these ON for ROCm, which is now a redundant override.
+# CUDA keeps them OFF (NVRTC is the primary path there).
 option(NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
        "Also compile legacy static fused softmax kernels for NVTE_DISABLE_NVRTC fallback"
-       OFF)
+       ${USE_ROCM})
 target_compile_definitions(transformer_engine
                            PRIVATE
                            NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX}>)
 
-# Default OFF: LayerNorm/RMSNorm require NVRTC. Set ON to additionally compile
-# the legacy static template instantiations, which are selected only when
-# NVTE_DISABLE_NVRTC=1 at runtime. This compiles all 556
-# REGISTER_NORM_LAUNCHER variants up front.
+# See above: ON for ROCm (norm hipRTC JIT non-functional -> static kernels
+# required), OFF for CUDA. Set ON to compile the legacy static template
+# instantiations, selected when norm/softmax NVRTC is disabled at runtime. This
+# compiles all 556 REGISTER_NORM_LAUNCHER variants up front.
 option(NVTE_BUILD_LEGACY_STATIC_NORM
        "Also compile static norm kernels for NVTE_DISABLE_NVRTC fallback"
-       OFF)
+       ${USE_ROCM})
 target_compile_definitions(transformer_engine
                            PRIVATE
                            NVTE_BUILD_LEGACY_STATIC_NORM=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_NORM}>)
