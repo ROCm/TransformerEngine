@@ -48,13 +48,13 @@ inline void dequantize_helper(const Tensor &input, Tensor *output, cudaStream_t 
     case NVTE_MXFP8_1D_SCALING: {
 #ifndef __HIP_PLATFORM_AMD__
       if (is_supported_by_CC_100()) {
-#endif //#ifndef __HIP_PLATFORM_AMD__
+#endif  //#ifndef __HIP_PLATFORM_AMD__
         mxfp8::dequantize(input, output, stream);
 #ifndef __HIP_PLATFORM_AMD__
       } else {
         NVTE_ERROR("MXFP8 Dequantization is NOT supported by architectures < 10.0");
       }
-#endif //#ifndef __HIP_PLATFORM_AMD__
+#endif  //#ifndef __HIP_PLATFORM_AMD__
       break;
     }
     case NVTE_NVFP4_1D_SCALING: {
@@ -75,13 +75,13 @@ inline void group_dequantize_helper(const GroupedTensor &input, GroupedTensor *o
     case NVTE_MXFP8_1D_SCALING: {
 #ifndef __HIP_PLATFORM_AMD__
       if (is_supported_by_CC_100()) {
+#endif  //#ifndef __HIP_PLATFORM_AMD__
         mxfp8::group_dequantize(&input, output, stream);
+#ifndef __HIP_PLATFORM_AMD__
       } else {
         NVTE_ERROR("MXFP8 Grouped Dequantization is NOT supported by architectures < 10.0");
       }
-#else
-      NVTE_ERROR("MXFP8 Grouped Dequantization is not supported on ROCm.");
-#endif
+#endif  //#ifndef __HIP_PLATFORM_AMD__
       break;
     }
     case NVTE_BLOCK_SCALING_1D:
