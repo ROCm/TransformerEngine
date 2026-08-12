@@ -26,16 +26,22 @@ from typing import List
 
 def install_requirements() -> List[str]:
     """Install dependencies for TE/PyTorch extensions."""
-    return [
+    requirements = [
         "torch>=2.1",
         "einops",
         "onnxscript",
         "onnx",
         "packaging",
         "pydantic",
-        "nvdlfw-inspect",
-        "nvidia-cudnn-frontend>=1.25.0",
     ]
+    if not rocm_build():
+        # NVIDIA-only: nvdlfw-inspect is CUDA framework-inspect; nvidia-cudnn-frontend
+        # supplies the cuDNN headers for the CUDA build (ROCm uses a stub).
+        requirements += [
+            "nvdlfw-inspect",
+            "nvidia-cudnn-frontend>=1.25.0",
+        ]
+    return requirements
 
 
 def test_requirements() -> List[str]:
