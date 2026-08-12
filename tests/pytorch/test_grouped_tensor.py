@@ -8,6 +8,7 @@ from typing import List, Optional, Tuple
 import os
 import pytest
 import torch
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine.pytorch as te
 from transformer_engine.pytorch.tensor.grouped_tensor import GroupedTensor
 from transformer_engine.pytorch import (
@@ -36,16 +37,32 @@ nvfp4_available, reason_for_no_nvfp4 = te.is_nvfp4_available(return_reason=True)
 # The fused grouped FP8 block-scaling quantize/dequantize kernels are Hopper-only: they gate on
 # SM90-SM99 (NVTE_CHECK(sm >= 90 && sm < 100)). FP8 block scaling is still reported "available" on
 # Blackwell (SM100+) for the emulated/non-grouped paths, so ``fp8_block_scaling_available`` alone
-# does not exclude SM100 — add the Hopper arch bound for the grouped tests.
+# does not exclude SM100 — add the Hopper arch bound for the grouped tests. On ROCm the fused
+# grouped path is not implemented (group_quantize throws NVTE_ERROR), and gfx942/gfx950 report a
+# compute capability inside the SM90-SM99 window, so the arch bound alone would let these run and
+# hit the hard error — exclude ROCm explicitly.
 _device_cc = torch.cuda.get_device_capability() if torch.cuda.is_available() else (0, 0)
-fp8_block_scaling_grouped_available = fp8_block_scaling_available and (9, 0) <= _device_cc < (10, 0)
+fp8_block_scaling_grouped_available = (
+    fp8_block_scaling_available and not IS_HIP_EXTENSION and (9, 0) <= _device_cc < (10, 0)
+)
 reason_for_no_fp8_block_scaling_grouped = (
     reason_for_no_fp8_block_scaling
     if not fp8_block_scaling_available
     else (
-        "Fused grouped FP8 block-scaling quantize/dequantize is only supported on Hopper"
+        "Fused grouped FP8 block-scaling quantize/dequantize is not implemented on ROCm."
+        if IS_HIP_EXTENSION
+        else "Fused grouped FP8 block-scaling quantize/dequantize is only supported on Hopper"
         " (SM90-SM99)."
     )
+)
+
+# Grouped FP8 current-scaling quantize is not implemented on ROCm (group_quantize throws
+# NVTE_ERROR); plain FP8 is otherwise available, so gate the grouped tests separately.
+fp8_current_scaling_grouped_available = fp8_available and not IS_HIP_EXTENSION
+reason_for_no_fp8_current_scaling_grouped = (
+    reason_for_no_fp8
+    if not fp8_available
+    else "Grouped FP8 current-scaling quantize is not implemented on ROCm."
 )
 
 _quantization_params = [
@@ -663,7 +680,10 @@ class TestGroupedTensor:
         [
             pytest.param(
                 "fp8_current_scaling",
-                marks=pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8),
+                marks=pytest.mark.skipif(
+                    not fp8_current_scaling_grouped_available,
+                    reason=reason_for_no_fp8_current_scaling_grouped,
+                ),
             ),
             pytest.param(
                 "mxfp8",
@@ -816,7 +836,10 @@ class TestGroupedTensor:
         ],
     )
     @pytest.mark.parametrize("overallocated", [False, True])
-    @pytest.mark.skipif(not fp8_available, reason=reason_for_no_fp8)
+    @pytest.mark.skipif(
+        not fp8_current_scaling_grouped_available,
+        reason=reason_for_no_fp8_current_scaling_grouped,
+    )
     def test_group_quantize_fp8_current_scaling(
         self,
         mode: str,
