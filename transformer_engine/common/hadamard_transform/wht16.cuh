@@ -11,8 +11,6 @@
 
 #include "hip/hip_runtime.h"
 
-#ifdef __HIP_PLATFORM_AMD__
-
 static constexpr int kHadamardDim     = 16;
 static constexpr int kThreadsPerWHT   = 4;
 static constexpr int kElemsPerThread  = 4;
@@ -114,7 +112,5 @@ __device__ __forceinline__ void wht16(
       v0*=sgn(0); v1*=sgn(1); v2*=sgn(2); v3*=sgn(3);
     }
 }
-
-#endif  // __HIP_PLATFORM_AMD__
 
 #endif  // TRANSFORMER_ENGINE_COMMON_HADAMARD_TRANSFORM_WHT16_CUH_
