@@ -598,14 +598,14 @@ def _shape_dtype(value) -> jax.ShapeDtypeStruct:
 
 def _import_cudnn_for_score_mod():
     # score_mod fused attention is a cuDNN-frontend (CUDA-only) feature; ROCm has
-    # no cuDNN frontend (GetCudnnFrontendVersion() is a stub). This is the primary
-    # rejection point for the score_mod path -- fused_attn() in attention.py raises
-    # NotImplementedError on ROCm before any graph construction. This guard is a
-    # defensive backstop for any direct caller of the graph builders; it raises
-    # NotImplementedError to match, rather than letting the version-match check
-    # below raise a confusing RuntimeError against the stub version.
+    # no cuDNN frontend (GetCudnnFrontendVersion() is a stub). This helper is the
+    # availability probe: callers (incl. the score_mod tests' skipif guard) treat
+    # ImportError as "feature unavailable -> skip", so signal unavailability that
+    # way on ROCm too. The user-facing rejection for an explicit score_mod request
+    # is a NotImplementedError raised earlier in fused_attn() (attention.py),
+    # before any graph construction.
     if is_hip_extension():
-        raise NotImplementedError("score_mod fused attention is not supported on ROCm.")
+        raise ImportError("score_mod fused attention is not supported on ROCm (no cuDNN frontend).")
     try:
         cudnn = importlib.import_module("cudnn")
     except ImportError as exc:
