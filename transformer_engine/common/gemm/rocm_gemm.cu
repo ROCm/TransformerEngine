@@ -680,8 +680,10 @@ static void dequant_fp4_gemm_inputs(
     const void** alpha_ptr_out, hipStream_t stream) {
 
   const float fp4_max = 6.0f;
-  const float fp8_max = te_fp8_fnuz() ? 240.0f : 448.0f;
-  const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max * fp8_max);
+  // Read the bound per operand as upstream does: 4over6 tensors carry 256, not 448.
+  const float fp8_max_A = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputA.nvfp4_e4m3_max);
+  const float fp8_max_B = te_fp8_fnuz() ? 240.0f : static_cast<float>(inputB.nvfp4_e4m3_max);
+  const float factor_inv = 1.0f / (fp4_max * fp4_max * fp8_max_A * fp8_max_B);
 
   const float* amax_A = (transa == CUBLAS_OP_T)
       ? reinterpret_cast<const float*>(inputA.amax.dptr)
