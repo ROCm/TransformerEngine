@@ -395,8 +395,11 @@ __global__ void __launch_bounds__(128)
 
 inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
                              cudaStream_t stream) {
-#ifdef __HIP_PLATFORM_AMD__
   using namespace group_dequantize_kernel;
+
+#ifndef __HIP_PLATFORM_AMD__
+  checkCuDriverContext(stream);
+#endif
 
   const bool use_rowwise_scaling = input->has_data();
   const bool use_colwise_scaling = input->has_columnwise_data();
@@ -430,9 +433,21 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
   const size_t first_logical_dim = input->logical_shape.data[0];
   const size_t last_logical_dim = input->logical_shape.data[1];
   const size_t elts_total = first_logical_dim * last_logical_dim;
-  if (elts_total == 0) return;
 
   const size_t num_tensors = input->num_tensors;
+
+  const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(input->tensor_offsets.dptr);
+  const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input->first_dims.dptr);
+  const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input->last_dims.dptr);
+
+  const e8m0_t *const scales_ptr =
+      use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(input->scale_inv.dptr)
+                          : reinterpret_cast<e8m0_t *>(input->columnwise_scale_inv.dptr);
+
+  const SimpleTensor &input_data = use_rowwise_scaling ? input->data : input->columnwise_data;
+
+#ifdef __HIP_PLATFORM_AMD__
+  if (elts_total == 0) return;
 
   size_t blocks_X = 0;
   size_t blocks_Y = 1;
@@ -451,10 +466,6 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
 
   const dim3 grid(blocks_X, blocks_Y);
   const dim3 block(THREADS_PER_CHUNK);
-
-  const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(input->tensor_offsets.dptr);
-  const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input->first_dims.dptr);
-  const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input->last_dims.dptr);
 
   // Per-tensor dims are device-resident, so reading them needs a host sync that capture forbids.
   auto read_dims_to_host = [&](const int64_t *dev_dims) {
@@ -503,12 +514,6 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
     }
   }
 
-  const e8m0_t *const scales_ptr =
-      use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(input->scale_inv.dptr)
-                          : reinterpret_cast<e8m0_t *>(input->columnwise_scale_inv.dptr);
-
-  const SimpleTensor &input_data = use_rowwise_scaling ? input->data : input->columnwise_data;
-
   const size_t scale_dim_X_rowwise = use_rowwise_scaling ? 32 : 1;
   const size_t scale_dim_Y_colwise = use_colwise_scaling ? 32 : 1;
 
@@ -536,45 +541,6 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
   );                                                         // NOLINT(*)
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else
-  using namespace group_dequantize_kernel;
-
-  checkCuDriverContext(stream);
-
-  const bool use_rowwise_scaling = input->has_data();
-  const bool use_colwise_scaling = input->has_columnwise_data();
-  NVTE_CHECK(use_rowwise_scaling || use_colwise_scaling,
-             "Input tensor must have either rowwise or columnwise data.");
-  NVTE_CHECK(!(use_rowwise_scaling && use_colwise_scaling),
-             "Dequantize only supports rowwise or columnwise scaling, not both simultaneously.");
-
-  NVTE_CHECK(!input->with_gemm_swizzled_scales, "Input must have scales in compact format.");
-  NVTE_CHECK(!is_fp8_dtype(output->dtype()), "Output must be in higher precision.");
-  NVTE_CHECK(!is_fp4_dtype(output->dtype()), "Output must not be FP4.");
-  NVTE_CHECK(is_fp8_dtype(input->dtype()), "Input must have FP8 type.");
-
-  NVTE_CHECK(input->num_tensors == output->num_tensors,
-             "Number of input and output tensors must be same.");
-
-  ShapeRepresentation shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
-  if (input->all_same_shape()) {
-    shape_rep = ShapeRepresentation::SAME_BOTH_DIMS;
-  } else if (input->all_same_first_dim()) {
-    shape_rep = ShapeRepresentation::VARYING_LAST_DIM;
-  } else if (input->all_same_last_dim()) {
-    shape_rep = ShapeRepresentation::VARYING_FIRST_DIM;
-  } else if (input->varying_both_dims()) {
-    shape_rep = ShapeRepresentation::VARYING_BOTH_DIMS;
-  }
-
-  const bool is_single_tensor = (shape_rep == ShapeRepresentation::SAME_BOTH_DIMS ||
-                                 shape_rep == ShapeRepresentation::VARYING_FIRST_DIM);
-
-  const size_t first_logical_dim = input->logical_shape.data[0];
-  const size_t last_logical_dim = input->logical_shape.data[1];
-  const size_t elts_total = first_logical_dim * last_logical_dim;
-
-  const size_t num_tensors = input->num_tensors;
-
   constexpr size_t CHUNK_DIM_Y = DequantizeConfig::CHUNK_DIM_Y;
   constexpr size_t CHUNK_DIM_X = DequantizeConfig::CHUNK_DIM_X;
   constexpr size_t THREADS_PER_CHUNK = DequantizeConfig::THREADS_PER_CHUNK;
@@ -601,16 +567,6 @@ inline void group_dequantize(const GroupedTensor *input, GroupedTensor *output,
 
   const dim3 grid(blocks);
   const dim3 block(THREADS_PER_CHUNK);
-
-  const int64_t *const offsets_ptr = reinterpret_cast<const int64_t *>(input->tensor_offsets.dptr);
-  const int64_t *const first_dims_ptr = reinterpret_cast<const int64_t *>(input->first_dims.dptr);
-  const int64_t *const last_dims_ptr = reinterpret_cast<const int64_t *>(input->last_dims.dptr);
-
-  const e8m0_t *const scales_ptr =
-      use_rowwise_scaling ? reinterpret_cast<e8m0_t *>(input->scale_inv.dptr)
-                          : reinterpret_cast<e8m0_t *>(input->columnwise_scale_inv.dptr);
-
-  const SimpleTensor &input_data = use_rowwise_scaling ? input->data : input->columnwise_data;
 
   TRANSFORMER_ENGINE_TYPE_SWITCH_FP8ONLY(
       input->dtype(), IType,

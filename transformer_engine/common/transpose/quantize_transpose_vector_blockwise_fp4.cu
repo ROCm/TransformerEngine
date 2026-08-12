@@ -1298,8 +1298,9 @@ void quantize_transpose_vector_blockwise_fp4(
                                               scale_t_stride_x, scale_t_stride_y, kScaleBlockDim,
                                               epsilon, rng_state, noop_ptr, e4m3_max_for_arch,
                                               nvfp4_4over6_mode ==
-                                                  kNVTENVFP44Over6MinMSE);))  // kUse4Over6 / kRowScaledNVFP4
-                                  )                                           // kIs2DBlockScaling
+                                                  kNVTENVFP44Over6MinMSE);)  // kUse4Over6
+                                      )                                      // kRowScaledNVFP4
+                                  )                                          // kIs2DBlockScaling
                               )  // kApplyStochasticRounding
                           )      // kSwizzledScale
                       )          // kAligned

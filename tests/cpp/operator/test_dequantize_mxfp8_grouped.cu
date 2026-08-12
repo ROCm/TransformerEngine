@@ -347,17 +347,20 @@ void performTest(const ShapeRepresentation shape_rep, const size_t num_tensors,
     int result = memcmp(out_grouped_h.data() + data_offset, out_ref_h.data() + data_offset,
                         tensor_elts * sizeof(OutputType));
     if (result != 0) {
-      for (size_t i = 0; i < tensor_elts; ++i) {
-        if (out_grouped_h[data_offset + i] != out_ref_h[data_offset + i]) {
-          GTEST_FAIL() << "Bitwise mismatch at tensor " << t << " element " << i
-                       << " (global offset " << (data_offset + i) << "): grouped="
-                       << static_cast<float>(out_grouped_h[data_offset + i])
-                       << " vs reference=" << static_cast<float>(out_ref_h[data_offset + i]);
-        }
+      const auto *grouped_bytes =
+          reinterpret_cast<const unsigned char *>(out_grouped_h.data() + data_offset);
+      const auto *ref_bytes =
+          reinterpret_cast<const unsigned char *>(out_ref_h.data() + data_offset);
+      size_t byte = 0;
+      while (grouped_bytes[byte] == ref_bytes[byte]) {
+        ++byte;
       }
+      const size_t i = byte / sizeof(OutputType);
+      GTEST_FAIL() << "Bitwise mismatch at tensor " << t << " element " << i << " (global offset "
+                   << (data_offset + i)
+                   << "): grouped=" << static_cast<float>(out_grouped_h[data_offset + i])
+                   << " vs reference=" << static_cast<float>(out_ref_h[data_offset + i]);
     }
-    // memcmp is the assertion; != would let -0.0 vs +0.0 and NaN payloads through.
-    ASSERT_EQ(result, 0) << "Bitwise mismatch in tensor " << t;
   }
 
   // Cleanup
@@ -493,6 +496,7 @@ TEST_P(GroupedDequantizeMXFP8TestSuite, TestGroupedDequantizeMXFP8) {
     if (last_dims[t] % 16 != 0) {
       GTEST_SKIP();
     }
+    // For colwise: first dim must be divisible by 32
     if (!rowwise && (first_dims[t] % 32 != 0)) {
       GTEST_SKIP();
     }
