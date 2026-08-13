@@ -1110,8 +1110,8 @@ class BlockwiseGemmCdna4 final : public BlockwiseGemmBackend {
         float *sb = reinterpret_cast<float *>(const_cast<void *>(ksb));
 
         static const bool use_pow2 = []() {
-            const char *e = std::getenv("NVTE_BLOCKWISE_FP8_POWER_OF_2_SCALE");
-            return e == nullptr || std::strcmp(e, "0") != 0;
+            const char *e = std::getenv("NVTE_FP8_BLOCK_SCALING_FP32_SCALES");
+            return e == nullptr || std::strcmp(e, "1") != 0;
         }();
 
         const int k_iters = K / BLOCK_K;

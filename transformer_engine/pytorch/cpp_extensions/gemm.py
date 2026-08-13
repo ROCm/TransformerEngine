@@ -498,7 +498,20 @@ def general_gemm(
         "beta": beta,
     }
 
-    if not _is_nvfp4_row_scaled_tensor(A) and not _is_nvfp4_row_scaled_tensor(B):
+    # ROCm-only backend: the Triton kernels use gfx942/gfx950-specific MFMA
+    # instructions and autotune configs, so refuse to enable on non-HIP builds.
+    # NVFP4 is not supported by the Triton path; when the Triton backend is
+    # opted into, te_generic_gemm_triton raises ValueError for NVFP4 inputs
+    # (surfaced as a pytest.skip via tests/pytorch/conftest.py).
+    use_gemm_triton = IS_HIP_EXTENSION and bool(int(os.environ.get("NVTE_USE_GEMM_TRITON", "0")))
+    if use_gemm_triton:
+        # Lazy: only pull in Triton when the backend is opted into. Keeps
+        # `triton` off the module-import path when NVTE_USE_GEMM_TRITON is
+        # unset (the default), so stacks without pytorch-triton-rocm can
+        # still use the C++ hipBLASLt path.
+        from ..triton_kernels.gemm import te_generic_gemm_triton
+        out, bias_grad, gelu_input, extra_output = te_generic_gemm_triton(*args, **kwargs)
+    elif not _is_nvfp4_row_scaled_tensor(A) and not _is_nvfp4_row_scaled_tensor(B):
         use_gemm_flydsl = (
             IS_HIP_EXTENSION
             and get_device_compute_capability() == (9, 5)
