@@ -81,6 +81,12 @@ _KNOWN_BAD_FP32_ON_GFX942 = {
     "test_basic_linear": _has_fp32_param,
     "test_custom_forward_fused_op2": _always,
     "test_custom_backward_fused_op": _always,
+    # tests/pytorch/test_numerics.py -- surfaced once the shard stopped
+    # crashing early on other MXFP8 issues. Same fp32-in Triton kernel
+    # divergence as test_basic_linear above; only dtype0=fp32 variants fail.
+    "test_linear_accuracy": _has_fp32_param,
+    "test_layernorm_linear_accuracy": _has_fp32_param,
+    "test_layernorm_mlp_accuracy": _has_fp32_param,
 }
 
 
