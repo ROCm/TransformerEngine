@@ -556,6 +556,7 @@ def uninstall_te_wheel_packages():
             "transformer_engine_cu12",
             "transformer_engine_torch",
             "transformer_engine_jax",
+            "transformer_engine_rocm7",
             "transformer_engine_rocm10",
             "transformer_engine_rocm_jax",
             "transformer_engine_rocm_torch",
