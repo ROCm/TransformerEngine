@@ -54,22 +54,11 @@ class BlockwiseGemmBackend {
     virtual void run(const BlockwiseGemmArgs &args) = 0;
 
     static BlockwiseGemmBackend *get() {
-        const int arch = transformer_engine::cuda::sm_arch();
-#ifdef KITTENS_HAVE_CDNA4
-        if (arch == 95) {
-            return get_cdna4();
-        }
-#endif
-#ifdef KITTENS_HAVE_CDNA3
-        if (arch == 94) {
-            return get_cdna3();
-        }
-#endif
-        static_cast<void>(arch);
-        return nullptr;
+        return get_for_arch(transformer_engine::cuda::sm_arch());
     }
 
  private:
+    static BlockwiseGemmBackend *get_for_arch(int sm_arch);
     static BlockwiseGemmBackend *get_cdna3();
     static BlockwiseGemmBackend *get_cdna4();
 };
@@ -161,15 +150,11 @@ class MXFP8GemmBackend {
     virtual bool grouped_wgrad(const MXFP8WgradArgs &args) = 0;
 
     static MXFP8GemmBackend *get() {
-#ifdef KITTENS_HAVE_CDNA4
-        if (transformer_engine::cuda::sm_arch() == 95) {
-            return get_cdna4();
-        }
-#endif
-        return nullptr;
+        return get_for_arch(transformer_engine::cuda::sm_arch());
     }
 
  private:
+    static MXFP8GemmBackend *get_for_arch(int sm_arch);
     static MXFP8GemmBackend *get_cdna4();
 };
 

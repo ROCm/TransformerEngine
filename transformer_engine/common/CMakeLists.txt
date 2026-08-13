@@ -717,7 +717,6 @@ else() # USE_ROCM
   endif()
   if(USE_HIPKITTENS_GEMM)
     target_compile_definitions(transformer_engine PUBLIC USE_HIPKITTENS_GEMM)
-    target_compile_definitions(transformer_engine PUBLIC ${KITTENS_HAVE_DEFS})
     list(APPEND transformer_engine_LINKER_LIBS kittens_gemm)
   endif()
   target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})

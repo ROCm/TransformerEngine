@@ -87,12 +87,11 @@ else()
                      FLAGS -gline-tables-only
                      SOURCE_FLAGS cdna4/blockwise_fp8_gemm.cpp "-ffast-math")
 
-    add_library(kittens_gemm SHARED ${_kittens_arch_objs})
+    add_library(kittens_gemm SHARED kittens_common.cpp ${_kittens_arch_objs})
     set_target_properties(kittens_gemm PROPERTIES LINKER_LANGUAGE HIP)
     target_include_directories(kittens_gemm PRIVATE ${HIP_INCLUDE_DIRS})
+    target_compile_definitions(kittens_gemm PRIVATE ${_kittens_have_defs})
     target_link_libraries(kittens_gemm PUBLIC hip::host hip::device)
-
-    set(KITTENS_HAVE_DEFS "${_kittens_have_defs}" PARENT_SCOPE)
 
     install(TARGETS kittens_gemm
         DESTINATION ${CMAKE_INSTALL_PREFIX}/transformer_engine/lib)
