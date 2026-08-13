@@ -1344,11 +1344,13 @@ def test_linear_accuracy(dtype, bs, model, return_bias, bias):
         recipe.MXFP8BlockScaling(),
     ],
 )
+@pytest.mark.parametrize("fp8_model_params", all_boolean)
 def test_linear_accuracy_flydsl(
     dtype,
     bs,
     model,
     fp8_recipe,
+    fp8_model_params,
 ):
     """Compare FlyDSL and native TE Linear forward, dgrad, and wgrad."""
 
@@ -1365,6 +1367,11 @@ def test_linear_accuracy_flydsl(
     fp8 = fp8_recipe is not None
     config = model_configs[model]
 
+    # Low-precision (fp8) weight init only makes sense under an fp8 recipe;
+    # without one it is identical to the fp8_model_params=False run.
+    if fp8_model_params and not fp8:
+        pytest.skip("fp8_model_params requires an FP8 recipe.")
+
     # "small" is the designated fallback case (not a config this PR claims to
     # support); every other model is expected to run on FlyDSL.
     expect_fallback = model == "small"
@@ -1378,9 +1385,13 @@ def test_linear_accuracy_flydsl(
     if config.max_seqlen_q % 16 != 0 and fp8:
         pytest.skip("FP8 requires sequence length to be divisible by 16.")
 
-    # Validate the GEMM backend, not quantized parameter storage.
-    # FlyDSL GEMM does not currently support bias.
-    with quantized_model_init(enabled=False, recipe=fp8_recipe):
+    # fp8_model_params controls low-precision (fp8) weight storage; the FlyDSL
+    # path is exercised both with high-precision params (fp8 autocast only) and
+    # fp8-initialized params (fp8 init + fp8 autocast).
+    # bias=False: FlyDSL implements the forward BIAS epilogue but not the fused
+    # bias-gradient (BGRADB), so a bias=True backward wgrad GEMM would fall back
+    # to the native backend on the non-fp8 path.
+    with quantized_model_init(enabled=fp8 and fp8_model_params, recipe=fp8_recipe):
         linear_ref = Linear(
             config.hidden_size,
             4 * config.hidden_size,
