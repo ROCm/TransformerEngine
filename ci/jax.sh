@@ -116,9 +116,7 @@ fi
 
 #Master script mode: prepares testing prerequisites
 start_message
-#See ci/pytorch.sh for the TE_CI_SETUP_ONLY / TE_CI_SKIP_SETUP contract. Running
-#the CK JIT prebuild here once, sequentially, also removes the race this script
-#used to have with ci/pytorch.sh over the shared blob cache.
+
 if check_setup_needed; then
     install_prerequisites
     pip list | egrep "flax|fidle|jax|ml_dtypes|numpy|transformer_e|typing_ext"

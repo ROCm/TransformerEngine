@@ -51,7 +51,7 @@ run_test_config(){
         #concurrent ones race on the shared checkpoint directory.
         _ckpt_variant=`get_test_variant_tag $_fus_attn ""`
         _ckpt_tag=`get_test_name_tag test_checkpoint.py $_ckpt_variant`
-        if [ -n "$TE_CI_LIST_ONLY" ]; then
+        if [ -n "$TE_CI_LIST_ITEMS" ]; then
             #Only emit the work item; do not generate the artifact. Save, test
             #and cleanup stay one unit when the item is dispatched.
             run 1 test_checkpoint.py
@@ -134,7 +134,7 @@ run_test_config_mgpu(){
 
 run_benchmark() {
     check_test_filter benchmark || return
-    if [ -n "$TE_CI_LIST_ONLY" ]; then
+    if [ -n "$TE_CI_LIST_ITEMS" ]; then
         echo "TE_CI_ITEM benchmark"
         return
     fi

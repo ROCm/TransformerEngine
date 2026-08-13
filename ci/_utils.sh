@@ -39,6 +39,13 @@ TEST_DIR=${TE_PATH}tests/
 : ${TEST_LEVEL:=99} #Run all tests by default
 TEST_JOBS_MODE=""
 
+#Scheduler inputs. Empty is the default for all of them
+: ${TEST_FILTER:=}
+: ${TE_CI_LIST_ITEMS:=}
+: ${TE_CI_SKIP_CHECK_SUPPORTED:=}
+: ${TE_CI_SETUP_ONLY:=}
+: ${TE_CI_SKIP_SETUP:=}
+
 if [ -z "${TEST_SGPU}${TEST_MGPU}" ]; then
     TEST_SGPU=1
     TEST_MGPU=1
@@ -140,30 +147,19 @@ check_level() {
     test $TEST_LEVEL -ge $1
 }
 
-# TE_CI_LIST_ALL widens list mode from "what this host would run" to "what this
-# TEST_LEVEL could run anywhere". Level gating, the backend matrix and TEST_FILTER
-# still apply -- only host capability probes are answered yes without probing.
-# The scheduler uses the wider list as the authoritative set of work items that
-# exist, so .github/scripts/scheduler/build_weights.py can tell a test that was deleted or
-# renamed (drop its weight) from one this host merely skipped (keep it). A probe
-# result varies by machine; whether a test file exists does not.
-check_list_all() {
-    test -n "$TE_CI_LIST_ONLY" -a -n "$TE_CI_LIST_ALL"
+# Disables check_supported function: so the list becomes every test at this TEST_LEVEL 
+# rather than the subset this host can run. 
+skip_check_supported() {
+    test -n "$TE_CI_LIST_ITEMS" -a -n "$TE_CI_SKIP_CHECK_SUPPORTED"
 }
 
-# Whether this invocation is the one that should do container-wide setup. The
-# scheduler hoists that out of the per-item runs -- once per suite with
-# TE_CI_SETUP_ONLY, then TE_CI_SKIP_SETUP on every item it dispatches -- and list
-# mode sets nothing up at all, since it only prints what it would have run. Every
-# setup step goes through here rather than spelling the condition out again.
+# Run the container-wide setup once and skip when each test is ran in queue.
 check_setup_needed() {
-    test -z "$TE_CI_SKIP_SETUP$TE_CI_LIST_ONLY"
+    test -z "$TE_CI_SKIP_SETUP" -a -z "$TE_CI_LIST_ITEMS"
 }
 
-# Every host capability probe goes through here, selected by label. Returns 0 to
-# run the guarded tests, 1 to skip them.
 check_supported() {
-    check_list_all && return 0
+    skip_check_supported && return 0
     case "$1" in
         "mxfp8")
             #MXFP8-only test filters collect no tests on unsupported archs
@@ -175,9 +171,6 @@ check_supported() {
             _probe_message="Flash attention is not installed"
         ;;
         *)
-            #A mistyped label must not read as "unsupported": that would skip the
-            #guarded tests on every host and look exactly like a machine that
-            #cannot run them. Count it so the run's exit code reports it.
             script_error "check_supported: unknown capability $1"
             return 1
         ;;
@@ -364,13 +357,6 @@ check_test_filter() {
 # would overwrite the first's results, and one dispatch would run both. Anything
 # that changes what a line runs -- an env prefix, a -k expression, extra pytest
 # args -- needs its own label to keep the tags apart.
-#
-# Fatal rather than counted-and-continued. Skipping the offending call line
-# leaves a run that looks complete but is quietly short by an item, and in list
-# mode that short list is what the scheduler queues -- so the tests the
-# duplicate displaced never run at all, on this run or any after it. The only
-# signal would be a non-zero exit code at the very end, long after the message
-# scrolled past.
 check_test_tag_unique() {
     case " $_seen_test_tags " in
     *" $1 "*)
@@ -427,7 +413,7 @@ pytest_run() {
     # -k expressions are reapplied by the script itself and never have to be
     # serialized here. The suite scripts stay the single source of truth for
     # what runs at each TEST_LEVEL.
-    if [ -n "$TE_CI_LIST_ONLY" ]; then
+    if [ -n "$TE_CI_LIST_ITEMS" ]; then
         echo "TE_CI_ITEM $_test_name_tag"
         return
     fi
@@ -465,10 +451,6 @@ pytest_run() {
 }
 
 PYTHON_TE_IMPORT="import sys; sys.path[:] = [p for p in sys.path if p not in ['', '.']]; import transformer_engine"
-# Usage: ck_jit_prebuild build|list
-# Build the CK JIT blob cache, or report what is in it. Like check_supported, the
-# guard lives with the thing it guards: a dispatched item or a list run returns
-# here without touching the cache, so no caller has to remember to ask.
 ck_jit_prebuild() {
     check_setup_needed || return 0
     _prebuild_list="${TE_PATH}ci/ck_jit_prebuild.txt"

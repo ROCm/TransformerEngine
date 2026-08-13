@@ -182,18 +182,6 @@ jobs:
           EOF
           )"
 
-      # The scheduler orders its queue longest-first, so it needs a per-item cost
-      # estimate. That table is produced by the previous run of this same job and
-      # carried forward in the cache -- there is no separate measurement pass.
-      # `restore` and `save` are separate actions on purpose: `actions/cache`
-      # skips its implicit save when the job fails, and a failing test run is
-      # exactly when the timings are most worth keeping.
-      #
-      # The key carries the test level as well as the arch. A level decides both
-      # which items run and how long some of them take (tests/jax switches on
-      # NVTE_JAX_UNITTEST_LEVEL, test_grouped_gemm.py adds its real shapes at
-      # level 2), so a shared table would have L1 and L3 runs continually
-      # overwriting each other's weights for the same key with different numbers.
       - name: Restore learned test weights
         uses: actions/cache/restore@v4
         with:
@@ -209,21 +197,11 @@ jobs:
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          # The queue clears test-results/ itself and creates one XML subdir per
-          # suite, so PyTorch/JAX/Core get independent reports and never collide
-          # on identically-named XML (test_sanity_import.auto.xml exists in both
-          # the torch and jax suites and runs in parallel). Clearing it here too
-          # covers the case where the container never starts.
+          # One subdir per suite so PyTorch/JAX/Core get independent reports and
+          # never collide on identically-named XML (e.g. test_sanity_import.auto.xml
+          # exists in both the torch and jax suites and runs in parallel).
           rm -rf test-results
 
-          # No in-tree seed table: on a cache miss the file is simply absent, the
-          # queue runs in its natural order for one run, and this run's timings
-          # create the table. A checked-in copy would go stale silently and is
-          # worth less than the one unordered run it saves.
-          #
-          # Listed rather than named: the queue derives the file from the arch it
-          # reads off rocminfo, and deriving it a second time from the matrix
-          # label would be a second thing to keep in step.
           mkdir -p ci-weights
           wc -l ci-weights/*.txt 2>/dev/null \
             || echo "no weight table restored; this run will be unordered"
@@ -238,12 +216,6 @@ jobs:
             te-runner bash /workspace/.github/scripts/run_queue_sgpu.sh \
               --log-dir /workspace/test-results/logs
 
-      # The queue's own last phase updated ci-weights/ before it exited, including
-      # when tests failed -- a red run still measures how long each item took. Only
-      # a run killed outright (this step's timeout) skips it, and that run's
-      # durations are ceilings imposed by the kill rather than costs, so losing
-      # them is no loss. Saving is separate because it must happen either way:
-      # a failed run's table is still better than the one restored above.
       - name: Save learned test weights
         if: always() && hashFiles('ci-weights/*') != ''
         uses: actions/cache/save@v4
@@ -264,23 +236,12 @@ jobs:
             --title "sGPU JAX (${{ matrix.arch_label }})"
           python3 ci/junit_report.py test-results/core \
             --title "sGPU Core (${{ matrix.arch_label }})"
-
-      # Last, so the summary leads with test results: how the work was scheduled
-      # only matters once you know what the tests did.
-      - name: Publish scheduling report
-        if: always()
-        run: |
           if [ -f test-results/logs/report/schedule.md ]; then
             cat test-results/logs/report/schedule.md >> "$GITHUB_STEP_SUMMARY"
           else
             echo "::warning::no schedule.md -- the queue did not reach its report phase"
           fi
 
-      # The gate is per suite, as before -- the queue interleaves suites across
-      # GPUs, but a suite is still what "PyTorch tests failed" means. What is
-      # dumped inline is per item: only the item logs that actually ended non-zero,
-      # rather than the whole suite's output with the failure buried in it. The
-      # passing items are in the artifact for anyone who wants them.
       - name: Check suite failure status
         if: always()
         run: |
@@ -304,12 +265,6 @@ jobs:
           done < .github/scripts/ci_sgpu_queue.conf
           exit $EXIT_STATUS
 
-      # test-results/ is the whole run: XML per suite plus one directory per
-      # scheduler phase under logs/. A download answers "what did it plan, what
-      # did it set up, what did each item print, what did each item cost" from a
-      # single tree. logs/queue/ is what makes it reproducible after the fact --
-      # schedule.md and the weight table can both be regenerated from
-      # timings.tsv + items.tsv alone.
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4

@@ -12,10 +12,6 @@
 #     mode=list    expanded into one work item per test invocation
 #     mode=opaque  scheduled as a single work item
 #
-# With no config given, .github/scripts/ci_sgpu_queue.conf is used. Unlike
-# run_parallel_sgpu.sh, line order carries no GPU assignment: every item from
-# every config goes into one queue and workers pull on completion.
-#
 # The queue uses every GPU it can see; restrict it with HIP_VISIBLE_DEVICES.
 #
 # Example usage:
@@ -30,8 +26,7 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # Two directories in the repo root:
 #
 #   test-results/  everything one run produced; this script adds logs/ under it
-#   ci-weights/    the learned weight table, the one thing that must outlive the
-#                  run that measured it. Same name the workflow caches.
+#   ci-weights/    the learned weight table
 : "${LOG_DIR:=${REPO_ROOT}/test-results/logs}"
 
 # Items with no recorded weight sort first: an unknown item is more likely to be
@@ -39,12 +34,6 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # tail. Losing the gamble costs far less than mis-scheduling a genuinely big item.
 : "${DEFAULT_WEIGHT:=${TE_CI_DEFAULT_WEIGHT:-999999}}"
 
-# Run state:  CONFIGS[]   suite lists to read, in the order given
-#             GPU_IDS[]   the worker pool, and where it was read from
-#             SUITE_*[]   the configs as parsed by Phase 0: one entry per config
-#                         line, in file order, shared index across all five.
-#                         Phases 1, 3 and 5 all walk them rather than re-reading
-#                         the files, so the parse happens once.
 declare -a CONFIGS=()
 declare -a GPU_IDS=()
 declare -a SUITE_LABELS=()
@@ -52,6 +41,7 @@ declare -a SUITE_LOGFILES=()
 declare -a SUITE_MODES=()
 declare -a SUITE_CMDS=()
 declare -a SUITE_ARGS=()
+declare -a FAILED_ITEMS=()
 GPU_SOURCE=""
 OVERALL_RC=0
 
@@ -152,15 +142,21 @@ worker() {
             fi
         fi
 
-        # Machine-readable timing record. The first five columns are the stable
-        # contract build_weights.py reads; the scheduling columns are appended
-        # after them so that reader stays unchanged. Written incrementally so a
-        # run killed by the job timeout still leaves a usable record of
-        # everything that had completed.
+        # Update timings.tsv: Phase 6 learns the next run's weights
+        # from it. One row appended per item as
+        # it ends, so a killed run still records what had finished.
+        #
+        #   label  tag  gpu  secs  rc  start_off  end_off  est  incomplete
+        #
         printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
             "$label" "$safetag" "$gpu" "$((end - start))" "$rc" \
             "$((start - START_TS))" "$((end - START_TS))" "$weight" "$incomplete" \
             >> "$TIMINGS_FILE"
+
+        # Console progress: one line per item as it finishes
+        #
+        #   time  gpu  start offset  duration  rc  estimate  suite  item
+        #
         printf '[%s] gpu%-2s t+%-7s %5ss rc=%-4s est=%-8s %-9s %s\n' \
             "$(date '+%H:%M:%S')" "$gpu" "$((start - START_TS))s" "$((end - start))" \
             "$rc" "$([[ $weight -eq $DEFAULT_WEIGHT ]] && echo unknown || echo "${weight}s")" \
@@ -257,8 +253,7 @@ mkdir -p "$(dirname "$WEIGHTS_FILE")" 2>/dev/null
 [[ "$LOG_DIR" != /* ]] && LOG_DIR="$(realpath -m "$LOG_DIR")"
 
 
-# One directory per phase, so "where did that come from" is answered by the path
-# and a phase can be cleared without touching the others:
+# Directory Structure under LOG_DIR:
 #
 #   prerequisite_ck_jit_status/ Phase 3  one-time prerequisites per suite
 #   items/                      Phase 4  the test output itself -- one file per item
@@ -267,9 +262,8 @@ mkdir -p "$(dirname "$WEIGHTS_FILE")" 2>/dev/null
 #   queue/                               the machine-readable state: what to run,
 #                                        what it cost
 #
-# Phase 1 has no directory: what it produced is queue.tsv and items.tsv, and all
-# it has of its own is whatever the suites printed on stderr while listing, which
-# is one file.
+# Phase 1 has no directory: what it produced is queue.tsv and items.tsv
+
 EXPAND_LOG="$LOG_DIR/expand.log"
 SETUP_DIR="$LOG_DIR/prerequisite_ck_jit_status"
 ITEM_LOG_DIR="$LOG_DIR/items"
@@ -303,9 +297,8 @@ LOCK_FILE="$QUEUE_DIR/queue.lock"
 # Phase 1: expand every suite into work items
 # ---------------------------------------------------------------------------
 #
-# List mode runs the suite script with TE_CI_LIST_ONLY=1, which makes pytest_run
-# echo "TE_CI_ITEM <tag>" for each invocation it would have made instead of
-# running it.
+# List mode runs the suite script with TE_CI_LIST_ITEMS=1, which makes pytest_run
+# echo "TE_CI_ITEM <tag>" instead of running it.
 #
 # Every list-mode suite is listed twice, because "will run" and "exists" are
 # different questions:
@@ -324,7 +317,7 @@ for i in "${!SUITE_LABELS[@]}"; do
     rest="${SUITE_ARGS[$i]}"
     if [[ "$mode" == "list" ]]; then
         echo "=== ${label}: list -- what this runner will run ===" >> "$EXPAND_LOG"
-        TE_CI_LIST_ONLY=1 "$cmd" ${rest:-} > "$LIST_TMP" 2>> "$EXPAND_LOG"
+        TE_CI_LIST_ITEMS=1 "$cmd" ${rest:-} > "$LIST_TMP" 2>> "$EXPAND_LOG"
         list_rc=$?
         mapfile -t tags < <(sed -n 's/^TE_CI_ITEM //p' "$LIST_TMP")
 
@@ -343,7 +336,7 @@ for i in "${!SUITE_LABELS[@]}"; do
         done
 
         echo "=== ${label}: list-all -- what exists at this level ===" >> "$EXPAND_LOG"
-        TE_CI_LIST_ONLY=1 TE_CI_LIST_ALL=1 "$cmd" ${rest:-} > "$LIST_TMP" 2>> "$EXPAND_LOG"
+        TE_CI_LIST_ITEMS=1 TE_CI_SKIP_CHECK_SUPPORTED=1 "$cmd" ${rest:-} > "$LIST_TMP" 2>> "$EXPAND_LOG"
         all_rc=$?
         mapfile -t all_tags < <(sed -n 's/^TE_CI_ITEM //p' "$LIST_TMP")
 
@@ -367,9 +360,6 @@ rm -f "$LIST_TMP"
 # ---------------------------------------------------------------------------
 # Phase 2: weight and order the queue (longest processing time first)
 # ---------------------------------------------------------------------------
-#
-# build_weights.py owns the weight table at both ends -- it applies the table
-# here and rewrites it in Phase 6.
 if ! python3 "$REPO_ROOT/.github/scripts/scheduler/build_weights.py" order "$QUEUE_FILE.raw" \
         --weights "$WEIGHTS_FILE" \
         --output "$QUEUE_FILE" \
@@ -386,8 +376,7 @@ TOTAL_ITEMS=$(wc -l < "$QUEUE_FILE")
 # Phase 3: one-time, container-wide setup
 # ---------------------------------------------------------------------------
 #
-# pip prerequisites and the CK JIT blob cache are container-wide filesystem
-# state, so each suite installs and prebuilds them once here.
+# Install pip prerequisites and build CK JIT blob once here.
 setup_banner=""
 for i in "${!SUITE_LABELS[@]}"; do
     label="${SUITE_LABELS[$i]}"
@@ -448,10 +437,13 @@ for i in "${!SUITE_LABELS[@]}"; do
     for itemlog in "$ITEM_LOG_DIR/${label}."*.log; do
         [[ -e "$itemlog" ]] || continue
         rc=$(cat "${itemlog}.rc" 2>/dev/null || echo 1)
+        iname=$(basename "$itemlog" .log)
         printf '%-4s rc=%-4s items/%s\n' \
             "$([[ "$rc" == "0" ]] && echo ok || echo FAIL)" "$rc" \
-            "$(basename "$itemlog")" >> "$suite_log"
-        [[ "$rc" != "0" ]] && worst=$rc
+            "${iname}.log" >> "$suite_log"
+        [[ "$rc" == "0" ]] && continue
+        worst=$rc
+        FAILED_ITEMS+=( "${itemlog#"${REPO_ROOT}/"}" )
     done
     echo "$worst" > "${suite_log}.rc"
     [[ "$worst" != "0" ]] && OVERALL_RC=$worst
@@ -475,6 +467,12 @@ if ! python3 "$REPO_ROOT/.github/scripts/scheduler/schedule_report.py" "$LOG_DIR
         --default-weight "$DEFAULT_WEIGHT" \
         --weights "$WEIGHTS_FILE"; then
     log_warn "could not write the scheduling report"
+fi
+
+if [[ ${#FAILED_ITEMS[@]} -gt 0 ]]; then
+    echo
+    echo "== ${#FAILED_ITEMS[@]} of ${TOTAL_ITEMS} items FAILED =="
+    printf '  %s\n' "${FAILED_ITEMS[@]}"
 fi
 
 exit $OVERALL_RC
