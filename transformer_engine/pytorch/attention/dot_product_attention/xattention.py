@@ -330,10 +330,15 @@ def fp8_backward(
     attn_mask_type: str,
     window_size: Optional[Tuple[int, int]],
     deterministic: bool,
+    fp8_output: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Run the xAttention per-tensor fp8 backward, returning bf16 dq/dk/dv.
+    """Run the xAttention per-tensor fp8 backward.
 
     Writes amax_dq/dk/dv into dqkv_quantizer and amax_ds into dp_quantizer.
+
+    dq/dk/dv are Float8Tensors when ``fp8_output`` is set and the dQKV
+    quantizer's scale is known ahead of the kernel, sparing the caller a
+    requantization pass; otherwise they are bf16.
     """
     assert _xattn is not None, f"xAttention binding not available: {_IMPORT_ERROR}"
     causal = "causal" in attn_mask_type
@@ -346,36 +351,55 @@ def fp8_backward(
     od = _to_bshd(_fp8_data(out_fp8), fmt)
     dod = _to_bshd(_fp8_data(d_out_fp8), fmt)
 
-    descale_q, descale_k, descale_v, descale_o, descale_do, scale_s, scale_ds = _host_scalars(
-        [
-            q_fp8._scale_inv,
-            k_fp8._scale_inv,
-            v_fp8._scale_inv,
-            out_fp8._scale_inv,
-            d_out_fp8._scale_inv,
-            s_quantizer.scale,
-            dp_quantizer.scale,
-        ]
+    # The kernel folds scale_dq/dk/dv into the gradient stores, so they may only
+    # be non-unit when we are actually asking for fp8 dq/dk/dv.
+    quantize_dqkv = fp8_output and _has_static_scale(dqkv_quantizer)
+
+    scales = [
+        q_fp8._scale_inv,
+        k_fp8._scale_inv,
+        v_fp8._scale_inv,
+        out_fp8._scale_inv,
+        d_out_fp8._scale_inv,
+        s_quantizer.scale,
+        dp_quantizer.scale,
+    ]
+    if quantize_dqkv:
+        scales.append(dqkv_quantizer.scale)
+    descale_q, descale_k, descale_v, descale_o, descale_do, scale_s, scale_ds, *rest = (
+        _host_scalars(scales)
     )
     descale_s = 1.0 / scale_s
     descale_ds = 1.0 / scale_ds
+    # One quantizer covers all three gradients, so they share a single scale.
+    scale_dqkv = rest[0] if quantize_dqkv else 1.0
 
     b, s, h, d = qd.shape
-    dq = torch.empty(b, s, h, d, device=qd.device, dtype=torch.bfloat16)
-    dk = torch.empty_like(kd, dtype=torch.bfloat16)
-    dv = torch.empty_like(vd, dtype=torch.bfloat16)
+    if quantize_dqkv:
+        # TE keeps fp8 payloads as uint8; the kernel wants the fp8 view of them.
+        grad_dtype = _torch_fp8_dtype(dqkv_quantizer.dtype)
+        dq_data = torch.empty(b, s, h, d, device=qd.device, dtype=torch.uint8)
+        dk_data = torch.empty_like(kd, dtype=torch.uint8)
+        dv_data = torch.empty_like(vd, dtype=torch.uint8)
+        dq, dk, dv = (t.view(grad_dtype) for t in (dq_data, dk_data, dv_data))
+    else:
+        dq = torch.empty(b, s, h, d, device=qd.device, dtype=torch.bfloat16)
+        dk = torch.empty_like(kd, dtype=torch.bfloat16)
+        dv = torch.empty_like(vd, dtype=torch.bfloat16)
 
     # Delayed-scaling history: the dQKV quantizer tracks a single amax across
     # dq/dk/dv, but the kernel's three reductions are plain stores to distinct
     # addresses, so aliasing them onto one slot would race. Give them adjacent
     # slots in one buffer and fold it afterwards. dS maps 1:1 and goes direct.
+    # Each amax is descaled by 1/scale_dq before it is stored, so the history
+    # stays in the gradients' true units whichever output dtype we asked for.
     amax_dqkv = torch.empty(3, device=qd.device, dtype=torch.float32)
 
     res = _xattn.bwd_quant(
         dod, qd, kd, vd, od, softmax_lse,
         descale_q, descale_k, descale_v, descale_o, descale_do,
         scale_s, descale_s, scale_ds, descale_ds,
-        1.0, 1.0, 1.0,  # dq/dk/dv are bf16 -> output scales unused
+        scale_dqkv, scale_dqkv, scale_dqkv,
         dq, dk, dv,
         amax_dqkv[0:1], amax_dqkv[1:2], amax_dqkv[2:3], dp_quantizer.amax,
         None,
@@ -384,5 +408,14 @@ def fp8_backward(
     dq_o, dk_o, dv_o = res[0], res[1], res[2]
 
     torch.amax(amax_dqkv, dim=0, keepdim=True, out=dqkv_quantizer.amax)
+
+    if quantize_dqkv:
+        # scale_inv is derived from the quantizer on device; no host round trip.
+        return tuple(
+            dqkv_quantizer.create_tensor_from_data(
+                _from_bshd(t, fmt), fake_dtype=d_out_fp8.dtype
+            )
+            for t in (dq_data, dk_data, dv_data)
+        )
 
     return _from_bshd(dq_o, fmt), _from_bshd(dk_o, fmt), _from_bshd(dv_o, fmt)

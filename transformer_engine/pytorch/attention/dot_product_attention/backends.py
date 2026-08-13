@@ -1684,7 +1684,9 @@ class FusedAttnFunc(torch.autograd.Function):
                         else out_fp8
                     )
                     if ctx.fused_attention_backend == FusedAttnBackend.get("XAttn"):
-                        # ROCm: route the fp8 bwd kernel to xAttention (bf16 dq/dk/dv).
+                        # ROCm: route the fp8 bwd kernel to xAttention, which writes
+                        # fp8 dq/dk/dv directly when it can, sparing the
+                        # requantization below.
                         dq_, dk_, dv_ = xattention.fp8_backward(
                             d_out_fp8,
                             q_fp8,
@@ -1702,6 +1704,7 @@ class FusedAttnFunc(torch.autograd.Function):
                             ctx.attn_mask_type,
                             ctx.window_size,
                             ctx.deterministic,
+                            ctx.is_input_fp8,
                         )
                         rest = [None]
                     else:

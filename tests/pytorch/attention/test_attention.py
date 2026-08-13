@@ -2199,8 +2199,13 @@ model_configs_fp8_dpa = {
 }
 
 
-@pytest.mark.skipif(IS_HIP_EXTENSION, reason="FP8 Fused attention is not supported on ROCm")
-@pytest.mark.skipif(get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required.")
+@pytest.mark.skipif(
+    IS_HIP_EXTENSION and not xattention_available,
+    reason="FP8 attention on ROCm requires the xAttention backend",
+)
+@pytest.mark.skipif(
+    not IS_HIP_EXTENSION and get_cudnn_version() < (9, 2, 1), reason="cuDNN 9.2.1+ is required."
+)
 @pytest.mark.skipif(not fp8_attn_available, reason=reason_for_no_fp8_attn)
 @pytest.mark.parametrize("dtype", param_types_fp8_vs_f16)
 @pytest.mark.parametrize("model", model_configs_fp8_vs_f16.keys())
@@ -2223,6 +2228,23 @@ def test_mha_fp8_vs_f16(
     """Test MultiHeadAttention module in FP8"""
     os.environ["NVTE_FP8_DPA_BWD"] = "1" if fp8_dpa_bwd else "0"
     config = model_configs_fp8_vs_f16[model]
+    if IS_HIP_EXTENSION and xattention_available:
+        os.environ["NVTE_FUSED_ATTN_XATTN"] = "1"
+        if scaling_mode == "current":
+            # xAttention is the only fp8 fused-attn backend on ROCm and it only
+            # supports DelayedScaling; skip explicitly instead of falling through
+            # to the generic "no FP8 backend" skip below.
+            pytest.skip("xAttention currently supports DelayedScaling only")
+        if is_training and not fp8_dpa_bwd:
+            # xAttention is fp8-only; an f16 backward (NVTE_FP8_DPA_BWD=0) would
+            # require a bf16 fused-attn backward, which is not available on ROCm.
+            pytest.skip("xAttention (fp8-only) does not support an f16 backward on ROCm")
+        if not RoPE:
+            # Without RoPE, MHA sets qkv_fp8_output=True and asks the QKV GEMM for
+            # an fp8 output, which hipBLASLt cannot serve on ROCm today ("Unable to
+            # find any suitable algorithms"). The RoPE path keeps that GEMM's
+            # output in high precision and still covers fp8 MHA end to end.
+            pytest.skip("fp8-output QKV GEMM is not supported by hipBLASLt on ROCm")
 
     # Test backend availability
     if scaling_mode == "delayed":
