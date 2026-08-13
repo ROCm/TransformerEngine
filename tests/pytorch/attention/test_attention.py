@@ -2782,8 +2782,8 @@ def test_xattn_fp8_cast_saturates(direction):
             is_causal=True,
             window_size_left=-1,
             window_size_right=-1,
-            input_bshd=True,
-            output_bshd=True,
+            input_layout="bshd",
+            output_layout="bshd",
         )
 
     if direction == "forward":
@@ -2829,8 +2829,8 @@ def test_xattn_fp8_cast_saturates(direction):
         is_causal=True,
         window_size_left=-1,
         window_size_right=-1,
-        input_bshd=True,
-        output_bshd=True,
+        input_layout="bshd",
+        output_layout="bshd",
     )
     _assert_xattn_ran(out_fp8, "xAttention fp8 forward output seeding the backward")
     softmax_lse = fwd_res[1].contiguous()
@@ -2875,8 +2875,8 @@ def test_xattn_fp8_cast_saturates(direction):
             window_size_right=-1,
             softcap=0.0,
             deterministic=False,
-            input_bshd=True,
-            output_bshd=True,
+            input_layout="bshd",
+            output_layout="bshd",
         )
 
     # amax_ds is reduced over the scaled fp32 dS *before* the cast, so it stays

@@ -56,31 +56,61 @@ std::optional<at::Tensor> checked_amax(std::optional<at::Tensor> t, const char *
   return t;
 }
 
-// q is (b, s, h, d) when BSHD and (b, h, s, d) otherwise; k supplies the KV
-// head count and sequence length.
-Workspace fwd_workspace(const at::Tensor &q, bool input_bshd) {
-  const auto s = q.sizes();
-  return Workspace(
-      q, xi::get_mha_fwd_workspace_size(s[0], input_bshd ? s[2] : s[1], input_bshd ? s[1] : s[2]));
+// xAttention reads each tensor through the strides implied by its layout, so a
+// caller holding sbhd data passes it as-is rather than transposing to bshd.
+xattn::MHADataLayout layout_from_name(const std::string &name) {
+  if (name == "bshd") return xattn::MHADataLayout::BSHD;
+  if (name == "sbhd") return xattn::MHADataLayout::SBHD;
+  if (name == "bhsd") return xattn::MHADataLayout::BHSD;
+  TORCH_CHECK(false, "unknown attention data layout '", name, "'; expected bshd, sbhd or bhsd");
 }
 
-Workspace bwd_workspace(const at::Tensor &q, const at::Tensor &k, bool input_bshd) {
-  const auto s = q.sizes();
-  return Workspace(q, xi::get_mha_bwd_workspace_size(
-                          s[0], input_bshd ? s[2] : s[1], input_bshd ? k.size(2) : k.size(1),
-                          input_bshd ? s[1] : s[2], input_bshd ? k.size(1) : k.size(2), s[3]));
+// (batch, seqlen, nhead) of a rank-4 attention tensor under `layout`; head_dim
+// is the last dimension in every layout.
+struct MHADims {
+  int64_t batch, seqlen, nhead;
+};
+
+MHADims dims_of(const at::Tensor &t, xattn::MHADataLayout layout) {
+  const auto s = t.sizes();
+  TORCH_CHECK(s.size() == 4, "attention data tensor must be rank 4, got rank ", s.size());
+  switch (layout) {
+    case xattn::MHADataLayout::BSHD:
+      return {s[0], s[1], s[2]};
+    case xattn::MHADataLayout::BHSD:
+      return {s[0], s[2], s[1]};
+    case xattn::MHADataLayout::SBHD:
+      return {s[1], s[0], s[2]};
+  }
+  TORCH_CHECK(false, "unknown attention data layout");
+}
+
+Workspace fwd_workspace(const at::Tensor &q, xattn::MHADataLayout layout) {
+  const auto q_dims = dims_of(q, layout);
+  return Workspace(
+      q, xi::get_mha_fwd_workspace_size(q_dims.batch, q_dims.nhead, q_dims.seqlen));
+}
+
+Workspace bwd_workspace(const at::Tensor &q, const at::Tensor &k, xattn::MHADataLayout layout) {
+  const auto q_dims = dims_of(q, layout);
+  const auto k_dims = dims_of(k, layout);
+  return Workspace(q, xi::get_mha_bwd_workspace_size(q_dims.batch, q_dims.nhead, k_dims.nhead,
+                                                     q_dims.seqlen, k_dims.seqlen, q.size(3)));
 }
 
 // ---- forward (fp16/bf16) --------------------------------------------------
 std::vector<at::Tensor> xattn_fwd(at::Tensor q, at::Tensor k, at::Tensor v,
                                   std::optional<at::Tensor> out, double softmax_scale,
                                   bool is_causal, int64_t window_size_left,
-                                  int64_t window_size_right, bool input_bshd, bool output_bshd) {
+                                  int64_t window_size_right, const std::string &input_layout,
+                                  const std::string &output_layout) {
   // {out, softmax_lse}
-  Workspace ws = fwd_workspace(q, input_bshd);
+  const auto in_l = layout_from_name(input_layout);
+  const auto out_l = layout_from_name(output_layout);
+  Workspace ws = fwd_workspace(q, in_l);
   return xi::mha_fwd(q, k, v, std::move(out), /*softmax_lse_=*/std::nullopt,
                      static_cast<float>(softmax_scale), is_causal,
-                     /*return_softmax=*/false, input_bshd, output_bshd,
+                     /*return_softmax=*/false, in_l, out_l,
                      static_cast<int>(window_size_left), static_cast<int>(window_size_right),
                      ws.ptr, ws.size, current_stream());
 }
@@ -93,14 +123,17 @@ std::vector<at::Tensor> xattn_bwd(at::Tensor dout, at::Tensor q, at::Tensor k, a
                                   std::optional<at::Tensor> alibi_slopes, double p_dropout,
                                   double softmax_scale, bool is_causal, int64_t window_size_left,
                                   int64_t window_size_right, double softcap, bool deterministic,
-                                  bool input_bshd, bool output_bshd) {
+                                  const std::string &input_layout,
+                                  const std::string &output_layout) {
   // {dq, dk, dv}
-  Workspace ws = bwd_workspace(q, k, input_bshd);
+  const auto in_l = layout_from_name(input_layout);
+  const auto out_l = layout_from_name(output_layout);
+  Workspace ws = bwd_workspace(q, k, in_l);
   return xi::mha_bwd(dout, q, k, v, out, softmax_lse, std::move(dq), std::move(dk), std::move(dv),
                      std::move(alibi_slopes), static_cast<float>(p_dropout),
                      static_cast<float>(softmax_scale), is_causal,
                      static_cast<int>(window_size_left), static_cast<int>(window_size_right),
-                     static_cast<float>(softcap), deterministic, input_bshd, output_bshd, ws.ptr,
+                     static_cast<float>(softcap), deterministic, in_l, out_l, ws.ptr,
                      ws.size, current_stream());
 }
 
@@ -112,18 +145,21 @@ std::vector<at::Tensor> xattn_fwd_quant(at::Tensor q, at::Tensor k, at::Tensor v
                                         std::optional<at::Tensor> amax_s,
                                         std::optional<at::Tensor> amax_o, double softmax_scale,
                                         bool is_causal, int64_t window_size_left,
-                                        int64_t window_size_right, bool input_bshd,
-                                        bool output_bshd) {
+                                        int64_t window_size_right,
+                                        const std::string &input_layout,
+                                        const std::string &output_layout) {
   // {out, lse, amax_s, amax_o}. Supplying amax_s/amax_o lets the caller hand in
   // its quantizers' amax slots so the reduction lands there directly.
-  Workspace ws = fwd_workspace(q, input_bshd);
+  const auto in_l = layout_from_name(input_layout);
+  const auto out_l = layout_from_name(output_layout);
+  Workspace ws = fwd_workspace(q, in_l);
   return xi::mha_fwd_quant(
       q, k, v, static_cast<float>(descale_q), static_cast<float>(descale_k),
       static_cast<float>(descale_v), static_cast<float>(scale_s), static_cast<float>(descale_s),
       static_cast<float>(scale_o), std::move(out), /*softmax_lse_=*/std::nullopt,
       checked_amax(std::move(amax_s), "amax_s"), checked_amax(std::move(amax_o), "amax_o"),
       static_cast<float>(softmax_scale), is_causal,
-      /*return_softmax=*/false, input_bshd, output_bshd, static_cast<int>(window_size_left),
+      /*return_softmax=*/false, in_l, out_l, static_cast<int>(window_size_left),
       static_cast<int>(window_size_right), ws.ptr, ws.size, current_stream());
 }
 
@@ -132,13 +168,16 @@ std::vector<at::Tensor> xattn_fwd_mx(at::Tensor q, at::Tensor k, at::Tensor v, a
                                      at::Tensor k_scale, at::Tensor v_scale,
                                      std::optional<at::Tensor> out, double softmax_scale,
                                      bool is_causal, int64_t window_size_left,
-                                     int64_t window_size_right, bool input_bshd, bool output_bshd) {
+                                     int64_t window_size_right, const std::string &input_layout,
+                                     const std::string &output_layout) {
   // {out, lse}
-  Workspace ws = fwd_workspace(q, input_bshd);
+  const auto in_l = layout_from_name(input_layout);
+  const auto out_l = layout_from_name(output_layout);
+  Workspace ws = fwd_workspace(q, in_l);
   return xi::mha_fwd_mx(q, k, v, q_scale, k_scale, v_scale, std::move(out),
                         /*softmax_lse_=*/std::nullopt,
                         static_cast<float>(softmax_scale), is_causal, /*return_softmax=*/false,
-                        input_bshd, output_bshd, static_cast<int>(window_size_left),
+                        in_l, out_l, static_cast<int>(window_size_left),
                         static_cast<int>(window_size_right), ws.ptr, ws.size, current_stream());
 }
 
@@ -152,11 +191,14 @@ std::vector<at::Tensor> xattn_bwd_quant(
     std::optional<at::Tensor> amax_dk, std::optional<at::Tensor> amax_dv,
     std::optional<at::Tensor> amax_ds, std::optional<at::Tensor> alibi_slopes, double p_dropout,
     double softmax_scale, bool is_causal, int64_t window_size_left, int64_t window_size_right,
-    double softcap, bool deterministic, bool input_bshd, bool output_bshd) {
+    double softcap, bool deterministic, const std::string &input_layout,
+    const std::string &output_layout) {
   // {dq, dk, dv, amax_dq, amax_dk, amax_dv, amax_ds}. The four amax reductions
   // write to distinct addresses, so a caller folding them together must still
   // pass four separate slots (they are plain stores, not atomic maxima).
-  Workspace ws = bwd_workspace(q, k, input_bshd);
+  const auto in_l = layout_from_name(input_layout);
+  const auto out_l = layout_from_name(output_layout);
+  Workspace ws = bwd_workspace(q, k, in_l);
   return xi::mha_bwd_quant(
       dout, q, k, v, out, softmax_lse, static_cast<float>(descale_q), static_cast<float>(descale_k),
       static_cast<float>(descale_v), static_cast<float>(descale_o), static_cast<float>(descale_do),
@@ -167,7 +209,7 @@ std::vector<at::Tensor> xattn_bwd_quant(
       checked_amax(std::move(amax_dv), "amax_dv"), checked_amax(std::move(amax_ds), "amax_ds"),
       std::move(alibi_slopes), static_cast<float>(p_dropout), static_cast<float>(softmax_scale),
       is_causal, static_cast<int>(window_size_left), static_cast<int>(window_size_right),
-      static_cast<float>(softcap), deterministic, input_bshd, output_bshd, ws.ptr, ws.size,
+      static_cast<float>(softcap), deterministic, in_l, out_l, ws.ptr, ws.size,
       current_stream());
 }
 
@@ -179,27 +221,27 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 
   m.def("fwd", &xattn_fwd, "xAttention forward (fp16/bf16)", py::arg("q"), py::arg("k"),
         py::arg("v"), py::arg("out"), py::arg("softmax_scale"), py::arg("is_causal"),
-        py::arg("window_size_left"), py::arg("window_size_right"), py::arg("input_bshd"),
-        py::arg("output_bshd"));
+        py::arg("window_size_left"), py::arg("window_size_right"), py::arg("input_layout"),
+        py::arg("output_layout"));
 
   m.def("bwd", &xattn_bwd, "xAttention backward (fp16/bf16)", py::arg("dout"), py::arg("q"),
         py::arg("k"), py::arg("v"), py::arg("out"), py::arg("softmax_lse"), py::arg("dq"),
         py::arg("dk"), py::arg("dv"), py::arg("alibi_slopes"), py::arg("p_dropout"),
         py::arg("softmax_scale"), py::arg("is_causal"), py::arg("window_size_left"),
         py::arg("window_size_right"), py::arg("softcap"), py::arg("deterministic"),
-        py::arg("input_bshd"), py::arg("output_bshd"));
+        py::arg("input_layout"), py::arg("output_layout"));
 
   m.def("fwd_quant", &xattn_fwd_quant, "xAttention forward (per-tensor fp8)", py::arg("q"),
         py::arg("k"), py::arg("v"), py::arg("descale_q"), py::arg("descale_k"), py::arg("descale_v"),
         py::arg("scale_s"), py::arg("descale_s"), py::arg("scale_o"), py::arg("out"),
         py::arg("amax_s"), py::arg("amax_o"), py::arg("softmax_scale"), py::arg("is_causal"),
-        py::arg("window_size_left"), py::arg("window_size_right"), py::arg("input_bshd"),
-        py::arg("output_bshd"));
+        py::arg("window_size_left"), py::arg("window_size_right"), py::arg("input_layout"),
+        py::arg("output_layout"));
 
   m.def("fwd_mx", &xattn_fwd_mx, "xAttention forward (MXFP8)", py::arg("q"), py::arg("k"),
         py::arg("v"), py::arg("q_scale"), py::arg("k_scale"), py::arg("v_scale"), py::arg("out"),
         py::arg("softmax_scale"), py::arg("is_causal"), py::arg("window_size_left"),
-        py::arg("window_size_right"), py::arg("input_bshd"), py::arg("output_bshd"));
+        py::arg("window_size_right"), py::arg("input_layout"), py::arg("output_layout"));
 
   m.def("bwd_quant", &xattn_bwd_quant, "xAttention backward (per-tensor fp8)", py::arg("dout"),
         py::arg("q"), py::arg("k"), py::arg("v"), py::arg("out"), py::arg("softmax_lse"),
@@ -210,5 +252,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("amax_dv"), py::arg("amax_ds"), py::arg("alibi_slopes"), py::arg("p_dropout"),
         py::arg("softmax_scale"), py::arg("is_causal"), py::arg("window_size_left"),
         py::arg("window_size_right"), py::arg("softcap"), py::arg("deterministic"),
-        py::arg("input_bshd"), py::arg("output_bshd"));
+        py::arg("input_layout"), py::arg("output_layout"));
 }

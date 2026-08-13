@@ -223,17 +223,15 @@ def _has_static_scale(quantizer) -> bool:
     return isinstance(quantizer, Float8Quantizer)
 
 
-def _to_bshd(x: torch.Tensor, fmt: str) -> torch.Tensor:
-    # x is per-tensor [*, h, d] laid out as fmt (sbhd or bshd); return bshd contig.
-    if fmt == "sbhd":
-        x = x.transpose(0, 1)
-    return x.contiguous()
+def _kernel_input(x: torch.Tensor) -> torch.Tensor:
+    """Hand a q/k/v/o payload to the kernel in its own layout.
 
-
-def _from_bshd(x: torch.Tensor, fmt: str) -> torch.Tensor:
-    if fmt == "sbhd":
-        return x.transpose(0, 1).contiguous()
-    return x
+    xAttention derives its batch/seq/head strides from the tensor and the layout
+    name, so sbhd data goes straight through -- no transpose to bshd -- and a
+    view into a packed qkv tensor needs no repack either. Only the head dim has
+    to be contiguous, which is already true for every layout TE dispatches here.
+    """
+    return x if x.stride(-1) == 1 else x.contiguous()
 
 
 def _window(window_size: Optional[Tuple[int, int]]) -> Tuple[int, int]:
@@ -269,9 +267,9 @@ def fp8_forward(
     wl, wr = _window(window_size)
     fmt = _qkv_format(qkv_layout)
 
-    qd = _to_bshd(_fp8_data(q_fp8), fmt)
-    kd = _to_bshd(_fp8_data(k_fp8), fmt)
-    vd = _to_bshd(_fp8_data(v_fp8), fmt)
+    qd = _kernel_input(_fp8_data(q_fp8))
+    kd = _kernel_input(_fp8_data(k_fp8))
+    vd = _kernel_input(_fp8_data(v_fp8))
 
     # The kernel folds scale_o into the output store whenever per-tensor quant is
     # on, so it may only be non-unit when we are actually asking for fp8 out.
@@ -298,19 +296,17 @@ def fp8_forward(
     res = _xattn.fwd_quant(
         qd, kd, vd, descale_q, descale_k, descale_v, scale_s, descale_s, scale_o,
         out, s_quantizer.amax, o_quantizer.amax,
-        float(softmax_scale), causal, wl, wr, True, True,
+        float(softmax_scale), causal, wl, wr, fmt, fmt,
     )
-    out_bshd, softmax_lse = res[0], res[1]
+    out_kernel, softmax_lse = res[0], res[1]
 
     if quantize_out:
         # scale_inv is derived from the quantizer on device; no host round trip.
         return (
-            o_quantizer.create_tensor_from_data(
-                _from_bshd(out_data, fmt), fake_dtype=q_fp8.dtype
-            ),
+            o_quantizer.create_tensor_from_data(out_data, fake_dtype=q_fp8.dtype),
             [softmax_lse.contiguous()],
         )
-    return _from_bshd(out_bshd, fmt), [softmax_lse.contiguous()]
+    return out_kernel, [softmax_lse.contiguous()]
 
 
 def fp8_backward(
@@ -345,11 +341,11 @@ def fp8_backward(
     wl, wr = _window(window_size)
     fmt = _qkv_format(qkv_layout)
 
-    qd = _to_bshd(_fp8_data(q_fp8), fmt)
-    kd = _to_bshd(_fp8_data(k_fp8), fmt)
-    vd = _to_bshd(_fp8_data(v_fp8), fmt)
-    od = _to_bshd(_fp8_data(out_fp8), fmt)
-    dod = _to_bshd(_fp8_data(d_out_fp8), fmt)
+    qd = _kernel_input(_fp8_data(q_fp8))
+    kd = _kernel_input(_fp8_data(k_fp8))
+    vd = _kernel_input(_fp8_data(v_fp8))
+    od = _kernel_input(_fp8_data(out_fp8))
+    dod = _kernel_input(_fp8_data(d_out_fp8))
 
     # The kernel folds scale_dq/dk/dv into the gradient stores, so they may only
     # be non-unit when we are actually asking for fp8 dq/dk/dv.
@@ -374,16 +370,15 @@ def fp8_backward(
     # One quantizer covers all three gradients, so they share a single scale.
     scale_dqkv = rest[0] if quantize_dqkv else 1.0
 
-    b, s, h, d = qd.shape
     if quantize_dqkv:
         # TE keeps fp8 payloads as uint8; the kernel wants the fp8 view of them.
         grad_dtype = _torch_fp8_dtype(dqkv_quantizer.dtype)
-        dq_data = torch.empty(b, s, h, d, device=qd.device, dtype=torch.uint8)
+        dq_data = torch.empty_like(qd, dtype=torch.uint8)
         dk_data = torch.empty_like(kd, dtype=torch.uint8)
         dv_data = torch.empty_like(vd, dtype=torch.uint8)
         dq, dk, dv = (t.view(grad_dtype) for t in (dq_data, dk_data, dv_data))
     else:
-        dq = torch.empty(b, s, h, d, device=qd.device, dtype=torch.bfloat16)
+        dq = torch.empty_like(qd, dtype=torch.bfloat16)
         dk = torch.empty_like(kd, dtype=torch.bfloat16)
         dv = torch.empty_like(vd, dtype=torch.bfloat16)
 
@@ -403,7 +398,7 @@ def fp8_backward(
         dq, dk, dv,
         amax_dqkv[0:1], amax_dqkv[1:2], amax_dqkv[2:3], dp_quantizer.amax,
         None,
-        0.0, float(softmax_scale), causal, wl, wr, 0.0, bool(deterministic), True, True,
+        0.0, float(softmax_scale), causal, wl, wr, 0.0, bool(deterministic), fmt, fmt,
     )
     dq_o, dk_o, dv_o = res[0], res[1], res[2]
 
@@ -412,10 +407,8 @@ def fp8_backward(
     if quantize_dqkv:
         # scale_inv is derived from the quantizer on device; no host round trip.
         return tuple(
-            dqkv_quantizer.create_tensor_from_data(
-                _from_bshd(t, fmt), fake_dtype=d_out_fp8.dtype
-            )
+            dqkv_quantizer.create_tensor_from_data(t, fake_dtype=d_out_fp8.dtype)
             for t in (dq_data, dk_data, dv_data)
         )
 
-    return _from_bshd(dq_o, fmt), _from_bshd(dk_o, fmt), _from_bshd(dv_o, fmt)
+    return dq_o, dk_o, dv_o
