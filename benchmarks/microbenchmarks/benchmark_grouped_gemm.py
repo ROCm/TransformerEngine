@@ -13,6 +13,7 @@ from utils import (
     compute_tflops,
     make_forward_backward_metric_records,
     run_benchmarks,
+    make_input,
 )
 
 BENCHMARK_LABEL = "Grouped GEMM"
@@ -114,18 +115,21 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype):
         params_dtype=dtype,
         device=device,
     )
-    x = torch.randn((sum_M, K), dtype=dtype, device=device, requires_grad=True)
+    # Rotate the activation buffer (on by default) so back-to-back grouped GEMMs 
+    # read different memory; GroupedLinear splits it internally per m_splits.
+    next_x = make_input((sum_M, K), dtype, device=device, requires_grad=True)
 
     def fwd_func_te():
-        return grouped_linear(x, m_splits, m_splits_tensor=m_splits_tensor)
+        return grouped_linear(next_x(), m_splits, m_splits_tensor=m_splits_tensor)
 
     out_te = fwd_func_te()
     grad_out = torch.randn_like(out_te)
 
     def fwd_bwd_func_te():
-        out = grouped_linear(x, m_splits, m_splits_tensor=m_splits_tensor)
+        xb = next_x()
+        out = grouped_linear(xb, m_splits, m_splits_tensor=m_splits_tensor)
         out.backward(grad_out)
-        x.grad = None
+        xb.grad = None
         for param in grouped_linear.parameters():
             param.grad = None
 

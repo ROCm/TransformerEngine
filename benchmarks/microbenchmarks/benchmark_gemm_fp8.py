@@ -17,6 +17,7 @@ from transformer_engine.common.recipe import DelayedScaling, Format
 from utils import (
     generate_gemm_test_cases,
     time_func, compute_tflops, make_forward_backward_metric_records, run_benchmarks,
+    make_input,
 )
 
 RECIPES = {
@@ -36,18 +37,19 @@ def bench_fp8_gemm(Case, M, N, K, dtype):
     device = "cuda"
 
     linear = te.Linear(K, N, bias=False).to(device=device, dtype=dtype)
-    x = torch.randn(M, K, dtype=dtype, device=device, requires_grad=True)
+    next_x = make_input((M, K), dtype, device=device, requires_grad=True)
     grad_out = torch.randn(M, N, dtype=dtype, device=device)
 
     def fwd_func():
         with te.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
-            return linear(x)
+            return linear(next_x())
 
     def fwd_bwd_func():
+        xb = next_x()
         with te.fp8_autocast(enabled=True, fp8_recipe=FP8_RECIPE):
-            out = linear(x)
+            out = linear(xb)
             out.backward(grad_out)
-        x.grad = None
+        xb.grad = None
         linear.weight.grad = None
 
     fwd_flops = 2 * M * N * K

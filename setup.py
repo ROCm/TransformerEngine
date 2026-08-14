@@ -443,8 +443,9 @@ if __name__ == "__main__":
         } if not rocm_build() else {
             "rocm": [f"transformer_engine_rocm7=={__version__}"],
             "rocm7": [f"transformer_engine_rocm7=={__version__}"],
-            "rocm_pytorch": [f"transformer_engine_rocm7[pytorch]=={__version__}"],
-            "rocm_jax": [f"transformer_engine_rocm7[jax]=={__version__}"],
+            "rocm10": [f"transformer_engine_rocm10=={__version__}"],
+            "rocm_pytorch": [f"transformer_engine_rocm_torch=={__version__}"],
+            "rocm_jax": [f"transformer_engine_rocm_jax=={__version__}"],
         }
     else:
         install_requires, test_requires = setup_requirements()
