@@ -151,9 +151,7 @@ pybind11::dict Registrations() {
 #endif  // NVTE_WITH_NCCL_EP
 
   // TopK
-#ifndef USE_ROCM  // Disabled on ROCm
   dict["te_topk_ffi"] = EncapsulateFFI(TopkHandler);
-#endif
 
   return dict;
 }
@@ -177,9 +175,7 @@ PYBIND11_MODULE(transformer_engine_jax, m) {
   m.def("get_norm_bwd_workspace_sizes", &GetNormBackwardWorkspaceSizes);
   m.def("get_fused_attn_fwd_workspace_sizes", &GetFusedAttnForwardWorkspaceSizes);
   m.def("get_fused_attn_bwd_workspace_sizes", &GetFusedAttnBackwardWorkspaceSizes);
-#ifndef USE_ROCM
   m.def("get_topk_workspace_sizes", &GetTopkWorkspaceSizes);
-#endif
   m.def("nvte_get_qkv_format", &nvte_get_qkv_format);
   m.def("is_non_nt_fp8_gemm_supported", &nvte_is_non_tn_fp8_gemm_supported);
 #ifndef USE_ROCM
