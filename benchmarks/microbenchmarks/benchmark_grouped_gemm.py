@@ -6,12 +6,14 @@
 ###############################################################################
 
 import torch
+import transformer_engine.pytorch as te
 from utils import (
     DTYPE_LIST,
     time_func,
     compute_tflops,
     make_forward_backward_metric_records,
     run_benchmarks,
+    make_input,
 )
 
 BENCHMARK_LABEL = "Grouped GEMM"
@@ -97,105 +99,48 @@ def generate_grok_v2_test_cases():
     )
 
 
-def make_fwd_bwd_funcs_te(x, w, group_lens, activation_dtype):
-    from transformer_engine.pytorch.cpp_extensions import general_grouped_gemm
-
-    B = int(group_lens.numel())
-    N = int(w.shape[1])
-    K = int(w.shape[2])
-
-    m_splits = [int(v) for v in group_lens.tolist()]
-    assert len(m_splits) == B
-    sum_M = sum(m_splits)
-    assert x.numel() > 0 and x.shape[0] == sum_M
-
-    x_view = x.reshape(-1, x.shape[-1])
-    xs = list(torch.split(x_view, m_splits))
-    weights = [w[i] for i in range(B)]
-
-    out = torch.empty((sum_M, N), device=x.device, dtype=activation_dtype)
-
-    def fwd_func_te():
-        general_grouped_gemm(
-            A=weights,
-            B=xs,
-            out=[out],
-            quantization_params=[None] * B,
-            out_dtype=activation_dtype,
-            single_output=True,
-            m_splits=m_splits,
-            use_bias=False,
-            bias=None,
-            layout="TN",
-        )
-        return out
-
-    dx = torch.empty((sum_M, K), device=x.device, dtype=activation_dtype)
-    dxs = list(torch.split(dx, m_splits))
-
-    dw_stacked = torch.empty((B, N, K), device=x.device, dtype=activation_dtype)
-    dws = [dw_stacked[i] for i in range(B)]
-
-    def bwd_func_te(grad_out):
-        go = grad_out.view(-1, grad_out.shape[-1])
-        splits = torch.split(go, m_splits)
-
-        general_grouped_gemm(
-            A=weights,
-            B=splits,
-            out=dxs,
-            quantization_params=[None] * B,
-            out_dtype=activation_dtype,
-            single_output=False,
-            layout="NN",
-            m_splits=m_splits,
-            grad=False,
-            use_bias=False,
-            bias=None,
-        )
-
-        general_grouped_gemm(
-            A=xs,
-            B=splits,
-            out=dws,
-            quantization_params=[None] * B,
-            out_dtype=activation_dtype,
-            single_output=False,
-            layout="NT",
-            m_splits=m_splits,
-            grad=False,
-            use_bias=False,
-            bias=None,
-            accumulate=False,
-        )
-
-        return dx, dw_stacked
-
-    return fwd_func_te, bwd_func_te
-
-
 def bench_grouped_gemm(Case, B, M, N, K, dtype):
     device = "cuda"
 
-    x = torch.randn((B * M, K), dtype=dtype, device=device, requires_grad=True)
-    w = torch.randn((B, N, K), dtype=dtype, device=device, requires_grad=True)
-    group_lens = generate_grouped_gemm_group_lens(B, M, balance=True).to(device)
+    group_lens = generate_grouped_gemm_group_lens(B, M, balance=True)
+    m_splits = [int(v) for v in group_lens.tolist()]
+    m_splits_tensor = torch.tensor(m_splits, dtype=torch.int32, device=device)
+    sum_M = sum(m_splits)
 
-    x_te = x.clone().detach()
-    w_te = w.clone().detach()
-    fwd_func_te, bwd_func_te_inner = make_fwd_bwd_funcs_te(
-        x_te, w_te, group_lens, activation_dtype=dtype
+    grouped_linear = te.GroupedLinear(
+        B,
+        K,
+        N,
+        bias=False,
+        params_dtype=dtype,
+        device=device,
     )
+    # Rotate the activation buffer (on by default) so back-to-back grouped GEMMs 
+    # read different memory; GroupedLinear splits it internally per m_splits.
+    next_x = make_input((sum_M, K), dtype, device=device, requires_grad=True)
+
+    def fwd_func_te():
+        return grouped_linear(next_x(), m_splits, m_splits_tensor=m_splits_tensor)
 
     out_te = fwd_func_te()
     grad_out = torch.randn_like(out_te)
-    bwd_func_te = lambda: bwd_func_te_inner(grad_out)
 
-    fwd_total_flops = 2 * B * M * N * K
+    def fwd_bwd_func_te():
+        xb = next_x()
+        out = grouped_linear(xb, m_splits, m_splits_tensor=m_splits_tensor)
+        out.backward(grad_out)
+        xb.grad = None
+        for param in grouped_linear.parameters():
+            param.grad = None
+
+    fwd_bwd_func_te()
+
+    fwd_total_flops = 2 * sum_M * N * K
     bwd_total_flops = 2 * fwd_total_flops
 
     fwd_te_ms, fwd_measurement = time_func(fwd_func_te)
-    bwd_te_ms, bwd_measurement = time_func(bwd_func_te)
+    fwd_bwd_te_ms, fwd_bwd_measurement = time_func(fwd_bwd_func_te)
+    bwd_te_ms = fwd_bwd_te_ms - fwd_te_ms
 
     fwd_te_tflops = compute_tflops(fwd_total_flops, fwd_te_ms)
     bwd_te_tflops = compute_tflops(bwd_total_flops, bwd_te_ms)
@@ -207,8 +152,9 @@ def bench_grouped_gemm(Case, B, M, N, K, dtype):
         fwd_te_tflops,
         bwd_te_ms,
         bwd_te_tflops,
+        backward_derived=True,
         fwd_measurement=fwd_measurement,
-        bwd_measurement=bwd_measurement,
+        fwd_bwd_measurement=fwd_bwd_measurement,
     )
 
 

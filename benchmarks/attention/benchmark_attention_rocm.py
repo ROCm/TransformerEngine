@@ -4,9 +4,8 @@
 # 
 # See LICENSE for license information.
 
-import os, sys, time, shutil
+import os, sys, time, shutil, subprocess
 import argparse
-import subprocess
 import pandas as pd
 import numpy as np
 import torch
@@ -137,7 +136,71 @@ KERNEL_PATTERNS = {
     "aotriton_bwd": "bwd",
 }
 
-# Runs benchmark with warmup iterations and profiles using rocprof
+ROCPROF_STATS_CSV = "results.stats.csv"
+
+def _profiler_python_code(model, attention, column_name, benchmark_dir):
+    return (
+        f"import sys; sys.path.insert(0, {benchmark_dir!r}); "
+        f"import benchmark_attention_rocm; "
+        f"benchmark_attention_rocm.benchmark_dot_product_attention_profiler("
+        f"{model!r}, {attention!r}, {column_name!r})"
+    )
+
+
+def _collect_rocprofv3_kernel_stats(dirname):
+    """rocprofv3 writes <dirname>/<host>/<pid>_kernel_stats.csv; TE expects results.stats.csv."""
+    stats_path = os.path.join(dirname, ROCPROF_STATS_CSV)
+    candidates = []
+    for root, _, files in os.walk(dirname):
+        for name in files:
+            if name.endswith("_kernel_stats.csv"):
+                candidates.append(os.path.join(root, name))
+    if not candidates:
+        return
+    src = max(candidates, key=os.path.getmtime)
+    if os.path.abspath(src) != os.path.abspath(stats_path):
+        shutil.copy2(src, stats_path)
+
+
+def _run_attention_profiler(model, attention, column_name, dirname):
+    benchmark_dir = os.path.dirname(os.path.abspath(__file__))
+    py_code = _profiler_python_code(model, attention, column_name, benchmark_dir)
+    cmd = [
+        "rocprofv3",
+        "--hip-trace",
+        "--kernel-trace",
+        "--stats",
+        "-f",
+        "csv",
+        "-d",
+        dirname,
+        "--",
+        sys.executable,
+        "-c",
+        py_code,
+    ]
+    try:
+        # Pass os.environ explicitly: C code may set ROCPROFILER_REGISTER_LIBRARY
+        # via setenv() without updating Python's environ cache, which breaks rocprofv3.
+        result = subprocess.run(cmd, capture_output=True, text=True, env=os.environ.copy())
+    except FileNotFoundError:
+        print(
+            "WARNING: rocprofv3 not found on PATH; kernel timing columns may be empty.",
+            file=sys.stderr,
+        )
+        return
+    if result.returncode != 0:
+        print(
+            f"WARNING: rocprofv3 failed (exit {result.returncode}); "
+            f"see stderr below. Kernel timing columns may be empty.\n{result.stderr[-4000:]}",
+            file=sys.stderr,
+        )
+        return
+
+    _collect_rocprofv3_kernel_stats(dirname)
+
+
+# Runs benchmark with warmup iterations and profiles using rocprofv3
 def benchmark_dot_product_attention(model, attention, column_name, dirname):
     config = model_configs[model]
 
@@ -153,29 +216,7 @@ def benchmark_dot_product_attention(model, attention, column_name, dirname):
                 is_training,
             )
     os.makedirs(dirname, exist_ok=True)
-    before_files = set(os.listdir(cwd))
-    # Profiling command using rocprof
-    benchmark_dir = os.path.dirname(os.path.abspath(__file__))
-    prof_cmd = [
-            "rocprof",
-            "--hip-trace",
-            "--basenames off",
-            "python",
-            "-c",
-            f""" "import sys; sys.path.insert(0, '{benchmark_dir}'); import benchmark_attention_rocm;""",
-            f"""benchmark_attention_rocm.benchmark_dot_product_attention_profiler("""
-            f"""'{model}', '{attention}', '{column_name}')" """,
-        ]
-    prof_cmd = " ".join(prof_cmd)
-    subprocess.call(prof_cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=True)
-    after_files = set(os.listdir(cwd))
-    new_files = after_files - before_files
-
-    for f in new_files:
-        src_path = os.path.join(cwd, f)
-        dst_path = os.path.join(dirname, f)
-        if os.path.isfile(src_path):  # Only move files, not directories
-            shutil.move(src_path, dst_path)
+    _run_attention_profiler(model, attention, column_name, dirname)
     torch.cuda.empty_cache()
     
 # Runs profiler and records timing information
@@ -215,12 +256,34 @@ def calculate_attention_tflops(batch_size, seq_len, num_heads_q, head_dim_qk, fw
     return fwd_tflops, bwd_tflops
 
 # Helper function to extract timing results from profiler logs
-def parse_helper(model, dirname, fwd_search_pattern, bwd_search_pattern, column_name, df_times):
-    df = pd.read_csv(os.path.join(dirname, "results.stats.csv"))
+def parse_helper(
+    model,
+    dirname,
+    fwd_search_pattern,
+    bwd_search_pattern,
+    column_name,
+    df_times,
+    *,
+    fwd_fallback=None,
+    bwd_fallback=None,
+):
+    stats_csv = os.path.join(dirname, ROCPROF_STATS_CSV)
+    if not os.path.isfile(stats_csv):
+        print(
+            f"WARNING: {stats_csv} missing for {model} [{column_name}]; skipping kernel parse.",
+            file=sys.stderr,
+        )
+        return False
+    df = pd.read_csv(stats_csv)
 
     # Extract kernel timing values
     fwd_values = df[df["Name"].str.contains(fwd_search_pattern, regex=False)]["AverageNs"].to_numpy()
+    # Optional fallback: when profiling v3, CK may still emit v2 kernel names.
+    if len(fwd_values) == 0 and fwd_fallback is not None:
+        fwd_values = df[df["Name"].str.contains(fwd_fallback, regex=False)]["AverageNs"].to_numpy()
     bwd_values = df[df["Name"].str.contains(bwd_search_pattern, regex=False)]["AverageNs"].to_numpy()
+    if len(bwd_values) == 0 and bwd_fallback is not None:
+        bwd_values = df[df["Name"].str.contains(bwd_fallback, regex=False)]["AverageNs"].to_numpy()
 
     if len(fwd_values) == 0 or len(bwd_values) == 0:
         return False  # Kernels not found
@@ -256,12 +319,22 @@ def parse_results(model, df_times, perf_dir_flash_attn, perf_dir_fused_ck, perf_
     if perf_dir_flash_attn:
         parse_helper(model, perf_dir_flash_attn, KERNEL_PATTERNS["flash_fwd"], KERNEL_PATTERNS["flash_bwd"], "FlashAttention", df_times)
     
-    # Parse FusedAttention CK (use v3 or v2 patterns based on flags)
+    # Parse FusedAttention CK (use v3 or v2 patterns based on flags).
+    # When v3 is requested, fall back to v2 kernel names if rocprofv3 did not
+    # capture v3 symbols (e.g. CK fell back to v2 at runtime on this config).
     if perf_dir_fused_ck:
         fwd_pattern = KERNEL_PATTERNS["ck_fwd_v3"] if use_ck_fwd_v3 else KERNEL_PATTERNS["ck_fwd_v2"]
         bwd_pattern = KERNEL_PATTERNS["ck_bwd_v3"] if use_ck_bwd_v3 else KERNEL_PATTERNS["ck_bwd_v2"]
-        parse_helper(model, perf_dir_fused_ck, fwd_pattern, bwd_pattern, "FusedAttention CK", df_times)
-    
+        parse_helper(
+            model,
+            perf_dir_fused_ck,
+            fwd_pattern,
+            bwd_pattern,
+            "FusedAttention CK",
+            df_times,
+            fwd_fallback=KERNEL_PATTERNS["ck_fwd_v2"] if use_ck_fwd_v3 else None,
+            bwd_fallback=KERNEL_PATTERNS["ck_bwd_v2"] if use_ck_bwd_v3 else None,
+        )
     # Parse AOTriton
     if perf_dir_fused_aotriton:
         parse_helper(model, perf_dir_fused_aotriton, KERNEL_PATTERNS["aotriton_fwd"], KERNEL_PATTERNS["aotriton_bwd"], "FusedAttention AOTriton", df_times)
@@ -323,12 +396,14 @@ def sanity_checks(
         print(f"{model}:")
         # Rocprof run status
         for be, pat in expected.items():
-            stats = os.path.join(profiler_root, pat.format(model=model), "results.stats.csv")
+            stats = os.path.join(profiler_root, pat.format(model=model), ROCPROF_STATS_CSV)
             if os.path.isfile(stats):
                 print(f"  [{be:<22}] Profiling successful")
             else:
                 ok_overall = False
-                raise FileNotFoundError(f"Error while profiling {model} [{be}], results.stats.csv not found")
+                raise FileNotFoundError(
+                    f"Error while profiling {model} [{be}], {ROCPROF_STATS_CSV} not found"
+                )
 
         print("-" * 60)
     return ok_overall
@@ -347,7 +422,7 @@ def main(args):
     os.makedirs(output_dir)
 
     df_times = pd.DataFrame(index=indices, columns=columns)
-    df_times = df_times.infer_objects(copy=False)
+    df_times = df_times.infer_objects()
     df_times.fillna(0.0, inplace=True)
     df_times.index.name = "Model"
     df_times.to_csv(output_csv_path)

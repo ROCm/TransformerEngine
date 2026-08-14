@@ -13,6 +13,12 @@
 #include "transformer_engine/transformer_engine.h"
 
 #ifdef USE_ROCM
+#include <ATen/cuda/CUDAContext.h>
+
+#include <map>
+#include <mutex>
+#include <utility>
+
 #include "common/common.h"
 #endif
 
@@ -30,6 +36,20 @@ std::vector<size_t> convert_shape_back_from_fp4(const std::vector<size_t>& shape
     ret.push_back(shape.front());
   }
   return ret;
+}
+
+std::array<size_t, 2> get_2d_dims(NVTEShape shape, bool transpose) {
+  if (!transpose) {
+    size_t flat_first = 1;
+    for (size_t i = 0; i + 1 < shape.ndim; ++i) flat_first *= shape.data[i];
+    const size_t flat_last = shape.ndim > 0 ? shape.data[shape.ndim - 1] : 1;
+    return {flat_first, flat_last};
+  } else {
+    const size_t flat_first = shape.ndim > 0 ? shape.data[0] : 1;
+    size_t flat_last = 1;
+    for (size_t i = 1; i < shape.ndim; ++i) flat_last *= shape.data[i];
+    return {flat_first, flat_last};
+  }
 }
 
 std::vector<size_t> getTensorShape(const at::Tensor& t) {
@@ -76,6 +96,31 @@ transformer_engine::DType getTransformerEngineFP8Type(bool e4m3_if_hybrid,
     return transformer_engine::DType::kFloat8E4M3;
   }
   return transformer_engine::DType::kFloat8E5M2;
+}
+
+pybind11::object MakePythonDType(transformer_engine::DType dtype) {
+  constexpr size_t num_dtypes = static_cast<size_t>(transformer_engine::DType::kNumTypes);
+  const size_t idx = static_cast<size_t>(dtype);
+  NVTE_CHECK(idx < num_dtypes, "Invalid DType (", idx, ").");
+
+  // Cache one ``transformer_engine.pytorch.DType`` member per value, built once in a
+  // thread-safe C++11 "magic static" initializer.
+  static const std::array<pybind11::object, num_dtypes> cache = [] {
+    pybind11::object dtype_cls =
+        pybind11::module_::import("transformer_engine.pytorch").attr("DType");
+    std::array<pybind11::object, num_dtypes> members;
+    for (pybind11::handle member : dtype_cls) {
+      const size_t value = member.attr("value").cast<size_t>();
+      if (value < num_dtypes) {
+        members[value] = pybind11::reinterpret_borrow<pybind11::object>(member);
+      }
+    }
+    return members;
+  }();
+  const pybind11::object& member = cache[idx];
+  NVTE_CHECK(static_cast<bool>(member), "No transformer_engine.pytorch.DType member for DType (",
+             idx, "); the Python DType enum is out of sync with the C++ enum.");
+  return member;
 }
 
 TensorWrapper makeTransformerEngineTensor(py::handle tensor, py::handle quantizer) {
@@ -328,10 +373,23 @@ at::Tensor allocate_amax_workspace(const TensorWrapper& input_tensor) {
     return at::empty(0, at::CUDA(at::kFloat));
   }
 
-  const auto N = input_tensor.numel();
-  size_t workspace_blocks = nvte_amax_workspace_num_blocks(N);
+  // Persistent: a per-call tensor is reclaimed while its kernels are still enqueued, which
+  // graph capture turns into an aliased read. One buffer per (device, stream).
+  // Leaked deliberately: these hold device memory and must not be destroyed at static teardown.
+  static std::mutex &amax_ws_mutex = *new std::mutex;
+  static auto &amax_ws_cache = *new std::map<std::pair<int, cudaStream_t>, at::Tensor>;
 
-  return at::empty(workspace_blocks, at::CUDA(at::kFloat));
+  const int device_id = at::cuda::current_device();
+  const cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+
+  std::lock_guard<std::mutex> lock(amax_ws_mutex);
+  auto& ws = amax_ws_cache[std::make_pair(device_id, stream)];
+  if (!ws.defined()) {
+    // Any N past the block cap yields the cap itself; avoid SIZE_MAX so DIVUP cannot overflow.
+    ws = at::empty(nvte_amax_workspace_num_blocks(static_cast<size_t>(1) << 40),
+                   at::CUDA(at::kFloat));
+  }
+  return ws;
 }
 
 #endif

@@ -1,49 +1,91 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 #
 # See LICENSE for license information.
+#
+# TE CI deps image
 
-## TE CI Dockerfile
-ARG BASE_DOCKER=registry-sc-harbor.amd.com/framework/compute-rocm-rel-7.2:57_ubuntu22.04_py3.11_pytorch_release-2.8_08d38866
-FROM $BASE_DOCKER
-WORKDIR /
+FROM ubuntu:24.04
 
-# Updated git via git-core PPA
-RUN apt-get update && apt-get install -y --no-install-recommends software-properties-common \
-    && add-apt-repository ppa:git-core/ppa -y \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends git vim \
+ARG DEBIAN_FRONTEND=noninteractive
+SHELL ["/bin/bash", "-euo", "pipefail", "-c"]
+
+ARG ROCK_RELEASE_VERSION=7.14.0
+ARG PYTHON_VERSION=3.12
+ARG PYTHON_ABI=cp312
+ARG TORCH_VERSION=2.12.0
+ARG TORCHVISION_VERSION=0.27.0
+# triton 3.7.1 ships as a git snapshot: triton-3.7.1+<TRITON_LOCAL>.rocm<rel>
+ARG TRITON_VERSION=3.7.1
+ARG TRITON_LOCAL=git0263a6a6
+ARG JAX_VERSION=0.11.0
+ARG FA_VERSION=v2.8.3
+ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
+ARG GPU_ARCH=gfx950;gfx942
+
+# Base OS packages
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates curl \
+    git vim \
+    build-essential cmake ninja-build pkg-config liblzma-dev \
+    libnuma1 libnuma-dev \
+    python${PYTHON_VERSION} python${PYTHON_VERSION}-venv python${PYTHON_VERSION}-dev python3-pip \
     && rm -rf /var/lib/apt/lists/*
 
-# Build arguments
-ARG FA_VERSION=v2.8.1
-ARG ROCM_VERSION=7.2
-ARG JAX_VERSION=0.8.0
-ARG PYTHON_VERSION=311
-# AITER - Required for MXFP4 FP4 GEMM kernels.
-ARG AITER_COMMIT=77455e3ecf4f0d28756afc452e914940c45b944b
+# Isolated Python env for pip packages
+RUN python${PYTHON_VERSION} -m venv /opt/venv
 
-RUN pip install setuptools wheel
-RUN pip install ipython pytest fire pydantic pybind11 ninja pandas
+# Default container env: venv on PATH. ROCm is provided by the pip rocm-sdk and
+# resolved on demand via `rocm-sdk path --root` (no /opt/rocm install).
+ENV VIRTUAL_ENV=/opt/venv \
+    PATH=/opt/venv/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 
-# Install flash-attention
-RUN git clone --branch ${FA_VERSION} --depth 1 https://github.com/Dao-AILab/flash-attention.git \
-    && cd flash-attention \
-    && GPU_ARCHS="gfx950;gfx942" FLASH_ATTENTION_TRITON_AMD_ENABLE=TRUE FLASH_ATTENTION_SKIP_CK_BUILD=FALSE python setup.py install \
-    && cd ..
+RUN python -m pip install --upgrade pip setuptools wheel pyyaml \
+    && pip install --no-cache-dir ipython pytest fire pydantic pybind11 ninja pandas expecttest onnxscript
 
-# Install AITER
-RUN git clone --no-checkout https://github.com/ROCm/aiter.git \
-    && cd aiter \
-    && git checkout ${AITER_COMMIT} \
+# Python ROCm SDK + torch from https://repo.amd.com/rocm/whl-multi-arch/
+# Multi-arch layout: arch-agnostic wheels (rocm-sdk-libraries, torch, torchvision,
+# triton) installed once, then a per-GPU device wheel (rocm-sdk-device-<arch>,
+# amd_torch_device_<arch>, amd_torchvision_device_<arch>) for every arch in
+# GPU_ARCH (semicolon-separated, overridable via --build-arg).
+RUN W="https://repo.amd.com/rocm/whl-multi-arch" \
+    && ROCM_WHEEL_TAG="rocm${ROCK_RELEASE_VERSION}" \
+    && pip install --no-cache-dir \
+        --extra-index-url "${W}" \
+        "rocm-sdk-core==${ROCK_RELEASE_VERSION}" \
+        "rocm-sdk-devel==${ROCK_RELEASE_VERSION}" \
+        "rocm-sdk-libraries==${ROCK_RELEASE_VERSION}" \
+        "${W}/rocm-${ROCK_RELEASE_VERSION}.tar.gz" \
+        "${W}/torch-${TORCH_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
+        "${W}/torchvision-${TORCHVISION_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
+        "${W}/triton-${TRITON_VERSION}%2B${TRITON_LOCAL}.${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
+    && for arch in ${GPU_ARCH//;/ }; do \
+         pip install --no-cache-dir --extra-index-url "${W}" \
+           "rocm-sdk-device-${arch}==${ROCK_RELEASE_VERSION}" \
+           "${W}/amd_torch_device_${arch}-${TORCH_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" \
+           "${W}/amd_torchvision_device_${arch}-${TORCHVISION_VERSION}%2B${ROCM_WHEEL_TAG}-${PYTHON_ABI}-${PYTHON_ABI}-linux_x86_64.whl" ; \
+       done
+
+# Install Jax
+RUN pip install --no-cache-dir \
+        "jax==${JAX_VERSION}" \
+        "jax-rocm7-pjrt==${JAX_VERSION}" \
+        "jax-rocm7-plugin==${JAX_VERSION}"
+
+# Install Flash Attention
+RUN export ROCM_PATH="$(rocm-sdk path --root)" \
+    && git clone --branch "${FA_VERSION}" --depth 1 https://github.com/Dao-AILab/flash-attention.git /tmp/flash-attention \
+    && cd /tmp/flash-attention \
+    && GPU_ARCHS="${GPU_ARCH}" python setup.py install \
+    && rm -rf /tmp/flash-attention
+
+# Install Aiter
+RUN export ROCM_PATH="$(rocm-sdk path --root)" \
+    && git clone --no-checkout https://github.com/ROCm/aiter.git /tmp/aiter \
+    && cd /tmp/aiter \
+    && git checkout "${AITER_COMMIT}" \
     && git submodule update --init --recursive \
-    && pip install .
-
-# Install JAX
-RUN ROCM_MAJOR=$(echo "${ROCM_VERSION}" | cut -d. -f1) && pip install \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-${ROCM_VERSION}/jax_rocm${ROCM_MAJOR}_pjrt-${JAX_VERSION}%2Brocm${ROCM_VERSION}.0-py3-none-manylinux_2_28_x86_64.whl \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-${ROCM_VERSION}/jax_rocm${ROCM_MAJOR}_plugin-${JAX_VERSION}%2Brocm${ROCM_VERSION}.0-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux_2_28_x86_64.whl \
-    jax==${JAX_VERSION} \
-    https://repo.radeon.com/rocm/manylinux/rocm-rel-${ROCM_VERSION}/jaxlib-${JAX_VERSION}%2Brocm${ROCM_VERSION}.0-cp${PYTHON_VERSION}-cp${PYTHON_VERSION}-manylinux_2_27_x86_64.whl
+    && pip install --no-build-isolation --no-cache-dir . \
+    && rm -rf /tmp/aiter
 
 WORKDIR /workspace/
 CMD ["/bin/bash"]

@@ -88,16 +88,15 @@ jobs:
           fi
 
           echo "Selected config key: $JSON_KEY"
-          IMAGE_TO_USE=$(jq -r --arg key "$JSON_KEY" '.docker_images[$key]' ci/ci_config.json)
+          IMAGE_BASE=$(jq -r --arg key "$JSON_KEY" '.docker_images[$key]' ci/ci_config.json)
 
           MANUAL_OVERRIDE="${{ inputs.docker_image_override }}"
           if [[ -n "$MANUAL_OVERRIDE" ]]; then
             echo "::notice::Manual override detected: $MANUAL_OVERRIDE"
-            IMAGE_TO_USE="$MANUAL_OVERRIDE"
           fi
 
-          echo "Selected image: $IMAGE_TO_USE"
-          echo "image-tag=$IMAGE_TO_USE" >> $GITHUB_OUTPUT
+          echo "Selected base image tag: $IMAGE_BASE"
+          echo "image-tag=$IMAGE_BASE" >> $GITHUB_OUTPUT
 
   build:
     # Delegate wheel building to the reusable workflow on dev. It produces a core .whl plus framework .tar.gz sdists under artifact name `te-rocm-wheels`.
@@ -108,7 +107,9 @@ jobs:
     name: sGPU Tests (${{ matrix.arch_label }})
     needs: [select_image, build]
     timeout-minutes: 270
-    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || 'linux-te-mi35x-4' }}
+    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-4' }}
+    env:
+      DOCKER_IMAGE: ${{ inputs.docker_image_override || needs.select_image.outputs.image-tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -140,7 +141,7 @@ jobs:
 
       - name: Pull Docker Image
         run: |
-          docker pull ${{ needs.select_image.outputs.image-tag }}
+          docker pull ${{ env.DOCKER_IMAGE }}
 
       - &run_container
         name: Run Container
@@ -159,7 +160,7 @@ jobs:
             --group-add $(getent group video | cut -d: -f3) \
             -v "${{ github.workspace }}:/workspace" \
             -w /workspace \
-            ${{ needs.select_image.outputs.image-tag }}
+            ${{ env.DOCKER_IMAGE }}
 
       - name: Install packages
         run: |
@@ -259,7 +260,9 @@ jobs:
     name: mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})
     needs: [select_image, build]
     timeout-minutes: 210
-    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || 'linux-te-mi35x-8' }}
+    runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
+    env:
+      DOCKER_IMAGE: ${{ inputs.docker_image_override || needs.select_image.outputs.image-tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -286,7 +289,7 @@ jobs:
 
       - name: Pull Docker Image
         run: |
-          docker pull ${{ needs.select_image.outputs.image-tag }}
+          docker pull ${{ env.DOCKER_IMAGE }}
 
       - *run_container
 

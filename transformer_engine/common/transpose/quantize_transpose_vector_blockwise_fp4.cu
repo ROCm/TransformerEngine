@@ -27,6 +27,19 @@
 #endif
 
 namespace transformer_engine {
+// The 4over6 body exists only on ROCm; expanding both arms on CUDA would instantiate every
+// specialization twice for a branch it cannot take.
+#ifdef __HIP_PLATFORM_AMD__
+#define NVTE_SWITCH_4OVER6(CONDITION, FLAG, ...) \
+  TRANSFORMER_ENGINE_SWITCH_CONDITION(CONDITION, FLAG, __VA_ARGS__)
+#else
+#define NVTE_SWITCH_4OVER6(CONDITION, FLAG, ...) \
+  {                                              \
+    constexpr bool FLAG = false;                 \
+    { __VA_ARGS__ }                              \
+  }
+#endif
+
 
 #if defined(__HIP_PLATFORM_AMD__) || CUDA_VERSION >= 12080
 namespace quantize_transpose_nvfp4 {
@@ -152,14 +165,13 @@ constexpr int kThreadsPerBlock = 256;  // Thread block size, 8 warps in total
 #endif
 
 // Tile dimension and thread block size:
-//   gfx942:          kTileDim=64  (64 KB LDS, kThreadsPerBlock=128, 4 warps)
-//   gfx950 / NVIDIA: kTileDim=128 (128 KB LDS, kThreadsPerBlock=256, 8 warps)
-// On AMD, __gfx950__ is only defined during device compilation, so the host
-// must select tile_dim at runtime via cuda::sm_arch() using the constants below.
+//   gfx942:            kTileDim=64  (64 KB LDS, kThreadsPerBlock=128, 4 warps)
+//   gfx950/gfx1250/NV: kTileDim=128 (128 KB LDS, kThreadsPerBlock=256, 8 warps)
+// Keep this in sync with the host's runtime choice (cuda::sm_arch() >= 95 ? 128 : 64) below.
 #ifdef __HIP_PLATFORM_AMD__
 constexpr int kTileDimGfx950 = 128;
 constexpr int kTileDimGfx942 = 64;
-#if !defined(__gfx950__)
+#if defined(__gfx942__)
 constexpr int kTileDim = kTileDimGfx942;
 #else
 constexpr int kTileDim = kTileDimGfx950;
@@ -191,6 +203,28 @@ constexpr int smem_size_for_tile(int tile_dim) {
 static __device__ constexpr unsigned int WARP_REDUCE_AMAX_GROUP_MASKS[8] = {
     0x01010101, 0x02020202, 0x04040404, 0x08080808, 0x10101010, 0x20202020, 0x40404040, 0x80808080};
 
+#ifdef __HIP_PLATFORM_AMD__
+// Upstream's tree order: pair rows 8 apart, then 4, 2, 1
+// (quantize_4over6_nvfp4.cuh::reduce_group_sum_16). Staged in shared memory because a
+// ROCm warp owns 4 rows, not 16.
+template <int kBlockSize, typename CType>
+__device__ __forceinline__ float reduceBlockError(const CType* staged) {
+  float v[kBlockSize];
+#pragma unroll
+  for (int i = 0; i < kBlockSize; ++i) {
+    v[i] = static_cast<float>(staged[i]);
+  }
+#pragma unroll
+  for (int stride = kBlockSize / 2; stride > 0; stride /= 2) {
+#pragma unroll
+    for (int i = 0; i < stride; ++i) {
+      v[i] = __fadd_rn(v[i], v[i + stride]);
+    }
+  }
+  return v[0];
+}
+#endif
+
 // max for every group_size elements in warp
 template <int group_size, int shfl_down_stride>
 __device__ __forceinline__ float groupMax(float val, unsigned int groupMask) {
@@ -220,18 +254,87 @@ __device__ __forceinline__ float ComputeEncodeScaleFP4(ScaleType decode_scale,
                TypeExtrema<float>::max);
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+// Round-trip one value through FP4 at a given scale, returning its block-error term.
+__device__ __forceinline__ float fp4_decode_e2m1(const __hip_fp4_storage_t q) {
+  constexpr float kMagnitude[8] = {0.0f, 0.5f, 1.0f, 1.5f, 2.0f, 3.0f, 4.0f, 6.0f};
+  const float m = kMagnitude[q & 0x7];
+  return (q & 0x8) ? -m : m;
+}
+
+// _rn intrinsics and upstream's operand order (quantize_4over6_nvfp4.cuh:199): an FMA
+// contraction here flips near-ties.
+__device__ __forceinline__ float fp4_roundtrip_err(const float x, const float block_scale_inverse,
+                                                   const float sf, const float global_amax,
+                                                   const float err_denom, const bool use_mse) {
+  const __hip_fp4_storage_t q =
+      __hip_cvt_float_to_fp4(__fmul_rn(x, block_scale_inverse), __HIP_E2M1, hipRoundNearest);
+  const float dequant = fp4_decode_e2m1(q);
+  const float val = __fdiv_rn(__fmul_rn(__fmul_rn(dequant, sf), global_amax), err_denom);
+  const float diff = __fsub_rn(val, x);
+  return use_mse ? __fmul_rn(diff, diff) : fabsf(diff);
+}
+
+// 4over6: score a block scale expanded by 1.5x (block max onto FP4 code 4) against the
+// plain one, and keep whichever reconstructs the block with less error.
+template <typename ScaleType>
+__device__ __forceinline__ void Compute4Over6Scales(const float amax,
+                                                    const float global_decode_scale,
+                                                    const float global_encode_scale,
+                                                    ScaleType* sf6_out, ScaleType* sf4_out,
+                                                    float* enc6_out, float* enc4_out) {
+  // Both candidates come off upstream's base expression, amax/6*S expanded by 1.5 for
+  // map-to-4 (quantize_4over6_nvfp4.cuh:129). Folding the /6 into the multiplier the way
+  // the non-4over6 path does rounds differently and moves blocks across E4M3 codes.
+  const float base = __fmul_rn(__fdiv_rn(amax, 6.0f), global_encode_scale);
+  const ScaleType sf6 = static_cast<ScaleType>(fminf(base, TypeExtrema<float>::max));
+  const ScaleType sf4 =
+      static_cast<ScaleType>(fminf(__fmul_rn(base, 1.5f), TypeExtrema<float>::max));
+  *sf6_out = sf6;
+  *sf4_out = sf4;
+  *enc6_out = ComputeEncodeScaleFP4<ScaleType>(sf6, global_decode_scale);
+  *enc4_out = ComputeEncodeScaleFP4<ScaleType>(sf4, global_decode_scale);
+}
+
+template <typename ScaleType>
+__device__ __forceinline__ void Compute4Over6Candidates(
+    const float* x, const int n, const float amax, const float global_decode_scale,
+    const bool use_mse, const float global_encode_scale, const float true_global_amax,
+    const float err_denom, ScaleType* sf6_out, ScaleType* sf4_out, float* enc6_out, float* enc4_out,
+    float* err6_out, float* err4_out) {
+  Compute4Over6Scales<ScaleType>(amax, global_decode_scale, global_encode_scale, sf6_out, sf4_out,
+                                 enc6_out, enc4_out);
+  const ScaleType sf6 = *sf6_out;
+  const ScaleType sf4 = *sf4_out;
+  const float enc6 = *enc6_out;
+  const float enc4 = *enc4_out;
+  // Dequantisation is val = dequant * sf * global_amax / (fp4_max * e4m3_max). Take the
+  // amax the encode scale was derived from; dividing err_denom back out costs a bit, and
+  // selection compares sums that are often equal to within one.
+  const float global_amax = true_global_amax;
+
+  float err6 = 0.0f;
+  float err4 = 0.0f;
+  for (int i = 0; i < n; ++i) {
+    err6 = __fadd_rn(err6, fp4_roundtrip_err(x[i], enc6, static_cast<float>(sf6), global_amax,
+                                             err_denom, use_mse));
+    err4 = __fadd_rn(err4, fp4_roundtrip_err(x[i], enc4, static_cast<float>(sf4), global_amax,
+                                             err_denom, use_mse));
+  }
+  *err6_out = err6;
+  *err4_out = err4;
+}
+
+#endif  // __HIP_PLATFORM_AMD__
+
 template <typename IType, typename ScaleType>
 __device__ __forceinline__ float ComputeOutputFP4(IType input, float encode_scale) {
   return static_cast<float>(input) * encode_scale;
 }
 
-__device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax) {
-#if defined(__HIP_PLATFORM_AMD__) && !defined(__HIP_DEVICE_COMPILE__)
-  // On AMD host, TypeExtrema<fp8e4m3>::max is non-constexpr (runtime FNUZ detection)
-  const float fp8_max = TypeExtrema<fp8e4m3>::max;
-#else
-  constexpr float fp8_max = TypeExtrema<fp8e4m3>::max;
-#endif
+__device__ __forceinline__ float ComputeGlobalEncodeScaleFP4(const float global_amax,
+                                                             const float e4m3_max) {
+  const float fp8_max = e4m3_max;
   constexpr float fp4_max = TypeExtrema<fp4e2m1>::max;
   float global_encode_scale = fp8_max * fp4_max / global_amax;
   // If scale is infinity, return max value of float32
@@ -433,14 +536,15 @@ __device__ __forceinline__ __nv_fp4x4_e2m1 cvt_fp32_to_fp4_4x(const float2 in01,
 
 template <bool kReturnIdentity, bool kReturnTranspose, bool kIsE8Scaling, bool kAligned,
           typename CType, typename IType, typename OType, typename ScaleType, bool kSwizzledScale,
-          bool kApplyStochasticRounding, bool kIs2DBlockScaling>
+          bool kApplyStochasticRounding, bool kIs2DBlockScaling, bool kRowScaledNVFP4,
+          bool kUse4Over6>
 __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpose_kernel(
     const IType* const input, const float* global_amax, OType* const output_c,
     OType* const output_t, ScaleType* const tile_scales_inv_c, ScaleType* const tile_scales_inv_t,
     const size_t row_length, const size_t num_rows, const size_t scale_stride_x,
     const size_t scale_stride_y, const size_t scale_t_stride_x, const size_t scale_t_stride_y,
     const size_t kScaleBlockDim, const float epsilon, const size_t* rng_state,
-    const float* noop_ptr) {
+    const float* noop_ptr, const float e4m3_max, const bool use_mse) {
   constexpr int kNVecContainer = kNVecOut / kNFP4PerContainer;
   using SMemVec = Vec<IType, kNVecSMem>;
   using OVec = Vec<OType, kNVecContainer>;
@@ -470,23 +574,26 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
   extern __shared__ char smem_base[];
   SMemVec* smem = reinterpret_cast<SMemVec*>(&smem_base[0]);
 
-  // 2D block scaling is not supported for E8 scaling MXFP4 or for colwise only mode.
-  // Instead of static_assert, return early if these invalid modes are detected.
+  // 2D block scaling is not supported for E8 scaling MXFP4.
+  // Instead of static_assert, return early if this invalid mode is detected.
   if constexpr (kIs2DBlockScaling && kIsE8Scaling) {
-    return;
-  }
-  if constexpr (kIs2DBlockScaling && !kReturnIdentity) {
     return;
   }
   // for 128x128 block, 2D block scaling means there will be 8x8 amax values for nvfp4, 4x4 for 2D mxfp4
   // use constexpr to define the size, when not using 2D, use minimal size 1x1
   constexpr int kFP4BlockScalingSize = 16;
+  constexpr float kFp4Max = 6.0f;  // TypeExtrema<fp4e2m1>::max
   constexpr int k2DBlockAmaxDim = kIs2DBlockScaling ? (kTileDim / kFP4BlockScalingSize) : 1;
   constexpr int kNumRowsPerWarp = kThreadsPerWarp / kNumThreadsStore;  // 4
   constexpr int k2DBlockAmaxReduceDim =
       kIs2DBlockScaling ? (kFP4BlockScalingSize / kNumRowsPerWarp) : 1;
   __shared__ CType amax_smem_red[k2DBlockAmaxDim][k2DBlockAmaxDim][k2DBlockAmaxReduceDim];
   __shared__ CType amax_smem[k2DBlockAmaxDim][k2DBlockAmaxDim];
+  // Unlike the amax, all 16 rows are staged: the fp32 sum is not associative.
+  constexpr int k4Over6Dim = kUse4Over6 ? k2DBlockAmaxDim : 1;
+  constexpr int k4Over6RowDim = kUse4Over6 ? kFP4BlockScalingSize : 1;
+  __shared__ CType err_smem_red[2][k4Over6Dim][k4Over6Dim][k4Over6RowDim];
+  __shared__ CType err_smem[2][k4Over6Dim][k4Over6Dim];
 
   // Step 1: Load input to shared memory
   {
@@ -535,12 +642,17 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
 
   const int kNumThreadsReduce = kScaleBlockDim / kNVecOut;
 #ifdef __HIP_PLATFORM_AMD__
-  const float global_encode_scale =
-      (kIsE8Scaling || global_amax == nullptr) ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0]);
+  const float global_encode_scale = (kIsE8Scaling || global_amax == nullptr)
+                                        ? 1.0f
+                                        : ComputeGlobalEncodeScaleFP4(global_amax[0], e4m3_max);
 #else
   const float global_encode_scale =
-      kIsE8Scaling ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0]);
+      kIsE8Scaling ? 1.0f : ComputeGlobalEncodeScaleFP4(global_amax[0], e4m3_max);
 #endif
+  // Mirrors the global_encode_scale guard exactly: where that falls back to 1.0f the
+  // dequantisation denominator is err_denom, so the equivalent amax is err_denom itself.
+  const float block_true_global_amax =
+      (kIsE8Scaling || global_amax == nullptr) ? kFp4Max * e4m3_max : global_amax[0];
   constexpr float fp4_max_inv = 1.0f / TypeExtrema<fp4e2m1>::max;
   const float global_encode_scale_multiplier = global_encode_scale * fp4_max_inv;
   const float global_decode_scale = 1.0 / global_encode_scale;
@@ -631,8 +743,72 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
         amax = amax_smem[data_row_idx / kFP4BlockScalingSize][tid_in_warp_x];
       }
       // Step 2.4: Compute scale
-      ScaleType scale_inv = ComputeDecodeScaleFP4<ScaleType>(amax, global_encode_scale_multiplier);
-      float encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, global_decode_scale);
+      const size_t row_idx = block_idx_y * kTileDim + r_s;
+      float row_global_encode_scale = global_encode_scale;
+      if constexpr (kRowScaledNVFP4) {
+        row_global_encode_scale =
+            row_idx < num_rows ? ComputeGlobalEncodeScaleFP4(global_amax[row_idx], e4m3_max) : 1.0f;
+      }
+      float row_true_global_amax = block_true_global_amax;
+      if constexpr (kRowScaledNVFP4) {
+        row_true_global_amax = row_idx < num_rows ? global_amax[row_idx] : kFp4Max * e4m3_max;
+      }
+      const float row_global_encode_scale_multiplier =
+          kRowScaledNVFP4 ? row_global_encode_scale * fp4_max_inv : global_encode_scale_multiplier;
+      const float row_global_decode_scale =
+          kRowScaledNVFP4 ? 1.0f / row_global_encode_scale : global_decode_scale;
+      ScaleType scale_inv;
+      float encode_scale;
+#ifdef __HIP_PLATFORM_AMD__
+      // 4over6 lives here only on ROCm; CUDA dispatches it to upstream's own kernel,
+      // so the helpers below are not defined there.
+      if constexpr (kUse4Over6) {
+        float blk[kNVecOut];
+#pragma unroll
+        for (int i = 0; i < kNVecOut / kNVecSMem; ++i) {
+#pragma unroll
+          for (int j = 0; j < kNVecSMem; ++j) {
+            blk[i * kNVecSMem + j] = static_cast<float>(smem_vec[i].data.elt[j]);
+          }
+        }
+        ScaleType sf6, sf4;
+        float enc6, enc4, err6, err4;
+        Compute4Over6Candidates<ScaleType>(
+            blk, kNVecOut, amax, row_global_decode_scale, use_mse, row_global_encode_scale,
+            row_true_global_amax, kFp4Max * e4m3_max, &sf6, &sf4, &enc6, &enc4, &err6, &err4);
+        if constexpr (kIs2DBlockScaling) {
+          // The scale spans a 16x16 block, so the error must too. Stage this row's
+          // error and let one thread run upstream's tree over the 16; indices
+          // recomputed rather than hoisted so the non-4over6 code is untouched.
+          constexpr int kNumRowsPerIter2 = kThreadsPerBlock / kNumThreadsStore;
+          const int warp_i = threadIdx.x / kThreadsPerWarp;
+          const int tx = threadIdx.x % kNumThreadsStore;
+          const int ty = (threadIdx.x / kNumThreadsStore) % kNumRowsPerWarp;
+          const int row_i = iter * kNumRowsPerIter2 + warp_i * kNumRowsPerWarp + ty;
+          const int blk_i = row_i / kFP4BlockScalingSize;
+          const int row_in_blk = row_i % kFP4BlockScalingSize;
+          err_smem_red[0][blk_i][tx][row_in_blk] = err6;
+          err_smem_red[1][blk_i][tx][row_in_blk] = err4;
+          __syncthreads();
+          if (row_in_blk == 0) {
+            err_smem[0][blk_i][tx] =
+                reduceBlockError<kFP4BlockScalingSize>(err_smem_red[0][blk_i][tx]);
+            err_smem[1][blk_i][tx] =
+                reduceBlockError<kFP4BlockScalingSize>(err_smem_red[1][blk_i][tx]);
+          }
+          __syncthreads();
+          err6 = err_smem[0][blk_i][tx];
+          err4 = err_smem[1][blk_i][tx];
+        }
+        const bool pick4 = err4 < err6;  // tie keeps map-to-6, matching upstream
+        scale_inv = pick4 ? sf4 : sf6;
+        encode_scale = pick4 ? enc4 : enc6;
+      } else  // NOLINT(readability/braces)
+#endif
+      {
+        scale_inv = ComputeDecodeScaleFP4<ScaleType>(amax, row_global_encode_scale_multiplier);
+        encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, row_global_decode_scale);
+      }
       // Step 2.5: Write scale_inv
       bool write_scale_inv = is_src_lane;
       if constexpr (!kAligned) {
@@ -687,6 +863,69 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     }
   }
 
+  // Step 2b: 2D-amax-only pass for columnwise-only mode.
+  // When only the transposed output is requested but 2D block scaling is enabled, the columnwise
+  // reads in Step 3 below still need amax_smem populated. Re-run the load + local-amax
+  // + 2D warp/smem reduction from Step 2 (steps 2.1-2.3), skipping the rowwise scale/quantize/store
+  // writes that Step 2 normally does. Same amax_smem values as the rowwise-enabled path, so the
+  // dgrad/wgrad columnwise output of (rowwise=False, columnwise=True, 2D) is bitwise identical to
+  // the columnwise half of (rowwise=True, columnwise=True, 2D).
+  if constexpr (!kReturnIdentity && kIs2DBlockScaling) {
+    constexpr int r_stride =
+        kThreadsPerBlock / kNumThreadsStore;             // stride in rows of shared memory
+    constexpr int num_iterations = kTileDim / r_stride;  // 4 iterations for kTileDim=128
+    const int c_s =
+        (threadIdx.x % kNumThreadsStore) * (kNVecOut / kNVecSMem);  // Column in shared memory
+    int r_s = threadIdx.x / kNumThreadsStore;                       // Row in shared memory
+#pragma unroll
+    for (int iter = 0; iter < num_iterations; ++iter) {
+      SMemVec smem_vec[kNVecOut / kNVecSMem];
+      // Step 2.1 (amax-only): Load from shared memory to registers
+#pragma unroll
+      for (int i = 0; i < kNVecOut / kNVecSMem; ++i) {
+        int c = c_s + i;
+        int r = r_s;
+        smem_vec[i] = smem[r * kSMemCol + c];
+      }
+      // Step 2.2 (amax-only): Compute local amax
+      CType amax = 0;
+#pragma unroll
+      for (int i = 0; i < kNVecOut / kNVecSMem; ++i) {
+#pragma unroll
+        for (int j = 0; j < kNVecSMem; ++j) {
+          __builtin_assume(amax >= 0);
+          amax = fmaxf(amax, fabsf(smem_vec[i].data.elt[j]));
+        }
+      }
+      // Step 2.3 (amax-only): 2D warp + smem amax reduction (mirrors Step 2's 2D path)
+      constexpr int kNumRowsPerIter = kThreadsPerBlock / kNumThreadsStore;  // 32
+      int warp_idx = threadIdx.x / kThreadsPerWarp;                         // 0 ~ 7
+      int tid_in_warp_x = threadIdx.x % kNumThreadsStore;
+      int tid_in_warp_y = (threadIdx.x / kNumThreadsStore) % kNumRowsPerWarp;
+      CType amax_warp_reduced = groupMax<kNumRowsPerWarp, kNumThreadsStore>(
+          amax, WARP_REDUCE_AMAX_GROUP_MASKS[tid_in_warp_x]);
+      int data_row_idx = iter * kNumRowsPerIter + warp_idx * kNumRowsPerWarp + tid_in_warp_y;
+      if (tid_in_warp_y == 0) {
+        amax_smem_red[data_row_idx / kFP4BlockScalingSize][tid_in_warp_x]
+                     [warp_idx % k2DBlockAmaxReduceDim] = amax_warp_reduced;
+      }
+      __syncthreads();
+
+      if (data_row_idx % kFP4BlockScalingSize == 0) {
+        CType amax_2d = 0.0;
+        for (int i = 0; i < k2DBlockAmaxReduceDim; i++) {
+          amax_2d =
+              fmaxf(amax_2d, amax_smem_red[data_row_idx / kFP4BlockScalingSize][tid_in_warp_x][i]);
+        }
+        amax_smem[data_row_idx / kFP4BlockScalingSize][tid_in_warp_x] = amax_2d;
+      }
+      __syncthreads();
+      // No 4over6 work here: Step 3 scores the columnwise candidates on their own
+      // column groups, so it only needs amax_smem from this pass.
+      r_s += r_stride;
+    }
+  }
+
   // Step 3: Transpose, cast and store to output_t
   if constexpr (kReturnTranspose) {
     constexpr int c_stride =
@@ -710,6 +949,48 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
     // This mask represents which threads should do the reduction together.
     const unsigned mask = ((1 << kNumThreadsReduce) - 1) << src_lane;
     const bool is_src_lane = (threadIdx.x % kNumThreadsReduce) == 0;
+#ifdef __HIP_PLATFORM_AMD__
+    // Step 3.0: 4over6 block errors for the whole tile. Scored on their own column groups
+    // per upstream (quantize_4over6_nvfp4.cuh::quantize_stage_colwise); kept out of the loop
+    // below because a block's 16 columns span both smem_idx halves.
+    if constexpr (kUse4Over6 && kIs2DBlockScaling) {
+      const int row_blk = threadIdx.x % kNumThreadsStore;
+      int c = c_s;
+#pragma unroll
+      for (int iter = 0; iter < num_iterations; ++iter, c += c_stride) {
+#pragma unroll
+        for (int smem_idx = 0; smem_idx < kNVecSMem; ++smem_idx) {
+          const int col_in_tile = c * kNVecSMem + smem_idx;
+          float blk[kNVecOut];
+#pragma unroll
+          for (int i = 0; i < kNVecOut; ++i) {
+            blk[i] = static_cast<float>(smem[(r_s + i) * kSMemCol + c].data.elt[smem_idx]);
+          }
+          ScaleType sf6, sf4;
+          float enc6, enc4, err6, err4;
+          Compute4Over6Candidates<ScaleType>(
+              blk, kNVecOut, amax_smem[row_blk][col_in_tile / kFP4BlockScalingSize],
+              global_decode_scale, use_mse, global_encode_scale, block_true_global_amax,
+              kFp4Max * e4m3_max, &sf6, &sf4, &enc6, &enc4, &err6, &err4);
+          err_smem_red[0][row_blk][col_in_tile / kFP4BlockScalingSize]
+                      [col_in_tile % kFP4BlockScalingSize] = err6;
+          err_smem_red[1][row_blk][col_in_tile / kFP4BlockScalingSize]
+                      [col_in_tile % kFP4BlockScalingSize] = err4;
+        }
+      }
+      __syncthreads();
+      // One thread per (row block, column block) runs upstream's tree over the 16 staged
+      // column errors; the columns paired first are 8 apart and so live in different
+      // warps, exactly as the rows do in the rowwise pass.
+      for (int idx = threadIdx.x; idx < k2DBlockAmaxDim * k2DBlockAmaxDim; idx += blockDim.x) {
+        const int rb = idx / k2DBlockAmaxDim;
+        const int cb = idx % k2DBlockAmaxDim;
+        err_smem[0][rb][cb] = reduceBlockError<kFP4BlockScalingSize>(err_smem_red[0][rb][cb]);
+        err_smem[1][rb][cb] = reduceBlockError<kFP4BlockScalingSize>(err_smem_red[1][rb][cb]);
+      }
+      __syncthreads();
+    }
+#endif
 #pragma unroll
     for (int iter = 0; iter < num_iterations; ++iter) {
       SMemVec smem_vec[kNVecOut];
@@ -754,9 +1035,39 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
           amax = __shfl_sync(mask, amax, src_lane);
         }
         // Step 3.4: Compute scale
-        ScaleType scale_inv =
-            ComputeDecodeScaleFP4<ScaleType>(amax, global_encode_scale_multiplier);
-        float encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, global_decode_scale);
+        ScaleType scale_inv;
+        float encode_scale;
+#ifdef __HIP_PLATFORM_AMD__
+        if constexpr (kUse4Over6) {
+          ScaleType sf6, sf4;
+          float enc6, enc4, err6, err4;
+          if constexpr (kIs2DBlockScaling) {
+            // Step 3.0 already scored this block; only the two scales are needed here.
+            const int row_blk = threadIdx.x % kNumThreadsStore;
+            const int col_blk = (c_s * kNVecSMem + smem_idx) / kFP4BlockScalingSize;
+            err6 = err_smem[0][row_blk][col_blk];
+            err4 = err_smem[1][row_blk][col_blk];
+            Compute4Over6Scales<ScaleType>(amax, global_decode_scale, global_encode_scale, &sf6,
+                                           &sf4, &enc6, &enc4);
+          } else {
+            float blk[kNVecOut];
+#pragma unroll
+            for (int i = 0; i < kNVecOut; ++i) {
+              blk[i] = static_cast<float>(smem_vec[i].data.elt[smem_idx]);
+            }
+            Compute4Over6Candidates<ScaleType>(
+                blk, kNVecOut, amax, global_decode_scale, use_mse, global_encode_scale,
+                block_true_global_amax, kFp4Max * e4m3_max, &sf6, &sf4, &enc6, &enc4, &err6, &err4);
+          }
+          const bool pick4 = err4 < err6;  // tie keeps map-to-6, matching upstream
+          scale_inv = pick4 ? sf4 : sf6;
+          encode_scale = pick4 ? enc4 : enc6;
+        } else  // NOLINT(readability/braces)
+#endif
+        {
+          scale_inv = ComputeDecodeScaleFP4<ScaleType>(amax, global_encode_scale_multiplier);
+          encode_scale = ComputeEncodeScaleFP4<ScaleType>(scale_inv, global_decode_scale);
+        }
         // Step 3.5: Write scale_inv_t
         bool write_scale_inv = is_src_lane;
         if constexpr (!kAligned) {
@@ -817,7 +1128,7 @@ __global__ void __launch_bounds__(kThreadsPerBlock) block_scaled_1d_cast_transpo
       }
     }
   }
-}
+}  // NOLINT(readability/fn_size) 4over6 grows upstream's kernel past 500 lines
 
 }  // namespace
 }  // namespace quantize_transpose_nvfp4
@@ -830,8 +1141,9 @@ void quantize_transpose_vector_blockwise_fp4(
     SimpleTensor& scale_inv_t, SimpleTensor& output, SimpleTensor& output_t, const float epsilon,
     const bool return_identity, const bool return_transpose, const bool pow2_scale,
     const bool swizzled_scale, const bool use_stochastic_rounding,
-    const NVTETensor rng_state_tensor, const bool use_2d_quantization,
-    const SimpleTensor& noop_tensor, cudaStream_t stream) {
+    const NVTETensor rng_state_tensor, const bool use_2d_quantization, const bool row_scaled_nvfp4,
+    const SimpleTensor& noop_tensor, const int nvfp4_e4m3_max,
+    const NVTENVFP44Over6Mode nvfp4_4over6_mode, cudaStream_t stream) {
   NVTE_API_CALL(quantize_transpose_vector_blockwise_fp4);
 #if defined(__HIP_PLATFORM_AMD__) || CUDA_VERSION >= 12080
 
@@ -842,8 +1154,10 @@ void quantize_transpose_vector_blockwise_fp4(
   NVTE_CHECK(return_identity || return_transpose,
              "At least one of return_identity or return_transpose must be true.");
 
-  NVTE_CHECK(return_identity || !use_2d_quantization,
-             "2D block quantization is only supported when return_identity is true.");
+  NVTE_CHECK(!row_scaled_nvfp4 || (return_identity && !return_transpose),
+             "Row-scaled NVFP4 quantization only supports rowwise quantization.");
+  NVTE_CHECK(!row_scaled_nvfp4 || !use_2d_quantization,
+             "Row-scaled NVFP4 quantization does not support 2D quantization.");
 
   const size_t row_length = input.shape.size() > 0 ? input.shape.at(input.shape.size() - 1) : 1u;
   size_t num_elements = row_length;
@@ -857,6 +1171,14 @@ void quantize_transpose_vector_blockwise_fp4(
   if (num_elements == 0) {
     return;
   }
+
+  // gfx942 stores E4M3 as FNUZ (max 240), gfx950 as OCP (max 448). The quantizer must use the
+  // same bound the GEMM's dequant does (rocm_gemm.cu:539), or the two disagree by 448/240.
+#ifdef __HIP_PLATFORM_AMD__
+  const float e4m3_max_for_arch = te_fp8_fnuz() ? 240.0f : static_cast<float>(nvfp4_e4m3_max);
+#else
+  const float e4m3_max_for_arch = static_cast<float>(nvfp4_e4m3_max);
+#endif
 
   size_t scale_stride_x = 0;
   size_t scale_stride_y = 0;
@@ -895,7 +1217,7 @@ void quantize_transpose_vector_blockwise_fp4(
     Tensor& rng_state_te_tensor = *convertNVTETensor(rng_state_tensor);
     NVTE_CHECK(rng_state_te_tensor.dtype() == DType::kInt64,
                "RNG state should contain 2 64-bit values.");
-    NVTE_CHECK(rng_state_te_tensor.data.shape == std::vector<size_t>{2},
+    NVTE_CHECK(rng_state_te_tensor.data.shape == Shape{2},
                "Shape of the RNG state should be [2], but got ", rng_state_te_tensor.data.shape);
     rng_state = reinterpret_cast<const size_t*>(rng_state_te_tensor.data.dptr);
   }
@@ -935,44 +1257,56 @@ void quantize_transpose_vector_blockwise_fp4(
                               TRANSFORMER_ENGINE_SWITCH_CONDITION(
                                   use_2d_quantization, kIs2DBlockScaling,
 
+                                  TRANSFORMER_ENGINE_SWITCH_CONDITION(
+                                      row_scaled_nvfp4, kRowScaledNVFP4,
+
+                                      NVTE_SWITCH_4OVER6(
+                                          nvfp4_4over6_mode != kNVTENVFP44Over6Disabled, kUse4Over6,
+
 #ifdef __HIP_PLATFORM_AMD__
-                                  size_t smem_bytes = smem_size_for_tile(tile_dim) * sizeof(InputType);
+                                          size_t smem_bytes =
+                                              smem_size_for_tile(tile_dim) * sizeof(InputType);
 #else
-                                  size_t smem_bytes = kSMemSize * sizeof(InputType);
+                                          size_t smem_bytes = kSMemSize * sizeof(InputType);
 #endif
-                                  auto kernel = block_scaled_1d_cast_transpose_kernel<
-                                      kReturnIdentity, kReturnTranspose, kPow2Scale, kAligned,
-                                      float, InputType, OutputType, ScaleType, kSwizzledScale,
-                                      kApplyStochasticRounding, kIs2DBlockScaling>;
-                                  if (smem_bytes >= 48 * 1024) {
-                                    cudaError_t err = cudaFuncSetAttribute(
-                                        kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
-                                        smem_bytes);
-                                    NVTE_CHECK(err == cudaSuccess,
-                                               "Failed to set dynamic shared memory size.");
+                                          auto kernel = block_scaled_1d_cast_transpose_kernel<
+                                              kReturnIdentity, kReturnTranspose, kPow2Scale,
+                                              kAligned, float, InputType, OutputType, ScaleType,
+                                              kSwizzledScale, kApplyStochasticRounding,
+                                              kIs2DBlockScaling, kRowScaledNVFP4, kUse4Over6>;
+                                          if (smem_bytes >= 48 * 1024) {
+                                            cudaError_t err = cudaFuncSetAttribute(
+                                                kernel, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                                smem_bytes);
+                                            NVTE_CHECK(err == cudaSuccess,
+                                                       "Failed to set dynamic shared memory size.");
 #ifdef __HIP_PLATFORM_AMD__
-                                  } kernel<<<grid, tile_dim * 2, smem_bytes,
-                                             stream>>>(
+                                          } kernel<<<grid, tile_dim * 2, smem_bytes,
+                                                     stream>>>(
 #else
-                                  } kernel<<<grid, kThreadsPerBlock, smem_bytes,
-                                             stream>>>(
+                                          } kernel<<<grid, kThreadsPerBlock, smem_bytes,
+                                                     stream>>>(
 #endif
-                                      reinterpret_cast<const InputType*>(input.dptr),
-                                      reinterpret_cast<const float*>(global_amax.dptr),
-                                      reinterpret_cast<OutputType*>(output.dptr),
-                                      reinterpret_cast<OutputType*>(output_t.dptr),
-                                      reinterpret_cast<ScaleType*>(scale_inv.dptr),
-                                      reinterpret_cast<ScaleType*>(scale_inv_t.dptr), row_length,
-                                      num_rows, scale_stride_x, scale_stride_y, scale_t_stride_x,
-                                      scale_t_stride_y, kScaleBlockDim, epsilon, rng_state,
-                                      noop_ptr);)  // kIs2DBlockScaling
-                              )                    // kApplyStochasticRounding
-                          )                        // kSwizzledScale
-                      )                            // kAligned
-                  )                                // kReturnTranspose
-              )                                    // kReturnIdentity
-          )                                        // OutputType
-      )                                            // InputType
+                                              reinterpret_cast<const InputType*>(input.dptr),
+                                              reinterpret_cast<const float*>(global_amax.dptr),
+                                              reinterpret_cast<OutputType*>(output.dptr),
+                                              reinterpret_cast<OutputType*>(output_t.dptr),
+                                              reinterpret_cast<ScaleType*>(scale_inv.dptr),
+                                              reinterpret_cast<ScaleType*>(scale_inv_t.dptr),
+                                              row_length, num_rows, scale_stride_x, scale_stride_y,
+                                              scale_t_stride_x, scale_t_stride_y, kScaleBlockDim,
+                                              epsilon, rng_state, noop_ptr, e4m3_max_for_arch,
+                                              nvfp4_4over6_mode ==
+                                                  kNVTENVFP44Over6MinMSE);)  // kUse4Over6
+                                      )                                      // kRowScaledNVFP4
+                                  )                                          // kIs2DBlockScaling
+                              )  // kApplyStochasticRounding
+                          )      // kSwizzledScale
+                      )          // kAligned
+                  )              // kReturnTranspose
+              )                  // kReturnIdentity
+          )                      // OutputType
+      )                          // InputType
 
   NVTE_CHECK_CUDA(cudaGetLastError());
 #else

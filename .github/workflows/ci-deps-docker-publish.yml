@@ -2,7 +2,7 @@
 #
 # See LICENSE for license information.
 #
-# Build .github/scripts/Dockerfile.ci.deps and push to Artifactory.
+# Build .github/scripts/Dockerfile.ci.deps and push to the container registry.
 #
 # Required repository secrets:
 #   ARTIFACTORY_DOCKER_USERNAME / ARTIFACTORY_DOCKER_PASSWORD — registry basic auth
@@ -16,8 +16,15 @@ name: Publish CI deps Docker image
 on:
   workflow_dispatch:
     inputs:
+      gpu_arch:
+        description: "GPU architecture"
+        required: true
+        type: choice
+        options:
+          - gfx942
+          - gfx950
       image_tag:
-        description: "Image tag pushed to Artifactory (required)"
+        description: "Tag to push to the registry"
         required: true
         type: string
 
@@ -45,7 +52,7 @@ jobs:
             exit 1
           fi
           if [ -z "${IMAGE_TAG}" ]; then
-            echo "image_tag must be non-empty." >&2
+            echo "image_tag input must be non-empty." >&2
             exit 1
           fi
 
@@ -60,12 +67,14 @@ jobs:
         env:
           REGISTRY: ${{ vars.ARTIFACTORY_DOCKER_REGISTRY }}
           REPOSITORY: ${{ vars.ARTIFACTORY_CI_DEPS_REPOSITORY }}
+          GPU_ARCH: ${{ inputs.gpu_arch }}
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
           FULL_IMAGE="${REGISTRY}/${REPOSITORY}"
           docker build \
             -f .github/scripts/Dockerfile.ci.deps \
+            --build-arg "GPU_ARCH=${GPU_ARCH}" \
             -t "${FULL_IMAGE}:${IMAGE_TAG}" \
             .
           docker push "${FULL_IMAGE}:${IMAGE_TAG}"

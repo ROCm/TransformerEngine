@@ -138,10 +138,10 @@ def get_te_core_package_info(rocm:bool) -> Tuple[bool, str, str]:
     Check if Tranformer Engine core package is installed.
     Returns the module name and version if found.
     """
-    
+
     te_core_packages = ("transformer-engine-cu12", "transformer-engine-cu13")
     if rocm:
-        te_core_packages = ("transformer-engine-rocm7",)
+        te_core_packages = ("transformer-engine-rocm7", "transformer-engine-rocm10")
     for package in te_core_packages:
         if _is_package_installed(package):
             return True, package, version(package)
@@ -412,7 +412,7 @@ def is_fp8_fnuz():
 @functools.lru_cache(maxsize=None)
 def _load_core_library():
     """Load shared library with Transformer Engine C extensions"""
-    return ctypes.CDLL(_get_shared_object_file("core"), mode=ctypes.RTLD_GLOBAL)
+    return ctypes.CDLL(_get_shared_object_file("core"), mode=ctypes.RTLD_GLOBAL | os.RTLD_LAZY)
 
 
 if "NVTE_PROJECT_BUILDING" not in os.environ or bool(int(os.getenv("NVTE_RELEASE_BUILD", "0"))):

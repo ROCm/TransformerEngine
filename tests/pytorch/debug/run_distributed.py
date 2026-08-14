@@ -1,3 +1,4 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -9,15 +10,19 @@ import itertools
 import random
 import argparse
 import re
+import sys
 
 import torch
 import torch.distributed as dist
 import transformer_engine
-import transformer_engine_torch as tex
+from transformer_engine.pytorch import DType
 import nvdlfw_inspect.api as debug_api
 from transformer_engine.debug import set_weight_tensor_tp_group_reduce
 from transformer_engine.pytorch import is_fp8_available
 
+# Executed as a script, so sibling imports rely on the interpreter putting this file's
+# directory on sys.path -- which safe-path mode (PYTHONSAFEPATH, python -P) disables.
+sys.path.append(os.path.dirname(os.path.realpath(__file__)))
 from test_numerics import (
     _emulate_linear,
     _init_debug,
@@ -683,7 +688,7 @@ if __name__ == "__main__":
         )
 
         # test_fake_quant_fp8
-        dtype_options = [tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2, None]
+        dtype_options = [DType.kFloat8E4M3, DType.kFloat8E5M2, None]
         _run_test_with_combinations(
             test_fake_quant_fp8,
             dtype_options,
