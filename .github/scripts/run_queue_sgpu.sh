@@ -17,7 +17,6 @@
 # Example usage:
 #   TEST_LEVEL=1 .github/scripts/run_queue_sgpu.sh
 #   HIP_VISIBLE_DEVICES=0,1 TEST_LEVEL=1 .github/scripts/run_queue_sgpu.sh
-#
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -34,6 +33,8 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # tail. Losing the gamble costs far less than mis-scheduling a genuinely big item.
 : "${DEFAULT_WEIGHT:=${TE_CI_DEFAULT_WEIGHT:-999999}}"
 
+# Cross-phase state. The SUITE_* arrays are filled once by Phase 0 and share an
+# index, so every later phase walks them instead of re-reading the configs.
 declare -a CONFIGS=()
 declare -a GPU_IDS=()
 declare -a SUITE_LABELS=()
@@ -41,7 +42,6 @@ declare -a SUITE_LOGFILES=()
 declare -a SUITE_MODES=()
 declare -a SUITE_CMDS=()
 declare -a SUITE_ARGS=()
-declare -a FAILED_ITEMS=()
 GPU_SOURCE=""
 OVERALL_RC=0
 
@@ -52,6 +52,70 @@ else
     log_error() { echo "Error: $*" >&2; }
     log_warn()  { echo "Warning: $*" >&2; }
 fi
+
+# ---------------------------------------------------------------------------
+# Parse arguments
+# ---------------------------------------------------------------------------
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        -l|--log-dir)
+            LOG_DIR="$2"; shift 2 ;;
+        --log-dir=*)
+            LOG_DIR="${1#*=}"; shift ;;
+        -*)
+            echo "Unknown option: $1" >&2
+            echo "Usage: $0 [-l|--log-dir <dir>] [<config>...]" >&2
+            exit 1 ;;
+        *)
+            break ;;
+    esac
+done
+
+# Resolve config paths to absolute
+if [[ $# -gt 0 ]]; then
+    for c in "$@"; do CONFIGS+=( "$(realpath -m "$c")" ); done
+else
+    CONFIGS=( "${SCRIPT_DIR}/ci_sgpu_queue.conf" )
+fi
+for c in "${CONFIGS[@]}"; do
+    if [[ ! -f "$c" ]]; then
+        log_error "suite list not found: $c"
+        exit 1
+    fi
+done
+
+# ---------------------------------------------------------------------------
+# Phase 0: read the configs and reject a bad one
+# ---------------------------------------------------------------------------
+for config in "${CONFIGS[@]}"; do
+    while IFS= read -r line || [[ -n "$line" ]]; do
+        [[ "$line" =~ ^[[:space:]]*# ]] && continue
+        [[ -z "${line//[[:space:]]/}" ]] && continue
+        read -r label logfile mode cmd rest <<< "$line"
+        SUITE_LABELS+=( "$label" )
+        SUITE_LOGFILES+=( "$logfile" )
+        SUITE_MODES+=( "$mode" )
+        SUITE_CMDS+=( "$cmd" )
+        SUITE_ARGS+=( "${rest:-}" )
+    done < "$config"
+done
+
+if [[ ${#SUITE_LABELS[@]} -eq 0 ]]; then
+    log_error "no suites to run: ${CONFIGS[*]} contain only comments and blank lines"
+    exit 1
+fi
+
+# Reject duplicate labels across configs: the queue is keyed by label
+dupe_labels=$(printf '%s\n' "${SUITE_LABELS[@]}" | sort | uniq -d)
+if [[ -n "$dupe_labels" ]]; then
+    log_error "duplicate suite labels across configs:"
+    echo "$dupe_labels" >&2
+    exit 1
+fi
+
+# ---------------------------------------------------------------------------
+# Set up the run: GPU pool, arch, weight table, log tree
+# ---------------------------------------------------------------------------
 
 # Fill GPU_IDS with every GPU this run can see: HIP_VISIBLE_DEVICES if set
 # else what rocminfo counts. Returns 1 if there is none.
@@ -71,6 +135,177 @@ detect_gpu_pool() {
 detect_arch() {
     rocminfo 2>/dev/null | grep -E "^ *Name: *gfx" | head -1 | sed "s/.*gfx/gfx/;s/[: ].*//"
 }
+
+if ! detect_gpu_pool; then
+    log_error "no GPU found: rocminfo reports none and HIP_VISIBLE_DEVICES is unset." \
+              "Set HIP_VISIBLE_DEVICES to the devices this run may use."
+    exit 1
+fi
+
+NUM_GPUS=${#GPU_IDS[@]}
+echo "== GPUs: ${NUM_GPUS} visible -- ids ${GPU_IDS[*]} (via ${GPU_SOURCE}) =="
+
+ARCH=$(detect_arch)
+if [[ -z "$ARCH" ]]; then
+    log_error "could not read the GPU arch from rocminfo; it keys the weight table"
+    exit 1
+fi
+echo "== Arch: ${ARCH} =="
+
+# The weight table is keyed by arch and TEST_LEVEL
+WEIGHTS_FILE="${REPO_ROOT}/ci-weights/test_weights.${ARCH}.l${TEST_LEVEL:-99}.txt"
+mkdir -p "$(dirname "$WEIGHTS_FILE")" 2>/dev/null
+
+[[ "$LOG_DIR" != /* ]] && LOG_DIR="$(realpath -m "$LOG_DIR")"
+
+# Directory Structure under LOG_DIR:
+#
+#   prerequisite_ck_jit_status/ Phase 3  one-time prerequisites per suite
+#   items/                      Phase 4  the test output itself -- one file per item
+#   suites/                     Phase 5  per-suite verdict: rc + index into items/
+#   report/                     Phase 7  the human-readable schedule
+#   queue/                               the machine-readable state: what to run,
+#                                        what it cost
+#
+SETUP_DIR="$LOG_DIR/prerequisite_ck_jit_status"
+ITEM_LOG_DIR="$LOG_DIR/items"
+SUITE_LOG_DIR="$LOG_DIR/suites"
+REPORT_DIR="$LOG_DIR/report"
+QUEUE_DIR="$LOG_DIR/queue"
+
+rm -rf "${REPO_ROOT}/test-results"
+rm -rf "$ITEM_LOG_DIR" "$SUITE_LOG_DIR"
+
+mkdir -p "$SETUP_DIR" "$ITEM_LOG_DIR" "$SUITE_LOG_DIR" "$REPORT_DIR" "$QUEUE_DIR"
+
+# cd to repo root so that commands in configs (e.g. ci/pytorch.sh) resolve correctly
+cd "$REPO_ROOT" || { echo "Error: cannot cd to '${REPO_ROOT}'" >&2; exit 1; }
+
+QUEUE_FILE="$QUEUE_DIR/queue.tsv"        # Phase 2 writes, Phases 4 and 5 read
+ITEMS_FILE="$QUEUE_DIR/items.tsv"        # Phase 1 writes, Phase 6 reads
+TIMINGS_FILE="$QUEUE_DIR/timings.tsv"    # Phase 4 writes, Phases 6 and 7 read
+: > "$QUEUE_FILE"
+: > "$ITEMS_FILE"
+
+# ---------------------------------------------------------------------------
+# Phase 1: expand every suite into work items
+# ---------------------------------------------------------------------------
+#
+# List mode runs the suite script with TE_CI_LIST_ITEMS=1, which makes pytest_run
+# echo "TE_CI_ITEM <tag>" instead of running it.
+#
+# Every list-mode suite is listed twice, because "will run" and "exists" are
+# different questions:
+#
+#   run 1  LIST_ONLY             what this host will run     -> the queue
+#   run 2  LIST_ONLY + LIST_ALL  what exists at this level   -> items.tsv
+#
+# So run2 - run1 is what this host skipped -- no flash-attn, say -- and those
+# tests do still exist. Only a tag in neither list is gone for good, and that is
+# what build_weights.py prunes on.
+EXPAND_LOG="$LOG_DIR/expand.log"   # whatever the suites printed while listing
+LIST_TMP="$QUEUE_DIR/.expand.tmp"  # one suite's list, reused per suite
+: > "$EXPAND_LOG"
+# Phase 2 removes the .raw file, but only if it gets that far: an expansion that
+# bails out leaves it behind, and re-running into the same log dir would then
+# append to the previous attempt and trip the duplicate-tag check. Local runs do
+# that a lot.
+: > "$QUEUE_FILE.raw"
+
+echo "== Expanding test suites into work items =="
+for i in "${!SUITE_LABELS[@]}"; do
+    label="${SUITE_LABELS[$i]}"
+    mode="${SUITE_MODES[$i]}"
+    cmd="${SUITE_CMDS[$i]}"
+    rest="${SUITE_ARGS[$i]}"
+    if [[ "$mode" == "list" ]]; then
+        echo "=== ${label}: list -- what this runner will run ===" >> "$EXPAND_LOG"
+        TE_CI_LIST_ITEMS=1 "$cmd" ${rest:-} > "$LIST_TMP" 2>> "$EXPAND_LOG"
+        list_rc=$?
+        mapfile -t tags < <(sed -n 's/^TE_CI_ITEM //p' "$LIST_TMP")
+
+        if [[ $list_rc -ne 0 ]]; then
+            log_error "suite '${label}' (${cmd}) reported an error while listing (rc=${list_rc})"
+            tail -20 "$EXPAND_LOG" >&2
+            exit 1
+        fi
+        if [[ ${#tags[@]} -eq 0 ]]; then
+            log_error "suite '${label}' (${cmd}) produced no work items"
+            tail -20 "$EXPAND_LOG" >&2
+            exit 1
+        fi
+        for tag in "${tags[@]}"; do
+            printf '%s\t%s\t%s\t%s\n' "$label" "$cmd" "$tag" "${rest:-}" >> "$QUEUE_FILE.raw"
+        done
+
+        echo "=== ${label}: list-all -- what exists at this level ===" >> "$EXPAND_LOG"
+        TE_CI_LIST_ITEMS=1 TE_CI_SKIP_CHECK_SUPPORTED=1 "$cmd" ${rest:-} > "$LIST_TMP" 2>> "$EXPAND_LOG"
+        all_rc=$?
+        mapfile -t all_tags < <(sed -n 's/^TE_CI_ITEM //p' "$LIST_TMP")
+
+        if [[ $all_rc -ne 0 ]]; then
+            log_warn "suite '${label}': list-all reported an error (rc=${all_rc}) after" \
+                     "returning ${#all_tags[@]} items; its weights will not be pruned"
+        else
+            for tag in "${all_tags[@]}"; do
+                printf '%s\t%s\n' "$label" "$tag" >> "$ITEMS_FILE"
+            done
+        fi
+        echo "  ${label}: ${#tags[@]} items (${#all_tags[@]} exist at this level)"
+    else
+        printf '%s\t%s\t%s\t%s\n' "$label" "$cmd" "" "${rest:-}" >> "$QUEUE_FILE.raw"
+        printf '%s\t%s\n' "$label" "" >> "$ITEMS_FILE"
+        echo "  ${label}: 1 item (opaque)"
+    fi
+done
+rm -f "$LIST_TMP"
+
+# ---------------------------------------------------------------------------
+# Phase 2: weight and order the queue (longest processing time first)
+# ---------------------------------------------------------------------------
+if ! python3 "$REPO_ROOT/.github/scripts/scheduler/build_weights.py" order "$QUEUE_FILE.raw" \
+        --weights "$WEIGHTS_FILE" \
+        --output "$QUEUE_FILE" \
+        --default-weight "$DEFAULT_WEIGHT" \
+        --gpus "${GPU_IDS[*]}"; then
+    log_error "could not order the queue"
+    exit 1
+fi
+rm -f "$QUEUE_FILE.raw"
+
+TOTAL_ITEMS=$(wc -l < "$QUEUE_FILE")
+
+# ---------------------------------------------------------------------------
+# Phase 3: Install pip prerequisites and build CK JIT blob once here.
+# ---------------------------------------------------------------------------
+setup_banner=""
+for i in "${!SUITE_LABELS[@]}"; do
+    label="${SUITE_LABELS[$i]}"
+    cmd="${SUITE_CMDS[$i]}"
+    # Only list-mode suites have a setup/dispatch split; an opaque suite is a
+    # single invocation that still does its own setup inline.
+    [[ "${SUITE_MODES[$i]}" == "list" ]] || continue
+    if [[ -z "$setup_banner" ]]; then
+        echo "== One-time setup: pip prerequisites + CK JIT prebuild (once per suite) =="
+        setup_banner=1
+    fi
+    printf '  %s: installing prerequisites, prebuilding CK JIT blobs (%s) ... ' "$label" "$cmd"
+    setup_start=$(date +%s)
+    if ! HIP_VISIBLE_DEVICES=${GPU_IDS[0]} TE_CI_SETUP_ONLY=1 "$cmd" \
+            > "$SETUP_DIR/${label}.log" 2>&1; then
+        echo "FAILED"
+        log_error "setup failed for ${label}; see $SETUP_DIR/${label}.log"
+        tail -30 "$SETUP_DIR/${label}.log" >&2
+        exit 1
+    fi
+    echo "done in $(( $(date +%s) - setup_start ))s"
+done
+
+# ---------------------------------------------------------------------------
+# Phase 4: run the queue
+# ---------------------------------------------------------------------------
+IDX_FILE="$QUEUE_DIR/queue.idx"    # next queue line to hand out
+LOCK_FILE="$QUEUE_DIR/queue.lock"  # guards the read-modify-write of IDX_FILE
 
 # Echo the next queue index and advance it. Every worker calls this, so the
 # read-modify-write is done under flock.
@@ -164,245 +399,6 @@ worker() {
     done
 }
 
-# ---------------------------------------------------------------------------
-# Parse arguments
-# ---------------------------------------------------------------------------
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        -l|--log-dir)
-            LOG_DIR="$2"; shift 2 ;;
-        --log-dir=*)
-            LOG_DIR="${1#*=}"; shift ;;
-        -*)
-            echo "Unknown option: $1" >&2
-            echo "Usage: $0 [-l|--log-dir <dir>] [<config>...]" >&2
-            exit 1 ;;
-        *)
-            break ;;
-    esac
-done
-
-# Resolve config paths to absolute against the caller's CWD *before* changing
-# directory, so relative paths passed by the caller remain valid: Phase 0 reads
-# them below, but the commands they name are not run until after the cd to the
-# repo root.
-if [[ $# -gt 0 ]]; then
-    for c in "$@"; do CONFIGS+=( "$(realpath -m "$c")" ); done
-else
-    CONFIGS=( "${SCRIPT_DIR}/ci_sgpu_queue.conf" )
-fi
-for c in "${CONFIGS[@]}"; do
-    if [[ ! -f "$c" ]]; then
-        log_error "suite list not found: $c"
-        exit 1
-    fi
-done
-
-# ---------------------------------------------------------------------------
-# Phase 0: read the configs and reject a bad one
-# ---------------------------------------------------------------------------
-for config in "${CONFIGS[@]}"; do
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        [[ "$line" =~ ^[[:space:]]*# ]] && continue
-        [[ -z "${line//[[:space:]]/}" ]] && continue
-        read -r label logfile mode cmd rest <<< "$line"
-        SUITE_LABELS+=( "$label" )
-        SUITE_LOGFILES+=( "$logfile" )
-        SUITE_MODES+=( "$mode" )
-        SUITE_CMDS+=( "$cmd" )
-        SUITE_ARGS+=( "${rest:-}" )
-    done < "$config"
-done
-
-if [[ ${#SUITE_LABELS[@]} -eq 0 ]]; then
-    log_error "no suites to run: ${CONFIGS[*]} contain only comments and blank lines"
-    exit 1
-fi
-
-# Reject duplicate labels across configs: the queue is keyed by label
-dupe_labels=$(printf '%s\n' "${SUITE_LABELS[@]}" | sort | uniq -d)
-if [[ -n "$dupe_labels" ]]; then
-    log_error "duplicate suite labels across configs:"
-    echo "$dupe_labels" >&2
-    exit 1
-fi
-
-# ---------------------------------------------------------------------------
-# Set up the run: GPU pool, arch, weight table, log tree
-# ---------------------------------------------------------------------------
-if ! detect_gpu_pool; then
-    log_error "no GPU found: rocminfo reports none and HIP_VISIBLE_DEVICES is unset." \
-              "Set HIP_VISIBLE_DEVICES to the devices this run may use."
-    exit 1
-fi
-
-NUM_GPUS=${#GPU_IDS[@]}
-echo "== GPUs: ${NUM_GPUS} visible -- ids ${GPU_IDS[*]} (via ${GPU_SOURCE}) =="
-
-ARCH=$(detect_arch)
-if [[ -z "$ARCH" ]]; then
-    log_error "could not read the GPU arch from rocminfo; it keys the weight table"
-    exit 1
-fi
-echo "== Arch: ${ARCH} =="
-
-# The weight table is keyed by arch and TEST_LEVEL 
-WEIGHTS_FILE="${REPO_ROOT}/ci-weights/test_weights.${ARCH}.l${TEST_LEVEL:-99}.txt"
-mkdir -p "$(dirname "$WEIGHTS_FILE")" 2>/dev/null
-
-[[ "$LOG_DIR" != /* ]] && LOG_DIR="$(realpath -m "$LOG_DIR")"
-
-
-# Directory Structure under LOG_DIR:
-#
-#   prerequisite_ck_jit_status/ Phase 3  one-time prerequisites per suite
-#   items/                      Phase 4  the test output itself -- one file per item
-#   suites/                     Phase 5  per-suite verdict: rc + index into items/
-#   report/                     Phase 7  the human-readable schedule
-#   queue/                               the machine-readable state: what to run,
-#                                        what it cost
-#
-# Phase 1 has no directory: what it produced is queue.tsv and items.tsv
-
-EXPAND_LOG="$LOG_DIR/expand.log"
-SETUP_DIR="$LOG_DIR/prerequisite_ck_jit_status"
-ITEM_LOG_DIR="$LOG_DIR/items"
-SUITE_LOG_DIR="$LOG_DIR/suites"
-REPORT_DIR="$LOG_DIR/report"
-QUEUE_DIR="$LOG_DIR/queue"
-
-rm -rf "${REPO_ROOT}/test-results"
-rm -rf "$ITEM_LOG_DIR" "$SUITE_LOG_DIR"
-
-mkdir -p "$SETUP_DIR" "$ITEM_LOG_DIR" "$SUITE_LOG_DIR" "$REPORT_DIR" "$QUEUE_DIR"
-: > "$EXPAND_LOG"
-
-# cd to repo root so that commands in configs (e.g. ci/pytorch.sh) resolve correctly
-cd "$REPO_ROOT" || { echo "Error: cannot cd to '${REPO_ROOT}'" >&2; exit 1; }
-
-QUEUE_FILE="$QUEUE_DIR/queue.tsv"
-ITEMS_FILE="$QUEUE_DIR/items.tsv"
-LIST_TMP="$QUEUE_DIR/.expand.tmp"
-TIMINGS_FILE="$QUEUE_DIR/timings.tsv"
-IDX_FILE="$QUEUE_DIR/queue.idx"
-LOCK_FILE="$QUEUE_DIR/queue.lock"
-: > "$QUEUE_FILE"
-: > "$ITEMS_FILE"
-# Phase 2 removes this, but only if it gets that far: an expansion that bails out
-# leaves it behind, and re-running into the same log dir would then append to the
-# previous attempt and trip the duplicate-tag check. Local runs do that a lot.
-: > "$QUEUE_FILE.raw"
-
-# ---------------------------------------------------------------------------
-# Phase 1: expand every suite into work items
-# ---------------------------------------------------------------------------
-#
-# List mode runs the suite script with TE_CI_LIST_ITEMS=1, which makes pytest_run
-# echo "TE_CI_ITEM <tag>" instead of running it.
-#
-# Every list-mode suite is listed twice, because "will run" and "exists" are
-# different questions:
-#
-#   run 1  LIST_ONLY             what this host will run     -> the queue
-#   run 2  LIST_ONLY + LIST_ALL  what exists at this level   -> items.tsv
-#
-# So run2 - run1 is what this host skipped -- no flash-attn, say -- and those
-# tests do still exist. Only a tag in neither list is gone for good, and that is
-# what build_weights.py prunes on.
-echo "== Expanding test suites into work items =="
-for i in "${!SUITE_LABELS[@]}"; do
-    label="${SUITE_LABELS[$i]}"
-    mode="${SUITE_MODES[$i]}"
-    cmd="${SUITE_CMDS[$i]}"
-    rest="${SUITE_ARGS[$i]}"
-    if [[ "$mode" == "list" ]]; then
-        echo "=== ${label}: list -- what this runner will run ===" >> "$EXPAND_LOG"
-        TE_CI_LIST_ITEMS=1 "$cmd" ${rest:-} > "$LIST_TMP" 2>> "$EXPAND_LOG"
-        list_rc=$?
-        mapfile -t tags < <(sed -n 's/^TE_CI_ITEM //p' "$LIST_TMP")
-
-        if [[ $list_rc -ne 0 ]]; then
-            log_error "suite '${label}' (${cmd}) reported an error while listing (rc=${list_rc})"
-            tail -20 "$EXPAND_LOG" >&2
-            exit 1
-        fi
-        if [[ ${#tags[@]} -eq 0 ]]; then
-            log_error "suite '${label}' (${cmd}) produced no work items"
-            tail -20 "$EXPAND_LOG" >&2
-            exit 1
-        fi
-        for tag in "${tags[@]}"; do
-            printf '%s\t%s\t%s\t%s\n' "$label" "$cmd" "$tag" "${rest:-}" >> "$QUEUE_FILE.raw"
-        done
-
-        echo "=== ${label}: list-all -- what exists at this level ===" >> "$EXPAND_LOG"
-        TE_CI_LIST_ITEMS=1 TE_CI_SKIP_CHECK_SUPPORTED=1 "$cmd" ${rest:-} > "$LIST_TMP" 2>> "$EXPAND_LOG"
-        all_rc=$?
-        mapfile -t all_tags < <(sed -n 's/^TE_CI_ITEM //p' "$LIST_TMP")
-
-        if [[ $all_rc -ne 0 ]]; then
-            log_warn "suite '${label}': list-all reported an error (rc=${all_rc}) after" \
-                     "returning ${#all_tags[@]} items; its weights will not be pruned"
-        else
-            for tag in "${all_tags[@]}"; do
-                printf '%s\t%s\n' "$label" "$tag" >> "$ITEMS_FILE"
-            done
-        fi
-        echo "  ${label}: ${#tags[@]} items (${#all_tags[@]} exist at this level)"
-    else
-        printf '%s\t%s\t%s\t%s\n' "$label" "$cmd" "" "${rest:-}" >> "$QUEUE_FILE.raw"
-        printf '%s\t%s\n' "$label" "" >> "$ITEMS_FILE"
-        echo "  ${label}: 1 item (opaque)"
-    fi
-done
-rm -f "$LIST_TMP"
-
-# ---------------------------------------------------------------------------
-# Phase 2: weight and order the queue (longest processing time first)
-# ---------------------------------------------------------------------------
-if ! python3 "$REPO_ROOT/.github/scripts/scheduler/build_weights.py" order "$QUEUE_FILE.raw" \
-        --weights "$WEIGHTS_FILE" \
-        --output "$QUEUE_FILE" \
-        --default-weight "$DEFAULT_WEIGHT" \
-        --gpus "${GPU_IDS[*]}"; then
-    log_error "could not order the queue"
-    exit 1
-fi
-rm -f "$QUEUE_FILE.raw"
-
-TOTAL_ITEMS=$(wc -l < "$QUEUE_FILE")
-
-# ---------------------------------------------------------------------------
-# Phase 3: one-time, container-wide setup
-# ---------------------------------------------------------------------------
-#
-# Install pip prerequisites and build CK JIT blob once here.
-setup_banner=""
-for i in "${!SUITE_LABELS[@]}"; do
-    label="${SUITE_LABELS[$i]}"
-    cmd="${SUITE_CMDS[$i]}"
-    # Only list-mode suites have a setup/dispatch split; an opaque suite is a
-    # single invocation that still does its own setup inline.
-    [[ "${SUITE_MODES[$i]}" == "list" ]] || continue
-    if [[ -z "$setup_banner" ]]; then
-        echo "== One-time setup: pip prerequisites + CK JIT prebuild (once per suite) =="
-        setup_banner=1
-    fi
-    printf '  %s: installing prerequisites, prebuilding CK JIT blobs (%s) ... ' "$label" "$cmd"
-    setup_start=$(date +%s)
-    if ! HIP_VISIBLE_DEVICES=${GPU_IDS[0]} TE_CI_SETUP_ONLY=1 "$cmd" \
-            > "$SETUP_DIR/${label}.log" 2>&1; then
-        echo "FAILED"
-        log_error "setup failed for ${label}; see $SETUP_DIR/${label}.log"
-        tail -30 "$SETUP_DIR/${label}.log" >&2
-        exit 1
-    fi
-    echo "done in $(( $(date +%s) - setup_start ))s"
-done
-
-# ---------------------------------------------------------------------------
-# Phase 4: run the queue
-# ---------------------------------------------------------------------------
 echo 1 > "$IDX_FILE"
 : > "$LOCK_FILE"
 : > "$TIMINGS_FILE"
@@ -421,10 +417,8 @@ WALL=$(( $(date +%s) - START_TS ))
 # ---------------------------------------------------------------------------
 # Phase 5: roll per-item results up into a per-suite verdict
 # ---------------------------------------------------------------------------
-#
-# Two outputs per suite, both keyed by the logfile name from the config so the
-# workflow's failure gate keeps reading the same name: the exit code it gates on,
-# and an index of which items ran and how each one ended.
+declare -a FAILED_ITEMS=()   # log path per failed item, for Phase 8
+
 for i in "${!SUITE_LABELS[@]}"; do
     label="${SUITE_LABELS[$i]}"
     # Phase 1 fails a suite that expands to nothing, so this should never skip.
@@ -469,6 +463,9 @@ if ! python3 "$REPO_ROOT/.github/scripts/scheduler/schedule_report.py" "$LOG_DIR
     log_warn "could not write the scheduling report"
 fi
 
+# ---------------------------------------------------------------------------
+# Phase 8: failure summary
+# ---------------------------------------------------------------------------
 if [[ ${#FAILED_ITEMS[@]} -gt 0 ]]; then
     echo
     echo "== ${#FAILED_ITEMS[@]} of ${TOTAL_ITEMS} items FAILED =="
