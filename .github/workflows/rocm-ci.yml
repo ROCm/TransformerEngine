@@ -109,7 +109,7 @@ jobs:
     timeout-minutes: 270
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-4' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-4' }}
     env:
-      DOCKER_IMAGE: ${{ inputs.docker_image_override || format('{0}{1}', needs.select_image.outputs.image-tag, matrix.arch_label == 'mi30x' && '_gfx942' || matrix.arch_label == 'mi35x' && '_gfx950') }}
+      DOCKER_IMAGE: ${{ inputs.docker_image_override || needs.select_image.outputs.image-tag }}
     strategy:
       fail-fast: false
       matrix:
@@ -262,7 +262,7 @@ jobs:
     timeout-minutes: 210
     runs-on: ${{ matrix.arch_label == 'mi30x' && 'linux-te-mi30x-8' || matrix.arch_label == 'mi35x' && 'linux-te-mi35x-8' }}
     env:
-      DOCKER_IMAGE: ${{ inputs.docker_image_override || format('{0}{1}', needs.select_image.outputs.image-tag, matrix.arch_label == 'mi30x' && '_gfx942' || matrix.arch_label == 'mi35x' && '_gfx950') }}
+      DOCKER_IMAGE: ${{ inputs.docker_image_override || needs.select_image.outputs.image-tag }}
     strategy:
       fail-fast: false
       matrix:

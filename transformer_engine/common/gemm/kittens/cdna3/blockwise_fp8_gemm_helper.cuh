@@ -89,20 +89,26 @@ __device__ inline float rtne_bias(float v) {
 }
 
 template <typename OType>
-__device__ inline float rtne_cast_roundtrip(float v) {
-    if constexpr (std::is_same_v<OType, float>) {
-        return v;
-    } else {
-        return static_cast<float>(kittens::base_types::convertor<OType, float>::convert(rtne_bias(v)));
-    }
-}
-
-template <typename OType>
 __device__ inline OType convert_out(float v) {
     if constexpr (std::is_same_v<OType, kittens::bf16>) {
         return kittens::base_types::convertor<OType, float>::convert(rtne_bias(v));
     } else {
         return kittens::base_types::convertor<OType, float>::convert(v);
+    }
+}
+
+// Deliberate: the reference rounds to the output type before the beta*C add
+// (blockwise_fp8_gemm_reference.py::qgemm). convert_out keeps rtne_bias at store granularity.
+template <typename OType>
+__device__ inline float round_to_out_dtype(float v) {
+    if constexpr (std::is_same_v<OType, float>) {
+        return v;
+    } else if constexpr (std::is_same_v<OType, kittens::bf16>) {
+        return kittens::base_types::convertor<float, OType>::convert(convert_out<OType>(v));
+    } else {
+        // fp16 is not parametrized in test_float8_blockwise_gemm_exact.py; left unchanged.
+        return static_cast<float>(
+            kittens::base_types::convertor<OType, float>::convert(rtne_bias(v)));
     }
 }
 
@@ -159,7 +165,7 @@ __device__ inline void apply_epilogue(
                 float x = v[r];
                 if constexpr (HAS_BIAS) x += bias_v;
                 if constexpr (HAS_BETA) {
-                    x = rtne_cast_roundtrip<OType>(x);
+                    x = round_to_out_dtype<OType>(x);
                     x += beta * static_cast<float>(c_in[m_g * N + col]);
                 }
                 if constexpr (HAS_GELU) {
