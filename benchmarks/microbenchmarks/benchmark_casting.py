@@ -21,6 +21,7 @@ from transformer_engine.pytorch import Float8Quantizer
 from utils import (
     MODEL_HIDDEN_SIZES, M_SIZE_LIST,
     time_func, compute_gbps, make_metric_record, run_benchmarks,
+    make_input, rotating,
 )
 
 TE_FP8_E4M3 = tex.DType.kFloat8E4M3
@@ -62,14 +63,19 @@ def bench_cast(Case, M, hidden_size, direction, fp8_dtype, dtype_str):
     quantizer = Float8Quantizer(scale, amax, fp8_dtype)
 
     if direction == "quantize":
-        x = torch.randn(M, hidden_size, dtype=torch.bfloat16, device=device)
-        out = quantizer(x)
-        cast_func = lambda: quantizer.quantize(x, out=out)
+        next_x = make_input((M, hidden_size), torch.bfloat16, device=device)
+        out = quantizer(next_x())
+        cast_func = lambda: quantizer.quantize(next_x(), out=out)
         total_bytes = numel * (2 + 1)  # BF16 read + FP8 write
     else:
-        x = torch.randn(M, hidden_size, dtype=torch.bfloat16, device=device)
-        fp8_tensor = quantizer(x)
-        cast_func = lambda: fp8_tensor.dequantize()
+        # Rotate a ring of FP8 tensors (bytes can't be inferred, so hint numel).
+        next_fp8 = rotating(
+            lambda: quantizer(
+                torch.randn(M, hidden_size, dtype=torch.bfloat16, device=device)
+            ),
+            bytes_per_buffer=numel,  # FP8 ~ 1 byte/element
+        )
+        cast_func = lambda: next_fp8().dequantize()
         total_bytes = numel * (1 + 2)  # FP8 read + BF16 write
 
     ms, measurement = time_func(cast_func, method="blocked")

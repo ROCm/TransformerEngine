@@ -11,6 +11,7 @@ import transformer_engine.pytorch as te
 from utils import (
     generate_gemm_test_cases,
     time_func, compute_tflops, make_forward_backward_metric_records, run_benchmarks,
+    make_input,
 )
 
 BENCHMARK_LABEL = "GEMM"
@@ -20,16 +21,17 @@ def bench_gemm(Case, M, N, K, dtype):
     device = "cuda"
 
     linear = te.Linear(K, N, bias=False).to(device=device, dtype=dtype)
-    x = torch.randn(M, K, dtype=dtype, device=device, requires_grad=True)
+    next_x = make_input((M, K), dtype, device=device, requires_grad=True)
 
-    fwd_func = lambda: linear(x)
+    fwd_func = lambda: linear(next_x())
     out = fwd_func()
     grad_out = torch.randn_like(out)
 
     def fwd_bwd_func():
-        out = linear(x)
+        xb = next_x()
+        out = linear(xb)
         out.backward(grad_out)
-        x.grad = None
+        xb.grad = None
         linear.weight.grad = None
 
     fwd_bwd_func()
