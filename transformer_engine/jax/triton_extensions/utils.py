@@ -412,7 +412,7 @@ def compile_triton(
     compiled = tc.compile(src, target=target, options=options.__dict__)
 
     # HSACO is bytes and nanobind won't coerce it to the std::string binary arg, so pass a path.
-    # The plugin unlinks the file once loaded; lowering reruns per process, so it is rewritten.
+    # The plugin reads the file once and unlinks it, then serves the blob from its own cache.
     binary = compiled.asm[binary_key]
     if is_hip:
         fd, hsaco_path = tempfile.mkstemp(suffix=".hsaco", dir=_hsaco_dir())
