@@ -92,6 +92,9 @@ run_test_config(){
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_numerics.py
     NVTE_USE_ATOMIC_AMAX=1 NVTE_USE_CAST_TRANSPOSE_TRITON=1 run_default_fa_lbl "amax+triton" 3 test_fusible_ops.py
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 triton_kernels/test_cast.py
+    # MIN_ELEMENTS=0 so the test shapes, which are far below the production size
+    # floor, actually exercise the kernel instead of falling back
+    NVTE_USE_MULTI_QUANTIZE_TRITON=1 NVTE_MULTI_QUANTIZE_TRITON_MIN_ELEMENTS=0 run_default_fa_lbl "triton" 3 attention/test_attention.py -k "fp8"
     run_default_fa 1 nvfp4/
     run_default_fa 1 mxfp4/
 }

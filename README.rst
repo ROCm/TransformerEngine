@@ -273,6 +273,14 @@ At runtime, you can enable specific triton kernels using the specific environmen
 * NVTE_USE_CAST_TRANSPOSE_TRITON=1 can be used to enable cast transpose (bgrad) triton kernels;
 * NVTE_USE_LAYERNORM_TRITON=1 can be used to enable layernorm triton kernels.
 * NVTE_USE_RMSNORM_TRITON=1 can be used to enable rmsnorm triton kernels.
+* NVTE_USE_MULTI_QUANTIZE_TRITON=1 can be used to enable the concat-free fp8 quantization of Q/K/V
+  in attention. By default Q/K/V are concatenated into one buffer before being cast, so that a
+  single amax covers all three; the triton kernel instead casts them in place while still producing
+  that shared amax. Applies to per-tensor delayed scaling only.
+* NVTE_MULTI_QUANTIZE_TRITON_MIN_ELEMENTS controls the smallest total Q/K/V element count for which
+  the above kernel is used (default 33554432). Smaller attention layers are bound by kernel launch
+  overhead rather than by the concatenation, so they keep the default path; the floor is ignored
+  during CUDA/HIP graph capture, where launch overhead does not apply.
 
 MXFP8 support on ROCm (gfx95x only)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

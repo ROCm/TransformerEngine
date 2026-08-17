@@ -43,6 +43,9 @@ from transformer_engine.pytorch.tensor.float8_tensor import (
     Float8Quantizer,
     Float8CurrentScalingQuantizer,
 )
+from transformer_engine.pytorch.tensor.storage.float8_tensor_storage import (
+    Float8TensorStorage,
+)
 from transformer_engine.pytorch.quantization import get_fp8_te_dtype
 from transformer_engine.pytorch.constants import TE_DType
 
@@ -2366,6 +2369,71 @@ def print_quantizers(
             )
 
 
+def _quantize_without_concat(tensors, qkv_quantizer, src_nominal_dtype):
+    """Concat-free equivalent of flatten+cat+quantize+split.
+
+    A Triton kernel walks the tensors as one virtual concatenation, so they
+    share a single amax/scale without the cat ever being materialized. Returns
+    (fp8 data per tensor, a template carrying the shared scale_inv) so that the
+    caller's make_like tail is unchanged, or None when the fast path does not
+    apply and the caller should fall back to the cat.
+    """
+    if not IS_HIP_EXTENSION:
+        return None
+    if not bool(int(os.getenv("NVTE_USE_MULTI_QUANTIZE_TRITON", "0"))):
+        return None
+    # Delayed scaling only: its scale is fixed before the cast, so the joint
+    # amax is a pure output. Current scaling needs the joint amax first.
+    if not isinstance(qkv_quantizer, Float8Quantizer):
+        return None
+
+    from transformer_engine.pytorch.triton_kernels.multi_quantize import (
+        MAX_FUSED_TENSORS,
+        multi_tensor_quantize_fp8_triton,
+    )
+
+    if len(tensors) > MAX_FUSED_TENSORS:
+        return None
+
+    # Below a few tens of millions of elements both paths are bound by host-side
+    # launch cost rather than by the cat, and this one dispatches more Python, so
+    # it loses. Measured crossover on MI355X is between 25M and 50M elements;
+    # under graph capture the host cost disappears and the fast path wins much
+    # earlier, so skip the floor while capturing.
+    min_elements = int(os.getenv("NVTE_MULTI_QUANTIZE_TRITON_MIN_ELEMENTS", "33554432"))
+    if sum(x.numel() for x in tensors) < min_elements:
+        if not torch.cuda.is_current_stream_capturing():
+            return None
+
+    tensors = [x.contiguous() for x in tensors]
+    data, scale_inv = multi_tensor_quantize_fp8_triton(tensors, qkv_quantizer)
+
+    # Same as Float8Quantizer.create_tensor_from_data, except it reuses the
+    # scale_inv the kernel already wrote instead of recomputing 1/scale.
+    if qkv_quantizer.internal:
+        template = Float8TensorStorage(
+            data=data[0],
+            fp8_scale_inv=scale_inv,
+            fp8_dtype=qkv_quantizer.dtype,
+            fake_dtype=src_nominal_dtype,
+            requires_grad=False,
+            data_transpose=None,
+            quantizer=qkv_quantizer,
+        )
+    else:
+        template = Float8Tensor(
+            shape=data[0].shape,
+            dtype=src_nominal_dtype,
+            data=data[0],
+            fp8_scale_inv=scale_inv,
+            fp8_dtype=qkv_quantizer.dtype,
+            requires_grad=False,
+            data_transpose=None,
+            quantizer=qkv_quantizer,
+        )
+    return data, template
+
+
 def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
     """Combine q,k,v based on qkv_layout and quantize them together"""
     # 1: qkv packed, 2: kv packed, 3: qkv separate
@@ -2382,27 +2450,37 @@ def combine_and_quantize(qkv_layout, q, k, v, qkv_quantizer):
             dim = qkv_layout.split("_")[1].find("2")
             kv = combine_tensors([k, v], dim)
             tensors = [q, kv]
-            num_tensors = len(tensors)
-            shapes = [x.shape for x in tensors]
-            numels = [x.numel() for x in tensors]
-            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
-            qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
-            qkv_fp8 = qkv_quantizer(qkv)
-            q_data, kv_data = [
-                qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
-            ]
+            no_concat = _quantize_without_concat(tensors, qkv_quantizer, src_nominal_dtype)
+            if no_concat is not None:
+                (q_data, kv_data), qkv_fp8 = no_concat
+            else:
+                num_tensors = len(tensors)
+                shapes = [x.shape for x in tensors]
+                numels = [x.numel() for x in tensors]
+                numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+                qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
+                qkv_fp8 = qkv_quantizer(qkv)
+                q_data, kv_data = [
+                    qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i])
+                    for i in range(num_tensors)
+                ]
             k_data, v_data = SplitAlongDim.apply(kv_data, dim, [1, 1], True)
         case 3:
             tensors = [q, k, v]
-            num_tensors = len(tensors)
-            shapes = [x.shape for x in tensors]
-            numels = [x.numel() for x in tensors]
-            numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
-            qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
-            qkv_fp8 = qkv_quantizer(qkv)
-            q_data, k_data, v_data = [
-                qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i]) for i in range(num_tensors)
-            ]
+            no_concat = _quantize_without_concat(tensors, qkv_quantizer, src_nominal_dtype)
+            if no_concat is not None:
+                (q_data, k_data, v_data), qkv_fp8 = no_concat
+            else:
+                num_tensors = len(tensors)
+                shapes = [x.shape for x in tensors]
+                numels = [x.numel() for x in tensors]
+                numels = [sum(numels[:i]) for i in range(num_tensors + 1)]
+                qkv = torch.cat([x.view(-1) for x in tensors], dim=0)
+                qkv_fp8 = qkv_quantizer(qkv)
+                q_data, k_data, v_data = [
+                    qkv_fp8._data[numels[i] : numels[i + 1]].view(shapes[i])
+                    for i in range(num_tensors)
+                ]
         case _:
             raise RuntimeError("Invalid qkv_layout " + qkv_layout)
 
