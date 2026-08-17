@@ -71,6 +71,7 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 if IS_HIP_EXTENSION:
     from transformer_engine.pytorch.triton_kernels.grouped_gemm import general_grouped_gemm_triton
     from transformer_engine.pytorch.moe import (
+        is_permute_free_exact_routes_enabled,
         is_permute_free_grouped_gemm_enabled,
         permute_free_grouped_gemm_forward,
         permute_free_grouped_gemm_backward,
@@ -667,6 +668,12 @@ class _GroupedLinear(torch.autograd.Function):
 
         # Perform GEMM
         if use_perm_free_grouped_gemm:
+            # Opt-in exact sizing: with ``m_splits`` carrying tokens_per_expert, its sum is the
+            # route count, which sizes the block-padded buffers exactly instead of to the static
+            # T * min(topk, E) bound. Set before the align is built (lazily, inside the wrapper);
+            # a metadata whose align is already cached keeps the bound it was built with.
+            if is_permute_free_exact_routes_enabled() and routing_metadata.num_routes is None:
+                routing_metadata.num_routes = sum(m_splits)
             # FC1 emits raw 2F [gate|up]; the ``activation`` hint on the metadata is consumed on
             # FC2, which applies the gated activation in a standalone pass and then runs a plain
             # GEMM (the fused-prologue path regressed throughput). Route probs ride with FC2 too.

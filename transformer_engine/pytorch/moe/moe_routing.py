@@ -48,13 +48,26 @@ class MoERoutingMetadata:
         ``num_recv_tokens * num_experts`` bound down to
         ``num_recv_tokens * min(topk, num_experts)``, shrinking ``em_max`` (and the zero-init
         it costs) by up to ``num_experts / topk``. Leave ``None`` to keep the dense bound.
+    num_routes:
+        Host-known **exact** route count (``routing_map.sum()``), the same quantity as
+        ``sum(tokens_per_expert)``. Optional, and off the default path. When provided it
+        replaces the static ``num_recv_tokens * min(topk, num_experts)`` over-allocation with
+        the exact count, so the block-padded buffers shrink to ``num_routes`` plus at most one
+        block of padding per expert -- the smallest this layout can be. The trade is that
+        ``em_max`` becomes data-dependent, so buffer shapes vary step to step and CUDA graph
+        capture no longer works; use it to measure the padding overhead, not as the default.
+
+        The caller owns correctness here: a value below the true ``routing_map.sum()``
+        under-allocates and routes past the bound are dropped (masked, not written out of
+        bounds). Set ``NVTE_PERMUTE_FREE_VALIDATE_ROUTES=1`` to check it against the routing
+        map on every align build, at the cost of a device sync.
 
     The remaining fields are lazily populated by ``prepare_moe_align`` and cached for
     FC1 fwd/dgrad reuse (all in the expert-sorted, block-padded route-list layout):
 
-    The align buffers are built sync-free and over-allocated to static, shape-derived
-    upper bounds; the real extents are carried as device scalars so no host sync is
-    needed to construct them.
+    The align buffers are built sync-free (unless ``num_routes`` is set) and over-allocated to
+    static, shape-derived upper bounds; the real extents are carried as device scalars so no
+    host sync is needed to construct them.
 
     sorted_slot_ids:
         ``[T * min(topk, E)]`` received-token row to gather for each block-padded position (sentinel
@@ -92,6 +105,7 @@ class MoERoutingMetadata:
     routing_map: torch.Tensor
     num_experts: Optional[int] = None
     topk: Optional[int] = None
+    num_routes: Optional[int] = None
     sorted_slot_ids: Optional[torch.Tensor] = None
     expert_ids: Optional[torch.Tensor] = None
     slot_expert_ids: Optional[torch.Tensor] = None

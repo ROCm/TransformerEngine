@@ -669,6 +669,7 @@ def _route_list_place_kernel(
     token_count_ptr,  # [T] int32 out: routes per token (only if BUILD_INVERSE)
     T,
     E,
+    em_max,
     stride_t,
     stride_e,
     BLOCK_SIZE_M: tl.constexpr,
@@ -689,16 +690,21 @@ def _route_list_place_kernel(
             w = tl.load(within_ptr + e * T + t)
             bs = tl.load(block_start_ptr + e)
             slot = bs * BLOCK_SIZE_M + w
-            tl.store(sorted_slot_ids_ptr + slot, t)
+            # Both bounds hold by construction when the caller's ``topk`` / ``num_routes``
+            # hints are honest. Mask anyway: an under-sized hint then drops the excess routes
+            # instead of writing past these buffers.
+            tl.store(sorted_slot_ids_ptr + slot, t, mask=slot < em_max)
             if BUILD_INVERSE:
                 # Block-padded canonical layout: every intermediate route tensor (the GEMM
                 # output, the FC2 route-read input, the activation) is indexed by the padded
                 # slot ``bs*BLOCK_SIZE_M + w``. The token->routes inverse map therefore stores the
                 # padded slot so the final padded->token gather-combine reads the correct rows.
-                tl.store(token_routes_ptr + t * MAXK + j, slot)
+                tl.store(token_routes_ptr + t * MAXK + j, slot, mask=j < MAXK)
                 j += 1
     if BUILD_INVERSE:
-        tl.store(token_count_ptr + t, j)
+        # Clamped for the same reason as the masked stores above: keep the gather-combine
+        # inside ``token_routes`` even if the hinted width was too small.
+        tl.store(token_count_ptr + t, tl.minimum(j, MAXK))
 
 
 def route_list_scan(
@@ -736,6 +742,7 @@ def route_list_align(
     block_size: int,
     scan=None,
     topk: int | None = None,
+    num_routes: int | None = None,
     build_inverse_map: bool = False,
 ):
     """Sync-free fused build of the route-list align buffers.
@@ -751,6 +758,12 @@ def route_list_align(
         top-k). When provided, the static over-allocation bound is tightened from the dense
         ``T * num_experts`` to ``T * min(topk, num_experts)`` -- still
         sync-free, but shrinking the padded buffers by ``num_experts / topk``.
+    num_routes:
+        Host-known **exact** route count (``routing_map.sum()``). When provided it replaces
+        the static bound entirely, leaving only the unavoidable per-expert block padding.
+        This makes ``em_max`` data-dependent (no static shapes, no CUDA graphs), so it is off
+        the default path; see :class:`MoERoutingMetadata`. A value below the true count
+        silently drops the routes past the bound.
     build_inverse_map:
         When True, the place kernel also emits the token->routes inverse map (used by the
         contention-free gather-combine in FC2 fwd / FC1 dgrad) in the same launch, so no
@@ -772,9 +785,11 @@ def route_list_align(
     E = int(num_experts)
 
     # Static (sync-free) upper bounds from shapes only. Each token routes to at most
-    # ``min(topk, E)`` experts, so that tightens the dense ``T * E`` bound.
+    # ``min(topk, E)`` experts, so that tightens the dense ``T * E`` bound. An exact
+    # ``num_routes`` from the host replaces the bound outright, leaving only the per-expert
+    # block padding the layout needs (the ``+ E`` term covers one partial block per expert).
     max_per_token = E if topk is None else min(int(topk), E)
-    routes_max = T * max_per_token
+    routes_max = T * max_per_token if num_routes is None else int(num_routes)
     blocks_max = (routes_max + block_size - 1) // block_size + E
     em_max = blocks_max * block_size
 
@@ -832,6 +847,7 @@ def route_list_align(
         token_route_count,
         T,
         E,
+        em_max,
         routing_map.stride(0),
         routing_map.stride(1),
         BLOCK_SIZE_M=block_size,

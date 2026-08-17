@@ -452,20 +452,26 @@ def _route_scan_ref(routing_map):
 
 
 @pytest.mark.parametrize(
-    "tighten_bound",
-    [pytest.param(False, id="dense-bound"), pytest.param(True, id="topk-bound")],
+    "bound",
+    [
+        pytest.param("dense", id="dense-bound"),
+        pytest.param("topk", id="topk-bound"),
+        pytest.param("exact", id="exact-bound"),
+    ],
 )
 @pytest.mark.parametrize("num_recv_tokens,num_experts,max_hits", _ALIGN_SHAPES)
-def test_route_list_align_buffers(num_recv_tokens, num_experts, max_hits, tighten_bound):
+def test_route_list_align_buffers(num_recv_tokens, num_experts, max_hits, bound):
     """``route_list_scan`` + ``moe_align_route_list`` build the expert-sorted route list.
 
     Covers the block-independent scan, the per-expert block layout, the token->route inverse
-    map, and the ``topk`` hint tightening the (still sync-free) static over-allocation.
+    map, and the three ways of bounding the buffers: the dense ``T * E`` static bound, the
+    ``topk`` hint tightening it (both sync-free), and the host-known exact ``num_routes``.
     """
     routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda")
     routes_per_token = routing_map.sum(dim=1).to(torch.int32)
     assert int(routes_per_token.max().item()) <= max_hits
-    topk = max_hits if tighten_bound else None
+    topk = max_hits if bound == "topk" else None
+    num_routes = int(routing_map.sum().item()) if bound == "exact" else None
 
     counts, within = route_list_scan(routing_map, num_experts=num_experts)
     counts_ref, within_ref = _route_scan_ref(routing_map)
@@ -487,17 +493,17 @@ def test_route_list_align_buffers(num_recv_tokens, num_experts, max_hits, tighte
         block_size=_FLYDSL_FWD_BLOCK_M,
         scan=(counts, within),
         topk=topk,
+        num_routes=num_routes,
         build_inverse_map=True,
     )
 
-    # Static (sync-free) over-allocation: T * min(topk, E) routes rounded up to whole blocks,
-    # plus one partial block per expert. The topk hint shrinks it by up to E / topk.
+    # Over-allocation: the route bound rounded up to whole blocks, plus one partial block per
+    # expert. Sync-free it is T * min(topk, E) (the topk hint shrinks it by up to E / topk);
+    # with a host-known num_routes only the per-expert block padding is left.
     max_per_token = num_experts if topk is None else min(topk, num_experts)
-    blocks_max = (
-        num_recv_tokens * max_per_token + _FLYDSL_FWD_BLOCK_M - 1
-    ) // _FLYDSL_FWD_BLOCK_M + num_experts
+    routes_max = num_recv_tokens * max_per_token if num_routes is None else num_routes
+    blocks_max = (routes_max + _FLYDSL_FWD_BLOCK_M - 1) // _FLYDSL_FWD_BLOCK_M + num_experts
     assert sorted_slot_ids.shape[0] == blocks_max * _FLYDSL_FWD_BLOCK_M
-    assert tighten_bound == (max_per_token < num_experts)
 
     # Per-expert block layout: ceil(count / block_m) blocks each, laid out back to back.
     blocks_ref = (counts_ref + _FLYDSL_FWD_BLOCK_M - 1) // _FLYDSL_FWD_BLOCK_M
@@ -800,3 +806,74 @@ def test_grouped_weight_grad_matches_ungrouped(monkeypatch, fuse_wgrad_accumulat
         (out[valid].float() * grad_output.float()).sum().backward()
         accumulated = grouped_weight.grad.view(grouped_shape).float()
         assert_close(accumulated, 2.0 * grad_ref, **dtype_tols(torch.bfloat16))
+
+
+def test_exact_route_sizing_matches_static(monkeypatch):
+    """``NVTE_PERMUTE_FREE_EXACT_ROUTES`` sizes the route buffers from ``sum(m_splits)``.
+
+    With ``m_splits`` carrying ``tokens_per_expert``, its sum is the exact route count, which
+    replaces the static ``T * min(topk, E)`` over-allocation. Only ``em_max`` changes: the
+    valid slots, the results and the gradients are the ones the static path produces.
+    """
+    monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "1")
+    # Off the default path, so check the caller's route count against the routing map.
+    monkeypatch.setenv("NVTE_PERMUTE_FREE_VALIDATE_ROUTES", "1")
+
+    # Enough tokens that the static bound dominates: below ~E blocks of routes the per-expert
+    # block padding (E * BLOCK_SIZE_M slots) is the whole story and both bounds land together.
+    num_recv_tokens, in_features, out_features = 1024, 128, 256
+    num_experts, max_hits = 8, 3
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda")
+    # tokens_per_expert: the per-expert route counts, summing to num_routes (NOT to the token
+    # count -- the permute-free input is unpermuted, so the two differ).
+    m_splits = routing_map.sum(dim=0).tolist()
+    num_routes = int(routing_map.sum().item())
+    assert sum(m_splits) == num_routes != num_recv_tokens
+
+    mod = GroupedLinear(
+        num_experts,
+        in_features,
+        out_features,
+        bias=False,
+        params_dtype=torch.bfloat16,
+        device="cuda",
+    )
+    inp = torch.randn(
+        num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+
+    def run(exact):
+        monkeypatch.setenv("NVTE_PERMUTE_FREE_EXACT_ROUTES", "1" if exact else "0")
+        routing = PermuteFreeMetadata(
+            routing_map=routing_map, num_experts=num_experts, topk=max_hits
+        )
+        out = mod(inp, m_splits, permute_free_metadata=routing)
+        assert routing.num_routes == (num_routes if exact else None)
+        valid = routing.sorted_slot_ids < num_recv_tokens
+        assert int(valid.sum().item()) == num_routes
+        inp.grad = None
+        out[valid].float().pow(2).sum().backward()
+        return int(out.shape[0]), out[valid].detach().clone(), inp.grad.detach().clone()
+
+    em_static, out_static, dgrad_static = run(exact=False)
+    em_exact, out_exact, dgrad_exact = run(exact=True)
+
+    # Same routes, fewer padded slots: the exact bound leaves only the per-expert block padding.
+    assert em_exact < em_static
+    blocks = -(-num_routes // _FLYDSL_FWD_BLOCK_M) + num_experts
+    assert em_exact == blocks * _FLYDSL_FWD_BLOCK_M
+    assert torch.equal(out_exact, out_static)
+    assert torch.equal(dgrad_exact, dgrad_static)
+
+
+def test_exact_route_sizing_rejects_wrong_count(monkeypatch):
+    """The opt-in validation catches a ``num_routes`` that disagrees with the routing map."""
+    monkeypatch.setenv("NVTE_PERMUTE_FREE_VALIDATE_ROUTES", "1")
+    num_recv_tokens, num_experts, max_hits = 128, 8, 3
+    routing_map = _random_routing_map(num_recv_tokens, num_experts, max_hits, "cuda")
+    # The classic mistake: passing token counts (which sum to T) as if they were route counts.
+    routing = MoERoutingMetadata(
+        routing_map=routing_map, num_experts=num_experts, num_routes=num_recv_tokens
+    )
+    with pytest.raises(ValueError, match="does not match routing_map.sum"):
+        prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)

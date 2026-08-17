@@ -161,6 +161,17 @@ def is_permute_free_grouped_gemm_enabled() -> bool:
     return IS_HIP_EXTENSION and os.getenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "0") == "1"
 
 
+def is_permute_free_exact_routes_enabled() -> bool:
+    """Size the route buffers from the host-known exact route count instead of the static bound.
+
+    ``GroupedLinear`` then reads that count off ``sum(m_splits)`` (i.e. ``tokens_per_expert``),
+    which removes the over-allocation but makes the buffer shapes data-dependent -- no static
+    shapes and no CUDA graphs. Off by default; intended for measuring the padding overhead
+    against an unpadded grouped-GEMM baseline.
+    """
+    return os.getenv("NVTE_PERMUTE_FREE_EXACT_ROUTES", "0") == "1"
+
+
 def moe_align_route_list(
     routing_map: torch.Tensor,
     *,
@@ -168,6 +179,7 @@ def moe_align_route_list(
     block_size: int,
     scan=None,
     topk: Optional[int] = None,
+    num_routes: Optional[int] = None,
     build_inverse_map: bool = False,
 ) -> Tuple[
     torch.Tensor,
@@ -198,6 +210,9 @@ def moe_align_route_list(
         Host-known upper bound (the router top-k) on the number of experts any token routes
         to. When provided, tightens the static over-allocation from ``T * num_experts`` to
         ``T * min(topk, num_experts)`` (still sync-free).
+    num_routes:
+        Host-known exact route count. Replaces the static over-allocation with the exact
+        count, at the cost of data-dependent (non-graphable) buffer shapes.
 
     Returns
     -------
@@ -212,8 +227,29 @@ def moe_align_route_list(
         block_size=block_size,
         scan=scan,
         topk=topk,
+        num_routes=num_routes,
         build_inverse_map=build_inverse_map,
     )
+
+
+def _exact_num_routes(metadata: MoERoutingMetadata) -> Optional[int]:
+    """Host-known exact route count to size the align buffers with, if the caller gave one.
+
+    Validation costs a device sync (the whole point of the default path is not paying one), so
+    it is opt-in via ``NVTE_PERMUTE_FREE_VALIDATE_ROUTES=1``.
+    """
+    num_routes = metadata.num_routes
+    if num_routes is None:
+        return None
+    num_routes = int(num_routes)
+    if os.getenv("NVTE_PERMUTE_FREE_VALIDATE_ROUTES", "0") == "1":
+        actual = int(metadata.routing_map.sum().item())
+        if num_routes != actual:
+            raise ValueError(
+                f"num_routes ({num_routes}) does not match routing_map.sum() ({actual}). "
+                "A value below the true count silently drops routes."
+            )
+    return num_routes
 
 
 def _ensure_route_scan(metadata: MoERoutingMetadata):
@@ -256,6 +292,7 @@ def prepare_moe_align(metadata: MoERoutingMetadata, block_m: int) -> MoERoutingM
         block_size=block_m,
         scan=(counts, within),
         topk=metadata.topk,
+        num_routes=_exact_num_routes(metadata),
         build_inverse_map=True,
     )
     metadata.sorted_slot_ids = sorted_slot_ids  # [T * min(topk, E)] int32: block-padded slot -> token
@@ -298,6 +335,7 @@ def _prepare_wgrad_align(
         block_size=contract_m,
         scan=_ensure_route_scan(metadata),
         topk=metadata.topk,
+        num_routes=_exact_num_routes(metadata),
     )
     cache.sorted_slot_ids = sorted_slot_ids
     cache.block_start = block_start
