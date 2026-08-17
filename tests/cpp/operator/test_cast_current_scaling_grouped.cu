@@ -1,5 +1,4 @@
 /*************************************************************************
- * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -386,13 +385,6 @@ class GroupedCastCurrentScalingTestSuite
                                                  >> {};
 
 TEST_P(GroupedCastCurrentScalingTestSuite, Test) {
-#ifdef __HIP_PLATFORM_AMD__
-  // Grouped FP8 current-scaling quantize is CUDA-only (inline PTX / TMA); it is
-  // guarded off on ROCm (group_quantize_fwd_helper throws NVTE_ERROR). ROCm
-  // reports compute capability 9.4, which passes the Hopper (>=90) gate below,
-  // so an explicit skip is required.
-  GTEST_SKIP() << "Grouped FP8 current-scaling quantize is not supported on ROCm.";
-#endif
   if (getDeviceComputeCapability() < hopperComputeCapability) {
     GTEST_SKIP();
   }

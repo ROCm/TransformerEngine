@@ -1,5 +1,4 @@
 /*************************************************************************
- * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -294,12 +293,6 @@ class GroupedDequantizeFP8BlockwiseTestSuite
     : public ::testing::TestWithParam<std::tuple<TestConfig, transformer_engine::DType>> {};
 
 TEST_P(GroupedDequantizeFP8BlockwiseTestSuite, Test) {
-#ifdef __HIP_PLATFORM_AMD__
-  // Grouped FP8 block-scaling dequantize is CUDA-only (Hopper TMA); guarded off
-  // on ROCm (NVTE_ERROR). ROCm reports cc 9.4 which passes the Hopper (>=90) gate,
-  // so an explicit skip is required.
-  GTEST_SKIP() << "Grouped FP8 block-scaling dequantize is not supported on ROCm.";
-#endif
   const TestConfig cfg = std::get<0>(GetParam());
   const DType output_type = std::get<1>(GetParam());
   // FP8 block scaling is E4M3-centric (matches the grouped quantize test scope).

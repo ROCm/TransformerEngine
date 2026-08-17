@@ -1,4 +1,5 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
  * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
@@ -132,6 +133,8 @@ __launch_bounds__(GROUPED_AMAX_KERNEL_THREADS) __global__
       const size_t total_vecs = numel / NVEC;
       const size_t tail_start = total_vecs * NVEC;
 
+      // Explicit conversion: hip_bfloat16 has no implicit float constructor, so
+      // upstream's `= 0.f` copy-initialization does not compile with hipcc.
       InputType thread_amax_val = InputType(0.f);
       const bool aligned = (reinterpret_cast<uintptr_t>(base) % IVecT::BYTES) == 0;
 

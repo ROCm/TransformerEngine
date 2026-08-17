@@ -221,6 +221,7 @@ def _compute_fp8_block_scaling_support() -> Tuple[bool, str]:
         "FP8 block scaled GEMM requires compute capability 9.0 or higher and CUDA >= 12.9.",
     )
 
+
 @torch.compiler.assume_constant_result
 def check_fp8_support() -> Tuple[bool, str]:
     """Return if fp8 support is available."""
