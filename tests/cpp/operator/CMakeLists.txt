@@ -46,6 +46,7 @@ if(USE_ROCM)
   list(REMOVE_ITEM test_cuda_sources
               test_grouped_gemm.cu)
   list(APPEND test_cuda_sources
+              test_multi_tensor_transpose_bhsd.cu
               test_dequantize_nvfp4.cu
               test_cublaslt_gemm.cu
               test_cast_mxfp4_transpose.cu
