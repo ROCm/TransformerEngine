@@ -35,6 +35,13 @@ Environment Variables:
         (jax-ml/jax#35218) instead of silently falling back to non-autotuned
         dispatch. Useful for CI or debugging to ensure autotuning is active.
         Default is "0" (silent compatibility fallback).
+    NVTE_JAX_TRITON_PREWARM: ROCm only. If set to "0", do not launch a freshly
+        compiled kernel once on a single device before returning from lowering.
+        The prewarm works around a race in the ROCm plugin, which unlinks the
+        HSACO it was handed before locking its module cache, so two device
+        threads reaching an unseen kernel together can make one of them fail
+        with ENOENT. Default is "1" (prewarm runs when more than one local
+        device is visible).
 """
 
 import hashlib
@@ -211,6 +218,10 @@ _TRITON_KERNEL_CACHE = {}
 # Process-scoped temp dir for ROCm HSACO blobs (removed at interpreter exit).
 _HSACO_TMPDIR = None
 
+# Single-device prewarm state (ROCm only; see _prewarm_kernel_call).
+_PREWARM_PRIM = None
+_PREWARM_ACTIVE = False
+
 
 def _hsaco_dir():
     """Return a process-scoped temp directory for HSACO blobs (created lazily)."""
@@ -218,6 +229,50 @@ def _hsaco_dir():
     if _HSACO_TMPDIR is None:
         _HSACO_TMPDIR = tempfile.TemporaryDirectory(prefix="te_jax_hsaco_")
     return _HSACO_TMPDIR.name
+
+
+def _prewarm_primitive():
+    """Primitive that re-emits an already-built Triton custom call for prewarming."""
+    global _PREWARM_PRIM
+    if _PREWARM_PRIM is None:
+        from jax.extend.core import Primitive
+        from jax.interpreters import mlir
+
+        prim = Primitive("te_triton_prewarm")
+        prim.multiple_results = True
+        prim.def_abstract_eval(lambda *_, out_avals, rule: out_avals)
+        mlir.register_lowering(prim, lambda ctx, *args, out_avals, rule: rule(ctx, *args))
+        _PREWARM_PRIM = prim
+    return _PREWARM_PRIM
+
+
+def _prewarm_kernel_call(ctx, rule):
+    """Load a freshly compiled HSACO into the ROCm plugin from a single device.
+
+    The plugin reads the blob from its path and unlinks it before taking the lock that
+    guards its module cache, so two device threads reaching an unseen kernel together
+    race: the winner deletes the file, the loser fails with ENOENT. Launching once here,
+    on one device, inserts the cache entry before any sharded executable can race for it.
+    """
+    global _PREWARM_ACTIVE
+    if _PREWARM_ACTIVE:
+        return
+    _PREWARM_ACTIVE = True
+    try:
+        prim = _prewarm_primitive()
+        device = jax.local_devices()[0]
+        operands = [
+            jax.device_put(jnp.zeros(aval.shape, aval.dtype), device) for aval in ctx.avals_in
+        ]
+        out_avals = tuple(core.ShapedArray(a.shape, a.dtype) for a in ctx.avals_out)
+        jax.block_until_ready(
+            jax.jit(lambda *xs: prim.bind(*xs, out_avals=out_avals, rule=rule))(*operands)
+        )
+    except Exception as e:  # pylint: disable=broad-except
+        # Prewarming is an optimization; a failure here must not break the real compile.
+        warnings.warn(f"Triton kernel prewarm failed ({type(e).__name__}: {e})", RuntimeWarning)
+    finally:
+        _PREWARM_ACTIVE = False
 
 
 def get_triton_info():
@@ -411,8 +466,8 @@ def compile_triton(
 
     compiled = tc.compile(src, target=target, options=options.__dict__)
 
-    # HSACO is bytes and nanobind won't coerce it to the std::string binary arg, so pass a path.
-    # The plugin reads the file once and unlinks it, then serves the blob from its own cache.
+    # The plugin's HIP branch takes a filename, not the blob; it reads the file once, unlinks it,
+    # and serves every later launch from its own cache.
     binary = compiled.asm[binary_key]
     if is_hip:
         fd, hsaco_path = tempfile.mkstemp(suffix=".hsaco", dir=_hsaco_dir())
@@ -567,6 +622,7 @@ def triton_call_lowering(
     # single non-autotuned dispatch for compatibility.  Set
     # NVTE_JAX_ENFORCE_TRITON_AUTOTUNING=1 to raise an error instead, prompting the
     # user to upgrade JAX for improved performance.
+    kernels_before = len(_TRITON_KERNEL_CACHE)
     is_autotuned = isinstance(kernel_fn, autotuner.Autotuner)
     used_autotuned_launch = False
     if is_autotuned and not is_triton_autotuned_alias_safe():
@@ -730,5 +786,13 @@ def triton_call_lowering(
             backend_config=compressed_call_proto,
             operand_output_aliases=ffi_operand_output_aliases,
         )
+
+    if (
+        is_hip_extension()
+        and len(_TRITON_KERNEL_CACHE) > kernels_before
+        and len(jax.local_devices()) > 1
+        and os.environ.get("NVTE_JAX_TRITON_PREWARM", "1") != "0"
+    ):
+        _prewarm_kernel_call(ctx, rule)
 
     return rule(ctx, *array_args)

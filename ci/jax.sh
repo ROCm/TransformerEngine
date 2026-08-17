@@ -65,6 +65,7 @@ run_test_config() {
     # group-mode per-segment dq_acc layout matters (see the equal-dim-128 RAGGED_SELF config).
     NVTE_CK_IS_V3_ATOMIC_FP32=0 run_default_fa_lbl "atomic16" 3 test_fused_attn.py -k "test_backward and RAGGED"
     run_default_fa 1 test_layer.py # it effectively always uses unfused attention
+    run_default_fa 1 test_permutation.py
     run_default_fa 1 test_sanity_import.py
     run_default_fa 1 test_softmax.py
     run_default_fa 1 test_triton_custom_calls.py
@@ -102,6 +103,7 @@ run_test_config_mgpu() {
     export XLA_FLAGS="${XLA_FLAGS} --xla_gpu_enable_triton_gemm=false"
     run_default_fa 2 test_distributed_layernorm_mlp.py -k "${_layernorm_mlp_jax_gemm_k}"
     export XLA_FLAGS="$_saved_xla_flags"
+    run_default_fa 3 test_distributed_permutation.py
     run_default_fa 3 test_distributed_softmax.py
 
     run_default_fa 3 test_sanity_import.py
