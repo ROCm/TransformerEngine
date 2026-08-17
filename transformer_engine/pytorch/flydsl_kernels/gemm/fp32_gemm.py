@@ -7,8 +7,8 @@
 The kernel specializes on K at compile time because the K32 loop is fully
 hand-unrolled. M/N are runtime launch dimensions. The private optimized core
 consumes A and B as FP32 tensors shaped [M, K] and [N, K], and writes FP32 C
-shaped [M, N]. The public ``fp32_matmul`` entry point accepts Transformer
-Engine's TN contract and performs the required private adaptation.
+shaped [M, N]. The public ``fp32_matmul`` entry point forwards these operands
+to the core directly; NN/NT layout normalization is handled by the wrapper.
 
 This module imports ``flydsl`` at import time and must therefore be imported
 lazily only after FlyDSL availability has been confirmed.
@@ -21,21 +21,23 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl._mlir.dialects import llvm
-from flydsl.expr import arith, const_expr, gpu, range_constexpr, rocdl
+from flydsl.expr import arith, const_expr, gpu, math, range_constexpr, rocdl
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 
 # Transformer Engine-local FlyDSL utilities.
-from .gemm_common_utils import require_block_tiling
+from .exceptions import FlyDSLUnsupportedError
+from .gemm_common_utils import require_block_tiling, require_launch_size
 from .fp16_gemm_utils import (
     G2SLoader,
     S2RLoader,
     compute_global_swizzle,
+    divmod,
     make_byte_buffer_tensor as make_fp32_byte_buffer_tensor,
     pack_i32x4_i32x8,
     swizzle_128,
     xcd_swizzle,
-    barrier
+    barrier,
 )
 
 
@@ -51,7 +53,7 @@ NUM_THREADS = 256
 WARP_SIZE = 64
 NUM_WAVES = NUM_THREADS // WARP_SIZE
 
-SUBTILE_M = 64 
+SUBTILE_M = 64
 SUBTILE_N = 64
 
 MFMA_M = 16
@@ -76,13 +78,6 @@ LOAD_PASSES_A_SUBTILE = LOAD_PASSES_A // 2
 LOAD_PASSES_B_SUBTILE = LOAD_PASSES_B // 2
 PASSES_PER_A_MI = LOAD_PASSES_A_SUBTILE // MFMA_M_PER_SUBTILE
 
-LDS_SYM_A0 = "fp32_pp_smem_a0"
-LDS_SYM_A1 = "fp32_pp_smem_a1"
-LDS_SYM_B0 = "fp32_pp_smem_b0"
-LDS_SYM_B1 = "fp32_pp_smem_b1"
-LDS_ALIAS_DOMAIN = '#llvm.alias_scope_domain<id = "fp32_pp_lds">'
-SCOPE_IDS = ("a0", "a1", "b0", "b1")
-
 assert BLOCK_K == 32
 # DO NOT CHANGE THE FOLLOWING LINE.
 assert NUM_THREADS == 256
@@ -103,18 +98,14 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
 
         DEFAULT        plain matmul
         BIAS           + per-output-feature bias vector (indexed by N)
-        GELU_AUX       (reserved) GELU with saved pre-activation aux
-        GELU_AUX_BIAS  (reserved) bias then GELU with saved aux
+        GELU_AUX       GELU(A@B), saving the pre-activation to the Aux output
+        GELU_AUX_BIAS  GELU(A@B + bias), saving the pre-activation to Aux
 
-    Only DEFAULT and BIAS are implemented; the GELU modes are accepted so the
-    store-loop structure and dispatch signature are already in place.
+    The GELU modes write a second M x N output (pre-activation, tanh-approx
+    GELU applied to C) for the backward pass.
     """
     if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
         raise ValueError(f"Unsupported FP32 epilogue: {epilogue}")
-    if epilogue in ("GELU_AUX", "GELU_AUX_BIAS"):
-        raise NotImplementedError(
-            f"FP32 epilogue {epilogue} is reserved but not yet implemented"
-        )
     has_bias = epilogue in ("BIAS", "GELU_AUX_BIAS")
     has_gelu = epilogue in ("GELU_AUX", "GELU_AUX_BIAS")
 
@@ -148,7 +139,9 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
 
     assert K % BLOCK_K == 0, f"K must be a multiple of {BLOCK_K}, got {K}"
     NUM_K_TILES = K // BLOCK_K
-    assert NUM_K_TILES >= 4, f"K={K} gives {NUM_K_TILES} K32 tiles; the two-page pipeline needs at least 4"
+    assert (
+        NUM_K_TILES >= 4
+    ), f"K={K} gives {NUM_K_TILES} K32 tiles; the two-page pipeline needs at least 4"
 
     LDS_ELEMS_HALF = (BLOCK_M // 2) * BLOCK_K
     LDS_BYTES_HALF = LDS_ELEMS_HALF * ELEM_BYTES
@@ -175,6 +168,7 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
         B: fx.Tensor,
         C: fx.Tensor,
         Bias: fx.Tensor,
+        Aux: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
     ):
@@ -219,8 +213,12 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
         # The utility mapping is identical to the previous manual staging:
         # each step contributes one contiguous 16-byte vector per thread, while
         # the global K coordinate is XOR-unswizzled for the physical LDS slot.
-        gl_off_a = compute_global_swizzle(lane, wave_id, K * ELEM_BYTES, LOAD_PASSES_HALF, preshuffled=False)
-        gl_off_b = compute_global_swizzle(lane, wave_id, K * ELEM_BYTES, LOAD_PASSES_HALF, preshuffled=False)
+        gl_off_a = compute_global_swizzle(
+            lane, wave_id, K * ELEM_BYTES, LOAD_PASSES_HALF, preshuffled=False
+        )
+        gl_off_b = compute_global_swizzle(
+            lane, wave_id, K * ELEM_BYTES, LOAD_PASSES_HALF, preshuffled=False
+        )
         a_g2s = G2SLoader(a_div, gl_off_a, LOAD_PASSES_HALF, fx.Uint8.ir_type, wave_id)
         b_g2s = G2SLoader(b_div, gl_off_b, LOAD_PASSES_HALF, fx.Uint8.ir_type, wave_id)
         s2r = S2RLoader(fx.Int32(0), 1)
@@ -251,6 +249,31 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
                 reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
                 fx.copy(bias_ld_atom, fx.slice(bias_div, (None, fx.Int32(col))), reg)
                 return fx.memref_load_vec(reg)[0]
+
+        # GELU_AUX saves the pre-activation value (A@B[+bias]) to a second M x N
+        # fp32 output so the backward pass can recompute the GELU gradient. Same
+        # tile base as C; DEFAULT gets a dummy 1-element tensor.
+        if const_expr(has_gelu):
+            gAux = fx.rocdl.make_buffer_tensor(Aux, max_size=True)
+            aux_div = fx.logical_divide(gAux, fx.make_layout(1, 1))
+            aux_store_atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Float32)
+
+            def gelu_tanh(x):
+                # tanh-approx GELU (matches PyTorch approximate='tanh' and the
+                # FlyDSL preshuffle reference), expressed through a non-positive
+                # exponent so exp() cannot overflow:
+                #   0.5*x*(1 + tanh(y)),  y = sqrt(2/pi)*(x + 0.044715*x^3)
+                half_f32 = fx.Float32(0.5)
+                one_f32 = fx.Float32(1.0)
+                zero_f32 = fx.Float32(0.0)
+                two_f32 = fx.Float32(2.0)
+                x3 = x * x * x
+                y = fx.Float32(0.7978845608) * (x + fx.Float32(0.044715) * x3)
+                abs_y = fx.Float32(y).maximumf(zero_f32 - y)
+                e_neg2abs = math.exp(fx.Float32(-2.0) * abs_y)
+                denom = one_f32 + e_neg2abs
+                numerator = (y > zero_f32).select(two_f32, two_f32 * e_neg2abs)
+                return half_f32 * x * (numerator * (one_f32 / denom))
 
         PIN_ACC_BASE = 0
 
@@ -343,11 +366,15 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
         def stage_a_subtile_pass(k_base, subtile, pass_in_subtile, lds_a):
             # One pass writes 256 threads * 16 B = 4 KiB. Four passes fill one
             # 128x64 half-page (16 KiB). Each half has its own LDS base.
-            global_base = (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(K * ELEM_BYTES) + k_base * fx.Index(ELEM_BYTES)
+            global_base = (bx_m_idx + fx.Index(subtile * (BLOCK_M // 2))) * fx.Index(
+                K * ELEM_BYTES
+            ) + k_base * fx.Index(ELEM_BYTES)
             a_g2s.load_one(lds_a[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_b_subtile_pass(k_base, subtile, pass_in_subtile, lds_b):
-            global_base = (by_n_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(K * ELEM_BYTES) + k_base * fx.Index(ELEM_BYTES)
+            global_base = (by_n_idx + fx.Index(subtile * (BLOCK_N // 2))) * fx.Index(
+                K * ELEM_BYTES
+            ) + k_base * fx.Index(ELEM_BYTES)
             b_g2s.load_one(lds_b[subtile], fx.Int32(global_base), pass_in_subtile)
 
         def stage_a_subtile(k_base, subtile, lds_a):
@@ -380,7 +407,9 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
             return load_frag_at_byte_base(lds_b[half], half_row * fx.Index(BLOCK_K * ELEM_BYTES))
 
         def _acc_idx(subtile_id, mi, ni):
-            return subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
+            return (
+                subtile_id * MFMA_M_PER_SUBTILE * MFMA_N_PER_SUBTILE + mi * MFMA_N_PER_SUBTILE + ni
+            )
 
         def _fp32_k4_operand(full_frag, k32_half, k4):
             # A/B 16x32 FP32 wave fragments are i32x8: one FP32 value per
@@ -393,16 +422,11 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
             llvm.InlineAsmOp(
                 None,
                 [arith._to_raw(a_k4), arith._to_raw(b_k4)],
-                (
-                    f"v_mfma_f32_16x16x4_f32 "
-                    f"a[{acc_pin}:{acc_pin + 3}], "
-                    f"$0, $1, "
-                    f"a[{acc_pin}:{acc_pin + 3}]"
-                ),
-                (
-                    f"v,v,~{{a{acc_pin}}},~{{a{acc_pin + 1}}},"
-                    f"~{{a{acc_pin + 2}}},~{{a{acc_pin + 3}}}"
-                ),
+                "v_mfma_f32_16x16x4_f32 "
+                f"a[{acc_pin}:{acc_pin + 3}], "
+                "$0, $1, "
+                f"a[{acc_pin}:{acc_pin + 3}]",
+                f"v,v,~{{a{acc_pin}}},~{{a{acc_pin + 1}}},~{{a{acc_pin + 2}}},~{{a{acc_pin + 3}}}",
                 has_side_effects=True,
             )
 
@@ -483,15 +507,22 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
                 c_idx = c_tile_base_elems + row * fx.Index(c_n) + col
 
                 # Epilogue stages run on the fp32 accumulator; output is fp32
-                # so there is no dtype narrowing. GELU will slot in here later.
+                # so there is no dtype narrowing:
+                #   value = acc [+ bias]           (pre-activation)
+                #   GELU_AUX: save pre-activation to Aux, then value = gelu(value)
                 value = Vec(acc)[ii]
                 if const_expr(has_bias):
                     value = value + bias_value
 
+                if const_expr(has_gelu):
+                    aux_reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
+                    fx.memref_store_vec(Vec.filled(1, value, fx.Float32), aux_reg)
+                    fx.copy(aux_store_atom, aux_reg, fx.slice(aux_div, (None, fx.Int32(c_idx))))
+                    value = gelu_tanh(value)
+
                 reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Float32)
                 fx.memref_store_vec(Vec.filled(1, value, fx.Float32), reg)
                 fx.copy(c_store_atom, reg, fx.slice(c_div, (None, fx.Int32(c_idx))))
-
 
         # Explicit register coordinates for HK-style four-quadrant mapping.
         # BLOCK_M/BLOCK_N are 256x256.  Four waves map to warp positions
@@ -788,7 +819,7 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
             #
             # Finalize accumulators in their own physical AGPR slots, but delay
             # each AGPR read/store until several independent final MFMAs have
-            # been issued. 
+            # been issued.
             #
             #   MFMA 0, MFMA 1, MFMA 2, MFMA 3, drain 0,
             #   MFMA 4, drain 1, MFMA 5, drain 2, ...
@@ -906,13 +937,13 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
             )
             hk_one_k_final(lds_a0, lds_b0, a0_regs, b0_regs)
 
-
     @flyc.jit
     def launch_gemm(
         A: fx.Tensor,
         B: fx.Tensor,
         C: fx.Tensor,
         Bias: fx.Tensor,
+        Aux: fx.Tensor,
         c_m: fx.Int32,
         c_n: fx.Int32,
         stream: fx.Stream = fx.Stream(None),
@@ -924,6 +955,7 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
             B,
             C,
             Bias,
+            Aux,
             c_m,
             c_n,
             value_attrs={"rocdl.waves_per_eu": 1, "rocdl.flat_work_group_size": "256,256"},
@@ -931,10 +963,10 @@ def _compile_kernel(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT
 
     return launch_gemm
 
+
 @functools.lru_cache(maxsize=None)
 def _cached_launch(K: int, use_xcd_remap: bool = True, epilogue: str = "DEFAULT"):
     return _compile_kernel(K, use_xcd_remap=use_xcd_remap, epilogue=epilogue)
-
 
 
 def fp32_matmul(
@@ -945,31 +977,28 @@ def fp32_matmul(
     *,
     epilogue: str = "DEFAULT",
     bias: torch.Tensor = None,
+    aux: torch.Tensor = None,
 ):
     """TE-facing TN FP32 GEMM adapter.
 
-    Public/backend contract:
+    Public/backend contract (matching every other dtype backend):
         a: [M, K] FP32
-        b: [K, N] FP32
+        b: [N, K] FP32
         c: [M, N] FP32 output
 
-    The optimized core streams both operands with K contiguous and therefore
-    privately consumes B as [N, K]. In the normal TE TN path, ``b`` is a
-    transpose view of contiguous rowwise weight storage, so ``b.T`` is already
-    contiguous and does not require a physical transpose.
+    The optimized core streams both operands with K contiguous and consumes B
+    as [N, K] directly, so this adapter performs no internal transpose. The
+    wrapper is responsible for normalizing NN/NT layouts into this contract.
     """
     if a.ndim != 2 or b.ndim != 2:
         raise ValueError(
-            f"FlyDSL FP32 TN expects rank-2 operands, got A{tuple(a.shape)} "
-            f"and B{tuple(b.shape)}"
+            f"FlyDSL FP32 TN expects rank-2 operands, got A{tuple(a.shape)} and B{tuple(b.shape)}"
         )
 
     m, k = a.shape
-    kb, n = b.shape
+    n, kb = b.shape
     if kb != k:
-        raise ValueError(
-            f"Inner dimensions do not match: A{tuple(a.shape)} and B{tuple(b.shape)}"
-        )
+        raise ValueError(f"Inner dimensions do not match: A{tuple(a.shape)} and B{tuple(b.shape)}")
     if a.dtype != torch.float32 or b.dtype != torch.float32:
         raise TypeError(
             "FlyDSL FP32 GEMM expects both operands to have torch.float32 dtype, "
@@ -978,19 +1007,17 @@ def fp32_matmul(
     if tuple(c.shape) != (m, n):
         raise ValueError(f"C shape {tuple(c.shape)} != expected {(m, n)}")
     if c.dtype != torch.float32:
-        raise TypeError(
+        raise FlyDSLUnsupportedError(
             f"The current FlyDSL FP32 kernel stores torch.float32 output, got {c.dtype}"
         )
     if a.device != b.device or a.device != c.device:
         raise ValueError(
-            f"A, B, and C must be on the same device, got "
-            f"{a.device}, {b.device}, and {c.device}"
+            f"A, B, and C must be on the same device, got {a.device}, {b.device}, and {c.device}"
         )
     if not c.is_contiguous():
-        raise ValueError("FlyDSL FP32 GEMM requires contiguous output storage")
+        raise FlyDSLUnsupportedError("FlyDSL FP32 GEMM requires contiguous output storage")
 
-    b_hk = b.transpose(0, 1).contiguous()
-    doGemm(a, b_hk, c, stream=stream, epilogue=epilogue, bias=bias)
+    doGemm(a, b, c, stream=stream, epilogue=epilogue, bias=bias, aux=aux)
 
 
 def doGemm(
@@ -1001,6 +1028,7 @@ def doGemm(
     use_xcd_remap: bool = True,
     epilogue: str = "DEFAULT",
     bias: torch.Tensor = None,
+    aux: torch.Tensor = None,
 ):
     """Launch the private K-specialized FP32 core.
 
@@ -1021,6 +1049,7 @@ def doGemm(
         block_k=_BLOCK_K,
         label="FP32 GEMM",
     )
+    require_launch_size("FP32 GEMM", ("A", A), ("B", B), ("C", C))
     assert C.shape == (M_runtime, N_runtime)
 
     if epilogue not in ("DEFAULT", "BIAS", "GELU_AUX", "GELU_AUX_BIAS"):
@@ -1033,13 +1062,26 @@ def doGemm(
         if bias.dtype != torch.float32:
             raise TypeError(f"FP32 bias must be float32, got {bias.dtype}")
         if bias.numel() != N_runtime:
-            raise ValueError(
-                f"FP32 bias length {bias.numel()} != N (out_features) {N_runtime}"
-            )
+            raise ValueError(f"FP32 bias length {bias.numel()} != N (out_features) {N_runtime}")
         if bias.device != A.device:
             raise ValueError("bias must be on the same device as A, B, and C")
     elif bias is not None:
         raise ValueError(f"FP32 epilogue {epilogue} does not accept a bias tensor")
+
+    needs_aux = epilogue in ("GELU_AUX", "GELU_AUX_BIAS")
+    if needs_aux:
+        # Pre-activation output for the backward pass: caller-allocated M x N
+        # fp32, filled in place through its buffer descriptor.
+        if aux is None:
+            raise ValueError(f"FP32 epilogue {epilogue} requires an aux output tensor")
+        if tuple(aux.shape) != (M_runtime, N_runtime):
+            raise ValueError(f"FP32 aux shape {tuple(aux.shape)} != {(M_runtime, N_runtime)}")
+        if aux.dtype != torch.float32:
+            raise TypeError(f"FP32 aux must be float32, got {aux.dtype}")
+        if aux.device != A.device:
+            raise ValueError("aux must be on the same device as A, B, and C")
+    elif aux is not None:
+        raise ValueError(f"FP32 epilogue {epilogue} does not accept an aux tensor")
 
     if stream is None:
         stream = torch.cuda.current_stream()
@@ -1047,10 +1089,14 @@ def doGemm(
     A_arg = A.contiguous().view(torch.uint8).view(-1)
     B_arg = B.contiguous().view(torch.uint8).view(-1)
     C_arg = C.view(-1)
-    # DEFAULT keeps the kernel signature uniform with a dummy 1-element bias.
+    # DEFAULT keeps the kernel signature uniform with dummy 1-element buffers.
     if needs_bias:
         Bias_arg = bias.contiguous().view(-1)
     else:
         Bias_arg = torch.zeros(1, dtype=torch.float32, device=A.device)
+    if needs_aux:
+        Aux_arg = aux.contiguous().view(-1)
+    else:
+        Aux_arg = torch.zeros(1, dtype=torch.float32, device=A.device)
     launch = _cached_launch(int(K_runtime), bool(use_xcd_remap), epilogue)
-    launch(A_arg, B_arg, C_arg, Bias_arg, M_runtime, N_runtime, stream=stream)
+    launch(A_arg, B_arg, C_arg, Bias_arg, Aux_arg, M_runtime, N_runtime, stream=stream)

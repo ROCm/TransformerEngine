@@ -1,5 +1,9 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
+#
+# Adapted by AMD from the FlyDSL project's GEMM utility helpers.
 """Byte-level staging helpers for the four-wave GEMM kernels.
 
 These loaders and swizzle helpers operate on flat byte views and carry no dtype
@@ -50,9 +54,7 @@ def compute_global_swizzle(
     n_waves = fx.block_dim.x // 64
     for round in range_constexpr(n_rounds):
         if const_expr(preshuffled):
-            raise AssertionError(
-                "16-bit first-pass port does not support preshuffled operands"
-            )
+            raise AssertionError("16-bit first-pass port does not support preshuffled operands")
         row = lane_id // 8 + wave_id * 8 + round * (n_waves * 8)
         col_bytes = (lane_id % 8) * 16
         r, c = swizzle_128(row, col_bytes)
@@ -88,11 +90,7 @@ def compute_global_transpose_swizzle(
         # XOR swizzle is self-inverse for this layout. Map the physical LDS
         # chunk back to its logical K/X-byte source coordinate.
         logical_k, logical_x_bytes = swizzle_128(physical_k, col_bytes)
-        offsets.append(
-            logical_k * leading_dim_bytes
-            + slice_idx * 64 * 2
-            + logical_x_bytes
-        )
+        offsets.append(logical_k * leading_dim_bytes + slice_idx * 64 * 2 + logical_x_bytes)
     return offsets
 
 

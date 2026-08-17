@@ -1,5 +1,9 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
+#
 # SPDX-License-Identifier: Apache-2.0
 # Copyright (c) 2025 FlyDSL Project Contributors
+#
+# Adapted by AMD from the FlyDSL project's GEMM utility helpers.
 """Dtype-independent primitives shared by the FlyDSL GEMM kernels.
 
 These helpers carry no dtype specialization, so the per-dtype utils modules
@@ -45,6 +49,32 @@ def require_block_tiling(m, n, k, *, block_m, block_n, block_k, label, min_k_til
     return num_k_tiles
 
 
+# FlyDSL packs flat operand byte views into an int32 launch signature, so any
+# single operand of >= 2 GiB overflows the 'i' pack format at launch. Guard for
+# it up front so oversized shapes fall back to the default backend instead of
+# aborting with an unrecoverable struct.error.
+_MAX_LAUNCH_BYTES = 2**31 - 1
+
+
+def require_launch_size(label, *tensors):
+    """Reject operands whose byte size exceeds the int32 launch-argument limit.
+
+    ``tensors`` is an iterable of ``(name, tensor)`` pairs. Raises
+    ``FlyDSLUnsupportedError`` (so ``general_gemm`` falls back to the C++
+    backend) for the first operand at or above ``_MAX_LAUNCH_BYTES``; skips
+    ``None`` tensors (e.g. an absent bias/aux).
+    """
+    for name, t in tensors:
+        if t is None:
+            continue
+        nbytes = t.numel() * t.element_size()
+        if nbytes > _MAX_LAUNCH_BYTES:
+            raise FlyDSLUnsupportedError(
+                f"FlyDSL {label} operand {name} is {nbytes} bytes, which exceeds "
+                f"the int32 launch-argument limit of {_MAX_LAUNCH_BYTES}"
+            )
+
+
 def cdiv(numer: int, denom: int) -> int:
     return (numer + denom - 1) // denom
 
@@ -52,7 +82,7 @@ def cdiv(numer: int, denom: int) -> int:
 ceildiv = cdiv
 
 
-def divmod(a, b):
+def divmod(a, b):  # pylint: disable=redefined-builtin
     """Integer divmod that works on DSL values (e.g. ``Int32``).
 
     The builtin ``divmod`` rejects DSL scalar types, so this uses the overloaded
@@ -61,7 +91,7 @@ def divmod(a, b):
     return (a // b, a % b)
 
 
-def min(a, b):
+def min(a, b):  # pylint: disable=redefined-builtin
     return arith.select(a < b, a, b)
 
 
