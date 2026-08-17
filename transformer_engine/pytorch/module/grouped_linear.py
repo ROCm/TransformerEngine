@@ -52,6 +52,7 @@ from ..cpp_extensions import (
     general_grouped_gemm,
     general_grouped_gemm_for_grouped_tensor,
 )
+from ..grouped_gemm_autotune import maybe_autotune_grouped_gemm
 from ..constants import GemmParallelModes, dist_group_type
 from ..jit import no_torch_dynamo
 from ..cpu_offload import is_cpu_offload_enabled, mark_not_offload, start_offload
@@ -618,19 +619,40 @@ class _GroupedLinear(torch.autograd.Function):
         else:
             general_grouped_gemm_func = general_grouped_gemm
             kwargs = {}
-        general_grouped_gemm_func(
-            weights_fp8,
-            inputmats,
-            [out],
-            output_quantizers,
-            activation_dtype,
-            single_output=True,
-            m_splits=m_splits,
-            bias=biases,
-            use_bias=use_bias,
-            use_split_accumulator=use_split_accumulator,
-            **kwargs,
-        )
+        # Opt-in fprop autotune (NVTE_AUTOTUNE=1, ROCm bf16 path): pick
+        # multi-stream hipBLASLt vs CK per shape and run into `out`. Returns
+        # (False, None) unless enabled, leaving the normal path below unchanged.
+        handled = False
+        if general_grouped_gemm_func is general_grouped_gemm and not (fp8 or debug):
+            handled, _ = maybe_autotune_grouped_gemm(
+                weights_fp8,
+                inputmats,
+                [out],
+                output_quantizers,
+                activation_dtype,
+                m_splits=m_splits,
+                layout="TN",
+                N=weights_fp8[0].size(0),
+                K=weights_fp8[0].size(1),
+                single_output=True,
+                bias=biases,
+                use_bias=use_bias,
+                use_split_accumulator=use_split_accumulator,
+            )
+        if not handled:
+            general_grouped_gemm_func(
+                weights_fp8,
+                inputmats,
+                [out],
+                output_quantizers,
+                activation_dtype,
+                single_output=True,
+                m_splits=m_splits,
+                bias=biases,
+                use_bias=use_bias,
+                use_split_accumulator=use_split_accumulator,
+                **kwargs,
+            )
 
 
         output_unpadded = False
@@ -1092,19 +1114,37 @@ class _GroupedLinear(torch.autograd.Function):
                 else:
                     general_grouped_gemm_func = general_grouped_gemm
                     kwargs = {}
-                general_grouped_gemm_func(
-                    weights_for_dgrad,
-                    grad_output,
-                    [dgrad],
-                    ctx.grad_input_quantizers,
-                    ctx.activation_dtype,
-                    single_output=True,
-                    layout="NN",
-                    m_splits=ctx.m_splits,
-                    grad=True,
-                    use_split_accumulator=dgrad_gemm_use_split_accumulator,
-                    **kwargs,
-                )
+                # Opt-in dgrad autotune (NVTE_AUTOTUNE=1, ROCm bf16 path).
+                dgrad_handled = False
+                if general_grouped_gemm_func is general_grouped_gemm and not (ctx.fp8 or ctx.debug):
+                    dgrad_handled, _ = maybe_autotune_grouped_gemm(
+                        weights_for_dgrad,
+                        grad_output,
+                        [dgrad],
+                        ctx.grad_input_quantizers,
+                        ctx.activation_dtype,
+                        m_splits=ctx.m_splits,
+                        layout="NN",
+                        N=weights_for_dgrad[0].size(0),
+                        K=weights_for_dgrad[0].size(1),
+                        single_output=True,
+                        grad=True,
+                        use_split_accumulator=dgrad_gemm_use_split_accumulator,
+                    )
+                if not dgrad_handled:
+                    general_grouped_gemm_func(
+                        weights_for_dgrad,
+                        grad_output,
+                        [dgrad],
+                        ctx.grad_input_quantizers,
+                        ctx.activation_dtype,
+                        single_output=True,
+                        layout="NN",
+                        m_splits=ctx.m_splits,
+                        grad=True,
+                        use_split_accumulator=dgrad_gemm_use_split_accumulator,
+                        **kwargs,
+                    )
 
                 if ctx.actual_m_splits is not None and ctx.actual_m_splits != ctx.m_splits \
                         and not ctx.output_unpadded:
@@ -1196,6 +1236,11 @@ class _GroupedLinear(torch.autograd.Function):
                 else:
                     general_grouped_gemm_func = general_grouped_gemm
                     kwargs = {}
+                wgrad_accumulate = (
+                    accumulate_wgrad_into_param_main_grad
+                    if not getattr(ctx, "origin_weights_overwrite_main_grad", False)
+                    else False
+                )
                 grouped_gemm_wgrad = functools.partial(
                     general_grouped_gemm_func,
                     quantization_params=ctx.grad_weight_quantizers,
@@ -1206,18 +1251,38 @@ class _GroupedLinear(torch.autograd.Function):
                     use_bias=ctx.use_bias if grad_biases[0] is None else None,
                     bias=biases,
                     use_split_accumulator=wgrad_gemm_use_split_accumulator,
-                    accumulate=(
-                        accumulate_wgrad_into_param_main_grad
-                        if not getattr(ctx, "origin_weights_overwrite_main_grad", False)
-                        else False
-                    ),
+                    accumulate=wgrad_accumulate,
                     **kwargs,
                 )
                 # WGRAD
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                     ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
                 else:
-                    _, grad_biases_, _ = grouped_gemm_wgrad(inputmats, grad_output, wgrad_list)
+                    # Opt-in wgrad autotune (NVTE_AUTOTUNE=1, ROCm bf16 path). The
+                    # deferred-wgrad branch above is left untouched.
+                    wgrad_handled = False
+                    if general_grouped_gemm_func is general_grouped_gemm and not (
+                        ctx.fp8 or ctx.debug
+                    ):
+                        wgrad_handled, wgrad_result = maybe_autotune_grouped_gemm(
+                            inputmats,
+                            grad_output,
+                            wgrad_list,
+                            ctx.grad_weight_quantizers,
+                            ctx.activation_dtype,
+                            m_splits=ctx.m_splits,
+                            layout="NT",
+                            N=wgrad_list[0].size(0),
+                            K=wgrad_list[0].size(1),
+                            grad=True,
+                            use_bias=ctx.use_bias if grad_biases[0] is None else None,
+                            bias=biases,
+                            use_split_accumulator=wgrad_gemm_use_split_accumulator,
+                            accumulate=wgrad_accumulate,
+                        )
+                    if not wgrad_handled:
+                        wgrad_result = grouped_gemm_wgrad(inputmats, grad_output, wgrad_list)
+                    _, grad_biases_, _ = wgrad_result
 
                     for i in range(ctx.num_gemms):
                         if grad_biases[i] is None:
