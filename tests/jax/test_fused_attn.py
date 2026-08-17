@@ -1563,6 +1563,49 @@ def _get_swa_window_size_for_test(s_kv: int, attn_mask_type: AttnMaskType) -> Tu
             QKVLayout.THD_THD_THD,
             id="2-1024-2048-12-6-128-64-FP16-CROSS-GQA-RAGGED_SEPARATE",
         ),
+        # equal head_dim 128 + bf16 + gqa + self-attn (llama3-like). Previously there was no
+        # equal-dim-128 self-attn coverage; the THD/RAGGED case exercises the group-mode dq_acc
+        # backward (the bf16 dq_shuffle path when NVTE_CK_IS_V3_ATOMIC_FP32=0), which was silently
+        # producing wrong dQ for every packed segment past cu_seqlens offset 0.
+        pytest.param(
+            2,
+            2048,
+            2048,
+            12,
+            6,
+            128,
+            128,
+            jnp.bfloat16,
+            QKVLayout.BSHD_BSHD_BSHD,
+            id="2-2048-2048-12-6-128-128-BF16-GQA-SELF",
+        ),
+        pytest.param(
+            2,
+            2048,
+            2048,
+            12,
+            6,
+            128,
+            128,
+            jnp.bfloat16,
+            QKVLayout.THD_THD_THD,
+            id="2-2048-2048-12-6-128-128-BF16-GQA-RAGGED_SELF",
+        ),
+        # non-16-multiple seqlen: exercises the atomic16 dq_acc seqlen padding (pad16(s_q)) on the bf16
+        # dq_shuffle THD backward path; make sure the CK flow handles a max_seqlen that is not a multiple of
+        # kV3DqAccSeqAlign (2044 % 16 == 12).
+        pytest.param(
+            2,
+            2044,
+            2044,
+            12,
+            6,
+            128,
+            128,
+            jnp.bfloat16,
+            QKVLayout.THD_THD_THD,
+            id="2-2044-2044-12-6-128-128-BF16-GQA-RAGGED_SELF-UNALIGNED",
+        ),
         pytest.param(
             10,
             4096,
