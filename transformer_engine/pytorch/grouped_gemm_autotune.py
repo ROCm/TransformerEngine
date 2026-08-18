@@ -71,7 +71,7 @@ def _log_selection(sel) -> None:
     key = sel.key
     ks = (
         f"G={key.num_groups} N={key.N} K={key.K} dtype={key.dtype} "
-        f"layout={key.layout} m_bucket={key.total_m_bucket} imbal={key.imbalance_bucket}"
+        f"layout={key.layout} size_bin={key.size_bin}"
     )
     if sel.from_cache:
         line = f"[gg-autotune] cache HIT  [{ks}] -> {sel.winner}"
@@ -216,29 +216,46 @@ def _get_router() -> AutotuneRouter:
     return _router
 
 
-def maybe_autotune_grouped_gemm(
-    A,
-    B,
-    out,
-    quantization_params,
-    out_dtype,
-    *,
-    m_splits,
-    layout,
-    N,
-    K,
-    **gemm_kwargs,
-):
-    """If autotune is enabled, select the fastest backend for this grouped GEMM
-    (identified by shape + ``layout``) and run it into ``out``.
+_FLOAT16_DTYPES = (torch.bfloat16, torch.float16)
 
-    Returns ``(handled, result)``: ``result`` is the ``general_grouped_gemm``
-    return value (wgrad uses its grad-bias output). Returns ``(False, None)`` when
-    disabled, so the caller runs its normal path. bf16 C++ path only.
+
+def _eligible(quantization_params, out_dtype) -> bool:
+    """True on the autotune-enabled bf16/fp16 C++ path with no quantizers (which
+    excludes fp8 and debug, whose quantizers are non-None)."""
+    return (
+        _autotune_enabled()
+        and out_dtype in _FLOAT16_DTYPES
+        and all(q is None for q in quantization_params)
+    )
+
+
+def _key_dims(A, out, layout):
+    """The weight dims (N, K) for the route key, from the layout-appropriate
+    operand: wgrad (NT) writes them into ``out``; fprop/dgrad read them off the
+    weight operand ``A``."""
+    t = out[0] if layout == "NT" else A[0]
+    return t.size(0), t.size(1)
+
+
+def autotuned_grouped_gemm(A, B, out, quantization_params, out_dtype, **kwargs):
+    """Drop-in for :func:`general_grouped_gemm`.
+
+    When ``NVTE_AUTOTUNE_KERNELS=1`` and the call is on the bf16/fp16 C++ path, it
+    selects the fastest backend (multi-stream hipBLASLt vs CK) for this
+    shape+layout and runs it. Otherwise -- disabled, CUDA, fp8/debug, or fp32 --
+    it delegates to ``general_grouped_gemm`` unchanged, returning its result.
     """
-    if not _autotune_enabled():
-        return False, None
+    if not _eligible(quantization_params, out_dtype):
+        return general_grouped_gemm(A, B, out, quantization_params, out_dtype, **kwargs)
 
+    m_splits = kwargs.get("m_splits")
+    if m_splits is None:
+        return general_grouped_gemm(A, B, out, quantization_params, out_dtype, **kwargs)
+
+    layout = kwargs.get("layout", "TN")
+    N, K = _key_dims(A, out, layout)
+    # layout/m_splits are tracked on the call; keep them out of the forwarded kwargs.
+    gemm_kwargs = {k: v for k, v in kwargs.items() if k not in ("layout", "m_splits")}
     call = _GGCall(
         A=A,
         B=B,
@@ -251,12 +268,10 @@ def maybe_autotune_grouped_gemm(
         K=K,
         gemm_kwargs=gemm_kwargs,
     )
-    key = make_route_key(call.num_groups, tuple(call.m_splits), N, K, str(out_dtype), layout)
-    router = _get_router()
-    sel = router.select(key, call)
+    key = make_route_key(len(m_splits), tuple(m_splits), N, K, str(out_dtype), layout)
+    sel = _get_router().select(key, call)
     if _verbose():
         _log_selection(sel)
-    # select() measures into scratch on a miss and only returns a name on a hit;
+    # select() measures into scratch on a miss and returns only a name on a hit;
     # run the chosen backend once into the real `out` to produce the result.
-    result = _backends[sel.winner].run_real(call)
-    return True, result
+    return _backends[sel.winner].run_real(call)

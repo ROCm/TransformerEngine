@@ -23,15 +23,14 @@ from typing import Any, Callable, Protocol, runtime_checkable
 
 @dataclass(frozen=True)
 class RouteKey:
-    """The GPU-free bundle of parameters a selection is keyed on. No live tensors.
+    """The GPU-free bundle a selection is keyed on. No live tensors.
 
     Structural fields (``num_groups``, ``N``, ``K``, ``dtype``, ``layout``) are
-    exact -- they are stable per layer. The token distribution is captured
-    *coarsely* via ``total_m_bucket`` and ``imbalance_bucket`` (see
-    :func:`make_route_key`) so nearby steps -- whose exact per-expert token counts
-    differ every iteration -- share one cached decision instead of forcing a
-    re-measure on every call. This trades a little routing precision for reuse;
-    the bucket granularity is the knob for that trade.
+    exact and stable per layer. The token count enters only as a coarse
+    ``size_bin`` (small/large, see :func:`make_route_key`): the exact per-step
+    token count jitters with dynamic routing, so a fine key would thrash the cache
+    and re-measure constantly. A single 2-bin split keeps the cache stable while
+    still capturing the one regime where the fastest backend flips with size.
     """
 
     num_groups: int
@@ -39,43 +38,29 @@ class RouteKey:
     K: int
     dtype: str
     layout: str
-    total_m_bucket: int
-    imbalance_bucket: int
+    size_bin: int
 
 
-def _next_pow2(x: int) -> int:
-    return 1 if x <= 1 else 1 << (x - 1).bit_length()
+# Coarse small/large split on the average per-group token count. A tunable
+# heuristic, not a hard boundary: the router still *measures* both backends per
+# bin, so the threshold only needs to sit near the size where the winner changes.
+_LARGE_TOKENS_PER_GROUP = 2048
 
 
-def _imbalance_bucket(m_splits) -> int:
-    """Coefficient-of-variation of the per-group token counts, bucketed:
-    0 = near-balanced, 1 = moderate skew, 2 = high skew. Multi-stream backends
-    (one GEMM per expert) are the most sensitive to this, so it belongs in the key."""
-    n = len(m_splits)
-    if n <= 1:
-        return 0
-    mean = sum(m_splits) / n
-    if mean == 0:
-        return 0
-    var = sum((m - mean) ** 2 for m in m_splits) / n
-    cv = (var**0.5) / mean
-    if cv < 0.1:
-        return 0
-    if cv < 0.5:
-        return 1
-    return 2
+def _size_bin(num_groups: int, m_splits) -> int:
+    avg_tokens = sum(m_splits) // max(num_groups, 1)
+    return 0 if avg_tokens < _LARGE_TOKENS_PER_GROUP else 1
 
 
 def make_route_key(num_groups, m_splits, N, K, dtype, layout) -> RouteKey:
-    """Derive a coarse, reusable RouteKey from the raw call parameters. Pure."""
+    """Derive a coarse, reuse-friendly RouteKey from the raw call parameters. Pure."""
     return RouteKey(
         num_groups=num_groups,
         N=N,
         K=K,
         dtype=dtype,
         layout=layout,
-        total_m_bucket=_next_pow2(sum(m_splits)),
-        imbalance_bucket=_imbalance_bucket(m_splits),
+        size_bin=_size_bin(num_groups, m_splits),
     )
 
 
