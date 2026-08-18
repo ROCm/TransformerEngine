@@ -830,6 +830,19 @@ def get_attention_backend(
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
+        # For MLA-style unequal head dims, pick fused attention instead of flash attention.
+        if IS_HIP_EXTENSION and (
+            use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
+        ):
+            logger.debug(
+                "Disabling FlashAttention on ROCm for MLA (head_dim_qk != head_dim_v) to give"
+                " FusedAttention preference. Found: head_dim_qk = %s, head_dim_v = %s.",
+                head_dim_qk,
+                head_dim_v,
+            )
+            use_flash_attention_2 = False
+            use_flash_attention_3 = False
+            use_flash_attention_4 = False
         qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
         if use_fused_attention and qkv_layout_group != "hd_hd_hd":
             logger.debug(
