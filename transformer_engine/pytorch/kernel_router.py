@@ -25,8 +25,10 @@ from typing import Any, Callable, Protocol, runtime_checkable
 class RouteKey:
     """The GPU-free bundle a selection is keyed on. No live tensors.
 
-    Structural fields (``num_groups``, ``N``, ``K``, ``dtype``, ``layout``) are
-    exact and stable per layer. The token count enters only as a coarse
+    Structural fields (``num_groups``, ``N``, ``K``, ``out_dtype``, ``layout``,
+    ``in_format``) are exact and stable per layer -- ``in_format`` is the input
+    number format (bf16/fp8/mxfp8), which the output element type (``out_dtype``)
+    alone cannot convey. The token count enters only as a coarse
     ``size_bin`` (small/large, see :func:`make_route_key`): the exact per-step
     token count jitters with dynamic routing, so a fine key would thrash the cache
     and re-measure constantly. A single 2-bin split keeps the cache stable while
@@ -36,9 +38,10 @@ class RouteKey:
     num_groups: int
     N: int
     K: int
-    dtype: str
+    out_dtype: str
     layout: str
     size_bin: int
+    in_format: str
 
 
 # Coarse small/large split on the average per-group token count. A tunable
@@ -52,15 +55,16 @@ def _size_bin(num_groups: int, m_splits) -> int:
     return 0 if avg_tokens < _LARGE_TOKENS_PER_GROUP else 1
 
 
-def make_route_key(num_groups, m_splits, N, K, dtype, layout) -> RouteKey:
+def make_route_key(num_groups, m_splits, N, K, out_dtype, layout, in_format) -> RouteKey:
     """Derive a coarse, reuse-friendly RouteKey from the raw call parameters. Pure."""
     return RouteKey(
         num_groups=num_groups,
         N=N,
         K=K,
-        dtype=dtype,
+        out_dtype=out_dtype,
         layout=layout,
         size_bin=_size_bin(num_groups, m_splits),
+        in_format=in_format,
     )
 
 

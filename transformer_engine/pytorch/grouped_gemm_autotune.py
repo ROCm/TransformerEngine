@@ -1,16 +1,16 @@
 # Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # License for AMD contributions = MIT. See LICENSE for more information
 
-"""Opt-in on-the-fly autotuning for bf16 grouped GEMM (forward + backward).
+"""Opt-in on-the-fly autotuning for grouped GEMM (bf16/fp8/mxfp8, fwd + bwd).
 
-When ``NVTE_AUTOTUNE_KERNELS=1`` (ROCm only), each bf16 grouped GEMM issued through
+When ``NVTE_AUTOTUNE_KERNELS=1`` (ROCm only), each grouped GEMM issued through
 ``general_grouped_gemm`` -- forward (TN), dgrad (NN), and wgrad (NT) -- picks the
-fastest backend for its shape+layout by measuring the candidates once (via
+fastest backend for its shape+layout+in_format by measuring the candidates once (via
 ``triton.testing.do_bench``) and caching the winner. The candidates are the two
 C++ backends that share the entry point and semantics (multi-stream hipBLASLt and
-CK), plus the Triton grouped GEMM. The pure selection
-lives in :mod:`kernel_router`; this module supplies the backend candidates and the
-process-global router.
+CK), HipKittens (mxfp8 only), plus the Triton grouped GEMM (bf16 only). The pure
+selection lives in :mod:`kernel_router`; this module supplies the backend
+candidates and the process-global router.
 
 The env vars are intentionally op-agnostic (``NVTE_AUTOTUNE_KERNELS`` /
 ``NVTE_AUTOTUNE_KERNELS_VERBOSE``) so the same switches govern future autotuned ops.
@@ -19,21 +19,29 @@ Scope / safety:
 
 * Forward, dgrad, and wgrad grouped GEMMs are routed; each layout is a distinct
   route key, measured independently.
-* The two C++ backends (hipBLASLt, CK) are always candidates. The Triton grouped
-  GEMM is also a candidate for all three layouts when importable: TN/NN run it
-  directly; NT (wgrad) runs it into a fresh 3D packed buffer (as the
-  ``use_grouped_gemm_triton`` path allocates) and copies/accumulates the result
-  back into the per-group output list this path uses. The separate global
-  ``NVTE_USE_GROUPED_GEMM_TRITON`` flag (which forces Triton for all layouts) is
-  independent of and mutually exclusive with this path.
+* The C++ backends are selected by transiently toggling env vars: hipBLASLt
+  (multi-stream, all formats, the guaranteed floor), CK (bf16/fp8, num_gemms > 1),
+  and, for mxfp8 only, a single cutlass-family candidate that prefers HipKittens
+  (``hipkittens``). HipKittens needs 256-aligned expert dims; when they are not,
+  the C++ path falls back to CK internally, so that one candidate covers
+  HK-when-aligned and CK-otherwise. It is deliberately the *only* mxfp8
+  cutlass-family candidate: the C++ HK-enable flag is a process-lifetime static
+  frozen on first use, so a second competing env config could not switch backends
+  at runtime and might pin the wrong one. Triton is a candidate for bf16 only. The
+  separate global ``NVTE_USE_GROUPED_GEMM_TRITON`` flag (which forces Triton for all
+  layouts) is independent of and mutually exclusive with this path.
+* Only the *input* is quantized (fp8/mxfp8); the GEMM output is bf16 with no
+  output quantizer, so repeated measurement never mutates quantizer amax state.
+  Output-quantized calls (debug, fp8 output) are excluded and delegated.
+* The Triton candidate runs TN/NN directly; NT (wgrad) runs into a fresh 3D packed
+  buffer (as the ``use_grouped_gemm_triton`` path allocates) and copies the result
+  back into the per-group output list.
 * Timing is side-effect-free: candidates are measured into a scratch clone of the
   output with ``accumulate=False``, so re-running them under ``do_bench`` can
   never corrupt a fused ``main_grad`` (wgrad accumulation) or any real output.
   Only the chosen winner is then run once into the real output with the real
   arguments.
 * The deferred-wgrad path (``wgrad_store``) is left untouched.
-* CK requires ``num_gemms > 1`` and bf16/fp16; otherwise it is unavailable and
-  the router falls back to multi-stream hipBLASLt (the guaranteed floor).
 * Off by default; ``NVTE_AUTOTUNE_KERNELS_VERBOSE=1`` adds per-call selection logging
   (cache hit/miss, route key, per-backend timings, winner).
 
@@ -49,8 +57,6 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 
 from .cpp_extensions import general_grouped_gemm
 from .kernel_router import AutotuneRouter, RouteKey, make_route_key
-
-_FLOAT16_KEYS = ("torch.bfloat16", "torch.float16")
 
 # Op-agnostic autotune switches, shared by any future autotuned op.
 _MASTER_ENV = "NVTE_AUTOTUNE_KERNELS"
@@ -79,7 +85,7 @@ def _log_selection(sel) -> None:
     global _last_log
     key = sel.key
     ks = (
-        f"G={key.num_groups} N={key.N} K={key.K} dtype={key.dtype} "
+        f"G={key.num_groups} N={key.N} K={key.K} in_format={key.in_format} "
         f"layout={key.layout} size_bin={key.size_bin}"
     )
     if sel.from_cache:
@@ -149,35 +155,39 @@ class _GGCall:
         return len(self.m_splits)
 
 
-class _GroupedGemmBackend:
-    """A grouped-GEMM backend reached through ``general_grouped_gemm``, selected
-    by transiently toggling the CK env vars."""
+_ALL_FORMATS = ("bf16", "fp8", "mxfp8")
 
-    def __init__(self, name: str, use_ck: bool):
+
+class _GroupedGemmBackend:
+    """A grouped-GEMM backend reached through ``general_grouped_gemm``, selected by
+    transiently toggling env vars. Availability is format-gated; ``needs_multi``
+    requires num_groups > 1 (the C++ path only takes the grouped fast path with more
+    than one group)."""
+
+    def __init__(self, name, env, *, formats, needs_multi=False):
         self.name = name
-        self._use_ck = use_ck
+        self._env = dict(env)
+        self._formats = frozenset(formats)
+        self._needs_multi = needs_multi
 
     def available(self, key: RouteKey) -> bool:
-        if self._use_ck:
-            return key.num_groups > 1 and key.dtype in _FLOAT16_KEYS
-        return True  # multi-stream hipBLASLt is the guaranteed-available floor
-
-    def _env_overrides(self):
-        if self._use_ck:
-            return {"NVTE_USE_CUTLASS_GROUPED_GEMM": "1", "NVTE_USE_CK_GROUPED_GEMM": "1"}
-        return {"NVTE_USE_CUTLASS_GROUPED_GEMM": None, "NVTE_USE_CK_GROUPED_GEMM": None}
+        if key.in_format not in self._formats:
+            return False
+        if self._needs_multi and key.num_groups <= 1:
+            return False
+        return True
 
     def prepare(self, call: _GGCall):
         # Side-effect-free timing: measure into a scratch clone of the output with
         # accumulate off, so repeated do_bench runs never touch the real output or
         # a fused main_grad. Only the winner is run for real via run_real().
-        overrides = self._env_overrides()
+        env = self._env
         scratch = [torch.empty_like(o) for o in call.out]
         timing_kwargs = dict(call.gemm_kwargs)
         timing_kwargs["accumulate"] = False
 
         def run():
-            with _env(**overrides):
+            with _env(**env):
                 general_grouped_gemm(
                     call.A, call.B, scratch, call.quantization_params, call.out_dtype,
                     m_splits=list(call.m_splits), layout=call.layout, **timing_kwargs,
@@ -186,7 +196,7 @@ class _GroupedGemmBackend:
         return run
 
     def run_real(self, call: _GGCall):
-        with _env(**self._env_overrides()):
+        with _env(**self._env):
             return general_grouped_gemm(
                 call.A, call.B, call.out, call.quantization_params, call.out_dtype,
                 m_splits=list(call.m_splits), layout=call.layout, **call.gemm_kwargs,
@@ -221,8 +231,8 @@ class _TritonGroupedGemmBackend:
 
     def available(self, key: RouteKey) -> bool:
         return (
-            key.layout in ("TN", "NN", "NT")
-            and key.dtype in _FLOAT16_KEYS
+            key.in_format == "bf16"
+            and key.layout in ("TN", "NN", "NT")
             and _triton_grouped_gemm() is not None
         )
 
@@ -291,8 +301,42 @@ def _get_router() -> AutotuneRouter:
     global _router, _backends
     if _router is None:
         candidates = [
-            _GroupedGemmBackend("hipblaslt", use_ck=False),
-            _GroupedGemmBackend("ck", use_ck=True),
+            _GroupedGemmBackend(
+                "hipblaslt",
+                {
+                    "NVTE_USE_CUTLASS_GROUPED_GEMM": None,
+                    "NVTE_USE_CK_GROUPED_GEMM": None,
+                    "NVTE_USE_HIPKITTENS_GROUPED_GEMM": None,
+                },
+                formats=_ALL_FORMATS,
+            ),
+            _GroupedGemmBackend(
+                "ck",
+                {
+                    "NVTE_USE_CUTLASS_GROUPED_GEMM": "1",
+                    "NVTE_USE_CK_GROUPED_GEMM": "1",
+                    "NVTE_USE_HIPKITTENS_GROUPED_GEMM": None,
+                },
+                formats=("bf16", "fp8"),
+                needs_multi=True,
+            ),
+            # Sole cutlass-family candidate for mxfp8. HipKittens is preferred (env
+            # HK=1) and the C++ path silently falls back to CK when the expert dims
+            # are not 256-aligned, so this one candidate covers HK-when-aligned and
+            # CK-otherwise. It must be the ONLY mxfp8 cutlass-family candidate: the
+            # C++ HK-enable flag is a process-lifetime static frozen on first use, so
+            # a second competing env config (e.g. a CK-forcing candidate) would not
+            # actually switch backends and could permanently pin the wrong choice.
+            _GroupedGemmBackend(
+                "hipkittens",
+                {
+                    "NVTE_USE_CUTLASS_GROUPED_GEMM": "1",
+                    "NVTE_USE_HIPKITTENS_GROUPED_GEMM": "1",
+                    "NVTE_USE_CK_GROUPED_GEMM": None,
+                },
+                formats=("mxfp8",),
+                needs_multi=True,
+            ),
             _TritonGroupedGemmBackend(),
         ]
         _backends = {c.name: c for c in candidates}
@@ -309,21 +353,64 @@ def _get_router() -> AutotuneRouter:
 
 _FLOAT16_DTYPES = (torch.bfloat16, torch.float16)
 
+_quant_cache = None
 
-def _eligible(quantization_params, out_dtype) -> bool:
-    """True on the autotune-enabled bf16/fp16 C++ path with no quantizers (which
-    excludes fp8 and debug, whose quantizers are non-None)."""
-    return (
-        _autotune_enabled()
-        and out_dtype in _FLOAT16_DTYPES
-        and all(q is None for q in quantization_params)
-    )
+
+def _quant_classes():
+    """Lazily import the quantizer/tensor classes used to classify the input format."""
+    global _quant_cache
+    if _quant_cache is None:
+        from .tensor import (
+            Float8CurrentScalingQuantizer,
+            Float8Quantizer,
+            MXFP8Quantizer,
+            QuantizedTensorStorage,
+        )
+
+        _quant_cache = (
+            (Float8Quantizer, Float8CurrentScalingQuantizer),
+            MXFP8Quantizer,
+            QuantizedTensorStorage,
+        )
+    return _quant_cache
+
+
+def _in_format(A, out_dtype):
+    """Classify the grouped GEMM as ``bf16`` / ``fp8`` / ``mxfp8`` from the input
+    operand, or ``None`` if unsupported (fp32, nvfp4, unknown). The GEMM output is
+    always bf16/fp16; the input format captures the *input* precision so a bf16 and
+    an fp8 GEMM of the same shape do not collide in the cache."""
+    if out_dtype not in _FLOAT16_DTYPES:
+        return None
+    fp8_types, mxfp8_type, storage_type = _quant_classes()
+    a0 = A[0]
+    if not isinstance(a0, storage_type):
+        return "bf16" if getattr(a0, "dtype", None) in _FLOAT16_DTYPES else None
+    q = getattr(a0, "_quantizer", None)
+    if isinstance(q, mxfp8_type):
+        return "mxfp8"
+    if isinstance(q, fp8_types):
+        return "fp8"
+    return None
+
+
+def _eligible(A, quantization_params, out_dtype):
+    """Return the input format (bf16/fp8/mxfp8) if this call should be autotuned,
+    else None. Excludes disabled autotune, output-quantized calls (debug or fp8
+    output, whose quantizer amax would be corrupted by repeated measurement), and
+    unsupported input formats."""
+    if not _autotune_enabled():
+        return None
+    if any(q is not None for q in quantization_params):
+        return None
+    return _in_format(A, out_dtype)
 
 
 def _key_dims(A, out, layout):
     """The weight dims (N, K) for the route key, from the layout-appropriate
     operand: wgrad (NT) writes them into ``out``; fprop/dgrad read them off the
-    weight operand ``A``."""
+    weight operand ``A``. Uses ``.size()`` so it works for quantized inputs too
+    (the ``*TensorStorage`` classes expose ``.size()`` but not ``.shape``)."""
     t = out[0] if layout == "NT" else A[0]
     return t.size(0), t.size(1)
 
@@ -331,12 +418,14 @@ def _key_dims(A, out, layout):
 def autotuned_grouped_gemm(A, B, out, quantization_params, out_dtype, **kwargs):
     """Drop-in for :func:`general_grouped_gemm`.
 
-    When ``NVTE_AUTOTUNE_KERNELS=1`` and the call is on the bf16/fp16 C++ path, it
-    selects the fastest backend (multi-stream hipBLASLt vs CK) for this
-    shape+layout and runs it. Otherwise -- disabled, CUDA, fp8/debug, or fp32 --
-    it delegates to ``general_grouped_gemm`` unchanged, returning its result.
+    When ``NVTE_AUTOTUNE_KERNELS=1`` and the call is an autotunable grouped GEMM
+    (bf16/fp8/mxfp8 inputs, unquantized output), it selects the fastest available
+    backend for this shape+layout+in_format and runs it. Otherwise -- disabled,
+    CUDA, debug, fp32, or an unsupported input format -- it delegates to
+    ``general_grouped_gemm`` unchanged, returning its result.
     """
-    if not _eligible(quantization_params, out_dtype):
+    in_format = _eligible(A, quantization_params, out_dtype)
+    if in_format is None:
         return general_grouped_gemm(A, B, out, quantization_params, out_dtype, **kwargs)
 
     m_splits = kwargs.get("m_splits")
@@ -359,7 +448,7 @@ def autotuned_grouped_gemm(A, B, out, quantization_params, out_dtype, **kwargs):
         K=K,
         gemm_kwargs=gemm_kwargs,
     )
-    key = make_route_key(len(m_splits), tuple(m_splits), N, K, str(out_dtype), layout)
+    key = make_route_key(len(m_splits), tuple(m_splits), N, K, str(out_dtype), layout, in_format)
     sel = _get_router().select(key, call)
     if _verbose():
         _log_selection(sel)
