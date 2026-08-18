@@ -830,7 +830,7 @@ def get_attention_backend(
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
-        # For MLA-style unequal head dims, pick fused attention instead of flash attention.
+        # On ROCm, for MLA-style unequal head dims, pick fused attention instead of flash attention.
         if IS_HIP_EXTENSION and (
             use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
         ):
