@@ -8,7 +8,7 @@ When ``NVTE_AUTOTUNE_KERNELS=1`` (ROCm only), each bf16 grouped GEMM issued thro
 fastest backend for its shape+layout by measuring the candidates once (via
 ``triton.testing.do_bench``) and caching the winner. The candidates are the two
 C++ backends that share the entry point and semantics (multi-stream hipBLASLt and
-CK), plus -- for TN/NN -- the Triton grouped GEMM. The pure selection
+CK), plus the Triton grouped GEMM. The pure selection
 lives in :mod:`kernel_router`; this module supplies the backend candidates and the
 process-global router.
 
@@ -20,10 +20,12 @@ Scope / safety:
 * Forward, dgrad, and wgrad grouped GEMMs are routed; each layout is a distinct
   route key, measured independently.
 * The two C++ backends (hipBLASLt, CK) are always candidates. The Triton grouped
-  GEMM is also a candidate for forward (TN) and dgrad (NN) when importable; it is
-  excluded from wgrad (NT), whose 3D packed output it cannot target here. The
-  separate global ``NVTE_USE_GROUPED_GEMM_TRITON`` flag (which forces Triton for
-  all layouts) is independent of and mutually exclusive with this path.
+  GEMM is also a candidate for all three layouts when importable: TN/NN run it
+  directly; NT (wgrad) runs it into a fresh 3D packed buffer (as the
+  ``use_grouped_gemm_triton`` path allocates) and copies/accumulates the result
+  back into the per-group output list this path uses. The separate global
+  ``NVTE_USE_GROUPED_GEMM_TRITON`` flag (which forces Triton for all layouts) is
+  independent of and mutually exclusive with this path.
 * Timing is side-effect-free: candidates are measured into a scratch clone of the
   output with ``accumulate=False``, so re-running them under ``do_bench`` can
   never corrupt a fused ``main_grad`` (wgrad accumulation) or any real output.
@@ -206,21 +208,47 @@ def _triton_grouped_gemm():
 class _TritonGroupedGemmBackend:
     """Triton (AITER) grouped GEMM as an autotune candidate.
 
-    Limited to forward (TN) and dgrad (NN), whose operands Triton accepts as-is
-    (it concatenates the per-group inputs internally -- a real cost in this
-    pre-split path, so it is left inside the timing). wgrad (NT) is excluded:
-    Triton wgrad expects a 3D packed output this path does not allocate. An error
-    on any shape drops it from the ranking.
+    Forward (TN) and dgrad (NN) call Triton directly -- it concatenates the
+    per-group inputs internally (a real cost in this pre-split path, left inside
+    the timing). wgrad (NT) is supported partially: Triton wgrad writes a 3D
+    packed output (like the ``use_grouped_gemm_triton`` path allocates), so it is
+    run into a fresh 3D buffer and the result copied/accumulated back into the
+    per-group output list this path uses. An error on any shape drops it from the
+    ranking.
     """
 
     name = "triton"
 
     def available(self, key: RouteKey) -> bool:
         return (
-            key.layout in ("TN", "NN")
+            key.layout in ("TN", "NN", "NT")
             and key.dtype in _FLOAT16_KEYS
             and _triton_grouped_gemm() is not None
         )
+
+    def _run_into(self, fn, call: _GGCall, out_target):
+        # TN/NN: Triton writes the per-group output list directly.
+        if call.layout != "NT":
+            return fn(
+                call.A, call.B, out_target, call.quantization_params, call.out_dtype,
+                m_splits=list(call.m_splits), layout=call.layout, **call.gemm_kwargs,
+            )
+        # NT (wgrad): Triton needs a 3D packed output (G, N, K). Run into a fresh
+        # buffer with accumulate off, then copy (or accumulate) back into the
+        # per-group targets -- so it works whether they are fresh buffers or fused
+        # main_grads, and the copy-back cast bridges any dtype difference.
+        num_gemms = len(out_target)
+        n, k = out_target[0].shape
+        out3d = torch.empty((num_gemms, n, k), dtype=call.out_dtype, device=out_target[0].device)
+        kwargs = dict(call.gemm_kwargs)
+        accumulate = kwargs.pop("accumulate", False)
+        result = fn(
+            call.A, call.B, out3d, call.quantization_params, call.out_dtype,
+            m_splits=list(call.m_splits), layout="NT", accumulate=False, **kwargs,
+        )
+        for i, w in enumerate(out_target):
+            w.add_(out3d[i]) if accumulate else w.copy_(out3d[i])
+        return result
 
     def prepare(self, call: _GGCall):
         fn = _triton_grouped_gemm()
@@ -228,20 +256,14 @@ class _TritonGroupedGemmBackend:
         scratch = [torch.empty_like(o) for o in call.out]
 
         def run():
-            fn(
-                call.A, call.B, scratch, call.quantization_params, call.out_dtype,
-                m_splits=list(call.m_splits), layout=call.layout, **call.gemm_kwargs,
-            )
+            self._run_into(fn, call, scratch)
 
         return run
 
     def run_real(self, call: _GGCall):
         fn = _triton_grouped_gemm()
         assert fn is not None  # guaranteed by available()
-        return fn(
-            call.A, call.B, call.out, call.quantization_params, call.out_dtype,
-            m_splits=list(call.m_splits), layout=call.layout, **call.gemm_kwargs,
-        )
+        return self._run_into(fn, call, call.out)
 
 
 _router: AutotuneRouter | None = None
