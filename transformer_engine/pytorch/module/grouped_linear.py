@@ -1080,87 +1080,171 @@ class _GroupedLinear(torch.autograd.Function):
                 # front so it folds the wgrad in directly -- no scratch dW and no separate
                 # add/copy. Both FC1 and FC2 (route_space, via swap_gather) emit [E, out, in]
                 # directly into the buffer.
+                routing = ctx.routing_metadata
+                route_space = getattr(routing, "route_space", False)
+                fc2_activation = getattr(ctx, "perm_free_fc2_activation", None)
+                num_gemms = ctx.num_gemms
                 grouped = getattr(ctx, "perm_free_grouped", False) and ctx.weights_requires_grad
-                wgrad_out = None
-                wgrad_accumulate = False
-                if grouped:
-                    grouped_weight = ctx.grouped_weight_ref()
-                    assert (
-                        grouped_weight is not None
-                    ), "grouped weight was removed before its wgrad could be applied"
-                    gw_shape = tuple(grouped_weight.shape)
-                    if ctx.grouped_fuse_wgrad:
-                        wgrad_out = ctx.grouped_main_grad_func().view(gw_shape)
-                        wgrad_accumulate = not ctx.grouped_overwrite_main_grad
+                # Extract the grouped-apply config as plain locals so the delayed-wgrad closure
+                # never captures ``ctx`` (and therefore never pins the saved 2F pre-activation).
+                grouped_weight_ref = getattr(ctx, "grouped_weight_ref", None)
+                grouped_fuse_wgrad = ctx.grouped_fuse_wgrad
+                grouped_overwrite = getattr(ctx, "grouped_overwrite_main_grad", False)
+                grouped_main_grad_func = getattr(ctx, "grouped_main_grad_func", None)
+
+                def _pf_resolve_wgrad_out(device):
+                    """Grouped wgrad destination + accumulate flag (folded in-kernel)."""
+                    if not grouped:
+                        return None, False
+                    gw = grouped_weight_ref()
+                    assert gw is not None, (
+                        "grouped weight was removed before its wgrad could be applied"
+                    )
+                    gw_shape = tuple(gw.shape)
+                    if grouped_fuse_wgrad:
+                        return grouped_main_grad_func().view(gw_shape), (not grouped_overwrite)
+                    # Accumulate into the grouped param's autograd ``.grad``; allocate it on the
+                    # first backward (overwrite) and add in place thereafter so grad accumulation
+                    # across microbatches still works.
+                    if gw.grad is None:
+                        gw.grad = torch.empty(gw_shape, dtype=gw.dtype, device=device)
+                        return gw.grad, False
+                    return gw.grad, True
+
+                def _pf_sink_wgrad(pf_result):
+                    """Sink a permute-free wgrad into the grouped param; return the positional list."""
+                    if not (grouped and pf_result.wgrad_stacked is not None):
+                        # Per-expert leaf params: return the [E, out, in] split as zero-copy views.
+                        return (
+                            list(pf_result.wgrad_stacked)
+                            if pf_result.wgrad_stacked is not None
+                            else [None] * num_gemms
+                        )
+                    gw = grouped_weight_ref()
+                    assert gw is not None, (
+                        "grouped weight was removed before its wgrad could be applied"
+                    )
+                    if pf_result.wgrad_applied:
+                        # The kernel already folded the wgrad into main_grad / .grad.
+                        if grouped_fuse_wgrad and hasattr(gw, "grad_added_to_main_grad"):
+                            gw.grad_added_to_main_grad = True
                     else:
-                        # Accumulate into the grouped param's autograd ``.grad``; allocate it on
-                        # the first backward (overwrite) and add in place thereafter so grad
-                        # accumulation across microbatches still works.
-                        if grouped_weight.grad is None:
-                            grouped_weight.grad = torch.empty(
-                                gw_shape, dtype=grouped_weight.dtype, device=grad_output.device
-                            )
-                            wgrad_accumulate = False
+                        dW = pf_result.wgrad_stacked
+                        if grouped_fuse_wgrad:
+                            main_grad = grouped_main_grad_func().view(dW.shape)
+                            if grouped_overwrite:
+                                main_grad.copy_(dW)
+                            else:
+                                main_grad.add_(dW)
+                            if hasattr(gw, "grad_added_to_main_grad"):
+                                gw.grad_added_to_main_grad = True
+                        elif gw.grad is None:
+                            gw.grad = dW
                         else:
-                            wgrad_accumulate = True
-                        wgrad_out = grouped_weight.grad
+                            gw.grad.add_(dW)
+                    return [None] * num_gemms
+
+                # Delayed weight gradient: compute dgrad now, defer the wgrad GEMM into the store
+                # so it can overlap later work. On the FC2 path we stash the F-wide fc2_input the
+                # act-bwd already produced (half the width of the 2F preact, which can now free);
+                # on the FC1 path we stash the token input + grad_output the wgrad re-reads. Only
+                # the grouped-weight path is delayed (the per-expert-leaf path keeps the inline
+                # behaviour), which is the layout the MoE grouped GEMM uses.
+                delay = (
+                    grouped
+                    and ctx.wgrad_store is not None
+                    and ctx.wgrad_store.delay_wgrad_compute()
+                )
+                if delay:
+                    pf_result = permute_free_grouped_gemm_backward(
+                        grad_output,
+                        routing=routing,
+                        weights=weights,
+                        num_gemms=num_gemms,
+                        hidden_states=inputmats[0],
+                        requires_dgrad=ctx.requires_dgrad,
+                        requires_wgrad=False,
+                        defer_wgrad=True,
+                        dispatched_probs=dispatched_probs,
+                        fc2_activation=fc2_activation,
+                    )
+                    if route_space:
+                        stashed = pf_result.deferred_fc2_input
+
+                        def _pf_delayed_wgrad(fc2_input, grad_output, _placeholder):
+                            wgrad_out, wgrad_accumulate = _pf_resolve_wgrad_out(grad_output.device)
+                            res = permute_free_grouped_gemm_backward(
+                                grad_output,
+                                routing=routing,
+                                weights=weights,
+                                num_gemms=num_gemms,
+                                hidden_states=None,
+                                requires_dgrad=False,
+                                requires_wgrad=True,
+                                fc2_activation=fc2_activation,
+                                fc2_input=fc2_input,
+                                wgrad_out=wgrad_out,
+                                wgrad_accumulate=wgrad_accumulate,
+                            )
+                            _pf_sink_wgrad(res)
+                            return (None, [None] * num_gemms, None)
+
+                    else:
+                        stashed = inputmats[0]  # token input the FC1 wgrad re-reads
+
+                        def _pf_delayed_wgrad(hidden_tok, grad_output, _placeholder):
+                            wgrad_out, wgrad_accumulate = _pf_resolve_wgrad_out(grad_output.device)
+                            res = permute_free_grouped_gemm_backward(
+                                grad_output,
+                                routing=routing,
+                                weights=weights,
+                                num_gemms=num_gemms,
+                                hidden_states=hidden_tok,
+                                requires_dgrad=False,
+                                requires_wgrad=True,
+                                wgrad_out=wgrad_out,
+                                wgrad_accumulate=wgrad_accumulate,
+                            )
+                            _pf_sink_wgrad(res)
+                            return (None, [None] * num_gemms, None)
+
+                    # The closures fold the grouped wgrad themselves; the third placeholder keeps
+                    # the store's ``tensor_list[2]`` contract and signals backward_dw to skip its
+                    # generic per-expert application.
+                    ctx.wgrad_store.put([stashed, grad_output, None], _pf_delayed_wgrad)
+                    ctx.wgrad_store.pf_delayed = True
+                    return (
+                        pf_result.dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
+                        None,  # m_splits
+                        pf_result.grad_probs,  # dispatched_probs
+                        None,  # non_tensor_args
+                        *([None] * num_gemms),
+                        *([None] * num_gemms),
+                    )
 
                 # The wrapper decides FC1 vs FC2 dgrad/wgrad from the routing metadata.
+                wgrad_out, wgrad_accumulate = _pf_resolve_wgrad_out(grad_output.device)
                 pf_result = permute_free_grouped_gemm_backward(
                     grad_output,
-                    routing=ctx.routing_metadata,
+                    routing=routing,
                     weights=weights,
-                    num_gemms=ctx.num_gemms,
+                    num_gemms=num_gemms,
                     hidden_states=inputmats[0],
                     requires_dgrad=ctx.requires_dgrad,
                     requires_wgrad=ctx.weights_requires_grad,
                     dispatched_probs=dispatched_probs,
-                    fc2_activation=getattr(ctx, "perm_free_fc2_activation", None),
+                    fc2_activation=fc2_activation,
                     wgrad_out=wgrad_out,
                     wgrad_accumulate=wgrad_accumulate,
                 )
-                if getattr(ctx, "perm_free_grouped", False) and pf_result.wgrad_stacked is not None:
-                    grouped_weight = ctx.grouped_weight_ref()
-                    assert (
-                        grouped_weight is not None
-                    ), "grouped weight was removed before its wgrad could be applied"
-                    if pf_result.wgrad_applied:
-                        # FC1: the kernel already folded the wgrad into main_grad / .grad.
-                        if ctx.grouped_fuse_wgrad and hasattr(
-                            grouped_weight, "grad_added_to_main_grad"
-                        ):
-                            grouped_weight.grad_added_to_main_grad = True
-                    else:
-                        # Fresh wgrad tensor: sink into main_grad / .grad.
-                        dW = pf_result.wgrad_stacked
-                        if ctx.grouped_fuse_wgrad:
-                            main_grad = ctx.grouped_main_grad_func().view(dW.shape)
-                            if ctx.grouped_overwrite_main_grad:
-                                main_grad.copy_(dW)
-                            else:
-                                main_grad.add_(dW)
-                            if hasattr(grouped_weight, "grad_added_to_main_grad"):
-                                grouped_weight.grad_added_to_main_grad = True
-                        elif grouped_weight.grad is None:
-                            grouped_weight.grad = dW
-                        else:
-                            grouped_weight.grad.add_(dW)
-                    wgrad_list = [None] * ctx.num_gemms
-                else:
-                    # Fall back to returning positional per-expert wgrad (separate leaf params).
-                    # Split the [E, out, in] gradient into zero-copy per-expert views.
-                    wgrad_list = (
-                        list(pf_result.wgrad_stacked)
-                        if pf_result.wgrad_stacked is not None
-                        else [None] * ctx.num_gemms
-                    )
+                wgrad_list = _pf_sink_wgrad(pf_result)
                 return (
                     pf_result.dgrad.view(ctx.inp_shape) if ctx.requires_dgrad else None,
                     None,  # m_splits
                     pf_result.grad_probs,  # dispatched_probs
                     None,  # non_tensor_args
                     *wgrad_list,
-                    *([None] * ctx.num_gemms),
+                    *([None] * num_gemms),
                 )
 
             # Restore from weakrefs to get original weight python objects
@@ -2175,6 +2259,14 @@ class GroupedLinear(TransformerEngineBaseModule):
         if self.wgrad_store.context is None or self.wgrad_store.context.empty():
             return
         with get_nvtx_range_context("_GroupedLinear_wgrad"):
+            if getattr(self.wgrad_store, "pf_delayed", False):
+                # Permute-free delayed wgrad: each stored closure computes and folds the grouped
+                # wgrad into main_grad / .grad itself, so there is nothing to apply here -- just
+                # drain the queue (one entry per microbatch) and fire the accumulation hooks.
+                while not self.wgrad_store.context.empty():
+                    self.wgrad_store.pop()
+                self._trigger_wgrad_accumulation_and_reduce_hooks()
+                return
             (_, grad_biases_, _), tensor_list = self.wgrad_store.pop()
             wgrad_list = tensor_list[2]
             weight_params = self._get_weight_tensors()

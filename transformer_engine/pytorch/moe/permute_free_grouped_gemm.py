@@ -1029,6 +1029,10 @@ class PermuteFreeBackwardResult:
     # True when the wgrad was written directly into the caller-provided ``wgrad_out``;
     # False when ``wgrad_stacked`` is a fresh tensor the caller still needs to sink.
     wgrad_applied: bool = False
+    # ``defer_wgrad`` output: the ``F``-wide FC2 activation (``act(gate)*up*prob``) emitted by the
+    # dgrad-phase gated-act backward, to be stashed for a later delayed FC2 wgrad. Stashing this
+    # (``F``-wide) instead of the ``2F`` pre-activation lets the preact free after the dgrad phase.
+    deferred_fc2_input: Optional[torch.Tensor] = None
 
 
 def permute_free_grouped_gemm_forward(
@@ -1074,6 +1078,8 @@ def permute_free_grouped_gemm_backward(
     fc2_activation: Optional[str] = None,
     wgrad_out: Optional[torch.Tensor] = None,
     wgrad_accumulate: bool = False,
+    defer_wgrad: bool = False,
+    fc2_input: Optional[torch.Tensor] = None,
 ) -> PermuteFreeBackwardResult:
     """Dispatch the permute-free grouped-GEMM backward (mirror of the forward dispatch).
 
@@ -1085,6 +1091,12 @@ def permute_free_grouped_gemm_backward(
     caller's buffer (``+=`` if ``wgrad_accumulate`` else ``=``) instead of returning a fresh
     tensor. When used, ``result.wgrad_applied`` is ``True`` and ``result.wgrad_stacked`` is
     that same buffer.
+
+    ``defer_wgrad`` computes only the dgrad (and, on the FC2 path, the ``F``-wide FC2 activation,
+    returned as ``result.deferred_fc2_input``) and skips the wgrad GEMM, for a later delayed
+    weight-gradient pass. ``fc2_input`` feeds that delayed pass back in: when given on the FC2
+    wgrad path it is used directly, so the wgrad neither re-reads the ``2F`` preact nor recomputes
+    the activation.
     """
     grad_output = grad_output.contiguous()
     route_space = getattr(routing, "route_space", False)
@@ -1097,9 +1109,11 @@ def permute_free_grouped_gemm_backward(
         # FC2: grad is token-space [num_recv, out]. dgrad gathers back to the route buffer,
         # then the standalone gated-activation backward maps dL/dF -> dL/d(2F) (+ dprob).
         recompute = fc2_activation is not None and hidden_states is not None
-        # When both grads are wanted with a gated activation, fuse the wgrad's activation
-        # recompute into the act-bwd (which is already streaming the 2F preact) so the wgrad
-        # can reuse the F-wide fc2_input instead of re-reading the 2F preact a second time.
+        # When the wgrad is wanted (now, via ``requires_wgrad``, or later, via ``defer_wgrad``)
+        # with a gated activation, fuse the wgrad's activation recompute into the act-bwd (which
+        # is already streaming the 2F preact) so the wgrad can reuse the F-wide fc2_input instead
+        # of re-reading the 2F preact a second time.
+        emit_fc2_input = (requires_wgrad or defer_wgrad) and recompute
         fused_fc2_input = None
         if requires_dgrad:
             weights_stacked = _stack_expert_weights(weights)  # [E, H, F], zero-copy when grouped
@@ -1107,7 +1121,7 @@ def permute_free_grouped_gemm_backward(
                 grad_output, weights_stacked, routing
             )
             if recompute:
-                if requires_wgrad:
+                if emit_fc2_input:
                     dgrad, grad_probs, fused_fc2_input = permute_free_gated_act_bwd(
                         dgrad_f,
                         hidden_states,
@@ -1128,13 +1142,32 @@ def permute_free_grouped_gemm_backward(
                     grad_probs = None
             else:
                 dgrad = dgrad_f
+        if defer_wgrad:
+            # Delayed-wgrad phase 1: hand back the F-wide activation to stash (so the 2F preact
+            # can free) and skip the wgrad GEMM. Fall back to a forward recompute only when the
+            # act-bwd did not run (e.g. input needs no dgrad).
+            deferred = fused_fc2_input
+            if deferred is None:
+                deferred = (
+                    permute_free_gated_act_fwd(
+                        hidden_states, routing,
+                        activation=fc2_activation, dispatched_probs=dispatched_probs,
+                    )
+                    if recompute
+                    else hidden_states
+                )
+            return PermuteFreeBackwardResult(
+                dgrad=dgrad, grad_probs=grad_probs, deferred_fc2_input=deferred,
+            )
         if requires_wgrad:
             weights_shape = (num_gemms, weights[0].size(0), weights[0].size(1))
-            if fused_fc2_input is not None:
-                # Reuse the F-wide activation emitted by the act-bwd above: a plain stored-act
-                # wgrad, no second pass over the 2F preact.
+            # Reuse an F-wide activation when we have one: either freshly emitted by the act-bwd
+            # above, or stashed from an earlier dgrad phase and passed back in via ``fc2_input``.
+            reuse_fc2_input = fused_fc2_input if fused_fc2_input is not None else fc2_input
+            if reuse_fc2_input is not None:
+                # Plain stored-act wgrad, no second pass over the 2F preact.
                 dW = permute_free_grouped_gemm_bf16_fc2_wgrad(
-                    fused_fc2_input, grad_output, weights_shape, routing,
+                    reuse_fc2_input, grad_output, weights_shape, routing,
                     out=wgrad_out, accumulate=wgrad_accumulate,
                 )  # [E, H, F]
             else:
@@ -1153,6 +1186,10 @@ def permute_free_grouped_gemm_backward(
         if requires_dgrad:
             weights_stacked = _stack_expert_weights(weights)  # [E, N, H], zero-copy when grouped
             dgrad = permute_free_grouped_gemm_bf16_dgrad(grad_output, weights_stacked, routing)
+        if defer_wgrad:
+            # FC1 has no activation to stash; the delayed wgrad re-reads grad_output + the token
+            # input, which the caller keeps alive in the wgrad store.
+            return PermuteFreeBackwardResult(dgrad=dgrad, grad_probs=grad_probs)
         if requires_wgrad:
             weights_shape = (num_gemms, weights[0].size(0), weights[0].size(1))
             # bf16 or fp32 ``main_grad`` sink both accumulate in-kernel (fp32 via the fp32-store
