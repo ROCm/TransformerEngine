@@ -445,3 +445,66 @@ def test_multi_layer_with_overlap_fp8(
         num_layers,
         use_cublasmp=use_cublasmp,
     )
+
+
+persistent_available = IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5)
+reason_for_no_persistent = "Persistent AG+GEMM overlap requires a gfx950 device."
+assert (SEQ_LENGTH * BATCH_SIZE) % 256 == 0
+assert (NUM_HEADS * HEAD_DIM) % 256 == 0
+
+
+def _run_persistent_ag(quantization="none"):
+    """Run the AG overlap harness with the persistent backend, returning the completed process."""
+    test_cmd = LAUNCH_CMD + [
+        str(TEST_ROOT / "run_gemm_with_overlap.py"),
+        "--check-numerics",
+        f"--seed={RNG_SEED}",
+        f"--seq-length={SEQ_LENGTH}",
+        f"--batch-size={BATCH_SIZE}",
+        f"--num-heads={NUM_HEADS}",
+        f"--head-dim={HEAD_DIM}",
+        "--comm-type=AG",
+        "--p2p",
+        f"--quantization={quantization}",
+    ]
+    return subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
+
+
+def _assert_numerics_passed(result):
+    stdout, stderr = result.stdout.decode(), result.stderr.decode()
+    assert result.returncode == 0, f"non-zero exit\n{stderr}"
+    assert "NUMERICAL CHECK FAILED" not in stderr, stderr
+    assert "NUMERICAL CHECK PASSED" in stdout, stdout
+
+
+@pytest.mark.skipif(not persistent_available, reason=reason_for_no_persistent)
+def test_persistent_ag_overlap_bf16():
+    """bf16 at an aligned shape: the fused backend runs and the result is correct."""
+    _assert_numerics_passed(_run_persistent_ag())
+
+
+@pytest.mark.skipif(not persistent_available, reason=reason_for_no_persistent)
+@pytest.mark.parametrize("quantization", ("fp8", "mxfp8"))
+def test_persistent_ag_overlap_declines_non_bf16(quantization):
+    """Non-bf16 is currently outside the backend."""
+    if quantization == "fp8" and not fp8_available:
+        pytest.skip(reason_for_no_fp8)
+    if quantization == "mxfp8" and not mxfp8_available:
+        pytest.skip(reason_for_no_mxfp8)
+    _assert_numerics_passed(_run_persistent_ag(quantization=quantization))
+
+
+@pytest.mark.skipif(not persistent_available, reason=reason_for_no_persistent)
+def test_persistent_ag_overlap_is_deterministic():
+    """Bitwise reproducibility across runs."""
+    first = _run_persistent_ag()
+    _assert_numerics_passed(first)
+    second = _run_persistent_ag()
+    _assert_numerics_passed(second)
+
+    def _numeric_lines(out):
+        return [ln for ln in out.decode().splitlines() if "NUMERICAL CHECK" in ln or "error" in ln]
+
+    assert _numeric_lines(first.stdout) == _numeric_lines(
+        second.stdout
+    ), "two identical runs disagreed"

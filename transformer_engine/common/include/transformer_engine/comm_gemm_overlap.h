@@ -316,6 +316,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
 
   uint64_t _ag_signal_base = 0;
   uint64_t _rs_signal_base = 0;
+  bool _persistent{false};
 
  private:
   void initialize(const std::vector<size_t> &buffer_shape, DType buffer_dtype,
@@ -331,7 +332,7 @@ class CommOverlapP2PBase : public CommOverlapCore {
                      CommOverlapType comm_type, int num_max_streams = NVTE_COMM_OVERLAP_MAX_STREAMS,
                      int comm_cga_size = 1, int gemm_priority = 0, int comm_priority = 0,
                      int num_comm_sm = 1, bool set_sm_margin = false, bool use_ce = true,
-                     bool atomic_gemm = false, bool aggregate = false);
+                     bool atomic_gemm = false, bool aggregate = false, bool persistent = false);
 
   // Constructor for cuBLASMp backend
   CommOverlapP2PBase(ncclComm_t nccl_comm_ptr, int tp_rank, int tp_size, int num_comm_sm = 1,

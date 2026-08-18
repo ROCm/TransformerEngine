@@ -28,6 +28,7 @@ from .base import (
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
+    ub_overlap_disabled,
     using_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
@@ -2101,6 +2102,18 @@ class LayerNormMLP(TransformerEngineBaseModule):
         self.ub_bulk_dgrad = (
             ub_bulk_dgrad and self.sequence_parallel and not self.ub_overlap_rs_dgrad
         )
+
+        # Layers with no overlap backend take the non-overlapped path.
+        if is_ub_initialized():
+            if ub_overlap_disabled("fc1_fprop") or ub_overlap_disabled("fc2_dgrad"):
+                self.ub_overlap_ag = False
+            if ub_overlap_disabled("fc2_fprop"):
+                self.ub_overlap_rs = False
+            if ub_overlap_disabled("fc1_dgrad"):
+                self.ub_overlap_rs_dgrad = False
+                self.ub_bulk_dgrad = False
+            if ub_overlap_disabled("fc1_wgrad"):
+                self.ub_bulk_wgrad = False
 
         if any(
             [

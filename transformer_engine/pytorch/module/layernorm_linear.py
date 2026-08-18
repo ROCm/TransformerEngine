@@ -27,6 +27,7 @@ from .base import (
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
+    ub_overlap_disabled,
     using_cublasmp_backend,
     quantize_weight,
     TransformerEngineBaseModule,
@@ -1431,6 +1432,19 @@ class LayerNormLinear(TransformerEngineBaseModule):
         self.ub_overlap_ag_dgrad = (
             ub_overlap_ag and self.sequence_parallel and self.parallel_mode == "row"
         )
+
+        # Layers with no overlap backend take the non-overlapped path.
+        if ub_name is not None and is_ub_initialized():
+            if ub_overlap_disabled(ub_name + "_fprop"):
+                self.ub_overlap_rs_fprop = False
+                self.ub_overlap_ag_fprop = False
+            if ub_overlap_disabled(ub_name + "_dgrad"):
+                self.ub_overlap_ag_dgrad = False
+                self.ub_overlap_rs_dgrad = False
+                self.ub_bulk_dgrad = False
+            if ub_overlap_disabled(ub_name + "_wgrad"):
+                self.ub_bulk_wgrad = False
+
         if any(
             [
                 self.ub_overlap_ag_fprop,

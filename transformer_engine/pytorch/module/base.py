@@ -58,6 +58,7 @@ from ..tensor.storage.float8_tensor_storage import Float8TensorStorage
 from ..tensor.storage.mxfp8_tensor_storage import MXFP8TensorStorage
 from ..tensor.storage.nvfp4_tensor_storage import NVFP4TensorStorage
 from ..utils import (
+    get_device_compute_capability,
     is_non_tn_fp8_gemm_supported,
     torch_get_autocast_gpu_dtype,
     get_nvtx_range_context,
@@ -85,6 +86,8 @@ _dummy_wgrads = {}
 _ub_communicators = None
 _ub_initialized = False
 _ub_with_cublasmp = False
+_ub_persistent_names = set()
+_ub_disabled_names = set()
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
 
@@ -160,7 +163,7 @@ def initialize_ub(
 
                  {
                     <gemm_name> : {
-                        "method": <"ring_exchange" or "pipeline">,
+                        "method": <"ring_exchange", "pipeline", or "persistent" (ROCm only)>,
                         "is_reduce_scatter": bool,
                         "num_sm": int,
                         "cga_size": int,
@@ -325,24 +328,28 @@ def initialize_ub(
 
     # Default overlap methods for layers
     if IS_HIP_EXTENSION:
+        _rocm_layers = [
+            "qkv_fprop",
+            "fc1_fprop",
+            "proj_dgrad",
+            "fc2_dgrad",
+            "proj_wgrad",
+            "fc2_wgrad",
+            "proj_fprop",
+            "fc2_fprop",
+            "qkv_dgrad",
+            "fc1_dgrad",
+            "qkv_wgrad",
+            "fc1_wgrad",
+        ]
+        # gfx950 runs the persistent backend or nothing by default.
+        _persistent_default = get_device_compute_capability() == (9, 5)
         methods = {
-            "ring_exchange": [
-                "qkv_fprop",
-                "fc1_fprop",
-                "proj_dgrad",
-                "fc2_dgrad",
-                "proj_wgrad",
-                "fc2_wgrad",
-                "proj_fprop",
-                "fc2_fprop",
-                "qkv_dgrad",
-                "fc1_dgrad",
-                "qkv_wgrad",
-                "fc1_wgrad"
-            ],
+            "ring_exchange": [] if _persistent_default else list(_rocm_layers),
             "pipeline": [],
             # TODO: Investigate issues with qkv_dgrad and fc1_dgrad overlap on ROCm
             "bulk": [],
+            "persistent": list(_rocm_layers) if _persistent_default else [],
         }
     else:
         methods = {
@@ -379,10 +386,13 @@ def initialize_ub(
         default_cfg = {
             "method": method,
             "is_reduce_scatter": is_reduce_scatter,
-            "num_sm": 1 if method == "ring_exchange" else 16,
-            "cga_size": 1 if method == "ring_exchange" else 2,
-            "set_sm_margin": not method == "ring_exchange" and not IS_HIP_EXTENSION, # Default set to False for HIP for performance
-            "num_splits": tp_size if method == "ring_exchange" else 4,
+            "num_sm": 1 if method in ("ring_exchange", "persistent") else 16,
+            "cga_size": 1 if method in ("ring_exchange", "persistent") else 2,
+            # Default set to False for HIP for performance
+            "set_sm_margin": (
+                method not in ("ring_exchange", "persistent") and not IS_HIP_EXTENSION
+            ),
+            "num_splits": tp_size if method in ("ring_exchange", "persistent") else 4,
             "aggregate": False,
             "atomic_gemm": False,
             "use_ce": True,
@@ -410,7 +420,15 @@ def initialize_ub(
         gemm_priority: int = 0,
         pipeline_rs_overlap_first_gemm: bool = False,
     ) -> None:
-        if with_cublasmp and method in ("bulk", "external"):
+        if method not in methods:
+            raise ValueError(f"At {name}, unrecognized overlap method `{method}`.")
+        if method == "persistent" and get_device_compute_capability() != (9, 5):
+            raise ValueError(f"At {name}, `persistent` overlap method requires a gfx950 device.")
+        if method == "persistent" and is_reduce_scatter:
+            # TODO: Add RS support.
+            _ub_disabled_names.add(name)
+            return
+        if with_cublasmp and method in ("bulk", "external", "persistent"):
             raise ValueError(
                 f"At {name}, cuBLASMp does not support `{method}` overlap method. "
                 "Please select a different method or set with_cublasmp=False."
@@ -473,7 +491,7 @@ def initialize_ub(
             else dtype
         )
         comm_type = tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG
-        if method == "ring_exchange":
+        if method in ("ring_exchange", "persistent"):
             ub_obj = tex.CommOverlapP2P(
                 shape,  # Communication buffer shape
                 buffer_dtype,  # Communication buffer data type
@@ -490,6 +508,7 @@ def initialize_ub(
                 aggregate=aggregate,
                 gemm_priority=gemm_priority,
                 comm_priority=comm_priority,
+                persistent=method == "persistent",
             )
         else:
             ub_obj = tex.CommOverlap(
@@ -510,6 +529,8 @@ def initialize_ub(
                 rs_overlap_first_gemm=pipeline_rs_overlap_first_gemm,
             )
         _ub_communicators[(name, quantization_mode)] = ub_obj
+        if method == "persistent":
+            _ub_persistent_names.add(name)
 
     for quantization_mode, user_ub_cfg in zip(quantization_modes, ub_cfgs):
         if user_ub_cfg is not None:
@@ -532,9 +553,12 @@ def initialize_ub(
                         layers_all_gather_overlap.remove(name)
                     if name not in layers_reduce_scatter_overlap:
                         layers_reduce_scatter_overlap.append(name)
-                    if name in methods["bulk"]:
-                        methods["bulk"].remove(name)
                     new_method = user_ub_cfg[name]["method"]
+                    # A leftover entry in another list allocates a second buffer for this name
+                    if IS_HIP_EXTENSION:
+                        for other_method, names in methods.items():
+                            if other_method != new_method and name in names:
+                                names.remove(name)
                     if name not in methods[new_method]:
                         methods[new_method].append(name)
 
@@ -601,12 +625,41 @@ def get_ub_is_fp8(name: str, use_fp8: bool) -> bool:
     return get_ub(name, use_fp8).is_fp8_ubuf()
 
 
+def fused_ag_gemm_eligible(name, inp, weight, bias, dtype, tp_size) -> bool:
+    """Whether the persistent AG+GEMM backend covers this call."""
+    if not _ub_is_persistent(name):
+        return True  # not our backend
+    if dtype != torch.bfloat16 or inp.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+        return False
+    if bias is not None:
+        return False
+    if tp_size not in (4, 8):
+        return False
+    out_features, in_features = weight.shape
+    n_chunk = inp.shape[0] if inp.dim() == 2 else inp.shape[0] * inp.shape[1]
+    return ( out_features % 256 == 0 and in_features % 128 == 0
+        and in_features >= 256 and n_chunk % 256 == 0
+    )
+
+
+def _ub_is_persistent(name: str) -> bool:
+    """Whether `name` was configured with the persistent overlap method."""
+    return name in _ub_persistent_names
+
+
+def ub_overlap_disabled(name: str) -> bool:
+    """Whether `name` has no overlap backend at all and must take the non-overlapped path."""
+    return name in _ub_disabled_names
+
+
 def destroy_ub():
     """Destroy all allocated userbuffer communicators."""
     global _ub_communicators, _ub_with_cublasmp, _ub_initialized
     _ub_communicators = None
     _ub_with_cublasmp = False
     _ub_initialized = False
+    _ub_persistent_names.clear()
+    _ub_disabled_names.clear()
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
     # Compiled graphs may have baked is_fp8_ubuf() via assume_constant_result;

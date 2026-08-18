@@ -14,6 +14,9 @@
 #include "common/util/logging.h"
 #include "common/util/system.h"
 #include "userbuffers/userbuffers.h"
+#ifdef USE_HIPKITTENS_GEMM
+#include "../gemm/kittens/fused_ag_gemm.h"
+#endif
 
 namespace transformer_engine {
 #if 0
@@ -246,12 +249,57 @@ static_assert(rings_are_unique<7,8>(tp_next_8), "Rings overlap");
 static_assert(prev_is_inverse_of_next<2,4>(tp_next_4, tp_prev_4), "tp_prev_4 is not inverse of tp_next_4");
 static_assert(prev_is_inverse_of_next<7,8>(tp_next_8, tp_prev_8), "tp_prev_8 is not inverse of tp_next_8");
 
+#ifdef USE_HIPKITTENS_GEMM
+// Fused all-gather + GEMM. Default on gfx950 for bf16 when comm overlap is enabled.
+static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, TensorWrapper &D,
+                             const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
+                             const TensorWrapper &B_copy, TensorWrapper &workspace, bool accumulate,
+                             const TensorWrapper &ubuf, const TensorWrapper &chunk, communicator *comm,
+                             int reg, int tp_id, int tp_size, uint64_t signal, cudaStream_t stream) {
+  if (!kittens_fused_ag_gemm_supported()) return false;
+
+  // TODO: Add bias support
+  NVTE_CHECK(!transb && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0 && B_copy.numel() == 0,
+             "persistent AG+GEMM reached with an unsupported epilogue");
+  NVTE_CHECK(A.dtype() == DType::kBFloat16 && ubuf.dtype() == DType::kBFloat16 && D.dtype() == DType::kBFloat16,
+             "persistent AG+GEMM reached with a non-bf16 operand");
+
+  const size_t m       = (transa) ? A.size(0) : A.size(1);
+  const size_t k       = (transa) ? A.size(1) : A.size(0);
+  const size_t n_chunk = chunk.size(0);
+  NVTE_CHECK((tp_size == 4 || tp_size == 8) && m % 256 == 0 && k % 128 == 0 && k >= 256 && n_chunk % 256 == 0,
+             "persistent AG+GEMM reached with an ineligible shape (m=", m, " k=", k, " n_chunk=", n_chunk,
+             " tp_size=", tp_size, ")");
+
+  const int rank_round_tp = comm->myrank - tp_id;
+  KittensFusedAgGemmArgs args{
+      A.dptr(), ubuf.dptr(), D.dptr(),
+      reinterpret_cast<char *>(comm->gpu_ptrs) + reg * comm->nvsize * sizeof(void *),
+      rank_round_tp % comm->nvsize, comm->nvsize,
+      GET_RECV_PTR_BY_INDEX(rank_round_tp, comm, reg, 0), comm->gpu_ptrs,
+      static_cast<size_t>(GET_SEND_PTR_BY_INDEX(0, comm, reg, 0) - reinterpret_cast<char *>(comm->peer_ptr[0][0])),
+      static_cast<size_t>(GET_RECV_PTR_BY_INDEX(1, comm, reg, 0) - GET_RECV_PTR_BY_INDEX(0, comm, reg, 0)),
+      signal, static_cast<int>(m), static_cast<int>(n_chunk * tp_size), static_cast<int>(k), transa,
+      tp_id, tp_size, chunk.bytes(), workspace.dptr(), workspace.bytes(), stream};
+  return kittens_fused_ag_gemm_bf16(args);
+}
+#endif
+
 // TODO: Introduce HIPGraphs for dependency management.
 void CommOverlapP2PBase::rocm_split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                                 bool transb, TensorWrapper &D, TensorWrapper &bias,
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
                                 cudaStream_t stream_main) {
+#ifdef USE_HIPKITTENS_GEMM
+  // Ahead of the _ub_comm->sms restore at the end.
+  if (hk_fused_ag_gemm(A, transa, transb, D, bias, pre_gelu_out, B_copy, workspace, accumulate,
+                       _ubuf, _ubufs[0], _ub_comm, _ub_reg, _tp_id, _tp_size,
+                       _ag_signal_base + _tp_size, stream_main)) {
+    _ag_signal_base += _tp_size;
+    return;
+  }
+#endif
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;

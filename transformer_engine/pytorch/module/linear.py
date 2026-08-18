@@ -21,6 +21,8 @@ from transformer_engine.pytorch.torch_version import torch_version
 
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
+    fused_ag_gemm_eligible,
+    ub_overlap_disabled,
     get_dummy_wgrad,
     get_ub,
     get_ub_is_fp8,
@@ -318,6 +320,11 @@ def _linear_forward_impl(
     # Configure tensor-parallel communication
     tp_world_size = get_distributed_world_size(tp_group)
     backward_needs_input = is_grad_enabled and weight.requires_grad
+    # The persistent backend covers only bf16.
+    if ub_overlap_ag_fprop and not fused_ag_gemm_eligible(
+        ub_name + "_fprop", inp, weight, bias, activation_dtype, tp_world_size
+    ):
+        ub_overlap_ag_fprop = False
     with_input_all_gather_nccl = (
         parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
     )
@@ -1626,6 +1633,18 @@ class Linear(TransformerEngineBaseModule):
         self.ub_overlap_ag_dgrad = (
             self.parallel_mode == "row" and self.sequence_parallel and ub_overlap_ag
         )
+
+        # Layers with no overlap backend take the non-overlapped path.
+        if ub_name is not None and is_ub_initialized():
+            if ub_overlap_disabled(ub_name + "_fprop"):
+                self.ub_overlap_rs_fprop = False
+                self.ub_overlap_ag_fprop = False
+            if ub_overlap_disabled(ub_name + "_dgrad"):
+                self.ub_overlap_ag_dgrad = False
+                self.ub_overlap_rs_dgrad = False
+                self.ub_bulk_dgrad = False
+            if ub_overlap_disabled(ub_name + "_wgrad"):
+                self.ub_bulk_wgrad = False
 
         if any(
             [
