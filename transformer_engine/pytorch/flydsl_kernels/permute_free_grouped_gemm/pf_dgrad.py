@@ -12,21 +12,21 @@ There are two flavours, matching the TE permute-free contract (``index_a_by_rout
 
 * **route-read** (FC1 dgrad, ``gather=False``): ``grad`` is **dense route-ordered**
   ``[num_routes, N]`` (or block-padded with only the dense head populated); row ``s`` is read
-  directly. ``dx`` is **block-padded route-ordered** ``[em_max, K]``.
+  directly. ``dx`` is **block-padded route-ordered** ``[R_block, K]``.
 * **gather** (FC2 dgrad, ``gather=True``): ``grad`` is **token-ordered** ``[num_recv, N]`` and each
   route slot ``s`` gathers ``grad[SORTED[s]]`` (sentinel ``SORTED[s] == num_recv`` -> 0), writing
-  block-padded route-ordered ``dXrow[em_max, K]``. Mirrors the forward NT gather, one row map
+  block-padded route-ordered ``dXrow[R_block, K]``. Mirrors the forward NT gather, one row map
   redirecting the two LDS A half-tiles, only on the NN tile.
 
 The weight is bit-identical to the forward ``[E, N, K]`` (forward reads it NT, dgrad NN).
 
 Contract:
-  * ``grad_y`` [rows, N]     bf16   incoming grad (rows = em_max route-read / num_recv gather)
+  * ``grad_y`` [rows, N]     bf16   incoming grad (rows = R_block route-read / num_recv gather)
   * ``weight`` [E, N, K]     bf16   per-expert weights (shared with forward)
-  * ``dx``     [em_max, K]   bf16   block-padded route-ordered input grad per slot (in place)
+  * ``dx``     [R_block, K]   bf16   block-padded route-ordered input grad per slot (in place)
   * ``expert_ids``      [num_m_blocks] i32   expert id per BLOCK_M slot block
   * ``num_tile_blocks`` [1]  i32   real (non-padding) BLOCK_M block count (device)
-  * ``sorted_slot_ids`` [em_max] i32  gather index (gather=True); unused for route-read
+  * ``sorted_slot_ids`` [R_block] i32  gather index (gather=True); unused for route-read
 """
 
 from __future__ import annotations
@@ -288,12 +288,12 @@ def compile_grouped_gemm_dgrad_bf16(
 
 
 def grouped_gemm_dgrad_bf16(
-    grad_y,  # [rows, N] bf16   incoming grad (rows = em_max route-read / num_recv gather)
+    grad_y,  # [rows, N] bf16   incoming grad (rows = R_block route-read / num_recv gather)
     weight,  # [E, N, K] bf16    per-expert weights (shared with forward)
-    dx,  # [em_max, K] bf16     block-padded route-ordered input grad per slot (in place)
+    dx,  # [R_block, K] bf16     block-padded route-ordered input grad per slot (in place)
     expert_ids,  # [num_m_blocks] i32
     num_tile_blocks,  # int   real BLOCK_M block count (host scalar; capture-safe)
-    sorted_slot_ids=None,  # [em_max] i32   gather index (required when gather=True)
+    sorted_slot_ids=None,  # [R_block] i32   gather index (required when gather=True)
     *,
     gather=False,
     BLOCK_M=256,
@@ -308,7 +308,7 @@ def grouped_gemm_dgrad_bf16(
 
     ``gather=False`` reads ``grad`` at the route row (FC1 dgrad, ``grad`` rows == ``dx`` rows).
     ``gather=True`` gathers ``grad[SORTED[s]]`` from a token-space buffer (FC2 dgrad); ``dx`` is
-    written over its full padded ``[em_max, K]`` extent (pad rows carry dead values).
+    written over its full padded ``[R_block, K]`` extent (pad rows carry dead values).
     """
     assert grad_y.dtype == torch.bfloat16 and weight.dtype == torch.bfloat16
     assert dx.dtype == torch.bfloat16

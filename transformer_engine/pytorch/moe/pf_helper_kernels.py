@@ -316,17 +316,17 @@ def fused_gated_act_prob_bwd(
         ``[num_recv_tokens, E]`` (matching ``dispatched_probs.dtype``) or ``None``; ``fc2_input`` is
         ``[T * min(topk, E), F]`` (bf16) when ``emit_act`` else ``None``.
     """
-    em_max, F = grad_out.shape
-    if preact.shape[0] != em_max or preact.shape[1] != 2 * F:
+    R_block, F = grad_out.shape
+    if preact.shape[0] != R_block or preact.shape[1] != 2 * F:
         raise ValueError(
-            f"preact must be [T * min(topk, E), 2F]={ (em_max, 2 * F) }, got {tuple(preact.shape)}."
+            f"preact must be [T * min(topk, E), 2F]={ (R_block, 2 * F) }, got {tuple(preact.shape)}."
         )
     routes_max = int(token.shape[0])
     has_probs = dispatched_probs is not None
 
-    dpre = torch.empty((em_max, 2 * F), dtype=torch.bfloat16, device=grad_out.device)
+    dpre = torch.empty((R_block, 2 * F), dtype=torch.bfloat16, device=grad_out.device)
     if emit_act:
-        act_out = torch.empty((em_max, F), dtype=torch.bfloat16, device=grad_out.device)
+        act_out = torch.empty((R_block, F), dtype=torch.bfloat16, device=grad_out.device)
         stride_aom, stride_aoh = act_out.stride(0), act_out.stride(1)
     else:
         act_out = None
@@ -510,7 +510,7 @@ def fused_gated_act_prob_fwd(
 
 @triton.jit
 def _gather_combine_kernel(
-    src_ptr,  # block-padded [em_max, N] (padded slot order; padding rows carry dead values)
+    src_ptr,  # block-padded [R_block, N] (padded slot order; padding rows carry dead values)
     token_routes_ptr,  # [T, MAXK] int32: block-padded slot positions per token
     token_count_ptr,  # [T] int32: number of routes for each token
     out_ptr,  # [T, N] out
@@ -669,7 +669,7 @@ def _route_list_place_kernel(
     token_count_ptr,  # [T] int32 out: routes per token (only if BUILD_INVERSE)
     T,
     E,
-    em_max,
+    R_block,
     stride_t,
     stride_e,
     BLOCK_SIZE_M: tl.constexpr,
@@ -693,7 +693,7 @@ def _route_list_place_kernel(
             # Both bounds hold by construction when the caller's ``topk`` / ``num_routes``
             # hints are honest. Mask anyway: an under-sized hint then drops the excess routes
             # instead of writing past these buffers.
-            tl.store(sorted_slot_ids_ptr + slot, t, mask=slot < em_max)
+            tl.store(sorted_slot_ids_ptr + slot, t, mask=slot < R_block)
             if BUILD_INVERSE:
                 # Block-padded canonical layout: every intermediate route tensor (the GEMM
                 # output, the FC2 route-read input, the activation) is indexed by the padded
@@ -761,7 +761,7 @@ def route_list_align(
     num_routes:
         Host-known **exact** route count (``routing_map.sum()``). When provided it replaces
         the static bound entirely, leaving only the unavoidable per-expert block padding.
-        This makes ``em_max`` data-dependent (no static shapes, no CUDA graphs), so it is off
+        This makes ``R_block`` data-dependent (no static shapes, no CUDA graphs), so it is off
         the default path; see :class:`MoERoutingMetadata`. A value below the true count
         silently drops the routes past the bound.
     build_inverse_map:
@@ -791,7 +791,7 @@ def route_list_align(
     max_per_token = E if topk is None else min(int(topk), E)
     routes_max = T * max_per_token if num_routes is None else int(num_routes)
     blocks_max = (routes_max + block_size - 1) // block_size + E
-    em_max = blocks_max * block_size
+    R_block = blocks_max * block_size
 
     # Per-expert count + exclusive within-expert rank (one program per expert). Reused
     # across block sizes when the caller passes a precomputed scan.
@@ -804,7 +804,7 @@ def route_list_align(
     blocks_per_expert = torch.empty((E,), dtype=torch.int32, device=device)  # [E]: ceil(count[e]/block_m)
     block_start = torch.empty((E,), dtype=torch.int32, device=device)  # [E]: first M-block index of expert e
     expert_ids = torch.empty((blocks_max,), dtype=torch.int32, device=device)  # [blocks_max]: owner of M-block b (-1 past end)
-    num_tokens_post_padded = torch.empty((1,), dtype=torch.int32, device=device)  # [1] device scalar: real em (padded route count)
+    num_tokens_post_padded = torch.empty((1,), dtype=torch.int32, device=device)  # [1] device scalar: actual R_block (padded route count)
     block_b = 256
     # From per-expert route counts, derive the expert-sorted block layout: how many M-blocks
     # each expert needs, where each expert's slots start (block_start), which expert owns each
@@ -837,7 +837,7 @@ def route_list_align(
     # One program per token: for each routed (t, e), write sorted_slot_ids[slot] = t where
     # slot = block_start[e] * block_m + within[e, t]. Unwritten slots stay at sentinel T.
     # Optionally emits token_routes / token_route_count (token -> padded slot indices).
-    sorted_slot_ids = torch.full((em_max,), T, dtype=torch.int32, device=device)
+    sorted_slot_ids = torch.full((R_block,), T, dtype=torch.int32, device=device)
     _route_list_place_kernel[(T,)](
         routing_map,
         within,
@@ -847,7 +847,7 @@ def route_list_align(
         token_route_count,
         T,
         E,
-        em_max,
+        R_block,
         routing_map.stride(0),
         routing_map.stride(1),
         BLOCK_SIZE_M=block_size,

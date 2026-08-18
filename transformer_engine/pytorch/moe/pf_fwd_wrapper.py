@@ -6,7 +6,7 @@
 Mirrors the route-list forward gather-GEMM contract: the fwd/dgrad launch consumes
 ``sorted_slot_ids`` and ``expert_ids`` from the routing align (plus ``block_m`` for tile
 geometry). ``block_start`` is not passed here; it is built alongside the align for wgrad only.
-Writes the block-padded ``[em_max, WIDTH_N]`` slot output in place.
+Writes the block-padded ``[R_block, WIDTH_N]`` slot output in place.
 
 Forward gather-GEMM is FlyDSL-only (MegaMOE-ported plain GEMM).
 """
@@ -39,25 +39,25 @@ def _run_gather_gemm(
     geometry (32x32x16 MFMA, ``BLOCK_N=256``, ``GROUP_M=4``, ``num_xcd=1``).
     """
     block_m = int(block_m)
-    em_max = int(sorted_slot_ids.shape[0])
-    if em_max % block_m != 0:
+    R_block = int(sorted_slot_ids.shape[0])
+    if R_block % block_m != 0:
         raise ValueError(
-            f"permute-free gather-GEMM expects em_max ({em_max}) divisible by block_m ({block_m}); "
+            f"permute-free gather-GEMM expects R_block ({R_block}) divisible by block_m ({block_m}); "
             "check routing align block_size_m."
         )
-    num_tile_blocks = em_max // block_m
+    num_tile_blocks = R_block // block_m
     expert_ids_i32 = expert_ids.to(torch.int32)
     if expert_ids_i32.numel() != num_tile_blocks:
         raise ValueError(
             f"permute-free gather-GEMM expects expert_ids length {num_tile_blocks} "
-            f"(em_max={em_max}, BLOCK_M={block_m}), got {expert_ids_i32.numel()}; "
+            f"(R_block={R_block}, BLOCK_M={block_m}), got {expert_ids_i32.numel()}; "
             f"routing align block_size_m must match block_m={block_m}"
         )
 
     if transpose_b:
         # dgrad: NN GEMM contracting the incoming grad against the forward weight [E, N, K]
         # route-read from block-padded route-ordered grad; FC2 dgrad gathers token-ordered
-        # grad [num_recv, N] into block-padded route-ordered dX [em_max, K].
+        # grad [num_recv, N] into block-padded route-ordered dX [R_block, K].
         from ..flydsl_kernels.permute_free_grouped_gemm.pf_dgrad import grouped_gemm_dgrad_bf16
 
         dgrad_group_m = _PF_DGRAD_FC1_GROUP_M if index_a_by_route_pos else _PF_GROUP_M
@@ -89,7 +89,7 @@ def flydsl_moe_fwd(
     index_a_by_route_pos: bool = False,
     dgrad: bool = False,
 ) -> None:
-    """Route-list gather-GEMM, writing block-padded route-ordered ``C[em_max, WIDTH_N]`` in place.
+    """Route-list gather-GEMM, writing block-padded route-ordered ``C[R_block, WIDTH_N]`` in place.
 
     ``A`` is token-ordered ``[num_recv, K]`` gathered via ``sorted_slot_ids`` when
     ``index_a_by_route_pos=False`` (FC1), or block-padded route-ordered read by route slot when

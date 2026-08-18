@@ -7,7 +7,7 @@
 Layout vocabulary:
   * **token-ordered** ``[num_recv_tokens, F]`` — one row per received token.
   * **dense route-ordered** ``[num_routes, F]`` — one row per ``(token, expert)`` route, no padding.
-  * **block-padded route-ordered** ``[em_max, F]`` — expert-sorted routes with per-expert
+  * **block-padded route-ordered** ``[R_block, F]`` — expert-sorted routes with per-expert
     ``block_m`` padding (sync-free over-allocated upper bound).
 
 TE builds expert-sorted ``sorted_slot_ids`` (token row per route slot) plus per-expert
@@ -400,7 +400,7 @@ def permute_free_grouped_gemm_bf16(
     """Route-list gather-in-GEMM (FC1 forward) for bf16 MoE.
 
     Computes ``C[slot] = A[sorted_slot_ids[slot]] @ W[expert(slot)]^T`` for each block-padded
-    slot, writing directly into the ``[em_max, out_features]`` block-padded output. Gated
+    slot, writing directly into the ``[R_block, out_features]`` block-padded output. Gated
     activation is **not** fused here; FC1 emits the raw ``2F`` ``[gate | up]`` pre-activation
     and the standalone gated-act helpers apply ``act(gate) * up [* prob]`` on FC2.
 
@@ -416,7 +416,7 @@ def permute_free_grouped_gemm_bf16(
     Returns
     -------
     torch.Tensor
-        Block-padded ``[em_max, out_features]``, bf16 (expert-contiguous, each expert padded to
+        Block-padded ``[R_block, out_features]``, bf16 (expert-contiguous, each expert padded to
         ``block_size``). The valid rows are the block-padded slots whose
         ``sorted_slot_ids[slot] < num_recv_tokens``; the padding slots carry inert dead values.
         Consumers locate each expert's rows via the routing metadata:
@@ -451,12 +451,12 @@ def permute_free_grouped_gemm_bf16(
     block_size_m = _ensure_fwd_align(routing, hidden_states, weights_stacked)
 
     # Worst-case (sync-free) allocation: size the output to the block-padded upper bound
-    # em_max = sorted_slot_ids.shape[0], which is derived purely from shapes (num_recv_tokens,
+    # R_block = sorted_slot_ids.shape[0], which is derived purely from shapes (num_recv_tokens,
     # num_experts, block_size) and is always >= num_routes. This avoids the device->host sync
     # (.item()) that a dense route-ordered [num_routes, N] allocation would require.
-    em_max = routing.sorted_slot_ids.shape[0]
+    R_block = routing.sorted_slot_ids.shape[0]
     output = torch.empty(
-        (em_max, out_features),
+        (R_block, out_features),
         dtype=torch.bfloat16,
         device=hidden_states.device,
     )
@@ -508,16 +508,16 @@ def permute_free_gated_act_bwd(
     -------
     ``(dpre, dprob)`` by default, or ``(dpre, dprob, fc2_input)`` when ``return_fc2_input`` --
     ``dpre`` is ``[T * min(topk, E), 2F]`` bf16; ``dprob`` matches ``dispatched_probs`` (or
-    ``None`` when no probs were fused); ``fc2_input`` is ``[em_max, F]`` bf16.
+    ``None`` when no probs were fused); ``fc2_input`` is ``[R_block, F]`` bf16.
     """
-    # Block-padded canonical layout: grad_out (FC2 dgrad) and preact both live in the [em_max]
+    # Block-padded canonical layout: grad_out (FC2 dgrad) and preact both live in the [R_block]
     # padded slot order, and the kernel indexes grad_out/preact/dpre by the same row as
     # token/expert -- so we must feed the padded slot arrays (sorted_slot_ids + slot expert),
     # not the dense route arrays, or the padded valid slots beyond routes_max never get a dpre
     # row (and each route pairs a correct token with the wrong padded grad row).
-    em_max = int(routing.sorted_slot_ids.shape[0])
+    R_block = int(routing.sorted_slot_ids.shape[0])
     token = routing.sorted_slot_ids.to(torch.int32)
-    expert = _expert_per_route(routing, em_max)
+    expert = _expert_per_route(routing, R_block)
     # ``num_tokens_post_padded`` is a device scalar bounding the real padded extent, so the tail
     # programs exit early (sync-free) instead of streaming the padding through HBM.
     dpre, dprob, fc2_input = fused_gated_act_prob_bwd(
@@ -556,15 +556,15 @@ def permute_free_gated_act_fwd(
     Returns
     -------
     torch.Tensor
-        ``act``, shape ``[em_max, F]``, bf16 (block-padded slot layout, matching the FC1
+        ``act``, shape ``[R_block, F]``, bf16 (block-padded slot layout, matching the FC1
         forward output and the layout the wgrad route-reads).
     """
     # Block-padded canonical layout: emit one row per padded slot (keyed by sorted_slot_ids) so
-    # the activation lines up with the [em_max] grad the wgrad route-reads. Padding slots
+    # the activation lines up with the [R_block] grad the wgrad route-reads. Padding slots
     # (token sentinel >= num_recv_tokens) are masked to zero by the kernel.
-    em_max = int(routing.sorted_slot_ids.shape[0])
+    R_block = int(routing.sorted_slot_ids.shape[0])
     token = routing.sorted_slot_ids.to(torch.int32)
-    expert = _expert_per_route(routing, em_max)
+    expert = _expert_per_route(routing, R_block)
     return fused_gated_act_prob_fwd(
         preact,
         token,
@@ -620,11 +620,11 @@ def permute_free_grouped_gemm_bf16_dgrad(
 
     block_size_m = _ensure_fwd_align(routing, grad_output, weights_stacked)
 
-    # Two-stage dgrad: (1) store per-route dX into block-padded route-ordered [em_max, in],
+    # Two-stage dgrad: (1) store per-route dX into block-padded route-ordered [R_block, in],
     # then (2) token-parallel gather-combine back to token-ordered dA. Replaces atomic scatter.
-    em_max = routing.sorted_slot_ids.shape[0]
+    R_block = routing.sorted_slot_ids.shape[0]
     route_buf = torch.empty(
-        (em_max, in_features),
+        (R_block, in_features),
         dtype=torch.bfloat16,
         device=grad_output.device,
     )
@@ -679,7 +679,7 @@ def permute_free_grouped_gemm_bf16_wgrad(
         With ``out``: add into it rather than overwrite.
     swap_gather:
         FC2 wgrad mode. Gathers ``grad_output`` (token-space ``[num_recv, out_features]``) and
-        walks ``hidden_states`` (block-padded ``[em_max, in_features]``) contiguously, emitting the
+        walks ``hidden_states`` (block-padded ``[R_block, in_features]``) contiguously, emitting the
         native ``[E, out_features, in_features]`` layout directly (no transpose).
 
     Returns
@@ -718,7 +718,7 @@ def permute_free_grouped_gemm_bf16_wgrad(
         grad_output = grad_output.contiguous()
 
     contract_m = _WGRAD_CONTRACT_M
-    # The grad operand lives in the forward's block-padded [em_max] slot layout (its row for
+    # The grad operand lives in the forward's block-padded [R_block] slot layout (its row for
     # route (e, w) is block_start[e]*block_size_m + w). Ensure the forward align is present so we
     # can pass that padded per-expert base to the kernel; routes are contiguous within an expert,
     # so base + within-rank indexes the correct padded grad row.
@@ -791,7 +791,7 @@ def permute_free_grouped_gemm_bf16_fc2(
     Parameters
     ----------
     fc2_input:
-        Block-padded route-ordered activations ``[em_max, in_features(F)]``, bf16.
+        Block-padded route-ordered activations ``[R_block, in_features(F)]``, bf16.
     weights:
         Expert weights ``[num_experts, out_features(H), in_features(F)]`` (W2) or list of ``[H, F]``.
     routing:
@@ -827,11 +827,11 @@ def permute_free_grouped_gemm_bf16_fc2(
 
     block_size_m = _ensure_fwd_align(routing, fc2_input, weights_stacked)
 
-    # Two-stage combine: (1) block-padded route-ordered per-route GEMM into [em_max, out],
+    # Two-stage combine: (1) block-padded route-ordered per-route GEMM into [R_block, out],
     # then (2) gather-combine to token-ordered output. Replaces atomic scatter-to-token.
-    em_max = routing.sorted_slot_ids.shape[0]
+    R_block = routing.sorted_slot_ids.shape[0]
     route_buf = torch.empty(
-        (em_max, out_features),
+        (R_block, out_features),
         dtype=torch.bfloat16,
         device=fc2_input.device,
     )
@@ -863,12 +863,12 @@ def permute_free_grouped_gemm_bf16_fc2_dgrad(
     ``grad_output`` is **token-ordered** ``[num_recv_tokens, out_features]`` (grad of FC2's
     gather-combine output). For each route slot the kernel gathers its token's grad row
     (``index_a_by_route_pos=False``) and computes ``grad[token] @ W2[e]^T``, writing
-    block-padded route-ordered ``d(fc2_input)`` ``[em_max, in_features]``.
+    block-padded route-ordered ``d(fc2_input)`` ``[R_block, in_features]``.
 
     Returns
     -------
     torch.Tensor
-        ``[em_max, in_features]``, bf16 (**block-padded route-ordered**; valid slots are the
+        ``[R_block, in_features]``, bf16 (**block-padded route-ordered**; valid slots are the
         dense route range ``[0, num_routes)``).
     """
     if grad_output.dtype != torch.bfloat16:
@@ -902,11 +902,11 @@ def permute_free_grouped_gemm_bf16_fc2_dgrad(
 
     # Block-padded route-ordered output; the gather-GEMM writes only the dense route range
     # [0, num_routes) and never visits the tail (bounded by num_tokens_post_padded, sentinel-masked).
-    # Left uninitialized (torch.empty) to skip the em_max*N zero-init; consumers read only the
+    # Left uninitialized (torch.empty) to skip the R_block*N zero-init; consumers read only the
     # dense route range via the routing metadata, so the garbage tail is never observed.
-    em_max = routing.sorted_slot_ids.shape[0]
+    R_block = routing.sorted_slot_ids.shape[0]
     dx = torch.empty(
-        (em_max, in_features),
+        (R_block, in_features),
         dtype=torch.bfloat16,
         device=grad_output.device,
     )
@@ -975,7 +975,7 @@ def permute_free_grouped_gemm_bf16_fc2_wgrad(
         )
 
     # FC2 wgrad via swap_gather: gather grad_output [num_recv, H] (N=H) and walk the block-padded
-    # fc2_input [em_max, F] (K=F) contiguously -> native [E, H, F], no transpose.
+    # fc2_input [R_block, F] (K=F) contiguously -> native [E, H, F], no transpose.
     weights_shape = (num_experts, out_features, in_features)  # [E, H, F]
     if out is not None and out.dtype in (torch.bfloat16, torch.float32):
         # bf16 or fp32 sink: the kernel writes/accumulates straight into it (fp32 via the
@@ -1046,7 +1046,7 @@ def permute_free_grouped_gemm_forward(
     - ``True`` (FC2): route-ordered ``2F`` pre-activation (FC1 output). The gated activation
       ``act(gate)*up[*prob]`` is applied in a standalone pass into an ``F``-wide transient, then
       a plain gather-GEMM + gather-combine -> ``[num_recv, out]``.
-    - ``False`` (FC1): gather-in-GEMM -> padded ``[em_max, out]`` raw ``[gate | up]`` (``2F``).
+    - ``False`` (FC1): gather-in-GEMM -> padded ``[R_block, out]`` raw ``[gate | up]`` (``2F``).
     """
     if getattr(routing, "route_space", False):
         fc2_input = hidden_states

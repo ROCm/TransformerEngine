@@ -48,12 +48,12 @@ def flydsl_moe_wgrad(
 
     See the permute-free wgrad API for the argument contract: ``x`` is
     ``[num_recv_tokens, K]`` (gathered by received-token row), ``grad`` is the block-padded
-    ``[em_max, N]`` per-slot gradient, ``sorted_slot_ids`` maps each block-padded slot to its
+    ``[R_block, N]`` per-slot gradient, ``sorted_slot_ids`` maps each block-padded slot to its
     received-token row (sentinel ``num_recv_tokens`` for padding), and ``grad_base[e]`` is the
     block-padded first-slot row of expert ``e`` (``block_start[e] * block_size_m``).
 
     ``swap_gather`` selects the FC2 wgrad variant: ``grad`` is the token-space ``[num_recv, N]``
-    operand (gathered) and ``x`` is the block-padded ``[em_max, K]`` operand (contiguous walk),
+    operand (gathered) and ``x`` is the block-padded ``[R_block, K]`` operand (contiguous walk),
     emitting the native ``dw[E, N, K]`` orientation with no transpose.
 
     ``block_n``/``block_k`` and ``warps_n``/``warps_k`` select the workgroup tile; the

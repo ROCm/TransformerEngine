@@ -98,26 +98,26 @@ def _dense_route_order(routing_map):
 def _route_slots(routing, num_recv_tokens):
     """Per-slot indices of an aligned routing metadata.
 
-    Returns ``(em_max, valid, tok, exp)``: the block-padded slot count, the mask of slots
+    Returns ``(R_block, valid, tok, exp)``: the block-padded slot count, the mask of slots
     backing a real route, and the token / local-expert id of each slot (padding slots are
     clamped in range so they can be indexed and then masked out).
     """
-    em_max = int(routing.sorted_slot_ids.shape[0])
+    R_block = int(routing.sorted_slot_ids.shape[0])
     valid = routing.sorted_slot_ids < num_recv_tokens
     tok = routing.sorted_slot_ids.to(torch.int64).clamp_(0, num_recv_tokens - 1)
-    exp = _expert_per_route(routing, em_max).to(torch.int64).clamp_min(0)
-    return em_max, valid, tok, exp
+    exp = _expert_per_route(routing, R_block).to(torch.int64).clamp_min(0)
+    return R_block, valid, tok, exp
 
 
-def _randn_route_buffer(em_max, width, valid):
+def _randn_route_buffer(R_block, width, valid):
     """Block-padded route buffer: random bf16 on the valid slots, zeros on the padding."""
-    buf = torch.zeros(em_max, width, device="cuda", dtype=torch.bfloat16)
+    buf = torch.zeros(R_block, width, device="cuda", dtype=torch.bfloat16)
     buf[valid] = torch.randn(int(valid.sum().item()), width, device="cuda", dtype=torch.bfloat16)
     return buf
 
 
 def _sum_by_expert(per_slot, exp, weights_shape):
-    """Reduce a per-route ``[em_max, out, in]`` outer product into ``[E, out, in]``."""
+    """Reduce a per-route ``[R_block, out, in]`` outer product into ``[E, out, in]``."""
     ref = torch.zeros(weights_shape, device=per_slot.device, dtype=torch.float32)
     ref.index_add_(0, exp, per_slot)
     return ref
@@ -209,20 +209,20 @@ def test_route_list_gemm(
     if layer == "fc1" and mode == "fwd":
         hidden = torch.randn(num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16)
         out = permute_free_grouped_gemm_bf16(hidden, weights, routing)
-        em_max, valid, tok, exp = _route_slots(routing, num_recv_tokens)
-        assert out.shape == (em_max, out_features)
+        R_block, valid, tok, exp = _route_slots(routing, num_recv_tokens)
+        assert out.shape == (R_block, out_features)
         assert int(valid.sum().item()) == num_routes
         ref = torch.einsum("rk,rnk->rn", hidden[tok].float(), weights[exp].float())
         _assert_bf16_close(out[valid], ref[valid])
         return
 
     prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    em_max, valid, tok, exp = _route_slots(routing, num_recv_tokens)
+    R_block, valid, tok, exp = _route_slots(routing, num_recv_tokens)
     valid_f = valid[:, None].float()
 
     if mode == "fwd":
         # FC2 forward: route-ordered activation in, token-ordered gather-combine out.
-        fc2_input = _randn_route_buffer(em_max, in_features, valid)
+        fc2_input = _randn_route_buffer(R_block, in_features, valid)
         out = permute_free_grouped_gemm_bf16_fc2(fc2_input, weights, routing)
         assert out.shape == (num_recv_tokens, out_features)
         per_slot = torch.einsum("rf,rhf->rh", fc2_input.float(), weights[exp].float()) * valid_f
@@ -233,7 +233,7 @@ def test_route_list_gemm(
 
     if mode == "dgrad":
         if layer == "fc1":
-            grad = _randn_route_buffer(em_max, out_features, valid)
+            grad = _randn_route_buffer(R_block, out_features, valid)
             dgrad = permute_free_grouped_gemm_bf16_dgrad(grad, weights, routing)
             assert dgrad.shape == (num_recv_tokens, in_features)
             assert int(valid.sum().item()) == num_routes
@@ -247,14 +247,14 @@ def test_route_list_gemm(
             num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16
         )
         dgrad = permute_free_grouped_gemm_bf16_fc2_dgrad(grad_output, weights, routing)
-        assert dgrad.shape == (em_max, in_features)
+        assert dgrad.shape == (R_block, in_features)
         ref = torch.einsum("rh,rhf->rf", grad_output[tok].float(), weights[exp].float())
         _assert_bf16_close(dgrad[valid], ref[valid])
         return
 
     assert mode == "wgrad"
     if layer == "fc1":
-        grad = _randn_route_buffer(em_max, out_features, valid)
+        grad = _randn_route_buffer(R_block, out_features, valid)
         hidden = torch.randn(num_recv_tokens, in_features, device="cuda", dtype=torch.bfloat16)
         dW = permute_free_grouped_gemm_bf16_wgrad(hidden, grad, weights_shape, routing)
         assert dW.shape == weights_shape
@@ -267,7 +267,7 @@ def test_route_list_gemm(
     grad_output = torch.randn(num_recv_tokens, out_features, device="cuda", dtype=torch.bfloat16)
 
     if wgrad_variant == "stored":
-        fc2_input = _randn_route_buffer(em_max, in_features, valid)
+        fc2_input = _randn_route_buffer(R_block, in_features, valid)
         per_slot = torch.einsum("rh,rf->rhf", grad_output[tok].float(), fc2_input.float())
         ref = _sum_by_expert(per_slot * valid[:, None, None].float(), exp, weights_shape)
 
@@ -293,7 +293,7 @@ def test_route_list_gemm(
     # Recompute-from-preact: the wgrad rebuilds the F-wide activation from the saved 2F preact
     # instead of consuming a stored one, and must match the stored-activation wgrad.
     assert wgrad_variant == "recompute"
-    preact = _randn_route_buffer(em_max, 2 * in_features, valid)
+    preact = _randn_route_buffer(R_block, 2 * in_features, valid)
     probs = torch.rand(num_recv_tokens, num_experts, device="cuda", dtype=torch.float32)
     act_ref = (
         _gated_act_ref(preact[:, :in_features].float(), "silu")
@@ -360,11 +360,11 @@ def test_route_list_gated_act(
     routing = prepare_moe_align(
         MoERoutingMetadata(routing_map=routing_map, num_experts=num_experts), _FLYDSL_FWD_BLOCK_M
     )
-    em_max, valid, tok, exp = _route_slots(routing, num_recv_tokens)
+    R_block, valid, tok, exp = _route_slots(routing, num_recv_tokens)
     valid_f = valid[:, None].float()
 
     if mode == "fwd":
-        preact = _randn_route_buffer(em_max, 2 * in_features, valid)
+        preact = _randn_route_buffer(R_block, 2 * in_features, valid)
         probs = (
             torch.rand(num_recv_tokens, num_experts, device="cuda", dtype=torch.float32)
             if use_probs
@@ -374,7 +374,7 @@ def test_route_list_gated_act(
         act = permute_free_gated_act_fwd(
             preact, routing, activation=activation, dispatched_probs=probs
         )
-        assert act.shape == (em_max, in_features)
+        assert act.shape == (R_block, in_features)
 
         gate, up = preact[:, :in_features].float(), preact[:, in_features:].float()
         act_ref = _gated_act_ref(gate, activation) * up * valid_f
@@ -383,14 +383,14 @@ def test_route_list_gated_act(
         _assert_bf16_close(act[valid], act_ref[valid])
         return
 
-    gate = (torch.randn(em_max, in_features, device="cuda") * valid_f).requires_grad_(True)
-    up = (torch.randn(em_max, in_features, device="cuda") * valid_f).requires_grad_(True)
+    gate = (torch.randn(R_block, in_features, device="cuda") * valid_f).requires_grad_(True)
+    up = (torch.randn(R_block, in_features, device="cuda") * valid_f).requires_grad_(True)
     probs = None
     if use_probs:
         probs = torch.rand(
             num_recv_tokens, num_experts, device="cuda", dtype=torch.float32, requires_grad=True
         )
-    grad_out = _randn_route_buffer(em_max, in_features, valid)
+    grad_out = _randn_route_buffer(R_block, in_features, valid)
 
     act_ref = _gated_act_ref(gate, activation) * up * valid_f
     if use_probs:
@@ -403,7 +403,7 @@ def test_route_list_gated_act(
     dpre, dprob = permute_free_gated_act_bwd(
         grad_out, preact, routing, activation=activation, dispatched_probs=fused_probs
     )
-    assert dpre.shape == (em_max, 2 * in_features)
+    assert dpre.shape == (R_block, 2 * in_features)
     _assert_bf16_close(dpre[valid], dpre_ref[valid])
     if use_probs:
         assert dprob.shape == (num_recv_tokens, num_experts)
@@ -425,7 +425,7 @@ def test_route_list_gated_act(
     fc2_ref = permute_free_gated_act_fwd(
         preact, routing, activation=activation, dispatched_probs=fused_probs
     )
-    assert fc2_input.shape == (em_max, in_features)
+    assert fc2_input.shape == (R_block, in_features)
     assert torch.equal(dpre_emit[valid], dpre[valid])
     _assert_bf16_close(fc2_input[valid], fc2_ref[valid])
     if use_probs:
@@ -543,20 +543,20 @@ def test_route_list_align_caching():
     assert routing.slot_expert_ids is None
     assert routing.route_counts is None
     prepare_moe_align(routing, _FLYDSL_FWD_BLOCK_M)
-    em_max = int(routing.sorted_slot_ids.shape[0])
+    R_block = int(routing.sorted_slot_ids.shape[0])
     scan_counts = routing.route_counts
     assert scan_counts is not None
 
     # slot_expert_ids is the block-level expert_ids broadcast to per-slot granularity, and
     # ``_expert_per_route`` hands back that cached tensor rather than recomputing it.
-    assert routing.slot_expert_ids.shape == (em_max,)
+    assert routing.slot_expert_ids.shape == (R_block,)
     assert routing.slot_expert_ids.dtype == torch.int32
-    block_idx = (torch.arange(em_max, device="cuda") // int(routing.block_size_m)).clamp(
+    block_idx = (torch.arange(R_block, device="cuda") // int(routing.block_size_m)).clamp(
         max=routing.expert_ids.numel() - 1
     )
     manual = routing.expert_ids[block_idx].to(torch.int32)
     assert torch.equal(routing.slot_expert_ids, manual)
-    assert _expert_per_route(routing, em_max) is routing.slot_expert_ids
+    assert _expert_per_route(routing, R_block) is routing.slot_expert_ids
 
     # Valid slots carry the expert-sorted dense route experts.
     _, route_expert = _dense_route_order(routing_map)
@@ -579,7 +579,7 @@ def test_route_list_align_caching():
     assert wgrad_align.block_size == _WGRAD_CONTRACT_M
     assert wgrad_align.block_start is not None
     assert wgrad_align.blocks_per_expert is not None
-    assert wgrad_align.sorted_slot_ids.shape[0] != em_max
+    assert wgrad_align.sorted_slot_ids.shape[0] != R_block
     # The scan is block-size independent, so the second align reuses the cached one.
     assert routing.route_counts is scan_counts
 
@@ -659,9 +659,9 @@ def test_fc1_fc2_gated_pipeline(monkeypatch, num_recv_tokens, hidden, ffn, num_e
     )
     prepare_moe_align(fc1_meta, _FLYDSL_FWD_BLOCK_M)
     fc2_meta = dataclasses.replace(fc1_meta, route_space=True)
-    em_max, valid, _, _ = _route_slots(fc1_meta, num_recv_tokens)
+    R_block, valid, _, _ = _route_slots(fc1_meta, num_recv_tokens)
     slot_token = fc1_meta.sorted_slot_ids[valid].cpu().to(torch.int64)
-    slot_expert = _expert_per_route(fc1_meta, em_max)[valid].cpu().to(torch.int64)
+    slot_expert = _expert_per_route(fc1_meta, R_block)[valid].cpu().to(torch.int64)
     m_splits = [num_recv_tokens // num_experts] * num_experts
     m_splits[-1] += num_recv_tokens - sum(m_splits)
 
@@ -752,7 +752,7 @@ def test_grouped_weight_grad_matches_ungrouped(monkeypatch, fuse_wgrad_accumulat
                 view.copy_(init)
         routing = PermuteFreeMetadata(routing_map=routing_map, num_experts=num_experts)
         out = mod(inp, m_splits, permute_free_metadata=routing)
-        # Block-padded canonical: the output is [em_max, out] in padded slot order, and the
+        # Block-padded canonical: the output is [R_block, out] in padded slot order, and the
         # valid (expert-ascending) slots line up with the dense upstream grad. Slicing
         # [:num_routes] would cut across the padding gaps, so gather the valid slots instead.
         valid = routing.sorted_slot_ids < num_recv_tokens
@@ -812,7 +812,7 @@ def test_exact_route_sizing_matches_static(monkeypatch):
     """``NVTE_PERMUTE_FREE_EXACT_ROUTES`` sizes the route buffers from ``sum(m_splits)``.
 
     With ``m_splits`` carrying ``tokens_per_expert``, its sum is the exact route count, which
-    replaces the static ``T * min(topk, E)`` over-allocation. Only ``em_max`` changes: the
+    replaces the static ``T * min(topk, E)`` over-allocation. Only ``R_block`` changes: the
     valid slots, the results and the gradients are the ones the static path produces.
     """
     monkeypatch.setenv("NVTE_PERMUTE_FREE_GROUPED_GEMM", "1")

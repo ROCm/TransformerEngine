@@ -16,8 +16,8 @@ memory model (no pre-permutation, gather-on-demand).
 Contract (mirrors MegaMOE ``grouped_gemm_bf16_only`` + permute-free routing metadata):
   * ``A``            [num_recv, K] bf16   received-token activations, UNPERMUTED (gather source)
   * ``B``            [E, N, K]    bf16    per-expert weights, NT (contiguous inner K)
-  * ``C``            [em_max, N]  bf16    block-padded route-ordered output (expert-major, in place)
-  * ``sorted_slot_ids`` [em_max]  i32     received-token row per padded slot (sentinel = num_recv)
+  * ``C``            [R_block, N]  bf16    block-padded route-ordered output (expert-major, in place)
+  * ``sorted_slot_ids`` [R_block]  i32     received-token row per padded slot (sentinel = num_recv)
   * ``expert_ids``   [num_m_blocks] i32   expert id per ``BLOCK_M`` output block (padding tail:
                                           ``-1``; those blocks early-exit in-kernel)
   * ``num_tile_blocks`` [1]      i32      real (non-padding) ``BLOCK_M`` block count (device)
@@ -292,10 +292,10 @@ def compile_grouped_gemm_gather_bf16(
 def grouped_gemm_gather_bf16(
     A,  # [num_recv, K] bf16   received-token activations (UNPERMUTED gather source)
     weight,  # [E, N, K] bf16   per-expert B (NT)
-    output,  # [em_max, N] bf16   block-padded route-ordered C (in place)
+    output,  # [R_block, N] bf16   block-padded route-ordered C (in place)
     expert_ids,  # [num_m_blocks] i32   expert per BLOCK_M output block
     num_tile_blocks,  # int   real BLOCK_M block count (host scalar; capture-safe)
-    sorted_slot_ids,  # [em_max] i32   received-token row per padded slot (sentinel = num_recv)
+    sorted_slot_ids,  # [R_block] i32   received-token row per padded slot (sentinel = num_recv)
     *,
     BLOCK_M=256,
     BLOCK_N=256,
@@ -308,9 +308,9 @@ def grouped_gemm_gather_bf16(
 ):
     """Host entry: grouped bf16 NT GEMM. With ``gather=True`` (FC1) ``C[pos] = A[SORTED[pos]]
     @ B[expert]^T``; with ``gather=False`` (FC2 route-read) ``A`` is **block-padded route-ordered**
-    ``[em_max, K]`` read at the route slot (``sorted_slot_ids`` unused, may be a dummy).
+    ``[R_block, K]`` read at the route slot (``sorted_slot_ids`` unused, may be a dummy).
 
-    ``output`` is written in place over its full padded ``[em_max, N]`` extent (padding rows carry
+    ``output`` is written in place over its full padded ``[R_block, N]`` extent (padding rows carry
     dead values, ignored by downstream stages keyed on the same routing metadata). ``c_m`` is the
     padded slot count (``output.shape[0]``); the grid self-bounds to ``num_tile_blocks``.
     """

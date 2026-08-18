@@ -3,7 +3,7 @@
 
 """Permute-free MoE weight-gradient (wgrad) grouped GEMM in FlyDSL.
 
-Contract: the gradient operand is the *block-padded* ``[em_max, N]`` buffer
+Contract: the gradient operand is the *block-padded* ``[R_block, N]`` buffer
 and ``SORTED`` maps each padded slot to a received-token row::
 
     dW[e][n, k] = sum_{routed slot s of e, valid} grad[grad_base[e] + local(s), n]
@@ -95,9 +95,9 @@ def compile_moe_wgrad_v2(
     if out_dtype not in ("bf16", "fp32"):
         raise ValueError(f"moe_wgrad out_dtype must be 'bf16' or 'fp32', got {out_dtype!r}")
     # ``swap_gather`` mirrors the two operands' gather/contiguous roles for the FC2 wgrad:
-    # FC1 walks ``GRAD`` (the [em_max, N] block-padded gradient) contiguously and token-gathers
+    # FC1 walks ``GRAD`` (the [R_block, N] block-padded gradient) contiguously and token-gathers
     # ``X`` (the [num_recv, K] activation) -> ``dW[E, N, K]``. FC2 instead token-gathers ``GRAD``
-    # (the [num_recv, N] token-space dL/dFC2out) and walks ``X`` (the [em_max, K] block-padded
+    # (the [num_recv, N] token-space dL/dFC2out) and walks ``X`` (the [R_block, K] block-padded
     # activation) contiguously, so the same kernel emits the native ``dW2[E, H, F]`` layout with
     # no transpose. Only the per-operand ``clamp_row`` and which operand's resource is bounded to
     # ``[num_recv, feat]`` differ.
@@ -154,7 +154,7 @@ def compile_moe_wgrad_v2(
     def wgrad_kernel(
         dW: fx.Pointer,          # [E, N, K] bf16 output
         X: fx.Pointer,           # [num_recv_tokens, K] bf16 (received-token activations)
-        GRAD: fx.Pointer,        # [em_max, N] bf16 (block-padded per-slot gradient)
+        GRAD: fx.Pointer,        # [R_block, N] bf16 (block-padded per-slot gradient)
         SORTED: fx.Pointer,      # [padded] i32 received-token row per slot (sentinel = num_recv_tokens)
         BLOCK_START: fx.Pointer,      # [E] i32 (block units)
         BLOCKS_PER_EXPERT: fx.Pointer,  # [E] i32
@@ -263,7 +263,7 @@ def compile_moe_wgrad_v2(
 
         # Per-expert routed-slot range. ``base_slot`` is the wgrad-align slot offset into
         # ``SORTED`` (holds the received-token row for the ``x`` gather); ``grad_base_idx`` is
-        # expert ``e``'s block-padded first-slot row into the ``[em_max, N]`` grad buffer.
+        # expert ``e``'s block-padded first-slot row into the ``[R_block, N]`` grad buffer.
         bstart = buffer_load_i32(bstart_rsrc, expert)
         nblocks = buffer_load_i32(bpe_rsrc, expert)
         gbase = buffer_load_i32(gbase_rsrc, expert)

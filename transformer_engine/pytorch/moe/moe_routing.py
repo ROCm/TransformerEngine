@@ -2,7 +2,16 @@
 #
 # See LICENSE for license information.
 
-"""MoE routing metadata for permute-free grouped GEMM."""
+"""MoE routing metadata for permute-free grouped GEMM.
+
+Route-row naming (sync-free memory docs use the same symbols):
+
+* ``R_block`` — block-padded route buffer row count (static over-allocation upper bound).
+  Buffer tensors are shaped ``[R_block, F]``; ``num_tokens_post_padded`` holds the actual
+  padded extent on device.
+* ``R_pool`` — cross-rank symmetric pool row count (``EP * R_static`` padded); used by
+  fused dispatch paths (MegaMoE / HybridEP), not by this permute-free module.
+"""
 
 from __future__ import annotations
 
@@ -46,7 +55,7 @@ class MoERoutingMetadata:
         token can feed. Optional. When provided, ``prepare_moe_align`` tightens the (still
         sync-free) static over-allocation of the block-padded route buffers from the dense
         ``num_recv_tokens * num_experts`` bound down to
-        ``num_recv_tokens * min(topk, num_experts)``, shrinking ``em_max`` (and the zero-init
+        ``num_recv_tokens * min(topk, num_experts)``, shrinking ``R_block`` (and the zero-init
         it costs) by up to ``num_experts / topk``. Leave ``None`` to keep the dense bound.
     num_routes:
         Host-known **exact** route count (``routing_map.sum()``), the same quantity as
@@ -54,7 +63,7 @@ class MoERoutingMetadata:
         replaces the static ``num_recv_tokens * min(topk, num_experts)`` over-allocation with
         the exact count, so the block-padded buffers shrink to ``num_routes`` plus at most one
         block of padding per expert -- the smallest this layout can be. The trade is that
-        ``em_max`` becomes data-dependent, so buffer shapes vary step to step and CUDA graph
+        ``R_block`` becomes data-dependent, so buffer shapes vary step to step and CUDA graph
         capture no longer works; use it to measure the padding overhead, not as the default.
 
         The caller owns correctness here: a value below the true ``routing_map.sum()``
@@ -80,7 +89,7 @@ class MoERoutingMetadata:
         ``block_size_m`` (``expert_ids[slot // block_size_m]``). Populated by
         ``prepare_moe_align`` for the standalone gated-activation kernels.
     num_tokens_post_padded:
-        ``[1]`` device scalar = real ``em`` (block-padded route count). Bounds the kernel.
+        ``[1]`` device scalar = actual ``R_block`` (real padded route count). Bounds the kernel.
     block_start:
         ``[num_experts]`` per-expert first block index (block units). Expert ``e``'s block-padded
         slots start at ``block_start[e] * block_size_m``.
@@ -147,10 +156,10 @@ class PermuteFreeMetadata(MoERoutingMetadata):
 
     - ``route_space=False`` (FC1): the input lives in **token-ordered**
       ``[num_recv_tokens, in]``. The forward *gathers* per expert (``index_a_by_route_pos=
-      False``) into the **block-padded route-ordered** ``[em_max, out]`` buffer; the dgrad
+      False``) into the **block-padded route-ordered** ``[R_block, out]`` buffer; the dgrad
       combines the input gradient back to token rows (contention-free gather-combine).
     - ``route_space=True`` (FC2): the input is already **block-padded route-ordered**
-      ``[em_max, in]`` (FC1's output). The forward reads by route slot
+      ``[R_block, in]`` (FC1's output). The forward reads by route slot
       (``index_a_by_route_pos=True``) and combines each token's routes back to
       **token-ordered** ``[num_recv_tokens, out]`` (contention-free gather-combine); the dgrad
       gathers the token-ordered grad back into the block-padded route-ordered buffer.
