@@ -4,11 +4,12 @@
 """Opt-in on-the-fly autotuning for bf16 grouped GEMM (forward + backward).
 
 When ``NVTE_AUTOTUNE_KERNELS=1`` (ROCm only), each bf16 grouped GEMM issued through
-``general_grouped_gemm`` -- forward (TN), dgrad (NN), and wgrad (NT) -- picks
-between the two C++ backends that share that entry point and semantics
-(multi-stream hipBLASLt and CK) by measuring them once per shape+layout (via
-``triton.testing.do_bench``) and caching the winner. The pure selection lives in
-:mod:`kernel_router`; this module supplies the backend candidates and the
+``general_grouped_gemm`` -- forward (TN), dgrad (NN), and wgrad (NT) -- picks the
+fastest backend for its shape+layout by measuring the candidates once (via
+``triton.testing.do_bench``) and caching the winner. The candidates are the two
+C++ backends that share the entry point and semantics (multi-stream hipBLASLt and
+CK), plus -- for TN/NN -- the Triton grouped GEMM. The pure selection
+lives in :mod:`kernel_router`; this module supplies the backend candidates and the
 process-global router.
 
 The env vars are intentionally op-agnostic (``NVTE_AUTOTUNE_KERNELS`` /
@@ -18,9 +19,11 @@ Scope / safety:
 
 * Forward, dgrad, and wgrad grouped GEMMs are routed; each layout is a distinct
   route key, measured independently.
-* Only the two backends reachable through ``general_grouped_gemm`` are
-  candidates. The Triton grouped GEMM is excluded (different input layout and
-  backward) and stays behind its ``NVTE_USE_GROUPED_GEMM_TRITON`` flag.
+* The two C++ backends (hipBLASLt, CK) are always candidates. The Triton grouped
+  GEMM is also a candidate for forward (TN) and dgrad (NN) when importable; it is
+  excluded from wgrad (NT), whose 3D packed output it cannot target here. The
+  separate global ``NVTE_USE_GROUPED_GEMM_TRITON`` flag (which forces Triton for
+  all layouts) is independent of and mutually exclusive with this path.
 * Timing is side-effect-free: candidates are measured into a scratch clone of the
   output with ``accumulate=False``, so re-running them under ``do_bench`` can
   never corrupt a fused ``main_grad`` (wgrad accumulation) or any real output.
@@ -51,6 +54,10 @@ _FLOAT16_KEYS = ("torch.bfloat16", "torch.float16")
 _MASTER_ENV = "NVTE_AUTOTUNE_KERNELS"
 _VERBOSE_ENV = "NVTE_AUTOTUNE_KERNELS_VERBOSE"
 
+# Warm-up iterations before timing, to force JIT/autotune compilation (Triton)
+# out of the measured region.
+_WARMUP_ITERS = 3
+
 
 def _autotune_enabled() -> bool:
     return IS_HIP_EXTENSION and os.getenv(_MASTER_ENV, "0") == "1"
@@ -74,6 +81,7 @@ def _log_selection(sel) -> None:
         f"layout={key.layout} size_bin={key.size_bin}"
     )
     if sel.from_cache:
+        return
         line = f"[gg-autotune] cache HIT  [{ks}] -> {sel.winner}"
     else:
         tried = []
@@ -183,6 +191,59 @@ class _GroupedGemmBackend:
             )
 
 
+def _triton_grouped_gemm():
+    """Lazily import the Triton grouped GEMM; return None if unavailable."""
+    try:
+        from transformer_engine.pytorch.triton_kernels.grouped_gemm import (
+            general_grouped_gemm_triton,
+        )
+
+        return general_grouped_gemm_triton
+    except Exception:
+        return None
+
+
+class _TritonGroupedGemmBackend:
+    """Triton (AITER) grouped GEMM as an autotune candidate.
+
+    Limited to forward (TN) and dgrad (NN), whose operands Triton accepts as-is
+    (it concatenates the per-group inputs internally -- a real cost in this
+    pre-split path, so it is left inside the timing). wgrad (NT) is excluded:
+    Triton wgrad expects a 3D packed output this path does not allocate. An error
+    on any shape drops it from the ranking.
+    """
+
+    name = "triton"
+
+    def available(self, key: RouteKey) -> bool:
+        return (
+            key.layout in ("TN", "NN")
+            and key.dtype in _FLOAT16_KEYS
+            and _triton_grouped_gemm() is not None
+        )
+
+    def prepare(self, call: _GGCall):
+        fn = _triton_grouped_gemm()
+        assert fn is not None  # guaranteed by available()
+        scratch = [torch.empty_like(o) for o in call.out]
+
+        def run():
+            fn(
+                call.A, call.B, scratch, call.quantization_params, call.out_dtype,
+                m_splits=list(call.m_splits), layout=call.layout, **call.gemm_kwargs,
+            )
+
+        return run
+
+    def run_real(self, call: _GGCall):
+        fn = _triton_grouped_gemm()
+        assert fn is not None  # guaranteed by available()
+        return fn(
+            call.A, call.B, call.out, call.quantization_params, call.out_dtype,
+            m_splits=list(call.m_splits), layout=call.layout, **call.gemm_kwargs,
+        )
+
+
 _router: AutotuneRouter | None = None
 _backends: dict = {}
 
@@ -190,6 +251,13 @@ _backends: dict = {}
 def _do_bench_ms(fn) -> float:
     import triton
 
+    # Warm up so first-call JIT/autotune compilation (Triton) is excluded from the
+    # timed region -- otherwise a cold compile (seconds) is charged to the first
+    # measured shape and permanently mis-rates the backend. do_bench's own warmup
+    # then runs on already-compiled kernels. Harmless for the JIT-free C++ backends.
+    for _ in range(_WARMUP_ITERS):
+        fn()
+    torch.cuda.synchronize()
     try:
         return triton.testing.do_bench(fn, warmup=100, rep=100, return_mode="median")
     except TypeError:
@@ -203,6 +271,7 @@ def _get_router() -> AutotuneRouter:
         candidates = [
             _GroupedGemmBackend("hipblaslt", use_ck=False),
             _GroupedGemmBackend("ck", use_ck=True),
+            _TritonGroupedGemmBackend(),
         ]
         _backends = {c.name: c for c in candidates}
         # verifier=None: both backends are already validated by TE's grouped-GEMM
