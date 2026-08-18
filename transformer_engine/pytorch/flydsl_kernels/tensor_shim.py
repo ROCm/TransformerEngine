@@ -3,14 +3,16 @@
 
 import torch
 import flydsl.compiler as flyc
-from flydsl.expr import arith, buffer_ops, ptrtoint
+from flydsl.expr import arith, ptrtoint
 from flydsl.expr.typing import T
+
+from .gemm.gemm_common_utils import make_buffer_rsrc_from_addr
 
 
 def ptr_rsrc(ptr):
-    """Convert an fx.Pointer kernel arg to a buffer resource for buffer_load/store."""
+    """Convert an fx.Pointer kernel arg to a V# buffer resource for the wgrad DMA."""
     addr_i64 = arith.index_cast(T.i64, ptrtoint(ptr))
-    return buffer_ops.create_buffer_resource_from_addr(addr_i64)
+    return make_buffer_rsrc_from_addr(addr_i64)
 
 
 def ptr_arg(t: torch.Tensor):

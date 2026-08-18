@@ -47,12 +47,19 @@ from flydsl._mlir import ir
 from flydsl._mlir.dialects import llvm as _llvm
 from flydsl._mlir.dialects import scf
 from flydsl.compiler.kernel_function import CompilationContext
-from flydsl.expr import arith, buffer_ops, const_expr, gpu, ptrtoint, range_constexpr, rocdl, vector
+from flydsl.expr import arith, const_expr, gpu, ptrtoint, range_constexpr, rocdl
+from flydsl._mlir.dialects import vector
+
 from flydsl.expr.typing import T
 from flydsl.runtime.device import get_rocm_arch
 from flydsl.utils.smem_allocator import SmemAllocator
 
-from ..gemm.pf_gemm_utils import buffer_load_i32
+from ..gemm.gemm_common_utils import (
+    make_buffer_rsrc_from_addr,
+    raw_buffer_load,
+    raw_buffer_load_i32 as buffer_load_i32,
+    raw_buffer_store,
+)
 from ..tensor_shim import ptr_rsrc
 
 __all__ = ["compile_moe_wgrad_v2", "WGRAD_BLOCK_M"]
@@ -239,13 +246,13 @@ def compile_moe_wgrad_v2(
         if swap_gather:
             grad_addr_i64 = arith.index_cast(T.i64, ptrtoint(GRAD))
             grad_nrec_bytes = nrecv_idx * N_idx * arith.index(2)
-            grad_rsrc = buffer_ops.create_buffer_resource_from_addr(
+            grad_rsrc = make_buffer_rsrc_from_addr(
                 grad_addr_i64, num_records_bytes=grad_nrec_bytes
             )
         else:
             x_addr_i64 = arith.index_cast(T.i64, ptrtoint(X))
             x_nrec_bytes = nrecv_idx * K_idx * arith.index(2)
-            x_rsrc = buffer_ops.create_buffer_resource_from_addr(
+            x_rsrc = make_buffer_rsrc_from_addr(
                 x_addr_i64, num_records_bytes=x_nrec_bytes
             )
 
@@ -571,13 +578,11 @@ def compile_moe_wgrad_v2(
                         )  # f32 accumulator
                         out_off = E_NK_row + n_out_idx * K_idx + c_n_idx
                         if const_expr(accumulate):
-                            prev = buffer_ops.buffer_load(
-                                dW_rsrc, out_off, vec_width=1, dtype=out_ty
-                            )
+                            prev = raw_buffer_load(dW_rsrc, out_off, out_ty)
                             prev_f32 = prev if const_expr(out_is_f32) else arith.extf(T.f32, prev)
                             val = arith.addf(val, prev_f32)
                         store_val = val if const_expr(out_is_f32) else arith.truncf(bf16, val)
-                        buffer_ops.buffer_store(store_val, dW_rsrc, out_off)
+                        raw_buffer_store(store_val, dW_rsrc, out_off)
                         scf.YieldOp([])
 
     @flyc.jit

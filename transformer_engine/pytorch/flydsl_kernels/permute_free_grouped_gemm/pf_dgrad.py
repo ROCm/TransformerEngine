@@ -38,18 +38,14 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith
-from flydsl.expr.buffer_ops import (
-    buffer_load,
-    create_buffer_resource,
-    extract_base_index,
-)
 from flydsl.expr.typing import AddressSpace, PointerType
 
 from ..gemm.half_prec_gemm import BLOCK_K, dense_mma_pipeline_bf16
 from ..gemm.fp16_gemm_utils import G2SLoader, ceildiv, make_byte_buffer_tensor
-from ..gemm.gemm_common_utils import _i64, make_value_attrs
+from ..gemm.gemm_common_utils import _i64, extract_base_index, make_value_attrs
 from ..gemm.pf_gemm_utils import (
     Mfma32x32x16,
+    RouteI32Loader,
     S2RLoaderBf16,
     S2RLoaderTrBf16,
     StoreCBf16,
@@ -216,8 +212,8 @@ def compile_grouped_gemm_dgrad_bf16(
     ):
         n_blocks = ceildiv(fx.Int32(Kout), BLOCK_N)
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        group_res = create_buffer_resource(TILE_TO_GROUP, max_size=True)
-        sorted_res = create_buffer_resource(SORTED, max_size=True)
+        group_res = RouteI32Loader(TILE_TO_GROUP)
+        sorted_res = RouteI32Loader(SORTED)
         # Real BLOCK_M tile count as a scalar (host-known, capture-safe -- no per-call device
         # tensor, which a HIP graph capture forbids). Host-known int scalar.
         real_tiles = NUM_TILE_BLOCKS
@@ -227,10 +223,10 @@ def compile_grouped_gemm_dgrad_bf16(
             elem_ty=fx.BFloat16.ir_type, address_space=AddressSpace.Global, alignment=16
         )
         gy_base = fx.arith.ArithValue(
-            arith.index_cast(fx.T.i64(), extract_base_index(GRAD_Y)), signed=True
+            arith.index_cast(fx.T.i64, extract_base_index(GRAD_Y)), signed=True
         )
         dx_base = fx.arith.ArithValue(
-            arith.index_cast(fx.T.i64(), extract_base_index(DX)), signed=True
+            arith.index_cast(fx.T.i64, extract_base_index(DX)), signed=True
         )
         # Flat 1D grad view (gather source; bounded to A_ELEMS so the sentinel row reads 0).
         # Built unconditionally: the route-read tile simply ignores it.
@@ -247,7 +243,7 @@ def compile_grouped_gemm_dgrad_bf16(
             group_size_m = arith.select(remaining_m < GROUP_M, remaining_m, fx.Int32(GROUP_M))
             block_m = first_pid_m + (pid_in_group % group_size_m)
             block_n = pid_in_group // group_size_m
-            g_idx = buffer_load(group_res, block_m, vec_width=1, dtype=fx.T.i32())
+            g_idx = group_res.load(block_m)
             # PF padding blocks mark expert_ids=-1; skip the full Mega pipeline.
             if g_idx >= fx.Int32(0):
                 gbase = g_idx * fx.Int32(N) * fx.Int32(Kout)

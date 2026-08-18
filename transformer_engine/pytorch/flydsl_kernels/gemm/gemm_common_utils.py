@@ -13,11 +13,233 @@ G2S/S2R loaders, buffer-tensor makers) stays in the per-dtype modules.
 """
 
 import flydsl.expr as fx
+from flydsl._mlir import ir
+from flydsl._mlir.dialects import arith as std_arith
+from flydsl._mlir.dialects import llvm, rocdl as _rocdl_ops
+from flydsl._mlir.extras import types as _T
 from flydsl.expr import arith, rocdl
-from flydsl.expr.buffer_ops import _unwrap_value
 from flydsl.expr.utils.arith import ArithValue
+from flydsl.runtime.device import is_rdna_arch
 
 from .exceptions import FlyDSLUnsupportedError
+
+
+# ---------------------------------------------------------------------------
+# Low-level AMD buffer primitives.
+#
+# The permute-free wgrad kernel needs a raw V# (``!llvm.ptr<8>``) buffer
+# resource because its global->LDS DMA (``rocdl.raw_ptr_buffer_load_lds``) takes
+# one as an operand -- something the tile/layout copy atoms cannot express. The
+# forward/dgrad scalar route loads and the ``StoreCBf16`` epilogue moved to the
+# copy API instead; only these irreducible helpers remain. Implemented directly
+# on the ``rocdl``/``llvm`` dialect ops (formerly FlyDSL's ``expr.buffer_ops``,
+# which upstream relocated out of the importable package).
+# ---------------------------------------------------------------------------
+
+
+def _get_buffer_flags(arch=None):
+    """AMD buffer resource descriptor (V#) flags word (bits 127:96).
+
+    CDNA (gfx9xx): ``(7 << 12) | (4 << 15)``; RDNA adds the reserved bit 24 and
+    OOB_SELECT=2. Mirrors LLVM's ``AMDGPUToROCDL makeBufferRsrc()``.
+    """
+    import os
+
+    if arch is None:
+        arch = os.environ.get("FLYDSL_GPU_ARCH")
+    flags = (7 << 12) | (4 << 15)
+    if is_rdna_arch(arch):
+        flags |= 1 << 24  # reserved bit, must be 1 on RDNA
+        flags |= 2 << 28  # OOB_SELECT = 2 (no bounds checking)
+    return flags
+
+
+def _unwrap_value(value):
+    """Recursively unwrap ArithValue / DSL Numeric wrappers to an ``ir.Value``."""
+    if hasattr(value, "ir_value") and not isinstance(value, ir.Value):
+        return value.ir_value()
+    max_depth = 10
+    depth = 0
+    while depth < max_depth and not isinstance(value, ir.Value):
+        if hasattr(value, "_value"):
+            value = value._value
+        elif hasattr(value, "value"):
+            value = value.value
+        else:
+            break
+        depth += 1
+    return value
+
+
+def _create_i32_constant(value: int) -> ir.Value:
+    i32_type = _T.i32()
+    if value > 0x7FFFFFFF:
+        value = int(value - 2**32)
+    attr = ir.IntegerAttr.get(i32_type, value)
+    return _unwrap_value(std_arith.ConstantOp(i32_type, attr).result)
+
+
+def _create_i16_constant(value: int) -> ir.Value:
+    i16_type = _T.i16()
+    attr = ir.IntegerAttr.get(i16_type, value)
+    return _unwrap_value(std_arith.ConstantOp(i16_type, attr).result)
+
+
+def _create_i64_constant(value: int) -> ir.Value:
+    i64_type = _T.i64()
+    attr = ir.IntegerAttr.get(i64_type, value)
+    return _unwrap_value(std_arith.ConstantOp(i64_type, attr).result)
+
+
+def extract_base_index(tensor, address_space: int = 1) -> ir.Value:
+    """Extract the base address of a fly.memref / pointer as an index value.
+
+    Used by the permute-free kernels to rebase a global operand in i64 (avoiding
+    i32 element-offset overflow on large token pools) before ``make_view``.
+    """
+    from flydsl._mlir.dialects import fly as _fly
+    from flydsl._mlir.dialects import memref as _memref
+
+    raw = _unwrap_value(tensor)
+    try:
+        ir.MemRefType(raw.type)
+        return _memref.extract_aligned_pointer_as_index(raw)
+    except ValueError:
+        pass
+
+    ptr_type = ir.Type.parse(f"!llvm.ptr<{address_space}>")
+    ptr = _fly.extract_aligned_pointer_as_index(ptr_type, raw)
+    i64_val = llvm.PtrToIntOp(ir.IntegerType.get_signless(64), ptr).result
+    return _unwrap_value(std_arith.IndexCastOp(ir.IndexType.get(), i64_val).result)
+
+
+def get_element_ptr(
+    base_ptr,
+    byte_offset=None,
+    static_byte_offset: int = 0,
+    elem_type=None,
+    no_wrap_flags=None,
+) -> ir.Value:
+    """Build an LLVM GEP from a base pointer plus byte offsets (i8 element type)."""
+    _gep_dynamic_index_sentinel = -(2**31)
+
+    base_ptr = _unwrap_value(base_ptr)
+    if not isinstance(static_byte_offset, int):
+        raise TypeError(f"static_byte_offset must be int, got {type(static_byte_offset).__name__}")
+    if elem_type is None:
+        elem_type = _T.i8()
+    elif callable(elem_type):
+        elem_type = elem_type()
+
+    if byte_offset is None:
+        dynamic_indices = []
+        raw_constant_indices = [int(static_byte_offset)]
+    elif isinstance(byte_offset, int):
+        dynamic_indices = []
+        raw_constant_indices = [int(byte_offset) + int(static_byte_offset)]
+    else:
+        offset_val = _unwrap_value(byte_offset)
+        if isinstance(offset_val.type, ir.IndexType):
+            offset_val = _unwrap_value(std_arith.IndexCastOp(_T.i64(), offset_val).result)
+        elif not isinstance(offset_val.type, ir.IntegerType):
+            raise TypeError(
+                "byte_offset must be int, index, or integer-typed MLIR value; "
+                f"got {offset_val.type}"
+            )
+
+        if static_byte_offset != 0:
+            static_type = offset_val.type
+            static_attr = ir.IntegerAttr.get(static_type, int(static_byte_offset))
+            static_const = _unwrap_value(std_arith.ConstantOp(static_type, static_attr).result)
+            offset_val = _unwrap_value(std_arith.AddIOp(offset_val, static_const).result)
+
+        dynamic_indices = [offset_val]
+        raw_constant_indices = [_gep_dynamic_index_sentinel]
+
+    return llvm.GEPOp(
+        base_ptr.type,
+        base_ptr,
+        dynamic_indices,
+        raw_constant_indices,
+        elem_type,
+        no_wrap_flags,
+    ).result
+
+
+def make_buffer_rsrc_from_addr(addr_i64, *, num_records_bytes=None) -> ir.Value:
+    """Create an AMD V# buffer resource (``!llvm.ptr<8>``) from a raw i64 address.
+
+    Used for kernel-arg pointers with no fly.memref (e.g. the wgrad DMA operands
+    and route-metadata tensors). ``num_records_bytes`` bounds the hardware OOB
+    check; ``None`` uses the max size (no effective bounds).
+    """
+    addr_i64 = _unwrap_value(addr_i64)
+    ptr_type = ir.Type.parse("!llvm.ptr")
+    base_ptr = llvm.IntToPtrOp(ptr_type, addr_i64).result
+    flags = _create_i32_constant(_get_buffer_flags())
+    stride = _create_i16_constant(0)
+    if num_records_bytes is None:
+        num_records = _create_i64_constant(0xFFFFFFFF)
+    elif isinstance(num_records_bytes, int):
+        nbytes = int(num_records_bytes)
+        if nbytes < 0:
+            nbytes = 0
+        if nbytes > 0xFFFFFFFF:
+            nbytes = 0xFFFFFFFF
+        num_records = _create_i64_constant(nbytes)
+    else:
+        num_records = _unwrap_value(num_records_bytes)
+        i64_type = _T.i64()
+        if not isinstance(num_records.type, ir.IntegerType) or num_records.type.width != 64:
+            if isinstance(num_records.type, ir.IndexType):
+                num_records = _unwrap_value(std_arith.IndexCastOp(i64_type, num_records).result)
+            else:
+                num_records = _unwrap_value(std_arith.ExtSIOp(i64_type, num_records).result)
+    rsrc_type = ir.Type.parse("!llvm.ptr<8>")
+    return _rocdl_ops.MakeBufferRsrcOp(rsrc_type, base_ptr, stride, num_records, flags).result
+
+
+def raw_buffer_load(rsrc, offset, dtype):
+    """Scalar buffer load of one ``dtype`` element at element ``offset`` (V# path)."""
+    if hasattr(dtype, "ir_type"):
+        dtype = dtype.ir_type
+    if isinstance(offset, int):
+        offset = _create_i32_constant(offset)
+    elif hasattr(offset, "ir_value"):
+        offset = offset.ir_value()
+    offset = _unwrap_value(offset)
+    if not isinstance(offset.type, ir.IntegerType) or offset.type.width != 32:
+        offset = _unwrap_value(std_arith.IndexCastOp(_T.i32(), offset).result)
+    element_bytes = dtype.width // 8
+    offset = _unwrap_value(std_arith.MulIOp(offset, _create_i32_constant(element_bytes)).result)
+    soffset = _create_i32_constant(0)
+    aux = _create_i32_constant(0)
+    return _rocdl_ops.RawPtrBufferLoadOp(dtype, rsrc, offset, soffset, aux).result
+
+
+def raw_buffer_load_i32(rsrc, offset):
+    """Load one i32 scalar from a V# buffer resource at element ``offset``."""
+    return raw_buffer_load(rsrc, offset, _T.i32())
+
+
+def raw_buffer_store(data, rsrc, offset):
+    """Scalar buffer store of ``data`` at element ``offset`` (V# path)."""
+    if hasattr(data, "ir_value"):
+        data = data.ir_value()
+    if isinstance(offset, int):
+        offset = _create_i32_constant(offset)
+    elif hasattr(offset, "ir_value"):
+        offset = offset.ir_value()
+    data = _unwrap_value(data)
+    rsrc = _unwrap_value(rsrc)
+    offset = _unwrap_value(offset)
+    if not isinstance(offset.type, ir.IntegerType) or offset.type.width != 32:
+        offset = _unwrap_value(std_arith.IndexCastOp(_T.i32(), offset).result)
+    element_bytes = data.type.width // 8
+    offset = _unwrap_value(std_arith.MulIOp(offset, _create_i32_constant(element_bytes)).result)
+    soffset = _create_i32_constant(0)
+    aux = _create_i32_constant(0)
+    _rocdl_ops.RawPtrBufferStoreOp(data, rsrc, offset, soffset, aux)
 
 
 def require_block_tiling(m, n, k, *, block_m, block_n, block_k, label, min_k_tiles=4):
@@ -191,7 +413,7 @@ def pack_i32x4_i32x8(lo, hi):
 
 def _i64(v):
     # widen an i32 runtime value to i64 (avoids overflow in worst-case base offsets)
-    return ArithValue(arith.extsi(fx.T.i64(), _unwrap_value(v)), signed=True)
+    return ArithValue(arith.extsi(fx.T.i64, _unwrap_value(v)), signed=True)
 
 
 def make_value_attrs(waves_per_eu, agpr_alloc, fwg):

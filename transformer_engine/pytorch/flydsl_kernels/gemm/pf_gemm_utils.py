@@ -13,14 +13,13 @@ import flydsl.expr as fx
 from flydsl._mlir import ir
 from flydsl._mlir.dialects import fly as fly_dialect
 from flydsl._mlir.dialects import llvm as _llvm
-from flydsl.expr import buffer_ops
 from flydsl.expr.arith import _to_raw as _raw
 from flydsl.expr.typing import T
 from flydsl.expr.typing import Vector as Vec
 from flydsl.expr.utils.arith import ArithValue
 from flydsl.expr import arith, range_constexpr
-from flydsl.expr.buffer_ops import buffer_store, create_buffer_resource
 
+from .gemm_common_utils import get_element_ptr
 from .half_prec_gemm import BLOCK_K, dense_mma_pipeline_bf16
 from .fp16_gemm_utils import G2SLoader, ceildiv, make_byte_buffer_tensor, swizzle_128
 
@@ -31,7 +30,7 @@ def _inttoptr_lds(byte_addr):
     return _llvm.inttoptr(ir.Type.parse("!llvm.ptr<3>"), _raw(fx.Int64(byte_addr)))
 
 
-_gep = buffer_ops.get_element_ptr
+_gep = get_element_ptr
 
 
 def _lds_ptr_from_i32(addr_i32, byte_offset=0):
@@ -166,32 +165,27 @@ class Mfma32x32x16(_MfmaBf16):
 
 class StoreCBf16:
     def __init__(self, C, c_rows, c_cols, out_ty, cache_modifier=0):
+        if cache_modifier:
+            raise NotImplementedError(
+                "StoreCBf16 no longer supports a cache_modifier V# store path"
+            )
         self.c_rows = c_rows
         self.c_cols = c_cols
         self.lane_id = fx.thread_idx.x % 64
         self.out_ty = out_ty
-        self.cache_modifier = cache_modifier
         c_nbytes = c_rows * c_cols * 2
         gC = fx.rocdl.make_buffer_tensor(C, max_size=False, num_records_bytes=c_nbytes)
         self.c_div = fx.logical_divide(gC, fx.make_layout(1, 1))
         self.out_atom_1 = fx.make_copy_atom(fx.rocdl.BufferCopy16b(), out_ty)
         self.reg_out_1 = fx.make_rmem_tensor(fx.make_layout(1, 1), out_ty)
-        self.c_rsrc = (
-            create_buffer_resource(C, max_size=False, num_records_bytes=c_nbytes)
-            if cache_modifier
-            else None
-        )
         self.oob = fx.Int32(c_rows * c_cols)  # out-of-bounds sink index
 
     def _store_masked(self, value, c_index, valid):
         """Store one element to c_index (masked to the OOB sink when invalid)."""
         idx = arith.select(valid, c_index, self.oob)
         val = value.to(self.out_ty)
-        if self.cache_modifier:
-            buffer_store(val, self.c_rsrc, fx.Int32(idx), cache_modifier=self.cache_modifier)
-        else:
-            fx.memref_store_vec(Vec.filled(1, val, self.out_ty), self.reg_out_1)
-            fx.copy(self.out_atom_1, self.reg_out_1, fx.slice(self.c_div, (None, fx.Int32(idx))))
+        fx.memref_store_vec(Vec.filled(1, val, self.out_ty), self.reg_out_1)
+        fx.copy(self.out_atom_1, self.reg_out_1, fx.slice(self.c_div, (None, fx.Int32(idx))))
 
     def store(self, c_frag, base_row, base_col):
         n = self.lane_id % 32
@@ -228,9 +222,30 @@ class StoreCBf16:
                 self._store_masked(acc[r], row_base + m, n_valid)
 
 
-def buffer_load_i32(rsrc, off):
-    """Load one i32 scalar from a buffer resource at ``off`` (i32- or index-typed)."""
-    return buffer_ops.buffer_load(rsrc, off, vec_width=1, dtype=T.i32)
+class RouteI32Loader:
+    """Copy-atom scalar i32 loader for a 1-D route/index tensor.
+
+    Replaces the removed ``buffer_load(rsrc, off, vec_width=1, dtype=i32)``: a
+    ``max_size`` buffer tensor so an out-of-range slot reads OOB (hardware 0),
+    and a linear ``logical_divide`` so the slice coordinate is the element index.
+    Build once per tensor; the copy atom is shared and a fresh register is
+    allocated per load (a shared register would alias across live loads).
+    """
+
+    def __init__(self, tensor):
+        g = fx.rocdl.make_buffer_tensor(tensor, max_size=True)
+        self.div = fx.logical_divide(g, fx.make_layout(1, 1))
+        self.atom = fx.make_copy_atom(fx.rocdl.BufferCopy32b(), fx.Int32)
+
+    def load(self, off):
+        reg = fx.make_rmem_tensor(fx.make_layout(1, 1), fx.Int32)
+        fx.copy(self.atom, fx.slice(self.div, (None, fx.Int32(off))), reg)
+        return fx.Int32(fx.memref_load_vec(reg)[0])
+
+
+def buffer_load_i32(loader, off):
+    """Load one i32 scalar from a :class:`RouteI32Loader` at element ``off``."""
+    return loader.load(off)
 
 
 def _global_swizzle_bf16(lane_id, wave_id, K, n_rounds, src_row):

@@ -34,18 +34,14 @@ import torch
 import flydsl.compiler as flyc
 import flydsl.expr as fx
 from flydsl.expr import arith, range_constexpr
-from flydsl.expr.buffer_ops import (
-    buffer_load,
-    create_buffer_resource,
-    extract_base_index,
-)
 from flydsl.expr.typing import AddressSpace, PointerType
 
 from ..gemm.half_prec_gemm import BLOCK_K, dense_mma_pipeline_bf16
 from ..gemm.fp16_gemm_utils import G2SLoader, ceildiv, make_byte_buffer_tensor
-from ..gemm.gemm_common_utils import _i64, make_value_attrs
+from ..gemm.gemm_common_utils import _i64, extract_base_index, make_value_attrs
 from ..gemm.pf_gemm_utils import (
     Mfma32x32x16,
+    RouteI32Loader,
     S2RLoaderBf16,
     StoreCBf16,
     _make_shared_storage,
@@ -210,8 +206,8 @@ def compile_grouped_gemm_gather_bf16(
     ):
         n_blocks = ceildiv(c_n, BLOCK_N)
         lds = fx.SharedAllocator().allocate(SharedStorage).peek()
-        group_res = create_buffer_resource(TILE_TO_GROUP, max_size=True)
-        sorted_res = create_buffer_resource(SORTED, max_size=True)
+        group_res = RouteI32Loader(TILE_TO_GROUP)
+        sorted_res = RouteI32Loader(SORTED)
         # Real (non-padding) BLOCK_M tile count as a scalar (host-known, capture-safe -- avoids a
         # per-call device tensor that a HIP graph capture forbids). Host-known int scalar.
         real_tiles = NUM_TILE_BLOCKS
@@ -226,7 +222,7 @@ def compile_grouped_gemm_gather_bf16(
         # gather offsets index this row-major buffer directly; the buffer resource clamps the
         # padding sentinel (src_row == num_recv) to an OOB read of 0. (int32 element count:
         # holds up to 2^31 elems; larger A needs a per-lane i64 rebase like Mega's fp8 path.)
-        a_base = fx.arith.ArithValue(arith.index_cast(fx.T.i64(), extract_base_index(A)), signed=True)
+        a_base = fx.arith.ArithValue(arith.index_cast(fx.T.i64, extract_base_index(A)), signed=True)
         A_flat = fx.make_view(fx.inttoptr(pool_ptr_ty, a_base), fx.make_layout(A_ELEMS, 1))
 
         def _emit():
@@ -240,14 +236,14 @@ def compile_grouped_gemm_gather_bf16(
             group_size_m = arith.select(remaining_m < GROUP_M, remaining_m, fx.Int32(GROUP_M))
             block_m = first_pid_m + (pid_in_group % group_size_m)
             block_n = pid_in_group // group_size_m
-            g_idx = buffer_load(group_res, block_m, vec_width=1, dtype=fx.T.i32())
+            g_idx = group_res.load(block_m)
             # PF padding blocks mark expert_ids=-1; skip the full Mega pipeline.
             if g_idx >= fx.Int32(0):
                 gbase = g_idx * fx.Int32(K) * c_n
                 # Worst-case pool (cap*N > 2^31): rebase C per tile in int64, int32 in-resource
                 # offset. Mirrors the fused nt path.
                 c_byte_off = _i64(block_m * fx.Int32(BLOCK_M)) * _i64(c_n) * fx.Int64(2)
-                c_base = fx.arith.ArithValue(arith.index_cast(fx.T.i64(), extract_base_index(C)), signed=True)
+                c_base = fx.arith.ArithValue(arith.index_cast(fx.T.i64, extract_base_index(C)), signed=True)
                 C_tile = fx.make_view(
                     fx.inttoptr(pool_ptr_ty, c_base + c_byte_off),
                     fx.make_layout(fx.Int32(BLOCK_M) * c_n, 1),
