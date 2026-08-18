@@ -3,7 +3,7 @@
 
 """Opt-in on-the-fly autotuning for bf16 grouped GEMM (forward + backward).
 
-When ``NVTE_AUTOTUNE=1`` (ROCm only), each bf16 grouped GEMM issued through
+When ``NVTE_AUTOTUNE_KERNELS=1`` (ROCm only), each bf16 grouped GEMM issued through
 ``general_grouped_gemm`` -- forward (TN), dgrad (NN), and wgrad (NT) -- picks
 between the two C++ backends that share that entry point and semantics
 (multi-stream hipBLASLt and CK) by measuring them once per shape+layout (via
@@ -11,8 +11,8 @@ between the two C++ backends that share that entry point and semantics
 :mod:`kernel_router`; this module supplies the backend candidates and the
 process-global router.
 
-The env vars are intentionally op-agnostic (``NVTE_AUTOTUNE`` /
-``NVTE_AUTOTUNE_VERBOSE``) so the same switches govern future autotuned ops.
+The env vars are intentionally op-agnostic (``NVTE_AUTOTUNE_KERNELS`` /
+``NVTE_AUTOTUNE_KERNELS_VERBOSE``) so the same switches govern future autotuned ops.
 
 Scope / safety:
 
@@ -29,12 +29,9 @@ Scope / safety:
 * The deferred-wgrad path (``wgrad_store``) is left untouched.
 * CK requires ``num_gemms > 1`` and bf16/fp16; otherwise it is unavailable and
   the router falls back to multi-stream hipBLASLt (the guaranteed floor).
-* Off by default; ``NVTE_AUTOTUNE_VERBOSE=1`` adds per-call selection logging
+* Off by default; ``NVTE_AUTOTUNE_KERNELS_VERBOSE=1`` adds per-call selection logging
   (cache hit/miss, route key, per-backend timings, winner).
 
-Note: selection is per-rank. For pure GEMM a divergent per-rank choice is a perf
-skew, not a hang (no collectives), but a future productionization should make the
-choice rank-consistent (tune on rank 0, broadcast).
 """
 from __future__ import annotations
 
@@ -51,8 +48,8 @@ from .kernel_router import AutotuneRouter, RouteKey, make_route_key
 _FLOAT16_KEYS = ("torch.bfloat16", "torch.float16")
 
 # Op-agnostic autotune switches, shared by any future autotuned op.
-_MASTER_ENV = "NVTE_AUTOTUNE"
-_VERBOSE_ENV = "NVTE_AUTOTUNE_VERBOSE"
+_MASTER_ENV = "NVTE_AUTOTUNE_KERNELS"
+_VERBOSE_ENV = "NVTE_AUTOTUNE_KERNELS_VERBOSE"
 
 
 def _autotune_enabled() -> bool:

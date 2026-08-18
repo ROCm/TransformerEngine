@@ -619,7 +619,7 @@ class _GroupedLinear(torch.autograd.Function):
         else:
             general_grouped_gemm_func = general_grouped_gemm
             kwargs = {}
-        # Opt-in fprop autotune (NVTE_AUTOTUNE=1, ROCm bf16 path): pick
+        # Opt-in fprop autotune (NVTE_AUTOTUNE_KERNELS=1, ROCm bf16 path): pick
         # multi-stream hipBLASLt vs CK per shape and run into `out`. Returns
         # (False, None) unless enabled, leaving the normal path below unchanged.
         handled = False
@@ -1114,7 +1114,7 @@ class _GroupedLinear(torch.autograd.Function):
                 else:
                     general_grouped_gemm_func = general_grouped_gemm
                     kwargs = {}
-                # Opt-in dgrad autotune (NVTE_AUTOTUNE=1, ROCm bf16 path).
+                # Opt-in dgrad autotune (NVTE_AUTOTUNE_KERNELS=1, ROCm bf16 path).
                 dgrad_handled = False
                 if general_grouped_gemm_func is general_grouped_gemm and not (ctx.fp8 or ctx.debug):
                     dgrad_handled, _ = maybe_autotune_grouped_gemm(
@@ -1258,7 +1258,7 @@ class _GroupedLinear(torch.autograd.Function):
                 if ctx.wgrad_store is not None and ctx.wgrad_store.delay_wgrad_compute():
                     ctx.wgrad_store.put([inputmats, grad_output, wgrad_list], grouped_gemm_wgrad)
                 else:
-                    # Opt-in wgrad autotune (NVTE_AUTOTUNE=1, ROCm bf16 path). The
+                    # Opt-in wgrad autotune (NVTE_AUTOTUNE_KERNELS=1, ROCm bf16 path). The
                     # deferred-wgrad branch above is left untouched.
                     wgrad_handled = False
                     if general_grouped_gemm_func is general_grouped_gemm and not (
