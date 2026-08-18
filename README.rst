@@ -224,6 +224,23 @@ These backends are not enabled by default. The following environment variables c
 When none are set, TE uses multi-stream dispatch (one hipBLASLt GEMM per expert).
 
 
+FlyDSL GEMM Backend on ROCm
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
+ROCm TE provides an optional FlyDSL GEMM backend for dense (non-grouped) GEMMs, covering BF16, FP16, FP32, tensor-wise FP8, and MXFP8.
+
+Support matrix:
+
+* **Architecture** -- gfx950 (CDNA4) is the targeted architecture for now. On any other architecture the backend is not selected and TE uses its default GEMM path. gfx942 support is planned for a future release.
+* **FlyDSL package** -- requires ``flydsl >= 0.3.0``. FlyDSL is not a declared dependency of TE (similar to flash-attention); install it yourself with ``pip install flydsl``.
+
+The backend is off by default and enabled via an environment variable:
+
+* ``NVTE_USE_FLYDSL=1`` -- dispatch dense GEMMs through FlyDSL when running on gfx950. Requires ``flydsl`` to be installed.
+* ``NVTE_FLYDSL_GEMM_WARN_FALLBACK=1`` -- emit a warning whenever a GEMM that FlyDSL cannot serve (unsupported shape/config) falls back to the default backend. Off by default.
+
+If ``NVTE_USE_FLYDSL=1`` is set but ``flydsl`` is missing or older than ``0.3.0``, TE warns once and falls back to the default GEMM backend. Configurations FlyDSL does not support (e.g. shapes that are not tile-aligned) also fall back transparently.
+
+
 Fused Attention Backends on ROCm
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 Currently ROCm TE supports two backends, AOTriton and CK, for fused attention.
