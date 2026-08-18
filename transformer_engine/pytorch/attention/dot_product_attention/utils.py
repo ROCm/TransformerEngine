@@ -830,19 +830,6 @@ def get_attention_backend(
 
     # Filter: Head dimension
     if head_dim_qk != head_dim_v:
-        # On ROCm, for MLA-style unequal head dims, pick fused attention instead of flash attention.
-        if IS_HIP_EXTENSION and (
-            use_flash_attention_2 or use_flash_attention_3 or use_flash_attention_4
-        ):
-            logger.debug(
-                "Disabling FlashAttention on ROCm for MLA (head_dim_qk != head_dim_v) to give"
-                " FusedAttention preference. Found: head_dim_qk = %s, head_dim_v = %s.",
-                head_dim_qk,
-                head_dim_v,
-            )
-            use_flash_attention_2 = False
-            use_flash_attention_3 = False
-            use_flash_attention_4 = False
         qkv_layout_group = qkv_layout.replace("b", "").replace("s", "").replace("t", "")
         if use_fused_attention and qkv_layout_group != "hd_hd_hd":
             logger.debug(
@@ -1600,10 +1587,15 @@ def get_attention_backend(
     )
 
     # Select FusedAttention for performance
-    if use_flash_attention and (not IS_HIP_EXTENSION) and use_fused_attention and device_compute_capability >= (9, 0):
+    prefer_fused_attention = (
+        # On ROCm, FusedAttention (aiter asm) is much faster than flash-attn for MLA-style unequal head dims.
+        head_dim_qk != head_dim_v
+        if IS_HIP_EXTENSION
+        else device_compute_capability >= (9, 0)
+    )
+    if use_flash_attention and use_fused_attention and prefer_fused_attention:
         logger.debug(
-            "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
-            "for performance reasons"
+            "Disabling FlashAttention to give FusedAttention preference for performance reasons"
         )
         use_flash_attention = False
 
