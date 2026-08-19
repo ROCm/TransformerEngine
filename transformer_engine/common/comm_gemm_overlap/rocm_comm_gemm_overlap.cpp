@@ -250,14 +250,12 @@ static_assert(prev_is_inverse_of_next<2,4>(tp_next_4, tp_prev_4), "tp_prev_4 is 
 static_assert(prev_is_inverse_of_next<7,8>(tp_next_8, tp_prev_8), "tp_prev_8 is not inverse of tp_next_8");
 
 #ifdef USE_HIPKITTENS_GEMM
-// Fused all-gather + GEMM. Default on gfx950 for bf16 when comm overlap is enabled.
+// Fused all-gather + GEMM, launched by persistent_overlap_ag below.
 static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, TensorWrapper &D,
                              const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
                              const TensorWrapper &B_copy, TensorWrapper &workspace, bool accumulate,
                              const TensorWrapper &ubuf, const TensorWrapper &chunk, communicator *comm,
                              int reg, int tp_id, int tp_size, uint64_t signal, cudaStream_t stream) {
-  if (!kittens_fused_ag_gemm_supported()) return false;
-
   // TODO: Add bias support
   NVTE_CHECK(!transb && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0 && B_copy.numel() == 0,
              "persistent AG+GEMM reached with an unsupported epilogue");
@@ -285,21 +283,31 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
 }
 #endif
 
+void CommOverlapP2PBase::persistent_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                                bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
+                                cudaStream_t stream_main) {
+#ifdef USE_HIPKITTENS_GEMM
+  if (kittens_fused_ag_gemm_supported(cuda::sm_arch())) {
+    const bool launched = hk_fused_ag_gemm(A, transa, transb, D, bias, pre_gelu_out, B_copy,
+                                           workspace, accumulate, _ubuf, _ubufs[0], _ub_comm,
+                                           _ub_reg, _tp_id, _tp_size, _ag_signal_base + _tp_size,
+                                           stream_main);
+    NVTE_CHECK(launched, "persistent AG+GEMM failed to launch");
+    _ag_signal_base += _tp_size;
+    return;
+  }
+#endif
+  NVTE_ERROR("persistent AG+GEMM was selected but is not built into this library");
+}
+
 // TODO: Introduce HIPGraphs for dependency management.
 void CommOverlapP2PBase::rocm_split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                                 bool transb, TensorWrapper &D, TensorWrapper &bias,
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
                                 cudaStream_t stream_main) {
-#ifdef USE_HIPKITTENS_GEMM
-  // Ahead of the _ub_comm->sms restore at the end.
-  if (hk_fused_ag_gemm(A, transa, transb, D, bias, pre_gelu_out, B_copy, workspace, accumulate,
-                       _ubuf, _ubufs[0], _ub_comm, _ub_reg, _tp_id, _tp_size,
-                       _ag_signal_base + _tp_size, stream_main)) {
-    _ag_signal_base += _tp_size;
-    return;
-  }
-#endif
   int ori_sms = _ub_comm->sms;
   _ub_comm->use_ce = _use_ce;
   _ub_comm->sms = _num_comm_sm;

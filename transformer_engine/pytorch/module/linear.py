@@ -320,11 +320,6 @@ def _linear_forward_impl(
     # Configure tensor-parallel communication
     tp_world_size = get_distributed_world_size(tp_group)
     backward_needs_input = is_grad_enabled and weight.requires_grad
-    # The persistent backend covers only bf16.
-    if ub_overlap_ag_fprop and not fused_ag_gemm_eligible(
-        ub_name + "_fprop", inp, weight, bias, activation_dtype, tp_world_size
-    ):
-        ub_overlap_ag_fprop = False
     with_input_all_gather_nccl = (
         parallel_mode == "column" and sequence_parallel and not ub_overlap_ag_fprop
     )
@@ -1984,6 +1979,17 @@ class Linear(TransformerEngineBaseModule):
             linear_bias_tensor = (
                 bias_tensor if (self.apply_bias and not self.gemm_bias_unfused_add) else None
             )
+
+            if ub_overlap_ag_fprop and not fused_ag_gemm_eligible(
+                self.ub_name + "_fprop", inp, weight_tensor, linear_bias_tensor,
+                self.activation_dtype, self.tp_size, self.fp8,
+            ):
+                ub_overlap_ag_fprop = False
+            if ub_overlap_ag_dgrad and not fused_ag_gemm_eligible(
+                self.ub_name + "_dgrad", inp, weight_tensor, None,
+                self.activation_dtype, self.tp_size, self.fp8, is_dgrad=True,
+            ):
+                ub_overlap_ag_dgrad = False
             wgrad_store = self.wgrad_store if self.wgrad_store.delay_wgrad_compute() else None
             fwd_args = LinearFwdArgs(
                 # tensors

@@ -47,10 +47,11 @@ std::map<const void *, std::vector<void *>> g_peers;
 std::mutex g_mu;
 
 // comm->gpu_ptrs is device memory, so the peer bases have to come back over the bus. Once per
-// registered region, not per call.
+// registered region, not per call. The returned pointer is only valid while g_mu is held.
 const std::vector<void *> *peer_bases(const void *peer_ub, int count) {
     auto it = g_peers.find(peer_ub);
-    if (it != g_peers.end()) return &it->second;
+    if (it != g_peers.end() && it->second.size() >= static_cast<size_t>(count)) return &it->second;
+    if (it != g_peers.end()) g_peers.erase(it);
     std::vector<void *> v(count);
     if (hipMemcpy(v.data(), peer_ub, count * sizeof(void *), hipMemcpyDeviceToHost) != hipSuccess) {
         return nullptr;
@@ -89,7 +90,7 @@ struct Carve {
     bool fits() const { return used <= cap; }
 };
 
-bool run_c1(const KittensFusedAgGemmArgs &args) {
+bool run_tn(const KittensFusedAgGemmArgs &args) {
     using namespace hk_ag_tn;
 
     const int M       = args.n;
@@ -162,7 +163,7 @@ bool run_c1(const KittensFusedAgGemmArgs &args) {
     return hipGetLastError() == hipSuccess;
 }
 
-bool run_c3(const KittensFusedAgGemmArgs &args) {
+bool run_nn(const KittensFusedAgGemmArgs &args) {
     using namespace hk_ag_nn;
 
     const int M       = args.n;
@@ -247,6 +248,15 @@ bool run_c3(const KittensFusedAgGemmArgs &args) {
 
 }  // namespace
 
+void kittens_fused_ag_gemm_reset_cdna4() {
+    std::lock_guard<std::mutex> lock(g_mu);
+    for (auto &kv : g_plans) {
+        if (kv.second.queue) static_cast<void>(hipFree(kv.second.queue));
+    }
+    g_plans.clear();
+    g_peers.clear();
+}
+
 bool kittens_fused_ag_gemm_bf16_cdna4(const KittensFusedAgGemmArgs &args) {
     const int M       = args.n;
     const int N_TOTAL = args.m;
@@ -260,5 +270,5 @@ bool kittens_fused_ag_gemm_bf16_cdna4(const KittensFusedAgGemmArgs &args) {
     if (args.chunk_bytes != static_cast<size_t>(M / tp_size) * K * sizeof(uint16_t)) return false;
     if (!args.workspace || !args.ub || !args.A || !args.D || !args.peer_ub) return false;
 
-    return args.transa ? run_c1(args) : run_c3(args);
+    return args.transa ? run_tn(args) : run_nn(args);
 }

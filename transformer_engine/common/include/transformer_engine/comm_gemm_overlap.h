@@ -138,6 +138,8 @@ class CommOverlapCore {
     NVTE_ERROR("Operation is not implemented.");
   }
 
+  virtual bool is_persistent() { return false; }
+
   bool with_cublasmp() { return _with_cublasmp; }
 
   virtual void bulk_overlap(const TensorWrapper &A, bool transa, const TensorWrapper &B,
@@ -194,6 +196,14 @@ class CommOverlapCore {
   }
 
   virtual void rocm_split_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+                                bool transb, TensorWrapper &D, TensorWrapper &bias,
+                                TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
+                                bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
+                                cudaStream_t stream_main) {
+    NVTE_ERROR("Operation is not implemented.");
+  }
+
+  virtual void persistent_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                                 bool transb, TensorWrapper &D, TensorWrapper &bias,
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
@@ -411,7 +421,18 @@ class CommOverlapP2PBase : public CommOverlapCore {
                         bool use_split_accumulator, TensorWrapper &B_copy,
                         cudaStream_t stream_main) override;
 
+  /*
+  ** Persistent ROCm fused AllGather + GEMM implemented with hipKittens
+  */
+  void persistent_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B, bool transb,
+                        TensorWrapper &D, TensorWrapper &bias, TensorWrapper &pre_gelu_out,
+                        TensorWrapper &workspace, bool grad, bool accumulate,
+                        bool use_split_accumulator, TensorWrapper &B_copy,
+                        cudaStream_t stream_main) override;
+
   bool is_aggregate() { return _aggregate; } // needed for rocm pathing
+
+  bool is_persistent() override { return _persistent; }
 
   /*
   ** This function overlaps the AG for the current communicator object with the GEMM for the overlap_gemm object.

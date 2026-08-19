@@ -24,6 +24,7 @@ from transformer_engine.pytorch.torch_version import torch_version
 from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_custom
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
+    fused_ag_gemm_eligible,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
@@ -210,6 +211,14 @@ class _LayerNormLinear(torch.autograd.Function):
         ub_overlap_ag_fprop = (
             ub_overlap_ag_fprop and is_grad_enabled and not return_layernorm_output
         )
+        if ub_overlap_ag_fprop and not fused_ag_gemm_eligible(
+            ub_name + "_fprop", inp, weight, bias, activation_dtype, tp_size, fp8,
+        ):
+            ub_overlap_ag_fprop = False
+        if ub_overlap_ag_dgrad and not fused_ag_gemm_eligible(
+            ub_name + "_dgrad", inp, weight, None, activation_dtype, tp_size, fp8, is_dgrad=True,
+        ):
+            ub_overlap_ag_dgrad = False
         if ub_overlap_rs_fprop:
             ub_obj = get_ub(ub_name + "_fprop", fp8)
             ub_type = tex.CommOverlapType.RS

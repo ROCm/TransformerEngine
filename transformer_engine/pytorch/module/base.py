@@ -625,21 +625,31 @@ def get_ub_is_fp8(name: str, use_fp8: bool) -> bool:
     return get_ub(name, use_fp8).is_fp8_ubuf()
 
 
-def fused_ag_gemm_eligible(name, inp, weight, bias, dtype, tp_size) -> bool:
+def fused_ag_gemm_eligible(
+    name: str,
+    inp: torch.Tensor,
+    weight: torch.Tensor,
+    bias: Optional[torch.Tensor],
+    dtype: torch.dtype,
+    tp_size: int,
+    fp8: bool,
+    gelu: bool = False,
+    is_dgrad: bool = False,
+) -> bool:
     """Whether the persistent AG+GEMM backend covers this call."""
     if not _ub_is_persistent(name):
         return True  # not our backend
-    if dtype != torch.bfloat16 or inp.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+    # TODO: Drop these as the kernel gains fp8/mxfp8, bias and gelu support.
+    if fp8 or gelu or bias is not None:
         return False
-    if bias is not None:
+    if dtype != torch.bfloat16 or inp.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
         return False
     if tp_size not in (4, 8):
         return False
     out_features, in_features = weight.shape
+    m, k = (in_features, out_features) if is_dgrad else (out_features, in_features)
     n_chunk = inp.shape[0] if inp.dim() == 2 else inp.shape[0] * inp.shape[1]
-    return ( out_features % 256 == 0 and in_features % 128 == 0
-        and in_features >= 256 and n_chunk % 256 == 0
-    )
+    return m % 256 == 0 and k % 128 == 0 and k >= 256 and n_chunk % 256 == 0
 
 
 def _ub_is_persistent(name: str) -> bool:
@@ -660,6 +670,8 @@ def destroy_ub():
     _ub_initialized = False
     _ub_persistent_names.clear()
     _ub_disabled_names.clear()
+    if IS_HIP_EXTENSION:
+        tex.reset_fused_ag_gemm_cache()
     global layers_atomic_ring_exchange
     layers_atomic_ring_exchange = []
     # Compiled graphs may have baked is_fp8_ubuf() via assume_constant_result;

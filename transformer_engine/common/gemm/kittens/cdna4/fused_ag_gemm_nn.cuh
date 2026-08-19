@@ -715,7 +715,7 @@ static persistent_fn_t get_persistent_fn(int M, int N, int K, int S) {
     return nullptr;
 }
 
-// Split-K is gated on the workspace budget
+// Split-K is gated on the workspace budget. 64 MiB cap is an intentional performance clamp, not a safety choice.
 static int select_split_k(int tiles, size_t budget_bytes) {
     const size_t cap    = 64ull << 20;
     const size_t budget = budget_bytes < cap ? budget_bytes : cap;

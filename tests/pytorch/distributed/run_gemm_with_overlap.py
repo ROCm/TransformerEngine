@@ -7,6 +7,7 @@
 import os
 import sys
 import socket
+import hashlib
 import warnings
 import subprocess
 import argparse
@@ -75,6 +76,12 @@ def _parse_args(argv=None, namespace=None):
     )
     parser.add_argument(
         "--atomic", action="store_true", default=False, help="Test overlap with atomic GEMM."
+    )
+    parser.add_argument(
+        "--persistent",
+        action="store_true",
+        default=False,
+        help="Select the persistent fused AG+GEMM backend (gfx950 only).",
     )
     parser.add_argument(
         "--aggregate",
@@ -357,6 +364,7 @@ def _main(opts):
             atomic_gemm=opts.atomic,
             aggregate=opts.aggregate,
             use_ce=not (opts.atomic and bool(int(os.getenv("NVTE_AG_P2P_MULTI_ATOMIC", "0")))),
+            persistent=opts.persistent,
         )
     else:
         ub_obj = tex.CommOverlap(
@@ -874,6 +882,11 @@ def _main(opts):
 
         torch.cuda.synchronize()
         dist.barrier(tp_group)
+        # Bit-exact fingerprint of the output.
+        out_bytes = test_out.detach().contiguous().cpu().flatten().view(torch.uint8)
+        out_hash = hashlib.sha256(out_bytes.numpy().tobytes()).hexdigest()
+        dist_print(f"OUTPUT HASH: {out_hash}", section=True, group=tp_group)
+
         diff = torch.abs(test_out - ref_out).flatten()
         m = torch.argmax(diff)
         abs_err = diff[m].item()

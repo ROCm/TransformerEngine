@@ -25,6 +25,7 @@ from transformer_engine.pytorch.tensor.utils import clear_columnwise_cache, is_c
 from .base import (
     fill_userbuffers_buffer_for_all_gather,
     _ub_communicators,
+    fused_ag_gemm_eligible,
     get_ub,
     get_ub_is_fp8,
     is_ub_initialized,
@@ -398,6 +399,16 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_bulk_dgrad = False
         ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output_gathered
         ub_overlap_rs = ub_overlap_rs and is_grad_enabled
+        if ub_overlap_ag and not (
+            fused_ag_gemm_eligible(
+                "fc1_fprop", inp, fc1_weight, fc1_bias, activation_dtype, tp_size, fp8,
+                gelu=gemm_gelu_fusion,
+            )
+            and fused_ag_gemm_eligible(
+                "fc2_dgrad", inp, fc2_weight, None, activation_dtype, tp_size, fp8, is_dgrad=True,
+            )
+        ):
+            ub_overlap_ag = False
 
         # Choose whether to use GEMM kernel with split accumulator
         use_split_accumulator = _2X_ACC_FPROP

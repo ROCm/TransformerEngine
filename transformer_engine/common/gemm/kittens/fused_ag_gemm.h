@@ -30,6 +30,9 @@ struct KittensFusedAgGemmArgs {
     hipStream_t stream;
 };
 
-bool kittens_fused_ag_gemm_supported();
+bool kittens_fused_ag_gemm_supported(int sm_arch);
+
+// Drops the cached work-queue plans and peer base pointers
+void kittens_fused_ag_gemm_reset();
 
 bool kittens_fused_ag_gemm_bf16(const KittensFusedAgGemmArgs &args);

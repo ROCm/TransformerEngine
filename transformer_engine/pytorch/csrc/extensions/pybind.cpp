@@ -8,6 +8,10 @@
 
 #include "pybind.h"
 
+#ifdef USE_HIPKITTENS_GEMM
+#include "common/gemm/kittens/fused_ag_gemm.h"
+#endif
+
 #include <pybind11/cast.h>
 #include <pybind11/detail/common.h>
 #include <pybind11/functional.h>
@@ -707,6 +711,14 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         "Bulk overlap All-Gather with a GEMM operation launched by another communicator",
         py::call_guard<py::gil_scoped_release>(), py::arg("allgather_communicator"),
         py::arg("send_stream"), py::arg("recv_stream"));
+  m.def(
+      "reset_fused_ag_gemm_cache",
+      []() {
+#ifdef USE_HIPKITTENS_GEMM
+        kittens_fused_ag_gemm_reset();
+#endif
+      },
+      "Drop cached persistent AG+GEMM plans and peer base pointers");
 #else
   m.def("bulk_overlap_ag_with_external_gemm", &transformer_engine::pytorch::placeholder,
         "Dummy function for python side annotations");

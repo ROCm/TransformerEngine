@@ -447,10 +447,16 @@ def test_multi_layer_with_overlap_fp8(
     )
 
 
-persistent_available = IS_HIP_EXTENSION and get_device_compute_capability() == (9, 5)
-reason_for_no_persistent = "Persistent AG+GEMM overlap requires a gfx950 device."
-assert (SEQ_LENGTH * BATCH_SIZE) % 256 == 0
-assert (NUM_HEADS * HEAD_DIM) % 256 == 0
+persistent_available = (
+    IS_HIP_EXTENSION
+    and get_device_compute_capability() == (9, 5)
+    and NUM_PROCS in (4, 8)
+    and (SEQ_LENGTH * BATCH_SIZE) % (256 * NUM_PROCS) == 0
+    and (NUM_HEADS * HEAD_DIM) % 256 == 0
+)
+reason_for_no_persistent = (
+    "Persistent AG+GEMM overlap requires a gfx950 device, tp_size in (4, 8) and a 256-aligned per-rank chunk."
+)
 
 
 def _run_persistent_ag(quantization="none"):
@@ -465,6 +471,7 @@ def _run_persistent_ag(quantization="none"):
         f"--head-dim={HEAD_DIM}",
         "--comm-type=AG",
         "--p2p",
+        "--persistent",
         f"--quantization={quantization}",
     ]
     return subprocess.run(test_cmd, env=os.environ, capture_output=True, check=False)
@@ -485,26 +492,29 @@ def test_persistent_ag_overlap_bf16():
 
 @pytest.mark.skipif(not persistent_available, reason=reason_for_no_persistent)
 @pytest.mark.parametrize("quantization", ("fp8", "mxfp8"))
-def test_persistent_ag_overlap_declines_non_bf16(quantization):
+def test_persistent_ag_overlap_rejects_non_bf16(quantization):
     """Non-bf16 is currently outside the backend."""
     if quantization == "fp8" and not fp8_available:
         pytest.skip(reason_for_no_fp8)
     if quantization == "mxfp8" and not mxfp8_available:
         pytest.skip(reason_for_no_mxfp8)
-    _assert_numerics_passed(_run_persistent_ag(quantization=quantization))
+    result = _run_persistent_ag(quantization=quantization)
+    assert result.returncode != 0, "persistent AG+GEMM accepted a non-bf16 operand"
+    assert "non-bf16 operand" in result.stderr.decode(), result.stderr.decode()
 
 
 @pytest.mark.skipif(not persistent_available, reason=reason_for_no_persistent)
 def test_persistent_ag_overlap_is_deterministic():
-    """Bitwise reproducibility across runs."""
+    """Bitwise reproducibility across runs"""
     first = _run_persistent_ag()
     _assert_numerics_passed(first)
     second = _run_persistent_ag()
     _assert_numerics_passed(second)
 
-    def _numeric_lines(out):
-        return [ln for ln in out.decode().splitlines() if "NUMERICAL CHECK" in ln or "error" in ln]
+    def _hashes(out):
+        prefix = "OUTPUT HASH: "
+        return [ln.split(prefix, 1)[1].strip() for ln in out.decode().splitlines() if prefix in ln]
 
-    assert _numeric_lines(first.stdout) == _numeric_lines(
-        second.stdout
-    ), "two identical runs disagreed"
+    first_hashes, second_hashes = _hashes(first.stdout), _hashes(second.stdout)
+    assert first_hashes, f"harness printed no output hash\n{first.stdout.decode()}"
+    assert first_hashes == second_hashes, "two identical runs produced different outputs"
