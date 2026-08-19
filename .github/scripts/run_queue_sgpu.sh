@@ -92,6 +92,8 @@ for config in "${CONFIGS[@]}"; do
         [[ "$line" =~ ^[[:space:]]*# ]] && continue
         [[ -z "${line//[[:space:]]/}" ]] && continue
         read -r label logfile mode cmd rest <<< "$line"
+        [[ "$cmd" == /* ]] || cmd="${REPO_ROOT}/${cmd}"
+        cmd="$(realpath -m "$cmd")"
         SUITE_LABELS+=( "$label" )
         SUITE_LOGFILES+=( "$logfile" )
         SUITE_MODES+=( "$mode" )
@@ -158,10 +160,24 @@ mkdir -p "$(dirname "$WEIGHTS_FILE")" 2>/dev/null
 
 [[ "$LOG_DIR" != /* ]] && LOG_DIR="$(realpath -m "$LOG_DIR")"
 
+# Items no longer run from the repo root (Phase 4), so a relative JUnit prefix
+# would land in a different place for every item. Anchor it once, here, keeping
+# any trailing slash: the prefix is concatenated with the label, not joined as a
+# path, and realpath strips the separator.
+if [[ -n "${JUNITXML_PREFIX:-}" && "$JUNITXML_PREFIX" != /* ]]; then
+    junit_prefix_sep=""
+    [[ "$JUNITXML_PREFIX" == */ ]] && junit_prefix_sep=/
+    JUNITXML_PREFIX="$(realpath -m "$JUNITXML_PREFIX")${junit_prefix_sep}"
+    export JUNITXML_PREFIX
+fi
+
 # Directory Structure under LOG_DIR:
 #
 #   prerequisite_ck_jit_status/ Phase 3  one-time prerequisites per suite
 #   items/                      Phase 4  the test output itself -- one file per item
+#   cwd/                        Phase 4  one working directory per item; empty ones
+#                                        are removed, so whatever is left here is
+#                                        what an item wrote to its CWD
 #   suites/                     Phase 5  per-suite verdict: rc + index into items/
 #   report/                     Phase 7  the human-readable schedule
 #   queue/                               the machine-readable state: what to run,
@@ -169,16 +185,18 @@ mkdir -p "$(dirname "$WEIGHTS_FILE")" 2>/dev/null
 #
 SETUP_DIR="$LOG_DIR/prerequisite_ck_jit_status"
 ITEM_LOG_DIR="$LOG_DIR/items"
+ITEM_CWD_DIR="$LOG_DIR/cwd"
 SUITE_LOG_DIR="$LOG_DIR/suites"
 REPORT_DIR="$LOG_DIR/report"
 QUEUE_DIR="$LOG_DIR/queue"
 
 rm -rf "${REPO_ROOT}/test-results"
-rm -rf "$ITEM_LOG_DIR" "$SUITE_LOG_DIR"
+rm -rf "$ITEM_LOG_DIR" "$SUITE_LOG_DIR" "$ITEM_CWD_DIR"
 
-mkdir -p "$SETUP_DIR" "$ITEM_LOG_DIR" "$SUITE_LOG_DIR" "$REPORT_DIR" "$QUEUE_DIR"
+mkdir -p "$SETUP_DIR" "$ITEM_LOG_DIR" "$ITEM_CWD_DIR" "$SUITE_LOG_DIR" "$REPORT_DIR" "$QUEUE_DIR"
 
-# cd to repo root so that commands in configs (e.g. ci/pytorch.sh) resolve correctly
+# The repo root is where the suites are expanded and where the scheduler's own
+# state lives; the items themselves each get their own directory in Phase 4.
 cd "$REPO_ROOT" || { echo "Error: cannot cd to '${REPO_ROOT}'" >&2; exit 1; }
 
 QUEUE_FILE="$QUEUE_DIR/queue.tsv"        # Phase 2 writes, Phases 4 and 5 read
@@ -325,6 +343,7 @@ take_next() {
 worker() {
     local gpu=$1
     local i line weight label cmd tag rest itemlog rc safetag junit_dir start end incomplete
+    local itemcwd
     while :; do
         i=$(take_next)
         [[ "$i" -gt "$TOTAL_ITEMS" ]] && break
@@ -341,20 +360,28 @@ worker() {
             junit_dir=""
         fi
 
+        # Every item gets a working directory to itself
+        itemcwd="$ITEM_CWD_DIR/${label}.${safetag}"
+        mkdir -p "$itemcwd"
+
         # No scheduler-imposed deadline: the suite scripts' own PYTEST_TIMEOUT and
         # the workflow's timeout-minutes are the only limits, exactly as they are
         # outside the queue.
         start=$(date +%s)
         if [[ -n "$tag" ]]; then
-            HIP_VISIBLE_DEVICES=$gpu TE_CI_SKIP_SETUP=1 TEST_FILTER="$tag" \
+            ( cd "$itemcwd" && HIP_VISIBLE_DEVICES=$gpu TE_CI_SKIP_SETUP=1 TEST_FILTER="$tag" \
                 JUNITXML_PREFIX="$junit_dir" \
-                "$cmd" ${rest:-} > "$itemlog" 2>&1
+                "$cmd" ${rest:-} ) > "$itemlog" 2>&1
         else
-            HIP_VISIBLE_DEVICES=$gpu JUNITXML_PREFIX="$junit_dir" \
-                "$cmd" ${rest:-} > "$itemlog" 2>&1
+            ( cd "$itemcwd" && HIP_VISIBLE_DEVICES=$gpu JUNITXML_PREFIX="$junit_dir" \
+                "$cmd" ${rest:-} ) > "$itemlog" 2>&1
         fi
         rc=$?
         end=$(date +%s)
+
+        # Leave the directory only when the item put something in it, so that
+        # cwd/ ends up listing exactly the items that write relative paths.
+        rmdir "$itemcwd" 2>/dev/null
 
         echo "$rc" > "${itemlog}.rc"
 
