@@ -230,6 +230,38 @@ def _has_static_scale(quantizer) -> bool:
     return isinstance(quantizer, Float8Quantizer)
 
 
+def _is_current_scaling(quantizer) -> bool:
+    """Whether ``quantizer`` derives its scale from the tensor it is casting."""
+    from ...tensor.float8_tensor import (  # pylint: disable=import-outside-toplevel
+        Float8CurrentScalingQuantizer,
+    )
+
+    return isinstance(quantizer, Float8CurrentScalingQuantizer)
+
+
+def quantize_output(o_quantizer, out):
+    """Quantize a high-precision xAttention output, reusing the kernel's amax.
+
+    The forward hands the kernel the O quantizer's amax slot, so by the time a
+    current-scaling quantizer comes to cast, the value it would otherwise scan
+    the tensor for is already sitting there. Telling it to trust that slot turns
+    a two-pass quantize into a plain cast; the distributed amax all-reduce still
+    runs, so this is safe under ``with_amax_reduction``.
+
+    The kernel reduces amax on the accumulator before rounding to the output
+    dtype, so it can land up to half an ulp under the amax of ``out`` itself.
+    The cast saturates, which at worst clamps the single largest element.
+    """
+    if not _is_current_scaling(o_quantizer):
+        return o_quantizer(out)
+    previous = o_quantizer.use_existing_amax
+    o_quantizer.use_existing_amax = True
+    try:
+        return o_quantizer(out)
+    finally:
+        o_quantizer.use_existing_amax = previous
+
+
 def _kernel_input(x: torch.Tensor) -> torch.Tensor:
     """Hand a q/k/v/o payload to the kernel in its own layout.
 
@@ -301,12 +333,12 @@ def fp8_forward(
     # The kernel reduces amax straight into the quantizers' slots, so there is no
     # allocation to make here and nothing to copy back afterwards. amax_o is
     # captured before scale_o is applied, so the history stays in the output's
-    # true units whichever output dtype we asked for. Only a delayed quantizer
-    # carries a history to feed; a current-scaling one recomputes amax when it
-    # casts, so asking for the reduction there is dead work.
+    # true units whichever output dtype we asked for. A delayed quantizer takes
+    # it as history; a current-scaling one is about to scan for that same value
+    # when it casts, and ``quantize_output`` lets it reuse this instead.
     res = _xattn.fwd_quant(
         qd, kd, vd, descale_q, descale_k, descale_v, scale_s, descale_s, scale_o,
-        out, s_quantizer.amax, o_quantizer.amax if _has_static_scale(o_quantizer) else None,
+        out, s_quantizer.amax, o_quantizer.amax,
         float(softmax_scale), causal, wl, wr, fmt, fmt,
     )
     out_kernel, softmax_lse = res[0], res[1]
@@ -403,7 +435,7 @@ def fp8_backward(
     # Each amax is descaled by 1/scale_dq before it is stored, so the history
     # stays in the gradients' true units whichever output dtype we asked for.
     # A current-scaling dQKV quantizer has no history and rescans at cast time,
-    # so skip the reductions and the fold entirely.
+    # so skip the buffer and the fold; the kernel still reduces into scratch.
     track_dqkv_amax = _has_static_scale(dqkv_quantizer)
     amax_dqkv = torch.empty(3, device=qd.device, dtype=torch.float32) if track_dqkv_amax else None
     amax_dq, amax_dk, amax_dv = (

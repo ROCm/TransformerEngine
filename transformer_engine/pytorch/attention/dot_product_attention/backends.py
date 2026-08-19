@@ -1419,7 +1419,12 @@ class FusedAttnFunc(torch.autograd.Function):
                     out = out_.dequantize().view(out_.shape)
             else:
                 if needs_fp8_out:
-                    out_fp8 = O_quantizer(out_)
+                    if fused_attention_backend == FusedAttnBackend.get("XAttn"):
+                        # the kernel already reduced O's amax into the quantizer,
+                        # so this cast does not have to scan for it again
+                        out_fp8 = xattention.quantize_output(O_quantizer, out_)
+                    else:
+                        out_fp8 = O_quantizer(out_)
 
             # print quantizers
             print_quantizers(
