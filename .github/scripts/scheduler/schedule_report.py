@@ -22,14 +22,35 @@ REPORT_PATH = ("report", "schedule.md")
 REPORT_TITLE = "sGPU queue schedule"
 
 
-def outcome(rc):
-    """An exit code as the word that says what to do about it.
+def outcome(rc, incomplete):
+    """How one item ended, as the word that says what to do about it.
+
+    Five words, and the line between them is the one the weight table draws:
+
+      pass, fail, error   the suite ran to the end. Its duration is what the
+                          item costs -- failing tests cost what they cost -- so
+                          the next run's weight learns from it.
+      incomplete, killed  the suite was stopped. Its duration is only where it
+                          stopped, so the weight table ignores the row and the
+                          item keeps the weight it came in with.
+
+    "incomplete" is the same word ``ci/junit_report.py`` uses for the same
+    condition, and both read it from the same signal: the result sidecar a dying
+    pytest leaves behind. Neither can name the cause -- a per-test timeout, a
+    segfault and an OOM-kill are indistinguishable from the outside, which is
+    why the word says what happened rather than why.
     """
+    if rc in KILLED_RCS:
+        # Killed from outside, which is a different story from the suite dying
+        # on its own: 124 is a `timeout` expiry, 137 a SIGKILL or an OOM-kill.
+        return "killed"
+    if incomplete == 1:
+        # rc cannot say this on its own: a --timeout-method=thread expiry exits
+        # 1, exactly like an ordinary test failure.
+        return "incomplete"
     if rc == 0:
         return "pass"
-    if rc == 1:
-        return "fail"
-    return "killed" if rc in KILLED_RCS else "error"
+    return "fail" if rc == 1 else "error"
 
 
 def read_queue_keys(path):
@@ -113,16 +134,17 @@ def calculate_schedule_table(frame, default_weight):
         # The % change is the scheduler feedback loop made visible: a large
         # positive miss is an item that should have been dispatched earlier.
         change = f"{(row.secs - row.est) * 100 / row.est:+.0f}%" if known else "n/a"
-        # "cut" marks a duration that is where the item was stopped rather than
-        # what it costs, which is also why the next run's weight table ignores
-        # that row.
-        result = outcome(row.rc) + (" (cut)" if row.incomplete == 1 else "")
+        # Reported for a stopped item too, unlike in the weights table below:
+        # there the number would describe a learning step that is not going to
+        # happen, but here it describes the GPU-time the item really did take,
+        # and an item that sat on a GPU for ten times its estimate is a
+        # scheduling miss whether or not it got as far as finishing.
         rows.append(
             [
                 f"gpu{row.gpu}",
                 f"t+{row.start_off}s",
                 f"{row.secs}s",
-                result,
+                outcome(row.rc, row.incomplete),
                 "unknown" if row.est == default_weight else f"{row.est}s",
                 change,
                 row.name,
@@ -132,14 +154,23 @@ def calculate_schedule_table(frame, default_weight):
 
 
 def calculate_updated_weights_table(frame, weights, default_weight):
-    """
-    What the next run will schedule each item with.
+    """What the next run will schedule each item with, and what moved it there.
     """
     rows = []
     for row in frame.itertuples(index=False):
         key = item_key(row.label, "" if row.tag == "whole" else row.tag)
         new = weights.get(key)
         known = row.est > 0 and row.est != default_weight
+        if not row.measured:
+            # Deliberately not a percentage: this run's duration is where the
+            # item stopped, so the gap between it and the weight measures
+            # nothing, and printing "+1044%" next to a weight that did not move
+            # invites the reader to go looking for the bug that ate the update.
+            change = f"not learned -- {outcome(row.rc, row.incomplete)}"
+        elif known:
+            change = f"{(row.secs - row.est) * 100 / row.est:+.0f}%"
+        else:
+            change = "first measurement"
         rows.append(
             (
                 # An item the table does not name is one the next run has no
@@ -149,8 +180,8 @@ def calculate_updated_weights_table(frame, weights, default_weight):
                 [
                     f"{new:.0f}s" if new is not None else "unknown",
                     "unknown" if not known else f"{row.est}s",
-                    f"{row.secs}s" + (" (cut)" if row.incomplete == 1 else ""),
-                    f"{(row.secs - row.est) * 100 / row.est:+.0f}%" if known else "n/a",
+                    f"{row.secs}s",
+                    change,
                     row.name,
                 ],
             )
@@ -158,7 +189,7 @@ def calculate_updated_weights_table(frame, weights, default_weight):
     # Name breaks ties so the order is stable run to run rather than dependent on
     # dispatch order.
     rows.sort(key=lambda r: (-r[0], r[1][4]))
-    return [["Updated weight", "This run", "Current weight", "% change", "Test name"]] + [
+    return [["Next weight", "Weight used", "This run", "Learned", "Test name"]] + [
         row for _, row in rows
     ]
 
@@ -182,13 +213,18 @@ def render_report_md(frame, wall, gpu_ids, total_items, default_weight, missing,
     n_gpus = len(gpu_ids)
     ran = len(frame)
     failed = int((frame["rc"] != 0).sum())
+    # Called out up front because it changes what the rest of the report means:
+    # a stopped item's duration is a floor, so both the utilisation above and
+    # the weights below are being read off a run that did not finish.
+    stopped = int((~frame["measured"]).sum())
+    note = f" ({stopped} stopped short, so not timed)" if stopped else ""
     util = int(frame["secs"].sum()) * 100 / (wall * n_gpus)
     mark = ":x:" if failed or ran != total_items else ":white_check_mark:"
 
     out = [
         f"## {REPORT_TITLE}",
         "",
-        f"{mark} **{ran} items** on {n_gpus} GPUs -- {failed} failed "
+        f"{mark} **{ran} items** on {n_gpus} GPUs -- {failed} failed{note} "
         f"-- {wall}s wall clock at {util:.1f}% GPU utilisation",
         "",
     ]
@@ -207,19 +243,29 @@ def render_report_md(frame, wall, gpu_ids, total_items, default_weight, missing,
         out += [f"### {heading}", ""] + render_md(rows) + [""]
 
     # The two big tables are collapsed: they are the detail you open once you
-    # know from the sections above that something is worth looking at.
-    for summary, rows in (
+    # know from the sections above that something is worth looking at. Each
+    # carries a legend, because the words in its Result/Learned column are the
+    # whole point of the table and are not self-explanatory.
+    for summary, rows, legend in (
         (
             "Schedule -- what ran where, in execution order",
             calculate_schedule_table(frame, default_weight),
+            "`pass` / `fail` / `error` ran to the end. `incomplete` hard-exited "
+            "mid-test (a per-test timeout, a segfault or an OOM-kill -- the same "
+            "condition the JUnit report calls incomplete); `killed` was stopped "
+            "from outside. Only the first three are timings; the last two are "
+            "just where the item stopped.",
         ),
         (
             "Updated weights for next run",
             calculate_updated_weights_table(frame, weights, default_weight),
+            "A failing item still feeds the table -- it cost what it cost. Only "
+            "the rows marked `not learned` are held out, and those keep the "
+            "weight they came in with, so their Next and Used columns match.",
         ),
     ):
         out += [f"<details><summary>{summary}</summary>", ""] + render_md(rows)
-        out += ["", "</details>", ""]
+        out += ["", legend, "", "</details>", ""]
     return out
 
 

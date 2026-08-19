@@ -12,7 +12,7 @@
 import argparse
 import sys
 
-from queue_files import KILLED_RCS, read_timings
+from queue_files import read_timings
 
 
 def measurements(frame):
@@ -27,24 +27,18 @@ def measurements(frame):
                   ``prune_weights``, which only needs to know the item exists.
 
     A row is kept out of ``measured`` when its duration records where the item
-    was stopped rather than what it costs:
+    was stopped rather than what it costs -- the ``measured`` column, whose rule
+    lives in ``queue_files.read_timings``. Note that failing is not one of the
+    disqualifiers: a suite that fails every test in it still took as long as it
+    took.
 
-      rc in KILLED_RCS   124 from a ``timeout`` expiry, 137 from a SIGKILL or an
-                         OOM-kill: killed from outside, so the duration is a
-                         ceiling imposed on it.
-      incomplete == 1    pytest never reached its end-of-session write, which rc
-                         cannot say on its own -- a ``--timeout-method=thread``
-                         expiry exits 1, indistinguishable from an ordinary test
-                         failure. The scheduler raises the flag from the result
-                         sidecar the dying process left behind.
-
-    Both still count as dispatched: the item plainly exists, it just taught the
-    table nothing this run.
+    A row held out still counts as dispatched: the item plainly exists, it just
+    taught the table nothing this run.
     """
     # "whole" is the scheduler's placeholder for an opaque suite item, which the
     # weight table keys by bare label rather than by "<label>/<tag>".
     key = frame["label"].where(frame["tag"] == "whole", frame["name"])
-    usable = ~frame["rc"].isin(KILLED_RCS) & (frame["incomplete"] != 1)
+    usable = frame["measured"]
     measured = frame["secs"][usable].groupby(key[usable]).sum()
     return measured.to_dict(), set(key)
 
@@ -191,15 +185,34 @@ def merge_weights(old, new, alpha_up=0.5, alpha_down=0.1):
 def prune_weights(weights, dispatched, live_keys, live_labels):
     """Drop the weights of work items that no longer exist.
 
-    A key survives if item.tsv lists it.
+    A key survives if items.tsv lists it or the run dispatched it. Absence on
+    its own is ambiguous, and the two shapes of key settle it differently:
+
+      "<label>/<tag>"  a list-mode item. Its label leaves items.tsv both when
+                       the suite is retired and when its list-all pass failed,
+                       and reading the second as the first throws away a whole
+                       suite's measurements. So a key whose label is missing
+                       altogether is kept, and only a tag missing from a label
+                       that *was* censused is pruned.
+      "<label>"        an opaque whole-suite item. The scheduler writes its
+                       items.tsv row straight from the config, with nothing in
+                       between that can fail, so absence can only mean the
+                       suite was removed from the config -- and it is pruned.
+
+    Returns ``(kept, pruned)``, where ``pruned`` pairs each dropped key with
+    why it went.
     """
     kept, pruned = {}, []
     for key, value in weights.items():
         label = key.split("/", 1)[0]
-        if key in dispatched or label not in live_labels or key in live_keys:
+        if key in dispatched or key in live_keys:
+            kept[key] = value
+        elif key == label:
+            pruned.append((key, "its suite is no longer in the config"))
+        elif label not in live_labels:
             kept[key] = value
         else:
-            pruned.append(key)
+            pruned.append((key, "its suite no longer lists it"))
     return kept, pruned
 
 
@@ -256,8 +269,8 @@ def run_update(args):
             # Named individually rather than counted: a prune is how a deleted
             # test leaves the table, and it is also exactly what a broken suite
             # expansion would look like, so the list is worth reading.
-            for key in sorted(pruned):
-                print(f"pruned {key}: its suite no longer lists it", file=sys.stderr)
+            for key, why in sorted(pruned):
+                print(f"pruned {key}: {why}", file=sys.stderr)
 
     lines = [
         f"{key} {value:.1f}\n" for key, value in sorted(weights.items(), key=lambda kv: -kv[1])

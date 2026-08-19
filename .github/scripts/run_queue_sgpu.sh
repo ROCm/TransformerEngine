@@ -53,6 +53,12 @@ else
     log_warn()  { echo "Warning: $*" >&2; }
 fi
 
+if [[ -n "${TEST_MGPU:-}" ]]; then
+    log_warn "ignoring TEST_MGPU=${TEST_MGPU}: this queue only dispatches single-GPU items"
+fi
+export TEST_SGPU=1
+export TEST_MGPU=""
+
 # ---------------------------------------------------------------------------
 # Parse arguments
 # ---------------------------------------------------------------------------
@@ -190,8 +196,7 @@ SUITE_LOG_DIR="$LOG_DIR/suites"
 REPORT_DIR="$LOG_DIR/report"
 QUEUE_DIR="$LOG_DIR/queue"
 
-rm -rf "${REPO_ROOT}/test-results"
-rm -rf "$ITEM_LOG_DIR" "$SUITE_LOG_DIR" "$ITEM_CWD_DIR"
+rm -rf "$SETUP_DIR" "$ITEM_LOG_DIR" "$ITEM_CWD_DIR" "$SUITE_LOG_DIR" "$REPORT_DIR" "$QUEUE_DIR"
 
 mkdir -p "$SETUP_DIR" "$ITEM_LOG_DIR" "$ITEM_CWD_DIR" "$SUITE_LOG_DIR" "$REPORT_DIR" "$QUEUE_DIR"
 
@@ -224,10 +229,10 @@ TIMINGS_FILE="$QUEUE_DIR/timings.tsv"    # Phase 4 writes, Phases 6 and 7 read
 EXPAND_LOG="$LOG_DIR/expand.log"   # whatever the suites printed while listing
 LIST_TMP="$QUEUE_DIR/.expand.tmp"  # one suite's list, reused per suite
 : > "$EXPAND_LOG"
-# Phase 2 removes the .raw file, but only if it gets that far: an expansion that
-# bails out leaves it behind, and re-running into the same log dir would then
-# append to the previous attempt and trip the duplicate-tag check. Local runs do
-# that a lot.
+# Truncated, not appended to: Phase 2 removes the .raw file only if it gets that
+# far, so an expansion that bails out leaves it behind, and the next run would
+# carry that attempt's tags into the duplicate-tag check. The startup wipe of
+# QUEUE_DIR covers the same case; this keeps the phase correct on its own.
 : > "$QUEUE_FILE.raw"
 
 echo "== Expanding test suites into work items =="
@@ -349,7 +354,12 @@ worker() {
         [[ "$i" -gt "$TOTAL_ITEMS" ]] && break
         line=$(sed -n "${i}p" "$QUEUE_FILE")
         [[ -z "$line" ]] && break
-        IFS=$'\t' read -r weight label cmd tag rest <<< "$line"
+
+        weight="${line%%$'\t'*}"; line="${line#*$'\t'}"
+        label="${line%%$'\t'*}"; line="${line#*$'\t'}"
+        cmd="${line%%$'\t'*}"; line="${line#*$'\t'}"
+        tag="${line%%$'\t'*}"
+        rest="${line#*$'\t'}"
 
         safetag="${tag:-whole}"
         itemlog="$ITEM_LOG_DIR/${label}.${safetag}.log"
@@ -455,17 +465,22 @@ for i in "${!SUITE_LABELS[@]}"; do
     suite_log="$SUITE_LOG_DIR/${SUITE_LOGFILES[$i]}"
     : > "$suite_log"
     worst=0
-    for itemlog in "$ITEM_LOG_DIR/${label}."*.log; do
-        [[ -e "$itemlog" ]] || continue
-        rc=$(cat "${itemlog}.rc" 2>/dev/null || echo 1)
-        iname=$(basename "$itemlog" .log)
-        printf '%-4s rc=%-4s items/%s\n' \
+    while IFS= read -r tag; do
+        safetag="${tag:-whole}"
+        itemlog="$ITEM_LOG_DIR/${label}.${safetag}.log"
+        note=""
+        rc=$(cat "${itemlog}.rc" 2>/dev/null)
+        if [[ ! "$rc" =~ ^[0-9]+$ ]]; then
+            rc=1
+            note="  <- no exit code recorded: the item never finished"
+        fi
+        printf '%-4s rc=%-4s items/%s%s\n' \
             "$([[ "$rc" == "0" ]] && echo ok || echo FAIL)" "$rc" \
-            "${iname}.log" >> "$suite_log"
+            "${label}.${safetag}.log" "$note" >> "$suite_log"
         [[ "$rc" == "0" ]] && continue
         worst=$rc
         FAILED_ITEMS+=( "${itemlog#"${REPO_ROOT}/"}" )
-    done
+    done < <(awk -F'\t' -v l="$label" '$2==l {print $4}' "$QUEUE_FILE")
     echo "$worst" > "${suite_log}.rc"
     [[ "$worst" != "0" ]] && OVERALL_RC=$worst
 done

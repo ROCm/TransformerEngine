@@ -20,6 +20,11 @@ Columns, in order:
   end_off     seconds from the start of the queue to this item's finish
   est         the weight used to schedule it, or the caller's default weight
   incomplete  1 if the item was cut off mid-way
+
+And one column derived on read:
+
+  measured    whether ``secs`` is what the item costs, or merely where it was
+              stopped. See ``read_timings``.
 """
 
 import pandas as pd
@@ -58,4 +63,22 @@ def read_timings(path):
     frame[NUMERIC_COLUMNS] = frame[NUMERIC_COLUMNS].astype(int)
 
     frame["name"] = frame["label"] + "/" + frame["tag"]
+    # Whether the row is a measurement of the item or just a record of where it
+    # stopped. Derived here, once, so the tool that learns from these rows and
+    # the tool that reports on them cannot come to different answers.
+    #
+    # Note what is *not* in the rule: rc. A suite that fails every test in it
+    # still took exactly as long as it took, so a failure is as good a
+    # measurement as a pass. Only being stopped spoils the number, and there are
+    # two ways for that to happen:
+    #
+    #   rc in KILLED_RCS   stopped from outside -- 124 from a ``timeout`` expiry,
+    #                      137 from a SIGKILL or an OOM-kill. The duration is a
+    #                      ceiling someone else imposed.
+    #   incomplete == 1    pytest never reached its end-of-session write, which
+    #                      rc cannot say on its own: a --timeout-method=thread
+    #                      expiry exits 1, indistinguishable from an ordinary
+    #                      test failure. The scheduler raises the flag from the
+    #                      result sidecar the dying process left behind.
+    frame["measured"] = ~frame["rc"].isin(KILLED_RCS) & (frame["incomplete"] != 1)
     return frame.reset_index(drop=True)
