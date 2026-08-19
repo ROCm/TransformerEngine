@@ -1,3 +1,4 @@
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -5,10 +6,14 @@
 """Unit tests for context parallel utils."""
 import torch
 import unittest
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
+
 from transformer_engine.pytorch.attention.dot_product_attention.context_parallel import (
     get_batch_on_this_cp_rank,
     pad_thd_sequences_for_cp,
     generate_positional_ids_for_cp,
+    flash_attn_fwd_softmax_lse_correction,
+    flash_attn_fwd_second_half_softmax_lse_correction,
 )
 
 
@@ -708,6 +713,62 @@ class TestContextParallelUtils(unittest.TestCase):
         expected_input_ids_r0 = torch.tensor([[1, 0, 2, 0]])
 
         self.assertTrue(torch.equal(input_ids_r0, expected_input_ids_r0))
+
+
+@unittest.skipUnless(
+    torch.cuda.is_available() and IS_HIP_EXTENSION,
+    "Requires ROCm",
+)
+class TestSoftmaxLseCorrectionReproducibility(unittest.TestCase):
+    """Regression tests for https://github.com/ROCm/TransformerEngine/issues/693.
+
+    The CP softmax-LSE merge has to return the same bits regardless of how many times it
+    has been called or with which shapes. When these functions are compiled, Dynamo can
+    hold more than one compiled variant, and on ROCm the variants may disagree by about
+    1 ULP because log1p contracts differently under different Triton launch configurations.
+    A reference model and an actor model built from the same checkpoint then diverge.
+    """
+
+    @staticmethod
+    def _merged_lse(softmax_lse, softmax_lse_per_step):
+        max_scale = torch.max(softmax_lse, softmax_lse_per_step)
+        min_scale = torch.min(softmax_lse, softmax_lse_per_step)
+        return max_scale + torch.log1p(torch.exp(min_scale - max_scale))
+
+    @staticmethod
+    def _rand(*shape):
+        return torch.rand(*shape, device="cuda", dtype=torch.float32) * 10
+
+    def test_softmax_lse_correction_is_bitwise_stable(self):
+        """The full LSE correction matches eager after calls with other shapes."""
+        b, h, s = 2, 4, 2053
+        softmax_lse = self._rand(b, h, s)
+        softmax_lse_per_step = self._rand(b, h, s)
+        expected = self._merged_lse(softmax_lse, softmax_lse_per_step)
+
+        # This second shape would make Dynamo build another variant if the function regressed
+        # to using jit_fuser.
+        flash_attn_fwd_softmax_lse_correction(self._rand(b, h, s // 2), self._rand(b, h, s // 2))
+
+        merged = softmax_lse.clone()
+        flash_attn_fwd_softmax_lse_correction(merged, softmax_lse_per_step)
+        self.assertTrue(torch.equal(merged, expected))
+
+    def test_second_half_softmax_lse_correction_is_bitwise_stable(self):
+        """The second-half LSE correction matches eager after calls with other shapes."""
+        b, h, s = 2, 4, 2053
+        softmax_lse = self._rand(b, h, 2, s)
+        softmax_lse_per_step = self._rand(b, h, s)
+        expected = softmax_lse.clone()
+        expected[..., 1, :] = self._merged_lse(softmax_lse[..., 1, :], softmax_lse_per_step)
+
+        flash_attn_fwd_second_half_softmax_lse_correction(
+            self._rand(b, h, 2, s // 2), self._rand(b, h, s // 2)
+        )
+
+        merged = softmax_lse.clone()
+        flash_attn_fwd_second_half_softmax_lse_correction(merged, softmax_lse_per_step)
+        self.assertTrue(torch.equal(merged, expected))
 
 
 if __name__ == "__main__":

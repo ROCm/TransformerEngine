@@ -582,7 +582,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("get_num_cublas_streams", &nvte_get_num_compute_streams, "Get number of compute streams",
         py::call_guard<py::gil_scoped_release>());
 
-  // Support THD format for Context Parallel
+  // Support Context Parallel
+  m.def("lse_correction", &transformer_engine::pytorch::lse_correction,
+        "Correct the softmax_lse for dense context parallel layouts",
+        py::call_guard<py::gil_scoped_release>());
   m.def("thd_read_half_tensor", &transformer_engine::pytorch::thd_read_half_tensor,
         "Read the first half(half_idx=0) or the second half(half_idx=1) of each sequence in a THD "
         "tensor",

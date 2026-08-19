@@ -476,6 +476,18 @@ void nvte_copy_to_kv_cache(NVTETensor new_k, NVTETensor new_v, NVTETensor k_cach
                            int max_ctx_len, int max_seq_len, int max_pages_per_seq,
                            int is_non_paged, cudaStream_t stream);
 
+/*!  \brief Correct softmax LSE (LogSumExp) for dense context parallel layouts.
+ *
+ * \warning   This API is **experimental** and subject to change.
+ *
+ *  \param[out]    lse                 Output tensor.
+ *  \param[in]     lse_per_step        Input tensor.
+ *  \param[in]     only_second_half    Whether to correct only the second half of lse.
+ *  \param[in]     stream              CUDA stream used for this operation.
+ */
+void nvte_cp_lse_correction(NVTETensor lse, const NVTETensor &lse_per_step, int only_second_half,
+                            cudaStream_t stream);
+
 /*!  \brief Extract the first half (half_idx=0) or second half (half_idx=1) of a THD tensor.
  *
  * \warning   This API is **experimental** and subject to change.

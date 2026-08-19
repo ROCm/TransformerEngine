@@ -1,4 +1,5 @@
 /*************************************************************************
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -15,7 +16,7 @@ namespace transformer_engine {
 namespace context_parallel {
 
 struct LseCorrectionFunctor {
-  __forceinline__ __device__ static void run(float *lse, float *half_lse, size_t idx,
+  __forceinline__ __device__ static void run(float *lse, const float *half_lse, size_t idx,
                                              size_t half_idx) {
     float val = lse[idx];
     float val_per_step = half_lse[half_idx];
@@ -24,6 +25,60 @@ struct LseCorrectionFunctor {
     lse[idx] = max_scale + log1pf(expf(min_scale - max_scale));
   }
 };
+
+/***************************************************************************************************
+ * Correct softmax LSE for dense Context Parallel layouts
+ **************************************************************************************************/
+
+template <bool only_second_half>
+__global__ void lse_correction_kernel(float *lse, const float *lse_per_step, size_t rows,
+                                      size_t cols) {
+  size_t col = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  size_t row = blockIdx.y;
+  if (row >= rows || col >= cols) {
+    return;
+  }
+
+  size_t half_idx = row * cols + col;
+  size_t idx = only_second_half ? (row * 2 + 1) * cols + col : half_idx;
+  LseCorrectionFunctor::run(lse, lse_per_step, idx, half_idx);
+}
+
+void lse_correction(Tensor lse, const Tensor &lse_per_step, bool only_second_half,
+                    cudaStream_t stream) {
+  using namespace transformer_engine;
+  NVTE_CHECK(lse.dtype() == DType::kFloat32);
+  NVTE_CHECK(lse_per_step.dtype() == DType::kFloat32);
+  NVTE_CHECK(lse_per_step.dim() >= 1);
+
+  const auto cols = lse_per_step.shape().back();
+  const auto step_numel = lse_per_step.numel();
+  NVTE_CHECK(cols > 0 && step_numel > 0);
+  if (only_second_half) {
+    NVTE_CHECK(lse.dim() == lse_per_step.dim() + 1);
+    NVTE_CHECK(lse.shape()[lse.dim() - 2] == 2);
+    NVTE_CHECK(lse.shape().back() == cols);
+    for (size_t i = 0; i + 1 < lse_per_step.dim(); ++i) {
+      NVTE_CHECK(lse.shape()[i] == lse_per_step.shape()[i]);
+    }
+  } else {
+    NVTE_CHECK(lse.shape() == lse_per_step.shape());
+  }
+
+  const auto rows = step_numel / cols;
+  constexpr unsigned int block = 256;
+  dim3 grid((cols + block - 1) / block, rows);
+  if (only_second_half) {
+    lse_correction_kernel<true><<<grid, block, 0, stream>>>(
+        reinterpret_cast<float *>(lse.data.dptr),
+        reinterpret_cast<const float *>(lse_per_step.data.dptr), rows, cols);
+  } else {
+    lse_correction_kernel<false><<<grid, block, 0, stream>>>(
+        reinterpret_cast<float *>(lse.data.dptr),
+        reinterpret_cast<const float *>(lse_per_step.data.dptr), rows, cols);
+  }
+  NVTE_CHECK_CUDA(cudaGetLastError());
+}
 
 struct ReadLseFunctor {
   __forceinline__ __device__ static void run(float *lse, float *half_lse, size_t idx,
@@ -680,6 +735,15 @@ void thd_get_partitioned_indices(const Tensor &cu_seqlens, Tensor output, int to
 
 }  // namespace context_parallel
 }  // namespace transformer_engine
+
+void nvte_cp_lse_correction(NVTETensor lse, const NVTETensor &lse_per_step, int only_second_half,
+                            cudaStream_t stream) {
+  NVTE_API_CALL(nvte_cp_lse_correction);
+  using namespace transformer_engine;
+
+  context_parallel::lse_correction(*convertNVTETensorCheck(lse),
+                                   *convertNVTETensorCheck(lse_per_step), only_second_half, stream);
+}
 
 void nvte_cp_thd_read_half_tensor(const NVTETensor &tensor, const NVTETensor &cu_seqlens,
                                   NVTETensor half, int half_idx, cudaStream_t stream) {

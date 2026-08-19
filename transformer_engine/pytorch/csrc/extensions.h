@@ -544,8 +544,10 @@ std::tuple<at::Tensor, at::Tensor, at::Tensor> swizzle_scales_and_pack_ptrs_for_
 }  // namespace grouped_mlp_experimental
 
 /***************************************************************************************************
- * Support THD format for Context Parallel
+ * Support Context Parallel
  **************************************************************************************************/
+
+void lse_correction(at::Tensor lse, const at::Tensor &lse_per_step, bool only_second_half);
 
 at::Tensor thd_read_half_tensor(const at::Tensor &tensor, const at::Tensor &cu_seqlens,
                                 int half_idx);
