@@ -168,7 +168,7 @@ def test_gqa_mla_thd():
     if FusedAttnBackend["CK"] not in fused_attn_backends:
         pytest.skip("This test requires the CK fused attention backend.")
 
-    test_dot_product_attention(dtype, {"layout_1": config}, "layout_1", False, False, qkv_layout, False, True)
+    test_dot_product_attention(dtype, {"layout_1": config}, "layout_1", False, qkv_layout, False, True)
 
 
 @pytest.mark.skipif(not IS_HIP_EXTENSION, reason="ROCm TE specific pytests.")
