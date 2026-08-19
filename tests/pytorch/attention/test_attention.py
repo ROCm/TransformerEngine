@@ -2230,11 +2230,6 @@ def test_mha_fp8_vs_f16(
     config = model_configs_fp8_vs_f16[model]
     if IS_HIP_EXTENSION and xattention_available:
         os.environ["NVTE_FUSED_ATTN_XATTN"] = "1"
-        if scaling_mode == "current":
-            # xAttention is the only fp8 fused-attn backend on ROCm and it only
-            # supports DelayedScaling; skip explicitly instead of falling through
-            # to the generic "no FP8 backend" skip below.
-            pytest.skip("xAttention currently supports DelayedScaling only")
         if is_training and not fp8_dpa_bwd:
             # xAttention is fp8-only; an f16 backward (NVTE_FP8_DPA_BWD=0) would
             # require a bf16 fused-attn backward, which is not available on ROCm.
@@ -2493,11 +2488,6 @@ def test_dpa_fp8_vs_f16(dtype, model, qkv_layout, fp8_dpa_bwd, is_training, scal
     config = model_configs_fp8_dpa[model]
     if IS_HIP_EXTENSION and xattention_available:
         os.environ["NVTE_FUSED_ATTN_XATTN"] = "1"
-        if scaling_mode == "current":
-            # xAttention is the only fp8 fused-attn backend on ROCm and it only
-            # supports DelayedScaling; skip explicitly instead of falling through
-            # to the generic "no FP8 backend" skip below.
-            pytest.skip("xAttention currently supports DelayedScaling only")
         if is_training and not fp8_dpa_bwd:
             # xAttention is fp8-only; an f16 backward (NVTE_FP8_DPA_BWD=0) would
             # require a bf16 fused-attn backward, which is not available on ROCm.

@@ -1165,7 +1165,7 @@ def get_attention_backend(
             logger.debug("Disabling FusedAttention as no backend supports the provided input")
             use_fused_attention = False
             fused_attention_backend = None
-        # ROCm xAttention (fp8) currently supports DelayedScaling only; the C++
+        # ROCm xAttention (fp8) takes its scales as per-tensor scalars; the C++
         # selector cannot see the recipe, so fall back here for other recipes.
         if (
             IS_HIP_EXTENSION
@@ -1176,8 +1176,11 @@ def get_attention_backend(
             _xa_recipe = fp8_meta["recipe"]
             if fp8_meta.get("local_recipes", None) is not None:
                 _xa_recipe = fp8_meta["local_recipes"][0]
-            if not _xa_recipe.delayed():
-                logger.debug("Disabling xAttention: only DelayedScaling is currently supported")
+            if not _xa_recipe.float8_per_tensor_scaling():
+                logger.debug(
+                    "Disabling xAttention: only per-tensor fp8 scaling (DelayedScaling,"
+                    " Float8CurrentScaling) is supported"
+                )
                 use_fused_attention = False
                 fused_attention_backend = None
         if (
@@ -2382,9 +2385,8 @@ def _quantize_without_concat(tensors, qkv_quantizer, src_nominal_dtype):
         return None
     if not bool(int(os.getenv("NVTE_USE_MULTI_QUANTIZE_TRITON", "0"))):
         return None
-    # Delayed scaling only: its scale is fixed before the cast, so the joint
-    # amax is a pure output. Current scaling needs the joint amax first.
-    if not isinstance(qkv_quantizer, Float8Quantizer):
+    # Per-tensor scaling only; the kernel walks the tensors under one scale.
+    if not isinstance(qkv_quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)):
         return None
 
     from transformer_engine.pytorch.triton_kernels.multi_quantize import (
@@ -2397,9 +2399,11 @@ def _quantize_without_concat(tensors, qkv_quantizer, src_nominal_dtype):
 
     # Below a few tens of millions of elements both paths are bound by host-side
     # launch cost rather than by the cat, and this one dispatches more Python, so
-    # it loses. Measured crossover on MI355X is between 25M and 50M elements;
-    # under graph capture the host cost disappears and the fast path wins much
-    # earlier, so skip the floor while capturing.
+    # it loses. Measured crossover on MI355X is between 25M and 50M elements for
+    # delayed scaling; current scaling saves more traffic but launches more
+    # kernels, so the same floor is a conservative starting point. Under graph
+    # capture the host cost disappears and the fast path wins much earlier, so
+    # skip the floor while capturing.
     min_elements = int(os.getenv("NVTE_MULTI_QUANTIZE_TRITON_MIN_ELEMENTS", "33554432"))
     if sum(x.numel() for x in tensors) < min_elements:
         if not torch.cuda.is_current_stream_capturing():
@@ -2408,8 +2412,9 @@ def _quantize_without_concat(tensors, qkv_quantizer, src_nominal_dtype):
     tensors = [x.contiguous() for x in tensors]
     data, scale_inv = multi_tensor_quantize_fp8_triton(tensors, qkv_quantizer)
 
-    # Same as Float8Quantizer.create_tensor_from_data, except it reuses the
-    # scale_inv the kernel already wrote instead of recomputing 1/scale.
+    # Same as the quantizer's create_tensor_from_data, except it carries the
+    # scale_inv the kernel already wrote -- which the delayed version would
+    # recompute and the current-scaling one would leave empty.
     if qkv_quantizer.internal:
         template = Float8TensorStorage(
             data=data[0],

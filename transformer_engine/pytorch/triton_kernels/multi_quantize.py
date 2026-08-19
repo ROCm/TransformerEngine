@@ -13,11 +13,14 @@ owns a block belonging to exactly one input, and the per-tensor loads/stores of
 the other inputs are fully masked off. A single atomic-max accumulator gives
 the joint amax without materializing the joint buffer.
 
-Delayed scaling only. Its scale is fixed ahead of the cast, so the joint amax
-is a pure output and can be accumulated in the same pass as the cast -- which
+Delayed scaling runs in a single pass: its scale is fixed ahead of the cast, so
+the joint amax is a pure output and can be accumulated as the cast goes -- which
 is also why the C++ cast kernels atomic-max into the running amax without
-clearing it. Current scaling needs the joint amax *before* it can pick a scale
-and is deliberately not handled here.
+clearing it. Current scaling needs the joint amax *before* it can pick a scale,
+so it runs the same walk twice, once to reduce and once to cast, with a
+one-thread scale kernel in between. That is still cheaper than the cat it
+replaces, which pays a read+write to build the joint buffer before the
+quantizer reads it twice.
 """
 
 import functools
@@ -27,6 +30,7 @@ import torch
 import triton
 import triton.language as tl
 
+from .cast_transpose import _compute_scale_from_amax_triton
 from .common import get_fp8_max, te_dtype_to_triton_dtype
 
 # Largest number of tensors a single launch can cover.
@@ -47,13 +51,19 @@ def _multi_cast_kernel(
     NUM_TENSORS: tl.constexpr,
     UNROLL: tl.constexpr,
     BLOCK: tl.constexpr,
+    CAST: tl.constexpr,
+    COMPUTE_AMAX: tl.constexpr,
+    WRITE_SCALE_INV: tl.constexpr,
 ):
     if USE_NOOP:
         if tl.load(noop_ptr) == 1.0:
             return
 
     pid = tl.program_id(0)
-    scale = tl.load(scale_ptr)
+    # Current scaling reduces the amax in a first pass, before scale_ptr holds
+    # anything, and only reads it on the second.
+    if CAST:
+        scale = tl.load(scale_ptr)
     CHUNK: tl.constexpr = BLOCK * UNROLL
 
     # Map the flat program id onto (tensor index, chunk index within tensor).
@@ -92,22 +102,29 @@ def _multi_cast_kernel(
             a = tl.where(tid == 2, tl.load(p2 + off, mask=m2, other=0), a)
 
         a = a.to(tl.float32)
-        scaled_a = tl.clamp(a * scale, -max_fp8, max_fp8)
-        fp8_a = scaled_a.to(o0.type.element_ty)
+        if CAST:
+            scaled_a = tl.clamp(a * scale, -max_fp8, max_fp8)
+            fp8_a = scaled_a.to(o0.type.element_ty)
 
-        tl.store(o0 + off, fp8_a, mask=m0)
-        if NUM_TENSORS > 1:
-            tl.store(o1 + off, fp8_a, mask=m1)
-        if NUM_TENSORS > 2:
-            tl.store(o2 + off, fp8_a, mask=m2)
+            tl.store(o0 + off, fp8_a, mask=m0)
+            if NUM_TENSORS > 1:
+                tl.store(o1 + off, fp8_a, mask=m1)
+            if NUM_TENSORS > 2:
+                tl.store(o2 + off, fp8_a, mask=m2)
 
         # amax is taken on the unscaled input, matching the C++ cast kernels.
-        acc = tl.maximum(acc, tl.max(tl.abs(a)))
+        if COMPUTE_AMAX:
+            acc = tl.maximum(acc, tl.max(tl.abs(a)))
 
-    tl.atomic_max(amax_ptr, acc, sem='relaxed')
+    if COMPUTE_AMAX:
+        tl.atomic_max(amax_ptr, acc, sem='relaxed')
 
-    if pid == 0:
-        tl.store(scale_inv_ptr, tl.fdiv(1.0, scale))
+    if CAST:
+        # Delayed scaling knows its scale here; current scaling has already had
+        # scale_inv written by the scale kernel between the two passes.
+        if WRITE_SCALE_INV:
+            if pid == 0:
+                tl.store(scale_inv_ptr, tl.fdiv(1.0, scale))
 
 
 # This kernel is limited by atomic_max traffic against the single amax address,
@@ -158,8 +175,11 @@ def multi_tensor_quantize_fp8_triton(
     ----------
     tensors: contiguous high-precision tensors, all of the same dtype. Up to
              ``MAX_FUSED_TENSORS`` of them.
-    quantizer: a ``Float8Quantizer`` (per-tensor delayed scaling).
+    quantizer: a ``Float8Quantizer`` (delayed) or ``Float8CurrentScalingQuantizer``
+               (current). Under current scaling the quantizer's own scale and
+               amax buffers are filled in, exactly as a plain cast would.
     noop_flag: optional float32[1]; when it holds 1.0 the cast is skipped.
+               Delayed scaling only.
 
     Returns
     -------
@@ -167,17 +187,18 @@ def multi_tensor_quantize_fp8_triton(
     like that input, and ``scale_inv`` is the single float32[1] buffer shared
     by all of them.
     """
-    from ..tensor.float8_tensor import Float8Quantizer
+    from ..tensor.float8_tensor import Float8CurrentScalingQuantizer, Float8Quantizer
 
     num_tensors = len(tensors)
     assert 0 < num_tensors <= MAX_FUSED_TENSORS, (
         f"multi_tensor_quantize_fp8_triton supports 1..{MAX_FUSED_TENSORS} tensors,"
         f" got {num_tensors}"
     )
-    assert isinstance(quantizer, Float8Quantizer), (
-        "multi_tensor_quantize_fp8_triton only supports per-tensor delayed scaling,"
+    assert isinstance(quantizer, (Float8Quantizer, Float8CurrentScalingQuantizer)), (
+        "multi_tensor_quantize_fp8_triton only supports per-tensor scaling,"
         f" got {type(quantizer).__name__}"
     )
+    current_scaling = isinstance(quantizer, Float8CurrentScalingQuantizer)
     ref = tensors[0]
     assert all(t.dtype == ref.dtype for t in tensors), "all tensors must share a dtype"
     assert all(t.device == ref.device for t in tensors), "all tensors must share a device"
@@ -192,6 +213,10 @@ def multi_tensor_quantize_fp8_triton(
     scale_inv = torch.empty(1, dtype=torch.float32, device=ref.device)
 
     if total == 0:
+        if current_scaling:
+            # Nothing to scan; match the C++ cast's "no amax -> unit scale".
+            quantizer.amax.zero_()
+            quantizer.scale.fill_(1.0)
         scale_inv.copy_(1.0 / quantizer.scale)
         return out_data, scale_inv
 
@@ -208,21 +233,50 @@ def multi_tensor_quantize_fp8_triton(
     use_noop = noop_flag is not None and noop_flag.numel() > 0
     if not use_noop:
         noop_flag = ref  # unused placeholder; the kernel never dereferences it
-
-    _multi_cast_kernel[grid](
-        *in_ptrs,
-        *out_ptrs,
-        *lens,
-        quantizer.scale,
-        quantizer.amax,
-        scale_inv,
-        noop_flag,
-        max_fp8=get_fp8_max(quantizer.dtype),
-        USE_NOOP=use_noop,
-        NUM_TENSORS=num_tensors,
-        UNROLL=unroll,
-        BLOCK=block,
-        num_warps=num_warps,
+    assert not (current_scaling and use_noop), (
+        "noop_flag is not supported under current scaling: the scale is derived"
+        " between the two passes and cannot be skipped"
     )
+
+    fp8_max = get_fp8_max(quantizer.dtype)
+
+    def launch(cast: bool, compute_amax: bool, write_scale_inv: bool) -> None:
+        _multi_cast_kernel[grid](
+            *in_ptrs,
+            *out_ptrs,
+            *lens,
+            quantizer.scale,
+            quantizer.amax,
+            scale_inv,
+            noop_flag,
+            max_fp8=fp8_max,
+            USE_NOOP=use_noop,
+            NUM_TENSORS=num_tensors,
+            UNROLL=unroll,
+            BLOCK=block,
+            CAST=cast,
+            COMPUTE_AMAX=compute_amax,
+            WRITE_SCALE_INV=write_scale_inv,
+            num_warps=num_warps,
+        )
+
+    if current_scaling:
+        # The reduction is an atomic max that does not clear, so the joint amax
+        # has to start from nothing rather than from whatever the quantizer's
+        # buffer last held.
+        quantizer.amax.zero_()
+        launch(cast=False, compute_amax=True, write_scale_inv=False)
+        _compute_scale_from_amax_triton[(1,)](
+            quantizer.amax,
+            quantizer.scale,
+            scale_inv,
+            fp8_max,
+            quantizer.amax_epsilon,
+            torch.finfo(torch.float32).max,
+            FORCE_POW_2_SCALES=quantizer.force_pow_2_scales,
+        )
+        launch(cast=True, compute_amax=False, write_scale_inv=False)
+    else:
+        launch(cast=True, compute_amax=True, write_scale_inv=True)
 
     return out_data, scale_inv

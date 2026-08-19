@@ -15,9 +15,16 @@ The binding module (``transformer_engine_xattention``) is built in-tree as a
 self-contained second extension against the ``3rdparty/xAttention`` submodule —
 see ``build_tools/xattention.py``.
 
-Scope (fp8 DelayedScaling): bshd/sbhd, non-padding, non-CP, head_dim 64/128,
-causal / no-mask / sliding-window. Anything else must be filtered out by
-``get_attention_backend`` before we get here.
+Scope (per-tensor fp8: DelayedScaling and Float8CurrentScaling): bshd/sbhd,
+non-padding, non-CP, head_dim 64/128, causal / no-mask / sliding-window.
+Anything else must be filtered out by ``get_attention_backend`` before we get
+here.
+
+Under current scaling TE hands this module a hybrid set of quantizers -- Q/K/V,
+O, dO and dQKV are current-scaling, while S and dP stay delayed, because a fused
+kernel needs ``scale_s``/``scale_ds`` before it runs. The current-scaling
+quantizers have no scale until after they cast, so the kernel is asked for
+high-precision O and dQ/dK/dV and the caller quantizes them.
 """
 
 import os
@@ -287,15 +294,19 @@ def fp8_forward(
         out_data = torch.empty_like(qd, dtype=torch.uint8)
         out = out_data.view(_torch_fp8_dtype(o_quantizer.dtype))
     else:
-        out = torch.empty_like(qd, dtype=torch.bfloat16)
+        # High precision out goes back to the caller as-is, so it has to carry
+        # the nominal dtype rather than a fixed one.
+        out = torch.empty_like(qd, dtype=q_fp8.dtype)
 
     # The kernel reduces amax straight into the quantizers' slots, so there is no
     # allocation to make here and nothing to copy back afterwards. amax_o is
     # captured before scale_o is applied, so the history stays in the output's
-    # true units whichever output dtype we asked for.
+    # true units whichever output dtype we asked for. Only a delayed quantizer
+    # carries a history to feed; a current-scaling one recomputes amax when it
+    # casts, so asking for the reduction there is dead work.
     res = _xattn.fwd_quant(
         qd, kd, vd, descale_q, descale_k, descale_v, scale_s, descale_s, scale_o,
-        out, s_quantizer.amax, o_quantizer.amax,
+        out, s_quantizer.amax, o_quantizer.amax if _has_static_scale(o_quantizer) else None,
         float(softmax_scale), causal, wl, wr, fmt, fmt,
     )
     out_kernel, softmax_lse = res[0], res[1]
@@ -378,6 +389,9 @@ def fp8_backward(
         dv_data = torch.empty_like(vd, dtype=torch.uint8)
         dq, dk, dv = (t.view(grad_dtype) for t in (dq_data, dk_data, dv_data))
     else:
+        # bf16 is the only high-precision gradient dtype the kernel accepts
+        # (unlike the forward, which takes the nominal dtype); the caller
+        # converts to the nominal dtype on the way out.
         dq = torch.empty_like(qd, dtype=torch.bfloat16)
         dk = torch.empty_like(kd, dtype=torch.bfloat16)
         dv = torch.empty_like(vd, dtype=torch.bfloat16)
@@ -388,7 +402,15 @@ def fp8_backward(
     # slots in one buffer and fold it afterwards. dS maps 1:1 and goes direct.
     # Each amax is descaled by 1/scale_dq before it is stored, so the history
     # stays in the gradients' true units whichever output dtype we asked for.
-    amax_dqkv = torch.empty(3, device=qd.device, dtype=torch.float32)
+    # A current-scaling dQKV quantizer has no history and rescans at cast time,
+    # so skip the reductions and the fold entirely.
+    track_dqkv_amax = _has_static_scale(dqkv_quantizer)
+    amax_dqkv = torch.empty(3, device=qd.device, dtype=torch.float32) if track_dqkv_amax else None
+    amax_dq, amax_dk, amax_dv = (
+        (amax_dqkv[0:1], amax_dqkv[1:2], amax_dqkv[2:3])
+        if track_dqkv_amax
+        else (None, None, None)
+    )
 
     res = _xattn.bwd_quant(
         dod, qd, kd, vd, od, softmax_lse,
@@ -396,13 +418,14 @@ def fp8_backward(
         scale_s, descale_s, scale_ds, descale_ds,
         scale_dqkv, scale_dqkv, scale_dqkv,
         dq, dk, dv,
-        amax_dqkv[0:1], amax_dqkv[1:2], amax_dqkv[2:3], dp_quantizer.amax,
+        amax_dq, amax_dk, amax_dv, dp_quantizer.amax,
         None,
         0.0, float(softmax_scale), causal, wl, wr, 0.0, bool(deterministic), fmt, fmt,
     )
     dq_o, dk_o, dv_o = res[0], res[1], res[2]
 
-    torch.amax(amax_dqkv, dim=0, keepdim=True, out=dqkv_quantizer.amax)
+    if track_dqkv_amax:
+        torch.amax(amax_dqkv, dim=0, keepdim=True, out=dqkv_quantizer.amax)
 
     if quantize_dqkv:
         # scale_inv is derived from the quantizer on device; no host round trip.

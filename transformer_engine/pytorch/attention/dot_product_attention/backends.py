@@ -1343,11 +1343,17 @@ class FusedAttnFunc(torch.autograd.Function):
                 dP_quantizer,
             )
 
+            # xAttention's fp8 backward takes O in fp8, so the current-scaling
+            # option of keeping it in high precision does not apply there.
+            cs_o_in_f16 = _dpa_fp8_cs_o_in_f16 and fused_attention_backend != FusedAttnBackend.get(
+                "XAttn"
+            )
+
             # whether O is needed in fp8 downstream, either as the returned output
             # or as the backward's O input; current scaling may keep the latter in
             # high precision instead
             needs_fp8_out = is_output_fp8 or (
-                is_bwd_fp8 and not (fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16)
+                is_bwd_fp8 and not (fp8_recipe.float8_current_scaling() and cs_o_in_f16)
             )
 
             # out_:
@@ -1434,7 +1440,7 @@ class FusedAttnFunc(torch.autograd.Function):
             fp8_tensors = (None, None, None, None)
             qkvo_tensors = (None, None, None, None)
             if is_bwd_fp8:
-                if fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16:
+                if fp8_recipe.float8_current_scaling() and cs_o_in_f16:
                     fp8_tensors = (q_fp8, k_fp8, v_fp8, None)
                     qkvo_tensors = (None, None, None, out)
                 else:
@@ -1678,10 +1684,13 @@ class FusedAttnFunc(torch.autograd.Function):
                     # DelayedScaling:               Float8Tensor; dtype = torch.float16 or torch.bfloat16
                     #                               fp8_dtype = tex.DType.kFloat8E5M2
                     # Float8CurrentScaling:         torch.Tensor; dtype = torch.float16 or torch.bfloat16
+                    # must mirror the forward's choice; see the note there
+                    cs_o_in_f16 = (
+                        _dpa_fp8_cs_o_in_f16
+                        and ctx.fused_attention_backend != FusedAttnBackend.get("XAttn")
+                    )
                     out_ = (
-                        out
-                        if ctx.fp8_recipe.float8_current_scaling() and _dpa_fp8_cs_o_in_f16
-                        else out_fp8
+                        out if ctx.fp8_recipe.float8_current_scaling() and cs_o_in_f16 else out_fp8
                     )
                     if ctx.fused_attention_backend == FusedAttnBackend.get("XAttn"):
                         # ROCm: route the fp8 bwd kernel to xAttention, which writes
