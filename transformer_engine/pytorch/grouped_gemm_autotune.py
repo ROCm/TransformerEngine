@@ -90,7 +90,7 @@ def _log_selection(sel) -> None:
     )
     if sel.from_cache:
         return
-        line = f"[gg-autotune] cache HIT  [{ks}] -> {sel.winner}"
+        line = f"[te-autotune] cache HIT  [{ks}] -> {sel.winner}"
     else:
         tried = []
         for r in sel.reports:
@@ -103,7 +103,7 @@ def _log_selection(sel) -> None:
             else:
                 tried.append(f"{r.name}={r.time_ms:.4f}ms")
         line = (
-            f"[gg-autotune] cache MISS [{ks}] tried: {', '.join(tried)} "
+            f"[te-autotune] cache MISS [{ks}] tried: {', '.join(tried)} "
             f"-> selected {sel.winner}"
         )
     if line != _last_log:
@@ -311,7 +311,7 @@ def _get_router() -> AutotuneRouter:
                 formats=_ALL_FORMATS,
             ),
             _GroupedGemmBackend(
-                "ck",
+                "ck_tile",
                 {
                     "NVTE_USE_CUTLASS_GROUPED_GEMM": "1",
                     "NVTE_USE_CK_GROUPED_GEMM": "1",
