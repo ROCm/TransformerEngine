@@ -35,18 +35,16 @@ Environment Variables:
         (jax-ml/jax#35218) instead of silently falling back to non-autotuned
         dispatch. Useful for CI or debugging to ensure autotuning is active.
         Default is "0" (silent compatibility fallback).
-    NVTE_JAX_TRITON_PREWARM: ROCm only. If set to "0", do not launch a freshly
-        compiled kernel once on a single device before returning from lowering.
-        The prewarm works around a race in the ROCm plugin, which unlinks the
-        HSACO it was handed before locking its module cache, so two device
-        threads reaching an unseen kernel together can make one of them fail
-        with ENOENT. Default is "1" (prewarm runs when more than one local
-        device is visible).
+    NVTE_JAX_TRITON_PREWARM: ROCm only. If set to "0", do not load each kernel from
+        a single device before returning from lowering. The load works around a race
+        in the ROCm plugin, which unlinks the HSACO it was handed before locking its
+        module cache. Default is "1" (runs when more than one local device is visible).
 """
 
 import hashlib
 import os
 import tempfile
+import threading
 import warnings
 from typing import Any, Callable, Mapping, Optional
 import zlib
@@ -198,7 +196,6 @@ if not is_triton_extension_supported():
     )
 
 try:
-    import triton
     from jax._src.lib import gpu_triton
     from triton.compiler import compiler as tc
     from triton.runtime import autotuner
@@ -217,47 +214,78 @@ _TRITON_KERNEL_CACHE = {}
 
 # Process-scoped temp dir for ROCm HSACO blobs (removed at interpreter exit).
 _HSACO_TMPDIR = None
+_HSACO_TMPDIR_LOCK = threading.Lock()
 
-# Single-device prewarm state (ROCm only; see _prewarm_kernel_call).
+# Prewarm state (ROCm only; see _prewarm_kernel_call).
 _PREWARM_PRIM = None
-_PREWARM_ACTIVE = False
+_PREWARM_PRIM_LOCK = threading.Lock()
+_PREWARMED = set()
+_PREWARM_KEY_LOCKS = {}
+_PREWARM_REGISTRY_LOCK = threading.Lock()
+
+
+def _reset_state_after_fork():
+    """Reset fork-unsafe module state in a child process."""
+    global _HSACO_TMPDIR, _HSACO_TMPDIR_LOCK, _PREWARM_PRIM_LOCK, _PREWARM_REGISTRY_LOCK
+    _HSACO_TMPDIR_LOCK = threading.Lock()
+    _PREWARM_PRIM_LOCK = threading.Lock()
+    _PREWARM_REGISTRY_LOCK = threading.Lock()
+    _PREWARM_KEY_LOCKS.clear()
+    # Detach first: dropping the last reference would delete the parent's directory.
+    if _HSACO_TMPDIR is not None:
+        _HSACO_TMPDIR._finalizer.detach()  # pylint: disable=protected-access
+        _HSACO_TMPDIR = None
+    # The plugin's module cache is not inherited, so nothing here is loaded yet.
+    _PREWARMED.clear()
+
+
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_state_after_fork)
 
 
 def _hsaco_dir():
     """Return a process-scoped temp directory for HSACO blobs (created lazily)."""
     global _HSACO_TMPDIR
-    if _HSACO_TMPDIR is None:
-        _HSACO_TMPDIR = tempfile.TemporaryDirectory(prefix="te_jax_hsaco_")
-    return _HSACO_TMPDIR.name
+    with _HSACO_TMPDIR_LOCK:
+        if _HSACO_TMPDIR is None:
+            _HSACO_TMPDIR = tempfile.TemporaryDirectory(  # pylint: disable=consider-using-with
+                prefix="te_jax_hsaco_"
+            )
+        return _HSACO_TMPDIR.name
 
 
 def _prewarm_primitive():
     """Primitive that re-emits an already-built Triton custom call for prewarming."""
     global _PREWARM_PRIM
-    if _PREWARM_PRIM is None:
-        from jax.extend.core import Primitive
-        from jax.interpreters import mlir
+    from jax.extend.core import Primitive
+    from jax.interpreters import mlir
 
-        prim = Primitive("te_triton_prewarm")
-        prim.multiple_results = True
-        prim.def_abstract_eval(lambda *_, out_avals, rule: out_avals)
-        mlir.register_lowering(prim, lambda ctx, *args, out_avals, rule: rule(ctx, *args))
-        _PREWARM_PRIM = prim
-    return _PREWARM_PRIM
+    with _PREWARM_PRIM_LOCK:
+        if _PREWARM_PRIM is None:
+            prim = Primitive("te_triton_prewarm")
+            prim.multiple_results = True
+            prim.def_abstract_eval(lambda *_, out_avals, rule: out_avals)
+            mlir.register_lowering(prim, lambda ctx, *args, out_avals, rule: rule(ctx, *args))
+            _PREWARM_PRIM = prim
+        return _PREWARM_PRIM
 
 
-def _prewarm_kernel_call(ctx, rule):
-    """Load a freshly compiled HSACO into the ROCm plugin from a single device.
+def _prewarm_kernel_call(ctx, rule, key):
+    """Load a kernel into the ROCm plugin from a single device."""
+    with _PREWARM_REGISTRY_LOCK:
+        key_lock = _PREWARM_KEY_LOCKS.setdefault(key, threading.Lock())
+    with key_lock:
+        if key in _PREWARMED:
+            return
+        try:
+            _prewarm_launch(ctx, rule)
+        finally:
+            # On failure too: a persistent cause would never succeed and would re-warn.
+            _PREWARMED.add(key)
 
-    The plugin reads the blob from its path and unlinks it before taking the lock that
-    guards its module cache, so two device threads reaching an unseen kernel together
-    race: the winner deletes the file, the loser fails with ENOENT. Launching once here,
-    on one device, inserts the cache entry before any sharded executable can race for it.
-    """
-    global _PREWARM_ACTIVE
-    if _PREWARM_ACTIVE:
-        return
-    _PREWARM_ACTIVE = True
+
+def _prewarm_launch(ctx, rule):
+    """Launch the kernel once and swallow any failure."""
     try:
         prim = _prewarm_primitive()
         device = jax.local_devices()[0]
@@ -265,14 +293,12 @@ def _prewarm_kernel_call(ctx, rule):
             jax.device_put(jnp.zeros(aval.shape, aval.dtype), device) for aval in ctx.avals_in
         ]
         out_avals = tuple(core.ShapedArray(a.shape, a.dtype) for a in ctx.avals_out)
-        jax.block_until_ready(
-            jax.jit(lambda *xs: prim.bind(*xs, out_avals=out_avals, rule=rule))(*operands)
-        )
+        # pylint: disable-next=unexpected-keyword-arg,missing-kwoa
+        launch = jax.jit(lambda *xs: prim.bind(*xs, out_avals=out_avals, rule=rule))
+        jax.block_until_ready(launch(*operands))
     except Exception as e:  # pylint: disable=broad-except
         # Prewarming is an optimization; a failure here must not break the real compile.
         warnings.warn(f"Triton kernel prewarm failed ({type(e).__name__}: {e})", RuntimeWarning)
-    finally:
-        _PREWARM_ACTIVE = False
 
 
 def get_triton_info():
@@ -403,6 +429,7 @@ def compile_triton(
 
     if is_hip:
         # ROCm: active GPU target (gfx arch + its native warp size); HSACO binary.
+        import triton
         from triton.compiler import make_backend
 
         target = triton.runtime.driver.active.get_current_target()
@@ -622,7 +649,6 @@ def triton_call_lowering(
     # single non-autotuned dispatch for compatibility.  Set
     # NVTE_JAX_ENFORCE_TRITON_AUTOTUNING=1 to raise an error instead, prompting the
     # user to upgrade JAX for improved performance.
-    kernels_before = len(_TRITON_KERNEL_CACHE)
     is_autotuned = isinstance(kernel_fn, autotuner.Autotuner)
     used_autotuned_launch = False
     if is_autotuned and not is_triton_autotuned_alias_safe():
@@ -774,11 +800,14 @@ def triton_call_lowering(
     if not used_autotuned_launch and jax_version_meet_requirement(
         TRITON_EXTENSION_CUDA_GRAPH_MIN_JAX_VERSION
     ):
-        rule = jax.ffi.ffi_lowering(
-            "triton_kernel_call_ffi",
-            backend_config={"opaque": ir.StringAttr.get(compressed_call_proto)},
-            operand_output_aliases=ffi_operand_output_aliases,
-        )
+        # Rebuilt per call: an MLIR attribute belongs to the context that made it.
+        def rule(lowering_ctx, *operands, **params):
+            return jax.ffi.ffi_lowering(
+                "triton_kernel_call_ffi",
+                backend_config={"opaque": ir.StringAttr.get(compressed_call_proto)},
+                operand_output_aliases=ffi_operand_output_aliases,
+            )(lowering_ctx, *operands, **params)
+
     else:
         rule = jax.ffi.ffi_lowering(
             "triton_kernel_call",  # Custom call target registered in gpu_triton.py
@@ -789,10 +818,9 @@ def triton_call_lowering(
 
     if (
         is_hip_extension()
-        and len(_TRITON_KERNEL_CACHE) > kernels_before
         and len(jax.local_devices()) > 1
         and os.environ.get("NVTE_JAX_TRITON_PREWARM", "1") != "0"
     ):
-        _prewarm_kernel_call(ctx, rule)
+        _prewarm_kernel_call(ctx, rule, hashlib.md5(compressed_call_proto).hexdigest())
 
     return rule(ctx, *array_args)

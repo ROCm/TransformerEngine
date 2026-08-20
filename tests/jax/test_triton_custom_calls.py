@@ -161,7 +161,7 @@ class TestTritonBinding:
 # Gluon binding tests. Drive a @gluon.jit kernel through the same
 # triton_call_lowering bridge as the Triton test above.
 if HAS_GLUON:
-    # BLOCK_SIZE must divide NUM_WARPS * WARP_SIZE so the 1-D layout tiles exactly.
+    # NUM_WARPS * WARP_SIZE must divide BLOCK_SIZE so the 1-D layout tiles exactly.
     BLOCK_SIZE = 1024
     NUM_WARPS = 4
 
