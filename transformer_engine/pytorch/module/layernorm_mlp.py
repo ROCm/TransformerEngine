@@ -399,10 +399,11 @@ class _LayerNormMLP(torch.autograd.Function):
             ub_bulk_dgrad = False
         ub_overlap_ag = ub_overlap_ag and is_grad_enabled and not return_layernorm_output_gathered
         ub_overlap_rs = ub_overlap_rs and is_grad_enabled
+        # bias_gelu_fusion moves both epilogues out of the FC1 GEMM
         if ub_overlap_ag and not (
             fused_ag_gemm_eligible(
-                "fc1_fprop", inp, fc1_weight, fc1_bias, activation_dtype, tp_size, fp8,
-                gelu=gemm_gelu_fusion,
+                "fc1_fprop", inp, fc1_weight, None if bias_gelu_fusion else fc1_bias, 
+                activation_dtype, tp_size, fp8, gelu=activation == "gelu" and not bias_gelu_fusion,
             )
             and fused_ag_gemm_eligible(
                 "fc2_dgrad", inp, fc2_weight, None, activation_dtype, tp_size, fp8, is_dgrad=True,

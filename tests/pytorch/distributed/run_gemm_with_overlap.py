@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2025-2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -78,10 +80,10 @@ def _parse_args(argv=None, namespace=None):
         "--atomic", action="store_true", default=False, help="Test overlap with atomic GEMM."
     )
     parser.add_argument(
-        "--persistent",
+        "--fused",
         action="store_true",
         default=False,
-        help="Select the persistent fused AG+GEMM backend (gfx950 only).",
+        help="Select the fused AG+GEMM backend (gfx950 only).",
     )
     parser.add_argument(
         "--aggregate",
@@ -364,7 +366,7 @@ def _main(opts):
             atomic_gemm=opts.atomic,
             aggregate=opts.aggregate,
             use_ce=not (opts.atomic and bool(int(os.getenv("NVTE_AG_P2P_MULTI_ATOMIC", "0")))),
-            persistent=opts.persistent,
+            fused=opts.fused,
         )
     else:
         ub_obj = tex.CommOverlap(

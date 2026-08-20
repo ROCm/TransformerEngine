@@ -718,7 +718,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         kittens_fused_ag_gemm_reset();
 #endif
       },
-      "Drop cached persistent AG+GEMM plans and peer base pointers");
+      "Drop cached fused AG+GEMM plans and peer base pointers");
 #else
   m.def("bulk_overlap_ag_with_external_gemm", &transformer_engine::pytorch::placeholder,
         "Dummy function for python side annotations");
@@ -809,7 +809,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                        transformer_engine::CommOverlapType comm_type, int num_max_streams,
                        int comm_cga_size, int gemm_priority, int comm_priority, int num_comm_sm,
                        bool set_sm_margin, bool atomic_gemm, bool use_ce, bool aggregate,
-                       bool use_cublasmp, bool persistent) {
+                       bool use_cublasmp, bool fused) {
              if (use_cublasmp) {
                return std::make_shared<CommOverlapP2P>(helper, helper->mylocal, tp_size, comm_type,
                                                        buffer_shape, buffer_dtype, num_comm_sm,
@@ -819,7 +819,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
                                                      comm_type, num_max_streams, comm_cga_size,
                                                      gemm_priority, comm_priority, num_comm_sm,
                                                      set_sm_margin, atomic_gemm, use_ce, aggregate,
-                                                     persistent);
+                                                     fused);
            }),
            py::call_guard<py::gil_scoped_release>(), py::arg("buffer_shape"),
            py::arg("buffer_dtype"), py::arg("helper"), py::arg("tp_size"), py::arg("comm_type"),
@@ -827,7 +827,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
            py::arg("gemm_priority") = 0, py::arg("comm_priority") = 0, py::arg("num_comm_sm") = 1,
            py::arg("set_sm_margin") = false, py::arg("atomic_gemm") = false,
            py::arg("use_ce") = true, py::arg("aggregate") = false, py::arg("use_cublasmp") = false,
-           py::arg("persistent") = false)
+           py::arg("fused") = false)
       .def("copy_into_buffer",
            static_cast<void (CommOverlapP2P::*)(const at::Tensor &, bool)>(
                &CommOverlapP2P::copy_into_buffer),

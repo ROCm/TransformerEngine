@@ -250,7 +250,7 @@ static_assert(prev_is_inverse_of_next<2,4>(tp_next_4, tp_prev_4), "tp_prev_4 is 
 static_assert(prev_is_inverse_of_next<7,8>(tp_next_8, tp_prev_8), "tp_prev_8 is not inverse of tp_next_8");
 
 #ifdef USE_HIPKITTENS_GEMM
-// Fused all-gather + GEMM, launched by persistent_overlap_ag below.
+// Fused all-gather + GEMM, launched by fused_overlap_ag below.
 static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, TensorWrapper &D,
                              const TensorWrapper &bias, const TensorWrapper &pre_gelu_out,
                              const TensorWrapper &B_copy, TensorWrapper &workspace, bool accumulate,
@@ -258,15 +258,15 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
                              int reg, int tp_id, int tp_size, uint64_t signal, cudaStream_t stream) {
   // TODO: Add bias support
   NVTE_CHECK(!transb && !accumulate && bias.numel() == 0 && pre_gelu_out.numel() == 0 && B_copy.numel() == 0,
-             "persistent AG+GEMM reached with an unsupported epilogue");
+             "fused AG+GEMM reached with an unsupported epilogue");
   NVTE_CHECK(A.dtype() == DType::kBFloat16 && ubuf.dtype() == DType::kBFloat16 && D.dtype() == DType::kBFloat16,
-             "persistent AG+GEMM reached with a non-bf16 operand");
+             "fused AG+GEMM reached with a non-bf16 operand");
 
   const size_t m       = (transa) ? A.size(0) : A.size(1);
   const size_t k       = (transa) ? A.size(1) : A.size(0);
   const size_t n_chunk = chunk.size(0);
   NVTE_CHECK((tp_size == 4 || tp_size == 8) && m % 256 == 0 && k % 128 == 0 && k >= 256 && n_chunk % 256 == 0,
-             "persistent AG+GEMM reached with an ineligible shape (m=", m, " k=", k, " n_chunk=", n_chunk,
+             "fused AG+GEMM reached with an ineligible shape (m=", m, " k=", k, " n_chunk=", n_chunk,
              " tp_size=", tp_size, ")");
 
   const int rank_round_tp = comm->myrank - tp_id;
@@ -283,7 +283,7 @@ static bool hk_fused_ag_gemm(const TensorWrapper &A, bool transa, bool transb, T
 }
 #endif
 
-void CommOverlapP2PBase::persistent_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
+void CommOverlapP2PBase::fused_overlap_ag(const TensorWrapper &A, bool transa, const TensorWrapper &B,
                                 bool transb, TensorWrapper &D, TensorWrapper &bias,
                                 TensorWrapper &pre_gelu_out, TensorWrapper &workspace, bool grad,
                                 bool accumulate, bool use_split_accumulator, TensorWrapper &B_copy,
@@ -294,12 +294,12 @@ void CommOverlapP2PBase::persistent_overlap_ag(const TensorWrapper &A, bool tran
                                            workspace, accumulate, _ubuf, _ubufs[0], _ub_comm,
                                            _ub_reg, _tp_id, _tp_size, _ag_signal_base + _tp_size,
                                            stream_main);
-    NVTE_CHECK(launched, "persistent AG+GEMM failed to launch");
+    NVTE_CHECK(launched, "fused AG+GEMM failed to launch");
     _ag_signal_base += _tp_size;
     return;
   }
 #endif
-  NVTE_ERROR("persistent AG+GEMM was selected but is not built into this library");
+  NVTE_ERROR("fused AG+GEMM was selected but is not built into this library");
 }
 
 // TODO: Introduce HIPGraphs for dependency management.

@@ -799,12 +799,12 @@ CommOverlapP2PBase::CommOverlapP2PBase(const std::vector<size_t> &buffer_shape, 
                                        CommOverlapType comm_type, int num_max_streams,
                                        int comm_cga_size, int gemm_priority, int comm_priority,
                                        int num_comm_sm, bool set_sm_margin, bool use_ce,
-                                       bool atomic_gemm, bool aggregate, bool persistent)
+                                       bool atomic_gemm, bool aggregate, bool fused)
     : CommOverlapCore(myrank, numranks, mylocal, numlocal, mynode, numnodes, tp_size,
                       allgather_handle, barrier_handle, tp_size, num_max_streams, comm_cga_size,
                       gemm_priority, comm_priority, num_comm_sm, set_sm_margin, use_ce,
                       atomic_gemm),
-      _persistent(persistent) {
+      _fused(fused) {
   initialize(buffer_shape, buffer_dtype, comm_type, aggregate);
 }
 

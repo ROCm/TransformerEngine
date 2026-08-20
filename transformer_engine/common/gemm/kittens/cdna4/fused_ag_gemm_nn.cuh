@@ -130,37 +130,18 @@ void gather_peer_tile(int peer, int tn, int sub, int gath_wg, int tiles_per_chun
 }
 
 __host__ __device__ __forceinline__
-int tile_xcd(int mode, int c, int tn) {
-    if (mode == 2) return c & (NUM_XCDS_AFF - 1);
-    return (c + tn) & (NUM_XCDS_AFF - 1);
-}
+int tile_xcd(int chunk_id) { return chunk_id & (NUM_XCDS_AFF - 1); }
 
 template <int U, bool NT>
 __device__ __forceinline__
-void gather_all(int xcd_aff, int my_pe, int tp_size, int gath_wg, int tiles_per_chunk,
+void gather_all(int my_pe, int gath_wg, int tiles_per_chunk,
                 char *gb, const PeerPtrs &peers, size_t chunk_bytes, unsigned int *arrive)
 {
-    const int lane = (int)blockIdx.x % NUM_XCDS_AFF;
-    const int sub  = (int)blockIdx.x / NUM_XCDS_AFF;
-
-    if (xcd_aff == 2) {
-        if (lane == my_pe || lane >= tp_size) return;
-        for (int tn = 0; tn < tiles_per_chunk; tn++) {
-            gather_peer_tile<U, NT>(lane, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
-        }
-    } else if (xcd_aff) {
-        for (int tn = 0; tn < tiles_per_chunk; tn++) {
-            const int c = (lane - tn) & (NUM_XCDS_AFF - 1);
-            if (c == my_pe || c >= tp_size) continue;
-            gather_peer_tile<U, NT>(c, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
-        }
-    } else {
-        const int pi   = (int)blockIdx.x / gath_wg;
-        const int sub  = (int)blockIdx.x % gath_wg;
-        const int peer = pi + (pi >= my_pe ? 1 : 0);
-        for (int tn = 0; tn < tiles_per_chunk; tn++) {
-            gather_peer_tile<U, NT>(peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
-        }
+    const int pi   = (int)blockIdx.x / gath_wg;
+    const int sub  = (int)blockIdx.x % gath_wg;
+    const int peer = pi + (pi >= my_pe ? 1 : 0);
+    for (int tn = 0; tn < tiles_per_chunk; tn++) {
+        gather_peer_tile<U, NT>(peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
     }
 }
 
@@ -171,13 +152,14 @@ void gather_all(int xcd_aff, int my_pe, int tp_size, int gath_wg, int tiles_per_
 __global__ __launch_bounds__(GATH_THREADS)
 void gather_only_kernel(bf16 *__restrict__ b_local, const PeerPtrs peers, unsigned int *__restrict__ arrive,
                         int my_pe, int tp_size, int gath_wg, int tiles_per_chunk, size_t chunk_bytes,
-                        int xcd_aff, int gath_u, int nt_store)
+                        int gath_u, int nt_store)
 {
     char *gb = (char *)b_local;
     // U=1 only.
+    (void)tp_size;
     (void)gath_u;
-    if (nt_store) gather_all<1, true >(xcd_aff, my_pe, tp_size, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
-    else          gather_all<1, false>(xcd_aff, my_pe, tp_size, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
+    if (nt_store) gather_all<1, true >(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
+    else          gather_all<1, false>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
 }
 
 template <typename U, typename RT>
@@ -217,7 +199,7 @@ void persistent_ag_bf16_gemm(
     const gl<float, 1, 1, -1, -1> CW, const TileDesc *__restrict__ work_queue, int num_tiles,
     int *__restrict__ tile_counter, const PeerPtrs peers, unsigned int *__restrict__ arrive, int my_pe,
     int tp_size, int gath_wg, int tiles_per_chunk, size_t chunk_bytes, unsigned int epoch, int xcd_sched_on,
-    int xcd_aff, int gath_u, int nt_store, const XcdBuckets buckets, int *__restrict__ bucket_ctr, int split_gath)
+    int xcd_bucket, int gath_u, int nt_store, const XcdBuckets buckets, int *__restrict__ bucket_ctr, int split_gath)
 {
     const int M       = A.rows();
     const int K       = A.cols();
@@ -299,13 +281,13 @@ void persistent_ag_bf16_gemm(
         #undef RDB
     };
 
-    const int NGATH = split_gath ? 0 : (xcd_aff ? (NUM_XCDS_AFF * gath_wg) : ((tp_size - 1) * gath_wg));
+    const int NGATH = split_gath ? 0 : ((tp_size - 1) * gath_wg);
     if ((int)blockIdx.x < NGATH) {
         char *gb = (char *)&A[{0, 0, 0, 0}];
         #define GA(UU) do {                                                                       \
-            if (nt_store) gather_all<UU, true >(xcd_aff, my_pe, tp_size, gath_wg,                 \
+            if (nt_store) gather_all<UU, true >(my_pe, gath_wg,                                   \
                                                 tiles_per_chunk, gb, peers, chunk_bytes, arrive); \
-            else          gather_all<UU, false>(xcd_aff, my_pe, tp_size, gath_wg,                 \
+            else          gather_all<UU, false>(my_pe, gath_wg,                                   \
                                                 tiles_per_chunk, gb, peers, chunk_bytes, arrive); \
         } while (0)
         switch (gath_u) {
@@ -328,7 +310,7 @@ void persistent_ag_bf16_gemm(
     while (true) {
         __shared__ int s_tile_idx;
         if (threadIdx.x == 0) {
-            if (xcd_aff) {
+            if (xcd_bucket) {
                 // Steal order: Own bucket, then the local chunk, then the other XCDs.
                 int found = -1;
                 const int b0 = (int)blockIdx.x % NUM_XCDS_AFF;
@@ -399,7 +381,7 @@ void persistent_ag_bf16_gemm(
         G_group::load(As[toc][0], A, {0, 0, block_row * 2,     kt_base + 1}, sw_A, a_srd, a_base, a_lds_10);
         load_B(toc, 1, 1);
 
-        asm volatile("s_waitcnt vmcnt(6)");
+        asm volatile("s_waitcnt vmcnt(4)");
         __builtin_amdgcn_s_barrier();
 
         // Main K-loop: two K-tiles per iteration, prefetching +2 ahead.
@@ -490,7 +472,7 @@ void persistent_ag_bf16_gemm(
             __builtin_amdgcn_sched_barrier(0);
 
             load_B(1, 1, tile + 3);
-            asm volatile("s_waitcnt vmcnt(6)");
+            asm volatile("s_waitcnt vmcnt(4)");
             __builtin_amdgcn_s_barrier();
 
             __builtin_amdgcn_s_setprio(1);
@@ -659,15 +641,14 @@ static std::vector<TileDesc> build_work_queue(int M, int N_total, int K, int tp_
 }
 
 // Stable-partition the queue into one contiguous segment per XCD
-static std::vector<TileDesc> bucketize_by_xcd(const std::vector<TileDesc> &q, int tpc, int mode, XcdBuckets &bk)
+static std::vector<TileDesc> bucketize_by_xcd(const std::vector<TileDesc> &q, XcdBuckets &bk)
 {
     std::vector<TileDesc> out;
     out.reserve(q.size());
     for (int b = 0; b < NUM_XCDS_AFF; b++) {
         bk.off[b] = (int)out.size();
         for (size_t i = 0; i < q.size(); i++) {
-            const int tm = q[i].tile_m - q[i].chunk_id * tpc;
-            if (tile_xcd(mode, q[i].chunk_id, tm) == b) out.push_back(q[i]);
+            if (tile_xcd(q[i].chunk_id) == b) out.push_back(q[i]);
         }
         bk.cnt[b] = (int)out.size() - bk.off[b];
     }
@@ -678,7 +659,7 @@ template <int KSPLIT>
 static void launch_persistent(
     int M, int N_TOTAL, int K, bf16 *d_a, bf16 *d_b, bf16 *d_c, float *d_cw, TileDesc *d_queue, int num_tiles,
     int *d_tile_counter, PeerPtrs peers, unsigned int *d_arrive, int my_pe, int tp_size, int gath_wg, int m_local,
-    size_t chunk_bytes, unsigned int epoch, int xcd_sched_on, int xcd_aff, int gath_u, int nt_store,
+    size_t chunk_bytes, unsigned int epoch, int xcd_sched_on, int xcd_bucket, int gath_u, int nt_store,
     XcdBuckets buckets, int *d_bucket_ctr, int split_gath, hipStream_t stream)
 {
     const int tiles_M = M / BLOCK_ROW;
@@ -691,8 +672,8 @@ static void launch_persistent(
     gl<float, 1, 1, -1, -1> CW_gl(d_cw, nullptr, nullptr, (size_t)M * KSPLIT, (size_t)N_TOTAL);
 
     // Gatherers are dedicated (blockIdx < NGATH) and only join the compute queue once their peer's chunk has landed.
-    const int NGATH = split_gath ? 0 : (xcd_aff ? (NUM_XCDS_AFF * gath_wg) : ((tp_size - 1) * gath_wg));
-    static const int grid_cap = getenv("GRID_CAP") ? atoi(getenv("GRID_CAP")) : 512;
+    const int NGATH = split_gath ? 0 : ((tp_size - 1) * gath_wg);
+    static const int grid_cap = getenv("HK_GRID_CAP") ? atoi(getenv("HK_GRID_CAP")) : 256;
     int grid = tiles_M * tiles_N * KSPLIT + NGATH;
     if (grid_cap > 0 && grid > grid_cap) grid = grid_cap;
     if (grid < NGATH) grid = NGATH;
@@ -700,7 +681,7 @@ static void launch_persistent(
     persistent_ag_bf16_gemm<KSPLIT><<<grid, NUM_THREADS, 0, stream>>>(
         A_gl, B_gl, C_gl, CW_gl, d_queue, num_tiles, d_tile_counter, peers,
         d_arrive, my_pe, tp_size, gath_wg, tiles_per_chunk, chunk_bytes, epoch, xcd_sched_on,
-        xcd_aff, gath_u, nt_store, buckets, d_bucket_ctr, split_gath);
+        xcd_bucket, gath_u, nt_store, buckets, d_bucket_ctr, split_gath);
 }
 
 using persistent_fn_t = void (*)(int, int, int, bf16 *, bf16 *, bf16 *, float *, TileDesc *, int, int *,

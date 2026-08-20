@@ -9,16 +9,30 @@
 #include "fused_ag_gemm_nn.cuh"
 
 #include <array>
+#include <cstdio>
 #include <map>
 #include <mutex>
 #include <vector>
 
 namespace {
 
+
+uint64_t compute_warn_ticks() {
+    int dev = 0, khz = 0;
+    if (hipGetDevice(&dev) != hipSuccess) return 0;
+    if (hipDeviceGetAttribute(&khz, hipDeviceAttributeWallClockRate, dev) != hipSuccess) return 0;
+    return static_cast<uint64_t>(khz) * 1000ull * 120; // 2 min warning timer
+}
+
+uint64_t ag_ready_warn_ticks() {
+    static const uint64_t ticks = compute_warn_ticks();
+    return ticks;
+}
+
 __global__ __launch_bounds__(64)
 void ag_ready_kernel(void *const *__restrict__ peers, size_t offset,
                      const char *__restrict__ local, size_t stride, uint64_t value,
-                     int first, int count, int tp_size) {
+                     int first, int count, int tp_size, uint64_t warn_ticks) {
     const int c = static_cast<int>(threadIdx.x);
     if (c >= tp_size) return;
 
@@ -27,15 +41,26 @@ void ag_ready_kernel(void *const *__restrict__ peers, size_t offset,
     __hip_atomic_store(pub, value, __ATOMIC_RELEASE, __HIP_MEMORY_SCOPE_SYSTEM);
 
     const uint64_t *f = reinterpret_cast<const uint64_t *>(local + static_cast<size_t>(c) * stride);
-    while (__hip_atomic_load(f, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM) < value) {
+    // Report once and keep spinning
+    const uint64_t deadline = warn_ticks ? wall_clock64() + warn_ticks : 0;
+    bool     warned = (warn_ticks == 0);
+    uint64_t seen   = __hip_atomic_load(f, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
+    while (seen < value) {
+        if (!warned && wall_clock64() > deadline) {
+            printf("[fused AG+GEMM] ag_ready_kernel still waiting: peer_slot=%d peer_first=%d "
+                   "tp_size=%d flag=%p expected=%llu observed=%llu\n", c, first, tp_size, static_cast<const void *>(f),
+                   static_cast<unsigned long long>(value), static_cast<unsigned long long>(seen));
+            warned = true;
+        }
+        seen = __hip_atomic_load(f, __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_SYSTEM);
     }
     __hip_atomic_load(f, __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_SYSTEM);
 }
 
 struct AgPlan {
-    void *queue   = nullptr;
-    int num_tiles = 0;
-    int xcd_aff   = 0;
+    void *queue = nullptr;
+    int num_tiles  = 0;
+    int xcd_bucket = 0;
     int off[hk_ag_tn::NUM_XCDS_AFF] = {};
     int cnt[hk_ag_tn::NUM_XCDS_AFF] = {};
 };
@@ -59,11 +84,12 @@ const std::vector<void *> *peer_bases(const void *peer_ub, int count) {
     return &g_peers.emplace(peer_ub, std::move(v)).first->second;
 }
 
+
 // Peer-dedicated queues win when the queue is walked at most ~2 times and there are enough M-tiles
-// to fill the buckets. Same gate as the harnesses, on the same GRID_CAP default.
-int auto_xcd_aff(int num_tiles, int tiles_m) {
-    const int grid_cap = getenv("GRID_CAP") ? atoi(getenv("GRID_CAP")) : 512;
-    return (grid_cap > 0 && num_tiles <= 2 * grid_cap && tiles_m >= 5) ? 2 : 0;
+// to fill the buckets. The 1024 is fixed, not derived from the grid cap.
+int auto_xcd_bucket(int num_tiles, int tiles_m) {
+    const int grid_cap = getenv("HK_GRID_CAP") ? atoi(getenv("HK_GRID_CAP")) : 256;
+    return (grid_cap > 0 && num_tiles <= 1024 && tiles_m >= 5) ? 1 : 0;
 }
 
 template <typename TD>
@@ -107,12 +133,12 @@ bool run_tn(const KittensFusedAgGemmArgs &args) {
     if (it == g_plans.end()) {
         AgPlan plan;
         std::vector<StepInfo> steps;
-        auto queue     = build_work_queue(M, N_TOTAL, K, tp_size, args.rank, steps);
-        plan.num_tiles = static_cast<int>(queue.size());
-        plan.xcd_aff   = auto_xcd_aff(plan.num_tiles, tiles_m);
-        if (plan.xcd_aff) {
+        auto queue      = build_work_queue(M, N_TOTAL, K, tp_size, args.rank, steps);
+        plan.num_tiles  = static_cast<int>(queue.size());
+        plan.xcd_bucket = auto_xcd_bucket(plan.num_tiles, tiles_m);
+        if (plan.xcd_bucket) {
             XcdBuckets bk{};
-            queue = bucketize_by_xcd(queue, m_local / BLOCK_ROW, plan.xcd_aff, bk);
+            queue = bucketize_by_xcd(queue, bk);
             for (int b = 0; b < NUM_XCDS_AFF; b++) {
                 plan.off[b] = bk.off[b];
                 plan.cnt[b] = bk.cnt[b];
@@ -151,14 +177,14 @@ bool run_tn(const KittensFusedAgGemmArgs &args) {
         ag_ready_kernel<<<1, 64, 0, args.stream>>>(
             static_cast<void *const *>(const_cast<void *>(args.arrive_peers)), args.arrive_offset,
             static_cast<const char *>(args.arrive_local), args.arrive_stride, args.arrive_value,
-            args.peer_first, args.peer_count, tp_size);
+            args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
     }
 
     get_persistent_fn(M, N_TOTAL, K)(
         M, N_TOTAL, K, static_cast<bf16 *>(args.ub),
         static_cast<bf16 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D),
         static_cast<TileDesc *>(plan.queue), plan.num_tiles, tile_counter, peers, arrive,
-        args.rank, tp_size, GATH_WG, m_local, args.chunk_bytes, 1u, 0, plan.xcd_aff, 1, 1,
+        args.rank, tp_size, GATH_WG, m_local, args.chunk_bytes, 1u, 0, plan.xcd_bucket, 1, 1,
         buckets, bucket_ctr, 0, args.stream);
     return hipGetLastError() == hipSuccess;
 }
@@ -187,12 +213,12 @@ bool run_nn(const KittensFusedAgGemmArgs &args) {
     if (it == g_plans.end()) {
         AgPlan plan;
         std::vector<StepInfo> steps;
-        auto queue     = build_work_queue(M, N_TOTAL, K, tp_size, args.rank, steps, S);
-        plan.num_tiles = static_cast<int>(queue.size());
-        plan.xcd_aff   = auto_xcd_aff(plan.num_tiles, tiles_m);
-        if (plan.xcd_aff) {
+        auto queue      = build_work_queue(M, N_TOTAL, K, tp_size, args.rank, steps, S);
+        plan.num_tiles  = static_cast<int>(queue.size());
+        plan.xcd_bucket = auto_xcd_bucket(plan.num_tiles, tiles_m);
+        if (plan.xcd_bucket) {
             XcdBuckets bk{};
-            queue = bucketize_by_xcd(queue, m_local / BLOCK_ROW, plan.xcd_aff, bk);
+            queue = bucketize_by_xcd(queue, bk);
             for (int b = 0; b < NUM_XCDS_AFF; b++) {
                 plan.off[b] = bk.off[b];
                 plan.cnt[b] = bk.cnt[b];
@@ -234,13 +260,13 @@ bool run_nn(const KittensFusedAgGemmArgs &args) {
         ag_ready_kernel<<<1, 64, 0, args.stream>>>(
             static_cast<void *const *>(const_cast<void *>(args.arrive_peers)), args.arrive_offset,
             static_cast<const char *>(args.arrive_local), args.arrive_stride, args.arrive_value,
-            args.peer_first, args.peer_count, tp_size);
+            args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
     }
 
     pfn(M, N_TOTAL, K, static_cast<bf16 *>(args.ub),
         static_cast<bf16 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D), cw,
         static_cast<TileDesc *>(plan.queue), plan.num_tiles, tile_counter, peers, arrive,
-        args.rank, tp_size, GATH_WG, m_local, args.chunk_bytes, 1u, 0, plan.xcd_aff, 1, 1,
+        args.rank, tp_size, GATH_WG, m_local, args.chunk_bytes, 1u, 0, plan.xcd_bucket, 1, 1,
         buckets, bucket_ctr, 0, args.stream);
     if (S > 1) launch_sk_reduce(cw, static_cast<bf16 *>(args.D), mn, S, args.stream);
     return hipGetLastError() == hipSuccess;

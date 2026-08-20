@@ -86,7 +86,7 @@ _dummy_wgrads = {}
 _ub_communicators = None
 _ub_initialized = False
 _ub_with_cublasmp = False
-_ub_persistent_names = set()
+_ub_fused_names = set()
 _ub_disabled_names = set()
 _MIN_STREAM_PRIORITY, _MAX_STREAM_PRIORITY = None, None
 layers_atomic_ring_exchange = []
@@ -163,7 +163,7 @@ def initialize_ub(
 
                  {
                     <gemm_name> : {
-                        "method": <"ring_exchange", "pipeline", or "persistent" (ROCm only)>,
+                        "method": <"ring_exchange", "pipeline", or "fused" (ROCm only)>,
                         "is_reduce_scatter": bool,
                         "num_sm": int,
                         "cga_size": int,
@@ -342,14 +342,14 @@ def initialize_ub(
             "qkv_wgrad",
             "fc1_wgrad",
         ]
-        # gfx950 runs the persistent backend or nothing by default.
-        _persistent_default = get_device_compute_capability() == (9, 5)
+        # gfx950 runs the fused backend or nothing by default.
+        _fused_default = get_device_compute_capability() == (9, 5)
         methods = {
-            "ring_exchange": [] if _persistent_default else list(_rocm_layers),
+            "ring_exchange": [] if _fused_default else list(_rocm_layers),
             "pipeline": [],
             # TODO: Investigate issues with qkv_dgrad and fc1_dgrad overlap on ROCm
             "bulk": [],
-            "persistent": list(_rocm_layers) if _persistent_default else [],
+            "fused": list(_rocm_layers) if _fused_default else [],
         }
     else:
         methods = {
@@ -386,13 +386,13 @@ def initialize_ub(
         default_cfg = {
             "method": method,
             "is_reduce_scatter": is_reduce_scatter,
-            "num_sm": 1 if method in ("ring_exchange", "persistent") else 16,
-            "cga_size": 1 if method in ("ring_exchange", "persistent") else 2,
+            "num_sm": 1 if method in ("ring_exchange", "fused") else 16,
+            "cga_size": 1 if method in ("ring_exchange", "fused") else 2,
             # Default set to False for HIP for performance
             "set_sm_margin": (
-                method not in ("ring_exchange", "persistent") and not IS_HIP_EXTENSION
+                method not in ("ring_exchange", "fused") and not IS_HIP_EXTENSION
             ),
-            "num_splits": tp_size if method in ("ring_exchange", "persistent") else 4,
+            "num_splits": tp_size if method in ("ring_exchange", "fused") else 4,
             "aggregate": False,
             "atomic_gemm": False,
             "use_ce": True,
@@ -422,13 +422,13 @@ def initialize_ub(
     ) -> None:
         if method not in methods:
             raise ValueError(f"At {name}, unrecognized overlap method `{method}`.")
-        if method == "persistent" and get_device_compute_capability() != (9, 5):
-            raise ValueError(f"At {name}, `persistent` overlap method requires a gfx950 device.")
-        if method == "persistent" and is_reduce_scatter:
+        if method == "fused" and get_device_compute_capability() != (9, 5):
+            raise ValueError(f"At {name}, `fused` overlap method requires a gfx950 device.")
+        if method == "fused" and is_reduce_scatter:
             # TODO: Add RS support.
             _ub_disabled_names.add(name)
             return
-        if with_cublasmp and method in ("bulk", "external", "persistent"):
+        if with_cublasmp and method in ("bulk", "external", "fused"):
             raise ValueError(
                 f"At {name}, cuBLASMp does not support `{method}` overlap method. "
                 "Please select a different method or set with_cublasmp=False."
@@ -491,7 +491,7 @@ def initialize_ub(
             else dtype
         )
         comm_type = tex.CommOverlapType.RS if is_reduce_scatter else tex.CommOverlapType.AG
-        if method in ("ring_exchange", "persistent"):
+        if method in ("ring_exchange", "fused"):
             ub_obj = tex.CommOverlapP2P(
                 shape,  # Communication buffer shape
                 buffer_dtype,  # Communication buffer data type
@@ -508,7 +508,7 @@ def initialize_ub(
                 aggregate=aggregate,
                 gemm_priority=gemm_priority,
                 comm_priority=comm_priority,
-                persistent=method == "persistent",
+                fused=method == "fused",
             )
         else:
             ub_obj = tex.CommOverlap(
@@ -529,8 +529,8 @@ def initialize_ub(
                 rs_overlap_first_gemm=pipeline_rs_overlap_first_gemm,
             )
         _ub_communicators[(name, quantization_mode)] = ub_obj
-        if method == "persistent":
-            _ub_persistent_names.add(name)
+        if method == "fused":
+            _ub_fused_names.add(name)
 
     for quantization_mode, user_ub_cfg in zip(quantization_modes, ub_cfgs):
         if user_ub_cfg is not None:
@@ -636,8 +636,8 @@ def fused_ag_gemm_eligible(
     gelu: bool = False,
     is_dgrad: bool = False,
 ) -> bool:
-    """Whether the persistent AG+GEMM backend covers this call."""
-    if not _ub_is_persistent(name):
+    """Whether the fused AG+GEMM backend covers this call."""
+    if not _ub_is_fused(name):
         return True  # not our backend
     # TODO: Drop these as the kernel gains fp8/mxfp8, bias and gelu support.
     if fp8 or gelu or bias is not None:
@@ -652,9 +652,9 @@ def fused_ag_gemm_eligible(
     return m % 256 == 0 and k % 128 == 0 and k >= 256 and n_chunk % 256 == 0
 
 
-def _ub_is_persistent(name: str) -> bool:
-    """Whether `name` was configured with the persistent overlap method."""
-    return name in _ub_persistent_names
+def _ub_is_fused(name: str) -> bool:
+    """Whether `name` was configured with the fused overlap method."""
+    return name in _ub_fused_names
 
 
 def ub_overlap_disabled(name: str) -> bool:
@@ -668,7 +668,7 @@ def destroy_ub():
     _ub_communicators = None
     _ub_with_cublasmp = False
     _ub_initialized = False
-    _ub_persistent_names.clear()
+    _ub_fused_names.clear()
     _ub_disabled_names.clear()
     if IS_HIP_EXTENSION:
         tex.reset_fused_ag_gemm_cache()
