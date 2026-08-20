@@ -65,8 +65,11 @@ run_test_config() {
     # group-mode per-segment dq_acc layout matters (see the equal-dim-128 RAGGED_SELF config).
     NVTE_CK_IS_V3_ATOMIC_FP32=0 run_default_fa_lbl "atomic16" 3 test_fused_attn.py -k "test_backward and RAGGED"
     run_default_fa 1 test_layer.py # it effectively always uses unfused attention
+    run_default_fa 1 test_recipe_characteristics.py # renamed upstream from test_helper.py
+    run_default_fa 1 test_fused_router.py
     run_default_fa 1 test_sanity_import.py
     run_default_fa 1 test_softmax.py
+    run_default_fa 1 test_misc.py
 }
 
 run_test_config_mgpu() {
@@ -90,6 +93,8 @@ run_test_config_mgpu() {
     # RCCL_MSCCL_ENABLE=0 is to avoid hangs in some distributed tests (ROCM-1719)
     RCCL_MSCCL_ENABLE=0 run $_dfa_level test_distributed_fused_attn.py
     run_default_fa 1 test_distributed_helper.py
+    # L0 is forced: this file only defines L0/L2 keys, so the L1 set above aborts collection
+    NVTE_JAX_UNITTEST_LEVEL=L0 run_default_fa 1 test_distributed_router.py
     run_default_fa 3 test_distributed_layernorm.py
     # JAX 0.10+ on ROCm lowers sharded FP8 dot_general (with_jax_gemm=True,
     # Float8CurrentScaling) to __triton_nested_gemm_fusion with f16 accumulation,

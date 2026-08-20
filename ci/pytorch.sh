@@ -94,6 +94,7 @@ run_test_config(){
     NVTE_ALLOW_NONDETERMINISTIC_ALGO=0 run_default_fa_lbl "deterministic" 3 attention/test_attention.py -k "test_deterministic_bwd_ck"
     run_default_fa 1 attention/test_cp_utils.py
     run_default_fa 1 attention/test_kv_cache.py
+    run_default_fa 1 attention/test_cu_seqlens_cache.py
     run_default_fa 1 triton_kernels/test_cast.py
     run_default_fa 1 triton_kernels/test_cast_mxfp8.py
     run_default_fa 1 triton_kernels/test_cast_mxfp4.py
@@ -121,6 +122,28 @@ run_test_config(){
     NVTE_USE_ATOMIC_AMAX=1 run_default_fa_lbl "amax" 3 triton_kernels/test_cast.py
     run_default_fa 1 nvfp4/
     run_default_fa 1 mxfp4/
+    run_default_fa 1 test_qk_norm.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_partial_cast.py
+    NVTE_DISABLE_TRITON_AUTOTUNING=1 run_default_fa 1 test_mhc.py
+    run_default_fa 1 layernorm_mlp/test_selective_activation_checkpoint.py
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_custom_recipe.py
+    #optimize_for_gemm cases self-skip on ROCm: MXFP8 scale swizzle fusion is unimplemented
+    NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 mxfp8/
+    #Upstream PR3122 moved the grouped MLP cases out of test_fusible_ops.py into this file.
+    #mxfp8-True variants are deselected: hipBLASLt MXFP8 GEMM does not support bias on ROCm.
+    #Scoped to TestGroupedMLPFusedOp; the TestGroupedLinearOp sweep in the same file is ~4.7k cases.
+    check_mxfp8_supported && NVTE_ROCM_ENABLE_MXFP8=1 run_default_fa 1 test_grouped_mlp.py -k "TestGroupedMLPFusedOp and not mxfp8-True"
+    #NVIDIA-DL-Framework-Inspect suite. One file per invocation: TEDebugState is process global,
+    #and debug/test_numerics.py must stay separate as its basename collides with test_numerics.py
+    _dbg_args="--feature_dirs=${TE_PATH}transformer_engine/debug/features --configs_dir=${TE_PATH}tests/pytorch/debug/test_configs/"
+    NVTE_TORCH_COMPILE=0 run_default_fa 1 debug/test_config.py $_dbg_args
+    NVTE_TORCH_COMPILE=0 run_default_fa 1 debug/test_sanity.py $_dbg_args
+    NVTE_TORCH_COMPILE=0 run_default_fa 1 debug/test_api_features.py $_dbg_args
+    NVTE_TORCH_COMPILE=0 run_default_fa 1 debug/test_perf.py $_dbg_args
+    NVTE_TORCH_COMPILE=0 run_default_fa 1 debug/test_numerics.py $_dbg_args
+    #test_log.py keeps the arch guard: test_fp8_stats_allows_nvfp4_with_recipe_prefix requests
+    #mxfp8 stats and fails, rather than skipping, when MXFP8 is unavailable
+    check_mxfp8_supported && NVTE_ROCM_ENABLE_MXFP8=1 NVTE_TORCH_COMPILE=0 run_default_fa 1 debug/test_log.py $_dbg_args
 }
 
 run_test_config_mgpu(){
@@ -135,6 +158,10 @@ run_test_config_mgpu(){
     run_default_fa 3 distributed/test_comm_gemm_overlap.py
     run_default_fa 2 distributed/test_fusible_ops.py
     run_default_fa 2 distributed/test_numerics.py
+    #mGPU only: on a single GPU this file asserts rather than skips
+    run_default_fa 2 distributed/test_sanity.py
+    run_default_fa 2 distributed/test_numerics_exact.py
+    NVTE_TORCH_COMPILE=0 run_default_fa 2 debug/test_distributed.py --feature_dirs=${TE_PATH}transformer_engine/debug/features --configs_dir=${TE_PATH}tests/pytorch/debug/test_configs/
     run_default_fa 1 distributed/test_torch_fsdp2.py
     run_default_fa 2 distributed/test_torch_fsdp2_fp8.py
     if [ $_fus_attn = ck ]; then
