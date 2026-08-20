@@ -618,8 +618,10 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
             fp8_recipe_dpa = fake_recipe
             fp8_recipes = fp8_recipe_dpa
-        elif fp8_recipe.nvfp4() and _dpa_fp8_recipe == "DelayedScaling":
+        elif (fp8_recipe.nvfp4() or fp8_recipe.mxfp4()) and _dpa_fp8_recipe == "DelayedScaling":
             # reuse fp8_dpa, fp8_mha from fp8_recipe but not fp8_format; construct a DS recipe
+            # mxfp4 joins nvfp4 here: 4-bit block scaling is not per-tensor, so a recipe with
+            # fp8_dpa=True would trip the assert below unless DPA falls back to per-tensor fp8
             fake_recipe = DelayedScaling(
                 fp8_format=_dpa_fp8_format,
                 amax_history_len=_dpa_fp8ds_amax_histlen,
@@ -659,7 +661,9 @@ class DotProductAttention(TransformerEngineBaseModule):
             )
             fp8_recipe_dpa = fake_recipe
             fp8_recipes = [fp8_recipe, fp8_recipe_dpa]
-        elif fp8_recipe.nvfp4() and _dpa_fp8_recipe == "Float8CurrentScaling":
+        elif (
+            fp8_recipe.nvfp4() or fp8_recipe.mxfp4()
+        ) and _dpa_fp8_recipe == "Float8CurrentScaling":
             # reuse fp8_dpa, fp8_mha from fp8_recipe but not fp8_format
             # construct a CS recipe for QKV, O, dO, dQKV and a DS recipe for S, dP
             fake_recipes = [
