@@ -151,7 +151,7 @@ int bwd_smem_bytes(DType ctype, int hidden_size, int ctas_per_row, int warps_m, 
 template <typename ParamsT>
 bool try_static_fallback(StaticFallback<ParamsT> static_fallback,
                          LaunchParams<ParamsT>& launch_params, const bool configure_params) {
-  if (rtc::is_enabled_norm_softmax()) {
+  if (rtc::is_enabled()) {
     return false;
   }
   NVTE_CHECK(static_fallback != nullptr,

@@ -36,18 +36,6 @@ namespace rtc {
  */
 bool is_enabled();
 
-/*! \brief Whether the norm/softmax RTC JIT path is enabled
- *
- * Same as is_enabled(), except on ROCm it defaults OFF so the dispatchers use
- * the static kernels built with NVTE_BUILD_LEGACY_STATIC_{NORM,FUSED_SOFTMAX}=ON.
- * The softmax RTC path is known-broken on hipRTC (it passes "--use_fast_math",
- * which hipRTC rejects at argument parsing -> HIPRTC_ERROR_COMPILATION); the norm
- * RTC path is unvalidated on hipRTC. Opt back in with NVTE_ENABLE_NVRTC=1. Scoped
- * to norm/softmax only; the transpose and cast-transpose RTC fast paths keep
- * using is_enabled() (functional on ROCm). See rtc.cpp for details.
- */
-bool is_enabled_norm_softmax();
-
 /*! \brief Header made available to an NVRTC program */
 struct Header {
   const char *content;

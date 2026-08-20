@@ -31,7 +31,11 @@ namespace transformer_engine {
 
 #ifdef __CUDACC_RTC__
 using fp16 = half;
+#ifdef __HIP_PLATFORM_AMD__
+using bf16 = hip_bfloat16;
+#else
 using bf16 = nv_bfloat16;
+#endif
 #endif
 
 #ifndef NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
@@ -368,6 +372,22 @@ namespace {
 constexpr const char *kRtcSourceFile =
     "transformer_engine/common/fused_softmax/scaled_upper_triang_masked_softmax.cu";
 
+// "--use_fast_math" is nvcc/NVRTC spelling; hipRTC rejects it while parsing
+// arguments. The ROCm build also compiles the static softmax kernels without
+// fast math (nvte_sources_with_fast_math is CUDA-only), so the JIT matches it
+// and passes no fast-math option at all.
+#ifdef __HIP_PLATFORM_AMD__
+constexpr bool kRtcFastMath = false;
+#else
+constexpr bool kRtcFastMath = true;
+#endif
+
+const std::vector<std::string> &rtc_compile_options() {
+  static const std::vector<std::string> opts =
+      kRtcFastMath ? std::vector<std::string>{"--use_fast_math"} : std::vector<std::string>{};
+  return opts;
+}
+
 template <typename Type>
 std::string make_softmax_rtc_code(int log2_elements) {
   (void)log2_elements;
@@ -378,7 +398,8 @@ std::string make_softmax_rtc_code(int log2_elements) {
 template <typename Type>
 std::string make_softmax_rtc_label(const char *direction, int log2_elements) {
   return concat_strings("fused_softmax,variant=upper_triang,direction=", direction,
-                        ",type=", TypeInfo<Type>::name, ",log2=", log2_elements, ",fast_math=1");
+                        ",type=", TypeInfo<Type>::name, ",log2=", log2_elements,
+                        ",fast_math=", kRtcFastMath ? 1 : 0);
 }
 
 template <typename Type>
@@ -427,7 +448,7 @@ void dispatch_scaled_upper_triang_masked_softmax_forward(output_t *dst, const in
     int blocks_per_seq = attn_batches / batches_per_block;
     dim3 blocks(seq_len, blocks_per_seq, 1);
     dim3 threads(warp_size, warps_per_block, 1);
-    if (rtc::is_enabled_norm_softmax()) {
+    if (rtc::is_enabled()) {
       auto &rtc_manager = rtc::KernelManager::instance();
       const std::string kernel_label = make_softmax_rtc_label<input_t>("forward", log2_elements);
       if (!rtc_manager.is_compiled(kernel_label)) {
@@ -435,7 +456,7 @@ void dispatch_scaled_upper_triang_masked_softmax_forward(output_t *dst, const in
                             make_softmax_rtc_kernel_name<input_t>(
                                 "scaled_upper_triang_masked_softmax_warp_forward", log2_elements),
                             make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile,
-                            {"--use_fast_math"});
+                            rtc_compile_options());
       }
       const acc_t rtc_scale = static_cast<acc_t>(scale);
       rtc_manager.launch(kernel_label, blocks, threads, 0, stream, dst, src, rtc_scale, batch_count,
@@ -563,7 +584,7 @@ void dispatch_scaled_upper_triang_masked_softmax_backward(output_t *grad_input, 
     int blocks_per_seq = attn_batches / batches_per_block;
     dim3 blocks(seq_len, blocks_per_seq, 1);
     dim3 threads(warp_size, warps_per_block, 1);
-    if (rtc::is_enabled_norm_softmax()) {
+    if (rtc::is_enabled()) {
       auto &rtc_manager = rtc::KernelManager::instance();
       const std::string kernel_label = make_softmax_rtc_label<input_t>("backward", log2_elements);
       if (!rtc_manager.is_compiled(kernel_label)) {
@@ -571,7 +592,7 @@ void dispatch_scaled_upper_triang_masked_softmax_backward(output_t *grad_input, 
                             make_softmax_rtc_kernel_name<input_t>(
                                 "scaled_upper_triang_masked_softmax_warp_backward", log2_elements),
                             make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile,
-                            {"--use_fast_math"});
+                            rtc_compile_options());
       }
       rtc_manager.launch(kernel_label, blocks, threads, 0, stream, grad_input, grad, output, scale,
                          batch_count, softmax_elements_stride, softmax_elements);

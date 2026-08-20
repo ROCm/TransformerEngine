@@ -25,7 +25,8 @@
         "cudaLaunchConfig_t": "hipLaunchConfig_t",
         "cudaLaunchAttribute": "hipLaunchAttribute",
         "cudaLaunchAttributeCooperative": "hipLaunchAttributeCooperative",
-        "CUdeviceptr": "hipDeviceptr_t"
+        "CUdeviceptr": "hipDeviceptr_t",
+        "__CUDACC_RTC__": "__HIPCC_RTC__"
  }
 }
 

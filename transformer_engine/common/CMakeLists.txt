@@ -754,6 +754,40 @@ function(make_string_header_from_file file_ STRING_NAME)
                    @ONLY)
 endfunction()
 
+# Same, but on ROCm embed the hipified variant of the file when hipify produced
+# one. RTC source strings must be the HIP flavour, otherwise hipRTC is handed
+# CUDA code. hipify only writes an output when the content actually changes, so
+# the .hip/_hip.* file may legitimately not exist; fall back to the original.
+# TE_Hipify() has already run at this point (configure time).
+function(make_string_header_from_hipified_file file_ STRING_NAME)
+    set(_src "${file_}")
+    if(USE_ROCM)
+        get_filename_component(_dir "${file_}" DIRECTORY)
+        get_filename_component(_stem "${file_}" NAME_WE)
+        get_filename_component(_ext "${file_}" EXT)
+        if(_ext STREQUAL ".cu")
+            set(_hip_name "${_stem}.hip")
+        elseif(_ext STREQUAL ".cuh")
+            set(_hip_name "${_stem}_hip.cuh")
+        elseif(_ext STREQUAL ".h")
+            set(_hip_name "${_stem}_hip.h")
+        else()
+            set(_hip_name "")
+        endif()
+        if(_hip_name)
+            if(_dir STREQUAL "")
+                set(_cand "${_hip_name}")
+            else()
+                set(_cand "${_dir}/${_hip_name}")
+            endif()
+            if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/${_cand}")
+                set(_src "${_cand}")
+            endif()
+        endif()
+    endif()
+    make_string_header_from_file("${_src}" "${STRING_NAME}")
+endfunction()
+
 if(USE_CUDA)
 # Header files with C++ strings
 list(GET CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES 0 cuda_include_path)
@@ -783,56 +817,44 @@ else()
   make_string_header_from_file(amd_detail/hip_float8.h
                               string_code_amd_detail_hip_float8_h)
 endif()
-# Fused-softmax RTC string headers: generated on both platforms, on purpose.
-# The softmax TU unconditionally compiles make_softmax_rtc_code(), which odr-uses
-# these string symbols, and that function is called under a *runtime* gate
-# (rtc::is_enabled_norm_softmax(), false by default on ROCm) -- not a compile-time
-# #if -- so the symbols must link and the include must resolve even though ROCm
-# runs the static kernels (NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=ON) at runtime.
-# Guarding the generation would require #ifdef-guarding the include + rtc_code
-# helper + call sites across these hot dispatch paths, and would turn the
-# NVTE_ENABLE_NVRTC=1 opt-in (used to trial the hipRTC JIT) into a rebuild. Kept
-# unconditional; revisit if/when the hipRTC softmax JIT is enabled on ROCm.
-make_string_header_from_file(fused_softmax/scaled_masked_softmax.cu
+make_string_header_from_hipified_file(fused_softmax/scaled_masked_softmax.cu
                              string_code_fused_softmax_scaled_masked_softmax_cu)
-make_string_header_from_file(fused_softmax/scaled_upper_triang_masked_softmax.cu
+make_string_header_from_hipified_file(fused_softmax/scaled_upper_triang_masked_softmax.cu
                              string_code_fused_softmax_scaled_upper_triang_masked_softmax_cu)
-make_string_header_from_file(fused_softmax/scaled_aligned_causal_masked_softmax.cu
+make_string_header_from_hipified_file(fused_softmax/scaled_aligned_causal_masked_softmax.cu
                              string_code_fused_softmax_scaled_aligned_causal_masked_softmax_cu)
-make_string_header_from_file(util/math.h
+make_string_header_from_hipified_file(util/math.h
                              string_code_util_math_h)
 
 # Norm NVRTC bundled headers + RTC source files
-make_string_header_from_file(normalization/kernel_params.h
+make_string_header_from_hipified_file(normalization/kernel_params.h
                              string_code_normalization_kernel_params_h)
-make_string_header_from_file(normalization/kernel_traits.h
+make_string_header_from_hipified_file(normalization/kernel_traits.h
                              string_code_normalization_kernel_traits_h)
-make_string_header_from_file(normalization/layernorm/ln_fwd_kernels.cuh
+make_string_header_from_hipified_file(normalization/layernorm/ln_fwd_kernels.cuh
                              string_code_normalization_layernorm_ln_fwd_kernels_cuh)
-make_string_header_from_file(normalization/layernorm/ln_bwd_kernels.cuh
+make_string_header_from_hipified_file(normalization/layernorm/ln_bwd_kernels.cuh
                              string_code_normalization_layernorm_ln_bwd_kernels_cuh)
-make_string_header_from_file(normalization/rmsnorm/rmsnorm_fwd_kernels.cuh
+make_string_header_from_hipified_file(normalization/rmsnorm/rmsnorm_fwd_kernels.cuh
                              string_code_normalization_rmsnorm_rmsnorm_fwd_kernels_cuh)
-make_string_header_from_file(normalization/rmsnorm/rmsnorm_bwd_kernels.cuh
+make_string_header_from_hipified_file(normalization/rmsnorm/rmsnorm_bwd_kernels.cuh
                              string_code_normalization_rmsnorm_rmsnorm_bwd_kernels_cuh)
-make_string_header_from_file(normalization/layernorm/rtc/ln_fwd_kernel.cu
+make_string_header_from_hipified_file(normalization/layernorm/rtc/ln_fwd_kernel.cu
                              string_code_normalization_layernorm_rtc_ln_fwd_kernel_cu)
-make_string_header_from_file(normalization/layernorm/rtc/ln_bwd_kernel.cu
+make_string_header_from_hipified_file(normalization/layernorm/rtc/ln_bwd_kernel.cu
                              string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu)
-make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_fwd_kernel.cu
+make_string_header_from_hipified_file(normalization/rmsnorm/rtc/rmsnorm_fwd_kernel.cu
                              string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu)
-make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu
+make_string_header_from_hipified_file(normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu
                              string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu)
 target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")
 
-# Default ON for ROCm, OFF for CUDA. On ROCm the norm/softmax hipRTC JIT is not
-# functional, so rtc::is_enabled_norm_softmax() defaults NVRTC off there and the
-# dispatchers select these static kernels — they MUST be compiled in. Defaulting
-# ON when USE_ROCM keeps a CMake-driven ROCm configure (direct cmake or a
-# downstream add_subdirectory) self-consistent: NVRTC-off + static kernels present.
-# setup.py also passes these ON for ROCm, which is now a redundant override.
-# CUDA keeps them OFF (NVRTC is the primary path there).
+# Default ON for ROCm, OFF for CUDA. The norm/softmax hipRTC JIT now works on
+# ROCm, so these are no longer required -- they are kept ON as the fallback for
+# NVTE_DISABLE_NVRTC=1 while the JIT path is being validated on AMD hardware.
+# Flipping them OFF (matching CUDA) is what buys the build-time win, notably the
+# 556 static norm variants below; do that once the JIT is validated.
 option(NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX
        "Also compile legacy static fused softmax kernels for NVTE_DISABLE_NVRTC fallback"
        ${USE_ROCM})
@@ -840,10 +862,9 @@ target_compile_definitions(transformer_engine
                            PRIVATE
                            NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX=$<BOOL:${NVTE_BUILD_LEGACY_STATIC_FUSED_SOFTMAX}>)
 
-# See above: ON for ROCm (norm hipRTC JIT non-functional -> static kernels
-# required), OFF for CUDA. Set ON to compile the legacy static template
-# instantiations, selected when norm/softmax NVRTC is disabled at runtime. This
-# compiles all 556 REGISTER_NORM_LAUNCHER variants up front.
+# See above: ON for ROCm as a fallback, OFF for CUDA. Set ON to compile the
+# legacy static template instantiations, selected when NVRTC is disabled at
+# runtime. This compiles all 556 REGISTER_NORM_LAUNCHER variants up front.
 option(NVTE_BUILD_LEGACY_STATIC_NORM
        "Also compile static norm kernels for NVTE_DISABLE_NVRTC fallback"
        ${USE_ROCM})

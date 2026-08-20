@@ -1,4 +1,6 @@
 /*************************************************************************
+ * This file was modified for portability to AMDGPU
+ * Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
  * Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
  *
  * See LICENSE for license information.
@@ -25,7 +27,11 @@ namespace normalization {
 // The underlying CUDA types come from utils.cuh (cuda_fp16/bf16/fp8 headers).
 using fp32 = float;
 using fp16 = half;
+#ifdef __HIP_PLATFORM_AMD__
+using bf16 = hip_bfloat16;
+#else
 using bf16 = nv_bfloat16;
+#endif
 using fp8e4m3 = __nv_fp8_e4m3;
 using fp8e5m2 = __nv_fp8_e5m2;
 #endif  // __CUDACC_RTC__

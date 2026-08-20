@@ -55,35 +55,13 @@ inline int max_supported_sm_arch() {
 }  // namespace
 
 bool is_enabled() {
-  // Global RTC gate (upstream default on every platform). Governs the transpose,
-  // cast-transpose and swap-first-dims RTC fast paths, which ARE functional on
-  // ROCm. Do not disable this on ROCm — see is_enabled_norm_softmax() for the
-  // norm/softmax-scoped opt-out.
-  static const bool is_enabled_ = !getenv<bool>("NVTE_DISABLE_NVRTC");
+  static bool is_enabled_ = false;
+  static bool need_to_check_env = true;
+  if (need_to_check_env) {
+    is_enabled_ = !getenv<bool>("NVTE_DISABLE_NVRTC");
+    need_to_check_env = false;
+  }
   return is_enabled_;
-}
-
-bool is_enabled_norm_softmax() {
-#ifdef __HIP_PLATFORM_AMD__
-  // Default OFF on ROCm; the fork uses the static norm/softmax kernels built with
-  // NVTE_BUILD_LEGACY_STATIC_{NORM,FUSED_SOFTMAX}=ON, and the dispatchers select
-  // that static path when this returns false.
-  //
-  // The softmax RTC path is known-broken on ROCm: the fused_softmax compile calls
-  // pass "--use_fast_math" (a valid NVRTC flag) as an hipRTC option, and hipRTC
-  // rejects it at argument parsing ("unknown argument: '--use_fast_math'" ->
-  // HIPRTC_ERROR_COMPILATION), before any kernel code is compiled. The norm RTC
-  // path passes no such flag and has not been validated on hipRTC either way.
-  // Until the softmax flag issue is fixed and the norm path is validated, keep
-  // the JIT off and use the static kernels. Opt in with NVTE_ENABLE_NVRTC=1.
-  //
-  // Scoped to norm/softmax so the transpose/cast-transpose RTC fast paths
-  // (is_enabled()) keep working on ROCm.
-  static const bool enabled_ = getenv<bool>("NVTE_ENABLE_NVRTC");
-  return enabled_;
-#else
-  return is_enabled();
-#endif
 }
 
 Kernel::Kernel(std::string mangled_name, std::string compiled_code)
@@ -205,8 +183,14 @@ void KernelManager::compile(const std::string& kernel_label, const std::string& 
   // Compilation flags
   std::vector<std::string> opts = {
 #if NDEBUG == 0
+#ifdef __HIP_PLATFORM_AMD__
+      // "-G" is nvcc/NVRTC spelling; hipRTC rejects it while parsing arguments
+      // (unknown argument -> HIPRTC_ERROR_COMPILATION) and takes "-g" instead.
+      "-g",
+#else
       "-G",
-#endif
+#endif  // __HIP_PLATFORM_AMD__
+#endif  // NDEBUG == 0
       "--std=c++17"};
 
 #ifndef __HIP_PLATFORM_AMD__
