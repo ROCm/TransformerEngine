@@ -9,9 +9,7 @@ from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch import LayerNormMLP
 import pytest
 
-# Expected forward-memory reduction from selective activation checkpointing, measured with
-# torch.cuda.max_memory_allocated. gfx950 consistently reaches ~5.71x rather than >6x; the
-# source of the shortfall has not been identified, so the bound is relaxed rather than removed.
+# gfx950 reaches ~5.71x rather than >6x; cause unidentified, so the bound is relaxed there.
 _MIN_FWD_MEM_REDUCTION = 5.5 if IS_HIP_EXTENSION else 6
 
 torch.manual_seed(1234)

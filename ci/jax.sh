@@ -93,7 +93,6 @@ run_test_config_mgpu() {
     # RCCL_MSCCL_ENABLE=0 is to avoid hangs in some distributed tests (ROCM-1719)
     RCCL_MSCCL_ENABLE=0 run $_dfa_level test_distributed_fused_attn.py
     run_default_fa 1 test_distributed_helper.py
-    # L0 is forced: this file only defines L0/L2 keys, so the L1 set above aborts collection
     NVTE_JAX_UNITTEST_LEVEL=L0 run_default_fa 1 test_distributed_router.py
     run_default_fa 3 test_distributed_layernorm.py
     # JAX 0.10+ on ROCm lowers sharded FP8 dot_general (with_jax_gemm=True,
