@@ -199,6 +199,10 @@ try:
     from jax._src.lib import gpu_triton
     from triton.compiler import compiler as tc
     from triton.runtime import autotuner
+
+    if not is_hip_extension():
+        # A Triton built for AMD only ships no triton/backends/nvidia.
+        from triton.backends.nvidia import compiler as cb
 except ImportError as e:
     raise ImportError(
         "Triton is required for transformer_engine.jax.triton_extensions. "
@@ -239,7 +243,7 @@ def _reset_state_after_fork():
     _PREWARMED.clear()
 
 
-if hasattr(os, "register_at_fork"):
+if is_hip_extension() and hasattr(os, "register_at_fork"):
     os.register_at_fork(after_in_child=_reset_state_after_fork)
 
 
@@ -445,13 +449,11 @@ def compile_triton(
         )
         binary_key = backend.binary_ext
     else:
-        # Triton built for AMD only does not ship triton/backends/nvidia.
-        from triton.backends.nvidia import compiler as cb
-
         cuda_option_kwargs = {}
         if version.parse(_TRITON_VERSION) < version.parse("3.6.0"):
             cuda_option_kwargs["cluster_dims"] = (1, 1, 1)
-        options = cb.CUDAOptions(
+        # cb is bound whenever this branch runs; see the guarded import above.
+        options = cb.CUDAOptions(  # pylint: disable=possibly-used-before-assignment
             num_warps=num_warps,
             num_stages=num_stages,
             num_ctas=num_ctas,
