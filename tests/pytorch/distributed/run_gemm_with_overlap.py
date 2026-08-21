@@ -887,7 +887,10 @@ def _main(opts):
         # Bit-exact fingerprint of the output.
         out_bytes = test_out.detach().contiguous().cpu().flatten().view(torch.uint8)
         out_hash = hashlib.sha256(out_bytes.numpy().tobytes()).hexdigest()
-        dist_print(f"OUTPUT HASH: {out_hash}", section=True, group=tp_group)
+        all_hashes = [None] * tp_size
+        dist.all_gather_object(all_hashes, out_hash, group=tp_group)
+        dist_print("OUTPUT HASH: " + " ".join(all_hashes), src=0, section=True, info=True,
+                   group=tp_group)
 
         diff = torch.abs(test_out - ref_out).flatten()
         m = torch.argmax(diff)

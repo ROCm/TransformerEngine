@@ -167,6 +167,10 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
     The event is used to schedule the communication kernel before the GEMM.
     This is needed only for Hopper, which uses persistent CTA execution.
   */
+#ifdef __HIP_PLATFORM_AMD__
+  // No HIP equivalent
+  _comm_launch_event = 0;
+#else
   int max_connection = transformer_engine::getenv<int>("CUDA_DEVICE_MAX_CONNECTIONS", 8);
   int runtime_version = 0;
   NVTE_CHECK_CUDA(cudaRuntimeGetVersion(&runtime_version));
@@ -177,6 +181,7 @@ void CommOverlapCore::initialize(int tp_size, int num_splits, int num_max_stream
   } else {
     _comm_launch_event = 0;
   }
+#endif
 }
 
 CommOverlapCore::~CommOverlapCore() {

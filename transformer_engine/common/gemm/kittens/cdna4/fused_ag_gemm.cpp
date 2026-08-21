@@ -132,8 +132,7 @@ bool run_tn(const KittensFusedAgGemmArgs &args) {
     auto it = g_plans.find(key);
     if (it == g_plans.end()) {
         AgPlan plan;
-        std::vector<StepInfo> steps;
-        auto queue      = build_work_queue(M, N_TOTAL, K, tp_size, args.rank, steps);
+        auto queue      = build_work_queue(M, N_TOTAL, K, tp_size, args.rank);
         plan.num_tiles  = static_cast<int>(queue.size());
         plan.xcd_bucket = auto_xcd_bucket(plan.num_tiles, tiles_m);
         if (plan.xcd_bucket) {
@@ -161,9 +160,9 @@ bool run_tn(const KittensFusedAgGemmArgs &args) {
     if (!bases) return false;
     PeerPtrs peers{};
     for (int c = 0; c < tp_size; c++) {
-        peers.b[c] = static_cast<bf16 *>((*bases)[(args.peer_first + c) % args.peer_count]);
+        peers.base[c] = static_cast<bf16 *>((*bases)[(args.peer_first + c) % args.peer_count]);
     }
-    peers.b[args.rank] = static_cast<bf16 *>(args.ub);
+    peers.base[args.rank] = static_cast<bf16 *>(args.ub);
 
     XcdBuckets buckets{};
     for (int b = 0; b < NUM_XCDS_AFF; b++) {
@@ -184,36 +183,35 @@ bool run_tn(const KittensFusedAgGemmArgs &args) {
         M, N_TOTAL, K, static_cast<bf16 *>(args.ub),
         static_cast<bf16 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D),
         static_cast<TileDesc *>(plan.queue), plan.num_tiles, tile_counter, peers, arrive,
-        args.rank, tp_size, GATH_WG, m_local, args.chunk_bytes, 1u, 0, plan.xcd_bucket, 1, 1,
-        buckets, bucket_ctr, 0, args.stream);
+        args.rank, tp_size, GATH_WG, m_local, args.chunk_bytes, plan.xcd_bucket,
+        buckets, bucket_ctr, args.stream);
     return hipGetLastError() == hipSuccess;
 }
 
-bool run_nn(const KittensFusedAgGemmArgs &args) {
+struct NnSetup {
+    const AgPlan *plan;
+    hk_ag_nn::PeerPtrs peers;
+    hk_ag_nn::XcdBuckets buckets;
+    int *tile_counter;
+    int *bucket_ctr;
+    unsigned int *arrive;
+    float *cw;
+};
+
+bool prepare_nn(const KittensFusedAgGemmArgs &args, int S, NnSetup &out) {
     using namespace hk_ag_nn;
 
     const int M       = args.n;
     const int N_TOTAL = args.m;
     const int K       = args.k;
     const int tp_size = args.nranks;
-    const int m_local = M / tp_size;
     const int tiles_m = M / BLOCK_ROW;
-
-    // The workspace is handed over whole and untouched and select_split_k clamps it.
-    int S = select_split_k(tiles_m * (N_TOTAL / BLOCK_COL), args.workspace_size);
-    if ((K / K_STEP) % (4 * S) != 0) S = 1;
-
-    persistent_fn_t pfn = get_persistent_fn(M, N_TOTAL, K, S);
-    if (!pfn) return false;
-
-    std::lock_guard<std::mutex> lock(g_mu);
 
     const PlanKey key{1, M, N_TOTAL, K, tp_size, args.rank, S};
     auto it = g_plans.find(key);
     if (it == g_plans.end()) {
         AgPlan plan;
-        std::vector<StepInfo> steps;
-        auto queue      = build_work_queue(M, N_TOTAL, K, tp_size, args.rank, steps, S);
+        auto queue      = build_work_queue(M, N_TOTAL, K, tp_size, args.rank, S);
         plan.num_tiles  = static_cast<int>(queue.size());
         plan.xcd_bucket = auto_xcd_bucket(plan.num_tiles, tiles_m);
         if (plan.xcd_bucket) {
@@ -227,31 +225,31 @@ bool run_nn(const KittensFusedAgGemmArgs &args) {
         if (!upload_plan(plan, queue)) return false;
         it = g_plans.emplace(key, plan).first;
     }
-    const AgPlan &plan = it->second;
+    out.plan = &it->second;
 
     const size_t mn           = static_cast<size_t>(M) * N_TOTAL;
     const size_t arrive_bytes = static_cast<size_t>(tiles_m) * sizeof(unsigned int);
     Carve ws{static_cast<char *>(args.workspace), 0, args.workspace_size};
-    int *tile_counter          = static_cast<int *>(ws.take(sizeof(int)));
-    int *bucket_ctr            = static_cast<int *>(ws.take(NUM_XCDS_AFF * sizeof(int)));
-    unsigned int *arrive       = static_cast<unsigned int *>(ws.take(arrive_bytes));
+    out.tile_counter           = static_cast<int *>(ws.take(sizeof(int)));
+    out.bucket_ctr             = static_cast<int *>(ws.take(NUM_XCDS_AFF * sizeof(int)));
+    out.arrive                 = static_cast<unsigned int *>(ws.take(arrive_bytes));
     const size_t counter_bytes = ws.used;
-    float *cw                  = (S > 1) ? static_cast<float *>(ws.take(S * mn * sizeof(float)))
+    out.cw                     = (S > 1) ? static_cast<float *>(ws.take(S * mn * sizeof(float)))
                                          : nullptr;
     if (!ws.fits()) return false;
 
     const std::vector<void *> *bases = peer_bases(args.peer_ub, args.peer_count);
     if (!bases) return false;
-    PeerPtrs peers{};
+    out.peers = PeerPtrs{};
     for (int c = 0; c < tp_size; c++) {
-        peers.b[c] = static_cast<bf16 *>((*bases)[(args.peer_first + c) % args.peer_count]);
+        out.peers.base[c] = static_cast<bf16 *>((*bases)[(args.peer_first + c) % args.peer_count]);
     }
-    peers.b[args.rank] = static_cast<bf16 *>(args.ub);
+    out.peers.base[args.rank] = static_cast<bf16 *>(args.ub);
 
-    XcdBuckets buckets{};
+    out.buckets = XcdBuckets{};
     for (int b = 0; b < NUM_XCDS_AFF; b++) {
-        buckets.off[b] = plan.off[b];
-        buckets.cnt[b] = plan.cnt[b];
+        out.buckets.off[b] = out.plan->off[b];
+        out.buckets.cnt[b] = out.plan->cnt[b];
     }
 
     if (hipMemsetAsync(args.workspace, 0, counter_bytes, args.stream) != hipSuccess) return false;
@@ -262,13 +260,44 @@ bool run_nn(const KittensFusedAgGemmArgs &args) {
             static_cast<const char *>(args.arrive_local), args.arrive_stride, args.arrive_value,
             args.peer_first, args.peer_count, tp_size, ag_ready_warn_ticks());
     }
+    return true;
+}
+
+int split_k_nn(const KittensFusedAgGemmArgs &args) {
+    using namespace hk_ag_nn;
+    const int M       = args.n;
+    const int N_TOTAL = args.m;
+    const int tiles_m = M / BLOCK_ROW;
+    int S = select_split_k(tiles_m * (N_TOTAL / BLOCK_COL), args.workspace_size);
+    if ((args.k / K_STEP) % (4 * S) != 0) S = 1;
+    return S;
+}
+
+bool run_nn(const KittensFusedAgGemmArgs &args) {
+    using namespace hk_ag_nn;
+
+    const int M       = args.n;
+    const int N_TOTAL = args.m;
+    const int K       = args.k;
+    const int tp_size = args.nranks;
+    const int m_local = M / tp_size;
+
+    const int S = split_k_nn(args);
+    persistent_fn_t pfn = get_persistent_fn(M, N_TOTAL, K, S);
+    if (!pfn) return false;
+
+    std::lock_guard<std::mutex> lock(g_mu);
+
+    NnSetup s{};
+    if (!prepare_nn(args, S, s)) return false;
 
     pfn(M, N_TOTAL, K, static_cast<bf16 *>(args.ub),
-        static_cast<bf16 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D), cw,
-        static_cast<TileDesc *>(plan.queue), plan.num_tiles, tile_counter, peers, arrive,
-        args.rank, tp_size, GATH_WG, m_local, args.chunk_bytes, 1u, 0, plan.xcd_bucket, 1, 1,
-        buckets, bucket_ctr, 0, args.stream);
-    if (S > 1) launch_sk_reduce(cw, static_cast<bf16 *>(args.D), mn, S, args.stream);
+        static_cast<bf16 *>(const_cast<void *>(args.A)), static_cast<bf16 *>(args.D), s.cw,
+        static_cast<TileDesc *>(s.plan->queue), s.plan->num_tiles, s.tile_counter, s.peers, s.arrive,
+        args.rank, tp_size, GATH_WG, m_local, args.chunk_bytes, s.plan->xcd_bucket,
+        s.buckets, s.bucket_ctr, args.stream);
+    if (S > 1) launch_sk_reduce(s.cw, static_cast<bf16 *>(args.D), static_cast<size_t>(M) * N_TOTAL,
+                                S, args.stream);
     return hipGetLastError() == hipSuccess;
 }
 
@@ -289,12 +318,17 @@ bool kittens_fused_ag_gemm_bf16_cdna4(const KittensFusedAgGemmArgs &args) {
     const int K       = args.k;
     const int tp_size = args.nranks;
 
-    if (tp_size < 1 || tp_size > 8 || tp_size > args.peer_count) return false;
-    if (args.rank < 0 || args.rank >= tp_size) return false;
-    if (M % tp_size != 0 || M % 256 != 0 || N_TOTAL % 256 != 0) return false;
-    if (K % 128 != 0 || K < 256 || (M / tp_size) % 256 != 0) return false;
-    if (args.chunk_bytes != static_cast<size_t>(M / tp_size) * K * sizeof(uint16_t)) return false;
-    if (!args.workspace || !args.ub || !args.A || !args.D || !args.peer_ub) return false;
+    // Shape and pointer requirements. Order matters: the tp_size range test has to short-circuit
+    // ahead of the M % tp_size and M / tp_size terms. The gathered region IS the [M,K] A operand,
+    // so chunk_bytes is pinned to it exactly -- a mis-sized region declines instead of silently
+    // gathering a fraction of itself.
+    const bool ok = tp_size >= 1 && tp_size <= 8 && tp_size <= args.peer_count &&
+                    args.rank >= 0 && args.rank < tp_size &&
+                    M % tp_size == 0 && M % 256 == 0 && N_TOTAL % 256 == 0 &&
+                    K % 128 == 0 && K >= 256 && (M / tp_size) % 256 == 0 &&
+                    args.workspace && args.ub && args.A && args.D && args.peer_ub &&
+                    args.chunk_bytes == static_cast<size_t>(M / tp_size) * K * sizeof(uint16_t);
+    if (!ok) return false;
 
     return args.transa ? run_tn(args) : run_nn(args);
 }

@@ -15,43 +15,30 @@ namespace hk_ag_tn {
 
 using namespace kittens;
 
-#ifndef SCHED_ROUNDS
-#define SCHED_ROUNDS 2
-#endif
-
-constexpr int NUM_WARPS   = 8;
-constexpr int WARPS_ROW   = 2;
-constexpr int WARPS_COL   = 4;
-constexpr int BLOCK_ROW   = 256;
-constexpr int BLOCK_COL   = 256;
-constexpr int K_STEP      = 64;
-constexpr int HALF_ROW    = BLOCK_ROW / 2;
-constexpr int HALF_COL    = BLOCK_COL / 2;
-constexpr int REG_M       = BLOCK_ROW / WARPS_ROW / 2;
-constexpr int REG_N       = BLOCK_COL / WARPS_COL / 2;
-constexpr int NUM_THREADS = NUM_WARPS * WARP_THREADS;
+constexpr int SCHED_ROUNDS = 2;
+constexpr int NUM_WARPS    = 8;
+constexpr int WARPS_ROW    = 2;
+constexpr int WARPS_COL    = 4;
+constexpr int BLOCK_ROW    = 256;
+constexpr int BLOCK_COL    = 256;
+constexpr int K_STEP       = 64;
+constexpr int HALF_ROW     = BLOCK_ROW / 2;
+constexpr int HALF_COL     = BLOCK_COL / 2;
+constexpr int REG_M        = BLOCK_ROW / WARPS_ROW / 2;
+constexpr int REG_N        = BLOCK_COL / WARPS_COL / 2;
+constexpr int NUM_THREADS  = NUM_WARPS * WARP_THREADS;
 
 using G_group = kittens::group<NUM_WARPS>;
 
-constexpr int TILE_COMPUTE = 0;
-
 struct TileDesc {
-    int type;
-    int step;
     int chunk_id;
-    int ring_id;
     int tile_m;
-    int n_offset;
-};
-
-struct StepInfo {
-    int start;
-    int count;
+    int tile_n;
 };
 
 // Per-PE pointer to each peer's [M,K] A buffer.
 struct PeerPtrs {
-    bf16 *b[8];
+    bf16 *base[8];
 };
 
 #ifndef GATH_WG
@@ -69,6 +56,7 @@ struct XcdBuckets {
 #define AG_SPIN(p) __hip_atomic_load((p), __ATOMIC_RELAXED, __HIP_MEMORY_SCOPE_AGENT)
 #define AG_ACQUIRE(p) ((void)__hip_atomic_load((p), __ATOMIC_ACQUIRE, __HIP_MEMORY_SCOPE_AGENT))
 
+// NT selects nontemporal stores for the gathered shard for performance.
 template <int U, bool NT>
 __device__ __forceinline__
 void gather_copy_wg(void *__restrict__ dst, const void *__restrict__ src, size_t nbytes) {
@@ -105,16 +93,16 @@ void gather_copy_wg(void *__restrict__ dst, const void *__restrict__ src, size_t
 
 template <int U, bool NT>
 __device__ __forceinline__
-void gather_peer_tile(int peer, int tn, int sub, int gath_wg, int tiles_per_chunk, char *b_local,
-                      const PeerPtrs &peers, size_t chunk_bytes, unsigned int *arrive)
-{
+void gather_peer_tile(int peer, int tn, int sub, int gath_wg, int tiles_per_chunk, char *gather_dst,
+                      const PeerPtrs &peers, size_t chunk_bytes, unsigned int *arrive) {
     const size_t tile_bytes = chunk_bytes / tiles_per_chunk;
     const size_t doff       = (size_t)peer * chunk_bytes + (size_t)tn * tile_bytes;
 
-    size_t per = ((tile_bytes / gath_wg) + 15) & ~size_t(15);
-    size_t o   = (size_t)sub * per;
-    size_t l   = (o >= tile_bytes) ? 0 : ((o + per <= tile_bytes) ? per : tile_bytes - o);
-    if (l) gather_copy_wg<U, NT>(b_local + doff + o, (const char *)peers.b[peer] + doff + o, l);
+    size_t sub_bytes = (((tile_bytes + gath_wg - 1) / gath_wg) + 15) & ~size_t(15);
+    size_t o         = (size_t)sub * sub_bytes;
+    size_t l         = (o >= tile_bytes) ? 0 : ((o + sub_bytes <= tile_bytes) ? sub_bytes : tile_bytes - o);
+
+    if (l) gather_copy_wg<U, NT>(gather_dst + doff + o, (const char *)peers.base[peer] + doff + o, l);
 
     __syncthreads();
     if (NT) {
@@ -132,31 +120,14 @@ int tile_xcd(int chunk_id) { return chunk_id & (NUM_XCDS_AFF - 1); }
 
 template <int U, bool NT>
 __device__ __forceinline__
-void gather_all(int my_pe, int gath_wg, int tiles_per_chunk,
-                char *gb, const PeerPtrs &peers, size_t chunk_bytes, unsigned int *arrive)
-{
+void gather_all(int my_pe, int gath_wg, int tiles_per_chunk, char *gb, const PeerPtrs &peers,
+                size_t chunk_bytes, unsigned int *arrive) {
     const int pi   = (int)blockIdx.x / gath_wg;
     const int sub  = (int)blockIdx.x % gath_wg;
     const int peer = pi + (pi >= my_pe ? 1 : 0);
     for (int tn = 0; tn < tiles_per_chunk; tn++) {
         gather_peer_tile<U, NT>(peer, tn, sub, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
     }
-}
-
-#ifndef GATH_THREADS
-#define GATH_THREADS 256
-#endif
-
-__global__ __launch_bounds__(GATH_THREADS)
-void gather_only_kernel(bf16 *__restrict__ b_local, const PeerPtrs peers, unsigned int *__restrict__ arrive,
-                        int my_pe, int tp_size, int gath_wg, int tiles_per_chunk, size_t chunk_bytes,
-                        int gath_u, int nt_store)
-{
-    char *gb = (char *)b_local;
-    (void)tp_size;
-    (void)gath_u;
-    if (nt_store) gather_all<1, true >(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
-    else          gather_all<1, false>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
 }
 
 template <typename U, typename RT>
@@ -190,13 +161,11 @@ void store_c_tile(U *base, const RT &src, int row_unit, int col_unit, int row_st
 }
 
 __global__ __launch_bounds__(NUM_THREADS, 2)
-void persistent_ag_bf16_gemm(
-    const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1, -1, -1> B, const gl<bf16, 1, 1, -1, -1> C,
-    const TileDesc *__restrict__ work_queue, int num_tiles, int *__restrict__ tile_counter, const PeerPtrs peers,
-    unsigned int *__restrict__ arrive, int my_pe, int tp_size, int gath_wg, int tiles_per_chunk, size_t chunk_bytes,
-    unsigned int epoch, int xcd_sched_on, int xcd_bucket, int gath_u, int nt_store, const XcdBuckets buckets,
-    int *__restrict__ bucket_ctr, int split_gath)
-{
+void persistent_ag_bf16_gemm(const gl<bf16, 1, 1, -1, -1> A, const gl<bf16, 1, 1, -1, -1> B,
+                             const gl<bf16, 1, 1, -1, -1> C, const TileDesc *__restrict__ work_queue, int num_tiles,
+                             int *__restrict__ tile_counter, const PeerPtrs peers, unsigned int *__restrict__ arrive,
+                             int my_pe, int tp_size, int gath_wg, int tiles_per_chunk, size_t chunk_bytes,
+                             int xcd_bucket, const XcdBuckets buckets, int *__restrict__ bucket_ctr) {
     const int M       = A.rows();
     const int K       = A.cols();
     const int N_TOTAL = B.rows();
@@ -222,14 +191,16 @@ void persistent_ag_bf16_gemm(
     constexpr int copies_B = HALF_COL * K_STEP * sizeof(T) / bpm;
 
     constexpr int elem_per_warp = (16 / sizeof(T)) * kittens::WARP_THREADS;
-    uint32_t a_lds_00 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[0][0].data[0]) + wid * elem_per_warp * sizeof(T)));
-    uint32_t a_lds_01 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[0][1].data[0]) + wid * elem_per_warp * sizeof(T)));
-    uint32_t a_lds_10 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[1][0].data[0]) + wid * elem_per_warp * sizeof(T)));
-    uint32_t a_lds_11 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[1][1].data[0]) + wid * elem_per_warp * sizeof(T)));
-    uint32_t b_lds_00 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&Bs[0][0].data[0]) + wid * elem_per_warp * sizeof(T)));
-    uint32_t b_lds_01 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&Bs[0][1].data[0]) + wid * elem_per_warp * sizeof(T)));
-    uint32_t b_lds_10 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&Bs[1][0].data[0]) + wid * elem_per_warp * sizeof(T)));
-    uint32_t b_lds_11 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&Bs[1][1].data[0]) + wid * elem_per_warp * sizeof(T)));
+    const uintptr_t lds_warp_off = wid * elem_per_warp * sizeof(T);
+
+    uint32_t a_lds_00 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[0][0].data[0]) + lds_warp_off));
+    uint32_t a_lds_01 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[0][1].data[0]) + lds_warp_off));
+    uint32_t a_lds_10 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[1][0].data[0]) + lds_warp_off));
+    uint32_t a_lds_11 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&As[1][1].data[0]) + lds_warp_off));
+    uint32_t b_lds_00 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&Bs[0][0].data[0]) + lds_warp_off));
+    uint32_t b_lds_01 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&Bs[0][1].data[0]) + lds_warp_off));
+    uint32_t b_lds_10 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&Bs[1][0].data[0]) + lds_warp_off));
+    uint32_t b_lds_11 = __builtin_amdgcn_readfirstlane(static_cast<uint32_t>(reinterpret_cast<uintptr_t>(&Bs[1][1].data[0]) + lds_warp_off));
 
     uint32_t sw_A[copies_A], sw_B[copies_B];
     G_group::prefill_swizzled_offsets(As[0][0], A, sw_A);
@@ -243,29 +214,11 @@ void persistent_ag_bf16_gemm(
     i32x4 b_srd            = make_srsrc(b_base, (size_t)N_TOTAL * b_row_stride, b_row_stride);
     bf16 *c_base           = (bf16 *)&C[{0, 0, 0, 0}];
 
-    const int NGATH = split_gath ? 0 : ((tp_size - 1) * gath_wg);
+    const int NGATH = (tp_size - 1) * gath_wg;
     if ((int)blockIdx.x < NGATH) {
         char *gb = (char *)&A[{0, 0, 0, 0}];
-        #define GA(UU) do {                                                                       \
-            if (nt_store) gather_all<UU, true >(my_pe, gath_wg,                                   \
-                                                tiles_per_chunk, gb, peers, chunk_bytes, arrive); \
-            else          gather_all<UU, false>(my_pe, gath_wg,                                   \
-                                                tiles_per_chunk, gb, peers, chunk_bytes, arrive); \
-        } while (0)
-        switch (gath_u) {
-            case 2:  GA(2);  break;
-            case 4:  GA(4);  break;
-            case 8:  GA(8);  break;
-            default: GA(1);  break;
-        }
-        #undef GA
+        gather_all<1, true>(my_pe, gath_wg, tiles_per_chunk, gb, peers, chunk_bytes, arrive);
     }
-
-    const bool xcd_sched = (xcd_sched_on != 0) && (tp_size == 1);
-    const int  n_compute = (int)gridDim.x - NGATH;
-    const int  my_cwg    = (int)blockIdx.x - NGATH;
-    const int  xcd_base  = (xcd_sched && n_compute > 0 && my_cwg >= 0)
-                         ? chiplet_transform_chunked(my_cwg, n_compute, NUM_XCDS, 64) : 0;
 
     const bool static_sched = (num_tiles <= SCHED_ROUNDS * (int)gridDim.x);
     int sched_iter = 0;
@@ -285,11 +238,12 @@ void persistent_ag_bf16_gemm(
                     if (__hip_atomic_load(&bucket_ctr[bb], __ATOMIC_RELAXED,
                                           __HIP_MEMORY_SCOPE_AGENT) >= buckets.cnt[bb]) continue;
                     const int idx = atomicAdd(&bucket_ctr[bb], 1);
-                    if (idx < buckets.cnt[bb]) { found = buckets.off[bb] + idx; break; }
+                    if (idx < buckets.cnt[bb]) {
+                        found = buckets.off[bb] + idx;
+                        break;
+                    }
                 }
                 s_tile_idx = (found < 0) ? num_tiles : found;
-            } else if (xcd_sched) {
-                s_tile_idx = xcd_base + sched_iter * n_compute;
             } else {
                 s_tile_idx = static_sched ? (int)(blockIdx.x + (long)sched_iter * gridDim.x)
                                           : atomicAdd(tile_counter, 1);
@@ -302,18 +256,19 @@ void persistent_ag_bf16_gemm(
 
         TileDesc desc = work_queue[tile_idx];
         if (desc.chunk_id != my_pe) {
-            const int tm      = desc.tile_m - desc.chunk_id * tiles_per_chunk;
-            const unsigned per = epoch * (unsigned)gath_wg;
-            unsigned int *f   = &arrive[(size_t)desc.chunk_id * tiles_per_chunk + tm];
+            const int tm                   = desc.tile_m - desc.chunk_id * tiles_per_chunk;
+            const unsigned needed_arrivals = (unsigned)gath_wg;
+            unsigned int *f                = &arrive[(size_t)desc.chunk_id * tiles_per_chunk + tm];
             if (threadIdx.x == 0) {
-                while (AG_SPIN(f) < per) {}
+                do {
+                } while (AG_SPIN(f) < needed_arrivals);
                 AG_ACQUIRE(f);
             }
             __syncthreads();
         }
 
         int block_row = desc.tile_m;
-        int block_col = desc.n_offset;
+        int block_col = desc.tile_n;
 
         RT_A a_tile;
         RT_B b_tile_0, b_tile_1;
@@ -538,56 +493,48 @@ void persistent_ag_bf16_gemm(
     } // end persistent loop
 }
 
-static std::vector<TileDesc> build_work_queue(int M, int N_total, int K, int tp_size, int my_pe,
-                                              std::vector<StepInfo> &steps_out)
-{
+static std::vector<TileDesc> build_work_queue(int M, int N_total, int K, int tp_size, int my_pe) {
     (void)K;
-    const int tiles_N = N_total / BLOCK_COL;
-    const int m_local = M / tp_size;
-    const int tpc     = m_local / BLOCK_ROW;
+    const int tiles_N         = N_total / BLOCK_COL;
+    const int m_local         = M / tp_size;
+    const int tiles_per_chunk = m_local / BLOCK_ROW;
 
     std::vector<TileDesc> queue;
-    queue.reserve((size_t)tiles_N * tpc * tp_size);
-    steps_out.clear();
+    queue.reserve((size_t)tiles_N * tiles_per_chunk * tp_size);
 
-    const int WGM = 16;
+    const int N_GROUP = 16;
 
     auto emit = [&](int chunk, int tm, int n0, int n1) {
         for (int tn = n0; tn < n1; tn++) {
             TileDesc td{};
-            td.type     = TILE_COMPUTE;
-            td.step     = 0;
-            td.ring_id  = 0;
             td.chunk_id = chunk;
-            td.tile_m   = chunk * tpc + tm;
-            td.n_offset = tn;
+            td.tile_m   = chunk * tiles_per_chunk + tm;
+            td.tile_n   = tn;
             queue.push_back(td);
         }
     };
 
-    const int nstep = (WGM > 0 && WGM < tiles_N) ? WGM : tiles_N;
+    const int nstep = (N_GROUP > 0 && N_GROUP < tiles_N) ? N_GROUP : tiles_N;
 
     // Local chunk first, then remote
     for (int n0 = 0; n0 < tiles_N; n0 += nstep) {
         const int n1 = std::min(n0 + nstep, tiles_N);
-        for (int tm = 0; tm < tpc; tm++) emit(my_pe, tm, n0, n1);
+        for (int tm = 0; tm < tiles_per_chunk; tm++) emit(my_pe, tm, n0, n1);
     }
     for (int n0 = 0; n0 < tiles_N; n0 += nstep) {
         const int n1 = std::min(n0 + nstep, tiles_N);
-        for (int tm = 0; tm < tpc; tm++) {
+        for (int tm = 0; tm < tiles_per_chunk; tm++) {
             for (int c = 0; c < tp_size; c++) {
                 if (c != my_pe) emit(c, tm, n0, n1);
             }
         }
     }
 
-    steps_out.push_back({0, (int)queue.size()});
     return queue;
 }
 
 // Stable-partition the queue into one contiguous segment per XCD.
-static std::vector<TileDesc> bucketize_by_xcd(const std::vector<TileDesc> &q, XcdBuckets &bk)
-{
+static std::vector<TileDesc> bucketize_by_xcd(const std::vector<TileDesc> &q, XcdBuckets &bk) {
     std::vector<TileDesc> out;
     out.reserve(q.size());
     for (int b = 0; b < NUM_XCDS_AFF; b++) {
@@ -600,14 +547,12 @@ static std::vector<TileDesc> bucketize_by_xcd(const std::vector<TileDesc> &q, Xc
     return out;
 }
 
-static void launch_persistent(
-    int M, int N_TOTAL, int K, bf16 *d_a, bf16 *d_b, bf16 *d_c, TileDesc *d_queue, int num_tiles,
-    int *d_tile_counter, PeerPtrs peers, unsigned int *d_arrive, int my_pe, int tp_size, int gath_wg,
-    int m_local, size_t chunk_bytes, unsigned int epoch, int xcd_sched_on, int xcd_bucket, int gath_u,
-    int nt_store, XcdBuckets buckets, int *d_bucket_ctr, int split_gath, hipStream_t stream)
-{
-    const int tiles_M = M / BLOCK_ROW;
-    const int tiles_N = N_TOTAL / BLOCK_COL;
+static void launch_persistent(int M, int N_TOTAL, int K, bf16 *d_a, bf16 *d_b, bf16 *d_c, TileDesc *d_queue,
+                              int num_tiles, int *d_tile_counter, PeerPtrs peers, unsigned int *d_arrive, int my_pe,
+                              int tp_size, int gath_wg, int m_local, size_t chunk_bytes, int xcd_bucket,
+                              XcdBuckets buckets, int *d_bucket_ctr, hipStream_t stream) {
+    const int tiles_M         = M / BLOCK_ROW;
+    const int tiles_N         = N_TOTAL / BLOCK_COL;
     const int tiles_per_chunk = m_local / BLOCK_ROW;
 
     gl<bf16, 1, 1, -1, -1> A_gl(d_a, nullptr, nullptr, (size_t)M,       (size_t)K);
@@ -615,7 +560,7 @@ static void launch_persistent(
     gl<bf16, 1, 1, -1, -1> C_gl(d_c, nullptr, nullptr, (size_t)M,       (size_t)N_TOTAL);
 
     // Gatherers are dedicated (blockIdx < NGATH) and only join the compute queue once their peer's chunk has landed.
-    const int NGATH = split_gath ? 0 : ((tp_size - 1) * gath_wg);
+    const int NGATH = (tp_size - 1) * gath_wg;
     static const int grid_cap = getenv("HK_GRID_CAP") ? atoi(getenv("HK_GRID_CAP")) : 256;
     int grid = tiles_M * tiles_N + NGATH;
     if (grid_cap > 0 && grid > grid_cap) grid = grid_cap;
@@ -623,13 +568,13 @@ static void launch_persistent(
 
     persistent_ag_bf16_gemm<<<grid, NUM_THREADS, 0, stream>>>(
         A_gl, B_gl, C_gl, d_queue, num_tiles, d_tile_counter, peers,
-        d_arrive, my_pe, tp_size, gath_wg, tiles_per_chunk, chunk_bytes, epoch, xcd_sched_on,
-        xcd_bucket, gath_u, nt_store, buckets, d_bucket_ctr, split_gath);
+        d_arrive, my_pe, tp_size, gath_wg, tiles_per_chunk, chunk_bytes,
+        xcd_bucket, buckets, d_bucket_ctr);
 }
 
 using persistent_fn_t = void (*)(int, int, int, bf16 *, bf16 *, bf16 *, TileDesc *, int, int *, PeerPtrs,
-                                 unsigned int *, int, int, int, int, size_t, unsigned int, int, int, int, int,
-                                 XcdBuckets, int *, int, hipStream_t);
+                                 unsigned int *, int, int, int, int, size_t, int,
+                                 XcdBuckets, int *, hipStream_t);
 
 static persistent_fn_t get_persistent_fn(int M, int N, int K) {
     (void)M; (void)N; (void)K;
