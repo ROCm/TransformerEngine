@@ -17,6 +17,7 @@
 
 #include <cstdint>
 #include <string>
+#include <type_traits>
 #include <vector>
 
 #include "../util/cuda_driver.h"
@@ -161,6 +162,30 @@ bool try_static_fallback(StaticFallback<ParamsT> static_fallback,
   return true;
 }
 
+#ifdef __HIP_PLATFORM_AMD__
+// ROCm-only MXFP8 norm output. The norm kernel writes an unquantized compute_t
+// buffer carved out of the workspace, and a follow-up kernel quantizes it into
+// the MXFP8 output tensor. The static launchers in
+// {layernorm,rmsnorm}/*_fwd_cuda_kernel.cu do both inline, so the RTC launchers
+// have to as well -- otherwise the buffer is never sized and the kernel writes
+// past the workspace.
+void mxfp8_configure(LaunchParams<ForwardKernelParams>& launch_params, DType ctype) {
+  if (launch_params.params.mxfp8_out) {
+    launch_params.mxfp8_buffer_bytes = static_cast<size_t>(launch_params.params.rows) *
+                                       launch_params.params.cols * byte_size_of(ctype);
+  }
+}
+
+void mxfp8_finalize(LaunchParams<ForwardKernelParams>& launch_params, DType ctype) {
+  if (!launch_params.params.mxfp8_out) {
+    return;
+  }
+  NVTE_CHECK(ctype == DType::kFloat32,
+             "MXFP8 norm output requires an fp32 compute type on ROCm.");
+  rocm_norm_mxfp8_quantize<float>(launch_params);
+}
+#endif  // __HIP_PLATFORM_AMD__
+
 // Common per-launch configure/launch helper. `kernel_expr` is the full
 // templated kernel symbol (used as the nvrtcAddNameExpression argument); the
 // closure captures everything needed.
@@ -170,11 +195,11 @@ void register_launcher(const std::string& label, const std::string& kernel_expr,
                        int threads_per_cta, int dynamic_smem_bytes, int ctas_per_row,
                        bool needs_cooperative, int barrier_bytes_per_col,
                        int workspace_bytes_per_col, int dgamma_part_bytes_per_col,
-                       StaticFallback<ParamsT> static_fallback) {
+                       StaticFallback<ParamsT> static_fallback, DType ctype) {
   auto closure = [label, kernel_expr, rtc_source, filename, threads_per_cta, dynamic_smem_bytes,
                   ctas_per_row, needs_cooperative, barrier_bytes_per_col, workspace_bytes_per_col,
-                  dgamma_part_bytes_per_col, static_fallback](LaunchParams<ParamsT>& launch_params,
-                                                              const bool configure_params) {
+                  dgamma_part_bytes_per_col, static_fallback,
+                  ctype](LaunchParams<ParamsT>& launch_params, const bool configure_params) {
     if (try_static_fallback(static_fallback, launch_params, configure_params)) {
       return;
     }
@@ -197,6 +222,11 @@ void register_launcher(const std::string& label, const std::string& kernel_expr,
         launch_params.dgamma_part_bytes =
             dgamma_part_bytes_per_col * launch_params.params.ctas_per_col;
       }
+#ifdef __HIP_PLATFORM_AMD__
+      if constexpr (std::is_same<ParamsT, ForwardKernelParams>::value) {
+        mxfp8_configure(launch_params, ctype);
+      }
+#endif
       return;
     }
 
@@ -214,7 +244,13 @@ void register_launcher(const std::string& label, const std::string& kernel_expr,
       mgr.launch_cooperative(label, dim3(ctas_per_row * ctas_per_col), dim3(threads_per_cta),
                              dynamic_smem_bytes, stream, launch_params.params);
     }
+#ifdef __HIP_PLATFORM_AMD__
+    if constexpr (std::is_same<ParamsT, ForwardKernelParams>::value) {
+      mxfp8_finalize(launch_params, ctype);
+    }
+#endif
     (void)needs_cooperative;
+    (void)ctype;
   };
   TeNormalizationRegistry<ParamsT>::registerFunction(key, std::move(closure));
 }
@@ -247,7 +283,7 @@ void register_ln_fwd_tuned(DType wt, DType it, DType ot, DType ct, int hidden, i
   register_launcher<ForwardKernelParams>(
       label, kernel_expr, string_code_normalization_layernorm_rtc_ln_fwd_kernel_cu,
       "ln_fwd_kernel.cu", key, threads_per_cta, smem_bytes, cr, /*needs_cooperative=*/cr > 1,
-      barrier_per_col, workspace_per_col, /*dgamma_part_bytes_per_col=*/0, static_fallback);
+      barrier_per_col, workspace_per_col, /*dgamma_part_bytes_per_col=*/0, static_fallback, ct);
 }
 
 void register_ln_fwd_general(DType wt, DType it, DType ot, DType ct, int hidden, int wm, int wn,
@@ -294,6 +330,9 @@ void register_ln_fwd_general(DType wt, DType it, DType ot, DType ct, int hidden,
         const int ctype_bytes = byte_size_of(ct);
         launch_params.workspace_bytes = ctas_per_col * wm * ctas_per_row * ctype_bytes * 2;
       }
+#ifdef __HIP_PLATFORM_AMD__
+      mxfp8_configure(launch_params, ct);
+#endif
       return;
     }
     const auto stream = launch_params.stream;
@@ -304,6 +343,9 @@ void register_ln_fwd_general(DType wt, DType it, DType ot, DType ct, int hidden,
       mgr.launch_cooperative(label, dim3(ctas_per_row * ctas_per_col), dim3(threads_per_cta), 0,
                              stream, launch_params.params);
     }
+#ifdef __HIP_PLATFORM_AMD__
+    mxfp8_finalize(launch_params, ct);
+#endif
   };
   TeNormalizationRegistry<ForwardKernelParams>::registerFunction(key, std::move(closure));
 }
@@ -332,7 +374,7 @@ void register_rmsnorm_fwd_tuned(DType wt, DType it, DType ot, DType ct, int hidd
   register_launcher<ForwardKernelParams>(
       label, kernel_expr, string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu,
       "rmsnorm_fwd_kernel.cu", key, threads_per_cta, smem_bytes, cr, /*needs_cooperative=*/cr > 1,
-      barrier_per_col, workspace_per_col, 0, static_fallback);
+      barrier_per_col, workspace_per_col, 0, static_fallback, ct);
 }
 
 void register_rmsnorm_fwd_general(DType wt, DType it, DType ot, DType ct, int hidden, int wm,
@@ -377,6 +419,9 @@ void register_rmsnorm_fwd_general(DType wt, DType it, DType ot, DType ct, int hi
         const int ctype_bytes = byte_size_of(ct);
         launch_params.workspace_bytes = ctas_per_col * wm * ctas_per_row * ctype_bytes * 2;
       }
+#ifdef __HIP_PLATFORM_AMD__
+      mxfp8_configure(launch_params, ct);
+#endif
       return;
     }
     const auto stream = launch_params.stream;
@@ -387,6 +432,9 @@ void register_rmsnorm_fwd_general(DType wt, DType it, DType ot, DType ct, int hi
       mgr.launch_cooperative(label, dim3(ctas_per_row * ctas_per_col), dim3(threads_per_cta), 0,
                              stream, launch_params.params);
     }
+#ifdef __HIP_PLATFORM_AMD__
+    mxfp8_finalize(launch_params, ct);
+#endif
   };
   TeNormalizationRegistry<ForwardKernelParams>::registerFunction(key, std::move(closure));
 }
