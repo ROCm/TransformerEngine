@@ -4,16 +4,13 @@
  * License for AMD contributions = MIT. See LICENSE for more information
  ************************************************************************/
 #include <cmath>
-#include <cstdio>
 #include <iostream>
 #include <string>
-#include <unistd.h>
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 #include <gtest/gtest.h>
 #include <transformer_engine/cast.h>
 #include <transformer_engine/gemm.h>
-#include <transformer_engine/multi_stream.h>
 #include <transformer_engine/swizzle.h>
 #include <transformer_engine/transformer_engine.h>
 #include "../test_common.h"
