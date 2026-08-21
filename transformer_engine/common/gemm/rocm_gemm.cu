@@ -34,9 +34,15 @@
 
 #ifdef USE_HIPKITTENS_GEMM
 #include "kittens/kittens_common.h"
-#ifdef KITTENS_HAVE_CDNA4
-#include "kittens/cdna4/mxfp8_gemm.h"
-#endif
+
+// Kittens enums mirror NVTE enums by value because kittens lib is built without TE.
+static_assert(KITTENS_FLOAT32  == static_cast<int>(transformer_engine::DType::kFloat32), "KittensDType out of sync with NVTEDType");
+static_assert(KITTENS_FLOAT16  == static_cast<int>(transformer_engine::DType::kFloat16), "KittensDType out of sync with NVTEDType");
+static_assert(KITTENS_BFLOAT16 == static_cast<int>(transformer_engine::DType::kBFloat16), "KittensDType out of sync with NVTEDType");
+static_assert(KITTENS_FP8E4M3  == static_cast<int>(transformer_engine::DType::kFloat8E4M3), "KittensDType out of sync with NVTEDType");
+static_assert(KITTENS_FP8E5M2  == static_cast<int>(transformer_engine::DType::kFloat8E5M2), "KittensDType out of sync with NVTEDType");
+static_assert(KITTENS_BLOCK_SCALING_1D == NVTE_BLOCK_SCALING_1D, "KittensScalingMode out of sync with NVTEScalingMode");
+static_assert(KITTENS_BLOCK_SCALING_2D == NVTE_BLOCK_SCALING_2D, "KittensScalingMode out of sync with NVTEScalingMode");
 #endif
 
 namespace transformer_engine {
@@ -2270,17 +2276,13 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                || inputB->scaling_mode == NVTE_MXFP8_1D_SCALING;
 
 #ifdef USE_HIPKITTENS_GEMM
-
   bool use_hipkittens = false;
-#ifdef KITTENS_HAVE_CDNA4
-  if (is_mxfp8) {
-    bool is_gfx950 = (cuda::sm_arch() == 95);
+  if (is_mxfp8 && kittens_mxfp8_supported()) {
     bool force_hipblaslt = false;
     if (const char *env_p = std::getenv("NVTE_ROCM_USE_HIPBLASLT_MXFP8")) {
       force_hipblaslt = (strcmp(env_p, "1") == 0);
     }
-    use_hipkittens = is_gfx950 && !force_hipblaslt
-                  && m % 256 == 0 && n % 256 == 0 && k % 128 == 0 && k >= 256;
+    use_hipkittens = !force_hipblaslt;
   }
 
   if (use_hipkittens) {
@@ -2299,7 +2301,7 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
                                         beta,
                                         workspace, workspaceSize, gemm_stream);
   }
-#endif
+
   if (!use_hipkittens) {
     if (is_mxfp8) {
       NVTE_CHECK(inputBias->data.dptr == nullptr,
@@ -2330,29 +2332,38 @@ void cublas_gemm(const Tensor *inputA, const Tensor *inputB, Tensor *outputD,
 #pragma GCC diagnostic pop
 
 #ifdef USE_HIPKITTENS_GEMM
-bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
-    int num_gemms, bool transa, bool transb, NVTETensor *workspace,
-    bool accumulate, cudaStream_t stream) {
-    if (accumulate || num_gemms <= 1) return false;
+static bool kittens_env_set(const char *name) {
+    const char *v = std::getenv(name);
+    return v && v[0] == '1';
+}
 
-    auto env_set = [](const char *name) {
-        const char *v = std::getenv(name);
-        return v && v[0] == '1';
-    };
-    static bool enabled = [&] {
-        if (cuda::sm_arch() != 95) return false;
-        bool use    = env_set("NVTE_USE_CUTLASS_GROUPED_GEMM");
-        bool use_hk = env_set("NVTE_USE_HIPKITTENS_GROUPED_GEMM");
-        bool use_ck = env_set("NVTE_USE_CK_GROUPED_GEMM");
+static bool kittens_grouped_mxfp8_enabled() {
+    static bool enabled = [] {
+        if (!kittens_mxfp8_supported()) return false;
+        bool use    = kittens_env_set("NVTE_USE_CUTLASS_GROUPED_GEMM");
+        bool use_hk = kittens_env_set("NVTE_USE_HIPKITTENS_GROUPED_GEMM");
+        bool use_ck = kittens_env_set("NVTE_USE_CK_GROUPED_GEMM");
         if (use_hk && use_ck) {
             fprintf(stderr, "[HK-grouped] both NVTE_USE_HIPKITTENS_GROUPED_GEMM and "
                     "NVTE_USE_CK_GROUPED_GEMM set; defaulting to HipKittens\n");
         }
         return use_hk || (use && !use_ck);
     }();
-    if (!enabled) return false;
+    return enabled;
+}
 
-    static bool warn_fallback = env_set("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK");
+static bool kittens_grouped_warn_fallback() {
+    static bool warn = kittens_env_set("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK");
+    return warn;
+}
+
+bool try_kittens_grouped_mxfp8_gemm(const NVTETensor *A, const NVTETensor *B, NVTETensor *D,
+    int num_gemms, bool transa, bool transb, NVTETensor *workspace,
+    bool accumulate, cudaStream_t stream) {
+    if (accumulate || num_gemms <= 1) return false;
+    if (!kittens_grouped_mxfp8_enabled()) return false;
+
+    const bool warn_fallback = kittens_grouped_warn_fallback();
 
     std::vector<const void *> a_ptrs(num_gemms), b_ptrs(num_gemms), c_ptrs(num_gemms);
     std::vector<const void *> sa_ptrs(num_gemms), sb_ptrs(num_gemms);
@@ -2448,20 +2459,9 @@ bool try_kittens_grouped_mxfp8_wgrad(const NVTETensor *A, const NVTETensor *B, N
     if (transa || !transb) return false;
     if (num_gemms <= 1) return false;
 
-    auto env_set = [](const char *name) {
-        const char *v = std::getenv(name);
-        return v && v[0] == '1';
-    };
-    static bool enabled = [&] {
-        if (cuda::sm_arch() != 95) return false;
-        bool use    = env_set("NVTE_USE_CUTLASS_GROUPED_GEMM");
-        bool use_hk = env_set("NVTE_USE_HIPKITTENS_GROUPED_GEMM");
-        bool use_ck = env_set("NVTE_USE_CK_GROUPED_GEMM");
-        return use_hk || (use && !use_ck);
-    }();
-    if (!enabled) return false;
+    if (!kittens_grouped_mxfp8_enabled()) return false;
 
-    static bool warn_fallback = env_set("NVTE_CUTLASS_GROUPED_GEMM_WARN_FALLBACK");
+    const bool warn_fallback = kittens_grouped_warn_fallback();
 
     std::vector<const void *> a_ptrs(num_gemms), b_ptrs(num_gemms);
     std::vector<void *>       d_ptrs(num_gemms);
