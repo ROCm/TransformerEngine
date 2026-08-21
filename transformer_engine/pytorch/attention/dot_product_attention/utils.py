@@ -1587,10 +1587,15 @@ def get_attention_backend(
     )
 
     # Select FusedAttention for performance
-    if use_flash_attention and (not IS_HIP_EXTENSION) and use_fused_attention and device_compute_capability >= (9, 0):
+    prefer_fused_attention = (
+        # On ROCm, FusedAttention (aiter asm) is much faster than flash-attn for MLA-style unequal head dims.
+        head_dim_qk != head_dim_v
+        if IS_HIP_EXTENSION
+        else device_compute_capability >= (9, 0)
+    )
+    if use_flash_attention and use_fused_attention and prefer_fused_attention:
         logger.debug(
-            "Disabling FlashAttention to give FusedAttention preference on Hopper+ "
-            "for performance reasons"
+            "Disabling FlashAttention to give FusedAttention preference for performance reasons"
         )
         use_flash_attention = False
 
