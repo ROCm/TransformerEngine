@@ -61,3 +61,4 @@ Usage:
 
 from .utils import *
 from .permutation import *
+from .indexer import score_reduce_triton, score_topk_triton
