@@ -32,7 +32,7 @@ from transformer_engine.common.recipe import (
 )
 from .constants import dist_group_type, DType
 
-from .utils import get_device_compute_capability
+from .utils import get_device_compute_capability, get_gemm_backend
 from .jit import jit_fuser
 
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
@@ -284,15 +284,15 @@ def check_recipe_support(recipe: Recipe) -> None:
     # PyTorch 2.11). The HYBRID recipe uses e4m3 for forward and e5m2 for backward,
     # producing mixed-type GEMMs during the backward pass. Only Format.E4M3 (which
     # uses e4m3 for both forward and backward) is compatible with the Triton backend.
-    use_gemm_triton = IS_HIP_EXTENSION and bool(int(os.environ.get("NVTE_USE_GEMM_TRITON", "0")))
+    use_gemm_triton = IS_HIP_EXTENSION and get_gemm_backend() == "triton"
     if use_gemm_triton and recipe is not None and hasattr(recipe, "fp8_format"):
         if recipe.fp8_format == Format.HYBRID:
             raise ValueError(
-                "The Triton GEMM backend (NVTE_USE_GEMM_TRITON=1) does not support "
+                "The Triton GEMM backend (NVTE_GEMM_BACKEND=TRITON) does not support "
                 "Format.HYBRID because the backward pass produces mixed FP8 type GEMMs "
                 "(e5m2 x e4m3), which trigger a Triton compiler bug "
                 "(triton-lang/triton#9567). Use Format.E4M3 instead, or disable the "
-                "Triton backend (unset NVTE_USE_GEMM_TRITON)."
+                "Triton backend (unset NVTE_GEMM_BACKEND)."
             )
 
 

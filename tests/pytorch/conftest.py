@@ -13,7 +13,7 @@ Two things live here:
    disappears and the hook stops firing.
 
 2. A ``pytest_collection_modifyitems`` hook that pre-skips known-bad
-   fp32 tests on gfx942 under ``NVTE_USE_GEMM_TRITON=1``. gfx942's
+   fp32 tests on gfx942 under ``NVTE_GEMM_BACKEND=TRITON``. gfx942's
    Triton fp32 matmul has a stable numerical divergence from
    ``torch.matmul``; mi35x/gfx950 runs the same tests cleanly. When the
    kernel is fixed, remove the ``_KNOWN_BAD_FP32_ON_GFX942`` set and
@@ -33,7 +33,7 @@ _TRITON_GEMM_GATE_MARKERS = (
     # Covers both quantization.py::check_recipe_support (HYBRID) and
     # gemm_wrapper._classify_input's refusal of NVFP4 / other
     # QuantizedTensorStorage subclasses.
-    "The Triton GEMM backend (NVTE_USE_GEMM_TRITON=1) does not support",
+    "The Triton GEMM backend (NVTE_GEMM_BACKEND=TRITON) does not support",
 )
 
 
@@ -64,14 +64,14 @@ def _always(item) -> bool:
     return True
 
 
-# Tests known to fail with fp32 on gfx942 under NVTE_USE_GEMM_TRITON=1. The value
+# Tests known to fail with fp32 on gfx942 under NVTE_GEMM_BACKEND=TRITON. The value
 # is a predicate on the pytest item that returns True if this specific variant
 # should be skipped (allows finer-grained control than "any fp32 param" for tests
 # with multiple dtype-like parameters).
 _KNOWN_BAD_FP32_ON_GFX942 = {
-    # tests/pytorch/triton_kernels/test_gemm.py -- Triton vs torch.matmul
+    # tests/pytorch/gemm/test_gemm.py -- Triton vs torch.matmul
     "test_triton_vs_pytorch_regular": _has_fp32_param,
-    # tests/pytorch/triton_kernels/test_gemm.py -- Triton vs C++ backend
+    # tests/pytorch/gemm/test_gemm.py -- Triton vs C++ backend
     "test_triton_vs_cpp_regular": _has_fp32_param,
     "test_triton_vs_cpp_bias_forward": _has_fp32_param,
     # tests/pytorch/triton_kernels/test_gemm_kernel.py -- low-level kernel
@@ -91,8 +91,8 @@ _KNOWN_BAD_FP32_ON_GFX942 = {
 
 
 def pytest_collection_modifyitems(config, items):
-    """Skip known-bad fp32 tests on gfx942 under NVTE_USE_GEMM_TRITON=1."""
-    if not bool(int(os.environ.get("NVTE_USE_GEMM_TRITON", "0"))):
+    """Skip known-bad fp32 tests on gfx942 under NVTE_GEMM_BACKEND=TRITON."""
+    if os.environ.get("NVTE_GEMM_BACKEND") != "TRITON":
         return
 
     import torch  # local import so conftest import stays cheap
@@ -108,7 +108,7 @@ def pytest_collection_modifyitems(config, items):
         reason=(
             "gfx942 Triton fp32 GEMM has a stable numerical divergence from "
             "torch.matmul (gfx950 passes cleanly). Skipping under "
-            "NVTE_USE_GEMM_TRITON=1 on gfx942 pending kernel fix."
+            "NVTE_GEMM_BACKEND=TRITON on gfx942 pending kernel fix."
         )
     )
     for item in items:

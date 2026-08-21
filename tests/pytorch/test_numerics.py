@@ -1355,12 +1355,12 @@ def test_linear_accuracy_flydsl(
     """Compare FlyDSL and native TE Linear forward, dgrad, and wgrad."""
 
     # FlyDSL GEMM dispatch is gated on gfx950 in cpp_extensions/gemm.py. On any
-    # other arch NVTE_USE_FLYDSL=1 is a no-op and the FlyDSL path would just be
-    # the native backend compared against itself, so skip rather than pass
-    # vacuously.
+    # other arch NVTE_GEMM_BACKEND=FLYDSL is a no-op and the FlyDSL path would
+    # just be the native backend compared against itself, so skip rather than
+    # pass vacuously.
     if not IS_HIP_EXTENSION or get_device_compute_capability() != (9, 5):
         pytest.skip("FlyDSL GEMM is only supported on gfx950.")
-    # flydsl is only installed when NVTE_USE_FLYDSL=1 at build time; without it
+    # flydsl is only installed when the FlyDSL backend is built in; without it
     # the lazy import in general_gemm raises, so skip instead of erroring.
     pytest.importorskip("flydsl", reason="FlyDSL package is not installed.")
 
@@ -1427,7 +1427,7 @@ def test_linear_accuracy_flydsl(
 
     try:
         # Native TE backend.
-        os.environ.pop("NVTE_USE_FLYDSL", None)
+        os.environ.pop("NVTE_GEMM_BACKEND", None)
         os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
 
         reset_rng_states()
@@ -1440,7 +1440,7 @@ def test_linear_accuracy_flydsl(
         torch.cuda.synchronize()
 
         # FlyDSL backend.
-        os.environ["NVTE_USE_FLYDSL"] = "1"
+        os.environ["NVTE_GEMM_BACKEND"] = "FLYDSL"
         os.environ["NVTE_FLYDSL_GEMM_WARN_FALLBACK"] = "1"
 
         reset_rng_states()
@@ -1459,7 +1459,7 @@ def test_linear_accuracy_flydsl(
         fell_back = any("[FLYDSL WARNING]" in str(w.message) for w in caught)
 
     finally:
-        os.environ.pop("NVTE_USE_FLYDSL", None)
+        os.environ.pop("NVTE_GEMM_BACKEND", None)
         os.environ.pop("NVTE_FLYDSL_GEMM_WARN_FALLBACK", None)
         FP8GlobalStateManager.reset()
 

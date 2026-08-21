@@ -2,9 +2,9 @@
 #
 # License for AMD contributions = MIT. See LICENSE for more information
 
-"""FlyDSL GEMM test package.
+"""Merged user-facing GEMM test package.
 
 Gives ``test_gemm.py`` a package-qualified module name so it does not collide
-under pytest's default prepend import mode with the identically named
-``tests/pytorch/triton_kernels/test_gemm.py``.
+under pytest's default prepend import mode with other identically named
+``test_gemm.py`` files elsewhere in the tree.
 """

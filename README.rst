@@ -235,10 +235,10 @@ Support matrix:
 
 The backend is off by default and enabled via an environment variable:
 
-* ``NVTE_USE_FLYDSL=1`` -- dispatch dense GEMMs through FlyDSL when running on gfx950. Requires ``flydsl`` to be installed.
+* ``NVTE_GEMM_BACKEND=FLYDSL`` -- dispatch dense GEMMs through FlyDSL when running on gfx950. Requires ``flydsl`` to be installed. (Leave ``NVTE_GEMM_BACKEND`` unset for the default C++/hipBLASLt backend, or set it to ``TRITON`` for the Triton GEMM backend.)
 * ``NVTE_FLYDSL_GEMM_WARN_FALLBACK=1`` -- emit a warning whenever a GEMM that FlyDSL cannot serve (unsupported shape/config) falls back to the default backend. Off by default.
 
-If ``NVTE_USE_FLYDSL=1`` is set but ``flydsl`` is missing or older than ``0.3.0``, TE warns once and falls back to the default GEMM backend. Configurations FlyDSL does not support (e.g. shapes that are not tile-aligned) also fall back transparently.
+If ``NVTE_GEMM_BACKEND=FLYDSL`` is set but ``flydsl`` is missing or older than ``0.3.0``, TE warns once and falls back to the default GEMM backend. Configurations FlyDSL does not support (e.g. shapes that are not tile-aligned) also fall back transparently.
 
 
 Fused Attention Backends on ROCm

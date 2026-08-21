@@ -14,7 +14,7 @@ import torch
 from torch.utils.cpp_extension import IS_HIP_EXTENSION
 import transformer_engine_torch as tex
 from ..constants import TE_DType, DType
-from ..utils import get_sm_count, _empty_tensor
+from ..utils import get_sm_count, _empty_tensor, get_gemm_backend
 if IS_HIP_EXTENSION:
     from ..utils import get_device_compute_capability
     from ..utils import cast_if_needed
@@ -335,8 +335,8 @@ def _nvfp4_row_scaled_gemm_inputs(
     )
 
 
-# Warn only once when NVTE_USE_FLYDSL=1 but the flydsl package is missing, so a
-# misconfigured run is surfaced without spamming the per-GEMM hot path.
+# Warn only once when NVTE_GEMM_BACKEND=FLYDSL but the flydsl package is missing,
+# so a misconfigured run is surfaced without spamming the per-GEMM hot path.
 _flydsl_import_warned = False
 
 
@@ -503,11 +503,12 @@ def general_gemm(
     # NVFP4 is not supported by the Triton path; when the Triton backend is
     # opted into, te_generic_gemm_triton raises ValueError for NVFP4 inputs
     # (surfaced as a pytest.skip via tests/pytorch/conftest.py).
-    use_gemm_triton = IS_HIP_EXTENSION and bool(int(os.environ.get("NVTE_USE_GEMM_TRITON", "0")))
+    gemm_backend = get_gemm_backend()
+    use_gemm_triton = IS_HIP_EXTENSION and gemm_backend == "triton"
     if use_gemm_triton:
         # Lazy: only pull in Triton when the backend is opted into. Keeps
-        # `triton` off the module-import path when NVTE_USE_GEMM_TRITON is
-        # unset (the default), so stacks without pytorch-triton-rocm can
+        # `triton` off the module-import path when NVTE_GEMM_BACKEND is not
+        # TRITON (the default), so stacks without pytorch-triton-rocm can
         # still use the C++ hipBLASLt path.
         from ..triton_kernels.gemm import te_generic_gemm_triton
         out, bias_grad, gelu_input, extra_output = te_generic_gemm_triton(*args, **kwargs)
@@ -515,13 +516,13 @@ def general_gemm(
         use_gemm_flydsl = (
             IS_HIP_EXTENSION
             and get_device_compute_capability() == (9, 5)
-            and bool(int(os.environ.get("NVTE_USE_FLYDSL", "0")))
+            and gemm_backend == "flydsl"
         )
         if use_gemm_flydsl:
             try:
                 # Lazy import keeps FlyDSL off the normal Transformer Engine
                 # import path. It is done inside the try so a wheel built without
-                # flydsl (NVTE_USE_FLYDSL unset at build time) degrades to the
+                # flydsl (NVTE_GEMM_BACKEND!=FLYDSL at build time) degrades to the
                 # default backend instead of raising a bare ImportError.
                 from ..flydsl_kernels.gemm import (
                     FlyDSLUnsupportedError,
@@ -533,7 +534,7 @@ def general_gemm(
                     **kwargs,
                 )
             except ImportError as exc:
-                # NVTE_USE_FLYDSL=1 was requested but the flydsl package is
+                # NVTE_GEMM_BACKEND=FLYDSL was requested but the flydsl package is
                 # missing or too old (see flydsl_kernels.gemm._MIN_FLYDSL). This
                 # is a misconfiguration, not an unsupported GEMM config, so always
                 # warn (once) regardless of the opt-in fallback flag before
@@ -542,8 +543,8 @@ def general_gemm(
                 if not _flydsl_import_warned:
                     _flydsl_import_warned = True
                     warnings.warn(
-                        "[FLYDSL WARNING]: NVTE_USE_FLYDSL=1 but the flydsl package "
-                        "is unavailable; falling back to the default backend. "
+                        "[FLYDSL WARNING]: NVTE_GEMM_BACKEND=FLYDSL but the flydsl "
+                        "package is unavailable; falling back to the default backend. "
                         f"Install a supported version (e.g. `pip install flydsl`) to "
                         f"enable it. Reason: {exc}",
                         UserWarning,
