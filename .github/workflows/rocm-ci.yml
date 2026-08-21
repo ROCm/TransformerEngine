@@ -179,6 +179,8 @@ jobs:
           pip install --upgrade hypothesis setuptools
           pip install --no-build-isolation --no-deps "$TE_TORCH_PKG"
           pip install --no-build-isolation --no-deps "$TE_JAX_PKG"
+          # Optional: wrap pytest with coverage.py. Export is non-blocking.
+          pip install 'coverage>=7'
           EOF
           )"
 
@@ -193,11 +195,13 @@ jobs:
           # One subdir per suite so PyTorch/JAX/Core get independent reports and
           # never collide on identically-named XML (e.g. test_sanity_import.auto.xml
           # exists in both the torch and jax suites and runs in parallel).
-          rm -rf test-results && mkdir -p test-results/torch test-results/jax test-results/core
+          rm -rf test-results python-coverage && mkdir -p test-results/torch test-results/jax test-results/core python-coverage
 
           docker exec \
             -e TEST_SGPU=1 \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
+            -e TE_COVERAGE=1 \
+            -e COVERAGE_FILE=/workspace/python-coverage/.coverage \
             -e JUNITXML_PREFIX=/workspace/test-results/ \
             -e JUNITXML_SUFFIX=.xml \
             -e HF_TOKEN="$HF_TOKEN" \
@@ -219,6 +223,17 @@ jobs:
             --title "sGPU JAX (${{ matrix.arch_label }})"
           python3 ci/junit_report.py test-results/core \
             --title "sGPU Core (${{ matrix.arch_label }})"
+
+      - name: Export Python coverage
+        if: always()
+        run: |
+          # JUnit XML is pass/fail of test cases. coverage.json is which
+          # installed transformer_engine Python functions this job executed.
+          # A missing artifact means export failed; do not fail the job.
+          docker exec \
+            -e COVERAGE_FILE=/workspace/python-coverage/.coverage \
+            te-runner bash /workspace/ci/export_python_coverage.sh /workspace/python-coverage \
+            || true
 
       - name: Check suite failure status
         if: always()
@@ -251,6 +266,17 @@ jobs:
             test-results/**/*.xml
           if-no-files-found: ignore
           retention-days: 5
+
+      - name: Upload Python coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage-sgpu-${{ matrix.arch_label }}
+          path: |
+            python-coverage/coverage.json
+            python-coverage/coverage-meta.txt
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Cleanup container
         if: always()
@@ -312,6 +338,7 @@ jobs:
           pip install ninja pybind11[global]
           pip install --upgrade hypothesis setuptools
           pip install --no-build-isolation --no-deps "$TE_FW_PKG"
+          pip install 'coverage>=7'
           EOF
           )"
 
@@ -329,11 +356,13 @@ jobs:
             *)       echo "::error::Unknown framework: ${{ matrix.framework }}"; exit 1 ;;
           esac
 
-          rm -rf test-results && mkdir -p test-results
+          rm -rf test-results python-coverage && mkdir -p test-results python-coverage
 
           docker exec \
             -e TEST_MGPU=1 \
             -e TEST_LEVEL=${{ env.TEST_LEVEL }} \
+            -e TE_COVERAGE=1 \
+            -e COVERAGE_FILE=/workspace/python-coverage/.coverage \
             -e TEST_SCRIPT=$TEST_SCRIPT \
             -e LOG_FILE=$LOG_FILE \
             -e SUITE_NAME=$SUITE_NAME \
@@ -367,6 +396,14 @@ jobs:
           python3 ci/junit_report.py test-results \
             --title "mGPU ${{ matrix.framework == 'pytorch' && 'Torch' || 'JAX' }} (${{ matrix.arch_label }})"
 
+      - name: Export Python coverage
+        if: always()
+        run: |
+          docker exec \
+            -e COVERAGE_FILE=/workspace/python-coverage/.coverage \
+            te-runner bash /workspace/ci/export_python_coverage.sh /workspace/python-coverage \
+            || true
+
       - name: Upload logs
         if: always()
         uses: actions/upload-artifact@v4
@@ -377,6 +414,17 @@ jobs:
             test-results/*.xml
           if-no-files-found: ignore
           retention-days: 5
+
+      - name: Upload Python coverage
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: python-coverage-mgpu-${{ matrix.arch_label }}-${{ matrix.framework }}
+          path: |
+            python-coverage/coverage.json
+            python-coverage/coverage-meta.txt
+          if-no-files-found: ignore
+          retention-days: 14
 
       - name: Cleanup container
         if: always()
