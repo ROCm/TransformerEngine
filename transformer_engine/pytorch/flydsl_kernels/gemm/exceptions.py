@@ -2,5 +2,12 @@
 #
 # See LICENSE for license information.
 
-class FlyDSLUnsupportedError(RuntimeError):
-    """The GEMM request is valid but unsupported by the available FlyDSL kernels."""
+"""Re-export of the shared FlyDSL exception type.
+
+The type was promoted to ``flydsl_kernels.exceptions`` when a second backend
+(attention) needed it; this module is kept so existing GEMM imports still work.
+"""
+
+from ..exceptions import FlyDSLUnsupportedError
+
+__all__ = ["FlyDSLUnsupportedError"]
