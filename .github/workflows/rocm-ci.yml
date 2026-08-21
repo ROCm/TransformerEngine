@@ -231,6 +231,9 @@ jobs:
           # installed transformer_engine Python functions this job executed.
           # A missing artifact means export failed; do not fail the job.
           docker exec \
+            -e TE_PATH=/workspace \
+            -e CI_ARCH=${{ matrix.arch_label }} \
+            -e CI_SUITE=sgpu \
             -e COVERAGE_FILE=/workspace/python-coverage/.coverage \
             te-runner bash /workspace/ci/export_python_coverage.sh /workspace/python-coverage \
             || true
@@ -399,7 +402,13 @@ jobs:
       - name: Export Python coverage
         if: always()
         run: |
+          # JUnit XML is pass/fail of test cases. coverage.json is which
+          # installed transformer_engine Python functions this job executed.
+          # A missing artifact means export failed; do not fail the job.
           docker exec \
+            -e TE_PATH=/workspace \
+            -e CI_ARCH=${{ matrix.arch_label }} \
+            -e CI_SUITE=mgpu-${{ matrix.framework }} \
             -e COVERAGE_FILE=/workspace/python-coverage/.coverage \
             te-runner bash /workspace/ci/export_python_coverage.sh /workspace/python-coverage \
             || true

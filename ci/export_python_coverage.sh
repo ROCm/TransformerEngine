@@ -14,6 +14,7 @@
 
 OUT_DIR="${1:-/workspace/python-coverage}"
 mkdir -p "$OUT_DIR" || exit 0
+cd "$OUT_DIR" || exit 0
 
 if ! command -v coverage >/dev/null 2>&1; then
     echo "coverage is not installed; skipping Python coverage export"
@@ -25,6 +26,7 @@ JSON="$OUT_DIR/coverage.json"
 META="$OUT_DIR/coverage-meta.txt"
 rm -f "$JSON" "$META"
 
+# Shards from parallel pytest_run invocations live next to COVERAGE_FILE.
 coverage combine || true
 if ! coverage json -o "$JSON"; then
     echo "coverage json failed; not uploading a stub"
@@ -64,11 +66,14 @@ fi
 
 {
     echo "commit=$COMMIT"
+    [ -n "${CI_ARCH:-}" ] && echo "arch=$CI_ARCH"
+    [ -n "${CI_SUITE:-}" ] && echo "suite=$CI_SUITE"
     echo "format=coverage.py JSON"
     echo "source=transformer_engine (installed package measured by CI pytest)"
     echo "not=JUnit pass/fail of test cases"
     echo "not=C++/HIP kernels (.cu/.hip); those need llvm-cov"
     echo "not=torchrun/mpirun child processes"
+    echo "not=direct python script invocations (examples, checkpoint, benchmarks)"
 } > "$META"
 
 echo "Wrote $JSON (commit=$COMMIT)"

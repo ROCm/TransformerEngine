@@ -378,11 +378,11 @@ pytest_run() {
     # after the job. This is not JUnit: it records which installed
     # transformer_engine functions ran, not which test cases passed.
     _pytest_launcher="python3 -m"
-    if [ -n "${TE_COVERAGE:-}" ]; then
+    if [ "${TE_COVERAGE:-}" = 1 ]; then
         if command -v coverage >/dev/null 2>&1; then
             _pytest_launcher="coverage run --branch --parallel-mode --source=transformer_engine -m"
         else
-            echo "TE_COVERAGE is set but coverage is not installed; running pytest without coverage" >&2
+            echo "TE_COVERAGE=1 but coverage is not installed; running pytest without coverage" >&2
         fi
     fi
     TE_RESULT_SINK="$_result_sink" PYTHONPATH="$_pytest_pythonpath" \
