@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -97,8 +99,10 @@ try:
     )
 
     _TRITON_AVAILABLE = True
-except ImportError:
+    _TRITON_IMPORT_ERROR = None
+except (ImportError, RuntimeError, ValueError) as _triton_import_error:
     _TRITON_AVAILABLE = False
+    _TRITON_IMPORT_ERROR = _triton_import_error
     make_chunk_sort_map = None
     make_row_id_map = None
     permute_with_mask_map = None
@@ -117,7 +121,7 @@ def _require_triton():
             "PermutationBackend.TRITON requires"
             " ``transformer_engine.jax.triton_extensions`` (and ``triton``)."
             " Install Triton or pass PermutationBackend.PURE_JAX."
-        )
+        ) from _TRITON_IMPORT_ERROR
 
 
 PRNGKey = Any

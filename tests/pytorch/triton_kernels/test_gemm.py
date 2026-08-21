@@ -1,0 +1,660 @@
+# Copyright (c) 2024-2026, Advanced Micro Devices, Inc. All rights reserved.
+#
+# License for AMD contributions = MIT. See LICENSE for more information
+
+"""User-facing Triton GEMM tests -- ``general_gemm()`` under ``NVTE_USE_GEMM_TRITON=1``.
+
+Exercises the same public entry point that TE ``Linear`` / ``LayerNormLinear``
+use. Covers the full precision surface (fp32 / fp16 / bf16 / same-format FP8 /
+mixed FP8 / MXFP8) and all three layouts (TN / NN / NT), plus bias / bias-grad
+epilogues and a batched-fp8 multidim case.
+
+Each test compares the Triton path against two independent references:
+
+  1. ``torch.matmul`` on dequantized inputs -- catches functional bugs
+     independent of any hipBLASLt behavior.
+  2. The C++ ``tex.generic_gemm`` backend under the same TE ``general_gemm``
+     surface -- catches divergence from the production path.
+
+Complementary file:
+
+- ``test_gemm_kernel.py`` -- low-level ``te_gemm_triton()`` kernel-direct
+  correctness (bypasses ``general_gemm`` and the wrappers; ~1000
+  parametrizations of a single ``test_correctness`` function).
+
+MXFP8 end-to-end numerical correctness lives here, in
+``test_triton_vs_pytorch_mxfp8`` / ``test_triton_vs_cpp_mxfp8``.
+"""
+
+import os
+import pytest
+import torch
+
+from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
+from transformer_engine.pytorch import Float8Tensor
+from transformer_engine.pytorch.tensor.float8_tensor import Float8Quantizer
+from transformer_engine.pytorch.tensor.mxfp8_tensor import MXFP8Quantizer, MXFP8Tensor
+import transformer_engine_torch as tex
+
+# --- Feature detection --------------------------------------------------------
+
+major, minor = torch.cuda.get_device_capability()
+# MXFP8 requires the fp8-scaled MFMA instructions currently available only on
+# gfx950+ (compute capability >= 9.5). Name reflects the capability, not the
+# specific arch, so it stays meaningful if future archs also support it.
+has_mxfp8_support = (major == 9 and minor >= 5)
+
+from transformer_engine.pytorch import torch_version
+_torch_ver = torch_version()
+
+requires_mxfp8_support = pytest.mark.skipif(
+    not has_mxfp8_support,
+    reason="MXFP8 requires hardware with fp8-scaled MFMA (gfx950+, cc >= 9.5)",
+)
+
+# tl.dot_scaled()'s current API (RHS scale in [N, K//32] layout) is only
+# available from PyTorch 2.10 onwards (Triton 3.6+).
+requires_torch210 = pytest.mark.skipif(
+    _torch_ver < (2, 10),
+    reason=(
+        "Triton tl.dot_scaled() RHS scale bug fixed in PyTorch 2.10 "
+        f"(found {_torch_ver}). The TE kernel uses the new dot_scaled API "
+        "(rhs_scale in [N, K//32] layout) which requires PyTorch >= 2.10."
+    ),
+)
+
+# --- Test parameters ----------------------------------------------------------
+
+REGULAR_FP8_SHAPES = [
+    (2304, 768, 4096),
+    (768, 768, 4096),
+    (768, 3072, 4096),
+    (229, 541, 541),
+    (71, 71, 3571),
+    (29, 29, 17389),
+]
+
+MXFP8_SHAPES = [
+    (128, 256, 512),
+    (768, 768, 4096),
+]
+
+LAYOUTS = ["TN", "NN", "NT"]
+
+FP8_FORMAT_COMBOS = [
+    (tex.DType.kFloat8E4M3, tex.DType.kFloat8E4M3),
+    (tex.DType.kFloat8E5M2, tex.DType.kFloat8E5M2),
+]
+
+# Mixed FP8 formats are disabled due to a Triton compiler bug on gfx950:
+# when the MFMA layout is transposed, operand B is packed using A's element type,
+# and the instruction format encoding doesn't account for the operand swap.
+# This affects both v_mfma_f32_32x32x16_{fp8|bf8} and v_mfma_f32_32x32x64_f8f6f4.
+# Fixed upstream in triton-lang/triton PR #9567 (commit eaaa75cf5, 2026-02-27).
+# Not yet in any pytorch-triton-rocm release as of PyTorch 2.11.
+# TODO: Re-enable once pytorch-triton-rocm includes the fix (expected PyTorch 2.12+).
+FP8_MIXED_FORMAT_COMBOS = [
+    (tex.DType.kFloat8E4M3, tex.DType.kFloat8E5M2),
+    (tex.DType.kFloat8E5M2, tex.DType.kFloat8E4M3),
+]
+
+REGULAR_DTYPES = [torch.float32, torch.float16, torch.bfloat16]
+
+# --- Fixtures -----------------------------------------------------------------
+
+@pytest.fixture(autouse=True)
+def cleanup_env():
+    """Save/restore NVTE_USE_GEMM_TRITON env var between tests."""
+    old_val = os.environ.get('NVTE_USE_GEMM_TRITON', None)
+    yield
+    if old_val is None:
+        os.environ.pop('NVTE_USE_GEMM_TRITON', None)
+    else:
+        os.environ['NVTE_USE_GEMM_TRITON'] = old_val
+
+
+# --- Helpers ------------------------------------------------------------------
+
+def get_shapes(layout, M, K, N):
+    """Returns (A_shape, B_shape) for the given TE ``general_gemm`` layout.
+
+    The first / second letter of ``layout`` is transa / transb (``T`` =
+    transposed, ``N`` = not). The stored operand shape depends on that
+    flag: transposed operands are stored with the transposed shape.
+
+    Under all three layouts the produced output has logical shape
+    ``(N, M)`` -- see ``compute_pytorch_reference``. Every layout must
+    therefore reference both ``M`` and ``N`` (early versions of this
+    helper used ``M`` in place of ``N`` for NN/NT, which silently made
+    the output square in ``K`` and left the ``N`` parameter unused).
+    """
+    if layout == "TN":     # A transposed, B not transposed
+        return (M, K), (N, K)
+    elif layout == "NN":   # neither transposed
+        return (K, M), (N, K)
+    elif layout == "NT":   # A not transposed, B transposed
+        return (K, M), (K, N)
+    else:
+        raise ValueError(f"Unsupported layout: {layout}")
+
+
+def compute_pytorch_reference(A_ref, B_ref, layout):
+    """torch.matmul reference producing the same ``(N, M)`` output shape as
+    ``general_gemm`` for the given ``get_shapes()`` operands."""
+    if layout == "TN":
+        # (N, K) x (K, M) = (N, M)
+        return torch.matmul(B_ref, A_ref.T)
+    elif layout == "NN":
+        # (N, K) x (K, M) = (N, M)
+        return torch.matmul(B_ref, A_ref)
+    elif layout == "NT":
+        # (N, K) x (K, M) = (N, M)
+        return torch.matmul(B_ref.T, A_ref)
+    else:
+        raise ValueError(f"Unsupported layout: {layout}")
+
+
+def create_regular_tensors(M, K, N, layout, dtype=torch.float32):
+    """Random (A, B) regular tensors sized for ``layout`` at ``(M, K, N)``.
+
+    Values are ``randn * 0.5`` -- magnitude ~O(1), consistent seed handled by
+    the caller. Used both as-is (regular GEMM tests) and as the fp32 input to
+    the Float8 / MXFP8 quantizers in ``create_fp8_tensors`` / ``create_mxfp8_tensors``.
+    """
+    A_shape, B_shape = get_shapes(layout, M, K, N)
+    A = torch.randn(A_shape, dtype=dtype, device='cuda') * 0.5
+    B = torch.randn(B_shape, dtype=dtype, device='cuda') * 0.5
+    return A, B
+
+
+def create_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b,
+                       a_scale=1.0, b_scale=1.0):
+    """Create Float8Tensor inputs and dequantized references.
+
+    ``a_scale`` / ``b_scale`` set the per-tensor quantization scale (fp32
+    magnitudes get multiplied by this before quantizing). Non-unity values
+    exercise the kernel's ``scale_inv`` fold-back -- with ``scale=1.0`` a bug
+    that dropped ``scale_inv`` would still pass since ``1/scale = 1``.
+    """
+    A_f32, B_f32 = create_regular_tensors(M, K, N, layout, dtype=torch.float32)
+
+    A_fp8 = Float8Quantizer(
+        scale=torch.full([1], a_scale, dtype=torch.float32, device='cuda'),
+        amax=torch.empty([1], dtype=torch.float32, device='cuda'),
+        fp8_dtype=fp8_dtype_a,
+    )(A_f32)
+    B_fp8 = Float8Quantizer(
+        scale=torch.full([1], b_scale, dtype=torch.float32, device='cuda'),
+        amax=torch.empty([1], dtype=torch.float32, device='cuda'),
+        fp8_dtype=fp8_dtype_b,
+    )(B_f32)
+
+    return A_fp8, B_fp8, A_fp8.dequantize(), B_fp8.dequantize()
+
+
+def create_mxfp8_tensors(M, K, N, layout):
+    """Create MXFP8Tensor inputs and dequantized references."""
+    A_f32, B_f32 = create_regular_tensors(M, K, N, layout, dtype=torch.float32)
+
+    quantizer = MXFP8Quantizer(
+        fp8_dtype=tex.DType.kFloat8E4M3,
+        rowwise=True,
+        columnwise=True,
+    )
+    A_mxfp8 = quantizer(A_f32)
+    B_mxfp8 = quantizer(B_f32)
+
+    return A_mxfp8, B_mxfp8, A_mxfp8.dequantize(), B_mxfp8.dequantize()
+
+
+def call_gemm(A, B, layout, out_dtype, use_triton=True):
+    """Call general_gemm() with appropriate env var setting."""
+    os.environ['NVTE_USE_GEMM_TRITON'] = '1' if use_triton else '0'
+    output, _, _, _ = general_gemm(
+        A=A,
+        B=B,
+        out_dtype=out_dtype,
+        layout=layout,
+    )
+    return output
+
+
+def call_gemm_with_bias(A, B, layout, out_dtype, bias, grad, use_triton=True):
+    """Call general_gemm() with a bias argument.
+
+    Returns (output, bias_grad). When grad=True the GEMM uses the BGRADB
+    epilogue and bias_grad contains the reduced bias gradient; otherwise
+    it uses the BIAS epilogue and bias is fused into the output.
+    """
+    os.environ['NVTE_USE_GEMM_TRITON'] = '1' if use_triton else '0'
+    output, bias_grad, _, _ = general_gemm(
+        A=A,
+        B=B,
+        out_dtype=out_dtype,
+        layout=layout,
+        bias=bias,
+        grad=grad,
+    )
+    return output, bias_grad
+
+
+# ==============================================================================
+# Approach 1: Triton vs PyTorch torch.matmul reference
+# ==============================================================================
+
+@pytest.mark.parametrize("M, K, N", REGULAR_FP8_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("dtype", REGULAR_DTYPES, ids=["fp32", "fp16", "bf16"])
+def test_triton_vs_pytorch_regular(M, K, N, layout, dtype):
+    """Test Triton GEMM vs torch.matmul for regular tensors."""
+    torch.manual_seed(42)
+    A, B = create_regular_tensors(M, K, N, layout, dtype=dtype)
+
+    # Triton result
+    output = call_gemm(A, B, layout, out_dtype=dtype, use_triton=True)
+
+    # PyTorch reference on fp32 copies
+    expected = compute_pytorch_reference(A.float(), B.float(), layout)
+
+    torch.testing.assert_close(
+        output.float(), expected.float(),
+        atol=1e-3, rtol=1e-2,
+    )
+
+
+@pytest.mark.parametrize("M, K, N", REGULAR_FP8_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("fp8_format", FP8_FORMAT_COMBOS,
+                         ids=["e4m3_e4m3", "e5m2_e5m2"])
+def test_triton_vs_pytorch_fp8(M, K, N, layout, fp8_format):
+    """Test Triton GEMM vs torch.matmul for Float8Tensor inputs."""
+    torch.manual_seed(42)
+    fp8_dtype_a, fp8_dtype_b = fp8_format
+    A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b)
+
+    output = call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_triton=True)
+    expected = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
+
+    torch.testing.assert_close(
+        output.float(), expected.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize(
+    "a_scale, b_scale",
+    [(4.0, 0.25), (16.0, 0.125), (0.5, 2.0)],
+    ids=["a=4,b=0.25", "a=16,b=0.125", "a=0.5,b=2"],
+)
+def test_triton_vs_pytorch_fp8_scales(layout, a_scale, b_scale):
+    """FP8 GEMM with non-unity per-tensor scales.
+
+    ``test_triton_vs_pytorch_fp8`` above quantizes both operands with
+    ``scale=1.0`` -- ``scale_inv=1.0`` -- so a kernel bug that dropped the
+    ``accumulator *= a_scale * b_scale`` fold-back would still pass the assert.
+    Use asymmetric non-unity scales (chosen so the product is 1 to keep the
+    output magnitude comparable) so any missing scale multiply produces a
+    systematically wrong result. Uses a single shape to keep the parametrize
+    matrix small -- correctness at one shape is enough to catch a dropped
+    scale multiply.
+    """
+    torch.manual_seed(42)
+    M, K, N = 768, 768, 4096
+    A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(
+        M, K, N, layout, tex.DType.kFloat8E4M3, tex.DType.kFloat8E4M3,
+        a_scale=a_scale, b_scale=b_scale,
+    )
+
+    output = call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_triton=True)
+    expected = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
+
+    torch.testing.assert_close(
+        output.float(), expected.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+@pytest.mark.skip(reason="Triton compiler bug with mixed FP8 formats (triton-lang/triton#9567)")
+@pytest.mark.parametrize("M, K, N", REGULAR_FP8_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("fp8_format", FP8_MIXED_FORMAT_COMBOS,
+                         ids=["e4m3_e5m2", "e5m2_e4m3"])
+def test_triton_vs_pytorch_fp8_mixed(M, K, N, layout, fp8_format):
+    """Test Triton GEMM vs torch.matmul for mixed Float8Tensor formats."""
+    torch.manual_seed(42)
+    fp8_dtype_a, fp8_dtype_b = fp8_format
+    A_fp8, B_fp8, A_deq, B_deq = create_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b)
+
+    output = call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_triton=True)
+    expected = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
+
+    torch.testing.assert_close(
+        output.float(), expected.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+@requires_mxfp8_support
+@requires_torch210
+@pytest.mark.parametrize("M, K, N", MXFP8_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_triton_vs_pytorch_mxfp8(M, K, N, layout):
+    """Test Triton GEMM vs torch.matmul for MXFP8Tensor inputs."""
+    torch.manual_seed(42)
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(M, K, N, layout)
+
+    output = call_gemm(A_mxfp8, B_mxfp8, layout, out_dtype=torch.bfloat16, use_triton=True)
+    expected = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
+
+    torch.testing.assert_close(
+        output.float(), expected.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+@requires_mxfp8_support
+@requires_torch210
+@pytest.mark.parametrize("M, K, N", MXFP8_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize(
+    "alpha, beta, accumulate",
+    [
+        # alpha != 1, no accumulate: D = alpha * A @ B
+        (-2.5, 0.0, False),
+        (3.5,  0.0, False),
+        # alpha=1, accumulate=True with beta=1: D = A @ B + D_prev (fused wgrad accumulate)
+        (1.0,  1.0, True),
+        # alpha != 1 and accumulate: D = alpha * A @ B + beta * D_prev
+        # (mirrors ForwardLinearScaleAdd / BackwardLinearScale)
+        (-2.5, 1.0, True),
+    ],
+    ids=["alpha=-2.5", "alpha=3.5", "acc-beta=1", "alpha=-2.5,acc-beta=1"],
+)
+def test_triton_mxfp8_alpha_beta_accumulate(M, K, N, layout, alpha, beta, accumulate):
+    """MXFP8 Triton GEMM with the alpha/beta/accumulate epilogue.
+
+    This exercises the fused-op pipeline entry points where
+    ``BasicLinear._functional_forward`` folds a scale/add into the GEMM by
+    passing ``alpha=<scale>, accumulate_into_out=True``. A prior version of
+    ``mxfp8_matmul`` silently dropped these three parameters, so the kernel
+    computed ``C = A @ B`` regardless -- producing wrong output whenever
+    the wrapping op relied on the fused epilogue.
+    """
+    torch.manual_seed(42)
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(M, K, N, layout)
+
+    # Pre-existing content of D that will be scaled by beta when accumulate=True.
+    out_shape = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout).shape
+    d_init = torch.randn(out_shape, dtype=torch.bfloat16, device='cuda') * 0.5
+
+    # Reference: recompute in fp32 from dequantized inputs.
+    ab = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout)
+    expected = alpha * ab
+    if accumulate:
+        expected = expected + beta * d_init.float()
+
+    d = d_init.clone()
+    os.environ['NVTE_USE_GEMM_TRITON'] = '1'
+    from transformer_engine.pytorch.cpp_extensions.gemm import general_gemm
+    out, _, _, _ = general_gemm(
+        A=A_mxfp8, B=B_mxfp8,
+        out_dtype=torch.bfloat16, layout=layout,
+        out=d,
+        alpha=alpha, beta=beta, accumulate=accumulate,
+    )
+
+    torch.testing.assert_close(
+        out.float(), expected.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+@requires_mxfp8_support
+@requires_torch210
+@pytest.mark.parametrize("M, K, N", MXFP8_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_triton_mxfp8_bias(M, K, N, layout):
+    """MXFP8 forward GEMM with the BIAS epilogue.
+
+    ``mxfp8_matmul_kernel`` implements a BIAS path so ``TransformerLayer`` /
+    ``te.ops.Linear(bias=True)`` under MXFP8 flow through Triton instead of
+    falling back to hipBLASLt (which asserts on MXFP8+bias). Compares the
+    fused-bias output against a plain-matmul reference with the same bias
+    added post-hoc.
+    """
+    torch.manual_seed(42)
+    A_mxfp8, B_mxfp8, A_deq, B_deq = create_mxfp8_tensors(M, K, N, layout)
+
+    # BLAS output shape is (N, M); BIAS is a vector along the last dim of
+    # the returned tensor, i.e. length M for TN (fprop) but length N for the
+    # non-TN layouts. call_gemm_with_bias sets the layout the same way.
+    out_features = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout).shape[-1]
+    bias = torch.randn(out_features, dtype=torch.bfloat16, device='cuda')
+
+    triton_out, _ = call_gemm_with_bias(A_mxfp8, B_mxfp8, layout, torch.bfloat16, bias, grad=False, use_triton=True)
+
+    # Bias must actually change the result -- guards against BIAS silently
+    # decaying to DEFAULT and the test passing vacuously.
+    no_bias_out = call_gemm(A_mxfp8, B_mxfp8, layout, out_dtype=torch.bfloat16, use_triton=True)
+    assert not torch.allclose(triton_out.float(), no_bias_out.float(), atol=1e-4), (
+        "Triton MXFP8 output matches no-bias output; BIAS epilogue appears inactive."
+    )
+
+    expected = compute_pytorch_reference(A_deq.float(), B_deq.float(), layout) + bias.float()
+    torch.testing.assert_close(
+        triton_out.float(), expected.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+# ==============================================================================
+# Approach 2: Triton vs C++ tex.generic_gemm reference
+# ==============================================================================
+
+@pytest.mark.parametrize("M, K, N", REGULAR_FP8_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("dtype", REGULAR_DTYPES, ids=["fp32", "fp16", "bf16"])
+def test_triton_vs_cpp_regular(M, K, N, layout, dtype):
+    """Test Triton GEMM vs C++ generic_gemm for regular tensors."""
+    torch.manual_seed(42)
+    A, B = create_regular_tensors(M, K, N, layout, dtype=dtype)
+
+    triton_out = call_gemm(A, B, layout, out_dtype=dtype, use_triton=True)
+    cpp_out = call_gemm(A, B, layout, out_dtype=dtype, use_triton=False)
+
+    torch.testing.assert_close(
+        triton_out.float(), cpp_out.float(),
+        atol=1e-3, rtol=1e-2,
+    )
+
+
+@pytest.mark.parametrize("M, K, N", REGULAR_FP8_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("fp8_format", FP8_FORMAT_COMBOS,
+                         ids=["e4m3_e4m3", "e5m2_e5m2"])
+def test_triton_vs_cpp_fp8(M, K, N, layout, fp8_format):
+    """Test Triton GEMM vs C++ generic_gemm for Float8Tensor inputs."""
+    torch.manual_seed(42)
+    fp8_dtype_a, fp8_dtype_b = fp8_format
+    A_fp8, B_fp8, _, _ = create_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b)
+
+    triton_out = call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_triton=True)
+    cpp_out = call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_triton=False)
+
+    torch.testing.assert_close(
+        triton_out.float(), cpp_out.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+@pytest.mark.skip(reason="Triton compiler bug with mixed FP8 formats (triton-lang/triton#9567)")
+@pytest.mark.parametrize("M, K, N", REGULAR_FP8_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+@pytest.mark.parametrize("fp8_format", FP8_MIXED_FORMAT_COMBOS,
+                         ids=["e4m3_e5m2", "e5m2_e4m3"])
+def test_triton_vs_cpp_fp8_mixed(M, K, N, layout, fp8_format):
+    """Test Triton GEMM vs C++ generic_gemm for mixed Float8Tensor formats."""
+    torch.manual_seed(42)
+    fp8_dtype_a, fp8_dtype_b = fp8_format
+    A_fp8, B_fp8, _, _ = create_fp8_tensors(M, K, N, layout, fp8_dtype_a, fp8_dtype_b)
+
+    triton_out = call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_triton=True)
+    cpp_out = call_gemm(A_fp8, B_fp8, layout, out_dtype=torch.float32, use_triton=False)
+
+    torch.testing.assert_close(
+        triton_out.float(), cpp_out.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+@requires_mxfp8_support
+@requires_torch210
+@pytest.mark.parametrize("M, K, N", MXFP8_SHAPES)
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_triton_vs_cpp_mxfp8(M, K, N, layout):
+    """Test Triton GEMM vs C++ generic_gemm for MXFP8Tensor inputs."""
+    torch.manual_seed(42)
+    A_mxfp8, B_mxfp8, _, _ = create_mxfp8_tensors(M, K, N, layout)
+
+    triton_out = call_gemm(A_mxfp8, B_mxfp8, layout, out_dtype=torch.bfloat16, use_triton=True)
+    cpp_out = call_gemm(A_mxfp8, B_mxfp8, layout, out_dtype=torch.bfloat16, use_triton=False)
+
+    torch.testing.assert_close(
+        triton_out.float(), cpp_out.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+# ==============================================================================
+# Bias epilogue coverage (regression guard for gemm_triton.py bias wiring)
+#
+# The Triton wrapper must honor the `bias` + `grad` arguments to general_gemm:
+#   - grad=False + bias present → BIAS epilogue, bias added to output
+#   - grad=True  + bias present → BGRADB epilogue, bias gradient returned as
+#                                  the second element of general_gemm's tuple
+# Layout TN matches TE Linear's forward convention: A=weight[M,K],
+# B=input[N,K], output[N,M]; BIAS reads bias[M], BGRADB reduces to shape [N].
+# ==============================================================================
+
+BIAS_SHAPES = [(128, 256, 512), (229, 541, 541), (71, 71, 3571)]
+
+
+@pytest.mark.parametrize("M, K, N", BIAS_SHAPES)
+@pytest.mark.parametrize("dtype", REGULAR_DTYPES, ids=["fp32", "fp16", "bf16"])
+def test_triton_vs_cpp_bias_forward(M, K, N, dtype):
+    """Forward with BIAS epilogue: Triton must match C++ when bias is fused."""
+    torch.manual_seed(42)
+    A, B = create_regular_tensors(M, K, N, "TN", dtype=dtype)
+    bias = torch.randn((M,), dtype=dtype, device='cuda')
+
+    triton_out, _ = call_gemm_with_bias(A, B, "TN", dtype, bias, grad=False, use_triton=True)
+    cpp_out, _ = call_gemm_with_bias(A, B, "TN", dtype, bias, grad=False, use_triton=False)
+
+    # Bias must actually change the result vs. no-bias path; otherwise BIAS
+    # silently reverted to DEFAULT would pass a simple Triton-vs-C++ check.
+    no_bias_out = call_gemm(A, B, "TN", out_dtype=dtype, use_triton=True)
+    assert not torch.allclose(triton_out.float(), no_bias_out.float(), atol=1e-4), (
+        "Triton output matches no-bias output; BIAS epilogue appears inactive."
+    )
+
+    torch.testing.assert_close(
+        triton_out.float(), cpp_out.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+WGRAD_SHAPES = [
+    # (batch*seq, in_features, out_features) — TE Linear wgrad pattern
+    (256, 128, 512),
+    (512, 541, 229),
+    (128, 3571, 71),
+]
+
+
+@pytest.mark.parametrize("batch, in_features, out_features", WGRAD_SHAPES)
+@pytest.mark.parametrize("dtype", REGULAR_DTYPES, ids=["fp32", "fp16", "bf16"])
+def test_triton_vs_cpp_bias_grad(batch, in_features, out_features, dtype):
+    """Backward with BGRADB epilogue: Triton must produce the correct bias gradient.
+
+    Exercises the same call shape TE Linear uses for weight-grad:
+      general_gemm(x, dy, layout="NT", bias=<weight.bias>, grad=True)
+    A=x[batch, in_features], B=dy[batch, out_features].
+    The reduced bias gradient is expected to equal dy.sum(dim=0).
+
+    Regression guard for the wrapper bug where the epilogue was hardcoded to
+    DEFAULT, which silently zeroed the returned bias gradient.
+    """
+    torch.manual_seed(42)
+    A = torch.randn((batch, in_features), dtype=dtype, device='cuda') * 0.5
+    B = torch.randn((batch, out_features), dtype=dtype, device='cuda') * 0.5
+    bias = torch.zeros((out_features,), dtype=dtype, device='cuda')
+
+    _, triton_bias_grad = call_gemm_with_bias(A, B, "NT", dtype, bias, grad=True, use_triton=True)
+    _, cpp_bias_grad = call_gemm_with_bias(A, B, "NT", dtype, bias, grad=True, use_triton=False)
+
+    assert triton_bias_grad is not None, "Triton did not return a bias gradient tensor."
+    assert cpp_bias_grad is not None, "C++ did not return a bias gradient tensor."
+    # A correct BGRADB must not produce an all-zero gradient for non-trivial B.
+    assert triton_bias_grad.abs().sum().item() > 0, (
+        "Triton bias gradient is all zeros — BGRADB epilogue appears inactive."
+    )
+
+    # Cross-check against the analytical reduction.
+    expected = B.float().sum(dim=0)
+    torch.testing.assert_close(
+        triton_bias_grad.float(), expected,
+        atol=5e-2, rtol=1e-2,
+    )
+    torch.testing.assert_close(
+        triton_bias_grad.float(), cpp_bias_grad.float(),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+# Batched (multi-dim) FP8 coverage. The 2D fp8 case is already covered by
+# test_triton_vs_pytorch_fp8 above; this exercises the backend's
+# flatten-leading-dims semantics for tensors with ndim > 2.
+@pytest.mark.parametrize("batch_size, M, K, N", [
+    (2, 128, 256, 512),
+    (4, 64, 128, 256),
+])
+def test_triton_vs_pytorch_fp8_multidim(batch_size, M, K, N):
+    os.environ['NVTE_USE_GEMM_TRITON'] = '1'
+    torch.manual_seed(42)
+    # TN layout: A=[batch, M, K], B=[batch, N, K]. Leading dims flatten.
+    A_f32 = torch.randn(batch_size, M, K, dtype=torch.float32, device='cuda') * 0.5
+    B_f32 = torch.randn(batch_size, N, K, dtype=torch.float32, device='cuda') * 0.5
+
+    A_fp8 = Float8Quantizer(
+        scale=torch.full([1], 1.0, dtype=torch.float32, device='cuda'),
+        amax=torch.empty([1], dtype=torch.float32, device='cuda'),
+        fp8_dtype=tex.DType.kFloat8E4M3,
+    )(A_f32)
+    B_fp8 = Float8Quantizer(
+        scale=torch.full([1], 1.0, dtype=torch.float32, device='cuda'),
+        amax=torch.empty([1], dtype=torch.float32, device='cuda'),
+        fp8_dtype=tex.DType.kFloat8E4M3,
+    )(B_f32)
+
+    output = call_gemm(A_fp8, B_fp8, layout="TN", out_dtype=torch.float32)
+
+    # Reference: flatten leading dims, then B @ A.T (TN semantics).
+    A_flat = A_fp8.dequantize().reshape(-1, K)  # [batch*M, K]
+    B_flat = B_fp8.dequantize().reshape(-1, K)  # [batch*N, K]
+    expected = torch.matmul(B_flat, A_flat.T).reshape(batch_size, N, batch_size * M)
+
+    torch.testing.assert_close(
+        output.to(torch.float32), expected.to(torch.float32),
+        atol=5e-3, rtol=1e-2,
+    )
+
+
+if __name__ == "__main__":
+    # Quick smoke test
+    os.environ['NVTE_USE_GEMM_TRITON'] = '1'
+    test_triton_vs_pytorch_regular(128, 256, 512, "TN", torch.float16)
+    test_triton_vs_pytorch_fp8(128, 256, 512, "TN",
+                               (tex.DType.kFloat8E4M3, tex.DType.kFloat8E4M3))
+    test_triton_vs_cpp_regular(128, 256, 512, "TN", torch.float16)
+    print("All smoke tests passed!")

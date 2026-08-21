@@ -310,8 +310,7 @@ set(cuda_only_cuda_sources
      fused_attn/fused_attn_f16_arbitrary_seqlen.cu
      fused_attn/fused_attn_fp8.cu
      fused_attn/utils.cu
-     swizzle/swizzle_block_scaling.cu
-     util/topk.cu) #CUDA-only
+     swizzle/swizzle_block_scaling.cu) #CUDA-only
 
 list(APPEND transformer_engine_cuda_arch_specific_sources
      fused_attn/flash_attn.cu
@@ -443,6 +442,25 @@ else() #USE_ROCM
   # process source code files
   include("${CMAKE_CURRENT_SOURCE_DIR}/../../build_tools/hipify/hipify.cmake")
   TE_Hipify(${CMAKE_CURRENT_SOURCE_DIR})
+
+  # TE_Hipify runs at configure time, so its inputs must be registered or edits go unnoticed.
+  # Generated _hip.* are excluded to avoid re-triggering configure on their own output.
+  set(_hipify_deps)
+  foreach(_src ${transformer_engine_SOURCES})
+    get_filename_component(_abs "${CMAKE_CURRENT_SOURCE_DIR}/${_src}" ABSOLUTE)
+    list(APPEND _hipify_deps "${_abs}")
+  endforeach()
+  file(GLOB_RECURSE _hipify_hdrs
+       "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
+       "${CMAKE_CURRENT_SOURCE_DIR}/*.cuh"
+       "${CMAKE_CURRENT_SOURCE_DIR}/*.hpp")
+  foreach(_hdr ${_hipify_hdrs})
+    if(NOT _hdr MATCHES "_hip\\.(h|cuh|hpp)$")
+      list(APPEND _hipify_deps "${_hdr}")
+    endif()
+  endforeach()
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${_hipify_deps})
+
   TE_GetHipifiedSources("${transformer_engine_SOURCES}" ${CMAKE_CURRENT_SOURCE_DIR} te_hip_sources)
 
   message("${message_line}")
@@ -717,12 +735,6 @@ else() # USE_ROCM
   endif()
   if(USE_HIPKITTENS_GEMM)
     target_compile_definitions(transformer_engine PUBLIC USE_HIPKITTENS_GEMM)
-    if(KITTENS_HAVE_CDNA3)
-      target_compile_definitions(transformer_engine PUBLIC KITTENS_HAVE_CDNA3)
-    endif()
-    if(KITTENS_HAVE_CDNA4)
-      target_compile_definitions(transformer_engine PUBLIC KITTENS_HAVE_CDNA4)
-    endif()
     list(APPEND transformer_engine_LINKER_LIBS kittens_gemm)
   endif()
   target_link_libraries(transformer_engine PUBLIC ${transformer_engine_LINKER_LIBS})
