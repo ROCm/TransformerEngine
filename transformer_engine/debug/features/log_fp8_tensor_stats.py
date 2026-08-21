@@ -1,3 +1,5 @@
+# This file was modified for portability to AMDGPU
+# Copyright (c) 2026, Advanced Micro Devices, Inc. All rights reserved.
 # Copyright (c) 2022-2026, NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 #
 # See LICENSE for license information.
@@ -12,7 +14,9 @@ import torch
 import nvdlfw_inspect.api as debug_api
 from nvdlfw_inspect.debug_features.log_tensor_stats import LogTensorStats as BaseLogTensorStats
 from nvdlfw_inspect.registry import Registry, api_method
+from torch.utils.cpp_extension import IS_HIP_EXTENSION
 from transformer_engine.pytorch import DType
+from transformer_engine.pytorch.quantization import is_mxfp8_available
 
 from transformer_engine.debug.features.utils.stats_buffer import STATS_BUFFERS
 from transformer_engine.debug.features.utils import get_reduction_params, next_enabled_iter
@@ -213,8 +217,15 @@ class LogFp8TensorStats(BaseLogTensorStats):
         if recipe_from_stat in ["fp8_block_scaling"] and torch.cuda.get_device_capability()[0] < 9:
             raise ValueError(f"Stat {stat} needs Hopper or later GPU.")
 
-        if recipe_from_stat == "mxfp8" and torch.cuda.get_device_capability()[0] < 10:
-            raise ValueError(f"Stat {stat} needs Blackwell or later GPU.")
+        # gfx950 supports MXFP8 but reports compute capability (9, 5), so the CUDA arch
+        # comparison below rejects it. Query recipe availability on ROCm instead.
+        if recipe_from_stat == "mxfp8":
+            if IS_HIP_EXTENSION:
+                available, reason = is_mxfp8_available(return_reason=True)
+                if not available:
+                    raise ValueError(f"Stat {stat} is not supported on this device: {reason}")
+            elif torch.cuda.get_device_capability()[0] < 10:
+                raise ValueError(f"Stat {stat} needs Blackwell or later GPU.")
 
         supported_stats = ["underflows%", "scale_inv_min", "scale_inv_max", "mse"]
         if stat_without_recipe not in supported_stats:
