@@ -479,6 +479,9 @@ def _train(opts):
         with_cublasmp=opts.use_cublasmp,
     )
 
+    dist_print("UB FUSED NAMES: " + " ".join(sorted(te.module.base._ub_fused_names)))
+    dist_print("UB DISABLED NAMES: " + " ".join(sorted(te.module.base._ub_disabled_names)))
+
     with te.quantized_model_init(enabled=opts.fp8_init):
         test_model = multi_module_model(opts.layer_type, opts.num_layers, *args, **kwargs)
     dist_print("Initialized test model...", debug=True)

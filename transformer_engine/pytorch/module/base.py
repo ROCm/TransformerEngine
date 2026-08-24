@@ -428,6 +428,9 @@ def initialize_ub(
             # TODO: Add RS support.
             _ub_disabled_names.add(name)
             return
+        if method == "fused" and not _fused_ub_supported(shape, tp_size, dtype):
+            _ub_disabled_names.add(name)
+            return
         if with_cublasmp and method in ("bulk", "external", "fused"):
             raise ValueError(
                 f"At {name}, cuBLASMp does not support `{method}` overlap method. "
@@ -625,6 +628,32 @@ def get_ub_is_fp8(name: str, use_fp8: bool) -> bool:
     return get_ub(name, use_fp8).is_fp8_ubuf()
 
 
+def _fused_gemm_shape_ok(m: int, k: int, n_chunk: int, tp_size: int) -> bool:
+    """The fused comm+GEMM kernels' shape contract."""
+    if tp_size not in (4, 8):
+        return False
+    return m % 256 == 0 and k % 128 == 0 and k >= 256 and n_chunk % 256 == 0
+
+
+def _fused_gemm_dims(inp: torch.Tensor, weight: torch.Tensor, is_dgrad: bool) -> tuple:
+    """(m, k, n_chunk) of the GEMM behind a fused overlap, in the kernel's operand convention."""
+    out_features, in_features = weight.shape
+    m, k = (in_features, out_features) if is_dgrad else (out_features, in_features)
+    n_chunk = inp.shape[0] if inp.dim() == 2 else inp.shape[0] * inp.shape[1]
+    return m, k, n_chunk
+
+
+def _fused_ub_supported(shape: Union[list, tuple], tp_size: int, dtype: torch.dtype) -> bool:
+    """Whether the fused backend can serve a Userbuffers region of this shape."""
+    if tp_size not in (4, 8):
+        return False
+    if dtype != torch.bfloat16:
+        return False
+    if shape[0] % tp_size != 0:
+        return False
+    return (shape[0] // tp_size) % 256 == 0
+
+
 def fused_ag_gemm_eligible(
     name: str,
     inp: torch.Tensor,
@@ -642,14 +671,31 @@ def fused_ag_gemm_eligible(
     # TODO: Drop these as the kernel gains fp8/mxfp8, bias and gelu support.
     if fp8 or gelu or bias is not None:
         return False
-    if dtype != torch.bfloat16 or inp.dtype != torch.bfloat16 or weight.dtype != torch.bfloat16:
+    if dtype != torch.bfloat16:
         return False
-    if tp_size not in (4, 8):
+    m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad)
+    return _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
+
+
+def fused_bulk_ag_eligible(
+    name: str,
+    inp: torch.Tensor,
+    weight: torch.Tensor,
+    dtype: torch.dtype,
+    tp_size: int,
+    fp8: bool,
+) -> bool:
+    """Whether this call may use the bulk all-gather overlap."""
+    if not IS_HIP_EXTENSION:
+        return True
+    if not _ub_is_fused(name):
         return False
-    out_features, in_features = weight.shape
-    m, k = (in_features, out_features) if is_dgrad else (out_features, in_features)
-    n_chunk = inp.shape[0] if inp.dim() == 2 else inp.shape[0] * inp.shape[1]
-    return m % 256 == 0 and k % 128 == 0 and k >= 256 and n_chunk % 256 == 0
+    if fp8:
+        return False
+    if dtype != torch.bfloat16:
+        return False
+    m, k, n_chunk = _fused_gemm_dims(inp, weight, is_dgrad=True)
+    return _fused_gemm_shape_ok(m, k, n_chunk, tp_size)
 
 
 def _ub_is_fused(name: str) -> bool:

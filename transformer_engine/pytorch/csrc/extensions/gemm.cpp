@@ -344,12 +344,23 @@ std::vector<py::object> gemm(py::handle A, bool transa, py::handle B, bool trans
       }
       // Direct GEMM call to the correct overlap
       if (bulk_overlap) {
-        NVTE_SCOPED_GIL_RELEASE({
-          comm_overlap->bulk_overlap(A_tensor, transa, B_tensor, transb, out_tensor, bias_tensor,
-                                     te_pre_gelu_out, te_workspace, grad, accumulate,
-                                     use_split_accumulator, comm_type.value(), extra_output_tensor,
-                                     main_stream);
-        });
+#ifdef __HIP_PLATFORM_AMD__
+        if (comm_overlap->is_fused() && comm_type.value() == CommOverlapType::AG) {
+          NVTE_SCOPED_GIL_RELEASE({
+            comm_overlap->fused_overlap_bulk_ag(A_tensor, transa, B_tensor, transb, out_tensor,
+                                                bias_tensor, te_pre_gelu_out, te_workspace, grad,
+                                                accumulate, use_split_accumulator, main_stream);
+          });
+        } else
+#endif
+        {
+          NVTE_SCOPED_GIL_RELEASE({
+            comm_overlap->bulk_overlap(A_tensor, transa, B_tensor, transb, out_tensor, bias_tensor,
+                                       te_pre_gelu_out, te_workspace, grad, accumulate,
+                                       use_split_accumulator, comm_type.value(),
+                                       extra_output_tensor, main_stream);
+          });
+        }
       } else if (comm_type.value() == CommOverlapType::AG) {
         if (comm_overlap->is_atomic_gemm()) {
           NVTE_SCOPED_GIL_RELEASE({
