@@ -379,22 +379,6 @@ namespace {
 constexpr const char *kRtcSourceFile =
     "transformer_engine/common/fused_softmax/scaled_aligned_causal_masked_softmax.cu";
 
-// "--use_fast_math" is nvcc/NVRTC spelling; hipRTC rejects it while parsing
-// arguments. The ROCm build also compiles the static softmax kernels without
-// fast math (nvte_sources_with_fast_math is CUDA-only), so the JIT matches it
-// and passes no fast-math option at all.
-#ifdef __HIP_PLATFORM_AMD__
-constexpr bool kRtcFastMath = false;
-#else
-constexpr bool kRtcFastMath = true;
-#endif
-
-const std::vector<std::string> &rtc_compile_options() {
-  static const std::vector<std::string> opts =
-      kRtcFastMath ? std::vector<std::string>{"--use_fast_math"} : std::vector<std::string>{};
-  return opts;
-}
-
 template <typename Type>
 std::string make_softmax_rtc_code(int log2_elements) {
   (void)log2_elements;
@@ -406,7 +390,7 @@ template <typename Type>
 std::string make_softmax_rtc_label(const char *direction, int log2_elements) {
   return concat_strings("fused_softmax,variant=aligned_causal,direction=", direction,
                         ",type=", TypeInfo<Type>::name, ",log2=", log2_elements,
-                        ",fast_math=", kRtcFastMath ? 1 : 0);
+                        ",fast_math=", rtc::kUseFastMath ? 1 : 0);
 }
 
 template <typename Type>
@@ -540,7 +524,7 @@ void dispatch_scaled_aligned_causal_masked_softmax_forward(output_t *dst, const 
                           make_softmax_rtc_kernel_name<input_t>(
                               "scaled_aligned_causal_masked_softmax_warp_forward", log2_elements),
                           make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile,
-                          rtc_compile_options());
+                          rtc::fast_math_options());
     }
     const acc_t rtc_scale = static_cast<acc_t>(scale);
     rtc_manager.launch(kernel_label, grid_size, block_size, 0, stream, dst, src, rtc_scale,
@@ -606,7 +590,7 @@ void dispatch_scaled_aligned_causal_masked_softmax_backward(
                           make_softmax_rtc_kernel_name<input_t>(
                               "scaled_aligned_causal_masked_softmax_warp_backward", log2_elements),
                           make_softmax_rtc_code<input_t>(log2_elements), kRtcSourceFile,
-                          rtc_compile_options());
+                          rtc::fast_math_options());
     }
     rtc_manager.launch(kernel_label, grid_size, block_size, 0, stream, grad_input, grad, output,
                        scale, microbatches, query_seq_len, key_seq_len);

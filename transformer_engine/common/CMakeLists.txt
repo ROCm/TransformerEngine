@@ -747,19 +747,13 @@ function(make_string_header STRING STRING_NAME)
                    "string_headers/${STRING_NAME}.h"
                    @ONLY)
 endfunction()
-function(make_string_header_from_file file_ STRING_NAME)
-    file(READ "${file_}" STRING)
-    configure_file(util/string_header.h.in
-                   "string_headers/${STRING_NAME}.h"
-                   @ONLY)
-endfunction()
 
-# Same, but on ROCm embed the hipified variant of the file when hipify produced
-# one. RTC source strings must be the HIP flavour, otherwise hipRTC is handed
-# CUDA code. hipify only writes an output when the content actually changes, so
-# the .hip/_hip.* file may legitimately not exist; fall back to the original.
-# TE_Hipify() has already run at this point (configure time).
-function(make_string_header_from_hipified_file file_ STRING_NAME)
+# On ROCm the hipified variant of the file is embedded when hipify produced one.
+# RTC source strings must be the HIP flavour, otherwise hipRTC is handed CUDA
+# code. hipify only writes an output when the content actually changes, so the
+# .hip/_hip.* file may legitimately not exist; fall back to the original in that
+# case. TE_Hipify() has already run at this point (configure time).
+function(make_string_header_from_file file_ STRING_NAME)
     set(_src "${file_}")
     if(USE_ROCM)
         get_filename_component(_dir "${file_}" DIRECTORY)
@@ -785,14 +779,21 @@ function(make_string_header_from_hipified_file file_ STRING_NAME)
             endif()
         endif()
     endif()
-    make_string_header_from_file("${_src}" "${STRING_NAME}")
+    file(READ "${_src}" STRING)
+    configure_file(util/string_header.h.in
+                   "string_headers/${STRING_NAME}.h"
+                   @ONLY)
 endfunction()
 
-if(USE_CUDA)
 # Header files with C++ strings
+if(USE_CUDA)
 list(GET CMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES 0 cuda_include_path)
 make_string_header("${cuda_include_path}"
                    string_path_cuda_include)
+else()
+make_string_header_from_file(amd_detail/hip_float8.h
+                             string_code_amd_detail_hip_float8_h)
+endif()
 make_string_header_from_file(transpose/rtc/cast_transpose_fusion.cu
                              string_code_transpose_rtc_cast_transpose_fusion_cu)
 make_string_header_from_file(transpose/rtc/cast_transpose.cu
@@ -803,49 +804,35 @@ make_string_header_from_file(transpose/rtc/swap_first_dims.cu
                              string_code_transpose_rtc_swap_first_dims_cu)
 make_string_header_from_file(utils.cuh
                              string_code_utils_cuh)
-else()
-  make_string_header_from_file(utils_hip.cuh
-                              string_code_utils_cuh)
-  make_string_header_from_file(transpose/rtc/cast_transpose_fusion.hip
-                              string_code_transpose_rtc_cast_transpose_fusion_cu)
-  make_string_header_from_file(transpose/rtc/cast_transpose.hip
-                              string_code_transpose_rtc_cast_transpose_cu)
-  make_string_header_from_file(transpose/rtc/transpose.hip
-                              string_code_transpose_rtc_transpose_cu)
-  make_string_header_from_file(transpose/rtc/swap_first_dims.hip
-                              string_code_transpose_rtc_swap_first_dims_cu)
-  make_string_header_from_file(amd_detail/hip_float8.h
-                              string_code_amd_detail_hip_float8_h)
-endif()
-make_string_header_from_hipified_file(fused_softmax/scaled_masked_softmax.cu
+make_string_header_from_file(fused_softmax/scaled_masked_softmax.cu
                              string_code_fused_softmax_scaled_masked_softmax_cu)
-make_string_header_from_hipified_file(fused_softmax/scaled_upper_triang_masked_softmax.cu
+make_string_header_from_file(fused_softmax/scaled_upper_triang_masked_softmax.cu
                              string_code_fused_softmax_scaled_upper_triang_masked_softmax_cu)
-make_string_header_from_hipified_file(fused_softmax/scaled_aligned_causal_masked_softmax.cu
+make_string_header_from_file(fused_softmax/scaled_aligned_causal_masked_softmax.cu
                              string_code_fused_softmax_scaled_aligned_causal_masked_softmax_cu)
-make_string_header_from_hipified_file(util/math.h
+make_string_header_from_file(util/math.h
                              string_code_util_math_h)
 
 # Norm NVRTC bundled headers + RTC source files
-make_string_header_from_hipified_file(normalization/kernel_params.h
+make_string_header_from_file(normalization/kernel_params.h
                              string_code_normalization_kernel_params_h)
-make_string_header_from_hipified_file(normalization/kernel_traits.h
+make_string_header_from_file(normalization/kernel_traits.h
                              string_code_normalization_kernel_traits_h)
-make_string_header_from_hipified_file(normalization/layernorm/ln_fwd_kernels.cuh
+make_string_header_from_file(normalization/layernorm/ln_fwd_kernels.cuh
                              string_code_normalization_layernorm_ln_fwd_kernels_cuh)
-make_string_header_from_hipified_file(normalization/layernorm/ln_bwd_kernels.cuh
+make_string_header_from_file(normalization/layernorm/ln_bwd_kernels.cuh
                              string_code_normalization_layernorm_ln_bwd_kernels_cuh)
-make_string_header_from_hipified_file(normalization/rmsnorm/rmsnorm_fwd_kernels.cuh
+make_string_header_from_file(normalization/rmsnorm/rmsnorm_fwd_kernels.cuh
                              string_code_normalization_rmsnorm_rmsnorm_fwd_kernels_cuh)
-make_string_header_from_hipified_file(normalization/rmsnorm/rmsnorm_bwd_kernels.cuh
+make_string_header_from_file(normalization/rmsnorm/rmsnorm_bwd_kernels.cuh
                              string_code_normalization_rmsnorm_rmsnorm_bwd_kernels_cuh)
-make_string_header_from_hipified_file(normalization/layernorm/rtc/ln_fwd_kernel.cu
+make_string_header_from_file(normalization/layernorm/rtc/ln_fwd_kernel.cu
                              string_code_normalization_layernorm_rtc_ln_fwd_kernel_cu)
-make_string_header_from_hipified_file(normalization/layernorm/rtc/ln_bwd_kernel.cu
+make_string_header_from_file(normalization/layernorm/rtc/ln_bwd_kernel.cu
                              string_code_normalization_layernorm_rtc_ln_bwd_kernel_cu)
-make_string_header_from_hipified_file(normalization/rmsnorm/rtc/rmsnorm_fwd_kernel.cu
+make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_fwd_kernel.cu
                              string_code_normalization_rmsnorm_rtc_rmsnorm_fwd_kernel_cu)
-make_string_header_from_hipified_file(normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu
+make_string_header_from_file(normalization/rmsnorm/rtc/rmsnorm_bwd_kernel.cu
                              string_code_normalization_rmsnorm_rtc_rmsnorm_bwd_kernel_cu)
 target_include_directories(transformer_engine PRIVATE
                            "${CMAKE_CURRENT_BINARY_DIR}/string_headers")

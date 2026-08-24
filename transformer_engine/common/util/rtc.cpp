@@ -64,6 +64,22 @@ bool is_enabled() {
   return is_enabled_;
 }
 
+const std::vector<std::string>& fast_math_options() {
+  static const std::vector<std::string> opts = [] {
+    if (!kUseFastMath) {
+      return std::vector<std::string>{};
+    }
+#ifdef __HIP_PLATFORM_AMD__
+    // "--use_fast_math" is nvcc/NVRTC spelling; hipRTC rejects it while parsing
+    // arguments and takes "-ffast-math" instead.
+    return std::vector<std::string>{"-ffast-math"};
+#else
+    return std::vector<std::string>{"--use_fast_math"};
+#endif  // __HIP_PLATFORM_AMD__
+  }();
+  return opts;
+}
+
 Kernel::Kernel(std::string mangled_name, std::string compiled_code)
     : mangled_name_{std::move(mangled_name)},
       compiled_code_{std::move(compiled_code)},
